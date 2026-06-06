@@ -32,7 +32,7 @@ from typing import List, Optional
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.responses import JSONResponse, FileResponse
 from starlette.middleware.base import BaseHTTPMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from PIL import Image, UnidentifiedImageError
 
 from display import TFTDisplay, SIM_OUTPUT, WIDTH, HEIGHT
@@ -154,6 +154,45 @@ class ClaimRequest(BaseModel):
     # SERVICE_SECRET-guarded endpoint.
     code: str = Field(..., min_length=1, max_length=32, description="Claim code")
     setup_url: str = Field(..., max_length=200, description="Setup wizard URL")
+    # WARP-819: optional Wi-Fi-connect creds so the claim screen ALSO shows how
+    # to join the box's Wi-Fi with no prior config — the host-encoded QR
+    # bit-matrix (the firmware never encodes on-device) plus the SSID and
+    # plaintext PSK for the readable "type-it" text under the QR. All optional
+    # and backward-compatible: an older orchestrator that omits them renders the
+    # original claim-only layout. The matrix is capped (a v-large QR would OOM
+    # the PyPortal); a Wi-Fi WPA2 join QR is small (≤ ~33x33), so 64 is headroom.
+    wifi_qr_matrix: Optional[List[List[int]]] = Field(
+        None, max_length=64, description="Host-encoded Wi-Fi QR bit-matrix (0/1 rows)")
+    wifi_ssid: Optional[str] = Field(
+        None, max_length=64, description="AP SSID for the readable creds line")
+    wifi_psk: Optional[str] = Field(
+        None, max_length=128, description="AP WPA2 passphrase for the readable creds line")
+
+    @model_validator(mode="after")
+    def _wifi_fields_all_or_nothing(self) -> "ClaimRequest":
+        """Reject a PARTIAL Wi-Fi block (WARP-819).
+
+        The three wifi_* fields are individually Optional only so a claim push
+        can omit the whole block (graceful degradation to the claim-only
+        layout). A partial block is a footgun: an ssid with no psk would render
+        a blank-password QR (`WIFI:T:WPA;S:Droplet;P:;;`) — an unjoinable,
+        named-but-open network, the same hazard the bridge boot-race guard
+        prevents. So all three must be present TOGETHER or none at all. An empty
+        string counts as absent: a present-but-empty psk is exactly the
+        blank-password case we must refuse, and the matrix must be non-empty to
+        paint anything.
+        """
+        present = (
+            bool(self.wifi_qr_matrix),       # non-empty matrix
+            bool(self.wifi_ssid),            # non-empty ssid
+            bool(self.wifi_psk),             # non-empty psk
+        )
+        if any(present) and not all(present):
+            raise ValueError(
+                "wifi_qr_matrix, wifi_ssid and wifi_psk must all be provided "
+                "together (and be non-empty) — a partial Wi-Fi block would "
+                "render a blank-password QR")
+        return self
 
 
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 MB
@@ -272,7 +311,12 @@ async def show_claim(req: ClaimRequest):
     """
     if not display:
         raise HTTPException(503, "Display not initialized")
-    display.show_claim(req.code, req.setup_url)
+    display.show_claim(
+        req.code, req.setup_url,
+        wifi_ssid=req.wifi_ssid,
+        wifi_psk=req.wifi_psk,
+        wifi_qr_matrix=req.wifi_qr_matrix,
+    )
     return {"ok": True, "mode": "claim"}
 
 

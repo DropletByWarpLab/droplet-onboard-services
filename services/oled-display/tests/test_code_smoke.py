@@ -120,6 +120,67 @@ def test_unknown_mode_is_reported(fw):
 
 
 # ---------------------------------------------------------------------------
+# Claim screen: a no-Wi-Fi push must CLEAR stale Wi-Fi creds (WARP-819)
+# ---------------------------------------------------------------------------
+# The claim merge keeps the URL when only the code is pushed (partial-push
+# resilience). But the Wi-Fi creds must NOT persist across a push that omits
+# them: when the bridge is down, the orchestrator sends a {code,setup_url}-only
+# claim frame, and if the firmware kept the previously-shown wifi_* the panel
+# would display a stale QR/password that may no longer be the live AP creds. So
+# the firmware resets wifi_qr_matrix/ssid/psk BEFORE merging each claim frame —
+# absent keys clear, present keys land.
+
+def test_claim_with_wifi_then_without_clears_stale_creds(fw):
+    code, _ = fw
+    matrix = [[1, 0, 1], [0, 1, 0], [1, 0, 1]]
+    # First push: full claim WITH wifi creds.
+    code.handle({"mode": "claim", "data": {
+        "code": "DRPL-7K2Q-9F4M",
+        "setup_url": "https://x/setup",
+        "wifi_qr_matrix": matrix,
+        "wifi_ssid": "Droplet",
+        "wifi_psk": "7gpz4k9m2njq8wxr",
+    }})
+    assert code.state["claim"]["wifi_ssid"] == "Droplet"
+    assert code.state["claim"]["wifi_qr_matrix"] == matrix
+
+    # Second push: bridge down -> only code + setup_url. The wifi_* MUST clear.
+    code.handle({"mode": "claim", "data": {
+        "code": "DRPL-7K2Q-9F4M",
+        "setup_url": "https://x/setup",
+    }})
+    assert code.state["claim"]["wifi_qr_matrix"] is None
+    assert code.state["claim"]["wifi_ssid"] == ""
+    assert code.state["claim"]["wifi_psk"] == ""
+    # The non-wifi fields are still merged as before.
+    assert code.state["claim"]["code"] == "DRPL-7K2Q-9F4M"
+    assert code.state["claim"]["setup_url"] == "https://x/setup"
+
+
+def test_claim_with_wifi_then_psk_omitted_clears_psk(fw):
+    # If a later push carries the matrix + ssid but DROPS wifi_psk (the host
+    # only puts psk on the wire when non-empty — WARP-819), the stale psk must
+    # not linger.
+    code, _ = fw
+    matrix = [[1, 1], [0, 1]]
+    code.handle({"mode": "claim", "data": {
+        "code": "DRPL-7K2Q-9F4M", "setup_url": "https://x/setup",
+        "wifi_qr_matrix": matrix, "wifi_ssid": "Droplet",
+        "wifi_psk": "secretpass123456",
+    }})
+    assert code.state["claim"]["wifi_psk"] == "secretpass123456"
+
+    code.handle({"mode": "claim", "data": {
+        "code": "DRPL-7K2Q-9F4M", "setup_url": "https://x/setup",
+        "wifi_qr_matrix": matrix, "wifi_ssid": "Droplet",
+        # wifi_psk intentionally omitted
+    }})
+    assert code.state["claim"]["wifi_psk"] == ""
+    assert code.state["claim"]["wifi_ssid"] == "Droplet"
+    assert code.state["claim"]["wifi_qr_matrix"] == matrix
+
+
+# ---------------------------------------------------------------------------
 # System screen renders WITH a host-supplied QR matrix
 # ---------------------------------------------------------------------------
 

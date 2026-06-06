@@ -145,11 +145,13 @@ describe("decideClaimScreen — claim takes priority over every QR (WARP-632)", 
       ensureClaimCode,
       pushClaimCode,
       setupUrl,
+      fetchWifiQR: async () => null,
     });
 
     expect(result.handled).toBe(true);
     expect(ensureClaimCode).toHaveBeenCalledOnce();
-    expect(pushClaimCode).toHaveBeenCalledWith("DRPL-7K2Q-9F4M", "https://192.168.1.87/setup");
+    // No WiFi QR available here → claim pushed with no wifi arg (undefined).
+    expect(pushClaimCode).toHaveBeenCalledWith("DRPL-7K2Q-9F4M", "https://192.168.1.87/setup", undefined);
     // Signature is claim-scoped + changes only when the code changes, so the
     // poller won't re-push the same code every 30 s tick.
     expect(result.signature?.startsWith("claim:")).toBe(true);
@@ -164,6 +166,7 @@ describe("decideClaimScreen — claim takes priority over every QR (WARP-632)", 
       ensureClaimCode,
       pushClaimCode,
       setupUrl: () => "https://host/setup",
+      fetchWifiQR: async () => null,
     });
 
     expect(result.handled).toBe(false);
@@ -182,6 +185,7 @@ describe("decideClaimScreen — claim takes priority over every QR (WARP-632)", 
       ensureClaimCode: async () => null,
       pushClaimCode,
       setupUrl: () => "https://host/setup",
+      fetchWifiQR: async () => null,
     });
 
     expect(result.handled).toBe(false);
@@ -195,6 +199,7 @@ describe("decideClaimScreen — claim takes priority over every QR (WARP-632)", 
         ensureClaimCode: async () => code,
         pushClaimCode: async () => true,
         setupUrl: () => "https://host/setup",
+        fetchWifiQR: async () => null,
       });
 
     const a = await mk("DRPL-7K2Q-9F4M");
@@ -214,10 +219,112 @@ describe("decideClaimScreen — claim takes priority over every QR (WARP-632)", 
       ensureClaimCode: async () => "DRPL-7K2Q-9F4M",
       pushClaimCode: async () => false,
       setupUrl: () => "https://host/setup",
+      fetchWifiQR: async () => null,
     });
 
     expect(result.handled).toBe(true);
     expect(result.pushed).toBe(false);
+  });
+});
+
+describe("decideClaimScreen — WiFi QR + creds rendered alongside the claim code (WARP-819)", () => {
+  // On first boot the user must be able to join the box's Wi-Fi with zero prior
+  // config — either by scanning a Wi-Fi-connect QR on the claim screen or by
+  // reading the SSID + password as text. So while unclaimed, decideClaimScreen
+  // ALSO fetches the Wi-Fi QR matrix + ssid + psk from the bridge and pushes
+  // them with the claim code. The bridge fetch is injected as a dep so it's
+  // unit-testable + mockable (no network).
+  const fakePrisma = {} as never;
+  const matrix = [
+    [1, 0, 1],
+    [0, 1, 0],
+    [1, 0, 1],
+  ];
+  const wifiOkFetch = async () => ({
+    matrix,
+    ssid: "Droplet",
+    psk: "7gpz4k9m2njq8wxr",
+  });
+  const wifiDownFetch = async () => null;
+
+  it("fetches the WiFi QR and pushes claim + wifi together while unclaimed", async () => {
+    const pushClaimCode = vi.fn(async () => true);
+    const fetchWifiQR = vi.fn(wifiOkFetch);
+
+    const result = await decideClaimScreen(fakePrisma, {
+      isClaimed: async () => false,
+      ensureClaimCode: async () => "DRPL-7K2Q-9F4M",
+      pushClaimCode,
+      setupUrl: () => "https://192.168.1.87/setup",
+      fetchWifiQR,
+    });
+
+    expect(result.handled).toBe(true);
+    expect(fetchWifiQR).toHaveBeenCalledOnce();
+    // Claim code + setup URL + the wifi creds are pushed in ONE claim frame.
+    expect(pushClaimCode).toHaveBeenCalledWith(
+      "DRPL-7K2Q-9F4M",
+      "https://192.168.1.87/setup",
+      { matrix, ssid: "Droplet", psk: "7gpz4k9m2njq8wxr" },
+    );
+  });
+
+  it("still pushes the claim code (no wifi arg) when the bridge has no WiFi QR", async () => {
+    // Graceful degradation: device-bridge down / AP not up yet must NOT block
+    // the claim screen — the claim code is the load-bearing element and still
+    // renders; the firmware falls back to the claim-only layout.
+    const pushClaimCode = vi.fn(async () => true);
+    const fetchWifiQR = vi.fn(wifiDownFetch);
+
+    const result = await decideClaimScreen(fakePrisma, {
+      isClaimed: async () => false,
+      ensureClaimCode: async () => "DRPL-7K2Q-9F4M",
+      pushClaimCode,
+      setupUrl: () => "https://host/setup",
+      fetchWifiQR,
+    });
+
+    expect(result.handled).toBe(true);
+    expect(pushClaimCode).toHaveBeenCalledWith("DRPL-7K2Q-9F4M", "https://host/setup", undefined);
+  });
+
+  it("does NOT fetch the WiFi QR when the box is already claimed", async () => {
+    // No point hitting the bridge if we're going to fall through to the System
+    // screen anyway.
+    const fetchWifiQR = vi.fn(wifiOkFetch);
+    const pushClaimCode = vi.fn(async () => true);
+
+    const result = await decideClaimScreen(fakePrisma, {
+      isClaimed: async () => true,
+      ensureClaimCode: async () => null,
+      pushClaimCode,
+      setupUrl: () => "https://host/setup",
+      fetchWifiQR,
+    });
+
+    expect(result.handled).toBe(false);
+    expect(fetchWifiQR).not.toHaveBeenCalled();
+    expect(pushClaimCode).not.toHaveBeenCalled();
+  });
+
+  it("does not let a WiFi-fetch failure throw — claim code still pushed", async () => {
+    // A thrown bridge fetch must be swallowed (treated as "no wifi"), never
+    // crash the claim branch or blank the lid.
+    const pushClaimCode = vi.fn(async () => true);
+    const fetchWifiQR = vi.fn(async () => {
+      throw new Error("bridge boom");
+    });
+
+    const result = await decideClaimScreen(fakePrisma, {
+      isClaimed: async () => false,
+      ensureClaimCode: async () => "DRPL-7K2Q-9F4M",
+      pushClaimCode,
+      setupUrl: () => "https://host/setup",
+      fetchWifiQR,
+    });
+
+    expect(result.handled).toBe(true);
+    expect(pushClaimCode).toHaveBeenCalledWith("DRPL-7K2Q-9F4M", "https://host/setup", undefined);
   });
 });
 

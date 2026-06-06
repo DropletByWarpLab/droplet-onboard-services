@@ -65,6 +65,12 @@ SSH_TIMEOUT       = int(os.environ.get("SSH_CONNECT_TIMEOUT", "4"))
 AP_MODE           = os.environ.get("DROPLET_AP_MODE", "uci").strip().lower()
 AP_SSID           = os.environ.get("DROPLET_AP_SSID", "").strip()
 AP_PSK            = os.environ.get("DROPLET_AP_PSK", "")
+# WARP-819: the single-box per-box AP PSK is generated + persisted host-side by
+# droplet-openwrt-attach to this 0600 file (which it also mirrors into the
+# bridge env). Reading the SAME file here guarantees the pairing QR/text equals
+# the PSK hostapd actually serves even if the bridge process started before its
+# env was refreshed — coherence. Used only when DROPLET_AP_PSK isn't in the env.
+AP_PSK_FILE       = os.environ.get("DROPLET_AP_PSK_FILE", "/etc/droplet/ap-psk").strip()
 # Container that runs the single-box hostapd AP. Its /etc/hostapd.conf is
 # the fallback creds source when DROPLET_AP_SSID isn't set in the env.
 AP_HOSTAPD_CONTAINER = os.environ.get(
@@ -375,22 +381,65 @@ def _read_hostapd_conf_creds():
     return _parse_hostapd_conf(out)
 
 
+def _read_persisted_psk():
+    """Read the per-box AP PSK from the persisted 0600 file (WARP-819).
+
+    droplet-openwrt-attach generates the PSK once and writes it here; this is
+    the SAME value hostapd serves. Returns the stripped key, or "" when the
+    file is absent/unreadable/empty. Never raises."""
+    try:
+        with open(AP_PSK_FILE) as f:
+            return f.read().strip()
+    except Exception:                                               # noqa: BLE001
+        return ""
+
+
 def hostapd_wifi_credentials():
     """Return the single-box hostapd AP's SSID + PSK.
 
-    Source order: the host env (DROPLET_AP_SSID/DROPLET_AP_PSK — cleanest,
-    set by droplet-openwrt-attach) first, then /etc/hostapd.conf inside the
-    droplet-openwrt container. Returns (creds, err) with the same dict shape
-    as openwrt_wifi_credentials()."""
+    Source order for the PSK, all coherent with what hostapd serves:
+      1. DROPLET_AP_PSK env (cleanest; mirrored in by droplet-openwrt-attach);
+      2. the persisted 0600 file AP_PSK_FILE (the attach script's source of
+         truth — covers a bridge started before its env was refreshed);
+      3. /etc/hostapd.conf inside the droplet-openwrt container (last resort).
+    Returns (creds, err) with the same dict shape as openwrt_wifi_credentials().
+    """
     if AP_SSID:
-        return ({
-            "ssid": AP_SSID,
-            "key": AP_PSK or "",
-            "encryption": "psk2",
-            "hidden": False,
-            "disabled": False,
-        }, None)
-    return _read_hostapd_conf_creds()
+        # Env PSK first, else the persisted per-box file (WARP-819). Both are the
+        # value the attach script fed hostapd, so the displayed creds match the
+        # live AP either way.
+        key = AP_PSK or _read_persisted_psk()
+        if key:
+            return ({
+                "ssid": AP_SSID,
+                "key": key,
+                "encryption": "psk2",
+                "hidden": False,
+                "disabled": False,
+            }, None)
+        # WARP-819 boot race: SSID is configured but neither the env nor the
+        # persisted 0600 file has the PSK yet (droplet-openwrt-attach hasn't run,
+        # or _read_persisted_psk() hit a PermissionError and swallowed it). Do
+        # NOT return key:"" — that renders an unscannable `WIFI:T:WPA;S:..;P:;;`
+        # QR a phone joins as a named-but-open network and then can't reach the
+        # box. Fall through to the live hostapd.conf (the value hostapd actually
+        # serves). _hostapd_conf_creds_or_error() rejects an empty-passphrase
+        # conf too, so the caller emits NO QR rather than a broken one.
+        return _hostapd_conf_creds_or_error()
+    return _hostapd_conf_creds_or_error()
+
+
+def _hostapd_conf_creds_or_error():
+    """Read hostapd.conf creds, rejecting an empty/missing passphrase.
+
+    Wraps _read_hostapd_conf_creds() so a parsed-but-keyless conf (an AP whose
+    wpa_passphrase line is empty, or a container still mid-boot) degrades to
+    (None, err) instead of leaking creds with key:"". The QR builder then emits
+    an error placeholder rather than an empty-passphrase QR (WARP-819)."""
+    creds, err = _read_hostapd_conf_creds()
+    if creds is not None and not creds.get("key"):
+        return None, "hostapd AP passphrase not available yet"
+    return creds, err
 
 
 def _hostapd_wifi_payload(ssid, key):

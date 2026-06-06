@@ -455,6 +455,25 @@ def _rrect(draw: ImageDraw.ImageDraw, x, y, w, h, r, *, fill=None,
                            fill=fill, outline=outline, width=width)
 
 
+def _wifi_qr_payload(ssid: str, key: str) -> str:
+    """Format a WPA WiFi-join QR payload with metacharacter escaping (WARP-819).
+
+    The single-box AP is always WPA2-PSK, so the security type is a fixed
+    `WPA` and the field order is T;S;P — identical to device-bridge.py's
+    `_hostapd_wifi_payload`. Escapes the WiFi-QR metacharacters (\\ ; , : ")
+    per the de-facto standard so an SSID/PSK containing them still scans. This
+    is the sim-only encode path; on the device the firmware paints the
+    host-supplied matrix verbatim (the bridge does the real encode), so the two
+    stay byte-identical.
+    """
+    def esc(s: str) -> str:
+        return (s or "").replace("\\", "\\\\").replace(";", "\\;") \
+                        .replace(",", "\\,").replace(":", "\\:") \
+                        .replace('"', '\\"')
+
+    return "WIFI:T:WPA;S:{};P:{};;".format(esc(ssid), esc(key))
+
+
 # ---------------------------------------------------------------------------
 # Touch regions
 # ---------------------------------------------------------------------------
@@ -544,6 +563,14 @@ class TFTDisplay:
         # the same code + setup URL.
         self._claim_code = ""
         self._claim_setup_url = ""
+        # WARP-819: optional Wi-Fi-connect creds shown on the claim screen so a
+        # first-boot user can join the box's Wi-Fi with no prior config. Empty
+        # by default; render_claim falls back to the claim-only layout when the
+        # matrix/ssid/psk are absent (an older orchestrator that doesn't send
+        # them, or the bridge being down at claim time).
+        self._claim_wifi_ssid = ""
+        self._claim_wifi_psk = ""
+        self._claim_wifi_qr_matrix = None
         # Readiness transition state. `_boot_complete` is an explicit flag —
         # we never infer "done" from the absence of something. `_boot_started_at`
         # anchors the timeout; `_last_readiness_check` gates the probe cadence.
@@ -1807,9 +1834,12 @@ class TFTDisplay:
         card_y = 60
         _rrect(draw, card_x, card_y, card_w, card_w, 12, fill=V3_WHITE)
         wifi = v.get("wifi") or {}
-        payload = "WIFI:T:WPA;S:{};P:{};;".format(
+        # WARP-819: escape WiFi-QR metachars (same helper as the claim screen)
+        # so a special-char SSID/PSK still scans, matching device-bridge.py.
+        payload = _wifi_qr_payload(
             wifi.get("ssid") or "Droplet-AI", wifi.get("password") or "")
-        self._draw_qr(img, draw, card_x + 9, card_y + 9, card_w - 18, payload)
+        self._draw_qr(img, draw, card_x + 9, card_y + 9, card_w - 18,
+                      payload=payload)
         mc = 26
         mcx = card_x + 9 + (card_w - 18) // 2 - mc // 2
         mcy = card_y + 9 + (card_w - 18) // 2 - mc // 2
@@ -1859,25 +1889,31 @@ class TFTDisplay:
         return img
 
     def _draw_qr(self, img: Image.Image, draw: ImageDraw.ImageDraw,
-                 x: int, y: int, size: int, payload: str) -> None:
-        """Render a real Wi-Fi join QR into the white card.
+                 x: int, y: int, size: int, payload: str = None,
+                 matrix: Optional[List[List[int]]] = None) -> None:
+        """Render a Wi-Fi join QR into the white card.
 
-        Uses the `qrcode` package (already a service dep) when available;
-        falls back to a deterministic pseudo-matrix purely so the sim/PNG
-        still shows a card if qrcode is missing. On the device the host
-        supplies the matrix over serial — this on-host render is for the
-        preview PNG only.
+        Two sources, in priority order:
+          1. an explicit host-supplied `matrix` (0/1 rows) — painted verbatim.
+             This is the production-faithful path: the firmware paints the same
+             host-encoded matrix on the device, so passing it here keeps the sim
+             preview byte-identical to the panel (WARP-819).
+          2. otherwise encode `payload` with the `qrcode` package (a service
+             dep) — the sim-only fallback when no matrix was supplied.
+        Falls back to a deterministic pseudo-matrix purely so the sim/PNG still
+        shows a card if neither a matrix nor qrcode is available.
         """
-        matrix = None
-        try:
-            import qrcode
-            qr = qrcode.QRCode(border=0,
-                               error_correction=qrcode.constants.ERROR_CORRECT_M)
-            qr.add_data(payload)
-            qr.make(fit=True)
-            matrix = qr.get_matrix()
-        except Exception:
-            matrix = None
+        if not matrix and payload is not None:
+            try:
+                import qrcode
+                qr = qrcode.QRCode(
+                    border=0,
+                    error_correction=qrcode.constants.ERROR_CORRECT_M)
+                qr.add_data(payload)
+                qr.make(fit=True)
+                matrix = qr.get_matrix()
+            except Exception:
+                matrix = None
         if not matrix:
             # Deterministic pseudo-matrix (layout only).
             n = 25
@@ -1989,54 +2025,63 @@ class TFTDisplay:
             "standby_wake", 0, 0, WIDTH, HEIGHT, lambda: self._go_system()))
         return img
 
-    def render_claim(self, code: str, setup_url: str) -> Image.Image:
+    def render_claim(self, code: str, setup_url: str,
+                     wifi_ssid: Optional[str] = None,
+                     wifi_psk: Optional[str] = None,
+                     wifi_qr_matrix: Optional[List[List[int]]] = None
+                     ) -> Image.Image:
         """Onboarding claim screen (WARP-632 / ADR-017), py-v3 editorial style.
 
         The claim CODE is the hero — same heavy-weight numeral face the idle
         clock / CPU load use (``_get_font(weight="heavy")``), centred on a
         raised card with an accent border so it reads as the one thing to copy
         off the lid. Above it a tracked ``CLAIM THIS DROPLET`` eyebrow + a brand
-        mark; below it a short instruction and the setup URL. Tokens, mark and
-        spacing match the boot/idle/System screens. Mirrors the firmware's
-        render_claim() 1:1.
+        mark. Tokens, mark and spacing match the boot/idle/System screens.
+        Mirrors the firmware's render_claim() 1:1.
+
+        WARP-819: when the box's Wi-Fi-connect creds are supplied, the screen
+        becomes STACKED — the claim code (slightly smaller) on top, and below it
+        a Wi-Fi-connect QR card + readable ``WiFi: <ssid>`` / ``Password: <psk>``
+        text, so a first-boot user can join the box's Wi-Fi with no prior config
+        (scan, or type the creds on a camera-less PC). When the wifi_* args are
+        absent (older orchestrator / bridge down at claim time) the original
+        claim-only layout renders unchanged (graceful degradation).
 
         Modal + host-driven: the orchestrator mints the code and pushes it while
         the box is unclaimed; the host navigates away once it's claimed.
-
-        QR on the lid is intentionally OMITTED here (text-only) — see ADR-017
-        consequences / the WARP-632 follow-up note: the code is short and meant
-        to be typed, so text keeps the screen unambiguous. QR is a clean
-        follow-up (it would reuse the existing wifi-QR matrix path).
         """
+        has_wifi = bool(wifi_qr_matrix and wifi_ssid)
+
         img = Image.new("RGB", (WIDTH, HEIGHT), V3_BG)
         draw = ImageDraw.Draw(img)
         with self._touch_regions_lock:
             self._touch_regions = []
 
-        # Brand mark up top — sized between idle (big) and the System header
-        # (tiny) so the code owns the middle band.
-        mark_size = 52
+        # Brand mark up top. Smaller in the stacked Wi-Fi layout so the lower
+        # band has room for the QR + creds.
+        mark_size = 40 if has_wifi else 52
         mark_w = int(mark_size * 52 / 60)
         mark_x = (WIDTH - mark_w) // 2
-        mark_y = 26
+        mark_y = 14 if has_wifi else 26
         draw_droplet_mark(draw, mark_x, mark_y, mark_size,
                           primary=V3_ACCENT, highlight=V3_ACCENT_INK)
         mark_b = mark_y + int(mark_size * 48 / 60)
 
         # Eyebrow — what this screen is. Tracked caps, like SYSTEM / CPU LOAD.
         font_eyebrow = _get_font(11, weight="bold")
-        eyebrow_y = mark_b + 20
+        eyebrow_y = mark_b + (12 if has_wifi else 20)
         _v3_text(draw, "CLAIM THIS DROPLET", WIDTH // 2, eyebrow_y,
                  font=font_eyebrow, fill=V3_LABEL3, anchor="ma", tracking=2)
 
-        # The CODE — hero on a raised card. Size the heavy face down from 48px
-        # until it (with card padding) fits the panel width, so a long code
-        # never overflows. Mirrors the firmware's terminalio-scale clamp.
+        # The CODE — hero on a raised card. Size the heavy face down until it
+        # (with card padding) fits the panel width, so a long code never
+        # overflows. Reduced ceiling in the stacked layout (the code shares the
+        # screen with the Wi-Fi block but stays the visual hero).
         code_text = (code or "").strip() or "— — — —"
         card_pad_x = 26
-        card_pad_y = 16
+        card_pad_y = 12 if has_wifi else 16
         max_card_w = WIDTH - 32
-        code_size = 48
+        code_size = 34 if has_wifi else 48
         while code_size > 22:
             font_code = _get_font(code_size, weight="heavy")
             cbbox = draw.textbbox((0, 0), code_text, font=font_code)
@@ -2048,7 +2093,7 @@ class TFTDisplay:
         card_w = min(max_card_w, max(180, code_w + card_pad_x * 2))
         card_h = code_h + card_pad_y * 2
         card_x = (WIDTH - card_w) // 2
-        card_y = eyebrow_y + 22
+        card_y = eyebrow_y + (16 if has_wifi else 22)
         _rrect(draw, card_x, card_y, card_w, card_h, 14, fill=V3_SURFACE)
         _rrect(draw, card_x, card_y, card_w, card_h, 14,
                outline=V3_ACCENT, width=1)
@@ -2057,18 +2102,61 @@ class TFTDisplay:
                    card_y + (card_h - code_h) // 2 - cbbox[1]),
                   code_text, fill=V3_ACCENT_INK, font=font_code)
 
-        # Instruction line under the card.
-        font_hint = _get_font(12, weight="regular")
-        _v3_text(draw, "Enter this code to finish setup",
-                 WIDTH // 2, card_y + card_h + 18,
-                 font=font_hint, fill=V3_LABEL3, anchor="ma", tracking=0.4)
+        if has_wifi:
+            # ----- Lower band: Wi-Fi-connect QR + readable creds -------------
+            # A divider sets the "now join the Wi-Fi" section apart from the
+            # claim code, then a left QR card + right NETWORK/PASSWORD text —
+            # the same two-column idiom as the System screen's PAIR · WI-FI.
+            band_y = card_y + card_h + 14
+            _v3_text(draw, "JOIN THIS DROPLET'S WI-FI", WIDTH // 2, band_y,
+                     font=_get_font(10, weight="bold"), fill=V3_ACCENT,
+                     anchor="ma", tracking=1.4)
 
-        # Setup URL at the foot — where to point the phone.
-        url_text = (setup_url or "").strip()[:54]
-        if url_text:
-            font_url = _get_font(12, weight="regular")
-            _v3_text(draw, url_text, WIDTH // 2, HEIGHT - 22,
-                     font=font_url, fill=V3_LABEL4, anchor="ma", tracking=0.4)
+            qr_top = band_y + 16
+            qr_size = min(118, HEIGHT - qr_top - 14)
+            qr_x = 26
+            qr_y = qr_top
+            _rrect(draw, qr_x, qr_y, qr_size, qr_size, 12, fill=V3_WHITE)
+            # Production-faithful: paint the host-supplied matrix (what the
+            # firmware paints on the device) so the preview and the panel match.
+            # The escaped payload is only the sim-side encode fallback when no
+            # matrix is supplied — it carries the same WiFi-QR metachar escaping
+            # device-bridge.py uses, so a special-char SSID/PSK still scans
+            # (WARP-819).
+            payload = _wifi_qr_payload(wifi_ssid or "", wifi_psk or "")
+            self._draw_qr(img, draw, qr_x + 9, qr_y + 9, qr_size - 18,
+                          payload=payload, matrix=wifi_qr_matrix)
+            mc = 22
+            mcx = qr_x + 9 + (qr_size - 18) // 2 - mc // 2
+            mcy = qr_y + 9 + (qr_size - 18) // 2 - mc // 2
+            _rrect(draw, mcx - 3, mcy - 3, mc + 6, mc + 6, 6, fill=V3_WHITE)
+            draw_droplet_mark(draw, mcx, mcy, mc, primary=V3_ACCENT,
+                              highlight=V3_ACCENT_INK)
+
+            tx = qr_x + qr_size + 18
+            ty = qr_y + 6
+            _v3_text(draw, "WIFI", tx, ty, font=_get_font(9, weight="bold"),
+                     fill=V3_LABEL3, tracking=1.6)
+            _v3_text(draw, str(wifi_ssid or "")[:20], tx, ty + 13,
+                     font=_get_font(15, weight="bold"), fill=V3_TEXT)
+            _v3_text(draw, "PASSWORD", tx, ty + 40, font=_get_font(9, weight="bold"),
+                     fill=V3_LABEL3, tracking=1.6)
+            _v3_text(draw, str(wifi_psk or "")[:22], tx, ty + 53,
+                     font=_get_font(14, weight="regular"), fill=V3_ACCENT_INK)
+            _v3_text(draw, "Scan, or join with these on any device",
+                     tx, ty + 78, font=_get_font(10, weight="regular"),
+                     fill=V3_LABEL4)
+        else:
+            # Claim-only layout (unchanged): instruction + setup URL at the foot.
+            font_hint = _get_font(12, weight="regular")
+            _v3_text(draw, "Enter this code to finish setup",
+                     WIDTH // 2, card_y + card_h + 18,
+                     font=font_hint, fill=V3_LABEL3, anchor="ma", tracking=0.4)
+            url_text = (setup_url or "").strip()[:54]
+            if url_text:
+                font_url = _get_font(12, weight="regular")
+                _v3_text(draw, url_text, WIDTH // 2, HEIGHT - 22,
+                         font=font_url, fill=V3_LABEL4, anchor="ma", tracking=0.4)
         return img
 
     @staticmethod
@@ -2240,7 +2328,10 @@ class TFTDisplay:
             })
             self._render_current_locked()
 
-    def show_claim(self, code: str, setup_url: str):
+    def show_claim(self, code: str, setup_url: str,
+                   wifi_ssid: Optional[str] = None,
+                   wifi_psk: Optional[str] = None,
+                   wifi_qr_matrix: Optional[List[List[int]]] = None):
         """Show the onboarding claim screen (WARP-632 / ADR-017).
 
         Host-driven: the orchestrator mints the claim code and POSTs it to
@@ -2248,14 +2339,34 @@ class TFTDisplay:
         stream a `claim` frame to the firmware (the render path to the PHYSICAL
         panel — NOT the preview-only /display/custom image path), and render a
         sim preview frame so the dashboard preview works too.
+
+        WARP-819: the optional wifi_* args add the box's Wi-Fi-connect QR matrix
+        + SSID + PSK so the claim screen also shows how to join the box's Wi-Fi
+        (scan, or type the creds on a camera-less PC). They are stored and
+        forwarded to the firmware in the same `claim` frame; absent → the
+        original claim-only layout renders (graceful degradation). Only the
+        wifi_* keys actually present are put on the wire so the firmware merge
+        never clobbers prior creds with nulls.
         """
         with self._lock:
             self._current_mode = self.CLAIM
             self._claim_code = code
             self._claim_setup_url = setup_url
-            self._pyportal_send("claim", {
-                "code": code, "setup_url": setup_url,
-            })
+            self._claim_wifi_ssid = wifi_ssid or ""
+            self._claim_wifi_psk = wifi_psk or ""
+            self._claim_wifi_qr_matrix = wifi_qr_matrix or None
+            frame = {"code": code, "setup_url": setup_url}
+            if wifi_qr_matrix and wifi_ssid:
+                frame["wifi_qr_matrix"] = wifi_qr_matrix
+                frame["wifi_ssid"] = wifi_ssid
+                # Only put wifi_psk on the wire when it is non-empty. The
+                # firmware resets the wifi_* keys before merging each claim
+                # frame, so OMITTING psk here clears any stale psk rather than
+                # re-sending wifi_psk:"" (WARP-819) — matching this method's
+                # "only the keys actually present are put on the wire" contract.
+                if wifi_psk:
+                    frame["wifi_psk"] = wifi_psk
+            self._pyportal_send("claim", frame)
             self._render_current_locked()
 
     def show_custom_image(self, image: Image.Image):
@@ -2379,7 +2490,12 @@ class TFTDisplay:
             img = self.render_shutdown(self._shutdown_reason,
                                        self._shutdown_phase)
         elif mode == self.CLAIM:
-            img = self.render_claim(self._claim_code, self._claim_setup_url)
+            img = self.render_claim(
+                self._claim_code, self._claim_setup_url,
+                wifi_ssid=self._claim_wifi_ssid,
+                wifi_psk=self._claim_wifi_psk,
+                wifi_qr_matrix=self._claim_wifi_qr_matrix,
+            )
         elif mode == self.IDLE:
             img = self.render_idle()
         elif mode == self.SYSTEM:

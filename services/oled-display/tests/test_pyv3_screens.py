@@ -264,6 +264,109 @@ def test_render_claim_tolerates_empty_inputs(sim_display: TFTDisplay):
     assert img.size == (WIDTH, HEIGHT)
 
 
+# --- Claim screen WiFi-connect QR + creds (WARP-819) ------------------------
+#
+# On first boot a user must be able to join the box's Wi-Fi with zero prior
+# config — by scanning a Wi-Fi-connect QR on the claim screen OR reading the
+# SSID + password as text. So render_claim grows an optional stacked layout:
+# the claim code on top, a Wi-Fi QR card + readable creds below. Absent creds
+# => the original claim-only layout (graceful degradation).
+
+CLAIM_WIFI_MATRIX = [[1, 0, 1], [0, 1, 0], [1, 0, 1]]
+CLAIM_WIFI_SSID = "Droplet"
+CLAIM_WIFI_PSK = "7gpz4k9m2njq8wxr"
+
+
+def test_render_claim_with_wifi_returns_full_frame(sim_display: TFTDisplay):
+    img = sim_display.render_claim(
+        CLAIM_CODE, CLAIM_URL,
+        wifi_ssid=CLAIM_WIFI_SSID, wifi_psk=CLAIM_WIFI_PSK,
+        wifi_qr_matrix=CLAIM_WIFI_MATRIX,
+    )
+    assert isinstance(img, Image.Image)
+    assert img.size == (WIDTH, HEIGHT)
+
+
+def test_render_claim_wifi_layout_differs_from_claim_only(sim_display: TFTDisplay):
+    # Supplying the Wi-Fi creds must materially change the frame — the QR card +
+    # creds are actually drawn, not silently ignored.
+    claim_only = sim_display.render_claim(CLAIM_CODE, CLAIM_URL)
+    with_wifi = sim_display.render_claim(
+        CLAIM_CODE, CLAIM_URL,
+        wifi_ssid=CLAIM_WIFI_SSID, wifi_psk=CLAIM_WIFI_PSK,
+        wifi_qr_matrix=CLAIM_WIFI_MATRIX,
+    )
+    assert claim_only.tobytes() != with_wifi.tobytes()
+
+
+def test_render_claim_psk_is_rendered(sim_display: TFTDisplay):
+    # The password is shown as readable text (camera-less PC setup), so changing
+    # it must change the frame.
+    a = sim_display.render_claim(
+        CLAIM_CODE, CLAIM_URL, wifi_ssid=CLAIM_WIFI_SSID,
+        wifi_psk=CLAIM_WIFI_PSK, wifi_qr_matrix=CLAIM_WIFI_MATRIX,
+    )
+    b = sim_display.render_claim(
+        CLAIM_CODE, CLAIM_URL, wifi_ssid=CLAIM_WIFI_SSID,
+        wifi_psk="different-passphrase9", wifi_qr_matrix=CLAIM_WIFI_MATRIX,
+    )
+    assert a.tobytes() != b.tobytes()
+
+
+def test_render_claim_falls_back_when_only_partial_wifi(sim_display: TFTDisplay):
+    # Matrix present but SSID missing (or vice versa) is not a usable Wi-Fi
+    # block — render the claim-only layout rather than a half-drawn band.
+    claim_only = sim_display.render_claim(CLAIM_CODE, CLAIM_URL)
+    no_ssid = sim_display.render_claim(
+        CLAIM_CODE, CLAIM_URL, wifi_ssid="", wifi_psk=CLAIM_WIFI_PSK,
+        wifi_qr_matrix=CLAIM_WIFI_MATRIX,
+    )
+    assert no_ssid.tobytes() == claim_only.tobytes()
+
+
+# --- WiFi-QR payload escaping + matrix-faithful render (WARP-819) -----------
+# The sim's claim QR previously formatted `WIFI:T:WPA;S:{};P:{};;` raw — an
+# SSID/PSK carrying a WiFi-QR metachar (\ ; , : ") would corrupt the payload,
+# unlike device-bridge.py's escaped `_hostapd_wifi_payload`. The sim must apply
+# the same escaping, AND (production-faithful) paint the host-supplied matrix
+# directly when one is provided — the firmware never re-encodes on-device.
+
+def test_wifi_qr_payload_escapes_metacharacters():
+    # Mirrors device-bridge.py _hostapd_wifi_payload's esc(): \ ; , : " are
+    # backslash-escaped so a special-char SSID/PSK still scans.
+    payload = display_module._wifi_qr_payload("My;Net:2", "p\\a,s;s")
+    assert payload == r"WIFI:T:WPA;S:My\;Net\:2;P:p\\a\,s\;s;;"
+
+
+def test_wifi_qr_payload_plain_values_unchanged():
+    # No metachars -> identical to the simple format (back-compat with the
+    # common alphanumeric generated PSK).
+    assert (display_module._wifi_qr_payload("Droplet", "7gpz4k9m2njq8wxr")
+            == "WIFI:T:WPA;S:Droplet;P:7gpz4k9m2njq8wxr;;")
+
+
+def test_render_claim_paints_host_matrix_not_reencoded(
+        monkeypatch: pytest.MonkeyPatch, sim_display: TFTDisplay):
+    # When a wifi_qr_matrix is supplied, the claim screen must paint THAT matrix
+    # (the bytes the firmware will paint), never silently re-encode a payload —
+    # otherwise the sim preview and the device diverge. Spy on _draw_qr and
+    # assert it received the host matrix.
+    seen = {}
+    orig = sim_display._draw_qr
+
+    def spy(img, draw, x, y, size, payload=None, matrix=None):
+        seen["payload"] = payload
+        seen["matrix"] = matrix
+        return orig(img, draw, x, y, size, payload=payload, matrix=matrix)
+
+    monkeypatch.setattr(sim_display, "_draw_qr", spy)
+    sim_display.render_claim(
+        CLAIM_CODE, CLAIM_URL, wifi_ssid=CLAIM_WIFI_SSID,
+        wifi_psk=CLAIM_WIFI_PSK, wifi_qr_matrix=CLAIM_WIFI_MATRIX,
+    )
+    assert seen.get("matrix") == CLAIM_WIFI_MATRIX
+
+
 # --- Backward-compat: existing boot/shutdown signatures still work ----------
 
 def test_render_boot_legacy_stage_signature_still_supported(sim_display: TFTDisplay):

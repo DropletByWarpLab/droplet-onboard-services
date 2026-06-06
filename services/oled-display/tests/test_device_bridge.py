@@ -38,7 +38,7 @@ def _load_bridge(monkeypatch: pytest.MonkeyPatch, env: dict | None = None):
     # Clear the AP-mode knobs so a leaked value from the process env can't
     # change a test's deployment shape; each test sets exactly what it needs.
     for key in ("DROPLET_AP_MODE", "DROPLET_AP_SSID", "DROPLET_AP_PSK",
-                "WIFI_KEY_ROTATION_ENABLED"):
+                "DROPLET_AP_PSK_FILE", "WIFI_KEY_ROTATION_ENABLED"):
         monkeypatch.delenv(key, raising=False)
     for k, v in (env or {}).items():
         monkeypatch.setenv(k, v)
@@ -207,6 +207,138 @@ def test_hostapd_env_creds_take_priority_over_conf(
     snap = bridge.qr_snapshot()
     assert snap["ssid"] == "EnvNet"
     assert snap["payload"] == "WIFI:T:WPA;S:EnvNet;P:envpass;;"
+
+
+# ---------------------------------------------------------------------------
+# WARP-819 — persisted per-box PSK file is a coherent creds source
+# ---------------------------------------------------------------------------
+# droplet-openwrt-attach generates a per-box PSK and persists it to a 0600 file
+# (/etc/droplet/ap-psk) which it ALSO mirrors into the bridge env. To guarantee
+# the pairing QR/text ALWAYS equals the PSK hostapd serves even if the bridge
+# process started before its env was refreshed, the bridge reads that same
+# persisted file when DROPLET_AP_PSK isn't in its env. The file path is
+# overridable (DROPLET_AP_PSK_FILE) so this is testable without touching /etc.
+
+def test_hostapd_reads_psk_from_persisted_file_when_env_psk_absent(
+        monkeypatch: pytest.MonkeyPatch, tmp_path):
+    psk_file = tmp_path / "ap-psk"
+    psk_file.write_text("480M4GnTS7wPfF36\n")  # trailing newline must be stripped
+    bridge = _load_bridge(monkeypatch, {
+        "DROPLET_AP_MODE": "hostapd",
+        "DROPLET_AP_SSID": "Droplet",
+        # No DROPLET_AP_PSK in env on purpose — the file is the source.
+        "DROPLET_AP_PSK_FILE": str(psk_file),
+    })
+    # Must not shell out to the container when the persisted file answers.
+    monkeypatch.setattr(bridge, "_run", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("docker exec used despite persisted PSK file")))
+
+    snap = bridge.qr_snapshot()
+    assert snap["ok"] is True
+    assert snap["ssid"] == "Droplet"
+    assert snap["key"] == "480M4GnTS7wPfF36"
+    assert snap["payload"] == "WIFI:T:WPA;S:Droplet;P:480M4GnTS7wPfF36;;"
+
+
+def test_hostapd_env_psk_takes_priority_over_persisted_file(
+        monkeypatch: pytest.MonkeyPatch, tmp_path):
+    # An explicit env PSK is the cleanest source and must win over the file.
+    psk_file = tmp_path / "ap-psk"
+    psk_file.write_text("file-psk-value99\n")
+    bridge = _load_bridge(monkeypatch, {
+        "DROPLET_AP_MODE": "hostapd",
+        "DROPLET_AP_SSID": "Droplet",
+        "DROPLET_AP_PSK": "envwins123456",
+        "DROPLET_AP_PSK_FILE": str(psk_file),
+    })
+    snap = bridge.qr_snapshot()
+    assert snap["key"] == "envwins123456"
+
+
+# ---------------------------------------------------------------------------
+# WARP-819 — empty-PSK boot race must NOT emit an unscannable (P:;;) QR.
+# On first boot the SSID env is set (DROPLET_AP_SSID=Droplet) but the PSK is
+# not yet known to the bridge — DROPLET_AP_PSK is absent and the persisted
+# 0600 file hasn't been written by droplet-openwrt-attach yet (or is empty).
+# Previously hostapd_wifi_credentials() returned {ssid, key:""} in that window,
+# so the claim QR encoded `WIFI:T:WPA;S:Droplet;P:;;` — an unjoinable
+# empty-passphrase network. The bridge must instead fall through to the live
+# hostapd.conf (the value hostapd actually serves); and if THAT is also
+# unavailable it must refuse to emit creds (better no QR than a broken one).
+# ---------------------------------------------------------------------------
+
+def test_hostapd_empty_env_and_file_psk_falls_through_to_conf(
+        monkeypatch: pytest.MonkeyPatch, tmp_path):
+    # SSID set, env PSK absent, persisted file empty -> the function must read
+    # the live /etc/hostapd.conf rather than emit an empty-passphrase QR.
+    psk_file = tmp_path / "ap-psk"
+    psk_file.write_text("")  # exists but empty (mid-write / pre-attach race)
+    bridge = _load_bridge(monkeypatch, {
+        "DROPLET_AP_MODE": "hostapd",
+        "DROPLET_AP_SSID": "Droplet",
+        # No DROPLET_AP_PSK on purpose.
+        "DROPLET_AP_PSK_FILE": str(psk_file),
+    })
+
+    def fake_run(cmd, timeout=15):
+        return 0, _HOSTAPD_CONF, ""
+
+    monkeypatch.setattr(bridge, "_run", fake_run)
+
+    snap = bridge.qr_snapshot()
+    assert snap["ok"] is True
+    assert snap["ssid"] == "Droplet"
+    # The PSK came from hostapd.conf, NOT the empty env/file.
+    assert snap["key"] == "Droplet123!"
+    assert snap["payload"] == "WIFI:T:WPA;S:Droplet;P:Droplet123!;;"
+    # Hard guarantee: never an empty-passphrase QR.
+    assert ";P:;;" not in snap["payload"]
+
+
+def test_hostapd_credentials_falls_through_when_key_empty(
+        monkeypatch: pytest.MonkeyPatch, tmp_path):
+    # Unit-level: hostapd_wifi_credentials() with SSID-but-no-key must defer to
+    # _read_hostapd_conf_creds() rather than return {key: ""}.
+    psk_file = tmp_path / "ap-psk"  # absent on disk
+    bridge = _load_bridge(monkeypatch, {
+        "DROPLET_AP_MODE": "hostapd",
+        "DROPLET_AP_SSID": "Droplet",
+        "DROPLET_AP_PSK_FILE": str(psk_file),
+    })
+    monkeypatch.setattr(
+        bridge, "_read_hostapd_conf_creds",
+        lambda: ({"ssid": "Droplet", "key": "fromconf123456",
+                  "encryption": "psk2", "hidden": False,
+                  "disabled": False}, None))
+    creds, err = bridge.hostapd_wifi_credentials()
+    assert err is None
+    assert creds["key"] == "fromconf123456"
+
+
+def test_hostapd_empty_psk_everywhere_refuses_qr_no_empty_passphrase(
+        monkeypatch: pytest.MonkeyPatch, tmp_path):
+    # Worst case during the boot race: SSID set, env+file PSK empty, AND the
+    # hostapd.conf read also yields no key (container not up yet). The function
+    # must NOT emit {key: ""} — better no QR (ok=false) than a P:;; QR a phone
+    # silently joins as an open-but-named network and then can't reach the box.
+    psk_file = tmp_path / "ap-psk"  # absent
+    bridge = _load_bridge(monkeypatch, {
+        "DROPLET_AP_MODE": "hostapd",
+        "DROPLET_AP_SSID": "Droplet",
+        "DROPLET_AP_PSK_FILE": str(psk_file),
+    })
+    # hostapd.conf parsed but carries an empty wpa_passphrase.
+    monkeypatch.setattr(
+        bridge, "_read_hostapd_conf_creds",
+        lambda: ({"ssid": "Droplet", "key": "",
+                  "encryption": "psk2", "hidden": False,
+                  "disabled": False}, None))
+    snap = bridge.qr_snapshot()
+    assert snap["ok"] is False
+    assert snap["matrix"] is None
+    assert snap["error"]
+    # Crucially: no empty-passphrase payload leaked out.
+    assert snap["payload"] is None
 
 
 # ---------------------------------------------------------------------------
