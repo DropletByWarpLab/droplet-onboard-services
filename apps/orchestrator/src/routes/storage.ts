@@ -90,6 +90,66 @@ function deriveBus(device: string): string {
   return "disk";
 }
 
+// ── WARP-827: data-drive inclusion filter ──
+//
+// What the home-user (ADR-002) is allowed to see on the /storage page is
+// ONLY real, user-relevant data drives. They must NEVER see firmware/boot/
+// swap/loop pseudo-devices or the OS/system disk dressed up as "your drive".
+//
+// Layered rule (defense in depth):
+//   • The device-bridge (services/oled-display/device-bridge.py) is the FIRST
+//     layer: it already scopes enumeration to /mnt/* mounts, restricts to a
+//     data-fstype allow-list (ext*/xfs/btrfs/f2fs/vfat/exfat/ntfs/zfs — no
+//     tmpfs/swap/squashfs/overlay/proc/sys), excludes the /mnt/droplet OS-root
+//     bind, skips zombie mounts, and drops trivially small (<100 MB) volumes.
+//   • This predicate is the SECOND layer at the orchestrator boundary — the
+//     CI-testable one (the bridge is host-side Python). It re-applies the same
+//     intent so an older bridge (predating that scoping), a future bridge, a
+//     mis-scoped/dev bridge, or a tampered snapshot can never leak junk to a
+//     customer. It is purposely conservative: it only EXCLUDES things that are
+//     unambiguously not user data, and never fabricates or mutates a drive.
+//
+// A drive is included iff ALL hold:
+//   1. it is mounted (an unmounted entry has no browsable contents);
+//   2. its mount path is a real user-storage location — under /mnt/ AND not
+//      the /mnt/droplet OS-root bind itself (children /mnt/droplet/<x> are
+//      fine). Pseudo mounts (/, /boot/efi, [SWAP], /snap/*, /proc, …) are out;
+//   3. its filesystem (when the bridge reports one) is a data fstype, never
+//      swap/squashfs/overlay/tmpfs/devtmpfs/proc/sysfs/cgroup.
+// `fs`/`mount` are presentation/host facts from the bridge — this is a
+// read-only display gate, never a security or eject gate (those stay in the
+// bridge + storage-safety framework). The empty-list degradation below is
+// preserved: a fully-junk snapshot yields [] honestly, not an error.
+
+/** Filesystem types we treat as browsable user storage. Mirrors the bridge's
+ *  `_DATA_FSTYPES`. An entry whose `fs` is set but absent from this set (swap,
+ *  squashfs, overlay, tmpfs, …) is excluded. An entry with no `fs` is allowed
+ *  to pass the fs check (an older bridge omits it) and is still gated by the
+ *  mount-path rule. */
+const DATA_FSTYPES = new Set([
+  "ext4", "ext3", "ext2", "xfs", "btrfs", "f2fs",
+  "vfat", "exfat", "ntfs", "ntfs3", "zfs",
+]);
+
+/** The OS-root shared-mount bind the automounter creates. Backed by the OS
+ *  disk, so surfacing it would show the install as a "drive". Children
+ *  (/mnt/droplet/<label-uuid>) are real hot-plug drives and ARE included. */
+const OS_ROOT_BIND_MOUNT = "/mnt/droplet";
+
+/** Predicate: is this bridge drive a real, user-relevant DATA drive worth
+ *  showing on the home-user storage page? See the rule block above. */
+function isUserDataDrive(d: BridgeDrive): boolean {
+  if (!d.mounted) return false;
+  const mount = (d.mount || "").replace(/\/+$/, "") || d.mount;
+  // Rule 2: must be a real user-storage location under /mnt/, excluding the
+  // OS-root bind itself. This rejects /, /boot/efi, [SWAP], /snap/*, etc.
+  if (!mount.startsWith("/mnt/")) return false;
+  if (mount === OS_ROOT_BIND_MOUNT) return false;
+  // Rule 3: data fstype only (when the bridge reports one).
+  if (d.fs && !DATA_FSTYPES.has(d.fs.toLowerCase())) return false;
+  return true;
+}
+
 // The device-bridge only runs with the OLED/display compose profile. On a host
 // without it, the fetch fails with ECONNREFUSED ("fetch failed" + a
 // `cause.code` of ECONNREFUSED/ENOTFOUND/etc.). That's an EXPECTED condition —
@@ -259,16 +319,22 @@ export function createStorageRouter(prisma: PrismaClient): Router {
       }
       const snap = (await r.json()) as BridgeDrivesSnapshot;
 
+      // WARP-827: drop firmware/boot/swap/loop pseudo-devices and the OS disk
+      // at the orchestrator boundary so the home-user only ever sees real data
+      // drives. See isUserDataDrive() for the documented rule. Done BEFORE the
+      // Drive-table join so we never query labels for junk.
+      const dataDrives = (snap.drives ?? []).filter(isUserDataDrive);
+
       // Single batched lookup — Drive table is tiny (one row per
       // physical drive the customer has named), so an unfiltered
       // findMany is fine. The Map keeps the join O(n) total.
-      const uuids = snap.drives.map((d) => d.uuid).filter(Boolean);
+      const uuids = dataDrives.map((d) => d.uuid).filter(Boolean);
       const labels = uuids.length
         ? await prisma.drive.findMany({ where: { uuid: { in: uuids } } })
         : [];
       const byUuid = new Map(labels.map((l) => [l.uuid, l]));
 
-      const drives: DriveWithLabel[] = snap.drives.map((d) => {
+      const drives: DriveWithLabel[] = dataDrives.map((d) => {
         const label = byUuid.get(d.uuid);
         return {
           ...d,
@@ -281,7 +347,9 @@ export function createStorageRouter(prisma: PrismaClient): Router {
         };
       });
 
-      res.json({ drives, count: snap.count, snapshot_at: snap.snapshot_at });
+      // count reflects the FILTERED set the dashboard renders, not the raw
+      // bridge count (which may include the junk we just dropped).
+      res.json({ drives, count: drives.length, snapshot_at: snap.snapshot_at });
     } catch (err) {
       // The device-bridge is optional (OLED/display profile only). A
       // connection refusal means it simply isn't running on this host — an
