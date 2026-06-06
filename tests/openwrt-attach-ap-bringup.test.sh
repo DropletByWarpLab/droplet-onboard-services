@@ -57,8 +57,13 @@ for m in \
   if grep -qF "$m" "$ATTACH"; then pass "sentinel present: $m"; else fail "sentinel missing: $m"; fi
 done
 
-if grep -qE "^[[:space:]]*install_ap_pkgs \|\| true" "$ATTACH"; then pass "install_ap_pkgs is invoked"; else fail "install_ap_pkgs not invoked"; fi
-if grep -qE "^[[:space:]]*start_hostapd \|\| true" "$ATTACH"; then pass "start_hostapd is invoked"; else fail "start_hostapd not invoked"; fi
+# The functions must be invoked. NOTE: the WARP-826 follow-up replaced the
+# original `... || true` (which MASKED a hard-fail from the oneshot unit) with a
+# propagating `if ! <fn>; then exit 1; fi`, so we just assert the call site
+# exists — see tests/openwrt-attach-ap-bringup-hardening.test.sh for the explicit
+# "no '|| true' masking + rc propagates to systemd" assertions.
+if grep -qE "^[[:space:]]*(if ! )?install_ap_pkgs\b" "$ATTACH"; then pass "install_ap_pkgs is invoked"; else fail "install_ap_pkgs not invoked"; fi
+if grep -qE "^[[:space:]]*(if ! )?start_hostapd\b" "$ATTACH"; then pass "start_hostapd is invoked"; else fail "start_hostapd not invoked"; fi
 
 # The old silent fire-and-forget hostapd start must be gone.
 if grep -qE 'pgrep -f "hostapd -B" >/dev/null \|\| hostapd -B' "$ATTACH"; then
@@ -91,18 +96,21 @@ run_inst() {
   bash -c "set -e; . '$WORK/inst.sh'; install_ap_pkgs && echo RC=0 || echo RC=\$?" 2>"$WORK/err"
 }
 
-# Case A: opkg works + hostapd present -> success (RC=0).
+# Case A: opkg works + hostapd AND iw present -> success (RC=0).
+# (The WARP-826 follow-up hard-verifies iw too, since iw is an AP prerequisite —
+# so the success case must provide both binaries.)
 printf '#!/usr/bin/env bash\nexit 0\n' > "$WORK/bin/opkg"; chmod +x "$WORK/bin/opkg"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$WORK/bin/hostapd"; chmod +x "$WORK/bin/hostapd"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$WORK/bin/iw"; chmod +x "$WORK/bin/iw"
 OUT="$(run_inst || true)"
-if printf '%s' "$OUT" | grep -qx 'RC=0'; then pass "opkg ok + hostapd present -> RC=0"; else fail "expected RC=0, got: $OUT"; fi
+if printf '%s' "$OUT" | grep -qx 'RC=0'; then pass "opkg ok + hostapd/iw present -> RC=0"; else fail "expected RC=0, got: $OUT"; fi
 
-# Case B: opkg always fails AND hostapd never appears -> RC=1 + loud ERROR.
+# Case B: opkg always fails AND binaries never appear -> RC=1 + loud ERROR.
 printf '#!/usr/bin/env bash\nexit 1\n' > "$WORK/bin/opkg"; chmod +x "$WORK/bin/opkg"
-rm -f "$WORK/bin/hostapd"   # hostapd absent => command -v fails
+rm -f "$WORK/bin/hostapd" "$WORK/bin/iw"   # AP prerequisites absent => command -v fails
 OUT="$(run_inst || true)"
-if printf '%s' "$OUT" | grep -qx 'RC=1' && grep -qi 'hostapd still missing' "$WORK/err"; then
-  pass "opkg fails + hostapd absent -> RC=1 with loud ERROR (no silent success)"
+if printf '%s' "$OUT" | grep -qx 'RC=1' && grep -qiE 'prerequisites still missing|hostapd not installed' "$WORK/err"; then
+  pass "opkg fails + AP prerequisites absent -> RC=1 with loud ERROR (no silent success)"
 else
   fail "expected RC=1 + ERROR, got rc:$OUT err:$(cat "$WORK/err")"
 fi
@@ -119,6 +127,7 @@ exit 0
 EOF
 chmod +x "$WORK/bin/opkg"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$WORK/bin/hostapd"; chmod +x "$WORK/bin/hostapd"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$WORK/bin/iw"; chmod +x "$WORK/bin/iw"
 rm -f "$WORK/upd.count"
 OUT="$(run_inst || true)"
 if printf '%s' "$OUT" | grep -qx 'RC=0'; then pass "flaky feed (retry then ok) -> RC=0"; else fail "expected RC=0 on retry, got: $OUT"; fi
@@ -128,19 +137,29 @@ echo "--- Phase 3: start_hostapd (start + verify + retry) ---"
 rm -f "$WORK/bin/opkg"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$WORK/bin/hostapd"; chmod +x "$WORK/bin/hostapd"
 
+# run_hap stubs both pgrep and iw to the SAME up/down state (the WARP-826 follow-
+# up verifies the iface is `type AP`, not just that a process exists, so the two
+# signals must agree): pgrep-exit-code 0 == running == iface type AP.
 run_hap() { # <pgrep-exit-code>
   printf '#!/usr/bin/env bash\nexit %s\n' "$1" > "$WORK/bin/pgrep"; chmod +x "$WORK/bin/pgrep"
+  if [ "$1" = "0" ]; then _ty="AP"; else _ty="managed"; fi
+  cat > "$WORK/bin/iw" <<IW
+#!/usr/bin/env bash
+if [ "\$1" = "dev" ] && [ "\$3" = "info" ]; then echo "Interface \$2"; echo "	type $_ty"; fi
+exit 0
+IW
+  chmod +x "$WORK/bin/iw"
   PATH="$WORK/bin:$PATH" AP_IFACE=wlp14s0 HOSTAPD_START_TRIES=2 HOSTAPD_START_SLEEP=0 \
   bash -c "set -e; . '$WORK/hap.sh'; start_hostapd && echo RC=0 || echo RC=\$?" 2>"$WORK/err"
 }
 
-# Already running: pgrep finds it -> RC=0 (no-op).
+# Already running: pgrep finds it + iface type AP -> RC=0 (no-op).
 OUT="$(run_hap 0 || true)"
 if printf '%s' "$OUT" | grep -qx 'RC=0'; then pass "already-running -> RC=0 (no-op)"; else fail "already-running expected RC=0, got: $OUT"; fi
 
 # Never starts: pgrep never finds it -> RC=1 + loud ERROR (the key fix vs fire-and-forget).
 OUT="$(run_hap 1 || true)"
-if printf '%s' "$OUT" | grep -qx 'RC=1' && grep -qi 'hostapd failed to start' "$WORK/err"; then
+if printf '%s' "$OUT" | grep -qx 'RC=1' && grep -qiE 'hostapd failed to (start|bring up the AP)' "$WORK/err"; then
   pass "never-starts -> RC=1 with loud ERROR (vs old silent fire-and-forget)"
 else
   fail "never-starts expected RC=1 + ERROR, got rc:$OUT err:$(cat "$WORK/err")"

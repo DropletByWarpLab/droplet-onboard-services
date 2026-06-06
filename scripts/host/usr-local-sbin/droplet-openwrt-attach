@@ -332,36 +332,60 @@ docker exec -i \
     _feed_tries="${OPKG_FEED_TRIES:-12}"
     _inst_tries="${OPKG_INSTALL_TRIES:-3}"
     _nap="${OPKG_RETRY_SLEEP:-5}"
+    # Capture (do NOT swallow) the last opkg output so a hard-fail can SURFACE the
+    # real error — a generic "feed unreachable" line hides whether it was DNS, no
+    # route, a 404 feed, or a dependency conflict, which is what an operator needs.
+    _upd_out=""
+    _inst_out=""
     _i=1
     _feed_ok=0
     while [ "$_i" -le "$_feed_tries" ]; do
-      if opkg update >/dev/null 2>&1; then _feed_ok=1; break; fi
+      _upd_out="$(opkg update 2>&1)"; _upd_rc=$?
+      if [ "$_upd_rc" -eq 0 ]; then _feed_ok=1; break; fi
       sleep "$_nap"
       _i=$((_i + 1))
     done
     [ "$_feed_ok" = 1 ] || echo "droplet-openwrt-attach: ERROR: opkg feed unreachable after ${_feed_tries} tries — AP/router packages cannot install until container connectivity returns" >&2
     _i=1
     while [ "$_i" -le "$_inst_tries" ]; do
-      if opkg install \
+      _inst_out="$(opkg install \
         hostapd-mbedtls hostapd-utils wireless-regdb iw-full \
         uhttpd uhttpd-mod-ubus rpcd rpcd-mod-rpcsys rpcd-mod-iwinfo rpcd-mod-file \
         umdns \
         wireguard-tools kmod-wireguard luci-proto-wireguard \
-        >/dev/null 2>&1; then break; fi
+        2>&1)"; _inst_rc=$?
+      [ "$_inst_rc" -eq 0 ] && break
       sleep "$_nap"
       _i=$((_i + 1))
     done
-    # Hard-verify the load-bearing AP binary actually landed — do NOT return
-    # success with a silently-broken AP (the recurring L276 failure this guards).
-    if command -v hostapd >/dev/null 2>&1; then
+    # Hard-verify the load-bearing AP binaries actually landed — BOTH hostapd and
+    # iw (iw is required for nl80211 phy/iface control; a present hostapd with no
+    # iw still cannot bring the radio into AP mode). Do NOT return success with a
+    # silently-broken AP (the recurring L276 failure this guards).
+    if command -v hostapd >/dev/null 2>&1 && command -v iw >/dev/null 2>&1; then
       return 0
     fi
-    echo "droplet-openwrt-attach: ERROR: hostapd still missing after opkg install retries — the default Wi-Fi AP cannot start (check container internet / opkg feed)" >&2
+    echo "droplet-openwrt-attach: ERROR: AP prerequisites still missing after opkg install retries — the default Wi-Fi AP cannot start:" >&2
+    command -v hostapd >/dev/null 2>&1 || echo "  - hostapd not installed" >&2
+    command -v iw >/dev/null 2>&1      || echo "  - iw not installed" >&2
+    # Surface the captured opkg output so the journal shows the ROOT cause, not
+    # just the symptom (the brief: do not swallow opkg output on the failure path).
+    echo "droplet-openwrt-attach: last opkg update output:" >&2
+    printf "%s\n" "$_upd_out" >&2
+    echo "droplet-openwrt-attach: last opkg install output:" >&2
+    printf "%s\n" "$_inst_out" >&2
     return 1
   }
   # <<< install_ap_pkgs (WARP-826b)
   if [ "$NEED_INSTALL" = 1 ]; then
-    install_ap_pkgs || true
+    # Propagate a persistent install failure: exit the docker-exec body non-zero
+    # so EXEC_RC in the outer script carries a failed status to the oneshot
+    # systemd unit. Limping on with no hostapd/iw is the silent no-AP this whole
+    # change exists to prevent (the live .87 failure) — fail loud + visible, do
+    # NOT mask it with `|| true`.
+    if ! install_ap_pkgs; then
+      exit 1
+    fi
     # netifd was started before luci-proto-wireguard arrived, so it didnt
     # load the wireguard protocol handler. Restart it so ifup wg0 works
     # for any subsequent peer-add via the routing service.
@@ -729,21 +753,44 @@ DNSMASQ
   # (pgrep || hostapd -B) hid launch failures — a dead AP while the attach
   # reported success (seen live on .87). Retry a few times, then log loudly so a
   # broken AP is never silent. Knobs: HOSTAPD_START_TRIES / HOSTAPD_START_SLEEP.
+  #
+  # Verification is two-layered: the hostapd -B PROCESS must be alive AND the AP
+  # iface must actually be in AP mode (`iw dev <if> info` -> `type AP`). The iface
+  # check is the real proof — a hostapd that started but failed to bind the radio
+  # exits, and even a lingering process would not have put the iface into AP mode
+  # (the pgrep-only check would false-pass on a bind failure). iw should always be
+  # present (install_ap_pkgs hard-verifies it); if it is somehow unavailable we
+  # fall back to the process check rather than false-fail a working AP.
   start_hostapd() {
-    if pgrep -f "hostapd -B" >/dev/null 2>&1; then return 0; fi
     _htries="${HOSTAPD_START_TRIES:-3}"
     _hnap="${HOSTAPD_START_SLEEP:-1}"
+    _haperr=/tmp/hostapd-start.err
+
+    _ap_running() {
+      pgrep -f "hostapd -B" >/dev/null 2>&1 || return 1
+      # Confirm AP mode when iw is usable; otherwise accept the live process.
+      if command -v iw >/dev/null 2>&1; then
+        iw dev "${AP_IFACE}" info 2>/dev/null | grep -qE "type[[:space:]]+AP" || return 1
+      fi
+      return 0
+    }
+
+    if _ap_running; then return 0; fi
     _h=1
     while [ "$_h" -le "$_htries" ]; do
-      hostapd -B -P /run/hostapd.pid /etc/hostapd.conf >/dev/null 2>&1 || true
+      # Capture hostapds stderr (the -B daemon detaches and would otherwise
+      # swallow its startup error) so the loud failure below can show the cause.
+      hostapd -B -P /run/hostapd.pid /etc/hostapd.conf >/dev/null 2>>"$_haperr" || true
       sleep "$_hnap"
-      if pgrep -f "hostapd -B" >/dev/null 2>&1; then
-        echo "droplet-openwrt-attach: hostapd up on ${AP_IFACE}"
+      if _ap_running; then
+        echo "droplet-openwrt-attach: hostapd up on ${AP_IFACE} (type AP)"
         return 0
       fi
       _h=$((_h + 1))
     done
-    echo "droplet-openwrt-attach: ERROR: hostapd failed to start after ${_htries} tries — default Wi-Fi AP is DOWN (hostapd installed? iface ${AP_IFACE} present? /etc/hostapd.conf valid?)" >&2
+    echo "droplet-openwrt-attach: ERROR: hostapd failed to bring up the AP after ${_htries} tries — default Wi-Fi AP is DOWN (hostapd installed? iface ${AP_IFACE} present + type AP? /etc/hostapd.conf valid?)" >&2
+    # Surface the captured hostapd error (do not swallow it on the failure path).
+    [ -s "$_haperr" ] && { echo "droplet-openwrt-attach: last hostapd error:" >&2; tail -10 "$_haperr" >&2; }
     return 1
   }
   # <<< start_hostapd (WARP-826b)
@@ -751,7 +798,44 @@ DNSMASQ
     pgrep -f "hostapd -B" | xargs -r kill 2>/dev/null
     sleep 1
   fi
-  start_hostapd || true
+  # Propagate a persistent hostapd failure to the oneshot unit (no `|| true`
+  # masking): a dead AP that reported success is exactly the live .87 bug.
+  if ! start_hostapd; then
+    exit 1
+  fi
+
+  # --- hostapd watchdog --------------------------------------------------
+  # start_hostapd verifies the AP at ATTACH time, but the attach is a oneshot —
+  # if hostapd later crashes (a transient nl80211/driver hiccup, an OOM kill)
+  # nothing brings it back and the AP silently disappears until reboot. Rather
+  # than a host-side .timer that would re-run this whole heavyweight attach
+  # (opkg, firewall, routing restart) every tick — disproportionate — add a
+  # lightweight in-container respawn loop modeled EXACTLY on the eth0 watchdog
+  # below: a 2-second loop that idempotently re-launches hostapd if pgrep shows
+  # it gone. Same /tmp storage rationale as eth0-keepalive (the overlay housing
+  # /usr/local/sbin is briefly read-only right after a docker restart; /tmp is a
+  # tmpfs mounted before procd, so writes always succeed; the file being wiped
+  # on restart is fine because this attach rewrites it every run). Best-effort by
+  # design — the LOUD failure signal is the start_hostapd verify above (which
+  # fails the unit); this just keeps a healthy AP healthy across crashes.
+  cat > /tmp/hostapd-keepalive <<"HOSTAPDWD"
+#!/bin/sh
+# hostapd watchdog. Re-launch hostapd -B if procd/a crash left it gone.
+# Idempotent: the pgrep guard makes the no-change case a cheap noop.
+CONF="${1:-/etc/hostapd.conf}"
+PIDF="${2:-/run/hostapd.pid}"
+while true; do
+  pgrep -f "hostapd -B" >/dev/null 2>&1 || hostapd -B -P "$PIDF" "$CONF" 2>/dev/null
+  sleep 2
+done
+HOSTAPDWD
+  chmod +x /tmp/hostapd-keepalive
+
+  start-stop-daemon -K -q -p /var/run/hostapd-keepalive.pid 2>/dev/null
+  rm -f /var/run/hostapd-keepalive.pid
+  start-stop-daemon -S -b -m -p /var/run/hostapd-keepalive.pid \
+    -x /tmp/hostapd-keepalive -- /etc/hostapd.conf /run/hostapd.pid
+  # ---------------------------------------------------------------------
 
   if [ "$DNSMASQ_CHANGED" = 1 ]; then
     pgrep -f "dnsmasq -C /etc/dnsmasq-ap.conf" | xargs -r kill 2>/dev/null
@@ -780,8 +864,20 @@ DNSMASQ
   unbridge_eth0
   bootstrap_net
 '
+# Capture the docker-exec exit status. The body above `exit 1`s on a hard-fail
+# (opkg could not install the AP prerequisites, or hostapd never brought up the
+# AP) — that exit becomes docker exec`s exit code. The outer script runs
+# `set +e`, so without capturing + re-exiting here a failed container body would
+# be MASKED and the oneshot unit would report success on a silent no-AP. Record
+# it, finish the best-effort host-side tail (rpcd ACL + routing recovery — still
+# worth attempting), then exit non-zero at the end so the systemd unit shows
+# failed and the failure is visible.
+EXEC_RC=$?
 
 echo "droplet-openwrt-attach: done (gateway=$GATEWAY_IP, ssid=$AP_SSID, domain=$AP_DOMAIN)"
+if [ "$EXEC_RC" -ne 0 ]; then
+  echo "droplet-openwrt-attach: WARN: container bring-up reported failure (rc=$EXEC_RC) — AP/package prerequisites did not satisfy; see errors above. Continuing host-side recovery, then failing the unit." >&2
+fi
 
 # Fresh-provision fix: install the droplet rpcd ACL so the routing service
 # session (root) is granted `umdns: [browse, update]` plus dhcp/iwinfo
@@ -818,3 +914,10 @@ if command -v docker >/dev/null 2>&1; then
     docker restart droplet-routing-1 >/dev/null 2>&1 || true
   fi
 fi
+
+# Propagate the container bring-up status as the script (and therefore the
+# oneshot unit) exit code. Best-effort host-side recovery above always runs, but
+# if the AP/package prerequisites failed inside the container we exit non-zero so
+# `systemctl status droplet-openwrt-attach` shows failed instead of masking a
+# silent no-AP behind a success.
+exit "${EXEC_RC:-0}"
