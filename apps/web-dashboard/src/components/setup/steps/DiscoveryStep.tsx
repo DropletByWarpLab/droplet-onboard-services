@@ -12,6 +12,7 @@ import {
 import { fetchMatterDevices } from "@/lib/api";
 import type { MatterDevice, MatterGrouped } from "@/lib/types";
 import { StepShell } from "@/components/setup/StepShell";
+import { ScrollRegion } from "@/components/setup/ScrollRegion";
 
 const CATEGORY_ICONS: Record<string, typeof Lightbulb> = {
   light: Lightbulb,
@@ -218,8 +219,12 @@ export function DiscoveryStep({
       primary={{ label: "Continue", onClick: handleFinish, showArrow: true }}
       skip={{ label: "Skip for now", onClick: handleFinish }}
     >
-      {/* Discovered devices grid */}
-      <div className="space-y-2 mb-8 max-h-[320px] overflow-y-auto">
+      {/* Discovered devices grid. WARP-820: the device list is unbounded, so
+          it lives in a <ScrollRegion> (the wizard's single scroll surface) —
+          the title, "N devices found" subtitle, and the CTA stay pinned in the
+          StepShell while only this list scrolls. The bound is viewport-relative
+          (was a fixed max-h-[320px]) so it shrinks on a short landscape phone. */}
+      <ScrollRegion aria-label="Discovered devices" className="space-y-2 mb-8">
         {discoveredDevices.map((device, index) => {
           const Icon = CATEGORY_ICONS[device.category] || Wifi;
           return (
@@ -262,7 +267,7 @@ export function DiscoveryStep({
             ))}
           </div>
         )}
-      </div>
+      </ScrollRegion>
 
       {/* Scanning timer + lifecycle hints (WARP-298). */}
       {isScanning && scanPhase === "active" && (

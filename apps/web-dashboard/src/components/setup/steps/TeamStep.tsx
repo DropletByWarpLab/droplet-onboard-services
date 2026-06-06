@@ -6,6 +6,7 @@ import { postTeamInvite, InviteError } from "@/lib/api";
 import type { TeamInviteRole } from "@/lib/types";
 import { StepShell } from "@/components/setup/StepShell";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
+import { ScrollRegion } from "@/components/setup/ScrollRegion";
 
 /**
  * Wizard step — Team (PR #381), the LAST onboarding step. Slots near the END:
@@ -162,8 +163,9 @@ export function TeamStep({
       }}
       skip={{ label: "I'll invite people later", onClick: onSkip }}
     >
-      {/* Directory sync (SSO) — the bulk alternative. */}
-      <div className="flex items-center gap-3.5 rounded-xl border border-accent/20 bg-accent-subtle px-4 py-3.5 mb-6">
+      {/* Directory sync (SSO) — the bulk alternative. WARP-820: fluid bottom
+          gap so the SSO card + invite row + pending list fit without scroll. */}
+      <div className="flex items-center gap-3.5 rounded-xl border border-accent/20 bg-accent-subtle px-4 py-3.5 mb-[clamp(16px,3vh,24px)]">
         <Users size={20} className="flex-shrink-0 text-accent" />
         <div className="min-w-0 flex-1">
           <p className="type-footnote font-semibold text-label-primary">
@@ -257,41 +259,48 @@ export function TeamStep({
         </p>
       )}
 
-      {/* Pending invitee list */}
+      {/* Pending invitee list. WARP-820: this list grows without bound as the
+          owner adds people, so it lives in a <ScrollRegion> (the wizard's
+          single scroll surface) — the invite row + the CTA stay pinned while
+          only the list scrolls once it's long. */}
       {invites.length > 0 && (
-        <ul className="mt-4 overflow-hidden rounded-xl border border-separator">
-          {invites.map((invite, i) => (
-            <li
-              key={invite.email}
-              className={[
-                "flex items-center gap-3 px-3.5 py-3 animate-fade-rise",
-                i > 0 ? "border-t border-separator" : "",
-              ].join(" ")}
-            >
-              <span
-                aria-hidden="true"
-                className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-accent-subtle type-caption-2 font-semibold text-accent"
+        <ScrollRegion aria-label="Pending invitations" className="mt-4">
+          <ul className="overflow-hidden rounded-xl border border-separator">
+            {invites.map((invite, i) => (
+              <li
+                key={invite.email}
+                className={[
+                  "flex items-center gap-3 px-3.5 py-3 animate-fade-rise",
+                  i > 0 ? "border-t border-separator" : "",
+                ].join(" ")}
               >
-                {initialsFromEmail(invite.email)}
-              </span>
-              <span className="min-w-0 flex-1 truncate type-footnote text-label-primary">
-                {invite.email}
-              </span>
-              <span className="dp-status-chip !h-7 !px-2.5">
-                {roleLabel(invite.role)}
-              </span>
-              <span className="type-caption-1 text-label-tertiary">Pending</span>
-              <button
-                type="button"
-                onClick={() => handleRemove(invite.email)}
-                aria-label={`Remove ${invite.email}`}
-                className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full text-label-tertiary transition-colors duration-200 ease-smooth hover:bg-surface-tertiary hover:text-label-secondary"
-              >
-                <X size={14} />
-              </button>
-            </li>
-          ))}
-        </ul>
+                <span
+                  aria-hidden="true"
+                  className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-accent-subtle type-caption-2 font-semibold text-accent"
+                >
+                  {initialsFromEmail(invite.email)}
+                </span>
+                <span className="min-w-0 flex-1 truncate type-footnote text-label-primary">
+                  {invite.email}
+                </span>
+                <span className="dp-status-chip !h-7 !px-2.5">
+                  {roleLabel(invite.role)}
+                </span>
+                <span className="type-caption-1 text-label-tertiary">
+                  Pending
+                </span>
+                <button
+                  type="button"
+                  onClick={() => handleRemove(invite.email)}
+                  aria-label={`Remove ${invite.email}`}
+                  className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full text-label-tertiary transition-colors duration-200 ease-smooth hover:bg-surface-tertiary hover:text-label-secondary"
+                >
+                  <X size={14} />
+                </button>
+              </li>
+            ))}
+          </ul>
+        </ScrollRegion>
       )}
 
       <p className="type-caption-1 text-label-tertiary mt-4 leading-relaxed">

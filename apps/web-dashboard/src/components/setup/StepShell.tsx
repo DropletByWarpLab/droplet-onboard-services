@@ -101,13 +101,13 @@ function RailRow({
     <div
       data-testid="rail-row"
       aria-current={state === "active" ? "step" : undefined}
-      className={`flex items-center gap-3 rounded-[10px] px-3 py-2 ${
+      className={`flex items-center gap-3 rounded-[10px] px-3 py-[clamp(5px,1.1vh,8px)] ${
         state === "active" ? "bg-white/[0.15]" : ""
       }`}
     >
       <span
         aria-hidden="true"
-        className={`flex h-[25px] w-[25px] flex-none items-center justify-center rounded-full ${
+        className={`flex h-[clamp(21px,18px+0.6vh,25px)] w-[clamp(21px,18px+0.6vh,25px)] flex-none items-center justify-center rounded-full ${
           state === "done"
             ? "bg-emerald-400 text-emerald-950"
             : state === "active"
@@ -118,7 +118,7 @@ function RailRow({
         {state === "done" ? <Check size={13} /> : <Icon size={12} />}
       </span>
       <span
-        className={`text-[13.5px] ${
+        className={`text-[clamp(12px,11px+0.35vh,13.5px)] ${
           state === "active"
             ? "font-semibold text-white"
             : state === "done"
@@ -159,17 +159,28 @@ export function StepShell({
   const showKicker = idx >= 1 && idx <= total - 2;
 
   return (
-    <div className="grid h-dvh grid-rows-1 overflow-hidden bg-surface-primary lg:grid-cols-[288px_1fr]">
-      {/* Aurora step rail (lg+) */}
-      <aside className="aurora-brand hidden flex-col overflow-y-auto p-7 text-white lg:flex xl:p-8">
-        <div className="mb-9 flex items-center gap-2.5">
+    // `setup-shell` scopes the wizard's fluid `type-*` overrides (globals.css);
+    // the rest of the dashboard's fixed type is untouched. `h-dvh
+    // overflow-hidden` keeps the document itself from ever scrolling.
+    <div className="setup-shell grid h-dvh grid-rows-1 overflow-hidden bg-surface-primary lg:grid-cols-[288px_1fr]">
+      {/* Aurora step rail (lg+). WARP-820: no inner scroll — the rail is sized
+          to fit; its spacing is viewport-fluid so the 12 steps + footer fit a
+          short laptop without a scrollbar. */}
+      <aside
+        data-testid="setup-rail"
+        className="aurora-brand hidden min-h-0 flex-col overflow-hidden p-[clamp(16px,1vw+1.6vh,32px)] text-white lg:flex"
+      >
+        <div className="mb-[clamp(16px,3.5vh,36px)] flex items-center gap-2.5">
           <DropletMark size={24} className="text-white" />
           <span className="text-[18px] font-bold tracking-tight">Droplet</span>
         </div>
-        <p className="mb-4 text-[11.5px] font-semibold uppercase tracking-[0.08em] text-white/80">
+        <p className="mb-[clamp(10px,1.6vh,16px)] text-[11.5px] font-semibold uppercase tracking-[0.08em] text-white/80">
           Set up · ~10 min
         </p>
-        <nav className="flex flex-col gap-0.5" aria-label="Setup progress">
+        <nav
+          className="flex min-h-0 flex-col gap-0.5"
+          aria-label="Setup progress"
+        >
           {STEPS.map((id, i) => {
             const meta = RAIL_LABELS[id];
             return (
@@ -182,7 +193,7 @@ export function StepShell({
             );
           })}
         </nav>
-        <div className="mt-auto flex items-center gap-2 pt-6 type-caption-1 leading-snug text-white/80">
+        <div className="mt-auto flex items-center gap-2 pt-[clamp(12px,2.4vh,24px)] type-caption-1 leading-snug text-white/80">
           <Shield size={13} aria-hidden="true" />
           Everything here stays on the box.
         </div>
@@ -209,9 +220,18 @@ export function StepShell({
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-6 py-10 sm:px-10">
-          <div className="mx-auto max-w-[600px] animate-in fade-in duration-300">
-            {icon && <div className="mb-6">{icon}</div>}
+        {/* WARP-820: fit-first — no `overflow-y-auto`. `overflow-hidden`
+            enforces the viewport lock; a step that still overflows is a signal
+            its spacing/type need more compaction, not a scrollbar. The only
+            scroll surface in the wizard is <ScrollRegion> (unbounded lists).
+            Vertical padding is viewport-fluid so the panel breathes on desktop
+            and tightens on a short landscape phone. */}
+        <div
+          data-testid="setup-main"
+          className="flex min-h-0 flex-1 flex-col overflow-hidden px-6 py-[clamp(16px,4vh,40px)] sm:px-10"
+        >
+          <div className="mx-auto w-full max-w-[600px] animate-in fade-in duration-300">
+            {icon && <div className="mb-[clamp(12px,2.4vh,24px)]">{icon}</div>}
             {showKicker && (
               <p className="type-caption-1 font-bold uppercase tracking-[0.06em] text-accent">
                 Step {idx + 1}
@@ -219,17 +239,17 @@ export function StepShell({
             )}
             <h1 className="type-title-1 text-label-primary mt-2">{title}</h1>
             {subtitle && (
-              <p className="type-subheadline text-label-secondary mt-2 mb-8">
+              <p className="type-subheadline text-label-secondary mt-2 mb-[clamp(16px,3.2vh,32px)]">
                 {subtitle}
               </p>
             )}
-            {!subtitle && <div className="mb-8" />}
+            {!subtitle && <div className="mb-[clamp(16px,3.2vh,32px)]" />}
             {children}
           </div>
         </div>
 
         {(primary || skip) && (
-          <div className="flex items-center justify-end gap-3 border-t border-separator bg-surface-secondary px-6 py-3.5 sm:px-10">
+          <div className="flex items-center justify-end gap-3 border-t border-separator bg-surface-secondary px-6 py-[clamp(10px,1.6vh,14px)] sm:px-10">
             {skip && (
               <button
                 type="button"

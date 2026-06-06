@@ -24,6 +24,7 @@ import {
 } from "@/lib/api";
 import type { DuckDnsStatus } from "@/lib/types";
 import { StepShell } from "@/components/setup/StepShell";
+import { ScrollRegion } from "@/components/setup/ScrollRegion";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 
 /**
@@ -384,6 +385,15 @@ export function InternetStep({
       }}
       skip={{ label: "Skip for now", onClick: onSkip }}
     >
+      {/* WARP-820 (finding #3): the body (the optional Home Wi-Fi disclosure,
+          the DuckDNS subdomain + token fields, the auto-update toggle, any
+          notice, and the help card) is taller than a short landscape phone and
+          the setup panel is now overflow-hidden, so the token field + help card
+          clipped off the bottom. The whole body lives in a <ScrollRegion> (the
+          wizard's single scroll surface) so it scrolls within the panel instead
+          of clipping; the title + CTA stay pinned in the StepShell. The WARP-808
+          / WARP-809 Wi-Fi write behaviour below is unchanged — only wrapped. */}
+      <ScrollRegion aria-label="Network setup">
       {alreadyConfigured && (
         <div className="dp-card !p-3 mb-4 flex items-start gap-2">
           <Globe size={14} className="text-system-green flex-shrink-0 mt-1" />
@@ -534,8 +544,9 @@ export function InternetStep({
         </div>
       )}
 
-      {/* Thin divider between the two sections */}
-      <div className="my-5 h-px bg-separator" />
+      {/* Thin divider between the two sections. WARP-820: fluid gap so the two
+          sections + the Wi-Fi advisory fit a short viewport without scroll. */}
+      <div className="my-[clamp(12px,2.4vh,20px)] h-px bg-separator" />
 
       {/* Section B — Internet address · DuckDNS (unchanged behavior) */}
       <SectionLabel icon={Globe}>Internet address · DuckDNS</SectionLabel>
@@ -688,6 +699,7 @@ export function InternetStep({
           or Twitter account, pick a subdomain, and copy the token.
         </p>
       </LearnMoreCard>
+      </ScrollRegion>
     </StepShell>
   );
 }

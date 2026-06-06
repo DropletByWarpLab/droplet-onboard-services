@@ -211,6 +211,80 @@
 }
 
 /* ============================================================
+   Setup-wizard fluid type — SCOPED to `.setup-shell` (WARP-820)
+   ------------------------------------------------------------
+   The onboarding wizard must fit every viewport with ZERO vertical
+   scroll, so under `.setup-shell` (StepShell root) the `type-*` sizes
+   become viewport-aware `clamp()`s: they shrink on short / narrow
+   screens and cap at the desktop size. The base tokens above stay
+   FIXED — this block overrides ONLY inside the wizard via the higher
+   `.setup-shell .type-*` specificity, so the rest of the dashboard's
+   type is byte-for-byte unchanged.
+
+   The PREF term is `Npx + Mvh`: it tracks viewport HEIGHT (the axis we
+   need to recover budget on), which also keeps it honest under 200%
+   zoom (zoom scales the px base, the vh term is bounded by the MAX) and
+   for 320px reflow (narrow but tall portrait keeps near-MAX type).
+
+   Accessibility floors (HARD — WARP-820 contract; do not lower):
+     • body / subheadline MIN ≥ 13px
+     • caption MIN ≥ 11px
+   font-weight + letter-spacing are inherited from the base tokens; only
+   font-size + line-height are re-stated here.
+   ============================================================ */
+@layer components {
+  .setup-shell .type-large-title {
+    font-size: clamp(26px, 20px + 1.4vh, 34px);
+    line-height: clamp(32px, 26px + 1.4vh, 41px);
+  }
+  .setup-shell .type-title-1 {
+    font-size: clamp(22px, 18px + 1.1vh, 28px);
+    line-height: clamp(28px, 24px + 1.1vh, 34px);
+  }
+  .setup-shell .type-title-2 {
+    font-size: clamp(19px, 16px + 0.8vh, 22px);
+    line-height: clamp(24px, 21px + 0.8vh, 28px);
+  }
+  .setup-shell .type-title-3 {
+    font-size: clamp(17px, 15px + 0.6vh, 20px);
+    line-height: clamp(22px, 19px + 0.6vh, 25px);
+  }
+  .setup-shell .type-headline {
+    font-size: clamp(15px, 14px + 0.5vh, 17px);
+    line-height: clamp(20px, 18px + 0.5vh, 22px);
+  }
+  .setup-shell .type-body {
+    /* MIN 15px ≥ 13px body floor. */
+    font-size: clamp(15px, 14px + 0.5vh, 17px);
+    line-height: clamp(20px, 18px + 0.5vh, 22px);
+  }
+  .setup-shell .type-callout {
+    font-size: clamp(14px, 13px + 0.4vh, 16px);
+    line-height: clamp(19px, 17px + 0.4vh, 21px);
+  }
+  .setup-shell .type-subheadline {
+    /* MIN 13px = subheadline floor (== body floor). */
+    font-size: clamp(13px, 12px + 0.4vh, 15px);
+    line-height: clamp(18px, 16px + 0.4vh, 20px);
+  }
+  .setup-shell .type-footnote {
+    /* MIN 12px — above the caption floor, keeps help text legible. */
+    font-size: clamp(12px, 11.5px + 0.2vh, 13px);
+    line-height: clamp(16px, 15px + 0.2vh, 18px);
+  }
+  .setup-shell .type-caption-1 {
+    /* MIN 11px = caption floor. */
+    font-size: clamp(11px, 10.8px + 0.18vh, 12px);
+    line-height: clamp(14px, 13px + 0.18vh, 16px);
+  }
+  .setup-shell .type-caption-2 {
+    /* Already at the 11px caption floor — pinned, never shrinks below. */
+    font-size: 11px;
+    line-height: 13px;
+  }
+}
+
+/* ============================================================
    Component Utilities
    ============================================================ */
 
