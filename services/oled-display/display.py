@@ -455,6 +455,25 @@ def _rrect(draw: ImageDraw.ImageDraw, x, y, w, h, r, *, fill=None,
                            fill=fill, outline=outline, width=width)
 
 
+def _wifi_qr_payload(ssid: str, key: str) -> str:
+    """Format a WPA WiFi-join QR payload with metacharacter escaping (WARP-819).
+
+    The single-box AP is always WPA2-PSK, so the security type is a fixed
+    `WPA` and the field order is T;S;P — identical to device-bridge.py's
+    `_hostapd_wifi_payload`. Escapes the WiFi-QR metacharacters (\\ ; , : ")
+    per the de-facto standard so an SSID/PSK containing them still scans. This
+    is the sim-only encode path; on the device the firmware paints the
+    host-supplied matrix verbatim (the bridge does the real encode), so the two
+    stay byte-identical.
+    """
+    def esc(s: str) -> str:
+        return (s or "").replace("\\", "\\\\").replace(";", "\\;") \
+                        .replace(",", "\\,").replace(":", "\\:") \
+                        .replace('"', '\\"')
+
+    return "WIFI:T:WPA;S:{};P:{};;".format(esc(ssid), esc(key))
+
+
 # ---------------------------------------------------------------------------
 # Touch regions
 # ---------------------------------------------------------------------------
@@ -1815,9 +1834,12 @@ class TFTDisplay:
         card_y = 60
         _rrect(draw, card_x, card_y, card_w, card_w, 12, fill=V3_WHITE)
         wifi = v.get("wifi") or {}
-        payload = "WIFI:T:WPA;S:{};P:{};;".format(
+        # WARP-819: escape WiFi-QR metachars (same helper as the claim screen)
+        # so a special-char SSID/PSK still scans, matching device-bridge.py.
+        payload = _wifi_qr_payload(
             wifi.get("ssid") or "Droplet-AI", wifi.get("password") or "")
-        self._draw_qr(img, draw, card_x + 9, card_y + 9, card_w - 18, payload)
+        self._draw_qr(img, draw, card_x + 9, card_y + 9, card_w - 18,
+                      payload=payload)
         mc = 26
         mcx = card_x + 9 + (card_w - 18) // 2 - mc // 2
         mcy = card_y + 9 + (card_w - 18) // 2 - mc // 2
@@ -1867,25 +1889,31 @@ class TFTDisplay:
         return img
 
     def _draw_qr(self, img: Image.Image, draw: ImageDraw.ImageDraw,
-                 x: int, y: int, size: int, payload: str) -> None:
-        """Render a real Wi-Fi join QR into the white card.
+                 x: int, y: int, size: int, payload: str = None,
+                 matrix: Optional[List[List[int]]] = None) -> None:
+        """Render a Wi-Fi join QR into the white card.
 
-        Uses the `qrcode` package (already a service dep) when available;
-        falls back to a deterministic pseudo-matrix purely so the sim/PNG
-        still shows a card if qrcode is missing. On the device the host
-        supplies the matrix over serial — this on-host render is for the
-        preview PNG only.
+        Two sources, in priority order:
+          1. an explicit host-supplied `matrix` (0/1 rows) — painted verbatim.
+             This is the production-faithful path: the firmware paints the same
+             host-encoded matrix on the device, so passing it here keeps the sim
+             preview byte-identical to the panel (WARP-819).
+          2. otherwise encode `payload` with the `qrcode` package (a service
+             dep) — the sim-only fallback when no matrix was supplied.
+        Falls back to a deterministic pseudo-matrix purely so the sim/PNG still
+        shows a card if neither a matrix nor qrcode is available.
         """
-        matrix = None
-        try:
-            import qrcode
-            qr = qrcode.QRCode(border=0,
-                               error_correction=qrcode.constants.ERROR_CORRECT_M)
-            qr.add_data(payload)
-            qr.make(fit=True)
-            matrix = qr.get_matrix()
-        except Exception:
-            matrix = None
+        if not matrix and payload is not None:
+            try:
+                import qrcode
+                qr = qrcode.QRCode(
+                    border=0,
+                    error_correction=qrcode.constants.ERROR_CORRECT_M)
+                qr.add_data(payload)
+                qr.make(fit=True)
+                matrix = qr.get_matrix()
+            except Exception:
+                matrix = None
         if not matrix:
             # Deterministic pseudo-matrix (layout only).
             n = 25
@@ -2089,10 +2117,15 @@ class TFTDisplay:
             qr_x = 26
             qr_y = qr_top
             _rrect(draw, qr_x, qr_y, qr_size, qr_size, 12, fill=V3_WHITE)
-            payload = "WIFI:T:WPA;S:{};P:{};;".format(wifi_ssid or "", wifi_psk or "")
-            # Reuse the existing QR renderer (encodes in-sim for the preview PNG;
-            # on the device the firmware paints the host-supplied matrix).
-            self._draw_qr(img, draw, qr_x + 9, qr_y + 9, qr_size - 18, payload)
+            # Production-faithful: paint the host-supplied matrix (what the
+            # firmware paints on the device) so the preview and the panel match.
+            # The escaped payload is only the sim-side encode fallback when no
+            # matrix is supplied — it carries the same WiFi-QR metachar escaping
+            # device-bridge.py uses, so a special-char SSID/PSK still scans
+            # (WARP-819).
+            payload = _wifi_qr_payload(wifi_ssid or "", wifi_psk or "")
+            self._draw_qr(img, draw, qr_x + 9, qr_y + 9, qr_size - 18,
+                          payload=payload, matrix=wifi_qr_matrix)
             mc = 22
             mcx = qr_x + 9 + (qr_size - 18) // 2 - mc // 2
             mcy = qr_y + 9 + (qr_size - 18) // 2 - mc // 2
@@ -2326,7 +2359,13 @@ class TFTDisplay:
             if wifi_qr_matrix and wifi_ssid:
                 frame["wifi_qr_matrix"] = wifi_qr_matrix
                 frame["wifi_ssid"] = wifi_ssid
-                frame["wifi_psk"] = wifi_psk or ""
+                # Only put wifi_psk on the wire when it is non-empty. The
+                # firmware resets the wifi_* keys before merging each claim
+                # frame, so OMITTING psk here clears any stale psk rather than
+                # re-sending wifi_psk:"" (WARP-819) — matching this method's
+                # "only the keys actually present are put on the wire" contract.
+                if wifi_psk:
+                    frame["wifi_psk"] = wifi_psk
             self._pyportal_send("claim", frame)
             self._render_current_locked()
 
