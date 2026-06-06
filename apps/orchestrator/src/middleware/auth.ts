@@ -518,3 +518,105 @@ export function requireRole(
     next();
   };
 }
+
+/**
+ * WARP-824 — paths an authenticated-but-must-change-password session may
+ * still reach. Everything else 403s `PASSWORD_CHANGE_REQUIRED` until the
+ * user picks a new password.
+ *
+ *   • POST /api/auth/change-password — the remediation endpoint itself.
+ *   • GET  /api/auth/me              — so the dashboard can read the
+ *                                      `mustChangePassword` signal and render
+ *                                      the change-password screen.
+ *   • POST /api/auth/logout          — the user can always bail out.
+ *   • POST /api/auth/refresh         — keeps the (still-gated) session alive
+ *                                      across the 15-min access-token TTL
+ *                                      while they're on the change screen;
+ *                                      refresh issues a token but the gate
+ *                                      re-checks the DB flag on the next
+ *                                      request, so this is not a bypass.
+ *
+ * Exact paths — NOT a `/api/auth/` prefix — so a future auth route isn't
+ * silently exempted from the gate.
+ */
+const PASSWORD_CHANGE_ALLOWED_PATHS: ReadonlySet<string> = new Set([
+  "/api/auth/change-password",
+  "/api/auth/me",
+  "/api/auth/logout",
+  "/api/auth/refresh",
+]);
+
+/**
+ * WARP-824 — server-enforced forced-password-change gate.
+ *
+ * Mounts AFTER `authMiddleware` (so `req.user` is populated) and BEFORE every
+ * protected router. For an authenticated HUMAN session it reads the EXPLICIT
+ * `User.mustChangePassword` flag FRESH from the row (keyed by the
+ * `req.user.id` UUID) and, when the flag is set, returns 403
+ * `PASSWORD_CHANGE_REQUIRED` for every route except
+ * `PASSWORD_CHANGE_ALLOWED_PATHS`.
+ *
+ * This is the SERVER half of the gate (the dashboard also redirects, but that
+ * is convenience): the decision is made from DB state, not the JWT claim, so a
+ * client that ignores the redirect — or replays a token minted before the
+ * flag was read — still can't touch a protected route.
+ *
+ * Never gates:
+ *   • a request with no `req.user` (auth disabled, or a public path the
+ *     upstream middleware already let through) — nothing to gate;
+ *   • a `service` principal — service tokens have no directory row and never
+ *     go through a human first-login flow; gating them would break the
+ *     voice/MCP/email/sampler integrations.
+ *
+ * Fails OPEN on a missing row or a DB read error: the gate's job is to FORCE a
+ * change for a user the directory says must change, not to be a second
+ * authentication layer. A row that can't be found carries no `true` flag, and
+ * a transient DB blip must not 503 the whole app — the downstream RBAC /
+ * self-action guards still apply. (A user who genuinely must change but whose
+ * read momentarily failed is re-gated on their next request.)
+ */
+export function requirePasswordChangeGate(
+  prisma: Pick<PrismaClient, "user">,
+): (req: Request, res: Response, next: NextFunction) => void {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const user = req.user;
+    // No session, or a service principal → never gated.
+    if (!user || user.role === "service") {
+      next();
+      return;
+    }
+    // The remediation surface is always reachable.
+    if (PASSWORD_CHANGE_ALLOWED_PATHS.has(req.path)) {
+      next();
+      return;
+    }
+
+    // Read the flag FRESH from the row — never from the JWT claim — so the
+    // gate reflects the current directory state and can't be replayed past.
+    prisma.user
+      .findUnique({
+        where: { id: user.id },
+        select: { mustChangePassword: true },
+      })
+      .then((row) => {
+        if (row?.mustChangePassword === true) {
+          res.status(403).json({
+            error:
+              "You must change your temporary password before continuing.",
+            code: "PASSWORD_CHANGE_REQUIRED",
+          });
+          return;
+        }
+        next();
+      })
+      .catch((err) => {
+        // Fail OPEN (see docstring): log and continue rather than 503 the app
+        // on a transient read failure. The user is re-gated next request.
+        logger.warn(
+          { err, userId: user.id },
+          "password-change gate: flag read failed; allowing request through (fail-open)",
+        );
+        next();
+      });
+  };
+}

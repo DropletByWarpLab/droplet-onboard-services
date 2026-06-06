@@ -1163,8 +1163,7 @@ model User {
   // created by an admin" inference (project no-guessing rule; same posture
   // as `directoryStatus` above and `TotpCredential.confirmedAt`). Set true
   // by POST /auth/users when the operator leaves "require change on first
-  // login" on (the default), and by an admin password RESET via
-  // PUT /auth/users/:username; cleared to false by POST /auth/change-password
+  // login" on (the default); cleared to false by POST /auth/change-password
   // once the user picks their own password. The post-auth gate
   // (`requirePasswordChangeGate`) reads this FRESH from the row on every
   // request, so it can't be bypassed by a stale/forged JWT. Defaults false so
