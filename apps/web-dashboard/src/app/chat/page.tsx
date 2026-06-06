@@ -513,7 +513,7 @@ export default function ChatPage() {
             >
               <Wrench size={14} className="flex-none text-accent" aria-hidden="true" />
               <span className="type-footnote text-label-secondary">
-                Acting on{" "}
+                Ready to use{" "}
                 <span className="text-label-primary font-medium">{activeTool.label}</span>
               </span>
               {activeTool.requiresWrite && (
@@ -532,7 +532,7 @@ export default function ChatPage() {
                 type="button"
                 onClick={() => setActiveTool(null)}
                 aria-label="Dismiss tool"
-                className="ml-auto flex-none p-1 rounded-sm text-label-tertiary hover:text-label-primary hover:bg-surface-tertiary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 transition-colors"
+                className="ml-auto flex-none p-2 rounded-sm text-label-tertiary hover:text-label-primary hover:bg-surface-tertiary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 transition-colors"
               >
                 <X size={14} aria-hidden="true" />
               </button>

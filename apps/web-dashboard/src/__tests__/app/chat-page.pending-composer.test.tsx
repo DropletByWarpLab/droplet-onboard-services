@@ -182,7 +182,9 @@ describe("WARP-829 chat-page pendingComposer (seed-not-send)", () => {
     // "acting on" indicator renders, and nothing is sent.
     await screen.findByPlaceholderText("Send a message...");
     expect(window.sessionStorage.getItem(PENDING_COMPOSER_KEY)).not.toBeNull();
-    expect(screen.queryByText(/acting on/i)).not.toBeInTheDocument();
+    // The indicator (which would name the tool) must not render for a
+    // deep-linked thread.
+    expect(screen.queryByText(/block network device/i)).not.toBeInTheDocument();
     expect(sendMessageMock).not.toHaveBeenCalled();
   });
 
