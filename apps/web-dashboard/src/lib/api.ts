@@ -3270,3 +3270,57 @@ export async function fetchToolCatalog(): Promise<ToolCatalogResponse> {
   }
   return res.json();
 }
+
+// --- WARP-825: Settings Danger Zone — factory reset ---
+
+/** Lifecycle of a factory-reset job, mirroring the orchestrator ResetJobStatus
+ *  enum. There is no `succeeded` — a completed reset wipes the db this row lives
+ *  in; the dashboard treats `dispatched` as terminal-success for its progress
+ *  view. */
+export type ResetJobStatus = "requested" | "dispatched" | "failed";
+
+export interface ResetJob {
+  id: string;
+  status: ResetJobStatus;
+  targetName: string;
+  failureReason: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ResetStatusResponse {
+  /** The canonical device name the owner must type to confirm. Server-derived. */
+  targetName: string;
+  /** The latest reset job, or null on a box that has never been reset. */
+  job: ResetJob | null;
+}
+
+/** GET the reset status: the canonical target name to type + the latest job. */
+export async function getResetStatus(): Promise<ResetStatusResponse> {
+  const res = await authFetch(`${BASE}/api/system/reset`);
+  if (!res.ok) throw new Error(`Failed to load reset status: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Trigger the factory reset. `confirm` is the device name the owner typed; it is
+ * re-validated SERVER-side (the client gate is not the authority). Resolves to
+ * the dispatched job; throws with the orchestrator's friendly message on a
+ * mismatch (400), an in-flight reset (409), or an unavailable executor (503).
+ */
+export async function triggerFactoryReset(confirm: string): Promise<{
+  status: ResetJobStatus;
+  id: string;
+  targetName: string;
+}> {
+  const res = await authFetch(`${BASE}/api/system/reset`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirm }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Factory reset failed: ${res.status}`);
+  }
+  return res.json();
+}

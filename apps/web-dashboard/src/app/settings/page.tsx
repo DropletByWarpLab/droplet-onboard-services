@@ -7,6 +7,7 @@ import { ThemeToggle } from "@/components/ThemeToggle";
 import { ProviderKeyForm } from "@/components/ProviderKeyForm";
 import { PasskeysSection } from "@/components/settings/PasskeysSection";
 import { EmailChannelSection } from "@/components/settings/EmailChannelSection";
+import { DangerZoneSection } from "@/components/settings/DangerZoneSection";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
 import { validatePassword, isValidEmail } from "@droplet/auth-policy";
@@ -325,6 +326,10 @@ export default function SettingsPage() {
           />
         </div>
       </section>
+
+      {/* WARP-825 — owner-only factory reset. Renders nothing for non-owners.
+          Sits at the bottom of Settings, fenced off in system-red. */}
+      <DangerZoneSection />
 
       <ConfirmDialog
         open={deleteUserTarget !== null}
