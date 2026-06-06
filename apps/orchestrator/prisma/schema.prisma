@@ -465,6 +465,55 @@ model NetworkConfigSnapshot {
   @@index([config, createdAt])
 }
 
+/// WARP-825: lifecycle of a factory-reset job (Settings Danger Zone).
+///
+/// Status is an EXPLICIT enum, never inferred from the absence of a column
+/// (handbook rule 10 / project CLAUDE.md "no guessing"; precedent WARP-218
+/// BrainMemoryItemStatus, BUG-3 PoolStatus). A reset is high-blast-radius:
+/// it wipes every data volume + secrets and bounces the orchestrator
+/// container itself, so the orchestrator can NEVER report "succeeded" — the
+/// process is gone before the wipe finishes. Honest states are therefore:
+///   requested  — owner confirmed; audit row written; about to dispatch.
+///   dispatched — handed to the device-bridge host executor; the wipe is
+///                running detached from the orchestrator (which will die).
+///   failed     — the dispatch itself failed (bridge unreachable / refused)
+///                BEFORE anything was wiped. The box is untouched and usable.
+/// There is deliberately no `succeeded`: a completed reset returns the box to
+/// first-run, where this table no longer exists (the db volume is wiped). The
+/// dashboard treats `dispatched` as terminal-success for its progress view.
+enum ResetJobStatus {
+  requested
+  dispatched
+  failed
+}
+
+/// WARP-825: one factory-reset attempt. At most ONE row may be in a
+/// non-terminal (`requested` or `dispatched`) state at a time — the
+/// double-fire guard (a second confirmed reset while one is in flight is
+/// refused). `confirmToken` is the device name the owner typed to clear the
+/// type-to-confirm friction step; it is validated SERVER-side before a row is
+/// ever created, and stored only for the audit trail. No host-specific
+/// default for the target name (handbook rule 12) — it is read from device
+/// identity at request time.
+model ResetJob {
+  id           String         @id @default(cuid())
+  status       ResetJobStatus @default(requested)
+  /// User.id (UUID) of the owner who confirmed. Never null in practice — the
+  /// route is requireRole("owner") — but nullable so an orphaned audit write
+  /// never blocks on a missing session id.
+  requestedBy  String?
+  /// The device/host name the reset targets + that the owner had to type to
+  /// confirm. Recorded for the audit trail.
+  targetName   String
+  /// Set when status transitions to `failed`; the human-readable dispatch
+  /// failure (bridge unreachable / refused). Null while requested/dispatched.
+  failureReason String?
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  @@index([status, createdAt])
+}
+
 // --- Camera / Frigate NVR ---
 
 model Camera {
