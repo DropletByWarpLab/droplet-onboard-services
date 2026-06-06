@@ -25,13 +25,19 @@ AP_PSK_FILE="${AP_PSK_FILE:-/etc/droplet/ap-psk}"
 # resolved PSK into it so the pairing QR/text the bridge renders ALWAYS equals
 # the PSK hostapd actually serves (WARP-819 coherence AC). Overridable for tests.
 DEVICE_BRIDGE_ENV_FILE="${DEVICE_BRIDGE_ENV_FILE:-/etc/droplet/device-bridge.env}"
-# Which wireless phy to move into the container netns, and what interface
-# name it surfaces with. On the photo-studio Ryzen box the MT7922 is phy0
-# (named wlp14s0) and supports Wi-Fi 6 at full 22 dBm on 2.4 GHz; the AX210
-# (phy1, wlp7s0) is firmware-capped at 3 dBm in AP mode. Defaults below keep
-# the original AX210 path; the env file overrides for this customer.
-AP_PHY="${DROPLET_AP_PHY:-phy1}"
-AP_IFACE="${DROPLET_AP_IFACE:-wlp7s0}"
+# Which wireless phy to move into the container netns, and what interface name
+# it surfaces with. These are AUTO-DETECTED below (detect_ap_radio) so the
+# attach works on whatever Wi-Fi card the box actually ships — the MT7922
+# single-box enumerates phy0/wlp14s0, an AX210 box phy1/wlp7s0, others wlan0,
+# etc. Hardcoding one card's layout (WARP-826: was phy1/wlp7s0) meant a
+# mismatched card left the radio un-moved into the netns and hostapd binding a
+# nonexistent iface → the AP never appeared. An explicit DROPLET_AP_PHY /
+# DROPLET_AP_IFACE env override stays AUTHORITATIVE: if set (non-empty) it is
+# used verbatim and detection is skipped, so an operator can always pin the
+# radio (e.g. to force the full-power MT7922 over a weaker AX210 on a dual-card
+# box). Seed from the env here; detect_ap_radio fills any unset side.
+AP_PHY="${DROPLET_AP_PHY:-}"
+AP_IFACE="${DROPLET_AP_IFACE:-}"
 GATEWAY_CONTAINER="${DROPLET_GATEWAY_CONTAINER:-droplet-gateway-1}"
 # Phase L: root password for OpenWrt rpcd. Read from the docker secret
 # the routing service also reads, so both sides stay in lockstep.
@@ -124,6 +130,97 @@ resolve_ap_psk() {
 }
 resolve_ap_psk
 # <<< resolve_ap_psk (WARP-819)
+
+# WARP-826: auto-detect the wireless phy + its netdev name so the attach works
+# on ANY card, instead of the old hardcoded phy1/wlp7s0 (the AX210 layout) that
+# silently no-op'd on the MT7922 single-box (phy0/wlp14s0) — radio never moved
+# into the container netns, hostapd bound a nonexistent iface, AP never came up.
+#
+# Override stays authoritative: an explicit DROPLET_AP_PHY / DROPLET_AP_IFACE
+# (seeded into AP_PHY/AP_IFACE above) is used verbatim; detection only fills the
+# side(s) left empty. Detection reads /sys/class/ieee80211 for the phy and
+# `iw dev` for the iface (parsing the `phy#N` / `Interface <name>` grouping),
+# preferring the phy that the chosen/declared iface belongs to and otherwise the
+# first phy present. No wireless hardware → both stay empty and the downstream
+# guards (the `[ -e /sys/class/ieee80211/$AP_PHY ]` netns move + hostapd bring-up)
+# handle the absence; the function never aborts the attach.
+#
+# Sentinel-delimited so it is unit-testable in isolation against a fake sysfs +
+# stub `iw` (tests/openwrt-attach-iface-detect.test.sh), mirroring
+# resolve_ap_psk / ap_firewall_zone. SYS_CLASS_IEEE80211 is overridable for that
+# test; in production it defaults to the real /sys path.
+# >>> detect_ap_radio (WARP-826)
+detect_ap_radio() {
+  sysfs="${SYS_CLASS_IEEE80211:-/sys/class/ieee80211}"
+
+  # phy -> netdev name and netdev -> phy, parsed once from `iw dev`. `iw dev`
+  # groups interfaces under a `phy#N` header followed by `\tInterface <name>`:
+  #   phy#0
+  #       Interface wlp14s0
+  #           type managed
+  # Build two newline-delimited maps ("phyN<TAB>iface") we can grep. `iw` absent
+  # (no wireless tooling) -> empty maps; we then fall back to sysfs-only for the
+  # phy and leave the iface empty.
+  _iwmap=""
+  if command -v iw >/dev/null 2>&1; then
+    _cur_phy=""
+    while IFS= read -r line; do
+      case "$line" in
+        phy#*)
+          # "phy#0" -> "phy0"
+          _n="${line#phy#}"
+          _cur_phy="phy${_n}"
+          ;;
+        *Interface\ *)
+          _if="${line##*Interface }"
+          _if="${_if%% *}"
+          [ -n "$_cur_phy" ] && [ -n "$_if" ] && \
+            _iwmap="${_iwmap}${_cur_phy}	${_if}
+"
+          ;;
+      esac
+    done <<EOF
+$(iw dev 2>/dev/null)
+EOF
+  fi
+
+  # 1) If an iface is pinned/known but the phy is not, recover the phy from the
+  #    iface's grouping in the iw map (never leave a known iface with a blank phy).
+  if [ -n "$AP_IFACE" ] && [ -z "$AP_PHY" ]; then
+    AP_PHY="$(printf '%s' "$_iwmap" | awk -F '\t' -v i="$AP_IFACE" '$2==i{print $1; exit}')"
+  fi
+
+  # 2) If the phy is pinned/known but the iface is not, fill the iface from that
+  #    phy's grouping.
+  if [ -n "$AP_PHY" ] && [ -z "$AP_IFACE" ]; then
+    AP_IFACE="$(printf '%s' "$_iwmap" | awk -F '\t' -v p="$AP_PHY" '$1==p{print $2; exit}')"
+  fi
+
+  # 3) Nothing declared yet — pick the first wireless phy present in sysfs, then
+  #    resolve its iface from the iw map. sysfs is the source of truth for "which
+  #    phys exist"; iw maps a phy to its netdev.
+  if [ -z "$AP_PHY" ]; then
+    if [ -d "$sysfs" ]; then
+      for d in "$sysfs"/phy*; do
+        [ -e "$d" ] || continue   # nullglob-safe: skip the literal when no match
+        AP_PHY="$(basename "$d")"
+        break
+      done
+    fi
+  fi
+  if [ -n "$AP_PHY" ] && [ -z "$AP_IFACE" ]; then
+    AP_IFACE="$(printf '%s' "$_iwmap" | awk -F '\t' -v p="$AP_PHY" '$1==p{print $2; exit}')"
+  fi
+
+  if [ -n "$AP_PHY" ] && [ -n "$AP_IFACE" ]; then
+    echo "droplet-openwrt-attach: AP radio detected — phy=$AP_PHY iface=$AP_IFACE"
+  else
+    echo "droplet-openwrt-attach: WARN: no wireless phy/iface resolved (phy='${AP_PHY}' iface='${AP_IFACE}'); set DROPLET_AP_PHY/DROPLET_AP_IFACE if the card is present — AP will not come up otherwise"
+  fi
+  return 0
+}
+detect_ap_radio
+# <<< detect_ap_radio (WARP-826)
 
 for i in $(seq 1 60); do
   state=$(docker inspect -f '{{.State.Running}}' droplet-openwrt 2>/dev/null)
