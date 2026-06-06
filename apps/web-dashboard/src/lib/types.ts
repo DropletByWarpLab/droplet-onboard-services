@@ -1212,3 +1212,33 @@ export interface ToolCatalogResponse {
   /** Domains in the orchestrator's canonical IA order — drives filter order. */
   domains: string[];
 }
+
+/**
+ * WARP-829 — the one-shot payload the `/tools` page writes to
+ * `sessionStorage["droplet.pendingComposer"]` before routing to `/chat`.
+ *
+ * Distinct from `droplet.pendingPrompt` (the hero hand-off, which the chat
+ * page AUTO-SENDS): this payload only SEEDS the composer. Clicking a tool
+ * primes the chat input with a starter line and pins a "acting on <tool>"
+ * indicator — nothing runs until the user edits and sends, at which point
+ * the model invokes the tool and the existing in-chat confirmation gate
+ * applies (see `docs/llm-safety-tiers.md`). The dashboard never dispatches
+ * a tool; dispatch stays in the orchestrator's MCP path.
+ *
+ * `kind` is a discriminant so the chat page can grow other seed sources
+ * later without overloading the key.
+ */
+export const PENDING_COMPOSER_KEY = "droplet.pendingComposer";
+
+export interface PendingComposerPayload {
+  kind: "tool";
+  /** Registry tool name, e.g. `block_network_device`. Identity for the chip. */
+  toolName: string;
+  /** Human-readable tool title, e.g. "Block network device" — chip label. */
+  label: string;
+  /** Mirrors the registry safety flags so the chip can show the right chip. */
+  requiresWrite: boolean;
+  requiresConfirmation: boolean;
+  /** Plain-language starter line dropped into the composer for the user to edit. */
+  seedText: string;
+}

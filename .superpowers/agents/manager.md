@@ -101,8 +101,6 @@ List the commands the Dev agent + QA ran:
 ### Follow-ups
 
 - Concrete next tickets this PR implies. Include any Dev "Handoff notes" that escape this scope. If a concern promoted from the Concerns section is the right long-term fix, stub a follow-up for it.
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
 ```
 
 ## Synthesis rules
