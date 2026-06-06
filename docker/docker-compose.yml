@@ -1634,7 +1634,19 @@ services:
   # for /tmp and /run because OpenWrt expects writable scratch space at
   # init time and these are runtime-state-only.
   openwrt:
-    image: openwrt/rootfs:x86_64-24.10.2
+    # WARP-826: bake the AP/router packages (hostapd, iw, wpad, umdns, wireguard,
+    # uhttpd/rpcd) into the image so a fresh container / post-factory-reset box
+    # never depends on a first-boot `opkg install` — the race that left the AP
+    # dead (hostapd absent) until droplet-openwrt-attach could reach the feed.
+    # `network: host` so opkg can resolve downloads.openwrt.org at build time via
+    # the host resolv.conf; the Dockerfile makes /var/lock first (the rootfs has
+    # none pre-init, so opkg cannot lock). droplet-openwrt-attach still
+    # installs-if-missing at runtime as a safety net.
+    build:
+      context: ../openwrt/singlebox-image
+      dockerfile: Dockerfile
+      network: host
+    image: droplet/openwrt-singlebox:24.10.2
     container_name: droplet-openwrt
     hostname: openwrt
     profiles: ["single-box"]
