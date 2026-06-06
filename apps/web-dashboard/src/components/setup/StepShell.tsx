@@ -300,13 +300,17 @@ export function StepShell({
         {showFooter && (
           <div className="flex items-center justify-between gap-3 border-t border-separator bg-surface-secondary px-6 py-[clamp(10px,1.6vh,14px)] sm:px-10">
             {/* Back — jumps to the previous step. Hidden on welcome (idx 0) and
-                when the wizard nav context isn't present (a step under test). */}
+                when the wizard nav context isn't present (a step under test).
+                Keeps dp-btn-secondary's full 44px min-height (the system touch
+                target) — only the horizontal padding is tightened for the
+                compact footer; a mobile home user is exactly who needs the 44px
+                target (UX review on #518). */}
             <div>
               {navigate && idx >= 1 && (
                 <button
                   type="button"
                   onClick={() => navigate(STEPS[idx - 1])}
-                  className="dp-btn-secondary type-footnote !min-h-[36px] !py-1.5 !px-3"
+                  className="dp-btn-secondary type-footnote !px-3"
                 >
                   <ArrowLeft size={16} aria-hidden="true" />
                   Back
