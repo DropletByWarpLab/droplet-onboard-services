@@ -423,16 +423,46 @@ export async function fetchUsers(): Promise<{ users: AuthUser[] }> {
 export async function createUser(
   email: string,
   password: string,
-  displayName?: string
+  displayName?: string,
+  // WARP-824: when true (the default), the new user must change this temporary
+  // password on first login. Passed through to POST /auth/users which sets the
+  // explicit `User.mustChangePassword` flag.
+  mustChangePassword = true,
 ): Promise<void> {
   const res = await authFetch(`${BASE}/api/auth/users`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password, displayName }),
+    body: JSON.stringify({ email, password, displayName, mustChangePassword }),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     const err = new Error(data.error || "Failed to create user") as Error & { code?: string };
+    err.code = data.code;
+    throw err;
+  }
+}
+
+/**
+ * WARP-824 — self-service password change. Used by the forced-change screen an
+ * admin-created user lands on, and reusable for any user rotating their own
+ * password. Posts the current + new password to the orchestrator, which
+ * verifies the current one, enforces the shared policy on the new one, and
+ * clears the forced-change flag. Throws an Error carrying the server `code`
+ * (INVALID_PASSWORD / WEAK_PASSWORD / SAME_PASSWORD) so the UI can map it to
+ * friendly copy.
+ */
+export async function changePassword(
+  currentPassword: string,
+  newPassword: string,
+): Promise<void> {
+  const res = await authFetch(`${BASE}/api/auth/change-password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ currentPassword, newPassword }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    const err = new Error(data.error || "Failed to change password") as Error & { code?: string };
     err.code = data.code;
     throw err;
   }
