@@ -201,11 +201,15 @@ install_single_box_host_integration() {
 DROPLET_AP_SSID=Droplet
 DROPLET_AP_PSK=$ap_psk
 
-# Hardware specifics for the Wi-Fi radio: phy0 surfaces as wlp14s0 inside
-# the openwrt container. Override here if your hardware enumerates
-# differently.
-DROPLET_AP_PHY=${DROPLET_AP_PHY:-phy0}
-DROPLET_AP_IFACE=${DROPLET_AP_IFACE:-wlp14s0}
+# Wi-Fi radio phy/iface. Left EMPTY by default so droplet-openwrt-attach's
+# detect_ap_radio AUTO-DETECTS whatever card the box ships (phy0/wlp14s0 on the
+# MT7922 single-box, phy1/wlp7s0 on an AX210, wlan0 elsewhere). Hardcoding one
+# card's layout here (WARP-826) made the env arrive non-empty, which SKIPS
+# detection and silently breaks the AP on any other card. To PIN the radio, set
+# DROPLET_AP_PHY / DROPLET_AP_IFACE (in .env or here) — a non-empty value is
+# honored verbatim and detection is skipped.
+DROPLET_AP_PHY=${DROPLET_AP_PHY:-}
+DROPLET_AP_IFACE=${DROPLET_AP_IFACE:-}
 EOF
     sudo chmod 0600 /etc/default/droplet-openwrt-attach
     log_success "Wrote /etc/default/droplet-openwrt-attach (mode 0600)"

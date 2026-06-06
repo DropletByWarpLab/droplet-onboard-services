@@ -32,6 +32,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT_REAL="$(cd "$SCRIPT_DIR/.." && pwd)"
 ATTACH="$REPO_ROOT_REAL/scripts/host/usr-local-sbin/droplet-openwrt-attach"
+# single-box.sh GENERATES /etc/default/droplet-openwrt-attach, which systemd
+# sources BEFORE the attach script. If it writes a hardcoded phy/iface there,
+# AP_PHY/AP_IFACE arrive non-empty and detect_ap_radio (above) is skipped —
+# re-introducing the very bug this suite guards. Phase 3 renders that env file
+# and asserts the phy/iface defaults are empty (so detection runs) yet an
+# operator override is still honored verbatim.
+LIB="$REPO_ROOT_REAL/scripts/lib/single-box.sh"
 FAILURES=0
 TESTS=0
 
@@ -238,6 +245,81 @@ if OUT_E="$(run_detect "$SYSE" '' 2>&1)"; then
   fi
 else
   fail "no wireless hardware: detect_ap_radio exited non-zero (must not abort the attach)"
+fi
+
+# --- Phase 3: the GENERATED env file must not hardcode a phy/iface default ----
+# scripts/lib/single-box.sh writes /etc/default/droplet-openwrt-attach, which
+# systemd sources before the attach script. A hardcoded DROPLET_AP_PHY=phy0 /
+# DROPLET_AP_IFACE=wlp14s0 there makes AP_PHY/AP_IFACE arrive NON-empty, so
+# detect_ap_radio is skipped and the AP silently fails on any other card (the
+# exact regression this PR fixes — Phase 1 only checks the attach BINARY, not
+# the generated env). We render the env-file heredoc in isolation (stub `sudo`,
+# redirect its target path) and assert the phy/iface VALUES are empty with no
+# override, and honored verbatim WITH one. Mirrors the extract-and-run style
+# used for detect_ap_radio above and in single-box-openwrt-readiness.test.sh.
+echo "--- Phase 3: single-box.sh generated env file does not hardcode phy/iface ---"
+
+if [ -f "$LIB" ]; then
+  pass "single-box.sh exists"
+else
+  fail "single-box.sh missing at $LIB — cannot verify the generated env defaults"
+fi
+
+# Pull just the `sudo tee /etc/default/droplet-openwrt-attach ... << EOF .. EOF`
+# heredoc out of install_single_box_host_integration().
+sed -n '/sudo tee \/etc\/default\/droplet-openwrt-attach > \/dev\/null << EOF/,/^EOF$/p' \
+  "$LIB" > "$WORK/envblock.sh"
+
+if [ -s "$WORK/envblock.sh" ]; then
+  pass "extracted the /etc/default/droplet-openwrt-attach heredoc from single-box.sh"
+else
+  fail "could not extract the env-file heredoc from single-box.sh"
+fi
+
+# Render the heredoc to $1. Extra args are KEY=VAL env overrides for the render.
+# `sudo` is stripped to a passthrough; the script's hardcoded target path is
+# redirected to our temp file via a `tee` wrapper. `ap_psk` is the local the
+# real function would have computed.
+render_envfile() {
+  local out="$1"; shift
+  RENDER_OUT="$out" env "$@" ap_psk="TESTPSK_PHITEST" bash -c '
+    set -e
+    sudo() { "$@"; }
+    tee() { command tee "$RENDER_OUT" >/dev/null; }
+    . "'"$WORK"'/envblock.sh"
+  '
+}
+
+# Value of a KEY= line, ignoring comment lines, taking the last assignment
+# (exactly how a shell sourcing the env file would resolve it).
+envval() { grep -E "^$1=" "$2" | tail -1 | cut -d'=' -f2-; }
+
+# Case F: no override → both phy and iface default to EMPTY (detection runs).
+render_envfile "$WORK/envF"
+phyF="$(envval DROPLET_AP_PHY "$WORK/envF")"
+ifaceF="$(envval DROPLET_AP_IFACE "$WORK/envF")"
+if [ -z "$phyF" ] && [ -z "$ifaceF" ]; then
+  pass "generated env: DROPLET_AP_PHY/DROPLET_AP_IFACE empty with no override (auto-detect runs)"
+else
+  fail "generated env hardcodes a phy/iface default (PHY='$phyF' IFACE='$ifaceF') — detection would be skipped, AP breaks on other cards"
+fi
+
+# Belt-and-braces: the specific old card layout must never reappear as the
+# default value (not the illustrative comment — only the KEY= value line).
+if [ "$phyF" = "phy0" ] || [ "$ifaceF" = "wlp14s0" ]; then
+  fail "generated env still defaults to the MT7922 layout (phy0/wlp14s0) — rule 12 host-specific default"
+else
+  pass "generated env does not default to the phy0/wlp14s0 (MT7922) layout"
+fi
+
+# Case G: operator override stays AUTHORITATIVE — values used verbatim.
+render_envfile "$WORK/envG" DROPLET_AP_PHY=phy3 DROPLET_AP_IFACE=wlan7
+phyG="$(envval DROPLET_AP_PHY "$WORK/envG")"
+ifaceG="$(envval DROPLET_AP_IFACE "$WORK/envG")"
+if [ "$phyG" = "phy3" ] && [ "$ifaceG" = "wlan7" ]; then
+  pass "generated env: operator DROPLET_AP_PHY/DROPLET_AP_IFACE override honored verbatim (phy3/wlan7)"
+else
+  fail "generated env dropped the operator override (PHY='$phyG' IFACE='$ifaceG'; expected phy3/wlan7)"
 fi
 
 echo ""
