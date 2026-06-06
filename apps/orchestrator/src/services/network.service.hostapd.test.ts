@@ -96,7 +96,8 @@ describe("hostapd mode (single-box) — routes through the device-bridge", () =>
 
   it("setWifiSsid STAGES the SSID and does NOT hit UCI or reload the AP", async () => {
     const res = await setWifiSsid("radio0", "default_radio0", "HomeNet");
-    expect(stageSsid).toHaveBeenCalledWith("HomeNet");
+    // WARP-808 review #2: staged keyed by userId (undefined here → anon key).
+    expect(stageSsid).toHaveBeenCalledWith("HomeNet", undefined);
     // No UCI write, no bridge apply (the password call does the single reload).
     expect(setWirelessSsid).not.toHaveBeenCalled();
     expect(applyWifi).not.toHaveBeenCalled();
@@ -108,7 +109,7 @@ describe("hostapd mode (single-box) — routes through the device-bridge", () =>
     await setWifiSsid("radio0", "default_radio0", "HomeNet");
     const res = await setWifiPassword("default_radio0", "supersecret1");
     expect(applyWifi).toHaveBeenCalledTimes(1);
-    expect(applyWifi).toHaveBeenCalledWith("supersecret1");
+    expect(applyWifi).toHaveBeenCalledWith("supersecret1", undefined);
     expect(setWirelessPassword).not.toHaveBeenCalled();
     expect(res).toEqual({ operationId: null });
   });
@@ -121,5 +122,15 @@ describe("hostapd mode (single-box) — routes through the device-bridge", () =>
     // And UCI is never touched on this shape.
     expect(setWirelessSsid).not.toHaveBeenCalled();
     expect(setWirelessPassword).not.toHaveBeenCalled();
+  });
+
+  it("threads the userId through to BOTH stage and apply (review #2 per-user key)", async () => {
+    // The SSID and password writes are separate HTTP requests; the same
+    // authenticated userId keys the stage and its consumption so concurrent
+    // wizard sessions can't clobber each other's staged SSID.
+    await setWifiSsid("radio0", "default_radio0", "HomeNet", "user-abc");
+    await setWifiPassword("default_radio0", "supersecret1", "user-abc");
+    expect(stageSsid).toHaveBeenCalledWith("HomeNet", "user-abc");
+    expect(applyWifi).toHaveBeenCalledWith("supersecret1", "user-abc");
   });
 });
