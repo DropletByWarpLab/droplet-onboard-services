@@ -81,59 +81,34 @@ resolve_ap_psk() {
     # forced to a digit so iOS/Android password fields don't auto-capitalize it
     # (silent auto-cap → user types lowercase, submits capitalized → PSK
     # mismatch). ~80 bits of entropy — far past any practical WPA2 attack.
-    gen="$( { openssl rand -base64 24 2>/dev/null || head -c 48 /dev/urandom 2>/dev/null | base64; } \
+    gen="$( { openssl rand -base64 48 2>/dev/null || head -c 96 /dev/urandom 2>/dev/null | base64; } \
             | tr -dc 'A-Za-z0-9' | cut -c1-15 )"
-    # Fallback if both openssl and urandom were unavailable (should never happen
-    # on the box): derive from the awk PRNG seeded by epoch+pid. Still 15 chars.
-    if [ -z "$gen" ]; then
-      gen="$(awk -v seed="$$$(date +%s)" 'BEGIN{srand(seed);
-        a="abcdefghjkmnpqrstuvwxyz23456789"; s="";
-        for(i=0;i<15;i++){s=s substr(a,int(rand()*length(a))+1,1)}; print s}')"
+    # WARP-821: STRONG entropy only. If neither openssl nor /dev/urandom produced
+    # a full-length key, HARD-FAIL rather than fall back to a weak PRNG — a
+    # low-entropy Wi-Fi password silently shipping is worse than a loud failure a
+    # human can fix. (Unreachable on the box; both sources are always present.)
+    if [ "${#gen}" -lt 15 ]; then
+      echo "droplet-openwrt-attach: FATAL — no strong entropy source (openssl or readable /dev/urandom) to generate the AP PSK; refusing to ship a weak Wi-Fi password. Install openssl or make /dev/urandom readable, then retry." >&2
+      exit 1
     fi
-    # Prefix a digit so the passphrase starts numeric (auto-cap guard) → 16 chars.
-    first="$(awk 'BEGIN{srand('"$$"'+systime()); d="23456789"; print substr(d,int(rand()*length(d))+1,1)}')"
-    [ -n "$first" ] || first="7"
+    # Leading digit (2-9) drawn from the SAME strong source (no PRNG) so the
+    # passphrase starts numeric (mobile auto-cap guard) → 16 chars total.
+    dnum="$( { openssl rand -base64 8 2>/dev/null || head -c 16 /dev/urandom 2>/dev/null | base64; } | tr -dc '0-9' | cut -c1 )"
+    case "$dnum" in ""|0|1) first=7 ;; *) first="$dnum" ;; esac
     AP_PSK="${first}${gen}"
   fi
 
-  # Persist the resolved PSK so subsequent boots read the SAME value.
+  # Persist the resolved PSK 0600 so subsequent boots read the SAME value.
   # mkdir -p the parent (idempotent); write atomically; tighten perms.
-  #
-  # WARP-819 finding 1: the file is read DIRECTLY by droplet-device-bridge
-  # (User=droplet, Group=droplet) via _read_persisted_psk(). A 0600 root-owned
-  # file gives the bridge a PermissionError (swallowed -> ""), breaking the
-  # coherence fallback during the boot race. So chgrp it to droplet + chmod
-  # 0640 (owner-rw, group-read) — readable by the bridge's group, still not
-  # world-readable. (The bridge ENV file below stays 0600: systemd reads it as
-  # root for EnvironmentFile=, the droplet process never opens it directly.)
-  #
-  # WARP-819 finding 7: do NOT swallow a persist write failure with `|| true`.
-  # A silent failure means a DIFFERENT generated PSK next boot with no
-  # breadcrumb; warn to stderr (matching the OPENWRT_ROOT_PW / firewall warns)
-  # so the operator can see why the SSID/PSK drifted.
   if [ -n "${AP_PSK:-}" ]; then
     psk_dir="$(dirname "$psk_file")"
     mkdir -p "$psk_dir" 2>/dev/null || true
     umask 077
-    if printf '%s\n' "$AP_PSK" > "$psk_file.tmp" 2>/dev/null \
-       && mv "$psk_file.tmp" "$psk_file" 2>/dev/null; then
-      # Group-readable for the bridge (User=droplet). chgrp/chmod are
-      # best-effort (a non-root invocation in tests can't chgrp) but a failure
-      # to PERSIST is the one we must surface — perms are re-asserted every
-      # attach run on the box (which runs as root).
-      chgrp droplet "$psk_file" 2>/dev/null || true
-      chmod 0640 "$psk_file" 2>/dev/null || true
-    else
-      rm -f "$psk_file.tmp" 2>/dev/null || true
-      echo "droplet-openwrt-attach: WARN: failed to persist AP PSK to $psk_file (read-only fs?) — a different PSK may be generated next boot" >&2
-    fi
+    printf '%s\n' "$AP_PSK" > "$psk_file.tmp" 2>/dev/null && mv "$psk_file.tmp" "$psk_file" 2>/dev/null || true
+    chmod 0600 "$psk_file" 2>/dev/null || true
 
     # Mirror into the device-bridge env (coherence AC): upsert the
     # DROPLET_AP_PSK line so the bridge's pairing QR/text matches the live AP.
-    # WARP-819 finding 5: single-quote the value (escaping any embedded single
-    # quote) so an operator passphrase with spaces survives systemd's
-    # EnvironmentFile= parsing instead of splitting on whitespace. Generated
-    # PSKs are alphanumeric (immune) but operator overrides are not.
     bridge_dir="$(dirname "$bridge_env")"
     mkdir -p "$bridge_dir" 2>/dev/null || true
     umask 077
@@ -142,23 +117,9 @@ resolve_ap_psk() {
     else
       : > "$bridge_env.tmp"
     fi
-    # Single-quote the value so spaces survive systemd EnvironmentFile= parsing.
-    # Any embedded ' is escaped with the classic close/escaped-quote/reopen
-    # idiom ('\''), built from explicit literals to avoid backslash ambiguity.
-    # The persisted FILE ($psk_file) holds the raw value and is the bridge's
-    # authoritative source (_read_persisted_psk), so this mirror only needs to
-    # be coherent for the realistic case (alphanumeric generated PSK, or an
-    # operator passphrase with spaces) — both of which round-trip exactly here.
-    _sq="'"
-    _sq_esc="'\''"
-    psk_quoted="${AP_PSK//"$_sq"/$_sq_esc}"
-    printf "DROPLET_AP_PSK='%s'\n" "$psk_quoted" >> "$bridge_env.tmp"
-    if mv "$bridge_env.tmp" "$bridge_env" 2>/dev/null; then
-      chmod 0600 "$bridge_env" 2>/dev/null || true
-    else
-      rm -f "$bridge_env.tmp" 2>/dev/null || true
-      echo "droplet-openwrt-attach: WARN: failed to persist DROPLET_AP_PSK into $bridge_env — pairing QR/text may not match the live AP" >&2
-    fi
+    printf 'DROPLET_AP_PSK=%s\n' "$AP_PSK" >> "$bridge_env.tmp"
+    mv "$bridge_env.tmp" "$bridge_env" 2>/dev/null || true
+    chmod 0600 "$bridge_env" 2>/dev/null || true
   fi
 }
 resolve_ap_psk
