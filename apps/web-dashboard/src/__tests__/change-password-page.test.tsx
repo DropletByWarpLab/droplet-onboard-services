@@ -6,6 +6,9 @@
  * - Enforces the shared policy client-side (disabled submit until the new
  *   password passes + confirm matches) so a user can't fire a guaranteed-400.
  * - Surfaces the server error code as friendly copy on failure.
+ * - Offers a discoverable "Sign out" escape: the sidebar (the only other
+ *   logout) is stripped on this screen, so a user who landed on the wrong
+ *   account or wants to defer must be able to leave without closing the tab.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
@@ -21,10 +24,12 @@ vi.mock("@/lib/api", () => ({
 }));
 
 const markPasswordChangedMock = vi.fn();
+const logoutMock = vi.fn();
 vi.mock("@/lib/auth", () => ({
   useAuth: () => ({
     user: { id: "u1", username: "kid", displayName: "Kid", role: "family", mustChangePassword: true },
     markPasswordChanged: markPasswordChangedMock,
+    logout: logoutMock,
   }),
 }));
 
@@ -36,6 +41,7 @@ beforeEach(() => {
   pushMock.mockReset();
   changePasswordMock.mockReset();
   markPasswordChangedMock.mockReset();
+  logoutMock.mockReset();
 });
 
 function fill(testid: string, value: string) {
@@ -88,5 +94,14 @@ describe("ChangePasswordPage", () => {
     await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
     expect(markPasswordChangedMock).not.toHaveBeenCalled();
     expect(pushMock).not.toHaveBeenCalled();
+  });
+
+  it("offers a discoverable Sign out escape that invokes logout()", () => {
+    render(<ChangePasswordPage />);
+    const signOut = screen.getByRole("button", { name: /sign out/i });
+    expect(signOut).toBeInTheDocument();
+
+    fireEvent.click(signOut);
+    expect(logoutMock).toHaveBeenCalledTimes(1);
   });
 });

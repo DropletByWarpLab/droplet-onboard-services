@@ -25,7 +25,7 @@ import { useAuth } from "@/lib/auth";
  */
 export default function ChangePasswordPage() {
   const router = useRouter();
-  const { user, markPasswordChanged } = useAuth();
+  const { user, markPasswordChanged, logout } = useAuth();
 
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -59,6 +59,14 @@ export default function ChangePasswordPage() {
     } finally {
       setSubmitting(false);
     }
+  }
+
+  async function handleSignOut() {
+    // The sidebar (the only other logout) is stripped on this screen, so this
+    // is the sole escape for a user who landed on the wrong account or wants to
+    // defer. Clear the session, then AuthGate routes the now-anonymous user out.
+    await logout();
+    router.push("/login");
   }
 
   return (
@@ -173,6 +181,22 @@ export default function ChangePasswordPage() {
           <p className="type-caption-1 text-label-tertiary text-center mt-6 leading-relaxed">
             This happens on your local network — nothing leaves the box.
           </p>
+
+          {/*
+            Discoverable escape. AuthGate strips the sidebar (the only other
+            logout) on this screen, so without this a user who landed on the
+            wrong account is dead-ended into "succeed or close the tab". Kept
+            deliberately subdued so it never competes with the primary action.
+          */}
+          <div className="mt-3 text-center">
+            <button
+              type="button"
+              onClick={() => void handleSignOut()}
+              className="inline-flex items-center justify-center min-h-[44px] px-3 rounded-lg type-footnote font-semibold text-label-tertiary hover:text-label-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 transition-colors duration-200 ease-smooth"
+            >
+              Sign out
+            </button>
+          </div>
         </div>
       </div>
     </div>
