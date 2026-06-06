@@ -1,6 +1,6 @@
 "use client";
 
-import type { CSSProperties, ReactNode } from "react";
+import type { CSSProperties, HTMLAttributes, ReactNode } from "react";
 
 /**
  * WARP-820 — the **single permitted inner-scroll surface** of the
@@ -45,7 +45,7 @@ export function ScrollRegion({
   children: ReactNode;
   className?: string;
   "aria-label": string;
-} & React.HTMLAttributes<HTMLDivElement>) {
+} & HTMLAttributes<HTMLDivElement>) {
   // Symmetric top+bottom alpha fade. ~14px feather is enough to read as a soft
   // edge without eating a full row. Kept inline (alpha-only) so it adds no
   // colour token and no global CSS; identical for standard + WebKit masks.
@@ -71,8 +71,13 @@ export function ScrollRegion({
         // The fade mask clips at the very edge; a hair of inline padding keeps
         // focus rings on inner rows from being shaved by the mask.
         "px-px",
-        // Keyboard focus affordance on the region itself (it's tabbable).
-        "rounded-[10px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40",
+        // WARP-820 nit: the scroller clips inner content at its own corner
+        // radius (overflow-y-auto computes overflow-x to a clipping value), so
+        // its radius must MATCH the radius of the rounded inner content it
+        // wraps. TeamStep's invite <ul> is `rounded-xl` (12px); a smaller
+        // `rounded-[10px]` here squared off the <ul>'s corners against the clip.
+        // Keep these in sync (12px).
+        "rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40",
         className,
       ]
         .filter(Boolean)

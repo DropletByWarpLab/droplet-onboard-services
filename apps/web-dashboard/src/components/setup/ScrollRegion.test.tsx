@@ -88,6 +88,25 @@ describe("ScrollRegion (WARP-820)", () => {
     );
   });
 
+  it("rounds its own corners to match the rounded inner content it wraps (rounded-xl)", () => {
+    // WARP-820 nit: `overflow-y-auto` makes the region a scroll container that
+    // clips inner content at its OWN border radius. TeamStep's invite <ul> is
+    // `rounded-xl` (12px); when ScrollRegion was a smaller `rounded-[10px]` the
+    // <ul>'s 12px corners were squared off against the 10px clip. The region's
+    // radius must therefore be >= the inner content's — pinned to rounded-xl.
+    render(
+      <ScrollRegion aria-label="Pending invitations">
+        <ul className="rounded-xl">
+          <li>row</li>
+        </ul>
+      </ScrollRegion>,
+    );
+    const region = screen.getByRole("region", { name: /pending invitations/i });
+    expect(region.className).toContain("rounded-xl");
+    // The narrower radius that clipped the inner corners must be gone.
+    expect(region.className).not.toContain("rounded-[10px]");
+  });
+
   it("merges caller className with the bounded-scroll base classes", () => {
     render(
       <ScrollRegion aria-label="Discovered devices" className="space-y-2 mb-8">
