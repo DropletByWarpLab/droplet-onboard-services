@@ -374,6 +374,13 @@ class HealthResponse(BaseModel):
     router_host: str
     board: Optional[dict] = None
     error: Optional[str] = None
+    # WARP-826: the explicit deployment-topology posture
+    # (PRIMARY_ROUTER | DOWNSTREAM_ROUTER | UNKNOWN), carried alongside `connected`
+    # so the orchestrator derives `routerConnected` from real reachability and can
+    # tell a LAN-only single-box (WAN handled by the host → UNKNOWN) apart from an
+    # unreachable router instead of rendering it OFFLINE. Best-effort: null when the
+    # router is unreachable or the (non-fatal) topology probe fails.
+    topology: Optional[str] = None
 
 
 class ErrorResponse(BaseModel):
