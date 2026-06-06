@@ -17,6 +17,7 @@ import { AiStep } from "@/components/setup/steps/AiStep";
 import { TeamStep } from "@/components/setup/steps/TeamStep";
 import { DoneStep } from "@/components/setup/steps/DoneStep";
 import { STEPS, type Step } from "@/components/setup/wizard-steps";
+import { SetupNavProvider } from "@/components/setup/setup-nav";
 
 /**
  * Customer-facing first-run wizard.
@@ -76,16 +77,41 @@ export default function SetupPage() {
   const [step, setStepState] = useState<Step>(() =>
     resumeStepFrom(setupState?.setupStep),
   );
+  // Furthest step reached this session — drives the clickable rail so a step
+  // the customer already completed stays navigable after they jump back to an
+  // earlier one. Seeded from the resumed step so a refresh mid-wizard keeps
+  // everything up to here unlocked. Not persisted: the orchestrator's
+  // `setupStep` is the single resume pointer; "furthest reached" is session UI.
+  const [maxReachedIdx, setMaxReachedIdx] = useState<number>(() =>
+    Math.max(0, STEPS.indexOf(resumeStepFrom(setupState?.setupStep))),
+  );
   const [displayName, setDisplayName] = useState("");
   const [discoveredCount, setDiscoveredCount] = useState(0);
 
-  // Advance the wizard AND persist the new step so a refresh resumes here.
-  // The PATCH is fire-and-forget (patchSetupStep swallows network errors) —
-  // local progress must never be gated on the round-trip.
-  const setStep = useCallback((next: Step) => {
-    setStepState(next);
-    void patchSetupStep(next);
-  }, []);
+  // Move the wizard, then persist the new step ONLY when it advances the
+  // furthest point reached — so the persisted resume pointer is monotonic
+  // non-decreasing. Used for forward completion AND backward navigation (the
+  // rail rows + the Back button); `maxReachedIdx` only ever grows.
+  //
+  // Why guard the PATCH (PR #518 review, rjouffret): the orchestrator's
+  // `setupStep` is the single resume pointer, and on mount `maxReachedIdx`
+  // re-seeds from it via `resumeStepFrom(...)`. A backward jump (vpn → cameras)
+  // followed by a refresh would otherwise persist the EARLIER step, re-seed
+  // `maxReachedIdx` to it, and RE-LOCK every step past it — defeating the
+  // clickable rail. Persisting forward-only keeps the in-session rail free to
+  // move anywhere while a refresh always resumes at the customer's high-water
+  // mark. The PATCH stays fire-and-forget (patchSetupStep swallows network
+  // errors) — local progress must never be gated on the round-trip.
+  const setStep = useCallback(
+    (next: Step) => {
+      setStepState(next);
+      if (STEPS.indexOf(next) > maxReachedIdx) {
+        setMaxReachedIdx(STEPS.indexOf(next));
+        void patchSetupStep(next);
+      }
+    },
+    [maxReachedIdx],
+  );
 
   // PR #384 — each step paints its own full-bleed aurora-rail `StepShell`, so
   // the page is just the step switch. The terminal `done` step is the
@@ -100,7 +126,7 @@ export default function SetupPage() {
   }
 
   return (
-    <>
+    <SetupNavProvider value={{ navigate: setStep, maxReachedIdx }}>
       {step === "welcome" && (
         <WelcomeStep onContinue={() => setStep("claim")} />
       )}
@@ -178,6 +204,6 @@ export default function SetupPage() {
           onSkip={() => setStep("done")}
         />
       )}
-    </>
+    </SetupNavProvider>
   );
 }
