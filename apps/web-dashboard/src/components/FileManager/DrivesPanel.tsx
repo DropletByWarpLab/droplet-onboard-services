@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
   HardDrive,
@@ -315,6 +315,15 @@ function DriveCard({
   // card shows the new name before the drives list refetches; rolled back on
   // failure.
   const [optimisticName, setOptimisticName] = useState<string | null>(null);
+  // Return focus to the Rename trigger when edit mode exits — save and cancel
+  // both unmount the input, which would otherwise drop focus to <body>
+  // (WCAG 2.4.3 focus order).
+  const renameBtnRef = useRef<HTMLButtonElement>(null);
+  const wasEditing = useRef(false);
+  useEffect(() => {
+    if (wasEditing.current && !editing) renameBtnRef.current?.focus();
+    wasEditing.current = editing;
+  }, [editing]);
 
   const p = usagePct(d);
   const st = statusOf(d);
@@ -377,14 +386,14 @@ function DriveCard({
                 onClick={save}
                 disabled={!valid || saving}
                 aria-label="Save"
-                className="flex-none inline-flex items-center justify-center h-11 w-11 rounded-md text-accent hover:bg-accent-subtle disabled:opacity-40 transition-colors duration-150"
+                className="flex-none inline-flex items-center justify-center h-11 w-11 rounded-md text-accent hover:bg-accent-subtle disabled:opacity-40 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
               >
                 <Check className="h-4 w-4" />
               </button>
               <button
                 onClick={cancelEdit}
                 aria-label="Cancel"
-                className="flex-none inline-flex items-center justify-center h-11 w-11 rounded-md text-label-tertiary hover:bg-surface-secondary transition-colors duration-150"
+                className="flex-none inline-flex items-center justify-center h-11 w-11 rounded-md text-label-tertiary hover:bg-surface-secondary transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
               >
                 <X className="h-4 w-4" />
               </button>
@@ -393,7 +402,7 @@ function DriveCard({
             <div className="flex items-center gap-2">
               <Link
                 href={driveContentsHref(d)}
-                className="min-w-0 inline-flex items-center gap-1 group"
+                className="min-w-0 inline-flex items-center gap-1 group rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                 aria-label={`Open ${name}`}
               >
                 <h3
@@ -402,16 +411,17 @@ function DriveCard({
                 >
                   {name}
                 </h3>
-                <FolderOpen className="flex-none h-3.5 w-3.5 text-label-quaternary group-hover:text-accent transition-colors duration-150" />
+                <FolderOpen className="flex-none h-3.5 w-3.5 text-label-tertiary group-hover:text-accent transition-colors duration-150" />
               </Link>
               <span className="flex-none type-caption-2 uppercase tracking-wide px-1.5 py-0.5 rounded border border-separator text-label-tertiary">
                 {busLabel(d.bus)}
               </span>
               {isAdmin && (
                 <button
+                  ref={renameBtnRef}
                   onClick={beginEdit}
                   aria-label="Rename"
-                  className="flex-none ml-auto inline-flex items-center justify-center h-11 w-11 -my-2.5 -mr-2.5 rounded-md text-label-tertiary hover:text-accent hover:bg-accent-subtle transition-colors duration-150"
+                  className="flex-none ml-auto inline-flex items-center justify-center h-11 w-11 -my-2.5 -mr-2.5 rounded-md text-label-tertiary hover:text-accent hover:bg-accent-subtle transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                 >
                   <Pencil className="h-4 w-4" />
                 </button>
