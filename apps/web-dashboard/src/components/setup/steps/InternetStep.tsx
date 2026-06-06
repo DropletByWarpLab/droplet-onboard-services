@@ -16,6 +16,7 @@ import {
   confirmNetworkCommand,
   fetchDuckDnsStatus,
   fetchNetworkOperation,
+  RouterStatusError,
   routerUnreachableNotice,
   setDuckDnsConfig,
   setWifiPassword,
@@ -293,6 +294,22 @@ export function InternetStep({
             setNoticeKind("router-unreachable");
             setError(unreachable.prefix);
             setNoticeDestination(unreachable.destination);
+          } else if (
+            // Review #4: a UCI safe-apply revert surfaces as a PLAIN Error whose
+            // message IS the router's revert reason (pollOperation throws
+            // `new Error(op.reason)` for a rolled_back/unknown op). That's not a
+            // RouterStatusError, so it isn't a reachability notice — and its
+            // message is actionable, NOT a raw 500. Surface it instead of the
+            // generic "couldn't set it up" copy, which would discard op.reason.
+            // (A RouterStatusError — e.g. a hostapd ROLLED_BACK 500 carrying raw
+            // server text — deliberately does NOT match here and still falls to
+            // the calm generic notice below.)
+            !(wifiErr instanceof RouterStatusError) &&
+            wifiErr instanceof Error &&
+            wifiErr.message.trim().length > 0
+          ) {
+            setErrorTone("error");
+            setError(wifiErr.message);
           } else {
             // Parked-hostapd ROLLED_BACK / any other Wi-Fi write failure: calm,
             // actionable, Wi-Fi-specific copy instead of the raw server error.
@@ -485,6 +502,35 @@ export function InternetStep({
             />
             WPA2 / WPA3 · broadcast on 2.4 &amp; 5 GHz from your Droplet
           </div>
+
+          {/* WARP-808: on the single-box shape the Droplet IS the router, so
+              changing the Wi-Fi name/key reconfigures the AP and drops every
+              connected device. Warn the customer BEFORE they save and tell them
+              how to get back on. Lives inside the (WARP-809) opt-in disclosure
+              and shows only once a network name is entered — an empty section
+              changes nothing. Calm amber advisory — same tokens as the WARP-807
+              unreachable notice (text-label-primary on a system-orange wash,
+              vivid AlertCircle), role=status/polite so a screen reader hears it
+              without an alert. */}
+          {ssid.trim() && (
+            <div
+              role="status"
+              aria-live="polite"
+              aria-label="Wi-Fi change notice"
+              className="flex items-start gap-2 type-caption-1 text-label-primary bg-system-orange/10 rounded-md px-3 py-2"
+            >
+              <AlertCircle
+                size={14}
+                className="mt-0.5 flex-shrink-0 text-system-orange"
+                aria-hidden="true"
+              />
+              <span>
+                Saving a new Wi-Fi name or password disconnects every device on
+                your Droplet right now — including this phone. Rejoin with the new
+                name and password to get back on.
+              </span>
+            </div>
+          )}
         </div>
       )}
 
