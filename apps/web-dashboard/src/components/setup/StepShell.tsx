@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  ArrowLeft,
   ArrowRight,
   BadgeCheck,
   Building2,
@@ -21,6 +22,7 @@ import {
 import type { ReactNode } from "react";
 import { DropletMark } from "@/components/DropletMark";
 import { STEPS, type Step } from "@/components/setup/wizard-steps";
+import { useSetupNav } from "@/components/setup/setup-nav";
 
 /**
  * Shared chrome for setup-wizard step components — the **aurora left-rail
@@ -92,19 +94,16 @@ function RailRow({
   label,
   Icon,
   state,
+  onClick,
 }: {
   label: string;
   Icon: LucideIcon;
   state: "done" | "active" | "todo";
+  /** When set, the row is a button that jumps to this (already-reached) step. */
+  onClick?: () => void;
 }) {
-  return (
-    <div
-      data-testid="rail-row"
-      aria-current={state === "active" ? "step" : undefined}
-      className={`flex items-center gap-3 rounded-[10px] px-3 py-[clamp(5px,1.1vh,8px)] ${
-        state === "active" ? "bg-white/[0.15]" : ""
-      }`}
-    >
+  const inner = (
+    <>
       <span
         aria-hidden="true"
         className={`flex h-[clamp(21px,18px+0.6vh,25px)] w-[clamp(21px,18px+0.6vh,25px)] flex-none items-center justify-center rounded-full ${
@@ -128,6 +127,38 @@ function RailRow({
       >
         {label}
       </span>
+    </>
+  );
+
+  const rowClass = `flex items-center gap-3 rounded-[10px] px-3 py-[clamp(5px,1.1vh,8px)] ${
+    state === "active" ? "bg-white/[0.15]" : ""
+  }`;
+
+  // A reached, non-active step becomes a button that navigates back (or
+  // forward) to it. Without the wizard nav context (a step rendered in
+  // isolation under test) `onClick` is undefined and the row stays a static,
+  // non-interactive div — the pre-nav behaviour, so existing tests hold.
+  if (onClick) {
+    return (
+      <button
+        type="button"
+        data-testid="rail-row"
+        onClick={onClick}
+        aria-label={`Go to ${label}`}
+        className={`${rowClass} w-full text-left transition-colors hover:bg-white/[0.10] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40`}
+      >
+        {inner}
+      </button>
+    );
+  }
+
+  return (
+    <div
+      data-testid="rail-row"
+      aria-current={state === "active" ? "step" : undefined}
+      className={rowClass}
+    >
+      {inner}
     </div>
   );
 }
@@ -158,6 +189,17 @@ export function StepShell({
   // even rail-framed). Guard idx >= 0 so an unknown id never renders "Step 0".
   const showKicker = idx >= 1 && idx <= total - 2;
 
+  // Wizard navigation (clickable rail + Back button). `null` when this shell is
+  // rendered outside the wizard page (a step under test) — the rail then stays
+  // static and no Back button shows. `maxReachedIdx` keeps a step the customer
+  // already completed navigable even after they jump back to an earlier one.
+  // Falling back to `idx` (no provider) reproduces the original rail states
+  // exactly: `< idx` done, `=== idx` active, `> idx` to-do.
+  const nav = useSetupNav();
+  const navigate = nav?.navigate;
+  const maxReached = nav?.maxReachedIdx ?? idx;
+  const showFooter = Boolean(primary || skip || (navigate && idx >= 1));
+
   return (
     // `setup-shell` scopes the wizard's fluid `type-*` overrides (globals.css);
     // the rest of the dashboard's fixed type is untouched. `h-dvh
@@ -183,12 +225,19 @@ export function StepShell({
         >
           {STEPS.map((id, i) => {
             const meta = RAIL_LABELS[id];
+            const state =
+              i === idx ? "active" : i <= maxReached ? "done" : "todo";
             return (
               <RailRow
                 key={id}
                 label={meta.label}
                 Icon={meta.Icon}
-                state={i < idx ? "done" : i === idx ? "active" : "todo"}
+                state={state}
+                onClick={
+                  navigate && i !== idx && i <= maxReached
+                    ? () => navigate(id)
+                    : undefined
+                }
               />
             );
           })}
@@ -248,35 +297,51 @@ export function StepShell({
           </div>
         </div>
 
-        {(primary || skip) && (
-          <div className="flex items-center justify-end gap-3 border-t border-separator bg-surface-secondary px-6 py-[clamp(10px,1.6vh,14px)] sm:px-10">
-            {skip && (
-              <button
-                type="button"
-                onClick={skip.onClick}
-                className="type-footnote font-semibold text-label-tertiary transition-colors hover:text-label-secondary"
-              >
-                {skip.label}
-              </button>
-            )}
-            <span className="type-caption-1 text-label-quaternary">
-              {idx + 1} / {total}
-            </span>
-            {primary && (
-              <button
-                type="button"
-                onClick={primary.onClick}
-                disabled={primary.disabled || primary.isLoading}
-                className="dp-btn-primary"
-              >
-                {primary.isLoading
-                  ? (primary.loadingLabel ?? "Working…")
-                  : primary.label}
-                {!primary.isLoading && primary.showArrow && (
-                  <ArrowRight size={16} aria-hidden="true" />
-                )}
-              </button>
-            )}
+        {showFooter && (
+          <div className="flex items-center justify-between gap-3 border-t border-separator bg-surface-secondary px-6 py-[clamp(10px,1.6vh,14px)] sm:px-10">
+            {/* Back — jumps to the previous step. Hidden on welcome (idx 0) and
+                when the wizard nav context isn't present (a step under test). */}
+            <div>
+              {navigate && idx >= 1 && (
+                <button
+                  type="button"
+                  onClick={() => navigate(STEPS[idx - 1])}
+                  className="dp-btn-secondary type-footnote !min-h-[36px] !py-1.5 !px-3"
+                >
+                  <ArrowLeft size={16} aria-hidden="true" />
+                  Back
+                </button>
+              )}
+            </div>
+            <div className="flex items-center gap-3">
+              {skip && (
+                <button
+                  type="button"
+                  onClick={skip.onClick}
+                  className="type-footnote font-semibold text-label-tertiary transition-colors hover:text-label-secondary"
+                >
+                  {skip.label}
+                </button>
+              )}
+              <span className="type-caption-1 text-label-quaternary">
+                {idx + 1} / {total}
+              </span>
+              {primary && (
+                <button
+                  type="button"
+                  onClick={primary.onClick}
+                  disabled={primary.disabled || primary.isLoading}
+                  className="dp-btn-primary"
+                >
+                  {primary.isLoading
+                    ? (primary.loadingLabel ?? "Working…")
+                    : primary.label}
+                  {!primary.isLoading && primary.showArrow && (
+                    <ArrowRight size={16} aria-hidden="true" />
+                  )}
+                </button>
+              )}
+            </div>
           </div>
         )}
       </div>
