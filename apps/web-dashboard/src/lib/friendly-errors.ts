@@ -109,6 +109,13 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "Two-factor setup hasn't started yet. Begin again to get a fresh code.",
     TOTP_ALREADY_ENABLED:
       "Two-factor is already turned on for this account.",
+    // WARP-824 — self-service / forced password change. The "auth" fallback
+    // talks about signing in, which is wrong on the change-password screen, so
+    // map the orchestrator's change-password codes explicitly.
+    INVALID_PASSWORD:
+      "That current password didn't match. Try again.",
+    SAME_PASSWORD:
+      "Choose a password different from your current one.",
   },
   files: {
     UPLOAD_TOO_LARGE: "That file is too large to upload here.",

@@ -201,11 +201,15 @@ install_single_box_host_integration() {
 DROPLET_AP_SSID=Droplet
 DROPLET_AP_PSK=$ap_psk
 
-# Hardware specifics for the Wi-Fi radio: phy0 surfaces as wlp14s0 inside
-# the openwrt container. Override here if your hardware enumerates
-# differently.
-DROPLET_AP_PHY=${DROPLET_AP_PHY:-phy0}
-DROPLET_AP_IFACE=${DROPLET_AP_IFACE:-wlp14s0}
+# Wi-Fi radio phy/iface. Left EMPTY by default so droplet-openwrt-attach's
+# detect_ap_radio AUTO-DETECTS whatever card the box ships (phy0/wlp14s0 on the
+# MT7922 single-box, phy1/wlp7s0 on an AX210, wlan0 elsewhere). Hardcoding one
+# card's layout here (WARP-826) made the env arrive non-empty, which SKIPS
+# detection and silently breaks the AP on any other card. To PIN the radio, set
+# DROPLET_AP_PHY / DROPLET_AP_IFACE (in .env or here) — a non-empty value is
+# honored verbatim and detection is skipped.
+DROPLET_AP_PHY=${DROPLET_AP_PHY:-}
+DROPLET_AP_IFACE=${DROPLET_AP_IFACE:-}
 EOF
     sudo chmod 0600 /etc/default/droplet-openwrt-attach
     log_success "Wrote /etc/default/droplet-openwrt-attach (mode 0600)"
@@ -247,6 +251,44 @@ EOF
   log_info "  Logs:        sudo journalctl -u droplet-openwrt-attach -u droplet-poc-host-net"
 }
 
+# WARP-826: poll for the OpenWrt container to be genuinely READY — Running AND
+# its ubus answering — not merely `.State.Running`. `.State.Running` flips true
+# the instant PID 1 starts, seconds before procd/ubus are up; on a freshly
+# (re)created container (post factory-reset) the attach then docker-exec'd
+# against a not-ready rootfs and the AP/RPC bootstrap raced → router offline.
+# Probing ubus inside the container is the real readiness signal the subsequent
+# attach depends on (it issues `ubus call ...` for the rpcd ACL + firewall).
+#
+# Tunables (env, defaults chosen for ~60s budget like the old loop):
+#   OPENWRT_READY_TRIES     poll attempts (default 30)
+#   OPENWRT_READY_INTERVAL  seconds between polls (default 2)
+# Returns 0 once ready, non-zero if readiness never arrives within the budget
+# (caller warns + skips — never hangs). Sentinel-delimited for unit testing
+# (tests/single-box-openwrt-readiness.test.sh), mirroring the attach script's
+# extractable functions.
+# >>> wait_for_openwrt_ready (WARP-826)
+wait_for_openwrt_ready() {
+  local tries="${OPENWRT_READY_TRIES:-30}"
+  local interval="${OPENWRT_READY_INTERVAL:-2}"
+  local i=0
+  while [ "$i" -lt "$tries" ]; do
+    i=$((i + 1))
+    # 1) Container process up?
+    if [ "$(docker inspect -f '{{.State.Running}}' droplet-openwrt 2>/dev/null)" = "true" ]; then
+      # 2) ubus actually answering inside it? `ubus -t 1 list` is a cheap,
+      #    read-only liveness probe that fails (non-zero) until procd/ubusd are
+      #    up — exactly the window the old Running-only gate skipped. Quiet; we
+      #    only care about the exit code.
+      if docker exec droplet-openwrt ubus -t 1 list >/dev/null 2>&1; then
+        return 0
+      fi
+    fi
+    sleep "$interval"
+  done
+  return 1
+}
+# <<< wait_for_openwrt_ready (WARP-826)
+
 # Trigger the OpenWrt container bootstrap after start_stack (re)creates it.
 # droplet-openwrt-attach.service is a boot-time `oneshot` (RemainAfterExit),
 # so on a no-reboot re-provision — factory-reset wiped openwrt-config /
@@ -254,26 +296,24 @@ EOF
 # does NOT re-run, leaving the new container unprovisioned (no umdns, no rpcd
 # ACL, eth0 not in the `lan` firewall zone). fw4 then DROPs ubus input and the
 # routing service crash-loops (WARP-578 — reproduces the reported "router
-# offline"). Restart the unit explicitly once openwrt is up; the attach script
-# is idempotent.
+# offline"). Restart the unit explicitly once openwrt is READY; the attach
+# script is idempotent.
 provision_single_box_openwrt() {
   if ! systemctl list-unit-files droplet-openwrt-attach.service >/dev/null 2>&1; then
     return 0  # unit not installed (non-single-box / dev host) — nothing to do
   fi
-  # Wait for the openwrt container to be Running before the attach docker-execs.
-  local tries=30
-  while [ "$tries" -gt 0 ]; do
-    [ "$(docker inspect -f '{{.State.Running}}' droplet-openwrt 2>/dev/null)" = "true" ] && break
-    tries=$((tries - 1))
-    sleep 2
-  done
-  if [ "$tries" -eq 0 ]; then
-    log_warn "openwrt container not Running after 60s — skipping attach; routing may be offline until next boot (WARP-578)"
+  # WARP-826: gate on real readiness (Running AND ubus up), not `.State.Running`
+  # alone. The attach docker-execs `ubus call ...`, so kicking it before ubus is
+  # answering raced the bootstrap on a freshly recreated container.
+  if ! wait_for_openwrt_ready; then
+    log_warn "openwrt container not READY (Running + ubus) within budget — skipping attach; routing may be offline until next boot (WARP-578/826)"
     return 0
   fi
   log_info "Provisioning the OpenWrt container (umdns + rpcd ACL + eth0 firewall trust)..."
+  # Re-kick the oneshot explicitly: it does NOT fire on a container recreate, so
+  # the provisioner is the only thing that re-runs the attach on a fresh container.
   if sudo systemctl restart droplet-openwrt-attach.service; then
-    log_success "droplet-openwrt-attach ran — routing can reach ubus (WARP-578)"
+    log_success "droplet-openwrt-attach ran — routing can reach ubus (WARP-578/826)"
   else
     log_warn "droplet-openwrt-attach failed — check: sudo journalctl -u droplet-openwrt-attach"
   fi

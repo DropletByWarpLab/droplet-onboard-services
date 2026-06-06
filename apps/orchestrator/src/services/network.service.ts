@@ -96,19 +96,34 @@ export async function getNetworkOverview(): Promise<Result<NetworkOverview, Rout
   if (cached) return ok(cached);
 
   try {
-    const [interfaces, wireless, systemInfo, leases] = await Promise.all([
-      openwrt.fetchInterfaces(),
-      openwrt.fetchWirelessStatus(),
-      openwrt.fetchSystemInfo(),
-      openwrt.fetchDhcpLeases(),
-    ]);
+    // WARP-826: `routerConnected` is DERIVED from a live reachability probe, not
+    // hardcoded `true`. `healthCheck()` mirrors the routing service's `/health`
+    // `connected` flag — a real ubus `board_info()` probe — so the flag is honest:
+    //   * a reachable LAN-only single-box (WAN handled by the host → the SDK
+    //     returns a `present:false` wan stub, NOT an error) reports connected:true
+    //     and is ONLINE — WAN-absence must never read as offline; and
+    //   * an unreachable router reports connected:false and is OFFLINE, which the
+    //     constant `true` could never represent.
+    // Run it alongside the status fetches so there's no extra round-trip latency.
+    // healthCheck() swallows its own errors and returns false, but `.catch` guards
+    // the derivation regardless: a probe hiccup degrades to "not connected", it
+    // never throws the whole overview into the 503 arm (a genuine *fetch* failure
+    // still does, below — reachability derivation must not mask real summary faults).
+    const [interfaces, wireless, systemInfo, leases, routerConnected] =
+      await Promise.all([
+        openwrt.fetchInterfaces(),
+        openwrt.fetchWirelessStatus(),
+        openwrt.fetchSystemInfo(),
+        openwrt.fetchDhcpLeases(),
+        openwrt.healthCheck().catch(() => false),
+      ]);
 
     const overview: NetworkOverview = {
       interfaces,
       wireless,
       system: systemInfo,
       connectedDeviceCount: leases.length,
-      routerConnected: true,
+      routerConnected,
     };
 
     await cacheSet(CACHE_KEYS.overview, overview, CACHE_TTL_SHORT);

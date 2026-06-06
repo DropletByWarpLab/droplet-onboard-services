@@ -46,13 +46,13 @@ import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
  *       SSID 1–32 chars, PSK 8–63 chars. Left collapsed (or opened-but-blank) =
  *       skipped: no Wi-Fi write happens and the box stays reachable either way.
  *
- *       Safety net (WARP-809): WARP-808's hostapd write-fix is parked, so on the
- *       single-box shape an SSID write still 500s with code ROLLED_BACK — which
- *       is NOT in ROUTER_UNREACHABLE_CODES, so the WARP-807 routerUnreachable
- *       notice doesn't catch it. A failed Wi-Fi write therefore surfaces its own
- *       calm, actionable notice ("Couldn't set up the Droplet's Wi-Fi right
- *       now — you can skip this and set it later from Network") instead of the
- *       raw "Set SSID: 500 Internal Server Error".
+ *       Single-box write path (WARP-808, now landed): the Droplet IS the AP, so
+ *       the write goes through the host hostapd — the orchestrator stages the
+ *       SSID, then the password write applies both via the device-bridge. A
+ *       failure never shows a raw status: an unreachable router → "finish from
+ *       Network later" (WARP-807); a 4xx validation refusal (an SSID/PSK the AP
+ *       rejects) → the specific, customer-fixable reason; any other write failure
+ *       → a calm "couldn't set it up — skip and do it later from Network".
  *
  *   B · Internet address · DuckDNS — unchanged. The customer signs up for a
  *       free DuckDNS account (their own, not a Droplet cloud feature) and
@@ -295,6 +295,19 @@ export function InternetStep({
             setNoticeKind("router-unreachable");
             setError(unreachable.prefix);
             setNoticeDestination(unreachable.destination);
+          } else if (
+            // A validation refusal from the host AP (the hostapd write rejecting
+            // an SSID/PSK that's out of range or has control characters) returns
+            // a 4xx (e.g. 422) RouterStatusError carrying an actionable message.
+            // Unlike an unreachable router (503) or an opaque 5xx / rollback, the
+            // customer can FIX this right now — show the specific reason in red,
+            // not the generic "set it up later" notice that discards it.
+            wifiErr instanceof RouterStatusError &&
+            (wifiErr.status === 400 || wifiErr.status === 422) &&
+            wifiErr.message.trim().length > 0
+          ) {
+            setErrorTone("error");
+            setError(wifiErr.message);
           } else if (
             // Review #4: a UCI safe-apply revert surfaces as a PLAIN Error whose
             // message IS the router's revert reason (pollOperation throws

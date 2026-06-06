@@ -161,6 +161,24 @@ const createUserSchema = z.object({
   password: passwordZod,
   displayName: z.string().min(1).max(128).optional(),
   email: emailField,
+  // WARP-824: the admin types a TEMPORARY password and (by default) requires
+  // the new user to change it on first login. This maps to the explicit
+  // `User.mustChangePassword` column the post-auth gate reads. Default true —
+  // an admin-minted account is a temp-credential handoff unless the operator
+  // explicitly opts out, so a client that omits the field gets the safe
+  // (forced-change) behaviour.
+  mustChangePassword: z.boolean().default(true),
+});
+
+// WARP-824 — self-service password change (forced first-login change, or any
+// user rotating their own password). `currentPassword` proves the caller holds
+// the existing credential (a session cookie alone must not let an attacker who
+// stepped away from an unlocked tab silently rotate the password). `newPassword`
+// goes through the SAME shared policy (passwordZod) every other credential
+// surface enforces, so the UI checklist and server agree.
+const changePasswordSchema = z.object({
+  currentPassword: z.string().min(1),
+  newPassword: passwordZod,
 });
 
 // PR #375 — TOTP verify / re-challenge body: exactly six decimal digits.
@@ -738,7 +756,11 @@ export function createPublicAuthRouter(
       // body field is only added when the query param is present.
       const wantBody = req.query.return === "body" || req.query.return === "body=1";
       res.json({
-        user: { id: userId, username, displayName, role },
+        // WARP-824: surface the explicit forced-change flag so the dashboard
+        // redirects an admin-created temp-password user to the change-password
+        // screen. This is a UX convenience — the post-auth gate enforces it
+        // server-side regardless of whether the client honours the redirect.
+        user: { id: userId, username, displayName, role, mustChangePassword: localUser.mustChangePassword },
         ...(wantBody
           ? {
               accessToken,
@@ -1308,12 +1330,147 @@ export function createProtectedAuthRouter(
         return;
       }
 
+      // WARP-824: read the forced-change flag FRESH from the row (not the JWT
+      // claim) so a hard refresh after sign-in still knows the user is gated,
+      // and so it flips to false the instant the change-password call clears
+      // it. Service principals have no directory row → treated as not gated.
+      // Fail-soft to false if prisma isn't wired (legacy shim) or the row is
+      // gone — the post-auth gate is the authoritative enforcement layer.
+      let mustChangePassword = false;
+      if (prisma && req.user.role !== "service") {
+        try {
+          const row = await prisma.user.findUnique({
+            where: { id: req.user.id },
+            select: { mustChangePassword: true },
+          });
+          mustChangePassword = row?.mustChangePassword ?? false;
+        } catch {
+          mustChangePassword = false;
+        }
+      }
+
       res.json({
         id: req.user.id,
         username: req.user.username,
         displayName: req.user.displayName,
         role: req.user.role,
+        mustChangePassword,
       });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ── WARP-824 — self-service password change ──
+  // Any authenticated user can rotate their own password here; an
+  // admin-created user holding a temporary password MUST come through here
+  // before the forced-change gate lets them reach anything else. Verifies the
+  // current password (a session cookie alone is not enough), enforces the
+  // shared policy on the new one, writes a fresh argon2id hash, and CLEARS the
+  // explicit `mustChangePassword` flag. Mirrors the local-directory model
+  // (ADR-013): the built-in argon2id hash is the auth source of truth, so the
+  // change lands on `User.passwordHash` directly. Nextcloud is mirrored
+  // downstream for WebDAV but is NOT consulted for the gate.
+  router.post("/auth/change-password", async (req, res, next) => {
+    try {
+      if (!req.user) {
+        res.status(401).json({ error: "Not authenticated" });
+        return;
+      }
+      if (!prisma) {
+        // Mirrors the create/login fail-closed posture for the legacy shim:
+        // without the directory we cannot verify or persist a password.
+        logger.error(
+          "change-password: prisma not wired into protected auth router; cannot rotate password",
+        );
+        res.status(500).json({
+          error: "Server misconfigured: local user database not wired",
+          code: "USERS_NO_PRISMA",
+        });
+        return;
+      }
+
+      const parsed = changePasswordSchema.safeParse(req.body);
+      if (!parsed.success) {
+        const fieldErrors = parsed.error.flatten().fieldErrors;
+        if (fieldErrors.newPassword?.length) {
+          res
+            .status(400)
+            .json({ error: "Password does not meet policy requirements", code: "WEAK_PASSWORD" });
+          return;
+        }
+        res.status(400).json({ error: "Current and new password are required", code: "INVALID_REQUEST" });
+        return;
+      }
+
+      const { currentPassword, newPassword } = parsed.data;
+
+      // A no-op "change" (new === current) is not a real rotation — reject it
+      // before touching the hash so a forced-change user can't satisfy the
+      // gate by re-entering the temp password.
+      if (currentPassword === newPassword) {
+        res
+          .status(400)
+          .json({ error: "Choose a password different from your current one", code: "SAME_PASSWORD" });
+        return;
+      }
+
+      const localUser = await prisma.user.findUnique({
+        where: { id: req.user.id },
+      });
+      // A session whose row vanished (deleted mid-flight) or a service-only
+      // row with no hash cannot rotate a password. Fail closed.
+      if (!localUser || !localUser.passwordHash) {
+        res.status(400).json({ error: "Invalid current password", code: "INVALID_PASSWORD" });
+        return;
+      }
+
+      const ok = await verifyPassword(localUser.passwordHash, currentPassword);
+      if (!ok) {
+        res.status(400).json({ error: "Invalid current password", code: "INVALID_PASSWORD" });
+        return;
+      }
+
+      // ADR-013: write the new argon2id hash to the directory row AND clear the
+      // forced-change flag in the SAME update so the gate opens atomically with
+      // the credential change.
+      const newHash = await hashPassword(newPassword);
+      await prisma.user.update({
+        where: { id: localUser.id },
+        data: { passwordHash: newHash, mustChangePassword: false },
+      });
+
+      // Mirror the new password downstream to Nextcloud for WebDAV (best
+      // effort — the directory is the source of truth, so a failed mirror must
+      // not fail the rotation; the next login re-provisions the NC session).
+      const ncUsername = localUser.nextcloudUsername ?? localUser.username;
+      const token = await resolveNcToken(req);
+      if (token) {
+        try {
+          await ncUpdateUser(token, ncUsername, "password", newPassword);
+        } catch (err) {
+          logger.warn(
+            { err, userId: localUser.id },
+            "change-password: downstream Nextcloud password mirror failed (non-fatal)",
+          );
+        }
+      }
+
+      await recordActivity({
+        kind: "auth",
+        severity: "ok",
+        sourceIcon: "key-round",
+        what: `${localUser.displayName} changed their password`,
+        sub: callerIpFromReq(req) ?? "unknown",
+        refs: {
+          outcome: "password_changed",
+          userId: localUser.id,
+          username: localUser.username,
+          ip: callerIpFromReq(req) ?? null,
+        },
+      });
+
+      res.json({ status: "ok" });
     } catch (err) {
       next(err);
     }
@@ -1618,7 +1775,7 @@ export function createProtectedAuthRouter(
         return;
       }
 
-      const { email, password, displayName } = parsed.data;
+      const { email, password, displayName, mustChangePassword } = parsed.data;
 
       const token = await resolveNcToken(req);
       if (!token) {
@@ -1692,6 +1849,11 @@ export function createProtectedAuthRouter(
           displayName: displayName || username,
           email,
           passwordHash,
+          // WARP-824: a re-issued temp password (idempotent retry, or an
+          // operator re-creating the same account with a fresh temp secret)
+          // re-arms the forced-change gate — mirror the create branch so the
+          // flag never goes stale on the update path.
+          mustChangePassword,
         },
         create: {
           username,
@@ -1700,6 +1862,9 @@ export function createProtectedAuthRouter(
           nextcloudUsername: username,
           passwordHash,
           role: "family" as any,
+          // WARP-824: explicit forced-change-on-first-login flag (default
+          // true). The post-auth gate reads this fresh on every request.
+          mustChangePassword,
         },
       });
 

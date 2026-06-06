@@ -149,9 +149,15 @@ The single-box shape needs three host-level integrations that the compose
 stack alone doesn't cover. `scripts/lib/single-box.sh::install_single_box_host_integration`
 installs all three when single-box mode is active:
 
-1. **MT7922 → OpenWrt netns attach** — moves the Wi-Fi PHY into the
-   container so OpenWrt's hostapd can drive it as an AP.
-   `/usr/local/sbin/droplet-openwrt-attach` + `droplet-openwrt-attach.service`.
+1. **Wi-Fi PHY → OpenWrt netns attach** — moves the Wi-Fi PHY into the
+   container so OpenWrt's hostapd can drive it as an AP. The PHY + its netdev
+   name are **auto-detected** at attach time (WARP-826) — `/sys/class/ieee80211`
+   for the phy, `iw dev` for the iface — so it works on whatever card the box
+   ships (MT7922 → `phy0`/`wlp14s0`, AX210 → `phy1`/`wlp7s0`, others → `wlan0`).
+   An explicit `DROPLET_AP_PHY` / `DROPLET_AP_IFACE` in
+   `/etc/default/droplet-openwrt-attach` stays authoritative (used verbatim,
+   detection skipped). `/usr/local/sbin/droplet-openwrt-attach` +
+   `droplet-openwrt-attach.service`.
 
 2. **br-lan host DHCP + Lantronix route** — dedicated dnsmasq on the
    host's `br-lan` so the Lantronix switch + downstream cameras get IPs,
@@ -185,6 +191,76 @@ installs all three when single-box mode is active:
 > `droplet-host-net` (or similar) name and updates the systemd unit +
 > bind paths in lockstep. Until that lands, the filenames stay as-is
 > to avoid breaking the captured-vs-installed parity check.
+
+## Box-side verification checklist — router + AP bring-up (WARP-826)
+
+Run this on-LAN, on the box, after a fresh provision / factory-reset+`setup.sh`
+to confirm the OpenWrt router **and** the default Wi-Fi AP actually came up. This
+is the human gate for WARP-826 — the code fixes (phy/iface auto-detect, the
+readiness poll that gates the attach re-kick, and the reachability-derived
+`routerConnected`) are verified statically by unit tests, but the live radio +
+on-LAN path can only be confirmed on hardware. SSH in as `droplet@<box-ip>`.
+
+1. **The radio was detected (not the old hardcoded phy1/wlp7s0).**
+   ```bash
+   sudo journalctl -u droplet-openwrt-attach | grep -E "AP radio detected|no wireless phy"
+   ```
+   Expect `AP radio detected — phy=<phyN> iface=<name>` matching the card the box
+   actually has (`ls /sys/class/ieee80211` + `iw dev` to cross-check). A
+   `no wireless phy/iface resolved` WARN means the card isn't seen — **stop and
+   check the hardware** (seated? `lspci | grep -i net`?); pin `DROPLET_AP_PHY` /
+   `DROPLET_AP_IFACE` in `/etc/default/droplet-openwrt-attach` only if the card
+   is present but enumerates oddly.
+
+2. **The PHY moved into the container netns.**
+   ```bash
+   # Host should NO LONGER see the AP phy; the container should.
+   iw dev                                   # AP iface absent on host
+   docker exec droplet-openwrt iw dev       # AP iface present in container
+   ```
+
+3. **The container is READY (Running AND ubus answering) — the readiness poll.**
+   ```bash
+   docker inspect -f '{{.State.Running}}' droplet-openwrt   # true
+   docker exec droplet-openwrt ubus -t 1 list >/dev/null && echo "ubus OK"
+   ```
+   On a freshly recreated container the attach must have waited for ubus before
+   running; if `provision_single_box_openwrt` logged
+   `not READY (Running + ubus) within budget`, the container never came up — check
+   `docker logs droplet-openwrt`.
+
+4. **hostapd is up and beaconing the default SSID.**
+   ```bash
+   docker exec droplet-openwrt pgrep -a hostapd          # running, -P /run/hostapd.pid
+   docker exec droplet-openwrt cat /etc/hostapd.conf | grep -E "^interface|^ssid"
+   ```
+   `interface=` must equal the detected/declared AP iface; `ssid=` the configured
+   `DROPLET_AP_SSID` (default `Droplet`).
+
+5. **A client can associate, get a DHCP lease, and resolve the local name.**
+   From a phone/laptop: join the `Droplet` SSID with the per-box PSK
+   (`sudo cat /etc/droplet/ap-psk`). Confirm it gets a `192.168.20.x` lease
+   (`docker exec droplet-openwrt cat /tmp/dhcp.leases`) and that
+   `https://droplet.local/` loads the dashboard (DNAT to the gateway container).
+
+6. **`routerConnected` is honest — the dashboard shows ONLINE, not OFFLINE.**
+   ```bash
+   # /health carries the explicit topology posture; connected reflects real ubus.
+   curl -fsS -H "Authorization: Bearer $ROUTING_SERVICE_TOKEN" \
+     "$ROUTING_SERVICE_URL/health" | python3 -m json.tool
+   ```
+   Expect `"connected": true` and a `"topology"` of `UNKNOWN` on a LAN-only
+   single-box (WAN handled by the host — **this is correct, not an error**) or
+   `DOWNSTREAM_ROUTER` if a WAN uplink with an upstream gateway is present. The
+   orchestrator's `/api/network/status` then returns `routerConnected: true` and
+   the dashboard Network page reads ONLINE. A `connected: false` here is a genuine
+   unreachable router — not the WAN-absence false-offline this ticket fixed.
+
+> WAN-absence is **not** offline: the single-box's containerized OpenWrt has no
+> `wan` logical interface (the host owns the WAN), so the routing SDK returns a
+> `present:false` wan stub and the topology posture is the explicit `UNKNOWN`.
+> Neither makes the router offline — `routerConnected` is derived from live ubus
+> reachability (`/health`), never from the presence of a WAN interface.
 
 ## Migrating an existing single-box host away from `docker-compose.override.yml`
 

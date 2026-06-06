@@ -60,7 +60,7 @@ export default function ContextPage() {
   // First-paint skeleton.
   if (isLoading && !full) {
     return (
-      <div className="relative min-h-screen">
+      <div className="relative">
         <div
           aria-hidden
           className="pointer-events-none absolute inset-x-0 top-0 h-[420px] aurora-bg opacity-[0.45] animate-aurora"
@@ -103,7 +103,7 @@ export default function ContextPage() {
   // Zero-files onboarding.
   if (full.files === 0) {
     return (
-      <div className="relative min-h-screen">
+      <div className="relative">
         <div
           aria-hidden
           className="pointer-events-none absolute inset-x-0 top-0 h-[420px] aurora-bg opacity-[0.45] animate-aurora"
@@ -124,7 +124,7 @@ export default function ContextPage() {
   }
 
   return (
-    <div className="relative min-h-screen">
+    <div className="relative">
       <div
         aria-hidden
         className="pointer-events-none absolute inset-x-0 top-0 h-[420px] aurora-bg opacity-[0.45] animate-aurora"

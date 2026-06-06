@@ -1,0 +1,51 @@
+"use client";
+
+import { createContext, useContext, type ReactNode } from "react";
+import type { Step } from "@/components/setup/wizard-steps";
+
+/**
+ * Wizard navigation context (clickable rail + Back button).
+ *
+ * The setup page owns the step state machine; this context lets the shared
+ * `StepShell` chrome drive it WITHOUT every one of the 11 step components
+ * having to prop-drill a navigate callback. The page wraps the wizard in
+ * `<SetupNavProvider>`; `StepShell` reads it via `useSetupNav()`.
+ *
+ * Rendered OUTSIDE the provider (e.g. a single step under test, or the
+ * terminal `done` celebration) `useSetupNav()` returns `null` — `StepShell`
+ * then falls back to the pre-nav behaviour: a static, non-clickable rail and
+ * no Back button. That keeps the existing per-step tests (which mount a step in
+ * isolation) green and makes the new navigation purely additive.
+ */
+export interface SetupNav {
+  /** Jump to an already-reached step (the rail rows + the Back button). */
+  navigate: (step: Step) => void;
+  /**
+   * Highest step index the customer has reached this session. A step at or
+   * before this index is navigable; anything beyond it is still "to-do" and
+   * stays locked. Tracked by the page (not derived from the current step) so
+   * going back doesn't relock the steps you already completed.
+   */
+  maxReachedIdx: number;
+}
+
+const SetupNavContext = createContext<SetupNav | null>(null);
+
+export function SetupNavProvider({
+  value,
+  children,
+}: {
+  value: SetupNav;
+  children: ReactNode;
+}) {
+  return (
+    <SetupNavContext.Provider value={value}>
+      {children}
+    </SetupNavContext.Provider>
+  );
+}
+
+/** The wizard nav, or `null` when rendered outside the wizard page. */
+export function useSetupNav(): SetupNav | null {
+  return useContext(SetupNavContext);
+}

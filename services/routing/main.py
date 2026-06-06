@@ -356,6 +356,27 @@ async def generic_exception_handler(request, exc):
 # ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
+def _best_effort_topology() -> Optional[str]:
+    """Return the explicit deployment-topology posture string, or None on any
+    failure. WARP-826: `/health` carries the posture so the orchestrator can
+    derive `routerConnected` from real reachability and distinguish a LAN-only
+    single-box (WAN handled by the host → UNKNOWN) from an unreachable router.
+
+    Strictly best-effort: the topology probe must NEVER turn a reachable router
+    (board_info() already succeeded) into a failed /health. Any exception — a
+    transient ubus fault, a genuine error, anything — degrades to None, leaving
+    `connected` as the single source of truth for reachability.
+    """
+    if router_instance is None:
+        return None
+    try:
+        # `posture` is a DeploymentTopology(str, Enum); use `.value` so the wire
+        # value is the bare name ("UNKNOWN"), not "DeploymentTopology.UNKNOWN".
+        return detect_deployment_topology(router_instance)["posture"].value
+    except Exception:  # noqa: BLE001 — health must not 500 on a posture hiccup
+        return None
+
+
 @app.get("/health", response_model=HealthResponse)
 def health():
     if router_instance is None:
@@ -367,7 +388,13 @@ def health():
         )
     try:
         board = router_instance.system.board_info()
-        return HealthResponse(status="ok", connected=True, router_host=OPENWRT_HOST, board=board)
+        return HealthResponse(
+            status="ok",
+            connected=True,
+            router_host=OPENWRT_HOST,
+            board=board,
+            topology=_best_effort_topology(),
+        )
     except (ConnectionLost, UbusError) as exc:
         return HealthResponse(
             status="error",

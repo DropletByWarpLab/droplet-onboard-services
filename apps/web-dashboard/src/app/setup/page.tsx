@@ -17,6 +17,7 @@ import { AiStep } from "@/components/setup/steps/AiStep";
 import { TeamStep } from "@/components/setup/steps/TeamStep";
 import { DoneStep } from "@/components/setup/steps/DoneStep";
 import { STEPS, type Step } from "@/components/setup/wizard-steps";
+import { SetupNavProvider } from "@/components/setup/setup-nav";
 
 /**
  * Customer-facing first-run wizard.
@@ -76,14 +77,25 @@ export default function SetupPage() {
   const [step, setStepState] = useState<Step>(() =>
     resumeStepFrom(setupState?.setupStep),
   );
+  // Furthest step reached this session — drives the clickable rail so a step
+  // the customer already completed stays navigable after they jump back to an
+  // earlier one. Seeded from the resumed step so a refresh mid-wizard keeps
+  // everything up to here unlocked. Not persisted: the orchestrator's
+  // `setupStep` is the single resume pointer; "furthest reached" is session UI.
+  const [maxReachedIdx, setMaxReachedIdx] = useState<number>(() =>
+    Math.max(0, STEPS.indexOf(resumeStepFrom(setupState?.setupStep))),
+  );
   const [displayName, setDisplayName] = useState("");
   const [discoveredCount, setDiscoveredCount] = useState(0);
 
-  // Advance the wizard AND persist the new step so a refresh resumes here.
-  // The PATCH is fire-and-forget (patchSetupStep swallows network errors) —
-  // local progress must never be gated on the round-trip.
+  // Move the wizard AND persist the new step so a refresh resumes here. The
+  // PATCH is fire-and-forget (patchSetupStep swallows network errors) — local
+  // progress must never be gated on the round-trip. Used for forward completion
+  // AND backward navigation (the rail rows + the Back button); `maxReachedIdx`
+  // only ever grows, so jumping back never relocks an already-completed step.
   const setStep = useCallback((next: Step) => {
     setStepState(next);
+    setMaxReachedIdx((prev) => Math.max(prev, STEPS.indexOf(next)));
     void patchSetupStep(next);
   }, []);
 
@@ -100,7 +112,7 @@ export default function SetupPage() {
   }
 
   return (
-    <>
+    <SetupNavProvider value={{ navigate: setStep, maxReachedIdx }}>
       {step === "welcome" && (
         <WelcomeStep onContinue={() => setStep("claim")} />
       )}
@@ -178,6 +190,6 @@ export default function SetupPage() {
           onSkip={() => setStep("done")}
         />
       )}
-    </>
+    </SetupNavProvider>
   );
 }

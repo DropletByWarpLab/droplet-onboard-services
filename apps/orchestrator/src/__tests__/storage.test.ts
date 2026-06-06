@@ -285,6 +285,234 @@ describe("storage routes (WARP-174)", () => {
   });
 });
 
+describe("storage routes — data-drive inclusion filter (WARP-827)", () => {
+  // The home-user persona (ADR-002) must never see firmware/boot/swap/loop
+  // pseudo-devices or the OS/system disk presented as "your drives". The
+  // device-bridge already scopes its /mnt/* enumeration (it excludes
+  // /mnt/droplet, non-data fstypes, and trivially small mounts), but the
+  // orchestrator is the CI-testable boundary and must defend in depth against
+  // a bridge — older, future, or mis-scoped — that leaks junk. This fixture
+  // mixes representative junk in with two real data drives and asserts only
+  // the real ones survive.
+  const junkAndDataSnapshot = {
+    drives: [
+      // EFI system partition — firmware, never user storage.
+      {
+        device: "/dev/sda1",
+        mount: "/boot/efi",
+        label: "EFI",
+        uuid: "U-EFI",
+        size_bytes: 536_870_912,
+        used_bytes: 30_000_000,
+        free_bytes: 506_870_912,
+        mounted: true,
+        fs: "vfat",
+      },
+      // Swap — not a filesystem the user browses.
+      {
+        device: "/dev/sda2",
+        mount: "[SWAP]",
+        label: "",
+        uuid: "U-SWAP",
+        size_bytes: 8_589_934_592,
+        used_bytes: 0,
+        free_bytes: 8_589_934_592,
+        mounted: true,
+        fs: "swap",
+      },
+      // Loop device — squashfs snap/appimage backing mount.
+      {
+        device: "/dev/loop0",
+        mount: "/snap/core/1234",
+        label: "",
+        uuid: "",
+        size_bytes: 104_857_600,
+        used_bytes: 104_857_600,
+        free_bytes: 0,
+        mounted: true,
+        fs: "squashfs",
+      },
+      // The OS / system disk mounted at root — the install, not a data drive.
+      {
+        device: "/dev/nvme0n1p2",
+        mount: "/",
+        label: "ubuntu",
+        uuid: "U-OSROOT",
+        size_bytes: 256_060_514_304,
+        used_bytes: 60_000_000_000,
+        free_bytes: 196_060_514_304,
+        mounted: true,
+        fs: "ext4",
+      },
+      // The OS-root shared-mount bind the automounter creates — backed by the
+      // OS disk, so it would show the install as a "drive" (device-bridge
+      // hides this at /mnt/droplet; defend here too).
+      {
+        device: "/dev/nvme0n1p2",
+        mount: "/mnt/droplet",
+        label: "ubuntu",
+        uuid: "U-OSROOT",
+        size_bytes: 256_060_514_304,
+        used_bytes: 60_000_000_000,
+        free_bytes: 196_060_514_304,
+        mounted: true,
+        fs: "ext4",
+      },
+      // A real external data drive (hot-plug, under /mnt/droplet/<name>).
+      {
+        device: "/dev/sdb1",
+        mount: "/mnt/droplet/photos-ab12cd34",
+        label: "TOSHIBA EXT",
+        uuid: "U-DATA-1",
+        size_bytes: 2_000_000_000_000,
+        used_bytes: 100_000_000_000,
+        free_bytes: 1_900_000_000_000,
+        mounted: true,
+        fs: "ext4",
+        removable: true,
+      },
+      // A real installed data drive (fstab) under /mnt/.
+      {
+        device: "/dev/sdc1",
+        mount: "/mnt/cloud-storage",
+        label: "VAULT",
+        uuid: "U-DATA-2",
+        size_bytes: 4_000_000_000_000,
+        used_bytes: 1_000_000_000_000,
+        free_bytes: 3_000_000_000_000,
+        mounted: true,
+        fs: "xfs",
+      },
+    ],
+    count: 7,
+    snapshot_at: "2026-06-06T00:00:00Z",
+  };
+
+  it("returns only real data drives — drops EFI/swap/loop/OS-disk/OS-root", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ ok: true, json: async () => junkAndDataSnapshot })),
+    );
+    const app = buildApp(createPrismaMock());
+    const res = await request(app).get("/api/storage/drives");
+    expect(res.status).toBe(200);
+    const uuids = res.body.drives.map((d: any) => d.uuid).sort();
+    expect(uuids).toEqual(["U-DATA-1", "U-DATA-2"]);
+    // count must reflect the FILTERED set, not the raw bridge count.
+    expect(res.body.count).toBe(2);
+    // None of the junk leaks through.
+    const mounts = res.body.drives.map((d: any) => d.mount);
+    expect(mounts).not.toContain("/boot/efi");
+    expect(mounts).not.toContain("[SWAP]");
+    expect(mounts).not.toContain("/snap/core/1234");
+    expect(mounts).not.toContain("/");
+    expect(mounts).not.toContain("/mnt/droplet");
+  });
+
+  it("does NOT drop everything — a snapshot of only data drives passes through intact", async () => {
+    // Regression guard against an over-aggressive predicate: the original
+    // WARP-174 fixture (all real /mnt/droplet drives) must survive unchanged.
+    const app = buildApp(createPrismaMock());
+    const res = await request(app).get("/api/storage/drives");
+    expect(res.status).toBe(200);
+    expect(res.body.drives).toHaveLength(3);
+    expect(res.body.count).toBe(3);
+  });
+
+  it("preserves the bridge_unavailable degradation (filter never fabricates drives)", async () => {
+    const connErr = Object.assign(new TypeError("fetch failed"), {
+      cause: Object.assign(new Error("connect ECONNREFUSED 172.17.0.1:9090"), {
+        code: "ECONNREFUSED",
+      }),
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw connErr;
+      }),
+    );
+    const app = buildApp(createPrismaMock());
+    const res = await request(app).get("/api/storage/drives");
+    expect(res.status).toBe(200);
+    expect(res.body.drives).toEqual([]);
+    expect(res.body.reason).toBe("bridge_unavailable");
+  });
+
+  it("returns an empty list (not an error) when every drive is junk", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          drives: [
+            { device: "/dev/sda1", mount: "/boot/efi", label: "EFI", uuid: "U-EFI", size_bytes: 5e8, used_bytes: 0, free_bytes: 5e8, mounted: true, fs: "vfat" },
+            { device: "/dev/loop1", mount: "/snap/x/1", label: "", uuid: "", size_bytes: 1e8, used_bytes: 1e8, free_bytes: 0, mounted: true, fs: "squashfs" },
+          ],
+          count: 2,
+          snapshot_at: "2026-06-06T00:00:00Z",
+        }),
+      })),
+    );
+    const app = buildApp(createPrismaMock());
+    const res = await request(app).get("/api/storage/drives");
+    expect(res.status).toBe(200);
+    expect(res.body.drives).toEqual([]);
+    expect(res.body.count).toBe(0);
+  });
+
+  it("drops an OS-disk partition auto-mounted as a data drive (os_disk/parent_disk — the real .87 case)", async () => {
+    // The automounter mounted the install disk's EFI/boot partitions under
+    // /mnt/droplet/drive-<uuid>: they pass rules 2-3 (ext4/vfat, under /mnt/,
+    // not the bind) yet live on the OS disk. The bridge tags parent_disk +
+    // reports os_disk so the orchestrator drops them. Mirrors what the live
+    // single-box (.87) actually returned: nvme0n1p1/p2 -> nvme0n1 == root.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          os_disk: "nvme0n1",
+          drives: [
+            { device: "/dev/nvme0n1p1", parent_disk: "nvme0n1", mount: "/mnt/droplet/drive-13EE-1E3", label: "drive", uuid: "U-EFI-AUTO", size_bytes: 1_073_741_824, used_bytes: 5e7, free_bytes: 1e9, mounted: true, fs: "vfat" },
+            { device: "/dev/nvme0n1p2", parent_disk: "nvme0n1", mount: "/mnt/droplet/drive-538963df", label: "drive", uuid: "U-BOOT-AUTO", size_bytes: 2_147_483_648, used_bytes: 3e8, free_bytes: 1.8e9, mounted: true, fs: "ext4" },
+            { device: "/dev/sdb1", parent_disk: "sdb", mount: "/mnt/droplet/data2-1380a14d", label: "data2", uuid: "U-DATA-REAL", size_bytes: 2e12, used_bytes: 1e11, free_bytes: 1.9e12, mounted: true, fs: "ext4", removable: true },
+          ],
+          count: 3,
+          snapshot_at: "2026-06-06T00:00:00Z",
+        }),
+      })),
+    );
+    const app = buildApp(createPrismaMock());
+    const res = await request(app).get("/api/storage/drives");
+    expect(res.status).toBe(200);
+    expect(res.body.drives.map((d: any) => d.uuid)).toEqual(["U-DATA-REAL"]);
+    expect(res.body.count).toBe(1);
+    const mounts = res.body.drives.map((d: any) => d.mount);
+    expect(mounts).not.toContain("/mnt/droplet/drive-13EE-1E3");
+    expect(mounts).not.toContain("/mnt/droplet/drive-538963df");
+  });
+
+  it("fails open: with no os_disk reported, a parent_disk tag never hides a real drive", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          drives: [
+            { device: "/dev/sdb1", parent_disk: "sdb", mount: "/mnt/droplet/data2", label: "data2", uuid: "U-NO-OSDISK", size_bytes: 2e12, used_bytes: 1e11, free_bytes: 1.9e12, mounted: true, fs: "ext4", removable: true },
+          ],
+          count: 1,
+          snapshot_at: "2026-06-06T00:00:00Z",
+        }),
+      })),
+    );
+    const app = buildApp(createPrismaMock());
+    const res = await request(app).get("/api/storage/drives");
+    expect(res.status).toBe(200);
+    expect(res.body.drives.map((d: any) => d.uuid)).toEqual(["U-NO-OSDISK"]);
+  });
+});
+
 describe("storage routes — device-bridge URL (WARP-660)", () => {
   // Regression lock: the bridge URL default MUST be the host.docker.internal
   // form, NOT the docker0 gateway (172.17.0.1). On the single-box deployment

@@ -423,16 +423,46 @@ export async function fetchUsers(): Promise<{ users: AuthUser[] }> {
 export async function createUser(
   email: string,
   password: string,
-  displayName?: string
+  displayName?: string,
+  // WARP-824: when true (the default), the new user must change this temporary
+  // password on first login. Passed through to POST /auth/users which sets the
+  // explicit `User.mustChangePassword` flag.
+  mustChangePassword = true,
 ): Promise<void> {
   const res = await authFetch(`${BASE}/api/auth/users`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password, displayName }),
+    body: JSON.stringify({ email, password, displayName, mustChangePassword }),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     const err = new Error(data.error || "Failed to create user") as Error & { code?: string };
+    err.code = data.code;
+    throw err;
+  }
+}
+
+/**
+ * WARP-824 — self-service password change. Used by the forced-change screen an
+ * admin-created user lands on, and reusable for any user rotating their own
+ * password. Posts the current + new password to the orchestrator, which
+ * verifies the current one, enforces the shared policy on the new one, and
+ * clears the forced-change flag. Throws an Error carrying the server `code`
+ * (INVALID_PASSWORD / WEAK_PASSWORD / SAME_PASSWORD) so the UI can map it to
+ * friendly copy.
+ */
+export async function changePassword(
+  currentPassword: string,
+  newPassword: string,
+): Promise<void> {
+  const res = await authFetch(`${BASE}/api/auth/change-password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ currentPassword, newPassword }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    const err = new Error(data.error || "Failed to change password") as Error & { code?: string };
     err.code = data.code;
     throw err;
   }
@@ -815,6 +845,43 @@ export async function confirmPoolCommand(input: {
     throw new Error(body.error || `Could not complete the operation: ${res.status}`);
   }
   return res.json();
+}
+
+/**
+ * WARP-828 — the Settings "Danger zone" reformat-a-drive entry points.
+ *
+ * These are the AC-named, typed aliases for the two-step destructive flow the
+ * pool/adopt UI already uses. They wrap the same orchestrator routes
+ * (`POST /api/storage/drives/adopt` → 202 token, then
+ * `POST /api/storage/command/confirm`) so there is ONE wire path and one place
+ * the contract lives; the Danger zone calls these by their intent-named handles
+ * rather than the pool-flavoured originals.
+ */
+
+/** Step 1: request a confirm token to wipe + reformat + mount a whole disk.
+ *  `device` is the WHOLE-disk kernel name ("sdb" / "nvme0n1"), never a
+ *  partition — derive it from a DriveInfo with `wholeDiskName()`. Returns 202 +
+ *  a single-use token; nothing is erased until {@link confirmStorageCommand}.
+ *  Owner/admin only + OS-disk refusal are enforced server-side. */
+export async function adoptDrive(input: {
+  device: string;
+  wipeMethod: "quick" | "secure";
+  fstype?: string;
+  label?: string;
+  confirmPhrase: string;
+}): Promise<PoolCommandToken> {
+  return requestAdoptDrive(input);
+}
+
+/** Step 2: confirm + execute a queued destructive storage op. MUST echo the
+ *  `service` + `resourceId` from the minted token (the server refuses a
+ *  mismatch). Owner/admin only, enforced server-side. */
+export async function confirmStorageCommand(input: {
+  confirmationToken: string;
+  service: string;
+  resourceId: string;
+}): Promise<{ ok: boolean; error?: string }> {
+  return confirmPoolCommand(input);
 }
 
 /**

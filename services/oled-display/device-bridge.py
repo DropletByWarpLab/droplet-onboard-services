@@ -956,6 +956,59 @@ def _bus_for(device):
     return "disk"
 
 
+# WARP-827: hide partitions that live on the OS/root disk. The automounter can
+# mount the install disk's EFI/boot partitions under /mnt/droplet/<uuid> (they
+# look like generic data volumes), which then surface as confusing "drives" —
+# and, worse, as reformat targets. We resolve each candidate's whole disk and
+# drop it when that disk also backs root "/". Fails OPEN: if root's disk can't
+# be resolved we hide nothing, so a real data drive is never lost.
+_os_disk_cache = {"disk": None, "at": 0.0}
+
+
+def _whole_disk(device):
+    """Whole-disk kernel name backing a device/partition. Uses lsblk's inverse
+    dependency walk (-s) so it resolves partitions (nvme0n1p2 -> nvme0n1) AND
+    device-mapper/LVM (a root LV -> its PV's physical disk) — a plain PKNAME
+    lookup returns nothing for dm devices, which is why the LVM root never
+    matched. -r keeps the NAME column free of tree-drawing glyphs. Returns the
+    deepest TYPE=disk in the chain, or "" when it can't be resolved."""
+    dev = device or ""
+    if not dev:
+        return ""
+    try:
+        _rc, out, _e = _run(["lsblk", "-rnso", "NAME,TYPE", dev], timeout=4)
+        disk = ""
+        for line in (out or "").splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[1] == "disk":
+                disk = parts[0].strip()  # last (deepest) disk in the chain
+        if disk:
+            return disk
+    except Exception:                                                  # noqa: BLE001
+        pass
+    return os.path.basename(dev)
+
+
+def _os_disk():
+    """Whole-disk kernel name that backs root "/" (cached ~5 min; topology is
+    stable). "" when undeterminable — callers then hide nothing (fail open)."""
+    now = time.time()
+    if _os_disk_cache["disk"] is not None and now - _os_disk_cache["at"] < 300:
+        return _os_disk_cache["disk"]
+    disk = ""
+    try:
+        _rc, src, _e = _run(["findmnt", "-fno", "SOURCE", "/"], timeout=4)
+        rows = (src or "").strip().splitlines()
+        root_src = rows[0].strip() if rows else ""
+        if root_src:
+            disk = _whole_disk(root_src)
+    except Exception:                                                  # noqa: BLE001
+        disk = ""
+    _os_disk_cache["disk"] = disk
+    _os_disk_cache["at"] = now
+    return disk
+
+
 # WARP-612: SMART health + temperature. OFF by default — smartctl spins up
 # disks and adds a subprocess per drive, which we don't want on the 10s drive
 # poll. Operators opt in with DRIVE_SMART_ENABLED=true; results are cached per
@@ -1072,6 +1125,7 @@ def drives_snapshot(invalidate=False):
         return _drives_cache["snap"]
 
     by_mount = {}  # mount-point -> entry, so state + /proc/mounts merge cleanly
+    os_disk = _os_disk()  # WARP-827: whole disk backing root "/"; "" = unknown
 
     # Filesystem type + read-only flag per mount, parsed once from
     # /proc/mounts so both the automount and fstab branches below can
@@ -1108,15 +1162,20 @@ def drives_snapshot(invalidate=False):
             # pass below will pick up the current location if any.
             if not os.path.ismount(mp):
                 continue
+            device = m.get("device")
+            parent_disk = _whole_disk(device)
+            if os_disk and parent_disk and parent_disk == os_disk:
+                continue  # WARP-827: partition on the OS/root disk, not a data drive
             total, used, free = _bytes_for(mp)
             # Fail SAFE on a /proc/mounts miss: report read-only, never a false
             # "writable". The UI renders mount status from this flag and the
             # deferred eject/fsck work will trust it — for a data-integrity-first
             # product an unknown state must not present as writable.
             fs, readonly = mount_meta.get(mp, ("", True))
-            smart, temp = _smart_for(m.get("device"))  # one smartctl pass, not two
+            smart, temp = _smart_for(device)  # one smartctl pass, not two
             by_mount[mp] = {
-                "device": m.get("device"),
+                "device": device,
+                "parent_disk": parent_disk,
                 "mount": mp,
                 "label": m.get("label") or "",
                 "uuid": m.get("uuid") or "",
@@ -1164,10 +1223,14 @@ def drives_snapshot(invalidate=False):
                 total, used, free = _bytes_for(mp)
                 if total < _MIN_DRIVE_BYTES:
                     continue
+                parent_disk = _whole_disk(dev)
+                if os_disk and parent_disk and parent_disk == os_disk:
+                    continue  # WARP-827: partition on the OS/root disk, not a data drive
                 label, uuid = _label_and_uuid_for(dev)
                 smart, temp = _smart_for(dev)  # one smartctl pass, not two
                 by_mount[mp] = {
                     "device": dev,
+                    "parent_disk": parent_disk,
                     "mount": mp,
                     "label": label,
                     "uuid": uuid,
@@ -1188,15 +1251,30 @@ def drives_snapshot(invalidate=False):
     except Exception:
         pass
 
-    # Stable order: fstab first (usually the big data drives), then
-    # automount (hot-plug), each group sorted by mount path for a
-    # predictable on-screen list.
-    mounts = sorted(by_mount.values(),
-                    key=lambda d: (d["source"] != "fstab", d["mount"]))
+    # WARP-827: one card per PHYSICAL drive. A drive can be mounted at more than
+    # one path (e.g. a friendly /mnt/droplet/data + the automount
+    # /mnt/droplet/data-<uuid>), which otherwise shows the same disk twice.
+    # Collapse by backing device, keeping the friendliest mount (fstab first,
+    # then the shortest path), and preserve ejectability if any duplicate was
+    # removable.
+    ordered = sorted(
+        by_mount.values(),
+        key=lambda d: (d.get("source") != "fstab", len(d.get("mount", "")), d.get("mount", "")),
+    )
+    by_device = {}
+    for e in ordered:
+        dev = e.get("device") or e.get("mount")
+        if dev in by_device:
+            if e.get("removable"):
+                by_device[dev]["removable"] = True
+            continue
+        by_device[dev] = e
+    mounts = list(by_device.values())
 
     snap = {
         "drives": mounts,
         "count": len(mounts),
+        "os_disk": os_disk,
         "snapshot_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     _drives_cache["snap"] = snap
