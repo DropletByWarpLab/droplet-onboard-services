@@ -691,7 +691,13 @@ export function wholeDiskName(devicePath: string): string {
   if (mmc) return mmc[1];
   const sd = tail.match(/^((?:sd|vd)[a-z]+)\d*$/);
   if (sd) return sd[1];
-  return tail;
+  // Unrecognised shape (loop*, md*, dm-*, mapper names, …): NOT a whole disk
+  // the adopt route / host wipe script can act on. Return "" per the contract
+  // above — every caller treats falsy as "skip / no-op" (the adopt picker
+  // bails, the Danger-zone reformat guard excludes it). Never leak the raw
+  // tail: a truthy non-disk name lets these slip into a wipe flow and 400 at
+  // the server instead of being filtered out up front.
+  return "";
 }
 
 /** Calm, honest copy for an adopt failure. The OS-disk refusal is the one we

@@ -145,6 +145,83 @@ describe("DangerZoneSection (WARP-828)", () => {
     expect(labels.join(" ")).not.toMatch(/boot|sda1/i);
   });
 
+  it("drops non-whole-disk shapes (loop / md / dm) even with a uuid + size + data mount", async () => {
+    // Regression (rjouffret): loop0 / md0 / dm-0 are NOT whole disks the host
+    // wipe script can reformat. They can carry a real FS uuid, a non-trivial
+    // size, and a /mnt data mount, so they sail past every OTHER guard — the
+    // only thing that must exclude them is wholeDiskName() returning falsy for
+    // an unrecognised shape. If that contract leaks the raw tail, these appear
+    // in the picker and a selection 400s server-side instead of being excluded
+    // up front. One real drive is mixed in to prove the filter is selective,
+    // not a blanket "hide everything".
+    fetchDrives.mockResolvedValueOnce({
+      drives: [
+        {
+          device: "/dev/sdb",
+          mount: "/mnt/droplet/wedding",
+          label: "TOSHIBA",
+          uuid: "U-WED",
+          size_bytes: 2_000_000_000_000,
+          used_bytes: 1e11,
+          free_bytes: 1.9e12,
+          mounted: true,
+          displayName: "Wedding Photos",
+          removable: true,
+        },
+        {
+          device: "/dev/loop0",
+          mount: "/mnt/droplet/loopback",
+          label: "LOOP",
+          uuid: "U-LOOP",
+          size_bytes: 8_000_000_000,
+          used_bytes: 0,
+          free_bytes: 8e9,
+          mounted: true,
+          displayName: "Loopback",
+          removable: false,
+        },
+        {
+          device: "/dev/md0",
+          mount: "/mnt/droplet/raid",
+          label: "RAID",
+          uuid: "U-MD",
+          size_bytes: 4_000_000_000_000,
+          used_bytes: 0,
+          free_bytes: 4e12,
+          mounted: true,
+          displayName: "Raid Array",
+          removable: false,
+        },
+        {
+          device: "/dev/dm-0",
+          mount: "/mnt/droplet/mapper",
+          label: "MAPPER",
+          uuid: "U-DM",
+          size_bytes: 1_000_000_000_000,
+          used_bytes: 0,
+          free_bytes: 1e12,
+          mounted: true,
+          displayName: "Mapped Volume",
+          removable: false,
+        },
+      ],
+      count: 4,
+    });
+
+    render(<DangerZoneSection />);
+    const picker = await screen.findByLabelText(/choose a drive/i);
+    const labels = within(picker)
+      .getAllByRole("option")
+      .map((o) => o.textContent ?? "")
+      .join(" ");
+    // The one genuine whole disk survives…
+    expect(labels).toMatch(/wedding photos/i);
+    // …and none of the non-whole-disk shapes are offered for a reformat.
+    expect(labels).not.toMatch(/loopback|loop0/i);
+    expect(labels).not.toMatch(/raid array|md0/i);
+    expect(labels).not.toMatch(/mapped volume|dm-0/i);
+  });
+
   it("shows the blunt consequence for the chosen drive", async () => {
     render(<DangerZoneSection />);
     const picker = await screen.findByLabelText(/choose a drive/i);
