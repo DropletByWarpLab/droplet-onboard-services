@@ -10,11 +10,19 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, within } from "@testing-library/react";
-import type { ToolCatalogEntry } from "@/lib/types";
+import { PENDING_COMPOSER_KEY, type ToolCatalogEntry, type PendingComposerPayload } from "@/lib/types";
 
 const useToolCatalogMock = vi.fn();
 vi.mock("@/lib/hooks/useToolCatalog", () => ({
   useToolCatalog: () => useToolCatalogMock(),
+}));
+
+// WARP-829: the "Use in chat" affordance writes a sessionStorage payload then
+// routes to /chat. Mock the router so we can assert the push without a real
+// app-router context.
+const pushMock = vi.fn();
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: pushMock }),
 }));
 
 import ToolsPage from "./page";
@@ -58,6 +66,8 @@ function ready(tools: ToolCatalogEntry[]) {
 
 beforeEach(() => {
   useToolCatalogMock.mockReset();
+  pushMock.mockReset();
+  window.sessionStorage.clear();
 });
 
 describe("<ToolsPage /> (WARP-555)", () => {
@@ -154,5 +164,69 @@ describe("<ToolsPage /> (WARP-555)", () => {
     const { container } = render(<ToolsPage />);
     // 4 tools across 2 domains — the count copy mentions 4.
     expect(within(container).getByText(/4 tools/i)).toBeInTheDocument();
+  });
+});
+
+// ── WARP-829: "Use in chat" primes the composer (seed-not-send) ──
+
+describe("<ToolsPage /> use-in-chat (WARP-829)", () => {
+  it("renders a 'Use in chat' control per tool, labelled with the tool", () => {
+    ready(SAMPLE);
+    render(<ToolsPage />);
+    // One actionable control per tool, named so screen readers announce the tool.
+    const action = screen.getByRole("button", {
+      name: /use list network devices in chat/i,
+    });
+    expect(action).toBeInTheDocument();
+  });
+
+  it("keeps the Writes / Asks-first badges alongside the action", () => {
+    ready(SAMPLE);
+    render(<ToolsPage />);
+    // block_network_device has both flags — badges must still render.
+    expect(screen.getAllByText(/writes/i).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText(/asks first/i).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("writes the pending-composer payload and routes to /chat on activate", () => {
+    ready(SAMPLE);
+    render(<ToolsPage />);
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: /use block network device in chat/i,
+      }),
+    );
+
+    const raw = window.sessionStorage.getItem(PENDING_COMPOSER_KEY);
+    expect(raw).not.toBeNull();
+    const payload = JSON.parse(raw!) as PendingComposerPayload;
+    expect(payload.kind).toBe("tool");
+    expect(payload.toolName).toBe("block_network_device");
+    expect(payload.label).toBe("Block network device");
+    expect(payload.requiresWrite).toBe(true);
+    expect(payload.requiresConfirmation).toBe(true);
+    // A non-empty plain-language starter line for the user to edit.
+    expect(payload.seedText.length).toBeGreaterThan(0);
+
+    expect(pushMock).toHaveBeenCalledWith("/chat");
+  });
+
+  it("carries each tool's own identity + safety flags in the payload", () => {
+    ready(SAMPLE);
+    render(<ToolsPage />);
+
+    // A read-only tool: both flags false.
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: /use list network devices in chat/i,
+      }),
+    );
+    const payload = JSON.parse(
+      window.sessionStorage.getItem(PENDING_COMPOSER_KEY)!,
+    ) as PendingComposerPayload;
+    expect(payload.toolName).toBe("list_network_devices");
+    expect(payload.requiresWrite).toBe(false);
+    expect(payload.requiresConfirmation).toBe(false);
   });
 });

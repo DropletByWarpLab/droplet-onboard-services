@@ -9,12 +9,17 @@
  * tools in `packages/tools-core` are registered but had no place to be
  * seen.
  *
- * Scope (v1): a catalog, not a console. There is intentionally NO
- * run-from-dashboard button here — executing a tool outside a chat turn
- * is a separate safety decision (RBAC + confirmation + audit), tracked
- * apart from this surface. The productized workflow shelf (Live / Drafts
- * / Suggested, FEATURES.md §2.8, backed by `/api/tools`) is also a
- * distinct concept from this capability catalog.
+ * Scope: a catalog, not a console. There is still intentionally NO
+ * run-from-dashboard path — executing a tool outside a chat turn is a
+ * separate safety decision (RBAC + confirmation + audit), tracked apart
+ * from this surface. WARP-829 makes each card actionable in a SEED-not-run
+ * sense: picking a tool primes the chat composer (via the one-shot
+ * `droplet.pendingComposer` sessionStorage payload) and pins a chip naming
+ * the tool — it never dispatches anything. The tool only runs when the user
+ * sends and the model invokes it through the orchestrator's confirmation
+ * gate. The productized workflow shelf (Live / Drafts / Suggested,
+ * FEATURES.md §2.8, backed by `/api/tools`) is a distinct concept from this
+ * capability catalog.
  *
  * Data: `useToolCatalog` → `GET /api/llm/tools/catalog`, which reads the
  * in-process tools-core registry and RBAC-filters write tools for
@@ -23,16 +28,39 @@
  */
 
 import { useMemo, useState } from "react";
-import { Pencil, Search, ShieldCheck, Wrench, XCircle } from "lucide-react";
+import { useRouter } from "next/navigation";
+import {
+  ArrowRight,
+  Pencil,
+  Search,
+  ShieldCheck,
+  Wrench,
+  XCircle,
+} from "lucide-react";
 import { Topbar } from "@/components/Topbar";
 import { useToolCatalog } from "@/lib/hooks/useToolCatalog";
 import { iconForDomain, labelForDomain } from "@/lib/tool-domains";
-import type { ToolCatalogEntry } from "@/lib/types";
+import {
+  PENDING_COMPOSER_KEY,
+  type PendingComposerPayload,
+  type ToolCatalogEntry,
+} from "@/lib/types";
 
 /** snake_case tool name → human title: `list_network_devices` → "List network devices". */
 function humanizeToolName(name: string): string {
   const spaced = name.replace(/_/g, " ").trim();
   return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}
+
+/**
+ * WARP-829 — the starter line dropped into the chat composer when a tool is
+ * picked from this catalog. Plain language, lower-case lead, no trailing
+ * punctuation (the user finishes the sentence). It does NOT name the raw
+ * tool — the home-user persona (ADR-002) asks the assistant in their own
+ * words; the pinned chip carries the precise tool identity for the model.
+ */
+function seedTextForTool(tool: ToolCatalogEntry): string {
+  return `Using ${labelForDomain(tool.domain).toLowerCase()}, `;
 }
 
 const ALL = "__all__";
@@ -194,8 +222,8 @@ export default function ToolsPage() {
           <h1 className="type-title-2 text-label-primary">Tools</h1>
           <p className="type-subheadline text-label-tertiary mt-1 max-w-2xl">
             Everything your Droplet’s assistant can do for you. Browse by
-            area or search by name. Tools run when you ask in a chat —
-            this page is just the catalog.
+            area or search by name, then pick a tool to start a chat about
+            it. Nothing runs until you send your message.
           </p>
         </div>
 
@@ -336,11 +364,80 @@ function FilterChip({
 }
 
 function ToolCard({ tool }: { tool: ToolCatalogEntry }) {
+  const router = useRouter();
+  const title = humanizeToolName(tool.name);
+
+  // WARP-829: picking a tool primes the chat composer — it never runs the
+  // tool. We write a one-shot seed-not-send payload to sessionStorage and
+  // route to /chat, which seeds the composer and pins a "acting on <tool>"
+  // chip. The tool only executes later, when the user sends and the model
+  // invokes it through the orchestrator's confirmation gate.
+  const useInChat = () => {
+    const payload: PendingComposerPayload = {
+      kind: "tool",
+      toolName: tool.name,
+      label: title,
+      requiresWrite: tool.requiresWrite,
+      requiresConfirmation: tool.requiresConfirmation,
+      seedText: seedTextForTool(tool),
+    };
+    try {
+      window.sessionStorage.setItem(PENDING_COMPOSER_KEY, JSON.stringify(payload));
+    } catch {
+      // Private-mode / quota — fall through to the navigation so the user
+      // still lands on chat; they just type the request themselves.
+    }
+    router.push("/chat");
+  };
+
+  // The whole card is the action: one tab stop, the largest possible hit
+  // target, and Enter/Space activation come free from the native <button>.
+  // The badges inside are non-interactive status, not nested controls.
   return (
-    <div className="dp-card p-4 flex flex-col gap-2 h-full">
-      <h3 className="type-subheadline text-label-primary font-medium">
-        {humanizeToolName(tool.name)}
-      </h3>
+    <button
+      type="button"
+      onClick={useInChat}
+      aria-label={`Use ${title} in chat`}
+      className="
+        dp-card group p-4 flex flex-col gap-2 h-full w-full text-left
+        cursor-pointer
+        transition-[border-color,box-shadow,transform] duration-200 ease-smooth
+        hover:border-accent/40 hover:shadow-md
+        focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
+        active:scale-[0.99]
+      "
+    >
+      <div className="flex items-start justify-between gap-2">
+        <h3 className="type-subheadline text-label-primary font-medium">
+          {title}
+        </h3>
+        {/* Affordance cue — the "Use in chat" label is always faintly present
+            so touch users (no hover) still see the card leads to chat; it
+            strengthens on hover/focus. No second tab stop — the whole card is
+            the button. */}
+        <span
+          className="
+            inline-flex items-center gap-1 type-caption-2 text-accent shrink-0
+            opacity-70
+            transition-opacity duration-200 ease-smooth
+            group-hover:opacity-100
+            group-focus-visible:opacity-100
+          "
+          aria-hidden
+        >
+          Use in chat
+          <ArrowRight
+            size={12}
+            strokeWidth={2.5}
+            className="
+              -translate-x-0.5
+              transition-transform duration-200 ease-smooth
+              group-hover:translate-x-0
+              group-focus-visible:translate-x-0
+            "
+          />
+        </span>
+      </div>
       {/* label-primary (not secondary): the home description is the card's
           primary content, and the shipped --color-label-secondary token sits
           at 3.44:1 on a white card — under WCAG AA for 13px text. Title still
@@ -373,7 +470,7 @@ function ToolCard({ tool }: { tool: ToolCatalogEntry }) {
           )}
         </div>
       )}
-    </div>
+    </button>
   );
 }
 
