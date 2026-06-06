@@ -331,4 +331,47 @@ describe("InternetStep — Home Wi-Fi is optional/skippable (WARP-809)", () => {
     fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
     expect(onSkip).toHaveBeenCalledTimes(1);
   });
+
+  it("surfaces the AP's actionable reason (red alert) when a Wi-Fi write is refused with a 4xx validation error", async () => {
+    // The single-box hostapd write goes through the device-bridge; a host-script
+    // validation refusal comes back as a 4xx RouterStatusError carrying an
+    // actionable message (the AP rejecting an out-of-range SSID/PSK, a control
+    // char, etc.). Unlike an opaque 5xx / ROLLED_BACK (calm "do it later"
+    // notice) or an unreachable router (503), a 4xx is user-fixable NOW — the
+    // specific reason must surface as a red alert, not be swallowed by the
+    // generic "couldn't set it up" notice.
+    setWifiSsid.mockResolvedValueOnce({ status: "ok" });
+    setWifiPassword.mockRejectedValueOnce(
+      new RouterStatusError(
+        "UNKNOWN",
+        "Wi-Fi password must be 8-63 characters.",
+        422,
+      ),
+    );
+    const onComplete = vi.fn();
+    render(<InternetStep onComplete={onComplete} onSkip={vi.fn()} />);
+    await waitFor(() => expect(saveCta()).toBeEnabled());
+
+    fireEvent.click(wifiExpander());
+    fireEvent.change(ssidInput()!, { target: { value: "Studio Fotonia" } });
+    fireEvent.change(screen.getByPlaceholderText(/wi-fi password/i), {
+      target: { value: "supersecret" },
+    });
+    fireEvent.click(saveCta());
+
+    // The actionable reason is shown as a hard error (role=alert), verbatim.
+    const err = await screen.findByText(
+      /wi-fi password must be 8-63 characters/i,
+    );
+    expect(err).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      /wi-fi password must be 8-63 characters/i,
+    );
+    // It is NOT mislabeled as the generic calm "couldn't set it up" notice.
+    expect(
+      screen.queryByText(/couldn.t set up the droplet.s wi-?fi right now/i),
+    ).not.toBeInTheDocument();
+    // And the step did not advance.
+    expect(onComplete).not.toHaveBeenCalled();
+  });
 });
