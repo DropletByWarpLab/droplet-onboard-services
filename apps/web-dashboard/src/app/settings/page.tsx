@@ -7,6 +7,7 @@ import { ThemeToggle } from "@/components/ThemeToggle";
 import { ProviderKeyForm } from "@/components/ProviderKeyForm";
 import { PasskeysSection } from "@/components/settings/PasskeysSection";
 import { EmailChannelSection } from "@/components/settings/EmailChannelSection";
+import { DangerZoneSection } from "@/components/settings/DangerZoneSection";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
 import { validatePassword, isValidEmail } from "@droplet/auth-policy";
@@ -325,6 +326,11 @@ export default function SettingsPage() {
           />
         </div>
       </section>
+
+      {/* Danger zone (WARP-828) — owner-only home for irreversible device
+          actions; the section self-gates to the owner role internally. Placed
+          last so the destructive action sits apart from routine settings. */}
+      <DangerZoneSection />
 
       <ConfirmDialog
         open={deleteUserTarget !== null}

@@ -818,6 +818,43 @@ export async function confirmPoolCommand(input: {
 }
 
 /**
+ * WARP-828 — the Settings "Danger zone" reformat-a-drive entry points.
+ *
+ * These are the AC-named, typed aliases for the two-step destructive flow the
+ * pool/adopt UI already uses. They wrap the same orchestrator routes
+ * (`POST /api/storage/drives/adopt` → 202 token, then
+ * `POST /api/storage/command/confirm`) so there is ONE wire path and one place
+ * the contract lives; the Danger zone calls these by their intent-named handles
+ * rather than the pool-flavoured originals.
+ */
+
+/** Step 1: request a confirm token to wipe + reformat + mount a whole disk.
+ *  `device` is the WHOLE-disk kernel name ("sdb" / "nvme0n1"), never a
+ *  partition — derive it from a DriveInfo with `wholeDiskName()`. Returns 202 +
+ *  a single-use token; nothing is erased until {@link confirmStorageCommand}.
+ *  Owner/admin only + OS-disk refusal are enforced server-side. */
+export async function adoptDrive(input: {
+  device: string;
+  wipeMethod: "quick" | "secure";
+  fstype?: string;
+  label?: string;
+  confirmPhrase: string;
+}): Promise<PoolCommandToken> {
+  return requestAdoptDrive(input);
+}
+
+/** Step 2: confirm + execute a queued destructive storage op. MUST echo the
+ *  `service` + `resourceId` from the minted token (the server refuses a
+ *  mismatch). Owner/admin only, enforced server-side. */
+export async function confirmStorageCommand(input: {
+  confirmationToken: string;
+  service: string;
+  resourceId: string;
+}): Promise<{ ok: boolean; error?: string }> {
+  return confirmPoolCommand(input);
+}
+
+/**
  * WARP-612: ask the device-bridge to refresh its drive snapshot (admin-only;
  * proxies the bridge's /drives/changed cache hook — no mount side effects).
  */
