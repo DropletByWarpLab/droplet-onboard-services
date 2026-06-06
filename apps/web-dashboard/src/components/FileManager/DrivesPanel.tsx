@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import Link from "next/link";
 import {
   HardDrive,
   Usb,
@@ -10,15 +9,10 @@ import {
   Layers,
   AlertTriangle,
   Loader2,
-  Pencil,
-  Check,
-  X,
-  FolderOpen,
 } from "lucide-react";
 import { useDrives } from "@/lib/hooks/useDrives";
 import { usePools } from "@/lib/hooks/usePools";
-import { ejectDrive, rescanDrives, updateDriveLabel } from "@/lib/api";
-import { useAuth } from "@/lib/auth";
+import { ejectDrive, rescanDrives } from "@/lib/api";
 import { useToast } from "@/components/Toast";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { translateError } from "@/lib/friendly-errors";
@@ -41,32 +35,12 @@ function fmtBytes(bytes: number): string {
 
 // Customer-facing name: friendly displayName, then FS label, then the mount
 // tail — never the raw device path, since the target user is non-technical.
-// `override` lets the card show an optimistic just-typed name before the
-// hook's data refetches.
-function driveName(d: DriveInfo, override?: string | null): string {
+function driveName(d: DriveInfo): string {
   const tail = d.mount.split("/").filter(Boolean).pop() ?? "";
-  const raw = (override || d.displayName || d.label || tail)
-    .replace(/[-_]+/g, " ")
-    .trim();
+  const raw = (d.displayName || d.label || tail).replace(/[-_]+/g, " ").trim();
   if (!raw) return "Drive";
   return raw.replace(/\b([a-z])/g, (c) => c.toUpperCase());
 }
-
-// WARP-827: the auto-mounter registers each drive as a Nextcloud external
-// storage mount at `/<mount-tail>` (services/automount/droplet-automount.sh →
-// `files_external:create "/$NAME"`), where the tail equals the host mount's
-// last path segment. So the drive's contents are browsable in the existing
-// Nextcloud-backed file browser at that path — we deep-link there (reuse, no
-// new endpoint). The FilesPage reads `?path=` on mount.
-function driveContentsHref(d: DriveInfo): string {
-  const tail = d.mount.split("/").filter(Boolean).pop() ?? "";
-  const ncPath = `/${tail}`;
-  return `/files?path=${encodeURIComponent(ncPath)}`;
-}
-
-// Customer-chosen drive names are 1–64 chars, trimmed, non-empty — mirrors the
-// orchestrator's updateDriveSchema (z.string().trim().min(1).max(64)).
-const DRIVE_NAME_MAX = 64;
 
 function usagePct(d: DriveInfo): number {
   if (!d.size_bytes) return 0;
@@ -118,11 +92,6 @@ export function DrivesPanel() {
   // "pooled storage" fiction. Pools are OPTIONAL — `pools` is [] when none.
   const { pools, refresh: refreshPools } = usePools();
   const { toast } = useToast();
-  // WARP-827: renaming a drive writes a device-wide label (PATCH is admin-only
-  // server-side); gate the edit affordance on the same roles so non-admins
-  // don't see a control that would 403. Mirrors isAdmin() in storage.ts.
-  const { user } = useAuth();
-  const isAdmin = user?.role === "owner" || user?.role === "admin";
   const [rescanning, setRescanning] = useState(false);
   const [ejectTarget, setEjectTarget] = useState<DriveInfo | null>(null);
   const [ejecting, setEjecting] = useState<string | null>(null);
@@ -260,16 +229,94 @@ export function DrivesPanel() {
           role="list"
           aria-label="Mounted drives"
         >
-          {drives.map((d) => (
-            <DriveCard
-              key={d.uuid || d.mount || d.device}
-              drive={d}
-              isAdmin={isAdmin}
-              ejecting={ejecting === d.uuid}
-              onEject={() => setEjectTarget(d)}
-              onRenamed={() => refresh()}
-            />
-          ))}
+          {drives.map((d) => {
+          const p = usagePct(d);
+          const st = statusOf(d);
+          return (
+            <div key={d.uuid || d.mount || d.device} role="listitem" className="dp-card p-4">
+              <div className="flex items-start gap-3">
+                <span className="flex-none h-10 w-10 rounded-[10px] bg-surface-secondary text-label-secondary flex items-center justify-center">
+                  <BusIcon bus={d.bus} className="h-5 w-5" />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <h3 className="type-headline text-label-primary truncate" title={driveName(d)}>
+                      {driveName(d)}
+                    </h3>
+                    <span className="flex-none type-caption-2 uppercase tracking-wide px-1.5 py-0.5 rounded border border-separator text-label-tertiary">
+                      {busLabel(d.bus)}
+                    </span>
+                  </div>
+                  <p className="type-caption-1 font-mono text-label-tertiary truncate" title={d.mount}>
+                    {d.mount}
+                  </p>
+                </div>
+                <span className={`flex-none type-caption-2 px-2 py-0.5 rounded-full ${st.cls}`}>
+                  {st.label}
+                </span>
+              </div>
+
+              <div className="mt-3">
+                <div className="flex items-baseline justify-between type-caption-1 tabular-nums mb-1">
+                  <span className="text-label-secondary">
+                    <span className="text-label-primary">{fmtBytes(d.used_bytes)}</span> of{" "}
+                    {fmtBytes(d.size_bytes)}
+                  </span>
+                  <span className="text-label-tertiary">{fmtBytes(d.free_bytes)} free</span>
+                </div>
+                <div className="h-1.5 rounded-full overflow-hidden bg-surface-secondary">
+                  <div
+                    className="h-full rounded-full transition-all duration-700"
+                    style={{ width: `${Math.max(2, p)}%`, background: barColor(p) }}
+                  />
+                </div>
+              </div>
+
+              <div className="mt-3 flex items-center gap-2 flex-wrap type-caption-2">
+                <span className="font-mono px-1.5 py-0.5 rounded border border-separator text-label-tertiary">
+                  {d.device}
+                </span>
+                {d.fs && (
+                  <span className="uppercase px-1.5 py-0.5 rounded border border-separator text-label-tertiary">
+                    {d.fs}
+                  </span>
+                )}
+                {typeof d.temp_c === "number" && (
+                  <span className="px-1.5 py-0.5 rounded border border-separator text-label-tertiary tabular-nums">
+                    {d.temp_c}°C
+                  </span>
+                )}
+                {d.smart && (
+                  <span
+                    className={`px-1.5 py-0.5 rounded ${
+                      d.smart === "PASSED"
+                        ? "bg-system-green/10 text-system-green"
+                        : "bg-system-red/10 text-system-red"
+                    }`}
+                  >
+                    SMART {d.smart}
+                  </span>
+                )}
+              </div>
+
+              {d.notes && (
+                <p className="mt-2 type-caption-1 text-label-tertiary">{d.notes}</p>
+              )}
+
+              {d.removable && d.mounted && (
+                <div className="mt-3 pt-3 border-t border-separator flex justify-end">
+                  <button
+                    onClick={() => setEjectTarget(d)}
+                    disabled={ejecting === d.uuid}
+                    className="dp-btn-secondary type-caption-1 px-2.5 h-8 rounded-md"
+                  >
+                    {ejecting === d.uuid ? "Ejecting…" : "Eject"}
+                  </button>
+                </div>
+              )}
+            </div>
+          );
+        })}
         </div>
       </div>
 
@@ -282,208 +329,6 @@ export function DrivesPanel() {
         confirmLabel="Eject"
         variant="destructive"
       />
-    </div>
-  );
-}
-
-/**
- * One drive card. Read by everyone; admins additionally get an inline rename
- * (WARP-827) wired to the existing PATCH /api/storage/drives/:uuid via
- * updateDriveLabel(). The friendly name is applied optimistically and rolled
- * back if the save fails. Clicking the card title deep-links into the existing
- * file browser scoped to this drive — never a new endpoint. The raw /dev/sdX
- * path is intentionally NOT shown (home-user persona, ADR-002).
- */
-function DriveCard({
-  drive: d,
-  isAdmin,
-  ejecting,
-  onEject,
-  onRenamed,
-}: {
-  drive: DriveInfo;
-  isAdmin: boolean;
-  ejecting: boolean;
-  onEject: () => void;
-  onRenamed: () => void;
-}) {
-  const { toast } = useToast();
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState("");
-  const [saving, setSaving] = useState(false);
-  // Optimistic display name — set on a successful (or in-flight) save so the
-  // card shows the new name before the drives list refetches; rolled back on
-  // failure.
-  const [optimisticName, setOptimisticName] = useState<string | null>(null);
-
-  const p = usagePct(d);
-  const st = statusOf(d);
-  const name = driveName(d, optimisticName);
-  const trimmed = draft.trim();
-  const valid = trimmed.length >= 1 && trimmed.length <= DRIVE_NAME_MAX;
-
-  function beginEdit() {
-    // Seed the field with the current friendly name (without the raw fallbacks
-    // that aren't user-set) so a rename edits rather than starts blank.
-    setDraft(optimisticName || d.displayName || "");
-    setEditing(true);
-  }
-
-  function cancelEdit() {
-    setEditing(false);
-    setDraft("");
-  }
-
-  async function save() {
-    if (!valid || saving) return;
-    const previous = optimisticName;
-    setOptimisticName(trimmed); // optimistic
-    setSaving(true);
-    setEditing(false);
-    try {
-      await updateDriveLabel(d.uuid, { displayName: trimmed });
-      onRenamed(); // refetch so the persisted name replaces the optimistic one
-    } catch (err) {
-      setOptimisticName(previous); // roll back
-      toast(translateError(err, "files"), "error");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div role="listitem" className="dp-card p-4">
-      <div className="flex items-start gap-3">
-        <span className="flex-none h-10 w-10 rounded-[10px] bg-surface-secondary text-label-secondary flex items-center justify-center">
-          <BusIcon bus={d.bus} className="h-5 w-5" />
-        </span>
-        <div className="min-w-0 flex-1">
-          {editing ? (
-            <div className="flex items-center gap-1.5">
-              <input
-                autoFocus
-                aria-label="Drive name"
-                value={draft}
-                maxLength={DRIVE_NAME_MAX}
-                onChange={(e) => setDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") save();
-                  if (e.key === "Escape") cancelEdit();
-                }}
-                className="dp-input !py-1.5 !px-2.5 type-subheadline min-w-0 flex-1"
-                placeholder="Drive name"
-              />
-              <button
-                onClick={save}
-                disabled={!valid || saving}
-                aria-label="Save"
-                className="flex-none inline-flex items-center justify-center h-11 w-11 rounded-md text-accent hover:bg-accent-subtle disabled:opacity-40 transition-colors duration-150"
-              >
-                <Check className="h-4 w-4" />
-              </button>
-              <button
-                onClick={cancelEdit}
-                aria-label="Cancel"
-                className="flex-none inline-flex items-center justify-center h-11 w-11 rounded-md text-label-tertiary hover:bg-surface-secondary transition-colors duration-150"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-          ) : (
-            <div className="flex items-center gap-2">
-              <Link
-                href={driveContentsHref(d)}
-                className="min-w-0 inline-flex items-center gap-1 group"
-                aria-label={`Open ${name}`}
-              >
-                <h3
-                  className="type-headline text-label-primary truncate group-hover:text-accent transition-colors duration-150"
-                  title={name}
-                >
-                  {name}
-                </h3>
-                <FolderOpen className="flex-none h-3.5 w-3.5 text-label-quaternary group-hover:text-accent transition-colors duration-150" />
-              </Link>
-              <span className="flex-none type-caption-2 uppercase tracking-wide px-1.5 py-0.5 rounded border border-separator text-label-tertiary">
-                {busLabel(d.bus)}
-              </span>
-              {isAdmin && (
-                <button
-                  onClick={beginEdit}
-                  aria-label="Rename"
-                  className="flex-none ml-auto inline-flex items-center justify-center h-11 w-11 -my-2.5 -mr-2.5 rounded-md text-label-tertiary hover:text-accent hover:bg-accent-subtle transition-colors duration-150"
-                >
-                  <Pencil className="h-4 w-4" />
-                </button>
-              )}
-            </div>
-          )}
-        </div>
-        {!editing && (
-          <span className={`flex-none type-caption-2 px-2 py-0.5 rounded-full ${st.cls}`}>
-            {st.label}
-          </span>
-        )}
-      </div>
-
-      <div className="mt-4">
-        <div className="flex items-baseline justify-between type-caption-1 tabular-nums mb-1.5">
-          <span className="text-label-secondary">
-            <span className="text-label-primary">{fmtBytes(d.used_bytes)}</span> of{" "}
-            {fmtBytes(d.size_bytes)}
-          </span>
-          <span className="text-label-tertiary">{fmtBytes(d.free_bytes)} free</span>
-        </div>
-        <div className="h-1.5 rounded-full overflow-hidden bg-surface-secondary">
-          <div
-            className="h-full rounded-full transition-all duration-700"
-            style={{ width: `${Math.max(2, p)}%`, background: barColor(p) }}
-          />
-        </div>
-      </div>
-
-      {/* Hardware facts — friendly only. The raw /dev/sdX path is deliberately
-          never surfaced (home-user persona, ADR-002); the bus label above is
-          the only hardware identifier we show. */}
-      {(d.fs || typeof d.temp_c === "number" || d.smart) && (
-        <div className="mt-3 flex items-center gap-2 flex-wrap type-caption-2">
-          {d.fs && (
-            <span className="uppercase px-1.5 py-0.5 rounded border border-separator text-label-tertiary">
-              {d.fs}
-            </span>
-          )}
-          {typeof d.temp_c === "number" && (
-            <span className="px-1.5 py-0.5 rounded border border-separator text-label-tertiary tabular-nums">
-              {d.temp_c}°C
-            </span>
-          )}
-          {d.smart && (
-            <span
-              className={`px-1.5 py-0.5 rounded ${
-                d.smart === "PASSED"
-                  ? "bg-system-green/10 text-system-green"
-                  : "bg-system-red/10 text-system-red"
-              }`}
-            >
-              SMART {d.smart}
-            </span>
-          )}
-        </div>
-      )}
-
-      {d.notes && <p className="mt-2 type-caption-1 text-label-tertiary">{d.notes}</p>}
-
-      {d.removable && d.mounted && (
-        <div className="mt-4 pt-3 border-t border-separator flex justify-end">
-          <button
-            onClick={onEject}
-            disabled={ejecting}
-            className="dp-btn-secondary type-subheadline px-4 rounded-md disabled:opacity-60"
-          >
-            {ejecting ? "Ejecting…" : "Eject"}
-          </button>
-        </div>
-      )}
     </div>
   );
 }

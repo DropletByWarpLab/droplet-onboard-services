@@ -10,9 +10,16 @@ const { useDrivesMock, usePoolsMock, toastMock } = vi.hoisted(() => ({
 vi.mock("@/components/Toast", () => ({ useToast: () => ({ toast: toastMock }) }));
 vi.mock("@/lib/hooks/useDrives", () => ({ useDrives: useDrivesMock }));
 vi.mock("@/lib/hooks/usePools", () => ({ usePools: usePoolsMock }));
+// WARP-827: DrivesPanel now reads useAuth() (admin gate for inline rename) and
+// updateDriveLabel(); mock both so this pools-focused suite renders without an
+// AuthProvider. Default to an admin so the card structure is fully exercised.
+vi.mock("@/lib/auth", () => ({
+  useAuth: () => ({ user: { id: "u1", username: "u", displayName: "U", role: "owner" } }),
+}));
 vi.mock("@/lib/api", () => ({
   ejectDrive: vi.fn(),
   rescanDrives: vi.fn(),
+  updateDriveLabel: vi.fn(),
 }));
 
 import { DrivesPanel } from "@/components/FileManager/DrivesPanel";
