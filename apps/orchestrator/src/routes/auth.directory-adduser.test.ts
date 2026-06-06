@@ -291,4 +291,49 @@ describe("POST /api/auth/users — email-based user creation with derived userid
     expect(row.passwordHash).toMatch(/^\$argon2id\$/);
     expect(JSON.stringify(row)).not.toContain("Kid-secret123");
   });
+
+  // ── WARP-824: temp-password / forced-change-on-first-login flag ──
+  // The admin types a temp password and (by default) requires the new user
+  // to change it on first login. The create handler must persist the
+  // EXPLICIT `mustChangePassword` flag on the local row so the post-auth
+  // gate can force the change. Default ON: when the body omits the flag the
+  // row is created with mustChangePassword = true.
+  it("defaults mustChangePassword=true on the created row when the flag is omitted (temp password)", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma, "owner");
+
+    const res = await request(app)
+      .post("/api/auth/users")
+      .send({ email: "kid@warp.test", password: "Kid-secret123" });
+
+    expect(res.status).toBe(201);
+    const row = prisma._users.find((u: any) => u.email === "kid@warp.test");
+    expect(row.mustChangePassword).toBe(true);
+  });
+
+  it("honours mustChangePassword=false when the operator opts out of the forced change", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma, "owner");
+
+    const res = await request(app)
+      .post("/api/auth/users")
+      .send({ email: "kid@warp.test", password: "Kid-secret123", mustChangePassword: false });
+
+    expect(res.status).toBe(201);
+    const row = prisma._users.find((u: any) => u.email === "kid@warp.test");
+    expect(row.mustChangePassword).toBe(false);
+  });
+
+  it("persists mustChangePassword=true on an explicit opt-in too", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma, "owner");
+
+    const res = await request(app)
+      .post("/api/auth/users")
+      .send({ email: "kid@warp.test", password: "Kid-secret123", mustChangePassword: true });
+
+    expect(res.status).toBe(201);
+    const row = prisma._users.find((u: any) => u.email === "kid@warp.test");
+    expect(row.mustChangePassword).toBe(true);
+  });
 });

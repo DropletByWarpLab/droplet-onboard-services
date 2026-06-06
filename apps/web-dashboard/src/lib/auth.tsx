@@ -24,6 +24,13 @@ export interface AuthUser {
   // the type. WARP-279 added the field for the /admin/claude-activity
   // visibility check.
   role?: "owner" | "admin" | "family" | "guest";
+  // WARP-824: true when this user was created by an admin with a temporary
+  // password and must change it before reaching any other surface. /auth/login
+  // and /auth/me return it (me reads it fresh from the row). AuthGate routes a
+  // `true` user to /change-password; the orchestrator gate enforces it
+  // server-side regardless. Optional so a cached pre-WARP-824 profile is
+  // treated as "not gated".
+  mustChangePassword?: boolean;
 }
 
 /**
@@ -92,6 +99,12 @@ interface AuthContextValue {
   // of replaying the tour. Same awaitable/never-rejects contract as
   // completeSetup. No-op-safe if `setupState` hasn't resolved yet.
   completeTour: () => Promise<void>;
+  // WARP-824 — called by the forced-change screen after a successful password
+  // change. Optimistically flips the in-memory `user.mustChangePassword` to
+  // false so AuthGate releases the user into the dashboard without a second
+  // round-trip. The server already cleared the persisted flag, so a hard
+  // refresh re-reads false from /auth/me — the two agree.
+  markPasswordChanged: () => void;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -472,6 +485,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await patchTourCompleted();
   }, []);
 
+  // WARP-824 — flip the in-memory must-change flag false after a successful
+  // password change (the server already cleared the persisted flag). Also
+  // refresh the cached profile so a reload before the next /auth/me reflects
+  // the change. AuthGate's `forcePasswordChange` re-evaluates and releases the
+  // user into the dashboard.
+  const markPasswordChanged = useCallback(() => {
+    setUser((prev) => {
+      if (!prev) return prev;
+      const next = { ...prev, mustChangePassword: false };
+      try {
+        localStorage.setItem(USER_KEY, JSON.stringify(next));
+      } catch {
+        /* ignore — privacy mode, etc. */
+      }
+      return next;
+    });
+  }, []);
+
   // Back-compat: derive the legacy boolean from the explicit state so any
   // consumer still reading `setupRequired` keeps working during migration.
   const setupRequired: boolean | null =
@@ -502,6 +533,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         logout,
         completeSetup,
         completeTour,
+        markPasswordChanged,
       }}
     >
       {children}
