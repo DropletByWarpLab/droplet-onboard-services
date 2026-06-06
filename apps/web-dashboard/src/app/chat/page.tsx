@@ -5,8 +5,12 @@ import {
   ArrowDown,
   MessageSquare,
   PanelLeftOpen,
+  Pencil,
   RotateCcw,
   Settings2,
+  ShieldCheck,
+  Wrench,
+  X,
 } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ChatMessage } from "@/components/ChatMessage";
@@ -19,6 +23,7 @@ import { useChat } from "@/lib/hooks/useChat";
 import { useModels } from "@/lib/hooks/useModels";
 import { useStickyScroll } from "@/lib/hooks/useStickyScroll";
 import { useAuth } from "@/lib/auth";
+import { PENDING_COMPOSER_KEY, type PendingComposerPayload } from "@/lib/types";
 
 export default function ChatPage() {
   // WARP-331: history panel imperative handle + mobile drawer state.
@@ -121,6 +126,9 @@ export default function ChatPage() {
   const [selectedModel, setSelectedModel] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
   const [showSystemPrompt, setShowSystemPrompt] = useState(false);
+  // WARP-829: the tool the composer was primed for via the /tools "Use in
+  // chat" hand-off (null when the chat wasn't opened from a tool).
+  const [activeTool, setActiveTool] = useState<PendingComposerPayload | null>(null);
   // WARP-295: sticky-bottom auto-scroll + Jump-to-latest pill. The hook
   // owns the detach detection so the page just wires onScroll +
   // stickyScrollToBottom through.
@@ -169,6 +177,36 @@ export default function ChatPage() {
     sendMessage(pending, selectedModel, systemPrompt || undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedModel]);
+
+  // WARP-829: the /tools "Use in chat" hand-off. Unlike the hero pendingPrompt
+  // above (which auto-SENDS), this SEEDS the composer with a starter line and
+  // pins an "acting on <tool>" indicator — it never sends. Execution still
+  // requires the user to edit + submit, and any write/build the model then
+  // invokes still hits the in-chat confirmation gate. Consume once, on a fresh
+  // chat only (no `?c=` deep link, no existing messages); otherwise leave the
+  // payload untouched so a deep-linked / populated thread isn't hijacked.
+  useEffect(() => {
+    let payload: PendingComposerPayload | null = null;
+    try {
+      const raw = window.sessionStorage.getItem(PENDING_COMPOSER_KEY);
+      if (raw) payload = JSON.parse(raw) as PendingComposerPayload;
+    } catch {
+      payload = null;
+    }
+    if (!payload || payload.kind !== "tool") return;
+    if (urlConversationId || messages.length > 0) return;
+    // One-shot: clear before seeding so it can't resurface on a later mount.
+    try {
+      window.sessionStorage.removeItem(PENDING_COMPOSER_KEY);
+    } catch {
+      /* ignore */
+    }
+    setActiveTool(payload);
+    chatInputRef.current?.seed(payload.seedText);
+    // Mount-only: the fresh-chat guard reads the initial url/messages, matching
+    // the pendingPrompt effect's one-shot semantics.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // WARP-295: sticky auto-scroll. The hook scrolls only when the user is
   // attached (within ~80px of the bottom). When they've scrolled up to
@@ -463,6 +501,44 @@ export default function ChatPage() {
             </button>
           </div>
         ) : null}
+
+        {/* WARP-829: "Use in chat" hand-off indicator. The composer was seeded
+            for this tool; the user still edits + sends (no auto-run), and any
+            write/build the model invokes still hits the in-chat confirm gate. */}
+        {activeTool && (
+          <div className="px-4 pt-3">
+            <div
+              role="status"
+              className="flex items-center gap-2 flex-wrap rounded-lg border border-separator bg-surface-secondary px-3 py-2"
+            >
+              <Wrench size={14} className="flex-none text-accent" aria-hidden="true" />
+              <span className="type-footnote text-label-secondary">
+                Acting on{" "}
+                <span className="text-label-primary font-medium">{activeTool.label}</span>
+              </span>
+              {activeTool.requiresWrite && (
+                <span className="inline-flex items-center gap-1 h-6 px-2 rounded-full type-caption-2 font-medium text-label-primary bg-system-orange/15">
+                  <Pencil size={11} aria-hidden="true" className="text-system-orange" />
+                  Writes
+                </span>
+              )}
+              {activeTool.requiresConfirmation && (
+                <span className="inline-flex items-center gap-1 h-6 px-2 rounded-full type-caption-2 font-medium text-label-primary bg-system-blue/15">
+                  <ShieldCheck size={11} aria-hidden="true" className="text-system-blue" />
+                  Asks first
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={() => setActiveTool(null)}
+                aria-label="Dismiss tool"
+                className="ml-auto flex-none p-1 rounded-sm text-label-tertiary hover:text-label-primary hover:bg-surface-tertiary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 transition-colors"
+              >
+                <X size={14} aria-hidden="true" />
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Input */}
         <ChatInput
