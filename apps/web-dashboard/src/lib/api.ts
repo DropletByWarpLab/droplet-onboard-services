@@ -3270,3 +3270,38 @@ export async function fetchToolCatalog(): Promise<ToolCatalogResponse> {
   }
   return res.json();
 }
+
+// --- Diagnostics log bundle (WARP-823) ---
+
+export interface LogBundleOptions {
+  /** Look-back window in hours (1-168). Defaults server-side to 24. */
+  windowHours?: number;
+  /** Optional single-service filter. */
+  service?: string;
+}
+
+/**
+ * Download the secret-redacted diagnostics log bundle as a .zip Blob.
+ *
+ * POSTs to `/api/logs/bundle` (owner/admin only) and returns the archive bytes.
+ * The orchestrator redacts every secret value before the bytes leave the box;
+ * the caller just hands the Blob to the browser's download plumbing. On any
+ * non-2xx the bridge/route error message is surfaced for the friendly UI line —
+ * never a stack.
+ */
+export async function downloadLogBundle(
+  opts: LogBundleOptions = {},
+): Promise<Blob> {
+  const res = await authFetch(`${BASE}/api/logs/bundle`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(opts),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(
+      body.error || body.message || `Couldn't collect logs: ${res.status}`,
+    );
+  }
+  return res.blob();
+}

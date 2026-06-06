@@ -7,6 +7,7 @@ import { ThemeToggle } from "@/components/ThemeToggle";
 import { ProviderKeyForm } from "@/components/ProviderKeyForm";
 import { PasskeysSection } from "@/components/settings/PasskeysSection";
 import { EmailChannelSection } from "@/components/settings/EmailChannelSection";
+import { LogsSection } from "@/components/settings/LogsSection";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
 import { validatePassword, isValidEmail } from "@droplet/auth-policy";
@@ -281,6 +282,9 @@ export default function SettingsPage() {
           <InfoRow label="Uptime" value={health ? formatUptime(health.uptime) : "—"} />
         </div>
       </section>
+
+      {/* Diagnostics (WARP-823) — owner/admin downloadable, redacted log bundle. */}
+      <LogsSection />
 
       {/* AI Providers */}
       <section className="mb-10">
