@@ -32,7 +32,7 @@ from typing import List, Optional
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.responses import JSONResponse, FileResponse
 from starlette.middleware.base import BaseHTTPMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from PIL import Image, UnidentifiedImageError
 
 from display import TFTDisplay, SIM_OUTPUT, WIDTH, HEIGHT
@@ -167,6 +167,32 @@ class ClaimRequest(BaseModel):
         None, max_length=64, description="AP SSID for the readable creds line")
     wifi_psk: Optional[str] = Field(
         None, max_length=128, description="AP WPA2 passphrase for the readable creds line")
+
+    @model_validator(mode="after")
+    def _wifi_fields_all_or_nothing(self) -> "ClaimRequest":
+        """Reject a PARTIAL Wi-Fi block (WARP-819).
+
+        The three wifi_* fields are individually Optional only so a claim push
+        can omit the whole block (graceful degradation to the claim-only
+        layout). A partial block is a footgun: an ssid with no psk would render
+        a blank-password QR (`WIFI:T:WPA;S:Droplet;P:;;`) — an unjoinable,
+        named-but-open network, the same hazard the bridge boot-race guard
+        prevents. So all three must be present TOGETHER or none at all. An empty
+        string counts as absent: a present-but-empty psk is exactly the
+        blank-password case we must refuse, and the matrix must be non-empty to
+        paint anything.
+        """
+        present = (
+            bool(self.wifi_qr_matrix),       # non-empty matrix
+            bool(self.wifi_ssid),            # non-empty ssid
+            bool(self.wifi_psk),             # non-empty psk
+        )
+        if any(present) and not all(present):
+            raise ValueError(
+                "wifi_qr_matrix, wifi_ssid and wifi_psk must all be provided "
+                "together (and be non-empty) — a partial Wi-Fi block would "
+                "render a blank-password QR")
+        return self
 
 
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 MB

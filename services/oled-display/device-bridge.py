@@ -402,14 +402,37 @@ def hostapd_wifi_credentials():
         # value the attach script fed hostapd, so the displayed creds match the
         # live AP either way.
         key = AP_PSK or _read_persisted_psk()
-        return ({
-            "ssid": AP_SSID,
-            "key": key or "",
-            "encryption": "psk2",
-            "hidden": False,
-            "disabled": False,
-        }, None)
-    return _read_hostapd_conf_creds()
+        if key:
+            return ({
+                "ssid": AP_SSID,
+                "key": key,
+                "encryption": "psk2",
+                "hidden": False,
+                "disabled": False,
+            }, None)
+        # WARP-819 boot race: SSID is configured but neither the env nor the
+        # persisted 0600 file has the PSK yet (droplet-openwrt-attach hasn't run,
+        # or _read_persisted_psk() hit a PermissionError and swallowed it). Do
+        # NOT return key:"" — that renders an unscannable `WIFI:T:WPA;S:..;P:;;`
+        # QR a phone joins as a named-but-open network and then can't reach the
+        # box. Fall through to the live hostapd.conf (the value hostapd actually
+        # serves). _hostapd_conf_creds_or_error() rejects an empty-passphrase
+        # conf too, so the caller emits NO QR rather than a broken one.
+        return _hostapd_conf_creds_or_error()
+    return _hostapd_conf_creds_or_error()
+
+
+def _hostapd_conf_creds_or_error():
+    """Read hostapd.conf creds, rejecting an empty/missing passphrase.
+
+    Wraps _read_hostapd_conf_creds() so a parsed-but-keyless conf (an AP whose
+    wpa_passphrase line is empty, or a container still mid-boot) degrades to
+    (None, err) instead of leaking creds with key:"". The QR builder then emits
+    an error placeholder rather than an empty-passphrase QR (WARP-819)."""
+    creds, err = _read_hostapd_conf_creds()
+    if creds is not None and not creds.get("key"):
+        return None, "hostapd AP passphrase not available yet"
+    return creds, err
 
 
 def _hostapd_wifi_payload(ssid, key):

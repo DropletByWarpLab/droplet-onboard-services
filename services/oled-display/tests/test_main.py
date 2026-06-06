@@ -206,6 +206,90 @@ def test_claim_without_wifi_fields_still_ok(client: TestClient):
     assert not main.display._claim_wifi_qr_matrix
 
 
+# --- /display/claim partial-wifi is rejected (WARP-819) ---------------------
+# The wifi_* fields are individually Optional only so a claim push can omit the
+# whole block (graceful degradation). But a PARTIAL block — e.g. an ssid with no
+# psk — would render a blank-password QR (`WIFI:T:WPA;S:Droplet;P:;;`), the same
+# unjoinable network the boot-race guard prevents. So the request model rejects
+# any combination where some wifi_* are set and others are absent: all three
+# travel together or none do.
+
+def test_claim_rejects_ssid_without_psk_and_matrix(client: TestClient):
+    r = client.post(
+        "/display/claim",
+        json={
+            "code": "DRPL-7K2Q-9F4M",
+            "setup_url": "https://192.168.1.87/setup",
+            "wifi_ssid": "Droplet",
+            # No wifi_psk, no wifi_qr_matrix.
+        },
+        headers=AUTH,
+    )
+    assert r.status_code == 422
+
+
+def test_claim_rejects_matrix_without_ssid_and_psk(client: TestClient):
+    r = client.post(
+        "/display/claim",
+        json={
+            "code": "DRPL-7K2Q-9F4M",
+            "setup_url": "https://192.168.1.87/setup",
+            "wifi_qr_matrix": [[1, 0], [0, 1]],
+        },
+        headers=AUTH,
+    )
+    assert r.status_code == 422
+
+
+def test_claim_rejects_ssid_and_psk_without_matrix(client: TestClient):
+    # ssid + psk but no matrix: the firmware needs the host-encoded matrix to
+    # paint the QR (it never encodes on-device), so this is still partial.
+    r = client.post(
+        "/display/claim",
+        json={
+            "code": "DRPL-7K2Q-9F4M",
+            "setup_url": "https://192.168.1.87/setup",
+            "wifi_ssid": "Droplet",
+            "wifi_psk": "7gpz4k9m2njq8wxr",
+        },
+        headers=AUTH,
+    )
+    assert r.status_code == 422
+
+
+def test_claim_rejects_partial_wifi_with_empty_psk(client: TestClient):
+    # Matrix + ssid present but an EMPTY psk is exactly the blank-password QR we
+    # must refuse — an empty string is "absent" for this gate.
+    r = client.post(
+        "/display/claim",
+        json={
+            "code": "DRPL-7K2Q-9F4M",
+            "setup_url": "https://192.168.1.87/setup",
+            "wifi_qr_matrix": [[1, 0], [0, 1]],
+            "wifi_ssid": "Droplet",
+            "wifi_psk": "",
+        },
+        headers=AUTH,
+    )
+    assert r.status_code == 422
+
+
+def test_claim_accepts_all_three_wifi_fields_together(client: TestClient):
+    # The happy path: all three present is the only valid wifi shape.
+    r = client.post(
+        "/display/claim",
+        json={
+            "code": "DRPL-7K2Q-9F4M",
+            "setup_url": "https://192.168.1.87/setup",
+            "wifi_qr_matrix": [[1, 0, 1], [0, 1, 0], [1, 0, 1]],
+            "wifi_ssid": "Droplet",
+            "wifi_psk": "7gpz4k9m2njq8wxr",
+        },
+        headers=AUTH,
+    )
+    assert r.status_code == 200
+
+
 # --- Lifespan shutdown fallback (M1) ----------------------------------------
 
 def test_lifespan_shutdown_renders_shutdown_frame():
