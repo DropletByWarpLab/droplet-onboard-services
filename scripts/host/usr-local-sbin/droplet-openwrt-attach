@@ -320,14 +320,48 @@ docker exec -i \
   # reset box loses AP discovery entirely until it is installed. Trigger a
   # (re)install when the binary is absent.
   [ -x /usr/sbin/umdns ] || NEED_INSTALL=1
+  # >>> install_ap_pkgs (WARP-826b)
+  # Install the AP/router packages, hardened against the first-boot race where
+  # the container has no internet yet — a single opkg attempt then silently
+  # fails and the AP never installs (the failure mode at L276, seen live on the
+  # .87 box: hostapd + iw absent, attach still exited 0). Wait for the feed,
+  # retry update + install, and NEVER hide a persistent failure. Knobs default to
+  # prod values; the unit tests shrink them: OPKG_FEED_TRIES / OPKG_INSTALL_TRIES
+  # / OPKG_RETRY_SLEEP.
+  install_ap_pkgs() {
+    _feed_tries="${OPKG_FEED_TRIES:-12}"
+    _inst_tries="${OPKG_INSTALL_TRIES:-3}"
+    _nap="${OPKG_RETRY_SLEEP:-5}"
+    _i=1
+    _feed_ok=0
+    while [ "$_i" -le "$_feed_tries" ]; do
+      if opkg update >/dev/null 2>&1; then _feed_ok=1; break; fi
+      sleep "$_nap"
+      _i=$((_i + 1))
+    done
+    [ "$_feed_ok" = 1 ] || echo "droplet-openwrt-attach: ERROR: opkg feed unreachable after ${_feed_tries} tries — AP/router packages cannot install until container connectivity returns" >&2
+    _i=1
+    while [ "$_i" -le "$_inst_tries" ]; do
+      if opkg install \
+        hostapd-mbedtls hostapd-utils wireless-regdb iw-full \
+        uhttpd uhttpd-mod-ubus rpcd rpcd-mod-rpcsys rpcd-mod-iwinfo rpcd-mod-file \
+        umdns \
+        wireguard-tools kmod-wireguard luci-proto-wireguard \
+        >/dev/null 2>&1; then break; fi
+      sleep "$_nap"
+      _i=$((_i + 1))
+    done
+    # Hard-verify the load-bearing AP binary actually landed — do NOT return
+    # success with a silently-broken AP (the recurring L276 failure this guards).
+    if command -v hostapd >/dev/null 2>&1; then
+      return 0
+    fi
+    echo "droplet-openwrt-attach: ERROR: hostapd still missing after opkg install retries — the default Wi-Fi AP cannot start (check container internet / opkg feed)" >&2
+    return 1
+  }
+  # <<< install_ap_pkgs (WARP-826b)
   if [ "$NEED_INSTALL" = 1 ]; then
-    opkg update >/dev/null 2>&1
-    opkg install \
-      hostapd-mbedtls hostapd-utils wireless-regdb iw-full \
-      uhttpd uhttpd-mod-ubus rpcd rpcd-mod-rpcsys rpcd-mod-iwinfo rpcd-mod-file \
-      umdns \
-      wireguard-tools kmod-wireguard luci-proto-wireguard \
-      >/dev/null 2>&1
+    install_ap_pkgs || true
     # netifd was started before luci-proto-wireguard arrived, so it didnt
     # load the wireguard protocol handler. Restart it so ifup wg0 works
     # for any subsequent peer-add via the routing service.
@@ -690,11 +724,34 @@ DNSMASQ
   ip link set "$AP_IFACE" up 2>/dev/null
   ip addr show "$AP_IFACE" | grep -q 192.168.20.1 || ip addr add 192.168.20.1/24 dev "$AP_IFACE"
 
+  # >>> start_hostapd (WARP-826b)
+  # Start hostapd and VERIFY it actually came up. The old fire-and-forget
+  # (pgrep || hostapd -B) hid launch failures — a dead AP while the attach
+  # reported success (seen live on .87). Retry a few times, then log loudly so a
+  # broken AP is never silent. Knobs: HOSTAPD_START_TRIES / HOSTAPD_START_SLEEP.
+  start_hostapd() {
+    if pgrep -f "hostapd -B" >/dev/null 2>&1; then return 0; fi
+    _htries="${HOSTAPD_START_TRIES:-3}"
+    _hnap="${HOSTAPD_START_SLEEP:-1}"
+    _h=1
+    while [ "$_h" -le "$_htries" ]; do
+      hostapd -B -P /run/hostapd.pid /etc/hostapd.conf >/dev/null 2>&1 || true
+      sleep "$_hnap"
+      if pgrep -f "hostapd -B" >/dev/null 2>&1; then
+        echo "droplet-openwrt-attach: hostapd up on ${AP_IFACE}"
+        return 0
+      fi
+      _h=$((_h + 1))
+    done
+    echo "droplet-openwrt-attach: ERROR: hostapd failed to start after ${_htries} tries — default Wi-Fi AP is DOWN (hostapd installed? iface ${AP_IFACE} present? /etc/hostapd.conf valid?)" >&2
+    return 1
+  }
+  # <<< start_hostapd (WARP-826b)
   if [ "$HOSTAPD_CHANGED" = 1 ]; then
     pgrep -f "hostapd -B" | xargs -r kill 2>/dev/null
     sleep 1
   fi
-  pgrep -f "hostapd -B" >/dev/null || hostapd -B -P /run/hostapd.pid /etc/hostapd.conf
+  start_hostapd || true
 
   if [ "$DNSMASQ_CHANGED" = 1 ]; then
     pgrep -f "dnsmasq -C /etc/dnsmasq-ap.conf" | xargs -r kill 2>/dev/null
