@@ -222,7 +222,14 @@ gh pr checks <n>
 # Code Reviewer returns one verdict + findings to the controller (internal artifact — NOT posted to GitHub).
 # Controller reads verdict:
 #   - APPROVE → §4 pre-merge handoff
-#   - APPROVE_WITH_COMMENTS → loop findings back through Dev (fix locally + push), then §4 pre-merge handoff
+#   - APPROVE_WITH_COMMENTS → loop findings back through Dev (fix locally + push), then
+#       RE-RUN the Code Reviewer on the new commits. Re-run until the verdict is APPROVE
+#       with no new non-trivial findings (or only deferred-to-PR-body items remain).
+#       Bound this to 2 re-review rounds; if it hasn't converged by then, HANDOFF_TO_HUMAN
+#       (the findings are deeper than a quick local fix — note the harness gap). Only once
+#       the Reviewer lands on a clean APPROVE → §4 pre-merge handoff. This guarantees the
+#       human reviewer's first sight of the branch is the clean, final PR — not the
+#       pre-fix commits.
 #   - REQUEST_CHANGES → SEND_BACK_TO_DEV (rare; note harness gap)
 ```
 

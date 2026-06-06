@@ -109,7 +109,7 @@ List the commands the Dev agent + QA ran:
 
 ## Synthesis rules
 
-- **Do not copy the QA or UX reports verbatim into the PR body.** They are separate comments for reference. The PR body is the reviewer-friendly summary.
+- **Do not copy the QA or UX reports verbatim into the PR body.** They are internal artifacts — never posted as separate GitHub comments; their substance is folded into the PR body self-review. The PR body is the reviewer-friendly summary.
 - **Every Concern has a justification.** "We're shipping with concern X because Y" — "Y" is the interesting part.
 - **Acceptance table is the contract.** Every AC bullet from the ticket appears in the PR body, checked or unchecked with a reason.
 - **Tone matches the repo.** Scan a recent merged PR (e.g. WARP-44, WARP-43) for voice. Terse, declarative, not salesy. No em-dashes as decoration.
