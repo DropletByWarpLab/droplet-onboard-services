@@ -105,6 +105,24 @@ fi
 install -m 0755 "$HOSTAPD_SCRIPT_SRC" "$HOSTAPD_SCRIPT_DST"
 log "installed $HOSTAPD_SCRIPT_DST"
 
+# --- 1e) Install the diagnostics log collector host script (WARP-823) ---
+# The device-bridge's GET /logs/bundle shells this to gather a BOUNDED,
+# secret-REDACTED slice of each Droplet service's logs (docker logs / journalctl)
+# for the Settings → "Download diagnostics" bundle. It reads host log streams
+# the orchestrator container can't reach, so it lives on the host per
+# architecture-guard rule 20; installed here (never hand-placed) so factory-reset
+# removes it cleanly. Read-only — it never mutates the box. Redaction here is
+# defense in depth; the orchestrator redacts again before zipping. Repo source is
+# scripts/host/.
+LOGS_SCRIPT_SRC="$REPO_ROOT/scripts/host/droplet-collect-logs.sh"
+LOGS_SCRIPT_DST="/usr/local/sbin/droplet-collect-logs.sh"
+if [[ ! -f "$LOGS_SCRIPT_SRC" ]]; then
+  log "missing source: $LOGS_SCRIPT_SRC"
+  exit 1
+fi
+install -m 0755 "$LOGS_SCRIPT_SRC" "$LOGS_SCRIPT_DST"
+log "installed $LOGS_SCRIPT_DST"
+
 # --- 2) Ensure the env file exists and contains the needed secrets ---
 install -d -m 0755 "$ENV_DIR"
 if [[ ! -f "$ENV_FILE" ]]; then
