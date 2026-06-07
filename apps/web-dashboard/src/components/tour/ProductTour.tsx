@@ -162,7 +162,17 @@ export function ProductTour({ onComplete }: { onComplete?: () => void } = {}) {
   }, []);
 
   return (
-    <div className="min-h-dvh bg-surface-primary flex items-center justify-center p-4">
+    <div
+      className={
+        // #9/#2: embedded on the Done screen, the setup page already supplies
+        // the full-height centered surface — adding our own min-h-dvh + padding
+        // here would nest two viewport-height boxes and scroll the desktop
+        // viewport. Standalone (/tour) keeps the full-screen surface.
+        onComplete
+          ? "w-full flex items-center justify-center"
+          : "min-h-dvh bg-surface-primary flex items-center justify-center p-4"
+      }
+    >
       <div className="w-full max-w-md">
         {/* Progress dots — quiet, accent only on the active step. */}
         <div
