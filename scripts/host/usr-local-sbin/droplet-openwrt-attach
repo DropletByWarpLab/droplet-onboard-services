@@ -514,9 +514,16 @@ docker exec -i \
   # <<< ap_firewall_zone (WARP-810)
 
   # Phase L: set root password from $OPENWRT_ROOT_PW so the routing services
-  # rpcd login works. Idempotent: only re-set if the current password fails.
+  # rpcd login works. Idempotent. WARP-834: stock OpenWrt ships root with an
+  # EMPTY password hash, and rpcd accepts ANY password against an empty-hash
+  # account (field-confirmed on the box: ubus session login returned a session
+  # for a bogus password while /etc/shadow showed "root:"). So the bare
+  # login-with-the-secret probe never fails on a passwordless root and passwd
+  # would be skipped, leaving root unprotected. Force the set when the hash is
+  # still empty ("^root::"); otherwise fall back to the login probe so a later
+  # rotation (hash already set to some OTHER value) still re-applies.
   if [ -n "$OPENWRT_ROOT_PW" ]; then
-    if ! ubus call session login "{\"username\":\"root\",\"password\":\"$OPENWRT_ROOT_PW\"}" >/dev/null 2>&1; then
+    if grep -q "^root::" /etc/shadow || ! ubus call session login "{\"username\":\"root\",\"password\":\"$OPENWRT_ROOT_PW\"}" >/dev/null 2>&1; then
       printf "%s\n%s\n" "$OPENWRT_ROOT_PW" "$OPENWRT_ROOT_PW" | passwd root >/dev/null 2>&1
       # rpcd caches sometimes; nudge it to re-read shadow
       /etc/init.d/rpcd restart >/dev/null 2>&1
