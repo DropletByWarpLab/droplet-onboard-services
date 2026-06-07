@@ -321,10 +321,14 @@ describe("setup wizard E2E happy path (WARP-174)", () => {
       enabled: true,
     });
 
-    // 4. Storage → name two drives + save.
+    // 4. Storage → name two drives + save. #5: 2+ drives default to pooling
+    // ON; toggle it OFF to take the name-the-drives-separately path.
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("switch", { name: /storage pool/i }));
     });
     const driveInputs = screen.getAllByPlaceholderText(
       /e\.g\. wedding photos/i,
