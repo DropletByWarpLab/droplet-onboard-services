@@ -83,7 +83,7 @@ export function createSystemResetRouter(prisma: PrismaClient): Router {
     const confirm = typeof req.body?.confirm === "string" ? req.body.confirm : "";
     if (!confirm) {
       return res.status(400).json({
-        error: "Type the device name to confirm.",
+        error: 'Type "factory reset" to confirm.',
         code: "CONFIRM_MISMATCH",
       });
     }

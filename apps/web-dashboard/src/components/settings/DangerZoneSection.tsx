@@ -296,7 +296,10 @@ function FactoryResetCard() {
   }, []);
 
   const handleConfirm = useCallback(async () => {
-    const res = await triggerFactoryReset(targetName);
+    // WARP-825 follow-up: the owner confirms by typing the fixed phrase
+    // "factory reset" (the device hostname read as a random string). The server
+    // accepts the phrase (and still the hostname); we send the phrase.
+    const res = await triggerFactoryReset("factory reset");
     // Success: the wipe is dispatched and the box is going down. Close the modal
     // and switch the section to the terminal progress notice.
     setLatestJob({
@@ -372,7 +375,7 @@ function FactoryResetCard() {
             the reset runs.
           </>
         }
-        confirmPhrase={targetName}
+        confirmPhrase="factory reset"
         confirmLabel="Factory reset"
         busyLabel="Resetting…"
         targetSummary={targetName || undefined}
