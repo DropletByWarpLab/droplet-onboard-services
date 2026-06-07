@@ -459,14 +459,35 @@ def _hostapd_wifi_payload(ssid, key):
     return "WIFI:T:WPA;S:{};P:{};;".format(esc(ssid), esc(key))
 
 
-def _use_hostapd_mode():
-    """Decide whether to source the QR creds from hostapd vs. UCI.
+# Cache the deployment-shape decision. In `auto` mode with no DROPLET_AP_SSID the
+# decision requires a UCI probe over SSH — an up-to-12s round trip via
+# openwrt_wifi_credentials(). qr_snapshot() calls _use_hostapd_mode() on every
+# GET /openwrt/qr and the POST /openwrt/wifi/hostapd handler calls it on every
+# Wi-Fi write; under ThreadingHTTPServer those run concurrently, so an uncached
+# probe blocks every display/orchestrator poll for up to 12s AND opens a fresh
+# SSH session each time. The mode is effectively static: DROPLET_AP_MODE is read
+# once at import, and in `auto` the only dynamic input is whether UCI answers —
+# which can't change without an explicit reconfiguration. A short TTL bounds any
+# staleness (e.g. UCI flapping) while keeping the hot path cheap. The probe runs
+# under _hostapd_mode_lock (single-flight) so a concurrent burst shares ONE probe
+# instead of each opening a parallel SSH session (WARP-834 findings 2 + 3).
+_HOSTAPD_MODE_TTL_S = 60.0
+_hostapd_mode_lock = threading.Lock()
+_hostapd_mode_cache = {"value": None, "at": 0.0}
+
+
+def _compute_hostapd_mode():
+    """Uncached deployment-shape decision — the real logic behind
+    _use_hostapd_mode().
 
     - hostapd  -> always hostapd.
     - uci      -> always UCI/SSH (back-compat default).
     - auto     -> hostapd when a DROPLET_AP_SSID is configured (a clear
                   single-box signal) OR when UCI wireless is empty/
                   unreachable; otherwise UCI.
+
+    Only the `auto` path with no DROPLET_AP_SSID issues the (up to 12s) SSH
+    probe; `hostapd` and `uci` decide from process-static env alone.
     """
     if AP_MODE == "hostapd":
         return True
@@ -479,6 +500,29 @@ def _use_hostapd_mode():
         creds, _err = openwrt_wifi_credentials()
         return creds is None
     return False
+
+
+def _use_hostapd_mode():
+    """Whether to source the QR creds from hostapd vs. UCI, cached for
+    _HOSTAPD_MODE_TTL_S.
+
+    Without the cache the `auto`-mode UCI probe (an SSH round trip up to 12s)
+    would run on every GET /openwrt/qr and every Wi-Fi write — continuously
+    degrading those endpoints under ThreadingHTTPServer. The explicit `hostapd`
+    and `uci` modes never probe, so the cache is essentially free there; it
+    matters on the `auto` shape. Computed single-flight under _hostapd_mode_lock
+    so a concurrent burst shares one probe rather than opening parallel SSH
+    sessions.
+    """
+    now = time.monotonic()
+    with _hostapd_mode_lock:
+        cached = _hostapd_mode_cache["value"]
+        if cached is not None and (now - _hostapd_mode_cache["at"]) < _HOSTAPD_MODE_TTL_S:
+            return cached
+        value = _compute_hostapd_mode()
+        _hostapd_mode_cache["value"] = value
+        _hostapd_mode_cache["at"] = time.monotonic()
+        return value
 
 
 # ---------------------------------------------------------------------------
@@ -1615,7 +1659,19 @@ def run_set_hostapd(params):
     systemctl — it execs droplet-set-hostapd.sh with the params as a single JSON
     argument; the script validates (SSID 1-32 / PSK 8-63) BEFORE writing,
     upserts the attach env file, and restarts droplet-openwrt-attach.service.
-    Returns (ok, info); never raises — mirrors run_pool_command()/eject_drive().
+    Never raises — mirrors run_pool_command()/eject_drive().
+
+    Returns a structured (ok, code, info) triple so the HTTP handler keys the
+    status code on a stable machine `code`, NOT a substring of the human
+    message (WARP-834 finding 1):
+      - (True,  "ok",           <host-script JSON dict>) — applied
+      - (False, "busy",         <msg>) — another write holds the lock → 409
+      - (False, "script_error", <msg>) — host-script validation/run failure → 422
+      - (False, "exec_error",   <msg>) — couldn't exec the host script → 422
+    The host script restarts droplet-openwrt-attach.service, whose systemd
+    stderr can itself contain the words "in progress" (e.g. "Job is already
+    queued or in progress for ..."); keying contention on `code == "busy"`
+    instead of `"in progress" in msg` stops that from being misread as a 409.
     The PSK is never logged (architecture-guard rule 19)."""
     ssid = (params or {}).get("ssid", "")
     psk = (params or {}).get("psk", "")
@@ -1623,10 +1679,10 @@ def run_set_hostapd(params):
     # Serialize concurrent writes (mirrors rotate_wifi_key's _ROTATION_LOCK). Two
     # threads racing here would interleave the env-file write and double-restart
     # the attach service / bounce hostapd. Non-blocking: a second in-flight write
-    # is rejected (the handler maps "in progress" to 409) rather than queued.
+    # is rejected (the handler maps code == "busy" to 409) rather than queued.
     if not _HOSTAPD_LOCK.acquire(blocking=False):
         logger.warning("set_hostapd rejected: a Wi-Fi write is already in progress")
-        return False, "hostapd write already in progress"
+        return False, "busy", "hostapd write already in progress"
     try:
         try:
             # Writing the env file + restarting the attach service (which respawns
@@ -1636,19 +1692,21 @@ def run_set_hostapd(params):
             # Log the SSID only — never the params dict (it carries the PSK).
             logger.warning("set_hostapd failed to exec host script (ssid=%r): %s",
                            ssid, e)
-            return False, "host script unavailable"
+            return False, "exec_error", "host script unavailable"
         if rc != 0:
             msg = (err.strip() or out.strip() or "host script refused")
             logger.warning("set_hostapd refused/failed (rc=%s, ssid=%r): %s",
                            rc, ssid, msg)
-            return False, msg
-        # qr_snapshot() is computed fresh on every call (no cache) and the hostapd
-        # creds fall back to parsing the container's regenerated /etc/hostapd.conf,
-        # so the next GET /openwrt/qr reflects the new SSID with no invalidation.
+            return False, "script_error", msg
+        # qr_snapshot() re-reads the creds on every call (the cached value is only
+        # the hostapd-vs-uci *mode*, which a Wi-Fi write never changes) and the
+        # hostapd creds fall back to parsing the container's regenerated
+        # /etc/hostapd.conf, so the next GET /openwrt/qr reflects the new SSID with
+        # no invalidation.
         try:
-            return True, json.loads(out or "{}")
+            return True, "ok", json.loads(out or "{}")
         except (ValueError, TypeError):
-            return True, {"message": (out or "").strip()}
+            return True, "ok", {"message": (out or "").strip()}
     finally:
         _HOSTAPD_LOCK.release()
 
@@ -2009,18 +2067,21 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:                                       # noqa: BLE001
                 return self._send(400, {"ok": False, "error": "bad json"})
             # Never log the body — it carries the PSK (rule 19).
-            ok, info = run_set_hostapd({
+            ok, code, info = run_set_hostapd({
                 "ssid": j.get("ssid", ""),
                 "psk": j.get("psk", ""),
             })
             if not ok:
-                # 409 Conflict when another Wi-Fi write is already in flight
-                # (lock contention) — same non-blocking-acquire posture as
-                # rotate_wifi_key. Everything else (host-script validation
-                # refusal: SSID/PSK out of range, write failure) is 422, same
-                # shape as /pools/command.
-                status = (409 if isinstance(info, str) and "in progress" in info
-                          else 422)
+                # 409 Conflict ONLY for true lock contention (another Wi-Fi write
+                # already in flight) — same non-blocking-acquire posture as
+                # rotate_wifi_key. Everything else (host-script validation refusal:
+                # SSID/PSK out of range, exec/write failure) is 422, same shape as
+                # /pools/command. Keyed on the machine `code`, NEVER a substring of
+                # the human message: the host script restarts
+                # droplet-openwrt-attach.service, whose systemd stderr can contain
+                # "in progress" ("Job is already queued or in progress for ...")
+                # and must not be misread as 409 (WARP-834 finding 1).
+                status = 409 if code == "busy" else 422
                 return self._send(status, {"ok": False, "error": info})
             return self._send(200, {"ok": True,
                                     **(info if isinstance(info, dict) else {"info": info})})

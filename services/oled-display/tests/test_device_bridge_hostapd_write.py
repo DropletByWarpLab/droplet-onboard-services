@@ -51,8 +51,9 @@ def test_set_hostapd_invokes_host_script_not_hostapd(monkeypatch):
 
     monkeypatch.setattr(bridge, "_run", fake_run)
 
-    ok, info = bridge.run_set_hostapd({"ssid": "HomeNet", "psk": "supersecret1"})
+    ok, code, info = bridge.run_set_hostapd({"ssid": "HomeNet", "psk": "supersecret1"})
     assert ok is True
+    assert code == "ok"
     cmd = captured["cmd"]
     # It shells the host script — NOT hostapd/systemctl from the bridge process.
     assert any("droplet-set-hostapd.sh" in str(part) for part in cmd)
@@ -91,8 +92,9 @@ def test_set_hostapd_surfaces_host_script_refusal(monkeypatch):
         return 1, "", "droplet-set-hostapd: Wi-Fi password must be 8-63 characters (got 5)"
 
     monkeypatch.setattr(bridge, "_run", fake_run)
-    ok, info = bridge.run_set_hostapd({"ssid": "HomeNet", "psk": "short"})
+    ok, code, info = bridge.run_set_hostapd({"ssid": "HomeNet", "psk": "short"})
     assert ok is False
+    assert code == "script_error"
     assert "password" in str(info).lower()
 
 
@@ -105,8 +107,9 @@ def test_set_hostapd_never_raises(monkeypatch):
     monkeypatch.setattr(bridge, "_run", explode)
     # Must degrade to (False, ...) rather than propagate — same contract as
     # eject_drive() / run_pool_command().
-    ok, info = bridge.run_set_hostapd({"ssid": "HomeNet", "psk": "supersecret1"})
+    ok, code, info = bridge.run_set_hostapd({"ssid": "HomeNet", "psk": "supersecret1"})
     assert ok is False
+    assert code == "exec_error"
 
 
 def test_set_hostapd_serializes_concurrent_writes(monkeypatch):
@@ -142,8 +145,9 @@ def test_set_hostapd_serializes_concurrent_writes(monkeypatch):
 
     # Second write while the first still holds the lock → rejected, host script
     # NOT invoked a second time.
-    ok2, info2 = bridge.run_set_hostapd({"ssid": "Other", "psk": "anothersecret"})
+    ok2, code2, info2 = bridge.run_set_hostapd({"ssid": "Other", "psk": "anothersecret"})
     assert ok2 is False
+    assert code2 == "busy"
     assert "in progress" in str(info2).lower()
 
     release.set()
@@ -297,6 +301,35 @@ def test_hostapd_write_validation_refusal_is_422(monkeypatch):
                         {"ssid": "HomeNet", "psk": "short"})
     assert status == 422
     assert obj.get("ok") is False
+
+
+def test_hostapd_write_script_stderr_mentioning_in_progress_is_422(monkeypatch):
+    """Regression (WARP-834 finding 1): a HOST-SCRIPT failure whose stderr merely
+    CONTAINS the substring 'in progress' — e.g. systemd's 'Job is already queued
+    or in progress for droplet-openwrt-attach.service' when the attach-service
+    restart collides — must map to 422 (script error), NOT 409 (lock contention).
+    The status is keyed on the machine `code`, never a substring of the message."""
+    bridge = _load_bridge(monkeypatch)
+    monkeypatch.setattr(
+        bridge, "_run",
+        lambda *a, **k: (
+            1, "",
+            "Job is already queued or in progress for droplet-openwrt-attach.service"))
+    status, obj = _post(bridge, {"X-Droplet-Auth": "pytest-bridge-token"},
+                        {"ssid": "HomeNet", "psk": "supersecret1"})
+    assert status == 422
+    assert obj.get("ok") is False
+
+
+def test_set_hostapd_tags_contention_distinctly_from_script_error(monkeypatch):
+    """The structured `code` distinguishes the two failure classes even when the
+    host script's human message would collide on a naive substring match."""
+    bridge = _load_bridge(monkeypatch)
+    monkeypatch.setattr(bridge, "_run",
+                        lambda *a, **k: (1, "", "... in progress ..."))
+    ok, code, info = bridge.run_set_hostapd({"ssid": "HomeNet", "psk": "supersecret1"})
+    assert ok is False
+    assert code == "script_error"   # NOT "busy", despite "in progress" in the text
 
 
 def test_hostapd_write_rejects_bad_json(monkeypatch):
