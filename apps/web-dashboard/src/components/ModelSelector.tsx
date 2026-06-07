@@ -16,6 +16,12 @@ const providerBadge: Record<string, { className: string; label: string }> = {
 export function ModelSelector({ value, onChange }: ModelSelectorProps) {
   const { models, isLoading } = useModels();
 
+  // Design handoff: when only one model is available there's nothing to
+  // choose, so don't show the picker/pill in the input zone at all. The
+  // page's auto-select already pins that single model. (Still render while
+  // loading, when we don't yet know the count.)
+  if (!isLoading && models.length <= 1) return null;
+
   const selected = models.find((m) => m.id === value);
   const provider = selected?.provider ?? "";
 
