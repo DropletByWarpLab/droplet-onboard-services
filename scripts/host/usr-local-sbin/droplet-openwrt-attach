@@ -97,10 +97,20 @@ resolve_ap_psk() {
       echo "droplet-openwrt-attach: FATAL — no strong entropy source (openssl or readable /dev/urandom) to generate the AP PSK; refusing to ship a weak Wi-Fi password. Install openssl or make /dev/urandom readable, then retry." >&2
       exit 1
     fi
-    # Leading digit (2-9) drawn from the SAME strong source (no PRNG) so the
-    # passphrase starts numeric (mobile auto-cap guard) → 16 chars total.
-    dnum="$( { openssl rand -base64 8 2>/dev/null || head -c 16 /dev/urandom 2>/dev/null | base64; } | tr -dc '0-9' | cut -c1 )"
-    case "$dnum" in ""|0|1) first=7 ;; *) first="$dnum" ;; esac
+    # Leading digit (2-9) sampled UNIFORMLY from the SAME strong source (no PRNG)
+    # so the passphrase starts numeric (mobile auto-cap guard) → 16 chars total.
+    # One random byte (0..255) reduced mod 8 and mapped to {2..9}: 256 is a
+    # multiple of 8, so the modulo is bias-free. The previous version took the
+    # first digit of a base64 stream and fell back to a constant 7 whenever the
+    # stream had no digit (or it was 0/1) — a hardcoded value, not "the same
+    # strong source", that over-represented 7. Entropy of the body is unchanged
+    # (~89 bits); this only debiases the one leading digit.
+    rbyte="$( { openssl rand -hex 1 2>/dev/null || head -c 1 /dev/urandom 2>/dev/null | od -An -tx1; } | tr -dc '0-9a-f' | cut -c1-2 )"
+    if [ -z "$rbyte" ]; then
+      echo "droplet-openwrt-attach: FATAL — no strong entropy source (openssl or readable /dev/urandom) to sample the AP PSK leading digit; refusing to ship a weak Wi-Fi password." >&2
+      exit 1
+    fi
+    first=$(( 2 + (0x$rbyte % 8) ))
     AP_PSK="${first}${gen}"
   fi
 
