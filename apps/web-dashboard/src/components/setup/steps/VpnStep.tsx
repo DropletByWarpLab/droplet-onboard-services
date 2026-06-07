@@ -25,6 +25,7 @@ import type {
 } from "@/lib/types";
 import { StepShell } from "@/components/setup/StepShell";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
+import { ScrollRegion } from "@/components/setup/ScrollRegion";
 
 /**
  * Wizard step — connect the customer's phone via WireGuard (remote access).
@@ -314,7 +315,11 @@ export function VpnStep({
         subtitle="Add more devices now, or anytime from Remote Access."
         primary={{ label: "Continue", onClick: onComplete, showArrow: true }}
       >
-        <div className="space-y-2" data-testid="vpn-returning-peers">
+        {/* WARP-820 viewport lock: the peer list is genuinely unbounded, so it
+            uses the wizard's single permitted inner-scroll surface. The title,
+            "Add another device", and the Continue CTA stay pinned in StepShell;
+            only this list scrolls (bounded to a viewport-relative max-height). */}
+        <ScrollRegion aria-label="Connected devices" className="space-y-2">
           {existingPeers.map((p) => (
             <div key={p.id} className="dp-card !py-3 flex items-center gap-3">
               <div className="w-9 h-9 rounded-lg bg-accent-subtle flex items-center justify-center flex-shrink-0">
@@ -344,7 +349,7 @@ export function VpnStep({
               </span>
             </div>
           ))}
-        </div>
+        </ScrollRegion>
 
         <button
           type="button"
