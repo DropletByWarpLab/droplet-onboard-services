@@ -1,8 +1,15 @@
 "use client";
 
-import { useState, useRef, useCallback, useImperativeHandle, forwardRef } from "react";
-import { ArrowUp, Paperclip, Square } from "lucide-react";
-import type { ChatAttachment } from "@/lib/types";
+import {
+  useState,
+  useRef,
+  useMemo,
+  useCallback,
+  useImperativeHandle,
+  forwardRef,
+} from "react";
+import { ArrowUp, Paperclip, Square, Wrench } from "lucide-react";
+import type { ChatAttachment, ToolCatalogEntry } from "@/lib/types";
 import { AttachmentChip } from "./AttachmentChip";
 
 interface ChatInputProps {
@@ -26,6 +33,16 @@ interface ChatInputProps {
    */
   isStreaming?: boolean;
   onStop?: () => void;
+  /**
+   * Slash-command tool menu. When a non-empty `slashTools` list is provided,
+   * typing "/" at the START of an empty-ish composer opens a filterable menu
+   * of tools; picking one fires `onToolCommand(tool)` (the chat page seeds the
+   * composer + shows its "Ready to use X" indicator, mirroring the WARP-829
+   * /tools hand-off). Omitted everywhere else (home hero, etc.) so those
+   * composers don't fetch the catalog or grow a menu.
+   */
+  slashTools?: ToolCatalogEntry[];
+  onToolCommand?: (tool: ToolCatalogEntry) => void;
 }
 
 /**
@@ -54,11 +71,45 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   onRemoveAttachment,
   isStreaming,
   onStop,
+  slashTools,
+  onToolCommand,
 }, ref) {
   const [value, setValue] = useState("");
   const [isDragging, setIsDragging] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Slash-command tool menu (gated on `slashTools`). Opens when the composer
+  // text starts with "/"; the query is everything after it. A "/" anywhere
+  // other than the start is just a literal slash, so normal messages are
+  // unaffected.
+  const slashEnabled = Boolean(slashTools && slashTools.length > 0 && onToolCommand);
+  const [slashActiveIdx, setSlashActiveIdx] = useState(0);
+  const slashQuery =
+    slashEnabled && value.startsWith("/") ? value.slice(1).trimStart() : null;
+  const slashOpen = slashQuery !== null;
+  const slashMatches = useMemo(() => {
+    if (!slashEnabled || slashQuery === null) return [];
+    const q = slashQuery.toLowerCase();
+    const list = q
+      ? (slashTools ?? []).filter(
+          (t) =>
+            t.name.toLowerCase().includes(q) ||
+            t.homeDescription.toLowerCase().includes(q),
+        )
+      : (slashTools ?? []);
+    return list.slice(0, 8);
+  }, [slashEnabled, slashQuery, slashTools]);
+
+  const pickTool = useCallback(
+    (tool: ToolCatalogEntry) => {
+      // Hand off to the page (seeds the composer + shows the indicator). The
+      // seed REPLACES the "/query" text, so the menu closes on its own.
+      onToolCommand?.(tool);
+      setSlashActiveIdx(0);
+    },
+    [onToolCommand],
+  );
 
   const handleSubmit = useCallback(() => {
     const trimmed = value.trim();
@@ -76,6 +127,30 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     // the message. Reading `nativeEvent.isComposing` covers the cases
     // React's synthetic event misses on Safari/Firefox.
     if (e.nativeEvent.isComposing) return;
+    // Slash-menu keyboard nav takes precedence while it's open with matches.
+    if (slashOpen && slashMatches.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSlashActiveIdx((i) => Math.min(i + 1, slashMatches.length - 1));
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSlashActiveIdx((i) => Math.max(i - 1, 0));
+        return;
+      }
+      if (e.key === "Enter") {
+        e.preventDefault();
+        pickTool(slashMatches[Math.min(slashActiveIdx, slashMatches.length - 1)]);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        // Drop the leading "/" so the menu closes but any typed text stays.
+        setValue((v) => v.replace(/^\/+/, ""));
+        return;
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSubmit();
@@ -212,6 +287,48 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           ))}
         </div>
       ) : null}
+      {slashOpen && slashMatches.length > 0 ? (
+        <ul
+          role="listbox"
+          aria-label="Tools"
+          data-testid="slash-tool-menu"
+          className="absolute bottom-full left-3 right-3 mb-2 max-h-64 overflow-y-auto
+            rounded-xl border border-separator bg-surface-primary dp-material shadow-lg z-50 py-1"
+        >
+          {slashMatches.map((tool, idx) => (
+            <li
+              key={tool.name}
+              role="option"
+              aria-selected={idx === slashActiveIdx}
+              onMouseDown={(e) => {
+                // preventDefault so the textarea keeps focus through the click.
+                e.preventDefault();
+                pickTool(tool);
+              }}
+              onMouseEnter={() => setSlashActiveIdx(idx)}
+              className={`flex items-start gap-2.5 px-3 py-2 cursor-pointer ${
+                idx === slashActiveIdx
+                  ? "bg-accent-subtle"
+                  : "hover:bg-surface-secondary"
+              }`}
+            >
+              <Wrench
+                size={14}
+                className="mt-0.5 flex-none text-accent"
+                aria-hidden="true"
+              />
+              <span className="min-w-0">
+                <span className="block type-footnote font-medium text-label-primary">
+                  {humanizeToolName(tool.name)}
+                </span>
+                <span className="block type-caption-1 text-label-tertiary line-clamp-2">
+                  {tool.homeDescription}
+                </span>
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
       <div className="flex items-end gap-2">
         {dropEnabled ? (
           <>
@@ -242,7 +359,10 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
         <textarea
           ref={textareaRef}
           value={value}
-          onChange={(e) => setValue(e.target.value)}
+          onChange={(e) => {
+            setValue(e.target.value);
+            setSlashActiveIdx(0);
+          }}
           onKeyDown={handleKeyDown}
           onInput={handleInput}
           placeholder="Send a message..."
@@ -293,3 +413,9 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     </div>
   );
 });
+
+/** "block_network_device" → "Block network device" for the slash menu. */
+function humanizeToolName(name: string): string {
+  const spaced = name.replace(/_/g, " ").trim();
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}

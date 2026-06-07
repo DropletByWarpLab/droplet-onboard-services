@@ -22,8 +22,13 @@ import { Dialog } from "@/components/Dialog";
 import { useChat } from "@/lib/hooks/useChat";
 import { useModels } from "@/lib/hooks/useModels";
 import { useStickyScroll } from "@/lib/hooks/useStickyScroll";
+import { useToolCatalog } from "@/lib/hooks/useToolCatalog";
 import { useAuth } from "@/lib/auth";
-import { PENDING_COMPOSER_KEY, type PendingComposerPayload } from "@/lib/types";
+import {
+  PENDING_COMPOSER_KEY,
+  type PendingComposerPayload,
+  type ToolCatalogEntry,
+} from "@/lib/types";
 
 export default function ChatPage() {
   // WARP-331: history panel imperative handle + mobile drawer state.
@@ -123,6 +128,9 @@ export default function ChatPage() {
   }, [conversationId]);
   const chatInputRef = useRef<ChatInputHandle>(null);
   const { models } = useModels();
+  // The chat composer's "/" slash menu lists these tools; picking one seeds
+  // the composer + pins the "Ready to use X" indicator (same as /tools).
+  const { tools: slashTools } = useToolCatalog();
   const [selectedModel, setSelectedModel] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
   const [showSystemPrompt, setShowSystemPrompt] = useState(false);
@@ -293,6 +301,25 @@ export default function ChatPage() {
 
   const handleQuote = useCallback((text: string) => {
     chatInputRef.current?.insertQuote(text);
+  }, []);
+
+  // "/" slash menu → pick a tool. Mirrors the WARP-829 /tools "Use in chat"
+  // hand-off: pin the "Ready to use X" indicator and hand the user an empty
+  // composer (no auto-send; any write/build still hits the in-chat confirm
+  // gate). Seeding "" replaces the "/query" so the menu closes.
+  const handleToolCommand = useCallback((tool: ToolCatalogEntry) => {
+    const label = tool.name
+      .replace(/_/g, " ")
+      .replace(/^\w/, (c) => c.toUpperCase());
+    setActiveTool({
+      kind: "tool",
+      toolName: tool.name,
+      label,
+      requiresWrite: tool.requiresWrite,
+      requiresConfirmation: tool.requiresConfirmation,
+      seedText: "",
+    });
+    chatInputRef.current?.seed("");
   }, []);
 
   const handleRegenerate = useCallback(
@@ -550,6 +577,8 @@ export default function ChatPage() {
           onRemoveAttachment={removeAttachment}
           isStreaming={isStreaming}
           onStop={stop}
+          slashTools={slashTools}
+          onToolCommand={handleToolCommand}
         />
       </div>
 
