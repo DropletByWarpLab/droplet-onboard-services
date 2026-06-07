@@ -38,7 +38,9 @@ beforeEach(() => {
   ssidMock.mockResolvedValue({ status: "ok", tier: 1 } as never);
   pwMock.mockResolvedValue({ status: "ok", tier: 1 } as never);
 });
-afterEach(() => vi.clearAllMocks());
+afterEach(() => {
+  vi.clearAllMocks();
+});
 
 function fill(ssid: string, pw: string) {
   fireEvent.change(screen.getByPlaceholderText(/studio fotonia/i), {
