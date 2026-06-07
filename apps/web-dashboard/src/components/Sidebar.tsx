@@ -37,6 +37,7 @@ import { ThemeToggle } from "./ThemeToggle";
 import { Dialog } from "./Dialog";
 import { useAuth } from "@/lib/auth";
 import { useWorkspace } from "@/lib/workspace";
+import { useCapabilities } from "@/lib/hooks/useCapabilities";
 
 type NavItem = {
   href: string;
@@ -50,6 +51,12 @@ type NavItem = {
   workspace?: "home" | "business";
   /** Restrict visibility by role. Default: visible to all. */
   roles?: Array<NonNullable<AuthRole>>;
+  /**
+   * Hide unless the named backend capability is wired (GET
+   * /api/admin/capabilities). Used for optional admin surfaces whose backing
+   * integration may be unconfigured. Default: no capability gate.
+   */
+  requiresCapability?: "claudeActivity" | "ragEval";
 };
 
 type AuthRole = "owner" | "admin" | "family" | "guest";
@@ -120,19 +127,23 @@ const NAV_GROUPS: NavGroup[] = [
       // WARP-174: customer-facing manual + "How Droplet works" replay
       // modal. Sits next to Settings — same "support / reference" zone.
       { href: "/help", label: "Help", icon: HelpCircle },
-      // WARP-279: admin-only Activity log entry. Visibility gated below.
+      // WARP-279: admin-only Activity log entry. Role-gated AND hidden unless
+      // GitHub/Jira is configured (capabilities.claudeActivity) — #14.
       {
         href: "/admin/claude-activity",
         label: "Activity",
         icon: Activity,
         roles: ["owner", "admin"],
+        requiresCapability: "claudeActivity",
       },
       // WARP-519: ad-hoc RAGAS run + baseline bootstrap trigger surface.
+      // Hidden unless RAG_EVAL_URL is set (capabilities.ragEval) — #15.
       {
         href: "/admin/rag-eval",
         label: "RAG eval",
         icon: FlaskConical,
         roles: ["owner", "admin"],
+        requiresCapability: "ragEval",
       },
     ],
   },
@@ -164,10 +175,13 @@ function visibleItems(
   items: NavItem[],
   workspace: "home" | "business",
   role: AuthRole | undefined,
+  capabilities: { claudeActivity: boolean; ragEval: boolean },
 ): NavItem[] {
   return items.filter((item) => {
     if (item.workspace && item.workspace !== workspace) return false;
     if (item.roles && (!role || !item.roles.includes(role))) return false;
+    if (item.requiresCapability && !capabilities[item.requiresCapability])
+      return false;
     return true;
   });
 }
@@ -177,6 +191,7 @@ export function Sidebar() {
   const router = useRouter();
   const { user, logout } = useAuth();
   const { workspaceType, isBusiness } = useWorkspace();
+  const capabilities = useCapabilities();
 
   // WARP-290: drawer state for the mobile "More" trigger.
   const [moreOpen, setMoreOpen] = useState(false);
@@ -208,7 +223,12 @@ export function Sidebar() {
   // filtered out so we don't render a lone caption.
   const renderedGroups = NAV_GROUPS.map((g) => ({
     label: g.label,
-    items: visibleItems(g.items, workspaceType, user?.role as AuthRole | undefined),
+    items: visibleItems(
+      g.items,
+      workspaceType,
+      user?.role as AuthRole | undefined,
+      capabilities,
+    ),
   })).filter((g) => g.items.length > 0);
 
   // Flatten for the "More" drawer — anything not in the bottom-bar

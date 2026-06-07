@@ -54,6 +54,7 @@ import { createAdminRetrievalEvalRouter } from "./routes/admin-retrieval-eval.js
 import { adminFilesRouter } from "./routes/admin-files.js";
 import { setPrismaForReindex } from "./services/file-reindex.service.js";
 import { createAdminRagEvalRouter } from "./routes/admin-rag-eval.js";
+import { createAdminCapabilitiesRouter } from "./routes/admin-capabilities.js";
 import { createMeContextStatsRouter } from "./routes/me-context-stats.js";
 import { createSettingsWorkspaceRouter } from "./routes/settings-workspace.js";
 import { createFipsRouter } from "./routes/fips.js";
@@ -282,6 +283,9 @@ export function createApp(prisma: PrismaClient) {
   // + run listing. Auth-gated (admin/owner); 503 when the `eval` Compose
   // profile is inactive (rag-eval service unreachable). NOT prod-gated.
   app.use("/api", createAdminRagEvalRouter());
+  // Admin capabilities probe — drives nav-gating for optional admin surfaces
+  // (Activity, RAG eval) so they hide when their integration is unconfigured.
+  app.use("/api", createAdminCapabilitiesRouter());
   // WARP-225: per-user context-meter (home widget + /context page).
   app.use("/api", createMeContextStatsRouter(prisma));
   // WARP-456: signed append-only activity feed + export bundle.
