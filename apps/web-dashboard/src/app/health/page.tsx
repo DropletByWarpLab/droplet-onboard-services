@@ -1,8 +1,10 @@
 "use client";
 
 import useSWR from "swr";
+import { HeartPulse } from "lucide-react";
 import { fetchSystemHealth, type SystemHealth } from "@/lib/api";
 import { HealthStatusView } from "@/components/health/HealthStatusView";
+import { ShellPage } from "@/components/shell/ShellPage";
 
 /**
  * /health — appliance/service health status page (PR #382).
@@ -22,10 +24,12 @@ export default function HealthPage() {
   );
 
   return (
-    <HealthStatusView
-      health={data}
-      isLoading={isLoading}
-      error={error instanceof Error ? error : undefined}
-    />
+    <ShellPage icon={<HeartPulse size={15} />} label="Health">
+      <HealthStatusView
+        health={data}
+        isLoading={isLoading}
+        error={error instanceof Error ? error : undefined}
+      />
+    </ShellPage>
   );
 }
