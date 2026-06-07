@@ -1,7 +1,7 @@
 "use client";
 
 import useSWR from "swr";
-import { Globe, Cpu, Wifi, ArrowRight, AlertTriangle } from "lucide-react";
+import { Globe, Cpu, Wifi, ArrowRight, AlertTriangle, Router } from "lucide-react";
 import { fetchApDevices } from "@/lib/api";
 import type { NetworkOverview } from "@/lib/types";
 
@@ -159,6 +159,34 @@ export function NetworkSimple({ overview, onOpenAdvanced }: Props) {
             </span>
           </button>
         )}
+      </section>
+
+      {/* Router — #17: surface the router as a manageable thing in the Simple
+          (home) view, with a direct path to its settings. The full controls
+          (hostname, OpenWrt version, reboot, resources) live in Advanced ›
+          System; home users had no discoverable entry point. Hardware-agnostic
+          per ADR-011 — status + a settings link, no board/NIC names. */}
+      <section className="dp-card p-5">
+        <div className="flex items-center justify-between gap-4 flex-wrap">
+          <div className="flex items-center gap-3">
+            <span className="flex-none h-10 w-10 rounded-[10px] bg-surface-secondary text-label-secondary flex items-center justify-center">
+              <Router className="h-5 w-5" />
+            </span>
+            <div>
+              <p className="type-title-3 text-label-primary">Router</p>
+              <p className="type-subheadline text-label-secondary">
+                {online ? "Connected" : "Status unknown"}
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={onOpenAdvanced}
+            className="dp-btn-secondary inline-flex items-center gap-1.5 px-3 h-9 rounded-md"
+          >
+            <span className="type-subheadline">Router settings</span>
+            <ArrowRight size={15} />
+          </button>
+        </div>
       </section>
     </div>
   );
