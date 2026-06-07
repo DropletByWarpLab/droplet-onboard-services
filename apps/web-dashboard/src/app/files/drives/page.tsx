@@ -1,7 +1,9 @@
 "use client";
 
-import { Topbar } from "@/components/Topbar";
+import Link from "next/link";
+import { ArrowLeft, HardDrive } from "lucide-react";
 import { DrivesPanel } from "@/components/FileManager/DrivesPanel";
+import { ShellPage } from "@/components/shell/ShellPage";
 
 /** Drives surface — the storage breakdown reached from the Files sub-nav.
  *  Mirrors the Droplet Design System handoff's "Drives" tab: a pooled-storage
@@ -9,11 +11,19 @@ import { DrivesPanel } from "@/components/FileManager/DrivesPanel";
  *  /api/storage/drives data. */
 export default function DrivesPage() {
   return (
-    <div>
-      <Topbar crumbs={[{ label: "Files", href: "/files" }, { label: "Drives" }]} />
-      <div className="p-6">
-        <DrivesPanel />
-      </div>
-    </div>
+    <ShellPage
+      icon={<HardDrive size={15} />}
+      label="Drives"
+      title="Drives"
+      sub="Storage pools and the physical volumes mounted on this Droplet."
+      actions={
+        <Link href="/files" className="btn ghost" aria-label="Back to files">
+          <ArrowLeft size={15} />
+          Files
+        </Link>
+      }
+    >
+      <DrivesPanel />
+    </ShellPage>
   );
 }
