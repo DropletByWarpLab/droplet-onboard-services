@@ -102,7 +102,7 @@ function readResumeIndex(): number {
   }
 }
 
-export function ProductTour() {
+export function ProductTour({ onComplete }: { onComplete?: () => void } = {}) {
   const router = useRouter();
   const reduced = useReducedMotion();
   const { completeTour } = useAuth();
@@ -139,8 +139,15 @@ export function ProductTour() {
     // Persist completion (optimistic in-memory flip + server PATCH). Never
     // rejects; routes onward regardless of the round-trip.
     await completeTour();
-    router.push("/");
-  }, [completeTour, router]);
+    // When embedded (e.g. on the Done screen, #9) the parent owns post-tour
+    // navigation — call onComplete and skip our own push so we don't
+    // double-navigate. Standalone (/tour route) falls back to pushing "/".
+    if (onComplete) {
+      onComplete();
+    } else {
+      router.push("/");
+    }
+  }, [completeTour, router, onComplete]);
 
   const next = useCallback(() => {
     if (isLast) {

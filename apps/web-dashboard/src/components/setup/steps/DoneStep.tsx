@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { WelcomeFlourish } from "@/components/auth/WelcomeFlourish";
+import { ProductTour } from "@/components/tour/ProductTour";
 import { useAuth } from "@/lib/auth";
 
 /**
@@ -38,8 +40,15 @@ export function DoneStep({
   discoveredCount: number;
 }) {
   const { completeSetup, completeSetupError } = useAuth();
+  const router = useRouter();
   const finishedRef = useRef(false);
   const [retrying, setRetrying] = useState(false);
+  // #9 — the walkthrough now plays ON the Done screen: the celebratory
+  // flourish first, then the product tour embedded here (not a separate /tour
+  // takeover). When the flourish finishes we advance to "tour"; when the tour
+  // finishes it has already set userTourCompleted=true, so we land on "/" and
+  // AuthGate's tourPending branch never re-routes to /tour.
+  const [phase, setPhase] = useState<"flourish" | "tour">("flourish");
 
   useEffect(() => {
     if (finishedRef.current) return;
@@ -82,6 +91,15 @@ export function DoneStep({
     );
   }
 
+  // Phase 2 — the tour plays on the Done screen. ProductTour persists
+  // completion (completeTour → userTourCompleted=true) then calls onComplete,
+  // where we navigate to the dashboard.
+  if (phase === "tour") {
+    return <ProductTour onComplete={() => router.push("/")} />;
+  }
+
+  // Phase 1 — celebratory flourish. `redirectTo={null}` hands navigation to us
+  // (onComplete) so the flourish doesn't push to "/" before the tour shows.
   return (
     <WelcomeFlourish
       displayName={displayName || undefined}
@@ -92,7 +110,8 @@ export function DoneStep({
             } connected and ready to control.`
           : "You can add smart home devices later from the Devices page."
       }
-      redirectTo="/"
+      redirectTo={null}
+      onComplete={() => setPhase("tour")}
     />
   );
 }
