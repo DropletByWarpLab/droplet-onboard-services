@@ -10,6 +10,7 @@ import { useToast } from "@/components/Toast";
 import { getDownloadUrl } from "@/lib/api";
 import { authFetch } from "@/lib/auth";
 import type { FileEntryInfo } from "@/lib/types";
+import { ShellPage } from "@/components/shell/ShellPage";
 
 /**
  * Bucket recent files by Today / Yesterday / This week / Earlier.
@@ -71,22 +72,18 @@ export default function RecentsPage() {
   };
 
   return (
-    <div className="p-6 lg:p-8 max-w-5xl">
-      <div className="flex items-center gap-3 mb-6">
-        <Link
-          href="/files"
-          className="p-1.5 rounded-full text-label-tertiary hover:text-label-primary hover:bg-surface-secondary transition-colors"
-          aria-label="Back to files"
-        >
-          <ArrowLeft size={18} />
+    <ShellPage
+      icon={<Clock size={15} />}
+      label="Recents"
+      title="Recents"
+      sub="Files you've modified recently, grouped by time."
+      actions={
+        <Link href="/files" className="btn ghost" aria-label="Back to files">
+          <ArrowLeft size={15} />
+          Files
         </Link>
-        <h1 className="type-large-title text-label-primary">Recents</h1>
-      </div>
-
-      <p className="type-footnote text-label-tertiary mb-4">
-        Files you&apos;ve modified recently, grouped by time.
-      </p>
-
+      }
+    >
       {items.length === 0 && !isLoading ? (
         <FileListSimple
           files={[]}
@@ -117,6 +114,6 @@ export default function RecentsPage() {
           ))}
         </div>
       )}
-    </div>
+    </ShellPage>
   );
 }
