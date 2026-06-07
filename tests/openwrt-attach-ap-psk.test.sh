@@ -278,6 +278,44 @@ else
   pass "awk-PRNG fallback removed from PSK generation"
 fi
 
+# --- WARP-835: leading digit is a uniform {2..9} sample, not a biased constant -
+echo "--- Phase 6: WARP-835 leading digit sampled uniformly from {2..9} ---"
+
+# Guardrail: the biased fallback is gone. The old code derived the leading digit
+# from a `dnum` base64-digit pick and fell back to a constant 7 when it was
+# empty/0/1; the replacement samples one byte mod 8 -> {2..9} uniformly (no
+# `dnum`, no hardcoded leading digit).
+if grep -qE '\bdnum\b' "$ATTACH"; then
+  fail "biased leading-digit fallback (dnum + constant) still present"
+else
+  pass "biased leading-digit fallback removed (uniform sample)"
+fi
+
+# Behavioral: across many FRESH generations the first char is ALWAYS a digit in
+# [2-9], and it actually varies (not stuck on a single constant value).
+leads=""
+lead_ok=1
+for _i in $(seq 1 20); do
+  rm -f "$PSK_FILE" "$BRIDGE_ENV"
+  p="$(run_resolve "")"
+  c="${p:0:1}"
+  case "$c" in
+    [2-9]) leads="${leads}${c}" ;;
+    *) lead_ok=0; echo "      unexpected leading char '$c' in '$p'" ;;
+  esac
+done
+if [ "$lead_ok" -eq 1 ]; then
+  pass "every generated PSK starts with a digit in [2-9]"
+else
+  fail "a generated PSK started with a char outside [2-9]"
+fi
+distinct="$(printf '%s' "$leads" | fold -w1 | sort -u | wc -l | tr -d ' ')"
+if [ "${distinct:-0}" -ge 2 ]; then
+  pass "leading digit varies across draws ($distinct distinct values)"
+else
+  fail "leading digit constant across 20 draws — not sampling"
+fi
+
 echo ""
 echo "  $((TESTS - FAILURES))/$TESTS checks passed"
 if [ "$FAILURES" -ne 0 ]; then
