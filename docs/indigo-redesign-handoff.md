@@ -103,10 +103,25 @@ gated as FR-001..004); chat (thinking indicator + hide single-model pill); Conte
   RecordingsTimeline scrubber, seek-on-segment-click, clip export to Nextcloud.
 - **Left immersive (untouched, by design):** `app/cameras/[name]/page.tsx`, `app/cameras/birdseye/page.tsx`.
 
-**Remaining queue (do in this order):**
-1. **Settings** (`components/settings/*`, ~2.9k LOC).
-2. **Files** (`components/FileManager/*`, ~3.5k LOC).
-3. **Network** (`components/network/*`, ~10.8k LOC, 52 files, 7-tab WAI-ARIA tablist) —
+**Done (this batch — Settings + Files):**
+- **Settings** (`app/settings/page.tsx`) — Topbar→ShellPage; section headers → `Sect`,
+  setting groups → `.card/.rows/.lrow`, status pills → `Badge`, buttons → `.btn`. Kept
+  WARP-824 temp-password create-user, WARP-292 always-visible delete a11y, ConfirmDialog,
+  and the Passkeys/Email/Logs/DangerZone sections. Patched the two settings tests'
+  wholesale `@/lib/api` mock to add `fetchSystemHealth` for the ShellPage chip.
+- **Files — all 7 routes** wrapped in ShellPage, heavy components kept as-is:
+  - `files/page.tsx` (main browser) — Folder icon, New folder + Upload actions; new-folder
+    dialog/detail-panel/buttons → `.card/.btn`. Kept SearchBar/BreadcrumbNav/UploadZone/
+    FileRow/SelectionToolbar/PreviewPane/ShareDialog/ContextMenu/MoveCopyDialog + CRUD.
+  - `files/favorites`, `files/recents`, `files/trash` — back-to-Files Link in actions,
+    FileListSimple/TrashView kept.
+  - `files/shared` — `.tabstrip` tabs, `.card/.empty/.rows/.lrow` body.
+  - `files/devices` — Pair/Refresh actions, live paired-count subtitle, ClientDeviceCard/
+    PairDialog kept.
+  - `files/drives` — Topbar→ShellPage, DrivesPanel kept.
+
+**Remaining queue:**
+1. **Network** (`components/network/*`, ~10.8k LOC, 52 files, 7-tab WAI-ARIA tablist) —
    biggest; preserve tablist roles/keyboard + operation-confirm flows exactly. A newer,
    higher-fidelity handoff for the **managed-switch** Network add-on is at
    `~/Downloads/design_handoff_network_switch/` (port map / PoE / VLAN spec + standalone HTML ref).
