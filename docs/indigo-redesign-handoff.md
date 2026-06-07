@@ -69,28 +69,49 @@ web dashboard into the **real** Next.js app (`apps/web-dashboard`), wiring to th
 
 ## Status
 
-**Done (10 commits on the branch):** foundation + Health; Tools; RAG Eval + Devices; Help;
-Activity (`admin/claude-activity`); Remote Access; Home stub-data removal (Calendar wired
-to `useCalendarEvents`, fake fallbacks dropped, Tasks/Activity/Scenes/Automations gated as
-FR-001..004); chat (thinking indicator + hide single-model pill); Context; Knowledge.
+**Done (foundation + Tier-1, earlier):** foundation + Health; Tools; RAG Eval + Devices;
+Help; Activity (`admin/claude-activity`); Remote Access; Home stub-data removal (Calendar
+wired to `useCalendarEvents`, fake fallbacks dropped, Tasks/Activity/Scenes/Automations
+gated as FR-001..004); chat (thinking indicator + hide single-model pill); Context; Knowledge.
+
+**Done (this batch — Users → Events + Cameras):**
+- **Users** (`app/users/page.tsx`) — ShellPage + `.card/.rows/.lrow/.badge/.empty`. Kept
+  WARP-217 invite flow, WARP-291 confirms, and the WARP-290 row-action a11y (p-2.5 +
+  aria-labels + no opacity-0). Patched `users.invite.test.tsx`'s wholesale `@/lib/api` mock
+  to add `fetchSystemHealth/fetchDevices/fetchHealth` (ShellPage status chip needs them).
+- **Calendar** (`app/calendar/page.tsx` + `MonthView`/`AgendaView`) — ShellPage, `.toolbar`
+  month-nav, `.pills` view toggle, per-source color legend (`.cal-legend/.cal-leg` + a new
+  optional `colorOf` prop on the two views), the iOS `.ds-ios-*` event-detail sheet
+  (Edit→EventForm, Remove→ConfirmDialog→deleteEvent; external events read-only), and a
+  Day/Week/Month `.ds-rep-day` schedule report computed client-side from loaded events.
+- **Events** (`app/events/page.tsx`) — ShellPage, `.tabstrip/.tab/.tcount`, `.search` +
+  Semantic `.badge`, `.card/.empty/.btn` body states. Heavy cards/modals/filter bars kept.
+- **Cameras index** (`app/cameras/page.tsx`) — ShellPage, sub-route nav → `.chiprow/.chip`,
+  `.sect` Pinned/All headers, `.card/.empty` states. Heavy components kept. Branding-guard green.
+- **Cameras People + Plates + Notifications** — ShellPage + back-button-in-actions pattern,
+  `.card/.empty` states; kept all CRUD/ConfirmDialogs + aria-pressed toggles.
 
 **Remaining queue (do in this order):**
-1. **Users** (`app/users/page.tsx`, ~791 LOC) — list + invite + TOTP/2FA dialogs. Keep the
-   WARP-290 `/users/i` a11y contract.
-2. **Calendar** (`app/calendar/*`) — re-skin month/agenda + rail, AND add the design's
-   net-new features from chat2: color-coded synced calendars + legend, the iOS event-detail
-   modal (Edit/Remove, scales to ≥30%/40vw of viewport), and Day/Week/Month **report**
-   generation. Keep `useCalendarEvents/Sources` + CRUD.
-3. **Events** (`app/events/*`, ~503 LOC) — tabs/cards/clip modals; keep semantic search,
-   filters, pagination, retain/review.
-4. **Tier-3 (each its own commit; Network is its own milestone):**
-   - **Cameras** (+ sub-routes) — re-skin chrome, leave Frigate video/canvas.
-   - **Settings** (`components/settings/*`, ~2.9k LOC).
-   - **Files** (`components/FileManager/*`, ~3.5k LOC).
-   - **Network** (`components/network/*`, ~10.8k LOC, 52 files, 7-tab WAI-ARIA tablist) —
-     biggest; preserve tablist roles/keyboard + operation-confirm flows exactly.
+1. **Cameras sub-routes still on old chrome:**
+   - `app/cameras/system/page.tsx` (~521 LOC) — health stat cards + tables + restart confirm.
+   - `app/cameras/[name]/settings/page.tsx` (~600 LOC) — 2-col settings form + sticky save bar.
+   - `app/cameras/[name]/recordings/page.tsx` (~432 LOC) — HLS player + timeline + export.
+   - **Leave** `app/cameras/[name]/page.tsx` and `app/cameras/birdseye/page.tsx` — intentionally
+     immersive full-bleed (`fixed inset-0 bg-black`); do NOT wrap in ShellPage.
+   - Pattern for these: ShellPage + Back("Cameras")/action buttons; keep `<video>`/HLS/MJPEG
+     media + PTZ as-is; neutral copy only (branding guard bans user-facing service names).
+2. **Settings** (`components/settings/*`, ~2.9k LOC).
+3. **Files** (`components/FileManager/*`, ~3.5k LOC).
+4. **Network** (`components/network/*`, ~10.8k LOC, 52 files, 7-tab WAI-ARIA tablist) —
+   biggest; preserve tablist roles/keyboard + operation-confirm flows exactly. A newer,
+   higher-fidelity handoff for the **managed-switch** Network add-on is at
+   `~/Downloads/design_handoff_network_switch/` (port map / PoE / VLAN spec + standalone HTML ref).
 - **Deferred polish:** chat full-layout indigo-surface restyle (thinking+pill done; page is
   already indigo-accented). Optional.
+
+**Note:** the welcome-page design archive URL (in "Design source" above) now returns 404 —
+the foundation is fully built, so it's no longer needed for re-skins; design intent for the
+net-new Calendar features was implemented from the handoff queue description.
 
 ## The established per-page pattern (follow it)
 
