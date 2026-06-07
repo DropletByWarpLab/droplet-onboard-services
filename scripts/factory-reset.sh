@@ -21,8 +21,10 @@
 #
 # Every reset reclaims the Docker build cache (the largest rebuildable disk
 # consumer; `down --rmi all` leaves it behind) so the box returns to a clean
-# out-of-box disk footprint. --purge-images escalates this to a full system
-# prune. Trade-off: the next setup.sh rebuild is a cold build.
+# out-of-box disk footprint. --purge-images additionally reclaims dangling
+# images + unused networks (scoped — never a daemon-wide prune, so sibling
+# project images such as Ollama survive). Trade-off: the next setup.sh rebuild
+# is a cold build.
 #
 # =============================================================================
 set -euo pipefail
@@ -212,12 +214,21 @@ log_success "All services stopped"
 # flag, and an appliance reset that leaves tens of GB behind isn't "clean".
 # Trade-off: the next setup.sh rebuild is a cold build (a few minutes slower);
 # acceptable for an infrequent reset, and it stops the drive from silently
-# filling. --purge-images escalates to a full `docker system prune` so dangling
-# images + unused networks go too (the built images are already gone via
-# `down --rmi all` above; named volumes are Phase 2's job, so no --volumes here).
+# filling. --purge-images extends the reclaim to dangling (untagged) images +
+# unused networks too — but it is deliberately SCOPED, not a daemon-wide
+# `docker system prune -af`: the `-a` there removes every image without a
+# running container, which at reset time (all containers just stopped) would
+# sweep the sibling droplet-local-LLM / Ollama images that deploy alongside
+# this project on the single-box inference host, leaving AI inference broken
+# until they are re-pulled. This project's own built images are already gone
+# via `down --rmi all` above. Named volumes are Phase 2's job, so no --volumes.
 if [ "$PURGE_IMAGES" = "true" ]; then
+  # Scoped on purpose (see block comment above): build cache + dangling
+  # (untagged) images + unused networks. NOT `docker system prune -af` — the
+  # `-a` would also delete tagged sibling-project images (e.g. Ollama).
   run_with_spinner "Reclaiming build cache, dangling images, and networks" \
-    docker system prune -af 2>/dev/null || true
+    sh -c 'docker builder prune -af; docker image prune -f; docker network prune -f' \
+    2>/dev/null || true
 else
   run_with_spinner "Reclaiming Docker build cache" \
     docker builder prune -af 2>/dev/null || true

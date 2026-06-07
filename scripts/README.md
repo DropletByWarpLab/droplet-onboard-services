@@ -224,7 +224,8 @@ Wipes **all** user data, credentials, and configuration — returning the device
   --yes            Skip interactive confirmation
   --reinstall      After wiping, auto-run setup.sh to re-provision
   --purge-images   Also remove built Docker images + dangling images/networks
-                   (escalates the always-on cache reclaim to a full system prune)
+                   (a scoped reclaim — not a daemon-wide system prune, so
+                   sibling project images such as Ollama are left intact)
   -h, --help       Show help
 ```
 
