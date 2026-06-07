@@ -32,6 +32,11 @@ REQUIRED_ENV_VARS=(
   DROPLET_PM_MQ_PASSWORD
   DROPLET_PM_MINIO_ACCESS_KEY
   DROPLET_PM_MINIO_SECRET_KEY
+  # WARP-834: per-device OpenWrt root / rpcd credential. Without this the
+  # routing service silently starts with an empty ubus password and loses
+  # the router (the WARP-826 symptom). Fail-closed here per the convention
+  # set by the Plane secrets block above.
+  OPENWRT_PASSWORD
 )
 
 _validate_env() {
