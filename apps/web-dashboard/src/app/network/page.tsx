@@ -32,6 +32,7 @@ import { PhoneHomeCard } from "@/components/network/PhoneHomeCard";
 import { NetworkSimple } from "@/components/network/NetworkSimple";
 import { SwitchPanel } from "@/components/network/switch/SwitchPanel";
 import { WifiScanPanel } from "@/components/network/WifiScanPanel";
+import { WifiSettingsForm } from "@/components/network/WifiSettingsForm";
 import {
   setWifiSsid,
   setWifiChannel,
@@ -838,13 +839,10 @@ function DevicesTab() {
 function WifiTab() {
   return (
     <div className="space-y-4">
-      <div className="dp-card">
-        <h3 className="type-headline text-label-primary mb-4">WiFi Settings</h3>
-        <p className="type-subheadline text-label-tertiary">
-          WiFi configuration is available through the SSID, password, and channel
-          controls. Use the API or AI chat to modify settings.
-        </p>
-      </div>
+      {/* Issue #12: editable provisioning form so a user who skipped Wi-Fi
+          during onboarding can set the SSID/password here — same write path as
+          the setup wizard's InternetStep. */}
+      <WifiSettingsForm />
 
       {/* WARP-816: the scanner lives in WifiScanPanel so it can distinguish the
           AP-mode "scanning unavailable while broadcasting" state (typed

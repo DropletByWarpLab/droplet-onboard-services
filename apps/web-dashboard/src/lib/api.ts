@@ -3338,6 +3338,27 @@ export async function fetchToolCatalog(): Promise<ToolCatalogResponse> {
   return res.json();
 }
 
+// --- Admin capabilities (nav-gating for optional admin surfaces) ---
+
+export interface AdminCapabilities {
+  /** /admin/claude-activity is wired (GitHub token OR Jira configured). */
+  claudeActivity: boolean;
+  /** /admin/rag-eval is wired (RAG_EVAL_URL set). */
+  ragEval: boolean;
+}
+
+/**
+ * Probe which optional admin surfaces the orchestrator has configured, so the
+ * sidebar can hide nav entries that would otherwise lead to a dead page
+ * (#14 Activity, #15 RAG eval). Admin-only on the backend (403 for non-admins);
+ * the consuming hook treats any failure as "all off".
+ */
+export async function fetchCapabilities(): Promise<AdminCapabilities> {
+  const res = await authFetch(`${BASE}/api/admin/capabilities`);
+  if (!res.ok) throw new Error(`Failed to fetch capabilities: ${res.status}`);
+  return res.json();
+}
+
 // --- WARP-825: Settings Danger Zone — factory reset ---
 
 /** Lifecycle of a factory-reset job, mirroring the orchestrator ResetJobStatus

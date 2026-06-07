@@ -292,17 +292,17 @@ describe("DangerZoneSection — reset flow (WARP-825)", () => {
     expect(screen.getAllByText(/first-run setup/i).length).toBeGreaterThan(0);
   });
 
-  it("calls triggerFactoryReset with the typed device name and shows progress", async () => {
+  it("calls triggerFactoryReset with the fixed 'factory reset' phrase and shows progress", async () => {
     render(<DangerZoneSection />);
     await openModal();
 
-    // Type the device name to clear the friction step.
+    // Type the fixed confirm phrase to clear the friction step.
     const input = await screen.findByLabelText(/type .* to confirm/i);
-    fireEvent.change(input, { target: { value: "droplet-home" } });
+    fireEvent.change(input, { target: { value: "factory reset" } });
 
     fireEvent.click(modalActionButton());
 
-    await waitFor(() => expect(triggerFactoryReset).toHaveBeenCalledWith("droplet-home"));
+    await waitFor(() => expect(triggerFactoryReset).toHaveBeenCalledWith("factory reset"));
     // Progress state mentions the box returning to first-run setup.
     await waitFor(() => expect(screen.getByText(/under way/i)).toBeInTheDocument());
   });
@@ -314,7 +314,7 @@ describe("DangerZoneSection — reset flow (WARP-825)", () => {
     render(<DangerZoneSection />);
     await openModal();
     fireEvent.change(await screen.findByLabelText(/type .* to confirm/i), {
-      target: { value: "droplet-home" },
+      target: { value: "factory reset" },
     });
     fireEvent.click(modalActionButton());
     expect(await screen.findByText(/already in progress/i)).toBeInTheDocument();

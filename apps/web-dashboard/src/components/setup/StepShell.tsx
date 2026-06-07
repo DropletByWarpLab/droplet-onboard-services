@@ -197,6 +197,7 @@ export function StepShell({
   // exactly: `< idx` done, `=== idx` active, `> idx` to-do.
   const nav = useSetupNav();
   const navigate = nav?.navigate;
+  const back = nav?.back;
   const maxReached = nav?.maxReachedIdx ?? idx;
   const showFooter = Boolean(primary || skip || (navigate && idx >= 1));
 
@@ -309,7 +310,7 @@ export function StepShell({
               {navigate && idx >= 1 && (
                 <button
                   type="button"
-                  onClick={() => navigate(STEPS[idx - 1])}
+                  onClick={() => (back ? back() : navigate(STEPS[idx - 1]))}
                   className="dp-btn-secondary type-footnote !px-3"
                 >
                   <ArrowLeft size={16} aria-hidden="true" />

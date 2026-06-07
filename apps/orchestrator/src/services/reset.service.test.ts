@@ -206,6 +206,24 @@ describe("requestFactoryReset — happy path", () => {
   });
 });
 
+describe("requestFactoryReset — fixed confirm phrase (WARP-825 follow-up)", () => {
+  it("accepts the literal 'factory reset' phrase even when it isn't the hostname", async () => {
+    const { prisma, jobs } = makeFakePrisma();
+    const fetchSpy = mockFetchOnce(200, { ok: true });
+
+    const job = await requestFactoryReset(prisma as never, {
+      userId: "owner-1",
+      typedConfirm: "factory reset",
+      targetName: "droplet-home",
+    });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(job.status).toBe("dispatched");
+    // The audit/job still record the canonical device name, not the phrase.
+    expect(jobs[0].targetName).toBe("droplet-home");
+  });
+});
+
 describe("requestFactoryReset — double-fire guard", () => {
   it("refuses a second reset while one is already in flight", async () => {
     const { prisma } = makeFakePrisma();

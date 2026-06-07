@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AlertCircle, MessageSquare, Sparkles } from "lucide-react";
+import ReactMarkdown from "react-markdown";
 import { fetchModels, sendChat } from "@/lib/api";
 import type { ModelInfo } from "@/lib/types";
 import { StepShell } from "@/components/setup/StepShell";
@@ -26,8 +27,9 @@ import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
  *   - POST /api/llm/chat with stream:false and that single user
  *     message. Non-streaming for wizard MVP; the main /chat page
  *     handles streaming for ongoing use.
- *   - Render the response inline. "Take me to the dashboard" finishes
- *     setup.
+ *   - Render the response inline (Markdown, in a scrollable region).
+ *     "Continue" advances to the next step (team) — this is NOT the
+ *     terminal step, so it must not claim to finish setup.
  *
  * Privacy callout is in the LearnMoreCard — explicit reassurance that
  * the prompt + conversation never leave the box, per ADR-002's
@@ -162,7 +164,7 @@ export function AiStep({
       title="Your private AI is ready"
       subtitle="Try it — it runs entirely on your hardware."
       primary={{
-        label: response ? "Take me to the dashboard" : "Ask the AI",
+        label: response ? "Continue" : "Ask the AI",
         loadingLabel: "Thinking…",
         onClick: response ? onComplete : handleAsk,
         isLoading: submitting,
@@ -219,7 +221,7 @@ export function AiStep({
             {SAMPLE_PROMPTS.map((p, i) => (
               <label
                 key={i}
-                className={`flex items-start gap-3 dp-card !py-3 cursor-pointer transition-colors ${
+                className={`flex items-start gap-3 dp-card px-4 !py-3 cursor-pointer transition-colors ${
                   selectedPrompt === i
                     ? "ring-2 ring-accent"
                     : "hover:bg-surface-secondary"
@@ -239,7 +241,7 @@ export function AiStep({
               </label>
             ))}
             <label
-              className={`flex items-start gap-3 dp-card !py-3 cursor-pointer transition-colors ${
+              className={`flex items-start gap-3 dp-card px-4 !py-3 cursor-pointer transition-colors ${
                 selectedPrompt === SAMPLE_PROMPTS.length
                   ? "ring-2 ring-accent"
                   : "hover:bg-surface-secondary"
@@ -280,9 +282,9 @@ export function AiStep({
                 {localSelected?.name ?? selectedModel}
               </span>
             </div>
-            <p className="type-body text-label-primary whitespace-pre-wrap">
-              {response}
-            </p>
+            <div className="chat-markdown type-body text-label-primary max-h-[40vh] overflow-y-auto">
+              <ReactMarkdown>{response}</ReactMarkdown>
+            </div>
           </div>
         )}
 

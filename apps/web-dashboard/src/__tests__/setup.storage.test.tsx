@@ -243,6 +243,12 @@ describe("setup Storage step (WARP-174)", () => {
     render(<SetupPage />);
     await advanceToStorage();
 
+    // #5: 2 drives default to pooling ON. Toggle it OFF to take the
+    // name-the-drives-separately path (primary becomes "Save and continue").
+    await act(async () => {
+      fireEvent.click(screen.getByRole("switch", { name: /storage pool/i }));
+    });
+
     const inputs = screen.getAllByPlaceholderText(/e\.g\. wedding photos/i);
     fireEvent.change(inputs[0], { target: { value: "Wedding Photos" } });
     fireEvent.change(inputs[1], { target: { value: "Camera Footage" } });
@@ -265,8 +271,13 @@ describe("setup Storage step (WARP-174)", () => {
     expect(screen.getByText(/discovering your devices/i)).toBeInTheDocument();
   });
 
-  it("Skip for now advances without calling updateDriveLabel", async () => {
-    fetchDrivesMock.mockResolvedValue(FIXTURE_DRIVES);
+  it("Skip for now advances without calling updateDriveLabel (single disk)", async () => {
+    // #5: only a single disk (can't be pooled) keeps the Skip affordance; with
+    // 2+ drives the step is non-skippable.
+    fetchDrivesMock.mockResolvedValue({
+      drives: [FIXTURE_DRIVES.drives[0]],
+      count: 1,
+    });
     render(<SetupPage />);
     await advanceToStorage();
 
@@ -280,8 +291,13 @@ describe("setup Storage step (WARP-174)", () => {
 
   // ── BUG-3 / ADR-019: the owner's hard constraint, pinned at the wizard ──
 
-  it("OPTIONAL: skipping the storage step creates no pool and formats nothing", async () => {
-    fetchDrivesMock.mockResolvedValue(FIXTURE_DRIVES);
+  it("OPTIONAL: skipping a single-disk storage step creates no pool and formats nothing", async () => {
+    // #5: a single disk can't be pooled, so it stays skippable; skipping it
+    // creates/formats nothing. (2+ drives are non-skippable — covered below.)
+    fetchDrivesMock.mockResolvedValue({
+      drives: [FIXTURE_DRIVES.drives[0]],
+      count: 1,
+    });
     render(<SetupPage />);
     await advanceToStorage();
 
@@ -309,6 +325,11 @@ describe("setup Storage step (WARP-174)", () => {
     });
     render(<SetupPage />);
     await advanceToStorage();
+
+    // #5: toggle pooling OFF to take the name-the-drives path.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("switch", { name: /storage pool/i }));
+    });
 
     const inputs = screen.getAllByPlaceholderText(/e\.g\. wedding photos/i);
     fireEvent.change(inputs[0], { target: { value: "Wedding Photos" } });
@@ -339,6 +360,11 @@ describe("setup Storage step (WARP-174)", () => {
     fetchDrivesMock.mockResolvedValue(FIXTURE_DRIVES);
     render(<SetupPage />);
     await advanceToStorage();
+
+    // #5: toggle pooling OFF to reach the name-the-drives path.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("switch", { name: /storage pool/i }));
+    });
 
     const inputs = screen.getAllByPlaceholderText(/e\.g\. wedding photos/i);
     fireEvent.change(inputs[0], { target: { value: "Drive" } });
@@ -392,43 +418,47 @@ describe("setup Storage step — RAID toggle + calculator (BUG-3 / ADR-019)", ()
     );
   }
 
-  it("defaults the RAID toggle OFF — no level chooser, no create action visible", async () => {
+  it("#5: defaults the RAID toggle ON for 2+ drives — chooser shown, primary is Create pool, no Skip", async () => {
     fetchDrivesMock.mockResolvedValue(FIXTURE_DRIVES);
     render(<SetupPage />);
     await advanceToStorage();
 
     const toggle = raidSwitch();
-    expect(toggle).toHaveAttribute("aria-checked", "false");
-    // The RAID-level chooser is hidden while OFF.
-    expect(screen.queryByRole("radiogroup", { name: /raid level/i })).toBeNull();
-    // The default primary is still the naming step's "Save and continue".
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    // The RAID-level chooser is visible by default, with a level pre-selected.
     expect(
-      screen.getByRole("button", { name: /save and continue/i }),
+      screen.getByRole("radiogroup", { name: /raid level/i }),
     ).toBeInTheDocument();
+    // The primary action is the (gated) Create pool, and 2+ drives have NO Skip.
+    expect(
+      screen.getByRole("button", { name: /create pool/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /skip for now/i })).toBeNull();
   });
 
-  it("OFF keeps the step skippable and creates no pool", async () => {
+  it("#5: toggling the pool OFF switches to naming (Save and continue) and creates no pool", async () => {
     fetchDrivesMock.mockResolvedValue(FIXTURE_DRIVES);
     render(<SetupPage />);
     await advanceToStorage();
 
-    // Toggle stays OFF; Skip advances to discovery with zero pool calls.
+    // Default-on for 2 drives → toggle OFF to keep the drives separate.
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+      fireEvent.click(raidSwitch());
     });
-    expect(screen.getByText(/discovering your devices/i)).toBeInTheDocument();
+    expect(raidSwitch()).toHaveAttribute("aria-checked", "false");
+    // Primary flips to the naming step; 2+ drives remain non-skippable.
+    expect(
+      screen.getByRole("button", { name: /save and continue/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /skip for now/i })).toBeNull();
     expect(requestCreatePoolMock).not.toHaveBeenCalled();
     expect(confirmPoolCommandMock).not.toHaveBeenCalled();
   });
 
-  it("turning the toggle ON reveals the RAID-level chooser", async () => {
+  it("#5: shows the RAID-level chooser by default for 2+ drives", async () => {
     fetchDrivesMock.mockResolvedValue(FIXTURE_DRIVES);
     render(<SetupPage />);
     await advanceToStorage();
-
-    await act(async () => {
-      fireEvent.click(raidSwitch());
-    });
 
     expect(raidSwitch()).toHaveAttribute("aria-checked", "true");
     const group = screen.getByRole("radiogroup", { name: /raid level/i });
@@ -443,10 +473,8 @@ describe("setup Storage step — RAID toggle + calculator (BUG-3 / ADR-019)", ()
     fetchDrivesMock.mockResolvedValue(FIXTURE_DRIVES);
     render(<SetupPage />);
     await advanceToStorage();
-    await act(async () => {
-      fireEvent.click(raidSwitch());
-    });
-
+    // #5: pooling is ON by default for 2+ drives, so the chooser is already
+    // shown — no toggle needed.
     for (const name of [/RAID 5/i, /RAID 6/i, /RAID 10/i]) {
       const radio = screen.getByRole("radio", { name });
       expect(radio).toBeDisabled();
@@ -477,10 +505,7 @@ describe("setup Storage step — RAID toggle + calculator (BUG-3 / ADR-019)", ()
     });
     render(<SetupPage />);
     await advanceToStorage();
-    await act(async () => {
-      fireEvent.click(raidSwitch());
-    });
-
+    // #5: pooling ON by default → calculator shown without a toggle.
     // JBOD/RAID0 = 3.6 TB, RAID1 = 1.8 TB. Sizes render in the mono font.
     expect(screen.getAllByText(/3\.6 TB/).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/1\.8 TB/).length).toBeGreaterThan(0);
@@ -499,10 +524,7 @@ describe("setup Storage step — RAID toggle + calculator (BUG-3 / ADR-019)", ()
 
     render(<SetupPage />);
     await advanceToStorage();
-    await act(async () => {
-      fireEvent.click(raidSwitch());
-    });
-    // Pick RAID 1 (mirror).
+    // #5: pooling ON by default. Pick RAID 1 (mirror).
     await act(async () => {
       fireEvent.click(screen.getByRole("radio", { name: /RAID 1 —/i }));
     });
@@ -575,9 +597,7 @@ describe("setup Storage step — RAID toggle + calculator (BUG-3 / ADR-019)", ()
 
     render(<SetupPage />);
     await advanceToStorage();
-    await act(async () => {
-      fireEvent.click(raidSwitch());
-    });
+    // #5: pooling ON by default — pick RAID 1, then create.
     await act(async () => {
       fireEvent.click(screen.getByRole("radio", { name: /RAID 1 —/i }));
     });
@@ -609,13 +629,11 @@ describe("setup Storage step — RAID toggle + calculator (BUG-3 / ADR-019)", ()
     fetchDrivesMock.mockResolvedValue(FIXTURE_DRIVES);
     render(<SetupPage />);
     await advanceToStorage();
-    await act(async () => {
-      fireEvent.click(raidSwitch());
-    });
+    // #5: pooling ON by default + a level pre-selected. Re-picking a level
+    // must never auto-create — only the explicit Create pool does.
     await act(async () => {
       fireEvent.click(screen.getByRole("radio", { name: /RAID 1 —/i }));
     });
-    // Merely turning the toggle on and picking a level must never auto-create.
     expect(requestCreatePoolMock).not.toHaveBeenCalled();
     expect(confirmPoolCommandMock).not.toHaveBeenCalled();
   });

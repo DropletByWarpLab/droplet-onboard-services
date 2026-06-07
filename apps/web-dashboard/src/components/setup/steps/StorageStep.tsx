@@ -38,6 +38,16 @@ import {
  * token) → confirmPoolCommand (execute). Nothing auto-creates; the AI never
  * reaches this path (the destructive ops aren't in tools-core at all).
  *
+ * #5 ADDENDUM (owner-directed reversal of ADR-019's default-OFF): with **2+
+ * drives** the pool toggle now defaults **ON** with a sensible level
+ * pre-selected, and the step is **non-skippable** — the customer either creates
+ * a pool or toggles it off and names the drives. The data-safety that motivated
+ * ADR-019 is preserved: pooling still NEVER auto-creates (the primary "Create
+ * pool" requires the owner-gated confirm dialog + the host-script typed
+ * double-confirm, which refuses any drive with data). A single disk keeps the
+ * default-OFF, skippable behavior (it can't be pooled). Zero drives still
+ * auto-skip.
+ *
  * Auto-skip when zero drives — a single-disk box has nothing to label or
  * pool here, and the wizard shouldn't make the customer click "Skip" on a
  * no-op step.
@@ -48,9 +58,15 @@ import {
 export function StorageStep({
   onComplete,
   onSkip,
+  onAutoSkip,
 }: {
   onComplete: () => void;
   onSkip: () => void;
+  /** Invoked when the step skips ITSELF on mount (no drives / bridge down) —
+   *  distinct from the user tapping "Skip for now" (onSkip). The wizard uses
+   *  this to advance WITHOUT recording the step in Back history, so Back skips
+   *  over it. Falls back to onSkip when not provided (older callers/tests). */
+  onAutoSkip?: () => void;
 }) {
   const [drives, setDrives] = useState<DriveInfo[]>([]);
   const [names, setNames] = useState<Record<string, string>>({});
@@ -98,21 +114,30 @@ export function StorageStep({
         initial[d.uuid] = d.displayName ?? "";
       }
       setNames(initial);
+      // #5: with 2+ drives, default to pooling ON (a sensible level is
+      // pre-selected by the effect below) so the customer lands on a
+      // ready-to-create pool. They can still keep the drives separate by
+      // toggling the pool off. A single disk can't be pooled, so it's left
+      // OFF (naming only). Reversal of ADR-019's default-OFF — see the
+      // component header note.
+      if (list.length >= 2) {
+        setRaidOn(true);
+      }
       // Auto-skip when there's nothing to label. Lets the wizard land
       // on the next step without a "Skip" click on an empty page.
       if (list.length === 0) {
-        onSkip();
+        (onAutoSkip ?? onSkip)();
       }
     } catch (e) {
       // Bridge unreachable / dev-mode without it — treat as "no drives"
       // and skip silently. Customer can label drives later from /storage.
-      onSkip();
+      (onAutoSkip ?? onSkip)();
       const _msg = e instanceof Error ? e.message : String(e);
       void _msg;
     } finally {
       setLoading(false);
     }
-  }, [onSkip]);
+  }, [onSkip, onAutoSkip]);
 
   useEffect(() => {
     load();
@@ -139,6 +164,17 @@ export function StorageStep({
       ),
     [drives],
   );
+
+  // #5: when pooling auto-enables (2+ drives) pre-select the first buildable
+  // RAID level so the customer lands on a ready-to-create pool. Only fills when
+  // nothing is chosen yet, so it never overrides an explicit pick or re-selects
+  // after the owner clears it.
+  useEffect(() => {
+    if (raidOn && !chosenLevel) {
+      const best = raidOptions.find((o) => o.selectable);
+      if (best) setChosenLevel(best.level);
+    }
+  }, [raidOn, chosenLevel, raidOptions]);
 
   // Drives that will be erased if the owner creates a pool — every detected
   // drive with a real device path. Their sizes feed the blast-radius copy.
@@ -313,7 +349,9 @@ export function StorageStep({
 
   // When RAID is on AND the owner has picked a buildable level, the primary
   // action becomes the (destructive) create. Otherwise it stays the naming
-  // step's "Save and continue". The step is ALWAYS skippable.
+  // step's "Save and continue". #5: the step is skippable ONLY for a single
+  // disk (which can't be pooled); with 2+ drives it's non-skippable — the
+  // customer either creates a pool or toggles it off and names the drives.
   const createMode = raidOn && !!chosenOption?.selectable;
   const primary = createMode
     ? {
@@ -334,7 +372,9 @@ export function StorageStep({
       title="Name your storage"
       subtitle="Give each drive a name so you remember what's on it."
       primary={primary}
-      skip={{ label: "Skip for now", onClick: onSkip }}
+      skip={
+        drives.length < 2 ? { label: "Skip for now", onClick: onSkip } : undefined
+      }
     >
       {/* WARP-820 (finding #3): on a short landscape phone the drive cards + the
           optional RAID/Adopt sections + the help card are taller than the now

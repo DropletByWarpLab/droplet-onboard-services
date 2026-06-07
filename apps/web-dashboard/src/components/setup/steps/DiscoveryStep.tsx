@@ -2,14 +2,16 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  ArrowRight,
+  AlertCircle,
+  Check,
+  KeyRound,
   Lightbulb,
   Radar,
   ThermometerSun,
   ToggleRight,
   Wifi,
 } from "lucide-react";
-import { fetchMatterDevices } from "@/lib/api";
+import { commissionMatterDevice, fetchMatterDevices } from "@/lib/api";
 import type { MatterDevice, MatterGrouped } from "@/lib/types";
 import { StepShell } from "@/components/setup/StepShell";
 import { ScrollRegion } from "@/components/setup/ScrollRegion";
@@ -73,6 +75,18 @@ export function DiscoveryStep({
   const timerRef = useRef<ReturnType<typeof setInterval>>();
   const seenIdsRef = useRef<Set<string>>(new Set());
   const lastFoundAtSecRef = useRef<number>(0);
+
+  // WARP-102 follow-up: inline manual Matter pairing-code entry. The standalone
+  // QR scanner lives at /devices/add-matter, but navigating there mid-wizard
+  // bounces the customer back (AuthGate guards every non-setup route while the
+  // appliance is unclaimed) — which read as "the QR option breaks setup and
+  // loops". The pairing code printed on the device / its packaging / under the
+  // QR is the same value the QR encodes, so a text field covers both the "QR
+  // handy" and "written code" cases without ever leaving setup.
+  const [manualCode, setManualCode] = useState("");
+  const [manualBusy, setManualBusy] = useState(false);
+  const [manualError, setManualError] = useState<string | null>(null);
+  const [manualOk, setManualOk] = useState<string | null>(null);
 
   // Read latest scanSeconds inside pollOnce via a ref so the callback's
   // identity stays stable across re-renders (we don't want startDiscovery
@@ -193,6 +207,38 @@ export function DiscoveryStep({
     onContinue(discoveredDevices.length);
   }
 
+  // Commission a device straight from the typed pairing code. Matter codes are
+  // 11 digits (short) or 21 digits (long); strip the spaces/dashes people copy
+  // off a label before validating. On success the active poll surfaces the new
+  // device (seenIdsRef dedups), so we just nudge one immediate poll.
+  async function handleManualAdd() {
+    const code = manualCode.replace(/[\s-]/g, "");
+    if (!/^(\d{11}|\d{21})$/.test(code)) {
+      setManualOk(null);
+      setManualError(
+        "Enter the 11- or 21-digit pairing code from the device, its box, or under the QR label.",
+      );
+      return;
+    }
+    setManualError(null);
+    setManualOk(null);
+    setManualBusy(true);
+    try {
+      await commissionMatterDevice(code);
+      setManualCode("");
+      setManualOk("Device added — it'll show up in the list in a moment.");
+      void pollOnce();
+    } catch (e) {
+      setManualError(
+        e instanceof Error
+          ? e.message
+          : "Couldn't add that device. Double-check the code and try again.",
+      );
+    } finally {
+      setManualBusy(false);
+    }
+  }
+
   return (
     <StepShell
       current="discovery"
@@ -310,34 +356,68 @@ export function DiscoveryStep({
         </div>
       )}
 
-      {/* WARP-102 — Add-by-QR affordance. For devices that aren't yet
-          on the LAN (still in packaging) or that the customer wants to
-          scan from a label. /devices/add-matter is the canonical
-          scanner; linking here so first-run customers find it without
-          hunting through the dashboard. Returns to the wizard via
-          browser back. */}
+      {/* WARP-102 follow-up — inline manual pairing-code entry. Replaces the
+          link to the standalone /devices/add-matter scanner, which bounced the
+          customer out of the wizard mid-setup (AuthGate guards non-setup routes
+          while the appliance is unclaimed). The QR code on a Matter device
+          encodes this same code, so typing it off the QR label / packaging
+          works without a camera and without leaving setup. */}
       <div className="border-t border-separator-default pt-4 mt-2 mb-4">
-        <a
-          href="/devices/add-matter"
-          className="block w-full text-left p-3 bg-fill-tertiary hover:bg-fill-secondary border border-separator-default rounded-lg transition-colors"
+        <label
+          htmlFor="matter-manual-code"
+          className="flex items-center gap-2 type-subheadline font-medium text-label-primary mb-1"
         >
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="type-subheadline font-medium text-label-primary">
-                Have a device&apos;s QR code handy?
-              </p>
-              <p className="type-footnote text-label-tertiary mt-0.5">
-                Scan it now — most Matter devices ship with one on the
-                packaging or label.
-              </p>
-            </div>
-            <ArrowRight
-              size={16}
-              className="text-label-tertiary flex-shrink-0"
+          <KeyRound size={14} aria-hidden="true" />
+          Have a pairing code or QR handy?
+        </label>
+        <p className="type-footnote text-label-tertiary mb-2">
+          Type the 11- or 21-digit code from the device, its box, or under its QR
+          label.
+        </p>
+        <div className="flex gap-2">
+          <input
+            id="matter-manual-code"
+            type="text"
+            inputMode="numeric"
+            value={manualCode}
+            onChange={(e) => setManualCode(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handleManualAdd();
+            }}
+            placeholder="3497-0112-3320"
+            className="dp-input flex-1 font-mono"
+            disabled={manualBusy}
+            autoComplete="off"
+          />
+          <button
+            type="button"
+            onClick={handleManualAdd}
+            disabled={manualBusy || !manualCode.trim()}
+            className="dp-btn-secondary"
+          >
+            {manualBusy ? "Adding…" : "Add device"}
+          </button>
+        </div>
+        {manualError && (
+          <div className="flex items-start gap-2 type-footnote text-system-red mt-2">
+            <AlertCircle
+              size={14}
+              className="mt-0.5 flex-shrink-0"
               aria-hidden="true"
             />
+            <span>{manualError}</span>
           </div>
-        </a>
+        )}
+        {manualOk && (
+          <div className="flex items-start gap-2 type-footnote text-system-green mt-2">
+            <Check
+              size={14}
+              className="mt-0.5 flex-shrink-0"
+              aria-hidden="true"
+            />
+            <span>{manualOk}</span>
+          </div>
+        )}
       </div>
 
     </StepShell>

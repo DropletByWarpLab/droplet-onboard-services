@@ -48,6 +48,7 @@ import {
   disableDetection,
   deleteCamera,
   addCamera,
+  syncCamerasFromDb,
   fetchEvents,
   buildRecordingClipUrl,
   buildVodMasterUrl,
@@ -108,6 +109,23 @@ function isValidEventId(id: string): boolean {
 
 export function createCamerasRouter(prisma: PrismaClient): Router {
   const router = Router();
+
+  // #11: after any change to the set of cameras the DB knows about, reconcile
+  // Frigate's config so entries orphaned by a prior version / Postgres wipe
+  // (e.g. camera_192_168_20_176) are pruned. Best-effort — a Frigate failure
+  // must not fail the DB op; the prune is idempotent and the next mutation
+  // retries it.
+  async function reconcileFrigateCameras(): Promise<void> {
+    try {
+      const all = await prisma.camera.findMany({ select: { name: true } });
+      const removed = await syncCamerasFromDb(all.map((c) => c.name));
+      if (removed.length > 0) {
+        logger.info({ removed }, "Reconciled Frigate cameras after DB change");
+      }
+    } catch (err) {
+      logger.warn({ err }, "Frigate camera reconciliation failed (non-fatal)");
+    }
+  }
 
   // ==========================================================================
   // FIXED-PATH ROUTES (must be registered before :name parameterized routes)
@@ -1211,6 +1229,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         where: { id: req.params.id },
         data: { enabled: true },
       });
+      await reconcileFrigateCameras();
       res.json({ status: "accepted", camera: camera.name });
     } catch (err) {
       next(err);
@@ -1221,6 +1240,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   router.post("/cameras/discovered/:id/reject", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       await prisma.camera.delete({ where: { id: req.params.id } });
+      await reconcileFrigateCameras();
       res.json({ status: "rejected" });
     } catch (err) {
       next(err);
@@ -1559,6 +1579,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
 
       await deleteCamera(req.params.name);
       await prisma.camera.deleteMany({ where: { name: req.params.name } });
+      await reconcileFrigateCameras();
       res.json({ status: "deleted", camera: req.params.name });
     } catch (err) {
       next(err);

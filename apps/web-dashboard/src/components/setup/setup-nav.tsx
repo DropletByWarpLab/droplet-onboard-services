@@ -18,7 +18,7 @@ import type { Step } from "@/components/setup/wizard-steps";
  * isolation) green and makes the new navigation purely additive.
  */
 export interface SetupNav {
-  /** Jump to an already-reached step (the rail rows + the Back button). */
+  /** Jump to an already-reached step (the rail rows). */
   navigate: (step: Step) => void;
   /**
    * Highest step index the customer has reached this session. A step at or
@@ -27,6 +27,15 @@ export interface SetupNav {
    * going back doesn't relock the steps you already completed.
    */
   maxReachedIdx: number;
+  /**
+   * Step back one VISITED step (the Back button). Pops the page's visited
+   * stack, which skips hardware steps that auto-skipped themselves on the way
+   * forward (storage/cameras with nothing to show) — so Back never lands on a
+   * step that immediately bounces forward again. Optional so a `StepShell`
+   * rendered without the page provider (a step under test) falls back to the
+   * previous step in `STEPS`.
+   */
+  back?: () => void;
 }
 
 const SetupNavContext = createContext<SetupNav | null>(null);

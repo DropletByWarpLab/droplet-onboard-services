@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useAuth } from "@/lib/auth";
 import { patchSetupStep } from "@/lib/api";
 import { WelcomeStep } from "@/components/setup/steps/WelcomeStep";
@@ -88,15 +88,68 @@ export default function SetupPage() {
   const [displayName, setDisplayName] = useState("");
   const [discoveredCount, setDiscoveredCount] = useState(0);
 
-  // Move the wizard AND persist the new step so a refresh resumes here. The
-  // PATCH is fire-and-forget (patchSetupStep swallows network errors) — local
-  // progress must never be gated on the round-trip. Used for forward completion
-  // AND backward navigation (the rail rows + the Back button); `maxReachedIdx`
-  // only ever grows, so jumping back never relocks an already-completed step.
+  // Refs mirror the nav state so setStep/autoSkip/back stay identity-stable
+  // (deps []) without reading stale closures.
+  const stepRef = useRef<Step>(step);
+  const maxReachedRef = useRef<number>(maxReachedIdx);
+  // Visited-step stack for the Back button. Auto-skipped hardware steps
+  // (storage/cameras with nothing to show) are NOT pushed here, so Back skips
+  // over them instead of landing on a step that immediately auto-skips forward
+  // again — the "Back goes back too far / bounces" report.
+  const historyRef = useRef<Step[]>([]);
+
+  // Forward + rail navigation. Records the step we're leaving (for Back) and
+  // persists the resume pointer ONLY when advancing past the furthest-reached
+  // step. Persisting on a BACKWARD jump would lower the stored pointer, so a
+  // mid-wizard refresh would re-seed `maxReachedIdx` lower and re-lock every
+  // completed step past it (PR #518 review: the pointer must be monotonic).
   const setStep = useCallback((next: Step) => {
+    const cur = stepRef.current;
+    if (cur !== next && STEPS.indexOf(next) > STEPS.indexOf(cur)) historyRef.current = [...historyRef.current, cur];
     setStepState(next);
-    setMaxReachedIdx((prev) => Math.max(prev, STEPS.indexOf(next)));
-    void patchSetupStep(next);
+    stepRef.current = next;
+    const nextIdx = STEPS.indexOf(next);
+    if (nextIdx > maxReachedRef.current) {
+      maxReachedRef.current = nextIdx;
+      setMaxReachedIdx(nextIdx);
+      // Fire-and-forget; local progress is never gated on the round-trip.
+      void patchSetupStep(next);
+    }
+  }, []);
+
+  // A hardware step (storage/cameras) auto-skipping itself on mount because it
+  // has nothing to show. Same forward move + monotonic persist as setStep, but
+  // it does NOT record history — so Back skips straight over the transparent
+  // step rather than bouncing on it.
+  const autoSkip = useCallback((next: Step) => {
+    setStepState(next);
+    stepRef.current = next;
+    const nextIdx = STEPS.indexOf(next);
+    if (nextIdx > maxReachedRef.current) {
+      maxReachedRef.current = nextIdx;
+      setMaxReachedIdx(nextIdx);
+      void patchSetupStep(next);
+    }
+  }, []);
+
+  // Back button. Pops the visited stack (auto-skipped steps were never pushed,
+  // so they're skipped); falls back to the previous step in STEPS when there's
+  // no recorded history (e.g. resumed mid-wizard after a refresh). Never lowers
+  // the persisted pointer.
+  const back = useCallback(() => {
+    const h = historyRef.current;
+    if (h.length > 0) {
+      const prev = h[h.length - 1];
+      historyRef.current = h.slice(0, -1);
+      setStepState(prev);
+      stepRef.current = prev;
+      return;
+    }
+    const i = STEPS.indexOf(stepRef.current);
+    if (i > 0) {
+      setStepState(STEPS[i - 1]);
+      stepRef.current = STEPS[i - 1];
+    }
   }, []);
 
   // PR #384 — each step paints its own full-bleed aurora-rail `StepShell`, so
@@ -112,7 +165,7 @@ export default function SetupPage() {
   }
 
   return (
-    <SetupNavProvider value={{ navigate: setStep, maxReachedIdx }}>
+    <SetupNavProvider value={{ navigate: setStep, maxReachedIdx, back }}>
       {step === "welcome" && (
         <WelcomeStep onContinue={() => setStep("claim")} />
       )}
@@ -150,6 +203,7 @@ export default function SetupPage() {
         <StorageStep
           onComplete={() => setStep("discovery")}
           onSkip={() => setStep("discovery")}
+          onAutoSkip={() => autoSkip("discovery")}
         />
       )}
 
@@ -166,6 +220,7 @@ export default function SetupPage() {
         <CamerasStep
           onComplete={() => setStep("vpn")}
           onSkip={() => setStep("vpn")}
+          onAutoSkip={() => autoSkip("vpn")}
         />
       )}
 

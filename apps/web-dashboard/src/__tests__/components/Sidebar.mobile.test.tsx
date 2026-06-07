@@ -86,6 +86,19 @@ vi.mock("framer-motion", async () => {
   return { ...actual, useReducedMotion: () => true };
 });
 
+// #14/#15 — Sidebar gates the Activity + RAG-eval entries on backend
+// capabilities (GET /api/admin/capabilities). A settable ref lets cases flip
+// them; default OFF (hidden) so the existing drawer expectations hold.
+const capsRef = {
+  current: { claudeActivity: false, ragEval: false } as {
+    claudeActivity: boolean;
+    ragEval: boolean;
+  },
+};
+vi.mock("@/lib/hooks/useCapabilities", () => ({
+  useCapabilities: () => capsRef.current,
+}));
+
 import { Sidebar } from "@/components/Sidebar";
 import { Home as HomeIcon } from "lucide-react";
 
@@ -394,5 +407,44 @@ describe("<Sidebar> desktop branch a11y (WARP-290)", () => {
     expect(settingsLink).toHaveAttribute("aria-current", "page");
     const homeLink = within(aside).getByRole("link", { name: /home/i });
     expect(homeLink).not.toHaveAttribute("aria-current");
+  });
+});
+
+// ── #14/#15 — capability-gated admin nav entries ────────────────────────
+describe("Sidebar — admin capability nav-gating (#14/#15)", () => {
+  beforeEach(() => {
+    pathnameRef.current = "/";
+    capsRef.current = { claudeActivity: false, ragEval: false };
+  });
+
+  it("hides Activity + RAG eval when their capabilities are off", () => {
+    render(<Sidebar />);
+    const bottomNav = screen.getByRole("navigation", {
+      name: /bottom navigation/i,
+    });
+    fireEvent.click(within(bottomNav).getByRole("button", { name: /more/i }));
+    const dialog = screen.getByRole("dialog");
+    expect(
+      within(dialog).queryByRole("link", { name: /^activity$/i }),
+    ).toBeNull();
+    expect(
+      within(dialog).queryByRole("link", { name: /rag eval/i }),
+    ).toBeNull();
+  });
+
+  it("shows Activity + RAG eval once their capabilities are wired", () => {
+    capsRef.current = { claudeActivity: true, ragEval: true };
+    render(<Sidebar />);
+    const bottomNav = screen.getByRole("navigation", {
+      name: /bottom navigation/i,
+    });
+    fireEvent.click(within(bottomNav).getByRole("button", { name: /more/i }));
+    const dialog = screen.getByRole("dialog");
+    expect(
+      within(dialog).getByRole("link", { name: /^activity$/i }),
+    ).toHaveAttribute("href", "/admin/claude-activity");
+    expect(
+      within(dialog).getByRole("link", { name: /rag eval/i }),
+    ).toHaveAttribute("href", "/admin/rag-eval");
   });
 });
