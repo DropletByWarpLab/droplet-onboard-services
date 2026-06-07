@@ -35,7 +35,7 @@ generate_env() {
   log_info "Generating device-unique secrets..."
 
   # --- Generate all secrets ---
-  local pg_password redis_password mqtt_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display ops_token service_token_mcp service_token_email orchestrator_sampler_token ai_gateway_sampler_token ollama_url
+  local pg_password redis_password mqtt_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display ops_token service_token_mcp service_token_email orchestrator_sampler_token ai_gateway_sampler_token ollama_url openwrt_password
   # WARP-503 — embedded Plane PM stack secrets (ADR-010, spec WARP-498).
   local pm_db_password pm_secret_key pm_admin_token pm_webhook_secret pm_web_url
   # Plane v0.24.1 also needs a RabbitMQ broker (celery) + MinIO object storage.
@@ -44,6 +44,10 @@ generate_env() {
   redis_password=$(_gen_password 24)
   mqtt_password=$(_gen_password 24)
   nc_password=$(_gen_password 24)
+  # WARP-834: per-device OpenWrt rpcd/root password. _gen_password keeps it
+  # alphanumeric ([A-Za-z0-9]) so it's safe for `passwd`, the docker secret
+  # file, and the ubus `… login` JSON string (no shell/JSON-hostile chars).
+  openwrt_password=$(_gen_password 24)
   device_secret=$(_gen_fernet_key)
   device_secret_key=$(openssl rand -base64 32)
   jwt_secret=$(openssl rand -hex 64)
@@ -184,6 +188,18 @@ JWT_SECRET=$jwt_secret
 
 # --- Routing service bearer (orchestrator, camera-discovery → routing) ---
 ROUTING_SERVICE_TOKEN=$routing_service_token
+
+# --- OpenWrt rpcd/root password (WARP-834) ---
+# Per-device password feeding sync_openwrt_password_secret() ->
+# docker/secrets/openwrt_password -> /run/secrets/openwrt_password. It serves
+# two consumers in lockstep: routing's _load_openwrt_password() (services/
+# routing/main.py) uses it for ubus auth, AND droplet-openwrt-attach sets the
+# OpenWrt container's root password to match. An empty value previously left
+# the router root password unset, so ubus auth never came up. Rotate via
+# `sudo systemctl restart droplet-openwrt-attach.service` (sets the container
+# root pw + restarts routing together) — NOT a bare `docker compose restart
+# routing`, which would present the new pw to a container still on the old one.
+OPENWRT_PASSWORD=$openwrt_password
 
 # --- Voice service bearer (voice-io → orchestrator /api/llm/chat) ---
 # WARP-154. Read by orchestrator's authMiddleware (matchServiceToken in
@@ -331,6 +347,7 @@ EOF
   log_info "  DEVICE_SECRET_KEY : ${device_secret_key:0:8}****"
   log_info "  JWT_SECRET        : ${jwt_secret:0:8}****"
   log_info "  ROUTING_TOKEN     : ${routing_service_token:0:8}****"
+  log_info "  OPENWRT_PASSWORD  : ${openwrt_password:0:4}****"
   log_info "  VOICE_TOKEN       : ${service_token_voice:0:8}****"
   log_info "  DISPLAY_TOKEN     : ${service_token_display:0:8}****"
   log_info "  OPS_TOKEN         : ${ops_token:0:8}****"
@@ -432,6 +449,10 @@ migrate_env() {
   _migrate_ensure_key ROUTING_SERVICE_TOKEN "$(openssl rand -hex 32)"
   _migrate_ensure_key ROUTING_MODE "$routing_mode_default"
   _migrate_ensure_key COMPOSE_PROFILES "$compose_profiles_default"
+  # WARP-834 backfill: existing installs predate the per-box OpenWrt password.
+  # Without it sync_openwrt_password_secret() writes an empty secret file and
+  # the OpenWrt container root pw stays unset (ubus auth never comes up).
+  _migrate_ensure_key OPENWRT_PASSWORD "$(_gen_password 24)"
   # WARP-154 backfill: existing installs predate the voice service-token
   # path; without this key voice-io will 401 on every /api/llm/chat call.
   _migrate_ensure_key SERVICE_TOKEN_VOICE "$(openssl rand -hex 32)"

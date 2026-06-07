@@ -139,6 +139,54 @@ else
   fail "generate_env failed on second call"
 fi
 
+# --- OPENWRT_PASSWORD generation (WARP-834) -------------------------------
+# generate_env must now mint a per-device OpenWrt rpcd/root password.
+# sync_openwrt_password_secret() writes this value into
+# docker/secrets/openwrt_password, which routing's _load_openwrt_password()
+# reads for ubus auth AND droplet-openwrt-attach uses to set the container
+# root pw. An empty value previously left the router root password unset.
+OPENWRT_PASS=$( { grep "^OPENWRT_PASSWORD=" "$TMP_ROOT/.env" || true; } | cut -d= -f2-)
+if [ -n "$OPENWRT_PASS" ]; then
+  pass "OPENWRT_PASSWORD is set (${OPENWRT_PASS:0:4}****)"
+else
+  fail "OPENWRT_PASSWORD is empty in generated .env (router root pw stays unset)"
+fi
+
+# Strength: >= 20 chars, alphanumeric only (safe for passwd, the secret file,
+# and the ubus login JSON string — no shell/JSON-hostile characters).
+if [ "${#OPENWRT_PASS}" -ge 20 ] && printf '%s' "$OPENWRT_PASS" | grep -qE '^[A-Za-z0-9]+$'; then
+  pass "OPENWRT_PASSWORD is strong (>= 20 chars, alphanumeric)"
+else
+  fail "OPENWRT_PASSWORD is weak (len=${#OPENWRT_PASS}, expected >= 20 alphanumeric chars)"
+fi
+
+# Idempotent — a second generate_env must not rotate OPENWRT_PASSWORD
+# (mirrors the POSTGRES_PASSWORD idempotency check above).
+OPENWRT_PASS_FIRST="$OPENWRT_PASS"
+if generate_env >/dev/null 2>&1; then
+  OPENWRT_PASS_SECOND=$( { grep "^OPENWRT_PASSWORD=" "$TMP_ROOT/.env" || true; } | cut -d= -f2-)
+  if [ "$OPENWRT_PASS_FIRST" = "$OPENWRT_PASS_SECOND" ]; then
+    pass "OPENWRT_PASSWORD is idempotent (second generate_env keeps existing value)"
+  else
+    fail "OPENWRT_PASSWORD rotated on second generate_env (not idempotent)"
+  fi
+else
+  fail "generate_env failed on the OPENWRT_PASSWORD idempotency re-run"
+fi
+
+# migrate_env backfill — existing installs predate the per-box OpenWrt
+# password. Strip the line from a generated .env, run migrate_env, and assert
+# exactly one non-empty OPENWRT_PASSWORD line is restored.
+sed -i.bak '/^OPENWRT_PASSWORD=/d' "$TMP_ROOT/.env" && rm -f "$TMP_ROOT/.env.bak"
+migrate_env >/dev/null 2>&1 || true
+OPENWRT_PASS_LINE_COUNT=$(grep -cE '^OPENWRT_PASSWORD=' "$TMP_ROOT/.env" || true)
+OPENWRT_PASS_MIGRATED=$( { grep -E '^OPENWRT_PASSWORD=' "$TMP_ROOT/.env" || true; } | head -n 1 | cut -d= -f2-)
+if [ "$OPENWRT_PASS_LINE_COUNT" = "1" ] && [ -n "$OPENWRT_PASS_MIGRATED" ]; then
+  pass "migrate_env backfills exactly one non-empty OPENWRT_PASSWORD line"
+else
+  fail "migrate_env backfill wrong (lines=${OPENWRT_PASS_LINE_COUNT}, value='${OPENWRT_PASS_MIGRATED:0:4}…')"
+fi
+
 # =============================================================================
 # Phase 3: single-box .env knobs — configure_single_box_env (WARP-654 follow-up)
 # =============================================================================
