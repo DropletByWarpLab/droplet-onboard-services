@@ -577,11 +577,13 @@ services:
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- RAG eval (RAGAS scoring, scheduled hourly off-hours) ---
-  # WARP-RAG-EVAL: opt-in via `eval` profile because running this on every
-  # user appliance is overkill — RAGAS is GPU-bound and only needed on
-  # development / staging / test boxes where we're tracking retrieval
-  # quality. Enable with `COMPOSE_PROFILES=eval` (or comma-append to the
-  # existing list).
+  # WARP-RAG-EVAL: gated behind the `eval` profile. RAGAS is GPU-bound, so it's
+  # off on profile-less / macOS-dev / multi-box deployments by default; enable
+  # with `COMPOSE_PROFILES=eval` (or comma-append to the existing list).
+  # The single-box shape, which always ships the dGPU RAGAS needs, enables this
+  # by DEFAULT — scripts/lib/single-box.sh appends `eval` to COMPOSE_PROFILES
+  # (bug #15) so /api/admin/rag-eval/* works out-of-the-box. Pause the scheduled
+  # runs there with RAG_EVAL_DISABLED=1 rather than dropping the profile.
   #
   # The container bakes queries.yaml + goldens.yaml + ragas_runner.py at
   # build time. Goldens are part of the image version; updating them
