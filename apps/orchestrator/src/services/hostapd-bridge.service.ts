@@ -36,7 +36,7 @@
 
 import pino from "pino";
 import { config } from "../config.js";
-import { RouterError } from "../types/router-error.js";
+import { RouterError, routerErrorFromResponse } from "../types/router-error.js";
 import { isBridgeConnectionError } from "../lib/bridge-errors.js";
 import type { WriteResult } from "./openwrt.client.js";
 
@@ -81,23 +81,52 @@ export function stageSsid(ssid: string, userId?: string | null): void {
 
 /**
  * Read the AP's current SSID from the bridge (GET /openwrt/qr — same token).
- * Used as the SSID for a password-only change when nothing was staged. Returns
- * null on any failure; the caller turns a null into an explicit RouterError so
- * we never POST an empty SSID (which hostapd would reject).
+ * Used as the SSID for a password-only change when nothing was staged.
+ *
+ * Failure classification (WARP-836): the previous version collapsed EVERY
+ * failure to `null`, and the caller turned any null into RouterError.unreachable
+ * — so a 401/403 from a stale BRIDGE_AUTH_TOKEN (e.g. install-device-bridge.sh
+ * re-run without refreshing the orchestrator env) was mislabeled "device not
+ * reachable", misdirecting triage to the network instead of the token. Now:
+ *   - a TRANSPORT failure (connection refused / DNS / client-side timeout)
+ *     throws RouterError.unreachable — the bridge genuinely didn't answer;
+ *   - an HTTP STATUS error means the bridge IS reachable but rejected the
+ *     request, so it is classified by `routerErrorFromResponse` (401/403 → AUTH)
+ *     — the same centralized classifier the rest of the network surface uses,
+ *     consistent with applyWifi's own BRIDGE_AUTH_UNCONFIGURED no-token guard;
+ *   - a reachable bridge that simply has no SSID in the body returns `null`,
+ *     which the caller turns into "could not determine the current network name"
+ *     (we never POST an empty SSID, which hostapd would reject).
  */
 async function currentSsidFromBridge(): Promise<string | null> {
   const token = bridgeAuthToken();
+  let res: Response;
   try {
-    const res = await fetch(`${BRIDGE_URL}/openwrt/qr`, {
+    res = await fetch(`${BRIDGE_URL}/openwrt/qr`, {
       signal: AbortSignal.timeout(3_000),
       ...(token ? { headers: { "X-Droplet-Auth": token } } : {}),
     });
-    if (!res.ok) return null;
-    const data = (await res.json()) as { ssid?: string };
-    return data.ssid && typeof data.ssid === "string" ? data.ssid : null;
-  } catch {
-    return null;
+  } catch (err) {
+    // The bridge never answered: dropped connection or client-side timeout.
+    if (isBridgeConnectionError(err) || isTimeoutOrAbort(err)) {
+      throw RouterError.unreachable("Set Wi-Fi: device-bridge not reachable", {
+        label: "Set Wi-Fi",
+        cause: err,
+      });
+    }
+    throw RouterError.unknown(
+      `Set Wi-Fi: ${(err as Error).message || "bridge request failed"}`,
+      { label: "Set Wi-Fi" },
+    );
   }
+  // The bridge answered with an HTTP error — it IS reachable. 401/403 → AUTH,
+  // 5xx → unreachable, anything else → unknown-with-status. NOT a blanket
+  // "unreachable" that would point triage at the network.
+  if (!res.ok) {
+    throw routerErrorFromResponse(res, "Set Wi-Fi");
+  }
+  const data = (await res.json().catch(() => ({}))) as { ssid?: string };
+  return data.ssid && typeof data.ssid === "string" ? data.ssid : null;
 }
 
 /** A fetch/abort failure that means "the request didn't get a response" — a
@@ -123,6 +152,9 @@ function isTimeoutOrAbort(err: unknown): boolean {
  *     (fail closed — we never mutate the host AP without the shared secret),
  *   - RouterError.unreachable when the bridge can't be reached (the setup
  *     wizard renders this as the soft "finish from Network later" notice),
+ *   - RouterError.auth (code AUTH) when reading the current SSID and the bridge
+ *     rejects our token (401/403) — distinct from "unreachable" so a stale
+ *     BRIDGE_AUTH_TOKEN points triage at the token, not the network (WARP-836),
  *   - RouterError.unknown carrying the bridge's message on any other non-ok
  *     reply (e.g. the host script's 422 validation refusal).
  */

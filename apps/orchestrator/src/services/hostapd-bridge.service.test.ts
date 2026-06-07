@@ -227,3 +227,38 @@ describe("applyWifi — timeout/abort classification (review #6)", () => {
     },
   );
 });
+
+describe("applyWifi — SSID-read failure classification (WARP-836)", () => {
+  it.each([401, 403])(
+    "maps a %s from the bridge SSID read to AUTH (stale token), not UNREACHABLE",
+    async (status) => {
+      // Nothing staged → applyWifi reads the current SSID from GET /openwrt/qr.
+      // A 401/403 means the bridge IS reachable but rejected our token — that
+      // must surface as an auth problem, NOT "device not reachable".
+      const fetchSpy = mockFetchOnce(status, { ok: false, error: "unauthorized" });
+      await expect(applyWifi("supersecret1")).rejects.toMatchObject({ code: "AUTH" });
+      // It must NOT fall through to the POST write.
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(String(fetchSpy.mock.calls[0][0])).toMatch(/\/openwrt\/qr$/);
+    },
+  );
+
+  it("maps a transport failure on the SSID read to UNREACHABLE", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(
+      Object.assign(new Error("fetch failed"), { cause: { code: "ECONNREFUSED" } }),
+    );
+    await expect(applyWifi("supersecret1")).rejects.toMatchObject({
+      code: "UNREACHABLE",
+    });
+  });
+
+  it("still treats a reachable bridge with no SSID in the body as UNREACHABLE", async () => {
+    // 200 OK but the AP reports no SSID → genuinely can't determine the network
+    // name; we must not POST an empty SSID (hostapd would reject it).
+    const fetchSpy = mockFetchOnce(200, { ok: true });
+    await expect(applyWifi("supersecret1")).rejects.toMatchObject({
+      code: "UNREACHABLE",
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(1); // never reached the POST
+  });
+});
