@@ -457,6 +457,12 @@ configure_single_box_env() {
 #   FRIGATE_RENDER_NODE  iGPU renderD129 (dGPU renderD128 is reserved Ollama)
 #   CAMERA_SUBNET        single-box camera network (br-lan 192.168.20.0/24);
 #                        overrides the multi-box VLAN default 192.168.100.0/24
+#   WIREGUARD_LAN_CIDR/  VPN peer .conf AllowedIPs + DNS, pinned to the single-
+#   WIREGUARD_DNS        box LAN (br-lan 192.168.20.0/24, gateway/dnsmasq at
+#                        192.168.20.1). Overrides the orchestrator's multi-box
+#                        Pi-LAN defaults (192.168.50.x in
+#                        apps/orchestrator/src/config.ts) so a remote VPN client
+#                        can reach the dashboard + resolve *.lan (WARP-839).
 #   OLLAMA_URL           compose-internal `ollama` service
 #   OPENSSL_CONF/FIPS/TPM consumer x86 has no FIPS OpenSSL / TPM 2.0
 #   LLM_MODEL            THE one model (architecture-guard one-model rule)
@@ -498,6 +504,17 @@ EOF
   # real isolated camera VLAN on this shape, this value moves to that VLAN's
   # network in lockstep.
   upsert_env CAMERA_SUBNET       192.168.20.0/24
+  # WARP-839: pin the WireGuard peer LAN CIDR + DNS to the single-box LAN. The
+  # orchestrator's defaults (WIREGUARD_LAN_CIDR=192.168.50.0/24,
+  # WIREGUARD_DNS=192.168.50.1 in apps/orchestrator/src/config.ts) are the
+  # MULTI-BOX Pi LAN. The single-box LAN is br-lan 192.168.20.0/24 with the
+  # gateway + dnsmasq at 192.168.20.1 (droplet.local -> 192.168.20.1), so the
+  # rendered peer .conf AllowedIPs/DNS must point there — otherwise a remote VPN
+  # client can't reach the dashboard or resolve *.lan. Multi-box keeps the
+  # config.ts 192.168.50.x defaults (untouched); this override is written ONLY
+  # on the single-box path.
+  upsert_env WIREGUARD_LAN_CIDR  192.168.20.0/24
+  upsert_env WIREGUARD_DNS       192.168.20.1
   upsert_env OLLAMA_URL          http://ollama:11434
   upsert_env OPENSSL_CONF        ""
   upsert_env DROPLET_FIPS_REQUIRED false
@@ -589,5 +606,5 @@ EOF
   upsert_env SWITCH_SERVICE_URL  "http://${bridge_gw}:8081"
   upsert_env DISPLAY_SERVICE_URL "http://${bridge_gw}:8082"
 
-  log_success "Wrote single-box knobs to .env (idempotent upsert — COMPOSE_PROFILES=${merged_profiles}, CAMERA_SUBNET=192.168.20.0/24, OLLAMA_URL, FIPS off, TPM=mock, OpenWrt 127.0.0.1:8181, LLM_MODEL=gpt-oss:20b, DROPLET_AP_MODE=hostapd, SWITCH_AUTOPROVISION=1 flat-lan, ROUTING/SWITCH/DISPLAY_SERVICE_URL → ${bridge_net} gateway ${bridge_gw})"
+  log_success "Wrote single-box knobs to .env (idempotent upsert — COMPOSE_PROFILES=${merged_profiles}, CAMERA_SUBNET=192.168.20.0/24, WIREGUARD_LAN_CIDR=192.168.20.0/24, WIREGUARD_DNS=192.168.20.1, OLLAMA_URL, FIPS off, TPM=mock, OpenWrt 127.0.0.1:8181, LLM_MODEL=gpt-oss:20b, DROPLET_AP_MODE=hostapd, SWITCH_AUTOPROVISION=1 flat-lan, ROUTING/SWITCH/DISPLAY_SERVICE_URL → ${bridge_net} gateway ${bridge_gw})"
 }

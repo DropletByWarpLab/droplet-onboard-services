@@ -281,6 +281,48 @@ else
   fail "effective CAMERA_SUBNET is '${CAM_SUBNET_EFFECTIVE}' (expected 192.168.20.0/24)"
 fi
 
+# --- Shape-aware WireGuard LAN CIDR/DNS (WARP-839) ------------------------
+# The orchestrator's WIREGUARD_LAN_CIDR/WIREGUARD_DNS defaults
+# (192.168.50.0/24 + 192.168.50.1 in apps/orchestrator/src/config.ts) are the
+# multi-box Pi LAN. The single-box LAN is br-lan 192.168.20.0/24 with the
+# gateway + dnsmasq (droplet.local) at 192.168.20.1, so the rendered VPN peer
+# .conf must advertise AllowedIPs/DNS on the box LAN or a remote client can't
+# reach the dashboard or resolve *.lan. configure_single_box_env must pin both
+# knobs to the single-box network. Two calls already ran above, so this also
+# asserts idempotency + the effective last-wins value.
+WG_CIDR_COUNT=$(grep -cE '^WIREGUARD_LAN_CIDR=192\.168\.20\.0/24$' "$TMP_ROOT/.env" || true)
+if [ "$WG_CIDR_COUNT" = "1" ]; then
+  pass "configure_single_box_env sets WIREGUARD_LAN_CIDR=192.168.20.0/24 (single occurrence, idempotent)"
+else
+  fail "expected exactly one 'WIREGUARD_LAN_CIDR=192.168.20.0/24' in .env, found ${WG_CIDR_COUNT}"
+fi
+
+# Effective (last-wins) WIREGUARD_LAN_CIDR must be the single-box network, not
+# the inherited multi-box 192.168.50.0/24 default — guards an append-without-
+# strip regression that would leave the wrong CIDR as the effective value.
+WG_CIDR_EFFECTIVE=$( { grep -E '^WIREGUARD_LAN_CIDR=' "$TMP_ROOT/.env" || true; } | tail -1 | cut -d= -f2-)
+if [ "$WG_CIDR_EFFECTIVE" = "192.168.20.0/24" ]; then
+  pass "effective (last-wins) WIREGUARD_LAN_CIDR is the single-box network 192.168.20.0/24"
+else
+  fail "effective WIREGUARD_LAN_CIDR is '${WG_CIDR_EFFECTIVE}' (expected 192.168.20.0/24)"
+fi
+
+WG_DNS_COUNT=$(grep -cE '^WIREGUARD_DNS=192\.168\.20\.1$' "$TMP_ROOT/.env" || true)
+if [ "$WG_DNS_COUNT" = "1" ]; then
+  pass "configure_single_box_env sets WIREGUARD_DNS=192.168.20.1 (single occurrence, idempotent)"
+else
+  fail "expected exactly one 'WIREGUARD_DNS=192.168.20.1' in .env, found ${WG_DNS_COUNT}"
+fi
+
+# Effective (last-wins) WIREGUARD_DNS must be the single-box gateway/dnsmasq
+# (192.168.20.1), not the inherited multi-box 192.168.50.1 default.
+WG_DNS_EFFECTIVE=$( { grep -E '^WIREGUARD_DNS=' "$TMP_ROOT/.env" || true; } | tail -1 | cut -d= -f2-)
+if [ "$WG_DNS_EFFECTIVE" = "192.168.20.1" ]; then
+  pass "effective (last-wins) WIREGUARD_DNS is the single-box gateway 192.168.20.1"
+else
+  fail "effective WIREGUARD_DNS is '${WG_DNS_EFFECTIVE}' (expected 192.168.20.1)"
+fi
+
 # ADR-018 item 9: single-box enables switch bring-up auto-provisioning in the
 # flat-lan profile (NOT segmented — single-box has no inter-VLAN routing yet,
 # item 3). Assert both knobs are written exactly once and stay idempotent
