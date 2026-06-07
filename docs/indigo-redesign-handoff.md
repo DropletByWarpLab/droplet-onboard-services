@@ -91,18 +91,22 @@ gated as FR-001..004); chat (thinking indicator + hide single-model pill); Conte
 - **Cameras People + Plates + Notifications** — ShellPage + back-button-in-actions pattern,
   `.card/.empty` states; kept all CRUD/ConfirmDialogs + aria-pressed toggles.
 
+**Done (this batch — Cameras sub-routes):**
+- **Cameras system** (`app/cameras/system/page.tsx`) — ShellPage + Server icon, back/refresh
+  actions; top stat tiles → `Kpi`, detector/GPU/storage panels → `Card` + `Meter`, per-camera
+  FPS table restyled with token colors. Kept 5s SWR refresh + WARP-291 tier-2 restart confirm.
+- **Cameras settings** (`app/cameras/[name]/settings/page.tsx`) — ShellPage + Camera icon;
+  `dp-card`→`.card`, sticky save bar → `.card`+`.btn primary/ghost`. Kept local-draft diff/PATCH
+  save, ToggleRow/SliderRow, ZoneEditor/MotionMaskEditor (inherit indigo accent).
+- **Cameras recordings** (`app/cameras/[name]/recordings/page.tsx`) — ShellPage + Video icon;
+  date picker/hour-nav/export/segment-list cards → `.card`/`.btn`/`.icon-btn`. Kept HlsPlayer,
+  RecordingsTimeline scrubber, seek-on-segment-click, clip export to Nextcloud.
+- **Left immersive (untouched, by design):** `app/cameras/[name]/page.tsx`, `app/cameras/birdseye/page.tsx`.
+
 **Remaining queue (do in this order):**
-1. **Cameras sub-routes still on old chrome:**
-   - `app/cameras/system/page.tsx` (~521 LOC) — health stat cards + tables + restart confirm.
-   - `app/cameras/[name]/settings/page.tsx` (~600 LOC) — 2-col settings form + sticky save bar.
-   - `app/cameras/[name]/recordings/page.tsx` (~432 LOC) — HLS player + timeline + export.
-   - **Leave** `app/cameras/[name]/page.tsx` and `app/cameras/birdseye/page.tsx` — intentionally
-     immersive full-bleed (`fixed inset-0 bg-black`); do NOT wrap in ShellPage.
-   - Pattern for these: ShellPage + Back("Cameras")/action buttons; keep `<video>`/HLS/MJPEG
-     media + PTZ as-is; neutral copy only (branding guard bans user-facing service names).
-2. **Settings** (`components/settings/*`, ~2.9k LOC).
-3. **Files** (`components/FileManager/*`, ~3.5k LOC).
-4. **Network** (`components/network/*`, ~10.8k LOC, 52 files, 7-tab WAI-ARIA tablist) —
+1. **Settings** (`components/settings/*`, ~2.9k LOC).
+2. **Files** (`components/FileManager/*`, ~3.5k LOC).
+3. **Network** (`components/network/*`, ~10.8k LOC, 52 files, 7-tab WAI-ARIA tablist) —
    biggest; preserve tablist roles/keyboard + operation-confirm flows exactly. A newer,
    higher-fidelity handoff for the **managed-switch** Network add-on is at
    `~/Downloads/design_handoff_network_switch/` (port map / PoE / VLAN spec + standalone HTML ref).
