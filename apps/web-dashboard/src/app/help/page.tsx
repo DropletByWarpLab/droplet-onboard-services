@@ -15,6 +15,8 @@ import {
 } from "lucide-react";
 import { WizardReplay } from "@/components/help/WizardReplay";
 import { searchHelp } from "@/lib/help-index";
+import { ShellPage } from "@/components/shell/ShellPage";
+import { LifeBuoy } from "lucide-react";
 
 /**
  * /help — single-page customer-facing manual for Droplet.
@@ -74,31 +76,24 @@ export default function HelpPage() {
     }
   }, []);
 
-  return (
-    <div className="p-6 lg:p-8 max-w-3xl mx-auto">
-      <header className="mb-6">
-        <h1 className="type-large-title text-label-primary mb-2">Help</h1>
-        <p className="type-body text-label-secondary mb-5">
-          Plain answers to the questions that come up most often. Looking
-          for the original setup walkthrough? Tap the button below.
-        </p>
-        <button
-          type="button"
-          onClick={() => setReplayOpen(true)}
-          className="dp-btn-secondary"
-        >
-          <Sparkles size={16} aria-hidden="true" />
-          How Droplet works
-        </button>
-      </header>
+  const howItWorks = (
+    <button type="button" onClick={() => setReplayOpen(true)} className="btn">
+      <Sparkles size={16} aria-hidden="true" />
+      How Droplet works
+    </button>
+  );
 
+  return (
+    <ShellPage
+      icon={<LifeBuoy size={15} />}
+      label="Help"
+      title="Help"
+      sub="Plain answers to the questions that come up most often. Looking for the original setup walkthrough? Tap the button on the right."
+      actions={howItWorks}
+    >
       {/* Search over the local help index. Offline — no cloud round-trip. */}
-      <div className="relative mb-8">
-        <Search
-          size={18}
-          className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary pointer-events-none"
-          aria-hidden="true"
-        />
+      <div className="search" style={{ maxWidth: "none", marginBottom: 24 }}>
+        <Search size={18} aria-hidden="true" />
         <input
           type="search"
           role="searchbox"
@@ -106,57 +101,37 @@ export default function HelpPage() {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search help — cameras, VPN, storage…"
-          className="dp-input !pl-10"
         />
       </div>
 
       {searching ? (
         <section aria-label="Search results">
           {results.length === 0 ? (
-            <div className="dp-card p-8 text-center">
-              <p className="type-headline text-label-primary mb-1">
-                No results for &ldquo;{trimmed}&rdquo;
-              </p>
-              <p className="type-subheadline text-label-secondary mb-5">
-                Nothing in the on-box help matched. Ask the local AI — it
-                can answer in your own words, privately on this Droplet.
-              </p>
-              <button
-                type="button"
-                onClick={askDropletAI}
-                className="dp-btn-primary mx-auto"
-              >
-                <MessageSquare size={16} aria-hidden="true" />
-                Ask Droplet AI
-              </button>
+            <div className="card">
+              <div className="empty">
+                <span className="eh">No results for &ldquo;{trimmed}&rdquo;</span>
+                <span>
+                  Nothing in the on-box help matched. Ask the local AI — it can answer in your own
+                  words, privately on this Droplet.
+                </span>
+                <button type="button" onClick={askDropletAI} className="btn primary" style={{ marginTop: 10 }}>
+                  <MessageSquare size={16} aria-hidden="true" />
+                  Ask Droplet AI
+                </button>
+              </div>
             </div>
           ) : (
-            <div className="space-y-3">
-              <p className="type-footnote text-label-tertiary">
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <p style={{ fontSize: 13, color: "var(--text-muted)" }}>
                 {results.length} result{results.length !== 1 ? "s" : ""}
               </p>
               {results.map((r) => (
-                <a
-                  key={r.id}
-                  href={`#${r.id}`}
-                  onClick={() => setQuery("")}
-                  className="dp-card !p-4 block hover:bg-surface-secondary transition-colors duration-200 ease-smooth"
-                >
-                  <p className="type-subheadline text-label-primary mb-1">
-                    {r.title}
-                  </p>
-                  <p className="type-footnote text-label-secondary line-clamp-2">
-                    {r.summary}
-                  </p>
+                <a key={r.id} href={`#${r.id}`} onClick={() => setQuery("")} className="card hover" style={{ display: "block" }}>
+                  <p style={{ fontSize: 14, fontWeight: 600, color: "var(--text)", marginBottom: 4 }}>{r.title}</p>
+                  <p className="clamp2" style={{ fontSize: 13, color: "var(--text-muted)" }}>{r.summary}</p>
                 </a>
               ))}
-              {/* Always offer the AI even with hits — the article may not be
-                  the exact answer the customer needs. */}
-              <button
-                type="button"
-                onClick={askDropletAI}
-                className="dp-btn-secondary"
-              >
+              <button type="button" onClick={askDropletAI} className="btn">
                 <MessageSquare size={16} aria-hidden="true" />
                 Ask Droplet AI instead
                 <ArrowRight size={16} aria-hidden="true" />
@@ -166,20 +141,12 @@ export default function HelpPage() {
         </section>
       ) : (
         <>
-          <nav
-            aria-label="Help table of contents"
-            className="dp-card !p-4 mb-8"
-          >
-            <p className="type-subheadline text-label-primary mb-2">
-              On this page
-            </p>
-            <ul className="space-y-1 type-footnote text-label-secondary">
+          <nav aria-label="Help table of contents" className="card" style={{ marginBottom: 28 }}>
+            <p style={{ fontSize: 14, fontWeight: 600, color: "var(--text)", marginBottom: 8 }}>On this page</p>
+            <ul style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 13 }}>
               {SECTIONS.map((s) => (
                 <li key={s.anchor}>
-                  <a
-                    href={`#${s.anchor}`}
-                    className="text-accent hover:underline"
-                  >
+                  <a href={`#${s.anchor}`} className="text-accent hover:underline">
                     {s.title}
                   </a>
                 </li>
@@ -188,18 +155,14 @@ export default function HelpPage() {
           </nav>
 
           {SECTIONS.map((section) => (
-            <section
-              key={section.anchor}
-              id={section.anchor}
-              className="mb-10 scroll-mt-20"
-            >
-              <div className="flex items-center gap-2 mb-3">
-                <section.Icon size={20} className="text-accent" />
-                <h2 className="type-title-2 text-label-primary">
+            <section key={section.anchor} id={section.anchor} style={{ marginBottom: 36, scrollMarginTop: 80 }}>
+              <div className="sect">
+                <h2 style={{ display: "inline-flex", alignItems: "center", gap: 9, fontSize: 20 }}>
+                  <section.Icon size={20} style={{ color: "var(--brand)" }} />
                   {section.title}
                 </h2>
               </div>
-              <div className="space-y-3 type-body text-label-secondary">
+              <div className="ds-help-prose" style={{ display: "flex", flexDirection: "column", gap: 12, color: "var(--text-muted)", lineHeight: 1.6 }}>
                 {section.body}
               </div>
             </section>
@@ -207,11 +170,8 @@ export default function HelpPage() {
         </>
       )}
 
-      <WizardReplay
-        open={replayOpen}
-        onClose={() => setReplayOpen(false)}
-      />
-    </div>
+      <WizardReplay open={replayOpen} onClose={() => setReplayOpen(false)} />
+    </ShellPage>
   );
 }
 
