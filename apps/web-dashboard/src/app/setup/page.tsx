@@ -105,7 +105,7 @@ export default function SetupPage() {
   // completed step past it (PR #518 review: the pointer must be monotonic).
   const setStep = useCallback((next: Step) => {
     const cur = stepRef.current;
-    if (cur !== next) historyRef.current = [...historyRef.current, cur];
+    if (cur !== next && STEPS.indexOf(next) > STEPS.indexOf(cur)) historyRef.current = [...historyRef.current, cur];
     setStepState(next);
     stepRef.current = next;
     const nextIdx = STEPS.indexOf(next);
