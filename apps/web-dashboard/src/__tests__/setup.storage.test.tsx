@@ -100,7 +100,13 @@ vi.mock("@/lib/api", () => ({
 }));
 
 import SetupPage from "@/app/setup/page";
-import { buildConfirmPhrase, wholeDiskName } from "@/components/setup/steps/StorageStep";
+import {
+  buildConfirmPhrase,
+  wholeDiskName,
+  friendlyAdoptError,
+  groupPhysicalDisks,
+} from "@/components/setup/steps/StorageStep";
+import type { DriveInfo } from "@/lib/types";
 import { passClaimStep } from "./helpers/claim-step";
 import { passOrgStep } from "./helpers/org-step";
 
@@ -160,7 +166,11 @@ const FIXTURE_DRIVES = {
       notes: null,
     },
     {
-      device: "/dev/sda2",
+      // A SEPARATE physical disk (sdb), not a second partition of sda — two
+      // real disks are what makes this a valid 2-disk pool candidate. (A disk
+      // split into two partitions is one pool/reclaim target; see the
+      // groupPhysicalDisks tests.)
+      device: "/dev/sdb1",
       mount: "/mnt/droplet/nvr",
       label: "WD ELEMENTS",
       uuid: "UUID-NVR",
@@ -539,15 +549,18 @@ describe("setup Storage step — RAID toggle + calculator (BUG-3 / ADR-019)", ()
     expect(requestCreatePoolMock).toHaveBeenCalledTimes(1);
     const arg = requestCreatePoolMock.mock.calls[0][0];
     expect(arg.level).toBe("raid1");
+    // One member per POOLABLE physical disk — the mounted device of each disk,
+    // never two partitions of the SAME disk (a meaningless same-disk mirror).
     expect(arg.members).toEqual(
-      expect.arrayContaining(["/dev/sda1", "/dev/sda2"]),
+      expect.arrayContaining(["/dev/sda1", "/dev/sdb1"]),
     );
+    expect(arg.members).toHaveLength(2);
     expect(arg.device).toMatch(/^md\d+$/);
     // The confirm phrase MUST name every member's short device — the host
     // script's "never run blind" gate (ADR-019 D4.3) refuses otherwise, even
     // on empty drives.
     expect(arg.confirmPhrase).toContain("sda1");
-    expect(arg.confirmPhrase).toContain("sda2");
+    expect(arg.confirmPhrase).toContain("sdb1");
 
     // The confirm dialog states plainly that the drives get erased, and names
     // them with their sizes. (The blast-radius wording also appears inline in
@@ -764,5 +777,155 @@ describe("setup Storage step — adopt existing drives (WARP-662)", () => {
     expect(requestAdoptDriveMock).toHaveBeenCalledWith(
       expect.objectContaining({ device: "sda", wipeMethod: "secure" }),
     );
+  });
+
+  it("groups two partitions of one disk into ONE reclaim row that names both folders", async () => {
+    // nvr + data on the SAME physical disk (sda) — the screenshot's footgun:
+    // two cards reading "sda" that, if either is adopted, wipe each other.
+    fetchDrivesMock.mockResolvedValue({
+      drives: [
+        { ...FIXTURE_DRIVES.drives[0], device: "/dev/sda1", uuid: "A", label: "Nvr", removable: true },
+        { ...FIXTURE_DRIVES.drives[0], device: "/dev/sda2", uuid: "B", label: "Data", removable: true },
+      ],
+      count: 2,
+    });
+    render(<SetupPage />);
+    await advanceToStorage();
+    await act(async () => {
+      fireEvent.click(adoptSwitch());
+    });
+    // One physical disk → exactly ONE Erase & adopt button (not two), and the
+    // row names every folder the wipe destroys.
+    const buttons = screen.getAllByRole("button", { name: /erase & adopt/i });
+    expect(buttons).toHaveLength(1);
+    expect(screen.getByText(/Nvr, Data/)).toBeInTheDocument();
+  });
+
+  it("disables reclaim on the box's installed storage and says it's in use", async () => {
+    // The single-box's own data drives (bridge removable:false) — must not be
+    // offered as wipe-able "foreign" drives.
+    fetchDrivesMock.mockResolvedValue({
+      drives: [
+        { ...FIXTURE_DRIVES.drives[0], device: "/dev/sda1", uuid: "A", removable: false },
+        { ...FIXTURE_DRIVES.drives[1], device: "/dev/sdb1", uuid: "B", removable: false },
+      ],
+      count: 2,
+    });
+    render(<SetupPage />);
+    await advanceToStorage();
+    await act(async () => {
+      fireEvent.click(adoptSwitch());
+    });
+    // No destructive buttons for in-use disks; an honest "In use" marker shown.
+    expect(screen.queryByRole("button", { name: /erase & adopt/i })).toBeNull();
+    expect(screen.getAllByText(/in use/i).length).toBeGreaterThan(0);
+    expect(requestAdoptDriveMock).not.toHaveBeenCalled();
+  });
+
+  it("renders a busy refusal as 'in use' — never the wrong 'system disk' message", async () => {
+    // The exact bug from the screenshot: the host script's mounted-but-busy
+    // refusal ("…close open files…") used to render as "system disk" because
+    // the bare /os/ test matched the "os" in "close".
+    fetchDrivesMock.mockResolvedValue(FIXTURE_DRIVES);
+    requestAdoptDriveMock.mockResolvedValue({
+      confirmationToken: "tok",
+      service: "drive_adopt",
+      resourceId: "sda",
+    });
+    confirmPoolCommandMock.mockRejectedValue(
+      new Error(
+        "droplet-storage-pool: refusing to adopt /dev/sda: unmount of /dev/sda1 failed (busy?) — close open files and retry",
+      ),
+    );
+    render(<SetupPage />);
+    await advanceToStorage();
+    await act(async () => {
+      fireEvent.click(adoptSwitch());
+    });
+    const rowButtons = screen.getAllByRole("button", { name: /erase & adopt/i });
+    await act(async () => {
+      fireEvent.click(rowButtons[0]);
+    });
+    const dialog = screen.getByRole("dialog");
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole("button", { name: /erase & adopt/i }));
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await waitFor(() =>
+      expect(screen.getByText(/in use right now/i)).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/system disk/i)).toBeNull();
+  });
+});
+
+describe("groupPhysicalDisks (setup — whole-disk grouping)", () => {
+  const mk = (over: Partial<DriveInfo>): DriveInfo => ({
+    device: "/dev/sda1",
+    mount: "/mnt/droplet/x",
+    label: "",
+    uuid: "u",
+    size_bytes: 1_000_000_000_000,
+    used_bytes: 0,
+    free_bytes: 1_000_000_000_000,
+    mounted: true,
+    ...over,
+  });
+
+  it("collapses two partitions of one disk into a single target, summing size", () => {
+    const disks = groupPhysicalDisks([
+      mk({ device: "/dev/sda1", uuid: "a", size_bytes: 400_000_000_000 }),
+      mk({ device: "/dev/sda2", uuid: "b", size_bytes: 1_400_000_000_000 }),
+      mk({ device: "/dev/sdb1", uuid: "c", size_bytes: 1_800_000_000_000 }),
+    ]);
+    expect(disks.map((d) => d.disk)).toEqual(["sda", "sdb"]);
+    expect(disks[0].members).toHaveLength(2);
+    expect(disks[0].sizeBytes).toBe(400_000_000_000 + 1_400_000_000_000);
+    expect(disks[1].members).toHaveLength(1);
+  });
+
+  it("prefers the bridge's parent_disk over deriving from the device path", () => {
+    const disks = groupPhysicalDisks([
+      mk({ device: "/dev/mapper/vg-root", parent_disk: "nvme0n1", uuid: "a" }),
+    ]);
+    expect(disks[0].disk).toBe("nvme0n1");
+  });
+
+  it("marks a disk in use when any member is installed storage (removable:false)", () => {
+    const [installed] = groupPhysicalDisks([mk({ removable: false })]);
+    expect(installed.inUse).toBe(true);
+    const [hotplug] = groupPhysicalDisks([mk({ removable: true })]);
+    expect(hotplug.inUse).toBe(false);
+    // An older bridge that omits `removable` stays eligible (host script gates).
+    const [unknown] = groupPhysicalDisks([mk({})]);
+    expect(unknown.inUse).toBe(false);
+  });
+});
+
+describe("friendlyAdoptError (WARP-662 — honest reclaim copy)", () => {
+  it("renders a busy/in-use refusal as 'in use', NOT 'system disk'", () => {
+    const msg = friendlyAdoptError(
+      new Error(
+        "droplet-storage-pool: refusing to adopt /dev/sdb: unmount of /dev/sdb1 failed (busy?) — close open files and retry",
+      ),
+    );
+    expect(msg).toMatch(/in use/i);
+    expect(msg).not.toMatch(/system disk/i);
+  });
+
+  it("renders the real OS-disk refusal as 'system disk'", () => {
+    const msg = friendlyAdoptError(
+      new Error(
+        "droplet-storage-pool: refusing: /dev/sda is (or backs) the OS/boot/system disk — never adoptable",
+      ),
+    );
+    expect(msg).toMatch(/system disk/i);
+  });
+
+  it("falls back to a calm generic message for anything else", () => {
+    const msg = friendlyAdoptError(new Error("totally unexpected wibble"));
+    expect(msg).toMatch(/couldn't reclaim/i);
+    expect(msg).not.toMatch(/system disk/i);
   });
 });
