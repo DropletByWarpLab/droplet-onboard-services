@@ -15,9 +15,14 @@
 # Options:
 #   --yes            Skip interactive confirmation (for automation)
 #   --reinstall      After wiping, automatically run setup.sh to re-provision
-#   --purge-images   Also remove built Docker images (slower rebuild)
+#   --purge-images   Also remove built Docker images + dangling images/networks
 #   --no-backup      Skip the pre-reset safety backup (WARP-570)
 #   -h, --help       Show this help message
+#
+# Every reset reclaims the Docker build cache (the largest rebuildable disk
+# consumer; `down --rmi all` leaves it behind) so the box returns to a clean
+# out-of-box disk footprint. --purge-images escalates this to a full system
+# prune. Trade-off: the next setup.sh rebuild is a cold build.
 #
 # =============================================================================
 set -euo pipefail
@@ -44,13 +49,14 @@ The device will be returned to a fresh out-of-the-box state.
 Options:
   --yes            Skip interactive confirmation (for automation)
   --reinstall      After wiping, automatically run setup.sh to re-provision
-  --purge-images   Also remove built Docker images (slower rebuild)
+  --purge-images   Also remove built Docker images + dangling images/networks
   --force          Restart Docker if volumes cannot be removed (stuck references)
   --no-backup      Skip the pre-reset full-device safety backup (WARP-570)
   -h, --help       Show this help message
 
 What gets deleted:
   - All Docker volumes (database, files, AI keys, Matter fabric state)
+  - The Docker build cache (always reclaimed — largest rebuildable consumer)
   - Generated secrets (.env)
   - TLS certificates
   - MQTT credentials
@@ -60,6 +66,9 @@ What is preserved:
   - Source code and git history
   - Docker images (unless --purge-images)
   - Docker engine and system packages
+
+Note: reclaiming the build cache means the next setup.sh is a cold (slower)
+rebuild. This is intentional — it stops the OS drive from filling over time.
 USAGE
   exit 0
 }
@@ -191,6 +200,29 @@ else
     $DC -f "$COMPOSE_FILE" $env_flag down -v --remove-orphans 2>/dev/null || true
 fi
 log_success "All services stopped"
+
+# --- Reclaim the Docker build cache (disk hygiene) ---
+# The build cache is the largest rebuildable disk consumer and the one thing
+# `docker compose down --rmi all` does NOT remove. It grows unbounded across
+# rebuilds (observed: 57 GB of ACTIVE=0 cache on a long-lived single-box,
+# enough to fill the OS NVMe) yet is pure build-accelerator state — never user
+# data. A factory reset returns the box to a clean out-of-box *disk footprint*,
+# so it must reclaim the cache. Done on EVERY reset — NOT gated behind
+# --purge-images — because the dashboard Danger Zone reset runs without that
+# flag, and an appliance reset that leaves tens of GB behind isn't "clean".
+# Trade-off: the next setup.sh rebuild is a cold build (a few minutes slower);
+# acceptable for an infrequent reset, and it stops the drive from silently
+# filling. --purge-images escalates to a full `docker system prune` so dangling
+# images + unused networks go too (the built images are already gone via
+# `down --rmi all` above; named volumes are Phase 2's job, so no --volumes here).
+if [ "$PURGE_IMAGES" = "true" ]; then
+  run_with_spinner "Reclaiming build cache, dangling images, and networks" \
+    docker system prune -af 2>/dev/null || true
+else
+  run_with_spinner "Reclaiming Docker build cache" \
+    docker builder prune -af 2>/dev/null || true
+fi
+log_success "Docker build cache reclaimed"
 
 log_divider
 
