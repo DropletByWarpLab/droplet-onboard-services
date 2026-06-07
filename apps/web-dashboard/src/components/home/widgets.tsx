@@ -3,16 +3,24 @@
 /**
  * Droplet Home — widget components + registry.
  *
- * Ported from the Claude Design handoff. Data-display widgets (System status,
- * Models, Recent files, Cameras) are wired to the dashboard's real SWR hooks
- * and fall back to representative placeholder content while loading or when a
- * backend is unavailable, so the board always reads well. Calendar, Activity,
- * Tasks, Notes, Tools and Smart-home toggles are realistic local mock — the
- * smart-home toggles are intentionally local-only (no Matter writes) so a
- * single tap on the Home board never silently controls a real device.
+ * Every data-display widget is wired to a REAL endpoint and shows an honest
+ * empty state when there's no data — no hardcoded/fallback content masquerading
+ * as live data:
+ *   · Chat        → useModels
+ *   · System status → useRecents / useModels / useCameras / useSmartHome
+ *   · Calendar    → useCalendarEvents (real /api/calendar/events)
+ *   · Recent files → useRecents
+ *   · Cameras     → useCameras
+ *   · Models      → useModels
+ *   · Notes       → local scratchpad (localStorage; real per-device store)
+ *
+ * Widgets whose backend doesn't exist yet (Tasks, Activity, Scenes, scheduled
+ * Automations) are gated behind default-off feature flags and tracked in
+ * `docs/feature-requests.md`. They are absent from the registry (and the Add
+ * tray) unless their `NEXT_PUBLIC_FEATURE_*` flag is enabled.
  */
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   Activity as ActivityIcon,
@@ -47,10 +55,11 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useModels } from "@/lib/hooks/useModels";
-import { useStorage } from "@/lib/hooks/useStorage";
 import { useRecents } from "@/lib/hooks/useRecents";
 import { useCameras } from "@/lib/hooks/useCameras";
 import { useSmartHome } from "@/lib/hooks/useSmartHome";
+import { useCalendarEvents } from "@/lib/hooks/useCalendar";
+import { FEATURES } from "@/lib/feature-flags";
 
 export interface WidgetProps {
   w: number;
@@ -106,6 +115,27 @@ function fileKind(f: { isDirectory: boolean; mimeType: string | null; name: stri
   return "doc";
 }
 
+/** Honest empty state for a data widget with no data (never mock content). */
+function WEmpty({ children }: { children: React.ReactNode }) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        height: "100%",
+        minHeight: 56,
+        fontSize: 12.5,
+        color: "var(--text-muted)",
+        textAlign: "center",
+        padding: 8,
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
 /* ─────────────────────────── Chat (centerpiece) ─────────────────────────── */
 function ChatWidget({ w, h }: WidgetProps) {
   const router = useRouter();
@@ -156,11 +186,18 @@ function ChatWidget({ w, h }: WidgetProps) {
           placeholder="Ask Droplet anything — your files, cameras, network, devices…"
         />
         <div className="w-chat-cap-row">
-          <span className="w-chat-model">
-            <span className="dot" />
-            {localModel?.name ?? "llama3.1:70b"}
-            <ChevronDown size={10} />
-          </span>
+          {localModel ? (
+            <span className="w-chat-model">
+              <span className="dot" />
+              {localModel.name}
+              <ChevronDown size={10} />
+            </span>
+          ) : (
+            <span className="w-chat-model" style={{ opacity: 0.6 }}>
+              <span className="dot" style={{ background: "var(--text-muted)" }} />
+              No model
+            </span>
+          )}
           <button className="w-chat-iconbtn" tabIndex={-1} aria-label="Attach" type="button">
             <Paperclip size={15} />
           </button>
@@ -191,17 +228,34 @@ const MONTHS = [
   "January", "February", "March", "April", "May", "June",
   "July", "August", "September", "October", "November", "December",
 ];
-const AGENDA: [string, string, string][] = [
-  ["09:00", "NAS snapshot", "nightly backup · 64 GB"],
-  ["13:00", "Firmware check", "3 devices pending"],
-  ["18:00", "Lights · Night", "scene · living room"],
-  ["21:30", "Clip retention", "prune clips over 30 days"],
-];
 function CalendarWidget({ h }: WidgetProps) {
   const today = new Date();
   const [view, setView] = useState({ y: today.getFullYear(), m: today.getMonth() });
   const agendaRef = useRef<HTMLDivElement>(null);
   const [maxItems, setMaxItems] = useState(4);
+
+  // Real events for the viewed month (drives both the day-dots and the agenda).
+  const monthStart = useMemo(() => new Date(view.y, view.m, 1), [view.y, view.m]);
+  const monthEnd = useMemo(() => new Date(view.y, view.m + 1, 0, 23, 59, 59), [view.y, view.m]);
+  const { events } = useCalendarEvents({ from: monthStart, to: monthEnd });
+
+  // Day numbers (within the viewed month) that have at least one event.
+  const eventDays = useMemo(() => {
+    const s = new Set<number>();
+    for (const e of events) {
+      const d = new Date(e.startsAt);
+      if (d.getFullYear() === view.y && d.getMonth() === view.m) s.add(d.getDate());
+    }
+    return s;
+  }, [events, view.y, view.m]);
+
+  // Agenda = upcoming events (not yet ended), soonest first.
+  const agenda = useMemo(() => {
+    const now = Date.now();
+    return [...events]
+      .filter((e) => new Date(e.endsAt).getTime() >= now)
+      .sort((a, b) => new Date(a.startsAt).getTime() - new Date(b.startsAt).getTime());
+  }, [events]);
 
   useLayoutEffect(() => {
     const el = agendaRef.current;
@@ -209,7 +263,7 @@ function CalendarWidget({ h }: WidgetProps) {
     const measure = () => {
       const avail = el.clientHeight - 12;
       const rowH = 52;
-      setMaxItems(Math.max(0, Math.min(AGENDA.length, Math.floor((avail + 10) / rowH))));
+      setMaxItems(Math.max(0, Math.floor((avail + 10) / rowH)));
     };
     measure();
     const ro = new ResizeObserver(measure);
@@ -217,7 +271,6 @@ function CalendarWidget({ h }: WidgetProps) {
     return () => ro.disconnect();
   }, [h]);
 
-  const eventDays = [today.getDate(), 9, 13, 17, 22];
   const first = new Date(view.y, view.m, 1).getDay();
   const days = new Date(view.y, view.m + 1, 0).getDate();
   const prevDays = new Date(view.y, view.m, 0).getDate();
@@ -233,7 +286,11 @@ function CalendarWidget({ h }: WidgetProps) {
     if (m > 11) { m = 0; y++; }
     setView({ y, m });
   };
-  const visible = AGENDA.slice(0, maxItems);
+  const visible = agenda.slice(0, maxItems);
+  const fmtTime = (iso: string, allDay: boolean) =>
+    allDay
+      ? "all-day"
+      : new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
 
   return (
     <div className="w-cal">
@@ -252,7 +309,7 @@ function CalendarWidget({ h }: WidgetProps) {
         ))}
         {cells.map((c, i) => {
           const isToday = isThisMonth && !c.out && c.d === today.getDate();
-          const ev = isThisMonth && !c.out && eventDays.includes(c.d);
+          const ev = !c.out && eventDays.has(c.d);
           return (
             <div className={"w-cal-cell" + (c.out ? " out" : "") + (isToday ? " today" : "")} key={i}>
               {c.d}
@@ -262,13 +319,22 @@ function CalendarWidget({ h }: WidgetProps) {
         })}
       </div>
       <div className={"w-cal-agenda" + (visible.length ? " has-items" : "")} ref={agendaRef}>
-        {visible.map(([t, tx, sub]) => (
-          <div className="w-ag" key={t}>
-            <span className="t">{t}</span>
-            <span className="bar" />
-            <span className="tx">{tx}<small>{sub}</small></span>
+        {visible.length === 0 ? (
+          <div className="w-ag-empty" style={{ fontSize: 12, color: "var(--text-muted)", padding: "8px 2px" }}>
+            No upcoming events
           </div>
-        ))}
+        ) : (
+          visible.map((e) => (
+            <div className="w-ag" key={e.id}>
+              <span className="t">{fmtTime(e.startsAt, e.allDay)}</span>
+              <span className="bar" />
+              <span className="tx">
+                {e.title}
+                {e.location ? <small>{e.location}</small> : null}
+              </span>
+            </div>
+          ))
+        )}
       </div>
     </div>
   );
@@ -342,22 +408,17 @@ function ActivityWidget() {
 }
 
 /* ─────────────────────────── Recent files ─────────────────────────── */
-const FILES_FALLBACK: [string, string, string][] = [
-  ["sheet", "Q1-budget-final.xlsx", "2m ago"],
-  ["image", "Family-photos", "14m ago"],
-  ["doc", "router-config.json", "1h ago"],
-  ["pdf", "network-audit-apr.pdf", "3h ago"],
-  ["video", "front-door-1014.mp4", "Yesterday"],
-  ["doc", "notes-home-lab.md", "Wed"],
-];
 function FilesWidget() {
   const { items } = useRecents(8);
-  const rows: [string, string, string][] = items.length
-    ? items.slice(0, 8).map((f) => [fileKind(f), f.name, relTime(f.modifiedAt)])
-    : FILES_FALLBACK;
+  const rows: [string, string, string][] = items
+    .slice(0, 8)
+    .map((f) => [fileKind(f), f.name, relTime(f.modifiedAt)]);
   const iconFor: Record<string, LucideIcon> = {
     doc: FileText, pdf: FileText, sheet: FileSpreadsheet, video: Video, image: ImageIcon,
   };
+  if (rows.length === 0) {
+    return <WEmpty>No recent files</WEmpty>;
+  }
   return (
     <div className="w-list">
       {rows.map(([kind, name, meta], i) => {
@@ -430,13 +491,15 @@ const CAM_TINTS = [
   "linear-gradient(135deg,#15171f,#1f2937)",
   "linear-gradient(135deg,#1a1d27,#242a38)",
 ];
-const CAMS_FALLBACK = ["Front door", "Garage", "Dock", "Lobby"];
 function CamerasWidget({ w, h }: WidgetProps) {
   const { cameras } = useCameras();
-  const names = cameras.length ? cameras.map((c) => c.displayName || c.name) : CAMS_FALLBACK;
+  const names = cameras.map((c) => c.displayName || c.name);
   const motionSet = new Set(
     cameras.filter((c) => c.status === "detecting" || c.lastDetection).map((c) => c.displayName || c.name),
   );
+  if (names.length === 0) {
+    return <WEmpty>No cameras yet</WEmpty>;
+  }
   const tiny = w <= 2 && h <= 2;
   const n = tiny ? 1 : w >= 4 && h >= 3 ? 4 : 2;
   const cols = tiny ? 1 : w >= 4 ? 2 : h >= 3 ? 1 : 2;
@@ -457,25 +520,20 @@ function CamerasWidget({ w, h }: WidgetProps) {
 }
 
 /* ─────────────────────────── Models ─────────────────────────── */
-const MODELS_FALLBACK: [boolean, string, string, "local" | "cloud"][] = [
-  [false, "llama3.1:70b", "jetson · 4.2 t/s", "local"],
-  [false, "qwen2.5-coder:32b", "jetson · 5.8 t/s", "local"],
-  [true, "claude-sonnet-4.5", "opt-in escape", "cloud"],
-  [true, "gpt-5.1", "opt-in escape", "cloud"],
-];
 function ModelsWidget() {
   const { models } = useModels();
-  const rows: [boolean, string, string, "local" | "cloud"][] = models.length
-    ? models.map((m) => {
-        const isLocal = m.provider === "ollama";
-        return [
-          !isLocal,
-          m.name,
-          isLocal ? "local · on-device" : `${m.provider} · opt-in`,
-          isLocal ? "local" : "cloud",
-        ];
-      })
-    : MODELS_FALLBACK;
+  const rows: [boolean, string, string, "local" | "cloud"][] = models.map((m) => {
+    const isLocal = m.provider === "ollama";
+    return [
+      !isLocal,
+      m.name,
+      isLocal ? "local · on-device" : `${m.provider} · opt-in`,
+      isLocal ? "local" : "cloud",
+    ];
+  });
+  if (rows.length === 0) {
+    return <WEmpty>No models installed</WEmpty>;
+  }
   return (
     <div className="w-list">
       {rows.map(([cloud, nm, sb, tag], i) => (
@@ -555,23 +613,23 @@ function TasksWidget() {
 /* ─────────────────────────── Notes ─────────────────────────── */
 function NotesWidget() {
   const [val, setVal] = useState("");
+  const [hydrated, setHydrated] = useState(false);
   useEffect(() => {
     try {
-      setVal(
-        window.localStorage.getItem("droplet-home-notes") ??
-          "Home lab\n\n- Move cameras onto VLAN 20\n- Test WAN failover on the next drop\n- Try qwen2.5-coder for config diffs",
-      );
+      setVal(window.localStorage.getItem("droplet-home-notes") ?? "");
     } catch {
       /* ignore */
     }
+    setHydrated(true);
   }, []);
   useEffect(() => {
+    if (!hydrated) return;
     try {
-      if (val) window.localStorage.setItem("droplet-home-notes", val);
+      window.localStorage.setItem("droplet-home-notes", val);
     } catch {
       /* ignore */
     }
-  }, [val]);
+  }, [val, hydrated]);
   return (
     <textarea
       className="w-notes"
@@ -583,20 +641,32 @@ function NotesWidget() {
   );
 }
 
-/* ─────────────────────────── Registry ─────────────────────────── */
+/* ─────────────────────────── Registry ───────────────────────────
+ * Widgets backed by a real endpoint are always present. The four whose
+ * backend doesn't exist yet (Activity, Scenes, Tools/automations, Tasks)
+ * are added ONLY when their feature flag is on — so they never ship mock
+ * data to users. See docs/feature-requests.md (FR-001…FR-004).
+ */
 export const WIDGETS: Record<string, WidgetMeta> = {
   chat:     { title: "Ask Droplet",   icon: Sparkles,     Comp: ChatWidget,     minW: 3, minH: 4, maxW: 12, maxH: 7, feature: true },
   calendar: { title: "Calendar",      icon: Calendar,     Comp: CalendarWidget, minW: 3, minH: 3, maxW: 6,  maxH: 6 },
   status:   { title: "System status", icon: Network,      Comp: StatusWidget,   minW: 2, minH: 2, maxW: 6,  maxH: 4 },
-  activity: { title: "Activity",      icon: ActivityIcon, Comp: ActivityWidget, minW: 3, minH: 3, maxW: 6,  maxH: 7, scroll: true },
   files:    { title: "Recent files",  icon: Folder,       Comp: FilesWidget,    minW: 2, minH: 2, maxW: 6,  maxH: 6, scroll: true },
-  scenes:   { title: "Smart home",    icon: Lightbulb,    Comp: ScenesWidget,   minW: 2, minH: 2, maxW: 6,  maxH: 5 },
   cameras:  { title: "Cameras",       icon: Video,        Comp: CamerasWidget,  minW: 2, minH: 2, maxW: 6,  maxH: 5 },
   models:   { title: "Models",        icon: Brain,        Comp: ModelsWidget,   minW: 2, minH: 2, maxW: 6,  maxH: 5, scroll: true },
-  tools:    { title: "Tools",         icon: Wrench,       Comp: ToolsWidget,    minW: 2, minH: 2, maxW: 6,  maxH: 5, scroll: true },
-  tasks:    { title: "Tasks",         icon: Check,        Comp: TasksWidget,    minW: 2, minH: 2, maxW: 6,  maxH: 5, scroll: true },
   notes:    { title: "Notes",         icon: PenLine,      Comp: NotesWidget,    minW: 2, minH: 2, maxW: 12, maxH: 5 },
 };
+
+// Feature-flagged widgets (no backend yet — default OFF).
+const GATED_WIDGETS: Array<[boolean, string, WidgetMeta]> = [
+  [FEATURES.homeActivity,    "activity", { title: "Activity",      icon: ActivityIcon, Comp: ActivityWidget, minW: 3, minH: 3, maxW: 6, maxH: 7, scroll: true }],
+  [FEATURES.homeScenes,      "scenes",   { title: "Smart home",    icon: Lightbulb,    Comp: ScenesWidget,   minW: 2, minH: 2, maxW: 6, maxH: 5 }],
+  [FEATURES.homeAutomations, "tools",    { title: "Automations",   icon: Wrench,       Comp: ToolsWidget,    minW: 2, minH: 2, maxW: 6, maxH: 5, scroll: true }],
+  [FEATURES.homeTasks,       "tasks",    { title: "Tasks",         icon: Check,        Comp: TasksWidget,    minW: 2, minH: 2, maxW: 6, maxH: 5, scroll: true }],
+];
+for (const [enabled, id, meta] of GATED_WIDGETS) {
+  if (enabled) WIDGETS[id] = meta;
+}
 
 export const CATALOG = Object.keys(WIDGETS).map((id) => ({
   id,
