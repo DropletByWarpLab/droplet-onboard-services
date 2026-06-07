@@ -17,7 +17,7 @@ import {
   WifiOff,
   XCircle,
 } from "lucide-react";
-import { Topbar } from "@/components/Topbar";
+import { ShellPage } from "@/components/shell/ShellPage";
 import { useWorkspace } from "@/lib/workspace";
 import { useNetwork } from "@/lib/hooks/useNetwork";
 import { useNetworkDevices } from "@/lib/hooks/useNetworkDevices";
@@ -168,31 +168,15 @@ export default function NetworkPage() {
     };
   }, [opStatus, refresh]);
 
-  // Shared Topbar for loading + error states. Keeps the chrome in place
-  // while the body swaps so the user doesn't see a flash of bare title.
-  const networkChrome = (status: { tone: "ok" | "warn" | "error" | "neutral"; label: string }) => (
-    <Topbar
-      crumbs={[
-        { label: "Workspace", href: "/" },
-        { label: "Operations" },
-        { label: "Network" },
-      ]}
-      status={status}
-    />
-  );
-
   if (isLoading) {
     return (
-      <div>
-        {networkChrome({ tone: "neutral", label: "Loading network state…" })}
-        <div className="p-6 space-y-6">
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            {Array.from({ length: 4 }).map((_, i) => (
-              <div key={i} className="dp-card h-28 animate-pulse bg-surface-secondary" />
-            ))}
-          </div>
+      <ShellPage icon={<Router size={15} />} label="Network" title="Network">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <div key={i} className="card animate-pulse" style={{ height: 112, background: "var(--surface-2)" }} />
+          ))}
         </div>
-      </div>
+      </ShellPage>
     );
   }
 
@@ -205,38 +189,34 @@ export default function NetworkPage() {
     // Don't use role="alert" or a retry button in that state.
     const isDisabled = routerErrorCode === "DISABLED";
     return (
-      <div>
-        {networkChrome({
-          tone: isDisabled ? "neutral" : "warn",
-          label: isDisabled ? "Networking disabled" : "Router unreachable",
-        })}
-        <div className="p-6">
-          <div
-            className="dp-card text-center py-12"
-            role={isDisabled ? "status" : "alert"}
-          >
-            <WifiOff size={32} className="mx-auto text-label-quaternary mb-3" />
-            <h2 className="type-title-3 text-label-primary mb-1">{copy.title}</h2>
-            <p className="type-subheadline text-label-tertiary max-w-md mx-auto">
-              {copy.body}
+      <ShellPage icon={<Router size={15} />} label="Network" title="Network">
+        <div
+          className="card text-center"
+          style={{ padding: "48px 20px" }}
+          role={isDisabled ? "status" : "alert"}
+        >
+          <WifiOff size={32} className="mx-auto text-label-quaternary mb-3" />
+          <h2 className="type-title-3 text-label-primary mb-1">{copy.title}</h2>
+          <p className="type-subheadline text-label-tertiary max-w-md mx-auto">
+            {copy.body}
+          </p>
+          {routerErrorMessage && !isDisabled && (
+            <p className="type-caption-2 text-label-quaternary mt-3 font-mono">
+              {routerErrorMessage}
             </p>
-            {routerErrorMessage && !isDisabled && (
-              <p className="type-caption-2 text-label-quaternary mt-3 font-mono">
-                {routerErrorMessage}
-              </p>
-            )}
-            {!isDisabled && (
-              <button
-                onClick={refresh}
-                className="dp-btn-secondary text-sm mt-4"
-                disabled={isRefreshing}
-              >
-                {isRefreshing ? "Retrying…" : "Retry now"}
-              </button>
-            )}
-          </div>
+          )}
+          {!isDisabled && (
+            <button
+              onClick={refresh}
+              className="btn ghost sm mt-4"
+              disabled={isRefreshing}
+              type="button"
+            >
+              {isRefreshing ? "Retrying…" : "Retry now"}
+            </button>
+          )}
         </div>
-      </div>
+      </ShellPage>
     );
   }
 
@@ -250,20 +230,10 @@ export default function NetworkPage() {
     { id: "system", label: "System", icon: Router },
   ];
 
-  const deviceCount = overview?.connectedDeviceCount ?? 0;
-  const networkStatus =
-    deviceCount === 0
-      ? { tone: "neutral" as const, label: "No devices seen yet" }
-      : { tone: "ok" as const, label: `${deviceCount} device${deviceCount === 1 ? "" : "s"} on network` };
-
   return (
-    <div>
-      {networkChrome(networkStatus)}
-
-      <div className="p-6">
-      {/* Refresh action — moved out of the Topbar so it sits next to the
-          tab strip where the operator's eye lands. Keeps the Topbar
-          chrome single-row at 360px. */}
+    <ShellPage icon={<Router size={15} />} label="Network" title="Network">
+      {/* Refresh action — sits next to the tab strip where the operator's
+          eye lands, paired with the Simple/Advanced mode toggle. */}
       <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
         {/* WARP-612: Simple / Advanced segmented control. Simple shows the
             everyday Overview; Advanced reveals the full OpenWrt tab surface. */}
@@ -295,7 +265,8 @@ export default function NetworkPage() {
         <button
           onClick={refresh}
           disabled={isRefreshing}
-          className="dp-btn-secondary flex items-center gap-2"
+          className="btn ghost"
+          type="button"
         >
           <RefreshCw size={16} className={isRefreshing ? "animate-spin" : ""} />
           Refresh
@@ -304,7 +275,10 @@ export default function NetworkPage() {
 
       {/* Confirmation Banner */}
       {pendingConfirm?.requiresConfirmation && (
-        <div className="dp-card mb-4 border-system-orange bg-system-orange/5 flex items-center justify-between">
+        <div
+          className="card mb-4 flex items-center justify-between"
+          style={{ borderColor: "#d9a35c", background: "rgba(217,163,92,0.06)" }}
+        >
           <div>
             <p className="type-subheadline text-label-primary font-medium">
               Confirmation Required
@@ -316,7 +290,8 @@ export default function NetworkPage() {
           <div className="flex gap-2">
             <button
               onClick={() => setPendingConfirm(null)}
-              className="dp-btn-secondary text-sm"
+              className="btn ghost sm"
+              type="button"
             >
               Cancel
             </button>
@@ -336,7 +311,8 @@ export default function NetworkPage() {
                   }
                 }
               }}
-              className="dp-btn-primary text-sm"
+              className="btn primary sm"
+              type="button"
             >
               Confirm
             </button>
@@ -350,7 +326,8 @@ export default function NetworkPage() {
       {opStatus.state === "pending" && (
         <div
           role="status"
-          className="dp-card mb-4 border-system-blue bg-system-blue/5 flex items-center gap-3"
+          className="card mb-4 flex items-center gap-3"
+          style={{ borderColor: "var(--brand)", background: "var(--brand-subtle)" }}
         >
           <Loader2 size={18} className="animate-spin text-system-blue" />
           <div className="flex-1">
@@ -364,14 +341,16 @@ export default function NetworkPage() {
       {opStatus.state === "applied" && (
         <div
           role="status"
-          className="dp-card mb-4 border-system-green bg-system-green/5 flex items-center gap-3"
+          className="card mb-4 flex items-center gap-3"
+          style={{ borderColor: "var(--success)", background: "color-mix(in srgb, var(--success) 7%, transparent)" }}
         >
           <CheckCircle2 size={18} className="text-system-green" />
           <p className="type-subheadline text-label-primary flex-1">Change applied.</p>
           <button
             onClick={() => setOpStatus({ state: "idle" })}
-            className="dp-btn-secondary text-sm"
+            className="btn ghost sm"
             aria-label="Dismiss"
+            type="button"
           >
             Dismiss
           </button>
@@ -380,7 +359,8 @@ export default function NetworkPage() {
       {opStatus.state === "rolled_back" && (
         <div
           role="alert"
-          className="dp-card mb-4 border-system-red bg-system-red/5 flex items-center gap-3"
+          className="card mb-4 flex items-center gap-3"
+          style={{ borderColor: "#ef4444", background: "rgba(239,68,68,0.06)" }}
         >
           <XCircle size={18} className="text-system-red" />
           <div className="flex-1">
@@ -393,8 +373,9 @@ export default function NetworkPage() {
           </div>
           <button
             onClick={() => setOpStatus({ state: "idle" })}
-            className="dp-btn-secondary text-sm"
+            className="btn ghost sm"
             aria-label="Dismiss"
+            type="button"
           >
             Dismiss
           </button>
@@ -407,7 +388,7 @@ export default function NetworkPage() {
         role="tablist"
         aria-label="Network view tabs"
         hidden={mode === "simple"}
-        className="flex gap-1 mb-6 border-b border-separator"
+        className="tabstrip"
       >
         {tabs.map((tab) => {
           const Icon = tab.icon;
@@ -451,14 +432,7 @@ export default function NetworkPage() {
                     ?.focus();
                 }
               }}
-              className={`
-                flex items-center gap-2 px-4 py-2.5 type-subheadline transition-colors
-                border-b-2 -mb-px
-                ${active
-                  ? "border-accent text-accent font-medium"
-                  : "border-transparent text-label-tertiary hover:text-label-secondary"
-                }
-              `}
+              className={"tab" + (active ? " active" : "")}
             >
               <Icon size={16} aria-hidden="true" />
               {tab.label}
@@ -540,8 +514,7 @@ export default function NetworkPage() {
         {activeTab === "system" && <SystemTab overview={overview} />}
       </div>
       </div>
-      </div>
-    </div>
+    </ShellPage>
   );
 }
 
@@ -629,7 +602,7 @@ function StatusCard({
 }) {
   const statusColor = status === "ok" ? "text-system-green" : status === "warning" ? "text-system-orange" : "text-system-red";
   return (
-    <div className="dp-card">
+    <div className="card">
       <div className="flex items-center gap-2 mb-2">
         <Icon size={18} className={statusColor} />
         <span className="type-footnote text-label-tertiary font-medium uppercase tracking-wider">
@@ -766,7 +739,7 @@ function DevicesTab() {
       )}
 
       {!isLoading && devices.length === 0 && (
-        <div className="dp-card text-center py-12">
+        <div className="card text-center" style={{ padding: "48px 20px" }}>
           <Monitor size={32} className="mx-auto text-label-quaternary mb-3" />
           <h3 className="type-title-3 text-label-primary mb-1">
             Your router hasn&apos;t seen any devices yet
@@ -777,7 +750,7 @@ function DevicesTab() {
           <button
             type="button"
             onClick={() => devicesSwr.mutate()}
-            className="dp-btn-secondary text-sm"
+            className="btn ghost sm"
           >
             Retry
           </button>
@@ -866,7 +839,7 @@ function FirewallTab({ firewall }: { firewall: FirewallConfig | undefined }) {
 
   return (
     <div className="space-y-4">
-      <div className="dp-card">
+      <div className="card">
         <h3 className="type-headline text-label-primary mb-4">
           Firewall Rules ({rules.length})
         </h3>
@@ -901,7 +874,7 @@ function FirewallTab({ firewall }: { firewall: FirewallConfig | undefined }) {
         )}
       </div>
 
-      <div className="dp-card">
+      <div className="card">
         <h3 className="type-headline text-label-primary mb-4">
           Port Forwards ({redirects.length})
         </h3>
@@ -957,7 +930,7 @@ function SystemTab({ overview }: { overview: NetworkOverview | undefined }) {
 
   return (
     <div className="space-y-4">
-      <div className="dp-card">
+      <div className="card">
         <h3 className="type-headline text-label-primary mb-4">Hardware</h3>
         <div className="grid grid-cols-2 gap-y-3 gap-x-6">
           <InfoRow label="Model" value={board?.model ?? "Unknown"} />
@@ -969,7 +942,7 @@ function SystemTab({ overview }: { overview: NetworkOverview | undefined }) {
         </div>
       </div>
 
-      <div className="dp-card">
+      <div className="card">
         <h3 className="type-headline text-label-primary mb-4">Resources</h3>
         <div className="grid grid-cols-2 gap-y-3 gap-x-6">
           <InfoRow label="Uptime" value={`${days}d ${hours}h ${minutes}m`} />
