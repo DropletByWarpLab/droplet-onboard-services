@@ -114,14 +114,17 @@ describe("StepShell aurora rail (PR #384)", () => {
 });
 
 /**
- * WARP-820 — viewport-locked, zero-scroll wizard shell.
+ * Viewport-locked wizard shell (WARP-820 + desktop-scroll fix).
  *
- * The shell was already `h-dvh overflow-hidden` (WARP-666); this ticket removes
- * the two INNER page-scrollers (rail aside + main panel) so neither shows a
- * scrollbar, and guarantees the title and CTA are always mounted (they pin
- * outside any ScrollRegion). jsdom can't measure layout, so these are STRUCTURE
- * assertions — the visual "fits on every device" proof is the UI/UX + on-box
- * pass.
+ * The shell root is `h-dvh overflow-hidden` (WARP-666) so the DOCUMENT never
+ * scrolls. The rail is sized to fit and never scrolls. The content panel is
+ * scroll-WHEN-NEEDED: steps are sized to fit, so a normal viewport shows no
+ * scrollbar; only a viewport too short for a step scrolls the panel — instead of
+ * clipping the step's lower content (the failure WARP-820 had band-aided with a
+ * 44dvh-capped ScrollRegion on the form steps). The title and CTA are always
+ * mounted (the CTA pins in the footer, outside the panel). jsdom can't measure
+ * layout, so these are STRUCTURE assertions — the visual "fits on every device"
+ * proof is the UI/UX + on-box pass.
  */
 describe("StepShell viewport-lock (WARP-820)", () => {
   it("scopes the fluid type layer with the .setup-shell class on the shell root", () => {
@@ -146,14 +149,24 @@ describe("StepShell viewport-lock (WARP-820)", () => {
     expect(rail.className).not.toContain("overflow-y-auto");
   });
 
-  it("does not let the main panel scroll (no overflow-y-auto)", () => {
+  it("makes the content panel scroll only when a step overflows (never the document)", () => {
     render(
       <StepShell current="storage" title="Storage">
         body
       </StepShell>,
     );
+    // The panel absorbs its own overflow (a too-short viewport scrolls the panel
+    // rather than clipping); on a normal viewport the content fits, so no
+    // scrollbar shows. overscroll-contain keeps a flick from chaining out.
     const main = screen.getByTestId("setup-main");
-    expect(main.className).not.toContain("overflow-y-auto");
+    expect(main.className).toContain("overflow-y-auto");
+    expect(main.className).toContain("overscroll-contain");
+
+    // …while the DOCUMENT itself stays locked by the shell root.
+    const shell = main.closest(".setup-shell");
+    expect(shell).not.toBeNull();
+    expect(shell?.className).toContain("overflow-hidden");
+    expect(shell?.className).toContain("h-dvh");
   });
 
   it("always mounts the step title regardless of the body content", () => {

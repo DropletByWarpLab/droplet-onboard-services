@@ -1,45 +1,39 @@
 /**
- * WARP-820 (review finding #3) — OrgStep's form (logo + name, the
- * droplet.local slug, three selects, the "nothing leaves the box" privacy
- * footnote, the help card) is taller than a short landscape phone (~568px), and
- * the setup panel is now `overflow-hidden`. Without a scroll surface the privacy
- * footnote + help card clip off the bottom. The form body therefore lives inside
- * a <ScrollRegion> — the wizard's single permitted scroll surface — so it
- * scrolls within the panel instead of clipping. Title + CTA stay pinned in the
- * StepShell.
+ * Workspace (Org) step — fits the panel without an inner scroll cap.
  *
- * Structure assertion (jsdom can't measure scroll): the form fields render
- * INSIDE the labelled scroll region, and that region carries the bounded-scroll
- * classes. Mirrors DiscoveryStep/TeamStep.scrollregion.test.tsx.
+ * WARP-820 wrapped this fixed-content form in a <ScrollRegion> capped at
+ * `max-h-[44dvh]`. On a desktop viewport that crushed the form into 44% of the
+ * screen and forced an inner scrollbar with empty space below — the opposite of
+ * the ticket's "zero scroll" goal. The form is fixed-content (not an unbounded
+ * list), so it no longer uses a ScrollRegion; the StepShell content panel is
+ * scroll-when-needed instead, so a normal viewport shows no scrollbar and a
+ * viewport too short scrolls the whole panel rather than clipping.
+ *
+ * jsdom can't measure layout, so these are STRUCTURE assertions: every field —
+ * including the bottom-most privacy footnote — renders and is reachable, and the
+ * form is NOT trapped inside a height-capped scroll region.
  */
 import { describe, it, expect } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { OrgStep } from "./OrgStep";
 
-describe("OrgStep form in ScrollRegion (WARP-820)", () => {
-  it("renders the workspace form inside a bounded, labelled scroll region", () => {
+describe("OrgStep fits without an inner scroll cap", () => {
+  it("renders the workspace form directly, not inside a height-capped scroll region", () => {
     render(<OrgStep onComplete={() => {}} />);
 
-    const region = screen.getByRole("region", { name: /workspace details/i });
-    // The workspace-name field is at the top of the form body.
-    expect(
-      within(region).getByPlaceholderText("Acme HQ"),
-    ).toBeInTheDocument();
+    // The form's top field renders…
+    expect(screen.getByPlaceholderText("Acme HQ")).toBeInTheDocument();
 
-    // …and the region is the bounded-scroll surface.
-    expect(region.className).toContain("overflow-y-auto");
-    expect(region.className).toContain("overscroll-contain");
-    expect(region.className).toMatch(/max-h-\[[^\]]*(vh|dvh|svh)\]/);
+    // …and it is NOT wrapped in the old bounded scroll region (no 44dvh cap).
+    expect(
+      screen.queryByRole("region", { name: /workspace details/i }),
+    ).toBeNull();
   });
 
-  it("keeps the privacy footnote reachable inside the scroll region", () => {
+  it("keeps the bottom-most privacy footnote reachable (not clipped)", () => {
     render(<OrgStep onComplete={() => {}} />);
-
-    const region = screen.getByRole("region", { name: /workspace details/i });
-    // The "nothing is sent off the box" footnote is the bottom-most content most
-    // at risk of clipping; it must be inside the scrollable region.
-    expect(
-      within(region).getByText(/nothing is sent off the box/i),
-    ).toBeInTheDocument();
+    // The "nothing is sent off the box" footnote is the lowest content — the bit
+    // that used to clip — so it must still render.
+    expect(screen.getByText(/nothing is sent off the box/i)).toBeInTheDocument();
   });
 });

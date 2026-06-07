@@ -4,7 +4,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, ChevronDown, ImageUp } from "lucide-react";
 import { postOrg, OrgError } from "@/lib/api";
 import { StepShell } from "@/components/setup/StepShell";
-import { ScrollRegion } from "@/components/setup/ScrollRegion";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 
 /**
@@ -258,13 +257,14 @@ export function OrgStep({ onComplete }: { onComplete: () => void }) {
         isLoading: submitting,
       }}
     >
-      {/* WARP-820 (finding #3): the form (logo + name, slug, three selects, the
-          privacy footnote, the help card) is taller than a short landscape phone
-          and the setup panel is now overflow-hidden, so the footnote + help card
-          clipped off the bottom. The whole form body lives in a <ScrollRegion>
-          (the wizard's single scroll surface) so it scrolls within the panel
-          instead of clipping; the title + CTA stay pinned in the StepShell. */}
-      <ScrollRegion aria-label="Workspace details">
+      {/* Fixed-content form (logo + name, slug, three selects, privacy footnote,
+          help card) — NOT an unbounded list, so it is NOT wrapped in a
+          <ScrollRegion>. WARP-820 had capped it at 44dvh, which on desktop
+          crushed the form to 44% of the viewport and forced an inner scrollbar
+          with empty space below. The StepShell panel is now scroll-when-needed
+          (fits desktop with no scrollbar; a viewport too short scrolls the whole
+          panel), and the help card auto-collapses on short viewports. */}
+      <>
         {/* Logo tile + workspace name */}
         <div className="flex items-start gap-4">
           <div className="flex-shrink-0">
@@ -439,7 +439,7 @@ export function OrgStep({ onComplete }: { onComplete: () => void }) {
             policies you can change anytime.
           </p>
         </LearnMoreCard>
-      </ScrollRegion>
+      </>
     </StepShell>
   );
 }

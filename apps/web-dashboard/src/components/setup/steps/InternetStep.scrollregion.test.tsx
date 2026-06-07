@@ -1,23 +1,20 @@
 /**
- * WARP-820 (review finding #3) — InternetStep's body (the optional Home Wi-Fi
- * disclosure, the DuckDNS subdomain + token fields, the auto-update checkbox,
- * any notice, and the help card) is taller than a short landscape phone
- * (~568px), and the setup panel is now `overflow-hidden`. Without a scroll
- * surface the DuckDNS token field + help card clip off the bottom. The body
- * therefore lives inside a <ScrollRegion> — the wizard's single permitted scroll
- * surface — so it scrolls within the panel instead of clipping. Title + CTA stay
- * pinned in the StepShell.
+ * Internet step — fits the panel without an inner scroll cap.
  *
- * Structure assertion (jsdom can't measure scroll): the form fields render
- * INSIDE the labelled scroll region, and that region carries the bounded-scroll
- * classes. Mirrors DiscoveryStep/TeamStep.scrollregion.test.tsx.
+ * WARP-820 wrapped this fixed-content network form in a <ScrollRegion> capped at
+ * `max-h-[44dvh]`, which forced an inner scrollbar on desktop with empty space
+ * below. The form is fixed-content (not an unbounded list), so it no longer uses
+ * a ScrollRegion; the StepShell content panel is scroll-when-needed instead.
  *
- * NOTE: this only adds a scroll wrapper around the EXISTING body — the WARP-808 /
- * WARP-809 Wi-Fi write behaviour is untouched and is covered by
- * InternetStep.test.tsx / InternetStep.hostapd-warning.test.tsx.
+ * STRUCTURE assertions (jsdom can't measure layout): the form fields — including
+ * the optional Home Wi-Fi disclosure and the DuckDNS field — render and are
+ * reachable, and the body is NOT trapped in a height-capped scroll region.
+ *
+ * NOTE: the WARP-808 / WARP-809 Wi-Fi write behaviour is untouched and is
+ * covered by InternetStep.test.tsx / InternetStep.hostapd-warning.test.tsx.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
@@ -29,39 +26,31 @@ vi.mock("@/lib/api", async () => {
 
 import { InternetStep } from "./InternetStep";
 
-describe("InternetStep body in ScrollRegion (WARP-820)", () => {
+describe("InternetStep fits without an inner scroll cap", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it("renders the network form inside a bounded, labelled scroll region", async () => {
+  it("renders the network form directly, not inside a height-capped scroll region", async () => {
     render(<InternetStep onComplete={() => {}} onSkip={() => {}} />);
 
-    const region = await screen.findByRole("region", {
-      name: /network setup/i,
-    });
-    // The DuckDNS subdomain field lives in the form body.
+    // The DuckDNS subdomain field renders…
     await waitFor(() =>
-      expect(
-        within(region).getByPlaceholderText("yourstudio"),
-      ).toBeInTheDocument(),
+      expect(screen.getByPlaceholderText("yourstudio")).toBeInTheDocument(),
     );
 
-    // …and the region is the bounded-scroll surface.
-    expect(region.className).toContain("overflow-y-auto");
-    expect(region.className).toContain("overscroll-contain");
-    expect(region.className).toMatch(/max-h-\[[^\]]*(vh|dvh|svh)\]/);
+    // …and the body is NOT wrapped in the old bounded scroll region (no 44dvh cap).
+    expect(
+      screen.queryByRole("region", { name: /network setup/i }),
+    ).toBeNull();
   });
 
-  it("keeps the optional Home Wi-Fi disclosure reachable inside the scroll region", async () => {
+  it("keeps the optional Home Wi-Fi disclosure reachable (not clipped)", async () => {
     render(<InternetStep onComplete={() => {}} onSkip={() => {}} />);
-
-    const region = await screen.findByRole("region", {
-      name: /network setup/i,
-    });
-    // The "Add a Wi-Fi network" disclosure toggle is part of the scrollable body.
-    expect(
-      within(region).getByRole("button", { name: /add a wi-fi network/i }),
-    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: /add a wi-fi network/i }),
+      ).toBeInTheDocument(),
+    );
   });
 });
