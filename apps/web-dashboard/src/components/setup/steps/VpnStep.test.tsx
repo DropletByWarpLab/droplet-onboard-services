@@ -15,6 +15,7 @@ import { VpnStep } from "./VpnStep";
 import { RouterStatusError } from "@/lib/api";
 
 const fetchVpnStatus = vi.fn();
+const fetchVpnPeers = vi.fn();
 const createVpnPeer = vi.fn();
 
 vi.mock("@/lib/api", async () => {
@@ -24,6 +25,7 @@ vi.mock("@/lib/api", async () => {
   return {
     ...actual,
     fetchVpnStatus: (...a: unknown[]) => fetchVpnStatus(...a),
+    fetchVpnPeers: (...a: unknown[]) => fetchVpnPeers(...a),
     createVpnPeer: (...a: unknown[]) => createVpnPeer(...a),
   };
 });
@@ -130,5 +132,135 @@ describe("VpnStep — router unreachable (WARP-807)", () => {
     expect(
       screen.queryByText(/router isn't reachable yet/i),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("VpnStep — precheck states (SETUP-WIZARD-SPEC §D)", () => {
+  it("renders the blocked view with spec copy when no internet address is configured", async () => {
+    fetchVpnStatus.mockResolvedValue({
+      configured: false,
+      endpointConfigured: false,
+    });
+    const onBackToInternet = vi.fn();
+    render(
+      <VpnStep
+        onComplete={vi.fn()}
+        onSkip={vi.fn()}
+        onBackToInternet={onBackToInternet}
+      />,
+    );
+
+    expect(
+      await screen.findByText(/remote access needs an internet address first/i),
+    ).toBeInTheDocument();
+    // "Set up internet" is a render-only back-jump — no redirect, no peer mint.
+    fireEvent.click(screen.getByRole("button", { name: /set up internet/i }));
+    expect(onBackToInternet).toHaveBeenCalledTimes(1);
+    expect(createVpnPeer).not.toHaveBeenCalled();
+  });
+
+  it("renders the returning view (existing active peer) without re-minting; Continue advances", async () => {
+    fetchVpnStatus.mockResolvedValue({
+      configured: true,
+      endpointConfigured: true,
+      endpointHost: "yourstudio.duckdns.org",
+      peerCount: 1,
+    });
+    fetchVpnPeers.mockResolvedValue({
+      peers: [
+        {
+          id: "p1",
+          userId: "owner",
+          deviceLabel: "Robin's Pixel",
+          publicKey: "PUB=",
+          assignedIp: "10.13.13.2",
+          status: "active",
+          createdAt: "2026-05-14T00:00:00Z",
+        },
+        {
+          id: "p0",
+          userId: "owner",
+          deviceLabel: "Old laptop",
+          publicKey: "OLD=",
+          assignedIp: "10.13.13.9",
+          status: "revoked",
+          createdAt: "2026-01-01T00:00:00Z",
+        },
+      ],
+    });
+    const onComplete = vi.fn();
+    render(
+      <VpnStep
+        onComplete={onComplete}
+        onSkip={vi.fn()}
+        onBackToInternet={vi.fn()}
+      />,
+    );
+
+    // Active peer is summarised; the revoked one is not listed.
+    expect(await screen.findByText("Robin's Pixel")).toBeInTheDocument();
+    expect(screen.queryByText("Old laptop")).not.toBeInTheDocument();
+    expect(screen.getByText(/remote access is set up/i)).toBeInTheDocument();
+    // Returning must never re-issue the one-shot key.
+    expect(createVpnPeer).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: /continue/i }));
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it("'Add another device' from returning opens the create form, still no re-mint", async () => {
+    fetchVpnStatus.mockResolvedValue({
+      configured: true,
+      endpointConfigured: true,
+      endpointHost: "x.duckdns.org",
+      peerCount: 1,
+    });
+    fetchVpnPeers.mockResolvedValue({
+      peers: [
+        {
+          id: "p1",
+          userId: "o",
+          deviceLabel: "Phone",
+          publicKey: "P=",
+          assignedIp: "10.13.13.2",
+          status: "active",
+          createdAt: "now",
+        },
+      ],
+    });
+    render(
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToInternet={vi.fn()} />,
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /add another device/i }),
+    );
+    expect(await screen.findByPlaceholderText(/iPhone/i)).toBeInTheDocument();
+    expect(createVpnPeer).not.toHaveBeenCalled();
+  });
+
+  it("renders the error view with a retry when the status check fails; never auto-skips", async () => {
+    fetchVpnStatus.mockReset();
+    fetchVpnStatus.mockRejectedValue(new Error("network down"));
+    const onSkip = vi.fn();
+    render(
+      <VpnStep onComplete={vi.fn()} onSkip={onSkip} onBackToInternet={vi.fn()} />,
+    );
+
+    expect(
+      await screen.findByText(/couldn't check remote access/i),
+    ).toBeInTheDocument();
+    // Hard, must-act failure → assertive alert (not a polite status).
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(onSkip).not.toHaveBeenCalled();
+    expect(fetchVpnStatus).toHaveBeenCalledTimes(1);
+
+    // "Try again" re-runs the precheck (no auto-advance, no auto-skip).
+    fireEvent.click(screen.getByRole("button", { name: /try again/i }));
+    await waitFor(() => expect(fetchVpnStatus).toHaveBeenCalledTimes(2));
+    expect(
+      screen.getByRole("button", { name: /skip for now/i }),
+    ).toBeInTheDocument();
+    expect(onSkip).not.toHaveBeenCalled();
   });
 });
