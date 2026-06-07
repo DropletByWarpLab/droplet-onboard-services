@@ -65,6 +65,19 @@ import type {
   DuckDnsStatus,
   ToolCatalogResponse,
 } from "./types";
+import type {
+  EmailAccount,
+  EmailAccountsResponse,
+  EmailFilter,
+  ThreadSummary,
+  ThreadsResponse,
+  ThreadDetail,
+  ThreadAnalysis,
+  DraftRow,
+  CreateDraftInput,
+  PatchDraftInput,
+  SendDraftResult,
+} from "./types-email";
 import { authFetch } from "./auth";
 
 const BASE = "";
@@ -3446,4 +3459,147 @@ export async function downloadLogBundle(
     );
   }
   return res.blob();
+}
+
+// --- Email (WARP-837) ---
+//
+// Front-end client for the orchestrator's `/api/email/*` routes (verified
+// against origin/main). Reads follow the file's throw-on-non-2xx convention;
+// the one deliberate exception is `sendDraft`, which maps the server's 451
+// `off_lan_blocked` into a TYPED result rather than throwing, so the UI can
+// render a calm, actionable message instead of a crash (mirrors the 202/429
+// typed-result shape used by `retryFailedContextItem`).
+
+/** List the household's connected mailboxes (RBAC-scoped server-side). */
+export async function fetchEmailAccounts(): Promise<EmailAccount[]> {
+  const res = await authFetch(`${BASE}/api/email/accounts`);
+  if (!res.ok) throw new Error(`Failed to fetch email accounts: ${res.status}`);
+  const body = (await res.json()) as EmailAccountsResponse;
+  return body.accounts ?? [];
+}
+
+/**
+ * List threads in `filter` for an account. The filter is wired into the query
+ * string the route reads; a foreign / missing account returns 404 (the IDOR
+ * guard) which we surface as a throw for the hook's error channel.
+ */
+export async function fetchEmailThreads(
+  accountId: string,
+  filter: EmailFilter,
+): Promise<ThreadSummary[]> {
+  const params = new URLSearchParams({ filter });
+  const res = await authFetch(
+    `${BASE}/api/email/${encodeURIComponent(accountId)}/threads?${params}`,
+  );
+  if (!res.ok) throw new Error(`Failed to fetch threads: ${res.status}`);
+  const body = (await res.json()) as ThreadsResponse;
+  return body.threads ?? [];
+}
+
+/** Fetch a full thread with its messages (ascending receivedAt). */
+export async function fetchEmailThread(
+  accountId: string,
+  threadId: string,
+): Promise<ThreadDetail> {
+  const res = await authFetch(
+    `${BASE}/api/email/${encodeURIComponent(accountId)}/threads/${encodeURIComponent(threadId)}`,
+  );
+  if (!res.ok) throw new Error(`Failed to fetch thread: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Fetch the AI side-panel analysis for a thread. The route answers 503 when the
+ * analysis service isn't wired yet — we throw so SWR's retry kicks in (the
+ * orchestrator comment explicitly chose 503 over 500 for that reason).
+ */
+export async function fetchThreadAnalysis(
+  accountId: string,
+  threadId: string,
+): Promise<ThreadAnalysis> {
+  const res = await authFetch(
+    `${BASE}/api/email/${encodeURIComponent(accountId)}/threads/${encodeURIComponent(threadId)}/analysis`,
+  );
+  if (!res.ok) throw new Error(`Failed to fetch thread analysis: ${res.status}`);
+  return res.json();
+}
+
+/** Create a draft on an account (optionally tied to a thread). Returns 201. */
+export async function createDraft(
+  accountId: string,
+  input: CreateDraftInput,
+): Promise<DraftRow> {
+  const res = await authFetch(
+    `${BASE}/api/email/${encodeURIComponent(accountId)}/drafts`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to create draft: ${res.status}`);
+  }
+  return res.json();
+}
+
+/** Edit a draft. 409 once the draft is no longer in `draft` status. */
+export async function patchDraft(
+  id: string,
+  patch: PatchDraftInput,
+): Promise<DraftRow> {
+  const res = await authFetch(
+    `${BASE}/api/email/drafts/${encodeURIComponent(id)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to update draft: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * The friendly fallback shown if the server's 451 carries no `message`. Mirrors
+ * the off-LAN allowlist vocabulary (FEATURES §8) and points the user at the one
+ * place this is changed — Settings — never this surface.
+ */
+const OFF_LAN_BLOCKED_FALLBACK =
+  "Sending email leaves your Droplet, and outbound email is currently turned off. An admin can enable it in Settings under the off-LAN allowlist.";
+
+/**
+ * Queue a draft for send (owner/admin only, server-enforced). Returns a TYPED
+ * result:
+ *   - 202 → `{ status: "queued", id }`
+ *   - 451 → `{ status: "off_lan_blocked", message, channel }` (NOT a throw) so
+ *           the UI renders an actionable "outbound email is off" message.
+ * Any other non-2xx (404 not found, 409 already dispatched, 5xx) throws.
+ */
+export async function sendDraft(id: string): Promise<SendDraftResult> {
+  const res = await authFetch(
+    `${BASE}/api/email/drafts/${encodeURIComponent(id)}/send`,
+    { method: "POST" },
+  );
+  if (res.status === 451) {
+    const body = (await res.json().catch(() => ({}))) as {
+      message?: string;
+      channel?: string;
+    };
+    return {
+      status: "off_lan_blocked",
+      message: body.message || OFF_LAN_BLOCKED_FALLBACK,
+      channel: body.channel || "outbound_email",
+    };
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to send draft: ${res.status}`);
+  }
+  const body = (await res.json()) as { id: string; status: string };
+  return { status: "queued", id: body.id };
 }
