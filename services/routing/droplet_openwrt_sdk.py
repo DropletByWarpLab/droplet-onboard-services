@@ -936,12 +936,26 @@ class FirewallApi:
         self.reload()
 
     def unblock_device(self, mac: str):
-        """Remove all firewall rules blocking a specific MAC address."""
+        """Remove all firewall rules blocking a specific MAC address.
+
+        Idempotent: when no matching REJECT rule exists — e.g. the schedule
+        ticker re-asserting the desired "unblocked" state for a device that was
+        never blocked — we skip the commit/reload entirely and return cleanly.
+        Previously this committed + reloaded even on zero matches, which the
+        safe-apply path rejected and surfaced as a recurring "Unblock device:
+        500" (code ROLLED_BACK) every tick.
+        """
         config = self._r.uci.get("firewall", type="rule")
+        removed = False
         for section_name, section_data in config.get("values", {}).items():
             if section_data.get("src_mac", "").upper() == mac.upper():
                 if section_data.get("target") == "REJECT":
                     self._r.uci.delete("firewall", section_name)
+                    removed = True
+        # Nothing matched → no-op (idempotent). Don't commit/reload an empty
+        # changeset; that's what was 500-ing on every schedule tick.
+        if not removed:
+            return
         self._r.uci.commit("firewall")
         self.reload()
 
