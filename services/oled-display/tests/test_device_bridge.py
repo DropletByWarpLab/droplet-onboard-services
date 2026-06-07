@@ -376,6 +376,27 @@ def test_auto_mode_falls_back_to_uci_when_no_hostapd_signal(
     assert snap["payload"] == "WIFI:S:Droplet-AI;T:WPA;P:droplethome2026;;"
 
 
+def test_use_hostapd_mode_caches_the_uci_probe(monkeypatch: pytest.MonkeyPatch):
+    """WARP-834 findings 2 + 3: in `auto` mode the deployment-shape decision needs
+    a UCI SSH probe (an up-to-12s round trip). It must be cached, not reissued on
+    every GET /openwrt/qr or Wi-Fi write — otherwise concurrent
+    ThreadingHTTPServer callers each block on a fresh probe and open parallel SSH
+    sessions. Across repeated calls the probe runs exactly once (within the TTL)."""
+    bridge = _load_bridge(monkeypatch, {"DROPLET_AP_MODE": "auto"})
+    calls = {"n": 0}
+
+    def counting_creds():
+        calls["n"] += 1
+        # Router answers → not None → UCI (multi-box) shape.
+        return ({"ssid": "Droplet-AI", "key": "k", "encryption": "psk2",
+                 "hidden": False, "disabled": False}, None)
+
+    monkeypatch.setattr(bridge, "openwrt_wifi_credentials", counting_creds)
+    results = [bridge._use_hostapd_mode() for _ in range(5)]
+    assert results == [False] * 5
+    assert calls["n"] == 1, f"UCI probe should be cached; ran {calls['n']}x"
+
+
 # ---------------------------------------------------------------------------
 # multi-box (UCI/SSH) path stays intact — default mode is unchanged
 # ---------------------------------------------------------------------------
