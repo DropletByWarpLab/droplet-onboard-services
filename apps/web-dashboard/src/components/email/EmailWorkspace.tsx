@@ -426,7 +426,13 @@ function ReplyComposer({
           type="button"
           onClick={() => setOpen(false)}
           aria-label="Close reply"
-          className="p-1 rounded-md text-label-tertiary hover:text-label-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="
+            -mr-2 inline-flex items-center justify-center min-h-[44px] min-w-[44px]
+            rounded-md text-label-tertiary
+            transition-colors duration-200 ease-smooth
+            hover:text-label-primary
+            focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
+          "
         >
           <X size={14} aria-hidden />
         </button>

@@ -13,6 +13,7 @@
  * which keeps this trivially testable and free of fetch concerns.
  */
 
+import { useMemo, useState } from "react";
 import { Inbox, Search, Sparkles } from "lucide-react";
 import type { EmailAccount, EmailFilter, ThreadSummary } from "@/lib/types-email";
 
@@ -74,6 +75,21 @@ export function EmailList({
   const searchPlaceholder =
     accountCount === 1 ? "Search inbox" : `Search ${accountCount} inboxes`;
 
+  // Lightweight client-side filter over the already-loaded threads — matches
+  // subject or sender, case-insensitive. No new fetch; the search just narrows
+  // what is on screen, so it stays instant and offline-safe.
+  const [query, setQuery] = useState("");
+  const q = query.trim().toLowerCase();
+  const visibleThreads = useMemo(() => {
+    if (!q) return threads;
+    return threads.filter(
+      (t) =>
+        t.subject.toLowerCase().includes(q) ||
+        (t.lastSender ?? "").toLowerCase().includes(q),
+    );
+  }, [threads, q]);
+  const noMatches = q.length > 0 && visibleThreads.length === 0;
+
   return (
     <div className="flex flex-col h-full min-h-0 border-r border-separator bg-surface-primary">
       {/* Header — account summary, search, filter chips. */}
@@ -94,6 +110,8 @@ export function EmailList({
           />
           <input
             type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
             placeholder={searchPlaceholder}
             aria-label={searchPlaceholder}
             className="
@@ -178,9 +196,23 @@ export function EmailList({
                 : "Nothing in this view right now."}
             </p>
           </div>
+        ) : noMatches ? (
+          <div className="p-8 text-center">
+            <Search
+              size={26}
+              className="mx-auto text-label-quaternary mb-2"
+              aria-hidden
+            />
+            <p className="type-subheadline text-label-primary">
+              No matches
+            </p>
+            <p className="type-footnote text-label-tertiary mt-1 max-w-[220px] mx-auto">
+              No threads match &ldquo;{query.trim()}&rdquo; in this view.
+            </p>
+          </div>
         ) : (
           <ul className="py-1">
-            {threads.map((t) => (
+            {visibleThreads.map((t) => (
               <li key={t.id}>
                 <EmailRow
                   thread={t}

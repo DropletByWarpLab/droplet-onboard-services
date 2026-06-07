@@ -136,6 +136,37 @@ describe("EmailList", () => {
     expect(screen.getByLabelText(/loading/i)).toBeInTheDocument();
   });
 
+  it("filters the loaded rows by subject or sender as you type (case-insensitive)", () => {
+    render(<EmailList {...baseProps()} />);
+    const search = screen.getByRole("searchbox");
+
+    // Match on subject — only the PO thread survives.
+    fireEvent.change(search, { target: { value: "po 4912" } });
+    expect(screen.getByText("PO 4912 revised ETA")).toBeInTheDocument();
+    expect(screen.queryByText("Invoice attached")).not.toBeInTheDocument();
+
+    // Match on sender — only the Hartwell thread survives.
+    fireEvent.change(search, { target: { value: "HARTWELL" } });
+    expect(screen.getByText("Invoice attached")).toBeInTheDocument();
+    expect(screen.queryByText("PO 4912 revised ETA")).not.toBeInTheDocument();
+
+    // Clearing the box restores every loaded row.
+    fireEvent.change(search, { target: { value: "" } });
+    expect(screen.getByText("PO 4912 revised ETA")).toBeInTheDocument();
+    expect(screen.getByText("Invoice attached")).toBeInTheDocument();
+  });
+
+  it("shows a calm no-matches state when a search matches nothing, without an exclamation mark", () => {
+    render(<EmailList {...baseProps()} />);
+    fireEvent.change(screen.getByRole("searchbox"), {
+      target: { value: "zzz no such thread" },
+    });
+    expect(screen.queryByText("PO 4912 revised ETA")).not.toBeInTheDocument();
+    expect(screen.getByText("No matches")).toBeInTheDocument();
+    // No exclamation marks in the no-matches copy.
+    expect(document.body.textContent).not.toMatch(/!/);
+  });
+
   it("renders an error state with a retry affordance", () => {
     const props = baseProps();
     const onRetry = vi.fn();

@@ -13,14 +13,7 @@
  * thread column behind an explicit confirm step.
  */
 
-import {
-  ArrowRight,
-  FileText,
-  Mail,
-  Sparkles,
-  Video,
-  Wrench,
-} from "lucide-react";
+import { FileText, Mail, Sparkles, Video, Wrench } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { RelatedReferences, ThreadAnalysis } from "@/lib/types-email";
 import { SafetyChip } from "./SafetyChip";
@@ -136,21 +129,15 @@ export function EmailAIPanel({
                     <li key={i}>
                       {/* Read-only surface: actions are shown, not dispatched
                           from here. They prime the next step; the actual write
-                          happens behind the thread's confirm gate or in chat. */}
-                      <div className="dp-card p-3 flex items-start gap-2.5">
-                        <span className="flex-1 min-w-0">
-                          <span className="block type-footnote text-label-primary">
-                            {a.label}
-                          </span>
-                          <span className="block mt-1.5">
-                            <SafetyChip safety={a.safety} />
-                          </span>
+                          happens behind the thread's confirm gate or in chat.
+                          No trailing chevron — these rows are not clickable. */}
+                      <div className="dp-card p-3">
+                        <span className="block type-footnote text-label-primary">
+                          {a.label}
                         </span>
-                        <ArrowRight
-                          size={13}
-                          className="shrink-0 mt-0.5 text-label-quaternary"
-                          aria-hidden
-                        />
+                        <span className="block mt-1.5">
+                          <SafetyChip safety={a.safety} />
+                        </span>
                       </div>
                     </li>
                   ))}
