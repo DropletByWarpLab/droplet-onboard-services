@@ -120,13 +120,22 @@ gated as FR-001..004); chat (thinking indicator + hide single-model pill); Conte
     PairDialog kept.
   - `files/drives` — Topbar→ShellPage, DrivesPanel kept.
 
-**Remaining queue:**
-1. **Network** (`components/network/*`, ~10.8k LOC, 52 files, 7-tab WAI-ARIA tablist) —
-   biggest; preserve tablist roles/keyboard + operation-confirm flows exactly. A newer,
-   higher-fidelity handoff for the **managed-switch** Network add-on is at
-   `~/Downloads/design_handoff_network_switch/` (port map / PoE / VLAN spec + standalone HTML ref).
-- **Deferred polish:** chat full-layout indigo-surface restyle (thinking+pill done; page is
-  already indigo-accented). Optional.
+**Done (this batch — Network):**
+- **Network** (`app/network/page.tsx`) — Topbar→ShellPage across loading/error/connected
+  states; WAI-ARIA tablist → `.tabstrip/.tab`, refresh/retry/dismiss → `.btn`, confirmation +
+  operation-status banners and the inline Overview/Devices/Firewall/System panels → `.card`.
+  **Tablist a11y contract preserved byte-for-byte** (role/aria-selected/aria-controls/id/
+  tabIndex/hidden + Arrow/Home/End) — only classNames changed; WARP-298 source-regex test
+  green. WARP-40 confirm-token + op-polling, Simple/Advanced toggle, and all feature panels
+  (SwitchPanel, CoverageExtendersPanel, DeviceDetailPanel, WifiSettingsForm, …) kept as-is.
+
+**Re-skin queue COMPLETE.** All secondary pages now wrap in ShellPage with indigo chrome.
+
+**Remaining (optional polish only):**
+- Chat full-layout indigo-surface restyle (thinking+pill already done; page is indigo-accented).
+- Managed-switch Network add-on: a higher-fidelity handoff lives at
+  `~/Downloads/design_handoff_network_switch/` (port map / PoE / VLAN). This is net-new
+  feature fidelity for `SwitchPanel`, not a chrome re-skin — out of scope for the re-skin pass.
 
 **Note:** the welcome-page design archive URL (in "Design source" above) now returns 404 —
 the foundation is fully built, so it's no longer needed for re-skins; design intent for the
