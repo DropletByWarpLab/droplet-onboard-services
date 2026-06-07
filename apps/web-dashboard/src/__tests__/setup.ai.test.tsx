@@ -243,13 +243,14 @@ describe("setup AI step (WARP-174)", () => {
     expect(
       screen.getByText(/i can help with files, cameras/i),
     ).toBeInTheDocument();
-    // Primary CTA flipped.
+    // Primary CTA flipped (the label is "Continue" — this is not the terminal
+    // step, so it must not claim to finish setup / go to the dashboard).
     expect(
-      screen.getByRole("button", { name: /take me to the dashboard/i }),
+      screen.getByRole("button", { name: /^continue$/i }),
     ).toBeInTheDocument();
   });
 
-  it("Take me to the dashboard advances to the team step (PR #381)", async () => {
+  it("the post-response Continue CTA advances to the team step (PR #381)", async () => {
     fetchModelsMock.mockResolvedValue({ models: [LOCAL_MODEL] });
     sendChatMock.mockResolvedValue({
       ok: true,
@@ -266,7 +267,7 @@ describe("setup AI step (WARP-174)", () => {
     });
     await act(async () => {
       fireEvent.click(
-        screen.getByRole("button", { name: /take me to the dashboard/i }),
+        screen.getByRole("button", { name: /^continue$/i }),
       );
     });
 

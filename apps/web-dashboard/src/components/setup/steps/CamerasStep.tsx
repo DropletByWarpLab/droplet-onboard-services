@@ -34,9 +34,15 @@ import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 export function CamerasStep({
   onComplete,
   onSkip,
+  onAutoSkip,
 }: {
   onComplete: (acceptedCount: number) => void;
   onSkip: () => void;
+  /** Invoked when the step skips ITSELF on mount (no cameras found / service
+   *  off) — distinct from the user tapping "Skip for now" (onSkip). Lets the
+   *  wizard advance WITHOUT recording the step in Back history. Falls back to
+   *  onSkip when not provided (older callers/tests). */
+  onAutoSkip?: () => void;
 }) {
   const [cameras, setCameras] = useState<DiscoveredCamera[]>([]);
   const [loading, setLoading] = useState(true);
@@ -48,17 +54,17 @@ export function CamerasStep({
       const list = await fetchDiscoveredCameras();
       setCameras(list);
       if (list.length === 0) {
-        onSkip();
+        (onAutoSkip ?? onSkip)();
       }
     } catch {
       // camera-discovery service might be off in dev; treat as "no
       // cameras" and skip silently. Customer can add cameras manually
       // from the Cameras page later.
-      onSkip();
+      (onAutoSkip ?? onSkip)();
     } finally {
       setLoading(false);
     }
-  }, [onSkip]);
+  }, [onSkip, onAutoSkip]);
 
   useEffect(() => {
     load();

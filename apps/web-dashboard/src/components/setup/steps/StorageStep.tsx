@@ -48,9 +48,15 @@ import {
 export function StorageStep({
   onComplete,
   onSkip,
+  onAutoSkip,
 }: {
   onComplete: () => void;
   onSkip: () => void;
+  /** Invoked when the step skips ITSELF on mount (no drives / bridge down) —
+   *  distinct from the user tapping "Skip for now" (onSkip). The wizard uses
+   *  this to advance WITHOUT recording the step in Back history, so Back skips
+   *  over it. Falls back to onSkip when not provided (older callers/tests). */
+  onAutoSkip?: () => void;
 }) {
   const [drives, setDrives] = useState<DriveInfo[]>([]);
   const [names, setNames] = useState<Record<string, string>>({});
@@ -101,18 +107,18 @@ export function StorageStep({
       // Auto-skip when there's nothing to label. Lets the wizard land
       // on the next step without a "Skip" click on an empty page.
       if (list.length === 0) {
-        onSkip();
+        (onAutoSkip ?? onSkip)();
       }
     } catch (e) {
       // Bridge unreachable / dev-mode without it — treat as "no drives"
       // and skip silently. Customer can label drives later from /storage.
-      onSkip();
+      (onAutoSkip ?? onSkip)();
       const _msg = e instanceof Error ? e.message : String(e);
       void _msg;
     } finally {
       setLoading(false);
     }
-  }, [onSkip]);
+  }, [onSkip, onAutoSkip]);
 
   useEffect(() => {
     load();

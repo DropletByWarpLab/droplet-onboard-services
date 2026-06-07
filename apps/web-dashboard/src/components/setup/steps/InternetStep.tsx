@@ -120,6 +120,7 @@ export function InternetStep({
   // --- DuckDNS (Section B) ---
   const [subdomain, setSubdomain] = useState("");
   const [token, setToken] = useState("");
+  const [showToken, setShowToken] = useState(false);
   const [enabled, setEnabled] = useState(true);
   const [existing, setExisting] = useState<DuckDnsStatus | null>(null);
   const [loading, setLoading] = useState(true);
@@ -607,7 +608,7 @@ export function InternetStep({
               aria-hidden="true"
             />
             <input
-              type="password"
+              type={showToken ? "text" : "password"}
               value={token}
               onChange={(e) => setToken(e.target.value)}
               placeholder={
@@ -615,9 +616,17 @@ export function InternetStep({
                   ? "•••••• (stored)"
                   : "Paste your DuckDNS token"
               }
-              className="dp-input pl-10"
+              className="dp-input pl-10 pr-10"
               autoComplete="off"
             />
+            <button
+              type="button"
+              onClick={() => setShowToken((s) => !s)}
+              aria-label={showToken ? "Hide token" : "Show token"}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-label-tertiary transition-colors duration-200 hover:text-label-secondary"
+            >
+              {showToken ? <EyeOff size={16} /> : <Eye size={16} />}
+            </button>
           </div>
         </div>
 

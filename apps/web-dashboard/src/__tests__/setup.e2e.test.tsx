@@ -406,7 +406,7 @@ describe("setup wizard E2E happy path (WARP-174)", () => {
     expect(screen.getByTestId("ai-response")).toBeInTheDocument();
     await act(async () => {
       fireEvent.click(
-        screen.getByRole("button", { name: /take me to the dashboard/i }),
+        screen.getByRole("button", { name: /^continue$/i }),
       );
     });
 
