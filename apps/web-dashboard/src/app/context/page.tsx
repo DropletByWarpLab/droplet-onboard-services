@@ -24,11 +24,13 @@
  */
 
 import { motion } from "framer-motion";
+import { Brain } from "lucide-react";
 import {
   useContextStatsFull,
   useContextStatsQueued,
   useContextStatsFailed,
 } from "@/lib/hooks/useContextStats";
+import { ShellPage } from "@/components/shell/ShellPage";
 import { StatCards } from "@/components/context/StatCards";
 import { ThroughputSparkline } from "@/components/context/ThroughputSparkline";
 import { CoverageDonut } from "@/components/context/CoverageDonut";
@@ -57,97 +59,59 @@ export default function ContextPage() {
     !!full && full.failed > 0,
   );
 
+  const SUB =
+    "What your Droplet's AI has learned about you — indexed locally, on-device. Nothing here leaves the box.";
+  const icon = <Brain size={15} />;
+
   // First-paint skeleton.
   if (isLoading && !full) {
     return (
-      <div className="relative">
-        <div
-          aria-hidden
-          className="pointer-events-none absolute inset-x-0 top-0 h-[420px] aurora-bg opacity-[0.45] animate-aurora"
-        />
-        <div className="relative p-6 lg:p-12 max-w-6xl mx-auto space-y-6">
-          <div className="h-3 w-40 bg-surface-secondary rounded animate-pulse" />
-          <div className="h-12 w-96 max-w-full bg-surface-secondary rounded animate-pulse" />
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-            <SkeletonRow height={120} />
-            <SkeletonRow height={120} />
-            <SkeletonRow height={120} />
-            <SkeletonRow height={120} />
-          </div>
-          <SkeletonRow height={180} />
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-            <SkeletonRow height={320} />
-            <SkeletonRow height={320} />
-          </div>
+      <ShellPage icon={icon} label="Context" title="Context" sub={SUB}>
+        <div className="grid c4" style={{ marginBottom: 16 }}>
+          <SkeletonRow height={120} />
+          <SkeletonRow height={120} />
+          <SkeletonRow height={120} />
+          <SkeletonRow height={120} />
         </div>
-      </div>
+        <SkeletonRow height={180} />
+        <div className="grid c2" style={{ marginTop: 16 }}>
+          <SkeletonRow height={320} />
+          <SkeletonRow height={320} />
+        </div>
+      </ShellPage>
     );
   }
 
   if (error || !full) {
     return (
-      <div className="p-6 lg:p-12 max-w-6xl mx-auto">
-        <div className="dp-tile p-8 text-center">
-          <p className="type-headline text-label-primary mb-2">
-            Couldn&apos;t load your context
-          </p>
-          <p className="type-footnote text-label-tertiary">
-            Try refreshing the page. If it persists, the orchestrator may
-            be unreachable.
-          </p>
+      <ShellPage icon={icon} label="Context" title="Context" sub={SUB}>
+        <div className="card">
+          <div className="empty">
+            <span className="eh">Couldn&apos;t load your context</span>
+            <span>
+              Try refreshing the page. If it persists, the orchestrator may be unreachable.
+            </span>
+          </div>
         </div>
-      </div>
+      </ShellPage>
     );
   }
 
   // Zero-files onboarding.
   if (full.files === 0) {
     return (
-      <div className="relative">
-        <div
-          aria-hidden
-          className="pointer-events-none absolute inset-x-0 top-0 h-[420px] aurora-bg opacity-[0.45] animate-aurora"
-        />
-        <div className="relative p-6 lg:p-12 max-w-6xl mx-auto">
-          <header className="mb-10">
-            <p className="type-caption-1 text-label-tertiary uppercase tracking-[0.18em]">
-              Your AI&apos;s Context
-            </p>
-            <h1 className="type-display text-label-primary text-5xl mt-2">
-              Get started
-            </h1>
-          </header>
-          <EmptyState />
-        </div>
-      </div>
+      <ShellPage icon={icon} label="Context" title="Context" sub={SUB}>
+        <EmptyState />
+      </ShellPage>
     );
   }
 
   return (
-    <div className="relative">
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-x-0 top-0 h-[420px] aurora-bg opacity-[0.45] animate-aurora"
-      />
-      <div className="relative p-6 lg:p-12 max-w-6xl mx-auto space-y-8">
-        {/* ── HERO ─────────────────────────────────── */}
-        <header className="animate-fade-rise">
-          <p className="type-caption-1 text-label-tertiary uppercase tracking-[0.18em]">
-            Your AI&apos;s Context
-          </p>
-          <h1 className="type-display text-label-primary text-4xl lg:text-5xl mt-2 max-w-3xl">
-            Your AI knows about{" "}
-            <span
-              className="type-display-italic"
-              style={{ color: "var(--aurora-ink)" }}
-            >
-              you
-            </span>
-            .
-          </h1>
-        </header>
-
-        {/* ── STAT CARDS (stagger-revealed) ────────── */}
+    <ShellPage icon={icon} label="Context" title="Context" sub={SUB}>
+      {/* Single wrapper so the framer-motion sections aren't direct children
+          of `.page-inner` (which would double up with the shell's CSS
+          entrance animation). */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 28 }}>
         <StatCards
           files={full.files}
           chunks={full.chunks}
@@ -155,7 +119,6 @@ export default function ContextPage() {
           failed={full.failed}
         />
 
-        {/* ── THROUGHPUT SPARKLINE ─────────────────── */}
         <motion.section
           initial={{ opacity: 0, y: 16 }}
           animate={{ opacity: 1, y: 0 }}
@@ -164,7 +127,6 @@ export default function ContextPage() {
           <ThroughputSparkline data={full.throughput7d} />
         </motion.section>
 
-        {/* ── DONUT + BYTES BAR (two-column on lg) ─── */}
         <motion.section
           initial={{ opacity: 0, y: 16 }}
           animate={{ opacity: 1, y: 0 }}
@@ -175,7 +137,6 @@ export default function ContextPage() {
           <BytesBySource data={full.byCategory} />
         </motion.section>
 
-        {/* ── PIPELINE HEALTH ──────────────────────── */}
         <motion.section
           initial={{ opacity: 0, y: 16 }}
           animate={{ opacity: 1, y: 0 }}
@@ -184,19 +145,13 @@ export default function ContextPage() {
           <PipelineHealth rows={full.pipelineHealth} />
         </motion.section>
 
-        {/* ── ACTIONABLE LISTS (two-column when both present) ── */}
         {(queued.length > 0 || failed.length > 0) && (
           <section className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-            {queued.length > 0 && (
-              <QueuedList items={queued} onChange={refetchQueued} />
-            )}
-            {failed.length > 0 && (
-              <FailedList items={failed} onChange={refetchFailed} />
-            )}
+            {queued.length > 0 && <QueuedList items={queued} onChange={refetchQueued} />}
+            {failed.length > 0 && <FailedList items={failed} onChange={refetchFailed} />}
           </section>
         )}
 
-        {/* ── RECENTLY INDEXED ─────────────────────── */}
         <motion.section
           initial={{ opacity: 0, y: 16 }}
           animate={{ opacity: 1, y: 0 }}
@@ -205,6 +160,6 @@ export default function ContextPage() {
           <RecentlyIndexed items={full.recentlyIndexed} />
         </motion.section>
       </div>
-    </div>
+    </ShellPage>
   );
 }
