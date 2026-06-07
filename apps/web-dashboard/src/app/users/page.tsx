@@ -34,6 +34,8 @@ import type {
 } from "@/lib/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useToast } from "@/components/Toast";
+import { ShellPage } from "@/components/shell/ShellPage";
+import { Badge, type BadgeKind } from "@/components/shell/primitives";
 
 const TTL_OPTIONS: Array<{ label: string; hours: number }> = [
   { label: "24 hours", hours: 24 },
@@ -335,88 +337,109 @@ export default function UsersPage() {
 
   if (isAdmin === false) {
     return (
-      <div className="p-6 lg:p-8 max-w-3xl">
-        <h1 className="type-large-title text-label-primary mb-4">Users</h1>
-        <div className="dp-card py-16 flex flex-col items-center text-label-tertiary">
-          <ShieldOff size={32} className="mb-3 text-label-quaternary" />
-          <p className="type-subheadline">Admin access required</p>
-          <p className="type-caption-1 mt-1 text-label-quaternary max-w-sm text-center">
-            Only administrators can manage users on this Droplet. Ask an admin
-            to give you the <code>admin</code> group membership.
-          </p>
+      <ShellPage icon={<UsersIcon size={15} />} label="Users" title="Users">
+        <div className="card">
+          <div className="empty">
+            <span className="ei">
+              <ShieldOff size={24} />
+            </span>
+            <span className="eh">Admin access required</span>
+            <span style={{ maxWidth: "32ch" }}>
+              Only administrators can manage users on this Droplet. Ask an admin
+              to give you the <code>admin</code> group membership.
+            </span>
+          </div>
         </div>
-      </div>
+      </ShellPage>
     );
   }
 
-  // Status pill copy + class for the pending-invites list.
-  function inviteStatus(i: InviteListItem): { label: string; cls: string } {
-    if (i.revokedAt) return { label: "Revoked", cls: "bg-label-quaternary/10 text-label-tertiary" };
-    if (i.acceptedAt) return { label: "Accepted", cls: "bg-system-green/15 text-system-green" };
+  // Status pill copy + badge kind for the pending-invites list.
+  function inviteStatus(i: InviteListItem): { label: string; kind: BadgeKind } {
+    if (i.revokedAt) return { label: "Revoked", kind: "muted" };
+    if (i.acceptedAt) return { label: "Accepted", kind: "ok" };
     if (new Date(i.expiresAt).getTime() < Date.now())
-      return { label: "Expired", cls: "bg-system-orange/15 text-system-orange" };
-    return { label: "Pending", cls: "bg-accent/15 text-accent" };
+      return { label: "Expired", kind: "warn" };
+    return { label: "Pending", kind: "info" };
   }
 
   return (
-    <div className="p-6 lg:p-8 max-w-4xl">
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="type-large-title text-label-primary">Users</h1>
+    <ShellPage
+      icon={<UsersIcon size={15} />}
+      label="Users"
+      title="Users"
+      sub="Manage who can access this Droplet — invite teammates, set their role, and revoke access."
+      actions={
         <button
           ref={inviteTriggerRef}
           onClick={() => {
             resetInviteForm();
             setShowInvite(true);
           }}
-          className="dp-btn-primary type-subheadline !py-2 !px-4 !min-h-[36px]"
+          className="btn primary"
+          type="button"
         >
           <Plus size={14} />
           Invite user
         </button>
-      </div>
-
+      }
+    >
       {error && (
-        <div className="mb-4 p-3 bg-system-red/10 border border-system-red/20 rounded type-footnote text-system-red flex items-center justify-between">
+        <div
+          className="card"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+            padding: "12px 16px",
+            borderColor: "rgba(239,68,68,0.25)",
+            background: "rgba(239,68,68,0.08)",
+            color: "#ef4444",
+            fontSize: 13,
+          }}
+        >
           <span>{error}</span>
-          <button onClick={() => setError(null)}>
-            <X size={12} />
+          <button onClick={() => setError(null)} aria-label="Dismiss error" type="button">
+            <X size={14} />
           </button>
         </div>
       )}
 
       {/* User list */}
-      <div className="dp-group">
+      <div className="card">
         {loading && users.length === 0 ? (
-          <div className="dp-row flex items-center justify-center text-label-tertiary type-subheadline">
+          <div className="empty" style={{ padding: "32px 20px" }}>
             Loading…
           </div>
         ) : users.length === 0 ? (
-          <div className="dp-row flex items-center justify-center text-label-tertiary type-subheadline">
-            No users yet.
+          <div className="empty">
+            <span className="ei">
+              <UsersIcon size={24} />
+            </span>
+            <span className="eh">No users yet</span>
+            <span>Invite a teammate to get started.</span>
           </div>
         ) : (
-          users.map((u) => {
+          <div className="rows">
+          {users.map((u) => {
             // aria-label uses the row's primary visible identifier so
             // screen-reader announcements match what sighted users see.
             const label = u.displayName || u.id;
             return (
-            <div key={u.id} className="dp-row group">
-              <div className="flex items-center gap-3 flex-1 min-w-0">
-                <div className="w-9 h-9 rounded-full bg-accent/15 flex items-center justify-center flex-shrink-0">
-                  <UsersIcon size={14} className="text-accent" />
-                </div>
-                <div className="min-w-0">
-                  <p className="type-callout text-label-primary truncate">
-                    {u.displayName || u.id}
-                  </p>
-                  <p className="type-caption-1 text-label-tertiary truncate">
-                    {u.id}
-                    {u.id === currentUser?.username && (
-                      <span className="ml-2 text-accent">· you</span>
-                    )}
-                  </p>
-                </div>
-              </div>
+            <div key={u.id} className="lrow">
+              <span className="ri brand">
+                <UsersIcon size={15} />
+              </span>
+              <span className="rt">
+                <span className="nm">{u.displayName || u.id}</span>
+                <span className="sub mono">
+                  {u.id}
+                  {u.id === currentUser?.username && (
+                    <span style={{ color: "var(--brand)" }}> · you</span>
+                  )}
+                </span>
+              </span>
               {/*
                 Row actions are always rendered (not opacity-gated on hover) so
                 they're discoverable on touch and reachable for keyboard-only
@@ -458,15 +481,19 @@ export default function UsersPage() {
               </div>
             </div>
             );
-          })
+          })}
+          </div>
         )}
       </div>
 
       {/* Pending invites */}
       {invites.length > 0 && (
-        <div className="mt-8">
-          <h2 className="type-headline text-label-primary mb-3">Pending invites</h2>
-          <div className="dp-group">
+        <div>
+          <div className="sect">
+            <h2>Pending invites</h2>
+          </div>
+          <div className="card">
+            <div className="rows">
             {invites.map((i) => {
               const status = inviteStatus(i);
               const canRevoke = !i.revokedAt && !i.acceptedAt;
@@ -474,26 +501,18 @@ export default function UsersPage() {
               // back to username) so the screen-reader announcement matches.
               const inviteLabel = i.displayName || i.username;
               return (
-                <div key={i.token} className="dp-row group">
-                  <div className="flex items-center gap-3 flex-1 min-w-0">
-                    <div className="w-9 h-9 rounded-full bg-accent/10 flex items-center justify-center flex-shrink-0">
-                      <LinkIcon size={14} className="text-accent" />
-                    </div>
-                    <div className="min-w-0">
-                      <p className="type-callout text-label-primary truncate">
-                        {i.displayName || i.username}
-                      </p>
-                      <p className="type-caption-1 text-label-tertiary truncate">
-                        {i.username} · {i.role === "admin" ? "admin" : "user"} · invited by{" "}
-                        {i.createdBy}
-                      </p>
-                    </div>
-                    <span
-                      className={`type-caption-1 px-2 py-0.5 rounded-full ${status.cls}`}
-                    >
-                      {status.label}
+                <div key={i.token} className="lrow">
+                  <span className="ri brand">
+                    <LinkIcon size={15} />
+                  </span>
+                  <span className="rt">
+                    <span className="nm">{i.displayName || i.username}</span>
+                    <span className="sub mono">
+                      {i.username} · {i.role === "admin" ? "admin" : "user"} · invited by{" "}
+                      {i.createdBy}
                     </span>
-                  </div>
+                  </span>
+                  <Badge kind={status.kind}>{status.label}</Badge>
                   {canRevoke && (
                     <div className="flex items-center gap-0.5">
                       <button
@@ -509,6 +528,7 @@ export default function UsersPage() {
                 </div>
               );
             })}
+            </div>
           </div>
         </div>
       )}
@@ -786,6 +806,6 @@ export default function UsersPage() {
         confirmLabel="Disable"
         variant="destructive"
       />
-    </div>
+    </ShellPage>
   );
 }
