@@ -10,7 +10,7 @@
  *   - RBAC: a family user does not get the send affordance,
  *   - the neutral placeholder when no thread is selected.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 
 // ── Hook mocks ──
@@ -91,6 +91,27 @@ const threadDetail = {
   ],
 };
 
+// ── matchMedia control ──
+// EmailWorkspace switches between the desktop multi-column layout and the mobile
+// single-pane layout from `useMediaQuery` state. jsdom ships no matchMedia, so
+// each test installs a stub. `setViewport("desktop")` reports a match for the
+// lg + xl width queries (full 3-column layout); `setViewport("mobile")` reports
+// no match (single active pane + AI drawer).
+const originalMatchMedia = window.matchMedia;
+function setViewport(kind: "desktop" | "mobile") {
+  const matches = kind === "desktop";
+  window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+    matches,
+    media: query,
+    onchange: null,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    addListener: vi.fn(),
+    removeListener: vi.fn(),
+    dispatchEvent: vi.fn(),
+  })) as unknown as typeof window.matchMedia;
+}
+
 function resetHooks() {
   useEmailAccountsMock.mockReturnValue({
     accounts: [account],
@@ -122,7 +143,12 @@ beforeEach(() => {
   authRef.role = "owner";
   pushMock.mockReset();
   createDraftMock.mockReset();
+  setViewport("desktop");
   resetHooks();
+});
+
+afterEach(() => {
+  window.matchMedia = originalMatchMedia;
 });
 
 describe("EmailWorkspace", () => {
@@ -261,5 +287,124 @@ describe("EmailWorkspace", () => {
         screen.getByRole("button", { name: /send reply/i }),
       ).toBeInTheDocument(),
     );
+  });
+
+  describe("responsive single-pane (below lg)", () => {
+    beforeEach(() => setViewport("mobile"));
+
+    it("shows the list and not the thread reader when no thread is selected", () => {
+      render(<EmailWorkspace />);
+      // List is the active pane.
+      expect(screen.getByText("PO 4912 revised ETA")).toBeInTheDocument();
+      // The reader's empty placeholder must NOT be mounted on a narrow viewport
+      // when nothing is selected (the list owns the single pane).
+      expect(
+        screen.queryByText(/pick a message from the list/i),
+      ).not.toBeInTheDocument();
+      // No back control while we're on the list.
+      expect(
+        screen.queryByRole("button", { name: /back to (inbox|list)/i }),
+      ).not.toBeInTheDocument();
+    });
+
+    it("selecting a thread swaps to the reader pane with a back control, and back returns to the list", async () => {
+      useEmailThreadMock.mockReturnValue({
+        thread: threadDetail,
+        isLoading: false,
+        error: undefined,
+        refresh: vi.fn(),
+      });
+      render(<EmailWorkspace />);
+
+      // Tap the email row.
+      fireEvent.click(screen.getByText("PO 4912 revised ETA"));
+
+      // The reader pane is now the active pane: its message body is visible…
+      await waitFor(() =>
+        expect(screen.getByText(/2h behind on PO 4912/i)).toBeInTheDocument(),
+      );
+      // …and a ≥44px back control is offered.
+      const back = screen.getByRole("button", { name: /back to (inbox|list)/i });
+      expect(back).toBeInTheDocument();
+
+      // Back clears the selection and returns to the list pane.
+      fireEvent.click(back);
+      await waitFor(() =>
+        expect(
+          screen.queryByText(/2h behind on PO 4912/i),
+        ).not.toBeInTheDocument(),
+      );
+      expect(screen.getByText("PO 4912 revised ETA")).toBeInTheDocument();
+    });
+
+    it("lands directly on the thread reader pane when deep-linked to a thread", () => {
+      useEmailThreadMock.mockReturnValue({
+        thread: threadDetail,
+        isLoading: false,
+        error: undefined,
+        refresh: vi.fn(),
+      });
+      render(<EmailWorkspace initialAccountId="acc-1" initialThreadId="t1" />);
+      // Deep link → reader pane on mount (not the list).
+      expect(screen.getByText(/2h behind on PO 4912/i)).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: /back to (inbox|list)/i }),
+      ).toBeInTheDocument();
+    });
+
+    it("surfaces the AI panel behind an 'about this thread' disclosure on a narrow viewport", async () => {
+      useEmailThreadMock.mockReturnValue({
+        thread: threadDetail,
+        isLoading: false,
+        error: undefined,
+        refresh: vi.fn(),
+      });
+      useThreadAnalysisMock.mockReturnValue({
+        analysis: {
+          summary: "Naomi is apologising for a delay on PO 4912.",
+          callouts: [],
+          suggestedActions: [],
+          related: { files: [], threads: [], cameras: [], tools: [] },
+        },
+        isLoading: false,
+        error: undefined,
+        refresh: vi.fn(),
+      });
+      render(<EmailWorkspace initialAccountId="acc-1" initialThreadId="t1" />);
+
+      // The full AI panel is collapsed by default on narrow — only the toggle shows.
+      const toggle = screen.getByRole("button", {
+        name: /about this thread/i,
+      });
+      expect(toggle).toHaveAttribute("aria-expanded", "false");
+      expect(
+        screen.queryByText(/apologising for a delay on PO 4912/i),
+      ).not.toBeInTheDocument();
+
+      // Opening it reveals the analysis.
+      fireEvent.click(toggle);
+      await waitFor(() =>
+        expect(
+          screen.getByText(/apologising for a delay on PO 4912/i),
+        ).toBeInTheDocument(),
+      );
+      expect(toggle).toHaveAttribute("aria-expanded", "true");
+    });
+  });
+
+  it("keeps both the reader and AI panel mounted alongside the list on a desktop viewport", () => {
+    // Regression guard for the responsive refactor: on lg+/xl the multi-column
+    // layout is intact — list + reader placeholder + AI panel render together,
+    // with no back control or AI disclosure toggle (those are mobile-only).
+    render(<EmailWorkspace />);
+    expect(screen.getByText("PO 4912 revised ETA")).toBeInTheDocument();
+    expect(screen.getByText(/pick a message from the list/i)).toBeInTheDocument();
+    expect(screen.getByText(/about this thread/i)).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /back to (inbox|list)/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /^about this thread$/i }),
+    ).not.toBeInTheDocument();
   });
 });

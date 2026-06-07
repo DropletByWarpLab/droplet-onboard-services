@@ -19,13 +19,14 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Mail, Send, Sparkles, X } from "lucide-react";
+import { ChevronDown, ChevronLeft, Mail, Send, Sparkles, X } from "lucide-react";
 import {
   useEmailAccounts,
   useEmailThreads,
   useEmailThread,
   useThreadAnalysis,
 } from "@/lib/hooks/useEmail";
+import { useMediaQuery } from "@/lib/hooks/useMediaQuery";
 import { useAuth } from "@/lib/auth";
 import { createDraft } from "@/lib/api";
 import type { DraftRow, EmailFilter } from "@/lib/types-email";
@@ -60,6 +61,15 @@ export function EmailWorkspace({
   const router = useRouter();
   const { user } = useAuth();
   const canSend = user?.role === "owner" || user?.role === "admin";
+
+  // Layout breakpoints, mirrored from the Tailwind grid below so the rendered
+  // panes and the CSS column template stay in lock-step:
+  //   isDesktop (lg, ≥1024px) → list + thread reader columns are both present.
+  //   isWide    (xl, ≥1280px) → the AI panel is a permanent third column.
+  // Below lg we render a single active pane (list OR reader); below xl the AI
+  // panel is reachable via an inline disclosure instead of a dead column.
+  const isDesktop = useMediaQuery("(min-width: 1024px)");
+  const isWide = useMediaQuery("(min-width: 1280px)");
 
   const { accounts, isLoading: accountsLoading, refresh: refreshAccounts } =
     useEmailAccounts();
@@ -116,6 +126,15 @@ export function EmailWorkspace({
     }
   }
 
+  // Mobile "back to inbox": clear the selection so the single pane returns to
+  // the list, and drop the thread segment from the URL.
+  function clearThread() {
+    setActiveThreadId(null);
+    if (activeAccountId) {
+      router.push(`/email/${activeAccountId}`);
+    }
+  }
+
   function handleFilterChange(next: EmailFilter) {
     setFilter(next);
     setActiveThreadId(null);
@@ -125,6 +144,12 @@ export function EmailWorkspace({
   if (!accountsLoading && accounts.length === 0) {
     return <NoAccountState />;
   }
+
+  // Single-pane routing below lg: the list owns the pane until a thread is
+  // selected, then the reader does. On desktop both panes are always present.
+  const hasSelection = Boolean(activeThreadId);
+  const showList = isDesktop || !hasSelection;
+  const showReader = isDesktop || hasSelection;
 
   return (
     <div
@@ -136,58 +161,159 @@ export function EmailWorkspace({
         xl:grid-cols-[300px_minmax(0,1fr)_380px]
       "
     >
-      {/* Column 1 — list */}
-      <EmailList
-        accounts={accounts}
-        threads={threads}
-        filter={filter}
-        onFilterChange={handleFilterChange}
-        activeThreadId={activeThreadId}
-        onSelectThread={selectThread}
-        isLoading={accountsLoading || threadsLoading}
-        error={threadsError}
-        lastSyncLabel={lastSyncLabel}
-        onRetry={() => {
-          refreshAccounts();
-          refreshThreads();
-        }}
-      />
-
-      {/* Column 2 — thread reader (+ confirm-gated send) */}
-      <div className="hidden lg:flex flex-col min-h-0">
-        <EmailThread
-          thread={activeThreadId ? thread : undefined}
-          draft={draft}
-          isLoading={Boolean(activeThreadId) && threadLoading}
-          error={threadError}
-          canSend={canSend}
-          onSent={() => {
-            setDraft(null);
-            refreshThread();
+      {/* Column 1 — list (hidden below lg once a thread is open). */}
+      {showList && (
+        <EmailList
+          accounts={accounts}
+          threads={threads}
+          filter={filter}
+          onFilterChange={handleFilterChange}
+          activeThreadId={activeThreadId}
+          onSelectThread={selectThread}
+          isLoading={accountsLoading || threadsLoading}
+          error={threadsError}
+          lastSyncLabel={lastSyncLabel}
+          onRetry={() => {
+            refreshAccounts();
             refreshThreads();
           }}
         />
-        {/* Reply composer — the only place a sendable draft is created. */}
-        {canSend && activeThreadId && thread && !draft && (
-          <ReplyComposer
-            accountId={activeAccountId as string}
-            threadId={activeThreadId}
-            to={replyRecipients(thread.messages, activeAccount?.address)}
-            subject={replySubject(thread.subject)}
-            onDraftCreated={setDraft}
-          />
-        )}
-      </div>
+      )}
 
-      {/* Column 3 — AI panel */}
-      <div className="hidden xl:flex flex-col min-h-0">
-        <EmailAIPanel
-          analysis={activeThreadId ? analysis : undefined}
-          isLoading={Boolean(activeThreadId) && analysisLoading}
-          error={analysisError}
-          onRetry={refreshAnalysis}
+      {/* Column 2 — thread reader (+ confirm-gated send). Below lg this is the
+          active pane only when a thread is selected, and carries the back
+          control + the AI disclosure so neither is stranded behind display:none. */}
+      {showReader && (
+        <div className="flex flex-col min-h-0">
+          {/* Mobile-only "back to inbox" — never rendered on desktop, where the
+              list is always visible beside the reader. */}
+          {!isDesktop && hasSelection && (
+            <div className="shrink-0 border-b border-separator px-2 py-1.5">
+              <button
+                type="button"
+                onClick={clearThread}
+                className="
+                  inline-flex items-center gap-1 min-h-[44px] px-2 rounded-lg
+                  type-footnote text-label-secondary
+                  transition-colors duration-200 ease-smooth
+                  hover:text-label-primary
+                  focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
+                "
+              >
+                <ChevronLeft size={16} aria-hidden />
+                Back to inbox
+              </button>
+            </div>
+          )}
+
+          <div className="flex-1 min-h-0 flex flex-col">
+            <EmailThread
+              thread={activeThreadId ? thread : undefined}
+              draft={draft}
+              isLoading={Boolean(activeThreadId) && threadLoading}
+              error={threadError}
+              canSend={canSend}
+              onSent={() => {
+                setDraft(null);
+                refreshThread();
+                refreshThreads();
+              }}
+            />
+            {/* Reply composer — the only place a sendable draft is created. */}
+            {canSend && activeThreadId && thread && !draft && (
+              <ReplyComposer
+                accountId={activeAccountId as string}
+                threadId={activeThreadId}
+                to={replyRecipients(thread.messages, activeAccount?.address)}
+                subject={replySubject(thread.subject)}
+                onDraftCreated={setDraft}
+              />
+            )}
+          </div>
+
+          {/* AI panel as an inline disclosure below xl, where it has no column.
+              Only when a thread is open — there's nothing to summarise otherwise. */}
+          {!isWide && hasSelection && (
+            <AIPanelDisclosure
+              analysis={analysis}
+              isLoading={analysisLoading}
+              error={analysisError}
+              onRetry={refreshAnalysis}
+            />
+          )}
+        </div>
+      )}
+
+      {/* Column 3 — AI panel, a permanent column at xl+. */}
+      {isWide && (
+        <div className="flex flex-col min-h-0">
+          <EmailAIPanel
+            analysis={activeThreadId ? analysis : undefined}
+            isLoading={Boolean(activeThreadId) && analysisLoading}
+            error={analysisError}
+            onRetry={refreshAnalysis}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The AI side panel surfaced as a bottom disclosure below xl, where it has no
+ * column of its own. Collapsed by default so the thread reader keeps the height;
+ * the customer opens it on demand. Reuses EmailAIPanel verbatim once open, so the
+ * §6 safety chips and the read-only contract are identical to the desktop panel.
+ */
+function AIPanelDisclosure({
+  analysis,
+  isLoading,
+  error,
+  onRetry,
+}: {
+  analysis?: import("@/lib/types-email").ThreadAnalysis;
+  isLoading: boolean;
+  error?: Error;
+  onRetry?: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="shrink-0 border-t border-separator">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-controls="email-ai-disclosure"
+        className="
+          group w-full flex items-center gap-1.5 min-h-[44px] px-4
+          text-left type-subheadline text-label-primary
+          transition-colors duration-200 ease-smooth
+          hover:bg-surface-secondary
+          focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40
+        "
+      >
+        <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-accent-subtle">
+          <Sparkles size={12} className="text-accent" aria-hidden />
+        </span>
+        <span className="flex-1 font-semibold">About this thread</span>
+        <ChevronDown
+          size={16}
+          className={`text-label-tertiary transition-transform duration-200 ease-smooth ${
+            open ? "rotate-180" : ""
+          }`}
+          aria-hidden
         />
-      </div>
+      </button>
+      {open && (
+        <div id="email-ai-disclosure" className="max-h-[50dvh] overflow-y-auto">
+          <EmailAIPanel
+            analysis={analysis}
+            isLoading={isLoading}
+            error={error}
+            onRetry={onRetry}
+          />
+        </div>
+      )}
     </div>
   );
 }
