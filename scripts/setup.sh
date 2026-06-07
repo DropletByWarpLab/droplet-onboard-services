@@ -149,6 +149,17 @@ if [ "$SYNC_SECRETS_ONLY" = "true" ]; then
   materialize_artifacts
   log_success "Done. Restart affected containers for changes to take effect:"
   log_info "  docker compose -f docker/docker-compose.yml restart"
+  # WARP-834 foot-gun guard: on the single-box, the OpenWrt root pw lives
+  # INSIDE the container and is set by droplet-openwrt-attach to match this
+  # secret. A bare `docker compose restart routing` after rotating
+  # OPENWRT_PASSWORD makes routing present the NEW password to a container
+  # whose root pw is still the OLD one -> ubus auth fails -> the router shows
+  # OFFLINE (the WARP-826 symptom). Rotate via the attach service instead, so
+  # the container root pw + routing restart move in lockstep:
+  log_info "  If you rotated OPENWRT_PASSWORD on a single-box, run this INSTEAD"
+  log_info "  of a bare 'restart routing' (sets the container root pw + restarts"
+  log_info "  routing in lockstep):"
+  log_info "    sudo systemctl restart droplet-openwrt-attach.service"
   exit 0
 fi
 
