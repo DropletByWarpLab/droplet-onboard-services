@@ -11,6 +11,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
 import { SWRConfig } from "swr";
 import type { ReactNode } from "react";
+import type { EmailFilter } from "@/lib/types-email";
 
 const fetchEmailAccounts = vi.fn();
 const fetchEmailThreads = vi.fn();
@@ -83,9 +84,8 @@ describe("useEmailThreads", () => {
   it("re-fetches with the new filter when it changes", async () => {
     fetchEmailThreads.mockResolvedValue([]);
     const { rerender } = renderHook(
-      ({ f }: { f: "inbox" | "triaged" | "droplet" }) =>
-        useEmailThreads("acc-1", f),
-      { wrapper, initialProps: { f: "inbox" as const } },
+      ({ f }: { f: EmailFilter }) => useEmailThreads("acc-1", f),
+      { wrapper, initialProps: { f: "inbox" as EmailFilter } },
     );
     await waitFor(() =>
       expect(fetchEmailThreads).toHaveBeenCalledWith("acc-1", "inbox"),
