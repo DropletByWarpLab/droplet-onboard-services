@@ -20,15 +20,17 @@ import { fetchCameraSystemStatus, restartFrigate } from "@/lib/api";
 import { confirmNetworkCommand } from "@/lib/api";
 import type { CameraSystemStatus } from "@/lib/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { ShellPage } from "@/components/shell/ShellPage";
+import { Card, Kpi, Meter } from "@/components/shell/primitives";
 
 /**
  * /cameras/system — Frigate-wide health surface (Phase 5).
  *
  * Aggregates the per-camera + per-detector + per-GPU + storage data
- * Frigate exposes via /api/stats and surfaces it as the operator's
- * "is everything OK?" page. The big-number cards at the top answer
- * "right this second"; the tables underneath let the operator drill
- * into a misbehaving detector or storage volume.
+ * the camera engine exposes via /api/stats and surfaces it as the
+ * operator's "is everything OK?" page. The big-number cards at the top
+ * answer "right this second"; the tables underneath let the operator
+ * drill into a misbehaving detector or storage volume.
  *
  * The Restart button uses the same tier-2 confirmation flow the
  * camera-disable / camera-delete buttons use — restart drops every
@@ -121,183 +123,171 @@ export default function CameraSystemPage() {
     return total > 0 ? { total, used, pct: (used / total) * 100 } : null;
   }, [data]);
 
-  return (
-    <div className="p-6">
-      <div className="flex items-center gap-3 mb-4">
-        <button
-          onClick={() => router.push("/cameras")}
-          className="p-2 -ml-2 rounded-full hover:bg-surface-secondary transition-colors"
-          aria-label="Back to cameras"
-        >
-          <ArrowLeft size={20} />
-        </button>
-        <div className="flex-1 min-w-0">
-          <h1 className="type-large-title text-label-primary">Camera system</h1>
-          <p className="type-subheadline text-label-tertiary mt-0.5">
-            Live health for the camera engine. Refreshes every 5 seconds.
-          </p>
-        </div>
-        <button
-          onClick={() => mutate()}
-          disabled={isLoading}
-          className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
-        >
-          <RefreshCw size={16} className={isLoading ? "animate-spin" : ""} />
-          <span className="type-subheadline">Refresh</span>
-        </button>
-      </div>
+  const actions = (
+    <>
+      <button onClick={() => router.push("/cameras")} className="btn ghost" type="button">
+        <ArrowLeft size={15} />
+        Cameras
+      </button>
+      <button
+        onClick={() => mutate()}
+        disabled={isLoading}
+        className="icon-btn"
+        aria-label="Refresh"
+        title="Refresh"
+        type="button"
+      >
+        <RefreshCw size={16} className={isLoading ? "animate-spin" : ""} />
+      </button>
+    </>
+  );
 
+  return (
+    <ShellPage
+      icon={<Server size={15} />}
+      label="System"
+      title="Camera system"
+      sub="Live health for the camera engine. Refreshes every 5 seconds."
+      actions={actions}
+    >
       {error && (
-        <div className="dp-card p-4 mb-4 text-system-red flex items-center gap-2">
-          <AlertTriangle size={16} />
-          <p className="type-subheadline">
+        <div className="card" style={{ display: "flex", alignItems: "center", gap: 8, color: "#ef4444", marginBottom: 16 }}>
+          <AlertTriangle size={14} />
+          <span>
             Couldn&apos;t reach the camera service:{" "}
             {error instanceof Error ? error.message : String(error)}
-          </p>
+          </span>
         </div>
       )}
 
       {!data ? (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+        <div className="grid c4">
           {Array.from({ length: 4 }).map((_, i) => (
-            <div key={i} className="dp-card h-24 animate-pulse bg-surface-secondary" />
+            <div key={i} className="card" style={{ height: 96, background: "var(--surface-2)" }} />
           ))}
         </div>
       ) : (
         <>
-          {/* Top stat cards */}
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
-            <StatCard
-              icon={Server}
+          {/* Top stat tiles */}
+          <div className="grid c4" style={{ marginBottom: 16 }}>
+            <Kpi
+              icon={<Server size={13} />}
               label="Engine"
               value={data.version}
-              hint={`Uptime ${fmtUptime(data.uptimeSec)}`}
+              note={`Uptime ${fmtUptime(data.uptimeSec)}`}
             />
-            <StatCard
-              icon={Video}
+            <Kpi
+              icon={<Video size={13} />}
               label="Cameras live"
               value={`${data.camerasLive} / ${data.cameraCount}`}
-              hint={
+              note={
                 data.cameraCount === 0
                   ? "No cameras configured"
                   : data.camerasLive === data.cameraCount
                     ? "All streaming"
                     : `${data.cameraCount - data.camerasLive} offline`
               }
-              tone={
+              dot={
                 data.cameraCount > 0 && data.camerasLive < data.cameraCount
-                  ? "warn"
-                  : "ok"
+                  ? "#d9a35c"
+                  : "var(--success)"
               }
             />
-            <StatCard
-              icon={Cpu}
+            <Kpi
+              icon={<Cpu size={13} />}
               label="CPU"
               value={`${data.cpuPct.toFixed(0)}%`}
-              hint="Across camera service processes"
-              tone={data.cpuPct > 200 ? "warn" : "ok"}
+              note="Across camera service processes"
+              dot={data.cpuPct > 200 ? "#d9a35c" : "var(--success)"}
             />
-            <StatCard
-              icon={HardDrive}
+            <Kpi
+              icon={<HardDrive size={13} />}
               label="Storage"
-              value={
-                totalStorage
-                  ? `${(totalStorage.pct).toFixed(0)}% used`
-                  : "—"
-              }
-              hint={
+              value={totalStorage ? `${totalStorage.pct.toFixed(0)}% used` : "—"}
+              note={
                 totalStorage
                   ? `${fmtBytes(totalStorage.used)} of ${fmtBytes(totalStorage.total)}`
                   : "No volumes reported"
               }
-              tone={totalStorage && totalStorage.pct > 90 ? "warn" : "ok"}
+              dot={totalStorage && totalStorage.pct > 90 ? "#d9a35c" : "var(--success)"}
             />
           </div>
 
           {/* Detectors + GPUs side-by-side */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 mb-4">
-            <div className="dp-card p-4">
-              <div className="flex items-center gap-2 mb-3">
-                <Zap size={16} className="text-accent" />
-                <h2 className="type-headline text-label-primary">Detectors</h2>
-              </div>
+          <div className="grid c2" style={{ marginBottom: 16 }}>
+            <Card icon={<Zap size={15} />} title="Detectors">
               {data.detectors.length === 0 ? (
-                <p className="type-caption-1 text-label-tertiary">
+                <p style={{ color: "var(--text-muted)", fontSize: 13 }}>
                   No detectors reporting.
                 </p>
               ) : (
-                <ul className="space-y-1.5">
+                <ul style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                   {data.detectors.map((d) => (
                     <li
                       key={d.name}
-                      className="flex items-center justify-between gap-2 p-2 rounded-lg hover:bg-surface-secondary"
+                      className="lrow"
+                      style={{ justifyContent: "space-between" }}
                     >
-                      <div className="flex items-center gap-2 min-w-0">
+                      <span style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
                         <span
-                          className={`w-2 h-2 rounded-full ${
-                            d.inferenceSpeedMs > 0
-                              ? "bg-system-green"
-                              : "bg-label-quaternary"
-                          }`}
+                          style={{
+                            width: 8,
+                            height: 8,
+                            borderRadius: "50%",
+                            background:
+                              d.inferenceSpeedMs > 0 ? "var(--success)" : "var(--text-muted)",
+                          }}
                         />
-                        <span className="type-subheadline text-label-primary truncate">
-                          {d.name}
-                        </span>
-                      </div>
-                      <span className="type-caption-1 text-label-secondary font-mono">
+                        <span className="nm">{d.name}</span>
+                      </span>
+                      <span className="rmeta mono">
                         {d.inferenceSpeedMs.toFixed(1)}&nbsp;ms
                       </span>
                     </li>
                   ))}
                 </ul>
               )}
-            </div>
+            </Card>
 
-            <div className="dp-card p-4">
-              <div className="flex items-center gap-2 mb-3">
-                <Activity size={16} className="text-accent" />
-                <h2 className="type-headline text-label-primary">GPUs</h2>
-              </div>
+            <Card icon={<Activity size={15} />} title="GPUs">
               {data.gpus.length === 0 ? (
-                <p className="type-caption-1 text-label-tertiary">
-                  No GPU stats reported. (CPU detector? Camera service
-                  without nvidia runtime?)
+                <p style={{ color: "var(--text-muted)", fontSize: 13 }}>
+                  No GPU stats reported. (CPU detector? Camera service without
+                  nvidia runtime?)
                 </p>
               ) : (
-                <ul className="space-y-2">
+                <ul style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                   {data.gpus.map((g) => (
-                    <li key={g.name} className="space-y-1">
-                      <div className="flex items-center justify-between">
-                        <span className="type-subheadline text-label-primary truncate">
-                          {g.name}
-                        </span>
-                        <span className="type-caption-1 text-label-secondary font-mono">
+                    <li key={g.name} style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                        <span className="nm">{g.name}</span>
+                        <span className="rmeta mono">
                           {g.gpuPct.toFixed(0)}%
                           {g.tempC !== null && (
-                            <span className="text-label-tertiary ml-2">
+                            <span style={{ color: "var(--text-muted)", marginLeft: 8 }}>
                               {g.tempC.toFixed(0)}°C
                             </span>
                           )}
                         </span>
                       </div>
-                      <div className="h-1.5 rounded-full bg-surface-secondary overflow-hidden">
-                        <div
-                          className="h-full bg-accent transition-all"
-                          style={{ width: `${Math.min(100, g.gpuPct)}%` }}
-                        />
-                      </div>
+                      <Meter pct={g.gpuPct} />
                       {g.memPct !== null && (
-                        <div className="flex items-center gap-2">
-                          <span className="type-caption-2 text-label-tertiary w-12">
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <span style={{ fontSize: 11, color: "var(--text-muted)", width: 32 }}>
                             mem
                           </span>
-                          <div className="flex-1 h-1 rounded-full bg-surface-secondary overflow-hidden">
-                            <div
-                              className="h-full bg-system-orange transition-all"
-                              style={{ width: `${Math.min(100, g.memPct)}%` }}
-                            />
+                          <div style={{ flex: 1 }}>
+                            <Meter pct={g.memPct} kind="warn" />
                           </div>
-                          <span className="type-caption-2 text-label-tertiary font-mono w-10 text-right">
+                          <span
+                            style={{
+                              fontSize: 11,
+                              color: "var(--text-muted)",
+                              fontFamily: "var(--font-mono)",
+                              width: 40,
+                              textAlign: "right",
+                            }}
+                          >
                             {g.memPct.toFixed(0)}%
                           </span>
                         </div>
@@ -306,45 +296,46 @@ export default function CameraSystemPage() {
                   ))}
                 </ul>
               )}
-            </div>
+            </Card>
           </div>
 
           {/* Per-camera FPS table */}
-          <div className="dp-card p-4 mb-4">
-            <h2 className="type-headline text-label-primary mb-3">Per-camera throughput</h2>
+          <Card title="Per-camera throughput" className="span2" style={{ marginBottom: 16 }}>
             {data.cameraFps.length === 0 ? (
-              <p className="type-caption-1 text-label-tertiary">
+              <p style={{ color: "var(--text-muted)", fontSize: 13 }}>
                 No cameras configured yet.
               </p>
             ) : (
-              <div className="overflow-x-auto -mx-2">
-                <table className="w-full text-left">
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", textAlign: "left", borderCollapse: "collapse" }}>
                   <thead>
-                    <tr className="type-caption-2 text-label-tertiary uppercase tracking-wide">
-                      <th className="px-2 py-1.5 font-medium">Camera</th>
-                      <th className="px-2 py-1.5 font-medium text-right">FPS</th>
-                      <th className="px-2 py-1.5 font-medium text-right">Detect FPS</th>
-                      <th className="px-2 py-1.5 font-medium text-right">Skipped</th>
+                    <tr style={{ fontSize: 10.5, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                      <th style={{ padding: "6px 8px", fontWeight: 500 }}>Camera</th>
+                      <th style={{ padding: "6px 8px", fontWeight: 500, textAlign: "right" }}>FPS</th>
+                      <th style={{ padding: "6px 8px", fontWeight: 500, textAlign: "right" }}>Detect FPS</th>
+                      <th style={{ padding: "6px 8px", fontWeight: 500, textAlign: "right" }}>Skipped</th>
                     </tr>
                   </thead>
                   <tbody>
                     {data.cameraFps.map((c) => (
-                      <tr key={c.name} className="border-t border-separator">
-                        <td className="px-2 py-2 type-subheadline text-label-primary">
+                      <tr key={c.name} style={{ borderTop: "1px solid var(--card-bd)" }}>
+                        <td style={{ padding: "8px", fontSize: 13, color: "var(--text)" }}>
                           {c.name.replace(/_/g, " ")}
                         </td>
-                        <td className="px-2 py-2 type-caption-1 text-label-secondary text-right font-mono">
+                        <td style={{ padding: "8px", fontSize: 12, color: "var(--text-muted)", textAlign: "right", fontFamily: "var(--font-mono)" }}>
                           {c.cameraFps.toFixed(1)}
                         </td>
-                        <td className="px-2 py-2 type-caption-1 text-label-secondary text-right font-mono">
+                        <td style={{ padding: "8px", fontSize: 12, color: "var(--text-muted)", textAlign: "right", fontFamily: "var(--font-mono)" }}>
                           {c.detectionFps.toFixed(1)}
                         </td>
                         <td
-                          className={`px-2 py-2 type-caption-1 text-right font-mono ${
-                            c.skippedFps > 0
-                              ? "text-system-orange"
-                              : "text-label-tertiary"
-                          }`}
+                          style={{
+                            padding: "8px",
+                            fontSize: 12,
+                            textAlign: "right",
+                            fontFamily: "var(--font-mono)",
+                            color: c.skippedFps > 0 ? "#d9a35c" : "var(--text-muted)",
+                          }}
                         >
                           {c.skippedFps.toFixed(1)}
                         </td>
@@ -354,73 +345,59 @@ export default function CameraSystemPage() {
                 </table>
               </div>
             )}
-            <p className="type-caption-2 text-label-tertiary mt-2">
+            <p style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 8 }}>
               Skipped frames mean the detector can&apos;t keep up with the
               capture rate. Lower the camera FPS or add a faster detector if
               this stays non-zero.
             </p>
-          </div>
+          </Card>
 
           {/* Storage table */}
           {data.storage.length > 0 && (
-            <div className="dp-card p-4 mb-4">
-              <h2 className="type-headline text-label-primary mb-3">Storage</h2>
-              <ul className="space-y-2">
+            <Card title="Storage" className="span2" style={{ marginBottom: 16 }}>
+              <ul style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                 {data.storage.map((s) => {
                   const pct = s.totalBytes > 0 ? (s.usedBytes / s.totalBytes) * 100 : 0;
                   return (
-                    <li key={s.path} className="space-y-1">
-                      <div className="flex items-center justify-between">
-                        <div className="min-w-0">
-                          <span className="type-subheadline text-label-primary truncate block">
-                            {s.path}
-                          </span>
-                          <span className="type-caption-2 text-label-tertiary">
+                    <li key={s.path} style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                        <div style={{ minWidth: 0 }}>
+                          <span className="nm" style={{ display: "block" }}>{s.path}</span>
+                          <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
                             {s.mountType}
                           </span>
                         </div>
-                        <span className="type-caption-1 text-label-secondary font-mono">
+                        <span className="rmeta mono">
                           {fmtBytes(s.usedBytes)} / {fmtBytes(s.totalBytes)}
                         </span>
                       </div>
-                      <div className="h-1.5 rounded-full bg-surface-secondary overflow-hidden">
-                        <div
-                          className={`h-full transition-all ${
-                            pct > 90
-                              ? "bg-system-red"
-                              : pct > 75
-                                ? "bg-system-orange"
-                                : "bg-accent"
-                          }`}
-                          style={{ width: `${Math.min(100, pct)}%` }}
-                        />
-                      </div>
+                      <Meter pct={pct} kind={pct > 90 ? "danger" : pct > 75 ? "warn" : ""} />
                     </li>
                   );
                 })}
               </ul>
-            </div>
+            </Card>
           )}
 
           {/* Restart card */}
-          <div className="dp-card p-4">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <h2 className="type-headline text-label-primary mb-1">
+          <Card className="span2">
+            <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
+              <div style={{ minWidth: 0 }}>
+                <h2 style={{ fontSize: 14, fontWeight: 600, color: "var(--text)", marginBottom: 4 }}>
                   Restart camera service
                 </h2>
-                <p className="type-caption-1 text-label-tertiary">
+                <p style={{ fontSize: 12.5, color: "var(--text-muted)" }}>
                   Drops every camera stream while the engine reloads. Roughly
                   10–15 seconds. Useful if a detector hangs or a config change
                   needs to take effect.
                 </p>
                 {restartMsg && (
                   <p
-                    className={`type-caption-1 mt-2 ${
-                      restartMsg.startsWith("Restarting")
-                        ? "text-system-green"
-                        : "text-system-red"
-                    }`}
+                    style={{
+                      fontSize: 12.5,
+                      marginTop: 8,
+                      color: restartMsg.startsWith("Restarting") ? "var(--success)" : "#ef4444",
+                    }}
                   >
                     {restartMsg}
                   </p>
@@ -429,19 +406,18 @@ export default function CameraSystemPage() {
               <button
                 onClick={handleRestart}
                 disabled={restarting}
-                className="flex items-center gap-2 px-3 py-2 rounded-lg bg-system-red/15 text-system-red hover:bg-system-red/25 disabled:opacity-60"
+                className="btn danger"
+                type="button"
               >
                 {restarting ? (
                   <Loader2 size={14} className="animate-spin" />
                 ) : (
                   <Power size={14} />
                 )}
-                <span className="type-subheadline">
-                  {restarting ? "Restarting…" : "Restart"}
-                </span>
+                {restarting ? "Restarting…" : "Restart"}
               </button>
             </div>
-          </div>
+          </Card>
         </>
       )}
 
@@ -457,45 +433,11 @@ export default function CameraSystemPage() {
         confirmLabel="Restart"
         variant="destructive"
       />
-    </div>
+    </ShellPage>
   );
 }
 
 // --- helpers ---
-
-function StatCard({
-  icon: Icon,
-  label,
-  value,
-  hint,
-  tone = "ok",
-}: {
-  icon: typeof Server;
-  label: string;
-  value: string;
-  hint?: string;
-  tone?: "ok" | "warn";
-}) {
-  return (
-    <div className="dp-card p-3">
-      <div className="flex items-center gap-2 mb-1">
-        <Icon
-          size={14}
-          className={tone === "warn" ? "text-system-orange" : "text-label-tertiary"}
-        />
-        <span className="type-caption-2 text-label-tertiary uppercase tracking-wide">
-          {label}
-        </span>
-      </div>
-      <div className="type-title-3 text-label-primary truncate">{value}</div>
-      {hint && (
-        <div className="type-caption-2 text-label-tertiary mt-0.5 truncate">
-          {hint}
-        </div>
-      )}
-    </div>
-  );
-}
 
 function fmtBytes(b: number): string {
   if (!Number.isFinite(b) || b < 0) return "—";

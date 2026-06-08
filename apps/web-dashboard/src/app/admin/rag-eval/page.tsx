@@ -10,15 +10,17 @@
  * isn't running — the `eval` Compose profile is inactive — so we render a
  * banner explaining how to enable it rather than a generic error.
  *
- * `"use client"` + useAuth() gate, mirroring /admin/claude-activity.
+ * Re-skinned to the indigo `.droplet-shell` design language (WARP design
+ * handoff); the polling, run/bootstrap, and 503 logic are unchanged.
  */
 
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Play, Layers, ShieldOff, AlertTriangle, RefreshCw } from "lucide-react";
+import { Play, Layers, ShieldOff, AlertTriangle, RefreshCw, FlaskConical } from "lucide-react";
 import { useAuth, authFetch } from "@/lib/auth";
 import { translateError } from "@/lib/friendly-errors";
+import { ShellPage } from "@/components/shell/ShellPage";
 
 const POLL_MS = 10_000;
 
@@ -40,11 +42,11 @@ interface RunWire {
   runsDone?: number;
 }
 
-const STATUS_STYLE: Record<RunStatus, string> = {
-  running: "text-system-blue",
-  succeeded: "text-system-green",
-  failed: "text-system-red",
-  unknown: "text-label-quaternary",
+const STATUS_BADGE: Record<RunStatus, "ok" | "warn" | "danger" | "info" | "muted"> = {
+  running: "info",
+  succeeded: "ok",
+  failed: "danger",
+  unknown: "muted",
 };
 
 function formatMetric(v: unknown): string {
@@ -52,9 +54,6 @@ function formatMetric(v: unknown): string {
   return String(v);
 }
 
-/** Pull the numeric top-level metric means out of a results `metrics`
- * block for compact display. RAGAS metric shapes vary (mean nested vs
- * flat number); handle both without guessing a fixed key set. */
 function metricPairs(
   metrics: Record<string, unknown> | null | undefined,
 ): Array<[string, string]> {
@@ -69,6 +68,9 @@ function metricPairs(
   }
   return out;
 }
+
+const SUB =
+  "Fire ad-hoc RAGAS retrieval-quality runs and bootstrap baselines. Runs go through the on-appliance rag-eval service.";
 
 export default function RagEvalPage() {
   const { user, isLoading: authLoading } = useAuth();
@@ -179,65 +181,69 @@ export default function RagEvalPage() {
     }
   }, [loadRuns]);
 
+  const icon = <FlaskConical size={15} />;
+
   if (authLoading || (loading && !unavailable && runs.length === 0 && !error)) {
     return (
-      <div className="p-6 lg:p-8 max-w-4xl">
-        <h1 className="type-large-title text-label-primary mb-6">RAG eval</h1>
-        <div className="dp-card p-12 text-center text-label-tertiary type-subheadline">
+      <ShellPage icon={icon} label="RAG eval" title="RAG eval" sub={SUB}>
+        <div className="card" style={{ textAlign: "center", padding: 48, color: "var(--text-muted)" }}>
           Loading…
         </div>
-      </div>
+      </ShellPage>
     );
   }
 
   if (!isAdminRole(user?.role)) {
     return (
-      <div className="p-6 lg:p-8 max-w-3xl">
-        <h1 className="type-large-title text-label-primary mb-4">RAG eval</h1>
-        <div className="dp-card py-16 flex flex-col items-center text-label-tertiary">
-          <ShieldOff size={32} className="mb-3 text-label-quaternary" />
-          <p className="type-subheadline">Admin access required</p>
-          <p className="type-caption-1 mt-1 text-label-quaternary max-w-sm text-center">
-            This page is only visible to <code>admin</code> / <code>owner</code>{" "}
-            roles.
-          </p>
+      <ShellPage icon={icon} label="RAG eval" title="RAG eval">
+        <div className="card">
+          <div className="empty">
+            <span className="ei">
+              <ShieldOff size={24} />
+            </span>
+            <span className="eh">Admin access required</span>
+            <span>
+              This page is only visible to <code>admin</code> / <code>owner</code> roles.
+            </span>
+          </div>
         </div>
-      </div>
+      </ShellPage>
     );
   }
 
-  return (
-    <div className="p-6 lg:p-8 max-w-4xl">
-      <header className="mb-6 flex items-end justify-between gap-4 flex-wrap">
-        <div>
-          <h1 className="type-large-title text-label-primary">RAG eval</h1>
-          <p className="type-caption-1 text-label-tertiary mt-1">
-            Fire ad-hoc RAGAS retrieval-quality runs and bootstrap baselines.
-            Runs go through the on-appliance rag-eval service.
-          </p>
-        </div>
-        <button
-          onClick={loadRuns}
-          className="dp-btn-secondary inline-flex items-center gap-1.5 type-footnote"
-          aria-label="Refresh runs"
-        >
-          <RefreshCw size={14} /> Refresh
-        </button>
-      </header>
+  const refreshAction = (
+    <button className="btn" onClick={loadRuns} aria-label="Refresh runs" type="button">
+      <RefreshCw size={14} /> Refresh
+    </button>
+  );
 
+  return (
+    <ShellPage icon={icon} label="RAG eval" title="RAG eval" sub={SUB} actions={refreshAction}>
       {unavailable ? (
-        <div className="dp-card p-5 mb-6 border border-system-orange/30">
-          <div className="flex items-start gap-3">
-            <AlertTriangle size={20} className="text-system-orange shrink-0 mt-0.5" />
+        <div className="card" style={{ borderColor: "rgba(217,163,92,0.4)" }}>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+            <AlertTriangle size={20} style={{ color: "#d9a35c", flexShrink: 0, marginTop: 2 }} />
             <div>
-              <p className="type-subheadline text-label-primary">
+              <p style={{ fontSize: 14, fontWeight: 600, color: "var(--text)" }}>
                 rag-eval service is not reachable
               </p>
-              <p className="type-caption-1 text-label-tertiary mt-1">
-                The eval service runs under the <code>eval</code> Compose
-                profile, which is off by default. Enable it on the appliance:
+              <p style={{ fontSize: 12.5, color: "var(--text-muted)", marginTop: 4 }}>
+                The eval service runs under the <code>eval</code> Compose profile, which is off by
+                default. Enable it on the appliance:
               </p>
-              <pre className="mt-2 text-label-secondary type-caption-2 bg-surface-secondary rounded-lg p-3 overflow-x-auto">
+              <pre
+                style={{
+                  marginTop: 8,
+                  fontSize: 11.5,
+                  fontFamily: "var(--font-mono)",
+                  color: "var(--text-muted)",
+                  background: "var(--surface)",
+                  border: "1px solid var(--border)",
+                  borderRadius: 10,
+                  padding: 12,
+                  overflowX: "auto",
+                }}
+              >
 {`echo 'COMPOSE_PROFILES=linux,display,eval' >> .env
 docker compose -f docker/docker-compose.yml --env-file .env up -d rag-eval`}
               </pre>
@@ -246,122 +252,98 @@ docker compose -f docker/docker-compose.yml --env-file .env up -d rag-eval`}
         </div>
       ) : (
         <>
-          <div className="flex flex-wrap gap-3 mb-4">
-            <button
-              onClick={triggerRun}
-              disabled={busyAction !== null}
-              className="dp-btn-primary inline-flex items-center gap-2 disabled:opacity-50"
-            >
+          <div className="toolbar" style={{ marginTop: 4 }}>
+            <button className="btn primary" onClick={triggerRun} disabled={busyAction !== null} type="button">
               <Play size={16} />
               {busyAction === "run" ? "Starting…" : "Run RAG eval now"}
             </button>
-            <button
-              onClick={() => setConfirmBootstrap(true)}
-              disabled={busyAction !== null}
-              className="dp-btn-secondary inline-flex items-center gap-2 disabled:opacity-50"
-            >
+            <button className="btn" onClick={() => setConfirmBootstrap(true)} disabled={busyAction !== null} type="button">
               <Layers size={16} />
               {busyAction === "bootstrap" ? "Starting…" : "Bootstrap baselines (5 runs)"}
             </button>
           </div>
 
           {actionMsg && (
-            <div className="dp-card p-3 mb-4 type-footnote text-label-secondary">
+            <div className="card" style={{ padding: 12, marginBottom: 14, fontSize: 13, color: "var(--text-muted)" }}>
               {actionMsg}
             </div>
           )}
           {error && (
-            <div className="dp-card p-3 mb-4 type-footnote text-system-red">
+            <div className="card" style={{ padding: 12, marginBottom: 14, fontSize: 13, color: "#ef4444" }}>
               {error}
             </div>
           )}
 
-          <h2 className="type-headline text-label-primary mb-3">Recent runs</h2>
+          <div className="sect">
+            <h2>Recent runs</h2>
+            <span className="sx">{runs.length}</span>
+          </div>
           {runs.length === 0 ? (
-            <div className="dp-card p-8 text-center text-label-tertiary type-subheadline">
+            <div className="card" style={{ textAlign: "center", padding: 32, color: "var(--text-muted)" }}>
               No runs yet.
             </div>
           ) : (
-            <ul className="space-y-2">
+            <div className="grid" style={{ gap: 10 }}>
               {runs.map((r) => {
                 const pairs = metricPairs(r.metrics);
                 return (
-                  <li key={r.runId} className="dp-card p-4">
-                    <div className="flex items-center justify-between gap-3 flex-wrap">
-                      <div className="flex items-center gap-3">
-                        <span className="type-callout text-label-primary font-mono">
+                  <div key={r.runId} className="card">
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                        <span style={{ fontSize: 13.5, fontFamily: "var(--font-mono)", color: "var(--text)" }}>
                           {r.runId}
                         </span>
-                        <span
-                          className={`type-caption-1 font-medium ${STATUS_STYLE[r.status] ?? STATUS_STYLE.unknown}`}
-                        >
+                        <span className={"badge " + (STATUS_BADGE[r.status] ?? "muted")}>
                           {r.status}
-                          {r.kind === "bootstrap" && r.runsTotal
-                            ? ` (${r.runsDone ?? 0}/${r.runsTotal})`
-                            : ""}
+                          {r.kind === "bootstrap" && r.runsTotal ? ` (${r.runsDone ?? 0}/${r.runsTotal})` : ""}
                         </span>
                       </div>
                       {r.startedAt && (
-                        <span className="type-caption-2 text-label-quaternary">
+                        <span style={{ fontSize: 11.5, color: "var(--text-muted)" }}>
                           {new Date(r.startedAt).toLocaleString()}
                         </span>
                       )}
                     </div>
                     {r.error && (
-                      <p className="type-caption-2 text-system-red mt-2">
-                        {r.error}
-                      </p>
+                      <p style={{ fontSize: 12, color: "#ef4444", marginTop: 8 }}>{r.error}</p>
                     )}
                     {pairs.length > 0 && (
-                      <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2">
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 16px", marginTop: 8 }}>
                         {pairs.map(([k, v]) => (
-                          <span
-                            key={k}
-                            className="type-caption-2 text-label-secondary"
-                          >
-                            <span className="text-label-quaternary">{k}:</span>{" "}
-                            {v}
+                          <span key={k} style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                            <span style={{ color: "var(--text-faint)" }}>{k}:</span> {v}
                           </span>
                         ))}
                       </div>
                     )}
-                  </li>
+                  </div>
                 );
               })}
-            </ul>
+            </div>
           )}
         </>
       )}
 
       {confirmBootstrap && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="dp-card p-6 max-w-md w-full">
-            <h3 className="type-headline text-label-primary mb-2">
-              Bootstrap baselines?
-            </h3>
-            <p className="type-footnote text-label-tertiary mb-5">
-              This runs RAGAS 5 times sequentially and aggregates the results
-              into <code>baselines.candidate.json</code>. It is GPU-bound and
-              can take roughly an hour on the appliance. Only one run or
-              bootstrap can be in flight at a time.
+        <div className="ds-ios-scrim" onClick={() => setConfirmBootstrap(false)}>
+          <div className="ds-confirm-card" onClick={(e) => e.stopPropagation()}>
+            <h3>Bootstrap baselines?</h3>
+            <p>
+              This runs RAGAS 5 times sequentially and aggregates the results into{" "}
+              <code>baselines.candidate.json</code>. It is GPU-bound and can take roughly an hour on
+              the appliance. Only one run or bootstrap can be in flight at a time.
             </p>
-            <div className="flex justify-end gap-3">
-              <button
-                onClick={() => setConfirmBootstrap(false)}
-                className="dp-btn-secondary"
-              >
+            <div className="row">
+              <button className="btn" onClick={() => setConfirmBootstrap(false)} type="button">
                 Cancel
               </button>
-              <button
-                onClick={triggerBootstrap}
-                className="dp-btn-primary"
-              >
+              <button className="btn primary" onClick={triggerBootstrap} type="button">
                 Start bootstrap
               </button>
             </div>
           </div>
         </div>
       )}
-    </div>
+    </ShellPage>
   );
 }

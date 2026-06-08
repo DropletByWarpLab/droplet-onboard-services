@@ -95,8 +95,16 @@ const ADD_SIZE: Record<string, { w: number; h: number }> = {
 const LS = "droplet-home-bento-v1-";
 const VALID_IDS = Object.keys(WIDGETS);
 
+// The default layout, minus any widget not in the active registry (a
+// feature-flagged widget whose backend isn't built yet is absent from
+// WIDGETS), repacked so removing it leaves no gap.
+function defaultsFor(dir: DensityKey): LayoutItem[] {
+  const valid = DEFAULTS[dir].filter((x) => VALID_IDS.includes(x.id)).map((x) => ({ ...x }));
+  return fillGaps(valid, DIRECTIONS[dir].cols, WIDGETS);
+}
+
 function loadLayout(dir: DensityKey): LayoutItem[] {
-  if (typeof window === "undefined") return DEFAULTS[dir].map((x) => ({ ...x }));
+  if (typeof window === "undefined") return defaultsFor(dir);
   try {
     const raw = JSON.parse(window.localStorage.getItem(LS + dir) ?? "null");
     if (Array.isArray(raw) && raw.length) {
@@ -114,12 +122,12 @@ function loadLayout(dir: DensityKey): LayoutItem[] {
           it.h > 0 &&
           it.h <= 20,
       );
-      if (clean.length) return clean;
+      if (clean.length) return fillGaps(clean, cols, WIDGETS);
     }
   } catch {
     /* ignore */
   }
-  return DEFAULTS[dir].map((x) => ({ ...x }));
+  return defaultsFor(dir);
 }
 
 function useIsMobile(): boolean {
@@ -269,9 +277,9 @@ export default function DashboardPage() {
   const [editMode, setEditMode] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [layouts, setLayouts] = useState<Record<DensityKey, LayoutItem[]>>({
-    balanced: DEFAULTS.balanced.map((x) => ({ ...x })),
-    dense: DEFAULTS.dense.map((x) => ({ ...x })),
-    airy: DEFAULTS.airy.map((x) => ({ ...x })),
+    balanced: defaultsFor("balanced"),
+    dense: defaultsFor("dense"),
+    airy: defaultsFor("airy"),
   });
 
   // Hydrate persisted density + layouts after mount (avoids SSR mismatch).
@@ -315,7 +323,7 @@ export default function DashboardPage() {
     const s = ADD_SIZE[id] || { w: 3, h: 3 };
     persist(fillGaps([...items, { id, ...s }], cfg.cols, WIDGETS));
   };
-  const onReset = () => persist(DEFAULTS[dir].map((x) => ({ ...x })));
+  const onReset = () => persist(defaultsFor(dir));
 
   const hidden = CATALOG.filter((c) => !items.some((it) => it.id === c.id));
 

@@ -15,8 +15,8 @@
 
 import { Suspense, useCallback, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { BookOpen, Database, Search } from "lucide-react";
-import { Topbar } from "@/components/Topbar";
+import { BookOpen, Database, Search, Library } from "lucide-react";
+import { ShellPage } from "@/components/shell/ShellPage";
 import { RecentlyIndexedTab } from "./RecentlyIndexedTab";
 import { SearchTab } from "./SearchTab";
 import { BrainMemoryTab } from "./BrainMemoryTab";
@@ -53,20 +53,14 @@ export default function KnowledgePage() {
   );
 }
 
+const KN_SUB =
+  "Everything your Droplet has indexed — recently added files, full-text search, and the brain memory you've built up from chat.";
+
 function KnowledgePageSkeleton() {
   return (
-    <div>
-      <Topbar
-        crumbs={[
-          { label: "Workspace", href: "/" },
-          { label: "Knowledge" },
-        ]}
-        status={{ tone: "neutral", label: "Loading…" }}
-      />
-      <div className="p-6 lg:p-8 max-w-5xl">
-        <p className="type-footnote text-label-tertiary">Loading indexed content…</p>
-      </div>
-    </div>
+    <ShellPage icon={<Library size={15} />} label="Knowledge" title="Knowledge" sub={KN_SUB}>
+      <p style={{ fontSize: 13, color: "var(--text-muted)" }}>Loading indexed content…</p>
+    </ShellPage>
   );
 }
 
@@ -152,28 +146,9 @@ function KnowledgePageInner() {
   }
 
   return (
-    <div>
-      <Topbar
-        crumbs={[
-          { label: "Workspace", href: "/" },
-          { label: "Knowledge" },
-        ]}
-      />
-
-      <div className="p-6 lg:p-8 max-w-5xl">
-      <div className="mb-6">
-        <p className="type-footnote text-label-tertiary">
-          Everything your Droplet has indexed — recently added files, full-text
-          search, and the brain memory you&apos;ve built up from chat.
-        </p>
-      </div>
-
+    <ShellPage icon={<Library size={15} />} label="Knowledge" title="Knowledge" sub={KN_SUB}>
       {/* Tab strip */}
-      <div
-        role="tablist"
-        aria-label="Knowledge view tabs"
-        className="flex items-center gap-1 mb-6 border-b border-separator"
-      >
+      <div role="tablist" aria-label="Knowledge view tabs" className="tabstrip">
         {TABS.map((t) => {
           const Icon = t.icon;
           const active = t.id === tab;
@@ -189,15 +164,7 @@ function KnowledgePageInner() {
               data-testid={`knowledge-tab-${t.id}`}
               onClick={() => handleTabChange(t.id)}
               onKeyDown={onTabKey}
-              className={`
-                inline-flex items-center gap-2 px-3 h-10 -mb-px
-                border-b-2 type-subheadline transition-colors duration-150
-                ${
-                  active
-                    ? "border-accent text-accent"
-                    : "border-transparent text-label-secondary hover:text-label-primary"
-                }
-              `}
+              className={"tab" + (active ? " active" : "")}
             >
               <Icon size={14} aria-hidden="true" />
               {t.label}
@@ -245,7 +212,6 @@ function KnowledgePageInner() {
       >
         {tab === "brain" && <BrainMemoryTab />}
       </div>
-      </div>
-    </div>
+    </ShellPage>
   );
 }

@@ -27,6 +27,12 @@ vi.mock("@/lib/api", () => ({
   createInvite: (...a: any[]) => createInviteMock(...a),
   listInvites: (...a: any[]) => listInvitesMock(...a),
   revokeInvite: (...a: any[]) => revokeInviteMock(...a),
+  // The page now renders inside <ShellPage>, whose status chip pulls the
+  // device + health hooks. Stub them so the wholesale api mock keeps these
+  // callable (otherwise SWR receives an undefined fetcher and throws).
+  fetchSystemHealth: vi.fn().mockResolvedValue({ status: "ok" }),
+  fetchDevices: vi.fn().mockResolvedValue([]),
+  fetchHealth: vi.fn().mockResolvedValue({}),
 }));
 
 vi.mock("@/lib/auth", () => ({

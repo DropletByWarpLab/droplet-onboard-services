@@ -2,14 +2,17 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Plus, RefreshCw, Smartphone, Wifi } from "lucide-react";
-import { Topbar } from "@/components/Topbar";
+import { Plus, RefreshCw, Smartphone, Wifi, Cpu } from "lucide-react";
 import { useSmartHome } from "@/lib/hooks/useSmartHome";
 import { useSmartHomeEvents } from "@/lib/hooks/useSmartHomeEvents";
 import { DeviceGroup } from "@/components/smart-home/DeviceGroup";
 import { DiscoveryBanner } from "@/components/smart-home/DiscoveryBanner";
 import { DeviceDetailPanel } from "@/components/smart-home/DeviceDetailPanel";
+import { ShellPage } from "@/components/shell/ShellPage";
 import type { MatterDevice } from "@/lib/types";
+
+const SUB =
+  "Lights, plugs, sensors and more paired over Matter — discovered and controlled locally on your Droplet.";
 
 export default function DevicesPage() {
   const router = useRouter();
@@ -25,9 +28,7 @@ export default function DevicesPage() {
   } = useSmartHome();
   useSmartHomeEvents();
 
-  const [selectedDevice, setSelectedDevice] = useState<MatterDevice | null>(
-    null
-  );
+  const [selectedDevice, setSelectedDevice] = useState<MatterDevice | null>(null);
 
   const groups = grouped
     ? [
@@ -42,39 +43,34 @@ export default function DevicesPage() {
       ]
     : [];
 
-  const status = totalDevices === 0
-    ? { tone: "neutral" as const, label: "No devices paired yet" }
-    : { tone: "ok" as const, label: `${totalDevices} device${totalDevices === 1 ? "" : "s"} connected` };
-
   const actions = (
     <>
       {/* WARP-102: scan QR / commission a new Matter device. */}
       <button
+        className="btn primary"
         onClick={() => router.push("/devices/add-matter")}
-        className="dp-btn-primary flex items-center gap-1.5 px-3 h-9 rounded-md"
         title="Scan a Matter device QR code to add it"
+        type="button"
       >
         <Plus size={15} />
-        <span className="type-subheadline hidden sm:inline">Add device</span>
+        <span className="hidden sm:inline">Add device</span>
       </button>
       <button
+        className="btn"
         onClick={() => router.push("/devices/clients")}
-        className="dp-btn-secondary flex items-center gap-1.5 px-3 h-9 rounded-md"
         title="Paired phones + laptops"
+        type="button"
       >
         <Smartphone size={15} />
-        <span className="type-subheadline hidden sm:inline">Paired apps</span>
+        <span className="hidden sm:inline">Paired apps</span>
       </button>
       <button
+        className="icon-btn"
         onClick={refresh}
         disabled={isRefreshing}
-        className="
-          inline-flex items-center justify-center h-9 w-9 rounded-md
-          text-label-tertiary hover:text-label-primary hover:bg-surface-secondary
-          transition-colors
-        "
         aria-label="Refresh devices"
         title="Refresh"
+        type="button"
       >
         <RefreshCw size={16} className={isRefreshing ? "animate-spin" : ""} />
       </button>
@@ -82,48 +78,33 @@ export default function DevicesPage() {
   );
 
   return (
-    <div>
-      <Topbar
-        crumbs={[
-          { label: "Workspace", href: "/" },
-          { label: "Operations" },
-          { label: "Devices" },
-        ]}
-        status={status}
-        actions={actions}
-      />
-
-      <div className="p-6">
-      {/* Content with refresh fade */}
+    <ShellPage icon={<Cpu size={15} />} label="Devices" title="Devices" sub={SUB} actions={actions}>
       <div
-        className={`transition-opacity duration-300 ${isRefreshing ? "opacity-60" : "opacity-100"}`}
+        style={{ transition: "opacity 300ms", opacity: isRefreshing ? 0.6 : 1 }}
       >
-        {/* Loading skeleton */}
         {isLoading ? (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          <div className="grid c3">
             {Array.from({ length: 6 }).map((_, i) => (
-              <div
-                key={i}
-                className="dp-card h-24 animate-pulse bg-surface-secondary"
-              />
+              <div key={i} className="card" style={{ height: 96, opacity: 0.5 }} />
             ))}
           </div>
         ) : error ? (
-          <div className="dp-card text-center py-12">
-            <Wifi size={32} className="mx-auto text-label-quaternary mb-3" />
-            <h2 className="type-title-3 text-label-primary mb-1">
-              Matter Controller Not Available
-            </h2>
-            <p className="type-subheadline text-label-tertiary max-w-md mx-auto">
-              The Matter controller could not start. Check that the device has
-              network access for mDNS discovery.
-            </p>
+          <div className="card">
+            <div className="empty">
+              <span className="ei">
+                <Wifi size={24} />
+              </span>
+              <span className="eh">Matter controller not available</span>
+              <span>
+                The Matter controller could not start. Check that the device has network access for
+                mDNS discovery.
+              </span>
+            </div>
           </div>
         ) : (
-          <div className="space-y-10">
+          <div style={{ display: "flex", flexDirection: "column", gap: 28 }}>
             <DiscoveryBanner count={discovered.length} />
 
-            {/* Device groups */}
             {groups.map((group) => (
               <DeviceGroup
                 key={group.title}
@@ -134,35 +115,32 @@ export default function DevicesPage() {
               />
             ))}
 
-            {/* Empty state — most-likely first-run moment, biggest CTA. */}
             {totalDevices === 0 && (
-              <div className="dp-card text-center py-12">
-                <Wifi
-                  size={32}
-                  className="mx-auto text-label-quaternary mb-3"
-                />
-                <h2 className="type-title-3 text-label-primary mb-1">
-                  No smart home devices yet
-                </h2>
-                <p className="type-subheadline text-label-tertiary max-w-md mx-auto mb-4">
-                  Scan a Matter QR code to add your first device. Most plugs,
-                  lights, and switches that say{" "}
-                  <em>“Works with Matter”</em> on the box will work.
-                </p>
-                <button
-                  onClick={() => router.push("/devices/add-matter")}
-                  className="dp-btn-primary inline-flex items-center gap-2 px-4 py-2 rounded-lg"
-                >
-                  <Plus size={16} />
-                  <span className="type-subheadline">Add your first device</span>
-                </button>
+              <div className="card">
+                <div className="empty">
+                  <span className="ei">
+                    <Wifi size={24} />
+                  </span>
+                  <span className="eh">No smart home devices yet</span>
+                  <span>
+                    Scan a Matter QR code to add your first device. Most plugs, lights, and switches
+                    that say <em>“Works with Matter”</em> on the box will work.
+                  </span>
+                  <button
+                    className="btn primary"
+                    onClick={() => router.push("/devices/add-matter")}
+                    type="button"
+                    style={{ marginTop: 10 }}
+                  >
+                    <Plus size={16} /> Add your first device
+                  </button>
+                </div>
               </div>
             )}
           </div>
         )}
       </div>
 
-      {/* Detail panel */}
       {selectedDevice && (
         <DeviceDetailPanel
           device={selectedDevice}
@@ -170,7 +148,6 @@ export default function DevicesPage() {
           onClose={() => setSelectedDevice(null)}
         />
       )}
-      </div>
-    </div>
+    </ShellPage>
   );
 }

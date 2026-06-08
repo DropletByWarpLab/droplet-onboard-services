@@ -20,6 +20,29 @@ import {
 import type { ChatMessage as ChatMessageType, ChatToolCall } from "@/lib/types";
 import { CitationCard } from "@/components/citations/CitationCard";
 import { mimeFromPath } from "@/lib/mime-icons";
+import "@/components/chat/thinking.css";
+
+/**
+ * "Droplet is thinking" indicator (design handoff Option B) — the faceted
+ * Droplet mark + a shimmering label, shown on the assistant turn while the
+ * model is generating but hasn't emitted its first token. role=status so a
+ * screen reader announces it once (no per-token spam).
+ */
+function ThinkingIndicator() {
+  return (
+    <div className="ds-thinking" role="status" aria-live="polite">
+      <span className="ds-thinking-avatar" aria-hidden="true">
+        <svg viewBox="0 0 52 60" xmlns="http://www.w3.org/2000/svg">
+          <polygon points="26,2 44,28 36,48 16,48 8,28" fill="#818cf8" />
+          <polygon className="facet-mid" points="26,2 44,28 26,36" fill="#a5b4fc" />
+          <polygon points="26,2 8,28 26,36" fill="#6366f1" opacity="0.6" />
+        </svg>
+      </span>
+      <span className="ds-thinking-label">Droplet is thinking</span>
+      <span className="sr-only">Droplet is generating a response…</span>
+    </div>
+  );
+}
 
 interface ChatMessageProps {
   message: ChatMessageType;
@@ -99,6 +122,15 @@ export const ChatMessage = memo(function ChatMessage({
   const confirmCall = !isUser
     ? toolCalls?.find((c) => c.status === "confirmation_required")
     : undefined;
+
+  // Pre-first-token "thinking" window: assistant turn is streaming but has
+  // no content, no tool chips, no confirmation, and no failure yet. Show the
+  // Droplet thinking indicator instead of an empty bubble + blinking cursor.
+  const isThinking =
+    !isUser && isStreaming && !message.content && !hasToolCalls && !confirmCall && !hasFailure;
+  if (isThinking) {
+    return <ThinkingIndicator />;
+  }
 
   return (
     <div className={`flex gap-2.5 ${isUser ? "flex-row-reverse" : ""}`}>

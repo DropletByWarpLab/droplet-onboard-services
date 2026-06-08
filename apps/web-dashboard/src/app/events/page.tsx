@@ -11,7 +11,7 @@ import {
   Sparkles,
   X,
 } from "lucide-react";
-import { Topbar } from "@/components/Topbar";
+import { ShellPage } from "@/components/shell/ShellPage";
 import { useCameras } from "@/lib/hooks/useCameras";
 import { useEvents } from "@/lib/hooks/useEvents";
 import { useReviews } from "@/lib/hooks/useReviews";
@@ -158,47 +158,38 @@ export default function EventsPage() {
     return reviewsHook.refresh();
   };
 
-  const eventsStatus = headerLoading
-    ? { tone: "neutral" as const, label: "Loading…" }
+  const sub = headerLoading
+    ? "Loading the latest camera activity…"
     : headerCount === 0
-      ? { tone: "ok" as const, label: "Nothing to triage" }
-      : {
-          tone: "warn" as const,
-          label: `${headerCount} ${tab === "events" ? "event" : "item"}${
-            headerCount === 1 ? "" : "s"
-          }${headerHasMore ? " (more)" : ""}`,
-        };
+      ? "Nothing to triage right now."
+      : `${headerCount} ${tab === "events" ? "event" : "item"}${
+          headerCount === 1 ? "" : "s"
+        }${headerHasMore ? " and counting" : ""} in this view.`;
+
+  const actions = (
+    <button
+      onClick={() => refreshActive()}
+      disabled={headerLoading}
+      className="icon-btn"
+      aria-label="Refresh events"
+      title="Refresh"
+      type="button"
+    >
+      <RefreshCw size={16} className={headerLoading ? "animate-spin" : ""} />
+    </button>
+  );
 
   return (
-    <div>
-      <Topbar
-        crumbs={[
-          { label: "Workspace", href: "/" },
-          { label: "Operations" },
-          { label: "Events" },
-        ]}
-        status={eventsStatus}
-        actions={
-          <button
-            onClick={() => refreshActive()}
-            disabled={headerLoading}
-            className="
-              inline-flex items-center justify-center h-9 w-9 rounded-md
-              text-label-tertiary hover:text-label-primary hover:bg-surface-secondary
-              transition-colors
-            "
-            aria-label="Refresh events"
-            title="Refresh"
-          >
-            <RefreshCw size={16} className={headerLoading ? "animate-spin" : ""} />
-          </button>
-        }
-      />
-
-      <div className="p-6">
+    <ShellPage
+      icon={<Film size={15} />}
+      label="Events"
+      title="Events"
+      sub={sub}
+      actions={actions}
+    >
       {/* Tab strip — Frigate splits the timeline by review severity, so
           the dashboard does too. Each tab carries its own filter. */}
-      <div className="flex items-center gap-1 mb-4 border-b border-separator">
+      <div className="tabstrip">
         {TAB_DEFS.map((t) => {
           const Icon = t.icon;
           const active = t.id === tab;
@@ -212,19 +203,12 @@ export default function EventsPage() {
             <button
               key={t.id}
               onClick={() => setTab(t.id)}
-              className={`flex items-center gap-2 px-3 py-2 -mb-px border-b-2 transition-colors ${
-                active
-                  ? "border-accent text-label-primary"
-                  : "border-transparent text-label-tertiary hover:text-label-secondary"
-              }`}
+              className={"tab" + (active ? " active" : "")}
+              type="button"
             >
               <Icon size={14} />
-              <span className="type-subheadline font-medium">{t.label}</span>
-              {unreviewedBadge > 0 && (
-                <span className="type-caption-2 px-1.5 py-0.5 rounded-full bg-accent text-white min-w-[18px] text-center">
-                  {unreviewedBadge}
-                </span>
-              )}
+              {t.label}
+              {unreviewedBadge > 0 && <span className="tcount">{unreviewedBadge}</span>}
             </button>
           );
         })}
@@ -234,31 +218,33 @@ export default function EventsPage() {
           embeddings stack must be enabled; we surface a clear error
           inline when it isn't. */}
       {tab === "events" && (
-        <div className="dp-card p-3 mb-4 flex items-center gap-2">
+        <div className="search" style={{ maxWidth: "100%", height: 44, marginBottom: 18 }}>
           <Search
-            size={14}
-            className={searching ? "text-accent animate-pulse" : "text-label-tertiary"}
+            size={15}
+            className={searching ? "animate-pulse" : ""}
+            style={{ color: searching ? "var(--brand)" : "var(--text-muted)", flexShrink: 0 }}
           />
           <input
             type="search"
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
             placeholder="Find events by description — e.g. “blue car at night”, “dog in driveway”"
-            className="flex-1 h-8 bg-transparent type-subheadline text-label-primary focus:outline-none placeholder:text-label-tertiary"
           />
           {searchInput && (
             <button
               type="button"
               onClick={() => setSearchInput("")}
-              className="p-1 rounded text-label-tertiary hover:text-label-primary hover:bg-surface-secondary"
+              className="icon-btn"
+              style={{ width: 28, height: 28, border: 0, background: "transparent" }}
               title="Clear search"
+              aria-label="Clear search"
             >
-              <X size={12} />
+              <X size={14} />
             </button>
           )}
           {searchQuery && !searchError && (
-            <span className="flex items-center gap-1 type-caption-2 text-accent px-2 py-0.5 rounded-full bg-accent/10">
-              <Sparkles size={10} />
+            <span className="badge info" style={{ flexShrink: 0 }}>
+              <Sparkles size={11} />
               Semantic
             </span>
           )}
@@ -330,8 +316,7 @@ export default function EventsPage() {
           onMarkViewed={(rv) => reviewsHook.markViewed(rv.id)}
         />
       )}
-      </div>
-    </div>
+    </ShellPage>
   );
 }
 
@@ -363,7 +348,7 @@ function EventsBody({
 }) {
   if (error) {
     return (
-      <div className="dp-card p-4 mb-4 text-system-red">
+      <div className="card" style={{ marginBottom: 16, color: "#ef4444" }}>
         <p className="type-subheadline">
           Couldn&apos;t load events:{" "}
           {error instanceof Error ? error.message : String(error)}
@@ -377,7 +362,8 @@ function EventsBody({
         {Array.from({ length: 8 }).map((_, i) => (
           <div
             key={i}
-            className="dp-card aspect-video animate-pulse bg-surface-secondary"
+            className="card aspect-video animate-pulse"
+            style={{ background: "var(--surface-2)" }}
           />
         ))}
       </div>
@@ -385,16 +371,18 @@ function EventsBody({
   }
   if (events.length === 0) {
     return (
-      <div className="dp-card text-center py-16">
-        <Film size={32} className="mx-auto text-label-quaternary mb-3" />
-        <h2 className="type-title-3 text-label-primary mb-1">
-          {searchMode ? "Nothing matched that query" : "No events yet"}
-        </h2>
-        <p className="type-subheadline text-label-tertiary max-w-md mx-auto">
-          {searchMode
-            ? "Try a different phrasing, drop a filter, or pick a wider time range."
-            : "As cameras detect motion or objects, the events will show up here. Try widening the filters above."}
-        </p>
+      <div className="card">
+        <div className="empty">
+          <span className="ei"><Film size={24} /></span>
+          <span className="eh">
+            {searchMode ? "Nothing matched that query" : "No events yet"}
+          </span>
+          <span style={{ maxWidth: "40ch" }}>
+            {searchMode
+              ? "Try a different phrasing, drop a filter, or pick a wider time range."
+              : "As cameras detect motion or objects, the events will show up here. Try widening the filters above."}
+          </span>
+        </div>
       </div>
     );
   }
@@ -410,7 +398,7 @@ function EventsBody({
           <button
             onClick={loadMore}
             disabled={isLoadingMore}
-            className="dp-btn-secondary flex items-center gap-2 px-4 py-2 rounded-lg disabled:opacity-60"
+            className="btn"
           >
             {isLoadingMore && <RefreshCw size={14} className="animate-spin" />}
             <span className="type-subheadline">
@@ -442,7 +430,7 @@ function ReviewsBody({
 }) {
   if (error) {
     return (
-      <div className="dp-card p-4 mb-4 text-system-red">
+      <div className="card" style={{ marginBottom: 16, color: "#ef4444" }}>
         <p className="type-subheadline">
           Couldn&apos;t load reviews:{" "}
           {error instanceof Error ? error.message : String(error)}
@@ -460,7 +448,8 @@ function ReviewsBody({
         {Array.from({ length: 8 }).map((_, i) => (
           <div
             key={i}
-            className="dp-card aspect-video animate-pulse bg-surface-secondary"
+            className="card aspect-video animate-pulse"
+            style={{ background: "var(--surface-2)" }}
           />
         ))}
       </div>
@@ -468,12 +457,14 @@ function ReviewsBody({
   }
   if (reviews.length === 0) {
     return (
-      <div className="dp-card text-center py-16">
-        <Eye size={32} className="mx-auto text-label-quaternary mb-3" />
-        <h2 className="type-title-3 text-label-primary mb-1">All clear</h2>
-        <p className="type-subheadline text-label-tertiary max-w-md mx-auto">
-          No clusters in this severity tier match the current filters.
-        </p>
+      <div className="card">
+        <div className="empty">
+          <span className="ei"><Eye size={24} /></span>
+          <span className="eh">All clear</span>
+          <span style={{ maxWidth: "40ch" }}>
+            No clusters in this severity tier match the current filters.
+          </span>
+        </div>
       </div>
     );
   }
@@ -489,7 +480,7 @@ function ReviewsBody({
           <button
             onClick={loadMore}
             disabled={isLoadingMore}
-            className="dp-btn-secondary flex items-center gap-2 px-4 py-2 rounded-lg disabled:opacity-60"
+            className="btn"
           >
             {isLoadingMore && <RefreshCw size={14} className="animate-spin" />}
             <span className="type-subheadline">

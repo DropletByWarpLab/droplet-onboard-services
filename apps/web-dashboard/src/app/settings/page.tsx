@@ -1,8 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Plus, Trash2, Users, X } from "lucide-react";
-import { Topbar } from "@/components/Topbar";
+import { Plus, Settings as SettingsIcon, Trash2, Users, X } from "lucide-react";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { ProviderKeyForm } from "@/components/ProviderKeyForm";
 import { PasskeysSection } from "@/components/settings/PasskeysSection";
@@ -21,6 +20,8 @@ import {
   deleteUser as apiDeleteUser,
 } from "@/lib/api";
 import type { AuthUser } from "@/lib/types";
+import { ShellPage } from "@/components/shell/ShellPage";
+import { Sect, Badge } from "@/components/shell/primitives";
 
 export default function SettingsPage() {
   const { device, health } = useDevice();
@@ -110,60 +111,59 @@ export default function SettingsPage() {
     }
   };
 
-  // Status chip — surfaces the device's overall health so the operator
-  // always knows what posture they're configuring. Falls back to neutral
-  // before /api/orchestrator/health has resolved.
-  const settingsStatus = health
-    ? { tone: "ok" as const, label: `${health.version ?? "v0.1.0"} · ${device?.hostname ?? "droplet"}` }
-    : { tone: "neutral" as const, label: "Loading device info…" };
-
   return (
-    <div>
-      <Topbar
-        crumbs={[
-          { label: "Workspace", href: "/" },
-          { label: "Admin" },
-          { label: "Settings" },
-        ]}
-        status={settingsStatus}
-      />
-
-      <div className="p-6 lg:p-8 max-w-4xl">
-      {/* Appearance */}
-      <section className="mb-10">
-        <h2 className="type-footnote text-label-secondary uppercase tracking-wider px-1 mb-2">
-          Appearance
-        </h2>
-        <div className="dp-group">
-          <div className="dp-row">
-            <span className="type-body text-label-primary">Theme</span>
-            <ThemeToggle />
+    <ShellPage
+      icon={<SettingsIcon size={15} />}
+      label="Settings"
+      title="Settings"
+      sub="Appearance, accounts, device info, AI providers, and maintenance."
+    >
+      <div style={{ maxWidth: 880 }}>
+        {/* Appearance */}
+        <Sect title="Appearance" />
+        <div className="card" style={{ padding: 0 }}>
+          <div className="rows">
+            <div className="lrow" style={{ padding: "12px 16px" }}>
+              <span className="rt">
+                <span className="nm">Theme</span>
+              </span>
+              <ThemeToggle />
+            </div>
           </div>
         </div>
-      </section>
 
-      {/* Passkeys (PR #377) — enrol a passwordless sign-in credential. */}
-      <PasskeysSection />
+        {/* Passkeys (PR #377) — enrol a passwordless sign-in credential. */}
+        <PasskeysSection />
 
-      {/* User Management */}
-      <section className="mb-10">
-        <div className="flex items-center justify-between px-1 mb-2">
-          <h2 className="type-footnote text-label-secondary uppercase tracking-wider">
-            Users
-          </h2>
+        {/* User Management */}
+        <div className="sect">
+          <h2>Users</h2>
           <button
             onClick={() => setShowAddUser(true)}
-            className="flex items-center gap-1 type-caption-1 text-accent hover:text-accent-hover transition-colors"
+            className="btn ghost sm"
+            style={{ marginLeft: "auto" }}
+            type="button"
           >
-            <Plus size={12} />
-            Add User
+            <Plus size={13} />
+            Add user
           </button>
         </div>
 
         {userError && (
-          <div className="mb-3 p-2.5 bg-system-red/10 border border-system-red/20 rounded type-footnote text-system-red flex items-center justify-between">
+          <div
+            className="card"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 8,
+              color: "#ef4444",
+              marginBottom: 12,
+              padding: 12,
+            }}
+          >
             <span>{userError}</span>
-            <button onClick={() => setUserError(null)}>
+            <button onClick={() => setUserError(null)} aria-label="Dismiss error" type="button">
               <X size={12} />
             </button>
           </div>
@@ -171,8 +171,8 @@ export default function SettingsPage() {
 
         {/* Add user form */}
         {showAddUser && (
-          <div className="dp-card p-4 mb-3 space-y-3">
-            <p className="type-headline text-label-primary">New User</p>
+          <div className="card space-y-3" style={{ marginBottom: 12 }}>
+            <p className="type-headline text-label-primary">New user</p>
             <div className="grid grid-cols-2 gap-3">
               <input
                 type="email"
@@ -218,12 +218,13 @@ export default function SettingsPage() {
               </span>
             </label>
             <div className="flex items-center gap-2 pt-1">
-              <button onClick={handleCreateUser} className="dp-btn-primary type-footnote !min-h-[36px] !py-1.5">
+              <button onClick={handleCreateUser} className="btn primary sm" type="button">
                 Create
               </button>
               <button
                 onClick={() => { setShowAddUser(false); setUserError(null); }}
-                className="type-subheadline text-accent hover:text-accent-hover transition-colors px-3 py-1.5"
+                className="btn ghost sm"
+                type="button"
               >
                 Cancel
               </button>
@@ -231,159 +232,145 @@ export default function SettingsPage() {
           </div>
         )}
 
-        <div className="dp-group">
+        <div className="card" style={{ padding: 0 }}>
           {users.length === 0 ? (
-            <div className="dp-row">
-              <span className="type-subheadline text-label-tertiary">No users found</span>
+            <div className="empty" style={{ padding: "32px 20px" }}>
+              <span>No users found</span>
             </div>
           ) : (
-            users.map((u) => {
-              // aria-label mirrors the row's primary visible identifier so
-              // screen-reader announcements match what sighted users see
-              // (WARP-220 pattern; applied site-wide in WARP-292).
-              const label = u.displayName || u.id;
-              return (
-              <div key={u.id} className="dp-row group">
-                <div className="flex items-center gap-3 flex-1 min-w-0">
-                  <div className="w-8 h-8 rounded-full bg-accent/15 flex items-center justify-center flex-shrink-0">
-                    <Users size={14} className="text-accent" />
+            <div className="rows">
+              {users.map((u) => {
+                // aria-label mirrors the row's primary visible identifier so
+                // screen-reader announcements match what sighted users see
+                // (WARP-220 pattern; applied site-wide in WARP-292).
+                const label = u.displayName || u.id;
+                return (
+                  <div key={u.id} className="lrow" style={{ padding: "12px 16px" }}>
+                    <span className="ri brand">
+                      <Users size={15} />
+                    </span>
+                    <span className="rt">
+                      <span className="nm">{u.displayName || u.id}</span>
+                      <span className="sub mono">{u.id}</span>
+                    </span>
+                    {u.id !== currentUser?.username ? (
+                      // Always rendered (no opacity-gate on hover) so the
+                      // action is discoverable for touch + keyboard users.
+                      // p-2.5 → 14 px icon + 20 px padding = 34 px hit-target,
+                      // clearing the ≥ 32 px ui-ux floor.
+                      <button
+                        onClick={() => handleDeleteUser(u.id)}
+                        aria-label={`Delete user ${label}`}
+                        className="p-2.5 rounded-sm text-label-quaternary hover:text-system-red hover:bg-system-red/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
+                        title="Delete"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    ) : (
+                      <Badge kind="info">You</Badge>
+                    )}
                   </div>
-                  <div className="min-w-0">
-                    <p className="type-callout text-label-primary truncate">
-                      {u.displayName || u.id}
-                    </p>
-                    <p className="type-caption-1 text-label-tertiary">{u.id}</p>
-                  </div>
-                </div>
-                {u.id !== currentUser?.username && (
-                  // Always rendered (no opacity-gate on hover) so the
-                  // action is discoverable for touch + keyboard users.
-                  // p-2.5 → 14 px icon + 20 px padding = 34 px hit-target,
-                  // clearing the ≥ 32 px ui-ux floor.
-                  <button
-                    onClick={() => handleDeleteUser(u.id)}
-                    aria-label={`Delete user ${label}`}
-                    className="p-2.5 rounded-sm text-label-quaternary hover:text-system-red hover:bg-system-red/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
-                    title="Delete"
-                  >
-                    <Trash2 size={14} />
-                  </button>
-                )}
-                {u.id === currentUser?.username && (
-                  <span className="type-caption-2 text-accent bg-accent/10 px-2 py-0.5 rounded-full">
-                    You
-                  </span>
-                )}
-              </div>
-              );
-            })
+                );
+              })}
+            </div>
           )}
         </div>
-      </section>
 
-      {/* Outbound email (BUG-11) — SMTP relay for invite delivery. Sits with
-          the people/account config since its primary consumer is invites. */}
-      <EmailChannelSection />
+        {/* Outbound email (BUG-11) — SMTP relay for invite delivery. Sits with
+            the people/account config since its primary consumer is invites. */}
+        <EmailChannelSection />
 
-      {/* Device Info */}
-      <section className="mb-10">
-        <h2 className="type-footnote text-label-secondary uppercase tracking-wider px-1 mb-2">
-          Device Information
-        </h2>
-        <div className="dp-group">
-          <InfoRow label="Hostname" value={device?.hostname ?? "Droplet"} />
-          <InfoRow label="Hardware" value={device?.hardwareRev ?? "—"} />
-          <InfoRow label="Network Mode" value={device?.networkMode ?? "—"} />
-          <InfoRow label="IP Address" value={device?.ip ?? "Not assigned"} />
-          <InfoRow
-            label="Services"
-            value={
-              health
-                ? `DB: ${health.services.db ? "OK" : "Down"} | Cache: ${health.services.redis ? "OK" : "Down"} | AI: ${health.services.aiGateway ? "OK" : "Down"} | Screen: ${health.services.display ? "OK" : "Down"}`
-                : "Loading..."
-            }
-          />
-          <InfoRow label="Uptime" value={health ? formatUptime(health.uptime) : "—"} />
+        {/* Device Info */}
+        <Sect title="Device information" />
+        <div className="card" style={{ padding: 0 }}>
+          <div className="rows">
+            <InfoRow label="Hostname" value={device?.hostname ?? "Droplet"} />
+            <InfoRow label="Hardware" value={device?.hardwareRev ?? "—"} />
+            <InfoRow label="Network mode" value={device?.networkMode ?? "—"} />
+            <InfoRow label="IP address" value={device?.ip ?? "Not assigned"} />
+            <InfoRow
+              label="Services"
+              value={
+                health
+                  ? `DB: ${health.services.db ? "OK" : "Down"} | Cache: ${health.services.redis ? "OK" : "Down"} | AI: ${health.services.aiGateway ? "OK" : "Down"} | Screen: ${health.services.display ? "OK" : "Down"}`
+                  : "Loading..."
+              }
+            />
+            <InfoRow label="Uptime" value={health ? formatUptime(health.uptime) : "—"} />
+          </div>
         </div>
-      </section>
 
-      {/* Diagnostics (WARP-823) — owner/admin downloadable, redacted log bundle. */}
-      <LogsSection />
+        {/* Diagnostics (WARP-823) — owner/admin downloadable, redacted log bundle. */}
+        <LogsSection />
 
-      {/* AI Providers */}
-      <section className="mb-10">
-        <h2 className="type-footnote text-label-secondary uppercase tracking-wider px-1 mb-2">
-          AI Providers
-        </h2>
+        {/* AI Providers */}
+        <Sect title="AI providers" />
 
         {/* Ollama / Local */}
-        <div className="dp-group mb-3">
-          <div className="dp-row">
-            <div>
-              <p className="type-body text-label-primary">Ollama (on-device)</p>
-              <p className="type-caption-1 text-label-tertiary mt-0.5">
-                Local LLM inference, never leaves your network
-              </p>
+        <div className="card" style={{ padding: 0, marginBottom: 12 }}>
+          <div className="rows">
+            <div className="lrow" style={{ padding: "12px 16px" }}>
+              <span className="rt">
+                <span className="nm">Ollama (on-device)</span>
+                <span className="sub">Local LLM inference, never leaves your network</span>
+              </span>
+              <Badge kind={health?.services.aiGateway ? "ok" : "muted"}>
+                {health?.services.aiGateway ? "Connected" : "Offline"}
+              </Badge>
             </div>
-            <span
-              className={`px-2.5 py-1 rounded-full type-caption-2 font-medium ${
-                health?.services.aiGateway
-                  ? "bg-system-green/15 text-system-green"
-                  : "bg-label-quaternary/30 text-label-tertiary"
-              }`}
-            >
-              {health?.services.aiGateway ? "Connected" : "Offline"}
-            </span>
           </div>
         </div>
 
         {/* Cloud providers */}
-        <div className="dp-group">
-          <ProviderKeyForm
-            provider="anthropic"
-            label="Anthropic (Claude)"
-            hasKey={configuredProviders.includes("anthropic")}
-            onUpdate={loadKeys}
-          />
-          <ProviderKeyForm
-            provider="openai"
-            label="OpenAI (GPT)"
-            hasKey={configuredProviders.includes("openai")}
-            onUpdate={loadKeys}
-          />
+        <div className="card" style={{ padding: 0 }}>
+          <div className="rows">
+            <ProviderKeyForm
+              provider="anthropic"
+              label="Anthropic (Claude)"
+              hasKey={configuredProviders.includes("anthropic")}
+              onUpdate={loadKeys}
+            />
+            <ProviderKeyForm
+              provider="openai"
+              label="OpenAI (GPT)"
+              hasKey={configuredProviders.includes("openai")}
+              onUpdate={loadKeys}
+            />
+          </div>
         </div>
-      </section>
 
-      {/* Danger zone (WARP-828 + WARP-825) — owner-only home for irreversible
-          device actions (reformat/remake storage AND factory reset). The
-          section self-gates to the owner role internally and renders nothing
-          for non-owners. Placed last so destructive actions sit apart from
-          routine settings, fenced off in system-red. */}
-      <DangerZoneSection />
+        {/* Danger zone (WARP-828 + WARP-825) — owner-only home for irreversible
+            device actions (reformat/remake storage AND factory reset). The
+            section self-gates to the owner role internally and renders nothing
+            for non-owners. Placed last so destructive actions sit apart from
+            routine settings, fenced off in system-red. */}
+        <DangerZoneSection />
 
-      <ConfirmDialog
-        open={deleteUserTarget !== null}
-        onConfirm={performDeleteUser}
-        onCancel={() => setDeleteUserTarget(null)}
-        title={
-          deleteUserTarget
-            ? `Delete user "${deleteUserTarget}"?`
-            : "Delete user?"
-        }
-        description="The account, sessions, and per-user state are removed. This cannot be undone."
-        confirmLabel="Delete"
-        variant="destructive"
-      />
+        <ConfirmDialog
+          open={deleteUserTarget !== null}
+          onConfirm={performDeleteUser}
+          onCancel={() => setDeleteUserTarget(null)}
+          title={
+            deleteUserTarget
+              ? `Delete user "${deleteUserTarget}"?`
+              : "Delete user?"
+          }
+          description="The account, sessions, and per-user state are removed. This cannot be undone."
+          confirmLabel="Delete"
+          variant="destructive"
+        />
       </div>
-    </div>
+    </ShellPage>
   );
 }
 
 function InfoRow({ label, value }: { label: string; value: string }) {
   return (
-    <div className="dp-row">
-      <span className="type-body text-label-secondary">{label}</span>
-      <span className="type-body text-label-primary font-mono text-sm">{value}</span>
+    <div className="lrow" style={{ padding: "12px 16px" }}>
+      <span className="rt">
+        <span className="nm" style={{ color: "var(--text-muted)", fontWeight: 400 }}>{label}</span>
+      </span>
+      <span className="rmeta mono">{value}</span>
     </div>
   );
 }

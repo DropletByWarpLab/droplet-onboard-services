@@ -74,9 +74,11 @@ interface Props {
   cursor: Date;
   onSelectEvent?: (ev: CalendarEvent) => void;
   onSelectDay?: (day: Date) => void;
+  /** Resolves the source calendar's color for an event chip's left accent. */
+  colorOf?: (ev: CalendarEvent) => string | undefined;
 }
 
-export function MonthView({ events, cursor, onSelectEvent, onSelectDay }: Props) {
+export function MonthView({ events, cursor, onSelectEvent, onSelectDay, colorOf }: Props) {
   const days = useMemo(() => monthGridDays(cursor), [cursor]);
   const byDay = useMemo(() => eventsByDay(events), [events]);
   const month = cursor.getMonth();
@@ -151,6 +153,7 @@ export function MonthView({ events, cursor, onSelectEvent, onSelectDay }: Props)
                       }
                     }}
                     title={`${ev.title}${ev.allDay ? " · All day" : " · " + shortTime(ev.startsAt)}${ev.location ? " · " + ev.location : ""}`}
+                    style={colorOf?.(ev) ? { borderLeft: `3px solid ${colorOf(ev)}` } : undefined}
                     className={[
                       "block truncate rounded px-1 py-0.5 type-caption-2 cursor-pointer",
                       "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 focus-visible:ring-inset",

@@ -18,6 +18,8 @@ vi.mock("@/lib/api", () => ({
   fetchUsers: (...a: any[]) => fetchUsersMock(...a),
   createUser: (...a: any[]) => createUserMock(...a),
   deleteUser: (...a: any[]) => deleteUserMock(...a),
+  // ShellPage's status chip reads /api/orchestrator/health via this fetcher.
+  fetchSystemHealth: () => Promise.resolve({ status: "ok" }),
 }));
 
 vi.mock("@/lib/auth", () => ({
