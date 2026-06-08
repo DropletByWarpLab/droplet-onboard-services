@@ -92,7 +92,11 @@ vi.mock("@/lib/api", () => ({
         notes: null,
       },
       {
-        device: "/dev/sda2",
+        // A SEPARATE physical disk (sdb) — two real disks make this a valid
+        // 2-disk pool candidate, matching the "2+ drives default ON" flow this
+        // test exercises below. (Two partitions of one disk group to a single
+        // pool target; see groupPhysicalDisks tests in setup.storage.test.tsx.)
+        device: "/dev/sdb1",
         mount: "/mnt/droplet/nvr",
         label: "WD ELEMENTS",
         uuid: "UUID-B",

@@ -11,7 +11,6 @@ import {
 } from "@/lib/api";
 import type { DriveInfo } from "@/lib/types";
 import { StepShell } from "@/components/setup/StepShell";
-import { ScrollRegion } from "@/components/setup/ScrollRegion";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import {
@@ -39,14 +38,28 @@ import {
  * reaches this path (the destructive ops aren't in tools-core at all).
  *
  * #5 ADDENDUM (owner-directed reversal of ADR-019's default-OFF): with **2+
- * drives** the pool toggle now defaults **ON** with a sensible level
+ * poolable drives** the pool toggle now defaults **ON** with a sensible level
  * pre-selected, and the step is **non-skippable** — the customer either creates
  * a pool or toggles it off and names the drives. The data-safety that motivated
  * ADR-019 is preserved: pooling still NEVER auto-creates (the primary "Create
  * pool" requires the owner-gated confirm dialog + the host-script typed
- * double-confirm, which refuses any drive with data). A single disk keeps the
- * default-OFF, skippable behavior (it can't be pooled). Zero drives still
- * auto-skip.
+ * double-confirm, which refuses any drive with data).
+ *
+ * "Poolable" means a FREE physical disk — the box's installed storage (a disk
+ * the Droplet is already using, bridge `removable: false`) is excluded from
+ * both pooling and reclaim here, because combining/wiping it would tear down
+ * live storage; the owner manages those from Settings › Storage. On the common
+ * single-box (whose drives are all in use) there's nothing poolable, so the
+ * step keeps the default-OFF, skippable behaviour and never drops the customer
+ * onto a create flow the host will (correctly) refuse.
+ *
+ * Whole-disk grouping (setup honesty): the bridge returns one entry per mounted
+ * FILESYSTEM, so a single physical disk split into two partitions (e.g. an
+ * `nvr` + a `data` filesystem on `sda`) comes back as two entries. The reclaim
+ * + pool flows act on the WHOLE disk, so we group those entries by their
+ * backing disk: that disk is ONE reclaim/pool target, shown once, and wiping it
+ * erases EVERY filesystem on it (named in the confirm). The naming step stays
+ * per-filesystem — you still name each one.
  *
  * Auto-skip when zero drives — a single-disk box has nothing to label or
  * pool here, and the wizard shouldn't make the customer click "Skip" on a
@@ -90,17 +103,21 @@ export function StorageStep({
   const [createError, setCreateError] = useState<string | null>(null);
 
   // WARP-662 — "reclaim existing drives" (wipe + reformat + mount). OFF by
-  // default + opt-in, mirroring the RAID toggle. Per-drive wipe method. Same
+  // default + opt-in, mirroring the RAID toggle. Per-disk wipe method. Same
   // owner-gated two-step flow (requestAdoptDrive → confirm). The OS disk is
-  // refused server-side by the host script; we never list it here either.
+  // refused server-side by the host script; the box's installed storage is
+  // disabled client-side too (it's in use, not a foreign drive).
   const [adoptOn, setAdoptOn] = useState(false);
+  // Keyed by whole-disk kernel name (e.g. "sda"), not a per-partition uuid —
+  // reclaim acts on the whole disk.
   const [adoptWipe, setAdoptWipe] = useState<Record<string, "quick" | "secure">>({});
   const [adoptPending, setAdoptPending] = useState<{
     token: { confirmationToken: string; service: string; resourceId: string };
-    drive: DriveInfo;
+    disk: PhysicalDisk;
   } | null>(null);
   const [adoptConfirmOpen, setAdoptConfirmOpen] = useState(false);
   const [adoptError, setAdoptError] = useState<string | null>(null);
+  // Whole-disk name currently mid-adopt (button spinner), or null.
   const [adoptBusy, setAdoptBusy] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -114,13 +131,12 @@ export function StorageStep({
         initial[d.uuid] = d.displayName ?? "";
       }
       setNames(initial);
-      // #5: with 2+ drives, default to pooling ON (a sensible level is
-      // pre-selected by the effect below) so the customer lands on a
-      // ready-to-create pool. They can still keep the drives separate by
-      // toggling the pool off. A single disk can't be pooled, so it's left
-      // OFF (naming only). Reversal of ADR-019's default-OFF — see the
-      // component header note.
-      if (list.length >= 2) {
+      // #5: with 2+ drives we can ACTUALLY pool — i.e. free physical disks —
+      // default to pooling ON (a sensible level is pre-selected by the effect
+      // below). A box whose drives are all in use by the Droplet has nothing
+      // poolable, so we leave the destructive pool toggle OFF rather than
+      // landing the customer on a create flow the host will refuse.
+      if (groupPhysicalDisks(list).filter((p) => !p.inUse).length >= 2) {
         setRaidOn(true);
       }
       // Auto-skip when there's nothing to label. Lets the wizard land
@@ -154,33 +170,61 @@ export function StorageStep({
     return null;
   }, [names]);
 
-  // Live capacity calculator over the REAL detected drives (sizes from the
-  // bridge fetch — never a fixture). Recomputed only when the drive set
-  // changes. Greys out levels the drive count can't support.
+  // Group the per-filesystem drive list by backing physical disk. The reclaim
+  // + pool flows act on whole disks, so two partitions of one disk (e.g. an
+  // `nvr` + a `data` filesystem on `sda`) are ONE target — shown once, and
+  // wiping it erases both. (WARP-662 / setup honesty.)
+  const physicalDisks = useMemo(() => groupPhysicalDisks(drives), [drives]);
+
+  // Disks we can actually pool/reclaim here: the box's installed storage
+  // (`removable: false`) is excluded — it's in use by the Droplet, not a
+  // previously-used foreign drive — so we never default the customer into a
+  // create/wipe the host will (correctly) refuse.
+  const poolableDisks = useMemo(
+    () => physicalDisks.filter((p) => !p.inUse),
+    [physicalDisks],
+  );
+
+  // Live capacity calculator over the REAL poolable disks — ONE entry per
+  // physical disk, sized to the whole disk (never per-partition, which would
+  // double-count a multi-partition disk and offer a meaningless same-disk
+  // "mirror"). Sizes come from the bridge fetch, never a fixture.
   const raidOptions = useMemo(
     () =>
       calculateRaidOptions(
-        drives.map((d) => ({ device: d.device, size_bytes: d.size_bytes })),
+        poolableDisks.map((p) => ({
+          device: `/dev/${p.disk}`,
+          size_bytes: p.sizeBytes,
+        })),
       ),
-    [drives],
+    [poolableDisks],
   );
 
-  // #5: when pooling auto-enables (2+ drives) pre-select the first buildable
-  // RAID level so the customer lands on a ready-to-create pool. Only fills when
-  // nothing is chosen yet, so it never overrides an explicit pick or re-selects
-  // after the owner clears it.
+  // #5: when pooling auto-enables (2+ poolable disks) pre-select the first
+  // buildable RAID level so the customer lands on a ready-to-create pool. Only
+  // fills when nothing is chosen yet, so it never overrides an explicit pick or
+  // re-selects after the owner clears it.
   useEffect(() => {
-    if (raidOn && !chosenLevel) {
+    // Only when there are 2+ FREE disks to actually combine. JBOD is
+    // "selectable" at a single disk, but a one-disk "pool" isn't a meaningful
+    // combine here — and pre-selecting it would light up "Create pool" while
+    // the chooser stays hidden (canPool gate), contradicting the can't-pool
+    // note. Gate the auto-pick on the same 2-disk floor the chooser uses.
+    if (raidOn && poolableDisks.length >= 2 && !chosenLevel) {
       const best = raidOptions.find((o) => o.selectable);
       if (best) setChosenLevel(best.level);
     }
-  }, [raidOn, chosenLevel, raidOptions]);
+  }, [raidOn, chosenLevel, raidOptions, poolableDisks.length]);
 
-  // Drives that will be erased if the owner creates a pool — every detected
-  // drive with a real device path. Their sizes feed the blast-radius copy.
+  // Every mounted filesystem a pool-create would erase — across every POOLABLE
+  // disk — so the confirm dialog names them all. (The member DEVICE list sent
+  // to the host is deduped to one per disk; see handleStartCreate.)
   const poolMembers = useMemo(
-    () => drives.filter((d) => /^\/dev\//.test(d.device)),
-    [drives],
+    () =>
+      poolableDisks
+        .flatMap((p) => p.members)
+        .filter((d) => /^\/dev\//.test(d.device)),
+    [poolableDisks],
   );
 
   const chosenOption = chosenLevel
@@ -231,7 +275,11 @@ export function StorageStep({
     if (!chosenLevel || !chosenOption?.selectable) return;
     setCreateError(null);
     setCreating(true);
-    const members = poolMembers.map((d) => d.device);
+    // One member per POOLABLE physical disk — never two partitions of the SAME
+    // disk (a meaningless "mirror" of a disk with itself, and zero real
+    // redundancy). Each is the disk's mounted device, so the host script's
+    // is-mounted gate still fires on it.
+    const members = poolableDisks.map((p) => p.members[0].device);
     try {
       const token = await requestCreatePool({
         // md device name is owner-agnostic — first pool is md0 on a fresh box
@@ -276,20 +324,21 @@ export function StorageStep({
     }
   }
 
-  // WARP-662 step 1 — adopt a single previously-used drive: request a confirm
-  // token (does NOT wipe yet) and open the per-drive blast-radius dialog. The
-  // device sent is the WHOLE disk (partition suffix stripped); the host script
-  // refuses the OS disk regardless.
-  async function handleStartAdopt(drive: DriveInfo) {
-    const disk = wholeDiskName(drive.device);
-    if (!disk) return;
+  // WARP-662 step 1 — adopt a previously-used DISK: request a confirm token
+  // (does NOT wipe yet) and open the per-disk blast-radius dialog. The device
+  // sent is the WHOLE disk; the host script refuses the OS disk regardless, and
+  // we never offer reclaim on the box's installed storage (disk.inUse).
+  async function handleStartAdopt(disk: PhysicalDisk) {
+    if (disk.inUse) return; // installed box storage — managed from Settings
+    const name = disk.disk;
+    if (!name) return;
     setAdoptError(null);
-    setAdoptBusy(drive.uuid);
+    setAdoptBusy(name);
     try {
       const token = await requestAdoptDrive({
-        device: disk,
-        wipeMethod: adoptWipe[drive.uuid] ?? "quick",
-        confirmPhrase: buildConfirmPhrase([disk]),
+        device: name,
+        wipeMethod: adoptWipe[name] ?? "quick",
+        confirmPhrase: buildConfirmPhrase([`/dev/${name}`]),
       });
       setAdoptPending({
         token: {
@@ -297,7 +346,7 @@ export function StorageStep({
           service: token.service,
           resourceId: token.resourceId,
         },
-        drive,
+        disk,
       });
       setAdoptConfirmOpen(true);
     } catch (e) {
@@ -349,10 +398,14 @@ export function StorageStep({
 
   // When RAID is on AND the owner has picked a buildable level, the primary
   // action becomes the (destructive) create. Otherwise it stays the naming
-  // step's "Save and continue". #5: the step is skippable ONLY for a single
-  // disk (which can't be pooled); with 2+ drives it's non-skippable — the
-  // customer either creates a pool or toggles it off and names the drives.
-  const createMode = raidOn && !!chosenOption?.selectable;
+  // step's "Save and continue". #5: the step is skippable when there aren't 2+
+  // poolable disks (a single disk, or a box whose drives are all in use — both
+  // can't be pooled); with 2+ poolable disks it's non-skippable.
+  // Create is reachable only with 2+ free disks to combine (mirrors the
+  // RaidSection's canPool gate) AND a buildable level chosen; otherwise the
+  // primary stays the naming step's "Save and continue".
+  const createMode =
+    raidOn && poolableDisks.length >= 2 && !!chosenOption?.selectable;
   const primary = createMode
     ? {
         label: "Create pool",
@@ -373,18 +426,18 @@ export function StorageStep({
       subtitle="Give each drive a name so you remember what's on it."
       primary={primary}
       skip={
-        drives.length < 2 ? { label: "Skip for now", onClick: onSkip } : undefined
+        poolableDisks.length < 2
+          ? { label: "Skip for now", onClick: onSkip }
+          : undefined
       }
     >
-      {/* WARP-820 (finding #3): on a short landscape phone the drive cards + the
-          optional RAID/Adopt sections + the help card are taller than the now
-          `overflow-hidden` panel, so the RAID/Adopt UI clipped off-screen with no
-          way to reach it. The whole body lives in a <ScrollRegion> (the wizard's
-          single scroll surface) so it scrolls within the panel instead of
-          clipping; the title + CTA stay pinned in the StepShell. The two
-          destructive ConfirmDialog overlays stay OUTSIDE — they're portaled
-          modals, not flow content. */}
-      <ScrollRegion aria-label="Storage options">
+      {/* Fixed-content body (drive cards + optional RAID/Adopt sections + help
+          card) — NOT an unbounded list, so it is NOT wrapped in a <ScrollRegion>.
+          WARP-820 had capped it at 44dvh, which forced an inner scrollbar on
+          desktop with empty space below. The StepShell panel is now scroll-when-
+          needed instead. The two destructive ConfirmDialog overlays stay OUTSIDE
+          — they're portaled modals, not flow content. */}
+      <>
         {/* WARP-820: fluid gap between drive cards so a multi-drive box fits the
             viewport before the list ever needs to scroll. */}
         <div className="space-y-[clamp(8px,1.6vh,12px)]">
@@ -446,6 +499,8 @@ export function StorageStep({
           chosenLevel={chosenLevel}
           onChoose={setChosenLevel}
           members={poolMembers}
+          poolableCount={poolableDisks.length}
+          inUseCount={physicalDisks.length - poolableDisks.length}
           createError={createError}
         />
 
@@ -459,13 +514,13 @@ export function StorageStep({
               return next;
             });
           }}
-          drives={drives}
+          disks={physicalDisks}
           wipeMethods={adoptWipe}
-          onWipeMethodChange={(uuid, m) =>
-            setAdoptWipe((prev) => ({ ...prev, [uuid]: m }))
+          onWipeMethodChange={(disk, m) =>
+            setAdoptWipe((prev) => ({ ...prev, [disk]: m }))
           }
           onAdopt={handleStartAdopt}
-          busyUuid={adoptBusy}
+          busyDisk={adoptBusy}
           adoptError={adoptError}
         />
 
@@ -480,7 +535,7 @@ export function StorageStep({
             Names are stored on this Droplet — nothing leaves the box.
           </p>
         </LearnMoreCard>
-      </ScrollRegion>
+      </>
 
       <ConfirmDialog
         open={confirmOpen}
@@ -502,7 +557,9 @@ export function StorageStep({
         variant="destructive"
       />
 
-      {/* WARP-662 — per-drive adopt confirm (wipe + reformat + mount). */}
+      {/* WARP-662 — per-disk adopt confirm (wipe + reformat + mount). Names
+          EVERY filesystem on the disk so the owner sees a same-disk sibling
+          (e.g. an `nvr` partition next to `data`) gets erased too. */}
       <ConfirmDialog
         open={adoptConfirmOpen}
         onConfirm={handleConfirmAdopt}
@@ -511,17 +568,16 @@ export function StorageStep({
           setAdoptPending(null);
         }}
         title="Erase and adopt this drive?"
-        description="This permanently erases EVERYTHING on the drive below, then formats it and adds it to your Droplet. This can't be undone — make sure anything you want is backed up first."
+        description="This permanently erases EVERYTHING on the disk below — including every folder it holds — then formats it and adds it to your Droplet. This can't be undone — make sure anything you want is backed up first."
         confirmLabel="Erase & adopt"
         confirmedIdentifier={
           adoptPending
-            ? `${driveName(adoptPending.drive)} · ${formatBytes(
-                adoptPending.drive.size_bytes,
-              )}${
-                (adoptWipe[adoptPending.drive.uuid] ?? "quick") === "secure"
-                  ? " · secure erase"
-                  : ""
-              }`
+            ? adoptPending.disk.members
+                .map((m) => `${driveName(m)} · ${formatBytes(m.size_bytes)}`)
+                .join("\n") +
+              ((adoptWipe[adoptPending.disk.disk] ?? "quick") === "secure"
+                ? "\n· secure erase"
+                : "")
             : ""
         }
         variant="destructive"
@@ -542,6 +598,8 @@ function RaidSection({
   chosenLevel,
   onChoose,
   members,
+  poolableCount,
+  inUseCount,
   createError,
 }: {
   raidOn: boolean;
@@ -550,11 +608,17 @@ function RaidSection({
   chosenLevel: RaidLevel | null;
   onChoose: (level: RaidLevel) => void;
   members: DriveInfo[];
+  /** Number of FREE physical disks that could form a pool. < 2 → nothing to
+   *  combine, so we show an honest explanation instead of a dead chooser. */
+  poolableCount: number;
+  /** Number of physical disks excluded because they're in use by the Droplet. */
+  inUseCount: number;
   createError: string | null;
 }) {
-  // RAID only makes sense with 2+ drives; with a single drive the toggle is
-  // shown but every redundant level is greyed — still honest, and the owner
-  // sees why. We always render the toggle so the option is discoverable.
+  // RAID only makes sense with 2+ FREE drives; we always render the toggle so
+  // the option is discoverable, but when there aren't 2 poolable disks we say
+  // why (honest) rather than showing a chooser with everything greyed out.
+  const canPool = poolableCount >= 2;
   return (
     <div className="dp-card !p-4 mt-6">
       <div className="flex items-start gap-3">
@@ -590,7 +654,21 @@ function RaidSection({
         </div>
       </div>
 
-      {raidOn && (
+      {raidOn && !canPool && (
+        <div
+          className="mt-4 flex items-start gap-2 type-footnote text-label-secondary bg-surface-secondary rounded-sm px-3 py-2 motion-safe:animate-in motion-safe:fade-in motion-safe:duration-200"
+          role="note"
+        >
+          <AlertCircle size={14} className="mt-0.5 flex-shrink-0 text-label-tertiary" />
+          <span>
+            {inUseCount > 0
+              ? "Your drives are in use by your Droplet right now, so they can't be combined into a pool here. You can set one up later from Settings › Storage."
+              : "You need at least two free drives to combine them into a pool."}
+          </span>
+        </div>
+      )}
+
+      {raidOn && canPool && (
         <div className="mt-4 motion-safe:animate-in motion-safe:fade-in motion-safe:duration-200">
           <div
             role="radiogroup"
@@ -740,18 +818,68 @@ export function wholeDiskName(devicePath: string): string {
   return "";
 }
 
+/**
+ * WARP-662 / setup — a physical disk and the mounted filesystems (partitions)
+ * that live on it. The reclaim + pool flows act on the WHOLE disk, so the
+ * per-mount drive list the bridge returns is grouped by backing disk: a single
+ * physical disk that holds two filesystems (e.g. an `nvr` + a `data` partition
+ * on `sda`) is ONE reclaim/pool target — not two — and wiping it erases both.
+ */
+export interface PhysicalDisk {
+  /** Whole-disk kernel name, e.g. "sda" / "nvme0n1". */
+  disk: string;
+  /** The mounted filesystems (partitions) that live on this disk. */
+  members: DriveInfo[];
+  /** Sum of member sizes — approximates the whole-disk capacity for the pool
+   *  calculator without a second bridge round-trip. */
+  sizeBytes: number;
+  /** True when any member is the box's INSTALLED storage (bridge `removable:
+   *  false`) — a disk the Droplet is actively using. Reclaiming/pooling it from
+   *  the setup wizard is disabled (it's not a "previously-used" foreign drive);
+   *  the owner manages it from Settings › Storage. A hot-plug drive
+   *  (`removable: true`) or an older bridge that omits the flag stays eligible —
+   *  the host script remains the real, last-line gate either way. */
+  inUse: boolean;
+}
+
+/**
+ * Group the bridge's per-filesystem drive list by backing physical disk. Order
+ * is stable (first-seen). Uses the bridge's `parent_disk` when present, else
+ * derives it from the device path via wholeDiskName().
+ */
+export function groupPhysicalDisks(list: DriveInfo[]): PhysicalDisk[] {
+  const order: string[] = [];
+  const map = new Map<string, PhysicalDisk>();
+  for (const d of list) {
+    const key = d.parent_disk || wholeDiskName(d.device) || d.device;
+    let pd = map.get(key);
+    if (!pd) {
+      pd = { disk: key, members: [], sizeBytes: 0, inUse: false };
+      map.set(key, pd);
+      order.push(key);
+    }
+    pd.members.push(d);
+    if (d.size_bytes > 0) pd.sizeBytes += d.size_bytes;
+    if (d.removable === false) pd.inUse = true;
+  }
+  return order.map((k) => map.get(k)!);
+}
+
 /** Calm, honest copy for an adopt failure. The OS-disk refusal is the one we
- *  name specifically; everything else is a generic retry. Raw mkfs/wipefs
- *  messages never reach the screen. */
-function friendlyAdoptError(err: unknown): string {
+ *  name specifically; a mounted/busy disk gets the actionable "in use" copy;
+ *  everything else is a generic retry. Raw mkfs/wipefs messages never reach the
+ *  screen. The OS-disk test uses PRECISE tokens the host script emits — NOT a
+ *  bare "os"/"boot" substring, which used to match "close", "reboot", "host", …
+ *  and made a plain "drive busy" refusal read as "system disk". */
+export function friendlyAdoptError(err: unknown): string {
   const raw = err instanceof Error ? err.message.toLowerCase() : "";
   // eslint-disable-next-line no-console
   console.error("[storage-step:adopt]", err);
-  if (/os|boot|system disk|never adoptable/.test(raw)) {
+  if (/system disk|never adoptable|os\/boot|backs the os|boot disk/.test(raw)) {
     return "That's the Droplet's system disk — it can't be erased or adopted.";
   }
-  if (/mounted|in use|busy/.test(raw)) {
-    return "That drive is busy right now. Try again in a moment.";
+  if (/busy|in use|mounted|unmount|close open files|open file/.test(raw)) {
+    return "That drive is in use right now — close anything using it, then try again.";
   }
   return "We couldn't reclaim that drive right now. Try again in a moment.";
 }
@@ -779,30 +907,34 @@ function formatBytes(bytes: number): string {
 
 /**
  * WARP-662 — optional "reclaim existing drives" block: a default-OFF switch and,
- * when ON, a per-drive list with a quick/secure wipe choice + an "Erase & adopt"
- * button. The OS disk is never listed (the bridge's snapshot only returns
- * /mnt data drives) and is refused server-side regardless. Pure presentation —
- * the destructive request/confirm wiring lives in the parent.
+ * when ON, a per-PHYSICAL-DISK list with a quick/secure wipe choice + an
+ * "Erase & adopt" button. Grouped by whole disk so a disk holding two
+ * filesystems shows ONCE (and the confirm names both). The box's installed
+ * storage (disk.inUse) is shown but disabled — it's in use by the Droplet, not
+ * a previously-used foreign drive; the OS disk is never listed and is refused
+ * server-side regardless. Pure presentation — the destructive request/confirm
+ * wiring lives in the parent.
  */
 function AdoptSection({
   adoptOn,
   onToggle,
-  drives,
+  disks,
   wipeMethods,
   onWipeMethodChange,
   onAdopt,
-  busyUuid,
+  busyDisk,
   adoptError,
 }: {
   adoptOn: boolean;
   onToggle: () => void;
-  drives: DriveInfo[];
+  disks: PhysicalDisk[];
   wipeMethods: Record<string, "quick" | "secure">;
-  onWipeMethodChange: (uuid: string, m: "quick" | "secure") => void;
-  onAdopt: (drive: DriveInfo) => void;
-  busyUuid: string | null;
+  onWipeMethodChange: (disk: string, m: "quick" | "secure") => void;
+  onAdopt: (disk: PhysicalDisk) => void;
+  busyDisk: string | null;
   adoptError: string | null;
 }) {
+  const anyInUse = disks.some((d) => d.inUse);
   return (
     <div className="rounded-lg border border-separator p-4 space-y-3">
       <div className="flex items-start justify-between gap-3">
@@ -835,51 +967,81 @@ function AdoptSection({
 
       {adoptOn && (
         <div className="space-y-2" data-testid="adopt-list">
-          {drives.length === 0 ? (
+          {disks.length === 0 ? (
             <p className="type-footnote text-label-tertiary">
               No drives detected to reclaim.
             </p>
           ) : (
-            drives.map((d) => (
-              <div
-                key={d.uuid}
-                data-testid={`adopt-row-${d.uuid}`}
-                className="flex items-center justify-between gap-3 rounded-md bg-surface-secondary px-3 py-2"
-              >
-                <div className="min-w-0">
-                  <p className="type-subhead text-label-primary truncate">
-                    {driveName(d)}{" "}
-                    <span className="font-mono text-label-tertiary">
-                      {formatBytes(d.size_bytes)}
+            disks.map((disk) => {
+              // What the disk holds, in friendly names — so the owner connects
+              // "sda" to the folders on it (e.g. "Nvr, Data") and sees that a
+              // wipe takes both.
+              const heldNames =
+                disk.members.map((m) => driveName(m)).join(", ") || disk.disk;
+              const busy = busyDisk === disk.disk;
+              return (
+                <div
+                  key={disk.disk}
+                  data-testid={`adopt-row-${disk.disk}`}
+                  className="flex items-center justify-between gap-3 rounded-md bg-surface-secondary px-3 py-2"
+                >
+                  <div className="min-w-0">
+                    <p className="type-subhead text-label-primary truncate">
+                      {heldNames}{" "}
+                      <span className="font-mono text-label-tertiary">
+                        {formatBytes(disk.sizeBytes)}
+                      </span>
+                    </p>
+                    <p className="type-caption-2 text-label-tertiary truncate">
+                      {disk.inUse
+                        ? `In use by your Droplet · ${disk.disk}`
+                        : disk.members.length > 1
+                          ? `${disk.disk} · wiping this disk clears all ${disk.members.length} folders on it`
+                          : disk.disk}
+                    </p>
+                  </div>
+                  {disk.inUse ? (
+                    // Installed box storage — not a "previously-used" foreign
+                    // drive. Reclaiming it would tear down storage the Droplet
+                    // is actively using, so it's managed from Settings, not here.
+                    <span className="flex-none whitespace-nowrap type-caption-1 text-label-tertiary">
+                      In use
                     </span>
-                  </p>
-                  <p className="type-caption-2 text-label-tertiary truncate">
-                    {wholeDiskName(d.device) || d.device}
-                  </p>
+                  ) : (
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      <select
+                        aria-label={`Wipe method for ${heldNames}`}
+                        className="dp-input py-1 text-sm"
+                        value={wipeMethods[disk.disk] ?? "quick"}
+                        onChange={(e) =>
+                          onWipeMethodChange(
+                            disk.disk,
+                            e.target.value as "quick" | "secure",
+                          )
+                        }
+                      >
+                        <option value="quick">Quick wipe</option>
+                        <option value="secure">Secure erase</option>
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() => onAdopt(disk)}
+                        disabled={busy}
+                        className="flex-none whitespace-nowrap rounded-md bg-system-red/90 hover:bg-system-red text-white px-3 py-1.5 text-sm font-medium disabled:opacity-60"
+                      >
+                        {busy ? "Working…" : "Erase & adopt"}
+                      </button>
+                    </div>
+                  )}
                 </div>
-                <div className="flex items-center gap-2 flex-shrink-0">
-                  <select
-                    aria-label={`Wipe method for ${driveName(d)}`}
-                    className="dp-input py-1 text-sm"
-                    value={wipeMethods[d.uuid] ?? "quick"}
-                    onChange={(e) =>
-                      onWipeMethodChange(d.uuid, e.target.value as "quick" | "secure")
-                    }
-                  >
-                    <option value="quick">Quick wipe</option>
-                    <option value="secure">Secure erase</option>
-                  </select>
-                  <button
-                    type="button"
-                    onClick={() => onAdopt(d)}
-                    disabled={busyUuid === d.uuid}
-                    className="rounded-md bg-system-red/90 hover:bg-system-red text-white px-3 py-1 text-sm font-medium disabled:opacity-60"
-                  >
-                    {busyUuid === d.uuid ? "Working…" : "Erase & adopt"}
-                  </button>
-                </div>
-              </div>
-            ))
+              );
+            })
+          )}
+          {anyInUse && (
+            <p className="type-caption-1 text-label-tertiary">
+              Drives your Droplet is already using stay put — manage them anytime
+              from Settings &rsaquo; Storage.
+            </p>
           )}
           {adoptError && (
             <div className="flex items-start gap-2 type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2">

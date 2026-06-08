@@ -288,15 +288,19 @@ export function StepShell({
           </div>
         </div>
 
-        {/* WARP-820: fit-first — no `overflow-y-auto`. `overflow-hidden`
-            enforces the viewport lock; a step that still overflows is a signal
-            its spacing/type need more compaction, not a scrollbar. The only
-            scroll surface in the wizard is <ScrollRegion> (unbounded lists).
-            Vertical padding is viewport-fluid so the panel breathes on desktop
-            and tightens on a short landscape phone. */}
+        {/* The DOCUMENT never scrolls — the shell root is `h-dvh
+            overflow-hidden`. This content panel is scroll-WHEN-NEEDED: steps are
+            sized (fluid type + spacing) to fit, so on a normal viewport the
+            content fits and NO scrollbar shows; only a viewport too short to hold
+            a step scrolls here, instead of clipping the step's lower content
+            off-screen (the failure WARP-820 had band-aided with a 44dvh-capped
+            ScrollRegion on the form steps). The CTA stays pinned in the footer
+            below — outside this panel — always reachable. Vertical padding is
+            viewport-fluid so the panel breathes on desktop and tightens on a
+            short landscape phone. */}
         <div
           data-testid="setup-main"
-          className="flex min-h-0 flex-1 flex-col overflow-hidden px-6 py-[clamp(16px,4vh,40px)] sm:px-10"
+          className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-6 py-[clamp(16px,4vh,40px)] sm:px-10"
         >
           <div className="mx-auto w-full max-w-[600px] animate-in fade-in duration-300">
             {icon && <div className="mb-[clamp(12px,2.4vh,24px)]">{icon}</div>}

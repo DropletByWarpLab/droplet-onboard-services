@@ -9,46 +9,55 @@ import {
   Check,
   Download,
   Globe,
+  Plus,
   Smartphone,
 } from "lucide-react";
-import { fetchVpnStatus, createVpnPeer, routerUnreachableNotice } from "@/lib/api";
-import type { VpnStatusInfo, VpnPeerCreatedInfo } from "@/lib/types";
+import {
+  fetchVpnStatus,
+  fetchVpnPeers,
+  createVpnPeer,
+  routerUnreachableNotice,
+} from "@/lib/api";
+import type {
+  VpnStatusInfo,
+  VpnPeerInfo,
+  VpnPeerCreatedInfo,
+} from "@/lib/types";
 import { StepShell } from "@/components/setup/StepShell";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
+import { ScrollRegion } from "@/components/setup/ScrollRegion";
 
 /**
- * Wizard step — connect the customer's phone via WireGuard.
+ * Wizard step — connect the customer's phone via WireGuard (remote access).
+ *
+ * Render-only precheck state machine (SETUP-WIZARD-SPEC §D — "render, never
+ * redirect"). The precheck picks which view to render in place; it never calls
+ * a navigate/redirect in an effect, so re-entering the step (via Back or the
+ * clickable rail) can never bounce. Navigation away is user-initiated only.
+ *
+ *   loading   → GET /api/vpn/status in flight (first entry only).
+ *   blocked   → endpointConfigured === false: no DuckDNS address yet. Renders a
+ *               "Set up internet address" button that is an ordinary back-jump
+ *               (onBackToAddress → setStep("address")) — NO redirect, NO
+ *               reload (SETUP-WIZARD-SPEC §D.5).
+ *   form      → endpointConfigured && no peer yet: device-name input +
+ *               "Create config" mints the first peer.
+ *   created   → a peer was just minted this session: QR + .conf + how-to-use.
+ *               The .conf (with the private key) is one-shot.
+ *   returning → endpointConfigured && a peer already exists: summarise it,
+ *               "Continue" or "Add another device". Keys are NOT re-issued and
+ *               the precheck renders this directly — it does not bounce
+ *               (SETUP-WIZARD-SPEC §D.3 / §D.5).
+ *   error     → status fetch failed: "Try again" + "Skip for now". Never
+ *               auto-advances or auto-skips on error (SETUP-WIZARD-SPEC §D.3).
  *
  * Hard-gated on the internet-address step (DuckDNS subdomain configured). The
- * commit-4 WIREGUARD_ENDPOINT_HOST auto-derivation in vpn.ts means
+ * WIREGUARD_ENDPOINT_HOST auto-derivation in vpn.ts means
  * `endpointConfigured: true` lights up the moment DuckDNS is set on the
- * internet-address step — no orchestrator restart needed. If the customer
- * skipped the address step, this step shows a "set up the internet address
- * first" view that jumps them back (Onboarding-Flow redesign — the address is
- * now its own step, so the precheck points at `address`, not the old combined
- * `internet`); we don't try to mint a peer that the phone can't dial.
+ * internet-address step — no orchestrator restart needed.
  *
- * State machine:
- *
- *   gate     → /api/vpn/status (loading)
- *      ↓
- *   preCheck → endpointConfigured: false. Two actions: "Set up internet
- *              address" (calls onBackToAddress) or "Skip for now".
- *      ↓
- *   form     → device-name input + "Create config" CTA. Mirrors the
- *              existing /remote-access "Add a device" dialog shape so
- *              the customer recognises it later.
- *      ↓
- *   ready    → QR + .conf download + the how-to-use ordered list
- *              (install WireGuard, scan, toggle). "I'm connected —
- *              continue" advances; the customer can also "Skip" still.
- *
- * The QR + .conf are returned ONCE from POST /api/vpn/peers. The dialog
- * forgets `created` on advance — if the customer needs to re-add the
- * device they revoke + re-mint from /remote-access later.
- *
- * Tier-3 reminder (llm-safety-tiers.md): VPN config is blocked for the
- * LLM. This step is by design the customer's only path to mint their
+ * Tier-3 reminder (llm-safety-tiers.md): VPN config is blocked for the LLM.
+ * This step is by design the customer's only in-wizard path to mint their
  * first peer.
  */
 export function VpnStep({
@@ -60,35 +69,64 @@ export function VpnStep({
   onSkip: () => void;
   onBackToAddress: () => void;
 }) {
-  const [phase, setPhase] = useState<"gate" | "preCheck" | "form" | "ready">(
-    "gate",
-  );
+  const [phase, setPhase] = useState<
+    "loading" | "blocked" | "form" | "created" | "returning" | "error"
+  >("loading");
   const [status, setStatus] = useState<VpnStatusInfo | null>(null);
+  // Active peers already on the box — drives the `returning` summary. Fetched
+  // once when status reports peers exist; never causes a key re-issue.
+  const [existingPeers, setExistingPeers] = useState<VpnPeerInfo[]>([]);
   const [deviceLabel, setDeviceLabel] = useState("");
   const [created, setCreated] = useState<VpnPeerCreatedInfo | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // WARP-807: a router-reachability notice is a soft "do this later" state —
-  // render it in amber (matching the preCheck gate) rather than alarm-red.
+  // render it in amber (matching the blocked gate) rather than alarm-red.
   const [errorTone, setErrorTone] = useState<"error" | "notice">("error");
   // Surface name to monospace inside the notice when the tone is "notice".
-  const [noticeDestination, setNoticeDestination] = useState<string | null>(null);
+  const [noticeDestination, setNoticeDestination] = useState<string | null>(
+    null,
+  );
   const [copied, setCopied] = useState(false);
   // Where this step's settings live in the dashboard. WireGuard peers are
   // managed at /remote-access ("Remote Access") — that, not Settings, is where
-  // we point the customer to finish later (WARP-807 UX review). The preCheck
-  // gate + LearnMoreCard already name "Remote Access"; keep this consistent.
+  // we point the customer to finish later (WARP-807 UX review).
   const REMOTE_ACCESS_DESTINATION = "Remote Access";
 
+  // Render-only precheck. Fetched once per entry into the step; NO navigation
+  // happens here (SETUP-WIZARD-SPEC §D.2 — navigation is user-initiated only),
+  // so returning to this step never re-fires a redirect.
   const load = useCallback(async () => {
+    setPhase("loading");
     try {
       const s = await fetchVpnStatus();
       setStatus(s);
-      setPhase(s?.endpointConfigured ? "form" : "preCheck");
+      if (!s.endpointConfigured) {
+        setPhase("blocked");
+        return;
+      }
+      // Endpoint is live. If a peer already exists this is a "returning" visit
+      // (the customer came back via Back or the rail) — summarise it and never
+      // re-mint the one-shot key (SETUP-WIZARD-SPEC §D.3 / §D.5).
+      if ((s.peerCount ?? 0) > 0) {
+        try {
+          const { peers } = await fetchVpnPeers();
+          const active = peers.filter((p) => p.status === "active");
+          if (active.length > 0) {
+            setExistingPeers(active);
+            setPhase("returning");
+            return;
+          }
+        } catch {
+          // Peer list unavailable — fall through to the create form rather than
+          // trapping the customer on a half-rendered returning view.
+        }
+      }
+      setPhase("form");
     } catch {
-      // Routing service down / orchestrator dev shim — surface the
-      // preCheck so the customer has a path out (skip or retry).
-      setPhase("preCheck");
+      // Status fetch failed → render the error view with a retry. Never
+      // auto-skip or bounce (SETUP-WIZARD-SPEC §D.3).
+      setPhase("error");
     }
   }, []);
 
@@ -109,11 +147,12 @@ export function VpnStep({
     try {
       const result = await createVpnPeer(trimmed);
       setCreated(result);
-      setPhase("ready");
+      setPhase("created");
     } catch (e) {
       // WARP-807: an unreachable router surfaces as a RouterStatusError
-      // (503 / UNREACHABLE). Show the actionable "finish from Settings later"
-      // notice in the soft amber tone; everything else keeps its real message.
+      // (503 / UNREACHABLE). Show the actionable "finish from Remote Access
+      // later" notice in the soft amber tone; everything else keeps its real
+      // message.
       const notice = routerUnreachableNotice(e, REMOTE_ACCESS_DESTINATION);
       if (notice) {
         setErrorTone("notice");
@@ -129,34 +168,22 @@ export function VpnStep({
   }
 
   // Auto-clear the system clipboard 30 s after a successful copy. The
-  // `created.conf` body is a full WireGuard config — including the
-  // peer's PrivateKey — and writeText leaves it in the OS clipboard
-  // (visible to clipboard-history on macOS / Win11, other tabs, any
-  // extension with clipboard permission) until something else overwrites
-  // it. PR #232 review (Romain): "drop the affordance or schedule a
-  // clipboard wipe and surface a one-line expires-in-30s hint." 30 s is
-  // long enough to paste into WireGuard's Import-from-clipboard flow on
-  // desktop, short enough to bound exposure. We also surface a countdown
-  // hint next to the button so the customer isn't surprised when the
-  // value disappears.
+  // `created.conf` body is a full WireGuard config — including the peer's
+  // PrivateKey — and writeText leaves it in the OS clipboard until something
+  // else overwrites it. PR #232 review (Romain): "schedule a clipboard wipe and
+  // surface a one-line expires-in-30s hint." 30 s is long enough to paste into
+  // WireGuard's Import-from-clipboard flow, short enough to bound exposure.
   const CLIPBOARD_TTL_MS = 30_000;
 
   function handleCopyConf() {
     if (!created) return;
     navigator.clipboard.writeText(created.conf).then(() => {
       setCopied(true);
-      // Reset the button label after 1.5 s (unchanged).
       setTimeout(() => setCopied(false), 1500);
-      // Wipe the clipboard after the TTL. We overwrite with an empty
-      // string rather than calling .reset()/.clear() because not every
-      // browser exposes those; writeText("") is universally supported.
-      // Best-effort: if the user's already copied something else in the
-      // meantime we just overwrite their newer value with empty, which
-      // is mildly annoying but strictly safer than leaving the conf.
       setTimeout(() => {
         navigator.clipboard.writeText("").catch(() => {
-          // Permission may have been revoked since the original write
-          // (focus loss, tab background); nothing meaningful we can do.
+          // Permission may have been revoked since the original write (focus
+          // loss, tab background); nothing meaningful we can do.
         });
       }, CLIPBOARD_TTL_MS);
     });
@@ -176,9 +203,9 @@ export function VpnStep({
   }
 
   // ──────────────────────────────────────────────────────────────────
-  // Loading gate — short-lived, just renders a skeleton.
+  // loading — short-lived, just renders a skeleton.
   // ──────────────────────────────────────────────────────────────────
-  if (phase === "gate") {
+  if (phase === "loading") {
     return (
       <StepShell current="vpn" title="Connect your phone" subtitle="One moment…">
         <div className="space-y-2">
@@ -199,38 +226,69 @@ export function VpnStep({
   }
 
   // ──────────────────────────────────────────────────────────────────
-  // The internet address wasn't configured → no usable endpoint to mint a
-  // peer against. Render the blocked state IN PLACE (never redirect) with a
-  // button that jumps cleanly back to the address step; the wizard's outer
-  // state machine preserves any form state.
+  // error — status fetch failed. Render in place with a retry; never
+  // auto-advance or auto-skip (SETUP-WIZARD-SPEC §D.3).
   // ──────────────────────────────────────────────────────────────────
-  if (phase === "preCheck") {
+  if (phase === "error") {
     return (
-      <StepShell current="vpn"
+      <StepShell
+        current="vpn"
+        title="Couldn't check remote access"
+        subtitle="Something went wrong reaching the box to check your remote-access setup."
+        primary={{ label: "Try again", onClick: () => load() }}
+        skip={{ label: "Skip for now", onClick: onSkip }}
+      >
+        {/* Hard failure (status fetch died, step can't proceed) → role="alert"
+            (assertive), matching the status-vs-alert split used by the form
+            error below and AddressStep. Soft "do it later" notices stay
+            role="status". */}
+        <div className="dp-card !p-4 flex items-start gap-3" role="alert">
+          <AlertCircle
+            size={18}
+            className="text-system-orange flex-shrink-0 mt-0.5"
+            aria-hidden="true"
+          />
+          <p className="type-footnote text-label-secondary">
+            This usually clears on its own. Try again, or skip for now — you can
+            finish remote access anytime from{" "}
+            <span className="font-mono">Remote Access</span> in the dashboard.
+          </p>
+        </div>
+      </StepShell>
+    );
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // blocked — the internet address wasn't configured, so there's no usable
+  // endpoint to mint a peer against. Render the blocked card in place; "Set up
+  // internet address" is a normal back-jump to the address step (no redirect,
+  // no reload — SETUP-WIZARD-SPEC §D.5).
+  // ──────────────────────────────────────────────────────────────────
+  if (phase === "blocked") {
+    return (
+      <StepShell
+        current="vpn"
         title="Remote access needs an internet address first"
-        subtitle="To reach your Droplet from outside your home, it first needs a permanent web address. Set that up on the internet-address step, then come back here to connect your phone."
-        primary={{
-          label: "Set up internet address",
-          onClick: onBackToAddress,
-        }}
+        subtitle="No internet address is set up yet."
+        primary={{ label: "Set up internet address", onClick: onBackToAddress }}
         skip={{ label: "Skip for now", onClick: onSkip }}
       >
         <div className="dp-card !p-4 flex items-start gap-3">
           <Globe
             size={18}
             className="text-system-orange flex-shrink-0 mt-0.5"
+            aria-hidden="true"
           />
           <div>
             <p className="type-subheadline text-label-primary mb-1">
-              No internet address configured
+              Why this comes first
             </p>
             <p className="type-footnote text-label-secondary">
-              The DuckDNS address from the internet-address step is what lets
-              your phone find this box from outside (like{" "}
-              <span className="font-mono">yourstudio.duckdns.org</span>). Set it
-              up first, and the remote-access step lights up automatically — or
-              skip it for now and add it later from{" "}
-              <span className="font-mono">Remote Access</span>.
+              Your home internet&rsquo;s address can change. DuckDNS gives the
+              box one permanent web address (like{" "}
+              <span className="font-mono">yourstudio.duckdns.org</span>) so your
+              phone can reach it from anywhere. Set that up on the internet-address
+              step and this lights up automatically.
             </p>
           </div>
         </div>
@@ -238,8 +296,8 @@ export function VpnStep({
         <LearnMoreCard helpAnchor="vpn">
           <p>
             You can also set this up later from{" "}
-            <span className="font-mono">Remote Access</span> in the dashboard
-            — the wizard isn&rsquo;t your only path.
+            <span className="font-mono">Remote Access</span> in the dashboard —
+            the wizard isn&rsquo;t your only path.
           </p>
         </LearnMoreCard>
       </StepShell>
@@ -247,11 +305,85 @@ export function VpnStep({
   }
 
   // ──────────────────────────────────────────────────────────────────
-  // Form — customer types a device name, we mint the peer + .conf.
+  // returning — a peer already exists. Summarise it; do NOT re-mint or
+  // re-issue the one-shot key (SETUP-WIZARD-SPEC §D.3 / §D.5).
+  // ──────────────────────────────────────────────────────────────────
+  if (phase === "returning") {
+    return (
+      <StepShell
+        current="vpn"
+        title="Remote access is set up"
+        subtitle="Add more devices now, or anytime from Remote Access."
+        primary={{ label: "Continue", onClick: onComplete, showArrow: true }}
+      >
+        {/* WARP-820 viewport lock: the peer list is genuinely unbounded, so it
+            uses the wizard's single permitted inner-scroll surface. The title,
+            "Add another device", and the Continue CTA stay pinned in StepShell;
+            only this list scrolls (bounded to a viewport-relative max-height). */}
+        <ScrollRegion aria-label="Connected devices" className="space-y-2">
+          {existingPeers.map((p) => (
+            <div key={p.id} className="dp-card !py-3 flex items-center gap-3">
+              <div className="w-9 h-9 rounded-lg bg-accent-subtle flex items-center justify-center flex-shrink-0">
+                <Smartphone
+                  size={16}
+                  className="text-accent"
+                  aria-hidden="true"
+                />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="type-subheadline text-label-primary truncate">
+                  {p.deviceLabel}
+                </p>
+                {status?.endpointHost && (
+                  <p className="type-caption-1 text-label-tertiary font-mono truncate">
+                    {status.endpointHost}
+                  </p>
+                )}
+              </div>
+              <span className="dp-status-chip type-caption-1 !h-7 !px-2.5 flex-shrink-0">
+                <Check
+                  size={12}
+                  className="text-system-green"
+                  aria-hidden="true"
+                />
+                Connected
+              </span>
+            </div>
+          ))}
+        </ScrollRegion>
+
+        <button
+          type="button"
+          onClick={() => {
+            setError(null);
+            setDeviceLabel("");
+            setPhase("form");
+          }}
+          className="dp-btn-secondary mt-4 w-full"
+        >
+          <Plus size={16} aria-hidden="true" />
+          Add another device
+        </button>
+
+        <LearnMoreCard helpAnchor="vpn">
+          <p>
+            Each device has its own WireGuard key. Keys are generated once — you
+            can revoke any device anytime from{" "}
+            <span className="font-mono">Remote Access</span> in the dashboard and
+            its config stops working immediately.
+          </p>
+        </LearnMoreCard>
+      </StepShell>
+    );
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // form — customer types a device name, we mint the peer + .conf.
   // ──────────────────────────────────────────────────────────────────
   if (phase === "form") {
     return (
-      <StepShell current="vpn"
+      <StepShell
+        current="vpn"
         title="Connect your phone"
         subtitle="Name the device you want to connect — usually your phone."
         primary={{
@@ -298,9 +430,6 @@ export function VpnStep({
           )}
 
           {error && errorTone === "notice" && (
-            // Soft "do this later" notice — see InternetStep for the rationale.
-            // role="status"/aria-live for announcement; text-label-primary for
-            // WCAG-AA contrast on the amber wash; vivid system-orange glyph.
             <div
               role="status"
               aria-live="polite"
@@ -319,26 +448,26 @@ export function VpnStep({
           )}
 
           {error && errorTone === "error" && (
-            // Hard failure (e.g. blank/duplicate device name) — urgent → alert.
             <div
               role="alert"
               className="flex items-start gap-2 type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2"
             >
-              <AlertCircle size={14} className="mt-0.5 flex-shrink-0" aria-hidden="true" />
+              <AlertCircle
+                size={14}
+                className="mt-0.5 flex-shrink-0"
+                aria-hidden="true"
+              />
               <span>{error}</span>
             </div>
           )}
         </div>
 
-        <LearnMoreCard
-          title="Why a name?"
-          helpAnchor="vpn"
-        >
+        <LearnMoreCard title="Why a name?" helpAnchor="vpn">
           <p>
-            Each device that connects gets its own WireGuard key. The name
-            is just a label so you can find &ldquo;Stefan&rsquo;s
-            iPhone&rsquo;s connection&rdquo; in the list and revoke it later
-            if the phone is lost.
+            Each device that connects gets its own WireGuard key. The name is
+            just a label so you can find &ldquo;Stefan&rsquo;s iPhone&rsquo;s
+            connection&rdquo; in the list and revoke it later if the phone is
+            lost.
           </p>
         </LearnMoreCard>
       </StepShell>
@@ -346,11 +475,12 @@ export function VpnStep({
   }
 
   // ──────────────────────────────────────────────────────────────────
-  // Ready — peer is minted, show the QR + .conf + how-to-use list.
+  // created — peer is minted, show the QR + .conf + how-to-use list.
   // ──────────────────────────────────────────────────────────────────
   if (!created) return null;
   return (
-    <StepShell current="vpn"
+    <StepShell
+      current="vpn"
       title="Scan to connect"
       subtitle="Open WireGuard on your phone and scan this code."
       primary={{
@@ -361,10 +491,7 @@ export function VpnStep({
       skip={{ label: "Skip for now", onClick: onSkip }}
     >
       <div className="flex justify-center mb-4">
-        <div
-          className="p-4 bg-white rounded-lg"
-          data-testid="vpn-qr-wrapper"
-        >
+        <div className="p-4 bg-white rounded-lg" data-testid="vpn-qr-wrapper">
           <QRCodeSVG
             value={created.conf}
             size={224}
@@ -421,8 +548,8 @@ export function VpnStep({
           </li>
           <li>Point your phone at the QR code above.</li>
           <li>
-            Tap the toggle to <strong>Connect</strong>. You&rsquo;ll see a
-            tiny VPN icon in your status bar.
+            Tap the toggle to <strong>Connect</strong>. You&rsquo;ll see a tiny
+            VPN icon in your status bar.
           </li>
         </ol>
         <p>
@@ -431,22 +558,21 @@ export function VpnStep({
           <span className="font-mono">
             {status?.endpointHost ?? "yoursubdomain.duckdns.org"}
           </span>{" "}
-          in your phone&rsquo;s browser. Lose the phone? Revoke this device
-          from <span className="font-mono">Remote Access</span> in the
-          dashboard — its config stops working immediately.
+          in your phone&rsquo;s browser. Lose the phone? Revoke this device from{" "}
+          <span className="font-mono">Remote Access</span> in the dashboard — its
+          config stops working immediately.
         </p>
         <p className="type-caption-1 text-label-quaternary">
           Heads up: this code is shown once. If you close this page without
           scanning it, you can revoke and create a new one from{" "}
-          <span className="font-mono">Remote Access</span> later — the old
-          config will stop working.
+          <span className="font-mono">Remote Access</span> later — the old config
+          will stop working.
         </p>
       </LearnMoreCard>
     </StepShell>
   );
 }
 
-// Helper retained for tests that want to assert the ready-state copy
-// without rendering through the full wizard. Not used by the component
-// itself.
+// Helper retained for tests that want to assert the ready-state copy without
+// rendering through the full wizard. Not used by the component itself.
 export { ArrowLeft as _ArrowLeftIcon };

@@ -33,6 +33,7 @@ import type {
   FirewallConfig,
   HealthResponse,
   ModelsResponse,
+  ModelsPagePayload,
   NetworkCommandResult,
   NetworkOverview,
   StorageStats,
@@ -2116,6 +2117,22 @@ export async function decommissionMatterDevice(nodeId: string): Promise<void> {
 export async function fetchModels(): Promise<ModelsResponse> {
   const res = await authFetch(`${BASE}/api/llm/models`);
   if (!res.ok) throw new Error(`Failed to fetch models: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * WARP-836 — the read-only Models surface payload (`GET /api/models`).
+ *
+ * Distinct from {@link fetchModels} (`/api/llm/models`, the chat model
+ * selector): this is the status page composer the orchestrator's
+ * `models-summary.service` returns — local LLMs + cloud opt-in providers +
+ * GPU/latency/spend KPIs. Authenticated GET (open to any principal per
+ * ADR-004 §3); `authFetch` carries the session + 401-refresh. `local` may be
+ * `[]` when ai-gateway is down, which is a valid 200 the page renders.
+ */
+export async function fetchModelsPage(): Promise<ModelsPagePayload> {
+  const res = await authFetch(`${BASE}/api/models`);
+  if (!res.ok) throw new Error(`Failed to fetch models page: ${res.status}`);
   return res.json();
 }
 

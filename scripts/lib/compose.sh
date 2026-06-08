@@ -199,15 +199,31 @@ prepare_and_build() {
     log_info "Plane PM disabled (DROPLET_PM_ENABLED=$pm_enabled_val) — skipping pm-health build"
   fi
 
+  # eval profile: rag-eval (RAGAS scoring) is `["eval"]`-profiled and has a
+  # `build:` section, so `up -d` with eval active fails with "No such image:
+  # docker-rag-eval" unless it's pre-built. Build it ONLY when the active
+  # COMPOSE_PROFILES set (in .env) contains `eval` — single-box enables it by
+  # default via scripts/lib/single-box.sh; macOS-dev / multi-box leave it off,
+  # so they skip the heavy RAGAS image build. Same build-only-when-active idiom
+  # as pm-health above. `|| true`: grep exits 1 when the key is absent (fresh /
+  # profile-less .env), which would abort build_images() under `set -euo pipefail`.
+  local active_profiles
+  active_profiles=$(grep -E '^COMPOSE_PROFILES=' "$COMPOSE_ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  case ",${active_profiles}," in
+    *,eval,*) build_services+=(rag-eval) ;;
+  esac
+
   # All profiles that carry a buildable service in the list above must be active
   # so compose can see every one. Without --profile linux, `build voice-io`
   # errors out because the service is invisible to compose's view of the
-  # project; without --profile pm the same is true for pm-health. (pm-health is
-  # only in build_services when PM is enabled, so --profile pm is harmless
-  # otherwise.) Default-profile services are visible regardless of --profile.
+  # project; without --profile pm the same is true for pm-health, and without
+  # --profile eval the same is true for rag-eval. (pm-health / rag-eval are only
+  # in build_services when their profile is enabled, so the extra --profile
+  # flags are harmless otherwise.) Default-profile services are visible
+  # regardless of --profile.
   for svc in "${build_services[@]}"; do
     if ! run_with_spinner "Building $svc" \
-      run_docker_compose --profile full --profile linux --profile pm --env-file "$COMPOSE_ENV_FILE" \
+      run_docker_compose --profile full --profile linux --profile pm --profile eval --env-file "$COMPOSE_ENV_FILE" \
         -f "$COMPOSE_FILE" \
         build "$svc"; then
       log_error "Failed to build $svc"

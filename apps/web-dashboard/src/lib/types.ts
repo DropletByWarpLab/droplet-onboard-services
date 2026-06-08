@@ -128,6 +128,62 @@ export interface ModelsResponse {
   models: ModelInfo[];
 }
 
+// ── WARP-836: read-only Models surface (`/models`) ──
+//
+// Wire shape of `GET /api/models` — the status page payload, distinct from
+// `/api/llm/models` (the chat model selector above). Mirrors the orchestrator
+// `models-summary.service.ts` types 1:1. Many fields are intentionally
+// null/0 today: they are DOCUMENTED PLACEHOLDERS for metrics ai-gateway
+// doesn't expose yet (gbOnDisk, role, tokensPerSec, diskBarPct, gpu,
+// avgLatencyMs) — never fabricated by the dashboard. The page renders them
+// as an honest "—"/"Unavailable" and `cloudSpendUsd` as "$0.00".
+
+/** One local LLM served on the box. */
+export interface LocalModelRow {
+  name: string;
+  family: string;
+  provider: string;
+  contextLength: number | null;
+  /** GB on disk — null until ai-gateway exposes per-model disk usage. */
+  gbOnDisk: number | null;
+  /** "chat" | "embed" | "vision" | … — null until ai-gateway tags models. */
+  role: string | null;
+  /** Lifecycle of the model in the runtime. Drives the status chip. */
+  status: "ready" | "loading" | "error";
+  /** Sustained tokens/sec from the most recent benchmark; null until wired. */
+  tokensPerSec: number | null;
+  /** 0–100 fill for the on-disk usage meter; null until gbOnDisk has a value. */
+  diskBarPct: number | null;
+}
+
+/** One opt-in cloud provider. Read-only on this surface — enabling a provider
+ *  happens in Settings (the off-LAN allowlist), never here. */
+export interface CloudProviderRow {
+  provider: "anthropic" | "openai" | "gemini";
+  /** Always false today (cloud escape default-off per FEATURES.md §8). */
+  enabled: boolean;
+  /** ISO timestamp of the last cloud-escape call, or null. */
+  lastUsedAt: string | null;
+  /** Cumulative spend this billing period; 0 until egress aggregation lands. */
+  spendUsd: number;
+}
+
+/** GPU stats block — null until ai-gateway exposes a `/gpu` probe. */
+export interface ModelsGpuInfo {
+  name: string;
+  vramGb: number;
+  utilPct: number;
+  tempC: number;
+}
+
+export interface ModelsPagePayload {
+  local: LocalModelRow[];
+  cloud: CloudProviderRow[];
+  gpu: ModelsGpuInfo | null;
+  avgLatencyMs: number;
+  cloudSpendUsd: number;
+}
+
 // WARP-311: legacy session types removed alongside the orchestrator
 // proxy routes. New persistence shape is `PersistedConversation` in
 // `lib/api.ts` (WARP-304).
@@ -392,6 +448,12 @@ export interface StorageStats {
 
 export interface DriveInfo {
   device: string;
+  /** WARP-827: whole-disk kernel name backing `device` (e.g. "sda",
+   *  "nvme0n1"), set by the device-bridge. Lets the UI group the partitions of
+   *  one physical disk together and act on the whole disk (reclaim/pool wipe the
+   *  disk, not a single partition). Absent on an older bridge — callers derive
+   *  it from `device` instead. */
+  parent_disk?: string;
   mount: string;
   /** FS-provided label from the bridge (e.g. "TOSHIBA EXT") — different
    *  from the customer-chosen displayName below. */
