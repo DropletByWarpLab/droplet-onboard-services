@@ -448,6 +448,12 @@ export interface StorageStats {
 
 export interface DriveInfo {
   device: string;
+  /** WARP-827: whole-disk kernel name backing `device` (e.g. "sda",
+   *  "nvme0n1"), set by the device-bridge. Lets the UI group the partitions of
+   *  one physical disk together and act on the whole disk (reclaim/pool wipe the
+   *  disk, not a single partition). Absent on an older bridge — callers derive
+   *  it from `device` instead. */
+  parent_disk?: string;
   mount: string;
   /** FS-provided label from the bridge (e.g. "TOSHIBA EXT") — different
    *  from the customer-chosen displayName below. */
