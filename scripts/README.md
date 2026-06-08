@@ -213,6 +213,7 @@ Wipes **all** user data, credentials, and configuration — returning the device
 ### What gets deleted
 
 - Docker volumes: database, uploaded files, Nextcloud data, AI keys, Matter fabric state
+- The Docker **build cache** — reclaimed on **every** reset. It's the largest rebuildable disk consumer (`docker compose down --rmi all` leaves it behind; it has grown past 57 GB on a long-lived box, enough to fill the OS NVMe) and is never user data. This is why the next `setup.sh` after a reset is a cold (slower) rebuild — an intentional trade so the OS drive doesn't silently fill over time.
 - Device secrets (`.env`)
 - TLS certificates and MQTT credentials
 - Setup logs
@@ -222,7 +223,9 @@ Wipes **all** user data, credentials, and configuration — returning the device
 ```
   --yes            Skip interactive confirmation
   --reinstall      After wiping, auto-run setup.sh to re-provision
-  --purge-images   Also remove built Docker images (slower rebuild)
+  --purge-images   Also remove built Docker images + dangling images/networks
+                   (a scoped reclaim — not a daemon-wide system prune, so
+                   sibling project images such as Ollama are left intact)
   -h, --help       Show help
 ```
 
