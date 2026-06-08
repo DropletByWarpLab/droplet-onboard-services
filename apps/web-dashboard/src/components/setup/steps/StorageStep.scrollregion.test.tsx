@@ -1,19 +1,19 @@
 /**
- * WARP-820 (review finding #3) — StorageStep's body (drive cards + the optional
- * RAID pool section + the "reclaim drives" section + the help card) is taller
- * than a short landscape phone (~568px), and the setup panel is now
- * `overflow-hidden`. Without a scroll surface the RAID/Adopt UI clips off the
- * bottom with no way to reach it. The body therefore lives inside a
- * <ScrollRegion> — the wizard's single permitted scroll surface — so it scrolls
- * within the panel instead of clipping. Title + CTA stay pinned in the
- * StepShell.
+ * Storage step — fits the panel without an inner scroll cap.
  *
- * Structure assertion (jsdom can't measure scroll): the drive cards render
- * INSIDE the labelled scroll region, and that region carries the
- * bounded-scroll classes. Mirrors DiscoveryStep/TeamStep.scrollregion.test.tsx.
+ * WARP-820 wrapped this fixed-content body (drive cards + optional RAID/Adopt
+ * sections + help card) in a <ScrollRegion> capped at `max-h-[44dvh]`, which
+ * forced an inner scrollbar on desktop with empty space below. The body is
+ * fixed-content (not an unbounded list), so it no longer uses a ScrollRegion;
+ * the StepShell content panel is scroll-when-needed instead. The two destructive
+ * ConfirmDialog overlays remain portaled modals, outside the flow.
+ *
+ * STRUCTURE assertions (jsdom can't measure layout): the drive cards and the
+ * RAID toggle render and are reachable, and the body is NOT trapped in a
+ * height-capped scroll region.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 
 const FIXTURE_DRIVES = {
   drives: [
@@ -53,39 +53,30 @@ vi.mock("@/lib/api", async () => {
 
 import { StorageStep } from "./StorageStep";
 
-describe("StorageStep body in ScrollRegion (WARP-820)", () => {
+describe("StorageStep fits without an inner scroll cap", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it("renders the drive cards inside a bounded, labelled scroll region", async () => {
+  it("renders the drive cards directly, not inside a height-capped scroll region", async () => {
     render(<StorageStep onComplete={() => {}} onSkip={() => {}} />);
 
-    // The detected-drive card lands inside the labelled scroll region.
-    const region = await screen.findByRole("region", {
-      name: /storage options/i,
-    });
-    expect(within(region).getByText("TOSHIBA EXT")).toBeInTheDocument();
+    // The detected-drive card renders…
+    await waitFor(() =>
+      expect(screen.getByText("TOSHIBA EXT")).toBeInTheDocument(),
+    );
 
-    // …and the region is the bounded-scroll surface.
-    expect(region.className).toContain("overflow-y-auto");
-    expect(region.className).toContain("overscroll-contain");
-    expect(region.className).toMatch(/max-h-\[[^\]]*(vh|dvh|svh)\]/);
+    // …and the body is NOT wrapped in the old bounded scroll region (no 44dvh cap).
+    expect(
+      screen.queryByRole("region", { name: /storage options/i }),
+    ).toBeNull();
   });
 
-  it("keeps the optional RAID pool toggle reachable inside the scroll region", async () => {
+  it("keeps the optional RAID pool toggle reachable (not clipped)", async () => {
     render(<StorageStep onComplete={() => {}} onSkip={() => {}} />);
-
-    const region = await screen.findByRole("region", {
-      name: /storage options/i,
-    });
-    // The RAID section is the content most at risk of clipping on a short
-    // viewport; it must be inside the scrollable region.
     await waitFor(() =>
       expect(
-        within(region).getByRole("switch", {
-          name: /set up a storage pool/i,
-        }),
+        screen.getByRole("switch", { name: /set up a storage pool/i }),
       ).toBeInTheDocument(),
     );
   });

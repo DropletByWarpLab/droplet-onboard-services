@@ -11,7 +11,6 @@ import {
 } from "@/lib/api";
 import type { DriveInfo } from "@/lib/types";
 import { StepShell } from "@/components/setup/StepShell";
-import { ScrollRegion } from "@/components/setup/ScrollRegion";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import {
@@ -376,15 +375,13 @@ export function StorageStep({
         drives.length < 2 ? { label: "Skip for now", onClick: onSkip } : undefined
       }
     >
-      {/* WARP-820 (finding #3): on a short landscape phone the drive cards + the
-          optional RAID/Adopt sections + the help card are taller than the now
-          `overflow-hidden` panel, so the RAID/Adopt UI clipped off-screen with no
-          way to reach it. The whole body lives in a <ScrollRegion> (the wizard's
-          single scroll surface) so it scrolls within the panel instead of
-          clipping; the title + CTA stay pinned in the StepShell. The two
-          destructive ConfirmDialog overlays stay OUTSIDE — they're portaled
-          modals, not flow content. */}
-      <ScrollRegion aria-label="Storage options">
+      {/* Fixed-content body (drive cards + optional RAID/Adopt sections + help
+          card) — NOT an unbounded list, so it is NOT wrapped in a <ScrollRegion>.
+          WARP-820 had capped it at 44dvh, which forced an inner scrollbar on
+          desktop with empty space below. The StepShell panel is now scroll-when-
+          needed instead. The two destructive ConfirmDialog overlays stay OUTSIDE
+          — they're portaled modals, not flow content. */}
+      <>
         {/* WARP-820: fluid gap between drive cards so a multi-drive box fits the
             viewport before the list ever needs to scroll. */}
         <div className="space-y-[clamp(8px,1.6vh,12px)]">
@@ -480,7 +477,7 @@ export function StorageStep({
             Names are stored on this Droplet — nothing leaves the box.
           </p>
         </LearnMoreCard>
-      </ScrollRegion>
+      </>
 
       <ConfirmDialog
         open={confirmOpen}

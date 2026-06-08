@@ -24,7 +24,6 @@ import {
 } from "@/lib/api";
 import type { DuckDnsStatus } from "@/lib/types";
 import { StepShell } from "@/components/setup/StepShell";
-import { ScrollRegion } from "@/components/setup/ScrollRegion";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 
 /**
@@ -399,15 +398,14 @@ export function InternetStep({
       }}
       skip={{ label: "Skip for now", onClick: onSkip }}
     >
-      {/* WARP-820 (finding #3): the body (the optional Home Wi-Fi disclosure,
-          the DuckDNS subdomain + token fields, the auto-update toggle, any
-          notice, and the help card) is taller than a short landscape phone and
-          the setup panel is now overflow-hidden, so the token field + help card
-          clipped off the bottom. The whole body lives in a <ScrollRegion> (the
-          wizard's single scroll surface) so it scrolls within the panel instead
-          of clipping; the title + CTA stay pinned in the StepShell. The WARP-808
-          / WARP-809 Wi-Fi write behaviour below is unchanged — only wrapped. */}
-      <ScrollRegion aria-label="Network setup">
+      {/* Fixed-content network form (optional Home Wi-Fi disclosure, the DuckDNS
+          subdomain + token fields, the auto-update toggle, notices, help card) —
+          NOT an unbounded list, so it is NOT wrapped in a <ScrollRegion>.
+          WARP-820 had capped it at 44dvh, which forced an inner scrollbar on
+          desktop with empty space below. The StepShell panel is now scroll-when-
+          needed instead. The WARP-808 / WARP-809 Wi-Fi write behaviour below is
+          unchanged — only unwrapped. */}
+      <>
       {alreadyConfigured && (
         <div className="dp-card !p-3 mb-4 flex items-start gap-2">
           <Globe size={14} className="text-system-green flex-shrink-0 mt-1" />
@@ -721,7 +719,7 @@ export function InternetStep({
           or Twitter account, pick a subdomain, and copy the token.
         </p>
       </LearnMoreCard>
-      </ScrollRegion>
+      </>
     </StepShell>
   );
 }
