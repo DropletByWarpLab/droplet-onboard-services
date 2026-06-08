@@ -17,12 +17,14 @@ import {
   Sparkles,
   User,
   Users,
+  Wifi,
   type LucideIcon,
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { DropletMark } from "@/components/DropletMark";
 import { STEPS, type Step } from "@/components/setup/wizard-steps";
 import { useSetupNav } from "@/components/setup/setup-nav";
+import { WizardThemeToggle } from "@/components/setup/WizardThemeToggle";
 
 /**
  * Shared chrome for setup-wizard step components — the **aurora left-rail
@@ -63,7 +65,10 @@ export const RAIL_LABELS: Record<Step, { label: string; Icon: LucideIcon }> = {
   account: { label: "Account", Icon: User },
   org: { label: "Workspace", Icon: Building2 },
   twofactor: { label: "2-step", Icon: KeyRound },
-  internet: { label: "Internet", Icon: Globe },
+  // Onboarding-Flow redesign — the old single "Internet" rail row becomes two:
+  // the local home Wi-Fi the box broadcasts, then the DuckDNS web address.
+  wifi: { label: "Home Wi-Fi", Icon: Wifi },
+  address: { label: "Internet address", Icon: Globe },
   storage: { label: "Storage", Icon: HardDrive },
   discovery: { label: "Smart home", Icon: Lightbulb },
   cameras: { label: "Cameras", Icon: Camera },
@@ -243,9 +248,19 @@ export function StepShell({
             );
           })}
         </nav>
-        <div className="mt-auto flex items-center gap-2 pt-[clamp(12px,2.4vh,24px)] type-caption-1 leading-snug text-white/80">
-          <Shield size={13} aria-hidden="true" />
-          Everything here stays on the box.
+        <div className="mt-auto flex flex-col gap-[clamp(8px,1.6vh,14px)] pt-[clamp(12px,2.4vh,24px)]">
+          {/* Appearance toggle (Onboarding-Flow redesign §2). Flips the shared
+              `droplet-theme` preference the whole dashboard reads. */}
+          <div className="flex items-center justify-between gap-2">
+            <span className="type-caption-2 font-semibold uppercase tracking-[0.06em] text-white/60">
+              Appearance
+            </span>
+            <WizardThemeToggle variant="aurora" compact />
+          </div>
+          <div className="flex items-center gap-2 type-caption-1 leading-snug text-white/80">
+            <Shield size={13} aria-hidden="true" />
+            Everything here stays on the box.
+          </div>
         </div>
       </aside>
 
@@ -258,9 +273,12 @@ export function StepShell({
               <DropletMark size={20} className="text-accent" />
               <span className="type-headline text-label-primary">Droplet</span>
             </div>
-            <span className="type-caption-1 text-label-tertiary">
-              Step {idx + 1} of {total}
-            </span>
+            <div className="flex items-center gap-3">
+              <WizardThemeToggle variant="plain" compact />
+              <span className="type-caption-1 text-label-tertiary">
+                Step {idx + 1} of {total}
+              </span>
+            </div>
           </div>
           <div className="mx-6 mt-4 h-1 overflow-hidden rounded-full bg-separator sm:mx-10">
             <div

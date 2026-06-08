@@ -19,20 +19,21 @@ import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 /**
  * Wizard step — connect the customer's phone via WireGuard.
  *
- * Hard-gated on the Internet step (DuckDNS subdomain configured). The
+ * Hard-gated on the internet-address step (DuckDNS subdomain configured). The
  * commit-4 WIREGUARD_ENDPOINT_HOST auto-derivation in vpn.ts means
- * `endpointConfigured: true` lights up the moment DuckDNS is set in the
- * Internet step — no orchestrator restart needed. If the customer
- * skipped Internet, this step shows a "set up Internet first" view
- * that bounces them back; we don't try to mint a peer that the phone
- * can't dial.
+ * `endpointConfigured: true` lights up the moment DuckDNS is set on the
+ * internet-address step — no orchestrator restart needed. If the customer
+ * skipped the address step, this step shows a "set up the internet address
+ * first" view that jumps them back (Onboarding-Flow redesign — the address is
+ * now its own step, so the precheck points at `address`, not the old combined
+ * `internet`); we don't try to mint a peer that the phone can't dial.
  *
  * State machine:
  *
  *   gate     → /api/vpn/status (loading)
  *      ↓
- *   preCheck → endpointConfigured: false. Two actions: "Back to
- *              Internet" (calls onBackToInternet) or "Skip for now".
+ *   preCheck → endpointConfigured: false. Two actions: "Set up internet
+ *              address" (calls onBackToAddress) or "Skip for now".
  *      ↓
  *   form     → device-name input + "Create config" CTA. Mirrors the
  *              existing /remote-access "Add a device" dialog shape so
@@ -53,11 +54,11 @@ import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 export function VpnStep({
   onComplete,
   onSkip,
-  onBackToInternet,
+  onBackToAddress,
 }: {
   onComplete: () => void;
   onSkip: () => void;
-  onBackToInternet: () => void;
+  onBackToAddress: () => void;
 }) {
   const [phase, setPhase] = useState<"gate" | "preCheck" | "form" | "ready">(
     "gate",
@@ -198,18 +199,19 @@ export function VpnStep({
   }
 
   // ──────────────────────────────────────────────────────────────────
-  // Internet wasn't configured → no usable endpoint to mint a peer
-  // against. Send the customer back to the Internet step (preserves the
-  // form state via the wizard's outer state machine).
+  // The internet address wasn't configured → no usable endpoint to mint a
+  // peer against. Render the blocked state IN PLACE (never redirect) with a
+  // button that jumps cleanly back to the address step; the wizard's outer
+  // state machine preserves any form state.
   // ──────────────────────────────────────────────────────────────────
   if (phase === "preCheck") {
     return (
       <StepShell current="vpn"
-        title="Connect your phone"
-        subtitle="To set up remote access we need an internet name first."
+        title="Remote access needs an internet address first"
+        subtitle="To reach your Droplet from outside your home, it first needs a permanent web address. Set that up on the internet-address step, then come back here to connect your phone."
         primary={{
-          label: "Back to internet setup",
-          onClick: onBackToInternet,
+          label: "Set up internet address",
+          onClick: onBackToAddress,
         }}
         skip={{ label: "Skip for now", onClick: onSkip }}
       >
@@ -220,14 +222,15 @@ export function VpnStep({
           />
           <div>
             <p className="type-subheadline text-label-primary mb-1">
-              Internet step not finished
+              No internet address configured
             </p>
             <p className="type-footnote text-label-secondary">
-              Your phone needs a name to dial back to (like{" "}
-              <span className="font-mono">yourstudio.duckdns.org</span>) when
-              it&rsquo;s off your home Wi-Fi. Pop back to the Internet step,
-              save your DuckDNS info, and the VPN step lights up
-              automatically.
+              The DuckDNS address from the internet-address step is what lets
+              your phone find this box from outside (like{" "}
+              <span className="font-mono">yourstudio.duckdns.org</span>). Set it
+              up first, and the remote-access step lights up automatically — or
+              skip it for now and add it later from{" "}
+              <span className="font-mono">Remote Access</span>.
             </p>
           </div>
         </div>

@@ -4,15 +4,15 @@
  * Walks a customer through every step end-to-end with realistic
  * (mocked) backend responses:
  *
- *   welcome → account → internet (save DuckDNS) →
+ *   welcome → account → wifi (skip) → address (save DuckDNS) →
  *   storage (rename two drives) → discovery (skip) →
  *   cameras (accept all) → vpn (mint peer, scan, continue) →
  *   ai (ask sample prompt, advance) → done
  *
  * Each step's individual test covers its branches; this one proves the
  * step-machine wiring doesn't drop state on the way through and the
- * cross-step values (displayName from account, endpoint from internet,
- * etc.) reach the right downstream call.
+ * cross-step values (displayName from account, endpoint from the address
+ * step, etc.) reach the right downstream call.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, act } from "@testing-library/react";
@@ -224,7 +224,7 @@ describe("setup wizard E2E happy path (WARP-174)", () => {
     vi.clearAllMocks();
   });
 
-  it("walks welcome → claim → account → org → internet → storage → discovery → cameras → vpn → ai → done with each step actually firing its API", async () => {
+  it("walks welcome → claim → account → org → wifi → address → storage → discovery → cameras → vpn → ai → done with each step actually firing its API", async () => {
     render(<SetupPage />);
 
     // 1. Welcome → Get Started.
@@ -296,7 +296,16 @@ describe("setup wizard E2E happy path (WARP-174)", () => {
       fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
     });
 
-    // 4. Internet → save DuckDNS.
+    // 4a. Wi-Fi (Onboarding-Flow redesign) — the single Internet step split
+    // into `wifi` then `address`. The Home Wi-Fi the box broadcasts is optional;
+    // leave it blank and Continue (no write) to reach the address step. The
+    // dedicated Wi-Fi behaviour is covered in WifiStep.test.tsx.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /^continue$/i }));
+    });
+
+    // 4b. Address → save DuckDNS. (Its fetchDuckDnsStatus effect resolves
+    // first.) The DuckDNS inputs now live on this dedicated address step.
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();

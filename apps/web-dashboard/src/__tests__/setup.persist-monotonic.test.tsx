@@ -19,8 +19,12 @@
  *   - forward nav past the furthest point still persists.
  *
  * Proven RED first: with the unconditional `void patchSetupStep(next)` the
- * Back-button case fires `patchSetupStep("cameras")` (idx 8) after reaching
- * `vpn` (idx 9), lowering the pointer — the monotonicity assertion fails.
+ * Back-button case fires `patchSetupStep("cameras")` (idx 9) after reaching
+ * `vpn` (idx 10), lowering the pointer — the monotonicity assertion fails.
+ *
+ * (Onboarding-Flow redesign — the single `internet` step split into `wifi` +
+ * `address`, so every step from `storage` on shifted +1: `vpn` is now idx 10,
+ * `cameras` idx 9, `wifi` idx 5.)
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen } from "@testing-library/react";
@@ -83,8 +87,8 @@ function lowestPersistedIdx(): number {
 describe("setup wizard — persisted resume pointer is monotonic (PR #518)", () => {
   beforeEach(() => {
     useReducedMotionMock.mockReturnValue(true);
-    // Resume already at vpn (idx 9): maxReachedIdx seeds to 9, so cameras
-    // (idx 8) and every earlier step are reached → navigable via the rail.
+    // Resume already at vpn (idx 10): maxReachedIdx seeds to 10, so cameras
+    // (idx 9) and every earlier step are reached → navigable via the rail.
     useAuthMock.mockReturnValue({
       completeSetup: vi.fn(),
       setupState: { appliance: "unclaimed", setupStep: "vpn", userTourCompleted: false },
@@ -102,26 +106,30 @@ describe("setup wizard — persisted resume pointer is monotonic (PR #518)", () 
       screen.queryByRole("button", { name: /get started/i }),
     ).not.toBeInTheDocument();
 
-    // Click Back: vpn (9) → ai is forward; Back goes to the PREVIOUS step
-    // cameras (8). This is a backward move below the furthest-reached point.
+    // Click Back: vpn (10) → ai is forward; Back goes to the PREVIOUS step
+    // cameras (9). This is a backward move below the furthest-reached point.
     const back = screen.getByRole("button", { name: /^back$/i });
     back.click();
 
     // The pointer must never be lowered. With the unconditional persist this
-    // fires patchSetupStep("cameras") (idx 8 < 9) and fails.
+    // fires patchSetupStep("cameras") (idx 9 < 10) and fails.
     expect(patchSetupStepMock).not.toHaveBeenCalledWith("cameras");
-    expect(lowestPersistedIdx()).toBeGreaterThanOrEqual(9);
+    expect(lowestPersistedIdx()).toBeGreaterThanOrEqual(10);
   });
 
   it("does NOT persist a lower step when a rail row jumps backward", () => {
     render(<SetupPage />);
 
-    // Jump back to an earlier reached step via the rail. "Internet" = idx 5.
-    const railJump = screen.getByRole("button", { name: "Go to Internet" });
+    // Jump back to an earlier reached step via the rail. Onboarding-Flow
+    // redesign — the old "Internet" rail row is now "Home Wi-Fi" (`wifi`,
+    // idx 5). A backward jump must not persist anything; in particular it must
+    // not write the `internet` SetupStep that `wifi`/`address` map to (which
+    // would lower the stored pointer below the resumed `vpn`).
+    const railJump = screen.getByRole("button", { name: "Go to Home Wi-Fi" });
     railJump.click();
 
     expect(patchSetupStepMock).not.toHaveBeenCalledWith("internet");
-    expect(lowestPersistedIdx()).toBeGreaterThanOrEqual(9);
+    expect(lowestPersistedIdx()).toBeGreaterThanOrEqual(10);
   });
 
   it("STILL persists forward progress past the furthest-reached step", () => {

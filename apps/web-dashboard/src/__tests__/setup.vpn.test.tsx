@@ -2,8 +2,10 @@
  * WARP-174 — VPN step.
  *
  * Three observable states:
- *   - preCheck: endpoint not configured → "Internet step not finished"
- *     hint + "Back to internet setup" + "Skip for now" buttons.
+ *   - preCheck: endpoint not configured → "No internet address configured"
+ *     hint + "Set up internet address" + "Skip for now" buttons. (Onboarding-
+ *     Flow redesign: the address is its own step now, so the precheck points
+ *     back at `address`, not the old combined `internet` step.)
  *   - form: endpoint OK → device-name input + "Create config" CTA.
  *   - ready: peer minted → QR + .conf actions + how-to-use list +
  *     "I'm connected — continue" CTA.
@@ -105,15 +107,24 @@ async function advanceToVpn() {
   });
   // PR #380 — pass through the org step (account → org → …).
   await passOrgStep();
-  // PR #375 — TwoFactor step → skip (org → twofactor → internet).
+  // PR #375 — TwoFactor step → skip (org → twofactor → wifi).
   await act(async () => {
     fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
   });
-  // Internet → skip
+  // Onboarding-Flow redesign — Internet split into Wi-Fi then Address. Skip both.
   await act(async () => {
     await Promise.resolve();
     await Promise.resolve();
-    fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /skip — i'll do this later/i }),
+    );
+  });
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+    fireEvent.click(
+      screen.getByRole("button", { name: /skip — no remote access/i }),
+    );
   });
   // Storage auto-skip → Discovery → skip → Cameras auto-skip → VPN.
   await act(async () => {
@@ -147,10 +158,10 @@ describe("setup VPN step (WARP-174)", () => {
     await advanceToVpn();
 
     expect(
-      screen.getByText(/internet step not finished/i),
+      screen.getByText(/no internet address configured/i),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: /back to internet setup/i }),
+      screen.getByRole("button", { name: /set up internet address/i }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: /skip for now/i }),
@@ -158,7 +169,7 @@ describe("setup VPN step (WARP-174)", () => {
     expect(createVpnPeerMock).not.toHaveBeenCalled();
   });
 
-  it("Back to internet returns the customer to the Internet step", async () => {
+  it("Set up internet address returns the customer to the Address step", async () => {
     fetchVpnStatusMock.mockResolvedValue({
       configured: false,
       endpointConfigured: false,
@@ -168,14 +179,15 @@ describe("setup VPN step (WARP-174)", () => {
 
     await act(async () => {
       fireEvent.click(
-        screen.getByRole("button", { name: /back to internet setup/i }),
+        screen.getByRole("button", { name: /set up internet address/i }),
       );
     });
 
-    // Internet step's title is back on screen. WARP-657 renamed the step from
-    // "Connect to the internet" to the two-section "Set up your network".
+    // Onboarding-Flow redesign — the precheck now jumps back to the dedicated
+    // Address step (not the old combined Internet step), whose title is
+    // "Give your box a web address".
     expect(
-      screen.getByText(/set up your network/i),
+      screen.getByText(/give your box a web address/i),
     ).toBeInTheDocument();
   });
 

@@ -8,7 +8,8 @@ import { ClaimStep } from "@/components/setup/steps/ClaimStep";
 import { AccountStep } from "@/components/setup/steps/AccountStep";
 import { OrgStep } from "@/components/setup/steps/OrgStep";
 import { TwoFactorStep } from "@/components/setup/steps/TwoFactorStep";
-import { InternetStep } from "@/components/setup/steps/InternetStep";
+import { WifiStep } from "@/components/setup/steps/WifiStep";
+import { AddressStep } from "@/components/setup/steps/AddressStep";
 import { StorageStep } from "@/components/setup/steps/StorageStep";
 import { DiscoveryStep } from "@/components/setup/steps/DiscoveryStep";
 import { CamerasStep } from "@/components/setup/steps/CamerasStep";
@@ -63,10 +64,28 @@ import { SetupNavProvider } from "@/components/setup/setup-nav";
  * the steps the wizard actually has — no blank screen.
  */
 function resumeStepFrom(setupStep: string | undefined): Step {
+  // Onboarding-Flow redesign — the orchestrator's Prisma `SetupStep` enum still
+  // has the single `internet` value; the wizard splits it into `wifi` → `address`
+  // (both client-only, like `twofactor`). A persisted `internet` therefore
+  // resumes at the FIRST sub-step, `wifi`.
+  if (setupStep === "internet") return "wifi";
   if (setupStep && setupStep !== "done" && (STEPS as readonly string[]).includes(setupStep)) {
     return setupStep as Step;
   }
   return "welcome";
+}
+
+/**
+ * Map a wizard step onto the value persisted to the orchestrator's
+ * `/api/setup/state`. `wifi` and `address` are CLIENT-ONLY sub-steps of the
+ * single `internet` `SetupStep` (the Prisma enum is deliberately not migrated
+ * for a presentation split), so both persist as `internet`; everything else
+ * persists under its own key. Resuming maps `internet` back to `wifi`
+ * (`resumeStepFrom`). Keeping the enum untouched means the backend route's
+ * `isSetupStep` validation never 400s on a step we send.
+ */
+function persistedStep(step: Step): string {
+  return step === "wifi" || step === "address" ? "internet" : step;
 }
 
 export default function SetupPage() {
@@ -113,7 +132,8 @@ export default function SetupPage() {
       maxReachedRef.current = nextIdx;
       setMaxReachedIdx(nextIdx);
       // Fire-and-forget; local progress is never gated on the round-trip.
-      void patchSetupStep(next);
+      // wifi/address persist as the `internet` SetupStep (see persistedStep).
+      void patchSetupStep(persistedStep(next));
     }
   }, []);
 
@@ -128,7 +148,7 @@ export default function SetupPage() {
     if (nextIdx > maxReachedRef.current) {
       maxReachedRef.current = nextIdx;
       setMaxReachedIdx(nextIdx);
-      void patchSetupStep(next);
+      void patchSetupStep(persistedStep(next));
     }
   }, []);
 
@@ -187,13 +207,20 @@ export default function SetupPage() {
 
       {step === "twofactor" && (
         <TwoFactorStep
-          onComplete={() => setStep("internet")}
-          onSkip={() => setStep("internet")}
+          onComplete={() => setStep("wifi")}
+          onSkip={() => setStep("wifi")}
         />
       )}
 
-      {step === "internet" && (
-        <InternetStep
+      {step === "wifi" && (
+        <WifiStep
+          onComplete={() => setStep("address")}
+          onSkip={() => setStep("address")}
+        />
+      )}
+
+      {step === "address" && (
+        <AddressStep
           onComplete={() => setStep("storage")}
           onSkip={() => setStep("storage")}
         />
@@ -228,7 +255,7 @@ export default function SetupPage() {
         <VpnStep
           onComplete={() => setStep("ai")}
           onSkip={() => setStep("ai")}
-          onBackToInternet={() => setStep("internet")}
+          onBackToAddress={() => setStep("address")}
         />
       )}
 

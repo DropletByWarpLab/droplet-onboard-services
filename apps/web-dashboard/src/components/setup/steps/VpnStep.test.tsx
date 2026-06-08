@@ -49,7 +49,7 @@ describe("VpnStep — router unreachable (WARP-807)", () => {
       new RouterStatusError("UNREACHABLE", "Create peer: fetch failed", 503),
     );
     render(
-      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToInternet={vi.fn()} />,
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
     );
     await reachForm();
 
@@ -73,7 +73,7 @@ describe("VpnStep — router unreachable (WARP-807)", () => {
       new RouterStatusError("UNREACHABLE", "Create peer: fetch failed", 503),
     );
     render(
-      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToInternet={vi.fn()} />,
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
     );
     await reachForm();
 
@@ -94,7 +94,7 @@ describe("VpnStep — router unreachable (WARP-807)", () => {
     );
     const onSkip = vi.fn();
     render(
-      <VpnStep onComplete={vi.fn()} onSkip={onSkip} onBackToInternet={vi.fn()} />,
+      <VpnStep onComplete={vi.fn()} onSkip={onSkip} onBackToAddress={vi.fn()} />,
     );
     await reachForm();
 
@@ -111,7 +111,7 @@ describe("VpnStep — router unreachable (WARP-807)", () => {
   it("still surfaces the real message for an ordinary (non-router) failure", async () => {
     createVpnPeer.mockRejectedValueOnce(new Error("Device name already taken"));
     render(
-      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToInternet={vi.fn()} />,
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
     );
     await reachForm();
 

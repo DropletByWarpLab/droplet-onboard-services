@@ -40,8 +40,9 @@ function renderWithNav(
 describe("setup wizard navigation (clickable rail + Back)", () => {
   it("renders reached, non-current steps as buttons that navigate on click", () => {
     const navigate = vi.fn();
-    // current = internet (idx 5); the customer has reached vpn (idx 9).
-    renderWithNav("internet", 9, navigate);
+    // current = wifi (idx 5); the customer has reached vpn (idx 10 after the
+    // Onboarding-Flow internet→wifi+address split shifted later steps by one).
+    renderWithNav("wifi", 10, navigate);
 
     // An earlier completed step is clickable…
     const welcome = screen.getByRole("button", { name: "Go to Welcome" });
@@ -56,16 +57,16 @@ describe("setup wizard navigation (clickable rail + Back)", () => {
 
   it("does not make the current step or not-yet-reached steps clickable", () => {
     const navigate = vi.fn();
-    // current = internet (idx 5), nothing beyond it reached.
-    renderWithNav("internet", 5, navigate);
+    // current = wifi (idx 5), nothing beyond it reached.
+    renderWithNav("wifi", 5, navigate);
 
     // Current step is not a navigation button.
     expect(
-      screen.queryByRole("button", { name: "Go to Internet" }),
+      screen.queryByRole("button", { name: "Go to Home Wi-Fi" }),
     ).toBeNull();
-    // Storage (idx 6) is past the furthest-reached index → locked.
+    // Internet address (idx 6) is past the furthest-reached index → locked.
     expect(
-      screen.queryByRole("button", { name: "Go to Storage" }),
+      screen.queryByRole("button", { name: "Go to Internet address" }),
     ).toBeNull();
     // But an earlier step is reachable.
     expect(
@@ -75,7 +76,7 @@ describe("setup wizard navigation (clickable rail + Back)", () => {
 
   it("shows a Back button that navigates to the previous step", () => {
     const navigate = vi.fn();
-    renderWithNav("internet", 5, navigate); // idx 5 → previous is twofactor (idx 4)
+    renderWithNav("wifi", 5, navigate); // idx 5 → previous is twofactor (idx 4)
     const back = screen.getByRole("button", { name: /back/i });
     back.click();
     expect(navigate).toHaveBeenCalledWith("twofactor");
@@ -90,7 +91,7 @@ describe("setup wizard navigation (clickable rail + Back)", () => {
   it("stays static with no Back button when no nav provider is present", () => {
     render(
       <StepShell
-        current="internet"
+        current="wifi"
         title="Title"
         primary={{ label: "Continue", onClick: () => {} }}
       >

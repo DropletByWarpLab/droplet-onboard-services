@@ -111,15 +111,24 @@ async function advanceToCameras() {
   });
   // PR #380 — pass through the org step (account → org → …).
   await passOrgStep();
-  // PR #375 — TwoFactor step → skip (org → twofactor → internet).
+  // PR #375 — TwoFactor step → skip (org → twofactor → wifi).
   await act(async () => {
     fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
   });
-  // Internet → skip
+  // Onboarding-Flow redesign — Internet split into Wi-Fi then Address. Skip both.
   await act(async () => {
     await Promise.resolve();
     await Promise.resolve();
-    fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /skip — i'll do this later/i }),
+    );
+  });
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+    fireEvent.click(
+      screen.getByRole("button", { name: /skip — no remote access/i }),
+    );
   });
   // Storage auto-skip → Discovery → skip
   await act(async () => {

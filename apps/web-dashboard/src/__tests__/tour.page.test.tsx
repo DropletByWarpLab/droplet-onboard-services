@@ -55,10 +55,13 @@ describe("ProductTour walkthrough (PR #382)", () => {
       screen.getByRole("heading", { level: 1, name: new RegExp(TOUR_STEPS[0].title, "i") }),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /skip/i })).toBeInTheDocument();
-    // Step indicator announces position (e.g. "Step 1 of N").
+    // Step indicator announces position. The redesign shows it twice — in the
+    // kicker ("… · 1 of 5") and the footer counter ("1 / 5") — so assert at
+    // least one match rather than a unique one.
     expect(
-      screen.getByText(new RegExp(`1\\s*(of|/)\\s*${TOUR_STEPS.length}`, "i")),
-    ).toBeInTheDocument();
+      screen.getAllByText(new RegExp(`1\\s*(of|/)\\s*${TOUR_STEPS.length}`, "i"))
+        .length,
+    ).toBeGreaterThanOrEqual(1);
   });
 
   it("advances on Next and returns on Back", () => {
