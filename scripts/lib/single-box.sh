@@ -434,6 +434,22 @@ configure_single_box_env() {
     log_info "Plane PM stack DISABLED on single-box (DROPLET_PM_ENABLED=${pm_enabled_val}) — ~2.5 GB freed"
   fi
 
+  # RAG eval (RAGAS retrieval-quality scoring) — enabled by DEFAULT on the
+  # single-box shape (bug #15). The `rag-eval` service is `["eval"]`-profiled,
+  # so it's reached by APPENDING `eval` to COMPOSE_PROFILES here — the same
+  # mechanism as `single-box`/`pm` above. docker-compose.yml's eval-profile
+  # comment calls RAGAS "GPU-bound, overkill on every appliance", but the
+  # single-box shape always ships the dGPU RAGAS leans on (Ollama's local
+  # judge), so that caveat doesn't apply here — the orchestrator's
+  # /api/admin/rag-eval/* surface would otherwise dead-end on a 503. To stop the
+  # scheduled runs WITHOUT dropping the container, set RAG_EVAL_DISABLED=1 in
+  # .env (consumed directly by the rag-eval container — see docker-compose.yml).
+  case ",${merged_profiles}," in
+    *,eval,*) : ;;                                  # already present — idempotent
+    ,,)       merged_profiles="eval" ;;
+    *)        merged_profiles="${merged_profiles},eval" ;;
+  esac
+
   # One-time descriptive header (idempotent — only on the first write).
   if ! grep -q 'Single-box deployment knobs' "$env_file"; then
     cat >> "$env_file" << 'EOF'
@@ -445,7 +461,10 @@ configure_single_box_env() {
 #                        (single-box also activates camera-discovery — gated
 #                        to `full` otherwise). single-box.sh ALSO appends `pm`
 #                        by DEFAULT so the embedded Plane PM stack at /pm/ runs
-#                        out-of-the-box (bug #10) — see DROPLET_PM_ENABLED.
+#                        out-of-the-box (bug #10) — see DROPLET_PM_ENABLED. It
+#                        ALSO appends `eval` by DEFAULT so the rag-eval (RAGAS)
+#                        service runs and /api/admin/rag-eval/* works out-of-the-
+#                        box (bug #15); set RAG_EVAL_DISABLED=1 to pause runs.
 #   DROPLET_PM_ENABLED   opt-OUT gate for the Plane PM stack, DEFAULT ON. The
 #                        7 PM services are `["pm"]`-profiled, so this knob
 #                        decides whether `pm` is appended to COMPOSE_PROFILES
