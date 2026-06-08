@@ -1,12 +1,13 @@
 /**
- * WARP-174 — VPN step.
+ * WARP-174 — VPN step (precheck states aligned to SETUP-WIZARD-SPEC §D).
  *
- * Three observable states:
- *   - preCheck: endpoint not configured → "Internet step not finished"
- *     hint + "Back to internet setup" + "Skip for now" buttons.
- *   - form: endpoint OK → device-name input + "Create config" CTA.
- *   - ready: peer minted → QR + .conf actions + how-to-use list +
+ * Render-only precheck states (the step never redirects):
+ *   - blocked: endpoint not configured → "Remote access needs an internet
+ *     address first" + "Set up internet" + "Skip for now" buttons.
+ *   - form: endpoint OK, no peer yet → device-name input + "Create config" CTA.
+ *   - created: peer minted → QR + .conf actions + how-to-use list +
  *     "I'm connected — continue" CTA.
+ *   - returning + error states have focused coverage in VpnStep.test.tsx.
  *
  * Tests assert on DOM-visible strings + that createVpnPeer is/isn't
  * called per path. Mocks fetchVpnStatus + createVpnPeer at the module-
@@ -57,6 +58,7 @@ vi.mock("@/lib/api", () => ({
   fetchDiscoveredCameras: vi.fn(async () => []),
   acceptDiscoveredCamera: vi.fn(),
   fetchVpnStatus: () => fetchVpnStatusMock(),
+  fetchVpnPeers: vi.fn(async () => ({ peers: [] })),
   createVpnPeer: (label: string) => createVpnPeerMock(label),
   // AI step is downstream — empty mock so its Skip link is always present.
   fetchModels: vi.fn(async () => ({ models: [] })),
@@ -138,7 +140,7 @@ describe("setup VPN step (WARP-174)", () => {
     vi.clearAllMocks();
   });
 
-  it("shows the preCheck view when endpoint isn't configured", async () => {
+  it("shows the blocked view when endpoint isn't configured", async () => {
     fetchVpnStatusMock.mockResolvedValue({
       configured: false,
       endpointConfigured: false,
@@ -147,10 +149,10 @@ describe("setup VPN step (WARP-174)", () => {
     await advanceToVpn();
 
     expect(
-      screen.getByText(/internet step not finished/i),
+      screen.getByText(/remote access needs an internet address first/i),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: /back to internet setup/i }),
+      screen.getByRole("button", { name: /set up internet/i }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: /skip for now/i }),
@@ -158,7 +160,7 @@ describe("setup VPN step (WARP-174)", () => {
     expect(createVpnPeerMock).not.toHaveBeenCalled();
   });
 
-  it("Back to internet returns the customer to the Internet step", async () => {
+  it("Set up internet returns the customer to the Internet step", async () => {
     fetchVpnStatusMock.mockResolvedValue({
       configured: false,
       endpointConfigured: false,
@@ -168,7 +170,7 @@ describe("setup VPN step (WARP-174)", () => {
 
     await act(async () => {
       fireEvent.click(
-        screen.getByRole("button", { name: /back to internet setup/i }),
+        screen.getByRole("button", { name: /set up internet/i }),
       );
     });
 
@@ -179,7 +181,7 @@ describe("setup VPN step (WARP-174)", () => {
     ).toBeInTheDocument();
   });
 
-  it("Skip for now from preCheck advances to done", async () => {
+  it("Skip for now from blocked advances to done", async () => {
     fetchVpnStatusMock.mockResolvedValue({
       configured: false,
       endpointConfigured: false,
