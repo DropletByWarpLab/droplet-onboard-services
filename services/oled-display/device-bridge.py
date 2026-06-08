@@ -2196,6 +2196,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"error": "bad json"})
             ssid = j.get("ssid", "")
             password = j.get("password", "")
+            # Validate the SSID before handing it to nmcli. With shell=False there
+            # is no shell injection, but nmcli parses positional args by its own
+            # grammar — an SSID like "--delete" would be read as an option, not a
+            # network name. Mirror the hostapd host-script gate: strip control
+            # characters, require 1–32 chars, and reject a leading dash.
+            if not isinstance(ssid, str):
+                ssid = ""
+            ssid = "".join(ch for ch in ssid if ord(ch) >= 32 and ord(ch) != 127)
+            if not ssid or len(ssid) > 32 or ssid.startswith("-"):
+                return self._send(400, {
+                    "ok": False,
+                    "error": "invalid SSID (1-32 chars, no control characters, no leading dash)",
+                })
             rc, out, err = _run(
                 ["nmcli", "device", "wifi", "connect", ssid] +
                 (["password", password] if password else []),
