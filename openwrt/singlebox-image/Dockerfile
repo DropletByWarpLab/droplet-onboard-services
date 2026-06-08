@@ -27,4 +27,5 @@ RUN mkdir -p /var/lock \
       hostapd-mbedtls hostapd-utils wireless-regdb iw-full \
       uhttpd uhttpd-mod-ubus rpcd rpcd-mod-rpcsys rpcd-mod-iwinfo rpcd-mod-file \
       umdns \
-      wireguard-tools kmod-wireguard luci-proto-wireguard
+      wireguard-tools kmod-wireguard luci-proto-wireguard \
+      ddns-scripts luci-app-ddns

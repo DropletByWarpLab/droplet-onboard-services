@@ -320,6 +320,11 @@ docker exec -i \
   # custom Dockerfile baked into compose build context for production).
   # Phase L: added wireguard-tools, kmod-wireguard, luci-proto-wireguard
   # so the routing service can mint VPN peers against this container.
+  # WARP-839: added ddns-scripts, luci-app-ddns so the single-box container has
+  # the DuckDNS updater (the firmware openwrt/build.sh already bakes these; this
+  # runtime list mirrors openwrt/singlebox-image/Dockerfile). ddns is NOT added
+  # to the hard-verify gate below — it is not load-bearing for the AP and must
+  # not block AP bring-up.
   NEED_INSTALL=0
   command -v hostapd >/dev/null || NEED_INSTALL=1
   command -v wg >/dev/null      || NEED_INSTALL=1
@@ -363,6 +368,7 @@ docker exec -i \
         uhttpd uhttpd-mod-ubus rpcd rpcd-mod-rpcsys rpcd-mod-iwinfo rpcd-mod-file \
         umdns \
         wireguard-tools kmod-wireguard luci-proto-wireguard \
+        ddns-scripts luci-app-ddns \
         2>&1)"; _inst_rc=$?
       [ "$_inst_rc" -eq 0 ] && break
       sleep "$_nap"
