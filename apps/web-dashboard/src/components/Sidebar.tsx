@@ -120,6 +120,11 @@ const NAV_GROUPS: NavGroup[] = [
       // write tools out for non-privileged roles, so family/guest see a
       // safe read-only subset. Visible in both workspaces.
       { href: "/tools", label: "Tools", icon: Wrench },
+      // WARP-836: read-only Models status surface (local LLMs + opt-in cloud).
+      // Unrestricted — GET /api/models is open to any authenticated principal
+      // (ADR-004 §3), so family/guest see the same status-only view. Reuses the
+      // Cpu glyph already imported for /devices. Active-state is automatic.
+      { href: "/models", label: "Models", icon: Cpu },
       { href: "/settings", label: "Settings", icon: Settings },
       // PR #382: appliance/service health status page. Reads the existing
       // WARP-43 aggregate; sits in the support/reference zone next to Help.
