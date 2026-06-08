@@ -152,6 +152,13 @@ _ROTATION_LOCK = threading.Lock()
 # _ROTATION_LOCK does for rotation: non-blocking acquire, 409 on contention.
 _HOSTAPD_LOCK = threading.Lock()
 
+# In-process lock for the factory reset (WARP-825). The HTTP server is threaded,
+# so two concurrent POST /system/factory-reset would each _spawn_detached the
+# wipe script — two `docker compose down -v` runs racing the same teardown.
+# Serialize the spawn decision exactly like _HOSTAPD_LOCK: non-blocking acquire,
+# 409 on contention.
+_FACTORY_RESET_LOCK = threading.Lock()
+
 
 # ---------------------------------------------------------------------------
 # Shell helper
@@ -1780,18 +1787,36 @@ def run_factory_reset(params):
         "jobId": job_id,
         "targetName": (params or {}).get("targetName", ""),
     })
+    # Serialize the spawn decision (mirrors run_set_hostapd's _HOSTAPD_LOCK). Two
+    # threads racing here would each launch the wipe — two `docker compose down
+    # -v` runs racing the same teardown. Non-blocking: a second in-flight reset is
+    # rejected (the handler maps code == "busy" to 409) rather than queued.
+    if not _FACTORY_RESET_LOCK.acquire(blocking=False):
+        logger.warning("factory reset rejected: a reset is already in progress")
+        return False, "busy"
+    released = False
     try:
-        # Pass the job context as a single JSON arg, same convention as the
-        # pool / hostapd host scripts.
-        ok, err = _spawn_detached([RESET_SCRIPT, payload])
-    except Exception as e:                                          # noqa: BLE001
-        logger.warning("factory reset failed to spawn host script: %s", e)
-        return False, "host script unavailable"
-    if not ok:
-        logger.warning("factory reset host script not launched: %s", err)
-        return False, (err or "host script refused")
-    logger.warning("factory reset dispatched to host script (job=%s)", job_id)
-    return True, {"dispatched": True, "jobId": job_id}
+        try:
+            # Pass the job context as a single JSON arg, same convention as the
+            # pool / hostapd host scripts.
+            ok, err = _spawn_detached([RESET_SCRIPT, payload])
+        except Exception as e:                                      # noqa: BLE001
+            logger.warning("factory reset failed to spawn host script: %s", e)
+            return False, "host script unavailable"
+        if not ok:
+            logger.warning("factory reset host script not launched: %s", err)
+            return False, (err or "host script refused")
+        # Launched. Do NOT release the lock: the wipe is now tearing the box
+        # (and this process) down, and a release here would re-open the
+        # double-fire window for a request that lands before teardown completes.
+        # On the failure paths above we DO release (via finally) so a retry after
+        # a failed launch can proceed.
+        released = True
+        logger.warning("factory reset dispatched to host script (job=%s)", job_id)
+        return True, {"dispatched": True, "jobId": job_id}
+    finally:
+        if not released:
+            _FACTORY_RESET_LOCK.release()
 
 
 # ---------------------------------------------------------------------------
@@ -1836,7 +1861,11 @@ def collect_logs(window_hours, service):
     # Pass the service filter only when it is a sane, shell-safe token. The
     # orchestrator already validates it, but the bridge is defense-in-depth: an
     # empty/garbage value becomes "" (the script treats that as "all services").
+    # A leading dash is rejected explicitly: `isalnum()` after stripping "-"/"_"
+    # still accepts a flag-shaped value like "--orchestrator", which would reach
+    # droplet-collect-logs.sh as an option argument rather than a service name.
     svc = service if (isinstance(service, str)
+                      and not service.startswith("-")
                       and service.replace("-", "").replace("_", "").isalnum()
                       and 0 < len(service) <= 64) else ""
     cmd = [LOGS_SCRIPT, str(hours), svc]
@@ -2000,6 +2029,12 @@ class Handler(BaseHTTPRequestHandler):
             # Invalidate the cache — the automount script calls this
             # whenever a drive is added or removed. Body is ignored;
             # we just want to force the next GET /drives to re-read.
+            # Auth-gated like the other mutating routes (WARP-659 left this one
+            # open): with BRIDGE_BIND=0.0.0.0 the bridge is LAN-reachable, so an
+            # unauthenticated caller could force cache churn. The automount
+            # script presents the shared token (X-Droplet-Auth).
+            if not self._authed():
+                return self._send(401, {"ok": False, "error": "unauthorized"})
             drives_snapshot(invalidate=True)
             return self._send(200, {"ok": True})
         if self.path.startswith("/drives/") and self.path.endswith("/eject"):
@@ -2107,8 +2142,16 @@ class Handler(BaseHTTPRequestHandler):
                 "targetName": j.get("targetName", ""),
             })
             if not ok:
-                # 502 — the host script couldn't be launched (missing / not
-                # executable). The box is untouched.
+                # 409 Conflict ONLY for true lock contention (another reset
+                # already in flight) — same non-blocking-acquire posture as
+                # /openwrt/wifi/hostapd. Keyed on the machine `info == "busy"`,
+                # never a substring of a human message. Everything else (host
+                # script missing / not executable) is 502; the box is untouched.
+                if info == "busy":
+                    return self._send(409, {
+                        "ok": False,
+                        "error": "reset already in progress",
+                    })
                 return self._send(502, {"ok": False, "error": info})
             return self._send(202, {"ok": True,
                                     **(info if isinstance(info, dict) else {"info": info})})

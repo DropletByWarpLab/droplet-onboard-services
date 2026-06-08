@@ -58,6 +58,10 @@ function makeFakePrisma() {
   const audits: Array<Record<string, unknown>> = [];
   let seq = 0;
   const prisma = {
+    // Interactive-transaction double — attached AFTER this object is built (see
+    // below) so it can reference `prisma` without a circular initializer. Typed
+    // as a callable so the strongly-typed vi.fn assigned later is compatible.
+    $transaction: (() => undefined) as unknown as (fn: (tx: unknown) => Promise<unknown>) => Promise<unknown>,
     resetJob: {
       create: vi.fn(async ({ data }: { data: Partial<FakeJob> }) => {
         const job: FakeJob = {
@@ -105,6 +109,14 @@ function makeFakePrisma() {
       }),
     },
   };
+  // The service wraps the double-fire guard + audit + job-create in
+  // prisma.$transaction(async (tx) => …). The fake runs the callback
+  // synchronously against the SAME in-memory client, so the count→create
+  // sequence (and a thrown ResetError) behave as in production. A real DB's
+  // atomicity isn't under unit test here — the service's branching is.
+  prisma.$transaction = vi.fn(
+    async (fn: (tx: typeof prisma) => Promise<unknown>) => fn(prisma),
+  );
   return { prisma, jobs, audits };
 }
 
@@ -245,6 +257,37 @@ describe("requestFactoryReset — double-fire guard", () => {
       }),
     ).rejects.toMatchObject({ code: "RESET_ALREADY_IN_PROGRESS" });
     expect(fetchSpy2).not.toHaveBeenCalled();
+  });
+
+  it("runs the in-flight guard + create inside ONE transaction, and a refused duplicate writes no audit row", async () => {
+    const { prisma, jobs, audits } = makeFakePrisma();
+    mockFetchOnce(200, { ok: true });
+
+    // First reset dispatches and creates exactly one job + one audit row.
+    await requestFactoryReset(prisma as never, {
+      userId: "owner-1",
+      typedConfirm: "droplet-home",
+      targetName: "droplet-home",
+    });
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(jobs).toHaveLength(1);
+    expect(audits).toHaveLength(1);
+
+    // A second confirmed reset is refused by the guard INSIDE the transaction.
+    await expect(
+      requestFactoryReset(prisma as never, {
+        userId: "owner-1",
+        typedConfirm: "droplet-home",
+        targetName: "droplet-home",
+      }),
+    ).rejects.toMatchObject({ code: "RESET_ALREADY_IN_PROGRESS" });
+
+    // The second attempt opened a transaction but, because it threw before the
+    // create, left NO new job and NO orphan audit row (the audit now lives
+    // inside the txn so a rejected duplicate rolls back cleanly).
+    expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+    expect(jobs).toHaveLength(1);
+    expect(audits).toHaveLength(1);
   });
 });
 

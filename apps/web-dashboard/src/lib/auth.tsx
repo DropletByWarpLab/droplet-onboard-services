@@ -174,6 +174,23 @@ function timeoutSignal(ms: number): AbortSignal {
  */
 let refreshInFlight: Promise<boolean> | null = null;
 
+/**
+ * Endpoints that must NOT trigger the 401 → refresh → retry dance. These are
+ * the auth *lifecycle* routes whose own 401 is meaningful (a bad login, an
+ * already-dead refresh cookie, the OIDC callback, logout) — refreshing on their
+ * 401 is pointless or recursive. Everything ELSE under /api/auth — notably
+ * `/api/auth/change-password` and `/api/auth/me` (whose comment explicitly says
+ * it should refresh) — DOES get the normal refresh+retry, so a merely-expired
+ * access token doesn't read as "logged out" mid-session. (Previously a broad
+ * `url.includes("/api/auth/")` skipped refresh for all of these.)
+ */
+const NO_REFRESH_PATHS = [
+  "/api/auth/login",
+  "/api/auth/refresh",
+  "/api/auth/callback",
+  "/api/auth/logout",
+];
+
 async function attemptRefresh(): Promise<boolean> {
   if (!refreshInFlight) {
     refreshInFlight = fetch("/api/auth/refresh", {
@@ -192,10 +209,40 @@ async function attemptRefresh(): Promise<boolean> {
 export async function authFetch(url: string, init?: RequestInit): Promise<Response> {
   const res = await fetch(url, { ...init, credentials: "same-origin" });
 
+  // A must-change-password user gets 403 PASSWORD_CHANGE_REQUIRED on every
+  // gated call. If a stale cached profile (mustChangePassword:false) let AuthGate
+  // skip the /change-password redirect, the user would otherwise sit on the
+  // dashboard while every call silently 403s. Route them to remediation on the
+  // FIRST gated 403. Clone the response so the caller still reads an intact body;
+  // never await/consume the original. Guard against a redirect loop by checking
+  // we're not already on /change-password.
+  if (
+    res.status === 403 &&
+    typeof window !== "undefined" &&
+    window.location.pathname !== "/change-password"
+  ) {
+    res
+      .clone()
+      .json()
+      .then((b) => {
+        if (
+          b?.code === "PASSWORD_CHANGE_REQUIRED" &&
+          typeof window !== "undefined" &&
+          window.location.pathname !== "/change-password"
+        ) {
+          window.location.assign("/change-password");
+        }
+      })
+      .catch(() => {
+        /* non-JSON / unrelated 403 — leave the caller's handling intact */
+      });
+    return res;
+  }
+
   if (
     res.status !== 401 ||
     typeof window === "undefined" ||
-    url.includes("/api/auth/")
+    NO_REFRESH_PATHS.some((p) => url.includes(p))
   ) {
     return res;
   }

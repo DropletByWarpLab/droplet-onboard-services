@@ -82,6 +82,8 @@ function bridgeAuthToken(): string {
   return (
     process.env.BRIDGE_AUTH_TOKEN ||
     process.env.SERVICE_TOKEN_DISPLAY ||
+    process.env.DEVICE_SECRET_KEY ||
+    process.env.SERVICE_SECRET ||
     ""
   ).trim();
 }
@@ -159,29 +161,36 @@ export async function requestFactoryReset(
     );
   }
 
-  // (2) Double-fire guard: at most one non-terminal job at a time.
-  const inFlight = await prisma.resetJob.count({
-    where: { status: { in: ["requested", "dispatched"] } },
-  });
-  if (inFlight > 0) {
-    throw new ResetError(
-      "RESET_ALREADY_IN_PROGRESS",
-      "A factory reset is already in progress.",
-    );
-  }
+  // (2)-(4) Double-fire guard + audit + job create, ATOMIC. The in-flight count
+  // and the resetJob.create must run in ONE transaction (AC3): as two separate
+  // calls, two concurrent resets both read count 0 and both create a job, so
+  // the wipe is dispatched twice. The interactive transaction serializes the
+  // guard with the insert. The audit row is written INSIDE so a rejected
+  // duplicate leaves no orphan audit row (the txn rolls back on the throw),
+  // while a legitimate request still records the destructive intent before the
+  // wipe is dispatched (AC1). Mirrors storage-safety's CommandAuditLog shape.
+  const job = await prisma.$transaction(async (tx) => {
+    const inFlight = await tx.resetJob.count({
+      where: { status: { in: ["requested", "dispatched"] } },
+    });
+    if (inFlight > 0) {
+      throw new ResetError(
+        "RESET_ALREADY_IN_PROGRESS",
+        "A factory reset is already in progress.",
+      );
+    }
 
-  // (3) Audit BEFORE the wipe. If the box is gone a second later, the intent is
-  // still recorded. Mirrors storage-safety's CommandAuditLog shape.
-  await writeResetAudit(prisma, { userId, targetName });
+    await writeResetAudit(tx, { userId, targetName });
 
-  // (4) Persist the job in `requested` before dispatch so a crash mid-dispatch
-  // leaves an explicit, queryable row (never an IS-NULL guess).
-  const job = await prisma.resetJob.create({
-    data: {
-      status: "requested",
-      requestedBy: userId ?? null,
-      targetName,
-    },
+    // Persist the job in `requested` before dispatch so a crash mid-dispatch
+    // leaves an explicit, queryable row (never an IS-NULL guess).
+    return tx.resetJob.create({
+      data: {
+        status: "requested",
+        requestedBy: userId ?? null,
+        targetName,
+      },
+    });
   });
 
   // Fail closed: no bridge token → we cannot safely invoke a data-destroying
@@ -277,7 +286,10 @@ async function dispatchToBridge(
 }
 
 async function writeResetAudit(
-  prisma: PrismaClient,
+  // Accepts the base client OR an interactive-transaction client (the request
+  // path now writes the audit row inside prisma.$transaction so a rejected
+  // duplicate rolls it back). Narrowed to the only delegate it uses.
+  prisma: Pick<PrismaClient, "commandAuditLog">,
   entry: { userId?: string; targetName: string },
 ): Promise<void> {
   try {
