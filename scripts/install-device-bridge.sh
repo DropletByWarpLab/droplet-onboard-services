@@ -105,6 +105,24 @@ fi
 install -m 0755 "$HOSTAPD_SCRIPT_SRC" "$HOSTAPD_SCRIPT_DST"
 log "installed $HOSTAPD_SCRIPT_DST"
 
+# --- 1d-bis) Polkit rule for the sandboxed Wi-Fi write (WARP-808 follow-up) ---
+# The bridge unit runs droplet-set-hostapd.sh as User=droplet inside
+# ProtectSystem=strict + NoNewPrivileges — it CANNOT write /etc/default or
+# sudo (the shipping box failed the wizard's Home Wi-Fi save with mktemp
+# EROFS). So the env-file write targets the bridge's StateDirectory
+# (DROPLET_HOSTAPD_ENV_FILE in the unit; droplet-openwrt-attach.service layers
+# that file last), and the one privileged step left — restarting
+# droplet-openwrt-attach.service — is authorized via this polkit rule (a D-Bus
+# ask to PID 1, scoped to user droplet + that single unit; no escalation).
+POLKIT_RULE_SRC="$SRC_DIR/50-droplet-device-bridge.rules"
+POLKIT_RULE_DST="/etc/polkit-1/rules.d/50-droplet-device-bridge.rules"
+if [[ ! -f "$POLKIT_RULE_SRC" ]]; then
+  log "missing source: $POLKIT_RULE_SRC"
+  exit 1
+fi
+install -m 0644 "$POLKIT_RULE_SRC" "$POLKIT_RULE_DST"
+log "installed $POLKIT_RULE_DST"
+
 # --- 1d) Factory-reset host executor (WARP-825) ---
 # The host-side entry point for the dashboard's owner-confirmed factory reset.
 # Spawned (detached) by the device-bridge's auth-gated POST /system/factory-reset

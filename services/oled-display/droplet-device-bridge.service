@@ -67,6 +67,18 @@ Environment=BRIDGE_PORT=9090
 # an operator can re-pin the bind via the env file below (loaded last).
 Environment=BRIDGE_BIND=0.0.0.0
 Environment=BRIDGE_STATE_FILE=/var/lib/droplet-bridge/state.json
+# WARP-808 follow-up: the hostapd Wi-Fi write (droplet-set-hostapd.sh, shelled
+# by POST /openwrt/wifi/hostapd) runs INSIDE this unit's sandbox — User=droplet
+# + ProtectSystem=strict make its default target /etc/default/droplet-openwrt-
+# attach unwritable (mktemp EROFS — the setup wizard's Home Wi-Fi save failed
+# with exactly that on the shipping box). Point the write at the bridge's own
+# StateDirectory instead; droplet-openwrt-attach.service layers this file
+# AFTER /etc/default/droplet-openwrt-attach (last wins), so a customer Wi-Fi
+# write overrides provisioning defaults without root. A factory reset wipes
+# the StateDirectory, reverting the AP to provisioning creds — intended.
+# The restart half of the write goes through polkit (50-droplet-device-
+# bridge.rules), not privilege escalation: NoNewPrivileges stays true.
+Environment=DROPLET_HOSTAPD_ENV_FILE=/var/lib/droplet-bridge/openwrt-attach.env
 # Operator-managed runtime config, loaded LAST so it overrides the inline
 # defaults above (BRIDGE_BIND, OPENWRT_*, etc.). Created by `setup.sh` with
 # 0600 perms; holds the OpenWrt SSH password, BRIDGE_AUTH_TOKEN, Frigate URL.

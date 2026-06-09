@@ -1,0 +1,26 @@
+// WARP-808 follow-up — polkit rule for the Droplet device-bridge.
+//
+// The bridge (droplet-device-bridge.service) runs as the unprivileged
+// `droplet` user inside a ProtectSystem=strict / NoNewPrivileges sandbox, so
+// it cannot sudo and cannot touch root-owned paths. The single-box Wi-Fi
+// write (scripts/host/droplet-set-hostapd.sh) needs exactly ONE privileged
+// action: `systemctl restart droplet-openwrt-attach.service` (which
+// regenerates /etc/hostapd.conf from the env files and respawns hostapd).
+// systemctl performs that via a D-Bus call to PID 1 — no process privilege
+// escalation — and polkit is the authorization gate. Allow `droplet` to
+// restart THAT ONE unit and nothing else.
+//
+// Installed to /etc/polkit-1/rules.d/ by scripts/install-device-bridge.sh.
+// Requires polkit >= 106 (JS rules) — the shipping box runs Ubuntu 24.04
+// (polkit 124).
+polkit.addRule(function (action, subject) {
+  if (
+    action.id === "org.freedesktop.systemd1.manage-units" &&
+    action.lookup("unit") === "droplet-openwrt-attach.service" &&
+    (action.lookup("verb") === "restart" ||
+      action.lookup("verb") === "start") &&
+    subject.user === "droplet"
+  ) {
+    return polkit.Result.YES;
+  }
+});
