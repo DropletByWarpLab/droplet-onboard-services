@@ -140,6 +140,8 @@ V3_ACCENT_INK = (0xB4, 0xBA, 0xFF)  # #b4baff mark highlight, password text
 # accentSubtle rgba(129,140,248,0.18) over #050507 -> nearest solid fill for
 # the active toggle cell (0.18*accent + 0.82*bg, per-channel).
 V3_ACCENT_SUBTLE = (0x1B, 0x1D, 0x32)  # ~#1b1d32
+# Waiting dots at rest on the claim screen — #818cf8 @ 30% over the bg.
+V3_ACCENT_FAINT = (0x2B, 0x2F, 0x52)
 # rgba(255,159,10,0.18) over #050507 -> orange-tinted KEY-pill fill when <60s.
 V3_ORANGE_SUBTLE = (0x32, 0x21, 0x08)  # ~#322108
 V3_TRACK     = (0x1F, 0x1F, 0x30)   # #1f1f30 progress/seconds track
@@ -474,6 +476,46 @@ def _wifi_qr_payload(ssid: str, key: str) -> str:
     return "WIFI:T:WPA;S:{};P:{};;".format(esc(ssid), esc(key))
 
 
+def _setup_qr_payload(setup_url: str, code: str) -> str:
+    """Build the scan-to-claim deep link: `<setup_url>?c=<CODE>`.
+
+    Design-handoff claim screen: scanning the QR lands the phone in the setup
+    wizard with the claim code in the `c` query param (ClaimStep prefills it).
+    The code goes bare — separators stripped, upper-cased — matching the
+    orchestrator's normalizeClaimCode(), which ignores non-alphanumerics; the
+    bare form also keeps the QR a version smaller. Returns "" when either part
+    is missing (no deep link to encode — the card degrades to mark-only).
+    """
+    url = (setup_url or "").strip()
+    bare = "".join(ch for ch in (code or "") if ch.isalnum()).upper()
+    if not url or not bare:
+        return ""
+    return "{}{}c={}".format(url, "&" if "?" in url else "?", bare)
+
+
+def _encode_qr_matrix(payload: str) -> Optional[List[List[int]]]:
+    """Encode `payload` into a 0/1 QR bit-matrix, host-side.
+
+    The firmware never encodes on-device (same contract as the Wi-Fi QR the
+    bridge encodes) — this is the host half that feeds the claim frame's
+    `setup_qr_matrix`. Same parameters as the sim fallback in `_draw_qr`
+    (border=0, ERROR_CORRECT_M) so the preview and the panel stay
+    byte-identical. Returns None if the `qrcode` dep is unavailable — the
+    claim screen then renders without the scan QR (graceful degradation).
+    """
+    if not payload:
+        return None
+    try:
+        import qrcode
+        qr = qrcode.QRCode(
+            border=0, error_correction=qrcode.constants.ERROR_CORRECT_M)
+        qr.add_data(payload)
+        qr.make(fit=True)
+        return [[1 if cell else 0 for cell in row] for row in qr.get_matrix()]
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Touch regions
 # ---------------------------------------------------------------------------
@@ -571,6 +613,10 @@ class TFTDisplay:
         self._claim_wifi_ssid = ""
         self._claim_wifi_psk = ""
         self._claim_wifi_qr_matrix = None
+        # Design-handoff scan-to-claim QR: the setup deep-link matrix, derived
+        # host-side by show_claim (the firmware never encodes) and retained so
+        # re-renders keep painting the same QR the panel shows.
+        self._claim_setup_qr_matrix = None
         # Readiness transition state. `_boot_complete` is an explicit flag —
         # we never infer "done" from the absence of something. `_boot_started_at`
         # anchors the timeout; `_last_readiness_check` gates the probe cadence.
@@ -2028,27 +2074,33 @@ class TFTDisplay:
     def render_claim(self, code: str, setup_url: str,
                      wifi_ssid: Optional[str] = None,
                      wifi_psk: Optional[str] = None,
-                     wifi_qr_matrix: Optional[List[List[int]]] = None
+                     wifi_qr_matrix: Optional[List[List[int]]] = None,
+                     setup_qr_matrix: Optional[List[List[int]]] = None
                      ) -> Image.Image:
-        """Onboarding claim screen (WARP-632 / ADR-017), py-v3 editorial style.
+        """Onboarding claim screen (WARP-632 / ADR-017), design-handoff
+        two-column layout ("PyPortal First Boot — Claim Code").
 
-        The claim CODE is the hero — same heavy-weight numeral face the idle
-        clock / CPU load use (``_get_font(weight="heavy")``), centred on a
-        raised card with an accent border so it reads as the one thing to copy
-        off the lid. Above it a tracked ``CLAIM THIS DROPLET`` eyebrow + a brand
-        mark. Tokens, mark and spacing match the boot/idle/System screens.
-        Mirrors the firmware's render_claim() 1:1.
+        A header band (brand mark + DROPLET wordmark, FIRST-TIME SETUP status
+        on the right), then two columns split by a hairline: the LEFT column
+        is the hero — the claim code drawn as its dash-separated groups with
+        accent dash bars between them, an accent rule, and the numbered
+        link steps — and the RIGHT column is a white scan QR card. The foot
+        carries the WAITING TO BE CLAIMED dots over a 2px scan track.
+        Tokens, mark and spacing match the boot/idle/System screens. Mirrors
+        the firmware's render_claim() 1:1.
 
-        WARP-819: when the box's Wi-Fi-connect creds are supplied, the screen
-        becomes STACKED — the claim code (slightly smaller) on top, and below it
-        a Wi-Fi-connect QR card + readable ``WiFi: <ssid>`` / ``Password: <psk>``
-        text, so a first-boot user can join the box's Wi-Fi with no prior config
-        (scan, or type the creds on a camera-less PC). When the wifi_* args are
-        absent (older orchestrator / bridge down at claim time) the original
-        claim-only layout renders unchanged (graceful degradation).
+        Without a Wi-Fi block the QR deep-links the setup wizard
+        (`<setup_url>?c=<CODE>` — host-encoded `setup_qr_matrix` preferred,
+        sim-side payload encode as the fallback) so a scan lands with the
+        code prefilled. WARP-819: when the box's Wi-Fi-connect creds are
+        supplied, the join-QR takes the card instead (joining the box's
+        Wi-Fi is the one step a fresh phone can't do by hand) with the
+        SSID/PSK as readable text under it (camera-less manual join), and
+        the steps gain a "Join Wi-Fi" first step. A partial Wi-Fi block
+        degrades to the claim-only layout, unchanged.
 
-        Modal + host-driven: the orchestrator mints the code and pushes it while
-        the box is unclaimed; the host navigates away once it's claimed.
+        Modal + host-driven: the orchestrator mints the code and pushes it
+        while the box is unclaimed; the host navigates away once it's claimed.
         """
         has_wifi = bool(wifi_qr_matrix and wifi_ssid)
 
@@ -2057,106 +2109,168 @@ class TFTDisplay:
         with self._touch_regions_lock:
             self._touch_regions = []
 
-        # Brand mark up top. Smaller in the stacked Wi-Fi layout so the lower
-        # band has room for the QR + creds.
-        mark_size = 40 if has_wifi else 52
-        mark_w = int(mark_size * 52 / 60)
-        mark_x = (WIDTH - mark_w) // 2
-        mark_y = 14 if has_wifi else 26
-        draw_droplet_mark(draw, mark_x, mark_y, mark_size,
+        # ---- Header band: mark + wordmark, first-time-setup status --------
+        font_eyebrow = _get_font(9, weight="bold")
+        draw_droplet_mark(draw, 20, 17, 20,
                           primary=V3_ACCENT, highlight=V3_ACCENT_INK)
-        mark_b = mark_y + int(mark_size * 48 / 60)
+        _v3_text(draw, "DROPLET", 50, 21, font=font_eyebrow,
+                 fill=V3_LABEL3, tracking=2)
+        setup_lbl = "FIRST-TIME SETUP"
+        slw = _v3_text_width(draw, setup_lbl, font_eyebrow, 1.4)
+        _v3_text(draw, setup_lbl, WIDTH - 20, 21, font=font_eyebrow,
+                 fill=V3_ACCENT, anchor="ra", tracking=1.4)
+        # Status dot left of the label (the panel pulses it; static per frame).
+        dcx = int(WIDTH - 20 - slw - 12)
+        draw.ellipse([dcx - 3, 23, dcx + 3, 29], fill=V3_ACCENT)
+        draw.rectangle([20, 44, WIDTH - 20, 44], fill=V3_SEP)
 
-        # Eyebrow — what this screen is. Tracked caps, like SYSTEM / CPU LOAD.
-        font_eyebrow = _get_font(11, weight="bold")
-        eyebrow_y = mark_b + (12 if has_wifi else 20)
-        _v3_text(draw, "CLAIM THIS DROPLET", WIDTH // 2, eyebrow_y,
-                 font=font_eyebrow, fill=V3_LABEL3, anchor="ma", tracking=2)
+        # ---- Column divider ------------------------------------------------
+        div_x = 284
+        draw.rectangle([div_x, 58, div_x, HEIGHT - 26], fill=V3_SEP)
 
-        # The CODE — hero on a raised card. Size the heavy face down until it
-        # (with card padding) fits the panel width, so a long code never
-        # overflows. Reduced ceiling in the stacked layout (the code shares the
-        # screen with the Wi-Fi block but stays the visual hero).
-        code_text = (code or "").strip() or "— — — —"
-        card_pad_x = 26
-        card_pad_y = 12 if has_wifi else 16
-        max_card_w = WIDTH - 32
-        code_size = 34 if has_wifi else 48
-        while code_size > 22:
-            font_code = _get_font(code_size, weight="heavy")
-            cbbox = draw.textbbox((0, 0), code_text, font=font_code)
-            code_w = cbbox[2] - cbbox[0]
-            if code_w + card_pad_x * 2 <= max_card_w:
-                break
-            code_size -= 2
-        code_h = cbbox[3] - cbbox[1]
-        card_w = min(max_card_w, max(180, code_w + card_pad_x * 2))
-        card_h = code_h + card_pad_y * 2
-        card_x = (WIDTH - card_w) // 2
-        card_y = eyebrow_y + (16 if has_wifi else 22)
-        _rrect(draw, card_x, card_y, card_w, card_h, 14, fill=V3_SURFACE)
-        _rrect(draw, card_x, card_y, card_w, card_h, 14,
-               outline=V3_ACCENT, width=1)
-        # Center the code in the card (account for the face's top bearing).
-        draw.text((card_x + (card_w - code_w) // 2,
-                   card_y + (card_h - code_h) // 2 - cbbox[1]),
-                  code_text, fill=V3_ACCENT_INK, font=font_code)
+        # ================= LEFT — claim code hero + steps ===================
+        _v3_text(draw, "CLAIM CODE", 20, 56, font=font_eyebrow,
+                 fill=V3_ACCENT, tracking=1.6)
 
-        if has_wifi:
-            # ----- Lower band: Wi-Fi-connect QR + readable creds -------------
-            # A divider sets the "now join the Wi-Fi" section apart from the
-            # claim code, then a left QR card + right NETWORK/PASSWORD text —
-            # the same two-column idiom as the System screen's PAIR · WI-FI.
-            band_y = card_y + card_h + 14
-            _v3_text(draw, "JOIN THIS DROPLET'S WI-FI", WIDTH // 2, band_y,
-                     font=_get_font(10, weight="bold"), fill=V3_ACCENT,
-                     anchor="ma", tracking=1.4)
-
-            qr_top = band_y + 16
-            qr_size = min(118, HEIGHT - qr_top - 14)
-            qr_x = 26
-            qr_y = qr_top
-            _rrect(draw, qr_x, qr_y, qr_size, qr_size, 12, fill=V3_WHITE)
-            # Production-faithful: paint the host-supplied matrix (what the
-            # firmware paints on the device) so the preview and the panel match.
-            # The escaped payload is only the sim-side encode fallback when no
-            # matrix is supplied — it carries the same WiFi-QR metachar escaping
-            # device-bridge.py uses, so a special-char SSID/PSK still scans
-            # (WARP-819).
-            payload = _wifi_qr_payload(wifi_ssid or "", wifi_psk or "")
-            self._draw_qr(img, draw, qr_x + 9, qr_y + 9, qr_size - 18,
-                          payload=payload, matrix=wifi_qr_matrix)
-            mc = 22
-            mcx = qr_x + 9 + (qr_size - 18) // 2 - mc // 2
-            mcy = qr_y + 9 + (qr_size - 18) // 2 - mc // 2
-            _rrect(draw, mcx - 3, mcy - 3, mc + 6, mc + 6, 6, fill=V3_WHITE)
-            draw_droplet_mark(draw, mcx, mcy, mc, primary=V3_ACCENT,
-                              highlight=V3_ACCENT_INK)
-
-            tx = qr_x + qr_size + 18
-            ty = qr_y + 6
-            _v3_text(draw, "WIFI", tx, ty, font=_get_font(9, weight="bold"),
-                     fill=V3_LABEL3, tracking=1.6)
-            _v3_text(draw, str(wifi_ssid or "")[:20], tx, ty + 13,
-                     font=_get_font(15, weight="bold"), fill=V3_TEXT)
-            _v3_text(draw, "PASSWORD", tx, ty + 40, font=_get_font(9, weight="bold"),
-                     fill=V3_LABEL3, tracking=1.6)
-            _v3_text(draw, str(wifi_psk or "")[:22], tx, ty + 53,
-                     font=_get_font(14, weight="regular"), fill=V3_ACCENT_INK)
-            _v3_text(draw, "Scan, or join with these on any device",
-                     tx, ty + 78, font=_get_font(10, weight="regular"),
-                     fill=V3_LABEL4)
+        # Hero code — the dash-separated groups drawn with accent dash bars
+        # between them; auto-fits the heavy face into the column.
+        code_text = (code or "").strip().upper()
+        groups = [g for g in code_text.split("-") if g]
+        code_y = 76
+        left_max = div_x - 20 - 16
+        if groups:
+            size = 30
+            font_code = _get_font(size, weight="heavy")
+            while size > 14:
+                font_code = _get_font(size, weight="heavy")
+                gap = max(5, int(size * 0.30))
+                dash_w = max(6, int(size * 0.30))
+                total = (sum(_v3_text_width(draw, g, font_code, 1)
+                             for g in groups)
+                         + (len(groups) - 1) * (gap * 2 + dash_w))
+                if total <= left_max:
+                    break
+                size -= 1
+            dash_h = max(3, int(size * 0.09))
+            cx = 20.0
+            for i, group in enumerate(groups):
+                cx += _v3_text(draw, group, int(cx), code_y, font=font_code,
+                               fill=V3_TEXT, tracking=1)
+                if i < len(groups) - 1:
+                    cx += gap
+                    _rrect(draw, cx, code_y + size * 0.55 - dash_h / 2,
+                           dash_w, dash_h, dash_h // 2, fill=V3_ACCENT)
+                    cx += dash_w + gap
+            code_h = size
         else:
-            # Claim-only layout (unchanged): instruction + setup URL at the foot.
-            font_hint = _get_font(12, weight="regular")
-            _v3_text(draw, "Enter this code to finish setup",
-                     WIDTH // 2, card_y + card_h + 18,
-                     font=font_hint, fill=V3_LABEL3, anchor="ma", tracking=0.4)
-            url_text = (setup_url or "").strip()[:54]
-            if url_text:
-                font_url = _get_font(12, weight="regular")
-                _v3_text(draw, url_text, WIDTH // 2, HEIGHT - 22,
-                         font=font_url, fill=V3_LABEL4, anchor="ma", tracking=0.4)
+            # Host hasn't pushed a code yet — defensive placeholder, like the
+            # firmware's "----  ----".
+            _v3_text(draw, "— — — —", 20, code_y,
+                     font=_get_font(30, weight="heavy"), fill=V3_LABEL4)
+            code_h = 30
+
+        # Accent rule under the code.
+        _rrect(draw, 20, code_y + code_h + 16, 56, 3, 1, fill=V3_ACCENT)
+
+        # Numbered link steps. With Wi-Fi creds the join step leads — a fresh
+        # phone can't reach the setup URL before it's on the box's network.
+        host = (setup_url or "").strip()
+        for prefix in ("https://", "http://"):
+            if host.startswith(prefix):
+                host = host[len(prefix):]
+                break
+        host = host.rstrip("/")
+
+        _v3_text(draw, "TO LINK THIS DEVICE", 20, 148,
+                 font=font_eyebrow, fill=V3_LABEL3, tracking=1.2)
+        steps = []
+        if has_wifi:
+            steps.append(("Join Wi-Fi", str(wifi_ssid or "")[:18]))
+        if host:
+            steps.append(("Go to", host[:26]))
+        steps.append(("Enter the code above", ""))
+
+        font_step = _get_font(12, weight="regular")
+        font_step_b = _get_font(12, weight="bold")
+        font_badge = _get_font(11, weight="heavy")
+        sy = 168
+        for i, (lead, em) in enumerate(steps):
+            _rrect(draw, 20, sy, 18, 18, 5, fill=V3_ACCENT_SUBTLE)
+            _v3_text(draw, str(i + 1), 29, sy + 9, font=font_badge,
+                     fill=V3_ACCENT_INK, anchor="mm")
+            if em:
+                lead_w = _v3_text(draw, lead + " ", 46, sy + 9, font=font_step,
+                                  fill=V3_LABEL2, anchor="lm")
+                _v3_text(draw, em, 46 + lead_w, sy + 9, font=font_step_b,
+                         fill=V3_ACCENT_INK, anchor="lm")
+            else:
+                _v3_text(draw, lead, 46, sy + 9, font=font_step,
+                         fill=V3_LABEL2, anchor="lm")
+            sy += 28
+
+        # ================= RIGHT — scan QR card =============================
+        rx = div_x + 16
+        rw = WIDTH - 20 - rx
+        _v3_text(draw, "SCAN TO JOIN WI-FI" if has_wifi else "SCAN TO CLAIM",
+                 rx, 56, font=font_eyebrow, fill=V3_ACCENT, tracking=1.2)
+
+        card_w = 128
+        card_x = rx + (rw - card_w) // 2
+        card_y = 72
+        _rrect(draw, card_x, card_y, card_w, card_w, 12, fill=V3_WHITE)
+        qx, qy, qz = card_x + 9, card_y + 9, card_w - 18
+        if has_wifi:
+            # Production-faithful: paint the host-supplied matrix (what the
+            # firmware paints) so preview and panel match; the escaped payload
+            # is the sim-only encode fallback (WARP-819).
+            payload = _wifi_qr_payload(wifi_ssid or "", wifi_psk or "")
+            self._draw_qr(img, draw, qx, qy, qz,
+                          payload=payload, matrix=wifi_qr_matrix)
+        else:
+            payload = _setup_qr_payload(setup_url, code_text)
+            if setup_qr_matrix or payload:
+                self._draw_qr(img, draw, qx, qy, qz,
+                              payload=payload or None, matrix=setup_qr_matrix)
+        mc = 26
+        mcx = card_x + card_w // 2 - mc // 2
+        mcy = card_y + card_w // 2 - mc // 2
+        _rrect(draw, mcx - 3, mcy - 3, mc + 6, mc + 6, 6, fill=V3_WHITE)
+        draw_droplet_mark(draw, mcx, mcy, mc, primary=V3_ACCENT,
+                          highlight=V3_ACCENT_INK)
+
+        cap_y = card_y + card_w + 12
+        if has_wifi:
+            _v3_text(draw, "Joins this Droplet's Wi-Fi", rx + rw // 2, cap_y,
+                     font=_get_font(10, weight="regular"), fill=V3_LABEL3,
+                     anchor="ma")
+            # Readable creds under the card — camera-less manual join
+            # (WARP-819): the SSID and the password as text.
+            _v3_text(draw, str(wifi_ssid or "")[:20], rx + rw // 2, cap_y + 17,
+                     font=_get_font(12, weight="bold"), fill=V3_TEXT,
+                     anchor="ma")
+            _v3_text(draw, str(wifi_psk or "")[:20], rx + rw // 2, cap_y + 34,
+                     font=_get_font(11, weight="regular"), fill=V3_ACCENT_INK,
+                     anchor="ma")
+        else:
+            _v3_text(draw, "Opens setup on your phone", rx + rw // 2, cap_y,
+                     font=_get_font(10, weight="regular"), fill=V3_LABEL3,
+                     anchor="ma")
+
+        # ---- Foot: waiting status + scan track -----------------------------
+        waiting = "WAITING TO BE CLAIMED"
+        wlw = _v3_text_width(draw, waiting, font_eyebrow, 0.6)
+        _v3_text(draw, waiting, WIDTH - 20, HEIGHT - 27, font=font_eyebrow,
+                 fill=V3_ACCENT, anchor="ra", tracking=0.6)
+        for i in range(3):
+            ddx = int(WIDTH - 20 - wlw - 22 + i * 7)
+            draw.ellipse([ddx - 2, HEIGHT - 25, ddx + 2, HEIGHT - 21],
+                         fill=V3_ACCENT if i == 0 else V3_ACCENT_FAINT)
+
+        # 2px scan track with an accent segment (the firmware owns any motion;
+        # static per frame here).
+        draw.rectangle([0, HEIGHT - 2, WIDTH, HEIGHT], fill=V3_TRACK)
+        seg_x = (WIDTH - 90) // 2
+        draw.rectangle([seg_x, HEIGHT - 2, seg_x + 90, HEIGHT], fill=V3_ACCENT)
         return img
 
     @staticmethod
@@ -2355,8 +2469,18 @@ class TFTDisplay:
             self._claim_wifi_ssid = wifi_ssid or ""
             self._claim_wifi_psk = wifi_psk or ""
             self._claim_wifi_qr_matrix = wifi_qr_matrix or None
+            has_wifi = bool(wifi_qr_matrix and wifi_ssid)
+            # Scan-to-claim deep link (design handoff): encode the setup QR
+            # host-side — the firmware paints the matrix verbatim, same
+            # contract as the Wi-Fi QR. Only when the Wi-Fi join QR is NOT
+            # taking the card: at most one matrix per claim frame so the
+            # firmware never holds two QR bitmaps on its ~165 KB heap
+            # (WARP-638 posture).
+            self._claim_setup_qr_matrix = (
+                None if has_wifi
+                else _encode_qr_matrix(_setup_qr_payload(setup_url, code)))
             frame = {"code": code, "setup_url": setup_url}
-            if wifi_qr_matrix and wifi_ssid:
+            if has_wifi:
                 frame["wifi_qr_matrix"] = wifi_qr_matrix
                 frame["wifi_ssid"] = wifi_ssid
                 # Only put wifi_psk on the wire when it is non-empty. The
@@ -2366,6 +2490,8 @@ class TFTDisplay:
                 # "only the keys actually present are put on the wire" contract.
                 if wifi_psk:
                     frame["wifi_psk"] = wifi_psk
+            elif self._claim_setup_qr_matrix:
+                frame["setup_qr_matrix"] = self._claim_setup_qr_matrix
             self._pyportal_send("claim", frame)
             self._render_current_locked()
 
@@ -2495,6 +2621,7 @@ class TFTDisplay:
                 wifi_ssid=self._claim_wifi_ssid,
                 wifi_psk=self._claim_wifi_psk,
                 wifi_qr_matrix=self._claim_wifi_qr_matrix,
+                setup_qr_matrix=self._claim_setup_qr_matrix,
             )
         elif mode == self.IDLE:
             img = self.render_idle()

@@ -103,7 +103,8 @@ def test_handle_every_mode_no_crash(fw):
         {"mode": "shutdown", "data": {"reason": "halt", "phase": "stopping"}},
         {"mode": "standby"},
         {"mode": "claim", "data": {"code": "DRPL-7K2Q-9F4M",
-                                    "setup_url": "https://x/setup"}},
+                                    "setup_url": "https://x/setup",
+                                    "setup_qr_matrix": SAMPLE_MATRIX}},
         {"mode": "brightness", "value": 120},
         {"mode": "ping"},
     ]
@@ -155,6 +156,54 @@ def test_claim_with_wifi_then_without_clears_stale_creds(fw):
     # The non-wifi fields are still merged as before.
     assert code.state["claim"]["code"] == "DRPL-7K2Q-9F4M"
     assert code.state["claim"]["setup_url"] == "https://x/setup"
+
+
+def test_claim_setup_matrix_merges_and_resets_like_wifi(fw):
+    # Design-handoff redesign: the claim-only frame carries a host-encoded
+    # scan-to-claim QR (setup_qr_matrix). It embeds the claim code in its
+    # payload, so like the wifi_* keys it must NOT survive a push that omits
+    # it — a stale matrix would deep-link a code that no longer matches the
+    # hero. Reset-before-merge, same as wifi_*.
+    code, _ = fw
+    code.handle({"mode": "claim", "data": {
+        "code": "DRPL-7K2Q-9F4M",
+        "setup_url": "https://x/setup",
+        "setup_qr_matrix": SAMPLE_MATRIX,
+    }})
+    assert code.state["claim"]["setup_qr_matrix"] == SAMPLE_MATRIX
+    assert code.state["screen"] == "claim"
+
+    code.handle({"mode": "claim", "data": {"code": "DRPL-AB12-CD34"}})
+    assert code.state["claim"]["setup_qr_matrix"] is None
+    # Partial-push resilience for the non-QR fields is unchanged.
+    assert code.state["claim"]["setup_url"] == "https://x/setup"
+    assert code.state["claim"]["code"] == "DRPL-AB12-CD34"
+
+
+def test_claim_waiting_dots_tick_advances_and_disarms(fw):
+    # The WAITING TO BE CLAIMED dots animate via the cheap main-loop ticker
+    # (palette mutation only — no frame rebuild, like the idle colon). The
+    # ticker must advance the active dot while on the claim screen and disarm
+    # (refs cleared) when the host navigates away.
+    code, _ = fw
+    code.handle({"mode": "claim", "data": {
+        "code": "DRPL-7K2Q-9F4M", "setup_url": "https://x/setup"}})
+    dots = code._claim_refs["dots"]
+    assert len(dots) == 3
+    before = code._claim_refs["active"]
+    code._claim_dots_tick(code._claim_refs["last"] + 10.0)
+    assert code._claim_refs["active"] != before
+
+    # Each dot must own a DEDICATED palette: _palette() caches by colour, and
+    # mutating a cached palette would tint every same-colour shape on screen.
+    shaders = {id(d.pixel_shader) for d in dots}
+    assert len(shaders) == 3
+    assert not any(id(d.pixel_shader) == id(code._palette(code.ACCENT))
+                   for d in dots)
+
+    # Navigating away disarms the ticker.
+    code.handle({"mode": "idle"})
+    assert not code._claim_refs["dots"]
 
 
 def test_claim_with_wifi_then_psk_omitted_clears_psk(fw):
