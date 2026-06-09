@@ -16,7 +16,7 @@ import { VpnStep } from "@/components/setup/steps/VpnStep";
 import { AiStep } from "@/components/setup/steps/AiStep";
 import { TeamStep } from "@/components/setup/steps/TeamStep";
 import { DoneStep } from "@/components/setup/steps/DoneStep";
-import { STEPS, type Step } from "@/components/setup/wizard-steps";
+import { CLIENT_ONLY_STEPS, STEPS, type Step } from "@/components/setup/wizard-steps";
 import { SetupNavProvider } from "@/components/setup/setup-nav";
 
 /**
@@ -113,7 +113,11 @@ export default function SetupPage() {
       maxReachedRef.current = nextIdx;
       setMaxReachedIdx(nextIdx);
       // Fire-and-forget; local progress is never gated on the round-trip.
-      void patchSetupStep(next);
+      // Client-only steps (twofactor) have no server SETUP_STEPS value — the
+      // server would 400 INVALID_SETUP_STEP and, being fire-and-forget, the
+      // failure would be silent. Skip them; the pointer catches up on the
+      // next persisted step.
+      if (!CLIENT_ONLY_STEPS.has(next)) void patchSetupStep(next);
     }
   }, []);
 
@@ -128,7 +132,9 @@ export default function SetupPage() {
     if (nextIdx > maxReachedRef.current) {
       maxReachedRef.current = nextIdx;
       setMaxReachedIdx(nextIdx);
-      void patchSetupStep(next);
+      // Same client-only guard as setStep — never persist a step the server
+      // rejects (silent 400 on the fire-and-forget PATCH).
+      if (!CLIENT_ONLY_STEPS.has(next)) void patchSetupStep(next);
     }
   }, []);
 

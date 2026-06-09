@@ -60,3 +60,16 @@ export const STEPS: Step[] = [
   "team",
   "done",
 ];
+
+/**
+ * Steps that exist only in this client's state machine — no `SetupStep`
+ * Prisma-enum value / orchestrator `SETUP_STEPS` entry (see the §1 note:
+ * `twofactor` is deliberately client-only per PR #375). The resume pointer
+ * (`PATCH /api/setup/state`) must never be sent one of these: the server
+ * rejects it 400 INVALID_SETUP_STEP, and because the persist is
+ * fire-and-forget the failure is silent — the stored pointer just goes one
+ * step stale. The page skips persisting these; a refresh while ON a
+ * client-only step resumes at the last persisted step before it (`org`),
+ * which renders fine and continues forward.
+ */
+export const CLIENT_ONLY_STEPS: ReadonlySet<Step> = new Set(["twofactor"]);
