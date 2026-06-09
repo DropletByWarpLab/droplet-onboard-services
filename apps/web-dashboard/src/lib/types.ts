@@ -37,6 +37,15 @@ export interface ChatMessage {
   /** Tool dispatches surfaced on this assistant turn (if any). */
   toolCalls?: ChatToolCall[];
   /**
+   * WARP-458 — concatenated deep-reasoning trace for this assistant
+   * turn. Accumulated live from `reasoning_step` SSE events and carried
+   * through loadConversation from the persisted row. Rendered as the
+   * collapsed "Thought process" disclosure above the bubble.
+   */
+  reasoning?: string;
+  /** WARP-844 — thumbs rating on an assistant turn (null/absent = unrated). */
+  feedback?: "up" | "down" | null;
+  /**
    * Set on an assistant message when the turn failed (network error,
    * ai-gateway down, MCP child crashed, model returned `stop_reason:
    * "error"`). The UI renders a friendly message + retry button rather
@@ -115,6 +124,15 @@ export interface ChatRequest {
   /** WARP-174: skip /chat history persistence for throwaway turns
    * (setup wizard "Ask the AI" probe, health checks). Default false. */
   ephemeral?: boolean;
+  /** Brain-memory items attached to this conversation (WARP-203). Sent
+   * on every turn; the orchestrator verifies ownership and injects the
+   * extracted content as a system message so the model actually sees
+   * what the user attached. */
+  attachments?: { itemId: string }[];
+  /** WARP-458 — ask the orchestrator to emit `reasoning_step` SSE events
+   * before the answer. Persistence of the trace happens server-side
+   * regardless; this only gates the live wire. */
+  captureReasoning?: boolean;
 }
 
 export interface ModelInfo {

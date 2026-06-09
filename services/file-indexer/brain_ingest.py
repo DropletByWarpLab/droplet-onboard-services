@@ -187,22 +187,23 @@ def handle_brain_uploaded(payload: dict) -> None:
         "brain_ingest: indexing item=%s user=%s mime=%s", item_id, user_id, mime
     )
 
-    # WARP-305: image-only attachments. There's no text to extract from a
-    # bare PNG/JPEG/HEIC, so running the extractor → "< 10 chars" check
-    # used to mark the chip as `failed` with reason=`empty_extraction`.
-    # That bubbled up as the "Something went wrong on this turn" toast in
-    # the chat surface because `empty_extraction` had no friendly mapping.
+    # WARP-305 → WARP-844: chat-attached images take an OCR-FIRST path.
     #
-    # The image IS successfully stored (the bytes live under the item dir
-    # for future retrieval and the row is in BrainMemoryItem) — it just
-    # isn't searchable by text content. Mark it `ready` with an
-    # `image_only` warning so the dashboard chip renders ✓ Ready with a
-    # softer subtitle instead of ⚠ Failed. Multimodal chat (sending
-    # images straight to the model as content_parts) is a separate
-    # follow-up; this fix is about not lying to the user.
-    if isinstance(mime, str) and mime.startswith("image/"):
+    # WARP-305 skipped extraction for image/* entirely because a photo
+    # with no text used to land as ⚠ Failed (`empty_extraction`) — but
+    # that also threw away the text in screenshots and scanned documents,
+    # which is exactly what users attach to a chat. WARP-844 runs the
+    # image OCR extractor like any other MIME and only falls back to the
+    # WARP-305 "✓ Ready (image_only)" outcome when OCR finds nothing —
+    # photos keep the friendly chip, screenshots become searchable and
+    # get inlined into the chat turn like every other attachment.
+    # Multimodal chat (image bytes to a vision model) remains a separate
+    # follow-up.
+    is_image = isinstance(mime, str) and mime.startswith("image/")
+
+    def _finish_image_only() -> None:
         logger.info(
-            "brain_ingest: image-only attachment, skipping text extraction for %s",
+            "brain_ingest: image attachment with no OCR-able text for %s",
             path,
         )
         try:
@@ -236,11 +237,15 @@ def handle_brain_uploaded(payload: dict) -> None:
             logger.warning(
                 "brain_ingest: failed to write image-only manifest: %s", e
             )
-        return
 
     # Extract.
     doc = dispatch(path, mime)
     if doc is None:
+        if is_image:
+            # OCR backend unavailable / unsupported variant — same
+            # user-facing outcome as "no text in the image".
+            _finish_image_only()
+            return
         logger.info(
             "brain_ingest: dispatch returned None (unsupported / oversized) for %s",
             path,
@@ -267,6 +272,10 @@ def handle_brain_uploaded(payload: dict) -> None:
     # consumes spans directly so it can attach each chunk's anchor.
     full_text = _full_text_from_doc(doc)
     if not full_text or len(full_text.strip()) < 10:
+        if is_image:
+            # A photo, not a document — the WARP-305 friendly outcome.
+            _finish_image_only()
+            return
         logger.info("brain_ingest: extracted text too small for %s", path)
         warnings.append("empty_extraction")
         _publish_status(user_id, item_id, "failed", reason="empty_extraction")

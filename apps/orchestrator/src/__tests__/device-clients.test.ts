@@ -16,6 +16,9 @@ vi.mock("../config.js", () => ({
     MAX_UPLOAD_SIZE_MB: 10,
     NEXTCLOUD_URL: "http://nextcloud.test",
     AUTH_ENABLED: false,
+    // camera-retention-purge.service.ts derefs this at module scope;
+    // the real config defaults it, so the mock must carry it too.
+    FRIGATE_URL: "http://frigate:5000",
     DEVICE_SECRET_KEY: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
   },
 }));
@@ -46,7 +49,12 @@ const pairingStore = new Map<string, any>();
 const clientStore = new Map<string, any>();
 
 vi.mock("@prisma/client", () => {
-  const mockPrisma = {
+  const tables = {
+    // BUG-11: requirePasswordChangeGate reads prisma.user.findUnique on
+    // every request; null = no directory row = fail-open.
+    user: {
+      findUnique: vi.fn().mockResolvedValue(null),
+    },
     $connect: vi.fn().mockResolvedValue(undefined),
     $disconnect: vi.fn().mockResolvedValue(undefined),
     $queryRaw: vi.fn().mockResolvedValue([{ "?column?": 1 }]),
@@ -86,6 +94,25 @@ vi.mock("@prisma/client", () => {
         }
         throw new Error("not found");
       }),
+      // The claim route consumes the code atomically via
+      // `updateMany({ where: { id, used: false, expiresAt: { gt } } })`
+      // and checks `count` to detect replays — honor those predicates.
+      updateMany: vi.fn(async ({ where, data }: any) => {
+        let count = 0;
+        for (const r of pairingStore.values()) {
+          if (where?.id && r.id !== where.id) continue;
+          if (where?.used !== undefined && r.used !== where.used) continue;
+          if (
+            where?.expiresAt?.gt &&
+            !(new Date(r.expiresAt) > new Date(where.expiresAt.gt))
+          ) {
+            continue;
+          }
+          Object.assign(r, data);
+          count++;
+        }
+        return { count };
+      }),
     },
     deviceClient: {
       create: vi.fn(async ({ data }: any) => {
@@ -116,6 +143,17 @@ vi.mock("@prisma/client", () => {
       }),
     },
   };
+  // The pair/claim route consumes the code + creates the DeviceClient
+  // inside an interactive transaction (device-clients.ts). Run the
+  // callback against the same tables — single-threaded tests need the
+  // API shape, not rollback semantics. Object.assign (rather than an
+  // inline self-reference) keeps tsc happy: a literal that references
+  // itself in its own initializer is TS7022.
+  const mockPrisma = Object.assign(tables, {
+    $transaction: vi.fn(
+      async (fn: (tx: typeof tables) => unknown) => fn(tables),
+    ),
+  });
   class PrismaClientKnownRequestError extends Error {
     code: string;
     clientVersion: string;

@@ -137,6 +137,11 @@ model ChatSession {
   title     String?
   model     String?
   provider  String?
+  /// WARP-844 — the caller-supplied system prompt this conversation is
+  /// held under. Persisted from the request's system message on every
+  /// turn (latest wins) and returned on GET so the dashboard restores
+  /// the textarea when the thread is reloaded. NULL = no custom prompt.
+  systemPrompt String?
   createdAt DateTime      @default(now())
   updatedAt DateTime      @default(now()) @updatedAt
   messages  ChatMessage[]
@@ -272,11 +277,20 @@ model ChatMessage {
   status      ChatMessageStatus @default(completed)
   completedAt DateTime?
   reasoning   String?
+  /// WARP-844 — user rating on an assistant turn (explicit column per the
+  /// no-guessing rule). NULL = unrated. Feeds the admin RAG-eval loop.
+  feedback    ChatMessageFeedback?
   createdAt   DateTime          @default(now())
 
   @@index([sessionId, createdAt])
   @@index([sessionId, turnId])
   @@index([sessionId, status])
+}
+
+/// WARP-844 — thumbs rating on an assistant message.
+enum ChatMessageFeedback {
+  up
+  down
 }
 
 /// WARP-329: lifecycle of a single ChatMessage row.

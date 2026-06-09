@@ -5,10 +5,13 @@ import {
   useRef,
   useMemo,
   useCallback,
+  useEffect,
   useImperativeHandle,
   forwardRef,
 } from "react";
-import { ArrowUp, Paperclip, Square, Wrench } from "lucide-react";
+import { ArrowUp, Loader2, Mic, Paperclip, Square, Wrench } from "lucide-react";
+import { transcribeAudio, SttUnavailable } from "@/lib/api";
+import { canCaptureAudio, PcmRecorder } from "@/lib/audio-capture";
 import type { ChatAttachment, ToolCatalogEntry } from "@/lib/types";
 import { AttachmentChip } from "./AttachmentChip";
 
@@ -76,6 +79,65 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
 }, ref) {
   const [value, setValue] = useState("");
   const [isDragging, setIsDragging] = useState(false);
+  // WARP-844 — voice input. "unavailable" hides the mic after the
+  // orchestrator answers 503 (whisper sidecar not deployed); jsdom and
+  // non-secure contexts hide it via canCaptureAudio().
+  const [voiceState, setVoiceState] = useState<
+    "idle" | "recording" | "transcribing" | "unavailable"
+  >(typeof window !== "undefined" && canCaptureAudio() ? "idle" : "unavailable");
+  const recorderRef = useRef<PcmRecorder | null>(null);
+
+  // Release the microphone if the composer unmounts mid-recording
+  // (navigation away) — otherwise the tab's mic indicator stays on and
+  // the capture stream leaks until the page is torn down.
+  useEffect(() => {
+    return () => {
+      const rec = recorderRef.current;
+      recorderRef.current = null;
+      if (rec) void rec.stop().catch(() => undefined);
+    };
+  }, []);
+
+  const toggleRecording = async () => {
+    if (voiceState === "transcribing" || voiceState === "unavailable") return;
+    if (voiceState === "recording") {
+      setVoiceState("transcribing");
+      try {
+        const rec = recorderRef.current;
+        recorderRef.current = null;
+        if (!rec) {
+          setVoiceState("idle");
+          return;
+        }
+        const { pcm, rate } = await rec.stop();
+        const { text } = await transcribeAudio(pcm, rate);
+        if (text) {
+          setValue((prev) => (prev ? `${prev} ${text}` : text));
+          textareaRef.current?.focus();
+        }
+        setVoiceState("idle");
+      } catch (err) {
+        if (err instanceof SttUnavailable) {
+          setVoiceState("unavailable");
+        } else {
+          // eslint-disable-next-line no-console
+          console.warn("[voice] transcription failed:", err);
+          setVoiceState("idle");
+        }
+      }
+      return;
+    }
+    try {
+      const rec = new PcmRecorder();
+      await rec.start();
+      recorderRef.current = rec;
+      setVoiceState("recording");
+    } catch {
+      // Mic permission denied / no device — treat as unavailable for
+      // this session rather than erroring on every click.
+      setVoiceState("unavailable");
+    }
+  };
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -202,6 +264,18 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     e.preventDefault();
     setIsDragging(false);
     handleFiles(e.dataTransfer.files);
+  };
+
+  // Paste-to-attach: a clipboard paste carrying files (screenshot, file
+  // copied from Finder/Explorer, ...) routes through the same attach path
+  // as drag-and-drop. Text-only pastes fall through to the default
+  // textarea behavior untouched.
+  const onPaste: React.ClipboardEventHandler<HTMLTextAreaElement> = (e) => {
+    if (!onAttach) return;
+    const files = e.clipboardData?.files;
+    if (!files || files.length === 0) return;
+    e.preventDefault();
+    handleFiles(files);
   };
 
   // Expose insertQuote to the parent — see ChatInputHandle. Wraps the
@@ -356,6 +430,35 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
             </button>
           </>
         ) : null}
+        {voiceState !== "unavailable" ? (
+          <button
+            type="button"
+            onClick={() => void toggleRecording()}
+            disabled={disabled || voiceState === "transcribing"}
+            aria-label={
+              voiceState === "recording"
+                ? "Stop recording"
+                : voiceState === "transcribing"
+                  ? "Transcribing…"
+                  : "Dictate a message"
+            }
+            aria-pressed={voiceState === "recording"}
+            className={`w-11 h-11 rounded-full flex items-center justify-center
+              transition-colors duration-150
+              disabled:opacity-50 disabled:cursor-not-allowed
+              ${
+                voiceState === "recording"
+                  ? "bg-system-red/15 text-system-red animate-pulse"
+                  : "bg-surface-secondary text-label-secondary hover:text-label-primary hover:bg-label-quaternary/40"
+              }`}
+          >
+            {voiceState === "transcribing" ? (
+              <Loader2 size={18} strokeWidth={2.5} className="animate-spin" />
+            ) : (
+              <Mic size={18} strokeWidth={2.5} />
+            )}
+          </button>
+        ) : null}
         <textarea
           ref={textareaRef}
           value={value}
@@ -365,6 +468,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           }}
           onKeyDown={handleKeyDown}
           onInput={handleInput}
+          onPaste={onPaste}
           placeholder="Send a message..."
           disabled={disabled}
           rows={1}

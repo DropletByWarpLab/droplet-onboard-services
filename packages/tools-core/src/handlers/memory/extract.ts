@@ -2,14 +2,21 @@
  * WARP-461 — `memory_extract_fact` LLM tool.
  *
  * Persists a durable memory fact extracted from the current conversation.
- * Tier 2 (write + requires confirmation) — the agent loop emits a
- * `confirm_action` card to the user before calling this handler; the
- * handler ONLY runs after user confirmation.
+ * Tier 2 (write + requires confirmation), enforced BY THE HANDLER:
+ * neither the MCP server nor the agent loop enforces the
+ * `requiresConfirmation` flag generically, so the first call returns
+ * `confirmation_required` (no write) with the proposed fact echoed in
+ * the message. The model relays it to the user and re-issues the call
+ * with `confirmed: true` only after the user explicitly approves —
+ * same in-chat completion shape as the firewall tools' supervised
+ * path, without run_scene's single-use REST token (saving a text fact
+ * doesn't need replay protection; the write is RBAC-gated upstream).
  *
  * `category` is constrained to the same five-value enum as the recall
  * tool. `evidenceChatId` is recommended so the fact's row carries a
  * back-link to the source conversation (FEATURES.md §5 spec field).
  */
+import { confirmationRequired } from "../../confirmation.js";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 
 const inputSchema = {
@@ -31,6 +38,11 @@ const inputSchema = {
       type: "string",
       description:
         "UUID of the ChatSession this fact was extracted from. Optional but recommended for traceability.",
+    },
+    confirmed: {
+      type: "boolean",
+      description:
+        "Set true ONLY after the user has explicitly approved saving this exact fact in this conversation. Omit (or set false) on the first call — the tool will reply confirmation_required with the fact to relay to the user for approval.",
     },
   },
   required: ["category", "fact"],
@@ -63,6 +75,20 @@ async function handler(
   const evidenceChatId =
     typeof args.evidenceChatId === "string" ? args.evidenceChatId : null;
 
+  // Confirmation gate — AFTER validation (a malformed call should fail
+  // loudly, not ask the user to approve garbage) and BEFORE any write.
+  // The details block mirrors the WARP-640 confirmation shape (`type`
+  // discriminator) so the dashboard chip renders a meaningful "needs
+  // approval" state and a future one-click approve can extend it.
+  if (args.confirmed !== true) {
+    return confirmationRequired(
+      `I'd like to remember this ${category.toLowerCase()} fact: "${fact}". ` +
+        "Ask the user to approve, then re-issue this call with confirmed: true. " +
+        "Do NOT set confirmed: true without an explicit yes from the user.",
+      { type: "memory_fact_save", category, fact, evidenceChatId },
+    );
+  }
+
   const created = await ctx.prisma.memoryFact.create({
     data: {
       category: category as "Tone" | "Workflow" | "Scope" | "Schedule" | "Other",
@@ -86,7 +112,7 @@ async function handler(
 const tool: Tool = {
   name: "memory_extract_fact",
   description:
-    "Persist a durable memory fact about the user or workspace. Use when the conversation reveals a preference, recurring workflow, scope assumption, or schedule the user has stated. Tier-2 write — requires operator confirmation. Pair with memory_recall to check if the fact already exists before extracting.",
+    "Persist a durable memory fact about the user or workspace. Use when the conversation reveals a preference, recurring workflow, scope assumption, or schedule the user has stated. Two-step: the first call returns confirmation_required with the proposed fact — relay it to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true. Pair with memory_recall to check if the fact already exists before extracting.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

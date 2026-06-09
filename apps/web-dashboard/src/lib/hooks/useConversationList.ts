@@ -30,12 +30,16 @@ export function useConversationList(): {
   isLoading: boolean;
   error: string | null;
   loadMore: () => Promise<void>;
+  /** WARP-844 — current search needle ("" = no filter). */
+  search: string;
+  setSearch: (q: string) => void;
   optimisticInsert: (item: ConversationSummary) => void;
   applyTurnCompleted: (id: string) => Promise<void>;
   rename: (id: string, title: string) => Promise<void>;
   remove: (id: string) => Promise<boolean>;
 } {
   const [flat, setFlat] = useState<ConversationSummary[]>([]);
+  const [search, setSearch] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
@@ -62,12 +66,19 @@ export function useConversationList(): {
     };
   }, []);
 
-  // Initial load
+  // Initial load + refetch-on-search (WARP-844). A search change resets
+  // pagination and replaces the list wholesale; "" restores the
+  // unfiltered first page.
   useEffect(() => {
     let cancelled = false;
+    setIsLoading(true);
     (async () => {
       try {
-        const page = await listConversations({ limit: PAGE_SIZE, offset: 0 });
+        const page = await listConversations({
+          limit: PAGE_SIZE,
+          offset: 0,
+          ...(search ? { q: search } : {}),
+        });
         if (cancelled) return;
         setFlat(page);
         offsetRef.current = page.length;
@@ -82,7 +93,7 @@ export function useConversationList(): {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [search]);
 
   const loadMore = useCallback(async () => {
     if (inFlightRef.current || !hasMore) return;
@@ -91,6 +102,7 @@ export function useConversationList(): {
       const next = await listConversations({
         limit: PAGE_SIZE,
         offset: offsetRef.current,
+        ...(search ? { q: search } : {}),
       });
       if (!isMountedRef.current) return;
       setFlat((prev) => [...prev, ...next]);
@@ -102,7 +114,7 @@ export function useConversationList(): {
     } finally {
       inFlightRef.current = false;
     }
-  }, [hasMore]);
+  }, [hasMore, search]);
 
   const optimisticInsert = useCallback((item: ConversationSummary) => {
     setFlat((prev) => {
@@ -172,6 +184,8 @@ export function useConversationList(): {
     isLoading,
     error,
     loadMore,
+    search,
+    setSearch,
     optimisticInsert,
     applyTurnCompleted,
     rename,

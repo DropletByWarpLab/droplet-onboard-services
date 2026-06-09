@@ -1,13 +1,14 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Plus } from "lucide-react";
+import { Plus, Search, X } from "lucide-react";
 import { Dialog } from "@/components/Dialog";
 import { useToast } from "@/components/Toast";
 import { useConversationList } from "@/lib/hooks/useConversationList";
 import { translateError } from "@/lib/friendly-errors";
 import type { ConversationSummary } from "@/lib/api";
 import { ChatHistoryRow } from "./ChatHistoryRow";
+import { exportConversationMarkdown } from "@/lib/export-conversation";
 
 export interface ChatHistoryPanelHandle {
   optimisticInsert: (item: ConversationSummary) => void;
@@ -36,11 +37,19 @@ export function ChatHistoryPanel({
     isLoading,
     error,
     loadMore,
+    setSearch,
     optimisticInsert,
     applyTurnCompleted,
     rename,
     remove,
   } = useConversationList();
+  // WARP-844 — raw input value, debounced into the hook's search needle
+  // so we don't refetch on every keystroke.
+  const [searchDraft, setSearchDraft] = useState("");
+  useEffect(() => {
+    const t = setTimeout(() => setSearch(searchDraft.trim()), 250);
+    return () => clearTimeout(t);
+  }, [searchDraft, setSearch]);
   const { toast } = useToast();
   const [pendingDelete, setPendingDelete] = useState<ConversationSummary | null>(null);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
@@ -98,6 +107,14 @@ export function ChatHistoryPanel({
     }
   };
 
+  const handleExport = async (id: string) => {
+    try {
+      await exportConversationMarkdown(id);
+    } catch (err) {
+      toast(translateError(err, "chat"));
+    }
+  };
+
   return (
     <div className="flex flex-col h-full">
       <div className="px-3 pt-3 pb-2 border-b border-separator">
@@ -110,6 +127,31 @@ export function ChatHistoryPanel({
         >
           <Plus size={16} /> New chat
         </button>
+        <div className="relative mt-2">
+          <Search
+            size={14}
+            aria-hidden="true"
+            className="absolute left-2.5 top-1/2 -translate-y-1/2 text-label-tertiary pointer-events-none"
+          />
+          <input
+            type="search"
+            value={searchDraft}
+            onChange={(e) => setSearchDraft(e.target.value)}
+            placeholder="Search chats…"
+            aria-label="Search chats"
+            className="dp-input type-footnote h-8 w-full pl-8 pr-7"
+          />
+          {searchDraft && (
+            <button
+              type="button"
+              onClick={() => setSearchDraft("")}
+              aria-label="Clear search"
+              className="absolute right-1.5 top-1/2 -translate-y-1/2 p-1 rounded-sm text-label-tertiary hover:text-label-primary"
+            >
+              <X size={12} aria-hidden="true" />
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto px-2 py-2">
@@ -138,6 +180,7 @@ export function ChatHistoryPanel({
                       onSelect={() => onSelect(item.id)}
                       onRenameSubmit={(title) => handleRename(item.id, title)}
                       onDeleteRequest={() => setPendingDelete(item)}
+                      onExport={() => void handleExport(item.id)}
                     />
                   ))}
                 </div>

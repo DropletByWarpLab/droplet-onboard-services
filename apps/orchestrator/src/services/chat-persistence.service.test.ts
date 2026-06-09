@@ -13,6 +13,7 @@ interface MockSession {
   title: string | null;
   model: string | null;
   provider: string | null;
+  systemPrompt?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -53,18 +54,50 @@ function makePrismaMock() {
       }
       return row;
     }),
-    findMany: vi.fn(async (args: { where: { userId: string }; take: number; skip: number }) => {
-      return sessions
-        .filter((s) => s.userId === args.where.userId)
-        .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())
-        .slice(args.skip, args.skip + args.take);
-    }),
+    findMany: vi.fn(
+      async (args: {
+        where: {
+          userId: string;
+          OR?: Array<{
+            title?: { contains: string; mode: string };
+            messages?: {
+              some: { content: { contains: string; mode: string } };
+            };
+          }>;
+        };
+        take: number;
+        skip: number;
+      }) => {
+        // Honor the WARP-844 search predicate: title ILIKE OR any message
+        // content ILIKE. Mirrors Prisma's `contains` + `mode:"insensitive"`.
+        const matchesSearch = (s: MockSession): boolean => {
+          if (!args.where.OR) return true;
+          const titleNeedle = args.where.OR.find((c) => c.title)?.title
+            ?.contains;
+          const contentNeedle = args.where.OR.find((c) => c.messages)?.messages
+            ?.some.content.contains;
+          const t = (titleNeedle ?? contentNeedle ?? "").toLowerCase();
+          if (!t) return true;
+          if ((s.title ?? "").toLowerCase().includes(t)) return true;
+          return messages.some(
+            (m) =>
+              m.sessionId === s.id && m.content.toLowerCase().includes(t),
+          );
+        };
+        return sessions
+          .filter((s) => s.userId === args.where.userId)
+          .filter(matchesSearch)
+          .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())
+          .slice(args.skip, args.skip + args.take);
+      },
+    ),
     create: vi.fn(async (args: { data: Omit<MockSession, "id" | "createdAt" | "updatedAt"> }) => {
       const row: MockSession = {
         id: `sess-${sessions.length + 1}`,
         title: args.data.title ?? null,
         model: args.data.model ?? null,
         provider: args.data.provider ?? null,
+        systemPrompt: args.data.systemPrompt ?? null,
         userId: args.data.userId,
         createdAt: new Date(),
         updatedAt: new Date(),
@@ -72,9 +105,9 @@ function makePrismaMock() {
       sessions.push(row);
       return row;
     }),
-    update: vi.fn(async (args: { where: { id: string }; data: { updatedAt: Date } }) => {
+    update: vi.fn(async (args: { where: { id: string }; data: Partial<MockSession> }) => {
       const row = sessions.find((s) => s.id === args.where.id);
-      if (row) row.updatedAt = args.data.updatedAt;
+      if (row) Object.assign(row, args.data);
       return row;
     }),
     deleteMany: vi.fn(async (args: { where: { id: string; userId: string } }) => {
@@ -88,6 +121,53 @@ function makePrismaMock() {
   };
 
   const chatMessage = {
+    // Truncation support: ordered listing + bulk delete by id set.
+    findMany: vi.fn(
+      async (args: {
+        where: { sessionId: string };
+        orderBy?: unknown;
+        select?: { id: boolean; turnId?: boolean; status?: boolean };
+      }) => {
+        return messages
+          .filter((m) => m.sessionId === args.where.sessionId)
+          .sort(
+            (a, b) =>
+              a.createdAt.getTime() - b.createdAt.getTime() ||
+              a.id.localeCompare(b.id),
+          )
+          .map((m) => ({ id: m.id, turnId: m.turnId, status: m.status }));
+      },
+    ),
+    updateMany: vi.fn(
+      async (args: {
+        where: { id: string; sessionId: string };
+        data: { feedback?: string | null };
+      }) => {
+        let count = 0;
+        for (const m of messages) {
+          if (m.id === args.where.id && m.sessionId === args.where.sessionId) {
+            Object.assign(m, args.data);
+            count++;
+          }
+        }
+        return { count };
+      },
+    ),
+    deleteMany: vi.fn(
+      async (args: { where: { id: { in: string[] }; sessionId: string } }) => {
+        let count = 0;
+        for (let i = messages.length - 1; i >= 0; i--) {
+          if (
+            args.where.id.in.includes(messages[i]!.id) &&
+            messages[i]!.sessionId === args.where.sessionId
+          ) {
+            messages.splice(i, 1);
+            count++;
+          }
+        }
+        return { count };
+      },
+    ),
     findFirst: vi.fn(async (args: { where: { sessionId: string; turnId: string; role: string } }) => {
       return (
         messages.find(
@@ -152,6 +232,303 @@ function makePrismaMock() {
 }
 
 describe("ChatPersistenceService (WARP-304)", () => {
+  it("ensureConversation persists + refreshes the system prompt (WARP-844)", async () => {
+    const { prisma, sessions } = makePrismaMock();
+    const svc = new ChatPersistenceService(prisma as never);
+
+    // Create with a prompt.
+    const created = await svc.ensureConversation({
+      conversationId: null,
+      userId: "alice",
+      model: "m1",
+      firstUserContent: "hi",
+      systemPrompt: "You are a pirate.",
+    });
+    expect(sessions.find((s) => s.id === created.id)?.systemPrompt).toBe(
+      "You are a pirate.",
+    );
+
+    // Later turn with a CHANGED prompt updates the row (latest wins).
+    await svc.ensureConversation({
+      conversationId: created.id,
+      userId: "alice",
+      model: "m1",
+      firstUserContent: "again",
+      systemPrompt: "You are a poet.",
+    });
+    expect(sessions.find((s) => s.id === created.id)?.systemPrompt).toBe(
+      "You are a poet.",
+    );
+
+    // A turn with no prompt clears it (the user emptied the textarea).
+    await svc.ensureConversation({
+      conversationId: created.id,
+      userId: "alice",
+      model: "m1",
+      firstUserContent: "third",
+      systemPrompt: null,
+    });
+    expect(
+      sessions.find((s) => s.id === created.id)?.systemPrompt,
+    ).toBeNull();
+  });
+
+  it("setMessageFeedback rates an assistant row and clears on null (WARP-844)", async () => {
+    const { prisma, sessions, messages } = makePrismaMock();
+    const svc = new ChatPersistenceService(prisma as never);
+    const now = new Date();
+    sessions.push({
+      id: "s1",
+      userId: "alice",
+      title: "t",
+      model: null,
+      provider: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    messages.push({
+      id: "a1",
+      sessionId: "s1",
+      role: "assistant",
+      content: "answer",
+      turnId: null,
+      status: "completed",
+      completedAt: now,
+      createdAt: now,
+    });
+
+    expect(await svc.setMessageFeedback("s1", "alice", "a1", "up")).toBe(true);
+    expect(
+      (messages[0] as { feedback?: string | null }).feedback,
+    ).toBe("up");
+
+    expect(await svc.setMessageFeedback("s1", "alice", "a1", null)).toBe(true);
+    expect(
+      (messages[0] as { feedback?: string | null }).feedback,
+    ).toBeNull();
+
+    // Cross-user and unknown ids refuse without writes.
+    expect(await svc.setMessageFeedback("s1", "mallory", "a1", "down")).toBe(
+      false,
+    );
+    expect(await svc.setMessageFeedback("s1", "alice", "nope", "down")).toBe(
+      false,
+    );
+  });
+
+  it("truncateConversationFromMessage deletes the target row and everything after it", async () => {
+    const { prisma, sessions, messages } = makePrismaMock();
+    const svc = new ChatPersistenceService(prisma as never);
+    const base = Date.parse("2026-06-09T10:00:00Z");
+    sessions.push({
+      id: "s1",
+      userId: "alice",
+      title: "t",
+      model: null,
+      provider: null,
+      createdAt: new Date(base),
+      updatedAt: new Date(base),
+    });
+    const mk = (id: string, role: string, offsetMs: number) => ({
+      id,
+      sessionId: "s1",
+      role,
+      content: `${id} content`,
+      turnId: null,
+      status: "completed",
+      completedAt: new Date(base + offsetMs),
+      createdAt: new Date(base + offsetMs),
+    });
+    messages.push(
+      mk("m1", "user", 0),
+      mk("m2", "assistant", 1),
+      mk("m3", "user", 2),
+      mk("m4", "assistant", 3),
+    );
+
+    const deleted = await svc.truncateConversationFromMessage("s1", "alice", "m3");
+    expect(deleted).toBe(2);
+    expect(messages.map((m) => m.id)).toEqual(["m1", "m2"]);
+  });
+
+  it("truncateConversationFromMessage refuses cross-user and unknown targets", async () => {
+    const { prisma, sessions, messages } = makePrismaMock();
+    const svc = new ChatPersistenceService(prisma as never);
+    const now = new Date();
+    sessions.push({
+      id: "s1",
+      userId: "alice",
+      title: "t",
+      model: null,
+      provider: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    messages.push({
+      id: "m1",
+      sessionId: "s1",
+      role: "user",
+      content: "hi",
+      turnId: null,
+      status: "completed",
+      completedAt: now,
+      createdAt: now,
+    });
+
+    // Wrong owner → refused, nothing deleted.
+    expect(
+      await svc.truncateConversationFromMessage("s1", "mallory", "m1"),
+    ).toBe("not_found");
+    expect(messages).toHaveLength(1);
+    // Unknown message id → refused.
+    expect(
+      await svc.truncateConversationFromMessage("s1", "alice", "nope"),
+    ).toBe("not_found");
+    expect(messages).toHaveLength(1);
+  });
+
+  it("truncate includes the edited turn's assistant sibling even when it sorts before the user row", async () => {
+    const { prisma, sessions, messages } = makePrismaMock();
+    const svc = new ChatPersistenceService(prisma as never);
+    const base = Date.parse("2026-06-09T10:00:00Z");
+    sessions.push({
+      id: "s1",
+      userId: "alice",
+      title: "t",
+      model: null,
+      provider: null,
+      createdAt: new Date(base),
+      updatedAt: new Date(base),
+    });
+    // Turn rows are written in one transaction and tie at ms precision;
+    // uuid ids make intra-turn order a coin flip. Simulate the adverse
+    // ordering: the assistant sibling's id sorts BEFORE the user row.
+    const mk = (id: string, role: string, turnId: string | null, offsetMs: number) => ({
+      id,
+      sessionId: "s1",
+      role,
+      content: `${id} content`,
+      turnId,
+      status: "completed",
+      completedAt: new Date(base + offsetMs),
+      createdAt: new Date(base + offsetMs),
+    });
+    messages.push(
+      mk("m1", "user", "t1", 0),
+      mk("m2", "assistant", "t1", 1),
+      mk("a-assistant", "assistant", "t2", 1000), // ties with b-user, sorts first
+      mk("b-user", "user", "t2", 1000),
+    );
+
+    const deleted = await svc.truncateConversationFromMessage(
+      "s1",
+      "alice",
+      "b-user",
+    );
+    // Both turn-2 rows die — the slice alone would have left a-assistant.
+    expect(deleted).toBe(2);
+    expect(messages.map((m) => m.id).sort()).toEqual(["m1", "m2"]);
+  });
+
+  it("truncate refuses with in_flight when a doomed row is still streaming", async () => {
+    const { prisma, sessions, messages } = makePrismaMock();
+    const svc = new ChatPersistenceService(prisma as never);
+    const now = new Date();
+    sessions.push({
+      id: "s1",
+      userId: "alice",
+      title: "t",
+      model: null,
+      provider: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    messages.push(
+      {
+        id: "u1",
+        sessionId: "s1",
+        role: "user",
+        content: "edit me",
+        turnId: "t1",
+        status: "completed",
+        completedAt: now,
+        createdAt: now,
+      },
+      {
+        id: "a1",
+        sessionId: "s1",
+        role: "assistant",
+        content: "",
+        turnId: "t1",
+        status: "streaming",
+        completedAt: null,
+        createdAt: new Date(now.getTime() + 1),
+      },
+    );
+
+    expect(
+      await svc.truncateConversationFromMessage("s1", "alice", "u1"),
+    ).toBe("in_flight");
+    expect(messages).toHaveLength(2);
+  });
+
+  it("listConversationsForUser filters by title OR message content when q is set", async () => {
+    const { prisma, sessions, messages } = makePrismaMock();
+    const svc = new ChatPersistenceService(prisma as never);
+    const now = new Date();
+    sessions.push(
+      {
+        id: "s1",
+        userId: "alice",
+        title: "Frigate camera ports",
+        model: null,
+        provider: null,
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: "s2",
+        userId: "alice",
+        title: "Dinner plans",
+        model: null,
+        provider: null,
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: "s3",
+        userId: "bob",
+        title: "Frigate on bob's account",
+        model: null,
+        provider: null,
+        createdAt: now,
+        updatedAt: now,
+      },
+    );
+    messages.push({
+      id: "m1",
+      sessionId: "s2",
+      role: "user",
+      content: "what ports does frigate need?",
+      turnId: null,
+      status: "completed",
+      completedAt: now,
+      createdAt: now,
+    });
+
+    // Title hit (s1) + message-content hit (s2); bob's session never leaks.
+    const hits = await svc.listConversationsForUser("alice", 20, 0, "frigate");
+    expect(hits.map((h) => h.id).sort()).toEqual(["s1", "s2"]);
+
+    // No needle → unfiltered list (back-compat).
+    const all = await svc.listConversationsForUser("alice", 20, 0);
+    expect(all).toHaveLength(2);
+
+    // Whitespace-only needle behaves like no needle.
+    const blank = await svc.listConversationsForUser("alice", 20, 0, "   ");
+    expect(blank).toHaveLength(2);
+  });
+
   it("ensureConversation creates a fresh session keyed to the user", async () => {
     const { prisma, sessions } = makePrismaMock();
     // The mock is shaped like PrismaClient at the surface we use; cast

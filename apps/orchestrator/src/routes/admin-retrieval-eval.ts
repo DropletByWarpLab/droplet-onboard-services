@@ -265,7 +265,13 @@ function makeAdminEvalChatAdapter() {
   }): Promise<{ content: string }> => {
     const ai = await import("../services/ai-gateway.client.js");
     const res = await ai.chat({
-      model: process.env.DEFAULT_MODEL ?? "mistral:7b-instruct",
+      // LLM_MODEL is the model the box actually hosts (single-box.sh
+      // writes it to .env); the historic mistral fallback is not pulled
+      // in production and would 404 upstream.
+      model:
+        process.env.DEFAULT_MODEL ??
+        process.env.LLM_MODEL ??
+        "mistral:7b-instruct",
       messages: [{ role: "user", content: args.prompt }],
       stream: false,
       temperature: args.temperature,

@@ -273,6 +273,52 @@ describe("ChatInput attachments", () => {
     expect(panel).not.toHaveAttribute("data-dragging");
   });
 
+  it("calls onAttach for files pasted into the textarea", () => {
+    const onAttach = vi.fn();
+    render(<ChatInput onSend={vi.fn()} onAttach={onAttach} />);
+    const textarea = screen.getByPlaceholderText("Send a message...");
+
+    const file = new File(["x"], "pasted.png", { type: "image/png" });
+    fireEvent.paste(textarea, { clipboardData: { files: [file] } });
+    expect(onAttach).toHaveBeenCalledWith(file);
+  });
+
+  it("leaves text-only pastes to the default textarea behavior", () => {
+    const onAttach = vi.fn();
+    render(<ChatInput onSend={vi.fn()} onAttach={onAttach} />);
+    const textarea = screen.getByPlaceholderText("Send a message...");
+
+    fireEvent.paste(textarea, {
+      clipboardData: { files: [], getData: () => "plain text" },
+    });
+    expect(onAttach).not.toHaveBeenCalled();
+  });
+
+  it("hides the mic when audio capture isn't available (jsdom default)", () => {
+    render(<ChatInput onSend={vi.fn()} />);
+    expect(
+      screen.queryByRole("button", { name: /dictate a message/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows the mic when the browser can capture audio", () => {
+    vi.stubGlobal("AudioContext", class {});
+    Object.defineProperty(navigator, "mediaDevices", {
+      value: { getUserMedia: vi.fn() },
+      configurable: true,
+    });
+    try {
+      render(<ChatInput onSend={vi.fn()} />);
+      expect(
+        screen.getByRole("button", { name: /dictate a message/i }),
+      ).toBeInTheDocument();
+    } finally {
+      vi.unstubAllGlobals();
+      // @ts-expect-error — cleanup of the test-injected property
+      delete navigator.mediaDevices;
+    }
+  });
+
   it("renders one chip per attachment with status text", () => {
     const attachments: ChatAttachment[] = [
       {

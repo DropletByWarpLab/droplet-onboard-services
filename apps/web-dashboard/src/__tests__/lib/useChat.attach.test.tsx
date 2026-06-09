@@ -10,9 +10,13 @@ import { act, render, waitFor } from "@testing-library/react";
 
 const mockSendChat = vi.fn();
 const mockUploadBrainFile = vi.fn();
+const mockFetchConversation = vi.fn();
+const mockGetBrainMemoryItems = vi.fn();
 vi.mock("@/lib/api", () => ({
   sendChat: (...args: unknown[]) => mockSendChat(...args),
   uploadBrainFile: (...args: unknown[]) => mockUploadBrainFile(...args),
+  fetchConversation: (...args: unknown[]) => mockFetchConversation(...args),
+  getBrainMemoryItems: (...args: unknown[]) => mockGetBrainMemoryItems(...args),
 }));
 
 import { useChat } from "@/lib/hooks/useChat";
@@ -22,6 +26,8 @@ interface ProbeValue {
   attach: ReturnType<typeof useChat>["attach"];
   removeAttachment: ReturnType<typeof useChat>["removeAttachment"];
   clearAttachments: ReturnType<typeof useChat>["clearAttachments"];
+  sendMessage: ReturnType<typeof useChat>["sendMessage"];
+  loadConversation: ReturnType<typeof useChat>["loadConversation"];
 }
 
 function Probe({
@@ -37,8 +43,29 @@ function Probe({
     attach: hook.attach,
     removeAttachment: hook.removeAttachment,
     clearAttachments: hook.clearAttachments,
+    sendMessage: hook.sendMessage,
+    loadConversation: hook.loadConversation,
   });
   return null;
+}
+
+/** Build an SSE response that ends immediately (one `done` frame). */
+function quickSseResponse(): Response {
+  const stream = new ReadableStream<Uint8Array>({
+    start(c) {
+      const enc = new TextEncoder();
+      c.enqueue(
+        enc.encode(
+          `event: done\ndata: {"iterations":1,"stop_reason":"model_done"}\n\n`,
+        ),
+      );
+      c.close();
+    },
+  });
+  return new Response(stream, {
+    status: 200,
+    headers: { "Content-Type": "text/event-stream" },
+  });
 }
 
 // Stub the WebSocket that useChat opens for MQTT status updates so the
@@ -68,6 +95,9 @@ class StubWebSocket {
 beforeEach(() => {
   mockSendChat.mockReset();
   mockUploadBrainFile.mockReset();
+  mockFetchConversation.mockReset();
+  mockGetBrainMemoryItems.mockReset();
+  mockGetBrainMemoryItems.mockResolvedValue({ items: [] });
   StubWebSocket.last = null;
   // Replace the global WebSocket while the test runs; restore in afterEach.
   vi.stubGlobal("WebSocket", StubWebSocket as unknown);
@@ -214,6 +244,265 @@ describe("useChat.attach (WARP-203)", () => {
     await waitFor(() => {
       expect(value!.attachments[0].status).toBe("ready");
     });
+  });
+
+  it("sends attachment itemIds with the chat turn so the model sees them", async () => {
+    mockUploadBrainFile.mockResolvedValueOnce({
+      itemId: "bmi-42",
+      status: "indexing",
+    });
+    mockSendChat.mockResolvedValueOnce(quickSseResponse());
+
+    let value: ProbeValue | null = null;
+    render(<Probe onValue={(v) => (value = v)} />);
+
+    await act(async () => {
+      await value!.attach(
+        new File(["hi"], "notes.md", { type: "text/markdown" }),
+      );
+    });
+    await act(async () => {
+      await value!.sendMessage("summarize my notes", "llama3");
+    });
+
+    expect(mockSendChat).toHaveBeenCalledOnce();
+    const body = mockSendChat.mock.calls[0]![0] as {
+      attachments?: { itemId: string }[];
+    };
+    expect(body.attachments).toEqual([{ itemId: "bmi-42" }]);
+  });
+
+  it("omits attachments from the turn when no chip has an itemId yet", async () => {
+    // Upload never resolves — the chip stays in "uploading" with no itemId.
+    mockUploadBrainFile.mockImplementationOnce(() => new Promise(() => {}));
+    mockSendChat.mockResolvedValueOnce(quickSseResponse());
+
+    let value: ProbeValue | null = null;
+    render(<Probe onValue={(v) => (value = v)} />);
+
+    act(() => {
+      void value!.attach(new File(["x"], "x.txt", { type: "text/plain" }));
+    });
+    await act(async () => {
+      await value!.sendMessage("hello", "llama3");
+    });
+
+    const body = mockSendChat.mock.calls[0]![0] as {
+      attachments?: { itemId: string }[];
+    };
+    expect(body.attachments).toBeUndefined();
+  });
+
+  it("tags uploads with the server conversationId once one exists", async () => {
+    // First turn establishes conv-9 via the response header.
+    mockSendChat.mockResolvedValueOnce(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(c) {
+            c.enqueue(
+              new TextEncoder().encode(
+                `event: done\ndata: {"iterations":1,"stop_reason":"model_done"}\n\n`,
+              ),
+            );
+            c.close();
+          },
+        }),
+        {
+          status: 200,
+          headers: {
+            "Content-Type": "text/event-stream",
+            "X-Conversation-Id": "conv-9",
+          },
+        },
+      ),
+    );
+    mockUploadBrainFile.mockResolvedValueOnce({
+      itemId: "bmi-1",
+      status: "indexing",
+    });
+
+    let value: ProbeValue | null = null;
+    render(<Probe onValue={(v) => (value = v)} chatId="chat-draft" />);
+
+    await act(async () => {
+      await value!.sendMessage("hello", "m1");
+    });
+    await act(async () => {
+      await value!.attach(new File(["x"], "x.txt", { type: "text/plain" }));
+    });
+
+    // Post-first-turn uploads carry the durable server id, not the
+    // client-minted draft chatId.
+    expect(mockUploadBrainFile).toHaveBeenCalledWith(expect.anything(), "conv-9");
+  });
+
+  it("rehydrates attachment chips from brain items on loadConversation", async () => {
+    mockFetchConversation.mockResolvedValueOnce({
+      id: "conv-55",
+      title: "Docs chat",
+      model: "m1",
+      provider: "ollama",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      messages: [
+        {
+          id: "m1",
+          role: "user",
+          content: "summarize",
+          toolCalls: null,
+          toolCallId: null,
+          turnId: "t1",
+          createdAt: new Date().toISOString(),
+        },
+      ],
+    });
+    mockGetBrainMemoryItems.mockResolvedValueOnce({
+      items: [
+        {
+          id: "bmi-9",
+          filename: "report.pdf",
+          mimeType: "application/pdf",
+          bytes: 1234,
+          status: "ready",
+        },
+        {
+          id: "bmi-10",
+          filename: "meeting.mp3",
+          mimeType: "audio/mpeg",
+          bytes: 999,
+          status: "queued_for_transcription",
+        },
+      ],
+    });
+
+    let value: ProbeValue | null = null;
+    render(<Probe onValue={(v) => (value = v)} />);
+
+    await act(async () => {
+      await value!.loadConversation("conv-55");
+    });
+
+    expect(mockGetBrainMemoryItems).toHaveBeenCalledWith({
+      originatingChatId: "conv-55",
+    });
+    await waitFor(() => {
+      expect(value!.attachments).toHaveLength(2);
+    });
+    expect(value!.attachments[0]).toMatchObject({
+      itemId: "bmi-9",
+      filename: "report.pdf",
+      status: "ready",
+    });
+    // queued_for_transcription renders as the indexing chip state.
+    expect(value!.attachments[1]).toMatchObject({
+      itemId: "bmi-10",
+      status: "indexing",
+    });
+  });
+
+  it("refuses the 9th attachment with a visible failed chip (review fix)", async () => {
+    mockUploadBrainFile.mockResolvedValue({ itemId: "bmi", status: "indexing" });
+    let value: ProbeValue | null = null;
+    render(<Probe onValue={(v) => (value = v)} />);
+
+    await act(async () => {
+      for (let i = 0; i < 8; i++) {
+        await value!.attach(new File(["x"], `f${i}.txt`, { type: "text/plain" }));
+      }
+    });
+    expect(mockUploadBrainFile).toHaveBeenCalledTimes(8);
+
+    await act(async () => {
+      await value!.attach(new File(["x"], "ninth.txt", { type: "text/plain" }));
+    });
+    // No 9th upload; the chip surfaces the limit instead of silently
+    // rendering as attached-but-never-sent.
+    expect(mockUploadBrainFile).toHaveBeenCalledTimes(8);
+    const ninth = value!.attachments.find((a) => a.filename === "ninth.txt")!;
+    expect(ninth.status).toBe("failed");
+    expect(ninth.error).toMatch(/limit/i);
+  });
+
+  it("drops a stale chip rehydration when another conversation loaded meanwhile (review fix)", async () => {
+    const conv = (id: string) => ({
+      id,
+      title: id,
+      model: "m1",
+      provider: "ollama",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      messages: [
+        {
+          id: `${id}-m1`,
+          role: "user",
+          content: "hi",
+          toolCalls: null,
+          toolCallId: null,
+          turnId: "t1",
+          createdAt: new Date().toISOString(),
+        },
+      ],
+    });
+    mockFetchConversation.mockImplementation(async (id: string) => conv(id));
+
+    // Conversation A's chip fetch hangs until we release it; B's resolves
+    // immediately.
+    let releaseA: (v: { items: unknown[] }) => void = () => {};
+    mockGetBrainMemoryItems.mockImplementation(
+      async ({ originatingChatId }: { originatingChatId: string }) => {
+        if (originatingChatId === "conv-A") {
+          return new Promise((res) => {
+            releaseA = res;
+          });
+        }
+        return {
+          items: [
+            {
+              id: "bmi-B",
+              filename: "b.pdf",
+              mimeType: "application/pdf",
+              bytes: 1,
+              status: "ready",
+              uploadedAt: "2026-06-09T10:00:00.000Z",
+            },
+          ],
+        };
+      },
+    );
+
+    let value: ProbeValue | null = null;
+    render(<Probe onValue={(v) => (value = v)} />);
+
+    let loadA!: Promise<boolean>;
+    await act(async () => {
+      loadA = value!.loadConversation("conv-A");
+      // A's messages resolve; its chip fetch is now pending.
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await value!.loadConversation("conv-B");
+    });
+    await waitFor(() => {
+      expect(value!.attachments.map((a) => a.itemId)).toEqual(["bmi-B"]);
+    });
+
+    // The slow loser resolves late — it must NOT clobber B's chips.
+    await act(async () => {
+      releaseA({
+        items: [
+          {
+            id: "bmi-A",
+            filename: "a.pdf",
+            mimeType: "application/pdf",
+            bytes: 1,
+            status: "ready",
+            uploadedAt: "2026-06-09T09:00:00.000Z",
+          },
+        ],
+      });
+      await loadA;
+    });
+    expect(value!.attachments.map((a) => a.itemId)).toEqual(["bmi-B"]);
   });
 
   it("ignores WS messages that aren't brain/indexed or for a different itemId", async () => {
