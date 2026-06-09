@@ -78,6 +78,15 @@ vi.mock("@prisma/client", () => {
       ]),
       update: vi.fn().mockResolvedValue({}),
     },
+    // BUG-11: app.ts installs requirePasswordChangeGate on every request;
+    // the gate calls `prisma.user.findUnique` synchronously inside the
+    // handler, so a mock without a `user` table throws a TypeError
+    // (bypassing the gate's fail-open .catch) and 500s every gated route.
+    // `null` means "no directory row" → the gate fails open, matching a
+    // fresh auth-disabled dev session.
+    user: {
+      findUnique: vi.fn().mockResolvedValue(null),
+    },
   };
   return {
     PrismaClient: vi.fn(() => mockPrisma),

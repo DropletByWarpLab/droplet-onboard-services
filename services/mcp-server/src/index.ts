@@ -246,16 +246,23 @@ async function main(): Promise<void> {
               metadataFilter: _enhancement.metadataFilter,
             }
           : undefined,
-        rerank: redis
-          ? {
-              redis: redis as unknown as {
+        // Rerank ALWAYS runs; Redis only caches the scores. When
+        // REDIS_URL is unset, substitute a no-op cache (every call
+        // hits ai-gateway) instead of dropping the rerank stage —
+        // gating rerank on the cache handle silently degraded results
+        // to RRF-only ordering. `rerankPassages` already tolerates
+        // cache and reranker failures internally, so this is safe in
+        // every environment.
+        rerank: {
+          redis: redis
+            ? (redis as unknown as {
                 get(k: string): Promise<string | null>;
                 setex(k: string, ttl: number, v: string): Promise<unknown>;
-              },
-              reranker: rerankerClient,
-              candidates: _enhancement?.searchOverrides?.rerankCandidates,
-            }
-          : undefined,
+              })
+            : { get: async () => null, setex: async () => undefined },
+          reranker: rerankerClient,
+          candidates: _enhancement?.searchOverrides?.rerankCandidates,
+        },
       });
     },
   };

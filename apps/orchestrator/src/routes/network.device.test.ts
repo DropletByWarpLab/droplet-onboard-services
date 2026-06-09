@@ -23,6 +23,9 @@ vi.mock("../config.js", () => ({
     MAX_UPLOAD_SIZE_MB: 10,
     NEXTCLOUD_URL: "http://nextcloud.test",
     AUTH_ENABLED: false,
+    // camera-retention-purge.service.ts derefs this at module scope;
+    // the real config defaults it, so the mock must carry it too.
+    FRIGATE_URL: "http://frigate:5000",
     DEVICE_SECRET_KEY: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
   },
 }));
@@ -237,6 +240,11 @@ vi.mock("@prisma/client", () => {
   };
 
   const mockPrisma = {
+    // BUG-11: requirePasswordChangeGate reads prisma.user.findUnique on
+    // every request; null = no directory row = fail-open.
+    user: {
+      findUnique: vi.fn().mockResolvedValue(null),
+    },
     $connect: vi.fn().mockResolvedValue(undefined),
     $disconnect: vi.fn().mockResolvedValue(undefined),
     $queryRaw: vi.fn().mockResolvedValue([{ "?column?": 1 }]),

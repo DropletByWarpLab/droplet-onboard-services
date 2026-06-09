@@ -71,6 +71,8 @@ export interface PersistedConversationSummary {
 }
 
 export interface PersistedConversationDetail extends PersistedConversationSummary {
+  /** WARP-844 — persisted caller system prompt, or null. */
+  systemPrompt: string | null;
   messages: Array<{
     id: string;
     role: string;
@@ -88,6 +90,8 @@ export interface PersistedConversationDetail extends PersistedConversationSummar
      * the visible content.
      */
     reasoning: string | null;
+    /** WARP-844 — thumbs rating, or null when unrated. */
+    feedback: "up" | "down" | null;
   }>;
 }
 
@@ -125,6 +129,7 @@ export class ChatPersistenceService {
       title: row.title,
       model: row.model,
       provider: row.provider,
+      systemPrompt: row.systemPrompt,
       createdAt: row.createdAt.toISOString(),
       updatedAt: row.updatedAt.toISOString(),
       messages: row.messages.map((m) => ({
@@ -141,6 +146,8 @@ export class ChatPersistenceService {
         // without re-running inference. `null` when the model produced
         // no reasoning on this turn.
         reasoning: m.reasoning ?? null,
+        // WARP-844 — thumbs rating, restored so the toolbar shows state.
+        feedback: (m.feedback as "up" | "down" | null) ?? null,
       })),
     };
   }
@@ -153,9 +160,33 @@ export class ChatPersistenceService {
     userId: string,
     limit: number,
     offset: number,
+    /** WARP-844 — optional search needle. Matches the session title OR
+     *  any message's content, case-insensitively. Whitespace-only is
+     *  treated as absent (back-compat unfiltered list). */
+    q?: string,
   ): Promise<PersistedConversationSummary[]> {
+    const search = q?.trim();
     const rows = await this.prisma.chatSession.findMany({
-      where: { userId },
+      where: {
+        userId,
+        ...(search
+          ? {
+              OR: [
+                { title: { contains: search, mode: "insensitive" as const } },
+                {
+                  messages: {
+                    some: {
+                      content: {
+                        contains: search,
+                        mode: "insensitive" as const,
+                      },
+                    },
+                  },
+                },
+              ],
+            }
+          : {}),
+      },
       orderBy: { updatedAt: "desc" },
       take: Math.min(Math.max(limit, 1), 100),
       skip: Math.max(offset, 0),
@@ -168,6 +199,87 @@ export class ChatPersistenceService {
       createdAt: r.createdAt.toISOString(),
       updatedAt: r.updatedAt.toISOString(),
     }));
+  }
+
+  /**
+   * WARP-844 — truncate a conversation from a message onward (the message
+   * itself plus everything after it, in the same `createdAt, id` order
+   * the GET endpoint renders). Backs the dashboard's edit-and-resend:
+   * the client truncates server-side BEFORE re-sending the edited
+   * prompt, so the persisted thread never diverges from what the user
+   * sees.
+   *
+   * Returns the number of deleted rows, or null when the conversation
+   * isn't owned by the user or the message isn't in it (no existence
+   * leak — callers 404 both cases identically).
+   */
+  async truncateConversationFromMessage(
+    conversationId: string,
+    userId: string,
+    messageId: string,
+  ): Promise<number | "not_found" | "in_flight"> {
+    const session = await this.prisma.chatSession.findFirst({
+      where: { id: conversationId, userId },
+    });
+    if (!session) return "not_found";
+    // Fetch ids in render order and slice from the target onward. The
+    // slice alone is NOT sufficient: createdAt ties within a turn (user
+    // + assistant rows are written in one transaction at TIMESTAMP(3)
+    // precision) and the `id asc` tiebreak is over random uuids, so the
+    // edited user row's assistant sibling can sort BEFORE it and survive
+    // the slice (reproduced ~1 in 3 turns on Postgres 16). Same-turn rows
+    // are one logical unit — extend the doomed set with every row sharing
+    // the target's turnId.
+    const ordered = await this.prisma.chatMessage.findMany({
+      where: { sessionId: conversationId },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      select: { id: true, turnId: true, status: true },
+    });
+    const idx = ordered.findIndex((m) => m.id === messageId);
+    if (idx === -1) return "not_found";
+    const doomed = new Set(ordered.slice(idx).map((m) => m.id));
+    const targetTurnId = ordered[idx]!.turnId;
+    if (targetTurnId) {
+      for (const m of ordered) {
+        if (m.turnId === targetTurnId) doomed.add(m.id);
+      }
+    }
+    // Refuse while any doomed row is mid-stream (a second tab/device can
+    // edit a conversation whose turn is streaming in another tab — the
+    // same-tab edit affordance is gated client-side only). Deleting the
+    // row out from under the agent loop leaves the streaming tab showing
+    // a reply the server discarded and publishes turn-completed for a
+    // dead messageId. The route maps this to 409.
+    if (ordered.some((m) => doomed.has(m.id) && m.status === "streaming")) {
+      return "in_flight";
+    }
+    const r = await this.prisma.chatMessage.deleteMany({
+      where: { id: { in: Array.from(doomed) }, sessionId: conversationId },
+    });
+    return r.count;
+  }
+
+  /**
+   * WARP-844 — set (or clear, with null) the thumbs rating on a message.
+   * Ownership is enforced through the session row; returns false for
+   * cross-user or unknown targets (callers 404 both identically).
+   */
+  async setMessageFeedback(
+    conversationId: string,
+    userId: string,
+    messageId: string,
+    feedback: "up" | "down" | null,
+  ): Promise<boolean> {
+    const session = await this.prisma.chatSession.findFirst({
+      where: { id: conversationId, userId },
+      select: { id: true },
+    });
+    if (!session) return false;
+    const r = await this.prisma.chatMessage.updateMany({
+      where: { id: messageId, sessionId: conversationId },
+      data: { feedback },
+    });
+    return r.count > 0;
   }
 
   /** Delete a conversation owned by the user. No-op when it doesn't exist. */
@@ -224,13 +336,28 @@ export class ChatPersistenceService {
     model: string;
     provider?: string | null;
     firstUserContent: string | null;
+    /** WARP-844 — the caller's system message for this turn (latest
+     *  wins; null clears). `undefined` leaves the stored value alone so
+     *  callers that don't track prompts can't accidentally wipe it. */
+    systemPrompt?: string | null;
   }): Promise<{ id: string; created: boolean }> {
     if (args.conversationId) {
       const existing = await this.prisma.chatSession.findFirst({
         where: { id: args.conversationId, userId: args.userId },
-        select: { id: true },
+        select: { id: true, systemPrompt: true },
       });
-      if (existing) return { id: existing.id, created: false };
+      if (existing) {
+        if (
+          args.systemPrompt !== undefined &&
+          existing.systemPrompt !== args.systemPrompt
+        ) {
+          await this.prisma.chatSession.update({
+            where: { id: existing.id },
+            data: { systemPrompt: args.systemPrompt },
+          });
+        }
+        return { id: existing.id, created: false };
+      }
       // The client sent an id we don't own (different user, deleted, or
       // forged). Don't trust it — start a fresh conversation. Returning
       // 404 would also be acceptable but silently rolling forward keeps
@@ -243,6 +370,7 @@ export class ChatPersistenceService {
         title,
         model: args.model,
         provider: args.provider ?? null,
+        systemPrompt: args.systemPrompt ?? null,
       },
       select: { id: true },
     });

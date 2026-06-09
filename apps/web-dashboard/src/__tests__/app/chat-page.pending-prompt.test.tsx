@@ -71,6 +71,11 @@ vi.mock("next/navigation", () => ({
 // SessionHeader does an authFetch; stub it so we don't fight network.
 vi.mock("@/lib/auth", () => ({
   authFetch: vi.fn(),
+  // DASH-04: the chat page gates its WS bridge on useAuth().user — the
+  // mock must export it (same shape as chat-page.jump-pill.test.tsx).
+  useAuth: () => ({
+    user: { id: "u1", username: "alice", displayName: "Alice" },
+  }),
 }));
 
 import ChatPage from "@/app/chat/page";

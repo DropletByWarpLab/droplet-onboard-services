@@ -606,6 +606,160 @@ describe("ChatMessage", () => {
     });
   });
 
+  describe("thumbs feedback (WARP-844)", () => {
+    it("rates up, and clicking the active thumb clears", () => {
+      const onFeedback = vi.fn();
+      const { rerender } = render(
+        <ChatMessage
+          message={{ id: "a1", role: "assistant", content: "Answer" }}
+          onFeedback={onFeedback}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Good response" }));
+      expect(onFeedback).toHaveBeenCalledWith("a1", "up");
+
+      rerender(
+        <ChatMessage
+          message={{
+            id: "a1",
+            role: "assistant",
+            content: "Answer",
+            feedback: "up",
+          }}
+          onFeedback={onFeedback}
+        />,
+      );
+      expect(
+        screen.getByRole("button", { name: "Good response" }),
+      ).toHaveAttribute("aria-pressed", "true");
+      fireEvent.click(screen.getByRole("button", { name: "Good response" }));
+      expect(onFeedback).toHaveBeenLastCalledWith("a1", null);
+    });
+
+    it("renders no thumbs on user rows", () => {
+      render(
+        <ChatMessage
+          message={{ id: "u1", role: "user", content: "hi" }}
+          onFeedback={vi.fn()}
+        />,
+      );
+      expect(
+        screen.queryByRole("button", { name: "Good response" }),
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  describe("edit & resend (WARP-844)", () => {
+    it("shows an Edit pencil on user rows and submits the edited text", () => {
+      const onEdit = vi.fn();
+      render(
+        <ChatMessage
+          message={{ id: "u1", role: "user", content: "original" }}
+          onEdit={onEdit}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Edit message" }));
+      const box = screen.getByRole("textbox", { name: "Edit message" });
+      fireEvent.change(box, { target: { value: "edited text" } });
+      fireEvent.click(screen.getByRole("button", { name: /save & resend/i }));
+      expect(onEdit).toHaveBeenCalledWith("u1", "edited text");
+    });
+
+    it("cancel restores the bubble without calling onEdit", () => {
+      const onEdit = vi.fn();
+      render(
+        <ChatMessage
+          message={{ id: "u1", role: "user", content: "original" }}
+          onEdit={onEdit}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Edit message" }));
+      fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
+      expect(onEdit).not.toHaveBeenCalled();
+      expect(screen.getByText("original")).toBeInTheDocument();
+    });
+
+    it("renders no pencil when onEdit is withheld or the row is assistant", () => {
+      const { rerender } = render(
+        <ChatMessage message={{ id: "u1", role: "user", content: "x" }} />,
+      );
+      expect(
+        screen.queryByRole("button", { name: "Edit message" }),
+      ).not.toBeInTheDocument();
+      rerender(
+        <ChatMessage
+          message={{ id: "a1", role: "assistant", content: "x" }}
+          onEdit={vi.fn()}
+        />,
+      );
+      expect(
+        screen.queryByRole("button", { name: "Edit message" }),
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  describe("reasoning disclosure (WARP-458)", () => {
+    it("renders a collapsed 'Thought process' disclosure when reasoning is present", () => {
+      render(
+        <ChatMessage
+          message={{
+            id: "asst-r",
+            role: "assistant",
+            content: "Answer.",
+            reasoning: "Step one.\n\nStep two.",
+          }}
+        />,
+      );
+      const toggle = screen.getByRole("button", { name: /thought process/i });
+      expect(toggle).toHaveAttribute("aria-expanded", "false");
+      // Collapsed: the trace text is not in the document yet.
+      expect(screen.queryByText(/Step one\./)).not.toBeInTheDocument();
+
+      fireEvent.click(toggle);
+      expect(toggle).toHaveAttribute("aria-expanded", "true");
+      expect(screen.getByText(/Step one\./)).toBeInTheDocument();
+    });
+
+    it("renders no disclosure when the message has no reasoning", () => {
+      render(
+        <ChatMessage
+          message={{ id: "asst-n", role: "assistant", content: "Hi." }}
+        />,
+      );
+      expect(
+        screen.queryByRole("button", { name: /thought process/i }),
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  describe("code blocks — highlighting + copy (Claude parity)", () => {
+    const CODE_MESSAGE = {
+      id: "asst-code",
+      role: "assistant" as const,
+      content: "```js\nconst x = 1;\n```",
+    };
+
+    it("applies hljs token classes to fenced code blocks", () => {
+      const { container } = render(<ChatMessage message={CODE_MESSAGE} />);
+      // rehype-highlight tokenizes `const` as a keyword.
+      const keyword = container.querySelector(".hljs-keyword");
+      expect(keyword).not.toBeNull();
+      expect(keyword!.textContent).toBe("const");
+    });
+
+    it("renders a copy button on the block that writes the code to the clipboard", async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      Object.assign(navigator, { clipboard: { writeText } });
+
+      render(<ChatMessage message={CODE_MESSAGE} />);
+      const btn = screen.getByRole("button", { name: "Copy code" });
+      fireEvent.click(btn);
+
+      await screen.findByRole("button", { name: "Copied" });
+      expect(writeText).toHaveBeenCalledWith("const x = 1;\n");
+    });
+  });
+
   describe("citation chips (WARP-295/WARP-287)", () => {
     it("renders a row of <CitationCard> chips below assistant messages with citations", () => {
       const { container } = render(

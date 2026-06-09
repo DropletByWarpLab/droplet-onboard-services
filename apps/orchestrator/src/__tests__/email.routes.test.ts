@@ -251,7 +251,9 @@ describe("WARP-465 — GET /api/email/:accountId/threads", () => {
       accounts: [
         {
           id: "a1",
-          userId: "stefan",
+          // Owned by the family caller — assertAccountAccessible compares
+          // EmailAccount.userId to req.user.id (mkUser mints `user-<role>`).
+          userId: "user-family",
           displayName: "x",
           address: "a@b.com",
           imapStatus: "idle",
@@ -338,7 +340,8 @@ describe("WARP-465 — POST /api/email/:accountId/drafts", () => {
       accounts: [
         {
           id: "a1",
-          userId: null,
+          // Owned by the family caller (see threads seed note).
+          userId: "user-family",
           displayName: "x",
           address: "a@b.com",
           imapStatus: "idle",
@@ -393,6 +396,21 @@ describe("WARP-465 — POST /api/email/:accountId/drafts", () => {
 describe("WARP-465 — POST /api/email/drafts/:id/send", () => {
   function withDraft(status: "draft" | "queued" | "sent" | "failed" = "draft") {
     return createPrismaMock({
+      // The send/PATCH routes now run assertAccountAccessible against the
+      // draft's accountId (belt-and-braces IDOR check) — the account row
+      // must exist for the lookup to pass.
+      accounts: [
+        {
+          id: "a1",
+          userId: "user-family",
+          displayName: "x",
+          address: "a@b.com",
+          imapStatus: "idle",
+          lastIdleAt: new Date(),
+          lastErrorAt: null,
+          lastError: null,
+        },
+      ],
       drafts: [
         {
           id: "d1",
@@ -465,6 +483,21 @@ describe("WARP-465 — POST /api/email/drafts/:id/send", () => {
 describe("WARP-465 — PATCH /api/email/drafts/:id", () => {
   it("edits a draft while status=draft", async () => {
     const prisma = createPrismaMock({
+      // The send/PATCH routes now run assertAccountAccessible against the
+      // draft's accountId (belt-and-braces IDOR check) — the account row
+      // must exist for the lookup to pass.
+      accounts: [
+        {
+          id: "a1",
+          userId: "user-family",
+          displayName: "x",
+          address: "a@b.com",
+          imapStatus: "idle",
+          lastIdleAt: new Date(),
+          lastErrorAt: null,
+          lastError: null,
+        },
+      ],
       drafts: [
         {
           id: "d1",
@@ -494,6 +527,21 @@ describe("WARP-465 — PATCH /api/email/drafts/:id", () => {
 
   it("409 when draft already queued/sent", async () => {
     const prisma = createPrismaMock({
+      // The send/PATCH routes now run assertAccountAccessible against the
+      // draft's accountId (belt-and-braces IDOR check) — the account row
+      // must exist for the lookup to pass.
+      accounts: [
+        {
+          id: "a1",
+          userId: "user-family",
+          displayName: "x",
+          address: "a@b.com",
+          imapStatus: "idle",
+          lastIdleAt: new Date(),
+          lastErrorAt: null,
+          lastError: null,
+        },
+      ],
       drafts: [
         {
           id: "d1",

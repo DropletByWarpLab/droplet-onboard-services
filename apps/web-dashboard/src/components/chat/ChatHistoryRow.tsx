@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { MoreHorizontal, Pencil, Trash2 } from "lucide-react";
+import { Download, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
 
 export interface ChatHistoryRowProps {
   id: string;
@@ -10,6 +10,8 @@ export interface ChatHistoryRowProps {
   onSelect: () => void;
   onRenameSubmit: (newTitle: string) => Promise<void>;
   onDeleteRequest: () => void;
+  /** Download this conversation as a Markdown transcript. */
+  onExport: () => void;
 }
 
 const DISPLAY_TITLE = (title: string | null) => title?.trim() || "Untitled chat";
@@ -21,6 +23,7 @@ export function ChatHistoryRow({
   onSelect,
   onRenameSubmit,
   onDeleteRequest,
+  onExport,
 }: ChatHistoryRowProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -140,6 +143,17 @@ export function ChatHistoryRow({
                 className="w-full flex items-center gap-2 px-3 py-2 type-footnote text-label-primary hover:bg-surface-secondary"
               >
                 <Pencil size={12} /> Rename
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onExport();
+                }}
+                className="w-full flex items-center gap-2 px-3 py-2 type-footnote text-label-primary hover:bg-surface-secondary"
+              >
+                <Download size={12} /> Export
               </button>
               <button
                 type="button"

@@ -2215,6 +2215,8 @@ export interface PersistedConversation {
   title: string | null;
   model: string | null;
   provider: string | null;
+  /** WARP-844 — persisted caller system prompt, or null/absent. */
+  systemPrompt?: string | null;
   createdAt: string;
   updatedAt: string;
   messages: Array<{
@@ -2244,6 +2246,13 @@ export interface PersistedConversation {
       | null;
     toolCallId: string | null;
     turnId: string | null;
+    /**
+     * WARP-458 — concatenated reasoning trace persisted for this
+     * assistant row, or null/absent when the model produced none.
+     */
+    reasoning?: string | null;
+    /** WARP-844 — thumbs rating, or null when unrated. */
+    feedback?: "up" | "down" | null;
     /**
      * Lifecycle status of the persisted row. The client uses
      * it to drive failureKind on reloaded messages. Optional because
@@ -2284,11 +2293,14 @@ export interface ConversationSummary {
 export async function listConversations(args: {
   limit: number;
   offset: number;
+  /** WARP-844 — search needle matching the title or any message content. */
+  q?: string;
 }): Promise<ConversationSummary[]> {
   const qs = new URLSearchParams({
     limit: String(args.limit),
     offset: String(args.offset),
   });
+  if (args.q) qs.set("q", args.q);
   const res = await authFetch(`${BASE}/api/llm/conversations?${qs}`);
   if (!res.ok) throw new Error(`Failed to list conversations: ${res.status}`);
   const body = (await res.json()) as { conversations: ConversationSummary[] };
@@ -2385,6 +2397,220 @@ export async function uploadBrainFile(
     throw new Error(body.error || `Upload failed: ${res.status}`);
   }
   return res.json();
+}
+
+// --- Voice input (WARP-844) ---
+
+export class SttUnavailable extends Error {
+  constructor() {
+    super("stt-unavailable");
+    this.name = "SttUnavailable";
+  }
+}
+
+/**
+ * Transcribe raw 16-bit LE mono PCM via the orchestrator's Wyoming STT
+ * proxy. Throws SttUnavailable on 503 (whisper sidecar not deployed —
+ * macOS dev or non-linux profile) so the composer can hide the mic.
+ */
+export async function transcribeAudio(
+  pcm: ArrayBuffer,
+  rate: number,
+): Promise<{ text: string }> {
+  const res = await authFetch(`${BASE}/api/stt?rate=${rate}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/octet-stream" },
+    body: pcm,
+  });
+  if (res.status === 503) throw new SttUnavailable();
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Transcription failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+// --- Edit & resend (WARP-844) ---
+
+/**
+ * Truncate a conversation from a message onward (the message itself plus
+ * everything after it). Called before re-sending an edited prompt so the
+ * persisted thread matches the visible one.
+ */
+export async function truncateConversation(
+  conversationId: string,
+  messageId: string,
+): Promise<{ deleted: number }> {
+  const res = await authFetch(
+    `${BASE}/api/llm/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to truncate: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * WARP-844 — set (or clear, with null) the thumbs rating on an assistant
+ * message. On this appliance the signal feeds the admin retrieval-eval
+ * loop rather than any cloud RLHF.
+ */
+export async function setMessageFeedback(
+  conversationId: string,
+  messageId: string,
+  feedback: "up" | "down" | null,
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/llm/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/feedback`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ feedback }),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to save feedback: ${res.status}`);
+  }
+}
+
+// --- Durable memory facts (WARP-461) ---
+
+/** One durable memory fact — workspace-global, injected into the chat
+ *  base prompt and managed via /api/memory/facts. */
+export interface MemoryFact {
+  id: string;
+  category: "Tone" | "Workflow" | "Scope" | "Schedule" | "Other";
+  fact: string;
+  addedBy: string;
+  evidenceChatId: string | null;
+  active: boolean;
+  addedAt: string;
+  updatedAt: string;
+}
+
+export async function listMemoryFacts(
+  opts: { category?: MemoryFact["category"]; active?: boolean; limit?: number } = {},
+): Promise<{ facts: MemoryFact[] }> {
+  const params = new URLSearchParams();
+  if (opts.category) params.set("category", opts.category);
+  if (opts.active !== undefined) params.set("active", String(opts.active));
+  if (opts.limit !== undefined) params.set("limit", String(opts.limit));
+  const qs = params.toString();
+  const res = await authFetch(`${BASE}/api/memory/facts${qs ? `?${qs}` : ""}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to load memory: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function createMemoryFact(input: {
+  category: MemoryFact["category"];
+  fact: string;
+  evidenceChatId?: string;
+}): Promise<{ fact: MemoryFact }> {
+  const res = await authFetch(`${BASE}/api/memory/facts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to save fact: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function updateMemoryFact(
+  id: string,
+  patch: { category?: MemoryFact["category"]; fact?: string; active?: boolean },
+): Promise<{ fact: MemoryFact }> {
+  const res = await authFetch(
+    `${BASE}/api/memory/facts/${encodeURIComponent(id)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to update fact: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function deleteMemoryFact(id: string): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/memory/facts/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok && res.status !== 404) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to delete fact: ${res.status}`);
+  }
+}
+
+// --- Context pins (WARP-460) ---
+
+/** One per-session context pin — injected into the system prompt on
+ *  every turn of the session by the orchestrator (routes/llm.ts). */
+export interface ContextPin {
+  id: string;
+  sessionId: string;
+  kind: "folder" | "file" | "email_thread" | "camera" | "camera_window";
+  ref: string;
+  meta?: Record<string, unknown> | null;
+  addedAt: string;
+}
+
+export async function listContextPins(
+  sessionId: string,
+): Promise<{ pins: ContextPin[] }> {
+  const res = await authFetch(
+    `${BASE}/api/llm/${encodeURIComponent(sessionId)}/pins`,
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to load pins: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function createContextPin(
+  sessionId: string,
+  pin: { kind: ContextPin["kind"]; ref: string; meta?: Record<string, unknown> },
+): Promise<{ pin: ContextPin }> {
+  const res = await authFetch(
+    `${BASE}/api/llm/${encodeURIComponent(sessionId)}/pins`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(pin),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to add pin: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function deleteContextPin(
+  sessionId: string,
+  pinId: string,
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/llm/${encodeURIComponent(sessionId)}/pins/${encodeURIComponent(pinId)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok && res.status !== 404) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to remove pin: ${res.status}`);
+  }
 }
 
 // --- Provider keys ---
@@ -3290,11 +3516,22 @@ export async function searchKnowledge(opts: {
  * an `unavailable` flag so the dashboard tab can render a friendly
  * placeholder rather than an error toast.
  */
-export async function getBrainMemoryItems(): Promise<{
+export async function getBrainMemoryItems(
+  opts: {
+    /** Filter to items uploaded in one chat (BrainMemoryItem.originatingChatId).
+     *  Used to rehydrate the composer's attachment chips on conversation load. */
+    originatingChatId?: string;
+  } = {},
+): Promise<{
   items: BrainMemoryItemInfo[];
   unavailable?: boolean;
 }> {
-  const res = await authFetch(`${BASE}/api/files/brain`);
+  const params = new URLSearchParams();
+  if (opts.originatingChatId) {
+    params.set("originatingChatId", opts.originatingChatId);
+  }
+  const qs = params.toString();
+  const res = await authFetch(`${BASE}/api/files/brain${qs ? `?${qs}` : ""}`);
   if (res.status === 404) {
     return { items: [], unavailable: true };
   }
