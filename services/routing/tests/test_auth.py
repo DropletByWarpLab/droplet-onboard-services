@@ -1,7 +1,10 @@
 """Bearer auth tests — covers WARP-36 acceptance criteria.
 
 `require_bearer` gates every route except `/health`. Its behaviour:
-- If ROUTING_SERVICE_TOKEN is unset, auth is disabled (dev mode).
+- If ROUTING_SERVICE_TOKEN is unset, the service FAILS CLOSED — every
+  non-/health route returns 503 — unless ROUTING_ALLOW_NO_AUTH is set, which
+  opts back into open dev mode. (The service binds 0.0.0.0:8080 under
+  network_mode: host, so a failed secret injection must not run open.)
 - `/health` is exempt regardless of token.
 - Missing / wrong / wrong-scheme tokens → 401.
 - Right token with constant-time compare → pass.
@@ -64,12 +67,32 @@ def test_protected_route_passes_with_right_token(disconnected_client):
     assert "not connected" in resp.json()["detail"].lower()
 
 
-def test_empty_token_disables_auth(disconnected_client, set_token):
-    """Dev-mode fallback: unset token means any request is accepted."""
+def test_empty_token_fails_closed(disconnected_client, set_token):
+    """Security regression: an unset ROUTING_SERVICE_TOKEN must FAIL CLOSED.
+
+    Previously an empty token short-circuited require_bearer to `return`, leaving
+    every mutation endpoint open on the host network. Now it raises 503 with an
+    auth-not-configured detail BEFORE reaching the handler — distinct from the
+    `get_router()` "not connected" 503, so we assert the detail to prove which
+    503 fired.
+    """
     set_token("")
     resp = disconnected_client.get("/network/summary")
-    # Reaches the handler → 503 because no router, NOT 401.
     assert resp.status_code == 503
+    assert "not configured" in resp.json()["detail"].lower()
+
+
+def test_empty_token_open_with_allow_no_auth(
+    disconnected_client, set_token, monkeypatch
+):
+    """ROUTING_ALLOW_NO_AUTH=1 restores open dev mode: an unset token then
+    reaches the handler, so the 503 is the `get_router()` "not connected" one,
+    NOT the auth-not-configured fail-closed 503."""
+    monkeypatch.setattr("main.ROUTING_ALLOW_NO_AUTH", True)
+    set_token("")
+    resp = disconnected_client.get("/network/summary")
+    assert resp.status_code == 503
+    assert "not connected" in resp.json()["detail"].lower()
 
 
 def test_case_insensitive_bearer_scheme(disconnected_client):

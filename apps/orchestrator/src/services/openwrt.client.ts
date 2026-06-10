@@ -718,10 +718,12 @@ export async function setDuckDnsConfig(opts: {
   return res.json() as Promise<DuckDnsStatus & { status: "ok" }>;
 }
 
-/** Fetch the state of a previously-started operation (WARP-40). */
+/** Fetch the state of a previously-started operation (WARP-40).
+ *  `rejected` is the routing service's neutral no-change terminal for a 4xx
+ *  (auth / validation): the request was refused before any router change. */
 export async function fetchOperation(opId: string): Promise<{
   id: string;
-  state: "pending" | "applied" | "rolled_back";
+  state: "pending" | "applied" | "rejected" | "rolled_back";
   startedAt: number;
   finishedAt: number | null;
   reason: string | null;

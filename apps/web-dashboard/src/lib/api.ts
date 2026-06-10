@@ -1332,7 +1332,10 @@ export type NetworkOperation = {
   // DASH-07: "unknown" is a distinct, non-success terminal state used when the
   // orchestrator can't account for the operation (404). It must NOT be treated
   // as "applied" — see fetchNetworkOperation.
-  state: "pending" | "applied" | "rolled_back" | "unknown";
+  // "rejected" (routing service) is a neutral no-change terminal state for a 4xx
+  // (auth / validation) — the request was refused before any router change, so
+  // it is neither a success ("applied") nor a reverted change ("rolled_back").
+  state: "pending" | "applied" | "rejected" | "rolled_back" | "unknown";
   startedAt: number;
   finishedAt: number | null;
   reason: string | null;

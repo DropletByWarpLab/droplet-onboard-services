@@ -48,6 +48,7 @@ import {
   Loader2,
   Plus,
   AlertTriangle,
+  Info,
   Clock,
   Trash2,
   ArrowUpRight,
@@ -231,6 +232,9 @@ type OperationStatus =
   | { state: "idle" }
   | { state: "pending"; id: string; mac: string; verb: "approve" | "remove" }
   | { state: "applied"; id: string; mac: string }
+  // Neutral no-change terminal (routing 4xx): the request was refused before any
+  // router change. Distinct from rolled_back (a change made then reverted).
+  | { state: "rejected"; id: string; mac: string; reason: string | null }
   | { state: "rolled_back"; id: string; mac: string; reason: string | null };
 
 interface ApCardProps {
@@ -402,6 +406,16 @@ export function CoverageExtendersPanel() {
             mac: opStatus.mac,
           });
           await mutate("/api/aps");
+        } else if (op.state === "rejected") {
+          // Neutral no-change terminal — the router refused the request (4xx),
+          // nothing was applied or reverted. Don't present the rollback alarm.
+          setOpStatus({
+            state: "rejected",
+            id: op.id,
+            mac: opStatus.mac,
+            reason: op.reason,
+          });
+          await mutate("/api/aps");
         } else if (op.state === "rolled_back") {
           setOpStatus({
             state: "rolled_back",
@@ -571,6 +585,31 @@ export function CoverageExtendersPanel() {
           <p className="type-subheadline text-label-primary flex-1">
             Finishing setup… the router is applying the new configuration.
           </p>
+        </div>
+      )}
+      {opStatus.state === "rejected" && (
+        <div
+          role="status"
+          className="mb-3 dp-card border border-separator bg-surface-secondary flex items-center gap-3 px-3 py-2"
+        >
+          <Info size={16} className="text-label-secondary" />
+          <div className="flex-1">
+            <p className="type-subheadline text-label-primary font-medium">
+              No change made
+            </p>
+            <p className="type-footnote text-label-tertiary">
+              {opStatus.reason ??
+                "The router rejected the request, so nothing was changed."}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setOpStatus({ state: "idle" })}
+            className="dp-btn-secondary type-footnote !min-h-[36px] !py-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            aria-label="Dismiss"
+          >
+            Dismiss
+          </button>
         </div>
       )}
       {opStatus.state === "rolled_back" && (
