@@ -23,6 +23,12 @@ __pycache__/
 # reader is documented against, so we keep it tracked.
 .claude/*
 !.claude/session-state.example.json
+# Project subagent definitions and shared project settings are team-shared
+# Claude Code config and must be tracked (settings.local.json stays ignored
+# via the `.claude/*` rule above).
+!.claude/agents/
+!.claude/skills/
+!.claude/settings.json
 .claude/session-state.json
 *.tsbuildinfo
 .DS_Store
