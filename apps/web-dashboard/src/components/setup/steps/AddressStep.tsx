@@ -18,7 +18,6 @@ import {
 } from "@/lib/api";
 import type { DuckDnsStatus } from "@/lib/types";
 import { StepShell } from "@/components/setup/StepShell";
-import { ScrollRegion } from "@/components/setup/ScrollRegion";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 
 /**
@@ -224,7 +223,15 @@ export function AddressStep({
       }}
       skip={{ label: "Skip — no remote access", onClick: onSkip }}
     >
-      <ScrollRegion aria-label="Internet address setup">
+      {/* Fixed-content body (chain diagram, subdomain + token fields,
+          auto-update toggle, help card) — NOT an unbounded list, so it is NOT
+          wrapped in a <ScrollRegion>. WARP-847: the onboarding split (#548) had
+          capped this at 40/44dvh, which forced an inner scrollbar over the
+          inputs with dead space below the card — regressing the #546 fix. The
+          StepShell panel is scroll-when-needed instead (fits a normal viewport
+          with no scrollbar; a viewport too short scrolls the whole panel rather
+          than clipping). */}
+      <>
         {/* The chain, in plain terms — why this step exists. */}
         <div
           className="flex items-stretch gap-2 mb-4"
@@ -415,7 +422,7 @@ export function AddressStep({
             remote access stays off until you add it later.
           </p>
         </LearnMoreCard>
-      </ScrollRegion>
+      </>
     </StepShell>
   );
 }
