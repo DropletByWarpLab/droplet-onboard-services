@@ -55,6 +55,14 @@ import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
  *  is empty (first-boot pull in progress). Bounded by React cleanup:
  *  the interval is cleared on unmount and as soon as a model appears. */
 const MODEL_POLL_INTERVAL_MS = 8_000;
+
+/** WARP-849 — completion budget for the sample probe. The configured
+ *  local model (gpt-oss:20b) is a REASONING model: it spends completion
+ *  tokens on a separate reasoning channel BEFORE any user-visible
+ *  content, and an exhausted budget (finish_reason "length") returns
+ *  EMPTY content — the old 400 false-failed the probe on a healthy box.
+ *  Local inference is cost-free, so size for reasoning + answer. */
+const SAMPLE_PROMPT_MAX_TOKENS = 2_000;
 export function AiStep({
   onComplete,
   onSkip,
@@ -70,6 +78,11 @@ export function AiStep({
   const [response, setResponse] = useState<string>("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // WARP-849 — soft, retryable "warming up" state: the model answered
+  // with reasoning but ran out of budget before any visible content.
+  // Kept separate from `error` so it renders as a neutral note, not
+  // the red failure box.
+  const [notice, setNotice] = useState<string | null>(null);
 
   // Three curated prompts tuned to the home-user persona — short,
   // sensible, demonstrate that the AI knows what it's running on.
@@ -140,6 +153,7 @@ export function AiStep({
       return;
     }
     setError(null);
+    setNotice(null);
     setResponse("");
     setSubmitting(true);
     try {
@@ -147,7 +161,8 @@ export function AiStep({
         model: selectedModel,
         messages: [{ role: "user", content: promptToSend }],
         stream: false,
-        max_tokens: 400,
+        // WARP-849: reasoning-sized budget — see SAMPLE_PROMPT_MAX_TOKENS.
+        max_tokens: SAMPLE_PROMPT_MAX_TOKENS,
         // WARP-174: the wizard's sample prompt is a throwaway "does
         // local AI work on this box" check. Without this flag every
         // first-run customer ends up with the wizard's probe at the
@@ -165,6 +180,19 @@ export function AiStep({
       const data = await res.json();
       const content = data?.message?.content;
       if (typeof content !== "string" || !content.trim()) {
+        // WARP-849 — reasoning models (gpt-oss) can exhaust the budget
+        // on the reasoning channel and return EMPTY content while the
+        // message still carries a non-empty `reasoning` trace. That's a
+        // healthy box mid-thought, not a failure: surface a soft
+        // retryable note. The raw reasoning text is NEVER rendered as
+        // the answer.
+        const reasoning = data?.message?.reasoning;
+        if (typeof reasoning === "string" && reasoning.trim()) {
+          setNotice(
+            "The model is still warming up its answer — try once more.",
+          );
+          return;
+        }
         throw new Error(
           "Got an empty response. The model may need to load — try again in a moment.",
         );
@@ -337,6 +365,24 @@ export function AiStep({
             <div className="chat-markdown type-body text-label-primary max-h-[40vh] overflow-y-auto">
               <ReactMarkdown>{response}</ReactMarkdown>
             </div>
+          </div>
+        )}
+
+        {/* WARP-849 — soft retryable state (reasoning spent the budget
+            before any visible answer). Neutral note styling, mirroring
+            the StorageStep pattern — deliberately NOT the red error. */}
+        {notice && (
+          <div
+            data-testid="ai-warming-up"
+            role="status"
+            className="flex items-start gap-2 type-footnote text-label-secondary bg-surface-secondary rounded-sm px-3 py-2 motion-safe:animate-in motion-safe:fade-in motion-safe:duration-200"
+          >
+            <AlertCircle
+              size={14}
+              className="mt-0.5 flex-shrink-0 text-label-tertiary"
+              aria-hidden="true"
+            />
+            <span>{notice}</span>
           </div>
         )}
 
