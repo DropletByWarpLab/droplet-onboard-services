@@ -684,6 +684,57 @@ def test_show_claim_wifi_frame_carries_one_matrix_only(
     assert "setup_qr_matrix" not in data
 
 
+# --- Unchanged-push dedup + READY/REQUEST_STATE resync -----------------------
+# The orchestrator's screen-qr poller re-pushes the claim screen every poll
+# tick while the box is unclaimed. An identical push must be a no-op (no
+# re-encode, no serial frame — each frame makes the firmware tear down and
+# rebuild the same tree, blanking the panel); a CHANGED push must go through;
+# and the firmware-reload resync (_push_full_state) must re-send the retained
+# claim frame explicitly, because the dedup would swallow the orchestrator's
+# next identical tick.
+
+def test_show_claim_dedups_unchanged_push(
+    sim_display: TFTDisplay, monkeypatch: pytest.MonkeyPatch
+):
+    sent = _spy_pyportal_send(sim_display, monkeypatch)
+    sim_display.show_claim(CLAIM_CODE, CLAIM_URL)
+    sim_display.show_claim(CLAIM_CODE, CLAIM_URL)
+    assert len([1 for (m, _) in sent if m == "claim"]) == 1
+
+
+def test_show_claim_changed_code_sends_again(
+    sim_display: TFTDisplay, monkeypatch: pytest.MonkeyPatch
+):
+    sent = _spy_pyportal_send(sim_display, monkeypatch)
+    sim_display.show_claim(CLAIM_CODE, CLAIM_URL)
+    sim_display.show_claim("DRPL-AB12-CD34", CLAIM_URL)
+    frames = [d for (m, d) in sent if m == "claim"]
+    assert len(frames) == 2
+    assert frames[1]["code"] == "DRPL-AB12-CD34"
+
+
+def test_full_state_resync_resends_claim_when_modal(
+    sim_display: TFTDisplay, monkeypatch: pytest.MonkeyPatch
+):
+    sent = _spy_pyportal_send(sim_display, monkeypatch)
+    sim_display.show_claim(CLAIM_CODE, CLAIM_URL)
+    sim_display._push_full_state()
+    claim_frames = [d for (m, d) in sent if m == "claim"]
+    assert len(claim_frames) == 2
+    assert claim_frames[1]["code"] == CLAIM_CODE
+    # And the carried QR matrix is the retained one, not a re-encode.
+    assert claim_frames[1].get("setup_qr_matrix") == \
+        claim_frames[0].get("setup_qr_matrix")
+
+
+def test_full_state_resync_skips_claim_when_not_modal(
+    sim_display: TFTDisplay, monkeypatch: pytest.MonkeyPatch
+):
+    sent = _spy_pyportal_send(sim_display, monkeypatch)
+    sim_display._push_full_state()
+    assert not [1 for (m, _) in sent if m == "claim"]
+
+
 def test_show_claim_stores_state_for_rerender(sim_display: TFTDisplay):
     # The code + URL must be retained so a live re-render (cycle loop) of the
     # claim screen keeps showing them.

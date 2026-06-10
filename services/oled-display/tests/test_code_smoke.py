@@ -194,6 +194,15 @@ def test_claim_waiting_dots_tick_advances_and_disarms(fw):
     code._claim_dots_tick(code._claim_refs["last"] + 10.0)
     assert code._claim_refs["active"] != before
 
+    # The tick must actually recolour the dots, not just bump the counter —
+    # the palette write sits inside a defensive try/except, so a silently
+    # failing mutation would freeze the panel's dots while the counter (and
+    # the suite) kept advancing.
+    active = code._claim_refs["active"]
+    for i, d in enumerate(dots):
+        expected = code.ACCENT if i == active else code.ACCENT_FAINT
+        assert d.pixel_shader[0] == expected, f"dot {i} not recoloured"
+
     # Each dot must own a DEDICATED palette: _palette() caches by colour, and
     # mutating a cached palette would tint every same-colour shape on screen.
     shaders = {id(d.pixel_shader) for d in dots}
@@ -204,6 +213,31 @@ def test_claim_waiting_dots_tick_advances_and_disarms(fw):
     # Navigating away disarms the ticker.
     code.handle({"mode": "idle"})
     assert not code._claim_refs["dots"]
+
+
+def test_claim_malformed_setup_matrix_never_strands_the_panel(fw):
+    # The serial wire is just JSON: a ragged / non-list / oversized matrix
+    # must render the claim screen WITHOUT the QR rather than raise
+    # mid-render — render_claim releases the live display tree before
+    # building, and a render error on the modal claim screen would strand
+    # the panel black with no self-recovery (_render_with_gc only catches
+    # MemoryError; claim is exempt from the idle timeout).
+    code, _ = fw
+    for bad in ("not-a-list", [[1, 0], [1]], [[]], [[1] * 5] * 80, 42):
+        assert code.handle({"mode": "claim", "data": {
+            "code": "DRPL-7K2Q-9F4M", "setup_url": "https://x/setup",
+            "setup_qr_matrix": bad,
+        }}) == "OK", f"claim push with bad matrix {bad!r} did not render"
+        assert code.state["screen"] == "claim"
+
+
+def test_hero_glyphs_trimmed_to_live_draw_sites(fw):
+    # The redesigned claim screen is terminalio-only, so the old claim
+    # hero's A-Z/"-" preloads were ~8-10 KB of dead 66px glyph cache pinned
+    # on the ~165 KB heap. Pin the trim so they don't creep back without a
+    # hero draw site to justify them.
+    code, _ = fw
+    assert code._HERO_GLYPHS == b"0123456789: %"
 
 
 def test_claim_with_wifi_then_psk_omitted_clears_psk(fw):
@@ -420,12 +454,16 @@ def test_hero_font_loads_once_across_renders(fw_with_hero):
 
 def test_hero_glyph_set_excludes_degree(fw_with_hero):
     # The "°" (U+00B0) is drawn in terminalio, not the hero face, so it must
-    # not be in the preloaded hero glyph set (heap narrowing, item 3).
+    # not be in the preloaded hero glyph set (heap narrowing, item 3). A-Z
+    # and "-" left the set with the claim-screen redesign (terminalio-only
+    # claim code), so they must stay out too.
     code, bf = fw_with_hero
     code.set_screen("idle")
     code.render_idle()  # forces the lazy load
     assert bf.fonts, "hero font never loaded"
     assert b"\xb0" not in bf.fonts[0].loaded_glyphs
+    for dead in (b"-", b"A", b"Z"):
+        assert dead not in bf.fonts[0].loaded_glyphs
     # Sanity: the glyphs that ARE drawn in the hero face are present.
-    for needed in (b"0", b"9", b":", b" ", b"%", b"-", b"A", b"Z"):
+    for needed in (b"0", b"9", b":", b" ", b"%"):
         assert needed in bf.fonts[0].loaded_glyphs

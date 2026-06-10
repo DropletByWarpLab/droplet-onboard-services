@@ -354,12 +354,14 @@ _HERO_FONT_PATH = "/lib/fonts/Inter-Hero-66.bdf"
 # renders (WARP-638). Hero draw sites:
 #   * idle clock  — digits + ":" + " " (the colon blinks to a space)
 #   * CPU hero    — digits + "%"
-#   * claim code  — A-Z + digits + "-"  (e.g. DRPL-7K2Q-9F4M)
-# AM/PM and the TEMP "°" are drawn in terminalio, NOT the hero face, so "°"
-# (U+00B0) is intentionally NOT preloaded — it was dead weight in the cache.
-# The bundled BDF (tools/make_hero_font.py) still carries every glyph; this
-# just narrows what gets rasterised into the live glyph cache.
-_HERO_GLYPHS = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-: %"
+# The redesigned claim screen is terminalio-only (its 248px column can't fit
+# the 66px face), so A-Z and "-" are no longer hero glyphs — preloading them
+# pinned ~27 dead 66px bitmaps (~8-10 KB) in the cache for nothing. AM/PM
+# and the TEMP "°" are drawn in terminalio, NOT the hero face, so they are
+# intentionally NOT preloaded either. The bundled BDF (tools/
+# make_hero_font.py) still carries every glyph; this just narrows what gets
+# rasterised into the live glyph cache.
+_HERO_GLYPHS = b"0123456789: %"
 
 
 def _hero_font():
@@ -1330,6 +1332,31 @@ def _request_power_on():
     _send("NAV:power_on")
 
 
+def _valid_matrix(m):
+    """Return `m` if it is a well-formed QR bit-matrix, else None.
+
+    The host encodes and caps the matrices, but the serial wire is still
+    just JSON: a malformed value (non-list, ragged rows) would raise
+    mid-render — AFTER render_claim has released the live display tree —
+    stranding the panel black on a modal screen (_render_with_gc only
+    catches MemoryError, and the claim screen is exempt from the idle
+    timeout). Validate up front; the 64-row cap mirrors the host-side
+    firmware-tolerance contract (main.py ClaimRequest).
+    """
+    try:
+        if not m or not isinstance(m, list) or len(m) > 64:
+            return None
+        n = len(m[0])
+        if n == 0:
+            return None
+        for row in m:
+            if not isinstance(row, list) or len(row) != n:
+                return None
+        return m
+    except Exception:
+        return None
+
+
 def render_claim():
     """Onboarding claim screen (WARP-632 / ADR-017), design-handoff
     two-column layout ("PyPortal First Boot — Claim Code").
@@ -1354,6 +1381,13 @@ def render_claim():
     Modal + host-driven (not in the SCREENS carousel); the host navigates
     away once the box is claimed. Terminalio-only text — the 66px hero face
     doesn't fit the column, and a fixed bitmap face can't scale down.
+
+    Deliberate descopes from the handoff card (revisit knowingly, not by
+    accident): the bottom-left DEVICE id line (no device identity exists in
+    the claim-frame contract), the claimed-success confirm screen
+    (drawClaimed — needs a new orchestrator-pushed mode), and the header-dot
+    pulse + scan-track shimmer (static; the WAITING dots are this screen's
+    only motion — heap discipline).
     """
     global touch_regions
     touch_regions = []
@@ -1363,20 +1397,23 @@ def render_claim():
     claim = state.get("claim") or {}
     code = str(claim.get("code") or "").strip().upper()
     setup_url = str(claim.get("setup_url") or "").strip()
-    setup_matrix = claim.get("setup_qr_matrix")
-    wifi_matrix = claim.get("wifi_qr_matrix")
+    setup_matrix = _valid_matrix(claim.get("setup_qr_matrix"))
+    wifi_matrix = _valid_matrix(claim.get("wifi_qr_matrix"))
     wifi_ssid = str(claim.get("wifi_ssid") or "").strip()
     wifi_psk = str(claim.get("wifi_psk") or "")
     has_wifi = bool(wifi_matrix and wifi_ssid)
     qr_matrix = wifi_matrix if has_wifi else setup_matrix
+    has_qr = bool(qr_matrix)
 
-    # OOM safety (WARP-638 pattern, mirrors render_system): when the claim
-    # screen carries a QR it holds a full QR bitmap, so release the prior
-    # frame's display tree + gc BEFORE building this one — never hold two
-    # large bitmaps alive at once on the ~165 KB Titano heap.
-    if qr_matrix:
-        board.DISPLAY.root_group = None
-        gc.collect()
+    # OOM safety (WARP-638 pattern): release the prior frame's display tree
+    # + gc BEFORE building this one — ALWAYS, not just on matrix frames. The
+    # redesigned tree is the heaviest in the firmware (~100 elements), so a
+    # matrix-less re-push holding two trees alive would be its own OOM risk
+    # on the ~165 KB Titano heap. The matrix shape is validated above, so
+    # nothing after this release can raise on malformed wire data and strand
+    # the panel black (render errors on a modal screen never self-recover).
+    board.DISPLAY.root_group = None
+    gc.collect()
 
     g = displayio.Group()
     g.append(_rect(0, 0, DISPLAY_W, DISPLAY_H, BG))
@@ -1447,7 +1484,11 @@ def render_claim():
     if has_wifi:
         steps.append(("Join Wi-Fi ", wifi_ssid[:18]))
     if host:
-        steps.append(("Go to ", host[:26]))
+        # A DUCKDNS-style hostname overflows the inline slot — wrap the
+        # address onto its own line rather than truncating the /setup path
+        # away (in the Wi-Fi layout this text is the only typed setup
+        # pointer; the setup QR is deliberately off that card).
+        steps.append(("Go to ", host[:37]))
     steps.append(("Enter the code above", ""))
 
     sy = 168
@@ -1457,7 +1498,11 @@ def render_claim():
                        anchor=(0.5, 0.5)))
         g.append(_text(lead, x=46, y=sy + 9, scale=1, color=LABEL_2,
                        anchor=(0.0, 0.5)))
-        if em:
+        if em and len(em) > 26:
+            g.append(_text(em, x=46, y=sy + 23, scale=1,
+                           color=ACCENT_INK, anchor=(0.0, 0.5)))
+            sy += 14
+        elif em:
             g.append(_text(em, x=46 + len(lead) * 6, y=sy + 9, scale=1,
                            color=ACCENT_INK, anchor=(0.0, 0.5)))
         sy += 28
@@ -1465,8 +1510,16 @@ def render_claim():
     # ================= RIGHT — scan QR card ==================================
     rx = div_x + 16
     rw = DISPLAY_W - 20 - rx
-    _tracked(g, "SCAN TO JOIN WI-FI" if has_wifi else "SCAN TO CLAIM",
-             x=rx, y=56, scale=1, color=ACCENT, tracking=1)
+    # The eyebrow stays honest: a card with no scannable matrix (older host
+    # that doesn't send setup_qr_matrix, or the host's encode degrading)
+    # must never instruct a scan that cannot work.
+    if has_wifi:
+        eyebrow_r = "SCAN TO JOIN WI-FI"
+    elif has_qr:
+        eyebrow_r = "SCAN TO CLAIM"
+    else:
+        eyebrow_r = "SETUP"
+    _tracked(g, eyebrow_r, x=rx, y=56, scale=1, color=ACCENT, tracking=1)
 
     card_w = 128
     card_x = rx + (rw - card_w) // 2
@@ -1486,7 +1539,9 @@ def render_claim():
         g.append(_text(wifi_psk[:20], x=rx + rw // 2, y=cap_y + 34, scale=1,
                        color=ACCENT_INK, anchor=(0.5, 0.0)))
     else:
-        g.append(_text("Opens setup on your phone", x=rx + rw // 2, y=cap_y,
+        g.append(_text("Opens setup on your phone" if has_qr
+                       else "Use the address above",
+                       x=rx + rw // 2, y=cap_y,
                        scale=1, color=LABEL_3, anchor=(0.5, 0.0)))
 
     # ---- Foot: waiting status + scan track ----------------------------------

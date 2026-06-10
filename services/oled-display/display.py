@@ -493,25 +493,41 @@ def _setup_qr_payload(setup_url: str, code: str) -> str:
     return "{}{}c={}".format(url, "&" if "?" in url else "?", bare)
 
 
+# Hard cap on the claim QR matrix we put on the serial wire — mirrors
+# ClaimRequest's wifi_qr_matrix max_length=64 (main.py), which exists because
+# a v-large QR would OOM the PyPortal. The internal encode path must honor the
+# same firmware-tolerance contract: an oversized payload (e.g. a long custom
+# setup_url) degrades to the no-QR variant rather than shipping a heap bomb.
+_CLAIM_QR_MAX_ROWS = 64
+
+
 def _encode_qr_matrix(payload: str) -> Optional[List[List[int]]]:
     """Encode `payload` into a 0/1 QR bit-matrix, host-side.
 
     The firmware never encodes on-device (same contract as the Wi-Fi QR the
     bridge encodes) — this is the host half that feeds the claim frame's
-    `setup_qr_matrix`. Same parameters as the sim fallback in `_draw_qr`
-    (border=0, ERROR_CORRECT_M) so the preview and the panel stay
-    byte-identical. Returns None if the `qrcode` dep is unavailable — the
-    claim screen then renders without the scan QR (graceful degradation).
+    `setup_qr_matrix`. ERROR_CORRECT_Q (~25% recovery), NOT the M the generic
+    `_draw_qr` fallback uses: the claim card paints a 32px white droplet-mark
+    pad dead-centre over the symbol, which at M corrupts more codewords than
+    Reed-Solomon can recover (the padded symbol fails to decode at M and
+    decodes cleanly at Q for the typical deep-link payload). Returns None
+    when the `qrcode` dep is unavailable or the symbol would exceed
+    `_CLAIM_QR_MAX_ROWS` — the claim screen then renders the no-QR variant
+    (graceful degradation, never a firmware heap risk).
     """
     if not payload:
         return None
     try:
         import qrcode
         qr = qrcode.QRCode(
-            border=0, error_correction=qrcode.constants.ERROR_CORRECT_M)
+            border=0, error_correction=qrcode.constants.ERROR_CORRECT_Q)
         qr.add_data(payload)
         qr.make(fit=True)
-        return [[1 if cell else 0 for cell in row] for row in qr.get_matrix()]
+        matrix = [[1 if cell else 0 for cell in row]
+                  for row in qr.get_matrix()]
+        if len(matrix) > _CLAIM_QR_MAX_ROWS:
+            return None
+        return matrix
     except Exception:
         return None
 
@@ -617,6 +633,11 @@ class TFTDisplay:
         # host-side by show_claim (the firmware never encodes) and retained so
         # re-renders keep painting the same QR the panel shows.
         self._claim_setup_qr_matrix = None
+        # Signature of the last claim frame sent — show_claim no-ops an
+        # unchanged push (the orchestrator re-pushes every poll tick while
+        # unclaimed; an identical frame would make the firmware tear down and
+        # rebuild the same tree, blanking the panel for nothing).
+        self._claim_frame_sig = None
         # Readiness transition state. `_boot_complete` is an explicit flag —
         # we never infer "done" from the absence of something. `_boot_started_at`
         # anchors the timeout; `_last_readiness_check` gates the probe cadence.
@@ -2101,6 +2122,15 @@ class TFTDisplay:
 
         Modal + host-driven: the orchestrator mints the code and pushes it
         while the box is unclaimed; the host navigates away once it's claimed.
+
+        Deliberate descopes from the handoff card (revisit knowingly, not by
+        accident): the bottom-left DEVICE id line (no device identity exists
+        in the claim-frame contract — adding one is an orchestrator change),
+        the claimed-success confirm screen (drawClaimed — needs a new
+        orchestrator-pushed mode; today the host simply navigates away), and
+        the header-dot pulse + scan-track shimmer (static on both halves;
+        the WAITING dots are the claim screen's only motion, firmware heap
+        discipline).
         """
         has_wifi = bool(wifi_qr_matrix and wifi_ssid)
 
@@ -2119,7 +2149,9 @@ class TFTDisplay:
         slw = _v3_text_width(draw, setup_lbl, font_eyebrow, 1.4)
         _v3_text(draw, setup_lbl, WIDTH - 20, 21, font=font_eyebrow,
                  fill=V3_ACCENT, anchor="ra", tracking=1.4)
-        # Status dot left of the label (the panel pulses it; static per frame).
+        # Status dot left of the label. Static on BOTH halves — the design's
+        # slow alpha pulse is dropped on firmware (heap discipline: the
+        # WAITING dots carry the claim screen's only motion).
         dcx = int(WIDTH - 20 - slw - 12)
         draw.ellipse([dcx - 3, 23, dcx + 3, 29], fill=V3_ACCENT)
         draw.rectangle([20, 44, WIDTH - 20, 44], fill=V3_SEP)
@@ -2187,7 +2219,11 @@ class TFTDisplay:
         if has_wifi:
             steps.append(("Join Wi-Fi", str(wifi_ssid or "")[:18]))
         if host:
-            steps.append(("Go to", host[:26]))
+            # A DUCKDNS-style hostname overflows the inline slot — wrap the
+            # address onto its own line rather than truncating the /setup
+            # path away (in the Wi-Fi layout this text is the only typed
+            # setup pointer; the setup QR is deliberately off that card).
+            steps.append(("Go to", host[:37]))
         steps.append(("Enter the code above", ""))
 
         font_step = _get_font(12, weight="regular")
@@ -2198,7 +2234,13 @@ class TFTDisplay:
             _rrect(draw, 20, sy, 18, 18, 5, fill=V3_ACCENT_SUBTLE)
             _v3_text(draw, str(i + 1), 29, sy + 9, font=font_badge,
                      fill=V3_ACCENT_INK, anchor="mm")
-            if em:
+            if em and len(em) > 26:
+                _v3_text(draw, lead, 46, sy + 9, font=font_step,
+                         fill=V3_LABEL2, anchor="lm")
+                _v3_text(draw, em, 46, sy + 23, font=font_step_b,
+                         fill=V3_ACCENT_INK, anchor="lm")
+                sy += 14
+            elif em:
                 lead_w = _v3_text(draw, lead + " ", 46, sy + 9, font=font_step,
                                   fill=V3_LABEL2, anchor="lm")
                 _v3_text(draw, em, 46 + lead_w, sy + 9, font=font_step_b,
@@ -2211,26 +2253,37 @@ class TFTDisplay:
         # ================= RIGHT — scan QR card =============================
         rx = div_x + 16
         rw = WIDTH - 20 - rx
-        _v3_text(draw, "SCAN TO JOIN WI-FI" if has_wifi else "SCAN TO CLAIM",
-                 rx, 56, font=font_eyebrow, fill=V3_ACCENT, tracking=1.2)
+        # Resolve the card's matrix FIRST so the eyebrow/caption stay honest:
+        # a card with no scannable matrix must never read "SCAN TO CLAIM".
+        # The firmware applies the same rule, so preview and panel agree in
+        # the no-matrix skew window too — no pseudo-QR paper-over here.
+        if has_wifi:
+            qr_payload = _wifi_qr_payload(wifi_ssid or "", wifi_psk or "")
+            qr_matrix = wifi_qr_matrix
+        else:
+            qr_payload = _setup_qr_payload(setup_url, code_text)
+            qr_matrix = setup_qr_matrix or _encode_qr_matrix(qr_payload)
+        has_qr = bool(qr_matrix)
+        if has_wifi:
+            eyebrow_r = "SCAN TO JOIN WI-FI"
+        else:
+            eyebrow_r = "SCAN TO CLAIM" if has_qr else "SETUP"
+        _v3_text(draw, eyebrow_r, rx, 56, font=font_eyebrow, fill=V3_ACCENT,
+                 tracking=1.2)
 
         card_w = 128
         card_x = rx + (rw - card_w) // 2
         card_y = 72
         _rrect(draw, card_x, card_y, card_w, card_w, 12, fill=V3_WHITE)
         qx, qy, qz = card_x + 9, card_y + 9, card_w - 18
-        if has_wifi:
-            # Production-faithful: paint the host-supplied matrix (what the
-            # firmware paints) so preview and panel match; the escaped payload
-            # is the sim-only encode fallback (WARP-819).
-            payload = _wifi_qr_payload(wifi_ssid or "", wifi_psk or "")
+        if has_qr:
+            # Production-faithful: paint the host-encoded matrix (what the
+            # firmware paints) so preview and panel match (WARP-819 idiom).
             self._draw_qr(img, draw, qx, qy, qz,
-                          payload=payload, matrix=wifi_qr_matrix)
-        else:
-            payload = _setup_qr_payload(setup_url, code_text)
-            if setup_qr_matrix or payload:
-                self._draw_qr(img, draw, qx, qy, qz,
-                              payload=payload or None, matrix=setup_qr_matrix)
+                          payload=qr_payload or None, matrix=qr_matrix)
+        # Centre mark pad: sits inside the ECC budget — the setup matrix is
+        # encoded at ERROR_CORRECT_Q for exactly this overlay (see
+        # _encode_qr_matrix).
         mc = 26
         mcx = card_x + card_w // 2 - mc // 2
         mcy = card_y + card_w // 2 - mc // 2
@@ -2252,7 +2305,10 @@ class TFTDisplay:
                      font=_get_font(11, weight="regular"), fill=V3_ACCENT_INK,
                      anchor="ma")
         else:
-            _v3_text(draw, "Opens setup on your phone", rx + rw // 2, cap_y,
+            _v3_text(draw,
+                     "Opens setup on your phone" if has_qr
+                     else "Use the address above",
+                     rx + rw // 2, cap_y,
                      font=_get_font(10, weight="regular"), fill=V3_LABEL3,
                      anchor="ma")
 
@@ -2266,8 +2322,9 @@ class TFTDisplay:
             draw.ellipse([ddx - 2, HEIGHT - 25, ddx + 2, HEIGHT - 21],
                          fill=V3_ACCENT if i == 0 else V3_ACCENT_FAINT)
 
-        # 2px scan track with an accent segment (the firmware owns any motion;
-        # static per frame here).
+        # 2px scan track with an accent segment. Static on BOTH halves — the
+        # design's travelling shimmer is dropped on firmware (same heap
+        # discipline; the WAITING dots are the only claim-screen motion).
         draw.rectangle([0, HEIGHT - 2, WIDTH, HEIGHT], fill=V3_TRACK)
         seg_x = (WIDTH - 90) // 2
         draw.rectangle([seg_x, HEIGHT - 2, seg_x + 90, HEIGHT], fill=V3_ACCENT)
@@ -2463,6 +2520,18 @@ class TFTDisplay:
         never clobbers prior creds with nulls.
         """
         with self._lock:
+            sig = (code, setup_url, wifi_ssid or "", wifi_psk or "",
+                   wifi_qr_matrix or None)
+            if sig == self._claim_frame_sig and \
+                    self._current_mode == self.CLAIM:
+                # Unchanged push from the orchestrator's poll tick — no-op.
+                # Re-sending an identical frame makes the firmware tear down
+                # and rebuild the same ~100-element tree (blanking the panel)
+                # and re-encoding the same QR is pure waste. The
+                # READY/REQUEST_STATE resync path re-sends explicitly via
+                # _resend_claim_locked, so firmware-reload recovery is not
+                # gated on this signature.
+                return
             self._current_mode = self.CLAIM
             self._claim_code = code
             self._claim_setup_url = setup_url
@@ -2479,21 +2548,35 @@ class TFTDisplay:
             self._claim_setup_qr_matrix = (
                 None if has_wifi
                 else _encode_qr_matrix(_setup_qr_payload(setup_url, code)))
-            frame = {"code": code, "setup_url": setup_url}
-            if has_wifi:
-                frame["wifi_qr_matrix"] = wifi_qr_matrix
-                frame["wifi_ssid"] = wifi_ssid
-                # Only put wifi_psk on the wire when it is non-empty. The
-                # firmware resets the wifi_* keys before merging each claim
-                # frame, so OMITTING psk here clears any stale psk rather than
-                # re-sending wifi_psk:"" (WARP-819) — matching this method's
-                # "only the keys actually present are put on the wire" contract.
-                if wifi_psk:
-                    frame["wifi_psk"] = wifi_psk
-            elif self._claim_setup_qr_matrix:
-                frame["setup_qr_matrix"] = self._claim_setup_qr_matrix
-            self._pyportal_send("claim", frame)
+            self._claim_frame_sig = sig
+            self._resend_claim_locked()
             self._render_current_locked()
+
+    def _resend_claim_locked(self):
+        """Send the retained claim frame to the firmware. Assumes _lock held.
+
+        Used by show_claim (fresh or changed push) and by the
+        READY/REQUEST_STATE resync: the claim screen is modal + host-driven,
+        so after a firmware reload the panel won't show it again until a
+        frame arrives — and show_claim's unchanged-push dedup would swallow
+        the orchestrator's next tick. Re-sending here makes firmware-reload
+        recovery immediate instead of one poll tick late.
+        """
+        frame = {"code": self._claim_code,
+                 "setup_url": self._claim_setup_url}
+        if self._claim_wifi_qr_matrix and self._claim_wifi_ssid:
+            frame["wifi_qr_matrix"] = self._claim_wifi_qr_matrix
+            frame["wifi_ssid"] = self._claim_wifi_ssid
+            # Only put wifi_psk on the wire when it is non-empty. The
+            # firmware resets the wifi_* keys before merging each claim
+            # frame, so OMITTING psk here clears any stale psk rather than
+            # re-sending wifi_psk:"" (WARP-819) — matching show_claim's
+            # "only the keys actually present are put on the wire" contract.
+            if self._claim_wifi_psk:
+                frame["wifi_psk"] = self._claim_wifi_psk
+        elif self._claim_setup_qr_matrix:
+            frame["setup_qr_matrix"] = self._claim_setup_qr_matrix
+        self._pyportal_send("claim", frame)
 
     def show_custom_image(self, image: Image.Image):
         with self._lock:
@@ -2709,6 +2792,16 @@ class TFTDisplay:
                     self._pyportal_send(mode, snap)
             except Exception as e:                          # noqa: BLE001
                 logger.warning("resync %s failed: %s", mode, e)
+        # The claim screen is modal + host-driven: if it's what we're
+        # showing, the resync must restore it too — the periodic stats/wifi
+        # pushes won't, and show_claim's unchanged-push dedup would swallow
+        # the orchestrator's next identical tick.
+        try:
+            with self._lock:
+                if self._current_mode == self.CLAIM and self._claim_code:
+                    self._resend_claim_locked()
+        except Exception as e:                              # noqa: BLE001
+            logger.warning("resync claim failed: %s", e)
 
     # ----- Wi-Fi helper -------------------------------------------------
 
