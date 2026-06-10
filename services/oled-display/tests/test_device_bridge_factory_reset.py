@@ -40,6 +40,21 @@ def _load_bridge(monkeypatch: pytest.MonkeyPatch, env: dict | None = None):
     return module
 
 
+class _FakeProc:
+    """Stand-in for the detached `subprocess.Popen` of a wipe — only the
+    liveness surface the bridge uses (poll() / returncode). `alive=True`
+    models a wipe still running (poll() -> None); flipping `alive` to False
+    models a wipe that exited (poll() -> returncode), i.e. one that failed
+    mid-run without ever tearing the bridge down."""
+
+    def __init__(self, alive: bool = True, returncode: int = 0):
+        self._alive = alive
+        self.returncode = returncode
+
+    def poll(self):
+        return None if self._alive else self.returncode
+
+
 # ---------------------------------------------------------------------------
 # run_factory_reset() spawns the HOST SCRIPT detached, never docker directly
 # ---------------------------------------------------------------------------
@@ -50,7 +65,7 @@ def test_factory_reset_spawns_host_script_detached(monkeypatch):
 
     def fake_spawn(cmd):
         captured["cmd"] = cmd
-        return True, None  # (ok, error)
+        return _FakeProc(), None  # (proc, error)
 
     monkeypatch.setattr(bridge, "_spawn_detached", fake_spawn)
 
@@ -73,7 +88,7 @@ def test_factory_reset_uses_popen_not_blocking_run(monkeypatch):
         raise AssertionError("factory reset must not block on _run")
 
     monkeypatch.setattr(bridge, "_run", boom_run)
-    monkeypatch.setattr(bridge, "_spawn_detached", lambda cmd: (True, None))
+    monkeypatch.setattr(bridge, "_spawn_detached", lambda cmd: (_FakeProc(), None))
 
     ok, info = bridge.run_factory_reset({"jobId": "job-1", "targetName": "droplet-home"})
     assert ok is True
@@ -85,7 +100,7 @@ def test_factory_reset_surfaces_spawn_failure(monkeypatch):
     bridge = _load_bridge(monkeypatch)
     monkeypatch.setattr(
         bridge, "_spawn_detached",
-        lambda cmd: (False, "host script not found"))
+        lambda cmd: (None, "host script not found"))
 
     ok, info = bridge.run_factory_reset({"jobId": "job-1", "targetName": "droplet-home"})
     assert ok is False
@@ -103,6 +118,52 @@ def test_factory_reset_never_raises(monkeypatch):
     # run_pool_command() / run_set_hostapd().
     ok, info = bridge.run_factory_reset({"jobId": "job-1", "targetName": "droplet-home"})
     assert ok is False
+
+
+# ---------------------------------------------------------------------------
+# Lock liveness (WARP-825 hardening): a wipe that FAILS mid-run must not wedge
+# every future reset at 409. A live wipe still must.
+# ---------------------------------------------------------------------------
+
+def test_second_reset_while_wipe_in_flight_is_rejected(monkeypatch):
+    """While the first wipe is genuinely running (poll() -> None), a second
+    reset is rejected as busy — the lock still serializes concurrent wipes."""
+    bridge = _load_bridge(monkeypatch)
+    live = _FakeProc(alive=True)
+    monkeypatch.setattr(bridge, "_spawn_detached", lambda cmd: (live, None))
+
+    ok1, _ = bridge.run_factory_reset({"jobId": "a", "targetName": "droplet-home"})
+    assert ok1 is True
+    ok2, info2 = bridge.run_factory_reset({"jobId": "b", "targetName": "droplet-home"})
+    assert ok2 is False
+    assert info2 == "busy"
+
+
+def test_stale_lock_reclaimed_after_a_failed_wipe(monkeypatch):
+    """If the prior wipe exited WITHOUT tearing the bridge down (it failed),
+    the next reset reclaims the stale lock and dispatches a fresh wipe instead
+    of returning 409 forever."""
+    bridge = _load_bridge(monkeypatch)
+    procs = []
+
+    def fake_spawn(cmd):
+        p = _FakeProc(alive=True)
+        procs.append(p)
+        return p, None
+
+    monkeypatch.setattr(bridge, "_spawn_detached", fake_spawn)
+
+    ok1, _ = bridge.run_factory_reset({"jobId": "a", "targetName": "droplet-home"})
+    assert ok1 is True
+
+    # The wipe exits without completing the teardown → it failed mid-run.
+    procs[0]._alive = False
+    procs[0].returncode = 1
+
+    ok2, info2 = bridge.run_factory_reset({"jobId": "b", "targetName": "droplet-home"})
+    assert ok2 is True              # lock reclaimed, retry dispatched
+    assert info2.get("dispatched") is True
+    assert len(procs) == 2          # a second wipe was actually spawned
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +229,7 @@ def test_reset_accepted_with_token(monkeypatch):
 
     def fake_spawn(cmd):
         spawned["n"] += 1
-        return True, None
+        return _FakeProc(), None
 
     monkeypatch.setattr(bridge, "_spawn_detached", fake_spawn)
     status, obj = _post(bridge, {"X-Droplet-Auth": "pytest-bridge-token"},
@@ -183,7 +244,7 @@ def test_reset_spawn_failure_maps_to_502(monkeypatch):
     bridge = _load_bridge(monkeypatch)
     monkeypatch.setattr(
         bridge, "_spawn_detached",
-        lambda cmd: (False, "host script not found"))
+        lambda cmd: (None, "host script not found"))
     status, obj = _post(bridge, {"X-Droplet-Auth": "pytest-bridge-token"},
                         {"jobId": "j", "targetName": "droplet-home"})
     assert status == 502
