@@ -1,0 +1,22 @@
+[Unit]
+Description=Droplet storage-pool apply (root executor for owner-confirmed mdadm/mkfs ops)
+# ADR-019 follow-up: the device-bridge sandbox (User=droplet +
+# ProtectSystem=strict + NoNewPrivileges) can never run mdadm/mkfs/mount, so
+# the bridge spools the owner-confirmed request into its StateDirectory
+# (/var/lib/droplet-bridge/pool-spool/request.json) and starts THIS unit via
+# polkit (50-droplet-device-bridge.rules — start verb, this unit only, user
+# droplet only). ExecStart consumes that one request as root, runs the
+# repo-tracked droplet-storage-pool.sh (whose hard pre-flight is the real
+# safety gate), and writes pool-spool/result.json for the bridge to read.
+#
+# Deliberately NO [Install] section: this unit is never enabled and never runs
+# at boot — it only ever runs on demand, one request at a time (systemd
+# serializes starts of the same unit).
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/droplet-storage-pool-apply.sh
+# mkfs/mdadm on a large array can take minutes. Keep this just under the
+# bridge's 600 s subprocess timeout on `systemctl start` so systemd reports
+# the failure before the bridge gives up on the call.
+TimeoutStartSec=590

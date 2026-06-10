@@ -436,6 +436,20 @@ if [ -f /usr/local/sbin/droplet-storage-pool.sh ]; then
   log_success "Removed storage-pool host script"
 fi
 
+# Storage-pool ROOT executor + apply unit + the bridge polkit rules (ADR-019
+# follow-up). Remove so a reset truly returns to out-of-box;
+# install-device-bridge.sh reinstalls all three on re-provision. The spooled
+# request/result files live in /var/lib/droplet-bridge, wiped below.
+if [ -f /usr/local/sbin/droplet-storage-pool-apply.sh ] || \
+   [ -f /etc/systemd/system/droplet-storage-pool-apply.service ] || \
+   [ -f /etc/polkit-1/rules.d/50-droplet-device-bridge.rules ]; then
+  sudo rm -f /usr/local/sbin/droplet-storage-pool-apply.sh 2>/dev/null || true
+  sudo rm -f /etc/systemd/system/droplet-storage-pool-apply.service 2>/dev/null || true
+  sudo rm -f /etc/polkit-1/rules.d/50-droplet-device-bridge.rules 2>/dev/null || true
+  sudo systemctl daemon-reload 2>/dev/null || true
+  log_success "Removed storage-pool apply unit, root executor, and bridge polkit rules"
+fi
+
 # Single-box hostapd Wi-Fi-write host script (WARP-808). Remove so a factory
 # reset truly returns to out-of-box; install-device-bridge.sh reinstalls it on
 # re-provision. The customer's SSID/PSK lives in the attach env file, which the
