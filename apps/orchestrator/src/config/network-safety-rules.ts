@@ -18,7 +18,13 @@ const TIER_2_OPERATIONS = new Set([
   "add_port_forward",
   "remove_port_forward",
   "set_wifi_password",
-  "set_wifi_ssid",        // Disconnects all wireless clients
+  // No SSID entry on purpose: the /network/wifi/ssid route evaluates its
+  // write as "set_ssid" — Tier 1, applies immediately, per the setup-wizard
+  // contract (docs/SETUP_WIZARD_WALKTHROUGH.md, "Internet" step) and this
+  // file's header. The AI-facing `set_wifi_ssid` tool enforces its own
+  // confirmation in-handler (tools-core `confirmed` flag, the
+  // memory_extract pattern) before the route applies the Tier-1 write.
+  // Pinned by network-wifi-routes.test.ts.
   "set_wan_protocol",
   "set_lan_ip",
   "create_vlan",
