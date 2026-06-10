@@ -54,6 +54,7 @@ Full protocol and debugging notes: [`pyportal/README.md`](./pyportal/README.md).
 | POST | `/display/logo`        | Navigate to the Idle screen (clock + mark + info chips) |
 | POST | `/display/boot`        | Boot screen `{stage, detail?, pct?}` — omit `pct` for an indeterminate band |
 | POST | `/display/shutdown`    | Shutdown screen `{reason?, phase?}` — `phase=halted` shows "Safe to power off" |
+| POST | `/display/claim`       | Onboarding claim screen `{code, setup_url, wifi_*?}` (WARP-632 / ADR-017). Design-handoff two-column layout: code hero + link steps left, scan QR card right. The QR is the host-encoded setup deep link (`<setup_url>?c=<CODE>`) or, when the optional Wi-Fi creds are supplied (WARP-819), the Wi-Fi join QR with readable SSID/PSK |
 | POST | `/display/message`     | Custom text `{title, lines[]}` — up to 10 lines |
 | POST | `/display/custom`      | Upload image (multipart, max 8 MB) |
 | POST | `/display/brightness`  | Set brightness `{value: 0–255}` (PyPortal only) |

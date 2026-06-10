@@ -44,11 +44,16 @@ Lifecycle screens (host-driven, modal — not in the swipe nav):
             the fully-collapsed safe-to-power-off frame. Pushed by the host's
             systemd ExecStop.
   standby   Dim mark + STANDBY + "tap to power on" (host-pushed; tap wakes).
-  claim     Onboarding claim screen (WARP-632 / ADR-017): the claim code is
-            the hero (same heavy bitmap face as the clock/CPU heroes) on a
-            raised card + a "CLAIM THIS DROPLET" eyebrow + the setup URL.
-            Host-driven by the orchestrator while the box is unclaimed;
-            cleared (host navigates away) once claimed.
+  claim     Onboarding claim screen (WARP-632 / ADR-017), design-handoff
+            two-column layout: header band (mark + FIRST-TIME SETUP), the
+            claim code as dash-separated groups with accent dash bars + the
+            numbered link steps on the left, a white scan QR card on the
+            right, WAITING TO BE CLAIMED dots over a 2px scan track at the
+            foot. The QR is the host-encoded setup deep link
+            (setup_qr_matrix) or, when Wi-Fi creds are pushed (WARP-819),
+            the Wi-Fi join QR + readable SSID/PSK. Host-driven by the
+            orchestrator while the box is unclaimed; cleared (host
+            navigates away) once claimed.
 
 Host → display (one JSON per line, contract UNCHANGED for back-compat)
   {"mode":"idle"|"stats"|"qr"|"logo"|"home"|"system"}  # see _ALIASES below;
@@ -56,7 +61,9 @@ Host → display (one JSON per line, contract UNCHANGED for back-compat)
         # screen now, logo→idle. Bare-mode (no data) = navigation.
   {"mode":"boot",   "data":{stage,detail,pct}}     # pct optional (indeterminate)
   {"mode":"shutdown","data":{reason,phase}}        # phase: stopping|halted
-  {"mode":"claim",  "data":{code, setup_url}}       # onboarding claim code
+  {"mode":"claim",  "data":{code, setup_url, setup_qr_matrix,
+                             wifi_qr_matrix, wifi_ssid, wifi_psk}}
+        # onboarding claim code; matrices host-encoded, at most one per frame
   {"mode":"stats",  "data":{cpu,mem,disk,temp,ip,hostname,uptime,now,date}}
   {"mode":"wifi",   "data":{networks, connected_to, adapter, state, ssid,
                              clients, channel, band, key_ttl_seconds, password}}
@@ -147,6 +154,8 @@ ACCENT_DIM    = 0x5B62C7   # seconds hairline
 ACCENT_INK    = 0xB4BAFF   # mark highlight, password text
 # accentSubtle rgba(129,140,248,0.18) over bg -> nearest solid (active toggle).
 ACCENT_SUBTLE = 0x1B1D32
+# Claim-screen waiting dots at rest — accent @ 30% over bg, flattened.
+ACCENT_FAINT  = 0x2B2F52
 # rgba(255,159,10,0.18) over bg -> KEY-pill fill when <60s.
 ORANGE_SUBTLE = 0x322108
 # sparkline fill #818cf822 over bg -> nearest solid.
@@ -345,12 +354,14 @@ _HERO_FONT_PATH = "/lib/fonts/Inter-Hero-66.bdf"
 # renders (WARP-638). Hero draw sites:
 #   * idle clock  — digits + ":" + " " (the colon blinks to a space)
 #   * CPU hero    — digits + "%"
-#   * claim code  — A-Z + digits + "-"  (e.g. DRPL-7K2Q-9F4M)
-# AM/PM and the TEMP "°" are drawn in terminalio, NOT the hero face, so "°"
-# (U+00B0) is intentionally NOT preloaded — it was dead weight in the cache.
-# The bundled BDF (tools/make_hero_font.py) still carries every glyph; this
-# just narrows what gets rasterised into the live glyph cache.
-_HERO_GLYPHS = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-: %"
+# The redesigned claim screen is terminalio-only (its 248px column can't fit
+# the 66px face), so A-Z and "-" are no longer hero glyphs — preloading them
+# pinned ~27 dead 66px bitmaps (~8-10 KB) in the cache for nothing. AM/PM
+# and the TEMP "°" are drawn in terminalio, NOT the hero face, so they are
+# intentionally NOT preloaded either. The bundled BDF (tools/
+# make_hero_font.py) still carries every glyph; this just narrows what gets
+# rasterised into the live glyph cache.
+_HERO_GLYPHS = b"0123456789: %"
 
 
 def _hero_font():
@@ -505,8 +516,10 @@ state = {
     "shutdown": {"reason": "", "phase": "stopping", "_frac": 0.0, "_t0": 0.0},
     # Onboarding claim screen (WARP-632 / ADR-017). Modal, host-driven.
     # WARP-819: optional Wi-Fi-connect creds (matrix/ssid/psk) so the claim
-    # screen can also show how to join the box's Wi-Fi. Absent => claim-only.
-    "claim": {"code": "", "setup_url": "",
+    # screen can also show how to join the box's Wi-Fi. Absent => claim-only,
+    # whose scan QR is the host-encoded setup deep link (setup_qr_matrix).
+    # The host sends at most ONE matrix per claim frame (heap posture).
+    "claim": {"code": "", "setup_url": "", "setup_qr_matrix": None,
               "wifi_qr_matrix": None, "wifi_ssid": "", "wifi_psk": ""},
     # Rolling sparkline history for the gauges. Each list is a ring buffer
     # capped at _SPARK_LEN; _record_sparks appends on every stats push.
@@ -1319,143 +1332,264 @@ def _request_power_on():
     _send("NAV:power_on")
 
 
-def render_claim():
-    """Onboarding claim screen (WARP-632 / ADR-017), py-v3 editorial style.
+def _valid_matrix(m):
+    """Return `m` if it is a well-formed QR bit-matrix, else None.
 
-    The claim CODE is the hero — drawn in the bundled heavy bitmap face the
-    idle clock / CPU hero use (``_hero_font()``), centred on a raised card with
-    an accent border so it reads as the one thing to copy off the lid. Above it
-    a tracked ``CLAIM THIS DROPLET`` eyebrow + the brand mark. Tokens, mark and
+    The host encodes and caps the matrices, but the serial wire is still
+    just JSON: a malformed value (non-list, ragged rows) would raise
+    mid-render — AFTER render_claim has released the live display tree —
+    stranding the panel black on a modal screen (_render_with_gc only
+    catches MemoryError, and the claim screen is exempt from the idle
+    timeout). Validate up front; the 64-row cap mirrors the host-side
+    firmware-tolerance contract (main.py ClaimRequest).
+    """
+    try:
+        if not m or not isinstance(m, list) or len(m) > 64:
+            return None
+        n = len(m[0])
+        if n == 0:
+            return None
+        for row in m:
+            if not isinstance(row, list) or len(row) != n:
+                return None
+        return m
+    except Exception:
+        return None
+
+
+def render_claim():
+    """Onboarding claim screen (WARP-632 / ADR-017), design-handoff
+    two-column layout ("PyPortal First Boot — Claim Code").
+
+    Header band (mark + DROPLET wordmark, FIRST-TIME SETUP status), then two
+    columns split by a hairline: LEFT is the hero — the claim code drawn as
+    its dash-separated groups with accent dash bars between them, an accent
+    rule and the numbered link steps; RIGHT is a white scan QR card. The foot
+    carries the WAITING TO BE CLAIMED dots (animated by _claim_dots_tick —
+    palette mutation only, no rebuild) over a 2px scan track. Tokens, mark and
     spacing match the boot/idle/system screens. Mirrors host display.py
     render_claim() 1:1.
 
-    WARP-819: when the host supplies the box's Wi-Fi-connect creds
-    (claim["wifi_qr_matrix"] + ssid + psk) the screen becomes STACKED — the
-    claim code (smaller) on top, and below it a Wi-Fi-connect QR card (the
-    SAME _v3_qr_card / _render_qr_matrix_plain path the System screen uses,
-    fed the claim's own matrix) + readable ``WIFI`` / ``PASSWORD`` text, so a
-    first-boot user can join the box's Wi-Fi with no prior config. When the
-    creds are absent the original claim-only layout (instruction + setup URL)
-    renders unchanged (graceful degradation).
+    The QR is whichever single matrix the host pushed: the setup deep-link
+    (claim["setup_qr_matrix"], `<setup_url>?c=<CODE>`) in the claim-only
+    layout, or — when the Wi-Fi creds are supplied (WARP-819) — the Wi-Fi
+    join QR with readable SSID/PSK under the card (camera-less manual join)
+    and a leading "Join Wi-Fi" step. The firmware never encodes on-device;
+    with no matrix at all the card degrades to the mark on white. A partial
+    Wi-Fi block degrades to the claim-only layout.
 
-    Modal + host-driven (not in the SCREENS carousel); the host navigates away
-    once the box is claimed. Falls back to terminalio-scaled text if the hero
-    font is missing, so a font problem never blanks the code.
+    Modal + host-driven (not in the SCREENS carousel); the host navigates
+    away once the box is claimed. Terminalio-only text — the 66px hero face
+    doesn't fit the column, and a fixed bitmap face can't scale down.
+
+    Deliberate descopes from the handoff card (revisit knowingly, not by
+    accident): the bottom-left DEVICE id line (no device identity exists in
+    the claim-frame contract), the claimed-success confirm screen
+    (drawClaimed — needs a new orchestrator-pushed mode), and the header-dot
+    pulse + scan-track shimmer (static; the WAITING dots are this screen's
+    only motion — heap discipline).
     """
     global touch_regions
     touch_regions = []
+    _claim_refs["dots"] = []
+    _claim_refs["active"] = 0
 
     claim = state.get("claim") or {}
-    code = str(claim.get("code") or "").strip()
+    code = str(claim.get("code") or "").strip().upper()
     setup_url = str(claim.get("setup_url") or "").strip()
-    wifi_matrix = claim.get("wifi_qr_matrix")
+    setup_matrix = _valid_matrix(claim.get("setup_qr_matrix"))
+    wifi_matrix = _valid_matrix(claim.get("wifi_qr_matrix"))
     wifi_ssid = str(claim.get("wifi_ssid") or "").strip()
     wifi_psk = str(claim.get("wifi_psk") or "")
     has_wifi = bool(wifi_matrix and wifi_ssid)
+    qr_matrix = wifi_matrix if has_wifi else setup_matrix
+    has_qr = bool(qr_matrix)
 
-    # OOM safety (WARP-638 pattern, mirrors render_system): when the claim
-    # screen carries a Wi-Fi QR it holds a full QR bitmap, so release the prior
-    # frame's display tree + gc BEFORE building this one — never hold two large
-    # matrices alive at once on the ~165 KB Titano heap.
-    if has_wifi:
-        board.DISPLAY.root_group = None
-        gc.collect()
+    # OOM safety (WARP-638 pattern): release the prior frame's display tree
+    # + gc BEFORE building this one — ALWAYS, not just on matrix frames. The
+    # redesigned tree is the heaviest in the firmware (~100 elements), so a
+    # matrix-less re-push holding two trees alive would be its own OOM risk
+    # on the ~165 KB Titano heap. The matrix shape is validated above, so
+    # nothing after this release can raise on malformed wire data and strand
+    # the panel black (render errors on a modal screen never self-recover).
+    board.DISPLAY.root_group = None
+    gc.collect()
 
     g = displayio.Group()
     g.append(_rect(0, 0, DISPLAY_W, DISPLAY_H, BG))
 
-    # Brand mark up top. Smaller in the stacked Wi-Fi layout so the lower band
-    # has room for the QR + creds.
-    mark_size = 40 if has_wifi else 52
-    mark_x = (DISPLAY_W - int(mark_size * 52 / 60)) // 2
-    mark_y = 14 if has_wifi else 26
-    _mark_poly(g, mark_size, mark_x, mark_y)
-    mark_b = mark_y + int(mark_size * 48 / 60)
+    # ---- Header band: mark + wordmark, first-time-setup status -------------
+    _mark_poly(g, 20, 20, 17)
+    _tracked(g, "DROPLET", x=50, y=21, scale=1, color=LABEL_3, tracking=2)
+    slw = _tracked(g, "FIRST-TIME SETUP", x=DISPLAY_W - 20, y=21, scale=1,
+                   color=ACCENT, tracking=1, align="right")
+    g.append(_circle(DISPLAY_W - 20 - slw - 12, 26, 3, ACCENT))
+    g.append(_rect(20, 44, DISPLAY_W - 40, 1, SEPARATOR))
 
-    # Eyebrow — tracked caps, like SYSTEM / CPU LOAD on the system screen.
-    eyebrow_y = mark_b + (12 if has_wifi else 20)
-    _tracked(g, "CLAIM THIS DROPLET", x=DISPLAY_W // 2, y=eyebrow_y, scale=1,
-             color=LABEL_3, anchor_y=0.5, tracking=2, align="center")
+    # ---- Column divider -----------------------------------------------------
+    div_x = 284
+    g.append(_rect(div_x, 58, 1, DISPLAY_H - 58 - 26, SEPARATOR))
 
-    # The CODE — hero on a raised card with an accent border. Prefer the
-    # bundled heavy bitmap face; size the card from the measured glyph run so a
-    # long code never overflows (cap at the display width minus a margin). In
-    # the stacked layout the hero is scaled down (scale via a smaller terminalio
-    # fallback / the same hero font but a tighter card) so it shares the screen
-    # with the Wi-Fi block while staying the visual hero.
-    code_text = code or "----  ----"
-    hero = _hero_font()
-    card_pad_x = 24
-    card_y = eyebrow_y + (14 if has_wifi else 20)
-    if hero is not None and not has_wifi:
-        # Full hero face (claim-only layout). Measure the run so the card hugs
-        # it. label.bounding_box is in base-font px; drawn at scale=1.
-        try:
-            probe = label.Label(hero, text=code_text, scale=1)
-            code_w = probe.bounding_box[2]
-            code_h = probe.bounding_box[3]
-        except Exception:
-            code_w, code_h = len(code_text) * 40, 52
-        card_h = code_h + 28
-        card_w = min(DISPLAY_W - 24, max(180, code_w + card_pad_x * 2))
-        card_x = (DISPLAY_W - card_w) // 2
-        _rounded_rect(g, card_x, card_y, card_w, card_h, 14, SURFACE)
-        _stroked_rect(card_x, card_y, card_w, card_h, ACCENT, 1)
-        g.append(_text(code_text, x=DISPLAY_W // 2, y=card_y + card_h // 2,
-                       scale=1, color=ACCENT_INK, anchor=(0.5, 0.5), font=hero))
+    # ================= LEFT — claim code hero + steps ========================
+    _tracked(g, "CLAIM CODE", x=20, y=56, scale=1, color=ACCENT, tracking=2)
+
+    # Hero code — dash-separated groups with accent dash bars between them.
+    # terminalio is a fixed 6px cell, so the run is measured arithmetically;
+    # drop the scale until the run fits the column (a CLAIM_CODE env override
+    # can be longer than DRPL-XXXX-XXXX).
+    code_y = 76
+    left_max = div_x - 20 - 16
+    groups = [grp for grp in code.split("-") if grp]
+    if groups:
+        gap, dash_w = 3, 8
+        scale = 3
+        while scale > 1:
+            total = (sum(len(grp) * 6 * scale for grp in groups)
+                     + (len(groups) - 1) * (gap * 2 + dash_w))
+            if total <= left_max:
+                break
+            scale -= 1
+        code_h = 12 * scale
+        code_cy = code_y + code_h // 2
+        cx = 20
+        for i, grp in enumerate(groups):
+            g.append(_text(grp, x=cx, y=code_cy, scale=scale, color=TEXT,
+                           anchor=(0.0, 0.5)))
+            cx += len(grp) * 6 * scale
+            if i < len(groups) - 1:
+                cx += gap
+                _rounded_rect(g, cx, code_cy - 2, dash_w, 4, 2, ACCENT)
+                cx += dash_w + gap
     else:
-        # Terminalio scaled up. scale=4 (~24px/char) for the claim-only fallback
-        # when the hero font is missing; scale=3 in the stacked Wi-Fi layout so
-        # the code stays prominent but leaves room for the QR + creds below.
-        code_scale = 3 if has_wifi else 4
-        code_px = len(code_text) * 6 * code_scale
-        card_w = min(DISPLAY_W - 24, max(180, code_px + card_pad_x * 2))
-        card_h = 52 if has_wifi else 64
-        card_x = (DISPLAY_W - card_w) // 2
-        _rounded_rect(g, card_x, card_y, card_w, card_h, 14, SURFACE)
-        _stroked_rect(card_x, card_y, card_w, card_h, ACCENT, 1)
-        g.append(_text(code_text, x=DISPLAY_W // 2, y=card_y + card_h // 2,
-                       scale=code_scale, color=ACCENT_INK, anchor=(0.5, 0.5)))
-
-    if has_wifi:
-        # ----- Lower band: Wi-Fi-connect QR + readable creds -----------------
-        # Eyebrow sets the "now join the Wi-Fi" section apart, then a left QR
-        # card (claim's own matrix, NOT the System screen's state["qr"]) + right
-        # WIFI / PASSWORD text — the same two-column idiom as render_system's
-        # PAIR · WI-FI block.
-        band_y = card_y + card_h + 14
-        _tracked(g, "JOIN THIS DROPLET WI-FI", x=DISPLAY_W // 2, y=band_y,
-                 scale=1, color=ACCENT, anchor_y=0.5, tracking=1, align="center")
-
-        qr_top = band_y + 14
-        qr_size = min(118, DISPLAY_H - qr_top - 12)
-        qr_x = 26
-        qr_y = qr_top
-        # Reuse the System screen's QR-card renderer, but feed it the claim's
-        # OWN matrix so the claim screen doesn't depend on a {"mode":"qr"} push.
-        _v3_qr_card(g, qr_x, qr_y, qr_size, matrix=wifi_matrix)
-
-        tx = qr_x + qr_size + 18
-        ty = qr_y + 8
-        _tracked(g, "WIFI", x=tx, y=ty, scale=1, color=LABEL_3, tracking=1)
-        g.append(_text(wifi_ssid[:18], x=tx, y=ty + 18, scale=2, color=TEXT,
-                       anchor=(0.0, 0.5)))
-        _tracked(g, "PASSWORD", x=tx, y=ty + 44, scale=1, color=LABEL_3,
-                 tracking=1)
-        g.append(_text(wifi_psk[:20], x=tx, y=ty + 60, scale=1, color=ACCENT_INK,
-                       anchor=(0.0, 0.5)))
-        g.append(_text("Scan or type on any device", x=tx, y=ty + 82, scale=1,
+        # Host hasn't pushed a code yet — defensive placeholder.
+        code_h = 36
+        g.append(_text("----  ----", x=20, y=code_y + code_h // 2, scale=3,
                        color=LABEL_4, anchor=(0.0, 0.5)))
+
+    # Accent rule under the code.
+    _rounded_rect(g, 20, code_y + code_h + 14, 56, 3, 1, ACCENT)
+
+    # Numbered link steps. With Wi-Fi creds the join step leads — a fresh
+    # phone can't reach the setup URL before it's on the box's network.
+    host = setup_url
+    for prefix in ("https://", "http://"):
+        if host.startswith(prefix):
+            host = host[len(prefix):]
+            break
+    host = host.rstrip("/")
+
+    _tracked(g, "TO LINK THIS DEVICE", x=20, y=148, scale=1, color=LABEL_3,
+             tracking=1)
+    steps = []
+    if has_wifi:
+        steps.append(("Join Wi-Fi ", wifi_ssid[:18]))
+    if host:
+        # A DUCKDNS-style hostname overflows the inline slot — wrap the
+        # address onto its own line rather than truncating the /setup path
+        # away (in the Wi-Fi layout this text is the only typed setup
+        # pointer; the setup QR is deliberately off that card).
+        steps.append(("Go to ", host[:37]))
+    steps.append(("Enter the code above", ""))
+
+    sy = 168
+    for i, (lead, em) in enumerate(steps):
+        _rounded_rect(g, 20, sy, 18, 18, 5, ACCENT_SUBTLE)
+        g.append(_text(str(i + 1), x=29, y=sy + 9, scale=1, color=ACCENT_INK,
+                       anchor=(0.5, 0.5)))
+        g.append(_text(lead, x=46, y=sy + 9, scale=1, color=LABEL_2,
+                       anchor=(0.0, 0.5)))
+        if em and len(em) > 26:
+            g.append(_text(em, x=46, y=sy + 23, scale=1,
+                           color=ACCENT_INK, anchor=(0.0, 0.5)))
+            sy += 14
+        elif em:
+            g.append(_text(em, x=46 + len(lead) * 6, y=sy + 9, scale=1,
+                           color=ACCENT_INK, anchor=(0.0, 0.5)))
+        sy += 28
+
+    # ================= RIGHT — scan QR card ==================================
+    rx = div_x + 16
+    rw = DISPLAY_W - 20 - rx
+    # The eyebrow stays honest: a card with no scannable matrix (older host
+    # that doesn't send setup_qr_matrix, or the host's encode degrading)
+    # must never instruct a scan that cannot work.
+    if has_wifi:
+        eyebrow_r = "SCAN TO JOIN WI-FI"
+    elif has_qr:
+        eyebrow_r = "SCAN TO CLAIM"
     else:
-        # Claim-only layout (unchanged): instruction + setup URL at the foot.
-        g.append(_text("Enter this code to finish setup",
-                       x=DISPLAY_W // 2, y=card_y + card_h + 18,
-                       scale=1, color=LABEL_3, anchor=(0.5, 0.5)))
-        if setup_url:
-            g.append(_text(setup_url[:40], x=DISPLAY_W // 2, y=DISPLAY_H - 22,
-                           scale=1, color=LABEL_4, anchor=(0.5, 0.5)))
+        eyebrow_r = "SETUP"
+    _tracked(g, eyebrow_r, x=rx, y=56, scale=1, color=ACCENT, tracking=1)
+
+    card_w = 128
+    card_x = rx + (rw - card_w) // 2
+    card_y = 72
+    # The System screen's QR-card renderer, fed the claim's OWN matrix so the
+    # claim screen never depends on a {"mode":"qr"} push. No matrix yet ->
+    # mark-on-white placeholder (the layout still reads).
+    _v3_qr_card(g, card_x, card_y, card_w, matrix=qr_matrix or [])
+
+    cap_y = card_y + card_w + 12
+    if has_wifi:
+        g.append(_text("Joins this Droplet's Wi-Fi", x=rx + rw // 2, y=cap_y,
+                       scale=1, color=LABEL_3, anchor=(0.5, 0.0)))
+        # Readable creds — camera-less manual join (WARP-819).
+        g.append(_text(wifi_ssid[:18], x=rx + rw // 2, y=cap_y + 17, scale=1,
+                       color=TEXT, anchor=(0.5, 0.0)))
+        g.append(_text(wifi_psk[:20], x=rx + rw // 2, y=cap_y + 34, scale=1,
+                       color=ACCENT_INK, anchor=(0.5, 0.0)))
+    else:
+        g.append(_text("Opens setup on your phone" if has_qr
+                       else "Use the address above",
+                       x=rx + rw // 2, y=cap_y,
+                       scale=1, color=LABEL_3, anchor=(0.5, 0.0)))
+
+    # ---- Foot: waiting status + scan track ----------------------------------
+    wlw = _tracked(g, "WAITING TO BE CLAIMED", x=DISPLAY_W - 20,
+                   y=DISPLAY_H - 27, scale=1, color=ACCENT, tracking=1,
+                   align="right")
+    for i in range(3):
+        # Dedicated palette per dot — _palette() caches by colour, and the
+        # ticker mutates these in place (a shared palette would tint every
+        # same-colour shape on screen).
+        pal = displayio.Palette(1)
+        pal[0] = ACCENT if i == 0 else ACCENT_FAINT
+        dot = vectorio.Circle(pixel_shader=pal, radius=2,
+                              x=int(DISPLAY_W - 20 - wlw - 22 + i * 7),
+                              y=DISPLAY_H - 23)
+        _claim_refs["dots"].append(dot)
+        g.append(dot)
+
+    # 2px scan track with a static accent segment (the waiting affordance).
+    g.append(_rect(0, DISPLAY_H - 2, DISPLAY_W, 2, TRACK))
+    g.append(_rect((DISPLAY_W - 90) // 2, DISPLAY_H - 2, 90, 2, ACCENT))
 
     board.DISPLAY.root_group = g
+
+
+# WAITING TO BE CLAIMED dot ticker — the claim screen's only motion. Same
+# cheap-update discipline as the idle colon: mutate the three dots' dedicated
+# palettes in place, never rebuild the frame (a rebuild would churn the QR
+# bitmap on the ~165 KB heap). Armed by render_claim, advanced from the main
+# loop while on the claim screen, disarmed by set_screen on nav-away.
+_claim_refs = {"dots": [], "active": 0, "last": 0.0}
+_CLAIM_DOT_PERIOD_S = 0.4
+
+
+def _claim_dots_tick(now_mono):
+    if state.get("screen") != "claim" or not _claim_refs["dots"]:
+        return
+    if now_mono - _claim_refs["last"] < _CLAIM_DOT_PERIOD_S:
+        return
+    _claim_refs["last"] = now_mono
+    _claim_refs["active"] = (_claim_refs["active"] + 1) % len(
+        _claim_refs["dots"])
+    for i, dot in enumerate(_claim_refs["dots"]):
+        try:
+            dot.pixel_shader[0] = (ACCENT if i == _claim_refs["active"]
+                                   else ACCENT_FAINT)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -1504,6 +1638,10 @@ def set_screen(name):
     name = _ALIASES.get(name, name)
     if name not in RENDERERS:
         return
+    if name != "claim":
+        # Disarm the claim dot ticker on nav-away (drops the refs so the old
+        # frame's dots can be collected; render_claim re-arms on entry).
+        _claim_refs["dots"] = []
     state["screen"] = name
     # Brightness: dim on idle, full elsewhere
     set_brightness(IDLE_BRIGHTNESS if name == "idle" else ACTIVE_BRIGHTNESS)
@@ -1702,10 +1840,14 @@ def handle(msg):
         # the live AP. So RESET the wifi_* keys BEFORE the merge — absent keys
         # then clear, present keys land. (The host already only puts a wifi_*
         # key on the wire when it is non-empty.)
+        # The setup deep-link matrix embeds the claim code in its payload, so
+        # like the wifi_* keys it must not survive a push that omits it — a
+        # stale matrix would deep-link a code that no longer matches the hero.
+        state["claim"]["setup_qr_matrix"] = None
         state["claim"]["wifi_qr_matrix"] = None
         state["claim"]["wifi_ssid"] = ""
         state["claim"]["wifi_psk"] = ""
-        for k in ("code", "setup_url",
+        for k in ("code", "setup_url", "setup_qr_matrix",
                   "wifi_qr_matrix", "wifi_ssid", "wifi_psk"):
             if k in data:
                 state["claim"][k] = data[k]
@@ -1778,6 +1920,11 @@ def main():
                     last_idle_colon = colon_on
             except Exception:
                 pass
+
+        # Claim-screen waiting dots — palette mutation only (see
+        # _claim_dots_tick); interval-gated internally.
+        if state["screen"] == "claim":
+            _claim_dots_tick(now_mono)
 
         # Power-sequence self-animation. Advance the fill/drain fraction and
         # re-render at ~12.5fps while a boot/shutdown is up and not host-driven
