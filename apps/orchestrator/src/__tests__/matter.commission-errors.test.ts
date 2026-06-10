@@ -20,7 +20,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
 import express, { type Request, type Response, type NextFunction } from "express";
-import { CommissionableDeviceDiscoveryFailedError } from "@matter/protocol";
+import { CommissionableDeviceDiscoveryFailedError } from "@matter/main/protocol";
 
 // ── Config mock — hoisted above route imports (same pattern as rbac.test). ──
 vi.mock("../config.js", () => ({

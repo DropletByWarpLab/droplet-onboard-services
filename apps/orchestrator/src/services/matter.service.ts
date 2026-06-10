@@ -20,7 +20,7 @@ import {
 import { NodeStates, type PairedNode } from "@project-chip/matter.js/device";
 import { GeneralCommissioning } from "@matter/main/clusters";
 import { ManualPairingCodeCodec, QrPairingCodeCodec } from "@matter/main/types";
-import { Ble, type CommissionableDevice } from "@matter/protocol";
+import { Ble, type CommissionableDevice } from "@matter/main/protocol";
 import { config } from "../config.js";
 import type {
   MatterCommissionedDevice,
