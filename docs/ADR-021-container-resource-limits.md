@@ -1,8 +1,17 @@
-# ADR-012 — Per-container resource limits (WARP-569)
+# ADR-021 — Per-container resource limits (WARP-569)
 
 **Status:** accepted  
 **Date:** 2026-05-31  
 **Ticket:** [WARP-569](https://warp-lab.atlassian.net/browse/WARP-569)
+
+> **Numbering note (2026-06-09).** This ADR originally landed as
+> `ADR-012-container-resource-limits.md` on the same day that
+> `ADR-012-phone-home-egress-control.md` (WARP-613) landed — a numbering
+> collision. Phone-home egress keeps ADR-012 (its number is referenced
+> from source code across the orchestrator, dashboard, and routing
+> service); this document is renumbered to the next free slot, ADR-021.
+> If you find an "ADR-012" reference about *resource limits*, it means
+> this file.
 
 ## Context
 
