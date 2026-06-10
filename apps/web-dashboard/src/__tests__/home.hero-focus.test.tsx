@@ -13,8 +13,11 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const here = path.dirname(new URL(import.meta.url).pathname);
+// fileURLToPath, not `new URL(...).pathname` — the latter yields "/C:/..."
+// on Windows, which path.resolve doubles into "C:\C:\...".
+const here = path.dirname(fileURLToPath(import.meta.url));
 const srcPath = path.resolve(here, "../components/home/widgets.tsx");
 
 describe("WARP-298 home hero focus ring", () => {
