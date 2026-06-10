@@ -123,7 +123,11 @@ const chatRequestSchema = z.object({
   ),
   stream: z.boolean().optional().default(false),
   temperature: z.number().min(0).max(2).optional(),
-  max_tokens: z.number().positive().optional(),
+  // Mirrors the ai-gateway's pydantic bound (schemas.py: int, ge=1,
+  // le=4096). Now that the value is actually forwarded (WARP-849), an
+  // out-of-range number must 400 here instead of 422ing at the gateway
+  // and surfacing as a 500.
+  max_tokens: z.number().int().min(1).max(4096).optional(),
   provider: z.string().optional(),
   max_iter: z.number().int().min(1).max(10).optional(),
   allowed_tools: z.array(z.string()).optional(),

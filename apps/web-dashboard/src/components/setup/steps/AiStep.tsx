@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, Loader2, MessageSquare, Sparkles } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import { fetchModels, sendChat } from "@/lib/api";
@@ -92,7 +92,15 @@ export function AiStep({
     "What kinds of files might I want to back up here?",
   ];
 
+  // Re-entrancy guard: the 8s poll must not stack a second fetch on a
+  // slow one (the gateway can be sluggish exactly when this step shows —
+  // Ollama busy with a first-boot pull). Without it, out-of-order
+  // resolutions could overwrite a discovered model list with a stale
+  // empty one.
+  const loadInFlight = useRef(false);
   const load = useCallback(async () => {
+    if (loadInFlight.current) return;
+    loadInFlight.current = true;
     try {
       const resp = await fetchModels();
       const list = resp.models ?? [];
@@ -103,6 +111,7 @@ export function AiStep({
       // Ollama may still be warming up after a fresh boot. The step
       // stays renderable with an empty picker + a skip option.
     } finally {
+      loadInFlight.current = false;
       setLoading(false);
     }
   }, []);

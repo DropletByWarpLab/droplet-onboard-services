@@ -157,4 +157,28 @@ describe("POST /api/llm/chat — max_tokens pass-through (WARP-849)", () => {
     expect(res.status).toBe(200);
     expect(agentRequest().max_tokens).toBeUndefined();
   });
+
+  // Now that the value is genuinely forwarded, the route schema must
+  // mirror the ai-gateway's pydantic bound (int, 1..4096). Out-of-range
+  // values used to be silently dropped; without this gate they would
+  // 422 at the gateway and surface as a 500.
+  it.each([
+    ["over the gateway ceiling", 8192],
+    ["not an integer", 1.5],
+    ["zero", 0],
+  ])("rejects max_tokens %s (%s) with 400 before the gateway", async (_label, value) => {
+    const app = buildApp(createPrismaMock());
+
+    const res = await request(app)
+      .post("/api/llm/chat")
+      .send({
+        model: "gpt-oss:20b",
+        messages: [{ role: "user", content: "hello" }],
+        stream: false,
+        max_tokens: value,
+      });
+
+    expect(res.status).toBe(400);
+    expect(mockRunAgent).not.toHaveBeenCalled();
+  });
 });
