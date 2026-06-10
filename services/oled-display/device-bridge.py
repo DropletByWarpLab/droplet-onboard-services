@@ -43,6 +43,17 @@ OPENWRT_USER      = os.environ.get("OPENWRT_USER", "root")
 OPENWRT_PASS      = os.environ.get("OPENWRT_PASS", "")
 OPENWRT_IFACE     = os.environ.get("OPENWRT_IFACE", "wlan0")
 SSH_TIMEOUT       = int(os.environ.get("SSH_CONNECT_TIMEOUT", "4"))
+# Persistent SSH known_hosts for the OpenWrt control channel (multi-box uci AP
+# path only — single-box hostapd never SSHes). Combined with
+# StrictHostKeyChecking=accept-new this trusts the router key on first contact
+# and then DETECTS any later key swap — a LAN MITM on 192.168.50.x trying to
+# capture OPENWRT_PASS or inject UCI now fails the connection instead of being
+# silently accepted (the old StrictHostKeyChecking=no + /dev/null accepted any
+# key on every connect). Defaults under the systemd StateDirectory
+# (/var/lib/droplet-bridge, created 0700) so the pin survives restarts;
+# install-device-bridge.sh can pre-seed it via ssh-keyscan.
+OPENWRT_KNOWN_HOSTS = os.environ.get(
+    "OPENWRT_KNOWN_HOSTS", "/var/lib/droplet-bridge/openwrt_known_hosts")
 
 # Access-point credentials source for the pairing QR. The two shipping
 # deployment shapes broadcast the AP differently:
@@ -193,10 +204,20 @@ if [ -z "$target" ]; then echo "ERR no active AP" >&2; exit 1; fi
 
 
 def _ssh_openwrt(remote_cmd, timeout=20):
+    # Pin the router host key to a persistent known_hosts and trust-on-first-use
+    # (accept-new): first contact records the key, every later connect verifies
+    # it, so a mid-stream key swap by a MITM is rejected rather than silently
+    # accepted. Best-effort ensure the parent dir exists (systemd StateDirectory
+    # normally creates it; this also covers manual/dev runs) — ssh surfaces any
+    # real permission error itself.
+    try:
+        os.makedirs(os.path.dirname(OPENWRT_KNOWN_HOSTS) or ".", exist_ok=True)
+    except OSError:
+        pass
     ssh_args = [
         "ssh",
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", f"UserKnownHostsFile={OPENWRT_KNOWN_HOSTS}",
         "-o", f"ConnectTimeout={SSH_TIMEOUT}",
         "-o", "LogLevel=ERROR",
         f"{OPENWRT_USER}@{OPENWRT_HOST}",
