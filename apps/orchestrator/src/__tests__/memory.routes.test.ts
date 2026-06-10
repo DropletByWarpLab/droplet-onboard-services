@@ -29,6 +29,7 @@ interface MockFact {
   addedBy: string;
   evidenceChatId: string | null;
   active: boolean;
+  audience: "owner" | "admin" | "family" | "guest";
   addedAt: Date;
   updatedAt: Date;
 }
@@ -43,13 +44,18 @@ function createPrismaMock(seed: MockFact[] = []) {
           where,
           take,
         }: {
-          where?: { category?: string; active?: boolean };
+          where?: {
+            category?: string;
+            active?: boolean;
+            audience?: { in: string[] };
+          };
           orderBy?: unknown;
           take?: number;
         } = {}) => {
           let r = rows;
           if (where?.category) r = r.filter((x) => x.category === where.category);
           if (where?.active !== undefined) r = r.filter((x) => x.active === where.active);
+          if (where?.audience) r = r.filter((x) => where.audience!.in.includes(x.audience));
           r = [...r].sort((a, b) => b.addedAt.getTime() - a.addedAt.getTime());
           return take ? r.slice(0, take) : r;
         },
@@ -62,6 +68,7 @@ function createPrismaMock(seed: MockFact[] = []) {
           addedBy: data.addedBy ?? "unknown",
           evidenceChatId: data.evidenceChatId ?? null,
           active: data.active ?? true,
+          audience: data.audience ?? "family",
           addedAt: new Date(),
           updatedAt: new Date(),
         };
@@ -69,10 +76,19 @@ function createPrismaMock(seed: MockFact[] = []) {
         return created;
       }),
       updateMany: vi.fn(
-        async ({ where, data }: { where: { id: string }; data: Partial<MockFact> }) => {
+        async ({
+          where,
+          data,
+        }: {
+          where: { id: string; audience?: { in: string[] } };
+          data: Partial<MockFact>;
+        }) => {
           let count = 0;
           for (const r of rows) {
-            if (r.id === where.id) {
+            if (
+              r.id === where.id &&
+              (!where.audience || where.audience.in.includes(r.audience))
+            ) {
               Object.assign(r, data, { updatedAt: new Date() });
               count++;
             }
@@ -80,18 +96,27 @@ function createPrismaMock(seed: MockFact[] = []) {
           return { count };
         },
       ),
-      findUniqueOrThrow: vi.fn(async ({ where }: { where: { id: string } }) => {
-        const r = rows.find((x) => x.id === where.id);
-        if (!r) throw new Error("not found");
-        return r;
+      findFirst: vi.fn(async ({ where }: { where: { id: string } }) => {
+        return rows.find((x) => x.id === where.id) ?? null;
       }),
-      deleteMany: vi.fn(async ({ where }: { where: { id: string } }) => {
-        const before = rows.length;
-        for (let i = rows.length - 1; i >= 0; i--) {
-          if (rows[i]!.id === where.id) rows.splice(i, 1);
-        }
-        return { count: before - rows.length };
-      }),
+      deleteMany: vi.fn(
+        async ({
+          where,
+        }: {
+          where: { id: string; audience?: { in: string[] } };
+        }) => {
+          const before = rows.length;
+          for (let i = rows.length - 1; i >= 0; i--) {
+            if (
+              rows[i]!.id === where.id &&
+              (!where.audience || where.audience.in.includes(rows[i]!.audience))
+            ) {
+              rows.splice(i, 1);
+            }
+          }
+          return { count: before - rows.length };
+        },
+      ),
     },
   };
 }
@@ -124,6 +149,7 @@ function seedFact(over: Partial<MockFact> = {}): MockFact {
     addedBy: over.addedBy ?? "stefan",
     evidenceChatId: over.evidenceChatId ?? null,
     active: over.active ?? true,
+    audience: over.audience ?? "family",
     addedAt: over.addedAt ?? new Date("2026-05-27T10:00:00Z"),
     updatedAt: over.updatedAt ?? new Date("2026-05-27T10:00:00Z"),
   };
@@ -208,5 +234,109 @@ describe("WARP-461 — /api/memory/facts CRUD", () => {
     const app = buildApp(prisma, { username: "stefan", role: "owner" });
     const res = await request(app).delete("/api/memory/facts/nope");
     expect(res.status).toBe(404);
+  });
+});
+
+describe("WARP-845 — role-scoped audiences", () => {
+  const LADDER = [
+    seedFact({ id: "f-owner", audience: "owner", fact: "owner-only" }),
+    seedFact({ id: "f-admin", audience: "admin", fact: "admin-up" }),
+    seedFact({ id: "f-family", audience: "family", fact: "household" }),
+    seedFact({ id: "f-guest", audience: "guest", fact: "everyone" }),
+  ];
+
+  it("family GET sees family+guest audiences only", async () => {
+    const prisma = createPrismaMock(LADDER.map((f) => ({ ...f })));
+    const app = buildApp(prisma, { username: "kid", role: "family" });
+    const res = await request(app).get("/api/memory/facts");
+    expect(res.status).toBe(200);
+    expect(res.body.facts.map((f: MockFact) => f.id).sort()).toEqual([
+      "f-family",
+      "f-guest",
+    ]);
+  });
+
+  it("guest GET sees guest-audience facts only", async () => {
+    const prisma = createPrismaMock(LADDER.map((f) => ({ ...f })));
+    const app = buildApp(prisma, { username: "visitor", role: "guest" });
+    const res = await request(app).get("/api/memory/facts");
+    expect(res.body.facts.map((f: MockFact) => f.id)).toEqual(["f-guest"]);
+  });
+
+  it("admin GET sees everything (panel management)", async () => {
+    const prisma = createPrismaMock(LADDER.map((f) => ({ ...f })));
+    const app = buildApp(prisma, { username: "boss", role: "admin" });
+    const res = await request(app).get("/api/memory/facts");
+    expect(res.body.facts).toHaveLength(4);
+  });
+
+  it("POST defaults the audience to family", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma, { username: "stefan", role: "family" });
+    const res = await request(app)
+      .post("/api/memory/facts")
+      .send({ category: "Tone", fact: "Be concise" });
+    expect(res.status).toBe(201);
+    expect(res.body.fact.audience).toBe("family");
+  });
+
+  it("family cannot mint an owner-audience fact", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma, { username: "kid", role: "family" });
+    const res = await request(app)
+      .post("/api/memory/facts")
+      .send({ category: "Tone", fact: "secret", audience: "owner" });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("audience_above_role");
+    expect(prisma.rows).toHaveLength(0);
+  });
+
+  it("family can widen a fact to guest but not raise it to admin", async () => {
+    const prisma = createPrismaMock([seedFact({ id: "f1", audience: "family" })]);
+    const app = buildApp(prisma, { username: "kid", role: "family" });
+
+    const denied = await request(app)
+      .patch("/api/memory/facts/f1")
+      .send({ audience: "admin" });
+    expect(denied.status).toBe(403);
+
+    const ok = await request(app)
+      .patch("/api/memory/facts/f1")
+      .send({ audience: "guest" });
+    expect(ok.status).toBe(200);
+    expect(prisma.rows[0]!.audience).toBe("guest");
+  });
+
+  // Review fix — writes are audience-scoped like reads, so a family
+  // caller can't touch (or read back via a no-op PATCH) an owner-only
+  // fact whose id leaked. Indistinguishable from a missing row (404).
+  it("family PATCH/DELETE on an out-of-rank fact 404 without leaking it", async () => {
+    const prisma = createPrismaMock([
+      seedFact({ id: "f-owner", audience: "owner", fact: "owner secret" }),
+    ]);
+    const app = buildApp(prisma, { username: "kid", role: "family" });
+
+    const patched = await request(app)
+      .patch("/api/memory/facts/f-owner")
+      .send({ active: false });
+    expect(patched.status).toBe(404);
+    expect(JSON.stringify(patched.body)).not.toContain("owner secret");
+    expect(prisma.rows[0]!.active).toBe(true);
+
+    const deleted = await request(app).delete("/api/memory/facts/f-owner");
+    expect(deleted.status).toBe(404);
+    expect(prisma.rows).toHaveLength(1);
+  });
+
+  it("admin PATCH on an owner fact still works (panel management scope)", async () => {
+    const prisma = createPrismaMock([
+      seedFact({ id: "f-owner", audience: "owner" }),
+    ]);
+    const app = buildApp(prisma, { username: "boss", role: "admin" });
+    const res = await request(app)
+      .patch("/api/memory/facts/f-owner")
+      .send({ active: false });
+    expect(res.status).toBe(200);
+    expect(prisma.rows[0]!.active).toBe(false);
   });
 });

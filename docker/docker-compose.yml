@@ -577,13 +577,15 @@ services:
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- RAG eval (RAGAS scoring, scheduled hourly off-hours) ---
-  # WARP-RAG-EVAL: gated behind the `eval` profile. RAGAS is GPU-bound, so it's
-  # off on profile-less / macOS-dev / multi-box deployments by default; enable
-  # with `COMPOSE_PROFILES=eval` (or comma-append to the existing list).
-  # The single-box shape, which always ships the dGPU RAGAS needs, enables this
-  # by DEFAULT — scripts/lib/single-box.sh appends `eval` to COMPOSE_PROFILES
-  # (bug #15) so /api/admin/rag-eval/* works out-of-the-box. Pause the scheduled
-  # runs there with RAG_EVAL_DISABLED=1 rather than dropping the profile.
+  # WARP-RAG-EVAL: gated behind the `eval` profile, which is STANDARD in
+  # every environment as of the WARP-844 follow-up: scripts/lib/secrets.sh
+  # writes it into the fresh-install COMPOSE_PROFILES on Linux AND macOS,
+  # and scripts/lib/single-box.sh keeps appending it idempotently for
+  # upgraded boxes (bug #15). The judge runs against the appliance's own
+  # Ollama (RAGAS_LOCAL_JUDGE_MODEL → LLM_MODEL fallback), so no GPU is
+  # strictly required — just slower on CPU. Pause the scheduled runs with
+  # RAG_EVAL_DISABLED=1 rather than dropping the profile; the ad-hoc
+  # /api/admin/rag-eval/* surface needs the container up.
   #
   # The container bakes queries.yaml + goldens.yaml + ragas_runner.py at
   # build time. Goldens are part of the image version; updating them
@@ -606,7 +608,9 @@ services:
       # local judge LLM). On Linux the bridge network reaches the host
       # via host-gateway; on macOS dev compose uses host.docker.internal.
       - RAGAS_OLLAMA_URL=${RAGAS_OLLAMA_URL:-http://host.docker.internal:11434/v1}
-      - RAGAS_LOCAL_JUDGE_MODEL=${RAGAS_LOCAL_JUDGE_MODEL:-mistral}
+      # ragas_runner.py falls back RAGAS_LOCAL_JUDGE_MODEL → LLM_MODEL →
+      # mistral; leaving this unset lets that chain pick the hosted model.
+      - RAGAS_LOCAL_JUDGE_MODEL=${RAGAS_LOCAL_JUDGE_MODEL:-}
       - RAGAS_JUDGE=${RAGAS_JUDGE:-local}
       - RAGAS_VARIANT=${RAGAS_VARIANT:-hybrid}
       - RAGAS_LIMIT=${RAGAS_LIMIT:-10}
@@ -1018,7 +1022,13 @@ services:
   # itself is pure CPU here; if a future profile needs CUDA, set
   # WHISPER_DEVICE=cuda (image auto-detects).
   wyoming-faster-whisper:
-    image: rhasspy/wyoming-whisper:${WHISPER_IMAGE_TAG:-latest}
+    # Pinned (WARP-844 follow-up): the Wyoming wire format differs across
+    # image versions (v1 inline-data vs v2 data_length framing), so a
+    # floating tag meant a routine pull could flip the protocol under the
+    # STT clients. Both in-repo clients (voice-io stt.py, orchestrator
+    # stt.client.ts) parse BOTH formats, but the pin keeps upgrades
+    # deliberate. 3.1.0 == today's `latest`.
+    image: rhasspy/wyoming-whisper:${WHISPER_IMAGE_TAG:-3.1.0}
     # Profile gate matches voice-io — same Linux-only audio
     # stack. On macOS dev installs the whole voice path is skipped.
     profiles: ["linux"]

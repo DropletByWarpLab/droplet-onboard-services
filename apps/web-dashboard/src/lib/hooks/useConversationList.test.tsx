@@ -5,12 +5,14 @@ const listConversationsMock = vi.fn();
 const renameConversationMock = vi.fn();
 const deleteConversationMock = vi.fn();
 const fetchConversationMock = vi.fn();
+const setConversationProjectMock = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   listConversations: (...a: unknown[]) => listConversationsMock(...a),
   renameConversation: (...a: unknown[]) => renameConversationMock(...a),
   deleteConversation: (...a: unknown[]) => deleteConversationMock(...a),
   fetchConversation: (...a: unknown[]) => fetchConversationMock(...a),
+  setConversationProject: (...a: unknown[]) => setConversationProjectMock(...a),
 }));
 
 import { useConversationList } from "./useConversationList";
@@ -32,6 +34,7 @@ beforeEach(() => {
   renameConversationMock.mockReset();
   deleteConversationMock.mockReset();
   fetchConversationMock.mockReset();
+  setConversationProjectMock.mockReset();
 });
 
 describe("useConversationList", () => {
@@ -193,6 +196,64 @@ describe("useConversationList", () => {
       await expect(result.current.rename("a", "new")).rejects.toThrow();
     });
     expect(result.current.flat[0].title).toBe("old");
+  });
+
+  it("moveToProject updates optimistically and reverts on error (WARP-845)", async () => {
+    listConversationsMock.mockResolvedValue([
+      { ...row("a"), projectId: null },
+    ]);
+    const { result } = renderHook(() => useConversationList());
+    await waitFor(() => expect(result.current.flat.length).toBe(1));
+
+    // Success path: optimistic stamp sticks.
+    setConversationProjectMock.mockResolvedValueOnce({ id: "a", projectId: "p1" });
+    await act(async () => {
+      await result.current.moveToProject("a", "p1");
+    });
+    expect(result.current.flat[0].projectId).toBe("p1");
+    expect(setConversationProjectMock).toHaveBeenCalledWith("a", "p1");
+
+    // Failure path: revert to the previous membership.
+    setConversationProjectMock.mockRejectedValueOnce(new Error("boom"));
+    await act(async () => {
+      await result.current.moveToProject("a", "p2");
+    });
+    expect(result.current.flat[0].projectId).toBe("p1");
+    expect(result.current.error).not.toBeNull();
+  });
+
+  it("mergeRows appends only unknown rows (WARP-845 fetch-on-expand)", async () => {
+    listConversationsMock.mockResolvedValue([row("a")]);
+    const { result } = renderHook(() => useConversationList());
+    await waitFor(() => expect(result.current.flat.length).toBe(1));
+
+    act(() => {
+      result.current.mergeRows([
+        { ...row("a"), title: "stale-dupe" }, // already known — dropped
+        { ...row("old"), projectId: "p1" },
+      ]);
+    });
+    expect(result.current.flat.map((c) => c.id)).toEqual(["a", "old"]);
+    // The known row keeps its existing (possibly optimistic) state.
+    expect(result.current.flat[0].title).toBe("chat-a");
+  });
+
+  it("clearProjectLocally ungroups a deleted project's chats (WARP-845)", async () => {
+    listConversationsMock.mockResolvedValue([
+      { ...row("a"), projectId: "p1" },
+      { ...row("b"), projectId: "p2" },
+    ]);
+    const { result } = renderHook(() => useConversationList());
+    await waitFor(() => expect(result.current.flat.length).toBe(2));
+
+    act(() => {
+      result.current.clearProjectLocally("p1");
+    });
+    expect(result.current.flat.find((c) => c.id === "a")?.projectId).toBeNull();
+    // Other projects untouched.
+    expect(result.current.flat.find((c) => c.id === "b")?.projectId).toBe("p2");
+    // No server call — the FK SET NULL already happened server-side.
+    expect(setConversationProjectMock).not.toHaveBeenCalled();
   });
 
   it("remove deletes the row when the server returns success", async () => {

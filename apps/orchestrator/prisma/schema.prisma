@@ -131,12 +131,32 @@ enum ArrayLevel {
 /// The pre-WARP-104 `model`/`provider` columns are kept (nullable now) for
 /// backwards compatibility with any existing rows; the new rows record them
 /// from the first turn's chat request.
+/// WARP-845 — per-user chat projects: folders in the history sidebar
+/// plus a default persona (systemPrompt) applied to new chats started
+/// inside the project. Strictly per-user (product call): no sharing,
+/// owner/admin get no visibility into other users' projects.
+model ChatProject {
+  id           String        @id @default(uuid())
+  userId       String
+  name         String
+  systemPrompt String?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @default(now()) @updatedAt
+  sessions     ChatSession[]
+
+  @@index([userId, updatedAt(sort: Desc)])
+}
+
 model ChatSession {
   id        String        @id @default(uuid())
   userId    String
   title     String?
   model     String?
   provider  String?
+  /// WARP-845 — optional project membership. SetNull on project delete:
+  /// the chats survive, falling back to the ungrouped date list.
+  projectId String?
+  project   ChatProject?  @relation(fields: [projectId], references: [id], onDelete: SetNull)
   /// WARP-844 — the caller-supplied system prompt this conversation is
   /// held under. Persisted from the request's system message on every
   /// turn (latest wins) and returned on GET so the dashboard restores
@@ -148,6 +168,9 @@ model ChatSession {
   pins      ContextPin[]
 
   @@index([userId, updatedAt(sort: Desc)])
+  /// WARP-845 — Postgres doesn't auto-index FK columns; per-project
+  /// counts and the SET NULL cascade on project delete scan on this.
+  @@index([projectId])
 }
 
 /// WARP-460 — Context pins per chat session. The dashboard's right-side
@@ -198,11 +221,27 @@ model MemoryFact {
   addedBy        String
   evidenceChatId String?
   active         Boolean            @default(true)
+  /// WARP-845 — role audience (minimum-role ladder owner > admin >
+  /// family > guest). A fact is visible to callers whose role rank is
+  /// AT OR ABOVE the audience's rank: audience=guest distributes to the
+  /// whole household incl. guests; audience=owner keeps it owner-only.
+  /// Default family = every member, no guests. Explicit column, never
+  /// derived (no-guessing rule).
+  audience       MemoryFactAudience @default(family)
   addedAt        DateTime           @default(now())
   updatedAt      DateTime           @default(now()) @updatedAt
 
   @@index([category, active])
   @@index([active, addedAt(sort: Desc)])
+  @@index([active, audience])
+}
+
+/// WARP-845 — who a memory fact is distributed to (minimum role).
+enum MemoryFactAudience {
+  owner
+  admin
+  family
+  guest
 }
 
 /// WARP-461 — per FEATURES.md §5 fact taxonomy. Explicit enum, never

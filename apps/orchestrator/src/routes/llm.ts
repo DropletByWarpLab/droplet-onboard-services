@@ -19,6 +19,7 @@ import {
 import { publish as mqttPublish } from "../services/mqtt.service.js";
 import { requireRole } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
+import { visibleAudiences } from "../services/memory-audience.js";
 
 /** WARP-456: severity bucket the dashboard renders for the activity feed. */
 function activitySeverityForTurnStatus(
@@ -162,6 +163,18 @@ const chatRequestSchema = z.object({
     .array(z.object({ itemId: z.string().min(1).max(64) }))
     .max(8)
     .optional(),
+  // The dashboard's client-minted draft chat id (`chat-<ts>`), sent on
+  // the FIRST turn only. Brain-memory uploads made before the server
+  // assigned a conversationId are tagged with it; the route re-stamps
+  // every item carrying this tag (ownership-scoped) to the new
+  // conversationId, so uploads that finish mid-turn or late still join
+  // the conversation (chip rehydration + per-chat export).
+  draftChatId: z.string().min(1).max(128).optional(),
+  // WARP-845 — file a NEWLY-created conversation under one of the
+  // caller's projects (ownership-validated in ensureConversation;
+  // foreign ids are silently ignored). Existing conversations are never
+  // moved by a turn.
+  projectId: z.string().uuid().optional(),
 });
 
 const CONVERSATION_ID_HEADER = "X-Conversation-Id";
@@ -311,9 +324,14 @@ const MEMORY_FACTS_CHAR_BUDGET = 2000;
 /** Render the active WARP-461 memory facts as a bounded bullet list,
  *  or "" when none exist. Newest first — when the budget bites, recent
  *  facts win. */
-async function buildMemoryFactsBlock(prisma: PrismaClient): Promise<string> {
+async function buildMemoryFactsBlock(
+  prisma: PrismaClient,
+  /** Caller's role — facts are filtered to the audiences this role may
+   *  read (WARP-845 role-scoped distribution). */
+  role: string | undefined,
+): Promise<string> {
   const facts = await prisma.memoryFact.findMany({
-    where: { active: true },
+    where: { active: true, audience: { in: visibleAudiences(role) } },
     orderBy: { addedAt: "desc" },
     take: MEMORY_FACTS_LIMIT,
   });
@@ -548,9 +566,16 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // path treats `_meta.userId` as authoritative because the
       // orchestrator IS the trust boundary for that channel.
       const userId = (req as AuthedRequest).user?.username;
-      const toolCallContext: McpCallContext | undefined = (ncToken || userId)
-        ? { ...(ncToken ? { ncToken } : {}), ...(userId ? { userId } : {}) }
-        : undefined;
+      // WARP-845: also forward the caller's role so role-scoped handlers
+      // (memory_recall) can filter what the model may read.
+      const toolCallContext: McpCallContext | undefined =
+        ncToken || userId || role
+          ? {
+              ...(ncToken ? { ncToken } : {}),
+              ...(userId ? { userId } : {}),
+              ...(role ? { userRole: role } : {}),
+            }
+          : undefined;
 
       // WARP-329: save-on-send.
       // The user message that drove this turn is the LAST role="user" in
@@ -587,6 +612,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             provider: chatReq.provider,
             firstUserContent: persistedUserContent,
             systemPrompt: callerSystemPrompt,
+            projectId: chatReq.projectId ?? null,
           })
           .catch((err: unknown) => {
             // Persistence failure must NOT block chat — the user can
@@ -880,6 +906,26 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         }
       }
 
+      // ── Draft-upload adoption (WARP-844 follow-up) ───────────────
+      //
+      // Uploads made while the chat was still a draft are tagged with
+      // the client-minted chatId. Adopt them all into the persisted
+      // conversation — including rows whose upload finished after the
+      // send (the row is created at upload-request time, so it exists
+      // by now). Ownership-scoped: a forged draftChatId can only ever
+      // re-tag the caller's OWN items.
+      if (chatReq.draftChatId && conversationId && userId) {
+        try {
+          await prisma.brainMemoryItem.updateMany({
+            where: { originatingChatId: chatReq.draftChatId, userId },
+            data: { originatingChatId: conversationId },
+          });
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("[llm/chat] draft-upload adoption failed:", err);
+        }
+      }
+
       // ── Base system prompt injection ─────────────────────────────
       //
       // Additive splice at index 0 (same pattern as pins/attachments
@@ -892,7 +938,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       if (chatReq.tool_choice !== "none") {
         let memoryBlock = "";
         try {
-          memoryBlock = await buildMemoryFactsBlock(prisma);
+          memoryBlock = await buildMemoryFactsBlock(prisma, role);
         } catch (err) {
           // eslint-disable-next-line no-console
           console.warn("[llm/chat] memory-fact load failed:", err);
@@ -1036,11 +1082,19 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // Bounded so a pathological query can't become a giant ILIKE.
       const q =
         typeof req.query.q === "string" ? req.query.q.slice(0, 200) : undefined;
+      // WARP-845 — optional project filter (sidebar folder expand).
+      // Still userId-scoped in the service, so a foreign projectId just
+      // yields an empty list.
+      const projectId =
+        typeof req.query.projectId === "string" && req.query.projectId.length > 0
+          ? req.query.projectId
+          : undefined;
       const conversations = await persistence.listConversationsForUser(
         userId,
         limit,
         offset,
         q,
+        projectId,
       );
       res.json({ conversations });
     } catch (err) {
@@ -1181,32 +1235,85 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         res.status(401).json({ error: "auth_required" });
         return;
       }
-      const body = req.body as { title?: unknown };
-      if (typeof body?.title !== "string") {
+      const body = req.body as { title?: unknown; projectId?: unknown };
+      const hasTitle = typeof body?.title === "string";
+      // WARP-845 — move into / out of a project. `null` = ungroup. An
+      // empty string is rejected outright (it would skip the ownership
+      // guard's truthiness check and then violate the FK).
+      const hasProject =
+        (typeof body?.projectId === "string" && body.projectId.length > 0) ||
+        body?.projectId === null;
+      if (
+        body?.projectId !== undefined &&
+        body?.projectId !== null &&
+        (typeof body.projectId !== "string" || body.projectId.length === 0)
+      ) {
+        res.status(400).json({ error: "invalid_project_id" });
+        return;
+      }
+      // A present-but-non-string title is a malformed request, not a
+      // "field omitted" — reject it even when a valid projectId rides
+      // along, instead of silently dropping the title leg.
+      if (body?.title !== undefined && !hasTitle) {
+        res.status(400).json({ error: "title_or_project_required" });
+        return;
+      }
+      if (!hasTitle && !hasProject) {
+        res.status(400).json({ error: "title_or_project_required" });
+        return;
+      }
+      // Pre-validate BOTH legs before mutating anything, so a bad
+      // project id can't leave a half-applied rename behind (and gets
+      // its own error code instead of `conversation_not_found`).
+      if (hasTitle && (body.title as string).trim().length === 0) {
         res.status(400).json({ error: "title_required" });
         return;
       }
-      let finalTitle: string | null;
-      try {
-        finalTitle = await persistence.renameConversationForUser(
-          req.params.id,
-          userId,
-          body.title,
-        );
-      } catch (err) {
-        if (err instanceof Error && err.message === "title_required") {
-          res.status(400).json({ error: "title_required" });
+      if (hasProject && body.projectId !== null) {
+        const project = await prisma.chatProject.findFirst({
+          where: { id: body.projectId as string, userId },
+          select: { id: true },
+        });
+        if (!project) {
+          res.status(404).json({ error: "project_not_found" });
           return;
         }
-        throw err;
       }
-      if (finalTitle === null) {
-        res.status(404).json({ error: "conversation_not_found" });
-        return;
+      let finalTitle: string | null = null;
+      if (hasTitle) {
+        try {
+          finalTitle = await persistence.renameConversationForUser(
+            req.params.id,
+            userId,
+            body.title as string,
+          );
+        } catch (err) {
+          if (err instanceof Error && err.message === "title_required") {
+            res.status(400).json({ error: "title_required" });
+            return;
+          }
+          throw err;
+        }
+        if (finalTitle === null) {
+          res.status(404).json({ error: "conversation_not_found" });
+          return;
+        }
+      }
+      if (hasProject) {
+        const ok = await persistence.setConversationProject(
+          req.params.id,
+          userId,
+          (body.projectId as string | null) ?? null,
+        );
+        if (!ok) {
+          res.status(404).json({ error: "conversation_not_found" });
+          return;
+        }
       }
       res.json({
         id: req.params.id,
-        title: finalTitle,
+        ...(hasTitle ? { title: finalTitle } : {}),
+        ...(hasProject ? { projectId: body.projectId ?? null } : {}),
       });
     } catch (err) {
       next(err);

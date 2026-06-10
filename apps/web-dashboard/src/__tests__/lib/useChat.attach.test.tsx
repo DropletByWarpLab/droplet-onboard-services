@@ -33,11 +33,13 @@ interface ProbeValue {
 function Probe({
   onValue,
   chatId,
+  projectId,
 }: {
   onValue: (v: ProbeValue) => void;
   chatId?: string;
+  projectId?: string | null;
 }) {
-  const hook = useChat({ chatId });
+  const hook = useChat({ chatId, projectId });
   onValue({
     attachments: hook.attachments,
     attach: hook.attach,
@@ -398,6 +400,92 @@ describe("useChat.attach (WARP-203)", () => {
       itemId: "bmi-10",
       status: "indexing",
     });
+  });
+
+  it("sends draftChatId on the first turn only (draft-upload adoption)", async () => {
+    const quick = (convId: string) =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(c) {
+            c.enqueue(
+              new TextEncoder().encode(
+                `event: done\ndata: {"iterations":1,"stop_reason":"model_done"}\n\n`,
+              ),
+            );
+            c.close();
+          },
+        }),
+        {
+          status: 200,
+          headers: {
+            "Content-Type": "text/event-stream",
+            "X-Conversation-Id": convId,
+          },
+        },
+      );
+    mockSendChat
+      .mockResolvedValueOnce(quick("conv-5"))
+      .mockResolvedValueOnce(quick("conv-5"));
+
+    let value: ProbeValue | null = null;
+    render(<Probe onValue={(v) => (value = v)} chatId="chat-draft-77" />);
+
+    await act(async () => {
+      await value!.sendMessage("first", "m1");
+    });
+    expect(mockSendChat.mock.calls[0]![0]).toMatchObject({
+      draftChatId: "chat-draft-77",
+    });
+
+    await act(async () => {
+      await value!.sendMessage("second", "m1");
+    });
+    const second = mockSendChat.mock.calls[1]![0] as { draftChatId?: string };
+    expect(second.draftChatId).toBeUndefined();
+  });
+
+  it("sends projectId on the first turn only (WARP-845 project stamping)", async () => {
+    const quick = (convId: string) =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(c) {
+            c.enqueue(
+              new TextEncoder().encode(
+                `event: done\ndata: {"iterations":1,"stop_reason":"model_done"}\n\n`,
+              ),
+            );
+            c.close();
+          },
+        }),
+        {
+          status: 200,
+          headers: {
+            "Content-Type": "text/event-stream",
+            "X-Conversation-Id": convId,
+          },
+        },
+      );
+    mockSendChat
+      .mockResolvedValueOnce(quick("conv-9"))
+      .mockResolvedValueOnce(quick("conv-9"));
+
+    let value: ProbeValue | null = null;
+    render(<Probe onValue={(v) => (value = v)} projectId="proj-1" />);
+
+    await act(async () => {
+      await value!.sendMessage("first", "m1");
+    });
+    expect(mockSendChat.mock.calls[0]![0]).toMatchObject({
+      projectId: "proj-1",
+    });
+
+    // Second turn: conversation already exists server-side — membership is
+    // already stamped, so projectId must not be re-sent.
+    await act(async () => {
+      await value!.sendMessage("second", "m1");
+    });
+    const second2 = mockSendChat.mock.calls[1]![0] as { projectId?: string };
+    expect(second2.projectId).toBeUndefined();
   });
 
   it("refuses the 9th attachment with a visible failed chip (review fix)", async () => {

@@ -66,6 +66,8 @@ export interface PersistedConversationSummary {
   title: string | null;
   model: string | null;
   provider: string | null;
+  /** WARP-845 — owning project, or null when ungrouped. */
+  projectId: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -129,6 +131,7 @@ export class ChatPersistenceService {
       title: row.title,
       model: row.model,
       provider: row.provider,
+      projectId: row.projectId ?? null,
       systemPrompt: row.systemPrompt,
       createdAt: row.createdAt.toISOString(),
       updatedAt: row.updatedAt.toISOString(),
@@ -164,11 +167,16 @@ export class ChatPersistenceService {
      *  any message's content, case-insensitively. Whitespace-only is
      *  treated as absent (back-compat unfiltered list). */
     q?: string,
+    /** WARP-845 — restrict to one project's chats (the sidebar fetches a
+     *  folder's full contents on expand, independent of the main list's
+     *  pagination window). */
+    projectId?: string,
   ): Promise<PersistedConversationSummary[]> {
     const search = q?.trim();
     const rows = await this.prisma.chatSession.findMany({
       where: {
         userId,
+        ...(projectId ? { projectId } : {}),
         ...(search
           ? {
               OR: [
@@ -196,6 +204,7 @@ export class ChatPersistenceService {
       title: r.title,
       model: r.model,
       provider: r.provider,
+      projectId: r.projectId ?? null,
       createdAt: r.createdAt.toISOString(),
       updatedAt: r.updatedAt.toISOString(),
     }));
@@ -276,8 +285,35 @@ export class ChatPersistenceService {
     });
     if (!session) return false;
     const r = await this.prisma.chatMessage.updateMany({
-      where: { id: messageId, sessionId: conversationId },
+      // role-gated: only assistant turns are ratable — a rated user row
+      // would inflate the admin feedback counts while never being
+      // listable (the admin surface pairs assistant turns with prompts).
+      where: { id: messageId, sessionId: conversationId, role: "assistant" },
       data: { feedback },
+    });
+    return r.count > 0;
+  }
+
+  /**
+   * WARP-845 — move a conversation into (or out of, with null) one of
+   * the user's projects. Returns false when the conversation isn't
+   * owned by the caller or the target project isn't theirs.
+   */
+  async setConversationProject(
+    conversationId: string,
+    userId: string,
+    projectId: string | null,
+  ): Promise<boolean> {
+    if (projectId) {
+      const project = await this.prisma.chatProject.findFirst({
+        where: { id: projectId, userId },
+        select: { id: true },
+      });
+      if (!project) return false;
+    }
+    const r = await this.prisma.chatSession.updateMany({
+      where: { id: conversationId, userId },
+      data: { projectId },
     });
     return r.count > 0;
   }
@@ -340,6 +376,12 @@ export class ChatPersistenceService {
      *  wins; null clears). `undefined` leaves the stored value alone so
      *  callers that don't track prompts can't accidentally wipe it. */
     systemPrompt?: string | null;
+    /** WARP-845 — project to file a NEWLY-created conversation under.
+     *  Ownership-validated here (the project must belong to the same
+     *  user; anything else is silently ignored). Existing conversations
+     *  are never moved by a chat turn — membership changes go through
+     *  the conversation PATCH. */
+    projectId?: string | null;
   }): Promise<{ id: string; created: boolean }> {
     if (args.conversationId) {
       const existing = await this.prisma.chatSession.findFirst({
@@ -364,6 +406,15 @@ export class ChatPersistenceService {
       // the chat surface from going blank in the face of a stale URL.
     }
     const title = args.firstUserContent ? deriveTitle(args.firstUserContent) : null;
+    // WARP-845: only stamp a project the caller actually owns.
+    let projectId: string | null = null;
+    if (args.projectId) {
+      const project = await this.prisma.chatProject.findFirst({
+        where: { id: args.projectId, userId: args.userId },
+        select: { id: true },
+      });
+      projectId = project?.id ?? null;
+    }
     const created = await this.prisma.chatSession.create({
       data: {
         userId: args.userId,
@@ -371,6 +422,7 @@ export class ChatPersistenceService {
         model: args.model,
         provider: args.provider ?? null,
         systemPrompt: args.systemPrompt ?? null,
+        projectId,
       },
       select: { id: true },
     });

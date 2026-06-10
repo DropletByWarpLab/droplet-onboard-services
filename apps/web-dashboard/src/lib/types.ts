@@ -133,6 +133,12 @@ export interface ChatRequest {
    * before the answer. Persistence of the trace happens server-side
    * regardless; this only gates the live wire. */
   captureReasoning?: boolean;
+  /** Client-minted draft chat id, sent on the FIRST turn so the server
+   * adopts draft-phase brain uploads into the new conversation. */
+  draftChatId?: string;
+  /** WARP-845 — file a newly-created conversation under this project
+   * (first turn only; ownership-validated server-side). */
+  projectId?: string;
 }
 
 export interface ModelInfo {

@@ -281,7 +281,7 @@ function deriveOptimisticTitle(firstUserContent: string): string {
 
 export function notifyHistoryOfNewConversation(
   handle: ChatHistoryPanelHandle | null,
-  args: { id: string; firstUserContent: string },
+  args: { id: string; firstUserContent: string; projectId?: string | null },
 ): void {
   if (!handle) return;
   const now = new Date().toISOString();
@@ -290,6 +290,9 @@ export function notifyHistoryOfNewConversation(
     title: deriveOptimisticTitle(args.firstUserContent),
     model: null,
     provider: null,
+    // WARP-845 — mirror the server-side project stamp so the new chat
+    // lands under its folder in the sidebar, not in the date groups.
+    projectId: args.projectId ?? null,
     createdAt: now,
     updatedAt: now,
   });
@@ -338,6 +341,10 @@ export interface UseChatOptions {
     model: string | null;
     systemPrompt: string | null;
   }) => void;
+  /** WARP-845 — project the NEXT new conversation should be filed under
+   *  (set when the user starts a chat from a project's "+"). Sent on the
+   *  first turn only; the server validates ownership. */
+  projectId?: string | null;
 }
 
 /**
@@ -420,6 +427,12 @@ export function useChat(options: UseChatOptions = {}) {
   // attachments/model/prompt (and a late chip restore would then leak
   // conversation A's itemIds into B's next turn via attachmentsRef).
   const loadEpochRef = useRef(0);
+
+  // Same ref treatment for the pending project id (WARP-845).
+  const projectIdRef = useRef(options.projectId);
+  useEffect(() => {
+    projectIdRef.current = options.projectId;
+  }, [options.projectId]);
 
   // Same ref treatment for the loaded-conversation callback so the
   // stable `loadConversation` sees the caller's latest prop.
@@ -732,6 +745,16 @@ export function useChat(options: UseChatOptions = {}) {
           signal: controller.signal,
           conversationId: conversationIdRef.current ?? undefined,
           turnId,
+          // First turn of a draft chat: hand the server the client-minted
+          // chatId so it adopts any draft-phase uploads (even ones whose
+          // upload finishes after this send) into the new conversation.
+          ...(conversationIdRef.current === null && chatIdRef.current
+            ? { draftChatId: chatIdRef.current }
+            : {}),
+          // WARP-845 — file the new conversation under the active project.
+          ...(conversationIdRef.current === null && projectIdRef.current
+            ? { projectId: projectIdRef.current }
+            : {}),
           // WARP-458 — surface the model's reasoning trace live; the
           // disclosure stays collapsed unless the user opens it.
           captureReasoning: true,
@@ -762,7 +785,11 @@ export function useChat(options: UseChatOptions = {}) {
             attachmentsByConvRef.current.delete(DRAFT_CONV_KEY);
             notifyHistoryOfNewConversation(
               options.historyHandleRef?.current ?? null,
-              { id: headerId, firstUserContent: content },
+              {
+                id: headerId,
+                firstUserContent: content,
+                projectId: projectIdRef.current ?? null,
+              },
             );
           }
         }

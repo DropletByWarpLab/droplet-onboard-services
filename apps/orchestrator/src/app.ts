@@ -55,6 +55,8 @@ import { createAdminRetrievalEvalRouter } from "./routes/admin-retrieval-eval.js
 import { adminFilesRouter } from "./routes/admin-files.js";
 import { setPrismaForReindex } from "./services/file-reindex.service.js";
 import { createAdminRagEvalRouter } from "./routes/admin-rag-eval.js";
+import { createAdminChatFeedbackRouter } from "./routes/admin-chat-feedback.js";
+import { createChatProjectsRouter } from "./routes/chat-projects.js";
 import { createAdminCapabilitiesRouter } from "./routes/admin-capabilities.js";
 import { createMeContextStatsRouter } from "./routes/me-context-stats.js";
 import { createSettingsWorkspaceRouter } from "./routes/settings-workspace.js";
@@ -287,6 +289,10 @@ export function createApp(prisma: PrismaClient) {
   // + run listing. Auth-gated (admin/owner); 503 when the `eval` Compose
   // profile is inactive (rag-eval service unreachable). NOT prod-gated.
   app.use("/api", createAdminRagEvalRouter());
+  // WARP-844 follow-up — thumbs ratings surfaced for the eval loop.
+  app.use("/api", createAdminChatFeedbackRouter(prisma));
+  // WARP-845 — per-user chat projects (sidebar folders + default persona).
+  app.use("/api", createChatProjectsRouter(prisma));
   // Admin capabilities probe — drives nav-gating for optional admin surfaces
   // (Activity, RAG eval) so they hide when their integration is unconfigured.
   app.use("/api", createAdminCapabilitiesRouter());

@@ -323,17 +323,23 @@ DROPLET_TPM_BACKEND=$([ -e /dev/tpm0 ] && printf 'real' || printf 'mock')
 DROPLET_DEVICE_ID=$(hostname 2>/dev/null || echo droplet)
 
 # --- Compose profiles ---
-# Linux defaults to "linux,display":
+# Linux defaults to "linux,display,eval":
 #   linux   → Frigate (needs /dev/dri/renderD128), voice-io (needs /dev/snd),
 #             wyoming-faster-whisper, wyoming-piper
 #   display → oled-display (status display — safe default, auto-falls back
 #             to a simulated PNG backend when no /dev/ttyACM* is present)
+#   eval    → rag-eval (RAGAS retrieval-quality scoring). Standard in ALL
+#             environments per WARP-844 follow-up — the judge runs on the
+#             appliance's own Ollama, so even macOS dev can score runs
+#             (slower, but functional). Pause the schedule with
+#             RAG_EVAL_DISABLED=1 rather than dropping the profile — the
+#             ad-hoc /api/admin/rag-eval/* surface needs the container up.
 #   full    → switch driver, camera-discovery (both require real hardware
 #             and operator-supplied credentials; not default-on so a fresh
 #             install doesn't scan the LAN or hit a missing switch on boot)
-# macOS: leave empty — Frigate is skipped, dashboard remains reachable via
-# the gateway. Add "full" by hand if you want the hardware-facing services.
-COMPOSE_PROFILES=$([ "$(uname)" = "Linux" ] && printf 'linux,display' || printf '')
+# macOS: linux/display are skipped (GPU/audio device mounts), but eval stays.
+# Add "full" by hand if you want the hardware-facing services.
+COMPOSE_PROFILES=$([ "$(uname)" = "Linux" ] && printf 'linux,display,eval' || printf 'eval')
 EOF
 
   chmod 600 "$env_file"
@@ -432,19 +438,21 @@ migrate_env() {
   local routing_mode_default="real"
   [ "$(uname)" = "Darwin" ] && routing_mode_default="mock"
 
-  # COMPOSE_PROFILES on Linux defaults to "linux,display":
+  # COMPOSE_PROFILES on Linux defaults to "linux,display,eval":
   #   linux   → Frigate, voice-io, wyoming-faster-whisper, wyoming-piper
   #             (need /dev/dri or /dev/snd, gated on Linux only)
   #   display → oled-display status display (safe default via sim fallback
   #             when /dev/ttyACM* is absent)
+  #   eval    → rag-eval (RAGAS) — standard in every env (WARP-845), so
+  #             macOS dev defaults to "eval" alone
   # `full` (switch, camera-discovery) is intentionally not in the default —
   # both need real hardware + credentials. Operator opts in via .env.
   #
   # Only appended when missing — existing installs that pinned a narrower
   # COMPOSE_PROFILES keep their value. To pull in the new default, edit
-  # .env manually: COMPOSE_PROFILES=linux,display
-  local compose_profiles_default=""
-  [ "$(uname)" = "Linux" ] && compose_profiles_default="linux,display"
+  # .env manually: COMPOSE_PROFILES=linux,display,eval
+  local compose_profiles_default="eval"
+  [ "$(uname)" = "Linux" ] && compose_profiles_default="linux,display,eval"
 
   _migrate_ensure_key ROUTING_SERVICE_TOKEN "$(openssl rand -hex 32)"
   _migrate_ensure_key ROUTING_MODE "$routing_mode_default"

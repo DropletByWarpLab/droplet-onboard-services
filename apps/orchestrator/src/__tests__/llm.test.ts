@@ -248,20 +248,48 @@ describe("LLM routes", () => {
       );
     });
 
-    it("returns 400 when title is missing or not a string", async () => {
+    it("returns 400 when neither title nor projectId is provided", async () => {
       const res1 = await request(app)
         .patch("/api/llm/conversations/abc")
         .set("x-test-role", "owner")
         .send({});
       expect(res1.status).toBe(400);
-      expect(res1.body).toMatchObject({ error: "title_required" });
+      // WARP-845 widened the PATCH to also accept projectId moves.
+      expect(res1.body).toMatchObject({ error: "title_or_project_required" });
 
       const res2 = await request(app)
         .patch("/api/llm/conversations/abc")
         .set("x-test-role", "owner")
         .send({ title: 42 });
       expect(res2.status).toBe(400);
-      expect(res2.body).toMatchObject({ error: "title_required" });
+      // A non-string title with no projectId falls through to the same
+      // "nothing actionable in the body" rejection.
+      expect(res2.body).toMatchObject({ error: "title_or_project_required" });
+    });
+
+    it("rejects an empty-string projectId outright (review fix)", async () => {
+      // "" would skip setConversationProject's truthiness-guarded
+      // ownership check and then violate the FK → 500. 400 instead.
+      const res = await request(app)
+        .patch("/api/llm/conversations/abc")
+        .set("x-test-role", "owner")
+        .send({ projectId: "" });
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({ error: "invalid_project_id" });
+      expect(mockRenameConversationForUser).not.toHaveBeenCalled();
+    });
+
+    it("rejects a malformed title even when a projectId rides along (review fix)", async () => {
+      // Previously the title leg was silently dropped and the move
+      // applied — a half-honored request. Now the whole PATCH 400s
+      // before mutating anything.
+      const res = await request(app)
+        .patch("/api/llm/conversations/abc")
+        .set("x-test-role", "owner")
+        .send({ title: 42, projectId: "11111111-1111-1111-1111-111111111111" });
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({ error: "title_or_project_required" });
+      expect(mockRenameConversationForUser).not.toHaveBeenCalled();
     });
 
     it("returns 400 when service rejects an empty title", async () => {
