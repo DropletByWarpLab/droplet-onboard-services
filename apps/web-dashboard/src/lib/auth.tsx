@@ -183,6 +183,8 @@ let refreshInFlight: Promise<boolean> | null = null;
  * it should refresh) — DOES get the normal refresh+retry, so a merely-expired
  * access token doesn't read as "logged out" mid-session. (Previously a broad
  * `url.includes("/api/auth/")` skipped refresh for all of these.)
+ *
+ * Matching is by exact PATHNAME (see isAuthLifecycleUrl) — never substring.
  */
 const NO_REFRESH_PATHS = [
   "/api/auth/login",
@@ -190,6 +192,33 @@ const NO_REFRESH_PATHS = [
   "/api/auth/callback",
   "/api/auth/logout",
 ];
+
+/**
+ * True when `url` targets one of the NO_REFRESH_PATHS lifecycle routes.
+ *
+ * pr-reviewer (PR #549, finding 2): a substring `url.includes(p)` here matched
+ * any URL merely CONTAINING a lifecycle path — `/api/auth/login-history`
+ * contains `/api/auth/login`, `/api/auth/refresh-token` contains
+ * `/api/auth/refresh` — silently turning their expired-token 401s into hard
+ * logouts. Compare the parsed PATHNAME instead: query strings are ignored, an
+ * absolute URL still matches its path, and only an exact path (or a true
+ * sub-segment, e.g. a future `/api/auth/callback/<provider>`) counts. All
+ * current callers pass relative `/api/...` paths (lib/api.ts BASE = "").
+ */
+function isAuthLifecycleUrl(url: string): boolean {
+  let pathname: string;
+  try {
+    const base =
+      typeof window !== "undefined" ? window.location.origin : "http://localhost";
+    pathname = new URL(url, base).pathname;
+  } catch {
+    // Unparseable input — fall back to stripping query/hash from the raw string.
+    pathname = url.split(/[?#]/, 1)[0];
+  }
+  return NO_REFRESH_PATHS.some(
+    (p) => pathname === p || pathname.startsWith(`${p}/`),
+  );
+}
 
 async function attemptRefresh(): Promise<boolean> {
   if (!refreshInFlight) {
@@ -242,7 +271,7 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
   if (
     res.status !== 401 ||
     typeof window === "undefined" ||
-    NO_REFRESH_PATHS.some((p) => url.includes(p))
+    isAuthLifecycleUrl(url)
   ) {
     return res;
   }

@@ -122,6 +122,80 @@ describe("authFetch — refresh scope is precise (NO_REFRESH_PATHS)", () => {
     expect(attempts).toBe(2); // initial 401 + one post-refresh retry
     expect(res.status).toBe(200);
   });
+
+  // pr-reviewer (PR #549, finding 2): NO_REFRESH_PATHS matched by SUBSTRING, so
+  // any URL merely CONTAINING a lifecycle path — /api/auth/login-history
+  // contains /api/auth/login, /api/auth/refresh-token contains
+  // /api/auth/refresh — silently lost the refresh+retry and became a hard
+  // logout. Matching must be exact on the pathname.
+  it.each([
+    "/api/auth/login-history",
+    "/api/auth/refresh-token",
+  ])("refreshes + retries on a 401 from %s (lifecycle-path substring is NOT a match)", async (path) => {
+    let refreshHit = false;
+    let attempts = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        // Exact-match the refresh endpoint — `includes("/api/auth/refresh")`
+        // would also swallow the /api/auth/refresh-token target under test.
+        if (url === "/api/auth/refresh") {
+          refreshHit = true;
+          return Promise.resolve(new Response(null, { status: 200 }));
+        }
+        if (url === path) {
+          attempts += 1;
+          return Promise.resolve(
+            attempts === 1
+              ? new Response("", { status: 401 })
+              : new Response(JSON.stringify({ ok: true }), { status: 200 }),
+          );
+        }
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }),
+    );
+
+    const res = await authFetch(path);
+    expect(refreshHit).toBe(true);
+    expect(attempts).toBe(2);
+    expect(res.status).toBe(200);
+  });
+
+  it("still short-circuits a lifecycle URL that carries a query string", async () => {
+    let refreshHit = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        if (url === "/api/auth/refresh") {
+          refreshHit = true;
+          return Promise.resolve(new Response(null, { status: 200 }));
+        }
+        return Promise.resolve(new Response("", { status: 401 }));
+      }),
+    );
+
+    const res = await authFetch("/api/auth/login?next=%2Ffiles");
+    expect(res.status).toBe(401);
+    expect(refreshHit).toBe(false);
+  });
+
+  it("short-circuits a lifecycle path even on an absolute URL (matches by pathname)", async () => {
+    let refreshHit = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        if (url.endsWith("/api/auth/refresh")) {
+          refreshHit = true;
+          return Promise.resolve(new Response(null, { status: 200 }));
+        }
+        return Promise.resolve(new Response("", { status: 401 }));
+      }),
+    );
+
+    const res = await authFetch("http://droplet-ai.local/api/auth/logout");
+    expect(res.status).toBe(401);
+    expect(refreshHit).toBe(false);
+  });
 });
 
 describe("authFetch — 403 PASSWORD_CHANGE_REQUIRED routes to remediation (F8)", () => {
