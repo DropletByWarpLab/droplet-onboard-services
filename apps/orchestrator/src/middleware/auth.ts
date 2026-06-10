@@ -309,8 +309,10 @@ async function validateNextcloudTokenDetailed(
         await cacheDel(cacheKey);
         return { kind: "invalid" };
       }
+      return { kind: "ok", user: cached };
     }
-    return { kind: "ok", user: cached };
+    // authPrisma not wired yet — treat as a cache miss so the DEACTIVATED
+    // re-check cannot be silently skipped; fall through to the live lookup.
   }
 
   try {
