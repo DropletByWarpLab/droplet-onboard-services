@@ -36,7 +36,10 @@ import pino from "pino";
 import { Prisma } from "@prisma/client";
 import type { PrismaClient, ResetJob } from "@prisma/client";
 import { config } from "../config.js";
-import { isBridgeConnectionError } from "../lib/bridge-errors.js";
+import {
+  isBridgeConnectionError,
+  isTimeoutOrAbort,
+} from "../lib/bridge-errors.js";
 
 const logger = pino({ name: "reset-service" });
 
@@ -256,11 +259,19 @@ export async function requestFactoryReset(
     }
   } catch (err) {
     if (err instanceof ResetError) throw err;
-    // Connection failure (or anything else) → the wipe never started; the box
-    // is untouched. Record the failure honestly.
-    const reason = isBridgeConnectionError(err)
-      ? "The device service isn't reachable right now; reset was not dispatched."
-      : `Reset dispatch failed: ${(err as Error).message || "bridge request failed"}`;
+    // Connection failure / timeout (or anything else) → the wipe never started;
+    // the box is untouched. Record the failure honestly. The 30 s
+    // AbortController timeout in dispatchToBridge surfaces as an AbortError —
+    // classify it as a timeout (pr-reviewer #549, 2026-06-10 finding 2), not a
+    // generic "operation was aborted". Same BRIDGE_UNREACHABLE code as a
+    // connection failure — consistent with hostapd-bridge.service.ts, which
+    // maps timeout/abort to RouterError.unreachable — but a distinct message
+    // so triage knows the bridge accepted the connection and then went silent.
+    const reason = isTimeoutOrAbort(err)
+      ? "Reset dispatch timed out; the bridge did not respond within 30 s."
+      : isBridgeConnectionError(err)
+        ? "The device service isn't reachable right now; reset was not dispatched."
+        : `Reset dispatch failed: ${(err as Error).message || "bridge request failed"}`;
     await prisma.resetJob.update({
       where: { id: job.id },
       data: { status: "failed", failureReason: reason },

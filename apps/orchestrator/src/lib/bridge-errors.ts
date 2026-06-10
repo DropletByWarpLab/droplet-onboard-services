@@ -39,3 +39,17 @@ export function isBridgeConnectionError(err: unknown): boolean {
   if (directCode && BRIDGE_CONNECTION_ERROR_CODES.has(directCode)) return true;
   return false;
 }
+
+/**
+ * A fetch/abort failure that means "the request didn't get a response" — a
+ * client-side timeout rather than a refused connection.
+ * AbortController.abort() throws an AbortError; AbortSignal.timeout() throws a
+ * TimeoutError (hostapd-bridge review #6 — checking only AbortError misses the
+ * timeout variant). Shared here (pr-reviewer #549, 2026-06-10 finding 2) so
+ * every bridge caller classifies timeouts the same way instead of falling
+ * through to a generic "operation was aborted" failure.
+ */
+export function isTimeoutOrAbort(err: unknown): boolean {
+  const name = (err as { name?: string })?.name;
+  return name === "AbortError" || name === "TimeoutError";
+}

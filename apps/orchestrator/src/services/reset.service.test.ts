@@ -388,6 +388,45 @@ describe("requestFactoryReset — bridge unreachable", () => {
   });
 });
 
+describe("requestFactoryReset — bridge dispatch timeout", () => {
+  // pr-reviewer (PR #549, 2026-06-10 finding 2): dispatchToBridge aborts after
+  // 30 s via AbortController; the resulting AbortError (or AbortSignal.timeout's
+  // TimeoutError) is NOT a socket-level connection error, so the catch used to
+  // fall through to the generic "Reset dispatch failed: The operation was
+  // aborted." A timeout must be reported as a timeout — same BRIDGE_UNREACHABLE
+  // code (consistent with hostapd-bridge.service.ts, which maps timeout/abort to
+  // RouterError.unreachable) but a distinct, truthful message.
+  it.each(["AbortError", "TimeoutError"])(
+    "reports a %s as a dispatch timeout, not a generic failure",
+    async (name) => {
+      const { prisma, jobs } = makeFakePrisma();
+      const abortErr = Object.assign(new Error("This operation was aborted"), {
+        name,
+      });
+      vi.spyOn(globalThis, "fetch").mockRejectedValue(abortErr);
+
+      await expect(
+        requestFactoryReset(prisma as never, {
+          userId: "owner-1",
+          typedConfirm: "droplet-home",
+          targetName: "droplet-home",
+        }),
+      ).rejects.toMatchObject({
+        code: "BRIDGE_UNREACHABLE",
+        message:
+          "Reset dispatch timed out; the bridge did not respond within 30 s.",
+      });
+
+      // Job marked failed with the timeout reason — never "operation aborted".
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0].status).toBe("failed");
+      expect(jobs[0].failureReason).toBe(
+        "Reset dispatch timed out; the bridge did not respond within 30 s.",
+      );
+    },
+  );
+});
+
 describe("getResetStatus", () => {
   it("returns null when no reset has been requested", async () => {
     const { prisma } = makeFakePrisma();
