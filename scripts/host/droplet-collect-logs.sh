@@ -92,7 +92,7 @@ redact() {
     -e '/-----BEGIN [A-Z ]*PRIVATE KEY-----/,/-----END [A-Z ]*PRIVATE KEY-----/c\'"$REDACT_PLACEHOLDER (private key)" \
     -e 's/(\bBearer[[:space:]]+)[A-Za-z0-9._+/=-]{8,}/\1'"$REDACT_PLACEHOLDER"'/g' \
     -e 's/((X-Droplet-Auth|Authorization|X-Api-Key|X-Auth-Token|Proxy-Authorization)[[:space:]]*[:=][[:space:]]*)[^[:space:]",;]{6,}/\1'"$REDACT_PLACEHOLDER"'/gI' \
-    -e 's/(([A-Za-z][A-Za-z0-9+.-]*):\/\/[^[:space:]:\/@]+:)[^[:space:]@\/]+(@)/\1'"$REDACT_PLACEHOLDER"'\3/g' \
+    -e 's/(([A-Za-z][A-Za-z0-9+.-]*):\/\/[^[:space:]:\/@]*:)[^[:space:]@\/]+(@)/\1'"$REDACT_PLACEHOLDER"'\3/g' \
     -e 's/(\b[A-Za-z0-9_.-]*(PASSWORD|PASSWD|SECRET|TOKEN|KEY|PSK|CREDENTIAL|AUTH)[A-Za-z0-9_.-]*[[:space:]]*[:=][[:space:]]*)("[^"]*"|'"'"'[^'"'"']*'"'"'|[^[:space:]",;]+)/\1'"$REDACT_PLACEHOLDER"'/gI'
 }
 

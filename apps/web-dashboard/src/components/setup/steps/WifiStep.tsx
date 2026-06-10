@@ -124,7 +124,11 @@ export function WifiStep({
     for (;;) {
       const op = await fetchNetworkOperation(operationId);
       if (op.state === "applied") return;
-      if (op.state === "rolled_back" || op.state === "unknown") {
+      if (
+        op.state === "rolled_back" ||
+        op.state === "unknown" ||
+        op.state === "rejected"
+      ) {
         throw new Error(
           op.reason ??
             "The Wi-Fi change didn't take. Re-check the network and try again.",

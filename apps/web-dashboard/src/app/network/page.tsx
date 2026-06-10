@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   Globe,
   Home,
+  Info,
   Loader2,
   Monitor,
   RefreshCw,
@@ -54,6 +55,10 @@ type OperationStatus =
   | { state: "idle" }
   | { state: "pending"; id: string }
   | { state: "applied"; id: string; finishedAt: number | null }
+  // Neutral no-change terminal: the routing service refused the request (4xx,
+  // auth/validation) before any router change. Distinct from "rolled_back",
+  // which means a change WAS made and then reverted.
+  | { state: "rejected"; id: string; reason: string | null }
   | { state: "rolled_back"; id: string; reason: string | null };
 
 type Tab = "overview" | "privacy" | "devices" | "schedules" | "wifi" | "firewall" | "system";
@@ -133,6 +138,11 @@ export default function NetworkPage() {
         if (cancelled) return;
         if (op.state === "applied") {
           setOpStatus({ state: "applied", id: op.id, finishedAt: op.finishedAt });
+          refresh();
+        } else if (op.state === "rejected") {
+          // Neutral no-change terminal — the router refused the request (4xx),
+          // nothing was applied or reverted. Don't show the rollback alarm.
+          setOpStatus({ state: "rejected", id: op.id, reason: op.reason });
           refresh();
         } else if (op.state === "rolled_back") {
           setOpStatus({ state: "rolled_back", id: op.id, reason: op.reason });
@@ -346,6 +356,28 @@ export default function NetworkPage() {
         >
           <CheckCircle2 size={18} className="text-system-green" />
           <p className="type-subheadline text-label-primary flex-1">Change applied.</p>
+          <button
+            onClick={() => setOpStatus({ state: "idle" })}
+            className="btn ghost sm"
+            aria-label="Dismiss"
+            type="button"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+      {opStatus.state === "rejected" && (
+        <div role="status" className="card mb-4 flex items-center gap-3">
+          <Info size={18} className="text-label-tertiary" />
+          <div className="flex-1">
+            <p className="type-subheadline text-label-primary font-medium">
+              No change made
+            </p>
+            <p className="type-footnote text-label-tertiary">
+              {opStatus.reason ??
+                "The router rejected the request, so nothing was changed."}
+            </p>
+          </div>
           <button
             onClick={() => setOpStatus({ state: "idle" })}
             className="btn ghost sm"

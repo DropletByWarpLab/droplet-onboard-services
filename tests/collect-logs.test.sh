@@ -59,6 +59,7 @@ GET /api/llm/models 200 4ms
 Authorization: Bearer eyJplantedjwt.aaaa.bbbb
 boot env JWT_SECRET=0123456789abcdef0123456789abcdef0123456789abcdef
 DATABASE_URL=postgresql://droplet:pgpass-supersecret@db:5432/droplet
+REDIS_URL=redis://:redis-empty-user-pw-5544@cache:6379/0
 EOF
 
 cat > "$FIXDIR/ai-gateway.log" <<'EOF'
@@ -106,6 +107,7 @@ assert_absent() {
 assert_absent "eyJplantedjwt.aaaa.bbbb"                              "Bearer token"
 assert_absent "0123456789abcdef0123456789abcdef0123456789abcdef"    "JWT_SECRET value"
 assert_absent "pgpass-supersecret"                                  "DB URL password"
+assert_absent "redis-empty-user-pw-5544"                            "REDIS_URL empty-username password"
 assert_absent "Sup3rSecretValue!"                                   "password= value"
 assert_absent "MIIEPLANTEDprivatekeymaterialmustnotleak0000000000"  "PEM key body"
 

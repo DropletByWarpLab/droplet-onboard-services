@@ -121,7 +121,13 @@ vi.mock("../services/brain-memory.service.js", () => ({
 
 import { createPublicAuthRouter, createProtectedAuthRouter } from "./auth.js";
 import * as nc from "../services/nextcloud.client.js";
-import { verifyAccessToken, signAccessToken } from "../services/jwt.service.js";
+import {
+  verifyAccessToken,
+  signAccessToken,
+  signRefreshToken,
+  denyRefreshToken,
+} from "../services/jwt.service.js";
+import { recordActivity } from "../services/activity.singleton.js";
 
 // ── In-memory User + Invite mock (sync layout with auth.invites.test.ts) ──
 interface UserRow {
@@ -133,6 +139,9 @@ interface UserRow {
   passwordHash: string | null;
   role: string;
   isLocal: boolean;
+  // ADR-013 SCIM soft-deactivation. Optional in the mock so existing ACTIVE
+  // fixtures (which omit it) read as not-deactivated.
+  directoryStatus?: "ACTIVE" | "DEACTIVATED";
   createdAt: Date;
   updatedAt: Date;
 }
@@ -468,6 +477,70 @@ describe("WARP-485 round 2 — JWT refresh path", () => {
     expect(refresh.status).toBe(401);
     expect(refresh.body).toMatchObject({ code: "USER_NOT_PROVISIONED" });
   });
+
+  it("denylists the BODY-supplied refresh token (ADR-008 mobile) on the no-User branch", async () => {
+    // Regression for the pr-reviewer finding: ADR-008 native clients POST the
+    // refresh token in the JSON body, not a cookie. On the !localUser error
+    // branch the deny call used refreshTokenCookie — null for body clients — so
+    // `denyRefreshToken(null)` threw internally and the token was NEVER revoked.
+    // It must denylist the BODY token (refreshTokenInput) instead.
+    const prisma = createPrismaMock([]); // no rows → !localUser branch
+    // A structurally valid refresh token for a subject with no local row.
+    const bodyToken = signRefreshToken({
+      id: "u-uuid-ghost-0001",
+      username: "ghost",
+      displayName: "Ghost",
+      role: "family",
+    });
+
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .post("/api/auth/refresh")
+      .send({ refreshToken: bodyToken }); // body only, NO cookie
+
+    expect(res.status).toBe(401);
+    expect(res.body).toMatchObject({ code: "USER_NOT_PROVISIONED" });
+    // The fix: the body token is what gets denylisted, never a null cookie.
+    expect(denyRefreshToken).toHaveBeenCalledWith(bodyToken);
+    expect(denyRefreshToken).not.toHaveBeenCalledWith(null);
+  });
+
+  it("refuses /auth/refresh with 401 when the local User row is directory-DEACTIVATED (ADR-013)", async () => {
+    // The user offboarded (SCIM active:false → DEACTIVATED) after the refresh
+    // token was issued. A row-existence check alone would still mint fresh
+    // credentials; the DEACTIVATED gate must fail it closed — parity with the
+    // /auth/login, SSO, and WebAuthn paths — and burn the presented token.
+    const localUser: UserRow = {
+      id: "u-uuid-deact-2468",
+      username: "deactivated-user",
+      displayName: "Deactivated User",
+      email: "deactivated@warp.test",
+      nextcloudUsername: "deactivated-user",
+      passwordHash: "$argon2id$v=19$m=19456,t=2,p=1$seed$seed",
+      role: "family",
+      isLocal: true,
+      directoryStatus: "DEACTIVATED",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    const prisma = createPrismaMock([localUser]);
+    const refreshToken = signRefreshToken({
+      id: "u-uuid-deact-2468",
+      username: "deactivated-user",
+      displayName: "Deactivated User",
+      role: "family",
+    });
+
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .post("/api/auth/refresh")
+      .send({ refreshToken });
+
+    expect(res.status).toBe(401);
+    expect(res.body).toMatchObject({ code: "USER_NOT_PROVISIONED" });
+    // Row still exists (it's deactivated, not deleted) yet the token is burned.
+    expect(denyRefreshToken).toHaveBeenCalledWith(refreshToken);
+  });
 });
 
 describe("WARP-485 round 2 — JWT invite-accept path", () => {
@@ -517,6 +590,44 @@ describe("WARP-485 round 2 — JWT invite-accept path", () => {
     expect(decoded.sub).not.toBe("fresh-invitee"); // not the username string
     expect(decoded.username).toBe("fresh-invitee");
     expect(decoded.role).toBe("family");
+  });
+});
+
+describe("pr-reviewer hardening — auth audit IP ignores a forged X-Forwarded-For", () => {
+  it("does not record the client-controlled leftmost XFF as the audit ip", async () => {
+    // callerIpFromReq now returns req.ip (forge-resistant under trust proxy),
+    // not the raw leftmost X-Forwarded-For entry. A credential-stuffing client
+    // could otherwise attribute every failed attempt to an arbitrary IP,
+    // defeating IP-based triage. Drive the audited wrong-password path and
+    // assert the attacker's forged XFF never lands in the audit row.
+    const localUser: UserRow = {
+      id: "u-uuid-xff-1357",
+      username: "xff-victim",
+      displayName: "XFF Victim",
+      email: "xff@warp.test",
+      nextcloudUsername: "xff-victim",
+      passwordHash: "$argon2id$v=19$m=19456,t=2,p=1$seed$seed",
+      role: "family",
+      isLocal: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    const prisma = createPrismaMock([localUser]);
+    verifyPassword.mockResolvedValueOnce(false); // wrong password → denyInvalid
+
+    const FORGED = "203.0.113.7"; // attacker-chosen; must never be trusted
+    const app = buildApp(prisma);
+    const res = await request(app)
+      .post("/api/auth/login")
+      .set("X-Forwarded-For", `${FORGED}, 10.1.1.1`)
+      .send({ email: "xff@warp.test", password: "definitely-wrong-pw" });
+
+    expect(res.status).toBe(401);
+    expect(recordActivity).toHaveBeenCalledTimes(1);
+    const arg = (recordActivity as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    // The forged leftmost XFF must not appear anywhere in the audit row.
+    expect(arg.refs.ip).not.toBe(FORGED);
+    expect(String(arg.sub)).not.toContain(FORGED);
   });
 });
 
