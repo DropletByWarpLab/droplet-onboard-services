@@ -57,7 +57,7 @@ function createMockPrisma() {
   } as never;
 }
 
-function buildApp() {
+function buildApp(prisma = createMockPrisma()) {
   const app = express();
   app.use(express.json());
   app.use((req: Request, _res: Response, next: NextFunction) => {
@@ -69,7 +69,7 @@ function buildApp() {
     };
     next();
   });
-  app.use("/api", createMatterRouter(createMockPrisma()));
+  app.use("/api", createMatterRouter(prisma));
   return app;
 }
 
@@ -131,5 +131,54 @@ describe("Matter Tier-2 mint → confirm entityId binding", () => {
     expect(confirm.status).toBe(400);
     expect(confirm.body.code).toBe("TOKEN_OPERATION_MISMATCH");
     expect(sendMatterCommand).not.toHaveBeenCalled();
+  });
+
+  it("confirms a lock whose category degrades mid-window — no live state re-read on the confirm path", async () => {
+    const app = buildApp();
+    const token = await mintLockCommand(app, "54321");
+
+    // The lock drops and re-establishes its fabric connection inside the
+    // 60 s window: the controller cache only has endpoint 0, so a live
+    // getDevice() would misreport the lock as the default "switch".
+    vi.mocked(getDevice).mockResolvedValue({
+      nodeId: "54321",
+      category: "switch",
+    } as never);
+    vi.mocked(getDevice).mockClear();
+
+    const confirm = await request(app)
+      .post("/api/matter/devices/54321/confirm")
+      .send({ confirmationToken: token, service: "lock" });
+
+    expect(confirm.status).toBe(200);
+    expect(confirm.body.confirmed).toBe(true);
+    // The mint-time pending record is authoritative; confirming must not
+    // depend on the device being reachable or fully re-enumerated.
+    expect(getDevice).not.toHaveBeenCalled();
+    expect(sendMatterCommand).toHaveBeenCalledWith("54321", "lock", undefined);
+  });
+
+  it("mints binary_sensor entityIds under their own domain — no silent aliasing onto sensor.*", async () => {
+    const prisma = createMockPrisma();
+    const app = buildApp(prisma);
+    vi.mocked(getDevice).mockResolvedValue({
+      nodeId: "777",
+      category: "binary_sensor",
+    } as never);
+
+    const res = await request(app)
+      .post("/api/matter/devices/777/command")
+      .send({ command: "turn_on" });
+
+    expect(res.status).toBe(200);
+    expect(
+      (prisma as { commandAuditLog: { create: ReturnType<typeof vi.fn> } })
+        .commandAuditLog.create,
+    ).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        entityId: "binary_sensor.777",
+        domain: "binary_sensor",
+      }),
+    });
   });
 });

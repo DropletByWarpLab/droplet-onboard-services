@@ -109,9 +109,16 @@ function translateCommissionError(err: unknown): {
 }
 
 /**
- * Map a device category to the safety-rule domain prefix. Both the command
- * route (mint) and the confirm route derive entityIds through this, so the
- * WARP-41 echo check compares like with like — e.g. "lock.12345" both times.
+ * Map a device category to the safety-rule domain prefix used when minting
+ * entityIds (e.g. "lock.12345"). The confirm route deliberately does NOT
+ * re-derive this — it binds on the mint-time pending record instead, so a
+ * device that degrades to endpoint-0-only mid-confirm-window can't break
+ * the WARP-41 echo check.
+ *
+ * Every category must map to its own distinct domain: TIER_2_DOMAINS and
+ * TIER_2_OVERRIDES in safety-rules.ts are keyed on these strings, and an
+ * alias (e.g. binary_sensor → sensor) would make rules for the aliased key
+ * silently unmatchable.
  */
 function categoryToDomain(category: string): string {
   const domainMap: Record<string, string> = {
@@ -123,7 +130,7 @@ function categoryToDomain(category: string): string {
     fan: "fan",
     media_player: "media_player",
     sensor: "sensor",
-    binary_sensor: "sensor",
+    binary_sensor: "binary_sensor",
     vacuum: "vacuum",
     camera: "camera",
   };
@@ -400,18 +407,14 @@ export function createMatterRouter(prisma: PrismaClient): Router {
       }
 
       const userId = (req as any).user?.id;
-      // The nodeId in the URL determines the expected entityId. The safety-tier
-      // service enforces the match centrally (WARP-41). The domain prefix must
-      // be derived from the device category exactly like the command route's
-      // mint (e.g. "lock.12345") — a hardcoded "matter." prefix can never
-      // match a pending token and rejects every legitimate confirm.
-      const device = await getDevice(req.params.nodeId);
-      if (!device)
-        return res.status(404).json({ error: "Device not found" });
-      const expectedEntityId = `${categoryToDomain(device.category)}.${req.params.nodeId}`;
+      // The nodeId in the URL must match the node the token was minted for.
+      // The safety-tier service enforces this centrally against the mint-time
+      // pending record (WARP-41) — no live getDevice() here, because a device
+      // that is offline or mid-reconnect reports a degraded category and a
+      // re-derived entityId would 400 the legitimate confirm.
       const result = await confirmCommand(prisma, confirmationToken, userId, {
         service,
-        entityId: expectedEntityId,
+        nodeId: req.params.nodeId,
       });
 
       if (!result.confirmed) {
