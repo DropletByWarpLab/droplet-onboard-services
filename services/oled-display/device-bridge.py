@@ -1649,8 +1649,11 @@ def _run_pool_via_executor(operation, params):
     res_path = os.path.join(POOL_SPOOL_DIR, "result.json")
     try:
         # 0700 like the StateDirectory it lives in — only the bridge user
-        # (or root) may place a request.
+        # (or root) may place a request. os.makedirs ignores `mode` when the
+        # directory already exists, so explicitly chmod it on every start to
+        # close the window where a prior install left a looser umask (0755).
         os.makedirs(POOL_SPOOL_DIR, mode=0o700, exist_ok=True)
+        os.chmod(POOL_SPOOL_DIR, 0o700)
         # Drop any stale pair from an interrupted earlier run so the executor
         # can never consume an old request and we never read an old result.
         for stale in (req_path, res_path):
@@ -1711,7 +1714,7 @@ def _run_pool_via_executor(operation, params):
     script_rc = result.get("rc")
     script_out = result.get("stdout") or ""
     script_err = result.get("stderr") or ""
-    if script_rc != 0:
+    if script_rc is None or script_rc != 0:
         msg = (script_err.strip() or script_out.strip()
                or "host script refused")
         logger.warning("pool command %s refused/failed (rc=%s): %s",
@@ -1719,12 +1722,13 @@ def _run_pool_via_executor(operation, params):
         return False, msg
     # Invalidate the pools cache so the next GET /pools reflects the change.
     pools_snapshot(invalidate=True)
-    # drive_adopt mounts a freshly-formatted disk under /mnt/droplet, so the
-    # drives cache must also be refreshed — otherwise GET /drives returns a
-    # stale snapshot for up to the cache TTL and StorageStep's immediate
-    # post-adopt load() shows the disk as not-yet-mounted. (review #499)
-    if operation == "drive_adopt":
-        drives_snapshot(invalidate=True)
+    # Any pool op can change which drives are free vs. in-use (pool_create,
+    # pool_destroy, pool_format, pool_add_spare, pool_remove_disk all alter
+    # md membership; drive_adopt also mounts under /mnt/droplet). Invalidate
+    # drives unconditionally so the next GET /drives reflects the new state
+    # within the cache TTL. The old run_pool_command did this unconditionally
+    # on success; the executor split should preserve the same invariant.
+    drives_snapshot(invalidate=True)
     try:
         return True, json.loads(script_out or "{}")
     except (ValueError, TypeError):
