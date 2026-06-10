@@ -26,7 +26,9 @@
 # HARD PRE-FLIGHT (this is the last line of defense — NEVER run blind):
 #   1. Operation must be in the allow-list.
 #   2. A typed double-confirm phrase MUST be present AND must name the disks
-#      (for create) or the array (for destroy/format/level) being erased. The
+#      (for create) or the array (for destroy/format/level) being erased —
+#      each short device name as an exact whole token of the phrase (WARP-848:
+#      a substring match let `sda1` ride on a phrase naming `sda10`). The
 #      orchestrator builds this phrase from the owner's typed confirmation.
 #   3. Refuse — ALWAYS and unconditionally — any target that is (or backs)
 #      the OS/boot disk.
@@ -113,11 +115,19 @@ mapfile -t MEMBERS < <(json_field members)
 short() { basename "$1"; }
 
 confirm_names() {
-  # $1 = needle (short name). Case-sensitive substring match in $CONFIRM.
-  case "$CONFIRM" in
-    *"$1"*) return 0 ;;
-    *) return 1 ;;
-  esac
+  # $1 = needle (short device name). EXACT-TOKEN match: the phrase is split on
+  # runs of non-alphanumerics and the needle must equal one whole token,
+  # case-sensitively. (WARP-848 hardening — a substring match let `sda1` ride
+  # on a phrase naming only `sda10`: one typed phrase consenting to a
+  # DIFFERENT disk.) After tr the candidates are pure alnum, so the unquoted
+  # word-split below can never glob. A needle that itself contains a
+  # non-alphanumeric (e.g. dm-0) can never match — that fails CLOSED, and the
+  # pool/adopt targets are plain kernel names (sdX / nvmeXnY / mmcblkN / mdN).
+  local needle="$1" tok
+  for tok in $(printf '%s' "$CONFIRM" | tr -cs '[:alnum:]' ' '); do
+    [ "$tok" = "$needle" ] && return 0
+  done
+  return 1
 }
 
 if [ "$OP" = "pool_create" ]; then
@@ -416,6 +426,22 @@ case "$OP" in
     # consent for the erase.
     for m in "${MEMBERS[@]}"; do
       teardown_mounts_of "$m" "refusing: pool_create member $m"
+    done
+    # WARP-848 belt-and-braces: members are expected to be WHOLE-DISK nodes
+    # (the dashboard sends them, and tearing one down releases every child
+    # partition via the kernel PKNAME topology). If some OTHER caller sends a
+    # PARTITION member, the teardown above released only that partition's own
+    # mounts — a SIBLING partition on the same physical disk can still be
+    # mounted (and would re-automount every boot), so wipefs+mdadm below would
+    # silently under-deliver the whole-disk erase the confirm phrase promised.
+    # Fail CLOSED before anything is wiped. ("mounted"/"busy" keeps the
+    # message inside the dashboard's friendlyCreateError mapping.)
+    for m in "${MEMBERS[@]}"; do
+      parent="$(lsblk -ndo PKNAME "$m" 2>/dev/null || true)"
+      [ -n "$parent" ] || continue   # whole-disk node — fully covered above
+      if [ -n "$(mounts_backed_by "/dev/$parent")" ]; then
+        die "refusing: pool_create member $m is a partition of /dev/$parent and another filesystem on that disk is still mounted (busy) — pool members must be whole disks"
+      fi
     done
     for m in "${MEMBERS[@]}"; do
       wipefs -a "$m"

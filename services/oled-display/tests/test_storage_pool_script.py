@@ -484,6 +484,92 @@ def test_create_execute_os_disk_refused_before_any_unmount_or_wipe(tmp_path):
     assert not any(c.startswith(("umount", "wipefs", "mdadm")) for c in cmds), cmds
 
 
+def test_create_execute_whole_disk_member_unmounts_all_its_partitions(tmp_path):
+    # The live-box shape (WARP-848 QA must-fix): ONE physical disk holding two
+    # automounted filesystems (sda1 `nvr` + sda2 `data`). The wizard sends
+    # WHOLE-DISK members; the managed teardown must release BOTH partitions
+    # (they are PKNAME-children of the disk node), wipefs the disk nodes
+    # themselves, then run mdadm — the whole-disk erase the confirm dialog
+    # promised, never a partition-sized pool with a survivor filesystem.
+    params = _create_params(members=["/dev/sda", "/dev/sdb"],
+                            confirm_phrase="ERASE sda sdb")
+    proc, cmds = _exec_run(
+        "pool_create", params, tmp_path,
+        mounts=[("/dev/sda1", "/mnt/droplet/nvr-aaaa1111"),
+                ("/dev/sda2", "/mnt/droplet/data-bbbb2222")])
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout).get("ok") is True
+    # BOTH partitions released…
+    assert _first(cmds, "umount /mnt/droplet/nvr-aaaa1111") >= 0, cmds
+    assert _first(cmds, "umount /mnt/droplet/data-bbbb2222") >= 0, cmds
+    # …the DISK nodes get wiped (not a partition)…
+    assert any(c.strip() == "wipefs -a /dev/sda" for c in cmds), cmds
+    assert any(c.strip() == "wipefs -a /dev/sdb" for c in cmds), cmds
+    # …and mdadm assembles the whole disks AFTER every unmount + wipe.
+    umounts = [i for i, c in enumerate(cmds) if c.startswith("umount")]
+    wipes = [i for i, c in enumerate(cmds) if c.startswith("wipefs")]
+    mdadm_idx = _first(cmds, "mdadm")
+    assert max(umounts) < min(wipes) < mdadm_idx, cmds
+    assert "--create /dev/md0" in cmds[mdadm_idx], cmds
+    assert "/dev/sda /dev/sdb" in cmds[mdadm_idx], cmds
+
+
+def test_create_execute_partition_member_with_mounted_sibling_refuses(tmp_path):
+    # Belt-and-braces for any OTHER caller that still sends a PARTITION member
+    # (the wizard now sends whole disks): tearing down /dev/sda1's own mounts
+    # leaves its SIBLING /dev/sda2 mounted — sda2 is not a PKNAME-child of the
+    # partition NODE — so wipefs+mdadm would silently under-deliver the
+    # whole-disk erase the confirm promised, and the survivor filesystem would
+    # re-automount every boot. The script must die loudly — with the
+    # dashboard-mappable mounted/busy wording — before ANYTHING is wiped.
+    params = _create_params(members=["/dev/sda1", "/dev/sdb1"],
+                            confirm_phrase="ERASE sda1 sdb1")
+    proc, cmds = _exec_run(
+        "pool_create", params, tmp_path,
+        mounts=[("/dev/sda1", "/mnt/droplet/nvr-aaaa1111"),
+                ("/dev/sda2", "/mnt/droplet/data-bbbb2222")])
+    assert proc.returncode != 0
+    combined = (proc.stderr + proc.stdout).lower()
+    # Matches the dashboard's friendlyCreateError regex (mounted / busy).
+    assert "mounted" in combined or "busy" in combined
+    assert _first(cmds, "wipefs") == -1, cmds
+    assert _first(cmds, "mdadm") == -1, cmds
+
+
+# ---------------------------------------------------------------------------
+# WARP-848 QA hardening — the confirm-phrase gate is an EXACT-TOKEN match.
+# A case-sensitive SUBSTRING check let `sda1` ride on a phrase that named only
+# `sda10`: one typed phrase consenting to a DIFFERENT disk. The phrase is now
+# split on runs of non-alphanumerics and each target's short name must equal a
+# whole token.
+# ---------------------------------------------------------------------------
+
+def test_create_confirm_phrase_substring_is_not_enough():
+    # Phrase names sda10, member is sda1 → must refuse (old substring passed).
+    proc = _run("pool_create", _create_params(
+        members=["/dev/sda1", "/dev/sdb1"],
+        confirm_phrase="ERASE sda10 sdb1"))
+    assert proc.returncode != 0
+    assert "confirm" in (proc.stderr + proc.stdout).lower()
+
+
+def test_adopt_confirm_phrase_substring_is_not_enough():
+    # Phrase names sdb1, adopt target is the DISK sdb → must refuse (old
+    # substring matched "sdb" inside "sdb1").
+    proc = _run("drive_adopt", _adopt_params(confirm_phrase="ERASE sdb1"))
+    assert proc.returncode != 0
+    assert "confirm" in (proc.stderr + proc.stdout).lower()
+
+
+def test_confirm_phrase_with_punctuation_separators_still_passes():
+    # The split is on runs of non-alphanumerics, so separator style doesn't
+    # matter — only whole-token identity does. (Pins compatibility with the
+    # dashboard's space-separated `buildConfirmPhrase` output and any caller
+    # that punctuates.)
+    proc = _run("pool_create", _create_params(confirm_phrase="ERASE: sda, sdb"))
+    assert proc.returncode == 0, proc.stderr
+
+
 def test_managed_unmount_prunes_the_automount_state(tmp_path):
     # WARP-612 parity: the guarded-eject path "forgets" an unmounted drive by
     # dropping its entry from /var/lib/droplet-automount/mounts.json. A managed

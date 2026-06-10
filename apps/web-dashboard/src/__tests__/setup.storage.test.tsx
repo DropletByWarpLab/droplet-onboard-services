@@ -556,22 +556,28 @@ describe("setup Storage step — RAID toggle + calculator (BUG-3 / ADR-019)", ()
       await Promise.resolve();
     });
 
-    // requestCreatePool got the chosen level + the real drive devices as members.
+    // requestCreatePool got the chosen level + the WHOLE physical disks as
+    // members. WARP-848 QA must-fix: a partition member (/dev/sda1) made the
+    // host script erase only that partition while the dialog promised — and
+    // the capacity options priced — the whole disk (a sibling /dev/sda2
+    // survived, un-erased, re-automounting every boot). The member is the
+    // backing DISK node; its teardown covers every child partition.
     expect(requestCreatePoolMock).toHaveBeenCalledTimes(1);
     const arg = requestCreatePoolMock.mock.calls[0][0];
     expect(arg.level).toBe("raid1");
-    // One member per POOLABLE physical disk — the mounted device of each disk,
-    // never two partitions of the SAME disk (a meaningless same-disk mirror).
+    // One member per POOLABLE physical disk — the disk node itself, never a
+    // partition of it (and never two partitions of the SAME disk).
     expect(arg.members).toEqual(
-      expect.arrayContaining(["/dev/sda1", "/dev/sdb1"]),
+      expect.arrayContaining(["/dev/sda", "/dev/sdb"]),
     );
     expect(arg.members).toHaveLength(2);
+    expect(arg.members).not.toContain("/dev/sda1");
+    expect(arg.members).not.toContain("/dev/sdb1");
     expect(arg.device).toMatch(/^md\d+$/);
-    // The confirm phrase MUST name every member's short device — the host
-    // script's "never run blind" gate (ADR-019 D4.3) refuses otherwise, even
-    // on empty drives.
-    expect(arg.confirmPhrase).toContain("sda1");
-    expect(arg.confirmPhrase).toContain("sdb1");
+    // The confirm phrase MUST name every member's short DISK name as a whole
+    // token — the host script's "never run blind" gate (ADR-019 D4.3) is an
+    // exact-token match, so this pins the end-to-end phrase format.
+    expect(arg.confirmPhrase).toBe("ERASE sda sdb");
 
     // The confirm dialog states plainly that the drives get erased, and names
     // them with their sizes. (The blast-radius wording also appears inline in
@@ -602,6 +608,49 @@ describe("setup Storage step — RAID toggle + calculator (BUG-3 / ADR-019)", ()
     await waitFor(() =>
       expect(screen.getByText(/discovering your devices/i)).toBeInTheDocument(),
     );
+  });
+
+  it("sends ONE whole-disk member per physical disk when a disk holds two filesystems", async () => {
+    // The live box's exact shape (WARP-848 QA must-fix): sda carries an `nvr`
+    // AND a `data` filesystem, sdb carries one. The confirm dialog lists all
+    // THREE filesystems and the capacity options price the whole disks — so
+    // the create request must send the two DISK nodes, not first partitions.
+    fetchDrivesMock.mockResolvedValue({
+      drives: [
+        { ...FIXTURE_DRIVES.drives[0], device: "/dev/sda1", uuid: "A", label: "nvr" },
+        { ...FIXTURE_DRIVES.drives[0], device: "/dev/sda2", uuid: "B", label: "data" },
+        { ...FIXTURE_DRIVES.drives[1], device: "/dev/sdb1", uuid: "C", label: "backup" },
+      ],
+      count: 3,
+    });
+    requestCreatePoolMock.mockResolvedValue({
+      status: "confirmation_required",
+      confirmationToken: "tok-848",
+      service: "pool_create",
+      resourceId: "md0",
+      expiresIn: 60,
+    });
+    render(<SetupPage />);
+    await advanceToStorage();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("radio", { name: /RAID 1 —/i }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /create pool/i }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const arg = requestCreatePoolMock.mock.calls[0][0];
+    expect(arg.members).toEqual(["/dev/sda", "/dev/sdb"]);
+    expect(arg.confirmPhrase).toBe("ERASE sda sdb");
+    // The dialog still names EVERY filesystem the erase takes — including
+    // sda's second partition, which the old partition-member request silently
+    // left mounted and un-erased.
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByText(/nvr/i)).toBeInTheDocument();
+    expect(within(dialog).getByText(/data/i)).toBeInTheDocument();
+    expect(within(dialog).getByText(/backup/i)).toBeInTheDocument();
   });
 
   it("surfaces a calm back-up message (not a raw error) when the drives hold data", async () => {
@@ -666,9 +715,17 @@ describe("setup Storage step — RAID toggle + calculator (BUG-3 / ADR-019)", ()
 describe("buildConfirmPhrase (ADR-019 D4.3 — host-script never-run-blind gate)", () => {
   it("names every member's short device so confirm_names() passes", () => {
     const phrase = buildConfirmPhrase(["/dev/sda1", "/dev/sda2"]);
-    // The host script does a case-sensitive substring match per member.
+    // The host script requires each short name as a whole TOKEN (split on
+    // non-alphanumerics, case-sensitive) — WARP-848 hardening; a substring
+    // match used to let `sda1` ride on a phrase naming `sda10`.
     expect(phrase).toContain("sda1");
     expect(phrase).toContain("sda2");
+  });
+
+  it("emits space-separated whole tokens the script's exact-token gate accepts", () => {
+    // End-to-end phrase format pin: wizard → orchestrator (pass-through) →
+    // script confirm_names(). Each member's basename must be its own token.
+    expect(buildConfirmPhrase(["/dev/sda", "/dev/sdb"])).toBe("ERASE sda sdb");
   });
 
   it("uses the basename, not the full /dev path", () => {
