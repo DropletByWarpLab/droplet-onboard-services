@@ -18,13 +18,16 @@ Type=oneshot
 RemainAfterExit=yes
 EnvironmentFile=-/etc/default/droplet-openwrt-attach
 # WARP-808 follow-up: customer Wi-Fi writes from the sandboxed device-bridge
-# land in this droplet-owned file (DROPLET_HOSTAPD_ENV_FILE in
-# droplet-device-bridge.service) — the bridge cannot write root-owned
-# /etc/default under ProtectSystem=strict/User=droplet. Loaded LAST so the
-# customer's DROPLET_AP_SSID/DROPLET_AP_PSK override the provisioning
-# defaults above (systemd EnvironmentFile: last assignment wins). Absent on
-# a fresh/factory-reset box (`=-`), which falls back to the defaults.
-EnvironmentFile=-/var/lib/droplet-bridge/openwrt-attach.env
+# land in /var/lib/droplet-bridge/openwrt-attach.env (DROPLET_HOSTAPD_ENV_FILE
+# in droplet-device-bridge.service) — the bridge cannot write root-owned
+# /etc/default under ProtectSystem=strict/User=droplet. That file is
+# deliberately NOT an EnvironmentFile here: (a) drop-ins (override.conf)
+# re-load /etc/default after the main unit, so EnvironmentFile ordering would
+# silently clobber the customer's values (PR #551 review blocker), and (b) a
+# droplet-writable file must never inject arbitrary env into a root unit.
+# Instead the attach script itself parses ONLY DROPLET_AP_SSID/DROPLET_AP_PSK
+# out of it, with hard validation — see the customer_ap_creds block in
+# /usr/local/sbin/droplet-openwrt-attach.
 ExecStart=/usr/local/sbin/droplet-openwrt-attach
 
 [Install]

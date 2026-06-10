@@ -72,10 +72,13 @@ Environment=BRIDGE_STATE_FILE=/var/lib/droplet-bridge/state.json
 # + ProtectSystem=strict make its default target /etc/default/droplet-openwrt-
 # attach unwritable (mktemp EROFS — the setup wizard's Home Wi-Fi save failed
 # with exactly that on the shipping box). Point the write at the bridge's own
-# StateDirectory instead; droplet-openwrt-attach.service layers this file
-# AFTER /etc/default/droplet-openwrt-attach (last wins), so a customer Wi-Fi
-# write overrides provisioning defaults without root. A factory reset wipes
-# the StateDirectory, reverting the AP to provisioning creds — intended.
+# StateDirectory instead; the attach script's customer_ap_creds block parses
+# ONLY DROPLET_AP_SSID/DROPLET_AP_PSK out of that file with hard validation
+# (NOT an EnvironmentFile — drop-in ordering would clobber it, and a
+# droplet-writable file must never inject arbitrary env into a root unit), so
+# a customer Wi-Fi write overrides provisioning defaults without root. A
+# factory reset wipes the StateDirectory AND /etc/droplet/ap-psk, so the AP
+# returns to the /etc/default SSID with a freshly generated per-box PSK.
 # The restart half of the write goes through polkit (50-droplet-device-
 # bridge.rules), not privilege escalation: NoNewPrivileges stays true.
 Environment=DROPLET_HOSTAPD_ENV_FILE=/var/lib/droplet-bridge/openwrt-attach.env

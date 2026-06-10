@@ -17,8 +17,9 @@ polkit.addRule(function (action, subject) {
   if (
     action.id === "org.freedesktop.systemd1.manage-units" &&
     action.lookup("unit") === "droplet-openwrt-attach.service" &&
-    (action.lookup("verb") === "restart" ||
-      action.lookup("verb") === "start") &&
+    // restart ONLY — droplet-set-hostapd.sh never starts/stops the unit, so
+    // the grant matches exactly what the write path needs (PR #551 review).
+    action.lookup("verb") === "restart" &&
     subject.user === "droplet"
   ) {
     return polkit.Result.YES;

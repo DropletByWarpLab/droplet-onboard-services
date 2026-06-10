@@ -472,6 +472,13 @@ if [ -d /var/lib/droplet-bridge ] || [ -f /etc/droplet/device-bridge.env ]; then
   # from the repo example on re-setup. We only remove the populated
   # copy, not the example template in the repo.
   sudo rm -f /etc/droplet/device-bridge.env 2>/dev/null || true
+  # The persisted per-box AP PSK (WARP-819). A customer Wi-Fi password set
+  # via the wizard gets persisted here too (resolve_ap_psk in
+  # droplet-openwrt-attach), so a factory reset must remove it — the next
+  # attach run then generates a FRESH per-box PSK, i.e. true factory state
+  # (PR #551 review). The wizard-written StateDirectory creds file is
+  # already covered by the /var/lib/droplet-bridge wipe above.
+  sudo rm -f /etc/droplet/ap-psk 2>/dev/null || true
   # Log files. These grow over time and can contain the current wifi
   # key's sha256 digest on "rotated" lines; nothing sensitive but
   # no reason to keep logs that pre-date the reset.
