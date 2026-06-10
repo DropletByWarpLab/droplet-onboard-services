@@ -71,19 +71,6 @@ export class ResetError extends Error {
 }
 
 /**
- * Shared secret the device-bridge requires on its mutating routes. Same env
- * precedence + per-call read as storage.ts / hostapd-bridge.service.ts so a
- * secret injected after boot (and the tests) see the current value.
- */
-function bridgeAuthToken(): string {
-  return (
-    process.env.BRIDGE_AUTH_TOKEN ||
-    process.env.SERVICE_TOKEN_DISPLAY ||
-    ""
-  ).trim();
-}
-
-/**
  * Prisma unique-constraint violation (P2002) — duck-typed rather than
  * `instanceof Prisma.PrismaClientKnownRequestError` so the unit tests' plain
  * thrown objects behave like the real client error.
@@ -212,6 +199,16 @@ export async function requestFactoryReset(
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
     );
   } catch (err) {
+    if (isUniqueViolation(err)) {
+      // The partial unique index "ResetJob_at_most_one_nonterminal" backs the
+      // in-flight guard at the DATABASE level: if a concurrent insert
+      // committed between our count and our create, the loser lands here —
+      // same truthful 409 as the explicit inFlight > 0 path above.
+      throw new ResetError(
+        "RESET_ALREADY_IN_PROGRESS",
+        "A factory reset is already in progress.",
+      );
+    }
     if (isSerializationConflict(err)) {
       // P2034 means the SERIALIZABLE snapshot collided with a concurrent
       // writer. If that writer was another reset transaction the inFlight
@@ -227,36 +224,6 @@ export async function requestFactoryReset(
     }
     throw err;
   }
-
-  // (3) Audit BEFORE the wipe. If the box is gone a second later, the intent is
-  // still recorded. Mirrors storage-safety's CommandAuditLog shape.
-  await writeResetAudit(prisma, { userId, targetName });
-
-  // (4) Persist the job in `requested` before dispatch so a crash mid-dispatch
-  // leaves an explicit, queryable row (never an IS-NULL guess). The partial
-  // unique index "ResetJob_at_most_one_nonterminal" backs the in-flight guard
-  // at the DATABASE level — two concurrent requests can both pass the count
-  // in (2), but only one insert wins; the loser's unique violation maps onto
-  // the same 409 path.
-  let job: ResetJob;
-  try {
-    job = await prisma.resetJob.create({
-      data: {
-        status: "requested",
-        requestedBy: userId ?? null,
-        targetName,
-      },
-    });
-  } catch (err) {
-    if (isUniqueViolation(err)) {
-      throw new ResetError(
-        "RESET_ALREADY_IN_PROGRESS",
-        "A factory reset is already in progress.",
-      );
-    }
-    throw err;
-  }
-
 
   // Fail closed: no bridge token → we cannot safely invoke a data-destroying
   // host action. Mark the job failed and surface BRIDGE_AUTH_UNCONFIGURED.
