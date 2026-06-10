@@ -844,8 +844,11 @@ describe("setup Storage step — adopt existing drives (WARP-662)", () => {
       resourceId: "sda",
     });
     confirmPoolCommandMock.mockRejectedValue(
+      // WARP-848 message shape: the managed teardown names the busy
+      // mountpoint. (The pre-848 "unmount of /dev/sda1 failed (busy?)"
+      // wording mapped identically.)
       new Error(
-        "droplet-storage-pool: refusing to adopt /dev/sda: unmount of /dev/sda1 failed (busy?) — close open files and retry",
+        "droplet-storage-pool: refusing to adopt /dev/sda: /dev/sda1 is busy at /mnt/droplet/data-1a2b3c4d (unmount failed) — close open files and retry",
       ),
     );
     render(<SetupPage />);
@@ -917,8 +920,9 @@ describe("groupPhysicalDisks (setup — whole-disk grouping)", () => {
 describe("friendlyAdoptError (WARP-662 — honest reclaim copy)", () => {
   it("renders a busy/in-use refusal as 'in use', NOT 'system disk'", () => {
     const msg = friendlyAdoptError(
+      // WARP-848 message shape: the managed teardown names the busy mountpoint.
       new Error(
-        "droplet-storage-pool: refusing to adopt /dev/sdb: unmount of /dev/sdb1 failed (busy?) — close open files and retry",
+        "droplet-storage-pool: refusing to adopt /dev/sdb: /dev/sdb1 is busy at /mnt/droplet/data-1a2b3c4d (unmount failed) — close open files and retry",
       ),
     );
     expect(msg).toMatch(/in use/i);
