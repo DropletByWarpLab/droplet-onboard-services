@@ -108,11 +108,12 @@ function translateCommissionError(err: unknown): {
   };
 }
 
-/** Map Matter command names to domain/service for safety tier classification. */
-function commandToDomainService(
-  category: string,
-  command: string,
-): { domain: string; service: string } {
+/**
+ * Map a device category to the safety-rule domain prefix. Both the command
+ * route (mint) and the confirm route derive entityIds through this, so the
+ * WARP-41 echo check compares like with like — e.g. "lock.12345" both times.
+ */
+function categoryToDomain(category: string): string {
   const domainMap: Record<string, string> = {
     light: "light",
     switch: "switch",
@@ -126,7 +127,15 @@ function commandToDomainService(
     vacuum: "vacuum",
     camera: "camera",
   };
-  const domain = domainMap[category] ?? category;
+  return domainMap[category] ?? category;
+}
+
+/** Map Matter command names to domain/service for safety tier classification. */
+function commandToDomainService(
+  category: string,
+  command: string,
+): { domain: string; service: string } {
+  const domain = categoryToDomain(category);
 
   const serviceMap: Record<string, string> = {
     turn_on: "turn_on",
@@ -392,9 +401,14 @@ export function createMatterRouter(prisma: PrismaClient): Router {
 
       const userId = (req as any).user?.id;
       // The nodeId in the URL determines the expected entityId. The safety-tier
-      // service now enforces the match centrally (WARP-41). "matter" domain is
-      // hardcoded because this router only mounts under /devices/matter.
-      const expectedEntityId = `matter.${req.params.nodeId}`;
+      // service enforces the match centrally (WARP-41). The domain prefix must
+      // be derived from the device category exactly like the command route's
+      // mint (e.g. "lock.12345") — a hardcoded "matter." prefix can never
+      // match a pending token and rejects every legitimate confirm.
+      const device = await getDevice(req.params.nodeId);
+      if (!device)
+        return res.status(404).json({ error: "Device not found" });
+      const expectedEntityId = `${categoryToDomain(device.category)}.${req.params.nodeId}`;
       const result = await confirmCommand(prisma, confirmationToken, userId, {
         service,
         entityId: expectedEntityId,
