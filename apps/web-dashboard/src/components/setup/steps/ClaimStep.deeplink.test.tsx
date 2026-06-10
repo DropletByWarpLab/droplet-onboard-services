@@ -53,13 +53,19 @@ describe("ClaimStep deep link", () => {
   it("ignores a junk ?c= param", async () => {
     window.history.replaceState(null, "", "/setup?c=%2e%2e%2f");
     render(<ClaimStep onComplete={vi.fn()} />);
-    await waitFor(() => expect(fetchApplianceContract).toHaveBeenCalled());
-    expect(codeInput().value).toBe("");
+    // The field only renders once the contract fetch resolves — find, don't
+    // get ("mock called" still precedes the applied state on slow runners).
+    const input = (await screen.findByPlaceholderText(
+      /DRPL/i,
+    )) as HTMLInputElement;
+    expect(input.value).toBe("");
   });
 
   it("renders the normal empty field without the param", async () => {
     render(<ClaimStep onComplete={vi.fn()} />);
-    await waitFor(() => expect(fetchApplianceContract).toHaveBeenCalled());
-    expect(codeInput().value).toBe("");
+    const input = (await screen.findByPlaceholderText(
+      /DRPL/i,
+    )) as HTMLInputElement;
+    expect(input.value).toBe("");
   });
 });
