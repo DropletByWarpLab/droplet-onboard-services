@@ -26,7 +26,7 @@ import {
   confirmCommand,
   getAuditLog,
 } from "../services/safety-tier.service.js";
-import { requireRole } from "../middleware/auth.js";
+import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 
 const logger = pino({ name: "matter-routes" });
 
@@ -229,8 +229,12 @@ export function createMatterRouter(prisma: PrismaClient): Router {
 
   // --- Commission a new device ---
   // WARP-171: per-route guard. owner + admin + family — household-tier
-  // operation; service principals (voice-io, mcp) excluded.
-  router.post("/matter/commission", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  // operation. WARP-339: the MCP principal is additionally admitted so
+  // the commission_device tool reaches this handler; other service
+  // principals (voice-io) stay excluded. Layered gates upstream:
+  // routes/llm.ts shows write tools to owner/admin chat users only, and
+  // the mcp-server re-checks canCallTool before any dispatch.
+  router.post("/matter/commission", requireRoleOrMcpService("owner", "admin", "family"), async (req, res, next) => {
     try {
       if (!isMatterInitialized()) {
         return res.status(503).json({ error: "Matter controller not started" });
@@ -280,10 +284,14 @@ export function createMatterRouter(prisma: PrismaClient): Router {
 
   // --- Send command (with safety tier evaluation) ---
   // WARP-171: per-route guard. owner + admin + family — same posture
-  // as /matter/commission.
+  // as /matter/commission. WARP-339: the MCP principal is admitted so
+  // the control_device tool reaches the safety-tier evaluator below
+  // instead of 403ing in front of it — `evaluateCommand` still
+  // classifies, rate-limits, audits, and mints a 202 for Tier-2
+  // (lock-like) commands on every call.
   router.post(
     "/matter/devices/:nodeId/command",
-    requireRole("owner", "admin", "family"),
+    requireRoleOrMcpService("owner", "admin", "family"),
     async (req, res, next) => {
     try {
       if (!isMatterInitialized()) {
@@ -362,7 +370,11 @@ export function createMatterRouter(prisma: PrismaClient): Router {
 
   // --- Confirm a Tier 2 command ---
   // WARP-171: per-route guard. owner + admin + family — confirming a
-  // staged command is the same trust tier as issuing one.
+  // staged command is the same trust tier as issuing one. WARP-339:
+  // deliberately NOT relaxed for the MCP principal — the Tier-2 "202
+  // only, never executes" invariant holds only if the principal that
+  // mints a token cannot also consume it. Human-only, like
+  // /network/command/confirm.
   router.post(
     "/matter/devices/:nodeId/confirm",
     requireRole("owner", "admin", "family"),
@@ -422,10 +434,11 @@ export function createMatterRouter(prisma: PrismaClient): Router {
   );
 
   // --- Decommission a device ---
-  // WARP-171: per-route guard. owner + admin + family.
+  // WARP-171: per-route guard. owner + admin + family. WARP-339: the
+  // MCP principal is admitted (same posture as /matter/commission).
   router.delete(
     "/matter/devices/:nodeId",
-    requireRole("owner", "admin", "family"),
+    requireRoleOrMcpService("owner", "admin", "family"),
     async (req, res, next) => {
     try {
       if (!isMatterInitialized()) {

@@ -43,19 +43,22 @@
  * Auth posture (layered)
  * ----------------------
  * The orchestrator's `/api/matter/*` WRITE routes ARE role-gated:
- * `requireRole("owner","admin","family")` on commission, command,
- * decommission (`apps/orchestrator/src/routes/matter.ts:233,286,368,428`).
- * The effective model is three layers:
+ * `requireRoleOrMcpService("owner","admin","family")` on commission,
+ * command, decommission (`apps/orchestrator/src/routes/matter.ts`) —
+ * since WARP-339 that guard additionally admits the `_service:mcp`
+ * principal (that exact id, NOT the coarse "service" role, so voice-io
+ * stays excluded). The effective model is four layers:
  *   1. `routes/llm.ts` narrows the LLM's tool list by the chat user's
  *      role (WRITE_TOOLS) before any dispatch;
  *   2. the mcp-server re-checks `canCallTool` at `tools/call` (RBAC + JWT);
- *   3. the orchestrator route enforces `requireRole` again — and the mcp
- *      hop presents the `service` principal (see the Auth note above).
- *      `requireRole("owner","admin","family")` does NOT include `service`,
- *      so every Matter WRITE call from the MCP/voice path returns 403 today.
- *      Matter write tools (commission, control-device, decommission) are
- *      therefore non-functional via MCP until this gap is resolved
- *      (tracked as WARP-339).
+ *   3. the orchestrator route admits owner/admin/family humans plus the
+ *      mcp principal — which then hits the safety-tier evaluator
+ *      (`evaluateCommand`): Tier-1 executes, Tier-2 (lock-like) mints a
+ *      202 confirmation and never executes;
+ *   4. the Tier-2 confirm route stays plain
+ *      `requireRole("owner","admin","family")` — human-only, like
+ *      /network/command/confirm — so the principal that mints a
+ *      confirmation token can never consume it.
  * (Earlier revisions of this comment claimed the routes were
  * unauthenticated — that is no longer true; corrected per TOOLS-06.)
  */
