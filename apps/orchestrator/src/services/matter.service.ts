@@ -20,7 +20,7 @@ import {
 import { NodeStates, type PairedNode } from "@project-chip/matter.js/device";
 import { GeneralCommissioning } from "@matter/main/clusters";
 import { ManualPairingCodeCodec, QrPairingCodeCodec } from "@matter/main/types";
-import type { CommissionableDevice } from "@matter/protocol";
+import { Ble, type CommissionableDevice } from "@matter/protocol";
 import { config } from "../config.js";
 import type {
   MatterCommissionedDevice,
@@ -121,6 +121,37 @@ export async function initMatterService(): Promise<void> {
 
 export function isMatterInitialized(): boolean {
   return _initialized;
+}
+
+// --- Capabilities ---
+
+export interface MatterCapabilities {
+  /**
+   * Whether BLE commissioning is available on this box. False means the
+   * box can only commission devices that are already reachable on the IP
+   * network — devices that require Bluetooth for first-time setup cannot
+   * be paired until WARP-850 lands.
+   */
+  bleCommissioning: boolean;
+}
+
+/**
+ * WARP-851: controller capability surface for the dashboard.
+ *
+ * Derivation mirrors matter.js exactly: @matter/node's
+ * NetworkServer.initialize() sets `state.ble = env.has(Ble)`, and
+ * CommissioningController.start() logs "BLE is not enabled on this
+ * platform" when that resolves false. A `Ble` implementation is
+ * registered in `Environment.default` only when a BLE transport (e.g.
+ * @matter/nodejs-ble) has been installed and wired in — we don't ship
+ * one, and the orchestrator container has no Bluetooth adapter, so this
+ * is false on every current deployment shape.
+ *
+ * Environment-derived, not controller-state-derived: answers correctly
+ * even before/without `initMatterService()`.
+ */
+export function getMatterCapabilities(): MatterCapabilities {
+  return { bleCommissioning: Environment.default.has(Ble) };
 }
 
 export async function shutdownMatterService(): Promise<void> {

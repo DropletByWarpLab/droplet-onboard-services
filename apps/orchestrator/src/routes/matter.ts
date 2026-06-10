@@ -20,6 +20,7 @@ import {
   subscribeStateChanges,
   subscribeConnectionChanges,
   isMatterInitialized,
+  getMatterCapabilities,
 } from "../services/matter.service.js";
 import {
   evaluateCommand,
@@ -234,6 +235,17 @@ export function createMatterRouter(prisma: PrismaClient): Router {
       unsubState();
       unsubConn();
     });
+  });
+
+  // --- Controller capabilities ---
+  // WARP-851: read-only surface for the dashboard so the wizard and
+  // /devices/add-matter can be honest about which commissioning paths
+  // work on this box (no BLE today — see WARP-850). Intentionally NOT
+  // gated on isMatterInitialized(): the capability is derived from the
+  // matter.js environment, not controller state, and the wizard needs
+  // the answer while the controller may still be booting.
+  router.get("/matter/capabilities", (_req, res) => {
+    res.json(getMatterCapabilities());
   });
 
   // --- Discover uncommissioned Matter devices ---
