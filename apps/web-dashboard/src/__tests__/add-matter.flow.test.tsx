@@ -40,10 +40,14 @@ describe("AddMatterDevicePage — three-state flow", () => {
     pushSpy.mockReset();
   });
 
-  it("renders the scan phase initially with the manual-entry input", () => {
+  it("renders the scan phase initially with the manual-entry input", async () => {
     render(<AddMatterDevicePage />);
     expect(screen.getByText(/add a smart device/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/enter the pairing code/i)).toBeInTheDocument();
+    // The scanner is lazy-loaded via next/dynamic (WARP-102), so the
+    // manual-entry input lands a tick after first render — findBy, not getBy.
+    expect(
+      await screen.findByLabelText(/enter the pairing code/i),
+    ).toBeInTheDocument();
   });
 
   it("submits a manually-entered code to commissionMatterDevice and shows success", async () => {
@@ -59,7 +63,7 @@ describe("AddMatterDevicePage — three-state flow", () => {
     );
     render(<AddMatterDevicePage />);
 
-    fireEvent.change(screen.getByLabelText(/enter the pairing code/i), {
+    fireEvent.change(await screen.findByLabelText(/enter the pairing code/i), {
       target: { value: "3497-0112-332" },
     });
     fireEvent.click(screen.getByRole("button", { name: /commission/i }));
@@ -84,7 +88,7 @@ describe("AddMatterDevicePage — three-state flow", () => {
     );
     render(<AddMatterDevicePage />);
 
-    fireEvent.change(screen.getByLabelText(/enter the pairing code/i), {
+    fireEvent.change(await screen.findByLabelText(/enter the pairing code/i), {
       target: { value: "00000000000" },
     });
     fireEvent.click(screen.getByRole("button", { name: /commission/i }));
@@ -100,7 +104,7 @@ describe("AddMatterDevicePage — three-state flow", () => {
   it("Go to devices routes to /devices after success", async () => {
     commissionSpy.mockResolvedValueOnce({ nodeId: "1" });
     render(<AddMatterDevicePage />);
-    fireEvent.change(screen.getByLabelText(/enter the pairing code/i), {
+    fireEvent.change(await screen.findByLabelText(/enter the pairing code/i), {
       target: { value: "11111111111" },
     });
     fireEvent.click(screen.getByRole("button", { name: /commission/i }));
@@ -112,14 +116,16 @@ describe("AddMatterDevicePage — three-state flow", () => {
   it("Add another goes back to the scan phase", async () => {
     commissionSpy.mockResolvedValueOnce({ nodeId: "1" });
     render(<AddMatterDevicePage />);
-    fireEvent.change(screen.getByLabelText(/enter the pairing code/i), {
+    fireEvent.change(await screen.findByLabelText(/enter the pairing code/i), {
       target: { value: "11111111111" },
     });
     fireEvent.click(screen.getByRole("button", { name: /commission/i }));
     await screen.findByText(/device added/i);
     fireEvent.click(screen.getByRole("button", { name: /add another/i }));
     // Back to scan: manual-entry input visible again
-    expect(screen.getByLabelText(/enter the pairing code/i)).toBeInTheDocument();
+    expect(
+      await screen.findByLabelText(/enter the pairing code/i),
+    ).toBeInTheDocument();
     expect(screen.queryByText(/device added/i)).not.toBeInTheDocument();
   });
 });
