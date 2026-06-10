@@ -15,6 +15,7 @@ import { createHealthRouter } from "./routes/health.js";
 import { createDevicesRouter } from "./routes/devices.js";
 import { createLlmRouter } from "./routes/llm.js";
 import { createMemoryRouter } from "./routes/memory.js";
+import { createSttRouter } from "./routes/stt.js";
 import { createFilesRouter } from "./routes/files.js";
 import { createFilesBrainRouter } from "./routes/files-brain.js";
 import { createFilesKnowledgeRouter } from "./routes/files-knowledge.js";
@@ -219,6 +220,9 @@ export function createApp(prisma: PrismaClient) {
   app.use("/api", createDevicesRouter());
   app.use("/api", createLlmRouter(prisma));
   app.use("/api", createMemoryRouter(prisma));
+  // WARP-844 — chat voice input (Wyoming STT proxy). 503s gracefully when
+  // the whisper sidecar isn't deployed (macOS dev / non-linux profile).
+  app.use("/api", createSttRouter());
   app.use("/api", createFilesRouter(prisma));
   app.use("/api", createFilesBrainRouter(prisma));
   app.use("/api", createFilesKnowledgeRouter(prisma));

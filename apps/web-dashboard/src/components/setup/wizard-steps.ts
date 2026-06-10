@@ -22,7 +22,8 @@ export type Step =
   | "account"
   | "org"
   | "twofactor"
-  | "internet"
+  | "wifi"
+  | "address"
   | "storage"
   | "discovery"
   | "cameras"
@@ -45,13 +46,24 @@ export type Step =
 // PR #384 — `StepShell` derives its aurora rail from this exact array (order +
 // membership), keyed into `RAIL_LABELS` for the plain-language label + icon,
 // so the rail can't drift from the state machine.
+//
+// Onboarding-Flow redesign — the single `internet` step is split into two
+// ordered steps, `wifi` (the local network the box broadcasts) and `address`
+// (the DuckDNS web address that powers remote access), so each maps to one
+// backend and one mental model (WIFI-ADDRESS-THEME-HANDOFF §1). Like
+// `twofactor`, both are CLIENT-ONLY steps: the orchestrator's Prisma
+// `SetupStep` enum has no `wifi`/`address` members, so the page persists both
+// as the existing `internet` SetupStep and resumes a persisted `internet` at
+// `wifi` (see `app/setup/page.tsx` resumeStepFrom + persistedStep). The enum
+// is deliberately NOT migrated for a presentation-only split.
 export const STEPS: Step[] = [
   "welcome",
   "claim",
   "account",
   "org",
   "twofactor",
-  "internet",
+  "wifi",
+  "address",
   "storage",
   "discovery",
   "cameras",
@@ -60,16 +72,3 @@ export const STEPS: Step[] = [
   "team",
   "done",
 ];
-
-/**
- * Steps that exist only in this client's state machine — no `SetupStep`
- * Prisma-enum value / orchestrator `SETUP_STEPS` entry (see the §1 note:
- * `twofactor` is deliberately client-only per PR #375). The resume pointer
- * (`PATCH /api/setup/state`) must never be sent one of these: the server
- * rejects it 400 INVALID_SETUP_STEP, and because the persist is
- * fire-and-forget the failure is silent — the stored pointer just goes one
- * step stale. The page skips persisting these; a refresh while ON a
- * client-only step resumes at the last persisted step before it (`org`),
- * which renders fine and continues forward.
- */
-export const CLIENT_ONLY_STEPS: ReadonlySet<Step> = new Set(["twofactor"]);

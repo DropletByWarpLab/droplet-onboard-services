@@ -107,18 +107,27 @@ async function advanceToDiscovery() {
   });
   // PR #380 — pass through the org step (account → org → …).
   await passOrgStep();
-  // PR #375 — TwoFactor step → skip (org → twofactor → internet).
+  // PR #375 — TwoFactor step → skip (org → twofactor → wifi).
   await act(async () => {
     fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
   });
-  // Account → Internet. The Internet step (WARP-174) sits between account
-  // and discovery — skip it so the polling-bounds tests can land on the
-  // discovery surface they exercise. Flush once for InternetStep's
-  // fetchDuckDnsStatus effect, then click the always-rendered skip link.
+  // Onboarding-Flow redesign — the single Internet step is now two (Wi-Fi then
+  // Address) between account and discovery. Skip both so the polling-bounds
+  // tests land on the discovery surface they exercise. Wi-Fi has no async mount
+  // load; the Address step's fetchDuckDnsStatus effect resolves before its skip.
   await act(async () => {
     await Promise.resolve();
     await Promise.resolve();
-    fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /skip — i'll do this later/i }),
+    );
+  });
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+    fireEvent.click(
+      screen.getByRole("button", { name: /skip — no remote access/i }),
+    );
   });
 }
 

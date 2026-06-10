@@ -160,6 +160,22 @@ export function ClaimStep({ onComplete }: { onComplete: () => void }) {
     void loadContract();
   }, [loadContract]);
 
+  // Scan-to-claim deep link (design handoff): the PyPortal claim screen's QR
+  // encodes `/setup?c=<CODE>`, so landing here from a scan prefills the field.
+  // Read once on mount from window.location (this is a client component; no
+  // useSearchParams so the page never needs a Suspense boundary for it).
+  // Normalized the same way the server's normalizeClaimCode() does — junk
+  // params degrade to the normal empty field. Prefill ONLY: never overwrite a
+  // typed value, never auto-submit (claiming stays a deliberate action under
+  // the WARP-631 rate-limit posture).
+  useEffect(() => {
+    const param = new URLSearchParams(window.location.search).get("c");
+    if (!param) return;
+    const scanned = param.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+    if (!scanned) return;
+    setCode((prev) => prev || scanned);
+  }, []);
+
   const handleClaim = useCallback(async () => {
     // While the rate-limit countdown is running the controls are disabled, but
     // guard here too so a stray Enter/programmatic call can't fire mid-lockout.

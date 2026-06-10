@@ -39,7 +39,11 @@ vi.mock("../services/jwt.service.js", () => ({
   REFRESH_TOKEN_TTL_SECONDS: 60 * 60 * 24 * 30,
 }));
 
-import { authMiddleware, _setAuthPrismaForTests } from "./auth.js";
+import {
+  authMiddleware,
+  requirePasswordChangeGate,
+  _setAuthPrismaForTests,
+} from "./auth.js";
 
 function mockReq(token: string): Request {
   return {
@@ -173,5 +177,70 @@ describe("authMiddleware — Nextcloud OCS validation", () => {
     // validateNextcloudToken catches errors and returns null, so the
     // middleware should 401, not 500. Confirm this is still the contract.
     expect((res.status as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(401);
+  });
+});
+
+describe("requirePasswordChangeGate — allowed-path matching", () => {
+  // A must-change user must always be able to REACH the remediation endpoint.
+  // The allow-list is exact-match, so a trailing slash on the path used to slip
+  // past it and 403 the user out of the very endpoint that clears the flag.
+  function gateReq(path: string): Request {
+    return {
+      user: { id: "u-1", role: "owner" },
+      path,
+    } as unknown as Request;
+  }
+
+  // findUnique resolves AFTER the allow-path short-circuit; if the gate reaches
+  // it for an allowed path, mustChangePassword:true would (wrongly) 403.
+  const prisma = {
+    user: {
+      findUnique: vi.fn().mockResolvedValue({ mustChangePassword: true }),
+    },
+  } as unknown as Parameters<typeof requirePasswordChangeGate>[0];
+
+  beforeEach(() => {
+    (prisma.user.findUnique as ReturnType<typeof vi.fn>).mockClear();
+  });
+
+  it("allows the change-password endpoint WITH a trailing slash", async () => {
+    const gate = requirePasswordChangeGate(prisma);
+    const req = gateReq("/api/auth/change-password/");
+    const res = mockRes();
+    const next = vi.fn() as unknown as NextFunction;
+
+    gate(req, res, next);
+    await new Promise((r) => setImmediate(r));
+
+    expect(next).toHaveBeenCalledTimes(1);
+    expect((res.status as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    // The allow-path short-circuit fires before any DB read.
+    expect(prisma.user.findUnique as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+  });
+
+  it("allows the change-password endpoint without a trailing slash", async () => {
+    const gate = requirePasswordChangeGate(prisma);
+    const req = gateReq("/api/auth/change-password");
+    const res = mockRes();
+    const next = vi.fn() as unknown as NextFunction;
+
+    gate(req, res, next);
+    await new Promise((r) => setImmediate(r));
+
+    expect(next).toHaveBeenCalledTimes(1);
+    expect((res.status as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+  });
+
+  it("still 403s a must-change user on a protected (non-allowed) path", async () => {
+    const gate = requirePasswordChangeGate(prisma);
+    const req = gateReq("/api/llm/models");
+    const res = mockRes();
+    const next = vi.fn() as unknown as NextFunction;
+
+    gate(req, res, next);
+    await new Promise((r) => setImmediate(r));
+
+    expect((res.status as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(403);
+    expect(next).not.toHaveBeenCalled();
   });
 });

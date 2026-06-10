@@ -58,6 +58,46 @@ describe("useConversationList", () => {
     expect(listConversationsMock).toHaveBeenNthCalledWith(2, { limit: 30, offset: 30 });
   });
 
+  it("setSearch refetches page one with q and resets pagination", async () => {
+    listConversationsMock.mockResolvedValueOnce(
+      Array.from({ length: 30 }, (_, i) => row(`a${i}`)),
+    );
+    const { result } = renderHook(() => useConversationList());
+    await waitFor(() => expect(result.current.flat.length).toBe(30));
+
+    listConversationsMock.mockResolvedValueOnce([row("hit")]);
+    act(() => {
+      result.current.setSearch("frigate");
+    });
+    await waitFor(() =>
+      expect(result.current.flat.map((c) => c.id)).toEqual(["hit"]),
+    );
+    expect(listConversationsMock).toHaveBeenLastCalledWith({
+      limit: 30,
+      offset: 0,
+      q: "frigate",
+    });
+    expect(result.current.hasMore).toBe(false);
+
+    // loadMore (when a search page fills up) carries the same q.
+    listConversationsMock.mockResolvedValueOnce(
+      Array.from({ length: 30 }, (_, i) => row(`s${i}`)),
+    );
+    act(() => {
+      result.current.setSearch("ports");
+    });
+    await waitFor(() => expect(result.current.flat.length).toBe(30));
+    listConversationsMock.mockResolvedValueOnce([]);
+    await act(async () => {
+      await result.current.loadMore();
+    });
+    expect(listConversationsMock).toHaveBeenLastCalledWith({
+      limit: 30,
+      offset: 30,
+      q: "ports",
+    });
+  });
+
   it("optimisticInsert prepends a new row", async () => {
     listConversationsMock.mockResolvedValue([row("a", 1)]);
     const { result } = renderHook(() => useConversationList());

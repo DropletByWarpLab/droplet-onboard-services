@@ -571,6 +571,20 @@ describe("storage routes — device-bridge URL (WARP-660)", () => {
     expect(url).toBe("http://host.docker.internal:9090/drives/changed");
   });
 
+  it("sends the bridge auth token on the rescan proxy (this PR gates /drives/changed — a bare POST 401s and rescan dies as 502)", async () => {
+    vi.stubEnv("BRIDGE_AUTH_TOKEN", "secret-token");
+    const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({ ok: true }) }));
+    vi.stubGlobal("fetch", fetchMock);
+    const app = buildApp(createPrismaMock());
+    const res = await request(app).post("/api/storage/drives/rescan");
+    expect(res.status).toBe(200);
+    const init = (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1];
+    expect(
+      (init.headers as Record<string, string>)["X-Droplet-Auth"],
+    ).toBe("secret-token");
+    vi.unstubAllEnvs();
+  });
+
   it("targets host.docker.internal for the eject path too", async () => {
     vi.stubEnv("BRIDGE_AUTH_TOKEN", "secret-token");
     const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({ ok: true }) }));

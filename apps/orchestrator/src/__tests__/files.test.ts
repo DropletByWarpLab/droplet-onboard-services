@@ -23,6 +23,9 @@ vi.mock("../config.js", () => ({
     MAX_UPLOAD_SIZE_MB: 10,
     NEXTCLOUD_URL: "http://nextcloud.test",
     AUTH_ENABLED: false,
+    // camera-retention-purge.service.ts derefs this at module scope;
+    // the real config defaults it, so the mock must carry it too.
+    FRIGATE_URL: "http://frigate:5000",
   },
 }));
 

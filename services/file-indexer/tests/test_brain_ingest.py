@@ -224,25 +224,25 @@ def test_synthetic_nc_file_id_is_deterministic():
 def test_handle_uploaded_image_only_is_ready_not_failed(
     fake_io, tmp_path, monkeypatch
 ):
-    """WARP-305: image-only attachments (PNG / JPEG / HEIC) have no text
-    to extract. The previous behavior published status='failed' with
-    reason='empty_extraction', which surfaced as "Something went wrong on
-    this turn" in the chat surface. The fix: skip text extraction entirely
-    for image MIME types, mark the row indexed with warning 'image_only',
-    and publish status='ready' so the chip shows ✓ instead of ⚠.
+    """WARP-305 → WARP-844: a photo with no OCR-able text must land as
+    ✓ Ready with the `image_only` warning (NOT ⚠ Failed). Since WARP-844
+    the handler tries OCR first (screenshots are worth indexing) and only
+    falls back to this outcome when the extractor finds nothing — here the
+    stubbed dispatch returns None, the "OCR backend unavailable /
+    nothing extractable" case.
     """
     import brain_ingest
 
-    # Drop a fake "image" file at the expected path. The handler doesn't
-    # actually read the bytes when the MIME is image/* — it just records
-    # the manifest and marks the row ready.
+    # Drop a fake "image" file at the expected path. The stubbed dispatch
+    # below answers None, so the handler records the manifest and marks
+    # the row ready without touching the bytes.
     item_dir = tmp_path / "alice" / "item-img"
     item_dir.mkdir(parents=True, exist_ok=True)
     fake_image = item_dir / "original.png"
     fake_image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
 
-    # Track whether the extractor / embedder ran — they MUST NOT for
-    # image-only files.
+    # WARP-844: OCR IS attempted now — record the call and answer None
+    # (no text found / backend unavailable).
     dispatch_calls: list[tuple] = []
     monkeypatch.setattr(
         brain_ingest,
@@ -262,9 +262,9 @@ def test_handle_uploaded_image_only_is_ready_not_failed(
         }
     )
 
-    # No text extraction attempted.
-    assert dispatch_calls == []
-    # No chunks upserted.
+    # OCR was attempted (WARP-844) but produced nothing…
+    assert len(dispatch_calls) == 1
+    # …so no chunks were upserted.
     assert fake_io["upserts"] == []
     # Row IS marked indexed with the image_only warning so the chip stops
     # spinning. WARP-330: status='ready' is now persisted explicitly so
@@ -292,6 +292,61 @@ def test_handle_uploaded_image_only_is_ready_not_failed(
     assert parsed["mimeType"] == "image/png"
     assert parsed["chunks"] == 0
     assert "image_only" in parsed["extractorWarnings"]
+
+
+def test_handle_uploaded_image_with_text_is_ocr_indexed(
+    fake_io, tmp_path, monkeypatch
+):
+    """WARP-844: a screenshot / scanned document carries OCR-able text —
+    it goes through the NORMAL pipeline (chunks upserted, embedded,
+    status='ready' with no image_only warning), exactly like a text file.
+    """
+    import brain_ingest
+    from extractors.spans import Span
+    from anchor_schema import NoneAnchor
+
+    item_dir = tmp_path / "alice" / "item-shot"
+    item_dir.mkdir(parents=True, exist_ok=True)
+    fake_image = item_dir / "original.png"
+    fake_image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+
+    ocr_text = "Quarterly revenue rose twelve percent compared to last year."
+    monkeypatch.setattr(
+        brain_ingest,
+        "dispatch",
+        lambda *_a, **_k: {
+            "spans": [
+                Span(text=ocr_text, anchor=NoneAnchor(), section_path=["original.png"])
+            ],
+            "warnings": [],
+        },
+    )
+    monkeypatch.setattr(brain_ingest, "_fetch_item_status", lambda _i: None)
+
+    brain_ingest.handle_brain_uploaded(
+        {
+            "itemId": "item-shot",
+            "userId": "alice",
+            "path": str(fake_image),
+            "mimeType": "image/png",
+            "filename": "screenshot.png",
+        }
+    )
+
+    # Chunks landed with the brain tagging — the screenshot is searchable.
+    assert len(fake_io["upserts"]) >= 1
+    for u in fake_io["upserts"]:
+        assert u["source"] == "brain"
+        assert u["brain_item_id"] == "item-shot"
+    # Embedded like any document.
+    assert fake_io["embed_calls"], "expected the OCR text to be embedded"
+    # Ready WITHOUT the image_only warning — this is a real indexed doc.
+    assert any(
+        m["item_id"] == "item-shot"
+        and m["status"] == "ready"
+        and "image_only" not in m["warnings"]
+        for m in fake_io["marked"]
+    ), fake_io["marked"]
 
 
 def test_handle_uploaded_skips_when_status_is_queued_for_transcription(

@@ -152,6 +152,13 @@ _ROTATION_LOCK = threading.Lock()
 # _ROTATION_LOCK does for rotation: non-blocking acquire, 409 on contention.
 _HOSTAPD_LOCK = threading.Lock()
 
+# In-process lock for the factory reset (WARP-825). The HTTP server is threaded,
+# so two concurrent POST /system/factory-reset would each _spawn_detached the
+# wipe script — two `docker compose down -v` runs racing the same teardown.
+# Serialize the spawn decision exactly like _HOSTAPD_LOCK: non-blocking acquire,
+# 409 on contention.
+_FACTORY_RESET_LOCK = threading.Lock()
+
 
 # ---------------------------------------------------------------------------
 # Shell helper
@@ -608,7 +615,8 @@ def wifi_snapshot():
 # ---------------------------------------------------------------------------
 # Pure-Python QR encoder.
 # Handles the subset we actually need: WIFI payload strings, byte mode,
-# error-correction level L, auto version bump. No external deps.
+# error-correction level Q (L fallback for oversized pathological payloads),
+# auto version bump. No external deps.
 
 def _wifi_payload(ssid, key, encryption):
     """Format a WiFi:...; QR payload per the de-facto standard."""
@@ -628,20 +636,47 @@ def _wifi_payload(ssid, key, encryption):
                                            esc(key) if sec != "nopass" else "")
 
 
+# Hard cap on the QR matrix we ship to the panel — mirrors ClaimRequest's
+# wifi_qr_matrix max_length=64 (main.py): a v-large QR would OOM the
+# PyPortal. At Q only a pathological fully-escaped SSID+PSK (~200+ chars)
+# exceeds it; _qr_encode degrades those to L, which always fits.
+_QR_MAX_ROWS = 64
+
+
 def _qr_encode(text):
     """Generate a QR code bit-matrix for `text` using the `qrcode` lib
-    (apt: python3-qrcode). Returns (matrix, version)."""
+    (apt: python3-qrcode). Returns (matrix, version).
+
+    ERROR_CORRECT_Q (~25% codeword recovery), NOT L: the PyPortal's QR card
+    (_v3_qr_card in pyportal/code.py) paints a 32x32px white droplet-mark
+    pad dead-centre over the symbol, and at L the pad corrupts more
+    codewords than Reed-Solomon can recover — the rendered card fails to
+    decode for every typical Wi-Fi payload (verified empirically; same
+    finding as the scan-to-claim QR in the PR #550 review). Typical WPA
+    payloads land at v4 (33x33) at Q, well inside the firmware's 64-row
+    tolerance. A payload too big for 64 rows at Q degrades to L — the same
+    matrix the encoder always shipped for those — rather than risking the
+    panel heap.
+    """
     import qrcode
-    from qrcode.constants import ERROR_CORRECT_L
-    q = qrcode.QRCode(
-        error_correction=ERROR_CORRECT_L,
-        border=0,       # we pad on the display side
-        box_size=1,
-    )
-    q.add_data(text)
-    q.make(fit=True)
-    matrix = [[1 if cell else 0 for cell in row] for row in q.get_matrix()]
-    return matrix, q.version
+    from qrcode.constants import ERROR_CORRECT_L, ERROR_CORRECT_Q
+
+    def _encode(level):
+        q = qrcode.QRCode(
+            error_correction=level,
+            border=0,       # we pad on the display side
+            box_size=1,
+        )
+        q.add_data(text)
+        q.make(fit=True)
+        matrix = [[1 if cell else 0 for cell in row]
+                  for row in q.get_matrix()]
+        return matrix, q.version
+
+    matrix, version = _encode(ERROR_CORRECT_Q)
+    if len(matrix) > _QR_MAX_ROWS:
+        matrix, version = _encode(ERROR_CORRECT_L)
+    return matrix, version
 
 
 def qr_snapshot():
@@ -1884,18 +1919,36 @@ def run_factory_reset(params):
         "jobId": job_id,
         "targetName": (params or {}).get("targetName", ""),
     })
+    # Serialize the spawn decision (mirrors run_set_hostapd's _HOSTAPD_LOCK). Two
+    # threads racing here would each launch the wipe — two `docker compose down
+    # -v` runs racing the same teardown. Non-blocking: a second in-flight reset is
+    # rejected (the handler maps code == "busy" to 409) rather than queued.
+    if not _FACTORY_RESET_LOCK.acquire(blocking=False):
+        logger.warning("factory reset rejected: a reset is already in progress")
+        return False, "busy"
+    released = False
     try:
-        # Pass the job context as a single JSON arg, same convention as the
-        # pool / hostapd host scripts.
-        ok, err = _spawn_detached([RESET_SCRIPT, payload])
-    except Exception as e:                                          # noqa: BLE001
-        logger.warning("factory reset failed to spawn host script: %s", e)
-        return False, "host script unavailable"
-    if not ok:
-        logger.warning("factory reset host script not launched: %s", err)
-        return False, (err or "host script refused")
-    logger.warning("factory reset dispatched to host script (job=%s)", job_id)
-    return True, {"dispatched": True, "jobId": job_id}
+        try:
+            # Pass the job context as a single JSON arg, same convention as the
+            # pool / hostapd host scripts.
+            ok, err = _spawn_detached([RESET_SCRIPT, payload])
+        except Exception as e:                                      # noqa: BLE001
+            logger.warning("factory reset failed to spawn host script: %s", e)
+            return False, "host script unavailable"
+        if not ok:
+            logger.warning("factory reset host script not launched: %s", err)
+            return False, (err or "host script refused")
+        # Launched. Do NOT release the lock: the wipe is now tearing the box
+        # (and this process) down, and a release here would re-open the
+        # double-fire window for a request that lands before teardown completes.
+        # On the failure paths above we DO release (via finally) so a retry after
+        # a failed launch can proceed.
+        released = True
+        logger.warning("factory reset dispatched to host script (job=%s)", job_id)
+        return True, {"dispatched": True, "jobId": job_id}
+    finally:
+        if not released:
+            _FACTORY_RESET_LOCK.release()
 
 
 # ---------------------------------------------------------------------------
@@ -1940,7 +1993,11 @@ def collect_logs(window_hours, service):
     # Pass the service filter only when it is a sane, shell-safe token. The
     # orchestrator already validates it, but the bridge is defense-in-depth: an
     # empty/garbage value becomes "" (the script treats that as "all services").
+    # A leading dash is rejected explicitly: `isalnum()` after stripping "-"/"_"
+    # still accepts a flag-shaped value like "--orchestrator", which would reach
+    # droplet-collect-logs.sh as an option argument rather than a service name.
     svc = service if (isinstance(service, str)
+                      and not service.startswith("-")
                       and service.replace("-", "").replace("_", "").isalnum()
                       and 0 < len(service) <= 64) else ""
     cmd = [LOGS_SCRIPT, str(hours), svc]
@@ -2104,6 +2161,12 @@ class Handler(BaseHTTPRequestHandler):
             # Invalidate the cache — the automount script calls this
             # whenever a drive is added or removed. Body is ignored;
             # we just want to force the next GET /drives to re-read.
+            # Auth-gated like the other mutating routes (WARP-659 left this one
+            # open): with BRIDGE_BIND=0.0.0.0 the bridge is LAN-reachable, so an
+            # unauthenticated caller could force cache churn. The automount
+            # script presents the shared token (X-Droplet-Auth).
+            if not self._authed():
+                return self._send(401, {"ok": False, "error": "unauthorized"})
             drives_snapshot(invalidate=True)
             return self._send(200, {"ok": True})
         if self.path.startswith("/drives/") and self.path.endswith("/eject"):
@@ -2212,8 +2275,16 @@ class Handler(BaseHTTPRequestHandler):
                 "targetName": j.get("targetName", ""),
             })
             if not ok:
-                # 502 — the host script couldn't be launched (missing / not
-                # executable). The box is untouched.
+                # 409 Conflict ONLY for true lock contention (another reset
+                # already in flight) — same non-blocking-acquire posture as
+                # /openwrt/wifi/hostapd. Keyed on the machine `info == "busy"`,
+                # never a substring of a human message. Everything else (host
+                # script missing / not executable) is 502; the box is untouched.
+                if info == "busy":
+                    return self._send(409, {
+                        "ok": False,
+                        "error": "reset already in progress",
+                    })
                 return self._send(502, {"ok": False, "error": info})
             return self._send(202, {"ok": True,
                                     **(info if isinstance(info, dict) else {"info": info})})
@@ -2258,6 +2329,37 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"error": "bad json"})
             ssid = j.get("ssid", "")
             password = j.get("password", "")
+            # Validate the SSID before handing it to nmcli. With shell=False there
+            # is no shell injection, but nmcli parses positional args by its own
+            # grammar — an SSID like "--delete" would be read as an option, not a
+            # network name. Mirror the hostapd host-script gate: strip control
+            # characters, require 1–32 chars, and reject a leading dash.
+            if not isinstance(ssid, str):
+                ssid = ""
+            # Length check runs on the raw value (before stripping) so a 33-byte
+            # input that contains control chars isn't silently accepted after
+            # strip reduces it to 32 printable chars (802.11 limit is 32 bytes).
+            if not ssid or len(ssid) > 32:
+                return self._send(400, {
+                    "ok": False,
+                    "error": "invalid SSID (1-32 chars, no control characters, no leading dash)",
+                })
+            ssid = "".join(ch for ch in ssid if ord(ch) >= 32 and ord(ch) != 127)
+            if not ssid or ssid.startswith("-"):
+                return self._send(400, {
+                    "ok": False,
+                    "error": "invalid SSID (1-32 chars, no control characters, no leading dash)",
+                })
+            if not isinstance(password, str):
+                password = ""
+            # Mirror the hostapd host-script PSK gate: WPA2 PSK must be 8–63
+            # chars (IEEE 802.11 §H.4.1). An empty string means open-network
+            # (nmcli connect without a password keyword), which is allowed.
+            if password and (len(password) < 8 or len(password) > 63):
+                return self._send(400, {
+                    "ok": False,
+                    "error": "invalid password (8-63 chars for WPA2 PSK)",
+                })
             rc, out, err = _run(
                 ["nmcli", "device", "wifi", "connect", ssid] +
                 (["password", password] if password else []),

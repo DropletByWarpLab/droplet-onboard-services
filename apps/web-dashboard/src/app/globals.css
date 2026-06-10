@@ -596,6 +596,39 @@
   color: var(--color-accent);
   text-decoration: underline;
 }
+/* Syntax highlighting (rehype-highlight → hljs classes). Colors map to
+   the design tokens so both themes stay coherent — no stock hljs
+   stylesheet import. Compact palette: keywords blue, strings green,
+   numbers/types orange, functions/headings accent, comments muted. */
+.chat-markdown .hljs-keyword,
+.chat-markdown .hljs-selector-tag,
+.chat-markdown .hljs-meta {
+  color: var(--color-system-blue);
+}
+.chat-markdown .hljs-string,
+.chat-markdown .hljs-regexp,
+.chat-markdown .hljs-addition {
+  color: var(--color-system-green);
+}
+.chat-markdown .hljs-number,
+.chat-markdown .hljs-literal,
+.chat-markdown .hljs-type,
+.chat-markdown .hljs-built_in,
+.chat-markdown .hljs-deletion {
+  color: var(--color-system-orange);
+}
+.chat-markdown .hljs-title,
+.chat-markdown .hljs-section,
+.chat-markdown .hljs-name,
+.chat-markdown .hljs-attr,
+.chat-markdown .hljs-attribute {
+  color: var(--color-accent);
+}
+.chat-markdown .hljs-comment,
+.chat-markdown .hljs-quote {
+  color: var(--color-label-tertiary);
+  font-style: italic;
+}
 
 /* ============================================================
    Reduced Motion

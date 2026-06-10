@@ -214,6 +214,9 @@ describe("GET /api/orchestrator/health", () => {
     stopHealthMonitor();
     const prisma = {
       $queryRaw: vi.fn().mockResolvedValue([]),
+      // BUG-11: requirePasswordChangeGate reads prisma.user.findUnique on
+      // every request; null = no directory row = fail-open.
+      user: { findUnique: vi.fn().mockResolvedValue(null) },
     } as unknown as PrismaClient;
     initDeviceService(prisma);
     app = createApp(prisma);

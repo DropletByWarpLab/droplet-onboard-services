@@ -18,6 +18,8 @@ import { ChatInput, type ChatInputHandle } from "@/components/ChatInput";
 import { ModelSelector } from "@/components/ModelSelector";
 import { SessionHeader } from "@/components/chat/SessionHeader";
 import { ChatHistoryPanel, type ChatHistoryPanelHandle } from "@/components/chat/ChatHistoryPanel";
+import { ContextPinsPopover } from "@/components/chat/ContextPinsPopover";
+import { MemoryPanel } from "@/components/chat/MemoryPanel";
 import { Dialog } from "@/components/Dialog";
 import { useChat } from "@/lib/hooks/useChat";
 import { useModels } from "@/lib/hooks/useModels";
@@ -50,6 +52,11 @@ export default function ChatPage() {
   // page when `user` is set, but passing it explicitly keeps the gate
   // correct if that ever changes and mirrors NotificationToaster.
   const { user } = useAuth();
+  // Model persisted on a just-loaded conversation, pending application to
+  // the picker. Held in state (not applied inline) because the models list
+  // may still be fetching on a cold deep-link — the effect below applies
+  // it once both sides are ready, then clears.
+  const [pendingRestoredModel, setPendingRestoredModel] = useState<string | null>(null);
   const {
     messages,
     isStreaming,
@@ -57,6 +64,8 @@ export default function ChatPage() {
     stop,
     retryMessage,
     regenerate,
+    editMessage,
+    rateMessage,
     approveScene,
     clearMessages,
     attachments,
@@ -66,7 +75,16 @@ export default function ChatPage() {
     conversationId,
     loadConversation,
     messagesEpoch,
-  } = useChat({ chatId, historyHandleRef, authReady: Boolean(user) });
+  } = useChat({
+    chatId,
+    historyHandleRef,
+    authReady: Boolean(user),
+    onConversationLoaded: ({ model, systemPrompt: persistedPrompt }) => {
+      if (model) setPendingRestoredModel(model);
+      // WARP-844 — restore the persona this conversation is held under.
+      setSystemPrompt(persistedPrompt ?? "");
+    },
+  });
 
   // WARP-304 + WARP-331: keep the URL hash and the live conversationId in
   // sync, both directions. The history panel calls router.push("/chat?c=X")
@@ -102,6 +120,7 @@ export default function ChatPage() {
       // doesn't keep showing the messages of a now-orphaned id.
       clearMessages();
       clearAttachments();
+      setSystemPrompt("");
       setChatId(`chat-${Date.now()}`);
     }
     // Intentionally only depend on urlConversationId. Including
@@ -155,6 +174,19 @@ export default function ChatPage() {
       setSelectedModel(local?.id ?? models[0].id);
     }
   }, [models, selectedModel]);
+
+  // Restore the model a loaded conversation was held in — but only when
+  // that model is still available on the gateway (an old chat may name a
+  // model that's since been removed; keep the current selection then).
+  // One-shot per load: clear pending either way so a later manual model
+  // switch isn't overridden when the models list refetches.
+  useEffect(() => {
+    if (!pendingRestoredModel || models.length === 0) return;
+    if (models.some((m) => m.id === pendingRestoredModel)) {
+      setSelectedModel(pendingRestoredModel);
+    }
+    setPendingRestoredModel(null);
+  }, [pendingRestoredModel, models]);
 
   // If the home-page hero handed off a prompt, send it once a model is ready.
   //
@@ -260,6 +292,7 @@ export default function ChatPage() {
   const handleNewChat = useCallback(() => {
     clearMessages();
     clearAttachments();
+    setSystemPrompt("");
     setChatId(`chat-${Date.now()}`);
   }, [clearMessages, clearAttachments]);
 
@@ -330,6 +363,16 @@ export default function ChatPage() {
     [regenerate, selectedModel, systemPrompt],
   );
 
+  // WARP-844: edit & resend. Withheld while a stream is in flight (the
+  // ChatMessage pencil is gated on the prop being present).
+  const handleEdit = useCallback(
+    (messageId: string, newContent: string) => {
+      if (!selectedModel) return;
+      void editMessage(messageId, newContent, selectedModel, systemPrompt || undefined);
+    },
+    [editMessage, selectedModel, systemPrompt],
+  );
+
   // Index of the last assistant message — the page passes
   // `isLastAssistant` to each ChatMessage so the Regenerate button
   // only surfaces on that one row.
@@ -382,6 +425,11 @@ export default function ChatPage() {
             <ModelSelector value={selectedModel} onChange={setSelectedModel} />
           </div>
           <div className="flex items-center gap-2">
+            {/* WARP-461: workspace-global memory — always available. */}
+            <MemoryPanel />
+            {/* WARP-460: pins are per-session — the popover appears once
+                the first turn has minted a conversationId. */}
+            {conversationId && <ContextPinsPopover sessionId={conversationId} />}
             <button
               onClick={() => setShowSystemPrompt(!showSystemPrompt)}
               className={`p-1.5 rounded-sm transition-colors ${
@@ -414,7 +462,7 @@ export default function ChatPage() {
         {/* WARP-205: per-chat brain memory export affordance.
             Hidden when no items are attached to this chat — the
             component itself returns null in that case. */}
-        <SessionHeader chatId={chatId} attachments={attachments} />
+        <SessionHeader chatId={conversationId ?? chatId} attachments={attachments} />
 
         {/* System prompt */}
         {showSystemPrompt && (
@@ -492,6 +540,8 @@ export default function ChatPage() {
               onQuote={handleQuote}
               onRegenerate={handleRegenerate}
               onApproveScene={approveScene}
+              onEdit={isStreaming ? undefined : handleEdit}
+              onFeedback={(id, fb) => void rateMessage(id, fb)}
             />
           ))}
         </div>

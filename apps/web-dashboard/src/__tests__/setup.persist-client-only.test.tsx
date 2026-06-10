@@ -10,9 +10,10 @@
  * the wizard advanced normally while the stored pointer stayed one step stale
  * ("org") — and nothing ever surfaced the rejection.
  *
- * Fix under test: the page skips persisting steps in `CLIENT_ONLY_STEPS`
- * (wizard-steps.ts) and the pointer catches up on the next persisted step
- * ("internet").
+ * Fix under test: the page maps every persisted step through `persistedStep`
+ * (app/setup/page.tsx) — `twofactor` maps to null (nothing sent) and the
+ * pointer catches up on the next persisted step (`wifi` persists as
+ * "internet").
  *
  * Proven RED first: with the unguarded `void patchSetupStep(next)`, completing
  * org fires `patchSetupStep("twofactor")` and the first assertion fails.
@@ -53,7 +54,8 @@ vi.mock("@/lib/api", async () => {
       reserved_host: "droplet.local/acme",
       next_step: "internet",
     })),
-    // Internet step (after the 2FA skip) renders on an unconfigured DuckDNS.
+    // Address step (post-redesign, after wifi) renders on an unconfigured
+    // DuckDNS; wifi itself fetches nothing on mount.
     fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
     setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
     fetchDrives: vi.fn(async () => ({ drives: [], count: 0 })),
