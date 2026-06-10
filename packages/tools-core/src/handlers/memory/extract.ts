@@ -95,6 +95,11 @@ async function handler(
       fact,
       evidenceChatId,
       addedBy: ctx.userId ?? "agent",
+      // WARP-845 — model-extracted facts default to the household
+      // (family) audience. Widening to guest or narrowing to
+      // admin/owner is a human decision made in the Memory panel, not
+      // something the model controls.
+      audience: "family",
     },
   });
 

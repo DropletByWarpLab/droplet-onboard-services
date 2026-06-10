@@ -124,6 +124,9 @@ describe("memory_extract_fact", () => {
         fact: "Recap under 200 words",
         evidenceChatId: "session-uuid",
         addedBy: "alice",
+        // WARP-845 — model-extracted facts default to the household
+        // audience; widening/narrowing is a human Memory-panel action.
+        audience: "family",
       },
     });
     expect(res.ok).toBe(true);

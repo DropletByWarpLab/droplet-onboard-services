@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Plus, Search, X } from "lucide-react";
+import { ChevronRight, Folder, FolderPlus, Plus, Search, Trash2, X } from "lucide-react";
 import { Dialog } from "@/components/Dialog";
 import { useToast } from "@/components/Toast";
 import { useConversationList } from "@/lib/hooks/useConversationList";
@@ -9,6 +9,13 @@ import { translateError } from "@/lib/friendly-errors";
 import type { ConversationSummary } from "@/lib/api";
 import { ChatHistoryRow } from "./ChatHistoryRow";
 import { exportConversationMarkdown } from "@/lib/export-conversation";
+import {
+  createChatProject,
+  deleteChatProject,
+  listChatProjects,
+  type ChatProject,
+} from "@/lib/api";
+import { groupConversationsByDate } from "@/lib/group-conversations-by-date";
 
 export interface ChatHistoryPanelHandle {
   optimisticInsert: (item: ConversationSummary) => void;
@@ -19,6 +26,8 @@ export interface ChatHistoryPanelProps {
   activeConversationId: string | null;
   onSelect: (id: string) => void;
   onNewChat: () => void;
+  /** WARP-845 — start a new chat filed under (and seeded by) a project. */
+  onNewChatInProject?: (project: ChatProject) => void;
   /** When provided, the panel writes its imperative handle here so the
    *  parent (e.g. useChat) can drive optimistic insert + turn-completed. */
   handleRef?: React.MutableRefObject<ChatHistoryPanelHandle | null>;
@@ -28,10 +37,10 @@ export function ChatHistoryPanel({
   activeConversationId,
   onSelect,
   onNewChat,
+  onNewChatInProject,
   handleRef,
 }: ChatHistoryPanelProps) {
   const {
-    groups,
     flat,
     hasMore,
     isLoading,
@@ -42,6 +51,8 @@ export function ChatHistoryPanel({
     applyTurnCompleted,
     rename,
     remove,
+    moveToProject,
+    clearProjectLocally,
   } = useConversationList();
   // WARP-844 — raw input value, debounced into the hook's search needle
   // so we don't refetch on every keystroke.
@@ -52,6 +63,74 @@ export function ChatHistoryPanel({
   }, [searchDraft, setSearch]);
   const { toast } = useToast();
   const [pendingDelete, setPendingDelete] = useState<ConversationSummary | null>(null);
+  // ── WARP-845 — projects state ──
+  const [projects, setProjects] = useState<ChatProject[]>([]);
+  const [expandedProjects, setExpandedProjects] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [newProjectDraft, setNewProjectDraft] = useState<string | null>(null);
+  const [pendingMove, setPendingMove] = useState<ConversationSummary | null>(null);
+  const [pendingProjectDelete, setPendingProjectDelete] =
+    useState<ChatProject | null>(null);
+
+  const loadProjects = async () => {
+    try {
+      const { projects } = await listChatProjects();
+      setProjects(projects);
+    } catch {
+      // Project list failing must not take the history panel down —
+      // the chats themselves still render in the date groups.
+      setProjects([]);
+    }
+  };
+  useEffect(() => {
+    void loadProjects();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleCreateProject = async (name: string) => {
+    const trimmed = name.trim();
+    setNewProjectDraft(null);
+    if (!trimmed) return;
+    try {
+      const { project } = await createChatProject({ name: trimmed });
+      setProjects((prev) => [project, ...prev]);
+      setExpandedProjects((prev) => new Set(prev).add(project.id));
+    } catch (err) {
+      toast(translateError(err, "chat"));
+    }
+  };
+
+  const confirmProjectDelete = async () => {
+    const target = pendingProjectDelete;
+    setPendingProjectDelete(null);
+    if (!target) return;
+    try {
+      await deleteChatProject(target.id);
+      setProjects((prev) => prev.filter((p) => p.id !== target.id));
+      // Chats survive server-side (FK SET NULL) — mirror that locally so
+      // they reappear in the date groups without a refetch.
+      clearProjectLocally(target.id);
+    } catch (err) {
+      toast(translateError(err, "chat"));
+    }
+  };
+
+  const handleMove = async (projectId: string | null) => {
+    const target = pendingMove;
+    setPendingMove(null);
+    if (!target) return;
+    await moveToProject(target.id, projectId);
+  };
+
+  const toggleProject = (id: string) => {
+    setExpandedProjects((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const deleteHeadingId = "chat-history-delete-heading";
 
@@ -115,6 +194,15 @@ export function ChatHistoryPanel({
     }
   };
 
+  // WARP-845 — project-grouped vs ungrouped chats. Date groups only show
+  // chats without a project; project chats nest under their folder.
+  const ungroupedGroups = groupConversationsByDate(
+    flat.filter((c) => !c.projectId),
+    new Date(),
+  );
+  const chatsInProject = (projectId: string) =>
+    flat.filter((c) => c.projectId === projectId);
+
   return (
     <div className="flex flex-col h-full">
       <div className="px-3 pt-3 pb-2 border-b border-separator">
@@ -127,7 +215,18 @@ export function ChatHistoryPanel({
         >
           <Plus size={16} /> New chat
         </button>
-        <div className="relative mt-2">
+        <div className="relative mt-2 flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => setNewProjectDraft("")}
+            aria-label="New project"
+            title="New project"
+            className="flex-none h-8 w-8 rounded-md flex items-center justify-center
+              text-label-tertiary hover:text-label-primary hover:bg-surface-secondary transition-colors"
+          >
+            <FolderPlus size={15} aria-hidden="true" />
+          </button>
+          <div className="relative flex-1">
           <Search
             size={14}
             aria-hidden="true"
@@ -151,6 +250,7 @@ export function ChatHistoryPanel({
               <X size={12} aria-hidden="true" />
             </button>
           )}
+          </div>
         </div>
       </div>
 
@@ -165,7 +265,106 @@ export function ChatHistoryPanel({
           </div>
         ) : (
           <>
-            {groups.map((group) => (
+            {/* WARP-845 — projects (per-user folders) above the date groups. */}
+            {(projects.length > 0 || newProjectDraft !== null) && (
+              <div className="mb-3">
+                <div className="px-2 py-1 flex items-center justify-between">
+                  <span className="type-caption-2 text-label-tertiary uppercase tracking-wide">
+                    Projects
+                  </span>
+                </div>
+                <div className="space-y-0.5">
+                  {projects.map((project) => {
+                    const chats = chatsInProject(project.id);
+                    const expanded = expandedProjects.has(project.id);
+                    return (
+                      <div key={project.id}>
+                        <div className="group/project relative">
+                          <button
+                            type="button"
+                            onClick={() => toggleProject(project.id)}
+                            aria-expanded={expanded}
+                            className="w-full text-left px-2 h-8 rounded-md type-footnote
+                              flex items-center gap-1.5 text-label-secondary
+                              hover:bg-surface-secondary hover:text-label-primary transition-colors"
+                          >
+                            <ChevronRight
+                              size={12}
+                              aria-hidden="true"
+                              className={`flex-none transition-transform duration-150 ${expanded ? "rotate-90" : ""}`}
+                            />
+                            <Folder size={13} aria-hidden="true" className="flex-none text-label-tertiary" />
+                            <span className="truncate flex-1">{project.name}</span>
+                            <span className="flex-none type-caption-2 text-label-quaternary">
+                              {chats.length}
+                            </span>
+                          </button>
+                          <div className="absolute right-1 top-1/2 -translate-y-1/2 hidden group-hover/project:flex items-center gap-0.5 bg-surface-secondary rounded">
+                            {onNewChatInProject && (
+                              <button
+                                type="button"
+                                onClick={() => onNewChatInProject(project)}
+                                aria-label={`New chat in ${project.name}`}
+                                className="p-1 rounded text-label-tertiary hover:text-label-primary"
+                              >
+                                <Plus size={12} aria-hidden="true" />
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => setPendingProjectDelete(project)}
+                              aria-label={`Delete project ${project.name}`}
+                              className="p-1 rounded text-label-tertiary hover:text-system-red"
+                            >
+                              <Trash2 size={12} aria-hidden="true" />
+                            </button>
+                          </div>
+                        </div>
+                        {expanded && (
+                          <div className="ml-4 space-y-0.5">
+                            {chats.length === 0 ? (
+                              <div className="px-2 py-1 type-caption-1 text-label-quaternary">
+                                No chats yet
+                              </div>
+                            ) : (
+                              chats.map((item) => (
+                                <ChatHistoryRow
+                                  key={item.id}
+                                  id={item.id}
+                                  title={item.title}
+                                  active={item.id === activeConversationId}
+                                  onSelect={() => onSelect(item.id)}
+                                  onRenameSubmit={(title) => handleRename(item.id, title)}
+                                  onDeleteRequest={() => setPendingDelete(item)}
+                                  onExport={() => void handleExport(item.id)}
+                                  onMoveRequest={() => setPendingMove(item)}
+                                />
+                              ))
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                  {newProjectDraft !== null && (
+                    <input
+                      autoFocus
+                      value={newProjectDraft}
+                      onChange={(e) => setNewProjectDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") void handleCreateProject(newProjectDraft);
+                        else if (e.key === "Escape") setNewProjectDraft(null);
+                      }}
+                      onBlur={() => void handleCreateProject(newProjectDraft)}
+                      placeholder="Project name…"
+                      aria-label="New project name"
+                      className="dp-input type-footnote h-8 w-full"
+                    />
+                  )}
+                </div>
+              </div>
+            )}
+            {ungroupedGroups.map((group) => (
               <div key={group.label} className="mb-3">
                 <div className="px-2 py-1 type-caption-2 text-label-tertiary uppercase tracking-wide">
                   {group.label}
@@ -181,6 +380,7 @@ export function ChatHistoryPanel({
                       onRenameSubmit={(title) => handleRename(item.id, title)}
                       onDeleteRequest={() => setPendingDelete(item)}
                       onExport={() => void handleExport(item.id)}
+                      onMoveRequest={() => setPendingMove(item)}
                     />
                   ))}
                 </div>
@@ -220,6 +420,89 @@ export function ChatHistoryPanel({
                          hover:bg-system-red/90 inline-flex items-center gap-1.5 min-h-[36px]"
             >
               Delete
+            </button>
+          </div>
+        </div>
+      </Dialog>
+
+      {/* WARP-845 — move-to-project chooser. */}
+      <Dialog
+        open={pendingMove !== null}
+        onClose={() => setPendingMove(null)}
+        labelledBy="move-chat-heading"
+        maxWidth="sm"
+      >
+        <div className="p-5">
+          <h2 id="move-chat-heading" className="type-headline mb-2">
+            Move chat to…
+          </h2>
+          <div className="space-y-1">
+            {projects.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => void handleMove(p.id)}
+                className="w-full text-left px-3 py-2 rounded-md type-subheadline
+                  flex items-center gap-2 text-label-primary
+                  hover:bg-surface-secondary transition-colors"
+              >
+                <Folder size={14} aria-hidden="true" className="text-label-tertiary" />
+                {p.name}
+              </button>
+            ))}
+            {pendingMove?.projectId && (
+              <button
+                type="button"
+                onClick={() => void handleMove(null)}
+                className="w-full text-left px-3 py-2 rounded-md type-subheadline
+                  flex items-center gap-2 text-label-secondary
+                  hover:bg-surface-secondary transition-colors"
+              >
+                <X size={14} aria-hidden="true" />
+                Remove from project
+              </button>
+            )}
+            {projects.length === 0 && (
+              <p className="type-footnote text-label-tertiary px-1 py-2">
+                No projects yet — create one with the folder button above the
+                search field.
+              </p>
+            )}
+          </div>
+        </div>
+      </Dialog>
+
+      {/* WARP-845 — delete-project confirm. Chats survive (they fall back
+          to the date groups); only the folder + its default persona go. */}
+      <Dialog
+        open={pendingProjectDelete !== null}
+        onClose={() => setPendingProjectDelete(null)}
+        labelledBy="delete-project-heading"
+        maxWidth="sm"
+      >
+        <div className="p-5">
+          <h2 id="delete-project-heading" className="type-headline mb-2">
+            Delete this project?
+          </h2>
+          <p className="type-subheadline text-label-secondary mb-4">
+            &ldquo;{pendingProjectDelete?.name}&rdquo; will be removed. Its
+            chats are kept and move back to the main list.
+          </p>
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setPendingProjectDelete(null)}
+              className="type-subheadline text-accent hover:text-accent-hover px-3 py-2 transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => void confirmProjectDelete()}
+              className="type-subheadline px-4 py-1.5 rounded-md bg-system-red text-white
+                         hover:bg-system-red/90 inline-flex items-center gap-1.5 min-h-[36px]"
+            >
+              Delete project
             </button>
           </div>
         </div>

@@ -29,11 +29,21 @@ const CATEGORIES: MemoryFact["category"][] = [
   "Other",
 ];
 
+/** WARP-845 — distribution ladder, widest reach last. The label says who
+ *  RECEIVES the fact in their chats. */
+const AUDIENCES: { value: MemoryFact["audience"]; label: string }[] = [
+  { value: "owner", label: "Owners" },
+  { value: "admin", label: "Admins+" },
+  { value: "family", label: "Household" },
+  { value: "guest", label: "Everyone" },
+];
+
 export function MemoryPanel() {
   const [open, setOpen] = useState(false);
   const [facts, setFacts] = useState<MemoryFact[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [category, setCategory] = useState<MemoryFact["category"]>("Other");
+  const [audience, setAudience] = useState<MemoryFact["audience"]>("family");
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -79,6 +89,23 @@ export function MemoryPanel() {
     }
   };
 
+  const handleAudience = async (
+    fact: MemoryFact,
+    next: MemoryFact["audience"],
+  ) => {
+    setError(null);
+    try {
+      const { fact: updated } = await updateMemoryFact(fact.id, {
+        audience: next,
+      });
+      setFacts((prev) =>
+        (prev ?? []).map((f) => (f.id === fact.id ? updated : f)),
+      );
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
   const handleDelete = async (fact: MemoryFact) => {
     setError(null);
     try {
@@ -95,7 +122,11 @@ export function MemoryPanel() {
     setBusy(true);
     setError(null);
     try {
-      const { fact } = await createMemoryFact({ category, fact: trimmed });
+      const { fact } = await createMemoryFact({
+        category,
+        fact: trimmed,
+        audience,
+      });
       setFacts((prev) => [fact, ...(prev ?? [])]);
       setDraft("");
     } catch (err) {
@@ -160,6 +191,27 @@ export function MemoryPanel() {
                   >
                     {fact.fact}
                   </span>
+                  <label className="sr-only" htmlFor={`audience-${fact.id}`}>
+                    Audience
+                  </label>
+                  <select
+                    id={`audience-${fact.id}`}
+                    value={fact.audience}
+                    onChange={(e) =>
+                      void handleAudience(
+                        fact,
+                        e.target.value as MemoryFact["audience"],
+                      )
+                    }
+                    title="Who receives this fact"
+                    className="dp-input type-caption-2 h-6 w-24 flex-none"
+                  >
+                    {AUDIENCES.map((a) => (
+                      <option key={a.value} value={a.value}>
+                        {a.label}
+                      </option>
+                    ))}
+                  </select>
                   <button
                     type="button"
                     role="switch"
@@ -205,6 +257,24 @@ export function MemoryPanel() {
               {CATEGORIES.map((c) => (
                 <option key={c} value={c}>
                   {c}
+                </option>
+              ))}
+            </select>
+            <label className="sr-only" htmlFor="memory-audience">
+              Audience
+            </label>
+            <select
+              id="memory-audience"
+              value={audience}
+              onChange={(e) =>
+                setAudience(e.target.value as MemoryFact["audience"])
+              }
+              title="Who receives this fact"
+              className="dp-input type-footnote h-8 w-28 flex-none"
+            >
+              {AUDIENCES.map((a) => (
+                <option key={a.value} value={a.value}>
+                  {a.label}
                 </option>
               ))}
             </select>

@@ -31,6 +31,7 @@ import {
   type PendingComposerPayload,
   type ToolCatalogEntry,
 } from "@/lib/types";
+import type { ChatProject } from "@/lib/api";
 
 export default function ChatPage() {
   // WARP-331: history panel imperative handle + mobile drawer state.
@@ -57,6 +58,14 @@ export default function ChatPage() {
   // may still be fetching on a cold deep-link — the effect below applies
   // it once both sides are ready, then clears.
   const [pendingRestoredModel, setPendingRestoredModel] = useState<string | null>(null);
+  // WARP-845 — the project the NEXT new chat is filed under (set by the
+  // sidebar's per-project "+"). Ref-mirrored so the URL-clear reset
+  // effect can seed the project persona without dep churn.
+  const [activeProject, setActiveProject] = useState<ChatProject | null>(null);
+  const activeProjectRef = useRef<ChatProject | null>(null);
+  useEffect(() => {
+    activeProjectRef.current = activeProject;
+  }, [activeProject]);
   const {
     messages,
     isStreaming,
@@ -79,6 +88,7 @@ export default function ChatPage() {
     chatId,
     historyHandleRef,
     authReady: Boolean(user),
+    projectId: activeProject?.id ?? null,
     onConversationLoaded: ({ model, systemPrompt: persistedPrompt }) => {
       if (model) setPendingRestoredModel(model);
       // WARP-844 — restore the persona this conversation is held under.
@@ -106,6 +116,9 @@ export default function ChatPage() {
   useEffect(() => {
     if (urlConversationId) {
       if (urlConversationId === conversationId) return; // already loaded
+      // An existing conversation belongs to whatever project it's already
+      // in — the pending new-chat project no longer applies.
+      setActiveProject(null);
       void loadConversation(urlConversationId).then((ok) => {
         if (!ok && typeof window !== "undefined") {
           // Stale or revoked id — strip from URL so we don't keep
@@ -120,7 +133,9 @@ export default function ChatPage() {
       // doesn't keep showing the messages of a now-orphaned id.
       clearMessages();
       clearAttachments();
-      setSystemPrompt("");
+      // WARP-845: a project-scoped new chat seeds the project's persona;
+      // a plain new chat starts blank.
+      setSystemPrompt(activeProjectRef.current?.systemPrompt ?? "");
       setChatId(`chat-${Date.now()}`);
     }
     // Intentionally only depend on urlConversationId. Including
@@ -290,6 +305,7 @@ export default function ChatPage() {
   );
 
   const handleNewChat = useCallback(() => {
+    setActiveProject(null);
     clearMessages();
     clearAttachments();
     setSystemPrompt("");
@@ -306,8 +322,21 @@ export default function ChatPage() {
   );
   const handleNewChatFromPanel = useCallback(() => {
     setMobileHistoryOpen(false);
+    setActiveProject(null);
     router.push("/chat");
   }, [router]);
+
+  // WARP-845 — start a new chat filed under a project: seed the project's
+  // persona and send projectId on the first turn.
+  const handleNewChatInProject = useCallback(
+    (project: ChatProject) => {
+      setMobileHistoryOpen(false);
+      setActiveProject(project);
+      setSystemPrompt(project.systemPrompt ?? "");
+      router.push("/chat");
+    },
+    [router],
+  );
 
   const handleRetry = useCallback(
     (messageId: string) => {
@@ -400,6 +429,7 @@ export default function ChatPage() {
           activeConversationId={conversationId}
           onSelect={handleSelectConversation}
           onNewChat={handleNewChatFromPanel}
+          onNewChatInProject={handleNewChatInProject}
           handleRef={historyHandleRef}
         />
       </aside>
@@ -423,6 +453,15 @@ export default function ChatPage() {
               <PanelLeftOpen size={18} aria-hidden="true" />
             </button>
             <ModelSelector value={selectedModel} onChange={setSelectedModel} />
+            {activeProject && !conversationId && (
+              <span
+                className="hidden sm:inline-flex items-center gap-1 h-6 px-2 rounded-full
+                  type-caption-2 font-medium bg-accent-subtle text-accent truncate max-w-[160px]"
+                title={`New chat in ${activeProject.name}`}
+              >
+                {activeProject.name}
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-2">
             {/* WARP-461: workspace-global memory — always available. */}
@@ -652,6 +691,7 @@ export default function ChatPage() {
             activeConversationId={conversationId}
             onSelect={handleSelectConversation}
             onNewChat={handleNewChatFromPanel}
+          onNewChatInProject={handleNewChatInProject}
           />
         </div>
       </Dialog>

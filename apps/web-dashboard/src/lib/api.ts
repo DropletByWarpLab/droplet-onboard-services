@@ -2286,6 +2286,8 @@ export interface ConversationSummary {
   title: string | null;
   model: string | null;
   provider: string | null;
+  /** WARP-845 — owning project, or null when ungrouped. */
+  projectId?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -2487,6 +2489,9 @@ export interface MemoryFact {
   addedBy: string;
   evidenceChatId: string | null;
   active: boolean;
+  /** WARP-845 — who the fact is distributed to (minimum-role ladder
+   *  owner > admin > family > guest). */
+  audience: "owner" | "admin" | "family" | "guest";
   addedAt: string;
   updatedAt: string;
 }
@@ -2511,6 +2516,7 @@ export async function createMemoryFact(input: {
   category: MemoryFact["category"];
   fact: string;
   evidenceChatId?: string;
+  audience?: MemoryFact["audience"];
 }): Promise<{ fact: MemoryFact }> {
   const res = await authFetch(`${BASE}/api/memory/facts`, {
     method: "POST",
@@ -2526,7 +2532,12 @@ export async function createMemoryFact(input: {
 
 export async function updateMemoryFact(
   id: string,
-  patch: { category?: MemoryFact["category"]; fact?: string; active?: boolean },
+  patch: {
+    category?: MemoryFact["category"];
+    fact?: string;
+    active?: boolean;
+    audience?: MemoryFact["audience"];
+  },
 ): Promise<{ fact: MemoryFact }> {
   const res = await authFetch(
     `${BASE}/api/memory/facts/${encodeURIComponent(id)}`,
@@ -2551,6 +2562,94 @@ export async function deleteMemoryFact(id: string): Promise<void> {
   if (!res.ok && res.status !== 404) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `Failed to delete fact: ${res.status}`);
+  }
+}
+
+// --- Chat projects (WARP-845) ---
+
+/** A per-user chat project: a sidebar folder plus a default persona the
+ *  dashboard seeds into new chats started inside it. */
+export interface ChatProject {
+  id: string;
+  name: string;
+  systemPrompt: string | null;
+  chatCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function listChatProjects(): Promise<{ projects: ChatProject[] }> {
+  const res = await authFetch(`${BASE}/api/llm/projects`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to load projects: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function createChatProject(input: {
+  name: string;
+  systemPrompt?: string | null;
+}): Promise<{ project: ChatProject }> {
+  const res = await authFetch(`${BASE}/api/llm/projects`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to create project: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function updateChatProject(
+  id: string,
+  patch: { name?: string; systemPrompt?: string | null },
+): Promise<{ project: ChatProject }> {
+  const res = await authFetch(
+    `${BASE}/api/llm/projects/${encodeURIComponent(id)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to update project: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function deleteChatProject(id: string): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/llm/projects/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok && res.status !== 404) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to delete project: ${res.status}`);
+  }
+}
+
+/** Move a conversation into (or out of, with null) one of the caller's
+ *  projects. Chats survive project deletion server-side (FK SET NULL). */
+export async function setConversationProject(
+  conversationId: string,
+  projectId: string | null,
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/llm/conversations/${encodeURIComponent(conversationId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projectId }),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to move conversation: ${res.status}`);
   }
 }
 

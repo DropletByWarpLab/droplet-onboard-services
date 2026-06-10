@@ -422,6 +422,37 @@ describe("POST /api/llm/chat — attachment context injection", () => {
     });
   });
 
+  it("re-stamps ALL items tagged with the draft chatId on the first persisted turn", async () => {
+    mockEnsureConversation.mockResolvedValue({ id: "conv-9" });
+    mockCreateTurnRows.mockResolvedValue({
+      userMessageId: "um-1",
+      assistantMessageId: "am-1",
+      assistantAlreadyFinal: false,
+    });
+    const prisma = createPrismaMock([], []);
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .post("/api/llm/chat")
+      .send({
+        model: "m1",
+        messages: [{ role: "user", content: "hello" }],
+        // No attachments on the wire — the upload may still be in flight —
+        // but the draft tag lets the server adopt whatever finished or
+        // finishes against the row that already exists.
+        draftChatId: "chat-1749600000000",
+      });
+
+    expect(res.status).toBe(200);
+    expect(prisma.brainMemoryItem.updateMany).toHaveBeenCalledWith({
+      where: {
+        originatingChatId: "chat-1749600000000",
+        userId: USERNAME,
+      },
+      data: { originatingChatId: "conv-9" },
+    });
+  });
+
   it("does not re-stamp when the turn has no persisted conversation", async () => {
     const prisma = createPrismaMock(
       [

@@ -177,6 +177,13 @@ export interface McpCallContext {
    */
   userId?: string;
   /**
+   * WARP-845 — caller's role, forwarded as `_meta.userRole` so
+   * role-scoped handlers (memory_recall's audience ladder) can filter
+   * what the model may read. Stdio-trusted only; the HTTP transport
+   * ignores it (restrictive guest default applies there).
+   */
+  userRole?: string;
+  /**
    * WARP-437 — adaptive-routing enhancement bundle (HyDE vector,
    * paraphrase vectors, filename filter, search overrides). Set by the
    * agent loop right before dispatching `search_content`. Routed via

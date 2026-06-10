@@ -248,20 +248,23 @@ describe("LLM routes", () => {
       );
     });
 
-    it("returns 400 when title is missing or not a string", async () => {
+    it("returns 400 when neither title nor projectId is provided", async () => {
       const res1 = await request(app)
         .patch("/api/llm/conversations/abc")
         .set("x-test-role", "owner")
         .send({});
       expect(res1.status).toBe(400);
-      expect(res1.body).toMatchObject({ error: "title_required" });
+      // WARP-845 widened the PATCH to also accept projectId moves.
+      expect(res1.body).toMatchObject({ error: "title_or_project_required" });
 
       const res2 = await request(app)
         .patch("/api/llm/conversations/abc")
         .set("x-test-role", "owner")
         .send({ title: 42 });
       expect(res2.status).toBe(400);
-      expect(res2.body).toMatchObject({ error: "title_required" });
+      // A non-string title with no projectId falls through to the same
+      // "nothing actionable in the body" rejection.
+      expect(res2.body).toMatchObject({ error: "title_or_project_required" });
     });
 
     it("returns 400 when service rejects an empty title", async () => {

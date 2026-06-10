@@ -11,6 +11,7 @@ import {
   renameConversation,
   deleteConversation,
   fetchConversation,
+  setConversationProject,
   type ConversationSummary,
 } from "@/lib/api";
 import {
@@ -37,6 +38,13 @@ export function useConversationList(): {
   applyTurnCompleted: (id: string) => Promise<void>;
   rename: (id: string, title: string) => Promise<void>;
   remove: (id: string) => Promise<boolean>;
+  /** WARP-845 — move a chat into (or out of, with null) a project.
+   *  Optimistic; reverts on server failure. */
+  moveToProject: (id: string, projectId: string | null) => Promise<void>;
+  /** WARP-845 — local-only mirror of the FK SET NULL after a project is
+   *  deleted server-side: its chats fall back to the date groups without
+   *  a refetch. */
+  clearProjectLocally: (projectId: string) => void;
 } {
   const [flat, setFlat] = useState<ConversationSummary[]>([]);
   const [search, setSearch] = useState("");
@@ -142,6 +150,31 @@ export function useConversationList(): {
     );
   }, []);
 
+  const moveToProject = useCallback(
+    async (id: string, projectId: string | null) => {
+      const prev = flatRef.current.find((c) => c.id === id)?.projectId ?? null;
+      setFlat((cur) =>
+        cur.map((c) => (c.id === id ? { ...c, projectId } : c)),
+      );
+      try {
+        await setConversationProject(id, projectId);
+      } catch (err) {
+        if (!isMountedRef.current) return;
+        setFlat((cur) =>
+          cur.map((c) => (c.id === id ? { ...c, projectId: prev } : c)),
+        );
+        setError(translateError(err, "chat"));
+      }
+    },
+    [],
+  );
+
+  const clearProjectLocally = useCallback((projectId: string) => {
+    setFlat((cur) =>
+      cur.map((c) => (c.projectId === projectId ? { ...c, projectId: null } : c)),
+    );
+  }, []);
+
   const rename = useCallback(async (id: string, title: string) => {
     // Snapshot prevTitle BEFORE entering the functional updater so the
     // updater stays pure (safe under React StrictMode's double-invoke).
@@ -190,5 +223,7 @@ export function useConversationList(): {
     applyTurnCompleted,
     rename,
     remove,
+    moveToProject,
+    clearProjectLocally,
   };
 }
