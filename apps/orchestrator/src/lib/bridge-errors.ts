@@ -10,8 +10,8 @@
  * "finish from Network later" notice) rather than surfacing a 500.
  *
  * Extracted here so the orchestrator has ONE definition of "the bridge wasn't
- * reachable", imported by both routes/storage.ts and
- * services/hostapd-bridge.service.ts (previously a verbatim copy in each).
+ * reachable", imported by routes/storage.ts, services/hostapd-bridge.service.ts,
+ * and services/reset.service.ts (previously a verbatim copy in each).
  */
 
 /** Socket-level error codes that mean "the bridge couldn't be reached at all". */
@@ -52,4 +52,25 @@ export function isBridgeConnectionError(err: unknown): boolean {
 export function isTimeoutOrAbort(err: unknown): boolean {
   const name = (err as { name?: string })?.name;
   return name === "AbortError" || name === "TimeoutError";
+}
+
+/**
+ * Shared bridge auth-token resolution for every orchestrator caller that POSTs
+ * to the device-bridge (reset.service.ts, hostapd-bridge.service.ts,
+ * storage.ts). Centralised here so the security-sensitive env-var precedence
+ * chain — BRIDGE_AUTH_TOKEN || SERVICE_TOKEN_DISPLAY, never DEVICE_SECRET_KEY —
+ * is defined in one place and all callers stay in lock-step.
+ *
+ * Per the comment in reset.service.ts (PR #549 review): DEVICE_SECRET_KEY is
+ * the FIPS-sealed AES-256 master encryption key. A fallback to it would put the
+ * master key in a plaintext HTTP header on a misconfigured install and still 401;
+ * failing closed (BRIDGE_AUTH_UNCONFIGURED) keeps it off the wire with a clear
+ * remediation path.
+ */
+export function bridgeAuthToken(): string {
+  return (
+    process.env.BRIDGE_AUTH_TOKEN ||
+    process.env.SERVICE_TOKEN_DISPLAY ||
+    ""
+  ).trim();
 }
