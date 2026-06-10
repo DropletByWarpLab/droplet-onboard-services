@@ -1,0 +1,613 @@
+/* ───────────────────────────────────────────────────────────────────────────
+   Ask AI — indigo chat surface (Claude Design handoff port, WARP-855).
+
+   Source of truth: the design bundle's chat.css / chat-page.jsx
+   ("Ask AI.html"). Values are ported verbatim where the design specifies
+   them; everything color-flavored reads the shared indigo tokens
+   (components/shell/indigo-tokens.css) so light/dark theming follows the
+   repo's `.dark` class mechanism instead of the prototype's data-theme.
+
+   Scope: every selector lives under `.droplet-shell` (same convention as
+   droplet-shell.css) so nothing leaks into non-ported surfaces.
+
+   Design-transcript constraints honored here:
+   - NO focus highlight on anything inside the composer card (the user
+     corrected this three times in the design sessions).
+   - Date captions are title-case and 11.5px — not uppercase.
+   - The model pill only exists when >1 model is configured (enforced in
+     ModelSelector.tsx, not here).
+   ─────────────────────────────────────────────────────────────────────── */
+
+/* ── Page frame ─────────────────────────────────────────────────────── */
+
+.droplet-shell.chat-app {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.droplet-shell .chat-main {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: transparent;
+}
+
+/* The ONLY scrolling region of the chat column. */
+.droplet-shell .chat-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 30px 0 20px;
+}
+.droplet-shell .chat-scroll::-webkit-scrollbar { width: 9px; }
+.droplet-shell .chat-scroll::-webkit-scrollbar-thumb {
+  background: var(--scrollbar);
+  border-radius: 5px;
+}
+
+/* Centered 768px message column. */
+.droplet-shell .chat-wrap {
+  max-width: 768px;
+  margin: 0 auto;
+  padding: 0 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* ── Header ─────────────────────────────────────────────────────────── */
+
+.droplet-shell .chat-head {
+  height: 56px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--glass);
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  z-index: 20;
+}
+
+.droplet-shell .chat-head-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: -0.1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Model pill (multi-model only — ModelSelector returns null otherwise). */
+.droplet-shell .chat-model {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 11px;
+  border-radius: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  font-family: var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace);
+  color: var(--text);
+}
+.droplet-shell .chat-model select {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  max-width: 180px;
+}
+.droplet-shell .chat-model .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+  flex-shrink: 0;
+}
+
+.droplet-shell .chat-tag {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* Bordered surface button (header "New chat", rail trigger). */
+.droplet-shell .chat-new {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 13px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  transition: background 180ms var(--ease, cubic-bezier(0.25, 0.1, 0.25, 1));
+}
+.droplet-shell .chat-new:hover:not(:disabled) { background: var(--surface-2); }
+.droplet-shell .chat-new:disabled {
+  color: var(--text-muted);
+  cursor: not-allowed;
+}
+
+/* Quiet 30px icon button (header tools, composer attach/mic). */
+.droplet-shell .chat-iconbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  transition: background 160ms var(--ease, ease), color 160ms var(--ease, ease);
+}
+.droplet-shell .chat-iconbtn:hover:not(:disabled) {
+  background: var(--surface);
+  color: var(--text);
+}
+.droplet-shell .chat-iconbtn:disabled { opacity: 0.5; cursor: not-allowed; }
+.droplet-shell .chat-iconbtn[aria-pressed="true"],
+.droplet-shell .chat-iconbtn.is-on {
+  background: var(--brand-subtle);
+  color: var(--brand);
+}
+/* Recording state for the mic. */
+.droplet-shell .chat-iconbtn.is-rec {
+  background: color-mix(in srgb, #ef4444 15%, transparent);
+  color: #ef4444;
+}
+
+/* ── Conversation rail ──────────────────────────────────────────────── */
+
+.droplet-shell .conv-rail {
+  width: 276px;
+  flex-shrink: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--glass-2);
+  border-right: 1px solid var(--border);
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+}
+
+.droplet-shell .conv-head {
+  height: 56px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px 0 18px;
+  border-bottom: 1px solid var(--border);
+}
+.droplet-shell .conv-head-t {
+  flex: 1;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: -0.1px;
+}
+.droplet-shell .conv-new-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-muted);
+  transition: background 160ms var(--ease, ease), color 160ms var(--ease, ease);
+}
+.droplet-shell .conv-new-btn:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.droplet-shell .conv-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 14px 4px;
+  height: 36px;
+  padding: 0 11px;
+  border-radius: 9px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+.droplet-shell .conv-search:focus-within {
+  border-color: color-mix(in srgb, var(--brand) 40%, var(--border));
+}
+.droplet-shell .conv-search input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: 0;
+  outline: none;
+  font-size: 13px;
+  color: var(--text);
+}
+.droplet-shell .conv-search input::placeholder { color: var(--text-muted); }
+
+.droplet-shell .conv-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px 10px 18px;
+}
+.droplet-shell .conv-list::-webkit-scrollbar { width: 8px; }
+.droplet-shell .conv-list::-webkit-scrollbar-thumb {
+  background: var(--scrollbar);
+  border-radius: 5px;
+}
+
+/* Title-case group captions — NOT uppercase (design correction). */
+.droplet-shell .conv-cap {
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--text-muted);
+  padding: 6px 10px 5px;
+}
+.droplet-shell .conv-group { margin-top: 10px; }
+.droplet-shell .conv-group:first-child { margin-top: 4px; }
+
+.droplet-shell .conv-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 9px 10px;
+  border-radius: 9px;
+  border-left: 2px solid transparent;
+  background: transparent;
+  text-align: left;
+  transition: background 140ms var(--ease, ease);
+}
+.droplet-shell .conv-item:hover { background: var(--surface); }
+.droplet-shell .conv-item.is-active {
+  background: var(--brand-subtle);
+  border-left-color: var(--brand);
+}
+.droplet-shell .conv-it-t {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  letter-spacing: -0.1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.droplet-shell .conv-item.is-active .conv-it-t { color: var(--brand-soft); }
+.droplet-shell .conv-it-s {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.droplet-shell .conv-none {
+  padding: 24px 12px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* Row hover actions (rename/move/export/delete) — kept from the real app,
+   presented with the msg-actions reveal pattern. */
+.droplet-shell .conv-acts {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  background: var(--surface);
+  border-radius: 7px;
+  opacity: 0;
+  transition: opacity 160ms var(--ease, ease);
+}
+.droplet-shell .conv-row:hover .conv-acts,
+.droplet-shell .conv-row:focus-within .conv-acts { opacity: 1; }
+
+/* ── Empty state ────────────────────────────────────────────────────── */
+
+.droplet-shell .chat-empty {
+  height: 60vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: var(--text-muted);
+  text-align: center;
+}
+.droplet-shell .chat-empty .ico {
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
+  background: var(--brand-subtle);
+  color: var(--brand);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 8px;
+}
+.droplet-shell .chat-empty .h {
+  font-size: 19px;
+  font-weight: 600;
+  color: var(--text);
+}
+.droplet-shell .chat-empty .s { font-size: 14px; }
+
+.droplet-shell .chat-suggs {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 18px;
+  max-width: 560px;
+  padding: 0 20px;
+}
+.droplet-shell .chat-sugg {
+  height: 34px;
+  padding: 0 14px;
+  border-radius: 9999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  transition: background 160ms var(--ease, ease),
+    border-color 160ms var(--ease, ease);
+}
+.droplet-shell .chat-sugg:hover {
+  background: var(--surface-2);
+  border-color: color-mix(in srgb, var(--brand) 28%, var(--border));
+}
+
+/* ── Messages ───────────────────────────────────────────────────────── */
+
+.droplet-shell .msg {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+.droplet-shell .msg.is-user { flex-direction: row-reverse; }
+
+.droplet-shell .msg-ava {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  margin-top: 1px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.droplet-shell .msg-ava.is-assistant {
+  background: var(--brand-subtle);
+  color: var(--brand);
+}
+.droplet-shell .msg-ava.is-user {
+  background: var(--surface-2);
+  color: var(--text-muted);
+}
+
+.droplet-shell .msg-col {
+  max-width: 80%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.droplet-shell .msg.is-user .msg-col { align-items: flex-end; }
+
+.droplet-shell .msg-bubble {
+  padding: 12px 16px;
+  font-size: 15px;
+  line-height: 1.55;
+  border-radius: 14px;
+  word-wrap: break-word;
+}
+.droplet-shell .msg-bubble.is-assistant {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-bottom-left-radius: 6px;
+}
+.droplet-shell .msg-bubble.is-user {
+  background: var(--user-bubble);
+  color: var(--user-bubble-text);
+  border-bottom-right-radius: 6px;
+  white-space: pre-wrap;
+}
+
+/* Hover-revealed action row under assistant messages. Carries the real
+   app's full action set (copy/quote/regenerate/edit/thumbs), not just the
+   design's copy+retry. */
+.droplet-shell .msg-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-left: 4px;
+  opacity: 0;
+  transition: opacity 160ms var(--ease, ease);
+}
+.droplet-shell .msg:hover .msg-actions,
+.droplet-shell .msg:focus-within .msg-actions { opacity: 1; }
+.droplet-shell .msg-act {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 9px;
+  border-radius: 7px;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  transition: background 160ms var(--ease, ease), color 160ms var(--ease, ease);
+}
+.droplet-shell .msg-act:hover:not(:disabled) {
+  background: var(--surface);
+  color: var(--text);
+}
+.droplet-shell .msg-act.is-on { color: var(--brand); }
+
+/* ── Composer ───────────────────────────────────────────────────────── */
+
+.droplet-shell .chat-composer {
+  flex-shrink: 0;
+  padding: 12px 24px 22px;
+}
+.droplet-shell .chat-composer-inner {
+  max-width: 768px;
+  margin: 0 auto;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 10px 10px 10px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+/* The card is the visual boundary — NOTHING inside it shows a focus ring
+   (design-session correction, three times). Keyboard users still have the
+   card-level affordance via the textarea caret. */
+.droplet-shell .chat-composer-inner :focus-visible { outline: none !important; }
+.droplet-shell .chat-composer-inner :focus {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+.droplet-shell .chat-composer-inner textarea {
+  width: 100%;
+  min-height: 24px;
+  max-height: 168px;
+  resize: none;
+  background: transparent;
+  border: 0;
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--text);
+}
+.droplet-shell .chat-composer-inner textarea::placeholder {
+  color: var(--text-muted);
+}
+.droplet-shell .chat-composer-inner textarea:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.droplet-shell .chat-crow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.droplet-shell .chat-send {
+  margin-left: auto;
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9px;
+  border: 0;
+  background: var(--brand);
+  color: #fff;
+  transition: background 180ms ease, transform 120ms ease;
+}
+.droplet-shell .chat-send:hover:not(:disabled) { background: var(--brand-hover); }
+.droplet-shell .chat-send:active:not(:disabled) { transform: scale(0.96); }
+.droplet-shell .chat-send:disabled {
+  background: var(--surface);
+  color: var(--text-muted);
+  cursor: not-allowed;
+}
+.droplet-shell .chat-send.chat-stop {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+.droplet-shell .chat-send.chat-stop:hover { background: var(--surface); }
+
+.droplet-shell .chat-hint {
+  max-width: 768px;
+  margin: 8px auto 0;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* ── Surfaces that ride along (system prompt, tool banner) ──────────── */
+
+.droplet-shell .chat-subpanel {
+  border-bottom: 1px solid var(--border);
+  background: var(--glass-2);
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  padding: 12px 20px;
+}
+.droplet-shell .chat-subpanel textarea {
+  width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 8px 11px;
+  font-size: 13px;
+  color: var(--text);
+  resize: none;
+}
+.droplet-shell .chat-subpanel textarea::placeholder { color: var(--text-muted); }
+.droplet-shell .chat-subpanel-label {
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--text-muted);
+}
+
+/* ── Mobile (≤760px to match the design; Tailwind lg: still governs the
+      rail visibility, this only adjusts paddings) ────────────────────── */
+
+@media (max-width: 760px) {
+  .droplet-shell .chat-head { padding: 0 14px; gap: 10px; }
+  .droplet-shell .chat-tag { display: none; }
+  .droplet-shell .chat-wrap { padding: 0 15px; }
+  .droplet-shell .chat-scroll { padding: 20px 0 14px; }
+  .droplet-shell .chat-composer {
+    padding: 10px 14px calc(12px + env(safe-area-inset-bottom));
+  }
+  .droplet-shell .chat-hint { display: none; }
+  .droplet-shell .chat-new span { display: none; }
+  .droplet-shell .chat-new { width: 34px; padding: 0; justify-content: center; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .droplet-shell .conv-item,
+  .droplet-shell .chat-sugg,
+  .droplet-shell .msg-actions,
+  .droplet-shell .chat-send,
+  .droplet-shell .chat-new,
+  .droplet-shell .chat-iconbtn {
+    transition: none;
+  }
+}

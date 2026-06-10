@@ -505,7 +505,10 @@ describe("ChatMessage", () => {
     // were `px-2 py-1` (~24 px). Bumped to `px-3 py-2` so the height
     // crosses the 32 px floor (≈ 36-40 px depending on icon + label) while
     // preserving the row's visual rhythm under the bubble.
-    it("Copy / Quote / Regenerate use ≥ 32 px hit-target padding (px-3 py-2, WARP-301)", () => {
+    it("actions render as design-handoff msg-act buttons (WARP-855)", () => {
+      // The Ask AI handoff replaces the px-3/py-2 Tailwind buttons with
+      // 26 px-high `.msg-act` pills (chat-indigo.css) — above WCAG
+      // 2.5.8 AA's 24 px minimum, matching the prototype's action row.
       render(
         <ChatMessage
           message={assistantMsg()}
@@ -517,17 +520,16 @@ describe("ChatMessage", () => {
       );
       for (const name of [/copy message/i, /quote message/i, /regenerate response/i]) {
         const btn = screen.getByRole("button", { name });
-        expect(btn.className).toMatch(/(^|\s)px-3(\s|$)/);
-        expect(btn.className).toMatch(/(^|\s)py-2(\s|$)/);
-        // Regression guard against the old sub-WCAG sizing.
-        expect(btn.className).not.toMatch(/(^|\s)px-2(\s|$)/);
-        expect(btn.className).not.toMatch(/(^|\s)py-1(\s|$)/);
+        expect(btn.className).toMatch(/(^|\s)msg-act(\s|$)/);
       }
     });
 
-    it("toolbar still reveals on focus-within (keyboard reachable)", () => {
-      // Preserve the WARP-295 behavior: opacity-0 default, focus-within
-      // surfaces it. Regression guard while bumping padding.
+    it("toolbar still reveals on hover/focus via the msg-actions contract", () => {
+      // WARP-295's keyboard reachability now lives in chat-indigo.css:
+      // `.msg:focus-within .msg-actions { opacity: 1 }`. jsdom can't
+      // compute external stylesheets, so the structural contract is the
+      // testable surface: the toolbar carries .msg-actions inside a .msg
+      // row (the selector pair that drives the reveal).
       render(
         <ChatMessage
           message={assistantMsg()}
@@ -536,8 +538,8 @@ describe("ChatMessage", () => {
         />,
       );
       const toolbar = screen.getByTestId("message-actions");
-      expect(toolbar.className).toMatch(/focus-within:opacity-100/);
-      expect(toolbar.className).toMatch(/opacity-0/);
+      expect(toolbar.className).toMatch(/(^|\s)msg-actions(\s|$)/);
+      expect(toolbar.closest(".msg")).not.toBeNull();
     });
 
     it("toolbar does NOT add `mt-1` when there are no citations to crowd against", () => {

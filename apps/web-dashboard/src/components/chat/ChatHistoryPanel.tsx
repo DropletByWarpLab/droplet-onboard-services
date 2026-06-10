@@ -258,57 +258,51 @@ export function ChatHistoryPanel({
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 
   return (
-    <div className="flex flex-col h-full">
-      <div className="px-3 pt-3 pb-2 border-b border-separator">
+    <div className="flex flex-col h-full min-h-0 w-full">
+      {/* Design-handoff rail header: "Chats" + quiet icon actions. */}
+      <div className="conv-head">
+        <span className="conv-head-t">Chats</span>
+        <button
+          type="button"
+          onClick={() => setNewProjectDraft("")}
+          aria-label="New project"
+          title="New project"
+          className="conv-new-btn"
+        >
+          <FolderPlus size={15} aria-hidden="true" />
+        </button>
         <button
           type="button"
           onClick={onNewChat}
-          className="w-full flex items-center justify-center gap-2 h-9 rounded-md
-                     bg-accent text-white type-subheadline font-medium
-                     hover:bg-accent-strong transition-colors"
+          aria-label="New chat"
+          title="New chat"
+          className="conv-new-btn"
         >
-          <Plus size={16} /> New chat
+          <Plus size={16} aria-hidden="true" />
         </button>
-        <div className="relative mt-2 flex items-center gap-1.5">
+      </div>
+      <div className="conv-search">
+        <Search size={14} aria-hidden="true" />
+        <input
+          type="search"
+          value={searchDraft}
+          onChange={(e) => setSearchDraft(e.target.value)}
+          placeholder="Search chats"
+          aria-label="Search chats"
+        />
+        {searchDraft && (
           <button
             type="button"
-            onClick={() => setNewProjectDraft("")}
-            aria-label="New project"
-            title="New project"
-            className="flex-none h-8 w-8 rounded-md flex items-center justify-center
-              text-label-tertiary hover:text-label-primary hover:bg-surface-secondary transition-colors"
+            onClick={() => setSearchDraft("")}
+            aria-label="Clear search"
+            className="chat-iconbtn !w-6 !h-6"
           >
-            <FolderPlus size={15} aria-hidden="true" />
+            <X size={12} aria-hidden="true" />
           </button>
-          <div className="relative flex-1">
-            <Search
-              size={14}
-              aria-hidden="true"
-              className="absolute left-2.5 top-1/2 -translate-y-1/2 text-label-tertiary pointer-events-none"
-            />
-            <input
-              type="search"
-              value={searchDraft}
-              onChange={(e) => setSearchDraft(e.target.value)}
-              placeholder="Search chats…"
-              aria-label="Search chats"
-              className="dp-input type-footnote h-8 w-full pl-8 pr-7"
-            />
-            {searchDraft && (
-              <button
-                type="button"
-                onClick={() => setSearchDraft("")}
-                aria-label="Clear search"
-                className="absolute right-1.5 top-1/2 -translate-y-1/2 p-1 rounded-sm text-label-tertiary hover:text-label-primary"
-              >
-                <X size={12} aria-hidden="true" />
-              </button>
-            )}
-          </div>
-        </div>
+        )}
       </div>
 
-      <div className="flex-1 overflow-y-auto px-2 py-2">
+      <div className="conv-list">
         {/* Error renders as a banner so a single failed action (e.g. one
             move PATCH) doesn't blank the whole sidebar. */}
         {error && (
@@ -324,26 +318,20 @@ export function ChatHistoryPanel({
             well be "create a project"); hidden while searching, when all
             matches surface in the date groups instead. */}
         {!search && (projects.length > 0 || newProjectDraft !== null) && (
-          <div className="mb-3">
-            <div className="px-2 py-1 flex items-center justify-between">
-              <span className="type-caption-2 text-label-tertiary uppercase tracking-wide">
-                Projects
-              </span>
-            </div>
+          <div className="conv-group">
+            <div className="conv-cap">Projects</div>
             <div className="space-y-0.5">
               {projects.map((project) => {
                 const chats = chatsInProject(project.id);
                 const expanded = expandedProjects.has(project.id);
                 return (
                   <div key={project.id}>
-                    <div className="group/project relative">
+                    <div className="conv-row group/project relative">
                       <button
                         type="button"
                         onClick={() => toggleProject(project.id)}
                         aria-expanded={expanded}
-                        className="w-full text-left px-2 h-8 rounded-md type-footnote
-                              flex items-center gap-1.5 text-label-secondary
-                              hover:bg-surface-secondary hover:text-label-primary transition-colors"
+                        className="conv-item !flex-row items-center gap-1.5"
                       >
                         <ChevronRight
                           size={12}
@@ -355,7 +343,7 @@ export function ChatHistoryPanel({
                           aria-hidden="true"
                           className="flex-none text-label-tertiary"
                         />
-                        <span className="truncate flex-1">{project.name}</span>
+                        <span className="conv-it-t flex-1">{project.name}</span>
                         <span className="flex-none type-caption-2 text-label-quaternary">
                           {fetchedProjects.has(project.id)
                             ? chats.length
@@ -364,7 +352,7 @@ export function ChatHistoryPanel({
                       </button>
                       {/* opacity (not display:none) so the buttons stay
                               keyboard-reachable — matches ChatHistoryRow. */}
-                      <div className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-0.5 bg-surface-secondary rounded opacity-0 group-hover/project:opacity-100 focus-within:opacity-100 transition-opacity">
+                      <div className="conv-acts">
                         {onNewChatInProject && (
                           <button
                             type="button"
@@ -415,6 +403,7 @@ export function ChatHistoryPanel({
               })}
               {newProjectDraft !== null && (
                 <input
+                  className="conv-search !m-0 !h-9 w-full px-3 text-[13px]"
                   autoFocus
                   value={newProjectDraft}
                   onChange={(e) => setNewProjectDraft(e.target.value)}
@@ -426,19 +415,16 @@ export function ChatHistoryPanel({
                   onBlur={() => void handleCreateProject(newProjectDraft)}
                   placeholder="Project name…"
                   aria-label="New project name"
-                  className="dp-input type-footnote h-8 w-full"
                 />
               )}
             </div>
           </div>
         )}
         {isLoading && flat.length === 0 ? (
-          <div className="px-2 py-4 type-footnote text-label-tertiary">
-            Loading chats…
-          </div>
+          <div className="conv-none">Loading chats…</div>
         ) : flat.length === 0 ? (
           !error && (
-            <div className="px-2 py-8 text-center type-footnote text-label-tertiary">
+            <div className="conv-none">
               {search
                 ? "No chats match your search."
                 : "No chats yet. Start by asking something below."}
@@ -447,10 +433,8 @@ export function ChatHistoryPanel({
         ) : (
           <>
             {ungroupedGroups.map((group) => (
-              <div key={group.label} className="mb-3">
-                <div className="px-2 py-1 type-caption-2 text-label-tertiary uppercase tracking-wide">
-                  {group.label}
-                </div>
+              <div key={group.label} className="conv-group">
+                <div className="conv-cap">{group.label}</div>
                 <div className="space-y-0.5">
                   {group.items.map((item) => (
                     <ChatHistoryRow
