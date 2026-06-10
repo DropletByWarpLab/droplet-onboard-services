@@ -268,6 +268,35 @@ if ! grep -qE '^BRIDGE_AUTH_TOKEN=..+' "$ENV_FILE"; then
   log "generated random BRIDGE_AUTH_TOKEN"
 fi
 
+# --- 2a2) Pre-seed the OpenWrt SSH host key (multi-box uci AP path only) ---
+# device-bridge.py reaches the OpenWrt router over SSH ONLY on the multi-box
+# (uci) shape — the single-box drives its AP via hostapd and never SSHes. The
+# bridge now pins the router key (StrictHostKeyChecking=accept-new + a persistent
+# known_hosts) instead of the old StrictHostKeyChecking=no + /dev/null, so a LAN
+# MITM can't silently capture OPENWRT_PASS or inject UCI. Seed that pin HERE, on
+# the trusted install network, so the trust-on-first-use happens deterministically
+# at provisioning time rather than on whatever key answers the first live call.
+# Best-effort: a missing / unreachable router must NOT abort the install — the
+# bridge still falls back to accept-new on first contact.
+bridge_ap_mode=$(grep -E '^DROPLET_AP_MODE=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- || true)
+if [[ "$bridge_ap_mode" != "hostapd" ]]; then
+  ow_host=$(grep -E '^OPENWRT_HOST=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- || true)
+  ow_host="${ow_host:-${OPENWRT_HOST:-192.168.50.1}}"
+  ow_known=$(grep -E '^OPENWRT_KNOWN_HOSTS=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- || true)
+  ow_known="${ow_known:-${OPENWRT_KNOWN_HOSTS:-/var/lib/droplet-bridge/openwrt_known_hosts}}"
+  install -d -m 0700 "$(dirname "$ow_known")"
+  if scanned=$(ssh-keyscan -T 5 "$ow_host" 2>/dev/null) && [[ -n "$scanned" ]]; then
+    # Drop any stale entries for this host, then append the freshly scanned keys.
+    [[ -f "$ow_known" ]] && ssh-keygen -R "$ow_host" -f "$ow_known" >/dev/null 2>&1 || true
+    printf '%s\n' "$scanned" >> "$ow_known"
+    chmod 0600 "$ow_known"
+    log "openwrt: pinned SSH host key for $ow_host in $ow_known"
+  else
+    log "openwrt: ssh-keyscan of $ow_host returned no key (router offline at"
+    log "  install?) — the bridge will pin on first contact via accept-new."
+  fi
+fi
+
 # --- 2b) Provision the host Python dep the pairing-QR render needs ---
 # droplet-device-bridge.service runs the host's /usr/bin/python3 (see the unit's
 # ExecStart) — NOT the oled-display container venv that gets requirements.txt.

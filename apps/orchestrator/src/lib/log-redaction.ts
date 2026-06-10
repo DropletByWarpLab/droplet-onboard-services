@@ -75,9 +75,13 @@ const RULES: readonly RedactionRule[] = [
   {
     // Credentials embedded in a URI userinfo: scheme://user:SECRET@host
     // Redacts only the password component, preserving scheme/user/host so the
-    // line still tells you which service/db it was.
+    // line still tells you which service/db it was. The username class is `*`
+    // (not `+`) so empty-username forms — `redis://:pw@host`, the exact shape
+    // secrets.sh generates for REDIS_URL, and `postgresql://:pw@db/...` — are
+    // also redacted. The trailing `@` anchor still prevents matching a plain
+    // `host:port` with no userinfo.
     name: "uri-userinfo",
-    pattern: /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s:/@]+:)([^\s@/]+)(@)/g,
+    pattern: /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s:/@]*:)([^\s@/]+)(@)/g,
     replace: (_m, pre: string, _secret: string, at: string) =>
       `${pre}${REDACTION_PLACEHOLDER}${at}`,
   },

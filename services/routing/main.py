@@ -135,24 +135,58 @@ if not OPENWRT_PASSWORD:
     )
 
 # Shared bearer for orchestrator / camera-discovery → routing (WARP-36).
-# When unset the service runs open — intended for local dev only; production
-# bring-up via scripts/setup.sh always generates a token.
+# Production bring-up via scripts/setup.sh always generates a token. When the
+# token is unset the service FAILS CLOSED — every non-/health route returns 503
+# — because routing binds 0.0.0.0:8080 under network_mode: host, so a missing or
+# failed secret injection at deploy time would otherwise expose every mutation
+# endpoint (VPN, firewall, SSID) to any host on the LAN. Set ROUTING_ALLOW_NO_AUTH=1
+# to opt back into open mode for local dev only.
 ROUTING_SERVICE_TOKEN = os.environ.get("ROUTING_SERVICE_TOKEN", "").strip()
+ROUTING_ALLOW_NO_AUTH = os.environ.get("ROUTING_ALLOW_NO_AUTH", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 if not ROUTING_SERVICE_TOKEN:
-    logger.warning(
-        "ROUTING_SERVICE_TOKEN is empty — auth disabled. Set it in production."
-    )
+    if ROUTING_ALLOW_NO_AUTH:
+        logger.warning(
+            "ROUTING_SERVICE_TOKEN is empty and ROUTING_ALLOW_NO_AUTH is set — "
+            "auth disabled. Local dev only; NEVER set this in production."
+        )
+    else:
+        logger.error(
+            "ROUTING_SERVICE_TOKEN is empty — failing closed (503) on all "
+            "non-/health routes. Set the token, or ROUTING_ALLOW_NO_AUTH=1 for "
+            "local dev."
+        )
 
 # Paths exempt from bearer auth (used by Docker healthcheck / orchestrator health roll-up).
 AUTH_EXEMPT_PATHS = frozenset({"/health"})
 
 
 def require_bearer(request: Request) -> None:
-    """Reject requests without a matching `Authorization: Bearer <token>` header."""
-    if not ROUTING_SERVICE_TOKEN:
-        return
+    """Reject requests without a matching `Authorization: Bearer <token>` header.
+
+    Fails CLOSED when no token is configured: an unset `ROUTING_SERVICE_TOKEN`
+    (e.g. a failed secret injection at deploy) yields 503 on every non-/health
+    route rather than silently opening the host-network service. Opt into the
+    old open behaviour for local dev with `ROUTING_ALLOW_NO_AUTH=1`.
+    """
+    # /health stays reachable without a token (Docker healthcheck / health
+    # roll-up) regardless of how auth is configured.
     if request.url.path in AUTH_EXEMPT_PATHS:
         return
+    if not ROUTING_SERVICE_TOKEN:
+        if ROUTING_ALLOW_NO_AUTH:
+            return
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Routing auth is not configured (ROUTING_SERVICE_TOKEN unset). "
+                "Set the token, or ROUTING_ALLOW_NO_AUTH=1 for local dev."
+            ),
+        )
     header = request.headers.get("authorization", "")
     scheme, _, token = header.partition(" ")
     if scheme.lower() != "bearer" or not hmac.compare_digest(token.strip(), ROUTING_SERVICE_TOKEN):
@@ -321,17 +355,19 @@ class OperationTrackingMiddleware(BaseHTTPMiddleware):
             operations.mark_rolled_back(op_id, f"handler raised: {exc.__class__.__name__}")
             raise
 
-        # 2xx = router accepted the change.
-        # 5xx = upstream failure, conservatively mark as rolled back so the
-        #       dashboard warns the user.
-        # 4xx = caller error (bad input, auth, etc.) — no router state change,
-        #       treat as applied so the dashboard doesn't scare the user.
+        # 2xx/3xx = router accepted the change.
+        # 5xx     = upstream failure, conservatively mark as rolled back so the
+        #           dashboard warns the user.
+        # 4xx     = caller error (bad input, auth, etc.) — the request was
+        #           refused before any router state change. Mark as `rejected`,
+        #           NOT `applied`: recording a 401/422 as an applied router
+        #           change masked auth/validation failures from operators.
         if 200 <= response.status_code < 400:
             operations.mark_applied(op_id)
         elif response.status_code >= 500:
             operations.mark_rolled_back(op_id, f"HTTP {response.status_code}")
         else:
-            operations.mark_applied(op_id)
+            operations.mark_rejected(op_id, f"HTTP {response.status_code}")
 
         response.headers["X-Operation-Id"] = op_id
         return response

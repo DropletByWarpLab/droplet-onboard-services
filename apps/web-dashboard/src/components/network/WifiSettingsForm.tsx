@@ -78,6 +78,15 @@ export function WifiSettingsForm() {
     for (;;) {
       const op = await fetchNetworkOperation(operationId);
       if (op.state === "applied") return;
+      if (op.state === "rejected") {
+        // Neutral no-change terminal (routing 4xx): the router refused the
+        // request before any change was made. Terminate with the reason — never
+        // mark it applied, and don't loop into a misleading timeout.
+        throw new Error(
+          op.reason ??
+            "The router didn't accept that Wi-Fi change, so nothing was changed.",
+        );
+      }
       if (op.state === "rolled_back" || op.state === "unknown") {
         throw new Error(
           op.reason ??

@@ -595,3 +595,50 @@ def test_qr_card_with_mark_pad_decodes(monkeypatch: pytest.MonkeyPatch):
         matrix, _ = bridge._qr_encode(payload)
         result = zxingcpp.read_barcode(_render_panel_qr_card(matrix))
         assert result and result.valid and result.text == payload, payload
+
+
+# ---------------------------------------------------------------------------
+# OpenWrt SSH host-key verification (pr-reviewer finding — multi-box uci path)
+# ---------------------------------------------------------------------------
+def test_ssh_openwrt_pins_host_key_and_drops_insecure_flags(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    """Regression: _ssh_openwrt must VERIFY the router host key.
+
+    The old call passed `StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null`,
+    so a LAN MITM on the 192.168.50.x segment could silently capture OPENWRT_PASS
+    and inject UCI. It must now pin the key with `accept-new` + a persistent
+    known_hosts (OPENWRT_KNOWN_HOSTS), and the insecure flags must be gone.
+    """
+    known = tmp_path / "openwrt_known_hosts"
+    bridge = _load_bridge(
+        monkeypatch,
+        {
+            "OPENWRT_KNOWN_HOSTS": str(known),
+            # Empty so the ssh argv isn't wrapped by sshpass — keeps the assert
+            # on argv[0] simple.
+            "OPENWRT_PASS": "",
+        },
+    )
+
+    captured: dict = {}
+
+    def fake_run(cmd, timeout=15):
+        captured["cmd"] = cmd
+        return 0, "ok", ""
+
+    monkeypatch.setattr(bridge, "_run", fake_run)
+
+    rc, _out, _err = bridge._ssh_openwrt("uci show wireless")
+    assert rc == 0
+
+    cmd = captured["cmd"]
+    joined = " ".join(cmd)
+    assert cmd[0] == "ssh"
+    assert "StrictHostKeyChecking=accept-new" in cmd
+    assert f"UserKnownHostsFile={known}" in cmd
+    # The insecure flags must NOT survive anywhere in the argv.
+    assert "StrictHostKeyChecking=no" not in joined
+    assert "/dev/null" not in joined
+    # The known_hosts directory is ensured so accept-new can pin on first use.
+    assert known.parent.exists()

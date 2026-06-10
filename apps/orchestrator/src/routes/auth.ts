@@ -79,14 +79,15 @@ import {
   isReservedUserId,
 } from "@droplet/auth-policy";
 
-/** WARP-456: caller IP for auth audit rows. Prefers `X-Forwarded-For`
- *  (set by the nginx gateway in production), falls back to req.ip. */
+/** WARP-456: caller IP for auth audit rows. With `app.set("trust proxy", 1)`
+ *  (app.ts), `req.ip` is the forge-resistant client address — Express takes the
+ *  rightmost untrusted hop, the one the nginx gateway actually observed, not the
+ *  client-controlled leftmost `X-Forwarded-For` entry. The previous body read the
+ *  raw header's leftmost value, letting any caller spoof every audit row's IP via
+ *  an `X-Forwarded-For:` header (sign-in, sign-out, TOTP, password-change events).
+ *  Mirror the hardened `getRequestIp` helper below. */
 function callerIpFromReq(req: Request): string | undefined {
-  const xff = req.headers["x-forwarded-for"];
-  if (typeof xff === "string" && xff.length > 0) {
-    return xff.split(",")[0]!.trim();
-  }
-  return req.ip;
+  return req.ip ?? req.socket?.remoteAddress ?? undefined;
 }
 
 const logger = pino({ name: "auth-route" });
@@ -927,7 +928,7 @@ export function createPublicAuthRouter(
             { sub },
             "JWT refresh: prisma not wired into public auth router; failing closed (WARP-485 round 2)",
           );
-          await denyRefreshToken(refreshTokenCookie);
+          await denyRefreshToken(refreshTokenInput);
           res.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
           res.clearCookie(REFRESH_COOKIE_NAME, { path: "/api/auth" });
           res.status(401).json({
@@ -937,15 +938,20 @@ export function createPublicAuthRouter(
           return;
         }
         const localUser = await prisma.user.findUnique({ where: { id: sub } });
-        if (!localUser) {
+        // Fail closed when the backing row is gone OR the directory deactivated
+        // it (SCIM `active:false` / DELETE → DEACTIVATED, soft). A row-existence
+        // check alone let a still-valid refresh token keep minting fresh
+        // credentials for an offboarded user; mirror the DEACTIVATED gate the
+        // /auth/login, SSO, and WebAuthn paths already enforce.
+        if (!localUser || localUser.directoryStatus === "DEACTIVATED") {
           logger.warn(
-            { sub },
-            "JWT refresh: no local User row for refresh-token subject; refusing rotation (WARP-485 round 2)",
+            { sub, deactivated: localUser?.directoryStatus === "DEACTIVATED" },
+            "JWT refresh: no usable User row for refresh-token subject (missing or deactivated); refusing rotation (WARP-485 round 2)",
           );
           // Burn the old refresh token so a retry can't re-enter this
           // branch repeatedly — denylist entry auto-expires with the
           // token's own TTL.
-          await denyRefreshToken(refreshTokenCookie);
+          await denyRefreshToken(refreshTokenInput);
           res.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
           res.clearCookie(REFRESH_COOKIE_NAME, { path: "/api/auth" });
           res.status(401).json({
