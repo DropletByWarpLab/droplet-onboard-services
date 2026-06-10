@@ -18,7 +18,14 @@ const TIER_2_OPERATIONS = new Set([
   "add_port_forward",
   "remove_port_forward",
   "set_wifi_password",
-  "set_wifi_ssid",        // Disconnects all wireless clients
+  // "set_wifi_ssid" is intentionally absent: the /network/wifi/ssid route
+  // passes "set_ssid" to evaluateNetworkCommand, which lands here at Tier 1
+  // (auto-execute). That is by design — the setup-wizard Internet step requires
+  // an immediate apply without a confirmation round-trip. The AI-facing
+  // set_wifi_ssid tool enforces its own in-handler confirmation (the
+  // tools-core `confirmed` flag + memory_extract pattern) before the route
+  // applies the Tier-1 write, so the net confirmation posture is unchanged.
+  // Pinned by apps/orchestrator/src/__tests__/network-wifi-routes.test.ts.
   "set_wan_protocol",
   "set_lan_ip",
   "create_vlan",
