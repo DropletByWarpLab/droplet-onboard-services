@@ -613,8 +613,13 @@ export function requirePasswordChangeGate(
       next();
       return;
     }
-    // The remediation surface is always reachable.
-    if (PASSWORD_CHANGE_ALLOWED_PATHS.has(req.path)) {
+    // The remediation surface is always reachable. Normalise a trailing slash
+    // before the exact-match lookup so `/api/auth/change-password/` resolves the
+    // same as `/api/auth/change-password` — otherwise a must-change user is
+    // locked out of the very endpoint that clears the flag. Collapse only
+    // trailing slashes; the root "/" is preserved.
+    const allowPath = req.path.replace(/\/+$/, "") || "/";
+    if (PASSWORD_CHANGE_ALLOWED_PATHS.has(allowPath)) {
       next();
       return;
     }

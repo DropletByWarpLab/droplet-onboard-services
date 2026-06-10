@@ -495,3 +495,103 @@ def test_qr_accepts_bearer_token(monkeypatch: pytest.MonkeyPatch):
     bridge = _load_bridge(monkeypatch)
     assert _do_get(bridge, monkeypatch, "/openwrt/qr",
                    {"Authorization": "Bearer pytest-bridge-token"})[0] == 200
+
+
+# ---------------------------------------------------------------------------
+# QR error-correction level — the symbol must survive the firmware's mark pad
+# ---------------------------------------------------------------------------
+# The PyPortal's QR card (_v3_qr_card in pyportal/code.py) paints a 32x32px
+# white droplet-mark pad dead-centre over the symbol. At ERROR_CORRECT_L the
+# pad corrupts more codewords than Reed-Solomon can recover and the rendered
+# card fails to decode for every typical Wi-Fi payload (verified empirically;
+# same finding as the scan-to-claim QR in the PR #550 review). _qr_encode
+# therefore pins ERROR_CORRECT_Q, degrading to L only when a pathological
+# payload would blow the firmware's 64-row tolerance (wifi_qr_matrix
+# max_length=64 in main.py).
+
+def test_qr_encode_uses_ecc_q_for_the_mark_pad_overlay(
+        monkeypatch: pytest.MonkeyPatch):
+    bridge = _load_bridge(monkeypatch)
+    # Pin the level via the deterministic version bump: the typical hostapd
+    # payload fits v3 (29 modules) at L but needs v4 (33 modules) at Q.
+    payload = bridge._hostapd_wifi_payload("Droplet", "abcdefghjkmnpqrs")
+    matrix, version = bridge._qr_encode(payload)
+    assert version == 4
+    assert len(matrix) == 33
+
+
+def test_qr_encode_typical_payloads_fit_firmware_row_cap(
+        monkeypatch: pytest.MonkeyPatch):
+    bridge = _load_bridge(monkeypatch)
+    typical = (
+        # Single-box hostapd shape: fixed WPA, 16-char rotated key.
+        bridge._hostapd_wifi_payload("Droplet", "abcdefghjkmnpqrs"),
+        # Multi-box UCI shape.
+        bridge._wifi_payload("Droplet-AI", "droplethome2026", "psk2"),
+        # Worst realistic creds: max-length SSID (32) + WPA2 PSK (63).
+        bridge._hostapd_wifi_payload("S" * 32, "p" * 63),
+    )
+    for payload in typical:
+        matrix, _ = bridge._qr_encode(payload)
+        assert len(matrix) <= bridge._QR_MAX_ROWS, payload
+
+
+def test_qr_encode_oversized_payload_degrades_to_l_within_row_cap(
+        monkeypatch: pytest.MonkeyPatch):
+    bridge = _load_bridge(monkeypatch)
+    # A fully-escaped metachar SSID+PSK (~208 chars) needs v13 (69 rows) at
+    # Q — over the firmware tolerance. The encoder must fall back to L
+    # (v9, 53 rows) rather than ship a panel heap bomb or return nothing.
+    payload = bridge._hostapd_wifi_payload(";" * 32, ":" * 63)
+    matrix, version = bridge._qr_encode(payload)
+    assert len(matrix) <= bridge._QR_MAX_ROWS
+    assert version == 9
+
+
+def _render_panel_qr_card(matrix):
+    """Render `matrix` exactly as the firmware's _v3_qr_card does.
+
+    Mirrors pyportal/code.py: a 132x132 white card (System screen card_w),
+    inset 9 -> module_px = (132-18)//n, symbol centred, then the 26px
+    droplet mark on a +3px white pad (32x32) dead-centre OVER the modules.
+    Returns a PIL image upscaled 4x nearest-neighbour (what a phone camera
+    resolves; keeps the decoder working on crisp module edges).
+    """
+    from PIL import Image
+
+    size, inset, mark = 132, 9, 26
+    img = Image.new("L", (size, size), 255)
+    px = img.load()
+    n = len(matrix)
+    module_px = max(1, (size - inset * 2) // n)
+    origin = (size - module_px * n) // 2
+    for i, row in enumerate(matrix):
+        for j, bit in enumerate(row):
+            if bit:
+                for dy in range(module_px):
+                    for dx in range(module_px):
+                        px[origin + j * module_px + dx,
+                           origin + i * module_px + dy] = 0
+    pad0 = size // 2 - mark // 2 - 3
+    for y in range(pad0, pad0 + mark + 6):
+        for x in range(pad0, pad0 + mark + 6):
+            px[x, y] = 255
+    return img.resize((size * 4, size * 4), Image.NEAREST)
+
+
+def test_qr_card_with_mark_pad_decodes(monkeypatch: pytest.MonkeyPatch):
+    # End-to-end scannability: whatever level _qr_encode picks, the matrix it
+    # ships must still decode under the firmware's mark-pad overlay. This is
+    # the regression the L-encoded Wi-Fi QR shipped: layout fine, undecodable
+    # symbol. zxing-cpp is a dev-only decoder dep; skip where absent.
+    zxingcpp = pytest.importorskip("zxingcpp")
+    bridge = _load_bridge(monkeypatch)
+    payloads = (
+        bridge._hostapd_wifi_payload("Droplet", "abcdefghjkmnpqrs"),
+        bridge._wifi_payload("Droplet-AI", "droplethome2026", "psk2"),
+        bridge._hostapd_wifi_payload("S" * 32, "p" * 63),
+    )
+    for payload in payloads:
+        matrix, _ = bridge._qr_encode(payload)
+        result = zxingcpp.read_barcode(_render_panel_qr_card(matrix))
+        assert result and result.valid and result.text == payload, payload

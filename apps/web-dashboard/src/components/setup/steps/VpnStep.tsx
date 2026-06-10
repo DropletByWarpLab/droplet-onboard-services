@@ -37,8 +37,8 @@ import { ScrollRegion } from "@/components/setup/ScrollRegion";
  *
  *   loading   → GET /api/vpn/status in flight (first entry only).
  *   blocked   → endpointConfigured === false: no DuckDNS address yet. Renders a
- *               "Set up internet" button that is an ordinary back-jump
- *               (onBackToInternet → setStep("internet")) — NO redirect, NO
+ *               "Set up internet address" button that is an ordinary back-jump
+ *               (onBackToAddress → setStep("address")) — NO redirect, NO
  *               reload (SETUP-WIZARD-SPEC §D.5).
  *   form      → endpointConfigured && no peer yet: device-name input +
  *               "Create config" mints the first peer.
@@ -51,10 +51,10 @@ import { ScrollRegion } from "@/components/setup/ScrollRegion";
  *   error     → status fetch failed: "Try again" + "Skip for now". Never
  *               auto-advances or auto-skips on error (SETUP-WIZARD-SPEC §D.3).
  *
- * Hard-gated on the Internet step (DuckDNS subdomain configured). The
+ * Hard-gated on the internet-address step (DuckDNS subdomain configured). The
  * WIREGUARD_ENDPOINT_HOST auto-derivation in vpn.ts means
- * `endpointConfigured: true` lights up the moment DuckDNS is set in the
- * Internet step — no orchestrator restart needed.
+ * `endpointConfigured: true` lights up the moment DuckDNS is set on the
+ * internet-address step — no orchestrator restart needed.
  *
  * Tier-3 reminder (llm-safety-tiers.md): VPN config is blocked for the LLM.
  * This step is by design the customer's only in-wizard path to mint their
@@ -63,11 +63,11 @@ import { ScrollRegion } from "@/components/setup/ScrollRegion";
 export function VpnStep({
   onComplete,
   onSkip,
-  onBackToInternet,
+  onBackToAddress,
 }: {
   onComplete: () => void;
   onSkip: () => void;
-  onBackToInternet: () => void;
+  onBackToAddress: () => void;
 }) {
   const [phase, setPhase] = useState<
     "loading" | "blocked" | "form" | "created" | "returning" | "error"
@@ -240,7 +240,7 @@ export function VpnStep({
       >
         {/* Hard failure (status fetch died, step can't proceed) → role="alert"
             (assertive), matching the status-vs-alert split used by the form
-            error below and InternetStep. Soft "do it later" notices stay
+            error below and AddressStep. Soft "do it later" notices stay
             role="status". */}
         <div className="dp-card !p-4 flex items-start gap-3" role="alert">
           <AlertCircle
@@ -259,9 +259,10 @@ export function VpnStep({
   }
 
   // ──────────────────────────────────────────────────────────────────
-  // blocked — Internet wasn't configured, so there's no usable endpoint to
-  // mint a peer against. Render the blocked card in place; "Set up internet"
-  // is a normal back-jump (no redirect, no reload — SETUP-WIZARD-SPEC §D.5).
+  // blocked — the internet address wasn't configured, so there's no usable
+  // endpoint to mint a peer against. Render the blocked card in place; "Set up
+  // internet address" is a normal back-jump to the address step (no redirect,
+  // no reload — SETUP-WIZARD-SPEC §D.5).
   // ──────────────────────────────────────────────────────────────────
   if (phase === "blocked") {
     return (
@@ -269,7 +270,7 @@ export function VpnStep({
         current="vpn"
         title="Remote access needs an internet address first"
         subtitle="No internet address is set up yet."
-        primary={{ label: "Set up internet", onClick: onBackToInternet }}
+        primary={{ label: "Set up internet address", onClick: onBackToAddress }}
         skip={{ label: "Skip for now", onClick: onSkip }}
       >
         <div className="dp-card !p-4 flex items-start gap-3">
@@ -286,8 +287,8 @@ export function VpnStep({
               Your home internet&rsquo;s address can change. DuckDNS gives the
               box one permanent web address (like{" "}
               <span className="font-mono">yourstudio.duckdns.org</span>) so your
-              phone can reach it from anywhere. Set that up on the Internet step
-              and this lights up automatically.
+              phone can reach it from anywhere. Set that up on the internet-address
+              step and this lights up automatically.
             </p>
           </div>
         </div>

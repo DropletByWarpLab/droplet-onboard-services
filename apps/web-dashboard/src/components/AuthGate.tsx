@@ -5,6 +5,7 @@ import { useEffect, type ReactNode } from "react";
 import { useAuth } from "@/lib/auth";
 import { Sidebar } from "@/components/Sidebar";
 import { DropletMark } from "@/components/DropletMark";
+import { HelpLauncher } from "@/components/help/HelpLauncher";
 
 const PUBLIC_PATHS = ["/setup", "/login"];
 
@@ -246,7 +247,10 @@ export function AuthGate({ children }: { children: ReactNode }) {
     return <>{children}</>;
   }
 
-  // Authenticated — show sidebar + main content
+  // Authenticated — show sidebar + main content, plus the persistent help
+  // launcher (Onboarding-Flow redesign §4). It mounts here, in the authenticated
+  // branch only, so it never appears on the wizard, login, the full-screen tour,
+  // or the change-password takeover (each returns earlier).
   return (
     <>
       <Sidebar />
@@ -257,6 +261,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
       >
         {children}
       </main>
+      <HelpLauncher />
     </>
   );
 }

@@ -33,9 +33,13 @@
 
 import { timingSafeEqual } from "node:crypto";
 import pino from "pino";
+import { Prisma } from "@prisma/client";
 import type { PrismaClient, ResetJob } from "@prisma/client";
 import { config } from "../config.js";
-import { isBridgeConnectionError } from "../lib/bridge-errors.js";
+import {
+  isBridgeConnectionError,
+  isTimeoutOrAbort,
+} from "../lib/bridge-errors.js";
 
 const logger = pino({ name: "reset-service" });
 
@@ -56,6 +60,7 @@ export const FACTORY_RESET_CONFIRM_PHRASE = "factory reset";
 export type ResetErrorCode =
   | "CONFIRM_MISMATCH"
   | "RESET_ALREADY_IN_PROGRESS"
+  | "SERIALIZATION_CONFLICT"
   | "BRIDGE_AUTH_UNCONFIGURED"
   | "BRIDGE_UNREACHABLE"
   | "BRIDGE_REFUSED";
@@ -79,6 +84,13 @@ export class ResetError extends Error {
  * secret injected after boot (and the tests) see the current value.
  */
 function bridgeAuthToken(): string {
+  // Exactly BRIDGE_AUTH_TOKEN || SERVICE_TOKEN_DISPLAY — never
+  // DEVICE_SECRET_KEY: that is the FIPS-sealed AES-256 master encryption key
+  // WARP-165 deliberately rotated OFF the wire. A fallback to it would put
+  // the master key in a plaintext HTTP header on a misconfigured install and
+  // still 401; failing closed (BRIDGE_AUTH_UNCONFIGURED) keeps the key off
+  // the wire with a clear remediation (re-run install-device-bridge.sh), and
+  // keeps this client in lock-step with storage.ts. (PR #549 review.)
   return (
     process.env.BRIDGE_AUTH_TOKEN ||
     process.env.SERVICE_TOKEN_DISPLAY ||
@@ -159,30 +171,65 @@ export async function requestFactoryReset(
     );
   }
 
-  // (2) Double-fire guard: at most one non-terminal job at a time.
-  const inFlight = await prisma.resetJob.count({
-    where: { status: { in: ["requested", "dispatched"] } },
-  });
-  if (inFlight > 0) {
-    throw new ResetError(
-      "RESET_ALREADY_IN_PROGRESS",
-      "A factory reset is already in progress.",
+  // (2)-(4) Double-fire guard + audit + job create, ATOMIC. The in-flight count
+  // and the resetJob.create must run in ONE transaction (AC3): as two separate
+  // calls, two concurrent resets both read count 0 and both create a job, so
+  // the wipe is dispatched twice. The audit row is written INSIDE so a rejected
+  // duplicate leaves no orphan audit row (the txn rolls back on the throw),
+  // while a legitimate request still records the destructive intent before the
+  // wipe is dispatched (AC1). Mirrors storage-safety's CommandAuditLog shape.
+  //
+  // SERIALIZABLE, not the READ COMMITTED default (pr-reviewer #549 finding 1):
+  // under READ COMMITTED two concurrent transactions can BOTH run the count
+  // before either INSERT commits — both see inFlight = 0, both pass the guard,
+  // and both dispatch. Serializable forces one of the pair to abort with a
+  // serialization failure (Prisma P2034), which we map to the SAME
+  // RESET_ALREADY_IN_PROGRESS the guard throws, so the duplicate caller gets a
+  // truthful 409 instead of an orphan failed job + misleading 502.
+  let job: ResetJob;
+  try {
+    job = await prisma.$transaction(
+      async (tx) => {
+        const inFlight = await tx.resetJob.count({
+          where: { status: { in: ["requested", "dispatched"] } },
+        });
+        if (inFlight > 0) {
+          throw new ResetError(
+            "RESET_ALREADY_IN_PROGRESS",
+            "A factory reset is already in progress.",
+          );
+        }
+
+        await writeResetAudit(tx, { userId, targetName });
+
+        // Persist the job in `requested` before dispatch so a crash mid-dispatch
+        // leaves an explicit, queryable row (never an IS-NULL guess).
+        return tx.resetJob.create({
+          data: {
+            status: "requested",
+            requestedBy: userId ?? null,
+            targetName,
+          },
+        });
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
     );
+  } catch (err) {
+    if (isSerializationConflict(err)) {
+      // P2034 means the SERIALIZABLE snapshot collided with a concurrent
+      // writer. If that writer was another reset transaction the inFlight
+      // check above would have caught it first; reaching here means the
+      // conflict was an unrelated concurrent write (e.g. CommandAuditLog
+      // from a simultaneous smart-home action). Reserve
+      // RESET_ALREADY_IN_PROGRESS for the explicit inFlight > 0 path so
+      // the owner gets a truthful "try again" rather than a misleading 409.
+      throw new ResetError(
+        "SERIALIZATION_CONFLICT",
+        "A transient conflict occurred; please try again.",
+      );
+    }
+    throw err;
   }
-
-  // (3) Audit BEFORE the wipe. If the box is gone a second later, the intent is
-  // still recorded. Mirrors storage-safety's CommandAuditLog shape.
-  await writeResetAudit(prisma, { userId, targetName });
-
-  // (4) Persist the job in `requested` before dispatch so a crash mid-dispatch
-  // leaves an explicit, queryable row (never an IS-NULL guess).
-  const job = await prisma.resetJob.create({
-    data: {
-      status: "requested",
-      requestedBy: userId ?? null,
-      targetName,
-    },
-  });
 
   // Fail closed: no bridge token → we cannot safely invoke a data-destroying
   // host action. Mark the job failed and surface BRIDGE_AUTH_UNCONFIGURED.
@@ -217,11 +264,19 @@ export async function requestFactoryReset(
     }
   } catch (err) {
     if (err instanceof ResetError) throw err;
-    // Connection failure (or anything else) → the wipe never started; the box
-    // is untouched. Record the failure honestly.
-    const reason = isBridgeConnectionError(err)
-      ? "The device service isn't reachable right now; reset was not dispatched."
-      : `Reset dispatch failed: ${(err as Error).message || "bridge request failed"}`;
+    // Connection failure / timeout (or anything else) → the wipe never started;
+    // the box is untouched. Record the failure honestly. The 30 s
+    // AbortController timeout in dispatchToBridge surfaces as an AbortError —
+    // classify it as a timeout (pr-reviewer #549, 2026-06-10 finding 2), not a
+    // generic "operation was aborted". Same BRIDGE_UNREACHABLE code as a
+    // connection failure — consistent with hostapd-bridge.service.ts, which
+    // maps timeout/abort to RouterError.unreachable — but a distinct message
+    // so triage knows the bridge accepted the connection and then went silent.
+    const reason = isTimeoutOrAbort(err)
+      ? "Reset dispatch timed out; the bridge did not respond within 30 s."
+      : isBridgeConnectionError(err)
+        ? "The device service isn't reachable right now; reset was not dispatched."
+        : `Reset dispatch failed: ${(err as Error).message || "bridge request failed"}`;
     await prisma.resetJob.update({
       where: { id: job.id },
       data: { status: "failed", failureReason: reason },
@@ -239,6 +294,22 @@ export async function requestFactoryReset(
   });
   logger.warn({ jobId: job.id, targetName }, "factory reset dispatched to host executor");
   return dispatched;
+}
+
+/**
+ * Prisma surfaces a Postgres serialization failure (the losing side of two
+ * concurrent SERIALIZABLE transactions) as P2034 — "Transaction failed due to a
+ * write conflict or a deadlock. Please retry your transaction." Detected by
+ * error code rather than `instanceof Prisma.PrismaClientKnownRequestError` so
+ * the check holds across client instances (and test doubles). No ResetErrorCode
+ * collides with the P-prefixed Prisma codes.
+ */
+function isSerializationConflict(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { code?: unknown }).code === "P2034"
+  );
 }
 
 interface BridgeResult {
@@ -277,7 +348,10 @@ async function dispatchToBridge(
 }
 
 async function writeResetAudit(
-  prisma: PrismaClient,
+  // Accepts the base client OR an interactive-transaction client (the request
+  // path now writes the audit row inside prisma.$transaction so a rejected
+  // duplicate rolls it back). Narrowed to the only delegate it uses.
+  prisma: Pick<PrismaClient, "commandAuditLog">,
   entry: { userId?: string; targetName: string },
 ): Promise<void> {
   try {

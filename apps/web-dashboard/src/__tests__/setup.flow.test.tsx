@@ -164,20 +164,28 @@ describe("setup flow → done state", () => {
     });
 
     // PR #375 — we're now on `twofactor`. Skip TOTP enrollment to advance
-    // to `internet` (the gate is exercised in TwoFactorStep.test.tsx).
+    // to `wifi` (the gate is exercised in TwoFactorStep.test.tsx).
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
     });
 
-    // We're now on `internet`. Skip to `discovery`. Need to flush again so
-    // the InternetStep's fetchDuckDnsStatus effect resolves before the
-    // "Skip for now" button is queried — the button is present regardless,
-    // but the form's loading-disabled state can briefly mask the primary
-    // CTA; the skip link is always rendered.
+    // Onboarding-Flow redesign — the single Internet step is now two: `wifi`
+    // then `address`. Skip both to reach `discovery`. The Wi-Fi step has no
+    // async mount load; the Address step's fetchDuckDnsStatus effect resolves
+    // before its skip link is queried (the skip link is always rendered).
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
-      fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+      fireEvent.click(
+        screen.getByRole("button", { name: /skip — i'll do this later/i }),
+      );
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      fireEvent.click(
+        screen.getByRole("button", { name: /skip — no remote access/i }),
+      );
     });
 
     // We're now on `discovery`. Skip again. Cameras auto-skips on 0,

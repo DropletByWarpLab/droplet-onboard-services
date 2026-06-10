@@ -53,6 +53,8 @@ function statusForResetError(code: ResetErrorCode): number {
       return 400;
     case "RESET_ALREADY_IN_PROGRESS":
       return 409;
+    case "SERIALIZATION_CONFLICT":
+      return 503;
     case "BRIDGE_AUTH_UNCONFIGURED":
       return 503;
     case "BRIDGE_UNREACHABLE":
