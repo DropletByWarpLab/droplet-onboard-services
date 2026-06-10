@@ -5,11 +5,12 @@ import type { ToolContext } from "../../../src/types.js";
 function ctxWithGet(get: ReturnType<typeof vi.fn>): ToolContext {
   return {
     http: {
-      routing: { get, post: vi.fn(), patch: vi.fn(), delete: vi.fn() },
+      routing: {} as ToolContext["http"]["routing"],
       cameras: {} as ToolContext["http"]["cameras"],
       switchSvc: {} as ToolContext["http"]["switchSvc"],
       fileIndexer: {} as ToolContext["http"]["fileIndexer"],
       nextcloud: {} as ToolContext["http"]["nextcloud"],
+      orchestrator: { get, post: vi.fn(), patch: vi.fn(), delete: vi.fn() },
     },
     prisma: {} as ToolContext["prisma"],
     matter: {} as ToolContext["matter"],

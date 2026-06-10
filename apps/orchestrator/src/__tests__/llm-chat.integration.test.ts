@@ -26,6 +26,7 @@ vi.mock("../middleware/auth.js", () => ({
     next();
   },
   requireRole: () => (_req: Request, _res: Response, next: NextFunction) => next(),
+  requireRoleOrMcpService: () => (_req: Request, _res: Response, next: NextFunction) => next(),
   // BUG-11 follow-up: app.ts now installs requirePasswordChangeGate on
   // every request; stub it as a pass-through like requireRole.
   requirePasswordChangeGate: () => (_req: Request, _res: Response, next: NextFunction) => next(),
@@ -129,11 +130,14 @@ function parseSse(text: string): SseFrame[] {
 describe("/api/llm/chat (orchestrator agent loop)", () => {
   let app: express.Express;
 
+  // Importing app.js pulls the full route graph — over vitest's default 10s
+  // hookTimeout cold on a Windows laptop under parallel suite load. 30s
+  // matches stdio-roundtrip.test.ts's connect beforeAll.
   beforeAll(async () => {
     const { createApp } = await import("../app.js");
     const prisma = new PrismaClient();
     app = createApp(prisma);
-  });
+  }, 30_000);
 
   it("non-streaming returns AgentResult shape (assistant message + trace)", async () => {
     mockChat.mockResolvedValueOnce({

@@ -200,7 +200,14 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
   });
 
   // --- Confirm Tier 2/3 network command ---
-  router.post("/network/command/confirm", async (req, res, next) => {
+  // Human-only by design, mirroring /switch/command/confirm: with the MCP
+  // principal admitted to the Tier-2 mint routes (requireRoleOrMcpService),
+  // an unguarded confirm would let that principal consume its OWN token —
+  // confirmNetworkCommand's user-match check passes when minter and
+  // confirmer are the same id — and execute the write with no human in the
+  // loop. Every mint route is owner/admin (reboot owner-only), so
+  // owner/admin is the complete legitimate caller set.
+  router.post("/network/command/confirm", requireRole("owner", "admin"), async (req, res, next) => {
     try {
       const { confirmationToken, operation, entityId } = req.body;
       if (!confirmationToken || typeof confirmationToken !== "string") {

@@ -520,6 +520,34 @@ export function requireRole(
 }
 
 /**
+ * Variant of `requireRole` that ALSO admits the MCP server's service
+ * principal (`_service:mcp`) — that exact principal id, NOT the coarse
+ * "service" role shared by voice/email-indexer.
+ *
+ * Why: LLM network tools dispatch through the mcp-server, which calls
+ * back into the orchestrator's /api/network/* write routes presenting
+ * the WARP-339 service bearer. Those routes' own safety layer
+ * (`evaluateNetworkCommand`) still classifies, rate-limits, audits, and
+ * mints Tier-2 confirmation tokens for every call — this guard only
+ * lets the tool path REACH that layer instead of 403ing in front of it.
+ * Human RBAC is unchanged: chat users without owner/admin never see
+ * write tools (routes/llm.ts `narrowAllowedToolsForRole`), and external
+ * MCP clients pass per-tool RBAC at the mcp-server before any dispatch.
+ */
+export function requireRoleOrMcpService(
+  ...allowed: Role[]
+): (req: Request, res: Response, next: NextFunction) => void {
+  const base = requireRole(...allowed);
+  return (req: Request, res: Response, next: NextFunction): void => {
+    if (req.user?.id === "_service:mcp" && req.user.role === "service") {
+      next();
+      return;
+    }
+    base(req, res, next);
+  };
+}
+
+/**
  * WARP-824 — paths an authenticated-but-must-change-password session may
  * still reach. Everything else 403s `PASSWORD_CHANGE_REQUIRED` until the
  * user picks a new password.

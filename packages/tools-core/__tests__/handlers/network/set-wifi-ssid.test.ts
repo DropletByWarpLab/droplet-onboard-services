@@ -5,11 +5,12 @@ import type { ToolContext } from "../../../src/types.js";
 function ctxWithPost(post: ReturnType<typeof vi.fn>): ToolContext {
   return {
     http: {
-      routing: { get: vi.fn(), post, patch: vi.fn(), delete: vi.fn() },
+      routing: {} as ToolContext["http"]["routing"],
       cameras: {} as ToolContext["http"]["cameras"],
       switchSvc: {} as ToolContext["http"]["switchSvc"],
       fileIndexer: {} as ToolContext["http"]["fileIndexer"],
       nextcloud: {} as ToolContext["http"]["nextcloud"],
+      orchestrator: { get: vi.fn(), post, patch: vi.fn(), delete: vi.fn() },
     },
     prisma: {} as ToolContext["prisma"],
     matter: {} as ToolContext["matter"],
@@ -29,21 +30,29 @@ describe("set_wifi_ssid", () => {
     if (!r.ok) expect(r.error.code).toBe("INVALID_ARGS");
   });
 
-  it("returns confirmation_required on 202", async () => {
+  it("returns confirmation_required without confirmed: true — no HTTP call", async () => {
+    const post = vi.fn();
+    const r = await setWifiSsid.handler({ ssid: "MyNet" }, ctxWithPost(post));
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.status).toBe("confirmation_required");
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it("passes through an orchestrator 202 as confirmation_required", async () => {
     const post = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ reason: "needs confirmation" }), { status: 202 }),
     );
-    const r = await setWifiSsid.handler({ ssid: "MyNet" }, ctxWithPost(post));
+    const r = await setWifiSsid.handler({ ssid: "MyNet", confirmed: true }, ctxWithPost(post));
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.status).toBe("confirmation_required");
   });
 
-  it("posts ssid on success", async () => {
+  it("posts ssid to the orchestrator wifi route when confirmed", async () => {
     const post = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ ok: true }), { status: 200 }),
     );
-    const r = await setWifiSsid.handler({ ssid: "MyNet" }, ctxWithPost(post));
-    expect(post).toHaveBeenCalledWith("/wifi/ssid", { ssid: "MyNet" });
+    const r = await setWifiSsid.handler({ ssid: "MyNet", confirmed: true }, ctxWithPost(post));
+    expect(post).toHaveBeenCalledWith("/api/network/wifi/ssid", { ssid: "MyNet" });
     expect(r.ok).toBe(true);
   });
 });

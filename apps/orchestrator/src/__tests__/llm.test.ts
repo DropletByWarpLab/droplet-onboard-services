@@ -23,6 +23,7 @@ vi.mock("../middleware/auth.js", () => ({
     next();
   },
   requireRole: () => (_req: Request, _res: Response, next: NextFunction) => next(),
+  requireRoleOrMcpService: () => (_req: Request, _res: Response, next: NextFunction) => next(),
   // BUG-11 follow-up: app.ts now installs requirePasswordChangeGate on
   // every request; stub it as a pass-through like requireRole.
   requirePasswordChangeGate: () => (_req: Request, _res: Response, next: NextFunction) => next(),
