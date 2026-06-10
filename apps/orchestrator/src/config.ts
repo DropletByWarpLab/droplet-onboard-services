@@ -70,7 +70,10 @@ const envSchema = z.object({
   // All vars use DROPLET_PM_* prefix per architecture-guard rule 11.
   // Defaults work on a brand-new install OR fail loud (rule 14).
   DROPLET_PM_API_URL: z.string().url().default("http://pm-api:8000"),
-  DROPLET_PM_WEB_URL: z.string().url().default("https://droplet-ai.local/pm"),
+  // Plane's dedicated TLS origin (spec WARP-498 OQ2 amendment): the vanilla
+  // frontend is built with basePath:"" so it must own an origin root — the
+  // gateway serves it on :8443, not under /pm/.
+  DROPLET_PM_WEB_URL: z.string().url().default("https://droplet-ai.local:8443"),
   // tools-core handlers/pm/* use this for server-to-server LLM-driven tool
   // dispatch (WARP-508/509). Per-user attribution flows through Plane's
   // OIDC-linked service tokens, not this admin key.
