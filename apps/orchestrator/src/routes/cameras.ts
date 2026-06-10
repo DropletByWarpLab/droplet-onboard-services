@@ -751,6 +751,10 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         },
       });
 
+      // #11: same best-effort prune as accept/reject/delete — without it an
+      // add-only operator keeps stale orphaned Frigate entries forever.
+      await reconcileFrigateCameras();
+
       res.json({ status: "ok", camera: name });
     } catch (err) {
       next(err);
