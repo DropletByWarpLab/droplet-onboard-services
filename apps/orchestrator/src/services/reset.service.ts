@@ -48,15 +48,6 @@ const BRIDGE_URL = config.DEVICE_BRIDGE_URL;
 const DOMAIN = "system";
 const SERVICE = "factory_reset";
 
-/**
- * The fixed phrase the owner types to confirm a factory reset. A friendly,
- * memorable constant (WARP-825 follow-up) — the device hostname read as a
- * "random string" and was awkward to type or copy/paste. Server-owned so the
- * client still can't dictate the friction value; the canonical hostname is also
- * accepted (see requestFactoryReset) for backward compatibility.
- */
-export const FACTORY_RESET_CONFIRM_PHRASE = "factory reset";
-
 /** Structured error codes the route maps to HTTP statuses. */
 export type ResetErrorCode =
   | "CONFIRM_MISMATCH"
@@ -138,17 +129,16 @@ export async function requestFactoryReset(
   const { userId, typedConfirm, targetName } = input;
 
   // (1) Server-side friction. Never trust the client's gate alone. The owner
-  // confirms by typing the fixed phrase "factory reset"; the canonical device
-  // hostname is still accepted as a (stricter) alternative for backward
-  // compatibility. Either clears the human gate — the real boundary is the
+  // confirms by typing the device's canonical hostname — a PER-DEVICE value
+  // (2026-06-09 sweep: the previous fixed phrase "factory reset" was public
+  // in the repo, so any reader of the codebase knew every box's confirm
+  // value; a universal phrase removes exactly the per-device friction this
+  // gate exists to provide). The real authorization boundary is still the
   // route's owner-role check.
-  if (
-    !validateConfirmToken(typedConfirm, FACTORY_RESET_CONFIRM_PHRASE) &&
-    !validateConfirmToken(typedConfirm, targetName)
-  ) {
+  if (!validateConfirmToken(typedConfirm, targetName)) {
     throw new ResetError(
       "CONFIRM_MISMATCH",
-      'Type "factory reset" to confirm.',
+      "Type your device's name to confirm.",
     );
   }
 

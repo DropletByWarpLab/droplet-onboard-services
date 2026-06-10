@@ -108,7 +108,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockRole = "owner";
   fetchDrives.mockResolvedValue(feed());
-  getResetStatus.mockResolvedValue({ targetName: "droplet-home", job: null });
+  // The API returns only a MASKED hint of the device name (2026-06-09 sweep)
+  // — the owner types the real name from Settings → Device information.
+  getResetStatus.mockResolvedValue({ targetHint: "d••••••e", job: null });
   triggerFactoryReset.mockResolvedValue({
     status: "dispatched",
     id: "job-1",
@@ -292,19 +294,45 @@ describe("DangerZoneSection — reset flow (WARP-825)", () => {
     expect(screen.getAllByText(/first-run setup/i).length).toBeGreaterThan(0);
   });
 
-  it("calls triggerFactoryReset with the fixed 'factory reset' phrase and shows progress", async () => {
+  it("forwards the TYPED device name to the server and shows progress (server-validated confirm)", async () => {
     render(<DangerZoneSection />);
     await openModal();
 
-    // Type the fixed confirm phrase to clear the friction step.
+    // The modal shows only the masked hint — the owner types the real name.
     const input = await screen.findByLabelText(/type .* to confirm/i);
-    fireEvent.change(input, { target: { value: "factory reset" } });
+    fireEvent.change(input, { target: { value: "droplet-home" } });
 
     fireEvent.click(modalActionButton());
 
-    await waitFor(() => expect(triggerFactoryReset).toHaveBeenCalledWith("factory reset"));
+    await waitFor(() => expect(triggerFactoryReset).toHaveBeenCalledWith("droplet-home"));
     // Progress state mentions the box returning to first-run setup.
     await waitFor(() => expect(screen.getByText(/under way/i)).toBeInTheDocument());
+  });
+
+  it("never renders an exact copy/paste-able confirm phrase — only the masked hint", async () => {
+    render(<DangerZoneSection />);
+    await openModal();
+    await screen.findByLabelText(/type .* to confirm/i);
+    // The verbatim device name must not appear anywhere in the modal.
+    expect(screen.queryByText(/droplet-home/)).not.toBeInTheDocument();
+    expect(screen.getAllByText(/d••••••e/).length).toBeGreaterThan(0);
+  });
+
+  it("surfaces a server mismatch (CONFIRM_MISMATCH) for a wrong typed name", async () => {
+    triggerFactoryReset.mockRejectedValueOnce(
+      new Error("Type your device's name to confirm."),
+    );
+    render(<DangerZoneSection />);
+    await openModal();
+    fireEvent.change(await screen.findByLabelText(/type .* to confirm/i), {
+      target: { value: "wrong-name" },
+    });
+    fireEvent.click(modalActionButton());
+    expect(
+      await screen.findByText(/type your device's name to confirm/i),
+    ).toBeInTheDocument();
+    // Wrong guess never dispatched anything terminal — the modal stays open.
+    expect(screen.getByText(/factory reset this droplet/i)).toBeInTheDocument();
   });
 
   it("surfaces a server refusal (already in progress)", async () => {
@@ -314,7 +342,7 @@ describe("DangerZoneSection — reset flow (WARP-825)", () => {
     render(<DangerZoneSection />);
     await openModal();
     fireEvent.change(await screen.findByLabelText(/type .* to confirm/i), {
-      target: { value: "factory reset" },
+      target: { value: "droplet-home" },
     });
     fireEvent.click(modalActionButton());
     expect(await screen.findByText(/already in progress/i)).toBeInTheDocument();
