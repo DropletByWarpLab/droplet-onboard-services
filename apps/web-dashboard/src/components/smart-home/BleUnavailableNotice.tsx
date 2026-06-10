@@ -19,7 +19,7 @@ export function BleUnavailableNotice({ className }: { className?: string }) {
     <div
       role="note"
       data-testid="ble-unavailable-notice"
-      className={`flex items-start gap-2 px-3 py-2.5 bg-fill-quaternary border border-separator-default rounded-lg ${className ?? ""}`}
+      className={`flex items-start gap-2 px-3 py-2.5 bg-surface-secondary border border-separator rounded-lg ${className ?? ""}`}
     >
       <Info
         size={14}
