@@ -314,12 +314,16 @@ describe("requestFactoryReset — transaction isolation closes the TOCTOU window
     );
   });
 
-  it("maps a P2034 serialization failure to RESET_ALREADY_IN_PROGRESS and never dispatches", async () => {
+  it("maps a P2034 serialization failure to SERIALIZATION_CONFLICT and never dispatches", async () => {
     const { prisma, jobs } = makeFakePrisma();
     const fetchSpy = mockFetchOnce(200, { ok: true });
 
     // Model the LOSING side of two concurrent serializable transactions: the
     // engine aborts it with P2034 ("write conflict or deadlock, retry").
+    // This could be caused by an unrelated concurrent write (e.g. another
+    // action writing to CommandAuditLog) — not necessarily a duplicate reset.
+    // SERIALIZATION_CONFLICT → 503 "try again"; RESET_ALREADY_IN_PROGRESS
+    // is reserved for the explicit inFlight > 0 guard path.
     (prisma.$transaction as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
       Object.assign(new Error("Transaction failed due to a write conflict or a deadlock. Please retry your transaction"), {
         code: "P2034",
@@ -332,7 +336,7 @@ describe("requestFactoryReset — transaction isolation closes the TOCTOU window
         typedConfirm: "droplet-home",
         targetName: "droplet-home",
       }),
-    ).rejects.toMatchObject({ code: "RESET_ALREADY_IN_PROGRESS" });
+    ).rejects.toMatchObject({ code: "SERIALIZATION_CONFLICT" });
 
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(jobs).toHaveLength(0);

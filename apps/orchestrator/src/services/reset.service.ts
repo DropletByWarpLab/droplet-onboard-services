@@ -57,6 +57,7 @@ export const FACTORY_RESET_CONFIRM_PHRASE = "factory reset";
 export type ResetErrorCode =
   | "CONFIRM_MISMATCH"
   | "RESET_ALREADY_IN_PROGRESS"
+  | "SERIALIZATION_CONFLICT"
   | "BRIDGE_AUTH_UNCONFIGURED"
   | "BRIDGE_UNREACHABLE"
   | "BRIDGE_REFUSED";
@@ -207,12 +208,16 @@ export async function requestFactoryReset(
     );
   } catch (err) {
     if (isSerializationConflict(err)) {
-      // We lost the race against a concurrent reset request — the other
-      // transaction committed its job first, so "already in progress" is the
-      // honest answer (no row was written by this transaction; it rolled back).
+      // P2034 means the SERIALIZABLE snapshot collided with a concurrent
+      // writer. If that writer was another reset transaction the inFlight
+      // check above would have caught it first; reaching here means the
+      // conflict was an unrelated concurrent write (e.g. CommandAuditLog
+      // from a simultaneous smart-home action). Reserve
+      // RESET_ALREADY_IN_PROGRESS for the explicit inFlight > 0 path so
+      // the owner gets a truthful "try again" rather than a misleading 409.
       throw new ResetError(
-        "RESET_ALREADY_IN_PROGRESS",
-        "A factory reset is already in progress.",
+        "SERIALIZATION_CONFLICT",
+        "A transient conflict occurred; please try again.",
       );
     }
     throw err;

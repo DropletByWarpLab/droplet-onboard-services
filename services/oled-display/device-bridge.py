@@ -2203,11 +2203,29 @@ class Handler(BaseHTTPRequestHandler):
             # characters, require 1–32 chars, and reject a leading dash.
             if not isinstance(ssid, str):
                 ssid = ""
-            ssid = "".join(ch for ch in ssid if ord(ch) >= 32 and ord(ch) != 127)
-            if not ssid or len(ssid) > 32 or ssid.startswith("-"):
+            # Length check runs on the raw value (before stripping) so a 33-byte
+            # input that contains control chars isn't silently accepted after
+            # strip reduces it to 32 printable chars (802.11 limit is 32 bytes).
+            if not ssid or len(ssid) > 32:
                 return self._send(400, {
                     "ok": False,
                     "error": "invalid SSID (1-32 chars, no control characters, no leading dash)",
+                })
+            ssid = "".join(ch for ch in ssid if ord(ch) >= 32 and ord(ch) != 127)
+            if not ssid or ssid.startswith("-"):
+                return self._send(400, {
+                    "ok": False,
+                    "error": "invalid SSID (1-32 chars, no control characters, no leading dash)",
+                })
+            if not isinstance(password, str):
+                password = ""
+            # Mirror the hostapd host-script PSK gate: WPA2 PSK must be 8–63
+            # chars (IEEE 802.11 §H.4.1). An empty string means open-network
+            # (nmcli connect without a password keyword), which is allowed.
+            if password and (len(password) < 8 or len(password) > 63):
+                return self._send(400, {
+                    "ok": False,
+                    "error": "invalid password (8-63 chars for WPA2 PSK)",
                 })
             rc, out, err = _run(
                 ["nmcli", "device", "wifi", "connect", ssid] +
