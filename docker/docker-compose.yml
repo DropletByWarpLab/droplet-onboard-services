@@ -1612,6 +1612,14 @@ services:
       ROCR_VISIBLE_DEVICES: "0"
       OLLAMA_HOST: "0.0.0.0:11434"
       OLLAMA_KEEP_ALIVE: "24h"
+      # WARP-854: Ollama's baked-in default context is 4096 tokens. The
+      # owner-role agent loop ships ~80 tool schemas (~11k tokens of
+      # prompt), so the default overflowed before generation even began —
+      # Ollama returned finish_reason=length with ZERO output tokens and
+      # every dashboard chat surfaced as an instant empty answer. 16k
+      # fits tools + memory block + history while keeping gpt-oss:20b's
+      # KV cache fully resident on a 16 GB GPU.
+      OLLAMA_CONTEXT_LENGTH: "${OLLAMA_CONTEXT_LENGTH:-16384}"
     volumes:
       - ollama-data:/root/.ollama
     healthcheck:

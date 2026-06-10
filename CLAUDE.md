@@ -318,6 +318,7 @@ percent-escapes; store raw `Droplet123!`, not `Droplet123%21`).
 | `AI_GATEWAY_MEM_LIMIT` | AI gateway mem ceiling (default `512m`) |
 | `FRIGATE_MEM_LIMIT` | Frigate NVR mem ceiling (default `1g`) — raise for higher-resolution streams |
 | `OLLAMA_MEM_LIMIT` | Ollama LLM inference mem ceiling (default `4g`) — raise for larger models |
+| `OLLAMA_CONTEXT_LENGTH` | Context window for the bundled single-box Ollama (default `16384`). Ollama's own default is 4096, which the owner-role tool schemas alone overflow — symptom: instant empty chat answers (WARP-854) |
 | `OLLAMA_CPUS` | Ollama CPU ceiling (default `4.0`) |
 | `WHISPER_MEM_LIMIT` | Wyoming Whisper STT mem ceiling (default `1g`) — small.en model is ~470 MB |
 | (other `*_MEM_LIMIT` / `*_CPUS`) | Per-service overrides for every container. See `docs/ADR-012-container-resource-limits.md` for the full list and RAM budget. |
