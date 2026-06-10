@@ -29,13 +29,13 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   const body: Record<string, string> = { mac };
   if (typeof args.name === "string") body.name = args.name;
 
-  const res = await ctx.http.routing.post("/firewall/block", body);
+  const res = await ctx.http.orchestrator.post("/api/network/firewall/block", body);
   if (isConfirmationResponse(res)) return passThroughConfirmation(res);
   if (!res.ok) {
     return {
       ok: false,
       status: "error",
-      error: { code: "BLOCK_FAILED", message: `routing returned ${res.status}` },
+      error: { code: "BLOCK_FAILED", message: `orchestrator returned ${res.status}` },
     };
   }
   const data = await res.json();

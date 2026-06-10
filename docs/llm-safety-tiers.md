@@ -58,6 +58,14 @@ Tokens expire after 60 seconds. Each confirmation is logged to the audit trail.
 | `reboot` | **3** | Service interruption |
 | `factory_reset` | **3** | Total data loss |
 
+Enforcement detail: `set_wifi_ssid` / `set_wifi_channel` confirmations are
+enforced **in the tool handler** — the orchestrator's human-facing SSID/channel
+routes are Tier 1 (the setup wizard applies them with no confirmation, see
+`SETUP_WIZARD_WALKTHROUGH.md`), so the tool refuses to post until the LLM
+re-calls it with `confirmed: true` after an explicit user yes in chat. The
+firewall writes get their 202 + token from the orchestrator's network-safety
+evaluator as described above.
+
 ## Protected Port
 
 The `SWITCH_PROTECTED_PORT` environment variable designates the switch port the Jetson is connected to. Disabling this port is classified as Tier 3 (blocked for AI), preventing the LLM from ever severing its own management connection.

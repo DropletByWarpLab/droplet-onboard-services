@@ -10,12 +10,12 @@ interface RawLease {
 }
 
 async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-  const res = await ctx.http.routing.get("/dhcp/leases", { headers: { Accept: "application/json" } });
+  const res = await ctx.http.orchestrator.get("/api/network/dhcp/leases", { headers: { Accept: "application/json" } });
   if (!res.ok) {
     return {
       ok: false,
       status: "error",
-      error: { code: "ROUTING_UNAVAILABLE", message: `routing service returned ${res.status}` },
+      error: { code: "ROUTING_UNAVAILABLE", message: `orchestrator returned ${res.status}` },
     };
   }
   const body = (await res.json()) as { leases?: RawLease[] } | RawLease[];

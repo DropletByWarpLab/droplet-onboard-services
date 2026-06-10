@@ -11,7 +11,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
-import { requireRole } from "../middleware/auth.js";
+import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 
 const sampleSchema = z.object({
   wanDownBps: z.union([
@@ -56,7 +56,10 @@ export function createNetworkThroughputRouter(prisma: PrismaClient): Router {
 
   router.get(
     "/network/summary",
-    requireRole("owner", "admin", "family", "guest"),
+    // Read-only KPI rollup. The MCP principal is admitted so the LLM's
+    // `network_summary` tool (tools-core handlers/network/summary.ts)
+    // reaches it — same posture as the aps.ts reads.
+    requireRoleOrMcpService("owner", "admin", "family", "guest"),
     async (_req, res, next) => {
       try {
         // Match the canonical ONLINE_WINDOW_MS = 2min from

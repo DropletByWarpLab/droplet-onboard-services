@@ -85,13 +85,13 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     dest_port: args.dest_port as string,
     proto,
   };
-  const res = await ctx.http.routing.post("/firewall/port-forward", body);
+  const res = await ctx.http.orchestrator.post("/api/network/firewall/port-forward", body);
   if (isConfirmationResponse(res)) return passThroughConfirmation(res);
   if (!res.ok) {
     return {
       ok: false,
       status: "error",
-      error: { code: "PORT_FORWARD_FAILED", message: `routing returned ${res.status}` },
+      error: { code: "PORT_FORWARD_FAILED", message: `orchestrator returned ${res.status}` },
     };
   }
   const data = await res.json();
