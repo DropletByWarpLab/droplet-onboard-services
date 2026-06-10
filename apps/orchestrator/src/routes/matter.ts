@@ -36,6 +36,14 @@ function isValidNodeId(id: string): boolean {
 }
 
 /**
+ * WARP-851: shared copy for every "the box can't see the device on the
+ * network" failure mode. Used by both the explicit discovery-failure
+ * branch and the generic network/BLE branch below.
+ */
+const NETWORK_DISCOVERY_COPY =
+  "Couldn't find the device on the network. Make sure it's powered on, in pairing mode, and on the same Wi-Fi as the Droplet.";
+
+/**
  * WARP-102: translate matter.js commissioning errors into customer-
  * facing strings + an `internalReason` for operator debugging.
  *
@@ -48,8 +56,10 @@ function isValidNodeId(id: string): boolean {
  * error-code surface because matter.js doesn't export one yet
  * (project-chip/matter.js#1438). Promote to a typed enum once that
  * upstream issue ships.
+ *
+ * Exported for unit tests (matter.commission-errors.test.ts).
  */
-function translateCommissionError(err: unknown): {
+export function translateCommissionError(err: unknown): {
   status: number;
   message: string;
   internalReason: string;
@@ -71,6 +81,22 @@ function translateCommissionError(err: unknown): {
       // promise a universal sequence — point the user at the device's
       // own instructions.
       message: "This device is already paired with the Droplet. Open it from the Devices page, or factory-reset it following the device's instructions if you want to re-pair.",
+      internalReason: raw,
+    };
+  }
+  // WARP-851: mDNS/BLE discovery found nothing before the waiter
+  // expired. matter.js (@matter/protocol ControllerDiscovery) throws
+  // CommissionableDeviceDiscoveryFailedError with "No device discovered
+  // using identifier {…}! Please check that the relevant device is
+  // online." — note "discovered", which the generic /discovery/ pattern
+  // below does NOT match, so this used to fall through to the 500 whose
+  // copy says to factory-reset the device. On a box that can't hear the
+  // device (no BLE, no LAN mDNS — see WARP-850), that advice is harmful:
+  // resetting the customer's device can never fix the box's reachability.
+  if (/no device discovered|check that the relevant device is online/i.test(raw)) {
+    return {
+      status: 502,
+      message: NETWORK_DISCOVERY_COPY,
       internalReason: raw,
     };
   }
@@ -97,7 +123,7 @@ function translateCommissionError(err: unknown): {
   if (/network|wifi|wi-?fi|ble|bluetooth|discovery/i.test(raw)) {
     return {
       status: 502,
-      message: "Couldn't find the device on the network. Make sure it's powered on, in pairing mode, and on the same Wi-Fi as the Droplet.",
+      message: NETWORK_DISCOVERY_COPY,
       internalReason: raw,
     };
   }
