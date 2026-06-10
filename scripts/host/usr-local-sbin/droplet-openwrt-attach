@@ -726,6 +726,17 @@ ETHWD
   # while everything else passes through to the real internet.
   nft add rule ip nat prerouting iifname \"$AP_IFACE\" ip daddr 192.168.20.1 tcp dport 443 dnat to ${GATEWAY_IP}:443
   nft add rule ip nat prerouting iifname \"$AP_IFACE\" ip daddr 192.168.20.1 tcp dport 80  dnat to ${GATEWAY_IP}:80
+  # WireGuard remote-access clients land on the same dashboard. Their peer
+  # .conf (apps/orchestrator/src/services/vpn.service.ts) advertises
+  # AllowedIPs = 192.168.20.0/24 + the tunnel subnet and DNS = 192.168.20.1,
+  # so a connected phone's only route to the dashboard is
+  # https://192.168.20.1 — which arrives on wg0, not $AP_IFACE. Without
+  # these two mirror rules the AP-scoped DNAT above never matches VPN
+  # ingress and the dashboard is unreachable over the tunnel even with a
+  # healthy handshake (observed on the .87 single-box, 2026-06-10). Same
+  # daddr predicate, same hijack-avoidance rationale.
+  nft add rule ip nat prerouting iifname \"wg0\" ip daddr 192.168.20.1 tcp dport 443 dnat to ${GATEWAY_IP}:443
+  nft add rule ip nat prerouting iifname \"wg0\" ip daddr 192.168.20.1 tcp dport 80  dnat to ${GATEWAY_IP}:80
   # ----------------------------------------------------------------------
 
   # Stop procd dnsmasq so our manual one can bind 192.168.20.1
