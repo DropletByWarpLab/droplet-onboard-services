@@ -167,11 +167,16 @@ export class ChatPersistenceService {
      *  any message's content, case-insensitively. Whitespace-only is
      *  treated as absent (back-compat unfiltered list). */
     q?: string,
+    /** WARP-845 — restrict to one project's chats (the sidebar fetches a
+     *  folder's full contents on expand, independent of the main list's
+     *  pagination window). */
+    projectId?: string,
   ): Promise<PersistedConversationSummary[]> {
     const search = q?.trim();
     const rows = await this.prisma.chatSession.findMany({
       where: {
         userId,
+        ...(projectId ? { projectId } : {}),
         ...(search
           ? {
               OR: [
@@ -280,7 +285,10 @@ export class ChatPersistenceService {
     });
     if (!session) return false;
     const r = await this.prisma.chatMessage.updateMany({
-      where: { id: messageId, sessionId: conversationId },
+      // role-gated: only assistant turns are ratable — a rated user row
+      // would inflate the admin feedback counts while never being
+      // listable (the admin surface pairs assistant turns with prompts).
+      where: { id: messageId, sessionId: conversationId, role: "assistant" },
       data: { feedback },
     });
     return r.count > 0;

@@ -222,6 +222,22 @@ describe("useConversationList", () => {
     expect(result.current.error).not.toBeNull();
   });
 
+  it("mergeRows appends only unknown rows (WARP-845 fetch-on-expand)", async () => {
+    listConversationsMock.mockResolvedValue([row("a")]);
+    const { result } = renderHook(() => useConversationList());
+    await waitFor(() => expect(result.current.flat.length).toBe(1));
+
+    act(() => {
+      result.current.mergeRows([
+        { ...row("a"), title: "stale-dupe" }, // already known — dropped
+        { ...row("old"), projectId: "p1" },
+      ]);
+    });
+    expect(result.current.flat.map((c) => c.id)).toEqual(["a", "old"]);
+    // The known row keeps its existing (possibly optimistic) state.
+    expect(result.current.flat[0].title).toBe("chat-a");
+  });
+
   it("clearProjectLocally ungroups a deleted project's chats (WARP-845)", async () => {
     listConversationsMock.mockResolvedValue([
       { ...row("a"), projectId: "p1" },

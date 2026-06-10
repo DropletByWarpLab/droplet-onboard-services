@@ -41,9 +41,16 @@ function createProjectsPrisma(seed: ProjectRow[] = []) {
           .map((r) => ({ ...r, _count: { sessions: 2 } })),
       ),
       findFirst: vi.fn(
-        async ({ where }: { where: { id: string; userId: string } }) =>
-          rows.find((r) => r.id === where.id && r.userId === where.userId) ??
-          null,
+        async ({ where }: { where: { id: string; userId?: string } }) => {
+          const r = rows.find(
+            (x) =>
+              x.id === where.id &&
+              (where.userId === undefined || x.userId === where.userId),
+          );
+          // The PATCH read-back includes _count; harmless extra for the
+          // ownership lookups that don't ask for it.
+          return r ? { ...r, _count: { sessions: 2 } } : null;
+        },
       ),
       create: vi.fn(async ({ data }: { data: Partial<ProjectRow> }) => {
         const row: ProjectRow = {
@@ -145,6 +152,24 @@ describe("WARP-845 — /api/llm/projects CRUD", () => {
       name: "Recipes",
       systemPrompt: "You are a chef.",
     });
+    // Review fix: POST returns the same DTO shape as GET — chatCount
+    // present (0 for a fresh project), no userId leak.
+    expect(res.body.project).toMatchObject({ name: "Recipes", chatCount: 0 });
+    expect(res.body.project).not.toHaveProperty("userId");
+  });
+
+  it("PATCH returns the mapped DTO (chatCount, no userId)", async () => {
+    const prisma = createProjectsPrisma([project({ id: "p1", userId: "alice" })]);
+    const res = await request(buildApp(prisma, "alice"))
+      .patch("/api/llm/projects/p1")
+      .send({ name: "Renamed" });
+    expect(res.status).toBe(200);
+    expect(res.body.project).toMatchObject({
+      id: "p1",
+      name: "Renamed",
+      chatCount: 2,
+    });
+    expect(res.body.project).not.toHaveProperty("userId");
   });
 
   it("PATCH/DELETE refuse foreign projects with 404", async () => {

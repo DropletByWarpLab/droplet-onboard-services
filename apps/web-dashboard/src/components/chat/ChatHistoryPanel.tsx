@@ -1,7 +1,15 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { ChevronRight, Folder, FolderPlus, Plus, Search, Trash2, X } from "lucide-react";
+import {
+  ChevronRight,
+  Folder,
+  FolderPlus,
+  Plus,
+  Search,
+  Trash2,
+  X,
+} from "lucide-react";
 import { Dialog } from "@/components/Dialog";
 import { useToast } from "@/components/Toast";
 import { useConversationList } from "@/lib/hooks/useConversationList";
@@ -13,6 +21,7 @@ import {
   createChatProject,
   deleteChatProject,
   listChatProjects,
+  listConversations,
   type ChatProject,
 } from "@/lib/api";
 import { groupConversationsByDate } from "@/lib/group-conversations-by-date";
@@ -46,8 +55,10 @@ export function ChatHistoryPanel({
     isLoading,
     error,
     loadMore,
+    search,
     setSearch,
     optimisticInsert,
+    mergeRows,
     applyTurnCompleted,
     rename,
     remove,
@@ -62,16 +73,25 @@ export function ChatHistoryPanel({
     return () => clearTimeout(t);
   }, [searchDraft, setSearch]);
   const { toast } = useToast();
-  const [pendingDelete, setPendingDelete] = useState<ConversationSummary | null>(null);
+  const [pendingDelete, setPendingDelete] =
+    useState<ConversationSummary | null>(null);
   // ── WARP-845 — projects state ──
   const [projects, setProjects] = useState<ChatProject[]>([]);
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(
     () => new Set(),
   );
   const [newProjectDraft, setNewProjectDraft] = useState<string | null>(null);
-  const [pendingMove, setPendingMove] = useState<ConversationSummary | null>(null);
+  const [pendingMove, setPendingMove] = useState<ConversationSummary | null>(
+    null,
+  );
   const [pendingProjectDelete, setPendingProjectDelete] =
     useState<ChatProject | null>(null);
+  // Projects whose full contents have been fetched (on first expand).
+  // Until then the folder count comes from the server's chatCount —
+  // `flat` only holds the paginated main-list window.
+  const [fetchedProjects, setFetchedProjects] = useState<Set<string>>(
+    () => new Set(),
+  );
 
   const loadProjects = async () => {
     try {
@@ -121,15 +141,42 @@ export function ChatHistoryPanel({
     setPendingMove(null);
     if (!target) return;
     await moveToProject(target.id, projectId);
+    // Folder counts for collapsed projects come from the server — keep
+    // them honest after a move without bookkeeping deltas locally.
+    void loadProjects();
   };
 
   const toggleProject = (id: string) => {
+    const opening = !expandedProjects.has(id);
     setExpandedProjects((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
       return next;
     });
+    // First expand: pull the folder's full contents — the paginated main
+    // list may not have loaded chats older than its current window.
+    if (opening && !fetchedProjects.has(id)) {
+      setFetchedProjects((prev) => new Set(prev).add(id));
+      void (async () => {
+        try {
+          const rows = await listConversations({
+            limit: 100,
+            offset: 0,
+            projectId: id,
+          });
+          mergeRows(rows);
+        } catch {
+          // Non-fatal: the folder still shows whatever the main window
+          // has; allow a retry on next expand.
+          setFetchedProjects((prev) => {
+            const next = new Set(prev);
+            next.delete(id);
+            return next;
+          });
+        }
+      })();
+    }
   };
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const deleteHeadingId = "chat-history-delete-heading";
@@ -196,12 +243,19 @@ export function ChatHistoryPanel({
 
   // WARP-845 — project-grouped vs ungrouped chats. Date groups only show
   // chats without a project; project chats nest under their folder.
+  // While SEARCHING, project membership is ignored: every match renders
+  // in the date groups so a chat filed in a collapsed folder is still
+  // findable (the projects section hides for the same reason).
   const ungroupedGroups = groupConversationsByDate(
-    flat.filter((c) => !c.projectId),
+    search ? flat : flat.filter((c) => !c.projectId),
     new Date(),
   );
+  // Newest-first inside a folder: fetch-on-expand merges older rows at
+  // the END of `flat`, so folder order can't just inherit list order.
   const chatsInProject = (projectId: string) =>
-    flat.filter((c) => c.projectId === projectId);
+    flat
+      .filter((c) => c.projectId === projectId)
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 
   return (
     <div className="flex flex-col h-full">
@@ -227,143 +281,171 @@ export function ChatHistoryPanel({
             <FolderPlus size={15} aria-hidden="true" />
           </button>
           <div className="relative flex-1">
-          <Search
-            size={14}
-            aria-hidden="true"
-            className="absolute left-2.5 top-1/2 -translate-y-1/2 text-label-tertiary pointer-events-none"
-          />
-          <input
-            type="search"
-            value={searchDraft}
-            onChange={(e) => setSearchDraft(e.target.value)}
-            placeholder="Search chats…"
-            aria-label="Search chats"
-            className="dp-input type-footnote h-8 w-full pl-8 pr-7"
-          />
-          {searchDraft && (
-            <button
-              type="button"
-              onClick={() => setSearchDraft("")}
-              aria-label="Clear search"
-              className="absolute right-1.5 top-1/2 -translate-y-1/2 p-1 rounded-sm text-label-tertiary hover:text-label-primary"
-            >
-              <X size={12} aria-hidden="true" />
-            </button>
-          )}
+            <Search
+              size={14}
+              aria-hidden="true"
+              className="absolute left-2.5 top-1/2 -translate-y-1/2 text-label-tertiary pointer-events-none"
+            />
+            <input
+              type="search"
+              value={searchDraft}
+              onChange={(e) => setSearchDraft(e.target.value)}
+              placeholder="Search chats…"
+              aria-label="Search chats"
+              className="dp-input type-footnote h-8 w-full pl-8 pr-7"
+            />
+            {searchDraft && (
+              <button
+                type="button"
+                onClick={() => setSearchDraft("")}
+                aria-label="Clear search"
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 p-1 rounded-sm text-label-tertiary hover:text-label-primary"
+              >
+                <X size={12} aria-hidden="true" />
+              </button>
+            )}
           </div>
         </div>
       </div>
 
       <div className="flex-1 overflow-y-auto px-2 py-2">
-        {isLoading && flat.length === 0 ? (
-          <div className="px-2 py-4 type-footnote text-label-tertiary">Loading chats…</div>
-        ) : error ? (
-          <div className="px-2 py-4 type-footnote text-system-red">{error}</div>
-        ) : flat.length === 0 ? (
-          <div className="px-2 py-8 text-center type-footnote text-label-tertiary">
-            No chats yet. Start by asking something below.
+        {/* Error renders as a banner so a single failed action (e.g. one
+            move PATCH) doesn't blank the whole sidebar. */}
+        {error && (
+          <div
+            role="alert"
+            className="px-2 py-2 mb-2 rounded-md bg-system-red/10 type-footnote text-system-red"
+          >
+            {error}
           </div>
-        ) : (
-          <>
-            {/* WARP-845 — projects (per-user folders) above the date groups. */}
-            {(projects.length > 0 || newProjectDraft !== null) && (
-              <div className="mb-3">
-                <div className="px-2 py-1 flex items-center justify-between">
-                  <span className="type-caption-2 text-label-tertiary uppercase tracking-wide">
-                    Projects
-                  </span>
-                </div>
-                <div className="space-y-0.5">
-                  {projects.map((project) => {
-                    const chats = chatsInProject(project.id);
-                    const expanded = expandedProjects.has(project.id);
-                    return (
-                      <div key={project.id}>
-                        <div className="group/project relative">
-                          <button
-                            type="button"
-                            onClick={() => toggleProject(project.id)}
-                            aria-expanded={expanded}
-                            className="w-full text-left px-2 h-8 rounded-md type-footnote
+        )}
+        {/* WARP-845 — projects (per-user folders) above the date groups.
+            Rendered even with zero chats (a fresh user's first move may
+            well be "create a project"); hidden while searching, when all
+            matches surface in the date groups instead. */}
+        {!search && (projects.length > 0 || newProjectDraft !== null) && (
+          <div className="mb-3">
+            <div className="px-2 py-1 flex items-center justify-between">
+              <span className="type-caption-2 text-label-tertiary uppercase tracking-wide">
+                Projects
+              </span>
+            </div>
+            <div className="space-y-0.5">
+              {projects.map((project) => {
+                const chats = chatsInProject(project.id);
+                const expanded = expandedProjects.has(project.id);
+                return (
+                  <div key={project.id}>
+                    <div className="group/project relative">
+                      <button
+                        type="button"
+                        onClick={() => toggleProject(project.id)}
+                        aria-expanded={expanded}
+                        className="w-full text-left px-2 h-8 rounded-md type-footnote
                               flex items-center gap-1.5 text-label-secondary
                               hover:bg-surface-secondary hover:text-label-primary transition-colors"
+                      >
+                        <ChevronRight
+                          size={12}
+                          aria-hidden="true"
+                          className={`flex-none transition-transform duration-150 ${expanded ? "rotate-90" : ""}`}
+                        />
+                        <Folder
+                          size={13}
+                          aria-hidden="true"
+                          className="flex-none text-label-tertiary"
+                        />
+                        <span className="truncate flex-1">{project.name}</span>
+                        <span className="flex-none type-caption-2 text-label-quaternary">
+                          {fetchedProjects.has(project.id)
+                            ? chats.length
+                            : project.chatCount}
+                        </span>
+                      </button>
+                      {/* opacity (not display:none) so the buttons stay
+                              keyboard-reachable — matches ChatHistoryRow. */}
+                      <div className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-0.5 bg-surface-secondary rounded opacity-0 group-hover/project:opacity-100 focus-within:opacity-100 transition-opacity">
+                        {onNewChatInProject && (
+                          <button
+                            type="button"
+                            onClick={() => onNewChatInProject(project)}
+                            aria-label={`New chat in ${project.name}`}
+                            className="p-1 rounded text-label-tertiary hover:text-label-primary"
                           >
-                            <ChevronRight
-                              size={12}
-                              aria-hidden="true"
-                              className={`flex-none transition-transform duration-150 ${expanded ? "rotate-90" : ""}`}
-                            />
-                            <Folder size={13} aria-hidden="true" className="flex-none text-label-tertiary" />
-                            <span className="truncate flex-1">{project.name}</span>
-                            <span className="flex-none type-caption-2 text-label-quaternary">
-                              {chats.length}
-                            </span>
+                            <Plus size={12} aria-hidden="true" />
                           </button>
-                          <div className="absolute right-1 top-1/2 -translate-y-1/2 hidden group-hover/project:flex items-center gap-0.5 bg-surface-secondary rounded">
-                            {onNewChatInProject && (
-                              <button
-                                type="button"
-                                onClick={() => onNewChatInProject(project)}
-                                aria-label={`New chat in ${project.name}`}
-                                className="p-1 rounded text-label-tertiary hover:text-label-primary"
-                              >
-                                <Plus size={12} aria-hidden="true" />
-                              </button>
-                            )}
-                            <button
-                              type="button"
-                              onClick={() => setPendingProjectDelete(project)}
-                              aria-label={`Delete project ${project.name}`}
-                              className="p-1 rounded text-label-tertiary hover:text-system-red"
-                            >
-                              <Trash2 size={12} aria-hidden="true" />
-                            </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setPendingProjectDelete(project)}
+                          aria-label={`Delete project ${project.name}`}
+                          className="p-1 rounded text-label-tertiary hover:text-system-red"
+                        >
+                          <Trash2 size={12} aria-hidden="true" />
+                        </button>
+                      </div>
+                    </div>
+                    {expanded && (
+                      <div className="ml-4 space-y-0.5">
+                        {chats.length === 0 ? (
+                          <div className="px-2 py-1 type-caption-1 text-label-quaternary">
+                            No chats yet
                           </div>
-                        </div>
-                        {expanded && (
-                          <div className="ml-4 space-y-0.5">
-                            {chats.length === 0 ? (
-                              <div className="px-2 py-1 type-caption-1 text-label-quaternary">
-                                No chats yet
-                              </div>
-                            ) : (
-                              chats.map((item) => (
-                                <ChatHistoryRow
-                                  key={item.id}
-                                  id={item.id}
-                                  title={item.title}
-                                  active={item.id === activeConversationId}
-                                  onSelect={() => onSelect(item.id)}
-                                  onRenameSubmit={(title) => handleRename(item.id, title)}
-                                  onDeleteRequest={() => setPendingDelete(item)}
-                                  onExport={() => void handleExport(item.id)}
-                                  onMoveRequest={() => setPendingMove(item)}
-                                />
-                              ))
-                            )}
-                          </div>
+                        ) : (
+                          chats.map((item) => (
+                            <ChatHistoryRow
+                              key={item.id}
+                              id={item.id}
+                              title={item.title}
+                              active={item.id === activeConversationId}
+                              onSelect={() => onSelect(item.id)}
+                              onRenameSubmit={(title) =>
+                                handleRename(item.id, title)
+                              }
+                              onDeleteRequest={() => setPendingDelete(item)}
+                              onExport={() => void handleExport(item.id)}
+                              onMoveRequest={() => setPendingMove(item)}
+                            />
+                          ))
                         )}
                       </div>
-                    );
-                  })}
-                  {newProjectDraft !== null && (
-                    <input
-                      autoFocus
-                      value={newProjectDraft}
-                      onChange={(e) => setNewProjectDraft(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") void handleCreateProject(newProjectDraft);
-                        else if (e.key === "Escape") setNewProjectDraft(null);
-                      }}
-                      onBlur={() => void handleCreateProject(newProjectDraft)}
-                      placeholder="Project name…"
-                      aria-label="New project name"
-                      className="dp-input type-footnote h-8 w-full"
-                    />
-                  )}
-                </div>
-              </div>
-            )}
+                    )}
+                  </div>
+                );
+              })}
+              {newProjectDraft !== null && (
+                <input
+                  autoFocus
+                  value={newProjectDraft}
+                  onChange={(e) => setNewProjectDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter")
+                      void handleCreateProject(newProjectDraft);
+                    else if (e.key === "Escape") setNewProjectDraft(null);
+                  }}
+                  onBlur={() => void handleCreateProject(newProjectDraft)}
+                  placeholder="Project name…"
+                  aria-label="New project name"
+                  className="dp-input type-footnote h-8 w-full"
+                />
+              )}
+            </div>
+          </div>
+        )}
+        {isLoading && flat.length === 0 ? (
+          <div className="px-2 py-4 type-footnote text-label-tertiary">
+            Loading chats…
+          </div>
+        ) : flat.length === 0 ? (
+          !error && (
+            <div className="px-2 py-8 text-center type-footnote text-label-tertiary">
+              {search
+                ? "No chats match your search."
+                : "No chats yet. Start by asking something below."}
+            </div>
+          )
+        ) : (
+          <>
             {ungroupedGroups.map((group) => (
               <div key={group.label} className="mb-3">
                 <div className="px-2 py-1 type-caption-2 text-label-tertiary uppercase tracking-wide">
@@ -402,8 +484,8 @@ export function ChatHistoryPanel({
             Delete this chat?
           </h2>
           <p className="type-subheadline text-label-secondary mb-4">
-            &ldquo;{pendingDelete?.title?.trim() || "Untitled chat"}&rdquo; will be permanently removed.
-            This can&rsquo;t be undone.
+            &ldquo;{pendingDelete?.title?.trim() || "Untitled chat"}&rdquo; will
+            be permanently removed. This can&rsquo;t be undone.
           </p>
           <div className="flex justify-end gap-2">
             <button
@@ -446,7 +528,11 @@ export function ChatHistoryPanel({
                   flex items-center gap-2 text-label-primary
                   hover:bg-surface-secondary transition-colors"
               >
-                <Folder size={14} aria-hidden="true" className="text-label-tertiary" />
+                <Folder
+                  size={14}
+                  aria-hidden="true"
+                  className="text-label-tertiary"
+                />
                 {p.name}
               </button>
             ))}

@@ -443,14 +443,16 @@ migrate_env() {
   #             (need /dev/dri or /dev/snd, gated on Linux only)
   #   display → oled-display status display (safe default via sim fallback
   #             when /dev/ttyACM* is absent)
+  #   eval    → rag-eval (RAGAS) — standard in every env (WARP-845), so
+  #             macOS dev defaults to "eval" alone
   # `full` (switch, camera-discovery) is intentionally not in the default —
   # both need real hardware + credentials. Operator opts in via .env.
   #
   # Only appended when missing — existing installs that pinned a narrower
   # COMPOSE_PROFILES keep their value. To pull in the new default, edit
-  # .env manually: COMPOSE_PROFILES=linux,display
-  local compose_profiles_default=""
-  [ "$(uname)" = "Linux" ] && compose_profiles_default="linux,display"
+  # .env manually: COMPOSE_PROFILES=linux,display,eval
+  local compose_profiles_default="eval"
+  [ "$(uname)" = "Linux" ] && compose_profiles_default="linux,display,eval"
 
   _migrate_ensure_key ROUTING_SERVICE_TOKEN "$(openssl rand -hex 32)"
   _migrate_ensure_key ROUTING_MODE "$routing_mode_default"

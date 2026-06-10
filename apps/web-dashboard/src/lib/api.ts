@@ -2297,12 +2297,15 @@ export async function listConversations(args: {
   offset: number;
   /** WARP-844 — search needle matching the title or any message content. */
   q?: string;
+  /** WARP-845 — restrict to one project's chats (sidebar folder expand). */
+  projectId?: string;
 }): Promise<ConversationSummary[]> {
   const qs = new URLSearchParams({
     limit: String(args.limit),
     offset: String(args.offset),
   });
   if (args.q) qs.set("q", args.q);
+  if (args.projectId) qs.set("projectId", args.projectId);
   const res = await authFetch(`${BASE}/api/llm/conversations?${qs}`);
   if (!res.ok) throw new Error(`Failed to list conversations: ${res.status}`);
   const body = (await res.json()) as { conversations: ConversationSummary[] };

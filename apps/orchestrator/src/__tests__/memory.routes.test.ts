@@ -76,10 +76,19 @@ function createPrismaMock(seed: MockFact[] = []) {
         return created;
       }),
       updateMany: vi.fn(
-        async ({ where, data }: { where: { id: string }; data: Partial<MockFact> }) => {
+        async ({
+          where,
+          data,
+        }: {
+          where: { id: string; audience?: { in: string[] } };
+          data: Partial<MockFact>;
+        }) => {
           let count = 0;
           for (const r of rows) {
-            if (r.id === where.id) {
+            if (
+              r.id === where.id &&
+              (!where.audience || where.audience.in.includes(r.audience))
+            ) {
               Object.assign(r, data, { updatedAt: new Date() });
               count++;
             }
@@ -87,18 +96,27 @@ function createPrismaMock(seed: MockFact[] = []) {
           return { count };
         },
       ),
-      findUniqueOrThrow: vi.fn(async ({ where }: { where: { id: string } }) => {
-        const r = rows.find((x) => x.id === where.id);
-        if (!r) throw new Error("not found");
-        return r;
+      findFirst: vi.fn(async ({ where }: { where: { id: string } }) => {
+        return rows.find((x) => x.id === where.id) ?? null;
       }),
-      deleteMany: vi.fn(async ({ where }: { where: { id: string } }) => {
-        const before = rows.length;
-        for (let i = rows.length - 1; i >= 0; i--) {
-          if (rows[i]!.id === where.id) rows.splice(i, 1);
-        }
-        return { count: before - rows.length };
-      }),
+      deleteMany: vi.fn(
+        async ({
+          where,
+        }: {
+          where: { id: string; audience?: { in: string[] } };
+        }) => {
+          const before = rows.length;
+          for (let i = rows.length - 1; i >= 0; i--) {
+            if (
+              rows[i]!.id === where.id &&
+              (!where.audience || where.audience.in.includes(rows[i]!.audience))
+            ) {
+              rows.splice(i, 1);
+            }
+          }
+          return { count: before - rows.length };
+        },
+      ),
     },
   };
 }
@@ -287,5 +305,38 @@ describe("WARP-845 — role-scoped audiences", () => {
       .send({ audience: "guest" });
     expect(ok.status).toBe(200);
     expect(prisma.rows[0]!.audience).toBe("guest");
+  });
+
+  // Review fix — writes are audience-scoped like reads, so a family
+  // caller can't touch (or read back via a no-op PATCH) an owner-only
+  // fact whose id leaked. Indistinguishable from a missing row (404).
+  it("family PATCH/DELETE on an out-of-rank fact 404 without leaking it", async () => {
+    const prisma = createPrismaMock([
+      seedFact({ id: "f-owner", audience: "owner", fact: "owner secret" }),
+    ]);
+    const app = buildApp(prisma, { username: "kid", role: "family" });
+
+    const patched = await request(app)
+      .patch("/api/memory/facts/f-owner")
+      .send({ active: false });
+    expect(patched.status).toBe(404);
+    expect(JSON.stringify(patched.body)).not.toContain("owner secret");
+    expect(prisma.rows[0]!.active).toBe(true);
+
+    const deleted = await request(app).delete("/api/memory/facts/f-owner");
+    expect(deleted.status).toBe(404);
+    expect(prisma.rows).toHaveLength(1);
+  });
+
+  it("admin PATCH on an owner fact still works (panel management scope)", async () => {
+    const prisma = createPrismaMock([
+      seedFact({ id: "f-owner", audience: "owner" }),
+    ]);
+    const app = buildApp(prisma, { username: "boss", role: "admin" });
+    const res = await request(app)
+      .patch("/api/memory/facts/f-owner")
+      .send({ active: false });
+    expect(res.status).toBe(200);
+    expect(prisma.rows[0]!.active).toBe(false);
   });
 });

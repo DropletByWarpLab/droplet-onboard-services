@@ -81,6 +81,16 @@ function authorOf(req: import("express").Request): string {
   return u.username ?? u.id ?? "unknown";
 }
 
+/** WARP-845: owner/admin manage everything; everyone else can only see —
+ *  and therefore touch — facts within their audience rank. Applied to
+ *  reads AND writes so a family caller can't PATCH/DELETE (or read back
+ *  via a no-op PATCH) an owner-audience fact they can't see. */
+function audienceScope(role: string | undefined) {
+  return role === "owner" || role === "admin"
+    ? {}
+    : { audience: { in: visibleAudiences(role) } };
+}
+
 export function createMemoryRouter(prisma: PrismaClient): Router {
   const router = Router();
 
@@ -97,15 +107,11 @@ export function createMemoryRouter(prisma: PrismaClient): Router {
         // WARP-845: owner/admin see everything (they manage the panel);
         // everyone else sees only the audiences their role may read.
         const role = (req as AuthedRequest).user?.role;
-        const audienceFilter =
-          role === "owner" || role === "admin"
-            ? {}
-            : { audience: { in: visibleAudiences(role) } };
         const facts = await prisma.memoryFact.findMany({
           where: {
             ...(q.data.category ? { category: q.data.category } : {}),
             ...(q.data.active !== undefined ? { active: q.data.active } : {}),
-            ...audienceFilter,
+            ...audienceScope(role),
           },
           orderBy: { addedAt: "desc" },
           take: q.data.limit,
@@ -174,18 +180,26 @@ export function createMemoryRouter(prisma: PrismaClient): Router {
           return;
         }
         // Atomic ownership-scoped update — same TOCTOU-avoidance pattern
-        // as PR #279 (droplet-pr-review-patterns P1).
+        // as PR #279 (droplet-pr-review-patterns P1). The audience scope
+        // makes an out-of-rank fact indistinguishable from a missing one.
+        const role = (req as AuthedRequest).user?.role;
         const r = await prisma.memoryFact.updateMany({
-          where: { id: req.params.id },
+          where: { id: req.params.id, ...audienceScope(role) },
           data: parsed.data,
         });
         if (r.count === 0) {
           res.status(404).json({ error: "fact not found" });
           return;
         }
-        const fact = await prisma.memoryFact.findUniqueOrThrow({
+        // findFirst (not findUniqueOrThrow): a concurrent DELETE between
+        // the update and the read-back should 404, not 500.
+        const fact = await prisma.memoryFact.findFirst({
           where: { id: req.params.id },
         });
+        if (!fact) {
+          res.status(404).json({ error: "fact not found" });
+          return;
+        }
         res.json({ fact });
       } catch (err) {
         next(err);
@@ -198,8 +212,9 @@ export function createMemoryRouter(prisma: PrismaClient): Router {
     requireRole("owner", "admin", "family"),
     async (req, res, next) => {
       try {
+        const role = (req as AuthedRequest).user?.role;
         const r = await prisma.memoryFact.deleteMany({
-          where: { id: req.params.id },
+          where: { id: req.params.id, ...audienceScope(role) },
         });
         if (r.count === 0) {
           res.status(404).json({ error: "fact not found" });

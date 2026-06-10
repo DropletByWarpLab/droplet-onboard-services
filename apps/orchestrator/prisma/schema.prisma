@@ -168,6 +168,9 @@ model ChatSession {
   pins      ContextPin[]
 
   @@index([userId, updatedAt(sort: Desc)])
+  /// WARP-845 — Postgres doesn't auto-index FK columns; per-project
+  /// counts and the SET NULL cascade on project delete scan on this.
+  @@index([projectId])
 }
 
 /// WARP-460 — Context pins per chat session. The dashboard's right-side

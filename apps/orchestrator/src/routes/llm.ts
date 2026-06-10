@@ -1082,11 +1082,19 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // Bounded so a pathological query can't become a giant ILIKE.
       const q =
         typeof req.query.q === "string" ? req.query.q.slice(0, 200) : undefined;
+      // WARP-845 — optional project filter (sidebar folder expand).
+      // Still userId-scoped in the service, so a foreign projectId just
+      // yields an empty list.
+      const projectId =
+        typeof req.query.projectId === "string" && req.query.projectId.length > 0
+          ? req.query.projectId
+          : undefined;
       const conversations = await persistence.listConversationsForUser(
         userId,
         limit,
         offset,
         q,
+        projectId,
       );
       res.json({ conversations });
     } catch (err) {
@@ -1229,12 +1237,47 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       }
       const body = req.body as { title?: unknown; projectId?: unknown };
       const hasTitle = typeof body?.title === "string";
-      // WARP-845 — move into / out of a project. `null` = ungroup.
+      // WARP-845 — move into / out of a project. `null` = ungroup. An
+      // empty string is rejected outright (it would skip the ownership
+      // guard's truthiness check and then violate the FK).
       const hasProject =
-        typeof body?.projectId === "string" || body?.projectId === null;
+        (typeof body?.projectId === "string" && body.projectId.length > 0) ||
+        body?.projectId === null;
+      if (
+        body?.projectId !== undefined &&
+        body?.projectId !== null &&
+        (typeof body.projectId !== "string" || body.projectId.length === 0)
+      ) {
+        res.status(400).json({ error: "invalid_project_id" });
+        return;
+      }
+      // A present-but-non-string title is a malformed request, not a
+      // "field omitted" — reject it even when a valid projectId rides
+      // along, instead of silently dropping the title leg.
+      if (body?.title !== undefined && !hasTitle) {
+        res.status(400).json({ error: "title_or_project_required" });
+        return;
+      }
       if (!hasTitle && !hasProject) {
         res.status(400).json({ error: "title_or_project_required" });
         return;
+      }
+      // Pre-validate BOTH legs before mutating anything, so a bad
+      // project id can't leave a half-applied rename behind (and gets
+      // its own error code instead of `conversation_not_found`).
+      if (hasTitle && (body.title as string).trim().length === 0) {
+        res.status(400).json({ error: "title_required" });
+        return;
+      }
+      if (hasProject && body.projectId !== null) {
+        const project = await prisma.chatProject.findFirst({
+          where: { id: body.projectId as string, userId },
+          select: { id: true },
+        });
+        if (!project) {
+          res.status(404).json({ error: "project_not_found" });
+          return;
+        }
       }
       let finalTitle: string | null = null;
       if (hasTitle) {

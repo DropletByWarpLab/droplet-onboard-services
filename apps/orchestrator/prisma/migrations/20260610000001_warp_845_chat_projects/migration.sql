@@ -38,3 +38,8 @@ DO $$ BEGIN
 EXCEPTION
     WHEN duplicate_object THEN NULL;
 END $$;
+
+-- Postgres doesn't auto-index FK columns; the per-project session
+-- counts and the ON DELETE SET NULL cascade both scan on projectId.
+CREATE INDEX IF NOT EXISTS "ChatSession_projectId_idx"
+    ON "ChatSession" ("projectId");

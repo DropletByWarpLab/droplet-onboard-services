@@ -281,7 +281,7 @@ function deriveOptimisticTitle(firstUserContent: string): string {
 
 export function notifyHistoryOfNewConversation(
   handle: ChatHistoryPanelHandle | null,
-  args: { id: string; firstUserContent: string },
+  args: { id: string; firstUserContent: string; projectId?: string | null },
 ): void {
   if (!handle) return;
   const now = new Date().toISOString();
@@ -290,6 +290,9 @@ export function notifyHistoryOfNewConversation(
     title: deriveOptimisticTitle(args.firstUserContent),
     model: null,
     provider: null,
+    // WARP-845 — mirror the server-side project stamp so the new chat
+    // lands under its folder in the sidebar, not in the date groups.
+    projectId: args.projectId ?? null,
     createdAt: now,
     updatedAt: now,
   });
@@ -782,7 +785,11 @@ export function useChat(options: UseChatOptions = {}) {
             attachmentsByConvRef.current.delete(DRAFT_CONV_KEY);
             notifyHistoryOfNewConversation(
               options.historyHandleRef?.current ?? null,
-              { id: headerId, firstUserContent: content },
+              {
+                id: headerId,
+                firstUserContent: content,
+                projectId: projectIdRef.current ?? null,
+              },
             );
           }
         }

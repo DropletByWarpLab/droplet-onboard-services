@@ -46,6 +46,29 @@ const patchSchema = z
 
 const HUMAN_ROLES = ["owner", "admin", "family", "guest"] as const;
 
+/** One wire shape for every verb — GET's mapping, minus the caller's own
+ *  `userId` (it's implicit) and always with `chatCount` so the dashboard
+ *  type holds for rows inserted from POST/PATCH responses too. */
+function toDto(
+  p: {
+    id: string;
+    name: string;
+    systemPrompt: string | null;
+    createdAt: Date;
+    updatedAt: Date;
+  },
+  chatCount: number,
+) {
+  return {
+    id: p.id,
+    name: p.name,
+    systemPrompt: p.systemPrompt,
+    chatCount,
+    createdAt: p.createdAt.toISOString(),
+    updatedAt: p.updatedAt.toISOString(),
+  };
+}
+
 export function createChatProjectsRouter(prisma: PrismaClient): Router {
   const router = Router();
 
@@ -65,14 +88,7 @@ export function createChatProjectsRouter(prisma: PrismaClient): Router {
           include: { _count: { select: { sessions: true } } },
         });
         res.json({
-          projects: projects.map((p) => ({
-            id: p.id,
-            name: p.name,
-            systemPrompt: p.systemPrompt,
-            chatCount: p._count.sessions,
-            createdAt: p.createdAt.toISOString(),
-            updatedAt: p.updatedAt.toISOString(),
-          })),
+          projects: projects.map((p) => toDto(p, p._count.sessions)),
         });
       } catch (err) {
         next(err);
@@ -105,7 +121,7 @@ export function createChatProjectsRouter(prisma: PrismaClient): Router {
             systemPrompt: parsed.data.systemPrompt ?? null,
           },
         });
-        res.status(201).json({ project });
+        res.status(201).json({ project: toDto(project, 0) });
       } catch (err) {
         next(err);
       }
@@ -139,10 +155,17 @@ export function createChatProjectsRouter(prisma: PrismaClient): Router {
           res.status(404).json({ error: "project_not_found" });
           return;
         }
-        const project = await prisma.chatProject.findUniqueOrThrow({
+        // findFirst (not findUniqueOrThrow): a concurrent DELETE between
+        // the update and the read-back should 404, not 500.
+        const project = await prisma.chatProject.findFirst({
           where: { id: req.params.id },
+          include: { _count: { select: { sessions: true } } },
         });
-        res.json({ project });
+        if (!project) {
+          res.status(404).json({ error: "project_not_found" });
+          return;
+        }
+        res.json({ project: toDto(project, project._count.sessions) });
       } catch (err) {
         next(err);
       }

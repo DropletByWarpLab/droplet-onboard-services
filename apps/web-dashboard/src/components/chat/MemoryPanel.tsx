@@ -20,6 +20,7 @@ import {
   updateMemoryFact,
   type MemoryFact,
 } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 
 const CATEGORIES: MemoryFact["category"][] = [
   "Tone",
@@ -38,6 +39,33 @@ const AUDIENCES: { value: MemoryFact["audience"]; label: string }[] = [
   { value: "guest", label: "Everyone" },
 ];
 
+/** Mirrors the server's roleRank/canTargetAudience ladder so the select
+ *  never offers an audience the API would 403 (`audience_above_role`).
+ *  Unknown role falls back to the family view. */
+const ROLE_RANK: Record<string, number> = {
+  owner: 3,
+  admin: 2,
+  family: 1,
+  guest: 0,
+};
+const AUDIENCE_RANK: Record<MemoryFact["audience"], number> = {
+  owner: 3,
+  admin: 2,
+  family: 1,
+  guest: 0,
+};
+function audienceOptionsForRole(role: string | undefined) {
+  const rank = ROLE_RANK[role ?? ""] ?? 1;
+  return AUDIENCES.filter((a) => AUDIENCE_RANK[a.value] <= rank);
+}
+
+function friendlyMemoryError(err: unknown): string {
+  const msg = (err as Error).message ?? String(err);
+  return msg.includes("audience_above_role")
+    ? "You can't target an audience above your own role."
+    : msg;
+}
+
 export function MemoryPanel() {
   const [open, setOpen] = useState(false);
   const [facts, setFacts] = useState<MemoryFact[] | null>(null);
@@ -47,6 +75,8 @@ export function MemoryPanel() {
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const { user } = useAuth();
+  const audienceOptions = audienceOptionsForRole(user?.role);
 
   const load = useCallback(async () => {
     setError(null);
@@ -102,7 +132,7 @@ export function MemoryPanel() {
         (prev ?? []).map((f) => (f.id === fact.id ? updated : f)),
       );
     } catch (err) {
-      setError((err as Error).message);
+      setError(friendlyMemoryError(err));
     }
   };
 
@@ -130,7 +160,7 @@ export function MemoryPanel() {
       setFacts((prev) => [fact, ...(prev ?? [])]);
       setDraft("");
     } catch (err) {
-      setError((err as Error).message);
+      setError(friendlyMemoryError(err));
     } finally {
       setBusy(false);
     }
@@ -206,7 +236,17 @@ export function MemoryPanel() {
                     title="Who receives this fact"
                     className="dp-input type-caption-2 h-6 w-24 flex-none"
                   >
-                    {AUDIENCES.map((a) => (
+                    {/* If the fact's current audience outranks the caller
+                        (e.g. an admin viewing an owner-only fact), keep it
+                        visible as a disabled option so the select doesn't
+                        render blank. */}
+                    {!audienceOptions.some((a) => a.value === fact.audience) && (
+                      <option value={fact.audience} disabled>
+                        {AUDIENCES.find((a) => a.value === fact.audience)
+                          ?.label ?? fact.audience}
+                      </option>
+                    )}
+                    {audienceOptions.map((a) => (
                       <option key={a.value} value={a.value}>
                         {a.label}
                       </option>
@@ -272,7 +312,7 @@ export function MemoryPanel() {
               title="Who receives this fact"
               className="dp-input type-footnote h-8 w-28 flex-none"
             >
-              {AUDIENCES.map((a) => (
+              {audienceOptions.map((a) => (
                 <option key={a.value} value={a.value}>
                   {a.label}
                 </option>

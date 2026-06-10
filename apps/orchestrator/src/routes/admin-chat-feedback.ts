@@ -31,9 +31,14 @@ export function createAdminChatFeedbackRouter(prisma: PrismaClient): Router {
     requireRole("owner", "admin"),
     async (req: Request, res, next) => {
       try {
-        const limit = Math.min(
-          Number.parseInt(String(req.query.limit ?? "50"), 10) || 50,
-          MAX_LIMIT,
+        // Clamp both ends — a negative `take` would make Prisma read
+        // from the END of the ordered set (oldest turns first).
+        const limit = Math.max(
+          1,
+          Math.min(
+            Number.parseInt(String(req.query.limit ?? "50"), 10) || 50,
+            MAX_LIMIT,
+          ),
         );
         const feedbackFilter =
           req.query.feedback === "up" || req.query.feedback === "down"
@@ -52,8 +57,14 @@ export function createAdminChatFeedbackRouter(prisma: PrismaClient): Router {
               session: { select: { id: true, title: true, model: true } },
             },
           }),
-          prisma.chatMessage.count({ where: { feedback: "up" } }),
-          prisma.chatMessage.count({ where: { feedback: "down" } }),
+          // role-filtered like `items`, so the counts can't diverge from
+          // what the list can ever show.
+          prisma.chatMessage.count({
+            where: { feedback: "up", role: "assistant" },
+          }),
+          prisma.chatMessage.count({
+            where: { feedback: "down", role: "assistant" },
+          }),
         ]);
 
         // Pair each rated assistant row with its turn's user prompt —

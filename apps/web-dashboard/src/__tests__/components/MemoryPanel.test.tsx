@@ -17,6 +17,15 @@ vi.mock("@/lib/api", () => ({
   deleteMemoryFact: (...a: unknown[]) => mockDeleteMemoryFact(...a),
 }));
 
+// WARP-845 review fix — the panel filters audience options by the
+// caller's role (so the select never offers a 403). Owner sees all four.
+vi.mock("@/lib/auth", () => ({
+  useAuth: () => ({
+    user: { id: "u1", username: "romain", displayName: "Romain", role: "owner" },
+    isLoading: false,
+  }),
+}));
+
 import { MemoryPanel } from "@/components/chat/MemoryPanel";
 
 const FACT = {

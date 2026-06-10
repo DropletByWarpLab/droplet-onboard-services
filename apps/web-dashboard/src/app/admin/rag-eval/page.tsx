@@ -427,9 +427,12 @@ docker compose -f docker/docker-compose.yml --env-file .env up -d rag-eval`}
               })}
             </div>
           )}
-          <FeedbackPanel />
         </>
       )}
+
+      {/* User thumbs feedback comes from the orchestrator, not the
+          rag-eval container — render it even when rag-eval is down. */}
+      <FeedbackPanel />
 
       {confirmBootstrap && (
         <div className="ds-ios-scrim" onClick={() => setConfirmBootstrap(false)}>

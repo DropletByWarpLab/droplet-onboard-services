@@ -35,6 +35,10 @@ export function useConversationList(): {
   search: string;
   setSearch: (q: string) => void;
   optimisticInsert: (item: ConversationSummary) => void;
+  /** WARP-845 — append rows not already present (by id). Used by the
+   *  sidebar's fetch-on-expand so a folder shows ALL its chats, not just
+   *  the ones the paginated main window happens to have loaded. */
+  mergeRows: (items: ConversationSummary[]) => void;
   applyTurnCompleted: (id: string) => Promise<void>;
   rename: (id: string, title: string) => Promise<void>;
   remove: (id: string) => Promise<boolean>;
@@ -132,6 +136,14 @@ export function useConversationList(): {
     });
   }, []);
 
+  const mergeRows = useCallback((items: ConversationSummary[]) => {
+    setFlat((prev) => {
+      const known = new Set(prev.map((c) => c.id));
+      const fresh = items.filter((c) => !known.has(c.id));
+      return fresh.length === 0 ? prev : [...prev, ...fresh];
+    });
+  }, []);
+
   const applyTurnCompleted = useCallback(async (id: string) => {
     const detail = await fetchConversation(id);
     if (!detail) return;
@@ -220,6 +232,7 @@ export function useConversationList(): {
     search,
     setSearch,
     optimisticInsert,
+    mergeRows,
     applyTurnCompleted,
     rename,
     remove,

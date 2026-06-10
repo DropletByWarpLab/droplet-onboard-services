@@ -135,4 +135,14 @@ describe("GET /api/admin/chat-feedback", () => {
     );
     expect(res.status).toBe(403);
   });
+
+  it("clamps a negative limit to 1 (review fix)", async () => {
+    // A negative Prisma `take` reads from the END of the ordered set
+    // (oldest turns) — the clamp keeps newest-first semantics.
+    const res = await request(buildApp(ROWS, "admin")).get(
+      "/api/admin/chat-feedback?limit=-5",
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.items).toHaveLength(1);
+  });
 });

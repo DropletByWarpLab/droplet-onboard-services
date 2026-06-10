@@ -323,6 +323,11 @@ export default function ChatPage() {
   const handleNewChatFromPanel = useCallback(() => {
     setMobileHistoryOpen(false);
     setActiveProject(null);
+    // Clear the draft persona synchronously: when no conversation is
+    // loaded, router.push("/chat") is a URL no-op and the ?c effect
+    // never fires — without this a just-seeded project persona would
+    // silently ride into a plain "New chat".
+    setSystemPrompt("");
     router.push("/chat");
   }, [router]);
 
