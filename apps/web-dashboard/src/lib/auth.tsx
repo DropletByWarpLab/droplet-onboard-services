@@ -296,7 +296,16 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
   } catch {
     /* ignore — privacy mode, etc. */
   }
-  if (!window.location.pathname.startsWith("/login")) {
+  // Public pages own their anonymous flow: a refresh failure on /setup (the
+  // first-run wizard probing /api/auth/me on an unclaimed box) or /login must
+  // NOT hard-navigate to /login — AuthGate routes those contextually
+  // client-side (unclaimed -> /setup). Without this guard every anonymous
+  // cold load of /setup detoured through /login with a full page reload
+  // (PR #549 review). Mirrors AuthGate's PUBLIC_PATHS.
+  const onPublicPage = ["/login", "/setup"].some((p) =>
+    window.location.pathname.startsWith(p),
+  );
+  if (!onPublicPage) {
     window.location.assign(
       `/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`,
     );

@@ -84,11 +84,16 @@ export class ResetError extends Error {
  * secret injected after boot (and the tests) see the current value.
  */
 function bridgeAuthToken(): string {
+  // Exactly BRIDGE_AUTH_TOKEN || SERVICE_TOKEN_DISPLAY — never
+  // DEVICE_SECRET_KEY: that is the FIPS-sealed AES-256 master encryption key
+  // WARP-165 deliberately rotated OFF the wire. A fallback to it would put
+  // the master key in a plaintext HTTP header on a misconfigured install and
+  // still 401; failing closed (BRIDGE_AUTH_UNCONFIGURED) keeps the key off
+  // the wire with a clear remediation (re-run install-device-bridge.sh), and
+  // keeps this client in lock-step with storage.ts. (PR #549 review.)
   return (
     process.env.BRIDGE_AUTH_TOKEN ||
     process.env.SERVICE_TOKEN_DISPLAY ||
-    process.env.DEVICE_SECRET_KEY ||
-    process.env.SERVICE_SECRET ||
     ""
   ).trim();
 }

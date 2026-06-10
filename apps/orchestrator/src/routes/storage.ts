@@ -474,8 +474,12 @@ export function createStorageRouter(prisma: PrismaClient): Router {
     try {
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), 4000);
+      // /drives/changed is auth-gated on the bridge now (this PR) — without
+      // the shared token every rescan 401s and the dashboard rescan dies as
+      // a 502 (review blocker on this PR).
       const r = await fetch(`${BRIDGE_URL}/drives/changed`, {
         method: "POST",
+        headers: { "X-Droplet-Auth": bridgeAuthToken() },
         signal: ctrl.signal,
       });
       clearTimeout(timer);
