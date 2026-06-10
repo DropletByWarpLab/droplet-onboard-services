@@ -996,6 +996,9 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             model: chatReq.model,
             messages: chatReq.messages,
             temperature: chatReq.temperature,
+            // WARP-849 — forward the caller's completion budget (the
+            // schema accepted it but the loop never received it).
+            max_tokens: chatReq.max_tokens,
             max_iter: chatReq.max_iter,
             allowed_tools: allowedForUser,
             tool_choice: chatReq.tool_choice,
@@ -1028,6 +1031,11 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           model: chatReq.model,
           messages: chatReq.messages,
           temperature: chatReq.temperature,
+          // WARP-849 — forward the caller's completion budget (the
+          // schema accepted it but the loop never received it). The
+          // setup wizard's sample probe relies on this so its raised
+          // reasoning-safe budget actually reaches Ollama.
+          max_tokens: chatReq.max_tokens,
           max_iter: chatReq.max_iter,
           allowed_tools: allowedForUser,
           tool_choice: chatReq.tool_choice,
