@@ -38,7 +38,8 @@ log() { printf '[install-bridge] %s\n' "$*"; }
 for unit in droplet-device-bridge.service \
             droplet-wifi-rotate.service \
             droplet-wifi-rotate.timer \
-            droplet-shutdown-screen.service; do
+            droplet-shutdown-screen.service \
+            droplet-storage-pool-apply.service; do
   src="$SRC_DIR/$unit"
   dst="$UNIT_DIR/$unit"
   if [[ ! -f "$src" ]]; then
@@ -71,12 +72,15 @@ install -m 0755 "$SHUTDOWN_SCRIPT_SRC" "$SHUTDOWN_SCRIPT_DST"
 log "installed $SHUTDOWN_SCRIPT_DST"
 
 # --- 1c) Install the storage-pool host script (BUG-3 / ADR-019) ---
-# The device-bridge's POST /pools/command shells this to run mdadm/mkfs — the
-# ONLY place those run. It lives on the host (root + real block devices, can't
-# run from a container) per architecture-guard rule 20; installed here (never
-# hand-placed) so factory-reset removes it cleanly. It is data-destroying and
-# carries its own hard pre-flight (refuse mounted / has-data / OS-disk; require
-# a typed double-confirm). Repo source is scripts/host/.
+# Runs mdadm/mkfs — the ONLY place those run. It lives on the host (root +
+# real block devices, can't run from a container) per architecture-guard rule
+# 20; installed here (never hand-placed) so factory-reset removes it cleanly.
+# It is data-destroying and carries its own hard pre-flight (refuse mounted /
+# has-data / OS-disk; require a typed double-confirm). Repo source is
+# scripts/host/. NOTE (ADR-019 follow-up): the device-bridge's POST
+# /pools/command does NOT exec this directly anymore — its sandbox can't grant
+# the root this needs — it goes through the spool + root apply unit installed
+# in 1c-bis below.
 POOL_SCRIPT_SRC="$REPO_ROOT/scripts/host/droplet-storage-pool.sh"
 POOL_SCRIPT_DST="/usr/local/sbin/droplet-storage-pool.sh"
 if [[ ! -f "$POOL_SCRIPT_SRC" ]]; then
@@ -85,6 +89,23 @@ if [[ ! -f "$POOL_SCRIPT_SRC" ]]; then
 fi
 install -m 0755 "$POOL_SCRIPT_SRC" "$POOL_SCRIPT_DST"
 log "installed $POOL_SCRIPT_DST"
+
+# --- 1c-bis) Install the storage-pool ROOT executor (ADR-019 follow-up) ---
+# The bridge sandbox (User=droplet + ProtectSystem=strict + NoNewPrivileges)
+# cannot run mdadm/mkfs/mount, so the bridge spools the owner-confirmed pool
+# request into its StateDirectory and polkit-starts
+# droplet-storage-pool-apply.service (unit installed in step 1; polkit grant
+# in 1d-bis), whose ExecStart is this script — it consumes the spooled request
+# as root, runs droplet-storage-pool.sh, and writes the result back for the
+# bridge to read. The unit is deliberately never enabled: on-demand only.
+POOL_APPLY_SRC="$REPO_ROOT/scripts/host/droplet-storage-pool-apply.sh"
+POOL_APPLY_DST="/usr/local/sbin/droplet-storage-pool-apply.sh"
+if [[ ! -f "$POOL_APPLY_SRC" ]]; then
+  log "missing source: $POOL_APPLY_SRC"
+  exit 1
+fi
+install -m 0755 "$POOL_APPLY_SRC" "$POOL_APPLY_DST"
+log "installed $POOL_APPLY_DST"
 
 # --- 1d) Install the single-box hostapd Wi-Fi-write host script (WARP-808) ---
 # The device-bridge's POST /openwrt/wifi/hostapd shells this to write the
@@ -104,6 +125,26 @@ if [[ ! -f "$HOSTAPD_SCRIPT_SRC" ]]; then
 fi
 install -m 0755 "$HOSTAPD_SCRIPT_SRC" "$HOSTAPD_SCRIPT_DST"
 log "installed $HOSTAPD_SCRIPT_DST"
+
+# --- 1d-bis) Polkit rules for the sandboxed bridge writes ---
+# The bridge unit runs as User=droplet inside ProtectSystem=strict +
+# NoNewPrivileges — it CANNOT write /etc/default or sudo (the shipping box
+# failed the wizard's Home Wi-Fi save with mktemp EROFS). The rules file
+# carries TWO narrowly-scoped grants for the droplet user, both D-Bus asks to
+# PID 1, no escalation:
+#   - restart/start droplet-openwrt-attach.service (WARP-808 Wi-Fi write —
+#     the env-file half targets the bridge's StateDirectory via
+#     DROPLET_HOSTAPD_ENV_FILE; the attach service layers that file last);
+#   - start droplet-storage-pool-apply.service (ADR-019 follow-up — the root
+#     oneshot that consumes the spooled pool request; start verb only).
+POLKIT_RULE_SRC="$SRC_DIR/50-droplet-device-bridge.rules"
+POLKIT_RULE_DST="/etc/polkit-1/rules.d/50-droplet-device-bridge.rules"
+if [[ ! -f "$POLKIT_RULE_SRC" ]]; then
+  log "missing source: $POLKIT_RULE_SRC"
+  exit 1
+fi
+install -m 0644 "$POLKIT_RULE_SRC" "$POLKIT_RULE_DST"
+log "installed $POLKIT_RULE_DST"
 
 # --- 1d) Factory-reset host executor (WARP-825) ---
 # The host-side entry point for the dashboard's owner-confirmed factory reset.

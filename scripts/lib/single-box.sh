@@ -624,6 +624,13 @@ EOF
   upsert_env ROUTING_SERVICE_URL "http://${bridge_gw}:8080"
   upsert_env SWITCH_SERVICE_URL  "http://${bridge_gw}:8081"
   upsert_env DISPLAY_SERVICE_URL "http://${bridge_gw}:8082"
+  # Device-bridge (host process, binds 0.0.0.0:9090) — same WARP-806 reasoning
+  # as the three host services above: the orchestrator's config default is
+  # http://host.docker.internal:9090 (docker0), exactly the default WARP-806
+  # documented as unreliable on this box. Pin it to the droplet_default gateway
+  # so the single-box Wi-Fi write (WARP-808), storage ops, and the QR/creds
+  # reads never depend on docker0 being up.
+  upsert_env DEVICE_BRIDGE_URL   "http://${bridge_gw}:9090"
 
-  log_success "Wrote single-box knobs to .env (idempotent upsert — COMPOSE_PROFILES=${merged_profiles}, CAMERA_SUBNET=192.168.20.0/24, WIREGUARD_LAN_CIDR=192.168.20.0/24, WIREGUARD_DNS=192.168.20.1, OLLAMA_URL, FIPS off, TPM=mock, OpenWrt 127.0.0.1:8181, LLM_MODEL=gpt-oss:20b, DROPLET_AP_MODE=hostapd, SWITCH_AUTOPROVISION=1 flat-lan, ROUTING/SWITCH/DISPLAY_SERVICE_URL → ${bridge_net} gateway ${bridge_gw})"
+  log_success "Wrote single-box knobs to .env (idempotent upsert — COMPOSE_PROFILES=${merged_profiles}, CAMERA_SUBNET=192.168.20.0/24, WIREGUARD_LAN_CIDR=192.168.20.0/24, WIREGUARD_DNS=192.168.20.1, OLLAMA_URL, FIPS off, TPM=mock, OpenWrt 127.0.0.1:8181, LLM_MODEL=gpt-oss:20b, DROPLET_AP_MODE=hostapd, SWITCH_AUTOPROVISION=1 flat-lan, ROUTING/SWITCH/DISPLAY/DEVICE_BRIDGE URLs → ${bridge_net} gateway ${bridge_gw})"
 }

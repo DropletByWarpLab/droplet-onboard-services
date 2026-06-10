@@ -79,9 +79,9 @@ export function ThemeToggle() {
             onClick={() => setTheme(opt.value)}
             onKeyDown={handleKey}
             className={`
-              flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-[6px]
+              flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-[6px]
               text-[12px] font-medium transition-all duration-200 ease-smooth
-              min-h-[32px] flex-1
+              min-h-[32px] flex-1 min-w-0
               ${
                 isActive
                   ? "bg-surface-tertiary text-label-primary shadow-sm"
@@ -89,8 +89,14 @@ export function ThemeToggle() {
               }
             `}
           >
-            <Icon size={14} aria-hidden="true" />
-            <span className="hidden sm:inline">{opt.label}</span>
+            <Icon size={14} aria-hidden="true" className="flex-shrink-0" />
+            {/* px-2 (not 3) + min-w-0 + truncate: in the 260px sidebar the
+                three labelled segments had ~1px of slack at default Chrome
+                metrics — wider font rendering (Firefox, OS font scaling,
+                Android font boosting) pushed the labels out of the pill and
+                over the rail edge. Give the row real headroom and let a
+                pathological label ellipsize instead of overlapping. */}
+            <span className="hidden sm:inline truncate">{opt.label}</span>
           </button>
         );
       })}
