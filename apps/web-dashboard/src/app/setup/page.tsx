@@ -84,8 +84,15 @@ function resumeStepFrom(setupStep: string | undefined): Step {
  * (`resumeStepFrom`). Keeping the enum untouched means the backend route's
  * `isSetupStep` validation never 400s on a step we send.
  */
-function persistedStep(step: Step): string {
-  return step === "wifi" || step === "address" ? "internet" : step;
+function persistedStep(step: Step): string | null {
+  if (step === "wifi" || step === "address") return "internet";
+  // `twofactor` is client-only with NO SetupStep enum value at all (PR #375)
+  // — unlike wifi/address there is nothing to map it to, and sending it gets
+  // a silent 400 INVALID_SETUP_STEP on the fire-and-forget PATCH, leaving
+  // the stored pointer one step stale (same bug PR #551 fixed). Persist
+  // nothing; the pointer catches up on the next persisted step.
+  if (step === "twofactor") return null;
+  return step;
 }
 
 export default function SetupPage() {
@@ -132,8 +139,10 @@ export default function SetupPage() {
       maxReachedRef.current = nextIdx;
       setMaxReachedIdx(nextIdx);
       // Fire-and-forget; local progress is never gated on the round-trip.
-      // wifi/address persist as the `internet` SetupStep (see persistedStep).
-      void patchSetupStep(persistedStep(next));
+      // wifi/address persist as the `internet` SetupStep; twofactor persists
+      // nothing (see persistedStep).
+      const persisted = persistedStep(next);
+      if (persisted !== null) void patchSetupStep(persisted);
     }
   }, []);
 
@@ -148,7 +157,8 @@ export default function SetupPage() {
     if (nextIdx > maxReachedRef.current) {
       maxReachedRef.current = nextIdx;
       setMaxReachedIdx(nextIdx);
-      void patchSetupStep(persistedStep(next));
+      const persisted = persistedStep(next);
+      if (persisted !== null) void patchSetupStep(persisted);
     }
   }, []);
 

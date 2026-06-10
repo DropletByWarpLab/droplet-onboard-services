@@ -109,6 +109,25 @@ describe("setup wizard — resumable from setupState (PR #372)", () => {
     expect(screen.getByText(/bring in your team/i)).toBeInTheDocument();
   });
 
+  it("resumes a persisted 'internet' on the wifi step (network-split mapping), not welcome", () => {
+    // The server's SetupStep enum still has the single `internet` value; the
+    // wizard split it into wifi -> address (persisted as `internet`). Without
+    // resumeStepFrom's internet->wifi mapping a persisted `internet` fails the
+    // STEPS.includes check (STEPS dropped "internet") and falls back to
+    // welcome — losing the customer's place (PR #548 review).
+    useAuthMock.mockReturnValue({
+      completeSetup: vi.fn(),
+      setupState: { appliance: "unclaimed", setupStep: "internet", userTourCompleted: false },
+    });
+    render(<SetupPage />);
+    expect(
+      screen.queryByRole("button", { name: /get started/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getAllByText(/set up your home wi-fi/i).length,
+    ).toBeGreaterThan(0);
+  });
+
   it("ignores an unknown persisted step and falls back to welcome", () => {
     useAuthMock.mockReturnValue({
       completeSetup: vi.fn(),

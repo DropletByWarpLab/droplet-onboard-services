@@ -225,8 +225,13 @@ export function StepShell({
         <p className="mb-[clamp(10px,1.6vh,16px)] text-[11.5px] font-semibold uppercase tracking-[0.08em] text-white/80">
           Set up · ~10 min
         </p>
+        {/* min-h-0 lets the nav shrink on short viewports; overflow-y-auto is
+            the FLOOR that makes the shrink clip/scroll instead of letting the
+            14 rows paint over the Appearance/footer rows below (overflow is
+            visible by default on a shrunken flex item — the reported
+            'appearance toggle overlapping text' on ~768-860px-tall windows). */}
         <nav
-          className="flex min-h-0 flex-col gap-0.5"
+          className="flex min-h-0 flex-col gap-0.5 overflow-y-auto"
           aria-label="Setup progress"
         >
           {STEPS.map((id, i) => {

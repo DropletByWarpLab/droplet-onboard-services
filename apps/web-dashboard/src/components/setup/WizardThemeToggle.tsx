@@ -61,7 +61,7 @@ export function WizardThemeToggle({
             onClick={() => setTheme(value)}
             aria-pressed={on}
             aria-label={`${label} theme`}
-            className={`inline-flex items-center justify-center gap-1.5 rounded-full font-semibold transition-colors duration-200 ease-smooth focus-visible:outline-none focus-visible:ring-2 ${
+            className={`inline-flex min-w-0 items-center justify-center gap-1.5 rounded-full font-semibold transition-colors duration-200 ease-smooth focus-visible:outline-none focus-visible:ring-2 ${
               compact ? "min-h-[30px] px-2.5 text-[11.5px]" : "min-h-[36px] px-3 text-[12px]"
             } ${
               aurora
@@ -73,8 +73,11 @@ export function WizardThemeToggle({
                   : "text-label-tertiary hover:text-label-secondary focus-visible:ring-accent"
             }`}
           >
-            <Icon size={14} aria-hidden="true" />
-            {!compact && <span>{label}</span>}
+            <Icon size={14} aria-hidden="true" className="flex-shrink-0" />
+            {/* min-w-0 + truncate: same overflow guard as the dashboard
+                ThemeToggle (PR #551) — wider font rendering must ellipsize
+                inside the pill, never escape it. */}
+            {!compact && <span className="truncate">{label}</span>}
           </button>
         );
       })}
