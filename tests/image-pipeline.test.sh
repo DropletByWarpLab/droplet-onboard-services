@@ -367,6 +367,48 @@ else
 fi
 
 # =============================================================================
+# (e) autoinstall seed: the firstboot NOPASSWD grant must not outlive
+#     provisioning (ADR-020 §D6 — a blanket grant that persists past first
+#     boot turns the account password into a remote root credential over SSH)
+# =============================================================================
+echo "--- (e) autoinstall sudoers grant is provisioning-window only ---"
+
+USER_DATA="$REPO_ROOT_REAL/scripts/image/autoinstall/user-data"
+if [ ! -f "$USER_DATA" ]; then
+  fail "scripts/image/autoinstall/user-data not present"
+else
+  # The unattended firstboot unit needs the grant to run setup.sh at all.
+  if grep -q 'NOPASSWD: ALL" > /etc/sudoers.d/droplet-firstboot' "$USER_DATA"; then
+    pass "seed writes the droplet-firstboot drop-in for the unattended setup.sh run"
+  else
+    fail "seed no longer writes /etc/sudoers.d/droplet-firstboot — firstboot setup.sh would fail its sudo preflight"
+  fi
+
+  # ...and the firstboot unit must remove it on success, AFTER stamping the
+  # .firstboot-done marker (rm first would kill the unit's own sudo before the
+  # marker lands, re-running setup on every boot).
+  post_line="$(grep 'ExecStartPost=' "$USER_DATA" || true)"
+  case "$post_line" in
+    *".firstboot-done"*"rm -f /etc/sudoers.d/droplet-firstboot"*)
+      pass "firstboot ExecStartPost removes the drop-in after the .firstboot-done marker"
+      ;;
+    *)
+      fail "firstboot ExecStartPost does not remove /etc/sudoers.d/droplet-firstboot after the marker" \
+           "ExecStartPost line: ${post_line:-<missing>}"
+      ;;
+  esac
+
+  # No NOPASSWD grant outside the self-removing firstboot drop-in
+  # (comment lines don't grant anything — skip them).
+  stray="$(grep 'NOPASSWD' "$USER_DATA" | grep -vE '^[[:space:]]*#' | grep -v 'droplet-firstboot' || true)"
+  if [ -z "$stray" ]; then
+    pass "no NOPASSWD grant outside the firstboot drop-in"
+  else
+    fail "seed contains a NOPASSWD grant outside droplet-firstboot:" "$stray"
+  fi
+fi
+
+# =============================================================================
 # Results
 # =============================================================================
 echo ""
