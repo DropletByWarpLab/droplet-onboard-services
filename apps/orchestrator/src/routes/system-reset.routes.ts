@@ -124,7 +124,7 @@ export function createSystemResetRouter(prisma: PrismaClient): Router {
       return res.status(202).json({
         status: job.status,
         id: job.id,
-        targetName: job.targetName,
+        targetName: maskedTargetHint(job.targetName),
       });
     } catch (err) {
       if (err instanceof ResetError) {

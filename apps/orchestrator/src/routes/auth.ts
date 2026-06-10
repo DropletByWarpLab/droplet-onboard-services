@@ -57,7 +57,7 @@ import {
   verifyPassword,
   verifyDummyPassword,
 } from "../services/password.service.js";
-import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
+import { cacheGet, cacheSet, cacheDel, cacheIncr } from "../services/cache.service.js";
 import {
   TOTP_ISSUER,
   generateTotpEnrollment,
@@ -280,8 +280,11 @@ async function checkPasswordChangeLock(
 
 async function recordPasswordChangeFailure(userId: string): Promise<void> {
   try {
-    const next = ((await cacheGet<number>(pwChangeFailsKey(userId))) ?? 0) + 1;
-    await cacheSet(pwChangeFailsKey(userId), next, PW_CHANGE_FAILS_TTL_SEC);
+    // cacheIncr is atomic (Redis INCR) — avoids the read-modify-write race
+    // where two concurrent wrong-password requests both read N and both write
+    // N+1, keeping the counter artificially low.
+    const next = await cacheIncr(pwChangeFailsKey(userId), PW_CHANGE_FAILS_TTL_SEC);
+    if (next === null) return; // Redis error — fail open
     const lockedSeconds = passwordChangeBackoffSeconds(next);
     if (lockedSeconds > 0) {
       await cacheSet(
@@ -1522,7 +1525,6 @@ export function createProtectedAuthRouter(
         res.status(400).json({ error: "Invalid current password", code: "INVALID_PASSWORD" });
         return;
       }
-      await clearPasswordChangeRateState(req.user.id);
 
       // A no-op "change" (new === current) is not a real rotation — reject it
       // before touching the hash so a forced-change user can't satisfy the
@@ -1530,12 +1532,16 @@ export function createProtectedAuthRouter(
       // password is verified: the endpoint must answer nothing about the
       // submitted strings to a caller who hasn't proven the current password
       // (PR #549 reviewer follow-up — ordering half of the oracle finding).
+      // clearPasswordChangeRateState is called AFTER this check so a caller
+      // submitting (correct, correct) cannot drain the failure counter without
+      // completing a real rotation (finding from 2026-06-10 sweep).
       if (currentPassword === newPassword) {
         res
           .status(400)
           .json({ error: "Choose a password different from your current one", code: "SAME_PASSWORD" });
         return;
       }
+      await clearPasswordChangeRateState(req.user.id);
 
       // ADR-013: write the new argon2id hash to the directory row AND clear the
       // forced-change flag in the SAME update so the gate opens atomically with
