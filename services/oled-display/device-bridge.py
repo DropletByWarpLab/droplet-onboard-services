@@ -1416,9 +1416,10 @@ def eject_drive(uuid):
 # ---------------------------------------------------------------------------
 # Reads /proc/mdstat (+ mdadm --detail --scan) and maps the raw md state onto
 # the ADR-019 explicit enums. NEVER mutates an array — create/destroy/format
-# live behind the auth-gated destructive POST (run_pool_command) which shells
-# the repo-tracked host script, never mdadm directly. Returns [] honestly when
-# md has no arrays (the owner's "no fake pool" constraint at the read layer).
+# live behind the auth-gated destructive POST (run_pool_command), which hands
+# the op to the root executor unit that runs the repo-tracked host script —
+# never mdadm directly. Returns [] honestly when md has no arrays (the
+# owner's "no fake pool" constraint at the read layer).
 
 _pools_cache = {"snap": None, "at": 0}
 
@@ -1587,50 +1588,153 @@ _POOL_OPS = frozenset({
     "drive_adopt",
 })
 
-# Path to the repo-tracked host script, installed by setup.sh via
-# install-device-bridge.sh. Overridable for tests / non-standard installs.
-POOL_SCRIPT = os.environ.get(
-    "DROPLET_POOL_SCRIPT", "/usr/local/sbin/droplet-storage-pool.sh").strip()
+# ADR-019 follow-up: the bridge CANNOT exec droplet-storage-pool.sh itself —
+# this process runs as User=droplet inside ProtectSystem=strict +
+# NoNewPrivileges, where mdadm/mkfs/mount all fail (EPERM on the root:disk
+# 0660 block devices, EROFS under /mnt) and the script's blkid "has data"
+# probe silently degrades (an unprivileged blkid can't open the device,
+# prints nothing, and the guard passes). Verified on the shipping box. So,
+# same posture as the WARP-808 hostapd Wi-Fi write but with a different
+# split (mdadm is a direct binary — there is no unit to polkit-restart):
+# the bridge writes the owner-confirmed request into a spool inside its own
+# StateDirectory, then `systemctl start`s a root oneshot
+# (droplet-storage-pool-apply.service — authorized for the droplet user by
+# 50-droplet-device-bridge.rules, start verb only) which runs the pool
+# script as root and writes a result file back into the spool.
+POOL_SPOOL_DIR = os.environ.get(
+    "DROPLET_POOL_SPOOL_DIR", "/var/lib/droplet-bridge/pool-spool").strip()
+POOL_APPLY_UNIT = os.environ.get(
+    "DROPLET_POOL_APPLY_UNIT", "droplet-storage-pool-apply.service").strip()
+
+# Serialize concurrent pool writes (mirrors _HOSTAPD_LOCK). The spool holds
+# exactly ONE request/result pair, so two racing POSTs would clobber each
+# other's files; non-blocking acquire → the second caller is refused, not
+# queued.
+_POOL_LOCK = threading.Lock()
 
 
 def run_pool_command(operation, params):
-    """Forward an owner-confirmed destructive pool op to the host script.
+    """Forward an owner-confirmed destructive pool op to the root executor.
 
-    The bridge does NOT run mdadm/mkfs — it execs droplet-storage-pool.sh,
-    passing the operation and the params as a single JSON argument. The host
-    script's hard pre-flight (refuse if a target disk is mounted / holds data /
-    is the OS disk; require the typed double-confirm) is the real safety gate;
-    this function only (a) refuses operations outside the allow-list and (b)
-    surfaces the script's exit code honestly. Returns (ok, info); never raises
-    — mirrors eject_drive()."""
+    The bridge does NOT run mdadm/mkfs — and (ADR-019 follow-up) it does not
+    exec droplet-storage-pool.sh either, because this sandbox can't grant the
+    root that script needs. It writes {request_id, operation, params} to the
+    pool spool and starts the root apply unit, whose ExecStart consumes the
+    request, runs the pool script (whose hard pre-flight — refuse mounted /
+    has-data / OS-disk, require the typed double-confirm — is the real safety
+    gate, and actually works under root), and writes back a result file
+    carrying the script's rc/stdout/stderr. This function only (a) refuses
+    operations outside the allow-list, (b) refuses a second in-flight write,
+    and (c) surfaces the executor's result honestly. Returns (ok, info);
+    never raises — mirrors eject_drive()."""
     if operation not in _POOL_OPS:
         return False, "unknown pool operation: {}".format(operation)
-    payload = json.dumps(params or {})
+    if not _POOL_LOCK.acquire(blocking=False):
+        logger.warning("pool command %s rejected: another storage operation "
+                       "is already in progress", operation)
+        return False, "another storage operation is already in progress"
     try:
-        # The host script runs `mdadm`/`mkfs` which can take a while on a large
-        # array; allow a generous timeout but still bounded.
-        rc, out, err = _run([POOL_SCRIPT, operation, payload], timeout=600)
+        return _run_pool_via_executor(operation, params)
+    finally:
+        _POOL_LOCK.release()
+
+
+def _run_pool_via_executor(operation, params):
+    """Spool the request, start the root apply unit, collect the result.
+
+    Split out of run_pool_command so the lock handling above stays trivially
+    correct. Same (ok, info) contract; never raises."""
+    request_id = secrets.token_hex(8)
+    req_path = os.path.join(POOL_SPOOL_DIR, "request.json")
+    res_path = os.path.join(POOL_SPOOL_DIR, "result.json")
+    try:
+        # 0700 like the StateDirectory it lives in — only the bridge user
+        # (or root) may place a request. os.makedirs ignores `mode` when the
+        # directory already exists, so explicitly chmod it on every start to
+        # close the window where a prior install left a looser umask (0755).
+        os.makedirs(POOL_SPOOL_DIR, mode=0o700, exist_ok=True)
+        os.chmod(POOL_SPOOL_DIR, 0o700)
+        # Drop any stale pair from an interrupted earlier run so the executor
+        # can never consume an old request and we never read an old result.
+        for stale in (req_path, res_path):
+            try:
+                os.remove(stale)
+            except FileNotFoundError:
+                pass
+        tmp = req_path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"request_id": request_id, "operation": operation,
+                       "params": params or {}}, f)
+        # Atomic rename: the executor never sees a half-written request.
+        os.replace(tmp, req_path)
     except Exception as e:                                          # noqa: BLE001
-        logger.warning("pool command %s failed to exec host script: %s",
+        logger.warning("pool command %s failed to spool request: %s",
                        operation, e)
-        return False, "host script unavailable"
+        return False, "could not spool the pool request"
+    try:
+        # Blocking start of a Type=oneshot unit returns when its ExecStart
+        # exits, i.e. when the result file is already in place. mdadm/mkfs on
+        # a large array can take a while; generous but bounded (the unit's
+        # own TimeoutStartSec sits just under this).
+        rc, out, err = _run(["systemctl", "start", POOL_APPLY_UNIT],
+                            timeout=600)
+    except Exception as e:                                          # noqa: BLE001
+        logger.warning("pool command %s failed to start executor unit: %s",
+                       operation, e)
+        rc, out, err = 1, "", str(e)
     if rc != 0:
-        msg = (err.strip() or out.strip() or "host script refused")
-        logger.warning("pool command %s refused/failed (rc=%s): %s",
+        # The unit never ran (polkit denied / not installed) or died at the
+        # executor level (no/malformed request). Remove the unconsumed
+        # request so it can't be picked up by a later start.
+        try:
+            os.remove(req_path)
+        except OSError:
+            pass
+        msg = (err.strip() or out.strip() or "pool executor failed to start")
+        logger.warning("pool command %s executor start failed (rc=%s): %s",
                        operation, rc, msg)
+        return False, msg
+    try:
+        with open(res_path) as f:
+            result = json.load(f)
+    except Exception as e:                                          # noqa: BLE001
+        logger.warning("pool command %s: executor wrote no readable result: %s",
+                       operation, e)
+        return False, "pool executor returned no readable result"
+    finally:
+        try:
+            os.remove(res_path)
+        except OSError:
+            pass
+    if result.get("request_id") != request_id:
+        # A leftover from some other run — never report it as ours.
+        logger.warning("pool command %s: stale executor result ignored",
+                       operation)
+        return False, "pool executor result did not match this request"
+    script_rc = result.get("rc")
+    script_out = result.get("stdout") or ""
+    script_err = result.get("stderr") or ""
+    if script_rc is None or script_rc != 0:
+        msg = (script_err.strip() or script_out.strip()
+               or "host script refused")
+        logger.warning("pool command %s refused/failed (rc=%s): %s",
+                       operation, script_rc, msg)
         return False, msg
     # Invalidate the pools cache so the next GET /pools reflects the change.
     pools_snapshot(invalidate=True)
-    # drive_adopt mounts a freshly-formatted disk under /mnt/droplet, so the
-    # drives cache must also be refreshed — otherwise GET /drives returns a
-    # stale snapshot for up to the cache TTL and StorageStep's immediate
-    # post-adopt load() shows the disk as not-yet-mounted. (review #499)
-    if operation == "drive_adopt":
-        drives_snapshot(invalidate=True)
+    # Any pool op can change which drives are free vs. in-use (pool_create,
+    # pool_destroy, pool_format, pool_add_spare, pool_remove_disk all alter
+    # md membership; drive_adopt also mounts under /mnt/droplet). Invalidate
+    # drives unconditionally so the next GET /drives reflects the new state
+    # within the cache TTL. NB this deliberately BROADENS the previous
+    # behavior (main invalidated drives only for drive_adopt; pools_snapshot
+    # was the unconditional one) — every pool op changes free/in-use drive
+    # state, so they all deserve the invalidation.
+    drives_snapshot(invalidate=True)
     try:
-        return True, json.loads(out or "{}")
+        return True, json.loads(script_out or "{}")
     except (ValueError, TypeError):
-        return True, {"message": (out or "").strip()}
+        return True, {"message": script_out.strip()}
 
 
 # ---------------------------------------------------------------------------
@@ -2019,8 +2123,9 @@ class Handler(BaseHTTPRequestHandler):
             # BUG-3 / ADR-019: destructive mdadm op. Auth-gated exactly like
             # /drives/:uuid/eject. The orchestrator only reaches here after an
             # owner session + a valid single-use confirm-token; the bridge
-            # requires its own auth token on top, and run_pool_command() shells
-            # the host script (whose hard pre-flight is the last safety gate) —
+            # requires its own auth token on top, and run_pool_command() hands
+            # the op to the root executor unit via the StateDirectory spool
+            # (the host script's hard pre-flight is the last safety gate) —
             # it never runs mdadm/mkfs itself.
             if not self._authed():
                 return self._send(401, {"ok": False, "error": "unauthorized"})
