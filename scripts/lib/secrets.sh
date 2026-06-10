@@ -35,7 +35,7 @@ generate_env() {
   log_info "Generating device-unique secrets..."
 
   # --- Generate all secrets ---
-  local pg_password redis_password mqtt_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display ops_token service_token_mcp service_token_email orchestrator_sampler_token ai_gateway_sampler_token ollama_url openwrt_password
+  local pg_password redis_password mqtt_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display service_token_switch ops_token service_token_mcp service_token_email orchestrator_sampler_token ai_gateway_sampler_token ollama_url openwrt_password
   # WARP-503 — embedded Plane PM stack secrets (ADR-010, spec WARP-498).
   local pm_db_password pm_secret_key pm_admin_token pm_webhook_secret pm_web_url
   # Plane v0.24.1 also needs a RabbitMQ broker (celery) + MinIO object storage.
@@ -69,6 +69,18 @@ generate_env() {
   # + device-bridge.py's BRIDGE_AUTH_TOKEN MUST read the same value;
   # compose wires both ends to ${SERVICE_TOKEN_DISPLAY}.
   service_token_display=$(openssl rand -hex 32)
+  # Shared bearer for orchestrator → switch service HTTP calls (/ports,
+  # /vlans, /poe, /provision/*). Same WARP-165 rationale as the display
+  # token: the switch container's SERVICE_SECRET previously reused
+  # DEVICE_SECRET_KEY (the FIPS-sealed AES-256 master encryption key),
+  # putting the master key on the wire — and the orchestrator side was
+  # never wired at all, so the moment DEVICE_SECRET_KEY existed the
+  # switch service started 403ing every orchestrator call (the dashboard
+  # Network page's "Router unavailable"). Both switch.client.ts
+  # (orchestrator, outbound) and the switch container's SERVICE_SECRET
+  # MUST read the same value; compose wires both ends to
+  # ${SERVICE_TOKEN_SWITCH}.
+  service_token_switch=$(openssl rand -hex 32)
   # WARP-337: ops-console support-client bearer. Used by Warp Lab
   # support to authenticate against the on-device /ops/* API when
   # troubleshooting a deployed Droplet. The service binds loopback-only
@@ -217,6 +229,16 @@ SERVICE_TOKEN_VOICE=$service_token_voice
 # SERVICE_SECRET + device-bridge's BRIDGE_AUTH_TOKEN MUST read the same
 # value; compose wires all three to \${SERVICE_TOKEN_DISPLAY}.
 SERVICE_TOKEN_DISPLAY=$service_token_display
+
+# --- Switch service bearer (orchestrator → switch service HTTP) ---
+# Used by switch.client.ts to authenticate to the switch service's
+# /ports, /vlans, /poe, /provision/* endpoints. Replaces the prior
+# reuse of DEVICE_SECRET_KEY (the FIPS-sealed AES-256 master encryption
+# key) as the switch container's SERVICE_SECRET — same rationale as
+# SERVICE_TOKEN_DISPLAY above. Both switch.client.ts and the switch
+# container's SERVICE_SECRET MUST read the same value; compose wires
+# both ends to \${SERVICE_TOKEN_SWITCH}.
+SERVICE_TOKEN_SWITCH=$service_token_switch
 
 # --- ops-console support-client bearer (WARP-337) ---
 # Used by Warp Lab support to authenticate to the on-device /ops/*
@@ -468,6 +490,13 @@ migrate_env() {
   # display bearer; without this key the orchestrator → oled-display path
   # falls back to the empty-string bearer and 401s on every health probe.
   _migrate_ensure_key SERVICE_TOKEN_DISPLAY "$(openssl rand -hex 32)"
+  # Switch-bearer backfill: existing installs wired the switch container's
+  # SERVICE_SECRET to DEVICE_SECRET_KEY while the orchestrator side sent no
+  # bearer at all — so any install with a DEVICE_SECRET_KEY in .env had the
+  # switch service 403ing every orchestrator call. Minting this key (and the
+  # compose rewire to ${SERVICE_TOKEN_SWITCH} on both ends) restores the
+  # orchestrator → switch path and keeps DEVICE_SECRET_KEY off the wire.
+  _migrate_ensure_key SERVICE_TOKEN_SWITCH "$(openssl rand -hex 32)"
   # WARP-337 backfill: ops-console support client bearer. Without this
   # key the service falls through to an ephemeral token that regenerates
   # on every container restart, so support's saved credential invalidates
