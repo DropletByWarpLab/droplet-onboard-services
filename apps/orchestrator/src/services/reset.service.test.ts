@@ -291,6 +291,54 @@ describe("requestFactoryReset — double-fire guard", () => {
   });
 });
 
+describe("requestFactoryReset — transaction isolation closes the TOCTOU window", () => {
+  // pr-reviewer (PR #549, finding 1): the default READ COMMITTED isolation does
+  // NOT serialize two concurrent count→create transactions — both can read
+  // inFlight = 0 before either INSERT commits. The guard transaction must run
+  // SERIALIZABLE, and the resulting Postgres serialization failure (Prisma
+  // P2034) on the losing transaction must surface as the same
+  // RESET_ALREADY_IN_PROGRESS the in-flight guard throws (409 at the route).
+  it("opens the guard transaction with Serializable isolation", async () => {
+    const { prisma } = makeFakePrisma();
+    mockFetchOnce(200, { ok: true });
+
+    await requestFactoryReset(prisma as never, {
+      userId: "owner-1",
+      typedConfirm: "droplet-home",
+      targetName: "droplet-home",
+    });
+
+    expect(prisma.$transaction).toHaveBeenCalledWith(
+      expect.any(Function),
+      expect.objectContaining({ isolationLevel: "Serializable" }),
+    );
+  });
+
+  it("maps a P2034 serialization failure to RESET_ALREADY_IN_PROGRESS and never dispatches", async () => {
+    const { prisma, jobs } = makeFakePrisma();
+    const fetchSpy = mockFetchOnce(200, { ok: true });
+
+    // Model the LOSING side of two concurrent serializable transactions: the
+    // engine aborts it with P2034 ("write conflict or deadlock, retry").
+    (prisma.$transaction as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      Object.assign(new Error("Transaction failed due to a write conflict or a deadlock. Please retry your transaction"), {
+        code: "P2034",
+      }),
+    );
+
+    await expect(
+      requestFactoryReset(prisma as never, {
+        userId: "owner-1",
+        typedConfirm: "droplet-home",
+        targetName: "droplet-home",
+      }),
+    ).rejects.toMatchObject({ code: "RESET_ALREADY_IN_PROGRESS" });
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(jobs).toHaveLength(0);
+  });
+});
+
 describe("requestFactoryReset — fail closed without a bridge token", () => {
   it("marks the job failed and never dispatches when no bridge auth token is set", async () => {
     delete process.env.BRIDGE_AUTH_TOKEN;

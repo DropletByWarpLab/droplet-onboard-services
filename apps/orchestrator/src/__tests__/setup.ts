@@ -81,6 +81,17 @@ vi.mock("@prisma/client", () => {
   };
   return {
     PrismaClient: vi.fn(() => mockPrisma),
-    Prisma: { PrismaClientKnownRequestError },
+    Prisma: {
+      PrismaClientKnownRequestError,
+      // Mirrors the generated client's const-object enum — reset.service opens
+      // its double-fire-guard transaction with
+      // `Prisma.TransactionIsolationLevel.Serializable` (pr-reviewer #549).
+      TransactionIsolationLevel: {
+        ReadUncommitted: "ReadUncommitted",
+        ReadCommitted: "ReadCommitted",
+        RepeatableRead: "RepeatableRead",
+        Serializable: "Serializable",
+      },
+    },
   };
 });

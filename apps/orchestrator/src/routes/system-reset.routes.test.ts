@@ -34,9 +34,14 @@ function createPrismaMock() {
   const jobs: any[] = [];
   const audits: any[] = [];
   let seq = 0;
-  return {
+  const prisma: any = {
     jobs,
     audits,
+    // reset.service wraps the double-fire guard + audit + job create in
+    // prisma.$transaction(fn, { isolationLevel: Serializable }) (pr-reviewer
+    // #549 finding 1). Run the callback against this same mock; atomicity
+    // itself isn't under test at the route level.
+    $transaction: vi.fn(async (fn: (tx: any) => Promise<any>) => fn(prisma)),
     resetJob: {
       create: vi.fn(async ({ data }: any) => {
         const job = {
@@ -73,7 +78,8 @@ function createPrismaMock() {
         return { id: `audit-${audits.length}`, ...data };
       }),
     },
-  } as any;
+  };
+  return prisma;
 }
 
 function ownerAuth(req: any, _res: any, next: any) {

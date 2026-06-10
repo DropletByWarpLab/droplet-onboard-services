@@ -33,6 +33,7 @@
 
 import { timingSafeEqual } from "node:crypto";
 import pino from "pino";
+import { Prisma } from "@prisma/client";
 import type { PrismaClient, ResetJob } from "@prisma/client";
 import { config } from "../config.js";
 import { isBridgeConnectionError } from "../lib/bridge-errors.js";
@@ -164,34 +165,58 @@ export async function requestFactoryReset(
   // (2)-(4) Double-fire guard + audit + job create, ATOMIC. The in-flight count
   // and the resetJob.create must run in ONE transaction (AC3): as two separate
   // calls, two concurrent resets both read count 0 and both create a job, so
-  // the wipe is dispatched twice. The interactive transaction serializes the
-  // guard with the insert. The audit row is written INSIDE so a rejected
+  // the wipe is dispatched twice. The audit row is written INSIDE so a rejected
   // duplicate leaves no orphan audit row (the txn rolls back on the throw),
   // while a legitimate request still records the destructive intent before the
   // wipe is dispatched (AC1). Mirrors storage-safety's CommandAuditLog shape.
-  const job = await prisma.$transaction(async (tx) => {
-    const inFlight = await tx.resetJob.count({
-      where: { status: { in: ["requested", "dispatched"] } },
-    });
-    if (inFlight > 0) {
+  //
+  // SERIALIZABLE, not the READ COMMITTED default (pr-reviewer #549 finding 1):
+  // under READ COMMITTED two concurrent transactions can BOTH run the count
+  // before either INSERT commits — both see inFlight = 0, both pass the guard,
+  // and both dispatch. Serializable forces one of the pair to abort with a
+  // serialization failure (Prisma P2034), which we map to the SAME
+  // RESET_ALREADY_IN_PROGRESS the guard throws, so the duplicate caller gets a
+  // truthful 409 instead of an orphan failed job + misleading 502.
+  let job: ResetJob;
+  try {
+    job = await prisma.$transaction(
+      async (tx) => {
+        const inFlight = await tx.resetJob.count({
+          where: { status: { in: ["requested", "dispatched"] } },
+        });
+        if (inFlight > 0) {
+          throw new ResetError(
+            "RESET_ALREADY_IN_PROGRESS",
+            "A factory reset is already in progress.",
+          );
+        }
+
+        await writeResetAudit(tx, { userId, targetName });
+
+        // Persist the job in `requested` before dispatch so a crash mid-dispatch
+        // leaves an explicit, queryable row (never an IS-NULL guess).
+        return tx.resetJob.create({
+          data: {
+            status: "requested",
+            requestedBy: userId ?? null,
+            targetName,
+          },
+        });
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
+  } catch (err) {
+    if (isSerializationConflict(err)) {
+      // We lost the race against a concurrent reset request — the other
+      // transaction committed its job first, so "already in progress" is the
+      // honest answer (no row was written by this transaction; it rolled back).
       throw new ResetError(
         "RESET_ALREADY_IN_PROGRESS",
         "A factory reset is already in progress.",
       );
     }
-
-    await writeResetAudit(tx, { userId, targetName });
-
-    // Persist the job in `requested` before dispatch so a crash mid-dispatch
-    // leaves an explicit, queryable row (never an IS-NULL guess).
-    return tx.resetJob.create({
-      data: {
-        status: "requested",
-        requestedBy: userId ?? null,
-        targetName,
-      },
-    });
-  });
+    throw err;
+  }
 
   // Fail closed: no bridge token → we cannot safely invoke a data-destroying
   // host action. Mark the job failed and surface BRIDGE_AUTH_UNCONFIGURED.
@@ -248,6 +273,22 @@ export async function requestFactoryReset(
   });
   logger.warn({ jobId: job.id, targetName }, "factory reset dispatched to host executor");
   return dispatched;
+}
+
+/**
+ * Prisma surfaces a Postgres serialization failure (the losing side of two
+ * concurrent SERIALIZABLE transactions) as P2034 — "Transaction failed due to a
+ * write conflict or a deadlock. Please retry your transaction." Detected by
+ * error code rather than `instanceof Prisma.PrismaClientKnownRequestError` so
+ * the check holds across client instances (and test doubles). No ResetErrorCode
+ * collides with the P-prefixed Prisma codes.
+ */
+function isSerializationConflict(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { code?: unknown }).code === "P2034"
+  );
 }
 
 interface BridgeResult {
