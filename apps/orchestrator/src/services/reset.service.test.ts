@@ -346,6 +346,28 @@ describe("requestFactoryReset — transaction isolation closes the TOCTOU window
   });
 });
 
+describe("requestFactoryReset — DB-level double-fire guard (partial unique index)", () => {
+  it("maps a P2002 unique violation on create onto RESET_ALREADY_IN_PROGRESS", async () => {
+    // Two concurrent requests can both pass the count check; the
+    // ResetJob_at_most_one_nonterminal index makes the second INSERT fail
+    // with P2002, which must read as the same 409 a sequential duplicate gets.
+    const { prisma } = makeFakePrisma();
+    const fetchSpy = mockFetchOnce(200, { ok: true });
+    (prisma.resetJob.create as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      Object.assign(new Error("Unique constraint failed"), { code: "P2002" }),
+    );
+
+    await expect(
+      requestFactoryReset(prisma as never, {
+        userId: "owner-1",
+        typedConfirm: "droplet-home",
+        targetName: "droplet-home",
+      }),
+    ).rejects.toMatchObject({ code: "RESET_ALREADY_IN_PROGRESS" });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
 describe("requestFactoryReset — fail closed without a bridge token", () => {
   it("marks the job failed and never dispatches when no bridge auth token is set", async () => {
     delete process.env.BRIDGE_AUTH_TOKEN;
