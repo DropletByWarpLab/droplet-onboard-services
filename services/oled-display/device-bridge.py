@@ -1726,8 +1726,10 @@ def _run_pool_via_executor(operation, params):
     # pool_destroy, pool_format, pool_add_spare, pool_remove_disk all alter
     # md membership; drive_adopt also mounts under /mnt/droplet). Invalidate
     # drives unconditionally so the next GET /drives reflects the new state
-    # within the cache TTL. The old run_pool_command did this unconditionally
-    # on success; the executor split should preserve the same invariant.
+    # within the cache TTL. NB this deliberately BROADENS the previous
+    # behavior (main invalidated drives only for drive_adopt; pools_snapshot
+    # was the unconditional one) — every pool op changes free/in-use drive
+    # state, so they all deserve the invalidation.
     drives_snapshot(invalidate=True)
     try:
         return True, json.loads(script_out or "{}")

@@ -106,9 +106,20 @@ set -e
 # --- Write the result where the sandboxed bridge can read it -------------------
 # Atomic (tmp + mv in the same dir) so the bridge never reads a half-written
 # file; owned like the spool dir (droplet) so the bridge can read it back.
+# Symlink hardening (PR #554 review): this runs as ROOT inside a 0700
+# droplet-owned dir on a FIXED, predictable path. A compromised droplet
+# account could pre-plant `result.json.tmp` as a symlink to any root file --
+# python's open(..., "w") and GNU chown-by-path both FOLLOW symlinks, turning
+# this into an arbitrary-root-file-write/chown primitive. So: unlink first,
+# create with O_NOFOLLOW|O_CREAT|O_EXCL (refuses any pre-planted entry), set
+# perms/owner on the FD (never by path), and `mv -T` so the final rename
+# cannot be redirected either.
 RES_TMP="$RES.tmp"
+rm -f "$RES_TMP"
+SPOOL_UID="$(stat -c %u "$SPOOL_DIR")"
+SPOOL_GID="$(stat -c %g "$SPOOL_DIR")"
 RC="$POOL_RC" REQUEST_ID="$REQUEST_ID" OUT_FILE="$OUT_FILE" ERR_FILE="$ERR_FILE" \
-RES_TMP="$RES_TMP" python3 - <<'PY'
+RES_TMP="$RES_TMP" SPOOL_UID="$SPOOL_UID" SPOOL_GID="$SPOOL_GID" python3 - <<'PY'
 import json, os
 with open(os.environ["OUT_FILE"], "r", encoding="utf-8", errors="replace") as fh:
     out = fh.read()
@@ -121,12 +132,29 @@ result = {
     "stderr": err,
 }
 path = os.environ["RES_TMP"]
-with open(path, "w", encoding="utf-8") as fh:
-    json.dump(result, fh)
+# O_EXCL|O_NOFOLLOW: fail closed if ANYTHING (file or symlink) already sits
+# at the path; 0600 from birth so the payload is never group/world-readable.
+# O_NOFOLLOW/fchown/fchmod are POSIX-only -- the shipping box is Linux where
+# all three exist; the getattr/hasattr fallbacks only keep the script
+# exercisable by pytest on a Windows dev host (O_EXCL, the primary
+# pre-planted-entry guard, holds on every platform).
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+fd = os.open(path, flags, 0o600)
+try:
+    # Owner/perms via the fd -- chown/chmod BY PATH would follow a racing
+    # symlink swap; the fd pins the inode we just created.
+    if hasattr(os, "fchown"):
+        os.fchown(fd, int(os.environ["SPOOL_UID"]), int(os.environ["SPOOL_GID"]))
+    if hasattr(os, "fchmod"):
+        os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fd = -1
+        json.dump(result, fh)
+finally:
+    if fd != -1:
+        os.close(fd)
 PY
-chmod 0600 "$RES_TMP"
-chown --reference="$SPOOL_DIR" "$RES_TMP"
-mv "$RES_TMP" "$RES"
+mv -T "$RES_TMP" "$RES"
 
 # Consume the request only after the result is in place, so a crash above
 # leaves the request inspectable rather than silently swallowed.

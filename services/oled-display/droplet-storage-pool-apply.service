@@ -20,3 +20,18 @@ ExecStart=/usr/local/sbin/droplet-storage-pool-apply.sh
 # bridge's 600 s subprocess timeout on `systemctl start` so systemd reports
 # the failure before the bridge gives up on the call.
 TimeoutStartSec=590
+
+# --- Hardening (PR #554 review) ---
+# Root is required for mdadm/mkfs/mount against real block devices and /mnt,
+# so ProtectSystem/PrivateDevices/PrivateMounts are off the table — but the
+# orthogonal reductions cost nothing: this unit never needs the network,
+# user homes, or kernel tunables/modules/logs.
+PrivateNetwork=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=true
+RestrictRealtime=true
