@@ -218,21 +218,24 @@ describe("requestFactoryReset — happy path", () => {
   });
 });
 
-describe("requestFactoryReset — fixed confirm phrase (WARP-825 follow-up)", () => {
-  it("accepts the literal 'factory reset' phrase even when it isn't the hostname", async () => {
-    const { prisma, jobs } = makeFakePrisma();
+describe("requestFactoryReset — hostname-only confirm (2026-06-09 sweep)", () => {
+  it("REJECTS the legacy universal 'factory reset' phrase — only the device name confirms", async () => {
+    // The fixed phrase was public in the repo, so it provided zero per-device
+    // friction. Typing it must now read as a mismatch and never dispatch.
+    const { prisma, jobs, audits } = makeFakePrisma();
     const fetchSpy = mockFetchOnce(200, { ok: true });
 
-    const job = await requestFactoryReset(prisma as never, {
-      userId: "owner-1",
-      typedConfirm: "factory reset",
-      targetName: "droplet-home",
-    });
+    await expect(
+      requestFactoryReset(prisma as never, {
+        userId: "owner-1",
+        typedConfirm: "factory reset",
+        targetName: "droplet-home",
+      }),
+    ).rejects.toMatchObject({ code: "CONFIRM_MISMATCH" });
 
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
-    expect(job.status).toBe("dispatched");
-    // The audit/job still record the canonical device name, not the phrase.
-    expect(jobs[0].targetName).toBe("droplet-home");
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(jobs).toHaveLength(0);
+    expect(audits).toHaveLength(0);
   });
 });
 
@@ -340,6 +343,28 @@ describe("requestFactoryReset — transaction isolation closes the TOCTOU window
 
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(jobs).toHaveLength(0);
+  });
+});
+
+describe("requestFactoryReset — DB-level double-fire guard (partial unique index)", () => {
+  it("maps a P2002 unique violation on create onto RESET_ALREADY_IN_PROGRESS", async () => {
+    // Two concurrent requests can both pass the count check; the
+    // ResetJob_at_most_one_nonterminal index makes the second INSERT fail
+    // with P2002, which must read as the same 409 a sequential duplicate gets.
+    const { prisma } = makeFakePrisma();
+    const fetchSpy = mockFetchOnce(200, { ok: true });
+    (prisma.resetJob.create as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      Object.assign(new Error("Unique constraint failed"), { code: "P2002" }),
+    );
+
+    await expect(
+      requestFactoryReset(prisma as never, {
+        userId: "owner-1",
+        typedConfirm: "droplet-home",
+        targetName: "droplet-home",
+      }),
+    ).rejects.toMatchObject({ code: "RESET_ALREADY_IN_PROGRESS" });
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
 

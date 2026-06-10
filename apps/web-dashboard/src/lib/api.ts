@@ -3736,13 +3736,20 @@ export interface ResetJob {
 }
 
 export interface ResetStatusResponse {
-  /** The canonical device name the owner must type to confirm. Server-derived. */
-  targetName: string;
+  /**
+   * MASKED hint of the device name (e.g. "d••••••t"). The API deliberately
+   * never returns the verbatim confirm value — the owner types the real name
+   * from Settings → Device information, and the server validates it. (A
+   * verbatim value here let the modal display the exact string to copy/paste,
+   * removing the per-device type-to-confirm friction.) `job.targetName` in
+   * this response is masked with the same rule.
+   */
+  targetHint: string;
   /** The latest reset job, or null on a box that has never been reset. */
   job: ResetJob | null;
 }
 
-/** GET the reset status: the canonical target name to type + the latest job. */
+/** GET the reset status: a masked hint of the target name + the latest job. */
 export async function getResetStatus(): Promise<ResetStatusResponse> {
   const res = await authFetch(`${BASE}/api/system/reset`);
   if (!res.ok) throw new Error(`Failed to load reset status: ${res.status}`);

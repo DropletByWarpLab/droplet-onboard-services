@@ -205,6 +205,36 @@ describe("POST /api/logs/bundle", () => {
     expect(typeof arg.what).toBe("string");
   });
 
+  it("completes the download even when the audit write hangs (finalize-first, 2026-06-09 sweep)", async () => {
+    // recordActivity stalls forever (slow/hung DB). The zip must still close
+    // with a clean EOF — the audit is best-effort + detached, never on the
+    // download's critical path (the inline 'never block the download' rule).
+    recordActivityMock.mockImplementationOnce(() => new Promise(() => {}));
+    fetchLogBundleMock.mockResolvedValue({
+      collected_at: "2026-06-06T10:00:00Z",
+      window_hours: 24,
+      services: [{ name: "orchestrator", source: "docker", lines: "ok" }],
+      truncated: false,
+    });
+
+    const res = await request(makeApp("owner"))
+      .post("/api/logs/bundle")
+      .send({})
+      .buffer(true)
+      .parse((r, cb) => {
+        const chunks: Buffer[] = [];
+        r.on("data", (c: Buffer) => chunks.push(c));
+        r.on("end", () => cb(null, Buffer.concat(chunks)));
+      });
+
+    expect(res.status).toBe(200);
+    // A parseable archive proves finalize() ran — the EOF arrived while the
+    // audit promise was still pending.
+    const entries = await readZip(res.body as Buffer);
+    expect(Object.keys(entries).length).toBeGreaterThan(0);
+    expect(recordActivityMock).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects an out-of-range window with 400 (bounded time window)", async () => {
     const res = await request(makeApp("owner"))
       .post("/api/logs/bundle")

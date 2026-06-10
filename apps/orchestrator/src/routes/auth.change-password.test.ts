@@ -34,9 +34,17 @@ vi.mock("../config.js", () => ({
   },
 }));
 
+// Stateful in-memory cache double — the change-password backoff (PR #549
+// follow-up) needs real get/set/del semantics, not a null stub.
+const cacheStore = vi.hoisted(() => new Map<string, unknown>());
 vi.mock("../services/cache.service.js", () => ({
-  cacheGet: vi.fn().mockResolvedValue(null),
-  cacheSet: vi.fn().mockResolvedValue(undefined),
+  cacheGet: vi.fn(async (key: string) => cacheStore.get(key) ?? null),
+  cacheSet: vi.fn(async (key: string, value: unknown) => {
+    cacheStore.set(key, value);
+  }),
+  cacheDel: vi.fn(async (key: string) => {
+    cacheStore.delete(key);
+  }),
 }));
 
 vi.mock("../services/nextcloud.client.js", () => ({
@@ -104,7 +112,10 @@ vi.mock("../services/brain-memory.service.js", () => ({
 import {
   createPublicAuthRouter,
   createProtectedAuthRouter,
+  passwordChangeBackoffSeconds,
+  callerIpFromReq,
 } from "./auth.js";
+import { recordActivity } from "../services/activity.singleton.js";
 import type { Role } from "../services/jwt.service.js";
 
 interface UserRow {
@@ -199,6 +210,7 @@ const session = (over: Partial<{ id: string; role: Role }> = {}) => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  cacheStore.clear();
   hashPassword.mockImplementation(async (_pw: string) => "$argon2id$v=19$m=19456,t=2,p=1$bmV3c2FsdA$bmV3aGFzaA");
   verifyDummyPassword.mockResolvedValue(false);
 });
@@ -325,5 +337,124 @@ describe("POST /auth/change-password", () => {
     expect(res.body.code).toBe("SAME_PASSWORD");
     const stored = prisma._users.find((u: UserRow) => u.id === "u-kid");
     expect(stored.mustChangePassword).toBe(true);
+  });
+});
+
+describe("POST /auth/change-password — current-password oracle hardening (PR #549 follow-up)", () => {
+  it("answers INVALID_PASSWORD (never SAME_PASSWORD) when the current password is wrong, even if current === new", async () => {
+    // Ordering half of the finding: SAME_PASSWORD must only ever be computed
+    // for a caller who has PROVEN the current password. Before the fix this
+    // request returned SAME_PASSWORD without running verifyPassword at all.
+    verifyPassword.mockResolvedValue(false);
+    const prisma = createPrismaMock([row()]);
+    const res = await request(protectedApp(prisma, session()))
+      .post("/api/auth/change-password")
+      .send({ currentPassword: "Guess-secret123", newPassword: "Guess-secret123" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("INVALID_PASSWORD");
+    expect(verifyPassword).toHaveBeenCalled();
+  });
+
+  it("locks with 429 TOO_MANY_ATTEMPTS after repeated wrong current passwords", async () => {
+    verifyPassword.mockResolvedValue(false);
+    const prisma = createPrismaMock([row()]);
+    const app = protectedApp(prisma, session());
+
+    // Free tier (5) + 1 — the 6th wrong attempt sets the first lock.
+    for (let i = 0; i < 6; i++) {
+      const res = await request(app)
+        .post("/api/auth/change-password")
+        .send({ currentPassword: `Wrong-secret-${i}23`, newPassword: "Brand-new-secret123" });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe("INVALID_PASSWORD");
+    }
+
+    const locked = await request(app)
+      .post("/api/auth/change-password")
+      .send({ currentPassword: "Wrong-final-secret123", newPassword: "Brand-new-secret123" });
+    expect(locked.status).toBe(429);
+    expect(locked.body.code).toBe("TOO_MANY_ATTEMPTS");
+    expect(Number(locked.headers["retry-after"])).toBeGreaterThan(0);
+    // The locked request never reached the verifier — no extra oracle sample.
+    expect(verifyPassword).toHaveBeenCalledTimes(6);
+  });
+
+  it("a successful verify clears the failure counter", async () => {
+    const prisma = createPrismaMock([row()]);
+    const app = protectedApp(prisma, session());
+
+    // 5 wrong attempts — still inside the free tier, no lock yet.
+    verifyPassword.mockResolvedValue(false);
+    for (let i = 0; i < 5; i++) {
+      await request(app)
+        .post("/api/auth/change-password")
+        .send({ currentPassword: `Wrong-secret-${i}23`, newPassword: "Brand-new-secret123" });
+    }
+
+    // Correct password → rotation succeeds and the counter resets.
+    verifyPassword.mockResolvedValue(true);
+    const ok = await request(app)
+      .post("/api/auth/change-password")
+      .send({ currentPassword: "Temp-secret123", newPassword: "Brand-new-secret123" });
+    expect(ok.status).toBe(200);
+
+    // One more wrong attempt starts from a CLEAN count (1 of 5) — were the
+    // counter not cleared this would be failure #6 and set a lock.
+    verifyPassword.mockResolvedValue(false);
+    await request(app)
+      .post("/api/auth/change-password")
+      .send({ currentPassword: "Wrong-again-secret123", newPassword: "Other-new-secret123" });
+
+    verifyPassword.mockResolvedValue(true);
+    const after = await request(app)
+      .post("/api/auth/change-password")
+      .send({ currentPassword: "Brand-new-secret123", newPassword: "Another-new-secret123" });
+    expect(after.status).toBe(200);
+  });
+});
+
+describe("auth audit caller IP (WARP-456) — spoof resistance", () => {
+  it("records the proxy-resolved IP in the audit row, never the client-supplied X-Forwarded-For", async () => {
+    // `trust proxy` is not set on this test app, so Express must ignore the
+    // forged header entirely; before the fix callerIpFromReq read the
+    // LEFTMOST X-Forwarded-For entry — i.e. whatever the caller claimed.
+    verifyPassword.mockResolvedValue(true);
+    const prisma = createPrismaMock([row()]);
+    const res = await request(protectedApp(prisma, session()))
+      .post("/api/auth/change-password")
+      .set("X-Forwarded-For", "6.6.6.6")
+      .send({ currentPassword: "Temp-secret123", newPassword: "Brand-new-secret123" });
+
+    expect(res.status).toBe(200);
+    const call = vi.mocked(recordActivity).mock.calls.at(-1)?.[0] as any;
+    expect(call).toBeDefined();
+    expect(call.sub).not.toBe("6.6.6.6");
+    expect(call.refs.ip).not.toBe("6.6.6.6");
+  });
+
+  it("callerIpFromReq prefers proxy-aware req.ip and falls back to the socket address", () => {
+    const spoofed = {
+      headers: { "x-forwarded-for": "6.6.6.6, 10.0.0.1" },
+      ip: "192.168.20.5",
+      socket: { remoteAddress: "172.18.0.9" },
+    } as any;
+    expect(callerIpFromReq(spoofed)).toBe("192.168.20.5");
+
+    const noIp = { headers: {}, ip: undefined, socket: { remoteAddress: "172.18.0.9" } } as any;
+    expect(callerIpFromReq(noIp)).toBe("172.18.0.9");
+  });
+});
+
+describe("passwordChangeBackoffSeconds — pure schedule", () => {
+  it("forgives the free tier, then escalates and caps", () => {
+    expect(passwordChangeBackoffSeconds(0)).toBe(0);
+    expect(passwordChangeBackoffSeconds(5)).toBe(0);
+    expect(passwordChangeBackoffSeconds(6)).toBe(30);
+    expect(passwordChangeBackoffSeconds(7)).toBe(60);
+    expect(passwordChangeBackoffSeconds(8)).toBe(120);
+    expect(passwordChangeBackoffSeconds(9)).toBe(300);
+    expect(passwordChangeBackoffSeconds(10)).toBe(900);
+    expect(passwordChangeBackoffSeconds(100)).toBe(900);
   });
 });

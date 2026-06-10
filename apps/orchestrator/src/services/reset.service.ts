@@ -48,15 +48,6 @@ const BRIDGE_URL = config.DEVICE_BRIDGE_URL;
 const DOMAIN = "system";
 const SERVICE = "factory_reset";
 
-/**
- * The fixed phrase the owner types to confirm a factory reset. A friendly,
- * memorable constant (WARP-825 follow-up) — the device hostname read as a
- * "random string" and was awkward to type or copy/paste. Server-owned so the
- * client still can't dictate the friction value; the canonical hostname is also
- * accepted (see requestFactoryReset) for backward compatibility.
- */
-export const FACTORY_RESET_CONFIRM_PHRASE = "factory reset";
-
 /** Structured error codes the route maps to HTTP statuses. */
 export type ResetErrorCode =
   | "CONFIRM_MISMATCH"
@@ -77,6 +68,32 @@ export class ResetError extends Error {
     this.code = code;
     this.bridgeStatus = bridgeStatus;
   }
+}
+
+/**
+ * Shared secret the device-bridge requires on its mutating routes. Same env
+ * precedence + per-call read as storage.ts / hostapd-bridge.service.ts so a
+ * secret injected after boot (and the tests) see the current value.
+ */
+function bridgeAuthToken(): string {
+  return (
+    process.env.BRIDGE_AUTH_TOKEN ||
+    process.env.SERVICE_TOKEN_DISPLAY ||
+    ""
+  ).trim();
+}
+
+/**
+ * Prisma unique-constraint violation (P2002) — duck-typed rather than
+ * `instanceof Prisma.PrismaClientKnownRequestError` so the unit tests' plain
+ * thrown objects behave like the real client error.
+ */
+function isUniqueViolation(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { code?: unknown }).code === "P2002"
+  );
 }
 
 /**
@@ -138,17 +155,16 @@ export async function requestFactoryReset(
   const { userId, typedConfirm, targetName } = input;
 
   // (1) Server-side friction. Never trust the client's gate alone. The owner
-  // confirms by typing the fixed phrase "factory reset"; the canonical device
-  // hostname is still accepted as a (stricter) alternative for backward
-  // compatibility. Either clears the human gate — the real boundary is the
+  // confirms by typing the device's canonical hostname — a PER-DEVICE value
+  // (2026-06-09 sweep: the previous fixed phrase "factory reset" was public
+  // in the repo, so any reader of the codebase knew every box's confirm
+  // value; a universal phrase removes exactly the per-device friction this
+  // gate exists to provide). The real authorization boundary is still the
   // route's owner-role check.
-  if (
-    !validateConfirmToken(typedConfirm, FACTORY_RESET_CONFIRM_PHRASE) &&
-    !validateConfirmToken(typedConfirm, targetName)
-  ) {
+  if (!validateConfirmToken(typedConfirm, targetName)) {
     throw new ResetError(
       "CONFIRM_MISMATCH",
-      'Type "factory reset" to confirm.',
+      "Type your device's name to confirm.",
     );
   }
 
@@ -211,6 +227,36 @@ export async function requestFactoryReset(
     }
     throw err;
   }
+
+  // (3) Audit BEFORE the wipe. If the box is gone a second later, the intent is
+  // still recorded. Mirrors storage-safety's CommandAuditLog shape.
+  await writeResetAudit(prisma, { userId, targetName });
+
+  // (4) Persist the job in `requested` before dispatch so a crash mid-dispatch
+  // leaves an explicit, queryable row (never an IS-NULL guess). The partial
+  // unique index "ResetJob_at_most_one_nonterminal" backs the in-flight guard
+  // at the DATABASE level — two concurrent requests can both pass the count
+  // in (2), but only one insert wins; the loser's unique violation maps onto
+  // the same 409 path.
+  let job: ResetJob;
+  try {
+    job = await prisma.resetJob.create({
+      data: {
+        status: "requested",
+        requestedBy: userId ?? null,
+        targetName,
+      },
+    });
+  } catch (err) {
+    if (isUniqueViolation(err)) {
+      throw new ResetError(
+        "RESET_ALREADY_IN_PROGRESS",
+        "A factory reset is already in progress.",
+      );
+    }
+    throw err;
+  }
+
 
   // Fail closed: no bridge token → we cannot safely invoke a data-destroying
   // host action. Mark the job failed and surface BRIDGE_AUTH_UNCONFIGURED.

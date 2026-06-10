@@ -265,7 +265,7 @@ function ReformatDriveCard() {
  * variant (aliased FactoryResetConfirm) shipped with this feature.
  */
 function FactoryResetCard() {
-  const [targetName, setTargetName] = useState<string>("");
+  const [targetHint, setTargetHint] = useState<string>("");
   const [latestJob, setLatestJob] = useState<ResetJob | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   // Once a reset is dispatched the box is tearing down; we flip to a terminal
@@ -281,13 +281,13 @@ function FactoryResetCard() {
       try {
         const status = await getResetStatus();
         if (cancelled) return;
-        setTargetName(status.targetName);
+        setTargetHint(status.targetHint);
         setLatestJob(status.job);
         if (status.job?.status === "dispatched") setDispatched(true);
       } catch {
-        // Non-fatal — leave the entry without a target name; the confirm flow
-        // can't enable until we have one (the friction phrase would be empty),
-        // so a failed status read fails safe (reset can't be triggered blind).
+        // Non-fatal — the card still works without the hint: the typed name
+        // is validated SERVER-side, so a failed status read can never let a
+        // reset through that the server wouldn't have allowed.
       }
     })();
     return () => {
@@ -295,11 +295,12 @@ function FactoryResetCard() {
     };
   }, []);
 
-  const handleConfirm = useCallback(async () => {
-    // WARP-825 follow-up: the owner confirms by typing the fixed phrase
-    // "factory reset" (the device hostname read as a random string). The server
-    // accepts the phrase (and still the hostname); we send the phrase.
-    const res = await triggerFactoryReset("factory reset");
+  const handleConfirm = useCallback(async (typed: string) => {
+    // 2026-06-09 sweep: the owner confirms by typing the device's name (from
+    // Settings → Device information). The API only ever gives us a masked
+    // hint, so the typed value goes to the server verbatim and the SERVER
+    // decides — a mismatch throws and the modal surfaces it for retry.
+    const res = await triggerFactoryReset(typed);
     // Success: the wipe is dispatched and the box is going down. Close the modal
     // and switch the section to the terminal progress notice.
     setLatestJob({
@@ -312,7 +313,7 @@ function FactoryResetCard() {
     });
     setDispatched(true);
     setModalOpen(false);
-  }, [targetName]);
+  }, []);
 
   return (
     <>
@@ -372,13 +373,15 @@ function FactoryResetCard() {
             This erases every account, file, message, smart-home setup, and
             setting on the box, and returns it to first-run setup. Your data
             cannot be recovered afterward. The dashboard will go offline while
-            the reset runs.
+            the reset runs. To confirm, type your device&rsquo;s name — you can
+            find it under Settings → Device information.
           </>
         }
-        confirmPhrase="factory reset"
+        confirmPrompt="your device's name"
+        confirmHint={targetHint || undefined}
         confirmLabel="Factory reset"
         busyLabel="Resetting…"
-        targetSummary={targetName || undefined}
+        targetSummary={targetHint || undefined}
         onConfirm={handleConfirm}
         onCancel={() => setModalOpen(false)}
         triggerRef={triggerRef}

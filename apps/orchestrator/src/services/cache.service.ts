@@ -113,6 +113,26 @@ export async function cacheDel(key: string): Promise<void> {
   }
 }
 
+/**
+ * Atomic increment. Uses Redis INCR (read-modify-write in a single command)
+ * then sets the TTL on every call so the window slides with each failure,
+ * matching the semantics of the old cacheGet+cacheSet pattern but without
+ * the race where two concurrent callers both read N and both write N+1.
+ * Returns the new counter value, or null on Redis error (caller fails open).
+ */
+export async function cacheIncr(
+  key: string,
+  ttlSeconds: number,
+): Promise<number | null> {
+  try {
+    const next = await getRedis().incr(key);
+    await getRedis().expire(key, ttlSeconds);
+    return next;
+  } catch {
+    return null;
+  }
+}
+
 export async function isRedisHealthy(): Promise<boolean> {
   try {
     const pong = await getRedis().ping();
