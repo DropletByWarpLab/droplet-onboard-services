@@ -26,7 +26,7 @@ describe("WifiStep fits without an inner scroll cap", () => {
 
     // …and it is NOT wrapped in the old bounded scroll region (no dvh cap).
     expect(
-      screen.queryByRole("region", { name: /home wi-fi setup/i }),
+      screen.queryByRole("region", { name: /home wi-?fi setup/i }),
     ).toBeNull();
   });
 
