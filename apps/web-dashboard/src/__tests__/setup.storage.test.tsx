@@ -133,15 +133,26 @@ async function advanceToStorage() {
   });
   // PR #380 — pass through the org step (account → org → …).
   await passOrgStep();
-  // PR #375 — TwoFactor step → skip (org → twofactor → internet).
+  // PR #375 — TwoFactor step → skip (org → twofactor → wifi).
   await act(async () => {
     fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
   });
-  // Internet step → skip to Storage.
+  // Onboarding-Flow redesign — the single Internet step is now two: Wi-Fi
+  // then Address. Skip both to reach Storage. Wi-Fi has no async mount load.
   await act(async () => {
     await Promise.resolve();
     await Promise.resolve();
-    fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /skip — i'll do this later/i }),
+    );
+  });
+  // Address step → skip (its fetchDuckDnsStatus effect resolves first).
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+    fireEvent.click(
+      screen.getByRole("button", { name: /skip — no remote access/i }),
+    );
   });
   // Let StorageStep's fetchDrives effect resolve.
   await act(async () => {

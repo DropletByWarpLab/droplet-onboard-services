@@ -22,7 +22,8 @@ export type Step =
   | "account"
   | "org"
   | "twofactor"
-  | "internet"
+  | "wifi"
+  | "address"
   | "storage"
   | "discovery"
   | "cameras"
@@ -45,13 +46,24 @@ export type Step =
 // PR #384 — `StepShell` derives its aurora rail from this exact array (order +
 // membership), keyed into `RAIL_LABELS` for the plain-language label + icon,
 // so the rail can't drift from the state machine.
+//
+// Onboarding-Flow redesign — the single `internet` step is split into two
+// ordered steps, `wifi` (the local network the box broadcasts) and `address`
+// (the DuckDNS web address that powers remote access), so each maps to one
+// backend and one mental model (WIFI-ADDRESS-THEME-HANDOFF §1). Like
+// `twofactor`, both are CLIENT-ONLY steps: the orchestrator's Prisma
+// `SetupStep` enum has no `wifi`/`address` members, so the page persists both
+// as the existing `internet` SetupStep and resumes a persisted `internet` at
+// `wifi` (see `app/setup/page.tsx` resumeStepFrom + persistedStep). The enum
+// is deliberately NOT migrated for a presentation-only split.
 export const STEPS: Step[] = [
   "welcome",
   "claim",
   "account",
   "org",
   "twofactor",
-  "internet",
+  "wifi",
+  "address",
   "storage",
   "discovery",
   "cameras",

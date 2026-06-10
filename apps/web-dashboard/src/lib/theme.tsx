@@ -84,3 +84,14 @@ export function useTheme(): ThemeContextValue {
   if (!ctx) throw new Error("useTheme must be used within ThemeProvider");
   return ctx;
 }
+
+/**
+ * Like {@link useTheme} but returns `null` instead of throwing when rendered
+ * outside a `ThemeProvider`. For chrome that can legitimately mount in
+ * isolation — e.g. the setup wizard's rail theme toggle, which step components
+ * render under unit test without the root layout's provider. Callers render a
+ * graceful fallback (usually nothing) when it returns `null`.
+ */
+export function useOptionalTheme(): ThemeContextValue | null {
+  return useContext(ThemeContext) ?? null;
+}
