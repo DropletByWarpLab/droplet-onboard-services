@@ -615,7 +615,8 @@ def wifi_snapshot():
 # ---------------------------------------------------------------------------
 # Pure-Python QR encoder.
 # Handles the subset we actually need: WIFI payload strings, byte mode,
-# error-correction level L, auto version bump. No external deps.
+# error-correction level Q (L fallback for oversized pathological payloads),
+# auto version bump. No external deps.
 
 def _wifi_payload(ssid, key, encryption):
     """Format a WiFi:...; QR payload per the de-facto standard."""
@@ -635,20 +636,47 @@ def _wifi_payload(ssid, key, encryption):
                                            esc(key) if sec != "nopass" else "")
 
 
+# Hard cap on the QR matrix we ship to the panel — mirrors ClaimRequest's
+# wifi_qr_matrix max_length=64 (main.py): a v-large QR would OOM the
+# PyPortal. At Q only a pathological fully-escaped SSID+PSK (~200+ chars)
+# exceeds it; _qr_encode degrades those to L, which always fits.
+_QR_MAX_ROWS = 64
+
+
 def _qr_encode(text):
     """Generate a QR code bit-matrix for `text` using the `qrcode` lib
-    (apt: python3-qrcode). Returns (matrix, version)."""
+    (apt: python3-qrcode). Returns (matrix, version).
+
+    ERROR_CORRECT_Q (~25% codeword recovery), NOT L: the PyPortal's QR card
+    (_v3_qr_card in pyportal/code.py) paints a 32x32px white droplet-mark
+    pad dead-centre over the symbol, and at L the pad corrupts more
+    codewords than Reed-Solomon can recover — the rendered card fails to
+    decode for every typical Wi-Fi payload (verified empirically; same
+    finding as the scan-to-claim QR in the PR #550 review). Typical WPA
+    payloads land at v4 (33x33) at Q, well inside the firmware's 64-row
+    tolerance. A payload too big for 64 rows at Q degrades to L — the same
+    matrix the encoder always shipped for those — rather than risking the
+    panel heap.
+    """
     import qrcode
-    from qrcode.constants import ERROR_CORRECT_L
-    q = qrcode.QRCode(
-        error_correction=ERROR_CORRECT_L,
-        border=0,       # we pad on the display side
-        box_size=1,
-    )
-    q.add_data(text)
-    q.make(fit=True)
-    matrix = [[1 if cell else 0 for cell in row] for row in q.get_matrix()]
-    return matrix, q.version
+    from qrcode.constants import ERROR_CORRECT_L, ERROR_CORRECT_Q
+
+    def _encode(level):
+        q = qrcode.QRCode(
+            error_correction=level,
+            border=0,       # we pad on the display side
+            box_size=1,
+        )
+        q.add_data(text)
+        q.make(fit=True)
+        matrix = [[1 if cell else 0 for cell in row]
+                  for row in q.get_matrix()]
+        return matrix, q.version
+
+    matrix, version = _encode(ERROR_CORRECT_Q)
+    if len(matrix) > _QR_MAX_ROWS:
+        matrix, version = _encode(ERROR_CORRECT_L)
+    return matrix, version
 
 
 def qr_snapshot():
