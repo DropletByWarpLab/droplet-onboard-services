@@ -140,6 +140,31 @@ describe("redactSecrets", () => {
     expect(out).toContain(REDACTION_PLACEHOLDER);
   });
 
+  it("redacts Authorization: Basic credentials (5-char scheme)", () => {
+    const planted = "dXNlcjpzdXBlci1zZWNyZXQtcGFzcw==";
+    const input = `proxy logged Authorization: Basic ${planted} for /api/files`;
+    const out = redactSecrets(input);
+    expect(out).not.toContain(planted);
+    expect(out).toContain(REDACTION_PLACEHOLDER);
+    // Surrounding non-secret context survives.
+    expect(out).toContain("proxy logged");
+    expect(out).toContain("for /api/files");
+  });
+
+  it("redacts Authorization: Token credentials (5-char scheme)", () => {
+    const planted = "tok-drf-style-secret-000111";
+    const input = `Authorization: Token ${planted}`;
+    const out = redactSecrets(input);
+    expect(out).not.toContain(planted);
+    expect(out).toContain(REDACTION_PLACEHOLDER);
+  });
+
+  it("stays idempotent over a redacted Basic header", () => {
+    const once = redactSecrets("Authorization: Basic dXNlcjpwYXNzd29yZA==");
+    expect(redactSecrets(once)).toBe(once);
+  });
+
+
   it("leaves non-secret log lines untouched", () => {
     const input = [
       "2026-06-06T10:00:00Z orchestrator listening on :3000",

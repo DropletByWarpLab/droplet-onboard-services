@@ -94,9 +94,15 @@ const RULES: readonly RedactionRule[] = [
   {
     // Custom auth headers carrying a raw token value:
     //   X-Droplet-Auth: <tok>, Authorization: <tok>, X-Api-Key: <tok>
+    // The value alternation matches "scheme + credential" FIRST for the
+    // 5-char schemes (`Basic`/`Token`) — the bare `{6,}` arm can't reach them
+    // (5 < 6), so `Authorization: Basic <base64>` would otherwise keep its
+    // credential: only the scheme word got redacted, by the fallback
+    // assignment rule. Scheme + credential are collapsed together (fail
+    // closed — over-redact rather than leak).
     name: "auth-header",
     pattern:
-      /\b(X-Droplet-Auth|Authorization|X-Api-Key|X-Auth-Token|Proxy-Authorization)(\s*[:=]\s*)([^\s",;]{6,})/gi,
+      /\b(X-Droplet-Auth|Authorization|X-Api-Key|X-Auth-Token|Proxy-Authorization)(\s*[:=]\s*)((?:Basic|Token)\s+[^\s",;]+|[^\s",;]{6,})/gi,
     replace: (_m, header: string, sep: string) =>
       `${header}${sep}${REDACTION_PLACEHOLDER}`,
   },
