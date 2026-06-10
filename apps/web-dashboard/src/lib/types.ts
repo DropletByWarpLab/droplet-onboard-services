@@ -709,6 +709,15 @@ export interface MatterDiscoveredDevice {
   addresses: Array<{ ip: string; port: number; type: string }>;
 }
 
+/**
+ * WARP-851: controller capability surface (GET /api/matter/capabilities).
+ * `bleCommissioning: false` means devices that need Bluetooth for
+ * first-time setup cannot be paired on this box yet (see WARP-850).
+ */
+export interface MatterCapabilities {
+  bleCommissioning: boolean;
+}
+
 // --- Camera / Frigate types ---
 
 export interface CameraInfo {

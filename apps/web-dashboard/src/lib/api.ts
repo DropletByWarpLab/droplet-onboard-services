@@ -23,6 +23,7 @@ import type {
   DetectionEvent,
   DeviceInfo,
   DiscoveredCamera,
+  MatterCapabilities,
   MatterDevice,
   MatterDiscoveredDevice,
   MatterGrouped,
@@ -2103,8 +2104,28 @@ export async function commissionMatterDevice(pairingCode: string): Promise<{ nod
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Failed to commission device: ${res.status}`);
+    // WARP-851: carry the HTTP status so translateError's status-based
+    // dispatch can map the orchestrator's curated commissioning copy
+    // (e.g. the 502 discovery failure → network-discovery copy) instead
+    // of flattening every failure onto the generic device fallback.
+    const err = new Error(
+      body.error || `Failed to commission device: ${res.status}`,
+    ) as Error & { status?: number };
+    err.status = res.status;
+    throw err;
   }
+  return res.json();
+}
+
+/**
+ * WARP-851: controller capability surface. Lets the wizard and
+ * /devices/add-matter be honest about which commissioning paths work on
+ * this box (no BLE today — devices needing Bluetooth first-time setup
+ * can't pair until WARP-850 lands).
+ */
+export async function fetchMatterCapabilities(): Promise<MatterCapabilities> {
+  const res = await authFetch(`${BASE}/api/matter/capabilities`);
+  if (!res.ok) throw new Error(`Failed to fetch Matter capabilities: ${res.status}`);
   return res.json();
 }
 
