@@ -125,3 +125,59 @@ describe("AddressStep — split behaviour", () => {
     ).toBeInTheDocument();
   });
 });
+
+/**
+ * WARP-869 — the write-failure ladder rung WifiStep already had. The live
+ * field case (2026-06-11 wizard run): the DuckDNS set ROLLED_BACK while rpcd
+ * denied the routing service (WARP-868), and this step rendered the raw
+ * "DuckDNS set: 500 Internal Server Error" in red on a first-run screen.
+ * A routing-layer write failure that isn't customer-fixable must read as the
+ * calm amber "skip and finish later" notice, never raw server text.
+ */
+describe("AddressStep — write failure surfaces the calm notice (WARP-869)", () => {
+  it("maps a ROLLED_BACK 500 onto the amber finish-later notice, not the raw message", async () => {
+    setDuckDnsConfig.mockRejectedValueOnce(
+      new RouterStatusError(
+        "ROLLED_BACK",
+        "DuckDNS set: 500 Internal Server Error",
+        500,
+      ),
+    );
+    const onComplete = vi.fn();
+    render(<AddressStep onComplete={onComplete} onSkip={vi.fn()} />);
+    await waitFor(() => expect(fetchDuckDnsStatus).toHaveBeenCalled());
+
+    fillDuckDns("mystudio", "a-valid-duckdns-token");
+    fireEvent.click(saveCta());
+
+    // Calm amber notice (role=status), naming where to finish later.
+    const notice = await screen.findByRole("status");
+    expect(notice).toHaveTextContent(/couldn't save the web address/i);
+    expect(notice).toHaveTextContent(/network/i);
+    expect(notice).toHaveTextContent(/later/i);
+    // The raw server text never reaches the customer.
+    expect(
+      screen.queryByText(/500 internal server error/i),
+    ).not.toBeInTheDocument();
+    // And the step did not advance — the customer chooses skip or retry.
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+
+  it("keeps a 400 validation refusal red and verbatim (customer-fixable)", async () => {
+    setDuckDnsConfig.mockRejectedValueOnce(
+      new RouterStatusError(
+        "ROLLED_BACK",
+        "Subdomain must be lowercase letters, digits, or hyphens (no leading/trailing hyphen, no dots).",
+        400,
+      ),
+    );
+    render(<AddressStep onComplete={vi.fn()} onSkip={vi.fn()} />);
+    await waitFor(() => expect(fetchDuckDnsStatus).toHaveBeenCalled());
+
+    fillDuckDns("mystudio", "a-valid-duckdns-token");
+    fireEvent.click(saveCta());
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/lowercase letters, digits, or hyphens/i);
+  });
+});
