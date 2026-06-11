@@ -212,6 +212,39 @@ preflight_member() {
 # tests only; the shipping path is fixed.
 AUTOMOUNT_STATE="${DROPLET_AUTOMOUNT_STATE:-/var/lib/droplet-automount/mounts.json}"
 
+# --- Host mount-namespace escape (WARP-868) ----------------------------------
+# The data drives are mounted in the HOST (init) mount namespace, but this
+# script runs under droplet-storage-pool-apply.service, whose hardening
+# directives (ProtectHome / ProtectKernelTunables / ProtectControlGroups) each
+# force systemd to give the unit a PRIVATE mount namespace with SLAVE
+# propagation. Verified live on the .87 box: a plain `umount /mnt/droplet/...`
+# inside that namespace returns 0 but frees ONLY this namespace's copy — the
+# kernel block device stays mounted in the host, so the subsequent
+# wipefs/mdadm hit EBUSY (and the teardown's own residual `findmnt` check still
+# sees the host mount that never went away, dying "busy"). That is exactly the
+# "pool create does nothing after the warning" / 422 regression.
+#
+# The Nextcloud container bind-mounts /mnt/droplet with shared propagation, so
+# every data mount appears TWICE in findmnt (host root + bind peer, same peer
+# group) — one host-namespace umount of the shared target clears both peers
+# (also verified live).
+#
+# Fix: run the unmount AND its verification in the host namespace via
+# `nsenter -m -t 1` (we are root → have CAP_SYS_ADMIN; the unit has no PID
+# namespace → /proc/1 is host init). Only engage it when our mount namespace
+# genuinely differs from PID 1's, so dev hosts and the PATH-shim unit tests
+# (which set DROPLET_POOL_HOSTNS_DISABLE=1) keep using the plain tools.
+HOSTNS=()
+if [ "${DROPLET_POOL_HOSTNS_DISABLE:-}" != "1" ] \
+   && command -v nsenter >/dev/null 2>&1 \
+   && [ -r /proc/1/ns/mnt ] \
+   && [ "$(readlink /proc/self/ns/mnt 2>/dev/null)" != "$(readlink /proc/1/ns/mnt 2>/dev/null)" ]; then
+  HOSTNS=(nsenter -m -t 1)
+fi
+# Run umount / findmnt in the host mount namespace (no-op prefix off-box).
+host_umount()  { "${HOSTNS[@]}" umount "$@"; }
+host_findmnt() { "${HOSTNS[@]}" findmnt "$@"; }
+
 # mounts_backed_by <node>: every current mount whose SOURCE is <node> itself
 # or a partition of it, as "SOURCE TARGET" lines — partitions first (deepest
 # target first), the node itself LAST. findmnt enumerates real mount SOURCES;
@@ -223,7 +256,9 @@ AUTOMOUNT_STATE="${DROPLET_AUTOMOUNT_STATE:-/var/lib/droplet-automount/mounts.js
 mounts_backed_by() {
   local node="$1" base src tgt pk grp slashes
   base="$(basename "$node")"
-  { findmnt -rn -o SOURCE,TARGET 2>/dev/null || true; } | {
+  # WARP-868: enumerate the HOST mount table (host_findmnt) so we see the real
+  # mounts holding the block device, not this private namespace's diverged copy.
+  { host_findmnt -rn -o SOURCE,TARGET 2>/dev/null || true; } | {
     while read -r src tgt; do
       [ -n "$src" ] && [ -n "$tgt" ] || continue
       if [ "$src" = "$node" ]; then
@@ -294,8 +329,14 @@ PY
 # mapping recognises, naming the mountpoint.
 unmount_mount_or_die() {
   local src="$1" tgt="$2" ctx="$3"
-  if ! umount "$tgt"; then
-    findmnt -rn --mountpoint "$tgt" >/dev/null 2>&1 || return 0
+  # WARP-868: a shared-propagation duplicate (Nextcloud's /mnt/droplet bind
+  # peer) means `mounts_backed_by` enumerates the same target twice; one
+  # host-namespace umount clears both peers, so a second umount of an
+  # already-cleared target returns "not mounted". Treat host-side-already-gone
+  # as success: re-check the HOST table and only die if the target truly
+  # persists (a real EBUSY with open file handles).
+  if ! host_umount "$tgt"; then
+    host_findmnt -rn --mountpoint "$tgt" >/dev/null 2>&1 || return 0
     die "$ctx: $src is busy at $tgt (unmount failed) — close open files and retry"
   fi
   prune_automount_state "$src" "$tgt"
