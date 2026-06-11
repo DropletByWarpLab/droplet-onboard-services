@@ -39,7 +39,9 @@ for unit in droplet-device-bridge.service \
             droplet-wifi-rotate.service \
             droplet-wifi-rotate.timer \
             droplet-shutdown-screen.service \
-            droplet-storage-pool-apply.service; do
+            droplet-storage-pool-apply.service \
+            droplet-wifi-watchdog.service \
+            droplet-wifi-watchdog.timer; do
   src="$SRC_DIR/$unit"
   dst="$UNIT_DIR/$unit"
   if [[ ! -f "$src" ]]; then
@@ -125,6 +127,19 @@ if [[ ! -f "$HOSTAPD_SCRIPT_SRC" ]]; then
 fi
 install -m 0755 "$HOSTAPD_SCRIPT_SRC" "$HOSTAPD_SCRIPT_DST"
 log "installed $HOSTAPD_SCRIPT_DST"
+
+# --- 1d-ter) Install the Wi-Fi PCI watchdog (WARP-869) ---
+# Revives a silently-dead Wi-Fi PCI function (driver bound, phy/netdev gone)
+# via remove + rescan, then re-runs droplet-openwrt-attach so hostapd rebinds
+# the AP. Scheduled by droplet-wifi-watchdog.timer (unit installed in step 1).
+WIFI_WD_SRC="$REPO_ROOT/scripts/host/usr-local-sbin/droplet-wifi-watchdog"
+WIFI_WD_DST="/usr/local/sbin/droplet-wifi-watchdog"
+if [[ ! -f "$WIFI_WD_SRC" ]]; then
+  log "missing source: $WIFI_WD_SRC"
+  exit 1
+fi
+install -m 0755 "$WIFI_WD_SRC" "$WIFI_WD_DST"
+log "installed $WIFI_WD_DST"
 
 # --- 1d-bis) Polkit rules for the sandboxed bridge writes ---
 # The bridge unit runs as User=droplet inside ProtectSystem=strict +
@@ -350,6 +365,12 @@ fi
 # starts it (ExecStart=/usr/bin/true reaches "active" immediately and its
 # ExecStop fires on the next shutdown). Idempotent. Independent of the bridge.
 systemctl enable --now droplet-shutdown-screen.service
+
+# WARP-869: Wi-Fi PCI watchdog — revives a silently-dead Wi-Fi function
+# (driver bound, phy/netdev gone; seen live on the shipping box) via PCI
+# remove + rescan, then re-runs droplet-openwrt-attach. Always on: the
+# healthy-path cost is a read-only sysfs scan every 2 minutes.
+systemctl enable --now droplet-wifi-watchdog.timer
 
 # Wi-Fi key rotation: off by default so saved credentials on phones keep
 # working after a restart. Enable only if the operator opts in via

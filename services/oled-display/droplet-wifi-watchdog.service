@@ -1,0 +1,17 @@
+[Unit]
+Description=Droplet Wi-Fi PCI watchdog (revive silently-dead Wi-Fi function)
+# WARP-869: the Wi-Fi card's PCI function can die mid-uptime (driver stays
+# bound, phy + netdev vanish, Bluetooth half keeps working) — seen live on the
+# shipping box. The watchdog scans for that exact signature and revives the
+# device via PCI remove + rescan, then restarts droplet-openwrt-attach so
+# hostapd rebinds the AP. Healthy boxes: a read-only sysfs scan, no-op.
+# Scheduled by droplet-wifi-watchdog.timer — no [Install] section here.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/droplet-wifi-watchdog
+# The revive path writes /sys/bus/pci/*/remove + /sys/bus/pci/rescan and
+# restarts a system unit — root, no sandbox directives that would put us in a
+# private mount/pid namespace (we need the real sysfs and real systemctl).
+# A stuck PCI rescan should never wedge the timer pipeline.
+TimeoutStartSec=120
