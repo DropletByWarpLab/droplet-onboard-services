@@ -25,7 +25,10 @@
  *
  * CE surface limits (also live-probed): `/api/v1` is workspace-scoped
  * only — no `/api/v1/workspaces/` list, no `/search/`, no `/members/`.
- * The handlers translate those 404s for the model.
+ * The workspace-list 404 is translated for the model; workspace search
+ * is emulated in `search-work-items.ts` by composing `listProjects` +
+ * `listWorkItems` and filtering client-side, so there is no search
+ * endpoint here at all.
  *
  * Errors:
  *   - HTTP 4xx / 5xx           → PlaneApiError with `.status`
@@ -34,8 +37,8 @@
  *
  * The handlers catch `PlaneApiError` and translate to the tool-result
  * code surface (PM_AUTH_FAILED on 401, PM_WORK_ITEM_NOT_FOUND on 404,
- * PM_SEARCH_UNAVAILABLE on the search 404, PM_API_ERROR otherwise).
- * Anything else is a bug — let it bubble to the agent loop's catch.
+ * PM_API_ERROR otherwise). Anything else is a bug — let it bubble to
+ * the agent loop's catch.
  *
  * Per architecture-guard rule 4 — chat traffic does NOT touch this
  * client. Control-plane integration only.
@@ -218,19 +221,6 @@ export async function getWorkItem(
     "GET",
     `/api/v1/workspaces/${encodeURIComponent(workspace_slug)}/projects/${encodeURIComponent(project_id)}/issues/${encodeURIComponent(work_item_id)}/`,
     { apiKey },
-  );
-}
-
-export async function searchWorkItems(
-  workspace_slug: string,
-  query: string,
-  per_page?: number,
-  apiKey?: string,
-): Promise<PlaneWorkItem[]> {
-  return call<PlaneWorkItem[]>(
-    "GET",
-    `/api/v1/workspaces/${encodeURIComponent(workspace_slug)}/search/`,
-    { queryParams: { query, per_page }, apiKey },
   );
 }
 

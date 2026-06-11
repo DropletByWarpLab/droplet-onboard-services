@@ -17,10 +17,12 @@
  * WARP-860 — the handlers now forward `ctx.pmApiKey` (the runtime-
  * provisioned Plane service token, plumbed via `_meta.pmToken`) as the
  * trailing arg of every client call, map upstream 401s to
- * `PM_AUTH_FAILED`, map the search 404 (no /api/v1 search endpoint in
- * Plane CE) to `PM_SEARCH_UNAVAILABLE`, and `pm_list_workspaces`
- * prefers the orchestrator-injected `ctx.pmWorkspaces` (CE's /api/v1
- * has no workspace list) over an HTTP call.
+ * `PM_AUTH_FAILED`, `pm_search_work_items` EMULATES workspace search
+ * (Plane CE has no /api/v1 search endpoint — live-probed 404) by
+ * composing listProjects + per-project listWorkItems with client-side
+ * substring filtering, and `pm_list_workspaces` prefers the
+ * orchestrator-injected `ctx.pmWorkspaces` (CE's /api/v1 has no
+ * workspace list) over an HTTP call.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { ToolContext } from "../../../src/types.js";
@@ -32,7 +34,6 @@ const mockClient = vi.hoisted(() => ({
   listProjects: vi.fn(),
   listWorkItems: vi.fn(),
   getWorkItem: vi.fn(),
-  searchWorkItems: vi.fn(),
   createWorkItem: vi.fn(),
   updateWorkItem: vi.fn(),
   addWorkItemComment: vi.fn(),
@@ -290,56 +291,124 @@ describe("pm_get_work_item", () => {
 });
 
 describe("pm_search_work_items", () => {
+  // WARP-860 — Plane CE v0.24.1 has no /api/v1 workspace search endpoint
+  // (live-probed 404), so the handler emulates search: listProjects, then
+  // listWorkItems per project, case-insensitive substring filter on name +
+  // tag-stripped description, early exit once `per_page` matches are found.
+  const projects = [
+    { id: "p1", name: "Web", identifier: "WEB", workspace: "w1" },
+    { id: "p2", name: "Mobile", identifier: "MOB", workspace: "w1" },
+  ];
+  const item = (id: string, name: string, description_html?: string) => ({
+    id,
+    name,
+    description_html,
+    created_at: "t",
+    updated_at: "t",
+  });
+  type SearchData = {
+    work_items: Array<{ id: string; project_id: string; project_identifier: string }>;
+  };
+
   it("is read-only", () => {
     expect(pmSearchWorkItems.requiresWrite).toBe(false);
     expect(pmSearchWorkItems.requiresConfirmation).toBe(false);
   });
 
-  it("forwards query + per_page + ctx.pmApiKey", async () => {
-    mockClient.searchWorkItems.mockResolvedValueOnce([]);
-    await pmSearchWorkItems.handler(
-      { workspace_slug: "acme", query: "login bug", per_page: 5 },
+  it("emulates search across all projects and annotates matches with the owning project", async () => {
+    mockClient.listProjects.mockResolvedValueOnce(projects);
+    mockClient.listWorkItems
+      .mockResolvedValueOnce([item("i1", "Login bug"), item("i2", "Unrelated")])
+      .mockResolvedValueOnce([item("i3", "Navbar", "<p>broken LOGIN flow</p>")]);
+    const res = await pmSearchWorkItems.handler(
+      { workspace_slug: "acme", query: "login" },
       ctx,
     );
-    expect(mockClient.searchWorkItems).toHaveBeenCalledWith(
+    expect(mockClient.listProjects).toHaveBeenCalledWith("acme", undefined, API_KEY);
+    expect(mockClient.listWorkItems).toHaveBeenNthCalledWith(
+      1,
       "acme",
-      "login bug",
-      5,
+      "p1",
+      { perPage: 100 },
       API_KEY,
     );
+    expect(mockClient.listWorkItems).toHaveBeenNthCalledWith(
+      2,
+      "acme",
+      "p2",
+      { perPage: 100 },
+      API_KEY,
+    );
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      const { work_items } = res.data as SearchData;
+      // i1 matches on name (case-insensitive), i3 on description, i2 not at all.
+      expect(work_items.map((w) => w.id)).toEqual(["i1", "i3"]);
+      expect(work_items[0]).toMatchObject({ project_id: "p1", project_identifier: "WEB" });
+      expect(work_items[1]).toMatchObject({ project_id: "p2", project_identifier: "MOB" });
+    }
   });
 
-  it("maps PlaneApiError to PM_API_ERROR", async () => {
-    mockClient.searchWorkItems.mockRejectedValueOnce(new PlaneApiError("x", 400));
+  it("matches description text only after stripping HTML tags", async () => {
+    mockClient.listProjects.mockResolvedValueOnce([projects[0]]);
+    mockClient.listWorkItems.mockResolvedValueOnce([
+      item("i1", "Tidy", "<div><p>clean markup</p></div>"),
+    ]);
     const res = await pmSearchWorkItems.handler(
-      { workspace_slug: "acme", query: "q" },
+      { workspace_slug: "acme", query: "div" },
       ctx,
     );
-    expect(res.ok).toBe(false);
-    if (!res.ok) expect(res.error.code).toBe("PM_API_ERROR");
+    expect(res.ok).toBe(true);
+    // "div" only occurs as a tag name — must NOT match.
+    if (res.ok) expect((res.data as SearchData).work_items).toEqual([]);
   });
 
-  it("maps a 404 to PM_SEARCH_UNAVAILABLE — Plane CE has no /api/v1 search (WARP-860)", async () => {
-    mockClient.searchWorkItems.mockRejectedValueOnce(new PlaneApiError("nope", 404));
+  it("stops scanning further projects once per_page matches are found", async () => {
+    mockClient.listProjects.mockResolvedValueOnce(projects);
+    mockClient.listWorkItems.mockResolvedValueOnce([
+      item("i1", "login a"),
+      item("i2", "login b"),
+    ]);
     const res = await pmSearchWorkItems.handler(
-      { workspace_slug: "acme", query: "q" },
+      { workspace_slug: "acme", query: "login", per_page: 1 },
       ctx,
     );
-    expect(res.ok).toBe(false);
-    if (!res.ok) {
-      expect(res.error.code).toBe("PM_SEARCH_UNAVAILABLE");
-      expect(res.error.message).toMatch(/Plane CE has no \/api\/v1 workspace search/);
+    // p1 already produced the single requested match — p2 is never listed.
+    expect(mockClient.listWorkItems).toHaveBeenCalledTimes(1);
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect((res.data as SearchData).work_items.map((w) => w.id)).toEqual(["i1"]);
     }
   });
 
   it("maps a 401 to PM_AUTH_FAILED", async () => {
-    mockClient.searchWorkItems.mockRejectedValueOnce(new PlaneApiError("unauth", 401));
+    mockClient.listProjects.mockRejectedValueOnce(new PlaneApiError("unauth", 401));
     const res = await pmSearchWorkItems.handler(
       { workspace_slug: "acme", query: "q" },
       ctx,
     );
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.code).toBe("PM_AUTH_FAILED");
+  });
+
+  it("fails closed with PM_API_ERROR when a project's work-item listing fails (no partial results)", async () => {
+    mockClient.listProjects.mockResolvedValueOnce(projects);
+    mockClient.listWorkItems
+      .mockResolvedValueOnce([item("i1", "login a")])
+      .mockRejectedValueOnce(new PlaneApiError("server", 500));
+    const res = await pmSearchWorkItems.handler(
+      { workspace_slug: "acme", query: "login" },
+      ctx,
+    );
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("PM_API_ERROR");
+  });
+
+  it("rethrows a non-PlaneApiError", async () => {
+    mockClient.listProjects.mockRejectedValueOnce(new TypeError("boom"));
+    await expect(
+      pmSearchWorkItems.handler({ workspace_slug: "acme", query: "q" }, ctx),
+    ).rejects.toBeInstanceOf(TypeError);
   });
 });
 

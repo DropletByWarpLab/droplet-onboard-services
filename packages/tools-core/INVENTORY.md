@@ -88,7 +88,7 @@ Authoritative inventory of every tool exposed by `@droplet/tools-core` after the
 | pm_list_projects | pm | List projects in a workspace. WARP-508. | false | false | orchestrator |
 | pm_list_work_items | pm | List work items in a project (optional state/assignee filters). WARP-508. | false | false | orchestrator |
 | pm_get_work_item | pm | Fetch a single work item by id. WARP-508. | false | false | orchestrator |
-| pm_search_work_items | pm | Search work items in a workspace by query. WARP-508. | false | false | orchestrator |
+| pm_search_work_items | pm | Search work items in a workspace by query — emulated client-side over projects + per-project issues (Plane CE has no /api/v1 search endpoint). WARP-508 / WARP-860. | false | false | orchestrator |
 
 ## Deferred (not ported in WARP-102)
 
