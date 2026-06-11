@@ -274,6 +274,16 @@ const envSchema = z.object({
   // --- Service-to-service auth (shared secret for routing/switch/discovery services) ---
   SERVICE_SECRET: z.string().default(""),
 
+  // SERVICE_TOKEN_SWITCH — dedicated outbound bearer for switch.client.ts →
+  // switch service, replacing the legacy shared SERVICE_SECRET on that path
+  // (same per-service-token shape as SERVICE_TOKEN_DISPLAY / WARP-165: the
+  // switch container's SERVICE_SECRET used to be wired to DEVICE_SECRET_KEY,
+  // the FIPS-sealed master encryption key, which this keeps off the wire).
+  // Compose wires both ends to ${SERVICE_TOKEN_SWITCH}; switch.client.ts
+  // falls back to SERVICE_SECRET so installs that pinned the legacy shared
+  // secret keep working until setup.sh re-mints.
+  SERVICE_TOKEN_SWITCH: z.string().default(""),
+
   // --- Service-principal bearer tokens (inbound) ---
   // Per shared_brain `agentic-workflows.md` + `LLM_AGENT.md`: services that
   // need LLM + MCP tool dispatch MUST call the orchestrator's `/api/llm/chat`
