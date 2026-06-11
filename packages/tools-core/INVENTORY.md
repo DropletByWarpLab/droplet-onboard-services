@@ -23,6 +23,7 @@ Authoritative inventory of every tool exposed by `@droplet/tools-core` after the
 | add_port_forward | network | Add a port-forward rule (external port -> internal IP:port, tcp/udp). | true | true | gateway |
 | network_summary | network | One-shot network-health snapshot (WAN throughput, active clients, DNS blocked today, off-LAN bytes this month) rendered as a KPI card. WARP-470. | false | false | WARP-470 |
 | get_router_system_info | network | Router hardware, OpenWrt version, uptime, CPU/memory. | false | false | gateway |
+| restart_router | network | Reboot the router. Drops all connected devices for 30–90 seconds while it restarts. Owner-only. May require a confirmation step in the Droplet dashboard. | true | true | WARP-864 |
 | list_ap_devices | network | List every coverage-extender AP the orchestrator knows about (status, model, IP, audit columns). | false | false | WARP-446 |
 | approve_ap | network | Approve a discovered extender AP and push wireless config. | true | true | WARP-446 |
 | decommission_ap | network | Remove an extender AP from the household network. | true | true | WARP-446 |
@@ -99,6 +100,6 @@ Authoritative inventory of every tool exposed by `@droplet/tools-core` after the
 
 ## Counts
 
-- Registered: 79 tools. (56 base [WARP-100 ×5 + WARP-102 ×51] + 14 pre-PR additions [WARP-446 ×3 AP tools, WARP-613 ×1 `set_phone_home_blocking`, PM ×9 WARP-508/509, ×1 other] + 9 this PR [memory ×2 WARP-461, email ×5 WARP-466, `network_summary` WARP-470, `run_scene` WARP-474] = 79.) This count is pinned by `__tests__/registry.test.ts` (`EXPECTED_TOOL_NAMES` and `TOOL_CATALOG.length === TOOLS.size`); update both in lockstep when adding/removing a tool.
+- Registered: 80 tools. (56 base [WARP-100 ×5 + WARP-102 ×51] + 14 pre-PR additions [WARP-446 ×3 AP tools, WARP-613 ×1 `set_phone_home_blocking`, PM ×9 WARP-508/509, ×1 other] + 9 previous PRs [memory ×2 WARP-461, email ×5 WARP-466, `network_summary` WARP-470, `run_scene` WARP-474] + 1 WARP-864 [`restart_router`] = 80.) This count is pinned by `__tests__/registry.test.ts` (`EXPECTED_TOOL_NAMES` and `TOOL_CATALOG.length === TOOLS.size`); update both in lockstep when adding/removing a tool.
 - Deferred: 2 tools.
 - Reconciled / collapsed: 4 (`block_device`, `unblock_device`, `get_cameras`, `get_camera_events`/`list_recent_camera_events`, `get_wifi_info`, `list_devices`/`get_connected_devices`) — all merged into the canonical names listed above.

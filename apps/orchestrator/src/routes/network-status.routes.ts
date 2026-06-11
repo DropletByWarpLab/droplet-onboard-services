@@ -30,7 +30,7 @@ import {
 } from "../services/network-safety.service.js";
 import type { createNetworkDeviceService } from "../services/network-device.service.js";
 import { handleRegistryError } from "./network-error-handler.js";
-import { requireRole } from "../middleware/auth.js";
+import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 
 export interface StatusDeps {
   prisma: PrismaClient;
@@ -170,7 +170,7 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
   // do this without confirmation from the install-time owner"). For
   // the moment we encode that as a single-role allow; if a future
   // ticket adds an MFA gate (WARP-230/238) it layers on top of this.
-  router.post("/network/system/reboot", requireRole("owner"), async (req, res, next) => {
+  router.post("/network/system/reboot", requireRoleOrMcpService("owner"), async (req, res, next) => {
     try {
       const userId = req.user?.id;
       const result = await evaluateNetworkCommand(
