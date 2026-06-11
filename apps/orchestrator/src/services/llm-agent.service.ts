@@ -46,6 +46,27 @@ export interface EnhancementDeps {
 }
 
 /**
+ * WARP-860 — Plane service-token deps for `pm_*` dispatches. The agent
+ * loop calls `contextForTool` right before dispatching any `pm_*` tool
+ * and merges the result (`pmToken`, and for `pm_list_workspaces` also
+ * `pmWorkspaces`) into the per-call `_meta` context. Resolution
+ * failures return `{}` — the dispatch proceeds and the handler answers
+ * an honest PM_AUTH_FAILED; the loop itself is never blocked by a
+ * flaky PM stack. When a `pm_*` result comes back PM_AUTH_FAILED the
+ * loop calls `invalidateToken` so the NEXT dispatch re-provisions (no
+ * in-turn auto-retry).
+ *
+ * Pass `undefined` to disable (back-compat default — existing tests
+ * pass nothing and observe no behavior change).
+ */
+export interface PmDeps {
+  contextForTool(
+    toolName: string,
+  ): Promise<{ pmToken?: string; pmWorkspaces?: { id: string; slug: string; name: string }[] }>;
+  invalidateToken(): void;
+}
+
+/**
  * WARP-473 — fire-and-forget file-citation enqueue. The agent loop
  * calls `enqueue` after every tool dispatch whose parsed result
  * references one or more file paths. The implementation MUST NOT
@@ -99,6 +120,13 @@ export interface AgentDeps {
    * citations are recorded — same byte-for-byte behavior as before.
    */
   citation?: CitationDeps;
+  /**
+   * WARP-860 — when present, every `pm_*` dispatch gets the runtime-
+   * provisioned Plane service token attached via `_meta.pmToken` (and
+   * `pm_list_workspaces` the workspace list). When absent, pm tools
+   * dispatch bare and fail closed at Plane with PM_AUTH_FAILED.
+   */
+  pm?: PmDeps;
   onEvent?: (e: SSEEvent) => void;
 }
 
@@ -559,6 +587,19 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         );
       }
 
+      // WARP-860 — `pm_*` tools authenticate to Plane with the runtime-
+      // provisioned service token, attached via `_meta.pmToken` (and the
+      // workspace list for pm_list_workspaces — Plane CE's /api/v1 has
+      // no workspace list endpoint). `contextForTool` never throws; a
+      // resolution failure yields `{}` and the handler answers an honest
+      // PM_AUTH_FAILED instead of blocking the loop.
+      if (call.function.name.startsWith("pm_") && deps.pm) {
+        const pmContext = await deps.pm.contextForTool(call.function.name);
+        if (Object.keys(pmContext).length > 0) {
+          toolContext = { ...toolContext, ...pmContext };
+        }
+      }
+
       // ORCH-05 — a *thrown* tool dispatch (stdio hiccup, child-process
       // blip, or a handler that throws instead of returning
       // `{isError:true}`) must NOT abort the whole turn. Catch it, feed a
@@ -594,6 +635,19 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         parsed = { raw: text };
       }
       trace.push({ tool_call_id: call.id, tool: call.function.name, args, result: parsed });
+
+      // WARP-860 — a pm_* PM_AUTH_FAILED means Plane rejected the cached
+      // service token (workspace reset under us). Invalidate so the NEXT
+      // dispatch re-provisions; no in-turn auto-retry — the model sees
+      // the honest failure and decides.
+      if (
+        call.function.name.startsWith("pm_") &&
+        deps.pm &&
+        result.isError &&
+        text.includes("PM_AUTH_FAILED")
+      ) {
+        deps.pm.invalidateToken();
+      }
 
       // Translate the MCP envelope into an SSE tool_result event.
       // confirmation_required is NOT a hard error — surface ok=true so

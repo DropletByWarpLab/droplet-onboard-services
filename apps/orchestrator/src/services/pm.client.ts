@@ -1,16 +1,25 @@
 /**
- * Plane API client — orchestrator-side (used by routes/mobile/pm.ts
- * and the pm-onboard wizard endpoint).
+ * Plane API client — orchestrator-side (used by routes/mobile/pm.ts).
  *
  * Distinct from `packages/tools-core/src/handlers/pm/pm-client.ts`,
  * which the mcp-server child process uses for the LLM-tool path. They
  * intentionally do NOT share code: the tool-side client lives inside
  * the mcp-server's import graph and resolves env at module load; the
- * orchestrator-side client takes `adminKey` as a parameter so request
- * handlers can short-circuit on missing config (returning 400 to the
- * mobile caller) instead of throwing TypeError("Invalid URL").
+ * orchestrator-side client takes `apiKey` as a parameter so request
+ * handlers can short-circuit on missing config instead of throwing
+ * TypeError("Invalid URL").
  *
- * Auth: `X-API-Key: ${adminKey}`. NOT `Authorization: Bearer`.
+ * Auth (WARP-860): `X-API-Key: ${apiKey}` where `apiKey` is the
+ * RUNTIME-PROVISIONED Plane service API token from
+ * pm-service-token.service.ts (`getPmServiceToken` /
+ * `withPmServiceToken`). NOT `Authorization: Bearer`, and NOT
+ * `DROPLET_PM_ADMIN_TOKEN` — that env var is registered nowhere in
+ * Plane (live-verified on CE v0.24.1, 2026-06-11) and 401s every call.
+ *
+ * CE surface limits (also live-probed): `/api/v1` is workspace-scoped
+ * only — `/api/v1/workspaces/` does NOT exist (404). Workspace
+ * discovery goes through `listPlaneWorkspaces()` (session app API) in
+ * pm-service-token.service.ts instead.
  *
  * Errors:
  *   - HTTP 4xx / 5xx → PlaneApiError with `.status` + `.detail`
@@ -18,18 +27,14 @@
  *
  * Callers branch on `err.status === 404` to translate to the route-
  * specific "not found" message — see `mapPmError` in
- * routes/mobile/pm.ts for the contextual 404 fanout.
+ * routes/mobile/pm.ts for the contextual 404 fanout — and on
+ * `err.status === 401` as the invalidate-and-retry signal for
+ * `withPmServiceToken`.
  */
 
 import { config } from "../config.js";
 
 const HTTP_TIMEOUT_MS = 8_000;
-
-export interface PlaneWorkspace {
-  id: string;
-  slug: string;
-  name: string;
-}
 
 export interface PlaneProject {
   id: string;
@@ -73,7 +78,7 @@ function resolveBase(): string {
 }
 
 async function call<T>(
-  adminKey: string,
+  apiKey: string,
   method: "GET" | "POST" | "PATCH" | "DELETE",
   path: string,
   options: {
@@ -81,11 +86,11 @@ async function call<T>(
     queryParams?: Record<string, string | number | undefined>;
   } = {},
 ): Promise<T> {
-  if (!adminKey) {
+  if (!apiKey) {
     throw new PlaneApiError(
-      "DROPLET_PM_ADMIN_TOKEN not configured",
+      "Plane service API token unavailable",
       0,
-      "missing config",
+      "missing token",
     );
   }
   const url = new URL(path, resolveBase());
@@ -100,7 +105,7 @@ async function call<T>(
     const resp = await fetch(url.toString(), {
       method,
       headers: {
-        "X-API-Key": adminKey,
+        "X-API-Key": apiKey,
         Accept: "application/json",
         "Content-Type": "application/json",
       },
@@ -136,17 +141,18 @@ async function call<T>(
   }
 }
 
-export async function listWorkspaces(adminKey: string): Promise<PlaneWorkspace[]> {
-  return call<PlaneWorkspace[]>(adminKey, "GET", "/api/v1/workspaces/");
-}
+// WARP-860: listWorkspaces was removed — `GET /api/v1/workspaces/` does
+// not exist on Plane CE v0.24.1 (404). Its only caller (the mobile
+// workspaces route) now uses `listPlaneWorkspaces()` from
+// pm-service-token.service.ts (session app API).
 
 export async function listProjects(
-  adminKey: string,
+  apiKey: string,
   workspace_slug: string,
   per_page: number,
 ): Promise<PlaneProject[]> {
   return call<PlaneProject[]>(
-    adminKey,
+    apiKey,
     "GET",
     `/api/v1/workspaces/${encodeURIComponent(workspace_slug)}/projects/`,
     { queryParams: { per_page } },
@@ -154,13 +160,13 @@ export async function listProjects(
 }
 
 export async function listWorkItems(
-  adminKey: string,
+  apiKey: string,
   workspace_slug: string,
   project_id: string,
   options: { perPage?: number; state?: string; assignee?: string } = {},
 ): Promise<PlaneWorkItem[]> {
   return call<PlaneWorkItem[]>(
-    adminKey,
+    apiKey,
     "GET",
     `/api/v1/workspaces/${encodeURIComponent(workspace_slug)}/projects/${encodeURIComponent(project_id)}/issues/`,
     {
@@ -174,13 +180,13 @@ export async function listWorkItems(
 }
 
 export async function getWorkItem(
-  adminKey: string,
+  apiKey: string,
   workspace_slug: string,
   project_id: string,
   work_item_id: string,
 ): Promise<PlaneWorkItem> {
   return call<PlaneWorkItem>(
-    adminKey,
+    apiKey,
     "GET",
     `/api/v1/workspaces/${encodeURIComponent(workspace_slug)}/projects/${encodeURIComponent(project_id)}/issues/${encodeURIComponent(work_item_id)}/`,
   );

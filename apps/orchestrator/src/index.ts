@@ -56,6 +56,7 @@ import { initActivityRecorder, recordActivity } from "./services/activity.single
 import { attachFileIndexerActivityBridge } from "./services/activity-file-indexer-bridge.js";
 import { ensureDefaultModelPulled } from "./services/model-readiness.service.js";
 import { bootstrapPlaneInstanceInBackground } from "./services/pm-bootstrap.service.js";
+import { pmCallContextForTool } from "./services/pm-service-token.service.js";
 
 const logger = pino({ name: "orchestrator" });
 
@@ -305,7 +306,13 @@ async function main() {
   // schedule-ticker` so only one replica fires each due schedule.
   const toolSchedulerDispatcher: StepDispatcher = {
     async call(tool, args) {
-      const result = await mcpClient.callTool(tool, args);
+      // WARP-860 — pm_* tools authenticate via `_meta.pmToken` (runtime-
+      // provisioned Plane service token); non-pm tools get `{}` (no-op).
+      const result = await mcpClient.callTool(
+        tool,
+        args,
+        await pmCallContextForTool(tool),
+      );
       if (result.isError) {
         const detail = result.content?.[0]?.text ?? "tool reported error";
         throw new Error(typeof detail === "string" ? detail : String(detail));

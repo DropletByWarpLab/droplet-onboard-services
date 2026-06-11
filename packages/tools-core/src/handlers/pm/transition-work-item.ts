@@ -1,6 +1,7 @@
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 
 import { transitionWorkItem, PlaneApiError } from "./pm-client.js";
+import { mapPlaneAuthError } from "./pm-errors.js";
 
 const inputSchema = {
   type: "object",
@@ -21,7 +22,7 @@ interface Args {
   state_id: string;
 }
 
-async function handler(args: Record<string, unknown>, _ctx: ToolContext): Promise<ToolResult> {
+async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
   const { workspace_slug, project_id, work_item_id, state_id } = args as unknown as Args;
   try {
     const work_item = await transitionWorkItem(
@@ -29,9 +30,12 @@ async function handler(args: Record<string, unknown>, _ctx: ToolContext): Promis
       project_id,
       work_item_id,
       state_id,
+      ctx.pmApiKey,
     );
     return { ok: true, data: { work_item } };
   } catch (err) {
+    const auth = mapPlaneAuthError(err);
+    if (auth) return auth;
     if (err instanceof PlaneApiError) {
       const code = err.status === 404 ? "PM_WORK_ITEM_NOT_FOUND" : "PM_API_ERROR";
       return {

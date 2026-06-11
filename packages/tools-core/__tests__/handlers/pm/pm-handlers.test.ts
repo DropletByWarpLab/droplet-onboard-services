@@ -13,6 +13,14 @@
  * (b) the success shape, (c) the error-code mapping, and (d) that a
  * non-PlaneApiError bubbles (handlers deliberately rethrow those to the
  * agent loop).
+ *
+ * WARP-860 — the handlers now forward `ctx.pmApiKey` (the runtime-
+ * provisioned Plane service token, plumbed via `_meta.pmToken`) as the
+ * trailing arg of every client call, map upstream 401s to
+ * `PM_AUTH_FAILED`, map the search 404 (no /api/v1 search endpoint in
+ * Plane CE) to `PM_SEARCH_UNAVAILABLE`, and `pm_list_workspaces`
+ * prefers the orchestrator-injected `ctx.pmWorkspaces` (CE's /api/v1
+ * has no workspace list) over an HTTP call.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { ToolContext } from "../../../src/types.js";
@@ -53,9 +61,14 @@ import pmUpdateWorkItem from "../../../src/handlers/pm/update-work-item.js";
 import pmAddWorkItemComment from "../../../src/handlers/pm/add-work-item-comment.js";
 import pmTransitionWorkItem from "../../../src/handlers/pm/transition-work-item.js";
 
-// The pm handlers ignore ToolContext entirely (they reach Plane through
-// the module-level client), so a bare cast is sufficient.
-const ctx = {} as ToolContext;
+// WARP-860: the handlers read `ctx.pmApiKey` (and `pm_list_workspaces`
+// reads `ctx.pmWorkspaces`); everything else on ToolContext is unused
+// by the pm domain, so a narrow cast is sufficient.
+const API_KEY = "plane_api_svc_token";
+const ctx = { pmApiKey: API_KEY } as ToolContext;
+/** Legacy context without a provisioned token — handlers forward undefined
+ *  and the client falls back to the env var (HTTP-transport path). */
+const ctxNoKey = {} as ToolContext;
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -72,19 +85,55 @@ describe("pm_list_workspaces", () => {
     expect(pmListWorkspaces.requiresConfirmation).toBe(false);
   });
 
-  it("returns the workspace list on success", async () => {
+  it("returns ctx.pmWorkspaces WITHOUT any HTTP call when injected (WARP-860)", async () => {
+    const injected = [{ id: "w1", slug: "droplet-home", name: "Droplet Home" }];
+    const res = await pmListWorkspaces.handler(
+      {},
+      { pmApiKey: API_KEY, pmWorkspaces: injected } as ToolContext,
+    );
+    expect(mockClient.listWorkspaces).not.toHaveBeenCalled();
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.data).toEqual({ workspaces: injected });
+  });
+
+  it("falls through to the client when pmWorkspaces is an empty array", async () => {
     const workspaces = [{ id: "w1", slug: "acme", name: "Acme" }];
     mockClient.listWorkspaces.mockResolvedValueOnce(workspaces);
-    const res = await pmListWorkspaces.handler({}, ctx);
+    const res = await pmListWorkspaces.handler(
+      {},
+      { pmApiKey: API_KEY, pmWorkspaces: [] } as unknown as ToolContext,
+    );
+    expect(mockClient.listWorkspaces).toHaveBeenCalledWith(API_KEY);
     expect(res.ok).toBe(true);
     if (res.ok) expect(res.data).toEqual({ workspaces });
   });
 
-  it("maps any PlaneApiError to PM_API_ERROR (no 404 special-case on a list)", async () => {
+  it("forwards ctx.pmApiKey to the client on the fallback path", async () => {
+    const workspaces = [{ id: "w1", slug: "acme", name: "Acme" }];
+    mockClient.listWorkspaces.mockResolvedValueOnce(workspaces);
+    const res = await pmListWorkspaces.handler({}, ctx);
+    expect(mockClient.listWorkspaces).toHaveBeenCalledWith(API_KEY);
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.data).toEqual({ workspaces });
+  });
+
+  it("maps a non-401 PlaneApiError to PM_API_ERROR naming the CE gap", async () => {
     mockClient.listWorkspaces.mockRejectedValueOnce(new PlaneApiError("boom", 404));
     const res = await pmListWorkspaces.handler({}, ctx);
     expect(res.ok).toBe(false);
-    if (!res.ok) expect(res.error.code).toBe("PM_API_ERROR");
+    if (!res.ok) {
+      expect(res.error.code).toBe("PM_API_ERROR");
+      // Plane CE v0.24.1 has no /api/v1 workspace list — the message must
+      // say so instead of parroting a bare upstream 404.
+      expect(res.error.message).toMatch(/Plane CE has no \/api\/v1 workspace list/);
+    }
+  });
+
+  it("maps a 401 to PM_AUTH_FAILED", async () => {
+    mockClient.listWorkspaces.mockRejectedValueOnce(new PlaneApiError("nope", 401));
+    const res = await pmListWorkspaces.handler({}, ctxNoKey);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("PM_AUTH_FAILED");
   });
 
   it("rethrows a non-PlaneApiError", async () => {
@@ -100,14 +149,14 @@ describe("pm_list_projects", () => {
     expect(pmListProjects.requiresConfirmation).toBe(false);
   });
 
-  it("forwards workspace_slug + per_page and returns projects", async () => {
+  it("forwards workspace_slug + per_page + ctx.pmApiKey and returns projects", async () => {
     const projects = [{ id: "p1", name: "Web", identifier: "WEB", workspace: "w1" }];
     mockClient.listProjects.mockResolvedValueOnce(projects);
     const res = await pmListProjects.handler(
       { workspace_slug: "acme", per_page: 25 },
       ctx,
     );
-    expect(mockClient.listProjects).toHaveBeenCalledWith("acme", 25);
+    expect(mockClient.listProjects).toHaveBeenCalledWith("acme", 25, API_KEY);
     expect(res.ok).toBe(true);
     if (res.ok) expect(res.data).toEqual({ projects });
   });
@@ -118,6 +167,16 @@ describe("pm_list_projects", () => {
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.code).toBe("PM_API_ERROR");
   });
+
+  it("maps a 401 to PM_AUTH_FAILED", async () => {
+    mockClient.listProjects.mockRejectedValueOnce(new PlaneApiError("unauth", 401));
+    const res = await pmListProjects.handler({ workspace_slug: "acme" }, ctx);
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.error.code).toBe("PM_AUTH_FAILED");
+      expect(res.error.message).toMatch(/service token/);
+    }
+  });
 });
 
 describe("pm_list_work_items", () => {
@@ -126,7 +185,7 @@ describe("pm_list_work_items", () => {
     expect(pmListWorkItems.requiresConfirmation).toBe(false);
   });
 
-  it("forwards filters under the options object", async () => {
+  it("forwards filters under the options object plus ctx.pmApiKey", async () => {
     mockClient.listWorkItems.mockResolvedValueOnce([]);
     await pmListWorkItems.handler(
       {
@@ -138,11 +197,16 @@ describe("pm_list_work_items", () => {
       },
       ctx,
     );
-    expect(mockClient.listWorkItems).toHaveBeenCalledWith("acme", "p1", {
-      perPage: 10,
-      state: "in_progress",
-      assignee: "u9",
-    });
+    expect(mockClient.listWorkItems).toHaveBeenCalledWith(
+      "acme",
+      "p1",
+      {
+        perPage: 10,
+        state: "in_progress",
+        assignee: "u9",
+      },
+      API_KEY,
+    );
   });
 
   it("maps PlaneApiError to PM_API_ERROR", async () => {
@@ -154,6 +218,16 @@ describe("pm_list_work_items", () => {
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.code).toBe("PM_API_ERROR");
   });
+
+  it("maps a 401 to PM_AUTH_FAILED", async () => {
+    mockClient.listWorkItems.mockRejectedValueOnce(new PlaneApiError("unauth", 401));
+    const res = await pmListWorkItems.handler(
+      { workspace_slug: "acme", project_id: "p1" },
+      ctx,
+    );
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("PM_AUTH_FAILED");
+  });
 });
 
 describe("pm_get_work_item", () => {
@@ -162,14 +236,14 @@ describe("pm_get_work_item", () => {
     expect(pmGetWorkItem.requiresConfirmation).toBe(false);
   });
 
-  it("forwards ids and returns the work_item", async () => {
+  it("forwards ids + ctx.pmApiKey and returns the work_item", async () => {
     const work_item = { id: "i1", name: "Bug", created_at: "t", updated_at: "t" };
     mockClient.getWorkItem.mockResolvedValueOnce(work_item);
     const res = await pmGetWorkItem.handler(
       { workspace_slug: "acme", project_id: "p1", work_item_id: "i1" },
       ctx,
     );
-    expect(mockClient.getWorkItem).toHaveBeenCalledWith("acme", "p1", "i1");
+    expect(mockClient.getWorkItem).toHaveBeenCalledWith("acme", "p1", "i1", API_KEY);
     expect(res.ok).toBe(true);
     if (res.ok) expect(res.data).toEqual({ work_item });
   });
@@ -182,6 +256,16 @@ describe("pm_get_work_item", () => {
     );
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.code).toBe("PM_WORK_ITEM_NOT_FOUND");
+  });
+
+  it("maps a 401 to PM_AUTH_FAILED (takes precedence over the 404 branch)", async () => {
+    mockClient.getWorkItem.mockRejectedValueOnce(new PlaneApiError("unauth", 401));
+    const res = await pmGetWorkItem.handler(
+      { workspace_slug: "acme", project_id: "p1", work_item_id: "i1" },
+      ctx,
+    );
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("PM_AUTH_FAILED");
   });
 
   it("maps a non-404 PlaneApiError to PM_API_ERROR", async () => {
@@ -211,13 +295,18 @@ describe("pm_search_work_items", () => {
     expect(pmSearchWorkItems.requiresConfirmation).toBe(false);
   });
 
-  it("forwards query + per_page", async () => {
+  it("forwards query + per_page + ctx.pmApiKey", async () => {
     mockClient.searchWorkItems.mockResolvedValueOnce([]);
     await pmSearchWorkItems.handler(
       { workspace_slug: "acme", query: "login bug", per_page: 5 },
       ctx,
     );
-    expect(mockClient.searchWorkItems).toHaveBeenCalledWith("acme", "login bug", 5);
+    expect(mockClient.searchWorkItems).toHaveBeenCalledWith(
+      "acme",
+      "login bug",
+      5,
+      API_KEY,
+    );
   });
 
   it("maps PlaneApiError to PM_API_ERROR", async () => {
@@ -228,6 +317,29 @@ describe("pm_search_work_items", () => {
     );
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.code).toBe("PM_API_ERROR");
+  });
+
+  it("maps a 404 to PM_SEARCH_UNAVAILABLE — Plane CE has no /api/v1 search (WARP-860)", async () => {
+    mockClient.searchWorkItems.mockRejectedValueOnce(new PlaneApiError("nope", 404));
+    const res = await pmSearchWorkItems.handler(
+      { workspace_slug: "acme", query: "q" },
+      ctx,
+    );
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.error.code).toBe("PM_SEARCH_UNAVAILABLE");
+      expect(res.error.message).toMatch(/Plane CE has no \/api\/v1 workspace search/);
+    }
+  });
+
+  it("maps a 401 to PM_AUTH_FAILED", async () => {
+    mockClient.searchWorkItems.mockRejectedValueOnce(new PlaneApiError("unauth", 401));
+    const res = await pmSearchWorkItems.handler(
+      { workspace_slug: "acme", query: "q" },
+      ctx,
+    );
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("PM_AUTH_FAILED");
   });
 });
 
@@ -242,7 +354,7 @@ describe("pm_create_work_item", () => {
     expect(pmCreateWorkItem.requiresConfirmation).toBe(true);
   });
 
-  it("forwards the create fields and returns the work_item", async () => {
+  it("forwards the create fields + ctx.pmApiKey and returns the work_item", async () => {
     const created = { id: "new1" };
     mockClient.createWorkItem.mockResolvedValueOnce(created);
     const res = await pmCreateWorkItem.handler(
@@ -256,17 +368,22 @@ describe("pm_create_work_item", () => {
       },
       ctx,
     );
-    expect(mockClient.createWorkItem).toHaveBeenCalledWith("acme", "p1", {
-      name: "New ticket",
-      description_html: "<p>hi</p>",
-      assignees: ["u1"],
-      labels: ["l1"],
-    });
+    expect(mockClient.createWorkItem).toHaveBeenCalledWith(
+      "acme",
+      "p1",
+      {
+        name: "New ticket",
+        description_html: "<p>hi</p>",
+        assignees: ["u1"],
+        labels: ["l1"],
+      },
+      API_KEY,
+    );
     expect(res.ok).toBe(true);
     if (res.ok) expect(res.data).toEqual({ work_item: created });
   });
 
-  it("maps any PlaneApiError to PM_API_ERROR (create has no 404 case)", async () => {
+  it("maps any non-401 PlaneApiError to PM_API_ERROR (create has no 404 case)", async () => {
     mockClient.createWorkItem.mockRejectedValueOnce(new PlaneApiError("bad", 400));
     const res = await pmCreateWorkItem.handler(
       { workspace_slug: "acme", project_id: "p1", name: "x" },
@@ -274,6 +391,16 @@ describe("pm_create_work_item", () => {
     );
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.code).toBe("PM_API_ERROR");
+  });
+
+  it("maps a 401 to PM_AUTH_FAILED", async () => {
+    mockClient.createWorkItem.mockRejectedValueOnce(new PlaneApiError("unauth", 401));
+    const res = await pmCreateWorkItem.handler(
+      { workspace_slug: "acme", project_id: "p1", name: "x" },
+      ctx,
+    );
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("PM_AUTH_FAILED");
   });
 });
 
@@ -283,7 +410,7 @@ describe("pm_update_work_item", () => {
     expect(pmUpdateWorkItem.requiresConfirmation).toBe(true);
   });
 
-  it("strips the id fields and forwards only the mutable fields", async () => {
+  it("strips the id fields and forwards the mutable fields + ctx.pmApiKey", async () => {
     mockClient.updateWorkItem.mockResolvedValueOnce({ id: "i1" });
     await pmUpdateWorkItem.handler(
       {
@@ -295,10 +422,16 @@ describe("pm_update_work_item", () => {
       },
       ctx,
     );
-    expect(mockClient.updateWorkItem).toHaveBeenCalledWith("acme", "p1", "i1", {
-      name: "Renamed",
-      labels: ["l2"],
-    });
+    expect(mockClient.updateWorkItem).toHaveBeenCalledWith(
+      "acme",
+      "p1",
+      "i1",
+      {
+        name: "Renamed",
+        labels: ["l2"],
+      },
+      API_KEY,
+    );
   });
 
   it("maps a 404 to PM_WORK_ITEM_NOT_FOUND", async () => {
@@ -310,6 +443,16 @@ describe("pm_update_work_item", () => {
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.code).toBe("PM_WORK_ITEM_NOT_FOUND");
   });
+
+  it("maps a 401 to PM_AUTH_FAILED", async () => {
+    mockClient.updateWorkItem.mockRejectedValueOnce(new PlaneApiError("unauth", 401));
+    const res = await pmUpdateWorkItem.handler(
+      { workspace_slug: "acme", project_id: "p1", work_item_id: "i1", name: "x" },
+      ctx,
+    );
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("PM_AUTH_FAILED");
+  });
 });
 
 describe("pm_add_work_item_comment", () => {
@@ -318,7 +461,7 @@ describe("pm_add_work_item_comment", () => {
     expect(pmAddWorkItemComment.requiresConfirmation).toBe(true);
   });
 
-  it("forwards the comment body and returns the comment", async () => {
+  it("forwards the comment body + ctx.pmApiKey and returns the comment", async () => {
     const comment = { id: "c1" };
     mockClient.addWorkItemComment.mockResolvedValueOnce(comment);
     const res = await pmAddWorkItemComment.handler(
@@ -335,6 +478,7 @@ describe("pm_add_work_item_comment", () => {
       "p1",
       "i1",
       "<p>note</p>",
+      API_KEY,
     );
     expect(res.ok).toBe(true);
     if (res.ok) expect(res.data).toEqual({ comment });
@@ -354,6 +498,21 @@ describe("pm_add_work_item_comment", () => {
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.code).toBe("PM_WORK_ITEM_NOT_FOUND");
   });
+
+  it("maps a 401 to PM_AUTH_FAILED", async () => {
+    mockClient.addWorkItemComment.mockRejectedValueOnce(new PlaneApiError("unauth", 401));
+    const res = await pmAddWorkItemComment.handler(
+      {
+        workspace_slug: "acme",
+        project_id: "p1",
+        work_item_id: "i1",
+        comment_html: "x",
+      },
+      ctx,
+    );
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("PM_AUTH_FAILED");
+  });
 });
 
 describe("pm_transition_work_item", () => {
@@ -362,7 +521,7 @@ describe("pm_transition_work_item", () => {
     expect(pmTransitionWorkItem.requiresConfirmation).toBe(true);
   });
 
-  it("forwards the target state_id", async () => {
+  it("forwards the target state_id + ctx.pmApiKey", async () => {
     mockClient.transitionWorkItem.mockResolvedValueOnce({ id: "i1" });
     await pmTransitionWorkItem.handler(
       {
@@ -378,6 +537,7 @@ describe("pm_transition_work_item", () => {
       "p1",
       "i1",
       "done",
+      API_KEY,
     );
   });
 
@@ -409,5 +569,20 @@ describe("pm_transition_work_item", () => {
     );
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.code).toBe("PM_API_ERROR");
+  });
+
+  it("maps a 401 to PM_AUTH_FAILED", async () => {
+    mockClient.transitionWorkItem.mockRejectedValueOnce(new PlaneApiError("unauth", 401));
+    const res = await pmTransitionWorkItem.handler(
+      {
+        workspace_slug: "acme",
+        project_id: "p1",
+        work_item_id: "i1",
+        state_id: "done",
+      },
+      ctx,
+    );
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("PM_AUTH_FAILED");
   });
 });

@@ -70,6 +70,7 @@ import { createEmailRouter, wireEmailAnalysis } from "./routes/email.js";
 import { createEmailAnalysisFn } from "./services/email-analysis.service.js";
 import { createToolsRouter } from "./routes/tools.js";
 import { mcpClient } from "./services/mcp-client.singleton.js";
+import { pmCallContextForTool } from "./services/pm-service-token.service.js";
 import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { createModelsRouter } from "./routes/models.js";
 import { createHardwareRouter } from "./routes/hardware.js";
@@ -377,7 +378,13 @@ export function createApp(prisma: PrismaClient) {
   // on the first failure; per-step trace returned to the caller.
   const toolStepDispatcher: StepDispatcher = {
     async call(tool, args) {
-      const result = await mcpClient.callTool(tool, args);
+      // WARP-860 — pm_* tools authenticate via `_meta.pmToken` (runtime-
+      // provisioned Plane service token); non-pm tools get `{}` (no-op).
+      const result = await mcpClient.callTool(
+        tool,
+        args,
+        await pmCallContextForTool(tool),
+      );
       if (result.isError) {
         const detail = result.content?.[0]?.text ?? "tool reported error";
         throw new Error(typeof detail === "string" ? detail : String(detail));

@@ -44,6 +44,7 @@ import {
   planeAppApi,
   PmBootstrapError,
 } from "../services/pm-bootstrap.service.js";
+import { getPmServiceToken } from "../services/pm-service-token.service.js";
 
 const logger = pino({ name: "pm-onboard-route" });
 
@@ -207,6 +208,17 @@ export function createPmOnboardRouter(): Router {
           logger.warn(
             { err: (err as Error).message },
             "could not clear Plane user onboarding flags (non-fatal)",
+          );
+        });
+
+        // 6. Best-effort: warm the service-token cache now that a
+        // workspace exists, so the first pm_* tool call / mobile pm
+        // request doesn't pay the provisioning round-trip. Failures are
+        // non-fatal — every consumer lazily provisions on demand.
+        void getPmServiceToken().catch((err: unknown) => {
+          logger.warn(
+            { err: err instanceof Error ? err.message : String(err) },
+            "could not warm the Plane service-token cache (non-fatal)",
           );
         });
 

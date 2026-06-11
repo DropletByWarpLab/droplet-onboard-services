@@ -1,6 +1,7 @@
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 
 import { listWorkItems, PlaneApiError } from "./pm-client.js";
+import { mapPlaneAuthError } from "./pm-errors.js";
 
 const inputSchema = {
   type: "object",
@@ -23,16 +24,23 @@ interface Args {
   per_page?: number;
 }
 
-async function handler(args: Record<string, unknown>, _ctx: ToolContext): Promise<ToolResult> {
+async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
   const { workspace_slug, project_id, state, assignee, per_page } = args as unknown as Args;
   try {
-    const work_items = await listWorkItems(workspace_slug, project_id, {
-      perPage: per_page,
-      state,
-      assignee,
-    });
+    const work_items = await listWorkItems(
+      workspace_slug,
+      project_id,
+      {
+        perPage: per_page,
+        state,
+        assignee,
+      },
+      ctx.pmApiKey,
+    );
     return { ok: true, data: { work_items } };
   } catch (err) {
+    const auth = mapPlaneAuthError(err);
+    if (auth) return auth;
     if (err instanceof PlaneApiError) {
       return {
         ok: false,

@@ -12,8 +12,20 @@
  * in the mcp-server child process and doesn't share the orchestrator's
  * import graph.
  *
- * Auth: `X-API-Key: ${DROPLET_PM_ADMIN_TOKEN}` (verified 2026-05-28
- * against Plane API ref). NOT `Authorization: Bearer`.
+ * Auth (WARP-860, ground truth from a live Plane CE v0.24.1 on
+ * 2026-06-11): `X-API-Key: <token>`. NOT `Authorization: Bearer`. The
+ * token is the RUNTIME-PROVISIONED Plane service API token the
+ * orchestrator mints via `POST /api/workspaces/<slug>/service-api-tokens/`
+ * (see apps/orchestrator/src/services/pm-service-token.service.ts) and
+ * forwards per-call as `ctx.pmApiKey` → the trailing `apiKey` param on
+ * every fn here. When no param arrives (legacy / HTTP-transport path)
+ * we fall back to `DROPLET_PM_ADMIN_TOKEN` — note that env var is NOT
+ * registered in Plane's APIToken table, so that path 401s against a
+ * stock CE box; it exists only to keep the old behavior reachable.
+ *
+ * CE surface limits (also live-probed): `/api/v1` is workspace-scoped
+ * only — no `/api/v1/workspaces/` list, no `/search/`, no `/members/`.
+ * The handlers translate those 404s for the model.
  *
  * Errors:
  *   - HTTP 4xx / 5xx           → PlaneApiError with `.status`
@@ -21,7 +33,8 @@
  *   - JSON parse failure       → PlaneApiError with status 0
  *
  * The handlers catch `PlaneApiError` and translate to the tool-result
- * code surface (PM_WORK_ITEM_NOT_FOUND on 404, PM_API_ERROR otherwise).
+ * code surface (PM_AUTH_FAILED on 401, PM_WORK_ITEM_NOT_FOUND on 404,
+ * PM_SEARCH_UNAVAILABLE on the search 404, PM_API_ERROR otherwise).
  * Anything else is a bug — let it bubble to the agent loop's catch.
  *
  * Per architecture-guard rule 4 — chat traffic does NOT touch this
@@ -84,13 +97,15 @@ function resolveBase(): string {
 }
 
 /**
- * Returns `X-API-Key` if `DROPLET_PM_ADMIN_TOKEN` is set, empty header
- * map otherwise. Plane rejects unauthenticated calls with 401; we let
- * that surface as PlaneApiError(401) rather than refuse at the client
- * layer — keeps the error path uniform across reads and writes.
+ * WARP-860 — prefer the per-call `apiKey` (the runtime-provisioned
+ * service token forwarded from `ctx.pmApiKey`); fall back to the legacy
+ * `DROPLET_PM_ADMIN_TOKEN` env var (HTTP-transport / pre-provisioning
+ * path). Neither set → empty header map: Plane rejects with 401 and we
+ * let that surface as PlaneApiError(401) rather than refuse at the
+ * client layer — keeps the error path uniform across reads and writes.
  */
-function authHeaders(): Record<string, string> {
-  const tok = process.env.DROPLET_PM_ADMIN_TOKEN ?? "";
+function authHeaders(apiKey?: string): Record<string, string> {
+  const tok = apiKey || process.env.DROPLET_PM_ADMIN_TOKEN || "";
   return tok ? { "X-API-Key": tok } : {};
 }
 
@@ -100,6 +115,7 @@ async function call<T>(
   options: {
     body?: unknown;
     queryParams?: Record<string, string | number | undefined>;
+    apiKey?: string;
   } = {},
 ): Promise<T> {
   const url = new URL(path, resolveBase());
@@ -116,7 +132,7 @@ async function call<T>(
       headers: {
         Accept: "application/json",
         "Content-Type": "application/json",
-        ...authHeaders(),
+        ...authHeaders(options.apiKey),
       },
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
       signal: controller.signal,
@@ -156,18 +172,19 @@ async function call<T>(
 
 // --- Read API (WARP-508) ---
 
-export async function listWorkspaces(): Promise<PlaneWorkspace[]> {
-  return call<PlaneWorkspace[]>("GET", "/api/v1/workspaces/");
+export async function listWorkspaces(apiKey?: string): Promise<PlaneWorkspace[]> {
+  return call<PlaneWorkspace[]>("GET", "/api/v1/workspaces/", { apiKey });
 }
 
 export async function listProjects(
   workspace_slug: string,
   per_page?: number,
+  apiKey?: string,
 ): Promise<PlaneProject[]> {
   return call<PlaneProject[]>(
     "GET",
     `/api/v1/workspaces/${encodeURIComponent(workspace_slug)}/projects/`,
-    { queryParams: { per_page } },
+    { queryParams: { per_page }, apiKey },
   );
 }
 
@@ -175,6 +192,7 @@ export async function listWorkItems(
   workspace_slug: string,
   project_id: string,
   options: { perPage?: number; state?: string; assignee?: string } = {},
+  apiKey?: string,
 ): Promise<PlaneWorkItem[]> {
   return call<PlaneWorkItem[]>(
     "GET",
@@ -185,6 +203,7 @@ export async function listWorkItems(
         state: options.state,
         assignee: options.assignee,
       },
+      apiKey,
     },
   );
 }
@@ -193,10 +212,12 @@ export async function getWorkItem(
   workspace_slug: string,
   project_id: string,
   work_item_id: string,
+  apiKey?: string,
 ): Promise<PlaneWorkItem> {
   return call<PlaneWorkItem>(
     "GET",
     `/api/v1/workspaces/${encodeURIComponent(workspace_slug)}/projects/${encodeURIComponent(project_id)}/issues/${encodeURIComponent(work_item_id)}/`,
+    { apiKey },
   );
 }
 
@@ -204,11 +225,12 @@ export async function searchWorkItems(
   workspace_slug: string,
   query: string,
   per_page?: number,
+  apiKey?: string,
 ): Promise<PlaneWorkItem[]> {
   return call<PlaneWorkItem[]>(
     "GET",
     `/api/v1/workspaces/${encodeURIComponent(workspace_slug)}/search/`,
-    { queryParams: { query, per_page } },
+    { queryParams: { query, per_page }, apiKey },
   );
 }
 
@@ -233,11 +255,12 @@ export async function createWorkItem(
   workspace_slug: string,
   project_id: string,
   fields: CreateWorkItemFields,
+  apiKey?: string,
 ): Promise<unknown> {
   return call(
     "POST",
     `/api/v1/workspaces/${encodeURIComponent(workspace_slug)}/projects/${encodeURIComponent(project_id)}/issues/`,
-    { body: fields },
+    { body: fields, apiKey },
   );
 }
 
@@ -246,11 +269,12 @@ export async function updateWorkItem(
   project_id: string,
   work_item_id: string,
   fields: UpdateWorkItemFields,
+  apiKey?: string,
 ): Promise<unknown> {
   return call(
     "PATCH",
     `/api/v1/workspaces/${encodeURIComponent(workspace_slug)}/projects/${encodeURIComponent(project_id)}/issues/${encodeURIComponent(work_item_id)}/`,
-    { body: fields },
+    { body: fields, apiKey },
   );
 }
 
@@ -259,11 +283,12 @@ export async function addWorkItemComment(
   project_id: string,
   work_item_id: string,
   comment_html: string,
+  apiKey?: string,
 ): Promise<unknown> {
   return call(
     "POST",
     `/api/v1/workspaces/${encodeURIComponent(workspace_slug)}/projects/${encodeURIComponent(project_id)}/issues/${encodeURIComponent(work_item_id)}/comments/`,
-    { body: { comment_html } },
+    { body: { comment_html }, apiKey },
   );
 }
 
@@ -272,10 +297,11 @@ export async function transitionWorkItem(
   project_id: string,
   work_item_id: string,
   state_id: string,
+  apiKey?: string,
 ): Promise<unknown> {
   return call(
     "PATCH",
     `/api/v1/workspaces/${encodeURIComponent(workspace_slug)}/projects/${encodeURIComponent(project_id)}/issues/${encodeURIComponent(work_item_id)}/`,
-    { body: { state_id } },
+    { body: { state_id }, apiKey },
   );
 }

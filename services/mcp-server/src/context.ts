@@ -100,6 +100,8 @@ export function buildContext(
   metaUserId?: string,
   metaEnhancement?: PrivateEnhancement,
   metaUserRole?: string,
+  metaPmToken?: string,
+  metaPmWorkspaces?: { id: string; slug: string; name: string }[],
 ): ToolContext {
   const userId = claims?.sub ?? metaUserId;
   // WARP-286: bind the searchHybrid shim with the authenticated userId
@@ -152,6 +154,12 @@ export function buildContext(
         : undefined),
     ncToken,
     _enhancement: metaEnhancement,
+    // WARP-860 — runtime-provisioned Plane service token + the
+    // orchestrator-resolved workspace list for `pm_*` handlers. The
+    // server.ts caller only passes these on the trusted stdio posture
+    // (same gate as `_enhancement` / `userRole`).
+    pmApiKey: metaPmToken,
+    pmWorkspaces: metaPmWorkspaces,
     signal,
   };
 }

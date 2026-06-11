@@ -6,6 +6,10 @@ import { cacheGet, cacheSet } from "../services/cache.service.js";
 import { runAgent, type AgentDeps } from "../services/llm-agent.service.js";
 import { createEnhancementDeps } from "../services/query-enhancement.service.js";
 import { createFileCitationService } from "../services/file-citation.service.js";
+import {
+  invalidatePmServiceToken,
+  pmCallContextForTool,
+} from "../services/pm-service-token.service.js";
 import { TOOLS, TOOL_CATALOG, TOOL_DOMAINS } from "@droplet/tools-core";
 import { mcpClient } from "../services/mcp-client.singleton.js";
 import type { McpCallContext } from "../services/mcp-client.service.js";
@@ -706,6 +710,14 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           conversationId && assistantMessageId
             ? createFileCitationService(prisma)
             : undefined,
+        // WARP-860 — `pm_*` dispatches carry the runtime-provisioned
+        // Plane service token via `_meta.pmToken`; a PM_AUTH_FAILED
+        // result invalidates the cache so the next dispatch
+        // re-provisions.
+        pm: {
+          contextForTool: pmCallContextForTool,
+          invalidateToken: invalidatePmServiceToken,
+        },
       };
       // Carry the authenticated user.id (UUID, not username) onto every
       // citation insert so the related-chats route can scope by owner.

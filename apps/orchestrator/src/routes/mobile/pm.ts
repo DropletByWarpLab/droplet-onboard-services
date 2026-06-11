@@ -4,8 +4,20 @@
  *
  * WARP-513 — per spec WARP-498 OQ4 (resolved 2026-05-28 to A): the
  * orchestrator transforms Plane's `work-item` shape into the existing
- * mobile envelope. Mobile clients NEVER call Plane directly; they hit
- * these wrappers which forward via DROPLET_PM_ADMIN_TOKEN.
+ * mobile envelope. Mobile clients NEVER call Plane directly.
+ *
+ * WARP-860 — auth rewrite, ground truth from a live Plane CE v0.24.1:
+ * `DROPLET_PM_ADMIN_TOKEN` is registered nowhere in Plane (every
+ * forwarded call 401'd), and `GET /api/v1/workspaces/` doesn't exist on
+ * CE (404). So these routes now:
+ *
+ *   - authenticate `/api/v1` with the RUNTIME-PROVISIONED service token
+ *     (`withPmServiceToken` — invalidate + retry once on a Plane 401);
+ *   - serve /workspaces from `listPlaneWorkspaces()` (session app API,
+ *     the only workspace list CE has) — same wire shape as before;
+ *   - surface provisioning/bootstrap failures as
+ *     `503 {error, code: "PM_NOT_READY"}` (the PM stack isn't onboarded
+ *     or reachable yet — retry after the wizard PM step).
  *
  * Endpoints (full shapes in docs/mobile-api-contract.md):
  *   GET /api/mobile/pm/workspaces
@@ -13,8 +25,8 @@
  *   GET /api/mobile/pm/work-items?workspace=<slug>&project_id=<id>...
  *   GET /api/mobile/pm/work-items/:id?workspace=<slug>&project_id=<id>
  *
- * Mount: under app.use("/api", createPmMobileRouter()) — protected by
- * authMiddleware (caller's dashboard JWT travels through to req.user).
+ * Mount: app.use(createPmMobileRouter()) — protected by authMiddleware
+ * (caller's dashboard JWT travels through to req.user).
  */
 
 import { Router, type Request, type Response, type NextFunction } from "express";
@@ -24,17 +36,23 @@ import {
   getWorkItem,
   listProjects,
   listWorkItems,
-  listWorkspaces,
   PlaneApiError,
   type PlaneWorkItem,
 } from "../../services/pm.client.js";
-import { config } from "../../config.js";
+import {
+  listPlaneWorkspaces,
+  PmServiceTokenError,
+  withPmServiceToken,
+} from "../../services/pm-service-token.service.js";
+import { PmBootstrapError } from "../../services/pm-bootstrap.service.js";
 import { requireRole } from "../../middleware/auth.js";
 
 const logger = pino({ name: "pm-mobile-route" });
 
-function adminKey(): string {
-  return config.DROPLET_PM_ADMIN_TOKEN;
+/** The withPmServiceToken auth-error predicate: a Plane 401 means the
+ *  cached service token went stale — invalidate, re-provision, retry. */
+function isPlane401(err: unknown): boolean {
+  return err instanceof PlaneApiError && err.status === 401;
 }
 
 function capPerPage(raw: unknown): number {
@@ -82,6 +100,18 @@ function mapPmError(
   res: Response,
   resource: "workspace" | "project" | "work_item",
 ): Response | null {
+  // WARP-860 — the PM stack isn't ready: the service token couldn't be
+  // provisioned (no workspace yet / Plane refused) or Plane itself is
+  // unreachable / won't sign the bootstrap admin in. 503 tells mobile
+  // clients to retry later (after the wizard PM step), distinct from
+  // the 502 "Plane answered badly" upstream case below.
+  if (err instanceof PmServiceTokenError || err instanceof PmBootstrapError) {
+    logger.warn(
+      { err: err.message, code: err.code },
+      "PM stack not ready for mobile pm route",
+    );
+    return res.status(503).json({ error: err.message, code: "PM_NOT_READY" });
+  }
   if (!(err instanceof PlaneApiError)) return null;
   if (err.status === 404) {
     const code =
@@ -120,7 +150,10 @@ export function createPmMobileRouter(): Router {
     HUMAN_GET,
     async (_req: Request, res: Response, next: NextFunction) => {
       try {
-        const workspaces = await listWorkspaces(adminKey());
+        // WARP-860 — Plane CE has no /api/v1/workspaces/ (404). The
+        // session app API is the only workspace list; the wire shape
+        // stays byte-identical to the contract doc.
+        const workspaces = await listPlaneWorkspaces();
         return res.json({
           workspaces: workspaces.map((w) => ({
             id: w.id,
@@ -147,10 +180,9 @@ export function createPmMobileRouter(): Router {
             .status(400)
             .json({ error: "workspace query param required" });
         }
-        const projects = await listProjects(
-          adminKey(),
-          workspace,
-          capPerPage(req.query.per_page),
+        const projects = await withPmServiceToken(
+          (token) => listProjects(token, workspace, capPerPage(req.query.per_page)),
+          isPlane401,
         );
         return res.json({
           projects: projects.map((p) => ({
@@ -179,15 +211,14 @@ export function createPmMobileRouter(): Router {
             .status(400)
             .json({ error: "workspace and project_id query params required" });
         }
-        const work_items = await listWorkItems(
-          adminKey(),
-          workspace,
-          projectId,
-          {
-            perPage: capPerPage(req.query.per_page),
-            state: req.query.state as string | undefined,
-            assignee: req.query.assignee as string | undefined,
-          },
+        const work_items = await withPmServiceToken(
+          (token) =>
+            listWorkItems(token, workspace, projectId, {
+              perPage: capPerPage(req.query.per_page),
+              state: req.query.state as string | undefined,
+              assignee: req.query.assignee as string | undefined,
+            }),
+          isPlane401,
         );
         // Romain PR #321 review §4: project each Plane work-item into
         // the mobile-api-contract shape rather than forwarding raw
@@ -214,11 +245,9 @@ export function createPmMobileRouter(): Router {
             .status(400)
             .json({ error: "workspace and project_id query params required" });
         }
-        const work_item = await getWorkItem(
-          adminKey(),
-          workspace,
-          projectId,
-          workItemId,
+        const work_item = await withPmServiceToken(
+          (token) => getWorkItem(token, workspace, projectId, workItemId),
+          isPlane401,
         );
         return res.json({ work_item: projectWorkItem(work_item) });
       } catch (err) {

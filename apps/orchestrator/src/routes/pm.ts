@@ -1,6 +1,17 @@
 /**
  * Plane PM integration routes — OIDC IdP.
  *
+ * ── WARP-860 STATUS: DORMANT against the shipped PM stack ───────────
+ * Plane CE v0.24.1 (what the box ships) has NO OIDC relying-party
+ * support at all — SSO is a paid-edition feature, so this IdP has no
+ * RP and none of the endpoints below ever fire (verified live,
+ * 2026-06-11). The router stays mounted because it is self-contained
+ * and fail-closed (every endpoint authenticates its own caller), and
+ * it becomes useful the day a commercial Plane edition lands. Do NOT
+ * build new flows on it; per-user PM attribution is the WARP-543 V2
+ * story, which decides whether this IdP wakes up or gets removed.
+ * ─────────────────────────────────────────────────────────────────────
+ *
  * WARP-505 — orchestrator is a minimal OIDC IdP for the embedded Plane
  * PM stack per spec WARP-498 OQ6 (resolved 2026-05-28). Plane is the
  * relying party; users authenticate via Plane's `/auth/oidc/` flow,
@@ -11,9 +22,9 @@
  * session cookie inline; /token and /userinfo verify client credentials
  * or the bearer-issued access token.
  *
- * Future tickets land here:
- *   WARP-507 — POST /api/pm/onboard (seed first workspace)
- *   WARP-511 — POST /api/pm/webhook (signed Plane → orchestrator events)
+ * Related routes that DID land elsewhere:
+ *   WARP-507/860 — POST /api/pm/onboard (routes/pm-onboard.ts)
+ *   WARP-511     — POST /api/pm/webhook (routes/pm-webhook.ts)
  */
 
 import { randomBytes } from "node:crypto";

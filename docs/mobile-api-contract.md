@@ -323,6 +323,14 @@ verified 2026-05-28) and transforms responses into Droplet's existing
 mobile envelope per OQ4 resolution. iOS/Android/Windows clients call
 the endpoints below; they MUST NOT call Plane directly.
 
+> WARP-860 — the orchestrator authenticates upstream with a
+> runtime-provisioned Plane service token (Plane CE registers no
+> env-configured keys). Until the wizard PM step has onboarded Plane
+> (or while Plane is unreachable), every endpoint in this section can
+> answer `503 {"error": "<detail>", "code": "PM_NOT_READY"}` — clients
+> should treat it as retryable, distinct from the `502` upstream-error
+> case. Success shapes are unchanged.
+
 ### `GET /api/mobile/pm/workspaces`
 
 List workspaces visible to the caller. Used for `workspace_slug`
@@ -413,6 +421,9 @@ Fetch a single work item with description body.
 - `404` — work item not in this project/workspace.
 - `401` — JWT missing or invalid.
 - `502` — Plane API unreachable (orchestrator logs the upstream error).
+- `503` — PM stack not ready (`code: "PM_NOT_READY"`, WARP-860) — Plane
+  not onboarded yet or the service token could not be provisioned;
+  retryable.
 
 ### Out of scope for V1
 

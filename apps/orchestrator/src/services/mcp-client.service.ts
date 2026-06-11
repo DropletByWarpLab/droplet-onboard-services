@@ -193,4 +193,19 @@ export interface McpCallContext {
    * facing route — the trust boundary is the agent loop itself.
    */
   _enhancement?: PrivateEnhancement;
+  /**
+   * WARP-860 — runtime-provisioned Plane service API token, resolved by
+   * `pm-service-token.service.ts` and attached right before dispatching
+   * any `pm_*` tool (`pmCallContextForTool`). Lands on `ctx.pmApiKey` in
+   * the handlers. Trusted-stdio only — the mcp-server's HTTP transport
+   * ignores it so an HTTP client can't inject credentials.
+   */
+  pmToken?: string;
+  /**
+   * WARP-860 — orchestrator-resolved Plane workspace list, attached only
+   * for `pm_list_workspaces` (Plane CE's `/api/v1` has no workspace
+   * list endpoint — the session app API is the only source). Trusted-
+   * stdio only, same posture as `pmToken`.
+   */
+  pmWorkspaces?: { id: string; slug: string; name: string }[];
 }

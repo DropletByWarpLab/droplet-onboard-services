@@ -19,10 +19,26 @@
  *   - Droplet role-change event from auth-service — calls
  *     {@link syncPlaneUserRole} to push the new mapping to Plane.
  *
+ * WARP-860 STATUS (live-probed Plane CE v0.24.1, 2026-06-11) — this
+ * module is a DORMANT seam:
+ *   (a) the OIDC sync trigger above is dead on CE — Plane CE has no
+ *       OIDC RP support at all (paid-edition feature), so the WARP-505
+ *       `/userinfo` handoff never fires;
+ *   (b) `/api/v1/workspaces/<slug>/members/<id>/` 404s on CE — the
+ *       members endpoint doesn't exist in the CE `/api/v1` surface —
+ *       and this module has no callers anywhere in the codebase.
+ * It stays as the WARP-543 per-user-attribution V2 seam (a commercial
+ * edition or a CE upstream that grows the endpoint). Do NOT build new
+ * CE callers on it. Auth was repointed to the runtime-provisioned
+ * service token (pm-service-token.service.ts) so the seam is honest
+ * when it wakes up: `DROPLET_PM_ADMIN_TOKEN` is registered nowhere in
+ * Plane and 401s every call.
+ *
  * Fail-CLOSED: if Plane returns an error during role push, the user is
  * locked out of PM (the existing OIDC `/userinfo` response refuses to
  * include the `member` claim Plane needs). Reconciliation alert via the
- * existing alert channel.
+ * existing alert channel. Every error path throws PmRbacError —
+ * including token-provisioning failures, which wrap as PM_API_ERROR.
  *
  * OQ5 fallback: Plane's API may not allow programmatic downgrade of the
  * workspace owner. Detected as a 403 from PATCH and surfaced as
@@ -33,6 +49,11 @@ import pino from "pino";
 
 import { config } from "../config.js";
 import type { Role } from "./jwt.service.js";
+import { PmBootstrapError } from "./pm-bootstrap.service.js";
+import {
+  PmServiceTokenError,
+  withPmServiceToken,
+} from "./pm-service-token.service.js";
 
 const logger = pino({ name: "pm-rbac" });
 
@@ -64,6 +85,21 @@ export class PmRbacError extends Error {
   ) {
     super(message);
     this.name = "PmRbacError";
+  }
+}
+
+/**
+ * WARP-860 — module-private sentinel for the `withPmServiceToken`
+ * auth-error predicate. This client checks `resp.status` inline rather
+ * than throwing typed 401s, so the 401 branch throws this marker; after
+ * the single re-provision retry is exhausted it is translated to the
+ * public PmRbacError(PM_API_ERROR) — the fail-closed contract stays
+ * "every error path is a PmRbacError".
+ */
+class PlaneAuthRejectedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PlaneAuthRejectedError";
   }
 }
 
@@ -107,6 +143,47 @@ export async function syncPlaneUserRole(input: {
     config.DROPLET_PM_API_URL,
   );
 
+  try {
+    // WARP-860 — authenticate with the runtime-provisioned service token;
+    // a Plane 401 (stale cache after a workspace reset) invalidates and
+    // retries exactly once with a freshly provisioned token.
+    return await withPmServiceToken(
+      (token) =>
+        patchMemberRole(url, token, input.planeUserId, input.dropletRole, target),
+      (err) => err instanceof PlaneAuthRejectedError,
+    );
+  } catch (err) {
+    if (err instanceof PmRbacError) throw err;
+    // The 401 survived the single re-provision retry — Plane genuinely
+    // rejects the service token. Fail closed as PM_API_ERROR.
+    if (err instanceof PlaneAuthRejectedError) {
+      throw new PmRbacError(err.message, "PM_API_ERROR");
+    }
+    // Token provisioning / Plane bootstrap failures — the PM stack is
+    // not onboarded or unreachable. Same fail-closed translation so the
+    // caller contract stays "every error path is a PmRbacError".
+    if (err instanceof PmServiceTokenError || err instanceof PmBootstrapError) {
+      throw new PmRbacError(
+        `Plane service-token provisioning failed: ${err.message}`,
+        "PM_API_ERROR",
+      );
+    }
+    throw err;
+  }
+}
+
+/**
+ * One PATCH attempt with the given service token. Throws
+ * PlaneAuthRejectedError on a Plane 401 (the `withPmServiceToken`
+ * retry signal); every other failure path is a typed PmRbacError.
+ */
+async function patchMemberRole(
+  url: URL,
+  token: string,
+  planeUserId: string,
+  dropletRole: Role,
+  target: PlaneWorkspaceRole,
+): Promise<{ applied: PlaneWorkspaceRole }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
 
@@ -114,27 +191,32 @@ export async function syncPlaneUserRole(input: {
     const resp = await fetch(url.toString(), {
       method: "PATCH",
       headers: {
-        "X-API-Key": config.DROPLET_PM_ADMIN_TOKEN,
+        "X-API-Key": token,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ role: target }),
       signal: controller.signal,
     });
 
+    if (resp.status === 401) {
+      throw new PlaneAuthRejectedError(
+        `Plane rejected the service token on PATCH member for user ${planeUserId}`,
+      );
+    }
     if (resp.status === 403) {
       // OQ5 fallback — Plane refused the change (typically when the
       // target is the workspace owner). Surface for manual reconciliation.
       logger.warn(
         {
-          dropletRole: input.dropletRole,
-          planeUserId: input.planeUserId,
+          dropletRole,
+          planeUserId,
           target,
           event_type: "pm_rbac_reconcile_required",
         },
         "Plane refused role change — manual reconciliation required",
       );
       throw new PmRbacError(
-        `Plane refused role change for user ${input.planeUserId}`,
+        `Plane refused role change for user ${planeUserId}`,
         "RECONCILE_REQUIRED",
       );
     }
@@ -155,7 +237,9 @@ export async function syncPlaneUserRole(input: {
     // contract. Translate to a typed PmRbacError. Other network-layer
     // failures (DNS, refused connection) come through as TypeError
     // with name="TypeError" — same handling.
-    if (err instanceof PmRbacError) throw err;
+    if (err instanceof PmRbacError || err instanceof PlaneAuthRejectedError) {
+      throw err;
+    }
     if (err instanceof Error && err.name === "AbortError") {
       throw new PmRbacError(
         `Plane PATCH member timed out after ${HTTP_TIMEOUT_MS}ms`,

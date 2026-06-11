@@ -90,6 +90,26 @@ export interface ToolContext {
    * `search_content`) forward it to `ctx.searchHybrid({ ..., _enhancement })`.
    */
   _enhancement?: PrivateEnhancement;
+  /**
+   * WARP-860 — runtime-provisioned Plane service API token (the name
+   * WARP-543's AC reserves). The orchestrator mints it through Plane's
+   * session app API at boot/wizard time and forwards it per-call via
+   * `_meta.pmToken` on the trusted stdio transport; the HTTP transport
+   * ignores it (an HTTP client must not inject credentials). The `pm_*`
+   * handlers forward it into every pm-client call; absent → the client
+   * falls back to the legacy `DROPLET_PM_ADMIN_TOKEN` env var.
+   */
+  pmApiKey?: string;
+  /**
+   * WARP-860 — orchestrator-injected Plane workspace list, consumed by
+   * `pm_list_workspaces` ONLY. Plane CE v0.24.1 has no
+   * `/api/v1/workspaces/` endpoint (404), so the orchestrator resolves
+   * the list through the session app API and injects it via
+   * `_meta.pmWorkspaces` (trusted stdio only, same posture as
+   * `pmApiKey`). Absent/empty → the handler falls through to the HTTP
+   * call and surfaces the CE gap as PM_API_ERROR.
+   */
+  pmWorkspaces?: { id: string; slug: string; name: string }[];
   signal: AbortSignal;
 }
 

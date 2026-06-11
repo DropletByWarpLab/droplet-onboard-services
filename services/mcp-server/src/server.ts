@@ -104,6 +104,9 @@ export function createServer(deps: ContextDeps, trust: TrustContext) {
     //     pgvector lookup). On the HTTP transport, `claims.sub` is the
     //     authoritative userId and `_meta.userId` is ignored to keep the
     //     trust boundary at the JWT.
+    //   - `pmToken` + `pmWorkspaces` (since WARP-860) — runtime-provisioned
+    //     Plane service API token + orchestrator-resolved workspace list
+    //     for the `pm_*` handlers. Trusted-stdio only (see below).
     //
     // On stdio (in-process trusted), the orchestrator passes both. On
     // HTTP, claims-based RBAC is the auth surface and `_meta.*` carries
@@ -143,6 +146,33 @@ export function createServer(deps: ContextDeps, trust: TrustContext) {
       !Array.isArray(meta._enhancement)
         ? (meta._enhancement as PrivateEnhancement)
         : undefined;
+    // WARP-860 — runtime-provisioned Plane service API token + the
+    // orchestrator-resolved workspace list (Plane CE's /api/v1 has no
+    // workspace list endpoint). BOTH are gated on `trustedPrincipal`
+    // exactly like `userRole` / `_enhancement`: an HTTP client must not
+    // be able to inject credentials or a fictional workspace list past
+    // the JWT trust boundary.
+    const metaPmToken =
+      trustedPrincipal &&
+      meta &&
+      typeof meta.pmToken === "string" &&
+      meta.pmToken.length > 0
+        ? meta.pmToken
+        : undefined;
+    const metaPmWorkspaces =
+      trustedPrincipal &&
+      meta &&
+      Array.isArray(meta.pmWorkspaces) &&
+      meta.pmWorkspaces.every(
+        (w) =>
+          typeof w === "object" &&
+          w !== null &&
+          typeof (w as { id?: unknown }).id === "string" &&
+          typeof (w as { slug?: unknown }).slug === "string" &&
+          typeof (w as { name?: unknown }).name === "string",
+      )
+        ? (meta.pmWorkspaces as { id: string; slug: string; name: string }[])
+        : undefined;
     const ctx = buildContext(
       deps,
       claims,
@@ -151,6 +181,8 @@ export function createServer(deps: ContextDeps, trust: TrustContext) {
       metaUserId,
       metaEnhancement,
       metaUserRole,
+      metaPmToken,
+      metaPmWorkspaces,
     );
     const args = (req.params.arguments ?? {}) as Record<string, unknown>;
     let result: ToolResult;
