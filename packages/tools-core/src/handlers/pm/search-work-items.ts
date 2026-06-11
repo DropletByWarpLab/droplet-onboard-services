@@ -1,7 +1,5 @@
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 
-import { searchWorkItems, PlaneApiError } from "./pm-client.js";
-
 const inputSchema = {
   type: "object",
   properties: {
@@ -19,21 +17,31 @@ interface Args {
   per_page?: number;
 }
 
-async function handler(args: Record<string, unknown>, _ctx: ToolContext): Promise<ToolResult> {
+async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
   const { workspace_slug, query, per_page } = args as unknown as Args;
-  try {
-    const work_items = await searchWorkItems(workspace_slug, query, per_page);
-    return { ok: true, data: { work_items } };
-  } catch (err) {
-    if (err instanceof PlaneApiError) {
-      return {
-        ok: false,
-        status: "error",
-        error: { code: "PM_API_ERROR", message: err.message },
-      };
-    }
-    throw err;
+  // WARP-867: Plane CE's /api/v1/ has no search — the orchestrator proxies
+  // the app API's global search (GET /api/pm/search → results.issue).
+  const params = new URLSearchParams({ workspace_slug, query });
+  const res = await ctx.http.orchestrator.get(`/api/pm/search?${params.toString()}`, {
+    headers: { Accept: "application/json" },
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    return {
+      ok: false,
+      status: "error",
+      error: {
+        code: "PM_API_ERROR",
+        message: body.error ?? `orchestrator returned ${res.status}`,
+      },
+    };
   }
+  const data = (await res.json()) as { work_items: unknown[] };
+  const items = data.work_items ?? [];
+  return {
+    ok: true,
+    data: { work_items: per_page ? items.slice(0, per_page) : items },
+  };
 }
 
 const tool: Tool = {
