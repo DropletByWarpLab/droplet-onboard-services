@@ -61,20 +61,19 @@ WAKE_SAMPLE_RATE = 16_000
 # name. Overridable via the VOSK_MODEL_PATH env var.
 VOSK_DEFAULT_MODEL_DIRNAME = "vosk-model-small-en-us"
 
-# Score assigned to a Vosk wake match when we have NO per-word confidence
-# evidence to compute a real score from — i.e. a fire on a partial
-# hypothesis (partials carry no `result` conf array) or a final Result that
-# omits the per-word array. We deliberately do NOT default to 1.0 here: a
-# max score would make the configured WAKE_THRESHOLD silently
-# un-enforceable on those matches (it could never gate them). Instead we
-# return a fixed, conservative value:
-#   * strictly < 1.0, so an operator who raises WAKE_THRESHOLD above it can
-#     suppress these evidence-free matches — the threshold stays a real gate;
-#   * >= the shipped WAKE_THRESHOLD default (0.3), so "hey droplet" still
-#     wakes out of the box on a default install.
-# 0.5 also matches the documented "reasonable floor" for the grammar-
-# constrained vosk engine in the README/compose. (WARP-154 review item 2)
-VOSK_NO_CONFIDENCE_SCORE = 0.5
+# Default WAKE_THRESHOLD when the engine is Vosk and the operator didn't
+# set one. Vosk fires only on REAL per-word confidence evidence (the
+# score is the MINIMUM per-word conf across the matched phrase window —
+# see predict()), and grammar-constrained decoding pushes a genuinely
+# spoken phrase to ~0.9–1.0 per word. Ambient speech (a TV, a podcast)
+# shoehorned into the grammar typically leaves at least one word well
+# below this. 0.7 keeps real wakes reliable while gating the
+# living-room-TV false-accept storm observed live on the single-box
+# (9 false wakes in 12 minutes at the old evidence-free 0.5 default).
+# The generic DEFAULT_THRESHOLD (0.3, voice/pipeline.py) still applies
+# to openWakeWord, whose scores are sigmoid outputs with different
+# semantics.
+VOSK_DEFAULT_THRESHOLD = 0.7
 
 
 @dataclasses.dataclass(frozen=True)
@@ -409,23 +408,47 @@ class VoskWakeWordDetector(WakeWordDetector):
                 logger.info("vosk: heard %r (no wake match)", text)
             return {}
 
-        # Matched the wake phrase. Score it from per-word confidences when
-        # we have them; otherwise fall back to the conservative
-        # VOSK_NO_CONFIDENCE_SCORE so the configured WAKE_THRESHOLD stays
-        # enforceable (see the constant's docstring). A final Result carries
-        # per-word confidences (SetWords(True)); a partial hypothesis never
-        # does, so a partial fire always takes the conservative default.
-        score = VOSK_NO_CONFIDENCE_SCORE
-        if is_final:
-            words = res.get("result") or []
-            phrase_tokens = set(self._phrase.split())
-            confs = [
-                float(w["conf"])
-                for w in words
-                if isinstance(w, dict) and w.get("word") in phrase_tokens and "conf" in w
-            ]
-            if confs:
-                score = sum(confs) / len(confs)
+        # Matched the wake phrase. A partial hypothesis carries no per-word
+        # confidence, and the grammar bias means ambient speech (a TV, a
+        # podcast) regularly shoehorns into a momentary "hey droplet"
+        # partial — firing those at a fixed default score was the
+        # living-room-TV false-accept storm. Instead, flush the decoder
+        # (FinalResult) to get the FINALIZED hypothesis with per-word
+        # confidences, still within the same 80 ms frame — wake latency is
+        # unchanged, but the fire decision now always rests on real
+        # acoustic evidence.
+        if not is_final:
+            try:
+                res = json.loads(self._rec.FinalResult())
+            except Exception as exc:
+                logger.warning("vosk finalize error: %s", exc)
+                self.reset()
+                return {}
+            text = (res.get("text") or "").strip().lower()
+            if not self._phrase_in_text(text):
+                # The flush revised the hypothesis away from the phrase —
+                # the partial was a grammar-bias artifact, not a wake.
+                logger.info(
+                    "vosk: partial wake revised away on finalize (heard %r)",
+                    text,
+                )
+                self.reset()
+                return {}
+
+        # Score = MINIMUM per-word confidence across the contiguous matched
+        # phrase window. The minimum (not the mean) so one confidently
+        # decoded word can't carry a weak one — TV speech that half-matches
+        # ("hey" strong, "droplet" shoehorned) scores at its weakest link.
+        # No confidence evidence at all → no fire: an evidence-free match
+        # must never outrank the operator's WAKE_THRESHOLD.
+        score = self._phrase_confidence(res)
+        if score is None:
+            logger.info(
+                "vosk: wake match on %r without confidence evidence — ignoring",
+                text,
+            )
+            self.reset()
+            return {}
         logger.info(
             "vosk: WAKE match on %r (score=%.2f, final=%s)", text, score, is_final,
         )
@@ -435,6 +458,33 @@ class VoskWakeWordDetector(WakeWordDetector):
         # after the STT excursion — see reset() below.
         self.reset()
         return {self._wake_word: score}
+
+    def _phrase_confidence(self, res: dict) -> Optional[float]:
+        """Minimum per-word confidence over the matched phrase window.
+
+        Mirrors `_phrase_in_text`'s contiguity rule on the `result` word
+        array: find contiguous windows whose word sequence equals the
+        phrase tokens, score each as min(conf) over the window, return the
+        best window's score. Windows missing any `conf` value don't count.
+        Returns None when no fully-evidenced window exists — the caller
+        treats that as "no fire".
+        """
+        words = res.get("result") or []
+        seq = [w for w in words if isinstance(w, dict) and "word" in w]
+        p = self._phrase_tokens
+        if not p or len(seq) < len(p):
+            return None
+        best: Optional[float] = None
+        for i in range(len(seq) - len(p) + 1):
+            window = seq[i : i + len(p)]
+            if [w["word"] for w in window] != p:
+                continue
+            if any("conf" not in w for w in window):
+                continue
+            m = min(float(w["conf"]) for w in window)
+            if best is None or m > best:
+                best = m
+        return best
 
     def reset(self) -> None:
         """Reset the KaldiRecognizer's decoder state.

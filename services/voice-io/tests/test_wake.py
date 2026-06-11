@@ -25,7 +25,7 @@ import numpy as np
 
 from voice.pipeline import DEFAULT_THRESHOLD
 from voice.wake import (
-    VOSK_NO_CONFIDENCE_SCORE,
+    VOSK_DEFAULT_THRESHOLD,
     WAKE_FRAME_SAMPLES,
     DisabledWakeWordDetector,
     MockWakeWordDetector,
@@ -348,17 +348,24 @@ class TestVoskWakeWordDetector:
     and pin the frame→score contract the pipeline depends on.
     """
 
-    def _install_fake_vosk(self, monkeypatch, accept_seq, result_obj=None, partial_obj=None):
+    def _install_fake_vosk(
+        self, monkeypatch, accept_seq, result_obj=None, partial_obj=None,
+        final_obj=None,
+    ):
         """Fake the `vosk` module. `accept_seq` is the bool returned by
         AcceptWaveform on each call (was an utterance endpoint reached?);
         `result_obj` is what Result() returns at an endpoint; `partial_obj`
-        is what PartialResult() returns between endpoints. Returns a state
-        dict tracking call counts (accepts / models / resets)."""
+        is what PartialResult() returns between endpoints; `final_obj` is
+        what FinalResult() returns when the detector flushes a
+        partial-hypothesis match (defaults to `result_obj` so simple tests
+        only configure one). Returns a state dict tracking call counts
+        (accepts / models / resets / finals)."""
         import sys
         import types
-        state = {"accepts": 0, "models": 0, "resets": 0}
+        state = {"accepts": 0, "models": 0, "resets": 0, "finals": 0}
         _result = result_obj if result_obj is not None else {"text": ""}
         _partial = partial_obj if partial_obj is not None else {"partial": ""}
+        _final = final_obj if final_obj is not None else _result
 
         class _FakeRec:
             def __init__(self, model, rate, grammar):
@@ -379,6 +386,10 @@ class TestVoskWakeWordDetector:
             def PartialResult(self):
                 return json.dumps(_partial)
 
+            def FinalResult(self):
+                state["finals"] += 1
+                return json.dumps(_final)
+
             def Reset(self):
                 state["resets"] += 1
 
@@ -394,25 +405,49 @@ class TestVoskWakeWordDetector:
         monkeypatch.setitem(sys.modules, "vosk", fake)
         return state
 
-    def test_fires_on_partial_before_endpoint(self, monkeypatch, tmp_path):
-        # A wake word must fire from the in-progress partial hypothesis,
-        # not only at an utterance endpoint (which a noisy room may never
-        # reach). Frame is mid-utterance (AcceptWaveform False) but the
-        # partial already contains the phrase.
+    def test_fires_on_partial_after_finalize_confirms(self, monkeypatch, tmp_path):
+        # A wake word must still fire from the in-progress partial
+        # hypothesis (an utterance endpoint may never come in a noisy
+        # room) — but a partial carries no per-word confidence, so the
+        # detector flushes the decoder (FinalResult) and fires only when
+        # the FINALIZED hypothesis still contains the phrase, scored on
+        # its real per-word confidences. This is the TV false-accept fix:
+        # the old path fired evidence-free partials at a fixed 0.5.
         state = self._install_fake_vosk(
             monkeypatch,
             accept_seq=[False],
             partial_obj={"partial": "hey droplet"},
+            final_obj={
+                "text": "hey droplet",
+                "result": [
+                    {"word": "hey", "conf": 0.95},
+                    {"word": "droplet", "conf": 0.88},
+                ],
+            },
         )
         det = VoskWakeWordDetector(wake_word="hey_droplet", model_path=str(tmp_path))
         scores = det.predict(_silence_frame())
-        # Partials carry NO per-word confidence, so we can't compute a real
-        # score — default to the conservative VOSK_NO_CONFIDENCE_SCORE so the
-        # configured WAKE_THRESHOLD stays enforceable (a strict threshold can
-        # suppress no-confidence matches) while still clearing the shipped
-        # 0.3 default so "hey droplet" wakes out of the box. (WARP-154)
-        assert scores == {"hey_droplet": VOSK_NO_CONFIDENCE_SCORE}
+        assert state["finals"] == 1              # decoder flushed for evidence
+        assert scores == {"hey_droplet": 0.88}   # min per-word conf
         assert state["resets"] == 1              # recognizer reset after a match
+
+    def test_partial_match_revised_away_on_finalize_does_not_fire(
+        self, monkeypatch, tmp_path,
+    ):
+        # The grammar bias regularly shoehorns ambient speech (TV,
+        # podcast) into a momentary "hey droplet" PARTIAL; the finalized
+        # best-path then resolves to [unk]. That must not fire — and the
+        # decoder must be reset so the artifact doesn't linger.
+        state = self._install_fake_vosk(
+            monkeypatch,
+            accept_seq=[False],
+            partial_obj={"partial": "hey droplet"},
+            final_obj={"text": "[unk]", "result": []},
+        )
+        det = VoskWakeWordDetector(wake_word="hey_droplet", model_path=str(tmp_path))
+        assert det.predict(_silence_frame()) == {}
+        assert state["finals"] == 1
+        assert state["resets"] == 1
 
     def test_does_not_fire_on_substring_only_match(self, monkeypatch, tmp_path):
         # Whole-word match (review item 6): "hey droplets" contains the
@@ -427,21 +462,32 @@ class TestVoskWakeWordDetector:
 
     def test_fires_on_phrase_with_surrounding_tokens(self, monkeypatch, tmp_path):
         # The phrase as a contiguous token run amid other tokens (e.g. a
-        # leading "[unk]") still fires (whole-word, not anchored-to-start).
+        # leading "[unk]") still fires (whole-word, not anchored-to-start),
+        # scored on the matched window's confidences only.
         self._install_fake_vosk(
             monkeypatch,
             accept_seq=[True],
-            result_obj={"text": "[unk] hey droplet", "result": []},
+            result_obj={
+                "text": "[unk] hey droplet",
+                "result": [
+                    {"word": "[unk]", "conf": 0.2},
+                    {"word": "hey", "conf": 0.92},
+                    {"word": "droplet", "conf": 0.9},
+                ],
+            },
         )
         det = VoskWakeWordDetector(wake_word="hey_droplet", model_path=str(tmp_path))
-        assert det.predict(_silence_frame()) == {"hey_droplet": VOSK_NO_CONFIDENCE_SCORE}
+        assert det.predict(_silence_frame()) == {"hey_droplet": 0.9}
 
-    def test_recognizes_phrase_and_scores_mean_confidence(self, monkeypatch, tmp_path):
+    def test_recognizes_phrase_and_scores_min_confidence(self, monkeypatch, tmp_path):
         # First frame buffers (AcceptWaveform False), second hits the
-        # endpoint (True) → Result() text matches → fire with mean conf.
+        # endpoint (True) → Result() text matches → fire scored at the
+        # MINIMUM per-word conf: one confidently decoded word must not
+        # carry a weak one (the TV half-match shape).
         self._install_fake_vosk(
             monkeypatch,
             accept_seq=[False, True],
+            partial_obj={"partial": ""},
             result_obj={
                 "text": "hey droplet",
                 "result": [
@@ -454,11 +500,33 @@ class TestVoskWakeWordDetector:
         assert det.predict(_silence_frame()) == {}          # buffering
         scores = det.predict(_silence_frame())              # endpoint → match
         assert set(scores) == {"hey_droplet"}
-        assert abs(scores["hey_droplet"] - 0.8) < 1e-6      # mean(0.9, 0.7)
+        assert abs(scores["hey_droplet"] - 0.7) < 1e-6      # min(0.9, 0.7)
         assert det.loaded is True
         assert det.using_fallback is False                  # never falls back
         assert det.model_name == "hey_droplet"
         assert det.requested_wake_word == "hey_droplet"
+
+    def test_scores_best_contiguous_window_not_stray_duplicates(
+        self, monkeypatch, tmp_path,
+    ):
+        # A stray earlier "hey" (low conf) outside the matched window must
+        # not drag the score down — the window that actually spells the
+        # phrase is what gets scored.
+        self._install_fake_vosk(
+            monkeypatch,
+            accept_seq=[True],
+            result_obj={
+                "text": "hey [unk] hey droplet",
+                "result": [
+                    {"word": "hey", "conf": 0.3},
+                    {"word": "[unk]", "conf": 0.5},
+                    {"word": "hey", "conf": 0.95},
+                    {"word": "droplet", "conf": 0.91},
+                ],
+            },
+        )
+        det = VoskWakeWordDetector(wake_word="hey_droplet", model_path=str(tmp_path))
+        assert det.predict(_silence_frame()) == {"hey_droplet": 0.91}
 
     def test_no_score_when_phrase_absent(self, monkeypatch, tmp_path):
         self._install_fake_vosk(
@@ -469,32 +537,44 @@ class TestVoskWakeWordDetector:
         det = VoskWakeWordDetector(wake_word="hey_droplet", model_path=str(tmp_path))
         assert det.predict(_silence_frame()) == {}
 
-    def test_scores_conservative_when_no_word_confidences(self, monkeypatch, tmp_path):
+    def test_no_fire_when_no_word_confidences(self, monkeypatch, tmp_path):
         # A final Result whose text matches but carries NO per-word `result`
-        # confidence array must NOT fire at the max (1.0) — that would make
-        # WAKE_THRESHOLD silently un-enforceable on configs that omit conf
-        # data. We default such matches to the conservative
-        # VOSK_NO_CONFIDENCE_SCORE: high enough to clear the shipped 0.3
-        # default (so the box still wakes out of the box) but low enough that
-        # an operator who raises WAKE_THRESHOLD above it can suppress these
-        # evidence-free matches. (WARP-154 review item 2)
-        self._install_fake_vosk(
+        # confidence array must NOT fire at all. The old behaviour scored
+        # these evidence-free matches at a fixed 0.5 — above the shipped
+        # threshold — which is exactly how a living-room TV kept waking the
+        # box. No acoustic evidence → no fire; the decoder is reset so the
+        # stale match can't linger into the next frame.
+        state = self._install_fake_vosk(
             monkeypatch,
             accept_seq=[True],
             result_obj={"text": "hey droplet"},
         )
         det = VoskWakeWordDetector(wake_word="hey_droplet", model_path=str(tmp_path))
-        assert det.predict(_silence_frame()) == {"hey_droplet": VOSK_NO_CONFIDENCE_SCORE}
+        assert det.predict(_silence_frame()) == {}
+        assert state["resets"] == 1
 
-    def test_no_confidence_score_is_threshold_enforceable(self, monkeypatch, tmp_path):
-        # The whole point of the conservative default: it sits strictly below
-        # 1.0 so the configured threshold remains a real gate. The pipeline
-        # owns the threshold compare; here we pin the contract that a
-        # no-confidence match scores a fixed value < 1.0 that a strict
-        # threshold could reject. (WARP-154 review item 2)
-        assert 0.0 < VOSK_NO_CONFIDENCE_SCORE < 1.0
-        # And it must clear the shipped default so the default box wakes.
-        assert VOSK_NO_CONFIDENCE_SCORE >= DEFAULT_THRESHOLD
+    def test_no_fire_when_window_conf_incomplete(self, monkeypatch, tmp_path):
+        # Partial evidence isn't evidence: if any word in the matched
+        # window lacks a conf value, the window doesn't count.
+        self._install_fake_vosk(
+            monkeypatch,
+            accept_seq=[True],
+            result_obj={
+                "text": "hey droplet",
+                "result": [
+                    {"word": "hey", "conf": 0.99},
+                    {"word": "droplet"},
+                ],
+            },
+        )
+        det = VoskWakeWordDetector(wake_word="hey_droplet", model_path=str(tmp_path))
+        assert det.predict(_silence_frame()) == {}
+
+    def test_vosk_default_threshold_is_sane(self):
+        # The engine-aware default must be a real gate: strictly above the
+        # generic openWakeWord default (vosk min-conf scores run hot for
+        # genuine matches) and strictly below 1.0 (or nothing ever fires).
+        assert DEFAULT_THRESHOLD < VOSK_DEFAULT_THRESHOLD < 1.0
 
     def test_predict_empty_and_unloaded_when_model_dir_missing(self):
         # No fake vosk installed + a nonexistent dir → the cheap dir

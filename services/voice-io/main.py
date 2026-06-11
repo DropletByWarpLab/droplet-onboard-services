@@ -41,7 +41,11 @@ from voice.pipeline import (
 from voice.llm import build_llm_from_env
 from voice.stt import build_stt_from_env
 from voice.tts import build_tts_from_env
-from voice.wake import build_detector_from_env
+from voice.wake import (
+    VOSK_DEFAULT_THRESHOLD,
+    VoskWakeWordDetector,
+    build_detector_from_env,
+)
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -50,7 +54,37 @@ logging.basicConfig(
 logger = logging.getLogger("voice.main")
 
 SAMPLE_RATE = int(os.environ.get("VOICE_SAMPLE_RATE", "16000"))
-WAKE_THRESHOLD = float(os.environ.get("WAKE_THRESHOLD", str(DEFAULT_THRESHOLD)))
+
+
+def resolve_wake_threshold(detector: object) -> float:
+    """Wake threshold for the pipeline. An explicit WAKE_THRESHOLD env
+    always wins; otherwise the default follows the ACTUAL detector type.
+    The defaults differ because the score semantics differ: Vosk scores
+    are min-per-word confidences (real acoustic evidence, ~0.9+ for a
+    genuinely spoken phrase → default VOSK_DEFAULT_THRESHOLD) while
+    openWakeWord scores are sigmoid outputs (default DEFAULT_THRESHOLD,
+    0.3). Keyed off the detector instance, not WAKE_ENGINE, because
+    build_detector_from_env has fallbacks (unknown engine → vosk;
+    vosk-without-model → openWakeWord) that make the env string
+    unreliable for this decision."""
+    env = (os.environ.get("WAKE_THRESHOLD") or "").strip()
+    if env:
+        return float(env)
+    return (
+        VOSK_DEFAULT_THRESHOLD
+        if isinstance(detector, VoskWakeWordDetector)
+        else DEFAULT_THRESHOLD
+    )
+
+
+# Display-only fallback for /voice/status before the pipeline exists
+# (no mic / startup bailed). The live pipeline reports its own value.
+# Compose passes WAKE_THRESHOLD through as "" when unset — treat empty
+# the same as absent (resolve_wake_threshold does too).
+WAKE_THRESHOLD = float(
+    (os.environ.get("WAKE_THRESHOLD") or "").strip()
+    or str(VOSK_DEFAULT_THRESHOLD),
+)
 WAKE_DEBOUNCE_S = float(
     os.environ.get("WAKE_DEBOUNCE_S", str(DEFAULT_DEBOUNCE_S))
 )
@@ -168,7 +202,7 @@ async def startup() -> None:
             llm=llm,
             input_device_index=r.input_device.index if r.input_device else None,
             output_device_index=r.output_device.index if r.output_device else None,
-            threshold=WAKE_THRESHOLD,
+            threshold=resolve_wake_threshold(detector),
             debounce_s=WAKE_DEBOUNCE_S,
             stt_max_record_s=STT_MAX_RECORD_S,
             post_speak_cooldown_s=POST_SPEAK_COOLDOWN_S,

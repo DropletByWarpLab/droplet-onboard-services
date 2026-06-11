@@ -961,12 +961,16 @@ services:
       # to openWakeWord (hey_jarvis) if the bundled Vosk model is absent.
       - WAKE_ENGINE=${WAKE_ENGINE:-vosk}
       - WAKE_WORD=${WAKE_WORD:-hey_droplet}
-      # Threshold tuned from live use on the single-box: 0.5 was too high
-      # to fire reliably at typical room distance (~3-6 ft); 0.3 catches
-      # real wakes while rejecting most background talk. Under the vosk
-      # engine this gates the mean per-word confidence of a phrase match
-      # — tune against the live mic per docs/voice-assistant-plan.md.
-      - WAKE_THRESHOLD=${WAKE_THRESHOLD:-0.3}
+      # Threshold semantics are engine-aware (resolve_wake_threshold in
+      # voice-io main.py). Under vosk every fire carries real acoustic
+      # evidence — the MINIMUM per-word confidence of the finalized
+      # phrase match (evidence-free matches never fire) — and a genuine
+      # spoken wake scores ~0.9+, so unset means the vosk default (0.7).
+      # That gates the living-room-TV false accepts the old fixed-0.5
+      # partial-fire scoring let through. Lower toward 0.5 if real wakes
+      # get missed at distance; tune per docs/voice-assistant-plan.md.
+      # (openWakeWord scores are sigmoids — its unset default stays 0.3.)
+      - WAKE_THRESHOLD=${WAKE_THRESHOLD:-}
       # STT — wake → next 5 s of audio gets streamed here for transcription.
       # `wyoming-faster-whisper` is the sibling container below (Rhasspy's
       # Wyoming-protocol wrapper around faster-whisper). Set STT_URL=__mock__
