@@ -70,10 +70,10 @@ export function PmStep({
     return (
       <div className="flex flex-col gap-6 p-8">
         <div className="flex items-center gap-3">
-          <FolderKanban className="h-6 w-6 text-blue-600" />
-          <h1 className="text-xl font-semibold">Projects ready</h1>
+          <FolderKanban className="h-6 w-6 text-accent" />
+          <h1 className="type-title-3 text-label-primary">Projects ready</h1>
         </div>
-        <p className="text-sm text-gray-700">
+        <p className="type-subheadline text-label-secondary">
           Your workspace <strong>{result.workspace.name}</strong> and project{" "}
           <strong>{result.project.name}</strong> are set up.
         </p>
@@ -82,15 +82,11 @@ export function PmStep({
             href={result.url}
             target="_blank"
             rel="noopener noreferrer"
-            className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+            className="dp-btn-primary no-underline"
           >
             View {result.project.name} →
           </a>
-          <button
-            type="button"
-            onClick={onNext}
-            className="rounded-md bg-gray-200 px-4 py-2 text-sm font-medium text-gray-800 hover:bg-gray-300"
-          >
+          <button type="button" onClick={onNext} className="dp-btn-secondary">
             Continue
           </button>
         </div>
@@ -101,45 +97,51 @@ export function PmStep({
   return (
     <div className="flex flex-col gap-6 p-8">
       <div className="flex items-center gap-3">
-        <FolderKanban className="h-6 w-6 text-blue-600" />
-        <h1 className="text-xl font-semibold">Project Management</h1>
+        <FolderKanban className="h-6 w-6 text-accent" />
+        <h1 className="type-title-3 text-label-primary">Project Management</h1>
       </div>
-      <p className="text-sm text-gray-700">
-        Droplet runs a self-hosted PM tool — Plane — so your projects, tickets,
-        and comments stay on this appliance instead of going to a SaaS. Name
-        your first workspace + project to get started, or skip to set this up
-        later from the dashboard.
+      <p className="type-subheadline text-label-secondary">
+        Keep your projects, tickets, and comments on this appliance rather than
+        a third-party service. Name your first workspace and project to get
+        started, or skip to set this up later from the dashboard.
       </p>
 
       <div className="flex flex-col gap-3">
-        <label className="flex flex-col gap-1 text-sm">
-          <span className="font-medium">Workspace name</span>
+        <label className="flex flex-col gap-1">
+          <span className="type-subheadline font-medium text-label-primary">Workspace name</span>
           <input
             type="text"
             value={workspaceName}
             onChange={(e) => setWorkspaceName(e.target.value)}
             placeholder="e.g. Acme Photography"
             maxLength={80}
-            className="rounded-md border border-gray-300 px-3 py-2 text-sm"
+            className="dp-input"
             data-testid="pm-workspace-name-input"
           />
         </label>
-        <label className="flex flex-col gap-1 text-sm">
-          <span className="font-medium">First project name</span>
+        <label className="flex flex-col gap-1">
+          <span className="type-subheadline font-medium text-label-primary">First project name</span>
           <input
             type="text"
             value={projectName}
             onChange={(e) => setProjectName(e.target.value)}
             placeholder="Inbox"
             maxLength={80}
-            className="rounded-md border border-gray-300 px-3 py-2 text-sm"
+            className="dp-input"
             data-testid="pm-project-name-input"
           />
         </label>
       </div>
 
       {error && (
-        <div className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
+        <div
+          className="rounded-lg border px-3 py-2 type-subheadline"
+          style={{
+            borderColor: "var(--color-system-red)",
+            background: "rgba(255,59,48,0.08)",
+            color: "var(--color-system-red)",
+          }}
+        >
           Couldn&apos;t set up the project — {error}. Try again, or skip and
           set up later.
         </div>
@@ -150,7 +152,7 @@ export function PmStep({
           type="button"
           onClick={submit}
           disabled={!workspaceName.trim() || submitting}
-          className="flex items-center gap-2 rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:bg-gray-400"
+          className="dp-btn-primary disabled:opacity-50 disabled:cursor-not-allowed"
           data-testid="pm-submit-btn"
         >
           {submitting ? (
@@ -166,7 +168,7 @@ export function PmStep({
         <button
           type="button"
           onClick={onSkip}
-          className="rounded-md bg-gray-200 px-4 py-2 text-sm font-medium text-gray-800 hover:bg-gray-300"
+          className="dp-btn-secondary"
           data-testid="pm-skip-btn"
         >
           Skip
