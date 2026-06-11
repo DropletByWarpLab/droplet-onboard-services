@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, Loader2, MessageSquare, Sparkles } from "lucide-react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import rehypeHighlight from "rehype-highlight";
 import { fetchModels, sendChat } from "@/lib/api";
 import type { ModelInfo } from "@/lib/types";
 import { StepShell } from "@/components/setup/StepShell";
@@ -372,7 +374,23 @@ export function AiStep({
               </span>
             </div>
             <div className="chat-markdown type-body text-label-primary max-h-[40vh] overflow-y-auto">
-              <ReactMarkdown>{response}</ReactMarkdown>
+              {/* Same plugin set as ChatMessage so the wizard answer renders
+                  identically to the in-app chat (GFM tables, code highlight). */}
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                rehypePlugins={[rehypeHighlight]}
+                components={{
+                  // WARP-295 parity: keep wide GFM tables from blowing out
+                  // the answer card on narrow viewports.
+                  table: ({ node, ...props }) => (
+                    <div className="overflow-x-auto">
+                      <table {...props} />
+                    </div>
+                  ),
+                }}
+              >
+                {response}
+              </ReactMarkdown>
             </div>
           </div>
         )}
