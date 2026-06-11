@@ -478,6 +478,14 @@ export function VpnStep({
   // created — peer is minted, show the QR + .conf + how-to-use list.
   // ──────────────────────────────────────────────────────────────────
   if (!created) return null;
+  // The conf's DNS line is the box-side gateway the tunnel routes to
+  // (192.168.20.1 on single-box, 192.168.50.1 on multi-box) — and the
+  // only address the dashboard answers on for VPN clients. Parse it
+  // instead of pinning a deployment shape. mDNS names (droplet.local)
+  // can NOT be used here: phones resolve .local via multicast only,
+  // which never crosses the tunnel.
+  const dashboardIp =
+    created.conf.match(/^DNS\s*=\s*([0-9.]+)/m)?.[1] ?? "192.168.20.1";
   return (
     <StepShell
       current="vpn"
@@ -553,14 +561,19 @@ export function VpnStep({
           </li>
         </ol>
         <p>
-          Once connected, you can reach this Droplet from anywhere — type
-          <span className="font-mono"> droplet.local</span> or{" "}
-          <span className="font-mono">
-            {status?.endpointHost ?? "yoursubdomain.duckdns.org"}
-          </span>{" "}
-          in your phone&rsquo;s browser. Lose the phone? Revoke this device from{" "}
-          <span className="font-mono">Remote Access</span> in the dashboard — its
-          config stops working immediately.
+          Once connected, open{" "}
+          <span className="font-mono">https://{dashboardIp}</span> in your
+          phone&rsquo;s browser — that&rsquo;s this Droplet from anywhere.
+          Bookmark it: names like{" "}
+          <span className="font-mono">droplet.local</span> only work at home,
+          not over the tunnel. Lose the phone? Revoke this device from{" "}
+          <span className="font-mono">Remote Access</span> in the dashboard —
+          its config stops working immediately.
+        </p>
+        <p>
+          Test it from cellular or another network. While you&rsquo;re on this
+          Droplet&rsquo;s own Wi-Fi the tunnel can&rsquo;t loop back home — and
+          you don&rsquo;t need it there; everything already works directly.
         </p>
         <p className="type-caption-1 text-label-quaternary">
           Heads up: this code is shown once. If you close this page without
