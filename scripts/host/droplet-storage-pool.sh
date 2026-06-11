@@ -241,9 +241,10 @@ if [ "${DROPLET_POOL_HOSTNS_DISABLE:-}" != "1" ] \
    && [ "$(readlink /proc/self/ns/mnt 2>/dev/null)" != "$(readlink /proc/1/ns/mnt 2>/dev/null)" ]; then
   HOSTNS=(nsenter -m -t 1)
 fi
-# Run umount / findmnt in the host mount namespace (no-op prefix off-box).
+# Run umount / findmnt / mount in the host mount namespace (no-op prefix off-box).
 host_umount()  { "${HOSTNS[@]}" umount "$@"; }
 host_findmnt() { "${HOSTNS[@]}" findmnt "$@"; }
+host_mount()   { "${HOSTNS[@]}" mount "$@"; }
 
 # mounts_backed_by <node>: every current mount whose SOURCE is <node> itself
 # or a partition of it, as "SOURCE TARGET" lines — partitions first (deepest
@@ -348,6 +349,11 @@ unmount_mount_or_die() {
 # live mount.
 teardown_mounts_of() {
   local node="$1" ctx="$2" line src tgt
+  # Fail loudly if the host-namespace gateway is broken — silent nsenter failures
+  # would let teardown proceed with live host mounts (EBUSY on wipefs/mdadm).
+  if [ "${#HOSTNS[@]}" -gt 0 ] && ! "${HOSTNS[@]}" true 2>/dev/null; then
+    die "nsenter to host mount namespace failed — cannot safely proceed with mount teardown"
+  fi
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     src="${line%% *}"
@@ -538,10 +544,13 @@ case "$OP" in
     fi
     # 4) Mount under the shared /mnt/droplet namespace so it's usable now and
     #    the device-bridge surfaces it; the udev automount re-mounts on reboot.
+    #    WARP-868: use host_mount so the mount lands in the HOST namespace, not
+    #    this unit's private slave-propagation namespace (which is destroyed on
+    #    unit exit, leaving the drive unmounted until the next udev automount).
     adopt_uuid="$(blkid -o value -s UUID "$MD" 2>/dev/null || true)"
     adopt_mnt="/mnt/droplet/${LABEL:-${adopt_uuid:-$(basename "$MD")}}"
     mkdir -p "$adopt_mnt"
-    mount "$MD" "$adopt_mnt"
+    host_mount "$MD" "$adopt_mnt"
     ;;
 esac
 
