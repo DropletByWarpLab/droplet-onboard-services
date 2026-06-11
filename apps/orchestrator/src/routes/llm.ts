@@ -20,6 +20,7 @@ import { publish as mqttPublish } from "../services/mqtt.service.js";
 import { requireRole } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { visibleAudiences } from "../services/memory-audience.js";
+import { loadIdentityPrompt } from "../services/identity-prompt.js";
 
 /** WARP-456: severity bucket the dashboard renders for the activity feed. */
 function activitySeverityForTurnStatus(
@@ -293,9 +294,10 @@ function replayedWriteToolAttempt(rawMessages: unknown): boolean {
  */
 function buildBaseSystemPrompt(allowed: string[] | undefined): string {
   const can = (name: string) => !allowed || allowed.includes(name);
-  const lines = [
-    "You are the Droplet AI assistant, running locally on the user's Droplet appliance.",
-  ];
+  // Identity leads: the full "who you are / what this box does" block
+  // from data/droplet-identity.md (fail-open to the legacy one-liner),
+  // shared by every surface — dashboard, voice, external MCP clients.
+  const lines = [loadIdentityPrompt()];
   const guidance: string[] = [];
   if (can("search_content")) {
     guidance.push(

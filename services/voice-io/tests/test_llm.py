@@ -33,6 +33,7 @@ import httpx
 import pytest
 
 from voice.llm import (
+    DEFAULT_LLM_SYSTEM_PROMPT,
     DEFAULT_LLM_URL,
     LLMUnavailable,
     MockLLM,
@@ -467,6 +468,39 @@ class TestBuildSystemPrompt:
             now=datetime(2026, 5, 14, 12, 0, tzinfo=ZoneInfo("UTC")),
         )
         assert prompt.startswith("You are X.\n\n")
+
+
+class TestDefaultPersona:
+    """The default persona must self-carry the identity essentials:
+    the intent-gated tool_choice="none" path (greetings, "who are
+    you?") skips the orchestrator's base system prompt entirely, so
+    those turns answer from DEFAULT_LLM_SYSTEM_PROMPT alone. These
+    pins protect the identity + spoken-delivery contract from a
+    well-meaning copy edit."""
+
+    def test_identity_names_droplet(self):
+        assert "You're Droplet" in DEFAULT_LLM_SYSTEM_PROMPT
+
+    def test_identity_states_local_privacy(self):
+        assert "not a cloud service" in DEFAULT_LLM_SYSTEM_PROMPT
+        assert "stays right here in the house" in DEFAULT_LLM_SYSTEM_PROMPT
+
+    def test_spoken_delivery_constraints_present(self):
+        # Every reply is read aloud by Piper — markdown and lists
+        # turn into gibberish on the speaker.
+        assert "No markdown" in DEFAULT_LLM_SYSTEM_PROMPT
+        assert "read aloud" in DEFAULT_LLM_SYSTEM_PROMPT
+        assert "one short spoken sentence" in DEFAULT_LLM_SYSTEM_PROMPT
+
+    def test_warm_housemate_tone_present(self):
+        assert "housemate" in DEFAULT_LLM_SYSTEM_PROMPT
+        assert "warmly" in DEFAULT_LLM_SYSTEM_PROMPT
+
+    def test_read_only_honesty_present(self):
+        # ADR-015 is not implemented yet — voice is read-only and the
+        # persona must say where changes actually happen.
+        assert "(read-only)" in DEFAULT_LLM_SYSTEM_PROMPT
+        assert "dashboard" in DEFAULT_LLM_SYSTEM_PROMPT
 
 
 class TestSystemPromptWiringIntoReply:

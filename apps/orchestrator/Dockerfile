@@ -158,6 +158,9 @@ RUN chmod +x ./apps/orchestrator/scripts/migrate-and-start.sh
 # WARP-81: bundle the IEEE OUI vendor registry snapshot. oui-lookup.service
 # reads this at startup to resolve MAC prefixes → vendor names.
 COPY --from=builder /app/apps/orchestrator/data/oui.csv ./apps/orchestrator/data/oui.csv
+# Droplet identity prompt — leads the base system prompt for every
+# /api/llm/chat surface (identity-prompt.ts reads it at first chat).
+COPY --from=builder /app/apps/orchestrator/data/droplet-identity.md ./apps/orchestrator/data/droplet-identity.md
 
 WORKDIR /app/apps/orchestrator
 
