@@ -32,6 +32,7 @@ COPY package.json package-lock.json ./
 COPY apps/orchestrator/package.json ./apps/orchestrator/package.json
 COPY apps/web-dashboard/package.json ./apps/web-dashboard/package.json
 COPY services/ai-gateway/package.json ./services/ai-gateway/package.json
+COPY services/matter-controller/package.json ./services/matter-controller/package.json
 COPY services/mcp-server/package.json ./services/mcp-server/package.json
 COPY packages/tools-core/package.json ./packages/tools-core/package.json
 COPY packages/fips-selftest/package.json ./packages/fips-selftest/package.json
