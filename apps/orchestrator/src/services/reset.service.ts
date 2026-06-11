@@ -199,6 +199,16 @@ export async function requestFactoryReset(
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
     );
   } catch (err) {
+    if (isUniqueViolation(err)) {
+      // The ResetJob_at_most_one_nonterminal partial unique index is the
+      // DATABASE-level backstop behind the inFlight count: two concurrent
+      // requests can both pass the count, but only one INSERT wins. The
+      // loser's P2002 must read as the same 409 a sequential duplicate gets.
+      throw new ResetError(
+        "RESET_ALREADY_IN_PROGRESS",
+        "A factory reset is already in progress.",
+      );
+    }
     if (isSerializationConflict(err)) {
       // P2034 means the SERIALIZABLE snapshot collided with a concurrent
       // writer. If that writer was another reset transaction the inFlight
@@ -210,17 +220,6 @@ export async function requestFactoryReset(
       throw new ResetError(
         "SERIALIZATION_CONFLICT",
         "A transient conflict occurred; please try again.",
-      );
-    }
-    // DB-level backstop: the partial unique index
-    // "ResetJob_at_most_one_nonterminal" lets only one non-terminal job exist,
-    // so a genuinely concurrent create that slips past the in-flight count
-    // loses with a P2002 unique violation — map it onto the same truthful 409
-    // the inFlight guard throws (not a misleading 502).
-    if (isUniqueViolation(err)) {
-      throw new ResetError(
-        "RESET_ALREADY_IN_PROGRESS",
-        "A factory reset is already in progress.",
       );
     }
     throw err;

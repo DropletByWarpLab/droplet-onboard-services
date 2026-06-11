@@ -16,11 +16,17 @@ function timeout(ms = DEFAULT_TIMEOUT): AbortSignal {
   return AbortSignal.timeout(ms);
 }
 
-/** Service-to-service auth headers. */
+/**
+ * Service-to-service auth headers. SERVICE_TOKEN_SWITCH is the dedicated
+ * bearer (compose wires the switch container's SERVICE_SECRET to the same
+ * value); SERVICE_SECRET is the legacy shared-secret fallback for installs
+ * whose .env predates the dedicated token.
+ */
 function authHeaders(): Record<string, string> {
   const headers: Record<string, string> = {};
-  if (config.SERVICE_SECRET) {
-    headers["Authorization"] = `Bearer ${config.SERVICE_SECRET}`;
+  const token = config.SERVICE_TOKEN_SWITCH || config.SERVICE_SECRET;
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
   }
   return headers;
 }

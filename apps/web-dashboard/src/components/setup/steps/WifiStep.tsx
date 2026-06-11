@@ -11,7 +11,6 @@ import {
   setWifiSsid,
 } from "@/lib/api";
 import { StepShell } from "@/components/setup/StepShell";
-import { ScrollRegion } from "@/components/setup/ScrollRegion";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 
 /**
@@ -215,7 +214,14 @@ export function WifiStep({
       }}
       skip={{ label: "Skip — I'll do this later", onClick: onSkip }}
     >
-      <ScrollRegion aria-label="Home Wi-Fi setup">
+      {/* Fixed-content form (SSID + password, security chip, advisory notices,
+          help card) — NOT an unbounded list, so it is NOT wrapped in a
+          <ScrollRegion>. WARP-847: the onboarding split (#548) had capped this
+          at 40/44dvh, which forced an inner scrollbar over the inputs with dead
+          space below the card — regressing the #546 fix. The StepShell panel is
+          scroll-when-needed instead (fits a normal viewport with no scrollbar;
+          a viewport too short scrolls the whole panel rather than clipping). */}
+      <>
         <div className="space-y-4">
           <div>
             <label className="type-subheadline text-label-secondary block mb-1.5">
@@ -364,7 +370,7 @@ export function WifiStep({
             the internet address on the next step.
           </p>
         </LearnMoreCard>
-      </ScrollRegion>
+      </>
     </StepShell>
   );
 }

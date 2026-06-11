@@ -106,7 +106,7 @@ describe("/chat page mounts the history panel", () => {
     );
     // The hydrated user message renders in the message column.
     await waitFor(() =>
-      expect(screen.getByText(/hello from a prior turn/i)).toBeInTheDocument(),
+      expect(screen.getAllByText(/hello from a prior turn/i).length).toBeGreaterThan(0),
     );
   });
 

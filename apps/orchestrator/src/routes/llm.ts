@@ -123,7 +123,11 @@ const chatRequestSchema = z.object({
   ),
   stream: z.boolean().optional().default(false),
   temperature: z.number().min(0).max(2).optional(),
-  max_tokens: z.number().positive().optional(),
+  // Mirrors the ai-gateway's pydantic bound (schemas.py: int, ge=1,
+  // le=4096). Now that the value is actually forwarded (WARP-849), an
+  // out-of-range number must 400 here instead of 422ing at the gateway
+  // and surfacing as a 500.
+  max_tokens: z.number().int().min(1).max(4096).optional(),
   provider: z.string().optional(),
   max_iter: z.number().int().min(1).max(10).optional(),
   allowed_tools: z.array(z.string()).optional(),
@@ -976,6 +980,31 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           "X-Accel-Buffering": "no",
         });
         const onEvent = (e: SSEEvent) => {
+          // WARP-854 — an "empty completion": the model "finished" without
+          // producing any visible output or calling a tool. Seen in the
+          // wild when the prompt alone overflows Ollama's context window
+          // (e.g. the owner-role tool list vs. the default 4096-token
+          // num_ctx): Ollama returns finish_reason=length with ZERO output
+          // tokens, the loop reads it as model_done, and the turn used to
+          // persist as completed-with-empty-content — invisible in the UI.
+          // Rewrite the terminal event to an error so the dashboard shows
+          // its retry chip instead of nothing, and finalize as `failed`.
+          if (
+            e.type === "done" &&
+            e.stop_reason === "model_done" &&
+            liveAssistantContent.trim().length === 0 &&
+            liveToolCalls.length === 0
+          ) {
+            emptyCompletion = true;
+            e = {
+              ...e,
+              stop_reason: "error",
+              error:
+                "empty_completion: the model returned no output. This " +
+                "usually means the request (system prompt + tools + " +
+                "history) overflowed the model's context window.",
+            };
+          }
           try {
             res.write(encodeSSE(e));
           } catch {
@@ -1001,6 +1030,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           }
         };
         let terminal: "completed" | "failed" | "aborted" = "completed";
+        // WARP-854 — set by the onEvent done-rewrite above.
+        let emptyCompletion = false;
         // WARP-329: detect client-side abort. req.on("close") fires when
         // the client disconnects mid-stream; we still finalize but flag
         // the turn as aborted so the row reflects reality.
@@ -1013,6 +1044,9 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             model: chatReq.model,
             messages: chatReq.messages,
             temperature: chatReq.temperature,
+            // WARP-849 — forward the caller's completion budget (the
+            // schema accepted it but the loop never received it).
+            max_tokens: chatReq.max_tokens,
             max_iter: chatReq.max_iter,
             allowed_tools: allowedForUser,
             tool_choice: chatReq.tool_choice,
@@ -1033,6 +1067,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         } finally {
           res.end();
         }
+        if (emptyCompletion) terminal = "failed";
         if (clientAborted) terminal = "aborted";
         await finalizeAndNotify(terminal);
         return;
@@ -1045,6 +1080,11 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           model: chatReq.model,
           messages: chatReq.messages,
           temperature: chatReq.temperature,
+          // WARP-849 — forward the caller's completion budget (the
+          // schema accepted it but the loop never received it). The
+          // setup wizard's sample probe relies on this so its raised
+          // reasoning-safe budget actually reaches Ollama.
+          max_tokens: chatReq.max_tokens,
           max_iter: chatReq.max_iter,
           allowed_tools: allowedForUser,
           tool_choice: chatReq.tool_choice,
@@ -1066,7 +1106,27 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             data: t.result,
           });
         }
-        await finalizeAndNotify("completed");
+        // WARP-854 — empty completion (no output, no tool calls): the
+        // model "finished" without saying anything, typically because the
+        // prompt overflowed the context window (see the streaming-path
+        // comment). Surface it as an error instead of a silent success.
+        if (
+          result.stop_reason === "model_done" &&
+          result.message.content.trim().length === 0 &&
+          result.trace.length === 0
+        ) {
+          result = {
+            ...result,
+            stop_reason: "error" as const,
+            error:
+              "empty_completion: the model returned no output. This " +
+              "usually means the request (system prompt + tools + " +
+              "history) overflowed the model's context window.",
+          };
+          await finalizeAndNotify("failed");
+        } else {
+          await finalizeAndNotify("completed");
+        }
       } catch (err) {
         await finalizeAndNotify("failed");
         throw err;

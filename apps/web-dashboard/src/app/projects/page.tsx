@@ -25,54 +25,72 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-const PLANE_URL = "/pm/";
+/**
+ * Plane's dedicated TLS origin (spec WARP-498 OQ2 amendment). The vanilla
+ * plane-frontend image is built with Next.js basePath:"" — its assets,
+ * API calls, and client-side route pushes are all root-relative — so it
+ * can never live under a /pm/ subpath (the first soft-nav inside the app
+ * escapes the prefix, and /_next/* chunks 404 off the dashboard's Next
+ * server: the black-iframe bug). The gateway serves it on its own port
+ * with the same cert (docker/nginx.conf :8443 server block). Derived
+ * from the page's own hostname so it works on any LAN name (mDNS or raw
+ * IP) — same-site, so the dashboard session cookie story is unchanged.
+ */
+const PLANE_PORT = 8443;
 
 /**
- * Romain PR #320 review §1: `iframe.contentDocument !== null` is
- * always true for a same-origin frame even when CSP `frame-ancestors`
- * blocks the load — the browser renders an error page INSIDE the
- * iframe but leaves contentDocument accessible. The catch-on-
- * SecurityError branch never fired either (same-origin throws no
- * SecurityError). Replaced the broken detector with two independent
- * signals that both work for same-origin blocks:
- *
- *   1. `load` never fires within the 5s timeout (sentinel branch)
- *   2. `load` fires but the resulting document is empty (no <body>
- *      content) — the browser-error placeholder browsers paint when
- *      framing was refused has childElementCount === 0
- *
- * Either signal flips `iframeBlocked` so the inline error card shows.
- * Cross-origin frames (when we eventually iframe a customer-installed
- * Plane on a different host) still set `iframeBlocked` via the SecurityError
- * branch on contentDocument access.
+ * Romain PR #320 review §1 (amended for the cross-origin move): the
+ * sentinel branch — `load` never fires within 5s — is the primary
+ * blocked/network-failure signal. Plane is now a cross-origin frame
+ * (different port), so its document is opaque to us: contentDocument
+ * is null (or access throws) on a HEALTHY frame. The empty-document
+ * heuristic from #320 only applies when the document is readable
+ * (same-origin error placeholders); an opaque document after `load`
+ * means the frame is fine.
  */
 export default function ProjectsPage(): JSX.Element {
   const [iframeBlocked, setIframeBlocked] = useState(false);
+  const [planeUrl, setPlaneUrl] = useState<string | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const loadFiredRef = useRef(false);
+
+  useEffect(() => {
+    // window is unavailable during prerender — derive the origin on mount.
+    setPlaneUrl(`https://${window.location.hostname}:${PLANE_PORT}/`);
+  }, []);
 
   const checkBlocked = useCallback(() => {
     const iframe = iframeRef.current;
     if (!iframe) return;
     try {
       const doc = iframe.contentDocument;
-      // Browser-painted error page for a CSP-blocked frame is a near-
-      // empty document — no <body> children. A real Plane page has
-      // dozens. Use `< 2` as the threshold to be tolerant of a single
-      // `<noscript>` style child some browsers inject.
-      if (!doc || !doc.body || doc.body.childElementCount < 2) {
+      if (doc === null) {
+        // Opaque cross-origin document — the healthy case for Plane's
+        // dedicated origin. `load` having fired is the success signal;
+        // refused/unreachable frames are caught by the 5s sentinel.
+        return;
+      }
+      // Readable document (same-origin placeholder): a refused frame is
+      // a near-empty document — no <body> children. A real page has
+      // dozens. Use `< 2` to be tolerant of a single `<noscript>` style
+      // child some browsers inject.
+      if (!doc.body || doc.body.childElementCount < 2) {
         setIframeBlocked(true);
       }
     } catch {
-      // SecurityError — cross-origin block. Treat as "blocked".
-      setIframeBlocked(true);
+      // SecurityError — some browsers throw instead of returning null
+      // for a cross-origin document. Same meaning as doc === null:
+      // opaque and healthy-if-loaded.
+      return;
     }
   }, []);
 
   useEffect(() => {
     // 5s fallback: if `load` never fires (network failure, infinite
-    // redirect, upstream timeout) flip the banner. Real loads complete
-    // within a second.
+    // redirect, upstream timeout, frame refused) flip the banner. Real
+    // loads complete within a second. Armed only once the iframe exists
+    // (planeUrl resolves on mount).
+    if (!planeUrl) return;
     const timer = setTimeout(() => {
       if (!loadFiredRef.current) {
         setIframeBlocked(true);
@@ -81,7 +99,7 @@ export default function ProjectsPage(): JSX.Element {
       }
     }, 5000);
     return () => clearTimeout(timer);
-  }, [checkBlocked]);
+  }, [checkBlocked, planeUrl]);
 
   const handleLoad = useCallback(() => {
     loadFiredRef.current = true;
@@ -103,7 +121,7 @@ export default function ProjectsPage(): JSX.Element {
           The embedded view didn&apos;t load. Open Plane in a new tab:
         </p>
         <a
-          href={PLANE_URL}
+          href={planeUrl ?? "#"}
           target="_blank"
           rel="noopener noreferrer"
           className="dp-btn-primary"
@@ -124,17 +142,19 @@ export default function ProjectsPage(): JSX.Element {
     //
     // Romain PR #320 review §4: <div> root, not <main>. See above.
     <div className="h-[calc(100dvh-56px-env(safe-area-inset-bottom))] lg:h-dvh">
-      <iframe
-        ref={iframeRef}
-        id="pm-iframe"
-        src={PLANE_URL}
-        title="Plane — Projects"
-        className="h-full w-full border-0"
-        onLoad={handleLoad}
-        // sandbox not set — Plane needs full document permissions for
-        // its own OIDC flow (popup, navigation). Tightening this is a
-        // follow-up once we know Plane's exact CSP needs.
-      />
+      {planeUrl !== null && (
+        <iframe
+          ref={iframeRef}
+          id="pm-iframe"
+          src={planeUrl}
+          title="Plane — Projects"
+          className="h-full w-full border-0"
+          onLoad={handleLoad}
+          // sandbox not set — Plane needs full document permissions for
+          // its own OIDC flow (popup, navigation). Tightening this is a
+          // follow-up once we know Plane's exact CSP needs.
+        />
+      )}
     </div>
   );
 }

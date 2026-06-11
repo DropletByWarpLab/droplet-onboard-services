@@ -287,6 +287,37 @@ describe("useChat — conversation persistence (WARP-304)", () => {
     });
   });
 
+  it("loadConversation flags a completed-but-empty ghost turn as failed (WARP-854)", async () => {
+    // Rows persisted before the empty-completion guard: status `completed`,
+    // no content, no tool calls (e.g. context-window overflow). Without the
+    // mapping they render as literally nothing.
+    mockFetchConversation.mockResolvedValueOnce({
+      id: "conv-ghost",
+      title: "Ghost",
+      model: "gpt-oss:20b",
+      provider: "ollama",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      messages: [
+        { id: "u1", role: "user", content: "What is the population of Tokyo?", toolCalls: null, toolCallId: null, turnId: "t1", status: "completed", createdAt: new Date().toISOString() },
+        { id: "a1", role: "assistant", content: "", toolCalls: null, toolCallId: null, turnId: "t1", status: "completed", createdAt: new Date().toISOString() },
+        // Tool-only completed turns with empty content remain legitimate.
+        { id: "u2", role: "user", content: "list devices", toolCalls: null, toolCallId: null, turnId: "t2", status: "completed", createdAt: new Date().toISOString() },
+        { id: "a2", role: "assistant", content: "", toolCalls: [{ id: "c1", name: "list_network_devices", args: {} }], toolCallId: null, turnId: "t2", status: "completed", createdAt: new Date().toISOString() },
+      ],
+    });
+
+    let probe: ProbeValue;
+    render(<Probe onValue={(v) => (probe = v)} />);
+
+    await act(async () => {
+      await probe!.loadConversation("conv-ghost");
+    });
+
+    expect(probe!.messages[1]).toMatchObject({ id: "a1", failureKind: "failed" });
+    expect(probe!.messages[3].failureKind).toBeUndefined();
+  });
+
   it("loadConversation synthesizes a missing-reply placeholder for a tail-orphan user message", async () => {
     mockFetchConversation.mockResolvedValueOnce({
       id: "conv-orphan",

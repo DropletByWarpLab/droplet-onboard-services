@@ -75,6 +75,7 @@ export interface AgentDeps {
       messages: ChatMessage[];
       stream?: boolean;
       temperature?: number;
+      max_tokens?: number;
       tools?: {
         type: "function";
         function: { name: string; description: string; parameters: Record<string, unknown> };
@@ -166,6 +167,19 @@ export interface AgentRequest {
   messages: ChatMessage[];
   max_iter?: number;
   temperature?: number;
+  /**
+   * WARP-849 — per-iteration completion budget, forwarded verbatim to
+   * the ai-gateway (OpenAI-compat `max_tokens`, which the local
+   * provider passes straight to Ollama's /v1/chat/completions). The
+   * /api/llm/chat zod schema always accepted this field but the loop
+   * never forwarded it, so caller budgets were silently dropped.
+   * Reasoning models (gpt-oss) spend completion tokens on the
+   * reasoning channel BEFORE any user-visible content, so callers that
+   * need a guaranteed visible answer (the setup wizard's sample probe)
+   * must size this for reasoning + answer. Unset → no cap sent; the
+   * provider default applies (pre-WARP-849 behavior).
+   */
+  max_tokens?: number;
   /** If set, restrict the registry to this subset of tool names. */
   allowed_tools?: string[];
   /**
@@ -386,6 +400,9 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       messages,
       stream: false,
       temperature: req.temperature,
+      // WARP-849 — forward the caller's completion budget (previously
+      // dropped here, making the wizard probe's max_tokens a no-op).
+      max_tokens: req.max_tokens,
       tools,
       tool_choice: toolChoice,
     });

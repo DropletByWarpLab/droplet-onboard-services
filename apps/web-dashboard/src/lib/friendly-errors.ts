@@ -254,6 +254,14 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "We couldn't reach that device. Check it's powered on and nearby, then try again.",
     NOT_FOUND: "We couldn't find that device.",
     TIMEOUT: "That device took too long to respond. Try again in a moment.",
+    // WARP-851: the orchestrator's Matter commissioning route returns
+    // 502 when discovery can't find the device on the network (matter.js
+    // CommissionableDeviceDiscoveryFailedError, or any network/BLE-class
+    // failure). Mirror its curated copy here — translateError never
+    // surfaces err.message verbatim, so without this entry the honest
+    // copy was flattened to the generic device fallback.
+    "502":
+      "Couldn't find the device on the network. Make sure it's powered on, in pairing mode, and on the same Wi-Fi as the Droplet.",
   },
   generic: {
     NETWORK:

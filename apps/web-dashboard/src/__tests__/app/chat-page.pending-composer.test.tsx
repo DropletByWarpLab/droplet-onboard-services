@@ -106,7 +106,7 @@ describe("WARP-829 chat-page pendingComposer (seed-not-send)", () => {
     render(<ChatPage />);
 
     const textarea = (await screen.findByPlaceholderText(
-      "Send a message...",
+      "Ask Droplet anything…",
     )) as HTMLTextAreaElement;
     await waitFor(() => expect(textarea.value).toBe("Using network, "));
   });
@@ -180,7 +180,7 @@ describe("WARP-829 chat-page pendingComposer (seed-not-send)", () => {
     // loadConversation side effect, which is exercised elsewhere). A
     // deep-linked thread must NOT be hijacked: the payload stays put, no
     // "acting on" indicator renders, and nothing is sent.
-    await screen.findByPlaceholderText("Send a message...");
+    await screen.findByPlaceholderText("Ask Droplet anything…");
     expect(window.sessionStorage.getItem(PENDING_COMPOSER_KEY)).not.toBeNull();
     // The indicator (which would name the tool) must not render for a
     // deep-linked thread.
@@ -199,7 +199,7 @@ describe("WARP-829 chat-page pendingComposer (seed-not-send)", () => {
 
     // No deep link, but the conversation isn't empty → leave the payload alone.
     await waitFor(() => {
-      expect(screen.getByPlaceholderText("Send a message...")).toBeInTheDocument();
+      expect(screen.getByPlaceholderText("Ask Droplet anything…")).toBeInTheDocument();
     });
     expect(window.sessionStorage.getItem(PENDING_COMPOSER_KEY)).not.toBeNull();
     expect(sendMessageMock).not.toHaveBeenCalled();

@@ -198,6 +198,35 @@ describe("LLM routes", () => {
       expect(Array.isArray(res.body.trace)).toBe(true);
       expect(mockChat).toHaveBeenCalledOnce();
     });
+
+    it("persists an empty completion as a FAILED turn (WARP-854)", async () => {
+      // Zero output + zero tool calls used to finalize `completed`, leaving
+      // an invisible ghost turn in history. It must persist as `failed` so
+      // the rehydrated UI shows the retry chip.
+      mockChat.mockResolvedValueOnce({
+        ok: true,
+        json: vi.fn().mockResolvedValue({
+          choices: [
+            { index: 0, message: { role: "assistant", content: "" }, finish_reason: "length" },
+          ],
+        }),
+      });
+
+      const res = await request(app)
+        .post("/api/llm/chat")
+        .set("x-test-role", "owner")
+        .send({
+          model: "llama3:8b",
+          messages: [{ role: "user", content: "hello" }],
+          stream: false,
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.stop_reason).toBe("error");
+      expect(mockFinalizeAssistantMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ status: "failed" }),
+      );
+    });
   });
 
   describe("Key management", () => {

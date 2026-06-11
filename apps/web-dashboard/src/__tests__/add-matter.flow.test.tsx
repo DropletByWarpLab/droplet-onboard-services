@@ -32,6 +32,10 @@ vi.mock("@zxing/library", () => ({
 const commissionSpy = vi.fn();
 vi.mock("@/lib/api", () => ({
   commissionMatterDevice: (code: string) => commissionSpy(code),
+  // WARP-851: the page probes capabilities at mount; without this stub
+  // the probe's fail-soft catch silently masks a missing mock instead
+  // of exercising a real resolution.
+  fetchMatterCapabilities: vi.fn().mockResolvedValue({ bleCommissioning: true }),
 }));
 
 describe("AddMatterDevicePage — three-state flow", () => {

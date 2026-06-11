@@ -78,6 +78,15 @@ export interface ChatMessage {
    * is populated exclusively by `loadConversation`.
    */
   failureKind?: "failed" | "aborted" | "interrupted" | "missing";
+  /**
+   * WARP-859 — files attached on a user turn. Snapshotted from the
+   * composer at send time so the file rides visibly onto the message it
+   * was sent with (and leaves the input). Display-only; the live status
+   * is frozen at send. Absent on assistant turns and on rehydrated
+   * history (server doesn't link brain items to individual messages —
+   * the conversation-scoped list drives SessionHeader instead).
+   */
+  attachments?: ChatAttachment[];
 }
 
 /**
@@ -707,6 +716,15 @@ export interface MatterDiscoveredDevice {
   deviceType?: number;
   commissioningMode: number;
   addresses: Array<{ ip: string; port: number; type: string }>;
+}
+
+/**
+ * WARP-851: controller capability surface (GET /api/matter/capabilities).
+ * `bleCommissioning: false` means devices that need Bluetooth for
+ * first-time setup cannot be paired on this box yet (see WARP-850).
+ */
+export interface MatterCapabilities {
+  bleCommissioning: boolean;
 }
 
 // --- Camera / Frigate types ---

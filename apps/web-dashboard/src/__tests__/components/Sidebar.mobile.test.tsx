@@ -192,6 +192,7 @@ describe("<Sidebar> mobile branch (WARP-290)", () => {
 
     // Displaced primary items (not in the 5-tab bar):
     expect(within(dialog).getByRole("link", { name: /calendar/i })).toHaveAttribute("href", "/calendar");
+    expect(within(dialog).getByRole("link", { name: /projects/i })).toHaveAttribute("href", "/projects");
     expect(within(dialog).getByRole("link", { name: /knowledge/i })).toHaveAttribute("href", "/knowledge");
     expect(within(dialog).getByRole("link", { name: /context/i })).toHaveAttribute("href", "/context");
 

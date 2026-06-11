@@ -17,6 +17,7 @@ import { Archive } from "lucide-react";
 import type { ArchiveMemberAnchor } from "@droplet/shared-types";
 import type { CitationHit } from "./CitationCard";
 import { CitationCard } from "./CitationCard";
+import { relevancePct } from "@/lib/relevance";
 
 export interface ArchiveCitationProps {
   hit: CitationHit;
@@ -44,7 +45,7 @@ export function ArchiveCitation({ hit, anchor }: ArchiveCitationProps): JSX.Elem
         </div>
         {typeof hit.score === "number" && (
           <span className="type-caption-2 text-label-tertiary flex-shrink-0">
-            {Math.round(hit.score * 100)}%
+            {relevancePct(hit.score)}%
           </span>
         )}
       </header>

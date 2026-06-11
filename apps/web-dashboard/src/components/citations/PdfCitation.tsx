@@ -15,6 +15,7 @@
 import Link from "next/link";
 import type { PdfPageAnchor } from "@droplet/shared-types";
 import type { CitationHit } from "./CitationCard";
+import { relevancePct } from "@/lib/relevance";
 
 export interface PdfCitationProps {
   hit: CitationHit;
@@ -43,7 +44,7 @@ export function PdfCitation({ hit, anchor }: PdfCitationProps): JSX.Element {
         <span className="type-caption-2 text-label-tertiary flex-shrink-0">
           p.{anchor.page}
           {typeof hit.score === "number" && (
-            <span className="ml-2">{Math.round(hit.score * 100)}%</span>
+            <span className="ml-2">{relevancePct(hit.score)}%</span>
           )}
         </span>
       </div>

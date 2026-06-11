@@ -67,6 +67,10 @@ services:
     ports:
       - "80:80"
       - "443:443"
+      # Plane PM dedicated origin (spec WARP-498 OQ2 amendment) — the
+      # vanilla Plane frontend needs its own origin root; see the :8443
+      # server block in nginx.conf.
+      - "8443:8443"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
       - ./certs:/etc/nginx/certs:ro
@@ -186,6 +190,12 @@ services:
       # display.client.ts; must equal the oled-display container's
       # SERVICE_SECRET env (wired below to the same source).
       - SERVICE_TOKEN_DISPLAY=${SERVICE_TOKEN_DISPLAY:-}
+      # Orchestrator → switch service bearer. Read by switch.client.ts;
+      # must equal the switch container's SERVICE_SECRET env (wired below
+      # to the same source). Before this key existed the orchestrator sent
+      # no bearer at all, so a switch container with SERVICE_SECRET set
+      # 403'd every call (dashboard Network page → "Router unavailable").
+      - SERVICE_TOKEN_SWITCH=${SERVICE_TOKEN_SWITCH:-}
       # The orchestrator's Dockerfile sets OPENSSL_CONF=/etc/ssl/openssl-fips.cnf
       # for FIPS 140-3 compliance (WARP-229). That cipher set rejects the
       # non-FIPS ciphers Postgres uses for its TLS handshake — Prisma's
@@ -750,7 +760,13 @@ services:
       - SWITCH_USERNAME=${SWITCH_USERNAME:-admin}
       - SWITCH_PASSWORD=${SWITCH_PASSWORD:-}
       - SWITCH_DRIVER=${SWITCH_DRIVER:-lantronix}
-      - SERVICE_SECRET=${DEVICE_SECRET_KEY:-}
+      # Dedicated orchestrator → switch bearer (same WARP-165 rationale as
+      # the display path): the prior ${DEVICE_SECRET_KEY} wiring put the
+      # FIPS-sealed master encryption key on the wire for every switch
+      # call — and the orchestrator never presented it anyway, so all
+      # authenticated endpoints 403'd. Must equal the orchestrator's
+      # SERVICE_TOKEN_SWITCH env (wired above to the same source).
+      - SERVICE_SECRET=${SERVICE_TOKEN_SWITCH:-}
       - PORT=8081
       # ADR-018 item 9: bring-up provisioning. Off unless explicitly enabled
       # (single-box sets SWITCH_AUTOPROVISION=1 + SWITCH_VLAN_PROFILE=flat-lan
@@ -1612,6 +1628,14 @@ services:
       ROCR_VISIBLE_DEVICES: "0"
       OLLAMA_HOST: "0.0.0.0:11434"
       OLLAMA_KEEP_ALIVE: "24h"
+      # WARP-854: Ollama's baked-in default context is 4096 tokens. The
+      # owner-role agent loop ships ~80 tool schemas (~11k tokens of
+      # prompt), so the default overflowed before generation even began —
+      # Ollama returned finish_reason=length with ZERO output tokens and
+      # every dashboard chat surfaced as an instant empty answer. 16k
+      # fits tools + memory block + history while keeping gpt-oss:20b's
+      # KV cache fully resident on a 16 GB GPU.
+      OLLAMA_CONTEXT_LENGTH: "${OLLAMA_CONTEXT_LENGTH:-16384}"
     volumes:
       - ollama-data:/root/.ollama
     healthcheck:
