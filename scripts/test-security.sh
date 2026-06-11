@@ -273,6 +273,12 @@ matter_env_violations+=$(_scan_matter_env "$REPO_ROOT/.env.example" \
 # Secrets heredoc in setup:  `MATTER_FOO=$value`
 matter_env_violations+=$(_scan_matter_env "$REPO_ROOT/scripts/lib/secrets.sh" \
   '^[[:space:]]*MATTER_[A-Z_]+=')
+# Compose ${...} interpolations: `mem_limit: ${MATTER_FOO:-256m}` — a bare
+# MATTER_* knob documented for the operator's .env is one stray env_file
+# away from matter.js's auto-import (WARP-850 QA caught exactly this with
+# MATTER_CONTROLLER_MEM_LIMIT). DROPLET_MATTER_* interpolations are fine.
+matter_env_violations+=$(_scan_matter_env "$COMPOSE_FILE" \
+  '\$\{MATTER_[A-Z_]+')
 
 if [ -z "$matter_env_violations" ]; then
   pass "no MATTER_* env vars outside allowlist { $MATTER_ENV_ALLOWLIST }"

@@ -18,12 +18,13 @@
  * the real user's RBAC has already narrowed the tool list before any
  * dispatch (`routes/llm.ts` WRITE_TOOLS).
  *
- * Background (WARP-102)
- * ---------------------
+ * Background (WARP-102, updated for WARP-850)
+ * -------------------------------------------
  * The Matter fabric (paired-node state, ACL, persistent storage) lives
- * inside the orchestrator process — `apps/orchestrator/src/services/
- * matter.service.ts` embeds `@project-chip/matter.js` and mounts the
- * `matter-data` volume at `/data/matter-storage`. Two controllers
+ * in the `matter-controller` host-network sidecar (ADR-022) — the
+ * orchestrator fronts it via `apps/orchestrator/src/services/
+ * matter.service.ts` (an HTTP client) and the `matter-data` volume is
+ * mounted in the sidecar at `/data/matter-storage`. Two controllers
  * reading the same storage from different processes is fragile — the
  * fabric crypto is single-writer by design.
  *
