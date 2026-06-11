@@ -3,7 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import {
-  Bot,
+  Sparkles,
   User,
   Wrench,
   ChevronRight,
@@ -266,26 +266,19 @@ export const ChatMessage = memo(function ChatMessage({
   }
 
   return (
-    <div className={`flex gap-2.5 ${isUser ? "flex-row-reverse" : ""}`}>
-      {/* Avatar */}
-      <div
-        className={`flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center
-          ${isUser ? "bg-accent-subtle text-accent" : "bg-surface-tertiary text-label-secondary"}`}
-      >
-        {isUser ? <User size={14} /> : <Bot size={14} />}
+    <div className={`msg ${isUser ? "is-user" : ""}`}>
+      {/* Avatar — design handoff: assistant wears the brand Sparkles mark,
+          the user a neutral silhouette. */}
+      <div className={`msg-ava ${isUser ? "is-user" : "is-assistant"}`}>
+        {isUser ? <User size={15} /> : <Sparkles size={15} />}
       </div>
 
       {/* Bubble + meta. group/message lets the action toolbar surface on
           hover OR keyboard focus (focus-within) without prop-drilling
           state up. */}
-      <div className={`flex flex-col gap-1 max-w-[70%] group/message ${isUser ? "items-end" : "items-start"}`}>
+      <div className={`msg-col group/message ${isUser ? "items-end" : "items-start"}`}>
       <div
-        className={`px-4 py-2.5 type-body
-          ${
-            isUser
-              ? "bg-accent text-white rounded-[20px] rounded-tr-[6px]"
-              : "bg-surface-tertiary text-label-primary rounded-[20px] rounded-tl-[6px]"
-          }`}
+        className={`msg-bubble ${isUser ? "is-user" : "is-assistant"}`}
         // role="status" + aria-live="polite" on the streaming assistant
         // bubble so screen readers announce content as it lands without
         // alert-spamming. WARP-44 precedent.
@@ -491,24 +484,12 @@ export const ChatMessage = memo(function ChatMessage({
           (the inline editor has its own Save/Cancel) and when the page
           withholds onEdit (stream in flight). */}
       {isUser && onEdit && !editing ? (
-        <div
-          className="
-            flex items-center
-            opacity-0 group-hover/message:opacity-100 focus-within:opacity-100
-            transition-opacity duration-150
-          "
-        >
+        <div className="msg-actions">
           <button
             type="button"
             onClick={startEdit}
             aria-label="Edit message"
-            className="
-              inline-flex items-center gap-1 px-3 py-2 rounded-md
-              type-caption-1 text-label-tertiary
-              hover:text-label-primary hover:bg-surface-secondary
-              focus:outline-none focus:ring-2 focus:ring-accent/40
-              transition-colors
-            "
+            className="msg-act"
           >
             <Pencil size={12} aria-hidden="true" />
             <span>Edit</span>
@@ -523,30 +504,19 @@ export const ChatMessage = memo(function ChatMessage({
       {showToolbar ? (
         <div
           data-testid="message-actions"
-          className={`
-            flex items-center gap-1 flex-wrap
-            opacity-0 group-hover/message:opacity-100 focus-within:opacity-100
-            transition-opacity duration-150
-            ${hasCitations ? "mt-1" : ""}
-          `}
+          className={`msg-actions flex-wrap ${hasCitations ? "mt-1" : ""}`}
         >
           {onCopy ? (
             <button
               type="button"
               onClick={handleCopy}
               aria-label={copyState === "copied" ? "Copied" : "Copy message"}
-              className="
-                inline-flex items-center gap-1 px-3 py-2 rounded-md
-                type-caption-1 text-label-tertiary
-                hover:text-label-primary hover:bg-surface-secondary
-                focus:outline-none focus:ring-2 focus:ring-accent/40
-                transition-colors
-              "
+              className="msg-act"
             >
               {copyState === "copied" ? (
-                <Check size={12} aria-hidden="true" />
+                <Check size={13} aria-hidden="true" />
               ) : (
-                <CopyIcon size={12} aria-hidden="true" />
+                <CopyIcon size={13} aria-hidden="true" />
               )}
               <span>{copyState === "copied" ? "Copied" : "Copy"}</span>
             </button>
@@ -556,15 +526,9 @@ export const ChatMessage = memo(function ChatMessage({
               type="button"
               onClick={() => onQuote(message.content)}
               aria-label="Quote message"
-              className="
-                inline-flex items-center gap-1 px-3 py-2 rounded-md
-                type-caption-1 text-label-tertiary
-                hover:text-label-primary hover:bg-surface-secondary
-                focus:outline-none focus:ring-2 focus:ring-accent/40
-                transition-colors
-              "
+              className="msg-act"
             >
-              <QuoteIcon size={12} aria-hidden="true" />
+              <QuoteIcon size={13} aria-hidden="true" />
               <span>Quote</span>
             </button>
           ) : null}
@@ -573,16 +537,10 @@ export const ChatMessage = memo(function ChatMessage({
               type="button"
               onClick={() => onRegenerate(message.id)}
               aria-label="Regenerate response"
-              className="
-                inline-flex items-center gap-1 px-3 py-2 rounded-md
-                type-caption-1 text-label-tertiary
-                hover:text-label-primary hover:bg-surface-secondary
-                focus:outline-none focus:ring-2 focus:ring-accent/40
-                transition-colors
-              "
+              className="msg-act"
             >
-              <RotateCcw size={12} aria-hidden="true" />
-              <span>Regenerate</span>
+              <RotateCcw size={13} aria-hidden="true" />
+              <span>Retry</span>
             </button>
           ) : null}
           {onFeedback ? (
@@ -597,20 +555,10 @@ export const ChatMessage = memo(function ChatMessage({
                 }
                 aria-label="Good response"
                 aria-pressed={message.feedback === "up"}
-                className={`
-                  inline-flex items-center px-3 py-2 rounded-md
-                  type-caption-1
-                  ${
-                    message.feedback === "up"
-                      ? "text-accent"
-                      : "text-label-tertiary hover:text-label-primary hover:bg-surface-secondary"
-                  }
-                  focus:outline-none focus:ring-2 focus:ring-accent/40
-                  transition-colors
-                `}
+                className={`msg-act ${message.feedback === "up" ? "is-on" : ""}`}
               >
                 <ThumbsUp
-                  size={12}
+                  size={13}
                   aria-hidden="true"
                   fill={message.feedback === "up" ? "currentColor" : "none"}
                 />
@@ -625,20 +573,10 @@ export const ChatMessage = memo(function ChatMessage({
                 }
                 aria-label="Bad response"
                 aria-pressed={message.feedback === "down"}
-                className={`
-                  inline-flex items-center px-3 py-2 rounded-md
-                  type-caption-1
-                  ${
-                    message.feedback === "down"
-                      ? "text-system-red"
-                      : "text-label-tertiary hover:text-label-primary hover:bg-surface-secondary"
-                  }
-                  focus:outline-none focus:ring-2 focus:ring-accent/40
-                  transition-colors
-                `}
+                className={`msg-act ${message.feedback === "down" ? "text-system-red" : ""}`}
               >
                 <ThumbsDown
-                  size={12}
+                  size={13}
                   aria-hidden="true"
                   fill={message.feedback === "down" ? "currentColor" : "none"}
                 />

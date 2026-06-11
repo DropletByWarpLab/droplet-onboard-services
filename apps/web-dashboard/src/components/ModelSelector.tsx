@@ -27,26 +27,28 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
 
   return (
     <div className="flex items-center gap-2">
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="bg-surface-tertiary border border-separator rounded-sm px-3 py-1.5
-          type-subheadline text-label-primary
-          focus:outline-none focus:ring-2 focus:ring-accent/40
-          transition-all duration-200 ease-smooth"
-      >
-        {isLoading && <option>Loading models...</option>}
-        {!isLoading && models.length === 0 && (
-          <option>No models available</option>
-        )}
-        {models.map((m) => (
-          <option key={m.id} value={m.id}>
-            {m.name}
-          </option>
-        ))}
-      </select>
+      {/* Design-handoff model pill: status dot + mono model name. The
+          native <select> supplies the chevron + picker for free. */}
+      <label className="chat-model" title="Model">
+        <span className="dot" aria-hidden="true" />
+        <select
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          aria-label="Model"
+        >
+          {isLoading && <option>Loading models...</option>}
+          {!isLoading && models.length === 0 && (
+            <option>No models available</option>
+          )}
+          {models.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.name}
+            </option>
+          ))}
+        </select>
+      </label>
 
-      {provider && (
+      {provider && provider !== "ollama" && (
         <span
           className={`px-2 py-0.5 rounded-full type-caption-2 font-medium ${
             providerBadge[provider]?.className ?? "bg-surface-tertiary text-label-secondary"
