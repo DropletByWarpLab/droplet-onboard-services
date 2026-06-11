@@ -13,7 +13,7 @@ pypdf>=4.0
 # WARP-862: fallback extractor for PDFs whose per-glyph positioning makes
 # pypdf emit letter-spaced token soup ("t a p  t o o l s"). pdfminer
 # rebuilds words from glyph geometry. MIT-licensed.
-pdfminer.six==20260107
+# pdfminer.six is pulled in transitively by pdfplumber — no explicit pin needed.
 readability-lxml>=0.8
 lxml_html_clean>=0.1
 pytesseract>=0.3.10

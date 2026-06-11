@@ -29,6 +29,10 @@ from extractors.types import ExtractedDoc
 
 logger = logging.getLogger(__name__)
 
+# Suppress pdfminer's per-font noise globally at import time so it doesn't
+# pollute log output whenever the WARP-862 fallback path is exercised.
+logging.getLogger("pdfminer").setLevel(logging.ERROR)
+
 
 # Default depth cap for outline traversal. The PDF spec doesn't strictly
 # bound outline nesting, but 32 is comfortably more than any real document
@@ -239,13 +243,17 @@ def _pdfminer_page_texts(path: str, n_pages: int) -> list[str]:
     the per-glyph PDFs pypdf mangles. Imported lazily so the common path
     never pays for it; its noisy per-font warnings are squelched to ERROR.
     """
-    logging.getLogger("pdfminer").setLevel(logging.ERROR)
     from pdfminer.high_level import extract_text as pdfminer_extract_text
 
-    return [
-        pdfminer_extract_text(path, page_numbers=[i]) or ""
-        for i in range(n_pages)
-    ]
+    full = pdfminer_extract_text(path)
+    pages = full.split('\f')
+    # pdfminer appends a trailing \f on the last page; drop empty tail
+    if pages and pages[-1].strip() == '':
+        pages = pages[:-1]
+    # Pad or trim to match the expected page count
+    while len(pages) < n_pages:
+        pages.append('')
+    return pages[:n_pages]
 
 
 def extract(path: str) -> ExtractedDoc:
