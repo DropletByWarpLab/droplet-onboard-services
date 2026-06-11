@@ -202,8 +202,14 @@ export async function ensureInstanceSetup(): Promise<void> {
   // setup-done re-read is the normal "someone got here first" case, while
   // ADMIN_ALREADY_EXIST with setup still pending is a genuinely wedged
   // half-state (admin row created, is_setup_done never flipped) that has no
-  // HTTP repair path.
-  const after = await fetchInstanceStatus();
+  // HTTP repair path. Sleep briefly to let the cache invalidate, then retry
+  // once before declaring the instance wedged.
+  await new Promise<void>((resolve) => setTimeout(resolve, 2_000));
+  let after = await fetchInstanceStatus();
+  if (!after.isSetupDone) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 2_000));
+    after = await fetchInstanceStatus();
+  }
   if (!after.isSetupDone) {
     throw new PmBootstrapError(
       adminExists
@@ -353,7 +359,15 @@ export async function planeAppApi<T>(
     },
     body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
   });
-  const body = (await res.json().catch(() => ({}))) as T;
+  let body: T;
+  try {
+    body = (await res.json()) as T;
+  } catch {
+    throw new PmBootstrapError(
+      `Plane ${path} returned non-JSON body (status ${res.status})`,
+      "PM_UNREACHABLE",
+    );
+  }
   return { status: res.status, body };
 }
 

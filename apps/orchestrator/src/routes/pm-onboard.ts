@@ -184,6 +184,7 @@ export function createPmOnboardRouter(): Router {
 
         // 3. Idempotent workspace lookup-or-create.
         let workspace = await findWorkspaceByName(session, workspace_name);
+        const isFirstSetup = !workspace;
         if (!workspace) {
           workspace = await createWorkspace(session, workspace_name);
           logger.info(
@@ -217,11 +218,18 @@ export function createPmOnboardRouter(): Router {
           url,
           // Plane CE's only auth is email+password — hand the owner the
           // bootstrap credentials so the embedded Plane is actually usable.
-          auth: {
-            email: planeAdminEmail(),
-            password: planeAdminPassword(),
-            signInUrl: config.DROPLET_PM_WEB_URL.replace(/\/$/, ""),
-          },
+          // Return Plane admin credentials only on the initial setup call —
+          // the password is deterministic so re-exposing it on every idempotent
+          // retry risks capture by telemetry/error reporters.
+          ...(isFirstSetup
+            ? {
+                auth: {
+                  email: planeAdminEmail(),
+                  password: planeAdminPassword(),
+                  signInUrl: config.DROPLET_PM_WEB_URL.replace(/\/$/, ""),
+                },
+              }
+            : {}),
         });
       } catch (err) {
         if (err instanceof PmBootstrapError) {
