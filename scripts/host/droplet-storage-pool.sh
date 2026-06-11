@@ -26,18 +26,26 @@
 # HARD PRE-FLIGHT (this is the last line of defense — NEVER run blind):
 #   1. Operation must be in the allow-list.
 #   2. A typed double-confirm phrase MUST be present AND must name the disks
-#      (for create) or the array (for destroy/format/level) being erased. The
+#      (for create) or the array (for destroy/format/level) being erased —
+#      each short device name as an exact whole token of the phrase (WARP-848:
+#      a substring match let `sda1` ride on a phrase naming `sda10`). The
 #      orchestrator builds this phrase from the owner's typed confirmation.
-#   3. Refuse any target member disk that is:
-#        - currently mounted, OR
-#        - holds a filesystem with data, OR
-#        - is (or backs) the OS/boot disk.
+#   3. Refuse — ALWAYS and unconditionally — any target that is (or backs)
+#      the OS/boot disk.
+#   4. pool_add_spare additionally refuses a member that is currently mounted
+#      or holds a filesystem with data. pool_create and drive_adopt do NOT
+#      refuse those (WARP-848): first-run drives arrive automounted, and the
+#      confirm phrase names every device being erased — so mounted/has-data
+#      targets get a MANAGED teardown in the execute step instead: clean,
+#      never-lazy unmount (a real EBUSY still dies loudly), then wipefs.
 #
 # Test/dev hooks (so the pre-flight is unit-testable without root or real md):
 #   DROPLET_POOL_DRY_RUN=1        print the mdadm/mkfs command instead of running
 #   DROPLET_POOL_TEST_MOUNTED=dev simulate `dev` being mounted
 #   DROPLET_POOL_TEST_HASDATA=dev simulate `dev` holding a populated filesystem
 #   DROPLET_POOL_TEST_OSDISK=dev  simulate `dev` being the OS disk
+#   DROPLET_AUTOMOUNT_STATE=path  override the automount state file the managed
+#                                 teardown prunes (WARP-848 unit tests)
 # In a real (non-dry-run) invocation these hooks are empty and the script uses
 # the real probes (findmnt / lsblk / blkid).
 #
@@ -107,11 +115,19 @@ mapfile -t MEMBERS < <(json_field members)
 short() { basename "$1"; }
 
 confirm_names() {
-  # $1 = needle (short name). Case-sensitive substring match in $CONFIRM.
-  case "$CONFIRM" in
-    *"$1"*) return 0 ;;
-    *) return 1 ;;
-  esac
+  # $1 = needle (short device name). EXACT-TOKEN match: the phrase is split on
+  # runs of non-alphanumerics and the needle must equal one whole token,
+  # case-sensitively. (WARP-848 hardening — a substring match let `sda1` ride
+  # on a phrase naming only `sda10`: one typed phrase consenting to a
+  # DIFFERENT disk.) After tr the candidates are pure alnum, so the unquoted
+  # word-split below can never glob. A needle that itself contains a
+  # non-alphanumeric (e.g. dm-0) can never match — that fails CLOSED, and the
+  # pool/adopt targets are plain kernel names (sdX / nvmeXnY / mmcblkN / mdN).
+  local needle="$1" tok
+  for tok in $(printf '%s' "$CONFIRM" | tr -cs '[:alnum:]' ' '); do
+    [ "$tok" = "$needle" ] && return 0
+  done
+  return 1
 }
 
 if [ "$OP" = "pool_create" ]; then
@@ -184,12 +200,139 @@ preflight_member() {
   return 0
 }
 
+# --- Managed unmount (WARP-848) -----------------------------------------------
+# First-run drives arrive automounted (droplet-automount mounts every data
+# drive at boot), so the confirm-gated destructive ops must be able to release
+# those mounts themselves — cleanly, NEVER lazily (`umount -l` would let a
+# wipe race open file handles). These helpers enumerate what is ACTUALLY
+# mounted and unwind it; a real unmount failure (EBUSY, open files) still dies
+# loudly so the owner closes files and retries.
+
+# Where droplet-automount records what it mounted. Overridable for the unit
+# tests only; the shipping path is fixed.
+AUTOMOUNT_STATE="${DROPLET_AUTOMOUNT_STATE:-/var/lib/droplet-automount/mounts.json}"
+
+# mounts_backed_by <node>: every current mount whose SOURCE is <node> itself
+# or a partition of it, as "SOURCE TARGET" lines — partitions first (deepest
+# target first), the node itself LAST. findmnt enumerates real mount SOURCES;
+# the old code instead asked `lsblk -rno MOUNTPOINT <disk>`, which lists CHILD
+# partition mountpoints, then umounted the never-mounted disk node and died
+# (the WARP-848 live failure). Child-ness comes from the kernel topology
+# (lsblk PKNAME), never name-pattern guessing. findmnt -r escapes blanks in
+# targets as \xHH; callers unescape with printf %b at use time.
+mounts_backed_by() {
+  local node="$1" base src tgt pk grp slashes
+  base="$(basename "$node")"
+  { findmnt -rn -o SOURCE,TARGET 2>/dev/null || true; } | {
+    while read -r src tgt; do
+      [ -n "$src" ] && [ -n "$tgt" ] || continue
+      if [ "$src" = "$node" ]; then
+        grp=1
+      else
+        pk="$(lsblk -ndo PKNAME "$src" 2>/dev/null || true)"
+        [ "$pk" = "$base" ] || continue
+        grp=0
+      fi
+      slashes="${tgt//[!\/]/}"
+      printf '%d %05d %s %s\n' "$grp" "$((99999 - ${#slashes}))" "$src" "$tgt"
+    done
+  } | sort | cut -d' ' -f3-
+}
+
+# prune_automount_state <source-device> <target>: WARP-612 parity. The guarded
+# eject path (device-bridge eject_drive) "forgets" a drive it unmounted by
+# dropping its entry from the automount state file; a managed unmount does the
+# same so the state stays honest. Best-effort: a missing/unreadable state file
+# is fine — the bridge's drives snapshot self-heals stale entries via its
+# ismount check, and the bridge invalidates that snapshot after every
+# successful pool command anyway. Nextcloud external-storage registrations are
+# NOT touched here, matching eject_drive: auto-registration is opt-in
+# (NEXTCLOUD_AUTO_REGISTER, default off) and deregistration belongs to
+# droplet-automount's udev remove handler.
+prune_automount_state() {
+  local src="$1" tgt="$2"
+  if [ -f "$AUTOMOUNT_STATE" ]; then
+    # The device travels via env in a JSON envelope — same posture as
+    # PARAMS_JSON in json_field. A bare "/dev/sdX1" value would LOOK like an
+    # absolute path and gets rewritten by the path-converting shims between
+    # bash and a native python on dev hosts (Git-Bash/MSYS env conversion);
+    # a JSON blob never does. Pure json.loads, no eval.
+    STATE_PATH="$AUTOMOUNT_STATE" PRUNE_JSON="{\"device\": \"$src\"}" \
+      python3 - <<'PY' || true
+import json, os, sys
+path = os.environ["STATE_PATH"]
+try:
+    device = json.loads(os.environ.get("PRUNE_JSON") or "{}").get("device") or ""
+except Exception:
+    sys.exit(0)
+if not device:
+    sys.exit(0)
+try:
+    with open(path) as f:
+        state = json.load(f)
+except Exception:
+    sys.exit(0)
+mounts = state.get("mounts", [])
+kept = [m for m in mounts if m.get("device") != device]
+if len(kept) != len(mounts):
+    state["mounts"] = kept
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f, indent=2)
+    os.replace(tmp, path)
+PY
+  fi
+  # The now-empty mountpoint dir (mirrors automount's remove handler). rmdir
+  # refuses a non-empty dir, so this can never delete data.
+  rmdir "$tgt" 2>/dev/null || true
+}
+
+# unmount_mount_or_die <source> <target> <context>: one clean, NON-lazy
+# unmount. Tolerates the mount having vanished since enumeration (something
+# raced us — that is success, not busy). A REAL failure dies with the
+# "close open files and retry" message the dashboard's friendly-error
+# mapping recognises, naming the mountpoint.
+unmount_mount_or_die() {
+  local src="$1" tgt="$2" ctx="$3"
+  if ! umount "$tgt"; then
+    findmnt -rn --mountpoint "$tgt" >/dev/null 2>&1 || return 0
+    die "$ctx: $src is busy at $tgt (unmount failed) — close open files and retry"
+  fi
+  prune_automount_state "$src" "$tgt"
+}
+
+# teardown_mounts_of <node> <context>: release everything mounted from <node>
+# — partitions first, the node itself only if it is genuinely a mount source.
+# Verifies nothing re-appeared before returning, so a wipe can never hit a
+# live mount.
+teardown_mounts_of() {
+  local node="$1" ctx="$2" line src tgt
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    src="${line%% *}"
+    tgt="$(printf '%b' "${line#* }")"   # findmnt -r escapes blanks as \xHH
+    unmount_mount_or_die "$src" "$tgt" "$ctx"
+  done < <(mounts_backed_by "$node")
+  if [ -n "$(mounts_backed_by "$node")" ]; then
+    die "$ctx: $node is still mounted after unmount — close open files and retry"
+  fi
+}
+
 # pool_create wipes every member; the array-level ops act on the array (md
 # device) but a remove/add touches a specific member disk. Pre-flight every
 # disk we are about to write to.
 case "$OP" in
   pool_create)
-    for m in "${MEMBERS[@]}"; do preflight_member "$m"; done
+    # WARP-848: mounted / has-data members are NO LONGER a pre-flight refusal
+    # here — first-run drives arrive automounted, so refusing them dead-ended
+    # the wizard with no unmount path. The confirm phrase already names every
+    # member (the gate above), so the execute step performs a managed teardown:
+    # clean non-lazy unmount of each member's mounts, then wipefs, then mdadm.
+    # The OS-disk refusal stays unconditional and runs HERE — before any
+    # unmount or wipe can touch anything.
+    for m in "${MEMBERS[@]}"; do
+      if is_os_disk "$m"; then die "refusing: $m is (or backs) the OS/boot/system disk"; fi
+    done
     ;;
   pool_add_spare|pool_remove_disk)
     [ -n "$MEMBER" ] || die "$OP requires a 'member'"
@@ -224,9 +367,10 @@ MD="/dev/$DEVICE"
 build_cmd() {
   case "$OP" in
     pool_create)
-      # mdadm --create with an explicit level + member count; --run avoids the
+      # Managed teardown (unmount + wipefs every member) first, then mdadm
+      # --create with an explicit level + member count; --run avoids the
       # interactive "continue creating array?" prompt. No auto-anything.
-      printf 'mdadm --create %s --level=%s --raid-devices=%s --run %s' \
+      printf 'unmount+wipefs members -> mdadm --create %s --level=%s --raid-devices=%s --run %s' \
         "$MD" "$LEVEL" "${#MEMBERS[@]}" "${MEMBERS[*]}"
       ;;
     pool_destroy)
@@ -273,6 +417,35 @@ fi
 # spelled out (not eval of $CMD) so we never execute a string we built loosely.
 case "$OP" in
   pool_create)
+    # WARP-848 managed teardown. Two phases so NOTHING is destroyed until
+    # EVERY member has released cleanly: (1) unmount each member's mounts —
+    # non-lazy; a real EBUSY dies naming the mountpoint before any wipe —
+    # then (2) clear each member's filesystem signature so mdadm starts from
+    # clean metal. The OS-disk refusal already ran in the pre-flight, before
+    # any of this. The typed confirm phrase naming every member is the
+    # consent for the erase.
+    for m in "${MEMBERS[@]}"; do
+      teardown_mounts_of "$m" "refusing: pool_create member $m"
+    done
+    # WARP-848 belt-and-braces: members are expected to be WHOLE-DISK nodes
+    # (the dashboard sends them, and tearing one down releases every child
+    # partition via the kernel PKNAME topology). If some OTHER caller sends a
+    # PARTITION member, the teardown above released only that partition's own
+    # mounts — a SIBLING partition on the same physical disk can still be
+    # mounted (and would re-automount every boot), so wipefs+mdadm below would
+    # silently under-deliver the whole-disk erase the confirm phrase promised.
+    # Fail CLOSED before anything is wiped. ("mounted"/"busy" keeps the
+    # message inside the dashboard's friendlyCreateError mapping.)
+    for m in "${MEMBERS[@]}"; do
+      parent="$(lsblk -ndo PKNAME "$m" 2>/dev/null || true)"
+      [ -n "$parent" ] || continue   # whole-disk node — fully covered above
+      if [ -n "$(mounts_backed_by "/dev/$parent")" ]; then
+        die "refusing: pool_create member $m is a partition of /dev/$parent and another filesystem on that disk is still mounted (busy) — pool members must be whole disks"
+      fi
+    done
+    for m in "${MEMBERS[@]}"; do
+      wipefs -a "$m"
+    done
     mdadm --create "$MD" --level="$LEVEL" \
       --raid-devices="${#MEMBERS[@]}" --run "${MEMBERS[@]}"
     ;;
@@ -298,21 +471,17 @@ case "$OP" in
     mdadm "$MD" --fail "$MEMBER" --remove "$MEMBER"
     ;;
   drive_adopt)
-    # 1) Unmount the target disk + any of its partitions if currently mounted
-    #    (e.g. it was auto-mounted on plug). FAIL LOUDLY on a busy device — a
-    #    destructive wipe must never lazy-unmount a drive with open file handles
-    #    (mirrors eject_drive's refuse-if-mounted policy; adopt is MORE
-    #    destructive). Uses is_mounted so the DROPLET_POOL_TEST_MOUNTED hook
-    #    reaches this path from the unit tests. (review #499)
-    if is_mounted "$MD"; then
-      umount "$MD" || die "refusing to adopt $MD: unmount failed (drive busy?) — close open files and retry"
-    fi
-    for part in "$MD"?*; do
-      [ -b "$part" ] || continue
-      if is_mounted "$part"; then
-        umount "$part" || die "refusing to adopt $MD: unmount of $part failed (busy?) — close open files and retry"
-      fi
-    done
+    # 1) Release everything actually mounted from this disk (e.g. it was
+    #    auto-mounted on plug): partitions first, the disk node itself ONLY if
+    #    it is genuinely a mount source. WARP-848: the old code asked
+    #    is_mounted() about the whole-disk node — whose lsblk fallback reports
+    #    CHILD partition mountpoints — then ran `umount /dev/sdX` on a node
+    #    that was never mounted and died on "not mounted" before its partition
+    #    loop could run. teardown_mounts_of enumerates real mount sources via
+    #    findmnt, tolerates "not mounted", and STILL FAILS LOUDLY on a busy
+    #    device — a destructive wipe must never lazy-unmount a drive with open
+    #    file handles (mirrors eject_drive's policy; adopt is MORE destructive).
+    teardown_mounts_of "$MD" "refusing to adopt $MD"
     # 2) Wipe. quick = clear fs/partition signatures (wipefs); secure = discard
     #    the whole device first (TRIM-based erase for flash), then wipefs.
     case "${WIPE_METHOD:-quick}" in
