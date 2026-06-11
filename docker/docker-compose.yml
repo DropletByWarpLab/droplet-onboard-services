@@ -751,7 +751,7 @@ services:
       # moves here from the orchestrator UNCHANGED.
       - matter-data:/data/matter-storage
     restart: always
-    # DROPLET_ prefix (not MATTER_CONTROLLER_*): the ADR-012 knob lives in
+    # DROPLET_ prefix (not MATTER_CONTROLLER_*): the ADR-021 knob lives in
     # the operator's .env, and a bare MATTER_* name there is one stray
     # env_file away from matter.js's auto-import minefield.
     mem_limit: ${DROPLET_MATTER_MEM_LIMIT:-256m}

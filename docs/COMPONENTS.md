@@ -155,7 +155,7 @@ network. Host-published ports and host-network services are called out.
   `CalendarSource` hold AES-256-GCM-encrypted secrets.
 - **Key internal services** (`src/services/`): `llm-agent.service.ts` (agent loop),
   `mcp-client*` (stdio MCP child lifecycle + registry), `matter.service.ts`
-  (HTTP client for the matter-controller host sidecar, ADR-021), `encryption.service.ts` (AES-256-GCM),
+  (HTTP client for the matter-controller host sidecar, ADR-022), `encryption.service.ts` (AES-256-GCM),
   `cron-runtime.service.ts` (Postgres advisory-lock scheduler — **the** sanctioned
   scheduler), `openwrt.client.ts`, `switch.client.ts`, `camera.service.ts`,
   `nextcloud.client.ts`, `pm.client.ts`, plus pollers/tickers (device-reconcile,

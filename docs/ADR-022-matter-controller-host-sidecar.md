@@ -1,4 +1,4 @@
-# ADR-021 — Matter controller as a host-network sidecar (WARP-850)
+# ADR-022 — Matter controller as a host-network sidecar (WARP-850)
 
 **Status:** accepted  
 **Date:** 2026-06-10  
@@ -108,7 +108,7 @@ Key properties:
 - The sidecar is restart-independent: the orchestrator's client reconnects
   (SSE bridge with backoff) and `isMatterInitialized()` self-heals, so a
   sidecar upgrade does not require an orchestrator restart.
-- One more always-on host-network container (~256 MB ceiling per the ADR-012
+- One more always-on host-network container (~256 MB ceiling per the ADR-021
   pattern: `DROPLET_MATTER_MEM_LIMIT`, default 256m — DROPLET-prefixed, not `MATTER_CONTROLLER_*`, so the operator-facing .env knob can never enter matter.js's `MATTER_*` auto-import scope).
 
 ## Risks

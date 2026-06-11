@@ -64,7 +64,7 @@ docker/                 Nginx, PostgreSQL 16, Redis 7, MQTT, Nextcloud 29, Friga
 - **Switch service:** Python, FastAPI, abstract driver interface (managed-switch driver / future ASIC)
 - **NVR:** Frigate (open-source), TensorRT GPU detection, RTSP
 - **Infra:** Docker Compose, Nginx, Redis, MQTT (Mosquitto), Nextcloud, Frigate
-- **Smart home:** Native Matter controller in the `matter-controller` host-network sidecar (`services/matter-controller/` — raw HCI for BLE commissioning + LAN mDNS, see ADR-021/WARP-850). The orchestrator fronts it (`matter.service.ts` is the HTTP client) and the dashboard talks to `/api/matter/*` as before.
+- **Smart home:** Native Matter controller in the `matter-controller` host-network sidecar (`services/matter-controller/` — raw HCI for BLE commissioning + LAN mDNS, see ADR-022/WARP-850). The orchestrator fronts it (`matter.service.ts` is the HTTP client) and the dashboard talks to `/api/matter/*` as before.
 
 ## Coding standards
 

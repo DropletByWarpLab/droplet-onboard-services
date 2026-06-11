@@ -21,7 +21,7 @@
  * Background (WARP-102, updated for WARP-850)
  * -------------------------------------------
  * The Matter fabric (paired-node state, ACL, persistent storage) lives
- * in the `matter-controller` host-network sidecar (ADR-021) — the
+ * in the `matter-controller` host-network sidecar (ADR-022) — the
  * orchestrator fronts it via `apps/orchestrator/src/services/
  * matter.service.ts` (an HTTP client) and the `matter-data` volume is
  * mounted in the sidecar at `/data/matter-storage`. Two controllers
