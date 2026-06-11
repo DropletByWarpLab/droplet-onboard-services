@@ -41,6 +41,9 @@ const fetchMatterDevicesMock = vi.fn(async () => ({
 
 vi.mock("@/lib/api", () => ({
   fetchMatterDevices: () => fetchMatterDevicesMock(),
+  // WARP-851: the step probes capabilities at mount; stub it so the
+  // fail-soft catch isn't silently masking a missing mock.
+  fetchMatterCapabilities: vi.fn().mockResolvedValue({ bleCommissioning: true }),
 }));
 
 import { DiscoveryStep } from "./DiscoveryStep";
