@@ -239,11 +239,14 @@ export function createPmOnboardRouter(): Router {
 
 /** Derive a Plane workspace slug (<= 48 chars, lowercase, dash-separated). */
 function deriveSlug(name: string): string {
+  // Trim leading/trailing dashes AFTER slicing so a 48-char boundary that
+  // lands on a dash (produced by the [^a-z0-9]→"-" substitution) does not
+  // leave a trailing dash that Plane rejects.
   const slug = name
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 48);
+    .slice(0, 48)
+    .replace(/^-+|-+$/g, "");
   return slug || "droplet";
 }
 

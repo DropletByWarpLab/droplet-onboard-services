@@ -219,6 +219,32 @@ export async function ensureInstanceSetup(): Promise<void> {
 }
 
 /**
+ * Portable Set-Cookie extractor that works on both Node 18 and Node >= 19.7.
+ *
+ * `Headers.getSetCookie()` was added in Node 19.7 (undici 5.21). On Node 18
+ * the raw `set-cookie` header is a comma-joined concatenation of all cookie
+ * strings. Splitting on "," is unsafe because cookie Expires directives also
+ * contain commas ("Thu, 01 Jan 2026 00:00:00 GMT"). We instead extract the
+ * two cookie names Plane is known to set by regex, which is reliable for
+ * well-formed values (no semicolons or commas inside the value portion).
+ */
+function getSetCookies(res: Response): string[] {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  if (typeof (res.headers as any).getSetCookie === "function") {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return (res.headers as any).getSetCookie() as string[];
+  }
+  // Node 18 fallback: extract known cookie names from the raw header.
+  const raw = res.headers.get("set-cookie") ?? "";
+  const result: string[] = [];
+  const csrfMatch = raw.match(/csrftoken=[^;,]+/);
+  const sessionMatch = raw.match(/session-id=[^;,]+/);
+  if (csrfMatch) result.push(csrfMatch[0]);
+  if (sessionMatch) result.push(sessionMatch[0]);
+  return result;
+}
+
+/**
  * Sign the bootstrap admin in through the REGULAR app flow and return the
  * `session-id` cookie pair for app-API calls. (Plane's session middleware
  * routes `/api/instances/*` to a separate `admin-session-id` cookie, so an
@@ -247,10 +273,11 @@ export async function getAppSessionCookie(): Promise<string> {
   }
 
   // undici exposes every Set-Cookie via getSetCookie() (Node >= 19.7).
-  const setCookies: string[] =
-    typeof res.headers.getSetCookie === "function"
-      ? res.headers.getSetCookie()
-      : [res.headers.get("set-cookie") ?? ""];
+  // On Node 18 the API is absent and the raw header is a comma-joined
+  // concatenation of all Set-Cookie values. A naive split on "," is
+  // unreliable (cookies can include commas in Expires directives), so
+  // we extract the known cookie names by regex on the raw string.
+  const setCookies: string[] = getSetCookies(res);
   const sessionCookie = setCookies
     .map((c) => c.split(";")[0]?.trim())
     .find((c) => c?.startsWith("session-id="));
@@ -353,6 +380,12 @@ let cachedServiceToken: string | null = null;
  *  a wiped pm DB invalidates old tokens). Next call re-mints. */
 export function invalidatePlaneServiceToken(): void {
   cachedServiceToken = null;
+}
+
+/** Drop the cached session cookie (e.g. after Plane returned 403 for a
+ *  DRF expired-session response). Next app-API call will re-authenticate. */
+export function invalidatePlaneSession(): void {
+  cachedSession = null;
 }
 
 async function getCachedSession(): Promise<string> {

@@ -35,6 +35,7 @@ import { config } from "../config.js";
 import {
   getPlaneServiceToken,
   invalidatePlaneServiceToken,
+  invalidatePlaneSession,
   PmBootstrapError,
 } from "./pm-bootstrap.service.js";
 import type { Role } from "./jwt.service.js";
@@ -112,26 +113,30 @@ export async function syncPlaneUserRole(input: {
     config.DROPLET_PM_API_URL,
   );
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
-
+  // The AbortController is created AFTER the (potentially slow) token fetch
+  // so that the 8s timeout window starts from when the actual PATCH is
+  // attempted, not from when we begin the session refresh → workspace list
+  // → token mint chain.
+  let apiKey: string;
   try {
     // WARP-867: authenticate with the runtime-minted Plane service token —
     // DROPLET_PM_ADMIN_TOKEN was never registered in Plane and 401'd every
     // call. PmBootstrapError (PM down / no workspace yet) → PM_API_ERROR.
-    let apiKey: string;
-    try {
-      apiKey = await getPlaneServiceToken();
-    } catch (err) {
-      if (err instanceof PmBootstrapError) {
-        throw new PmRbacError(
-          `Plane service token unavailable: ${err.message}`,
-          "PM_API_ERROR",
-        );
-      }
-      throw err;
+    apiKey = await getPlaneServiceToken();
+  } catch (err) {
+    if (err instanceof PmBootstrapError) {
+      throw new PmRbacError(
+        `Plane service token unavailable: ${err.message}`,
+        "PM_API_ERROR",
+      );
     }
+    throw err;
+  }
 
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
+
+  try {
     const doPatch = (key: string): Promise<globalThis.Response> =>
       fetch(url.toString(), {
         method: "PATCH",
@@ -144,8 +149,11 @@ export async function syncPlaneUserRole(input: {
       });
 
     let resp = await doPatch(apiKey);
-    if (resp.status === 401) {
-      // Stale cached token (e.g. Plane DB wiped) — re-mint once.
+    if (resp.status === 401 || resp.status === 403) {
+      // DRF SessionAuthentication returns 403 (not 401) for expired sessions;
+      // also catch 401 for token-based auth failures. Clear both caches and
+      // re-authenticate before retrying.
+      invalidatePlaneSession();
       invalidatePlaneServiceToken();
       resp = await doPatch(await getPlaneServiceToken());
     }

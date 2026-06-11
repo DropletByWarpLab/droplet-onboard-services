@@ -17,10 +17,15 @@
 import type { ToolContext } from "../../types.js";
 import { setPlaneApiToken } from "./pm-client.js";
 
-let injected = false;
+/**
+ * Track the last token value we injected rather than a bare boolean so that
+ * a token rotation (e.g. Plane DB wipe + orchestrator re-mint) is detected:
+ * if getPlaneServiceToken returns a different string the next call will
+ * re-inject the new value instead of silently using the stale one.
+ */
+let injectedToken: string | null = null;
 
 export async function ensurePlaneToken(ctx: ToolContext): Promise<void> {
-  if (injected) return;
   try {
     const res = await ctx.http.orchestrator.get("/api/pm/service-token", {
       headers: { Accept: "application/json" },
@@ -28,8 +33,9 @@ export async function ensurePlaneToken(ctx: ToolContext): Promise<void> {
     if (!res.ok) return;
     const body = (await res.json()) as { token?: string };
     if (typeof body.token === "string" && body.token.length > 0) {
+      if (body.token === injectedToken) return; // already up to date
       setPlaneApiToken(body.token);
-      injected = true;
+      injectedToken = body.token;
     }
   } catch {
     // Orchestrator or PM stack not ready — fall through to the 401 path.
