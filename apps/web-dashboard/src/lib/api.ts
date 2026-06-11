@@ -1880,14 +1880,47 @@ export async function enableCamera(name: string): Promise<void> {
   if (!res.ok) throw new Error(`Failed to enable camera: ${res.status}`);
 }
 
+/** Consume a camera-domain Tier-2 confirmation token (WARP-861).
+ *  Pairs with POST /api/cameras/command/confirm — the camera analogue of
+ *  /switch/command/confirm. The operation echo is required (WARP-41). */
+async function confirmCameraCommand(
+  confirmationToken: string,
+  operation: string,
+): Promise<void> {
+  const res = await authFetch(`${BASE}/api/cameras/command/confirm`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirmationToken, operation }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { error?: string }).error || `Confirm failed: ${res.status}`);
+  }
+}
+
 export async function disableCamera(name: string): Promise<void> {
   const res = await authFetch(`${BASE}/api/cameras/${encodeURIComponent(name)}/disable`, { method: "POST" });
   if (!res.ok) throw new Error(`Failed to disable camera: ${res.status}`);
+  // disable_camera is Tier 2: the route 202s with a token and does nothing
+  // until the token is consumed (WARP-861 — previously this silently
+  // no-opped). The user already confirmed in the UI dialog that invoked us,
+  // so complete the two-step handshake here.
+  if (res.status === 202) {
+    const body = (await res.json().catch(() => ({}))) as { confirmationToken?: string };
+    if (!body.confirmationToken) throw new Error("Disable requires confirmation but no token was issued");
+    await confirmCameraCommand(body.confirmationToken, "disable_camera");
+  }
 }
 
 export async function removeCamera(name: string): Promise<void> {
   const res = await authFetch(`${BASE}/api/cameras/${encodeURIComponent(name)}`, { method: "DELETE" });
   if (!res.ok) throw new Error(`Failed to remove camera: ${res.status}`);
+  // delete_camera is Tier 2 — same two-step handshake as disableCamera.
+  if (res.status === 202) {
+    const body = (await res.json().catch(() => ({}))) as { confirmationToken?: string };
+    if (!body.confirmationToken) throw new Error("Remove requires confirmation but no token was issued");
+    await confirmCameraCommand(body.confirmationToken, "delete_camera");
+  }
 }
 
 export function getCameraSnapshotUrl(name: string): string {
