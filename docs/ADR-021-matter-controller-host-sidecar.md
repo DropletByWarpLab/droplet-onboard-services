@@ -109,7 +109,7 @@ Key properties:
   (SSE bridge with backoff) and `isMatterInitialized()` self-heals, so a
   sidecar upgrade does not require an orchestrator restart.
 - One more always-on host-network container (~256 MB ceiling per the ADR-012
-  pattern: `MATTER_CONTROLLER_MEM_LIMIT`, default 256m).
+  pattern: `DROPLET_MATTER_MEM_LIMIT`, default 256m — DROPLET-prefixed, not `MATTER_CONTROLLER_*`, so the operator-facing .env knob can never enter matter.js's `MATTER_*` auto-import scope).
 
 ## Risks
 

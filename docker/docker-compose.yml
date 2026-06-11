@@ -722,9 +722,12 @@ services:
       # guidance (host network + raw socket capability).
       - NET_ADMIN
       - NET_RAW
-    env_file:
-      - path: ../.env
-        required: false
+    # NO env_file here — deliberately. matter.js auto-imports every
+    # MATTER_* process env var (see scripts/test-security.sh Test 7), so
+    # this is the one container that must never inherit the operator's
+    # whole .env. Every key it needs is explicit below; compose still
+    # interpolates ${...} defaults from --env-file without injecting
+    # unrelated vars into the process.
     environment:
       - NODE_ENV=production
       - PORT=8083
@@ -748,8 +751,11 @@ services:
       # moves here from the orchestrator UNCHANGED.
       - matter-data:/data/matter-storage
     restart: always
-    mem_limit: ${MATTER_CONTROLLER_MEM_LIMIT:-256m}
-    cpus: ${MATTER_CONTROLLER_CPUS:-1.0}
+    # DROPLET_ prefix (not MATTER_CONTROLLER_*): the ADR-012 knob lives in
+    # the operator's .env, and a bare MATTER_* name there is one stray
+    # env_file away from matter.js's auto-import minefield.
+    mem_limit: ${DROPLET_MATTER_MEM_LIMIT:-256m}
+    cpus: ${DROPLET_MATTER_CPUS:-1.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- Email indexer (IMAP IDLE + MIME parser + outbound SMTP) ---
