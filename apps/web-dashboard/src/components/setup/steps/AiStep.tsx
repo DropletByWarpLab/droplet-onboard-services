@@ -7,8 +7,28 @@ import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { fetchModels, sendChat } from "@/lib/api";
 import type { ModelInfo } from "@/lib/types";
+import { CodeBlock } from "@/components/CodeBlock";
 import { StepShell } from "@/components/setup/StepShell";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
+
+// Module-level constants so ReactMarkdown receives stable references across
+// re-renders (model-poll ticks, error state toggles). Inline object/array
+// literals create new references on every render and cause full markdown
+// re-parses on long AI responses (WARP-866 finding 2).
+const REMARK_PLUGINS = [remarkGfm];
+const REHYPE_PLUGINS = [rehypeHighlight];
+const MARKDOWN_COMPONENTS = {
+  // WARP-295 parity: keep wide GFM tables from blowing out the answer card
+  // on narrow viewports.
+  table: ({ node, ...props }: any) => (
+    <div className="overflow-x-auto">
+      <table {...props} />
+    </div>
+  ),
+  // Hover copy button on every fenced code block — matches ChatMessage.tsx
+  // so wizard AI responses are visually consistent with in-app chat (WARP-866).
+  pre: ({ node, ...props }: any) => <CodeBlock {...props} />,
+};
 
 /**
  * Wizard step — show the customer their local AI works and what it
@@ -375,19 +395,13 @@ export function AiStep({
             </div>
             <div className="chat-markdown type-body text-label-primary max-h-[40vh] overflow-y-auto">
               {/* Same plugin set as ChatMessage so the wizard answer renders
-                  identically to the in-app chat (GFM tables, code highlight). */}
+                  identically to the in-app chat (GFM tables, code highlight,
+                  per-block copy button). Stable module-level refs avoid
+                  full re-parses on poll ticks. */}
               <ReactMarkdown
-                remarkPlugins={[remarkGfm]}
-                rehypePlugins={[rehypeHighlight]}
-                components={{
-                  // WARP-295 parity: keep wide GFM tables from blowing out
-                  // the answer card on narrow viewports.
-                  table: ({ node, ...props }) => (
-                    <div className="overflow-x-auto">
-                      <table {...props} />
-                    </div>
-                  ),
-                }}
+                remarkPlugins={REMARK_PLUGINS}
+                rehypePlugins={REHYPE_PLUGINS}
+                components={MARKDOWN_COMPONENTS}
               >
                 {response}
               </ReactMarkdown>
