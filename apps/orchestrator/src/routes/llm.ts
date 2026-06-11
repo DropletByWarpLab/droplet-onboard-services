@@ -884,14 +884,30 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             };
             chatReq.messages = [attachmentSystemMessage, ...chatReq.messages];
           }
-          // Durably join the items to this conversation: uploads are
-          // tagged with the dashboard's client-minted draft chatId
-          // (`chat-<ts>`), which is lost on reload. Re-stamping
-          // `originatingChatId` to the server conversationId lets the
-          // dashboard rehydrate the chip row (and the per-chat export)
-          // via GET /api/files/brain?originatingChatId=<conversationId>.
-          // Ownership-scoped by userId, same as the context lookup.
-          if (conversationId) {
+        } catch (err) {
+          // Attachment-context failure must NOT block chat — the turn
+          // proceeds without the inlined content (the model can still
+          // reach the document via search_content).
+          // eslint-disable-next-line no-console
+          console.warn("[llm/chat] attachment-context load failed:", err);
+        }
+
+        // Durably join the items to this conversation: uploads are tagged with
+        // the dashboard's client-minted draft chatId (`chat-<ts>`), which is
+        // lost on reload. Re-stamping `originatingChatId` to the server
+        // conversationId lets the dashboard rehydrate the chip row (and the
+        // per-chat export) via GET /api/files/brain?originatingChatId=<id>.
+        // Ownership-scoped by userId, same as the context lookup.
+        //
+        // SEPARATE try/catch from the context build (pr-reviewer #550 finding):
+        // when this was nested under the context build, a transient updateMany
+        // failure was swallowed by the same generic "context load failed"
+        // handler AFTER the context had already been injected — the model saw
+        // the attachment this turn but the association never persisted, so the
+        // chip silently vanished on reload with no distinct diagnostic. The
+        // persistence outcome is now logged on its own; still non-fatal.
+        if (conversationId) {
+          try {
             await prisma.brainMemoryItem.updateMany({
               where: {
                 id: { in: chatReq.attachments.map((a) => a.itemId) },
@@ -900,13 +916,14 @@ export function createLlmRouter(prisma: PrismaClient): Router {
               },
               data: { originatingChatId: conversationId },
             });
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.warn(
+              "[llm/chat] attachment chat-association persist failed " +
+                "(chip may not rehydrate on reload):",
+              err,
+            );
           }
-        } catch (err) {
-          // Attachment-context failure must NOT block chat — the turn
-          // proceeds without the inlined content (the model can still
-          // reach the document via search_content).
-          // eslint-disable-next-line no-console
-          console.warn("[llm/chat] attachment-context load failed:", err);
         }
       }
 

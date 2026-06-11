@@ -422,6 +422,49 @@ describe("POST /api/llm/chat — attachment context injection", () => {
     });
   });
 
+  it("still completes the turn when the chat-association persist fails (non-fatal)", async () => {
+    // pr-reviewer #563: the durable originatingChatId re-stamp runs AFTER the
+    // attachment context is injected. A transient updateMany failure must not
+    // take down the turn — the model still gets the attachment this turn; only
+    // the chip's reload-rehydration is lost. (The re-stamp now has its own
+    // try/catch so this failure is logged distinctly, not swallowed by the
+    // generic context-load handler.)
+    mockEnsureConversation.mockResolvedValue({ id: "conv-77" });
+    mockCreateTurnRows.mockResolvedValue({
+      userMessageId: "um-1",
+      assistantMessageId: "am-1",
+      assistantAlreadyFinal: false,
+    });
+    const prisma = createPrismaMock(
+      [
+        {
+          id: "bmi-1",
+          userId: USERNAME,
+          filename: "report.pdf",
+          mimeType: "application/pdf",
+          status: "ready",
+        },
+      ],
+      [{ brainItemId: "bmi-1", chunkIdx: 0, text: "hello" }],
+    );
+    prisma.brainMemoryItem.updateMany.mockRejectedValue(
+      new Error("connection blip"),
+    );
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .post("/api/llm/chat")
+      .send({
+        model: "m1",
+        messages: [{ role: "user", content: "summarize" }],
+        attachments: [{ itemId: "bmi-1" }],
+      });
+
+    // The turn succeeds despite the persist failure.
+    expect(res.status).toBe(200);
+    expect(prisma.brainMemoryItem.updateMany).toHaveBeenCalled();
+  });
+
   it("re-stamps ALL items tagged with the draft chatId on the first persisted turn", async () => {
     mockEnsureConversation.mockResolvedValue({ id: "conv-9" });
     mockCreateTurnRows.mockResolvedValue({

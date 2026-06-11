@@ -170,6 +170,16 @@ _HOSTAPD_LOCK = threading.Lock()
 # 409 on contention.
 _FACTORY_RESET_LOCK = threading.Lock()
 
+# Handle to the in-flight wipe's detached process (WARP-825 hardening). On a
+# successful spawn the lock is held for the wipe's whole lifetime — the wipe is
+# meant to tear this bridge down, so a SUCCESSFUL wipe never returns to this
+# process at all. If a LATER reset request finds the lock held, polling this
+# handle distinguishes a live wipe (poll() is None → genuinely in progress →
+# 409) from one that exited WITHOUT completing the teardown (poll() is not None
+# → the wipe FAILED mid-run → reclaim the stale lock so the owner can retry,
+# instead of wedging every future reset at 409 for the life of the bridge).
+_factory_reset_proc = None
+
 
 # ---------------------------------------------------------------------------
 # Shell helper
@@ -1895,9 +1905,13 @@ RESET_SCRIPT = os.environ.get(
 def _spawn_detached(cmd):
     """Spawn a long-running host command fully detached from this process.
 
-    Returns (ok, error). `ok` means "the child was launched" — NOT "the wipe
-    finished" (we deliberately don't wait; the wipe outlives us). A launch
-    failure (script missing / not executable) returns (False, <reason>).
+    Returns (proc, error). `proc` is the live `subprocess.Popen` on a
+    successful launch — NOT a finished wipe (we deliberately don't wait; the
+    wipe outlives us). The caller keeps the handle so a LATER reset request can
+    poll() it: a detached wipe that exits without tearing this bridge down has
+    failed, and polling lets us reclaim the stale lock instead of wedging every
+    future reset at 409. A launch failure (script missing / not executable)
+    returns (None, <reason>).
 
     Detached so the child keeps running after the bridge is torn down by the
     very wipe it kicked off: new session (setsid / new process group), stdio
@@ -1915,12 +1929,12 @@ def _spawn_detached(cmd):
         # portable (POSIX) way; guard for platforms without it.
         if hasattr(os, "setsid"):
             kwargs["start_new_session"] = True
-        subprocess.Popen(cmd, **kwargs)  # noqa: S603 — fixed argv, no shell
-        return True, None
+        proc = subprocess.Popen(cmd, **kwargs)  # noqa: S603 — fixed argv, no shell
+        return proc, None
     except FileNotFoundError:
-        return False, "host script not found"
+        return None, "host script not found"
     except Exception as e:                                          # noqa: BLE001
-        return False, str(e)
+        return None, str(e)
 
 
 def run_factory_reset(params):
@@ -1940,30 +1954,52 @@ def run_factory_reset(params):
         "jobId": job_id,
         "targetName": (params or {}).get("targetName", ""),
     })
+    global _factory_reset_proc
     # Serialize the spawn decision (mirrors run_set_hostapd's _HOSTAPD_LOCK). Two
     # threads racing here would each launch the wipe — two `docker compose down
     # -v` runs racing the same teardown. Non-blocking: a second in-flight reset is
     # rejected (the handler maps code == "busy" to 409) rather than queued.
     if not _FACTORY_RESET_LOCK.acquire(blocking=False):
-        logger.warning("factory reset rejected: a reset is already in progress")
-        return False, "busy"
+        # The lock is held. Either a wipe is genuinely in flight, or a previous
+        # wipe FAILED mid-run — it exited without tearing this bridge down and
+        # left the lock held forever, so every later reset 409s for the life of
+        # the process (manual SSH to restart the bridge was the only recovery).
+        # Poll the tracked process to tell the two apart.
+        prior = _factory_reset_proc
+        if prior is None or prior.poll() is None:
+            # No tracked process, or it is still running → genuinely in progress.
+            logger.warning("factory reset rejected: a reset is already in progress")
+            return False, "busy"
+        # The prior wipe exited without completing the teardown → it failed.
+        # Reclaim the stale lock so this attempt can proceed.
+        logger.warning(
+            "factory reset: prior wipe exited (rc=%s) without completing the "
+            "teardown — reclaiming the stale lock for a retry", prior.returncode)
+        _factory_reset_proc = None
+        _FACTORY_RESET_LOCK.release()
+        if not _FACTORY_RESET_LOCK.acquire(blocking=False):
+            # Lost the race to a concurrent retry — treat as in-progress.
+            logger.warning("factory reset rejected: a reset is already in progress")
+            return False, "busy"
     released = False
     try:
         try:
             # Pass the job context as a single JSON arg, same convention as the
             # pool / hostapd host scripts.
-            ok, err = _spawn_detached([RESET_SCRIPT, payload])
+            proc, err = _spawn_detached([RESET_SCRIPT, payload])
         except Exception as e:                                      # noqa: BLE001
             logger.warning("factory reset failed to spawn host script: %s", e)
             return False, "host script unavailable"
-        if not ok:
+        if proc is None:
             logger.warning("factory reset host script not launched: %s", err)
             return False, (err or "host script refused")
-        # Launched. Do NOT release the lock: the wipe is now tearing the box
-        # (and this process) down, and a release here would re-open the
-        # double-fire window for a request that lands before teardown completes.
-        # On the failure paths above we DO release (via finally) so a retry after
-        # a failed launch can proceed.
+        # Launched. Track the process so a later reset can distinguish a live
+        # wipe from one that failed (see _factory_reset_proc). Do NOT release the
+        # lock: the wipe is now tearing the box (and this process) down, and a
+        # release here would re-open the double-fire window for a request that
+        # lands before teardown completes. On the failure paths above we DO
+        # release (via finally) so a retry after a failed launch can proceed.
+        _factory_reset_proc = proc
         released = True
         logger.warning("factory reset dispatched to host script (job=%s)", job_id)
         return True, {"dispatched": True, "jobId": job_id}
