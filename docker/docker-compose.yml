@@ -532,7 +532,7 @@ services:
     # (BAAI/bge-reranker-base no longer publishes the smaller int8
     # `model_quantized.onnx`) peaks at ~2.9 GB RSS for a batch-8 forward
     # pass, measured on the gateway image. 512m OOM-killed model load.
-    # See docs/ADR-012-container-resource-limits.md for the RAM budget;
+    # See docs/ADR-021-container-resource-limits.md for the RAM budget;
     # revisit if int8 quantization is reintroduced (would drop this back
     # toward the original ~1g tier).
     mem_limit: ${AI_GATEWAY_MEM_LIMIT:-4g}
