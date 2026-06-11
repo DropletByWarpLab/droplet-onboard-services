@@ -67,6 +67,10 @@ services:
     ports:
       - "80:80"
       - "443:443"
+      # Plane PM dedicated origin (spec WARP-498 OQ2 amendment) — the
+      # vanilla Plane frontend needs its own origin root; see the :8443
+      # server block in nginx.conf.
+      - "8443:8443"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
       - ./certs:/etc/nginx/certs:ro

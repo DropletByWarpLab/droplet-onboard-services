@@ -28,6 +28,22 @@ vi.mock("../config.js", () => ({
   },
 }));
 
+// Tests that need a one-off config call vi.doMock with their override and
+// MUST restore via this helper afterwards — NOT vi.doUnmock, which removes
+// the file-level vi.mock above from the registry too, silently feeding the
+// REAL config (real Zod defaults) to every later import in the file. That
+// leak went unnoticed while the real DROPLET_PM_WEB_URL default coincided
+// with the mocked value, and surfaced the moment the default changed.
+function remockStandardConfig(): void {
+  vi.doMock("../config.js", () => ({
+    config: {
+      DROPLET_PM_OIDC_CLIENT_SECRET: "super-secret-32-byte-test-value!",
+      DROPLET_PM_OIDC_CLIENT_ID: "plane",
+      DROPLET_PM_WEB_URL: "https://droplet-ai.local/pm",
+    },
+  }));
+}
+
 describe("verifyClientSecret — constant-time compare", () => {
   let verifyClientSecret: (s: string) => boolean;
 
@@ -78,7 +94,7 @@ describe("verifyClientSecret — constant-time compare", () => {
     }));
     const mod = await import("./pm-oidc.service.js");
     expect(mod.verifyClientSecret("anything")).toBe(false);
-    vi.doUnmock("../config.js");
+    remockStandardConfig();
   });
 });
 
@@ -114,7 +130,7 @@ describe("buildAllowedRedirectUris — exact-match allowlist", () => {
       "https://droplet-ai.local/pm/auth/oidc/",
       "https://droplet-ai.local/pm/auth/oidc/callback/",
     ]);
-    vi.doUnmock("../config.js");
+    remockStandardConfig();
   });
 
   it("does NOT include /auth/oidc/logout/ (that's the post_logout_redirect_uri, not the /authorize destination)", () => {
@@ -136,5 +152,51 @@ describe("buildAllowedRedirectUris — exact-match allowlist", () => {
     for (const uri of attackerUris) {
       expect(allowed.includes(uri)).toBe(false);
     }
+  });
+});
+
+describe("oidcIssuer — the IdP stays on the dashboard origin", () => {
+  // The issuer must always resolve to the DASHBOARD origin (gateway
+  // :443), where /api/pm/oidc/* is served by the orchestrator. On the
+  // post-OQ2-amendment dedicated Plane origin (:8443), /api/* routes to
+  // pm-api — an issuer derived from that origin 404s Plane's discovery
+  // fetch and kills the whole SSO flow.
+  async function issuerFor(webUrl: string): Promise<string> {
+    vi.resetModules();
+    vi.doMock("../config.js", () => ({
+      config: {
+        DROPLET_PM_OIDC_CLIENT_SECRET: "x",
+        DROPLET_PM_OIDC_CLIENT_ID: "plane",
+        DROPLET_PM_WEB_URL: webUrl,
+      },
+    }));
+    const mod = await import("./pm-oidc.service.js");
+    const issuer = mod.oidcIssuer();
+    remockStandardConfig();
+    return issuer;
+  }
+
+  it("legacy /pm subpath shape: strips the path, keeps the origin", async () => {
+    expect(await issuerFor("https://droplet-ai.local/pm")).toBe(
+      "https://droplet-ai.local/api/pm/oidc",
+    );
+  });
+
+  it("legacy shape tolerates a trailing slash", async () => {
+    expect(await issuerFor("https://droplet-ai.local/pm/")).toBe(
+      "https://droplet-ai.local/api/pm/oidc",
+    );
+  });
+
+  it("dedicated-origin shape (OQ2 amendment): drops Plane's port", async () => {
+    expect(await issuerFor("https://droplet-ai.local:8443")).toBe(
+      "https://droplet-ai.local/api/pm/oidc",
+    );
+  });
+
+  it("legacy shape on a nonstandard port keeps that port (origin preserved)", async () => {
+    expect(await issuerFor("https://droplet-ai.local:9443/pm")).toBe(
+      "https://droplet-ai.local:9443/api/pm/oidc",
+    );
   });
 });

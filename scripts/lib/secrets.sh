@@ -135,7 +135,10 @@ generate_env() {
   # SANs; override BEFORE running setup.sh if the customer uses a different
   # LAN name (e.g. `DROPLET_PM_WEB_URL=https://pm.acme.lan ./scripts/setup.sh`).
   # No host-specific IP defaults (rule 14) — DNS name only.
-  pm_web_url="${DROPLET_PM_WEB_URL:-https://droplet-ai.local/pm}"
+  # :8443 is Plane's dedicated TLS origin (spec WARP-498 OQ2 amendment) —
+  # the vanilla frontend is built with basePath:"" and must own an origin
+  # root, so the gateway serves it on its own port instead of under /pm/.
+  pm_web_url="${DROPLET_PM_WEB_URL:-https://droplet-ai.local:8443}"
 
   # OLLAMA_URL — picks the bundled droplet-ollama container by default
   # (single-box PoC). Override before running setup.sh for a multi-box
@@ -524,7 +527,24 @@ migrate_env() {
   _migrate_ensure_key DROPLET_PM_ADMIN_TOKEN "$(openssl rand -hex 32)"
   _migrate_ensure_key DROPLET_PM_WEBHOOK_SECRET "$(openssl rand -hex 32)"
   _migrate_ensure_key DROPLET_PM_API_URL "http://pm-api:8000"
-  _migrate_ensure_key DROPLET_PM_WEB_URL "${DROPLET_PM_WEB_URL:-https://droplet-ai.local/pm}"
+  _migrate_ensure_key DROPLET_PM_WEB_URL "${DROPLET_PM_WEB_URL:-https://droplet-ai.local:8443}"
+  # One-time rewrite for the WARP-498 OQ2 amendment: Plane moved from the
+  # /pm subpath (which the vanilla basePath:"" frontend could never serve —
+  # the /projects iframe rendered black) to a dedicated :8443 origin. Only
+  # the exact pre-amendment default is rewritten — operator overrides keep
+  # their value.
+  if grep -qE '^DROPLET_PM_WEB_URL=https://droplet-ai\.local/pm/?$' "$env_file" 2>/dev/null; then
+    if [ "$backed_up" = "false" ]; then
+      # shellcheck disable=SC2155  # Same rationale as line 29: `date +%s` cannot meaningfully fail.
+      local backup="$env_file.bak.$(date +%s)"
+      cp "$env_file" "$backup"
+      log_info "Backed up existing .env to $backup before migration"
+      backed_up=true
+    fi
+    sed -i.tmp 's|^DROPLET_PM_WEB_URL=https://droplet-ai\.local/pm/\{0,1\}$|DROPLET_PM_WEB_URL=https://droplet-ai.local:8443|' "$env_file"
+    rm -f "$env_file.tmp"
+    log_success "Migrated .env: DROPLET_PM_WEB_URL /pm subpath -> :8443 dedicated origin (WARP-498 OQ2 amendment)"
+  fi
   # Plane v0.24.1 broker + object storage (completing the #487 integration).
   _migrate_ensure_key DROPLET_PM_MQ_USER "plane"
   _migrate_ensure_key DROPLET_PM_MQ_PASSWORD "$(_gen_password 24)"
