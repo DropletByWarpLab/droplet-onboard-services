@@ -1,0 +1,15 @@
+[Unit]
+Description=Run the Droplet Wi-Fi PCI watchdog every 2 minutes
+# WARP-869 — cadence rationale: the failure leaves the AP dark until someone
+# notices, so detection latency is the whole game; the healthy-path cost is a
+# read-only sysfs scan (<10ms). 90s after boot lets the normal driver
+# bring-up + droplet-openwrt-attach finish first so a mid-init card is never
+# mistaken for a wedge (the watchdog also settle-rechecks internally).
+
+[Timer]
+OnBootSec=90
+OnUnitActiveSec=120
+AccuracySec=30
+
+[Install]
+WantedBy=timers.target
