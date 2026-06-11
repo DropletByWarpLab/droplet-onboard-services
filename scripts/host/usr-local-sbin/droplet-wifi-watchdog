@@ -76,22 +76,51 @@ for dev in "$SYS_PCI"/*; do
 
   # Wedge candidate — settle, then re-check (never race normal bring-up).
   sleep "$SETTLE_S"
+  # Re-check after settle: udev or operator may have unbound during the window
+  if [ ! -e "$dev/driver" ]; then
+    log "DEBUG: driver unbound during settle for $(basename "$dev") — skipping (not a watchdog concern)"
+    continue
+  fi
   alive "$dev" && continue
 
   addr="$(basename "$dev")"
   log "Wi-Fi function $addr is wedged (driver bound, no phy/netdev) — PCI remove + rescan"
+  # WARNING: sysfs write can block in kernel D-state on a severely wedged slot.
+  # D-state processes ignore SIGTERM/SIGKILL — TimeoutStartSec=120 is the only exit.
   if ! echo 1 > "$dev/remove" 2>/dev/null; then
     log "WARN: could not remove $addr — skipping"
     continue
   fi
   sleep 2
-  echo 1 > "$RESCAN" 2>/dev/null || log "WARN: PCI rescan write failed"
+  # WARNING: sysfs write can block in kernel D-state on a severely wedged slot.
+  # D-state processes ignore SIGTERM/SIGKILL — TimeoutStartSec=120 is the only exit.
+  if ! echo 1 > "$RESCAN" 2>/dev/null; then
+    log "WARN: PCI rescan write failed for $addr — check $RESCAN permissions; skipping revival"
+    continue
+  fi
 
   waited=0
   until alive "$dev" || [ "$waited" -ge "$WAIT_S" ]; do
     sleep 2
     waited=$((waited + 2))
   done
+  # If the original address is still dead, the kernel may have re-enumerated the
+  # device at a different PCI address (e.g. 0000:0f:00.0 instead of 0000:0e:00.0).
+  # Search for any Wi-Fi-class device that is now alive and was not present before
+  # (no driver symlink would mean it predated us; alive() is the presence guard).
+  if ! alive "$dev"; then
+    for candidate in "$SYS_PCI"/*; do
+      [ -d "$candidate" ] || continue
+      [ "$candidate" = "$dev" ] && continue
+      is_wifi_class "$candidate" || continue
+      if alive "$candidate"; then
+        log "note: $addr re-enumerated at $(basename "$candidate") after rescan — updating path"
+        dev="$candidate"
+        addr="$(basename "$dev")"
+        break
+      fi
+    done
+  fi
   if alive "$dev"; then
     log "revived $addr ($(first_netdev "$dev"))"
     revived=1
@@ -107,7 +136,13 @@ if [ "$revived" = 1 ] && [ -n "$ATTACH_UNIT" ]; then
   if command -v systemctl >/dev/null 2>&1 \
      && systemctl cat "$ATTACH_UNIT" >/dev/null 2>&1; then
     log "restarting $ATTACH_UNIT to rebind the AP"
+    # NOTE: droplet-set-hostapd.sh may also restart this unit concurrently.
+    # systemd serializes activations per-unit, so the two runs queue and do not
+    # overlap — but the second run will re-apply config with the environment
+    # state at queue time (see scripts/host/droplet-set-hostapd.sh).
     systemctl restart "$ATTACH_UNIT" || log "WARN: $ATTACH_UNIT restart failed — see its journal"
+  else
+    log "WARN: revived $addr but $ATTACH_UNIT not in systemd — AP interface not rebound; run: systemctl daemon-reload && systemctl enable --now $ATTACH_UNIT"
   fi
 fi
 
