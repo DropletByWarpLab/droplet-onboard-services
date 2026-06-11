@@ -35,6 +35,7 @@ import { Dialog } from "@/components/Dialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useToast } from "@/components/Toast";
 import { translateError } from "@/lib/friendly-errors";
+import { dashboardIpFromConf } from "@/lib/wireguard";
 
 /**
  * Remote Access — WireGuard VPN management page.
@@ -575,8 +576,25 @@ function AddDeviceDialog({
                 Open the app, tap <strong>+</strong>, choose <strong>Create from QR code</strong>,
                 and scan the code below.
               </li>
-              <li>Activate the new tunnel — done.</li>
+              <li>
+                Activate the tunnel, then open{" "}
+                <strong className="font-mono">
+                  {/* The conf's DNS line is the box-side gateway — the only
+                      address the dashboard answers on for VPN clients.
+                      .local names never resolve over the tunnel (phones use
+                      multicast for those, which doesn't cross it). Parsed +
+                      IPv4-validated in lib/wireguard.ts. */}
+                  https://{dashboardIpFromConf(created.conf)}
+                </strong>{" "}
+                in the browser — that&rsquo;s your Droplet from anywhere.
+              </li>
             </ol>
+            <p className="type-caption-1 text-label-tertiary">
+              Test it away from home (cellular works) — on this Droplet&rsquo;s
+              own Wi-Fi the tunnel can&rsquo;t loop back, and you don&rsquo;t
+              need it there. Names like <span className="font-mono">droplet.local</span>{" "}
+              only work at home, not over the tunnel.
+            </p>
 
             <div className="flex justify-center">
               <div className="p-4 bg-white rounded-lg">
