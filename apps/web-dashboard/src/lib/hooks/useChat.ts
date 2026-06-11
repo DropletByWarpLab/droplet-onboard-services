@@ -385,6 +385,17 @@ export function useChat(options: UseChatOptions = {}) {
    */
   const attachmentsByConvRef = useRef<Map<string, ChatAttachment[]>>(new Map());
   /**
+   * WARP-859 — conversation-scoped attachment list: everything ever
+   * attached to this chat. Distinct from the composer staging
+   * `attachments` above, which now CLEARS on send (the file rides onto
+   * the sent message and leaves the input). This list feeds SessionHeader
+   * and the per-turn content re-injection (turnAttachments), and survives
+   * reload (rehydrated from the server's brain items). Same per-conv
+   * bucketing as the composer cache.
+   */
+  const [sessionAttachments, setSessionAttachments] = useState<ChatAttachment[]>([]);
+  const sessionByConvRef = useRef<Map<string, ChatAttachment[]>>(new Map());
+  /**
    * WARP-331: track conversation ids whose stream JUST finished locally.
    * The MQTT turn-completed handler uses this to skip an auto-refresh
    * when the local stream already wrote the final content — the reload
@@ -461,6 +472,12 @@ export function useChat(options: UseChatOptions = {}) {
   useEffect(() => {
     attachmentsRef.current = attachments;
   }, [attachments]);
+  // WARP-859 — ref-mirror of the conversation-scoped list so the send
+  // path can read+merge it synchronously when building the turn.
+  const sessionAttachmentsRef = useRef<ChatAttachment[]>([]);
+  useEffect(() => {
+    sessionAttachmentsRef.current = sessionAttachments;
+  }, [sessionAttachments]);
 
   // ── MQTT-driven attachment status updates ──
   //
@@ -518,6 +535,13 @@ export function useChat(options: UseChatOptions = {}) {
           attachmentsByConvRef.current.set(key, list.map(flip));
         }
         setAttachments((prev) => prev.map(flip));
+        // WARP-859 — keep the conversation-scoped list (SessionHeader +
+        // re-injection) in lockstep so a file attached and sent while
+        // still "indexing" flips to "ready" there too.
+        for (const [key, list] of sessionByConvRef.current) {
+          sessionByConvRef.current.set(key, list.map(flip));
+        }
+        setSessionAttachments((prev) => prev.map(flip));
         return;
       }
 
@@ -662,10 +686,29 @@ export function useChat(options: UseChatOptions = {}) {
 
   const sendMessage = useCallback(
     async (content: string, model: string, systemPrompt?: string) => {
+      // WARP-859 — files staged in the composer ride onto THIS message
+      // and then leave the input. Snapshot the staged chips for display
+      // on the user bubble, and fold them into the conversation-scoped
+      // session list (deduped by itemId) so they stay attached to the
+      // chat (SessionHeader, per-turn re-injection) after the composer
+      // clears.
+      const stagedSnapshot = attachmentsRef.current.slice();
+      const sessionKey = conversationIdRef.current ?? DRAFT_CONV_KEY;
+      const mergedSession = (() => {
+        const byKey = new Map(
+          sessionAttachmentsRef.current.map((a) => [a.itemId ?? a.localId, a]),
+        );
+        for (const a of stagedSnapshot) byKey.set(a.itemId ?? a.localId, a);
+        return [...byKey.values()];
+      })();
+
       const userMessage: ChatMessage = {
         id: createId(),
         role: "user",
         content,
+        ...(stagedSnapshot.length > 0
+          ? { attachments: stagedSnapshot }
+          : {}),
       };
       const assistantMessage: ChatMessage = {
         id: createId(),
@@ -729,13 +772,28 @@ export function useChat(options: UseChatOptions = {}) {
       // Chips still uploading have no itemId yet and are skipped — the
       // orchestrator resolves the live status (ready / indexing /
       // failed) per item, so a stale client status can't mislead it.
-      // Cap matches the route schema's `.max(8)`.
-      const turnAttachments = attachmentsRef.current
+      // Cap matches the route schema's `.max(8)`. WARP-859: source from
+      // the merged conversation-scoped list (not just the composer) so an
+      // attached doc stays injected for follow-up turns even though the
+      // composer cleared after the turn that attached it.
+      const turnAttachments = mergedSession
         .filter((a): a is ChatAttachment & { itemId: string } =>
           Boolean(a.itemId),
         )
         .slice(0, MAX_ATTACHMENTS_PER_CONVERSATION)
         .map((a) => ({ itemId: a.itemId }));
+
+      // Commit the merged session list + clear the composer staging area.
+      // Keyed by the same conv slot the chips live in (DRAFT on a first
+      // turn); the draft→real migration below moves both buckets.
+      if (mergedSession.length > 0) {
+        sessionByConvRef.current.set(sessionKey, mergedSession);
+        setSessionAttachments(mergedSession);
+      }
+      if (stagedSnapshot.length > 0) {
+        attachmentsByConvRef.current.set(sessionKey, []);
+        setAttachments([]);
+      }
 
       try {
         const response = await sendChat({
@@ -783,6 +841,14 @@ export function useChat(options: UseChatOptions = {}) {
               attachmentsByConvRef.current.set(headerId, drafted);
             }
             attachmentsByConvRef.current.delete(DRAFT_CONV_KEY);
+            // WARP-859 — move the conversation-scoped session bucket from
+            // the draft slot to the real id too, so SessionHeader + the
+            // per-turn re-injection keep finding the chat's attachments.
+            const draftSession = sessionByConvRef.current.get(DRAFT_CONV_KEY);
+            if (draftSession && draftSession.length > 0) {
+              sessionByConvRef.current.set(headerId, draftSession);
+            }
+            sessionByConvRef.current.delete(DRAFT_CONV_KEY);
             notifyHistoryOfNewConversation(
               options.historyHandleRef?.current ?? null,
               {
@@ -1331,8 +1397,13 @@ export function useChat(options: UseChatOptions = {}) {
                   "indexing",
           ...(i.failureReason ? { error: i.failureReason } : {}),
         }));
-        attachmentsByConvRef.current.set(persisted.id, chips);
-        setAttachments(chips);
+        // WARP-859 — on reload the chat's attachments are conversation
+        // history, not staged input: populate the session-scoped list
+        // (SessionHeader + re-injection) and leave the composer empty.
+        sessionByConvRef.current.set(persisted.id, chips);
+        setSessionAttachments(chips);
+        attachmentsByConvRef.current.set(persisted.id, []);
+        setAttachments([]);
       } catch {
         // non-fatal — chat renders without chips
       }
@@ -1442,6 +1513,11 @@ export function useChat(options: UseChatOptions = {}) {
     const key = conversationIdRef.current ?? DRAFT_CONV_KEY;
     attachmentsByConvRef.current.delete(key);
     setAttachments([]);
+    // WARP-859 — a fresh chat (handleNewChat / URL-clear reset) drops the
+    // conversation-scoped list too, so a new thread starts with no
+    // inherited attachments.
+    sessionByConvRef.current.delete(key);
+    setSessionAttachments([]);
   }, []);
 
   // WARP-331: when the active conversationId changes, swap the visible
@@ -1452,8 +1528,9 @@ export function useChat(options: UseChatOptions = {}) {
   // meantime.
   useEffect(() => {
     const key = conversationId ?? DRAFT_CONV_KEY;
-    const stored = attachmentsByConvRef.current.get(key) ?? [];
-    setAttachments(stored);
+    setAttachments(attachmentsByConvRef.current.get(key) ?? []);
+    // WARP-859 — swap the conversation-scoped list in lockstep.
+    setSessionAttachments(sessionByConvRef.current.get(key) ?? []);
   }, [conversationId]);
 
   // WARP-331: derive the visible streaming lock. The in-flight stream
@@ -1476,6 +1553,9 @@ export function useChat(options: UseChatOptions = {}) {
     approveScene,
     clearMessages,
     attachments,
+    /** WARP-859 — every attachment on this conversation (for SessionHeader);
+     *  the composer `attachments` above clears on send. */
+    sessionAttachments,
     attach,
     removeAttachment,
     clearAttachments,

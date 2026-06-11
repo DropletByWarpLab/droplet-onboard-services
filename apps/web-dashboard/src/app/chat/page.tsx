@@ -82,6 +82,7 @@ export default function ChatPage() {
     approveScene,
     clearMessages,
     attachments,
+    sessionAttachments,
     attach,
     removeAttachment,
     clearAttachments,
@@ -516,7 +517,9 @@ export default function ChatPage() {
         {/* WARP-205: per-chat brain memory export affordance.
             Hidden when no items are attached to this chat — the
             component itself returns null in that case. */}
-        <SessionHeader chatId={conversationId ?? chatId} attachments={attachments} />
+        {/* WARP-859 — SessionHeader reflects the whole conversation's
+            attachments (composer chips clear on send). */}
+        <SessionHeader chatId={conversationId ?? chatId} attachments={sessionAttachments} />
 
         {/* System prompt */}
         {showSystemPrompt && (
