@@ -173,8 +173,7 @@
 
   /* Themed scrollbars — thin, design-token colours, both WebKit and standards */
   ::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
+    display: none;
   }
   ::-webkit-scrollbar-track {
     background: transparent;
