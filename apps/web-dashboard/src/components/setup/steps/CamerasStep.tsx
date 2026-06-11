@@ -64,12 +64,16 @@ export function CamerasStep({
     try {
       // The cameras list rides along but must not block the step —
       // discovery is the primary signal, so its failure (service off in
-      // dev) still skips, while a cameras-list hiccup just hides the
-      // "Already set up" section.
-      const [list, all] = await Promise.all([
-        fetchDiscoveredCameras(),
-        fetchCameras().catch(() => [] as CameraInfo[]),
-      ]);
+      // dev) still skips, while a cameras-list error surfaces to the user
+      // instead of silently hiding the "Already set up" section.
+      let all: CameraInfo[];
+      try {
+        all = await fetchCameras();
+      } catch {
+        setError("Couldn't load existing cameras. Check your connection and try again.");
+        all = [];
+      }
+      const list = await fetchDiscoveredCameras();
       // GET /cameras includes pending discovered rows (enabled=false) —
       // filter to enabled so they don't duplicate the discovered cards.
       const enabled = all.filter((c) => c.enabled);

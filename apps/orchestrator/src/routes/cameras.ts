@@ -1431,16 +1431,17 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if (!confirmationToken || typeof confirmationToken !== "string") {
         return res.status(400).json({ error: "Missing 'confirmationToken'", code: "TOKEN_MISSING" });
       }
-      // WARP-41 parity with /network/command/confirm: callers echo the
-      // operation from the 202 response so a leaked token can't execute
-      // something the user never saw.
+      // WARP-41 parity with /network/command/confirm: callers must supply
+      // the operation name they originally requested (the 202 response does
+      // not include it) so a leaked token can't execute something the user
+      // never saw.
       if (!operation || typeof operation !== "string") {
         return res.status(400).json({
-          error: "Missing 'operation' — clients must echo the operation from the 202 response",
+          error: "Missing 'operation' — clients must supply the operation name they originally requested",
           code: "TOKEN_OPERATION_MISMATCH",
         });
       }
-
+      if (!userId) return res.status(401).json({ error: "UNAUTHORIZED" });
       const result = await confirmNetworkCommand(prisma, confirmationToken, userId, { operation });
       if (!result.confirmed) {
         return res.status(400).json({ error: result.reason, code: result.code });
@@ -1473,11 +1474,11 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
             method: "POST",
             headers: { "Content-Type": "application/json", ...serviceAuthHeaders() },
             body: JSON.stringify({
-              vlan_id: (p.vlanId as number) || 100,
+              vlan_id: (p.vlanId as number) ?? 100,
               subnet: (p.subnet as string) || "192.168.100.1",
               netmask: (p.netmask as string) || "255.255.255.0",
-              dhcp_start: (p.dhcpStart as number) || 100,
-              dhcp_limit: (p.dhcpLimit as number) || 150,
+              dhcp_start: (p.dhcpStart as number) ?? 100,
+              dhcp_limit: (p.dhcpLimit as number) ?? 150,
               leasetime: (p.leasetime as string) || "12h",
             }),
             signal: AbortSignal.timeout(30000),
