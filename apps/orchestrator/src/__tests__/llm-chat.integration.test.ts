@@ -189,6 +189,54 @@ describe("/api/llm/chat (orchestrator agent loop)", () => {
     });
   });
 
+  it("streaming rewrites an empty completion to a done error frame (WARP-854)", async () => {
+    // The model "finishes" with zero output and no tool calls — seen in
+    // the wild when the prompt alone overflows Ollama's context window
+    // (finish_reason=length with 0 output tokens). The wire must carry an
+    // error the dashboard can render, not a silent model_done.
+    mockChat.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        choices: [{ message: { role: "assistant", content: "" } }],
+      }),
+    });
+    const res = await request(app)
+      .post("/api/llm/chat")
+      .send({
+        model: "ollama/qwen3",
+        messages: [{ role: "user", content: "hi" }],
+        stream: true,
+      })
+      .buffer(true)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .parse(sseBufferParser as any);
+    expect(res.status).toBe(200);
+    const frames = parseSse(sseText(res));
+    expect(frames.map((f) => f.event)).toEqual(["done"]);
+    expect(frames[0].data).toMatchObject({ stop_reason: "error" });
+    expect(String((frames[0].data as { error?: string }).error)).toContain(
+      "empty_completion",
+    );
+  });
+
+  it("non-streaming surfaces an empty completion as stop_reason error (WARP-854)", async () => {
+    mockChat.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        choices: [{ message: { role: "assistant", content: "  " } }],
+      }),
+    });
+    const res = await request(app)
+      .post("/api/llm/chat")
+      .send({
+        model: "ollama/qwen3",
+        messages: [{ role: "user", content: "hi" }],
+      });
+    expect(res.status).toBe(200);
+    expect(res.body.stop_reason).toBe("error");
+    expect(res.body.error).toContain("empty_completion");
+  });
+
   it("streaming emits tool_call + tool_result events when the model dispatches a tool", async () => {
     mockChat
       .mockResolvedValueOnce({
