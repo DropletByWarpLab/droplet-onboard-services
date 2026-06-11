@@ -1374,6 +1374,43 @@ export async function confirmNetworkCommand(
   return { operationId: body?.operationId ?? null };
 }
 
+/**
+ * Reboot the router (WARP-871). Owner-only (the orchestrator route enforces
+ * it). "reboot" is a Tier-3 operation confirmable via the dashboard, so the
+ * POST returns 202 + a confirmation token; the Restart click IS the consent,
+ * so we echo it straight back through confirmNetworkCommand. Returns the
+ * operationId (or null) so the caller can show a "rebooting…" state.
+ */
+export async function rebootRouter(): Promise<{ operationId: string | null }> {
+  const res = await authFetch(`${BASE}/api/network/system/reboot`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (res.status === 202) {
+    if (!body?.confirmationToken || !body?.operation) {
+      throw new Error(
+        "Unexpected 202 response: missing confirmationToken or operation",
+      );
+    }
+    return confirmNetworkCommand(body.confirmationToken, body.operation);
+  }
+  if (res.ok) {
+    // Tier dropped to immediate (no confirmation needed) — already executing.
+    return { operationId: body?.operationId ?? null };
+  }
+  if (res.status === 403) {
+    throw new Error(
+      (body as { error?: string }).error ||
+        "Only the owner can restart the router.",
+    );
+  }
+  throw new Error(
+    (body as { error?: string }).error || `Failed to restart router: ${res.status}`,
+  );
+}
+
 export async function fetchNetworkOperation(id: string): Promise<NetworkOperation> {
   const res = await authFetch(`${BASE}/api/network/operations/${encodeURIComponent(id)}`);
   if (res.status === 404) {
