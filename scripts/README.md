@@ -25,7 +25,7 @@ The script runs six phases, each idempotent (safe to re-run):
 |-------|-------------|
 | **1. Preflight** | Checks OS (Debian/Raspbian/Ubuntu), architecture (ARM64 or x86_64), disk (≥ 8 GB), memory (≥ 2 GB), internet |
 | **2. Docker** | Installs Docker Engine 25+ and Compose v2 if not present. Adds user to `docker` group |
-| **3. Camera Drivers** | Installs UVC/V4L2 kernel modules, v4l-utils, ffmpeg, udev rules for USB cameras |
+| **3. Camera Drivers** | Installs UVC/V4L2 kernel modules, v4l-utils, ffmpeg, udev rules for USB cameras. Also preps host Bluetooth for Matter BLE commissioning (WARP-850): bluez + rfkill installed, `bluetooth.service` enabled, radio rfkill-unblocked, adapter powered — bluetoothd stays RUNNING (noble's raw-channel HCI socket coexists with it; see `lib/bluetooth.sh`) |
 | **4. Secrets** | Generates unique-per-device passwords and encryption keys. Writes `.env` (chmod 600) |
 | **5. Build** | Pulls 7 base images, builds every service with a local `Dockerfile` — orchestrator, web-dashboard, ai-gateway, routing, plus the profile-gated file-indexer, switch, and camera-discovery. Previously the `full`-profile images were skipped, so `COMPOSE_PROFILES=full docker compose up -d` on a fresh install would fail with "No such image". |
 | **6. Start** | Starts the full Docker Compose stack with health-check waits |
@@ -42,6 +42,7 @@ Each device gets its own random secrets — no two devices share credentials:
 | `REDIS_PASSWORD` | cache, orchestrator, ai-gateway, nextcloud | Redis authentication |
 | `MQTT_PASSWORD` | broker, orchestrator, file-indexer | Mosquitto MQTT authentication |
 | `NEXTCLOUD_ADMIN_PASSWORD` | nextcloud | Nextcloud bootstrap admin |
+| `DROPLET_MATTER_SERVICE_TOKEN` | orchestrator, matter-controller | X-Droplet-Auth bearer for the Matter host-network sidecar (WARP-850) |
 
 ---
 
@@ -306,5 +307,6 @@ scripts/
     ├── secrets.sh         .env generation with openssl rand
     ├── compose.sh         Image pull, build, start, health wait
     ├── systemd.sh         Optional boot service
-    └── camera-drivers.sh  Camera driver library (sourced by setup.sh)
+    ├── camera-drivers.sh  Camera driver library (sourced by setup.sh)
+    └── bluetooth.sh       Host Bluetooth prep for Matter BLE (WARP-850)
 ```

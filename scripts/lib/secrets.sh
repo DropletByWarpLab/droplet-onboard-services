@@ -36,6 +36,8 @@ generate_env() {
 
   # --- Generate all secrets ---
   local pg_password redis_password mqtt_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display service_token_switch ops_token service_token_mcp service_token_email orchestrator_sampler_token ai_gateway_sampler_token ollama_url openwrt_password
+  # WARP-850: orchestrator -> matter-controller sidecar bearer (X-Droplet-Auth).
+  local droplet_matter_service_token
   # WARP-503 — embedded Plane PM stack secrets (ADR-010, spec WARP-498).
   local pm_db_password pm_secret_key pm_admin_token pm_webhook_secret pm_web_url
   # Plane v0.24.1 also needs a RabbitMQ broker (celery) + MinIO object storage.
@@ -95,6 +97,14 @@ generate_env() {
   # attribute correctly (`_service:mcp` vs `_service:voice`). Compose
   # wires mcp-server's ORCHESTRATOR_TOKEN to ${SERVICE_TOKEN_MCP}.
   service_token_mcp=$(openssl rand -hex 32)
+  # WARP-850: shared bearer the orchestrator presents in the
+  # X-Droplet-Auth header on every call to the matter-controller
+  # host-network sidecar (services/matter-controller, port 8083).
+  # Same device-bridge auth pattern as SERVICE_TOKEN_DISPLAY; the
+  # sidecar fails CLOSED (401s everything) when this is empty. Both
+  # ends read the same .env key via compose — rotate in lockstep and
+  # restart orchestrator + matter-controller together.
+  droplet_matter_service_token=$(openssl rand -hex 32)
   # WARP-465: bearer the email-indexer service presents on POST to
   # /api/email/_ingest/* and PATCH /api/email/_ingest/drafts/:id. Same
   # authMiddleware path as voice/mcp — distinct token so the principal
@@ -258,6 +268,15 @@ OPS_TOKEN=$ops_token
 # mcp-server's ORCHESTRATOR_TOKEN to \${SERVICE_TOKEN_MCP}.
 SERVICE_TOKEN_MCP=$service_token_mcp
 
+# --- Matter controller sidecar bearer (orchestrator → matter-controller) ---
+# WARP-850. The matter.js controller runs in the matter-controller
+# host-network sidecar (raw HCI for BLE commissioning + native LAN
+# mDNS); the orchestrator authenticates to it with this token in the
+# X-Droplet-Auth header (device-bridge precedent). The sidecar fails
+# closed when the value is empty. Rotate both sides in lockstep —
+# change here, restart orchestrator + matter-controller.
+DROPLET_MATTER_SERVICE_TOKEN=$droplet_matter_service_token
+
 # --- Email indexer service bearer (email-indexer → orchestrator REST) ---
 # WARP-465. Bearer the email-indexer presents on ingest POSTs.
 # Compose wires email-indexer's ORCHESTRATOR_SERVICE_TOKEN to this value.
@@ -383,6 +402,7 @@ EOF
   log_info "  DISPLAY_TOKEN     : ${service_token_display:0:8}****"
   log_info "  OPS_TOKEN         : ${ops_token:0:8}****"
   log_info "  MCP_TOKEN         : ${service_token_mcp:0:8}****"
+  log_info "  MATTER_TOKEN      : ${droplet_matter_service_token:0:8}****"
   log_info "  PM_DB_PASSWORD    : ${pm_db_password:0:4}****"
   log_info "  PM_SECRET_KEY     : ${pm_secret_key:0:8}****"
   log_info "  PM_ADMIN_TOKEN    : ${pm_admin_token:0:8}****"
@@ -510,6 +530,11 @@ migrate_env() {
   # path; without this key mcp-server's outbound calls to orchestrator
   # /api/matter/* will 401 when AUTH_ENABLED=true.
   _migrate_ensure_key SERVICE_TOKEN_MCP "$(openssl rand -hex 32)"
+  # WARP-850 backfill: existing installs predate the matter-controller
+  # sidecar; without this key the sidecar's auth wall fails closed and
+  # every orchestrator Matter call 401s (dashboard shows the controller
+  # as disconnected).
+  _migrate_ensure_key DROPLET_MATTER_SERVICE_TOKEN "$(openssl rand -hex 32)"
 
   # WARP-503 backfill: embedded Plane PM stack (ADR-010). Existing installs
   # predate the PM stack; without these keys docker compose up will refuse
