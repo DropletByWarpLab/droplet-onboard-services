@@ -50,7 +50,9 @@ export class PmBootstrapError extends Error {
       | "PM_NOT_CONFIGURED"
       | "PM_UNREACHABLE"
       | "INSTANCE_SETUP_FAILED"
-      | "SIGN_IN_FAILED",
+      | "SIGN_IN_FAILED"
+      | "NO_WORKSPACE"
+      | "TOKEN_MINT_FAILED",
   ) {
     super(message);
     this.name = "PmBootstrapError";
@@ -326,4 +328,130 @@ export async function planeAppApi<T>(
   });
   const body = (await res.json().catch(() => ({}))) as T;
   return { status: res.status, body };
+}
+
+// ---------------------------------------------------------------------------
+// WARP-867 — session-cached app-API access + the Plane service API token.
+//
+// Plane CE's `/api/v1/` token API has NO workspace list and NO search (its
+// url modules are cycle/intake/issue/member/module/project/state only), and
+// the only mintable credential is a SERVER-GENERATED service token
+// (`POST /api/workspaces/:slug/service-api-tokens/` — idempotent, returns
+// the existing is_service token). So the orchestrator mints that token at
+// runtime through the bootstrap admin's session and serves it to the v1
+// consumers (pm-rbac, pm.client, tools-core pm handlers via
+// GET /api/pm/service-token); workspace listing + search are proxied over
+// the session app API instead of the nonexistent v1 routes.
+// ---------------------------------------------------------------------------
+
+// Plane sessions live 7 days — cache the cookie and re-login on 401 rather
+// than paying the CSRF + sign-in dance on every proxied call.
+let cachedSession: string | null = null;
+let cachedServiceToken: string | null = null;
+
+/** Drop the cached service token (e.g. after Plane returned 401 for it —
+ *  a wiped pm DB invalidates old tokens). Next call re-mints. */
+export function invalidatePlaneServiceToken(): void {
+  cachedServiceToken = null;
+}
+
+async function getCachedSession(): Promise<string> {
+  if (cachedSession) return cachedSession;
+  await ensureInstanceSetup();
+  cachedSession = await getAppSessionCookie();
+  return cachedSession;
+}
+
+/** Session-cached app-API call; one retry with a fresh sign-in on 401. */
+async function planeAppApiAuthed<T>(
+  path: string,
+  init: { method?: "GET" | "POST" | "PATCH"; body?: unknown } = {},
+): Promise<{ status: number; body: T }> {
+  let res = await planeAppApi<T>(path, await getCachedSession(), init);
+  if (res.status === 401) {
+    cachedSession = null;
+    res = await planeAppApi<T>(path, await getCachedSession(), init);
+  }
+  return res;
+}
+
+export interface PlaneWorkspaceSummary {
+  id: string;
+  slug: string;
+  name: string;
+}
+
+/** Workspaces visible to the bootstrap admin (it owns every workspace
+ *  pm-onboard creates). Uses `/api/users/me/workspaces/` — the bare
+ *  `GET /api/workspaces/` list 400s on CE v0.24.1 (cache-decorator quirk). */
+export async function listPlaneWorkspaces(): Promise<PlaneWorkspaceSummary[]> {
+  const { status, body } = await planeAppApiAuthed<
+    Array<{ id: string; slug: string; name: string }>
+  >("/api/users/me/workspaces/");
+  if (status !== 200 || !Array.isArray(body)) {
+    throw new PmBootstrapError(
+      `Plane workspace list returned ${status}`,
+      "PM_UNREACHABLE",
+    );
+  }
+  return body.map((w) => ({ id: w.id, slug: w.slug, name: w.name }));
+}
+
+/** Free-text work-item search via the app API's global-search endpoint
+ *  (`results.issue`); the v1 token API has no search at all. */
+export async function searchPlaneWorkItems(
+  workspaceSlug: string,
+  query: string,
+): Promise<unknown[]> {
+  const { status, body } = await planeAppApiAuthed<{
+    results?: { issue?: unknown[] };
+  }>(
+    `/api/workspaces/${encodeURIComponent(workspaceSlug)}/search/?search=${encodeURIComponent(query)}`,
+  );
+  if (status !== 200) {
+    throw new PmBootstrapError(
+      `Plane search returned ${status}`,
+      "PM_UNREACHABLE",
+    );
+  }
+  return body?.results?.issue ?? [];
+}
+
+/**
+ * The Plane service API token for `/api/v1/` calls (X-Api-Key header).
+ * Minted lazily through the first workspace (service tokens are
+ * workspace-scoped to mint but authenticate the admin user everywhere)
+ * and cached for the process lifetime; the mint endpoint is idempotent
+ * so a restart re-fetches the SAME token.
+ *
+ * Throws NO_WORKSPACE until PM onboarding has created a workspace —
+ * every v1 route is workspace-scoped anyway, so there is nothing the
+ * token could be used for before that.
+ */
+export async function getPlaneServiceToken(): Promise<string> {
+  if (cachedServiceToken) return cachedServiceToken;
+  const workspaces = await listPlaneWorkspaces();
+  if (workspaces.length === 0) {
+    throw new PmBootstrapError(
+      "no Plane workspace exists yet — complete PM onboarding first",
+      "NO_WORKSPACE",
+    );
+  }
+  const slug = workspaces[0].slug;
+  const res = await planeAppApiAuthed<{ token?: string }>(
+    `/api/workspaces/${encodeURIComponent(slug)}/service-api-tokens/`,
+    { method: "POST", body: { label: "droplet-orchestrator" } },
+  );
+  if ((res.status !== 200 && res.status !== 201) || !res.body?.token) {
+    throw new PmBootstrapError(
+      `Plane service-token mint returned ${res.status}`,
+      "TOKEN_MINT_FAILED",
+    );
+  }
+  cachedServiceToken = res.body.token;
+  logger.info(
+    { workspaceSlug: slug, created: res.status === 201, event_type: "pm_service_token_ready" },
+    "Plane service API token ready",
+  );
+  return cachedServiceToken;
 }

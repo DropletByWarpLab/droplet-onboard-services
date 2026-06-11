@@ -32,6 +32,11 @@
 import pino from "pino";
 
 import { config } from "../config.js";
+import {
+  getPlaneServiceToken,
+  invalidatePlaneServiceToken,
+  PmBootstrapError,
+} from "./pm-bootstrap.service.js";
 import type { Role } from "./jwt.service.js";
 
 const logger = pino({ name: "pm-rbac" });
@@ -111,15 +116,39 @@ export async function syncPlaneUserRole(input: {
   const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
 
   try {
-    const resp = await fetch(url.toString(), {
-      method: "PATCH",
-      headers: {
-        "X-API-Key": config.DROPLET_PM_ADMIN_TOKEN,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ role: target }),
-      signal: controller.signal,
-    });
+    // WARP-867: authenticate with the runtime-minted Plane service token —
+    // DROPLET_PM_ADMIN_TOKEN was never registered in Plane and 401'd every
+    // call. PmBootstrapError (PM down / no workspace yet) → PM_API_ERROR.
+    let apiKey: string;
+    try {
+      apiKey = await getPlaneServiceToken();
+    } catch (err) {
+      if (err instanceof PmBootstrapError) {
+        throw new PmRbacError(
+          `Plane service token unavailable: ${err.message}`,
+          "PM_API_ERROR",
+        );
+      }
+      throw err;
+    }
+
+    const doPatch = (key: string): Promise<globalThis.Response> =>
+      fetch(url.toString(), {
+        method: "PATCH",
+        headers: {
+          "X-API-Key": key,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ role: target }),
+        signal: controller.signal,
+      });
+
+    let resp = await doPatch(apiKey);
+    if (resp.status === 401) {
+      // Stale cached token (e.g. Plane DB wiped) — re-mint once.
+      invalidatePlaneServiceToken();
+      resp = await doPatch(await getPlaneServiceToken());
+    }
 
     if (resp.status === 403) {
       // OQ5 fallback — Plane refused the change (typically when the

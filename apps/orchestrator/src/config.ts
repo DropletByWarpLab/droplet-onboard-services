@@ -77,9 +77,11 @@ const envSchema = z.object({
   // frontend is built with basePath:"" so it must own an origin root — the
   // gateway serves it on :8443, not under /pm/.
   DROPLET_PM_WEB_URL: z.string().url().default("https://droplet-ai.local:8443"),
-  // tools-core handlers/pm/* use this for server-to-server LLM-driven tool
-  // dispatch (WARP-508/509). Per-user attribution flows through Plane's
-  // OIDC-linked service tokens, not this admin key.
+  // WARP-867: NOT a Plane API key — Plane CE only authenticates its own
+  // server-generated service tokens, which pm-bootstrap.service mints at
+  // runtime and serves via GET /api/pm/service-token. This secret is the
+  // seed for the bootstrap admin identity (the Plane admin password is
+  // HMAC-derived from it — see planeAdminPassword()).
   DROPLET_PM_ADMIN_TOKEN: z.string().default(""),
   // WARP-860 — identity of the auto-bootstrapped Plane instance admin.
   // Plane CE has no OIDC and no headless setup, so pm-bootstrap.service.ts

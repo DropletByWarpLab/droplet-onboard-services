@@ -20,15 +20,14 @@ import type { ToolContext } from "../../../src/types.js";
 // --- Mock the Plane client; keep the real PlaneApiError class. ---
 // `vi.hoisted` so the fns exist when the (hoisted) vi.mock factory runs.
 const mockClient = vi.hoisted(() => ({
-  listWorkspaces: vi.fn(),
   listProjects: vi.fn(),
   listWorkItems: vi.fn(),
   getWorkItem: vi.fn(),
-  searchWorkItems: vi.fn(),
   createWorkItem: vi.fn(),
   updateWorkItem: vi.fn(),
   addWorkItemComment: vi.fn(),
   transitionWorkItem: vi.fn(),
+  setPlaneApiToken: vi.fn(),
 }));
 
 vi.mock("../../../src/handlers/pm/pm-client.js", async () => {
@@ -53,9 +52,15 @@ import pmUpdateWorkItem from "../../../src/handlers/pm/update-work-item.js";
 import pmAddWorkItemComment from "../../../src/handlers/pm/add-work-item-comment.js";
 import pmTransitionWorkItem from "../../../src/handlers/pm/transition-work-item.js";
 
-// The pm handlers ignore ToolContext entirely (they reach Plane through
-// the module-level client), so a bare cast is sufficient.
-const ctx = {} as ToolContext;
+// WARP-867: handlers now touch ctx.http.orchestrator — the v1-backed ones
+// via ensurePlaneToken (best-effort, failure-tolerant), and
+// pm_list_workspaces / pm_search_work_items as their primary data path
+// (Plane CE's /api/v1/ has neither route, so they proxy through the
+// orchestrator's app-API endpoints).
+const orchestratorGet = vi.fn();
+const ctx = {
+  http: { orchestrator: { get: orchestratorGet } },
+} as unknown as ToolContext;
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -72,24 +77,33 @@ describe("pm_list_workspaces", () => {
     expect(pmListWorkspaces.requiresConfirmation).toBe(false);
   });
 
-  it("returns the workspace list on success", async () => {
+  it("returns the workspace list from the orchestrator proxy", async () => {
     const workspaces = [{ id: "w1", slug: "acme", name: "Acme" }];
-    mockClient.listWorkspaces.mockResolvedValueOnce(workspaces);
+    orchestratorGet.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ workspaces }),
+    });
     const res = await pmListWorkspaces.handler({}, ctx);
+    expect(orchestratorGet).toHaveBeenCalledWith(
+      "/api/pm/workspaces",
+      expect.objectContaining({ headers: { Accept: "application/json" } }),
+    );
     expect(res.ok).toBe(true);
     if (res.ok) expect(res.data).toEqual({ workspaces });
   });
 
-  it("maps any PlaneApiError to PM_API_ERROR (no 404 special-case on a list)", async () => {
-    mockClient.listWorkspaces.mockRejectedValueOnce(new PlaneApiError("boom", 404));
+  it("maps a non-OK proxy response to PM_API_ERROR with the upstream message", async () => {
+    orchestratorGet.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      json: async () => ({ error: "Plane is not ready yet" }),
+    });
     const res = await pmListWorkspaces.handler({}, ctx);
     expect(res.ok).toBe(false);
-    if (!res.ok) expect(res.error.code).toBe("PM_API_ERROR");
-  });
-
-  it("rethrows a non-PlaneApiError", async () => {
-    mockClient.listWorkspaces.mockRejectedValueOnce(new Error("unexpected"));
-    await expect(pmListWorkspaces.handler({}, ctx)).rejects.toThrow("unexpected");
+    if (!res.ok) {
+      expect(res.error.code).toBe("PM_API_ERROR");
+      expect(res.error.message).toBe("Plane is not ready yet");
+    }
   });
 });
 
@@ -211,17 +225,29 @@ describe("pm_search_work_items", () => {
     expect(pmSearchWorkItems.requiresConfirmation).toBe(false);
   });
 
-  it("forwards query + per_page", async () => {
-    mockClient.searchWorkItems.mockResolvedValueOnce([]);
-    await pmSearchWorkItems.handler(
+  it("forwards workspace_slug + query to the proxy and caps with per_page", async () => {
+    orchestratorGet.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ work_items: [1, 2, 3, 4, 5, 6] }),
+    });
+    const res = await pmSearchWorkItems.handler(
       { workspace_slug: "acme", query: "login bug", per_page: 5 },
       ctx,
     );
-    expect(mockClient.searchWorkItems).toHaveBeenCalledWith("acme", "login bug", 5);
+    expect(orchestratorGet).toHaveBeenCalledWith(
+      "/api/pm/search?workspace_slug=acme&query=login+bug",
+      expect.objectContaining({ headers: { Accept: "application/json" } }),
+    );
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.data).toEqual({ work_items: [1, 2, 3, 4, 5] });
   });
 
-  it("maps PlaneApiError to PM_API_ERROR", async () => {
-    mockClient.searchWorkItems.mockRejectedValueOnce(new PlaneApiError("x", 400));
+  it("maps a non-OK proxy response to PM_API_ERROR", async () => {
+    orchestratorGet.mockResolvedValueOnce({
+      ok: false,
+      status: 502,
+      json: async () => ({ error: "Plane unreachable" }),
+    });
     const res = await pmSearchWorkItems.handler(
       { workspace_slug: "acme", query: "q" },
       ctx,

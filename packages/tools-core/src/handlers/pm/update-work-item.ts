@@ -1,6 +1,7 @@
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 
 import { updateWorkItem, PlaneApiError } from "./pm-client.js";
+import { ensurePlaneToken } from "./ensure-token.js";
 
 const inputSchema = {
   type: "object",
@@ -27,7 +28,10 @@ interface Args {
   labels?: string[];
 }
 
-async function handler(args: Record<string, unknown>, _ctx: ToolContext): Promise<ToolResult> {
+async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+  // WARP-867: inject the orchestrator-minted Plane service token before
+  // the first /api/v1/ call (DROPLET_PM_ADMIN_TOKEN was never valid).
+  await ensurePlaneToken(ctx);
   const { workspace_slug, project_id, work_item_id, ...fields } = args as unknown as Args;
   try {
     const work_item = await updateWorkItem(

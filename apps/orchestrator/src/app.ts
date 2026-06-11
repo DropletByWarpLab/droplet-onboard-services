@@ -33,6 +33,7 @@ import { createScimRouter } from "./routes/scim.js";
 import { createMatterRouter } from "./routes/matter.js";
 import { createPmWebhookRouter } from "./routes/pm-webhook.js";
 import { createPmOnboardRouter } from "./routes/pm-onboard.js";
+import { createPmProxyRouter } from "./routes/pm-proxy.js";
 import { createPmMobileRouter } from "./routes/mobile/pm.js";
 import { createPmRouter } from "./routes/pm.js";
 import { createScenesRouter } from "./routes/scenes.js";
@@ -237,6 +238,9 @@ export function createApp(prisma: PrismaClient) {
   app.use("/api", createMatterRouter(prisma));
   // WARP-507 — Plane onboarding endpoint for the setup wizard.
   app.use(createPmOnboardRouter());
+  // WARP-867 — Plane service-token mint + app-API proxies (workspace
+  // list, search) for the v1 surfaces Plane CE doesn't provide.
+  app.use(createPmProxyRouter());
   // WARP-513 — read-only mobile wrappers around Plane upstream
   // (workspaces, projects, work-items). iOS/Android/Windows consume.
   app.use(createPmMobileRouter());
