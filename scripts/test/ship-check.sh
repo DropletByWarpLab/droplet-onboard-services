@@ -1163,16 +1163,12 @@ run_check_lifecycle_naming() {
   #   inference-engine.local). Affected files: scripts/lib/single-box.sh,
   #   scripts/setup.sh.
   #
-  #   Tier 2 — free-text "PoC" comment mentions (per-line allowlist; these are
-  #   stable prose, few, and not a naming surface — they describe the
-  #   single-box deployment's history). Each is a comment, none names a
-  #   profile/env/flag/service:
-  #     docker/docker-compose.yml:181   "The dev/POC compromise: override …"
-  #     docker/docker-compose.yml:1131  "Defaults verified live on POC 2026-05-15."
-  #     .env.example:33                 "Single-box PoC (Ollama in the bundled …"
-  #     scripts/lib/secrets.sh:117      "(single-box PoC). Override before …"
-  #     scripts/lib/secrets.sh:159      "works out of the box on the single-box PoC"
-  #     scripts/lib/secrets.sh:164      "which is why every fresh PoC …"
+  #   Tier 2 — RETIRED (WARP-850). The six free-text "PoC" comment mentions
+  #   that used to live here (docker-compose.yml ×2, .env.example ×1,
+  #   scripts/lib/secrets.sh ×3) were line-number-pinned, which broke the
+  #   moment WARP-850's compose/secrets insertions shifted them. Instead of
+  #   re-pinning, the prose itself was de-PoC'd ("single-box" framing), so
+  #   the allowlist is empty. Add new entries ONLY with a retirement owner.
   #
   # TOKEN PATTERN: whole-word `poc` / `prototype` (case-insensitive — catches
   # `poc`, `POC`, `PoC`, `prototype`) PLUS structural `-dev` / `-test` /
@@ -1213,13 +1209,10 @@ run_check_lifecycle_naming() {
   fi
 
   # --- Tier 2 per-line allowlist (file:line → 1). Documented above. --------
+  # Empty since WARP-850 retired the grandfathered prose mentions. The
+  # declaration stays so the lookup below keeps working when a future
+  # (owner-tracked) entry is added.
   declare -A allowlist
-  allowlist["docker/docker-compose.yml:181"]=1
-  allowlist["docker/docker-compose.yml:1131"]=1
-  allowlist[".env.example:33"]=1
-  allowlist["scripts/lib/secrets.sh:117"]=1
-  allowlist["scripts/lib/secrets.sh:159"]=1
-  allowlist["scripts/lib/secrets.sh:164"]=1
 
   # Tier 1 grandfathered legacy identifiers — stripped from each line BEFORE
   # the token re-scan, so they're allowed wherever they appear (robust to

@@ -624,6 +624,9 @@ EOF
   upsert_env ROUTING_SERVICE_URL "http://${bridge_gw}:8080"
   upsert_env SWITCH_SERVICE_URL  "http://${bridge_gw}:8081"
   upsert_env DISPLAY_SERVICE_URL "http://${bridge_gw}:8082"
+  # WARP-850: matter-controller is the 4th host-net service on the ladder
+  # (:8083) — same WARP-806 reasoning as the three above.
+  upsert_env DROPLET_MATTER_SERVICE_URL "http://${bridge_gw}:8083"
   # Device-bridge (host process, binds 0.0.0.0:9090) — same WARP-806 reasoning
   # as the three host services above: the orchestrator's config default is
   # http://host.docker.internal:9090 (docker0), exactly the default WARP-806

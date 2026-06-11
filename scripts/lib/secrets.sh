@@ -151,7 +151,7 @@ generate_env() {
   pm_web_url="${DROPLET_PM_WEB_URL:-https://droplet-ai.local:8443}"
 
   # OLLAMA_URL — picks the bundled droplet-ollama container by default
-  # (single-box PoC). Override before running setup.sh for a multi-box
+  # (single-box). Override before running setup.sh for a multi-box
   # deployment with a separate inference host on the LAN, e.g.
   # `OLLAMA_URL=http://192.168.50.197:11434 ./scripts/setup.sh`.
   # The legacy `JETSON_OLLAMA_URL` env var is still read as a fallback
@@ -193,13 +193,13 @@ NEXTCLOUD_URL=http://nextcloud:80
 # --- AI Gateway ---
 AI_GATEWAY_URL=http://ai-gateway:8000
 # Default targets the bundled \`droplet-ollama\` container on the compose
-# default network — works out of the box on the single-box PoC where
+# default network — works out of the box on the single-box deployment where
 # Ollama runs alongside the rest of the stack. Override BEFORE running
 # setup.sh if you're deploying against a separate inference host on the
 # LAN (\`OLLAMA_URL=http://192.168.50.197:11434 ./scripts/setup.sh\`).
 # The old \`inference-engine.local\` mDNS name does NOT resolve from
-# inside Docker containers on Linux/macOS, which is why every fresh PoC
-# install used to come up with a broken model list and ai-gateway logs
+# inside Docker containers on Linux/macOS, which is why every fresh
+# single-box install used to come up with a broken model list and ai-gateway logs
 # full of "Temporary failure in name resolution". See CLAUDE.md
 # "Ollama call path" for the full rationale.
 OLLAMA_URL=${ollama_url}

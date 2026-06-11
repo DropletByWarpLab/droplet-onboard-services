@@ -161,6 +161,8 @@ prepare_and_build() {
     web-dashboard
     ai-gateway
     routing
+    # WARP-850: Matter controller host-network sidecar (BLE + LAN mDNS)
+    matter-controller
     # full profile (hardware-facing services)
     file-indexer
     switch

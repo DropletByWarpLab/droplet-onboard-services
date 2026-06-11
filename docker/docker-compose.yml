@@ -200,7 +200,7 @@ services:
       # for FIPS 140-3 compliance (WARP-229). That cipher set rejects the
       # non-FIPS ciphers Postgres uses for its TLS handshake — Prisma's
       # libpq then fails to open ANY connection with P1011: "library has
-      # no ciphers". The dev/POC compromise: override the openssl config
+      # no ciphers". The single-box compromise: override the openssl config
       # back to the system default so Prisma can talk to the sibling-
       # container Postgres over TLS. Production FIPS for orchestrator is
       # a separate effort (split migration into init container without
@@ -1234,7 +1234,7 @@ services:
       # hex string to .env; if missing the container generates an
       # ephemeral one and logs it loudly (NOT for production).
       - OPS_TOKEN=${OPS_TOKEN:-}
-      # Per-service probe URLs. Defaults verified live on POC 2026-05-15.
+      # Per-service probe URLs. Defaults verified live on the single-box 2026-05-15.
       # Empty default = container exists but exposes no HTTP /health
       # endpoint; surfaces as `unknown` (relies on /ops/containers for
       # liveness). Override any with a real URL via .env to enable.
