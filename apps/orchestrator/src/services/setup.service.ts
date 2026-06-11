@@ -222,6 +222,38 @@ export async function setSetupStep(
 }
 
 /**
+ * WARP-867 — monotonic variant of `setSetupStep` for flows that may legally
+ * REPLAY an early wizard step on a box whose persisted pointer is already
+ * further along. The claim route is the canonical caller: after a reboot the
+ * wizard can restart from `welcome` (a cold load that raced the state probe),
+ * the customer re-enters the code, and the ALREADY_CLAIMED short-circuit used
+ * to call `setSetupStep(STEP_AFTER_CLAIM)` unconditionally — dragging a
+ * pointer like `internet` back to `account`. Once the owner row exists the
+ * account step is unsatisfiable (POST /auth/setup 409s OWNER_EXISTS), so the
+ * regressed pointer parked the box on a dead-end resume target.
+ *
+ * Floor semantics: persist `step` only when the CURRENT pointer orders
+ * strictly before it in `SETUP_STEPS` (wizard order); otherwise return the
+ * stored state untouched. The comparison uses `getSetupState`, so the
+ * WARP-804 claim→account healing applies before ordering.
+ */
+export async function advanceSetupStepToAtLeast(
+  prisma: PrismaClient,
+  step: string,
+): Promise<SetupState> {
+  if (!isSetupStep(step)) {
+    throw new InvalidSetupStepError(step);
+  }
+  const current = await getSetupState(prisma);
+  const currentIdx = SETUP_STEPS.indexOf(current.setupStep);
+  const targetIdx = SETUP_STEPS.indexOf(step);
+  if (currentIdx >= targetIdx) {
+    return current;
+  }
+  return setSetupStep(prisma, step);
+}
+
+/**
  * Flip the appliance to "ready" — the wizard-finish transition. Explicit
  * column write; the dashboard never infers ready-ness from `setupStep`.
  * Also lands the step on `done` so the persisted row is internally

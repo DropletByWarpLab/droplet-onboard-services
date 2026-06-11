@@ -441,3 +441,76 @@ describe("POST /api/setup/claim (PR #373)", () => {
     expect(r.body.claimed).toBe(true);
   });
 });
+
+/**
+ * WARP-867 — the resume pointer across claim re-runs. A wizard that cold
+ * started from welcome (reboot raced the state probe) replays the claim step
+ * on an already-claimed box; reconciling the pointer there must use FLOOR
+ * semantics: heal a stranded early pointer forward, never drag a
+ * further-along one back onto the unsatisfiable account step.
+ */
+describe("POST /api/setup/claim — resume-pointer floor on re-claim (WARP-867)", () => {
+  beforeEach(() => {
+    process.env.DEVICE_SECRET = "test-device-secret";
+    cacheStore.clear();
+  });
+  afterEach(() => {
+    delete process.env.DEVICE_SECRET;
+    cacheStore.clear();
+    vi.clearAllMocks();
+  });
+
+  it("does NOT regress a further-along pointer on an already-claimed re-run", async () => {
+    const prisma = createPrismaMock();
+    prisma.claimCode._seed({
+      codeHash: hashClaimCode("DRPL-7K2Q-9F4M"),
+      state: "consumed",
+      usedAt: new Date(),
+    });
+    // The interrupted run got the customer to the internet step before the
+    // reboot — that pointer is the only way back to where they were.
+    await prisma.applianceSetup.upsert({
+      where: { id: "singleton" },
+      create: { id: "singleton", setupStep: "internet" },
+      update: { setupStep: "internet" },
+    });
+
+    const res = await request(buildApp(prisma))
+      .post("/api/setup/claim")
+      .send({ code: "DRPL-7K2Q-9F4M" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.already_claimed).toBe(true);
+    // The persisted pointer survives the replayed claim untouched.
+    expect(
+      (prisma._appliance() as { setupStep?: string } | null)?.setupStep,
+    ).toBe("internet");
+  });
+
+  it("heals a pointer stranded BEFORE account on an already-claimed re-run", async () => {
+    const prisma = createPrismaMock();
+    prisma.claimCode._seed({
+      codeHash: hashClaimCode("DRPL-7K2Q-9F4M"),
+      state: "consumed",
+      usedAt: new Date(),
+    });
+    // E.g. the original claim's best-effort step persist failed, leaving the
+    // pointer at welcome on a claimed box.
+    await prisma.applianceSetup.upsert({
+      where: { id: "singleton" },
+      create: { id: "singleton", setupStep: "welcome" },
+      update: { setupStep: "welcome" },
+    });
+
+    const res = await request(buildApp(prisma))
+      .post("/api/setup/claim")
+      .send({ code: "DRPL-7K2Q-9F4M" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.already_claimed).toBe(true);
+    // The pointer moved FORWARD onto the post-claim step.
+    expect(
+      (prisma._appliance() as { setupStep?: string } | null)?.setupStep,
+    ).toBe("account");
+  });
+});

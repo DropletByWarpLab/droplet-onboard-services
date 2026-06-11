@@ -25,7 +25,7 @@ vi.mock("framer-motion", async () => {
 });
 
 vi.mock("@/lib/auth", () => ({
-  useAuth: () => ({ completeSetup: vi.fn() }),
+  useAuth: () => ({ completeSetup: vi.fn(), setupState: { appliance: "unclaimed", setupStep: "welcome", userTourCompleted: false } }),
 }));
 
 const setupAdminMock = vi.fn(async () => undefined);
@@ -45,6 +45,9 @@ const sendChatMock = vi.fn();
 const postTeamInviteMock = vi.fn();
 
 vi.mock("@/lib/api", () => ({
+  // WARP-867 — AccountStep probes setup status on mount to pick its mode;
+  // "required" keeps these walks on the normal create form.
+  checkSetupRequired: vi.fn(async () => "required"),
   // Forwarders use typed Parameters<typeof …> so spread inference passes
   // tsc --noEmit (the original `...args: unknown[]` form tripped TS2556
   // because the real signatures aren't variadic). Uncovered by WARP-482's

@@ -34,7 +34,7 @@ vi.mock("framer-motion", async () => {
 });
 
 vi.mock("@/lib/auth", () => ({
-  useAuth: () => ({ completeSetup: vi.fn() }),
+  useAuth: () => ({ completeSetup: vi.fn(), setupState: { appliance: "unclaimed", setupStep: "welcome", userTourCompleted: false } }),
 }));
 
 // Spy the persist call so we can assert the wifi/address sub-steps map to the
@@ -44,6 +44,9 @@ const patchSetupStepMock = vi.fn(async (_setupStep: string) => undefined);
 const fetchDuckDnsStatusMock = vi.fn(async () => ({ configured: false }));
 
 vi.mock("@/lib/api", () => ({
+  // WARP-867 — AccountStep probes setup status on mount to pick its mode;
+  // "required" keeps these walks on the normal create form.
+  checkSetupRequired: vi.fn(async () => "required"),
   setupAdmin: vi.fn(async () => undefined),
   patchSetupStep: (setupStep: string) => patchSetupStepMock(setupStep),
   loginUser: vi.fn(async () => undefined),

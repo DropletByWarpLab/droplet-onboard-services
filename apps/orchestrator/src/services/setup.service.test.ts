@@ -34,6 +34,7 @@ import { SetupStep } from "@prisma/client";
 import {
   getSetupState,
   setSetupStep,
+  advanceSetupStepToAtLeast,
   markApplianceReady,
   markTourCompleted,
   isSetupStep,
@@ -296,5 +297,67 @@ describe("setup.service — claim step is satisfied once the box is claimed (WAR
     // A read of the same unclaimed box still reports `claim` (the step shows).
     const state = await getSetupState(prisma as never);
     expect(state.setupStep).toBe("claim");
+  });
+});
+
+/**
+ * WARP-867 — `advanceSetupStepToAtLeast` is the floor-semantics variant the
+ * claim route uses: heal a pointer stranded at/before the target, never drag
+ * a further-along pointer backward. The field-report dead-end was a resume
+ * pointer regressed onto `account` — unsatisfiable once the owner row exists
+ * (POST /auth/setup 409s OWNER_EXISTS).
+ */
+describe("setup.service — advanceSetupStepToAtLeast floor semantics (WARP-867)", () => {
+  it("advances a pointer that is still BEFORE the target", async () => {
+    const prisma = createPrismaMock();
+    await setSetupStep(prisma as never, "welcome");
+    const state = await advanceSetupStepToAtLeast(prisma as never, STEP_AFTER_CLAIM);
+    expect(state.setupStep).toBe(STEP_AFTER_CLAIM);
+    expect((prisma._peek() as Record<string, unknown>).setupStep).toBe(
+      STEP_AFTER_CLAIM,
+    );
+  });
+
+  it("does NOT regress a pointer that is already PAST the target", async () => {
+    const prisma = createPrismaMock();
+    await setSetupStep(prisma as never, "internet");
+    const state = await advanceSetupStepToAtLeast(prisma as never, STEP_AFTER_CLAIM);
+    // Returned AND persisted state keep the further-along pointer.
+    expect(state.setupStep).toBe("internet");
+    expect((prisma._peek() as Record<string, unknown>).setupStep).toBe(
+      "internet",
+    );
+  });
+
+  it("is a no-op when the pointer already EQUALS the target", async () => {
+    const prisma = createPrismaMock();
+    await setSetupStep(prisma as never, STEP_AFTER_CLAIM);
+    const upsertSpy = vi.spyOn(prisma.applianceSetup, "upsert");
+    const state = await advanceSetupStepToAtLeast(prisma as never, STEP_AFTER_CLAIM);
+    expect(state.setupStep).toBe(STEP_AFTER_CLAIM);
+    // Equal pointer → pure read, no write at all.
+    expect(upsertSpy).not.toHaveBeenCalled();
+  });
+
+  it("orders by WIZARD order (SETUP_STEPS), and a claimed box's healed `claim` read participates", async () => {
+    // Stored `claim` on a CLAIMED box reads as STEP_AFTER_CLAIM (WARP-804), so
+    // advancing to STEP_AFTER_CLAIM is a no-op rather than a real write —
+    // the healing and the floor compose.
+    const prisma = createPrismaMock({ consumedClaims: 1 });
+    // Write the raw row directly via upsert to park the STORED value on claim.
+    await prisma.applianceSetup.upsert({
+      where: { id: "singleton" },
+      create: { id: "singleton", setupStep: "claim" },
+      update: { setupStep: "claim" },
+    });
+    const state = await advanceSetupStepToAtLeast(prisma as never, STEP_AFTER_CLAIM);
+    expect(state.setupStep).toBe(STEP_AFTER_CLAIM);
+  });
+
+  it("rejects an unknown step with InvalidSetupStepError", async () => {
+    const prisma = createPrismaMock();
+    await expect(
+      advanceSetupStepToAtLeast(prisma as never, "not-a-step"),
+    ).rejects.toBeInstanceOf(InvalidSetupStepError);
   });
 });

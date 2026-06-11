@@ -3,6 +3,7 @@
 import { useCallback, useRef, useState } from "react";
 import { useAuth } from "@/lib/auth";
 import { patchSetupStep } from "@/lib/api";
+import { DropletMark } from "@/components/DropletMark";
 import { WelcomeStep } from "@/components/setup/steps/WelcomeStep";
 import { ClaimStep } from "@/components/setup/steps/ClaimStep";
 import { AccountStep } from "@/components/setup/steps/AccountStep";
@@ -95,21 +96,94 @@ function persistedStep(step: Step): string | null {
   return step;
 }
 
+/**
+ * WARP-867 — the resume gate. The step machine below hydrates its step from
+ * `setupState.setupStep` in a useState INITIALIZER, which runs exactly once
+ * on first render. AuthGate deliberately renders public pages before the
+ * boot probes settle (the blank-login fix), so on every cold load of /setup
+ * the context's `setupState` was still `null` at that first render — the
+ * initializer saw `undefined`, resumed to "welcome", and the persisted step
+ * was ignored for the whole session. A mid-wizard refresh (or a reboot)
+ * always restarted the customer at the beginning, which is how the field
+ * report's box walked itself back into the unsatisfiable account step.
+ *
+ * So: hold the wizard unmounted until the lifecycle probe resolves, showing
+ * the same calm connecting/retry surface AuthGate uses for protected pages
+ * (it suppresses that surface on public pages — this page owns it instead).
+ * Once `setupState` is non-null we mount the machine exactly once with a
+ * concrete `initialStep`; later context updates still never yank the
+ * customer mid-wizard because the machine keeps its own state from there.
+ */
 export default function SetupPage() {
-  const { setupState } = useAuth();
+  const {
+    setupState,
+    setupProbeError,
+    setupAutoRetrying,
+    retrySetupProbe,
+  } = useAuth();
+
+  if (setupState == null) {
+    return (
+      <div className="grid min-h-dvh place-items-center bg-surface-primary p-4">
+        <div role="status" aria-live="polite" className="text-center max-w-sm">
+          <div
+            className={`flex items-center justify-center mx-auto mb-3${
+              setupProbeError === null || setupAutoRetrying
+                ? " animate-pulse motion-reduce:animate-none"
+                : ""
+            }`}
+          >
+            <DropletMark size={32} className="text-accent" />
+          </div>
+          {setupProbeError === null || setupAutoRetrying ? (
+            <>
+              <p className="type-headline text-label-primary mb-2">
+                Connecting to your Droplet…
+              </p>
+              <p className="type-subheadline text-label-tertiary">
+                Picking up where you left off.
+              </p>
+            </>
+          ) : (
+            <>
+              <p className="type-headline text-label-primary mb-2">
+                Can&apos;t reach your appliance
+              </p>
+              <p className="type-subheadline text-label-tertiary mb-4">
+                {setupProbeError}
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  void retrySetupProbe();
+                }}
+                className="rounded-full bg-accent px-5 py-2 text-on-accent type-subheadline"
+              >
+                Retry
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return <SetupWizard initialStep={resumeStepFrom(setupState.setupStep)} />;
+}
+
+function SetupWizard({ initialStep }: { initialStep: Step }) {
   // Hydrate once from the persisted step (resumability). useState's
   // initializer runs only on first render, so later context updates don't
-  // yank the customer back mid-wizard.
-  const [step, setStepState] = useState<Step>(() =>
-    resumeStepFrom(setupState?.setupStep),
-  );
+  // yank the customer back mid-wizard. The page above guarantees
+  // `initialStep` was derived from a RESOLVED setup state (WARP-867).
+  const [step, setStepState] = useState<Step>(initialStep);
   // Furthest step reached this session — drives the clickable rail so a step
   // the customer already completed stays navigable after they jump back to an
   // earlier one. Seeded from the resumed step so a refresh mid-wizard keeps
   // everything up to here unlocked. Not persisted: the orchestrator's
   // `setupStep` is the single resume pointer; "furthest reached" is session UI.
   const [maxReachedIdx, setMaxReachedIdx] = useState<number>(() =>
-    Math.max(0, STEPS.indexOf(resumeStepFrom(setupState?.setupStep))),
+    Math.max(0, STEPS.indexOf(initialStep)),
   );
   const [displayName, setDisplayName] = useState("");
   const [discoveredCount, setDiscoveredCount] = useState(0);

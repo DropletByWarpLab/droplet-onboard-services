@@ -117,8 +117,17 @@ export function AuthGate({ children }: { children: ReactNode }) {
       return;
     }
 
-    // If authenticated and on login/setup page, redirect to dashboard.
-    if (user && isPublicPage) {
+    // If authenticated and on login/setup page, redirect to dashboard —
+    // but ONLY once the appliance is claimed. The wizard authenticates the
+    // owner at the account step (auto-login), so while the appliance is
+    // still "unclaimed" an authenticated user on /setup is the NORMAL
+    // mid-wizard state, not a stray sign-in. Bouncing them to "/" here while
+    // the unclaimed branch above bounces "/" straight back to /setup was an
+    // infinite redirect loop on every mid-wizard refresh after the account
+    // step (WARP-867). /setup stays the stable home until the finish PATCH
+    // flips the appliance ready; an authenticated user on /login with an
+    // unclaimed box is routed into the wizard by the first branch above.
+    if (user && isPublicPage && !applianceUnclaimed) {
       router.replace("/");
       return;
     }
