@@ -139,7 +139,7 @@ COPY --from=builder /app/packages/auth-policy/package.json ./packages/auth-polic
 COPY --from=builder /app/packages/auth-policy/dist ./packages/auth-policy/dist
 COPY --from=builder /app/services/mcp-server/package.json ./services/mcp-server/package.json
 COPY --from=builder /app/services/mcp-server/dist ./services/mcp-server/dist
-# WARP-856: the embedding + reranker gRPC clients in the mcp-server stdio
+# WARP-858: the embedding + reranker gRPC clients in the mcp-server stdio
 # child use @grpc/proto-loader to read inference.proto AT RUNTIME (their
 # last-resort lookup is /app/proto/inference.proto). Without this copy,
 # every `search_content` call in a containerized orchestrator throws at

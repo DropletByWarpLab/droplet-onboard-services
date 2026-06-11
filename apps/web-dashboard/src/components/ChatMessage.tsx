@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import type { ChatMessage as ChatMessageType, ChatToolCall } from "@/lib/types";
 import { CitationCard } from "@/components/citations/CitationCard";
+import { AttachmentChip } from "@/components/AttachmentChip";
 import { mimeFromPath } from "@/lib/mime-icons";
 import "@/components/chat/thinking.css";
 
@@ -459,24 +460,54 @@ export const ChatMessage = memo(function ChatMessage({
           is projected into the canonical CitationHit DTO; chat citations
           don't carry a per-chunk `anchor` yet, so they fall through to
           <FileCitation> (the same chip the old <CitationChip> rendered). */}
+      {/* WARP-859 — files attached on this user turn, snapshotted from the
+          composer at send time so the document rides onto the message it
+          was sent with. Read-only (no remove); the live chip in the
+          composer cleared on send. */}
+      {isUser && message.attachments && message.attachments.length > 0 ? (
+        <div
+          data-testid="message-attachments"
+          className="flex flex-wrap gap-1.5 mt-0.5 justify-end"
+        >
+          {message.attachments.map((a) => (
+            <AttachmentChip key={a.localId} attachment={a} />
+          ))}
+        </div>
+      ) : null}
       {!isUser && hasCitations ? (
         <div
           data-testid="chat-citations"
           className="flex flex-wrap gap-1.5 mt-0.5"
         >
-          {citations!.map((c, i) => (
-            <CitationCard
-              key={`${c.source}:${c.path}:${c.pageNumber ?? ""}:${i}`}
-              hit={{
-                fileId: c.brainItemId ? String(c.brainItemId) : c.path,
-                filename: c.path.split("/").pop() || c.path,
-                mimeType: c.mimeType ?? mimeFromPath(c.path),
-                chunkText: c.snippet ?? "",
-                score: c.score ?? 0,
-                anchor: null,
-              }}
-            />
-          ))}
+          {citations!.map((c, i) => {
+            // WARP-859 — resolve the click target per source so a brain
+            // citation never links to `/files/<absolute-brain-path>` (the
+            // 404 Romain hit). Brain items download via the authenticated
+            // brain route keyed by item id; a brain hit missing that id has
+            // no routable target (its `path` is a `/data/brain-memory/...`
+            // filesystem path), so pass `null` → non-link chip. Nextcloud
+            // hits fall through to FileCitation's `/files/<fileId>` default.
+            const href =
+              c.source === "brain"
+                ? c.brainItemId
+                  ? `/api/files/brain/${encodeURIComponent(String(c.brainItemId))}/download`
+                  : null
+                : undefined;
+            return (
+              <CitationCard
+                key={`${c.source}:${c.path}:${c.pageNumber ?? ""}:${i}`}
+                hit={{
+                  fileId: c.brainItemId ? String(c.brainItemId) : c.path,
+                  filename: c.path.split("/").pop() || c.path,
+                  mimeType: c.mimeType ?? mimeFromPath(c.path),
+                  chunkText: c.snippet ?? "",
+                  score: c.score ?? 0,
+                  anchor: null,
+                  href,
+                }}
+              />
+            );
+          })}
         </div>
       ) : null}
       {/* WARP-844: user-row edit affordance — pencil on hover, mirroring

@@ -40,7 +40,7 @@ export function SessionHeader({ chatId, attachments }: Props) {
   // (still uploading, queued for indexing) won't have a row yet, but
   // are reasonable to include since the export route reads the row,
   // not the indexer state. Anything past `pending` qualifies.
-  const exportable = attachments.filter(
+  const exportable = (attachments ?? []).filter(
     (a) => a.status === "ready" || a.status === "indexing",
   );
   if (exportable.length === 0) {

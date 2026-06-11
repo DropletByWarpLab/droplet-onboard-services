@@ -23,6 +23,7 @@ import { useChat } from "@/lib/hooks/useChat";
 
 interface ProbeValue {
   attachments: ReturnType<typeof useChat>["attachments"];
+  sessionAttachments: ReturnType<typeof useChat>["sessionAttachments"];
   attach: ReturnType<typeof useChat>["attach"];
   removeAttachment: ReturnType<typeof useChat>["removeAttachment"];
   clearAttachments: ReturnType<typeof useChat>["clearAttachments"];
@@ -32,22 +33,26 @@ interface ProbeValue {
 
 function Probe({
   onValue,
+  onMessages,
   chatId,
   projectId,
 }: {
   onValue: (v: ProbeValue) => void;
+  onMessages?: (m: ReturnType<typeof useChat>["messages"]) => void;
   chatId?: string;
   projectId?: string | null;
 }) {
   const hook = useChat({ chatId, projectId });
   onValue({
     attachments: hook.attachments,
+    sessionAttachments: hook.sessionAttachments,
     attach: hook.attach,
     removeAttachment: hook.removeAttachment,
     clearAttachments: hook.clearAttachments,
     sendMessage: hook.sendMessage,
     loadConversation: hook.loadConversation,
   });
+  onMessages?.(hook.messages);
   return null;
 }
 
@@ -387,16 +392,20 @@ describe("useChat.attach (WARP-203)", () => {
     expect(mockGetBrainMemoryItems).toHaveBeenCalledWith({
       originatingChatId: "conv-55",
     });
+    // WARP-859 — on reload the chat's attachments are conversation history,
+    // not staged input: they land in the conversation-scoped session list
+    // (drives SessionHeader), and the composer stays empty.
     await waitFor(() => {
-      expect(value!.attachments).toHaveLength(2);
+      expect(value!.sessionAttachments).toHaveLength(2);
     });
-    expect(value!.attachments[0]).toMatchObject({
+    expect(value!.attachments).toHaveLength(0);
+    expect(value!.sessionAttachments[0]).toMatchObject({
       itemId: "bmi-9",
       filename: "report.pdf",
       status: "ready",
     });
     // queued_for_transcription renders as the indexing chip state.
-    expect(value!.attachments[1]).toMatchObject({
+    expect(value!.sessionAttachments[1]).toMatchObject({
       itemId: "bmi-10",
       status: "indexing",
     });
@@ -488,6 +497,61 @@ describe("useChat.attach (WARP-203)", () => {
     expect(second2.projectId).toBeUndefined();
   });
 
+  it("WARP-859: a staged attachment rides onto the sent message and clears the composer", async () => {
+    const quick = (convId: string) =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(c) {
+            c.enqueue(
+              new TextEncoder().encode(
+                `event: done\ndata: {"iterations":1,"stop_reason":"model_done"}\n\n`,
+              ),
+            );
+            c.close();
+          },
+        }),
+        {
+          status: 200,
+          headers: {
+            "Content-Type": "text/event-stream",
+            "X-Conversation-Id": convId,
+          },
+        },
+      );
+    mockUploadBrainFile.mockResolvedValueOnce({ itemId: "bmi-77", status: "ready" });
+    mockSendChat.mockResolvedValueOnce(quick("conv-77"));
+
+    let value: ProbeValue | null = null;
+    let messages: ReturnType<typeof useChat>["messages"] = [];
+    render(
+      <Probe
+        onValue={(v) => (value = v)}
+        onMessages={(m) => (messages = m)}
+      />,
+    );
+
+    await act(async () => {
+      await value!.attach(new File(["x"], "report.pdf", { type: "application/pdf" }));
+    });
+    expect(value!.attachments).toHaveLength(1);
+
+    await act(async () => {
+      await value!.sendMessage("summarize this", "m1");
+    });
+
+    // The turn sent the itemId…
+    expect(mockSendChat.mock.calls[0]![0]).toMatchObject({
+      attachments: [{ itemId: "bmi-77" }],
+    });
+    // …the composer cleared…
+    expect(value!.attachments).toHaveLength(0);
+    // …the file rode onto the user message…
+    const userMsg = messages.find((m) => m.role === "user");
+    expect(userMsg?.attachments?.[0]).toMatchObject({ itemId: "bmi-77", filename: "report.pdf" });
+    // …and it stays attached to the conversation for SessionHeader.
+    expect(value!.sessionAttachments.map((a) => a.itemId)).toEqual(["bmi-77"]);
+  });
+
   it("refuses the 9th attachment with a visible failed chip (review fix)", async () => {
     mockUploadBrainFile.mockResolvedValue({ itemId: "bmi", status: "indexing" });
     let value: ProbeValue | null = null;
@@ -571,7 +635,8 @@ describe("useChat.attach (WARP-203)", () => {
       await value!.loadConversation("conv-B");
     });
     await waitFor(() => {
-      expect(value!.attachments.map((a) => a.itemId)).toEqual(["bmi-B"]);
+      // WARP-859 — rehydration lands in the conversation-scoped list now.
+      expect(value!.sessionAttachments.map((a) => a.itemId)).toEqual(["bmi-B"]);
     });
 
     // The slow loser resolves late — it must NOT clobber B's chips.
@@ -590,7 +655,7 @@ describe("useChat.attach (WARP-203)", () => {
       });
       await loadA;
     });
-    expect(value!.attachments.map((a) => a.itemId)).toEqual(["bmi-B"]);
+    expect(value!.sessionAttachments.map((a) => a.itemId)).toEqual(["bmi-B"]);
   });
 
   it("ignores WS messages that aren't brain/indexed or for a different itemId", async () => {

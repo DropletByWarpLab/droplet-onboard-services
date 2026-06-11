@@ -41,6 +41,19 @@ export interface CitationHit {
   chunkText: string;
   score: number;
   anchor: Anchor | null;
+  /**
+   * WARP-859 — resolved click target for the fall-through `<FileCitation>`
+   * chip. Lets the call site pick the right route per source instead of
+   * always linking `/files/<fileId>`:
+   *   - a string → use it verbatim (e.g. brain items →
+   *     `/api/files/brain/<id>/download`),
+   *   - `null`   → the hit has no routable target (a brain chunk whose
+   *     brainItemId is missing — its stored path is an unroutable
+   *     `/data/brain-memory/...` filesystem path), so render a plain,
+   *     non-navigable chip rather than a 404 link,
+   *   - `undefined` → legacy default `/files/<fileId>` (Nextcloud hits).
+   */
+  href?: string | null;
 }
 
 export interface CitationCardProps {
