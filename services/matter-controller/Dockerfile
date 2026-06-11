@@ -92,7 +92,11 @@ WORKDIR /app/services/matter-controller
 # Fail the BUILD if the BLE package can't resolve from the service's
 # runtime location — this class of packaging gap must never again
 # surface only as a runtime degrade log on a customer box.
-RUN node -e "require.resolve('@matter/nodejs-ble')"
+# Also assert the exact pinned version: if the lockfile ever drifts
+# (e.g. caret ranges regenerate @matter/nodejs-ble@0.16.11), this gate
+# fails loudly here rather than silently splitting the Environment.default
+# singleton again and disabling BLE on a shipped box (WARP-850).
+RUN node -e "const v=require('@matter/nodejs-ble/package.json').version; if(v!=='0.16.10') throw new Error('version-skew: expected 0.16.10, got '+v)"
 
 # Port follows the host-service ladder: routing 8080, switch 8081,
 # display 8082, matter-controller 8083. The container runs with

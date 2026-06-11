@@ -18,13 +18,29 @@
  * native load is lazy, deferred to first scanner access, which this
  * test deliberately never triggers).
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Environment } from "@matter/main";
 import { Ble } from "@matter/main/protocol";
 
 describe("BLE registration package identity (real modules, no seams)", () => {
+  beforeEach(() => {
+    // Assert no stale Ble state from a previous broken test — catches
+    // singleton-split scenarios early with a clear error rather than a
+    // confusing failure inside the test body.
+    expect(
+      Environment.default.has(Ble),
+      "Ble was already registered before test started — check for cross-suite singleton leak"
+    ).toBe(false);
+  });
+
   afterEach(() => {
-    // Deregister so no Ble instance leaks into other suites.
+    // Best-effort deregistration: sets ble.enable=false on OUR
+    // Environment.default, which unregisters the hook IFF the install
+    // hook from @matter/nodejs-ble was bound to the same singleton.
+    // In a version-skewed tree the nested copy of @matter/general owns
+    // a different Environment.default, so this call is a no-op for that
+    // copy — cleanup is silently incomplete, but the beforeEach guard
+    // in the next test will catch any residual state.
     Environment.default.vars.set("ble.enable", false);
   });
 
