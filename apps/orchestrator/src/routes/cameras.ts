@@ -669,6 +669,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if ("requiresConfirmation" in result && result.requiresConfirmation) {
         return res.status(202).json({
           status: "confirmation_required",
+          operation: "restart_frigate",
           confirmationToken: result.confirmationToken,
           reason: result.reason,
           tier: result.tier,
@@ -1349,6 +1350,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if ("requiresConfirmation" in result && result.requiresConfirmation) {
         return res.status(202).json({
           status: "confirmation_required",
+          operation: "camera_subnet_setup",
           confirmationToken: result.confirmationToken,
           reason: result.reason,
           tier: result.tier,
@@ -1393,6 +1395,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if ("requiresConfirmation" in result && result.requiresConfirmation) {
         return res.status(202).json({
           status: "confirmation_required",
+          operation: "camera_subnet_teardown",
           confirmationToken: result.confirmationToken,
           reason: result.reason,
           tier: result.tier,
@@ -1427,6 +1430,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   router.post("/cameras/command/confirm", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       const userId = req.user?.id;
+      if (!userId) return res.status(401).json({ error: 'UNAUTHENTICATED' });
       const { confirmationToken, operation } = req.body ?? {};
       if (!confirmationToken || typeof confirmationToken !== "string") {
         return res.status(400).json({ error: "Missing 'confirmationToken'", code: "TOKEN_MISSING" });
@@ -1473,12 +1477,12 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
             method: "POST",
             headers: { "Content-Type": "application/json", ...serviceAuthHeaders() },
             body: JSON.stringify({
-              vlan_id: (p.vlanId as number) || 100,
-              subnet: (p.subnet as string) || "192.168.100.1",
-              netmask: (p.netmask as string) || "255.255.255.0",
-              dhcp_start: (p.dhcpStart as number) || 100,
-              dhcp_limit: (p.dhcpLimit as number) || 150,
-              leasetime: (p.leasetime as string) || "12h",
+              vlan_id: (p.vlanId as number) ?? 100,
+              subnet: (p.subnet as string) ?? "192.168.100.1",
+              netmask: (p.netmask as string) ?? "255.255.255.0",
+              dhcp_start: (p.dhcpStart as number) ?? 100,
+              dhcp_limit: (p.dhcpLimit as number) ?? 150,
+              leasetime: (p.leasetime as string) ?? "12h",
             }),
             signal: AbortSignal.timeout(30000),
           });
@@ -1632,6 +1636,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if ("requiresConfirmation" in result && result.requiresConfirmation) {
         return res.status(202).json({
           status: "confirmation_required",
+          operation: "disable_camera",
           confirmationToken: result.confirmationToken,
           reason: result.reason,
           tier: result.tier,
@@ -1666,6 +1671,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if ("requiresConfirmation" in result && result.requiresConfirmation) {
         return res.status(202).json({
           status: "confirmation_required",
+          operation: "delete_camera",
           confirmationToken: result.confirmationToken,
           reason: result.reason,
           tier: result.tier,

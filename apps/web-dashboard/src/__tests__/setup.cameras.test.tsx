@@ -30,6 +30,8 @@ vi.mock("@/lib/auth", () => ({
 
 const fetchDiscoveredCamerasMock = vi.fn();
 const acceptDiscoveredCameraMock = vi.fn();
+const fetchCamerasMock = vi.fn();
+const removeCameraMock = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   setupAdmin: vi.fn(async () => undefined),
@@ -58,6 +60,8 @@ vi.mock("@/lib/api", () => ({
   updateDriveLabel: vi.fn(),
   fetchDiscoveredCameras: () => fetchDiscoveredCamerasMock(),
   acceptDiscoveredCamera: (id: string) => acceptDiscoveredCameraMock(id),
+  fetchCameras: () => fetchCamerasMock(),
+  removeCamera: (name: string) => removeCameraMock(name),
   // VPN step is downstream; lands on preCheck (endpointConfigured: false)
   // so tests can navigate it with one extra Skip click.
   fetchVpnStatus: vi.fn(async () => ({
@@ -168,6 +172,10 @@ describe("setup Cameras step (WARP-174)", () => {
   beforeEach(() => {
     fetchDiscoveredCamerasMock.mockReset();
     acceptDiscoveredCameraMock.mockReset();
+    fetchCamerasMock.mockReset();
+    removeCameraMock.mockReset();
+    // Default: no existing cameras (no stale-camera section).
+    fetchCamerasMock.mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -297,6 +305,20 @@ describe("setup Cameras step (WARP-174)", () => {
       );
     });
     expect(screen.getByTestId("welcome-flourish")).toBeInTheDocument();
+  });
+
+  it("F2 — fetchCameras error shows error state instead of auto-skipping", async () => {
+    // discovery returns nothing; fetchCameras throws (API temporarily down).
+    fetchDiscoveredCamerasMock.mockResolvedValue([]);
+    fetchCamerasMock.mockRejectedValue(new Error("network error"));
+    render(<SetupPage />);
+    await advanceToCameras();
+
+    // Must NOT have auto-skipped — stays on CamerasStep with an error message.
+    expect(screen.queryByTestId("welcome-flourish")).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/couldn't load existing cameras/i),
+    ).toBeInTheDocument();
   });
 
   it("when every accept call fails, stays on step + shows error", async () => {

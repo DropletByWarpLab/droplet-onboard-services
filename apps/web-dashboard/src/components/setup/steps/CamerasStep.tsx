@@ -64,18 +64,26 @@ export function CamerasStep({
     try {
       // The cameras list rides along but must not block the step —
       // discovery is the primary signal, so its failure (service off in
-      // dev) still skips, while a cameras-list hiccup just hides the
-      // "Already set up" section.
-      const [list, all] = await Promise.all([
+      // dev) still skips. A fetchCameras failure is different: the user
+      // may have existing cameras we can't see, so we surface an error
+      // and let them retry rather than auto-skipping into data loss.
+      let all: CameraInfo[] = [];
+      let camerasError = false;
+      const [list] = await Promise.all([
         fetchDiscoveredCameras(),
-        fetchCameras().catch(() => [] as CameraInfo[]),
+        fetchCameras().then(
+          (result) => { all = result; },
+          () => { camerasError = true; },
+        ),
       ]);
       // GET /cameras includes pending discovered rows (enabled=false) —
       // filter to enabled so they don't duplicate the discovered cards.
       const enabled = all.filter((c) => c.enabled);
       setCameras(list);
       setExisting(enabled);
-      if (list.length === 0 && enabled.length === 0) {
+      if (camerasError) {
+        setError("Couldn't load existing cameras — check your connection and try again.");
+      } else if (list.length === 0 && enabled.length === 0) {
         (onAutoSkip ?? onSkip)();
       }
     } catch {
