@@ -10,6 +10,10 @@ openpyxl>=3.1.0
 beautifulsoup4>=4.12.0
 # WARP-201 RAG Phase 1 extractors
 pypdf>=4.0
+# WARP-862: fallback extractor for PDFs whose per-glyph positioning makes
+# pypdf emit letter-spaced token soup ("t a p  t o o l s"). pdfminer
+# rebuilds words from glyph geometry. MIT-licensed.
+pdfminer.six==20260107
 readability-lxml>=0.8
 lxml_html_clean>=0.1
 pytesseract>=0.3.10

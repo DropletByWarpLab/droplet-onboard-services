@@ -208,6 +208,46 @@ def _section_path_by_page(reader: PdfReader, n_pages: int) -> dict[int, list[str
     return by_page
 
 
+def _looks_letter_spaced(text: str, *, min_tokens: int = 20) -> bool:
+    """Detect pypdf's per-glyph failure mode (WARP-862).
+
+    PDFs that position every glyph individually (design-tool exports are
+    the common case) make ``page.extract_text()`` emit each character or
+    tiny glyph cluster as its own whitespace-separated token::
+
+        D ro p le t
+        t a p  t o o l s  —  a  w i d e n i n g  s w i t c h i n g - c o s t
+
+    Such text is useless for retrieval: no real words for lexical search,
+    token soup for the embedder. Heuristic: among alphabetic tokens, an
+    overwhelming majority being 1–2 characters long never happens in real
+    prose (typical English averages ~4–5 chars/word) but is the defining
+    signature of glyph-split output. Short samples are skipped — a page
+    holding only "Q 4" must not trip the fallback.
+    """
+    tokens = [t for t in text.split() if any(c.isalpha() for c in t)]
+    if len(tokens) < min_tokens:
+        return False
+    tiny = sum(1 for t in tokens if len(t) <= 2)
+    return tiny / len(tokens) > 0.6
+
+
+def _pdfminer_page_texts(path: str, n_pages: int) -> list[str]:
+    """Per-page re-extraction via pdfminer.six (the WARP-862 fallback).
+
+    pdfminer reconstructs words from glyph positions itself, which handles
+    the per-glyph PDFs pypdf mangles. Imported lazily so the common path
+    never pays for it; its noisy per-font warnings are squelched to ERROR.
+    """
+    logging.getLogger("pdfminer").setLevel(logging.ERROR)
+    from pdfminer.high_level import extract_text as pdfminer_extract_text
+
+    return [
+        pdfminer_extract_text(path, page_numbers=[i]) or ""
+        for i in range(n_pages)
+    ]
+
+
 def extract(path: str) -> ExtractedDoc:
     reader = PdfReader(path)
     spans: list[Span] = []
@@ -217,17 +257,42 @@ def extract(path: str) -> ExtractedDoc:
     n_pages = len(reader.pages)
     section_by_page = _section_path_by_page(reader, n_pages)
 
+    page_texts: dict[int, str] = {}
     for idx, page in enumerate(reader.pages, start=1):
         try:
-            text = page.extract_text() or ""
+            page_texts[idx] = page.extract_text() or ""
         except Exception as exc:  # noqa: BLE001 — per-page failure must not abort the file
             logger.warning(
                 "extractor.span.failed",
                 extra={"extractor": "pdf", "page": idx, "error": str(exc)},
             )
             warnings.append(f"page_{idx}_extract_failed")
-            continue
 
+    # WARP-862 — pypdf emits per-glyph token soup for PDFs that position
+    # every character individually. When the document as a whole reads as
+    # letter-spaced, re-extract through pdfminer.six, which rebuilds words
+    # from glyph geometry. Whole-document check (not per-page) so a short
+    # spaced heading on an otherwise-fine page doesn't flip backends.
+    extractor_name = "pdf"
+    combined = "\n".join(page_texts.values())
+    if combined.strip() and _looks_letter_spaced(combined):
+        try:
+            miner_texts = _pdfminer_page_texts(path, n_pages)
+        except Exception as exc:  # noqa: BLE001 — fallback failure keeps pypdf output
+            logger.warning(
+                "extractor.pdfminer_fallback_failed",
+                extra={"extractor": "pdf", "error": str(exc)},
+            )
+            warnings.append("pdfminer_fallback_failed")
+        else:
+            for idx in range(1, n_pages + 1):
+                if miner_texts[idx - 1].strip():
+                    page_texts[idx] = miner_texts[idx - 1]
+            extractor_name = "pdf+pdfminer"
+            warnings.append("pypdf_letter_spaced_used_pdfminer")
+
+    for idx in range(1, n_pages + 1):
+        text = page_texts.get(idx, "")
         if not text or not text.strip():
             continue
 
@@ -245,8 +310,8 @@ def extract(path: str) -> ExtractedDoc:
         spans=spans,
         language=None,
         metadata={
-            "extractor_name": "pdf",
-            "extractor_version": "2",
+            "extractor_name": extractor_name,
+            "extractor_version": "3",
             "page_count": n_pages,
         },
         warnings=warnings,
