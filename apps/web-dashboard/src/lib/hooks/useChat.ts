@@ -1221,7 +1221,15 @@ export function useChat(options: UseChatOptions = {}) {
                 ? "aborted"
                 : m.status === "streaming"
                   ? "interrupted"
-                  : undefined
+                  : // WARP-854 — ghost turns: rows persisted as `completed`
+                    // with no visible output and no tool activity (the
+                    // pre-fix empty-completion bug, e.g. context-window
+                    // overflow). Without this they render as nothing at
+                    // all; mapping to "failed" surfaces the retry chip.
+                    m.content.trim().length === 0 &&
+                      (!m.toolCalls || m.toolCalls.length === 0)
+                    ? "failed"
+                    : undefined
             : undefined;
         rebuilt.push({
           id: m.id,
