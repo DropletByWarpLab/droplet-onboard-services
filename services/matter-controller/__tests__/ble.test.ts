@@ -8,123 +8,166 @@
  * IP-only commissioning when there is no adapter or the native HCI
  * module can't load (Windows dev installs, CI without Bluetooth).
  *
- * The native module is consumed via dynamic import behind an injected
- * `importModule` seam, and the adapter probe + matter.js environment
- * are injected too — so these tests run on any host, with no Bluetooth
- * and no real @matter/nodejs-ble side effects.
+ * Registration is EXPLICIT — construct NodeJsBle, env.set(Ble, ...) —
+ * never via the package's install hook. The first deployed image
+ * proved the hook can land in a parallel ESM module universe (CJS dist
+ * + dynamic import() → ESM @matter/general → different
+ * ServiceBundle/Environment singletons) and silently no-op. These
+ * fakes therefore model a PLAIN key/value environment with NO hook
+ * behavior: if the production code ever regresses to relying on a
+ * side effect, every registration assertion here goes red.
  */
 import { describe, it, expect, vi } from "vitest";
 import { registerBleAtProcessStart, type BleEnvLike } from "../src/ble.js";
 
-function fakeEnv(opts: {
-  registersOnEnable?: boolean;
-  scannerThrows?: boolean;
-} = {}): BleEnvLike & { vars: { set: ReturnType<typeof vi.fn> }; setCalls: Record<string, unknown> } {
-  const { registersOnEnable = true, scannerThrows = false } = opts;
-  const setCalls: Record<string, unknown> = {};
-  let bleRegistered = false;
+class FakeNodeJsBle {
+  readonly options: { environment: unknown };
+  private readonly scannerThrows: boolean;
+  constructor(options: { environment: unknown }, scannerThrows = false) {
+    this.options = options;
+    this.scannerThrows = scannerThrows;
+  }
+  get scanner(): unknown {
+    if (this.scannerThrows) {
+      throw new Error("ENOENT: bluetooth-hci-socket bindings not found");
+    }
+    return {};
+  }
+}
+
+function fakeEnv(): BleEnvLike & {
+  varCalls: Record<string, unknown>;
+  registrations: Map<unknown, unknown>;
+  deleteCalls: Array<{ type: unknown; instance: unknown }>;
+} {
+  const varCalls: Record<string, unknown> = {};
+  const registrations = new Map<unknown, unknown>();
+  const deleteCalls: Array<{ type: unknown; instance: unknown }> = [];
   return {
-    setCalls,
+    varCalls,
+    registrations,
+    deleteCalls,
     vars: {
       set: vi.fn((name: string, value: unknown) => {
-        setCalls[name] = value;
-        // Emulate @matter/nodejs-ble's install.js ServiceBundle hook:
-        // flipping `ble.enable` (de)registers the Ble implementation.
-        if (name === "ble.enable") {
-          bleRegistered = registersOnEnable && value === true;
-        }
+        varCalls[name] = value;
       }),
     },
-    has: () => bleRegistered,
-    get: () => ({
-      get scanner() {
-        if (scannerThrows) {
-          throw new Error("ENOENT: bluetooth-hci-socket bindings not found");
-        }
-        return {};
-      },
-    }),
+    set: (type, instance) => {
+      registrations.set(type, instance);
+    },
+    delete: (type, instance) => {
+      deleteCalls.push({ type, instance });
+      registrations.delete(type);
+    },
+    has: (type) => registrations.has(type),
+    get: (type) => registrations.get(type),
+  };
+}
+
+function moduleWith(scannerThrows = false) {
+  return {
+    NodeJsBle: class extends FakeNodeJsBle {
+      constructor(options: { environment: unknown }) {
+        super(options, scannerThrows);
+      }
+    },
   };
 }
 
 describe("registerBleAtProcessStart", () => {
-  it("registers BLE and reports bleCommissioning=true on the happy path", async () => {
+  it("constructs NodeJsBle against the given environment, registers it explicitly, and reports true", async () => {
     const env = fakeEnv();
-    const importModule = vi.fn().mockResolvedValue({});
     const result = await registerBleAtProcessStart({
       hciId: 0,
       environment: env,
       adapterPresent: () => true,
-      importModule,
+      loadModule: () => moduleWith(),
     });
     expect(result.bleCommissioning).toBe(true);
-    expect(importModule).toHaveBeenCalledOnce();
-    expect(env.setCalls["ble.hci.id"]).toBe(0);
-    expect(env.setCalls["ble.enable"]).toBe(true);
+    expect(env.varCalls["ble.hci.id"]).toBe(0);
+    // Exactly one explicit registration, and the instance was built
+    // against OUR environment (not some ambient singleton).
+    expect(env.registrations.size).toBe(1);
+    const instance = [...env.registrations.values()][0] as FakeNodeJsBle;
+    expect(instance.options.environment).toBe(env);
   });
 
-  it("passes a non-default HCI id through to the matter.js environment", async () => {
+  it("passes a non-default HCI id through before construction", async () => {
     const env = fakeEnv();
     await registerBleAtProcessStart({
       hciId: 1,
       environment: env,
       adapterPresent: () => true,
-      importModule: vi.fn().mockResolvedValue({}),
+      loadModule: () => moduleWith(),
     });
-    expect(env.setCalls["ble.hci.id"]).toBe(1);
+    expect(env.varCalls["ble.hci.id"]).toBe(1);
   });
 
   it("degrades to IP-only without touching matter.js when no adapter is present", async () => {
     const env = fakeEnv();
-    const importModule = vi.fn();
+    const loadModule = vi.fn();
     const result = await registerBleAtProcessStart({
       hciId: 0,
       environment: env,
       adapterPresent: () => false,
-      importModule,
+      loadModule,
     });
     expect(result.bleCommissioning).toBe(false);
     expect(result.reason).toMatch(/adapter/i);
-    expect(importModule).not.toHaveBeenCalled();
+    expect(loadModule).not.toHaveBeenCalled();
     expect(env.vars.set).not.toHaveBeenCalled();
+    expect(env.registrations.size).toBe(0);
   });
 
-  it("degrades to IP-only when @matter/nodejs-ble cannot be imported", async () => {
+  it("degrades to IP-only when @matter/nodejs-ble cannot be loaded", async () => {
     const env = fakeEnv();
     const result = await registerBleAtProcessStart({
       hciId: 0,
       environment: env,
       adapterPresent: () => true,
-      importModule: vi.fn().mockRejectedValue(new Error("Cannot find module")),
+      loadModule: () => {
+        throw new Error("Cannot find module");
+      },
     });
     expect(result.bleCommissioning).toBe(false);
-    expect(result.reason).toMatch(/import|module/i);
-    expect(env.setCalls["ble.enable"]).toBeUndefined();
+    expect(result.reason).toMatch(/load|module/i);
+    expect(env.registrations.size).toBe(0);
   });
 
-  it("degrades to IP-only when the env never registers a Ble implementation", async () => {
-    const env = fakeEnv({ registersOnEnable: false });
+  it("degrades to IP-only when NodeJsBle construction throws, registering nothing", async () => {
+    const env = fakeEnv();
     const result = await registerBleAtProcessStart({
       hciId: 0,
       environment: env,
       adapterPresent: () => true,
-      importModule: vi.fn().mockResolvedValue({}),
+      loadModule: () => ({
+        NodeJsBle: class {
+          constructor() {
+            throw new Error("incompatible environment");
+          }
+        },
+      }),
     });
     expect(result.bleCommissioning).toBe(false);
+    expect(result.reason).toMatch(/construction/i);
+    expect(env.registrations.size).toBe(0);
   });
 
-  it("unregisters and degrades when the native HCI stack fails to load", async () => {
-    const env = fakeEnv({ scannerThrows: true });
+  it("rolls the registration back and degrades when the native HCI stack fails to load", async () => {
+    const env = fakeEnv();
     const result = await registerBleAtProcessStart({
       hciId: 0,
       environment: env,
       adapterPresent: () => true,
-      importModule: vi.fn().mockResolvedValue({}),
+      loadModule: () => moduleWith(true),
     });
     expect(result.bleCommissioning).toBe(false);
     expect(result.reason).toMatch(/native|hci|load/i);
     // The failed registration must be rolled back so matter.js never
-    // advertises a BLE transport it can't actually drive.
-    expect(env.setCalls["ble.enable"]).toBe(false);
+    // advertises a BLE transport it can't actually drive — and the
+    // delete must hand back the SAME instance that was registered.
+    expect(env.registrations.size).toBe(0);
+    expect(env.deleteCalls).toHaveLength(1);
+    expect(env.deleteCalls[0].instance).toBeInstanceOf(FakeNodeJsBle);
   });
 });

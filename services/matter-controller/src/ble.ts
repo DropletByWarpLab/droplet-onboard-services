@@ -14,18 +14,23 @@
  *    to load. Windows dev installs and CI runners hit those paths;
  *    capabilities must reflect reality, not aspiration.
  *
- * How registration works (verified against @matter/nodejs-ble 0.16.10):
- * importing the package runs its `install.js` side effect, which adds a
- * ServiceBundle hook watching the `ble.enable` environment variable.
- * Setting `ble.enable=true` constructs a `NodeJsBle` (reading the HCI
- * id from `ble.hci.id`) and calls `env.set(Ble, instance)`; setting it
- * back to false deletes the registration. matter.js's controller then
- * answers `env.has(Ble)` — the same check behind its "BLE is not
- * enabled on this platform" log line and our capabilities surface.
+ * How registration works — EXPLICITLY, not via the package's install
+ * hook. @matter/nodejs-ble ships an `install.js` side effect that adds
+ * a ServiceBundle hook watching `ble.enable`, but the hook registers
+ * into whichever @matter/general module instance the LOADER bound. Our
+ * dist is CJS; a dynamic `import()` from it loads the package's ESM
+ * build, whose `#general` binds the ESM copy of @matter/general — a
+ * DIFFERENT ServiceBundle/Environment singleton than our CJS one. On
+ * the box that meant the hook fired in a parallel universe and
+ * `env.has(Ble)` stayed false (first deployed sidecar image, WARP-850
+ * on-box regression #3). So we do not depend on the hook at all:
+ * load the module, construct `NodeJsBle({ environment })` ourselves,
+ * and `env.set(Ble, instance)` keyed to OUR `Ble` symbol — the same
+ * module universe the CommissioningController checks.
  *
  * The noble native module is loaded LAZILY by matter.js (first access
- * to the scanner), so a successful `ble.enable=true` alone would let a
- * box without working HCI bindings claim bleCommissioning=true and then
+ * to the scanner), so a successful registration alone would let a box
+ * without working HCI bindings claim bleCommissioning=true and then
  * explode on the first commissioning attempt. We force the load here by
  * touching `.scanner` once, and roll the registration back if it
  * throws.
@@ -43,8 +48,15 @@ const logger = pino({ name: "matter-controller-ble" });
  */
 export interface BleEnvLike {
   vars: { set(name: string, value: unknown): void };
+  set(type: unknown, instance: unknown): void;
+  delete(type: unknown, instance?: unknown): void;
   has(type: unknown): boolean;
   get(type: unknown): unknown;
+}
+
+/** The slice of @matter/nodejs-ble this module consumes. */
+export interface NodeJsBleModuleLike {
+  NodeJsBle: new (options: { environment: unknown }) => unknown;
 }
 
 export interface BleRegistrationResult {
@@ -59,8 +71,13 @@ export interface RegisterBleOptions {
   environment: BleEnvLike;
   /** Test seam — defaults to the /sys/class/bluetooth/hci<N> probe. */
   adapterPresent?: (hciId: number) => boolean;
-  /** Test seam — defaults to dynamic-importing @matter/nodejs-ble. */
-  importModule?: () => Promise<unknown>;
+  /**
+   * Test seam — defaults to `require("@matter/nodejs-ble")`. require,
+   * NOT dynamic import(): our dist is CJS, and import() would load the
+   * package's ESM build, binding the ESM copy of @matter/general — the
+   * split-singleton failure this module exists to avoid.
+   */
+  loadModule?: () => NodeJsBleModuleLike | Promise<NodeJsBleModuleLike>;
 }
 
 /**
@@ -80,7 +97,9 @@ export async function registerBleAtProcessStart(
     hciId,
     environment,
     adapterPresent = defaultAdapterPresent,
-    importModule = () => import("@matter/nodejs-ble"),
+    loadModule = () =>
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      require("@matter/nodejs-ble") as NodeJsBleModuleLike,
   } = options;
 
   if (!adapterPresent(hciId)) {
@@ -89,22 +108,36 @@ export async function registerBleAtProcessStart(
     return { bleCommissioning: false, reason };
   }
 
+  let mod: NodeJsBleModuleLike;
   try {
-    await importModule();
+    mod = await loadModule();
   } catch (err) {
-    const reason = `@matter/nodejs-ble import failed (${(err as Error).message}) — BLE commissioning disabled, IP-only`;
+    const reason = `@matter/nodejs-ble load failed (${(err as Error).message}) — BLE commissioning disabled, IP-only`;
     logger.warn(reason);
     return { bleCommissioning: false, reason };
   }
 
-  // The install hook reads ble.hci.id when constructing NodeJsBle, so
-  // the id must be in place BEFORE ble.enable flips true.
+  // NodeJsBle reads the HCI id from the environment's vars, so it must
+  // be in place BEFORE construction.
   environment.vars.set("ble.hci.id", hciId);
-  environment.vars.set("ble.enable", true);
+
+  let instance: unknown;
+  try {
+    instance = new mod.NodeJsBle({ environment });
+  } catch (err) {
+    const reason = `NodeJsBle construction failed (${(err as Error).message}) — BLE commissioning disabled, IP-only`;
+    logger.warn(reason);
+    return { bleCommissioning: false, reason };
+  }
+
+  // Explicit registration keyed to OUR Ble symbol — never the install
+  // hook (see the header: the hook can land in a parallel ESM module
+  // universe and silently no-op).
+  environment.set(Ble, instance);
 
   if (!environment.has(Ble)) {
     const reason =
-      "ble.enable was set but no Ble implementation registered — BLE commissioning disabled, IP-only";
+      "environment rejected the Ble registration — BLE commissioning disabled, IP-only";
     logger.warn(reason);
     return { bleCommissioning: false, reason };
   }
@@ -115,7 +148,7 @@ export async function registerBleAtProcessStart(
   try {
     void (environment.get(Ble) as Ble).scanner;
   } catch (err) {
-    environment.vars.set("ble.enable", false);
+    environment.delete(Ble, instance);
     const reason = `BLE native HCI stack failed to load (${(err as Error).message}) — registration rolled back, IP-only`;
     logger.warn(reason);
     return { bleCommissioning: false, reason };

@@ -52,6 +52,12 @@ COPY services/matter-controller ./services/matter-controller
 RUN npm run -w @droplet/fips-selftest build
 RUN npm run -w @droplet/matter-controller build
 
+# npm is free to place a workspace dependency in the workspace's OWN
+# node_modules instead of hoisting it to the root (it did exactly that
+# with @matter/nodejs-ble@0.16.10) — guarantee the directory exists so
+# the run stage's COPY below is valid under either placement.
+RUN mkdir -p services/matter-controller/node_modules
+
 # --- Run stage ---
 FROM node:20-bookworm-slim
 
@@ -76,8 +82,21 @@ COPY --from=builder /app/packages/fips-selftest/package.json ./packages/fips-sel
 COPY --from=builder /app/packages/fips-selftest/dist ./packages/fips-selftest/dist
 COPY --from=builder /app/services/matter-controller/package.json ./services/matter-controller/package.json
 COPY --from=builder /app/services/matter-controller/dist ./services/matter-controller/dist
+# Workspace-level node_modules — without this the first deployed image
+# shipped WITHOUT @matter/nodejs-ble (npm placed it here, the run stage
+# only copied the root tree) and the box silently degraded to IP-only.
+COPY --from=builder /app/services/matter-controller/node_modules ./services/matter-controller/node_modules
 
 WORKDIR /app/services/matter-controller
+
+# Fail the BUILD if the BLE package can't resolve from the service's
+# runtime location — this class of packaging gap must never again
+# surface only as a runtime degrade log on a customer box.
+# Also assert the exact pinned version: if the lockfile ever drifts
+# (e.g. caret ranges regenerate @matter/nodejs-ble@0.16.11), this gate
+# fails loudly here rather than silently splitting the Environment.default
+# singleton again and disabling BLE on a shipped box (WARP-850).
+RUN node -e "const v=require('@matter/nodejs-ble/package.json').version; if(v!=='0.16.10') throw new Error('version-skew: expected 0.16.10, got '+v)"
 
 # Port follows the host-service ladder: routing 8080, switch 8081,
 # display 8082, matter-controller 8083. The container runs with
