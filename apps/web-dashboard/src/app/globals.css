@@ -163,10 +163,32 @@
     @apply bg-surface-secondary text-label-primary antialiased;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    /* Ensure the background color spans the full viewport on short-content pages */
+    min-height: 100dvh;
   }
 
   ::selection {
     background: var(--color-accent-subtle);
+  }
+
+  /* Themed scrollbars — thin, design-token colours, both WebKit and standards */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background-color: var(--color-label-tertiary);
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: var(--color-label-secondary);
+  }
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-label-tertiary) transparent;
   }
 }
 
