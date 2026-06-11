@@ -81,6 +81,13 @@ const envSchema = z.object({
   // dispatch (WARP-508/509). Per-user attribution flows through Plane's
   // OIDC-linked service tokens, not this admin key.
   DROPLET_PM_ADMIN_TOKEN: z.string().default(""),
+  // WARP-860 — identity of the auto-bootstrapped Plane instance admin.
+  // Plane CE has no OIDC and no headless setup, so pm-bootstrap.service.ts
+  // completes the god-mode instance setup programmatically with this email
+  // and a password derived from DROPLET_PM_ADMIN_TOKEN. The owner signs in
+  // to the embedded Plane with these credentials (surfaced once in the
+  // setup wizard's PM step).
+  DROPLET_PM_ADMIN_EMAIL: z.string().email().default("admin@droplet.local"),
   // HMAC signing key for Plane → orchestrator webhooks (WARP-511).
   // Empty default = webhook receiver fail-CLOSED (every payload 401s) per
   // engineering-handbook 04-coding-standards/security-rules.md §1.

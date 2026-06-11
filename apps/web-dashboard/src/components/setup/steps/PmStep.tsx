@@ -26,6 +26,9 @@ interface OnboardResponse {
   workspace: { id: string; slug: string; name: string };
   project: { id: string; name: string; identifier: string };
   url: string;
+  /** WARP-860 — Plane CE's only auth is email+password; the orchestrator
+   *  bootstraps the instance admin and hands the owner its credentials. */
+  auth?: { email: string; password: string; signInUrl: string };
 }
 
 export function PmStep({
@@ -77,6 +80,31 @@ export function PmStep({
           Your workspace <strong>{result.workspace.name}</strong> and project{" "}
           <strong>{result.project.name}</strong> are set up.
         </p>
+        {result.auth && (
+          <div className="dp-card !p-4 flex flex-col gap-2" data-testid="pm-credentials">
+            <p className="type-subheadline font-medium text-label-primary">
+              Your Projects sign-in
+            </p>
+            <p className="type-footnote text-label-secondary">
+              The first time you open Projects, sign in with these — your
+              browser stays signed in for a week at a time.
+            </p>
+            <dl className="flex flex-col gap-1">
+              <div className="flex items-baseline gap-2">
+                <dt className="type-caption-1 text-label-tertiary w-16 shrink-0">Email</dt>
+                <dd className="type-footnote text-label-primary font-mono break-all">
+                  {result.auth.email}
+                </dd>
+              </div>
+              <div className="flex items-baseline gap-2">
+                <dt className="type-caption-1 text-label-tertiary w-16 shrink-0">Password</dt>
+                <dd className="type-footnote text-label-primary font-mono break-all">
+                  {result.auth.password}
+                </dd>
+              </div>
+            </dl>
+          </div>
+        )}
         <div className="flex gap-3">
           <a
             href={result.url}
