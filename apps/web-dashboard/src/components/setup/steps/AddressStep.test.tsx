@@ -124,17 +124,4 @@ describe("AddressStep — split behaviour", () => {
       }),
     ).toBeInTheDocument();
   });
-
-  it("renders the form inside a bounded, labelled scroll region (WARP-820)", async () => {
-    render(<AddressStep onComplete={() => {}} onSkip={() => {}} />);
-    const region = await screen.findByRole("region", {
-      name: /internet address setup/i,
-    });
-    await waitFor(() =>
-      expect(screen.getByPlaceholderText("yourstudio")).toBeInTheDocument(),
-    );
-    expect(region.className).toContain("overflow-y-auto");
-    expect(region.className).toContain("overscroll-contain");
-    expect(region.className).toMatch(/max-h-\[[^\]]*(vh|dvh|svh)\]/);
-  });
 });

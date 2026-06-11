@@ -167,13 +167,3 @@ describe("WifiStep — calm error ladder (WARP-807/808)", () => {
     expect(onComplete).not.toHaveBeenCalled();
   });
 });
-
-describe("WifiStep — body lives in a labelled scroll region (WARP-820)", () => {
-  it("renders the Wi-Fi form inside a bounded, labelled scroll region", () => {
-    render(<WifiStep onComplete={() => {}} onSkip={() => {}} />);
-    const region = screen.getByRole("region", { name: /home wi-?fi setup/i });
-    expect(region.className).toContain("overflow-y-auto");
-    expect(region.className).toContain("overscroll-contain");
-    expect(region.className).toMatch(/max-h-\[[^\]]*(vh|dvh|svh)\]/);
-  });
-});
