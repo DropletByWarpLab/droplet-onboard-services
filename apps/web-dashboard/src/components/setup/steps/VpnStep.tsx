@@ -26,6 +26,7 @@ import type {
 import { StepShell } from "@/components/setup/StepShell";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 import { ScrollRegion } from "@/components/setup/ScrollRegion";
+import { dashboardIpFromConf } from "@/lib/wireguard";
 
 /**
  * Wizard step — connect the customer's phone via WireGuard (remote access).
@@ -478,6 +479,11 @@ export function VpnStep({
   // created — peer is minted, show the QR + .conf + how-to-use list.
   // ──────────────────────────────────────────────────────────────────
   if (!created) return null;
+  // The conf's DNS line is the box-side gateway the tunnel routes to —
+  // the only address the dashboard answers on for VPN clients. Parsed
+  // and IPv4-validated in lib/wireguard.ts (WIREGUARD_DNS reaches the
+  // conf unvalidated, and a mistyped value must not become a dead link).
+  const dashboardIp = dashboardIpFromConf(created.conf);
   return (
     <StepShell
       current="vpn"
@@ -553,14 +559,19 @@ export function VpnStep({
           </li>
         </ol>
         <p>
-          Once connected, you can reach this Droplet from anywhere — type
-          <span className="font-mono"> droplet.local</span> or{" "}
-          <span className="font-mono">
-            {status?.endpointHost ?? "yoursubdomain.duckdns.org"}
-          </span>{" "}
-          in your phone&rsquo;s browser. Lose the phone? Revoke this device from{" "}
-          <span className="font-mono">Remote Access</span> in the dashboard — its
-          config stops working immediately.
+          Once connected, open{" "}
+          <span className="font-mono">https://{dashboardIp}</span> in your
+          phone&rsquo;s browser — that&rsquo;s this Droplet from anywhere.
+          Bookmark it: names like{" "}
+          <span className="font-mono">droplet.local</span> only work at home,
+          not over the tunnel. Lose the phone? Revoke this device from{" "}
+          <span className="font-mono">Remote Access</span> in the dashboard —
+          its config stops working immediately.
+        </p>
+        <p>
+          Test it from cellular or another network. While you&rsquo;re on this
+          Droplet&rsquo;s own Wi-Fi the tunnel can&rsquo;t loop back home — and
+          you don&rsquo;t need it there; everything already works directly.
         </p>
         <p className="type-caption-1 text-label-quaternary">
           Heads up: this code is shown once. If you close this page without

@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
+  AlertCircle,
   CalendarClock,
   CheckCircle2,
   Globe,
@@ -19,6 +20,8 @@ import {
   XCircle,
 } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { useAuth } from "@/lib/auth";
 import { useWorkspace } from "@/lib/workspace";
 import { useNetwork } from "@/lib/hooks/useNetwork";
 import { useNetworkDevices } from "@/lib/hooks/useNetworkDevices";
@@ -39,6 +42,7 @@ import {
   setWifiChannel,
   confirmNetworkCommand,
   fetchNetworkOperation,
+  rebootRouter,
   type NetworkOperation,
 } from "@/lib/api";
 import type {
@@ -983,6 +987,103 @@ function SystemTab({ overview }: { overview: NetworkOverview | undefined }) {
           <InfoRow label="Memory Free" value={`${memFreeMB} MB`} />
         </div>
       </div>
+
+      {/* WARP-871: the reboot endpoint (owner-only, Tier-3 confirmable) was
+          fully wired server-side but had no UI path — the only ways to restart
+          the router were the LLM tool or curl. */}
+      <RouterRebootCard />
+    </div>
+  );
+}
+
+// --- Router reboot (WARP-871) ---
+// Owner-only restart with a typed double-confirm. "reboot" is Tier 3 — the
+// orchestrator answers the POST with a 202 + token, and the dashboard
+// confirmation IS the consent (rebootRouter echoes it straight back).
+function RouterRebootCard() {
+  const { user } = useAuth();
+  const isOwner = user?.role === "owner";
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [status, setStatus] = useState<
+    { kind: "idle" } | { kind: "rebooting" } | { kind: "error"; message: string }
+  >({ kind: "idle" });
+  const triggerRef = useRef<HTMLButtonElement>(null);
+
+  if (!isOwner) return null;
+
+  async function doReboot() {
+    setStatus({ kind: "rebooting" });
+    try {
+      await rebootRouter();
+      // The router goes down for ~30-90s; leave the calm "restarting" state up.
+    } catch (e) {
+      setStatus({
+        kind: "error",
+        message:
+          e instanceof Error ? e.message : "Couldn't restart the router. Try again.",
+      });
+    }
+  }
+
+  return (
+    <div className="card">
+      <h3 className="type-headline text-label-primary mb-1">Restart router</h3>
+      <p className="type-subheadline text-label-tertiary mb-4">
+        Restarting the router drops every connected device for about a minute
+        while it reboots. Wi-Fi and internet come back automatically.
+      </p>
+      <button
+        ref={triggerRef}
+        type="button"
+        onClick={() => setConfirmOpen(true)}
+        disabled={status.kind === "rebooting"}
+        className="dp-btn-secondary flex items-center gap-2 text-system-red"
+      >
+        {status.kind === "rebooting" ? (
+          <Loader2 size={16} className="animate-spin" />
+        ) : (
+          <RefreshCw size={16} />
+        )}
+        {status.kind === "rebooting" ? "Restarting…" : "Restart router"}
+      </button>
+
+      {status.kind === "rebooting" && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="mt-4 flex items-start gap-2 type-footnote text-label-primary bg-system-orange/10 rounded-sm px-3 py-2"
+        >
+          <Info size={14} className="mt-0.5 flex-shrink-0 text-system-orange" aria-hidden="true" />
+          <span>
+            Router is restarting — devices will reconnect on their own in a
+            minute or so.
+          </span>
+        </div>
+      )}
+
+      {status.kind === "error" && (
+        <div
+          role="alert"
+          className="mt-4 flex items-start gap-2 type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2"
+        >
+          <AlertCircle size={14} className="mt-0.5 flex-shrink-0" aria-hidden="true" />
+          <span>{status.message}</span>
+        </div>
+      )}
+
+      <ConfirmDialog
+        open={confirmOpen}
+        triggerRef={triggerRef}
+        title="Restart the router?"
+        description="Every connected device — including this one — will lose its connection for about a minute while the router reboots."
+        confirmLabel="Restart"
+        variant="destructive"
+        onConfirm={async () => {
+          setConfirmOpen(false);
+          await doReboot();
+        }}
+        onCancel={() => setConfirmOpen(false)}
+      />
     </div>
   );
 }

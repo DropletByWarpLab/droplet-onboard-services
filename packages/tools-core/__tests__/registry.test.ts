@@ -12,6 +12,7 @@ const EXPECTED_TOOL_NAMES = [
   "get_firewall_rules",
   "get_network_status",
   "get_router_system_info",
+  "restart_router",          // WARP-864
   "get_wifi_settings",
   "list_ap_devices",       // WARP-446
   "list_dhcp_leases",

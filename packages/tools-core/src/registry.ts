@@ -14,6 +14,7 @@ import unblockNetworkDevice from "./handlers/network/unblock-network-device.js";
 import setPhoneHomeBlocking from "./handlers/network/set-phone-home-blocking.js";
 import addPortForward from "./handlers/network/add-port-forward.js";
 import getRouterSystemInfo from "./handlers/network/get-router-system-info.js";
+import restartRouter from "./handlers/network/restart-router.js";
 // WARP-470: F2 network throughput summary (network_check card)
 import networkSummary from "./handlers/network/summary.js";
 // WARP-446 — coverage extender AP onboarding
@@ -126,6 +127,7 @@ const allTools: Tool[] = [
   setPhoneHomeBlocking,
   addPortForward,
   getRouterSystemInfo,
+  restartRouter,
   // WARP-470: F2 network KPI rollup → network_check card
   networkSummary,
   // WARP-446: coverage extender AP onboarding

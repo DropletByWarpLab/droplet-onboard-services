@@ -108,6 +108,8 @@ source "$SCRIPT_DIR/lib/compose.sh"
 source "$SCRIPT_DIR/lib/systemd.sh"
 # shellcheck source=lib/camera-drivers.sh
 source "$SCRIPT_DIR/lib/camera-drivers.sh"
+# shellcheck source=lib/bluetooth.sh
+source "$SCRIPT_DIR/lib/bluetooth.sh"
 # shellcheck source=lib/local-dns.sh
 source "$SCRIPT_DIR/lib/local-dns.sh"
 # shellcheck source=lib/single-box.sh
@@ -220,6 +222,9 @@ if [ "$DRY_RUN" = "true" ]; then
   log_info "  Would load kernel modules: uvcvideo, videodev, videobuf2_v4l2"
   log_info "  Would persist modules for boot, install udev rules"
   log_info "  Would detect connected USB cameras"
+  log_info "  Would prep host Bluetooth for Matter BLE commissioning (WARP-850):"
+  log_info "                  install bluez + rfkill, enable bluetooth.service,"
+  log_info "                  rfkill unblock bluetooth, power on the adapter"
 
   log_step 4 $TOTAL_STEPS "Secret generation"
   if [ -f "$REPO_ROOT/.env" ] && [ "$REGENERATE_ENV" != "true" ]; then
@@ -342,6 +347,19 @@ main() {
     log_divider
   else
     install_camera_drivers
+  fi
+
+  # WARP-850: host Bluetooth prep for the matter-controller sidecar's
+  # BLE commissioning (bluez + bluetoothd enabled/active + rfkill
+  # unblock + adapter powered). Idempotent and non-fatal — a box
+  # without Bluetooth still ships IP-only Matter. Rides the same
+  # --skip-drivers escape hatch as the camera modules (both are
+  # host-hardware prep).
+  if [ "$SKIP_DRIVERS" = "true" ]; then
+    log_info "Skipping Bluetooth host prep (--skip-drivers)"
+    log_divider
+  else
+    setup_bluetooth_host
   fi
 
   # --- Phase 4: Secrets ---

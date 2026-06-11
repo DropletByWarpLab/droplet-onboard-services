@@ -40,6 +40,7 @@ from voice.pipeline import (
     PipelineStatus,
     WakePipeline,
     classify_tool_choice,
+    transcript_is_actionable,
 )
 from voice.llm import LLMClient, LLMUnavailable, MockLLM
 from voice.stt import MockSTT, STTUnavailable, StreamingSTT
@@ -689,6 +690,128 @@ class _RecoveringSoundDevice:
         stream = _RecoveringStream(session, self._shutdown, _PortAudioError)
         self.streams.append(stream)
         return stream
+
+
+class _FrameRecordingDetector(WakeWordDetector):
+    """Records every mono frame the pipeline hands to predict()."""
+
+    def __init__(self):
+        self.frames: list[np.ndarray] = []
+
+    @property
+    def model_name(self) -> str:
+        return "recorder"
+
+    @property
+    def loaded(self) -> bool:
+        return True
+
+    def predict(self, audio_frame: np.ndarray) -> dict[str, float]:
+        self.frames.append(audio_frame.copy())
+        return {}
+
+    def reset(self) -> None:
+        pass
+
+
+class _StereoStream:
+    """One stream session yielding scripted (1280, 2) int16 frames; sets
+    shutdown when exhausted so a synchronous _loop() returns."""
+
+    def __init__(self, frames, shutdown_event):
+        self._frames = list(frames)
+        self._shutdown = shutdown_event
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self, n):
+        if not self._frames:
+            self._shutdown.set()
+            return np.zeros((n, 2), dtype=np.int16), False
+        return self._frames.pop(0), False
+
+
+class _StereoSoundDevice:
+    PortAudioError = _PortAudioError
+
+    def __init__(self, frames, shutdown_event):
+        self._frames = frames
+        self._shutdown = shutdown_event
+
+    def query_devices(self, index=None):
+        return {"max_input_channels": 2}
+
+    def InputStream(self, **kwargs):  # noqa: N802 — matches real API
+        return _StereoStream(self._frames, self._shutdown)
+
+
+class TestCaptureDownmix:
+    """Multichannel→mono contract. The reSpeaker XVF3800 carries
+    beamformed voice on channel 0 and AEC residual on channel 1 —
+    averaging them halved the voice and mixed in junk (the "have to
+    talk really loud" report). Default consumes channel 0; "mean" stays
+    available for plain stereo mics; VOICE_INPUT_GAIN applies after."""
+
+    def _run(self, frames, **pipe_kwargs):
+        shutdown = threading.Event()
+        det = _FrameRecordingDetector()
+        pipe = WakePipeline(
+            detector=det,
+            input_device_index=4,
+            threshold=0.5,
+            sd_module=_StereoSoundDevice(frames, shutdown),
+            **pipe_kwargs,
+        )
+        pipe._shutdown = shutdown
+        pipe._loop()
+        return det.frames
+
+    @staticmethod
+    def _stereo_frame(left: int, right: int) -> np.ndarray:
+        f = np.zeros((1280, 2), dtype=np.int16)
+        f[:, 0] = left
+        f[:, 1] = right
+        return f
+
+    def test_default_consumes_primary_channel_only(self):
+        frames = self._run([self._stereo_frame(left=1000, right=0)])
+        # Old mean() behaviour would deliver 500 — half the voice.
+        assert len(frames) >= 1
+        assert int(frames[0][0]) == 1000
+
+    def test_mean_downmix_available_via_config(self):
+        frames = self._run(
+            [self._stereo_frame(left=1000, right=0)],
+            input_downmix="mean",
+        )
+        assert int(frames[0][0]) == 500
+
+    def test_input_gain_scales_and_clips(self):
+        frames = self._run(
+            [self._stereo_frame(left=1000, right=0),
+             self._stereo_frame(left=30000, right=0)],
+            input_gain=2.0,
+        )
+        assert int(frames[0][0]) == 2000          # 1000 × 2.0
+        assert int(frames[1][0]) == 32767         # 30000 × 2.0 clips, no wrap
+
+    def test_unknown_downmix_falls_back_to_default(self):
+        frames = self._run(
+            [self._stereo_frame(left=1000, right=0)],
+            input_downmix="bogus",
+        )
+        assert int(frames[0][0]) == 1000          # "first" semantics
+
+    def test_nonpositive_gain_falls_back_to_unity(self):
+        frames = self._run(
+            [self._stereo_frame(left=1000, right=0)],
+            input_gain=0.0,
+        )
+        assert int(frames[0][0]) == 1000
 
 
 class TestLoopDeviceRecovery:
@@ -1652,13 +1775,49 @@ class TestClosedLoop:
         assert s.last_transcript == "what time is it"
         assert s.last_response == "it is three p.m."
 
+    def test_fragment_transcript_stays_quiet(self, monkeypatch):
+        # A residual false wake (TV phonetic near-collision) captures a
+        # fragment like "it." — the box must NOT send it to the LLM and
+        # must NOT speak, or it ends up chatting with the television.
+        # Observed live on the single-box: wake at conf 1.00 off TV
+        # audio, transcript 'it.', spoken reply into an empty room.
+        play_calls = _patch_play(monkeypatch)
+        llm = _RecordingLLM(scripted_replies=["should never be asked"])
+        tts = _RecordingTTS(scripted_audio=SynthesizedAudio(
+            pcm=b"\x00" * 200, sample_rate=22050, sample_width=2, channels=1,
+        ))
+        stt = _RecordingSTT(scripted_transcripts=["it."])
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
+            input_device_index=0,
+            output_device_index=7,
+            threshold=0.5,
+            stt=stt,
+            tts=tts,
+            llm=llm,
+            stt_max_record_s=0.05,
+        )
+        pipe._stt_available = True
+        pipe._tts_available = True
+        pipe._llm_available = True
+        pipe._on_frame(_silence_frame())  # wake
+        pipe._on_frame(_silence_frame())  # begin transcription + chunk
+        time.sleep(0.08)
+        pipe._on_frame(_silence_frame())  # exceed window → finish
+
+        assert llm.requests == []           # fragment never reaches the LLM
+        assert tts.texts_received == []     # nothing synthesized
+        assert play_calls == []             # nothing spoken
+        # The transcript still lands in status for diagnosis.
+        assert pipe.status().last_transcript == "it."
+
     def test_llm_unavailable_does_not_break_wake_loop(self, monkeypatch):
         # If the orchestrator is down, the wake → STT → transcript path
         # still works (transcript visible in status), just no spoken
         # reply. Pipeline must NOT enter error state.
         _patch_play(monkeypatch)
         llm = _RecordingLLM(available=False)  # never reachable
-        stt = _RecordingSTT(scripted_transcripts=["hi"])
+        stt = _RecordingSTT(scripted_transcripts=["what time is it"])
         tts = _RecordingTTS()
         pipe = WakePipeline(
             detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
@@ -1679,7 +1838,7 @@ class TestClosedLoop:
         pipe._on_frame(_silence_frame())
 
         # Transcript landed:
-        assert pipe.status().last_transcript == "hi"
+        assert pipe.status().last_transcript == "what time is it"
         # No LLM call attempted (because llm_available is False, skip):
         assert llm.requests == []
         # No TTS playback:
@@ -1693,7 +1852,7 @@ class TestClosedLoop:
         # error message surfaces via /voice/status.
         _patch_play(monkeypatch)
         llm = _RecordingLLM(raise_on_reply=True)
-        stt = _RecordingSTT(scripted_transcripts=["hi"])
+        stt = _RecordingSTT(scripted_transcripts=["what time is it"])
         tts = _RecordingTTS()
         pipe = WakePipeline(
             detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
@@ -1724,7 +1883,7 @@ class TestClosedLoop:
         # input. We should NOT push empty audio through Piper.
         _patch_play(monkeypatch)
         llm = _RecordingLLM(scripted_replies=[""])
-        stt = _RecordingSTT(scripted_transcripts=["..."])
+        stt = _RecordingSTT(scripted_transcripts=["play some music"])
         tts = _RecordingTTS()
         pipe = WakePipeline(
             detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
@@ -1744,7 +1903,7 @@ class TestClosedLoop:
         time.sleep(0.08)
         pipe._on_frame(_silence_frame())
 
-        assert llm.requests == ["..."]
+        assert llm.requests == ["play some music"]
         assert tts.texts_received == []  # no Piper call for empty reply
 
     def test_status_exposes_llm_loaded_after_probe(self):
@@ -2099,3 +2258,42 @@ class TestIntentClassifier:
         # Defensive: pipeline never passes None, but make sure the
         # signature handles it without raising.
         assert classify_tool_choice(None) is None  # type: ignore[arg-type]
+
+
+class TestTranscriptActionable:
+    """transcript_is_actionable — the fragment gate on the LLM→speak path.
+    Pure-function contract: a real command always carries at least one
+    word of ≥3 letters; ambient fragments captured by a residual false
+    wake don't."""
+
+    @pytest.mark.parametrize("transcript", [
+        "it.",
+        "uh",
+        "ah.",
+        "no",
+        "ok",
+        "",
+        "   ",
+        "a b c",
+        "I'm ok",          # contractions of short words only
+        "...",
+        "24 7",            # digits aren't command words
+    ])
+    def test_fragments_are_not_actionable(self, transcript: str):
+        assert transcript_is_actionable(transcript) is False
+
+    @pytest.mark.parametrize("transcript", [
+        "stop",
+        "lights",
+        "what time is it",
+        "turn on the kitchen light",
+        "what's the weather",
+        "play some music",
+        "who are you",
+        "set a timer for ten minutes",
+    ])
+    def test_commands_are_actionable(self, transcript: str):
+        assert transcript_is_actionable(transcript) is True
+
+    def test_none_input_is_not_actionable(self):
+        assert transcript_is_actionable(None) is False  # type: ignore[arg-type]

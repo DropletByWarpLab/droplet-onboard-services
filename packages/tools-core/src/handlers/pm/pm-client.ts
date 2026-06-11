@@ -84,13 +84,27 @@ function resolveBase(): string {
 }
 
 /**
- * Returns `X-API-Key` if `DROPLET_PM_ADMIN_TOKEN` is set, empty header
- * map otherwise. Plane rejects unauthenticated calls with 401; we let
- * that surface as PlaneApiError(401) rather than refuse at the client
- * layer — keeps the error path uniform across reads and writes.
+ * WARP-867 — runtime-injected Plane service token. Plane CE only accepts
+ * server-generated service tokens on `/api/v1/`; the orchestrator mints
+ * one (GET /api/pm/service-token) and the handlers inject it here via
+ * `ensurePlaneToken(ctx)` before their first pm-client call. The
+ * `DROPLET_PM_ADMIN_TOKEN` env fallback is kept for tests that stub the
+ * fetch layer.
+ */
+let runtimeToken: string | null = null;
+
+export function setPlaneApiToken(token: string): void {
+  runtimeToken = token;
+}
+
+/**
+ * Returns `X-API-Key` when a token is available, empty header map
+ * otherwise. Plane rejects unauthenticated calls with 401; we let that
+ * surface as PlaneApiError(401) rather than refuse at the client layer —
+ * keeps the error path uniform across reads and writes.
  */
 function authHeaders(): Record<string, string> {
-  const tok = process.env.DROPLET_PM_ADMIN_TOKEN ?? "";
+  const tok = runtimeToken ?? process.env.DROPLET_PM_ADMIN_TOKEN ?? "";
   return tok ? { "X-API-Key": tok } : {};
 }
 
@@ -156,9 +170,11 @@ async function call<T>(
 
 // --- Read API (WARP-508) ---
 
-export async function listWorkspaces(): Promise<PlaneWorkspace[]> {
-  return call<PlaneWorkspace[]>("GET", "/api/v1/workspaces/");
-}
+// WARP-867: no listWorkspaces / searchWorkItems here — Plane CE's /api/v1/
+// has neither route (its url modules are cycle/intake/issue/member/module/
+// project/state only). The pm_list_workspaces and pm_search_work_items
+// handlers go through the orchestrator's app-API proxies instead
+// (GET /api/pm/workspaces, GET /api/pm/search).
 
 export async function listProjects(
   workspace_slug: string,
@@ -197,18 +213,6 @@ export async function getWorkItem(
   return call<PlaneWorkItem>(
     "GET",
     `/api/v1/workspaces/${encodeURIComponent(workspace_slug)}/projects/${encodeURIComponent(project_id)}/issues/${encodeURIComponent(work_item_id)}/`,
-  );
-}
-
-export async function searchWorkItems(
-  workspace_slug: string,
-  query: string,
-  per_page?: number,
-): Promise<PlaneWorkItem[]> {
-  return call<PlaneWorkItem[]>(
-    "GET",
-    `/api/v1/workspaces/${encodeURIComponent(workspace_slug)}/search/`,
-    { queryParams: { query, per_page } },
   );
 }
 

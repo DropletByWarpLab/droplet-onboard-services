@@ -464,7 +464,7 @@ _Generated 2026-05-30 by a 20-agent /architecture workflow. Each plan: root caus
 5. Verify restart interplay: the stack uses restart: always / unless-stopped. Document in the budget comment that mem_limit turns a host-wide OOM into an isolated single-container OOM that restart recovers cleanly; note an operator override to restart: on-failure for any service observed hot-looping. Re-check each existing healthcheck still passes under the new ceiling.
 6. Add the CI guard to scripts/test-security.sh mirroring its existing assertion/exit-code style: parse docker/docker-compose.yml, fail with a clear message if any service block lacks mem_limit, and fail if any service uses deploy.resources.limits.
 7. Validate: `docker compose -f docker/docker-compose.yml --env-file .env config` parses and resolves interpolation; then on Linux `docker compose ... up -d --force-recreate <service>` per CLAUDE.md's recreate note and confirm `docker stats --no-stream` shows a populated MEM LIMIT for every container.
-8. Document: add docs/ADR-012-container-resource-limits.md with the budget table and the top-level-keys-vs-deploy.resources rationale, referenced from CLAUDE.md next to 'Updating .env on a running stack'.
+8. Document: add docs/ADR-021-container-resource-limits.md (landed as ADR-012, renumbered 2026-06-09 to resolve a collision) with the budget table and the top-level-keys-vs-deploy.resources rationale, referenced from CLAUDE.md next to 'Updating .env on a running stack'.
 
 **Acceptance criteria.**
 - Every service block in docker/docker-compose.yml has a mem_limit (count of mem_limit occurrences == number of services).
@@ -484,7 +484,7 @@ _Generated 2026-05-30 by a 20-agent /architecture workflow. Each plan: root caus
 - Restart policy interplay: with restart: always a chronically under-sized container hot-loops instead of staying down. Mitigation: document an operator override to restart: on-failure and alert on RestartCount.
 - Recreate gotcha (already in CLAUDE.md): editing .env/compose needs `up -d --force-recreate`; a plain `docker restart` won't apply new limits, so an operator could believe limits are active when they aren't. Mitigation: call this out in the ADR and add a `docker stats`/`docker inspect` verification step to the runbook.
 
-**Files.** `docker/docker-compose.yml`, `scripts/test-security.sh`, `CLAUDE.md`, `scripts/setup.sh`, `docs/ADR-012-container-resource-limits.md`
+**Files.** `docker/docker-compose.yml`, `scripts/test-security.sh`, `CLAUDE.md`, `scripts/setup.sh`, `docs/ADR-021-container-resource-limits.md`
 
 ## WARP-570 — No backup/disaster-recovery for core customer data (orchestrator Postgres, Nextcloud files, aikeys, matter-data)
 

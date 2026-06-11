@@ -252,12 +252,17 @@ describe("applyWifi — SSID-read failure classification (WARP-836)", () => {
     });
   });
 
-  it("still treats a reachable bridge with no SSID in the body as UNREACHABLE", async () => {
-    // 200 OK but the AP reports no SSID → genuinely can't determine the network
-    // name; we must not POST an empty SSID (hostapd would reject it).
+  it("treats a reachable bridge with no SSID in the body as a 422 precondition, NOT UNREACHABLE", async () => {
+    // 200 OK but the AP reports no SSID → the bridge IS reachable; the AP just
+    // has no network name yet (a password-only apply before any SSID was set).
+    // Classifying this UNREACHABLE wrongly fired the wizard's "device not
+    // reachable, finish later" notice and pointed triage at the network
+    // (pr-reviewer #563 finding). It must surface as an actionable 422, and we
+    // still must not POST an empty SSID (hostapd would reject it).
     const fetchSpy = mockFetchOnce(200, { ok: true });
     await expect(applyWifi("supersecret1")).rejects.toMatchObject({
-      code: "UNREACHABLE",
+      code: "UNKNOWN",
+      status: 422,
     });
     expect(fetchSpy).toHaveBeenCalledTimes(1); // never reached the POST
   });

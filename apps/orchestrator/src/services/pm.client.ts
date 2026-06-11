@@ -136,9 +136,9 @@ async function call<T>(
   }
 }
 
-export async function listWorkspaces(adminKey: string): Promise<PlaneWorkspace[]> {
-  return call<PlaneWorkspace[]>(adminKey, "GET", "/api/v1/workspaces/");
-}
+// WARP-867: no listWorkspaces here — `GET /api/v1/workspaces/` does not
+// exist on Plane CE. Workspace listing goes through the session app API
+// (pm-bootstrap.service `listPlaneWorkspaces`).
 
 export async function listProjects(
   adminKey: string,
