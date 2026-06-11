@@ -256,12 +256,15 @@ export function createMatterRouter(prisma: PrismaClient): Router {
   // --- Controller capabilities ---
   // WARP-851: read-only surface for the dashboard so the wizard and
   // /devices/add-matter can be honest about which commissioning paths
-  // work on this box (no BLE today — see WARP-850). Intentionally NOT
-  // gated on isMatterInitialized(): the capability is derived from the
-  // matter.js environment, not controller state, and the wizard needs
-  // the answer while the controller may still be booting.
-  router.get("/matter/capabilities", (_req, res) => {
-    res.json(getMatterCapabilities());
+  // work on this box. Since WARP-850 this proxies the matter-controller
+  // sidecar's real state (bleCommissioning=true when its BLE transport
+  // registered at process start). Intentionally NOT gated on
+  // isMatterInitialized(): the sidecar answers before its controller
+  // finishes booting, the wizard needs the answer early, and the
+  // service degrades to { bleCommissioning: false } instead of
+  // throwing when the sidecar is unreachable.
+  router.get("/matter/capabilities", async (_req, res) => {
+    res.json(await getMatterCapabilities());
   });
 
   // --- Discover uncommissioned Matter devices ---
