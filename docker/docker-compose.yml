@@ -1057,6 +1057,8 @@ services:
       --language ${WHISPER_LANGUAGE:-en}
       --uri tcp://0.0.0.0:10300
       --beam-size 1
+      --compute-type ${WHISPER_COMPUTE:-int8}
+      --cpu-threads ${WHISPER_CPU_THREADS:-4}
     volumes:
       # Whisper model cache (~470 MB for small.en). Named volume so a
       # `docker compose down` doesn't redownload; mounted read-write so
