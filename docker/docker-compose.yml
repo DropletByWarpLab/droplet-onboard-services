@@ -1754,8 +1754,12 @@ services:
     # none pre-init, so opkg cannot lock). droplet-openwrt-attach still
     # installs-if-missing at runtime as a safety net.
     build:
-      context: ../openwrt/singlebox-image
-      dockerfile: Dockerfile
+      # WARP-868: context is openwrt/ (not singlebox-image/) so the Dockerfile
+      # can COPY the canonical rpcd ACL from openwrt/files/usr/share/rpcd/acl.d/
+      # — one source of truth shared with the multi-box image overlay, instead
+      # of a duplicated copy that drifts.
+      context: ../openwrt
+      dockerfile: singlebox-image/Dockerfile
       network: host
     image: droplet/openwrt-singlebox:24.10.2
     container_name: droplet-openwrt

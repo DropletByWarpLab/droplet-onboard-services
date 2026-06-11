@@ -947,13 +947,41 @@ fi
 # Fresh-provision fix: install the droplet rpcd ACL so the routing service
 # session (root) is granted `umdns: [browse, update]` plus dhcp/iwinfo
 # reads. Without it ubus returns "Access denied" on umdns browse and
-# /aps/discovered 500s — AP auto-discovery cannot work. /usr/share is not a
-# persisted volume (lost on container recreate), so (re)copy it every attach.
+# /aps/discovered 500s — AP auto-discovery cannot work.
+#
+# WARP-868: the singlebox image now BAKES this file (openwrt/singlebox-image/
+# Dockerfile), so on a current image this is a no-op verify. The copy remains
+# as the safety net for containers created from pre-bake images — and it is
+# no longer silenced: the 2026-06-11 reflash hit a docker-cp failure that
+# `>/dev/null 2>&1` swallowed entirely, leaving /dhcp/leases, /aps/discovered
+# and the wizard's DDNS write 500ing with zero log signal. A missing ACL now
+# logs loudly and FAILS the unit (systemd's on-failure retry re-runs us).
 DROPLET_RPCD_ACL="${DROPLET_RPCD_ACL:-/home/droplet/edge-platform/openwrt/files/usr/share/rpcd/acl.d/droplet-ai.json}"
-if [ -r "$DROPLET_RPCD_ACL" ]; then
-  if docker cp "$DROPLET_RPCD_ACL" droplet-openwrt:/usr/share/rpcd/acl.d/droplet-ai.json >/dev/null 2>&1; then
+if docker exec droplet-openwrt test -r /usr/share/rpcd/acl.d/droplet-ai.json 2>/dev/null; then
+  echo "droplet-openwrt-attach: rpcd ACL present (image bake or prior attach)"
+elif [ -r "$DROPLET_RPCD_ACL" ]; then
+  if docker cp "$DROPLET_RPCD_ACL" droplet-openwrt:/usr/share/rpcd/acl.d/droplet-ai.json; then
     docker exec droplet-openwrt /etc/init.d/rpcd restart >/dev/null 2>&1
-    echo "droplet-openwrt-attach: installed rpcd ACL (umdns browse/update)"
+    echo "droplet-openwrt-attach: installed rpcd ACL (umdns browse/update + file reads)"
+  else
+    echo "droplet-openwrt-attach: ERROR: rpcd ACL copy failed — /dhcp/leases + /aps/discovered will answer 500 (Access denied) until it lands. Failing the unit so systemd retries." >&2
+    EXEC_RC=1
+  fi
+else
+  echo "droplet-openwrt-attach: ERROR: rpcd ACL missing from container AND source unreadable at $DROPLET_RPCD_ACL — network reads will answer 500 (Access denied). Failing the unit so systemd retries." >&2
+  EXEC_RC=1
+fi
+
+# WARP-868: enforce the uhttpd concurrency cap for containers created from
+# pre-bake images (fresh containers get it via the image's uci-defaults).
+# Stock max_requests=3 drops/resets the slowest rpcd invocations under the
+# orchestrator's network-summary fan-out. Idempotent: only writes + restarts
+# uhttpd when the value differs.
+if [ "$(docker exec droplet-openwrt uci -q get uhttpd.main.max_requests 2>/dev/null)" != "10" ]; then
+  if docker exec droplet-openwrt sh -c "uci set uhttpd.main.max_requests='10' && uci commit uhttpd && /etc/init.d/uhttpd restart" >/dev/null 2>&1; then
+    echo "droplet-openwrt-attach: raised uhttpd max_requests to 10 (WARP-868)"
+  else
+    echo "droplet-openwrt-attach: WARN: could not raise uhttpd max_requests — concurrent ubus calls may reset under load" >&2
   fi
 fi
 
