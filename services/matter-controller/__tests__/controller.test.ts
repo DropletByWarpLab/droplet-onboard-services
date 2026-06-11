@@ -15,6 +15,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { NodeStates } from "@project-chip/matter.js/device";
 import {
   createMatterControllerCore,
+  MATTER_ENV_ID,
   type ControllerLike,
   type MatterControllerCore,
 } from "../src/controller.js";
@@ -264,5 +265,17 @@ describe("createMatterControllerCore", () => {
       expect(controller.close).toHaveBeenCalledOnce();
       expect(core.isInitialized()).toBe(false);
     });
+  });
+});
+
+describe("fabric-continuity invariant (WARP-850 requirement #2)", () => {
+  it("pins the matter.js environment id to the pre-extraction value", () => {
+    // The id keys the on-disk storage layout under MATTER_STORAGE_PATH.
+    // The orchestrator created its CommissioningController with
+    // `id: "droplet-controller"` before WARP-850; the sidecar must
+    // present the identical environment or every commissioned device
+    // orphans on upgrade. If this assertion ever needs to change, a
+    // storage migration must ship with it.
+    expect(MATTER_ENV_ID).toBe("droplet-controller");
   });
 });

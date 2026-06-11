@@ -142,6 +142,16 @@ export interface MatterControllerCore {
   events: EventEmitter;
 }
 
+/**
+ * Fabric-continuity invariant (WARP-850 requirement #2): this id keys
+ * the on-disk storage layout under MATTER_STORAGE_PATH. It MUST stay
+ * `droplet-controller` — the value the orchestrator used pre-extraction
+ * — or every paired device orphans on upgrade. Pinned by
+ * controller.test.ts; exported so the test fails compilation if the
+ * constant disappears and fails assertion if the value drifts.
+ */
+export const MATTER_ENV_ID = "droplet-controller";
+
 export function createMatterControllerCore(
   options: MatterControllerCoreOptions,
 ): MatterControllerCore {
@@ -155,11 +165,7 @@ export function createMatterControllerCore(
       new CommissioningController({
         environment: {
           environment: Environment.default,
-          // Fabric-continuity invariant (WARP-850 requirement #2): this id
-          // keys the on-disk storage layout under MATTER_STORAGE_PATH. It
-          // MUST stay `droplet-controller` — the value the orchestrator
-          // used — or every paired device orphans on upgrade.
-          id: "droplet-controller",
+          id: MATTER_ENV_ID,
         },
         autoConnect: true,
         adminFabricLabel: options.adminFabricLabel,
