@@ -130,7 +130,8 @@ export interface MatterControllerCore {
   isInitialized(): boolean;
   discover(timeoutMs: number): Promise<MatterDiscoveredDevice[]>;
   commission(pairingCode: string): Promise<{ nodeId: string }>;
-  decommission(nodeIdStr: string): Promise<void>;
+  /** @returns false when the nodeId isn't commissioned (route maps to 404). */
+  decommission(nodeIdStr: string): Promise<boolean>;
   listDevices(): Promise<MatterGrouped>;
   getDevice(nodeIdStr: string): Promise<MatterCommissionedDevice | null>;
   sendCommand(
@@ -471,9 +472,13 @@ export function createMatterControllerCore(
       return { nodeId: String(nodeId) };
     },
 
-    async decommission(nodeIdStr: string): Promise<void> {
+    async decommission(nodeIdStr: string): Promise<boolean> {
       const ctl = requireController();
       const nodeId = NodeId(BigInt(nodeIdStr));
+      // Mirror getDevice's guard: an uncommissioned nodeId must surface
+      // as the route's 404, not an untyped matter.js getNode throw that
+      // the HTTP layer can only report as a 500.
+      if (!ctl.isNodeCommissioned(nodeId)) return false;
       const node = await ctl.getNode(nodeId);
       try {
         await node.decommission();
@@ -482,6 +487,7 @@ export function createMatterControllerCore(
         await ctl.removeNode(nodeId, false);
       }
       logger.info("Device decommissioned: %s", nodeIdStr);
+      return true;
     },
 
     async listDevices(): Promise<MatterGrouped> {

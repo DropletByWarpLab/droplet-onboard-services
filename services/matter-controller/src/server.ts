@@ -51,9 +51,16 @@ export interface AppDeps {
   capabilities: BleRegistrationResult;
 }
 
-/** Mirror of routes/matter.ts isValidNodeId — digits only, BigInt-safe. */
+/** Matter node IDs are uint64 — 18446744073709551615 is the ceiling. */
+const NODE_ID_MAX = 18446744073709551615n;
+
+/**
+ * Mirror of routes/matter.ts isValidNodeId — digits only, BigInt-safe,
+ * and inside the uint64 range (20 digits can exceed the ceiling, which
+ * would blow up in NodeId() as a 500 instead of this validator's 400).
+ */
 function isValidNodeId(id: string): boolean {
-  return /^\d{1,20}$/.test(id);
+  return /^\d{1,20}$/.test(id) && BigInt(id) <= NODE_ID_MAX;
 }
 
 function errorBody(err: unknown): SidecarErrorBody {
@@ -224,7 +231,16 @@ export function createApp(deps: AppDeps): Express {
     if (!requireInitialized(res)) return;
     if (!validNodeIdOr400(req, res)) return;
     try {
-      await core.decommission(req.params.nodeId);
+      const removed = await core.decommission(req.params.nodeId);
+      if (!removed) {
+        // Same contract as GET /devices/:nodeId — an uncommissioned
+        // node is a 404 condition, not an internal error.
+        return res.status(404).json({
+          error: "Device not found",
+          errorClass: "NotFoundError",
+          errorMessage: "Device not found",
+        } satisfies SidecarErrorBody);
+      }
       res.json({ status: "decommissioned", nodeId: req.params.nodeId });
     } catch (err) {
       res.status(500).json(errorBody(err));

@@ -177,6 +177,25 @@ describe("createMatterControllerCore", () => {
       await core.decommission("1");
       expect(controller.removeNode).toHaveBeenCalledWith(expect.anything(), false);
     });
+
+    it("returns false without touching getNode when the node isn't commissioned", async () => {
+      // Mirror of getDevice's guard: getNode throws an untyped matter.js
+      // error for unknown nodeIds, which the HTTP layer could only
+      // report as a 500 — the boolean lets the route 404 instead
+      // (pr-reviewer finding 4, 2026-06-11).
+      (controller.isNodeCommissioned as ReturnType<typeof vi.fn>).mockReturnValue(
+        false,
+      );
+      await expect(core.decommission("1")).resolves.toBe(false);
+      expect(controller.getNode).not.toHaveBeenCalled();
+      expect(controller.removeNode).not.toHaveBeenCalled();
+    });
+
+    it("returns true after a successful decommission", async () => {
+      const node = fakeNode();
+      (controller.getNode as ReturnType<typeof vi.fn>).mockResolvedValue(node);
+      await expect(core.decommission("1")).resolves.toBe(true);
+    });
   });
 
   describe("sendCommand", () => {

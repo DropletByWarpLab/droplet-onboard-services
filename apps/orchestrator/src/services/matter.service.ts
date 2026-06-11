@@ -56,6 +56,11 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const COMMISSION_TIMEOUT_MS = 120_000;
 const DISCOVERY_MARGIN_MS = 10_000;
 const BRIDGE_RECONNECT_MS = 3_000;
+// How often to re-probe /health while the SSE stream is open — the
+// stream staying alive says nothing about the controller (see
+// runEventBridge). 15 s bounds the staleness window without meaningful
+// load (one local GET).
+const HEALTH_REPROBE_MS = 15_000;
 
 // --- Module state ---
 let sidecarReachable = false;
@@ -118,6 +123,25 @@ async function sidecarJson<T>(
   });
   if (!res.ok) throw await toSidecarError(res);
   return (await res.json()) as T;
+}
+
+/**
+ * Audit-row writes must never change a Matter operation's outcome: a
+ * Prisma hiccup after a successful commission would otherwise surface
+ * as a false 500 (the device IS commissioned — a retry then hits
+ * "already commissioned" and the device looks orphaned), and one inside
+ * sendMatterCommand's finally block would REPLACE the real matter.js
+ * error with a Prisma error that translateCommissionError can't map.
+ * The operation result is the truth; a lost audit row is a warn line.
+ */
+async function auditQuietly(
+  entry: Parameters<typeof recordActivity>[0],
+): Promise<void> {
+  try {
+    await recordActivity(entry);
+  } catch (err) {
+    logger.warn("Matter audit row write failed (non-fatal): %s", err);
+  }
 }
 
 // --- Initialization / lifecycle ---
@@ -224,7 +248,7 @@ export async function commissionDevice(
   // highest-impact Matter operation — the appliance now owns the
   // device's network credentials and can drive it. Stays orchestrator-
   // side so the signed ActivityRow chain lives in one process.
-  await recordActivity({
+  await auditQuietly({
     kind: "smart_home",
     severity: "ok",
     sourceIcon: "plug",
@@ -238,15 +262,28 @@ export async function commissionDevice(
 
 // --- Decommissioning ---
 
-export async function decommissionDevice(nodeIdStr: string): Promise<void> {
-  await sidecarJson<{ status: string }>(
-    `/devices/${encodeURIComponent(nodeIdStr)}`,
-    { method: "DELETE" },
+/**
+ * @returns false when the sidecar reports the node isn't commissioned
+ * (its 404) — the route layer maps that to its own 404, mirroring
+ * getDevice, instead of reconstructing it from a thrown error.
+ */
+export async function decommissionDevice(
+  nodeIdStr: string,
+): Promise<boolean> {
+  const res = await fetch(
+    `${baseUrl()}/devices/${encodeURIComponent(nodeIdStr)}`,
+    {
+      method: "DELETE",
+      headers: authHeaders(),
+      signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+    },
   );
+  if (res.status === 404) return false;
+  if (!res.ok) throw await toSidecarError(res);
   logger.info("Device decommissioned: %s", nodeIdStr);
 
   // WARP-456: audit row for the destructive write.
-  await recordActivity({
+  await auditQuietly({
     kind: "smart_home",
     severity: "warn",
     sourceIcon: "unplug",
@@ -254,6 +291,7 @@ export async function decommissionDevice(nodeIdStr: string): Promise<void> {
     sub: `nodeId ${nodeIdStr}`,
     refs: { nodeId: nodeIdStr },
   });
+  return true;
 }
 
 // --- Device listing ---
@@ -302,7 +340,9 @@ export async function sendMatterCommand(
     threw = err;
     throw err;
   } finally {
-    await recordActivity({
+    // auditQuietly, NOT recordActivity: a throw inside a finally block
+    // replaces the in-flight matter.js error with the audit failure.
+    await auditQuietly({
       kind: "smart_home",
       severity: threw ? "err" : "ok",
       sourceIcon: "home",
@@ -357,7 +397,22 @@ async function runEventBridge(signal: AbortSignal): Promise<void> {
       });
       if (res.ok && res.body) {
         await refreshHealthFlags();
-        await consumeSseStream(res.body, signal);
+        // The connect-time snapshot of sidecarInitialized goes stale
+        // while the stream lives: the sidecar's HTTP server + SSE
+        // heartbeats keep running when its controller fails
+        // non-fatally (routes 503), so the TCP stream never closes and
+        // the flag would stay true indefinitely. Re-probe /health on
+        // an interval for as long as the stream is open so
+        // isMatterInitialized() tracks the controller, not the socket.
+        const reprobe = setInterval(() => {
+          void refreshHealthFlags();
+        }, HEALTH_REPROBE_MS);
+        reprobe.unref?.();
+        try {
+          await consumeSseStream(res.body, signal);
+        } finally {
+          clearInterval(reprobe);
+        }
       } else {
         await res.body?.cancel().catch(() => undefined);
       }

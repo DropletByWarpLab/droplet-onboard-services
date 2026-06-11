@@ -24,7 +24,7 @@ function fakeCore(overrides: Partial<MatterControllerCore> = {}): MatterControll
     isInitialized: vi.fn().mockReturnValue(true),
     discover: vi.fn().mockResolvedValue([]),
     commission: vi.fn().mockResolvedValue({ nodeId: "7" }),
-    decommission: vi.fn().mockResolvedValue(undefined),
+    decommission: vi.fn().mockResolvedValue(true),
     listDevices: vi.fn().mockResolvedValue({
       lights: [], switches: [], sensors: [], climate: [],
       media: [], covers: [], locks: [], other: [],
@@ -186,6 +186,42 @@ describe("device routes", () => {
       .set("X-Droplet-Auth", TOKEN);
     expect(res.status).toBe(200);
     expect(core.decommission).toHaveBeenCalledWith("7");
+  });
+
+  it("404s when decommissioning a node that isn't commissioned", async () => {
+    // Same contract as GET /devices/:nodeId — uncommissioned is a 404
+    // condition, not the untyped getNode throw → 500 it used to be
+    // (pr-reviewer finding 4, 2026-06-11).
+    const core = fakeCore({
+      decommission: vi.fn().mockResolvedValue(false),
+    });
+    const res = await request(buildApp(core))
+      .delete("/devices/7")
+      .set("X-Droplet-Auth", TOKEN);
+    expect(res.status).toBe(404);
+    expect(res.body.errorClass).toBe("NotFoundError");
+  });
+
+  it("400s on a 20-digit nodeId above the uint64 ceiling", async () => {
+    // /^\d{1,20}$/ alone admits 99999999999999999999 > uint64 max, which
+    // blows up inside NodeId() as a 500 (pr-reviewer finding 5).
+    const core = fakeCore();
+    const res = await request(buildApp(core))
+      .get("/devices/99999999999999999999")
+      .set("X-Droplet-Auth", TOKEN);
+    expect(res.status).toBe(400);
+    expect(core.getDevice).not.toHaveBeenCalled();
+  });
+
+  it("accepts the exact uint64 maximum as a nodeId", async () => {
+    // The ceiling itself (18446744073709551615, 20 digits) is a VALID
+    // node id — a 19-digit cap would wrongly reject it.
+    const core = fakeCore();
+    const res = await request(buildApp(core))
+      .get("/devices/18446744073709551615")
+      .set("X-Droplet-Auth", TOKEN);
+    expect(res.status).toBe(404); // getDevice fake returns null
+    expect(core.getDevice).toHaveBeenCalledWith("18446744073709551615");
   });
 
   it("runs discovery with a clamped timeout", async () => {

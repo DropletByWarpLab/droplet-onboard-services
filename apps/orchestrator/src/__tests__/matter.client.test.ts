@@ -226,6 +226,79 @@ describe("WARP-456 activity wrappers stay orchestrator-side", () => {
   });
 });
 
+describe("audit failures never change a Matter operation's outcome (pr-reviewer findings 1-3)", () => {
+  it("commission still succeeds when the audit row write throws", async () => {
+    // The sidecar already commissioned the device — a Prisma hiccup
+    // here must not surface as a false 500 (retry would then hit
+    // "already commissioned" and the device looks orphaned).
+    installFetchMock({
+      "/commission": () => jsonResponse({ nodeId: "7" }),
+    });
+    recordActivityMock.mockRejectedValueOnce(new Error("prisma down"));
+    await expect(commissionDevice("34970112332")).resolves.toEqual({
+      nodeId: "7",
+    });
+  });
+
+  it("decommission still succeeds when the audit row write throws", async () => {
+    installFetchMock({
+      "/devices/7": () =>
+        jsonResponse({ status: "decommissioned", nodeId: "7" }),
+    });
+    recordActivityMock.mockRejectedValueOnce(new Error("prisma down"));
+    await expect(decommissionDevice("7")).resolves.toBe(true);
+  });
+
+  it("a failing audit row in the command finally block does not mask the matter.js error", async () => {
+    // finally-block semantics: a throw there REPLACES the in-flight
+    // error — the client must still see the translatable matter error,
+    // never the Prisma one.
+    installFetchMock({
+      "/devices/7/command": () =>
+        jsonResponse(
+          {
+            error: "Device 7 is not connected",
+            errorClass: "Error",
+            errorMessage: "Device 7 is not connected",
+          },
+          500,
+        ),
+    });
+    recordActivityMock.mockRejectedValueOnce(new Error("prisma down"));
+    await expect(sendMatterCommand("7", "turn_on")).rejects.toThrow(
+      /not connected/,
+    );
+  });
+
+  it("command success survives a failing audit row", async () => {
+    installFetchMock({
+      "/devices/7/command": () => jsonResponse({ status: "ok" }),
+    });
+    recordActivityMock.mockRejectedValueOnce(new Error("prisma down"));
+    await expect(sendMatterCommand("7", "turn_on")).resolves.toEqual({
+      status: "ok",
+    });
+  });
+
+  it("decommission maps the sidecar's 404 to false without writing an audit row", async () => {
+    // Mirrors getDevice's null contract — the route layer turns false
+    // into its own 404 (pr-reviewer finding 4 companion).
+    installFetchMock({
+      "/devices/7": () =>
+        jsonResponse(
+          {
+            error: "Device not found",
+            errorClass: "NotFoundError",
+            errorMessage: "Device not found",
+          },
+          404,
+        ),
+    });
+    await expect(decommissionDevice("7")).resolves.toBe(false);
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("init / health / events bridge", () => {
   beforeEach(() => {
     expect(isMatterInitialized()).toBe(false);

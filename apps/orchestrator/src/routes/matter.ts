@@ -31,9 +31,17 @@ import { requireRole } from "../middleware/auth.js";
 
 const logger = pino({ name: "matter-routes" });
 
-/** Validate that a nodeId string is a safe numeric value for BigInt conversion. */
+/** Matter node IDs are uint64 — 18446744073709551615 is the ceiling. */
+const NODE_ID_MAX = 18446744073709551615n;
+
+/**
+ * Validate that a nodeId string is a safe numeric value for BigInt
+ * conversion AND inside the uint64 range — 20 digits can exceed the
+ * ceiling (e.g. "99999999999999999999"), which would blow up inside
+ * the controller as a 500 instead of this validator's 400.
+ */
 function isValidNodeId(id: string): boolean {
-  return /^\d{1,20}$/.test(id);
+  return /^\d{1,20}$/.test(id) && BigInt(id) <= NODE_ID_MAX;
 }
 
 /**
@@ -492,7 +500,10 @@ export function createMatterRouter(prisma: PrismaClient): Router {
       if (!isValidNodeId(req.params.nodeId)) {
         return res.status(400).json({ error: "Invalid node ID format" });
       }
-      await decommissionDevice(req.params.nodeId);
+      const removed = await decommissionDevice(req.params.nodeId);
+      if (!removed) {
+        return res.status(404).json({ error: "Device not found" });
+      }
       res.json({ status: "decommissioned", nodeId: req.params.nodeId });
     } catch (err) {
       next(err);
