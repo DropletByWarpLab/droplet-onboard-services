@@ -174,6 +174,52 @@ function timeoutSignal(ms: number): AbortSignal {
  */
 let refreshInFlight: Promise<boolean> | null = null;
 
+/**
+ * Endpoints that must NOT trigger the 401 → refresh → retry dance. These are
+ * the auth *lifecycle* routes whose own 401 is meaningful (a bad login, an
+ * already-dead refresh cookie, the OIDC callback, logout) — refreshing on their
+ * 401 is pointless or recursive. Everything ELSE under /api/auth — notably
+ * `/api/auth/change-password` and `/api/auth/me` (whose comment explicitly says
+ * it should refresh) — DOES get the normal refresh+retry, so a merely-expired
+ * access token doesn't read as "logged out" mid-session. (Previously a broad
+ * `url.includes("/api/auth/")` skipped refresh for all of these.)
+ *
+ * Matching is by exact PATHNAME (see isAuthLifecycleUrl) — never substring.
+ */
+const NO_REFRESH_PATHS = [
+  "/api/auth/login",
+  "/api/auth/refresh",
+  "/api/auth/callback",
+  "/api/auth/logout",
+];
+
+/**
+ * True when `url` targets one of the NO_REFRESH_PATHS lifecycle routes.
+ *
+ * pr-reviewer (PR #549, finding 2): a substring `url.includes(p)` here matched
+ * any URL merely CONTAINING a lifecycle path — `/api/auth/login-history`
+ * contains `/api/auth/login`, `/api/auth/refresh-token` contains
+ * `/api/auth/refresh` — silently turning their expired-token 401s into hard
+ * logouts. Compare the parsed PATHNAME instead: query strings are ignored, an
+ * absolute URL still matches its path, and only an exact path (or a true
+ * sub-segment, e.g. a future `/api/auth/callback/<provider>`) counts. All
+ * current callers pass relative `/api/...` paths (lib/api.ts BASE = "").
+ */
+function isAuthLifecycleUrl(url: string): boolean {
+  let pathname: string;
+  try {
+    const base =
+      typeof window !== "undefined" ? window.location.origin : "http://localhost";
+    pathname = new URL(url, base).pathname;
+  } catch {
+    // Unparseable input — fall back to stripping query/hash from the raw string.
+    pathname = url.split(/[?#]/, 1)[0];
+  }
+  return NO_REFRESH_PATHS.some(
+    (p) => pathname === p || pathname.startsWith(`${p}/`),
+  );
+}
+
 async function attemptRefresh(): Promise<boolean> {
   if (!refreshInFlight) {
     refreshInFlight = fetch("/api/auth/refresh", {
@@ -192,10 +238,40 @@ async function attemptRefresh(): Promise<boolean> {
 export async function authFetch(url: string, init?: RequestInit): Promise<Response> {
   const res = await fetch(url, { ...init, credentials: "same-origin" });
 
+  // A must-change-password user gets 403 PASSWORD_CHANGE_REQUIRED on every
+  // gated call. If a stale cached profile (mustChangePassword:false) let AuthGate
+  // skip the /change-password redirect, the user would otherwise sit on the
+  // dashboard while every call silently 403s. Route them to remediation on the
+  // FIRST gated 403. Clone the response so the caller still reads an intact body;
+  // never await/consume the original. Guard against a redirect loop by checking
+  // we're not already on /change-password.
+  if (
+    res.status === 403 &&
+    typeof window !== "undefined" &&
+    window.location.pathname !== "/change-password"
+  ) {
+    res
+      .clone()
+      .json()
+      .then((b) => {
+        if (
+          b?.code === "PASSWORD_CHANGE_REQUIRED" &&
+          typeof window !== "undefined" &&
+          window.location.pathname !== "/change-password"
+        ) {
+          window.location.assign("/change-password");
+        }
+      })
+      .catch(() => {
+        /* non-JSON / unrelated 403 — leave the caller's handling intact */
+      });
+    return res;
+  }
+
   if (
     res.status !== 401 ||
     typeof window === "undefined" ||
-    url.includes("/api/auth/")
+    isAuthLifecycleUrl(url)
   ) {
     return res;
   }
@@ -220,7 +296,16 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
   } catch {
     /* ignore — privacy mode, etc. */
   }
-  if (!window.location.pathname.startsWith("/login")) {
+  // Public pages own their anonymous flow: a refresh failure on /setup (the
+  // first-run wizard probing /api/auth/me on an unclaimed box) or /login must
+  // NOT hard-navigate to /login — AuthGate routes those contextually
+  // client-side (unclaimed -> /setup). Without this guard every anonymous
+  // cold load of /setup detoured through /login with a full page reload
+  // (PR #549 review). Mirrors AuthGate's PUBLIC_PATHS.
+  const onPublicPage = ["/login", "/setup"].some((p) =>
+    window.location.pathname.startsWith(p),
+  );
+  if (!onPublicPage) {
     window.location.assign(
       `/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`,
     );

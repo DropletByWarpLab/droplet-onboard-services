@@ -21,6 +21,7 @@ trust, PM secrets) are summarized in [`CLAUDE.md`](../CLAUDE.md).
 | `AI_GATEWAY_URL`     | AI gateway endpoint                                  |
 | `OLLAMA_URL`         | Chat-path Ollama endpoint (default `http://host.docker.internal:11434` locally). Points **direct at Ollama**, not the manager's `/proxy` — see the `debug-ollama-call-path` skill |
 | `OLLAMA_MANAGER_URL` | Optional ollama-manager root for lifecycle/limits, decoupled from the chat `OLLAMA_URL` (XR-05). If `OLLAMA_URL` itself ends in `/proxy`, the manager root is derived from it |
+| `OLLAMA_CONTEXT_LENGTH` | Context window for the bundled single-box Ollama (default `16384`). Ollama's own default is 4096, which the owner-role tool schemas alone overflow — symptom: instant empty chat answers (WARP-854) |
 | `DROPLET_SSO_{GOOGLE,ENTRA,OKTA}_{ISSUER,CLIENT_ID,CLIENT_SECRET,REDIRECT_URI}` | Optional OIDC SSO provider config (commented out by default in `.env.example`) |
 | `FILES_ROOT`         | `.data/files` (local) / `/data/files` (Docker)       |
 | `STORAGE_BACKEND`    | `legacy` or `nextcloud`                              |

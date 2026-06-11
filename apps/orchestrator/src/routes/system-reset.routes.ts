@@ -10,9 +10,14 @@
  *                                  guards double-fire, and dispatches the reset
  *                                  through the device-bridge host executor. Never
  *                                  shells factory-reset.sh from the web tier.
- *   GET  /api/system/reset       — owner-only. Returns the canonical target name
- *                                  (so the UI shows exactly what to type) plus the
- *                                  latest reset job for the progress poll.
+ *   GET  /api/system/reset       — owner-only. Returns a MASKED hint of the
+ *                                  target name plus the latest reset job for the
+ *                                  progress poll. The verbatim hostname is never
+ *                                  returned here (2026-06-09 sweep): handing the
+ *                                  modal the exact string to copy/paste removed
+ *                                  the per-device type-to-confirm friction. The
+ *                                  owner reads the name from Settings → Device
+ *                                  information.
  *
  * owner-only per ADR-004 §3 (destructive system actions like the service
  * restart routes and POST /api/network/system/reboot are owner-only);
@@ -46,6 +51,20 @@ function canonicalTargetName(): string {
   return (os.hostname() || "droplet").trim();
 }
 
+/**
+ * Masked hint of the confirm target (first + last char survive as an
+ * orientation cue; bullet count is clamped so the mask doesn't encode the
+ * exact length). The owner types the real name from Settings → Device
+ * information — the API deliberately never hands the modal a copy/paste-able
+ * confirm value.
+ */
+function maskedTargetHint(name: string): string {
+  const n = (name ?? "").trim();
+  if (n.length <= 2) return "••";
+  const bullets = Math.min(Math.max(n.length - 2, 3), 8);
+  return `${n[0]}${"•".repeat(bullets)}${n[n.length - 1]}`;
+}
+
 /** Map a ResetError to an HTTP status. */
 function statusForResetError(code: ResetErrorCode): number {
   switch (code) {
@@ -53,6 +72,8 @@ function statusForResetError(code: ResetErrorCode): number {
       return 400;
     case "RESET_ALREADY_IN_PROGRESS":
       return 409;
+    case "SERIALIZATION_CONFLICT":
+      return 503;
     case "BRIDGE_AUTH_UNCONFIGURED":
       return 503;
     case "BRIDGE_UNREACHABLE":
@@ -67,12 +88,17 @@ function statusForResetError(code: ResetErrorCode): number {
 export function createSystemResetRouter(prisma: PrismaClient): Router {
   const router = Router();
 
-  // GET status — owner-only (the target name is low-sensitivity, but the whole
-  // Danger Zone surface is owner-gated, so keep the read consistent).
+  // GET status — owner-only (the whole Danger Zone surface is owner-gated).
+  // Only a MASKED hint of the target name leaves the API; the job row's
+  // targetName is masked with the same rule so the history poll can't be
+  // used as a side door to the verbatim confirm value.
   router.get("/system/reset", requireRole("owner"), async (_req, res, next) => {
     try {
       const job = await getResetStatus(prisma);
-      res.json({ targetName: canonicalTargetName(), job });
+      res.json({
+        targetHint: maskedTargetHint(canonicalTargetName()),
+        job: job ? { ...job, targetName: maskedTargetHint(job.targetName) } : null,
+      });
     } catch (err) {
       next(err);
     }
@@ -83,7 +109,7 @@ export function createSystemResetRouter(prisma: PrismaClient): Router {
     const confirm = typeof req.body?.confirm === "string" ? req.body.confirm : "";
     if (!confirm) {
       return res.status(400).json({
-        error: 'Type "factory reset" to confirm.',
+        error: "Type your device's name to confirm.",
         code: "CONFIRM_MISMATCH",
       });
     }
@@ -98,7 +124,7 @@ export function createSystemResetRouter(prisma: PrismaClient): Router {
       return res.status(202).json({
         status: job.status,
         id: job.id,
-        targetName: job.targetName,
+        targetName: maskedTargetHint(job.targetName),
       });
     } catch (err) {
       if (err instanceof ResetError) {

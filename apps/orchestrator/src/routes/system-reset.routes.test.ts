@@ -34,9 +34,14 @@ function createPrismaMock() {
   const jobs: any[] = [];
   const audits: any[] = [];
   let seq = 0;
-  return {
+  const prisma: any = {
     jobs,
     audits,
+    // reset.service wraps the double-fire guard + audit + job create in
+    // prisma.$transaction(fn, { isolationLevel: Serializable }) (pr-reviewer
+    // #549 finding 1). Run the callback against this same mock; atomicity
+    // itself isn't under test at the route level.
+    $transaction: vi.fn(async (fn: (tx: any) => Promise<any>) => fn(prisma)),
     resetJob: {
       create: vi.fn(async ({ data }: any) => {
         const job = {
@@ -73,7 +78,8 @@ function createPrismaMock() {
         return { id: `audit-${audits.length}`, ...data };
       }),
     },
-  } as any;
+  };
+  return prisma;
 }
 
 function ownerAuth(req: any, _res: any, next: any) {
@@ -107,12 +113,31 @@ afterEach(() => {
 });
 
 describe("GET /api/system/reset", () => {
-  it("exposes the canonical target name and a null status on a fresh box", async () => {
+  it("exposes only a MASKED target hint and a null status on a fresh box", async () => {
     const prisma = createPrismaMock();
     const res = await request(makeApp(prisma)).get("/api/system/reset");
     expect(res.status).toBe(200);
-    expect(res.body.targetName).toBe(os.hostname());
+    // First + last char + bullets — never the verbatim hostname (the modal
+    // must not be able to display the exact copy/paste-able confirm value).
+    const host = os.hostname();
+    expect(res.body.targetHint).toMatch(/^.•+.$|^••$/);
+    expect(res.body.targetHint).not.toBe(host);
+    expect(JSON.stringify(res.body)).not.toContain(host);
     expect(res.body.job).toBeNull();
+  });
+
+  it("masks the job's targetName in the status poll too", async () => {
+    const prisma = createPrismaMock();
+    vi.stubGlobal("fetch", bridgeOk());
+    const post = await request(makeApp(prisma))
+      .post("/api/system/reset")
+      .send({ confirm: os.hostname() });
+    expect(post.status).toBe(202);
+
+    const res = await request(makeApp(prisma)).get("/api/system/reset");
+    expect(res.status).toBe(200);
+    expect(res.body.job).not.toBeNull();
+    expect(JSON.stringify(res.body)).not.toContain(os.hostname());
   });
 });
 

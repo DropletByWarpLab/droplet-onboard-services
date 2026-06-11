@@ -57,6 +57,7 @@ import {
   verifyPassword,
   verifyDummyPassword,
 } from "../services/password.service.js";
+import { cacheGet, cacheSet, cacheDel, cacheIncr } from "../services/cache.service.js";
 import {
   TOTP_ISSUER,
   generateTotpEnrollment,
@@ -79,14 +80,13 @@ import {
   isReservedUserId,
 } from "@droplet/auth-policy";
 
-/** WARP-456: caller IP for auth audit rows. Prefers `X-Forwarded-For`
- *  (set by the nginx gateway in production), falls back to req.ip. */
-function callerIpFromReq(req: Request): string | undefined {
-  const xff = req.headers["x-forwarded-for"];
-  if (typeof xff === "string" && xff.length > 0) {
-    return xff.split(",")[0]!.trim();
-  }
-  return req.ip;
+/** WARP-456: caller IP for auth audit rows. Uses Express's proxy-aware
+ *  `req.ip` — `trust proxy` is set in app.ts, so behind the nginx gateway
+ *  this resolves to the real client. NEVER the leftmost `X-Forwarded-For`
+ *  entry: that one is client-controlled, so every auth audit row would
+ *  record whatever IP the caller chose to claim. Exported for tests. */
+export function callerIpFromReq(req: Request): string | undefined {
+  return req.ip ?? req.socket?.remoteAddress ?? undefined;
 }
 
 const logger = pino({ name: "auth-route" });
@@ -228,6 +228,83 @@ const acceptInviteSchema = z.object({
 /** Best-effort source IP for the audit trail. Honours `trust proxy`. */
 function getRequestIp(req: Request): string | null {
   return req.ip ?? req.socket?.remoteAddress ?? null;
+}
+
+/**
+ * Progressive backoff for failed current-password checks on
+ * POST /auth/change-password (PR #549 reviewer follow-up: without a lockout
+ * the endpoint is a current-password brute-force oracle for whoever holds a
+ * session cookie). Mirrors the WARP-631 claim-code model: a small free tier,
+ * then FIXED escalating locks that always elapse on their own; the failure
+ * counter resets after an hour without failures and on a successful verify.
+ * Keyed by user id — the gate protects the ACCOUNT's password, and a NATed
+ * household shares one IP. Fails OPEN on cache errors so a flaky Redis can
+ * never lock a legitimate user out of rotating their password.
+ */
+const PW_CHANGE_FREE_TIER = 5;
+/** Lock seconds for the 1st, 2nd, 3rd … lock; the last value is the cap. */
+const PW_CHANGE_BACKOFF_SCHEDULE = [30, 60, 120, 300, 900] as const;
+/** Failure counter resets after an hour of no failures (rolling window). */
+const PW_CHANGE_FAILS_TTL_SEC = 60 * 60;
+
+function pwChangeFailsKey(userId: string): string {
+  return `ratelimit:change-password:fails:${userId}`;
+}
+function pwChangeLockKey(userId: string): string {
+  return `ratelimit:change-password:lock:${userId}`;
+}
+
+/** PURE schedule map (failure count → lock seconds). Exported for tests. */
+export function passwordChangeBackoffSeconds(failureCount: number): number {
+  const idx = failureCount - PW_CHANGE_FREE_TIER - 1;
+  if (idx < 0) return 0;
+  return PW_CHANGE_BACKOFF_SCHEDULE[
+    Math.min(idx, PW_CHANGE_BACKOFF_SCHEDULE.length - 1)
+  ];
+}
+
+async function checkPasswordChangeLock(
+  userId: string,
+): Promise<{ locked: boolean; retryAfterSeconds: number }> {
+  try {
+    const until = (await cacheGet<number>(pwChangeLockKey(userId))) ?? 0;
+    const now = Date.now();
+    if (until > now) {
+      return { locked: true, retryAfterSeconds: Math.ceil((until - now) / 1000) };
+    }
+    return { locked: false, retryAfterSeconds: 0 };
+  } catch {
+    return { locked: false, retryAfterSeconds: 0 };
+  }
+}
+
+async function recordPasswordChangeFailure(userId: string): Promise<void> {
+  try {
+    // cacheIncr is atomic (Redis INCR) — avoids the read-modify-write race
+    // where two concurrent wrong-password requests both read N and both write
+    // N+1, keeping the counter artificially low.
+    const next = await cacheIncr(pwChangeFailsKey(userId), PW_CHANGE_FAILS_TTL_SEC);
+    if (next === null) return; // Redis error — fail open
+    const lockedSeconds = passwordChangeBackoffSeconds(next);
+    if (lockedSeconds > 0) {
+      await cacheSet(
+        pwChangeLockKey(userId),
+        Date.now() + lockedSeconds * 1000,
+        lockedSeconds,
+      );
+    }
+  } catch {
+    // fail open — see the model comment above.
+  }
+}
+
+async function clearPasswordChangeRateState(userId: string): Promise<void> {
+  try {
+    await cacheDel(pwChangeFailsKey(userId));
+    await cacheDel(pwChangeLockKey(userId));
+  } catch {
+    // fail open.
+  }
 }
 
 // The invite-accept URL is built by the shared, host-validated
@@ -927,7 +1004,11 @@ export function createPublicAuthRouter(
             { sub },
             "JWT refresh: prisma not wired into public auth router; failing closed (WARP-485 round 2)",
           );
-          await denyRefreshToken(refreshTokenCookie);
+          // Deny the token that was actually presented — body-sourced for
+          // native clients (ADR-008), cookie for browsers. Denying only the
+          // cookie left a body token replayable after its rotation claim
+          // expired.
+          await denyRefreshToken(refreshTokenInput);
           res.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
           res.clearCookie(REFRESH_COOKIE_NAME, { path: "/api/auth" });
           res.status(401).json({
@@ -937,15 +1018,21 @@ export function createPublicAuthRouter(
           return;
         }
         const localUser = await prisma.user.findUnique({ where: { id: sub } });
-        if (!localUser) {
+        // Fail closed when the backing row is gone OR the directory deactivated
+        // it (SCIM `active:false` / DELETE → DEACTIVATED, soft). A row-existence
+        // check alone let a still-valid refresh token keep minting fresh
+        // credentials for an offboarded user; mirror the DEACTIVATED gate the
+        // /auth/login, SSO, and WebAuthn paths already enforce.
+        if (!localUser || localUser.directoryStatus === "DEACTIVATED") {
           logger.warn(
-            { sub },
-            "JWT refresh: no local User row for refresh-token subject; refusing rotation (WARP-485 round 2)",
+            { sub, deactivated: localUser?.directoryStatus === "DEACTIVATED" },
+            "JWT refresh: no usable User row for refresh-token subject (missing or deactivated); refusing rotation (WARP-485 round 2)",
           );
           // Burn the old refresh token so a retry can't re-enter this
           // branch repeatedly — denylist entry auto-expires with the
-          // token's own TTL.
-          await denyRefreshToken(refreshTokenCookie);
+          // token's own TTL. Must be the token actually presented
+          // (body-sourced for ADR-008 native clients, cookie for browsers).
+          await denyRefreshToken(refreshTokenInput);
           res.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
           res.clearCookie(REFRESH_COOKIE_NAME, { path: "/api/auth" });
           res.status(401).json({
@@ -1405,13 +1492,20 @@ export function createProtectedAuthRouter(
 
       const { currentPassword, newPassword } = parsed.data;
 
-      // A no-op "change" (new === current) is not a real rotation — reject it
-      // before touching the hash so a forced-change user can't satisfy the
-      // gate by re-entering the temp password.
-      if (currentPassword === newPassword) {
+      // Progressive lock BEFORE any verify work (PR #549 reviewer follow-up):
+      // without this, a hijacked session can brute-force the current password
+      // unbounded — change-password is the one authenticated surface where
+      // the password itself is the thing being guessed.
+      const lock = await checkPasswordChangeLock(req.user.id);
+      if (lock.locked) {
         res
-          .status(400)
-          .json({ error: "Choose a password different from your current one", code: "SAME_PASSWORD" });
+          .status(429)
+          .set("Retry-After", String(lock.retryAfterSeconds))
+          .json({
+            error: "Too many attempts. Try again shortly.",
+            code: "TOO_MANY_ATTEMPTS",
+            retryAfterSeconds: lock.retryAfterSeconds,
+          });
         return;
       }
 
@@ -1427,9 +1521,27 @@ export function createProtectedAuthRouter(
 
       const ok = await verifyPassword(localUser.passwordHash, currentPassword);
       if (!ok) {
+        await recordPasswordChangeFailure(req.user.id);
         res.status(400).json({ error: "Invalid current password", code: "INVALID_PASSWORD" });
         return;
       }
+
+      // A no-op "change" (new === current) is not a real rotation — reject it
+      // before touching the hash so a forced-change user can't satisfy the
+      // gate by re-entering the temp password. Checked AFTER the current
+      // password is verified: the endpoint must answer nothing about the
+      // submitted strings to a caller who hasn't proven the current password
+      // (PR #549 reviewer follow-up — ordering half of the oracle finding).
+      // clearPasswordChangeRateState is called AFTER this check so a caller
+      // submitting (correct, correct) cannot drain the failure counter without
+      // completing a real rotation (finding from 2026-06-10 sweep).
+      if (currentPassword === newPassword) {
+        res
+          .status(400)
+          .json({ error: "Choose a password different from your current one", code: "SAME_PASSWORD" });
+        return;
+      }
+      await clearPasswordChangeRateState(req.user.id);
 
       // ADR-013: write the new argon2id hash to the directory row AND clear the
       // forced-change flag in the SAME update so the gate opens atomically with

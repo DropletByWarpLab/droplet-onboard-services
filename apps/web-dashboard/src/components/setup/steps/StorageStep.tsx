@@ -275,11 +275,23 @@ export function StorageStep({
     if (!chosenLevel || !chosenOption?.selectable) return;
     setCreateError(null);
     setCreating(true);
-    // One member per POOLABLE physical disk — never two partitions of the SAME
-    // disk (a meaningless "mirror" of a disk with itself, and zero real
-    // redundancy). Each is the disk's mounted device, so the host script's
-    // is-mounted gate still fires on it.
-    const members = poolableDisks.map((p) => p.members[0].device);
+    // One member per POOLABLE physical disk — the WHOLE DISK NODE, never a
+    // partition of it (and never two partitions of the SAME disk). WARP-848
+    // QA must-fix: this used to send each disk's FIRST partition
+    // (members[0].device, e.g. /dev/sda1), so the host script's managed
+    // teardown released only that partition's mounts and wipefs/mdadm ran on
+    // the partition — while the ConfirmDialog promised, and the capacity
+    // options priced, the whole disk. A sibling partition (the live box's
+    // sda2 `data` next to sda1 `nvr`) survived mounted and un-erased,
+    // re-automounting every boot, and the pool came up partition-sized.
+    // Tearing down a DISK node covers every child partition (kernel PKNAME
+    // topology), so the whole-disk member delivers exactly what the dialog
+    // names. `p.disk` is normally a short kernel name ("sda"); the
+    // groupPhysicalDisks fallback can carry a full device path for an
+    // unrecognized shape, so only prefix /dev/ when it's missing.
+    const members = poolableDisks.map((p) =>
+      p.disk.startsWith("/dev/") ? p.disk : `/dev/${p.disk}`,
+    );
     try {
       const token = await requestCreatePool({
         // md device name is owner-agnostic — first pool is md0 on a fresh box
@@ -782,11 +794,13 @@ function friendlyCreateError(err: unknown): string {
 
 /**
  * Build the host-script confirm phrase (ADR-019 D4.3). The script's "never
- * run blind" gate requires the phrase to contain every member's SHORT device
- * basename (case-sensitive substring), e.g. for ["/dev/sda1","/dev/sda2"] →
- * "ERASE sda1 sda2". The owner-facing confirmation (role + token +
- * destructive ConfirmDialog naming each drive) is the human gate; this is the
- * machine token that satisfies the last-line script check.
+ * run blind" gate requires every member's SHORT device basename as a whole
+ * TOKEN of the phrase (split on non-alphanumerics, case-sensitive — WARP-848
+ * hardening; a substring match used to let `sda1` ride on a phrase naming
+ * `sda10`), e.g. for ["/dev/sda","/dev/sdb"] → "ERASE sda sdb". The
+ * owner-facing confirmation (role + token + destructive ConfirmDialog naming
+ * each drive) is the human gate; this is the machine token that satisfies the
+ * last-line script check.
  */
 export function buildConfirmPhrase(members: string[]): string {
   const shorts = members

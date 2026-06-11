@@ -58,11 +58,17 @@ describe("EmailChannelSection", () => {
     getEmailChannel.mockResolvedValueOnce({ ...baseCfg, hasPassword: true });
     render(<EmailChannelSection />);
 
-    const pw = await screen.findByLabelText(/smtp password/i);
+    const pw = (await screen.findByLabelText(
+      /smtp password/i,
+    )) as HTMLInputElement;
     // Write-only: the field is empty, with a placeholder noting one exists.
-    expect((pw as HTMLInputElement).value).toBe("");
-    expect((pw as HTMLInputElement).placeholder).toMatch(/saved|stored|replace/i);
-    expect((pw as HTMLInputElement).type).toBe("password");
+    // The field renders before the redacted config lands, so wait for the
+    // placeholder to flip — asserting right after findBy races the load.
+    await waitFor(() =>
+      expect(pw.placeholder).toMatch(/saved|stored|replace/i),
+    );
+    expect(pw.value).toBe("");
+    expect(pw.type).toBe("password");
   });
 
   it("saves the form and shows a success confirmation", async () => {

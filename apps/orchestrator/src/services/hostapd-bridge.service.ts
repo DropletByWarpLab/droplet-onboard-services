@@ -37,25 +37,16 @@
 import pino from "pino";
 import { config } from "../config.js";
 import { RouterError, routerErrorFromResponse } from "../types/router-error.js";
-import { isBridgeConnectionError } from "../lib/bridge-errors.js";
+import {
+  isBridgeConnectionError,
+  isTimeoutOrAbort,
+  bridgeAuthToken,
+} from "../lib/bridge-errors.js";
 import type { WriteResult } from "./openwrt.client.js";
 
 const logger = pino({ name: "hostapd-bridge" });
 
 const BRIDGE_URL = config.DEVICE_BRIDGE_URL;
-
-/**
- * Shared secret the device-bridge requires on its mutating routes. Same env
- * precedence + per-call read as routes/storage.ts's bridgeAuthToken() so a
- * secret injected after boot (and the tests) see the current value.
- */
-function bridgeAuthToken(): string {
-  return (
-    process.env.BRIDGE_AUTH_TOKEN ||
-    process.env.SERVICE_TOKEN_DISPLAY ||
-    ""
-  ).trim();
-}
 
 /**
  * Staged SSIDs from the preceding setWifiSsid call, keyed by the authenticated
@@ -129,15 +120,6 @@ async function currentSsidFromBridge(): Promise<string | null> {
   return data.ssid && typeof data.ssid === "string" ? data.ssid : null;
 }
 
-/** A fetch/abort failure that means "the request didn't get a response" — a
- *  dropped connection or a client-side timeout. AbortController.abort() throws
- *  an AbortError; AbortSignal.timeout() throws a TimeoutError (review #6 — the
- *  earlier check only matched AbortError and missed the timeout variant). */
-function isTimeoutOrAbort(err: unknown): boolean {
-  const name = (err as { name?: string })?.name;
-  return name === "AbortError" || name === "TimeoutError";
-}
-
 /**
  * Apply the staged SSID + this PSK to the host hostapd AP via the device-bridge.
  * Exactly one bridge POST → one AP reload. Consumes (clears) the staged SSID for
@@ -187,9 +169,17 @@ export async function applyWifi(
     ssid = await currentSsidFromBridge();
   }
   if (!ssid) {
-    throw RouterError.unreachable(
-      "Set Wi-Fi: could not determine the current network name (SSID).",
-      { label: "Set Wi-Fi" },
+    // The bridge IS reachable (currentSsidFromBridge throws UNREACHABLE/AUTH on
+    // a transport/HTTP failure and only returns null when the AP simply has no
+    // SSID set yet) — so this is NOT a reachability fault. Classifying it as
+    // UNREACHABLE fired the wizard's WARP-807 "device not reachable, finish
+    // later" notice and pointed triage at the network, when the real cause is a
+    // password-only apply before any network name was ever configured. Surface
+    // it as a 422 precondition with actionable copy instead (no PSK logged).
+    throw RouterError.unknown(
+      "Set Wi-Fi: set the Wi-Fi network name before saving a password — " +
+        "no network name is configured yet.",
+      { label: "Set Wi-Fi", status: 422 },
     );
   }
 

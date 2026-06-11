@@ -196,6 +196,54 @@ describe("useChat — conversation persistence (WARP-304)", () => {
     expect(probe!.messages[1].toolCalls?.[0]).toMatchObject({ id: "c1", name: "get_time" });
   });
 
+  it("loadConversation reports the persisted model via onConversationLoaded", async () => {
+    mockFetchConversation.mockResolvedValueOnce({
+      id: "conv-model",
+      title: "Old chat",
+      model: "qwen2.5:3b-instruct",
+      provider: "ollama",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      messages: [
+        {
+          id: "m1",
+          role: "user",
+          content: "hi",
+          toolCalls: null,
+          toolCallId: null,
+          turnId: "t1",
+          createdAt: new Date().toISOString(),
+        },
+      ],
+    });
+
+    const onLoaded = vi.fn();
+    function ProbeWithCallback({ onValue }: { onValue: (v: ProbeValue) => void }) {
+      const hook = useChat({ onConversationLoaded: onLoaded });
+      onValue({
+        messages: hook.messages,
+        sendMessage: hook.sendMessage,
+        clearMessages: hook.clearMessages,
+        loadConversation: hook.loadConversation,
+        retryMessage: hook.retryMessage,
+        conversationId: hook.conversationId,
+      });
+      return null;
+    }
+    let probe: ProbeValue;
+    render(<ProbeWithCallback onValue={(v) => (probe = v)} />);
+
+    await act(async () => {
+      await probe!.loadConversation("conv-model");
+    });
+
+    expect(onLoaded).toHaveBeenCalledWith({
+      id: "conv-model",
+      model: "qwen2.5:3b-instruct",
+      systemPrompt: null,
+    });
+  });
+
   it("loadConversation maps server status to failureKind on assistant messages", async () => {
     mockFetchConversation.mockResolvedValueOnce({
       id: "conv-statuses",
@@ -237,6 +285,37 @@ describe("useChat — conversation persistence (WARP-304)", () => {
       failureKind: "interrupted",
       content: "mid",
     });
+  });
+
+  it("loadConversation flags a completed-but-empty ghost turn as failed (WARP-854)", async () => {
+    // Rows persisted before the empty-completion guard: status `completed`,
+    // no content, no tool calls (e.g. context-window overflow). Without the
+    // mapping they render as literally nothing.
+    mockFetchConversation.mockResolvedValueOnce({
+      id: "conv-ghost",
+      title: "Ghost",
+      model: "gpt-oss:20b",
+      provider: "ollama",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      messages: [
+        { id: "u1", role: "user", content: "What is the population of Tokyo?", toolCalls: null, toolCallId: null, turnId: "t1", status: "completed", createdAt: new Date().toISOString() },
+        { id: "a1", role: "assistant", content: "", toolCalls: null, toolCallId: null, turnId: "t1", status: "completed", createdAt: new Date().toISOString() },
+        // Tool-only completed turns with empty content remain legitimate.
+        { id: "u2", role: "user", content: "list devices", toolCalls: null, toolCallId: null, turnId: "t2", status: "completed", createdAt: new Date().toISOString() },
+        { id: "a2", role: "assistant", content: "", toolCalls: [{ id: "c1", name: "list_network_devices", args: {} }], toolCallId: null, turnId: "t2", status: "completed", createdAt: new Date().toISOString() },
+      ],
+    });
+
+    let probe: ProbeValue;
+    render(<Probe onValue={(v) => (probe = v)} />);
+
+    await act(async () => {
+      await probe!.loadConversation("conv-ghost");
+    });
+
+    expect(probe!.messages[1]).toMatchObject({ id: "a1", failureKind: "failed" });
+    expect(probe!.messages[3].failureKind).toBeUndefined();
   });
 
   it("loadConversation synthesizes a missing-reply placeholder for a tail-orphan user message", async () => {

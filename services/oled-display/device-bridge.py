@@ -43,6 +43,17 @@ OPENWRT_USER      = os.environ.get("OPENWRT_USER", "root")
 OPENWRT_PASS      = os.environ.get("OPENWRT_PASS", "")
 OPENWRT_IFACE     = os.environ.get("OPENWRT_IFACE", "wlan0")
 SSH_TIMEOUT       = int(os.environ.get("SSH_CONNECT_TIMEOUT", "4"))
+# Persistent SSH known_hosts for the OpenWrt control channel (multi-box uci AP
+# path only — single-box hostapd never SSHes). Combined with
+# StrictHostKeyChecking=accept-new this trusts the router key on first contact
+# and then DETECTS any later key swap — a LAN MITM on 192.168.50.x trying to
+# capture OPENWRT_PASS or inject UCI now fails the connection instead of being
+# silently accepted (the old StrictHostKeyChecking=no + /dev/null accepted any
+# key on every connect). Defaults under the systemd StateDirectory
+# (/var/lib/droplet-bridge, created 0700) so the pin survives restarts;
+# install-device-bridge.sh can pre-seed it via ssh-keyscan.
+OPENWRT_KNOWN_HOSTS = os.environ.get(
+    "OPENWRT_KNOWN_HOSTS", "/var/lib/droplet-bridge/openwrt_known_hosts")
 
 # Access-point credentials source for the pairing QR. The two shipping
 # deployment shapes broadcast the AP differently:
@@ -152,6 +163,23 @@ _ROTATION_LOCK = threading.Lock()
 # _ROTATION_LOCK does for rotation: non-blocking acquire, 409 on contention.
 _HOSTAPD_LOCK = threading.Lock()
 
+# In-process lock for the factory reset (WARP-825). The HTTP server is threaded,
+# so two concurrent POST /system/factory-reset would each _spawn_detached the
+# wipe script — two `docker compose down -v` runs racing the same teardown.
+# Serialize the spawn decision exactly like _HOSTAPD_LOCK: non-blocking acquire,
+# 409 on contention.
+_FACTORY_RESET_LOCK = threading.Lock()
+
+# Handle to the in-flight wipe's detached process (WARP-825 hardening). On a
+# successful spawn the lock is held for the wipe's whole lifetime — the wipe is
+# meant to tear this bridge down, so a SUCCESSFUL wipe never returns to this
+# process at all. If a LATER reset request finds the lock held, polling this
+# handle distinguishes a live wipe (poll() is None → genuinely in progress →
+# 409) from one that exited WITHOUT completing the teardown (poll() is not None
+# → the wipe FAILED mid-run → reclaim the stale lock so the owner can retry,
+# instead of wedging every future reset at 409 for the life of the bridge).
+_factory_reset_proc = None
+
 
 # ---------------------------------------------------------------------------
 # Shell helper
@@ -193,10 +221,20 @@ if [ -z "$target" ]; then echo "ERR no active AP" >&2; exit 1; fi
 
 
 def _ssh_openwrt(remote_cmd, timeout=20):
+    # Pin the router host key to a persistent known_hosts and trust-on-first-use
+    # (accept-new): first contact records the key, every later connect verifies
+    # it, so a mid-stream key swap by a MITM is rejected rather than silently
+    # accepted. Best-effort ensure the parent dir exists (systemd StateDirectory
+    # normally creates it; this also covers manual/dev runs) — ssh surfaces any
+    # real permission error itself.
+    try:
+        os.makedirs(os.path.dirname(OPENWRT_KNOWN_HOSTS) or ".", exist_ok=True)
+    except OSError:
+        pass
     ssh_args = [
         "ssh",
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", f"UserKnownHostsFile={OPENWRT_KNOWN_HOSTS}",
         "-o", f"ConnectTimeout={SSH_TIMEOUT}",
         "-o", "LogLevel=ERROR",
         f"{OPENWRT_USER}@{OPENWRT_HOST}",
@@ -608,7 +646,8 @@ def wifi_snapshot():
 # ---------------------------------------------------------------------------
 # Pure-Python QR encoder.
 # Handles the subset we actually need: WIFI payload strings, byte mode,
-# error-correction level L, auto version bump. No external deps.
+# error-correction level Q (L fallback for oversized pathological payloads),
+# auto version bump. No external deps.
 
 def _wifi_payload(ssid, key, encryption):
     """Format a WiFi:...; QR payload per the de-facto standard."""
@@ -628,20 +667,47 @@ def _wifi_payload(ssid, key, encryption):
                                            esc(key) if sec != "nopass" else "")
 
 
+# Hard cap on the QR matrix we ship to the panel — mirrors ClaimRequest's
+# wifi_qr_matrix max_length=64 (main.py): a v-large QR would OOM the
+# PyPortal. At Q only a pathological fully-escaped SSID+PSK (~200+ chars)
+# exceeds it; _qr_encode degrades those to L, which always fits.
+_QR_MAX_ROWS = 64
+
+
 def _qr_encode(text):
     """Generate a QR code bit-matrix for `text` using the `qrcode` lib
-    (apt: python3-qrcode). Returns (matrix, version)."""
+    (apt: python3-qrcode). Returns (matrix, version).
+
+    ERROR_CORRECT_Q (~25% codeword recovery), NOT L: the PyPortal's QR card
+    (_v3_qr_card in pyportal/code.py) paints a 32x32px white droplet-mark
+    pad dead-centre over the symbol, and at L the pad corrupts more
+    codewords than Reed-Solomon can recover — the rendered card fails to
+    decode for every typical Wi-Fi payload (verified empirically; same
+    finding as the scan-to-claim QR in the PR #550 review). Typical WPA
+    payloads land at v4 (33x33) at Q, well inside the firmware's 64-row
+    tolerance. A payload too big for 64 rows at Q degrades to L — the same
+    matrix the encoder always shipped for those — rather than risking the
+    panel heap.
+    """
     import qrcode
-    from qrcode.constants import ERROR_CORRECT_L
-    q = qrcode.QRCode(
-        error_correction=ERROR_CORRECT_L,
-        border=0,       # we pad on the display side
-        box_size=1,
-    )
-    q.add_data(text)
-    q.make(fit=True)
-    matrix = [[1 if cell else 0 for cell in row] for row in q.get_matrix()]
-    return matrix, q.version
+    from qrcode.constants import ERROR_CORRECT_L, ERROR_CORRECT_Q
+
+    def _encode(level):
+        q = qrcode.QRCode(
+            error_correction=level,
+            border=0,       # we pad on the display side
+            box_size=1,
+        )
+        q.add_data(text)
+        q.make(fit=True)
+        matrix = [[1 if cell else 0 for cell in row]
+                  for row in q.get_matrix()]
+        return matrix, q.version
+
+    matrix, version = _encode(ERROR_CORRECT_Q)
+    if len(matrix) > _QR_MAX_ROWS:
+        matrix, version = _encode(ERROR_CORRECT_L)
+    return matrix, version
 
 
 def qr_snapshot():
@@ -1416,9 +1482,10 @@ def eject_drive(uuid):
 # ---------------------------------------------------------------------------
 # Reads /proc/mdstat (+ mdadm --detail --scan) and maps the raw md state onto
 # the ADR-019 explicit enums. NEVER mutates an array — create/destroy/format
-# live behind the auth-gated destructive POST (run_pool_command) which shells
-# the repo-tracked host script, never mdadm directly. Returns [] honestly when
-# md has no arrays (the owner's "no fake pool" constraint at the read layer).
+# live behind the auth-gated destructive POST (run_pool_command), which hands
+# the op to the root executor unit that runs the repo-tracked host script —
+# never mdadm directly. Returns [] honestly when md has no arrays (the
+# owner's "no fake pool" constraint at the read layer).
 
 _pools_cache = {"snap": None, "at": 0}
 
@@ -1587,50 +1654,153 @@ _POOL_OPS = frozenset({
     "drive_adopt",
 })
 
-# Path to the repo-tracked host script, installed by setup.sh via
-# install-device-bridge.sh. Overridable for tests / non-standard installs.
-POOL_SCRIPT = os.environ.get(
-    "DROPLET_POOL_SCRIPT", "/usr/local/sbin/droplet-storage-pool.sh").strip()
+# ADR-019 follow-up: the bridge CANNOT exec droplet-storage-pool.sh itself —
+# this process runs as User=droplet inside ProtectSystem=strict +
+# NoNewPrivileges, where mdadm/mkfs/mount all fail (EPERM on the root:disk
+# 0660 block devices, EROFS under /mnt) and the script's blkid "has data"
+# probe silently degrades (an unprivileged blkid can't open the device,
+# prints nothing, and the guard passes). Verified on the shipping box. So,
+# same posture as the WARP-808 hostapd Wi-Fi write but with a different
+# split (mdadm is a direct binary — there is no unit to polkit-restart):
+# the bridge writes the owner-confirmed request into a spool inside its own
+# StateDirectory, then `systemctl start`s a root oneshot
+# (droplet-storage-pool-apply.service — authorized for the droplet user by
+# 50-droplet-device-bridge.rules, start verb only) which runs the pool
+# script as root and writes a result file back into the spool.
+POOL_SPOOL_DIR = os.environ.get(
+    "DROPLET_POOL_SPOOL_DIR", "/var/lib/droplet-bridge/pool-spool").strip()
+POOL_APPLY_UNIT = os.environ.get(
+    "DROPLET_POOL_APPLY_UNIT", "droplet-storage-pool-apply.service").strip()
+
+# Serialize concurrent pool writes (mirrors _HOSTAPD_LOCK). The spool holds
+# exactly ONE request/result pair, so two racing POSTs would clobber each
+# other's files; non-blocking acquire → the second caller is refused, not
+# queued.
+_POOL_LOCK = threading.Lock()
 
 
 def run_pool_command(operation, params):
-    """Forward an owner-confirmed destructive pool op to the host script.
+    """Forward an owner-confirmed destructive pool op to the root executor.
 
-    The bridge does NOT run mdadm/mkfs — it execs droplet-storage-pool.sh,
-    passing the operation and the params as a single JSON argument. The host
-    script's hard pre-flight (refuse if a target disk is mounted / holds data /
-    is the OS disk; require the typed double-confirm) is the real safety gate;
-    this function only (a) refuses operations outside the allow-list and (b)
-    surfaces the script's exit code honestly. Returns (ok, info); never raises
-    — mirrors eject_drive()."""
+    The bridge does NOT run mdadm/mkfs — and (ADR-019 follow-up) it does not
+    exec droplet-storage-pool.sh either, because this sandbox can't grant the
+    root that script needs. It writes {request_id, operation, params} to the
+    pool spool and starts the root apply unit, whose ExecStart consumes the
+    request, runs the pool script (whose hard pre-flight — refuse mounted /
+    has-data / OS-disk, require the typed double-confirm — is the real safety
+    gate, and actually works under root), and writes back a result file
+    carrying the script's rc/stdout/stderr. This function only (a) refuses
+    operations outside the allow-list, (b) refuses a second in-flight write,
+    and (c) surfaces the executor's result honestly. Returns (ok, info);
+    never raises — mirrors eject_drive()."""
     if operation not in _POOL_OPS:
         return False, "unknown pool operation: {}".format(operation)
-    payload = json.dumps(params or {})
+    if not _POOL_LOCK.acquire(blocking=False):
+        logger.warning("pool command %s rejected: another storage operation "
+                       "is already in progress", operation)
+        return False, "another storage operation is already in progress"
     try:
-        # The host script runs `mdadm`/`mkfs` which can take a while on a large
-        # array; allow a generous timeout but still bounded.
-        rc, out, err = _run([POOL_SCRIPT, operation, payload], timeout=600)
+        return _run_pool_via_executor(operation, params)
+    finally:
+        _POOL_LOCK.release()
+
+
+def _run_pool_via_executor(operation, params):
+    """Spool the request, start the root apply unit, collect the result.
+
+    Split out of run_pool_command so the lock handling above stays trivially
+    correct. Same (ok, info) contract; never raises."""
+    request_id = secrets.token_hex(8)
+    req_path = os.path.join(POOL_SPOOL_DIR, "request.json")
+    res_path = os.path.join(POOL_SPOOL_DIR, "result.json")
+    try:
+        # 0700 like the StateDirectory it lives in — only the bridge user
+        # (or root) may place a request. os.makedirs ignores `mode` when the
+        # directory already exists, so explicitly chmod it on every start to
+        # close the window where a prior install left a looser umask (0755).
+        os.makedirs(POOL_SPOOL_DIR, mode=0o700, exist_ok=True)
+        os.chmod(POOL_SPOOL_DIR, 0o700)
+        # Drop any stale pair from an interrupted earlier run so the executor
+        # can never consume an old request and we never read an old result.
+        for stale in (req_path, res_path):
+            try:
+                os.remove(stale)
+            except FileNotFoundError:
+                pass
+        tmp = req_path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"request_id": request_id, "operation": operation,
+                       "params": params or {}}, f)
+        # Atomic rename: the executor never sees a half-written request.
+        os.replace(tmp, req_path)
     except Exception as e:                                          # noqa: BLE001
-        logger.warning("pool command %s failed to exec host script: %s",
+        logger.warning("pool command %s failed to spool request: %s",
                        operation, e)
-        return False, "host script unavailable"
+        return False, "could not spool the pool request"
+    try:
+        # Blocking start of a Type=oneshot unit returns when its ExecStart
+        # exits, i.e. when the result file is already in place. mdadm/mkfs on
+        # a large array can take a while; generous but bounded (the unit's
+        # own TimeoutStartSec sits just under this).
+        rc, out, err = _run(["systemctl", "start", POOL_APPLY_UNIT],
+                            timeout=600)
+    except Exception as e:                                          # noqa: BLE001
+        logger.warning("pool command %s failed to start executor unit: %s",
+                       operation, e)
+        rc, out, err = 1, "", str(e)
     if rc != 0:
-        msg = (err.strip() or out.strip() or "host script refused")
-        logger.warning("pool command %s refused/failed (rc=%s): %s",
+        # The unit never ran (polkit denied / not installed) or died at the
+        # executor level (no/malformed request). Remove the unconsumed
+        # request so it can't be picked up by a later start.
+        try:
+            os.remove(req_path)
+        except OSError:
+            pass
+        msg = (err.strip() or out.strip() or "pool executor failed to start")
+        logger.warning("pool command %s executor start failed (rc=%s): %s",
                        operation, rc, msg)
+        return False, msg
+    try:
+        with open(res_path) as f:
+            result = json.load(f)
+    except Exception as e:                                          # noqa: BLE001
+        logger.warning("pool command %s: executor wrote no readable result: %s",
+                       operation, e)
+        return False, "pool executor returned no readable result"
+    finally:
+        try:
+            os.remove(res_path)
+        except OSError:
+            pass
+    if result.get("request_id") != request_id:
+        # A leftover from some other run — never report it as ours.
+        logger.warning("pool command %s: stale executor result ignored",
+                       operation)
+        return False, "pool executor result did not match this request"
+    script_rc = result.get("rc")
+    script_out = result.get("stdout") or ""
+    script_err = result.get("stderr") or ""
+    if script_rc is None or script_rc != 0:
+        msg = (script_err.strip() or script_out.strip()
+               or "host script refused")
+        logger.warning("pool command %s refused/failed (rc=%s): %s",
+                       operation, script_rc, msg)
         return False, msg
     # Invalidate the pools cache so the next GET /pools reflects the change.
     pools_snapshot(invalidate=True)
-    # drive_adopt mounts a freshly-formatted disk under /mnt/droplet, so the
-    # drives cache must also be refreshed — otherwise GET /drives returns a
-    # stale snapshot for up to the cache TTL and StorageStep's immediate
-    # post-adopt load() shows the disk as not-yet-mounted. (review #499)
-    if operation == "drive_adopt":
-        drives_snapshot(invalidate=True)
+    # Any pool op can change which drives are free vs. in-use (pool_create,
+    # pool_destroy, pool_format, pool_add_spare, pool_remove_disk all alter
+    # md membership; drive_adopt also mounts under /mnt/droplet). Invalidate
+    # drives unconditionally so the next GET /drives reflects the new state
+    # within the cache TTL. NB this deliberately BROADENS the previous
+    # behavior (main invalidated drives only for drive_adopt; pools_snapshot
+    # was the unconditional one) — every pool op changes free/in-use drive
+    # state, so they all deserve the invalidation.
+    drives_snapshot(invalidate=True)
     try:
-        return True, json.loads(out or "{}")
+        return True, json.loads(script_out or "{}")
     except (ValueError, TypeError):
-        return True, {"message": (out or "").strip()}
+        return True, {"message": script_out.strip()}
 
 
 # ---------------------------------------------------------------------------
@@ -1735,9 +1905,13 @@ RESET_SCRIPT = os.environ.get(
 def _spawn_detached(cmd):
     """Spawn a long-running host command fully detached from this process.
 
-    Returns (ok, error). `ok` means "the child was launched" — NOT "the wipe
-    finished" (we deliberately don't wait; the wipe outlives us). A launch
-    failure (script missing / not executable) returns (False, <reason>).
+    Returns (proc, error). `proc` is the live `subprocess.Popen` on a
+    successful launch — NOT a finished wipe (we deliberately don't wait; the
+    wipe outlives us). The caller keeps the handle so a LATER reset request can
+    poll() it: a detached wipe that exits without tearing this bridge down has
+    failed, and polling lets us reclaim the stale lock instead of wedging every
+    future reset at 409. A launch failure (script missing / not executable)
+    returns (None, <reason>).
 
     Detached so the child keeps running after the bridge is torn down by the
     very wipe it kicked off: new session (setsid / new process group), stdio
@@ -1755,12 +1929,12 @@ def _spawn_detached(cmd):
         # portable (POSIX) way; guard for platforms without it.
         if hasattr(os, "setsid"):
             kwargs["start_new_session"] = True
-        subprocess.Popen(cmd, **kwargs)  # noqa: S603 — fixed argv, no shell
-        return True, None
+        proc = subprocess.Popen(cmd, **kwargs)  # noqa: S603 — fixed argv, no shell
+        return proc, None
     except FileNotFoundError:
-        return False, "host script not found"
+        return None, "host script not found"
     except Exception as e:                                          # noqa: BLE001
-        return False, str(e)
+        return None, str(e)
 
 
 def run_factory_reset(params):
@@ -1780,18 +1954,58 @@ def run_factory_reset(params):
         "jobId": job_id,
         "targetName": (params or {}).get("targetName", ""),
     })
+    global _factory_reset_proc
+    # Serialize the spawn decision (mirrors run_set_hostapd's _HOSTAPD_LOCK). Two
+    # threads racing here would each launch the wipe — two `docker compose down
+    # -v` runs racing the same teardown. Non-blocking: a second in-flight reset is
+    # rejected (the handler maps code == "busy" to 409) rather than queued.
+    if not _FACTORY_RESET_LOCK.acquire(blocking=False):
+        # The lock is held. Either a wipe is genuinely in flight, or a previous
+        # wipe FAILED mid-run — it exited without tearing this bridge down and
+        # left the lock held forever, so every later reset 409s for the life of
+        # the process (manual SSH to restart the bridge was the only recovery).
+        # Poll the tracked process to tell the two apart.
+        prior = _factory_reset_proc
+        if prior is None or prior.poll() is None:
+            # No tracked process, or it is still running → genuinely in progress.
+            logger.warning("factory reset rejected: a reset is already in progress")
+            return False, "busy"
+        # The prior wipe exited without completing the teardown → it failed.
+        # Reclaim the stale lock so this attempt can proceed.
+        logger.warning(
+            "factory reset: prior wipe exited (rc=%s) without completing the "
+            "teardown — reclaiming the stale lock for a retry", prior.returncode)
+        _factory_reset_proc = None
+        _FACTORY_RESET_LOCK.release()
+        if not _FACTORY_RESET_LOCK.acquire(blocking=False):
+            # Lost the race to a concurrent retry — treat as in-progress.
+            logger.warning("factory reset rejected: a reset is already in progress")
+            return False, "busy"
+    released = False
     try:
-        # Pass the job context as a single JSON arg, same convention as the
-        # pool / hostapd host scripts.
-        ok, err = _spawn_detached([RESET_SCRIPT, payload])
-    except Exception as e:                                          # noqa: BLE001
-        logger.warning("factory reset failed to spawn host script: %s", e)
-        return False, "host script unavailable"
-    if not ok:
-        logger.warning("factory reset host script not launched: %s", err)
-        return False, (err or "host script refused")
-    logger.warning("factory reset dispatched to host script (job=%s)", job_id)
-    return True, {"dispatched": True, "jobId": job_id}
+        try:
+            # Pass the job context as a single JSON arg, same convention as the
+            # pool / hostapd host scripts.
+            proc, err = _spawn_detached([RESET_SCRIPT, payload])
+        except Exception as e:                                      # noqa: BLE001
+            logger.warning("factory reset failed to spawn host script: %s", e)
+            return False, "host script unavailable"
+        if proc is None:
+            logger.warning("factory reset host script not launched: %s", err)
+            return False, (err or "host script refused")
+        # Launched. Track the process so a later reset can distinguish a live
+        # wipe from one that failed (see _factory_reset_proc). Do NOT release the
+        # lock: the wipe is now tearing the box (and this process) down, and a
+        # release here would re-open the double-fire window for a request that
+        # lands before teardown completes. On the failure paths above we DO
+        # release (via finally) so a retry after a failed launch can proceed.
+        _factory_reset_proc = proc
+        released = True
+        logger.warning("factory reset dispatched to host script (job=%s)", job_id)
+        return True, {"dispatched": True, "jobId": job_id}
+    finally:
+        if not released:
+            _FACTORY_RESET_LOCK.release()
 
 
 # ---------------------------------------------------------------------------
@@ -1836,7 +2050,11 @@ def collect_logs(window_hours, service):
     # Pass the service filter only when it is a sane, shell-safe token. The
     # orchestrator already validates it, but the bridge is defense-in-depth: an
     # empty/garbage value becomes "" (the script treats that as "all services").
+    # A leading dash is rejected explicitly: `isalnum()` after stripping "-"/"_"
+    # still accepts a flag-shaped value like "--orchestrator", which would reach
+    # droplet-collect-logs.sh as an option argument rather than a service name.
     svc = service if (isinstance(service, str)
+                      and not service.startswith("-")
                       and service.replace("-", "").replace("_", "").isalnum()
                       and 0 < len(service) <= 64) else ""
     cmd = [LOGS_SCRIPT, str(hours), svc]
@@ -2000,6 +2218,12 @@ class Handler(BaseHTTPRequestHandler):
             # Invalidate the cache — the automount script calls this
             # whenever a drive is added or removed. Body is ignored;
             # we just want to force the next GET /drives to re-read.
+            # Auth-gated like the other mutating routes (WARP-659 left this one
+            # open): with BRIDGE_BIND=0.0.0.0 the bridge is LAN-reachable, so an
+            # unauthenticated caller could force cache churn. The automount
+            # script presents the shared token (X-Droplet-Auth).
+            if not self._authed():
+                return self._send(401, {"ok": False, "error": "unauthorized"})
             drives_snapshot(invalidate=True)
             return self._send(200, {"ok": True})
         if self.path.startswith("/drives/") and self.path.endswith("/eject"):
@@ -2019,8 +2243,9 @@ class Handler(BaseHTTPRequestHandler):
             # BUG-3 / ADR-019: destructive mdadm op. Auth-gated exactly like
             # /drives/:uuid/eject. The orchestrator only reaches here after an
             # owner session + a valid single-use confirm-token; the bridge
-            # requires its own auth token on top, and run_pool_command() shells
-            # the host script (whose hard pre-flight is the last safety gate) —
+            # requires its own auth token on top, and run_pool_command() hands
+            # the op to the root executor unit via the StateDirectory spool
+            # (the host script's hard pre-flight is the last safety gate) —
             # it never runs mdadm/mkfs itself.
             if not self._authed():
                 return self._send(401, {"ok": False, "error": "unauthorized"})
@@ -2107,8 +2332,16 @@ class Handler(BaseHTTPRequestHandler):
                 "targetName": j.get("targetName", ""),
             })
             if not ok:
-                # 502 — the host script couldn't be launched (missing / not
-                # executable). The box is untouched.
+                # 409 Conflict ONLY for true lock contention (another reset
+                # already in flight) — same non-blocking-acquire posture as
+                # /openwrt/wifi/hostapd. Keyed on the machine `info == "busy"`,
+                # never a substring of a human message. Everything else (host
+                # script missing / not executable) is 502; the box is untouched.
+                if info == "busy":
+                    return self._send(409, {
+                        "ok": False,
+                        "error": "reset already in progress",
+                    })
                 return self._send(502, {"ok": False, "error": info})
             return self._send(202, {"ok": True,
                                     **(info if isinstance(info, dict) else {"info": info})})
@@ -2153,6 +2386,37 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"error": "bad json"})
             ssid = j.get("ssid", "")
             password = j.get("password", "")
+            # Validate the SSID before handing it to nmcli. With shell=False there
+            # is no shell injection, but nmcli parses positional args by its own
+            # grammar — an SSID like "--delete" would be read as an option, not a
+            # network name. Mirror the hostapd host-script gate: strip control
+            # characters, require 1–32 chars, and reject a leading dash.
+            if not isinstance(ssid, str):
+                ssid = ""
+            # Length check runs on the raw value (before stripping) so a 33-byte
+            # input that contains control chars isn't silently accepted after
+            # strip reduces it to 32 printable chars (802.11 limit is 32 bytes).
+            if not ssid or len(ssid) > 32:
+                return self._send(400, {
+                    "ok": False,
+                    "error": "invalid SSID (1-32 chars, no control characters, no leading dash)",
+                })
+            ssid = "".join(ch for ch in ssid if ord(ch) >= 32 and ord(ch) != 127)
+            if not ssid or ssid.startswith("-"):
+                return self._send(400, {
+                    "ok": False,
+                    "error": "invalid SSID (1-32 chars, no control characters, no leading dash)",
+                })
+            if not isinstance(password, str):
+                password = ""
+            # Mirror the hostapd host-script PSK gate: WPA2 PSK must be 8–63
+            # chars (IEEE 802.11 §H.4.1). An empty string means open-network
+            # (nmcli connect without a password keyword), which is allowed.
+            if password and (len(password) < 8 or len(password) > 63):
+                return self._send(400, {
+                    "ok": False,
+                    "error": "invalid password (8-63 chars for WPA2 PSK)",
+                })
             rc, out, err = _run(
                 ["nmcli", "device", "wifi", "connect", ssid] +
                 (["password", password] if password else []),

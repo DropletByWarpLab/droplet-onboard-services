@@ -24,8 +24,9 @@ import Link from "next/link";
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, CheckCircle2, Lightbulb, Loader2 } from "lucide-react";
-import { commissionMatterDevice } from "@/lib/api";
+import { commissionMatterDevice, fetchMatterCapabilities } from "@/lib/api";
 import { translateError } from "@/lib/friendly-errors";
+import { BleUnavailableNotice } from "@/components/smart-home/BleUnavailableNotice";
 
 // WARP-102: lazy-load the QR scanner. `@zxing/browser` + `@zxing/library`
 // are ~200 KB minified each and not tree-shakeable (the decoder pulls a
@@ -66,6 +67,27 @@ export default function AddMatterDevicePage() {
   // Commission button doesn't fire a duplicate manual submit on top of
   // an in-flight QR commission. See PR #233 review.
   const commissioningRef = useRef(false);
+
+  // WARP-851: BLE-commissioning capability. `null` = unknown (probe in
+  // flight or failed) — show nothing rather than warn on a guess.
+  // `false` = the box can only add devices already on the home network;
+  // say so above the scanner instead of letting the customer retry a
+  // Bluetooth-only device forever.
+  const [bleAvailable, setBleAvailable] = useState<boolean | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const caps = await fetchMatterCapabilities();
+        if (!cancelled) setBleAvailable(caps.bleCommissioning);
+      } catch {
+        // Capability unknown — leave the notice hidden.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleCode = useCallback(async (pairingCode: string) => {
     if (commissioningRef.current) return;
@@ -114,6 +136,9 @@ export default function AddMatterDevicePage() {
               onDismiss={() => setState({ phase: "scan", error: null })}
             />
           )}
+          {/* WARP-851: until the box can hear BLE devices (WARP-850),
+              be honest about what scanning a code can actually add. */}
+          {bleAvailable === false && <BleUnavailableNotice className="mb-4" />}
           <MatterQrScanner
             onResult={handleCode}
             disabled={state.phase !== "scan"}

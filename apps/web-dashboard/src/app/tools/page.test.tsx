@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, within } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import { PENDING_COMPOSER_KEY, type ToolCatalogEntry, type PendingComposerPayload } from "@/lib/types";
 
 const useToolCatalogMock = vi.fn();
@@ -79,8 +79,12 @@ describe("<ToolsPage /> (WARP-555)", () => {
       error: undefined,
       refresh: vi.fn(),
     });
-    render(<ToolsPage />);
-    expect(screen.getByText(/loading/i)).toBeInTheDocument();
+    const { container } = render(<ToolsPage />);
+    // The indigo re-skin renders skeleton cards (no "Loading…" copy): a
+    // toolbar placeholder plus a 6-card grid, with no data states yet.
+    expect(container.querySelectorAll(".grid.c3 > .card").length).toBe(6);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByText(/no tools available/i)).not.toBeInTheDocument();
   });
 
   it("shows an error state with a retry affordance", () => {
@@ -102,9 +106,8 @@ describe("<ToolsPage /> (WARP-555)", () => {
   it("shows an empty state when no tools come back", () => {
     ready([]);
     render(<ToolsPage />);
-    expect(
-      screen.getByRole("heading", { name: /no tools available/i }),
-    ).toBeInTheDocument();
+    // The re-skinned empty state is a styled span (`.eh`), not a heading.
+    expect(screen.getByText(/no tools available/i)).toBeInTheDocument();
   });
 
   it("renders tools grouped by domain with friendly headings", () => {
@@ -161,9 +164,12 @@ describe("<ToolsPage /> (WARP-555)", () => {
 
   it("shows the total tool count in the chrome", () => {
     ready(SAMPLE);
-    const { container } = render(<ToolsPage />);
-    // 4 tools across 2 domains — the count copy mentions 4.
-    expect(within(container).getByText(/4 tools/i)).toBeInTheDocument();
+    render(<ToolsPage />);
+    // 4 tools across 2 domains — the count now lives in the "All" filter
+    // chip ("All 4") rather than standalone "N tools" copy.
+    expect(
+      screen.getByRole("button", { name: /^all 4$/i }),
+    ).toBeInTheDocument();
   });
 });
 

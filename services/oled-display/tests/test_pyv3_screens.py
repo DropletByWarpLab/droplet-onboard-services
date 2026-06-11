@@ -367,6 +367,171 @@ def test_render_claim_paints_host_matrix_not_reencoded(
     assert seen.get("matrix") == CLAIM_WIFI_MATRIX
 
 
+# --- Design-handoff claim redesign (two-column: code hero | scan QR) --------
+#
+# The claim screen follows the design-system handoff card "PyPortal First
+# Boot — Claim Code": a header band (brand mark + FIRST-TIME SETUP), a left
+# column with the claim-code hero (accent dash group separators) + numbered
+# steps, a right column with a scan QR card, and a bottom WAITING band over a
+# 2px scan track. Without a Wi-Fi block the QR deep-links the setup wizard
+# (`<setup_url>?c=<CODE>`) so a scan lands with the code prefilled; with a
+# Wi-Fi block (WARP-819) the Wi-Fi-join QR keeps the right column — joining
+# the box's Wi-Fi is the one step a fresh phone can't do by hand.
+
+SETUP_MATRIX = [[1, 1, 0], [0, 1, 0], [0, 0, 1]]
+
+
+def test_setup_qr_payload_builds_deep_link():
+    # Dashes are stripped + the code upper-cased: the dashboard's
+    # normalizeClaimCode() ignores separators, and the bare form keeps the QR
+    # a version smaller.
+    assert (display_module._setup_qr_payload(CLAIM_URL, CLAIM_CODE)
+            == CLAIM_URL + "?c=DRPL7K2Q9F4M")
+
+
+def test_setup_qr_payload_appends_to_existing_query():
+    assert (display_module._setup_qr_payload("https://x/setup?lang=en", "ab-12")
+            == "https://x/setup?lang=en&c=AB12")
+
+
+def test_setup_qr_payload_requires_both_parts():
+    # No code or no URL -> no deep link (the QR card degrades to mark-only).
+    assert display_module._setup_qr_payload(CLAIM_URL, "") == ""
+    assert display_module._setup_qr_payload("", CLAIM_CODE) == ""
+
+
+def test_encode_qr_matrix_returns_square_bit_matrix():
+    m = display_module._encode_qr_matrix(CLAIM_URL + "?c=DRPL7K2Q9F4M")
+    assert m, "qrcode is a declared service dep; encoding must succeed"
+    assert len(m) == len(m[0])
+    assert all(v in (0, 1) for row in m for v in row)
+
+
+def test_encode_qr_matrix_uses_ecc_q_for_the_mark_overlay():
+    # The claim card paints a 32px white mark pad dead-centre over the
+    # symbol. At ERROR_CORRECT_M the padded symbol fails to decode (review
+    # finding, verified empirically); at Q it decodes. Pin the level via the
+    # deterministic version bump: the typical deep-link payload fits v3
+    # (29 modules) at M but needs v4 (33 modules) at Q.
+    m = display_module._encode_qr_matrix(CLAIM_URL + "?c=DRPL7K2Q9F4M")
+    assert len(m) == 33
+
+
+def test_encode_qr_matrix_caps_rows_at_firmware_tolerance():
+    # Mirrors ClaimRequest's wifi_qr_matrix max_length=64 ("a v-large QR
+    # would OOM the PyPortal") — an oversized payload must degrade to no-QR
+    # rather than ship a heap bomb to the panel over the serial wire.
+    huge = "https://" + "a" * 180 + "/setup?c=" + "X" * 32
+    assert display_module._encode_qr_matrix(huge) is None
+
+
+def test_render_claim_no_wifi_draws_setup_deep_link_qr(
+        monkeypatch: pytest.MonkeyPatch, sim_display: TFTDisplay):
+    # The claim-only layout must draw the scan-to-claim QR with the setup
+    # deep-link payload (host-encoded matrix preferred, payload fallback).
+    seen = {}
+    orig = sim_display._draw_qr
+
+    def spy(img, draw, x, y, size, payload=None, matrix=None):
+        seen["payload"] = payload
+        seen["matrix"] = matrix
+        return orig(img, draw, x, y, size, payload=payload, matrix=matrix)
+
+    monkeypatch.setattr(sim_display, "_draw_qr", spy)
+    sim_display.render_claim(CLAIM_CODE, CLAIM_URL)
+    assert seen, "claim-only layout must draw a scan-to-claim QR card"
+    if seen.get("matrix") is None:
+        assert "?c=DRPL7K2Q9F4M" in (seen.get("payload") or "")
+
+
+def test_render_claim_prefers_supplied_setup_matrix(
+        monkeypatch: pytest.MonkeyPatch, sim_display: TFTDisplay):
+    # A host-supplied setup matrix (what the firmware paints) wins over the
+    # sim-side payload encode, keeping preview and panel byte-identical.
+    seen = {}
+    orig = sim_display._draw_qr
+
+    def spy(img, draw, x, y, size, payload=None, matrix=None):
+        seen["matrix"] = matrix
+        return orig(img, draw, x, y, size, payload=payload, matrix=matrix)
+
+    monkeypatch.setattr(sim_display, "_draw_qr", spy)
+    sim_display.render_claim(CLAIM_CODE, CLAIM_URL,
+                             setup_qr_matrix=SETUP_MATRIX)
+    assert seen.get("matrix") == SETUP_MATRIX
+
+
+def test_render_claim_header_separator_and_column_divider(
+        sim_display: TFTDisplay):
+    # Two structural hairlines pin the two-column layout: the header band's
+    # separator and the vertical divider between code column and QR column.
+    img = sim_display.render_claim(CLAIM_CODE, CLAIM_URL)
+    assert any(img.getpixel((WIDTH // 2, y)) == display_module.V3_SEP
+               for y in range(40, 52))
+    assert any(img.getpixel((x, 150)) == display_module.V3_SEP
+               for x in range(276, 294))
+
+
+def test_render_claim_bottom_scan_track(sim_display: TFTDisplay):
+    # The bottom edge carries the 2px scan track with an accent segment (the
+    # "waiting" affordance; static per frame).
+    img = sim_display.render_claim(CLAIM_CODE, CLAIM_URL)
+    row = {img.getpixel((x, HEIGHT - 1)) for x in range(WIDTH)}
+    assert display_module.V3_TRACK in row
+    assert display_module.V3_ACCENT in row
+
+
+def test_render_claim_no_qr_variant_is_honest(
+        monkeypatch: pytest.MonkeyPatch, sim_display: TFTDisplay):
+    # When no scan matrix can exist (qrcode unavailable / payload oversized)
+    # the card must not instruct a scan: no QR is painted and the
+    # eyebrow/caption switch to the typed-address fallback — same rule the
+    # firmware applies, so preview and panel agree in that state (no
+    # pseudo-QR paper-over).
+    drew = []
+    orig = sim_display._draw_qr
+
+    def spy(img, draw, x, y, size, payload=None, matrix=None):
+        drew.append(1)
+        return orig(img, draw, x, y, size, payload=payload, matrix=matrix)
+
+    monkeypatch.setattr(sim_display, "_draw_qr", spy)
+    with_qr = sim_display.render_claim(CLAIM_CODE, CLAIM_URL)
+    assert len(drew) == 1
+
+    monkeypatch.setattr(display_module, "_encode_qr_matrix", lambda p: None)
+    no_qr = sim_display.render_claim(CLAIM_CODE, CLAIM_URL)
+    assert len(drew) == 1, "no matrix -> the QR painter must not run"
+    assert with_qr.tobytes() != no_qr.tobytes()
+
+
+def test_render_claim_long_host_keeps_setup_path(sim_display: TFTDisplay):
+    # DUCKDNS-style hostnames must keep the /setup path visible (wrapped
+    # onto its own line) instead of truncating it away — in the Wi-Fi layout
+    # that text is the only typed setup pointer. Fixed matrix on both
+    # renders so only the step text can differ.
+    fixed = SETUP_MATRIX
+    a = sim_display.render_claim(
+        CLAIM_CODE, "https://droplet-stefan.duckdns.org/setup",
+        setup_qr_matrix=fixed)
+    b = sim_display.render_claim(
+        CLAIM_CODE, "https://droplet-stefan.duckdns.org/other",
+        setup_qr_matrix=fixed)
+    assert a.tobytes() != b.tobytes()
+
+
+def test_render_claim_wifi_keeps_readable_ssid(sim_display: TFTDisplay):
+    # WARP-819 regression guard under the redesign: the SSID stays readable
+    # text (camera-less manual join), so changing it must change the frame.
+    a = sim_display.render_claim(
+        CLAIM_CODE, CLAIM_URL, wifi_ssid=CLAIM_WIFI_SSID,
+        wifi_psk=CLAIM_WIFI_PSK, wifi_qr_matrix=CLAIM_WIFI_MATRIX)
+    b = sim_display.render_claim(
+        CLAIM_CODE, CLAIM_URL, wifi_ssid="OtherNet",
+        wifi_psk=CLAIM_WIFI_PSK, wifi_qr_matrix=CLAIM_WIFI_MATRIX)
+    assert a.tobytes() != b.tobytes()
+
+
 # --- Backward-compat: existing boot/shutdown signatures still work ----------
 
 def test_render_boot_legacy_stage_signature_still_supported(sim_display: TFTDisplay):

@@ -4,7 +4,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
 import pino from "pino";
 import { config } from "../config.js";
-import { cacheGet, cacheSet } from "../services/cache.service.js";
+import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
 import { verifyAccessToken, roleFromGroups, type Role } from "../services/jwt.service.js";
 
 const logger = pino({ name: "auth" });
@@ -292,7 +292,28 @@ async function validateNextcloudTokenDetailed(
   // post-WARP-485 lookup). On hit we still return { kind: "ok", user }
   // so the discriminator stays consistent end-to-end.
   const cached = await cacheGet<AuthUser>(cacheKey);
-  if (cached) return { kind: "ok", user: cached };
+  if (cached) {
+    // ADR-013 (SCIM): the cached AuthUser was normalised at write time, but a
+    // directory deactivation (active:false / DELETE → DEACTIVATED, soft) can
+    // land while the entry is still warm. Without this re-check a deactivated
+    // user keeps passing auth for up to TOKEN_CACHE_TTL. Re-validate the soft
+    // status on every hit via an indexed single-column select on the primary
+    // key (cheap; no full-row fetch), and purge the stale entry on rejection.
+    // Mirrors the DEACTIVATED gate /auth/login, SSO, and WebAuthn enforce.
+    if (authPrisma) {
+      const row = await authPrisma.user.findUnique({
+        where: { id: cached.id },
+        select: { directoryStatus: true },
+      });
+      if (!row || row.directoryStatus === "DEACTIVATED") {
+        await cacheDel(cacheKey);
+        return { kind: "invalid" };
+      }
+      return { kind: "ok", user: cached };
+    }
+    // authPrisma not wired yet — treat as a cache miss so the DEACTIVATED
+    // re-check cannot be silently skipped; fall through to the live lookup.
+  }
 
   try {
     const url = `${config.NEXTCLOUD_URL}/ocs/v1.php/cloud/user`;
@@ -341,6 +362,17 @@ async function validateNextcloudTokenDetailed(
         "OCS auth: no local User row for Nextcloud user; operator must provision via /api/people",
       );
       return { kind: "user-not-provisioned" };
+    }
+    // ADR-013 (SCIM): a directory-deactivated row must be denied here too — and,
+    // critically, must NOT be written to the token cache below (a cached entry
+    // would otherwise survive for TOKEN_CACHE_TTL even after offboarding). Mirror
+    // the DEACTIVATED gate at webauthn.ts:397 / the /auth/login + SSO paths.
+    if (localUser.directoryStatus === "DEACTIVATED") {
+      logger.warn(
+        { ncUsername, userId: localUser.id },
+        "OCS auth: directory user is deactivated; rejecting token (ADR-013)",
+      );
+      return { kind: "invalid" };
     }
 
     const user: AuthUser = {
@@ -520,6 +552,34 @@ export function requireRole(
 }
 
 /**
+ * Variant of `requireRole` that ALSO admits the MCP server's service
+ * principal (`_service:mcp`) — that exact principal id, NOT the coarse
+ * "service" role shared by voice/email-indexer.
+ *
+ * Why: LLM network tools dispatch through the mcp-server, which calls
+ * back into the orchestrator's /api/network/* write routes presenting
+ * the WARP-339 service bearer. Those routes' own safety layer
+ * (`evaluateNetworkCommand`) still classifies, rate-limits, audits, and
+ * mints Tier-2 confirmation tokens for every call — this guard only
+ * lets the tool path REACH that layer instead of 403ing in front of it.
+ * Human RBAC is unchanged: chat users without owner/admin never see
+ * write tools (routes/llm.ts `narrowAllowedToolsForRole`), and external
+ * MCP clients pass per-tool RBAC at the mcp-server before any dispatch.
+ */
+export function requireRoleOrMcpService(
+  ...allowed: Role[]
+): (req: Request, res: Response, next: NextFunction) => void {
+  const base = requireRole(...allowed);
+  return (req: Request, res: Response, next: NextFunction): void => {
+    if (req.user?.id === "_service:mcp" && req.user.role === "service") {
+      next();
+      return;
+    }
+    base(req, res, next);
+  };
+}
+
+/**
  * WARP-824 — paths an authenticated-but-must-change-password session may
  * still reach. Everything else 403s `PASSWORD_CHANGE_REQUIRED` until the
  * user picks a new password.
@@ -585,8 +645,13 @@ export function requirePasswordChangeGate(
       next();
       return;
     }
-    // The remediation surface is always reachable.
-    if (PASSWORD_CHANGE_ALLOWED_PATHS.has(req.path)) {
+    // The remediation surface is always reachable. Normalise a trailing slash
+    // before the exact-match lookup so `/api/auth/change-password/` resolves the
+    // same as `/api/auth/change-password` — otherwise a must-change user is
+    // locked out of the very endpoint that clears the flag. Collapse only
+    // trailing slashes; the root "/" is preserved.
+    const allowPath = req.path.replace(/\/+$/, "") || "/";
+    if (PASSWORD_CHANGE_ALLOWED_PATHS.has(allowPath)) {
       next();
       return;
     }

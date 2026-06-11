@@ -5,10 +5,13 @@ import {
   useRef,
   useMemo,
   useCallback,
+  useEffect,
   useImperativeHandle,
   forwardRef,
 } from "react";
-import { ArrowUp, Paperclip, Square, Wrench } from "lucide-react";
+import { ArrowUpRight, Loader2, Mic, Paperclip, Square, Wrench } from "lucide-react";
+import { transcribeAudio, SttUnavailable } from "@/lib/api";
+import { canCaptureAudio, PcmRecorder } from "@/lib/audio-capture";
 import type { ChatAttachment, ToolCatalogEntry } from "@/lib/types";
 import { AttachmentChip } from "./AttachmentChip";
 
@@ -76,6 +79,65 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
 }, ref) {
   const [value, setValue] = useState("");
   const [isDragging, setIsDragging] = useState(false);
+  // WARP-844 — voice input. "unavailable" hides the mic after the
+  // orchestrator answers 503 (whisper sidecar not deployed); jsdom and
+  // non-secure contexts hide it via canCaptureAudio().
+  const [voiceState, setVoiceState] = useState<
+    "idle" | "recording" | "transcribing" | "unavailable"
+  >(typeof window !== "undefined" && canCaptureAudio() ? "idle" : "unavailable");
+  const recorderRef = useRef<PcmRecorder | null>(null);
+
+  // Release the microphone if the composer unmounts mid-recording
+  // (navigation away) — otherwise the tab's mic indicator stays on and
+  // the capture stream leaks until the page is torn down.
+  useEffect(() => {
+    return () => {
+      const rec = recorderRef.current;
+      recorderRef.current = null;
+      if (rec) void rec.stop().catch(() => undefined);
+    };
+  }, []);
+
+  const toggleRecording = async () => {
+    if (voiceState === "transcribing" || voiceState === "unavailable") return;
+    if (voiceState === "recording") {
+      setVoiceState("transcribing");
+      try {
+        const rec = recorderRef.current;
+        recorderRef.current = null;
+        if (!rec) {
+          setVoiceState("idle");
+          return;
+        }
+        const { pcm, rate } = await rec.stop();
+        const { text } = await transcribeAudio(pcm, rate);
+        if (text) {
+          setValue((prev) => (prev ? `${prev} ${text}` : text));
+          textareaRef.current?.focus();
+        }
+        setVoiceState("idle");
+      } catch (err) {
+        if (err instanceof SttUnavailable) {
+          setVoiceState("unavailable");
+        } else {
+          // eslint-disable-next-line no-console
+          console.warn("[voice] transcription failed:", err);
+          setVoiceState("idle");
+        }
+      }
+      return;
+    }
+    try {
+      const rec = new PcmRecorder();
+      await rec.start();
+      recorderRef.current = rec;
+      setVoiceState("recording");
+    } catch {
+      // Mic permission denied / no device — treat as unavailable for
+      // this session rather than erroring on every click.
+      setVoiceState("unavailable");
+    }
+  };
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -204,6 +266,18 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     handleFiles(e.dataTransfer.files);
   };
 
+  // Paste-to-attach: a clipboard paste carrying files (screenshot, file
+  // copied from Finder/Explorer, ...) routes through the same attach path
+  // as drag-and-drop. Text-only pastes fall through to the default
+  // textarea behavior untouched.
+  const onPaste: React.ClipboardEventHandler<HTMLTextAreaElement> = (e) => {
+    if (!onAttach) return;
+    const files = e.clipboardData?.files;
+    if (!files || files.length === 0) return;
+    e.preventDefault();
+    handleFiles(files);
+  };
+
   // Expose insertQuote to the parent — see ChatInputHandle. Wraps the
   // text in markdown blockquote syntax (matches what users would type
   // by hand) and focuses the textarea so they can keep typing their
@@ -268,15 +342,17 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}
-      className={`p-3 border-t border-separator bg-[var(--color-toolbar-bg)] dp-material
-        relative
-        ${isDragging ? "ring-2 ring-accent ring-inset" : ""}
-      `}
+      className="chat-composer relative"
     >
+      {/* Design-handoff composer card. The card is the visual focus
+          boundary — chat-indigo.css suppresses every inner focus ring. */}
+      <div
+        className={`chat-composer-inner ${isDragging ? "ring-2 ring-accent ring-inset" : ""}`}
+      >
       {showAttachmentRow ? (
         <div
           data-testid="attachment-row"
-          className="mb-2 flex flex-wrap gap-1.5"
+          className="flex flex-wrap gap-1.5"
         >
           {attachments!.map((a) => (
             <AttachmentChip
@@ -329,7 +405,21 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           ))}
         </ul>
       ) : null}
-      <div className="flex items-end gap-2">
+      <textarea
+        ref={textareaRef}
+        value={value}
+        onChange={(e) => {
+          setValue(e.target.value);
+          setSlashActiveIdx(0);
+        }}
+        onKeyDown={handleKeyDown}
+        onInput={handleInput}
+        onPaste={onPaste}
+        placeholder="Ask Droplet anything…"
+        disabled={disabled}
+        rows={1}
+      />
+      <div className="chat-crow">
         {dropEnabled ? (
           <>
             <input
@@ -346,70 +436,59 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
               onClick={() => fileInputRef.current?.click()}
               disabled={disabled}
               aria-label="Attach a file"
-              className="w-11 h-11 rounded-full flex items-center justify-center
-                bg-surface-secondary text-label-secondary
-                hover:text-label-primary hover:bg-label-quaternary/40
-                transition-colors duration-150
-                disabled:opacity-50 disabled:cursor-not-allowed"
+              className="chat-iconbtn"
             >
-              <Paperclip size={18} strokeWidth={2.5} />
+              <Paperclip size={15} />
             </button>
           </>
         ) : null}
-        <textarea
-          ref={textareaRef}
-          value={value}
-          onChange={(e) => {
-            setValue(e.target.value);
-            setSlashActiveIdx(0);
-          }}
-          onKeyDown={handleKeyDown}
-          onInput={handleInput}
-          placeholder="Send a message..."
-          disabled={disabled}
-          rows={1}
-          className="flex-1 resize-none bg-surface-secondary rounded-[22px] px-4 py-2.5
-            type-body text-label-primary placeholder:text-label-tertiary
-            focus:outline-none focus:ring-2 focus:ring-accent/30
-            disabled:opacity-50 disabled:cursor-not-allowed
-            transition-all duration-200 ease-smooth"
-        />
+        {voiceState !== "unavailable" ? (
+          <button
+            type="button"
+            onClick={() => void toggleRecording()}
+            disabled={disabled || voiceState === "transcribing"}
+            aria-label={
+              voiceState === "recording"
+                ? "Stop recording"
+                : voiceState === "transcribing"
+                  ? "Transcribing…"
+                  : "Dictate a message"
+            }
+            aria-pressed={voiceState === "recording"}
+            className={`chat-iconbtn ${voiceState === "recording" ? "is-rec animate-pulse" : ""}`}
+          >
+            {voiceState === "transcribing" ? (
+              <Loader2 size={15} className="animate-spin" />
+            ) : (
+              <Mic size={15} />
+            )}
+          </button>
+        ) : null}
         {showStop ? (
           <button
             type="button"
             onClick={onStop}
             aria-label="Stop generating"
-            className="
-              w-11 h-11 rounded-full flex items-center justify-center
-              bg-surface-secondary text-system-red
-              hover:bg-system-red/10
-              transition-all duration-200 ease-smooth
-              active:scale-90
-            "
+            className="chat-send chat-stop"
           >
-            <Square size={14} strokeWidth={2.5} fill="currentColor" aria-hidden="true" />
+            <Square size={13} fill="currentColor" aria-hidden="true" />
           </button>
         ) : (
           <button
             onClick={handleSubmit}
             disabled={disabled || !hasText}
             aria-label="Send message"
-            className={`
-              w-11 h-11 rounded-full flex items-center justify-center
-              transition-all duration-200 ease-smooth
-              ${
-                hasText
-                  ? "bg-accent text-white scale-100 opacity-100"
-                  : "bg-label-quaternary text-label-tertiary scale-90 opacity-60"
-              }
-              disabled:cursor-not-allowed
-              active:scale-90
-            `}
+            className="chat-send"
           >
-            <ArrowUp size={18} strokeWidth={2.5} />
+            <ArrowUpRight size={15} strokeWidth={2.4} />
           </button>
         )}
       </div>
+      </div>
+      <p className="chat-hint">
+        Responses are generated locally on your Droplet — nothing leaves the
+        device.
+      </p>
     </div>
   );
 });

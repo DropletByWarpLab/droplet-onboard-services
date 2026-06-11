@@ -123,6 +123,18 @@ export function createServer(deps: ContextDeps, trust: TrustContext) {
     // the HTTP transport ignores it (an attacker on HTTP could otherwise
     // smuggle precomputed vectors past the schema validator). We gate on
     // `trustedPrincipal` to make the trust boundary explicit.
+    // WARP-845 — caller's role for role-scoped reads (memory_recall's
+    // audience ladder). Trusted-stdio only, same posture as
+    // `_enhancement`: an HTTP client could otherwise claim `owner` and
+    // widen its memory read. Absent role → handlers fall back to the
+    // most-restrictive guest view.
+    const metaUserRole =
+      trustedPrincipal &&
+      meta &&
+      typeof meta.userRole === "string" &&
+      meta.userRole.length > 0
+        ? meta.userRole
+        : undefined;
     const metaEnhancement =
       trustedPrincipal &&
       meta &&
@@ -138,6 +150,7 @@ export function createServer(deps: ContextDeps, trust: TrustContext) {
       ncToken,
       metaUserId,
       metaEnhancement,
+      metaUserRole,
     );
     const args = (req.params.arguments ?? {}) as Record<string, unknown>;
     let result: ToolResult;

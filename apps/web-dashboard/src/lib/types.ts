@@ -37,6 +37,15 @@ export interface ChatMessage {
   /** Tool dispatches surfaced on this assistant turn (if any). */
   toolCalls?: ChatToolCall[];
   /**
+   * WARP-458 — concatenated deep-reasoning trace for this assistant
+   * turn. Accumulated live from `reasoning_step` SSE events and carried
+   * through loadConversation from the persisted row. Rendered as the
+   * collapsed "Thought process" disclosure above the bubble.
+   */
+  reasoning?: string;
+  /** WARP-844 — thumbs rating on an assistant turn (null/absent = unrated). */
+  feedback?: "up" | "down" | null;
+  /**
    * Set on an assistant message when the turn failed (network error,
    * ai-gateway down, MCP child crashed, model returned `stop_reason:
    * "error"`). The UI renders a friendly message + retry button rather
@@ -69,6 +78,15 @@ export interface ChatMessage {
    * is populated exclusively by `loadConversation`.
    */
   failureKind?: "failed" | "aborted" | "interrupted" | "missing";
+  /**
+   * WARP-859 — files attached on a user turn. Snapshotted from the
+   * composer at send time so the file rides visibly onto the message it
+   * was sent with (and leaves the input). Display-only; the live status
+   * is frozen at send. Absent on assistant turns and on rehydrated
+   * history (server doesn't link brain items to individual messages —
+   * the conversation-scoped list drives SessionHeader instead).
+   */
+  attachments?: ChatAttachment[];
 }
 
 /**
@@ -115,6 +133,21 @@ export interface ChatRequest {
   /** WARP-174: skip /chat history persistence for throwaway turns
    * (setup wizard "Ask the AI" probe, health checks). Default false. */
   ephemeral?: boolean;
+  /** Brain-memory items attached to this conversation (WARP-203). Sent
+   * on every turn; the orchestrator verifies ownership and injects the
+   * extracted content as a system message so the model actually sees
+   * what the user attached. */
+  attachments?: { itemId: string }[];
+  /** WARP-458 — ask the orchestrator to emit `reasoning_step` SSE events
+   * before the answer. Persistence of the trace happens server-side
+   * regardless; this only gates the live wire. */
+  captureReasoning?: boolean;
+  /** Client-minted draft chat id, sent on the FIRST turn so the server
+   * adopts draft-phase brain uploads into the new conversation. */
+  draftChatId?: string;
+  /** WARP-845 — file a newly-created conversation under this project
+   * (first turn only; ownership-validated server-side). */
+  projectId?: string;
 }
 
 export interface ModelInfo {
@@ -683,6 +716,15 @@ export interface MatterDiscoveredDevice {
   deviceType?: number;
   commissioningMode: number;
   addresses: Array<{ ip: string; port: number; type: string }>;
+}
+
+/**
+ * WARP-851: controller capability surface (GET /api/matter/capabilities).
+ * `bleCommissioning: false` means devices that need Bluetooth for
+ * first-time setup cannot be paired on this box yet (see WARP-850).
+ */
+export interface MatterCapabilities {
+  bleCommissioning: boolean;
 }
 
 // --- Camera / Frigate types ---

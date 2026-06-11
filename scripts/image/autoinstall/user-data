@@ -110,7 +110,7 @@ autoinstall:
       User=droplet
       WorkingDirectory=/home/droplet/edge-platform
       ExecStart=/bin/bash -lc "./scripts/setup.sh --single-box --systemd"
-      ExecStartPost=/bin/bash -lc "sudo mkdir -p /var/lib/droplet && sudo touch /var/lib/droplet/.firstboot-done"
+      ExecStartPost=/bin/bash -lc "sudo mkdir -p /var/lib/droplet && sudo touch /var/lib/droplet/.firstboot-done && sudo rm -f /etc/sudoers.d/droplet-firstboot"
       RemainAfterExit=yes
       TimeoutStartSec=0
 
@@ -119,7 +119,13 @@ autoinstall:
       UNIT'
     - curtin in-target --target=/target -- systemctl enable droplet-firstboot.service
     # Passwordless sudo for the firstboot unit's setup.sh (setup.sh installs
-    # Docker + systemd units). Scoped to the droplet user; the locked password
-    # still gates interactive login.
+    # Docker + systemd units). PROVISIONING-WINDOW ONLY: the firstboot unit's
+    # ExecStartPost deletes this drop-in right after it stamps .firstboot-done
+    # (marker first — the rm kills the unit's own sudo), so the grant never
+    # outlives provisioning. Steady state on a shipped box is `sudo`-group
+    # membership gated by the operator's password; unattended privileged paths
+    # go through the device-bridge's polkit-routed root units, never sudo. A
+    # NOPASSWD: ALL that persisted past first boot would turn the SSH password
+    # into a remote root credential (ADR-020 §D6).
     - |
       curtin in-target --target=/target -- bash -c 'echo "droplet ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/droplet-firstboot && chmod 440 /etc/sudoers.d/droplet-firstboot'

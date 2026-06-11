@@ -11,10 +11,15 @@ import {
   ToggleRight,
   Wifi,
 } from "lucide-react";
-import { commissionMatterDevice, fetchMatterDevices } from "@/lib/api";
+import {
+  commissionMatterDevice,
+  fetchMatterCapabilities,
+  fetchMatterDevices,
+} from "@/lib/api";
 import type { MatterDevice, MatterGrouped } from "@/lib/types";
 import { StepShell } from "@/components/setup/StepShell";
 import { ScrollRegion } from "@/components/setup/ScrollRegion";
+import { BleUnavailableNotice } from "@/components/smart-home/BleUnavailableNotice";
 
 const CATEGORY_ICONS: Record<string, typeof Lightbulb> = {
   light: Lightbulb,
@@ -87,6 +92,28 @@ export function DiscoveryStep({
   const [manualBusy, setManualBusy] = useState(false);
   const [manualError, setManualError] = useState<string | null>(null);
   const [manualOk, setManualOk] = useState<string | null>(null);
+
+  // WARP-851: BLE-commissioning capability. `null` = unknown (probe
+  // failed or still in flight) — show nothing rather than warn on a
+  // guess. `false` = the box can only add devices already on the home
+  // network, so say so near the pairing-code input instead of letting
+  // the customer retry a Bluetooth-only device forever.
+  const [bleAvailable, setBleAvailable] = useState<boolean | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const caps = await fetchMatterCapabilities();
+        if (!cancelled) setBleAvailable(caps.bleCommissioning);
+      } catch {
+        // Capability unknown (controller booting / transient failure) —
+        // leave the notice hidden.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Read latest scanSeconds inside pollOnce via a ref so the callback's
   // identity stays stable across re-renders (we don't want startDiscovery
@@ -374,6 +401,9 @@ export function DiscoveryStep({
           Type the 11- or 21-digit code from the device, its box, or under its QR
           label.
         </p>
+        {/* WARP-851: until the box can hear BLE devices (WARP-850), be
+            honest about what a pairing code can actually add. */}
+        {bleAvailable === false && <BleUnavailableNotice className="mb-3" />}
         <div className="flex gap-2">
           <input
             id="matter-manual-code"

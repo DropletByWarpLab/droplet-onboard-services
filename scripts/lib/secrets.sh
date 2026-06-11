@@ -35,7 +35,7 @@ generate_env() {
   log_info "Generating device-unique secrets..."
 
   # --- Generate all secrets ---
-  local pg_password redis_password mqtt_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display ops_token service_token_mcp service_token_email orchestrator_sampler_token ai_gateway_sampler_token ollama_url openwrt_password
+  local pg_password redis_password mqtt_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display service_token_switch ops_token service_token_mcp service_token_email orchestrator_sampler_token ai_gateway_sampler_token ollama_url openwrt_password
   # WARP-503 — embedded Plane PM stack secrets (ADR-010, spec WARP-498).
   local pm_db_password pm_secret_key pm_admin_token pm_webhook_secret pm_web_url
   # Plane v0.24.1 also needs a RabbitMQ broker (celery) + MinIO object storage.
@@ -69,6 +69,18 @@ generate_env() {
   # + device-bridge.py's BRIDGE_AUTH_TOKEN MUST read the same value;
   # compose wires both ends to ${SERVICE_TOKEN_DISPLAY}.
   service_token_display=$(openssl rand -hex 32)
+  # Shared bearer for orchestrator → switch service HTTP calls (/ports,
+  # /vlans, /poe, /provision/*). Same WARP-165 rationale as the display
+  # token: the switch container's SERVICE_SECRET previously reused
+  # DEVICE_SECRET_KEY (the FIPS-sealed AES-256 master encryption key),
+  # putting the master key on the wire — and the orchestrator side was
+  # never wired at all, so the moment DEVICE_SECRET_KEY existed the
+  # switch service started 403ing every orchestrator call (the dashboard
+  # Network page's "Router unavailable"). Both switch.client.ts
+  # (orchestrator, outbound) and the switch container's SERVICE_SECRET
+  # MUST read the same value; compose wires both ends to
+  # ${SERVICE_TOKEN_SWITCH}.
+  service_token_switch=$(openssl rand -hex 32)
   # WARP-337: ops-console support-client bearer. Used by Warp Lab
   # support to authenticate against the on-device /ops/* API when
   # troubleshooting a deployed Droplet. The service binds loopback-only
@@ -123,7 +135,10 @@ generate_env() {
   # SANs; override BEFORE running setup.sh if the customer uses a different
   # LAN name (e.g. `DROPLET_PM_WEB_URL=https://pm.acme.lan ./scripts/setup.sh`).
   # No host-specific IP defaults (rule 14) — DNS name only.
-  pm_web_url="${DROPLET_PM_WEB_URL:-https://droplet-ai.local/pm}"
+  # :8443 is Plane's dedicated TLS origin (spec WARP-498 OQ2 amendment) —
+  # the vanilla frontend is built with basePath:"" and must own an origin
+  # root, so the gateway serves it on its own port instead of under /pm/.
+  pm_web_url="${DROPLET_PM_WEB_URL:-https://droplet-ai.local:8443}"
 
   # OLLAMA_URL — picks the bundled droplet-ollama container by default
   # (single-box PoC). Override before running setup.sh for a multi-box
@@ -217,6 +232,16 @@ SERVICE_TOKEN_VOICE=$service_token_voice
 # SERVICE_SECRET + device-bridge's BRIDGE_AUTH_TOKEN MUST read the same
 # value; compose wires all three to \${SERVICE_TOKEN_DISPLAY}.
 SERVICE_TOKEN_DISPLAY=$service_token_display
+
+# --- Switch service bearer (orchestrator → switch service HTTP) ---
+# Used by switch.client.ts to authenticate to the switch service's
+# /ports, /vlans, /poe, /provision/* endpoints. Replaces the prior
+# reuse of DEVICE_SECRET_KEY (the FIPS-sealed AES-256 master encryption
+# key) as the switch container's SERVICE_SECRET — same rationale as
+# SERVICE_TOKEN_DISPLAY above. Both switch.client.ts and the switch
+# container's SERVICE_SECRET MUST read the same value; compose wires
+# both ends to \${SERVICE_TOKEN_SWITCH}.
+SERVICE_TOKEN_SWITCH=$service_token_switch
 
 # --- ops-console support-client bearer (WARP-337) ---
 # Used by Warp Lab support to authenticate to the on-device /ops/*
@@ -323,17 +348,23 @@ DROPLET_TPM_BACKEND=$([ -e /dev/tpm0 ] && printf 'real' || printf 'mock')
 DROPLET_DEVICE_ID=$(hostname 2>/dev/null || echo droplet)
 
 # --- Compose profiles ---
-# Linux defaults to "linux,display":
+# Linux defaults to "linux,display,eval":
 #   linux   → Frigate (needs /dev/dri/renderD128), voice-io (needs /dev/snd),
 #             wyoming-faster-whisper, wyoming-piper
 #   display → oled-display (status display — safe default, auto-falls back
 #             to a simulated PNG backend when no /dev/ttyACM* is present)
+#   eval    → rag-eval (RAGAS retrieval-quality scoring). Standard in ALL
+#             environments per WARP-844 follow-up — the judge runs on the
+#             appliance's own Ollama, so even macOS dev can score runs
+#             (slower, but functional). Pause the schedule with
+#             RAG_EVAL_DISABLED=1 rather than dropping the profile — the
+#             ad-hoc /api/admin/rag-eval/* surface needs the container up.
 #   full    → switch driver, camera-discovery (both require real hardware
 #             and operator-supplied credentials; not default-on so a fresh
 #             install doesn't scan the LAN or hit a missing switch on boot)
-# macOS: leave empty — Frigate is skipped, dashboard remains reachable via
-# the gateway. Add "full" by hand if you want the hardware-facing services.
-COMPOSE_PROFILES=$([ "$(uname)" = "Linux" ] && printf 'linux,display' || printf '')
+# macOS: linux/display are skipped (GPU/audio device mounts), but eval stays.
+# Add "full" by hand if you want the hardware-facing services.
+COMPOSE_PROFILES=$([ "$(uname)" = "Linux" ] && printf 'linux,display,eval' || printf 'eval')
 EOF
 
   chmod 600 "$env_file"
@@ -432,19 +463,21 @@ migrate_env() {
   local routing_mode_default="real"
   [ "$(uname)" = "Darwin" ] && routing_mode_default="mock"
 
-  # COMPOSE_PROFILES on Linux defaults to "linux,display":
+  # COMPOSE_PROFILES on Linux defaults to "linux,display,eval":
   #   linux   → Frigate, voice-io, wyoming-faster-whisper, wyoming-piper
   #             (need /dev/dri or /dev/snd, gated on Linux only)
   #   display → oled-display status display (safe default via sim fallback
   #             when /dev/ttyACM* is absent)
+  #   eval    → rag-eval (RAGAS) — standard in every env (WARP-845), so
+  #             macOS dev defaults to "eval" alone
   # `full` (switch, camera-discovery) is intentionally not in the default —
   # both need real hardware + credentials. Operator opts in via .env.
   #
   # Only appended when missing — existing installs that pinned a narrower
   # COMPOSE_PROFILES keep their value. To pull in the new default, edit
-  # .env manually: COMPOSE_PROFILES=linux,display
-  local compose_profiles_default=""
-  [ "$(uname)" = "Linux" ] && compose_profiles_default="linux,display"
+  # .env manually: COMPOSE_PROFILES=linux,display,eval
+  local compose_profiles_default="eval"
+  [ "$(uname)" = "Linux" ] && compose_profiles_default="linux,display,eval"
 
   _migrate_ensure_key ROUTING_SERVICE_TOKEN "$(openssl rand -hex 32)"
   _migrate_ensure_key ROUTING_MODE "$routing_mode_default"
@@ -460,6 +493,13 @@ migrate_env() {
   # display bearer; without this key the orchestrator → oled-display path
   # falls back to the empty-string bearer and 401s on every health probe.
   _migrate_ensure_key SERVICE_TOKEN_DISPLAY "$(openssl rand -hex 32)"
+  # Switch-bearer backfill: existing installs wired the switch container's
+  # SERVICE_SECRET to DEVICE_SECRET_KEY while the orchestrator side sent no
+  # bearer at all — so any install with a DEVICE_SECRET_KEY in .env had the
+  # switch service 403ing every orchestrator call. Minting this key (and the
+  # compose rewire to ${SERVICE_TOKEN_SWITCH} on both ends) restores the
+  # orchestrator → switch path and keeps DEVICE_SECRET_KEY off the wire.
+  _migrate_ensure_key SERVICE_TOKEN_SWITCH "$(openssl rand -hex 32)"
   # WARP-337 backfill: ops-console support client bearer. Without this
   # key the service falls through to an ephemeral token that regenerates
   # on every container restart, so support's saved credential invalidates
@@ -487,7 +527,24 @@ migrate_env() {
   _migrate_ensure_key DROPLET_PM_ADMIN_TOKEN "$(openssl rand -hex 32)"
   _migrate_ensure_key DROPLET_PM_WEBHOOK_SECRET "$(openssl rand -hex 32)"
   _migrate_ensure_key DROPLET_PM_API_URL "http://pm-api:8000"
-  _migrate_ensure_key DROPLET_PM_WEB_URL "${DROPLET_PM_WEB_URL:-https://droplet-ai.local/pm}"
+  _migrate_ensure_key DROPLET_PM_WEB_URL "${DROPLET_PM_WEB_URL:-https://droplet-ai.local:8443}"
+  # One-time rewrite for the WARP-498 OQ2 amendment: Plane moved from the
+  # /pm subpath (which the vanilla basePath:"" frontend could never serve —
+  # the /projects iframe rendered black) to a dedicated :8443 origin. Only
+  # the exact pre-amendment default is rewritten — operator overrides keep
+  # their value.
+  if grep -qE '^DROPLET_PM_WEB_URL=https://droplet-ai\.local/pm/?$' "$env_file" 2>/dev/null; then
+    if [ "$backed_up" = "false" ]; then
+      # shellcheck disable=SC2155  # Same rationale as line 29: `date +%s` cannot meaningfully fail.
+      local backup="$env_file.bak.$(date +%s)"
+      cp "$env_file" "$backup"
+      log_info "Backed up existing .env to $backup before migration"
+      backed_up=true
+    fi
+    sed -i.tmp 's|^DROPLET_PM_WEB_URL=https://droplet-ai\.local/pm/\{0,1\}$|DROPLET_PM_WEB_URL=https://droplet-ai.local:8443|' "$env_file"
+    rm -f "$env_file.tmp"
+    log_success "Migrated .env: DROPLET_PM_WEB_URL /pm subpath -> :8443 dedicated origin (WARP-498 OQ2 amendment)"
+  fi
   # Plane v0.24.1 broker + object storage (completing the #487 integration).
   _migrate_ensure_key DROPLET_PM_MQ_USER "plane"
   _migrate_ensure_key DROPLET_PM_MQ_PASSWORD "$(_gen_password 24)"

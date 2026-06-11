@@ -67,6 +67,10 @@ services:
     ports:
       - "80:80"
       - "443:443"
+      # Plane PM dedicated origin (spec WARP-498 OQ2 amendment) — the
+      # vanilla Plane frontend needs its own origin root; see the :8443
+      # server block in nginx.conf.
+      - "8443:8443"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
       - ./certs:/etc/nginx/certs:ro
@@ -186,6 +190,12 @@ services:
       # display.client.ts; must equal the oled-display container's
       # SERVICE_SECRET env (wired below to the same source).
       - SERVICE_TOKEN_DISPLAY=${SERVICE_TOKEN_DISPLAY:-}
+      # Orchestrator → switch service bearer. Read by switch.client.ts;
+      # must equal the switch container's SERVICE_SECRET env (wired below
+      # to the same source). Before this key existed the orchestrator sent
+      # no bearer at all, so a switch container with SERVICE_SECRET set
+      # 403'd every call (dashboard Network page → "Router unavailable").
+      - SERVICE_TOKEN_SWITCH=${SERVICE_TOKEN_SWITCH:-}
       # The orchestrator's Dockerfile sets OPENSSL_CONF=/etc/ssl/openssl-fips.cnf
       # for FIPS 140-3 compliance (WARP-229). That cipher set rejects the
       # non-FIPS ciphers Postgres uses for its TLS handshake — Prisma's
@@ -577,13 +587,15 @@ services:
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- RAG eval (RAGAS scoring, scheduled hourly off-hours) ---
-  # WARP-RAG-EVAL: gated behind the `eval` profile. RAGAS is GPU-bound, so it's
-  # off on profile-less / macOS-dev / multi-box deployments by default; enable
-  # with `COMPOSE_PROFILES=eval` (or comma-append to the existing list).
-  # The single-box shape, which always ships the dGPU RAGAS needs, enables this
-  # by DEFAULT — scripts/lib/single-box.sh appends `eval` to COMPOSE_PROFILES
-  # (bug #15) so /api/admin/rag-eval/* works out-of-the-box. Pause the scheduled
-  # runs there with RAG_EVAL_DISABLED=1 rather than dropping the profile.
+  # WARP-RAG-EVAL: gated behind the `eval` profile, which is STANDARD in
+  # every environment as of the WARP-844 follow-up: scripts/lib/secrets.sh
+  # writes it into the fresh-install COMPOSE_PROFILES on Linux AND macOS,
+  # and scripts/lib/single-box.sh keeps appending it idempotently for
+  # upgraded boxes (bug #15). The judge runs against the appliance's own
+  # Ollama (RAGAS_LOCAL_JUDGE_MODEL → LLM_MODEL fallback), so no GPU is
+  # strictly required — just slower on CPU. Pause the scheduled runs with
+  # RAG_EVAL_DISABLED=1 rather than dropping the profile; the ad-hoc
+  # /api/admin/rag-eval/* surface needs the container up.
   #
   # The container bakes queries.yaml + goldens.yaml + ragas_runner.py at
   # build time. Goldens are part of the image version; updating them
@@ -606,7 +618,9 @@ services:
       # local judge LLM). On Linux the bridge network reaches the host
       # via host-gateway; on macOS dev compose uses host.docker.internal.
       - RAGAS_OLLAMA_URL=${RAGAS_OLLAMA_URL:-http://host.docker.internal:11434/v1}
-      - RAGAS_LOCAL_JUDGE_MODEL=${RAGAS_LOCAL_JUDGE_MODEL:-mistral}
+      # ragas_runner.py falls back RAGAS_LOCAL_JUDGE_MODEL → LLM_MODEL →
+      # mistral; leaving this unset lets that chain pick the hosted model.
+      - RAGAS_LOCAL_JUDGE_MODEL=${RAGAS_LOCAL_JUDGE_MODEL:-}
       - RAGAS_JUDGE=${RAGAS_JUDGE:-local}
       - RAGAS_VARIANT=${RAGAS_VARIANT:-hybrid}
       - RAGAS_LIMIT=${RAGAS_LIMIT:-10}
@@ -746,7 +760,13 @@ services:
       - SWITCH_USERNAME=${SWITCH_USERNAME:-admin}
       - SWITCH_PASSWORD=${SWITCH_PASSWORD:-}
       - SWITCH_DRIVER=${SWITCH_DRIVER:-lantronix}
-      - SERVICE_SECRET=${DEVICE_SECRET_KEY:-}
+      # Dedicated orchestrator → switch bearer (same WARP-165 rationale as
+      # the display path): the prior ${DEVICE_SECRET_KEY} wiring put the
+      # FIPS-sealed master encryption key on the wire for every switch
+      # call — and the orchestrator never presented it anyway, so all
+      # authenticated endpoints 403'd. Must equal the orchestrator's
+      # SERVICE_TOKEN_SWITCH env (wired above to the same source).
+      - SERVICE_SECRET=${SERVICE_TOKEN_SWITCH:-}
       - PORT=8081
       # ADR-018 item 9: bring-up provisioning. Off unless explicitly enabled
       # (single-box sets SWITCH_AUTOPROVISION=1 + SWITCH_VLAN_PROFILE=flat-lan
@@ -1018,7 +1038,13 @@ services:
   # itself is pure CPU here; if a future profile needs CUDA, set
   # WHISPER_DEVICE=cuda (image auto-detects).
   wyoming-faster-whisper:
-    image: rhasspy/wyoming-whisper:${WHISPER_IMAGE_TAG:-latest}
+    # Pinned (WARP-844 follow-up): the Wyoming wire format differs across
+    # image versions (v1 inline-data vs v2 data_length framing), so a
+    # floating tag meant a routine pull could flip the protocol under the
+    # STT clients. Both in-repo clients (voice-io stt.py, orchestrator
+    # stt.client.ts) parse BOTH formats, but the pin keeps upgrades
+    # deliberate. 3.1.0 == today's `latest`.
+    image: rhasspy/wyoming-whisper:${WHISPER_IMAGE_TAG:-3.1.0}
     # Profile gate matches voice-io — same Linux-only audio
     # stack. On macOS dev installs the whole voice path is skipped.
     profiles: ["linux"]
@@ -1602,6 +1628,14 @@ services:
       ROCR_VISIBLE_DEVICES: "0"
       OLLAMA_HOST: "0.0.0.0:11434"
       OLLAMA_KEEP_ALIVE: "24h"
+      # WARP-854: Ollama's baked-in default context is 4096 tokens. The
+      # owner-role agent loop ships ~80 tool schemas (~11k tokens of
+      # prompt), so the default overflowed before generation even began —
+      # Ollama returned finish_reason=length with ZERO output tokens and
+      # every dashboard chat surfaced as an instant empty answer. 16k
+      # fits tools + memory block + history while keeping gpt-oss:20b's
+      # KV cache fully resident on a 16 GB GPU.
+      OLLAMA_CONTEXT_LENGTH: "${OLLAMA_CONTEXT_LENGTH:-16384}"
     volumes:
       - ollama-data:/root/.ollama
     healthcheck:

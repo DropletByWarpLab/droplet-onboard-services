@@ -75,9 +75,13 @@ const RULES: readonly RedactionRule[] = [
   {
     // Credentials embedded in a URI userinfo: scheme://user:SECRET@host
     // Redacts only the password component, preserving scheme/user/host so the
-    // line still tells you which service/db it was.
+    // line still tells you which service/db it was. The username class is `*`
+    // (not `+`) so empty-username forms — `redis://:pw@host`, the exact shape
+    // secrets.sh generates for REDIS_URL, and `postgresql://:pw@db/...` — are
+    // also redacted. The trailing `@` anchor still prevents matching a plain
+    // `host:port` with no userinfo.
     name: "uri-userinfo",
-    pattern: /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s:/@]+:)([^\s@/]+)(@)/g,
+    pattern: /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s:/@]*:)([^\s@/]+)(@)/g,
     replace: (_m, pre: string, _secret: string, at: string) =>
       `${pre}${REDACTION_PLACEHOLDER}${at}`,
   },
@@ -90,9 +94,14 @@ const RULES: readonly RedactionRule[] = [
   {
     // Custom auth headers carrying a raw token value:
     //   X-Droplet-Auth: <tok>, Authorization: <tok>, X-Api-Key: <tok>
+    // The value alternation matches "scheme + credential" FIRST for the known
+    // schemes (`Basic`/`Bearer`/`Token`) — the bare `{6,}` arm would only
+    // reach the 6-char `Bearer` word, leaving short tokens (< 8 chars, below
+    // the bearer-token rule's {8,} threshold) unredacted. Naming the scheme
+    // explicitly captures scheme + credential together (fail closed).
     name: "auth-header",
     pattern:
-      /\b(X-Droplet-Auth|Authorization|X-Api-Key|X-Auth-Token|Proxy-Authorization)(\s*[:=]\s*)([^\s",;]{6,})/gi,
+      /\b(X-Droplet-Auth|Authorization|X-Api-Key|X-Auth-Token|Proxy-Authorization)(\s*[:=]\s*)((?:Basic|Bearer|Token)\s+[^\s",;]+|[^\s",;]{6,})/gi,
     replace: (_m, header: string, sep: string) =>
       `${header}${sep}${REDACTION_PLACEHOLDER}`,
   },

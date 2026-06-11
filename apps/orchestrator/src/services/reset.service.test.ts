@@ -58,6 +58,10 @@ function makeFakePrisma() {
   const audits: Array<Record<string, unknown>> = [];
   let seq = 0;
   const prisma = {
+    // Interactive-transaction double — attached AFTER this object is built (see
+    // below) so it can reference `prisma` without a circular initializer. Typed
+    // as a callable so the strongly-typed vi.fn assigned later is compatible.
+    $transaction: (() => undefined) as unknown as (fn: (tx: unknown) => Promise<unknown>) => Promise<unknown>,
     resetJob: {
       create: vi.fn(async ({ data }: { data: Partial<FakeJob> }) => {
         const job: FakeJob = {
@@ -105,6 +109,14 @@ function makeFakePrisma() {
       }),
     },
   };
+  // The service wraps the double-fire guard + audit + job-create in
+  // prisma.$transaction(async (tx) => …). The fake runs the callback
+  // synchronously against the SAME in-memory client, so the count→create
+  // sequence (and a thrown ResetError) behave as in production. A real DB's
+  // atomicity isn't under unit test here — the service's branching is.
+  prisma.$transaction = vi.fn(
+    async (fn: (tx: typeof prisma) => Promise<unknown>) => fn(prisma),
+  );
   return { prisma, jobs, audits };
 }
 
@@ -206,21 +218,24 @@ describe("requestFactoryReset — happy path", () => {
   });
 });
 
-describe("requestFactoryReset — fixed confirm phrase (WARP-825 follow-up)", () => {
-  it("accepts the literal 'factory reset' phrase even when it isn't the hostname", async () => {
-    const { prisma, jobs } = makeFakePrisma();
+describe("requestFactoryReset — hostname-only confirm (2026-06-09 sweep)", () => {
+  it("REJECTS the legacy universal 'factory reset' phrase — only the device name confirms", async () => {
+    // The fixed phrase was public in the repo, so it provided zero per-device
+    // friction. Typing it must now read as a mismatch and never dispatch.
+    const { prisma, jobs, audits } = makeFakePrisma();
     const fetchSpy = mockFetchOnce(200, { ok: true });
 
-    const job = await requestFactoryReset(prisma as never, {
-      userId: "owner-1",
-      typedConfirm: "factory reset",
-      targetName: "droplet-home",
-    });
+    await expect(
+      requestFactoryReset(prisma as never, {
+        userId: "owner-1",
+        typedConfirm: "factory reset",
+        targetName: "droplet-home",
+      }),
+    ).rejects.toMatchObject({ code: "CONFIRM_MISMATCH" });
 
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
-    expect(job.status).toBe("dispatched");
-    // The audit/job still record the canonical device name, not the phrase.
-    expect(jobs[0].targetName).toBe("droplet-home");
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(jobs).toHaveLength(0);
+    expect(audits).toHaveLength(0);
   });
 });
 
@@ -245,6 +260,111 @@ describe("requestFactoryReset — double-fire guard", () => {
       }),
     ).rejects.toMatchObject({ code: "RESET_ALREADY_IN_PROGRESS" });
     expect(fetchSpy2).not.toHaveBeenCalled();
+  });
+
+  it("runs the in-flight guard + create inside ONE transaction, and a refused duplicate writes no audit row", async () => {
+    const { prisma, jobs, audits } = makeFakePrisma();
+    mockFetchOnce(200, { ok: true });
+
+    // First reset dispatches and creates exactly one job + one audit row.
+    await requestFactoryReset(prisma as never, {
+      userId: "owner-1",
+      typedConfirm: "droplet-home",
+      targetName: "droplet-home",
+    });
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(jobs).toHaveLength(1);
+    expect(audits).toHaveLength(1);
+
+    // A second confirmed reset is refused by the guard INSIDE the transaction.
+    await expect(
+      requestFactoryReset(prisma as never, {
+        userId: "owner-1",
+        typedConfirm: "droplet-home",
+        targetName: "droplet-home",
+      }),
+    ).rejects.toMatchObject({ code: "RESET_ALREADY_IN_PROGRESS" });
+
+    // The second attempt opened a transaction but, because it threw before the
+    // create, left NO new job and NO orphan audit row (the audit now lives
+    // inside the txn so a rejected duplicate rolls back cleanly).
+    expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+    expect(jobs).toHaveLength(1);
+    expect(audits).toHaveLength(1);
+  });
+});
+
+describe("requestFactoryReset — transaction isolation closes the TOCTOU window", () => {
+  // pr-reviewer (PR #549, finding 1): the default READ COMMITTED isolation does
+  // NOT serialize two concurrent count→create transactions — both can read
+  // inFlight = 0 before either INSERT commits. The guard transaction must run
+  // SERIALIZABLE, and the resulting Postgres serialization failure (Prisma
+  // P2034) on the losing transaction must surface as the same
+  // RESET_ALREADY_IN_PROGRESS the in-flight guard throws (409 at the route).
+  it("opens the guard transaction with Serializable isolation", async () => {
+    const { prisma } = makeFakePrisma();
+    mockFetchOnce(200, { ok: true });
+
+    await requestFactoryReset(prisma as never, {
+      userId: "owner-1",
+      typedConfirm: "droplet-home",
+      targetName: "droplet-home",
+    });
+
+    expect(prisma.$transaction).toHaveBeenCalledWith(
+      expect.any(Function),
+      expect.objectContaining({ isolationLevel: "Serializable" }),
+    );
+  });
+
+  it("maps a P2034 serialization failure to SERIALIZATION_CONFLICT and never dispatches", async () => {
+    const { prisma, jobs } = makeFakePrisma();
+    const fetchSpy = mockFetchOnce(200, { ok: true });
+
+    // Model the LOSING side of two concurrent serializable transactions: the
+    // engine aborts it with P2034 ("write conflict or deadlock, retry").
+    // This could be caused by an unrelated concurrent write (e.g. another
+    // action writing to CommandAuditLog) — not necessarily a duplicate reset.
+    // SERIALIZATION_CONFLICT → 503 "try again"; RESET_ALREADY_IN_PROGRESS
+    // is reserved for the explicit inFlight > 0 guard path.
+    (prisma.$transaction as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      Object.assign(new Error("Transaction failed due to a write conflict or a deadlock. Please retry your transaction"), {
+        code: "P2034",
+      }),
+    );
+
+    await expect(
+      requestFactoryReset(prisma as never, {
+        userId: "owner-1",
+        typedConfirm: "droplet-home",
+        targetName: "droplet-home",
+      }),
+    ).rejects.toMatchObject({ code: "SERIALIZATION_CONFLICT" });
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(jobs).toHaveLength(0);
+  });
+});
+
+describe("requestFactoryReset — DB-level double-fire guard (partial unique index)", () => {
+  it("maps a P2002 unique violation on create onto RESET_ALREADY_IN_PROGRESS", async () => {
+    // Two concurrent requests can both pass the count check; the
+    // ResetJob_at_most_one_nonterminal index makes the second INSERT fail
+    // with P2002, which must read as the same 409 a sequential duplicate gets.
+    const { prisma } = makeFakePrisma();
+    const fetchSpy = mockFetchOnce(200, { ok: true });
+    (prisma.resetJob.create as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      Object.assign(new Error("Unique constraint failed"), { code: "P2002" }),
+    );
+
+    await expect(
+      requestFactoryReset(prisma as never, {
+        userId: "owner-1",
+        typedConfirm: "droplet-home",
+        targetName: "droplet-home",
+      }),
+    ).rejects.toMatchObject({ code: "RESET_ALREADY_IN_PROGRESS" });
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
 
@@ -291,6 +411,45 @@ describe("requestFactoryReset — bridge unreachable", () => {
     expect(jobs[0].status).toBe("failed");
     expect(jobs[0].failureReason).toBeTruthy();
   });
+});
+
+describe("requestFactoryReset — bridge dispatch timeout", () => {
+  // pr-reviewer (PR #549, 2026-06-10 finding 2): dispatchToBridge aborts after
+  // 30 s via AbortController; the resulting AbortError (or AbortSignal.timeout's
+  // TimeoutError) is NOT a socket-level connection error, so the catch used to
+  // fall through to the generic "Reset dispatch failed: The operation was
+  // aborted." A timeout must be reported as a timeout — same BRIDGE_UNREACHABLE
+  // code (consistent with hostapd-bridge.service.ts, which maps timeout/abort to
+  // RouterError.unreachable) but a distinct, truthful message.
+  it.each(["AbortError", "TimeoutError"])(
+    "reports a %s as a dispatch timeout, not a generic failure",
+    async (name) => {
+      const { prisma, jobs } = makeFakePrisma();
+      const abortErr = Object.assign(new Error("This operation was aborted"), {
+        name,
+      });
+      vi.spyOn(globalThis, "fetch").mockRejectedValue(abortErr);
+
+      await expect(
+        requestFactoryReset(prisma as never, {
+          userId: "owner-1",
+          typedConfirm: "droplet-home",
+          targetName: "droplet-home",
+        }),
+      ).rejects.toMatchObject({
+        code: "BRIDGE_UNREACHABLE",
+        message:
+          "Reset dispatch timed out; the bridge did not respond within 30 s.",
+      });
+
+      // Job marked failed with the timeout reason — never "operation aborted".
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0].status).toBe("failed");
+      expect(jobs[0].failureReason).toBe(
+        "Reset dispatch timed out; the bridge did not respond within 30 s.",
+      );
+    },
+  );
 });
 
 describe("getResetStatus", () => {

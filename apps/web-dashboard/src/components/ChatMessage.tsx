@@ -1,10 +1,15 @@
-import { memo, useState } from "react";
+import { memo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import rehypeHighlight from "rehype-highlight";
 import {
-  Bot,
+  Sparkles,
   User,
   Wrench,
+  ChevronRight,
+  Pencil,
+  ThumbsUp,
+  ThumbsDown,
   Loader2,
   Check,
   AlertTriangle,
@@ -19,8 +24,106 @@ import {
 } from "lucide-react";
 import type { ChatMessage as ChatMessageType, ChatToolCall } from "@/lib/types";
 import { CitationCard } from "@/components/citations/CitationCard";
+import { AttachmentChip } from "@/components/AttachmentChip";
 import { mimeFromPath } from "@/lib/mime-icons";
 import "@/components/chat/thinking.css";
+
+/**
+ * WARP-458 — collapsed "Thought process" disclosure above the answer.
+ * The trace is muted, pre-wrapped plain text (it's model monologue, not
+ * markdown), collapsed by default so it never competes with the reply.
+ */
+function ReasoningDisclosure({ trace }: { trace: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mb-1.5">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="
+          inline-flex items-center gap-1 py-0.5
+          type-caption-1 text-label-tertiary hover:text-label-secondary
+          focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 rounded-sm
+          transition-colors
+        "
+      >
+        <ChevronRight
+          size={12}
+          aria-hidden="true"
+          className={`transition-transform duration-150 ${open ? "rotate-90" : ""}`}
+        />
+        Thought process
+      </button>
+      {open && (
+        <div
+          className="
+            mt-1 pl-3 border-l-2 border-separator
+            whitespace-pre-wrap type-footnote text-label-tertiary
+          "
+        >
+          {trace}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Fenced code block with a hover copy button. Rendered via the
+ * ReactMarkdown `pre` component override so every code block in every
+ * bubble gets the affordance (Claude-chat parity). The text is read
+ * from the DOM at click time (textContent of the highlighted <code>),
+ * so the button works identically for highlighted and plain blocks.
+ */
+function CodeBlock(props: React.HTMLAttributes<HTMLPreElement>) {
+  const preRef = useRef<HTMLPreElement>(null);
+  const [copied, setCopied] = useState(false);
+  const timerRef = useRef<number | null>(null);
+
+  const handleCopy = async () => {
+    const text = preRef.current?.textContent ?? "";
+    if (!text || typeof navigator === "undefined" || !navigator.clipboard) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // Clipboard API rejects in unfocused tabs — still flip the
+      // transient state so the button doesn't appear stuck.
+    }
+    setCopied(true);
+    if (timerRef.current) window.clearTimeout(timerRef.current);
+    timerRef.current = window.setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <div className="relative group/code">
+      <button
+        type="button"
+        onClick={handleCopy}
+        aria-label={copied ? "Copied" : "Copy code"}
+        className="
+          absolute right-1.5 top-1.5 z-10
+          inline-flex items-center gap-1 px-2 py-1 rounded-md
+          type-caption-2 text-label-tertiary bg-surface-secondary/90
+          opacity-0 group-hover/code:opacity-100 focus-visible:opacity-100
+          hover:text-label-primary
+          focus:outline-none focus:ring-2 focus:ring-accent/40
+          transition-opacity duration-150
+        "
+      >
+        {copied ? (
+          <Check size={12} aria-hidden="true" />
+        ) : (
+          <CopyIcon size={12} aria-hidden="true" />
+        )}
+        <span>{copied ? "Copied" : "Copy"}</span>
+      </button>
+      <pre ref={preRef} {...props} />
+    </div>
+  );
+}
 
 /**
  * "Droplet is thinking" indicator (design handoff Option B) — the faceted
@@ -71,6 +174,17 @@ interface ChatMessageProps {
    * re-issues the action with the single-use token the chip is carrying.
    */
   onApproveScene?: (messageId: string, toolCallId: string) => void;
+  /**
+   * WARP-844: edit & resend. Wired by the page to `useChat.editMessage`.
+   * Rendering the pencil is gated on this prop AND the row being a user
+   * message; the page withholds it while a stream is in flight.
+   */
+  onEdit?: (messageId: string, newContent: string) => void;
+  /**
+   * WARP-844: thumbs rating. Wired to `useChat.rateMessage`. Clicking the
+   * active thumb again clears the rating (null).
+   */
+  onFeedback?: (messageId: string, feedback: "up" | "down" | null) => void;
 }
 
 export const ChatMessage = memo(function ChatMessage({
@@ -82,7 +196,22 @@ export const ChatMessage = memo(function ChatMessage({
   onQuote,
   onRegenerate,
   onApproveScene,
+  onEdit,
+  onFeedback,
 }: ChatMessageProps) {
+  // WARP-844 — inline edit state for user bubbles.
+  const [editing, setEditing] = useState(false);
+  const [editDraft, setEditDraft] = useState("");
+  const startEdit = () => {
+    setEditDraft(message.content);
+    setEditing(true);
+  };
+  const submitEdit = () => {
+    const trimmed = editDraft.trim();
+    setEditing(false);
+    if (!trimmed || trimmed === message.content) return;
+    onEdit?.(message.id, trimmed);
+  };
   const isUser = message.role === "user";
   const toolCalls = message.toolCalls;
   const hasToolCalls = !isUser && toolCalls && toolCalls.length > 0;
@@ -98,7 +227,12 @@ export const ChatMessage = memo(function ChatMessage({
   const citations = !isUser ? message.citations : undefined;
   const hasCitations = Boolean(citations && citations.length > 0);
   const showToolbar =
-    !isUser && !isStreaming && (Boolean(onCopy) || Boolean(onQuote) || Boolean(onRegenerate));
+    !isUser &&
+    !isStreaming &&
+    (Boolean(onCopy) ||
+      Boolean(onQuote) ||
+      Boolean(onRegenerate) ||
+      Boolean(onFeedback));
   const [copyState, setCopyState] = useState<"idle" | "copied">("idle");
 
   const handleCopy = async () => {
@@ -133,26 +267,19 @@ export const ChatMessage = memo(function ChatMessage({
   }
 
   return (
-    <div className={`flex gap-2.5 ${isUser ? "flex-row-reverse" : ""}`}>
-      {/* Avatar */}
-      <div
-        className={`flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center
-          ${isUser ? "bg-accent-subtle text-accent" : "bg-surface-tertiary text-label-secondary"}`}
-      >
-        {isUser ? <User size={14} /> : <Bot size={14} />}
+    <div className={`msg ${isUser ? "is-user" : ""}`}>
+      {/* Avatar — design handoff: assistant wears the brand Sparkles mark,
+          the user a neutral silhouette. */}
+      <div className={`msg-ava ${isUser ? "is-user" : "is-assistant"}`}>
+        {isUser ? <User size={15} /> : <Sparkles size={15} />}
       </div>
 
       {/* Bubble + meta. group/message lets the action toolbar surface on
           hover OR keyboard focus (focus-within) without prop-drilling
           state up. */}
-      <div className={`flex flex-col gap-1 max-w-[70%] group/message ${isUser ? "items-end" : "items-start"}`}>
+      <div className={`msg-col group/message ${isUser ? "items-end" : "items-start"}`}>
       <div
-        className={`px-4 py-2.5 type-body
-          ${
-            isUser
-              ? "bg-accent text-white rounded-[20px] rounded-tr-[6px]"
-              : "bg-surface-tertiary text-label-primary rounded-[20px] rounded-tl-[6px]"
-          }`}
+        className={`msg-bubble ${isUser ? "is-user" : "is-assistant"}`}
         // role="status" + aria-live="polite" on the streaming assistant
         // bubble so screen readers announce content as it lands without
         // alert-spamming. WARP-44 precedent.
@@ -160,7 +287,44 @@ export const ChatMessage = memo(function ChatMessage({
         aria-live={!isUser && isStreaming ? "polite" : undefined}
       >
         {isUser ? (
-          <p className="whitespace-pre-wrap">{message.content}</p>
+          editing ? (
+            <div className="flex flex-col gap-1.5 min-w-[240px]">
+              <textarea
+                value={editDraft}
+                onChange={(e) => setEditDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    submitEdit();
+                  } else if (e.key === "Escape") {
+                    setEditing(false);
+                  }
+                }}
+                aria-label="Edit message"
+                rows={Math.min(6, Math.max(2, editDraft.split("\n").length))}
+                autoFocus
+                className="dp-input type-subheadline w-full resize-y bg-surface-primary text-label-primary"
+              />
+              <div className="flex gap-2 justify-end">
+                <button
+                  type="button"
+                  onClick={() => setEditing(false)}
+                  className="type-caption-1 text-label-tertiary hover:text-label-primary"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={submitEdit}
+                  className="type-caption-1 font-medium text-accent hover:text-accent-hover"
+                >
+                  Save &amp; resend
+                </button>
+              </div>
+            </div>
+          ) : (
+            <p className="whitespace-pre-wrap">{message.content}</p>
+          )
         ) : (
           <div className="chat-markdown">
             {hasToolCalls && (
@@ -222,9 +386,16 @@ export const ChatMessage = memo(function ChatMessage({
                 ) : null}
               </div>
             )}
+            {message.reasoning && !isUser && (
+              <ReasoningDisclosure trace={message.reasoning} />
+            )}
             {message.content && (
               <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
+                // Fenced-block syntax highlighting (hljs classes; colors
+                // mapped to design tokens in globals.css). Unknown / absent
+                // languages render as plain <code> — no detection pass.
+                rehypePlugins={[rehypeHighlight]}
                 components={{
                   // WARP-295: wrap GFM tables in a horizontal-scroll
                   // container so a wide table doesn't blow out the
@@ -235,6 +406,8 @@ export const ChatMessage = memo(function ChatMessage({
                       <table {...props} />
                     </div>
                   ),
+                  // Per-block hover copy button (Claude-chat parity).
+                  pre: ({ node, ...props }) => <CodeBlock {...props} />,
                 }}
               >
                 {message.content}
@@ -287,24 +460,71 @@ export const ChatMessage = memo(function ChatMessage({
           is projected into the canonical CitationHit DTO; chat citations
           don't carry a per-chunk `anchor` yet, so they fall through to
           <FileCitation> (the same chip the old <CitationChip> rendered). */}
+      {/* WARP-859 — files attached on this user turn, snapshotted from the
+          composer at send time so the document rides onto the message it
+          was sent with. Read-only (no remove); the live chip in the
+          composer cleared on send. */}
+      {isUser && message.attachments && message.attachments.length > 0 ? (
+        <div
+          data-testid="message-attachments"
+          className="flex flex-wrap gap-1.5 mt-0.5 justify-end"
+        >
+          {message.attachments.map((a) => (
+            <AttachmentChip key={a.localId} attachment={a} />
+          ))}
+        </div>
+      ) : null}
       {!isUser && hasCitations ? (
         <div
           data-testid="chat-citations"
           className="flex flex-wrap gap-1.5 mt-0.5"
         >
-          {citations!.map((c, i) => (
-            <CitationCard
-              key={`${c.source}:${c.path}:${c.pageNumber ?? ""}:${i}`}
-              hit={{
-                fileId: c.brainItemId ? String(c.brainItemId) : c.path,
-                filename: c.path.split("/").pop() || c.path,
-                mimeType: c.mimeType ?? mimeFromPath(c.path),
-                chunkText: c.snippet ?? "",
-                score: c.score ?? 0,
-                anchor: null,
-              }}
-            />
-          ))}
+          {citations!.map((c, i) => {
+            // WARP-859 — resolve the click target per source so a brain
+            // citation never links to `/files/<absolute-brain-path>` (the
+            // 404 Romain hit). Brain items download via the authenticated
+            // brain route keyed by item id; a brain hit missing that id has
+            // no routable target (its `path` is a `/data/brain-memory/...`
+            // filesystem path), so pass `null` → non-link chip. Nextcloud
+            // hits fall through to FileCitation's `/files/<fileId>` default.
+            const href =
+              c.source === "brain"
+                ? c.brainItemId
+                  ? `/api/files/brain/${encodeURIComponent(String(c.brainItemId))}/download`
+                  : null
+                : undefined;
+            return (
+              <CitationCard
+                key={`${c.source}:${c.path}:${c.pageNumber ?? ""}:${i}`}
+                hit={{
+                  fileId: c.brainItemId ? String(c.brainItemId) : c.path,
+                  filename: c.path.split("/").pop() || c.path,
+                  mimeType: c.mimeType ?? mimeFromPath(c.path),
+                  chunkText: c.snippet ?? "",
+                  score: c.score ?? 0,
+                  anchor: null,
+                  href,
+                }}
+              />
+            );
+          })}
+        </div>
+      ) : null}
+      {/* WARP-844: user-row edit affordance — pencil on hover, mirroring
+          the assistant toolbar's reveal behavior. Hidden while editing
+          (the inline editor has its own Save/Cancel) and when the page
+          withholds onEdit (stream in flight). */}
+      {isUser && onEdit && !editing ? (
+        <div className="msg-actions">
+          <button
+            type="button"
+            onClick={startEdit}
+            aria-label="Edit message"
+            className="msg-act"
+          >
+            <Pencil size={12} aria-hidden="true" />
+            <span>Edit</span>
+          </button>
         </div>
       ) : null}
       {/* WARP-295: message-actions toolbar. focus-within keeps the
@@ -315,30 +535,19 @@ export const ChatMessage = memo(function ChatMessage({
       {showToolbar ? (
         <div
           data-testid="message-actions"
-          className={`
-            flex items-center gap-1 flex-wrap
-            opacity-0 group-hover/message:opacity-100 focus-within:opacity-100
-            transition-opacity duration-150
-            ${hasCitations ? "mt-1" : ""}
-          `}
+          className={`msg-actions flex-wrap ${hasCitations ? "mt-1" : ""}`}
         >
           {onCopy ? (
             <button
               type="button"
               onClick={handleCopy}
               aria-label={copyState === "copied" ? "Copied" : "Copy message"}
-              className="
-                inline-flex items-center gap-1 px-3 py-2 rounded-md
-                type-caption-1 text-label-tertiary
-                hover:text-label-primary hover:bg-surface-secondary
-                focus:outline-none focus:ring-2 focus:ring-accent/40
-                transition-colors
-              "
+              className="msg-act"
             >
               {copyState === "copied" ? (
-                <Check size={12} aria-hidden="true" />
+                <Check size={13} aria-hidden="true" />
               ) : (
-                <CopyIcon size={12} aria-hidden="true" />
+                <CopyIcon size={13} aria-hidden="true" />
               )}
               <span>{copyState === "copied" ? "Copied" : "Copy"}</span>
             </button>
@@ -348,15 +557,9 @@ export const ChatMessage = memo(function ChatMessage({
               type="button"
               onClick={() => onQuote(message.content)}
               aria-label="Quote message"
-              className="
-                inline-flex items-center gap-1 px-3 py-2 rounded-md
-                type-caption-1 text-label-tertiary
-                hover:text-label-primary hover:bg-surface-secondary
-                focus:outline-none focus:ring-2 focus:ring-accent/40
-                transition-colors
-              "
+              className="msg-act"
             >
-              <QuoteIcon size={12} aria-hidden="true" />
+              <QuoteIcon size={13} aria-hidden="true" />
               <span>Quote</span>
             </button>
           ) : null}
@@ -365,17 +568,51 @@ export const ChatMessage = memo(function ChatMessage({
               type="button"
               onClick={() => onRegenerate(message.id)}
               aria-label="Regenerate response"
-              className="
-                inline-flex items-center gap-1 px-3 py-2 rounded-md
-                type-caption-1 text-label-tertiary
-                hover:text-label-primary hover:bg-surface-secondary
-                focus:outline-none focus:ring-2 focus:ring-accent/40
-                transition-colors
-              "
+              className="msg-act"
             >
-              <RotateCcw size={12} aria-hidden="true" />
-              <span>Regenerate</span>
+              <RotateCcw size={13} aria-hidden="true" />
+              <span>Retry</span>
             </button>
+          ) : null}
+          {onFeedback ? (
+            <>
+              <button
+                type="button"
+                onClick={() =>
+                  onFeedback(
+                    message.id,
+                    message.feedback === "up" ? null : "up",
+                  )
+                }
+                aria-label="Good response"
+                aria-pressed={message.feedback === "up"}
+                className={`msg-act ${message.feedback === "up" ? "is-on" : ""}`}
+              >
+                <ThumbsUp
+                  size={13}
+                  aria-hidden="true"
+                  fill={message.feedback === "up" ? "currentColor" : "none"}
+                />
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  onFeedback(
+                    message.id,
+                    message.feedback === "down" ? null : "down",
+                  )
+                }
+                aria-label="Bad response"
+                aria-pressed={message.feedback === "down"}
+                className={`msg-act ${message.feedback === "down" ? "text-system-red" : ""}`}
+              >
+                <ThumbsDown
+                  size={13}
+                  aria-hidden="true"
+                  fill={message.feedback === "down" ? "currentColor" : "none"}
+                />
+              </button>
+            </>
           ) : null}
         </div>
       ) : null}

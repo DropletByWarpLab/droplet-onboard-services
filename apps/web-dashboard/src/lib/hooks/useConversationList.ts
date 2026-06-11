@@ -11,6 +11,7 @@ import {
   renameConversation,
   deleteConversation,
   fetchConversation,
+  setConversationProject,
   type ConversationSummary,
 } from "@/lib/api";
 import {
@@ -30,12 +31,27 @@ export function useConversationList(): {
   isLoading: boolean;
   error: string | null;
   loadMore: () => Promise<void>;
+  /** WARP-844 — current search needle ("" = no filter). */
+  search: string;
+  setSearch: (q: string) => void;
   optimisticInsert: (item: ConversationSummary) => void;
+  /** WARP-845 — append rows not already present (by id). Used by the
+   *  sidebar's fetch-on-expand so a folder shows ALL its chats, not just
+   *  the ones the paginated main window happens to have loaded. */
+  mergeRows: (items: ConversationSummary[]) => void;
   applyTurnCompleted: (id: string) => Promise<void>;
   rename: (id: string, title: string) => Promise<void>;
   remove: (id: string) => Promise<boolean>;
+  /** WARP-845 — move a chat into (or out of, with null) a project.
+   *  Optimistic; reverts on server failure. */
+  moveToProject: (id: string, projectId: string | null) => Promise<void>;
+  /** WARP-845 — local-only mirror of the FK SET NULL after a project is
+   *  deleted server-side: its chats fall back to the date groups without
+   *  a refetch. */
+  clearProjectLocally: (projectId: string) => void;
 } {
   const [flat, setFlat] = useState<ConversationSummary[]>([]);
+  const [search, setSearch] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
@@ -62,12 +78,19 @@ export function useConversationList(): {
     };
   }, []);
 
-  // Initial load
+  // Initial load + refetch-on-search (WARP-844). A search change resets
+  // pagination and replaces the list wholesale; "" restores the
+  // unfiltered first page.
   useEffect(() => {
     let cancelled = false;
+    setIsLoading(true);
     (async () => {
       try {
-        const page = await listConversations({ limit: PAGE_SIZE, offset: 0 });
+        const page = await listConversations({
+          limit: PAGE_SIZE,
+          offset: 0,
+          ...(search ? { q: search } : {}),
+        });
         if (cancelled) return;
         setFlat(page);
         offsetRef.current = page.length;
@@ -82,7 +105,7 @@ export function useConversationList(): {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [search]);
 
   const loadMore = useCallback(async () => {
     if (inFlightRef.current || !hasMore) return;
@@ -91,6 +114,7 @@ export function useConversationList(): {
       const next = await listConversations({
         limit: PAGE_SIZE,
         offset: offsetRef.current,
+        ...(search ? { q: search } : {}),
       });
       if (!isMountedRef.current) return;
       setFlat((prev) => [...prev, ...next]);
@@ -102,13 +126,21 @@ export function useConversationList(): {
     } finally {
       inFlightRef.current = false;
     }
-  }, [hasMore]);
+  }, [hasMore, search]);
 
   const optimisticInsert = useCallback((item: ConversationSummary) => {
     setFlat((prev) => {
       // De-dupe by id (the server may already have raced us with the real row).
       const without = prev.filter((c) => c.id !== item.id);
       return [item, ...without];
+    });
+  }, []);
+
+  const mergeRows = useCallback((items: ConversationSummary[]) => {
+    setFlat((prev) => {
+      const known = new Set(prev.map((c) => c.id));
+      const fresh = items.filter((c) => !known.has(c.id));
+      return fresh.length === 0 ? prev : [...prev, ...fresh];
     });
   }, []);
 
@@ -127,6 +159,31 @@ export function useConversationList(): {
         }
         return { ...c, title: detail.title, updatedAt: detail.updatedAt };
       }),
+    );
+  }, []);
+
+  const moveToProject = useCallback(
+    async (id: string, projectId: string | null) => {
+      const prev = flatRef.current.find((c) => c.id === id)?.projectId ?? null;
+      setFlat((cur) =>
+        cur.map((c) => (c.id === id ? { ...c, projectId } : c)),
+      );
+      try {
+        await setConversationProject(id, projectId);
+      } catch (err) {
+        if (!isMountedRef.current) return;
+        setFlat((cur) =>
+          cur.map((c) => (c.id === id ? { ...c, projectId: prev } : c)),
+        );
+        setError(translateError(err, "chat"));
+      }
+    },
+    [],
+  );
+
+  const clearProjectLocally = useCallback((projectId: string) => {
+    setFlat((cur) =>
+      cur.map((c) => (c.projectId === projectId ? { ...c, projectId: null } : c)),
     );
   }, []);
 
@@ -172,9 +229,14 @@ export function useConversationList(): {
     isLoading,
     error,
     loadMore,
+    search,
+    setSearch,
     optimisticInsert,
+    mergeRows,
     applyTurnCompleted,
     rename,
     remove,
+    moveToProject,
+    clearProjectLocally,
   };
 }

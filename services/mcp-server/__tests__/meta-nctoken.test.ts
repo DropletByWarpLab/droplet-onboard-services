@@ -64,7 +64,9 @@ describe("MCP _meta.ncToken propagation (stdio)", () => {
     await client.callTool({
       name: "list_files",
       arguments: { path: "/" },
-      _meta: { ncToken: "nct-abc-123" },
+      // TOOLS-03 gated list_files on BOTH ctx.userId and ctx.ncToken,
+      // matching what the orchestrator's agent loop always sends.
+      _meta: { ncToken: "nct-abc-123", userId: "alice" },
     });
 
     expect(captured.authHeader).toBe("nct-abc-123");
@@ -204,7 +206,8 @@ describe("MCP _meta.ncToken propagation (stdio)", () => {
     await client.callTool({
       name: "list_files",
       arguments: { path: "/photos" },
-      _meta: { ncToken: "nct-xyz" },
+      // userId required since TOOLS-03's auth gate (see above).
+      _meta: { ncToken: "nct-xyz", userId: "alice" },
     });
 
     // `path` reached the handler; `ncToken` did NOT reach the args

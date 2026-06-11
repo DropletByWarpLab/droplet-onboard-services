@@ -621,7 +621,15 @@ def test_show_claim_sends_claim_frame_to_firmware(
     claim_frames = [(m, d) for (m, d) in sent if m == "claim"]
     assert claim_frames, f"expected a claim frame; got {sent!r}"
     _, data = claim_frames[0]
-    assert data == {"code": CLAIM_CODE, "setup_url": CLAIM_URL}
+    assert data["code"] == CLAIM_CODE
+    assert data["setup_url"] == CLAIM_URL
+    # Design-handoff redesign: the claim-only frame also carries a
+    # host-encoded scan-to-claim QR matrix (deep-links `<setup_url>?c=<code>`)
+    # — the firmware never encodes on-device (same contract as the Wi-Fi QR).
+    m = data.get("setup_qr_matrix")
+    assert m and len(m) == len(m[0]), (
+        f"claim-only frame must carry the setup deep-link QR matrix; got {data.keys()!r}")
+    assert "wifi_qr_matrix" not in data
 
 
 # --- WARP-819: only non-empty wifi_* keys go on the wire --------------------
@@ -661,12 +669,81 @@ def test_show_claim_includes_nonempty_psk_in_frame(
     assert data["wifi_psk"] == "7gpz4k9m2njq8wxr"
 
 
+def test_show_claim_wifi_frame_carries_one_matrix_only(
+    sim_display: TFTDisplay, monkeypatch: pytest.MonkeyPatch
+):
+    # With a Wi-Fi block the join-QR takes the card; the setup matrix must be
+    # OMITTED from the frame so the firmware never holds two QR matrices on
+    # its ~165 KB heap (WARP-638 posture).
+    sent = _spy_pyportal_send(sim_display, monkeypatch)
+    sim_display.show_claim(CLAIM_CODE, CLAIM_URL, wifi_ssid="Droplet",
+                           wifi_psk="7gpz4k9m2njq8wxr",
+                           wifi_qr_matrix=_CLAIM_MATRIX)
+    data = [d for (m, d) in sent if m == "claim"][0]
+    assert data["wifi_qr_matrix"] == _CLAIM_MATRIX
+    assert "setup_qr_matrix" not in data
+
+
+# --- Unchanged-push dedup + READY/REQUEST_STATE resync -----------------------
+# The orchestrator's screen-qr poller re-pushes the claim screen every poll
+# tick while the box is unclaimed. An identical push must be a no-op (no
+# re-encode, no serial frame — each frame makes the firmware tear down and
+# rebuild the same tree, blanking the panel); a CHANGED push must go through;
+# and the firmware-reload resync (_push_full_state) must re-send the retained
+# claim frame explicitly, because the dedup would swallow the orchestrator's
+# next identical tick.
+
+def test_show_claim_dedups_unchanged_push(
+    sim_display: TFTDisplay, monkeypatch: pytest.MonkeyPatch
+):
+    sent = _spy_pyportal_send(sim_display, monkeypatch)
+    sim_display.show_claim(CLAIM_CODE, CLAIM_URL)
+    sim_display.show_claim(CLAIM_CODE, CLAIM_URL)
+    assert len([1 for (m, _) in sent if m == "claim"]) == 1
+
+
+def test_show_claim_changed_code_sends_again(
+    sim_display: TFTDisplay, monkeypatch: pytest.MonkeyPatch
+):
+    sent = _spy_pyportal_send(sim_display, monkeypatch)
+    sim_display.show_claim(CLAIM_CODE, CLAIM_URL)
+    sim_display.show_claim("DRPL-AB12-CD34", CLAIM_URL)
+    frames = [d for (m, d) in sent if m == "claim"]
+    assert len(frames) == 2
+    assert frames[1]["code"] == "DRPL-AB12-CD34"
+
+
+def test_full_state_resync_resends_claim_when_modal(
+    sim_display: TFTDisplay, monkeypatch: pytest.MonkeyPatch
+):
+    sent = _spy_pyportal_send(sim_display, monkeypatch)
+    sim_display.show_claim(CLAIM_CODE, CLAIM_URL)
+    sim_display._push_full_state()
+    claim_frames = [d for (m, d) in sent if m == "claim"]
+    assert len(claim_frames) == 2
+    assert claim_frames[1]["code"] == CLAIM_CODE
+    # And the carried QR matrix is the retained one, not a re-encode.
+    assert claim_frames[1].get("setup_qr_matrix") == \
+        claim_frames[0].get("setup_qr_matrix")
+
+
+def test_full_state_resync_skips_claim_when_not_modal(
+    sim_display: TFTDisplay, monkeypatch: pytest.MonkeyPatch
+):
+    sent = _spy_pyportal_send(sim_display, monkeypatch)
+    sim_display._push_full_state()
+    assert not [1 for (m, _) in sent if m == "claim"]
+
+
 def test_show_claim_stores_state_for_rerender(sim_display: TFTDisplay):
     # The code + URL must be retained so a live re-render (cycle loop) of the
     # claim screen keeps showing them.
     sim_display.show_claim(CLAIM_CODE, CLAIM_URL)
     assert sim_display._claim_code == CLAIM_CODE
     assert sim_display._claim_setup_url == CLAIM_URL
+    # The derived setup deep-link matrix is retained too, so re-renders keep
+    # painting the same QR the firmware shows.
+    assert sim_display._claim_setup_qr_matrix
 
 
 def test_render_dispatch_routes_claim_mode(sim_display: TFTDisplay):

@@ -505,7 +505,10 @@ describe("ChatMessage", () => {
     // were `px-2 py-1` (~24 px). Bumped to `px-3 py-2` so the height
     // crosses the 32 px floor (≈ 36-40 px depending on icon + label) while
     // preserving the row's visual rhythm under the bubble.
-    it("Copy / Quote / Regenerate use ≥ 32 px hit-target padding (px-3 py-2, WARP-301)", () => {
+    it("actions render as design-handoff msg-act buttons (WARP-855)", () => {
+      // The Ask AI handoff replaces the px-3/py-2 Tailwind buttons with
+      // 26 px-high `.msg-act` pills (chat-indigo.css) — above WCAG
+      // 2.5.8 AA's 24 px minimum, matching the prototype's action row.
       render(
         <ChatMessage
           message={assistantMsg()}
@@ -517,17 +520,16 @@ describe("ChatMessage", () => {
       );
       for (const name of [/copy message/i, /quote message/i, /regenerate response/i]) {
         const btn = screen.getByRole("button", { name });
-        expect(btn.className).toMatch(/(^|\s)px-3(\s|$)/);
-        expect(btn.className).toMatch(/(^|\s)py-2(\s|$)/);
-        // Regression guard against the old sub-WCAG sizing.
-        expect(btn.className).not.toMatch(/(^|\s)px-2(\s|$)/);
-        expect(btn.className).not.toMatch(/(^|\s)py-1(\s|$)/);
+        expect(btn.className).toMatch(/(^|\s)msg-act(\s|$)/);
       }
     });
 
-    it("toolbar still reveals on focus-within (keyboard reachable)", () => {
-      // Preserve the WARP-295 behavior: opacity-0 default, focus-within
-      // surfaces it. Regression guard while bumping padding.
+    it("toolbar still reveals on hover/focus via the msg-actions contract", () => {
+      // WARP-295's keyboard reachability now lives in chat-indigo.css:
+      // `.msg:focus-within .msg-actions { opacity: 1 }`. jsdom can't
+      // compute external stylesheets, so the structural contract is the
+      // testable surface: the toolbar carries .msg-actions inside a .msg
+      // row (the selector pair that drives the reveal).
       render(
         <ChatMessage
           message={assistantMsg()}
@@ -536,8 +538,8 @@ describe("ChatMessage", () => {
         />,
       );
       const toolbar = screen.getByTestId("message-actions");
-      expect(toolbar.className).toMatch(/focus-within:opacity-100/);
-      expect(toolbar.className).toMatch(/opacity-0/);
+      expect(toolbar.className).toMatch(/(^|\s)msg-actions(\s|$)/);
+      expect(toolbar.closest(".msg")).not.toBeNull();
     });
 
     it("toolbar does NOT add `mt-1` when there are no citations to crowd against", () => {
@@ -603,6 +605,160 @@ describe("ChatMessage", () => {
       const srOnly = container.querySelector(".sr-only");
       expect(srOnly).not.toBeNull();
       expect(srOnly!.textContent).toMatch(/working/i);
+    });
+  });
+
+  describe("thumbs feedback (WARP-844)", () => {
+    it("rates up, and clicking the active thumb clears", () => {
+      const onFeedback = vi.fn();
+      const { rerender } = render(
+        <ChatMessage
+          message={{ id: "a1", role: "assistant", content: "Answer" }}
+          onFeedback={onFeedback}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Good response" }));
+      expect(onFeedback).toHaveBeenCalledWith("a1", "up");
+
+      rerender(
+        <ChatMessage
+          message={{
+            id: "a1",
+            role: "assistant",
+            content: "Answer",
+            feedback: "up",
+          }}
+          onFeedback={onFeedback}
+        />,
+      );
+      expect(
+        screen.getByRole("button", { name: "Good response" }),
+      ).toHaveAttribute("aria-pressed", "true");
+      fireEvent.click(screen.getByRole("button", { name: "Good response" }));
+      expect(onFeedback).toHaveBeenLastCalledWith("a1", null);
+    });
+
+    it("renders no thumbs on user rows", () => {
+      render(
+        <ChatMessage
+          message={{ id: "u1", role: "user", content: "hi" }}
+          onFeedback={vi.fn()}
+        />,
+      );
+      expect(
+        screen.queryByRole("button", { name: "Good response" }),
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  describe("edit & resend (WARP-844)", () => {
+    it("shows an Edit pencil on user rows and submits the edited text", () => {
+      const onEdit = vi.fn();
+      render(
+        <ChatMessage
+          message={{ id: "u1", role: "user", content: "original" }}
+          onEdit={onEdit}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Edit message" }));
+      const box = screen.getByRole("textbox", { name: "Edit message" });
+      fireEvent.change(box, { target: { value: "edited text" } });
+      fireEvent.click(screen.getByRole("button", { name: /save & resend/i }));
+      expect(onEdit).toHaveBeenCalledWith("u1", "edited text");
+    });
+
+    it("cancel restores the bubble without calling onEdit", () => {
+      const onEdit = vi.fn();
+      render(
+        <ChatMessage
+          message={{ id: "u1", role: "user", content: "original" }}
+          onEdit={onEdit}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Edit message" }));
+      fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
+      expect(onEdit).not.toHaveBeenCalled();
+      expect(screen.getByText("original")).toBeInTheDocument();
+    });
+
+    it("renders no pencil when onEdit is withheld or the row is assistant", () => {
+      const { rerender } = render(
+        <ChatMessage message={{ id: "u1", role: "user", content: "x" }} />,
+      );
+      expect(
+        screen.queryByRole("button", { name: "Edit message" }),
+      ).not.toBeInTheDocument();
+      rerender(
+        <ChatMessage
+          message={{ id: "a1", role: "assistant", content: "x" }}
+          onEdit={vi.fn()}
+        />,
+      );
+      expect(
+        screen.queryByRole("button", { name: "Edit message" }),
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  describe("reasoning disclosure (WARP-458)", () => {
+    it("renders a collapsed 'Thought process' disclosure when reasoning is present", () => {
+      render(
+        <ChatMessage
+          message={{
+            id: "asst-r",
+            role: "assistant",
+            content: "Answer.",
+            reasoning: "Step one.\n\nStep two.",
+          }}
+        />,
+      );
+      const toggle = screen.getByRole("button", { name: /thought process/i });
+      expect(toggle).toHaveAttribute("aria-expanded", "false");
+      // Collapsed: the trace text is not in the document yet.
+      expect(screen.queryByText(/Step one\./)).not.toBeInTheDocument();
+
+      fireEvent.click(toggle);
+      expect(toggle).toHaveAttribute("aria-expanded", "true");
+      expect(screen.getByText(/Step one\./)).toBeInTheDocument();
+    });
+
+    it("renders no disclosure when the message has no reasoning", () => {
+      render(
+        <ChatMessage
+          message={{ id: "asst-n", role: "assistant", content: "Hi." }}
+        />,
+      );
+      expect(
+        screen.queryByRole("button", { name: /thought process/i }),
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  describe("code blocks — highlighting + copy (Claude parity)", () => {
+    const CODE_MESSAGE = {
+      id: "asst-code",
+      role: "assistant" as const,
+      content: "```js\nconst x = 1;\n```",
+    };
+
+    it("applies hljs token classes to fenced code blocks", () => {
+      const { container } = render(<ChatMessage message={CODE_MESSAGE} />);
+      // rehype-highlight tokenizes `const` as a keyword.
+      const keyword = container.querySelector(".hljs-keyword");
+      expect(keyword).not.toBeNull();
+      expect(keyword!.textContent).toBe("const");
+    });
+
+    it("renders a copy button on the block that writes the code to the clipboard", async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      Object.assign(navigator, { clipboard: { writeText } });
+
+      render(<ChatMessage message={CODE_MESSAGE} />);
+      const btn = screen.getByRole("button", { name: "Copy code" });
+      fireEvent.click(btn);
+
+      await screen.findByRole("button", { name: "Copied" });
+      expect(writeText).toHaveBeenCalledWith("const x = 1;\n");
     });
   });
 

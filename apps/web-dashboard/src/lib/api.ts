@@ -23,6 +23,7 @@ import type {
   DetectionEvent,
   DeviceInfo,
   DiscoveredCamera,
+  MatterCapabilities,
   MatterDevice,
   MatterDiscoveredDevice,
   MatterGrouped,
@@ -66,6 +67,19 @@ import type {
   DuckDnsStatus,
   ToolCatalogResponse,
 } from "./types";
+import type {
+  EmailAccount,
+  EmailAccountsResponse,
+  EmailFilter,
+  ThreadSummary,
+  ThreadsResponse,
+  ThreadDetail,
+  ThreadAnalysis,
+  DraftRow,
+  CreateDraftInput,
+  PatchDraftInput,
+  SendDraftResult,
+} from "./types-email";
 import { authFetch } from "./auth";
 
 const BASE = "";
@@ -1332,7 +1346,10 @@ export type NetworkOperation = {
   // DASH-07: "unknown" is a distinct, non-success terminal state used when the
   // orchestrator can't account for the operation (404). It must NOT be treated
   // as "applied" — see fetchNetworkOperation.
-  state: "pending" | "applied" | "rolled_back" | "unknown";
+  // "rejected" (routing service) is a neutral no-change terminal state for a 4xx
+  // (auth / validation) — the request was refused before any router change, so
+  // it is neither a success ("applied") nor a reverted change ("rolled_back").
+  state: "pending" | "applied" | "rejected" | "rolled_back" | "unknown";
   startedAt: number;
   finishedAt: number | null;
   reason: string | null;
@@ -2100,8 +2117,28 @@ export async function commissionMatterDevice(pairingCode: string): Promise<{ nod
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Failed to commission device: ${res.status}`);
+    // WARP-851: carry the HTTP status so translateError's status-based
+    // dispatch can map the orchestrator's curated commissioning copy
+    // (e.g. the 502 discovery failure → network-discovery copy) instead
+    // of flattening every failure onto the generic device fallback.
+    const err = new Error(
+      body.error || `Failed to commission device: ${res.status}`,
+    ) as Error & { status?: number };
+    err.status = res.status;
+    throw err;
   }
+  return res.json();
+}
+
+/**
+ * WARP-851: controller capability surface. Lets the wizard and
+ * /devices/add-matter be honest about which commissioning paths work on
+ * this box (no BLE today — devices needing Bluetooth first-time setup
+ * can't pair until WARP-850 lands).
+ */
+export async function fetchMatterCapabilities(): Promise<MatterCapabilities> {
+  const res = await authFetch(`${BASE}/api/matter/capabilities`);
+  if (!res.ok) throw new Error(`Failed to fetch Matter capabilities: ${res.status}`);
   return res.json();
 }
 
@@ -2215,6 +2252,8 @@ export interface PersistedConversation {
   title: string | null;
   model: string | null;
   provider: string | null;
+  /** WARP-844 — persisted caller system prompt, or null/absent. */
+  systemPrompt?: string | null;
   createdAt: string;
   updatedAt: string;
   messages: Array<{
@@ -2244,6 +2283,13 @@ export interface PersistedConversation {
       | null;
     toolCallId: string | null;
     turnId: string | null;
+    /**
+     * WARP-458 — concatenated reasoning trace persisted for this
+     * assistant row, or null/absent when the model produced none.
+     */
+    reasoning?: string | null;
+    /** WARP-844 — thumbs rating, or null when unrated. */
+    feedback?: "up" | "down" | null;
     /**
      * Lifecycle status of the persisted row. The client uses
      * it to drive failureKind on reloaded messages. Optional because
@@ -2277,6 +2323,8 @@ export interface ConversationSummary {
   title: string | null;
   model: string | null;
   provider: string | null;
+  /** WARP-845 — owning project, or null when ungrouped. */
+  projectId?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -2284,11 +2332,17 @@ export interface ConversationSummary {
 export async function listConversations(args: {
   limit: number;
   offset: number;
+  /** WARP-844 — search needle matching the title or any message content. */
+  q?: string;
+  /** WARP-845 — restrict to one project's chats (sidebar folder expand). */
+  projectId?: string;
 }): Promise<ConversationSummary[]> {
   const qs = new URLSearchParams({
     limit: String(args.limit),
     offset: String(args.offset),
   });
+  if (args.q) qs.set("q", args.q);
+  if (args.projectId) qs.set("projectId", args.projectId);
   const res = await authFetch(`${BASE}/api/llm/conversations?${qs}`);
   if (!res.ok) throw new Error(`Failed to list conversations: ${res.status}`);
   const body = (await res.json()) as { conversations: ConversationSummary[] };
@@ -2385,6 +2439,317 @@ export async function uploadBrainFile(
     throw new Error(body.error || `Upload failed: ${res.status}`);
   }
   return res.json();
+}
+
+// --- Voice input (WARP-844) ---
+
+export class SttUnavailable extends Error {
+  constructor() {
+    super("stt-unavailable");
+    this.name = "SttUnavailable";
+  }
+}
+
+/**
+ * Transcribe raw 16-bit LE mono PCM via the orchestrator's Wyoming STT
+ * proxy. Throws SttUnavailable on 503 (whisper sidecar not deployed —
+ * macOS dev or non-linux profile) so the composer can hide the mic.
+ */
+export async function transcribeAudio(
+  pcm: ArrayBuffer,
+  rate: number,
+): Promise<{ text: string }> {
+  const res = await authFetch(`${BASE}/api/stt?rate=${rate}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/octet-stream" },
+    body: pcm,
+  });
+  if (res.status === 503) throw new SttUnavailable();
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Transcription failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+// --- Edit & resend (WARP-844) ---
+
+/**
+ * Truncate a conversation from a message onward (the message itself plus
+ * everything after it). Called before re-sending an edited prompt so the
+ * persisted thread matches the visible one.
+ */
+export async function truncateConversation(
+  conversationId: string,
+  messageId: string,
+): Promise<{ deleted: number }> {
+  const res = await authFetch(
+    `${BASE}/api/llm/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to truncate: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * WARP-844 — set (or clear, with null) the thumbs rating on an assistant
+ * message. On this appliance the signal feeds the admin retrieval-eval
+ * loop rather than any cloud RLHF.
+ */
+export async function setMessageFeedback(
+  conversationId: string,
+  messageId: string,
+  feedback: "up" | "down" | null,
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/llm/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/feedback`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ feedback }),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to save feedback: ${res.status}`);
+  }
+}
+
+// --- Durable memory facts (WARP-461) ---
+
+/** One durable memory fact — workspace-global, injected into the chat
+ *  base prompt and managed via /api/memory/facts. */
+export interface MemoryFact {
+  id: string;
+  category: "Tone" | "Workflow" | "Scope" | "Schedule" | "Other";
+  fact: string;
+  addedBy: string;
+  evidenceChatId: string | null;
+  active: boolean;
+  /** WARP-845 — who the fact is distributed to (minimum-role ladder
+   *  owner > admin > family > guest). */
+  audience: "owner" | "admin" | "family" | "guest";
+  addedAt: string;
+  updatedAt: string;
+}
+
+export async function listMemoryFacts(
+  opts: { category?: MemoryFact["category"]; active?: boolean; limit?: number } = {},
+): Promise<{ facts: MemoryFact[] }> {
+  const params = new URLSearchParams();
+  if (opts.category) params.set("category", opts.category);
+  if (opts.active !== undefined) params.set("active", String(opts.active));
+  if (opts.limit !== undefined) params.set("limit", String(opts.limit));
+  const qs = params.toString();
+  const res = await authFetch(`${BASE}/api/memory/facts${qs ? `?${qs}` : ""}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to load memory: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function createMemoryFact(input: {
+  category: MemoryFact["category"];
+  fact: string;
+  evidenceChatId?: string;
+  audience?: MemoryFact["audience"];
+}): Promise<{ fact: MemoryFact }> {
+  const res = await authFetch(`${BASE}/api/memory/facts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to save fact: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function updateMemoryFact(
+  id: string,
+  patch: {
+    category?: MemoryFact["category"];
+    fact?: string;
+    active?: boolean;
+    audience?: MemoryFact["audience"];
+  },
+): Promise<{ fact: MemoryFact }> {
+  const res = await authFetch(
+    `${BASE}/api/memory/facts/${encodeURIComponent(id)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to update fact: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function deleteMemoryFact(id: string): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/memory/facts/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok && res.status !== 404) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to delete fact: ${res.status}`);
+  }
+}
+
+// --- Chat projects (WARP-845) ---
+
+/** A per-user chat project: a sidebar folder plus a default persona the
+ *  dashboard seeds into new chats started inside it. */
+export interface ChatProject {
+  id: string;
+  name: string;
+  systemPrompt: string | null;
+  chatCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function listChatProjects(): Promise<{ projects: ChatProject[] }> {
+  const res = await authFetch(`${BASE}/api/llm/projects`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to load projects: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function createChatProject(input: {
+  name: string;
+  systemPrompt?: string | null;
+}): Promise<{ project: ChatProject }> {
+  const res = await authFetch(`${BASE}/api/llm/projects`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to create project: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function updateChatProject(
+  id: string,
+  patch: { name?: string; systemPrompt?: string | null },
+): Promise<{ project: ChatProject }> {
+  const res = await authFetch(
+    `${BASE}/api/llm/projects/${encodeURIComponent(id)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to update project: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function deleteChatProject(id: string): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/llm/projects/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok && res.status !== 404) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to delete project: ${res.status}`);
+  }
+}
+
+/** Move a conversation into (or out of, with null) one of the caller's
+ *  projects. Chats survive project deletion server-side (FK SET NULL). */
+export async function setConversationProject(
+  conversationId: string,
+  projectId: string | null,
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/llm/conversations/${encodeURIComponent(conversationId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projectId }),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to move conversation: ${res.status}`);
+  }
+}
+
+// --- Context pins (WARP-460) ---
+
+/** One per-session context pin — injected into the system prompt on
+ *  every turn of the session by the orchestrator (routes/llm.ts). */
+export interface ContextPin {
+  id: string;
+  sessionId: string;
+  kind: "folder" | "file" | "email_thread" | "camera" | "camera_window";
+  ref: string;
+  meta?: Record<string, unknown> | null;
+  addedAt: string;
+}
+
+export async function listContextPins(
+  sessionId: string,
+): Promise<{ pins: ContextPin[] }> {
+  const res = await authFetch(
+    `${BASE}/api/llm/${encodeURIComponent(sessionId)}/pins`,
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to load pins: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function createContextPin(
+  sessionId: string,
+  pin: { kind: ContextPin["kind"]; ref: string; meta?: Record<string, unknown> },
+): Promise<{ pin: ContextPin }> {
+  const res = await authFetch(
+    `${BASE}/api/llm/${encodeURIComponent(sessionId)}/pins`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(pin),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to add pin: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function deleteContextPin(
+  sessionId: string,
+  pinId: string,
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/llm/${encodeURIComponent(sessionId)}/pins/${encodeURIComponent(pinId)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok && res.status !== 404) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to remove pin: ${res.status}`);
+  }
 }
 
 // --- Provider keys ---
@@ -3290,11 +3655,22 @@ export async function searchKnowledge(opts: {
  * an `unavailable` flag so the dashboard tab can render a friendly
  * placeholder rather than an error toast.
  */
-export async function getBrainMemoryItems(): Promise<{
+export async function getBrainMemoryItems(
+  opts: {
+    /** Filter to items uploaded in one chat (BrainMemoryItem.originatingChatId).
+     *  Used to rehydrate the composer's attachment chips on conversation load. */
+    originatingChatId?: string;
+  } = {},
+): Promise<{
   items: BrainMemoryItemInfo[];
   unavailable?: boolean;
 }> {
-  const res = await authFetch(`${BASE}/api/files/brain`);
+  const params = new URLSearchParams();
+  if (opts.originatingChatId) {
+    params.set("originatingChatId", opts.originatingChatId);
+  }
+  const qs = params.toString();
+  const res = await authFetch(`${BASE}/api/files/brain${qs ? `?${qs}` : ""}`);
   if (res.status === 404) {
     return { items: [], unavailable: true };
   }
@@ -3394,13 +3770,20 @@ export interface ResetJob {
 }
 
 export interface ResetStatusResponse {
-  /** The canonical device name the owner must type to confirm. Server-derived. */
-  targetName: string;
+  /**
+   * MASKED hint of the device name (e.g. "d••••••t"). The API deliberately
+   * never returns the verbatim confirm value — the owner types the real name
+   * from Settings → Device information, and the server validates it. (A
+   * verbatim value here let the modal display the exact string to copy/paste,
+   * removing the per-device type-to-confirm friction.) `job.targetName` in
+   * this response is masked with the same rule.
+   */
+  targetHint: string;
   /** The latest reset job, or null on a box that has never been reset. */
   job: ResetJob | null;
 }
 
-/** GET the reset status: the canonical target name to type + the latest job. */
+/** GET the reset status: a masked hint of the target name + the latest job. */
 export async function getResetStatus(): Promise<ResetStatusResponse> {
   const res = await authFetch(`${BASE}/api/system/reset`);
   if (!res.ok) throw new Error(`Failed to load reset status: ${res.status}`);
@@ -3463,4 +3846,147 @@ export async function downloadLogBundle(
     );
   }
   return res.blob();
+}
+
+// --- Email (WARP-837) ---
+//
+// Front-end client for the orchestrator's `/api/email/*` routes (verified
+// against origin/main). Reads follow the file's throw-on-non-2xx convention;
+// the one deliberate exception is `sendDraft`, which maps the server's 451
+// `off_lan_blocked` into a TYPED result rather than throwing, so the UI can
+// render a calm, actionable message instead of a crash (mirrors the 202/429
+// typed-result shape used by `retryFailedContextItem`).
+
+/** List the household's connected mailboxes (RBAC-scoped server-side). */
+export async function fetchEmailAccounts(): Promise<EmailAccount[]> {
+  const res = await authFetch(`${BASE}/api/email/accounts`);
+  if (!res.ok) throw new Error(`Failed to fetch email accounts: ${res.status}`);
+  const body = (await res.json()) as EmailAccountsResponse;
+  return body.accounts ?? [];
+}
+
+/**
+ * List threads in `filter` for an account. The filter is wired into the query
+ * string the route reads; a foreign / missing account returns 404 (the IDOR
+ * guard) which we surface as a throw for the hook's error channel.
+ */
+export async function fetchEmailThreads(
+  accountId: string,
+  filter: EmailFilter,
+): Promise<ThreadSummary[]> {
+  const params = new URLSearchParams({ filter });
+  const res = await authFetch(
+    `${BASE}/api/email/${encodeURIComponent(accountId)}/threads?${params}`,
+  );
+  if (!res.ok) throw new Error(`Failed to fetch threads: ${res.status}`);
+  const body = (await res.json()) as ThreadsResponse;
+  return body.threads ?? [];
+}
+
+/** Fetch a full thread with its messages (ascending receivedAt). */
+export async function fetchEmailThread(
+  accountId: string,
+  threadId: string,
+): Promise<ThreadDetail> {
+  const res = await authFetch(
+    `${BASE}/api/email/${encodeURIComponent(accountId)}/threads/${encodeURIComponent(threadId)}`,
+  );
+  if (!res.ok) throw new Error(`Failed to fetch thread: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Fetch the AI side-panel analysis for a thread. The route answers 503 when the
+ * analysis service isn't wired yet — we throw so SWR's retry kicks in (the
+ * orchestrator comment explicitly chose 503 over 500 for that reason).
+ */
+export async function fetchThreadAnalysis(
+  accountId: string,
+  threadId: string,
+): Promise<ThreadAnalysis> {
+  const res = await authFetch(
+    `${BASE}/api/email/${encodeURIComponent(accountId)}/threads/${encodeURIComponent(threadId)}/analysis`,
+  );
+  if (!res.ok) throw new Error(`Failed to fetch thread analysis: ${res.status}`);
+  return res.json();
+}
+
+/** Create a draft on an account (optionally tied to a thread). Returns 201. */
+export async function createDraft(
+  accountId: string,
+  input: CreateDraftInput,
+): Promise<DraftRow> {
+  const res = await authFetch(
+    `${BASE}/api/email/${encodeURIComponent(accountId)}/drafts`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to create draft: ${res.status}`);
+  }
+  return res.json();
+}
+
+/** Edit a draft. 409 once the draft is no longer in `draft` status. */
+export async function patchDraft(
+  id: string,
+  patch: PatchDraftInput,
+): Promise<DraftRow> {
+  const res = await authFetch(
+    `${BASE}/api/email/drafts/${encodeURIComponent(id)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to update draft: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * The friendly fallback shown if the server's 451 carries no `message`. Mirrors
+ * the off-LAN allowlist vocabulary (FEATURES §8) and points the user at the one
+ * place this is changed — Settings — never this surface.
+ */
+const OFF_LAN_BLOCKED_FALLBACK =
+  "Sending email leaves your Droplet, and outbound email is currently turned off. An admin can enable it in Settings under the off-LAN allowlist.";
+
+/**
+ * Queue a draft for send (owner/admin only, server-enforced). Returns a TYPED
+ * result:
+ *   - 202 → `{ status: "queued", id }`
+ *   - 451 → `{ status: "off_lan_blocked", message, channel }` (NOT a throw) so
+ *           the UI renders an actionable "outbound email is off" message.
+ * Any other non-2xx (404 not found, 409 already dispatched, 5xx) throws.
+ */
+export async function sendDraft(id: string): Promise<SendDraftResult> {
+  const res = await authFetch(
+    `${BASE}/api/email/drafts/${encodeURIComponent(id)}/send`,
+    { method: "POST" },
+  );
+  if (res.status === 451) {
+    const body = (await res.json().catch(() => ({}))) as {
+      message?: string;
+      channel?: string;
+    };
+    return {
+      status: "off_lan_blocked",
+      message: body.message || OFF_LAN_BLOCKED_FALLBACK,
+      channel: body.channel || "outbound_email",
+    };
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to send draft: ${res.status}`);
+  }
+  const body = (await res.json()) as { id: string; status: string };
+  return { status: "queued", id: body.id };
 }

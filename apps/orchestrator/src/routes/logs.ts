@@ -176,10 +176,15 @@ export function createLogsRouter(): Router {
       archive.append(header + body + "\n", { name: safeEntryName(svc.name) });
     }
 
-    // 3) Audit the export on the signed chain (AC4). Best-effort — recordActivity
-    //    swallows its own failures; we never block/fail the download on it. We
-    //    record the metadata (who, window, service count) — NEVER the log bytes.
-    await recordActivity({
+    // 3) Finalize FIRST — the download must never wait on the audit write
+    //    (a slow DB would stall the zip stream without an EOF).
+    await archive.finalize();
+
+    // 4) Audit the export on the signed chain (AC4). Best-effort + detached —
+    //    recordActivity swallows its own failures and we never block/fail the
+    //    download on it. We record the metadata (who, window, service count)
+    //    — NEVER the log bytes.
+    void recordActivity({
       kind: "system",
       severity: "info",
       sourceIcon: "download",
@@ -194,9 +199,10 @@ export function createLogsRouter(): Router {
         truncated: bundle.truncated,
         ...(service ? { service } : {}),
       },
+    }).catch(() => {
+      // recordActivity already swallows its own failures; this guard only
+      // exists so a detached rejection can never become an unhandled one.
     });
-
-    await archive.finalize();
   });
 
   return router;

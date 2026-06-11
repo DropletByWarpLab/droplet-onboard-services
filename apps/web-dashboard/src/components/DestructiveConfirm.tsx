@@ -35,8 +35,26 @@ export interface DestructiveConfirmProps {
   title: string;
   /** Blunt, plain-language statement of what will be lost. Sentence case. */
   consequence: ReactNode;
-  /** The exact phrase the owner must type to clear the friction step. */
-  confirmPhrase: string;
+  /**
+   * The exact phrase the owner must type to clear the friction step. When the
+   * expected value is only known SERVER-side (e.g. the factory-reset device
+   * name — the API intentionally returns it only as a masked hint so the
+   * modal can't offer a copy/paste-able confirm value), omit this and supply
+   * `confirmPrompt` (+ optionally `confirmHint`): the input then gates on
+   * "non-empty" and the server verdict is the authority — a mismatch comes
+   * back as a thrown error from `onConfirm` and is surfaced for retry.
+   */
+  confirmPhrase?: string;
+  /**
+   * What to type, described in words, for the server-validated mode (e.g.
+   * "your device's name"). Ignored when `confirmPhrase` is set.
+   */
+  confirmPrompt?: ReactNode;
+  /**
+   * Masked orientation hint shown next to the prompt in the server-validated
+   * mode (e.g. "d••••••t"). Ignored when `confirmPhrase` is set.
+   */
+  confirmHint?: string;
   /** Label for the destructive button (e.g. "Factory reset"). */
   confirmLabel: string;
   /** Copy shown on the destructive button while the action is in flight. */
@@ -44,10 +62,12 @@ export interface DestructiveConfirmProps {
   /** A short summary of the target being acted on (e.g. the device name). */
   targetSummary?: ReactNode;
   /**
-   * Run the destructive action. Resolve to let the caller close/redirect;
-   * reject (throw) to keep the modal open and surface the error for retry.
+   * Run the destructive action; receives the typed (trimmed) confirm value so
+   * server-validated callers can forward it. Resolve to let the caller
+   * close/redirect; reject (throw) to keep the modal open and surface the
+   * error for retry.
    */
-  onConfirm: () => Promise<void> | void;
+  onConfirm: (typed: string) => Promise<void> | void;
   /** Cancel — the default action (Escape, backdrop, Cancel button). */
   onCancel: () => void;
   /** Element that opened the modal — focus returns here on close. */
@@ -59,6 +79,8 @@ export function DestructiveConfirm({
   title,
   consequence,
   confirmPhrase,
+  confirmPrompt,
+  confirmHint,
   confirmLabel,
   busyLabel = "Resetting…",
   targetSummary,
@@ -76,7 +98,12 @@ export function DestructiveConfirm({
   // least-effort one (a stray Enter cancels, never confirms).
   const cancelRef = useRef<HTMLButtonElement | null>(null);
 
-  const phraseMatches = typed.trim() === confirmPhrase.trim() && confirmPhrase.length > 0;
+  // Server-validated mode: the exact phrase is deliberately unknown here, so
+  // the local gate is "typed something" and the server is the authority.
+  const serverValidated = confirmPhrase === undefined;
+  const phraseMatches = serverValidated
+    ? typed.trim().length > 0
+    : typed.trim() === confirmPhrase.trim() && confirmPhrase.length > 0;
   const canConfirm = phraseMatches && !busy;
 
   const handleConfirm = useCallback(async () => {
@@ -84,7 +111,7 @@ export function DestructiveConfirm({
     setError(null);
     setBusy(true);
     try {
-      await onConfirm();
+      await onConfirm(typed.trim());
       // Leave `busy` true on success: the caller is expected to close/redirect
       // (a factory reset tears the page down), and we never want the button to
       // re-enable for a second fire in the window before that happens.
@@ -96,7 +123,7 @@ export function DestructiveConfirm({
       );
       setBusy(false);
     }
-  }, [canConfirm, onConfirm]);
+  }, [canConfirm, onConfirm, typed]);
 
   const handleCancel = useCallback(() => {
     if (busy) return; // can't bail out mid-flight
@@ -146,7 +173,19 @@ export function DestructiveConfirm({
         <div className="mt-5">
           <label htmlFor={inputId} className="type-caption-1 text-label-secondary px-0.5">
             Type{" "}
-            <span className="font-mono text-label-primary">{confirmPhrase}</span>{" "}
+            {serverValidated ? (
+              <>
+                {confirmPrompt ?? "the confirmation phrase"}
+                {confirmHint ? (
+                  <>
+                    {" "}
+                    (<span className="font-mono text-label-primary">{confirmHint}</span>)
+                  </>
+                ) : null}
+              </>
+            ) : (
+              <span className="font-mono text-label-primary">{confirmPhrase}</span>
+            )}{" "}
             to confirm
           </label>
           <input
@@ -162,7 +201,7 @@ export function DestructiveConfirm({
             spellCheck={false}
             aria-invalid={typed.length > 0 && !phraseMatches}
             className="dp-input mt-1.5 font-mono disabled:opacity-60"
-            placeholder={confirmPhrase}
+            placeholder={serverValidated ? confirmHint : confirmPhrase}
           />
         </div>
 

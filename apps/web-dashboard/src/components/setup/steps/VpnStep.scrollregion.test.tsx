@@ -57,7 +57,7 @@ describe("VpnStep returning list in ScrollRegion (WARP-820)", () => {
       <VpnStep
         onComplete={() => {}}
         onSkip={() => {}}
-        onBackToInternet={() => {}}
+        onBackToAddress={() => {}}
       />,
     );
 

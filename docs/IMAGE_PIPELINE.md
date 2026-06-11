@@ -156,6 +156,15 @@ passwords, TLS) are generated **at first boot** by
 [`scripts/lib/secrets.sh`](../scripts/lib/secrets.sh), exactly as on a `setup.sh`
 install today.
 
+Privilege follows the same window: the seed's `NOPASSWD` drop-in
+(`/etc/sudoers.d/droplet-firstboot`) exists only so the unattended
+`droplet-firstboot` unit can run `setup.sh`, and the unit's `ExecStartPost`
+deletes it once provisioning succeeds. After that, `droplet`'s sudo is
+password-gated; unattended privileged paths use the device-bridge's
+polkit-routed root units, never sudo. `tests/image-pipeline.test.sh` §(e)
+asserts the grant is written, removed after the `.firstboot-done` marker, and
+that no other `NOPASSWD` grant sneaks into the seed.
+
 ## `flash` safety guard (ADR-019)
 
 Writing an OS image to a block device is as destructive as `mdadm --create`, so

@@ -25,6 +25,37 @@ AP_PSK_FILE="${AP_PSK_FILE:-/etc/droplet/ap-psk}"
 # resolved PSK into it so the pairing QR/text the bridge renders ALWAYS equals
 # the PSK hostapd actually serves (WARP-819 coherence AC). Overridable for tests.
 DEVICE_BRIDGE_ENV_FILE="${DEVICE_BRIDGE_ENV_FILE:-/etc/droplet/device-bridge.env}"
+
+# >>> customer_ap_creds (WARP-808 follow-up)
+# The setup wizard's Wi-Fi write lands in the device-bridge's StateDirectory
+# (droplet-set-hostapd.sh writes it there — the bridge sandbox can't touch
+# root-owned /etc/default). Parse ONLY the two AP keys out of that
+# droplet-owned file instead of EnvironmentFile-ing it into this root unit:
+#   - a file an unprivileged account can write must never inject arbitrary
+#     env into a root process (defense-in-depth — PR #551 review), and
+#   - systemd EnvironmentFile ordering is fragile under drop-ins (the
+#     pre-existing override.conf re-loads /etc/default LAST, which silently
+#     clobbered the customer's values — the PR #551 review blocker).
+# Customer creds, when present and valid, win over the /etc/default
+# provisioning defaults; resolve_ap_psk() then treats the customer PSK as an
+# explicit real value, keeps it, and mirrors it to the pairing QR. Re-validated
+# here with the same bounds droplet-set-hostapd.sh enforces (SSID 1-32,
+# PSK 8-63, no control characters) because root must not trust the file.
+CUSTOMER_AP_ENV="${DROPLET_CUSTOMER_AP_ENV:-/var/lib/droplet-bridge/openwrt-attach.env}"
+if [ -f "$CUSTOMER_AP_ENV" ]; then
+  c_ssid="$(grep -m1 '^DROPLET_AP_SSID=' "$CUSTOMER_AP_ENV" 2>/dev/null | cut -d= -f2- | tr -d '\r\n')"
+  c_psk="$(grep -m1 '^DROPLET_AP_PSK=' "$CUSTOMER_AP_ENV" 2>/dev/null | cut -d= -f2- | tr -d '\r\n')"
+  case "$c_ssid" in *[[:cntrl:]]*) c_ssid="";; esac
+  case "$c_psk"  in *[[:cntrl:]]*) c_psk="";;  esac
+  if [ -n "$c_ssid" ] && [ "${#c_ssid}" -le 32 ]; then
+    AP_SSID="$c_ssid"
+  fi
+  if [ -n "$c_psk" ] && [ "${#c_psk}" -ge 8 ] && [ "${#c_psk}" -le 63 ]; then
+    AP_PSK="$c_psk"
+  fi
+fi
+# <<< customer_ap_creds
+
 # Which wireless phy to move into the container netns, and what interface name
 # it surfaces with. These are AUTO-DETECTED below (detect_ap_radio) so the
 # attach works on whatever Wi-Fi card the box actually ships — the MT7922
@@ -695,6 +726,17 @@ ETHWD
   # while everything else passes through to the real internet.
   nft add rule ip nat prerouting iifname \"$AP_IFACE\" ip daddr 192.168.20.1 tcp dport 443 dnat to ${GATEWAY_IP}:443
   nft add rule ip nat prerouting iifname \"$AP_IFACE\" ip daddr 192.168.20.1 tcp dport 80  dnat to ${GATEWAY_IP}:80
+  # WireGuard remote-access clients land on the same dashboard. Their peer
+  # .conf (apps/orchestrator/src/services/vpn.service.ts) advertises
+  # AllowedIPs = 192.168.20.0/24 + the tunnel subnet and DNS = 192.168.20.1,
+  # so a connected phone's only route to the dashboard is
+  # https://192.168.20.1 — which arrives on wg0, not $AP_IFACE. Without
+  # these two mirror rules the AP-scoped DNAT above never matches VPN
+  # ingress and the dashboard is unreachable over the tunnel even with a
+  # healthy handshake (observed on the .87 single-box, 2026-06-10). Same
+  # daddr predicate, same hijack-avoidance rationale.
+  nft add rule ip nat prerouting iifname \"wg0\" ip daddr 192.168.20.1 tcp dport 443 dnat to ${GATEWAY_IP}:443
+  nft add rule ip nat prerouting iifname \"wg0\" ip daddr 192.168.20.1 tcp dport 80  dnat to ${GATEWAY_IP}:80
   # ----------------------------------------------------------------------
 
   # Stop procd dnsmasq so our manual one can bind 192.168.20.1

@@ -61,7 +61,7 @@ import {
   type PtzAction,
 } from "../services/frigate.client.js";
 import { getCameraSystemStatus } from "../services/camera-system.service.js";
-import { Readable } from "node:stream";
+import { pipeUpstreamBody } from "../lib/pipe-upstream.js";
 import { config } from "../config.js";
 import { evaluateNetworkCommand } from "../services/network-safety.service.js";
 import { exportClip, signShareUrl, verifyShareUrl } from "../services/clips.service.js";
@@ -396,8 +396,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       const len = upstream.headers.get("content-length");
       if (len) res.setHeader("Content-Length", len);
       if (upstream.body) {
-        const { Readable } = await import("node:stream");
-        Readable.fromWeb(upstream.body as never).pipe(res);
+        pipeUpstreamBody(upstream.body, res);
       } else {
         res.end();
       }
@@ -611,7 +610,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if (!upstream.body) {
         return res.status(502).json({ error: "Frigate returned no body" });
       }
-      Readable.fromWeb(upstream.body as never).pipe(res);
+      pipeUpstreamBody(upstream.body, res);
     } catch (err) {
       // Birdseye is optional — Frigate returns 404 if no camera is
       // configured for birdseye output. Surface that as a clean 404
@@ -750,6 +749,10 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
           lastSeen: new Date(),
         },
       });
+
+      // #11: same best-effort prune as accept/reject/delete — without it an
+      // add-only operator keeps stale orphaned Frigate entries forever.
+      await reconcileFrigateCameras();
 
       res.json({ status: "ok", camera: name });
     } catch (err) {
@@ -1005,7 +1008,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       const len = upstream.headers.get("content-length");
       if (len) res.setHeader("Content-Length", len);
       if (upstream.body) {
-        Readable.fromWeb(upstream.body as never).pipe(res);
+        pipeUpstreamBody(upstream.body, res);
       } else {
         res.end();
       }
@@ -1465,7 +1468,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if (!frigateResp.body) {
         return res.status(502).json({ error: "Frigate returned no body" });
       }
-      Readable.fromWeb(frigateResp.body as never).pipe(res);
+      pipeUpstreamBody(frigateResp.body, res);
     } catch (err) {
       next(err);
     }
@@ -1764,7 +1767,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if (len) res.setHeader("Content-Length", len);
       res.setHeader("Cache-Control", "private, max-age=300");
       if (upstream.body) {
-        Readable.fromWeb(upstream.body as never).pipe(res);
+        pipeUpstreamBody(upstream.body, res);
       } else {
         res.end();
       }
@@ -1893,7 +1896,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       // tuple — long cache keeps repeat scrubs cheap.
       res.setHeader("Cache-Control", "private, max-age=3600");
       if (upstream.body) {
-        Readable.fromWeb(upstream.body as never).pipe(res);
+        pipeUpstreamBody(upstream.body, res);
       } else {
         res.end();
       }
@@ -2355,8 +2358,7 @@ export function createCameraSharePublicRouter(): Router {
 
       res.setHeader("Content-Type", "video/mp4");
       res.setHeader("Content-Disposition", `inline; filename="${req.params.filename.replace(/[^a-zA-Z0-9._-]/g, "_")}"`);
-      const { Readable } = await import("node:stream");
-      Readable.fromWeb(stream as never).pipe(res);
+      pipeUpstreamBody(stream, res);
     } catch (err) {
       next(err);
     }

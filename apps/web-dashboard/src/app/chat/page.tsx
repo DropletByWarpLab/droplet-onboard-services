@@ -3,12 +3,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDown,
-  MessageSquare,
   PanelLeftOpen,
   Pencil,
   RotateCcw,
   Settings2,
   ShieldCheck,
+  Sparkles,
   Wrench,
   X,
 } from "lucide-react";
@@ -18,6 +18,8 @@ import { ChatInput, type ChatInputHandle } from "@/components/ChatInput";
 import { ModelSelector } from "@/components/ModelSelector";
 import { SessionHeader } from "@/components/chat/SessionHeader";
 import { ChatHistoryPanel, type ChatHistoryPanelHandle } from "@/components/chat/ChatHistoryPanel";
+import { ContextPinsPopover } from "@/components/chat/ContextPinsPopover";
+import { MemoryPanel } from "@/components/chat/MemoryPanel";
 import { Dialog } from "@/components/Dialog";
 import { useChat } from "@/lib/hooks/useChat";
 import { useModels } from "@/lib/hooks/useModels";
@@ -29,6 +31,11 @@ import {
   type PendingComposerPayload,
   type ToolCatalogEntry,
 } from "@/lib/types";
+import type { ChatProject } from "@/lib/api";
+// WARP-855 — Ask AI indigo re-skin (Claude Design handoff). Tokens are the
+// shared shell set; chat-indigo.css carries the chat-specific surface.
+import "@/components/shell/indigo-tokens.css";
+import "@/components/chat/chat-indigo.css";
 
 export default function ChatPage() {
   // WARP-331: history panel imperative handle + mobile drawer state.
@@ -50,6 +57,19 @@ export default function ChatPage() {
   // page when `user` is set, but passing it explicitly keeps the gate
   // correct if that ever changes and mirrors NotificationToaster.
   const { user } = useAuth();
+  // Model persisted on a just-loaded conversation, pending application to
+  // the picker. Held in state (not applied inline) because the models list
+  // may still be fetching on a cold deep-link — the effect below applies
+  // it once both sides are ready, then clears.
+  const [pendingRestoredModel, setPendingRestoredModel] = useState<string | null>(null);
+  // WARP-845 — the project the NEXT new chat is filed under (set by the
+  // sidebar's per-project "+"). Ref-mirrored so the URL-clear reset
+  // effect can seed the project persona without dep churn.
+  const [activeProject, setActiveProject] = useState<ChatProject | null>(null);
+  const activeProjectRef = useRef<ChatProject | null>(null);
+  useEffect(() => {
+    activeProjectRef.current = activeProject;
+  }, [activeProject]);
   const {
     messages,
     isStreaming,
@@ -57,16 +77,29 @@ export default function ChatPage() {
     stop,
     retryMessage,
     regenerate,
+    editMessage,
+    rateMessage,
     approveScene,
     clearMessages,
     attachments,
+    sessionAttachments,
     attach,
     removeAttachment,
     clearAttachments,
     conversationId,
     loadConversation,
     messagesEpoch,
-  } = useChat({ chatId, historyHandleRef, authReady: Boolean(user) });
+  } = useChat({
+    chatId,
+    historyHandleRef,
+    authReady: Boolean(user),
+    projectId: activeProject?.id ?? null,
+    onConversationLoaded: ({ model, systemPrompt: persistedPrompt }) => {
+      if (model) setPendingRestoredModel(model);
+      // WARP-844 — restore the persona this conversation is held under.
+      setSystemPrompt(persistedPrompt ?? "");
+    },
+  });
 
   // WARP-304 + WARP-331: keep the URL hash and the live conversationId in
   // sync, both directions. The history panel calls router.push("/chat?c=X")
@@ -88,6 +121,9 @@ export default function ChatPage() {
   useEffect(() => {
     if (urlConversationId) {
       if (urlConversationId === conversationId) return; // already loaded
+      // An existing conversation belongs to whatever project it's already
+      // in — the pending new-chat project no longer applies.
+      setActiveProject(null);
       void loadConversation(urlConversationId).then((ok) => {
         if (!ok && typeof window !== "undefined") {
           // Stale or revoked id — strip from URL so we don't keep
@@ -102,6 +138,9 @@ export default function ChatPage() {
       // doesn't keep showing the messages of a now-orphaned id.
       clearMessages();
       clearAttachments();
+      // WARP-845: a project-scoped new chat seeds the project's persona;
+      // a plain new chat starts blank.
+      setSystemPrompt(activeProjectRef.current?.systemPrompt ?? "");
       setChatId(`chat-${Date.now()}`);
     }
     // Intentionally only depend on urlConversationId. Including
@@ -155,6 +194,19 @@ export default function ChatPage() {
       setSelectedModel(local?.id ?? models[0].id);
     }
   }, [models, selectedModel]);
+
+  // Restore the model a loaded conversation was held in — but only when
+  // that model is still available on the gateway (an old chat may name a
+  // model that's since been removed; keep the current selection then).
+  // One-shot per load: clear pending either way so a later manual model
+  // switch isn't overridden when the models list refetches.
+  useEffect(() => {
+    if (!pendingRestoredModel || models.length === 0) return;
+    if (models.some((m) => m.id === pendingRestoredModel)) {
+      setSelectedModel(pendingRestoredModel);
+    }
+    setPendingRestoredModel(null);
+  }, [pendingRestoredModel, models]);
 
   // If the home-page hero handed off a prompt, send it once a model is ready.
   //
@@ -258,8 +310,10 @@ export default function ChatPage() {
   );
 
   const handleNewChat = useCallback(() => {
+    setActiveProject(null);
     clearMessages();
     clearAttachments();
+    setSystemPrompt("");
     setChatId(`chat-${Date.now()}`);
   }, [clearMessages, clearAttachments]);
 
@@ -273,8 +327,26 @@ export default function ChatPage() {
   );
   const handleNewChatFromPanel = useCallback(() => {
     setMobileHistoryOpen(false);
+    setActiveProject(null);
+    // Clear the draft persona synchronously: when no conversation is
+    // loaded, router.push("/chat") is a URL no-op and the ?c effect
+    // never fires — without this a just-seeded project persona would
+    // silently ride into a plain "New chat".
+    setSystemPrompt("");
     router.push("/chat");
   }, [router]);
+
+  // WARP-845 — start a new chat filed under a project: seed the project's
+  // persona and send projectId on the first turn.
+  const handleNewChatInProject = useCallback(
+    (project: ChatProject) => {
+      setMobileHistoryOpen(false);
+      setActiveProject(project);
+      setSystemPrompt(project.systemPrompt ?? "");
+      router.push("/chat");
+    },
+    [router],
+  );
 
   const handleRetry = useCallback(
     (messageId: string) => {
@@ -330,6 +402,16 @@ export default function ChatPage() {
     [regenerate, selectedModel, systemPrompt],
   );
 
+  // WARP-844: edit & resend. Withheld while a stream is in flight (the
+  // ChatMessage pencil is gated on the prop being present).
+  const handleEdit = useCallback(
+    (messageId: string, newContent: string) => {
+      if (!selectedModel) return;
+      void editMessage(messageId, newContent, selectedModel, systemPrompt || undefined);
+    },
+    [editMessage, selectedModel, systemPrompt],
+  );
+
   // Index of the last assistant message — the page passes
   // `isLastAssistant` to each ChatMessage so the Regenerate button
   // only surfaces on that one row.
@@ -340,6 +422,20 @@ export default function ChatPage() {
     return -1;
   }, [messages]);
 
+  // WARP-855 — design-handoff header: conversation title (first user
+  // message, clamped) or "New chat", plus the "local · on-device" privacy
+  // tag whenever the selected model runs on the box (ollama provider).
+  const headerTitle = useMemo(() => {
+    const first = messages.find((m) => m.role === "user")?.content.trim();
+    if (!first) return "New chat";
+    const flat = first.replace(/\s+/g, " ");
+    return flat.length > 64 ? `${flat.slice(0, 63)}…` : flat;
+  }, [messages]);
+  const isLocalModel = useMemo(
+    () => models.find((m) => m.id === selectedModel)?.provider === "ollama",
+    [models, selectedModel],
+  );
+
   return (
     // Mobile: subtract the bottom-nav height (56px + safe-area) so the input
     // pins just above the tab bar with no gap. Matches AuthGate main's padding.
@@ -347,82 +443,89 @@ export default function ChatPage() {
     // dvh (not vh) absorbs iOS Safari's collapsing URL bar.
     // overflow-x-hidden: guard against horizontal overflow on narrow phones.
     // Underscores inside calc() are Tailwind's whitespace marker (CSS spec requires spaces around -).
-    <div className="flex h-[calc(100dvh_-_56px_-_env(safe-area-inset-bottom))] lg:h-dvh overflow-x-hidden">
-      {/* WARP-331: desktop chat history panel — fixed 280px left column on lg+. */}
-      <aside
-        className="hidden lg:flex lg:flex-col lg:w-[280px] lg:flex-shrink-0 border-r border-separator bg-surface-secondary"
-        aria-label="Chat history"
-      >
+    <div className="droplet-shell chat-app h-[calc(100dvh_-_56px_-_env(safe-area-inset-bottom))] lg:h-dvh overflow-x-hidden">
+      {/* WARP-331: desktop chat history panel — the design's conversation
+          rail (276px, glass) between the app sidebar and the chat column. */}
+      <aside className="conv-rail hidden lg:flex" aria-label="Chat history">
         <ChatHistoryPanel
           activeConversationId={conversationId}
           onSelect={handleSelectConversation}
           onNewChat={handleNewChatFromPanel}
+          onNewChatInProject={handleNewChatInProject}
           handleRef={historyHandleRef}
         />
       </aside>
 
       {/* Main chat area */}
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="chat-main">
         {/* Header */}
-        <header className="flex items-center justify-between px-4 h-14 border-b border-separator bg-[var(--color-toolbar-bg)] dp-material">
-          <div className="flex items-center gap-2 min-w-0 flex-1">
-            {/* WARP-331: mobile-only history-drawer trigger. */}
-            <button
-              ref={historyTriggerRef}
-              type="button"
-              onClick={() => setMobileHistoryOpen(true)}
-              aria-label="Open chat history"
-              aria-haspopup="dialog"
-              aria-expanded={mobileHistoryOpen}
-              className="lg:hidden p-1.5 rounded-sm text-label-tertiary hover:text-label-primary hover:bg-surface-secondary transition-colors"
-              title="Chat history"
-            >
-              <PanelLeftOpen size={18} aria-hidden="true" />
-            </button>
-            <ModelSelector value={selectedModel} onChange={setSelectedModel} />
+        <header className="chat-head">
+          {/* WARP-331: mobile-only history-drawer trigger. */}
+          <button
+            ref={historyTriggerRef}
+            type="button"
+            onClick={() => setMobileHistoryOpen(true)}
+            aria-label="Open chat history"
+            aria-haspopup="dialog"
+            aria-expanded={mobileHistoryOpen}
+            className="chat-iconbtn lg:hidden"
+            title="Chat history"
+          >
+            <PanelLeftOpen size={18} aria-hidden="true" />
+          </button>
+          <div className="chat-head-title" title={headerTitle}>
+            {headerTitle}
+            {activeProject && !conversationId && (
+              <span
+                className="ml-2 inline-flex items-center h-6 px-2 rounded-full
+                  type-caption-2 font-medium bg-accent-subtle text-accent align-middle"
+                title={`New chat in ${activeProject.name}`}
+              >
+                {activeProject.name}
+              </span>
+            )}
           </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setShowSystemPrompt(!showSystemPrompt)}
-              className={`p-1.5 rounded-sm transition-colors ${
-                systemPrompt
-                  ? "text-accent bg-accent-subtle"
-                  : "text-label-tertiary hover:text-label-primary hover:bg-surface-secondary"
-              }`}
-              title="System prompt"
-              aria-label={
-                showSystemPrompt ? "Hide system prompt" : "Show system prompt"
-              }
-              aria-pressed={showSystemPrompt}
-            >
-              <Settings2 size={16} aria-hidden="true" />
-            </button>
-            <button
-              onClick={handleNewChat}
-              disabled={messages.length === 0}
-              className="flex items-center gap-1.5 type-subheadline text-accent
-                hover:text-accent-hover disabled:text-label-quaternary
-                disabled:cursor-not-allowed transition-colors duration-200 ease-smooth"
-              aria-label="Start a new chat"
-            >
-              <RotateCcw size={14} aria-hidden="true" />
-              <span className="hidden sm:inline">New chat</span>
-            </button>
-          </div>
+          <ModelSelector value={selectedModel} onChange={setSelectedModel} />
+          {isLocalModel && <span className="chat-tag">local · on-device</span>}
+          {/* WARP-461: workspace-global memory — always available. */}
+          <MemoryPanel />
+          {/* WARP-460: pins are per-session — the popover appears once
+              the first turn has minted a conversationId. */}
+          {conversationId && <ContextPinsPopover sessionId={conversationId} />}
+          <button
+            onClick={() => setShowSystemPrompt(!showSystemPrompt)}
+            className={`chat-iconbtn ${systemPrompt ? "is-on" : ""}`}
+            title="System prompt"
+            aria-label={
+              showSystemPrompt ? "Hide system prompt" : "Show system prompt"
+            }
+            aria-pressed={showSystemPrompt}
+          >
+            <Settings2 size={16} aria-hidden="true" />
+          </button>
+          <button
+            onClick={handleNewChat}
+            disabled={messages.length === 0}
+            className="chat-new"
+            aria-label="Start a new chat"
+          >
+            <RotateCcw size={14} aria-hidden="true" />
+            <span>New chat</span>
+          </button>
         </header>
 
         {/* WARP-205: per-chat brain memory export affordance.
             Hidden when no items are attached to this chat — the
             component itself returns null in that case. */}
-        <SessionHeader chatId={chatId} attachments={attachments} />
+        {/* WARP-859 — SessionHeader reflects the whole conversation's
+            attachments (composer chips clear on send). */}
+        <SessionHeader chatId={conversationId ?? chatId} attachments={sessionAttachments} />
 
         {/* System prompt */}
         {showSystemPrompt && (
-          <div className="px-4 py-3 border-b border-separator bg-surface-secondary">
+          <div className="chat-subpanel">
             <div className="flex items-center justify-between mb-1.5">
-              <label className="type-caption-1 text-label-tertiary uppercase tracking-wider">
-                System Prompt
-              </label>
+              <label className="chat-subpanel-label">System prompt</label>
               {systemPrompt && (
                 <button
                   onClick={() => setSystemPrompt("")}
@@ -437,7 +540,6 @@ export default function ChatPage() {
               onChange={(e) => setSystemPrompt(e.target.value)}
               placeholder="e.g. You are a helpful cooking assistant..."
               rows={2}
-              className="dp-input type-footnote resize-none"
             />
           </div>
         )}
@@ -447,30 +549,31 @@ export default function ChatPage() {
           ref={scrollRef}
           onScroll={onScroll}
           data-testid="chat-scroll"
-          className="relative flex-1 overflow-y-auto px-5 py-6 space-y-3 bg-surface-primary"
+          className="chat-scroll relative"
         >
           {messages.length === 0 && (
-            <div className="flex flex-col items-center justify-center h-full text-label-tertiary">
-              <MessageSquare size={40} strokeWidth={1} className="mb-3 text-label-quaternary" />
-              <p className="type-title-3 text-label-secondary mb-1">Start a conversation</p>
-              <p className="type-subheadline mb-6">
+            <div className="chat-empty">
+              <div className="ico" aria-hidden="true">
+                <Sparkles size={26} />
+              </div>
+              <p className="h">Ask Droplet anything</p>
+              <p className="s">
                 {selectedModel
-                  ? "Ask anything — your Droplet AI is ready."
+                  ? "Your local AI is ready — nothing leaves the device."
                   : "Select a model above to get started."}
               </p>
               {selectedModel && (
-                <div className="flex flex-wrap justify-center gap-2 max-w-md">
+                <div className="chat-suggs">
                   {[
-                    "Summarize a document for me",
-                    "Help me write a script",
-                    "Explain how this device works",
+                    "What's using the most storage?",
+                    "Summarize the files I uploaded today",
+                    "Dim the living-room lights to 30%",
+                    "What joined the network this week?",
                   ].map((prompt) => (
                     <button
                       key={prompt}
                       onClick={() => handleSend(prompt)}
-                      className="px-3.5 py-2 type-footnote bg-surface-tertiary text-label-secondary
-                        rounded-full border border-separator hover:border-accent/40 hover:text-accent
-                        transition-colors"
+                      className="chat-sugg"
                     >
                       {prompt}
                     </button>
@@ -479,21 +582,25 @@ export default function ChatPage() {
               )}
             </div>
           )}
-          {messages.map((msg, idx) => (
-            <ChatMessage
-              key={msg.id}
-              message={msg}
-              isStreaming={
-                isStreaming && idx === messages.length - 1 && msg.role === "assistant"
-              }
-              isLastAssistant={idx === lastAssistantIdx}
-              onRetry={handleRetry}
-              onCopy={handleCopy}
-              onQuote={handleQuote}
-              onRegenerate={handleRegenerate}
-              onApproveScene={approveScene}
-            />
-          ))}
+          <div className="chat-wrap">
+            {messages.map((msg, idx) => (
+              <ChatMessage
+                key={msg.id}
+                message={msg}
+                isStreaming={
+                  isStreaming && idx === messages.length - 1 && msg.role === "assistant"
+                }
+                isLastAssistant={idx === lastAssistantIdx}
+                onRetry={handleRetry}
+                onCopy={handleCopy}
+                onQuote={handleQuote}
+                onRegenerate={handleRegenerate}
+                onApproveScene={approveScene}
+                onEdit={isStreaming ? undefined : handleEdit}
+                onFeedback={(id, fb) => void rateMessage(id, fb)}
+              />
+            ))}
+          </div>
         </div>
         {/* WARP-295: Jump-to-latest pill — visible only when the user
             scrolled up off the live tail. Sits absolutely above the
@@ -602,6 +709,7 @@ export default function ChatPage() {
             activeConversationId={conversationId}
             onSelect={handleSelectConversation}
             onNewChat={handleNewChatFromPanel}
+          onNewChatInProject={handleNewChatInProject}
           />
         </div>
       </Dialog>

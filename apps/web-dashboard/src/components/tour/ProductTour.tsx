@@ -3,86 +3,280 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { motion, useReducedMotion } from "framer-motion";
-import { ArrowLeft, ArrowRight, Cpu, FolderOpen, Globe, Video } from "lucide-react";
+import {
+  ArrowLeft,
+  ArrowRight,
+  Camera,
+  Check,
+  Cpu,
+  Folder,
+  FolderOpen,
+  Globe,
+  Smartphone,
+  Sparkles,
+  Video,
+  Wifi,
+  HardDrive,
+  Lightbulb,
+  ShieldCheck,
+  User,
+} from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { DropletMark } from "@/components/DropletMark";
 
 /**
  * Each step renders its own glyph. A render function (rather than a bare
  * component type) lets a Lucide icon and the bespoke DropletMark coexist
- * without forcing one into the other's prop contract — Lucide's `size` is
- * `string | number`, DropletMark's is `number`, so a shared component type
- * would need a cast. The 26px size lives here at the single call site.
+ * without forcing one into the other's prop contract.
  */
 type StepGlyph = (className: string) => ReactNode;
 
 /**
- * Post-setup product tour (PR #382). A focused, full-screen guided
- * walkthrough shown exactly once after the owner finishes the first-run
- * wizard — AuthGate routes a claimed-but-tour-pending owner here, and on
- * finish/skip we persist `userTourCompleted` (via the auth context's
- * completeTour → PATCH /api/setup/state) so the dashboard takes over and the
- * tour never re-traps.
+ * Post-setup product walkthrough — the Done-step beats (PR #382, restyled for
+ * the Onboarding-Flow redesign). A paced, one-beat-at-a-time recap of what the
+ * owner just set up, shown once after the first-run wizard. AuthGate routes a
+ * claimed-but-tour-pending owner here; on finish/skip we persist
+ * `userTourCompleted` (auth context `completeTour` → PATCH /api/setup/state) so
+ * the dashboard takes over and it never re-traps.
  *
- * Design discipline:
- *   - Tokens only (dp-card / dp-btn-* / type-* / text-label-* /
- *     bg-surface-* / text-accent). No raw hex, no freelance font sizes.
- *   - Offline-first copy, same vocabulary as the wizard + WizardReplay
- *     (ADR-002): files/AI/cameras/remote-access stay on the box; no cloud
- *     or "sync account" language.
- *   - Restrained motion (Emil-Kowalski lens for a home-user surface): a
- *     single short cross-fade/translate per step, fully gated behind
- *     useReducedMotion. No bouncing, no looping, nothing playful.
+ * Onboarding-Flow redesign — each beat now carries an illustrative MOTIF (a
+ * recap of configured surfaces, a files list, an on-device AI exchange, camera
+ * tiles, a remote-access card) so the privacy positioning lands visually, not
+ * just as a paragraph. Mirrors `redesign/OnbWizard.jsx` SetDone. Clickable beat
+ * dots let the owner jump between beats; "Go to dashboard" finishes.
  *
- * Resumability: the active step index is persisted to localStorage so a
- * refresh mid-tour resumes where the owner was, not back at step 1.
+ * Design discipline: tokens only (dp-card / type-* / text-label-* /
+ * bg-surface-* / text-accent / system-* status colors). Offline-first copy
+ * (ADR-002). Restrained motion — a single short cross-fade per beat, fully
+ * gated behind `useReducedMotion`.
+ *
+ * Resumability: the active beat index persists to localStorage so a refresh
+ * mid-walkthrough resumes where the owner was.
  */
 
 export interface TourStep {
   /** Stable key — also drives the localStorage resume + React keys. */
   key: string;
-  /** Renders the step's glyph with the passed token className. */
+  /** Renders the beat's header glyph with the passed token className. */
   glyph: StepGlyph;
+  /** Short uppercase kicker above the title (e.g. "Private AI"). */
+  kicker: string;
   title: string;
   body: string;
+  /** Illustrative motif rendered under the copy. */
+  motif: () => ReactNode;
+}
+
+// ── Beat motifs ────────────────────────────────────────────────────
+// Static, illustrative recaps that make each privacy beat land visually.
+// Token-only; no fixtures, no live data — this is a celebratory recap.
+
+function MotifRecap() {
+  const pills: [typeof User, string][] = [
+    [User, "Account"],
+    [Wifi, "Wi-Fi"],
+    [Globe, "Internet address"],
+    [HardDrive, "Drives"],
+    [Lightbulb, "Smart home"],
+    [Camera, "Cameras"],
+    [ShieldCheck, "Remote access"],
+    [Sparkles, "Private AI"],
+  ];
+  return (
+    <div className="w-full rounded-[14px] border border-separator bg-surface-secondary p-4">
+      <div className="mb-3 flex items-center gap-2">
+        <span className="flex h-5 w-5 flex-none items-center justify-center rounded-full bg-system-green/15 text-system-green">
+          <Check size={12} aria-hidden="true" />
+        </span>
+        <span className="type-caption-1 font-bold text-label-secondary">
+          Everything configured
+        </span>
+        <span className="type-caption-2 ml-auto text-label-tertiary">
+          droplet-rack-1 · online
+        </span>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {pills.map(([Icon, label]) => (
+          <span
+            key={label}
+            className="inline-flex items-center gap-1.5 rounded-full border border-separator bg-surface-primary px-2.5 py-1 type-caption-1 font-semibold text-label-secondary"
+          >
+            <Icon size={13} className="text-accent" aria-hidden="true" />
+            {label}
+            <Check size={12} className="text-system-green" aria-hidden="true" />
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function MotifFiles() {
+  const rows: [string, string][] = [
+    ["Wedding Photos", "482 GB"],
+    ["Camera Footage", "1.2 TB"],
+    ["Client Backups", "96 GB"],
+  ];
+  return (
+    <div className="w-full overflow-hidden rounded-[14px] border border-separator bg-surface-primary text-left">
+      <div className="flex items-center gap-2 border-b border-separator bg-surface-secondary px-3.5 py-2.5">
+        <FolderOpen size={15} className="text-accent" aria-hidden="true" />
+        <span className="type-caption-1 font-semibold text-label-secondary">
+          Files · on this Droplet
+        </span>
+        <span className="ml-auto inline-flex items-center gap-1 rounded-full bg-system-green/15 px-2 py-0.5 type-caption-2 font-semibold text-system-green">
+          local
+        </span>
+      </div>
+      {rows.map(([name, size], i) => (
+        <div
+          key={name}
+          className={`flex items-center gap-3 px-3.5 py-2.5 ${
+            i ? "border-t border-separator" : ""
+          }`}
+        >
+          <Folder size={16} className="text-accent" aria-hidden="true" />
+          <span className="flex-1 type-footnote font-semibold text-label-primary">
+            {name}
+          </span>
+          <span className="type-caption-1 font-mono text-label-tertiary">
+            {size}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function MotifAi() {
+  return (
+    <div className="flex w-full flex-col gap-2.5 rounded-[14px] border border-separator bg-surface-secondary p-4 text-left">
+      <div className="max-w-[78%] self-end rounded-[12px_12px_4px_12px] bg-accent px-3.5 py-2 type-footnote text-on-accent">
+        What can you help me with on this box?
+      </div>
+      <div className="max-w-[85%] self-start rounded-[12px_12px_12px_4px] border border-separator bg-surface-primary px-3.5 py-2">
+        <div className="mb-1 flex items-center gap-1.5">
+          <Sparkles size={12} className="text-accent" aria-hidden="true" />
+          <span className="type-caption-2 font-bold text-label-secondary">
+            On-device model
+          </span>
+          <span className="ml-auto inline-flex items-center gap-1 rounded-full bg-system-green/15 px-1.5 py-0.5 type-caption-2 font-semibold text-system-green">
+            on-device
+          </span>
+        </div>
+        <p className="type-footnote text-label-secondary">
+          Find files, summarize footage, draft emails — and none of it leaves
+          this box.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function MotifCameras() {
+  return (
+    <div className="grid w-full grid-cols-2 gap-3">
+      {["Front door", "Driveway"].map((label) => (
+        <div
+          key={label}
+          className="relative h-[104px] overflow-hidden rounded-[12px] border border-separator bg-label-primary/90"
+        >
+          <span className="absolute inset-0 flex items-center justify-center text-white/15">
+            <Camera size={34} aria-hidden="true" />
+          </span>
+          <div className="absolute left-2.5 top-2.5 flex items-center gap-1.5">
+            <span
+              className="h-1.5 w-1.5 rounded-full bg-system-red"
+              aria-hidden="true"
+            />
+            <span className="type-caption-2 font-bold tracking-[0.08em] text-white">
+              REC
+            </span>
+          </div>
+          <span className="absolute right-2.5 top-2.5 rounded bg-white/20 px-1.5 py-0.5 type-caption-2 font-bold tracking-[0.08em] text-white">
+            LOCAL
+          </span>
+          <span className="absolute bottom-2 left-2.5 type-caption-1 font-semibold text-white">
+            {label}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function MotifRemote() {
+  return (
+    <div className="flex w-full items-center gap-4 rounded-[14px] border border-separator bg-surface-secondary p-4 text-left">
+      <div className="flex h-[88px] w-[88px] flex-none items-center justify-center rounded-[12px] border border-separator bg-surface-primary text-label-primary">
+        {/* Decorative QR-ish glyph; the real QR is minted on the Remote Access page. */}
+        <Smartphone size={40} aria-hidden="true" />
+      </div>
+      <div className="min-w-0">
+        <div className="mb-1 flex items-center gap-2">
+          <Smartphone size={15} className="text-label-tertiary" aria-hidden="true" />
+          <span className="type-footnote font-semibold text-label-primary">
+            Your phone
+          </span>
+          <span className="inline-flex items-center gap-1 rounded-full bg-system-green/15 px-2 py-0.5 type-caption-2 font-semibold text-system-green">
+            connected
+          </span>
+        </div>
+        <div className="type-caption-1 font-mono text-label-secondary">
+          yourstudio.duckdns.org
+        </div>
+        <div className="mt-1.5 type-caption-1 text-label-tertiary">
+          WireGuard · keys generated on the box
+        </div>
+      </div>
+    </div>
+  );
 }
 
 /**
- * The walkthrough. Five steps: a welcome framing, then the four core
- * privacy-positioning beats the customer saw as cards on first run, now
- * paced one-at-a-time so the post-setup moment reads as a guided tour
- * rather than a wall of cards.
+ * The walkthrough. Five beats: a welcome framing, then the four core
+ * privacy-positioning beats — paced one at a time, each with its motif.
  */
 export const TOUR_STEPS: readonly TourStep[] = [
   {
     key: "welcome",
     glyph: (cn) => <DropletMark size={26} className={cn} />,
-    title: "Welcome to your Droplet",
-    body: "Everything you set up runs on this box, right here on your network. Take a minute to see what that actually means — files, AI, cameras, and remote access, all private by default.",
+    kicker: "You're all set",
+    title: "Your Droplet is live",
+    body: "Everything you just set up runs on this box, right here on your network. Take a minute to see what that actually means — files, AI, cameras, and remote access, all private by default.",
+    motif: () => <MotifRecap />,
   },
   {
     key: "files",
     glyph: (cn) => <FolderOpen size={26} className={cn} />,
+    kicker: "Files",
     title: "Your files live here, not in the cloud",
     body: "When you upload a photo or document, it's stored on this Droplet's drives — no copies in someone else's data centre. If the Droplet is offline, the only thing affected is access. Your files don't disappear.",
+    motif: () => <MotifFiles />,
   },
   {
     key: "ai",
     glyph: (cn) => <Cpu size={26} className={cn} />,
+    kicker: "Private AI",
     title: "The AI runs on your hardware",
     body: "The local models run on the GPU inside this box. Your questions, the model's answers, the whole conversation — none of it leaves the Droplet. Cloud models are an explicit opt-in with your own API key, never the default.",
+    motif: () => <MotifAi />,
   },
   {
     key: "cameras",
     glyph: (cn) => <Video size={26} className={cn} />,
+    kicker: "Cameras",
     title: "Your camera footage stays put",
-    body: "Cameras record straight to the Droplet's Frigate NVR. Review footage, get motion alerts, grant remote access — but the video never streams out to a cloud service. You can isolate cameras on their own network from the Cameras page.",
+    body: "Cameras record straight to the Droplet's NVR. Review footage, get motion alerts, grant remote access — but the video never streams out to a cloud service. You can isolate cameras on their own network from the Cameras page.",
+    motif: () => <MotifCameras />,
   },
   {
     key: "remote",
     glyph: (cn) => <Globe size={26} className={cn} />,
+    kicker: "Remote access",
     title: "Remote access is end-to-end encrypted",
     body: "Off your home Wi-Fi, your phone reaches the Droplet over WireGuard — a modern VPN whose keys you generated on the box itself. Add a device from the Remote Access page and scan one QR code to connect.",
+    motif: () => <MotifRemote />,
   },
 ];
 
@@ -107,11 +301,9 @@ export function ProductTour({ onComplete }: { onComplete?: () => void } = {}) {
   const reduced = useReducedMotion();
   const { completeTour } = useAuth();
 
-  // Hydrate once from the persisted step (resumability). useState's
-  // initializer runs only on first render.
+  // Hydrate once from the persisted step (resumability).
   const [index, setIndex] = useState<number>(() => readResumeIndex());
-  // Guard the finish path so a double-click (or Skip racing the last Next)
-  // can't fire completeTour + navigate twice.
+  // Guard the finish path so a double-click can't fire completeTour + navigate twice.
   const finishedRef = useRef(false);
 
   // Persist the active step so a refresh resumes here.
@@ -130,18 +322,14 @@ export function ProductTour({ onComplete }: { onComplete?: () => void } = {}) {
   const finish = useCallback(async () => {
     if (finishedRef.current) return;
     finishedRef.current = true;
-    // Clear the resume marker so a later replay (from Help) starts clean.
     try {
       window.localStorage.removeItem(RESUME_KEY);
     } catch {
       /* ignore */
     }
-    // Persist completion (optimistic in-memory flip + server PATCH). Never
-    // rejects; routes onward regardless of the round-trip.
     await completeTour();
-    // When embedded (e.g. on the Done screen, #9) the parent owns post-tour
-    // navigation — call onComplete and skip our own push so we don't
-    // double-navigate. Standalone (/tour route) falls back to pushing "/".
+    // Embedded (Done screen): the parent owns post-tour navigation. Standalone
+    // (/tour route): fall back to pushing "/".
     if (onComplete) {
       onComplete();
     } else {
@@ -164,93 +352,89 @@ export function ProductTour({ onComplete }: { onComplete?: () => void } = {}) {
   return (
     <div
       className={
-        // #9/#2: embedded on the Done screen, the setup page already supplies
-        // the full-height centered surface — adding our own min-h-dvh + padding
-        // here would nest two viewport-height boxes and scroll the desktop
-        // viewport. Standalone (/tour) keeps the full-screen surface.
+        // Embedded on the Done screen, the setup page supplies the full-height
+        // centered surface; standalone (/tour) keeps its own full-screen surface.
         onComplete
           ? "w-full flex items-center justify-center"
           : "min-h-dvh bg-surface-primary flex items-center justify-center p-4"
       }
     >
-      <div className="w-full max-w-md">
-        {/* Progress dots — quiet, accent only on the active step. */}
-        <div
-          className="flex items-center justify-center gap-1.5 mb-8"
-          aria-hidden="true"
-        >
-          {TOUR_STEPS.map((s, i) => (
-            <span
-              key={s.key}
-              className={`h-1.5 rounded-full transition-all duration-300 ease-smooth ${
-                i === index
-                  ? "w-6 bg-accent"
-                  : i < index
-                    ? "w-1.5 bg-accent/40"
-                    : "w-1.5 bg-separator"
-              }`}
-            />
-          ))}
-        </div>
-
-        <div className="dp-card p-8 text-center">
-          <div
-            className="w-14 h-14 rounded-2xl bg-accent/10 flex items-center justify-center mx-auto mb-6"
-            aria-hidden="true"
-          >
-            {step.glyph("text-accent")}
+      <div className="w-full max-w-[560px]">
+        <div className="dp-card p-8">
+          {/* Clickable beat dots — quiet, accent on the active beat. */}
+          <div className="mb-6 flex items-center gap-1.5">
+            {TOUR_STEPS.map((s, i) => (
+              <button
+                key={s.key}
+                type="button"
+                onClick={() => setIndex(i)}
+                aria-label={`Go to ${s.kicker}`}
+                aria-current={i === index ? "step" : undefined}
+                className={`h-1.5 rounded-full transition-all duration-300 ease-smooth focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+                  i === index
+                    ? "w-6 bg-accent"
+                    : i < index
+                      ? "w-1.5 bg-accent/40"
+                      : "w-1.5 bg-separator"
+                }`}
+              />
+            ))}
           </div>
 
-          {/* Re-key the body on `index` so the cross-fade replays per step.
-              motion is fully neutralized under reduced-motion. */}
+          <span
+            className="aurora-brand mb-5 flex h-14 w-14 items-center justify-center rounded-2xl text-white"
+            aria-hidden="true"
+          >
+            {step.glyph("text-white")}
+          </span>
+
+          {/* Re-key on `index` so the cross-fade replays per beat; neutralised
+              under reduced-motion. */}
           <motion.div
             key={step.key}
             initial={reduced ? false : { opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: reduced ? 0 : 0.28, ease: [0.25, 0.1, 0.25, 1] }}
           >
-            <p className="type-footnote text-label-tertiary mb-2">
-              Step {index + 1} of {TOUR_STEPS.length}
+            <p className="type-caption-1 font-bold uppercase tracking-[0.06em] text-accent">
+              {step.kicker} · {index + 1} of {TOUR_STEPS.length}
             </p>
-            <h1 className="type-title-2 text-label-primary mb-3">
+            <h1 className="type-title-2 text-label-primary mt-2 mb-3">
               {step.title}
             </h1>
-            <p className="type-body text-label-secondary">{step.body}</p>
+            <p className="type-body text-label-secondary mb-6">{step.body}</p>
+            {step.motif()}
           </motion.div>
 
-          <div className="flex items-center justify-between gap-3 mt-8">
+          <div className="mt-8 flex items-center justify-between gap-3">
             {isFirst ? (
               <span aria-hidden="true" />
             ) : (
-              <button
-                type="button"
-                onClick={back}
-                className="dp-btn-secondary"
-              >
+              <button type="button" onClick={back} className="dp-btn-secondary">
                 <ArrowLeft size={16} aria-hidden="true" />
                 Back
               </button>
             )}
 
-            <button
-              type="button"
-              onClick={next}
-              className="dp-btn-primary ml-auto"
-            >
-              {isLast ? "Go to dashboard" : "Next"}
-              {!isLast && <ArrowRight size={16} aria-hidden="true" />}
-            </button>
+            <div className="ml-auto flex items-center gap-3">
+              {!isLast && (
+                <button
+                  type="button"
+                  onClick={() => void finish()}
+                  className="type-footnote font-semibold text-label-tertiary transition-colors hover:text-label-secondary"
+                >
+                  Skip the tour
+                </button>
+              )}
+              <span className="type-caption-1 text-label-quaternary">
+                {index + 1} / {TOUR_STEPS.length}
+              </span>
+              <button type="button" onClick={next} className="dp-btn-primary">
+                {isLast ? "Go to dashboard" : "Next"}
+                {!isLast && <ArrowRight size={16} aria-hidden="true" />}
+              </button>
+            </div>
           </div>
-        </div>
-
-        <div className="text-center mt-4">
-          <button
-            type="button"
-            onClick={() => void finish()}
-            className="type-subheadline text-label-tertiary hover:text-label-secondary py-2 transition-colors"
-          >
-            Skip the tour
-          </button>
         </div>
       </div>
     </div>

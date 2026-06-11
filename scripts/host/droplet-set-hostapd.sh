@@ -42,6 +42,18 @@
 #   DROPLET_HOSTAPD_ENV_FILE=...  override the env-file path (default
 #                                 /etc/default/droplet-openwrt-attach)
 #
+# In production this is NOT only a test hook: droplet-device-bridge.service
+# pins DROPLET_HOSTAPD_ENV_FILE=/var/lib/droplet-bridge/openwrt-attach.env —
+# the bridge sandbox (User=droplet + ProtectSystem=strict) cannot write
+# root-owned /etc/default, so the write lands in the bridge's StateDirectory.
+# The attach script's customer_ap_creds block then parses ONLY the two AP
+# keys back out of that file, with this same validation re-applied (it is
+# deliberately NOT an EnvironmentFile of the root attach unit — drop-in
+# ordering would clobber it, and root must not source a droplet-writable
+# file wholesale). The `systemctl restart` below is authorized for the
+# droplet user by the polkit rule 50-droplet-device-bridge.rules (scoped to
+# that single unit) — no sudo, NoNewPrivileges stays on.
+#
 # Output: a single JSON object on stdout on success; a human refusal on stderr
 # + a non-zero exit on any validation failure.
 # =============================================================================

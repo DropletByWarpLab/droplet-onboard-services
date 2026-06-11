@@ -47,9 +47,15 @@ DEFAULT_API_URL = os.environ.get("API_URL", "http://localhost:3000")
 DEFAULT_OLLAMA_URL = os.environ.get(
     "RAGAS_OLLAMA_URL", "http://localhost:11434/v1"
 )
+# Fall back to LLM_MODEL — the model the box actually pulls (single-box
+# writes it to .env, which the rag-eval container loads via env_file) —
+# before the historic `mistral` name production Ollama does not host.
+# Without this every scheduled RAGAS run failed its judge calls on a
+# stock appliance. Same fallback chain as the orchestrator's
+# DEFAULT_MODEL (WARP-844).
 DEFAULT_LOCAL_JUDGE_MODEL = os.environ.get(
-    "RAGAS_LOCAL_JUDGE_MODEL", "mistral"
-)
+    "RAGAS_LOCAL_JUDGE_MODEL"
+) or os.environ.get("LLM_MODEL") or "mistral"
 DEFAULT_CLOUD_JUDGE_MODEL = os.environ.get(
     "RAGAS_CLOUD_JUDGE_MODEL", "gpt-4o-mini"
 )

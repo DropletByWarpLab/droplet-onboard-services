@@ -136,6 +136,41 @@ forbidden (rule 20). So:
 - The script's hard pre-flight (D4.3) is the last line of defense and is unit
   tested for each refusal (mounted / has-data / OS-disk / missing double-confirm).
 
+#### D6.1 — The bridge cannot run the script itself: spool + root apply unit
+
+The original D6 wiring had the bridge `exec` the script directly — but the
+bridge runs as `User=droplet` inside `ProtectSystem=strict` +
+`NoNewPrivileges`, where every privileged step fails (`EPERM` opening the
+`root:disk 0660` block devices, `EROFS` under `/mnt`) and, worse, the `blkid`
+"has data" probe **silently degrades**: an unprivileged `blkid -p` cannot open
+the device, prints nothing, and the guard passes. Verified on the shipping
+single-box. So no pool op could ever succeed from the sandbox, and the
+pre-flight is only trustworthy under root.
+
+The fix follows the WARP-808 hostapd split (StateDirectory write + a
+narrowly-scoped polkit grant), adapted because `mdadm` is a direct binary with
+no unit of its own to polkit-restart:
+
+1. The bridge writes `{request_id, operation, params}` atomically to
+   `/var/lib/droplet-bridge/pool-spool/request.json` — inside its own 0700
+   `StateDirectory`, so only the bridge (or root) can place a request.
+2. It then runs `systemctl start droplet-storage-pool-apply.service` — a
+   D-Bus ask to PID 1, authorized for the `droplet` user by
+   `services/oled-display/50-droplet-device-bridge.rules` (that one unit,
+   `start` verb only). `NoNewPrivileges` stays on; there is no sudo anywhere.
+3. The apply unit (root, `Type=oneshot`, never enabled) runs
+   `scripts/host/droplet-storage-pool-apply.sh`, which consumes the one
+   spooled request, runs `droplet-storage-pool.sh` — whose D4.3 pre-flight now
+   probes with root and therefore actually bites — and writes
+   `pool-spool/result.json` (`{request_id, rc, stdout, stderr}`) back for the
+   bridge to read, verify against its `request_id`, and delete.
+
+A blocking `systemctl start` of a oneshot returns when `ExecStart` exits, so
+the bridge reads the result synchronously; concurrent POSTs are refused by a
+non-blocking in-process lock (and systemd serializes the unit besides). A
+refused pre-flight is **not** a unit failure — the refusal travels in
+`result.json` so a wrong confirm phrase never leaves a failed unit behind.
+
 ### D7 — Read path
 
 `GET /api/storage/pools` (orchestrator, read-only, no role gate — reading health

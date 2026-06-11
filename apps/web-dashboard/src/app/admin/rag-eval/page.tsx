@@ -17,7 +17,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Play, Layers, ShieldOff, AlertTriangle, RefreshCw, FlaskConical } from "lucide-react";
+import { Play, Layers, ShieldOff, AlertTriangle, RefreshCw, FlaskConical, ThumbsDown, ThumbsUp } from "lucide-react";
 import { useAuth, authFetch } from "@/lib/auth";
 import { translateError } from "@/lib/friendly-errors";
 import { ShellPage } from "@/components/shell/ShellPage";
@@ -48,6 +48,111 @@ const STATUS_BADGE: Record<RunStatus, "ok" | "warn" | "danger" | "info" | "muted
   failed: "danger",
   unknown: "muted",
 };
+
+interface FeedbackItem {
+  messageId: string;
+  conversationId: string;
+  conversationTitle: string | null;
+  model: string | null;
+  feedback: "up" | "down";
+  userPrompt: string;
+  answer: string;
+  createdAt: string;
+}
+
+/**
+ * WARP-844 follow-up — real user judgments next to the RAGAS scores.
+ * Thumbs ratings from chat (ChatMessage.feedback) via
+ * GET /api/admin/chat-feedback; the thumbs-down list is the natural
+ * seed for new eval goldens.
+ */
+function FeedbackPanel() {
+  const [counts, setCounts] = useState<{ up: number; down: number } | null>(null);
+  const [items, setItems] = useState<FeedbackItem[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await authFetch("/api/admin/chat-feedback?limit=25");
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = (await res.json()) as {
+          counts: { up: number; down: number };
+          items: FeedbackItem[];
+        };
+        if (cancelled) return;
+        setCounts(json.counts);
+        setItems(json.items);
+      } catch (err) {
+        if (!cancelled) setError(translateError(err, "knowledge"));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return (
+    <div className="card" style={{ marginTop: 16 }}>
+      <h2>User feedback</h2>
+      <p style={{ fontSize: 12.5, color: "var(--text-muted)", marginTop: 4 }}>
+        Thumbs ratings left on chat replies. Thumbs-down turns are good
+        candidates for new eval goldens.
+      </p>
+      {counts && (
+        <div style={{ display: "flex", gap: 16, marginTop: 10, fontSize: 13 }}>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <ThumbsUp size={14} style={{ color: "var(--ok, #34c759)" }} /> {counts.up}
+          </span>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <ThumbsDown size={14} style={{ color: "#ef4444" }} /> {counts.down}
+          </span>
+        </div>
+      )}
+      {error && (
+        <p style={{ fontSize: 12, color: "#ef4444", marginTop: 8 }}>{error}</p>
+      )}
+      {!error && counts && items.length === 0 && (
+        <p style={{ fontSize: 12.5, color: "var(--text-muted)", marginTop: 10 }}>
+          No rated replies yet.
+        </p>
+      )}
+      <div style={{ marginTop: 8 }}>
+        {items.map((i) => (
+          <div
+            key={i.messageId}
+            style={{
+              borderTop: "1px solid var(--border)",
+              padding: "10px 0",
+              display: "flex",
+              gap: 10,
+              alignItems: "flex-start",
+            }}
+          >
+            {i.feedback === "down" ? (
+              <ThumbsDown size={14} style={{ color: "#ef4444", flexShrink: 0, marginTop: 2 }} />
+            ) : (
+              <ThumbsUp size={14} style={{ color: "var(--ok, #34c759)", flexShrink: 0, marginTop: 2 }} />
+            )}
+            <div style={{ minWidth: 0 }}>
+              <p style={{ fontSize: 12.5, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis" }}>
+                {i.userPrompt || "(prompt unavailable)"}
+              </p>
+              <p style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis" }}>
+                {i.answer}
+              </p>
+              <span style={{ fontSize: 11, color: "var(--text-faint)" }}>
+                {i.conversationTitle ?? i.conversationId}
+                {i.model ? ` · ${i.model}` : ""} · {new Date(i.createdAt).toLocaleString()}
+              </span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 function formatMetric(v: unknown): string {
   if (typeof v === "number") return v.toFixed(3);
@@ -228,8 +333,9 @@ export default function RagEvalPage() {
                 rag-eval service is not reachable
               </p>
               <p style={{ fontSize: 12.5, color: "var(--text-muted)", marginTop: 4 }}>
-                The eval service runs under the <code>eval</code> Compose profile, which is off by
-                default. Enable it on the appliance:
+                The eval service runs under the <code>eval</code> Compose profile — standard on
+                new installs, but absent from .env files generated before the WARP-844 follow-up.
+                Enable it on the appliance:
               </p>
               <pre
                 style={{
@@ -323,6 +429,10 @@ docker compose -f docker/docker-compose.yml --env-file .env up -d rag-eval`}
           )}
         </>
       )}
+
+      {/* User thumbs feedback comes from the orchestrator, not the
+          rag-eval container — render it even when rag-eval is down. */}
+      <FeedbackPanel />
 
       {confirmBootstrap && (
         <div className="ds-ios-scrim" onClick={() => setConfirmBootstrap(false)}>

@@ -70,7 +70,10 @@ const envSchema = z.object({
   // All vars use DROPLET_PM_* prefix per architecture-guard rule 11.
   // Defaults work on a brand-new install OR fail loud (rule 14).
   DROPLET_PM_API_URL: z.string().url().default("http://pm-api:8000"),
-  DROPLET_PM_WEB_URL: z.string().url().default("https://droplet-ai.local/pm"),
+  // Plane's dedicated TLS origin (spec WARP-498 OQ2 amendment): the vanilla
+  // frontend is built with basePath:"" so it must own an origin root — the
+  // gateway serves it on :8443, not under /pm/.
+  DROPLET_PM_WEB_URL: z.string().url().default("https://droplet-ai.local:8443"),
   // tools-core handlers/pm/* use this for server-to-server LLM-driven tool
   // dispatch (WARP-508/509). Per-user attribution flows through Plane's
   // OIDC-linked service tokens, not this admin key.
@@ -273,6 +276,16 @@ const envSchema = z.object({
 
   // --- Service-to-service auth (shared secret for routing/switch/discovery services) ---
   SERVICE_SECRET: z.string().default(""),
+
+  // SERVICE_TOKEN_SWITCH — dedicated outbound bearer for switch.client.ts →
+  // switch service, replacing the legacy shared SERVICE_SECRET on that path
+  // (same per-service-token shape as SERVICE_TOKEN_DISPLAY / WARP-165: the
+  // switch container's SERVICE_SECRET used to be wired to DEVICE_SECRET_KEY,
+  // the FIPS-sealed master encryption key, which this keeps off the wire).
+  // Compose wires both ends to ${SERVICE_TOKEN_SWITCH}; switch.client.ts
+  // falls back to SERVICE_SECRET so installs that pinned the legacy shared
+  // secret keep working until setup.sh re-mints.
+  SERVICE_TOKEN_SWITCH: z.string().default(""),
 
   // --- Service-principal bearer tokens (inbound) ---
   // Per shared_brain `agentic-workflows.md` + `LLM_AGENT.md`: services that

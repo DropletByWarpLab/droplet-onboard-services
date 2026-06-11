@@ -51,11 +51,22 @@ export interface AccessTokenClaims {
 
 /** Stable issuer URL — Plane verifies tokens against this. */
 export function oidcIssuer(): string {
-  // gateway URL with /api/pm/oidc as the realm. DROPLET_PM_WEB_URL ends
-  // at /pm; the IdP itself lives one level up on the same host so we
-  // strip the trailing /pm before appending.
-  const base = config.DROPLET_PM_WEB_URL.replace(/\/pm\/?$/, "");
-  return `${base}/api/pm/oidc`;
+  // The IdP lives on the DASHBOARD origin (gateway :443) — never on
+  // Plane's. Two DROPLET_PM_WEB_URL shapes exist:
+  //   - legacy subpath (`https://host/pm`): Plane shared the dashboard
+  //     origin, so stripping the /pm path yields the IdP base — port
+  //     and all.
+  //   - dedicated origin (`https://host:8443`, spec WARP-498 OQ2
+  //     amendment): Plane owns its own port, where /api/* routes to
+  //     pm-api — NOT the orchestrator. Deriving the issuer from this
+  //     origin would point Plane's discovery fetch at pm-api and 404
+  //     the whole SSO flow. The dashboard is on the same host's
+  //     default HTTPS port, so rebuild from the hostname alone.
+  const url = new URL(config.DROPLET_PM_WEB_URL);
+  if (/\/pm\/?$/.test(url.pathname)) {
+    return `${url.origin}/api/pm/oidc`;
+  }
+  return `https://${url.hostname}/api/pm/oidc`;
 }
 
 function getPrivateKey(): string {

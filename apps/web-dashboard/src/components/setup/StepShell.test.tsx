@@ -71,7 +71,7 @@ describe("StepShell aurora rail (PR #384)", () => {
     });
   });
 
-  it("accepts every one of the 12 step ids for `current` and shows the step counter", () => {
+  it("accepts every wizard step id for `current` and shows the step counter", () => {
     for (let i = 0; i < STEPS.length; i++) {
       const current: Step = STEPS[i];
       const { unmount } = render(
@@ -94,8 +94,8 @@ describe("StepShell aurora rail (PR #384)", () => {
     let skipClicks = 0;
     render(
       <StepShell
-        current="internet"
-        title="Connect to the internet"
+        current="wifi"
+        title="Set up your home Wi-Fi"
         primary={{ label: "Save and continue", onClick: () => primaryClicks++ }}
         skip={{ label: "Skip for now", onClick: () => skipClicks++ }}
       >

@@ -16,8 +16,11 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const here = path.dirname(new URL(import.meta.url).pathname);
+// fileURLToPath, not `new URL(...).pathname` — the latter yields "/C:/..."
+// on Windows, which path.resolve doubles into "C:\C:\...".
+const here = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(here, "..");
 
 function read(rel: string): string {
@@ -26,13 +29,6 @@ function read(rel: string): string {
 
 describe("WARP-300 DropletMark callsite audit", () => {
   describe("standalone (no nearby wordmark) — opt-in to aria-label", () => {
-    it("login page is standalone and announces the mark", () => {
-      // Pre-existing from WARP-298; pinned here so a future refactor
-      // can't silently drop the label.
-      const src = read("app/login/page.tsx");
-      expect(src).toMatch(/<DropletMark[^>]*aria-label="Droplet"/);
-    });
-
     it("invite page loading-state mark is standalone and announces", () => {
       const src = read("app/invite/[token]/page.tsx");
       // Loading state mark sits next to "Loading your invitation..." —
@@ -72,12 +68,24 @@ describe("WARP-300 DropletMark callsite audit", () => {
       );
     });
 
-    it("setup welcome mark is decorative (heading adjacent)", () => {
-      // The welcome step's heading reads "Welcome to Droplet"
-      // immediately below the mark — decorative.
-      const src = read("app/setup/page.tsx");
+    it("login wordmark mark is decorative (wordmark adjacent)", () => {
+      // The aurora re-skin pairs the compact mark with a visible
+      // "Droplet" wordmark span — default aria-hidden is correct;
+      // announcing the SVG would duplicate the wordmark.
+      const src = read("app/login/page.tsx");
       expect(src).toMatch(
-        /<DropletMark size=\{48\} className="text-accent" \/>/,
+        /<DropletMark size=\{24\} className="text-accent" \/>/,
+      );
+      expect(src).not.toMatch(/<DropletMark[^>]*aria-label/);
+    });
+
+    it("setup welcome mark is decorative (heading adjacent)", () => {
+      // The welcome step (extracted to WelcomeStep in the aurora
+      // re-skin) titles itself "Welcome to Droplet" next to the mark
+      // — decorative.
+      const src = read("components/setup/steps/WelcomeStep.tsx");
+      expect(src).toMatch(
+        /<DropletMark size=\{34\} className="text-white" \/>/,
       );
     });
 

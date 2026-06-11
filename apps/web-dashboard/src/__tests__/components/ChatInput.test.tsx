@@ -7,14 +7,14 @@ import type { ChatAttachment } from "@/lib/types";
 describe("ChatInput", () => {
   it("renders textarea and send button", () => {
     render(<ChatInput onSend={vi.fn()} />);
-    expect(screen.getByPlaceholderText("Send a message...")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Ask Droplet anything…")).toBeInTheDocument();
     expect(screen.getByRole("button")).toBeInTheDocument();
   });
 
   it("calls onSend with the input value", () => {
     const onSend = vi.fn();
     render(<ChatInput onSend={onSend} />);
-    const textarea = screen.getByPlaceholderText("Send a message...");
+    const textarea = screen.getByPlaceholderText("Ask Droplet anything…");
 
     fireEvent.change(textarea, { target: { value: "Hello AI" } });
     fireEvent.click(screen.getByRole("button"));
@@ -26,7 +26,7 @@ describe("ChatInput", () => {
     const onSend = vi.fn();
     render(<ChatInput onSend={onSend} />);
     const textarea = screen.getByPlaceholderText(
-      "Send a message..."
+      "Ask Droplet anything…"
     ) as HTMLTextAreaElement;
 
     fireEvent.change(textarea, { target: { value: "Hello" } });
@@ -45,14 +45,14 @@ describe("ChatInput", () => {
 
   it("disables input when disabled prop is true", () => {
     render(<ChatInput onSend={vi.fn()} disabled />);
-    const textarea = screen.getByPlaceholderText("Send a message...");
+    const textarea = screen.getByPlaceholderText("Ask Droplet anything…");
     expect(textarea).toBeDisabled();
   });
 
   it("sends on Enter key", () => {
     const onSend = vi.fn();
     render(<ChatInput onSend={onSend} />);
-    const textarea = screen.getByPlaceholderText("Send a message...");
+    const textarea = screen.getByPlaceholderText("Ask Droplet anything…");
 
     fireEvent.change(textarea, { target: { value: "Test message" } });
     fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
@@ -63,7 +63,7 @@ describe("ChatInput", () => {
   it("does not send on Shift+Enter", () => {
     const onSend = vi.fn();
     render(<ChatInput onSend={onSend} />);
-    const textarea = screen.getByPlaceholderText("Send a message...");
+    const textarea = screen.getByPlaceholderText("Ask Droplet anything…");
 
     fireEvent.change(textarea, { target: { value: "Test" } });
     fireEvent.keyDown(textarea, { key: "Enter", shiftKey: true });
@@ -100,56 +100,52 @@ describe("ChatInput stop button (WARP-295)", () => {
     expect(screen.queryByLabelText("Stop generating")).not.toBeInTheDocument();
   });
 
-  it("uses text-system-red on the Stop icon so it reads as a destructive primary", () => {
+  it("renders Stop as the design-handoff neutral chat-stop variant (WARP-855)", () => {
+    // The Ask AI handoff replaced the red destructive Stop with a quiet
+    // bordered square (surface-2 + --text) — Claude-style "stop keeps
+    // partial text", not a destructive action.
     render(
       <ChatInput onSend={vi.fn()} onStop={vi.fn()} isStreaming />,
     );
     const stop = screen.getByLabelText("Stop generating");
-    // The stop icon (or its wrapper) carries text-system-red — sniffing
-    // for either the button or any descendant with the token.
-    const hasRedToken =
-      stop.className.includes("text-system-red") ||
-      stop.querySelector('[class*="text-system-red"]') !== null;
-    expect(hasRedToken).toBe(true);
+    expect(stop.className).toMatch(/(^|\s)chat-send(\s|$)/);
+    expect(stop.className).toMatch(/(^|\s)chat-stop(\s|$)/);
   });
 });
 
-// ── WARP-301: hit-target audit (WCAG 2.5.5 AA → 44 px) ──
+// ── WARP-855: composer control contract (Ask AI design handoff) ──
+//
+// The handoff supersedes WARP-301's 44 px floor INSIDE the composer card:
+// send is a 34 px brand square, attach/mic are 30 px quiet icon buttons
+// (chat.css spec values). Both clear WCAG 2.5.8 AA's 24 px minimum; the
+// card itself provides the generous touch surround on mobile.
 
-describe("ChatInput hit-targets (WARP-301)", () => {
-  it("Send button is ≥ 44×44 px (uses w-11 h-11 utility)", () => {
+describe("ChatInput composer controls (WARP-855)", () => {
+  it("Send is the 34 px brand square (chat-send)", () => {
     render(<ChatInput onSend={vi.fn()} />);
     const send = screen.getByLabelText("Send message");
-    // Tailwind's w-11/h-11 = 2.75rem = 44 px. The audit floor.
-    expect(send.className).toMatch(/(^|\s)w-11(\s|$)/);
-    expect(send.className).toMatch(/(^|\s)h-11(\s|$)/);
+    expect(send.className).toMatch(/(^|\s)chat-send(\s|$)/);
   });
 
-  it("Stop button is ≥ 44×44 px (uses w-11 h-11 utility)", () => {
+  it("Stop swaps in as chat-send chat-stop", () => {
     render(<ChatInput onSend={vi.fn()} onStop={vi.fn()} isStreaming />);
     const stop = screen.getByLabelText("Stop generating");
-    expect(stop.className).toMatch(/(^|\s)w-11(\s|$)/);
-    expect(stop.className).toMatch(/(^|\s)h-11(\s|$)/);
+    expect(stop.className).toMatch(/(^|\s)chat-stop(\s|$)/);
   });
 
-  it("Paperclip / attach button is ≥ 44×44 px (uses w-11 h-11 utility)", () => {
+  it("Paperclip / attach is a quiet 30 px icon button (chat-iconbtn)", () => {
     render(<ChatInput onSend={vi.fn()} onAttach={vi.fn()} />);
     const attach = screen.getByLabelText("Attach a file");
-    expect(attach.className).toMatch(/(^|\s)w-11(\s|$)/);
-    expect(attach.className).toMatch(/(^|\s)h-11(\s|$)/);
+    expect(attach.className).toMatch(/(^|\s)chat-iconbtn(\s|$)/);
   });
 
-  // WARP-301 fold-in: the paperclip icon was `size={16}` inside a 44 px
-  // button while Send used `size={18}`. Bump to 18 for icon-weight
-  // parity. lucide-react renders `size={N}` as width/height="N" on the
-  // underlying SVG, so we sniff the SVG attributes.
-  it("Paperclip icon renders at size 18 for parity with Send (WARP-301)", () => {
+  it("Paperclip icon renders at the handoff's size 15", () => {
     render(<ChatInput onSend={vi.fn()} onAttach={vi.fn()} />);
     const attach = screen.getByLabelText("Attach a file");
     const svg = attach.querySelector("svg");
     expect(svg).not.toBeNull();
-    expect(svg!.getAttribute("width")).toBe("18");
-    expect(svg!.getAttribute("height")).toBe("18");
+    expect(svg!.getAttribute("width")).toBe("15");
+    expect(svg!.getAttribute("height")).toBe("15");
   });
 });
 
@@ -160,7 +156,7 @@ describe("ChatInput seed (WARP-829)", () => {
     const ref = createRef<ChatInputHandle>();
     render(<ChatInput ref={ref} onSend={vi.fn()} />);
     const textarea = screen.getByPlaceholderText(
-      "Send a message...",
+      "Ask Droplet anything…",
     ) as HTMLTextAreaElement;
 
     // act() flushes the setValue state update + the deferred focus microtask
@@ -176,7 +172,7 @@ describe("ChatInput seed (WARP-829)", () => {
     const ref = createRef<ChatInputHandle>();
     render(<ChatInput ref={ref} onSend={vi.fn()} />);
     const textarea = screen.getByPlaceholderText(
-      "Send a message...",
+      "Ask Droplet anything…",
     ) as HTMLTextAreaElement;
 
     act(() => {
@@ -195,7 +191,7 @@ describe("ChatInput seed (WARP-829)", () => {
     const ref = createRef<ChatInputHandle>();
     render(<ChatInput ref={ref} onSend={vi.fn()} />);
     const textarea = screen.getByPlaceholderText(
-      "Send a message...",
+      "Ask Droplet anything…",
     ) as HTMLTextAreaElement;
 
     fireEvent.change(textarea, { target: { value: "leftover draft" } });
@@ -211,7 +207,7 @@ describe("ChatInput IME composition guard (WARP-295)", () => {
   it("does NOT send on Enter while the user is composing a CJK character", () => {
     const onSend = vi.fn();
     render(<ChatInput onSend={onSend} />);
-    const textarea = screen.getByPlaceholderText("Send a message...");
+    const textarea = screen.getByPlaceholderText("Ask Droplet anything…");
 
     fireEvent.change(textarea, { target: { value: "你好" } });
     // jsdom's KeyboardEvent doesn't surface `isComposing` through the
@@ -271,6 +267,52 @@ describe("ChatInput attachments", () => {
     expect(onAttach).toHaveBeenCalledWith(file);
     // Drag-state clears after drop.
     expect(panel).not.toHaveAttribute("data-dragging");
+  });
+
+  it("calls onAttach for files pasted into the textarea", () => {
+    const onAttach = vi.fn();
+    render(<ChatInput onSend={vi.fn()} onAttach={onAttach} />);
+    const textarea = screen.getByPlaceholderText("Ask Droplet anything…");
+
+    const file = new File(["x"], "pasted.png", { type: "image/png" });
+    fireEvent.paste(textarea, { clipboardData: { files: [file] } });
+    expect(onAttach).toHaveBeenCalledWith(file);
+  });
+
+  it("leaves text-only pastes to the default textarea behavior", () => {
+    const onAttach = vi.fn();
+    render(<ChatInput onSend={vi.fn()} onAttach={onAttach} />);
+    const textarea = screen.getByPlaceholderText("Ask Droplet anything…");
+
+    fireEvent.paste(textarea, {
+      clipboardData: { files: [], getData: () => "plain text" },
+    });
+    expect(onAttach).not.toHaveBeenCalled();
+  });
+
+  it("hides the mic when audio capture isn't available (jsdom default)", () => {
+    render(<ChatInput onSend={vi.fn()} />);
+    expect(
+      screen.queryByRole("button", { name: /dictate a message/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows the mic when the browser can capture audio", () => {
+    vi.stubGlobal("AudioContext", class {});
+    Object.defineProperty(navigator, "mediaDevices", {
+      value: { getUserMedia: vi.fn() },
+      configurable: true,
+    });
+    try {
+      render(<ChatInput onSend={vi.fn()} />);
+      expect(
+        screen.getByRole("button", { name: /dictate a message/i }),
+      ).toBeInTheDocument();
+    } finally {
+      vi.unstubAllGlobals();
+      // @ts-expect-error — cleanup of the test-injected property
+      delete navigator.mediaDevices;
+    }
   });
 
   it("renders one chip per attachment with status text", () => {

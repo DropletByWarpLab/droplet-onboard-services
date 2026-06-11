@@ -13,7 +13,7 @@ import {
   setWifiChannel,
 } from "../services/network.service.js";
 import { evaluateNetworkCommand } from "../services/network-safety.service.js";
-import { requireRole } from "../middleware/auth.js";
+import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 
 export interface WifiDeps {
   prisma: PrismaClient;
@@ -42,8 +42,10 @@ export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
 
   // WARP-171: per-route guard. owner + admin only — changing the
   // household's SSID drops every connected device, so this stays in
-  // the household-admin tier.
-  router.post("/network/wifi/ssid", requireRole("owner", "admin"), async (req, res, next) => {
+  // the household-admin tier. The MCP principal is additionally
+  // admitted so the set_wifi_ssid tool reaches the safety layer; the
+  // tool itself gates on an explicit user confirmation first.
+  router.post("/network/wifi/ssid", requireRoleOrMcpService("owner", "admin"), async (req, res, next) => {
     try {
       const { radio = "radio0", iface_section = "default_radio0", ssid } = req.body;
       if (!ssid || typeof ssid !== "string") {
@@ -105,8 +107,10 @@ export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
     }
   });
 
-  // WARP-171: per-route guard. owner + admin only.
-  router.post("/network/wifi/channel", requireRole("owner", "admin"), async (req, res, next) => {
+  // WARP-171: per-route guard. owner + admin only, plus the MCP
+  // principal for the set_wifi_channel tool (confirmation gated
+  // in-handler, same as set_wifi_ssid).
+  router.post("/network/wifi/channel", requireRoleOrMcpService("owner", "admin"), async (req, res, next) => {
     try {
       const { radio_section = "radio0", channel } = req.body;
       if (channel === undefined) {

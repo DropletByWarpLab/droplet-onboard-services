@@ -10,6 +10,7 @@ import {
   Cpu,
   Film,
   FlaskConical,
+  FolderKanban,
   FolderOpen,
   Globe,
   HardDrive,
@@ -18,6 +19,7 @@ import {
   Laptop,
   LayoutDashboard,
   LogOut,
+  Mail,
   MessageSquare,
   MoreHorizontal,
   Network,
@@ -83,7 +85,17 @@ const NAV_GROUPS: NavGroup[] = [
       { href: "/", label: "Home", icon: LayoutDashboard },
       { href: "/chat", label: "Ask AI", icon: MessageSquare },
       { href: "/files", label: "Files", icon: FolderOpen },
+      // WARP-837: Email triage surface. Left unrestricted — the backend allows
+      // owner/admin/family and RBAC-scopes accounts per user; the send tier is
+      // gated to owner/admin in the UI + server. No unread-count badge (the
+      // NavItem type has no count field; out of scope).
+      { href: "/email", label: "Email", icon: Mail },
       { href: "/calendar", label: "Calendar", icon: CalendarIcon },
+      // WARP-512: embedded Plane PM stack — workspace surface, sits next
+      // to Calendar (both are time/workflow-oriented) and ahead of
+      // Knowledge (which is the read-only search index). Page at
+      // /projects iframes Plane behind the OIDC IdP from WARP-505.
+      { href: "/projects", label: "Projects", icon: FolderKanban },
       { href: "/knowledge", label: "Knowledge", icon: BookOpen },
       // WARP-225: per-user context-meter. Lives next to Knowledge so the
       // eye reads them paired — /knowledge is "what's indexed" by file,

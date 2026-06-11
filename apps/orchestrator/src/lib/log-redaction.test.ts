@@ -118,6 +118,53 @@ describe("redactSecrets", () => {
     expect(out).not.toContain("mqtt-inline-secret");
   });
 
+  it("redacts an empty-username connection URI (redis://:pw@host) — secrets.sh's REDIS_URL shape", () => {
+    // The uri-userinfo rule's username class is now `*` (was `+`), so the
+    // empty-username form `redis://:pw@host` is scrubbed. secrets.sh generates
+    // exactly this shape for REDIS_URL, and the key name carries no
+    // PASSWORD/SECRET/TOKEN/KEY suffix so the assignment rule never fires —
+    // before this fix the password leaked verbatim into the diagnostics bundle.
+    const input = "REDIS_URL=redis://:redis-pw-9988xyz@cache:6379";
+    const out = redactSecrets(input);
+    expect(out).not.toContain("redis-pw-9988xyz");
+    expect(out).toContain(REDACTION_PLACEHOLDER);
+    // Scheme + host survive so the line is still diagnosable.
+    expect(out).toContain("redis://");
+    expect(out).toContain("cache:6379");
+  });
+
+  it("redacts an empty-username postgres URI (postgresql://:pw@host/db)", () => {
+    const input = "DATABASE_URL=postgresql://:pg-empty-user-pw-7766@db:5432/droplet";
+    const out = redactSecrets(input);
+    expect(out).not.toContain("pg-empty-user-pw-7766");
+    expect(out).toContain(REDACTION_PLACEHOLDER);
+  });
+
+  it("redacts Authorization: Basic credentials (5-char scheme)", () => {
+    const planted = "dXNlcjpzdXBlci1zZWNyZXQtcGFzcw==";
+    const input = `proxy logged Authorization: Basic ${planted} for /api/files`;
+    const out = redactSecrets(input);
+    expect(out).not.toContain(planted);
+    expect(out).toContain(REDACTION_PLACEHOLDER);
+    // Surrounding non-secret context survives.
+    expect(out).toContain("proxy logged");
+    expect(out).toContain("for /api/files");
+  });
+
+  it("redacts Authorization: Token credentials (5-char scheme)", () => {
+    const planted = "tok-drf-style-secret-000111";
+    const input = `Authorization: Token ${planted}`;
+    const out = redactSecrets(input);
+    expect(out).not.toContain(planted);
+    expect(out).toContain(REDACTION_PLACEHOLDER);
+  });
+
+  it("stays idempotent over a redacted Basic header", () => {
+    const once = redactSecrets("Authorization: Basic dXNlcjpwYXNzd29yZA==");
+    expect(redactSecrets(once)).toBe(once);
+  });
+
+
   it("leaves non-secret log lines untouched", () => {
     const input = [
       "2026-06-06T10:00:00Z orchestrator listening on :3000",

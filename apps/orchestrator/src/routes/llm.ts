@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
-import type { PrismaClient } from "@prisma/client";
+import { BrainMemoryItemStatus, type PrismaClient } from "@prisma/client";
 import * as aiGateway from "../services/ai-gateway.client.js";
 import { cacheGet, cacheSet } from "../services/cache.service.js";
 import { runAgent, type AgentDeps } from "../services/llm-agent.service.js";
@@ -19,6 +19,7 @@ import {
 import { publish as mqttPublish } from "../services/mqtt.service.js";
 import { requireRole } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
+import { visibleAudiences } from "../services/memory-audience.js";
 
 /** WARP-456: severity bucket the dashboard renders for the activity feed. */
 function activitySeverityForTurnStatus(
@@ -122,7 +123,11 @@ const chatRequestSchema = z.object({
   ),
   stream: z.boolean().optional().default(false),
   temperature: z.number().min(0).max(2).optional(),
-  max_tokens: z.number().positive().optional(),
+  // Mirrors the ai-gateway's pydantic bound (schemas.py: int, ge=1,
+  // le=4096). Now that the value is actually forwarded (WARP-849), an
+  // out-of-range number must 400 here instead of 422ing at the gateway
+  // and surfacing as a 500.
+  max_tokens: z.number().int().min(1).max(4096).optional(),
   provider: z.string().optional(),
   max_iter: z.number().int().min(1).max(10).optional(),
   allowed_tools: z.array(z.string()).optional(),
@@ -151,6 +156,29 @@ const chatRequestSchema = z.object({
   // flag gates EMISSION, not PERSISTENCE — so the dashboard can
   // lazy-load reasoning on demand without re-running the turn.
   captureReasoning: z.boolean().optional().default(false),
+  // Chat attachments (WARP-203 brain-memory items) referenced by this
+  // turn. The dashboard uploads files via POST /api/files/brain/upload
+  // and sends the resulting itemIds here on every turn of the
+  // conversation; the route verifies ownership and injects the
+  // extracted content (budgeted) as a system message so the model
+  // actually sees what the user attached. Capped at 8 per turn; the
+  // composer enforces the same cap at attach time (useChat.attach).
+  attachments: z
+    .array(z.object({ itemId: z.string().min(1).max(64) }))
+    .max(8)
+    .optional(),
+  // The dashboard's client-minted draft chat id (`chat-<ts>`), sent on
+  // the FIRST turn only. Brain-memory uploads made before the server
+  // assigned a conversationId are tagged with it; the route re-stamps
+  // every item carrying this tag (ownership-scoped) to the new
+  // conversationId, so uploads that finish mid-turn or late still join
+  // the conversation (chip rehydration + per-chat export).
+  draftChatId: z.string().min(1).max(128).optional(),
+  // WARP-845 — file a NEWLY-created conversation under one of the
+  // caller's projects (ownership-validated in ensureConversation;
+  // foreign ids are silently ignored). Existing conversations are never
+  // moved by a turn.
+  projectId: z.string().uuid().optional(),
 });
 
 const CONVERSATION_ID_HEADER = "X-Conversation-Id";
@@ -158,6 +186,10 @@ const CONVERSATION_ID_HEADER = "X-Conversation-Id";
  *  response. The client uses it to update the matching `streaming` row when
  *  the MQTT `turn-completed` event lands. */
 const ASSISTANT_MESSAGE_ID_HEADER = "X-Assistant-Message-Id";
+/** WARP-844: the user row's id for this turn, set alongside the two headers
+ *  above. The dashboard re-ids its optimistic user bubble with it so
+ *  edit-and-resend can truncate the persisted thread by a real row id. */
+const USER_MESSAGE_ID_HEADER = "X-User-Message-Id";
 
 // Which tool names require the caller to have owner/admin role. Read-only
 // tools (list_*, get_*, search_*) are fine for any authenticated user; write
@@ -239,6 +271,204 @@ function replayedWriteToolAttempt(rawMessages: unknown): boolean {
 // WARP-329 replaced the post-stream `persistTurn` helper with
 // save-on-send: see `persistence.createTurnRows` (pre-agent) +
 // `persistence.finalizeAssistantMessage` (post-agent) inline below.
+
+// ── Base system prompt (RAG + durable-memory steering) ──
+//
+// Without a server-side base prompt the model receives ZERO guidance
+// about this appliance's retrieval and memory surfaces — RAG invocation
+// rode entirely on the search_content tool description, which already
+// failed in practice (the WARP-642 hallucinated-tool guard exists
+// because gpt-oss:20b invented `knowledge_base_search`), and WARP-461
+// memory facts only surfaced if the model spontaneously called
+// memory_recall. The base prompt names the tools and inlines the active
+// facts (bounded below) so both work by default.
+/**
+ * Build the base prompt from the caller's EFFECTIVE tool set. Mentioning
+ * a tool the role can't call is worse than silence: non-privileged roles
+ * (family/guest/service) have write tools like memory_extract_fact
+ * stripped by narrowAllowedToolsForRole, and a system prompt instructing
+ * a stripped tool sends small local models straight into the WARP-642
+ * hallucinated-tool guard (and, after 3 guard-only iterations, a failed
+ * turn). `allowed` undefined = privileged caller = every tool.
+ */
+function buildBaseSystemPrompt(allowed: string[] | undefined): string {
+  const can = (name: string) => !allowed || allowed.includes(name);
+  const lines = [
+    "You are the Droplet AI assistant, running locally on the user's Droplet appliance.",
+  ];
+  const guidance: string[] = [];
+  if (can("search_content")) {
+    guidance.push(
+      "- For questions about the user's files, documents, notes, emails, or photos, call the search_content tool and ground your answer in the returned passages (cite their path values). Use tool names exactly as advertised — never invent one.",
+    );
+  }
+  guidance.push(
+    "- Before answering questions about the user's preferences or how they like things done, check the durable memory below" +
+      (can("memory_recall") ? "; call memory_recall for anything not listed." : "."),
+  );
+  if (can("memory_extract_fact")) {
+    guidance.push(
+      "- When the user states a durable preference or fact worth keeping, save it with memory_extract_fact.",
+    );
+  }
+  if (guidance.length > 0) {
+    lines.push("", "Tool guidance:", ...guidance);
+  }
+  return lines.join("\n");
+}
+
+/** Bounds for the durable-memory block appended to the base prompt.
+ *  MemoryFact rows are short one-liners; 20 facts / 2k chars keeps the
+ *  block well under the attachment/pin budgets while covering every
+ *  realistic household fact list. Older facts beyond the cap stay
+ *  reachable via the memory_recall tool. */
+const MEMORY_FACTS_LIMIT = 20;
+const MEMORY_FACTS_CHAR_BUDGET = 2000;
+
+/** Render the active WARP-461 memory facts as a bounded bullet list,
+ *  or "" when none exist. Newest first — when the budget bites, recent
+ *  facts win. */
+async function buildMemoryFactsBlock(
+  prisma: PrismaClient,
+  /** Caller's role — facts are filtered to the audiences this role may
+   *  read (WARP-845 role-scoped distribution). */
+  role: string | undefined,
+): Promise<string> {
+  const facts = await prisma.memoryFact.findMany({
+    where: { active: true, audience: { in: visibleAudiences(role) } },
+    orderBy: { addedAt: "desc" },
+    take: MEMORY_FACTS_LIMIT,
+  });
+  const lines: string[] = [];
+  let used = 0;
+  for (const f of facts) {
+    const line = `- [${f.category}] ${f.fact}`;
+    if (used + line.length > MEMORY_FACTS_CHAR_BUDGET) break;
+    used += line.length;
+    lines.push(line);
+  }
+  if (lines.length === 0) return "";
+  return (
+    "\n\nDurable memory — facts previously saved for this household:\n" +
+    lines.join("\n")
+  );
+}
+
+// ── Chat-attachment context injection ──
+//
+// Budgets are deliberately conservative: local models often run with a
+// small context window (Ollama defaults to a few thousand tokens), and
+// the inlined attachment text shares that window with the system
+// prompt, pins, history, and tool results. 12k chars ≈ 3k tokens total;
+// anything beyond the budget is reachable via `search_content` (the
+// file-indexer embedded the full document into FileContentChunk).
+const ATTACHMENT_PER_ITEM_CHAR_BUDGET = 4000;
+const ATTACHMENT_TOTAL_CHAR_BUDGET = 12000;
+/** Upper bound on chunk rows fetched per item — bounds the query, and
+ *  hitting it implies the document continues beyond what we inline. */
+const ATTACHMENT_CHUNK_FETCH_CAP = 30;
+
+/**
+ * Build the system-message text describing the turn's attachments, or
+ * null when none of the referenced items belong to the caller.
+ *
+ * Ownership is enforced the same way as /api/files/brain/*: the query
+ * filters by `userId`, so a foreign or unknown itemId simply drops out
+ * (no existence leak, no content leak). Ready items get their extracted
+ * text inlined from FileContentChunk (chunkIdx order — the indexer
+ * writes the document linearly); queued/indexing and failed items get a
+ * one-line status note so the model can tell the user what's going on
+ * instead of hallucinating content.
+ */
+async function buildAttachmentContext(
+  prisma: PrismaClient,
+  userId: string,
+  refs: { itemId: string }[],
+): Promise<string | null> {
+  const ids = Array.from(new Set(refs.map((r) => r.itemId)));
+  const items = await prisma.brainMemoryItem.findMany({
+    where: { id: { in: ids }, userId },
+  });
+  if (items.length === 0) return null;
+  // Preserve the client's order (upload order) rather than DB order.
+  const byId = new Map(items.map((i) => [i.id, i]));
+
+  let remainingBudget = ATTACHMENT_TOTAL_CHAR_BUDGET;
+  let anyTruncated = false;
+  let anyReady = false;
+  const sections: string[] = [];
+  let n = 0;
+  for (const id of ids) {
+    const item = byId.get(id);
+    if (!item) continue;
+    n += 1;
+    const mime = item.mimeType ? ` (${item.mimeType})` : "";
+    const head = `[${n}] "${item.filename}"${mime}`;
+    if (item.status === BrainMemoryItemStatus.ready) {
+      anyReady = true;
+      const chunks = await prisma.fileContentChunk.findMany({
+        where: { brainItemId: item.id },
+        orderBy: { chunkIdx: "asc" },
+        select: { text: true },
+        take: ATTACHMENT_CHUNK_FETCH_CAP,
+      });
+      const fullText = chunks.map((c) => c.text).join("\n").trim();
+      const budget = Math.max(
+        0,
+        Math.min(ATTACHMENT_PER_ITEM_CHAR_BUDGET, remainingBudget),
+      );
+      const body = fullText.slice(0, budget);
+      remainingBudget -= body.length;
+      const truncated =
+        body.length < fullText.length ||
+        chunks.length === ATTACHMENT_CHUNK_FETCH_CAP;
+      if (truncated) anyTruncated = true;
+      if (body.length === 0) {
+        // Either the extractor produced no text (e.g. image with no
+        // OCR-able content) or the total budget is exhausted.
+        sections.push(
+          `${head} — no inlined content${truncated ? " (budget exhausted; retrieve it via search_content)" : " (no text could be extracted)"}.`,
+        );
+      } else {
+        sections.push(
+          `${head}:\n"""\n${body}${truncated ? "\n…[truncated]" : ""}\n"""`,
+        );
+      }
+    } else if (item.status === BrainMemoryItemStatus.failed) {
+      sections.push(
+        `${head} — could not be processed (extraction failed). Tell the user if they ask about it.`,
+      );
+    } else {
+      // indexing | queued_for_transcription
+      sections.push(
+        `${head} — still being processed; its content is not available yet. Tell the user if they ask about it.`,
+      );
+    }
+  }
+  if (sections.length === 0) return null;
+
+  const lines = [
+    "The user attached the following file(s) to this conversation. " +
+      "Treat them as primary context for the user's request.",
+    "",
+    ...sections,
+  ];
+  if (anyTruncated) {
+    lines.push(
+      "",
+      "Some attachment content was truncated. Call the search_content " +
+        "tool to retrieve additional passages from these documents when " +
+        "the inlined excerpt is not enough.",
+    );
+  } else if (anyReady) {
+    lines.push(
+      "",
+      "Use the search_content tool if you need additional passages from " +
+        "the user's stored documents.",
+    );
+  }
+  return lines.join("\n");
+}
 
 export function createLlmRouter(prisma: PrismaClient): Router {
   const router = Router();
@@ -340,9 +570,16 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // path treats `_meta.userId` as authoritative because the
       // orchestrator IS the trust boundary for that channel.
       const userId = (req as AuthedRequest).user?.username;
-      const toolCallContext: McpCallContext | undefined = (ncToken || userId)
-        ? { ...(ncToken ? { ncToken } : {}), ...(userId ? { userId } : {}) }
-        : undefined;
+      // WARP-845: also forward the caller's role so role-scoped handlers
+      // (memory_recall) can filter what the model may read.
+      const toolCallContext: McpCallContext | undefined =
+        ncToken || userId || role
+          ? {
+              ...(ncToken ? { ncToken } : {}),
+              ...(userId ? { userId } : {}),
+              ...(role ? { userRole: role } : {}),
+            }
+          : undefined;
 
       // WARP-329: save-on-send.
       // The user message that drove this turn is the LAST role="user" in
@@ -366,6 +603,11 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // downstream just won't set the X-Conversation-Id header.
       } else if (userId && persistedUserContent) {
         // ensureConversation: find-or-create the ChatSession row.
+        // WARP-844 — the caller's own system message (persona). Read from
+        // the raw request BEFORE the pin/attachment/base-prompt splices
+        // below mutate chatReq.messages. Empty string means "cleared".
+        const callerSystemPrompt =
+          chatReq.messages.find((m) => m.role === "system")?.content ?? null;
         const convo = await persistence
           .ensureConversation({
             conversationId: chatReq.conversationId,
@@ -373,6 +615,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             model: chatReq.model,
             provider: chatReq.provider,
             firstUserContent: persistedUserContent,
+            systemPrompt: callerSystemPrompt,
+            projectId: chatReq.projectId ?? null,
           })
           .catch((err: unknown) => {
             // Persistence failure must NOT block chat — the user can
@@ -403,6 +647,9 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             assistantMessageId = turn.assistantMessageId;
             res.setHeader(CONVERSATION_ID_HEADER, conversationId);
             res.setHeader(ASSISTANT_MESSAGE_ID_HEADER, assistantMessageId);
+            if (turn.userMessageId) {
+              res.setHeader(USER_MESSAGE_ID_HEADER, turn.userMessageId);
+            }
             // If the client re-submitted a turn whose assistant message is
             // already in a terminal state (completed/failed/aborted), short-
             // circuit. The model has already replied; the cached row IS the
@@ -432,8 +679,15 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // already canonicalised the env var name for the eval harness.
       const aiGatewayGrpcUrl =
         process.env.AI_GATEWAY_GRPC_URL ?? "ai-gateway:50051";
+      // Fall back to LLM_MODEL (the model the box actually pulls —
+      // single-box.sh writes it to .env, and the orchestrator loads
+      // .env via env_file) before the historic hardcoded name, which
+      // production Ollama does not host. Without this, HyDE/multi-query
+      // rewrites would 404 upstream and silently no-op.
       const defaultChatModel =
-        process.env.DEFAULT_MODEL ?? "mistral:7b-instruct";
+        process.env.DEFAULT_MODEL ??
+        process.env.LLM_MODEL ??
+        "mistral:7b-instruct";
 
       const deps: AgentDeps = {
         mcp: mcpClient,
@@ -609,6 +863,114 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         }
       }
 
+      // ── Attachment context injection ─────────────────────────────
+      //
+      // Brain-memory items the client referenced for this turn. Unlike
+      // pins this must work WITHOUT a persisted conversation — the
+      // common case is a file attached before the very first turn.
+      // Ownership is enforced inside buildAttachmentContext (query is
+      // filtered by the caller's username, matching /api/files/brain).
+      if (chatReq.attachments?.length && userId) {
+        try {
+          const attachmentContext = await buildAttachmentContext(
+            prisma,
+            userId,
+            chatReq.attachments,
+          );
+          if (attachmentContext) {
+            const attachmentSystemMessage: ChatMessage = {
+              role: "system",
+              content: attachmentContext,
+            };
+            chatReq.messages = [attachmentSystemMessage, ...chatReq.messages];
+          }
+        } catch (err) {
+          // Attachment-context failure must NOT block chat — the turn
+          // proceeds without the inlined content (the model can still
+          // reach the document via search_content).
+          // eslint-disable-next-line no-console
+          console.warn("[llm/chat] attachment-context load failed:", err);
+        }
+
+        // Durably join the items to this conversation: uploads are tagged with
+        // the dashboard's client-minted draft chatId (`chat-<ts>`), which is
+        // lost on reload. Re-stamping `originatingChatId` to the server
+        // conversationId lets the dashboard rehydrate the chip row (and the
+        // per-chat export) via GET /api/files/brain?originatingChatId=<id>.
+        // Ownership-scoped by userId, same as the context lookup.
+        //
+        // SEPARATE try/catch from the context build (pr-reviewer #550 finding):
+        // when this was nested under the context build, a transient updateMany
+        // failure was swallowed by the same generic "context load failed"
+        // handler AFTER the context had already been injected — the model saw
+        // the attachment this turn but the association never persisted, so the
+        // chip silently vanished on reload with no distinct diagnostic. The
+        // persistence outcome is now logged on its own; still non-fatal.
+        if (conversationId) {
+          try {
+            await prisma.brainMemoryItem.updateMany({
+              where: {
+                id: { in: chatReq.attachments.map((a) => a.itemId) },
+                userId,
+                NOT: { originatingChatId: conversationId },
+              },
+              data: { originatingChatId: conversationId },
+            });
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.warn(
+              "[llm/chat] attachment chat-association persist failed " +
+                "(chip may not rehydrate on reload):",
+              err,
+            );
+          }
+        }
+      }
+
+      // ── Draft-upload adoption (WARP-844 follow-up) ───────────────
+      //
+      // Uploads made while the chat was still a draft are tagged with
+      // the client-minted chatId. Adopt them all into the persisted
+      // conversation — including rows whose upload finished after the
+      // send (the row is created at upload-request time, so it exists
+      // by now). Ownership-scoped: a forged draftChatId can only ever
+      // re-tag the caller's OWN items.
+      if (chatReq.draftChatId && conversationId && userId) {
+        try {
+          await prisma.brainMemoryItem.updateMany({
+            where: { originatingChatId: chatReq.draftChatId, userId },
+            data: { originatingChatId: conversationId },
+          });
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("[llm/chat] draft-upload adoption failed:", err);
+        }
+      }
+
+      // ── Base system prompt injection ─────────────────────────────
+      //
+      // Additive splice at index 0 (same pattern as pins/attachments
+      // above; this unshift runs LAST so the base prompt lands first).
+      // Skipped when tool_choice="none": that's voice-io's greeting
+      // path, which advertises zero tools and ships its own persona
+      // prompt — tool guidance there would be misleading. Memory-fact
+      // load failure degrades to the bare base prompt (fail-open, same
+      // posture as the pin block).
+      if (chatReq.tool_choice !== "none") {
+        let memoryBlock = "";
+        try {
+          memoryBlock = await buildMemoryFactsBlock(prisma, role);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("[llm/chat] memory-fact load failed:", err);
+        }
+        const baseSystemMessage: ChatMessage = {
+          role: "system",
+          content: buildBaseSystemPrompt(allowedForUser) + memoryBlock,
+        };
+        chatReq.messages = [baseSystemMessage, ...chatReq.messages];
+      }
+
       // ── Streaming path ──
       if (chatReq.stream) {
         res.writeHead(200, {
@@ -618,6 +980,31 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           "X-Accel-Buffering": "no",
         });
         const onEvent = (e: SSEEvent) => {
+          // WARP-854 — an "empty completion": the model "finished" without
+          // producing any visible output or calling a tool. Seen in the
+          // wild when the prompt alone overflows Ollama's context window
+          // (e.g. the owner-role tool list vs. the default 4096-token
+          // num_ctx): Ollama returns finish_reason=length with ZERO output
+          // tokens, the loop reads it as model_done, and the turn used to
+          // persist as completed-with-empty-content — invisible in the UI.
+          // Rewrite the terminal event to an error so the dashboard shows
+          // its retry chip instead of nothing, and finalize as `failed`.
+          if (
+            e.type === "done" &&
+            e.stop_reason === "model_done" &&
+            liveAssistantContent.trim().length === 0 &&
+            liveToolCalls.length === 0
+          ) {
+            emptyCompletion = true;
+            e = {
+              ...e,
+              stop_reason: "error",
+              error:
+                "empty_completion: the model returned no output. This " +
+                "usually means the request (system prompt + tools + " +
+                "history) overflowed the model's context window.",
+            };
+          }
           try {
             res.write(encodeSSE(e));
           } catch {
@@ -643,6 +1030,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           }
         };
         let terminal: "completed" | "failed" | "aborted" = "completed";
+        // WARP-854 — set by the onEvent done-rewrite above.
+        let emptyCompletion = false;
         // WARP-329: detect client-side abort. req.on("close") fires when
         // the client disconnects mid-stream; we still finalize but flag
         // the turn as aborted so the row reflects reality.
@@ -655,6 +1044,9 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             model: chatReq.model,
             messages: chatReq.messages,
             temperature: chatReq.temperature,
+            // WARP-849 — forward the caller's completion budget (the
+            // schema accepted it but the loop never received it).
+            max_tokens: chatReq.max_tokens,
             max_iter: chatReq.max_iter,
             allowed_tools: allowedForUser,
             tool_choice: chatReq.tool_choice,
@@ -675,6 +1067,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         } finally {
           res.end();
         }
+        if (emptyCompletion) terminal = "failed";
         if (clientAborted) terminal = "aborted";
         await finalizeAndNotify(terminal);
         return;
@@ -687,6 +1080,11 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           model: chatReq.model,
           messages: chatReq.messages,
           temperature: chatReq.temperature,
+          // WARP-849 — forward the caller's completion budget (the
+          // schema accepted it but the loop never received it). The
+          // setup wizard's sample probe relies on this so its raised
+          // reasoning-safe budget actually reaches Ollama.
+          max_tokens: chatReq.max_tokens,
           max_iter: chatReq.max_iter,
           allowed_tools: allowedForUser,
           tool_choice: chatReq.tool_choice,
@@ -708,7 +1106,27 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             data: t.result,
           });
         }
-        await finalizeAndNotify("completed");
+        // WARP-854 — empty completion (no output, no tool calls): the
+        // model "finished" without saying anything, typically because the
+        // prompt overflowed the context window (see the streaming-path
+        // comment). Surface it as an error instead of a silent success.
+        if (
+          result.stop_reason === "model_done" &&
+          result.message.content.trim().length === 0 &&
+          result.trace.length === 0
+        ) {
+          result = {
+            ...result,
+            stop_reason: "error" as const,
+            error:
+              "empty_completion: the model returned no output. This " +
+              "usually means the request (system prompt + tools + " +
+              "history) overflowed the model's context window.",
+          };
+          await finalizeAndNotify("failed");
+        } else {
+          await finalizeAndNotify("completed");
+        }
       } catch (err) {
         await finalizeAndNotify("failed");
         throw err;
@@ -737,10 +1155,23 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       }
       const limit = Number.parseInt(String(req.query.limit ?? "20"), 10) || 20;
       const offset = Number.parseInt(String(req.query.offset ?? "0"), 10) || 0;
+      // WARP-844 — optional search needle (title OR message content).
+      // Bounded so a pathological query can't become a giant ILIKE.
+      const q =
+        typeof req.query.q === "string" ? req.query.q.slice(0, 200) : undefined;
+      // WARP-845 — optional project filter (sidebar folder expand).
+      // Still userId-scoped in the service, so a foreign projectId just
+      // yields an empty list.
+      const projectId =
+        typeof req.query.projectId === "string" && req.query.projectId.length > 0
+          ? req.query.projectId
+          : undefined;
       const conversations = await persistence.listConversationsForUser(
         userId,
         limit,
         offset,
+        q,
+        projectId,
       );
       res.json({ conversations });
     } catch (err) {
@@ -793,6 +1224,83 @@ export function createLlmRouter(prisma: PrismaClient): Router {
     }
   });
 
+  // WARP-844 — truncate a conversation from a message onward. The
+  // dashboard's edit-and-resend calls this BEFORE re-sending the edited
+  // prompt so the persisted thread matches the visible one. Ownership +
+  // 404 posture mirror the other conversation routes (cross-user and
+  // unknown-message both 404; no existence leak).
+  router.delete(
+    "/llm/conversations/:id/messages/:messageId",
+    requireRole("owner", "admin", "family", "guest"),
+    async (req, res, next) => {
+      try {
+        const userId = (req as AuthedRequest).user?.username;
+        if (!userId) {
+          res.status(401).json({ error: "auth_required" });
+          return;
+        }
+        const deleted = await persistence.truncateConversationFromMessage(
+          req.params.id,
+          userId,
+          req.params.messageId,
+        );
+        if (deleted === "not_found") {
+          res.status(404).json({ error: "message_not_found" });
+          return;
+        }
+        if (deleted === "in_flight") {
+          // A doomed row is still streaming (cross-tab edit) — refuse
+          // rather than delete the turn out from under the agent loop.
+          res.status(409).json({ error: "turn_in_flight" });
+          return;
+        }
+        res.json({ deleted });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // WARP-844 — thumbs rating on an assistant message. Body:
+  // { feedback: "up" | "down" | null } (null clears). Ownership + 404
+  // posture mirror the other conversation routes.
+  router.patch(
+    "/llm/conversations/:id/messages/:messageId/feedback",
+    requireRole("owner", "admin", "family", "guest"),
+    async (req, res, next) => {
+      try {
+        const userId = (req as AuthedRequest).user?.username;
+        if (!userId) {
+          res.status(401).json({ error: "auth_required" });
+          return;
+        }
+        const parsed = z
+          .object({ feedback: z.enum(["up", "down"]).nullable() })
+          .safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({
+            error: "Invalid feedback",
+            details: parsed.error.flatten(),
+          });
+          return;
+        }
+        const ok = await persistence.setMessageFeedback(
+          req.params.id,
+          userId,
+          req.params.messageId,
+          parsed.data.feedback,
+        );
+        if (!ok) {
+          res.status(404).json({ error: "message_not_found" });
+          return;
+        }
+        res.json({ feedback: parsed.data.feedback });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
   // WARP-331: rename. Mirrors the GET/DELETE handlers above — scoped by
   // req.user.username, service maps "no such row owned by this user"
   // to a null return, and we surface that as 404.
@@ -804,32 +1312,85 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         res.status(401).json({ error: "auth_required" });
         return;
       }
-      const body = req.body as { title?: unknown };
-      if (typeof body?.title !== "string") {
+      const body = req.body as { title?: unknown; projectId?: unknown };
+      const hasTitle = typeof body?.title === "string";
+      // WARP-845 — move into / out of a project. `null` = ungroup. An
+      // empty string is rejected outright (it would skip the ownership
+      // guard's truthiness check and then violate the FK).
+      const hasProject =
+        (typeof body?.projectId === "string" && body.projectId.length > 0) ||
+        body?.projectId === null;
+      if (
+        body?.projectId !== undefined &&
+        body?.projectId !== null &&
+        (typeof body.projectId !== "string" || body.projectId.length === 0)
+      ) {
+        res.status(400).json({ error: "invalid_project_id" });
+        return;
+      }
+      // A present-but-non-string title is a malformed request, not a
+      // "field omitted" — reject it even when a valid projectId rides
+      // along, instead of silently dropping the title leg.
+      if (body?.title !== undefined && !hasTitle) {
+        res.status(400).json({ error: "title_or_project_required" });
+        return;
+      }
+      if (!hasTitle && !hasProject) {
+        res.status(400).json({ error: "title_or_project_required" });
+        return;
+      }
+      // Pre-validate BOTH legs before mutating anything, so a bad
+      // project id can't leave a half-applied rename behind (and gets
+      // its own error code instead of `conversation_not_found`).
+      if (hasTitle && (body.title as string).trim().length === 0) {
         res.status(400).json({ error: "title_required" });
         return;
       }
-      let finalTitle: string | null;
-      try {
-        finalTitle = await persistence.renameConversationForUser(
-          req.params.id,
-          userId,
-          body.title,
-        );
-      } catch (err) {
-        if (err instanceof Error && err.message === "title_required") {
-          res.status(400).json({ error: "title_required" });
+      if (hasProject && body.projectId !== null) {
+        const project = await prisma.chatProject.findFirst({
+          where: { id: body.projectId as string, userId },
+          select: { id: true },
+        });
+        if (!project) {
+          res.status(404).json({ error: "project_not_found" });
           return;
         }
-        throw err;
       }
-      if (finalTitle === null) {
-        res.status(404).json({ error: "conversation_not_found" });
-        return;
+      let finalTitle: string | null = null;
+      if (hasTitle) {
+        try {
+          finalTitle = await persistence.renameConversationForUser(
+            req.params.id,
+            userId,
+            body.title as string,
+          );
+        } catch (err) {
+          if (err instanceof Error && err.message === "title_required") {
+            res.status(400).json({ error: "title_required" });
+            return;
+          }
+          throw err;
+        }
+        if (finalTitle === null) {
+          res.status(404).json({ error: "conversation_not_found" });
+          return;
+        }
+      }
+      if (hasProject) {
+        const ok = await persistence.setConversationProject(
+          req.params.id,
+          userId,
+          (body.projectId as string | null) ?? null,
+        );
+        if (!ok) {
+          res.status(404).json({ error: "conversation_not_found" });
+          return;
+        }
       }
       res.json({
         id: req.params.id,
-        title: finalTitle,
+        ...(hasTitle ? { title: finalTitle } : {}),
+        ...(hasProject ? { projectId: body.projectId ?? null } : {}),
       });
     } catch (err) {
       next(err);

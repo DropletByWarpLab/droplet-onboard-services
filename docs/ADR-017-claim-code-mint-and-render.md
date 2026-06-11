@@ -97,6 +97,13 @@ unchanged.
 - **QR on the lid is omitted** (text-only code + setup URL) — the code is short
   and meant to be typed; a QR is a clean follow-up (could reuse the existing
   wifi-QR matrix path).
+  - *Follow-up landed* (design-handoff claim redesign): the claim screen now
+    carries a scan QR via exactly that matrix path — the display service
+    encodes `<setup_url>?c=<CODE>` host-side into a `setup_qr_matrix` claim
+    frame key (or shows the WARP-819 Wi-Fi join QR instead when creds are
+    pushed; at most one matrix per frame), and the dashboard's ClaimStep
+    prefills the code from the `c` query param. The orchestrator's
+    mint/verify contract above is unchanged.
 
 ## Alternatives considered
 

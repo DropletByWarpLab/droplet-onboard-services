@@ -223,7 +223,7 @@ Runs with `network_mode: host` and `NET_ADMIN` capability for direct router acce
 
 ## LLM Tools
 
-The AI gateway exposes these network tools (defined in `services/ai-gateway/tools/`):
+The LLM network tools (defined in `packages/tools-core/src/handlers/network/`) call the orchestrator's safety-tiered REST surface, which fronts this service:
 
 | Tool | Endpoint |
 |------|----------|

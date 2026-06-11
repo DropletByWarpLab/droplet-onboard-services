@@ -51,7 +51,7 @@ describe("VpnStep — router unreachable (WARP-807)", () => {
       new RouterStatusError("UNREACHABLE", "Create peer: fetch failed", 503),
     );
     render(
-      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToInternet={vi.fn()} />,
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
     );
     await reachForm();
 
@@ -75,7 +75,7 @@ describe("VpnStep — router unreachable (WARP-807)", () => {
       new RouterStatusError("UNREACHABLE", "Create peer: fetch failed", 503),
     );
     render(
-      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToInternet={vi.fn()} />,
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
     );
     await reachForm();
 
@@ -96,7 +96,7 @@ describe("VpnStep — router unreachable (WARP-807)", () => {
     );
     const onSkip = vi.fn();
     render(
-      <VpnStep onComplete={vi.fn()} onSkip={onSkip} onBackToInternet={vi.fn()} />,
+      <VpnStep onComplete={vi.fn()} onSkip={onSkip} onBackToAddress={vi.fn()} />,
     );
     await reachForm();
 
@@ -113,7 +113,7 @@ describe("VpnStep — router unreachable (WARP-807)", () => {
   it("still surfaces the real message for an ordinary (non-router) failure", async () => {
     createVpnPeer.mockRejectedValueOnce(new Error("Device name already taken"));
     render(
-      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToInternet={vi.fn()} />,
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
     );
     await reachForm();
 
@@ -141,21 +141,24 @@ describe("VpnStep — precheck states (SETUP-WIZARD-SPEC §D)", () => {
       configured: false,
       endpointConfigured: false,
     });
-    const onBackToInternet = vi.fn();
+    const onBackToAddress = vi.fn();
     render(
       <VpnStep
         onComplete={vi.fn()}
         onSkip={vi.fn()}
-        onBackToInternet={onBackToInternet}
+        onBackToAddress={onBackToAddress}
       />,
     );
 
     expect(
       await screen.findByText(/remote access needs an internet address first/i),
     ).toBeInTheDocument();
-    // "Set up internet" is a render-only back-jump — no redirect, no peer mint.
-    fireEvent.click(screen.getByRole("button", { name: /set up internet/i }));
-    expect(onBackToInternet).toHaveBeenCalledTimes(1);
+    // "Set up internet address" is a render-only back-jump to the address step —
+    // no redirect, no peer mint.
+    fireEvent.click(
+      screen.getByRole("button", { name: /set up internet address/i }),
+    );
+    expect(onBackToAddress).toHaveBeenCalledTimes(1);
     expect(createVpnPeer).not.toHaveBeenCalled();
   });
 
@@ -193,7 +196,7 @@ describe("VpnStep — precheck states (SETUP-WIZARD-SPEC §D)", () => {
       <VpnStep
         onComplete={onComplete}
         onSkip={vi.fn()}
-        onBackToInternet={vi.fn()}
+        onBackToAddress={vi.fn()}
       />,
     );
 
@@ -229,7 +232,7 @@ describe("VpnStep — precheck states (SETUP-WIZARD-SPEC §D)", () => {
       ],
     });
     render(
-      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToInternet={vi.fn()} />,
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
     );
 
     fireEvent.click(
@@ -244,7 +247,7 @@ describe("VpnStep — precheck states (SETUP-WIZARD-SPEC §D)", () => {
     fetchVpnStatus.mockRejectedValue(new Error("network down"));
     const onSkip = vi.fn();
     render(
-      <VpnStep onComplete={vi.fn()} onSkip={onSkip} onBackToInternet={vi.fn()} />,
+      <VpnStep onComplete={vi.fn()} onSkip={onSkip} onBackToAddress={vi.fn()} />,
     );
 
     expect(
