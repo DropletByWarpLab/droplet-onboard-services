@@ -576,6 +576,78 @@ class TestVoskWakeWordDetector:
         # genuine matches) and strictly below 1.0 (or nothing ever fires).
         assert DEFAULT_THRESHOLD < VOSK_DEFAULT_THRESHOLD < 1.0
 
+    def test_no_fire_when_word_timing_implausible(self, monkeypatch, tmp_path):
+        # Grammar-forced decoding can align the phrase over a stretch of
+        # TV music/noise at FULL confidence — observed live (score=1.00
+        # fire off broadcast audio). Word geometry is the independent
+        # rejection signal: here "droplet" is smeared over 2.4 s, which
+        # no human utterance produces → no fire.
+        self._install_fake_vosk(
+            monkeypatch,
+            accept_seq=[True],
+            result_obj={
+                "text": "hey droplet",
+                "result": [
+                    {"word": "hey", "conf": 1.0, "start": 0.1, "end": 0.3},
+                    {"word": "droplet", "conf": 1.0, "start": 0.4, "end": 2.8},
+                ],
+            },
+        )
+        det = VoskWakeWordDetector(wake_word="hey_droplet", model_path=str(tmp_path))
+        assert det.predict(_silence_frame()) == {}
+
+    def test_no_fire_when_inter_word_gap_implausible(self, monkeypatch, tmp_path):
+        # "hey" … 1.5 s of music … "droplet" is two separate alignments,
+        # not a wake phrase.
+        self._install_fake_vosk(
+            monkeypatch,
+            accept_seq=[True],
+            result_obj={
+                "text": "hey droplet",
+                "result": [
+                    {"word": "hey", "conf": 1.0, "start": 0.1, "end": 0.3},
+                    {"word": "droplet", "conf": 1.0, "start": 1.8, "end": 2.3},
+                ],
+            },
+        )
+        det = VoskWakeWordDetector(wake_word="hey_droplet", model_path=str(tmp_path))
+        assert det.predict(_silence_frame()) == {}
+
+    def test_fires_with_plausible_word_timings(self, monkeypatch, tmp_path):
+        # A normally spoken "hey droplet" (~0.8 s end to end, small beat
+        # between the words) passes the geometry gate and scores min-conf.
+        self._install_fake_vosk(
+            monkeypatch,
+            accept_seq=[True],
+            result_obj={
+                "text": "hey droplet",
+                "result": [
+                    {"word": "hey", "conf": 0.97, "start": 0.10, "end": 0.32},
+                    {"word": "droplet", "conf": 0.93, "start": 0.45, "end": 0.92},
+                ],
+            },
+        )
+        det = VoskWakeWordDetector(wake_word="hey_droplet", model_path=str(tmp_path))
+        assert det.predict(_silence_frame()) == {"hey_droplet": 0.93}
+
+    def test_fires_without_timing_data(self, monkeypatch, tmp_path):
+        # Timing is an EXTRA rejection signal when present — a result
+        # array without start/end keys must still fire on confidence
+        # alone (older vosk builds omit timings).
+        self._install_fake_vosk(
+            monkeypatch,
+            accept_seq=[True],
+            result_obj={
+                "text": "hey droplet",
+                "result": [
+                    {"word": "hey", "conf": 0.95},
+                    {"word": "droplet", "conf": 0.9},
+                ],
+            },
+        )
+        det = VoskWakeWordDetector(wake_word="hey_droplet", model_path=str(tmp_path))
+        assert det.predict(_silence_frame()) == {"hey_droplet": 0.9}
+
     def test_predict_empty_and_unloaded_when_model_dir_missing(self):
         # No fake vosk installed + a nonexistent dir → the cheap dir
         # check short-circuits before importing vosk. predict() returns

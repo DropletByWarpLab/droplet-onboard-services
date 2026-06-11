@@ -197,6 +197,23 @@ def classify_tool_choice(transcript: str) -> Optional[ToolChoice]:
             return "none"
     return None
 
+
+def transcript_is_actionable(transcript: str) -> bool:
+    """Whether a post-wake transcript looks like an actual command.
+
+    Residual false wakes (phonetic near-collisions — the TV saying
+    "hey, drop it") capture ambient fragments: "it.", "uh", "yeah.".
+    Every real command or question carries at least one word of three
+    or more letters ("stop", "lights", "what's the weather"), so gate
+    the LLM → speak path on that. False wakes then decay silently
+    instead of the box answering the television; a false NEGATIVE here
+    would require a genuine command made entirely of ≤2-letter words,
+    which doesn't occur in practice.
+
+    Pure function — no I/O, no state. Safe to call from any thread.
+    """
+    return bool(re.search(r"[a-zA-Z]{3,}", transcript or ""))
+
 # Default tuning. Overridable via env at construct time (read by
 # main.py's wiring, not by this module directly).
 DEFAULT_THRESHOLD = 0.3
@@ -1176,6 +1193,18 @@ class WakePipeline:
         behaviour (e.g. dashboard-driven dispatch in commit 8).
         """
         if not transcript:
+            return
+        if not transcript_is_actionable(transcript):
+            # Residual false wakes (a phonetic near-collision on the TV —
+            # "hey, drop it") capture room fragments like "it." or "uh".
+            # A real post-wake command always carries at least one
+            # substantive word; don't send fragments to the LLM, and
+            # especially don't speak an answer to the television. The
+            # transcript still lands in /voice/status for diagnosis.
+            logger.info(
+                "transcript %r is a fragment, not a command — staying quiet",
+                transcript,
+            )
             return
         if self._llm is None or not self._llm_available:
             logger.info(

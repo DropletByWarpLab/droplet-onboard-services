@@ -481,10 +481,48 @@ class VoskWakeWordDetector(WakeWordDetector):
                 continue
             if any("conf" not in w for w in window):
                 continue
+            if not self._window_timing_plausible(window):
+                continue
             m = min(float(w["conf"]) for w in window)
             if best is None or m > best:
                 best = m
         return best
+
+    @staticmethod
+    def _window_timing_plausible(window: list[dict]) -> bool:
+        """Reject phrase alignments whose word geometry no human utterance
+        produces. Grammar-forced decoding can align the phrase over a
+        stretch of TV music/noise at full confidence — but those
+        alignments tend to smear words out (or compress them to nothing).
+        Bounds are deliberately generous so a real "hey droplet" — fast,
+        slow, or with a beat between the words — always passes:
+
+          * each word lasts 0.05–1.2 s,
+          * the gap between consecutive words is ≤ 0.6 s,
+          * the whole phrase spans 0.2–2.0 s.
+
+        Windows without complete start/end data pass — timing is an
+        EXTRA rejection signal when present, never a new requirement
+        (older vosk builds omit timings unless SetWords is on).
+        """
+        try:
+            times = [
+                (float(w["start"]), float(w["end"]))
+                for w in window
+                if "start" in w and "end" in w
+            ]
+        except (TypeError, ValueError):
+            return True  # malformed timing data — don't block on it
+        if len(times) < len(window):
+            return True  # incomplete timing data — conf gate still applies
+        for start, end in times:
+            if not 0.05 <= (end - start) <= 1.2:
+                return False
+        for (_, prev_end), (nxt_start, _) in zip(times, times[1:]):
+            if nxt_start - prev_end > 0.6:
+                return False
+        span = times[-1][1] - times[0][0]
+        return 0.2 <= span <= 2.0
 
     def reset(self) -> None:
         """Reset the KaldiRecognizer's decoder state.
