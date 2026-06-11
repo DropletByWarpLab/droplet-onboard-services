@@ -26,6 +26,7 @@ trust, PM secrets) are summarized in [`CLAUDE.md`](../CLAUDE.md).
 | `FILES_ROOT`         | `.data/files` (local) / `/data/files` (Docker)       |
 | `STORAGE_BACKEND`    | `legacy` or `nextcloud`                              |
 | `NEXTCLOUD_URL`      | Nextcloud instance URL                               |
+| `FILES_API_URL` | Files-API target for the MCP file tools (default `http://orchestrator:3000/api/files`). Despite the client's historical "nextcloud" name, raw Nextcloud can't serve these tools (WARP-861) |
 | `AUTH_ENABLED`       | Enable/disable auth                                  |
 | `PORT`               | Server listen port                                   |
 | `DEVICE_SECRET`      | Device authentication secret                         |

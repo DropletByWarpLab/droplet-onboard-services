@@ -213,7 +213,7 @@ describe("MCP _meta.ncToken propagation (stdio)", () => {
     // `path` reached the handler; `ncToken` did NOT reach the args
     // (it would have been forwarded as a path or query param if it
     // had).
-    expect(argsSpy).toHaveBeenCalledWith("/photos");
+    expect(argsSpy).toHaveBeenCalledWith(`/?path=${encodeURIComponent("/photos")}`);
     // Sanity: the token did make it through the side-channel.
     expect(captured.authHeader).toBe("nct-xyz");
 

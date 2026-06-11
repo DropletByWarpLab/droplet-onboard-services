@@ -188,6 +188,9 @@ Full per-variable reference (defaults, ports, resource limits):
 - `DROPLET_PM_ADMIN_TOKEN` is orchestrator-only — **never** exposed to
   the dashboard or LLM agent. `DROPLET_PM_WEBHOOK_SECRET` empty →
   webhook receiver fails CLOSED.
+- `FILES_API_URL` is the MCP file-tools target (default
+  `http://orchestrator:3000/api/files`). Raw Nextcloud cannot serve
+  these tools — see WARP-861.
 
 ## GTM alignment
 

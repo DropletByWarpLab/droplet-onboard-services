@@ -24,7 +24,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     "X-Nextcloud-User": ctx.userId,
   };
   const res = await ctx.http.nextcloud.delete(
-    `/files?path=${encodeURIComponent(v.path)}`,
+    `/?path=${encodeURIComponent(v.path)}`,
     { headers },
   );
   if (!res.ok) return err("DELETE_FAILED", `nextcloud returned ${res.status}`);

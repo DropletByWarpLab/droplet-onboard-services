@@ -38,7 +38,7 @@ import { resolveNcToken } from "../services/nextcloud-session.service.js";
 import { publish } from "../services/mqtt.service.js";
 import { config } from "../config.js";
 import type { FileEntryInfo } from "../types/index.js";
-import { requireRole } from "../middleware/auth.js";
+import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 
 const logger = pino({ name: "files-route" });
 
@@ -65,7 +65,26 @@ class MissingNcTokenError extends Error {
   }
 }
 
+/**
+ * WARP-861 — the MCP file tools call these routes with the service
+ * bearer (SERVICE_TOKEN_MCP → `_service:mcp`) plus the per-user
+ * Nextcloud credential the agent loop threads via `_meta.ncToken`:
+ *   X-Nextcloud-Token: the user's NC app-password / session token
+ *   X-Nextcloud-User:  the username the call acts as
+ * Only the trusted mcp service principal may assert another user this
+ * way (same trust posture as the stdio `_meta` channel); for every
+ * other caller the headers are ignored and the session cookie rules.
+ */
+function isMcpService(req: Request): boolean {
+  return req.user?.id === "_service:mcp" && req.user.role === "service";
+}
+
 async function getToken(req: Request): Promise<string> {
+  if (isMcpService(req)) {
+    const headerToken = (req.header("x-nextcloud-token") ?? "").trim();
+    if (!headerToken) throw new MissingNcTokenError();
+    return headerToken;
+  }
   const token = await resolveNcToken(req);
   if (!token) throw new MissingNcTokenError();
   return token;
@@ -73,6 +92,13 @@ async function getToken(req: Request): Promise<string> {
 
 /** Get the username from the authenticated request. */
 function getUser(req: Request): string {
+  if (isMcpService(req)) {
+    const headerUser = (req.header("x-nextcloud-user") ?? "").trim();
+    // No fallback for the service principal: acting as "admin" by
+    // default would be a privilege escalation, not a convenience.
+    if (!headerUser) throw new MissingNcTokenError();
+    return headerUser;
+  }
   return req.user?.username || "admin";
 }
 
@@ -337,7 +363,7 @@ export function createFilesRouter(prisma: PrismaClient): Router {
   });
 
   // ── Delete a file or directory ──
-  router.delete("/files", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  router.delete("/files", requireRoleOrMcpService("owner", "admin", "family"), async (req, res, next) => {
     try {
       const filePath = req.query.path as string;
       if (!filePath) {
@@ -359,7 +385,7 @@ export function createFilesRouter(prisma: PrismaClient): Router {
   });
 
   // ── Create a directory ──
-  router.post("/files/mkdir", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  router.post("/files/mkdir", requireRoleOrMcpService("owner", "admin", "family"), async (req, res, next) => {
     try {
       const schema = z.object({ path: z.string().min(1) });
       const parsed = schema.safeParse(req.body);
@@ -516,7 +542,7 @@ export function createFilesRouter(prisma: PrismaClient): Router {
   });
 
   // ── Move (POST /api/files/move) ──
-  router.post("/files/move", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  router.post("/files/move", requireRoleOrMcpService("owner", "admin", "family"), async (req, res, next) => {
     try {
       const schema = z.object({
         from: z.string().min(1),
@@ -542,7 +568,7 @@ export function createFilesRouter(prisma: PrismaClient): Router {
   });
 
   // ── Copy (POST /api/files/copy) ──
-  router.post("/files/copy", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  router.post("/files/copy", requireRoleOrMcpService("owner", "admin", "family"), async (req, res, next) => {
     try {
       const schema = z.object({
         from: z.string().min(1),
