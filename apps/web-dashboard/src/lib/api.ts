@@ -1388,7 +1388,12 @@ export async function rebootRouter(): Promise<{ operationId: string | null }> {
     body: JSON.stringify({}),
   });
   const body = await res.json().catch(() => ({}));
-  if (res.status === 202 && body?.confirmationToken && body?.operation) {
+  if (res.status === 202) {
+    if (!body?.confirmationToken || !body?.operation) {
+      throw new Error(
+        "Unexpected 202 response: missing confirmationToken or operation",
+      );
+    }
     return confirmNetworkCommand(body.confirmationToken, body.operation);
   }
   if (res.ok) {

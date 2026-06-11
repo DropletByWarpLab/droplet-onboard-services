@@ -35,7 +35,7 @@ describe("rebootRouter (WARP-871)", () => {
     authFetchMock
       .mockResolvedValueOnce(
         res({
-          ok: false,
+          ok: true,
           status: 202,
           json: {
             status: "confirmation_required",
@@ -82,5 +82,18 @@ describe("rebootRouter (WARP-871)", () => {
       res({ ok: false, status: 503, json: {} }),
     );
     await expect(rebootRouter()).rejects.toThrow(/503/);
+  });
+
+  it("throws on a 202 with missing operation field (malformed server response)", async () => {
+    authFetchMock.mockResolvedValueOnce(
+      res({
+        ok: true,
+        status: 202,
+        json: { status: "confirmation_required", confirmationToken: "tok-x" },
+      }),
+    );
+    await expect(rebootRouter()).rejects.toThrow(
+      /Unexpected 202 response: missing confirmationToken or operation/,
+    );
   });
 });
