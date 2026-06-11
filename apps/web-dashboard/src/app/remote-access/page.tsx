@@ -35,6 +35,7 @@ import { Dialog } from "@/components/Dialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useToast } from "@/components/Toast";
 import { translateError } from "@/lib/friendly-errors";
+import { dashboardIpFromConf } from "@/lib/wireguard";
 
 /**
  * Remote Access — WireGuard VPN management page.
@@ -581,8 +582,9 @@ function AddDeviceDialog({
                   {/* The conf's DNS line is the box-side gateway — the only
                       address the dashboard answers on for VPN clients.
                       .local names never resolve over the tunnel (phones use
-                      multicast for those, which doesn't cross it). */}
-                  https://{created.conf.match(/^DNS\s*=\s*([0-9.]+)/m)?.[1] ?? "192.168.20.1"}
+                      multicast for those, which doesn't cross it). Parsed +
+                      IPv4-validated in lib/wireguard.ts. */}
+                  https://{dashboardIpFromConf(created.conf)}
                 </strong>{" "}
                 in the browser — that&rsquo;s your Droplet from anywhere.
               </li>

@@ -26,6 +26,7 @@ import type {
 import { StepShell } from "@/components/setup/StepShell";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 import { ScrollRegion } from "@/components/setup/ScrollRegion";
+import { dashboardIpFromConf } from "@/lib/wireguard";
 
 /**
  * Wizard step — connect the customer's phone via WireGuard (remote access).
@@ -478,14 +479,11 @@ export function VpnStep({
   // created — peer is minted, show the QR + .conf + how-to-use list.
   // ──────────────────────────────────────────────────────────────────
   if (!created) return null;
-  // The conf's DNS line is the box-side gateway the tunnel routes to
-  // (192.168.20.1 on single-box, 192.168.50.1 on multi-box) — and the
-  // only address the dashboard answers on for VPN clients. Parse it
-  // instead of pinning a deployment shape. mDNS names (droplet.local)
-  // can NOT be used here: phones resolve .local via multicast only,
-  // which never crosses the tunnel.
-  const dashboardIp =
-    created.conf.match(/^DNS\s*=\s*([0-9.]+)/m)?.[1] ?? "192.168.20.1";
+  // The conf's DNS line is the box-side gateway the tunnel routes to —
+  // the only address the dashboard answers on for VPN clients. Parsed
+  // and IPv4-validated in lib/wireguard.ts (WIREGUARD_DNS reaches the
+  // conf unvalidated, and a mistyped value must not become a dead link).
+  const dashboardIp = dashboardIpFromConf(created.conf);
   return (
     <StepShell
       current="vpn"
