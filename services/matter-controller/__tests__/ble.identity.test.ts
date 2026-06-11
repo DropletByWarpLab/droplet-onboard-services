@@ -1,59 +1,69 @@
 /**
- * BLE package-identity pin (WARP-850 on-box regression).
+ * BLE package-identity pin (WARP-850 on-box regressions).
  *
- * The first deployed sidecar image shipped with @matter/main@0.16.10
- * but @matter/nodejs-ble@0.16.11 (caret ranges + lockfile drift).
- * matter.js pins exact versions across its workspace, so npm nested
- * 0.16.11 copies of @matter/general + @matter/protocol under
- * nodejs-ble — TWO Environment.default singletons and TWO Ble symbols.
- * The install hook registered Ble into ITS environment while ble.ts
- * set `ble.enable` on OURS: registration silently no-oped and the box
- * came up IP-only ("ble.enable was set but no Ble implementation
- * registered").
+ * The first deployed sidecar image hit TWO identity-class failures:
+ *  1. Version skew (@matter/main 0.16.10 vs @matter/nodejs-ble 0.16.11
+ *     via caret ranges) nested duplicate @matter/general+protocol —
+ *     two Environment.default singletons, two Ble symbols.
+ *  2. After pinning: the package's install hook registered into the
+ *     ESM copy of @matter/general (dynamic import() from our CJS dist
+ *     loads the ESM build) while the controller checked the CJS copy —
+ *     hook fired in a parallel module universe, has(Ble) stayed false.
  *
- * This test uses the REAL modules end-to-end — no seams — so any
- * future version skew that splits the package identity fails CI
- * before it ships. It is hardware-free: the install hook constructs
- * NodeJsBle on `ble.enable=true` without touching HCI (the noble
- * native load is lazy, deferred to first scanner access, which this
- * test deliberately never triggers).
+ * ble.ts therefore registers EXPLICITLY: load the module, construct
+ * NodeJsBle against our environment, env.set(Ble, instance) keyed to
+ * OUR Ble symbol. This test pins that chain with the REAL modules and
+ * the REAL Environment.default — no seams — so any future skew or
+ * loader split that breaks construct-or-register fails CI before it
+ * ships. Hardware-free: noble's native load is lazy (first scanner
+ * access) and this test deliberately never touches it.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Environment } from "@matter/main";
 import { Ble } from "@matter/main/protocol";
 
-describe("BLE registration package identity (real modules, no seams)", () => {
+let registered: unknown;
+
+describe("BLE explicit registration against the real Environment.default", () => {
   beforeEach(() => {
     // Assert no stale Ble state from a previous broken test — catches
-    // singleton-split scenarios early with a clear error rather than a
+    // singleton-leak scenarios early with a clear error rather than a
     // confusing failure inside the test body.
     expect(
       Environment.default.has(Ble),
-      "Ble was already registered before test started — check for cross-suite singleton leak"
+      "Ble was already registered before test started — check for cross-suite singleton leak",
     ).toBe(false);
   });
 
   afterEach(() => {
-    // Best-effort deregistration: sets ble.enable=false on OUR
-    // Environment.default, which unregisters the hook IFF the install
-    // hook from @matter/nodejs-ble was bound to the same singleton.
-    // In a version-skewed tree the nested copy of @matter/general owns
-    // a different Environment.default, so this call is a no-op for that
-    // copy — cleanup is silently incomplete, but the beforeEach guard
-    // in the next test will catch any residual state.
-    Environment.default.vars.set("ble.enable", false);
+    // Deterministic cleanup: we registered explicitly, so we can
+    // deregister explicitly — no hook, no best-effort vars flip.
+    if (registered !== undefined) {
+      (Environment.default as unknown as {
+        delete(type: unknown, instance?: unknown): void;
+      }).delete(Ble, registered);
+      registered = undefined;
+    }
   });
 
-  it("the nodejs-ble install hook registers into OUR Environment.default under OUR Ble symbol", async () => {
-    await import("@matter/nodejs-ble");
+  it("real NodeJsBle constructs against our environment and registers under OUR Ble symbol", async () => {
+    const mod = (await import("@matter/nodejs-ble")) as unknown as {
+      NodeJsBle: new (options: { environment: unknown }) => unknown;
+    };
 
     const env = Environment.default;
     env.vars.set("ble.hci.id", 0);
-    env.vars.set("ble.enable", true);
 
-    // On a version-skewed tree this is false: the hook lives in a
-    // nested @matter/general copy with its own Environment.default
-    // and its own Ble key, and our vars.set never even reaches it.
+    // Construction must accept our environment (fails on version skew
+    // where the constructor's expected Environment API drifted).
+    registered = new mod.NodeJsBle({ environment: env });
+
+    // Explicit registration keyed to OUR Ble symbol must be visible to
+    // OUR env.has — the exact check the CommissioningController runs.
+    (env as unknown as { set(type: unknown, instance: unknown): void }).set(
+      Ble,
+      registered,
+    );
     expect(env.has(Ble)).toBe(true);
   });
 });
