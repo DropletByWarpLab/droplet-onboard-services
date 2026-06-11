@@ -82,10 +82,15 @@ def resolve_wake_threshold(detector: object) -> float:
 # Display-only fallback for /voice/status before the pipeline exists
 # (no mic / startup bailed). The live pipeline reports its own value.
 # Compose passes WAKE_THRESHOLD through as "" when unset — treat empty
-# the same as absent (resolve_wake_threshold does too).
+# the same as absent (resolve_wake_threshold does too). Falls back to
+# the engine-agnostic DEFAULT_THRESHOLD: before build_detector_from_env
+# runs the detector type is unknowable, and reporting the Vosk 0.7 on a
+# box that would resolve to openWakeWord (live gate 0.3) sends an
+# operator down the wrong path. resolve_wake_threshold owns the real,
+# engine-aware value once the pipeline exists.
 WAKE_THRESHOLD = float(
     (os.environ.get("WAKE_THRESHOLD") or "").strip()
-    or str(VOSK_DEFAULT_THRESHOLD),
+    or str(DEFAULT_THRESHOLD),
 )
 WAKE_DEBOUNCE_S = float(
     os.environ.get("WAKE_DEBOUNCE_S", str(DEFAULT_DEBOUNCE_S))
@@ -207,6 +212,19 @@ async def startup() -> None:
         stt = build_stt_from_env()
         tts = build_tts_from_env()
         llm = await asyncio.to_thread(build_llm_from_env)
+        wake_threshold = resolve_wake_threshold(detector)
+        # Announce the EFFECTIVE threshold: boxes that relied on the old
+        # compose default (`:-0.3`) silently moved to the engine-aware
+        # default when the passthrough became `:-` — this line is how an
+        # operator sees what the container actually runs at.
+        logger.info(
+            "wake threshold: %.2f (engine: %s%s)",
+            wake_threshold,
+            type(detector).__name__,
+            ""
+            if (os.environ.get("WAKE_THRESHOLD") or "").strip()
+            else " — engine default; set WAKE_THRESHOLD to override",
+        )
         _pipeline = WakePipeline(
             detector=detector,
             stt=stt,
@@ -214,7 +232,7 @@ async def startup() -> None:
             llm=llm,
             input_device_index=r.input_device.index if r.input_device else None,
             output_device_index=r.output_device.index if r.output_device else None,
-            threshold=resolve_wake_threshold(detector),
+            threshold=wake_threshold,
             debounce_s=WAKE_DEBOUNCE_S,
             stt_max_record_s=STT_MAX_RECORD_S,
             post_speak_cooldown_s=POST_SPEAK_COOLDOWN_S,

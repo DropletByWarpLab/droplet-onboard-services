@@ -648,6 +648,45 @@ class TestVoskWakeWordDetector:
         det = VoskWakeWordDetector(wake_word="hey_droplet", model_path=str(tmp_path))
         assert det.predict(_silence_frame()) == {"hey_droplet": 0.9}
 
+    def test_no_fire_when_partially_timed_word_is_implausible(
+        self, monkeypatch, tmp_path,
+    ):
+        # One word missing timing must not void the whole geometry gate:
+        # the words that DO carry timing are still validated. Here
+        # "droplet" is smeared over 2.4 s — pre-fix code let this through
+        # because "hey" lacked start/end (pr-reviewer finding, 2026-06-11).
+        self._install_fake_vosk(
+            monkeypatch,
+            accept_seq=[True],
+            result_obj={
+                "text": "hey droplet",
+                "result": [
+                    {"word": "hey", "conf": 1.0},
+                    {"word": "droplet", "conf": 1.0, "start": 0.4, "end": 2.8},
+                ],
+            },
+        )
+        det = VoskWakeWordDetector(wake_word="hey_droplet", model_path=str(tmp_path))
+        assert det.predict(_silence_frame()) == {}
+
+    def test_fires_with_partial_but_plausible_timing(self, monkeypatch, tmp_path):
+        # Partial timing with plausible evidence still fires — checks
+        # whose endpoints are missing (span, gap) are skipped, never
+        # failed: timing stays an extra signal, not a new requirement.
+        self._install_fake_vosk(
+            monkeypatch,
+            accept_seq=[True],
+            result_obj={
+                "text": "hey droplet",
+                "result": [
+                    {"word": "hey", "conf": 0.95},
+                    {"word": "droplet", "conf": 0.9, "start": 0.45, "end": 0.92},
+                ],
+            },
+        )
+        det = VoskWakeWordDetector(wake_word="hey_droplet", model_path=str(tmp_path))
+        assert det.predict(_silence_frame()) == {"hey_droplet": 0.9}
+
     def test_predict_empty_and_unloaded_when_model_dir_missing(self):
         # No fake vosk installed + a nonexistent dir → the cheap dir
         # check short-circuits before importing vosk. predict() returns

@@ -443,10 +443,21 @@ class VoskWakeWordDetector(WakeWordDetector):
         # must never outrank the operator's WAKE_THRESHOLD.
         score = self._phrase_confidence(res)
         if score is None:
-            logger.info(
-                "vosk: wake match on %r without confidence evidence — ignoring",
-                text,
-            )
+            if self._timing_rejected:
+                # Confidence evidence existed but the word geometry failed
+                # _window_timing_plausible — say so, or an operator chasing
+                # a missed real wake debugs the wrong gate.
+                logger.info(
+                    "vosk: wake match on %r rejected — word timing "
+                    "implausible (grammar-forced alignment)",
+                    text,
+                )
+            else:
+                logger.info(
+                    "vosk: wake match on %r without confidence evidence "
+                    "— ignoring",
+                    text,
+                )
             self.reset()
             return {}
         logger.info(
@@ -467,8 +478,11 @@ class VoskWakeWordDetector(WakeWordDetector):
         phrase tokens, score each as min(conf) over the window, return the
         best window's score. Windows missing any `conf` value don't count.
         Returns None when no fully-evidenced window exists — the caller
-        treats that as "no fire".
+        treats that as "no fire". Sets `_timing_rejected` when at least
+        one confident window was thrown out by the timing gate, so the
+        caller can log the true rejection reason.
         """
+        self._timing_rejected = False
         words = res.get("result") or []
         seq = [w for w in words if isinstance(w, dict) and "word" in w]
         p = self._phrase_tokens
@@ -482,6 +496,7 @@ class VoskWakeWordDetector(WakeWordDetector):
             if any("conf" not in w for w in window):
                 continue
             if not self._window_timing_plausible(window):
+                self._timing_rejected = True
                 continue
             m = min(float(w["conf"]) for w in window)
             if best is None or m > best:
@@ -501,27 +516,36 @@ class VoskWakeWordDetector(WakeWordDetector):
           * the gap between consecutive words is ≤ 0.6 s,
           * the whole phrase spans 0.2–2.0 s.
 
-        Windows without complete start/end data pass — timing is an
-        EXTRA rejection signal when present, never a new requirement
-        (older vosk builds omit timings unless SetWords is on).
+        Timing is an EXTRA rejection signal when present, never a new
+        requirement (older vosk builds omit timings unless SetWords is
+        on) — but a partially-timed window is validated on the evidence
+        it DOES carry: every available (start, end) pair is checked,
+        gaps are checked between adjacent timed words, and only the
+        checks whose endpoints are missing are skipped. Discarding all
+        timing because ONE word lacks it would let a smeared
+        grammar-forced alignment through on a technicality.
         """
         try:
-            times = [
+            timed = [
                 (float(w["start"]), float(w["end"]))
-                for w in window
                 if "start" in w and "end" in w
+                else None
+                for w in window
             ]
         except (TypeError, ValueError):
             return True  # malformed timing data — don't block on it
-        if len(times) < len(window):
-            return True  # incomplete timing data — conf gate still applies
-        for start, end in times:
+        present = [t for t in timed if t is not None]
+        if not present:
+            return True  # no timing at all — conf gate still applies
+        for start, end in present:
             if not 0.05 <= (end - start) <= 1.2:
                 return False
-        for (_, prev_end), (nxt_start, _) in zip(times, times[1:]):
-            if nxt_start - prev_end > 0.6:
+        for prev, nxt in zip(timed, timed[1:]):
+            if prev is not None and nxt is not None and nxt[0] - prev[1] > 0.6:
                 return False
-        span = times[-1][1] - times[0][0]
+        if timed[0] is None or timed[-1] is None:
+            return True  # span check needs both endpoints — skip just it
+        span = timed[-1][1] - timed[0][0]
         return 0.2 <= span <= 2.0
 
     def reset(self) -> None:
