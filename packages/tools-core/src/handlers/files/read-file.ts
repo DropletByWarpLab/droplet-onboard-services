@@ -66,7 +66,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "read_file",
   description:
-    "Read the text content of a file on the Droplet's Nextcloud. Returns up to 10,000 characters; binary files are rejected with an explanatory note.",
+    "Read the text content of a file on the Droplet's Nextcloud. Returns up to 10,000 characters; binary files are rejected with an explanatory note. NOTE: files attached in chat live in brain memory, not here — use search_content for those.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

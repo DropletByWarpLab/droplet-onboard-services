@@ -29,7 +29,7 @@ describe("list_files", () => {
     );
     const r = await listFiles.handler({}, ctxWith(get));
     expect(get).toHaveBeenCalledWith(
-      "/",
+      `/?path=${encodeURIComponent("/")}`,
       expect.objectContaining({
         headers: expect.objectContaining({
           "X-Nextcloud-Token": "ncT-abc",
@@ -43,7 +43,7 @@ describe("list_files", () => {
   it("forwards a non-default path", async () => {
     const get = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
     await listFiles.handler({ path: "/photos" }, ctxWith(get));
-    expect(get).toHaveBeenCalledWith("/photos", expect.anything());
+    expect(get).toHaveBeenCalledWith(`/?path=${encodeURIComponent("/photos")}`, expect.anything());
   });
 
   // TOOLS-03: auth gate — the raw path is used as the entire WebDAV URL

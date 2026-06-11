@@ -336,7 +336,12 @@ services:
       - DATABASE_URL=${DATABASE_URL}
       - ROUTING_SERVICE_URL=${ROUTING_SERVICE_URL:-http://host.docker.internal:8080}
       - SWITCH_SERVICE_URL=${SWITCH_SERVICE_URL:-http://host.docker.internal:8081}
-      - NEXTCLOUD_URL=http://nextcloud:80
+      # WARP-861: the files-domain tools speak the orchestrator's
+      # /api/files contract (it validates the per-user ncToken headers
+      # and proxies WebDAV itself) — NOT raw Nextcloud, which can't serve
+      # the JSON shape and redirects plain HTTP to an unserved :443
+      # behind the TLS gateway.
+      - FILES_API_URL=${FILES_API_URL:-http://orchestrator:3000/api/files}
       # WARP-102: Matter tool calls + audit-log proxy through here back
       # to the orchestrator's /api/matter/*, /api/audit-log/*. Explicit
       # wiring (rather than relying on baseUrlFor's compose-DNS default)

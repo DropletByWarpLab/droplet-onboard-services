@@ -37,7 +37,12 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     "X-Nextcloud-Token": ctx.ncToken,
     "X-Nextcloud-User": ctx.userId,
   };
-  const res = await ctx.http.nextcloud.get(path, { headers });
+  // WARP-861: the files API lists via `GET /?path=<dir>` — the path rides
+  // in the query, not the URL path (which only matched "/" by accident).
+  const res = await ctx.http.nextcloud.get(
+    `/?path=${encodeURIComponent(path)}`,
+    { headers },
+  );
   if (!res.ok) {
     return {
       ok: false,
@@ -52,7 +57,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "list_files",
   description:
-    "List files and directories at a path on the Droplet device's Nextcloud storage. Defaults to '/'.",
+    "List files and directories at a path in the user's Droplet file storage. Defaults to '/'. NOTE: files attached in chat live in brain memory, not here — use search_content to find their contents.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,
