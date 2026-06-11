@@ -33,6 +33,8 @@ from voice.devices import (
 )
 from voice.pipeline import (
     DEFAULT_DEBOUNCE_S,
+    DEFAULT_INPUT_DOWNMIX,
+    DEFAULT_INPUT_GAIN,
     DEFAULT_POST_SPEAK_COOLDOWN_S,
     DEFAULT_STT_MAX_RECORD_S,
     DEFAULT_THRESHOLD,
@@ -93,6 +95,16 @@ STT_MAX_RECORD_S = float(
 )
 POST_SPEAK_COOLDOWN_S = float(
     os.environ.get("POST_SPEAK_COOLDOWN_S", str(DEFAULT_POST_SPEAK_COOLDOWN_S))
+)
+# Multichannel→mono strategy + digital input gain (see pipeline.py's
+# DEFAULT_INPUT_DOWNMIX / DEFAULT_INPUT_GAIN). Empty env = default.
+VOICE_INPUT_DOWNMIX = (
+    (os.environ.get("VOICE_INPUT_DOWNMIX") or "").strip().lower()
+    or DEFAULT_INPUT_DOWNMIX
+)
+VOICE_INPUT_GAIN = float(
+    (os.environ.get("VOICE_INPUT_GAIN") or "").strip()
+    or str(DEFAULT_INPUT_GAIN),
 )
 
 app = FastAPI(title="voice-io", version="0.1.0")
@@ -210,6 +222,8 @@ async def startup() -> None:
             # re-enumerates (reSpeaker card-index shift under Docker) so
             # the wake loop reopens the right device instead of dying.
             resolve_input_device=_reresolve_input_index,
+            input_downmix=VOICE_INPUT_DOWNMIX,
+            input_gain=VOICE_INPUT_GAIN,
         )
         await asyncio.to_thread(_pipeline.start)
     except Exception as exc:

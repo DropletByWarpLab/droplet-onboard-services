@@ -946,6 +946,15 @@ services:
     environment:
       - VOICE_INPUT_DEVICE=${VOICE_INPUT_DEVICE:-}
       - VOICE_OUTPUT_DEVICE=${VOICE_OUTPUT_DEVICE:-}
+      # Multichannel→mono: "first" (default) consumes channel 0 — the
+      # primary/processed channel on mic arrays (the reSpeaker XVF3800
+      # carries beamformed voice on L, AEC residual on R; averaging the
+      # two halves the voice). "mean" averages, for plain stereo mics.
+      - VOICE_INPUT_DOWNMIX=${VOICE_INPUT_DOWNMIX:-}
+      # Digital gain on the mono capture frame (int16-clipped). 1.0 =
+      # untouched; ~2.0 ≈ +6 dB for a quiet chain. Survives chip
+      # reboots, unlike xvf_host AUDIO_MGR_MIC_GAIN tweaks.
+      - VOICE_INPUT_GAIN=${VOICE_INPUT_GAIN:-}
       - VOICE_SAMPLE_RATE=${VOICE_SAMPLE_RATE:-16000}
       - VOICE_FRAME_MS=${VOICE_FRAME_MS:-30}
       - DEVICE_RESCAN_INTERVAL=${DEVICE_RESCAN_INTERVAL:-5}

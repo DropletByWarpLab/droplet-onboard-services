@@ -252,6 +252,23 @@ DEFAULT_VAD_MIN_SPEECH_S = 0.4    # min CUMULATIVE speech before end-of-speech
                                   # may fire — keeps the wake-word tail + a
                                   # pause before the command from ending early
 
+# Multichannel capture → mono for the detector + STT.
+#
+# "first" (default): consume CHANNEL 0 only. Mic arrays put the primary
+# processed signal there — the reSpeaker XVF3800 ships beamformed voice
+# on L and AEC *residual* on R, so the old mean-of-channels downmix
+# halved the voice amplitude and mixed in residual noise. That cost
+# ~6 dB of effective sensitivity ("you have to talk really loud") and
+# fed the VAD/wake/STT a dirtier signal. "mean" stays available via
+# VOICE_INPUT_DOWNMIX for plain stereo mics where both channels carry
+# the room.
+DEFAULT_INPUT_DOWNMIX = "first"
+# Digital gain applied to the mono frame after downmix (int16-clipped).
+# 1.0 = untouched. For a quiet capture chain raise via VOICE_INPUT_GAIN
+# (e.g. 2.0 ≈ +6 dB) — cheaper and persistent vs. volatile DSP-side
+# gain set over xvf_host (lost on every chip reboot).
+DEFAULT_INPUT_GAIN = 1.0
+
 # Audio-device self-heal backoff. When the mic re-enumerates (the
 # reSpeaker XVF3800 USB array shifts its card index under Docker), the
 # open InputStream goes invalid and read() — or the next open() — raises
@@ -356,6 +373,8 @@ class WakePipeline:
         recover_backoff_initial_s: float = DEFAULT_RECOVER_BACKOFF_INITIAL_S,
         recover_backoff_max_s: float = DEFAULT_RECOVER_BACKOFF_MAX_S,
         sd_reinit: Optional[Callable[[Any], None]] = None,
+        input_downmix: str = DEFAULT_INPUT_DOWNMIX,
+        input_gain: float = DEFAULT_INPUT_GAIN,
     ):
         self._detector = detector
         self._input_device_index = input_device_index
@@ -409,6 +428,13 @@ class WakePipeline:
         # re-resolving. Defaults to sd._terminate()+sd._initialize();
         # injectable for tests / alternate bindings.
         self._sd_reinit = sd_reinit or self._default_sd_reinit
+        # Multichannel→mono strategy + digital input gain (see the
+        # DEFAULT_INPUT_DOWNMIX / DEFAULT_INPUT_GAIN docstrings).
+        self._input_downmix = (
+            input_downmix if input_downmix in ("first", "mean")
+            else DEFAULT_INPUT_DOWNMIX
+        )
+        self._input_gain = input_gain if input_gain > 0 else DEFAULT_INPUT_GAIN
 
         self._thread: Optional[threading.Thread] = None
         self._probe_thread: Optional[threading.Thread] = None
@@ -850,13 +876,27 @@ class WakePipeline:
                     # on first run while ONNX kernels JIT; logs once
                     # to avoid spam.
                     logger.debug("wake pipeline: input buffer overflow")
-                # frames is shape (1280, in_channels) int16. Downmix to a
-                # mono 1-D frame (mean across channels) for the detector
-                # + STT; a 1-channel device just flattens.
+                # frames is shape (1280, in_channels) int16. Reduce to a
+                # mono 1-D frame for the detector + STT: channel 0 by
+                # default (the primary/processed channel on mic arrays —
+                # see DEFAULT_INPUT_DOWNMIX), mean across channels when
+                # configured; a 1-channel device just flattens.
                 if frames.ndim > 1 and frames.shape[1] > 1:
-                    mono = frames.mean(axis=1).astype("int16")
+                    if self._input_downmix == "mean":
+                        mono = frames.mean(axis=1).astype("int16")
+                    else:
+                        mono = np.ascontiguousarray(frames[:, 0])
                 else:
                     mono = frames.reshape(-1)
+                if self._input_gain != 1.0:
+                    # Digital boost for quiet capture chains; clip into
+                    # int16 so an over-eager gain distorts instead of
+                    # wrapping around.
+                    mono = np.clip(
+                        mono.astype(np.float32) * self._input_gain,
+                        -32768.0,
+                        32767.0,
+                    ).astype(np.int16)
                 self._on_frame(mono)
 
     def _refresh_audio_enumeration(self, sd: Any) -> None:

@@ -692,6 +692,128 @@ class _RecoveringSoundDevice:
         return stream
 
 
+class _FrameRecordingDetector(WakeWordDetector):
+    """Records every mono frame the pipeline hands to predict()."""
+
+    def __init__(self):
+        self.frames: list[np.ndarray] = []
+
+    @property
+    def model_name(self) -> str:
+        return "recorder"
+
+    @property
+    def loaded(self) -> bool:
+        return True
+
+    def predict(self, audio_frame: np.ndarray) -> dict[str, float]:
+        self.frames.append(audio_frame.copy())
+        return {}
+
+    def reset(self) -> None:
+        pass
+
+
+class _StereoStream:
+    """One stream session yielding scripted (1280, 2) int16 frames; sets
+    shutdown when exhausted so a synchronous _loop() returns."""
+
+    def __init__(self, frames, shutdown_event):
+        self._frames = list(frames)
+        self._shutdown = shutdown_event
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self, n):
+        if not self._frames:
+            self._shutdown.set()
+            return np.zeros((n, 2), dtype=np.int16), False
+        return self._frames.pop(0), False
+
+
+class _StereoSoundDevice:
+    PortAudioError = _PortAudioError
+
+    def __init__(self, frames, shutdown_event):
+        self._frames = frames
+        self._shutdown = shutdown_event
+
+    def query_devices(self, index=None):
+        return {"max_input_channels": 2}
+
+    def InputStream(self, **kwargs):  # noqa: N802 — matches real API
+        return _StereoStream(self._frames, self._shutdown)
+
+
+class TestCaptureDownmix:
+    """Multichannel→mono contract. The reSpeaker XVF3800 carries
+    beamformed voice on channel 0 and AEC residual on channel 1 —
+    averaging them halved the voice and mixed in junk (the "have to
+    talk really loud" report). Default consumes channel 0; "mean" stays
+    available for plain stereo mics; VOICE_INPUT_GAIN applies after."""
+
+    def _run(self, frames, **pipe_kwargs):
+        shutdown = threading.Event()
+        det = _FrameRecordingDetector()
+        pipe = WakePipeline(
+            detector=det,
+            input_device_index=4,
+            threshold=0.5,
+            sd_module=_StereoSoundDevice(frames, shutdown),
+            **pipe_kwargs,
+        )
+        pipe._shutdown = shutdown
+        pipe._loop()
+        return det.frames
+
+    @staticmethod
+    def _stereo_frame(left: int, right: int) -> np.ndarray:
+        f = np.zeros((1280, 2), dtype=np.int16)
+        f[:, 0] = left
+        f[:, 1] = right
+        return f
+
+    def test_default_consumes_primary_channel_only(self):
+        frames = self._run([self._stereo_frame(left=1000, right=0)])
+        # Old mean() behaviour would deliver 500 — half the voice.
+        assert len(frames) >= 1
+        assert int(frames[0][0]) == 1000
+
+    def test_mean_downmix_available_via_config(self):
+        frames = self._run(
+            [self._stereo_frame(left=1000, right=0)],
+            input_downmix="mean",
+        )
+        assert int(frames[0][0]) == 500
+
+    def test_input_gain_scales_and_clips(self):
+        frames = self._run(
+            [self._stereo_frame(left=1000, right=0),
+             self._stereo_frame(left=30000, right=0)],
+            input_gain=2.0,
+        )
+        assert int(frames[0][0]) == 2000          # 1000 × 2.0
+        assert int(frames[1][0]) == 32767         # 30000 × 2.0 clips, no wrap
+
+    def test_unknown_downmix_falls_back_to_default(self):
+        frames = self._run(
+            [self._stereo_frame(left=1000, right=0)],
+            input_downmix="bogus",
+        )
+        assert int(frames[0][0]) == 1000          # "first" semantics
+
+    def test_nonpositive_gain_falls_back_to_unity(self):
+        frames = self._run(
+            [self._stereo_frame(left=1000, right=0)],
+            input_gain=0.0,
+        )
+        assert int(frames[0][0]) == 1000
+
+
 class TestLoopDeviceRecovery:
     """Self-heal contract for audio-device disconnects."""
 
