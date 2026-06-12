@@ -365,8 +365,12 @@ class UbusClient:
                 f"Malformed JSON-RPC batch response from {self.base_url}: expected array"
             )
 
-        # Match responses by ID (JSON-RPC batch responses may arrive in any order)
-        response_by_id = {r["id"]: r for r in responses}
+        # Match responses by ID (JSON-RPC batch responses may arrive in any
+        # order). rpcd can emit bare error objects WITHOUT an "id" key for
+        # malformed batch members — .get() keys them under None instead of
+        # raising KeyError; the per-request lookup below then reports any
+        # missing match as a typed UbusError.
+        response_by_id = {r.get("id"): r for r in responses}
         results = []
         for req_id in request_ids:
             r = response_by_id.get(req_id)

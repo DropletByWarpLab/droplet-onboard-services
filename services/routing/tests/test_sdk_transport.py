@@ -123,6 +123,50 @@ def test_batch_call_retries_reset_and_returns_in_order(
     assert len(calls) == 2
 
 
+def test_batch_call_tolerates_idless_response_elements(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """rpcd can emit bare error objects without an "id" key in a batch
+    response. The by-id reassembly must skip them, not KeyError."""
+
+    def fake_urlopen(req, timeout=None):
+        sent = json.loads(req.data.decode("utf-8"))
+        responses = [
+            {"jsonrpc": "2.0", "id": p["id"], "result": [0, {"n": p["id"]}]}
+            for p in sent
+        ]
+        # Bare error object, no "id" — as rpcd emits for malformed members.
+        responses.append(
+            {"jsonrpc": "2.0", "error": {"code": -32600, "message": "Invalid request"}}
+        )
+        return _ok_response(responses)
+
+    monkeypatch.setattr(sdk, "urlopen", fake_urlopen)
+    client = UbusClient("127.0.0.1", 8181)
+    out = client.batch_call("0" * 32, [("uci", "get", {}), ("uci", "get", {})])
+    assert len(out) == 2
+
+
+def test_batch_call_idless_element_replacing_response_is_typed_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """If an id-less error object stands in for a request's response, the
+    missing match must surface as the typed UbusError, never a KeyError."""
+
+    def fake_urlopen(req, timeout=None):
+        sent = json.loads(req.data.decode("utf-8"))
+        responses = [
+            {"jsonrpc": "2.0", "id": sent[0]["id"], "result": [0, {}]},
+            {"jsonrpc": "2.0", "error": {"code": -32600, "message": "Invalid request"}},
+        ]
+        return _ok_response(responses)
+
+    monkeypatch.setattr(sdk, "urlopen", fake_urlopen)
+    client = UbusClient("127.0.0.1", 8181)
+    with pytest.raises(sdk.UbusError, match="Missing response"):
+        client.batch_call("0" * 32, [("uci", "get", {}), ("uci", "get", {})])
+
+
 def test_clean_response_needs_no_retry(monkeypatch: pytest.MonkeyPatch):
     calls: list[int] = []
 
