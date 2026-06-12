@@ -67,7 +67,7 @@ services.
 4. **Up:**
 
    ```bash
-   docker compose -f docker/docker-compose.dev.yml up
+   docker compose --env-file .env -f docker/docker-compose.dev.yml up
    ```
 
    First boot takes **~5 minutes**: pulling images (~2 GB), running

@@ -128,10 +128,10 @@ async function seedCameras() {
     if (!cam) continue;
     await prisma.cameraGroupMember.upsert({
       where: {
-        cameraId_groupId: { cameraId: cam.id, groupId: entries.id },
+        groupId_cameraId: { groupId: entries.id, cameraId: cam.id },
       },
       update: {},
-      create: { cameraId: cam.id, groupId: entries.id, cameraName: cam.name },
+      create: { groupId: entries.id, cameraId: cam.id },
     });
   }
 

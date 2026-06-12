@@ -23,7 +23,7 @@
 #
 # Quickstart:
 #   cp docker/dev/.env.example .env
-#   docker compose -f docker/docker-compose.dev.yml up
+#   docker compose --env-file .env -f docker/docker-compose.dev.yml up
 #   open http://localhost:3001
 #
 # First boot: ~5 minutes (npm install in each container + Prisma
@@ -144,21 +144,42 @@ services:
       PORT: 3000
       # ── Database / cache / broker ──
       DATABASE_URL: postgresql://${POSTGRES_USER:-droplet}:${POSTGRES_PASSWORD:-dropletdev}@db:5432/droplet
-      REDIS_HOST: cache
-      REDIS_PORT: 6379
-      REDIS_PASSWORD: ""
+      # The orchestrator reads REDIS_URL (config.ts) — REDIS_HOST/PORT are
+      # Nextcloud's vars. With only those set, cache.service silently fell
+      # back to redis://localhost:6379 inside the container: an ioredis
+      # reconnect storm and no working cache/claim-rate-limit state in dev.
+      REDIS_URL: redis://cache:6379
       MQTT_BROKER: mqtt://broker:1883
       # ── Auth ──
       JWT_SECRET: ${JWT_SECRET:-dev-only-jwt-secret-do-not-ship}
       DEVICE_SECRET: ${DEVICE_SECRET:-dev-only-device-secret-do-not-ship}
+      # Audit-chain signing key (WARP-456/476). The container has no /data
+      # mount, so the env fallback is the only source in dev; without it the
+      # orchestrator fails closed at boot. base64 of a ≥32-byte dev string.
+      AUDIT_SIGNING_KEY: ${AUDIT_SIGNING_KEY:-ZGV2LW9ubHktYXVkaXQtc2lnbmluZy1rZXktZG8tbm90LXNoaXAtMzJi}
+      # ── First-run claim code. On the box the minted code renders on the
+      #    lid display; the dev stack has no display, so pass a known code
+      #    through so the wizard's Claim step is walkable locally. ──
+      CLAIM_CODE: ${CLAIM_CODE:-}
       # ── Companion services. URLs intentionally point at non-existent
       #    hosts; the orchestrator should gracefully degrade. ──
       NEXTCLOUD_URL: http://nextcloud:80
+      # nextcloud.client authenticates to the OCS API as the Nextcloud
+      # admin (defaults admin/admin). Without these, the wizard's account
+      # step 500s — "Cannot reach Nextcloud OCS API: 401". Must match the
+      # nextcloud service's NEXTCLOUD_ADMIN_* above.
+      NEXTCLOUD_ADMIN_USER: ${NEXTCLOUD_ADMIN_USER:-admin}
+      NEXTCLOUD_ADMIN_PASSWORD: ${NEXTCLOUD_ADMIN_PASSWORD:-dropletdev}
       AI_GATEWAY_URL: http://ai-gateway-disabled:8000
       AI_GATEWAY_GRPC_URL: ai-gateway-disabled:50051
       ROUTING_SERVICE_URL: http://routing-disabled:8080
       ROUTING_SERVICE_TOKEN: dev-routing-token-unused
-      ROUTING_MODE: mock
+      # "disabled" is the WARP-44 short-circuit (no network calls at all).
+      # "mock" is a unit-test seam, NOT a network stub — with it every
+      # routing call still fetched routing-disabled:8080, and the poller
+      # retry storm (device-reconcile, ap-discovery, schedule-ticker)
+      # saturated the event loop until wizard endpoints took 25s+.
+      ROUTING_MODE: disabled
       SWITCH_SERVICE_URL: http://switch-disabled:8081
       DISPLAY_SERVICE_URL: http://display-disabled:8082
       FRIGATE_URL: http://frigate-disabled:5000
