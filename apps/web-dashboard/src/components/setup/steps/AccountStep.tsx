@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Eye, EyeOff, Lock, Mail, UserCheck } from "lucide-react";
 import { setupAdmin, loginUser, checkSetupRequired } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 import { StepShell } from "@/components/setup/StepShell";
 import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
 import { translateError } from "@/lib/friendly-errors";
@@ -35,6 +36,17 @@ export function AccountStep({
   onComplete: (displayName: string) => void;
 }) {
   const [mode, setMode] = useState<"create" | "signin">("create");
+  // Adopt the wizard's auto-login into the auth context. Without this the
+  // context `user` stays null for the whole wizard (loginUser only sets the
+  // cookie), so AuthGate treats the owner as anonymous at the Done screen and
+  // bounces them to /login mid-flourish — the embedded tour never plays and
+  // they're asked to sign in to the account they created seconds earlier.
+  // `setUserFromPasskey` is the existing adopt-an-established-session setter
+  // (sets user + re-probes the authoritative lifecycle state, WARP-867), so
+  // the unclaimed appliance keeps the wizard in place. The method is called
+  // optionally: wizard-page test harnesses mock useAuth() with step-scoped
+  // objects that don't carry it, and there the adoption is simply skipped.
+  const { setUserFromPasskey } = useAuth();
   const [email, setEmail] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [password, setPassword] = useState("");
@@ -99,7 +111,11 @@ export function AccountStep({
     setIsSubmitting(true);
     try {
       await setupAdmin(email, password, displayName || undefined);
-      await loginUser(email, password); // auto-login for authed discovery steps
+      // Auto-login for the authed steps that follow, and adopt the session
+      // into the auth context so AuthGate knows the owner is signed in.
+      // (Read defensively — step harnesses stub loginUser without a body.)
+      const login = await loginUser(email, password);
+      if (login?.user) setUserFromPasskey?.(login.user);
       onComplete(displayName);
     } catch (err: unknown) {
       // WARP-867 — the owner row already exists (interrupted earlier run).
@@ -125,6 +141,7 @@ export function AccountStep({
     setIsSubmitting(true);
     try {
       const { user } = await loginUser(email, password);
+      setUserFromPasskey?.(user);
       onComplete(user.displayName ?? "");
     } catch (err: unknown) {
       setError(translateError(err, "auth"));

@@ -20,6 +20,12 @@ vi.mock("@/lib/api", () => ({
   checkSetupRequired: vi.fn(async () => "required"),
 }));
 
+// The step adopts its auto-login into the auth context; this harness renders
+// it bare, so stub useAuth with the one method it reads.
+vi.mock("@/lib/auth", () => ({
+  useAuth: () => ({ setUserFromPasskey: vi.fn() }),
+}));
+
 describe("AccountStep — password requirement stated up front (WARP-668)", () => {
   it("states the 12-char minimum at the password field before the user types", () => {
     render(<AccountStep onComplete={vi.fn()} />);

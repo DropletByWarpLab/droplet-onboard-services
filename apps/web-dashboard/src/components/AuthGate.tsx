@@ -68,8 +68,15 @@ export function AuthGate({ children }: { children: ReactNode }) {
       return;
     }
 
-    // Appliance already claimed but the user is on /setup → bounce to login.
-    if (!applianceUnclaimed && pathname === "/setup") {
+    // Appliance already claimed and an ANONYMOUS visitor is on /setup →
+    // bounce to login. Guarded on !user: the wizard signs the owner in at the
+    // account step (the context adopts that session), so an authenticated
+    // user on /setup is the wizard itself — most importantly the Done screen,
+    // which flips the appliance ready while it plays the flourish + embedded
+    // tour. Bouncing on appliance-state alone yanked the owner to
+    // /login?from=setup mid-celebration and re-asked for the password they
+    // chose a minute earlier.
+    if (!user && !applianceUnclaimed && pathname === "/setup") {
       router.replace("/login?from=setup");
       return;
     }
@@ -127,7 +134,16 @@ export function AuthGate({ children }: { children: ReactNode }) {
     // step (WARP-867). /setup stays the stable home until the finish PATCH
     // flips the appliance ready; an authenticated user on /login with an
     // unclaimed box is routed into the wizard by the first branch above.
-    if (user && isPublicPage && !applianceUnclaimed) {
+    // …and not while the wizard's Done screen owns the viewport: the finish
+    // PATCH flips the appliance ready while the owner is still on /setup
+    // watching the flourish + EMBEDDED tour (DoneStep phase machine). While
+    // the tour is pending, /setup is that screen — leave it alone; when the
+    // tour completes, ProductTour itself navigates to "/" (and this branch
+    // re-fires harmlessly toward the same target). /login is deliberately NOT
+    // excepted: an authenticated user parked there still belongs on the
+    // dashboard, where the tour gate routes them onward.
+    const onWizardDoneScreen = pathname === "/setup" && tourPending;
+    if (user && isPublicPage && !applianceUnclaimed && !onWizardDoneScreen) {
       router.replace("/");
       return;
     }
