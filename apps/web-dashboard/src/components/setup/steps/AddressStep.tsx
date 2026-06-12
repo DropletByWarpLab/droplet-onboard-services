@@ -14,6 +14,7 @@ import {
 import {
   fetchDuckDnsStatus,
   routerUnreachableNotice,
+  RouterStatusError,
   setDuckDnsConfig,
 } from "@/lib/api";
 import type { DuckDnsStatus } from "@/lib/types";
@@ -183,12 +184,33 @@ export function AddressStep({
     } catch (e) {
       // WARP-807: an unreachable router throws a RouterStatusError (503 /
       // UNREACHABLE). Surface the actionable "finish from Network later" notice
-      // in the soft amber tone; everything else keeps its real message.
+      // in the soft amber tone.
       const notice = routerUnreachableNotice(e, NETWORK_DESTINATION);
       if (notice) {
         setErrorTone("notice");
         setError(notice.prefix);
         setNoticeDestination(notice.destination);
+      } else if (
+        // A 4xx refusal carries an actionable, customer-fixable message (bad
+        // subdomain shape, token length) — show it in red, like WifiStep.
+        e instanceof RouterStatusError &&
+        (e.status === 400 || e.status === 422) &&
+        e.message.trim().length > 0
+      ) {
+        setErrorTone("error");
+        setError(e.message);
+      } else if (e instanceof RouterStatusError) {
+        // WARP-869 — any other routing-layer failure on the write. The live
+        // case (2026-06-11 wizard run): the DuckDNS set ROLLED_BACK while
+        // rpcd denied the routing service (WARP-868), and this step rendered
+        // the raw "DuckDNS set: 500 Internal Server Error" in red on a
+        // first-run screen. Mirror WifiStep's calm write-failure ladder rung
+        // instead: amber, skippable, names where to finish later.
+        setErrorTone("notice");
+        setError(
+          "We couldn't save the web address right now. You can skip this step and finish it from",
+        );
+        setNoticeDestination(NETWORK_DESTINATION);
       } else {
         setErrorTone("error");
         setError(
