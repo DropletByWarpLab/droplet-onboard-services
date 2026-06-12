@@ -44,7 +44,7 @@ from fastapi.responses import JSONResponse
 from driver_checker import full_driver_report, auto_fix_drivers
 from frigate_client import FrigateClient
 from onvif_scanner import discover_cameras, probe_onvif_device
-from rtsp_prober import probe_camera
+from rtsp_prober import probe_camera, verify_stream
 from vendor_init import check_status as vendor_status_check
 from vendor_init import initialize_camera as vendor_initialize
 
@@ -518,24 +518,51 @@ async def scan_and_discover() -> None:
             rtsp_url = None
             camera_info["rtsp_url"] = None
 
-        # If we have a valid RTSP URL, auto-add to Frigate
-        if rtsp_url:
-            success = await frigate.add_camera(camera_name, camera_info["rtsp_url"])
-            if success:
-                camera_info["status"] = "active"
-                known_cameras[mac] = camera_info
-                logger.info(
-                    "Auto-added camera: %s (%s) at %s",
-                    camera_name,
-                    camera_info.get("manufacturer", "unknown"),
-                    ip,
-                )
-            else:
-                camera_info["status"] = "pending"
-                pending_cameras[mac] = camera_info
+        # Only auto-add to Frigate a stream we have VERIFIED actually answers
+        # — never a port-open guess. The prober emits an unverified
+        # `rtsp://<ip>:554/stream1` placeholder for "ports open, no stream
+        # confirmed" (detection_method == "rtsp_port_open"); the old code
+        # pushed that straight into Frigate as `status: active` and cached it
+        # in `known_cameras`. Two failures resulted: Frigate sat at 0 fps on a
+        # dead URL, AND the camera was now "known" so the candidate loop
+        # skipped it forever — it never re-probed, so a camera that came good
+        # later (finished first-boot, operator set credentials) was never
+        # picked up. STAGNANT.
+        #
+        # Now: verify the stream (real DESCRIBE → 200) before promoting. A
+        # camera that doesn't verify stays in `pending_cameras` — surfaced to
+        # the wizard as "needs setup", re-probed every scan, and auto-promoted
+        # the instant a real stream appears. A genuinely working stream
+        # (open, default-credential, or ONVIF-provided) verifies and is added
+        # exactly as before.
+        verified = False
+        if rtsp_url and camera_info.get("detection_method") != "rtsp_port_open":
+            try:
+                verified = await verify_stream(rtsp_url)
+            except Exception as exc:  # transient network error — retry next scan
+                logger.debug("Stream verify raised for %s: %s", ip, exc)
+                verified = False
+
+        if verified and await frigate.add_camera(camera_name, rtsp_url):
+            camera_info["status"] = "active"
+            known_cameras[mac] = camera_info
+            pending_cameras.pop(mac, None)
+            logger.info(
+                "Auto-added camera: %s (%s) at %s",
+                camera_name,
+                camera_info.get("manufacturer", "unknown"),
+                ip,
+            )
         else:
-            camera_info["status"] = "pending"
+            # Unverified / dead-guess / Frigate-add-failed → keep it pending and
+            # re-probeable. NEVER cache it in known_cameras, or the candidate
+            # loop would skip it and it would go stagnant on a stream that does
+            # not work.
+            camera_info["status"] = (
+                "needs_setup" if rtsp_url else "pending"
+            )
             pending_cameras[mac] = camera_info
+            known_cameras.pop(mac, None)
 
         # Publish discovery event
         publish_discovery({
@@ -735,6 +762,21 @@ async def accept_camera(mac: str, request: Request):
     if not rtsp_url:
         pending_cameras[mac] = camera  # Put back
         raise HTTPException(status_code=400, detail="No RTSP URL available for this camera")
+
+    # Verify the stream actually answers before committing it to Frigate, so a
+    # manual accept of a port-open guess can't install a permanently-0-fps
+    # camera. A camera that doesn't verify needs credentials / a corrected URL
+    # first — stays pending so the operator can supply them, rather than
+    # silently landing a dead feed.
+    if not await verify_stream(rtsp_url):
+        pending_cameras[mac] = camera  # Put back
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Camera stream did not respond — it likely needs credentials "
+                "or a corrected RTSP URL before it can be added."
+            ),
+        )
 
     name = camera.get("name", _sanitize_camera_name(camera.get("hostname", ""), camera["ip"]))
     success = await frigate.add_camera(name, rtsp_url)

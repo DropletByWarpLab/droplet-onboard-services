@@ -14,7 +14,7 @@ import base64
 import hashlib
 import logging
 import socket
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 
 from default_credentials import get_credentials
 
@@ -312,9 +312,41 @@ async def probe_camera(ip: str) -> dict | None:
 
     # Ports are open but no valid stream found — still likely a camera.
     # Return a placeholder so the UI can surface it as "needs credentials".
+    # detection_method == "rtsp_port_open" marks this URL as a GUESS, never a
+    # verified stream: callers must NOT auto-add it to Frigate (see
+    # verify_stream + the scan loop's stream-verified gate in main.py).
     return {
         "ip": ip,
         "port": open_ports[0],
         "rtsp_url": f"rtsp://{ip}:{open_ports[0]}/stream1",
         "detection_method": "rtsp_port_open",
     }
+
+
+async def verify_stream(rtsp_url: str, timeout: float = 4.0) -> bool:
+    """Return True iff ``rtsp_url`` actually answers a DESCRIBE with 200.
+
+    The discovery probe can emit a placeholder URL (port-open-only guess) that
+    no camera will ever serve — adding it to Frigate yields a permanently
+    0-fps "camera". This is the gate that stops that: a real RTSP DESCRIBE
+    (using any ``user:pass@`` embedded in the URL, with the same 401→auth
+    retry the credential prober uses) must return 200 before a camera is
+    promoted to active. A 400/401/404/timeout → False, so the camera stays
+    pending and the next scan re-probes it — it never goes stagnant on a dead
+    guess, and auto-promotes the moment a real stream becomes reachable
+    (camera finished its first-boot, operator set its credentials, etc.).
+    """
+    parts = urlsplit(rtsp_url)
+    if parts.scheme != "rtsp" or not parts.hostname:
+        return False
+    host = parts.hostname
+    port = parts.port or 554
+    path = parts.path or "/"
+    if parts.query:
+        path = f"{path}?{parts.query}"
+    user = unquote(parts.username) if parts.username else ""
+    pw = unquote(parts.password) if parts.password else ""
+    # _try_credentials_once handles the no-auth (200 on first DESCRIBE) AND the
+    # 401→Basic/Digest retry paths, returning True only on a 200. Reused so the
+    # verify path and the credential-probe path can never diverge.
+    return await _try_credentials_once(host, port, path, user, pw, timeout)
