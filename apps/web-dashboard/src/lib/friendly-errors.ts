@@ -262,6 +262,19 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
     // copy was flattened to the generic device fallback.
     "502":
       "Couldn't find the device on the network. Make sure it's powered on, in pairing mode, and on the same Wi-Fi as the Droplet.",
+    // WARP-856 (item 1): same bug class as the 502 above, for the other two
+    // statuses the commissioning route actually answers. The orchestrator's
+    // curated 504 copy ("Put it into pairing mode again…") reached the
+    // client with err.status = 504 but no entry existed here, so the
+    // actionable step was flattened to the generic device fallback;
+    // `inferCodeFromMessage` only matches /timeout|timed out/, which that
+    // copy doesn't contain. 503 is the controller-still-starting answer
+    // ("Matter controller not started") — jargon a first-run customer
+    // shouldn't see verbatim.
+    "504":
+      "Couldn't reach the device in time. Put it into pairing mode again, make sure it's within a few feet of the Droplet, and retry.",
+    "503":
+      "The Droplet's smart-home service is still starting up. Give it a few seconds and try again.",
   },
   generic: {
     NETWORK:
