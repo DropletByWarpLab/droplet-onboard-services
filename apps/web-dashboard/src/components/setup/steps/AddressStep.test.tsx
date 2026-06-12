@@ -145,7 +145,7 @@ describe("AddressStep — write failure surfaces the calm notice (WARP-869)", ()
     );
     const onComplete = vi.fn();
     render(<AddressStep onComplete={onComplete} onSkip={vi.fn()} />);
-    await waitFor(() => expect(fetchDuckDnsStatus).toHaveBeenCalled());
+    await waitFor(() => expect(saveCta()).toBeEnabled());
 
     fillDuckDns("mystudio", "a-valid-duckdns-token");
     fireEvent.click(saveCta());
@@ -163,6 +163,31 @@ describe("AddressStep — write failure surfaces the calm notice (WARP-869)", ()
     expect(onComplete).not.toHaveBeenCalled();
   });
 
+  it("routes a 403 (not customer-fixable) to the amber finish-later notice, not a red alert", async () => {
+    setDuckDnsConfig.mockRejectedValueOnce(
+      new RouterStatusError(
+        "ROLLED_BACK",
+        "DuckDNS set: 403 Access denied",
+        403,
+      ),
+    );
+    const onComplete = vi.fn();
+    render(<AddressStep onComplete={onComplete} onSkip={vi.fn()} />);
+    await waitFor(() => expect(saveCta()).toBeEnabled());
+
+    fillDuckDns("mystudio", "a-valid-duckdns-token");
+    fireEvent.click(saveCta());
+
+    const notice = await screen.findByRole("status");
+    expect(notice).toHaveTextContent(/couldn't save the web address/i);
+    expect(notice).toHaveTextContent(/skip this step/i);
+    expect(notice).toHaveTextContent(/network/i);
+    // Never a red alert, never the raw server text.
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByText(/access denied/i)).not.toBeInTheDocument();
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+
   it("keeps a 400 validation refusal red and verbatim (customer-fixable)", async () => {
     setDuckDnsConfig.mockRejectedValueOnce(
       new RouterStatusError(
@@ -172,7 +197,7 @@ describe("AddressStep — write failure surfaces the calm notice (WARP-869)", ()
       ),
     );
     render(<AddressStep onComplete={vi.fn()} onSkip={vi.fn()} />);
-    await waitFor(() => expect(fetchDuckDnsStatus).toHaveBeenCalled());
+    await waitFor(() => expect(saveCta()).toBeEnabled());
 
     fillDuckDns("mystudio", "a-valid-duckdns-token");
     fireEvent.click(saveCta());
