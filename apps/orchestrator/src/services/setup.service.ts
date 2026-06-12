@@ -12,8 +12,18 @@
  * route layer; this service returns the camelCase domain object):
  *   { appliance: "unclaimed" | "ready", setupStep, userTourCompleted }
  */
-import { type SetupStep, type PrismaClient } from "@prisma/client";
+import { type SetupStep, type PrismaClient, type Prisma } from "@prisma/client";
 import { isClaimed } from "./claim-code.service.js";
+
+/**
+ * WARP-867 (pr-reviewer on #599) — the client surface the state machine
+ * reads/writes through: the root client OR an interactive-transaction client
+ * (`tx`), so `advanceSetupStepToAtLeast` can run its floor compare + write
+ * ATOMICALLY while every reader/writer keeps going through this module's
+ * single enforcement point. Type-only — the module still has no runtime
+ * dependency on `@prisma/client` (see the SETUP_STEPS note below).
+ */
+export type SetupDbClient = PrismaClient | Prisma.TransactionClient;
 
 /** The fixed primary key of the singleton row. Mirrors `Workspace.id = 1`. */
 export const APPLIANCE_SETUP_ID = "singleton";
@@ -179,7 +189,7 @@ const DEFAULT_STATE: SetupState = {
  * issued when the step is actually `claim`, so non-claim reads (the
  * overwhelming majority) keep their exact single-query behaviour.
  */
-export async function getSetupState(prisma: PrismaClient): Promise<SetupState> {
+export async function getSetupState(prisma: SetupDbClient): Promise<SetupState> {
   const row = await prisma.applianceSetup.findUnique({
     where: { id: APPLIANCE_SETUP_ID },
   });
@@ -205,7 +215,7 @@ export async function getSetupState(prisma: PrismaClient): Promise<SetupState> {
  * persisted unchanged (the claim step still shows on a fresh box).
  */
 export async function setSetupStep(
-  prisma: PrismaClient,
+  prisma: SetupDbClient,
   step: string,
 ): Promise<SetupState> {
   if (!isSetupStep(step)) {
@@ -236,7 +246,21 @@ export async function setSetupStep(
  * strictly before it in `SETUP_STEPS` (wizard order); otherwise return the
  * stored state untouched. The comparison uses `getSetupState`, so the
  * WARP-804 claim→account healing applies before ordering.
+ *
+ * ATOMICITY (pr-reviewer on #599) — the compare and the write run inside ONE
+ * SERIALIZABLE interactive transaction, not two independent round-trips. As
+ * separate calls, a re-claim racing a wizard PATCH could read `welcome`, lose
+ * the race to a committed `internet`, then blind-upsert `account` — regressing
+ * the pointer the floor exists to protect. READ COMMITTED (Prisma's default)
+ * is not enough: both sides of the race can pass the compare before either
+ * commit. Under SERIALIZABLE the losing side aborts with P2034 ("retry your
+ * transaction"); the operation is idempotent and converges (a competitor that
+ * advanced further turns the retry into a pure read), so we retry a bounded
+ * number of times — same pattern as `reset.service`'s double-fire guard
+ * (pr-reviewer #549).
  */
+const ADVANCE_TX_ATTEMPTS = 3;
+
 export async function advanceSetupStepToAtLeast(
   prisma: PrismaClient,
   step: string,
@@ -244,13 +268,48 @@ export async function advanceSetupStepToAtLeast(
   if (!isSetupStep(step)) {
     throw new InvalidSetupStepError(step);
   }
-  const current = await getSetupState(prisma);
-  const currentIdx = SETUP_STEPS.indexOf(current.setupStep);
-  const targetIdx = SETUP_STEPS.indexOf(step);
-  if (currentIdx >= targetIdx) {
-    return current;
+  let conflict: unknown;
+  for (let attempt = 0; attempt < ADVANCE_TX_ATTEMPTS; attempt++) {
+    try {
+      return await prisma.$transaction(
+        async (tx) => {
+          const current = await getSetupState(tx);
+          const currentIdx = SETUP_STEPS.indexOf(current.setupStep);
+          const targetIdx = SETUP_STEPS.indexOf(step);
+          if (currentIdx >= targetIdx) {
+            return current;
+          }
+          return setSetupStep(tx, step);
+        },
+        // The string literal (vs `Prisma.TransactionIsolationLevel.Serializable`)
+        // keeps this module free of runtime `@prisma/client` imports (the
+        // SETUP_STEPS note above); the `$transaction` options type still
+        // checks it against the generated isolation-level union.
+        { isolationLevel: "Serializable" },
+      );
+    } catch (err) {
+      if (!isSerializationConflict(err)) {
+        throw err;
+      }
+      conflict = err;
+    }
   }
-  return setSetupStep(prisma, step);
+  throw conflict;
+}
+
+/**
+ * Prisma surfaces a Postgres serialization failure (the losing side of two
+ * concurrent SERIALIZABLE transactions) as P2034. Detected by error code
+ * rather than `instanceof Prisma.PrismaClientKnownRequestError` so the check
+ * holds across client instances (and test doubles) — mirrors
+ * `reset.service.ts`.
+ */
+function isSerializationConflict(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { code?: unknown }).code === "P2034"
+  );
 }
 
 /**

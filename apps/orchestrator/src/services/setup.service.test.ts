@@ -58,7 +58,7 @@ function createPrismaMock(opts: { userCount?: number; consumedClaims?: number } 
   // claim-satisfied short-circuit in getSetupState/setSetupStep only fires when
   // this is > 0, and these legacy cases never claim the box.
   let consumedClaims = opts.consumedClaims ?? 0;
-  return {
+  const prisma = {
     _peek: () => row,
     _setUserCount: (n: number) => {
       userCount = n;
@@ -111,6 +111,19 @@ function createPrismaMock(opts: { userCount?: number; consumedClaims?: number } 
       },
     },
   };
+  // WARP-867 (pr-reviewer on #599) — interactive-transaction stand-in: runs
+  // the callback against the SAME in-memory store (the `tx` client sees the
+  // singleton row), recording calls + options so tests can assert the
+  // monotonic floor compare AND its write happen inside ONE Serializable
+  // transaction. Same callback-against-the-store shape as
+  // setup-claim.test.ts / network.schedules.test.ts.
+  const $transaction = vi.fn(
+    async (
+      fn: (tx: typeof prisma) => Promise<unknown>,
+      _opts?: { isolationLevel?: string },
+    ): Promise<unknown> => fn(prisma),
+  );
+  return Object.assign(prisma, { $transaction });
 }
 
 type PrismaMock = ReturnType<typeof createPrismaMock>;
@@ -359,5 +372,74 @@ describe("setup.service — advanceSetupStepToAtLeast floor semantics (WARP-867)
     await expect(
       advanceSetupStepToAtLeast(prisma as never, "not-a-step"),
     ).rejects.toBeInstanceOf(InvalidSetupStepError);
+  });
+
+  // ── Atomicity (pr-reviewer on #599): the floor compare and the write must
+  // not be two independent round-trips, or a concurrent re-claim racing a
+  // wizard PATCH can regress the resume pointer (read `welcome`, lose the
+  // race to a committed `internet`, then blind-upsert `account`). ──
+
+  it("runs the floor compare + write inside ONE Serializable interactive transaction", async () => {
+    const prisma = createPrismaMock();
+    await setSetupStep(prisma as never, "welcome");
+    const state = await advanceSetupStepToAtLeast(prisma as never, STEP_AFTER_CLAIM);
+    expect(state.setupStep).toBe(STEP_AFTER_CLAIM);
+    // The read AND the conditional write went through the tx callback —
+    // exactly one transaction, opened SERIALIZABLE (READ COMMITTED would
+    // let both sides of a race pass the compare before either commit).
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(prisma.$transaction).toHaveBeenCalledWith(
+      expect.any(Function),
+      expect.objectContaining({ isolationLevel: "Serializable" }),
+    );
+  });
+
+  it("retries a P2034 serialization conflict and converges on the concurrent winner", async () => {
+    const prisma = createPrismaMock();
+    await setSetupStep(prisma as never, "welcome");
+    prisma.$transaction.mockImplementationOnce(async () => {
+      // A concurrent wizard PATCH commits a FURTHER step while our snapshot
+      // is open; the SERIALIZABLE engine aborts the losing side with P2034.
+      await prisma.applianceSetup.upsert({
+        where: { id: "singleton" },
+        create: { id: "singleton", setupStep: "internet" },
+        update: { setupStep: "internet" },
+      });
+      const err = new Error(
+        "Transaction failed due to a write conflict or a deadlock. Please retry your transaction.",
+      ) as Error & { code?: string };
+      err.code = "P2034";
+      throw err;
+    });
+    const state = await advanceSetupStepToAtLeast(prisma as never, STEP_AFTER_CLAIM);
+    // The retry re-reads inside a FRESH transaction, sees the winner, and the
+    // floor keeps it — the pointer is never dragged back to `account`.
+    expect(state.setupStep).toBe("internet");
+    expect((prisma._peek() as Record<string, unknown>).setupStep).toBe("internet");
+    expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+  });
+
+  it("gives up after bounded attempts and rethrows the serialization conflict", async () => {
+    const prisma = createPrismaMock();
+    prisma.$transaction.mockImplementation(async () => {
+      const err = new Error("write conflict") as Error & { code?: string };
+      err.code = "P2034";
+      throw err;
+    });
+    await expect(
+      advanceSetupStepToAtLeast(prisma as never, STEP_AFTER_CLAIM),
+    ).rejects.toMatchObject({ code: "P2034" });
+    expect(prisma.$transaction).toHaveBeenCalledTimes(3);
+  });
+
+  it("does NOT retry a non-serialization failure", async () => {
+    const prisma = createPrismaMock();
+    prisma.$transaction.mockImplementation(async () => {
+      throw new Error("connection lost");
+    });
+    await expect(
+      advanceSetupStepToAtLeast(prisma as never, STEP_AFTER_CLAIM),
+    ).rejects.toThrow("connection lost");
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
   });
 });

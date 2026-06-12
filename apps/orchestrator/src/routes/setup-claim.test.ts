@@ -133,7 +133,7 @@ function createPrismaMock() {
     },
   };
 
-  return {
+  const prisma = {
     _appliance: () => appliance,
     user: { count: async () => 0 },
     claimCode,
@@ -162,9 +162,18 @@ function createPrismaMock() {
         return { ...appliance };
       },
     },
-    $transaction: async <T>(fn: (tx: unknown) => Promise<T>): Promise<T> =>
-      fn({ claimCode }),
   };
+  // The tx exposes the SAME store slice as the root client — a real
+  // `Prisma.TransactionClient` carries every delegate. `consumeClaimCode`
+  // only touches `tx.claimCode`; the atomic `advanceSetupStepToAtLeast`
+  // (WARP-867 / pr-reviewer on #599) reads + writes `tx.applianceSetup`
+  // inside its SERIALIZABLE transaction.
+  return Object.assign(prisma, {
+    $transaction: async <T>(
+      fn: (tx: typeof prisma) => Promise<T>,
+      _opts?: { isolationLevel?: string },
+    ): Promise<T> => fn(prisma),
+  });
 }
 
 function buildApp(prisma: ReturnType<typeof createPrismaMock>) {
