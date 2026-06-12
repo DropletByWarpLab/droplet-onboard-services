@@ -502,7 +502,13 @@ async def scan_and_discover() -> None:
                     # Hostname suggests camera but no streams found — add as pending
                     camera_info = candidate
                 else:
-                    # Not a camera
+                    # Not a camera (e.g. a TP-Link AP that has 554 open but
+                    # doesn't speak RTSP — probe_camera returns None for it).
+                    # Drop any prior pending/known entry so a device that was
+                    # mis-classified before this confirmation clears without a
+                    # restart, instead of lingering in the discovered list.
+                    pending_cameras.pop(mac, None)
+                    known_cameras.pop(mac, None)
                     continue
 
         camera_name = _sanitize_camera_name(

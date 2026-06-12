@@ -67,6 +67,52 @@ async def scan_ports(ip: str, ports: list[int] | None = None, timeout: float = 2
     return open_ports
 
 
+async def is_rtsp_server(ip: str, port: int = 554, timeout: float = 3.0) -> bool:
+    """Return True iff ``ip:port`` actually speaks RTSP at the protocol level.
+
+    A port being open is NOT enough to call something a camera — plenty of
+    non-camera devices listen on 554 (TP-Link APs/routers, DLNA/UPnP media
+    boxes, debug services). They answer an RTSP ``OPTIONS`` with an HTTP
+    response, a malformed ``RTSP/1.0 400 Bad Request`` (no method support, and
+    typically ``CSeq: 0`` — our CSeq not echoed), or a connection reset.
+
+    A genuine RTSP server — even one that's auth-gated or exposes no stream on
+    the paths we guess — answers ``OPTIONS`` with a well-formed RTSP status:
+    ``200 OK`` (usually with a ``Public:`` method list), or ``401/403`` when it
+    demands credentials. We accept exactly those and reject everything else, so
+    a port-open-only guess is never emitted for a device that isn't a camera.
+    """
+    try:
+        reader, writer = await _open_rtsp(ip, port, timeout)
+    except (asyncio.TimeoutError, OSError):
+        return False
+    try:
+        request = (
+            f"OPTIONS rtsp://{ip}:{port}/ RTSP/1.0\r\n"
+            f"CSeq: 1\r\n"
+            f"User-Agent: Droplet-CameraDiscovery/1.0\r\n"
+            f"\r\n"
+        )
+        writer.write(request.encode())
+        await writer.drain()
+        raw = await asyncio.wait_for(reader.read(1024), timeout=timeout)
+    except (asyncio.TimeoutError, OSError, UnicodeDecodeError, ValueError):
+        return False
+    finally:
+        _close_rtsp(writer)
+
+    resp = raw.decode("utf-8", errors="ignore")
+    status_line = resp.split("\r\n", 1)[0]
+    # Must be an RTSP status line (reject HTTP responders on 554) with a code
+    # that proves a working RTSP control channel. 400/404/5xx ⇒ not a camera.
+    if not status_line.startswith(("RTSP/1.0", "RTSP/2.0")):
+        return False
+    parts = status_line.split(" ", 2)
+    if len(parts) < 2 or not parts[1].isdigit():
+        return False
+    return int(parts[1]) in (200, 401, 403)
+
+
 async def probe_rtsp_stream(ip: str, port: int = 554, timeout: float = 3.0) -> str | None:
     """Try common RTSP stream paths and return the first valid one.
 
@@ -310,15 +356,29 @@ async def probe_camera(ip: str) -> dict | None:
                 "detection_method": "rtsp_default_credentials",
             }
 
-    # Ports are open but no valid stream found — still likely a camera.
-    # Return a placeholder so the UI can surface it as "needs credentials".
-    # detection_method == "rtsp_port_open" marks this URL as a GUESS, never a
-    # verified stream: callers must NOT auto-add it to Frigate (see
-    # verify_stream + the scan loop's stream-verified gate in main.py).
+    # Ports are open but no stream cracked. Before surfacing this as a camera,
+    # confirm at least one open port actually speaks RTSP — a bare open 554 is
+    # also how TP-Link APs/routers, DLNA boxes and other non-cameras look. A
+    # device that doesn't answer a clean RTSP OPTIONS (e.g. the TP-Link AP that
+    # returns `RTSP/1.0 400 Bad Request`) is NOT a camera and must never enter
+    # the discovered list.
+    rtsp_port = None
+    for port in open_ports:
+        if await is_rtsp_server(ip, port):
+            rtsp_port = port
+            break
+    if rtsp_port is None:
+        return None
+
+    # Confirmed RTSP server, but no path/credential matched — surface it as a
+    # "needs credentials" placeholder. detection_method == "rtsp_port_open"
+    # marks this URL as a GUESS, never a verified stream: callers must NOT
+    # auto-add it to Frigate (see verify_stream + the scan loop's
+    # stream-verified gate in main.py).
     return {
         "ip": ip,
-        "port": open_ports[0],
-        "rtsp_url": f"rtsp://{ip}:{open_ports[0]}/stream1",
+        "port": rtsp_port,
+        "rtsp_url": f"rtsp://{ip}:{rtsp_port}/stream1",
         "detection_method": "rtsp_port_open",
     }
 

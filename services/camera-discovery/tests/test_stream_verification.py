@@ -70,6 +70,133 @@ class TestVerifyStream:
         assert await rtsp_prober.verify_stream("rtsp://192.168.20.10:554/stream1") is False
 
 
+class _FakeWriter:
+    def write(self, _data):
+        pass
+
+    async def drain(self):
+        pass
+
+    def close(self):
+        pass
+
+    async def wait_closed(self):
+        pass
+
+
+class _FakeReader:
+    def __init__(self, payload: bytes):
+        self._payload = payload
+
+    async def read(self, _n):
+        return self._payload
+
+
+class TestIsRtspServer:
+    """A device is only a camera if it actually speaks RTSP — a bare open 554
+    (TP-Link APs, DLNA boxes, …) is not enough."""
+
+    def _patch_response(self, monkeypatch, payload: bytes):
+        import rtsp_prober
+
+        async def fake_open(ip, port, timeout):
+            return _FakeReader(payload), _FakeWriter()
+
+        monkeypatch.setattr(rtsp_prober, "_open_rtsp", fake_open)
+
+    @pytest.mark.asyncio
+    async def test_real_rtsp_200_is_a_server(self, monkeypatch):
+        import rtsp_prober
+
+        self._patch_response(
+            monkeypatch,
+            b"RTSP/1.0 200 OK\r\nCSeq: 1\r\nPublic: DESCRIBE, SETUP, PLAY\r\n\r\n",
+        )
+        assert await rtsp_prober.is_rtsp_server("192.168.20.10") is True
+
+    @pytest.mark.asyncio
+    async def test_auth_challenge_401_is_a_server(self, monkeypatch):
+        import rtsp_prober
+
+        self._patch_response(
+            monkeypatch,
+            b'RTSP/1.0 401 Unauthorized\r\nCSeq: 1\r\n'
+            b'WWW-Authenticate: Digest realm="x", nonce="y"\r\n\r\n',
+        )
+        assert await rtsp_prober.is_rtsp_server("192.168.20.10") is True
+
+    @pytest.mark.asyncio
+    async def test_tplink_ap_400_is_not_a_server(self, monkeypatch):
+        """The exact shape the TP-Link AP at .176 returns — 400 Bad Request,
+        CSeq not echoed. Must NOT be treated as a camera."""
+        import rtsp_prober
+
+        self._patch_response(
+            monkeypatch,
+            b"RTSP/1.0 400 Bad Request\r\nCSeq: 0\r\n\r\n",
+        )
+        assert await rtsp_prober.is_rtsp_server("192.168.20.176") is False
+
+    @pytest.mark.asyncio
+    async def test_http_responder_on_554_is_not_a_server(self, monkeypatch):
+        import rtsp_prober
+
+        self._patch_response(
+            monkeypatch, b"HTTP/1.0 200 OK\r\nServer: lighttpd\r\n\r\n"
+        )
+        assert await rtsp_prober.is_rtsp_server("192.168.20.176") is False
+
+
+class TestProbeCameraRejectsNonCameras:
+    @pytest.mark.asyncio
+    async def test_open_port_but_not_rtsp_returns_none(self, monkeypatch):
+        """Ports open, no stream cracked, and the device fails the RTSP-server
+        handshake → probe_camera returns None (not a camera)."""
+        import rtsp_prober
+
+        async def fake_scan(ip, ports=None, timeout=2.0):
+            return [554]
+
+        async def fake_stream(ip, port=554, timeout=3.0):
+            return None
+
+        async def fake_creds(ip, port):
+            return None
+
+        async def fake_is_server(ip, port=554, timeout=3.0):
+            return False  # the AP case
+
+        monkeypatch.setattr(rtsp_prober, "scan_ports", fake_scan)
+        monkeypatch.setattr(rtsp_prober, "probe_rtsp_stream", fake_stream)
+        monkeypatch.setattr(rtsp_prober, "probe_rtsp_with_credentials", fake_creds)
+        monkeypatch.setattr(rtsp_prober, "is_rtsp_server", fake_is_server)
+        assert await rtsp_prober.probe_camera("192.168.20.176") is None
+
+    @pytest.mark.asyncio
+    async def test_open_port_confirmed_rtsp_returns_placeholder(self, monkeypatch):
+        import rtsp_prober
+
+        async def fake_scan(ip, ports=None, timeout=2.0):
+            return [554]
+
+        async def fake_stream(ip, port=554, timeout=3.0):
+            return None
+
+        async def fake_creds(ip, port):
+            return None
+
+        async def fake_is_server(ip, port=554, timeout=3.0):
+            return True  # a real but uncracked camera
+
+        monkeypatch.setattr(rtsp_prober, "scan_ports", fake_scan)
+        monkeypatch.setattr(rtsp_prober, "probe_rtsp_stream", fake_stream)
+        monkeypatch.setattr(rtsp_prober, "probe_rtsp_with_credentials", fake_creds)
+        monkeypatch.setattr(rtsp_prober, "is_rtsp_server", fake_is_server)
+        result = await rtsp_prober.probe_camera("192.168.20.20")
+        assert result is not None
+        assert result["detection_method"] == "rtsp_port_open"
+
+
 class TestScanLoopGate:
     """The scan loop must not promote an unverified guess to known/active."""
 
