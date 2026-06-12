@@ -22,6 +22,14 @@ vi.mock("@/lib/api", () => ({
   checkSetupRequired: (...a: unknown[]) => checkSetupRequired(...a),
 }));
 
+// The step adopts the wizard auto-login into the auth context (so AuthGate
+// knows the owner is signed in for the rest of the wizard — incl. the Done
+// screen's embedded tour).
+const setUserFromPasskey = vi.fn();
+vi.mock("@/lib/auth", () => ({
+  useAuth: () => ({ setUserFromPasskey }),
+}));
+
 beforeEach(() => {
   vi.clearAllMocks();
   setupAdmin.mockResolvedValue(undefined);
@@ -103,6 +111,11 @@ describe("AccountStep", () => {
       ),
     );
     expect(onComplete).toHaveBeenCalledTimes(1);
+    // The session is adopted into the auth context — AuthGate must know the
+    // owner is signed in for the rest of the wizard (Done screen included).
+    expect(setUserFromPasskey).toHaveBeenCalledWith(
+      expect.objectContaining({ username: "stefan" }),
+    );
   });
 
   it("surfaces a friendly error (never the raw cause) if creation fails", async () => {
@@ -183,6 +196,10 @@ describe("AccountStep — owner already exists (WARP-867)", () => {
     expect(onComplete).toHaveBeenCalledWith("Stefan");
     // The create-only API was called exactly once (the refused attempt).
     expect(setupAdmin).toHaveBeenCalledTimes(1);
+    // Sign-in mode adopts the session into the auth context too.
+    expect(setUserFromPasskey).toHaveBeenCalledWith(
+      expect.objectContaining({ username: "stefan" }),
+    );
   });
 
   it("renders the sign-in variant proactively when the probe says setup is complete", async () => {

@@ -154,3 +154,63 @@ describe("AuthGate — authenticated user, unclaimed appliance (WARP-867)", () =
     expect(replaceMock).toHaveBeenCalledWith("/");
   });
 });
+
+/**
+ * Done-screen handoff — the wizard-finish PATCH flips the appliance "ready"
+ * while the owner is still ON /setup watching the flourish + EMBEDDED tour
+ * (DoneStep phase machine). The owner is authenticated by then (the account
+ * step adopts its auto-login into the context), so AuthGate must leave that
+ * screen alone until the tour completes; bouncing on appliance-state alone
+ * yanked the owner to /login?from=setup mid-celebration and re-asked for the
+ * password they chose a minute earlier.
+ */
+describe("AuthGate — wizard Done screen owns /setup while the tour is pending", () => {
+  const owner = { id: "u1", username: "ada", displayName: "Ada", role: "owner" };
+
+  beforeEach(() => {
+    replaceMock.mockReset();
+    useAuthMock.mockReset();
+    pathnameValue = "/setup";
+  });
+
+  it("leaves an authenticated owner on /setup when ready + tour pending (flourish + embedded tour)", () => {
+    setAuth({
+      user: owner,
+      isLoading: false,
+      setupState: { appliance: "ready", setupStep: "done", userTourCompleted: false },
+    });
+    render(<AuthGate>child</AuthGate>);
+    expect(replaceMock).not.toHaveBeenCalled();
+  });
+
+  it("sends an authenticated user on /setup to the dashboard once the tour is complete", () => {
+    setAuth({
+      user: owner,
+      isLoading: false,
+      setupState: { appliance: "ready", setupStep: "done", userTourCompleted: true },
+    });
+    render(<AuthGate>child</AuthGate>);
+    expect(replaceMock).toHaveBeenCalledWith("/");
+  });
+
+  it("still bounces an ANONYMOUS visitor off /setup on a claimed box (tour pending or not)", () => {
+    setAuth({
+      user: null,
+      isLoading: false,
+      setupState: { appliance: "ready", setupStep: "done", userTourCompleted: false },
+    });
+    render(<AuthGate>child</AuthGate>);
+    expect(replaceMock).toHaveBeenCalledWith("/login?from=setup");
+  });
+
+  it("does NOT except /login: an authenticated user parked there with the tour pending still leaves", () => {
+    pathnameValue = "/login";
+    setAuth({
+      user: owner,
+      isLoading: false,
+      setupState: { appliance: "ready", setupStep: "done", userTourCompleted: false },
+    });
+    render(<AuthGate>child</AuthGate>);
+    expect(replaceMock).toHaveBeenCalledWith("/");
+  });
+});

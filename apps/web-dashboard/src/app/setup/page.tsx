@@ -59,10 +59,9 @@ import { SetupNavProvider } from "@/components/setup/setup-nav";
 /**
  * PR #372 — the persisted `setupStep` comes from `/api/setup/state` via the
  * auth context. Resume there if it's a step this wizard can render; fall
- * back to welcome otherwise (e.g. the terminal `done`, which has nothing to
- * resume into). With PR #381 every SETUP_STEPS value (claim / org / team
- * included) is now a renderable step. Keeps the resume target congruent with
- * the steps the wizard actually has — no blank screen.
+ * back to welcome otherwise. With PR #381 every SETUP_STEPS value (claim /
+ * org / team included) is now a renderable step. Keeps the resume target
+ * congruent with the steps the wizard actually has — no blank screen.
  */
 function resumeStepFrom(setupStep: string | undefined): Step {
   // Onboarding-Flow redesign — the orchestrator's Prisma `SetupStep` enum still
@@ -70,7 +69,14 @@ function resumeStepFrom(setupStep: string | undefined): Step {
   // (both client-only, like `twofactor`). A persisted `internet` therefore
   // resumes at the FIRST sub-step, `wifi`.
   if (setupStep === "internet") return "wifi";
-  if (setupStep && setupStep !== "done" && (STEPS as readonly string[]).includes(setupStep)) {
+  // `done` is resumable too (it used to fall back to `welcome`): the Done
+  // screen is no longer an empty terminal — it owns the flourish + EMBEDDED
+  // product tour (DoneStep phase machine), and AuthGate deliberately leaves
+  // an authenticated owner on /setup while the tour is pending. Excluding it
+  // resumed a mid-tour refresh at `welcome` and walked the owner back into a
+  // wizard they had already finished. Re-rendering Done is safe:
+  // `completeSetup` is an idempotent 200 on an already-ready appliance.
+  if (setupStep && (STEPS as readonly string[]).includes(setupStep)) {
     return setupStep as Step;
   }
   return "welcome";
