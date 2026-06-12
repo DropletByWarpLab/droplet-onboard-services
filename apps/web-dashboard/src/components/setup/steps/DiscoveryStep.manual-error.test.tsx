@@ -71,6 +71,24 @@ describe("DiscoveryStep manual pairing — friendly errors (WARP-856)", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("maps the 503 controller-starting message onto the still-starting copy", async () => {
+    commissionMatterDeviceMock.mockRejectedValueOnce(
+      Object.assign(new Error("Matter controller not started"), {
+        status: 503,
+      }),
+    );
+    render(<DiscoveryStep onContinue={() => {}} />);
+    await submitPairingCode("749701123365521327694");
+
+    expect(
+      await screen.findByText(/smart-home service is still starting up/i),
+    ).toBeInTheDocument();
+    // The controller jargon never reaches the customer.
+    expect(
+      screen.queryByText(/matter controller not started/i),
+    ).not.toBeInTheDocument();
+  });
+
   it("maps the 504 timeout onto the pairing-mode retry copy", async () => {
     commissionMatterDeviceMock.mockRejectedValueOnce(
       Object.assign(new Error("Failed to commission device: 504"), {
