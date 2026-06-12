@@ -29,3 +29,23 @@ RUN mkdir -p /var/lock \
       umdns \
       wireguard-tools kmod-wireguard luci-proto-wireguard \
       ddns-scripts luci-app-ddns
+
+# WARP-868 — bake the droplet rpcd ACL into the image. rpcd's `read '*'` in a
+# login only expands over the acl.d groups that EXIST, so without this file
+# even the root session is denied `file` reads (/dhcp/leases) and `umdns`
+# browse (/aps/discovered) — the network tab and the wizard's DDNS step 500.
+# It used to arrive only via a silenced best-effort `docker cp` in
+# droplet-openwrt-attach, which failed on the 2026-06-11 reflash and left the
+# box degraded with zero log signal. The COPY source is the CANONICAL file
+# shared with the multi-box image overlay (openwrt/files/...) — the compose
+# build context is openwrt/ for exactly this reason; attach keeps its copy as
+# a safety net for containers created from pre-bake images.
+COPY files/usr/share/rpcd/acl.d/droplet-ai.json /usr/share/rpcd/acl.d/droplet-ai.json
+
+# WARP-868 — stock uhttpd caps concurrent ubus JSON-RPC invocations at
+# max_requests=3. The orchestrator's network-summary fan-out (leases + aps +
+# wireless + firewall + health in parallel) exceeds that, so the slowest rpcd
+# scripts get their connections reset under load. uci-defaults scripts run
+# once on first boot of a fresh container; droplet-openwrt-attach enforces the
+# same value at attach time for containers that predate this image.
+COPY singlebox-image/uci-defaults/60-droplet-uhttpd-limits /etc/uci-defaults/60-droplet-uhttpd-limits
