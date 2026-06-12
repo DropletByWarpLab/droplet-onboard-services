@@ -32,7 +32,7 @@ vi.mock("framer-motion", async () => {
 });
 
 vi.mock("@/lib/auth", () => ({
-  useAuth: () => ({ completeSetup: vi.fn() }),
+  useAuth: () => ({ completeSetup: vi.fn(), setupState: { appliance: "unclaimed", setupStep: "welcome", userTourCompleted: false } }),
 }));
 
 const fetchDrivesMock = vi.fn();
@@ -47,6 +47,9 @@ const confirmPoolCommandMock = vi.fn();
 const requestAdoptDriveMock = vi.fn();
 
 vi.mock("@/lib/api", () => ({
+  // WARP-867 — AccountStep probes setup status on mount to pick its mode;
+  // "required" keeps these walks on the normal create form.
+  checkSetupRequired: vi.fn(async () => "required"),
   setupAdmin: vi.fn(async () => undefined),
   patchSetupStep: vi.fn(async () => undefined),
   loginUser: vi.fn(async () => undefined),

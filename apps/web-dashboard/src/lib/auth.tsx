@@ -467,17 +467,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const data = await res.json();
     // The server sets the HTTP-only cookie — we only store the user profile
     localStorage.setItem(USER_KEY, JSON.stringify(data.user));
+    // WARP-867 — re-read the AUTHORITATIVE lifecycle state before exposing
+    // the user to AuthGate, instead of force-flipping the in-memory
+    // appliance to "ready" (the previous behaviour). The flip was meant to
+    // stop a fresh sign-in being bounced into the wizard on a stale state,
+    // but on a genuinely unclaimed box — signing in mid-setup after a
+    // reboot, exactly the account step's "owner already exists" resume path
+    // — it parked the owner on the dashboard of a half-configured box until
+    // the next refresh re-probed the truth. AuthGate now treats
+    // authenticated+unclaimed as a stable wizard state, so routing off the
+    // real answer is correct in both directions. The probe is bounded and
+    // never throws; if it fails, the last-known state stands and AuthGate
+    // routes off that.
+    await probeSetupState(timeoutSignal(AUTH_INIT_TIMEOUT_MS));
     setUser(data.user);
-    // A successful sign-in means setup is past the account step at minimum.
-    // The orchestrator owns the authoritative `appliance` state; reflect a
-    // ready appliance locally so AuthGate doesn't bounce the freshly
-    // authenticated user back into the wizard before the next state fetch.
-    setSetupState((prev) =>
-      prev
-        ? { ...prev, appliance: "ready" }
-        : { appliance: "ready", setupStep: "done", userTourCompleted: false },
-    );
-  }, []);
+  }, [probeSetupState]);
 
   const setUserFromPasskey = useCallback((u: AuthUser) => {
     // The cookie is already set server-side by authenticate/verify — same as
@@ -488,17 +492,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       /* ignore — privacy mode, etc. */
     }
     setUser(u);
-    // A successful passkey sign-in means the appliance is past first-run.
-    // Mirror login(): flip the in-memory appliance to "ready" so AuthGate
-    // doesn't bounce the freshly authenticated user back into the wizard
-    // before the next `/api/setup/state` fetch lands. The orchestrator
-    // remains the authoritative source for the `appliance` state.
-    setSetupState((prev) =>
-      prev
-        ? { ...prev, appliance: "ready" }
-        : { appliance: "ready", setupStep: "done", userTourCompleted: false },
-    );
-  }, []);
+    // WARP-867 — mirror login(): re-probe the authoritative lifecycle state
+    // instead of force-flipping the in-memory appliance to "ready" (passkeys
+    // can be enrolled at the wizard's two-factor step, so a passkey sign-in
+    // on a still-unclaimed box is a real resume path). Fire-and-forget to
+    // keep this setter synchronous for its callers; until the probe lands,
+    // AuthGate routes off the last-known state — authenticated+unclaimed is
+    // a stable wizard state now, so no flip-flop either way.
+    void probeSetupState(timeoutSignal(AUTH_INIT_TIMEOUT_MS));
+  }, [probeSetupState]);
 
   const logout = useCallback(async () => {
     try {

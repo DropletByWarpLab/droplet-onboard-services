@@ -15,6 +15,9 @@ import { AccountStep } from "@/components/setup/steps/AccountStep";
 vi.mock("@/lib/api", () => ({
   setupAdmin: vi.fn(),
   loginUser: vi.fn(),
+  // WARP-867 — the step probes setup status on mount to pick its mode;
+  // "required" keeps these tests on the create form they assert.
+  checkSetupRequired: vi.fn(async () => "required"),
 }));
 
 describe("AccountStep — password requirement stated up front (WARP-668)", () => {

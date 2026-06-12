@@ -49,6 +49,7 @@ import { z } from "zod";
 import {
   getSetupState,
   setSetupStep,
+  advanceSetupStepToAtLeast,
   markApplianceReady,
   markTourCompleted,
   isSetupStep,
@@ -441,8 +442,11 @@ export function createSetupRouter(prisma: PrismaClient): Router {
         // Advance the resumable wizard to the next step. Best-effort: a failure
         // to persist the step must not fail the (already-committed) claim — the
         // dashboard also advances locally and re-syncs on the next PATCH.
+        // WARP-867: floor semantics — never drags an already-further pointer
+        // backward (a fresh claim can't legally have one, but the invariant is
+        // cheap and uniform with the re-claim path below).
         try {
-          await setSetupStep(prisma, STEP_AFTER_CLAIM);
+          await advanceSetupStepToAtLeast(prisma, STEP_AFTER_CLAIM);
         } catch (stepErr) {
           logger.warn(
             { err: stepErr },
@@ -462,6 +466,26 @@ export function createSetupRouter(prisma: PrismaClient): Router {
         // Idempotent short-circuit — the box is already bound, move on. Clear
         // the rate state too so a prior partial-lock can't linger (WARP-631).
         await clearClaimRateState(ip).catch(() => {});
+        // WARP-867 — reconcile the resume pointer on a re-presented claim
+        // (wizard restarted from welcome after a reboot raced the state
+        // probe). Floor semantics, two jobs: (a) HEAL a pointer stranded
+        // at/before "claim" — e.g. the original claim's best-effort step
+        // persist failed — so the next cold load resumes past the consumed
+        // code instead of re-gating on it; (b) never move a further-along
+        // pointer backward, so a replayed early step can't manufacture the
+        // unsatisfiable-account dead-end from the field report (that
+        // regression came from the client re-persisting early steps after
+        // the broken cold-load resume; the floor keeps this side immune
+        // regardless of client behaviour). Best-effort for the same reason
+        // as the fresh-claim path.
+        try {
+          await advanceSetupStepToAtLeast(prisma, STEP_AFTER_CLAIM);
+        } catch (stepErr) {
+          logger.warn(
+            { err: stepErr },
+            "Re-claim acknowledged but reconciling the wizard step failed",
+          );
+        }
         // Idempotent re-claim — still kick the panel off the claim screen in
         // case a prior transition was missed (e.g. the display was down at the
         // moment of the original claim).

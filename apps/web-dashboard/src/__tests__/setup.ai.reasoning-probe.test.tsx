@@ -30,6 +30,9 @@ const fetchModelsMock = vi.fn();
 const sendChatMock = vi.fn();
 
 vi.mock("@/lib/api", () => ({
+  // WARP-867 — AccountStep probes setup status on mount to pick its mode;
+  // "required" keeps these walks on the normal create form.
+  checkSetupRequired: vi.fn(async () => "required"),
   fetchModels: () => fetchModelsMock(),
   sendChat: (req: unknown) => sendChatMock(req),
 }));

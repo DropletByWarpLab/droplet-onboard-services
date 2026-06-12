@@ -95,3 +95,62 @@ describe("AuthGate — routes off /setup/state (PR #372)", () => {
     expect(replaceMock).toHaveBeenCalledWith("/login");
   });
 });
+
+/**
+ * WARP-867 — an AUTHENTICATED user on an UNCLAIMED appliance must have one
+ * stable home: the wizard. The account step auto-logs the owner in, so this
+ * combination is the NORMAL state for the entire back half of first-run.
+ * Pre-fix, `/setup` bounced to `/` (user && isPublicPage) while `/` bounced
+ * back to `/setup` (applianceUnclaimed) — an infinite redirect loop on every
+ * mid-wizard refresh. These cases pin the loop closed from each entry point.
+ */
+describe("AuthGate — authenticated user, unclaimed appliance (WARP-867)", () => {
+  const authedUnclaimed = {
+    user: { id: "u1", username: "ada", displayName: "Ada", role: "owner" },
+    isLoading: false,
+    setupState: {
+      appliance: "unclaimed",
+      setupStep: "internet",
+      userTourCompleted: false,
+    },
+  };
+
+  beforeEach(() => {
+    replaceMock.mockReset();
+    useAuthMock.mockReset();
+    pathnameValue = "/";
+  });
+
+  it("stays put on /setup — no redirect at all (the loop's first leg)", () => {
+    pathnameValue = "/setup";
+    setAuth(authedUnclaimed);
+    render(<AuthGate>child</AuthGate>);
+    expect(replaceMock).not.toHaveBeenCalled();
+  });
+
+  it("routes / back into the wizard, not the dashboard (the loop's second leg)", () => {
+    pathnameValue = "/";
+    setAuth(authedUnclaimed);
+    render(<AuthGate>child</AuthGate>);
+    expect(replaceMock).toHaveBeenCalledWith("/setup");
+    expect(replaceMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes /login into the wizard — setup still owns the session", () => {
+    pathnameValue = "/login";
+    setAuth(authedUnclaimed);
+    render(<AuthGate>child</AuthGate>);
+    expect(replaceMock).toHaveBeenCalledWith("/setup");
+    expect(replaceMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("still sends an authenticated user on a READY box off /login to the dashboard", () => {
+    pathnameValue = "/login";
+    setAuth({
+      ...authedUnclaimed,
+      setupState: { appliance: "ready", setupStep: "done", userTourCompleted: true },
+    });
+    render(<AuthGate>child</AuthGate>);
+    expect(replaceMock).toHaveBeenCalledWith("/");
+  });
+});
