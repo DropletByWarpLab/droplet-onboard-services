@@ -106,6 +106,7 @@ ALL_CHECKS=(
   pm-invariants
   lifecycle-naming
   image-pipeline
+  tls-invariants
 )
 FULL_ONLY_CHECKS=(
   docker-build-smoke
@@ -131,7 +132,7 @@ SUBCOMMAND
                         tsc-full, compose-config, frigate-env-scan,
                         shellcheck, matter-env-allowlist, exec-bits,
                         stale-repo-names, pm-invariants, lifecycle-naming,
-                        image-pipeline, docker-build-smoke
+                        image-pipeline, tls-invariants, docker-build-smoke
                       Useful for iterating on a single failure.
 
 EXAMPLES
@@ -1288,6 +1289,75 @@ run_check_lifecycle_naming() {
   return 1
 }
 
+run_check_tls_invariants() {
+  # ADR-023 (C2/C3): invariants the public-CA per-device TLS work must hold so
+  # the box never ships certless and the LE cert installs without an nginx
+  # config change. Three static asserts:
+  #   1. _generate_tls_cert adds the per-device FQDN (DROPLET_PUBLIC_FQDN) to the
+  #      bootstrap self-signed SAN — so the box serves a name-matching cert for
+  #      the FQDN even before the first LE issuance / offline.
+  #   2. nginx.conf still references droplet.crt + droplet.key on BOTH server
+  #      blocks (:443 and :8443) — the LE fullchain overwrites droplet.crt, so a
+  #      rename of those paths would silently break the zero-config handoff.
+  #   3. factory-reset.sh deregisters the FQDN (DELETE /dhcp/hostnames/<fqdn>).
+  local label="tls-invariants"
+  local secrets_sh="$REPO_ROOT/scripts/lib/secrets.sh"
+  local nginx_conf="$REPO_ROOT/docker/nginx.conf"
+  local factory_reset="$REPO_ROOT/scripts/factory-reset.sh"
+  local failures=0
+
+  # 1. Bootstrap SAN includes the per-device FQDN.
+  if [ -f "$secrets_sh" ]; then
+    if ! grep -qE 'DNS:\$public_fqdn|DNS:\$\{DROPLET_PUBLIC_FQDN' "$secrets_sh" \
+       && ! grep -qE 'DROPLET_PUBLIC_FQDN.*san|san.*public_fqdn' "$secrets_sh"; then
+      printf "  ${_RED}FAIL${_RESET}  %s — _generate_tls_cert does not add the FQDN to the bootstrap SAN\n" "$label"
+      printf "    | (ADR-023 C2: add DNS:\$public_fqdn near the hostname SAN in secrets.sh.)\n" >&2
+      failures=$((failures + 1))
+    fi
+  else
+    printf "  ${_RED}FAIL${_RESET}  %s — scripts/lib/secrets.sh not found\n" "$label"
+    failures=$((failures + 1))
+  fi
+
+  # 2. nginx references droplet.crt + droplet.key on BOTH server blocks.
+  if [ -f "$nginx_conf" ]; then
+    local crt_refs key_refs
+    crt_refs="$(grep -cE 'ssl_certificate[[:space:]].*droplet\.crt' "$nginx_conf" 2>/dev/null || echo 0)"
+    key_refs="$(grep -cE 'ssl_certificate_key[[:space:]].*droplet\.key' "$nginx_conf" 2>/dev/null || echo 0)"
+    if [ "$crt_refs" -lt 2 ] || [ "$key_refs" -lt 2 ]; then
+      printf "  ${_RED}FAIL${_RESET}  %s — nginx.conf must reference droplet.crt/.key on BOTH servers (found crt=%s key=%s)\n" "$label" "$crt_refs" "$key_refs"
+      printf "    | (ADR-023 C2: the LE fullchain overwrites droplet.crt — do not rename these paths.)\n" >&2
+      failures=$((failures + 1))
+    fi
+  else
+    printf "  ${_RED}FAIL${_RESET}  %s — docker/nginx.conf not found\n" "$label"
+    failures=$((failures + 1))
+  fi
+
+  # 3. factory-reset deregisters the FQDN host-record. The curl uses `-X DELETE`
+  #    with the URL on the following line, so assert on BOTH parts independently:
+  #    a DELETE verb AND the /dhcp/hostnames/<fqdn> path.
+  if [ -f "$factory_reset" ]; then
+    if ! grep -qE '\-X[[:space:]]+DELETE' "$factory_reset" \
+       || ! grep -qE '\/dhcp\/hostnames\/\$\{?_?DEREGISTER_FQDN' "$factory_reset"; then
+      printf "  ${_RED}FAIL${_RESET}  %s — factory-reset.sh does not deregister the FQDN (DELETE /dhcp/hostnames/<fqdn>)\n" "$label"
+      printf "    | (ADR-023 C3: drop the split-horizon host-record on reset.)\n" >&2
+      failures=$((failures + 1))
+    fi
+  else
+    printf "  ${_RED}FAIL${_RESET}  %s — scripts/factory-reset.sh not found\n" "$label"
+    failures=$((failures + 1))
+  fi
+
+  if [ "$failures" -eq 0 ]; then
+    printf "  ${_GREEN}PASS${_RESET}  %s (FQDN SAN + nginx cert paths + factory-reset deregistration)\n" "$label"
+    CHECK_RESULTS[$label]=pass
+    return 0
+  fi
+  CHECK_RESULTS[$label]=fail
+  return 1
+}
+
 run_check_image_pipeline() {
   # WARP-663 / ADR-020: the appliance image pipeline (`droplet-image
   # build|manifest|sign|verify|list|publish|flash`) ships a versioned, signed
@@ -1652,6 +1722,7 @@ _dispatch_check() {
     pm-invariants)        run_check_pm_invariants ;;
     lifecycle-naming)     run_check_lifecycle_naming ;;
     image-pipeline)       run_check_image_pipeline ;;
+    tls-invariants)       run_check_tls_invariants ;;
     docker-build-smoke)   run_check_docker_build_smoke ;;
     *)
       printf "${_RED}error:${_RESET} unknown check '%s'\n" "$1" >&2

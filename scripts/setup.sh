@@ -533,13 +533,28 @@ main() {
   printf "  Dashboard:     ${_CYAN}https://droplet-ai.local${_RESET} (mDNS) or ${_CYAN}https://droplet-ai.lan${_RESET} (router DNS)\n"
   printf "                 ${_DIM}https://localhost also works on this device${_RESET}\n"
   printf "  API:           ${_CYAN}https://droplet-ai.local/api/health${_RESET}\n"
+  # ADR-023: surface the publicly-trusted per-device FQDN as the PRIMARY URL
+  # when it's known — the one address that works at home AND over the VPN with
+  # a green padlock and no per-client install. Read straight from .env; empty
+  # until the box has learned it from HQ on its first issuance run.
+  _public_fqdn=""
+  if [ -f "$REPO_ROOT/.env" ]; then
+    _public_fqdn="$(grep -E '^DROPLET_PUBLIC_FQDN=' "$REPO_ROOT/.env" | tail -1 | cut -d= -f2- | tr -d '"' || true)"
+  fi
+  if [ -n "$_public_fqdn" ]; then
+    printf "\n"
+    printf "  ${_BOLD}Your one address, everywhere:${_RESET} ${_CYAN}https://%s${_RESET}\n" "$_public_fqdn"
+    printf "  Works at home AND over the VPN, with a trusted padlock — nothing to install.\n"
+  fi
   printf "\n"
-  printf "  ${_BOLD}To silence the browser \"Not secure\" warning${_RESET} (one-time, per client):\n"
-  printf "    macOS / Linux: ${_CYAN}./scripts/trust-droplet-cert.sh${_RESET}\n"
-  printf "    Windows:       ${_CYAN}powershell -ExecutionPolicy Bypass -File scripts\\trust-droplet-cert.ps1${_RESET}  ${_DIM}(run as Administrator)${_RESET}\n"
-  printf "  The script downloads the Droplet's self-signed cert and installs it\n"
-  printf "  into your OS trust store — the Droplet signs for droplet-ai.local,\n"
-  printf "  droplet-ai.lan, droplet.local, droplet.lan, localhost, and LAN IPs.\n"
+  printf "  ${_BOLD}About the browser padlock${_RESET}\n"
+  printf "  The Droplet gets a publicly-trusted certificate automatically — no\n"
+  printf "  per-device install is needed. The first few minutes after setup it may\n"
+  printf "  serve a temporary self-signed cert (you'll see a one-time \"Not secure\"\n"
+  printf "  warning) until the trusted certificate is issued; it then turns into a\n"
+  printf "  green padlock on its own.\n"
+  printf "  ${_DIM}Offline / air-gapped fallback only: ./scripts/trust-droplet-cert.sh${_RESET}\n"
+  printf "  ${_DIM}Windows: powershell -ExecutionPolicy Bypass -File scripts\\trust-droplet-cert.ps1${_RESET}\n"
   printf "\n"
   printf "  Open the dashboard to complete setup — a guided wizard\n"
   printf "  will walk you through creating your admin account.\n"

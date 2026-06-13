@@ -238,6 +238,15 @@ services:
       # the orchestrator's gRPC client can reach it without exposing a
       # network port. Read-only — the orchestrator never writes.
       - /var/run/droplet:/var/run/droplet:ro
+      # ADR-023 (C2): the TLS cert dir, mounted READ-WRITE so the
+      # tls-issuance cron can atomically install the freshly-issued LE
+      # fullchain (droplet.crt) + private key (droplet.key). The gateway
+      # mounts the SAME dir read-only (see the gateway service above) and
+      # serves from it — nginx needs zero config change because the LE
+      # fullchain overwrites the same droplet.crt the bootstrap wrote. The
+      # orchestrator triggers the nginx reload via the device-bridge, NOT a
+      # docker socket (which is deliberately never mounted here).
+      - ./certs:/app/docker/certs:rw
     # WARP-43: rolled-up health includes postgres, redis, routing, ai-gateway,
     # nextcloud. A `down` aggregate returns HTTP 503 so Docker restarts this
     # container when a HARD dependency (postgres) is lost.
@@ -407,7 +416,11 @@ services:
       # scripts/lib/local-dns.sh; droplet.local / droplet.lan are accepted too
       # so OpenWrt's own umdns/expand_hosts entries keep working if a user
       # ever points them at the Jetson directly.
-      - NEXTCLOUD_TRUSTED_DOMAINS=localhost nextcloud gateway droplet-ai.local droplet-ai.lan droplet.local droplet.lan
+      # ADR-023 (C4): append the publicly-trusted per-device FQDN
+      # (${DROPLET_PUBLIC_FQDN}) so Nextcloud trusts the one-URL-everywhere
+      # address. Empty until the box learns it from HQ — a trailing blank token
+      # is harmless to Nextcloud's space-separated trusted-domains list.
+      - NEXTCLOUD_TRUSTED_DOMAINS=localhost nextcloud gateway droplet-ai.local droplet-ai.lan droplet.local droplet.lan ${DROPLET_PUBLIC_FQDN:-}
       - OVERWRITEPROTOCOL=https
     volumes:
       - nextcloud-data:/var/www/html
@@ -520,7 +533,11 @@ services:
       # Static config only — secrets come from .env via env_file
       - ORCHESTRATOR_URL=http://orchestrator:3000
       - GRPC_PORT=50051
-      - CORS_ORIGINS=https://localhost,http://localhost,https://localhost:3001,http://localhost:3001
+      # ADR-023 (C4): append https://${DROPLET_PUBLIC_FQDN} so the ai-gateway
+      # accepts the publicly-trusted one-URL-everywhere origin. Empty until the
+      # box learns its FQDN from HQ — a trailing comma is tolerated by the
+      # ai-gateway's comma-split (empty entries are dropped, see main.py).
+      - CORS_ORIGINS=https://localhost,http://localhost,https://localhost:3001,http://localhost:3001,https://${DROPLET_PUBLIC_FQDN:-localhost}
       # GW-14: socket peers (your nginx edge) whose forwarded client-IP headers
       # the rate limiter trusts. Empty default = trust nothing (key on the real
       # socket peer). Set RATE_LIMIT_TRUSTED_PROXIES to nginx's IP/subnet.
