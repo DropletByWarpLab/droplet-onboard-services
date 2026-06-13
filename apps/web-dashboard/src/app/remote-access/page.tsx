@@ -35,7 +35,7 @@ import { Dialog } from "@/components/Dialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useToast } from "@/components/Toast";
 import { translateError } from "@/lib/friendly-errors";
-import { dashboardIpFromConf } from "@/lib/wireguard";
+import { dashboardUrlFromConf } from "@/lib/wireguard";
 
 /**
  * Remote Access — WireGuard VPN management page.
@@ -179,7 +179,13 @@ export default function RemoteAccessPage() {
       {/* DuckDNS card — only renders when the user is an admin. */}
       <DuckDnsCard />
 
-      {showAdd && <AddDeviceDialog onClose={() => setShowAdd(false)} onAdded={reload} />}
+      {showAdd && (
+        <AddDeviceDialog
+          onClose={() => setShowAdd(false)}
+          onAdded={reload}
+          publicFqdn={status?.publicFqdn ?? null}
+        />
+      )}
 
       <ConfirmDialog
         open={revokeTarget !== null}
@@ -439,9 +445,11 @@ function PeerRow({
 function AddDeviceDialog({
   onClose,
   onAdded,
+  publicFqdn,
 }: {
   onClose: () => void;
   onAdded: () => void;
+  publicFqdn: string | null;
 }) {
   const [step, setStep] = useState<"form" | "ready">("form");
   const [deviceLabel, setDeviceLabel] = useState("");
@@ -578,22 +586,35 @@ function AddDeviceDialog({
               </li>
               <li>
                 Activate the tunnel, then open{" "}
-                <strong className="font-mono">
-                  {/* The conf's DNS line is the box-side gateway — the only
-                      address the dashboard answers on for VPN clients.
-                      .local names never resolve over the tunnel (phones use
-                      multicast for those, which doesn't cross it). Parsed +
-                      IPv4-validated in lib/wireguard.ts. */}
-                  https://{dashboardIpFromConf(created.conf)}
+                <strong className="font-mono break-all">
+                  {/* ADR-023: prefer the publicly-trusted per-device FQDN — the
+                      one address that works at home AND over the tunnel with a
+                      green padlock. Falls back to the box-side gateway IP from
+                      the conf's DNS line (parsed + IPv4-validated in
+                      lib/wireguard.ts) until the box learns its FQDN from HQ. */}
+                  {dashboardUrlFromConf(created.conf, publicFqdn ?? undefined)}
                 </strong>{" "}
                 in the browser — that&rsquo;s your Droplet from anywhere.
               </li>
             </ol>
             <p className="type-caption-1 text-label-tertiary">
-              Test it away from home (cellular works) — on this Droplet&rsquo;s
-              own Wi-Fi the tunnel can&rsquo;t loop back, and you don&rsquo;t
-              need it there. Names like <span className="font-mono">droplet.local</span>{" "}
-              only work at home, not over the tunnel.
+              {publicFqdn ? (
+                <>
+                  This is the same address you use at home — it works on your
+                  Wi-Fi <em>and</em> over the tunnel, with a secure padlock and
+                  nothing to install. (On this Droplet&rsquo;s own Wi-Fi the
+                  tunnel can&rsquo;t loop back, and you don&rsquo;t need it
+                  there.)
+                </>
+              ) : (
+                <>
+                  Test it away from home (cellular works) — on this
+                  Droplet&rsquo;s own Wi-Fi the tunnel can&rsquo;t loop back, and
+                  you don&rsquo;t need it there. Names like{" "}
+                  <span className="font-mono">droplet.local</span> only work at
+                  home, not over the tunnel.
+                </>
+              )}
             </p>
 
             <div className="flex justify-center">
