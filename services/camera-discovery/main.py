@@ -541,8 +541,14 @@ async def scan_and_discover() -> None:
         # the instant a real stream appears. A genuinely working stream
         # (open, default-credential, or ONVIF-provided) verifies and is added
         # exactly as before.
+        detection_method = camera_info.get("detection_method")
         verified = False
-        if rtsp_url and camera_info.get("detection_method") != "rtsp_port_open":
+        if detection_method == "rtsp_default_credentials":
+            # probe_rtsp_with_credentials already confirmed a live 200 DESCRIBE;
+            # repeating verify_stream would open an identical TCP connection for
+            # no new information. Mark verified directly.
+            verified = bool(rtsp_url)
+        elif rtsp_url and detection_method != "rtsp_port_open":
             try:
                 verified = await verify_stream(rtsp_url)
             except Exception as exc:  # transient network error — retry next scan

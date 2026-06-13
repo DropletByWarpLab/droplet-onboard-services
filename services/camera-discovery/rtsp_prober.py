@@ -104,13 +104,16 @@ async def is_rtsp_server(ip: str, port: int = 554, timeout: float = 3.0) -> bool
     resp = raw.decode("utf-8", errors="ignore")
     status_line = resp.split("\r\n", 1)[0]
     # Must be an RTSP status line (reject HTTP responders on 554) with a code
-    # that proves a working RTSP control channel. 400/404/5xx ⇒ not a camera.
+    # that proves a working RTSP control channel. 400/5xx ⇒ not a camera.
+    # 404 is accepted: some Hikvision/Dahua firmware returns 404 on a root
+    # OPTIONS because they only process path-specific requests, but are real
+    # RTSP servers — silently dropping them would hide valid cameras.
     if not status_line.startswith(("RTSP/1.0", "RTSP/2.0")):
         return False
     parts = status_line.split(" ", 2)
     if len(parts) < 2 or not parts[1].isdigit():
         return False
-    return int(parts[1]) in (200, 401, 403)
+    return int(parts[1]) in (200, 401, 403, 404)
 
 
 async def probe_rtsp_stream(ip: str, port: int = 554, timeout: float = 3.0) -> str | None:
@@ -255,10 +258,10 @@ async def _try_credentials_once(ip: str, port: int, path: str,
         _close_rtsp(writer)
         return False
 
-    if "RTSP/1.0 200" in resp1:
+    if "RTSP/1.0 200" in resp1 or "RTSP/2.0 200" in resp1:
         _close_rtsp(writer)
         return True
-    if "RTSP/1.0 401" not in resp1:
+    if "RTSP/1.0 401" not in resp1 and "RTSP/2.0 401" not in resp1:
         _close_rtsp(writer)
         return False  # 404 / 501 / etc — path doesn't exist here
 
@@ -294,7 +297,7 @@ async def _try_credentials_once(ip: str, port: int, path: str,
     finally:
         _close_rtsp(writer2)
 
-    return "RTSP/1.0 200" in resp2
+    return "RTSP/1.0 200" in resp2 or "RTSP/2.0 200" in resp2
 
 
 async def probe_rtsp_with_credentials(ip: str, port: int

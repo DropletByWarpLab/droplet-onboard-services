@@ -228,8 +228,12 @@ class TestScanLoopGate:
             added["n"] += 1
             return True
 
+        async def fake_probe_onvif(ip):
+            return None
+
         monkeypatch.setattr(main, "fetch_dhcp_leases", fake_leases)
         monkeypatch.setattr(main, "discover_cameras", fake_onvif)
+        monkeypatch.setattr(main, "probe_onvif_device", fake_probe_onvif)
         monkeypatch.setattr(main, "probe_camera", fake_probe)
         monkeypatch.setattr(main, "verify_stream", fake_verify)
         monkeypatch.setattr(main, "_is_camera_hostname", lambda h: False)
@@ -295,8 +299,12 @@ class TestScanLoopGate:
                     "rtsp_url": f"rtsp://{ip}:554/stream1",
                     "detection_method": "rtsp_port_open"}
 
+        async def fake_probe_onvif_skip(ip):
+            return None
+
         monkeypatch.setattr(main, "fetch_dhcp_leases", fake_leases)
         monkeypatch.setattr(main, "discover_cameras", fake_onvif)
+        monkeypatch.setattr(main, "probe_onvif_device", fake_probe_onvif_skip)
         monkeypatch.setattr(main, "probe_camera", fake_probe)
         monkeypatch.setattr(main, "verify_stream", counting_verify)
         monkeypatch.setattr(main, "_is_camera_hostname", lambda h: False)
