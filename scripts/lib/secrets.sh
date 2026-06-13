@@ -366,6 +366,20 @@ MAX_UPLOAD_SIZE_MB=100
 DROPLET_TPM_BACKEND=$([ -e /dev/tpm0 ] && printf 'real' || printf 'mock')
 DROPLET_DEVICE_ID=$(hostname 2>/dev/null || echo droplet)
 
+# --- Public-CA per-device TLS (ADR-023) ---
+# DROPLET_PUBLIC_FQDN: the opaque per-device subdomain
+#   d-HMAC.devices.warp-lab.ai. The box CANNOT compute the HQ-keyed HMAC, so it
+#   starts EMPTY and is populated when the tls-issuance cron learns the FQDN
+#   from the HQ challenge response and persists it back here. Empty is the
+#   correct first-boot value: the bootstrap self-signed cert keeps the box
+#   serving TLS, and the FQDN becomes the canonical origin + a bootstrap-SAN
+#   entry once known.
+DROPLET_PUBLIC_FQDN=
+# HQ_ISSUANCE_URL: base URL of the fleet HQ issuance API (hq.warp-lab.com).
+#   Empty disables live issuance (dev / pre-fleet). Plain outbound HTTPS; does
+#   NOT require the fleet WireGuard tunnel.
+HQ_ISSUANCE_URL=
+
 # --- Compose profiles ---
 # Linux defaults to "linux,display,eval":
 #   linux   → Frigate (needs /dev/dri/renderD128), voice-io (needs /dev/snd),

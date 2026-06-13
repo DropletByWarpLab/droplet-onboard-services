@@ -178,6 +178,72 @@ else
 fi
 
 # =============================================================================
+# Phase 0b: Deregister the split-horizon FQDN + HQ registration (ADR-023 C3)
+# =============================================================================
+# MUST run BEFORE Phase 1 stops the stack (the routing service has to be up to
+# accept the DELETE) AND before Phase 3 wipes .env (we read DROPLET_PUBLIC_FQDN
+# + DROPLET_DEVICE_ID from it). Every step is BEST-EFFORT and non-fatal: a reset
+# must complete even if HQ or the router is unreachable.
+
+_DEREGISTER_FQDN=""
+_DEREGISTER_DEVICE_ID=""
+if [ -f "$REPO_ROOT/.env" ]; then
+  # Read the two keys without sourcing the whole .env (avoids executing it).
+  _DEREGISTER_FQDN="$(grep -E '^DROPLET_PUBLIC_FQDN=' "$REPO_ROOT/.env" | tail -1 | cut -d= -f2- | tr -d '"' || true)"
+  _DEREGISTER_DEVICE_ID="$(grep -E '^DROPLET_DEVICE_ID=' "$REPO_ROOT/.env" | tail -1 | cut -d= -f2- | tr -d '"' || true)"
+fi
+
+if [ -n "$_DEREGISTER_FQDN" ]; then
+  log_step 0 4 "Deregistering public-FQDN DNS + HQ registration (${_DEREGISTER_FQDN})"
+
+  # 1. Remove the split-horizon host-record from the OpenWrt dnsmasq (routing).
+  _routing_url="${ROUTING_SERVICE_URL:-http://localhost:8080}"
+  _routing_token="${ROUTING_SERVICE_TOKEN:-}"
+  _routing_auth=()
+  [ -n "$_routing_token" ] && _routing_auth=(-H "Authorization: Bearer ${_routing_token}")
+  if curl -sf --max-time 5 "${_routing_url}/health" >/dev/null 2>&1; then
+    curl -sS --max-time 10 -X DELETE \
+      "${_routing_url}/dhcp/hostnames/${_DEREGISTER_FQDN}" \
+      "${_routing_auth[@]}" >/dev/null 2>&1 \
+      && log_success "Removed router DNS host-record for ${_DEREGISTER_FQDN}" \
+      || log_warn "Could not remove router DNS host-record (non-fatal)"
+  else
+    log_warn "Routing service unreachable — skipping router DNS deregistration (non-fatal)"
+  fi
+
+  # 2. Remove the managed host-record line from the host dnsmasq config
+  #    (ADR-018-transitional leg). Best-effort; the file is wiped/regenerated on
+  #    re-provision anyway, but stripping it now keeps a not-reinstalled box clean.
+  _host_dnsmasq_conf="/etc/droplet-poc-host-net/lan-dhcp.conf"
+  if [ -f "$_host_dnsmasq_conf" ]; then
+    _tmp_dns="$(mktemp -t droplet-hostdns-rm.XXXXXX 2>/dev/null || mktemp)"
+    sudo grep -vF "# ADR-023 managed host-record" "$_host_dnsmasq_conf" 2>/dev/null \
+      | grep -vE '^host-record=.*\.devices\.warp-lab\.ai,' > "$_tmp_dns" || true
+    sudo cp "$_tmp_dns" "$_host_dnsmasq_conf" 2>/dev/null || true
+    rm -f "$_tmp_dns"
+    sudo systemctl reload droplet-poc-host-net.service 2>/dev/null \
+      || sudo systemctl restart droplet-poc-host-net.service 2>/dev/null || true
+    log_success "Removed host dnsmasq host-record (ADR-018-transitional)"
+  fi
+
+  # 3. Best-effort HQ deregistration. The box can't compute the HQ-keyed HMAC,
+  #    so HQ owns the label↔device unbind; we just notify it. A fresh challenge+
+  #    signature would normally authenticate this, but at factory-reset time the
+  #    device-identity sidecar may already be down — so this is fire-and-forget
+  #    and explicitly NON-FATAL. HQ also reaps stale registrations server-side.
+  _hq_url="${HQ_ISSUANCE_URL:-}"
+  if [ -n "$_hq_url" ] && [ -n "$_DEREGISTER_DEVICE_ID" ]; then
+    curl -sS --max-time 10 -X DELETE \
+      "${_hq_url%/}/api/issuance/registration?device_id=${_DEREGISTER_DEVICE_ID}" \
+      >/dev/null 2>&1 \
+      && log_success "Notified HQ to deregister ${_DEREGISTER_DEVICE_ID}" \
+      || log_warn "Could not reach HQ for deregistration (non-fatal — HQ reaps stale registrations)"
+  fi
+
+  log_divider
+fi
+
+# =============================================================================
 # Phase 1: Stop the stack
 # =============================================================================
 
