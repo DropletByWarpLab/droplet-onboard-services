@@ -221,9 +221,9 @@ ROUTING_SERVICE_TOKEN=$routing_service_token
 # routing/main.py) uses it for ubus auth, AND droplet-openwrt-attach sets the
 # OpenWrt container's root password to match. An empty value previously left
 # the router root password unset, so ubus auth never came up. Rotate via
-# `sudo systemctl restart droplet-openwrt-attach.service` (sets the container
-# root pw + restarts routing together) — NOT a bare `docker compose restart
-# routing`, which would present the new pw to a container still on the old one.
+# \`sudo systemctl restart droplet-openwrt-attach.service\` (sets the container
+# root pw + restarts routing together) — NOT a bare \`docker compose restart
+# routing\`, which would present the new pw to a container still on the old one.
 OPENWRT_PASSWORD=$openwrt_password
 
 # --- Voice service bearer (voice-io → orchestrator /api/llm/chat) ---
@@ -337,7 +337,7 @@ DROPLET_PM_WEB_URL=$pm_web_url
 
 # Plane v0.24.1 Celery broker (RabbitMQ) — internal-only, no host port. Plane
 # builds CELERY_BROKER_URL from these (plane/settings/common.py). User is
-# `plane` (NOT the default `guest`, which RabbitMQ restricts to loopback and
+# \`plane\` (NOT the default \`guest\`, which RabbitMQ restricts to loopback and
 # would refuse cross-container celery connections).
 DROPLET_PM_MQ_USER=plane
 DROPLET_PM_MQ_PASSWORD=$pm_mq_password
