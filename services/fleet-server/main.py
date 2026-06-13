@@ -31,6 +31,14 @@ SCOPE-NOTES (deviations / decisions, for the box-side + PR body)
    prod only after plumbing is verified (ADR-023 §Risk: LE rate limits).
 7. NOT added to the box docker-compose (it deploys to HQ). A standalone
    services/fleet-server/docker-compose.yml + README cover the HQ deploy.
+8. The contract lists 502 for "ACME/Cloudflare upstream". Because
+   issuance is ASYNC (202 then poll), an upstream ACME/Cloudflare failure
+   during the background dance surfaces via GET /order/{id} as
+   status="failed" + last_error — NOT as a synchronous 502 on /order.
+   A synchronous 502 would only apply if issuance were inline; it isn't.
+9. The unattended renewal path re-finalizes against the stored CSR, so a
+   box that ROTATES its serving key must POST /renew with the fresh CSR
+   itself (the daily job alone keeps the existing key's cert alive).
 """
 
 from __future__ import annotations
