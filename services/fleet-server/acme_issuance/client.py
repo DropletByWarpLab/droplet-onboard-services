@@ -74,25 +74,30 @@ class AcmeIssuer:
         txt_value = dns01.validation(self._account_key)
         record_name = dns01.validation_domain_name(domain)
 
+        # Local variable so concurrent calls on the singleton AcmeIssuer
+        # don't overwrite each other's result via a shared instance attribute.
+        finalized: Optional[Any] = None
+
         async def _answer_and_finalize() -> None:
+            nonlocal finalized
             # Answer the challenge then finalize — both sync acme calls.
             def _do() -> Any:
                 response = dns01.response(self._account_key)
                 self._acme.answer_challenge(challb, response)
-                deadline = datetime.datetime.now() + datetime.timedelta(
+                # Use UTC so the deadline is correct on any host timezone.
+                deadline = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
                     seconds=self._order_timeout
                 )
                 return self._acme.poll_and_finalize(orderr, deadline)
 
-            self._finalized = await asyncio.to_thread(_do)
+            finalized = await asyncio.to_thread(_do)
 
-        self._finalized: Optional[Any] = None
         await self._dns.publish_challenge(record_name, txt_value, _answer_and_finalize)
 
-        if self._finalized is None or not getattr(self._finalized, "fullchain_pem", None):
+        if finalized is None or not getattr(finalized, "fullchain_pem", None):
             raise AcmeOrderError(f"order for {fqdn} finalized without a fullchain")
         logger.info("acme: issued certificate for %s", fqdn)
-        return self._finalized
+        return finalized
 
     async def revoke_certificate(self, fullchain_pem: str, *, reason: int = 0) -> None:
         """ACME-revoke a previously-issued certificate (deregistration)."""

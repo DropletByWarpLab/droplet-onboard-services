@@ -88,10 +88,15 @@ def validate_csr(csr_pem: str, *, expected_fqdn: str) -> x509.CertificateSigning
     except x509.ExtensionNotFound as exc:
         raise CsrValidationError("CSR has no SubjectAlternativeName") from exc
 
+    all_sans = list(san_ext.value)
+    if len(all_sans) != 1:
+        raise CsrValidationError(
+            f"CSR must carry exactly one SAN entry, got {len(all_sans)}"
+        )
     dns_names = san_ext.value.get_values_for_type(x509.DNSName)
     if len(dns_names) != 1:
         raise CsrValidationError(
-            f"CSR must carry exactly one DNS SAN, got {len(dns_names)}"
+            f"CSR's single SAN must be a DNS name, got {type(all_sans[0]).__name__}"
         )
     if dns_names[0] != expected_fqdn:
         raise CsrValidationError(

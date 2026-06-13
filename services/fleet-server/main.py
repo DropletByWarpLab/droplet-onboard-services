@@ -152,6 +152,9 @@ async def _renew_one(*, repo, device_id: str) -> None:
     if cert is None or not cert.csr_pem:
         logger.warning("renewal: %s has no stored CSR; skipping", device_id)
         return
+    if not renewal_mod.assert_renewing_allowed(cert):
+        logger.warning("renewal: %s is not in ACTIVE state, skipping", device_id)
+        return
     await repo.mark_cert_renewing(device_id=device_id)
     await flow_mod.run_order_flow(
         repo=repo, issuer=app.state.issuer, device_id=device_id,
@@ -204,7 +207,7 @@ async def startup():
 
     app.state.repo = PgIssuanceRepository(db.get_pool())
     app.state.issuer = _build_acme_issuer()
-    app.state.run_background = True
+    app.state.run_background = False
 
     _scheduler = _build_scheduler()
     _scheduler.start()

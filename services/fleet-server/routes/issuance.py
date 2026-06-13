@@ -177,6 +177,10 @@ async def _order_or_renew(request: Request, body: OrderRequest,
 
     existing = await repo.get_cert(body.device_id)
     if existing is not None:
+        # 403 if the device has been deregistered. The row is retained for
+        # audit; a REVOKED device must not self-reinstate via /order or /renew.
+        if existing.status == CertStatus.REVOKED:
+            raise HTTPException(status_code=403, detail="device has been deregistered")
         # 409 if an order is already in progress for this device.
         if existing.status in _IN_PROGRESS:
             raise HTTPException(status_code=409, detail="order already in progress")
@@ -189,7 +193,7 @@ async def _order_or_renew(request: Request, body: OrderRequest,
         ):
             logger.info("order: idempotent hit for %s (same CSR)", body.device_id)
             return OrderAcceptedResponse(
-                order_id=existing.order_id, status=CertStatus.PENDING, fqdn=fqdn
+                order_id=existing.order_id, status=existing.status, fqdn=fqdn
             )
 
     order_id = new_order_id()

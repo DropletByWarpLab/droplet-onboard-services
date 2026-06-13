@@ -31,9 +31,11 @@ class FakeRepository:
 
     # --- challenges ---
     async def create_challenge(self, *, nonce, device_id, expires_at) -> None:
-        self.challenges[nonce] = ChallengeRow(
+        row = ChallengeRow(
             nonce=nonce, device_id=device_id, expires_at=expires_at, consumed_at=None
         )
+        row._created_at = datetime.now(timezone.utc)
+        self.challenges[nonce] = row
 
     async def get_challenge(self, nonce) -> Optional[ChallengeRow]:
         return self.challenges.get(nonce)
