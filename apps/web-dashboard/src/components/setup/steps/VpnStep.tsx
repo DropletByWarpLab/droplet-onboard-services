@@ -26,7 +26,7 @@ import type {
 import { StepShell } from "@/components/setup/StepShell";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 import { ScrollRegion } from "@/components/setup/ScrollRegion";
-import { dashboardIpFromConf } from "@/lib/wireguard";
+import { dashboardUrlFromConf } from "@/lib/wireguard";
 
 /**
  * Wizard step — connect the customer's phone via WireGuard (remote access).
@@ -479,11 +479,15 @@ export function VpnStep({
   // created — peer is minted, show the QR + .conf + how-to-use list.
   // ──────────────────────────────────────────────────────────────────
   if (!created) return null;
-  // The conf's DNS line is the box-side gateway the tunnel routes to —
-  // the only address the dashboard answers on for VPN clients. Parsed
-  // and IPv4-validated in lib/wireguard.ts (WIREGUARD_DNS reaches the
-  // conf unvalidated, and a mistyped value must not become a dead link).
-  const dashboardIp = dashboardIpFromConf(created.conf);
+  // ADR-023: prefer the publicly-trusted per-device FQDN — the one address that
+  // works at home AND over the tunnel with a green padlock. Falls back to the
+  // box-side gateway IP from the conf's DNS line (parsed + IPv4-validated in
+  // lib/wireguard.ts) until the box learns its FQDN from HQ.
+  const dashboardUrl = dashboardUrlFromConf(
+    created.conf,
+    status?.publicFqdn ?? undefined,
+  );
+  const hasPublicFqdn = Boolean(status?.publicFqdn);
   return (
     <StepShell
       current="vpn"
@@ -560,13 +564,23 @@ export function VpnStep({
         </ol>
         <p>
           Once connected, open{" "}
-          <span className="font-mono">https://{dashboardIp}</span> in your
-          phone&rsquo;s browser — that&rsquo;s this Droplet from anywhere.
-          Bookmark it: names like{" "}
-          <span className="font-mono">droplet.local</span> only work at home,
-          not over the tunnel. Lose the phone? Revoke this device from{" "}
-          <span className="font-mono">Remote Access</span> in the dashboard —
-          its config stops working immediately.
+          <span className="font-mono break-all">{dashboardUrl}</span> in your
+          phone&rsquo;s browser — that&rsquo;s this Droplet from anywhere.{" "}
+          {hasPublicFqdn ? (
+            <>
+              Bookmark it: it&rsquo;s the same secure address you use at home,
+              with nothing to install.
+            </>
+          ) : (
+            <>
+              Bookmark it: names like{" "}
+              <span className="font-mono">droplet.local</span> only work at home,
+              not over the tunnel.
+            </>
+          )}{" "}
+          Lose the phone? Revoke this device from{" "}
+          <span className="font-mono">Remote Access</span> in the dashboard — its
+          config stops working immediately.
         </p>
         <p>
           Test it from cellular or another network. While you&rsquo;re on this

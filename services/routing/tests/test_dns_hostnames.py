@@ -75,6 +75,26 @@ class TestDnsHostnameSchema:
         )
         assert resp.status_code == 422
 
+    # --- ADR-023: the opaque per-device FQDN must pass hostname validation ---
+    # The split-horizon FQDN `d-<hmac>.devices.warp-lab.ai` is a multi-label
+    # FQDN with hyphens — exactly the shape the grammar must accept so
+    # local-dns.sh's setup_public_fqdn_dns() can register it.
+    @pytest.mark.parametrize(
+        "fqdn",
+        [
+            "d-abc123def456.devices.warp-lab.ai",
+            "d-0a1b2c3d4e5f6789.devices.warp-lab.ai",
+        ],
+    )
+    def test_opaque_fqdn_passes_validation(self, connected_client, fqdn):
+        resp = connected_client.post(
+            "/dhcp/hostnames",
+            json=self._payload(hostname=fqdn, ip="192.168.20.1"),
+            headers={"authorization": "Bearer pytest-fake-token"},
+        )
+        # The real SDK is mocked — assert the schema accepted the FQDN shape.
+        assert resp.status_code != 422, resp.text
+
 
 # ---------------------------------------------------------------------------
 # SDK (DHCPApi) upsert / list / delete
@@ -297,3 +317,39 @@ class TestDnsHostnameEndpoints:
             headers={"authorization": "Bearer pytest-fake-token"},
         )
         assert resp.status_code == 503
+
+    # --- ADR-023: the opaque per-device FQDN round-trips through the endpoint ---
+    def test_opaque_fqdn_round_trips(self, connected_client, mock_router):
+        """setup_public_fqdn_dns() POSTs {fqdn -> 192.168.20.1}; the endpoint
+        must accept the FQDN shape AND forward it verbatim to set_hostrecord so
+        the box resolves the FQDN on LAN (and over the tunnel via 192.168.20.1)."""
+        fqdn = "d-abc123def456.devices.warp-lab.ai"
+        mock_router.dhcp.set_hostrecord.return_value = {
+            "section": "cfg09domain",
+            "hostname": fqdn,
+            "ip": "192.168.20.1",
+            "action": "created",
+        }
+        resp = connected_client.post(
+            "/dhcp/hostnames",
+            json={"hostname": fqdn, "ip": "192.168.20.1"},
+            headers={"authorization": "Bearer pytest-fake-token"},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["status"] == "ok"
+        assert body["hostname"] == fqdn
+        mock_router.dhcp.set_hostrecord.assert_called_once_with(fqdn, "192.168.20.1")
+        mock_router.uci.apply.assert_called_once()
+
+    def test_opaque_fqdn_deregisters(self, connected_client, mock_router):
+        """factory-reset.sh DELETEs the FQDN host-record on deregistration."""
+        fqdn = "d-abc123def456.devices.warp-lab.ai"
+        mock_router.dhcp.delete_hostrecord.return_value = 1
+        resp = connected_client.delete(
+            f"/dhcp/hostnames/{fqdn}",
+            headers={"authorization": "Bearer pytest-fake-token"},
+        )
+        assert resp.status_code == 200, resp.text
+        mock_router.dhcp.delete_hostrecord.assert_called_once_with(fqdn)
+        mock_router.uci.apply.assert_called_once()

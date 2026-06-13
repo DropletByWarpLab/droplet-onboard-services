@@ -215,6 +215,26 @@ const envSchema = z.object({
   WIREGUARD_LAN_CIDR: z.string().default("192.168.50.0/24"),
   WIREGUARD_DNS: z.string().default("192.168.50.1"),
 
+  // --- Public-CA per-device TLS (ADR-023) ---
+  // DROPLET_PUBLIC_FQDN — the opaque per-device subdomain
+  //   `d-<hmac>.devices.warp-lab.ai`. The box CANNOT compute the HQ-keyed HMAC,
+  //   so it learns this from the HQ challenge response and persists it back to
+  //   .env (scripts/lib/secrets.sh). Empty until first HQ contact — the
+  //   tls-issuance cron is a no-op while empty and the bootstrap self-signed
+  //   cert keeps the box serving TLS. When set it is the TOP-priority canonical
+  //   origin (trusted-origin.ts) and the one address that works at home AND
+  //   over the WireGuard tunnel.
+  DROPLET_PUBLIC_FQDN: z.string().default(""),
+  // HQ_ISSUANCE_URL — base URL of the fleet HQ issuance API
+  //   (hq.warp-lab.com). Plain outbound HTTPS; does NOT require the fleet
+  //   WireGuard tunnel. Empty disables live issuance (the cron skips), which is
+  //   the correct posture for dev laptops + CI.
+  HQ_ISSUANCE_URL: z.string().default(""),
+  // DROPLET_DEVICE_ID — the device's HQ registry id. Mirrors the value the
+  //   device-identity sidecar reads (docker-compose.yml). Defaults to the
+  //   hostname-derived `droplet` placeholder (matches scripts/lib/secrets.sh).
+  DROPLET_DEVICE_ID: z.string().default("droplet"),
+
   // --- Coverage extender APs (WARP-446) ---
   // Per ADR-005. `DROPLET_AP_*` prefix is mandatory (see the long
   // MATTER_* warning above for why — same risk).
@@ -412,7 +432,11 @@ const parsed = envSchema.parse(envForParse);
 // Comma-separated → trimmed, empties dropped. When the operator hasn't set
 // CORS_ALLOWED_ORIGINS, fall back to the appliance's own LAN dashboard origin
 // (covered by the TLS cert SANs) plus the dev dashboard origin outside prod.
-function resolveCorsAllowedOrigins(raw: string, nodeEnv: string): string[] {
+function resolveCorsAllowedOrigins(
+  raw: string,
+  nodeEnv: string,
+  publicFqdn: string,
+): string[] {
   const explicit = raw
     .split(",")
     .map((o) => o.trim())
@@ -428,6 +452,17 @@ function resolveCorsAllowedOrigins(raw: string, nodeEnv: string): string[] {
           // the orchestrator's own PORT, so it would grant nothing useful here.
           ...(nodeEnv !== "production" ? ["http://localhost:3001"] : []),
         ];
+
+  // ADR-023 (C4): the publicly-trusted per-device FQDN is a first-class
+  // browser origin — the dashboard is served on it at home AND over the
+  // tunnel. Add it whether the operator set an explicit allowlist or fell
+  // through to the defaults, deduped, so credentialed CORS never rejects the
+  // canonical address. Empty until first HQ contact.
+  const fqdn = publicFqdn.trim();
+  if (fqdn) {
+    const fqdnOrigin = `https://${fqdn}`;
+    if (!origins.includes(fqdnOrigin)) origins.push(fqdnOrigin);
+  }
 
   // Fail-fast on wildcard + credentials, mirroring ai-gateway's guard
   // (services/ai-gateway/main.py:125-129). `credentials: true` is always on
@@ -450,6 +485,7 @@ export const config = {
   corsAllowedOrigins: resolveCorsAllowedOrigins(
     parsed.CORS_ALLOWED_ORIGINS,
     parsed.NODE_ENV,
+    parsed.DROPLET_PUBLIC_FQDN,
   ),
 };
 export type Config = typeof config;

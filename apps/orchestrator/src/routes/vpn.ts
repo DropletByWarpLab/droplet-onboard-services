@@ -147,10 +147,18 @@ export function createVpnRouter(prisma: PrismaClient): Router {
       const endpointHost = await resolveEndpointHost();
       const endpointConfigured = endpointHost !== "";
       const exposeEndpointHost = isAdmin(req);
+      // ADR-023 (C4): the publicly-trusted per-device FQDN. Unlike endpointHost
+      // (which can leak the box's public reachability), the FQDN is already
+      // published to Certificate Transparency for everyone — it carries no PII
+      // and no A record — so it is safe to surface to any authenticated user so
+      // the Remote Access page can show the one address that works at home AND
+      // over the tunnel. Empty until the box learns it from HQ.
+      const publicFqdn = config.DROPLET_PUBLIC_FQDN || null;
       if (!status) {
         return res.json({
           configured: false,
           endpointConfigured,
+          publicFqdn,
           message: "VPN not yet bootstrapped — POST /api/vpn/peers to start.",
         });
       }
@@ -158,6 +166,7 @@ export function createVpnRouter(prisma: PrismaClient): Router {
         configured: true,
         endpointConfigured,
         endpointHost: exposeEndpointHost ? (endpointHost || null) : null,
+        publicFqdn,
         listenPort: status.listen_port,
         serverPublicKey: status.public_key,
         addresses: status.addresses,

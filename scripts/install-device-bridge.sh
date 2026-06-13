@@ -196,6 +196,21 @@ fi
 install -m 0755 "$LOGS_SCRIPT_SRC" "$LOGS_SCRIPT_DST"
 log "installed $LOGS_SCRIPT_DST"
 
+# ADR-023 (C2): gateway-nginx reload host executor. The orchestrator's
+# tls-issuance cron POSTs /tls/reload to the bridge after writing a fresh LE
+# fullchain; the bridge execs this wrapper, which delegates to the shared
+# scripts/lib/tls-reload.sh::reload_gateway_nginx (the orchestrator has no docker
+# socket). Repo-tracked (architecture-guard rule 20), installed here so
+# factory-reset removes it cleanly. Repo source is scripts/host/.
+TLS_RELOAD_SCRIPT_SRC="$REPO_ROOT/scripts/host/droplet-tls-reload.sh"
+TLS_RELOAD_SCRIPT_DST="/usr/local/sbin/droplet-tls-reload.sh"
+if [[ ! -f "$TLS_RELOAD_SCRIPT_SRC" ]]; then
+  log "missing source: $TLS_RELOAD_SCRIPT_SRC"
+  exit 1
+fi
+install -m 0755 "$TLS_RELOAD_SCRIPT_SRC" "$TLS_RELOAD_SCRIPT_DST"
+log "installed $TLS_RELOAD_SCRIPT_DST"
+
 # --- 2) Ensure the env file exists and contains the needed secrets ---
 install -d -m 0755 "$ENV_DIR"
 if [[ ! -f "$ENV_FILE" ]]; then

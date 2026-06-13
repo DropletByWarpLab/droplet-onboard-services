@@ -234,7 +234,7 @@ export function AddressStep({
     <StepShell
       current="address"
       title="Give your box a web address"
-      subtitle="A permanent address so you can reach this box from anywhere — only needed if you want remote access from outside your home."
+      subtitle="Optional. Your box already gets a secure web address automatically — DuckDNS is a legacy extra you can skip."
       primary={{
         label: nothingNewToSubmit ? "Continue" : "Save and continue",
         loadingLabel: "Saving…",
@@ -422,12 +422,16 @@ export function AddressStep({
 
         <LearnMoreCard helpAnchor="internet">
           <p>
-            Your home internet&rsquo;s address can change without warning.{" "}
-            <strong>DuckDNS</strong> is a free service that gives the box one
-            permanent web address — like{" "}
-            <span className="font-mono">yourstudio.duckdns.org</span> — that
-            always finds it. That address is what the <strong>Remote access</strong>{" "}
-            step hands your phone; without it the VPN has nowhere to dial.
+            Your box now gets its own secure web address automatically — the one
+            you already use at home works over remote access too, with a padlock
+            and nothing to install. <strong>You can skip this step.</strong>
+          </p>
+          <p>
+            <strong>DuckDNS</strong> is a legacy extra: a free service that gives
+            the box a second, custom address like{" "}
+            <span className="font-mono">yourstudio.duckdns.org</span>. Add it only
+            if you specifically want that name; it&rsquo;s no longer required for
+            remote access.
           </p>
           <p>
             Don&rsquo;t have a DuckDNS account?{" "}
