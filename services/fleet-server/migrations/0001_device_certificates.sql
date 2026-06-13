@@ -33,6 +33,10 @@ CREATE TABLE IF NOT EXISTS device_certificates (
     status           TEXT NOT NULL
                        CHECK (status IN ('pending','active','renewing','revoked','failed')),
     order_id         TEXT,
+    -- The box's last-submitted CSR, kept so the unattended renewal job can
+    -- re-finalize against the SAME serving keypair without box interaction
+    -- (ADR-023 §Decision 5). It is a public CSR — no private key, no secret.
+    csr_pem          TEXT,
     fullchain_pem    TEXT,
     cert_serial      TEXT,
     not_before       TIMESTAMPTZ,
