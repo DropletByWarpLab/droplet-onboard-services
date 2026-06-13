@@ -20,10 +20,41 @@ import hashlib
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePublicKey
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
 
 
 class CsrValidationError(ValueError):
     """Raised when a submitted CSR is invalid or its SAN != fqdn."""
+
+
+# Accepted box keypair policy (ADR-023 §Decision 1 — the box serving key is a
+# TPM ECC P-256 key). We pin the acceptable key types HERE rather than letting
+# a weak key fall through to Let's Encrypt: relying on the upstream CA to
+# reject a weak key is a fail-open posture. EC P-256/P-384 (the TPM curves) or
+# RSA >= 2048 are allowed; everything else is rejected.
+_ALLOWED_EC_CURVES = frozenset({"secp256r1", "secp384r1"})
+_MIN_RSA_BITS = 2048
+
+
+def _assert_key_policy(req: x509.CertificateSigningRequest) -> None:
+    """Raise CsrValidationError unless the CSR's public key meets policy."""
+    pub = req.public_key()
+    if isinstance(pub, EllipticCurvePublicKey):
+        curve = pub.curve.name.lower()
+        if curve not in _ALLOWED_EC_CURVES:
+            raise CsrValidationError(f"disallowed EC curve {curve!r}")
+        return
+    if isinstance(pub, RSAPublicKey):
+        if pub.key_size < _MIN_RSA_BITS:
+            raise CsrValidationError(
+                f"RSA key too small ({pub.key_size} bits, min {_MIN_RSA_BITS})"
+            )
+        return
+    raise CsrValidationError(
+        f"disallowed CSR key type {type(pub).__name__}"
+    )
 
 
 def _load(csr_pem: str) -> x509.CertificateSigningRequest:
@@ -45,6 +76,10 @@ def validate_csr(csr_pem: str, *, expected_fqdn: str) -> x509.CertificateSigning
     # means the requester does not hold the key for this CSR.
     if not req.is_signature_valid:
         raise CsrValidationError("CSR self-signature is invalid")
+
+    # Pin the box keypair policy (EC P-256/P-384 or RSA>=2048) — never fall
+    # open to the upstream CA for key strength.
+    _assert_key_policy(req)
 
     try:
         san_ext = req.extensions.get_extension_for_class(
