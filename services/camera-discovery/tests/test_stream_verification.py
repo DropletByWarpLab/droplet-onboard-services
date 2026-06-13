@@ -69,6 +69,44 @@ class TestVerifyStream:
         monkeypatch.setattr(rtsp_prober, "_try_credentials_once", fake_once)
         assert await rtsp_prober.verify_stream("rtsp://192.168.20.10:554/stream1") is False
 
+    @pytest.mark.asyncio
+    async def test_rtsps_scheme_is_not_hard_rejected(self, monkeypatch):
+        """An ONVIF camera reporting ``rtsps://…`` passes is_safe_rtsp_url, so
+        verify_stream must not reject it before the URL ever reaches the
+        DESCRIBE path — otherwise the camera is stuck needs_setup forever and
+        accept_camera always 422s. The TLS handshake itself is out of scope
+        (the prober speaks plaintext); the contract here is only that the
+        scheme is no longer hard-rejected and the probe is actually attempted."""
+        import rtsp_prober
+
+        seen = {}
+
+        async def fake_once(ip, port, path, user, pw, timeout=3.0):
+            seen.update(ip=ip, port=port, path=path)
+            return True
+
+        monkeypatch.setattr(rtsp_prober, "_try_credentials_once", fake_once)
+        ok = await rtsp_prober.verify_stream("rtsps://192.168.20.10/stream")
+        assert ok is True
+        assert seen["ip"] == "192.168.20.10"
+        # rtsps defaults to 322 (RFC 2326 secure RTSP), not 554.
+        assert seen["port"] == 322
+        assert seen["path"] == "/stream"
+
+    @pytest.mark.asyncio
+    async def test_rtsps_with_explicit_port_preserved(self, monkeypatch):
+        import rtsp_prober
+
+        seen = {}
+
+        async def fake_once(ip, port, path, user, pw, timeout=3.0):
+            seen.update(port=port)
+            return True
+
+        monkeypatch.setattr(rtsp_prober, "_try_credentials_once", fake_once)
+        await rtsp_prober.verify_stream("rtsps://192.168.20.10:8555/stream")
+        assert seen["port"] == 8555
+
 
 class _FakeWriter:
     def write(self, _data):
@@ -274,6 +312,64 @@ class TestScanLoopGate:
         assert len(known) == 1
         assert next(iter(known.values()))["status"] == "active"
         assert pending == {}
+
+    @pytest.mark.asyncio
+    async def test_frigate_add_raising_does_not_abort_candidate_loop(self, monkeypatch):
+        """If frigate.add_camera throws (Frigate 5xx / connection refused /
+        timeout) on one candidate, the exception must NOT propagate out of the
+        candidate loop and silently skip every remaining candidate that cycle.
+        The failed camera must also stay out of known_cameras."""
+        main = _fresh_main()
+
+        async def fake_leases():
+            return [
+                {"ipaddr": "192.168.100.60", "macaddr": "aa:bb:cc:dd:ee:60",
+                 "hostname": "cam-a", "source": "dhcp"},
+                {"ipaddr": "192.168.100.61", "macaddr": "aa:bb:cc:dd:ee:61",
+                 "hostname": "cam-b", "source": "dhcp"},
+            ]
+
+        async def fake_onvif():
+            return []
+
+        async def fake_probe(ip):
+            return {"ip": ip, "port": 554,
+                    "rtsp_url": f"rtsp://{ip}:554/live",
+                    "detection_method": "rtsp_default_credentials"}
+
+        async def fake_probe_onvif_skip(ip):
+            return None
+
+        seen_adds = []
+
+        async def flaky_add(name, url):
+            seen_adds.append(name)
+            # First candidate's Frigate add explodes; the loop must survive it.
+            if "192.168.100.60" in url:
+                raise RuntimeError("Frigate 502 Bad Gateway")
+            return True
+
+        monkeypatch.setattr(main, "fetch_dhcp_leases", fake_leases)
+        monkeypatch.setattr(main, "discover_cameras", fake_onvif)
+        monkeypatch.setattr(main, "probe_onvif_device", fake_probe_onvif_skip)
+        monkeypatch.setattr(main, "probe_camera", fake_probe)
+        monkeypatch.setattr(main, "_is_camera_hostname", lambda h: False)
+        monkeypatch.setattr(main, "_camera_network", None)
+        monkeypatch.setattr(main.frigate, "add_camera", flaky_add)
+        monkeypatch.setattr(main, "publish_discovery", lambda *_a, **_k: None)
+
+        main.known_cameras.clear()
+        main.pending_cameras.clear()
+
+        # Must NOT raise — the whole sweep has to complete.
+        await main.scan_and_discover()
+
+        # Both candidates were attempted (the loop didn't abort after the first).
+        assert len(seen_adds) == 2
+        # The candidate whose add raised is NOT marked known/active.
+        assert "aa:bb:cc:dd:ee:60" not in main.known_cameras
+        # The healthy candidate was added.
+        assert "aa:bb:cc:dd:ee:61" in main.known_cameras
 
     @pytest.mark.asyncio
     async def test_port_open_guess_skips_verify_entirely(self, monkeypatch):

@@ -400,10 +400,20 @@ async def verify_stream(rtsp_url: str, timeout: float = 4.0) -> bool:
     (camera finished its first-boot, operator set its credentials, etc.).
     """
     parts = urlsplit(rtsp_url)
-    if parts.scheme != "rtsp" or not parts.hostname:
+    # Accept both plaintext RTSP and TLS RTSP (rtsps://) schemes — is_safe_rtsp_url
+    # in main.py admits both, so an ONVIF camera that advertises an rtsps:// URL
+    # must not be hard-rejected here. Doing so leaves it stuck in needs_setup
+    # forever and makes accept_camera 422 every time. NOTE: the prober itself
+    # only speaks plaintext RTSP (_open_rtsp uses a bare asyncio.open_connection
+    # with no TLS context); a TLS-only camera's DESCRIBE will simply not verify
+    # and the camera stays pending + re-probeable rather than being rejected
+    # outright. Native rtsps:// TLS handshaking is deferred to its own ticket.
+    if parts.scheme not in ("rtsp", "rtsps") or not parts.hostname:
         return False
     host = parts.hostname
-    port = parts.port or 554
+    # rtsps:// defaults to 322 (secure RTSP), plaintext rtsp:// to 554.
+    default_port = 322 if parts.scheme == "rtsps" else 554
+    port = parts.port or default_port
     path = parts.path or "/"
     if parts.query:
         path = f"{path}?{parts.query}"

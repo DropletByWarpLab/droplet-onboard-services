@@ -555,7 +555,27 @@ async def scan_and_discover() -> None:
                 logger.debug("Stream verify raised for %s: %s", ip, exc)
                 verified = False
 
-        if verified and await frigate.add_camera(camera_name, rtsp_url):
+        # Guard the Frigate call: a 5xx / connection-refused / timeout from
+        # frigate.add_camera must NOT escape and abort the candidate loop —
+        # that would silently skip every remaining candidate this sweep. A
+        # failed add is logged and treated like an unverified stream: the
+        # camera stays pending + re-probeable and is NEVER cached in
+        # known_cameras (so it can't go stagnant on a stream Frigate refused).
+        added = False
+        if verified:
+            try:
+                added = await frigate.add_camera(camera_name, rtsp_url)
+            except Exception as exc:
+                logger.warning(
+                    "Frigate add_camera failed for %s at %s: %s — keeping "
+                    "pending, will retry next scan",
+                    camera_name,
+                    ip,
+                    exc,
+                )
+                added = False
+
+        if added:
             camera_info["status"] = "active"
             known_cameras[mac] = camera_info
             pending_cameras.pop(mac, None)
@@ -785,8 +805,11 @@ async def accept_camera(mac: str, request: Request):
         raise HTTPException(
             status_code=422,
             detail=(
-                "Camera stream did not respond — it likely needs credentials "
-                "or a corrected RTSP URL before it can be added."
+                "Camera stream did not verify — the RTSP path or credentials "
+                "are likely wrong. Many cameras (e.g. Hikvision/Dahua) gate "
+                "their real stream behind a vendor-specific path that the "
+                "discovery placeholder can't guess, so a corrected RTSP "
+                "URL/path (or credentials) is needed before it can be added."
             ),
         )
 
