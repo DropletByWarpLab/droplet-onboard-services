@@ -13,7 +13,7 @@
  * disk / gRPC / network); index.ts composes these into createTlsIssuanceService.
  */
 import { createHash } from "node:crypto";
-import { open, rename, writeFile } from "node:fs/promises";
+import { open, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import pino from "pino";
 import type { PrismaClient } from "@prisma/client";
@@ -148,7 +148,14 @@ async function writeFileAtomic(
   } finally {
     await fh.close();
   }
-  await rename(tmp, target);
+  try {
+    await rename(tmp, target);
+  } catch (err) {
+    // Clean up the temp file so private-key material doesn't linger in
+    // docker/certs/ after a failed atomic swap (e.g. volume remount).
+    await unlink(tmp).catch(() => {});
+    throw err;
+  }
 }
 
 export function createDiskTlsFileOps(): TlsFileOps {

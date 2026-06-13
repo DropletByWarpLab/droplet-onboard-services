@@ -168,9 +168,11 @@ function isTransientNetworkError(err: unknown): boolean {
   ) {
     return true;
   }
-  // Generic Error (e.g. fetch threw, non-2xx from the HQ client). Treat as a
-  // recoverable HQ-side issue: we never want a flaky HQ to crash-loop the box.
-  return err instanceof Error;
+  // Only treat Errors that originate from the HQ HTTP client as transient.
+  // hqFetch throws `new Error("HQ <path> returned <status>: …")` for non-2xx.
+  // RangeError, ReferenceError, SyntaxError, and other programming bugs must
+  // propagate so the cron canary increments (no silent cert-renewal failure).
+  return err instanceof Error && (err as Error).message.startsWith("HQ ");
 }
 
 function daysUntil(iso: string | null): number {
@@ -247,8 +249,22 @@ export function createTlsIssuanceService(
     // 4. Submit the order (issue vs renew share the body shape).
     const placed = mode === "renew" ? await hq.renew(orderReq) : await hq.order(orderReq);
 
-    // 5. Poll until active.
-    const result = await hq.poll(placed.order_id, deviceId);
+    // 5. Poll until active. Up to 5 attempts with exponential back-off (10 s,
+    //    20 s, 40 s, 80 s, capped at 5 min) to absorb DNS propagation delays at
+    //    HQ. If still not active after all attempts, throw TlsIssuancePendingError
+    //    so the catch records LE_RENEW_FAILED and the next daily tick retries.
+    const POLL_MAX_ATTEMPTS = 5;
+    const POLL_BASE_DELAY_MS = 10_000;
+    let result = await hq.poll(placed.order_id, deviceId);
+    for (
+      let attempt = 1;
+      attempt < POLL_MAX_ATTEMPTS && result.status === "pending";
+      attempt++
+    ) {
+      const delay = Math.min(POLL_BASE_DELAY_MS * 2 ** (attempt - 1), 300_000);
+      await new Promise<void>((resolve) => setTimeout(resolve, delay));
+      result = await hq.poll(placed.order_id, deviceId);
+    }
     if (result.status !== "active" || !result.fullchain_pem || !result.not_after) {
       // HQ accepted the order but the DNS-01 dance didn't complete (or failed).
       // Treat as a recoverable failure: keep the current cert, mark
@@ -284,11 +300,9 @@ export function createTlsIssuanceService(
         return;
       }
 
-      // Read the installed cert (diagnostic / future drift checks) + the
-      // explicit state row. A missing row is treated as BOOTSTRAP_SELF_SIGNED
-      // (the box has a self-signed cert from secrets.sh) — NEVER inferred from
-      // a null cert.
-      await files.readCert();
+      // Read the explicit state row. A missing row is treated as
+      // BOOTSTRAP_SELF_SIGNED (the box has a self-signed cert from secrets.sh)
+      // — NEVER inferred from a null cert.
       const existing = await store.get(fqdn);
       const state: TlsCertStateValue =
         existing?.state ?? "BOOTSTRAP_SELF_SIGNED";
@@ -298,10 +312,18 @@ export function createTlsIssuanceService(
       if (state === "BOOTSTRAP_SELF_SIGNED") {
         mode = "issue";
       } else if (state === "LE_ISSUED" || state === "LE_RENEW_FAILED" || state === "LE_RENEWING") {
-        // For an issued (or previously-failed / interrupted) cert, renew when
-        // we're inside the 30-day window. A LE_RENEW_FAILED row with time left
-        // also retries via the renew path.
-        mode = daysUntil(existing?.notAfter ?? null) <= RENEW_THRESHOLD_DAYS ? "renew" : "noop";
+        if (state === "LE_RENEW_FAILED" && (existing?.notAfter ?? null) === null) {
+          // First-ever issuance failed (no cert ever issued). Use order(), NOT
+          // renew(): /api/issuance/renew requires an existing cert at HQ; calling
+          // it without one permanently routes this box to the wrong endpoint with
+          // no self-recovery.
+          mode = "issue";
+        } else {
+          // For an issued (or previously-failed / interrupted) cert, renew when
+          // we're inside the 30-day window. A LE_RENEW_FAILED row with time left
+          // also retries via the renew path.
+          mode = daysUntil(existing?.notAfter ?? null) <= RENEW_THRESHOLD_DAYS ? "renew" : "noop";
+        }
       } else {
         mode = "noop";
       }

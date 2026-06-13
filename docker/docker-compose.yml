@@ -537,7 +537,7 @@ services:
       # accepts the publicly-trusted one-URL-everywhere origin. Empty until the
       # box learns its FQDN from HQ — a trailing comma is tolerated by the
       # ai-gateway's comma-split (empty entries are dropped, see main.py).
-      - CORS_ORIGINS=https://localhost,http://localhost,https://localhost:3001,http://localhost:3001,https://${DROPLET_PUBLIC_FQDN:-localhost}
+      - CORS_ORIGINS=https://localhost,http://localhost,https://localhost:3001,http://localhost:3001,https://${DROPLET_PUBLIC_FQDN:-}
       # GW-14: socket peers (your nginx edge) whose forwarded client-IP headers
       # the rate limiter trusts. Empty default = trust nothing (key on the real
       # socket peer). Set RATE_LIMIT_TRUSTED_PROXIES to nginx's IP/subnet.
