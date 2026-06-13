@@ -916,6 +916,19 @@ _generate_tls_cert() {
   hn=$(hostname 2>/dev/null || echo "droplet")
   san="$san,DNS:$hn,DNS:${hn}.local"
 
+  # ADR-023 (C2): the opaque per-device FQDN (`d-<hmac>.devices.warp-lab.ai`).
+  # The box can't compute the HQ-keyed HMAC, so it learns its FQDN from the HQ
+  # challenge response and persists it to .env (DROPLET_PUBLIC_FQDN). When it is
+  # known, add it to the bootstrap self-signed SAN so the box serves a
+  # name-matching cert for the FQDN even BEFORE the first LE cert is issued
+  # (works offline / pre-issuance). The LE cert later overwrites these same
+  # files with a publicly-trusted fullchain. Empty on first ever boot — harmless.
+  local public_fqdn="${DROPLET_PUBLIC_FQDN:-}"
+  if [ -n "$public_fqdn" ]; then
+    san="$san,DNS:$public_fqdn"
+    log_info "  Including per-device FQDN in SAN: $public_fqdn"
+  fi
+
   # Add all non-loopback IPv4 addresses
   local ip
   for ip in $(ip -4 addr show scope global 2>/dev/null \
@@ -949,17 +962,15 @@ _generate_tls_cert() {
   # --sync-secrets flow), ask nginx to reload so the new cert is served
   # immediately. On a fresh install this is a no-op because gateway isn't
   # up yet — nginx will just pick up the cert on first start.
-  if command -v docker >/dev/null 2>&1; then
-    local compose_file="$REPO_ROOT/docker/docker-compose.yml"
-    if [ -f "$compose_file" ] && \
-       docker compose -f "$compose_file" ps --services --filter status=running 2>/dev/null \
-         | grep -qx gateway; then
-      if docker compose -f "$compose_file" exec -T gateway nginx -s reload 2>/dev/null; then
-        log_info "  Hot-reloaded gateway nginx with the new cert"
-      else
-        log_warn "  Could not nginx -s reload the gateway container — restart it manually:"
-        log_warn "    docker compose -f docker/docker-compose.yml restart gateway"
-      fi
-    fi
+  #
+  # ADR-023 (C2): the reload is now the shared scripts/lib/tls-reload.sh helper,
+  # so the SELF-SIGNED bootstrap path here and the LE-RENEW path (orchestrator →
+  # device-bridge) use exactly one reload implementation.
+  if ! declare -F reload_gateway_nginx >/dev/null 2>&1; then
+    # Defensive: secrets.sh is normally sourced after tls-reload.sh by setup.sh,
+    # but source it directly if a caller sourced secrets.sh standalone.
+    # shellcheck source=tls-reload.sh
+    source "$(dirname "${BASH_SOURCE[0]}")/tls-reload.sh"
   fi
+  reload_gateway_nginx || true
 }

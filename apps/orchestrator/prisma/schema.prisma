@@ -2524,3 +2524,35 @@ model ClaimCode {
   createdAt DateTime       @default(now())
   updatedAt DateTime       @updatedAt
 }
+
+/// ADR-023 (C2): the lifecycle state of the per-device TLS serving cert.
+/// EXPLICIT (architecture-guard rule 10 + ADR-023 §C2): the tls-issuance cron
+/// reads this enum to decide issue-vs-renew-vs-noop — it NEVER infers the state
+/// from a null/expired cert file.
+///   BOOTSTRAP_SELF_SIGNED — the secrets.sh self-signed bootstrap cert is
+///                           installed; HQ issuance has not yet succeeded.
+///   LE_ISSUED             — a publicly-trusted Let's Encrypt fullchain is
+///                           installed and current.
+///   LE_RENEWING           — a renewal/issuance order is in flight.
+///   LE_RENEW_FAILED       — HQ was unreachable or the order didn't go active;
+///                           the box keeps serving its current cert and retries
+///                           on the next daily tick.
+enum TlsCertState {
+  BOOTSTRAP_SELF_SIGNED
+  LE_ISSUED
+  LE_RENEWING
+  LE_RENEW_FAILED
+}
+
+/// ADR-023 (C2): one row per opaque per-device FQDN tracking the installed TLS
+/// cert's state + expiry. Keyed by `fqdn` (`d-<hmac>.devices.warp-lab.ai`) so a
+/// box that ever learns a new FQDN gets a fresh row rather than overwriting the
+/// old one. `notAfter` mirrors the installed leaf's expiry and drives the
+/// 30-day renewal threshold; null until the first LE cert is installed.
+model TlsCert {
+  fqdn      String       @id
+  state     TlsCertState @default(BOOTSTRAP_SELF_SIGNED)
+  notAfter  DateTime?
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+}

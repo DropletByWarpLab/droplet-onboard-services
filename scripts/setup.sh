@@ -100,6 +100,8 @@ source "$SCRIPT_DIR/lib/logging.sh"
 source "$SCRIPT_DIR/lib/preflight.sh"
 # shellcheck source=lib/docker.sh
 source "$SCRIPT_DIR/lib/docker.sh"
+# shellcheck source=lib/tls-reload.sh
+source "$SCRIPT_DIR/lib/tls-reload.sh"
 # shellcheck source=lib/secrets.sh
 source "$SCRIPT_DIR/lib/secrets.sh"
 # shellcheck source=lib/compose.sh

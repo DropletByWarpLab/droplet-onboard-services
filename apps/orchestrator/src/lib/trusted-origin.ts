@@ -19,13 +19,14 @@
  * invite path can later delegate here (one source of truth). The resolution
  * order is the documented contract — do not reorder without updating the tests:
  *
- *   1. **Canonical origin** — `WIREGUARD_ENDPOINT_HOST` (the operator-set
- *      public DNS name, verbatim), else the box's enabled DuckDNS subdomain
- *      (`fullDomain` || `<subdomain>.duckdns.org`). This is the same
- *      env→DuckDNS order `vpn.ts`'s `resolveEndpointHost()` uses for the
- *      WireGuard endpoint, so every generated URL and the VPN endpoint agree on
- *      "what is this box's public address". When present, the URL is built from
- *      it and the request host is ignored.
+ *   1. **Canonical origin** — `DROPLET_PUBLIC_FQDN` (ADR-023: the publicly-
+ *      trusted per-device FQDN `d-<hmac>.devices.warp-lab.ai`, the top-priority
+ *      source), else `WIREGUARD_ENDPOINT_HOST` (the operator-set public DNS
+ *      name, verbatim), else the box's enabled DuckDNS subdomain
+ *      (`fullDomain` || `<subdomain>.duckdns.org`). The env→DuckDNS tail of this
+ *      order matches `vpn.ts`'s `resolveEndpointHost()`, so every generated URL
+ *      and the VPN endpoint agree on "what is this box's public address". When
+ *      present, the URL is built from it and the request host is ignored.
  *   2. **Allowlisted request host** — when there is no canonical origin, the
  *      request's host (`x-forwarded-host` then `host`) is used ONLY if it
  *      matches the allowlist {canonical-origin host} ∪ {hosts of
@@ -134,10 +135,23 @@ export async function resolveTrustedOrigin(): Promise<TrustedOrigin> {
     if (h) allowedHosts.add(h);
   }
 
-  // 1. Operator-set public DNS name wins, verbatim, without a network call.
+  // 0. ADR-023 (C4): the publicly-trusted per-device FQDN
+  //    (`d-<hmac>.devices.warp-lab.ai`) is the TOP-priority canonical origin —
+  //    above WIREGUARD_ENDPOINT_HOST and DuckDNS. It is the single address that
+  //    works at home AND over the WireGuard tunnel and carries a publicly-
+  //    trusted cert, so every generated URL should prefer it. Verbatim, no
+  //    network call. Empty until the box learns its FQDN from HQ.
   let canonicalHost: string | null = null;
+  const fqdn = (config.DROPLET_PUBLIC_FQDN ?? "").trim();
+  if (fqdn) {
+    canonicalHost = bareHost(fqdn);
+  }
+
+  // 1. Operator-set public DNS name, verbatim, without a network call.
   const envHost = (config.WIREGUARD_ENDPOINT_HOST ?? "").trim();
-  if (envHost) {
+  if (canonicalHost) {
+    // FQDN already chosen above — skip the lower-priority sources.
+  } else if (envHost) {
     canonicalHost = bareHost(envHost);
   } else if (config.ROUTING_MODE !== "disabled") {
     // 2. Else derive from an enabled DuckDNS config. Skipped when routing

@@ -472,6 +472,14 @@ if [ -f /usr/local/sbin/droplet-factory-reset.sh ]; then
   log_success "Removed factory-reset host executor"
 fi
 
+# TLS-reload host executor (ADR-023 C2). Remove so a reset truly returns to
+# out-of-box; install-device-bridge.sh reinstalls it on re-provision. It only
+# triggers `nginx -s reload` — removing it touches no certs or data.
+if [ -f /usr/local/sbin/droplet-tls-reload.sh ]; then
+  sudo rm -f /usr/local/sbin/droplet-tls-reload.sh 2>/dev/null || true
+  log_success "Removed TLS-reload host executor"
+fi
+
 # Device-bridge state + logs (needs sudo because systemd StateDirectory
 # runs as root). Silent if not installed — dev machines won't have this.
 if [ -d /var/lib/droplet-bridge ] || [ -f /etc/droplet/device-bridge.env ]; then

@@ -6,6 +6,8 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // origins) so a forged X-Forwarded-Host can never be honoured.
 vi.mock("../config.js", () => ({
   config: {
+    // ADR-023: top-priority canonical origin, above WIREGUARD_ENDPOINT_HOST.
+    DROPLET_PUBLIC_FQDN: "",
     WIREGUARD_ENDPOINT_HOST: "",
     // Production default (config.ts) is "real"; the DuckDNS leg is only
     // skipped when routing supervision is explicitly disabled. The
@@ -61,6 +63,7 @@ beforeEach(() => {
   // file otherwise) before re-establishing the default "not configured" return.
   vi.clearAllMocks();
   _resetTrustedOriginCacheForTests();
+  (config as { DROPLET_PUBLIC_FQDN: string }).DROPLET_PUBLIC_FQDN = "";
   (config as { WIREGUARD_ENDPOINT_HOST: string }).WIREGUARD_ENDPOINT_HOST = "";
   (config as { ROUTING_MODE: string }).ROUTING_MODE = "real";
   (config as { corsAllowedOrigins: string[] }).corsAllowedOrigins = [
@@ -161,8 +164,39 @@ describe("pickTrustedHost", () => {
   });
 });
 
-// ── resolveTrustedOrigin: canonical-origin resolution (env → DuckDNS) ──
+// ── resolveTrustedOrigin: canonical-origin resolution (FQDN → env → DuckDNS) ──
 describe("resolveTrustedOrigin", () => {
+  it("ADR-023: DROPLET_PUBLIC_FQDN is the top-priority canonical host, above WIREGUARD_ENDPOINT_HOST", async () => {
+    (config as { DROPLET_PUBLIC_FQDN: string }).DROPLET_PUBLIC_FQDN =
+      "d-abc123.devices.warp-lab.ai";
+    (config as { WIREGUARD_ENDPOINT_HOST: string }).WIREGUARD_ENDPOINT_HOST =
+      "studio.duckdns.org";
+    const { canonicalHost } = await resolveTrustedOrigin();
+    expect(canonicalHost).toBe("d-abc123.devices.warp-lab.ai");
+    // The FQDN wins without ever consulting WIREGUARD_ENDPOINT_HOST or DuckDNS.
+    expect(openwrt.fetchDuckDnsStatus).not.toHaveBeenCalled();
+  });
+
+  it("ADR-023: the FQDN is added to the allowlist", async () => {
+    (config as { DROPLET_PUBLIC_FQDN: string }).DROPLET_PUBLIC_FQDN =
+      "d-abc123.devices.warp-lab.ai";
+    const { allowedHosts } = await resolveTrustedOrigin();
+    expect(allowedHosts.has("d-abc123.devices.warp-lab.ai")).toBe(true);
+    expect(allowedHosts.has("droplet-ai.local")).toBe(true);
+  });
+
+  it("ADR-023: trustedOriginUrl builds from the FQDN when set", async () => {
+    (config as { DROPLET_PUBLIC_FQDN: string }).DROPLET_PUBLIC_FQDN =
+      "d-abc123.devices.warp-lab.ai";
+    const url = await trustedOriginUrl(
+      fakeReq({ host: "droplet-ai.local", xForwardedProto: "https" }),
+      "/api/auth/callback",
+    );
+    expect(url).toBe(
+      "https://d-abc123.devices.warp-lab.ai/api/auth/callback",
+    );
+  });
+
   it("uses WIREGUARD_ENDPOINT_HOST verbatim as the canonical host", async () => {
     (config as { WIREGUARD_ENDPOINT_HOST: string }).WIREGUARD_ENDPOINT_HOST =
       "studio.duckdns.org";

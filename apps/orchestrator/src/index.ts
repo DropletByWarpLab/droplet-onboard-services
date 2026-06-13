@@ -33,6 +33,14 @@ import { createDeviceReconcilePoller } from "./services/device-reconcile-poller.
 import { startApDiscoveryPoller } from "./services/ap-discovery-poller.js";
 import { sweepExpiredGuests } from "./services/guest-expiry-sweep.service.js";
 import { purgeCameraArtifacts } from "./services/camera-retention-purge.service.js";
+import { createTlsIssuanceService } from "./services/tls-issuance.service.js";
+import {
+  createHqIssuanceClient,
+  createPrismaTlsCertStore,
+  createDiskTlsFileOps,
+  bridgeNginxReloader,
+} from "./services/tls-issuance.adapters.js";
+import { createDeviceIdentityClient } from "./services/device-identity.client.js";
 import {
   createScheduleTicker,
   type FirewallClient,
@@ -437,6 +445,33 @@ async function main() {
       }
     },
     { lockKey: "droplet:camera-retention-purge" },
+  );
+
+  // ADR-023 (C2): daily public-CA TLS issuance / renewal. Fires at 04:00 so it
+  // doesn't contend with the 03:00 daily purge, 03:15 guest sweep, or 03:30
+  // camera purge on the advisory-lock pool. Reads the explicit TlsCert state
+  // row + the installed cert: a BOOTSTRAP_SELF_SIGNED box issues a publicly-
+  // trusted cert now; an LE_ISSUED cert renews when <=30 days remain. HQ-
+  // unreachable keeps the current cert and sets LE_RENEW_FAILED inside the
+  // service (it does NOT throw), so a flaky HQ never increments the canary;
+  // only an unexpected (programming) error bubbles up here — exactly what the
+  // canary should escalate, same posture as the purge handlers above.
+  const tlsIssuance = createTlsIssuanceService({
+    fqdn: config.DROPLET_PUBLIC_FQDN,
+    deviceId: config.DROPLET_DEVICE_ID,
+    hq: createHqIssuanceClient(),
+    identity: createDeviceIdentityClient(),
+    store: createPrismaTlsCertStore(prisma),
+    files: createDiskTlsFileOps(),
+    reloadNginx: bridgeNginxReloader,
+    logger,
+  });
+  cronRuntime.scheduleCron(
+    "0 4 * * *",
+    async () => {
+      await tlsIssuance.runOnce();
+    },
+    { lockKey: "droplet:tls-renewal" },
   );
 
   // Start Express on top of a raw http.Server so we can attach the
