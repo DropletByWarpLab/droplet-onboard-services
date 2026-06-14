@@ -27,7 +27,7 @@ vi.mock("../config.js", () => ({
 // limit tests can drive the returned count deterministically; by default it
 // returns null (Redis unavailable) which the route treats as fail-OPEN, so
 // every existing signature/replay test runs unaffected.
-const cacheIncrMock = vi.fn(async (): Promise<number | null> => null);
+const cacheIncrMock = vi.fn(async (..._args: unknown[]): Promise<number | null> => null);
 vi.mock("../services/cache.service.js", () => ({
   cacheIncr: (...args: unknown[]) => cacheIncrMock(...args),
 }));
