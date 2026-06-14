@@ -124,6 +124,16 @@ function safePublish(topic: string, payload: Record<string, unknown>): void {
  * auth/validation/403/404/OCS status — are handled by the checks ABOVE and keep
  * their existing behavior; only the unavailable-dependency path degrades, and we
  * deliberately do NOT cache the empty fallback so it self-heals on recovery.
+ *
+ * ORDERING CONTRACT: the `NextcloudOcsError` check runs before the `degradeTo`
+ * branch, so a 4xx OCS status always surfaces verbatim. But a *5xx* OCS status
+ * means the same thing as a connectivity failure — Nextcloud is down — so on a
+ * read endpoint (degradeTo supplied) it must fall through to the empty fallback
+ * rather than return a 5xx. Today the degraded list fns throw plain `Error`, so
+ * `isUpstreamUnavailable` already catches them via message shape; this 5xx-OCS
+ * carve-out locks the contract so a future refactor that throws
+ * `NextcloudOcsError(503)` from a list fn still degrades instead of silently
+ * 503-ing. The files-route test asserts exactly this.
  */
 function handleFileError(
   err: unknown,
@@ -135,7 +145,14 @@ function handleFileError(
     res.status(401).json({ error: err.message });
     return;
   }
-  if (err instanceof NextcloudOcsError) {
+  // A 5xx OCS status means Nextcloud is down, same as a connectivity failure —
+  // so on a read endpoint (degradeTo supplied) it joins the degrade path below
+  // instead of surfacing the 5xx (see ORDERING CONTRACT above).
+  const ocsOutage =
+    err instanceof NextcloudOcsError &&
+    err.ocsStatus >= 500 &&
+    err.ocsStatus < 600;
+  if (err instanceof NextcloudOcsError && !(degradeTo !== undefined && ocsOutage)) {
     const status =
       err.ocsStatus >= 400 && err.ocsStatus < 600 ? err.ocsStatus : 400;
     res.status(status).json({ error: err.message });
@@ -146,7 +163,7 @@ function handleFileError(
     res.status(404).json({ error: "File not found" });
     return;
   }
-  if (degradeTo !== undefined && isUpstreamUnavailable(err)) {
+  if (degradeTo !== undefined && (isUpstreamUnavailable(err) || ocsOutage)) {
     logger.warn({ err }, "Nextcloud unreachable; serving empty file listing");
     res.json(degradeTo);
     return;

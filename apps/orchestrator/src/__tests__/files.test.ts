@@ -207,6 +207,34 @@ describe("File Operations (Nextcloud-backed routes)", () => {
       expect(res.status).toBe(500);
       expect(res.body).not.toEqual([]);
     });
+
+    it("GET /api/files → 200 [] when a list fn throws NextcloudOcsError(503) (degrade ordering contract)", async () => {
+      // Locks handleFileError's ORDERING CONTRACT: the NextcloudOcsError
+      // instanceof check runs before the degrade branch, but a 5xx OCS status
+      // is an outage — so a read endpoint must still fall through to the empty
+      // fallback rather than 503. Today list fns throw plain Error; this guards
+      // against a future refactor that throws NextcloudOcsError on 5xx silently
+      // making the degrade path unreachable.
+      const { NextcloudOcsError } = nc as typeof import("../services/nextcloud.client.js");
+      ncMock.ncListFiles.mockRejectedValue(
+        new NextcloudOcsError("OCS PROPFIND failed (503)", 503),
+      );
+      const res = await request(app).get("/api/files?path=/");
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual([]);
+    });
+
+    it("still surfaces a NextcloudOcsError(403) verbatim — a 4xx OCS status is NOT an outage", async () => {
+      // The 5xx carve-out must not bleed into 4xx: a real OCS authorization
+      // error keeps its upstream status even on a read endpoint.
+      const { NextcloudOcsError } = nc as typeof import("../services/nextcloud.client.js");
+      ncMock.ncListFiles.mockRejectedValue(
+        new NextcloudOcsError("OCS forbidden", 403),
+      );
+      const res = await request(app).get("/api/files?path=/");
+      expect(res.status).toBe(403);
+      expect(res.body).not.toEqual([]);
+    });
   });
 
   // ── POST /api/files/mkdir ──

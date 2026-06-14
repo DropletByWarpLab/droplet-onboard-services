@@ -65,8 +65,10 @@ export function isUpstreamUnavailable(err: unknown): boolean {
   if (!message) return false;
 
   // undici's top-level "fetch failed" wrapper (the cause-code branch above
-  // already catches the classified ones; this covers any variant).
-  if (/fetch failed/i.test(message)) return true;
+  // already catches the classified ones; this covers any variant). Word-
+  // bounded so a future wrapper prefix like "prefetch failed: 403" can't
+  // masquerade as an outage and degrade a real 4xx.
+  if (/\bfetch failed\b/i.test(message)) return true;
   // A reachable upstream that answered 5xx — the HTTP clients fold the status
   // into the message via the same two idioms:
   //   "<label>: 5xx"  → "Frigate stats: 502", "WebDAV PROPFIND failed: 503"
@@ -75,8 +77,13 @@ export function isUpstreamUnavailable(err: unknown): boolean {
   // auth/not-found error the route must keep surfacing, not an outage.
   if (/:\s*5\d\d\b/.test(message) || /\bHTTP\s+5\d\d\b/i.test(message))
     return true;
-  // Explicit "not reachable / cannot reach / unavailable" prose.
-  if (/not reachable|cannot reach|unavailable/i.test(message)) return true;
+  // Explicit "service unavailable / not reachable / cannot reach" prose
+  // (the 503 HTTP reason phrase + our own "X is not reachable" idioms).
+  // Anchored on purpose: a bare /unavailable/ would also swallow per-resource
+  // strings like "Preview unavailable" / "Share unavailable", wrongly degrading
+  // a real error instead of surfacing it.
+  if (/\bservice unavailable\b|\bnot reachable\b|\bcannot reach\b/i.test(message))
+    return true;
 
   return false;
 }

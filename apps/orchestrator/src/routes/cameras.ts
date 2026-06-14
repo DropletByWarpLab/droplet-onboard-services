@@ -88,6 +88,15 @@ const logger = pino({ name: "cameras-routes" });
  * System page renders "0 of 0 cameras live" rather than dead-ending on a 500
  * during a Frigate outage. Mirrors models-summary.service.ts's empty-payload
  * degrade. Self-heals on the next poll once Frigate is back (we never cache it).
+ *
+ * Frozen at declaration so a consumer can never `.push()` into one of the shared
+ * array fields and corrupt the constant for every later Frigate-down response
+ * (mirrors matter.ts's frozen DISCONNECTED_DEVICES). We keep the
+ * `: CameraSystemStatus` annotation for shape-checking and freeze at runtime —
+ * a bare `as const` would narrow the arrays to `readonly []`, which isn't
+ * assignable to the interface's mutable `Array<…>`. The freeze covers the object
+ * itself plus each empty array (a shallow object freeze alone would still leave
+ * `.cameraFps.push()` mutating the shared array).
  */
 const EMPTY_SYSTEM_STATUS: CameraSystemStatus = {
   version: "unknown",
@@ -100,6 +109,11 @@ const EMPTY_SYSTEM_STATUS: CameraSystemStatus = {
   storage: [],
   cpuPct: 0,
 };
+Object.freeze(EMPTY_SYSTEM_STATUS.cameraFps);
+Object.freeze(EMPTY_SYSTEM_STATUS.detectors);
+Object.freeze(EMPTY_SYSTEM_STATUS.gpus);
+Object.freeze(EMPTY_SYSTEM_STATUS.storage);
+Object.freeze(EMPTY_SYSTEM_STATUS);
 
 /** Service-to-service auth headers for routing/discovery services. */
 function serviceAuthHeaders(): Record<string, string> {
