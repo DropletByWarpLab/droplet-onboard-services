@@ -476,7 +476,11 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   const router = Router();
   const persistence = new ChatPersistenceService(prisma);
 
-  // List available models
+  // List available models. Degrade gracefully when the AI gateway is
+  // unreachable (down / disabled / transient network blip): serve an empty
+  // model list instead of 500ing the dashboard's 30s SWR poll and the setup
+  // wizard's AI step. Mirrors /api/models (models-summary.service.ts), which
+  // already returns an empty local list on the same failure.
   router.get("/llm/models", async (_req, res, next) => {
     try {
       const cached = await cacheGet<ModelsResponse>(MODELS_CACHE_KEY);
@@ -485,7 +489,17 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         return;
       }
 
-      const models = await aiGateway.listModels();
+      let models: ModelsResponse;
+      try {
+        models = await aiGateway.listModels();
+      } catch (err) {
+        // Do NOT cache the empty fallback — the next request retries the
+        // gateway so the list self-heals once it is reachable again.
+        console.warn("[llm/models] ai-gateway unreachable; serving empty list:", err);
+        const empty: ModelsResponse = { models: [] };
+        res.json(empty);
+        return;
+      }
       await cacheSet(MODELS_CACHE_KEY, models, MODELS_CACHE_TTL);
       res.json(models);
     } catch (err) {

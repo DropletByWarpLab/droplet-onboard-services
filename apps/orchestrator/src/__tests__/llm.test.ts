@@ -127,6 +127,17 @@ describe("LLM routes", () => {
       // listModels may or may not be called depending on cache, but endpoint should not error
       expect(mockListModels).toBeDefined();
     });
+
+    it("degrades to an empty list (not 500) when ai-gateway is unreachable", async () => {
+      // Setup wizard / dashboard SWR must not get a 500 when the gateway is
+      // down or disabled (dev: AI_GATEWAY_URL=ai-gateway-disabled → ENOTFOUND).
+      mockListModels.mockRejectedValueOnce(
+        new Error("fetch failed: getaddrinfo ENOTFOUND ai-gateway-disabled")
+      );
+      const res = await request(app).get("/api/llm/models");
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ models: [] });
+    });
   });
 
   describe("POST /api/llm/chat", () => {
