@@ -232,7 +232,11 @@ async function narrowAllowedToolsForRole(
   if (isPrivilegedRole(role)) {
     return requestedAllowed;
   }
-  if (requestedAllowed?.length) {
+  // Distinguish `undefined` (no list supplied → fall through to the
+  // role default) from an explicit empty array (caller asked for ZERO
+  // tools). `.length` truthiness would conflate the two and grant the
+  // full non-write registry for an intentional `allowed_tools: []`.
+  if (requestedAllowed !== undefined) {
     return requestedAllowed.filter((n) => !WRITE_TOOLS.has(n));
   }
   // Default for unprivileged users: every tool the live MCP server
@@ -1036,10 +1040,20 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         let emptyCompletion = false;
         // WARP-329: detect client-side abort. req.on("close") fires when
         // the client disconnects mid-stream; we still finalize but flag
-        // the turn as aborted so the row reflects reality.
+        // the turn as aborted so the row reflects reality. The
+        // AbortController additionally tears down the in-flight work:
+        // its signal is threaded into runAgent → the ai-gateway fetch
+        // (cancelling inference) and is checked between agent-loop
+        // iterations / before each tool dispatch, so a disconnect stops
+        // the loop instead of letting it run (and fire write tools) in
+        // the background.
         let clientAborted = false;
+        const abortController = new AbortController();
         req.on("close", () => {
-          if (!res.writableEnded) clientAborted = true;
+          if (!res.writableEnded) {
+            clientAborted = true;
+            abortController.abort();
+          }
         });
         try {
           const streamResult = await runAgent({ ...deps, onEvent }, {
@@ -1055,6 +1069,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             toolCallContext,
             captureReasoning: chatReq.captureReasoning,
             citationContext,
+            // WARP-329 — cancel inference + halt the loop on disconnect.
+            signal: abortController.signal,
           });
           // WARP-458 — the agent loop populates message.reasoning
           // REGARDLESS of captureReasoning (only the wire-emit is

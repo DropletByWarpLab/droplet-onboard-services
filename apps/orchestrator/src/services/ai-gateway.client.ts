@@ -45,14 +45,23 @@ export async function listModels(): Promise<ModelsResponse> {
   }
 }
 
-export async function chat(request: ChatRequest): Promise<Response> {
+export async function chat(
+  request: ChatRequest,
+  signal?: AbortSignal,
+): Promise<Response> {
   // Streaming chat: no timeout — inference can legitimately take minutes on
   // local Ollama. The orchestrator's agent loop owns turn-level timeouts.
   // Return raw Response so the route handler can pipe streaming bodies.
+  //
+  // WARP-329 — `signal` is the client-disconnect AbortSignal threaded from
+  // the /api/llm/chat route's `req.on("close")`. Aborting it cancels the
+  // in-flight inference fetch so a disconnected client doesn't keep the
+  // model running.
   const res = await fetch(`${BASE_URL}/ai/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),
+    signal,
   });
   if (!res.ok && !request.stream) {
     const body = await res.text();
