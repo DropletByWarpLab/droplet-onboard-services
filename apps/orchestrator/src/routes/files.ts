@@ -39,6 +39,7 @@ import { publish } from "../services/mqtt.service.js";
 import { config } from "../config.js";
 import type { FileEntryInfo } from "../types/index.js";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
+import { isUpstreamUnavailable } from "../lib/upstream-unavailable.js";
 
 const logger = pino({ name: "files-route" });
 
@@ -115,11 +116,20 @@ function safePublish(topic: string, payload: Record<string, unknown>): void {
  * Map errors from the Nextcloud client + generic fallthroughs to HTTP responses.
  * OCS errors preserve their upstream status (400 for validation, 403 forbidden,
  * 404 not found, 997 not allowed) so the frontend can render the real message.
+ *
+ * `degradeTo` (read endpoints only): when supplied AND the error means Nextcloud
+ * is simply unreachable (down / 5xx / not resolvable), respond 200 with this
+ * empty shape instead of a 500 so the dashboard's file surfaces don't dead-end
+ * during a Nextcloud outage (mirrors models-summary.service.ts). Real errors —
+ * auth/validation/403/404/OCS status — are handled by the checks ABOVE and keep
+ * their existing behavior; only the unavailable-dependency path degrades, and we
+ * deliberately do NOT cache the empty fallback so it self-heals on recovery.
  */
 function handleFileError(
   err: unknown,
   res: Response,
-  next: NextFunction
+  next: NextFunction,
+  degradeTo?: unknown
 ): void {
   if (err instanceof MissingNcTokenError) {
     res.status(401).json({ error: err.message });
@@ -134,6 +144,11 @@ function handleFileError(
   const anyErr = err as any;
   if (anyErr?.message?.includes("404")) {
     res.status(404).json({ error: "File not found" });
+    return;
+  }
+  if (degradeTo !== undefined && isUpstreamUnavailable(err)) {
+    logger.warn({ err }, "Nextcloud unreachable; serving empty file listing");
+    res.json(degradeTo);
     return;
   }
   next(err);
@@ -284,7 +299,7 @@ export function createFilesRouter(prisma: PrismaClient): Router {
       await cacheSet(cacheKey, entries, CACHE_TTL);
       res.json(entries);
     } catch (err) {
-      handleFileError(err, res, next);
+      handleFileError(err, res, next, []);
     }
   });
 
@@ -723,7 +738,7 @@ export function createFilesRouter(prisma: PrismaClient): Router {
       const items = await ncListTrash(await getToken(req), getUser(req));
       res.json({ items });
     } catch (err) {
-      handleFileError(err, res, next);
+      handleFileError(err, res, next, { items: [] });
     }
   });
 
@@ -876,7 +891,7 @@ export function createFilesRouter(prisma: PrismaClient): Router {
       await cacheSet(cacheKey, items, FAVORITES_TTL);
       res.json({ items });
     } catch (err) {
-      handleFileError(err, res, next);
+      handleFileError(err, res, next, { items: [] });
     }
   });
 
@@ -898,7 +913,7 @@ export function createFilesRouter(prisma: PrismaClient): Router {
       await cacheSet(cacheKey, items, RECENTS_TTL);
       res.json({ items });
     } catch (err) {
-      handleFileError(err, res, next);
+      handleFileError(err, res, next, { items: [] });
     }
   });
 
@@ -1048,7 +1063,7 @@ export function createFilesRouter(prisma: PrismaClient): Router {
       const shares = await ncListSharedWithMe(await getToken(req));
       res.json({ shares });
     } catch (err) {
-      handleFileError(err, res, next);
+      handleFileError(err, res, next, { shares: [] });
     }
   });
 

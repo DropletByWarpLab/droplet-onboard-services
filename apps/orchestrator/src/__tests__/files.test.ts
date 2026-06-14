@@ -145,6 +145,70 @@ describe("File Operations (Nextcloud-backed routes)", () => {
     });
   });
 
+  // ── Degrade-on-outage (Nextcloud down → 200 empty, not 500) ──
+  //
+  // When Nextcloud is unreachable a dashboard-polled GET must serve the
+  // endpoint's empty shape so the file surfaces don't dead-end on a 500
+  // during a backing-service outage (mirrors models-summary.service.ts).
+  // Connectivity is simulated two ways: an undici "fetch failed" + a
+  // cause.code, and a reachable-but-5xx WebDAV response.
+  describe("Nextcloud-down degrade (read endpoints)", () => {
+    const fetchFailed = () => {
+      const e = new Error("fetch failed");
+      (e as { cause?: unknown }).cause = { code: "ECONNREFUSED" };
+      return e;
+    };
+
+    it("GET /api/files → 200 [] when Nextcloud is unreachable", async () => {
+      ncMock.ncListFiles.mockRejectedValue(fetchFailed());
+      const res = await request(app).get("/api/files?path=/");
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual([]);
+    });
+
+    it("GET /api/files/trash → 200 { items: [] } on a 5xx upstream", async () => {
+      ncMock.ncListTrash.mockRejectedValue(
+        new Error("WebDAV PROPFIND trashbin failed: 503"),
+      );
+      const res = await request(app).get("/api/files/trash");
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ items: [] });
+    });
+
+    it("GET /api/files/favorites → 200 { items: [] } when Nextcloud is unreachable", async () => {
+      ncMock.ncListFavorites.mockRejectedValue(fetchFailed());
+      const res = await request(app).get("/api/files/favorites");
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ items: [] });
+    });
+
+    it("GET /api/files/recents → 200 { items: [] } when Nextcloud is unreachable", async () => {
+      ncMock.ncListRecents.mockRejectedValue(fetchFailed());
+      const res = await request(app).get("/api/files/recents");
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ items: [] });
+    });
+
+    it("GET /api/files/shared-with-me → 200 { shares: [] } when Nextcloud is unreachable", async () => {
+      ncMock.ncListSharedWithMe.mockRejectedValue(fetchFailed());
+      const res = await request(app).get("/api/files/shared-with-me");
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ shares: [] });
+    });
+
+    it("does NOT degrade a real (non-connectivity) error — a 403 still surfaces, not a 200 empty list", async () => {
+      // A WebDAV 403 is a genuine authorization failure, not "Nextcloud is
+      // down" — it must keep its non-degraded behavior (untyped → 500),
+      // never be masked as an empty 200 list.
+      ncMock.ncListFiles.mockRejectedValue(
+        new Error("WebDAV PROPFIND failed: 403"),
+      );
+      const res = await request(app).get("/api/files?path=/");
+      expect(res.status).toBe(500);
+      expect(res.body).not.toEqual([]);
+    });
+  });
+
   // ── POST /api/files/mkdir ──
 
   describe("POST /api/files/mkdir", () => {
