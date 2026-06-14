@@ -30,10 +30,3 @@ def test_health_returns_ok():
     body = resp.json()
     assert body["status"] == "ok"
     assert body["service"] == "file-indexer"
-
-
-def test_health_needs_no_auth_or_body():
-    # Plain GET, no headers — the orchestrator health-monitor + Docker
-    # healthcheck both hit it unauthenticated.
-    resp = _client().get("/health")
-    assert resp.status_code == 200

@@ -273,6 +273,9 @@ const envSchema = z.object({
   // Defaulting to `uci` keeps every multi-box install behaving exactly as before.
   DROPLET_AP_MODE: z.enum(["uci", "hostapd", "auto"]).default("uci"),
 
+  // --- File indexer (WARP-287 re-index + WARP-598 health probe) ---
+  FILE_INDEXER_URL: z.string().default("http://file-indexer:8090"),
+
   // --- Frigate NVR ---
   FRIGATE_URL: z.string().default("http://localhost:5000"),
   CAMERA_DISCOVERY_URL: z.string().default("http://localhost:8085"),

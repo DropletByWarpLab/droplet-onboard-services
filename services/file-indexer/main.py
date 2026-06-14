@@ -224,6 +224,7 @@ def main():
             uvicorn.run(api, host="0.0.0.0", port=port, log_level="info")
         except Exception:
             logger.exception("file-indexer HTTP server failed to start")
+            os._exit(1)
 
     http_thread = threading.Thread(
         target=_http_server_thread, name="warp287-http", daemon=True
