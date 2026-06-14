@@ -263,7 +263,7 @@ const envSchema = z.object({
   // against unbounded table growth. Set 0 (or negative) to disable the
   // purge entirely — the safe "keep forever" stance, NOT a sentinel:
   // audit-retention-purge.service.ts treats <= 0 as "skip".
-  DROPLET_AUDIT_RETENTION_DAYS: z.coerce.number().default(90),
+  DROPLET_AUDIT_RETENTION_DAYS: z.coerce.number().int().min(1).finite().default(90),
 
   // WARP-808: which deployment shape broadcasts the home Wi-Fi AP. This is the
   // SAME knob the device-bridge reads (services/oled-display/device-bridge.py)
