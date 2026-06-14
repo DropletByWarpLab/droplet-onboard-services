@@ -1062,6 +1062,11 @@ model VpnPeer {
 
   @@index([userId])
   @@index([status])
+  // WARP-565: a PARTIAL unique index enforces "at most one ACTIVE peer per
+  // assignedIp" at the DB layer (revoked rows' IPs are reusable). Prisma can't
+  // express partial-unique declaratively, so it lives as raw SQL in migration
+  // 20260614000000_vpn_peer_unique_active_ip. This @@index stays for the
+  // non-unique read path the allocator uses.
   @@index([assignedIp])
 }
 
