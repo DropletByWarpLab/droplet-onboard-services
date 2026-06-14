@@ -71,7 +71,7 @@ class SessionStore:
     async def get(self, session_id: str) -> Session | None:
         raise NotImplementedError
 
-    async def list_sessions(self, limit: int = 50, offset: int = 0) -> list[Session]:
+    async def list_sessions(self, limit: int = 50, offset: int = 0, owner: str | None = None) -> list[Session]:
         raise NotImplementedError
 
     async def add_message(self, session_id: str, role: str, content: str) -> SessionMessage | None:
@@ -117,10 +117,12 @@ class InMemorySessionStore(SessionStore):
     async def get(self, session_id: str) -> Session | None:
         return self._sessions.get(session_id)
 
-    async def list_sessions(self, limit: int = 50, offset: int = 0) -> list[Session]:
+    async def list_sessions(self, limit: int = 50, offset: int = 0, owner: str | None = None) -> list[Session]:
         all_sessions = sorted(
             self._sessions.values(), key=lambda s: s.updated_at, reverse=True
         )
+        if owner is not None:
+            all_sessions = [s for s in all_sessions if s.owner == owner]
         return all_sessions[offset : offset + limit]
 
     async def add_message(self, session_id: str, role: str, content: str) -> SessionMessage | None:
@@ -214,14 +216,22 @@ class RedisSessionStore(SessionStore):
             return None
         return self._session_from_dict(data)
 
-    async def list_sessions(self, limit: int = 50, offset: int = 0) -> list[Session]:
-        ids = await self._redis.zrevrange(self.INDEX_KEY, offset, offset + limit - 1)
+    async def list_sessions(self, limit: int = 50, offset: int = 0, owner: str | None = None) -> list[Session]:
+        # When owner is set we cannot use the sorted-set offset/limit directly
+        # because filtering happens after fetch. We over-fetch a safe window and
+        # then trim. For un-owned (legacy) sessions owner is None and we return
+        # everything (backwards-compatible behaviour).
+        fetch_limit = offset + limit * 4 if owner is not None else limit
+        ids = await self._redis.zrevrange(self.INDEX_KEY, 0, fetch_limit - 1)
         sessions = []
         for sid in ids:
             session = await self.get(sid)
-            if session:
-                sessions.append(session)
-        return sessions
+            if not session:
+                continue
+            if owner is not None and session.owner != owner:
+                continue
+            sessions.append(session)
+        return sessions[offset : offset + limit]
 
     async def add_message(self, session_id: str, role: str, content: str) -> SessionMessage | None:
         key = self._key(session_id)

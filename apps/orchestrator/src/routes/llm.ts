@@ -693,7 +693,9 @@ export function createLlmRouter(prisma: PrismaClient): Router {
 
       const deps: AgentDeps = {
         mcp: mcpClient,
-        aiGateway: { chat: aiGateway.chat },
+        // WARP-561: close over the requesting user's id so the gateway scopes
+        // BYOK key resolution to their namespace for every agent-loop turn.
+        aiGateway: { chat: (chatReq) => aiGateway.chat(chatReq, (req as AuthedRequest).user?.id) },
         enhancement: createEnhancementDeps({
           aiGatewayGrpcUrl,
           defaultModel: defaultChatModel,

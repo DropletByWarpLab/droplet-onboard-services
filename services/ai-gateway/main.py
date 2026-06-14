@@ -470,13 +470,14 @@ async def create_session(body: SessionCreateRequest, request: Request):
 
 @app.get("/ai/sessions", response_model=SessionListResponse)
 async def list_sessions(
+    request: Request,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ):
-    """List chat sessions, most recent first."""
+    """List chat sessions for the calling principal, most recent first."""
     if not session_store:
         raise HTTPException(status_code=503, detail="Service not ready")
-    sessions = await session_store.list_sessions(limit=limit, offset=offset)
+    sessions = await session_store.list_sessions(limit=limit, offset=offset, owner=_principal(request))
     return SessionListResponse(sessions=[_session_to_out(s) for s in sessions])
 
 
@@ -503,6 +504,8 @@ async def update_session(session_id: str, body: SessionUpdateRequest, request: R
     _assert_session_owner(session, _principal(request))
     await session_store.update_title(session_id, body.title)
     session = await session_store.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
     return _session_to_out(session)
 
 
@@ -515,7 +518,9 @@ async def delete_session(session_id: str, request: Request):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     _assert_session_owner(session, _principal(request))
-    await session_store.delete(session_id)
+    deleted = await session_store.delete(session_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Session not found")
     return {"status": "deleted", "session_id": session_id}
 
 
