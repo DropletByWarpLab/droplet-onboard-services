@@ -53,6 +53,7 @@ import {
   purgeScheduleEvents,
   purgeExpiredOverrides,
 } from "./services/schedule-purge.js";
+import { purgeAuditLogs } from "./services/audit-retention-purge.service.js";
 import { tickToolSchedules } from "./services/tool-schedule-ticker.service.js";
 import { mcpClient } from "./services/mcp-client.singleton.js";
 import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
@@ -362,6 +363,16 @@ async function main() {
       // than throughput (30 d) because totals roll up to monthly
       // billing windows; 90 d covers QoQ review without bloat.
       const offLanDeleted = await purgeOffLanEgressSamples(prisma, 90);
+      // WARP-586: retention purge for the append-only audit/log tables
+      // (ActivityRow, CommandAuditLog, NotificationLog). Window is
+      // operator-tunable via DROPLET_AUDIT_RETENTION_DAYS (default 90);
+      // <= 0 disables the purge. ActivityRow is hash-chained, so this is
+      // an oldest-prefix seal-and-truncate, not a mid-chain delete — see
+      // audit-retention-purge.service.ts for the integrity argument.
+      const auditPurge = await purgeAuditLogs(
+        prisma,
+        config.DROPLET_AUDIT_RETENTION_DAYS,
+      );
       logger.info(
         {
           eventsDeleted,
@@ -369,6 +380,10 @@ async function main() {
           presenceDeleted: presenceDeleted.count,
           throughputDeleted,
           offLanDeleted,
+          activityDeleted: auditPurge.activityDeleted,
+          commandAuditDeleted: auditPurge.commandAuditDeleted,
+          notificationDeleted: auditPurge.notificationDeleted,
+          auditRetentionSkipped: auditPurge.skipped,
         },
         "daily purges complete",
       );

@@ -256,6 +256,15 @@ const envSchema = z.object({
   DROPLET_AP_DAWN_ENABLED: z.coerce.boolean().default(true),
   DROPLET_AP_DEFAULT_TXPOWER: z.coerce.number().default(20),
 
+  // WARP-586: retention window (days) for the append-only audit/log tables
+  // ActivityRow, CommandAuditLog, NotificationLog. The daily 03:00 cron
+  // (index.ts) deletes rows older than this. 90 days balances "enough
+  // history for the dashboard's activity feed + an incident look-back"
+  // against unbounded table growth. Set 0 (or negative) to disable the
+  // purge entirely — the safe "keep forever" stance, NOT a sentinel:
+  // audit-retention-purge.service.ts treats <= 0 as "skip".
+  DROPLET_AUDIT_RETENTION_DAYS: z.coerce.number().default(90),
+
   // WARP-808: which deployment shape broadcasts the home Wi-Fi AP. This is the
   // SAME knob the device-bridge reads (services/oled-display/device-bridge.py)
   // and that single-box.sh's configure_single_box_env upserts into .env.
