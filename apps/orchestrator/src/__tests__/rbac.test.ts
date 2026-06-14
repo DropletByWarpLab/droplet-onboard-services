@@ -30,6 +30,10 @@ vi.mock("../config.js", () => ({
     SERVICE_TOKEN_VOICE: "test-voice-token-32chars-padding-xyz",
     SERVICE_TOKEN_MCP: "test-mcp-token-32chars-padding-1234a",
     JWT_SECRET: "test-secret-32-bytes-long-aaaaaaaa",
+    // The owner reset path dispatches to the device-bridge; without a configured
+    // URL the service reports BRIDGE_UNREACHABLE → 503, so the owner "guard
+    // passes" assertion (status < 500) fails. Mirror the dedicated handler test.
+    DEVICE_BRIDGE_URL: "http://bridge.test:9090",
   },
 }));
 
@@ -535,6 +539,11 @@ describe("system-reset router RBAC wiring (WARP-825)", () => {
     // commandAuditLog, but for the DENIED roles the guard short-circuits before
     // any of these are touched.
     const prisma = {
+      // requestFactoryReset wraps the double-fire guard + audit + job create in
+      // prisma.$transaction(fn, { isolationLevel: Serializable }); without this
+      // the double's $transaction is undefined → TypeError → 500 (not the 202
+      // the owner-passes-guard assertion expects). Run the fn against the double.
+      $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma)),
       resetJob: {
         count: vi.fn(async () => 0),
         create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({

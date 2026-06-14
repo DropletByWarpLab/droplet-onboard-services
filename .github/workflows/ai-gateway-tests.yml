@@ -3,8 +3,17 @@ name: ai-gateway-tests
 # Pytest for services/ai-gateway. Path-filtered.
 
 on:
-  # Temporarily disabled: manual-only until GitHub Actions testing minutes
-  # are restored. Restore the pull_request/push triggers from git history.
+  pull_request:
+    paths:
+      - "services/ai-gateway/**"
+      - "proto/**"
+      - ".github/workflows/ai-gateway-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "services/ai-gateway/**"
+      - "proto/**"
+      - ".github/workflows/ai-gateway-tests.yml"
   workflow_dispatch:
 
 concurrency:
@@ -14,6 +23,9 @@ concurrency:
 jobs:
   pytest:
     runs-on: ubuntu-latest
+    # Safety net: a hung test (e.g. a cross-event-loop await that never resolves)
+    # must fail the job fast, not burn a 6h default runner allocation.
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: services/ai-gateway
