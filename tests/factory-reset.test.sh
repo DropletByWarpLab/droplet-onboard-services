@@ -52,9 +52,17 @@ fi
 # =============================================================================
 echo "--- Phase 2: Verify clean state ---"
 
-# Check volumes are gone
-COMPOSE_PROJECT=$(basename "$(dirname "$COMPOSE_FILE")")
-for vol in pgdata filedata nextcloud-data aikeys nvrdata; do
+# Check volumes are gone. Derive the REAL compose project name from the compose
+# file's `name:` (it is `droplet`, NOT the `docker` dir-basename — see the
+# factory-reset.sh Phase 1 comment). The old basename guess checked nonexistent
+# `docker_*` volumes and trivially passed even when the real `droplet_*` volumes
+# survived — the exact silent-success this whole fix targets.
+COMPOSE_PROJECT=$(grep -E '^name:[[:space:]]' "$COMPOSE_FILE" | head -1 | awk '{print $2}' || true)
+COMPOSE_PROJECT="${COMPOSE_PROJECT:-droplet}"
+# brain-memory-data + ops-audit are the customer-data volumes the wipe list used
+# to omit (they survived a reset); assert they are gone. `filedata` was a dead
+# legacy name that no compose volume ever created, so it always vacuously passed.
+for vol in pgdata brain-memory-data ops-audit nextcloud-data aikeys nvrdata; do
   full_name="${COMPOSE_PROJECT}_${vol}"
   if docker volume inspect "$full_name" >/dev/null 2>&1; then
     fail "Volume ${full_name} still exists"
@@ -62,6 +70,16 @@ for vol in pgdata filedata nextcloud-data aikeys nvrdata; do
     pass "Volume ${vol} removed"
   fi
 done
+
+# Authoritative gate (mirrors factory-reset.sh's own verify): NO *_pgdata volume
+# may survive a reset. A stale PGDATA is what makes the new db container keep the
+# OLD role password and crash-loop the orchestrator against the rotated .env.
+if docker volume ls --format '{{.Name}}' | grep -qE '_pgdata$'; then
+  survivors=$(docker volume ls --format '{{.Name}}' | grep -E '_pgdata$' | tr '\n' ' ')
+  fail "a *_pgdata volume survived factory-reset: ${survivors}"
+else
+  pass "no *_pgdata volume survives factory-reset (docker volume ls clean)"
+fi
 
 # Check .env is gone
 if [ ! -f "$REPO_ROOT/.env" ]; then

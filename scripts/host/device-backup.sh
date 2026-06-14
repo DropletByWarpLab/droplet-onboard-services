@@ -55,7 +55,8 @@
 #
 # Env overrides (defaults match the production compose stack — the test harness
 # points these at a disposable project):
-#   PROJECT       compose project name for volume prefixes (droplet-pi-platform)
+#   PROJECT       compose project name for volume prefixes (derived from the
+#                 compose `name:` field, default droplet)
 #   COMPOSE_FILE  path to the compose file
 #   DB_SERVICE    main Postgres service (db)
 #   DB_USER       main DB user (falls back to in-container $POSTGRES_USER)
@@ -74,8 +75,20 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 OUTPUT_DIR="${1:-/var/lib/droplet/backups}"
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
 
-PROJECT="${PROJECT:-droplet-pi-platform}"
 COMPOSE_FILE="${COMPOSE_FILE:-$REPO_ROOT/docker/docker-compose.yml}"
+
+# Live compose project name. DERIVE it from the compose file's `name:` field
+# (pinned `name: droplet`, WARP-187) — never hard-code the RETIRED pre-WARP-605
+# `droplet-pi-platform`. Docker prefixes volumes `<project>_<vol>`, so a stale
+# default silently targets nonexistent `droplet-pi-platform_*` volumes and backs
+# up NOTHING — the same stale-project bug just fixed in factory-reset.sh. An
+# explicit PROJECT= override still wins (the test harness points it at a
+# disposable project). `|| true` leaves the "compose file not found" check below
+# in charge of a missing file rather than dying here under `set -e`/pipefail.
+if [ -z "${PROJECT:-}" ]; then
+  PROJECT="$(grep -E '^name:[[:space:]]' "$COMPOSE_FILE" 2>/dev/null | head -1 | awk '{gsub(/["\x27]/,"",$2); print $2}' || true)"
+fi
+PROJECT="${PROJECT:-droplet}"
 DB_SERVICE="${DB_SERVICE:-db}"
 PM_SERVICE="${PM_SERVICE:-postgres-pm}"
 BACKUP_KEEP="${BACKUP_KEEP:-7}"
@@ -100,6 +113,7 @@ DATA_VOLUMES=(
 # rebuildable state (regenerated on reinstall), not customer data. Keep in sync
 # with factory-reset.sh's wipe list minus DATA_VOLUMES minus the pg_dump'd DBs.
 EXCLUDED_VOLUMES=(
+  migration-snapshots # WARP-573 pre-migration DB snapshots — regenerated on fresh boot
   redis-pm-data      # Plane redis cache — rebuilt on start
   frigate-config     # NVR config — regenerated from .env on setup
   rag-eval-data      # RAGAS eval output — not customer data
@@ -108,6 +122,9 @@ EXCLUDED_VOLUMES=(
   ollama-data        # local model blobs — re-pulled
   openwrt-config     # single-box router config — re-provisioned
   openwrt-overlay    # single-box router overlay — re-provisioned
+  switch-state       # managed-switch state — re-provisioned by setup
+  pm-minio-data      # Plane object store (attachments) — full backup is WARP-514
+  pm-rabbitmq-data   # Plane task queue — ephemeral, rebuilt on start
 )
 
 # --- Source logging library if present (matches setup.sh convention) ------
