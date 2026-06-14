@@ -347,6 +347,42 @@ class TestOnFrameDecision:
         assert s.state == "error"
         assert "predict failed" in (s.error_message or "")
 
+    def test_error_state_does_not_resume_wake_detection(self):
+        # Once we're in 'error', a later frame must NOT silently resume
+        # wake detection: a wake fire would overwrite _state with
+        # 'wake_detected' while the stale _error_message lingered, masking
+        # the fault on /voice/status. Pre-fix, 'error' hit the fall-through
+        # to _run_wake_detect. Recovery from error is an explicit
+        # transition, never an implicit one off the next mic frame.
+        fires: list[WakeEvent] = []
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.99}]),
+            input_device_index=0,
+            threshold=0.5,
+            on_wake=fires.append,
+        )
+        pipe._set_error("STT session failed (test)")
+        pipe._on_frame(_silence_frame())  # high-scoring frame
+        assert fires == []                       # no wake fired
+        assert pipe._state == "error"            # still latched in error
+        assert "STT session failed" in (pipe.status().error_message or "")
+
+    def test_no_mic_state_does_not_resume_wake_detection(self):
+        # Same contract for 'no_mic': the supervising loop owns the
+        # recovery transition back to 'listening'; _on_frame must not
+        # resume wake detection from a no_mic latch on its own.
+        fires: list[WakeEvent] = []
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.99}]),
+            input_device_index=0,
+            threshold=0.5,
+            on_wake=fires.append,
+        )
+        pipe._set_state("no_mic")
+        pipe._on_frame(_silence_frame())
+        assert fires == []
+        assert pipe._state == "no_mic"
+
     def test_callback_exception_does_not_propagate(self):
         # The on_wake hook is operator-supplied (commit 7 wires it to
         # the LLM bridge). A bug there must not crash the loop.
@@ -1615,6 +1651,46 @@ class TestSpeak:
         # Error message surfaces via /voice/status
         assert pipe.status().state == "error"
         assert "synth blew up" in (pipe.status().error_message or "")
+
+    def test_playback_failure_arms_post_speak_cooldown(self, monkeypatch):
+        # A mid-playback failure still drove the speaker for part of the
+        # reply, so the anti-feedback cooldown must engage — otherwise the
+        # partial Piper output can bleed into the mic and self-trigger a
+        # wake. Pre-fix, _speak_ended_at was set only on the success path
+        # (_restore_state_after_speak), so the except left it None.
+        def _raising_play(audio, samplerate, device):
+            raise RuntimeError("PortAudio write failed (test)")
+
+        import voice.audio_io as _audio_io
+        monkeypatch.setattr(_audio_io, "play", _raising_play)
+
+        tts = _RecordingTTS()
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.99}]),
+            input_device_index=0,
+            output_device_index=0,
+            threshold=0.5,
+            tts=tts,
+        )
+        pipe._tts_available = True
+        pipe._state = "listening"
+
+        result = pipe.speak("hello")
+        assert result["ok"] is False
+        assert pipe.status().state == "error"
+        # The load-bearing assertion: the cooldown timestamp is armed even
+        # though playback raised, so wake detection is suppressed for the
+        # post-speak window.
+        assert pipe._speak_ended_at is not None
+        now = time.time()
+        assert now - pipe._speak_ended_at < pipe._post_speak_cooldown_s
+
+        # And _run_wake_detect honours it: a high-scoring frame inside the
+        # cooldown window does NOT fire a wake.
+        fires: list[WakeEvent] = []
+        pipe._on_wake = fires.append
+        pipe._run_wake_detect(_silence_frame())
+        assert fires == []
 
     def test_speak_transitions_into_and_out_of_speaking_state(self, monkeypatch):
         # We can't observe the intermediate 'speaking' state from outside

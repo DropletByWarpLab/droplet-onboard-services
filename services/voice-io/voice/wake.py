@@ -513,8 +513,16 @@ class VoskWakeWordDetector(WakeWordDetector):
         slow, or with a beat between the words — always passes:
 
           * each word lasts 0.05–1.2 s,
-          * the gap between consecutive words is ≤ 0.6 s,
+          * the gap between consecutive words is ≤ 1.2 s,
           * the whole phrase spans 0.2–2.0 s.
+
+        The gap bound is 1.2 s, not the old 0.6 s: a deliberately-spaced
+        "hey … droplet" — the ~0.7–0.9 s beat people leave when re-trying
+        after a missed wake — is a real, confident alignment and was being
+        rejected. 1.2 s admits that beat while still rejecting the
+        two-separate-alignments shape (e.g. "hey" … 1.5 s of TV music …
+        "droplet") that this gate exists to catch; the 2.0 s span ceiling
+        keeps the overall phrase bounded.
 
         Timing is an EXTRA rejection signal when present, never a new
         requirement (older vosk builds omit timings unless SetWords is
@@ -541,7 +549,7 @@ class VoskWakeWordDetector(WakeWordDetector):
             if not 0.05 <= (end - start) <= 1.2:
                 return False
         for prev, nxt in zip(timed, timed[1:]):
-            if prev is not None and nxt is not None and nxt[0] - prev[1] > 0.6:
+            if prev is not None and nxt is not None and nxt[0] - prev[1] > 1.2:
                 return False
         if timed[0] is None or timed[-1] is None:
             return True  # span check needs both endpoints — skip just it
