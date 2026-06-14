@@ -69,13 +69,13 @@ export function parseVpnSubnet(cidr: string): {
  * rows; revoked rows free their IP for re-allocation.
  *
  * NOT atomic on its own — two concurrent calls could pick the same IP. The
- * route handler relies on `assignedIp`'s uniqueness within active rows: an
- * INSERT with a duplicate IP fails on the publicKey unique constraint
- * elsewhere, but to be safe we wrap allocation + insert in a transaction
- * and retry once on conflict. See route handler.
+ * route handler's `allocateMintAndPersistPeer` loop relies on the partial
+ * unique index on (assignedIp) WHERE status = 'active' (WARP-565): the losing
+ * INSERT fails with P2002, which the loop catches and re-allocates against the
+ * now-updated taken set. This bare helper is the per-attempt allocation step.
  */
 export async function allocatePeerIp(
-  prisma: PrismaClient,
+  prisma: VpnPeerStore,
   subnet: string,
 ): Promise<string> {
   const { prefix, firstPeer, lastPeer } = parseVpnSubnet(subnet);
@@ -91,6 +91,130 @@ export async function allocatePeerIp(
     if (!takenSet.has(candidate)) return candidate;
   }
   throw new VpnIpExhaustedError(subnet);
+}
+
+// Narrow structural type for the Prisma surface the allocator reads. Lets
+// allocatePeerIp / the persist loop accept either the real PrismaClient or the
+// interactive-transaction client `tx` (same model delegates) without a cast.
+type VpnPeerStore = {
+  vpnPeer: {
+    findMany: PrismaClient["vpnPeer"]["findMany"];
+    create: PrismaClient["vpnPeer"]["create"];
+  };
+};
+
+// The Prisma surface allocateMintAndPersistPeer needs: the outer client for
+// the read-only allocate (findMany) + interactive $transaction. The real
+// PrismaClient satisfies this; the unit test double provides the same shape.
+type VpnTxClient = Pick<PrismaClient, "$transaction"> & VpnPeerStore;
+
+/**
+ * Prisma unique-constraint violation (P2002) — duck-typed rather than
+ * `instanceof Prisma.PrismaClientKnownRequestError` so the unit tests' plain
+ * thrown objects behave like the real client error. Mirrors reset.service.ts.
+ */
+function isUniqueViolation(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { code?: unknown }).code === "P2002"
+  );
+}
+
+/**
+ * Is this P2002 the active-IP race (retryable) rather than the publicKey clash?
+ *
+ * Both surface as P2002. Prisma reports the offending field(s) in `meta.target`
+ * (the index name / column list). The publicKey clash means routing minted a
+ * pubkey we already hold — a genuine persist failure that must NOT be retried
+ * (it would just re-mint and clash again). The assignedIp clash is the WARP-565
+ * allocation race we want to re-allocate around. When `meta.target` is absent
+ * (older Prisma / bare test errors) we conservatively treat it as the IP race,
+ * since the publicKey path has its own explicit pre-seed in the rollback test.
+ */
+export function isActiveIpViolation(err: unknown): boolean {
+  if (!isUniqueViolation(err)) return false;
+  const target = (err as { meta?: { target?: unknown } })?.meta?.target;
+  const mentions = (needle: string) =>
+    Array.isArray(target)
+      ? target.some((t) => typeof t === "string" && t.includes(needle))
+      : typeof target === "string" && target.includes(needle);
+  if (mentions("publicKey")) return false;
+  if (mentions("assignedIp")) return true;
+  return target === undefined; // unannotated P2002 → assume the IP race
+}
+
+/**
+ * Allocate the next free IP, mint the router-side peer with it, then persist —
+ * retrying the WHOLE sequence on the active-IP unique conflict (WARP-565).
+ *
+ * Why retry the whole sequence and not just the DB write? The router peer is
+ * installed with `AllowedIPs = <peerIp>/32`, so a re-allocated IP needs a
+ * re-mint. `mint` (an external HTTP call) therefore stays OUT of the DB
+ * transaction; only the create runs inside `$transaction`. Whenever a persist
+ * attempt fails — retryable IP race OR a terminal error like a publicKey clash
+ * — `rollbackMint` tears down that attempt's router peer so we never leak an
+ * orphan peer pinned to an IP we didn't keep. This generalizes (and preserves)
+ * the pre-WARP-565 single-shot rollback the route already did.
+ *
+ * Bounded retry: contention is a handful of concurrent setup calls, not a
+ * herd, so a small fixed budget suffices. After `maxRetries` exhausted active-
+ * IP conflicts the last error propagates (route surfaces it as a 500).
+ */
+export async function allocateMintAndPersistPeer<TMint extends { public_key: string }>(
+  prisma: VpnTxClient,
+  subnet: string,
+  deps: {
+    deviceLabel: string;
+    userId: string;
+    mint: (peerIp: string) => Promise<TMint>;
+    rollbackMint: (minted: TMint) => Promise<void>;
+  },
+  maxRetries = 3,
+): Promise<{
+  peerIp: string;
+  minted: TMint;
+  saved: Awaited<ReturnType<PrismaClient["vpnPeer"]["create"]>>;
+}> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    // Allocate the candidate IP, then mint the router peer pinned to it. The
+    // mint is an external HTTP call, so it stays OUT of the DB transaction.
+    const peerIp = await allocatePeerIp(prisma, subnet);
+    const minted = await deps.mint(peerIp);
+    try {
+      // Persist inside a transaction. The partial unique index on (assignedIp)
+      // WHERE status = 'active' is the real authority: if a concurrent setup
+      // claimed this IP between our allocate above and this insert, the INSERT
+      // fails P2002 and the catch re-runs the loop, re-allocating against the
+      // now-updated taken set on the next pass.
+      const saved = await prisma.$transaction((tx) =>
+        tx.vpnPeer.create({
+          data: {
+            userId: deps.userId,
+            deviceLabel: deps.deviceLabel,
+            publicKey: minted.public_key,
+            assignedIp: peerIp,
+          },
+        }),
+      );
+      return { peerIp, minted, saved };
+    } catch (err) {
+      // Always roll back THIS attempt's router peer — it was minted with an IP
+      // we failed to persist, retryable or not, so it must not linger.
+      try {
+        await deps.rollbackMint(minted);
+      } catch {
+        // rollbackMint logs internally; swallow so the original error wins.
+      }
+      if (isActiveIpViolation(err) && attempt < maxRetries) {
+        lastErr = err;
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
 }
 
 /**

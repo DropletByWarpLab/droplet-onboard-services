@@ -30,7 +30,7 @@ import {
   RouterError,
 } from "../services/openwrt.client.js";
 import {
-  allocatePeerIp,
+  allocateMintAndPersistPeer,
   parseVpnSubnet,
   renderPeerConf,
   VpnConfigError,
@@ -252,43 +252,41 @@ export function createVpnRouter(prisma: PrismaClient): Router {
         address: serverAddressFromSubnet(config.WIREGUARD_VPN_SUBNET),
       });
 
-      // 2. Allocate next free IP. We allocate then mint then persist; if
-      //    persist fails we delete the routing-side peer to avoid orphans.
-      const peerIp = await allocatePeerIp(prisma, config.WIREGUARD_VPN_SUBNET);
-
-      // 3. Ask routing to mint a keypair + install the peer.
-      const minted = await createVpnPeer({
-        description: parsed.data.deviceLabel,
-        allowedIps: [`${peerIp}/32`],
-      });
-
-      // 4. Persist. On failure, tear down the routing-side peer so we
-      //    don't leak silent peers that nobody owns from the orchestrator's POV.
-      let saved;
-      try {
-        saved = await prisma.vpnPeer.create({
-          data: {
-            userId: user.username,
-            deviceLabel: parsed.data.deviceLabel,
-            publicKey: minted.public_key,
-            assignedIp: peerIp,
+      // 2-4. Allocate next free IP, mint the router-side peer with it, and
+      //    persist — as one retryable unit. WARP-565: the allocate-then-persist
+      //    sequence is a read-then-write race (two concurrent setup calls can
+      //    pick the same "free" IP). The partial unique index on (assignedIp)
+      //    WHERE status = 'active' makes the loser's INSERT fail P2002, which
+      //    allocateMintAndPersistPeer catches and re-allocates around (re-minting
+      //    the router peer with the new IP). Any failed attempt's router peer is
+      //    rolled back so we never leak an orphan peer pinned to an unkept IP.
+      const { peerIp, minted, saved } = await allocateMintAndPersistPeer(
+        prisma,
+        config.WIREGUARD_VPN_SUBNET,
+        {
+          userId: user.username,
+          deviceLabel: parsed.data.deviceLabel,
+          mint: (ip) =>
+            createVpnPeer({
+              description: parsed.data.deviceLabel,
+              allowedIps: [`${ip}/32`],
+            }),
+          rollbackMint: async (m) => {
+            logger.error(
+              { publicKey: m.public_key },
+              "vpn: persist failed after routing mint — rolling back routing-side peer",
+            );
+            try {
+              await deleteVpnPeer({ publicKey: m.public_key });
+            } catch (rollbackErr) {
+              logger.error(
+                { err: rollbackErr, publicKey: m.public_key },
+                "vpn: rollback delete failed — orphan peer on router; admin must clean up manually",
+              );
+            }
           },
-        });
-      } catch (persistErr) {
-        logger.error(
-          { err: persistErr, publicKey: minted.public_key },
-          "vpn: persist failed after routing mint — rolling back routing-side peer",
-        );
-        try {
-          await deleteVpnPeer({ publicKey: minted.public_key });
-        } catch (rollbackErr) {
-          logger.error(
-            { err: rollbackErr, publicKey: minted.public_key },
-            "vpn: rollback delete failed — orphan peer on router; admin must clean up manually",
-          );
-        }
-        throw persistErr;
-      }
+        },
+      );
 
       const conf = renderPeerConf({
         privateKey: minted.private_key,
