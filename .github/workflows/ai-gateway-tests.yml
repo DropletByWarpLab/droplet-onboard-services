@@ -23,6 +23,9 @@ concurrency:
 jobs:
   pytest:
     runs-on: ubuntu-latest
+    # Safety net: a hung test (e.g. a cross-event-loop await that never resolves)
+    # must fail the job fast, not burn a 6h default runner allocation.
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: services/ai-gateway
