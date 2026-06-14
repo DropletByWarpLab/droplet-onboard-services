@@ -255,7 +255,13 @@ describe("WARP-586 — purgeAuditLogs", () => {
     expect(prisma.notificationLog.deleteMany).not.toHaveBeenCalled();
   });
 
-  it("skips when the window is negative (treated as disabled, not a future cutoff)", async () => {
+  // Defense-in-depth unit test of the `<= 0` guard itself. In production a
+  // negative window can NOT reach here via config — the Zod schema rejects
+  // negatives at startup (DROPLET_AUDIT_RETENTION_DAYS uses .min(0), so only
+  // 0 is the config-level disable). This pins the guard's behaviour for any
+  // direct caller so a negative is skipped rather than computing a
+  // future-dated cutoff that would wipe the whole table.
+  it("guard skips a negative window directly (not a future cutoff)", async () => {
     const prisma = createPrismaMock({
       activity: 7,
       commandAudit: 7,
