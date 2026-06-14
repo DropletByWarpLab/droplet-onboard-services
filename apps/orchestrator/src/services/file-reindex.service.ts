@@ -27,6 +27,7 @@
  * `vi.mock`, so they don't need to wire prisma.
  */
 import type { PrismaClient } from "@prisma/client";
+import { config } from "../config.js";
 
 export interface ReindexFileParams {
   /** Opaque file identifier (Nextcloud fileId or BrainMemoryItem id). */
@@ -124,7 +125,7 @@ export function hashFileId(fileId: string): bigint {
 async function callFileIndexerReindex(
   fileId: string,
 ): Promise<{ chunksWritten: number }> {
-  const base = process.env.FILE_INDEXER_URL ?? "http://file-indexer:8090";
+  const base = config.FILE_INDEXER_URL;
   const url = `${base}/reindex/${encodeURIComponent(fileId)}`;
   const resp = await fetch(url, { method: "POST" });
   if (!resp.ok) {
