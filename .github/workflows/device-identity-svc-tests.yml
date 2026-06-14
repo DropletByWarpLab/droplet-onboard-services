@@ -26,6 +26,10 @@ concurrency:
 jobs:
   pytest:
     runs-on: ubuntu-latest
+    # A hung test must fail the job fast, not burn the 6h default runner
+    # allocation. Higher than the plain pytest suites because the install
+    # step apt-builds libtss2-dev + compiles the tpm2-pytss C extension.
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: services/device-identity-svc

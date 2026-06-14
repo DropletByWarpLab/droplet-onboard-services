@@ -31,6 +31,12 @@ concurrency:
 jobs:
   setup-script:
     runs-on: ubuntu-latest
+    # A hung step must fail the job fast, not burn the 6h default runner
+    # allocation. This is the heaviest restored suite: setup.sh's build phase
+    # runs a full `docker compose --profile full build` and the ai-gateway
+    # image alone pulls ~5GB of CUDA/NCCL — 60 min covers a cold from-scratch
+    # build on a disk-constrained runner while still bounding a hung build.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 

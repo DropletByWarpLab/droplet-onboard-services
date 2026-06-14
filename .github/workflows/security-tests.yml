@@ -9,12 +9,19 @@ on:
     paths:
       - "docker/**"
       - "scripts/**"
+      # Test 13 statically audits the CORS wildcard-rejection guard here, and
+      # Test 14 audits the guarded migration entrypoint — a regression to either
+      # audited file must trigger this suite, not just compose/script edits.
+      - "apps/orchestrator/src/config.ts"
+      - "apps/orchestrator/Dockerfile"
       - ".github/workflows/security-tests.yml"
   push:
     branches: [main]
     paths:
       - "docker/**"
       - "scripts/**"
+      - "apps/orchestrator/src/config.ts"
+      - "apps/orchestrator/Dockerfile"
       - ".github/workflows/security-tests.yml"
   workflow_dispatch:
 
@@ -25,6 +32,10 @@ concurrency:
 jobs:
   test-security:
     runs-on: ubuntu-latest
+    # A hung test must fail the job fast, not burn the 6h default runner
+    # allocation. Static bash regression checks, no Docker — 15 min is a wide
+    # ceiling for a sub-minute suite.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Run security regression suite

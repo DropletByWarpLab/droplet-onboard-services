@@ -24,6 +24,11 @@ concurrency:
 jobs:
   setup-unit:
     runs-on: ubuntu-latest
+    # A hung test must fail the job fast, not burn the 6h default runner
+    # allocation. Despite the name this is the fast unit suite (<5s, no
+    # Docker — docker is stubbed on PATH); the heavy from-scratch image build
+    # lives in setup-e2e.yml. 15 min is a very wide ceiling here.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Run setup unit tests

@@ -28,6 +28,11 @@ concurrency:
 jobs:
   device-backup:
     runs-on: ubuntu-latest
+    # A hung test must fail the job fast, not burn the 6h default runner
+    # allocation. Runs a backup→mutate→restore Docker round-trip against a
+    # disposable compose project (pulls only postgres:16-alpine, no image
+    # build) — 20 min covers the pull + round-trip with headroom.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Run full-device backup + restore drill

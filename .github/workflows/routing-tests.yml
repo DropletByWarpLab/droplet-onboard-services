@@ -15,6 +15,9 @@ on:
 jobs:
   pytest:
     runs-on: ubuntu-latest
+    # A hung test must fail the job fast, not burn the 6h default runner
+    # allocation. Plain pytest suite — 15 min ceiling.
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: services/routing

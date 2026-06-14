@@ -37,6 +37,10 @@ concurrency:
 jobs:
   vitest:
     runs-on: ubuntu-latest
+    # A hung test must fail the job fast, not burn the 6h default runner
+    # allocation. npm ci + Prisma generate + workspace builds + vitest, no
+    # Docker — 15 min is a generous ceiling for the suite.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
