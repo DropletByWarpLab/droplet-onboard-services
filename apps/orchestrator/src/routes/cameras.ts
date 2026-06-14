@@ -60,7 +60,8 @@ import {
   restartFrigate,
   type PtzAction,
 } from "../services/frigate.client.js";
-import { getCameraSystemStatus } from "../services/camera-system.service.js";
+import { getCameraSystemStatus, type CameraSystemStatus } from "../services/camera-system.service.js";
+import { isUpstreamUnavailable } from "../lib/upstream-unavailable.js";
 import { pipeUpstreamBody } from "../lib/pipe-upstream.js";
 import { config } from "../config.js";
 import { evaluateNetworkCommand, confirmNetworkCommand } from "../services/network-safety.service.js";
@@ -81,6 +82,38 @@ import {
 import { z } from "zod";
 
 const logger = pino({ name: "cameras-routes" });
+
+/**
+ * Empty CameraSystemStatus served when Frigate is unreachable — the dashboard's
+ * System page renders "0 of 0 cameras live" rather than dead-ending on a 500
+ * during a Frigate outage. Mirrors models-summary.service.ts's empty-payload
+ * degrade. Self-heals on the next poll once Frigate is back (we never cache it).
+ *
+ * Frozen at declaration so a consumer can never `.push()` into one of the shared
+ * array fields and corrupt the constant for every later Frigate-down response
+ * (mirrors matter.ts's frozen DISCONNECTED_DEVICES). We keep the
+ * `: CameraSystemStatus` annotation for shape-checking and freeze at runtime —
+ * a bare `as const` would narrow the arrays to `readonly []`, which isn't
+ * assignable to the interface's mutable `Array<…>`. The freeze covers the object
+ * itself plus each empty array (a shallow object freeze alone would still leave
+ * `.cameraFps.push()` mutating the shared array).
+ */
+const EMPTY_SYSTEM_STATUS: CameraSystemStatus = {
+  version: "unknown",
+  uptimeSec: 0,
+  cameraCount: 0,
+  camerasLive: 0,
+  cameraFps: [],
+  detectors: [],
+  gpus: [],
+  storage: [],
+  cpuPct: 0,
+};
+Object.freeze(EMPTY_SYSTEM_STATUS.cameraFps);
+Object.freeze(EMPTY_SYSTEM_STATUS.detectors);
+Object.freeze(EMPTY_SYSTEM_STATUS.gpus);
+Object.freeze(EMPTY_SYSTEM_STATUS.storage);
+Object.freeze(EMPTY_SYSTEM_STATUS);
 
 /** Service-to-service auth headers for routing/discovery services. */
 function serviceAuthHeaders(): Record<string, string> {
@@ -641,6 +674,11 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       const status = await getCameraSystemStatus();
       res.json({ status });
     } catch (err) {
+      if (isUpstreamUnavailable(err)) {
+        logger.warn({ err }, "Frigate unreachable; serving empty system status");
+        res.json({ status: EMPTY_SYSTEM_STATUS });
+        return;
+      }
       next(err);
     }
   });
@@ -856,6 +894,11 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       });
       res.json(result);
     } catch (err) {
+      if (isUpstreamUnavailable(err)) {
+        logger.warn({ err }, "Frigate unreachable; serving empty events list");
+        res.json({ events: [], nextCursor: null });
+        return;
+      }
       next(err);
     }
   });
@@ -975,6 +1018,11 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       });
       res.json(result);
     } catch (err) {
+      if (isUpstreamUnavailable(err)) {
+        logger.warn({ err }, "Frigate unreachable; serving empty reviews list");
+        res.json({ reviews: [], nextCursor: null });
+        return;
+      }
       next(err);
     }
   });
@@ -1181,6 +1229,11 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       const events = await getRecentEvents(limit);
       res.json({ events });
     } catch (err) {
+      if (isUpstreamUnavailable(err)) {
+        logger.warn({ err }, "Frigate unreachable; serving empty recent events");
+        res.json({ events: [] });
+        return;
+      }
       next(err);
     }
   });
