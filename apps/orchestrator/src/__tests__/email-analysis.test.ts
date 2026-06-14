@@ -25,6 +25,10 @@ const ALLOW_GATE: EmailGate = {
   outboundEmailEnabled: vi.fn().mockResolvedValue(true),
 };
 
+interface AccountRow {
+  id: string;
+  userId: string | null;
+}
 interface ThreadRow {
   id: string;
   accountId: string;
@@ -51,12 +55,20 @@ interface ThreadRow {
   }>;
 }
 
-function createPrismaMock(threads: ThreadRow[]) {
+// Account `a1` is owned by the family caller — assertAccountAccessible
+// compares EmailAccount.userId to req.user.id and mkUser mints `user-<role>`.
+const DEFAULT_ACCOUNTS: AccountRow[] = [{ id: "a1", userId: "user-family" }];
+
+function createPrismaMock(threads: ThreadRow[], accounts = DEFAULT_ACCOUNTS) {
   const map = new Map(threads.map((t) => [t.id, t]));
+  const accountMap = new Map(accounts.map((a) => [a.id, a]));
   return {
     emailAccount: {
       findMany: vi.fn(async () => []),
-      findUnique: vi.fn(async () => null),
+      findUnique: vi.fn(
+        async ({ where }: { where: { id: string } }) =>
+          accountMap.get(where.id) ?? null,
+      ),
     },
     emailThread: {
       findMany: vi.fn(async () => []),
@@ -186,6 +198,45 @@ describe("WARP-466 — GET /:accountId/threads/:threadId/analysis", () => {
       "/api/email/a1/threads/t1/analysis",
     );
     expect(res.status).toBe(403);
+  });
+
+  // IDOR: a non-privileged family caller must not read the AI analysis of
+  // another household member's account. assertAccountAccessible scopes
+  // family-and-below to the accounts they own; the owner still gets 200.
+  it("404 for a family caller who does not own the account; 200 for the owner", async () => {
+    const fn: EmailAnalysisFn = vi.fn().mockResolvedValue({
+      summary: "ok",
+      callouts: [],
+      suggestedActions: [],
+      related: { files: [], threads: [], cameras: [], tools: [] },
+    });
+    wireEmailAnalysis(fn);
+    // Account a1 is owned by `user-owner-other`, not the family caller.
+    const prisma = createPrismaMock(
+      [sampleThread],
+      [{ id: "a1", userId: "user-owner-other" }],
+    );
+
+    const intruder = await request(
+      buildApp(prisma, mkUser("family", "intruder")),
+    ).get("/api/email/a1/threads/t1/analysis");
+    expect(intruder.status).toBe(404);
+    expect(fn).not.toHaveBeenCalled();
+
+    // The account owner (matched by EmailAccount.userId === req.user.id)
+    // still gets a 200.
+    const ownerUser: AuthUser = {
+      id: "user-owner-other",
+      username: "owner",
+      displayName: "owner",
+      role: "family",
+    };
+    const owner = await request(buildApp(prisma, ownerUser)).get(
+      "/api/email/a1/threads/t1/analysis",
+    );
+    expect(owner.status).toBe(200);
+    expect(owner.body.summary).toBe("ok");
+    expect(fn).toHaveBeenCalledTimes(1);
   });
 
   it("caps message body size before passing to analysis fn", async () => {
