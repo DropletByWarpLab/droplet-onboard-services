@@ -2250,6 +2250,21 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, {"error": "not found"})
 
     def do_POST(self):
+        # Mirror do_GET: wrap the whole dispatch so a handler that raises
+        # before responding (a non-numeric Content-Length -> ValueError on
+        # int(...), or rfile.read().decode() blowing up) returns a clean JSON
+        # error instead of escaping the handler — which would otherwise leave
+        # the client with a dangling/!200 connection and a stack trace in the
+        # bridge log. The real routing lives in _dispatch_post.
+        try:
+            return self._dispatch_post()
+        except ValueError as e:                                      # noqa: BLE001
+            # Bad Content-Length (or other malformed-request value): 400.
+            return self._send(400, {"ok": False, "error": str(e)})
+        except Exception as e:                                       # noqa: BLE001
+            return self._send(500, {"ok": False, "error": str(e)})
+
+    def _dispatch_post(self):
         if self.path == "/drives/changed":
             # Invalidate the cache — the automount script calls this
             # whenever a drive is added or removed. Body is ignored;

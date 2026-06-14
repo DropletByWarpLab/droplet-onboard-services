@@ -1533,11 +1533,19 @@ def render_claim():
     if has_wifi:
         g.append(_text("Joins this Droplet's Wi-Fi", x=rx + rw // 2, y=cap_y,
                        scale=1, color=LABEL_3, anchor=(0.5, 0.0)))
-        # Readable creds — camera-less manual join (WARP-819).
+        # Readable creds — camera-less manual join (WARP-819). The PSK is the
+        # thing a camera-less user types by hand, so it must be shown in FULL:
+        # truncating a longer passphrase silently breaks the join. terminalio
+        # is a fixed 6px cell at scale=1, so the card holds rw//6 chars per
+        # line — wrap the PSK across as many lines as it needs.
         g.append(_text(wifi_ssid[:18], x=rx + rw // 2, y=cap_y + 17, scale=1,
                        color=TEXT, anchor=(0.5, 0.0)))
-        g.append(_text(wifi_psk[:20], x=rx + rw // 2, y=cap_y + 34, scale=1,
-                       color=ACCENT_INK, anchor=(0.5, 0.0)))
+        psk_cpl = max(1, rw // 6)
+        psk_y = cap_y + 34
+        for i in range(0, len(wifi_psk), psk_cpl):
+            g.append(_text(wifi_psk[i:i + psk_cpl], x=rx + rw // 2, y=psk_y,
+                           scale=1, color=ACCENT_INK, anchor=(0.5, 0.0)))
+            psk_y += 12
     else:
         g.append(_text("Opens setup on your phone" if has_qr
                        else "Use the address above",
