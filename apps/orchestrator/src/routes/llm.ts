@@ -493,6 +493,19 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       try {
         models = await aiGateway.listModels();
       } catch (err) {
+        // Only degrade for an UNREACHABLE gateway (down / disabled / transient
+        // network blip). A reachable gateway that 5xxs, or a malformed-JSON
+        // response, is a real failure and must surface as an error — not be
+        // masked as an empty 200. `listModels()` throws a TypeError from
+        // fetch() on network failure (ENOTFOUND / ECONNREFUSED) and an
+        // Error("AI Gateway timeout …") on an AbortSignal.timeout; anything
+        // else (e.g. "AI Gateway error: 503", a SyntaxError from res.json())
+        // re-throws to the outer next(err) handler.
+        const isUnreachable =
+          err instanceof TypeError ||
+          (err instanceof Error &&
+            /ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|timeout/i.test(err.message));
+        if (!isUnreachable) throw err;
         // Do NOT cache the empty fallback — the next request retries the
         // gateway so the list self-heals once it is reachable again.
         console.warn("[llm/models] ai-gateway unreachable; serving empty list:", err);

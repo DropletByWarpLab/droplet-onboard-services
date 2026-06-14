@@ -4,6 +4,7 @@ import { PrismaClient } from "@prisma/client";
 import type { Request, Response, NextFunction } from "express";
 import { createApp } from "../app.js";
 import { initDeviceService } from "../services/device.service.js";
+import { cacheGet, cacheSet } from "../services/cache.service.js";
 
 // Stub auth middleware — pulls a role from `x-test-role` so tests can
 // exercise both authenticated and unauthenticated paths. Matches the
@@ -83,6 +84,24 @@ vi.mock("../services/ai-gateway.client.js", () => ({
   deleteKey: (...args: any[]) => mockDeleteKey(...args),
 }));
 
+// Mock the cache so the model-list cache path is deterministic instead of
+// silently depending on REDIS_URL being unset. Keep every other cache export
+// (cacheDel, cacheSetNx, getRedis, withSwrCache, …) real — `createApp` mounts
+// the whole route tree and many of those importers run during construction /
+// per-request, so a bare {cacheGet, cacheSet} factory would hand them
+// `undefined`. Only cacheGet/cacheSet are overridden, as controllable spies, so
+// the no-cache-on-degrade invariant can be asserted.
+vi.mock("../services/cache.service.js", async () => {
+  const actual = await vi.importActual<
+    typeof import("../services/cache.service.js")
+  >("../services/cache.service.js");
+  return {
+    ...actual,
+    cacheGet: vi.fn().mockResolvedValue(null),
+    cacheSet: vi.fn().mockResolvedValue(undefined),
+  };
+});
+
 // Stub the MCP singleton so /api/llm/chat can drive the (now in-process)
 // agent loop without spawning the mcp-server child. Since WARP-101 the
 // orchestrator owns the loop and reads tools from this client.
@@ -94,6 +113,9 @@ vi.mock("../services/mcp-client.singleton.js", () => ({
   ensureMcpStarted: vi.fn().mockResolvedValue(undefined),
   stopMcp: vi.fn().mockResolvedValue(undefined),
 }));
+
+const mockCacheGet = vi.mocked(cacheGet);
+const mockCacheSet = vi.mocked(cacheSet);
 
 describe("LLM routes", () => {
   let app: ReturnType<typeof createApp>;
@@ -112,6 +134,9 @@ describe("LLM routes", () => {
         { id: "llama3:8b", provider: "ollama", name: "llama3:8b", context_window: null },
       ],
     });
+    // Default to a cache miss so /api/llm/models exercises the gateway path.
+    mockCacheGet.mockResolvedValue(null);
+    mockCacheSet.mockResolvedValue(undefined);
   });
 
   describe("GET /api/llm/models", () => {
@@ -137,6 +162,49 @@ describe("LLM routes", () => {
       const res = await request(app).get("/api/llm/models");
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ models: [] });
+    });
+
+    it("degrades on a timeout (AbortSignal.timeout fired)", async () => {
+      mockListModels.mockRejectedValueOnce(
+        new Error("AI Gateway timeout after 10000ms during listModels")
+      );
+      const res = await request(app).get("/api/llm/models");
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ models: [] });
+    });
+
+    it("does NOT cache the empty fallback (list self-heals next request)", async () => {
+      mockListModels.mockRejectedValueOnce(
+        new Error("fetch failed: getaddrinfo ENOTFOUND ai-gateway-disabled")
+      );
+      const res = await request(app).get("/api/llm/models");
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ models: [] });
+      // The degraded path must not poison the cache — otherwise the empty list
+      // would be served for the full TTL even after the gateway recovers.
+      expect(mockCacheSet).not.toHaveBeenCalled();
+    });
+
+    it("re-throws (500) when a reachable gateway returns a 5xx", async () => {
+      // A reachable gateway erroring (503/500) or returning malformed JSON is a
+      // real failure, NOT an unreachable gateway — it must surface as an error,
+      // not be masked as an empty 200.
+      mockListModels.mockRejectedValueOnce(
+        new Error("AI Gateway error: 503")
+      );
+      const res = await request(app).get("/api/llm/models");
+      expect(res.status).toBe(500);
+      expect(mockCacheSet).not.toHaveBeenCalled();
+    });
+
+    it("caches a successful model list", async () => {
+      const res = await request(app).get("/api/llm/models");
+      expect(res.status).toBe(200);
+      expect(mockCacheSet).toHaveBeenCalledWith(
+        "llm:models",
+        expect.objectContaining({ models: expect.any(Array) }),
+        expect.any(Number)
+      );
     });
   });
 
