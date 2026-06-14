@@ -693,7 +693,9 @@ export function createLlmRouter(prisma: PrismaClient): Router {
 
       const deps: AgentDeps = {
         mcp: mcpClient,
-        aiGateway: { chat: aiGateway.chat },
+        // WARP-561: close over the requesting user's id so the gateway scopes
+        // BYOK key resolution to their namespace for every agent-loop turn.
+        aiGateway: { chat: (chatReq) => aiGateway.chat(chatReq, (req as AuthedRequest).user?.id) },
         enhancement: createEnhancementDeps({
           aiGatewayGrpcUrl,
           defaultModel: defaultChatModel,
@@ -1478,16 +1480,17 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         res.status(400).json({ error: "api_key is required" });
         return;
       }
-      await aiGateway.saveKey(provider, api_key);
+      // WARP-561: forward the caller so the gateway namespaces the key per user.
+      await aiGateway.saveKey(provider, api_key, (req as AuthedRequest).user?.id);
       res.json({ status: "ok", provider });
     } catch (err) {
       next(err);
     }
   });
 
-  router.get("/llm/keys", async (_req, res, next) => {
+  router.get("/llm/keys", async (req, res, next) => {
     try {
-      const providers = await aiGateway.listKeys();
+      const providers = await aiGateway.listKeys((req as AuthedRequest).user?.id);
       res.json({ providers });
     } catch (err) {
       next(err);
@@ -1497,7 +1500,10 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   // WARP-171: same posture as POST /llm/keys/:provider.
   router.delete("/llm/keys/:provider", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
-      await aiGateway.deleteKey(req.params.provider);
+      await aiGateway.deleteKey(
+        req.params.provider,
+        (req as AuthedRequest).user?.id
+      );
       res.json({ status: "deleted" });
     } catch (err) {
       next(err);

@@ -79,6 +79,37 @@ _assert_device_secret_safe()
 _SALT_FILE = KEYS_DIR / ".salt"
 _KDF_ITERATIONS = 480_000  # OWASP 2023 recommendation for PBKDF2-HMAC-SHA256
 
+# WARP-561: per-user BYOK namespacing. Keys are stored under
+# `{user_id}/{provider}.enc` so one household member's cloud key is never
+# readable by another. `user_id is None` is the SHARED/device namespace
+# (`_shared/{provider}.enc`) — used by server-side callers that have no
+# per-request identity (model listing, gRPC EmbedText, router reload). The
+# segment is sanitised so a hostile id can never escape KEYS_DIR via
+# traversal or absolute paths.
+_SHARED_NAMESPACE = "_shared"
+
+
+def _user_namespace(user_id: str | None) -> str:
+    """Map a caller identity to a filesystem-safe key namespace.
+
+    None / blank → the shared device namespace. Otherwise the id is reduced
+    to a conservative `[A-Za-z0-9._-]` token (collapsing anything else to
+    `_`) so it can never contain a path separator, `..`, or a drive/root
+    prefix. This is the only place a user id touches the path.
+    """
+    if not user_id or not user_id.strip():
+        return _SHARED_NAMESPACE
+    safe = "".join(c if (c.isalnum() or c in "._-") else "_" for c in user_id.strip())
+    # A token of only dots ("." / "..") would still be a traversal token.
+    if not safe or set(safe) <= {"."}:
+        return _SHARED_NAMESPACE
+    return safe
+
+
+def _key_path(provider: str, user_id: str | None) -> Path:
+    """Return the on-disk path for a provider key in a user's namespace."""
+    return KEYS_DIR / _user_namespace(user_id) / f"{provider}.enc"
+
 
 def _get_or_create_salt() -> bytes:
     """Return the per-device salt, creating it on first use.
@@ -112,19 +143,19 @@ def _get_fernet() -> Fernet:
     return Fernet(key)
 
 
-async def store_key(provider: str, api_key: str) -> None:
-    """Encrypt and store an API key for a provider."""
-    KEYS_DIR.mkdir(parents=True, exist_ok=True)
+async def store_key(provider: str, api_key: str, user_id: str | None = None) -> None:
+    """Encrypt and store an API key for a provider in the caller's namespace."""
+    key_path = _key_path(provider, user_id)
+    key_path.parent.mkdir(parents=True, exist_ok=True)
     fernet = _get_fernet()
     encrypted = fernet.encrypt(api_key.encode())
-    key_path = KEYS_DIR / f"{provider}.enc"
     key_path.write_bytes(encrypted)
-    logger.info("Stored API key for provider: %s", provider)
+    logger.info("Stored API key for provider: %s (namespace: %s)", provider, key_path.parent.name)
 
 
-async def get_key(provider: str) -> str | None:
-    """Retrieve and decrypt an API key for a provider."""
-    key_path = KEYS_DIR / f"{provider}.enc"
+async def get_key(provider: str, user_id: str | None = None) -> str | None:
+    """Retrieve and decrypt an API key for a provider in the caller's namespace."""
+    key_path = _key_path(provider, user_id)
     if not key_path.exists():
         return None
 
@@ -137,18 +168,19 @@ async def get_key(provider: str) -> str | None:
         return None
 
 
-async def delete_key(provider: str) -> bool:
-    """Remove a stored API key."""
-    key_path = KEYS_DIR / f"{provider}.enc"
+async def delete_key(provider: str, user_id: str | None = None) -> bool:
+    """Remove a stored API key from the caller's namespace."""
+    key_path = _key_path(provider, user_id)
     if key_path.exists():
         key_path.unlink()
-        logger.info("Deleted API key for provider: %s", provider)
+        logger.info("Deleted API key for provider: %s (namespace: %s)", provider, key_path.parent.name)
         return True
     return False
 
 
-async def list_providers_with_keys() -> list[str]:
-    """Return provider names that have stored keys."""
-    if not KEYS_DIR.exists():
+async def list_providers_with_keys(user_id: str | None = None) -> list[str]:
+    """Return provider names that have stored keys in the caller's namespace."""
+    ns_dir = KEYS_DIR / _user_namespace(user_id)
+    if not ns_dir.exists():
         return []
-    return [p.stem for p in KEYS_DIR.glob("*.enc")]
+    return [p.stem for p in ns_dir.glob("*.enc")]

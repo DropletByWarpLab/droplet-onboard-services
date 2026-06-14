@@ -91,6 +91,13 @@ class TestSessionStreamPersistence:
         and assert the partial reply was still persisted by the finally."""
         from main import session_chat
         from schemas import SessionChatRequest
+        from starlette.requests import Request
+
+        # Minimal ASGI Request for the direct (non-HTTP) call. No principal
+        # header → owner check is a no-op for the unowned session created above.
+        http_request = Request(
+            {"type": "http", "method": "POST", "headers": [], "path": "/", "query_string": b""}
+        )
 
         session_id = await _make_session(client_with_sessions)
 
@@ -104,6 +111,7 @@ class TestSessionStreamPersistence:
             response = await session_chat(
                 session_id,
                 SessionChatRequest(message="hi", stream=True),
+                http_request,
             )
             it = response.body_iterator
             # Consume the first two content frames, then simulate the client

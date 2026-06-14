@@ -40,12 +40,23 @@ async def client():
 
 @pytest.fixture
 def keys_dir() -> Path:
-    """Return the test keys directory and clean it before each test."""
+    """Return the test keys directory and clean it before each test.
+
+    WARP-561: keys are now namespaced per user under subdirs
+    (`{user_id}/{provider}.enc`, `_shared/{provider}.enc`), so cleanup is
+    recursive — leftover per-namespace keys would otherwise bleed across tests.
+    The device `.salt` is preserved so the Fernet key stays stable."""
+    import shutil
+
     d = Path(os.environ["KEYS_DIR"])
     d.mkdir(parents=True, exist_ok=True)
-    # Clean any leftover keys
-    for f in d.glob("*.enc"):
-        f.unlink()
+    for child in d.iterdir():
+        if child.name == ".salt":
+            continue
+        if child.is_dir():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            child.unlink()
     return d
 
 
