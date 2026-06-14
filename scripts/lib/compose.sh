@@ -114,8 +114,11 @@ prepare_and_build() {
   )
   # Frigate is gated to the `linux` compose profile (see docker-compose.yml);
   # skip the ~2GB pull on macOS where it can never run.
+  # Use the same pinned tag (and .env override) the compose file resolves to,
+  # so the pre-pull lands the exact image Compose runs instead of pulling a
+  # floating `:stable` that's then re-pulled as `:0.17.1` on `up`.
   if [ "$(uname)" = "Linux" ]; then
-    images+=("ghcr.io/blakeblackshear/frigate:stable")
+    images+=("${FRIGATE_IMAGE:-ghcr.io/blakeblackshear/frigate:0.17.1}")
   fi
 
   local failed=0

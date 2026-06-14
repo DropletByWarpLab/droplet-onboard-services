@@ -60,6 +60,21 @@ name: droplet
 #   ops:         ops-console 256 MB
 # =============================================================================
 
+# =============================================================================
+# WARP-591 — Bounded container logs
+# =============================================================================
+# Without an explicit logging config, Docker's default json-file driver keeps
+# every container's stdout/stderr forever — an unbounded write that fills the
+# OS drive on a long-lived appliance. This anchor caps each container at
+# 3 × 10 MB of rotated logs (30 MB ceiling per service) and is merged into the
+# long-running services below via `<<: *default-logging`.
+x-logging: &default-logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
 services:
   # --- Ingress ---
   gateway:
@@ -80,6 +95,7 @@ services:
       web-dashboard:
         condition: service_started
     restart: always
+    <<: *default-logging
     mem_limit: ${GATEWAY_MEM_LIMIT:-128m}
     cpus: ${GATEWAY_CPUS:-0.5}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
@@ -97,6 +113,7 @@ services:
       - PORT=3001
       - NODE_ENV=production
     restart: always
+    <<: *default-logging
     mem_limit: ${WEB_DASHBOARD_MEM_LIMIT:-384m}
     cpus: ${WEB_DASHBOARD_CPUS:-1.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
@@ -267,6 +284,7 @@ services:
       start_period: 60s
       retries: 3
     restart: always
+    <<: *default-logging
     # Protected core: reservation ensures the OOM killer targets other
     # containers before the orchestrator. mem_limit caps absolute ceiling.
     mem_limit: ${ORCHESTRATOR_MEM_LIMIT:-768m}
@@ -317,6 +335,7 @@ services:
       # device-identity.sock.
       - /var/run/droplet:/var/run/droplet
     restart: always
+    <<: *default-logging
     mem_limit: ${DEVICE_IDENTITY_MEM_LIMIT:-128m}
     cpus: ${DEVICE_IDENTITY_CPUS:-0.5}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
@@ -339,6 +358,7 @@ services:
       dockerfile: services/mcp-server/Dockerfile
     container_name: droplet-mcp-server
     restart: unless-stopped
+    <<: *default-logging
     env_file:
       - path: ../.env
         required: false
@@ -442,6 +462,7 @@ services:
           create_host_path: true
           propagation: rshared
     restart: always
+    <<: *default-logging
     mem_limit: ${NEXTCLOUD_MEM_LIMIT:-768m}
     cpus: ${NEXTCLOUD_CPUS:-1.0}
     pids_limit: ${NEXTCLOUD_PIDS_LIMIT:-1024}
@@ -475,6 +496,7 @@ services:
       retries: 10
       start_period: 30s
     restart: always
+    <<: *default-logging
     # db is the most critical protected core: mem_reservation ensures the OOM
     # killer targets lighter containers before Postgres. A database OOM kills
     # every dependent service simultaneously — protect it hardest.
@@ -490,6 +512,7 @@ services:
         required: false
     command: ["sh", "-c", "redis-server --requirepass \"$REDIS_PASSWORD\""]
     restart: always
+    <<: *default-logging
     # mem_reservation on cache: session + auth data — OOM kills here cascade
     # to every authenticated request. Protect before db fills its budget.
     mem_limit: ${CACHE_MEM_LIMIT:-256m}
@@ -503,6 +526,7 @@ services:
       - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
       - ./mosquitto_passwd_dir:/mosquitto/config/passwd_dir:ro
     restart: always
+    <<: *default-logging
     mem_limit: ${BROKER_MEM_LIMIT:-64m}
     cpus: ${BROKER_CPUS:-0.5}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
@@ -558,6 +582,7 @@ services:
       - broker
       - orchestrator
     restart: always
+    <<: *default-logging
     # WARP-644: raised 512m -> 4g. The BGE-reranker-base fp32 ONNX graph
     # (BAAI/bge-reranker-base no longer publishes the smaller int8
     # `model_quantized.onnx`) peaks at ~2.9 GB RSS for a batch-8 forward
@@ -612,6 +637,7 @@ services:
     # directives for profile-gated services when the profile isn't
     # active. file-indexer now starts on every `docker compose up`.
     restart: always
+    <<: *default-logging
     mem_limit: ${FILE_INDEXER_MEM_LIMIT:-512m}
     cpus: ${FILE_INDEXER_CPUS:-1.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
@@ -681,6 +707,7 @@ services:
         condition: service_started
     profiles: ["eval"]
     restart: always
+    <<: *default-logging
     mem_limit: ${RAG_EVAL_MEM_LIMIT:-1g}
     cpus: ${RAG_EVAL_CPUS:-2.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
@@ -724,6 +751,7 @@ services:
     secrets:
       - openwrt_password
     restart: always
+    <<: *default-logging
     mem_limit: ${ROUTING_MEM_LIMIT:-256m}
     cpus: ${ROUTING_CPUS:-1.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
@@ -782,6 +810,7 @@ services:
       # moves here from the orchestrator UNCHANGED.
       - matter-data:/data/matter-storage
     restart: always
+    <<: *default-logging
     # DROPLET_ prefix (not MATTER_CONTROLLER_*): the ADR-021 knob lives in
     # the operator's .env, and a bare MATTER_* name there is one stray
     # env_file away from matter.js's auto-import minefield.
@@ -833,6 +862,7 @@ services:
       - broker
       - orchestrator
     restart: always
+    <<: *default-logging
     profiles: ["full"]
     mem_limit: ${EMAIL_INDEXER_MEM_LIMIT:-256m}
     cpus: ${EMAIL_INDEXER_CPUS:-1.0}
@@ -884,6 +914,7 @@ services:
       - switch-state:/var/lib/droplet/switch
     profiles: ["full", "single-box"]
     restart: always
+    <<: *default-logging
     mem_limit: ${SWITCH_MEM_LIMIT:-128m}
     cpus: ${SWITCH_CPUS:-0.5}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
@@ -901,7 +932,7 @@ services:
   # FRIGATE_RUNTIME lets the GPU-host scripts set `nvidia` without forcing
   # macOS / Docker Desktop (which has no nvidia runtime) to fail validation.
   frigate:
-    image: ${FRIGATE_IMAGE:-ghcr.io/blakeblackshear/frigate:stable}
+    image: ${FRIGATE_IMAGE:-ghcr.io/blakeblackshear/frigate:0.17.1}
     runtime: ${FRIGATE_RUNTIME:-runc}
     profiles: ["linux"]
     shm_size: "256mb"
@@ -969,6 +1000,7 @@ services:
     depends_on:
       - broker
     restart: always
+    <<: *default-logging
     # Frigate is the most memory-intensive linux-profile service: it runs
     # the detector model + FFmpeg decode pipelines concurrently.
     # NOTE (cgroups v2): the 256mb shm_size above is tmpfs that counts
@@ -1015,6 +1047,7 @@ services:
     # not by dropping the profile guard onto macOS dev installs.
     profiles: ["full", "single-box"]
     restart: always
+    <<: *default-logging
     mem_limit: ${CAMERA_DISCOVERY_MEM_LIMIT:-256m}
     cpus: ${CAMERA_DISCOVERY_CPUS:-1.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
@@ -1130,6 +1163,7 @@ services:
     # Skip on macOS Docker Desktop (no /dev/snd).
     profiles: ["linux"]
     restart: always
+    <<: *default-logging
     mem_limit: ${VOICE_IO_MEM_LIMIT:-512m}
     cpus: ${VOICE_IO_CPUS:-1.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
@@ -1172,6 +1206,7 @@ services:
       # the first-run download can land in the right place.
       - whisper-models:/data
     restart: always
+    <<: *default-logging
     # Whisper loads the full model into RAM at startup: small.en ~470 MB.
     mem_limit: ${WHISPER_MEM_LIMIT:-1g}
     cpus: ${WHISPER_CPUS:-2.0}
@@ -1183,7 +1218,9 @@ services:
   # (audio) → speaker. Same Wyoming protocol on TCP/10200 by default.
   # Voices download on first request and cache in the named volume.
   wyoming-piper:
-    image: rhasspy/wyoming-piper:${PIPER_IMAGE_TAG:-latest}
+    # Pinned (WARP-590): match the whisper sidecar's deliberate-upgrade
+    # posture instead of floating on `latest`. 2.2.2 == today's `latest`.
+    image: rhasspy/wyoming-piper:${PIPER_IMAGE_TAG:-2.2.2}
     profiles: ["linux"]
     expose:
       - "10200"
@@ -1198,6 +1235,7 @@ services:
       # .env to switch.
       - piper-voices:/data
     restart: always
+    <<: *default-logging
     mem_limit: ${PIPER_MEM_LIMIT:-512m}
     cpus: ${PIPER_CPUS:-1.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
@@ -1258,6 +1296,7 @@ services:
     # silently or scan the network on boot.
     profiles: ["display"]
     restart: always
+    <<: *default-logging
     mem_limit: ${OLED_DISPLAY_MEM_LIMIT:-128m}
     cpus: ${OLED_DISPLAY_CPUS:-0.5}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
@@ -1334,6 +1373,7 @@ services:
       - no-new-privileges:true
     profiles: ["ops"]
     restart: unless-stopped
+    <<: *default-logging
     mem_limit: ${OPS_CONSOLE_MEM_LIMIT:-256m}
     cpus: ${OPS_CONSOLE_CPUS:-1.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
@@ -1377,6 +1417,7 @@ services:
     container_name: droplet-postgres-pm
     profiles: ["pm"]
     restart: unless-stopped
+    <<: *default-logging
     environment:
       POSTGRES_DB: ${DROPLET_PM_DB_NAME:-plane}
       POSTGRES_USER: ${DROPLET_PM_DB_USER:-plane}
@@ -1407,6 +1448,7 @@ services:
     container_name: droplet-redis-pm
     profiles: ["pm"]
     restart: unless-stopped
+    <<: *default-logging
     volumes:
       - redis-pm-data:/data
     healthcheck:
@@ -1470,6 +1512,7 @@ services:
     container_name: droplet-pm-api
     profiles: ["pm"]
     restart: unless-stopped
+    <<: *default-logging
     depends_on:
       postgres-pm:
         condition: service_healthy
@@ -1520,6 +1563,7 @@ services:
     container_name: droplet-pm-worker
     profiles: ["pm"]
     restart: unless-stopped
+    <<: *default-logging
     depends_on:
       pm-api:
         condition: service_started
@@ -1570,6 +1614,7 @@ services:
     container_name: droplet-pm-web
     profiles: ["pm"]
     restart: unless-stopped
+    <<: *default-logging
     depends_on:
       pm-api:
         condition: service_started
@@ -1592,6 +1637,7 @@ services:
     container_name: droplet-pm-health
     profiles: ["pm"]
     restart: unless-stopped
+    <<: *default-logging
     depends_on:
       pm-api:
         condition: service_started
@@ -1617,6 +1663,7 @@ services:
     container_name: droplet-pm-mq
     profiles: ["pm"]
     restart: unless-stopped
+    <<: *default-logging
     environment:
       RABBITMQ_DEFAULT_USER: ${DROPLET_PM_MQ_USER:-plane}
       RABBITMQ_DEFAULT_PASS: ${DROPLET_PM_MQ_PASSWORD}
@@ -1644,6 +1691,7 @@ services:
     container_name: droplet-pm-minio
     profiles: ["pm"]
     restart: unless-stopped
+    <<: *default-logging
     environment:
       MINIO_ROOT_USER: ${DROPLET_PM_MINIO_ACCESS_KEY}
       MINIO_ROOT_PASSWORD: ${DROPLET_PM_MINIO_SECRET_KEY}
@@ -1663,6 +1711,7 @@ services:
     container_name: droplet-pm-beat
     profiles: ["pm"]
     restart: unless-stopped
+    <<: *default-logging
     depends_on:
       pm-api:
         condition: service_started
@@ -1719,10 +1768,15 @@ services:
   # the compose service name `ollama` (resolved via the default bridge
   # network), not the host loopback.
   ollama:
-    image: ollama/ollama:rocm
+    # Pinned (WARP-590): the upstream `rocm` tag rolls forward on every
+    # release, so a routine pull could swap the inference runtime under the
+    # box. 0.30.8-rocm == today's `rocm`; it still natively supports gfx1200
+    # (RDNA4), so the no-HSA_OVERRIDE note above still holds.
+    image: ollama/ollama:0.30.8-rocm
     container_name: droplet-ollama
     profiles: ["single-box"]
     restart: unless-stopped
+    <<: *default-logging
     expose:
       - "11434"
     ports:
@@ -1804,6 +1858,7 @@ services:
     command: /sbin/init
     privileged: true
     restart: unless-stopped
+    <<: *default-logging
     cap_add:
       - NET_ADMIN
       - SYS_ADMIN
