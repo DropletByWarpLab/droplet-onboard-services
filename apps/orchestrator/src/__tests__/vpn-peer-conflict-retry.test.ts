@@ -118,9 +118,15 @@ describe("allocateMintAndPersistPeer (WARP-565 retry-on-conflict)", () => {
     expect(mint).toHaveBeenCalledTimes(2);
     expect(mint).toHaveBeenNthCalledWith(1, "10.13.13.2");
     expect(mint).toHaveBeenNthCalledWith(2, "10.13.13.3");
-    // The failed attempt's router peer was rolled back exactly once.
+    // The failed attempt's router peer was rolled back exactly once. The race
+    // is retryable AND there's retry budget left, so the rollback is signalled
+    // as NON-terminal (terminal=false) — the route logs it at warn, not error,
+    // so a successful-on-retry mint doesn't false-page error alerting.
     expect(rollbackMint).toHaveBeenCalledTimes(1);
-    expect(rollbackMint).toHaveBeenCalledWith({ public_key: "PUB-1", private_key: "PRIV-1" });
+    expect(rollbackMint).toHaveBeenCalledWith(
+      { public_key: "PUB-1", private_key: "PRIV-1" },
+      false,
+    );
   });
 
   it("does NOT retry a publicKey clash — rolls back once and rethrows", async () => {
@@ -146,7 +152,13 @@ describe("allocateMintAndPersistPeer (WARP-565 retry-on-conflict)", () => {
     ).rejects.toMatchObject({ code: "P2002" });
 
     expect(mint).toHaveBeenCalledTimes(1);
+    // A publicKey clash is a genuine final failure → rollback is terminal=true
+    // so the route logs it at error level (this one SHOULD page).
     expect(rollbackMint).toHaveBeenCalledTimes(1);
+    expect(rollbackMint).toHaveBeenCalledWith(
+      { public_key: "PUB-1", private_key: "PRIV-1" },
+      true,
+    );
   });
 
   it("gives up after the bounded retry budget on persistent conflicts", async () => {
@@ -172,6 +184,24 @@ describe("allocateMintAndPersistPeer (WARP-565 retry-on-conflict)", () => {
     // attempts = maxRetries + 1 = 3 mints, each rolled back.
     expect(mint).toHaveBeenCalledTimes(3);
     expect(rollbackMint).toHaveBeenCalledTimes(3);
+    // The first two rollbacks are retryable (budget remained) → terminal=false;
+    // the final one exhausts the budget and propagates → terminal=true. Only the
+    // last should log at error level.
+    expect(rollbackMint).toHaveBeenNthCalledWith(
+      1,
+      { public_key: "PUB-1", private_key: "PRIV-1" },
+      false,
+    );
+    expect(rollbackMint).toHaveBeenNthCalledWith(
+      2,
+      { public_key: "PUB-2", private_key: "PRIV-2" },
+      false,
+    );
+    expect(rollbackMint).toHaveBeenNthCalledWith(
+      3,
+      { public_key: "PUB-3", private_key: "PRIV-3" },
+      true,
+    );
   });
 });
 

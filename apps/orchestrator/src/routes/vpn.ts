@@ -271,14 +271,25 @@ export function createVpnRouter(prisma: PrismaClient): Router {
               description: parsed.data.deviceLabel,
               allowedIps: [`${ip}/32`],
             }),
-          rollbackMint: async (m) => {
-            logger.error(
-              { publicKey: m.public_key },
-              "vpn: persist failed after routing mint — rolling back routing-side peer",
+          rollbackMint: async (m, terminal) => {
+            // A retryable active-IP race that re-allocates and succeeds is the
+            // normal happy-path under concurrent setup calls — logging it at
+            // error would false-page any alerting keyed on logger.error (up to
+            // maxRetries-1 spurious errors per successful POST). Only a terminal
+            // rollback (genuine final failure) keeps error severity (WARP-565).
+            const rollbackLog = terminal ? logger.error.bind(logger) : logger.warn.bind(logger);
+            rollbackLog(
+              { publicKey: m.public_key, terminal },
+              terminal
+                ? "vpn: persist failed after routing mint — rolling back routing-side peer"
+                : "vpn: active-IP race after routing mint — rolling back and retrying",
             );
             try {
               await deleteVpnPeer({ publicKey: m.public_key });
             } catch (rollbackErr) {
+              // A failed rollback delete always leaves an orphan peer needing
+              // manual cleanup, regardless of whether the parent attempt was
+              // retryable — so this stays at error level.
               logger.error(
                 { err: rollbackErr, publicKey: m.public_key },
                 "vpn: rollback delete failed — orphan peer on router; admin must clean up manually",

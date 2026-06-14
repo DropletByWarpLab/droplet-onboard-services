@@ -168,7 +168,16 @@ export async function allocateMintAndPersistPeer<TMint extends { public_key: str
     deviceLabel: string;
     userId: string;
     mint: (peerIp: string) => Promise<TMint>;
-    rollbackMint: (minted: TMint) => Promise<void>;
+    /**
+     * Tear down the router-side peer for a failed persist attempt. `terminal`
+     * tells the caller whether this rollback is part of a retryable path
+     * (`false` — a re-allocated active-IP race that will retry, the normal
+     * happy-path under concurrent setup) or a final-failure path (`true` — a
+     * terminal error, or the last attempt after the retry budget is spent).
+     * The route uses it to pick the log severity so a successful-on-retry mint
+     * doesn't emit a spurious `error` per rolled-back attempt (WARP-565).
+     */
+    rollbackMint: (minted: TMint, terminal: boolean) => Promise<void>;
   },
   maxRetries = 3,
 ): Promise<{
@@ -200,14 +209,19 @@ export async function allocateMintAndPersistPeer<TMint extends { public_key: str
       );
       return { peerIp, minted, saved };
     } catch (err) {
+      // Determine retryability BEFORE rolling back so the rollback can be
+      // logged at the right severity: a retryable active-IP race that still
+      // has budget left is the normal happy-path under concurrent setup and
+      // must NOT page; anything terminal still logs at error (WARP-565).
+      const retryable = isActiveIpViolation(err) && attempt < maxRetries;
       // Always roll back THIS attempt's router peer — it was minted with an IP
       // we failed to persist, retryable or not, so it must not linger.
       try {
-        await deps.rollbackMint(minted);
+        await deps.rollbackMint(minted, !retryable);
       } catch {
         // rollbackMint logs internally; swallow so the original error wins.
       }
-      if (isActiveIpViolation(err) && attempt < maxRetries) {
+      if (retryable) {
         lastErr = err;
         continue;
       }
