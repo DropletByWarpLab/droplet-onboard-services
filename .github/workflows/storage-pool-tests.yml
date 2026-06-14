@@ -1,0 +1,22 @@
+name: storage-pool-tests
+
+# Fast unit tests for scripts/host/droplet-storage-pool.sh — pool_destroy
+# captures md members BEFORE `mdadm --stop` so each superblock is actually
+# zeroed (no array re-assembles on next boot). < 5s, no Docker.
+
+on:
+  # Temporarily disabled: manual-only until GitHub Actions testing minutes
+  # are restored. Restore the pull_request/push triggers from git history.
+  workflow_dispatch:
+
+concurrency:
+  group: storage-pool-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  storage-pool-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run storage-pool unit tests
+        run: bash tests/storage-pool-destroy-superblock.test.sh
