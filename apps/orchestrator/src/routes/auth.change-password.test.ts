@@ -45,6 +45,14 @@ vi.mock("../services/cache.service.js", () => ({
   cacheDel: vi.fn(async (key: string) => {
     cacheStore.delete(key);
   }),
+  // The backoff was refactored to atomic cacheIncr (auth.ts) to avoid a
+  // read-modify-write race; the mock must provide it or the lockout fails open
+  // (cacheIncr undefined → throws → caught → no lock) and never reaches 429.
+  cacheIncr: vi.fn(async (key: string) => {
+    const next = ((cacheStore.get(key) as number) ?? 0) + 1;
+    cacheStore.set(key, next);
+    return next;
+  }),
 }));
 
 vi.mock("../services/nextcloud.client.js", () => ({

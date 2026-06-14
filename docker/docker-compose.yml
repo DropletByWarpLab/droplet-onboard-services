@@ -1549,6 +1549,11 @@ services:
       AWS_S3_ENDPOINT_URL: http://pm-minio:9000
       AWS_S3_BUCKET_NAME: ${DROPLET_PM_MINIO_BUCKET:-uploads}
       FILE_SIZE_LIMIT: ${DROPLET_PM_FILE_SIZE_LIMIT:-5242880}
+      # Mirror pm-api's env (WARP-575): the worker runs the SAME backend image, so
+      # its environment is kept a superset of pm-api's. The worker runs Celery
+      # (docker-entrypoint-worker.sh), not gunicorn, so it ignores this at runtime
+      # — it is here purely for image/env parity with pm-api.
+      GUNICORN_WORKERS: ${DROPLET_PM_GUNICORN_WORKERS:-2}
     # Plane's celery worker loads the full Django app + task registry at startup;
     # 512m cgroup-OOM-killed it (exit 137) on a box with 24 GB free. 1g clears
     # startup + light single-box task load. Override via PM_WORKER_MEM_LIMIT.
