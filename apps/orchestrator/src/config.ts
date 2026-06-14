@@ -182,7 +182,7 @@ const envSchema = z.object({
   // --- OpenWrt Routing ---
   // Default uses `host.docker.internal` so the bridged orchestrator can
   // reach the routing service, which runs with `network_mode: host` (bound
-  // to the Jetson host's :8080). `localhost` would be the orchestrator
+  // to the appliance host's :8080). `localhost` would be the orchestrator
   // container itself and never resolve to :8080. The orchestrator compose
   // service wires `host.docker.internal` via `extra_hosts: host-gateway`.
   ROUTING_SERVICE_URL: z.string().default("http://host.docker.internal:8080"),
@@ -259,7 +259,7 @@ const envSchema = z.object({
   // WARP-808: which deployment shape broadcasts the home Wi-Fi AP. This is the
   // SAME knob the device-bridge reads (services/oled-display/device-bridge.py)
   // and that single-box.sh's configure_single_box_env upserts into .env.
-  //   uci      — multi-box: a Pi-5 OpenWrt router holds the AP in UCI. Home
+  //   uci      — multi-box: a router-host OpenWrt holds the AP in UCI. Home
   //              Wi-Fi SSID/PSK writes go through the routing service (UCI/SSH),
   //              exactly as before. This is the back-compat default.
   //   hostapd  — single-box: the host runs a raw hostapd AP (no UCI), so a UCI
@@ -285,7 +285,7 @@ const envSchema = z.object({
 
   // --- OLED / TFT Display ---
   // Same rationale again: the display service runs with `network_mode: host`
-  // on the Jetson (uvicorn on :8082). `localhost` inside the orchestrator
+  // on the appliance (uvicorn on :8082). `localhost` inside the orchestrator
   // container would never resolve to it, so default to the host gateway.
   DISPLAY_SERVICE_URL: z.string().default("http://host.docker.internal:8082"),
 

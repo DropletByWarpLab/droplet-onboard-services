@@ -18,14 +18,14 @@
 
 - CSR / external CA-issued device certs — self-signed for v1; real CA path is a future ticket
 - mTLS to cloud connectors using this identity — uses device identity, but connector code is Phase D
-- Hardware variant where Jetson lacks fTPM and external TPM module is required — single-Jetson assumption
+- Hardware variant where the appliance lacks fTPM and external TPM module is required — single-appliance assumption
 - Physical-button-press reseal trigger (GPIO hardware path) — future federal-customer ticket
 
 ## Locked decisions from brainstorm
 
 | Q | Decision |
 |---|---|
-| Q1 — mock TPM strategy | **A** — pure-Python in-memory mock for dev + CI. Doesn't exercise real TSS2 wire encoding; mitigate by manual verification on a Jetson before each release. |
+| Q1 — mock TPM strategy | **A** — pure-Python in-memory mock for dev + CI. Doesn't exercise real TSS2 wire encoding; mitigate by manual verification on the appliance before each release. |
 | Q2 — deployment topology | **B** — sidecar `services/device-identity-svc/`. Stronger audit + investor story. Clean security boundary (only one container has `/dev/tpm0`). |
 | Q3 — operator-presence for reseal | **D** — dashboard re-auth (MFA within 60s) OR admin CLI. No physical button. |
 
@@ -56,7 +56,7 @@
         ┌──────────────────────────────────────────────┐
         │ services/device-identity-svc/                │
         │  Python gRPC sidecar — only container with   │
-        │  /dev/tpm0 device passthrough on Jetson.     │
+        │  /dev/tpm0 device passthrough on the box.    │
         │                                              │
         │  gRPC methods:                               │
         │   • Sign(payload, scheme) → signature        │
@@ -99,11 +99,11 @@
 
 ### Key implementation choices
 
-- **Key type:** ECC P-256 (FIPS 140-3 approved, smaller signatures, faster on Jetson; matches WARP-229's allowlist)
+- **Key type:** ECC P-256 (FIPS 140-3 approved, smaller signatures, faster on the appliance; matches WARP-229's allowlist)
 - **PCRs sealed against:** `[0, 2, 4, 7]` per the Jira description (SRTM/firmware + option ROMs + IPL/bootloader + Secure Boot Policy)
 - **Storage:** `/var/lib/droplet/tpm/`, bind-mounted into the sidecar from the host
 - **Sidecar transport:** Unix socket (`/var/run/droplet/device-identity.sock`) — faster than TCP, doesn't need a port, container-internal only
-- **Real-TPM library:** `tpm2-pytss` on Jetson. Cleaner errors than tpm2-tools CLI shell-out.
+- **Real-TPM library:** `tpm2-pytss` on the appliance. Cleaner errors than tpm2-tools CLI shell-out.
 - **Mock backend selector:** `DROPLET_TPM_BACKEND` env var (`real` default in production; `mock` default for dev/CI)
 - **FIPS posture:** all crypto via the FIPS-validated stack from WARP-229. ECDSA P-256 + SHA-256 + AES-256-GCM (wrapping key) all approved.
 
@@ -113,8 +113,8 @@
 
 `scripts/provision-device-identity.sh` is idempotent (re-runnable; detects existing identity and exits 0). Steps:
 
-1. **Detect TPM presence.** `[ -e /dev/tpm0 ]` (real Jetson) or `DROPLET_TPM_BACKEND=mock` (dev/CI). If neither: log + exit cleanly with `provisioned=false` so the rest of setup.sh can finish.
-2. **Read or generate Endorsement Key Certificate.** TPM 2.0 ships with a permanent endorsement primary seed. Re-derive the EK + extract its cert (or generate a self-signed EK cert if hardware doesn't ship one; Jetson modules don't). Persist to `/var/lib/droplet/tpm/ek-cert.pem`.
+1. **Detect TPM presence.** `[ -e /dev/tpm0 ]` (real appliance) or `DROPLET_TPM_BACKEND=mock` (dev/CI). If neither: log + exit cleanly with `provisioned=false` so the rest of setup.sh can finish.
+2. **Read or generate Endorsement Key Certificate.** TPM 2.0 ships with a permanent endorsement primary seed. Re-derive the EK + extract its cert (or generate a self-signed EK cert if hardware doesn't ship one; the appliance TPM may not). Persist to `/var/lib/droplet/tpm/ek-cert.pem`.
 3. **Create Storage Root Key.** Derived from the SRK seed under the Owner hierarchy. Persistent at handle `0x81000001`. Persist public key to `srk-pub.pem`.
 4. **Generate device identity key.** ECC P-256, scheme = ECDSA + SHA-256, attributes = `sign|fixedTPM|fixedParent|sensitiveDataOrigin`. The `fixedTPM | fixedParent` flags make the key non-extractable. Public key to `device-id-pub.pem`.
 5. **Self-sign a device certificate.** Subject CN derived from `hostname` or `DROPLET_DEVICE_ID` env. Persist to `device-id-cert.pem`. WARP-244 (cosign signing) can replace this with a real CA-issued cert later.
@@ -238,9 +238,9 @@ Total: ~5-7 days of subagent work. Single PR. Mirrors WARP-229 structure.
 ## Risks
 
 - **tpm2-pytss build/install difficulty.** Native deps; may need extra apt packages on the Python image. Mitigation: mock backend means we don't block on this — real backend can be iterated post-merge if Dockerfile takes time to get right.
-- **PCR set on Jetson may differ from generic UEFI.** PCRs 0/2/4/7 are canonical for x86/UEFI; Jetson's cboot may not match. Mitigation: detect actual PCR values during provisioning, persist the SET we use to `provisioned.json`. Set is configurable via env (`DROPLET_TPM_PCRS=0,2,4,7`) so a Jetson-specific override is one config change away.
+- **PCR set may differ from generic UEFI.** PCRs 0/2/4/7 are canonical for standard UEFI boot; some bootloaders may not match. Mitigation: detect actual PCR values during provisioning, persist the SET we use to `provisioned.json`. Set is configurable via env (`DROPLET_TPM_PCRS=0,2,4,7`) so a platform-specific override is one config change away.
 - **Reseal after firmware update fails because old seal doesn't unseal.** Documented recovery: re-provision from scratch. Loses any peer trust established against the old cert. For v1 acceptable since no cloud-connector peers exist yet.
-- **Mock backend silently masks real-TPM bugs.** Mitigation: explicit "manual Jetson verification before release" in the release runbook (added in commit 10).
+- **Mock backend silently masks real-TPM bugs.** Mitigation: explicit "manual appliance verification before release" in the release runbook (added in commit 10).
 
 ## Acceptance criteria
 
@@ -260,7 +260,7 @@ Total: ~5-7 days of subagent work. Single PR. Mirrors WARP-229 structure.
 
 - CSR / CA-issued device certs — future ticket
 - mTLS to cloud connectors — Phase D
-- External TPM module hardware variant — single-Jetson assumption
+- External TPM module hardware variant — single-appliance assumption
 - Physical button reseal trigger — future federal-customer ticket
 - WebAuthn MFA for reseal (vs current TOTP) — WARP-238 hooks in once it ships
 - Audit log integration — WARP-237 ingestor picks up the structured-JSON events retroactively when it lands

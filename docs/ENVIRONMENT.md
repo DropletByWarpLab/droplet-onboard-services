@@ -45,8 +45,8 @@ trust, PM secrets) are summarized in [`CLAUDE.md`](../CLAUDE.md).
 | `CAMERA_CREDENTIALS_JSON` | JSON array of `[user, pw]` pairs probed before factory defaults |
 | `ONVIF_WS_DISCOVERY_ENABLED` | `1` to enable WS-Discovery multicast scan (default `0`; `python-ws-discovery` leaks FDs on Python 3.12+) |
 | `CAMERA_AUTO_INITIALIZE` | `1` to auto-run the vendor first-run admin-password flow (Hanwha `/init-cgi/pw_init.cgi`) using `CAMERA_DEFAULT_PASSWORD` when an uninitialized camera is seen (default `0`) |
-| `FRIGATE_IMAGE`      | Frigate container image (default `stable` CPU; set `stable-tensorrt-jp6` on the inference host with JetPack 6 / NVIDIA GPU) |
-| `FRIGATE_RUNTIME`    | Docker runtime for the Frigate container (`runc` default; set `nvidia` on inference hosts / x86+NVIDIA hosts) |
+| `FRIGATE_IMAGE`      | Frigate container image (default `stable` CPU; set `stable-tensorrt-jp6` on an NVIDIA-GPU inference host) |
+| `FRIGATE_RUNTIME`    | Docker runtime for the Frigate container (`runc` default; set `nvidia` on inference hosts with an NVIDIA GPU) |
 | `YOLO_MODELS`        | JP6-image model preparator trigger; leave empty until the s6 prepare script stops expecting legacy `.cfg` inputs |
 | `SWITCH_HOST`        | Managed switch IP (default `192.168.1.77`)             |
 | `SWITCH_PORT`        | Managed switch HTTPS port (default `443`)              |

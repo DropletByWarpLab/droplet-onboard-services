@@ -5,7 +5,7 @@
  * - Tier 1: Read-only operations (get ports, get VLANs, get PoE)
  * - Tier 2: All writes require user confirmation (port enable/disable,
  *           VLAN create/delete/membership, PoE toggle, camera setup)
- * - Tier 3: Disabling the protected port (Jetson's port) is blocked for AI
+ * - Tier 3: Disabling the protected port (the appliance's port) is blocked for AI
  *
  * Proxies requests to the switch service (default :8081) which talks
  * to the hardware via the active driver (pluggable backend; prototype
@@ -55,7 +55,7 @@ async function evalSwitchCommand(
   );
 }
 
-/** Helper: check if a port is the protected Jetson port. */
+/** Helper: check if a port is the protected appliance port. */
 function isProtectedPort(port: number): boolean {
   return PROTECTED_PORT > 0 && port === PROTECTED_PORT;
 }

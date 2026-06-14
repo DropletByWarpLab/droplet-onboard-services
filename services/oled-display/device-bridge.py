@@ -1,7 +1,7 @@
 """
 Droplet device-bridge — host-side HTTP API for the on-device screen.
 
-Runs on the Jetson host (outside the oled-display container). Exposes a
+Runs on the appliance host (outside the oled-display container). Exposes a
 stable read-only API the display service polls, with each endpoint
 sourcing live data from the appropriate upstream:
 
@@ -58,7 +58,7 @@ OPENWRT_KNOWN_HOSTS = os.environ.get(
 # Access-point credentials source for the pairing QR. The two shipping
 # deployment shapes broadcast the AP differently:
 #
-#   uci      — multi-box: a Pi-5 OpenWrt router holds the AP in UCI
+#   uci      — multi-box: a router-host OpenWrt instance holds the AP in UCI
 #              (`wireless.*`). We read SSID+PSK over SSH (the historical
 #              path). This is the back-compat default.
 #   hostapd  — single-box: the host runs a raw hostapd AP via the
@@ -564,7 +564,7 @@ def _use_hostapd_mode():
 
 
 # ---------------------------------------------------------------------------
-# Jetson-local nmcli fallback
+# Appliance-local nmcli fallback
 # ---------------------------------------------------------------------------
 
 def scan_via_nmcli():
@@ -2404,7 +2404,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self._authed():
                 return self._send(401, {"ok": False, "error": "unauthorized"})
             if _use_hostapd_mode():
-                # Single-box / hostapd mode: no Pi-5 router to SSH into —
+                # Single-box / hostapd mode: no router host to SSH into —
                 # return the same rotation_disabled sentinel as qr_snapshot()
                 # so callers (PyPortal UI, scheduled timer) gracefully no-op.
                 return self._send(410, {

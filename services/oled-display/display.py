@@ -72,7 +72,7 @@ PYPORTAL_TTY = os.environ.get("PYPORTAL_TTY", "/dev/ttyACM1")
 PYPORTAL_BAUD = int(os.environ.get("PYPORTAL_BAUD", "115200"))
 
 # Host-side device-bridge URL (see services/oled-display/device-bridge.py).
-# The bridge runs on the Jetson host and exposes /wifi, /files, /cameras,
+# The bridge runs on the appliance host and exposes /wifi, /files, /cameras,
 # /drives, /openwrt/qr so the container gets live data without mounting
 # NetworkManager/DBus/etc. inside. Default 127.0.0.1 because the bridge
 # binds to loopback by default (see BRIDGE_BIND in device-bridge.py).

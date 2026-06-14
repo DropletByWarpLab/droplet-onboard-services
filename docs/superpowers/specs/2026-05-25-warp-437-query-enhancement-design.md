@@ -137,7 +137,7 @@ RAGAS metrics are read from baselines once Phase 2 batch D's CI run populates `t
 
 ### Latency budget
 
-Per query, worst case: 1 deberta classify (~50 ms CPU) + 1 HyDE chat (~600 ms local Ollama mistral-7b on Orin Nano warm, p95) + 1 multi-query chat (~600 ms) + 4 parallel vector arms (~30 ms each, in flight together) + 1 rerank batch (~120 ms) ≈ **1.4 s p95**, vs today's ~250 ms p95. This is acceptable for the agent loop (the LLM round-trip dominates anyway), but the adaptive layer guarantees the worst case applies ONLY to analytical queries; conversational queries skip both LLM calls and stay near baseline.
+Per query, worst case: 1 deberta classify (~50 ms CPU) + 1 HyDE chat (~600 ms local Ollama mistral-7b on the inference host warm, p95) + 1 multi-query chat (~600 ms) + 4 parallel vector arms (~30 ms each, in flight together) + 1 rerank batch (~120 ms) ≈ **1.4 s p95**, vs today's ~250 ms p95. This is acceptable for the agent loop (the LLM round-trip dominates anyway), but the adaptive layer guarantees the worst case applies ONLY to analytical queries; conversational queries skip both LLM calls and stay near baseline.
 
 ### What we don't do
 

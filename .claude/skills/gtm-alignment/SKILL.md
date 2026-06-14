@@ -29,5 +29,5 @@ Most of Stage 1 (M1.1–M1.8) lives here in some form, most of Stage 2 (M2.1–M
 ## Pointers
 
 - `docs/ROADMAP.md` — per-milestone status (M1.1–M3.6), blockers, next actions
-- `docs/gtm-mapping.md` — path-by-path bridge from GTM reference architecture to this repo's layout, plus the major architectural deltas (OpenWrt vs. Pi-Docker router, Node vs. Python control plane, `file-sync` → `file-indexer` rename, Next.js vs. static HTML UI)
+- `docs/gtm-mapping.md` — path-by-path bridge from GTM reference architecture to this repo's layout, plus the major architectural deltas (OpenWrt vs. Docker-based router, Node vs. Python control plane, `file-sync` → `file-indexer` rename, Next.js vs. static HTML UI)
 - `docs/STATUS.md` — Working / Partial / Not started capabilities with file references, and PH1–PH5 table

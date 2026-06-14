@@ -327,7 +327,7 @@ network. Host-published ports and host-network services are called out.
   first-run init flow, registers confirmed cameras in Frigate, publishes discovery
   events to MQTT.
 - **Gotchas:** fails closed if `DEVICE_SECRET` empty (`/drivers/fix` needs auth);
-  subnet sweep is throttled (concurrency cap) to respect the Jetson FD limit; RTSP
+  subnet sweep is throttled (concurrency cap) to respect the inference host FD limit; RTSP
   URLs validated as RFC-1918 before reaching Frigate; `ONVIF_WS_DISCOVERY_ENABLED`
   defaults off (FD leak on Python 3.12+).
 
@@ -380,7 +380,7 @@ network. Host-published ports and host-network services are called out.
 
 - **Purpose:** TPM 2.0 device-identity sidecar. gRPC over a **unix socket**
   (`/var/run/droplet/device-identity.sock`). `Sign` / `GetCert` / `GetStatus` /
-  `Reseal`. `RealBackend` (tpm2-pytss + `/dev/tpm0`, Jetson prod) vs `MockBackend`
+  `Reseal`. `RealBackend` (tpm2-pytss + `/dev/tpm0`, appliance prod) vs `MockBackend`
   (pure-Python, dev/CI) — indistinguishable at the gRPC boundary. Reseal requires a
   short-lived nonce the orchestrator issues only after MFA re-auth.
 
@@ -412,8 +412,8 @@ network. Host-published ports and host-network services are called out.
   `file.exec`), `files/etc/uci-defaults/99-droplet-setup` (first-boot secrets +
   board tweaks). Camera VLAN 100 is pre-provisioned.
 - **Target:** generic hardware-agnostic router build (see
-  [ADR-011](ADR-011-hardware-agnostic-codebase.md)); reference platform is a Pi-class
-  board with a MediaTek MT7922 Wi-Fi module + USB NIC. The MT7922 needs three
+  [ADR-011](ADR-011-hardware-agnostic-codebase.md)); reference platform is a small ARM
+  router board with a MediaTek MT7922 Wi-Fi module + USB NIC. The MT7922 needs three
   things together (32-bit DMA overlay, `disable_aspm=1`, firmware blobs baked in).
 
 ## docker/

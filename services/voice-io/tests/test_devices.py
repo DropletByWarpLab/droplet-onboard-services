@@ -110,7 +110,7 @@ class TestScoring:
         assert score_output("Some input-only device", "usb", 0) == 0
 
     def test_platform_bus_treated_as_intended_device(self):
-        # Jetson I/O Brick's I²S codec on platform bus — should beat
+        # the I/O-Brick's I²S codec on platform bus — should beat
         # an unrecognised PCI device even without a name match.
         plat = score_input("snd-codec-1 mic (hw:2,0)", "platform", 1)
         pci = score_input("Generic codec (hw:3,0)", "pci", 1)
@@ -336,8 +336,8 @@ class TestRealHardwareScenarios:
     def test_production_v26_jetson_with_io_brick(
         self, make_sounddevice, make_sysfs_root,
     ):
-        """Jetson + I²S codec on platform bus. No PCI codecs in this
-        scenario (Jetson host has no traditional onboard audio)."""
+        """An I²S codec on platform bus. No PCI codecs in this
+        scenario (this host has no traditional onboard audio)."""
         sd = make_sounddevice([
             {"name": "tegra-snd-codec: I2S audio (hw:0,0)",
              "max_input_channels": 1, "max_output_channels": 2,

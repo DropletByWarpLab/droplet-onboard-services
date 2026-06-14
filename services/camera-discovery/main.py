@@ -250,7 +250,7 @@ async def _subnet_sweep(network: ipaddress.IPv4Network) -> list[str]:
     lease shows up. Capped to /22 (~1k hosts) and throttled to 64
     in-flight connections — without the semaphore a /24 bursts 250+
     sockets at once and we trip the default ``ulimit -n`` on the
-    Jetson (RLIMIT_NOFILE=1024 out of the box).
+    inference host (RLIMIT_NOFILE=1024 out of the box).
     """
     if network.num_addresses > 1024:
         logger.warning(

@@ -7,7 +7,7 @@ mqtt:
 
 # Detector:
 #   type: cpu                 — works on every image variant, 10-20 FPS
-#                               on the Orin. Safe default while the JP6
+#                               on the GPU host. Safe default while the JP6
 #                               ONNX model cache is being provisioned.
 #   type: onnx (JP6)          — NVIDIA TensorRT execution provider. On
 #                               first boot the image downloads + compiles

@@ -1,7 +1,7 @@
 """NET-02 — wireless radio/iface/device defaults are configurable, not host-hardcoded.
 
 The historical `radio0` / `default_radio0` / `wlan0` literals don't exist on
-the shipped Pi-5 router (MT7922 → `radio3` / `default_radio3`) nor on a
+the shipped router host (MT7922 → `radio3` / `default_radio3`) nor on a
 single-box (`wlp14s0`/similar). These defaults must come from the deployment
 env (`DROPLET_WIFI_RADIO`, `DROPLET_WIFI_IFACE_SECTION`,
 `DROPLET_WIFI_SCAN_DEVICE`), falling back to the literal only when unset, and

@@ -165,7 +165,7 @@ case that single-shot tests would call green and ship.
 
 ### LLM offline acceptance
 
-If `ai-gateway` routes Ollama to an unreachable Jetson (the default
+If `ai-gateway` routes Ollama to an unreachable inference host (the default
 on a developer laptop), the agent hits `max_iter` and returns
 `stop_reason: "iteration_limit"`. That's acceptable as long as
 `search_content` was still called and hits came back. The test
@@ -446,7 +446,7 @@ file, same sentinel — stays stable across model invocations. Free-text
 output is allowed to vary; that's a model property, not a RAG one. The
 header comment in the test file spells out which axes are deterministic.
 
-If your ai-gateway routes to an off-line Jetson (the default in this
+If your ai-gateway routes to an off-line inference host (the default in this
 repo), the e2e test will hit the iteration limit on the agent loop —
 `stop_reason: "iteration_limit"` is acceptable as long as
 `search_content` was called and returned hits. Set

@@ -329,7 +329,7 @@ Single proxy, single model pool, single VRAM budget. Endpoints:
 - `/v1/diarize` → pyannote (Phase F WARP-207)
 - `/v1/scene-detect` → CLIP-based (Phase J)
 
-### 7.6 Resource budget — Jetson Orin (32 GB)
+### 7.6 Resource budget — inference host (32 GB)
 
 | Component | Memory | Notes |
 |---|---|---|
@@ -423,7 +423,7 @@ Execution: subagent-driven development harness (the same we used for WARP-224). 
 
 - **Not a public cloud.** Multi-tenant isolation, global deployment, SLAs — not us. Each device is its own world.
 - **Not 100+ SaaS connectors.** ~15 local connectors plus the push API. Cross-system reach is via push.
-- **Not a 70B-model experience.** 8B-class quantized LLM on Jetson is the realistic target. Operators who want frontier models can route to BYOK via the Model Hub in Phase F, but the default and primary mode is local.
+- **Not a 70B-model experience.** 8B-class quantized LLM on the inference host is the realistic target. Operators who want frontier models can route to BYOK via the Model Hub in Phase F, but the default and primary mode is local.
 - **Not FedRAMP.** That's a cloud certification. We pursue FISMA-aligned controls + Common Criteria EAL2 if a federal customer materializes.
 
 ---

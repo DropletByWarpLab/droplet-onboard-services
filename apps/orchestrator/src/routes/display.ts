@@ -64,7 +64,7 @@ export function createDisplayRouter(_prisma: PrismaClient): Router {
 
   // /display/wifi/connect — proxy to the display service's /wifi/connect
   // route. Admin/owner only: joining an SSID mutates host network state
-  // and, combined with the Jetson being the video/storage hub, a coerced
+  // and, combined with the appliance being the video/storage hub, a coerced
   // SSID join is a credible pivot vector. Non-privileged users (family,
   // guest) cannot invoke this even though they can hit other /display/*.
   router.post("/display/wifi/connect", async (req, res) => {

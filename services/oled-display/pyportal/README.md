@@ -2,10 +2,10 @@
 
 Front-panel display for the Droplet appliance. The PyPortal Titano is a
 self-contained board (ATSAMD51 + 3.5" 480×320 TFT + resistive touch) running
-CircuitPython 9.x. It connects to the Jetson over USB and exposes two USB CDC
+CircuitPython 9.x. It connects to the appliance over USB and exposes two USB CDC
 serial endpoints:
 
-| Endpoint | Path on Jetson | Purpose |
+| Endpoint | Path on the appliance | Purpose |
 |---|---|---|
 | `console` | `/dev/ttyACM0` | CircuitPython REPL (`screen /dev/ttyACM0 115200`) |
 | `data` | `/dev/ttyACM1` | JSON command channel — the `oled-display` service talks here |
@@ -136,7 +136,7 @@ empty screens after a firmware drop.
    the idle clock screen within a few seconds and `/dev/ttyACM1` should
    appear on the host.
 
-## Verify from the Jetson
+## Verify from the appliance
 
 ```bash
 ls /dev/ttyACM*                      # expect ttyACM0 and ttyACM1
@@ -218,6 +218,6 @@ screen; bare-mode frames navigate.
 
 The Titano's ESP32 co-processor can do Wi-Fi, but USB serial is simpler for
 this deployment: no credentials to configure, works when Wi-Fi is down, lower
-latency (~50 ms round-trip vs. seconds for HTTP polling), and the Jetson just
+latency (~50 ms round-trip vs. seconds for HTTP polling), and the appliance just
 needs one cable. Switching to Wi-Fi later is a drop-in swap — the JSON
 protocol stays the same, only the transport changes.

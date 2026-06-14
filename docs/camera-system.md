@@ -147,7 +147,7 @@ Base config at `docker/frigate/config.yml`:
 
 | Setting | Value | Notes |
 |---------|-------|-------|
-| Detector | TensorRT (Jetson GPU) | Hardware-accelerated AI detection |
+| Detector | TensorRT (NVIDIA GPU) | Hardware-accelerated AI detection |
 | Record retention | 7 days (motion), 14 days (events) | Configurable |
 | Snapshot retention | 14 days | |
 | Detection FPS | 5 | Per camera |
