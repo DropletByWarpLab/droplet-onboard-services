@@ -367,8 +367,12 @@ async function main() {
       // (ActivityRow, CommandAuditLog, NotificationLog). Window is
       // operator-tunable via DROPLET_AUDIT_RETENTION_DAYS (default 90);
       // <= 0 disables the purge. ActivityRow is hash-chained, so this is
-      // an oldest-prefix seal-and-truncate, not a mid-chain delete — see
-      // audit-retention-purge.service.ts for the integrity argument.
+      // an id-contiguous oldest-prefix seal-and-truncate, not a mid-chain
+      // delete — see audit-retention-purge.service.ts for the integrity
+      // argument. Deletes are batched and capped per run so a months-deep
+      // first-run backlog can't push this handler past the 60 s
+      // advisory-lock transaction (cron-runtime withAdvisoryLock) into a
+      // permanent P2028 retry loop; the backlog drains over nights.
       const auditPurge = await purgeAuditLogs(
         prisma,
         config.DROPLET_AUDIT_RETENTION_DAYS,
