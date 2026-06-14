@@ -43,7 +43,7 @@ COMPOSE_FILE="${COMPOSE_FILE:-$REPO_ROOT/docker/docker-compose.yml}"
 # disposable project). `|| true` leaves the "compose file not found" check below
 # in charge of a missing file rather than dying here under `set -e`/pipefail.
 if [ -z "${PROJECT:-}" ]; then
-  PROJECT="$(grep -E '^name:[[:space:]]' "$COMPOSE_FILE" 2>/dev/null | head -1 | awk '{print $2}' || true)"
+  PROJECT="$(grep -E '^name:[[:space:]]' "$COMPOSE_FILE" 2>/dev/null | head -1 | awk '{gsub(/["\x27]/,"",$2); print $2}' || true)"
 fi
 PROJECT="${PROJECT:-droplet}"
 DB_SERVICE="${DB_SERVICE:-db}"

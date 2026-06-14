@@ -270,7 +270,7 @@ fi
 # orchestrator/file-indexer crash-loop this fix prevents.
 # `|| true` so a compose file without a `name:` line (grep exits 1) does not trip
 # `set -euo pipefail` and abort the reset before the `:-droplet` fallback applies.
-PRIMARY_PROJECT=$(grep -E '^name:[[:space:]]' "$COMPOSE_FILE" | head -1 | awk '{print $2}' || true)
+PRIMARY_PROJECT=$(grep -E '^name:[[:space:]]' "$COMPOSE_FILE" | head -1 | awk '{gsub(/["\x27]/,"",$2); print $2}' || true)
 PRIMARY_PROJECT="${PRIMARY_PROJECT:-droplet}"
 
 # The brick-safe reflash keeps the OLD stack UP while it builds the new images,
@@ -456,8 +456,18 @@ docker volume prune -f >/dev/null 2>&1 || true
 vol_suffix_re=$(IFS='|'; printf '%s' "${VOLUMES[*]}")
 owned_prefix_re=$(IFS='|'; printf '%s' "${OWNED_PREFIXES[*]}")
 _remaining_owned_volumes() {
-  docker volume ls --format '{{.Name}}' 2>/dev/null \
-    | grep -E "^(${owned_prefix_re})_(${vol_suffix_re})\$" || true
+  # Two passes against one `docker volume ls`: project-prefixed survivors
+  # (`<prefix>_<suffix>`) AND bare-named survivors (`<suffix>`, no prefix). The
+  # bare-name removal loop above logs "re-checked by the verify gate" on
+  # failure, so the gate MUST actually re-check bare names — otherwise a bare
+  # `pgdata` survivor is invisible here and the reset finishes "clean" with the
+  # stale DB still on the box.
+  local listing
+  listing="$(docker volume ls --format '{{.Name}}' 2>/dev/null || true)"
+  {
+    printf '%s\n' "$listing" | grep -E "^(${owned_prefix_re})_(${vol_suffix_re})\$"
+    printf '%s\n' "$listing" | grep -E "^(${vol_suffix_re})\$"
+  } 2>/dev/null | grep -vE '^$' || true
 }
 remaining="$(_remaining_owned_volumes)"
 
@@ -488,7 +498,21 @@ if [ -n "$remaining" ]; then
       fi
     else
       sudo systemctl restart docker 2>/dev/null || true
-      sleep 3
+      # Mirror the macOS readiness loop above: on a loaded box Docker can take
+      # well over a few seconds to accept connections again. A fixed `sleep`
+      # would let the verify gate below run `docker volume ls` against a
+      # not-yet-ready daemon — the command fails, `2>/dev/null`/`|| true`
+      # swallows it to empty, and a surviving DB volume falsely reads as gone.
+      docker_retries=30
+      while [ $docker_retries -gt 0 ]; do
+        docker info >/dev/null 2>&1 && break
+        docker_retries=$((docker_retries - 1))
+        sleep 2
+      done
+      if [ $docker_retries -eq 0 ]; then
+        log_error "Docker did not restart in time"
+        exit 1
+      fi
     fi
     # Retry removal of exactly what survived, then RE-VERIFY — force is an
     # operator escalation, not a license to finish with the DB volume intact.
