@@ -5,8 +5,17 @@ name: security-tests
 # those are the main places security invariants live.
 
 on:
-  # Temporarily disabled: manual-only until GitHub Actions testing minutes
-  # are restored. Restore the pull_request/push triggers from git history.
+  pull_request:
+    paths:
+      - "docker/**"
+      - "scripts/**"
+      - ".github/workflows/security-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "docker/**"
+      - "scripts/**"
+      - ".github/workflows/security-tests.yml"
   workflow_dispatch:
 
 concurrency:

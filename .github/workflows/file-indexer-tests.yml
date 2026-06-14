@@ -3,8 +3,15 @@ name: file-indexer-tests
 # Pytest for services/file-indexer. Path-filtered.
 
 on:
-  # Temporarily disabled: manual-only until GitHub Actions testing minutes
-  # are restored. Restore the pull_request/push triggers from git history.
+  pull_request:
+    paths:
+      - "services/file-indexer/**"
+      - ".github/workflows/file-indexer-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "services/file-indexer/**"
+      - ".github/workflows/file-indexer-tests.yml"
   workflow_dispatch:
 
 concurrency:

@@ -7,8 +7,21 @@ name: setup-e2e
 # (which the docker-build workflow covers separately).
 
 on:
-  # Temporarily disabled: manual-only until GitHub Actions testing minutes
-  # are restored. Restore the pull_request/push triggers from git history.
+  pull_request:
+    paths:
+      - "scripts/**"
+      - "docker/docker-compose.yml"
+      - "apps/**/Dockerfile"
+      - "services/**/Dockerfile"
+      - ".github/workflows/setup-e2e.yml"
+  push:
+    branches: [main]
+    paths:
+      - "scripts/**"
+      - "docker/docker-compose.yml"
+      - "apps/**/Dockerfile"
+      - "services/**/Dockerfile"
+      - ".github/workflows/setup-e2e.yml"
   workflow_dispatch:
 
 concurrency:

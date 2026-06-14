@@ -4,8 +4,15 @@ name: switch-tests
 # PRs don't trigger a Python install.
 
 on:
-  # Temporarily disabled: manual-only until GitHub Actions testing minutes
-  # are restored. Restore the pull_request/push triggers from git history.
+  pull_request:
+    paths:
+      - "services/switch/**"
+      - ".github/workflows/switch-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "services/switch/**"
+      - ".github/workflows/switch-tests.yml"
   workflow_dispatch:
 
 concurrency:

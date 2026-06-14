@@ -4,8 +4,17 @@ name: setup-tests
 # .env permissions, idempotency, compose.sh psql wiring. < 5s, no Docker.
 
 on:
-  # Temporarily disabled: manual-only until GitHub Actions testing minutes
-  # are restored. Restore the pull_request/push triggers from git history.
+  pull_request:
+    paths:
+      - "scripts/**"
+      - "tests/setup.test.sh"
+      - ".github/workflows/setup-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "scripts/**"
+      - "tests/setup.test.sh"
+      - ".github/workflows/setup-tests.yml"
   workflow_dispatch:
 
 concurrency:

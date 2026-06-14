@@ -18,8 +18,27 @@ name: test-fips
 # must be documented.
 
 on:
-  # Temporarily disabled: manual-only until GitHub Actions testing minutes
-  # are restored. Restore the pull_request/push triggers from git history.
+  pull_request:
+    paths:
+      - "apps/**"
+      - "services/**"
+      - "packages/**"
+      - "scripts/**"
+      - "docker/**"
+      - "docs/security/fips-exceptions.md"
+      - "docs/security/fips-allowed-algorithms.md"
+      - ".github/workflows/test-fips.yml"
+  push:
+    branches: [main]
+    paths:
+      - "apps/**"
+      - "services/**"
+      - "packages/**"
+      - "scripts/**"
+      - "docker/**"
+      - "docs/security/fips-exceptions.md"
+      - "docs/security/fips-allowed-algorithms.md"
+      - ".github/workflows/test-fips.yml"
   workflow_dispatch:
 
 concurrency:

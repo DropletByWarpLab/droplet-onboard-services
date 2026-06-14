@@ -6,9 +6,19 @@ name: device-backup-tests
 # compose project. Docker is available on ubuntu-latest runners.
 
 on:
-  # Temporarily disabled: manual-only until GitHub Actions testing minutes
-  # are restored. Restore the pull_request/push triggers from git history,
-  # matching the sibling setup-tests.yml policy.
+  pull_request:
+    paths:
+      - "scripts/**"
+      - "docker/**"
+      - "tests/device-backup.test.sh"
+      - ".github/workflows/device-backup-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "scripts/**"
+      - "docker/**"
+      - "tests/device-backup.test.sh"
+      - ".github/workflows/device-backup-tests.yml"
   workflow_dispatch:
 
 concurrency:
