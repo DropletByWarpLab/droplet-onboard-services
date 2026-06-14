@@ -18,6 +18,7 @@
     "test:security": "./scripts/test-security.sh",
     "test:all": "npm run test:security && npm run test:ai-gateway && npm run test",
     "test:setup": "bash tests/setup.test.sh",
+    "test:factory-reset-wipe": "bash tests/factory-reset-volume-wipe.test.sh",
     "test:image": "bash tests/image-pipeline.test.sh",
     "test:backup": "bash tests/device-backup.test.sh",
     "test:openwrt-attach": "bash tests/openwrt-attach-firewall.test.sh",

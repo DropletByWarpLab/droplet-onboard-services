@@ -260,13 +260,37 @@ if [ -f "$REPO_ROOT/.env" ]; then
   env_flag="--env-file $REPO_ROOT/.env"
 fi
 
+# Live compose project name. The compose file PINS it via `name:` (WARP-187, to
+# avoid colliding with the sibling droplet-local-LLM repo, which auto-derives
+# `docker` from its own docker/ dir). DERIVE it — never guess from the directory
+# basename: the old Phase 2 used `basename $(dirname compose.yml)` = "docker",
+# so its remove + verify loops targeted nonexistent "docker_*" volumes and
+# silently "succeeded" while the real droplet_pgdata survived. That stale DB
+# (old role password vs a freshly-rotated POSTGRES_PASSWORD) is the
+# orchestrator/file-indexer crash-loop this fix prevents.
+# `|| true` so a compose file without a `name:` line (grep exits 1) does not trip
+# `set -euo pipefail` and abort the reset before the `:-droplet` fallback applies.
+PRIMARY_PROJECT=$(grep -E '^name:[[:space:]]' "$COMPOSE_FILE" | head -1 | awk '{print $2}' || true)
+PRIMARY_PROJECT="${PRIMARY_PROJECT:-droplet}"
+
+# The brick-safe reflash keeps the OLD stack UP while it builds the new images,
+# so a target volume can still be mounted when factory-reset runs. Tear the
+# stack down FIRST so the volumes are free; Phase 2 then removes them and
+# VERIFIES they are gone, so a swallowed `down` can no longer hide a surviving
+# DB. stderr is NOT sent to /dev/null — run_with_spinner already captures output
+# to the log; `|| true` continues because Phase 2's verify is the real gate.
 if [ "$PURGE_IMAGES" = "true" ]; then
   run_with_spinner "Stopping stack, removing volumes and images" \
-    $DC -f "$COMPOSE_FILE" $env_flag down -v --rmi all --remove-orphans 2>/dev/null || true
+    $DC -f "$COMPOSE_FILE" $env_flag down -v --rmi all --remove-orphans || true
 else
   run_with_spinner "Stopping stack and removing volumes" \
-    $DC -f "$COMPOSE_FILE" $env_flag down -v --remove-orphans 2>/dev/null || true
+    $DC -f "$COMPOSE_FILE" $env_flag down -v --remove-orphans || true
 fi
+
+# Tear the retired pre-WARP-605 `droplet-pi-platform` namespace down too so its
+# containers release any mount before Phase 2 sweeps the orphaned volumes.
+$DC -f "$COMPOSE_FILE" $env_flag -p droplet-pi-platform down -v --remove-orphans \
+  >/dev/null 2>&1 || true
 log_success "All services stopped"
 
 # --- Reclaim the Docker build cache (disk hygiene) ---
@@ -309,55 +333,109 @@ log_divider
 
 log_step 2 4 "Removing Docker volumes"
 
-COMPOSE_PROJECT=$(basename "$(dirname "$COMPOSE_FILE")")
+# Project prefixes whose volumes we OWN and may remove. PRIMARY_PROJECT is the
+# live name derived from the compose `name:` in Phase 1; droplet-pi-platform is
+# the retired pre-WARP-605 name whose volumes still linger on long-lived boxes.
+# Deliberately EXCLUDES the bare `docker` project — that belongs to the sibling
+# droplet-local-LLM repo (its compose auto-derives `docker` from its own docker/
+# dir, the collision we pinned `name: droplet` to avoid). Sweeping docker_* here
+# would nuke the sibling's Ollama model cache.
+OWNED_PREFIXES=("$PRIMARY_PROJECT" "droplet-pi-platform")
+# This list is the belt-and-suspenders fallback for when `down -v` is swallowed
+# (brick-safe reflash, volume still in use). It MUST mirror every named volume in
+# docker/docker-compose.yml — a "factory reset" that leaves any of them behind is
+# data remanence. It is kept in lock-step with scripts/host/device-backup.sh: the
+# DATA_VOLUMES it captures + the EXCLUDED_VOLUMES it intentionally drops + the
+# pg_dump'd DBs == this list. Listed unconditionally; `docker volume rm` of a
+# volume that a given profile never created is a soft fail the loop below handles.
 VOLUMES=(
-  "pgdata"
-  "filedata"
+  # --- Customer / operator data (device-backup.sh DATA_VOLUMES captures these
+  #     before a backed-up reset; omitting any from this fallback would let a
+  #     swallowed `down -v` leave personal data on the box). ---
+  "pgdata"               # orchestrator Postgres (also pg_dump'd by device-backup)
   "nextcloud-data"
   "aikeys"
-  "nvrdata"
   "matter-data"
+  "brain-memory-data"    # assistant memory: extracted text + embeddings of personal files
+  "nvrdata"
+  "ops-audit"            # WARP-337 append-only audit trail
   # WARP-573: pre-migration DB snapshots from the orchestrator's guarded boot
   # entrypoint. Wiped on reset so factory-reset truly returns to out-of-box.
   "migration-snapshots"
+  # --- Rebuildable caches / regenerated state (device-backup.sh EXCLUDED_VOLUMES:
+  #     wiped but intentionally not backed up — regenerated on reinstall). ---
   "frigate-config"
-  # WARP-501 — embedded Plane PM stack (ADR-010). Dedicated postgres + redis
-  # per spec OQ1; both volumes wiped on factory reset so a re-install starts
-  # with a clean Plane DB. Backup integration lands in WARP-514.
-  "postgres-pm-data"
-  "redis-pm-data"
-  # single-box profile volumes (only present when COMPOSE_PROFILES=single-box
-  # has been active at some point on this host). Listed unconditionally so a
-  # reset works whether the profile is on or off — `docker volume rm` of a
-  # nonexistent volume is a soft fail and the loop below handles it.
+  "rag-eval-data"
+  "whisper-models"
+  "piper-voices"
   "ollama-data"
   "openwrt-config"
   "openwrt-overlay"
+  "switch-state"         # managed-switch state — re-provisioned by setup, like openwrt-*
+  # WARP-501 — embedded Plane PM stack (ADR-010): dedicated postgres + redis +
+  # object store + queue. All wiped on reset so a re-install starts with a clean
+  # Plane. (Full Plane backup incl. pm-minio attachments lands in WARP-514.)
+  "postgres-pm-data"
+  "redis-pm-data"
+  "pm-minio-data"
+  "pm-rabbitmq-data"
 )
 
+# Free any container still mounting a target volume so the removals below are
+# clean. Phase 1's `down --remove-orphans` handles the compose-managed case;
+# this catches a stray or half-stopped container outside the projects.
+for prefix in "${OWNED_PREFIXES[@]}"; do
+  for vol in "${VOLUMES[@]}"; do
+    holders=$(docker ps -aq --filter "volume=${prefix}_${vol}" 2>/dev/null || true)
+    if [ -n "$holders" ]; then
+      log_warn "Stopping container(s) holding ${prefix}_${vol} before removal"
+      # shellcheck disable=SC2086  # word-splitting the id list is intended
+      docker rm -f $holders >/dev/null 2>&1 || true
+    fi
+  done
+done
+
+# Remove every owned volume that exists. A failure here is NOT swallowed as
+# success — the authoritative `docker volume ls` gate below turns any surviving
+# volume into a hard abort (the stale-Postgres crash-loop this fix prevents).
 removed=0
-for vol in "${VOLUMES[@]}"; do
-  # Docker Compose prefixes volume names with the project directory name
-  full_name="${COMPOSE_PROJECT}_${vol}"
-  if docker volume inspect "$full_name" >/dev/null 2>&1; then
+for prefix in "${OWNED_PREFIXES[@]}"; do
+  for vol in "${VOLUMES[@]}"; do
+    full_name="${prefix}_${vol}"
+    docker volume inspect "$full_name" >/dev/null 2>&1 || continue
     if docker volume rm "$full_name" >/dev/null 2>&1; then
       log_success "Removed volume: $full_name"
       removed=$((removed + 1))
     else
-      log_warn "Failed to remove volume: $full_name (may be in use)"
+      log_warn "Failed to remove volume: $full_name (re-checked by the verify gate)"
     fi
+  done
+done
+
+# Bare-named volumes (custom naming, no project prefix).
+for vol in "${VOLUMES[@]}"; do
+  docker volume inspect "$vol" >/dev/null 2>&1 || continue
+  if docker volume rm "$vol" >/dev/null 2>&1; then
+    log_success "Removed volume: $vol"
+    removed=$((removed + 1))
   else
-    # Try without project prefix (in case of custom naming)
-    if docker volume inspect "$vol" >/dev/null 2>&1; then
-      if docker volume rm "$vol" >/dev/null 2>&1; then
-        log_success "Removed volume: $vol"
-        removed=$((removed + 1))
-      else
-        log_warn "Failed to remove volume: $vol (may be in use)"
-      fi
-    fi
+    log_warn "Failed to remove volume: $vol (re-checked by the verify gate)"
   fi
 done
+
+# Sweep ALL volumes still under the retired pre-WARP-605 `droplet-pi-platform`
+# project — even ones not in VOLUMES — since that name is dead and anything
+# under it is orphaned. (We never blanket-sweep PRIMARY_PROJECT_*: a future
+# volume not yet in VOLUMES could still be legitimately in use.)
+while IFS= read -r orphan; do
+  [ -n "$orphan" ] || continue
+  if docker volume rm "$orphan" >/dev/null 2>&1; then
+    log_success "Removed orphaned legacy volume: $orphan"
+    removed=$((removed + 1))
+  else
+    log_warn "Failed to remove orphaned legacy volume: $orphan (re-checked by the verify gate)"
+  fi
+done < <(docker volume ls --format '{{.Name}}' 2>/dev/null | grep -E '^droplet-pi-platform_' || true)
 
 if [ $removed -gt 0 ]; then
   log_success "$removed volume(s) removed"
@@ -368,18 +446,26 @@ fi
 # Final sweep for any orphaned anonymous volumes
 docker volume prune -f >/dev/null 2>&1 || true
 
-# --- Verify all target volumes are truly gone ---
-remaining=0
-for vol in "${VOLUMES[@]}"; do
-  full_name="${COMPOSE_PROJECT}_${vol}"
-  if docker volume inspect "$full_name" >/dev/null 2>&1 || \
-     docker volume inspect "$vol" >/dev/null 2>&1; then
-    log_warn "Volume still exists after removal: $vol"
-    remaining=$((remaining + 1))
-  fi
-done
+# --- Authoritative gate: verify OUR volumes are truly gone -------------------
+# Enumerate what ACTUALLY remains instead of trusting the targeted loop above.
+# Scope to prefixes we own so a sibling project's same-suffixed volume (e.g. the
+# droplet-local-LLM Ollama cache, docker_ollama-data) is never misread as ours.
+# A surviving *_pgdata is the headline failure this whole fix exists to stop:
+# the new db container would re-mount the OLD PGDATA, keep the OLD role password,
+# and crash-loop the orchestrator against the freshly-rotated .env secret.
+vol_suffix_re=$(IFS='|'; printf '%s' "${VOLUMES[*]}")
+owned_prefix_re=$(IFS='|'; printf '%s' "${OWNED_PREFIXES[*]}")
+_remaining_owned_volumes() {
+  docker volume ls --format '{{.Name}}' 2>/dev/null \
+    | grep -E "^(${owned_prefix_re})_(${vol_suffix_re})\$" || true
+}
+remaining="$(_remaining_owned_volumes)"
 
-if [ $remaining -gt 0 ]; then
+if [ -n "$remaining" ]; then
+  log_warn "Volumes still present after removal:"
+  printf '%s\n' "$remaining" | while IFS= read -r v; do
+    [ -n "$v" ] && log_warn "  - $v"
+  done
   if [ "$FORCE_REMOVE" = "true" ]; then
     log_warn "Force mode: restarting Docker to release stuck volume references..."
     if [[ "$(uname)" == "Darwin" ]]; then
@@ -404,14 +490,23 @@ if [ $remaining -gt 0 ]; then
       sudo systemctl restart docker 2>/dev/null || true
       sleep 3
     fi
-    # Retry volume removal after Docker restart
-    for vol in "${VOLUMES[@]}"; do
-      full_name="${COMPOSE_PROJECT}_${vol}"
-      docker volume rm "$full_name" 2>/dev/null || docker volume rm "$vol" 2>/dev/null || true
+    # Retry removal of exactly what survived, then RE-VERIFY — force is an
+    # operator escalation, not a license to finish with the DB volume intact.
+    printf '%s\n' "$remaining" | while IFS= read -r v; do
+      [ -n "$v" ] && docker volume rm "$v" >/dev/null 2>&1 || true
     done
+    remaining="$(_remaining_owned_volumes)"
+    if [ -n "$remaining" ]; then
+      log_error "Volume(s) STILL present after Docker restart + retry:"
+      printf '%s\n' "$remaining" | while IFS= read -r v; do
+        [ -n "$v" ] && log_error "  - $v"
+      done
+      log_error "Refusing to finish — a surviving DB volume would crash-loop re-setup."
+      exit 1
+    fi
     log_success "Volumes force-removed after Docker restart"
   else
-    log_error "$remaining volume(s) could not be removed."
+    log_error "$(printf '%s\n' "$remaining" | grep -c .) volume(s) could not be removed."
     log_error "Try: ./scripts/factory-reset.sh --yes --force"
     log_error "Or manually: docker volume rm <name>"
     exit 1

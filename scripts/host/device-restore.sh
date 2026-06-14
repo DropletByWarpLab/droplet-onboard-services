@@ -32,8 +32,20 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-PROJECT="${PROJECT:-droplet-pi-platform}"
 COMPOSE_FILE="${COMPOSE_FILE:-$REPO_ROOT/docker/docker-compose.yml}"
+
+# Live compose project name. DERIVE it from the compose file's `name:` field
+# (pinned `name: droplet`, WARP-187) — never hard-code the RETIRED pre-WARP-605
+# `droplet-pi-platform`. Docker prefixes volumes `<project>_<vol>`, so a stale
+# default silently targets nonexistent `droplet-pi-platform_*` volumes and
+# restores NOTHING — the same stale-project bug just fixed in factory-reset.sh.
+# An explicit PROJECT= override still wins (the test harness points it at a
+# disposable project). `|| true` leaves the "compose file not found" check below
+# in charge of a missing file rather than dying here under `set -e`/pipefail.
+if [ -z "${PROJECT:-}" ]; then
+  PROJECT="$(grep -E '^name:[[:space:]]' "$COMPOSE_FILE" 2>/dev/null | head -1 | awk '{print $2}' || true)"
+fi
+PROJECT="${PROJECT:-droplet}"
 DB_SERVICE="${DB_SERVICE:-db}"
 PM_SERVICE="${PM_SERVICE:-postgres-pm}"
 

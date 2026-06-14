@@ -176,15 +176,28 @@ LOCK_FILE="$REPO_ROOT/.data/.setup.lock"
 _acquire_lock() {
   mkdir -p "$(dirname "$LOCK_FILE")"
   if [ -f "$LOCK_FILE" ]; then
-    local lock_age
-    lock_age=$(( $(date +%s) - $(stat -c %Y "$LOCK_FILE" 2>/dev/null || stat -f %m "$LOCK_FILE" 2>/dev/null || echo 0) ))
-    if [ "$lock_age" -gt 3600 ]; then
-      log_warn "Removing stale lock file (${lock_age}s old)"
+    local lock_pid lock_age
+    lock_pid=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
+    # Stale-aware reclaim: if the recorded PID is empty/garbage or no longer
+    # alive, the previous run died (a SIGKILL or power loss bypasses the EXIT
+    # trap below) and stranded its lock — reclaim it instead of refusing. This
+    # is what made the box un-reprovisionable after an interrupted setup.
+    if [ -z "$lock_pid" ] || ! kill -0 "$lock_pid" 2>/dev/null; then
+      log_warn "Reclaiming stale lock (pid ${lock_pid:-unreadable} not alive)"
       rm -f "$LOCK_FILE"
     else
-      log_error "Another setup is running (lock: $LOCK_FILE)"
-      log_error "If this is a mistake, remove the lock: rm $LOCK_FILE"
-      exit 1
+      # PID is alive — a real concurrent run, or (rarely) PID reuse by an
+      # unrelated process. Fall back to the age guard so even a reused-PID
+      # lock clears after an hour rather than blocking forever.
+      lock_age=$(( $(date +%s) - $(stat -c %Y "$LOCK_FILE" 2>/dev/null || stat -f %m "$LOCK_FILE" 2>/dev/null || echo 0) ))
+      if [ "$lock_age" -gt 3600 ]; then
+        log_warn "Removing stale lock file (${lock_age}s old)"
+        rm -f "$LOCK_FILE"
+      else
+        log_error "Another setup is running (lock: $LOCK_FILE, pid: $lock_pid)"
+        log_error "If this is a mistake, remove the lock: rm $LOCK_FILE"
+        exit 1
+      fi
     fi
   fi
   echo $$ > "$LOCK_FILE"
@@ -197,7 +210,8 @@ _release_lock() {
 # --- Error trap ---
 _on_error() {
   log_error "Setup failed. See log: $LOG_FILE"
-  _release_lock
+  # Lock release is handled by the EXIT trap (set right after _acquire_lock),
+  # so it runs on EVERY exit path — not just this one. exit here fires it.
   exit 1
 }
 
@@ -314,6 +328,12 @@ main() {
   trap _on_error ERR
 
   _acquire_lock
+  # Release the lock on ANY exit (success, error, or `set -e` abort). The ERR
+  # trap fires only on a failed command; the benign "seeder failed (exit 1)"
+  # path and other non-error early exits would otherwise leave .setup.lock
+  # behind and make the next run abort with "Another setup is running".
+  # Set AFTER a successful acquire so we never delete another run's lock.
+  trap _release_lock EXIT
 
   local total_steps=7
   [ "$SKIP_DOCKER" = "true" ] || true
@@ -524,7 +544,7 @@ main() {
   fi
 
   # --- Done ---
-  _release_lock
+  # Lock is released by the EXIT trap set right after _acquire_lock.
 
   log_divider
   printf "\n"
