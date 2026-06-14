@@ -1,5 +1,49 @@
 import { z } from "zod";
 
+// WARP-580 — production JWT-secret strength guard. A production boot must
+// reject a secret that is too short OR is one of the shipped dev placeholders
+// (a copy-paste from .env.example is the realistic foot-gun). setup.sh mints a
+// 64-byte hex value, so a real deployment clears 32 chars with room to spare.
+const JWT_SECRET_MIN_LENGTH = 32;
+const KNOWN_DEV_JWT_SECRETS: readonly string[] = [
+  "dev-jwt-secret-do-not-use-in-production",
+  "changeme",
+  "secret",
+  "your-secret-here",
+];
+
+/** PURE — true when `s` is unfit for production use. Exported for tests. */
+export function isWeakJwtSecret(s: string): boolean {
+  return s.length < JWT_SECRET_MIN_LENGTH || KNOWN_DEV_JWT_SECRETS.includes(s);
+}
+
+/**
+ * WARP-580 — resolve the EFFECTIVE auth posture (fail-closed).
+ *
+ * Auth is on unless an operator EXPLICITLY opts out in a non-production
+ * environment. We read the LITERAL env string here rather than zod's coerced
+ * boolean: `z.coerce.boolean()` runs JS `Boolean(...)`, so the string "false"
+ * (non-empty) coerces to TRUE — it cannot represent an explicit opt-out. The
+ * opt-out is therefore an explicit falsey token ("false"/"0"/"no"/"off",
+ * case-insensitive); anything else (including an absent var) stays ON. In
+ * production we force-ON regardless of the var, so the middleware's
+ * owner-injection-when-disabled branch can never fire on a shipped box even if
+ * `.env` carries a stale `AUTH_ENABLED=false`.
+ */
+const FALSEY_ENV_TOKENS: ReadonlySet<string> = new Set(["false", "0", "no", "off"]);
+export function resolveAuthEnabled(
+  rawAuthEnv: string | undefined,
+  nodeEnv: string,
+): boolean {
+  // Production: fail-closed — auth is always on.
+  if (nodeEnv === "production") return true;
+  // Non-production: honour an EXPLICIT falsey opt-out only. An unset var stays ON.
+  if (rawAuthEnv !== undefined && FALSEY_ENV_TOKENS.has(rawAuthEnv.trim().toLowerCase())) {
+    return false;
+  }
+  return true;
+}
+
 const envSchema = z.object({
   DATABASE_URL: z.string().default("postgresql://droplet:droplet@localhost:5432/droplet"),
   REDIS_URL: z.string().default("redis://localhost:6379"),
@@ -27,7 +71,14 @@ const envSchema = z.object({
 
   // --- Nextcloud (single file storage backend) ---
   NEXTCLOUD_URL: z.string().default("http://localhost:8080"),
-  AUTH_ENABLED: z.coerce.boolean().default(false),
+  // WARP-580 — auth is FAIL-CLOSED. The default is `true`; the only way to run
+  // with auth off is an EXPLICIT `AUTH_ENABLED=false` AND a non-production
+  // NODE_ENV (see resolveAuthEnabled below). A bare/missing var, or `=false`
+  // in production, both resolve to auth ENABLED. The middleware's
+  // owner-injection-when-disabled path (middleware/auth.ts) therefore can
+  // never fire in production. Parsed here as the raw operator INTENT; the
+  // effective value is `config.AUTH_ENABLED` after resolveAuthEnabled.
+  AUTH_ENABLED: z.coerce.boolean().default(true),
 
   // --- Device pairing ---
   // 32-byte base64 key used to encrypt per-device Nextcloud app passwords
@@ -108,12 +159,18 @@ const envSchema = z.object({
   // --- JWT ---
   // In production this must be set — setup.sh generates a 64-byte random hex value.
   // The default is intentionally weak so tests work without env setup.
+  //
+  // WARP-580 — production secret-strength guard. In production the secret must
+  // be at least JWT_SECRET_MIN_LENGTH chars AND must not match any known dev
+  // placeholder. Outside production the weak default is allowed so tests + dev
+  // laptops run without env setup. The refine runs at parse time (config load),
+  // so a misconfigured production boot dies loud before serving a request.
   JWT_SECRET: z
     .string()
     .default("dev-jwt-secret-do-not-use-in-production")
     .refine(
-      (s) => process.env.NODE_ENV !== "production" || s !== "dev-jwt-secret-do-not-use-in-production",
-      "JWT_SECRET must be set to a strong random value in production",
+      (s) => process.env.NODE_ENV !== "production" || !isWeakJwtSecret(s),
+      `JWT_SECRET must be a strong random value in production (at least ${JWT_SECRET_MIN_LENGTH} characters and not a dev placeholder)`,
     ),
 
   // --- OAuth2 ---
@@ -507,6 +564,10 @@ function resolveCorsAllowedOrigins(
 
 export const config = {
   ...parsed,
+  // WARP-580 — `AUTH_ENABLED` on the exported config is the EFFECTIVE,
+  // fail-closed posture (resolved from the literal env string). Production
+  // always resolves to true; non-production honours an explicit opt-out only.
+  AUTH_ENABLED: resolveAuthEnabled(process.env.AUTH_ENABLED, parsed.NODE_ENV),
   corsAllowedOrigins: resolveCorsAllowedOrigins(
     parsed.CORS_ALLOWED_ORIGINS,
     parsed.NODE_ENV,
