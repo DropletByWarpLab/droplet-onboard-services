@@ -23,6 +23,15 @@ vi.mock("../config.js", () => ({
   },
 }));
 
+// The route's per-IP rate limiter calls `cacheIncr`. Mock it so the rate-
+// limit tests can drive the returned count deterministically; by default it
+// returns null (Redis unavailable) which the route treats as fail-OPEN, so
+// every existing signature/replay test runs unaffected.
+const cacheIncrMock = vi.fn(async (): Promise<number | null> => null);
+vi.mock("../services/cache.service.js", () => ({
+  cacheIncr: (...args: unknown[]) => cacheIncrMock(...args),
+}));
+
 import { createPmWebhookRouter, pmWebhookBus } from "../routes/pm-webhook.js";
 
 const WEBHOOK_PATH = "/api/pm/webhook";
@@ -59,6 +68,10 @@ describe("WARP-566 pm-webhook HMAC over raw bytes", () => {
   beforeEach(() => {
     mockConfig.DROPLET_PM_WEBHOOK_SECRET = "test-webhook-secret";
     pmWebhookBus.removeAllListeners();
+    // Default: cache unavailable → cacheIncr returns null → fail-OPEN (no
+    // limiting), so the signature/replay assertions below are untouched.
+    cacheIncrMock.mockReset();
+    cacheIncrMock.mockResolvedValue(null);
   });
 
   it("verifies a byte-identical signed body and emits the event", async () => {
@@ -241,6 +254,33 @@ describe("WARP-566 pm-webhook HMAC over raw bytes", () => {
       .send(rawBody);
 
     expect(res.status).toBe(400);
+  });
+
+  it("returns 429 when the per-IP rate limit is exceeded (before HMAC work)", async () => {
+    // Count over the cap → limiter fires BEFORE the signature check, so an
+    // unsigned request still 429s (proving the limiter runs first).
+    cacheIncrMock.mockResolvedValue(61);
+    const app = buildApp();
+    const res = await request(app)
+      .post(WEBHOOK_PATH)
+      .set("Content-Type", "application/json")
+      .send('{"event":"issue","data":{}}');
+
+    expect(res.status).toBe(429);
+    expect(res.headers["retry-after"]).toBeDefined();
+  });
+
+  it("does not rate-limit a count at or below the cap", async () => {
+    // Count at the cap → request proceeds; missing signature → 401 (not 429).
+    cacheIncrMock.mockResolvedValue(60);
+    const app = buildApp();
+    const res = await request(app)
+      .post(WEBHOOK_PATH)
+      .set(TIMESTAMP_HEADER, String(Date.now()))
+      .set("Content-Type", "application/json")
+      .send('{"event":"issue","data":{}}');
+
+    expect(res.status).toBe(401);
   });
 
   it("leaves non-webhook routes receiving parsed JSON objects", async () => {

@@ -13,8 +13,13 @@
  * Replay guard: Plane sends a `X-Plane-Delivery-Timestamp` header. We
  * reject deliveries older than REPLAY_WINDOW_MS (5 min).
  *
- * Rate limit: deferred to the existing rate-limit middleware (mounted
- * upstream in app.ts).
+ * Rate limit: this route is mounted BEFORE authMiddleware, so the only
+ * thing in front of it is the HMAC check. To stop an unauthenticated
+ * flood from burning CPU on signature comparison (or wedging the event
+ * bus), a per-IP fixed-window limiter runs FIRST, before any HMAC work.
+ * It reuses the repo's `cacheIncr` Redis primitive (same posture as the
+ * setup-claim limiter in routes/setup.ts) and fails OPEN on a cache
+ * outage so a down Redis never blackholes legitimate Plane deliveries.
  *
  * Routing: valid payload → fired on an in-process EventEmitter that
  * downstream consumers subscribe to. Consumers (AI summarization, voice
@@ -29,11 +34,21 @@ import { Router, type Request, type Response } from "express";
 import pino from "pino";
 
 import { config } from "../config.js";
+import { cacheIncr } from "../services/cache.service.js";
 
 const logger = pino({ name: "pm-webhook" });
 
 /** Replay window — payloads older than this are rejected. */
 const REPLAY_WINDOW_MS = 5 * 60 * 1000;
+
+/** Per-IP rate-limit window length (seconds) and max deliveries within it. */
+const RATE_LIMIT_WINDOW_SEC = 60;
+const RATE_LIMIT_MAX = 60;
+
+/** `ratelimit:pm-webhook:<ip>` — fixed-window delivery count for the IP. */
+function rateLimitKey(ip: string): string {
+  return `ratelimit:pm-webhook:${ip}`;
+}
 
 /** Plane's webhook signature header name. */
 const SIGNATURE_HEADER = "x-plane-signature";
@@ -68,7 +83,20 @@ export function createPmWebhookRouter(): Router {
     // (key order, whitespace, unicode/float formatting) and both reject
     // valid events and weaken integrity. JSON.parse happens only AFTER the
     // signature verifies.
-    (req: Request, res: Response) => {
+    async (req: Request, res: Response) => {
+      // Per-IP fixed-window rate limit FIRST — this public route's only
+      // other gate is the HMAC check, so cap deliveries before spending CPU
+      // on signature comparison. `cacheIncr` is atomic (INCR + EXPIRE) and
+      // returns null on a Redis error, in which case we fail OPEN (treat as
+      // under-limit) so a down cache never drops valid Plane events.
+      const ip = req.ip ?? "unknown";
+      const count = await cacheIncr(rateLimitKey(ip), RATE_LIMIT_WINDOW_SEC);
+      if (count !== null && count > RATE_LIMIT_MAX) {
+        logger.warn({ event_type: "webhook_rate_limited", ip }, "pm webhook rate limit exceeded");
+        res.setHeader("Retry-After", String(RATE_LIMIT_WINDOW_SEC));
+        return res.status(429).json({ error: "rate limit exceeded" });
+      }
+
       const signature = req.header(SIGNATURE_HEADER);
       const timestamp = req.header(TIMESTAMP_HEADER);
       const secret = config.DROPLET_PM_WEBHOOK_SECRET;
