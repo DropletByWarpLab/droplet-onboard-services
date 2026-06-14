@@ -23,13 +23,13 @@
 #
 # Both default to `droplet-ai*` to avoid collisions with the OpenWrt router:
 #   - mDNS: OpenWrt's umdns publishes `droplet.local` for the router itself,
-#     so an Avahi claim of `droplet.local` on the Jetson loses the tiebreak
+#     so an Avahi claim of `droplet.local` on the appliance loses the tiebreak
 #     and falls back to `droplet-2.local` — defeating the whole point.
 #   - Router DNS: dnsmasq's `expand_hosts=1` makes the router's own hostname
 #     (`Droplet`) resolve as `droplet.lan`, so a static hostrecord on
 #     `droplet.lan` competes with it (round-robin) — clients land on the
 #     router's web UI half the time instead of the dashboard.
-# `droplet-ai*` matches the Jetson's system hostname (`droplet-AI`) and has
+# `droplet-ai*` matches the appliance's system hostname (`droplet-AI`) and has
 # no such collision from anything else on the LAN.
 DROPLET_MDNS_HOSTNAME="${DROPLET_MDNS_HOSTNAME:-droplet-ai}"
 DROPLET_LAN_HOSTNAME="${DROPLET_LAN_HOSTNAME:-droplet-ai.lan}"

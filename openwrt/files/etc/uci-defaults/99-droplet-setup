@@ -48,7 +48,7 @@ uci set uhttpd.main.ubus_socket='/var/run/ubus/ubus.sock'
 uci commit uhttpd
 
 # ---------------------------------------------------------------------------
-# 4. Configure mDNS so Jetson can discover router as Droplet.local
+# 4. Configure mDNS so the appliance can discover router as Droplet.local
 # ---------------------------------------------------------------------------
 if [ -f /etc/config/umdns ]; then
     uci set umdns.@umdns[0]=umdns
@@ -203,6 +203,6 @@ echo "Droplet: First-boot setup complete. Restarting services..."
 /etc/init.d/umdns restart 2>/dev/null || true
 
 echo "Droplet: Router ready at 192.168.50.1"
-echo "Droplet: Credentials stored in /etc/droplet/ — retrieve during Jetson provisioning"
+echo "Droplet: Credentials stored in /etc/droplet/ — retrieve during appliance provisioning"
 
 exit 0

@@ -291,8 +291,7 @@ class VoskWakeWordDetector(WakeWordDetector):
     per-word confidence as the [0, 1] score the pipeline thresholds.
 
     Apache-2.0, fully offline, no AccessKey, no licensing fee. CPU cost
-    of the small model is negligible on Droplet-class hosts (Ryzen /
-    Jetson Orin).
+    of the small model is negligible on Droplet-class hosts.
 
     Lazy-loads on first predict() (like OpenWakeWordDetector) so FastAPI
     startup isn't blocked by the model load. Unlike openWakeWord there is

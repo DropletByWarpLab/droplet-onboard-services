@@ -19,7 +19,7 @@ There is **no combined image**.
 | Layer | Builder | Artifact | What it is |
 |---|---|---|---|
 | **Appliance host** (this pipeline) | `scripts/image/build-iso.sh` | `output/droplet-single-box-<version>.iso` | x86 single-box host: Ubuntu + Docker + the Droplet stack. |
-| **Router** | `openwrt/build.sh` | `openwrt/output/*-droplet-*.img.gz` | Raspberry Pi 5 OpenWrt SD card (multi-box) / containerized on single-box. |
+| **Router** | `openwrt/build.sh` | `openwrt/output/*-droplet-*.img.gz` | Router-host OpenWrt SD card (multi-box) / containerized on single-box. |
 
 The appliance image ships in two phases:
 

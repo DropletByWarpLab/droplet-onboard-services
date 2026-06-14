@@ -11,7 +11,7 @@ from typing import Optional, Union
 # Wireless defaults are deployment-shape-specific and MUST NOT be hardcoded.
 #
 # The historical `radio0` / `default_radio0` / `wlan0` literals only ever
-# matched a long-gone build. The shipped Pi-5 router runs an MT7922 whose
+# matched a long-gone build. The shipped router host runs an MT7922 whose
 # radio section is `radio3` / `default_radio3` (see
 # openwrt/files/etc/config/wireless); a single-box's radio enumerates as
 # `wlp14s0`/similar. Defaulting writes (`/wireless/ssid`, `/wireless/channel`,
@@ -334,7 +334,7 @@ class ApApproveRequest(BaseModel):
 
     `radio` defaults to the deployment's configured primary radio
     (`DROPLET_WIFI_RADIO`, falling back to `radio0` only when unset). On the
-    shipped Pi-5 router the MT7922's primary 5 GHz AP is `radio3`, so the
+    shipped router host the MT7922's primary 5 GHz AP is `radio3`, so the
     compose for that shape sets `DROPLET_WIFI_RADIO=radio3`; the dashboard's
     wizard surfaces this as the primary household band. `encryption` defaults
     to `psk2+ccmp` (WPA2-PSK, AES-only) — same posture as the main router's

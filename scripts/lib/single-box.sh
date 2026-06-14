@@ -5,7 +5,7 @@
 # The `single-box` deployment runs the full Droplet stack on ONE x86
 # host with a dGPU (for Ollama) + iGPU (for Frigate) + Wi-Fi card
 # (for the in-container OpenWrt AP) — as opposed to the `multi-box`
-# shape which has Ollama on a separate Jetson and OpenWrt on a Pi 5,
+# shape which has Ollama on a separate inference host and OpenWrt on a separate router host,
 # or the future `v2-6` shape which uses the custom 9-PCB chassis.
 # All three are shipping product; the difference is hardware layout.
 #
@@ -487,7 +487,7 @@ configure_single_box_env() {
 #   LLM_MODEL            THE one model (architecture-guard one-model rule)
 #   OPENWRT_*            bundled openwrt container at 127.0.0.1:8181
 #   DROPLET_AP_MODE      hostapd — the single-box host runs the Wi-Fi AP via
-#                        hostapd (not a Pi-5 UCI router), so the device-bridge
+#                        hostapd (not a standalone UCI router), so the device-bridge
 #                        reads pairing-QR creds in hostapd mode. Mirrored into
 #                        /etc/droplet/device-bridge.env by
 #                        install-device-bridge.sh (WARP-654).

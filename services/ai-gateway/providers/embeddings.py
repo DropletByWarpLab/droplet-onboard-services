@@ -27,7 +27,7 @@ def _get_model(model_name: str | None = None):
 
     Thread-safe: concurrent cold-start requests block on the lock rather
     than loading the model twice (which would double memory usage on a
-    Jetson/Pi with limited RAM).
+    host with limited RAM).
     """
     name = model_name or DEFAULT_MODEL
     if name in _model_cache:

@@ -14,7 +14,7 @@ and docker-compose wiring.
 > path (`/dev/fb1`) for Pi-shield TFTs. Both were removed because Tegra's
 > GPIO/SPI driver stack on L4T is incompatible with the Pi-form-factor TFT
 > shields we originally targeted (see WARP-127). The PyPortal pivot sidesteps
-> that entirely — a stock Jetson just enumerates the Titano as USB-ACM and
+> that entirely — a stock appliance host just enumerates the Titano as USB-ACM and
 > we drive it over serial, no GPIO/kernel module required.
 
 ## Display backends
@@ -204,7 +204,7 @@ Rotation is rate-limited to 30 s between calls and serialized by an
 in-process lock. With rotation disabled, the endpoint returns `410
 Gone` and the PyPortal UI hides the Rotate button + TTL chip entirely.
 
-### Install on the Jetson
+### Install on the appliance
 
 ```bash
 sudo ./scripts/install-device-bridge.sh

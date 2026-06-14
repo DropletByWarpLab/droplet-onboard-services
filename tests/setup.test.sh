@@ -225,7 +225,7 @@ else
   fail "configure_single_box_env exited with an error"
 fi
 
-# The single-box shape runs the AP as a host hostapd (not a Pi-5 UCI router),
+# The single-box shape runs the AP as a host hostapd (not a standalone UCI router),
 # so the device-bridge must read pairing-QR creds in hostapd mode. The install
 # records that as a .env knob; install-device-bridge.sh mirrors it into
 # /etc/droplet/device-bridge.env, where device-bridge.py reads it (it defaults
@@ -442,7 +442,7 @@ fi
 
 # --- Single-box OpenWrt override is intact (WARP-815 K2 regression guard) ---
 # K2 reconciles the *documented compose default* OPENWRT_HOST to 192.168.50.1
-# (the multi-box Pi-5 router), but the single-box talks to the in-container
+# (the multi-box router host), but the single-box talks to the in-container
 # OpenWrt on 127.0.0.1:8181. configure_single_box_env owns that override and
 # MUST keep writing it — this guards against the K2 doc change accidentally
 # regressing the working single-box path. Asserted once + idempotent + the

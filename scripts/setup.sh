@@ -60,7 +60,7 @@ Options:
                      host scripts, writes single-box knobs to .env,
                      activates the `single-box` compose profile).
                      Auto-detected on Linux hosts with dGPU + iGPU and
-                     no separate Jetson on the LAN; use this to force or
+                     no separate inference host on the LAN; use this to force or
                      skip auto-detect.
   --no-single-box    Force single-box off (multi-box / v2-6 deployment).
   --regenerate-env   Force-regenerate .env (backs up existing)

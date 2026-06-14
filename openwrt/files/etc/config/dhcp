@@ -62,8 +62,8 @@ config dhcp 'cameras'
     option dhcpv6 'server'
     option ra 'server'
 
-# --- Static lease: Jetson AI module ---
-# Uncomment and set the MAC address of the Jetson's Ethernet port
+# --- Static lease: appliance AI module ---
+# Uncomment and set the MAC address of the appliance's Ethernet port
 # config host
 #     option name 'jetson'
 #     option mac 'XX:XX:XX:XX:XX:XX'

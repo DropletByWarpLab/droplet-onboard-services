@@ -156,7 +156,7 @@ local boxes don't try to dial HQ).
 
 **Image / size:** Tiny Python service. <50 MB final image. The
 `wg` userspace path means no kernel-module install on the host —
-works under the existing Pi / Jetson kernels untouched.
+works under the existing host kernels untouched.
 
 ### 2. `fleet-server` (new service on HQ)
 

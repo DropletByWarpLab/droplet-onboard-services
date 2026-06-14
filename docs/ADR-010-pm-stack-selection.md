@@ -40,7 +40,7 @@ We ship vanilla Plane — pinned to upstream releases, with any local patches su
 - AGPL-3 obligation imposes ongoing discipline: any local patches must be source-available to the customer on request. Mitigation: pin upstream, document patches, link to upstream from the dashboard footer.
 - New dependency on a third-party project's release cadence — Plane breaking API changes propagate into our tools-core handlers.
 - Storage growth: Plane DB + attachments compete with Frigate footage and Nextcloud files for the same SSD on `single-box`. Mitigation: storage budget in `SINGLE_BOX.md`; default attachment cap; `v2-6` has a dedicated storage brick per `pcb-claude-tool` modular platform spec.
-- Adds ~200MB RAM and one Postgres + one Redis to the deploy. Acceptable on x86 single-box; tighter on Pi-class.
+- Adds ~200MB RAM and one Postgres + one Redis to the deploy. Acceptable on a large-memory single-box; tighter on a memory-constrained single-box.
 
 ### Neutral
 

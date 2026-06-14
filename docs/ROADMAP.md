@@ -143,7 +143,7 @@ Status legend:
   - `apps/orchestrator/src/__tests__/vpn.test.ts` (13 tests)
   - `apps/web-dashboard/src/app/remote-access/page.tsx` — list + Add Device dialog (QR via `qrcode.react`) + DuckDNS card
   - `apps/web-dashboard/src/components/Sidebar.tsx` — "Remote Access" nav entry (Globe icon)
-- **Status:** `[x]` Done — verified live on the lab Jetson + OpenWrt router (49+16+13 tests pass; full setup + peer mint + nft rules + .conf rendering exercised end-to-end).
+- **Status:** `[x]` Done — verified live on the lab appliance + OpenWrt router (49+16+13 tests pass; full setup + peer mint + nft rules + .conf rendering exercised end-to-end).
 - **Architectural decisions made along the way:**
   1. **WireGuard on OpenWrt, not Docker.** Aligns with the SDK's existing ubus-based control plane and gives kernel-speed encryption.
   2. **Server-side keypair generation** (priv returned once in the API response). Client-side keygen would require a multi-step pairing flow; not worth the UX cost for v1.
@@ -229,7 +229,7 @@ Each risk is reproduced from the GTM doc with severity, and mapped to the compon
 
 | Risk | Severity | Likelihood | Owner in this repo | Notes |
 |---|---|---|---|---|
-| LLM inference too slow on Pi (10–30s/response) | High | Certain | `services/ai-gateway/` (streaming passthrough) | Primary mitigation is M1.6 streaming; hardware path is inference-engine/Jetson. |
+| LLM inference too slow on a low-power host (10–30s/response) | High | Certain | `services/ai-gateway/` (streaming passthrough) | Primary mitigation is M1.6 streaming; hardware path is inference-engine / the inference host. |
 | Small-model tool-calling unreliability | High | High | `services/ai-gateway/schemas.py` (output schema validation) | Depth-defence in inference-engine's OpenClaw tool policy. |
 | Prompt injection via user input | Critical | Medium | `services/ai-gateway/middleware/`, `services/ai-gateway/schemas.py` | M2.7. Input layer lives here; sandbox + guardrails live in inference-engine. |
 | Privileged container escape from router/NAS | Critical | Low | `openwrt/` (replaces privileged Docker approach) | Architecture already mitigates: router is OpenWrt, not a `--privileged` container. |

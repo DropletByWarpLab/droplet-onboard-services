@@ -3,11 +3,11 @@
 # Droplet Router Firmware Upgrade
 # =============================================================================
 #
-# Upgrades a running OpenWrt instance on the Pi 5 without re-flashing the SD
+# Upgrades a running OpenWrt instance on the router host without re-flashing the SD
 # card. Uses OpenWrt's sysupgrade mechanism which preserves UCI configuration
 # files (/etc/config/*) across upgrades.
 #
-# Run this from the Jetson (or any machine on the LAN), NOT on the router.
+# Run this from the inference host (or any machine on the LAN), NOT on the router.
 #
 # Usage:
 #   ./scripts/upgrade-router.sh <firmware-image>
@@ -41,7 +41,7 @@
 set -euo pipefail
 
 # --- Defaults ---
-# WARP-815: single documented OPENWRT_HOST default — the multi-box Pi-5 router
+# WARP-815: single documented OPENWRT_HOST default — the multi-box router host
 # (matches docker/docker-compose.yml + services/routing/main.py + docs).
 ROUTER_HOST="${OPENWRT_HOST:-192.168.50.1}"
 ROUTER_USER="root"

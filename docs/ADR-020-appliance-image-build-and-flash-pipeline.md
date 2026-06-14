@@ -10,7 +10,7 @@
 
 A `single-box` Droplet is provisioned today by running [`scripts/setup.sh`](../scripts/setup.sh) on an **already-installed** Ubuntu host. It installs Docker, generates per-device secrets, builds/pulls ~22 containers, and first-boot-pulls the model. This is correct and stays the canonical provisioning path — but it presumes a human has already installed an OS and cloned the repo. There is **no shippable artifact**: nothing you can hand to an operator (or a customer) to *flash an SSD and boot a working Droplet*.
 
-The only image builder that exists is [`openwrt/build.sh`](../openwrt/build.sh), which builds the **router** image (Raspberry Pi 5 OpenWrt SD card) — a different layer of the system. [`scripts/build-image.sh`](../scripts/build-image.sh) is a five-line stub (`echo "TODO: Implement Pi image build (pi-gen)"`).
+The only image builder that exists is [`openwrt/build.sh`](../openwrt/build.sh), which builds the **router** image (router-host OpenWrt SD card) — a different layer of the system. [`scripts/build-image.sh`](../scripts/build-image.sh) is a five-line stub (`echo "TODO: Implement Pi image build (pi-gen)"`).
 
 ROADMAP **M2.8** ("Downloadable image with Ubuntu + Docker + Droplet pre-installed") has been blocked, verbatim, on *"Architecture call: OpenWrt-only image vs. dual-image"* with the next action *"decide image topology."* ROADMAP **M3.4** (OTA) further commits to a *"`releases/` repo (external) [that] holds manifests"* and an agent that *"pulls a signed manifest, verifies it, and applies … updates atomically."*
 
@@ -20,7 +20,7 @@ This ADR makes the topology call, defines the build + versioning + flashing cont
 
 ### D1 — Topology: a single-box **appliance** image, autoinstall ISO first, golden raw `.img` second
 
-The artifact is the **appliance image** — the x86 single-box *host* (Ubuntu + Docker + the Droplet stack). This is a distinct layer from `openwrt/build.sh`'s **router** image (per ADR-018 the router is its own deployment element, containerized on single-box and a separate Pi on multi-box). The M2.8 "OpenWrt-only vs dual-image" framing is therefore resolved as: **neither** — they are orthogonal images for orthogonal layers, each built by its own pinned builder. There is no combined image.
+The artifact is the **appliance image** — the x86 single-box *host* (Ubuntu + Docker + the Droplet stack). This is a distinct layer from `openwrt/build.sh`'s **router** image (per ADR-018 the router is its own deployment element, containerized on single-box and a separate router host on multi-box). The M2.8 "OpenWrt-only vs dual-image" framing is therefore resolved as: **neither** — they are orthogonal images for orthogonal layers, each built by its own pinned builder. There is no combined image.
 
 The appliance image ships in two phases:
 

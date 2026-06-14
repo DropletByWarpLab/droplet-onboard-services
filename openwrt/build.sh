@@ -113,7 +113,7 @@ PACKAGES+=" ddns-scripts luci-app-ddns"
 PACKAGES+=" opkg luci luci-ssl luci-app-firewall luci-app-opkg"
 PACKAGES+=" luci-theme-openwrt-2020"
 
-# --- ubus JSON-RPC API (Jetson ↔ OpenWrt control plane) ---
+# --- ubus JSON-RPC API (appliance ↔ OpenWrt control plane) ---
 PACKAGES+=" uhttpd uhttpd-mod-ubus rpcd rpcd-mod-iwinfo"
 PACKAGES+=" luci-mod-rpc"
 
@@ -132,7 +132,7 @@ PACKAGES+=" luci-app-statistics"
 # --- VLAN support ---
 PACKAGES+=" kmod-8021q"
 
-# --- mDNS (so Jetson can discover router as droplet-router.local) ---
+# --- mDNS (so the appliance can discover router as droplet-router.local) ---
 PACKAGES+=" umdns"
 
 # ---------------------------------------------------------------------------

@@ -32,7 +32,7 @@ const logger = pino({ name: "appliance-contract" });
 export interface ApplianceSpec {
   /** Short human label, e.g. "Compute". */
   label: string;
-  /** One-line value, e.g. "Jetson Orin Nano + Pi 5 control plane". */
+  /** One-line value, e.g. "inference host + router host control plane". */
   value: string;
   /** Whether this subsystem is reporting healthy (drives the UI dot). */
   online: boolean;

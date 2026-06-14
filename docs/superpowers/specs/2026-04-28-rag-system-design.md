@@ -123,7 +123,7 @@ class ExtractedDoc(TypedDict):
 ```
 
 **Dispatch rules:**
-- **Skip if too big.** Files over `MAX_INDEX_BYTES` (default `50_000_000`) skip with `reason="oversized"` recorded in indexer logs (no DB write). Avoids OOM on the Jetson.
+- **Skip if too big.** Files over `MAX_INDEX_BYTES` (default `50_000_000`) skip with `reason="oversized"` recorded in indexer logs (no DB write). Avoids OOM on the inference host.
 - **Truncate-and-warn if too long.** Texts over `MAX_INDEX_CHARS` (default `5_000_000`) truncate with a warning. A 1000-page PDF still indexes the first ~700 pages.
 - **Image OCR escape hatch.** Tesseract gets `confidence_threshold` (default 50). Pages where mean confidence falls below this attach a `low_confidence_ocr` warning to the chunk metadata so retrieval can de-prioritize. We don't drop them — junk OCR is sometimes the only signal we have.
 - **Code files** (`.py`, `.ts`, etc.) treated as plain text in v1. Syntax-aware chunking is a follow-up.
@@ -140,7 +140,7 @@ class ExtractedDoc(TypedDict):
 
 | Capability | Ticket | Why deferred |
 |---|---|---|
-| Audio (Whisper) | [WARP-197](https://warp-lab.atlassian.net/browse/WARP-197) | CPU/GPU model-size decision wants Jetson JP6 path settled first. |
+| Audio (Whisper) | [WARP-197](https://warp-lab.atlassian.net/browse/WARP-197) | CPU/GPU model-size decision wants the inference-host GPU path settled first. |
 | Video (frame OCR + audio) | [WARP-198](https://warp-lab.atlassian.net/browse/WARP-198) | Depends on audio. |
 | Email (`.eml`/`.msg`) | [WARP-199](https://warp-lab.atlassian.net/browse/WARP-199) | Multipart/threading/encoding warrants focused implementation. |
 | Archives (`.zip`/`.tar`/`.7z`) | [WARP-200](https://warp-lab.atlassian.net/browse/WARP-200) | Bomb-proofing + nested-citation contract warrants own scope. |

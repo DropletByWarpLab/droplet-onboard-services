@@ -34,7 +34,7 @@
 #
 # The cert is fetched from the running device over the network (not from the
 # repo) so the script works on any client without filesystem access to the
-# Jetson.
+# appliance.
 # =============================================================================
 set -euo pipefail
 

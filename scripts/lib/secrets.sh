@@ -469,7 +469,7 @@ migrate_env() {
 
   # --- One-time rename: JETSON_OLLAMA_URL -> OLLAMA_URL ----------------
   # The env var was originally named with a hardware-specific prefix
-  # (Jetson was one of multiple possible inference hosts). The variable
+  # (the old name carried hardware-specific framing). The variable
   # is hardware-agnostic — it's just where Ollama is reachable — so we
   # renamed it to OLLAMA_URL. Code still reads JETSON_OLLAMA_URL as a
   # fallback during the transition window, but this migration moves the

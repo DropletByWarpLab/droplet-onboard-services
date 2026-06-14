@@ -12,7 +12,7 @@ name: droplet
 # =============================================================================
 # WARP-569 — Per-container resource limits
 # =============================================================================
-# Target hardware: ~7 GB shared RAM (single-box; multi-box Jetson is similar).
+# Target hardware: ~7 GB shared RAM (single-box; multi-box inference host is similar).
 # Host/kernel reserve: ~1 GB → allocate up to ~6 GB to default-on services.
 #
 # IMPORTANT: use top-level keys (mem_limit / cpus / pids_limit), NOT
@@ -122,7 +122,7 @@ services:
       - path: ../.env
         required: false
     # routing, switch, and display all run with `network_mode: host` on
-    # the Jetson. The orchestrator is on the default bridge network — so
+    # the appliance. The orchestrator is on the default bridge network — so
     # `localhost` from inside this container is the container itself, not
     # the host. Docker's magic `host-gateway` resolves to the host's IP on
     # the bridge subnet (172.x.0.1 on Linux, the gateway IP on Docker
@@ -415,7 +415,7 @@ services:
       # droplet-ai.lan (OpenWrt dnsmasq) are the primary names registered by
       # scripts/lib/local-dns.sh; droplet.local / droplet.lan are accepted too
       # so OpenWrt's own umdns/expand_hosts entries keep working if a user
-      # ever points them at the Jetson directly.
+      # ever points them at the appliance directly.
       # ADR-023 (C4): append the publicly-trusted per-device FQDN
       # (${DROPLET_PUBLIC_FQDN}) so Nextcloud trusts the one-URL-everywhere
       # address. Empty until the box learns it from HQ — a trailing blank token
@@ -689,7 +689,7 @@ services:
       - NET_ADMIN
     environment:
       # WARP-815 (K2): the documented default is 192.168.50.1 — the multi-box
-      # Pi-5 OpenWrt router (matches services/routing/main.py and the docs). The
+      # router-host OpenWrt (matches services/routing/main.py and the docs). The
       # single-box shape talks to the in-container OpenWrt on 127.0.0.1:8181;
       # scripts/lib/single-box.sh writes that override into .env before bring-up,
       # so this default is only the multi-box / dev fallback. The previous
@@ -887,9 +887,9 @@ services:
   # Image variants (override FRIGATE_IMAGE in .env):
   #   stable              — default; CPU detector only (works everywhere)
   #   stable-tensorrt     — x86_64 hosts with NVIDIA discrete GPUs
-  #   stable-tensorrt-jp6 — Jetson Orin on JetPack 6 (pair with
+  #   stable-tensorrt-jp6 — a JetPack 6 GPU host (pair with
   #                          FRIGATE_RUNTIME=nvidia + YOLO_MODELS=yolov9-s)
-  # FRIGATE_RUNTIME lets the Jetson scripts set `nvidia` without forcing
+  # FRIGATE_RUNTIME lets the GPU-host scripts set `nvidia` without forcing
   # macOS / Docker Desktop (which has no nvidia runtime) to fail validation.
   frigate:
     image: ${FRIGATE_IMAGE:-ghcr.io/blakeblackshear/frigate:stable}
@@ -911,7 +911,7 @@ services:
     devices:
       - /dev/bus/usb:/dev/bus/usb              # USB cameras
       # GPU render node. Default `/dev/dri/renderD128` matches every host
-      # with a single render node (Jetson Orin's nvgpu, x86 single-GPU
+      # with a single render node (an NVIDIA GPU host's nvgpu, x86 single-GPU
       # boxes). Override via `FRIGATE_RENDER_NODE` in .env when the dGPU
       # is reserved for another container — on the single-box deployment
       # shape the AMD dGPU (renderD128) hosts Ollama, so Frigate detects
@@ -921,7 +921,7 @@ services:
     volumes:
       - frigate-config:/config
       # NVR recordings default to the `nvrdata` named volume so every fresh
-      # deployment works out of the box. On Jetson lab hosts the operator
+      # deployment works out of the box. On GPU lab hosts the operator
       # can redirect this to a dedicated NVMe partition by overriding
       # `NVR_MEDIA_SOURCE` in .env (e.g. NVR_MEDIA_SOURCE=/mnt/cameras)
       # once the partition is provisioned. See docs/STATUS.md.
@@ -933,7 +933,7 @@ services:
       # auto-added camera on restart and trips "Config file is read-only,
       # unable to migrate" on version bumps.
       - ../docker/frigate/config.yml:/config/config.yml
-      # Jetson Orin TensorRT + NVMM libraries. The JP6 TensorRT image
+      # NVIDIA Tegra TensorRT + NVMM libraries. The JP6 TensorRT image
       # calls into libnvdla_compiler.so / libnvmedia* which live in
       # /usr/lib/aarch64-linux-gnu/tegra on the host; without this
       # bind-mount the ONNX→TensorRT model compilation falls back to
@@ -1032,7 +1032,7 @@ services:
     # specific devices — sounddevice picks them up via PortAudio.
     devices:
       - "/dev/snd:/dev/snd"
-    # The host's audio group GID. On Ubuntu/Debian (single-box + Jetson) it's 29;
+    # The host's audio group GID. On Ubuntu/Debian (single-box + inference host) it's 29;
     # docker-compose's numeric group_add doesn't care if a name exists
     # in the container's /etc/group as long as the kernel sees the GID
     # match for /dev/snd's owner.
@@ -1101,7 +1101,7 @@ services:
       # echoes as the spoken reply).
       - LLM_URL=${LLM_URL:-http://orchestrator:3000}
       # Default per shared_brain LLM_AGENT.md (qwen2.5:3b-instruct fits
-      # the Orin Nano 7 GB RAM budget with the rest of the stack up).
+      # the inference host's 7 GB RAM budget with the rest of the stack up).
       # Override via env if the appliance has a larger/different model
       # loaded (see droplet-local-LLM /models/sync).
       - LLM_MODEL=${LLM_MODEL:-qwen2.5:3b-instruct}
@@ -1680,14 +1680,14 @@ services:
   # single-box profile (`COMPOSE_PROFILES=single-box`) — bundled-inference
   # deployment shape services.
   # ==========================================================================
-  # The multi-box deployment runs Ollama on a separate Jetson (the dGPU
-  # host) and a real OpenWrt router (the Pi 5). The single-box shape
+  # The multi-box deployment runs Ollama on a separate inference host (the dGPU
+  # host) and a real OpenWrt router host. The single-box shape
   # collapses both into containers on the same x86 host. Services below
   # ONLY start when the `single-box` profile is active; on every other
   # deployment shape they're invisible.
   #
   # Activation: `COMPOSE_PROFILES=single-box` in .env (setup.sh writes this
-  # when it detects single-box hardware: dGPU + iGPU + no separate Jetson
+  # when it detects single-box hardware: dGPU + iGPU + no separate inference host
   # on LAN). Operators can also force it with
   # `COMPOSE_PROFILES=single-box,linux docker compose up -d` for testing.
   #

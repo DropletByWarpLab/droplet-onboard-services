@@ -7,7 +7,7 @@ Custom OpenWrt image for the Droplet router — Raspberry Pi 5 (bcm2712) with **
 ## Network Topology
 
 ```
-ISP / Upstream         Pi 5 (OpenWrt)                  Jetson (AI)
+ISP / Upstream         Pi 5 (OpenWrt)                  Inference host (AI)
      |                 |-- ETH0 (onboard) = WAN         |
      +--- cable -------+                                |
                        |-- ETH1 (USB RTL8153B) --+      |
@@ -28,7 +28,7 @@ ISP / Upstream         Pi 5 (OpenWrt)                  Jetson (AI)
 This build produces the router firmware that the platform's **routing service** (`services/routing/`) communicates with. The connection flow:
 
 ```
-Jetson (services/routing/)                  Pi 5 (OpenWrt)
+Inference host (services/routing/)          Pi 5 (OpenWrt)
     |                                           |
     |  DropletRouter SDK (droplet_openwrt_sdk)  |
     |  -> HTTP POST /ubus                      |
@@ -93,7 +93,7 @@ sudo dd if=output/openwrt-*.img of=/dev/sdX bs=4M status=progress
 3. Plug in TP-Link UE306 USB NIC
 4. Power on — first boot takes ~60-90s
 
-### 4. Verify from Jetson
+### 4. Verify from the inference host
 
 ```bash
 # Set env vars (same ones used by the routing service)
