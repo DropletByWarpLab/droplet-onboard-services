@@ -19,6 +19,21 @@ REDIS_URL = os.getenv("REDIS_URL", "")
 SESSION_TTL = int(os.getenv("SESSION_TTL", str(7 * 24 * 3600)))  # 7 days default
 
 
+def _is_production() -> bool:
+    """Whether we're running in a non-dev deployment.
+
+    WARP-588: mirrors the gating in ``auth/keystore.py`` — an explicit
+    production signal (``DROPLET_ENV in {production, prod}`` or a truthy
+    ``DROPLET_FIPS_REQUIRED``) opts into fail-closed behaviour, while dev/CI
+    (no signal) stays permissive so the in-memory store keeps working locally.
+    """
+    env = (os.getenv("DROPLET_ENV") or "").strip().lower()
+    if env in ("production", "prod"):
+        return True
+    fips = (os.getenv("DROPLET_FIPS_REQUIRED") or "").strip().lower()
+    return fips in ("true", "1", "yes")
+
+
 @dataclass
 class SessionMessage:
     role: str
@@ -35,12 +50,22 @@ class Session:
     updated_at: float
     messages: list[SessionMessage] = field(default_factory=list)
     system_prompt: str | None = None
+    # WARP-560: the principal (forwarded end-user id) that created the session.
+    # None for identity-less/legacy sessions. Read by the route layer to refuse
+    # cross-user reads so one household member can't read another's chat.
+    owner: str | None = None
 
 
 class SessionStore:
     """Abstract session storage interface."""
 
-    async def create(self, model: str, title: str = "", system_prompt: str | None = None) -> Session:
+    async def create(
+        self,
+        model: str,
+        title: str = "",
+        system_prompt: str | None = None,
+        owner: str | None = None,
+    ) -> Session:
         raise NotImplementedError
 
     async def get(self, session_id: str) -> Session | None:
@@ -68,7 +93,13 @@ class InMemorySessionStore(SessionStore):
     def __init__(self):
         self._sessions: dict[str, Session] = {}
 
-    async def create(self, model: str, title: str = "", system_prompt: str | None = None) -> Session:
+    async def create(
+        self,
+        model: str,
+        title: str = "",
+        system_prompt: str | None = None,
+        owner: str | None = None,
+    ) -> Session:
         session_id = str(uuid.uuid4())
         now = time.time()
         session = Session(
@@ -78,6 +109,7 @@ class InMemorySessionStore(SessionStore):
             created_at=now,
             updated_at=now,
             system_prompt=system_prompt,
+            owner=owner,
         )
         self._sessions[session_id] = session
         return session
@@ -135,6 +167,9 @@ class RedisSessionStore(SessionStore):
             updated_at=float(data.get("updated_at", 0)),
             messages=messages,
             system_prompt=data.get("system_prompt"),
+            # Empty string in the hash means "no recorded owner" (legacy /
+            # identity-less session) — normalise back to None.
+            owner=(data.get("owner") or None),
         )
 
     def _session_to_dict(self, session: Session) -> dict:
@@ -146,9 +181,16 @@ class RedisSessionStore(SessionStore):
             "updated_at": str(session.updated_at),
             "messages": json.dumps([asdict(m) for m in session.messages]),
             "system_prompt": session.system_prompt or "",
+            "owner": session.owner or "",
         }
 
-    async def create(self, model: str, title: str = "", system_prompt: str | None = None) -> Session:
+    async def create(
+        self,
+        model: str,
+        title: str = "",
+        system_prompt: str | None = None,
+        owner: str | None = None,
+    ) -> Session:
         session_id = str(uuid.uuid4())
         now = time.time()
         session = Session(
@@ -158,6 +200,7 @@ class RedisSessionStore(SessionStore):
             created_at=now,
             updated_at=now,
             system_prompt=system_prompt,
+            owner=owner,
         )
         key = self._key(session_id)
         await self._redis.hset(key, mapping=self._session_to_dict(session))
@@ -224,9 +267,24 @@ class RedisSessionStore(SessionStore):
 
 
 def create_session_store() -> SessionStore:
-    """Factory: use Redis if REDIS_URL is set, otherwise in-memory."""
+    """Factory: use Redis if REDIS_URL is set, otherwise in-memory.
+
+    WARP-588: in production the in-memory store is unsafe — sessions evaporate
+    on every restart and aren't shared across workers, silently losing chat
+    history. Refuse it: when this is a shipping box (``_is_production()``) and
+    no ``REDIS_URL`` is configured, fail closed at startup rather than booting
+    a data-losing backend. Dev/CI (no production signal) keeps the in-memory
+    fallback.
+    """
     if REDIS_URL:
         logger.info("Using Redis session store: %s", REDIS_URL)
         return RedisSessionStore(REDIS_URL)
+    if _is_production():
+        raise RuntimeError(
+            "REDIS_URL is unset in a production deployment. The in-memory "
+            "session store loses all chat history on restart and is not shared "
+            "across workers. Configure REDIS_URL (setup.sh wires the bundled "
+            "Redis) before booting. Refusing to start with an in-memory store."
+        )
     logger.info("Using in-memory session store (no REDIS_URL set)")
     return InMemorySessionStore()

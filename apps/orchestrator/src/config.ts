@@ -319,6 +319,16 @@ const envSchema = z.object({
   // secret keep working until setup.sh re-mints.
   SERVICE_TOKEN_SWITCH: z.string().default(""),
 
+  // SERVICE_TOKEN_AI_GATEWAY — WARP-560. Dedicated outbound bearer for
+  // ai-gateway.client.ts → ai-gateway, which previously had NO inbound auth
+  // (/ai/chat, /ai/sessions/*, /ai/keys/* were all reachable by anything that
+  // could open the socket). The ai-gateway's ServiceAuthMiddleware now requires
+  // this Bearer on every /ai/* route (except /ai/health). Compose wires both
+  // ends to ${SERVICE_TOKEN_AI_GATEWAY}; ai-gateway.client.ts falls back to
+  // SERVICE_SECRET so installs whose .env predates this token keep working
+  // until setup.sh re-mints. Empty = unauthenticated (dev/CI default).
+  SERVICE_TOKEN_AI_GATEWAY: z.string().default(""),
+
   // --- Service-principal bearer tokens (inbound) ---
   // Per shared_brain `agentic-workflows.md` + `LLM_AGENT.md`: services that
   // need LLM + MCP tool dispatch MUST call the orchestrator's `/api/llm/chat`

@@ -20,6 +20,16 @@ import main
 _SECRET = "https://api.openai.com/v1/chat sk-LEAKED-UPSTREAM-secret-body"
 
 
+def _make_http_request():
+    """Minimal ASGI Request for direct calls to main.chat (WARP-560 added an
+    http_request param so the handler can read the forwarded principal)."""
+    from starlette.requests import Request
+
+    return Request(
+        {"type": "http", "method": "POST", "headers": [], "path": "/", "query_string": b""}
+    )
+
+
 async def _ensure_chat_globals():
     """Initialise + start the module globals the chat path needs (the plain
     ASGI test transport doesn't run the app lifespan, so these are None)."""
@@ -79,7 +89,7 @@ class TestHttpProviderErrorDisclosure:
             with patch.object(main, "provider_router") as pr:
                 pr.chat = AsyncMock(side_effect=asyncio.CancelledError())
                 with pytest.raises(asyncio.CancelledError):
-                    await main.chat(req, x_request_priority=0)
+                    await main.chat(req, _make_http_request(), x_request_priority=0)
             # Slot released (back to 0), not leaked.
             assert sched.active_requests == 0
         finally:
@@ -105,7 +115,7 @@ class TestHttpProviderErrorDisclosure:
             with patch.object(main, "provider_router") as pr:
                 pr.chat = AsyncMock(side_effect=RuntimeError(_SECRET))
                 with pytest.raises(HTTPException) as ei:
-                    await main.chat(req, x_request_priority=0)
+                    await main.chat(req, _make_http_request(), x_request_priority=0)
             assert ei.value.status_code == 502
             assert _SECRET not in str(ei.value.detail)
             assert "sk-LEAKED" not in str(ei.value.detail)

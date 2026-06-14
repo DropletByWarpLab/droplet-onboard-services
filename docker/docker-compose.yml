@@ -196,6 +196,10 @@ services:
       # no bearer at all, so a switch container with SERVICE_SECRET set
       # 403'd every call (dashboard Network page → "Router unavailable").
       - SERVICE_TOKEN_SWITCH=${SERVICE_TOKEN_SWITCH:-}
+      # WARP-560: orchestrator → ai-gateway bearer. Read by ai-gateway.client.ts;
+      # must equal the ai-gateway container's SERVICE_TOKEN_AI_GATEWAY (wired
+      # below to the same source). The gateway had no inbound auth before this.
+      - SERVICE_TOKEN_AI_GATEWAY=${SERVICE_TOKEN_AI_GATEWAY:-}
       # The orchestrator's Dockerfile sets OPENSSL_CONF=/etc/ssl/openssl-fips.cnf
       # for FIPS 140-3 compliance (WARP-229). That cipher set rejects the
       # non-FIPS ciphers Postgres uses for its TLS handshake — Prisma's
@@ -533,6 +537,11 @@ services:
       # Static config only — secrets come from .env via env_file
       - ORCHESTRATOR_URL=http://orchestrator:3000
       - GRPC_PORT=50051
+      # WARP-560: inbound service-auth bearer. The ai-gateway's
+      # ServiceAuthMiddleware requires this on every /ai/* route (except
+      # /ai/health). MUST equal the orchestrator's SERVICE_TOKEN_AI_GATEWAY env
+      # (wired above to the same source). Empty = unauthenticated (dev only).
+      - SERVICE_TOKEN_AI_GATEWAY=${SERVICE_TOKEN_AI_GATEWAY:-}
       # ADR-023 (C4): append https://${DROPLET_PUBLIC_FQDN} so the ai-gateway
       # accepts the publicly-trusted one-URL-everywhere origin. Empty until the
       # box learns its FQDN from HQ — a trailing comma is tolerated by the
