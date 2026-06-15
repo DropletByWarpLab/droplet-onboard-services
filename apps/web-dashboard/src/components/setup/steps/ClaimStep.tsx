@@ -19,8 +19,8 @@ import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
  * Wizard step — Claim (PR #373, slots FIRST after the welcome splash).
  *
  * The customer confirms the appliance the box detected on the LAN is theirs and
- * binds it to their workspace by entering the claim code shown on the PyPortal
- * lid display. Per #371 handoff §2 + OnbWizard.jsx `WizClaim`.
+ * binds it to their workspace by entering the claim code shown on the
+ * front-panel display. Per #371 handoff §2 + OnbWizard.jsx `WizClaim`.
  *
  * PR #384 — reflowed into the shared aurora-rail `StepShell` (was a bespoke
  * centered column with an in-body CTA). The three phases each render through
@@ -160,7 +160,7 @@ export function ClaimStep({ onComplete }: { onComplete: () => void }) {
     void loadContract();
   }, [loadContract]);
 
-  // Scan-to-claim deep link (design handoff): the PyPortal claim screen's QR
+  // Scan-to-claim deep link (design handoff): the front-panel claim screen's QR
   // encodes `/setup?c=<CODE>`, so landing here from a scan prefills the field.
   // Read once on mount from window.location (this is a client component; no
   // useSearchParams so the page never needs a Suspense boundary for it).
@@ -181,7 +181,7 @@ export function ClaimStep({ onComplete }: { onComplete: () => void }) {
     // guard here too so a stray Enter/programmatic call can't fire mid-lockout.
     if (secondsLeft > 0) return;
     if (!code.trim()) {
-      setClaimError("Enter the claim code shown on the PyPortal display.");
+      setClaimError("Enter the claim code shown on the display.");
       return;
     }
     setClaimError(null);
@@ -334,7 +334,7 @@ export function ClaimStep({ onComplete }: { onComplete: () => void }) {
           }}
         />
         <span className="type-caption-1 text-label-tertiary mt-1.5 block">
-          Shown on the PyPortal display on the front of the unit.
+          Shown on the display on the front of the unit.
         </span>
       </label>
 
@@ -389,7 +389,7 @@ export function ClaimStep({ onComplete }: { onComplete: () => void }) {
       <LearnMoreCard helpAnchor="claim">
         <p>
           Claiming binds this specific appliance to your workspace so only you
-          control it. The code lives on the PyPortal screen on the unit — it
+          control it. The code lives on the display on the unit — it
           never leaves your network.
         </p>
         <p>

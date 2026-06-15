@@ -44,7 +44,7 @@ vi.mock("@/lib/api", () => ({
     compute: { label: "Compute", value: "Local AI compute", online: true },
     storage: { label: "Storage", value: "Encrypted at rest", online: true },
     network: { label: "Network", value: "Local network", online: true },
-    display: { label: "Display", value: "PyPortal lid display", online: true },
+    display: { label: "Display", value: "Front-panel display", online: true },
     supply_chain: { taa_compliant: true, ndaa_889_clear: true, summary: "Verified" },
   })),
   postClaim: vi.fn(async () => ({ claimed: true, next_step: "account" })),
