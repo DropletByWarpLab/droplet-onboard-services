@@ -2262,7 +2262,11 @@ class Handler(BaseHTTPRequestHandler):
             # Bad Content-Length (or other malformed-request value): 400.
             return self._send(400, {"ok": False, "error": str(e)})
         except Exception as e:                                       # noqa: BLE001
-            return self._send(500, {"ok": False, "error": str(e)})
+            # Do not surface str(e) — subprocess errors include the full command
+            # line (which may contain OPENWRT_PASS in plaintext). Log for the
+            # bridge operator and return a sanitised message to the HTTP client.
+            logger.exception("unhandled error in do_POST: %s", e)
+            return self._send(500, {"ok": False, "error": "internal server error"})
 
     def _dispatch_post(self):
         if self.path == "/drives/changed":
