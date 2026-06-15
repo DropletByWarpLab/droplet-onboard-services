@@ -1080,8 +1080,13 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           liveReasoning = streamResult.message.reasoning ?? null;
         } catch (err) {
           terminal = "failed";
-          // eslint-disable-next-line no-console
-          console.error("[llm/chat] agent loop failed:", err);
+          // A client disconnect aborts the in-flight fetch, throwing an
+          // AbortError. That is expected behavior — don't log it as a
+          // failure; clientAborted overrides terminal to "aborted" below.
+          if (!clientAborted) {
+            // eslint-disable-next-line no-console
+            console.error("[llm/chat] agent loop failed:", err);
+          }
         } finally {
           res.end();
         }
