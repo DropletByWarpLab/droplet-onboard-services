@@ -197,6 +197,10 @@ class _FakeHandler:
         self.sent = []  # list of (status, obj)
         self._authed = bridge.Handler._authed.__get__(self, bridge.Handler)
         self.do_POST = bridge.Handler.do_POST.__get__(self, bridge.Handler)
+        # do_POST now delegates routing to _dispatch_post inside an outer
+        # try/except — bind it too so the fake handler dispatches.
+        self._dispatch_post = bridge.Handler._dispatch_post.__get__(
+            self, bridge.Handler)
 
     def _send(self, status, obj):
         self.sent.append((status, obj))

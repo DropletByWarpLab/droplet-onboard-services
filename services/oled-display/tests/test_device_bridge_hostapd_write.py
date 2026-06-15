@@ -240,6 +240,10 @@ class _FakeHandler:
         # Bind the real implementations to this fake instance.
         self._authed = bridge.Handler._authed.__get__(self, bridge.Handler)
         self.do_POST = bridge.Handler.do_POST.__get__(self, bridge.Handler)
+        # do_POST now delegates routing to _dispatch_post inside an outer
+        # try/except — bind it too so the fake handler dispatches.
+        self._dispatch_post = bridge.Handler._dispatch_post.__get__(
+            self, bridge.Handler)
 
     def _send(self, status, obj):
         self.sent.append((status, obj))
@@ -344,3 +348,53 @@ def test_hostapd_write_rejects_bad_json(monkeypatch):
     h.do_POST()
     status, obj = h.sent[-1]
     assert status == 400
+
+
+# ---------------------------------------------------------------------------
+# do_POST outer try/except: a handler that raises before responding returns a
+# clean JSON error (mirrors do_GET), instead of escaping the handler and
+# leaving the client with a dangling connection + a stack trace in the log.
+# ---------------------------------------------------------------------------
+
+class _RaisingRfile:
+    """rfile whose read() blows up — stands in for a truncated/corrupt body
+    where rfile.read(n).decode() raises mid-dispatch."""
+
+    def read(self, n):
+        raise OSError("connection reset mid-read")
+
+
+def test_do_post_non_numeric_content_length_is_400(monkeypatch):
+    # A non-numeric Content-Length makes int(self.headers.get(...)) raise
+    # ValueError before the route can respond. The outer try/except must catch
+    # it and return a clean 400 — not let the handler escape. We pass the auth
+    # token + hostapd mode so dispatch reaches the int(Content-Length) line, and
+    # fail loudly if the host script is ever invoked (the parse must raise first).
+    bridge = _load_bridge(monkeypatch)
+    monkeypatch.setattr(bridge, "_run",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("host script invoked on bad length")))
+    headers = {"X-Droplet-Auth": "pytest-bridge-token",
+               "Content-Length": "not-a-number"}
+    h = _FakeHandler(bridge, headers, b"{}")
+    h.do_POST()
+    status, obj = h.sent[-1]
+    assert status == 400
+    assert obj.get("ok") is False
+
+
+def test_do_post_read_error_is_500(monkeypatch):
+    # If rfile.read(n).decode() raises (e.g. the client drops mid-body), the
+    # outer try/except returns a 500 rather than letting the exception escape
+    # do_POST. Reuses the hostapd route, which reads the body after auth.
+    bridge = _load_bridge(monkeypatch)
+    monkeypatch.setattr(bridge, "_run",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("host script invoked despite read error")))
+    h = _FakeHandler(bridge, {"X-Droplet-Auth": "pytest-bridge-token",
+                              "Content-Length": "2"}, b"{}")
+    h.rfile = _RaisingRfile()
+    h.do_POST()
+    status, obj = h.sent[-1]
+    assert status == 500
+    assert obj.get("ok") is False
