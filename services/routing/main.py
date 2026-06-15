@@ -226,6 +226,18 @@ async def lifespan(app: FastAPI):
         except Exception as exc:  # noqa: BLE001 — non-fatal startup task
             logger.warning("off-LAN egress meter failed to start: %s", exc)
 
+    # WARP-468: start the 60 s DNS-block meter. Non-fatal — until the
+    # OpenWrt adblock/blocklist ubus method is pinned the meter logs
+    # once and emits zero samples (read_counters_via_ubus fail-soft).
+    dns_block_scheduler = None
+    if router_instance is not None:
+        try:
+            from dns_block_meter import start_dns_block_meter
+
+            dns_block_scheduler = start_dns_block_meter(router_instance)
+        except Exception as exc:  # noqa: BLE001 — non-fatal startup task
+            logger.warning("dns-block meter failed to start: %s", exc)
+
     yield
 
     if throughput_scheduler is not None:
@@ -239,6 +251,12 @@ async def lifespan(app: FastAPI):
             egress_meter_scheduler.shutdown(wait=False)
         except Exception as exc:  # noqa: BLE001
             logger.warning("off-LAN egress meter shutdown failed: %s", exc)
+
+    if dns_block_scheduler is not None:
+        try:
+            dns_block_scheduler.shutdown(wait=False)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("dns-block meter shutdown failed: %s", exc)
 
     if router_instance:
         router_instance.disconnect()

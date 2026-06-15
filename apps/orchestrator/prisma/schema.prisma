@@ -148,6 +148,27 @@ model NetworkThroughputSample {
   @@index([ts(sort: Desc)])
 }
 
+/// WARP-468 — per-tick deltas of DNS queries blocked by the OpenWrt
+/// adblock / blocklist layer, sampled by the routing service.
+///
+/// A 60 s apscheduler tick in `services/routing/dns_block_meter.py`
+/// reads the cumulative blocked-query counter via ubus, diffs against
+/// the previous reading to derive a per-tick delta, and POSTs the
+/// delta into the orchestrator via /api/network/dns-block-sample. The
+/// Network page §2.6 KPI strip sums these rows day-to-date for the
+/// "DNS blocked today" chip.
+///
+/// `blockedCount` is Int (not BigInt like throughput's bps): a single
+/// 60 s window cannot accumulate > 2³¹ blocked queries, so a count
+/// delta fits comfortably in Int. Retention: a nightly cron prunes
+/// rows older than 30 days alongside the existing daily-purge.
+model DnsBlockSample {
+  ts            DateTime @id @default(now())
+  blockedCount  Int
+
+  @@index([ts(sort: Desc)])
+}
+
 /// WARP-304 / WARP-329: persisted message in a `ChatSession`. Stored in
 /// order of `createdAt`; for the same millisecond the `id` (uuid) breaks
 /// the tie.

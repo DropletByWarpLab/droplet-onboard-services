@@ -21,13 +21,22 @@ interface MockSample {
   wanUpBps: bigint;
 }
 
+interface DnsBlockRow {
+  ts: Date;
+  blockedCount: number;
+}
+
 function createPrismaMock(over: {
   samples?: MockSample[];
   clientCount?: number;
+  offLanBytesSum?: bigint | null;
+  dnsBlockedSum?: number | null;
 } = {}) {
   const samples = [...(over.samples ?? [])];
+  const dnsBlockSamples: DnsBlockRow[] = [];
   return {
     samples,
+    dnsBlockSamples,
     networkThroughputSample: {
       findFirst: vi.fn(async ({ orderBy }: { orderBy?: unknown }) => {
         void orderBy;
@@ -65,6 +74,24 @@ function createPrismaMock(over: {
     networkDevice: {
       count: vi.fn(async () => over.clientCount ?? 0),
     },
+    offLanEgressSample: {
+      aggregate: vi.fn(async () => ({
+        _sum: { bytes: over.offLanBytesSum ?? null },
+      })),
+    },
+    dnsBlockSample: {
+      aggregate: vi.fn(async () => ({
+        _sum: { blockedCount: over.dnsBlockedSum ?? null },
+      })),
+      create: vi.fn(async ({ data }: { data: DnsBlockRow }) => {
+        dnsBlockSamples.push({
+          ts: data.ts,
+          blockedCount: data.blockedCount,
+        });
+        return data;
+      }),
+      deleteMany: vi.fn(async () => ({ count: 0 })),
+    },
   };
 }
 
@@ -96,13 +123,15 @@ beforeEach(() => {
 });
 
 describe("WARP-470 — /api/network/summary", () => {
-  it("returns latest-sample bps + client count + placeholders", async () => {
+  it("returns latest-sample bps + client count + real off-LAN + DNS-block totals", async () => {
     const prisma = createPrismaMock({
       samples: [
         { ts: new Date("2026-05-27T10:00:00Z"), wanDownBps: 50_000_000n, wanUpBps: 5_000_000n },
         { ts: new Date("2026-05-27T10:01:00Z"), wanDownBps: 80_000_000n, wanUpBps: 7_500_000n },
       ],
       clientCount: 18,
+      offLanBytesSum: 987_654n,
+      dnsBlockedSum: 73,
     });
     const app = buildApp(prisma, mkUser("family", "stefan"));
     const res = await request(app).get("/api/network/summary");
@@ -110,9 +139,43 @@ describe("WARP-470 — /api/network/summary", () => {
     expect(res.body.wanDownBps).toBe(80_000_000);
     expect(res.body.wanUpBps).toBe(7_500_000);
     expect(res.body.clientCount).toBe(18);
+    expect(res.body.dnsBlockedToday).toBe(73);
+    expect(res.body.offLanBytesThisMonth).toBe(987_654);
+    expect(res.body.lastSampleAt).toBe("2026-05-27T10:01:00.000Z");
+  });
+
+  it("sums offLanEgressSample bytes month-to-date", async () => {
+    const prisma = createPrismaMock({ offLanBytesSum: 123_456n });
+    const app = buildApp(prisma, mkUser("family", "stefan"));
+    const res = await request(app).get("/api/network/summary");
+    expect(res.status).toBe(200);
+    expect(res.body.offLanBytesThisMonth).toBe(123_456);
+    // Aggregate runs with a month-start lower bound, not the latest row.
+    expect(prisma.offLanEgressSample.aggregate).toHaveBeenCalledTimes(1);
+  });
+
+  it("sums dnsBlockSample blockedCount day-to-date", async () => {
+    const prisma = createPrismaMock({ dnsBlockedSum: 42 });
+    const app = buildApp(prisma, mkUser("family", "stefan"));
+    const res = await request(app).get("/api/network/summary");
+    expect(res.status).toBe(200);
+    expect(res.body.dnsBlockedToday).toBe(42);
+    expect(prisma.dnsBlockSample.aggregate).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns 0 dnsBlockedToday/offLanBytesThisMonth when aggregates are null", async () => {
+    const prisma = createPrismaMock({
+      samples: [
+        { ts: new Date("2026-05-27T10:00:00Z"), wanDownBps: 1n, wanUpBps: 1n },
+      ],
+      offLanBytesSum: null,
+      dnsBlockedSum: null,
+    });
+    const app = buildApp(prisma, mkUser("family", "stefan"));
+    const res = await request(app).get("/api/network/summary");
+    expect(res.status).toBe(200);
     expect(res.body.dnsBlockedToday).toBe(0);
     expect(res.body.offLanBytesThisMonth).toBe(0);
-    expect(res.body.lastSampleAt).toBe("2026-05-27T10:01:00.000Z");
   });
 
   it("returns 0 bps + null lastSampleAt when no samples exist", async () => {
@@ -216,5 +279,36 @@ describe("WARP-470 — POST /api/network/throughput-sample", () => {
       .send({ wanDownBps: 1000, wanUpBps: 500, ts: "2026-05-27T09:00:00.000Z" });
     expect(res.status).toBe(201);
     expect(res.body.ts).toBe("2026-05-27T09:00:00.000Z");
+  });
+});
+
+describe("WARP-468 — POST /api/network/dns-block-sample", () => {
+  it("service role can push a numeric blockedCount", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma, mkUser("service", "_service"));
+    const res = await request(app)
+      .post("/api/network/dns-block-sample")
+      .send({ blockedCount: 17 });
+    expect(res.status).toBe(201);
+    expect(prisma.dnsBlockSamples).toHaveLength(1);
+    expect(prisma.dnsBlockSamples[0]?.blockedCount).toBe(17);
+  });
+
+  it("rejects non-service-role pushes with 403", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma, mkUser("family", "stefan"));
+    const res = await request(app)
+      .post("/api/network/dns-block-sample")
+      .send({ blockedCount: 0 });
+    expect(res.status).toBe(403);
+  });
+
+  it("rejects a negative blockedCount with 400", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma, mkUser("service", "_service"));
+    const res = await request(app)
+      .post("/api/network/dns-block-sample")
+      .send({ blockedCount: -1 });
+    expect(res.status).toBe(400);
   });
 });

@@ -44,7 +44,10 @@ import { tickToolSchedules } from "./services/tool-schedule-ticker.service.js";
 import { mcpClient } from "./services/mcp-client.singleton.js";
 import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { mineToolCallPatterns } from "./services/pattern-miner.service.js";
-import { purgeNetworkThroughputSamples } from "./routes/network-throughput.js";
+import {
+  purgeNetworkThroughputSamples,
+  purgeDnsBlockSamples,
+} from "./routes/network-throughput.js";
 import { purgeOffLanEgressSamples } from "./routes/off-lan-network.js";
 import { startContextStatsInvalidator } from "./services/context-stats-invalidation.service.js";
 import { initActivityRecorder, recordActivity } from "./services/activity.singleton.js";
@@ -301,6 +304,10 @@ async function main() {
       // than throughput (30 d) because totals roll up to monthly
       // billing windows; 90 d covers QoQ review without bloat.
       const offLanDeleted = await purgeOffLanEgressSamples(prisma, 90);
+      // WARP-468: DnsBlockSample retention. 30 days mirrors throughput —
+      // the "DNS blocked today" chip only reads day-to-date, so a longer
+      // horizon would just bloat the table.
+      const dnsBlockDeleted = await purgeDnsBlockSamples(prisma, 30);
       logger.info(
         {
           eventsDeleted,
@@ -308,6 +315,7 @@ async function main() {
           presenceDeleted: presenceDeleted.count,
           throughputDeleted,
           offLanDeleted,
+          dnsBlockDeleted,
         },
         "daily purges complete",
       );
