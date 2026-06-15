@@ -642,3 +642,59 @@ def test_ssh_openwrt_pins_host_key_and_drops_insecure_flags(
     assert "/dev/null" not in joined
     # The known_hosts directory is ensured so accept-new can pin on first use.
     assert known.parent.exists()
+
+
+# ---------------------------------------------------------------------------
+# OpenWrt SSH credential leak via subprocess exception strings
+# (pr-reviewer finding — _run / do_POST error sanitization)
+# ---------------------------------------------------------------------------
+def test_run_does_not_leak_argv_on_subprocess_timeout(
+    monkeypatch: pytest.MonkeyPatch
+):
+    """Regression: _run must NEVER return str(e) for a subprocess timeout.
+
+    _ssh_openwrt builds ["sshpass", "-p", OPENWRT_PASS, "ssh", ...]. On a
+    TimeoutExpired (or CalledProcessError), the exception's __str__ embeds the
+    FULL command list — including the plaintext OPENWRT_PASS. Callers route the
+    returned `err` straight into HTTP bodies, so a raw str(e) would expose the
+    router password (real exposure when BRIDGE_BIND=0.0.0.0). The error string
+    _run returns must be a fixed message with no argv / password material.
+    """
+    import subprocess
+
+    bridge = _load_bridge(monkeypatch, {"OPENWRT_PASS": "s3cr3t-router-pw"})
+
+    def fake_subprocess_run(cmd, **kwargs):
+        # The real subprocess would raise this with the full argv attached.
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(bridge.subprocess, "run", fake_subprocess_run)
+
+    rc, out, err = bridge._ssh_openwrt("uci show wireless")
+    assert rc == 1
+    assert out == ""
+    # The password must not appear anywhere in the returned error, and the
+    # error must not be the raw exception string (which carries the argv).
+    assert "s3cr3t-router-pw" not in err
+    assert "sshpass" not in err
+    assert err == "command timed out"
+
+
+def test_run_does_not_leak_argv_on_called_process_error(
+    monkeypatch: pytest.MonkeyPatch
+):
+    """Companion: a CalledProcessError str() also embeds the argv → password."""
+    import subprocess
+
+    bridge = _load_bridge(monkeypatch, {"OPENWRT_PASS": "s3cr3t-router-pw"})
+
+    def fake_subprocess_run(cmd, **kwargs):
+        raise subprocess.CalledProcessError(returncode=1, cmd=cmd)
+
+    monkeypatch.setattr(bridge.subprocess, "run", fake_subprocess_run)
+
+    rc, out, err = bridge._ssh_openwrt("uci show wireless")
+    assert rc == 1
+    assert "s3cr3t-router-pw" not in err
+    assert "sshpass" not in err
+    assert err == "command failed"

@@ -189,8 +189,27 @@ def _run(cmd, timeout=15):
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         return r.returncode, r.stdout, r.stderr
-    except Exception as e:                                          # noqa: BLE001
-        return 1, "", str(e)
+    except subprocess.TimeoutExpired:
+        # str(TimeoutExpired) embeds the full command list — for the sshpass
+        # argv (["sshpass", "-p", OPENWRT_PASS, ...]) that is the plaintext
+        # router password. Callers route this string straight into HTTP bodies,
+        # so NEVER return str(e); a fixed message keeps OPENWRT_PASS off the
+        # wire (real exposure when BRIDGE_BIND=0.0.0.0).
+        logger.warning("device-bridge subprocess timed out after %ss", timeout)
+        return 1, "", "command timed out"
+    except (subprocess.CalledProcessError, OSError) as e:           # noqa: BLE001
+        # CalledProcessError.__str__ also embeds the argv; OSError can carry a
+        # path/filename but never the argv. Log full detail server-side, return
+        # a sanitized message. (subprocess.run only raises CalledProcessError
+        # under check=True, but guard it regardless.)
+        logger.warning("device-bridge subprocess failed: %s",
+                       type(e).__name__)
+        return 1, "", "command failed"
+    except Exception:                                              # noqa: BLE001
+        # Any other failure: log server-side, return a fixed message rather
+        # than str(e), which could wrap a credential-bearing exception.
+        logger.exception("device-bridge subprocess error")
+        return 1, "", "command error"
 
 
 # ---------------------------------------------------------------------------
@@ -2261,8 +2280,23 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as e:                                      # noqa: BLE001
             # Bad Content-Length (or other malformed-request value): 400.
             return self._send(400, {"ok": False, "error": str(e)})
-        except Exception as e:                                       # noqa: BLE001
-            return self._send(500, {"ok": False, "error": str(e)})
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError,
+                OSError) as e:                                       # noqa: BLE001
+            # A route that shells out (several build argv like
+            # ["sshpass", "-p", OPENWRT_PASS, "ssh", ...]) can raise these if it
+            # bypasses the _run() chokepoint. str(e) on TimeoutExpired /
+            # CalledProcessError embeds the FULL command list — including the
+            # plaintext OPENWRT_PASS — which would be returned in the HTTP body
+            # (a real exposure when BRIDGE_BIND=0.0.0.0). Log the detail
+            # server-side, return a sanitized fixed message to the client.
+            logger.exception("device-bridge POST %s subprocess error", self.path)
+            return self._send(500, {"ok": False, "error": "subprocess error"})
+        except Exception:                                            # noqa: BLE001
+            # Defence-in-depth: never echo str(e) — an exception originating
+            # from a credential-bearing argv (or wrapping one) could otherwise
+            # leak OPENWRT_PASS into the response. Fixed string only.
+            logger.exception("device-bridge POST %s internal error", self.path)
+            return self._send(500, {"ok": False, "error": "internal error"})
 
     def _dispatch_post(self):
         if self.path == "/drives/changed":

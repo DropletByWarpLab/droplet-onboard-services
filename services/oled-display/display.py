@@ -2301,9 +2301,19 @@ class TFTDisplay:
             _v3_text(draw, str(wifi_ssid or "")[:20], rx + rw // 2, cap_y + 17,
                      font=_get_font(12, weight="bold"), fill=V3_TEXT,
                      anchor="ma")
-            _v3_text(draw, str(wifi_psk or "")[:20], rx + rw // 2, cap_y + 34,
-                     font=_get_font(11, weight="regular"), fill=V3_ACCENT_INK,
-                     anchor="ma")
+            # The PSK is the thing a camera-less user types by hand, so it must
+            # be shown in FULL: truncating a longer passphrase silently breaks
+            # the join. Mirror the firmware (pyportal/code.py): the card holds
+            # rw // 6 chars per line, so wrap the PSK across as many lines as it
+            # needs (WARP-819 preview/panel parity).
+            psk_text = str(wifi_psk or "")
+            psk_cpl = max(1, rw // 6)
+            psk_font = _get_font(11, weight="regular")
+            psk_y = cap_y + 34
+            for i in range(0, len(psk_text), psk_cpl):
+                _v3_text(draw, psk_text[i:i + psk_cpl], rx + rw // 2, psk_y,
+                         font=psk_font, fill=V3_ACCENT_INK, anchor="ma")
+                psk_y += 12
         else:
             _v3_text(draw,
                      "Opens setup on your phone" if has_qr
