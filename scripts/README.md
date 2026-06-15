@@ -65,7 +65,7 @@ Each device gets its own random secrets — no two devices share credentials:
 ### Examples
 
 ```bash
-# Full setup on a fresh Pi
+# Full setup on a fresh appliance host
 ./scripts/setup.sh
 
 # See what would happen without doing anything

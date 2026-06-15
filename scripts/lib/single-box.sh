@@ -479,7 +479,7 @@ configure_single_box_env() {
 #   WIREGUARD_LAN_CIDR/  VPN peer .conf AllowedIPs + DNS, pinned to the single-
 #   WIREGUARD_DNS        box LAN (br-lan 192.168.20.0/24, gateway/dnsmasq at
 #                        192.168.20.1). Overrides the orchestrator's multi-box
-#                        Pi-LAN defaults (192.168.50.x in
+#                        LAN defaults (192.168.50.x in
 #                        apps/orchestrator/src/config.ts) so a remote VPN client
 #                        can reach the dashboard + resolve *.lan (WARP-839).
 #   OLLAMA_URL           compose-internal `ollama` service
@@ -526,7 +526,7 @@ EOF
   # WARP-839: pin the WireGuard peer LAN CIDR + DNS to the single-box LAN. The
   # orchestrator's defaults (WIREGUARD_LAN_CIDR=192.168.50.0/24,
   # WIREGUARD_DNS=192.168.50.1 in apps/orchestrator/src/config.ts) are the
-  # MULTI-BOX Pi LAN. The single-box LAN is br-lan 192.168.20.0/24 with the
+  # MULTI-BOX LAN. The single-box LAN is br-lan 192.168.20.0/24 with the
   # gateway + dnsmasq at 192.168.20.1 (droplet.local -> 192.168.20.1), so the
   # rendered peer .conf AllowedIPs/DNS must point there — otherwise a remote VPN
   # client can't reach the dashboard or resolve *.lan. Multi-box keeps the

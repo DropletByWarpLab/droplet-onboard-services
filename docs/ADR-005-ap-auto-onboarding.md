@@ -31,8 +31,8 @@ Every extender AP runs an updated `99-droplet-setup` first-boot script that, in 
 | TXT key | Example value | Notes |
 |---|---|---|
 | `mac` | `B8:27:EB:12:34:56` | onboard NIC MAC, canonical uppercase per `normalizeMac()` |
-| `serial` | `RPi5-00000000a1b2c3d4` | from `/sys/firmware/devicetree/base/serial-number` |
-| `model` | `raspberrypi,5-model-b` | from `/proc/device-tree/compatible` |
+| `serial` | `AP-00000000a1b2c3d4` | from `/sys/firmware/devicetree/base/serial-number` |
+| `model` | `raspberrypi,5-model-b` | from `/proc/device-tree/compatible` — the literal device-tree compatible string a Pi-based AP emits; AP detection matches on this value (kept verbatim, ADR-011) |
 | `version` | `1.0` | tied to the openwrt overlay version |
 | `role` | `extender` | distinguishes from `router` (main box) |
 

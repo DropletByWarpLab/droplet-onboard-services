@@ -67,7 +67,7 @@ vi.mock("@prisma/client", () => {
         {
           id: "test-uuid",
           deviceId: "droplet-dev-001",
-          hostname: "droplet-pi",
+          hostname: "droplet-dev",
           hardwareRev: "dev",
           networkMode: "dhcp",
           ip: "192.168.1.100",

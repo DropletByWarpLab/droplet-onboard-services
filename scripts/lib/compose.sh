@@ -101,7 +101,7 @@ prepare_and_build() {
   # logs`) silently default secrets to empty strings and break auth services.
   ln -sfn ../.env "$REPO_ROOT/docker/.env"
 
-  # --- Pull base images (sequential for slow Pi connections) ---
+  # --- Pull base images (sequential for slow appliance connections) ---
   log_info "Pulling base container images..."
   local images=(
     "postgres:16-alpine"
