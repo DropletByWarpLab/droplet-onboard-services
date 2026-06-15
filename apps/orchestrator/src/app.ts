@@ -83,6 +83,7 @@ import { createDeviceIdentityClient } from "./services/device-identity.client.js
 import { startRemindersPoller } from "./services/reminders-poller.js";
 import { startScreenQRPoller } from "./services/screen-qr.service.js";
 import { initPushDispatch } from "./services/push-dispatch.service.js";
+import { outboundEmailGate } from "./services/off-lan-gate.service.js";
 import {
   seedWorkspaceSettings,
   seedOffLanChannels,
@@ -361,29 +362,14 @@ export function createApp(prisma: PrismaClient) {
   // WARP-465 (D1): email backbone — accounts list, threads list +
   // detail, draft CRUD, queue-send. Send is gated by the WARP-467/468
   // off-LAN `outbound_email` allowlist channel; refusal raises 451.
-  // The OffLanAllowlistChannel model lands in WARP-467 — until that
-  // PR is in main, this gate falls back to default-allow on any error
-  // (missing table, missing key, etc.) so chat → reply doesn't 451 on
-  // a stack that hasn't merged E1 yet.
+  // WARP-467 is merged, so the gate now uses the typed Prisma read in
+  // off-lan-gate.service.ts and FAILS CLOSED (no egress) on any DB
+  // error or missing row — a sovereignty control must not default-open
+  // on a transient hiccup (mirrors ai-gateway/middleware/off_lan_gating.py).
   app.use(
     "/api",
     createEmailRouter(prisma, {
-      outboundEmailEnabled: async () => {
-        try {
-          // Use the raw client so the type checker doesn't trip when
-          // the model is absent on stacks pre-WARP-467.
-          const rows = await prisma.$queryRawUnsafe<
-            Array<{ enabled: boolean }>
-          >(
-            `SELECT enabled FROM "OffLanAllowlistChannel" WHERE key = 'outbound_email' LIMIT 1`,
-          );
-          if (rows.length === 0) return true;
-          return rows[0].enabled === true;
-        } catch {
-          // Table missing (pre-WARP-467) → default-allow.
-          return true;
-        }
-      },
+      outboundEmailEnabled: () => outboundEmailGate(prisma),
     }),
   );
 
