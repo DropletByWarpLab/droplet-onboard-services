@@ -232,7 +232,11 @@ async function narrowAllowedToolsForRole(
   if (isPrivilegedRole(role)) {
     return requestedAllowed;
   }
-  if (requestedAllowed?.length) {
+  // Distinguish `undefined` (no list supplied → fall through to the
+  // role default) from an explicit empty array (caller asked for ZERO
+  // tools). `.length` truthiness would conflate the two and grant the
+  // full non-write registry for an intentional `allowed_tools: []`.
+  if (requestedAllowed !== undefined) {
     return requestedAllowed.filter((n) => !WRITE_TOOLS.has(n));
   }
   // Default for unprivileged users: every tool the live MCP server
@@ -722,7 +726,12 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         mcp: mcpClient,
         // WARP-561: close over the requesting user's id so the gateway scopes
         // BYOK key resolution to their namespace for every agent-loop turn.
-        aiGateway: { chat: (chatReq) => aiGateway.chat(chatReq, (req as AuthedRequest).user?.id) },
+        // WARP-329: forward the agent loop's client-disconnect AbortSignal so an
+        // in-flight inference fetch is cancelled when the client goes away.
+        aiGateway: {
+          chat: (chatReq, signal) =>
+            aiGateway.chat(chatReq, signal, (req as AuthedRequest).user?.id),
+        },
         enhancement: createEnhancementDeps({
           aiGatewayGrpcUrl,
           defaultModel: defaultChatModel,
@@ -1065,10 +1074,20 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         let emptyCompletion = false;
         // WARP-329: detect client-side abort. req.on("close") fires when
         // the client disconnects mid-stream; we still finalize but flag
-        // the turn as aborted so the row reflects reality.
+        // the turn as aborted so the row reflects reality. The
+        // AbortController additionally tears down the in-flight work:
+        // its signal is threaded into runAgent → the ai-gateway fetch
+        // (cancelling inference) and is checked between agent-loop
+        // iterations / before each tool dispatch, so a disconnect stops
+        // the loop instead of letting it run (and fire write tools) in
+        // the background.
         let clientAborted = false;
+        const abortController = new AbortController();
         req.on("close", () => {
-          if (!res.writableEnded) clientAborted = true;
+          if (!res.writableEnded) {
+            clientAborted = true;
+            abortController.abort();
+          }
         });
         try {
           const streamResult = await runAgent({ ...deps, onEvent }, {
@@ -1084,6 +1103,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             toolCallContext,
             captureReasoning: chatReq.captureReasoning,
             citationContext,
+            // WARP-329 — cancel inference + halt the loop on disconnect.
+            signal: abortController.signal,
           });
           // WARP-458 — the agent loop populates message.reasoning
           // REGARDLESS of captureReasoning (only the wire-emit is
@@ -1092,14 +1113,27 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           // without re-running inference.
           liveReasoning = streamResult.message.reasoning ?? null;
         } catch (err) {
-          terminal = "failed";
-          // eslint-disable-next-line no-console
-          console.error("[llm/chat] agent loop failed:", err);
+          // Use the name-based check rather than instanceof DOMException:
+          // aligns with the codebase pattern and stays robust against
+          // error-wrapping layers that re-throw as a plain Error with
+          // name:"AbortError" (retry wrappers, SDK updates, etc.).
+          const isAbortErr =
+            err instanceof Error && (err as Error).name === "AbortError";
+          if (!isAbortErr) {
+            // Only non-abort errors mark the row as failed. For AbortErrors,
+            // terminal stays "completed" so the clientAborted guard below
+            // can correctly set "aborted" for mid-inference disconnects.
+            terminal = "failed";
+            // eslint-disable-next-line no-console
+            console.error("[llm/chat] agent loop failed:", err);
+          }
         } finally {
           res.end();
         }
         if (emptyCompletion) terminal = "failed";
-        if (clientAborted) terminal = "aborted";
+        // Preserve the model-error label when emptyCompletion and clientAborted
+        // are both set (e.g. context-window overflow races a client disconnect).
+        if (clientAborted && terminal !== "failed") terminal = "aborted";
         await finalizeAndNotify(terminal);
         return;
       }

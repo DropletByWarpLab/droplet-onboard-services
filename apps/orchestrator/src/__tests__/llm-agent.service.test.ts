@@ -785,6 +785,165 @@ describe("runAgent", () => {
     expect(listTools).not.toHaveBeenCalled();
   });
 
+  // An explicit `allowed_tools: []` means "no tools" — it must NOT fall
+  // through to advertising the full registry. `.length` truthiness used to
+  // conflate the empty array with `undefined` (no restriction).
+  it("allowed_tools: [] advertises ZERO tools (not the full set)", async () => {
+    const chat = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        choices: [{ message: { role: "assistant", content: "no tools here" } }],
+      }),
+    });
+    const deps: AgentDeps = {
+      mcp: {
+        listTools: vi.fn().mockResolvedValue([
+          { name: "list_cameras", description: "...", inputSchema: { type: "object", properties: {} } },
+          { name: "get_system_health", description: "...", inputSchema: { type: "object", properties: {} } },
+        ]),
+        callTool: vi.fn(),
+      } as never,
+      aiGateway: { chat } as never,
+    };
+    await runAgent(deps, {
+      model: "ollama/qwen3",
+      messages: [{ role: "user", content: "what time is it" }],
+      allowed_tools: [],
+    });
+    expect(chat).toHaveBeenCalledTimes(1);
+    expect((chat.mock.calls[0][0] as { tools: unknown[] }).tools).toEqual([]);
+  });
+
+  // The undefined case stays "no restriction → every tool", so the empty
+  // array fix doesn't accidentally clamp callers that omit allowed_tools.
+  it("allowed_tools undefined forwards the full tool set", async () => {
+    const chat = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        choices: [{ message: { role: "assistant", content: "done" } }],
+      }),
+    });
+    const deps: AgentDeps = {
+      mcp: {
+        listTools: vi.fn().mockResolvedValue([
+          { name: "list_cameras", description: "...", inputSchema: { type: "object", properties: {} } },
+          { name: "get_system_health", description: "...", inputSchema: { type: "object", properties: {} } },
+        ]),
+        callTool: vi.fn(),
+      } as never,
+      aiGateway: { chat } as never,
+    };
+    await runAgent(deps, {
+      model: "ollama/qwen3",
+      messages: [{ role: "user", content: "list cameras" }],
+      // allowed_tools intentionally omitted
+    });
+    expect((chat.mock.calls[0][0] as { tools: unknown[] }).tools).toHaveLength(2);
+  });
+
+  // WARP-329 — client disconnect cancellation. The signal is forwarded to
+  // the ai-gateway fetch so an in-flight inference call is cancelled.
+  it("forwards req.signal to the ai-gateway chat call", async () => {
+    const chat = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        choices: [{ message: { role: "assistant", content: "ok" } }],
+      }),
+    });
+    const deps: AgentDeps = {
+      mcp: {
+        listTools: vi.fn().mockResolvedValue([]),
+        callTool: vi.fn(),
+      } as never,
+      aiGateway: { chat } as never,
+    };
+    const controller = new AbortController();
+    await runAgent(deps, {
+      model: "ollama/qwen3",
+      messages: [{ role: "user", content: "hi" }],
+      signal: controller.signal,
+    });
+    // Second positional arg is the AbortSignal.
+    expect(chat.mock.calls[0][1]).toBe(controller.signal);
+  });
+
+  // WARP-329 — an already-aborted signal bails before the first inference
+  // call, so a client that disconnected before the loop started burns zero
+  // inference.
+  it("bails before issuing any inference call when the signal is already aborted", async () => {
+    const chat = vi.fn();
+    const deps: AgentDeps = {
+      mcp: {
+        listTools: vi.fn().mockResolvedValue([]),
+        callTool: vi.fn(),
+      } as never,
+      aiGateway: { chat } as never,
+    };
+    const controller = new AbortController();
+    controller.abort();
+    const result = await runAgent(deps, {
+      model: "ollama/qwen3",
+      messages: [{ role: "user", content: "hi" }],
+      signal: controller.signal,
+    });
+    expect(chat).not.toHaveBeenCalled();
+    expect(result.stop_reason).toBe("error");
+    expect(result.error).toBe("client_aborted");
+  });
+
+  // WARP-329 — a disconnect that lands while a tool turn is queued must
+  // stop BEFORE dispatching the (possibly write) tool to the MCP child.
+  it("does not dispatch a tool once the client has disconnected mid-turn", async () => {
+    const controller = new AbortController();
+    const callTool = vi.fn();
+    // Single turn asking for a tool call; the client disconnects as soon as
+    // the inference response arrives, before the dispatch loop runs.
+    const chat = vi.fn().mockImplementationOnce(async () => {
+      controller.abort();
+      return {
+        ok: true,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "c1",
+                    type: "function",
+                    function: { name: "block_network_device", arguments: "{}" },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      };
+    });
+    const deps: AgentDeps = {
+      mcp: {
+        listTools: vi.fn().mockResolvedValue([
+          {
+            name: "block_network_device",
+            description: "...",
+            inputSchema: { type: "object", properties: {} },
+          },
+        ]),
+        callTool,
+      } as never,
+      aiGateway: { chat } as never,
+    };
+    const result = await runAgent(deps, {
+      model: "ollama/qwen3",
+      messages: [{ role: "user", content: "block the router" }],
+      signal: controller.signal,
+    });
+    expect(callTool).not.toHaveBeenCalled();
+    expect(result.stop_reason).toBe("error");
+    expect(result.error).toBe("client_aborted");
+  });
+
   it("tool_choice defaults to 'auto' and forwards the full tool set when unset", async () => {
     const chat = vi.fn().mockResolvedValue({
       ok: true,
