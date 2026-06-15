@@ -613,6 +613,25 @@ class TestVoskWakeWordDetector:
         det = VoskWakeWordDetector(wake_word="hey_droplet", model_path=str(tmp_path))
         assert det.predict(_silence_frame()) == {}
 
+    def test_fires_on_deliberately_spaced_words(self, monkeypatch, tmp_path):
+        # A re-try after a missed wake: "hey … droplet" with a ~0.8 s beat
+        # between the words. The gap is above the old 0.6 s bound but it's
+        # a single confident alignment, not two separate ones — the 1.2 s
+        # gap bound must admit it (the whole phrase still spans < 2.0 s).
+        self._install_fake_vosk(
+            monkeypatch,
+            accept_seq=[True],
+            result_obj={
+                "text": "hey droplet",
+                "result": [
+                    {"word": "hey", "conf": 0.96, "start": 0.10, "end": 0.30},
+                    {"word": "droplet", "conf": 0.92, "start": 1.10, "end": 1.50},
+                ],
+            },
+        )
+        det = VoskWakeWordDetector(wake_word="hey_droplet", model_path=str(tmp_path))
+        assert det.predict(_silence_frame()) == {"hey_droplet": 0.92}
+
     def test_fires_with_plausible_word_timings(self, monkeypatch, tmp_path):
         # A normally spoken "hey droplet" (~0.8 s end to end, small beat
         # between the words) passes the geometry gate and scores min-conf.

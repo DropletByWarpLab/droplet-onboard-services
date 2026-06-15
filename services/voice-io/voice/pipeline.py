@@ -641,6 +641,15 @@ class WakePipeline:
                 self._play_pcm(audio)
             except Exception as exc:
                 self._set_error(f"playback failed: {exc}")
+                # Mid-playback failure still drove the speaker for some of
+                # the reply, so the same anti-feedback window applies: the
+                # partial Piper output can bleed into the mic and score
+                # above threshold. Arm the post-speak cooldown here too —
+                # _restore_state_after_speak (which normally sets it) does
+                # NOT run on this path because _set_error moved us out of
+                # 'speaking' into 'error'.
+                with self._lock:
+                    self._speak_ended_at = time.time()
                 return {"ok": False, "error": str(exc), "duration_s": audio.duration_s}
 
             self._restore_state_after_speak(prev_state)
@@ -985,6 +994,16 @@ class WakePipeline:
             # Anti-feedback: while we're driving the speaker, ignore
             # incoming mic frames entirely. Piper's voice would otherwise
             # tip the wake detector on a self-spoken "hey jarvis ...".
+            return
+        if state in ("error", "no_mic"):
+            # Latched fault states. Do NOT auto-resume wake detection from
+            # here: a wake fire would overwrite _state with 'wake_detected'
+            # while leaving the now-stale _error_message in place, masking
+            # the fault on /voice/status. Recovery is an explicit transition
+            # — the supervising _loop re-opens the stream and calls
+            # _set_state("listening") after a genuine device recovery; an
+            # 'error' is cleared only by a deliberate _set_state/restart.
+            # Until then, drop frames silently.
             return
 
         # state == "listening" (or 'loading' on the first tick — harmless,
