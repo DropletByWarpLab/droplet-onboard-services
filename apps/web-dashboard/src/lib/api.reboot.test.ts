@@ -95,5 +95,22 @@ describe("rebootRouter (WARP-871)", () => {
     await expect(rebootRouter()).rejects.toThrow(
       /Unexpected 202 response: missing confirmationToken or operation/,
     );
+    // It must NOT silently treat the 202 as success — only the reboot POST runs,
+    // no /command/confirm follow-up.
+    expect(authFetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws on a 202 'confirmation_required' that omits BOTH confirm fields (no silent success)", async () => {
+    // rebootRouter() checks res.status === 202 before res.ok, so a 202 always
+    // enters the status guard and never reaches the res.ok branch. A malformed
+    // 202 body (missing confirmationToken or operation) throws here rather than
+    // silently succeeding via the res.ok path.
+    authFetchMock.mockResolvedValueOnce(
+      res({ ok: true, status: 202, json: { status: "confirmation_required" } }),
+    );
+    await expect(rebootRouter()).rejects.toThrow(
+      /Unexpected 202 response: missing confirmationToken or operation/,
+    );
+    expect(authFetchMock).toHaveBeenCalledTimes(1);
   });
 });
