@@ -270,7 +270,9 @@ async function main() {
     logger.warn(
       "ROUTING_MODE=disabled — skipping router-dependent schedulers " +
         "(schedule-ticker, egress-reconciler, device-reconcile, ap-discovery). " +
-        "Set ROUTING_MODE=real or mock to enable them.",
+        "API writes to schedule/phone-home/firewall state will be persisted to the " +
+        "database but will NOT be enforced on the router until ROUTING_MODE is set " +
+        "to real or mock.",
     );
   }
 
