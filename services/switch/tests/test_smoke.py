@@ -34,3 +34,12 @@ def test_create_driver_rejects_unknown_type(monkeypatch):
 
     with pytest.raises(ValueError, match="Unknown SWITCH_DRIVER"):
         create_driver()
+
+
+def test_keepalive_loop_removed():
+    """WARP-221: the banned `while True` keepalive loop is gone, replaced
+    by the apscheduler-fired tick wrapper."""
+    from drivers.lantronix import LantronixDriver
+
+    assert not hasattr(LantronixDriver, "_keepalive_loop")
+    assert hasattr(LantronixDriver, "_keepalive_tick")

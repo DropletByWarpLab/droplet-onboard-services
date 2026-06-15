@@ -32,10 +32,13 @@ import logging
 import os
 import re
 import time
+from datetime import datetime
 from urllib.parse import urlparse
 
 import httpx
 import paho.mqtt.client as mqtt
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
@@ -551,28 +554,44 @@ async def scan_and_discover() -> None:
         })
 
 
-# --- Background task ---
+# --- Background scheduling (WARP-221) ---
+#
+# The periodic discovery scan runs on an apscheduler AsyncIOScheduler
+# instead of a hand-rolled ``while True: ... await asyncio.sleep(N)`` loop
+# (banned per CLAUDE.md "no `while True` scheduling loops" rule; the
+# canonical replacement is services/file-indexer/scheduler_service.py,
+# WARP-218). The scheduler binds to uvicorn's running event loop when
+# ``start()`` is called from the FastAPI startup handler.
 
-_discovery_task: asyncio.Task | None = None
+_scheduler: AsyncIOScheduler | None = None
 
 
-async def discovery_loop() -> None:
-    """Continuous discovery loop running in background."""
-    logger.info("Camera discovery loop started (interval: %ds)", SCAN_INTERVAL)
+async def _wait_for_frigate() -> None:
+    """One-shot, bounded warm-up: wait for Frigate to come up.
 
-    # Wait for Frigate to be ready
+    This is a terminating ``for`` loop, not a scheduling loop, so it is
+    allowed under WARP-221. Mirrors the readiness wait the old discovery
+    loop did before its first scan.
+    """
     for _ in range(30):
         if await frigate.health_check():
-            break
+            return
         logger.info("Waiting for Frigate to be ready...")
         await asyncio.sleep(5)
 
-    while True:
-        try:
-            await scan_and_discover()
-        except Exception as e:
-            logger.error("Discovery scan error: %s", e)
-        await asyncio.sleep(SCAN_INTERVAL)
+
+async def _scan_job() -> None:
+    """Scheduler job wrapper: run one discovery scan, log-but-swallow errors.
+
+    Preserves the old loop's contract that a single scan failure is
+    logged via the service logger and never propagates (apscheduler would
+    otherwise log it at ERROR through its own job-error handler, losing
+    the 'Discovery scan error' grep target).
+    """
+    try:
+        await scan_and_discover()
+    except Exception as e:  # noqa: BLE001 — keep the scheduler ticking
+        logger.error("Discovery scan error: %s", e)
 
 
 # --- FastAPI app ---
@@ -611,7 +630,7 @@ async def _reconcile_with_frigate() -> None:
 
 @app.on_event("startup")
 async def startup():
-    global mqtt_client, _discovery_task
+    global mqtt_client, _scheduler
     try:
         mqtt_client = _connect_mqtt()
         logger.info("Connected to MQTT broker")
@@ -628,13 +647,34 @@ async def startup():
         logger.info("Waiting for Frigate to be ready...")
         await asyncio.sleep(5)
 
-    _discovery_task = asyncio.create_task(discovery_loop())
+    # Bounded warm-up wait so the first scan doesn't fire before Frigate
+    # is up (the old loop did this inline before its first iteration).
+    await _wait_for_frigate()
+
+    # WARP-221: periodic discovery runs on apscheduler, not a while-True
+    # loop. ``next_run_time=datetime.now()`` preserves the old behavior of
+    # running the first scan immediately rather than waiting one full
+    # SCAN_INTERVAL. coalesce=True + max_instances=1 stop a slow scan from
+    # overlapping or stampeding the next tick.
+    _scheduler = AsyncIOScheduler()
+    _scheduler.add_job(
+        _scan_job,
+        trigger=IntervalTrigger(seconds=SCAN_INTERVAL),
+        id="camera_discovery_scan",
+        name="ONVIF/RTSP camera discovery scan",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        next_run_time=datetime.now(),
+    )
+    _scheduler.start()
+    logger.info("Camera discovery scheduler started (interval: %ds)", SCAN_INTERVAL)
 
 
 @app.on_event("shutdown")
 async def shutdown():
-    if _discovery_task:
-        _discovery_task.cancel()
+    if _scheduler:
+        _scheduler.shutdown(wait=False)
     if mqtt_client:
         mqtt_client.loop_stop()
         mqtt_client.disconnect()

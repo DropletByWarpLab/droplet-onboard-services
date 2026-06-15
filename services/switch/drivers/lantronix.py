@@ -22,6 +22,8 @@ import time
 from typing import Any
 
 import httpx
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.interval import IntervalTrigger
 
 from .base import (
     SwitchDriver,
@@ -75,9 +77,11 @@ class LantronixDriver(SwitchDriver):
       (every successful re-auth), and `_request()` (every successful
       application call). `is_connected()` / the orchestrator health probe
       read from this cache rather than hitting the switch.
-    * The background `_keepalive_loop` task pings /stat/sysinfo on a cadence
-      below the switch idle timeout. It doesn't reset `_last_ok_at` directly
-      — it calls `_request()`, which does.
+    * A background apscheduler job (`_keepalive_tick`) pings /stat/sysinfo on
+      a cadence below the switch idle timeout. It doesn't reset `_last_ok_at`
+      directly — it calls `_ping()` → `_request()`, which does. (WARP-221:
+      replaced the old `while True` keepalive loop with AsyncIOScheduler, the
+      canonical pattern in services/file-indexer/scheduler_service.py.)
     """
 
     def __init__(self, host: str, port: int, username: str, password: str):
@@ -87,13 +91,16 @@ class LantronixDriver(SwitchDriver):
         self._password = password
         self._client: httpx.AsyncClient | None = None
         self._auth_lock = asyncio.Lock()
-        self._keepalive_task: asyncio.Task | None = None
+        self._keepalive_scheduler: AsyncIOScheduler | None = None
         self._last_ok_at: float = 0.0
         self._last_auth_failure_at: float = 0.0
 
     # --- Lifecycle ---
 
     async def connect(self) -> None:
+        # Must be awaited from inside a running asyncio event loop (it is —
+        # the FastAPI lifespan awaits it on uvicorn's loop). AsyncIOScheduler
+        # binds to the running loop when .start() is called below.
         logger.warning(
             "TLS certificate verification disabled for switch at %s:%d "
             "(self-signed cert expected). Set SWITCH_CA_CERT to enable verification.",
@@ -119,17 +126,30 @@ class LantronixDriver(SwitchDriver):
         # Mark the startup auth as a fresh ok so is_connected() reports true
         # before the first keepalive tick has landed.
         self._last_ok_at = time.monotonic()
-        self._keepalive_task = asyncio.create_task(
-            self._keepalive_loop(), name="lantronix-keepalive"
+        # WARP-221: keepalive runs on apscheduler, not a while-True loop.
+        # coalesce=True + max_instances=1 stop a slow ping from overlapping
+        # or stampeding the next tick.
+        self._keepalive_scheduler = AsyncIOScheduler()
+        self._keepalive_scheduler.add_job(
+            self._keepalive_tick,
+            trigger=IntervalTrigger(seconds=_KEEPALIVE_INTERVAL_S),
+            id="lantronix_keepalive",
+            name="Lantronix switch session keepalive",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+        self._keepalive_scheduler.start()
+        logger.info(
+            "Keepalive scheduled (interval=%.1fs, liveness window=%.1fs)",
+            _KEEPALIVE_INTERVAL_S, _LIVENESS_WINDOW_S,
         )
         logger.info("Connected to Lantronix switch at %s:%d", self._host, self._port)
 
     async def disconnect(self) -> None:
-        if self._keepalive_task:
-            self._keepalive_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._keepalive_task
-            self._keepalive_task = None
+        if self._keepalive_scheduler:
+            self._keepalive_scheduler.shutdown(wait=False)
+            self._keepalive_scheduler = None
         if self._client:
             await self._client.aclose()
             self._client = None
@@ -268,30 +288,20 @@ class LantronixDriver(SwitchDriver):
                 self._last_auth_failure_at = time.monotonic()
                 raise ConnectionLost(f"Timeout connecting to switch: {exc}")
 
-    async def _keepalive_loop(self) -> None:
-        """Ping /stat/sysinfo at a cadence below the switch's idle timeout.
+    async def _keepalive_tick(self) -> None:
+        """One scheduler-fired keepalive: ping /stat/sysinfo, swallow errors.
 
-        Runs forever until cancelled by `disconnect()`. Exceptions are
-        logged but never propagate — losing the switch for a while is
-        surfaced via `is_connected()` going False, not by crashing the
-        task.
+        Fired every `_KEEPALIVE_INTERVAL_S` by the AsyncIOScheduler set up in
+        `connect()` (WARP-221 — replaced the old `while True` loop). The
+        IntervalTrigger waits one full interval before its first fire, which
+        matches the old loop's "sleep first, then ping" cadence. Exceptions
+        are logged but never propagate — losing the switch for a while is
+        surfaced via `is_connected()` going False, not by crashing.
         """
-        logger.info(
-            "Keepalive started (interval=%.1fs, liveness window=%.1fs)",
-            _KEEPALIVE_INTERVAL_S, _LIVENESS_WINDOW_S,
-        )
         try:
-            while True:
-                await asyncio.sleep(_KEEPALIVE_INTERVAL_S)
-                try:
-                    await self._ping()
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:  # noqa: BLE001 — any failure is interesting
-                    logger.warning("Keepalive ping failed: %s", exc)
-        except asyncio.CancelledError:
-            logger.info("Keepalive stopped")
-            raise
+            await self._ping()
+        except Exception as exc:  # noqa: BLE001 — any failure is interesting
+            logger.warning("Keepalive ping failed: %s", exc)
 
     async def _ping(self) -> None:
         """One keepalive cycle: GET sysinfo, re-auth if expired, record time."""
