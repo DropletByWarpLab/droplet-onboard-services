@@ -514,7 +514,7 @@ export function createSetupRouter(prisma: PrismaClient): Router {
         return;
       }
       res.status(400).json({
-        error: "That claim code didn't match. Check the PyPortal display and try again.",
+        error: "That claim code didn't match. Check the display and try again.",
         code: "CLAIM_CODE_INVALID",
       });
     } catch (err) {

@@ -11,7 +11,7 @@
  *     value; the device-identity service owns the real serial-bound id).
  *   - `compute` / `storage` / `display` are PLACEHOLDER descriptors. The real
  *     sources are the device-bridge inventory (drives), the model-readiness
- *     service (compute), and the PyPortal display-service — none of which
+ *     service (compute), and the status-display service — none of which
  *     expose a claim-time summary yet. They are FOLLOW-UPS.
  *   - `network` is the ONLY field with a live source: the routing service's
  *     `/system/info` is router-only, so we BEST-EFFORT enrich it via
@@ -119,7 +119,7 @@ export async function getApplianceContract(): Promise<ApplianceContract> {
     network,
     display: {
       label: "Display",
-      value: "PyPortal lid display",
+      value: "Front-panel display",
       online: true,
     },
     supply_chain: {

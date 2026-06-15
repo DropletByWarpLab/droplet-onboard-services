@@ -21,7 +21,7 @@ export const FIXTURE_APPLIANCE_CONTRACT = {
   compute: { label: "Compute", value: "Local AI compute", online: true },
   storage: { label: "Storage", value: "Encrypted at rest", online: true },
   network: { label: "Network", value: "On your local network", online: true },
-  display: { label: "Display", value: "PyPortal lid display", online: true },
+  display: { label: "Display", value: "Front-panel display", online: true },
   supply_chain: {
     taa_compliant: true,
     ndaa_889_clear: true,
