@@ -497,13 +497,27 @@ case "$OP" in
       --raid-devices="${#MEMBERS[@]}" --run "${MEMBERS[@]}"
     ;;
   pool_destroy)
-    # Stop the array, then wipe each member's md superblock so the disk is
-    # reusable and no stale array re-assembles on the next boot.
-    mdadm --stop "$MD"
+    # Validate $DEVICE is a bare md name (e.g. md0) to prevent path-traversal
+    # attacks where a crafted value like "md0/../md1" passes the confirm-phrase
+    # gate (basename reduces it to "md1") but the sysfs glob resolves to the
+    # wrong array, stopping and zeroing unintended members.
+    [[ "$DEVICE" =~ ^md[0-9]+$ ]] || die "invalid device '$DEVICE': must match md[0-9]+"
+    # Capture members BEFORE --stop, then stop, then wipe each member's md
+    # superblock so the disk is reusable and no stale array re-assembles on the
+    # next boot. Order matters: `mdadm --stop` tears down the md device and
+    # removes /sys/block/$DEVICE, so the slaves glob must be read first — read
+    # it after --stop and it matches nothing, leaving every superblock intact.
+    # >>> pool_destroy member wipe (capture members BEFORE --stop)
+    members=()
     for slave in /sys/block/"$DEVICE"/slaves/*; do
       [ -e "$slave" ] || continue
-      mdadm --zero-superblock "/dev/$(basename "$slave")" || true
+      members+=("/dev/$(basename "$slave")")
     done
+    mdadm --stop "$MD" || true
+    for member in "${members[@]}"; do
+      mdadm --zero-superblock "$member" || true
+    done
+    # <<< pool_destroy member wipe
     ;;
   pool_format)
     "mkfs.${FSTYPE:-ext4}" "$MD"

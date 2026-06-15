@@ -22,6 +22,7 @@
     "test:image": "bash tests/image-pipeline.test.sh",
     "test:backup": "bash tests/device-backup.test.sh",
     "test:openwrt-attach": "bash tests/openwrt-attach-firewall.test.sh",
+    "test:storage-pool": "bash tests/storage-pool-destroy-superblock.test.sh",
     "test:integration": "cd tests && npm run test:docker",
     "lint": "turbo run lint",
     "gen:anchor-schema": "node scripts/gen-anchor-schema.mjs"
