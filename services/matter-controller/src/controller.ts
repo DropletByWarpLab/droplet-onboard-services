@@ -415,12 +415,16 @@ export function createMatterControllerCore(
         "Starting Matter device discovery (timeout: %dms)",
         timeoutMs,
       );
-      const timeoutSec = (timeoutMs / 1000) as Duration;
+      // matter.js Duration is stored in milliseconds (see @matter/general
+      // time/Duration.ts), so pass timeoutMs straight through — dividing by
+      // 1000 here previously turned a 5000ms scan into a 5ms one that found
+      // nothing.
+      const timeout = timeoutMs as Duration;
       const devices = await ctl.discoverCommissionableDevices(
         {} as any, // Empty identifier = discover all
         undefined,
         undefined,
-        timeoutSec,
+        timeout,
       );
       return devices.map(commissionableToDiscovered);
     },
