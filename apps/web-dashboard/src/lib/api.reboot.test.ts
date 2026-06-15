@@ -101,9 +101,10 @@ describe("rebootRouter (WARP-871)", () => {
   });
 
   it("throws on a 202 'confirmation_required' that omits BOTH confirm fields (no silent success)", async () => {
-    // A 202 satisfies res.ok, so a confirm-required body that's missing the
-    // token/operation would otherwise fall through to the res.ok branch and be
-    // reported as an immediate (op-less) success. It must be treated as an error.
+    // rebootRouter() checks res.status === 202 before res.ok, so a 202 always
+    // enters the status guard and never reaches the res.ok branch. A malformed
+    // 202 body (missing confirmationToken or operation) throws here rather than
+    // silently succeeding via the res.ok path.
     authFetchMock.mockResolvedValueOnce(
       res({ ok: true, status: 202, json: { status: "confirmation_required" } }),
     );

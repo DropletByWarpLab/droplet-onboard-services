@@ -996,7 +996,10 @@ function RouterRebootCard({
     setStatus({ kind: "rebooting" });
     try {
       await rebootRouter();
-      // The router goes down for ~30-90s; leave the calm "restarting" state up.
+      // Command accepted — clear rebooting flag so subsequent outages
+      // (router going offline, coming back) are surfaced normally by the
+      // SWR poll instead of being masked by a permanent rebooting=true.
+      setStatus({ kind: "idle" });
     } catch (e) {
       setStatus({
         kind: "error",
