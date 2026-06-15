@@ -127,4 +127,12 @@ describe("POST /api/pm/onboard RBAC", () => {
     expect(res.body.workspace).toMatchObject({ slug: "home" });
     expect(res.body.project).toMatchObject({ id: "p1" });
   });
+
+  it("lets an admin through the guard (not 403)", async () => {
+    const res = await request(makeApp("admin"))
+      .post("/api/pm/onboard")
+      .send({ workspace_name: "Home", project_name: "Inbox" });
+
+    expect(res.status).not.toBe(403);
+  });
 });

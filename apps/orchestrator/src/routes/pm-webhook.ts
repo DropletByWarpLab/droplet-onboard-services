@@ -50,6 +50,24 @@ function rateLimitKey(ip: string): string {
   return `ratelimit:pm-webhook:${ip}`;
 }
 
+/**
+ * Returns true for RFC-1918 private addresses and loopback.
+ * In the single-box topology, Plane's pm-api container delivers webhooks
+ * from a Docker-internal IP (172.x.x.x / 10.x.x.x), so all deliveries
+ * share one req.ip and would exhaust a single rate-limit bucket during
+ * bulk operations (sprint closures, batch imports). Skip rate-limiting
+ * for these internal origins.
+ */
+function isInternalIp(ip: string): boolean {
+  return (
+    ip === "127.0.0.1" ||
+    ip === "::1" ||
+    /^10\./.test(ip) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(ip) ||
+    /^192\.168\./.test(ip)
+  );
+}
+
 /** Plane's webhook signature header name. */
 const SIGNATURE_HEADER = "x-plane-signature";
 
@@ -89,12 +107,17 @@ export function createPmWebhookRouter(): Router {
       // on signature comparison. `cacheIncr` is atomic (INCR + EXPIRE) and
       // returns null on a Redis error, in which case we fail OPEN (treat as
       // under-limit) so a down cache never drops valid Plane events.
+      // Internal Docker IPs (Plane container on the same compose network)
+      // are exempt: they share a single req.ip and bulk operations would
+      // exhaust the bucket and silently drop legitimate webhook events.
       const ip = req.ip ?? "unknown";
-      const count = await cacheIncr(rateLimitKey(ip), RATE_LIMIT_WINDOW_SEC);
-      if (count !== null && count > RATE_LIMIT_MAX) {
-        logger.warn({ event_type: "webhook_rate_limited", ip }, "pm webhook rate limit exceeded");
-        res.setHeader("Retry-After", String(RATE_LIMIT_WINDOW_SEC));
-        return res.status(429).json({ error: "rate limit exceeded" });
+      if (!isInternalIp(ip)) {
+        const count = await cacheIncr(rateLimitKey(ip), RATE_LIMIT_WINDOW_SEC);
+        if (count !== null && count > RATE_LIMIT_MAX) {
+          logger.warn({ event_type: "webhook_rate_limited", ip }, "pm webhook rate limit exceeded");
+          res.setHeader("Retry-After", String(RATE_LIMIT_WINDOW_SEC));
+          return res.status(429).json({ error: "rate limit exceeded" });
+        }
       }
 
       const signature = req.header(SIGNATURE_HEADER);
