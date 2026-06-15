@@ -22,6 +22,7 @@
  * mocked, in-memory Prisma mock).
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { createHash } from "node:crypto";
 import request from "supertest";
 import express from "express";
 import cookieParser from "cookie-parser";
@@ -49,7 +50,10 @@ vi.mock("../services/cache.service.js", () => ({
   cacheDel: vi.fn(async (key: string) => {
     cacheStore.delete(key);
   }),
-  cacheIncr: vi.fn(async (key: string) => {
+  // cacheIncr is a true fixed-window counter (finding 5); the in-memory double
+  // doesn't model TTL expiry, so the window semantics are a no-op here — the
+  // counter semantics under test (escalating lockout) are what we exercise.
+  cacheIncr: vi.fn(async (key: string, _ttl?: number) => {
     const next = ((cacheStore.get(key) as number | undefined) ?? 0) + 1;
     cacheStore.set(key, next);
     return next;
@@ -105,11 +109,47 @@ vi.mock("../services/activity.singleton.js", () => ({
   recordActivity: vi.fn().mockResolvedValue(undefined),
 }));
 
+// TOTP second-factor: verifyTotpCode is the gate the finding-1 brute-force
+// targets. Default to a wrong code (false) so each attempt is a 2FA failure.
+const verifyTotpCode = vi.fn().mockResolvedValue(false);
+vi.mock("../services/totp.service.js", () => ({
+  TOTP_ISSUER: "Droplet",
+  generateTotpEnrollment: vi.fn(),
+  encryptTotpSecret: vi.fn(),
+  decryptTotpSecret: vi.fn(() => "JBSWY3DPEHPK3PXP"),
+  verifyTotpCode: (...a: unknown[]) => verifyTotpCode(...a),
+}));
+
+vi.mock("../services/recovery.service.js", () => ({
+  generateRecoveryCodes: vi.fn(),
+  findMatchingRecoveryCodeHash: vi.fn().mockResolvedValue(null),
+}));
+
 vi.mock("../services/brain-memory.service.js", () => ({
   purgeUserData: vi.fn().mockResolvedValue({ items: 0, chunks: 0 }),
 }));
 
+// Capture logger.warn so finding 3 (per-IP gate inactive when the caller IP is
+// unresolved) can assert the degraded state is observable. pino is the only
+// logger the auth route constructs at module load.
+const loggerWarn = vi.hoisted(() => vi.fn());
+vi.mock("pino", () => ({
+  default: () => ({
+    info: vi.fn(),
+    warn: loggerWarn,
+    error: vi.fn(),
+    debug: vi.fn(),
+  }),
+}));
+
 import { createPublicAuthRouter, loginBackoffSeconds } from "./auth.js";
+
+/** sha256 hex of the normalized login email — the account key namespace must
+ *  hash the email (finding 4), never interpolate it as plaintext. */
+function accountFailsKey(email: string): string {
+  const hashed = createHash("sha256").update(email).digest("hex");
+  return `ratelimit:login:account:fails:${hashed}`;
+}
 
 interface UserRow {
   id: string;
@@ -126,7 +166,10 @@ interface UserRow {
   updatedAt: Date;
 }
 
-function createPrismaMock(seed: UserRow[] = []) {
+function createPrismaMock(
+  seed: UserRow[] = [],
+  totpCred: { userId: string; confirmedAt: Date | null; secretEnc: string } | null = null,
+) {
   const users: UserRow[] = [...seed];
   const self: any = {};
   self.user = {
@@ -138,7 +181,15 @@ function createPrismaMock(seed: UserRow[] = []) {
       return null;
     }),
   };
-  self.totpCredential = { findUnique: vi.fn(async () => null) };
+  self.totpCredential = {
+    findUnique: vi.fn(async ({ where }: { where: any }) =>
+      totpCred && totpCred.userId === where.userId ? totpCred : null,
+    ),
+  };
+  self.recoveryCode = {
+    findMany: vi.fn(async () => []),
+    updateMany: vi.fn(async () => ({ count: 0 })),
+  };
   self._users = users;
   return self;
 }
@@ -249,6 +300,162 @@ describe("WARP-579 — POST /auth/login brute-force throttle", () => {
         .send({ email: "stefan@warp.test", password: `again-${i}` });
       expect(res.status).toBe(401);
     }
+  });
+
+  // ── Finding 1 — TOTP brute-force must accrue toward the same lockout ──────
+  it("repeated wrong-TOTP-after-correct-password attempts accrue toward lockout and eventually 429", async () => {
+    // Password is ALWAYS correct; the user has TOTP enabled; every code is wrong.
+    verifyPassword.mockResolvedValue(true);
+    verifyTotpCode.mockResolvedValue(false);
+    const prisma = createPrismaMock([stefan], {
+      userId: stefan.id,
+      confirmedAt: new Date(),
+      secretEnc: "enc",
+    });
+    const app = buildApp(prisma);
+
+    // Per-account free tier is 5 → the 6th wrong-TOTP attempt arms the lock.
+    for (let i = 0; i < 6; i++) {
+      const res = await request(app)
+        .post("/api/auth/login")
+        .send({ email: "stefan@warp.test", password: "correct-horse", totp: `00000${i}` });
+      // The password is right but the second factor fails → 401 TOTP_REQUIRED.
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe("TOTP_REQUIRED");
+    }
+
+    // The 7th attempt is throttled at the gate BEFORE any verify work — the
+    // wrong-TOTP attempts accrued toward the same lockout that guards the
+    // password gate, so the attacker cannot spin through ~10^6 codes for free.
+    const locked = await request(app)
+      .post("/api/auth/login")
+      .send({ email: "stefan@warp.test", password: "correct-horse", totp: "999999" });
+    expect(locked.status).toBe(429);
+    expect(locked.body.code).toBe("TOO_MANY_ATTEMPTS");
+    // 6 real password verifies — the throttled 7th short-circuited before verify.
+    expect(verifyPassword).toHaveBeenCalledTimes(6);
+
+    // A fully-successful login (right password AND right code) still clears the
+    // account counter so a legit user isn't held under a stale lock — prove a
+    // fresh wrong-TOTP run after success starts from zero (would otherwise be
+    // already-locked).
+    cacheStore.clear();
+    verifyTotpCode.mockResolvedValueOnce(true);
+    const ok = await request(app)
+      .post("/api/auth/login")
+      .send({ email: "stefan@warp.test", password: "correct-horse", totp: "123456" });
+    expect(ok.status).toBe(200);
+    // Account counter cleared on full success: 5 more wrong-TOTP attempts stay
+    // inside the free tier (no lock yet).
+    verifyTotpCode.mockResolvedValue(false);
+    for (let i = 0; i < 5; i++) {
+      const res = await request(app)
+        .post("/api/auth/login")
+        .send({ email: "stefan@warp.test", password: "correct-horse", totp: `11111${i}` });
+      expect(res.status).toBe(401);
+    }
+  });
+
+  // ── Finding 2 — one account's success must not zero the shared-IP gate ────
+  it("a successful login for account A does NOT reset the per-IP counter throttling account B on the same IP", async () => {
+    const attacker: UserRow = {
+      ...stefan,
+      id: "u-uuid-attacker-9999",
+      username: "mallory",
+      email: "mallory@warp.test",
+      nextcloudUsername: "mallory",
+    };
+    const prisma = createPrismaMock([attacker]);
+    const app = buildApp(prisma);
+
+    // Credential-stuffing spray: 9 failures against 9 DISTINCT victim emails
+    // from the shared NAT IP. Distinct emails keep every per-ACCOUNT counter at
+    // 1 (well under the account free tier of 5), so ONLY the per-IP counter
+    // climbs. Per-IP free tier is 10 → no lock yet (the IP counter is at 9).
+    verifyPassword.mockResolvedValue(false);
+    for (let i = 0; i < 9; i++) {
+      const res = await request(app)
+        .post("/api/auth/login")
+        .send({ email: `victim-${i}@warp.test`, password: "spray" });
+      expect(res.status).toBe(401);
+    }
+
+    // The attacker logs into their OWN account from the same IP. Pre-fix this
+    // wiped the shared per-IP counter; now it must only clear the attacker's
+    // ACCOUNT keys and leave the per-IP failure state intact.
+    verifyPassword.mockResolvedValue(true);
+    const ownLogin = await request(app)
+      .post("/api/auth/login")
+      .send({ email: "mallory@warp.test", password: "attacker-correct" });
+    expect(ownLogin.status).toBe(200);
+
+    // Two more distinct-email failures → IP counter reaches 11, arming the
+    // per-IP lock; the NEXT attempt is throttled. (If the attacker's success
+    // had zeroed the IP counter, the IP count would be 2 here and never lock.)
+    verifyPassword.mockResolvedValue(false);
+    for (let i = 9; i < 11; i++) {
+      const res = await request(app)
+        .post("/api/auth/login")
+        .send({ email: `victim-${i}@warp.test`, password: "spray" });
+      expect(res.status).toBe(401);
+    }
+
+    const throttled = await request(app)
+      .post("/api/auth/login")
+      .send({ email: "victim-final@warp.test", password: "spray" });
+    expect(throttled.status).toBe(429);
+    expect(throttled.body.code).toBe("TOO_MANY_ATTEMPTS");
+  });
+
+  // ── Finding 4 — account Redis key is the sha256 hash, not plaintext email ─
+  it("uses the sha256-hashed account key, never the plaintext email", async () => {
+    verifyPassword.mockResolvedValue(false);
+    const prisma = createPrismaMock([stefan]);
+    const app = buildApp(prisma);
+
+    await request(app)
+      .post("/api/auth/login")
+      .send({ email: "stefan@warp.test", password: "wrong" });
+
+    const keys = [...cacheStore.keys()];
+    // The hashed fails key exists…
+    expect(keys).toContain(accountFailsKey("stefan@warp.test"));
+    // …and the plaintext email never appears in ANY Redis key.
+    expect(keys.some((k) => k.includes("stefan@warp.test"))).toBe(false);
+  });
+});
+
+// ── Finding 3 — per-IP gate inactive when the caller IP is unresolved ──────
+describe("WARP-579 — per-IP throttle observability when caller IP is null", () => {
+  it("logs a warning when the caller IP cannot be resolved", async () => {
+    verifyPassword.mockResolvedValue(false);
+    const prisma = createPrismaMock([stefan]);
+
+    // Build an app whose requests carry no resolvable IP: disable trust proxy
+    // and strip req.ip / socket.remoteAddress so callerIpFromReq → undefined.
+    const app = express();
+    app.use(express.json());
+    app.use(cookieParser());
+    app.use((req, _res, nextFn) => {
+      Object.defineProperty(req, "ip", { value: undefined, configurable: true });
+      Object.defineProperty(req, "socket", {
+        value: { remoteAddress: undefined },
+        configurable: true,
+      });
+      nextFn();
+    });
+    app.use("/api", createPublicAuthRouter(prisma));
+
+    loggerWarn.mockClear();
+    await request(app)
+      .post("/api/auth/login")
+      .send({ email: "stefan@warp.test", password: "wrong" });
+
+    // Exactly one warn fired for this request, naming the inactive per-IP gate.
+    const ipGateWarn = loggerWarn.mock.calls.find((call) =>
+      JSON.stringify(call).toLowerCase().includes("per-ip"),
+    );
+    expect(ipGateWarn).toBeDefined();
   });
 });
 
