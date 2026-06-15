@@ -407,6 +407,32 @@ describe("PATCH /api/people/:id/scope", () => {
     );
   });
 
+  it("rolls back the deleteMany when a create fails — no zero-binding window, no ActivityRow", async () => {
+    const prisma = createPrismaMock([seedUser({ id: "u1" })]);
+    const app = buildApp(prisma);
+
+    // Make the SECOND scopeBinding.create reject mid-rewrite.
+    let calls = 0;
+    prisma.scopeBinding.create.mockImplementation(async () => {
+      calls += 1;
+      if (calls === 2) throw new Error("insert failed");
+      return {};
+    });
+
+    const res = await request(app)
+      .patch("/api/people/u1/scope")
+      .send({ scopes: ["team", "finance"] });
+
+    expect(res.status).toBe(500);
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(prisma.scopeBinding.deleteMany).toHaveBeenCalledTimes(1);
+    // The audit emit is gated behind transaction success, so a failed
+    // rewrite produces no ActivityRow. On real Postgres the deleteMany
+    // is rolled back too, so the user never observes zero bindings; the
+    // passthrough mock can only prove the ordering + the gated emit.
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
   it("rejects an empty scopes array with 400 (force at least one binding)", async () => {
     // Clearing every binding is a delete-style operation that
     // belongs on DELETE /people/:id/scope (not in this ticket).
