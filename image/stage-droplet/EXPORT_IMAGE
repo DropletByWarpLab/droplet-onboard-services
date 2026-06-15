@@ -1,0 +1,8 @@
+# pi-gen export marker.
+#
+# The presence of this file makes pi-gen export a deployable image artifact for
+# the stage-droplet stage (pi-gen convention: a stage with EXPORT_IMAGE /
+# EXPORT_NOOBS produces an image under deploy/). The contents set the exported
+# image suffix and default compression — kept consistent with image/config
+# (DEPLOY_COMPRESSION=gz).
+IMG_SUFFIX="-droplet-appliance"

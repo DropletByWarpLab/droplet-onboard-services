@@ -291,11 +291,48 @@ Standalone tool for managing camera drivers (can be run independently of `setup.
 
 ---
 
+## Appliance OS image (SD card)
+
+For shipping a turnkey device you don't run `setup.sh` by hand — you flash a
+pre-baked SD-card image and let it provision itself on first boot.
+
+```bash
+# On a LINUX build host (NOT Windows/macOS — pi-gen needs Linux + qemu/binfmt):
+./scripts/build-image.sh            # build the app appliance .img.gz (default)
+./scripts/build-image.sh --help     # options + env knobs
+```
+
+`build-image.sh` uses [pi-gen](https://github.com/RPi-Distro/pi-gen) to bake Pi
+OS (arm64) Lite + Docker + a pre-built copy of the docker-compose stack + the
+first-boot provisioning unit into `image/output/*.img.gz`. On first boot a
+`droplet-firstboot.service` oneshot runs **this** `setup.sh --systemd` exactly
+once (guarded by `/var/lib/droplet/.firstboot-done`), which generates all
+device-unique secrets via `lib/secrets.sh` — **nothing is baked into the
+image.**
+
+This is the **app** half of a **dual-image** topology (the OpenWrt **router**
+firmware is built separately by `openwrt/build.sh`), matching the multi-box /
+dual-CPU production shape — cite **ADR-005 canonical-system-architecture** and
+`docs/SINGLE_BOX.md` (multi-box). Full details, host requirements, the
+first-boot sequence diagram, and flash instructions live in
+[`image/README.md`](../image/README.md).
+
+`lib/systemd.sh::install_firstboot_service` is the runtime/self-heal twin of the
+baked unit — it lets `setup.sh` (re)install the same first-boot oneshot on a
+manually-provisioned host.
+
+> The arm64 image build only runs on a Linux ARM-capable build host. On Windows
+> use WSL2 or a Linux CI runner. Static contract checks
+> (`bash tests/build-image.test.sh`) are Windows-runnable.
+
+---
+
 ## File layout
 
 ```
 scripts/
 ├── setup.sh               Main entry point (7 phases)
+├── build-image.sh         Appliance OS image builder (pi-gen → image/output/*.img.gz)
 ├── factory-reset.sh       Wipe all data and start fresh
 ├── verify.sh              Standalone smoke test
 ├── camera-drivers.sh      Camera driver check/install/scan/fix tool
@@ -306,7 +343,10 @@ scripts/
     ├── docker.sh          Docker install + group handling
     ├── secrets.sh         .env generation with openssl rand
     ├── compose.sh         Image pull, build, start, health wait
-    ├── systemd.sh         Optional boot service
+    ├── systemd.sh         Boot service (droplet.service) + first-boot oneshot
     ├── camera-drivers.sh  Camera driver library (sourced by setup.sh)
     └── bluetooth.sh       Host Bluetooth prep for Matter BLE (WARP-850)
 ```
+
+The appliance image inputs live under the top-level [`image/`](../image)
+directory (pi-gen `config`, `stage-droplet/`, the baked first-boot unit).

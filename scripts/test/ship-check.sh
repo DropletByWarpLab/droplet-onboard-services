@@ -605,7 +605,12 @@ run_check_shellcheck() {
   # shellcheck will surface it loudly.
   local targets=()
   local file
-  for file in "$REPO_ROOT/scripts/setup.sh" "$REPO_ROOT/scripts/factory-reset.sh"; do
+  # M2.8 appliance-image build scripts are linted in the same lane as the
+  # installer (build-image.sh = the SD-card image builder; the pi-gen chroot
+  # stage run script ships as part of the baked image).
+  for file in "$REPO_ROOT/scripts/setup.sh" "$REPO_ROOT/scripts/factory-reset.sh" \
+              "$REPO_ROOT/scripts/build-image.sh" \
+              "$REPO_ROOT/image/stage-droplet/01-run.sh"; do
     if [ -f "$file" ]; then
       targets+=("$file")
     fi

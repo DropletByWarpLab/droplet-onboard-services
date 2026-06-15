@@ -113,3 +113,64 @@ install_systemd_service() {
   log_info "  The stack will start automatically on boot."
   log_info "  Re-run \`setup.sh --systemd\` after editing .env to refresh the unit."
 }
+
+# install_firstboot_service — install the oneshot unit that runs setup.sh ONCE
+# on the first boot of a freshly-flashed appliance image (M2.8 SD-card image).
+#
+# This is the runtime/self-heal counterpart of the STATIC unit baked into the
+# appliance image at image/stage-droplet/files/droplet-firstboot.service. The
+# baked image installs the static file directly; this function lets setup.sh
+# (re)install the same unit on a manually-provisioned host. Both produce the
+# same unit — keep them in lockstep.
+#
+# Explicit completion is gated by an explicit sentinel
+# (/var/lib/droplet/.firstboot-done via ConditionPathExists), mirroring the
+# OpenWrt uci-defaults "run once then mark done" precedent and the repo's
+# explicit-state convention (ADR-005-ap §"why an enum, not a derived flag").
+# Secrets are NEVER baked: setup.sh generates them on this first run via
+# scripts/lib/secrets.sh.
+install_firstboot_service() {
+  if ! command -v systemctl >/dev/null 2>&1; then
+    log_warn "systemctl not found — skipping first-boot service installation"
+    return 0
+  fi
+
+  local service_name="droplet-firstboot"
+  local service_file="/etc/systemd/system/${service_name}.service"
+  local setup_path="$REPO_ROOT/scripts/setup.sh"
+
+  log_info "Installing first-boot service: ${service_name}.service"
+
+  # Ensure the sentinel directory exists so ExecStartPost can write into it.
+  sudo install -d -m 0755 /var/lib/droplet
+
+  sudo tee "$service_file" > /dev/null << EOF
+[Unit]
+Description=Droplet Edge Platform — first-boot provisioning (oneshot)
+Documentation=https://github.com/DropletByWarpLab/droplet-onboard-services
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+Before=droplet.service
+ConditionPathExists=!/var/lib/droplet/.firstboot-done
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=$REPO_ROOT
+ExecStart=$setup_path --systemd
+ExecStartPost=/usr/bin/touch /var/lib/droplet/.firstboot-done
+TimeoutStartSec=1800
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  sudo systemctl daemon-reload
+  sudo systemctl enable "$service_name" >/dev/null 2>&1
+
+  log_success "First-boot service installed and enabled"
+  log_info "  It runs ${setup_path} --systemd once, then writes"
+  log_info "  /var/lib/droplet/.firstboot-done and never runs again."
+  log_info "  Logs:    sudo journalctl -u $service_name"
+}
