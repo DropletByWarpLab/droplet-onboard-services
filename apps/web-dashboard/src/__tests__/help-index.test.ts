@@ -14,6 +14,24 @@
 import { describe, it, expect } from "vitest";
 import { HELP_INDEX, searchHelp } from "@/lib/help-index";
 
+// Mirror of the /help page's SECTIONS anchors. The index MUST carry one entry
+// per browse section so the HelpLauncher search + "Browse all topics" surface
+// every topic the page documents — a section without an index entry is silently
+// unsearchable. Keep this list in sync with SECTIONS in app/help/page.tsx.
+const PAGE_SECTION_ANCHORS = [
+  "claim",
+  "workspace",
+  "roles",
+  "extenders",
+  "internet",
+  "storage",
+  "cameras",
+  "vpn",
+  "ai",
+  "devices",
+  "files",
+];
+
 describe("help index", () => {
   it("ships a non-empty index with stable anchors, titles, and searchable text", () => {
     expect(HELP_INDEX.length).toBeGreaterThan(0);
@@ -26,6 +44,15 @@ describe("help index", () => {
     // Anchors are unique (they're DOM ids + deep-link targets).
     const ids = HELP_INDEX.map((e) => e.id);
     expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("carries an entry for every /help browse section (search mirrors the page)", () => {
+    const ids = HELP_INDEX.map((e) => e.id);
+    for (const anchor of PAGE_SECTION_ANCHORS) {
+      // A page section with no matching index entry is invisible to the
+      // HelpLauncher search + "Browse all topics" list.
+      expect(ids).toContain(anchor);
+    }
   });
 });
 
