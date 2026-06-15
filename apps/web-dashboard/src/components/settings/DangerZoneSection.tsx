@@ -343,8 +343,9 @@ function FactoryResetCard() {
               <div className="min-w-0">
                 <p className="type-headline text-label-primary">Factory reset</p>
                 <p className="type-footnote text-label-secondary mt-1 leading-relaxed">
-                  Erase every account, file, message, and setting on this box and
-                  return it to first-run setup. This cannot be undone.
+                  Erase every account, file, message, smart-home setup, and
+                  setting on this box and return it to first-run setup. This
+                  cannot be undone.
                 </p>
                 {latestJob?.status === "failed" && latestJob.failureReason && (
                   <p className="type-caption-1 text-label-tertiary mt-1">
