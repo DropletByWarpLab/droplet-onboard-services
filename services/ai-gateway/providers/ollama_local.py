@@ -39,19 +39,7 @@ logger = logging.getLogger(__name__)
 # static IP. Override via OLLAMA_URL to opt into the /proxy if you want
 # the tool-call repair + circuit-breaker for a specific deploy.
 # See ADR-004 in the droplet-local-LLM repo for the original rationale.
-#
-# Backward compatibility: the legacy `JETSON_OLLAMA_URL` env var is
-# still read as a fallback for .env files that pre-date the rename.
-# Setup.sh's migrate_env renames it in-place on next run.
-OLLAMA_URL = os.getenv("OLLAMA_URL") or os.getenv(
-    "JETSON_OLLAMA_URL", "http://host.docker.internal:11434"
-)
-if os.getenv("JETSON_OLLAMA_URL") and not os.getenv("OLLAMA_URL"):
-    logger.warning(
-        "JETSON_OLLAMA_URL is deprecated — rename to OLLAMA_URL "
-        "(legacy hardware-specific naming; the variable is hardware-agnostic). "
-        "Setup.sh migrate_env will rename it on next run."
-    )
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://host.docker.internal:11434")
 
 # XR-05: /health (the appliance limits + readiness contract) lives on
 # ollama-manager (:8002), NOT on Ollama (:11434). On the canonical DIRECT chat

@@ -12,7 +12,7 @@ class TestHealthEndpoint:
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "ok"
-        assert "jetson_reachable" in data
+        assert "inference_reachable" in data
 
 
 class TestModelsEndpoint:

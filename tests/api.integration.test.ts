@@ -96,13 +96,13 @@ describe("AI Gateway Integration", () => {
       const { status, body } = await fetchJson(`${AI_GATEWAY_URL}/ai/health`);
       expect(status).toBe(200);
       expect(body.status).toBe("ok");
-      expect(body).toHaveProperty("jetson_reachable");
+      expect(body).toHaveProperty("inference_reachable");
     });
 
-    it("jetson_reachable is false in test environment", async () => {
+    it("inference_reachable is false in test environment", async () => {
       const { body } = await fetchJson(`${AI_GATEWAY_URL}/ai/health`);
       // the inference host is not real in test compose, so it should be false
-      expect(body.jetson_reachable).toBe(false);
+      expect(body.inference_reachable).toBe(false);
     });
   });
 

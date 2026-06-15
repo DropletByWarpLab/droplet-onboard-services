@@ -39,7 +39,7 @@ Justification:
 - The catalog is structured as **techniques, not frameworks.** Every technique we want from it (HyDE, contextual headers, small-to-big, adaptive retrieval, CRAG-lite, semantic chunking, CLIP) is a <300-LOC change to `chunker.py`, `file-search.service.ts`, or the orchestrator's agent loop — each adds one capability, each is independently gated on an eval delta, each preserves the abstractions that already work.
 - For **evaluation only**, RAGAS gives us faithfulness / context-relevance / answer-correctness metrics that NDCG@10 doesn't cover. It runs offline as a Python script inside `tests/retrieval-eval/`, never in the production path. Its judge LLM can be the local Ollama model for routine runs and a cloud model for golden runs — no production dependency on a cloud judge.
 
-**Adoption priority is set by three filters, in order:** (a) edge-viable on Jetson Orin Nano with local Ollama, (b) measurable in the existing eval harness (NDCG@10 today, RAGAS metrics after Phase 2), (c) leverage proportional to cost.
+**Adoption priority is set by three filters, in order:** (a) edge-viable on the appliance's inference host with local Ollama, (b) measurable in the existing eval harness (NDCG@10 today, RAGAS metrics after Phase 2), (c) leverage proportional to cost.
 
 ## Options considered
 
@@ -237,7 +237,7 @@ Each step row carries:
 
 | # | Step | Files / surfaces | Depends on | Batch |
 |---|---|---|---|---|
-| 5.1 | Add `moondream` to the Ollama pre-pulled-models list in the device-jetson-ai sibling repo. Coordinate with that repo's setup (`scripts/setup-jetson-ai.sh` or equivalent). **Cross-repo dependency: needs a PR there first.** | `droplet-jetson-ai/scripts/setup-jetson-ai.sh` (sibling repo) | — | A |
+| 5.1 | Add `moondream` to the Ollama pre-pulled-models list in the inference sibling repo. Coordinate with that repo's setup (`scripts/setup.sh` or equivalent). **Cross-repo dependency: needs a PR there first.** | `droplet-local-LLM/scripts/setup.sh` (sibling repo) | — | A |
 | 5.2 | Author Prisma migration adding `modality: enum('text', 'image_caption')` to `FileContentChunk`. Default `text` for backfill. Add index `(userId, modality, indexedAt)` for filtered queries. | `apps/orchestrator/prisma/schema.prisma`, `apps/orchestrator/prisma/migrations/<ts>_add_modality/` | — | A |
 | 5.3 | Extend `tests/retrieval-eval/queries.yaml` with 10 image-grounded queries (PDF with figures, image-only chat attachments). Add fixture images to `tests/fixtures/`. | `tests/retrieval-eval/queries.yaml`, `tests/fixtures/` | — | A |
 | 5.4 | Add `CaptionImage` RPC to ai-gateway gRPC server. Input: `(image_bytes, length='normal')`. Output: caption string. Calls Ollama's `moondream` model via OpenAI-compat vision API. Lazy-loaded singleton like reranker/classifier/grader. | `services/ai-gateway/grpc_server.py`, `services/ai-gateway/captioner.py` (new), `services/ai-gateway/protos/*.proto` | 5.1 | B |
@@ -251,7 +251,7 @@ Each step row carries:
 **Files changed:** ~7 files in this repo + 1 in the sibling repo, ~400 LOC, 1 Prisma migration.
 **Eval gate:** Above.
 **Calendar:** 8–12 working days *after* the sibling repo's Ollama pre-pull lands (Step 5.1).
-**Hard blockers:** Step 5.1 needs inference-engine / droplet-jetson-ai capacity confirmation. The actual model fits the budget; the question is whether ops wants to ship a second model on the device. Coordinate before starting.
+**Hard blockers:** Step 5.1 needs droplet-local-LLM capacity confirmation. The actual model fits the budget; the question is whether ops wants to ship a second model on the device. Coordinate before starting.
 
 ---
 
@@ -298,7 +298,7 @@ JIRA epic + child stories live in the **WARP** project on `warp-lab.atlassian.ne
 | Phase 2 — RAGAS eval harness | [WARP-436](https://warp-lab.atlassian.net/browse/WARP-436) | **Merged** — batches A/B/C/E landed; batch D (populate `baselines.json`) now done via the `services/rag-eval/` service's `bootstrap --runs 5` on the appliance, not CI. Until that runs, the integration test is in recording mode. |
 | Phase 3 — Query enhancement | [WARP-437](https://warp-lab.atlassian.net/browse/WARP-437) | **Done** — merged in [#271](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/271). HyDE + multi-query + adaptive routing via `_meta._enhancement`. Shipping dark behind `WARP_437_ENHANCEMENT_ENABLED`; per-class gates in recording mode until baselines land. |
 | Phase 4 — CRAG-lite | [WARP-438](https://warp-lab.atlassian.net/browse/WARP-438) | To Do — WARP-437 blocker cleared; remaining blocker is the WARP-436 baselines. |
-| Phase 5 — Multimodal | [WARP-439](https://warp-lab.atlassian.net/browse/WARP-439) | To Do (blocked on droplet-jetson-ai `moondream` pre-pull, cross-repo). |
+| Phase 5 — Multimodal | [WARP-439](https://warp-lab.atlassian.net/browse/WARP-439) | To Do (blocked on droplet-local-LLM `moondream` pre-pull, cross-repo). |
 | Eval service | (no phase ticket) | **Merged** in [#299](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/299) — `services/rag-eval/` runs the harness on the appliance (Compose profile `eval`). Follow-ups in review: [WARP-519](https://warp-lab.atlassian.net/browse/WARP-519) HTTP trigger ([#315](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/315)), [WARP-520](https://warp-lab.atlassian.net/browse/WARP-520) stream output ([#312](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/312)), [WARP-521](https://warp-lab.atlassian.net/browse/WARP-521) aggregator tests ([#313](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/313)). |
 
 All assigned to Romain. Labels: `origin-ai`, `size-{m\|l}`, `rag`, plus a per-phase topical tag (`ingest`, `eval`, `query`, `grading`, `multimodal`).
@@ -308,7 +308,7 @@ Blocking relations wired in Jira:
 - WARP-436 blocks WARP-438
 - WARP-437 blocks WARP-438 (cleared — WARP-437 merged)
 
-WARP-439's blocker is cross-repo (droplet-jetson-ai sibling) and isn't represented as a Jira link.
+WARP-439's blocker is cross-repo (droplet-local-LLM sibling) and isn't represented as a Jira link.
 
 > **Note on the original "GitHub Actions nightly" plan (step 2.6):** the eval is
 > NOT run via GitHub Actions. Per repo convention GHA is for dev tasks (PR CI,
@@ -361,7 +361,7 @@ These map onto the GTM milestone style. Suggested placement: under Stage 3 (Prod
 - **Framework:** moondream2 (~1.5 GB) via Ollama as `moondream`. Reserves Qwen2.5-VL 3B as fallback.
 - **Files:** services/file-indexer/extractors/image.py, services/ai-gateway/captioner.py (new CaptionImage RPC), prisma schema (add modality enum)
 - **Status:** [ ] Not started
-- **Blockers:** droplet-jetson-ai Ollama pre-pull PR (cross-repo).
+- **Blockers:** droplet-local-LLM Ollama pre-pull PR (cross-repo).
 - **Ticket:** WARP-RAG.5
 ```
 
