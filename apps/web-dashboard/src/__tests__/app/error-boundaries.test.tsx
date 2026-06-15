@@ -120,6 +120,61 @@ describe("global-error.tsx boundary (WARP-576)", () => {
   });
 });
 
+// A sticky fault (stale client state, a recurring fetch failure under an
+// untrusted cert, etc.) makes `reset()` re-render straight back into the same
+// error — the "could not recover from" dead-end. Both boundaries therefore
+// expose a real full-reload escape that matches the recovery copy.
+describe("error boundaries offer a working full-reload recovery", () => {
+  const realLocation = window.location;
+  let reload: ReturnType<typeof vi.fn>;
+  let consoleErr: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    reload = vi.fn();
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: {
+        href: "https://192.168.1.87/",
+        origin: "https://192.168.1.87",
+        pathname: "/",
+        search: "",
+        hash: "",
+        assign: vi.fn(),
+        replace: vi.fn(),
+        reload,
+      },
+    });
+    consoleErr = vi.spyOn(console, "error").mockImplementation(() => {}) as ReturnType<
+      typeof vi.spyOn
+    >;
+  });
+  afterEach(() => {
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: realLocation,
+    });
+    consoleErr.mockRestore();
+    vi.clearAllMocks();
+  });
+
+  it("error.tsx 'Reload page' performs a full reload (not just a re-render)", () => {
+    const reset = vi.fn();
+    render(<ErrorBoundary error={new Error("boom")} reset={reset} />);
+    fireEvent.click(screen.getByRole("button", { name: /reload page/i }));
+    expect(reload).toHaveBeenCalledTimes(1);
+    // Reload is a distinct action from the re-render retry.
+    expect(reset).not.toHaveBeenCalled();
+  });
+
+  it("global-error.tsx 'Reload page' performs a full reload (matches its copy)", () => {
+    const reset = vi.fn();
+    render(<GlobalError error={new Error("layout boom")} reset={reset} />);
+    fireEvent.click(screen.getByRole("button", { name: /reload page/i }));
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(reset).not.toHaveBeenCalled();
+  });
+});
+
 describe("not-found.tsx (WARP-576)", () => {
   it("renders a 404 surface with a link back to the home dashboard", () => {
     render(<NotFound />);

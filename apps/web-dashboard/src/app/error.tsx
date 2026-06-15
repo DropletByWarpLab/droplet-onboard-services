@@ -30,16 +30,28 @@ export default function Error({
           Something went wrong
         </h1>
         <p className="type-footnote text-label-tertiary mt-2">
-          The dashboard hit an unexpected error. You can try again, or head back
-          to the home screen.
+          The dashboard hit an unexpected error. You can try again, reload the
+          page, or head back to the home screen.
         </p>
-        <div className="mt-6 flex items-center justify-center gap-3">
+        <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
           <button
             type="button"
             onClick={() => reset()}
             className="dp-btn-primary"
           >
             Try again
+          </button>
+          {/* `reset()` only re-attempts the render; if the fault is sticky
+              (stale client state, a transient fetch failure that recurs), a
+              re-render lands on the same error. A full reload re-fetches the
+              app shell + re-runs the (defensive) client-state parsers, which is
+              the recovery the copy promises. */}
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="dp-btn-secondary"
+          >
+            Reload page
           </button>
           <a href="/" className="type-footnote text-accent hover:underline">
             Go home
