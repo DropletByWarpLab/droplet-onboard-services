@@ -38,9 +38,13 @@ export default function SharedPage() {
   const { items, isLoading } = useSharedWithMe();
   const { toast } = useToast();
 
-  // "Shared by me" is a future enhancement — it would need a GET /shares
-  // endpoint with a reverse filter. For now the tab is visible but empty with
-  // a helpful message, so the UX structure is in place for Phase 3+.
+  // "Shared by me" (outbound shares) is blocked on a reverse-share endpoint
+  // that does not exist yet: the orchestrator needs to expose the current
+  // user's *outbound* shares (e.g. GET /api/files/shares?direction=outbound,
+  // backed by a Nextcloud OCS shares query filtered to shares this user owns).
+  // `useSharedWithMe` only returns inbound shares. Until that endpoint lands
+  // the tab stays visible but empty. NOTE: building the endpoint is out of
+  // scope here — this is the tracked gap, not a TODO to implement inline.
   const visibleShares: ShareDetail[] = useMemo(() => {
     if (tab === "with-me") return items;
     return [];

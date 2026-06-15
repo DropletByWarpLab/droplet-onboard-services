@@ -1,7 +1,7 @@
 # Roadmap — edge-platform
 
 Source: `droplet-gtm-strategy.docx` (April 2026 internal GTM strategy & risk analysis)
-Last updated: 2026-04-15
+Last updated: 2026-06-15
 
 This roadmap projects every GTM milestone that touches this repo onto the actual file layout. Milestone IDs (M1.1–M3.6) are the GTM doc's; status is this repo's current reality. See `docs/gtm-mapping.md` for the path-by-path bridge between the GTM reference architecture and what's on disk today.
 
@@ -45,32 +45,31 @@ Status legend:
 
 ### M1.4 HTTPS
 - **GTM scope:** Self-signed TLS certificate auto-generated on first boot; nginx termination.
-- **This repo's slice:** Nginx gateway already listens on `:443` with cert/key volume mount; `scripts/setup.sh` generates per-device secrets. Certificate auto-generation on first boot needs verification; `docker/certs/` is referenced.
-- **Files involved:** `docker/docker-compose.yml` (gateway `:443` mapping), `docker/nginx.conf`, `docker/certs/`, `scripts/setup.sh`
-- **Status:** `[~]` Partial
-- **Blockers:** Confirm setup.sh generates a self-signed cert if `docker/certs/` is empty; confirm HTTPS redirect is configured in `nginx.conf`.
-- **Next action:** Trace `scripts/setup.sh` and `docker/certs/` lifecycle; add explicit cert-generation step if missing.
+- **This repo's slice:** Nginx terminates TLS on `:443` (`docker/nginx.conf`: `listen 443 ssl` with `droplet.crt`/`droplet.key`) and 301-redirects `:80` → `https://$host$request_uri`. The self-signed cert is auto-generated/regenerated on first boot by `_generate_tls_cert` in `scripts/lib/secrets.sh` (also re-issues if the cert is missing, near expiry, or lacks the expected SANs).
+- **Files involved:** `docker/docker-compose.yml` (gateway `:443` mapping), `docker/nginx.conf` (`listen 80` → `return 301`; `listen 443 ssl`), `scripts/lib/secrets.sh` (`_generate_tls_cert`)
+- **Status:** `[x]` Done
+- **What was done:** Verified the 80→443 redirect block and 443 TLS termination in `nginx.conf`; confirmed `_generate_tls_cert` generates/regenerates the self-signed cert on first boot.
+- **Next action:** None — optional follow-up is Let's Encrypt/ACME for non-self-signed certs once a public hostname exists.
 
 ### M1.5 Conversation persistence
 - **GTM scope:** SQLite or PostgreSQL backend for chat history, accessible across sessions.
-- **This repo's slice:** PostgreSQL (`postgres:16-alpine`) is provisioned in `docker/docker-compose.yml` under service `db`. Orchestrator owns the `Prisma` schema. Per `README.md`, sessions are stored in the AI gateway, not orchestrator — the ai-gateway has a `sessions/` directory.
-- **Files involved:** `apps/orchestrator/prisma/schema.prisma`, `services/ai-gateway/sessions/`, `apps/orchestrator/src/routes/llm.ts` (session CRUD endpoints)
-- **Status:** `[~]` Partial — endpoints exist and Postgres is available; verify session persistence actually writes to the DB (not just in-memory).
-- **Blockers:** Verify AI gateway's session storage backend (DB vs. in-memory).
-- **Next action:** Inspect `services/ai-gateway/sessions/` and either back it with Postgres or move session ownership into the orchestrator + Prisma.
+- **This repo's slice:** Chat history is persisted in PostgreSQL via the orchestrator's `ChatSession` / `ChatMessage` Prisma models. `apps/orchestrator/src/services/chat-persistence.service.ts` owns create/find/list/delete of sessions and transactional message writes, with `updatedAt` maintenance. Session ownership lives in the orchestrator + Prisma — NOT in-memory and NOT in the ai-gateway.
+- **Files involved:** `apps/orchestrator/prisma/schema.prisma` (`ChatSession`, `ChatMessage`), `apps/orchestrator/src/services/chat-persistence.service.ts`, `apps/orchestrator/src/routes/llm.ts` (session CRUD endpoints)
+- **Status:** `[x]` Done — chat history is Postgres-backed and survives across sessions.
+- **What was done:** Session/message persistence moved into the orchestrator (`chat-persistence.service.ts`) against Postgres; the earlier `README` note about ai-gateway-owned sessions is obsolete.
+- **Next action:** None — optional follow-up is retention/pruning policy for old sessions.
 
 ### M1.6 Response streaming
 - **GTM scope:** SSE or WebSocket streaming from Ollama through FastAPI to the UI.
-- **This repo's slice:** Orchestrator `routes/llm.ts` and ai-gateway `main.py` reference streaming; `sse-starlette` is in the AI gateway stack. End-to-end behaviour depends on the **inference-engine** repo's OpenClaw/Ollama streaming support, which per cross-repo notes is **not implemented** upstream — so the full chain is not yet verified.
-- **Files involved:** `apps/orchestrator/src/routes/llm.ts`, `services/ai-gateway/main.py`, `services/ai-gateway/router.py`, `services/ai-gateway/providers/`, `apps/web-dashboard/src/app/chat/page.tsx`
-- **Status:** `[~]` Partial — plumbing exists; inference-engine upstream gap blocks true streaming.
-- **Cross-ref:** `inference-engine/docs/ROADMAP.md` (M1.6 is flagged there as the single biggest upstream gap).
-- **Blockers:** inference-engine streaming support (Ollama passthrough).
-- **Next action:** Coordinate with Agent 2 (inference-engine); add an e2e streaming integration test here once upstream is unblocked.
+- **This repo's slice:** SSE streaming is implemented in-repo. `apps/orchestrator/src/routes/llm.ts` accepts `stream:true`, opens a `text/event-stream` response, and emits `encodeSSE` events (see `apps/orchestrator/src/types/sse-events.ts`) from the agent run's `onEvent` callback, with WARP-329 debounced persistence of streamed content to Postgres and `X-Conversation-Id` + assistant-row-id headers set identically on streaming and non-streaming paths.
+- **Files involved:** `apps/orchestrator/src/routes/llm.ts`, `apps/orchestrator/src/types/sse-events.ts`, `apps/orchestrator/src/services/llm-agent.service.ts`, `apps/web-dashboard/src/app/chat/page.tsx`
+- **Status:** `[~]` Partial — the SSE wire format is complete; the remaining work is in-repo only.
+- **Real gap (in-repo, not upstream):** the orchestrator agent loop in `apps/orchestrator/src/services/llm-agent.service.ts` (~line 361) currently calls the model with `stream:false`, so per-token deltas are not yet forwarded through the SSE channel — the client receives the assistant turn once the loop completes rather than token-by-token. Wiring the agent loop to request a streamed completion and relay deltas to `onEvent` is being addressed separately. This is NOT a `droplet-local-LLM` (formerly `inference-engine`) upstream blocker — the earlier claim that streaming depended on an unimplemented upstream Ollama passthrough was a mis-attribution.
+- **Next action:** Flip the agent loop's `stream:false` to a streamed completion and relay token deltas to the existing `onEvent`/`encodeSSE` SSE path; add an e2e streaming integration test.
 
 ### M1.7 Test suite foundation
 - **GTM scope:** Unit tests for tools.py, llm.py, Device API endpoints; integration test for full tool-calling loop.
-- **This repo's slice:** Vitest unit tests for orchestrator (`apps/orchestrator/src/__tests__/`), pytest for ai-gateway, Vitest for web-dashboard, and repo-level integration tests at `tests/` (`api.integration.test.ts`, `auth.integration.test.ts`, `setup.test.sh`, `factory-reset.test.sh`). Coverage of the full tool-calling loop is thin — GTM's "tools.py integration test" is cross-repo (lives in `inference-engine`).
+- **This repo's slice:** Vitest unit tests for orchestrator (`apps/orchestrator/src/__tests__/`), pytest for ai-gateway, Vitest for web-dashboard, and repo-level integration tests at `tests/` (`api.integration.test.ts`, `auth.integration.test.ts`, `setup.test.sh`, `factory-reset.test.sh`). Coverage of the full tool-calling loop is thin — GTM's "tools.py integration test" is cross-repo (lives in `droplet-local-LLM`).
 - **Files involved:** `apps/orchestrator/src/__tests__/`, `services/ai-gateway/tests/`, `apps/web-dashboard/src/__tests__/`, `tests/`
 - **Status:** `[~]` Partial
 - **Blockers:** End-to-end streaming tests depend on M1.6. No Playwright or similar browser E2E.
@@ -78,11 +77,11 @@ Status legend:
 
 ### M1.8 CI/CD pipeline
 - **GTM scope:** GitHub Actions — lint, test, build Docker images, push to GHCR.
-- **This repo's slice:** `.github/` exists but contains only logo assets — **no workflows**. `scripts/verify.sh` and `scripts/test-security.sh` exist for local/manual CI-like runs.
-- **Files involved:** `.github/workflows/` *(does not exist)*, `turbo.json`, `scripts/verify.sh`, `scripts/test-security.sh`
-- **Status:** `[ ]` Not started
+- **This repo's slice:** 19 GitHub Actions workflows live under `.github/workflows/` — per-service test suites (orchestrator, web-dashboard, ai-gateway, mcp-server, routing, camera-discovery, file-indexer, switch, voice-io, device-identity), plus `ci-coverage.yml`, `docker-build.yml`, `security-tests.yml`, `test-fips.yml`, `setup-tests.yml` / `setup-e2e.yml`, `rag-tests.yml` + nightly `rag-eval-nightly.yml`, and `refresh-oui.yml`.
+- **Files involved:** `.github/workflows/` (19 workflows), `turbo.json`, `scripts/verify.sh`, `scripts/test-security.sh`
+- **Status:** `[x]` Done
 - **Blockers:** None.
-- **Next action:** Add `.github/workflows/ci.yml` running `npm test`, `npm run build`, and `turbo lint`; add an image-build workflow gated on `main` pushes.
+- **Next action:** None — maintain workflows as services are added; optional follow-up is a GHCR image-push gate on `main`.
 
 ---
 
@@ -98,19 +97,19 @@ Status legend:
 
 ### M2.2 Full RBAC
 - **GTM scope:** Four-role system (owner/admin/family/guest) with per-endpoint authorization.
-- **This repo's slice:** Orchestrator has an auth middleware stub but no role concept; `/api/auth/users` admin endpoint exists but no `role` column in user store.
-- **Files involved:** `apps/orchestrator/src/middleware/auth.ts`, `apps/orchestrator/src/routes/auth.ts`, `apps/orchestrator/prisma/schema.prisma`
-- **Status:** `[ ]` Not started
-- **Blockers:** Depends on M1.3 (JWT/auth-model decision).
-- **Next action:** After M1.3 lands, add `role` enum to Prisma, `requireRole()` middleware, and per-route guards.
+- **This repo's slice:** `Role` enum on the Prisma `User` model (`apps/orchestrator/prisma/schema.prisma`, `enum Role`); `requireRole(...)` middleware (`apps/orchestrator/src/middleware/auth.ts`, scope helper in `middleware/scope.ts`) is applied per-route — e.g. `routes/aps.ts` (`requireRole("owner", "admin")`), `routes/activity.ts`, `routes/auth.ts`.
+- **Files involved:** `apps/orchestrator/src/middleware/auth.ts`, `apps/orchestrator/src/middleware/scope.ts`, `apps/orchestrator/src/routes/auth.ts`, `apps/orchestrator/prisma/schema.prisma` (`enum Role`), tests at `apps/orchestrator/src/__tests__/rbac.test.ts` + `require-role.middleware.test.ts`
+- **Status:** `[x]` Done
+- **Blockers:** None.
+- **What was done:** Added the `Role` enum + role column on `User`, the `requireRole()` middleware, and per-route guards across privileged routes; covered by `rbac.test.ts` + `require-role.middleware.test.ts`.
 
 ### M2.3 Device pairing flow
 - **GTM scope:** QR-code or PIN-based pairing flow for new clients.
-- **This repo's slice:** Not present. Setup flow creates a first admin user (`/setup`) but there is no device-pairing endpoint or QR surface.
-- **Files involved:** `apps/orchestrator/src/routes/auth.ts` (new pairing route TBD), `apps/web-dashboard/src/app/setup/` (wizard extension)
-- **Status:** `[ ]` Not started
-- **Blockers:** None architecturally; depends on mobile-app for the scanning side.
-- **Next action:** Design ADR for pairing protocol (QR payload + PIN fallback + mDNS discovery).
+- **This repo's slice:** QR/PIN pairing is implemented in `apps/orchestrator/src/routes/device-clients.ts`: `POST /api/devices/pair` mints a short-lived 6-char code and a `droplet://pair?server=...&code=...` QR payload, `GET /api/devices/pair/:code/status` lets the initiator poll, and `POST /api/devices/pair/claim` completes the pairing (publishing `droplet/devices/<user>/paired` over MQTT).
+- **Files involved:** `apps/orchestrator/src/routes/device-clients.ts` (`/devices/pair`, `/devices/pair/:code/status`, `/devices/pair/claim`)
+- **Status:** `[x]` Done
+- **Blockers:** None — client-side scanning is handled by the native apps.
+- **What was done:** Added the pair/claim endpoints with a code + TTL, the `droplet://pair` QR payload, status polling, and the paired-device MQTT notification.
 
 ### M2.4 Mobile-responsive UI / PWA
 - **GTM scope:** Responsive web UI or progressive web app (PWA) that works well on phones.
@@ -155,7 +154,7 @@ Status legend:
 - **GTM scope:** Input sanitization, output schema validation, rate limiting on sensitive tools.
 - **This repo's slice:** ai-gateway is the entry point; `services/ai-gateway/middleware/` and `tools/` directories exist. Rate limiting and input validation are now implemented.
 - **Files involved:** `services/ai-gateway/middleware/rate_limit.py`, `services/ai-gateway/schemas.py`, `services/ai-gateway/tools/`
-- **Cross-ref:** Depth-defence in `inference-engine` (OpenClaw guardrails + sandbox). This repo's ai-gateway is the outer input layer.
+- **Cross-ref:** Depth-defence in `droplet-local-LLM` (OpenClaw guardrails + sandbox). This repo's ai-gateway is the outer input layer.
 - **Status:** `[~]` Partial — rate limiting, input bounds, and CORS restriction are done. Output schema validation for tool-call responses remains.
 - **Blockers:** None.
 - **What was done:** Sliding-window rate limiter (Redis/in-memory) on chat endpoints; `max_tokens` capped at 4096; message list capped at 100; content length capped at 32k; CORS restricted from `*` to explicit origins.
@@ -180,7 +179,7 @@ Only milestones that touch this repo are listed. M3.1 (revenue-model decision), 
 - **This repo's slice:** `services/file-indexer/` already has an `embedder.py` and `chunker.py`. Image-specific embedding (CLIP) is not yet present; current embedder is likely text-only.
 - **Files involved:** `services/file-indexer/embedder.py`, `services/file-indexer/extractors/`, `services/file-indexer/db.py`
 - **Status:** `[~]` Partial — text indexing plumbing exists; image embedding not.
-- **Blockers:** Inference-engine capacity for a CLIP model alongside the chat model (single-threaded Ollama risk from GTM §5.3).
+- **Blockers:** `droplet-local-LLM` capacity for a CLIP model alongside the chat model (single-threaded Ollama risk from GTM §5.3).
 - **Next action:** Add CLIP pipeline to `file-indexer/extractors/` + image-vector column in `db.py`.
 
 ### M3.4 OTA update system
@@ -193,11 +192,11 @@ Only milestones that touch this repo are listed. M3.1 (revenue-model decision), 
 
 ### M3.6 Community marketplace
 - **GTM scope:** Framework for community-contributed tool extensions and integrations.
-- **This repo's slice:** Orchestrator would host the extension registry API; web-dashboard would host the browse/install UI. Tool execution sandbox lives in `inference-engine` (OpenClaw), so the boundary here is about surfacing and provisioning extensions — not running them.
+- **This repo's slice:** Orchestrator would host the extension registry API; web-dashboard would host the browse/install UI. Tool execution sandbox lives in `droplet-local-LLM` (OpenClaw), so the boundary here is about surfacing and provisioning extensions — not running them.
 - **Files involved:** `apps/orchestrator/src/routes/` (new `extensions.ts`), `apps/web-dashboard/src/app/` (new `/extensions` route), `apps/orchestrator/prisma/schema.prisma` (new `Extension` model)
 - **Status:** `[ ]` Not started
-- **Blockers:** Sandbox contract with inference-engine's OpenClaw; signing/trust model.
-- **Next action:** ADR on extension manifest format; align with `inference-engine` OpenClaw agent config schema.
+- **Blockers:** Sandbox contract with `droplet-local-LLM`'s OpenClaw; signing/trust model.
+- **Next action:** ADR on extension manifest format; align with `droplet-local-LLM` OpenClaw agent config schema.
 
 ---
 
@@ -207,23 +206,23 @@ Each risk is reproduced from the GTM doc with severity, and mapped to the compon
 
 | Risk | Severity | Likelihood | Owner in this repo | Notes |
 |---|---|---|---|---|
-| LLM inference too slow on Pi (10–30s/response) | High | Certain | `services/ai-gateway/` (streaming passthrough) | Primary mitigation is M1.6 streaming; hardware path is inference-engine/Jetson. |
-| Small-model tool-calling unreliability | High | High | `services/ai-gateway/schemas.py` (output schema validation) | Depth-defence in inference-engine's OpenClaw tool policy. |
-| Prompt injection via user input | Critical | Medium | `services/ai-gateway/middleware/`, `services/ai-gateway/schemas.py` | M2.7. Input layer lives here; sandbox + guardrails live in inference-engine. |
+| LLM inference too slow on Pi (10–30s/response) | High | Certain | `services/ai-gateway/` (streaming passthrough) | Primary mitigation is M1.6 streaming; hardware path is droplet-local-LLM/Jetson. |
+| Small-model tool-calling unreliability | High | High | `services/ai-gateway/schemas.py` (output schema validation) | Depth-defence in droplet-local-LLM's OpenClaw tool policy. |
+| Prompt injection via user input | Critical | Medium | `services/ai-gateway/middleware/`, `services/ai-gateway/schemas.py` | M2.7. Input layer lives here; sandbox + guardrails live in droplet-local-LLM. |
 | Privileged container escape from router/NAS | Critical | Low | `openwrt/` (replaces privileged Docker approach) | Architecture already mitigates: router is OpenWrt, not a `--privileged` container. |
 | SD card corruption / data loss | High | Medium | `scripts/setup.sh`, `openwrt/` | Storage health monitoring + A/B partition scheme (overlaps M3.4). |
 | Docker Compose complexity for non-technical users | Medium | High | `scripts/setup.sh`, `scripts/factory-reset.sh`, `openwrt/build.sh` | M2.8 SD-card image is the long-term mitigation. |
 | No defined revenue model / MIT license fork risk | High | — | Program level | Out of scope for this repo's code; licence file lives at repo root. |
 | Nextcloud dependency weight | — | — | `docker/docker-compose.yml`, `apps/orchestrator/src/middleware/auth.ts` | Current auth model couples to Nextcloud OCS; reconsider in M1.3 ADR. |
 | Conversation state ephemeral | — | — | `apps/orchestrator/src/routes/llm.ts`, `services/ai-gateway/sessions/` | M1.5. |
-| Single-threaded Ollama serving | — | — | `services/ai-gateway/scheduler.py` (queueing) | Partial — scheduler exists; true concurrency lives in inference-engine. |
+| Single-threaded Ollama serving | — | — | `services/ai-gateway/scheduler.py` (queueing) | Partial — scheduler exists; true concurrency lives in droplet-local-LLM. |
 
 ---
 
 ## Coordination checklist (what depends on which repo)
 
 - **M1.3 JWT auth** — entirely in this repo, but shared-api specs should be updated too (Agent 4).
-- **M1.6 Streaming** — this repo's ai-gateway is the proxy; inference-engine is the source (Agent 2).
-- **M2.7 Prompt-injection hardening** — input layer here; sandbox layer in inference-engine (Agent 2).
+- **M1.6 Streaming** — implemented in-repo (orchestrator `routes/llm.ts` SSE path). The remaining work is the orchestrator agent loop's `stream:false` (see M1.6); not a `droplet-local-LLM` dependency.
+- **M2.7 Prompt-injection hardening** — input layer here; sandbox layer in droplet-local-LLM (Agent 2).
 - **M3.2 Native mobile app** — not this repo; mobile-app (Agent 3) consumes the orchestrator via `@droplet/shared-api` (Agent 4).
 - **M3.4 OTA** — this repo owns the update agent; `releases/` holds the manifests.
