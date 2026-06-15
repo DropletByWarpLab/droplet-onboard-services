@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   ArrowRight,
+  BadgeCheck,
+  Building2,
   Cpu,
   FolderOpen,
   Globe,
@@ -11,7 +13,9 @@ import {
   MessageSquare,
   Search,
   Sparkles,
+  Users,
   Video,
+  Wifi,
 } from "lucide-react";
 import { WizardReplay } from "@/components/help/WizardReplay";
 import { searchHelp } from "@/lib/help-index";
@@ -187,6 +191,96 @@ interface Section {
 }
 
 const SECTIONS: Section[] = [
+  {
+    anchor: "claim",
+    title: "Claiming your Droplet",
+    Icon: BadgeCheck,
+    body: (
+      <>
+        <p>
+          Claiming binds this specific box to your workspace, so only you
+          can set it up and control it. It&rsquo;s a one-time step the first
+          time you turn the Droplet on.
+        </p>
+        <p>
+          <strong>Where&rsquo;s the code?</strong> A short code shaped like{" "}
+          <span className="font-mono">DRPL-XXXX-XXXX</span> appears on the
+          display on the front of the unit. Type it into the Claim step, or
+          scan the on-screen QR code with your phone to jump straight there.
+        </p>
+        <p>
+          <strong>No code showing?</strong> Make sure the box is powered on
+          and the display is awake, then try again. The code only ever shows
+          on the unit itself — it never leaves your network.
+        </p>
+      </>
+    ),
+  },
+  {
+    anchor: "workspace",
+    title: "Your workspace",
+    Icon: Building2,
+    body: (
+      <>
+        <p>
+          A workspace is the shared home for everyone who uses this
+          Droplet — your files, chats, cameras, and people all live inside
+          it. Most homes need just one.
+        </p>
+        <p>
+          <strong>Name and address:</strong> the workspace name is what
+          people see; the short web address (the &ldquo;slug&rdquo;) is used
+          in links. You can rename the workspace later from Settings.
+        </p>
+      </>
+    ),
+  },
+  {
+    anchor: "roles",
+    title: "Team & roles",
+    Icon: Users,
+    body: (
+      <>
+        <p>
+          Invite the people who share this Droplet from the People page (or
+          the wizard&rsquo;s team step). Everyone signs in with their own
+          account — nothing is shared by password.
+        </p>
+        <p>
+          <strong>Roles:</strong> owners can do everything, including
+          factory-reset and managing other people; admins handle day-to-day
+          settings and devices; and members use the Droplet&rsquo;s files,
+          chat, and cameras without changing how it&rsquo;s set up.
+        </p>
+        <p>
+          <strong>To invite someone:</strong> open People in the sidebar,
+          tap Invite, choose a role, and share the invite link. You can
+          change or remove someone&rsquo;s access at any time.
+        </p>
+      </>
+    ),
+  },
+  {
+    anchor: "extenders",
+    title: "Wi-Fi extenders",
+    Icon: Wifi,
+    body: (
+      <>
+        <p>
+          If parts of your home are out of the Droplet&rsquo;s Wi-Fi range,
+          add a Droplet extender to widen coverage. Plug it in on the same
+          network and it shows up on the Network page for one-tap approval —
+          usually within about 30 seconds.
+        </p>
+        <p>
+          <strong>To approve one:</strong> open Network in the sidebar, find
+          the pending extender, and tap Approve. It joins your
+          Droplet&rsquo;s Wi-Fi and starts relaying right away — no separate
+          app or account needed.
+        </p>
+      </>
+    ),
+  },
   {
     anchor: "internet",
     title: "Internet (DuckDNS)",

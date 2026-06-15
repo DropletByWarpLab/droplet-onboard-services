@@ -31,6 +31,34 @@ export interface HelpEntry {
 
 export const HELP_INDEX: readonly HelpEntry[] = [
   {
+    id: "claim",
+    title: "Claiming your Droplet",
+    summary:
+      "Claiming binds this specific box to your workspace so only you can set it up and control it. It is a one-time step the first time you turn the Droplet on. A short code shaped like DRPL-XXXX-XXXX appears on the display on the front of the unit — type it into the Claim step, or scan the on-screen QR code with your phone to jump straight there. If no code is showing, make sure the box is powered on and the display is awake, then try again. The code only ever shows on the unit itself and never leaves your network.",
+    keywords: ["claim", "claim code", "pair", "bind", "activate", "drpl", "qr code", "first time", "setup"],
+  },
+  {
+    id: "workspace",
+    title: "Your workspace",
+    summary:
+      "A workspace is the shared home for everyone who uses this Droplet — your files, conversations, devices, and people all live inside it. Most homes need just one. The workspace name is what people see; the short web address (the slug) is used in links. You can rename the workspace later from Settings.",
+    keywords: ["workspace", "organization", "tenant", "home", "rename", "slug", "name", "address"],
+  },
+  {
+    id: "roles",
+    title: "Team & roles",
+    summary:
+      "Invite the people who share this Droplet from the People page or the wizard's team step. Everyone signs in with their own account — nothing is shared by password. Owners can do everything, including factory-reset and managing other people; admins handle day-to-day settings and devices; members use the Droplet's files, chat, and everyday features without changing how it is set up. To invite someone, open People in the sidebar, tap Invite, choose a role, and share the invite link. You can change or remove someone's access at any time.",
+    keywords: ["roles", "permissions", "members", "team", "owner", "admin", "invite", "people", "access"],
+  },
+  {
+    id: "extenders",
+    title: "Wi-Fi extenders",
+    summary:
+      "If parts of your home are out of the Droplet's Wi-Fi range, add a Droplet extender to widen coverage. Plug it in on the same network and it shows up on the Network page for one-tap approval, usually within about 30 seconds. To approve one, open Network in the sidebar, find the pending extender, and tap Approve. It joins your Droplet's Wi-Fi and starts relaying right away — no separate app or account needed.",
+    keywords: ["extender", "wifi extender", "mesh", "coverage", "range", "repeater", "network", "approve"],
+  },
+  {
     id: "internet",
     title: "Internet (DuckDNS)",
     summary:

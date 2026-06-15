@@ -765,7 +765,7 @@ function EmptyState({ onAdd }: { onAdd: () => void }) {
           <Plus size={14} aria-hidden /> Add extender
         </button>
         <a
-          href="https://droplet.lan/help#extenders"
+          href="/help#extenders"
           className="type-footnote text-label-tertiary hover:text-label-primary inline-flex items-center gap-1 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded-sm"
         >
           Learn more <ArrowUpRight size={12} aria-hidden />

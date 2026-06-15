@@ -28,7 +28,14 @@ vi.mock("framer-motion", async () => {
 
 import HelpPage from "@/app/help/page";
 
+// Every anchor a wizard/dashboard LearnMoreCard (or Learn-more link) deep-links
+// to. Keep this in sync with the `helpAnchor` props in the setup steps + the
+// Network coverage panel — a missing section here is a dead "Learn more" link.
 const SECTION_ANCHORS = [
+  "claim",
+  "workspace",
+  "roles",
+  "extenders",
   "internet",
   "storage",
   "cameras",
@@ -51,10 +58,14 @@ describe("/help page (WARP-174)", () => {
     expect(
       screen.getByRole("button", { name: /how droplet works/i }),
     ).toBeInTheDocument();
-    // TOC enumerates every section.
+    // TOC enumerates every section — match by anchor href, not a name regex:
+    // section titles can share substrings (e.g. "Claiming" contains "ai"), so a
+    // /anchor/i name match is ambiguous and finds multiple links.
     for (const anchor of SECTION_ANCHORS) {
-      const link = screen.getByRole("link", { name: new RegExp(anchor, "i") });
-      expect(link).toHaveAttribute("href", `#${anchor}`);
+      const tocLinks = screen
+        .getAllByRole("link")
+        .filter((a) => a.getAttribute("href") === `#${anchor}`);
+      expect(tocLinks.length).toBeGreaterThanOrEqual(1);
     }
   });
 
