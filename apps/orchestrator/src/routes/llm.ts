@@ -1079,16 +1079,17 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           // without re-running inference.
           liveReasoning = streamResult.message.reasoning ?? null;
         } catch (err) {
-          terminal = "failed";
-          // Narrow to AbortError only: a client disconnect cancels the
-          // in-flight fetch, which throws DOMException{name:"AbortError"}.
-          // Any other infrastructure failure (MCP crash, gateway JSON error,
-          // ECONNRESET) must still be logged even if a concurrent disconnect
-          // also fired — so we check the error type, not clientAborted.
+          // Use the name-based check rather than instanceof DOMException:
+          // aligns with the codebase pattern and stays robust against
+          // error-wrapping layers that re-throw as a plain Error with
+          // name:"AbortError" (retry wrappers, SDK updates, etc.).
           const isAbortErr =
-            err instanceof DOMException &&
-            (err as DOMException).name === "AbortError";
+            err instanceof Error && (err as Error).name === "AbortError";
           if (!isAbortErr) {
+            // Only non-abort errors mark the row as failed. For AbortErrors,
+            // terminal stays "completed" so the clientAborted guard below
+            // can correctly set "aborted" for mid-inference disconnects.
+            terminal = "failed";
             // eslint-disable-next-line no-console
             console.error("[llm/chat] agent loop failed:", err);
           }
