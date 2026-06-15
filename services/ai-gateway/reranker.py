@@ -5,7 +5,7 @@ Loads the model lazily on first use. Cached on disk at
 container starts skip the model download.
 
 Inference runs via optimum.onnxruntime on CPU. Future tickets may
-add a TensorRT backend for Jetson GPU acceleration.
+add a TensorRT backend for inference-host GPU acceleration.
 
 WARP-644: init now fails closed. If the optimum/onnxruntime import or the
 model load raises, the singleton stays unavailable and `compute_score`

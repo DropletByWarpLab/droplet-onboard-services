@@ -43,10 +43,13 @@ def _run_fips_boot_self_test() -> None:
 _run_fips_boot_self_test()
 
 
+import hmac
+
 import httpx
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from auth import keystore
 from auth.byok import save_api_key, delete_api_key
@@ -73,6 +76,71 @@ from scheduler import InferenceScheduler, QueueFullError
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# WARP-560: inbound service-to-service authentication
+# ---------------------------------------------------------------------------
+# The gateway had NO inbound auth — every /ai/* route was reachable by anything
+# that could open the socket (chat, session read, BYOK key CRUD). It is a
+# service-to-service component whose sole legitimate caller is the orchestrator,
+# so we require a shared bearer service token (same proven shape as
+# services/switch/main.py's ServiceAuthMiddleware). Empty token = unauthenticated
+# (logged loudly) so dev/CI keeps working; setup.sh provisions a real one.
+SERVICE_TOKEN_AI_GATEWAY = (os.environ.get("SERVICE_TOKEN_AI_GATEWAY") or "").strip()
+if not SERVICE_TOKEN_AI_GATEWAY:
+    logger.warning(
+        "SERVICE_TOKEN_AI_GATEWAY not set — /ai/* endpoints are unauthenticated. "
+        "Set SERVICE_TOKEN_AI_GATEWAY to enable service-to-service auth."
+    )
+
+# Header the orchestrator sets to forward the end-user principal so the gateway
+# can namespace BYOK keys (WARP-561) and scope session ownership (WARP-560).
+PRINCIPAL_HEADER = "X-Droplet-User"
+
+# Paths that bypass the inbound auth gate. /ai/health is the liveness probe
+# wired into the compose healthcheck and ops-console probe; it must answer
+# without a token (mirrors switch's /health exemption).
+_AUTH_EXEMPT_PATHS = frozenset({"/ai/health"})
+
+
+class ServiceAuthMiddleware(BaseHTTPMiddleware):
+    """Reject /ai/* requests without a valid SERVICE_TOKEN_AI_GATEWAY bearer.
+
+    On success it records the forwarded end-user principal on
+    ``request.state.principal`` (None for an identity-less service call) so the
+    route handlers can scope per-user BYOK keys and session ownership.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        # Let CORS preflight through untouched (no Authorization header on it).
+        if request.method == "OPTIONS":
+            return await call_next(request)
+        if request.url.path in _AUTH_EXEMPT_PATHS:
+            request.state.principal = None
+            return await call_next(request)
+        if SERVICE_TOKEN_AI_GATEWAY:
+            auth = request.headers.get("Authorization", "")
+            token = auth.removeprefix("Bearer ").strip()
+            if not hmac.compare_digest(token, SERVICE_TOKEN_AI_GATEWAY):
+                return JSONResponse(
+                    status_code=401,
+                    content={"error": "Invalid or missing service token"},
+                )
+        principal = request.headers.get(PRINCIPAL_HEADER, "").strip() or None
+        request.state.principal = principal
+        return await call_next(request)
+
+
+def _principal(request: Request) -> str | None:
+    """Return the forwarded end-user principal recorded by the auth middleware.
+
+    Falls back to reading the header directly so handlers stay correct even if
+    the middleware is bypassed (e.g. the unauthenticated dev path)."""
+    principal = getattr(request.state, "principal", None)
+    if principal is not None:
+        return principal
+    return request.headers.get(PRINCIPAL_HEADER, "").strip() or None
 
 
 def _provider_error_detail(exc: Exception, context: str) -> str:
@@ -145,16 +213,27 @@ if "*" in _cors_origins:
         "Set an explicit origin list."
     )
 
+# Middleware execution order is the REVERSE of add order (Starlette prepends).
+# We want, outermost → innermost: CORS → ServiceAuth → RateLimit → app, so:
+#   - CORS outermost so OPTIONS preflight + CORS headers apply even to 401s,
+#   - ServiceAuth next so unauthenticated traffic is rejected before it can
+#     consume a rate-limit bucket,
+#   - RateLimit innermost (only authenticated requests get metered).
+# Add in reverse of that order.
+
+# --- Rate limiting ---
+app.add_middleware(RateLimitMiddleware)
+
+# --- Inbound service auth (WARP-560) ---
+app.add_middleware(ServiceAuthMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Request-Priority"],
+    allow_headers=["Authorization", "Content-Type", "X-Request-Priority", PRINCIPAL_HEADER],
 )
-
-# --- Rate limiting ---
-app.add_middleware(RateLimitMiddleware)
 
 
 # --- Health ---
@@ -162,10 +241,10 @@ app.add_middleware(RateLimitMiddleware)
 
 @app.get("/ai/health")
 async def health():
-    jetson_reachable = False
+    inference_reachable = False
     if provider_router:
-        jetson_reachable = await provider_router.ollama.is_reachable()
-    return {"status": "ok", "jetson_reachable": jetson_reachable}
+        inference_reachable = await provider_router.ollama.is_reachable()
+    return {"status": "ok", "inference_reachable": inference_reachable}
 
 
 @app.get("/ai/readiness")
@@ -210,7 +289,13 @@ async def readiness():
 
 @app.get("/ai/models", response_model=ModelsResponse)
 async def list_models():
-    """Return available models from all providers."""
+    """Return available models from all providers.
+
+    Model discovery is device-wide (the cached list is shared), so this uses
+    the shared/device key namespace rather than a per-user one — a user's own
+    BYOK key only changes which CLOUD models their CHAT turns can reach, gated
+    separately in /ai/chat (WARP-561) and the off-LAN allowlist (WARP-468).
+    """
     if not model_registry or not provider_router:
         raise HTTPException(status_code=503, detail="Service not ready")
     models = await model_registry.get_models(provider_router)
@@ -221,7 +306,11 @@ async def list_models():
 
 
 @app.post("/ai/chat")
-async def chat(request: ChatRequest, x_request_priority: int = Header(default=0, alias="X-Request-Priority")):
+async def chat(
+    request: ChatRequest,
+    http_request: Request,
+    x_request_priority: int = Header(default=0, alias="X-Request-Priority"),
+):
     """Unified chat endpoint — routes to the selected provider.
 
     Priority scheduling (via X-Request-Priority header or query param):
@@ -231,6 +320,9 @@ async def chat(request: ChatRequest, x_request_priority: int = Header(default=0,
     """
     if not provider_router or not inference_scheduler:
         raise HTTPException(status_code=503, detail="Service not ready")
+
+    # WARP-561: the requesting user's BYOK keys (not a device-global key).
+    principal = _principal(http_request)
 
     # Enqueue with priority
     try:
@@ -262,7 +354,7 @@ async def chat(request: ChatRequest, x_request_priority: int = Header(default=0,
             await inference_scheduler.release()
 
     try:
-        result = await provider_router.chat(request)
+        result = await provider_router.chat(request, user_id=principal)
     except ValueError as e:
         await _release_once()
         raise HTTPException(status_code=400, detail=str(e))
@@ -348,57 +440,84 @@ def _session_to_detail(session) -> SessionDetailOut:
     )
 
 
+def _assert_session_owner(session, principal: str | None) -> None:
+    """WARP-560: refuse cross-user access to a session.
+
+    A session created by an identified principal can only be read/mutated by
+    that same principal. Legacy/identity-less sessions (``owner is None``) stay
+    open so existing data and the unauthenticated dev path keep working; once a
+    real principal owns a session, everyone else gets 404 (not 403 — we don't
+    confirm the session exists to a non-owner).
+    """
+    owner = getattr(session, "owner", None)
+    if owner is not None and owner != principal:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+
 @app.post("/ai/sessions", response_model=SessionOut, status_code=201)
-async def create_session(body: SessionCreateRequest):
-    """Create a new chat session."""
+async def create_session(body: SessionCreateRequest, request: Request):
+    """Create a new chat session owned by the calling principal."""
     if not session_store:
         raise HTTPException(status_code=503, detail="Service not ready")
     session = await session_store.create(
-        model=body.model, title=body.title, system_prompt=body.system_prompt
+        model=body.model,
+        title=body.title,
+        system_prompt=body.system_prompt,
+        owner=_principal(request),
     )
     return _session_to_out(session)
 
 
 @app.get("/ai/sessions", response_model=SessionListResponse)
 async def list_sessions(
+    request: Request,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ):
-    """List chat sessions, most recent first."""
+    """List chat sessions for the calling principal, most recent first."""
     if not session_store:
         raise HTTPException(status_code=503, detail="Service not ready")
-    sessions = await session_store.list_sessions(limit=limit, offset=offset)
+    sessions = await session_store.list_sessions(limit=limit, offset=offset, owner=_principal(request))
     return SessionListResponse(sessions=[_session_to_out(s) for s in sessions])
 
 
 @app.get("/ai/sessions/{session_id}", response_model=SessionDetailOut)
-async def get_session(session_id: str):
-    """Get a session with all its messages."""
+async def get_session(session_id: str, request: Request):
+    """Get a session with all its messages (owner-scoped)."""
     if not session_store:
         raise HTTPException(status_code=503, detail="Service not ready")
     session = await session_store.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    _assert_session_owner(session, _principal(request))
     return _session_to_detail(session)
 
 
 @app.patch("/ai/sessions/{session_id}", response_model=SessionOut)
-async def update_session(session_id: str, body: SessionUpdateRequest):
-    """Update session title."""
+async def update_session(session_id: str, body: SessionUpdateRequest, request: Request):
+    """Update session title (owner-scoped)."""
     if not session_store:
         raise HTTPException(status_code=503, detail="Service not ready")
-    updated = await session_store.update_title(session_id, body.title)
-    if not updated:
-        raise HTTPException(status_code=404, detail="Session not found")
     session = await session_store.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _assert_session_owner(session, _principal(request))
+    await session_store.update_title(session_id, body.title)
+    session = await session_store.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
     return _session_to_out(session)
 
 
 @app.delete("/ai/sessions/{session_id}")
-async def delete_session(session_id: str):
-    """Delete a session and its messages."""
+async def delete_session(session_id: str, request: Request):
+    """Delete a session and its messages (owner-scoped)."""
     if not session_store:
         raise HTTPException(status_code=503, detail="Service not ready")
+    session = await session_store.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _assert_session_owner(session, _principal(request))
     deleted = await session_store.delete(session_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -406,7 +525,7 @@ async def delete_session(session_id: str):
 
 
 @app.post("/ai/sessions/{session_id}/chat")
-async def session_chat(session_id: str, body: SessionChatRequest):
+async def session_chat(session_id: str, body: SessionChatRequest, request: Request):
     """Chat within a session — messages are automatically persisted.
 
     The full conversation history is sent to the provider so the model has context.
@@ -415,9 +534,11 @@ async def session_chat(session_id: str, body: SessionChatRequest):
     if not session_store or not provider_router:
         raise HTTPException(status_code=503, detail="Service not ready")
 
+    principal = _principal(request)
     session = await session_store.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    _assert_session_owner(session, principal)
 
     # Save user message
     await session_store.add_message(session_id, "user", body.message)
@@ -440,7 +561,7 @@ async def session_chat(session_id: str, body: SessionChatRequest):
     )
 
     try:
-        result = await provider_router.chat(chat_request)
+        result = await provider_router.chat(chat_request, user_id=principal)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -536,10 +657,10 @@ async def session_chat(session_id: str, body: SessionChatRequest):
 
 
 @app.post("/ai/keys/{provider}")
-async def store_key(provider: str, body: ApiKeyRequest):
-    """Store an API key for a cloud provider."""
+async def store_key(provider: str, body: ApiKeyRequest, request: Request):
+    """Store an API key for a cloud provider in the caller's namespace."""
     try:
-        await save_api_key(provider, body.api_key)
+        await save_api_key(provider, body.api_key, user_id=_principal(request))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -551,16 +672,16 @@ async def store_key(provider: str, body: ApiKeyRequest):
 
 
 @app.get("/ai/keys", response_model=KeyStatusResponse)
-async def list_keys():
+async def list_keys(request: Request):
     """List which providers have stored API keys (no key values returned)."""
-    providers = await keystore.list_providers_with_keys()
+    providers = await keystore.list_providers_with_keys(user_id=_principal(request))
     return KeyStatusResponse(providers=providers)
 
 
 @app.delete("/ai/keys/{provider}")
-async def remove_key(provider: str):
-    """Remove a stored API key."""
-    deleted = await delete_api_key(provider)
+async def remove_key(provider: str, request: Request):
+    """Remove a stored API key from the caller's namespace."""
+    deleted = await delete_api_key(provider, user_id=_principal(request))
     if not deleted:
         raise HTTPException(status_code=404, detail=f"No key stored for {provider}")
 

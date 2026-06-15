@@ -7,7 +7,7 @@ shapes differ only in hardware layout.
 | Shape | Hardware | Activation |
 |---|---|---|
 | **`single-box`** | One x86 host with dGPU (Ollama) + iGPU (Frigate) + MT7922 Wi-Fi card (in-container OpenWrt AP) | `COMPOSE_PROFILES=single-box` in `.env` |
-| **`multi-box`** | Separate Jetson Orin (Compute Brick) + Pi 5 OpenWrt router + Lantronix switch | Default — no extra env |
+| **`multi-box`** | Separate inference host (Compute Brick) + OpenWrt router host + managed switch | Default — no extra env |
 | **`v2-6`** (future) | Custom 9-PCB chassis from `pcb-claude-tool` | TBD as that hardware lands |
 
 This doc covers the **single-box** shape. The other two have their own
@@ -26,7 +26,7 @@ cd droplet-onboard-services
 ```
 
 That's it. The setup script's auto-detection sees the dGPU + iGPU + no
-separate Jetson on the LAN, enables single-box mode automatically, and:
+separate inference host on the LAN, enables single-box mode automatically, and:
 
 - generates per-device secrets in `.env` via `secrets.sh`
 - appends the single-box knobs to `.env` (`COMPOSE_PROFILES=linux,single-box`,
@@ -54,7 +54,7 @@ Auto-detection is conservative. Override with:
 
 Detection sources (in order — see `scripts/lib/single-box.sh::detect_single_box_mode`):
 
-1. **Separate Jetson reachable** (`192.168.50.197:11434` answers
+1. **Separate inference host reachable** (`192.168.50.197:11434` answers
    `/api/version` OR `inference-engine.local:11434` answers) → multi-box,
    NOT single-box.
 2. **2+ DRM render nodes + dGPU silicon present** → single-box.
@@ -125,9 +125,10 @@ Plane's Django migrations are quarantined from Prisma's.
 | `pm-health` (sidecar) | `services/pm/Dockerfile` | 8090 (internal) | ~25 MB | ~30 MB |
 
 **Total Plane stack footprint at idle: ~500 MB RAM.** Acceptable on every
-shipping deployment shape (x86 single-box has 32 GB; Pi-class single-box
-has 8 GB minus other services). For Pi-class deployments operating near
-RAM ceiling, monitor `pm-worker` first — Celery's per-task memory dominates.
+shipping deployment shape (a large-memory single-box has 32 GB; a
+memory-constrained single-box has 8 GB minus other services). For
+memory-constrained deployments operating near RAM ceiling, monitor
+`pm-worker` first — Celery's per-task memory dominates.
 
 **Storage budget (per spec OQ1 cascade):**
 - `postgres-pm-data` — Plane DB. ~10 MB seed, ~50 MB per 1k issues with

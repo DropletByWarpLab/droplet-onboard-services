@@ -12,7 +12,7 @@ name: droplet
 # =============================================================================
 # WARP-569 — Per-container resource limits
 # =============================================================================
-# Target hardware: ~7 GB shared RAM (single-box; multi-box Jetson is similar).
+# Target hardware: ~7 GB shared RAM (single-box; multi-box inference host is similar).
 # Host/kernel reserve: ~1 GB → allocate up to ~6 GB to default-on services.
 #
 # IMPORTANT: use top-level keys (mem_limit / cpus / pids_limit), NOT
@@ -60,6 +60,21 @@ name: droplet
 #   ops:         ops-console 256 MB
 # =============================================================================
 
+# =============================================================================
+# WARP-591 — Bounded container logs
+# =============================================================================
+# Without an explicit logging config, Docker's default json-file driver keeps
+# every container's stdout/stderr forever — an unbounded write that fills the
+# OS drive on a long-lived appliance. This anchor caps each container at
+# 3 × 10 MB of rotated logs (30 MB ceiling per service) and is merged into the
+# long-running services below via `<<: *default-logging`.
+x-logging: &default-logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
 services:
   # --- Ingress ---
   gateway:
@@ -80,6 +95,7 @@ services:
       web-dashboard:
         condition: service_started
     restart: always
+    <<: *default-logging
     mem_limit: ${GATEWAY_MEM_LIMIT:-128m}
     cpus: ${GATEWAY_CPUS:-0.5}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
@@ -97,6 +113,7 @@ services:
       - PORT=3001
       - NODE_ENV=production
     restart: always
+    <<: *default-logging
     mem_limit: ${WEB_DASHBOARD_MEM_LIMIT:-384m}
     cpus: ${WEB_DASHBOARD_CPUS:-1.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
@@ -122,7 +139,7 @@ services:
       - path: ../.env
         required: false
     # routing, switch, and display all run with `network_mode: host` on
-    # the Jetson. The orchestrator is on the default bridge network — so
+    # the appliance. The orchestrator is on the default bridge network — so
     # `localhost` from inside this container is the container itself, not
     # the host. Docker's magic `host-gateway` resolves to the host's IP on
     # the bridge subnet (172.x.0.1 on Linux, the gateway IP on Docker
@@ -196,6 +213,10 @@ services:
       # no bearer at all, so a switch container with SERVICE_SECRET set
       # 403'd every call (dashboard Network page → "Router unavailable").
       - SERVICE_TOKEN_SWITCH=${SERVICE_TOKEN_SWITCH:-}
+      # WARP-560: orchestrator → ai-gateway bearer. Read by ai-gateway.client.ts;
+      # must equal the ai-gateway container's SERVICE_TOKEN_AI_GATEWAY (wired
+      # below to the same source). The gateway had no inbound auth before this.
+      - SERVICE_TOKEN_AI_GATEWAY=${SERVICE_TOKEN_AI_GATEWAY:-}
       # The orchestrator's Dockerfile sets OPENSSL_CONF=/etc/ssl/openssl-fips.cnf
       # for FIPS 140-3 compliance (WARP-229). That cipher set rejects the
       # non-FIPS ciphers Postgres uses for its TLS handshake — Prisma's
@@ -263,6 +284,7 @@ services:
       start_period: 60s
       retries: 3
     restart: always
+    <<: *default-logging
     # Protected core: reservation ensures the OOM killer targets other
     # containers before the orchestrator. mem_limit caps absolute ceiling.
     mem_limit: ${ORCHESTRATOR_MEM_LIMIT:-768m}
@@ -313,6 +335,7 @@ services:
       # device-identity.sock.
       - /var/run/droplet:/var/run/droplet
     restart: always
+    <<: *default-logging
     mem_limit: ${DEVICE_IDENTITY_MEM_LIMIT:-128m}
     cpus: ${DEVICE_IDENTITY_CPUS:-0.5}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
@@ -335,6 +358,7 @@ services:
       dockerfile: services/mcp-server/Dockerfile
     container_name: droplet-mcp-server
     restart: unless-stopped
+    <<: *default-logging
     env_file:
       - path: ../.env
         required: false
@@ -415,7 +439,7 @@ services:
       # droplet-ai.lan (OpenWrt dnsmasq) are the primary names registered by
       # scripts/lib/local-dns.sh; droplet.local / droplet.lan are accepted too
       # so OpenWrt's own umdns/expand_hosts entries keep working if a user
-      # ever points them at the Jetson directly.
+      # ever points them at the appliance directly.
       # ADR-023 (C4): append the publicly-trusted per-device FQDN
       # (${DROPLET_PUBLIC_FQDN}) so Nextcloud trusts the one-URL-everywhere
       # address. Empty until the box learns it from HQ — a trailing blank token
@@ -438,6 +462,7 @@ services:
           create_host_path: true
           propagation: rshared
     restart: always
+    <<: *default-logging
     mem_limit: ${NEXTCLOUD_MEM_LIMIT:-768m}
     cpus: ${NEXTCLOUD_CPUS:-1.0}
     pids_limit: ${NEXTCLOUD_PIDS_LIMIT:-1024}
@@ -471,6 +496,7 @@ services:
       retries: 10
       start_period: 30s
     restart: always
+    <<: *default-logging
     # db is the most critical protected core: mem_reservation ensures the OOM
     # killer targets lighter containers before Postgres. A database OOM kills
     # every dependent service simultaneously — protect it hardest.
@@ -486,6 +512,7 @@ services:
         required: false
     command: ["sh", "-c", "redis-server --requirepass \"$REDIS_PASSWORD\""]
     restart: always
+    <<: *default-logging
     # mem_reservation on cache: session + auth data — OOM kills here cascade
     # to every authenticated request. Protect before db fills its budget.
     mem_limit: ${CACHE_MEM_LIMIT:-256m}
@@ -499,6 +526,7 @@ services:
       - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
       - ./mosquitto_passwd_dir:/mosquitto/config/passwd_dir:ro
     restart: always
+    <<: *default-logging
     mem_limit: ${BROKER_MEM_LIMIT:-64m}
     cpus: ${BROKER_CPUS:-0.5}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
@@ -533,6 +561,11 @@ services:
       # Static config only — secrets come from .env via env_file
       - ORCHESTRATOR_URL=http://orchestrator:3000
       - GRPC_PORT=50051
+      # WARP-560: inbound service-auth bearer. The ai-gateway's
+      # ServiceAuthMiddleware requires this on every /ai/* route (except
+      # /ai/health). MUST equal the orchestrator's SERVICE_TOKEN_AI_GATEWAY env
+      # (wired above to the same source). Empty = unauthenticated (dev only).
+      - SERVICE_TOKEN_AI_GATEWAY=${SERVICE_TOKEN_AI_GATEWAY:-}
       # ADR-023 (C4): append https://${DROPLET_PUBLIC_FQDN} so the ai-gateway
       # accepts the publicly-trusted one-URL-everywhere origin. Empty until the
       # box learns its FQDN from HQ — a trailing comma is tolerated by the
@@ -549,6 +582,7 @@ services:
       - broker
       - orchestrator
     restart: always
+    <<: *default-logging
     # WARP-644: raised 512m -> 4g. The BGE-reranker-base fp32 ONNX graph
     # (BAAI/bge-reranker-base no longer publishes the smaller int8
     # `model_quantized.onnx`) peaks at ~2.9 GB RSS for a batch-8 forward
@@ -603,6 +637,7 @@ services:
     # directives for profile-gated services when the profile isn't
     # active. file-indexer now starts on every `docker compose up`.
     restart: always
+    <<: *default-logging
     mem_limit: ${FILE_INDEXER_MEM_LIMIT:-512m}
     cpus: ${FILE_INDEXER_CPUS:-1.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
@@ -672,6 +707,7 @@ services:
         condition: service_started
     profiles: ["eval"]
     restart: always
+    <<: *default-logging
     mem_limit: ${RAG_EVAL_MEM_LIMIT:-1g}
     cpus: ${RAG_EVAL_CPUS:-2.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
@@ -689,7 +725,7 @@ services:
       - NET_ADMIN
     environment:
       # WARP-815 (K2): the documented default is 192.168.50.1 — the multi-box
-      # Pi-5 OpenWrt router (matches services/routing/main.py and the docs). The
+      # router-host OpenWrt (matches services/routing/main.py and the docs). The
       # single-box shape talks to the in-container OpenWrt on 127.0.0.1:8181;
       # scripts/lib/single-box.sh writes that override into .env before bring-up,
       # so this default is only the multi-box / dev fallback. The previous
@@ -715,6 +751,7 @@ services:
     secrets:
       - openwrt_password
     restart: always
+    <<: *default-logging
     mem_limit: ${ROUTING_MEM_LIMIT:-256m}
     cpus: ${ROUTING_CPUS:-1.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
@@ -773,6 +810,7 @@ services:
       # moves here from the orchestrator UNCHANGED.
       - matter-data:/data/matter-storage
     restart: always
+    <<: *default-logging
     # DROPLET_ prefix (not MATTER_CONTROLLER_*): the ADR-021 knob lives in
     # the operator's .env, and a bare MATTER_* name there is one stray
     # env_file away from matter.js's auto-import minefield.
@@ -824,6 +862,7 @@ services:
       - broker
       - orchestrator
     restart: always
+    <<: *default-logging
     profiles: ["full"]
     mem_limit: ${EMAIL_INDEXER_MEM_LIMIT:-256m}
     cpus: ${EMAIL_INDEXER_CPUS:-1.0}
@@ -875,6 +914,7 @@ services:
       - switch-state:/var/lib/droplet/switch
     profiles: ["full", "single-box"]
     restart: always
+    <<: *default-logging
     mem_limit: ${SWITCH_MEM_LIMIT:-128m}
     cpus: ${SWITCH_CPUS:-0.5}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
@@ -887,12 +927,12 @@ services:
   # Image variants (override FRIGATE_IMAGE in .env):
   #   stable              — default; CPU detector only (works everywhere)
   #   stable-tensorrt     — x86_64 hosts with NVIDIA discrete GPUs
-  #   stable-tensorrt-jp6 — Jetson Orin on JetPack 6 (pair with
+  #   stable-tensorrt-jp6 — a JetPack 6 GPU host (pair with
   #                          FRIGATE_RUNTIME=nvidia + YOLO_MODELS=yolov9-s)
-  # FRIGATE_RUNTIME lets the Jetson scripts set `nvidia` without forcing
+  # FRIGATE_RUNTIME lets the GPU-host scripts set `nvidia` without forcing
   # macOS / Docker Desktop (which has no nvidia runtime) to fail validation.
   frigate:
-    image: ${FRIGATE_IMAGE:-ghcr.io/blakeblackshear/frigate:stable}
+    image: ${FRIGATE_IMAGE:-ghcr.io/blakeblackshear/frigate:0.17.1}
     runtime: ${FRIGATE_RUNTIME:-runc}
     profiles: ["linux"]
     shm_size: "256mb"
@@ -911,7 +951,7 @@ services:
     devices:
       - /dev/bus/usb:/dev/bus/usb              # USB cameras
       # GPU render node. Default `/dev/dri/renderD128` matches every host
-      # with a single render node (Jetson Orin's nvgpu, x86 single-GPU
+      # with a single render node (an NVIDIA GPU host's nvgpu, x86 single-GPU
       # boxes). Override via `FRIGATE_RENDER_NODE` in .env when the dGPU
       # is reserved for another container — on the single-box deployment
       # shape the AMD dGPU (renderD128) hosts Ollama, so Frigate detects
@@ -921,7 +961,7 @@ services:
     volumes:
       - frigate-config:/config
       # NVR recordings default to the `nvrdata` named volume so every fresh
-      # deployment works out of the box. On Jetson lab hosts the operator
+      # deployment works out of the box. On GPU lab hosts the operator
       # can redirect this to a dedicated NVMe partition by overriding
       # `NVR_MEDIA_SOURCE` in .env (e.g. NVR_MEDIA_SOURCE=/mnt/cameras)
       # once the partition is provisioned. See docs/STATUS.md.
@@ -933,7 +973,7 @@ services:
       # auto-added camera on restart and trips "Config file is read-only,
       # unable to migrate" on version bumps.
       - ../docker/frigate/config.yml:/config/config.yml
-      # Jetson Orin TensorRT + NVMM libraries. The JP6 TensorRT image
+      # NVIDIA Tegra TensorRT + NVMM libraries. The JP6 TensorRT image
       # calls into libnvdla_compiler.so / libnvmedia* which live in
       # /usr/lib/aarch64-linux-gnu/tegra on the host; without this
       # bind-mount the ONNX→TensorRT model compilation falls back to
@@ -960,6 +1000,7 @@ services:
     depends_on:
       - broker
     restart: always
+    <<: *default-logging
     # Frigate is the most memory-intensive linux-profile service: it runs
     # the detector model + FFmpeg decode pipelines concurrently.
     # NOTE (cgroups v2): the 256mb shm_size above is tmpfs that counts
@@ -1006,6 +1047,7 @@ services:
     # not by dropping the profile guard onto macOS dev installs.
     profiles: ["full", "single-box"]
     restart: always
+    <<: *default-logging
     mem_limit: ${CAMERA_DISCOVERY_MEM_LIMIT:-256m}
     cpus: ${CAMERA_DISCOVERY_CPUS:-1.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
@@ -1032,7 +1074,7 @@ services:
     # specific devices — sounddevice picks them up via PortAudio.
     devices:
       - "/dev/snd:/dev/snd"
-    # The host's audio group GID. On Ubuntu/Debian (single-box + Jetson) it's 29;
+    # The host's audio group GID. On Ubuntu/Debian (single-box + inference host) it's 29;
     # docker-compose's numeric group_add doesn't care if a name exists
     # in the container's /etc/group as long as the kernel sees the GID
     # match for /dev/snd's owner.
@@ -1101,7 +1143,7 @@ services:
       # echoes as the spoken reply).
       - LLM_URL=${LLM_URL:-http://orchestrator:3000}
       # Default per shared_brain LLM_AGENT.md (qwen2.5:3b-instruct fits
-      # the Orin Nano 7 GB RAM budget with the rest of the stack up).
+      # the inference host's 7 GB RAM budget with the rest of the stack up).
       # Override via env if the appliance has a larger/different model
       # loaded (see droplet-local-LLM /models/sync).
       - LLM_MODEL=${LLM_MODEL:-qwen2.5:3b-instruct}
@@ -1121,6 +1163,7 @@ services:
     # Skip on macOS Docker Desktop (no /dev/snd).
     profiles: ["linux"]
     restart: always
+    <<: *default-logging
     mem_limit: ${VOICE_IO_MEM_LIMIT:-512m}
     cpus: ${VOICE_IO_CPUS:-1.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
@@ -1163,6 +1206,7 @@ services:
       # the first-run download can land in the right place.
       - whisper-models:/data
     restart: always
+    <<: *default-logging
     # Whisper loads the full model into RAM at startup: small.en ~470 MB.
     mem_limit: ${WHISPER_MEM_LIMIT:-1g}
     cpus: ${WHISPER_CPUS:-2.0}
@@ -1174,7 +1218,9 @@ services:
   # (audio) → speaker. Same Wyoming protocol on TCP/10200 by default.
   # Voices download on first request and cache in the named volume.
   wyoming-piper:
-    image: rhasspy/wyoming-piper:${PIPER_IMAGE_TAG:-latest}
+    # Pinned (WARP-590): match the whisper sidecar's deliberate-upgrade
+    # posture instead of floating on `latest`. 2.2.2 == today's `latest`.
+    image: rhasspy/wyoming-piper:${PIPER_IMAGE_TAG:-2.2.2}
     profiles: ["linux"]
     expose:
       - "10200"
@@ -1189,6 +1235,7 @@ services:
       # .env to switch.
       - piper-voices:/data
     restart: always
+    <<: *default-logging
     mem_limit: ${PIPER_MEM_LIMIT:-512m}
     cpus: ${PIPER_CPUS:-1.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
@@ -1249,6 +1296,7 @@ services:
     # silently or scan the network on boot.
     profiles: ["display"]
     restart: always
+    <<: *default-logging
     mem_limit: ${OLED_DISPLAY_MEM_LIMIT:-128m}
     cpus: ${OLED_DISPLAY_CPUS:-0.5}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
@@ -1325,6 +1373,7 @@ services:
       - no-new-privileges:true
     profiles: ["ops"]
     restart: unless-stopped
+    <<: *default-logging
     mem_limit: ${OPS_CONSOLE_MEM_LIMIT:-256m}
     cpus: ${OPS_CONSOLE_CPUS:-1.0}
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
@@ -1368,6 +1417,7 @@ services:
     container_name: droplet-postgres-pm
     profiles: ["pm"]
     restart: unless-stopped
+    <<: *default-logging
     environment:
       POSTGRES_DB: ${DROPLET_PM_DB_NAME:-plane}
       POSTGRES_USER: ${DROPLET_PM_DB_USER:-plane}
@@ -1398,6 +1448,7 @@ services:
     container_name: droplet-redis-pm
     profiles: ["pm"]
     restart: unless-stopped
+    <<: *default-logging
     volumes:
       - redis-pm-data:/data
     healthcheck:
@@ -1461,6 +1512,7 @@ services:
     container_name: droplet-pm-api
     profiles: ["pm"]
     restart: unless-stopped
+    <<: *default-logging
     depends_on:
       postgres-pm:
         condition: service_healthy
@@ -1511,6 +1563,7 @@ services:
     container_name: droplet-pm-worker
     profiles: ["pm"]
     restart: unless-stopped
+    <<: *default-logging
     depends_on:
       pm-api:
         condition: service_started
@@ -1540,6 +1593,11 @@ services:
       AWS_S3_ENDPOINT_URL: http://pm-minio:9000
       AWS_S3_BUCKET_NAME: ${DROPLET_PM_MINIO_BUCKET:-uploads}
       FILE_SIZE_LIMIT: ${DROPLET_PM_FILE_SIZE_LIMIT:-5242880}
+      # Mirror pm-api's env (WARP-575): the worker runs the SAME backend image, so
+      # its environment is kept a superset of pm-api's. The worker runs Celery
+      # (docker-entrypoint-worker.sh), not gunicorn, so it ignores this at runtime
+      # — it is here purely for image/env parity with pm-api.
+      GUNICORN_WORKERS: ${DROPLET_PM_GUNICORN_WORKERS:-2}
     # Plane's celery worker loads the full Django app + task registry at startup;
     # 512m cgroup-OOM-killed it (exit 137) on a box with 24 GB free. 1g clears
     # startup + light single-box task load. Override via PM_WORKER_MEM_LIMIT.
@@ -1556,6 +1614,7 @@ services:
     container_name: droplet-pm-web
     profiles: ["pm"]
     restart: unless-stopped
+    <<: *default-logging
     depends_on:
       pm-api:
         condition: service_started
@@ -1578,6 +1637,7 @@ services:
     container_name: droplet-pm-health
     profiles: ["pm"]
     restart: unless-stopped
+    <<: *default-logging
     depends_on:
       pm-api:
         condition: service_started
@@ -1603,6 +1663,7 @@ services:
     container_name: droplet-pm-mq
     profiles: ["pm"]
     restart: unless-stopped
+    <<: *default-logging
     environment:
       RABBITMQ_DEFAULT_USER: ${DROPLET_PM_MQ_USER:-plane}
       RABBITMQ_DEFAULT_PASS: ${DROPLET_PM_MQ_PASSWORD}
@@ -1630,6 +1691,7 @@ services:
     container_name: droplet-pm-minio
     profiles: ["pm"]
     restart: unless-stopped
+    <<: *default-logging
     environment:
       MINIO_ROOT_USER: ${DROPLET_PM_MINIO_ACCESS_KEY}
       MINIO_ROOT_PASSWORD: ${DROPLET_PM_MINIO_SECRET_KEY}
@@ -1649,6 +1711,7 @@ services:
     container_name: droplet-pm-beat
     profiles: ["pm"]
     restart: unless-stopped
+    <<: *default-logging
     depends_on:
       pm-api:
         condition: service_started
@@ -1680,14 +1743,14 @@ services:
   # single-box profile (`COMPOSE_PROFILES=single-box`) — bundled-inference
   # deployment shape services.
   # ==========================================================================
-  # The multi-box deployment runs Ollama on a separate Jetson (the dGPU
-  # host) and a real OpenWrt router (the Pi 5). The single-box shape
+  # The multi-box deployment runs Ollama on a separate inference host (the dGPU
+  # host) and a real OpenWrt router host. The single-box shape
   # collapses both into containers on the same x86 host. Services below
   # ONLY start when the `single-box` profile is active; on every other
   # deployment shape they're invisible.
   #
   # Activation: `COMPOSE_PROFILES=single-box` in .env (setup.sh writes this
-  # when it detects single-box hardware: dGPU + iGPU + no separate Jetson
+  # when it detects single-box hardware: dGPU + iGPU + no separate inference host
   # on LAN). Operators can also force it with
   # `COMPOSE_PROFILES=single-box,linux docker compose up -d` for testing.
   #
@@ -1705,10 +1768,15 @@ services:
   # the compose service name `ollama` (resolved via the default bridge
   # network), not the host loopback.
   ollama:
-    image: ollama/ollama:rocm
+    # Pinned (WARP-590): the upstream `rocm` tag rolls forward on every
+    # release, so a routine pull could swap the inference runtime under the
+    # box. 0.30.8-rocm == today's `rocm`; it still natively supports gfx1200
+    # (RDNA4), so the no-HSA_OVERRIDE note above still holds.
+    image: ollama/ollama:0.30.8-rocm
     container_name: droplet-ollama
     profiles: ["single-box"]
     restart: unless-stopped
+    <<: *default-logging
     expose:
       - "11434"
     ports:
@@ -1790,6 +1858,7 @@ services:
     command: /sbin/init
     privileged: true
     restart: unless-stopped
+    <<: *default-logging
     cap_add:
       - NET_ADMIN
       - SYS_ADMIN

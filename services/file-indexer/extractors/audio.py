@@ -109,7 +109,7 @@ def extract(path: Union[str, Path], mime: str) -> Optional[ExtractedDoc]:
         except (RuntimeError, ValueError) as exc:
             # RuntimeError: most commonly CUDA OOM when Ollama is mid-inference.
             # ValueError: ctranslate2 raises this when the package was not
-            #   compiled with CUDA (e.g. macOS dev box, CPU-only Jetson host).
+            #   compiled with CUDA (e.g. macOS dev box, CPU-only host).
             # Either way the response is the same: drop to CPU for this call
             # and emit gpu_unavailable so the caller knows.
             logger.warning("CUDA path failed (%s); falling back to CPU", exc)

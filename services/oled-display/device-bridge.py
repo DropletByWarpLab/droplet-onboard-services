@@ -1,7 +1,7 @@
 """
 Droplet device-bridge — host-side HTTP API for the on-device screen.
 
-Runs on the Jetson host (outside the oled-display container). Exposes a
+Runs on the appliance host (outside the oled-display container). Exposes a
 stable read-only API the display service polls, with each endpoint
 sourcing live data from the appropriate upstream:
 
@@ -58,7 +58,7 @@ OPENWRT_KNOWN_HOSTS = os.environ.get(
 # Access-point credentials source for the pairing QR. The two shipping
 # deployment shapes broadcast the AP differently:
 #
-#   uci      — multi-box: a Pi-5 OpenWrt router holds the AP in UCI
+#   uci      — multi-box: a router-host OpenWrt instance holds the AP in UCI
 #              (`wireless.*`). We read SSID+PSK over SSH (the historical
 #              path). This is the back-compat default.
 #   hostapd  — single-box: the host runs a raw hostapd AP via the
@@ -564,7 +564,7 @@ def _use_hostapd_mode():
 
 
 # ---------------------------------------------------------------------------
-# Jetson-local nmcli fallback
+# Appliance-local nmcli fallback
 # ---------------------------------------------------------------------------
 
 def scan_via_nmcli():
@@ -2250,6 +2250,25 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, {"error": "not found"})
 
     def do_POST(self):
+        # Mirror do_GET: wrap the whole dispatch so a handler that raises
+        # before responding (a non-numeric Content-Length -> ValueError on
+        # int(...), or rfile.read().decode() blowing up) returns a clean JSON
+        # error instead of escaping the handler — which would otherwise leave
+        # the client with a dangling/!200 connection and a stack trace in the
+        # bridge log. The real routing lives in _dispatch_post.
+        try:
+            return self._dispatch_post()
+        except ValueError as e:                                      # noqa: BLE001
+            # Bad Content-Length (or other malformed-request value): 400.
+            return self._send(400, {"ok": False, "error": str(e)})
+        except Exception as e:                                       # noqa: BLE001
+            # Do not surface str(e) — subprocess errors include the full command
+            # line (which may contain OPENWRT_PASS in plaintext). Log for the
+            # bridge operator and return a sanitised message to the HTTP client.
+            logger.exception("unhandled error in do_POST: %s", e)
+            return self._send(500, {"ok": False, "error": "internal server error"})
+
+    def _dispatch_post(self):
         if self.path == "/drives/changed":
             # Invalidate the cache — the automount script calls this
             # whenever a drive is added or removed. Body is ignored;
@@ -2404,7 +2423,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self._authed():
                 return self._send(401, {"ok": False, "error": "unauthorized"})
             if _use_hostapd_mode():
-                # Single-box / hostapd mode: no Pi-5 router to SSH into —
+                # Single-box / hostapd mode: no router host to SSH into —
                 # return the same rotation_disabled sentinel as qr_snapshot()
                 # so callers (PyPortal UI, scheduled timer) gracefully no-op.
                 return self._send(410, {

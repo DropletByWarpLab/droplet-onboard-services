@@ -5,7 +5,7 @@
 # The `single-box` deployment runs the full Droplet stack on ONE x86
 # host with a dGPU (for Ollama) + iGPU (for Frigate) + Wi-Fi card
 # (for the in-container OpenWrt AP) — as opposed to the `multi-box`
-# shape which has Ollama on a separate Jetson and OpenWrt on a Pi 5,
+# shape which has Ollama on a separate inference host and OpenWrt on a separate router host,
 # or the future `v2-6` shape which uses the custom 9-PCB chassis.
 # All three are shipping product; the difference is hardware layout.
 #
@@ -76,7 +76,7 @@ detect_single_box_mode() {
   # The CI / DROPLET_SKIP_NETWORK_PROBE escape hatch lets dev re-runs of
   # the script skip the two 2-second curl probes (≤4 s added latency on
   # every fresh install). Real provisions still do the probe.
-  local jetson_reachable=0
+  local inference_reachable=0
   local skip_probe=0
   if [ -n "${CI:-}" ] || [ -n "${DROPLET_SKIP_NETWORK_PROBE:-}" ]; then
     skip_probe=1
@@ -88,7 +88,7 @@ detect_single_box_mode() {
     # fails the body grep.
     if curl -fsS -m 2 http://192.168.50.197:11434/api/version 2>/dev/null | grep -q '"version":' \
        || curl -fsS -m 2 http://inference-engine.local:11434/api/version 2>/dev/null | grep -q '"version":'; then
-      jetson_reachable=1
+      inference_reachable=1
     fi
   fi
 
@@ -109,7 +109,7 @@ detect_single_box_mode() {
   fi
 
   # Decision matrix
-  if [ "$jetson_reachable" = 1 ]; then
+  if [ "$inference_reachable" = 1 ]; then
     SINGLE_BOX_DETECTION_REASON="separate inference host reachable on LAN — multi-box deployment shape"
     return 1
   fi
@@ -125,7 +125,7 @@ detect_single_box_mode() {
   fi
 
   # shellcheck disable=SC2034  # global: set across this fn, read by the caller (scripts/setup.sh:124,127) after `source`. shellcheck checks this lib standalone and can't see the cross-file read; the directive sits on the last assignment, where SC2034 anchors.
-  SINGLE_BOX_DETECTION_REASON="ambiguous signals (render=${render_count}, dgpu=${has_dgpu}, inference_host=${jetson_reachable}) — declining to auto-enable"
+  SINGLE_BOX_DETECTION_REASON="ambiguous signals (render=${render_count}, dgpu=${has_dgpu}, inference_host=${inference_reachable}) — declining to auto-enable"
   return 1
 }
 
@@ -479,7 +479,7 @@ configure_single_box_env() {
 #   WIREGUARD_LAN_CIDR/  VPN peer .conf AllowedIPs + DNS, pinned to the single-
 #   WIREGUARD_DNS        box LAN (br-lan 192.168.20.0/24, gateway/dnsmasq at
 #                        192.168.20.1). Overrides the orchestrator's multi-box
-#                        Pi-LAN defaults (192.168.50.x in
+#                        LAN defaults (192.168.50.x in
 #                        apps/orchestrator/src/config.ts) so a remote VPN client
 #                        can reach the dashboard + resolve *.lan (WARP-839).
 #   OLLAMA_URL           compose-internal `ollama` service
@@ -487,7 +487,7 @@ configure_single_box_env() {
 #   LLM_MODEL            THE one model (architecture-guard one-model rule)
 #   OPENWRT_*            bundled openwrt container at 127.0.0.1:8181
 #   DROPLET_AP_MODE      hostapd — the single-box host runs the Wi-Fi AP via
-#                        hostapd (not a Pi-5 UCI router), so the device-bridge
+#                        hostapd (not a standalone UCI router), so the device-bridge
 #                        reads pairing-QR creds in hostapd mode. Mirrored into
 #                        /etc/droplet/device-bridge.env by
 #                        install-device-bridge.sh (WARP-654).
@@ -526,7 +526,7 @@ EOF
   # WARP-839: pin the WireGuard peer LAN CIDR + DNS to the single-box LAN. The
   # orchestrator's defaults (WIREGUARD_LAN_CIDR=192.168.50.0/24,
   # WIREGUARD_DNS=192.168.50.1 in apps/orchestrator/src/config.ts) are the
-  # MULTI-BOX Pi LAN. The single-box LAN is br-lan 192.168.20.0/24 with the
+  # MULTI-BOX LAN. The single-box LAN is br-lan 192.168.20.0/24 with the
   # gateway + dnsmasq at 192.168.20.1 (droplet.local -> 192.168.20.1), so the
   # rendered peer .conf AllowedIPs/DNS must point there — otherwise a remote VPN
   # client can't reach the dashboard or resolve *.lan. Multi-box keeps the

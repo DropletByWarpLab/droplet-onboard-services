@@ -53,6 +53,7 @@ import {
   purgeScheduleEvents,
   purgeExpiredOverrides,
 } from "./services/schedule-purge.js";
+import { purgeAuditLogs } from "./services/audit-retention-purge.service.js";
 import { tickToolSchedules } from "./services/tool-schedule-ticker.service.js";
 import { mcpClient } from "./services/mcp-client.singleton.js";
 import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
@@ -258,13 +259,33 @@ async function main() {
   // the handler; the others silently skip. Each distinct cron task gets
   // its own lock key so they don't starve each other.
   const cronRuntime = createCronRuntime(prisma);
+
+  // Router-dependent schedulers only run when routing supervision is active.
+  // With ROUTING_MODE=disabled (dev / CI / router-less deploys) every openwrt
+  // call short-circuits to RouterError.disabled, so scheduling these would emit
+  // a warn-level error every tick — a 47h dev-stack run logged 16k+
+  // "firewall error; preserving state" lines this way. Surface the disabled
+  // state once at boot instead. No-op in production (ROUTING_MODE=real).
+  const routerSupervisionEnabled = config.ROUTING_MODE !== "disabled";
+  if (!routerSupervisionEnabled) {
+    logger.warn(
+      "ROUTING_MODE=disabled — skipping router-dependent schedulers " +
+        "(schedule-ticker, egress-reconciler, device-reconcile, ap-discovery). " +
+        "API writes to schedule/phone-home/firewall state will be persisted to the " +
+        "database but will NOT be enforced on the router until ROUTING_MODE is set " +
+        "to real or mock.",
+    );
+  }
+
   const scheduleTicker = createScheduleTicker(prisma, firewall);
   const tickMs = Number(process.env.SCHEDULE_TICK_MS ?? 30_000);
-  cronRuntime.scheduleInterval(
-    tickMs,
-    () => scheduleTicker.tickOnce(),
-    { lockKey: "droplet:schedule-ticker" },
-  );
+  if (routerSupervisionEnabled) {
+    cronRuntime.scheduleInterval(
+      tickMs,
+      () => scheduleTicker.tickOnce(),
+      { lockKey: "droplet:schedule-ticker" },
+    );
+  }
 
   // WARP-613: phone-home egress reconciler (ADR-012). Additive sibling to the
   // schedule ticker — enforces per-group/master phone-home WAN-egress blocks
@@ -282,11 +303,13 @@ async function main() {
     },
   };
   const egressReconciler = createEgressReconciler(prisma, egressClient);
-  cronRuntime.scheduleInterval(
-    tickMs,
-    () => egressReconciler.tickOnce(),
-    { lockKey: "droplet:egress-reconciler" },
-  );
+  if (routerSupervisionEnabled) {
+    cronRuntime.scheduleInterval(
+      tickMs,
+      () => egressReconciler.tickOnce(),
+      { lockKey: "droplet:egress-reconciler" },
+    );
+  }
 
   // WARP-89: device-intelligence reconciler poller + daily presence purge.
   // Reuses the same cron runtime as the schedule ticker. The poller pulls
@@ -300,12 +323,14 @@ async function main() {
     openwrt,
     reconcileMs,
   );
-  cronRuntime.scheduleInterval(
-    reconcileMs,
-    () => reconcilePoller.pollOnce(),
-    { lockKey: "droplet:device-reconcile-poller" },
-  );
-  logger.info({ reconcileMs }, "device reconcile poller started");
+  if (routerSupervisionEnabled) {
+    cronRuntime.scheduleInterval(
+      reconcileMs,
+      () => reconcilePoller.pollOnce(),
+      { lockKey: "droplet:device-reconcile-poller" },
+    );
+    logger.info({ reconcileMs }, "device reconcile poller started");
+  }
 
   // WARP-463 (C2): tool-schedule-ticker. Every 60s scans due
   // ToolSchedule rows, dispatches via the imperative walker shared
@@ -346,7 +371,9 @@ async function main() {
   // schedule ticker / reconcile poller above so multi-instance
   // deploys don't double-fire.
   const apDiscoveryIntervalMs = config.DROPLET_AP_DISCOVERY_INTERVAL * 1000;
-  startApDiscoveryPoller(cronRuntime, prisma, openwrt, apDiscoveryIntervalMs);
+  if (routerSupervisionEnabled) {
+    startApDiscoveryPoller(cronRuntime, prisma, openwrt, apDiscoveryIntervalMs);
+  }
 
   cronRuntime.scheduleCron(
     "0 3 * * *",
@@ -362,6 +389,20 @@ async function main() {
       // than throughput (30 d) because totals roll up to monthly
       // billing windows; 90 d covers QoQ review without bloat.
       const offLanDeleted = await purgeOffLanEgressSamples(prisma, 90);
+      // WARP-586: retention purge for the append-only audit/log tables
+      // (ActivityRow, CommandAuditLog, NotificationLog). Window is
+      // operator-tunable via DROPLET_AUDIT_RETENTION_DAYS (default 90);
+      // <= 0 disables the purge. ActivityRow is hash-chained, so this is
+      // an id-contiguous oldest-prefix seal-and-truncate, not a mid-chain
+      // delete — see audit-retention-purge.service.ts for the integrity
+      // argument. Deletes are batched and capped per run so a months-deep
+      // first-run backlog can't push this handler past the 60 s
+      // advisory-lock transaction (cron-runtime withAdvisoryLock) into a
+      // permanent P2028 retry loop; the backlog drains over nights.
+      const auditPurge = await purgeAuditLogs(
+        prisma,
+        config.DROPLET_AUDIT_RETENTION_DAYS,
+      );
       logger.info(
         {
           eventsDeleted,
@@ -369,6 +410,10 @@ async function main() {
           presenceDeleted: presenceDeleted.count,
           throughputDeleted,
           offLanDeleted,
+          activityDeleted: auditPurge.activityDeleted,
+          commandAuditDeleted: auditPurge.commandAuditDeleted,
+          notificationDeleted: auditPurge.notificationDeleted,
+          auditRetentionSkipped: auditPurge.skipped,
         },
         "daily purges complete",
       );

@@ -66,7 +66,7 @@ const TIER_3_OPERATIONS = new Set([
   "add_vpn_peer",
   "setup_vpn_firewall",
   "network_restart",
-  // Switch — never let AI disable the port the Jetson is on
+  // Switch — never let AI disable the port the appliance is on
   "switch_disable_protected_port",
 ]);
 

@@ -276,6 +276,21 @@ describe("createMatterControllerCore", () => {
         },
       ]);
     });
+
+    it("passes the timeout to matter.js as milliseconds, not seconds", async () => {
+      const discover = controller.discoverCommissionableDevices as ReturnType<
+        typeof vi.fn
+      >;
+      await core.discover(5000);
+      // matter.js Duration is millisecond-valued; the timeout must be the
+      // raw 5000, not 5 (which would expire the scan in ~5ms).
+      expect(discover).toHaveBeenCalledWith(
+        expect.anything(),
+        undefined,
+        undefined,
+        5000,
+      );
+    });
   });
 
   describe("shutdown", () => {

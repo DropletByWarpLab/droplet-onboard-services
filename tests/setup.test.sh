@@ -225,7 +225,7 @@ else
   fail "configure_single_box_env exited with an error"
 fi
 
-# The single-box shape runs the AP as a host hostapd (not a Pi-5 UCI router),
+# The single-box shape runs the AP as a host hostapd (not a standalone UCI router),
 # so the device-bridge must read pairing-QR creds in hostapd mode. The install
 # records that as a .env knob; install-device-bridge.sh mirrors it into
 # /etc/droplet/device-bridge.env, where device-bridge.py reads it (it defaults
@@ -442,7 +442,7 @@ fi
 
 # --- Single-box OpenWrt override is intact (WARP-815 K2 regression guard) ---
 # K2 reconciles the *documented compose default* OPENWRT_HOST to 192.168.50.1
-# (the multi-box Pi-5 router), but the single-box talks to the in-container
+# (the multi-box router host), but the single-box talks to the in-container
 # OpenWrt on 127.0.0.1:8181. configure_single_box_env owns that override and
 # MUST keep writing it — this guards against the K2 doc change accidentally
 # regressing the working single-box path. Asserted once + idempotent + the
@@ -636,6 +636,84 @@ if grep -q 'ID_FS_LABEL}=="EFI"' "$AUTOMOUNT_RULES" \
   pass "automount udev rule excludes EFI/BOOT system partitions (never mounts the OS disk)"
 else
   fail "automount udev rule is missing the EFI/BOOT system-partition exclusions"
+fi
+
+# =============================================================================
+# Phase 7: setup.sh lock lifecycle (box-strand fix)
+# =============================================================================
+# Two failure modes stranded the box after an interrupted setup:
+#   (a) the lock was released only on the happy path, so a non-zero exit (e.g.
+#       the benign "seeder failed (exit 1)") left .setup.lock behind and the
+#       next run aborted with "Another setup is running". Fix: release it from
+#       an EXIT trap that runs on every exit path.
+#   (b) even with the lock present, the staleness check was purely age-based
+#       (1 h), so a SIGKILL'd / power-lost run blocked re-provisioning for an
+#       hour. Fix: reclaim a lock whose recorded PID is no longer alive.
+# Static assertions verify the wiring; behavioural assertions exercise the REAL
+# _acquire_lock / _release_lock extracted from setup.sh (not a copy).
+echo "--- Phase 7: setup.sh lock lifecycle ---"
+
+SETUP_SH="$REPO_ROOT_REAL/scripts/setup.sh"
+
+# (1) Static: the lock must be released from an EXIT trap, not just inline.
+if grep -qE '^[[:space:]]*trap[[:space:]]+_release_lock[[:space:]]+EXIT' "$SETUP_SH"; then
+  pass "setup.sh releases the lock from an EXIT trap (survives non-zero exits)"
+else
+  fail "setup.sh has no 'trap _release_lock EXIT' — a failed run strands .setup.lock"
+fi
+
+# (2) Static: the acquire path must be stale-aware (reclaim a dead PID's lock).
+if grep -qE 'kill -0' "$SETUP_SH"; then
+  pass "_acquire_lock is stale-aware (kill -0 liveness check on the recorded PID)"
+else
+  fail "_acquire_lock has no PID-liveness check — a crashed run blocks re-provision for ~1h"
+fi
+
+# --- Behavioural: extract the real lock functions and exercise them ----------
+# Pull the exact function source out of setup.sh (start at the def line, stop at
+# the first column-0 `}`) and eval it, so we test the shipping code, not a copy.
+eval "$(awk '/^_acquire_lock\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$SETUP_SH")"
+eval "$(awk '/^_release_lock\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$SETUP_SH")"
+
+LOCK_FILE="$TMP_ROOT/.data/.setup.lock"   # consumed by the eval'd functions
+mkdir -p "$(dirname "$LOCK_FILE")"
+
+# (3) Empty/garbage lock file → reclaimed (acquire succeeds, writes a live PID).
+: > "$LOCK_FILE"
+if ( _acquire_lock ) >/dev/null 2>&1 && [ -s "$LOCK_FILE" ]; then
+  pass "_acquire_lock reclaims an empty/garbage lock file"
+else
+  fail "_acquire_lock did not reclaim an empty lock file"
+fi
+rm -f "$LOCK_FILE"
+
+# (4) Dead-PID lock → reclaimed. Spawn a process, reap it, reuse its dead PID.
+sleep 0.1 & dead_pid=$!
+wait "$dead_pid" 2>/dev/null || true
+echo "$dead_pid" > "$LOCK_FILE"
+if ( _acquire_lock ) >/dev/null 2>&1; then
+  pass "_acquire_lock reclaims a lock whose recorded PID is dead (no 1h wait)"
+else
+  fail "_acquire_lock refused a dead-PID lock (box would stay stranded)"
+fi
+rm -f "$LOCK_FILE"
+
+# (5) Live-PID, fresh lock → refused (the real concurrency guard still holds).
+echo $$ > "$LOCK_FILE"   # our own PID: alive, just written (age ~0)
+if ( _acquire_lock ) >/dev/null 2>&1; then
+  fail "_acquire_lock granted a lock held by a live PID (concurrency guard broken)"
+else
+  pass "_acquire_lock still refuses a fresh lock held by a live process"
+fi
+rm -f "$LOCK_FILE"
+
+# (6) _release_lock removes the lock file.
+echo $$ > "$LOCK_FILE"
+_release_lock
+if [ ! -f "$LOCK_FILE" ]; then
+  pass "_release_lock removes the lock file"
+else
+  fail "_release_lock left the lock file in place"
 fi
 
 # =============================================================================

@@ -7,7 +7,7 @@
 > **Scope:** Every component in this repo (`droplet-onboard-services`, GitHub
 > `DropletByWarpLab/droplet-onboard-services`) — the **intelligence layer** of the
 > Droplet edge AI appliance. Inference (Ollama + `ollama-manager`) lives in the
-> sibling repo [`droplet-jetson-ai`](../../droplet-jetson-ai); the physical
+> sibling repo [`droplet-local-LLM`](../../droplet-local-LLM); the physical
 > appliance lives in `pcb-claude-tool`. See [`agentic-workflows.md`](agentic-workflows.md)
 > for the cross-repo picture and [`ADR-009-canonical-system-architecture.md`](ADR-009-canonical-system-architecture.md)
 > for the canonical system shape (do not violate it without a superseding ADR).
@@ -327,7 +327,7 @@ network. Host-published ports and host-network services are called out.
   first-run init flow, registers confirmed cameras in Frigate, publishes discovery
   events to MQTT.
 - **Gotchas:** fails closed if `DEVICE_SECRET` empty (`/drivers/fix` needs auth);
-  subnet sweep is throttled (concurrency cap) to respect the Jetson FD limit; RTSP
+  subnet sweep is throttled (concurrency cap) to respect the inference host FD limit; RTSP
   URLs validated as RFC-1918 before reaching Frigate; `ONVIF_WS_DISCOVERY_ENABLED`
   defaults off (FD leak on Python 3.12+).
 
@@ -380,7 +380,7 @@ network. Host-published ports and host-network services are called out.
 
 - **Purpose:** TPM 2.0 device-identity sidecar. gRPC over a **unix socket**
   (`/var/run/droplet/device-identity.sock`). `Sign` / `GetCert` / `GetStatus` /
-  `Reseal`. `RealBackend` (tpm2-pytss + `/dev/tpm0`, Jetson prod) vs `MockBackend`
+  `Reseal`. `RealBackend` (tpm2-pytss + `/dev/tpm0`, appliance prod) vs `MockBackend`
   (pure-Python, dev/CI) — indistinguishable at the gRPC boundary. Reseal requires a
   short-lived nonce the orchestrator issues only after MFA re-auth.
 
@@ -404,17 +404,22 @@ network. Host-published ports and host-network services are called out.
 
 ## openwrt/
 
-- **Purpose:** OpenWrt 24.10 ImageBuilder + UCI config overlay producing the router
-  firmware (SD `.img.gz` + sysupgrade image). `build.sh` validates the overlay,
-  pulls the ImageBuilder, and `make image` with custom packages + `files/`.
+- **Purpose:** OpenWrt 24.10 — on single-box (the shipping shape) the AP runs in a
+  container built from `singlebox-image/Dockerfile` (`droplet/openwrt-singlebox`
+  image), which bakes the AP/router packages + the canonical rpcd ACL. The UCI
+  config overlay under `files/` documents the network/firewall/camera-VLAN model
+  and remains the source of truth for the rpcd ACL. The legacy multi-box bare-metal
+  router SD-card image builder (`openwrt/build.sh`) has been retired (ADR-011).
 - **Overlay:** `files/etc/config/*` (network/wireless/firewall/dhcp/uhttpd/rpcd/
   system), `files/usr/share/rpcd/acl.d/droplet-ai.json` (ubus ACL, denies
   `file.exec`), `files/etc/uci-defaults/99-droplet-setup` (first-boot secrets +
-  board tweaks). Camera VLAN 100 is pre-provisioned.
-- **Target:** generic hardware-agnostic router build (see
-  [ADR-011](ADR-011-hardware-agnostic-codebase.md)); reference platform is a Pi-class
-  board with a MediaTek MT7922 Wi-Fi module + USB NIC. The MT7922 needs three
-  things together (32-bit DMA overlay, `disable_aspm=1`, firmware blobs baked in).
+  board tweaks). Camera VLAN 100 is pre-provisioned. Note: the single-box
+  container does NOT consume `files/etc/config/*` — its `/etc/config` is a runtime
+  named volume; it only bakes the rpcd ACL + uhttpd limits.
+- **Target:** generic hardware-agnostic OpenWrt build (see
+  [ADR-011](ADR-011-hardware-agnostic-codebase.md)). On single-box the host's Wi-Fi
+  radio is moved into the container's netns and hostapd serves the AP. The legacy
+  bare-metal router reference used a MediaTek MT7922 Wi-Fi module + USB NIC.
 
 ## docker/
 

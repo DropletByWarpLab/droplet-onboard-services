@@ -1,7 +1,7 @@
 """
 Droplet OpenWrt SDK
 ===================
-Python client for the Jetson AI module to control all aspects of the
+Python client for the appliance AI module to control all aspects of the
 OpenWrt routing layer via the ubus JSON-RPC API.
 
 Usage:
@@ -13,7 +13,7 @@ Usage:
     status = router.network.interface_status("lan")
 
     # Change WiFi SSID (radio / iface-section names are deployment-specific;
-    # the shipped Pi-5 router uses radio3 / default_radio3 — see schemas.py)
+    # the shipped router host uses radio3 / default_radio3 — see schemas.py)
     router.wireless.set_ssid("radio3", "default_radio3", "My-New-SSID")
     router.apply_changes("wireless")
 
@@ -86,7 +86,7 @@ _DEFAULT_ROUTE_TARGETS = frozenset({"0.0.0.0", "::"})
 # ---------------------------------------------------------------------------
 # Wireless scan/info device default is deployment-shape-specific.
 #
-# `wlan0` is the wrong NIC name on every current shape (the Pi-5 router's
+# `wlan0` is the wrong NIC name on every current shape (the router host's
 # MT7922 enumerates via its `radio3` sections; a single-box's radio is
 # `wlp14s0`/similar). Resolve from `DROPLET_WIFI_SCAN_DEVICE` so the shipped
 # compose can name the real interface; the literal is only a last-resort
@@ -163,7 +163,7 @@ class UbusError(Exception):
 
 
 class ConnectionLost(Exception):
-    """Raised when the Jetson can no longer reach the OpenWrt device."""
+    """Raised when the appliance can no longer reach the OpenWrt device."""
     pass
 
 
@@ -1577,7 +1577,7 @@ class ApApi:
             {
                 "mac": "B8:27:EB:12:34:56",
                 "model": "raspberrypi,5-model-b",
-                "serial": "RPi5-00000000a1b2c3d4",
+                "serial": "AP-00000000a1b2c3d4",
                 "version": "1.0",
                 "last_ip": "192.168.50.42",
                 "hostname": "droplet-extender-b827eb123456",

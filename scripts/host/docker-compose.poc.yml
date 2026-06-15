@@ -40,7 +40,7 @@ services:
     environment:
       OPENSSL_CONF: ""
       DROPLET_FIPS_REQUIRED: "false"
-      JETSON_OLLAMA_URL: "http://ollama:11434"
+      OLLAMA_URL: "http://ollama:11434"
   device-identity-svc:
     environment:
       DROPLET_TPM_BACKEND: "mock"

@@ -52,10 +52,15 @@ const buttonStyle: React.CSSProperties = {
   cursor: "pointer",
 };
 
-const linkStyle: React.CSSProperties = {
-  color: "#9ca3af",
-  fontSize: "0.8125rem",
-  textDecoration: "none",
+const secondaryButtonStyle: React.CSSProperties = {
+  display: "inline-block",
+  padding: "0.5rem 1rem",
+  borderRadius: "0.5rem",
+  border: "1px solid rgba(255,255,255,0.18)",
+  background: "transparent",
+  color: "#f5f5f7",
+  fontWeight: 600,
+  cursor: "pointer",
 };
 export default function GlobalError({
   error,
@@ -107,13 +112,19 @@ export default function GlobalError({
               >
                 Try again
               </button>
-              <a
-                href="/"
-                className="type-footnote text-accent hover:underline"
-                style={linkStyle}
+              {/* The copy promises "reload the page" — wire an actual reload.
+                  `reset()` only re-renders the root tree; a sticky fault (the
+                  root layout/providers throwing on stale state or a recurring
+                  fetch failure) re-throws immediately, so a full reload is the
+                  real escape this last-resort surface needs. */}
+              <button
+                type="button"
+                onClick={() => window.location.reload()}
+                className="dp-btn-secondary"
+                style={secondaryButtonStyle}
               >
-                Go home
-              </a>
+                Reload page
+              </button>
             </div>
           </div>
         </div>

@@ -186,7 +186,7 @@ Expected output shape:
 ## Model recommendations
 
 - **`qwen2.5:3b-instruct`** (2.0 GB, Q4_K_M, current default) — fits the
-  Orin Nano's 7 GB RAM budget with Frigate + orchestrator + Nextcloud
+  inference host's 7 GB RAM budget with Frigate + orchestrator + Nextcloud
   running. Tool-calling quality is decent; occasional schema issues on
   nested objects.
 - **`qwen2.5:7b-instruct`** (4.7 GB) — better tool-calling reliability but

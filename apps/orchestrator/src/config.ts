@@ -1,5 +1,49 @@
 import { z } from "zod";
 
+// WARP-580 — production JWT-secret strength guard. A production boot must
+// reject a secret that is too short OR is one of the shipped dev placeholders
+// (a copy-paste from .env.example is the realistic foot-gun). setup.sh mints a
+// 64-byte hex value, so a real deployment clears 32 chars with room to spare.
+const JWT_SECRET_MIN_LENGTH = 32;
+const KNOWN_DEV_JWT_SECRETS: readonly string[] = [
+  "dev-jwt-secret-do-not-use-in-production",
+  "changeme",
+  "secret",
+  "your-secret-here",
+];
+
+/** PURE — true when `s` is unfit for production use. Exported for tests. */
+export function isWeakJwtSecret(s: string): boolean {
+  return s.length < JWT_SECRET_MIN_LENGTH || KNOWN_DEV_JWT_SECRETS.includes(s);
+}
+
+/**
+ * WARP-580 — resolve the EFFECTIVE auth posture (fail-closed).
+ *
+ * Auth is on unless an operator EXPLICITLY opts out in a non-production
+ * environment. We read the LITERAL env string here rather than zod's coerced
+ * boolean: `z.coerce.boolean()` runs JS `Boolean(...)`, so the string "false"
+ * (non-empty) coerces to TRUE — it cannot represent an explicit opt-out. The
+ * opt-out is therefore an explicit falsey token ("false"/"0"/"no"/"off",
+ * case-insensitive); anything else (including an absent var) stays ON. In
+ * production we force-ON regardless of the var, so the middleware's
+ * owner-injection-when-disabled branch can never fire on a shipped box even if
+ * `.env` carries a stale `AUTH_ENABLED=false`.
+ */
+const FALSEY_ENV_TOKENS: ReadonlySet<string> = new Set(["false", "0", "no", "off"]);
+export function resolveAuthEnabled(
+  rawAuthEnv: string | undefined,
+  nodeEnv: string,
+): boolean {
+  // Production: fail-closed — auth is always on.
+  if (nodeEnv === "production") return true;
+  // Non-production: honour an EXPLICIT falsey opt-out only. An unset var stays ON.
+  if (rawAuthEnv !== undefined && FALSEY_ENV_TOKENS.has(rawAuthEnv.trim().toLowerCase())) {
+    return false;
+  }
+  return true;
+}
+
 const envSchema = z.object({
   DATABASE_URL: z.string().default("postgresql://droplet:droplet@localhost:5432/droplet"),
   REDIS_URL: z.string().default("redis://localhost:6379"),
@@ -27,7 +71,14 @@ const envSchema = z.object({
 
   // --- Nextcloud (single file storage backend) ---
   NEXTCLOUD_URL: z.string().default("http://localhost:8080"),
-  AUTH_ENABLED: z.coerce.boolean().default(false),
+  // WARP-580 — auth is FAIL-CLOSED. The default is `true`; the only way to run
+  // with auth off is an EXPLICIT `AUTH_ENABLED=false` AND a non-production
+  // NODE_ENV (see resolveAuthEnabled below). A bare/missing var, or `=false`
+  // in production, both resolve to auth ENABLED. The middleware's
+  // owner-injection-when-disabled path (middleware/auth.ts) therefore can
+  // never fire in production. Parsed here as the raw operator INTENT; the
+  // effective value is `config.AUTH_ENABLED` after resolveAuthEnabled.
+  AUTH_ENABLED: z.coerce.boolean().default(true),
 
   // --- Device pairing ---
   // 32-byte base64 key used to encrypt per-device Nextcloud app passwords
@@ -108,12 +159,18 @@ const envSchema = z.object({
   // --- JWT ---
   // In production this must be set — setup.sh generates a 64-byte random hex value.
   // The default is intentionally weak so tests work without env setup.
+  //
+  // WARP-580 — production secret-strength guard. In production the secret must
+  // be at least JWT_SECRET_MIN_LENGTH chars AND must not match any known dev
+  // placeholder. Outside production the weak default is allowed so tests + dev
+  // laptops run without env setup. The refine runs at parse time (config load),
+  // so a misconfigured production boot dies loud before serving a request.
   JWT_SECRET: z
     .string()
     .default("dev-jwt-secret-do-not-use-in-production")
     .refine(
-      (s) => process.env.NODE_ENV !== "production" || s !== "dev-jwt-secret-do-not-use-in-production",
-      "JWT_SECRET must be set to a strong random value in production",
+      (s) => process.env.NODE_ENV !== "production" || !isWeakJwtSecret(s),
+      `JWT_SECRET must be a strong random value in production (at least ${JWT_SECRET_MIN_LENGTH} characters and not a dev placeholder)`,
     ),
 
   // --- OAuth2 ---
@@ -182,7 +239,7 @@ const envSchema = z.object({
   // --- OpenWrt Routing ---
   // Default uses `host.docker.internal` so the bridged orchestrator can
   // reach the routing service, which runs with `network_mode: host` (bound
-  // to the Jetson host's :8080). `localhost` would be the orchestrator
+  // to the appliance host's :8080). `localhost` would be the orchestrator
   // container itself and never resolve to :8080. The orchestrator compose
   // service wires `host.docker.internal` via `extra_hosts: host-gateway`.
   ROUTING_SERVICE_URL: z.string().default("http://host.docker.internal:8080"),
@@ -256,10 +313,22 @@ const envSchema = z.object({
   DROPLET_AP_DAWN_ENABLED: z.coerce.boolean().default(true),
   DROPLET_AP_DEFAULT_TXPOWER: z.coerce.number().default(20),
 
+  // WARP-586: retention window (days) for the append-only audit/log tables
+  // ActivityRow, CommandAuditLog, NotificationLog. The daily 03:00 cron
+  // (index.ts) deletes rows older than this. 90 days balances "enough
+  // history for the dashboard's activity feed + an incident look-back"
+  // against unbounded table growth. Set 0 to disable the purge entirely —
+  // the safe "keep forever" stance, NOT a sentinel: 0 parses here and
+  // audit-retention-purge.service.ts treats <= 0 as "skip" (defense in
+  // depth). A negative window is nonsensical input, so the schema rejects
+  // it at startup (fail fast) rather than silently treating it as disable;
+  // .int() rejects sub-day floats and .finite() rejects Infinity.
+  DROPLET_AUDIT_RETENTION_DAYS: z.coerce.number().int().min(0).finite().default(90),
+
   // WARP-808: which deployment shape broadcasts the home Wi-Fi AP. This is the
   // SAME knob the device-bridge reads (services/oled-display/device-bridge.py)
   // and that single-box.sh's configure_single_box_env upserts into .env.
-  //   uci      — multi-box: a Pi-5 OpenWrt router holds the AP in UCI. Home
+  //   uci      — multi-box: a router-host OpenWrt holds the AP in UCI. Home
   //              Wi-Fi SSID/PSK writes go through the routing service (UCI/SSH),
   //              exactly as before. This is the back-compat default.
   //   hostapd  — single-box: the host runs a raw hostapd AP (no UCI), so a UCI
@@ -273,6 +342,9 @@ const envSchema = z.object({
   // Defaulting to `uci` keeps every multi-box install behaving exactly as before.
   DROPLET_AP_MODE: z.enum(["uci", "hostapd", "auto"]).default("uci"),
 
+  // --- File indexer (WARP-287 re-index + WARP-598 health probe) ---
+  FILE_INDEXER_URL: z.string().default("http://file-indexer:8090"),
+
   // --- Frigate NVR ---
   FRIGATE_URL: z.string().default("http://localhost:5000"),
   CAMERA_DISCOVERY_URL: z.string().default("http://localhost:8085"),
@@ -285,7 +357,7 @@ const envSchema = z.object({
 
   // --- OLED / TFT Display ---
   // Same rationale again: the display service runs with `network_mode: host`
-  // on the Jetson (uvicorn on :8082). `localhost` inside the orchestrator
+  // on the appliance (uvicorn on :8082). `localhost` inside the orchestrator
   // container would never resolve to it, so default to the host gateway.
   DISPLAY_SERVICE_URL: z.string().default("http://host.docker.internal:8082"),
 
@@ -318,6 +390,16 @@ const envSchema = z.object({
   // falls back to SERVICE_SECRET so installs that pinned the legacy shared
   // secret keep working until setup.sh re-mints.
   SERVICE_TOKEN_SWITCH: z.string().default(""),
+
+  // SERVICE_TOKEN_AI_GATEWAY — WARP-560. Dedicated outbound bearer for
+  // ai-gateway.client.ts → ai-gateway, which previously had NO inbound auth
+  // (/ai/chat, /ai/sessions/*, /ai/keys/* were all reachable by anything that
+  // could open the socket). The ai-gateway's ServiceAuthMiddleware now requires
+  // this Bearer on every /ai/* route (except /ai/health). Compose wires both
+  // ends to ${SERVICE_TOKEN_AI_GATEWAY}; ai-gateway.client.ts falls back to
+  // SERVICE_SECRET so installs whose .env predates this token keep working
+  // until setup.sh re-mints. Empty = unauthenticated (dev/CI default).
+  SERVICE_TOKEN_AI_GATEWAY: z.string().default(""),
 
   // --- Service-principal bearer tokens (inbound) ---
   // Per shared_brain `agentic-workflows.md` + `LLM_AGENT.md`: services that
@@ -411,8 +493,7 @@ const envSchema = z.object({
 // `DEVICE_BRIDGE_URL`. We standardize on `DEVICE_BRIDGE_URL` (config key
 // above) but honor a legacy `BRIDGE_URL` when the canonical key is unset, so
 // an existing deployment that set `BRIDGE_URL` in .env isn't silently
-// repointed at the default. Mirrors the JETSON_OLLAMA_URL → OLLAMA_URL
-// rename courtesy.
+// repointed at the default.
 // Treat an empty/whitespace value as unset so a templated `.env` with a bare
 // `DEVICE_BRIDGE_URL=` (or `BRIDGE_URL=`) line falls through to the alias and
 // then the schema default, rather than parsing as an empty URL.
@@ -482,6 +563,10 @@ function resolveCorsAllowedOrigins(
 
 export const config = {
   ...parsed,
+  // WARP-580 — `AUTH_ENABLED` on the exported config is the EFFECTIVE,
+  // fail-closed posture (resolved from the literal env string). Production
+  // always resolves to true; non-production honours an explicit opt-out only.
+  AUTH_ENABLED: resolveAuthEnabled(process.env.AUTH_ENABLED, parsed.NODE_ENV),
   corsAllowedOrigins: resolveCorsAllowedOrigins(
     parsed.CORS_ALLOWED_ORIGINS,
     parsed.NODE_ENV,

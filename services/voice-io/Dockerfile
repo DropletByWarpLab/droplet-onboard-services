@@ -1,6 +1,6 @@
 # voice-io — Droplet's always-on voice loop (WARP-154).
 #
-# Multi-arch (single-box x86 + multi-box/v2.6 Jetson deployment shapes).
+# Multi-arch (single-box x86 + multi-box/v2.6 inference-host deployment shapes).
 # Base is python:3.12-slim; the audio stack adds ALSA + PortAudio +
 # ffmpeg (for any audio format conversion the TTS pipe needs later).
 FROM python:3.12-slim AS base

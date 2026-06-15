@@ -9,7 +9,7 @@
 
 ## 1. Goals
 
-Defer audio + video transcription on **chat-attached uploads** (the brain-memory ingestion path) to a daily off-peak window. Phase 2 v1 ships ASR (WARP-197 audio + WARP-198 video) running synchronously when a file is uploaded; on a CPU-only Jetson this saturates the device for tens of minutes per file and contends with the LLM path users are actually here for.
+Defer audio + video transcription on **chat-attached uploads** (the brain-memory ingestion path) to a daily off-peak window. Phase 2 v1 ships ASR (WARP-197 audio + WARP-198 video) running synchronously when a file is uploaded; on a CPU-only inference host this saturates the device for tens of minutes per file and contends with the LLM path users are actually here for.
 
 Specifically:
 
@@ -263,7 +263,7 @@ UPDATE "BrainMemoryItem"
    AND "lastAttemptedAt" < NOW() - INTERVAL '6 hours';
 ```
 
-Catches mid-transcription crash. 6 hours is conservative — much longer than any realistic single-file run, even on a CPU-only Jetson with `large-v3`. Items reset to queued get picked up on the next daily run (or via manual `transcribe-now`).
+Catches mid-transcription crash. 6 hours is conservative — much longer than any realistic single-file run, even on a CPU-only inference host with `large-v3`. Items reset to queued get picked up on the next daily run (or via manual `transcribe-now`).
 
 ## 7. Retry cap (max 3 attempts per rolling hour)
 

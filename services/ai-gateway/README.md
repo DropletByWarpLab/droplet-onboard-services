@@ -10,7 +10,7 @@
 > new LLM-callable tool, see the "LLM tool calling" section in the repo
 > root [CLAUDE.md](../../CLAUDE.md).
 
-FastAPI + LiteLLM model routing proxy. Routes LLM requests to local (Ollama on Jetson) or cloud providers and forwards model responses verbatim — including any `tool_calls[]` the model produces — to the orchestrator's agent loop.
+FastAPI + LiteLLM model routing proxy. Routes LLM requests to local (Ollama on the inference host) or cloud providers and forwards model responses verbatim — including any `tool_calls[]` the model produces — to the orchestrator's agent loop.
 
 ## Architecture
 
@@ -25,7 +25,7 @@ Dashboard / API client
   ├── LiteLLM router (multi-provider)
   └── gRPC server (:50051)
        │
-       ├──→ Ollama (Jetson local inference)
+       ├──→ Ollama (inference-host local inference)
        ├──→ OpenAI API
        ├──→ Anthropic API
        └──→ Other providers
@@ -115,7 +115,7 @@ services/ai-gateway/
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OLLAMA_URL` | `http://host.docker.internal:11434` | **Direct** to Ollama's OpenAI-compat `/v1/chat/completions`. Do **not** point this at ollama-manager's `:8002/proxy` for chat — that path has a 120 s read leg (`TIMEOUT_PROXY`) that breaks the agent loop on cold/CPU model loads (see repo `CLAUDE.md` → "Ollama call path"). The `:8002/proxy` URL is an explicit opt-in for tool-call observability + JSON repair + circuit breaker only; lifecycle + `/health.limits` live on ollama-manager `:8002`, **not** in the chat path. |
-| `OLLAMA_READ_TIMEOUT` | `300` | Read timeout (s) for Ollama HTTP calls. Cold-loading a model on the Jetson can take 30-90s; long completions stream for minutes. Bump if a larger model on slower hardware times out during load. |
+| `OLLAMA_READ_TIMEOUT` | `300` | Read timeout (s) for Ollama HTTP calls. Cold-loading a model on the inference host can take 30-90s; long completions stream for minutes. Bump if a larger model on slower hardware times out during load. |
 | `REDIS_URL` | `redis://localhost:6379` | Response caching |
 | `MQTT_BROKER` | `mqtt://localhost:1883` | Event bus |
 | `DEVICE_SECRET` | (required) | Device auth secret |

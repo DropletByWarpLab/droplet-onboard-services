@@ -73,10 +73,19 @@ class ProviderRouter:
         # back to prefix matching alone.
         self._local_model = (os.getenv("LLM_MODEL") or "").strip().lower() or None
 
-    async def refresh_keys(self):
-        """Reload API keys from the BYOK keystore."""
-        anthropic_key = await get_api_key("anthropic")
-        openai_key = await get_api_key("openai")
+    async def refresh_keys(self, user_id: str | None = None):
+        """Reload API keys from the BYOK keystore for a given caller.
+
+        WARP-561: keys are namespaced per authenticated user. ``user_id`` is
+        the caller threaded down from the HTTP route (the orchestrator-provided
+        principal). ``None`` reads the shared/device namespace and is used by
+        server-side callers that have no per-request identity (model listing,
+        gRPC EmbedText). Cloud providers are rebuilt per call rather than
+        cached on the instance so two concurrent users never see each other's
+        key — the router holds no per-user key state between requests.
+        """
+        anthropic_key = await get_api_key("anthropic", user_id=user_id)
+        openai_key = await get_api_key("openai", user_id=user_id)
         self.anthropic = AnthropicCloudProvider(api_key=anthropic_key)
         self.openai = OpenAICloudProvider(api_key=openai_key)
         self._providers["anthropic"] = self.anthropic
@@ -102,9 +111,9 @@ class ProviderRouter:
         # Default to Ollama (local-first)
         return self.ollama
 
-    async def list_all_models(self) -> list[ModelInfo]:
+    async def list_all_models(self, user_id: str | None = None) -> list[ModelInfo]:
         """Query all providers for available models concurrently."""
-        await self.refresh_keys()
+        await self.refresh_keys(user_id=user_id)
         tasks = [provider.list_models() for provider in self._providers.values()]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -116,14 +125,20 @@ class ProviderRouter:
                 models.extend(result)
         return models
 
-    async def chat(self, request: ChatRequest) -> dict | AsyncGenerator[str, None]:
+    async def chat(
+        self, request: ChatRequest, user_id: str | None = None
+    ) -> dict | AsyncGenerator[str, None]:
         """Route a chat request to the appropriate provider.
 
         Forwards `tools[]` to the model untouched. If the model emits
         `tool_calls[]` they are returned to the caller (the orchestrator
         agent loop) verbatim — this gateway never executes tools.
+
+        WARP-561: ``user_id`` selects which caller's BYOK keys are loaded for
+        this turn so a cloud request uses the requesting user's key, not a
+        device-global one.
         """
-        await self.refresh_keys()
+        await self.refresh_keys(user_id=user_id)
         provider = self.resolve_provider(request.model, request.provider)
 
         # WARP-468: off-LAN gate. Refuses any non-local provider with

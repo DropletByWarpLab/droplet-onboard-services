@@ -352,7 +352,7 @@ docker exec -i \
   # Phase L: added wireguard-tools, kmod-wireguard, luci-proto-wireguard
   # so the routing service can mint VPN peers against this container.
   # WARP-839: added ddns-scripts, luci-app-ddns so the single-box container has
-  # the DuckDNS updater (the firmware openwrt/build.sh already bakes these; this
+  # the DuckDNS updater (the legacy router image baked these too; this
   # runtime list mirrors openwrt/singlebox-image/Dockerfile). ddns is NOT added
   # to the hard-verify gate below — it is not load-bearing for the AP and must
   # not block AP bring-up.

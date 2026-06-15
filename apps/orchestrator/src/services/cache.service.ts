@@ -114,19 +114,39 @@ export async function cacheDel(key: string): Promise<void> {
 }
 
 /**
- * Atomic increment. Uses Redis INCR (read-modify-write in a single command)
- * then sets the TTL on every call so the window slides with each failure,
- * matching the semantics of the old cacheGet+cacheSet pattern but without
- * the race where two concurrent callers both read N and both write N+1.
- * Returns the new counter value, or null on Redis error (caller fails open).
+ * Atomic fixed-window increment. Runs INCR and a first-creation-only EXPIRE in
+ * a single Lua script (one server round-trip, executed atomically by Redis), so:
+ *
+ *   - the counter and its TTL can never diverge — there is no window between the
+ *     two commands in which a crash/Redis-error leaves the key TTL-less and the
+ *     limiter stuck "tripped" forever (the old INCR-then-EXPIRE bug); and
+ *   - the TTL is stamped ONLY when the counter is first created (INCR == 1), so
+ *     the window is FIXED: it expires `ttlSeconds` after the first hit and the
+ *     counter resets, instead of sliding forward on every call (which would let
+ *     a steady trickle of requests keep the key — and thus the limit — alive
+ *     indefinitely, contradicting the "resets after the window" intent).
+ *
+ * Returns the new counter value, or null on a Redis error (caller fails OPEN).
  */
+const INCR_FIXED_WINDOW_LUA = `
+local n = redis.call('INCR', KEYS[1])
+if n == 1 then
+  redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return n
+`;
+
 export async function cacheIncr(
   key: string,
   ttlSeconds: number,
 ): Promise<number | null> {
   try {
-    const next = await getRedis().incr(key);
-    await getRedis().expire(key, ttlSeconds);
+    const next = (await getRedis().eval(
+      INCR_FIXED_WINDOW_LUA,
+      1,
+      key,
+      String(ttlSeconds),
+    )) as number;
     return next;
   } catch {
     return null;

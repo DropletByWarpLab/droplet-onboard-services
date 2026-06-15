@@ -26,7 +26,10 @@ _BOARD_INFO: dict[str, Any] = {
     "kernel": "6.6.40",
     "hostname": "droplet-mock",
     "system": "OpenWrt SNAPSHOT",
-    "model": "Raspberry Pi 5 (mock)",
+    # `model` is the human-readable system model; `board_name` is the
+    # device-tree compatible string AP detection matches on (KEEP as-is —
+    # it's the literal value Pi-based APs emit on /proc/device-tree/compatible).
+    "model": "Droplet AP (mock)",
     "board_name": "raspberrypi,5-model-b",
     "release": {
         "distribution": "OpenWrt",

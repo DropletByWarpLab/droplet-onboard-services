@@ -2,7 +2,7 @@
 # Droplet rpcd Configuration
 # =============================================================================
 # Defines the droplet-ai RPC user with dedicated ACL permissions
-# The Jetson authenticates as this user to manage the router
+# The appliance authenticates as this user to manage the router
 # =============================================================================
 
 config rpcd

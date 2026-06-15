@@ -4,7 +4,7 @@ The voice service runs on a deliberately wide range of hardware:
 
   - POC dev box       — x86, onboard Realtek ALC662 + optional USB headset
   - POC + ReSpeaker   — same box plus a 4-mic USB array (the intended POC)
-  - Production v2.6   — Jetson + I/O-Brick I²S codec (TBD)
+  - Production v2.6   — appliance + I/O-Brick I²S codec (TBD)
   - Generic Linux box — any USB headset
 
 We can't hardcode any of them. Instead we enumerate ALSA devices at
@@ -146,7 +146,7 @@ def detect_bus(
         /sys/class/sound/card1 -> ../../devices/pci0000:00/0000:00:08.1/
                                        0000:17:00.1/sound/card1
 
-      Platform-bus codec (Jetson I/O Brick, etc.):
+      Platform-bus codec (appliance I/O Brick, etc.):
         /sys/class/sound/card0 -> ../../devices/platform/snd-codec/sound/card0
 
     The card/device symlink resolves into the *interface* node for USB
@@ -201,7 +201,7 @@ def score_input(name: str, bus: str, max_input_channels: int) -> int:
     if bus == "usb":
         score += 200
     elif bus == "platform":
-        score += 80          # I²S codec on Jetson production — likely the
+        score += 80          # I²S codec on the appliance — likely the
                              # intended primary device.
     # bus == "pci" gets 0 baseline — onboard codecs are typical but not
     # special-cased up unless their name says otherwise.

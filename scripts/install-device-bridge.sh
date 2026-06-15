@@ -17,7 +17,7 @@
 # Usage:
 #   sudo ./scripts/install-device-bridge.sh
 #
-# Run from the Jetson host, not inside any container.
+# Run from the appliance host, not inside any container.
 # =============================================================================
 set -euo pipefail
 
@@ -232,7 +232,7 @@ set_env_if_blank() {
     return 0
   fi
   if grep -qE "^#?\s*${key}=" "$ENV_FILE"; then
-    # Replace an empty or commented line (GNU sed — Jetson is Ubuntu).
+    # Replace an empty or commented line (GNU sed — the appliance is Ubuntu).
     sed -i -E "s|^#?\s*${key}=.*|${key}=${value}|" "$ENV_FILE"
   else
     printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"
@@ -280,7 +280,7 @@ if [[ -f "$REPO_ENV" ]]; then
 
   # Pairing-QR AP source (WARP-654). setup.sh --single-box records
   # DROPLET_AP_MODE=hostapd in the repo .env (scripts/lib/single-box.sh) because
-  # the single-box host runs the Wi-Fi AP via hostapd, not a Pi-5 UCI router.
+  # the single-box host runs the Wi-Fi AP via hostapd, not a standalone UCI router.
   # Mirror it into the bridge env so device-bridge.py reads the hostapd creds
   # instead of an empty `uci show wireless`. set_env_if_blank never clobbers an
   # operator override; multi-box installs leave the key unset in .env, so the

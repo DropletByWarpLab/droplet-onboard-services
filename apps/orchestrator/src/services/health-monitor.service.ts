@@ -21,6 +21,7 @@ import { isRedisHealthy } from "./cache.service.js";
 import { healthCheck as aiGatewayHealth } from "./ai-gateway.client.js";
 import { healthCheck as routingHealth } from "./openwrt.client.js";
 import { healthCheck as displayHealth } from "./display.client.js";
+import { healthCheck as fileIndexerHealth } from "./file-indexer.client.js";
 import { ncPing } from "./nextcloud.client.js";
 
 const logger = pino({ name: "health-monitor" });
@@ -31,7 +32,8 @@ export type ComponentName =
   | "routing"
   | "ai-gateway"
   | "nextcloud"
-  | "display";
+  | "display"
+  | "file-indexer";
 export type ComponentHealthStatus = "ok" | "down";
 export type AggregateStatus = "ok" | "degraded" | "down";
 
@@ -106,6 +108,11 @@ function buildProbes(prisma: PrismaClient): Array<{ name: ComponentName; probe: 
     // in, and the appliance is still usable without a screen, so a down
     // display never trips the aggregate to `down`.
     { name: "display", probe: displayHealth },
+    // WARP-598: file-indexer is SOFT (degraded-class). A down indexer
+    // only stops new files from being chunked/embedded for semantic
+    // search; the rest of the appliance is fully usable, so it never
+    // trips the aggregate to `down`.
+    { name: "file-indexer", probe: fileIndexerHealth },
   ];
 }
 

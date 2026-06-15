@@ -53,6 +53,6 @@ def test_reseal_after_pcr_change(backend):
     (e.g., via swtpm.pcr_extend), reseal, verify seal_valid recovers."""
     backend.provision(device_id="x", sealing_pcrs=[0, 2, 4, 7])
     # Test runner must arrange a PCR extend between these two calls
-    # (swtpm has tpm2_pcrextend; real Jetson would be a kernel update).
+    # (swtpm has tpm2_pcrextend; real hardware would be a kernel update).
     result = backend.reseal()
     assert result["resealed"] is True

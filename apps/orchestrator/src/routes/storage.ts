@@ -304,7 +304,7 @@ export function createStorageRouter(prisma: PrismaClient): Router {
   });
 
   /**
-   * GET /api/storage/drives — USB drives auto-mounted on the Jetson host.
+   * GET /api/storage/drives — USB drives auto-mounted on the appliance host.
    *
    * Reads from the device-bridge (services/oled-display/device-bridge.py)
    * running on the host at :9090. Bridge reads from the automount

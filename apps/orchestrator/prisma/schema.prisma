@@ -1062,6 +1062,11 @@ model VpnPeer {
 
   @@index([userId])
   @@index([status])
+  // WARP-565: a PARTIAL unique index enforces "at most one ACTIVE peer per
+  // assignedIp" at the DB layer (revoked rows' IPs are reusable). Prisma can't
+  // express partial-unique declaratively, so it lives as raw SQL in migration
+  // 20260614000000_vpn_peer_unique_active_ip. This @@index stays for the
+  // non-unique read path the allocator uses.
   @@index([assignedIp])
 }
 
@@ -1112,7 +1117,7 @@ model ApDevice {
   mac              String         @id
   // Operator-friendly label set at approval time. Defaults to the
   // model name + last-3-octets of the MAC if the operator doesn't
-  // override it (e.g. "Pi5 AP (12:34:56)"). Editable from the
+  // override it (e.g. "AP (12:34:56)"). Editable from the
   // dashboard later (PATCH /api/aps/:mac).
   displayName      String?
   // mDNS-reported product info — useful for the dashboard's "what is

@@ -35,7 +35,7 @@ generate_env() {
   log_info "Generating device-unique secrets..."
 
   # --- Generate all secrets ---
-  local pg_password redis_password mqtt_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display service_token_switch ops_token service_token_mcp service_token_email orchestrator_sampler_token ai_gateway_sampler_token ollama_url openwrt_password
+  local pg_password redis_password mqtt_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display service_token_switch service_token_ai_gateway ops_token service_token_mcp service_token_email orchestrator_sampler_token ai_gateway_sampler_token ollama_url openwrt_password
   # WARP-850: orchestrator -> matter-controller sidecar bearer (X-Droplet-Auth).
   local droplet_matter_service_token
   # WARP-503 — embedded Plane PM stack secrets (ADR-010, spec WARP-498).
@@ -83,6 +83,13 @@ generate_env() {
   # MUST read the same value; compose wires both ends to
   # ${SERVICE_TOKEN_SWITCH}.
   service_token_switch=$(openssl rand -hex 32)
+  # WARP-560: bearer the orchestrator presents on every outbound call to
+  # the ai-gateway. The gateway's ServiceAuthMiddleware requires it on all
+  # /ai/* routes (except /ai/health) — before this the gateway had NO
+  # inbound auth. Both ai-gateway.client.ts (orchestrator, outbound) and the
+  # ai-gateway container's SERVICE_TOKEN_AI_GATEWAY MUST read the same value;
+  # compose wires both ends to ${SERVICE_TOKEN_AI_GATEWAY}.
+  service_token_ai_gateway=$(openssl rand -hex 32)
   # WARP-337: ops-console support-client bearer. Used by Warp Lab
   # support to authenticate against the on-device /ops/* API when
   # troubleshooting a deployed Droplet. The service binds loopback-only
@@ -154,12 +161,10 @@ generate_env() {
   # (single-box). Override before running setup.sh for a multi-box
   # deployment with a separate inference host on the LAN, e.g.
   # `OLLAMA_URL=http://192.168.50.197:11434 ./scripts/setup.sh`.
-  # The legacy `JETSON_OLLAMA_URL` env var is still read as a fallback
-  # for back-compat with operators who have it set in their shell.
   # NEVER set this to `inference-engine.local:11434` — mDNS does not
   # resolve from inside Docker containers and you'll get
   # "Temporary failure in name resolution" on every chat.
-  ollama_url="${OLLAMA_URL:-${JETSON_OLLAMA_URL:-http://droplet-ollama:11434}}"
+  ollama_url="${OLLAMA_URL:-http://droplet-ollama:11434}"
 
   # --- Write .env directly (single source of truth — no template, no sed) ---
   cat > "$env_file" << EOF
@@ -252,6 +257,14 @@ SERVICE_TOKEN_DISPLAY=$service_token_display
 # container's SERVICE_SECRET MUST read the same value; compose wires
 # both ends to \${SERVICE_TOKEN_SWITCH}.
 SERVICE_TOKEN_SWITCH=$service_token_switch
+
+# --- AI gateway service bearer (orchestrator → ai-gateway HTTP) ---
+# WARP-560. Required by the ai-gateway's ServiceAuthMiddleware on every
+# /ai/* route (chat, sessions, BYOK key CRUD) except /ai/health — the
+# gateway previously had NO inbound auth at all. Both ai-gateway.client.ts
+# and the ai-gateway container's SERVICE_TOKEN_AI_GATEWAY MUST read the
+# same value; compose wires both ends to \${SERVICE_TOKEN_AI_GATEWAY}.
+SERVICE_TOKEN_AI_GATEWAY=$service_token_ai_gateway
 
 # --- ops-console support-client bearer (WARP-337) ---
 # Used by Warp Lab support to authenticate to the on-device /ops/*
@@ -467,31 +480,6 @@ migrate_env() {
     fi
   }
 
-  # --- One-time rename: JETSON_OLLAMA_URL -> OLLAMA_URL ----------------
-  # The env var was originally named with a hardware-specific prefix
-  # (Jetson was one of multiple possible inference hosts). The variable
-  # is hardware-agnostic — it's just where Ollama is reachable — so we
-  # renamed it to OLLAMA_URL. Code still reads JETSON_OLLAMA_URL as a
-  # fallback during the transition window, but this migration moves the
-  # value to the new name on next setup.sh run so the .env stops
-  # carrying the legacy name.
-  if grep -qE '^JETSON_OLLAMA_URL=' "$env_file" 2>/dev/null \
-     && ! grep -qE '^OLLAMA_URL=' "$env_file" 2>/dev/null; then
-    if [ "$backed_up" = "false" ]; then
-      # shellcheck disable=SC2155  # Same rationale as lines 29, 352: `date +%s` cannot meaningfully fail; the masked return value carries no signal we'd act on.
-      local backup="$env_file.bak.$(date +%s)"
-      cp "$env_file" "$backup"
-      log_info "Backed up existing .env to $backup before migration"
-      backed_up=true
-    fi
-    # Rename in-place: change the first JETSON_OLLAMA_URL line to OLLAMA_URL.
-    # sed -i with a portable backup suffix that we immediately remove,
-    # which works on both BSD (Darwin) and GNU sed.
-    sed -i.tmp 's/^JETSON_OLLAMA_URL=/OLLAMA_URL=/' "$env_file"
-    rm -f "$env_file.tmp"
-    log_success "Migrated .env: renamed JETSON_OLLAMA_URL -> OLLAMA_URL (hardware-agnostic)"
-  fi
-
   # Default ROUTING_MODE to `mock` on macOS (no local OpenWrt), `real` on
   # Linux. Only set when missing — never overwrite a user's choice.
   local routing_mode_default="real"
@@ -534,6 +522,13 @@ migrate_env() {
   # compose rewire to ${SERVICE_TOKEN_SWITCH} on both ends) restores the
   # orchestrator → switch path and keeps DEVICE_SECRET_KEY off the wire.
   _migrate_ensure_key SERVICE_TOKEN_SWITCH "$(openssl rand -hex 32)"
+  # WARP-560 backfill: existing installs predate the ai-gateway inbound-auth
+  # token. Minting it (and the compose wire on both ends) closes the gap where
+  # /ai/chat, /ai/sessions/*, and /ai/keys/* were reachable with no auth.
+  # Until the gateway also reads SERVICE_TOKEN_AI_GATEWAY it stays open, so the
+  # orchestrator already sending a bearer is harmless; once both ends have the
+  # key the gateway enforces it.
+  _migrate_ensure_key SERVICE_TOKEN_AI_GATEWAY "$(openssl rand -hex 32)"
   # WARP-337 backfill: ops-console support client bearer. Without this
   # key the service falls through to an ephemeral token that regenerates
   # on every container restart, so support's saved credential invalidates

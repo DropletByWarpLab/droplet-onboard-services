@@ -41,7 +41,7 @@ describe("GET /api/devices", () => {
     const res = await request(app).get("/api/devices");
     const device = res.body[0];
     expect(device.deviceId).toBe("droplet-dev-001");
-    expect(device.hostname).toBe("droplet-pi");
+    expect(device.hostname).toBe("droplet-dev");
     expect(device.networkMode).toBe("dhcp");
     expect(device.ip).toBe("192.168.1.100");
   });

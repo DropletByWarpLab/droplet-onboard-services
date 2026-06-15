@@ -1,13 +1,23 @@
 name: routing-tests
 
 on:
-  # Temporarily disabled: manual-only until GitHub Actions testing minutes
-  # are restored. Restore the pull_request/push triggers from git history.
+  pull_request:
+    paths:
+      - "services/routing/**"
+      - ".github/workflows/routing-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "services/routing/**"
+      - ".github/workflows/routing-tests.yml"
   workflow_dispatch:
 
 jobs:
   pytest:
     runs-on: ubuntu-latest
+    # A hung test must fail the job fast, not burn the 6h default runner
+    # allocation. Plain pytest suite — 15 min ceiling.
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: services/routing

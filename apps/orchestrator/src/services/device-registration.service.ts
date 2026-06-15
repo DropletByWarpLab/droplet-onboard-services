@@ -29,7 +29,7 @@ function detectIp(): string | null {
 
 /**
  * Detect hardware revision.
- * - Raspberry Pi / Jetson: reads /proc/device-tree/model
+ * - ARM hosts: read /proc/device-tree/model
  * - Fallback: platform/arch (e.g. "linux/arm64", "darwin/arm64")
  */
 function detectHardwareRev(): string {

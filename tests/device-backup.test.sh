@@ -117,6 +117,24 @@ if [ -f "$BACKUP_SCRIPT" ] && [ -f "$RESTORE_SCRIPT" ]; then
     fail "docker-compose.yml not found for volume-name cross-check"
   fi
 
+  # REGRESSION GUARD (stale compose-project default): neither host script may
+  # default PROJECT to the RETIRED pre-WARP-605 `droplet-pi-platform`. The live
+  # project is `droplet`, pinned via `name:` in docker-compose.yml; Docker
+  # prefixes volumes `<project>_<vol>`, so a stale default makes backup/restore
+  # target nonexistent `droplet-pi-platform_*` volumes and silently capture /
+  # restore NOTHING. Both must DERIVE the default from the compose `name:` field
+  # (mirroring scripts/factory-reset.sh) while still honouring a PROJECT=
+  # override — the same stale-naming bug class as the volume cross-check above.
+  for s in "$BACKUP_SCRIPT" "$RESTORE_SCRIPT"; do
+    nm="$(basename "$s")"
+    grep -qF 'PROJECT:-droplet-pi-platform' "$s" \
+      && fail "$nm still defaults PROJECT to retired 'droplet-pi-platform'" \
+      || pass "$nm drops the retired 'droplet-pi-platform' default"
+    grep -qF "grep -E '^name:[[:space:]]'" "$s" \
+      && pass "$nm derives PROJECT from the compose name: field" \
+      || fail "$nm does not derive PROJECT from the compose name: field"
+  done
+
   # Secrets safety: chmod 600 on the archive.
   grep -qE 'chmod 600' "$BACKUP_SCRIPT" && pass "backup chmod 600 the archive" || fail "backup does not chmod 600 (secrets exposure)"
 

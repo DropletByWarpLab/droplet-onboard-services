@@ -480,7 +480,11 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   const router = Router();
   const persistence = new ChatPersistenceService(prisma);
 
-  // List available models
+  // List available models. Degrade gracefully when the AI gateway is
+  // unreachable (down / disabled / transient network blip): serve an empty
+  // model list instead of 500ing the dashboard's 30s SWR poll and the setup
+  // wizard's AI step. Mirrors /api/models (models-summary.service.ts), which
+  // already returns an empty local list on the same failure.
   router.get("/llm/models", async (_req, res, next) => {
     try {
       const cached = await cacheGet<ModelsResponse>(MODELS_CACHE_KEY);
@@ -489,7 +493,30 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         return;
       }
 
-      const models = await aiGateway.listModels();
+      let models: ModelsResponse;
+      try {
+        models = await aiGateway.listModels();
+      } catch (err) {
+        // Only degrade for an UNREACHABLE gateway (down / disabled / transient
+        // network blip). A reachable gateway that 5xxs, or a malformed-JSON
+        // response, is a real failure and must surface as an error — not be
+        // masked as an empty 200. `listModels()` throws a TypeError from
+        // fetch() on network failure (ENOTFOUND / ECONNREFUSED) and an
+        // Error("AI Gateway timeout …") on an AbortSignal.timeout; anything
+        // else (e.g. "AI Gateway error: 503", a SyntaxError from res.json())
+        // re-throws to the outer next(err) handler.
+        const isUnreachable =
+          err instanceof TypeError ||
+          (err instanceof Error &&
+            /ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|timeout/i.test(err.message));
+        if (!isUnreachable) throw err;
+        // Do NOT cache the empty fallback — the next request retries the
+        // gateway so the list self-heals once it is reachable again.
+        console.warn("[llm/models] ai-gateway unreachable; serving empty list:", err);
+        const empty: ModelsResponse = { models: [] };
+        res.json(empty);
+        return;
+      }
       await cacheSet(MODELS_CACHE_KEY, models, MODELS_CACHE_TTL);
       res.json(models);
     } catch (err) {
@@ -697,7 +724,14 @@ export function createLlmRouter(prisma: PrismaClient): Router {
 
       const deps: AgentDeps = {
         mcp: mcpClient,
-        aiGateway: { chat: aiGateway.chat },
+        // WARP-561: close over the requesting user's id so the gateway scopes
+        // BYOK key resolution to their namespace for every agent-loop turn.
+        // WARP-329: forward the agent loop's client-disconnect AbortSignal so an
+        // in-flight inference fetch is cancelled when the client goes away.
+        aiGateway: {
+          chat: (chatReq, signal) =>
+            aiGateway.chat(chatReq, signal, (req as AuthedRequest).user?.id),
+        },
         enhancement: createEnhancementDeps({
           aiGatewayGrpcUrl,
           defaultModel: defaultChatModel,
@@ -1507,16 +1541,17 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         res.status(400).json({ error: "api_key is required" });
         return;
       }
-      await aiGateway.saveKey(provider, api_key);
+      // WARP-561: forward the caller so the gateway namespaces the key per user.
+      await aiGateway.saveKey(provider, api_key, (req as AuthedRequest).user?.id);
       res.json({ status: "ok", provider });
     } catch (err) {
       next(err);
     }
   });
 
-  router.get("/llm/keys", async (_req, res, next) => {
+  router.get("/llm/keys", async (req, res, next) => {
     try {
-      const providers = await aiGateway.listKeys();
+      const providers = await aiGateway.listKeys((req as AuthedRequest).user?.id);
       res.json({ providers });
     } catch (err) {
       next(err);
@@ -1526,7 +1561,10 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   // WARP-171: same posture as POST /llm/keys/:provider.
   router.delete("/llm/keys/:provider", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
-      await aiGateway.deleteKey(req.params.provider);
+      await aiGateway.deleteKey(
+        req.params.provider,
+        (req as AuthedRequest).user?.id
+      );
       res.json({ status: "deleted" });
     } catch (err) {
       next(err);

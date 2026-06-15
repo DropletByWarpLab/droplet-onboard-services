@@ -1,129 +1,101 @@
-# Droplet OpenWrt Build System
+# Droplet OpenWrt
 
-Custom OpenWrt image for the Droplet router — Raspberry Pi 5 (bcm2712) with **MediaTek MT7922 WiFi 6** (PCIe over FPC) and TP-Link UE306 USB NIC.
+This directory holds the Droplet OpenWrt assets: the **in-container single-box
+AP image** (the active, shipping path) and the **OpenWrt overlay files** shared
+between deployment shapes.
 
-> **WiFi card history:** This build was originally targeted at the Intel BE200 WiFi 7. The BE200 was a client-mode-only card on the Pi 5 — `iwlwifi` AP mode failed ACS ("Unable to collect survey data"). Swapped to the MT7922 in PR `feat/openwrt-mt7922-support`, validated live on hardware.
+> **Legacy router image retired (ADR-011).** The historical multi-box deployment
+> ran OpenWrt on a separate **bare-metal router host** flashed from a custom
+> SD-card image (`openwrt/build.sh`). That bare-metal router image-build +
+> flash machinery has been removed — the shipping product is the **single-box**
+> shape, which runs OpenWrt **in a container** on the appliance host. The
+> overlay files under `files/` and the in-container image under
+> `singlebox-image/` are what remain in use.
 
-## Network Topology
+## How the AP runs today (single-box, in-container)
+
+On the single-box shape the appliance host owns a Wi-Fi radio; the host's PHY is
+moved into the OpenWrt container's network namespace and the container runs
+`hostapd` to serve the AP. The container image is built from
+[`singlebox-image/Dockerfile`](singlebox-image/Dockerfile) (compose service
+`openwrt`, profile `single-box`) and bakes the AP/router packages (hostapd, iw,
+wpad, umdns, wireguard, uhttpd/rpcd, DDNS) so a fresh container never depends on
+a first-boot `opkg install`.
+
+- The routing service (`services/routing/`) reaches the container's ubus
+  JSON-RPC over `127.0.0.1:8181` on the host network.
+- The bootstrap sequence (moving the PHY into the netns, attaching, the rpcd
+  ACL safety net) lives in
+  [`scripts/host/usr-local-sbin/droplet-openwrt-attach`](../scripts/host/usr-local-sbin/droplet-openwrt-attach).
+
+The single-box image COPYs exactly two things from this directory at build time:
+
+| Source | Why |
+|---|---|
+| `files/usr/share/rpcd/acl.d/droplet-ai.json` | Canonical ubus ACL — without it even root sessions are denied `file`/`umdns` reads (the network tab + DDNS step 500). Shared source of truth. |
+| `singlebox-image/uci-defaults/60-droplet-uhttpd-limits` | Raises uhttpd `max_requests` so the orchestrator's network-summary fan-out doesn't get connections reset. |
+
+It does **not** consume `files/etc/config/*` or `files/etc/uci-defaults/99-droplet-setup`
+— the in-container wireless config is created at runtime.
+
+## Integration with the platform
+
+The routing service (`services/routing/`) talks to OpenWrt's ubus JSON-RPC. The
+connection flow:
 
 ```
-ISP / Upstream         Pi 5 (OpenWrt)                  Jetson (AI)
-     |                 |-- ETH0 (onboard) = WAN         |
-     +--- cable -------+                                |
-                       |-- ETH1 (USB RTL8153B) --+      |
-                       |                         |-- br-lan -- 192.168.50.0/24
-                       +-- WiFi MT7922 ----------+      |
-                            5 GHz Wi-Fi 6 (HE80)        +--- 192.168.50.x
-                                                         ubus JSON-RPC -> 192.168.50.1/ubus
+Orchestrator (openwrt.client.ts)
+   -> Routing service (services/routing/, FastAPI :8080)
+      -> DropletRouter SDK (droplet_openwrt_sdk.py)
+         -> HTTP POST /ubus  →  OpenWrt (127.0.0.1:8181 single-box)
 ```
 
-- **WAN**: ETH0 (onboard BCM54213PE) — DHCP client from upstream
-- **LAN**: ETH1 (TP-Link UE306 USB) + WiFi radios bridged as `br-lan` at `192.168.50.1/24`
-- **WiFi**: MediaTek MT7922 on the FPC PCIe lane (`pcie@110000`), 5 GHz channel 149, HE80, WPA2 (`psk2` for Apple-device compatibility)
-- **DHCP range**: `192.168.50.100` - `192.168.50.249`
-- **API endpoint**: `http://192.168.50.1/ubus` (ubus JSON-RPC)
-
-## Integration with the Platform
-
-This build produces the router firmware that the platform's **routing service** (`services/routing/`) communicates with. The connection flow:
-
-```
-Jetson (services/routing/)                  Pi 5 (OpenWrt)
-    |                                           |
-    |  DropletRouter SDK (droplet_openwrt_sdk)  |
-    |  -> HTTP POST /ubus                      |
-    +----------------------------------------->|
-    |                                           |
-    |  FastAPI routing service (main.py)        |
-    |  -> Orchestrator calls via REST           |
-    |                                           |
-    |  Orchestrator (openwrt.client.ts)         |
-    |  -> Dashboard & AI gateway               |
-```
-
-The `droplet-ai` user created by this build matches the credentials expected by:
-- `services/routing/main.py` — via `OPENWRT_USERNAME` / `OPENWRT_PASSWORD` env vars
+The `droplet-ai` rpcd user (or `root` on single-box) matches the credentials
+expected by:
+- `services/routing/main.py` — via `OPENWRT_USERNAME` / `OPENWRT_PASSWORD`
 - `services/routing/droplet_openwrt_sdk.py` — the Python SDK
-- `apps/orchestrator/src/services/openwrt.client.ts` — the orchestrator HTTP client
+- `apps/orchestrator/src/services/openwrt.client.ts` — the orchestrator client
 
-## Appliance image topology
+## Overlay files (`files/`)
 
-This `build.sh` builds the **router** image (Raspberry Pi 5 OpenWrt SD card).
-That is a **different layer** from the **appliance host** image (the x86
-single-box: Ubuntu + Docker + the Droplet stack). Per
-[ADR-018](../docs/ADR-018-deployment-topology-and-network-unification.md) the
-router and the host are orthogonal deployment elements, and per
-[ADR-020](../docs/ADR-020-appliance-image-build-and-flash-pipeline.md) they are
-**orthogonal images, each with its own pinned builder** — there is no combined
-"dual image":
+These are the OpenWrt UCI configs + first-boot script for the **legacy
+bare-metal router image overlay**. They are retained because the rpcd ACL is the
+canonical source shared with the single-box image, and the configs document the
+network/firewall/camera-VLAN model. They are **not** applied to the single-box
+container's `/etc/config` (which is a runtime named volume).
 
-| Image | Built by | Artifact |
-|---|---|---|
-| **Router** (this dir) | `openwrt/build.sh` | `openwrt/output/*-droplet-*.img.gz` |
-| **Appliance host** | `scripts/image/build-iso.sh` (CLI: `scripts/droplet-image`) | `output/droplet-single-box-<version>.iso` |
-
-The appliance ISO autoinstalls Ubuntu and runs `setup.sh --single-box --systemd`
-on first boot; on the single-box shape it brings the router up *in a container*,
-so the two images are still independently versioned. See
-[`docs/IMAGE_PIPELINE.md`](../docs/IMAGE_PIPELINE.md) for the appliance pipeline,
-CLI contract, signed-manifest format, key custody, and the manual flash+boot gate.
-
-## Quick Start
-
-### 1. Build the Image (on Linux x86_64)
-
-```bash
-cd openwrt
-chmod +x build.sh
-./build.sh
+```
+openwrt/
+├── README.md                           # This file
+├── singlebox-image/                    # In-container single-box AP image (ACTIVE)
+│   ├── Dockerfile
+│   └── uci-defaults/
+│       └── 60-droplet-uhttpd-limits
+├── files/                              # OpenWrt overlay (legacy router image)
+│   ├── etc/config/
+│   │   ├── network                     # WAN/LAN/bridge + camera VLAN 100
+│   │   ├── wireless                    # MT7922 5 GHz AP (legacy router image)
+│   │   ├── firewall                    # NAT, zones, rules + camera isolation
+│   │   ├── dhcp                        # DHCP (LAN + camera subnet)
+│   │   ├── uhttpd                      # Web server + ubus endpoint
+│   │   ├── rpcd                        # RPC daemon + droplet-ai user
+│   │   └── system                      # Hostname, NTP, LEDs
+│   ├── etc/droplet/
+│   │   └── droplet-ai-password         # AI agent RPC password
+│   ├── etc/uci-defaults/
+│   │   └── 99-droplet-setup            # First-boot setup script (legacy router)
+│   └── usr/share/rpcd/acl.d/
+│       └── droplet-ai.json             # ubus API permissions (shared w/ single-box)
+└── scripts/
+    ├── setup-camera-subnet.sh          # Standalone camera VLAN setup
+    ├── upgrade-router.sh               # OpenWrt sysupgrade (in-place firmware update)
+    ├── router-connect.py               # Connection test & monitor
+    └── droplet-router-monitor.service  # systemd unit for the appliance host
 ```
 
-### 2. Flash to SD Card
+## Camera subnet (VLAN 100)
 
-Use balenaEtcher, Raspberry Pi Imager, or `dd`:
-```bash
-gunzip -k output/openwrt-*.img.gz
-sudo dd if=output/openwrt-*.img of=/dev/sdX bs=4M status=progress
-```
-
-### 3. First Boot
-
-1. Insert SD card into Pi 5
-2. Connect ETH0 (onboard) to upstream/ISP
-3. Plug in TP-Link UE306 USB NIC
-4. Power on — first boot takes ~60-90s
-
-### 4. Verify from Jetson
-
-```bash
-# Set env vars (same ones used by the routing service)
-export OPENWRT_HOST=192.168.50.1
-export OPENWRT_USERNAME=droplet-ai
-export OPENWRT_PASSWORD=DropletAI2024!
-
-# Run connectivity test
-python3 openwrt/scripts/router-connect.py
-
-# Or install as persistent monitor
-sudo cp openwrt/scripts/droplet-router-monitor.service /etc/systemd/system/
-sudo systemctl enable --now droplet-router-monitor
-```
-
-## Default Credentials
-
-| Account | Username | Password | Purpose |
-|---------|----------|----------|---------|
-| Root (SSH/LuCI) | `root` | *Generated at first boot* | Full system access |
-| AI Agent (ubus) | `droplet-ai` | *Generated at first boot* | Inference host -> OpenWrt control |
-
-Credentials are **unique per device** — generated randomly during first boot and stored in `/etc/droplet/`. Retrieve the AI agent password during appliance provisioning:
-```bash
-ssh root@192.168.50.1 cat /etc/droplet/droplet-ai-password
-```
-
-## Camera Subnet (VLAN 100)
-
-The image ships with a pre-configured isolated subnet for IP cameras:
+The overlay configs ship a pre-configured isolated subnet for IP cameras:
 
 | Setting | Value |
 |---------|-------|
@@ -135,98 +107,39 @@ The image ships with a pre-configured isolated subnet for IP cameras:
 | cameras → LAN | REJECT (users can't browse camera feeds) |
 | cameras → WAN | ACCEPT (NTP, DNS, firmware updates) |
 
-Cameras plugged into VLAN 100 ports are automatically isolated from the main network. Only the Droplet appliance can access them.
+Cameras plugged into VLAN 100 ports are isolated from the main network. Only the
+Droplet appliance can reach them.
 
-## Upgrading an Existing Router
+## Upgrading an OpenWrt router (in-place sysupgrade)
 
-### In-Place Sysupgrade (Preserves Config)
+`scripts/upgrade-router.sh` pushes an OpenWrt sysupgrade image to a running
+router and flashes it, preserving UCI config (`/etc/config/*`). This is a
+generic OpenWrt mechanism — useful for any reachable OpenWrt router host.
 
 ```bash
-# Build the image (produces both SD card + sysupgrade images)
-cd openwrt && ./build.sh
-
-# Push firmware to the running router from any LAN device
 ./scripts/upgrade-router.sh output/openwrt-*-sysupgrade.img.gz
 ```
 
-UCI configs (`/etc/config/*`) are preserved across sysupgrade — WiFi, firewall, DHCP, camera VLAN all stay intact.
+UCI configs are preserved across sysupgrade — WiFi, firewall, DHCP, camera VLAN
+all stay intact.
 
 Options:
 - `--no-preserve` — clean flash with new defaults
 - `--dry-run` — upload only, don't flash
-- `--apply-defaults` — re-run uci-defaults scripts after upgrade (e.g., add new camera VLAN config)
-- `--host <ip>` — specify router IP (default: `OPENWRT_HOST` or `192.168.50.1`)
+- `--apply-defaults` — re-run uci-defaults scripts after upgrade
+- `--host <ip>` — router IP (default: `OPENWRT_HOST` or `192.168.50.1`)
+- `--force` — skip the firmware-filename sanity check
 
-### Adding Camera VLAN to Existing Router (No Firmware Flash)
+### Adding the camera VLAN to an existing router (no firmware flash)
 
 ```bash
-scp openwrt/scripts/setup-camera-subnet.sh root@192.168.50.1:/tmp/
-ssh root@192.168.50.1 'sh /tmp/setup-camera-subnet.sh'
+scp openwrt/scripts/setup-camera-subnet.sh root@<router>:/tmp/
+ssh root@<router> 'sh /tmp/setup-camera-subnet.sh'
 ```
 
-The script is idempotent (safe to re-run) and supports:
-- `--status` — show connected cameras and VLAN config
-- `--remove` — tear down the camera subnet
-- `--dry-run` — preview changes without applying
-- `--vlan-id <id>` — custom VLAN ID (default: 100)
-- `--subnet <ip>` — custom gateway IP (default: 192.168.100.1)
+The script is idempotent and supports `--status`, `--remove`, `--dry-run`,
+`--vlan-id <id>`, and `--subnet <ip>`.
 
-## File Structure
+## OpenWrt version
 
-```
-openwrt/
-├── build.sh                            # Image builder (produces .img.gz + sysupgrade)
-├── README.md                           # This file
-├── files/                              # OpenWrt overlay (baked into image)
-│   ├── etc/config/
-│   │   ├── network                     # WAN/LAN/bridge + camera VLAN 100
-│   │   ├── wireless                    # WiFi 7 tri-band AP
-│   │   ├── firewall                    # NAT, zones, rules + camera isolation
-│   │   ├── dhcp                        # DHCP (LAN + camera subnet)
-│   │   ├── uhttpd                      # Web server + ubus endpoint
-│   │   ├── rpcd                        # RPC daemon + droplet-ai user
-│   │   └── system                      # Hostname, NTP, LEDs
-│   ├── etc/droplet/
-│   │   └── droplet-ai-password         # AI agent RPC password
-│   ├── etc/uci-defaults/
-│   │   └── 99-droplet-setup            # First-boot setup script
-│   └── usr/share/rpcd/acl.d/
-│       └── droplet-ai.json             # ubus API permissions for AI agent
-├── scripts/
-│   ├── setup-camera-subnet.sh          # Standalone camera VLAN setup for existing routers
-│   ├── upgrade-router.sh               # Remote firmware upgrade (sysupgrade)
-│   ├── router-connect.py               # Connection test & monitor
-│   └── droplet-router-monitor.service  # systemd unit for the inference host
-└── output/                             # Built images (gitignored)
-```
-
-## Hardware
-
-| Component | Model | Driver | Notes |
-|-----------|-------|--------|-------|
-| SBC | Raspberry Pi 5 (bcm2712) | Built-in | 4GB+ RAM |
-| WiFi | MediaTek MT7922 (M.2 → FPC PCIe) | `kmod-mt7921e` | Wi-Fi 6, dual-band capable, 5 GHz primary |
-| USB NIC | TP-Link UE306 | `kmod-usb-net-rtl8152` | RTL8153B, Gigabit |
-
-## MT7922 — required boot configuration
-
-The MT7922 on the Pi 5's FPC PCIe lane will not enumerate without **all three** of the following. The first-boot script (`files/etc/uci-defaults/99-droplet-setup`) and the package list in `build.sh` handle them automatically — this section documents the *why* for anyone debugging:
-
-1. **`dtoverlay=pcie-32bit-dma-pi5` in `/boot/config.txt`**
-   Forces 32-bit DMA addressing on the external PCIe lane. The MT7922's mt7921e probe path allocates DMA-coherent ring buffers; without 32-bit-DMA bouncing through SWIOTLB, the chip can't address the buffers and the probe fails with `mt7921e: probe of 0000:01:00.0 failed with error -12` (`-ENOMEM`). The first-boot script appends this line idempotently.
-
-2. **`mt7921e disable_aspm=1` in `/etc/modules.d/mt7921e`**
-   Disables PCIe Active State Power Management L0s/L1 negotiation on this device. ASPM negotiation between mt7921e and the Pi 5's `brcm-pcie` host bridge is unreliable and can stall the probe. Per-device, no effect on RP1 or other PCIe devices.
-
-3. **`kmod-mt7921e` + `kmod-mt7922-firmware` baked into the image** (`build.sh` package list)
-   The driver and the MT7922-specific firmware blobs (`WIFI_MT7922_patch_mcu_1_1_hdr.bin` + `WIFI_RAM_CODE_MT7922_1.bin`) must be present at boot.
-
-### MT7922 known limitations
-
-- **TX power capped at ~3 dBm** on the in-image OpenWrt 24.10 mt76 driver. Channel 149 in US allows 30 dBm but the firmware regulatory state defaults to a conservative cap that doesn't lift even with `country=US` set in UCI. Coverage is room-scale; long-range clients should bridge through a downstream AP. Tracking as a follow-up — likely needs a newer mt76 driver via custom OpenWrt build.
-- **WPA3 transition mode (`sae-mixed`) breaks Apple devices.** iPhones/iPads fail association in mixed mode. Stay on `psk2` (WPA2) for production; revisit when iOS WPA3 transition handling improves.
-- **2.4 GHz radio is disabled by default** in `etc/config/wireless`. The MT7922 supports simultaneous dual-band but enabling 2.4 GHz adds beacon airtime; flip `wireless.radio3_2g.disabled=0` if you need a 2.4 GHz AP for legacy IoT devices.
-
-## OpenWrt Version
-
-Uses **OpenWrt 24.10.0** targeting `bcm27xx/bcm2712`.
+The single-box container image is based on `openwrt/rootfs:x86_64-24.10.2`.
