@@ -497,6 +497,11 @@ case "$OP" in
       --raid-devices="${#MEMBERS[@]}" --run "${MEMBERS[@]}"
     ;;
   pool_destroy)
+    # Validate $DEVICE is a bare md name (e.g. md0) to prevent path-traversal
+    # attacks where a crafted value like "md0/../md1" passes the confirm-phrase
+    # gate (basename reduces it to "md1") but the sysfs glob resolves to the
+    # wrong array, stopping and zeroing unintended members.
+    [[ "$DEVICE" =~ ^md[0-9]+$ ]] || die "invalid device '$DEVICE': must match md[0-9]+"
     # Capture members BEFORE --stop, then stop, then wipe each member's md
     # superblock so the disk is reusable and no stale array re-assembles on the
     # next boot. Order matters: `mdadm --stop` tears down the md device and
@@ -508,7 +513,7 @@ case "$OP" in
       [ -e "$slave" ] || continue
       members+=("/dev/$(basename "$slave")")
     done
-    mdadm --stop "$MD"
+    mdadm --stop "$MD" || true
     for member in "${members[@]}"; do
       mdadm --zero-superblock "$member" || true
     done

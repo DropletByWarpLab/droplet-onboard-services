@@ -117,7 +117,7 @@ PATH="$WORK/bin:$PATH" \
 SLAVES_DIR="$SYSBLK/md0/slaves" \
 ZEROED_LOG="$ZEROED_LOG" \
 DEVICE="md0" MD="/dev/md0" \
-bash -c "set -e; . '$WORK/block.run.sh'" >/dev/null 2>&1 || true
+bash -c "set -euo pipefail; . '$WORK/block.run.sh'" >/dev/null 2>&1
 
 zeroed_count="$(wc -l < "$ZEROED_LOG" | tr -d ' ')"
 if [ "$zeroed_count" -eq 2 ]; then
