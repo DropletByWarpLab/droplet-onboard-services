@@ -38,6 +38,10 @@ import { createMeContextStatsRouter } from "./routes/me-context-stats.js";
 import { createFipsRouter } from "./routes/fips.js";
 import { createActivityRouter } from "./routes/activity.js";
 import { createPeopleRouter } from "./routes/people.js";
+import {
+  initScopeLoader,
+  loadUserEffectiveScopes,
+} from "./services/scope-loader.service.js";
 import { createSettingsRouter } from "./routes/settings.js";
 import { createEmailRouter, wireEmailAnalysis } from "./routes/email.js";
 import { createEmailAnalysisFn } from "./services/email-analysis.service.js";
@@ -97,6 +101,14 @@ export function createApp(prisma: PrismaClient) {
   // boot requests fall into the fail-closed `USER_NOT_PROVISIONED`
   // branch instead of regressing the OCS-username-as-id leak.
   setAuthPrisma(prisma);
+
+  // WARP-455 — bind the scope-loader singleton to the same Prisma client
+  // before the first request, for the same reason as setAuthPrisma above:
+  // requireScope()'s injected loader (loadUserEffectiveScopes) reads
+  // ScopeBinding/GuestExpiry through this singleton, and the very first
+  // post-boot request to a scope-guarded route must find it populated.
+  // Idempotent — a second createApp() in tests is a no-op.
+  initScopeLoader(prisma);
 
   // Auth middleware (controlled by AUTH_ENABLED env var)
   app.use(authMiddleware);
@@ -159,7 +171,7 @@ export function createApp(prisma: PrismaClient) {
   // WARP-455: A1 local user directory + role/scope mutations. Mutations
   // emit ActivityRow rows via recordActivity (auth kind for lifecycle,
   // system kind for permission edits).
-  app.use("/api", createPeopleRouter(prisma));
+  app.use("/api", createPeopleRouter(prisma, loadUserEffectiveScopes));
   // WARP-457: A3 workspace settings CRUD (GET tree / GET section /
   // PATCH section with per-type validation). Mutations emit ActivityRow
   // rows via recordActivity (kind: system, severity: info — one row per

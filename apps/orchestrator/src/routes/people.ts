@@ -30,6 +30,7 @@ import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import pino from "pino";
 import { requireRole } from "../middleware/auth.js";
+import { requireScope, type ScopeLoader } from "../middleware/scope.js";
 import { recordActivity } from "../services/activity.singleton.js";
 
 const logger = pino({ name: "people-route" });
@@ -128,7 +129,10 @@ const PERMISSIONS_MATRIX = {
   },
 } as const;
 
-export function createPeopleRouter(prisma: PrismaClient): Router {
+export function createPeopleRouter(
+  prisma: PrismaClient,
+  loadUserScopes: ScopeLoader,
+): Router {
   const router = Router();
 
   // ── GET /api/people ─────────────────────────────────────────
@@ -166,6 +170,11 @@ export function createPeopleRouter(prisma: PrismaClient): Router {
   router.patch(
     "/people/:id/role",
     requireRole("owner", "admin"),
+    // Scope axis (WARP-455): runs AFTER requireRole per scope.ts module
+    // comment. owner/admin short-circuit before the loader, so today this
+    // is defense-in-depth + makes the axis live; it bites if the role
+    // allowlist ever widens to family/guest.
+    requireScope("exec_only", loadUserScopes),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         // WARP-480 self-action guard. Runs FIRST so the refusal path
@@ -273,6 +282,8 @@ export function createPeopleRouter(prisma: PrismaClient): Router {
   router.patch(
     "/people/:id/scope",
     requireRole("owner", "admin"),
+    // Scope axis (WARP-455) — second guard, see PATCH /people/:id/role.
+    requireScope("exec_only", loadUserScopes),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         // WARP-480 self-action guard. See the matching block on
@@ -355,6 +366,8 @@ export function createPeopleRouter(prisma: PrismaClient): Router {
   router.delete(
     "/people/:id",
     requireRole("owner", "admin"),
+    // Scope axis (WARP-455) — second guard, see PATCH /people/:id/role.
+    requireScope("exec_only", loadUserScopes),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         // WARP-480 self-action guard. An owner could otherwise DELETE

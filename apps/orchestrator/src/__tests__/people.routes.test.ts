@@ -44,6 +44,7 @@ vi.mock("../services/activity.singleton.js", () => ({
 }));
 
 import { createPeopleRouter } from "../routes/people.js";
+import type { ScopeName } from "../middleware/scope.js";
 
 interface MockUser {
   id: string;
@@ -194,7 +195,17 @@ function buildApp(
     };
     next();
   });
-  app.use("/api", createPeopleRouter(prismaMock));
+  // WARP-455: createPeopleRouter now takes a scope loader (the second
+  // RBAC axis). Every caller in this suite is owner/admin (loader
+  // short-circuited) or family (rejected by requireRole before the
+  // loader runs), so a fixed loader keeps every assertion intact.
+  app.use(
+    "/api",
+    createPeopleRouter(
+      prismaMock,
+      async () => new Set<ScopeName>(["exec_only"]),
+    ),
+  );
   return app;
 }
 
