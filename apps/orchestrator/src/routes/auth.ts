@@ -1,5 +1,5 @@
 import { Router, Request } from "express";
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash } from "node:crypto";
 import { z } from "zod";
 import pino from "pino";
 import {
@@ -307,6 +307,135 @@ async function clearPasswordChangeRateState(userId: string): Promise<void> {
   }
 }
 
+/**
+ * WARP-579 — progressive backoff for failed /auth/login credential checks.
+ * Until now /auth/login verified the argon2id hash with NO rate limit, so an
+ * unauthenticated attacker could brute-force any account's password from the
+ * public router. Mirrors the change-password backoff model above (a small free
+ * tier, then FIXED escalating locks that always elapse on their own; the
+ * counter resets after an hour without failures and on a successful login).
+ *
+ * Two independent gates, BOTH consulted before the verify:
+ *   • per-IP    — caps how fast one source can spray attempts across many
+ *                 accounts (credential stuffing). Keyed by the proxy-aware
+ *                 caller IP.
+ *   • per-account — caps how fast one account's password can be guessed from
+ *                 anywhere (distributed guessing). Keyed by the normalized
+ *                 login email; applied to EVERY attempt — including
+ *                 unknown-email — so it can't double as an account-enumeration
+ *                 oracle (the email is hashed into the key, not stored).
+ *
+ * The per-account tier is more forgiving than per-IP because a NATed household
+ * legitimately shares one public IP; the per-account lock is the harder ceiling
+ * on actually compromising a single credential. Fails OPEN on cache errors so a
+ * flaky Redis can never lock every user out of signing in.
+ */
+const LOGIN_IP_FREE_TIER = 10;
+const LOGIN_ACCOUNT_FREE_TIER = 5;
+/** Lock seconds for the 1st, 2nd, 3rd … lock; the last value is the cap. */
+const LOGIN_BACKOFF_SCHEDULE = [30, 60, 120, 300, 900] as const;
+/** Failure counter resets after an hour of no failures (rolling window). */
+const LOGIN_FAILS_TTL_SEC = 60 * 60;
+
+function loginIpFailsKey(ip: string): string {
+  return `ratelimit:login:ip:fails:${ip}`;
+}
+function loginIpLockKey(ip: string): string {
+  return `ratelimit:login:ip:lock:${ip}`;
+}
+/**
+ * WARP-579 finding 4: the login email must be HASHED into the per-account
+ * Redis key, never interpolated as plaintext. Interpolating it (a) leaks every
+ * targeted email to anyone with Redis `SCAN`, and (b) lets an RFC-valid colon
+ * in the local-part (`a:b@x`) corrupt the `ratelimit:login:account:fails:`
+ * namespace. `email` is already trim+lowercased by loginSchema, so the hash is
+ * stable across the write/read boundary. sha256 is a one-way namespace digest
+ * here, not a password hash — speed is fine and salting is unnecessary (the key
+ * is per-attempt rate-limit state, not a stored secret).
+ */
+function hashLoginEmail(email: string): string {
+  return createHash("sha256").update(email).digest("hex");
+}
+function loginAccountFailsKey(email: string): string {
+  return `ratelimit:login:account:fails:${hashLoginEmail(email)}`;
+}
+function loginAccountLockKey(email: string): string {
+  return `ratelimit:login:account:lock:${hashLoginEmail(email)}`;
+}
+
+/**
+ * PURE schedule map (failure count → lock seconds) for the given free tier.
+ * Exported for tests. Below `freeTier` failures the gate forgives; the first
+ * lock lands on the (freeTier+1)th failure.
+ */
+export function loginBackoffSeconds(failureCount: number, freeTier: number): number {
+  const idx = failureCount - freeTier - 1;
+  if (idx < 0) return 0;
+  return LOGIN_BACKOFF_SCHEDULE[
+    Math.min(idx, LOGIN_BACKOFF_SCHEDULE.length - 1)
+  ];
+}
+
+async function checkLoginLock(
+  lockKey: string,
+): Promise<{ locked: boolean; retryAfterSeconds: number }> {
+  try {
+    const until = (await cacheGet<number>(lockKey)) ?? 0;
+    const now = Date.now();
+    if (until > now) {
+      return { locked: true, retryAfterSeconds: Math.ceil((until - now) / 1000) };
+    }
+    return { locked: false, retryAfterSeconds: 0 };
+  } catch {
+    return { locked: false, retryAfterSeconds: 0 };
+  }
+}
+
+async function recordLoginFailure(
+  failsKey: string,
+  lockKey: string,
+  freeTier: number,
+): Promise<void> {
+  try {
+    // cacheIncr is atomic (Lua INCR + first-creation-only EXPIRE) — avoids the
+    // read-modify-write race where two concurrent failed logins both read N and
+    // both write N+1. WARP-579 finding 5: it is a true FIXED window — the TTL is
+    // stamped only when the counter is first created, so the counter passively
+    // decays after LOGIN_FAILS_TTL_SEC of no failures, matching the documented
+    // "resets after an hour of no failures" intent. (A sliding TTL would re-arm
+    // the window on every failure and never let it expire — that bug was fixed
+    // in cacheIncr itself, so the throttle gets fixed-window semantics for free.)
+    const next = await cacheIncr(failsKey, LOGIN_FAILS_TTL_SEC);
+    if (next === null) return; // Redis error — fail open
+    const lockedSeconds = loginBackoffSeconds(next, freeTier);
+    if (lockedSeconds > 0) {
+      await cacheSet(lockKey, Date.now() + lockedSeconds * 1000, lockedSeconds);
+    }
+  } catch {
+    // fail open — see the model comment above.
+  }
+}
+
+/**
+ * WARP-579 finding 2: on a COMPLETE successful login, clear ONLY the
+ * authenticating account's fail/lock counters. We deliberately do NOT clear the
+ * per-IP keys: a shared-NAT attacker could otherwise spray failures against a
+ * victim, then log into their OWN account from the same IP to zero the shared
+ * per-IP counter, looping forever. The per-IP counters decay on their own via
+ * their fixed-window TTL (finding 5), so one account's success can never wipe
+ * the per-IP failure state that guards every other account on that IP. The
+ * legitimate user's own per-account counter still resets here, so their next
+ * session isn't held under a stale lock.
+ */
+async function clearLoginAccountRateState(email: string): Promise<void> {
+  try {
+    await cacheDel(loginAccountFailsKey(email));
+    await cacheDel(loginAccountLockKey(email));
+  } catch {
+    // fail open.
+  }
+}
+
 // The invite-accept URL is built by the shared, host-validated
 // `buildInviteUrl` in lib/invite-url.ts (PR #486 review finding 2). The old
 // local copy trusted `x-forwarded-host` blindly, embedding an unvalidated host
@@ -590,14 +719,83 @@ export function createPublicAuthRouter(
       // unique index. Keep the `.trim()` as belt-and-suspenders.
       const loginEmail = (parsed.data.email ?? parsed.data.username ?? "").trim();
       const password = parsed.data.password;
+      const loginIp = callerIpFromReq(req) ?? null;
+
+      // WARP-579 finding 3: when the caller IP can't be resolved (misconfigured
+      // `trust proxy`, unix-socket transport), the per-IP brute-force gate below
+      // is silently inactive — `loginIp` is null so no per-IP lock is checked or
+      // recorded, leaving only the per-account gate. Surface the degraded state
+      // exactly once per affected request so operators can spot a misconfigured
+      // proxy instead of discovering the per-IP gate is off only after an
+      // incident. We keep serving the request (the per-account gate still
+      // applies, and hard-failing would break unix-socket health checks); this
+      // is the observability fix, not a hard fail-closed.
+      if (!loginIp) {
+        logger.warn(
+          { route: "/auth/login" },
+          "per-IP login brute-force throttle inactive: caller IP unresolved " +
+            "(check `trust proxy` / transport); only the per-account gate applies",
+        );
+      }
+
+      // WARP-579 — progressive brute-force throttle BEFORE any verify work.
+      // Without this the public /auth/login route is an unbounded
+      // password-guessing oracle. Two independent gates (per-IP and
+      // per-account) — either one locked → 429, never spend a verify. The
+      // 429 is returned regardless of whether the account exists, so the
+      // throttle leaks no enumeration signal.
+      const ipLock = loginIp
+        ? await checkLoginLock(loginIpLockKey(loginIp))
+        : { locked: false, retryAfterSeconds: 0 };
+      const accountLock = await checkLoginLock(loginAccountLockKey(loginEmail));
+      if (ipLock.locked || accountLock.locked) {
+        const retryAfterSeconds = Math.max(
+          ipLock.retryAfterSeconds,
+          accountLock.retryAfterSeconds,
+        );
+        await recordActivity({
+          kind: "auth",
+          severity: "warn",
+          sourceIcon: "shield-alert",
+          what: "Sign-in throttled",
+          sub: `${loginEmail} • ${loginIp ?? "unknown"}`,
+          refs: {
+            outcome: "too_many_attempts",
+            username: loginEmail,
+            ip: loginIp,
+          },
+        });
+        res
+          .status(429)
+          .set("Retry-After", String(retryAfterSeconds))
+          .json({
+            error: "Too many attempts. Try again shortly.",
+            code: "TOO_MANY_ATTEMPTS",
+            retryAfterSeconds,
+          });
+        return;
+      }
 
       // Shared failure path. Identical status + body for every
       // unsuccessful branch (unknown email, no password set, wrong
       // password) so an attacker can't enumerate registered emails by
       // diffing the response. The `username` label in the audit row is
       // the attempted login identifier; the password never reaches the
-      // recorder.
+      // recorder. WARP-579: each unsuccessful attempt bumps BOTH the
+      // per-IP and per-account failure counters (escalating lockout).
       const denyInvalid = async (attempted: string): Promise<void> => {
+        if (loginIp) {
+          await recordLoginFailure(
+            loginIpFailsKey(loginIp),
+            loginIpLockKey(loginIp),
+            LOGIN_IP_FREE_TIER,
+          );
+        }
+        await recordLoginFailure(
+          loginAccountFailsKey(loginEmail),
+          loginAccountLockKey(loginEmail),
+          LOGIN_ACCOUNT_FREE_TIER,
+        );
         await recordActivity({
           kind: "auth",
           severity: "warn",
@@ -658,6 +856,15 @@ export function createPublicAuthRouter(
         await denyInvalid(loginEmail);
         return;
       }
+
+      // WARP-579 finding 1: the password verified, but the login is NOT yet
+      // complete if this user has a second factor. We must NOT clear the
+      // throttle state here — doing so before the TOTP gate let an attacker
+      // who knew a valid password brute-force all ~10^6 TOTP codes with no
+      // lockout (the TOTP-failure path never re-armed the throttle). The clear
+      // now happens ONLY after the COMPLETE login succeeds (below), and a TOTP
+      // failure is recorded as a login failure so it accrues toward the same
+      // account/IP lockout that guards the password gate.
 
       const userId = localUser.id; // local UUID — fed into JWT.sub + NC store key
       const username = localUser.username; // human-readable handle (display + audit only)
@@ -721,6 +928,26 @@ export function createPublicAuthRouter(
         }
 
         if (!secondFactorOk) {
+          // WARP-579 finding 1: a wrong second factor IS a failed login attempt
+          // for throttling purposes. Without this, an attacker holding a valid
+          // password could spin through ~10^6 TOTP codes with no lockout. Bump
+          // the SAME per-account (and per-IP when resolvable) failure counters
+          // that guard the password gate, so repeated wrong-TOTP attempts
+          // escalate to a 429 at the top of the handler exactly like wrong
+          // passwords do. The counters are cleared only on a fully-successful
+          // login below.
+          if (loginIp) {
+            await recordLoginFailure(
+              loginIpFailsKey(loginIp),
+              loginIpLockKey(loginIp),
+              LOGIN_IP_FREE_TIER,
+            );
+          }
+          await recordLoginFailure(
+            loginAccountFailsKey(loginEmail),
+            loginAccountLockKey(loginEmail),
+            LOGIN_ACCOUNT_FREE_TIER,
+          );
           // Distinguishable from "Invalid credentials" so the dashboard can
           // prompt for the code instead of treating it as a bad password.
           // The password was already correct, so this leaks no enumeration
@@ -747,6 +974,15 @@ export function createPublicAuthRouter(
 
         mfaStampIso = new Date().toISOString();
       }
+
+      // WARP-579 finding 1 + 2: the login is now COMPLETE (password verified AND
+      // — if enabled — the second factor satisfied). Clear the brute-force
+      // throttle for THIS account only, so a legitimate user who fat-fingered
+      // their password or TOTP a few times isn't held under a stale lock next
+      // session. We intentionally leave the per-IP counters to decay via their
+      // own TTL (finding 2) so one account's success can't wipe the shared per-IP
+      // failure state guarding other accounts on the same NAT.
+      await clearLoginAccountRateState(loginEmail);
 
       // Downstream provisioning (NOT authentication): ensure the caller
       // has a live Nextcloud app-password so Files/WebDAV keep working.
