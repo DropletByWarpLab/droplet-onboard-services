@@ -1080,10 +1080,15 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           liveReasoning = streamResult.message.reasoning ?? null;
         } catch (err) {
           terminal = "failed";
-          // A client disconnect aborts the in-flight fetch, throwing an
-          // AbortError. That is expected behavior — don't log it as a
-          // failure; clientAborted overrides terminal to "aborted" below.
-          if (!clientAborted) {
+          // Narrow to AbortError only: a client disconnect cancels the
+          // in-flight fetch, which throws DOMException{name:"AbortError"}.
+          // Any other infrastructure failure (MCP crash, gateway JSON error,
+          // ECONNRESET) must still be logged even if a concurrent disconnect
+          // also fired — so we check the error type, not clientAborted.
+          const isAbortErr =
+            err instanceof DOMException &&
+            (err as DOMException).name === "AbortError";
+          if (!isAbortErr) {
             // eslint-disable-next-line no-console
             console.error("[llm/chat] agent loop failed:", err);
           }
@@ -1091,7 +1096,9 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           res.end();
         }
         if (emptyCompletion) terminal = "failed";
-        if (clientAborted) terminal = "aborted";
+        // Preserve the model-error label when emptyCompletion and clientAborted
+        // are both set (e.g. context-window overflow races a client disconnect).
+        if (clientAborted && terminal !== "failed") terminal = "aborted";
         await finalizeAndNotify(terminal);
         return;
       }
