@@ -493,8 +493,7 @@ const envSchema = z.object({
 // `DEVICE_BRIDGE_URL`. We standardize on `DEVICE_BRIDGE_URL` (config key
 // above) but honor a legacy `BRIDGE_URL` when the canonical key is unset, so
 // an existing deployment that set `BRIDGE_URL` in .env isn't silently
-// repointed at the default. Mirrors the JETSON_OLLAMA_URL → OLLAMA_URL
-// rename courtesy.
+// repointed at the default.
 // Treat an empty/whitespace value as unset so a templated `.env` with a bare
 // `DEVICE_BRIDGE_URL=` (or `BRIDGE_URL=`) line falls through to the alias and
 // then the schema default, rather than parsing as an empty URL.

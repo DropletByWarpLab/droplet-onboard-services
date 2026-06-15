@@ -7,7 +7,7 @@
 > **Scope:** Every component in this repo (`droplet-onboard-services`, GitHub
 > `DropletByWarpLab/droplet-onboard-services`) — the **intelligence layer** of the
 > Droplet edge AI appliance. Inference (Ollama + `ollama-manager`) lives in the
-> sibling repo [`droplet-jetson-ai`](../../droplet-jetson-ai); the physical
+> sibling repo [`droplet-local-LLM`](../../droplet-local-LLM); the physical
 > appliance lives in `pcb-claude-tool`. See [`agentic-workflows.md`](agentic-workflows.md)
 > for the cross-repo picture and [`ADR-009-canonical-system-architecture.md`](ADR-009-canonical-system-architecture.md)
 > for the canonical system shape (do not violate it without a superseding ADR).

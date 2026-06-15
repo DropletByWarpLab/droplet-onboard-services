@@ -241,10 +241,10 @@ app.add_middleware(
 
 @app.get("/ai/health")
 async def health():
-    jetson_reachable = False
+    inference_reachable = False
     if provider_router:
-        jetson_reachable = await provider_router.ollama.is_reachable()
-    return {"status": "ok", "jetson_reachable": jetson_reachable}
+        inference_reachable = await provider_router.ollama.is_reachable()
+    return {"status": "ok", "inference_reachable": inference_reachable}
 
 
 @app.get("/ai/readiness")

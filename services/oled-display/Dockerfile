@@ -5,7 +5,7 @@ FROM python:3.12-slim
 
 # System deps are just Pillow's native libs + DejaVu for the on-screen font.
 # The old SPI/GPIO/evdev build chain (gcc + python3-dev + linux-libc-dev) is
-# gone along with spidev/evdev/Jetson.GPIO/luma.lcd — PyPortal needs only
+# gone along with the spidev/evdev/GPIO/luma.lcd stack — PyPortal needs only
 # pyserial, which ships as a pure-Python wheel.
 # WARP-229 — also installs openssl + ca-certificates for the FIPS provider.
 RUN apt-get update && apt-get install -y --no-install-recommends \

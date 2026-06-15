@@ -333,13 +333,13 @@ class TestRealHardwareScenarios:
         assert r.output_device is not None
         assert r.output_device.max_output_channels > 0
 
-    def test_production_v26_jetson_with_io_brick(
+    def test_production_v26_soc_with_io_brick(
         self, make_sounddevice, make_sysfs_root,
     ):
         """An I²S codec on platform bus. No PCI codecs in this
         scenario (this host has no traditional onboard audio)."""
         sd = make_sounddevice([
-            {"name": "tegra-snd-codec: I2S audio (hw:0,0)",
+            {"name": "soc-snd-codec: I2S audio (hw:0,0)",
              "max_input_channels": 1, "max_output_channels": 2,
              "default_samplerate": 16000, "hostapi": 0},
         ])

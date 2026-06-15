@@ -76,7 +76,7 @@ detect_single_box_mode() {
   # The CI / DROPLET_SKIP_NETWORK_PROBE escape hatch lets dev re-runs of
   # the script skip the two 2-second curl probes (≤4 s added latency on
   # every fresh install). Real provisions still do the probe.
-  local jetson_reachable=0
+  local inference_reachable=0
   local skip_probe=0
   if [ -n "${CI:-}" ] || [ -n "${DROPLET_SKIP_NETWORK_PROBE:-}" ]; then
     skip_probe=1
@@ -88,7 +88,7 @@ detect_single_box_mode() {
     # fails the body grep.
     if curl -fsS -m 2 http://192.168.50.197:11434/api/version 2>/dev/null | grep -q '"version":' \
        || curl -fsS -m 2 http://inference-engine.local:11434/api/version 2>/dev/null | grep -q '"version":'; then
-      jetson_reachable=1
+      inference_reachable=1
     fi
   fi
 
@@ -109,7 +109,7 @@ detect_single_box_mode() {
   fi
 
   # Decision matrix
-  if [ "$jetson_reachable" = 1 ]; then
+  if [ "$inference_reachable" = 1 ]; then
     SINGLE_BOX_DETECTION_REASON="separate inference host reachable on LAN — multi-box deployment shape"
     return 1
   fi
@@ -125,7 +125,7 @@ detect_single_box_mode() {
   fi
 
   # shellcheck disable=SC2034  # global: set across this fn, read by the caller (scripts/setup.sh:124,127) after `source`. shellcheck checks this lib standalone and can't see the cross-file read; the directive sits on the last assignment, where SC2034 anchors.
-  SINGLE_BOX_DETECTION_REASON="ambiguous signals (render=${render_count}, dgpu=${has_dgpu}, inference_host=${jetson_reachable}) — declining to auto-enable"
+  SINGLE_BOX_DETECTION_REASON="ambiguous signals (render=${render_count}, dgpu=${has_dgpu}, inference_host=${inference_reachable}) — declining to auto-enable"
   return 1
 }
 
