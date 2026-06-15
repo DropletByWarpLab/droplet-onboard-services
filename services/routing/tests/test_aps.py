@@ -267,7 +267,7 @@ class TestApApiBrowseDiscovered:
                     "txt": [
                         "mac=B8:27:EB:12:34:56",
                         "model=raspberrypi,5-model-b",
-                        "serial=RPi5-00000000a1b2c3d4",
+                        "serial=AP-00000000a1b2c3d4",
                         "version=1.0",
                         "role=extender",
                     ],
@@ -279,7 +279,7 @@ class TestApApiBrowseDiscovered:
         rec = result[0]
         assert rec["mac"] == "B8:27:EB:12:34:56"
         assert rec["model"] == "raspberrypi,5-model-b"
-        assert rec["serial"] == "RPi5-00000000a1b2c3d4"
+        assert rec["serial"] == "AP-00000000a1b2c3d4"
         assert rec["version"] == "1.0"
         assert rec["last_ip"] == "192.168.50.42"
         assert rec["hostname"] == "droplet-ap-b827eb123456"

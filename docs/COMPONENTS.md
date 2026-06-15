@@ -404,17 +404,22 @@ network. Host-published ports and host-network services are called out.
 
 ## openwrt/
 
-- **Purpose:** OpenWrt 24.10 ImageBuilder + UCI config overlay producing the router
-  firmware (SD `.img.gz` + sysupgrade image). `build.sh` validates the overlay,
-  pulls the ImageBuilder, and `make image` with custom packages + `files/`.
+- **Purpose:** OpenWrt 24.10 — on single-box (the shipping shape) the AP runs in a
+  container built from `singlebox-image/Dockerfile` (`droplet/openwrt-singlebox`
+  image), which bakes the AP/router packages + the canonical rpcd ACL. The UCI
+  config overlay under `files/` documents the network/firewall/camera-VLAN model
+  and remains the source of truth for the rpcd ACL. The legacy multi-box bare-metal
+  router SD-card image builder (`openwrt/build.sh`) has been retired (ADR-011).
 - **Overlay:** `files/etc/config/*` (network/wireless/firewall/dhcp/uhttpd/rpcd/
   system), `files/usr/share/rpcd/acl.d/droplet-ai.json` (ubus ACL, denies
   `file.exec`), `files/etc/uci-defaults/99-droplet-setup` (first-boot secrets +
-  board tweaks). Camera VLAN 100 is pre-provisioned.
-- **Target:** generic hardware-agnostic router build (see
-  [ADR-011](ADR-011-hardware-agnostic-codebase.md)); reference platform is a small ARM
-  router board with a MediaTek MT7922 Wi-Fi module + USB NIC. The MT7922 needs three
-  things together (32-bit DMA overlay, `disable_aspm=1`, firmware blobs baked in).
+  board tweaks). Camera VLAN 100 is pre-provisioned. Note: the single-box
+  container does NOT consume `files/etc/config/*` — its `/etc/config` is a runtime
+  named volume; it only bakes the rpcd ACL + uhttpd limits.
+- **Target:** generic hardware-agnostic OpenWrt build (see
+  [ADR-011](ADR-011-hardware-agnostic-codebase.md)). On single-box the host's Wi-Fi
+  radio is moved into the container's netns and hostapd serves the AP. The legacy
+  bare-metal router reference used a MediaTek MT7922 Wi-Fi module + USB NIC.
 
 ## docker/
 

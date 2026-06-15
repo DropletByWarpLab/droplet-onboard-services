@@ -1577,7 +1577,7 @@ class ApApi:
             {
                 "mac": "B8:27:EB:12:34:56",
                 "model": "raspberrypi,5-model-b",
-                "serial": "RPi5-00000000a1b2c3d4",
+                "serial": "AP-00000000a1b2c3d4",
                 "version": "1.0",
                 "last_ip": "192.168.50.42",
                 "hostname": "droplet-extender-b827eb123456",

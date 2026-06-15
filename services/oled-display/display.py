@@ -13,7 +13,7 @@ Backends:
 
 The direct-SPI / luma.lcd / fbtft-framebuffer paths were removed after the
 pivot to the status display (the inference host's GPIO/SPI driver stack is
-incompatible with the Pi-shield TFTs we originally targeted; see WARP-127).
+incompatible with the GPIO-header TFT shields we originally targeted; see WARP-127).
 gpio_shim, the old GPIO library, luma, spidev, and the XPT2046 touch code
 are gone.
 
