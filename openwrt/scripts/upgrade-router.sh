@@ -90,7 +90,7 @@ done
 
 if [ -z "$FIRMWARE_FILE" ]; then
     err "Usage: $0 <firmware-image> [options]"
-    err "  e.g.: $0 output/openwrt-24.10.0-bcm27xx-bcm2712-rpi-5-droplet-squashfs-sysupgrade.img.gz"
+    err "  e.g.: $0 output/openwrt-*-droplet-squashfs-sysupgrade.img.gz"
     exit 1
 fi
 
@@ -133,9 +133,12 @@ printf "  /tmp free: %s\n" "$FLASH_FREE"
 
 # --- Step 3: Compatibility check ---
 if [ "$FORCE" != "true" ]; then
-    # Check the firmware filename contains the right target
-    if ! echo "$FIRMWARE_NAME" | grep -qi "bcm27xx\|bcm2712\|rpi-5\|rpi5"; then
-        warn "Firmware file doesn't appear to be for bcm2712/rpi-5"
+    # Sanity-check the firmware filename looks like an OpenWrt sysupgrade image
+    # for this router. The target board is read live from the router below
+    # (ubus system board); this is just a fast filename guard against an
+    # obviously-wrong file. Use --force to skip.
+    if ! echo "$FIRMWARE_NAME" | grep -qi "openwrt\|sysupgrade"; then
+        warn "Firmware file doesn't look like an OpenWrt sysupgrade image"
         warn "File: $FIRMWARE_NAME"
         printf "  Continue anyway? [y/N] "
         read -r answer

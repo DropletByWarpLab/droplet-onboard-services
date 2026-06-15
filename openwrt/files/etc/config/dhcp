@@ -2,7 +2,7 @@
 # Droplet DHCP / DNS Configuration
 # =============================================================================
 # dnsmasq serves DHCP on LAN (192.168.50.100 — 192.168.50.249)
-# Gateway and DNS both point to 192.168.50.1 (the Pi)
+# Gateway and DNS both point to 192.168.50.1 (the router host)
 # =============================================================================
 
 config dnsmasq

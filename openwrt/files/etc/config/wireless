@@ -4,20 +4,25 @@
 # Hardware swap from Intel BE200 to MT7922 in PR feat/openwrt-mt7922-support.
 # The BE200 worked as a client but failed AP-mode ACS ("Unable to collect
 # survey data") and was replaced. The MT7922 is dual-band (2.4 + 5 GHz),
-# Wi-Fi 6, and works as an AP on the Pi 5 *only* when:
+# Wi-Fi 6, and works as an AP on the legacy multi-box router host *only* when:
 #
-#   1. The `pcie-32bit-dma-pi5` device-tree overlay is loaded at boot
-#      (forces 32-bit DMA addressing — without this the mt7921e probe
-#      fails with -ENOMEM / error -12). See uci-defaults/99-droplet-setup.
+#   1. A 32-bit-DMA device-tree overlay is loaded at boot on the router
+#      host's SBC (forces 32-bit DMA addressing — without this the mt7921e
+#      probe fails with -ENOMEM / error -12). See uci-defaults/99-droplet-setup.
 #   2. The `mt7921e` driver is loaded with `disable_aspm=1` (avoids ASPM
-#      L0s/L1 power-state-related probe stalls on brcm-pcie). See
+#      L0s/L1 power-state-related probe stalls on the PCIe host bridge). See
 #      etc/modules.d/mt7921e.
 #   3. The `kmod-mt7921e` driver and `kmod-mt7922-firmware` blob are
-#      installed (both baked into the image via openwrt/build.sh).
+#      installed (both baked into the legacy router image).
 #
 # Path string `axi/1000110000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0`
-# is the FPC PCIe x1 slot on the Pi 5 (NOT the RP1 controller at
-# 1000120000 — that's the Pi's own I/O hub and must not be touched here).
+# is the FPC PCIe x1 slot on the router host's SBC (NOT the on-SoC I/O
+# controller at 1000120000 — that's the SoC's own I/O hub and must not be
+# touched here).
+#
+# NOTE: this overlay feeds the LEGACY multi-box bare-metal router image only.
+# The single-box shape runs OpenWrt IN-CONTAINER (see openwrt/singlebox-image/)
+# and does NOT consume this file; its wireless config is created at runtime.
 #
 # All radios are bridged into br-lan (192.168.50.0/24).
 # =============================================================================
@@ -81,13 +86,13 @@ config wifi-iface 'default_radio3_2g'
     option ieee80211w '0'
     option disabled '1'
 
-# --- BCM4345/6 onboard (SDIO) — DISABLED ---
+# --- Onboard SDIO radio — DISABLED ---
 #
-# The Pi 5's onboard Cypress/Broadcom BCM4345/6 (brcmfmac via SDIO) was
-# the previous fallback AP while the BE200 was being debugged. Now that
-# MT7922 is the production chip, the onboard radio is disabled to free
-# CPU/memory and avoid SSID confusion. Re-enable by setting disabled=0 if
-# the MT7922 needs to be swapped out.
+# The router host SBC's onboard SDIO Wi-Fi (brcmfmac) was the previous
+# fallback AP while the BE200 was being debugged. Now that MT7922 is the
+# production chip, the onboard radio is disabled to free CPU/memory and
+# avoid SSID confusion. Re-enable by setting disabled=0 if the MT7922
+# needs to be swapped out.
 config wifi-device 'radio4'
     option type 'mac80211'
     option path 'platform/axi/1001100000.mmc/mmc_host/mmc1/mmc1:0001/mmc1:0001:1'
