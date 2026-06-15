@@ -1117,7 +1117,7 @@ model ApDevice {
   mac              String         @id
   // Operator-friendly label set at approval time. Defaults to the
   // model name + last-3-octets of the MAC if the operator doesn't
-  // override it (e.g. "Pi5 AP (12:34:56)"). Editable from the
+  // override it (e.g. "AP (12:34:56)"). Editable from the
   // dashboard later (PATCH /api/aps/:mac).
   displayName      String?
   // mDNS-reported product info — useful for the dashboard's "what is

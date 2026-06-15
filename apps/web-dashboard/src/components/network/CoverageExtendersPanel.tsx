@@ -217,7 +217,11 @@ function timeAgo(iso: string | null | undefined): string {
 function displayNameFor(ap: ApDeviceInfo): string {
   if (ap.displayName) return ap.displayName;
   const last3 = ap.mac.split(":").slice(-3).join(":");
-  if (ap.model?.includes("raspberrypi,5")) return `Pi5 AP (${last3})`;
+  // The device-tree compatible string `raspberrypi,5-model-b` is the literal
+  // value Pi-based APs emit on /proc/device-tree/compatible — matched here for
+  // detection (do NOT rename it), but the operator-facing label stays
+  // hardware-agnostic (ADR-011).
+  if (ap.model?.includes("raspberrypi,5")) return `AP (${last3})`;
   if (ap.model) return `${ap.model} AP (${last3})`;
   return `Extender (${last3})`;
 }
