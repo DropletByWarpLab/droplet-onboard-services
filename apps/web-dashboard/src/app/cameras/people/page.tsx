@@ -18,6 +18,7 @@ import {
 import type { KnownFace } from "@/lib/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useToast } from "@/components/Toast";
+import { ShellPage } from "@/components/shell/ShellPage";
 
 /**
  * Known-faces management (Phase 7.5).
@@ -117,57 +118,56 @@ export default function PeoplePage() {
     setDeleteImageTarget(null);
   };
 
-  return (
-    <div className="p-6 max-w-5xl mx-auto">
-      <div className="flex items-center gap-3 mb-4">
-        <button
-          onClick={() => router.push("/cameras")}
-          className="p-2 -ml-2 rounded-full hover:bg-surface-secondary"
-          aria-label="Back to cameras"
-        >
-          <ArrowLeft size={20} />
-        </button>
-        <div className="flex-1 min-w-0">
-          <h1 className="type-large-title text-label-primary">People</h1>
-          <p className="type-subheadline text-label-tertiary mt-0.5">
-            Faces this Droplet has been trained to recognise. Add new ones
-            from the <span className="font-mono">Events</span> page by tagging
-            a person.
-          </p>
-        </div>
-        <button
-          onClick={() => void refresh()}
-          disabled={loading}
-          className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
-        >
-          <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
-          <span className="type-subheadline">Refresh</span>
-        </button>
-      </div>
+  const actions = (
+    <>
+      <button onClick={() => router.push("/cameras")} className="btn ghost" type="button">
+        <ArrowLeft size={15} />
+        Cameras
+      </button>
+      <button
+        onClick={() => void refresh()}
+        disabled={loading}
+        className="icon-btn"
+        aria-label="Refresh"
+        title="Refresh"
+        type="button"
+      >
+        <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
+      </button>
+    </>
+  );
 
+  return (
+    <ShellPage
+      icon={<User size={15} />}
+      label="People"
+      title="People"
+      sub="Faces this Droplet has been trained to recognise. Add new ones from the Events page by tagging a person."
+      actions={actions}
+    >
       {error && (
-        <div className="dp-card p-4 mb-3 text-system-red flex items-center gap-2">
+        <div className="card" style={{ display: "flex", alignItems: "center", gap: 8, color: "#ef4444" }}>
           <AlertTriangle size={14} />
-          <span className="type-subheadline">{error}</span>
+          <span>{error}</span>
         </div>
       )}
 
       {loading && !faces ? (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {Array.from({ length: 4 }).map((_, i) => (
-            <div key={i} className="dp-card h-40 animate-pulse bg-surface-secondary" />
+            <div key={i} className="card h-40 animate-pulse" style={{ background: "var(--surface-2)" }} />
           ))}
         </div>
       ) : !faces || faces.length === 0 ? (
-        <div className="dp-card text-center py-12">
-          <User size={32} className="mx-auto text-label-quaternary mb-3" />
-          <h2 className="type-title-3 text-label-primary mb-1">
-            No known faces
-          </h2>
-          <p className="type-subheadline text-label-tertiary max-w-md mx-auto">
-            Face recognition isn&apos;t enabled, or no one has been tagged
-            yet. Tag someone from an event on the Events page to start.
-          </p>
+        <div className="card">
+          <div className="empty">
+            <span className="ei"><User size={24} /></span>
+            <span className="eh">No known faces</span>
+            <span style={{ maxWidth: "44ch" }}>
+              Face recognition isn&apos;t enabled, or no one has been tagged
+              yet. Tag someone from an event on the Events page to start.
+            </span>
+          </div>
         </div>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
@@ -176,7 +176,7 @@ export default function PeoplePage() {
             const cover = face.images[0];
             const deleting = busy === face.name;
             return (
-              <div key={face.name} className="dp-card overflow-hidden">
+              <div key={face.name} className="card" style={{ padding: 0, overflow: "hidden" }}>
                 <div className="relative aspect-square bg-surface-secondary">
                   {cover ? (
                     <img
@@ -283,6 +283,6 @@ export default function PeoplePage() {
         confirmLabel="Remove person"
         variant="destructive"
       />
-    </div>
+    </ShellPage>
   );
 }

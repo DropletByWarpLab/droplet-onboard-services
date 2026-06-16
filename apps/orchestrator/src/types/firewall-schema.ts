@@ -16,45 +16,46 @@ const stringOrList = z.union([z.string(), z.array(z.string())]);
 
 // `passthrough()` lets unknown keys (like `.anonymous`, `.type`, `.name`, or
 // fields OpenWrt adds in a future version) flow through without validation
-// errors. Every field is optional — OpenWrt omits defaults from the on-disk
-// config.
+// errors. Every field is `.nullish()` (optional + nullable) — OpenWrt omits
+// defaults from the on-disk config, and ubus surfaces some omitted fields as
+// `null` (e.g. a LAN zone with no `masq`), which `.optional()` alone rejects.
 
 export const FirewallZoneSchema = z
   .object({
-    name: z.string().optional(),
-    network: stringOrList.optional(),
-    input: z.string().optional(),
-    output: z.string().optional(),
-    forward: z.string().optional(),
-    masq: z.string().optional(),
+    name: z.string().nullish(),
+    network: stringOrList.nullish(),
+    input: z.string().nullish(),
+    output: z.string().nullish(),
+    forward: z.string().nullish(),
+    masq: z.string().nullish(),
   })
   .passthrough();
 
 export const FirewallRuleSchema = z
   .object({
-    name: z.string().optional(),
-    src: z.string().optional(),
-    dest: z.string().optional(),
-    src_mac: z.string().optional(),
-    proto: stringOrList.optional(),
-    src_port: z.string().optional(),
-    dest_port: z.string().optional(),
-    target: z.string().optional(),
-    enabled: z.string().optional(),
+    name: z.string().nullish(),
+    src: z.string().nullish(),
+    dest: z.string().nullish(),
+    src_mac: z.string().nullish(),
+    proto: stringOrList.nullish(),
+    src_port: z.string().nullish(),
+    dest_port: z.string().nullish(),
+    target: z.string().nullish(),
+    enabled: z.string().nullish(),
   })
   .passthrough();
 
 export const FirewallRedirectSchema = z
   .object({
-    name: z.string().optional(),
-    src: z.string().optional(),
-    dest: z.string().optional(),
-    proto: stringOrList.optional(),
-    src_dport: z.string().optional(),
-    dest_ip: z.string().optional(),
-    dest_port: z.string().optional(),
-    target: z.string().optional(),
-    enabled: z.string().optional(),
+    name: z.string().nullish(),
+    src: z.string().nullish(),
+    dest: z.string().nullish(),
+    proto: stringOrList.nullish(),
+    src_dport: z.string().nullish(),
+    dest_ip: z.string().nullish(),
+    dest_port: z.string().nullish(),
+    target: z.string().nullish(),
+    enabled: z.string().nullish(),
   })
   .passthrough();
 

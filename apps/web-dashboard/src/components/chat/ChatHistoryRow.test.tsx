@@ -9,6 +9,8 @@ const baseProps = {
   onSelect: vi.fn(),
   onRenameSubmit: vi.fn().mockResolvedValue(undefined),
   onDeleteRequest: vi.fn(),
+  onExport: vi.fn(),
+  onMoveRequest: vi.fn(),
 };
 
 describe("ChatHistoryRow", () => {
@@ -27,6 +29,23 @@ describe("ChatHistoryRow", () => {
     render(<ChatHistoryRow {...baseProps} onSelect={onSelect} />);
     fireEvent.click(screen.getByRole("button", { name: /open chat/i }));
     expect(onSelect).toHaveBeenCalled();
+  });
+
+  it("fires onMoveRequest when 'Move to project' is chosen (WARP-845)", () => {
+    const onMoveRequest = vi.fn();
+    render(<ChatHistoryRow {...baseProps} onMoveRequest={onMoveRequest} />);
+    fireEvent.click(screen.getByRole("button", { name: /more actions/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /move to project/i }));
+    expect(onMoveRequest).toHaveBeenCalled();
+  });
+
+  it("fires onExport (and closes the menu) when Export is chosen", () => {
+    const onExport = vi.fn();
+    render(<ChatHistoryRow {...baseProps} onExport={onExport} />);
+    fireEvent.click(screen.getByRole("button", { name: /more actions/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /export/i }));
+    expect(onExport).toHaveBeenCalled();
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
   });
 
   it("opens inline rename when the Rename menu item is chosen", () => {

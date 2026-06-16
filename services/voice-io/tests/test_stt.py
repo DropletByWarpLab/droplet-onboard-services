@@ -219,6 +219,68 @@ class TestWyomingSessionErrorPaths:
             srv.shutdown()
             srv.server_close()
 
+    def test_chatty_server_hits_total_wall_clock_deadline(self):
+        """GW-16: a server that drips non-transcript events forever (never the
+        final transcript) keeps resetting the per-recv timeout. _read_transcript
+        must still bail out on a TOTAL wall-clock deadline rather than block the
+        single-threaded pipeline worker indefinitely.
+        """
+        class _ChattyHandler(socketserver.BaseRequestHandler):
+            def handle(self) -> None:
+                sock = self.request
+                sock.settimeout(5.0)
+                try:
+                    # Read client events until audio-stop, then start dripping
+                    # non-transcript events at a steady ~40 ms cadence — faster
+                    # than the per-recv timeout, so that clock keeps resetting.
+                    while True:
+                        header = _read_json_line(sock)
+                        if header is None:
+                            return
+                        payload_len = int(header.get("payload_length") or 0)
+                        if payload_len:
+                            _read_exactly(sock, payload_len)
+                        if header.get("type") == "audio-stop":
+                            break
+                    while True:
+                        # An event the client ignores (not type=="transcript").
+                        evt = (
+                            json.dumps({
+                                "type": "info",
+                                "data": {"note": "still working"},
+                                "payload_length": 0,
+                            }) + "\n"
+                        ).encode()
+                        sock.sendall(evt)
+                        time.sleep(0.04)
+                except (OSError, socket.timeout, STTUnavailable):
+                    return
+
+        srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _ChattyHandler)
+        srv.allow_reuse_address = True
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            # Per-recv timeout (1.0s) >> drip interval (0.04s): the per-recv
+            # clock never fires. The TOTAL deadline (0.5s) is what saves us.
+            client = WyomingSTT(
+                host="127.0.0.1",
+                port=port,
+                transcript_timeout_s=1.0,
+                total_deadline_s=0.5,
+            )
+            with client.session() as session:
+                start = time.monotonic()
+                with pytest.raises(STTUnavailable, match="wall-clock deadline"):
+                    session.finish()
+                elapsed = time.monotonic() - start
+            # Bailed out near the total deadline, not at the (longer) per-recv
+            # timeout and certainly not never.
+            assert elapsed < 1.0, f"did not honour total deadline (took {elapsed:.2f}s)"
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
     def test_peer_close_before_transcript_raises(self):
         # Server accepts then closes immediately after the first read.
         class _CloseHandler(socketserver.BaseRequestHandler):

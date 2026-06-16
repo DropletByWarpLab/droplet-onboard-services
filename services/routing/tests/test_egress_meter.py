@@ -145,3 +145,32 @@ class TestUbusReadDegradation:
             "droplet_offlan_telemetry": 1000,
             "stray_key": 999,
         }
+
+
+class TestOrchestratorUrlDefault:
+    """NET-08 — the off-LAN egress meter runs in the host-network `routing`
+    container, where the docker-compose service name `orchestrator` does NOT
+    resolve. The default must be the loopback host-port (matching scheduler.py,
+    the sibling sampler in the same process), or every `_post_batch` silently
+    fails DNS and off-LAN samples are lost whenever ORCHESTRATOR_URL is unset."""
+
+    def test_default_is_localhost_not_compose_service_name(self, monkeypatch):
+        import importlib
+        monkeypatch.delenv("ORCHESTRATOR_URL", raising=False)
+        mod = importlib.reload(importlib.import_module("egress_meter"))
+        try:
+            assert mod.ORCHESTRATOR_URL == "http://localhost:3000"
+            assert "orchestrator:3000" not in mod.ORCHESTRATOR_URL
+        finally:
+            importlib.reload(mod)
+
+    def test_default_matches_scheduler_sibling(self, monkeypatch):
+        import importlib
+        monkeypatch.delenv("ORCHESTRATOR_URL", raising=False)
+        meter = importlib.reload(importlib.import_module("egress_meter"))
+        scheduler = importlib.reload(importlib.import_module("scheduler"))
+        try:
+            assert meter.ORCHESTRATOR_URL == scheduler.ORCHESTRATOR_URL
+        finally:
+            importlib.reload(meter)
+            importlib.reload(scheduler)

@@ -7,6 +7,7 @@
  */
 
 import { config } from "../config.js";
+import type { SwitchProvisionConfig, SwitchRawPortStatus } from "../types/switch.js";
 
 const SWITCH_URL = config.SWITCH_SERVICE_URL;
 const DEFAULT_TIMEOUT = 10_000;
@@ -15,11 +16,17 @@ function timeout(ms = DEFAULT_TIMEOUT): AbortSignal {
   return AbortSignal.timeout(ms);
 }
 
-/** Service-to-service auth headers. */
+/**
+ * Service-to-service auth headers. SERVICE_TOKEN_SWITCH is the dedicated
+ * bearer (compose wires the switch container's SERVICE_SECRET to the same
+ * value); SERVICE_SECRET is the legacy shared-secret fallback for installs
+ * whose .env predates the dedicated token.
+ */
 function authHeaders(): Record<string, string> {
   const headers: Record<string, string> = {};
-  if (config.SERVICE_SECRET) {
-    headers["Authorization"] = `Bearer ${config.SERVICE_SECRET}`;
+  const token = config.SERVICE_TOKEN_SWITCH || config.SERVICE_SECRET;
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
   }
   return headers;
 }
@@ -52,6 +59,14 @@ export async function fetchPort(port: number): Promise<unknown> {
   const resp = await fetch(`${SWITCH_URL}/ports/${port}`, { headers: authHeaders(), signal: timeout() });
   if (!resp.ok) throw new Error(`Switch port ${port}: ${resp.status}`);
   return resp.json();
+}
+
+/** Live link/speed per port (the §7 aggregation's real link source). */
+export async function fetchPortStatus(): Promise<SwitchRawPortStatus[]> {
+  const resp = await fetch(`${SWITCH_URL}/ports/status`, { headers: authHeaders(), signal: timeout() });
+  if (!resp.ok) throw new Error(`Switch port status: ${resp.status}`);
+  const data = (await resp.json()) as { ports?: SwitchRawPortStatus[] };
+  return data.ports ?? [];
 }
 
 export async function enablePort(port: number): Promise<void> {
@@ -163,6 +178,29 @@ export async function disablePortPoe(port: number): Promise<void> {
 export async function fetchSystemInfo(): Promise<unknown> {
   const resp = await fetch(`${SWITCH_URL}/system/info`, { headers: authHeaders(), signal: timeout() });
   if (!resp.ok) throw new Error(`Switch system info: ${resp.status}`);
+  return resp.json();
+}
+
+// --- Provisioning ---
+
+/** Read-only echo of the bring-up provisioning config + persisted state. */
+export async function fetchProvisionConfig(): Promise<SwitchProvisionConfig> {
+  const resp = await fetch(`${SWITCH_URL}/provision/config`, {
+    headers: authHeaders(),
+    signal: timeout(),
+  });
+  if (!resp.ok) throw new Error(`Switch provision config: ${resp.status}`);
+  return (await resp.json()) as SwitchProvisionConfig;
+}
+
+/** Re-run the bring-up provisioner (re-apply the managed layout). */
+export async function provisionSwitch(): Promise<unknown> {
+  const resp = await fetch(`${SWITCH_URL}/provision`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    signal: timeout(15_000),
+  });
+  if (!resp.ok) throw new Error(`Switch provision: ${resp.status}`);
   return resp.json();
 }
 

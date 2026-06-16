@@ -1,12 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { AlertCircle, Video } from "lucide-react";
+import { AlertCircle, Video, X } from "lucide-react";
 import {
   fetchDiscoveredCameras,
   acceptDiscoveredCamera,
+  fetchCameras,
+  removeCamera,
 } from "@/lib/api";
-import type { DiscoveredCamera } from "@/lib/types";
+import type { CameraInfo, DiscoveredCamera } from "@/lib/types";
 import { StepShell } from "@/components/setup/StepShell";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 
@@ -19,14 +21,21 @@ import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
  * until the customer accepts it. The wizard's job here is to surface
  * those pending entries in one screen and accept them as a batch.
  *
- * Auto-skip when nothing's been found — matches the Storage step's
- * behaviour and avoids making the customer click "Skip" on an empty
- * page. The Cameras page on the main dashboard surfaces its own
- * discovery banner for cameras that show up post-setup; it also owns
- * renaming, credentials, and the Network Isolation (VLAN 100) toggle.
- * We don't surface those advanced controls in the wizard — they belong
- * in the dashboard's progressive-disclosure "Advanced" tier
- * (ADR-002 §"Information architecture").
+ * WARP-861 — re-running setup without a factory reset leaves cameras
+ * accepted in a previous run (`enabled=true`) live in Frigate, invisible
+ * to this step's discovered-only view. Those now render in an "Already
+ * set up" section with a per-camera Remove, so a stale camera from an
+ * old install can be cleared without leaving the wizard.
+ *
+ * Auto-skip when there's NOTHING to show — no pending discoveries AND
+ * no existing cameras — matches the Storage step's behaviour and avoids
+ * making the customer click "Skip" on an empty page. The Cameras page
+ * on the main dashboard surfaces its own discovery banner for cameras
+ * that show up post-setup; it also owns renaming, credentials, and the
+ * Network Isolation (VLAN 100) toggle. We don't surface those advanced
+ * controls in the wizard — they belong in the dashboard's
+ * progressive-disclosure "Advanced" tier (ADR-002 §"Information
+ * architecture").
  *
  * Skipping leaves the pending entries in place; the customer sees them
  * in the Cameras page's discovery banner whenever they next visit.
@@ -34,31 +43,54 @@ import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 export function CamerasStep({
   onComplete,
   onSkip,
+  onAutoSkip,
 }: {
   onComplete: (acceptedCount: number) => void;
   onSkip: () => void;
+  /** Invoked when the step skips ITSELF on mount (no cameras found / service
+   *  off) — distinct from the user tapping "Skip for now" (onSkip). Lets the
+   *  wizard advance WITHOUT recording the step in Back history. Falls back to
+   *  onSkip when not provided (older callers/tests). */
+  onAutoSkip?: () => void;
 }) {
   const [cameras, setCameras] = useState<DiscoveredCamera[]>([]);
+  const [existing, setExisting] = useState<CameraInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [removing, setRemoving] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
+      // The cameras list rides along but must not block the step —
+      // discovery is the primary signal, so its failure (service off in
+      // dev) still skips, while a cameras-list error surfaces to the user
+      // instead of silently hiding the "Already set up" section.
+      let all: CameraInfo[];
+      try {
+        all = await fetchCameras();
+      } catch {
+        setError("Couldn't load existing cameras. Check your connection and try again.");
+        all = [];
+      }
       const list = await fetchDiscoveredCameras();
+      // GET /cameras includes pending discovered rows (enabled=false) —
+      // filter to enabled so they don't duplicate the discovered cards.
+      const enabled = all.filter((c) => c.enabled);
       setCameras(list);
-      if (list.length === 0) {
-        onSkip();
+      setExisting(enabled);
+      if (list.length === 0 && enabled.length === 0) {
+        (onAutoSkip ?? onSkip)();
       }
     } catch {
       // camera-discovery service might be off in dev; treat as "no
       // cameras" and skip silently. Customer can add cameras manually
       // from the Cameras page later.
-      onSkip();
+      (onAutoSkip ?? onSkip)();
     } finally {
       setLoading(false);
     }
-  }, [onSkip]);
+  }, [onSkip, onAutoSkip]);
 
   useEffect(() => {
     load();
@@ -90,11 +122,26 @@ export function CamerasStep({
     }
   }
 
+  async function handleRemove(cam: CameraInfo) {
+    setError(null);
+    setRemoving(cam.name);
+    try {
+      await removeCamera(cam.name);
+      // getCameras is server-cached — trust the delete and update local
+      // state instead of refetching into a stale read.
+      setExisting((prev) => prev.filter((c) => c.name !== cam.name));
+    } catch {
+      setError("Couldn't remove that camera. Try again from the Cameras page.");
+    } finally {
+      setRemoving(null);
+    }
+  }
+
   // Auto-skip path may have fired during load — show a tiny placeholder
   // so we don't briefly flash an empty page before the unmount.
-  if (loading && cameras.length === 0) {
+  if (loading && cameras.length === 0 && existing.length === 0) {
     return (
-      <StepShell title="Set up your cameras" subtitle="One moment…">
+      <StepShell current="cameras" title="Set up your cameras" subtitle="One moment…">
         <div className="space-y-2">
           {[0, 1].map((i) => (
             <div
@@ -113,17 +160,31 @@ export function CamerasStep({
     );
   }
 
+  const hasDiscovered = cameras.length > 0;
+
   return (
-    <StepShell
+    <StepShell current="cameras"
       title="Set up your cameras"
-      subtitle={`We found ${cameras.length} camera${cameras.length !== 1 ? "s" : ""} on your network.`}
-      primary={{
-        label:
-          cameras.length === 1 ? "Add this camera" : "Add these cameras",
-        loadingLabel: "Adding…",
-        onClick: handleAcceptAll,
-        isLoading: saving,
-      }}
+      subtitle={
+        hasDiscovered
+          ? `We found ${cameras.length} camera${cameras.length !== 1 ? "s" : ""} on your network.`
+          : `${existing.length} camera${existing.length !== 1 ? "s are" : " is"} still set up from a previous run.`
+      }
+      primary={
+        hasDiscovered
+          ? {
+              label:
+                cameras.length === 1 ? "Add this camera" : "Add these cameras",
+              loadingLabel: "Adding…",
+              onClick: handleAcceptAll,
+              isLoading: saving,
+            }
+          : {
+              label: "Continue",
+              onClick: () => onComplete(0),
+              isLoading: saving,
+            }
+      }
       skip={{ label: "Skip for now", onClick: onSkip }}
     >
       <div className="space-y-2">
@@ -144,6 +205,39 @@ export function CamerasStep({
             />
           </div>
         ))}
+
+        {existing.length > 0 && (
+          <>
+            <p className="type-footnote text-label-secondary mt-4">
+              Already set up{hasDiscovered ? "" : " from a previous run"} —
+              remove any you no longer use
+            </p>
+            {existing.map((cam) => (
+              <div key={cam.name} className="dp-card !py-3 flex items-center gap-3">
+                <div className="w-9 h-9 rounded-lg bg-accent/10 flex items-center justify-center flex-shrink-0">
+                  <Video size={18} className="text-accent" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="type-subheadline text-label-primary truncate">
+                    {cam.displayName || cam.name}
+                  </p>
+                  <p className="type-caption-1 text-label-tertiary">
+                    {cam.ipAddress}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleRemove(cam)}
+                  disabled={removing === cam.name}
+                  aria-label={`Remove ${cam.displayName || cam.name}`}
+                  className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full text-label-tertiary transition-colors duration-200 ease-smooth hover:bg-surface-tertiary hover:text-label-secondary disabled:opacity-50"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            ))}
+          </>
+        )}
 
         {error && (
           <div className="flex items-start gap-2 type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2 mt-3">

@@ -23,6 +23,7 @@ import type { PrismaClient } from "@prisma/client";
 import pino from "pino";
 import { requireRole } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
+import { randomBytes } from "node:crypto";
 
 const logger = pino({ name: "scenes-route" });
 
@@ -74,6 +75,36 @@ export interface MatterDispatcher {
     command: string,
     args?: Record<string, unknown>,
   ): Promise<{ status: string; result?: unknown }>;
+}
+
+// TOOLS-01 / WARP-640 — scene-run confirmation tokens. A scene batches Tier-2
+// device actions, so an unconfirmed run must NOT execute: it mints a single-use,
+// scene-bound, TTL'd token and replies 202, so the chat "Approve & run" chip can
+// echo the token back to actually run it. Mirrors network-safety.service's
+// pendingConfirmations (single-use, bound, expiring) so a leaked/replayed token
+// can't fire an arbitrary scene. The dashboard scenes page keeps using
+// ?confirm=true (it pops its own confirm dialog).
+const SCENE_CONFIRM_TTL_MS = 5 * 60_000; // 5 min — user must see the chip + click
+const MAX_PENDING_SCENE_CONFIRMS = 200;
+const pendingSceneConfirms = new Map<string, { sceneId: string; expiresAt: number }>();
+
+function mintSceneConfirmToken(sceneId: string): string {
+  const now = Date.now();
+  for (const [t, p] of pendingSceneConfirms) {
+    if (p.expiresAt <= now) pendingSceneConfirms.delete(t); // opportunistic GC
+  }
+  const token = randomBytes(32).toString("hex");
+  pendingSceneConfirms.set(token, { sceneId, expiresAt: now + SCENE_CONFIRM_TTL_MS });
+  return token;
+}
+
+/** Single-use: valid once, unexpired, and only for the scene it was minted for.
+ *  Always deletes the token first (replay-proof), then validates. */
+function consumeSceneConfirmToken(token: string, sceneId: string): boolean {
+  const pending = pendingSceneConfirms.get(token);
+  if (!pending) return false;
+  pendingSceneConfirms.delete(token);
+  return pending.expiresAt > Date.now() && pending.sceneId === sceneId;
 }
 
 export function createScenesRouter(
@@ -297,16 +328,44 @@ export function createScenesRouter(
         // first call. Require `?confirm=true` so the LLM agent must
         // emit the confirmation flag — same posture as #294's run-now
         // gate.
-        const confirmed =
+        // TOOLS-01 / WARP-640 — confirmation gate. A scene batches Tier-2
+        // device actions, so it must NOT run on an unconfirmed call. Confirmed
+        // via either the dashboard scenes page's ?confirm=true (its own confirm
+        // dialog) OR a valid single-use confirmationToken (body) this server
+        // minted for THIS scene — the path the chat "Approve & run" chip uses.
+        // Otherwise mint a token and reply 202 confirmation_required.
+        const queryConfirmed =
           String(req.query.confirm ?? "").toLowerCase() === "true";
-        if (!confirmed) {
-          res.status(409).json({
-            error: "confirmation_required",
-            detail:
-              "scene runs are confirm-required — re-POST with ?confirm=true",
+        const suppliedToken =
+          typeof (req.body as { confirmationToken?: unknown } | undefined)
+            ?.confirmationToken === "string"
+            ? (req.body as { confirmationToken: string }).confirmationToken
+            : "";
+        const tokenConfirmed =
+          suppliedToken !== "" && consumeSceneConfirmToken(suppliedToken, scene.id);
+        if (!queryConfirmed && !tokenConfirmed) {
+          if (suppliedToken !== "") {
+            // Token supplied but invalid / expired / not for this scene.
+            res.status(403).json({
+              error: "confirmation_invalid",
+              detail:
+                "confirmation token is invalid, expired, or not for this scene",
+              sceneId: scene.id,
+            });
+            return;
+          }
+          if (pendingSceneConfirms.size >= MAX_PENDING_SCENE_CONFIRMS) {
+            res.status(429).json({ error: "too_many_pending_confirmations" });
+            return;
+          }
+          const confirmationToken = mintSceneConfirmToken(scene.id);
+          res.status(202).json({
+            status: "confirmation_required",
+            confirmationToken,
             sceneId: scene.id,
             name: scene.name,
             actionCount: scene.actions.length,
+            message: `Running "${scene.name}" will run ${scene.actions.length} device action(s). Approve to run it.`,
           });
           return;
         }

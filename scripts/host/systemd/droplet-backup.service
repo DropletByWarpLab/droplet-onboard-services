@@ -1,0 +1,33 @@
+# =============================================================================
+# WARP-570 — Full-device backup (oneshot, driven by droplet-backup.timer)
+# =============================================================================
+#
+# Install (host, as root):
+#   sudo cp scripts/host/systemd/droplet-backup.{service,timer} /etc/systemd/system/
+#   # Edit the two paths below to your checkout location, then:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now droplet-backup.timer
+#
+# Inspect:
+#   systemctl list-timers droplet-backup.timer
+#   journalctl -u droplet-backup.service
+#
+# The orchestrator's in-container cron-runtime is deliberately NOT used: it
+# cannot pg_dump the sibling DB containers nor write to a host backup path.
+# A host systemd timer is the correct home for a host-level full-device backup.
+# =============================================================================
+[Unit]
+Description=Droplet full-device backup (Postgres x2 + data volumes)
+Documentation=https://warp-lab.atlassian.net/browse/WARP-570
+Wants=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+# Edit this to the absolute path of your droplet-onboard-services checkout.
+WorkingDirectory=/opt/droplet/droplet-onboard-services
+ExecStart=/opt/droplet/droplet-onboard-services/scripts/host/device-backup.sh
+# The archive contains DB dumps + the aikeys volume; keep new files owner-only.
+UMask=0077
+Nice=10
+IOSchedulingClass=idle

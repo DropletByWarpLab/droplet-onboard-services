@@ -18,17 +18,18 @@ const MOCK_STATUS_PAYLOAD = {
 describe("stdio roundtrip", () => {
   let client: Client;
   let transport: StdioClientTransport;
-  let routingMock: Server;
-  let routingHits = 0;
+  let orchestratorMock: Server;
+  let orchestratorHits = 0;
 
   beforeAll(async () => {
-    // Stand up a tiny HTTP fake at a free port so the routing-backed tool
-    // (`get_network_status`) can call it without depending on the real
-    // OpenWrt routing service. ROUTING_SERVICE_URL is the only knob the
-    // mcp-server reads.
-    routingMock = createHttpServer((req, res) => {
-      if (req.method === "GET" && req.url === "/status") {
-        routingHits++;
+    // Stand up a tiny HTTP fake at a free port so the orchestrator-backed
+    // network tool (`get_network_status`, which proxies the orchestrator's
+    // /api/network/status safety-tiered surface) can call it without
+    // depending on a live orchestrator. ORCHESTRATOR_URL is the knob the
+    // mcp-server reads for that target.
+    orchestratorMock = createHttpServer((req, res) => {
+      if (req.method === "GET" && req.url === "/api/network/status") {
+        orchestratorHits++;
         res.statusCode = 200;
         res.setHeader("Content-Type", "application/json");
         res.end(JSON.stringify(MOCK_STATUS_PAYLOAD));
@@ -37,17 +38,17 @@ describe("stdio roundtrip", () => {
       res.statusCode = 404;
       res.end("not found");
     });
-    await new Promise<void>((r) => routingMock.listen(0, "127.0.0.1", r));
-    const addr = routingMock.address();
-    if (!addr || typeof addr === "string") throw new Error("routing mock did not bind");
-    const ROUTING_URL = `http://127.0.0.1:${addr.port}`;
+    await new Promise<void>((r) => orchestratorMock.listen(0, "127.0.0.1", r));
+    const addr = orchestratorMock.address();
+    if (!addr || typeof addr === "string") throw new Error("orchestrator mock did not bind");
+    const ORCHESTRATOR_MOCK_URL = `http://127.0.0.1:${addr.port}`;
 
     transport = new StdioClientTransport({
       command: process.execPath,
       args: [SERVER_BIN, "--transport=stdio"],
       env: {
         ...process.env,
-        ROUTING_SERVICE_URL: ROUTING_URL,
+        ORCHESTRATOR_URL: ORCHESTRATOR_MOCK_URL,
       },
     });
     client = new Client(
@@ -59,7 +60,7 @@ describe("stdio roundtrip", () => {
 
   afterAll(async () => {
     await client?.close();
-    await new Promise<void>((r) => routingMock?.close(() => r()));
+    await new Promise<void>((r) => orchestratorMock?.close(() => r()));
   });
 
   it("tools/list exposes the WARP-100 vertical slice + every WARP-102 port", async () => {
@@ -109,13 +110,13 @@ describe("stdio roundtrip", () => {
     expect(res.tools.length).toBeGreaterThanOrEqual(50);
   });
 
-  it("tools/call get_network_status proxies to the routing service and returns the payload", async () => {
+  it("tools/call get_network_status proxies to the orchestrator network surface and returns the payload", async () => {
     const res = await client.callTool({ name: "get_network_status", arguments: {} });
     expect(res.isError).toBe(false);
     const blocks = res.content as { type: string; text: string }[];
     expect(blocks[0].type).toBe("text");
     const parsed = JSON.parse(blocks[0].text);
     expect(parsed).toEqual(MOCK_STATUS_PAYLOAD);
-    expect(routingHits).toBeGreaterThan(0);
+    expect(orchestratorHits).toBeGreaterThan(0);
   });
 });

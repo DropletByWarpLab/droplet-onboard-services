@@ -1,7 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
-import { sendChat, uploadBrainFile, fetchConversation } from "../api";
+import {
+  sendChat,
+  uploadBrainFile,
+  fetchConversation,
+  getBrainMemoryItems,
+  runSceneConfirmed,
+  truncateConversation,
+  setMessageFeedback,
+} from "../api";
 import type {
   ChatAttachment,
   ChatCitation,
@@ -16,6 +24,11 @@ const CONVERSATION_ID_HEADER = "x-conversation-id";
  *  this turn's assistant row. The client uses it to match incoming
  *  `turn-completed` MQTT events back to the right in-flight message. */
 const ASSISTANT_MESSAGE_ID_HEADER = "x-assistant-message-id";
+
+/** WARP-844: the persisted user-row id for this turn. The hook re-ids the
+ *  optimistic user bubble with it so edit-and-resend can truncate the
+ *  server thread by a real row id, even on a live (non-reloaded) chat. */
+const USER_MESSAGE_ID_HEADER = "x-user-message-id";
 
 /**
  * WARP-329: ask for `Notification` permission lazily on the user's first
@@ -163,6 +176,22 @@ interface ToolResultEvent extends SSEEventBase {
   data?: unknown;
   status?: string;
   message?: string;
+  /**
+   * WARP-640 — one-click re-issue handle forwarded by the orchestrator when a
+   * tool returns `confirmation_required` and supports completing in chat (e.g.
+   * `run_scene`). The chip renders an "Approve & run" button that re-POSTs with
+   * this single-use token.
+   */
+  confirmation?: {
+    kind: string;
+    sceneId?: string;
+    confirmationToken: string;
+  };
+}
+
+interface ReasoningStepEvent extends SSEEventBase {
+  type: "reasoning_step";
+  text: string;
 }
 
 interface DoneEvent extends SSEEventBase {
@@ -176,6 +205,7 @@ type SSEEvent =
   | ContentDeltaEvent
   | ToolCallEvent
   | ToolResultEvent
+  | ReasoningStepEvent
   | DoneEvent;
 
 /**
@@ -223,6 +253,14 @@ function friendlyErrorMessage(err: unknown): string {
 
 let attachmentCounter = 0;
 
+/**
+ * Hard cap on attachments per conversation — mirrors the route schema's
+ * `.max(8)` on POST /api/llm/chat. Enforced at attach time with a
+ * visible failed chip; without this, the 9th+ chip rendered as attached
+ * but was silently never sent to the model.
+ */
+export const MAX_ATTACHMENTS_PER_CONVERSATION = 8;
+
 function createAttachmentId(): string {
   return `att-${Date.now()}-${++attachmentCounter}`;
 }
@@ -243,7 +281,7 @@ function deriveOptimisticTitle(firstUserContent: string): string {
 
 export function notifyHistoryOfNewConversation(
   handle: ChatHistoryPanelHandle | null,
-  args: { id: string; firstUserContent: string },
+  args: { id: string; firstUserContent: string; projectId?: string | null },
 ): void {
   if (!handle) return;
   const now = new Date().toISOString();
@@ -252,6 +290,9 @@ export function notifyHistoryOfNewConversation(
     title: deriveOptimisticTitle(args.firstUserContent),
     model: null,
     provider: null,
+    // WARP-845 — mirror the server-side project stamp so the new chat
+    // lands under its folder in the sidebar, not in the date groups.
+    projectId: args.projectId ?? null,
     createdAt: now,
     updatedAt: now,
   });
@@ -279,6 +320,31 @@ export interface UseChatOptions {
    * new conversation, and `applyTurnCompleted` when turn-completed fires.
    */
   historyHandleRef?: MutableRefObject<ChatHistoryPanelHandle | null>;
+  /**
+   * DASH-04: whether an authenticated user is present. The chat WS bridge
+   * (`/api/ws/events`) is only opened when this is true, so we don't
+   * connect — and then reconnect-with-backoff forever — on an
+   * unauthenticated or expired session before auth resolves. Mirrors the
+   * `if (!user) return` gate `NotificationToaster` already applies to the
+   * same endpoint. Defaults to `true` so callers that don't pass it (and
+   * unit tests) keep the prior always-connect behavior.
+   */
+  authReady?: boolean;
+  /**
+   * Fires after `loadConversation` successfully rehydrates a persisted
+   * thread, with the conversation's persisted metadata. The chat page
+   * uses it to restore the model the conversation was held in (the
+   * picker otherwise keeps whatever model happened to be selected).
+   */
+  onConversationLoaded?: (meta: {
+    id: string;
+    model: string | null;
+    systemPrompt: string | null;
+  }) => void;
+  /** WARP-845 — project the NEXT new conversation should be filed under
+   *  (set when the user starts a chat from a project's "+"). Sent on the
+   *  first turn only; the server validates ownership. */
+  projectId?: string | null;
 }
 
 /**
@@ -319,6 +385,17 @@ export function useChat(options: UseChatOptions = {}) {
    */
   const attachmentsByConvRef = useRef<Map<string, ChatAttachment[]>>(new Map());
   /**
+   * WARP-859 — conversation-scoped attachment list: everything ever
+   * attached to this chat. Distinct from the composer staging
+   * `attachments` above, which now CLEARS on send (the file rides onto
+   * the sent message and leaves the input). This list feeds SessionHeader
+   * and the per-turn content re-injection (turnAttachments), and survives
+   * reload (rehydrated from the server's brain items). Same per-conv
+   * bucketing as the composer cache.
+   */
+  const [sessionAttachments, setSessionAttachments] = useState<ChatAttachment[]>([]);
+  const sessionByConvRef = useRef<Map<string, ChatAttachment[]>>(new Map());
+  /**
    * WARP-331: track conversation ids whose stream JUST finished locally.
    * The MQTT turn-completed handler uses this to skip an auto-refresh
    * when the local stream already wrote the final content — the reload
@@ -354,6 +431,27 @@ export function useChat(options: UseChatOptions = {}) {
     chatIdRef.current = options.chatId;
   }, [options.chatId]);
 
+  // Staleness guard for loadConversation's post-await writes. Each load
+  // (and clearMessages) bumps the epoch; a load that awakes from an await
+  // to find the epoch moved on MUST NOT write — otherwise switching
+  // conversations mid-load lets the slow loser clobber the winner's
+  // attachments/model/prompt (and a late chip restore would then leak
+  // conversation A's itemIds into B's next turn via attachmentsRef).
+  const loadEpochRef = useRef(0);
+
+  // Same ref treatment for the pending project id (WARP-845).
+  const projectIdRef = useRef(options.projectId);
+  useEffect(() => {
+    projectIdRef.current = options.projectId;
+  }, [options.projectId]);
+
+  // Same ref treatment for the loaded-conversation callback so the
+  // stable `loadConversation` sees the caller's latest prop.
+  const onConversationLoadedRef = useRef(options.onConversationLoaded);
+  useEffect(() => {
+    onConversationLoadedRef.current = options.onConversationLoaded;
+  }, [options.onConversationLoaded]);
+
   // Keep a ref-mirror of `messages` so callbacks (especially
   // `retryMessage`) can read the current snapshot synchronously without
   // relying on the setMessages updater to run before the surrounding
@@ -365,6 +463,22 @@ export function useChat(options: UseChatOptions = {}) {
     messagesRef.current = messages;
   }, [messages]);
 
+  // Ref-mirror of the visible attachment chips so `sendMessage` (a
+  // stable callback) can read the current conversation's attachments
+  // when building the request. The visible list always tracks the
+  // active conversation (see the bucket-swap effect below), which is
+  // exactly the conversation a send targets.
+  const attachmentsRef = useRef<ChatAttachment[]>([]);
+  useEffect(() => {
+    attachmentsRef.current = attachments;
+  }, [attachments]);
+  // WARP-859 — ref-mirror of the conversation-scoped list so the send
+  // path can read+merge it synchronously when building the turn.
+  const sessionAttachmentsRef = useRef<ChatAttachment[]>([]);
+  useEffect(() => {
+    sessionAttachmentsRef.current = sessionAttachments;
+  }, [sessionAttachments]);
+
   // ── MQTT-driven attachment status updates ──
   //
   // The orchestrator's WS bridge forwards `droplet/files/<user>/brain/indexed`
@@ -373,8 +487,18 @@ export function useChat(options: UseChatOptions = {}) {
   // socket here (rather than inside ChatInput) keeps the chip state in
   // a single owner — the hook — so the Composer can render N chips
   // from the same source without duplicating the subscription.
+  //
+  // DASH-04: only open the socket once an authenticated user is present.
+  // Without this gate the effect connected on mount (deps `[]`) even on an
+  // unauthenticated / expired session and then reconnected with backoff
+  // indefinitely against a `/api/ws/events` endpoint that just closes the
+  // upgrade. Gating on `authReady` (and listing it in the deps) means the
+  // socket opens exactly once auth resolves — same `if (!user) return`
+  // treatment NotificationToaster applies to the same endpoint.
+  const authReady = options.authReady ?? true;
   useEffect(() => {
     if (typeof window === "undefined") return;
+    if (!authReady) return;
     let ws: WebSocket | null = null;
     let closed = false;
     let attempt = 0;
@@ -411,6 +535,13 @@ export function useChat(options: UseChatOptions = {}) {
           attachmentsByConvRef.current.set(key, list.map(flip));
         }
         setAttachments((prev) => prev.map(flip));
+        // WARP-859 — keep the conversation-scoped list (SessionHeader +
+        // re-injection) in lockstep so a file attached and sent while
+        // still "indexing" flips to "ready" there too.
+        for (const [key, list] of sessionByConvRef.current) {
+          sessionByConvRef.current.set(key, list.map(flip));
+        }
+        setSessionAttachments((prev) => prev.map(flip));
         return;
       }
 
@@ -551,14 +682,33 @@ export function useChat(options: UseChatOptions = {}) {
         }
       }
     };
-  }, []);
+  }, [authReady]);
 
   const sendMessage = useCallback(
     async (content: string, model: string, systemPrompt?: string) => {
+      // WARP-859 — files staged in the composer ride onto THIS message
+      // and then leave the input. Snapshot the staged chips for display
+      // on the user bubble, and fold them into the conversation-scoped
+      // session list (deduped by itemId) so they stay attached to the
+      // chat (SessionHeader, per-turn re-injection) after the composer
+      // clears.
+      const stagedSnapshot = attachmentsRef.current.slice();
+      const sessionKey = conversationIdRef.current ?? DRAFT_CONV_KEY;
+      const mergedSession = (() => {
+        const byKey = new Map(
+          sessionAttachmentsRef.current.map((a) => [a.itemId ?? a.localId, a]),
+        );
+        for (const a of stagedSnapshot) byKey.set(a.itemId ?? a.localId, a);
+        return [...byKey.values()];
+      })();
+
       const userMessage: ChatMessage = {
         id: createId(),
         role: "user",
         content,
+        ...(stagedSnapshot.length > 0
+          ? { attachments: stagedSnapshot }
+          : {}),
       };
       const assistantMessage: ChatMessage = {
         id: createId(),
@@ -607,12 +757,44 @@ export function useChat(options: UseChatOptions = {}) {
       isStoppingRef.current = false;
 
       const turnId = createTurnId();
+      // WARP-844: persisted assistant row id, captured from the response
+      // headers inside the try block; consumed in finally (re-id).
+      let headerAssistantId: string | null = null;
       // WARP-329: lazy-ask for Notification permission on the user's first
       // send (never on page load — too aggressive, and Safari is harsh
       // about it). Awaiting here is intentional: we want the prompt to
       // appear right after the user takes a clear action. Don't block on
       // a denial — chat keeps working without notifications.
       void ensureNotificationPermission();
+      // Reference every uploaded attachment chip on this turn (chips
+      // persist for the conversation's lifetime, mirroring how an
+      // attached file stays in context for the whole conversation).
+      // Chips still uploading have no itemId yet and are skipped — the
+      // orchestrator resolves the live status (ready / indexing /
+      // failed) per item, so a stale client status can't mislead it.
+      // Cap matches the route schema's `.max(8)`. WARP-859: source from
+      // the merged conversation-scoped list (not just the composer) so an
+      // attached doc stays injected for follow-up turns even though the
+      // composer cleared after the turn that attached it.
+      const turnAttachments = mergedSession
+        .filter((a): a is ChatAttachment & { itemId: string } =>
+          Boolean(a.itemId),
+        )
+        .slice(0, MAX_ATTACHMENTS_PER_CONVERSATION)
+        .map((a) => ({ itemId: a.itemId }));
+
+      // Commit the merged session list + clear the composer staging area.
+      // Keyed by the same conv slot the chips live in (DRAFT on a first
+      // turn); the draft→real migration below moves both buckets.
+      if (mergedSession.length > 0) {
+        sessionByConvRef.current.set(sessionKey, mergedSession);
+        setSessionAttachments(mergedSession);
+      }
+      if (stagedSnapshot.length > 0) {
+        attachmentsByConvRef.current.set(sessionKey, []);
+        setAttachments([]);
+      }
+
       try {
         const response = await sendChat({
           model,
@@ -621,6 +803,22 @@ export function useChat(options: UseChatOptions = {}) {
           signal: controller.signal,
           conversationId: conversationIdRef.current ?? undefined,
           turnId,
+          // First turn of a draft chat: hand the server the client-minted
+          // chatId so it adopts any draft-phase uploads (even ones whose
+          // upload finishes after this send) into the new conversation.
+          ...(conversationIdRef.current === null && chatIdRef.current
+            ? { draftChatId: chatIdRef.current }
+            : {}),
+          // WARP-845 — file the new conversation under the active project.
+          ...(conversationIdRef.current === null && projectIdRef.current
+            ? { projectId: projectIdRef.current }
+            : {}),
+          // WARP-458 — surface the model's reasoning trace live; the
+          // disclosure stays collapsed unless the user opens it.
+          captureReasoning: true,
+          ...(turnAttachments.length > 0
+            ? { attachments: turnAttachments }
+            : {}),
         });
 
         // WARP-304: capture the server-assigned conversation id from the
@@ -643,9 +841,21 @@ export function useChat(options: UseChatOptions = {}) {
               attachmentsByConvRef.current.set(headerId, drafted);
             }
             attachmentsByConvRef.current.delete(DRAFT_CONV_KEY);
+            // WARP-859 — move the conversation-scoped session bucket from
+            // the draft slot to the real id too, so SessionHeader + the
+            // per-turn re-injection keep finding the chat's attachments.
+            const draftSession = sessionByConvRef.current.get(DRAFT_CONV_KEY);
+            if (draftSession && draftSession.length > 0) {
+              sessionByConvRef.current.set(headerId, draftSession);
+            }
+            sessionByConvRef.current.delete(DRAFT_CONV_KEY);
             notifyHistoryOfNewConversation(
               options.historyHandleRef?.current ?? null,
-              { id: headerId, firstUserContent: content },
+              {
+                id: headerId,
+                firstUserContent: content,
+                projectId: projectIdRef.current ?? null,
+              },
             );
           }
         }
@@ -654,13 +864,17 @@ export function useChat(options: UseChatOptions = {}) {
         // hook so a future "regenerate this exact reply" UX has a stable
         // handle, and so the WS-driven cross-tab sync (follow-up) can
         // match incoming turn-completed events to a known message.
-        const headerAssistantId = response.headers.get(
-          ASSISTANT_MESSAGE_ID_HEADER,
-        );
-        if (headerAssistantId) {
-          // No state to set today; reserved for follow-up cross-tab sync.
-          // eslint-disable-next-line @typescript-eslint/no-unused-expressions
-          headerAssistantId;
+        headerAssistantId = response.headers.get(ASSISTANT_MESSAGE_ID_HEADER);
+        // WARP-844: swap the optimistic user bubble's local id for the
+        // persisted row id so a later edit can truncate server-side.
+        const headerUserId = response.headers.get(USER_MESSAGE_ID_HEADER);
+        if (headerUserId) {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === userMessage.id ? { ...m, id: headerUserId } : m,
+            ),
+          );
+          userMessage.id = headerUserId;
         }
 
         if (!response.body) {
@@ -745,6 +959,18 @@ export function useChat(options: UseChatOptions = {}) {
         const justFinished = streamingConversationIdRef.current;
         if (justFinished) {
           recentlyLocallyCompletedRef.current.set(justFinished, Date.now());
+        }
+        // WARP-844: swap the assistant placeholder's local id for the
+        // persisted row id AFTER the stream settles (doing it mid-stream
+        // would orphan applyEvent's delta routing, which captures the
+        // local id). Live turns become ratable / addressable server-side.
+        if (headerAssistantId) {
+          const persistedId = headerAssistantId;
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantMessage.id ? { ...m, id: persistedId } : m,
+            ),
+          );
         }
         // Clear both stream-state shards. The exposed `isStreaming` flips
         // false on the next render — for any chat the user is currently
@@ -855,6 +1081,164 @@ export function useChat(options: UseChatOptions = {}) {
   );
 
   /**
+   * WARP-844: thumbs rating. Optimistic local flip + server PATCH;
+   * reverts on failure. Clicking the active thumb again clears (null).
+   */
+  const rateMessage = useCallback(
+    async (messageId: string, feedback: "up" | "down" | null) => {
+      const convId = conversationIdRef.current;
+      const prevValue = messagesRef.current.find((m) => m.id === messageId)
+        ?.feedback ?? null;
+      const apply = (value: "up" | "down" | null) =>
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === messageId ? { ...m, feedback: value } : m,
+          ),
+        );
+      apply(feedback);
+      if (!convId) return;
+      try {
+        await setMessageFeedback(convId, messageId, feedback);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("[chat] feedback save failed:", err);
+        apply(prevValue);
+      }
+    },
+    [],
+  );
+
+  /**
+   * WARP-844: edit & resend a user turn. Slices the local thread to just
+   * BEFORE the edited message, truncates the persisted thread from that
+   * row onward (so a reload matches), then re-sends the edited prompt
+   * through the normal sendMessage path. Truncation failures degrade to
+   * a local-only edit — the chat keeps working; only a reload would show
+   * the superseded turns.
+   */
+  const editMessage = useCallback(
+    async (
+      messageId: string,
+      newContent: string,
+      model: string,
+      systemPrompt?: string,
+    ) => {
+      const trimmed = newContent.trim();
+      if (!trimmed) return;
+      const snapshot = messagesRef.current;
+      const idx = snapshot.findIndex((m) => m.id === messageId);
+      if (idx === -1) return;
+      if (snapshot[idx].role !== "user") return;
+
+      const convId = conversationIdRef.current;
+      if (convId) {
+        try {
+          await truncateConversation(convId, messageId);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("[chat] truncate before edit failed:", err);
+        }
+        // The truncate is a real network round-trip and nothing locks the
+        // UI during it — if the user switched conversations (or hit
+        // "+ New chat", nulling the ref) mid-await, sending now would
+        // append the edited prompt to the WRONG thread while the original
+        // one is already truncated server-side. Bail; the user can redo
+        // the edit on the (still-truncated) original conversation.
+        if (conversationIdRef.current !== convId) return;
+      }
+
+      // Drop the edited message and everything after it; sendMessage
+      // re-appends the edited prompt + a fresh assistant placeholder.
+      // Re-derive the slice point from the CURRENT thread (it may have
+      // changed during the await) instead of the stale pre-await snapshot.
+      const current = messagesRef.current;
+      const currentIdx = current.findIndex((m) => m.id === messageId);
+      if (currentIdx === -1) return;
+      setMessages((prev) => {
+        const i = prev.findIndex((m) => m.id === messageId);
+        return i === -1 ? prev : prev.slice(0, i);
+      });
+      messagesRef.current = current.slice(0, currentIdx);
+
+      await sendMessage(trimmed, model, systemPrompt);
+    },
+    [sendMessage],
+  );
+
+  /**
+   * WARP-640: complete an in-chat `run_scene` confirmation. The chip's
+   * "Approve & run" button calls this with the assistant message id + the
+   * tool-call id; we read the single-use `confirmationToken` the tool_result
+   * stamped onto that call and echo it back to `POST /api/scenes/:id/run`.
+   *
+   * The chip walks idle → running → ran/failed. On success the approval block
+   * dismisses and the chip flips green (all actions ran) or red (partial). On
+   * failure the block stays but flips to a failed note: the token is single-use
+   * and already spent server-side, so there's no dead "retry same token"
+   * affordance — the copy tells the user to ask again, which mints a fresh one.
+   *
+   * Guards against double-submit (ignores a call already running/ran) and
+   * against a malformed/absent confirmation handle.
+   */
+  const approveScene = useCallback(
+    async (messageId: string, toolCallId: string) => {
+      const snapshot = messagesRef.current;
+      const msg = snapshot.find((m) => m.id === messageId);
+      const call = msg?.toolCalls?.find((c) => c.id === toolCallId);
+      const confirmation = call?.confirmation;
+      if (
+        !call ||
+        !confirmation ||
+        confirmation.kind !== "scene_run" ||
+        !confirmation.sceneId
+      ) {
+        return;
+      }
+      if (call.confirmState === "running" || call.confirmState === "ran") return;
+
+      const patchCall = (patch: Partial<ChatToolCall>) =>
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id !== messageId
+              ? m
+              : {
+                  ...m,
+                  toolCalls: m.toolCalls?.map((c) =>
+                    c.id === toolCallId ? { ...c, ...patch } : c,
+                  ),
+                },
+          ),
+        );
+
+      patchCall({ confirmState: "running" });
+      try {
+        const outcome = await runSceneConfirmed(
+          confirmation.sceneId,
+          confirmation.confirmationToken,
+        );
+        const allSucceeded = outcome.successCount === outcome.actionCount;
+        patchCall({
+          confirmState: "ran",
+          // Clearing confirmation_required dismisses the amber approval block;
+          // `ok` flips the chip green (all ran) / red (partial).
+          status: allSucceeded ? "ok" : "error",
+          ok: allSucceeded,
+          message: allSucceeded
+            ? `Ran all ${outcome.actionCount} action(s).`
+            : `Ran ${outcome.successCount} of ${outcome.actionCount} action(s) — ${outcome.actionCount - outcome.successCount} failed.`,
+        });
+      } catch (e) {
+        patchCall({
+          confirmState: "failed",
+          message:
+            e instanceof Error ? e.message : "Couldn't run the scene.",
+        });
+      }
+    },
+    [],
+  );
+
+  /**
    * WARP-331: increments every time the messages array is replaced
    * wholesale (loadConversation, clearMessages) rather than appended/
    * mutated by a streaming chunk. The chat page watches this to force a
@@ -864,6 +1248,8 @@ export function useChat(options: UseChatOptions = {}) {
   const [messagesEpoch, setMessagesEpoch] = useState(0);
 
   const clearMessages = useCallback(() => {
+    // Invalidate any in-flight loadConversation (see loadEpochRef).
+    loadEpochRef.current += 1;
     setMessages([]);
     // WARP-304: starting a new chat must detach from the prior persisted
     // conversation — subsequent sends will mint a fresh one server-side.
@@ -881,8 +1267,12 @@ export function useChat(options: UseChatOptions = {}) {
    */
   const loadConversation = useCallback(
     async (id: string): Promise<boolean> => {
+      const epoch = ++loadEpochRef.current;
       const persisted = await fetchConversation(id).catch(() => null);
       if (!persisted) return false;
+      // A newer load (or "+ New chat") superseded this one mid-fetch —
+      // drop the result instead of clobbering the winner's state.
+      if (loadEpochRef.current !== epoch) return false;
       // Filter to user/assistant only — the chat surface doesn't render
       // system or tool messages directly; tool calls live inside the
       // assistant message's `toolCalls` chip row.
@@ -897,12 +1287,28 @@ export function useChat(options: UseChatOptions = {}) {
                 ? "aborted"
                 : m.status === "streaming"
                   ? "interrupted"
-                  : undefined
+                  : // WARP-854 — ghost turns: rows persisted as `completed`
+                    // with no visible output and no tool activity (the
+                    // pre-fix empty-completion bug, e.g. context-window
+                    // overflow). Without this they render as nothing at
+                    // all; mapping to "failed" surfaces the retry chip.
+                    m.content.trim().length === 0 &&
+                      (!m.toolCalls || m.toolCalls.length === 0)
+                    ? "failed"
+                    : undefined
             : undefined;
         rebuilt.push({
           id: m.id,
           role: m.role as "user" | "assistant",
           content: m.content,
+          // WARP-458 — re-render the persisted trace without re-running
+          // inference.
+          ...(m.role === "assistant" && m.reasoning
+            ? { reasoning: m.reasoning }
+            : {}),
+          ...(m.role === "assistant" && m.feedback
+            ? { feedback: m.feedback }
+            : {}),
           ...(m.role === "assistant" && m.toolCalls?.length
             ? {
                 toolCalls: m.toolCalls.map((c) => ({
@@ -913,6 +1319,12 @@ export function useChat(options: UseChatOptions = {}) {
                   status: c.status,
                   message: c.message,
                   data: c.data,
+                  // WARP-640 — restore the confirmation handle so a chip
+                  // reloaded in `confirmation_required` still renders the
+                  // "Approve & run" button (mirrors the live tool_result
+                  // path above). The amber block guards re-clicks via the
+                  // server's 403 on a consumed/expired token. (review #497)
+                  ...(c.confirmation ? { confirmation: c.confirmation } : {}),
                 })),
               }
             : {}),
@@ -938,6 +1350,63 @@ export function useChat(options: UseChatOptions = {}) {
       setConversationId(persisted.id);
       conversationIdRef.current = persisted.id;
       setMessagesEpoch((e) => e + 1);
+      // Surface the persisted metadata so the page can restore the model
+      // this conversation was held in. Read through a ref so the stable
+      // callback sees the caller's latest prop.
+      onConversationLoadedRef.current?.({
+        id: persisted.id,
+        model: persisted.model ?? null,
+        systemPrompt: persisted.systemPrompt ?? null,
+      });
+      // Rehydrate the attachment chip row. Uploads are tagged with the
+      // conversationId (directly post-first-turn; via the orchestrator's
+      // re-stamp for draft-phase uploads), so the brain-items list filtered
+      // by originatingChatId is exactly this conversation's attachments.
+      // Best-effort: a failed fetch leaves the chips empty, same as before
+      // this rehydration existed.
+      try {
+        const { items } = await getBrainMemoryItems({
+          originatingChatId: persisted.id,
+        });
+        // Superseded while fetching chips: the conversation itself loaded
+        // fine (return true below), but the chip write belongs to a view
+        // the user already left.
+        if (loadEpochRef.current !== epoch) return true;
+        // Deterministic chip set: oldest-first, capped to the same limit
+        // attach() enforces — so a reload selects the SAME 8 the live
+        // session referenced, not a different newest-first subset.
+        const ordered = [...items].sort((a, b) =>
+          String((a as { uploadedAt?: string }).uploadedAt ?? "").localeCompare(
+            String((b as { uploadedAt?: string }).uploadedAt ?? ""),
+          ),
+        );
+        const chips: ChatAttachment[] = ordered
+          .slice(0, MAX_ATTACHMENTS_PER_CONVERSATION)
+          .map((i) => ({
+          localId: `att-rehydrated-${i.id}`,
+          itemId: i.id,
+          filename: i.filename,
+          bytes: Number((i as { bytes?: number }).bytes ?? 0),
+          status:
+            i.status === "ready"
+              ? "ready"
+              : i.status === "failed"
+                ? "failed"
+                : // indexing | queued_for_transcription both render as
+                  // the in-progress chip; the WS bridge flips them live.
+                  "indexing",
+          ...(i.failureReason ? { error: i.failureReason } : {}),
+        }));
+        // WARP-859 — on reload the chat's attachments are conversation
+        // history, not staged input: populate the session-scoped list
+        // (SessionHeader + re-injection) and leave the composer empty.
+        sessionByConvRef.current.set(persisted.id, chips);
+        setSessionAttachments(chips);
+        attachmentsByConvRef.current.set(persisted.id, []);
+        setAttachments([]);
+      } catch {
+        // non-fatal — chat renders without chips
+      }
       return true;
     },
     [],
@@ -973,6 +1442,24 @@ export function useChat(options: UseChatOptions = {}) {
   const attach = useCallback(
     async (file: File): Promise<string> => {
       const localId = createAttachmentId();
+      // Enforce the per-conversation cap (failed chips don't count —
+      // they hold no itemId and are never sent).
+      const active = attachmentsRef.current.filter(
+        (a) => a.status !== "failed",
+      ).length;
+      if (active >= MAX_ATTACHMENTS_PER_CONVERSATION) {
+        mutateAttachments((prev) => [
+          ...prev,
+          {
+            localId,
+            filename: file.name,
+            bytes: file.size,
+            status: "failed",
+            error: `Attachment limit reached (${MAX_ATTACHMENTS_PER_CONVERSATION} per conversation).`,
+          },
+        ]);
+        return localId;
+      }
       const pending: ChatAttachment = {
         localId,
         filename: file.name,
@@ -982,7 +1469,16 @@ export function useChat(options: UseChatOptions = {}) {
       mutateAttachments((prev) => [...prev, pending]);
 
       try {
-        const res = await uploadBrainFile(file, chatIdRef.current);
+        // Prefer the durable server conversationId as the brain tag once
+        // one exists — the orchestrator also re-stamps draft uploads to
+        // it on the next turn, so every item in a persisted conversation
+        // ends up queryable by `originatingChatId = conversationId`
+        // (which is what loadConversation's chip rehydration reads).
+        // Pre-first-turn drafts fall back to the client-minted chatId.
+        const res = await uploadBrainFile(
+          file,
+          conversationIdRef.current ?? chatIdRef.current,
+        );
         mutateAttachments((prev) =>
           prev.map((a) =>
             a.localId === localId
@@ -1017,6 +1513,11 @@ export function useChat(options: UseChatOptions = {}) {
     const key = conversationIdRef.current ?? DRAFT_CONV_KEY;
     attachmentsByConvRef.current.delete(key);
     setAttachments([]);
+    // WARP-859 — a fresh chat (handleNewChat / URL-clear reset) drops the
+    // conversation-scoped list too, so a new thread starts with no
+    // inherited attachments.
+    sessionByConvRef.current.delete(key);
+    setSessionAttachments([]);
   }, []);
 
   // WARP-331: when the active conversationId changes, swap the visible
@@ -1027,8 +1528,9 @@ export function useChat(options: UseChatOptions = {}) {
   // meantime.
   useEffect(() => {
     const key = conversationId ?? DRAFT_CONV_KEY;
-    const stored = attachmentsByConvRef.current.get(key) ?? [];
-    setAttachments(stored);
+    setAttachments(attachmentsByConvRef.current.get(key) ?? []);
+    // WARP-859 — swap the conversation-scoped list in lockstep.
+    setSessionAttachments(sessionByConvRef.current.get(key) ?? []);
   }, [conversationId]);
 
   // WARP-331: derive the visible streaming lock. The in-flight stream
@@ -1046,8 +1548,14 @@ export function useChat(options: UseChatOptions = {}) {
     stop,
     retryMessage,
     regenerate,
+    editMessage,
+    rateMessage,
+    approveScene,
     clearMessages,
     attachments,
+    /** WARP-859 — every attachment on this conversation (for SessionHeader);
+     *  the composer `attachments` above clears on send. */
+    sessionAttachments,
     attach,
     removeAttachment,
     clearAttachments,
@@ -1087,6 +1595,19 @@ function applyEvent(
         updated[idx] = { ...last, content: last.content + evt.text };
         return updated;
       }
+      case "reasoning_step": {
+        // WARP-458 — steps arrive before the answer's content_delta;
+        // concatenate with blank lines, mirroring how the orchestrator
+        // persists the trace to ChatMessage.reasoning.
+        const updated = [...prev];
+        updated[idx] = {
+          ...last,
+          reasoning: last.reasoning
+            ? `${last.reasoning}\n\n${evt.text}`
+            : evt.text,
+        };
+        return updated;
+      }
       case "tool_call": {
         const chip: ChatToolCall = {
           id: evt.id,
@@ -1111,6 +1632,9 @@ function applyEvent(
           data: evt.data,
           status: evt.status,
           message: evt.message,
+          // WARP-640: carry the re-issue token onto the chip so the
+          // "Approve & run" button can complete the action in-chat.
+          ...(evt.confirmation ? { confirmation: evt.confirmation } : {}),
         };
         const updated = [...prev];
         // WARP-295: when the matching tool is a retrieval tool, fold
@@ -1144,12 +1668,21 @@ function applyEvent(
         return updated;
       }
       case "done": {
-        if (evt.stop_reason === "error" && !last.content) {
+        if (evt.stop_reason === "error") {
           // eslint-disable-next-line no-console
           console.error("[chat] agent loop ended with error:", evt.error);
           const updated = [...prev];
           updated[idx] = {
             ...last,
+            // DASH-03: do NOT set `failureKind` on a live turn. Per the
+            // types.ts contract `failureKind` is populated exclusively by
+            // loadConversation; setting "interrupted" here would win the
+            // FailureChip precedence (`failureKind ?? (error ? "failed" : …)`)
+            // and show the generic "Interrupted — the reply didn't finish."
+            // copy instead of this live retry message. Setting `error` alone
+            // derives "failed", whose chip renders this message + a retry,
+            // and any partial content that already streamed still shows via
+            // the `message.content &&` render guard.
             error: {
               message:
                 "The Droplet AI couldn't finish this turn. Try again, or ask in a different way.",

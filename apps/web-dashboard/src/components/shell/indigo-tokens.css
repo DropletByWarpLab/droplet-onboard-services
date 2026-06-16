@@ -1,0 +1,120 @@
+/* ============================================================
+   Droplet — Indigo design tokens for the shared page shell.
+
+   Ported from the Claude Design handoff (colors_and_type.css). The
+   handoff was dark-first with a `[data-theme="light"]` override; here it
+   is inverted to match the repo's convention — LIGHT is the base
+   (`.droplet-shell`) and DARK hangs off `.dark .droplet-shell` (the
+   ThemeProvider toggles `.dark` on <html>).
+
+   This mirrors the indigo identity already shipped for the Home page in
+   `components/home/home-bento.css` (`.droplet-home`). The core ramp values
+   are kept in lockstep with that file by hand; the extra surface tokens
+   (--glass, --inset, --scrim, …) come from the handoff's themeable-surface
+   block, which the shell primitives (shell.css port) consume.
+
+   Every secondary page wraps its content in `.droplet-shell`; generic
+   class names from the port (.card, .kpi, .page-top, …) are descendant-
+   scoped under it so nothing leaks into the violet dashboard.
+   ============================================================ */
+
+.droplet-shell {
+  /* ── Indigo identity — LIGHT (default) ─────────────────── */
+  --bg: #f5f6fb;
+  --surface: #ffffff;
+  --surface-2: #eef0f7;
+  --border: #e4e6f1;
+  --text: #1b1e2b;
+  --text-muted: #6b7180;
+  --brand: #6366f1;        /* indigo-500 — stronger on light */
+  --brand-hover: #4f46e5;
+  --brand-soft: #818cf8;
+  --brand-deep: #4338ca;
+  --success: #16a34a;
+  --danger: #b91c1c;
+  --user-bubble: #dbe4ff;
+  --user-bubble-text: #1c3a5e;
+
+  --font-ui: var(--font-inter), -apple-system, BlinkMacSystemFont, "Segoe UI",
+    Roboto, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --radius-input: 8px;
+  --radius-card: 12px;
+  --radius-pill: 999px;
+
+  /* engine — ease-out-quint (snappy start, soft settle) */
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+
+  --brand-subtle: rgba(99, 102, 241, 0.12);
+  --lift: 0 18px 40px -16px rgba(30, 30, 60, 0.22),
+    0 0 0 1px rgba(99, 102, 241, 0.25);
+  --card-bg: #ffffff;
+  --card-bd: rgba(20, 22, 45, 0.08);
+  --card-inner: rgba(20, 22, 45, 0.035);
+
+  /* themeable surfaces consumed by the shell primitives */
+  --glass: rgba(255, 255, 255, 0.82);
+  --glass-2: rgba(255, 255, 255, 0.62);
+  --inset: rgba(17, 19, 32, 0.04);
+  --inset-strong: rgba(17, 19, 32, 0.07);
+  --hover: rgba(17, 19, 32, 0.045);
+  --scrollbar: #c8cbd5;
+  --text-faint: #a6aab5;
+  --nav-link: #565a66;
+  --scrim: rgba(28, 30, 40, 0.32);
+
+  /* ambient blob opacities (AmbientLayer reuse) */
+  --hero-aurora-opacity: 0.4;
+  --blob-a: 0.05;
+  --blob-b: 0.045;
+  --blob-c: 0.035;
+  --blob-d: 0.03;
+
+  color-scheme: light;
+  color: var(--text);
+  font-family: var(--font-ui);
+}
+
+.dark .droplet-shell {
+  /* ── Indigo identity — DARK (the original handoff ramp) ── */
+  --bg: #0f1117;
+  --surface: #1a1d27;
+  --surface-2: #1f2937;
+  --border: #2a2d3a;
+  --text: #e4e4e7;
+  --text-muted: #8a8a94;
+  --brand: #818cf8;        /* indigo-400 — brighter on dark */
+  --brand-hover: #6366f1;
+  --brand-soft: #a5b4fc;
+  --brand-deep: #4f46e5;
+  --success: #22c55e;
+  --danger: #7f1d1d;
+  --user-bubble: #1e3a5f;
+  --user-bubble-text: #dbe7f8;
+
+  --brand-subtle: rgba(129, 140, 248, 0.15);
+  --lift: 0 18px 40px -16px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(129, 140, 248, 0.22);
+  --card-bg: #14161d;
+  --card-bd: rgba(255, 255, 255, 0.055);
+  --card-inner: rgba(255, 255, 255, 0.035);
+
+  --glass: rgba(26, 29, 39, 0.82);
+  --glass-2: rgba(26, 29, 39, 0.6);
+  --inset: rgba(255, 255, 255, 0.04);
+  --inset-strong: rgba(255, 255, 255, 0.085);
+  --hover: rgba(255, 255, 255, 0.045);
+  --scrollbar: #2a2d3a;
+  --text-faint: #3f3f46;
+  --nav-link: #a1a1aa;
+  --scrim: rgba(8, 9, 13, 0.6);
+
+  --hero-aurora-opacity: 0.5;
+  --blob-a: 0.1;
+  --blob-b: 0.085;
+  --blob-c: 0.065;
+  --blob-d: 0.05;
+
+  color-scheme: dark;
+}

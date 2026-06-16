@@ -85,3 +85,4 @@ These are not optional polish at the end. Run them on the failing-test cycle for
 - Invoke the QA agent. (Controller's job.)
 - Touch unrelated files. (Scope creep.)
 - Skip TDD because "it's trivial." (It isn't.)
+- Expect review feedback to arrive as GitHub PR comments. The harness's internal reviews (QA / UX / Code Reviewer) come back through the controller, not GitHub — when re-invoked to address findings, you fix them locally on the branch and push; only genuinely-deferred items end up in the PR body.

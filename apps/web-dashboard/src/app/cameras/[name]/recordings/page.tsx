@@ -9,6 +9,7 @@ import {
   Download,
   Loader2,
   RefreshCw,
+  Video,
 } from "lucide-react";
 import { useCameras } from "@/lib/hooks/useCameras";
 import {
@@ -25,6 +26,7 @@ import {
 } from "@/components/recordings/RecordingsTimeline";
 import type { CameraInfo } from "@/lib/types";
 import { X } from "lucide-react";
+import { ShellPage } from "@/components/shell/ShellPage";
 
 /** Playback window — one full hour. With HLS the orchestrator no
  *  longer caps the range, but the per-hour granularity matches the
@@ -187,46 +189,49 @@ export default function RecordingsPage() {
 
   if (!name) return null;
 
-  return (
-    <div className="p-6">
-      {/* Header */}
-      <div className="flex items-center gap-3 mb-4">
-        <button
-          onClick={() => router.push(`/cameras/${encodeURIComponent(name)}`)}
-          className="p-2 -ml-2 rounded-full hover:bg-surface-secondary transition-colors"
-          aria-label="Back to camera"
-        >
-          <ArrowLeft size={20} />
-        </button>
-        <div className="flex-1 min-w-0">
-          <h1 className="type-large-title text-label-primary truncate">
-            {camera?.displayName ?? name} · Recordings
-          </h1>
-          <p className="type-subheadline text-label-tertiary mt-0.5">
-            Browse the past 7 days. Click an hour on the timeline to jump in.
-          </p>
-        </div>
-        <button
-          onClick={() => {
-            summaryHook.refresh();
-            rangeHook.refresh();
-          }}
-          className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
-        >
-          <RefreshCw size={16} />
-          <span className="type-subheadline">Refresh</span>
-        </button>
-      </div>
+  const actions = (
+    <>
+      <button
+        onClick={() => router.push(`/cameras/${encodeURIComponent(name)}`)}
+        className="btn ghost"
+        type="button"
+      >
+        <ArrowLeft size={15} />
+        Camera
+      </button>
+      <button
+        onClick={() => {
+          summaryHook.refresh();
+          rangeHook.refresh();
+        }}
+        className="icon-btn"
+        aria-label="Refresh"
+        title="Refresh"
+        type="button"
+      >
+        <RefreshCw size={16} />
+      </button>
+    </>
+  );
 
+  return (
+    <ShellPage
+      icon={<Video size={15} />}
+      label="Recordings"
+      title={`${camera?.displayName ?? name} · Recordings`}
+      sub="Browse the past 7 days. Click an hour on the timeline to jump in."
+      actions={actions}
+    >
       {/* Date picker */}
-      <div className="dp-card p-3 mb-4 flex items-center gap-2">
+      <div className="card mb-4 flex items-center gap-2" style={{ padding: 12 }}>
         <button
           onClick={() => {
             setDay((d) => dayPlusOffset(d, -1));
             setHour(null);
           }}
-          className="dp-btn-secondary p-2 rounded-lg"
+          className="icon-btn"
           aria-label="Previous day"
+          type="button"
         >
           <ChevronLeft size={16} />
         </button>
@@ -246,8 +251,9 @@ export default function RecordingsPage() {
             setHour(null);
           }}
           disabled={day >= localDayString(new Date())}
-          className="dp-btn-secondary p-2 rounded-lg disabled:opacity-50"
+          className="icon-btn disabled:opacity-50"
           aria-label="Next day"
+          type="button"
         >
           <ChevronRight size={16} />
         </button>
@@ -256,7 +262,7 @@ export default function RecordingsPage() {
       <div className="grid grid-cols-1 lg:grid-cols-[2fr_1fr] gap-4">
         {/* Player + timeline column */}
         <div className="space-y-4">
-          <div className="dp-card overflow-hidden bg-black aspect-video relative">
+          <div className="card overflow-hidden bg-black aspect-video relative" style={{ padding: 0 }}>
             {playbackUrl ? (
               <HlsPlayer
                 src={playbackUrl}
@@ -283,13 +289,14 @@ export default function RecordingsPage() {
 
           {/* Hour navigation under the player. */}
           {hour !== null && (
-            <div className="flex items-center justify-between dp-card px-3 py-2">
+            <div className="card flex items-center justify-between" style={{ padding: "8px 12px" }}>
               <button
                 onClick={() => {
                   if (hour > 0) setHour(hour - 1);
                 }}
                 disabled={hour === 0}
-                className="dp-btn-secondary flex items-center gap-1 px-2 py-1 rounded-lg disabled:opacity-50"
+                className="btn ghost sm disabled:opacity-50"
+                type="button"
               >
                 <ChevronLeft size={14} />
                 <span className="type-caption-1">Earlier hour</span>
@@ -303,7 +310,8 @@ export default function RecordingsPage() {
                   if (hour < 23) setHour(hour + 1);
                 }}
                 disabled={hour === 23}
-                className="dp-btn-secondary flex items-center gap-1 px-2 py-1 rounded-lg disabled:opacity-50"
+                className="btn ghost sm disabled:opacity-50"
+                type="button"
               >
                 <span className="type-caption-1">Later hour</span>
                 <ChevronRight size={14} />
@@ -326,7 +334,7 @@ export default function RecordingsPage() {
         {/* Right rail */}
         <div className="space-y-4">
           {/* Export */}
-          <div className="dp-card p-4">
+          <div className="card">
             <div className="flex items-start justify-between gap-2 mb-1">
               <h3 className="type-subheadline text-label-primary font-medium">
                 {selection ? "Export selection" : "Export current hour"}
@@ -356,7 +364,9 @@ export default function RecordingsPage() {
             <button
               onClick={handleExport}
               disabled={exporting || exportRange.after === null}
-              className="dp-btn-primary w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg disabled:opacity-60"
+              className="btn primary w-full disabled:opacity-60"
+              style={{ justifyContent: "center" }}
+              type="button"
             >
               {exporting ? (
                 <Loader2 size={14} className="animate-spin" />
@@ -381,7 +391,7 @@ export default function RecordingsPage() {
           </div>
 
           {/* Segment list */}
-          <div className="dp-card p-4">
+          <div className="card">
             <h3 className="type-subheadline text-label-primary font-medium mb-2">
               Segments
             </h3>
@@ -428,6 +438,6 @@ export default function RecordingsPage() {
           </div>
         </div>
       </div>
-    </div>
+    </ShellPage>
   );
 }

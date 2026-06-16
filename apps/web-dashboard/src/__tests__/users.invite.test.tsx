@@ -27,6 +27,12 @@ vi.mock("@/lib/api", () => ({
   createInvite: (...a: any[]) => createInviteMock(...a),
   listInvites: (...a: any[]) => listInvitesMock(...a),
   revokeInvite: (...a: any[]) => revokeInviteMock(...a),
+  // The page now renders inside <ShellPage>, whose status chip pulls the
+  // device + health hooks. Stub them so the wholesale api mock keeps these
+  // callable (otherwise SWR receives an undefined fetcher and throws).
+  fetchSystemHealth: vi.fn().mockResolvedValue({ status: "ok" }),
+  fetchDevices: vi.fn().mockResolvedValue([]),
+  fetchHealth: vi.fn().mockResolvedValue({}),
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -78,9 +84,9 @@ describe("Users page — invite UX", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: /invite user/i }));
 
-    // Modal renders username + role + ttl — but NO password.
-    fireEvent.change(screen.getByPlaceholderText(/username/i), {
-      target: { value: "bob" },
+    // Modal renders email + role + ttl — but NO password.
+    fireEvent.change(screen.getByPlaceholderText(/you@company\.com/i), {
+      target: { value: "bob@example.com" },
     });
     expect(
       document.querySelector('input[type="password"]'),
@@ -94,7 +100,7 @@ describe("Users page — invite UX", () => {
       expect(createInviteMock).toHaveBeenCalledTimes(1);
     });
     const callArg = createInviteMock.mock.calls[0][0];
-    expect(callArg.username).toBe("bob");
+    expect(callArg.email).toBe("bob@example.com");
     expect(callArg.role).toBe("user");
   });
 
@@ -112,8 +118,8 @@ describe("Users page — invite UX", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: /invite user/i }));
 
-    fireEvent.change(screen.getByPlaceholderText(/username/i), {
-      target: { value: "charlie" },
+    fireEvent.change(screen.getByPlaceholderText(/you@company\.com/i), {
+      target: { value: "charlie@example.com" },
     });
     fireEvent.click(
       screen.getByRole("button", { name: /generate (invite )?link|generate$/i }),
@@ -253,8 +259,8 @@ describe("Users page — invite UX", () => {
       expect(screen.getByRole("button", { name: /invite user/i })).toBeInTheDocument(),
     );
     fireEvent.click(screen.getByRole("button", { name: /invite user/i }));
-    fireEvent.change(screen.getByPlaceholderText(/username/i), {
-      target: { value: "charlie" },
+    fireEvent.change(screen.getByPlaceholderText(/you@company\.com/i), {
+      target: { value: "charlie@example.com" },
     });
     fireEvent.click(
       screen.getByRole("button", { name: /generate (invite )?link|generate$/i }),
@@ -264,7 +270,7 @@ describe("Users page — invite UX", () => {
       expect(screen.getByDisplayValue(url)).toBeInTheDocument();
     });
 
-    const qrImg = screen.getByRole("img", { name: /qr code.*charlie/i });
+    const qrImg = screen.getByRole("img", { name: /qr code.*charlie@example\.com/i });
     expect(qrImg).toBeInTheDocument();
   });
 
@@ -418,22 +424,22 @@ describe("Users page — invite UX", () => {
     });
   });
 
-  it("rejects reserved usernames at form-submit time without calling createInvite", async () => {
+  it("rejects an invalid email at form-submit time without calling createInvite", async () => {
     render(<UsersPage />);
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /invite user/i })).toBeInTheDocument(),
     );
     fireEvent.click(screen.getByRole("button", { name: /invite user/i }));
 
-    fireEvent.change(screen.getByPlaceholderText(/username/i), {
-      target: { value: "admin" },
+    fireEvent.change(screen.getByPlaceholderText(/you@company\.com/i), {
+      target: { value: "not-an-email" },
     });
     fireEvent.click(
       screen.getByRole("button", { name: /generate (invite )?link|generate$/i }),
     );
 
     await waitFor(() => {
-      expect(screen.getByText(/reserved/i)).toBeInTheDocument();
+      expect(screen.getByText(/valid email/i)).toBeInTheDocument();
     });
     expect(createInviteMock).not.toHaveBeenCalled();
   });

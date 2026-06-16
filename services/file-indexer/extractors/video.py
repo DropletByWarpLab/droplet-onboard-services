@@ -4,30 +4,28 @@ optional frame OCR via WARP-208 when `VIDEO_FRAME_OCR_ENABLED=1`.
 Spec: docs/superpowers/specs/2026-05-07-rag-phase-2-extractors-design.md §4.2
 WARP-208: docs/superpowers/specs/2026-05-09-warp-208-frame-ocr-design.md
 
-Strategy:
+Output: an `ExtractedDoc` carrying a list of Spans. Each span is anchored to
+a media-timestamp window:
 
-  Step 1: ffprobe the file to enumerate streams.
-  Step 2a (subtitles path): if a text-based subtitle stream exists
-          (codec_name in srt/ass/ssa/mov_text/webvtt), pick the first
-          English one (by `tags.language == "eng"`) else the first such
-          stream, run ffmpeg to convert it to SRT on stdout, parse with
-          the `srt` library, and emit `metadata.subtitle_source =
-          "embedded"`.
-  Step 2b (audio fallback): otherwise, run ffmpeg to strip the audio
-          track to a 16 kHz mono WAV in /tmp and delegate to the
-          WARP-197 audio extractor (faster-whisper). Tag the result
-          with `metadata.subtitle_source = "asr_transcript"` so
-          downstream consumers can render the right badge. Always
-          clean up the temp WAV.
-  Step 3 (WARP-208, opt-in): if `VIDEO_FRAME_OCR_ENABLED=1`, sample
-          frames every `VIDEO_FRAME_OCR_INTERVAL_SEC` seconds, phash-
-          dedup, OCR survivors via the image extractor's helper,
-          merge timestamp-tagged segments into the existing text under
-          a `--- Frame OCR ---` separator, and combine provenance
-          (e.g. `embedded+frame_ocr`).
+  - Transcript spans (one per subtitle cue or ASR segment) span their cue's
+    [start, end] in milliseconds.
+  - Frame-OCR spans (one per surviving frame) span a 1-second window
+    centered on the frame's wall-clock time.
 
-The 2 GB per-MIME byte cap is enforced upstream by `registry.dispatch()`
-(`VIDEO_MAX_BYTES`).
+Spans are emitted in `startMs` ascending order so downstream chunkers can
+treat the doc as a single time-ordered stream.
+
+Two helpers exist as explicit test seams:
+
+  _transcribe(path) -> (segments_iter, info)
+      Picks the best transcript source for the file (embedded subtitles
+      preferred; ASR fallback). Returns Whisper-shaped objects with
+      `.start` / `.end` (seconds, float) and `.text` (str).
+
+  _run_frame_ocr(path) -> list[dict]
+      Returns frame-OCR results as `[{"timestamp_seconds": float,
+      "text": str}, ...]`. Returns `[]` when frame OCR is disabled or
+      produced nothing.
 """
 from __future__ import annotations
 
@@ -36,12 +34,16 @@ import logging
 import os
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Union
+from typing import Iterable, Optional, Union
 
 import srt as srt_lib
 
+from anchor_schema import MediaTimestampAnchor
+
 from . import audio, frame_ocr
+from .spans import Span
 from .types import ExtractedDoc
 
 logger = logging.getLogger(__name__)
@@ -62,9 +64,26 @@ SUPPORTED_MIMES = frozenset(
 # are deliberately excluded — those would need OCR (WARP-208).
 _TEXT_SUBTITLE_CODECS = frozenset({"srt", "ass", "ssa", "mov_text", "webvtt"})
 
-# WARP-208 sentinel — chunker treats this like the email
-# "--- Attachment: <name> ---" boundary (text-level, no special chunking).
-_FRAME_OCR_SEPARATOR = "--- Frame OCR ---"
+# Frame-OCR spans cover a 1-second window centered on the sampled frame
+# (we pad ±500 ms so the strict endMs > startMs invariant holds and the
+# anchor stays representative without overlapping wildly with neighbors).
+_FRAME_OCR_WINDOW_MS = 1000
+
+
+@dataclass
+class _TranscriptSegment:
+    """Whisper-shaped tuple-ish so `_transcribe` returns one homogeneous type
+    regardless of whether the source was an SRT cue or an ASR segment."""
+    start: float
+    end: float
+    text: str
+
+
+@dataclass
+class _TranscriptInfo:
+    language: Optional[str]
+    duration: Optional[float]
+    subtitle_source: str  # "embedded" | "asr_transcript" | "asr_transcript_failed"
 
 
 def _ffprobe_streams(path: Path) -> list[dict]:
@@ -79,12 +98,7 @@ def _ffprobe_streams(path: Path) -> list[dict]:
 
 
 def _pick_subtitle_stream(streams: list[dict]) -> Optional[int]:
-    """Return the in-file stream index of the chosen text-based subtitle.
-
-    English-tagged streams win over untagged / non-English. If there's
-    no English match, the first text-based subtitle stream wins. None
-    is returned when no candidate exists.
-    """
+    """Return the in-file stream index of the chosen text-based subtitle."""
     candidates = [
         s
         for s in streams
@@ -100,13 +114,7 @@ def _pick_subtitle_stream(streams: list[dict]) -> Optional[int]:
 
 
 def _extract_srt(path: Path, stream_index: int) -> str:
-    """Convert the picked subtitle stream to SRT on stdout.
-
-    `-map 0:s:<n>` indexes among the file's subtitle streams (not its
-    overall stream list), so we have to translate the absolute stream
-    index returned by `_pick_subtitle_stream` into a subtitle-only index
-    by counting subtitle streams up to the picked one.
-    """
+    """Convert the picked subtitle stream to SRT on stdout."""
     streams = _ffprobe_streams(path)
     sub_streams = [s for s in streams if s.get("codec_type") == "subtitle"]
     sub_idx = next(i for i, s in enumerate(sub_streams) if s["index"] == stream_index)
@@ -134,7 +142,7 @@ def _strip_audio_to_wav(path: Path) -> Path:
     subprocess.run(
         [
             "ffmpeg",
-            "-y",  # overwrite the empty file mkstemp created
+            "-y",
             "-v", "error",
             "-i", str(path),
             "-vn",
@@ -148,70 +156,57 @@ def _strip_audio_to_wav(path: Path) -> Path:
     return Path(tmp)
 
 
-def _extract_subtitles_or_audio_fallback(
-    path: Path, mime: str,
-) -> Optional[ExtractedDoc]:
-    """Subtitles-first, ASR fallback. Pre-WARP-208 video extractor logic.
+def _transcribe(path: Union[str, Path]) -> tuple[Iterable, _TranscriptInfo]:
+    """Pick the best transcript source: embedded subtitles > ASR fallback.
 
-    Extracted as a private helper so the `extract()` wrapper can decide
-    whether to layer frame OCR on top. Returns None for unsupported
-    MIMEs (matching the pre-WARP-208 contract).
+    Returns Whisper-shaped segments (`.start`, `.end`, `.text`) plus an
+    info object carrying language / duration / provenance.
     """
-    if mime not in SUPPORTED_MIMES:
-        return None
-
-    streams = _ffprobe_streams(path)
+    p = Path(path)
+    streams = _ffprobe_streams(p)
     sub_index = _pick_subtitle_stream(streams)
 
     if sub_index is not None:
-        srt_text = _extract_srt(path, sub_index)
+        srt_text = _extract_srt(p, sub_index)
         cues = list(srt_lib.parse(srt_text))
-        text_parts: list[str] = []
-        page_breaks: list[int] = []
-        cursor = 0
-        for cue in cues:
-            line = cue.content.replace("\n", " ").strip()
-            text_parts.append(line)
-            cursor += len(line) + 1  # +1 for the join newline
-            page_breaks.append(cursor)
-        return ExtractedDoc(
-            text="\n".join(text_parts),
-            page_breaks=page_breaks,
-            language=None,
-            metadata={
-                "subtitle_source": "embedded",
-                "cue_count": len(cues),
-                "extractor_name": "video",
-                "extractor_version": "1.0.0",
-            },
-            warnings=[],
+        segments = [
+            _TranscriptSegment(
+                start=cue.start.total_seconds(),
+                end=cue.end.total_seconds(),
+                text=cue.content.replace("\n", " ").strip(),
+            )
+            for cue in cues
+        ]
+        duration = segments[-1].end if segments else None
+        return iter(segments), _TranscriptInfo(
+            language=None, duration=duration, subtitle_source="embedded",
         )
 
-    # Audio fallback. Always clean up the temp WAV regardless of how
-    # the audio extractor exits.
-    wav_path = _strip_audio_to_wav(path)
+    # ASR fallback: strip audio to WAV, delegate to the audio extractor's
+    # private `_load_model` -> `transcribe()` path. We re-implement the WAV
+    # pipeline here (not via `audio.extract`) because we need Whisper's
+    # raw segment objects, not the spans-shaped `ExtractedDoc`.
+    wav_path = _strip_audio_to_wav(p)
     try:
-        audio_doc = audio.extract(wav_path, mime="audio/wav")
-        if audio_doc is None:
-            logger.warning(
-                "video: audio extractor refused the temp WAV — bug? path=%s", path,
-            )
-            return ExtractedDoc(
-                text="",
-                page_breaks=[],
-                language=None,
-                metadata={
-                    "subtitle_source": "asr_transcript_failed",
-                    "extractor_name": "video",
-                    "extractor_version": "1.0.0",
-                },
-                warnings=["audio_extractor_returned_none"],
-            )
-        # Tag the source so downstream renderers (chat chip, search hit
-        # badge) can show "ASR transcript" vs. "Subtitles".
-        audio_doc.setdefault("metadata", {})
-        audio_doc["metadata"]["subtitle_source"] = "asr_transcript"
-        return audio_doc
+        with audio._model_lock:  # noqa: SLF001 — intentional reuse of the audio lock
+            try:
+                model = audio._load_model("cuda")
+                segments_iter, info = model.transcribe(
+                    str(wav_path), beam_size=5, temperature=0.0,
+                )
+            except (RuntimeError, ValueError) as exc:
+                logger.warning("video ASR: CUDA path failed (%s); CPU fallback", exc)
+                audio._model_cache.pop(f"{audio._model_name()}:cuda", None)
+                model = audio._load_model("cpu")
+                segments_iter, info = model.transcribe(
+                    str(wav_path), beam_size=5, temperature=0.0,
+                )
+        segments = list(segments_iter)
+        return iter(segments), _TranscriptInfo(
+            language=getattr(info, "language", None),
+            duration=getattr(info, "duration", None),
+            subtitle_source="asr_transcript",
+        )
     finally:
         try:
             wav_path.unlink()
@@ -219,93 +214,134 @@ def _extract_subtitles_or_audio_fallback(
             pass
 
 
-def _fmt_ts(sec: int) -> str:
-    """Format an integer second offset as `mm:ss` (zero-padded)."""
-    return f"{sec // 60:02d}:{sec % 60:02d}"
-
-
 def _frame_ocr_enabled() -> bool:
     """Master switch — VIDEO_FRAME_OCR_ENABLED=1 turns on the WARP-208 path."""
     return os.environ.get("VIDEO_FRAME_OCR_ENABLED", "0") == "1"
 
 
-def _append_frame_ocr(
-    base: ExtractedDoc, segments: list, stats,
-) -> ExtractedDoc:
-    """Merge a frame-OCR result onto an existing subtitle/ASR `ExtractedDoc`.
+def _run_frame_ocr(path: Union[str, Path]) -> list[dict]:
+    """Sample frames, OCR survivors. Returns `[{"timestamp_seconds", "text"}, ...]`.
 
-    Mutates `base` (in keeping with the audio-fallback path's
-    `audio_doc.setdefault(...)` style) and returns it for caller
-    convenience. Combines `subtitle_source` provenance:
-      embedded         -> embedded+frame_ocr
-      asr_transcript   -> asr_transcript+frame_ocr
-      (empty base text) -> frame_ocr_only
+    Best-effort: degrades to `[]` on any pipeline failure. Each survivor
+    becomes one entry; the caller turns it into a span anchored to a
+    1-second window around `timestamp_seconds`.
     """
-    base_text = base.get("text", "") or ""
-    base_source = base.get("metadata", {}).get("subtitle_source")
-
-    # Always surface the stats dict + any warnings, even when no
-    # segments were emitted (operators triaging cost / quality).
-    base["metadata"]["frame_ocr"] = {
-        "frames_sampled": stats.frames_sampled,
-        "frames_ocr_run": stats.frames_ocr_run,
-        "segments_emitted": stats.segments_emitted,
-        "interval_sec_used": stats.interval_sec_used,
-    }
-    if stats.warnings:
-        base.setdefault("warnings", []).extend(stats.warnings)
-
-    if not segments:
-        # No frame-OCR text produced; leave base text + subtitle_source alone.
-        return base
-
-    # Render the frame-OCR section.
-    section_lines = [_FRAME_OCR_SEPARATOR]
+    segments, stats = frame_ocr.extract_frame_text(Path(path))
+    results: list[dict] = []
     for seg in segments:
-        section_lines.append(
-            f"[{_fmt_ts(seg.start_sec)} → {_fmt_ts(seg.end_sec)}] {seg.text}"
+        # Center the frame's wall-clock at start_sec; the caller decides
+        # how wide the anchor window is.
+        results.append(
+            {
+                "timestamp_seconds": float(seg.start_sec),
+                "text": seg.text,
+            }
         )
-    frame_section = "\n".join(section_lines)
-
-    if base_text:
-        base["text"] = f"{base_text}\n\n{frame_section}"
-    else:
-        base["text"] = frame_section
-
-    # Combine provenance.
-    if not base_text:
-        base["metadata"]["subtitle_source"] = "frame_ocr_only"
-    elif base_source in ("embedded", "asr_transcript"):
-        base["metadata"]["subtitle_source"] = f"{base_source}+frame_ocr"
-    else:
-        # Unknown / "asr_transcript_failed" / etc. — treat as frame-OCR only
-        # for badge purposes, since that's the only channel with text.
-        base["metadata"]["subtitle_source"] = "frame_ocr_only"
-
-    return base
+    return results
 
 
-def extract(path: Union[str, Path], mime: str) -> Optional[ExtractedDoc]:
-    """Extract text from a video file.
+def _span_from_transcript_segment(seg, section_path: list[str]) -> Optional[Span]:
+    """Build a span from a Whisper-shaped segment. Returns None when the
+    segment is empty or degenerate (endMs <= startMs after rounding)."""
+    seg_text = (getattr(seg, "text", "") or "").strip()
+    if not seg_text:
+        return None
+    start_ms = int(round(float(seg.start) * 1000))
+    end_ms = int(round(float(seg.end) * 1000))
+    if end_ms <= start_ms:
+        return None
+    return Span(
+        text=seg_text,
+        anchor=MediaTimestampAnchor(startMs=start_ms, endMs=end_ms),
+        section_path=list(section_path),
+    )
 
-    Order of operations:
-      1. Subtitles-first / ASR-fallback (WARP-198).
-      2. If `VIDEO_FRAME_OCR_ENABLED=1`, also run frame OCR (WARP-208)
-         and merge the result on top.
 
-    Returns None when `mime` isn't in `SUPPORTED_MIMES`. The 2 GB byte
-    cap is enforced upstream in `registry.dispatch()` so this function
-    doesn't re-check size.
+def _span_from_frame_ocr_result(result: dict, section_path: list[str]) -> Optional[Span]:
+    """Build a span from a frame-OCR result. Anchor window is
+    `_FRAME_OCR_WINDOW_MS` wide, centered (well, starting) at the
+    sampled timestamp."""
+    text = (result.get("text") or "").strip()
+    if not text:
+        return None
+    ts_sec = float(result.get("timestamp_seconds", 0.0))
+    start_ms = max(0, int(round(ts_sec * 1000)))
+    end_ms = start_ms + _FRAME_OCR_WINDOW_MS
+    return Span(
+        text=text,
+        anchor=MediaTimestampAnchor(startMs=start_ms, endMs=end_ms),
+        section_path=list(section_path),
+    )
+
+
+def extract(
+    path: Union[str, Path], mime: Optional[str] = None,
+) -> Optional[ExtractedDoc]:
+    """Extract spans from a video file.
+
+    Transcript first (embedded subtitles preferred, ASR fallback), then —
+    if `VIDEO_FRAME_OCR_ENABLED=1` — frame-OCR spans on top. All spans
+    are anchored as `media-timestamp` and sorted by `startMs` ascending.
+
+    Returns None when `mime` is supplied and isn't in `SUPPORTED_MIMES`.
+    The 2 GB byte cap is enforced upstream in `registry.dispatch()`.
     """
-    p = Path(path)
-    base = _extract_subtitles_or_audio_fallback(p, mime)
-    if base is None:
+    if mime is not None and mime not in SUPPORTED_MIMES:
         return None
 
-    if not _frame_ocr_enabled():
-        return base
+    warnings: list[str] = []
+    spans: list[Span] = []
+    language: Optional[str] = None
+    duration: Optional[float] = None
+    subtitle_source: Optional[str] = None
 
-    # Frame OCR is best-effort: extract_frame_text never raises out,
-    # so we never gate the subtitle/ASR result on its success.
-    segments, stats = frame_ocr.extract_frame_text(p)
-    return _append_frame_ocr(base, segments, stats)
+    # Video has no in-file structural hierarchy; the document-level
+    # breadcrumb is the filename (WARP-435 fallback).
+    section_path = [os.path.basename(str(path)) or "video"]
+
+    # Transcript pass.
+    try:
+        segments_iter, info = _transcribe(path)
+    except Exception as exc:  # noqa: BLE001 — never abort the file
+        logger.warning("video transcript failed (%s)", exc)
+        warnings.append(f"transcript_failed:{exc}")
+    else:
+        language = info.language
+        duration = info.duration
+        subtitle_source = info.subtitle_source
+        for seg in segments_iter:
+            span = _span_from_transcript_segment(seg, section_path)
+            if span is None:
+                continue
+            spans.append(span)
+
+    # Frame-OCR pass (opt-in).
+    frame_results: list[dict] = []
+    if _frame_ocr_enabled():
+        try:
+            frame_results = _run_frame_ocr(path)
+        except Exception as exc:  # noqa: BLE001 — best-effort
+            logger.warning("video frame OCR failed (%s)", exc)
+            warnings.append(f"frame_ocr_failed:{exc}")
+        for result in frame_results:
+            span = _span_from_frame_ocr_result(result, section_path)
+            if span is None:
+                continue
+            spans.append(span)
+
+    # Time-order the merged stream so chunkers / citation rendering can
+    # walk the doc as a single timeline.
+    spans.sort(key=lambda s: s.anchor.startMs)
+
+    return ExtractedDoc(
+        spans=spans,
+        language=language,
+        metadata={
+            "extractor_name": "video",
+            "extractor_version": "2",
+            "subtitle_source": subtitle_source,
+            "duration_seconds": duration,
+            "frame_ocr_segments": len(frame_results),
+        },
+        warnings=warnings,
+    )

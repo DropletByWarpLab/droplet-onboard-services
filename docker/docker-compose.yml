@@ -4,10 +4,76 @@
 # even without .env. The setup script validates secrets before starting.
 
 # Explicit project name so containers don't collide with the sibling
-# `droplet-jetson-ai` repo, whose compose file is also under a `docker/`
+# `droplet-local-LLM` repo, whose compose file is also under a `docker/`
 # directory and would otherwise auto-derive the same project name from
 # its parent dir. Caught locally during the WARP-187 verification.
-name: droplet-pi-platform
+name: droplet
+
+# =============================================================================
+# WARP-569 — Per-container resource limits
+# =============================================================================
+# Target hardware: ~7 GB shared RAM (single-box; multi-box inference host is similar).
+# Host/kernel reserve: ~1 GB → allocate up to ~6 GB to default-on services.
+#
+# IMPORTANT: use top-level keys (mem_limit / cpus / pids_limit), NOT
+# deploy.resources.limits.  deploy.* is silently IGNORED by `docker compose up`
+# outside Swarm and would pass review while enforcing nothing.
+#
+# Every limit is env-overridable so operators on bigger hardware can raise them
+# without editing tracked files.  The test-security.sh CI guard (Test 10) fails
+# if any service is missing mem_limit or accidentally uses deploy.resources.
+#
+# Default-profile RAM budget (always-on services):
+#   gateway           128 MB
+#   web-dashboard     384 MB
+#   orchestrator      768 MB   (reservation 512 MB)
+#   device-identity   128 MB
+#   mcp-server        256 MB
+#   nextcloud         768 MB
+#   db              1,024 MB   (reservation 512 MB)
+#   cache             256 MB   (reservation 128 MB)
+#   broker             64 MB
+#   ai-gateway      ≤4,096 MB (model-dependent; BGE reranker fp32 — see WARP-644)
+#   file-indexer      512 MB
+#   routing           256 MB
+#   ──────────────────────────
+#   Total           ~8.6 GB   (exceeds the 6 GB target — ai-gateway reranker bump pending ADR-012 review; see WARP-644)
+#
+# Profile-gated services are sized for their provisioned hardware and are
+# NOT counted in the 6 GB default budget:
+#   linux:       frigate 1 GB, voice-io 512 MB, whisper 1 GB, piper 512 MB
+#   single-box:  ollama 4 GB, openwrt 512 MB, switch 128 MB (ADR-018 item 9:
+#                the managed switch auto-provisions a plugged-in AP onto the
+#                LAN — shared with the `full` profile, +128 MB on single-box).
+#                scripts/lib/single-box.sh ALSO appends `pm` to COMPOSE_PROFILES
+#                by default (opt-OUT gate, DROPLET_PM_ENABLED), so the `pm` row
+#                below (~4.8 GB) is normally part of the single-box footprint —
+#                set DROPLET_PM_ENABLED=0 on a memory-constrained box to drop it.
+#   pm:          postgres-pm 512 MB, redis-pm 256 MB, pm-api 1 GB, pm-worker 1 GB,
+#                pm-web 384 MB, pm-health 128 MB, pm-mq 512 MB, pm-minio 512 MB,
+#                pm-beat 512 MB (~4.8 GB total; pm-migrator is a one-shot that
+#                exits — not always-on). Plane v0.24.1 added the broker (pm-mq),
+#                object storage (pm-minio) + beat scheduler; pm-api/worker raised
+#                to 1 GB now that they actually run gunicorn/celery.
+#   eval:        rag-eval 1 GB
+#   full:        email-indexer 256 MB, switch 128 MB, camera-discovery 256 MB
+#   ops:         ops-console 256 MB
+# =============================================================================
+
+# =============================================================================
+# WARP-591 — Bounded container logs
+# =============================================================================
+# Without an explicit logging config, Docker's default json-file driver keeps
+# every container's stdout/stderr forever — an unbounded write that fills the
+# OS drive on a long-lived appliance. This anchor caps each container at
+# 3 × 10 MB of rotated logs (30 MB ceiling per service) and is merged into the
+# long-running services below via `<<: *default-logging`.
+x-logging: &default-logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
 
 services:
   # --- Ingress ---
@@ -16,6 +82,10 @@ services:
     ports:
       - "80:80"
       - "443:443"
+      # Plane PM dedicated origin (spec WARP-498 OQ2 amendment) — the
+      # vanilla Plane frontend needs its own origin root; see the :8443
+      # server block in nginx.conf.
+      - "8443:8443"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
       - ./certs:/etc/nginx/certs:ro
@@ -25,20 +95,28 @@ services:
       web-dashboard:
         condition: service_started
     restart: always
+    <<: *default-logging
+    mem_limit: ${GATEWAY_MEM_LIMIT:-128m}
+    cpus: ${GATEWAY_CPUS:-0.5}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- Apps ---
   # NOTE: No host ports exposed — Nginx routes all traffic internally.
   # This avoids conflicts with local dev servers (npm run dev on 3000/3001).
   web-dashboard:
     build:
-      context: ../apps/web-dashboard
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: apps/web-dashboard/Dockerfile
     expose:
       - "3001"
     environment:
       - PORT=3001
       - NODE_ENV=production
     restart: always
+    <<: *default-logging
+    mem_limit: ${WEB_DASHBOARD_MEM_LIMIT:-384m}
+    cpus: ${WEB_DASHBOARD_CPUS:-1.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   orchestrator:
     build:
@@ -61,7 +139,7 @@ services:
       - path: ../.env
         required: false
     # routing, switch, and display all run with `network_mode: host` on
-    # the Jetson. The orchestrator is on the default bridge network — so
+    # the appliance. The orchestrator is on the default bridge network — so
     # `localhost` from inside this container is the container itself, not
     # the host. Docker's magic `host-gateway` resolves to the host's IP on
     # the bridge subnet (172.x.0.1 on Linux, the gateway IP on Docker
@@ -73,19 +151,19 @@ services:
       - PORT=3000
       - AI_GATEWAY_URL=http://ai-gateway:8000
       - NEXTCLOUD_URL=http://nextcloud:80
-      - MATTER_STORAGE_PATH=/data/matter-storage
       # WARP-101: the orchestrator's MCP client spawns the mcp-server's
       # dist as a stdio child. Pin the path explicitly so we don't rely
       # on the singleton's process.cwd()-relative fallback.
       - MCP_SERVER_BIN=/app/services/mcp-server/dist/index.js
-      # DROPLET_-prefixed, NOT MATTER_-prefixed. matter.js scans the process
-      # env for MATTER_* at startup and injects each one into its internal
-      # VariableService — `MATTER_CONTROLLER_NAME` used to land as the var
-      # `controller.name`, which collides with the root-node `controller`
-      # behavior's schema and crashes controller init with "Property \"name\"
-      # is unsupported". See apps/orchestrator/src/config.ts for the full
-      # explanation.
-      - DROPLET_MATTER_CONTROLLER_NAME=${DROPLET_MATTER_CONTROLLER_NAME:-Droplet}
+      # WARP-850: the matter.js controller moved into the matter-controller
+      # host-network sidecar (raw HCI for BLE commissioning + native LAN
+      # mDNS). Same host-gateway rationale as ROUTING_SERVICE_URL below;
+      # port 8083 follows the host-service ladder (routing 8080, switch
+      # 8081, display 8082). The token is the X-Droplet-Auth shared bearer
+      # (device-bridge precedent) generated by setup.sh — both ends read
+      # the same .env key and the sidecar fails closed when it's empty.
+      - DROPLET_MATTER_SERVICE_URL=${DROPLET_MATTER_SERVICE_URL:-http://host.docker.internal:8083}
+      - DROPLET_MATTER_SERVICE_TOKEN=${DROPLET_MATTER_SERVICE_TOKEN:-}
       # WARP-203: chat-attached files land here. Default matches the
       # volume mount below; override only if you bind-mount a different
       # host path (e.g. an NVMe partition for backup convenience).
@@ -109,6 +187,19 @@ services:
       # "Router supervision disabled" banner. `mock` is handled on the routing
       # side — orchestrator still calls the endpoints as normal.
       - ROUTING_MODE=${ROUTING_MODE:-real}
+      # WARP-808: which deployment shape broadcasts the home Wi-Fi AP. `uci`
+      # (default, multi-box) routes Home Wi-Fi SSID/PSK writes through the
+      # routing service exactly as before; `hostapd` (single-box, set by
+      # single-box.sh's configure_single_box_env) routes them through the
+      # device-bridge's POST /openwrt/wifi/hostapd because the single-box AP is
+      # a raw host hostapd, not a UCI router. Read by network.service.ts. The
+      # .env (env_file above) also carries it; listing it here keeps the
+      # orchestrator's AP-mode dependency self-documenting, like ROUTING_MODE.
+      - DROPLET_AP_MODE=${DROPLET_AP_MODE:-uci}
+      # WARP-562: credentialed CORS allowlist. Empty falls through to the safe
+      # code default (https://droplet-ai.local). NEVER set this to '*' — the
+      # orchestrator rejects a wildcard at startup.
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-}
       - FRIGATE_URL=${FRIGATE_URL:-http://frigate:5000}
       - SWITCH_SERVICE_URL=${SWITCH_SERVICE_URL:-http://host.docker.internal:8081}
       - DISPLAY_SERVICE_URL=${DISPLAY_SERVICE_URL:-http://host.docker.internal:8082}
@@ -116,18 +207,39 @@ services:
       # display.client.ts; must equal the oled-display container's
       # SERVICE_SECRET env (wired below to the same source).
       - SERVICE_TOKEN_DISPLAY=${SERVICE_TOKEN_DISPLAY:-}
+      # Orchestrator → switch service bearer. Read by switch.client.ts;
+      # must equal the switch container's SERVICE_SECRET env (wired below
+      # to the same source). Before this key existed the orchestrator sent
+      # no bearer at all, so a switch container with SERVICE_SECRET set
+      # 403'd every call (dashboard Network page → "Router unavailable").
+      - SERVICE_TOKEN_SWITCH=${SERVICE_TOKEN_SWITCH:-}
+      # WARP-560: orchestrator → ai-gateway bearer. Read by ai-gateway.client.ts;
+      # must equal the ai-gateway container's SERVICE_TOKEN_AI_GATEWAY (wired
+      # below to the same source). The gateway had no inbound auth before this.
+      - SERVICE_TOKEN_AI_GATEWAY=${SERVICE_TOKEN_AI_GATEWAY:-}
       # The orchestrator's Dockerfile sets OPENSSL_CONF=/etc/ssl/openssl-fips.cnf
       # for FIPS 140-3 compliance (WARP-229). That cipher set rejects the
       # non-FIPS ciphers Postgres uses for its TLS handshake — Prisma's
       # libpq then fails to open ANY connection with P1011: "library has
-      # no ciphers". The dev/POC compromise: override the openssl config
+      # no ciphers". The single-box compromise: override the openssl config
       # back to the system default so Prisma can talk to the sibling-
       # container Postgres over TLS. Production FIPS for orchestrator is
       # a separate effort (split migration into init container without
       # FIPS, or get Postgres to use FIPS-approved ciphers server-side).
       - OPENSSL_CONF=${OPENSSL_CONF:-/etc/ssl/openssl.cnf}
+      # WARP-519: rag-eval HTTP trigger server. The orchestrator's
+      # /api/admin/rag-eval/* route proxies ad-hoc RAGAS runs here. rag-eval
+      # is in the `eval` Compose profile — when that profile is inactive the
+      # service name doesn't resolve and the proxy route returns 503
+      # (rag_eval_unavailable), which the dashboard renders as a "enable the
+      # eval profile" banner. Setting the URL unconditionally is correct;
+      # the route detects the connection failure at request time.
+      - RAG_EVAL_URL=${RAG_EVAL_URL:-http://rag-eval:8090}
     volumes:
-      - matter-data:/data/matter-storage
+      # WARP-573: pre-migration DB snapshots written by the guarded boot
+      # entrypoint (scripts/migrate-and-start.sh) immediately before applying
+      # pending migrations, so a power-cut mid-migration can be auto-recovered.
+      - migration-snapshots:/data/migration-snapshots
       # WARP-203: chat-attached "brain memory" files. Per-user dirs at
       # /data/brain-memory/<userId>/<itemId>/ hold the original bytes,
       # extracted text, and a manifest mirroring the BrainMemoryItem
@@ -147,6 +259,15 @@ services:
       # the orchestrator's gRPC client can reach it without exposing a
       # network port. Read-only — the orchestrator never writes.
       - /var/run/droplet:/var/run/droplet:ro
+      # ADR-023 (C2): the TLS cert dir, mounted READ-WRITE so the
+      # tls-issuance cron can atomically install the freshly-issued LE
+      # fullchain (droplet.crt) + private key (droplet.key). The gateway
+      # mounts the SAME dir read-only (see the gateway service above) and
+      # serves from it — nginx needs zero config change because the LE
+      # fullchain overwrites the same droplet.crt the bootstrap wrote. The
+      # orchestrator triggers the nginx reload via the device-bridge, NOT a
+      # docker socket (which is deliberately never mounted here).
+      - ./certs:/app/docker/certs:rw
     # WARP-43: rolled-up health includes postgres, redis, routing, ai-gateway,
     # nextcloud. A `down` aggregate returns HTTP 503 so Docker restarts this
     # container when a HARD dependency (postgres) is lost.
@@ -163,6 +284,13 @@ services:
       start_period: 60s
       retries: 3
     restart: always
+    <<: *default-logging
+    # Protected core: reservation ensures the OOM killer targets other
+    # containers before the orchestrator. mem_limit caps absolute ceiling.
+    mem_limit: ${ORCHESTRATOR_MEM_LIMIT:-768m}
+    mem_reservation: ${ORCHESTRATOR_MEM_RESERVATION:-512m}
+    cpus: ${ORCHESTRATOR_CPUS:-2.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- Device identity sidecar (WARP-230) ---
   # Python gRPC service holding the device's non-extractable identity
@@ -207,6 +335,10 @@ services:
       # device-identity.sock.
       - /var/run/droplet:/var/run/droplet
     restart: always
+    <<: *default-logging
+    mem_limit: ${DEVICE_IDENTITY_MEM_LIMIT:-128m}
+    cpus: ${DEVICE_IDENTITY_CPUS:-0.5}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- MCP Server (HTTP transport) ---
   # WARP-103: streamable-HTTP MCP transport for off-process consumers
@@ -226,6 +358,7 @@ services:
       dockerfile: services/mcp-server/Dockerfile
     container_name: droplet-mcp-server
     restart: unless-stopped
+    <<: *default-logging
     env_file:
       - path: ../.env
         required: false
@@ -235,7 +368,12 @@ services:
       - DATABASE_URL=${DATABASE_URL}
       - ROUTING_SERVICE_URL=${ROUTING_SERVICE_URL:-http://host.docker.internal:8080}
       - SWITCH_SERVICE_URL=${SWITCH_SERVICE_URL:-http://host.docker.internal:8081}
-      - NEXTCLOUD_URL=http://nextcloud:80
+      # WARP-861: the files-domain tools speak the orchestrator's
+      # /api/files contract (it validates the per-user ncToken headers
+      # and proxies WebDAV itself) — NOT raw Nextcloud, which can't serve
+      # the JSON shape and redirects plain HTTP to an unserved :443
+      # behind the TLS gateway.
+      - FILES_API_URL=${FILES_API_URL:-http://orchestrator:3000/api/files}
       # WARP-102: Matter tool calls + audit-log proxy through here back
       # to the orchestrator's /api/matter/*, /api/audit-log/*. Explicit
       # wiring (rather than relying on baseUrlFor's compose-DNS default)
@@ -273,6 +411,9 @@ services:
       timeout: 5s
       start_period: 30s
       retries: 3
+    mem_limit: ${MCP_SERVER_MEM_LIMIT:-256m}
+    cpus: ${MCP_SERVER_CPUS:-1.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- Nextcloud (headless backend) ---
   # Not published to host — accessed only via nginx at /nextcloud/.
@@ -298,8 +439,12 @@ services:
       # droplet-ai.lan (OpenWrt dnsmasq) are the primary names registered by
       # scripts/lib/local-dns.sh; droplet.local / droplet.lan are accepted too
       # so OpenWrt's own umdns/expand_hosts entries keep working if a user
-      # ever points them at the Jetson directly.
-      - NEXTCLOUD_TRUSTED_DOMAINS=localhost nextcloud gateway droplet-ai.local droplet-ai.lan droplet.local droplet.lan
+      # ever points them at the appliance directly.
+      # ADR-023 (C4): append the publicly-trusted per-device FQDN
+      # (${DROPLET_PUBLIC_FQDN}) so Nextcloud trusts the one-URL-everywhere
+      # address. Empty until the box learns it from HQ — a trailing blank token
+      # is harmless to Nextcloud's space-separated trusted-domains list.
+      - NEXTCLOUD_TRUSTED_DOMAINS=localhost nextcloud gateway droplet-ai.local droplet-ai.lan droplet.local droplet.lan ${DROPLET_PUBLIC_FQDN:-}
       - OVERWRITEPROTOCOL=https
     volumes:
       - nextcloud-data:/var/www/html
@@ -317,6 +462,10 @@ services:
           create_host_path: true
           propagation: rshared
     restart: always
+    <<: *default-logging
+    mem_limit: ${NEXTCLOUD_MEM_LIMIT:-768m}
+    cpus: ${NEXTCLOUD_CPUS:-1.0}
+    pids_limit: ${NEXTCLOUD_PIDS_LIMIT:-1024}
 
   # --- Infrastructure ---
   db:
@@ -347,6 +496,14 @@ services:
       retries: 10
       start_period: 30s
     restart: always
+    <<: *default-logging
+    # db is the most critical protected core: mem_reservation ensures the OOM
+    # killer targets lighter containers before Postgres. A database OOM kills
+    # every dependent service simultaneously — protect it hardest.
+    mem_limit: ${DB_MEM_LIMIT:-1g}
+    mem_reservation: ${DB_MEM_RESERVATION:-512m}
+    cpus: ${DB_CPUS:-2.0}
+    pids_limit: ${DB_PIDS_LIMIT:-1024}
 
   cache:
     image: redis:7-alpine
@@ -355,6 +512,13 @@ services:
         required: false
     command: ["sh", "-c", "redis-server --requirepass \"$REDIS_PASSWORD\""]
     restart: always
+    <<: *default-logging
+    # mem_reservation on cache: session + auth data — OOM kills here cascade
+    # to every authenticated request. Protect before db fills its budget.
+    mem_limit: ${CACHE_MEM_LIMIT:-256m}
+    mem_reservation: ${CACHE_MEM_RESERVATION:-128m}
+    cpus: ${CACHE_CPUS:-0.5}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   broker:
     image: eclipse-mosquitto:2
@@ -362,6 +526,10 @@ services:
       - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
       - ./mosquitto_passwd_dir:/mosquitto/config/passwd_dir:ro
     restart: always
+    <<: *default-logging
+    mem_limit: ${BROKER_MEM_LIMIT:-64m}
+    cpus: ${BROKER_CPUS:-0.5}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- AI Services ---
   ai-gateway:
@@ -393,7 +561,20 @@ services:
       # Static config only — secrets come from .env via env_file
       - ORCHESTRATOR_URL=http://orchestrator:3000
       - GRPC_PORT=50051
-      - CORS_ORIGINS=https://localhost,http://localhost,https://localhost:3001,http://localhost:3001
+      # WARP-560: inbound service-auth bearer. The ai-gateway's
+      # ServiceAuthMiddleware requires this on every /ai/* route (except
+      # /ai/health). MUST equal the orchestrator's SERVICE_TOKEN_AI_GATEWAY env
+      # (wired above to the same source). Empty = unauthenticated (dev only).
+      - SERVICE_TOKEN_AI_GATEWAY=${SERVICE_TOKEN_AI_GATEWAY:-}
+      # ADR-023 (C4): append https://${DROPLET_PUBLIC_FQDN} so the ai-gateway
+      # accepts the publicly-trusted one-URL-everywhere origin. Empty until the
+      # box learns its FQDN from HQ — a trailing comma is tolerated by the
+      # ai-gateway's comma-split (empty entries are dropped, see main.py).
+      - CORS_ORIGINS=https://localhost,http://localhost,https://localhost:3001,http://localhost:3001,https://${DROPLET_PUBLIC_FQDN:-}
+      # GW-14: socket peers (your nginx edge) whose forwarded client-IP headers
+      # the rate limiter trusts. Empty default = trust nothing (key on the real
+      # socket peer). Set RATE_LIMIT_TRUSTED_PROXIES to nginx's IP/subnet.
+      - RATE_LIMIT_TRUSTED_PROXIES=${RATE_LIMIT_TRUSTED_PROXIES:-}
     volumes:
       - aikeys:/data/keys
     depends_on:
@@ -401,6 +582,17 @@ services:
       - broker
       - orchestrator
     restart: always
+    <<: *default-logging
+    # WARP-644: raised 512m -> 4g. The BGE-reranker-base fp32 ONNX graph
+    # (BAAI/bge-reranker-base no longer publishes the smaller int8
+    # `model_quantized.onnx`) peaks at ~2.9 GB RSS for a batch-8 forward
+    # pass, measured on the gateway image. 512m OOM-killed model load.
+    # See docs/ADR-021-container-resource-limits.md for the RAM budget;
+    # revisit if int8 quantization is reintroduced (would drop this back
+    # toward the original ~1g tier).
+    mem_limit: ${AI_GATEWAY_MEM_LIMIT:-4g}
+    cpus: ${AI_GATEWAY_CPUS:-2.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- File indexer (Phase 4: AI content search) ---
   # Watches the Nextcloud data volume for file changes, extracts text,
@@ -445,6 +637,80 @@ services:
     # directives for profile-gated services when the profile isn't
     # active. file-indexer now starts on every `docker compose up`.
     restart: always
+    <<: *default-logging
+    mem_limit: ${FILE_INDEXER_MEM_LIMIT:-512m}
+    cpus: ${FILE_INDEXER_CPUS:-1.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
+
+  # --- RAG eval (RAGAS scoring, scheduled hourly off-hours) ---
+  # WARP-RAG-EVAL: gated behind the `eval` profile, which is STANDARD in
+  # every environment as of the WARP-844 follow-up: scripts/lib/secrets.sh
+  # writes it into the fresh-install COMPOSE_PROFILES on Linux AND macOS,
+  # and scripts/lib/single-box.sh keeps appending it idempotently for
+  # upgraded boxes (bug #15). The judge runs against the appliance's own
+  # Ollama (RAGAS_LOCAL_JUDGE_MODEL → LLM_MODEL fallback), so no GPU is
+  # strictly required — just slower on CPU. Pause the scheduled runs with
+  # RAG_EVAL_DISABLED=1 rather than dropping the profile; the ad-hoc
+  # /api/admin/rag-eval/* surface needs the container up.
+  #
+  # The container bakes queries.yaml + goldens.yaml + ragas_runner.py at
+  # build time. Goldens are part of the image version; updating them
+  # means rebuilding + redeploying the rag-eval image.
+  #
+  # Results land in the `rag-eval-data` named volume at /data/rag-eval/.
+  # Per-run JSON + Markdown summaries are written under runs/; the
+  # bootstrap mode (`docker exec rag-eval python main.py bootstrap`)
+  # writes baselines.candidate.json at the volume root.
+  rag-eval:
+    build:
+      context: ..
+      dockerfile: services/rag-eval/Dockerfile
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      - ORCHESTRATOR_URL=http://orchestrator:3000
+      # RAGAS_OLLAMA_URL points at the host's Ollama (the appliance's
+      # local judge LLM). On Linux the bridge network reaches the host
+      # via host-gateway; on macOS dev compose uses host.docker.internal.
+      - RAGAS_OLLAMA_URL=${RAGAS_OLLAMA_URL:-http://host.docker.internal:11434/v1}
+      # ragas_runner.py falls back RAGAS_LOCAL_JUDGE_MODEL → LLM_MODEL →
+      # mistral; leaving this unset lets that chain pick the hosted model.
+      - RAGAS_LOCAL_JUDGE_MODEL=${RAGAS_LOCAL_JUDGE_MODEL:-}
+      - RAGAS_JUDGE=${RAGAS_JUDGE:-local}
+      - RAGAS_VARIANT=${RAGAS_VARIANT:-hybrid}
+      - RAGAS_LIMIT=${RAGAS_LIMIT:-10}
+      - RAG_EVAL_CRON_HOUR=${RAG_EVAL_CRON_HOUR:-22-23,0-5}
+      - RAG_EVAL_CRON_MINUTE=${RAG_EVAL_CRON_MINUTE:-0}
+      - RAG_EVAL_DISABLED=${RAG_EVAL_DISABLED:-0}
+      # OPENAI_API_KEY only consumed when RAGAS_JUDGE=cloud.
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      # WARP-519: HTTP trigger server bind port. The orchestrator proxies
+      # ad-hoc /run, /bootstrap, and run-listing here via RAG_EVAL_URL
+      # (set on the orchestrator service). Keep in sync with the expose
+      # below and EXPOSE in services/rag-eval/Dockerfile.
+      - RAG_EVAL_HTTP_PORT=${RAG_EVAL_HTTP_PORT:-8090}
+    # WARP-519: internal-network only — no host publish. The orchestrator
+    # reaches this by service name (rag-eval:8090) and is the auth wall;
+    # the HTTP server itself has no auth.
+    expose:
+      - "8090"
+    volumes:
+      - rag-eval-data:/data/rag-eval
+    extra_hosts:
+      # So RAGAS_OLLAMA_URL can resolve `host.docker.internal` on Linux
+      # the same way it does on macOS / WSL. Mirrors the pattern used by
+      # the routing service for OpenWrt access.
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      orchestrator:
+        condition: service_started
+    profiles: ["eval"]
+    restart: always
+    <<: *default-logging
+    mem_limit: ${RAG_EVAL_MEM_LIMIT:-1g}
+    cpus: ${RAG_EVAL_CPUS:-2.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- Routing (OpenWrt control) ---
   # WARP-44: default dependency — starts on every `docker compose up`. Set
@@ -458,7 +724,13 @@ services:
     cap_add:
       - NET_ADMIN
     environment:
-      - OPENWRT_HOST=${OPENWRT_HOST:-10.0.0.1}
+      # WARP-815 (K2): the documented default is 192.168.50.1 — the multi-box
+      # router-host OpenWrt (matches services/routing/main.py and the docs). The
+      # single-box shape talks to the in-container OpenWrt on 127.0.0.1:8181;
+      # scripts/lib/single-box.sh writes that override into .env before bring-up,
+      # so this default is only the multi-box / dev fallback. The previous
+      # 10.0.0.1 here matched no shape and was a rule-12 host-specific footgun.
+      - OPENWRT_HOST=${OPENWRT_HOST:-192.168.50.1}
       - OPENWRT_PORT=${OPENWRT_PORT:-80}
       - OPENWRT_USERNAME=${OPENWRT_USERNAME:-droplet-ai}
       # OPENWRT_PASSWORD is read from /run/secrets/openwrt_password (WARP-37).
@@ -469,10 +741,82 @@ services:
       # so dev laptops without a router get a realistic UI. `disabled` is an
       # orchestrator-side concern; this service still runs fine with it.
       - ROUTING_MODE=${ROUTING_MODE:-real}
+      # WARP-815 (K4): the Wi-Fi scan radio. The orchestrator no longer hardcodes
+      # `wlan0` on the /wireless/scan call, so the SDK resolves the radio from
+      # this env (services/routing/droplet_openwrt_sdk.py). Empty default keeps
+      # the SDK's last-resort `wlan0` for multi-box/dev; scripts/lib/single-box.sh
+      # writes wlp14s0 (sourced from DROPLET_AP_IFACE) into .env on the single-box.
+      - DROPLET_WIFI_SCAN_DEVICE=${DROPLET_WIFI_SCAN_DEVICE:-}
       - PORT=8080
     secrets:
       - openwrt_password
     restart: always
+    <<: *default-logging
+    mem_limit: ${ROUTING_MEM_LIMIT:-256m}
+    cpus: ${ROUTING_CPUS:-1.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
+
+  # --- Matter controller (smart-home commissioning + control) ---
+  # WARP-850: owns the matter.js CommissioningController, extracted from
+  # the orchestrator. Runs in the init network namespace so it gets:
+  #   - raw HCI access to the host Bluetooth adapter (hci0, Intel AX210
+  #     on the single-box) for BLE commissioning, and
+  #   - native LAN multicast for mDNS discovery on BOTH the home LAN and
+  #     the in-container OpenWrt AP's br-lan (a host bridge).
+  # The orchestrator is its only consumer (HTTP on :8083 — host-service
+  # ladder after routing 8080 / switch 8081 / display 8082), authed via
+  # the X-Droplet-Auth shared token. Host Bluetooth prep (bluez, rfkill
+  # unblock, powered adapter) is owned by scripts/setup.sh.
+  matter-controller:
+    build:
+      # Repo-root context so the workspace deps resolve via npm
+      # workspaces (same rationale as the orchestrator image).
+      context: ..
+      dockerfile: services/matter-controller/Dockerfile
+    network_mode: host
+    cap_add:
+      # NET_RAW + NET_ADMIN: AF_BLUETOOTH raw HCI sockets for
+      # @stoprocent/noble's hci-socket bindings (BLE central role) plus
+      # device up/down during commissioning. Mirrors the noble Docker
+      # guidance (host network + raw socket capability).
+      - NET_ADMIN
+      - NET_RAW
+    # NO env_file here — deliberately. matter.js auto-imports every
+    # MATTER_* process env var (see scripts/test-security.sh Test 7), so
+    # this is the one container that must never inherit the operator's
+    # whole .env. Every key it needs is explicit below; compose still
+    # interpolates ${...} defaults from --env-file without injecting
+    # unrelated vars into the process.
+    environment:
+      - NODE_ENV=production
+      - PORT=8083
+      # The ONE allow-listed MATTER_* env var (scripts/test-security.sh).
+      # It deliberately folds to matter.js's `storage.path`, pointing the
+      # persisted fabric at the matter-data volume below — the SAME
+      # volume + path the orchestrator used pre-WARP-850, so commissioned
+      # fabrics survive the migration without re-pairing.
+      - MATTER_STORAGE_PATH=/data/matter-storage
+      - DROPLET_MATTER_CONTROLLER_NAME=${DROPLET_MATTER_CONTROLLER_NAME:-Droplet}
+      - DROPLET_MATTER_SERVICE_TOKEN=${DROPLET_MATTER_SERVICE_TOKEN:-}
+      # Which HCI adapter to commission over (default hci0).
+      - DROPLET_MATTER_BLE_HCI_ID=${DROPLET_MATTER_BLE_HCI_ID:-0}
+      # Same FIPS posture note as the orchestrator: the slim image has no
+      # NIST-validated provider module yet, so default to the system
+      # OpenSSL config until provider provisioning lands.
+      - OPENSSL_CONF=${OPENSSL_CONF:-/etc/ssl/openssl.cnf}
+      - DROPLET_FIPS_REQUIRED=${DROPLET_FIPS_REQUIRED:-false}
+    volumes:
+      # Fabric continuity (WARP-850 requirement #2): the named volume
+      # moves here from the orchestrator UNCHANGED.
+      - matter-data:/data/matter-storage
+    restart: always
+    <<: *default-logging
+    # DROPLET_ prefix (not MATTER_CONTROLLER_*): the ADR-021 knob lives in
+    # the operator's .env, and a bare MATTER_* name there is one stray
+    # env_file away from matter.js's auto-import minefield.
+    mem_limit: ${DROPLET_MATTER_MEM_LIMIT:-256m}
+    cpus: ${DROPLET_MATTER_CPUS:-1.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- Email indexer (IMAP IDLE + MIME parser + outbound SMTP) ---
   # WARP-465 D1 follow-up. One async task per EmailAccount via
@@ -518,7 +862,11 @@ services:
       - broker
       - orchestrator
     restart: always
+    <<: *default-logging
     profiles: ["full"]
+    mem_limit: ${EMAIL_INDEXER_MEM_LIMIT:-256m}
+    cpus: ${EMAIL_INDEXER_CPUS:-1.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- Managed Switch (PoE + VLAN control) ---
   switch:
@@ -533,10 +881,43 @@ services:
       - SWITCH_USERNAME=${SWITCH_USERNAME:-admin}
       - SWITCH_PASSWORD=${SWITCH_PASSWORD:-}
       - SWITCH_DRIVER=${SWITCH_DRIVER:-lantronix}
-      - SERVICE_SECRET=${DEVICE_SECRET_KEY:-}
+      # Dedicated orchestrator → switch bearer (same WARP-165 rationale as
+      # the display path): the prior ${DEVICE_SECRET_KEY} wiring put the
+      # FIPS-sealed master encryption key on the wire for every switch
+      # call — and the orchestrator never presented it anyway, so all
+      # authenticated endpoints 403'd. Must equal the orchestrator's
+      # SERVICE_TOKEN_SWITCH env (wired above to the same source).
+      - SERVICE_SECRET=${SERVICE_TOKEN_SWITCH:-}
       - PORT=8081
-    profiles: ["full"]
+      # ADR-018 item 9: bring-up provisioning. Off unless explicitly enabled
+      # (single-box sets SWITCH_AUTOPROVISION=1 + SWITCH_VLAN_PROFILE=flat-lan
+      # in .env). flat-lan only pulls a stranded access port back to VLAN 1;
+      # segmented isolation is double-gated on the routing cameras.present
+      # cross-check (item 9 depends on item 3).
+      - SWITCH_AUTOPROVISION=${SWITCH_AUTOPROVISION:-0}
+      - SWITCH_VLAN_PROFILE=${SWITCH_VLAN_PROFILE:-flat-lan}
+      - SWITCH_PROTECTED_PORT=${SWITCH_PROTECTED_PORT:-0}
+      - SWITCH_CAMERA_PORTS=${SWITCH_CAMERA_PORTS:-}
+      - SWITCH_AP_PORTS=${SWITCH_AP_PORTS:-}
+      - SWITCH_CLIENT_PORTS=${SWITCH_CLIENT_PORTS:-}
+      # ADR-018 item 10: plan-only by default; set SWITCH_LIVE_WRITES=1 after
+      # one-time supervised confirmation of the write shape per firmware.
+      - SWITCH_LIVE_WRITES=${SWITCH_LIVE_WRITES:-0}
+      - SWITCH_PROVISION_TIMEOUT=${SWITCH_PROVISION_TIMEOUT:-30}
+      - ROUTING_SERVICE_URL=${ROUTING_SERVICE_URL:-http://localhost:8080}
+    # single-box bundles the managed switch so a plugged-in AP auto-provisions
+    # onto the LAN instead of stranding on an isolated VLAN (ADR-018 item 9);
+    # `full` is the multi-box/explicit-managed shape.
+    volumes:
+      # ADR-018 item 12: persist last_provisioned_at across container restarts.
+      # provision_state.py writes to SWITCH_STATE_DIR (default /var/lib/droplet/switch).
+      - switch-state:/var/lib/droplet/switch
+    profiles: ["full", "single-box"]
     restart: always
+    <<: *default-logging
+    mem_limit: ${SWITCH_MEM_LIMIT:-128m}
+    cpus: ${SWITCH_CPUS:-0.5}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- Frigate NVR (camera management + AI detection) ---
   # Linux-only: requires /dev/dri/renderD128 (Intel/AMD VAAPI) and /dev/bus/usb,
@@ -546,12 +927,12 @@ services:
   # Image variants (override FRIGATE_IMAGE in .env):
   #   stable              — default; CPU detector only (works everywhere)
   #   stable-tensorrt     — x86_64 hosts with NVIDIA discrete GPUs
-  #   stable-tensorrt-jp6 — Jetson Orin on JetPack 6 (pair with
+  #   stable-tensorrt-jp6 — a JetPack 6 GPU host (pair with
   #                          FRIGATE_RUNTIME=nvidia + YOLO_MODELS=yolov9-s)
-  # FRIGATE_RUNTIME lets the Jetson scripts set `nvidia` without forcing
+  # FRIGATE_RUNTIME lets the GPU-host scripts set `nvidia` without forcing
   # macOS / Docker Desktop (which has no nvidia runtime) to fail validation.
   frigate:
-    image: ${FRIGATE_IMAGE:-ghcr.io/blakeblackshear/frigate:stable}
+    image: ${FRIGATE_IMAGE:-ghcr.io/blakeblackshear/frigate:0.17.1}
     runtime: ${FRIGATE_RUNTIME:-runc}
     profiles: ["linux"]
     shm_size: "256mb"
@@ -570,7 +951,7 @@ services:
     devices:
       - /dev/bus/usb:/dev/bus/usb              # USB cameras
       # GPU render node. Default `/dev/dri/renderD128` matches every host
-      # with a single render node (Jetson Orin's nvgpu, x86 single-GPU
+      # with a single render node (an NVIDIA GPU host's nvgpu, x86 single-GPU
       # boxes). Override via `FRIGATE_RENDER_NODE` in .env when the dGPU
       # is reserved for another container — on the single-box deployment
       # shape the AMD dGPU (renderD128) hosts Ollama, so Frigate detects
@@ -580,7 +961,7 @@ services:
     volumes:
       - frigate-config:/config
       # NVR recordings default to the `nvrdata` named volume so every fresh
-      # deployment works out of the box. On Jetson lab hosts the operator
+      # deployment works out of the box. On GPU lab hosts the operator
       # can redirect this to a dedicated NVMe partition by overriding
       # `NVR_MEDIA_SOURCE` in .env (e.g. NVR_MEDIA_SOURCE=/mnt/cameras)
       # once the partition is provisioned. See docs/STATUS.md.
@@ -592,7 +973,7 @@ services:
       # auto-added camera on restart and trips "Config file is read-only,
       # unable to migrate" on version bumps.
       - ../docker/frigate/config.yml:/config/config.yml
-      # Jetson Orin TensorRT + NVMM libraries. The JP6 TensorRT image
+      # NVIDIA Tegra TensorRT + NVMM libraries. The JP6 TensorRT image
       # calls into libnvdla_compiler.so / libnvmedia* which live in
       # /usr/lib/aarch64-linux-gnu/tegra on the host; without this
       # bind-mount the ONNX→TensorRT model compilation falls back to
@@ -619,6 +1000,16 @@ services:
     depends_on:
       - broker
     restart: always
+    <<: *default-logging
+    # Frigate is the most memory-intensive linux-profile service: it runs
+    # the detector model + FFmpeg decode pipelines concurrently.
+    # NOTE (cgroups v2): the 256mb shm_size above is tmpfs that counts
+    # AGAINST mem_limit, so the effective process budget here is ~768 MB,
+    # not 1 GB. Single-stream is fine; for 2+ camera streams raise the
+    # ceiling, e.g. FRIGATE_MEM_LIMIT=1536m. See docs/ADR-012.
+    mem_limit: ${FRIGATE_MEM_LIMIT:-1g}
+    cpus: ${FRIGATE_CPUS:-2.0}
+    pids_limit: ${FRIGATE_PIDS_LIMIT:-1024}
 
   # --- Camera auto-discovery (ONVIF + RTSP scanning) ---
   camera-discovery:
@@ -646,8 +1037,20 @@ services:
     # frigate as best-effort over its localhost HTTP client.
     depends_on:
       - broker
-    profiles: ["full"]
+    # ADR-018 Decision 4 / T5: also active on the `single-box` shape. A compose
+    # service runs when ANY of its profiles is active; the single-box brings up
+    # { linux, display, single-box } (scripts/lib/single-box.sh), so without
+    # `single-box` here camera-discovery was orphaned — no container ran and the
+    # camera scan found nothing (live symptom #5). `full` is retained so the
+    # multi-box / explicit-`full` path is unchanged. The shape's actual camera
+    # network is set via the CAMERA_SUBNET knob (single-box → 192.168.20.0/24),
+    # not by dropping the profile guard onto macOS dev installs.
+    profiles: ["full", "single-box"]
     restart: always
+    <<: *default-logging
+    mem_limit: ${CAMERA_DISCOVERY_MEM_LIMIT:-256m}
+    cpus: ${CAMERA_DISCOVERY_CPUS:-1.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- Voice assistant (WARP-154) ---
   # Always-on voice loop: mic capture -> wake-word -> STT -> orchestrator
@@ -671,7 +1074,7 @@ services:
     # specific devices — sounddevice picks them up via PortAudio.
     devices:
       - "/dev/snd:/dev/snd"
-    # The host's audio group GID. On Ubuntu/Debian (single-box + Jetson) it's 29;
+    # The host's audio group GID. On Ubuntu/Debian (single-box + inference host) it's 29;
     # docker-compose's numeric group_add doesn't care if a name exists
     # in the container's /etc/group as long as the kernel sees the GID
     # match for /dev/snd's owner.
@@ -683,6 +1086,15 @@ services:
     environment:
       - VOICE_INPUT_DEVICE=${VOICE_INPUT_DEVICE:-}
       - VOICE_OUTPUT_DEVICE=${VOICE_OUTPUT_DEVICE:-}
+      # Multichannel→mono: "first" (default) consumes channel 0 — the
+      # primary/processed channel on mic arrays (the reSpeaker XVF3800
+      # carries beamformed voice on L, AEC residual on R; averaging the
+      # two halves the voice). "mean" averages, for plain stereo mics.
+      - VOICE_INPUT_DOWNMIX=${VOICE_INPUT_DOWNMIX:-}
+      # Digital gain on the mono capture frame (int16-clipped). 1.0 =
+      # untouched; ~2.0 ≈ +6 dB for a quiet chain. Survives chip
+      # reboots, unlike xvf_host AUDIO_MGR_MIC_GAIN tweaks.
+      - VOICE_INPUT_GAIN=${VOICE_INPUT_GAIN:-}
       - VOICE_SAMPLE_RATE=${VOICE_SAMPLE_RATE:-16000}
       - VOICE_FRAME_MS=${VOICE_FRAME_MS:-30}
       - DEVICE_RESCAN_INTERVAL=${DEVICE_RESCAN_INTERVAL:-5}
@@ -692,13 +1104,22 @@ services:
       # default lets dev installs run with LLM_URL=__mock__; production
       # requires a real shared secret or every /api/llm/chat 401s.
       - ORCHESTRATOR_TOKEN=${SERVICE_TOKEN_VOICE:-${ORCHESTRATOR_TOKEN:-}}
+      # Wake-word backend. `vosk` (default) recognizes the WAKE_WORD
+      # phrase out of the box — no per-phrase training, no licensing fee
+      # — so "hey droplet" works on every box. Automatically falls back
+      # to openWakeWord (hey_jarvis) if the bundled Vosk model is absent.
+      - WAKE_ENGINE=${WAKE_ENGINE:-vosk}
       - WAKE_WORD=${WAKE_WORD:-hey_droplet}
-      # Threshold tuned from POC live use: 0.5 was too high to fire on
-      # speech at typical room distance (~3-6 ft). 0.3 catches real
-      # wakes while still rejecting most background talk. Raise back
-      # toward 0.5 once a custom-trained `hey_droplet.onnx` lands —
-      # bundled-model fallbacks need the lower floor.
-      - WAKE_THRESHOLD=${WAKE_THRESHOLD:-0.3}
+      # Threshold semantics are engine-aware (resolve_wake_threshold in
+      # voice-io main.py). Under vosk every fire carries real acoustic
+      # evidence — the MINIMUM per-word confidence of the finalized
+      # phrase match (evidence-free matches never fire) — and a genuine
+      # spoken wake scores ~0.9+, so unset means the vosk default (0.7).
+      # That gates the living-room-TV false accepts the old fixed-0.5
+      # partial-fire scoring let through. Lower toward 0.5 if real wakes
+      # get missed at distance; tune per docs/voice-assistant-plan.md.
+      # (openWakeWord scores are sigmoids — its unset default stays 0.3.)
+      - WAKE_THRESHOLD=${WAKE_THRESHOLD:-}
       # STT — wake → next 5 s of audio gets streamed here for transcription.
       # `wyoming-faster-whisper` is the sibling container below (Rhasspy's
       # Wyoming-protocol wrapper around faster-whisper). Set STT_URL=__mock__
@@ -722,7 +1143,7 @@ services:
       # echoes as the spoken reply).
       - LLM_URL=${LLM_URL:-http://orchestrator:3000}
       # Default per shared_brain LLM_AGENT.md (qwen2.5:3b-instruct fits
-      # the Orin Nano 7 GB RAM budget with the rest of the stack up).
+      # the inference host's 7 GB RAM budget with the rest of the stack up).
       # Override via env if the appliance has a larger/different model
       # loaded (see droplet-local-LLM /models/sync).
       - LLM_MODEL=${LLM_MODEL:-qwen2.5:3b-instruct}
@@ -742,6 +1163,10 @@ services:
     # Skip on macOS Docker Desktop (no /dev/snd).
     profiles: ["linux"]
     restart: always
+    <<: *default-logging
+    mem_limit: ${VOICE_IO_MEM_LIMIT:-512m}
+    cpus: ${VOICE_IO_CPUS:-1.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- Whisper STT sidecar (WARP-154) ---
   # Rhasspy's wyoming-faster-whisper — TCP-protocol Whisper server that
@@ -751,7 +1176,13 @@ services:
   # itself is pure CPU here; if a future profile needs CUDA, set
   # WHISPER_DEVICE=cuda (image auto-detects).
   wyoming-faster-whisper:
-    image: rhasspy/wyoming-whisper:${WHISPER_IMAGE_TAG:-latest}
+    # Pinned (WARP-844 follow-up): the Wyoming wire format differs across
+    # image versions (v1 inline-data vs v2 data_length framing), so a
+    # floating tag meant a routine pull could flip the protocol under the
+    # STT clients. Both in-repo clients (voice-io stt.py, orchestrator
+    # stt.client.ts) parse BOTH formats, but the pin keeps upgrades
+    # deliberate. 3.1.0 == today's `latest`.
+    image: rhasspy/wyoming-whisper:${WHISPER_IMAGE_TAG:-3.1.0}
     # Profile gate matches voice-io — same Linux-only audio
     # stack. On macOS dev installs the whole voice path is skipped.
     profiles: ["linux"]
@@ -767,12 +1198,19 @@ services:
       --language ${WHISPER_LANGUAGE:-en}
       --uri tcp://0.0.0.0:10300
       --beam-size 1
+      --compute-type ${WHISPER_COMPUTE:-int8}
+      --cpu-threads ${WHISPER_CPU_THREADS:-4}
     volumes:
       # Whisper model cache (~470 MB for small.en). Named volume so a
       # `docker compose down` doesn't redownload; mounted read-write so
       # the first-run download can land in the right place.
       - whisper-models:/data
     restart: always
+    <<: *default-logging
+    # Whisper loads the full model into RAM at startup: small.en ~470 MB.
+    mem_limit: ${WHISPER_MEM_LIMIT:-1g}
+    cpus: ${WHISPER_CPUS:-2.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- Piper TTS sidecar (WARP-154) ---
   # Rhasspy's wyoming-piper. Pairs with wyoming-faster-whisper to
@@ -780,7 +1218,9 @@ services:
   # (audio) → speaker. Same Wyoming protocol on TCP/10200 by default.
   # Voices download on first request and cache in the named volume.
   wyoming-piper:
-    image: rhasspy/wyoming-piper:${PIPER_IMAGE_TAG:-latest}
+    # Pinned (WARP-590): match the whisper sidecar's deliberate-upgrade
+    # posture instead of floating on `latest`. 2.2.2 == today's `latest`.
+    image: rhasspy/wyoming-piper:${PIPER_IMAGE_TAG:-2.2.2}
     profiles: ["linux"]
     expose:
       - "10200"
@@ -795,6 +1235,10 @@ services:
       # .env to switch.
       - piper-voices:/data
     restart: always
+    <<: *default-logging
+    mem_limit: ${PIPER_MEM_LIMIT:-512m}
+    cpus: ${PIPER_CPUS:-1.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # --- TFT Display (3.5" front-panel) ---
   # Drives the Adafruit PyPortal Titano over USB-serial. DISPLAY_BACKEND
@@ -852,6 +1296,10 @@ services:
     # silently or scan the network on boot.
     profiles: ["display"]
     restart: always
+    <<: *default-logging
+    mem_limit: ${OLED_DISPLAY_MEM_LIMIT:-128m}
+    cpus: ${OLED_DISPLAY_CPUS:-0.5}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # ---------------------------------------------------------------------------
   # ops-console — operator-side monitoring + control surface.
@@ -877,7 +1325,7 @@ services:
       # hex string to .env; if missing the container generates an
       # ephemeral one and logs it loudly (NOT for production).
       - OPS_TOKEN=${OPS_TOKEN:-}
-      # Per-service probe URLs. Defaults verified live on POC 2026-05-15.
+      # Per-service probe URLs. Defaults verified live on the single-box 2026-05-15.
       # Empty default = container exists but exposes no HTTP /health
       # endpoint; surfaces as `unknown` (relies on /ops/containers for
       # liveness). Override any with a real URL via .env to enable.
@@ -925,19 +1373,384 @@ services:
       - no-new-privileges:true
     profiles: ["ops"]
     restart: unless-stopped
+    <<: *default-logging
+    mem_limit: ${OPS_CONSOLE_MEM_LIMIT:-256m}
+    cpus: ${OPS_CONSOLE_CPUS:-1.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
+
+  # ==========================================================================
+  # WARP-501 — embedded Plane PM stack (ADR-010, spec WARP-498)
+  # ==========================================================================
+  # Customer-facing project-management surface. Wraps upstream Plane (AGPL-3,
+  # pinned by SHA per spec OQ3) plus a Droplet-side health sidecar.
+  # The `services/pm/PATCHES.md` ledger tracks any local modifications per
+  # ADR-010 AGPL §13 posture.
+  #
+  # OQ1 resolution: dedicated postgres-pm + redis-pm — backup/restore
+  # granularity + Plane schema-migration quarantine outweigh ~200MB RAM cost.
+  #
+  # Profiles: `["pm"]` on every PM service. Compose profiles are STATIC (a
+  # service runs iff one of its declared profiles is in the active set), so
+  # the single-box opt-OUT gate cannot live here — it lives in the COMPOSE_
+  # PROFILES composition done by scripts/lib/single-box.sh:
+  #   * `pm` is activated explicitly on a multi-box / `--profile pm` deploy.
+  #     PM_PILOT also deploys these by NAME (which starts a profiled service
+  #     regardless of profile activation), so the pilot flow is unaffected.
+  #   * On the single-box shape, scripts/lib/single-box.sh APPENDS `pm` to
+  #     COMPOSE_PROFILES (=linux,display,single-box,pm) by DEFAULT, so PM
+  #     works out-of-the-box (bug #10: without it the always-present nginx
+  #     /pm/ route returned 502). That append is an opt-OUT, default-ON gate
+  #     keyed on DROPLET_PM_ENABLED — a resource-constrained (~6 GB) box sets
+  #     DROPLET_PM_ENABLED=0 to drop the ~2.5 GB always-on Plane stack, and
+  #     single-box.sh then omits `pm` so none of these services start.
+  # Keeping `single-box` OFF these profiles (vs PR #487's `["pm","single-box"]`)
+  # is what makes the gate possible: when single-box.sh withholds `pm`, the
+  # `single-box` profile alone must NOT resolve the PM stack.
+  # Resource cost when enabled: see the "Profile-gated services" budget at the
+  # top of this file (`pm:` row — ~2.5 GB always-on: postgres-pm 512M +
+  # redis-pm 256M + pm-api 768M + pm-worker 512M + pm-web 384M + pm-health
+  # 128M; pm-migrator is one-shot). The `pm` gate also keeps these OFF the
+  # default profile so a plain `docker compose up` on a shape that wants
+  # neither profile never pulls the heavy Plane images. WARP-496 / ADR-010.
+  postgres-pm:
+    image: postgres:15-alpine
+    container_name: droplet-postgres-pm
+    profiles: ["pm"]
+    restart: unless-stopped
+    <<: *default-logging
+    environment:
+      POSTGRES_DB: ${DROPLET_PM_DB_NAME:-plane}
+      POSTGRES_USER: ${DROPLET_PM_DB_USER:-plane}
+      POSTGRES_PASSWORD: ${DROPLET_PM_DB_PASSWORD:-}
+    volumes:
+      - postgres-pm-data:/var/lib/postgresql/data
+    healthcheck:
+      # `pg_isready` flips to "accepting connections" before Postgres
+      # finishes internal recovery — clients that connect during that
+      # window see "FATAL: the database system is starting up" and
+      # crash. pm-api/pm-worker both gate on this via depends_on:
+      # service_healthy, so a premature green here crash-loops them on
+      # cold boot (same failure mode the main `db` service hit). Run an
+      # actual SELECT 1 instead so the check fails until the query
+      # path is genuinely ready.
+      test: ["CMD-SHELL", "psql -U ${DROPLET_PM_DB_USER:-plane} -d ${DROPLET_PM_DB_NAME:-plane} -c 'SELECT 1' >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
+    mem_limit: ${POSTGRES_PM_MEM_LIMIT:-512m}
+    mem_reservation: ${POSTGRES_PM_MEM_RESERVATION:-256m}
+    cpus: ${POSTGRES_PM_CPUS:-1.0}
+    pids_limit: ${DB_PIDS_LIMIT:-1024}
+
+  redis-pm:
+    image: redis:7-alpine
+    container_name: droplet-redis-pm
+    profiles: ["pm"]
+    restart: unless-stopped
+    <<: *default-logging
+    volumes:
+      - redis-pm-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    mem_limit: ${REDIS_PM_MEM_LIMIT:-256m}
+    cpus: ${REDIS_PM_CPUS:-0.5}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
+
+  pm-migrator:
+    # One-shot Django migration runner. Plane's backend image splits work across
+    # bin/ entrypoints: pm-api runs `wait_for_migrations` (it BLOCKS until the
+    # schema is applied, it never migrates) and pm-worker assumes a migrated DB.
+    # `migrate` itself only runs from docker-entrypoint-migrator.sh — so a fresh
+    # postgres-pm volume needs this to complete first or pm-api hangs on
+    # wait_for_migrations and any query hits missing tables. Same backend pin as
+    # pm-api/pm-worker (Test 11 single-pin posture) → no extra image download.
+    # restart "no": it runs `wait_for_db` + `migrate`, then exits 0; pm-api and
+    # pm-worker gate on it via service_completed_successfully. (WARP-496)
+    image: makeplane/plane-backend:v0.24.1
+    command: ["./bin/docker-entrypoint-migrator.sh"]
+    container_name: droplet-pm-migrator
+    profiles: ["pm"]
+    restart: "no"
+    depends_on:
+      postgres-pm:
+        condition: service_healthy
+      redis-pm:
+        condition: service_healthy
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      DATABASE_URL: postgres://${DROPLET_PM_DB_USER:-plane}:${DROPLET_PM_DB_PASSWORD}@postgres-pm:5432/${DROPLET_PM_DB_NAME:-plane}
+      REDIS_URL: redis://redis-pm:6379
+      # Plane's settings module reads SECRET_KEY at import time, so even the
+      # migrate command needs it set (DATABASE_URL/REDIS_URL drive the actual
+      # connection). WEB_URL is link-rendering only — not needed to migrate.
+      SECRET_KEY: ${DROPLET_PM_SECRET_KEY:-}
+    mem_limit: ${PM_MIGRATOR_MEM_LIMIT:-512m}
+    # Soft floor so the migrator isn't the first OOM-eviction target when the
+    # rest of the stack is under memory pressure during its run — a kill here
+    # exits non-zero and blocks pm-api/pm-worker (they gate on its success).
+    # Mirrors postgres-pm. (Note: this protects against contention, not against
+    # a migration batch exceeding the 512m mem_limit — 512m is ample for migrate.)
+    mem_reservation: ${PM_MIGRATOR_MEM_RESERVATION:-256m}
+    cpus: ${PM_MIGRATOR_CPUS:-1.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
+
+  pm-api:
+    # Plane upstream pinned per ADR-010 OQ3. SHA refresh is a deliberate
+    # per-Droplet-release decision; do not bump without spec update.
+    image: makeplane/plane-backend:v0.24.1
+    # The backend image's default CMD is bare `python3` (a REPL). The API server
+    # must be started explicitly via its bundled entrypoint — exactly as
+    # pm-worker/pm-migrator do. Without this pm-api ran `python3`, hit EOF on no
+    # stdin, exited 0, and restart-looped (never serving the API).
+    command: ["./bin/docker-entrypoint-api.sh"]
+    container_name: droplet-pm-api
+    profiles: ["pm"]
+    restart: unless-stopped
+    <<: *default-logging
+    depends_on:
+      postgres-pm:
+        condition: service_healthy
+      redis-pm:
+        condition: service_healthy
+      pm-migrator:
+        condition: service_completed_successfully
+      # Django's Celery bootstrap connects to the broker on startup; gate on it
+      # so a cold start doesn't hit the pm-mq start_period window. (review #500)
+      pm-mq:
+        condition: service_healthy
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      DATABASE_URL: postgres://${DROPLET_PM_DB_USER:-plane}:${DROPLET_PM_DB_PASSWORD}@postgres-pm:5432/${DROPLET_PM_DB_NAME:-plane}
+      REDIS_URL: redis://redis-pm:6379
+      SECRET_KEY: ${DROPLET_PM_SECRET_KEY:-}
+      WEB_URL: ${DROPLET_PM_WEB_URL:-}
+      # Celery broker (RabbitMQ). Plane builds CELERY_BROKER_URL from AMQP_URL
+      # (plane/settings/common.py); pm-mq is the broker service below.
+      AMQP_URL: amqp://${DROPLET_PM_MQ_USER:-plane}:${DROPLET_PM_MQ_PASSWORD}@pm-mq:5672/${DROPLET_PM_MQ_VHOST:-plane}
+      # Object storage (MinIO, S3-compatible) for file uploads/attachments.
+      USE_MINIO: "1"
+      AWS_ACCESS_KEY_ID: ${DROPLET_PM_MINIO_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${DROPLET_PM_MINIO_SECRET_KEY}
+      AWS_S3_ENDPOINT_URL: http://pm-minio:9000
+      AWS_S3_BUCKET_NAME: ${DROPLET_PM_MINIO_BUCKET:-uploads}
+      FILE_SIZE_LIMIT: ${DROPLET_PM_FILE_SIZE_LIMIT:-5242880}
+      # The api entrypoint runs `exec gunicorn -w "$GUNICORN_WORKERS" ...`, so an
+      # unset value passes `-w ''` → "invalid int value" → gunicorn never starts
+      # and pm-api restart-loops. Plane's variables.env defaults this; the bare
+      # image does not. Single-box default 2 (override via DROPLET_PM_GUNICORN_WORKERS).
+      GUNICORN_WORKERS: ${DROPLET_PM_GUNICORN_WORKERS:-2}
+    # 1g (was 768m): pm-api now actually runs gunicorn workers (it never did before
+    # the command fix); 2 uvicorn workers + the Django app need the headroom.
+    mem_limit: ${PM_API_MEM_LIMIT:-1g}
+    cpus: ${PM_API_CPUS:-1.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
+
+  pm-worker:
+    # Plane does not publish a standalone worker image. The Celery worker runs
+    # from the same backend image as pm-api via the bundled entrypoint — this
+    # is the upstream-canonical single-box deployment topology (ADR-010 OQ3).
+    # Reusing the already-pulled pm-api image means no extra download. (WARP-575)
+    image: makeplane/plane-backend:v0.24.1
+    command: ["./bin/docker-entrypoint-worker.sh"]
+    container_name: droplet-pm-worker
+    profiles: ["pm"]
+    restart: unless-stopped
+    <<: *default-logging
+    depends_on:
+      pm-api:
+        condition: service_started
+      pm-migrator:
+        condition: service_completed_successfully
+      # Celery worker consumes from the broker; gate on it so a cold start
+      # doesn't hit the pm-mq start_period window + restart-loop. (review #500)
+      pm-mq:
+        condition: service_healthy
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      DATABASE_URL: postgres://${DROPLET_PM_DB_USER:-plane}:${DROPLET_PM_DB_PASSWORD}@postgres-pm:5432/${DROPLET_PM_DB_NAME:-plane}
+      REDIS_URL: redis://redis-pm:6379
+      # Must match pm-api's env exactly: SECRET_KEY signs Celery messages /
+      # sessions, and WEB_URL is baked into notification/email link hrefs at
+      # worker app init (the API having it does not cover the worker process).
+      SECRET_KEY: ${DROPLET_PM_SECRET_KEY:-}
+      WEB_URL: ${DROPLET_PM_WEB_URL:-}
+      # Celery broker (RabbitMQ) — the worker consumes tasks from here.
+      AMQP_URL: amqp://${DROPLET_PM_MQ_USER:-plane}:${DROPLET_PM_MQ_PASSWORD}@pm-mq:5672/${DROPLET_PM_MQ_VHOST:-plane}
+      # Object storage — workers generate/process attachments (exports, thumbnails).
+      USE_MINIO: "1"
+      AWS_ACCESS_KEY_ID: ${DROPLET_PM_MINIO_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${DROPLET_PM_MINIO_SECRET_KEY}
+      AWS_S3_ENDPOINT_URL: http://pm-minio:9000
+      AWS_S3_BUCKET_NAME: ${DROPLET_PM_MINIO_BUCKET:-uploads}
+      FILE_SIZE_LIMIT: ${DROPLET_PM_FILE_SIZE_LIMIT:-5242880}
+      # Mirror pm-api's env (WARP-575): the worker runs the SAME backend image, so
+      # its environment is kept a superset of pm-api's. The worker runs Celery
+      # (docker-entrypoint-worker.sh), not gunicorn, so it ignores this at runtime
+      # — it is here purely for image/env parity with pm-api.
+      GUNICORN_WORKERS: ${DROPLET_PM_GUNICORN_WORKERS:-2}
+    # Plane's celery worker loads the full Django app + task registry at startup;
+    # 512m cgroup-OOM-killed it (exit 137) on a box with 24 GB free. 1g clears
+    # startup + light single-box task load. Override via PM_WORKER_MEM_LIMIT.
+    mem_limit: ${PM_WORKER_MEM_LIMIT:-1g}
+    cpus: ${PM_WORKER_CPUS:-1.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
+
+  pm-web:
+    image: makeplane/plane-frontend:v0.24.1
+    # The frontend image's default CMD is bare `node` (a REPL). The Next.js
+    # standalone server must be started explicitly. Without this pm-web ran
+    # `node`, hit EOF, exited 0, and restart-looped (never serving the UI).
+    command: ["node", "web/server.js"]
+    container_name: droplet-pm-web
+    profiles: ["pm"]
+    restart: unless-stopped
+    <<: *default-logging
+    depends_on:
+      pm-api:
+        condition: service_started
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: ${DROPLET_PM_API_URL:-http://pm-api:8000}
+    # No host-port exposure — Nginx reverse-proxies at /pm/ (WARP-502).
+    expose:
+      - "3000"
+    mem_limit: ${PM_WEB_MEM_LIMIT:-384m}
+    cpus: ${PM_WEB_CPUS:-1.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
+
+  pm-health:
+    # Droplet-side standardized /health sidecar (WARP-500).
+    build:
+      context: ..
+      dockerfile: services/pm/Dockerfile
+      args:
+        PLANE_PIN_SHA: v0.24.1
+    container_name: droplet-pm-health
+    profiles: ["pm"]
+    restart: unless-stopped
+    <<: *default-logging
+    depends_on:
+      pm-api:
+        condition: service_started
+    environment:
+      DROPLET_PM_API_URL: http://pm-api:8000
+    # Internal only — orchestrator + ship-check poll this.
+    expose:
+      - "8090"
+    mem_limit: ${PM_HEALTH_MEM_LIMIT:-128m}
+    cpus: ${PM_HEALTH_CPUS:-0.5}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
+
+  # --- Plane PM broker + object storage + scheduler (completes the v0.24.1 stack) ---
+  # #487 wired Plane with only postgres-pm + redis-pm. Plane v0.24.1 ALSO requires
+  # a RabbitMQ broker for Celery and uses MinIO for file storage, plus a beat
+  # scheduler for periodic tasks. All three are internal-only (no host ports);
+  # Nginx already reverse-proxies the user-facing /pm/ surface (WARP-502).
+  pm-mq:
+    # Celery broker — pinned to match Plane v0.24.1's selfhost compose. User is
+    # `plane` (NOT the default `guest`, which RabbitMQ restricts to loopback and
+    # would refuse cross-container celery connections).
+    image: rabbitmq:3.13.6-management-alpine
+    container_name: droplet-pm-mq
+    profiles: ["pm"]
+    restart: unless-stopped
+    <<: *default-logging
+    environment:
+      RABBITMQ_DEFAULT_USER: ${DROPLET_PM_MQ_USER:-plane}
+      RABBITMQ_DEFAULT_PASS: ${DROPLET_PM_MQ_PASSWORD}
+      RABBITMQ_DEFAULT_VHOST: ${DROPLET_PM_MQ_VHOST:-plane}
+    volumes:
+      - pm-rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    expose:
+      - "5672"
+    mem_limit: ${PM_MQ_MEM_LIMIT:-512m}
+    cpus: ${PM_MQ_CPUS:-1.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
+
+  pm-minio:
+    # S3-compatible object storage for Plane file uploads/attachments. Pinned
+    # (Plane upstream floats :latest; Droplet pins). Internal-only — Plane proxies
+    # asset URLs, so neither the dashboard nor the LLM ever reaches this directly.
+    image: minio/minio:RELEASE.2024-12-18T13-15-44Z
+    command: server /export --console-address ":9090"
+    container_name: droplet-pm-minio
+    profiles: ["pm"]
+    restart: unless-stopped
+    <<: *default-logging
+    environment:
+      MINIO_ROOT_USER: ${DROPLET_PM_MINIO_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${DROPLET_PM_MINIO_SECRET_KEY}
+    volumes:
+      - pm-minio-data:/export
+    expose:
+      - "9000"
+    mem_limit: ${PM_MINIO_MEM_LIMIT:-512m}
+    cpus: ${PM_MINIO_CPUS:-1.0}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
+
+  pm-beat:
+    # Celery beat scheduler (periodic tasks: token cleanup, exports, digests).
+    # Same backend image + bundled entrypoint as pm-worker; needs DB + broker.
+    image: makeplane/plane-backend:v0.24.1
+    command: ["./bin/docker-entrypoint-beat.sh"]
+    container_name: droplet-pm-beat
+    profiles: ["pm"]
+    restart: unless-stopped
+    <<: *default-logging
+    depends_on:
+      pm-api:
+        condition: service_started
+      pm-migrator:
+        condition: service_completed_successfully
+      pm-mq:
+        condition: service_healthy
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      DATABASE_URL: postgres://${DROPLET_PM_DB_USER:-plane}:${DROPLET_PM_DB_PASSWORD}@postgres-pm:5432/${DROPLET_PM_DB_NAME:-plane}
+      REDIS_URL: redis://redis-pm:6379
+      SECRET_KEY: ${DROPLET_PM_SECRET_KEY:-}
+      AMQP_URL: amqp://${DROPLET_PM_MQ_USER:-plane}:${DROPLET_PM_MQ_PASSWORD}@pm-mq:5672/${DROPLET_PM_MQ_VHOST:-plane}
+      # Object storage — beat dispatches S3 tasks (delete_old_s3_link, exports);
+      # without these they fail at runtime, not startup. (review #500)
+      USE_MINIO: "1"
+      AWS_ACCESS_KEY_ID: ${DROPLET_PM_MINIO_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${DROPLET_PM_MINIO_SECRET_KEY}
+      AWS_S3_ENDPOINT_URL: http://pm-minio:9000
+      AWS_S3_BUCKET_NAME: ${DROPLET_PM_MINIO_BUCKET:-uploads}
+      FILE_SIZE_LIMIT: ${DROPLET_PM_FILE_SIZE_LIMIT:-5242880}
+    mem_limit: ${PM_BEAT_MEM_LIMIT:-512m}
+    cpus: ${PM_BEAT_CPUS:-0.5}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   # ==========================================================================
   # single-box profile (`COMPOSE_PROFILES=single-box`) — bundled-inference
   # deployment shape services.
   # ==========================================================================
-  # The multi-box deployment runs Ollama on a separate Jetson (the dGPU
-  # host) and a real OpenWrt router (the Pi 5). The single-box shape
+  # The multi-box deployment runs Ollama on a separate inference host (the dGPU
+  # host) and a real OpenWrt router host. The single-box shape
   # collapses both into containers on the same x86 host. Services below
   # ONLY start when the `single-box` profile is active; on every other
   # deployment shape they're invisible.
   #
   # Activation: `COMPOSE_PROFILES=single-box` in .env (setup.sh writes this
-  # when it detects single-box hardware: dGPU + iGPU + no separate Jetson
+  # when it detects single-box hardware: dGPU + iGPU + no separate inference host
   # on LAN). Operators can also force it with
   # `COMPOSE_PROFILES=single-box,linux docker compose up -d` for testing.
   #
@@ -955,10 +1768,15 @@ services:
   # the compose service name `ollama` (resolved via the default bridge
   # network), not the host loopback.
   ollama:
-    image: ollama/ollama:rocm
+    # Pinned (WARP-590): the upstream `rocm` tag rolls forward on every
+    # release, so a routine pull could swap the inference runtime under the
+    # box. 0.30.8-rocm == today's `rocm`; it still natively supports gfx1200
+    # (RDNA4), so the no-HSA_OVERRIDE note above still holds.
+    image: ollama/ollama:0.30.8-rocm
     container_name: droplet-ollama
     profiles: ["single-box"]
     restart: unless-stopped
+    <<: *default-logging
     expose:
       - "11434"
     ports:
@@ -975,6 +1793,14 @@ services:
       ROCR_VISIBLE_DEVICES: "0"
       OLLAMA_HOST: "0.0.0.0:11434"
       OLLAMA_KEEP_ALIVE: "24h"
+      # WARP-854: Ollama's baked-in default context is 4096 tokens. The
+      # owner-role agent loop ships ~80 tool schemas (~11k tokens of
+      # prompt), so the default overflowed before generation even began —
+      # Ollama returned finish_reason=length with ZERO output tokens and
+      # every dashboard chat surfaced as an instant empty answer. 16k
+      # fits tools + memory block + history while keeping gpt-oss:20b's
+      # KV cache fully resident on a 16 GB GPU.
+      OLLAMA_CONTEXT_LENGTH: "${OLLAMA_CONTEXT_LENGTH:-16384}"
     volumes:
       - ollama-data:/root/.ollama
     healthcheck:
@@ -989,6 +1815,13 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+    # Ollama's ceiling is the dominant RAM consumer on single-box: the
+    # qwen2.5:3b model weights + KV cache sit at ~3-4 GB hot. 4 GB cap
+    # lets it finish loading without starving the rest of the default
+    # stack. Raise OLLAMA_MEM_LIMIT in .env for larger models.
+    mem_limit: ${OLLAMA_MEM_LIMIT:-4g}
+    cpus: ${OLLAMA_CPUS:-4.0}
+    pids_limit: ${OLLAMA_PIDS_LIMIT:-2048}
 
   # --- OpenWrt (router-in-container) ---------------------------------------
   # Hosts the Wi-Fi AP (after `droplet-openwrt-attach` moves the host's
@@ -1002,13 +1835,30 @@ services:
   # for /tmp and /run because OpenWrt expects writable scratch space at
   # init time and these are runtime-state-only.
   openwrt:
-    image: openwrt/rootfs:x86_64-24.10.2
+    # WARP-826: bake the AP/router packages (hostapd, iw, wpad, umdns, wireguard,
+    # uhttpd/rpcd) into the image so a fresh container / post-factory-reset box
+    # never depends on a first-boot `opkg install` — the race that left the AP
+    # dead (hostapd absent) until droplet-openwrt-attach could reach the feed.
+    # `network: host` so opkg can resolve downloads.openwrt.org at build time via
+    # the host resolv.conf; the Dockerfile makes /var/lock first (the rootfs has
+    # none pre-init, so opkg cannot lock). droplet-openwrt-attach still
+    # installs-if-missing at runtime as a safety net.
+    build:
+      # WARP-868: context is openwrt/ (not singlebox-image/) so the Dockerfile
+      # can COPY the canonical rpcd ACL from openwrt/files/usr/share/rpcd/acl.d/
+      # — one source of truth shared with the multi-box image overlay, instead
+      # of a duplicated copy that drifts.
+      context: ../openwrt
+      dockerfile: singlebox-image/Dockerfile
+      network: host
+    image: droplet/openwrt-singlebox:24.10.2
     container_name: droplet-openwrt
     hostname: openwrt
     profiles: ["single-box"]
     command: /sbin/init
     privileged: true
     restart: unless-stopped
+    <<: *default-logging
     cap_add:
       - NET_ADMIN
       - SYS_ADMIN
@@ -1023,6 +1873,9 @@ services:
     volumes:
       - openwrt-config:/etc/config
       - openwrt-overlay:/overlay
+    mem_limit: ${OPENWRT_MEM_LIMIT:-512m}
+    cpus: ${OPENWRT_CPUS:-1.0}
+    pids_limit: ${OPENWRT_PIDS_LIMIT:-1024}
 
 secrets:
   # WARP-37: OpenWrt router password mounted read-only at /run/secrets/openwrt_password
@@ -1041,13 +1894,31 @@ volumes:
   # engagements and doesn't require operators to pre-create a host dir.
   ops-audit:
   matter-data:
+  # WARP-573: pre-migration snapshots taken by the orchestrator's guarded
+  # boot entrypoint. Wiped on factory reset (see scripts/factory-reset.sh).
+  migration-snapshots:
   brain-memory-data:
+  # WARP-RAG-EVAL: per-run RAGAS JSON + Markdown + the bootstrap
+  # baselines.candidate.json. Named volume so results survive container
+  # restarts during ops work and don't require an operator-created host
+  # dir. Retention is unbounded today; the rag-eval container's runner
+  # leaves cleanup to the operator. Add a sweep if it grows.
+  rag-eval-data:
+  # WARP-501 — embedded Plane PM stack (ADR-010, spec WARP-498 OQ1).
+  # Dedicated postgres/redis volumes so backup/restore (WARP-514) and
+  # factory-reset granularity are per-volume.
+  postgres-pm-data:
+  redis-pm-data:
+  pm-rabbitmq-data:
+  pm-minio-data:
   # WARP-154 — Wyoming Whisper model cache (~470 MB for small.en).
   # Persists across `docker compose down`/`up`. Manual reset:
   # `docker volume rm <project>_whisper-models`.
   whisper-models:
   # WARP-154 — Piper voice cache (~70 MB per voice).
   piper-voices:
+  # ADR-018 item 12: switch provision-state persistence (last_provisioned_at).
+  switch-state:
   # single-box profile (`COMPOSE_PROFILES=single-box`) — only used when the bundled
   # ollama + openwrt services are active. Declared unconditionally so
   # `docker volume ls` shows the names whether the profile is on or off;

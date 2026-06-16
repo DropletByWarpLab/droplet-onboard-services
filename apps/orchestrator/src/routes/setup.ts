@@ -1,0 +1,627 @@
+/**
+ * `/api/setup/state` — first-run setup state machine (PR #372 /
+ * docs/ONBOARDING_STATE_MACHINE.md).
+ *
+ * Replaces the stateless, Nextcloud-`installed`-derived `setupRequired`
+ * boolean with an explicit, resumable server-side state.
+ *
+ *   GET  /api/setup/state
+ *     → { appliance: "unclaimed"|"ready", setup_step, user_tour_completed }
+ *     The dashboard's AuthGate routes off this: unclaimed → wizard@step;
+ *     ready + tour pending → tour; else dashboard.
+ *
+ *   PATCH /api/setup/state
+ *     Body (any non-empty subset):
+ *       { setup_step?: SetupStep,         // resumability — persist wizard step
+ *         appliance?: "ready",            // wizard-finish transition
+ *         user_tour_completed?: true }    // post-claim tour done
+ *     → the updated state, same shape as GET.
+ *
+ * The router is mounted BEFORE the auth middleware in app.ts (allow-listed
+ * in middleware/auth.ts) because first-run resumability happens before any
+ * user exists, exactly like the existing public POST /auth/setup. The wire
+ * shape is snake_case to match the spec contract; the service speaks
+ * camelCase internally.
+ *
+ * AUTH POSTURE (M1/M2, PR #372 re-review):
+ *   - GET is PUBLIC and SIDE-EFFECT-FREE (findUnique; never writes — M5).
+ *   - PATCH of `setup_step` / `user_tour_completed` stays PUBLIC: these are
+ *     low-sensitivity resumability hints that the wizard needs to persist
+ *     pre-claim, and neither can claim the box.
+ *   - PATCH of `appliance:"ready"` — the lifecycle-MUTATING claim transition
+ *     — is GATED. It is honored only when the caller proves they're the
+ *     legitimate owner: either a valid dashboard session cookie (the wizard
+ *     authenticates at the account step, so the finish PATCH rides that
+ *     cookie), or — the durable backstop — the service's M2 precondition
+ *     that an admin account already exists (`markApplianceReady` rejects an
+ *     account-less box with 409). An unauthenticated pre-claim caller can
+ *     therefore neither take the box over (flip it ready early) nor lock the
+ *     owner out.
+ *
+ * The GATE constraint (PR #372) keeps claim / org / team out of SetupStep,
+ * so an unknown step is a 400 here (the service's InvalidSetupStepError),
+ * never silently coerced onto a resume target the wizard can't render.
+ */
+import { Router, type Request } from "express";
+import { type PrismaClient } from "@prisma/client";
+import pino from "pino";
+import { z } from "zod";
+import {
+  getSetupState,
+  setSetupStep,
+  advanceSetupStepToAtLeast,
+  markApplianceReady,
+  markTourCompleted,
+  isSetupStep,
+  STEP_AFTER_CLAIM,
+  InvalidSetupStepError,
+  SetupNotCompleteError,
+  type SetupState,
+} from "../services/setup.service.js";
+import {
+  consumeClaimCode,
+  CLAIM_OUTCOME,
+} from "../services/setup-claim.service.js";
+import {
+  persistOrg,
+  SlugInvalidError,
+  SlugTakenError,
+} from "../services/setup-org.service.js";
+import { getApplianceContract } from "../services/appliance-contract.service.js";
+import { verifyAccessToken } from "../services/jwt.service.js";
+import { SESSION_COOKIE_NAME } from "../middleware/auth.js";
+import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
+import { kickScreenQRRefresh } from "../services/screen-qr.service.js";
+
+const logger = pino({ name: "setup-route" });
+
+// PR #373 / WARP-804 — STEP_AFTER_CLAIM (the wizard step the customer lands on
+// after a successful claim: `account`, since claim slots FIRST) is now owned by
+// the setup state machine (`services/setup.service.ts`) and imported above, so
+// the route, getSetupState, and setSetupStep all read the SAME constant. WARP-804
+// also makes the state machine treat a `claim` step on an already-claimed box as
+// satisfied (→ STEP_AFTER_CLAIM), closing the lockout where a re-presented claim
+// step could never be satisfied.
+
+/**
+ * PR #380 — the wizard step the customer lands on after naming their workspace.
+ * Org slots AFTER account (welcome → claim → account → org → internet → …, per
+ * the #380 spec), so a successful persist advances the resumable wizard to
+ * `internet`. This is the ONLY place that step name is written for the org
+ * flow; keep it in sync with the dashboard `STEPS` array + `SETUP_STEPS`.
+ */
+const STEP_AFTER_ORG = "internet";
+
+/**
+ * PR #380 — org request body. `name`, `slug`, `tz` are required (the workspace
+ * must have a name + reservable host + a time zone). `industry` / `size` are
+ * OPTIONAL LOCAL smart-default hints — the orchestrator persists them but never
+ * sends them off the box (FEATURES.md §10). `logo` is the optional logo path.
+ * Slug *shape* validation lives in the service (setup-org.service.isValidSlug)
+ * so the schema only checks presence/type; the service throws the typed
+ * SlugInvalidError the route maps to a 400.
+ */
+const orgSchema = z.object({
+  name: z.string().min(1).max(120),
+  slug: z.string().min(1).max(80),
+  tz: z.string().min(1).max(64),
+  industry: z.string().max(80).optional(),
+  size: z.string().max(40).optional(),
+  logo: z.string().max(512).optional(),
+});
+
+/**
+ * WARP-631 — wrong-code rate-limit with PROGRESSIVE BACKOFF (replaces the flat
+ * PR #373 10-attempts/15-min sliding lockout). A claim code is short and read
+ * off a physical display, so an attacker on the LAN could otherwise brute-force
+ * it. But the old flat lockout had a field-incident failure mode (2026-06-01):
+ * its sliding TTL was bumped on EVERY attempt, so a user who kept trying never
+ * let the window elapse — a correct code entered during the lock read as
+ * rejected. The backoff model locks for a FIXED, escalating duration instead,
+ * so the lock always elapses on its own and a correct code clears the state.
+ *
+ * FREE_TIER wrong codes are forgiven (inline CLAIM_CODE_INVALID, no lock). The
+ * (FREE_TIER+1)th wrong code is the first lock; each successive lockout
+ * escalates along BACKOFF_SCHEDULE and caps at its last value. Everything fails
+ * OPEN if the cache is down so a flaky Redis can't lock a legitimate owner out
+ * of claiming their box. Keyed by client IP.
+ */
+const CLAIM_FREE_TIER = 3;
+/** Lockout seconds for the 1st, 2nd, 3rd … lock; the last value is the cap. */
+const CLAIM_BACKOFF_SCHEDULE = [15, 30, 60, 120, 300, 900] as const;
+/** Wrong-code counter resets after an hour of no failures (rolling window). */
+const CLAIM_FAILS_TTL_SEC = 60 * 60;
+
+/** `ratelimit:setup-claim:fails:<ip>` — running wrong-code count for the IP. */
+function claimFailsKey(ip: string): string {
+  return `ratelimit:setup-claim:fails:${ip}`;
+}
+/** `ratelimit:setup-claim:lock:<ip>` — locked-until epoch ms for the IP. */
+function claimLockKey(ip: string): string {
+  return `ratelimit:setup-claim:lock:${ip}`;
+}
+
+/**
+ * WARP-631 — PURE progressive-backoff schedule. Maps a running wrong-code count
+ * onto the lockout duration in seconds. The first `CLAIM_FREE_TIER` failures
+ * are forgiven (0 = no lock); the next failure is the first scheduled lock, and
+ * the schedule escalates then caps at its final value. Monotonic
+ * non-decreasing. Exported + unit-tested independently of any I/O (AC#7).
+ *
+ *   idx = failureCount - CLAIM_FREE_TIER - 1
+ *   idx < 0                        → 0
+ *   else SCHEDULE[min(idx, last)]
+ */
+export function claimBackoffSeconds(failureCount: number): number {
+  const idx = failureCount - CLAIM_FREE_TIER - 1;
+  if (idx < 0) return 0;
+  return CLAIM_BACKOFF_SCHEDULE[
+    Math.min(idx, CLAIM_BACKOFF_SCHEDULE.length - 1)
+  ];
+}
+
+/**
+ * Read the per-IP lock. If a lock exists and is still in the future, the
+ * request is locked and we report the whole-seconds wait. Fails OPEN (reports
+ * not-locked) on any cache error — a down cache must never brick first-run
+ * claiming.
+ */
+async function checkClaimLock(
+  ip: string,
+): Promise<{ locked: boolean; retryAfterSeconds: number }> {
+  try {
+    const until = (await cacheGet<number>(claimLockKey(ip))) ?? 0;
+    const now = Date.now();
+    if (until > now) {
+      return {
+        locked: true,
+        retryAfterSeconds: Math.ceil((until - now) / 1000),
+      };
+    }
+    return { locked: false, retryAfterSeconds: 0 };
+  } catch {
+    return { locked: false, retryAfterSeconds: 0 };
+  }
+}
+
+/**
+ * Record one wrong-code attempt for the IP: bump the rolling failure counter
+ * (1h TTL) and, if the new count crosses into a scheduled lock, write the
+ * locked-until timestamp with a TTL equal to the lock duration so it expires on
+ * its own. Returns the lock duration applied (0 = still within the free tier).
+ * Fails OPEN (returns 0) on any cache error.
+ */
+async function recordClaimFailure(ip: string): Promise<{ lockedSeconds: number }> {
+  try {
+    const current = (await cacheGet<number>(claimFailsKey(ip))) ?? 0;
+    const next = current + 1;
+    await cacheSet(claimFailsKey(ip), next, CLAIM_FAILS_TTL_SEC);
+    const lockedSeconds = claimBackoffSeconds(next);
+    if (lockedSeconds > 0) {
+      await cacheSet(
+        claimLockKey(ip),
+        Date.now() + lockedSeconds * 1000,
+        lockedSeconds,
+      );
+    }
+    return { lockedSeconds };
+  } catch {
+    return { lockedSeconds: 0 };
+  }
+}
+
+/**
+ * Clear the per-IP failure + lock state. Called after a successful (or
+ * already-claimed) bind so a correct code always resets the counters (AC#3),
+ * and so a brief lock can't outlive a legitimate success.
+ */
+async function clearClaimRateState(ip: string): Promise<void> {
+  await cacheDel(claimFailsKey(ip));
+  await cacheDel(claimLockKey(ip));
+}
+
+/** Claim request body — a single non-empty `code` string. */
+const claimSchema = z.object({
+  code: z.string().min(1).max(64),
+});
+
+/** Map the camelCase domain object onto the snake_case wire contract. */
+function toWire(state: SetupState): {
+  appliance: "unclaimed" | "ready";
+  setup_step: string;
+  user_tour_completed: boolean;
+} {
+  return {
+    appliance: state.appliance,
+    setup_step: state.setupStep,
+    user_tour_completed: state.userTourCompleted,
+  };
+}
+
+// PATCH body: every field optional, but `.refine` requires at least one so
+// an empty patch is a 400 rather than a silent no-op. `setup_step` is
+// validated against the shipped enum by the service (isSetupStep);
+// `appliance` only ever moves forward to "ready" (the wizard-finish
+// transition) — "unclaimed" is the boot default and isn't a client-driven
+// target. `user_tour_completed` only flips true (you can't un-see the tour).
+const patchSchema = z
+  .object({
+    setup_step: z.string().min(1).optional(),
+    appliance: z.literal("ready").optional(),
+    user_tour_completed: z.literal(true).optional(),
+  })
+  .refine(
+    (b) =>
+      b.setup_step !== undefined ||
+      b.appliance !== undefined ||
+      b.user_tour_completed !== undefined,
+    { message: "At least one of setup_step, appliance, user_tour_completed is required" },
+  );
+
+export function createSetupRouter(prisma: PrismaClient): Router {
+  const router = Router();
+
+  // ── GET /api/setup/state ───────────────────────────────────────
+  router.get("/setup/state", async (_req: Request, res, next) => {
+    try {
+      const state = await getSetupState(prisma);
+      res.json(toWire(state));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ── PATCH /api/setup/state ─────────────────────────────────────
+  router.patch("/setup/state", async (req: Request, res, next) => {
+    try {
+      const parsed = patchSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({
+          error: "Invalid setup state update",
+          code: "INVALID_SETUP_PATCH",
+          details: parsed.error.flatten(),
+        });
+        return;
+      }
+      const body = parsed.data;
+
+      // Pre-validate the step here so we 400 BEFORE any write — the service
+      // would also reject it, but failing fast keeps the persisted row
+      // untouched on a bad request.
+      if (body.setup_step !== undefined && !isSetupStep(body.setup_step)) {
+        res.status(400).json({
+          error: `Unknown setup step "${body.setup_step}"`,
+          code: "INVALID_SETUP_STEP",
+        });
+        return;
+      }
+
+      // M1 — the `appliance:"ready"` claim is the only lifecycle-MUTATING
+      // transition, so it is the only one we gate. A request is allowed to
+      // claim the box when EITHER:
+      //   (a) it carries a valid dashboard session cookie (the wizard's
+      //       account step authenticated the owner, so the finish PATCH
+      //       rides that cookie — this router is mounted before
+      //       authMiddleware so we verify the cookie inline, the same way
+      //       routes/pm.ts does for the OIDC authorize endpoint), OR
+      //   (b) an admin account already exists, in which case the box is
+      //       genuinely claimable and `markApplianceReady` (M2) will honor
+      //       it; the service itself fails CLOSED with 409 when no admin
+      //       exists, so an anonymous pre-claim caller can never flip it.
+      // The session check here is a fast 403 for the common anonymous case;
+      // the M2 precondition in the service is the authoritative backstop.
+      let claimAuthorized = false;
+      if (body.appliance === "ready") {
+        const sessionToken = req.cookies?.[SESSION_COOKIE_NAME];
+        const session = sessionToken ? verifyAccessToken(sessionToken) : null;
+        if (session) {
+          claimAuthorized = true;
+        } else if ((await prisma.user.count()) === 0) {
+          res.status(403).json({
+            error:
+              "Claiming the appliance (appliance:\"ready\") requires an authenticated session or a completed setup.",
+            code: "SETUP_CLAIM_FORBIDDEN",
+          });
+          return;
+        }
+      }
+
+      // Apply the requested transitions. Order is deliberate: persist the
+      // step first (resumability), then the terminal flips. Each helper
+      // upserts the singleton and returns the latest state, so the last
+      // one wins as the response.
+      let latest: SetupState | null = null;
+      if (body.setup_step !== undefined) {
+        latest = await setSetupStep(prisma, body.setup_step);
+      }
+      if (body.appliance === "ready") {
+        // `authorized` short-circuits the service's admin-count precondition
+        // when a valid session proved ownership (covers the freshly-claimed
+        // window); otherwise the service re-checks admin existence (M2).
+        latest = await markApplianceReady(prisma, { authorized: claimAuthorized });
+      }
+      if (body.user_tour_completed === true) {
+        latest = await markTourCompleted(prisma);
+      }
+
+      // `latest` is guaranteed non-null: the schema's refine() rejects an
+      // empty patch, so at least one branch above ran.
+      res.json(toWire(latest ?? (await getSetupState(prisma))));
+    } catch (err) {
+      if (err instanceof InvalidSetupStepError) {
+        res.status(400).json({ error: err.message, code: err.code });
+        return;
+      }
+      // M2 — claiming an account-less box is a 409 (well-formed request,
+      // but the appliance isn't in a claimable state yet). Fail CLOSED:
+      // the appliance stays unclaimed.
+      if (err instanceof SetupNotCompleteError) {
+        res.status(409).json({ error: err.message, code: err.code });
+        return;
+      }
+      logger.error({ err }, "Failed to update setup state");
+      next(err);
+    }
+  });
+
+  // ── GET /api/setup/appliance ───────────────────────────────────
+  //
+  // PR #373 — the hardware contract the Claim step renders
+  // ({ appliance_id, compute, storage, network, display, supply_chain }).
+  // PUBLIC: shown before any account exists. This is a DOCUMENTED STUB — no
+  // orchestrator facility produces this exact shape yet; the contract service
+  // assembles it (best-effort enriching `network` from the routing
+  // /system/info, which is router-only). The route stays thin so the UI has a
+  // stable shape to build against while the real per-field sources land.
+  router.get("/setup/appliance", async (_req: Request, res, next) => {
+    try {
+      const contract = await getApplianceContract();
+      res.json(contract);
+    } catch (err) {
+      logger.error({ err }, "Failed to assemble appliance contract");
+      next(err);
+    }
+  });
+
+  // ── POST /api/setup/claim ──────────────────────────────────────
+  //
+  // PR #373 — bind the appliance to the workspace. Atomic, single-use,
+  // rate-limited; the code is hashed at rest and compared in constant time
+  // (setup-claim.service). PUBLIC: claiming precedes account creation.
+  //
+  //   correct code      → 200 { claimed:true, next_step } and advance the
+  //                        resumable wizard to `account`. Does NOT flip the
+  //                        appliance to "ready" — that's the wizard-FINISH
+  //                        transition (#372); claim is the FIRST step. CLEARS
+  //                        the per-IP failure/lock counters (WARP-631 AC#3).
+  //   already claimed    → 200 { claimed:true, already_claimed:true, next_step }
+  //                        — idempotent short-circuit so a refresh/re-run moves
+  //                        the customer on instead of erroring. Also clears the
+  //                        rate state.
+  //   wrong/unknown/expired → 400 { code:"CLAIM_CODE_INVALID" } while within the
+  //                        free tier (WARP-631), never echoing the real code;
+  //                        the (FREE_TIER+1)th wrong code instead returns
+  //                        429 { code:"CLAIM_RATE_LIMITED", retryAfterSeconds }
+  //                        + a Retry-After header.
+  //   already locked     → 429 { code:"CLAIM_RATE_LIMITED", retryAfterSeconds }
+  //                        + Retry-After, BEFORE any DB read.
+  router.post("/setup/claim", async (req: Request, res, next) => {
+    try {
+      const parsed = claimSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({
+          error: "A claim code is required.",
+          code: "CLAIM_CODE_REQUIRED",
+        });
+        return;
+      }
+
+      // WARP-631 — check the per-IP lock BEFORE any DB work so a locked client
+      // can't hammer the lookup, and so a correct code attempted DURING a lock
+      // still reads as rate-limited (the lock must elapse first). `req.ip` is
+      // the client address (Express trust-proxy aware). Fails OPEN if the
+      // cache is down (checkClaimLock returns not-locked on error).
+      const ip = req.ip ?? "unknown";
+      const lock = await checkClaimLock(ip);
+      if (lock.locked) {
+        res.setHeader("Retry-After", String(lock.retryAfterSeconds));
+        res.status(429).json({
+          error: "Too many claim attempts. Try again shortly.",
+          code: "CLAIM_RATE_LIMITED",
+          retryAfterSeconds: lock.retryAfterSeconds,
+        });
+        return;
+      }
+
+      const result = await consumeClaimCode(prisma, parsed.data.code);
+
+      if (result.outcome === CLAIM_OUTCOME.CLAIMED) {
+        // A correct code clears the failure/lock counters (WARP-631 AC#3).
+        // Best-effort: a cache hiccup here must not fail the committed claim.
+        await clearClaimRateState(ip).catch(() => {});
+        // Advance the resumable wizard to the next step. Best-effort: a failure
+        // to persist the step must not fail the (already-committed) claim — the
+        // dashboard also advances locally and re-syncs on the next PATCH.
+        // WARP-867: floor semantics — never drags an already-further pointer
+        // backward (a fresh claim can't legally have one, but the invariant is
+        // cheap and uniform with the re-claim path below).
+        try {
+          await advanceSetupStepToAtLeast(prisma, STEP_AFTER_CLAIM);
+        } catch (stepErr) {
+          logger.warn(
+            { err: stepErr },
+            "Claim succeeded but persisting the post-claim step failed",
+          );
+        }
+        // Unstick the PyPortal: the box just got claimed, so kick the screen-qr
+        // poller to move the panel off the modal claim screen onto the live
+        // System screen now, instead of waiting up to POLL_INTERVAL_MS. Fire-
+        // and-forget — a display hiccup must not fail the (committed) claim.
+        kickScreenQRRefresh();
+        res.json({ claimed: true, next_step: STEP_AFTER_CLAIM });
+        return;
+      }
+
+      if (result.outcome === CLAIM_OUTCOME.ALREADY_CLAIMED) {
+        // Idempotent short-circuit — the box is already bound, move on. Clear
+        // the rate state too so a prior partial-lock can't linger (WARP-631).
+        await clearClaimRateState(ip).catch(() => {});
+        // WARP-867 — reconcile the resume pointer on a re-presented claim
+        // (wizard restarted from welcome after a reboot raced the state
+        // probe). Floor semantics, two jobs: (a) HEAL a pointer stranded
+        // at/before "claim" — e.g. the original claim's best-effort step
+        // persist failed — so the next cold load resumes past the consumed
+        // code instead of re-gating on it; (b) never move a further-along
+        // pointer backward, so a replayed early step can't manufacture the
+        // unsatisfiable-account dead-end from the field report (that
+        // regression came from the client re-persisting early steps after
+        // the broken cold-load resume; the floor keeps this side immune
+        // regardless of client behaviour). Best-effort for the same reason
+        // as the fresh-claim path.
+        try {
+          await advanceSetupStepToAtLeast(prisma, STEP_AFTER_CLAIM);
+        } catch (stepErr) {
+          logger.warn(
+            { err: stepErr },
+            "Re-claim acknowledged but reconciling the wizard step failed",
+          );
+        }
+        // Idempotent re-claim — still kick the panel off the claim screen in
+        // case a prior transition was missed (e.g. the display was down at the
+        // moment of the original claim).
+        kickScreenQRRefresh();
+        res.json({
+          claimed: true,
+          already_claimed: true,
+          next_step: STEP_AFTER_CLAIM,
+        });
+        return;
+      }
+
+      // Invalid (wrong / unknown / expired). Inline error, no reveal. WARP-631:
+      // record the failure; if this crosses into a scheduled lock (the
+      // FREE_TIER+1th wrong code), it was both wrong AND is now locked, so we
+      // answer 429 with the wait — satisfying AC#1. Otherwise the usual inline
+      // 400 within the free tier.
+      const { lockedSeconds } = await recordClaimFailure(ip);
+      if (lockedSeconds > 0) {
+        res.setHeader("Retry-After", String(lockedSeconds));
+        res.status(429).json({
+          error: "Too many claim attempts. Try again shortly.",
+          code: "CLAIM_RATE_LIMITED",
+          retryAfterSeconds: lockedSeconds,
+        });
+        return;
+      }
+      res.status(400).json({
+        error: "That claim code didn't match. Check the display and try again.",
+        code: "CLAIM_CODE_INVALID",
+      });
+    } catch (err) {
+      logger.error({ err }, "Failed to process claim");
+      next(err);
+    }
+  });
+
+  // ── POST /api/setup/org ────────────────────────────────────────
+  //
+  // PR #380 — name the single workspace (the "company brain") and reserve its
+  // `droplet.local/<slug>` host. Org slots AFTER account in the resumable
+  // wizard, so a successful persist advances the wizard to `internet`.
+  //
+  // The slug is validated `[a-z0-9-]` + uniqueness in setup-org.service; the
+  // route maps the typed errors onto inline-error HTTP codes so the wizard can
+  // block continue and show the field error:
+  //   valid          → 200 { ok, slug, reserved_host, next_step:"internet" }
+  //   missing fields → 400 { code:"ORG_FIELDS_REQUIRED" }
+  //   bad slug shape → 400 { code:"ORG_SLUG_INVALID" }
+  //   slug taken     → 409 { code:"ORG_SLUG_TAKEN" }
+  //
+  // industry / size are LOCAL smart-default hints only — persisted on the box,
+  // NEVER sent off it (FEATURES.md §10). This handler makes no outbound call.
+  router.post("/setup/org", async (req: Request, res, next) => {
+    try {
+      // ORCH-04 — this route is on the public allow-list (no authMiddleware),
+      // and `persistOrg` does an UNCONDITIONAL upsert of the Workspace
+      // singleton (clearing optional fields with `?? null` each call). Gate
+      // it the same way the lifecycle-mutating `appliance:"ready"` PATCH is
+      // gated above: a write is allowed when EITHER
+      //   (a) the request carries a valid dashboard session cookie (the
+      //       wizard's account step authenticated the owner before the org
+      //       step, so the org POST rides that cookie — verified inline
+      //       because this router mounts before authMiddleware), OR
+      //   (b) setup is not yet finished (`appliance !== "ready"`), i.e.
+      //       genuine first-run/unclaimed onboarding, which must stay open.
+      // Once the appliance is claimed (`appliance:"ready"`), an anonymous LAN
+      // client must NOT be able to silently rename the workspace, change its
+      // tz/logo, or re-reserve its slug — so we require a session then. This
+      // also closes the unauthenticated slug-uniqueness probe oracle on a
+      // set-up box.
+      const sessionToken = req.cookies?.[SESSION_COOKIE_NAME];
+      const session = sessionToken ? verifyAccessToken(sessionToken) : null;
+      if (!session) {
+        const { appliance } = await getSetupState(prisma);
+        if (appliance === "ready") {
+          res.status(401).json({
+            error: "Editing the workspace requires an authenticated session.",
+            code: "ORG_AUTH_REQUIRED",
+          });
+          return;
+        }
+      }
+
+      const parsed = orgSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({
+          error: "A workspace name, URL, and time zone are required.",
+          code: "ORG_FIELDS_REQUIRED",
+          details: parsed.error.flatten(),
+        });
+        return;
+      }
+      const body = parsed.data;
+
+      const result = await persistOrg(prisma, {
+        name: body.name,
+        slug: body.slug,
+        tz: body.tz,
+        industry: body.industry ?? null,
+        size: body.size ?? null,
+        logoPath: body.logo ?? null,
+      });
+
+      // Advance the resumable wizard. Best-effort: a failure to persist the
+      // step must not fail the (already-committed) org write — the dashboard
+      // also advances locally and re-syncs on the next PATCH. (Mirrors the
+      // claim route's post-bind step advance.)
+      try {
+        await setSetupStep(prisma, STEP_AFTER_ORG);
+      } catch (stepErr) {
+        logger.warn(
+          { err: stepErr },
+          "Org persisted but advancing the wizard step failed",
+        );
+      }
+
+      res.json({
+        ok: true,
+        slug: result.slug,
+        reserved_host: result.reservedHost,
+        next_step: STEP_AFTER_ORG,
+      });
+    } catch (err) {
+      if (err instanceof SlugInvalidError) {
+        res.status(400).json({ error: err.message, code: err.code });
+        return;
+      }
+      if (err instanceof SlugTakenError) {
+        res.status(409).json({ error: err.message, code: err.code });
+        return;
+      }
+      logger.error({ err }, "Failed to persist org settings");
+      next(err);
+    }
+  });
+
+  return router;
+}

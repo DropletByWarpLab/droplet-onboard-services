@@ -55,7 +55,7 @@ by `scripts/lib/secrets.sh generate_env` and backfilled via
 `_migrate_ensure_key` for existing installs.
 
 The docker SDK calls are scoped to the
-`com.docker.compose.project=droplet-pi-platform` label, so support
+`com.docker.compose.project=droplet` label, so support
 can list / inspect / restart only containers in our own stack — never
 neighbours that happen to share the docker socket.
 

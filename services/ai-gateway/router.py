@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections.abc import AsyncGenerator
 
 from auth.byok import get_api_key
@@ -24,9 +25,28 @@ from schemas import ChatRequest, ModelInfo
 
 logger = logging.getLogger(__name__)
 
-# Model name prefix → provider mapping
+# Model name prefix → provider mapping.
+#
+# Order matters: dicts iterate in insertion order, and `resolve_provider`
+# returns the first provider whose prefix matches. `ollama` is listed
+# FIRST so a local family whose name collides with a cloud prefix wins.
+# The canonical collision is `gpt-oss` — OpenAI's OPEN-WEIGHTS model,
+# served locally by Ollama, whose name starts with the openai cloud
+# prefix `gpt`. It must route to ollama (the off-LAN gate blocks the
+# nonexistent cloud call with HTTP 451). `gpt-oss` is more specific than
+# `gpt`, and matched first, so genuine cloud models (`gpt-4o`, `o1`)
+# still resolve to openai.
 PROVIDER_PREFIXES = {
-    "ollama": ["llama", "mistral", "phi", "gemma", "qwen", "codellama", "deepseek"],
+    "ollama": [
+        "llama",
+        "mistral",
+        "phi",
+        "gemma",
+        "qwen",
+        "codellama",
+        "deepseek",
+        "gpt-oss",
+    ],
     "anthropic": ["claude"],
     "openai": ["gpt", "o1", "o3"],
 }
@@ -44,11 +64,28 @@ class ProviderRouter:
             "anthropic": self.anthropic,
             "openai": self.openai,
         }
+        # The one configured local model (the "one-model rule"). When the
+        # chat request targets exactly this model it ALWAYS routes to the
+        # local Ollama provider, regardless of any cloud-looking name —
+        # we know it's local because it's what this deployment runs, so we
+        # never have to guess from the model string. Empty when unset
+        # (e.g. tests / cloud-only deploys), in which case routing falls
+        # back to prefix matching alone.
+        self._local_model = (os.getenv("LLM_MODEL") or "").strip().lower() or None
 
-    async def refresh_keys(self):
-        """Reload API keys from the BYOK keystore."""
-        anthropic_key = await get_api_key("anthropic")
-        openai_key = await get_api_key("openai")
+    async def refresh_keys(self, user_id: str | None = None):
+        """Reload API keys from the BYOK keystore for a given caller.
+
+        WARP-561: keys are namespaced per authenticated user. ``user_id`` is
+        the caller threaded down from the HTTP route (the orchestrator-provided
+        principal). ``None`` reads the shared/device namespace and is used by
+        server-side callers that have no per-request identity (model listing,
+        gRPC EmbedText). Cloud providers are rebuilt per call rather than
+        cached on the instance so two concurrent users never see each other's
+        key — the router holds no per-user key state between requests.
+        """
+        anthropic_key = await get_api_key("anthropic", user_id=user_id)
+        openai_key = await get_api_key("openai", user_id=user_id)
         self.anthropic = AnthropicCloudProvider(api_key=anthropic_key)
         self.openai = OpenAICloudProvider(api_key=openai_key)
         self._providers["anthropic"] = self.anthropic
@@ -60,6 +97,13 @@ class ProviderRouter:
             return self._providers[explicit_provider]
 
         model_lower = model.lower()
+
+        # The configured local model always routes local, even if its name
+        # collides with a cloud prefix (the gpt-oss / cloud-finetune case).
+        # This is the explicit one-model rule, not a name heuristic.
+        if self._local_model and model_lower == self._local_model:
+            return self.ollama
+
         for provider_name, prefixes in PROVIDER_PREFIXES.items():
             if any(model_lower.startswith(p) for p in prefixes):
                 return self._providers[provider_name]
@@ -67,9 +111,9 @@ class ProviderRouter:
         # Default to Ollama (local-first)
         return self.ollama
 
-    async def list_all_models(self) -> list[ModelInfo]:
+    async def list_all_models(self, user_id: str | None = None) -> list[ModelInfo]:
         """Query all providers for available models concurrently."""
-        await self.refresh_keys()
+        await self.refresh_keys(user_id=user_id)
         tasks = [provider.list_models() for provider in self._providers.values()]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -81,14 +125,20 @@ class ProviderRouter:
                 models.extend(result)
         return models
 
-    async def chat(self, request: ChatRequest) -> dict | AsyncGenerator[str, None]:
+    async def chat(
+        self, request: ChatRequest, user_id: str | None = None
+    ) -> dict | AsyncGenerator[str, None]:
         """Route a chat request to the appropriate provider.
 
         Forwards `tools[]` to the model untouched. If the model emits
         `tool_calls[]` they are returned to the caller (the orchestrator
         agent loop) verbatim — this gateway never executes tools.
+
+        WARP-561: ``user_id`` selects which caller's BYOK keys are loaded for
+        this turn so a cloud request uses the requesting user's key, not a
+        device-global one.
         """
-        await self.refresh_keys()
+        await self.refresh_keys(user_id=user_id)
         provider = self.resolve_provider(request.model, request.provider)
 
         # WARP-468: off-LAN gate. Refuses any non-local provider with

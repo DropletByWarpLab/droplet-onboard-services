@@ -70,7 +70,7 @@ function createPrismaMock(
   let nextId = 1;
   const mkId = (prefix: string) => `${prefix}-${nextId++}`;
 
-  return {
+  const tables = {
     specs,
     runs,
     toolSpec: {
@@ -271,6 +271,15 @@ function createPrismaMock(
       ),
     },
   };
+  // tools.ts PATCH replaces steps + bumps version inside
+  // prisma.$transaction(async (tx) => ...); run the callback against the
+  // same tables — tests need the API shape, not rollback semantics.
+  // Object.assign (not an inline self-reference) avoids TS7022.
+  return Object.assign(tables, {
+    $transaction: vi.fn(
+      async (fn: (tx: typeof tables) => unknown) => fn(tables),
+    ),
+  });
 }
 
 function mkUser(role: AuthUser["role"], username = "stefan"): AuthUser {

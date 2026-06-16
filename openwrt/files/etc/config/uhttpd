@@ -2,7 +2,7 @@
 # Droplet uhttpd Configuration
 # =============================================================================
 # Serves LuCI web UI and ubus JSON-RPC API endpoint
-# ubus API exposed at /ubus for Jetson AI control
+# ubus API exposed at /ubus for appliance AI control
 # =============================================================================
 
 config uhttpd 'main'

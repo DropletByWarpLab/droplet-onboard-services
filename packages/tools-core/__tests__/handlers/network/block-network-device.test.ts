@@ -5,11 +5,12 @@ import type { ToolContext } from "../../../src/types.js";
 function ctxWithPost(post: ReturnType<typeof vi.fn>): ToolContext {
   return {
     http: {
-      routing: { get: vi.fn(), post, patch: vi.fn(), delete: vi.fn() },
+      routing: {} as ToolContext["http"]["routing"],
       cameras: {} as ToolContext["http"]["cameras"],
       switchSvc: {} as ToolContext["http"]["switchSvc"],
       fileIndexer: {} as ToolContext["http"]["fileIndexer"],
       nextcloud: {} as ToolContext["http"]["nextcloud"],
+      orchestrator: { get: vi.fn(), post, patch: vi.fn(), delete: vi.fn() },
     },
     prisma: {} as ToolContext["prisma"],
     matter: {} as ToolContext["matter"],
@@ -33,7 +34,7 @@ describe("block_network_device", () => {
       expect(r.status).toBe("confirmation_required");
       expect(r.error.message).toContain("confirmation");
     }
-    expect(post).toHaveBeenCalledWith("/firewall/block", { mac: "AA:BB:CC:DD:EE:FF" });
+    expect(post).toHaveBeenCalledWith("/api/network/firewall/block", { mac: "AA:BB:CC:DD:EE:FF" });
   });
 
   it("returns ok when orchestrator returns 200", async () => {

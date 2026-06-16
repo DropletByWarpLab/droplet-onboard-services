@@ -182,7 +182,7 @@ All Frigate access goes through `apps/orchestrator/src/services/frigate.client.t
 
 ### Storage path
 
-Frigate's recordings live on disk under `${NVR_MEDIA_SOURCE}` (default `nvrdata` Docker volume; on Jetson typically `/mnt/cameras`). HLS playback streams from there via the orchestrator with auth + range-request support; clip export already uses Nextcloud (kept as-is).
+Frigate's recordings live on disk under `${NVR_MEDIA_SOURCE}` (default `nvrdata` Docker volume; on the inference host typically `/mnt/cameras`). HLS playback streams from there via the orchestrator with auth + range-request support; clip export already uses Nextcloud (kept as-is).
 
 ---
 

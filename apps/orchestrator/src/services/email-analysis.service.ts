@@ -159,7 +159,14 @@ function extractJson(text: string): unknown {
 export function createEmailAnalysisFn(
   mcp: McpClientService,
 ): EmailAnalysisFn {
-  const defaultModel = process.env.DEFAULT_MODEL ?? "mistral:7b-instruct";
+  // LLM_MODEL is the model the box actually hosts (single-box.sh writes
+  // it to .env); the historic mistral fallback is not pulled in
+  // production and would 404 upstream — every analysis would silently
+  // degrade to DEFAULT_ANALYSIS.
+  const defaultModel =
+    process.env.DEFAULT_MODEL ??
+    process.env.LLM_MODEL ??
+    "mistral:7b-instruct";
   return async (input: EmailAnalysisInput): Promise<EmailAnalysis> => {
     try {
       const result = await runAgent(

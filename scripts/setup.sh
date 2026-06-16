@@ -60,7 +60,7 @@ Options:
                      host scripts, writes single-box knobs to .env,
                      activates the `single-box` compose profile).
                      Auto-detected on Linux hosts with dGPU + iGPU and
-                     no separate Jetson on the LAN; use this to force or
+                     no separate inference host on the LAN; use this to force or
                      skip auto-detect.
   --no-single-box    Force single-box off (multi-box / v2-6 deployment).
   --regenerate-env   Force-regenerate .env (backs up existing)
@@ -100,6 +100,8 @@ source "$SCRIPT_DIR/lib/logging.sh"
 source "$SCRIPT_DIR/lib/preflight.sh"
 # shellcheck source=lib/docker.sh
 source "$SCRIPT_DIR/lib/docker.sh"
+# shellcheck source=lib/tls-reload.sh
+source "$SCRIPT_DIR/lib/tls-reload.sh"
 # shellcheck source=lib/secrets.sh
 source "$SCRIPT_DIR/lib/secrets.sh"
 # shellcheck source=lib/compose.sh
@@ -108,6 +110,8 @@ source "$SCRIPT_DIR/lib/compose.sh"
 source "$SCRIPT_DIR/lib/systemd.sh"
 # shellcheck source=lib/camera-drivers.sh
 source "$SCRIPT_DIR/lib/camera-drivers.sh"
+# shellcheck source=lib/bluetooth.sh
+source "$SCRIPT_DIR/lib/bluetooth.sh"
 # shellcheck source=lib/local-dns.sh
 source "$SCRIPT_DIR/lib/local-dns.sh"
 # shellcheck source=lib/single-box.sh
@@ -147,8 +151,22 @@ if [ "$SYNC_SECRETS_ONLY" = "true" ]; then
   log_info "Syncing setup artifacts from .env..."
   migrate_env
   materialize_artifacts
-  log_success "Done. Restart affected containers for changes to take effect:"
-  log_info "  docker compose -f docker/docker-compose.yml restart"
+  log_success "Done. Restart affected containers to apply changes:"
+  # WARP-834 foot-gun guard: on the single-box, the OpenWrt root pw lives
+  # INSIDE the container and is set by droplet-openwrt-attach to match this
+  # secret. A bare `docker compose restart routing` after rotating
+  # OPENWRT_PASSWORD makes routing present the NEW password to a container
+  # whose root pw is still the OLD one -> ubus auth fails -> the router shows
+  # OFFLINE (the WARP-826 symptom). Rotate via the attach service instead, so
+  # the container root pw + routing restart move in lockstep.
+  # Print this WARNING first so an operator who just rotated OPENWRT_PASSWORD
+  # sees the safe path before the generic restart command.
+  log_warn "  If you rotated OPENWRT_PASSWORD on a single-box, run this INSTEAD"
+  log_warn "  of a bare 'restart routing' (sets the container root pw + restarts"
+  log_warn "  routing in lockstep):"
+  log_warn "    sudo systemctl restart droplet-openwrt-attach.service"
+  log_info "  For all other secret rotations:"
+  log_info "    docker compose -f docker/docker-compose.yml restart"
   exit 0
 fi
 
@@ -158,15 +176,28 @@ LOCK_FILE="$REPO_ROOT/.data/.setup.lock"
 _acquire_lock() {
   mkdir -p "$(dirname "$LOCK_FILE")"
   if [ -f "$LOCK_FILE" ]; then
-    local lock_age
-    lock_age=$(( $(date +%s) - $(stat -c %Y "$LOCK_FILE" 2>/dev/null || stat -f %m "$LOCK_FILE" 2>/dev/null || echo 0) ))
-    if [ "$lock_age" -gt 3600 ]; then
-      log_warn "Removing stale lock file (${lock_age}s old)"
+    local lock_pid lock_age
+    lock_pid=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
+    # Stale-aware reclaim: if the recorded PID is empty/garbage or no longer
+    # alive, the previous run died (a SIGKILL or power loss bypasses the EXIT
+    # trap below) and stranded its lock — reclaim it instead of refusing. This
+    # is what made the box un-reprovisionable after an interrupted setup.
+    if [ -z "$lock_pid" ] || ! kill -0 "$lock_pid" 2>/dev/null; then
+      log_warn "Reclaiming stale lock (pid ${lock_pid:-unreadable} not alive)"
       rm -f "$LOCK_FILE"
     else
-      log_error "Another setup is running (lock: $LOCK_FILE)"
-      log_error "If this is a mistake, remove the lock: rm $LOCK_FILE"
-      exit 1
+      # PID is alive — a real concurrent run, or (rarely) PID reuse by an
+      # unrelated process. Fall back to the age guard so even a reused-PID
+      # lock clears after an hour rather than blocking forever.
+      lock_age=$(( $(date +%s) - $(stat -c %Y "$LOCK_FILE" 2>/dev/null || stat -f %m "$LOCK_FILE" 2>/dev/null || echo 0) ))
+      if [ "$lock_age" -gt 3600 ]; then
+        log_warn "Removing stale lock file (${lock_age}s old)"
+        rm -f "$LOCK_FILE"
+      else
+        log_error "Another setup is running (lock: $LOCK_FILE, pid: $lock_pid)"
+        log_error "If this is a mistake, remove the lock: rm $LOCK_FILE"
+        exit 1
+      fi
     fi
   fi
   echo $$ > "$LOCK_FILE"
@@ -179,7 +210,8 @@ _release_lock() {
 # --- Error trap ---
 _on_error() {
   log_error "Setup failed. See log: $LOG_FILE"
-  _release_lock
+  # Lock release is handled by the EXIT trap (set right after _acquire_lock),
+  # so it runs on EVERY exit path — not just this one. exit here fires it.
   exit 1
 }
 
@@ -206,6 +238,9 @@ if [ "$DRY_RUN" = "true" ]; then
   log_info "  Would load kernel modules: uvcvideo, videodev, videobuf2_v4l2"
   log_info "  Would persist modules for boot, install udev rules"
   log_info "  Would detect connected USB cameras"
+  log_info "  Would prep host Bluetooth for Matter BLE commissioning (WARP-850):"
+  log_info "                  install bluez + rfkill, enable bluetooth.service,"
+  log_info "                  rfkill unblock bluetooth, power on the adapter"
 
   log_step 4 $TOTAL_STEPS "Secret generation"
   if [ -f "$REPO_ROOT/.env" ] && [ "$REGENERATE_ENV" != "true" ]; then
@@ -226,10 +261,21 @@ if [ "$DRY_RUN" = "true" ]; then
     log_info "  single-box: would append COMPOSE_PROFILES=linux,single-box + knobs to .env"
     log_info "                  (FRIGATE_RENDER_NODE, OLLAMA_URL, OPENSSL_CONF=,"
     log_info "                  DROPLET_FIPS_REQUIRED=false, DROPLET_TPM_BACKEND=mock,"
-    log_info "                  LLM_MODEL=gpt-oss:20b, OPENWRT_HOST/PORT/USERNAME)"
+    log_info "                  LLM_MODEL=gpt-oss:20b, OPENWRT_HOST/PORT/USERNAME,"
+    log_info "                  ROUTING/SWITCH/DISPLAY_SERVICE_URL)"
+    log_info "  single-box: would docker-network-inspect (create if absent) the"
+    log_info "                  droplet_default bridge so its gateway is derivable at"
+    log_info "                  Phase 4, before stack bring-up (compose adopts it on up)"
+    log_info "  single-box: would pin ROUTING_SERVICE_URL (:8080), SWITCH_SERVICE_URL"
+    log_info "                  (:8081), DISPLAY_SERVICE_URL (:8082) to the live"
+    log_info "                  droplet_default gateway (derived from docker, never"
+    log_info "                  hardcoded) — host-net services unreachable via the"
+    log_info "                  host.docker.internal/docker0 default the multi-box keeps"
     log_info "  single-box: would install /usr/local/sbin/droplet-openwrt-attach +"
     log_info "                  droplet-poc-host-net + 2 systemd units + /etc/default/"
     log_info "                  configs + /etc/avahi/services/droplet.service"
+    log_info "  single-box: would install automount udev rule → /etc/udev/rules.d/99-droplet-automount.rules"
+    log_info "                  + droplet-automount@.service + mnt-droplet.mount → /etc/systemd/system/"
   fi
 
   log_step 5 $TOTAL_STEPS "Build container images"
@@ -282,6 +328,12 @@ main() {
   trap _on_error ERR
 
   _acquire_lock
+  # Release the lock on ANY exit (success, error, or `set -e` abort). The ERR
+  # trap fires only on a failed command; the benign "seeder failed (exit 1)"
+  # path and other non-error early exits would otherwise leave .setup.lock
+  # behind and make the next run abort with "Another setup is running".
+  # Set AFTER a successful acquire so we never delete another run's lock.
+  trap _release_lock EXIT
 
   local total_steps=7
   [ "$SKIP_DOCKER" = "true" ] || true
@@ -319,6 +371,19 @@ main() {
     install_camera_drivers
   fi
 
+  # WARP-850: host Bluetooth prep for the matter-controller sidecar's
+  # BLE commissioning (bluez + bluetoothd enabled/active + rfkill
+  # unblock + adapter powered). Idempotent and non-fatal — a box
+  # without Bluetooth still ships IP-only Matter. Rides the same
+  # --skip-drivers escape hatch as the camera modules (both are
+  # host-hardware prep).
+  if [ "$SKIP_DRIVERS" = "true" ]; then
+    log_info "Skipping Bluetooth host prep (--skip-drivers)"
+    log_divider
+  else
+    setup_bluetooth_host
+  fi
+
   # --- Phase 4: Secrets ---
   log_step 4 $total_steps "Secrets"
   generate_env
@@ -349,6 +414,34 @@ main() {
   # scripts/host/.
   if [ "$SINGLE_BOX_MODE" = "true" ]; then
     install_single_box_host_integration
+    # Front-panel (PyPortal Titano) host integration: the shutdown-screen
+    # systemd hook (pushes "Shutting down" / "Safe to power off" on teardown)
+    # plus the device-bridge. Non-fatal — the dashboard and the oled-display
+    # container still run without it. install-device-bridge.sh is idempotent,
+    # self-elevates with sudo, auto-provisions the host pairing-QR dep
+    # (python3-qrcode) plus the single-box DROPLET_AP_MODE=hostapd knob, and
+    # enables the bridge unconditionally (the shutdown screen needs no deps).
+    # NOTE: this does
+    # NOT flash the board's CircuitPython firmware — that is a deliberate
+    # ./scripts/flash-pyportal.sh step (a write-locked board needs a physical
+    # UF2/safe-mode flash, so it must not run unattended here).
+    if [ -x "$SCRIPT_DIR/install-device-bridge.sh" ]; then
+      "$SCRIPT_DIR/install-device-bridge.sh" \
+        || log_warn "front-panel host integration had issues (continuing)"
+    fi
+    # USB/NVMe hot-plug auto-mount. Installs the udev rule +
+    # droplet-automount@.service so a drive added or swapped at runtime
+    # auto-mounts under /mnt/droplet and surfaces in the dashboard (the
+    # device-bridge merges the automount state with /proc/mounts). Idempotent;
+    # needs root for /etc/udev + /etc/systemd, so run under sudo. Non-fatal —
+    # the box still serves without hot-plug mounting. install.sh deliberately
+    # does NOT sweep already-attached drives (a provisioning foot-gun); the
+    # first mount of an existing drive happens on the next hot-plug/reboot, and
+    # the opt-in setup "adopt drives" step handles deliberate wipe+adopt.
+    if [ -f "$REPO_ROOT/services/automount/install.sh" ]; then
+      sudo bash "$REPO_ROOT/services/automount/install.sh" \
+        || log_warn "USB auto-mount install had issues (continuing)"
+    fi
   fi
 
   # --- Phase 5: Build ---
@@ -367,6 +460,14 @@ main() {
     log_divider
   else
     start_stack
+  fi
+
+  # Single-box: (re)provision the OpenWrt container now that start_stack
+  # (re)created it. The boot-time oneshot droplet-openwrt-attach does not fire
+  # on a no-reboot re-provision, so trigger it here or routing crash-loops
+  # against an unprovisioned openwrt (WARP-578).
+  if [ "$SINGLE_BOX_MODE" = "true" ] && [ "$SKIP_START" != "true" ]; then
+    provision_single_box_openwrt
   fi
 
   # --- Workspace settings seeder (WARP-457) ---
@@ -443,7 +544,7 @@ main() {
   fi
 
   # --- Done ---
-  _release_lock
+  # Lock is released by the EXIT trap set right after _acquire_lock.
 
   log_divider
   printf "\n"
@@ -452,13 +553,28 @@ main() {
   printf "  Dashboard:     ${_CYAN}https://droplet-ai.local${_RESET} (mDNS) or ${_CYAN}https://droplet-ai.lan${_RESET} (router DNS)\n"
   printf "                 ${_DIM}https://localhost also works on this device${_RESET}\n"
   printf "  API:           ${_CYAN}https://droplet-ai.local/api/health${_RESET}\n"
+  # ADR-023: surface the publicly-trusted per-device FQDN as the PRIMARY URL
+  # when it's known — the one address that works at home AND over the VPN with
+  # a green padlock and no per-client install. Read straight from .env; empty
+  # until the box has learned it from HQ on its first issuance run.
+  _public_fqdn=""
+  if [ -f "$REPO_ROOT/.env" ]; then
+    _public_fqdn="$(grep -E '^DROPLET_PUBLIC_FQDN=' "$REPO_ROOT/.env" | tail -1 | cut -d= -f2- | tr -d '"' || true)"
+  fi
+  if [ -n "$_public_fqdn" ]; then
+    printf "\n"
+    printf "  ${_BOLD}Your one address, everywhere:${_RESET} ${_CYAN}https://%s${_RESET}\n" "$_public_fqdn"
+    printf "  Works at home AND over the VPN, with a trusted padlock — nothing to install.\n"
+  fi
   printf "\n"
-  printf "  ${_BOLD}To silence the browser \"Not secure\" warning${_RESET} (one-time, per client):\n"
-  printf "    macOS / Linux: ${_CYAN}./scripts/trust-droplet-cert.sh${_RESET}\n"
-  printf "    Windows:       ${_CYAN}powershell -ExecutionPolicy Bypass -File scripts\\trust-droplet-cert.ps1${_RESET}  ${_DIM}(run as Administrator)${_RESET}\n"
-  printf "  The script downloads the Droplet's self-signed cert and installs it\n"
-  printf "  into your OS trust store — the Droplet signs for droplet-ai.local,\n"
-  printf "  droplet-ai.lan, droplet.local, droplet.lan, localhost, and LAN IPs.\n"
+  printf "  ${_BOLD}About the browser padlock${_RESET}\n"
+  printf "  The Droplet gets a publicly-trusted certificate automatically — no\n"
+  printf "  per-device install is needed. The first few minutes after setup it may\n"
+  printf "  serve a temporary self-signed cert (you'll see a one-time \"Not secure\"\n"
+  printf "  warning) until the trusted certificate is issued; it then turns into a\n"
+  printf "  green padlock on its own.\n"
+  printf "  ${_DIM}Offline / air-gapped fallback only: ./scripts/trust-droplet-cert.sh${_RESET}\n"
+  printf "  ${_DIM}Windows: powershell -ExecutionPolicy Bypass -File scripts\\trust-droplet-cert.ps1${_RESET}\n"
   printf "\n"
   printf "  Open the dashboard to complete setup — a guided wizard\n"
   printf "  will walk you through creating your admin account.\n"

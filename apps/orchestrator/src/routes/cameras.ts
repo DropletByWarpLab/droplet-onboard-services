@@ -14,6 +14,7 @@ import { Router } from "express";
 import { PrismaClient } from "@prisma/client";
 import pino from "pino";
 import { requireRole } from "../middleware/auth.js";
+import { loadCameraRetentionPolicy } from "../services/camera-retention-purge.service.js";
 import {
   getCameras,
   getEventsFiltered,
@@ -47,6 +48,7 @@ import {
   disableDetection,
   deleteCamera,
   addCamera,
+  syncCamerasFromDb,
   fetchEvents,
   buildRecordingClipUrl,
   buildVodMasterUrl,
@@ -58,10 +60,11 @@ import {
   restartFrigate,
   type PtzAction,
 } from "../services/frigate.client.js";
-import { getCameraSystemStatus } from "../services/camera-system.service.js";
-import { Readable } from "node:stream";
+import { getCameraSystemStatus, type CameraSystemStatus } from "../services/camera-system.service.js";
+import { isUpstreamUnavailable } from "../lib/upstream-unavailable.js";
+import { pipeUpstreamBody } from "../lib/pipe-upstream.js";
 import { config } from "../config.js";
-import { evaluateNetworkCommand } from "../services/network-safety.service.js";
+import { evaluateNetworkCommand, confirmNetworkCommand } from "../services/network-safety.service.js";
 import { exportClip, signShareUrl, verifyShareUrl } from "../services/clips.service.js";
 import { resolveNcToken } from "../services/nextcloud-session.service.js";
 import { ncDownloadFile } from "../services/nextcloud.client.js";
@@ -79,6 +82,38 @@ import {
 import { z } from "zod";
 
 const logger = pino({ name: "cameras-routes" });
+
+/**
+ * Empty CameraSystemStatus served when Frigate is unreachable — the dashboard's
+ * System page renders "0 of 0 cameras live" rather than dead-ending on a 500
+ * during a Frigate outage. Mirrors models-summary.service.ts's empty-payload
+ * degrade. Self-heals on the next poll once Frigate is back (we never cache it).
+ *
+ * Frozen at declaration so a consumer can never `.push()` into one of the shared
+ * array fields and corrupt the constant for every later Frigate-down response
+ * (mirrors matter.ts's frozen DISCONNECTED_DEVICES). We keep the
+ * `: CameraSystemStatus` annotation for shape-checking and freeze at runtime —
+ * a bare `as const` would narrow the arrays to `readonly []`, which isn't
+ * assignable to the interface's mutable `Array<…>`. The freeze covers the object
+ * itself plus each empty array (a shallow object freeze alone would still leave
+ * `.cameraFps.push()` mutating the shared array).
+ */
+const EMPTY_SYSTEM_STATUS: CameraSystemStatus = {
+  version: "unknown",
+  uptimeSec: 0,
+  cameraCount: 0,
+  camerasLive: 0,
+  cameraFps: [],
+  detectors: [],
+  gpus: [],
+  storage: [],
+  cpuPct: 0,
+};
+Object.freeze(EMPTY_SYSTEM_STATUS.cameraFps);
+Object.freeze(EMPTY_SYSTEM_STATUS.detectors);
+Object.freeze(EMPTY_SYSTEM_STATUS.gpus);
+Object.freeze(EMPTY_SYSTEM_STATUS.storage);
+Object.freeze(EMPTY_SYSTEM_STATUS);
 
 /** Service-to-service auth headers for routing/discovery services. */
 function serviceAuthHeaders(): Record<string, string> {
@@ -107,6 +142,23 @@ function isValidEventId(id: string): boolean {
 
 export function createCamerasRouter(prisma: PrismaClient): Router {
   const router = Router();
+
+  // #11: after any change to the set of cameras the DB knows about, reconcile
+  // Frigate's config so entries orphaned by a prior version / Postgres wipe
+  // (e.g. camera_192_168_20_176) are pruned. Best-effort — a Frigate failure
+  // must not fail the DB op; the prune is idempotent and the next mutation
+  // retries it.
+  async function reconcileFrigateCameras(): Promise<void> {
+    try {
+      const all = await prisma.camera.findMany({ select: { name: true } });
+      const removed = await syncCamerasFromDb(all.map((c) => c.name));
+      if (removed.length > 0) {
+        logger.info({ removed }, "Reconciled Frigate cameras after DB change");
+      }
+    } catch (err) {
+      logger.warn({ err }, "Frigate camera reconciliation failed (non-fatal)");
+    }
+  }
 
   // ==========================================================================
   // FIXED-PATH ROUTES (must be registered before :name parameterized routes)
@@ -377,8 +429,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       const len = upstream.headers.get("content-length");
       if (len) res.setHeader("Content-Length", len);
       if (upstream.body) {
-        const { Readable } = await import("node:stream");
-        Readable.fromWeb(upstream.body as never).pipe(res);
+        pipeUpstreamBody(upstream.body, res);
       } else {
         res.end();
       }
@@ -592,7 +643,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if (!upstream.body) {
         return res.status(502).json({ error: "Frigate returned no body" });
       }
-      Readable.fromWeb(upstream.body as never).pipe(res);
+      pipeUpstreamBody(upstream.body, res);
     } catch (err) {
       // Birdseye is optional — Frigate returns 404 if no camera is
       // configured for birdseye output. Surface that as a clean 404
@@ -623,6 +674,11 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       const status = await getCameraSystemStatus();
       res.json({ status });
     } catch (err) {
+      if (isUpstreamUnavailable(err)) {
+        logger.warn({ err }, "Frigate unreachable; serving empty system status");
+        res.json({ status: EMPTY_SYSTEM_STATUS });
+        return;
+      }
       next(err);
     }
   });
@@ -667,11 +723,23 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   // --- List all cameras ---
   router.get("/cameras", async (_req, res, next) => {
     try {
+      // WARP-475 (G3): expose retention block so the §2.5 retention
+      // notice has a backing value to render. The retention window is
+      // operator-editable via the dashboard — clip days come from the
+      // `hardware.camera_retention_days` WorkspaceSetting row (seeded
+      // to 14 by workspace-settings.service.ts, then mutable through
+      // `PATCH /api/settings`); event retention comes from
+      // `hardware.event_retention_days` (seeded `null` = "kept
+      // forever"). loadCameraRetentionPolicy() reads both rows fresh
+      // on every request — no in-process cache that could drift past
+      // a dashboard edit. Loaded BEFORE the Frigate check so the
+      // disconnected case still surfaces the operator-visible policy.
+      const retention = await loadCameraRetentionPolicy(prisma);
       if (!isInitialized()) {
-        return res.json({ cameras: [], _status: "disconnected" });
+        return res.json({ cameras: [], retention, _status: "disconnected" });
       }
       const cameras = await getCameras(prisma);
-      res.json({ cameras });
+      res.json({ cameras, retention });
     } catch (err) {
       next(err);
     }
@@ -720,6 +788,10 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         },
       });
 
+      // #11: same best-effort prune as accept/reject/delete — without it an
+      // add-only operator keeps stale orphaned Frigate entries forever.
+      await reconcileFrigateCameras();
+
       res.json({ status: "ok", camera: name });
     } catch (err) {
       next(err);
@@ -729,8 +801,17 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   // --- Trigger a discovery scan ---
   router.post("/cameras/scan", requireRole("owner", "admin", "family"), async (_req, res) => {
     try {
+      // NET-05: camera-discovery now gates /scan behind DEVICE_SECRET.
+      // Forward it like /drivers/fix below, else this proxied call 403s and
+      // the manual-scan button breaks.
+      const headers: Record<string, string> = {};
+      const deviceSecret = process.env.DEVICE_SECRET_KEY || process.env.DEVICE_SECRET || "";
+      if (deviceSecret) {
+        headers["Authorization"] = `Bearer ${deviceSecret}`;
+      }
       const resp = await fetch(`${config.CAMERA_DISCOVERY_URL}/scan`, {
         method: "POST",
+        headers,
         signal: AbortSignal.timeout(30_000),
       });
       if (!resp.ok) {
@@ -813,6 +894,11 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       });
       res.json(result);
     } catch (err) {
+      if (isUpstreamUnavailable(err)) {
+        logger.warn({ err }, "Frigate unreachable; serving empty events list");
+        res.json({ events: [], nextCursor: null });
+        return;
+      }
       next(err);
     }
   });
@@ -932,6 +1018,11 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       });
       res.json(result);
     } catch (err) {
+      if (isUpstreamUnavailable(err)) {
+        logger.warn({ err }, "Frigate unreachable; serving empty reviews list");
+        res.json({ reviews: [], nextCursor: null });
+        return;
+      }
       next(err);
     }
   });
@@ -965,7 +1056,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       const len = upstream.headers.get("content-length");
       if (len) res.setHeader("Content-Length", len);
       if (upstream.body) {
-        Readable.fromWeb(upstream.body as never).pipe(res);
+        pipeUpstreamBody(upstream.body, res);
       } else {
         res.end();
       }
@@ -1138,6 +1229,11 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       const events = await getRecentEvents(limit);
       res.json({ events });
     } catch (err) {
+      if (isUpstreamUnavailable(err)) {
+        logger.warn({ err }, "Frigate unreachable; serving empty recent events");
+        res.json({ events: [] });
+        return;
+      }
       next(err);
     }
   });
@@ -1189,6 +1285,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         where: { id: req.params.id },
         data: { enabled: true },
       });
+      await reconcileFrigateCameras();
       res.json({ status: "accepted", camera: camera.name });
     } catch (err) {
       next(err);
@@ -1199,6 +1296,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   router.post("/cameras/discovered/:id/reject", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
       await prisma.camera.delete({ where: { id: req.params.id } });
+      await reconcileFrigateCameras();
       res.json({ status: "rejected" });
     } catch (err) {
       next(err);
@@ -1218,7 +1316,16 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   // --- Driver status (proxied from camera-discovery service) ---
   router.get("/cameras/drivers", async (_req, res) => {
     try {
+      // NET-05: /drivers is now auth-gated on camera-discovery. Forward
+      // DEVICE_SECRET (same pattern as /drivers/fix) so the driver status
+      // panel doesn't 403.
+      const headers: Record<string, string> = {};
+      const deviceSecret = process.env.DEVICE_SECRET_KEY || process.env.DEVICE_SECRET || "";
+      if (deviceSecret) {
+        headers["Authorization"] = `Bearer ${deviceSecret}`;
+      }
       const resp = await fetch(`${config.CAMERA_DISCOVERY_URL}/drivers`, {
+        headers,
         signal: AbortSignal.timeout(5000),
       });
       if (!resp.ok) {
@@ -1361,6 +1468,100 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
+  // --- Confirm a camera-domain Tier 2 command (WARP-861) ---
+  // Mirrors /switch/command/confirm. The generic /network/command/confirm
+  // switch only executes router-domain operations, so the camera tokens
+  // minted above (delete_camera / disable_camera / camera_subnet_*) could
+  // never be consumed — every camera "Remove" 202'd and silently did
+  // nothing. The executors live in this module, so the consumer does too.
+  // Role: family stays admitted because the delete/disable mint routes admit
+  // family; confirmNetworkCommand pins each token to its minting user, so a
+  // family member can never confirm an owner/admin-minted subnet token.
+  router.post("/cameras/command/confirm", requireRole("owner", "admin", "family"), async (req, res, next) => {
+    try {
+      const userId = req.user?.id;
+      const { confirmationToken, operation } = req.body ?? {};
+      if (!confirmationToken || typeof confirmationToken !== "string") {
+        return res.status(400).json({ error: "Missing 'confirmationToken'", code: "TOKEN_MISSING" });
+      }
+      // WARP-41 parity with /network/command/confirm: callers must supply
+      // the operation name they originally requested (the 202 response does
+      // not include it) so a leaked token can't execute something the user
+      // never saw.
+      if (!operation || typeof operation !== "string") {
+        return res.status(400).json({
+          error: "Missing 'operation' — clients must supply the operation name they originally requested",
+          code: "TOKEN_OPERATION_MISMATCH",
+        });
+      }
+      if (!userId) return res.status(401).json({ error: "UNAUTHORIZED" });
+      const result = await confirmNetworkCommand(prisma, confirmationToken, userId, { operation });
+      if (!result.confirmed) {
+        return res.status(400).json({ error: result.reason, code: result.code });
+      }
+
+      const { operation: confirmedOp, params } = result;
+      const p = (params || {}) as Record<string, unknown>;
+      switch (confirmedOp) {
+        case "delete_camera": {
+          const name = p.name as string;
+          if (!isValidCameraName(name)) {
+            return res.status(400).json({ error: "Invalid camera name in confirmed command" });
+          }
+          await deleteCamera(name);
+          await prisma.camera.deleteMany({ where: { name } });
+          await reconcileFrigateCameras();
+          break;
+        }
+        case "disable_camera": {
+          const name = p.name as string;
+          if (!isValidCameraName(name)) {
+            return res.status(400).json({ error: "Invalid camera name in confirmed command" });
+          }
+          await disableDetection(name);
+          await prisma.camera.updateMany({ where: { name }, data: { enabled: false } });
+          break;
+        }
+        case "camera_subnet_setup": {
+          const resp = await fetch(`${config.ROUTING_SERVICE_URL}/network/subnets/cameras/setup`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...serviceAuthHeaders() },
+            body: JSON.stringify({
+              vlan_id: (p.vlanId as number) ?? 100,
+              subnet: (p.subnet as string) || "192.168.100.1",
+              netmask: (p.netmask as string) || "255.255.255.0",
+              dhcp_start: (p.dhcpStart as number) ?? 100,
+              dhcp_limit: (p.dhcpLimit as number) ?? 150,
+              leasetime: (p.leasetime as string) || "12h",
+            }),
+            signal: AbortSignal.timeout(30000),
+          });
+          if (!resp.ok) {
+            return res.status(resp.status).json(await resp.json().catch(() => ({})));
+          }
+          break;
+        }
+        case "camera_subnet_teardown": {
+          const resp = await fetch(`${config.ROUTING_SERVICE_URL}/network/subnets/cameras`, {
+            method: "DELETE",
+            headers: serviceAuthHeaders(),
+            signal: AbortSignal.timeout(30000),
+          });
+          if (!resp.ok) {
+            return res.status(resp.status).json(await resp.json().catch(() => ({})));
+          }
+          break;
+        }
+        default:
+          return res.status(400).json({ error: `Unknown operation: ${confirmedOp}` });
+      }
+
+      res.json({ status: "ok", operation: confirmedOp, confirmed: true });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // ==========================================================================
   // PARAMETERIZED ROUTES (/cameras/:name) — must come AFTER all fixed paths
   // ==========================================================================
@@ -1414,7 +1615,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if (!frigateResp.body) {
         return res.status(502).json({ error: "Frigate returned no body" });
       }
-      Readable.fromWeb(frigateResp.body as never).pipe(res);
+      pipeUpstreamBody(frigateResp.body, res);
     } catch (err) {
       next(err);
     }
@@ -1528,6 +1729,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
 
       await deleteCamera(req.params.name);
       await prisma.camera.deleteMany({ where: { name: req.params.name } });
+      await reconcileFrigateCameras();
       res.json({ status: "deleted", camera: req.params.name });
     } catch (err) {
       next(err);
@@ -1712,7 +1914,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if (len) res.setHeader("Content-Length", len);
       res.setHeader("Cache-Control", "private, max-age=300");
       if (upstream.body) {
-        Readable.fromWeb(upstream.body as never).pipe(res);
+        pipeUpstreamBody(upstream.body, res);
       } else {
         res.end();
       }
@@ -1841,7 +2043,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       // tuple — long cache keeps repeat scrubs cheap.
       res.setHeader("Cache-Control", "private, max-age=3600");
       if (upstream.body) {
-        Readable.fromWeb(upstream.body as never).pipe(res);
+        pipeUpstreamBody(upstream.body, res);
       } else {
         res.end();
       }
@@ -2303,8 +2505,7 @@ export function createCameraSharePublicRouter(): Router {
 
       res.setHeader("Content-Type", "video/mp4");
       res.setHeader("Content-Disposition", `inline; filename="${req.params.filename.replace(/[^a-zA-Z0-9._-]/g, "_")}"`);
-      const { Readable } = await import("node:stream");
-      Readable.fromWeb(stream as never).pipe(res);
+      pipeUpstreamBody(stream, res);
     } catch (err) {
       next(err);
     }

@@ -1,13 +1,13 @@
 """
 Droplet device-bridge — host-side HTTP API for the on-device screen.
 
-Runs on the Jetson host (outside the oled-display container). Exposes a
+Runs on the appliance host (outside the oled-display container). Exposes a
 stable read-only API the display service polls, with each endpoint
 sourcing live data from the appropriate upstream:
 
-  GET  /wifi           -> OpenWrt iwinfo scan (SSH), fallback to Jetson nmcli
+  GET  /wifi           -> OpenWrt iwinfo scan (SSH), fallback to host nmcli
   GET  /openwrt/qr     -> OpenWrt's LAN SSID + PSK encoded as a WiFi QR
-                          matrix + payload (PyPortal renders the grid)
+                          matrix + payload (status display renders the grid)
   GET  /files          -> file-indexer / orchestrator storage snapshot
   GET  /cameras        -> Frigate recent events + online camera count
   POST /wifi/connect   -> join an SSID (nmcli fallback path)
@@ -30,7 +30,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib import request as urlrequest
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 logger = logging.getLogger("droplet.bridge")
 
@@ -43,10 +43,55 @@ OPENWRT_USER      = os.environ.get("OPENWRT_USER", "root")
 OPENWRT_PASS      = os.environ.get("OPENWRT_PASS", "")
 OPENWRT_IFACE     = os.environ.get("OPENWRT_IFACE", "wlan0")
 SSH_TIMEOUT       = int(os.environ.get("SSH_CONNECT_TIMEOUT", "4"))
+# Persistent SSH known_hosts for the OpenWrt control channel (multi-box uci AP
+# path only — single-box hostapd never SSHes). Combined with
+# StrictHostKeyChecking=accept-new this trusts the router key on first contact
+# and then DETECTS any later key swap — a LAN MITM on 192.168.50.x trying to
+# capture OPENWRT_PASS or inject UCI now fails the connection instead of being
+# silently accepted (the old StrictHostKeyChecking=no + /dev/null accepted any
+# key on every connect). Defaults under the systemd StateDirectory
+# (/var/lib/droplet-bridge, created 0700) so the pin survives restarts;
+# install-device-bridge.sh can pre-seed it via ssh-keyscan.
+OPENWRT_KNOWN_HOSTS = os.environ.get(
+    "OPENWRT_KNOWN_HOSTS", "/var/lib/droplet-bridge/openwrt_known_hosts")
+
+# Access-point credentials source for the pairing QR. The two shipping
+# deployment shapes broadcast the AP differently:
+#
+#   uci      — multi-box: a router-host OpenWrt instance holds the AP in UCI
+#              (`wireless.*`). We read SSID+PSK over SSH (the historical
+#              path). This is the back-compat default.
+#   hostapd  — single-box: the host runs a raw hostapd AP via the
+#              `droplet-openwrt-attach` script (no UCI), so we read the
+#              creds from DROPLET_AP_SSID/DROPLET_AP_PSK (set by that
+#              script) and fall back to parsing /etc/hostapd.conf inside
+#              the droplet-openwrt container.
+#   auto     — pick `hostapd` when DROPLET_AP_SSID is set OR when UCI
+#              wireless is empty/unreachable; otherwise `uci`. Lets a
+#              single image serve both shapes without per-box env edits.
+#
+# Defaulting to `uci` keeps every existing multi-box install behaving
+# exactly as before; single-box installs set DROPLET_AP_MODE=hostapd in
+# /etc/droplet/device-bridge.env.
+AP_MODE           = os.environ.get("DROPLET_AP_MODE", "uci").strip().lower()
+AP_SSID           = os.environ.get("DROPLET_AP_SSID", "").strip()
+AP_PSK            = os.environ.get("DROPLET_AP_PSK", "")
+# WARP-819: the single-box per-box AP PSK is generated + persisted host-side by
+# droplet-openwrt-attach to this 0600 file (which it also mirrors into the
+# bridge env). Reading the SAME file here guarantees the pairing QR/text equals
+# the PSK hostapd actually serves even if the bridge process started before its
+# env was refreshed — coherence. Used only when DROPLET_AP_PSK isn't in the env.
+AP_PSK_FILE       = os.environ.get("DROPLET_AP_PSK_FILE", "/etc/droplet/ap-psk").strip()
+# Container that runs the single-box hostapd AP. Its /etc/hostapd.conf is
+# the fallback creds source when DROPLET_AP_SSID isn't set in the env.
+AP_HOSTAPD_CONTAINER = os.environ.get(
+    "DROPLET_AP_CONTAINER", "droplet-openwrt").strip()
+AP_HOSTAPD_CONF_PATH = os.environ.get(
+    "DROPLET_AP_HOSTAPD_CONF", "/etc/hostapd.conf").strip()
 
 FRIGATE_URL       = os.environ.get("FRIGATE_URL", "http://127.0.0.1:5000")
 ORCHESTRATOR_URL  = os.environ.get("ORCHESTRATOR_URL", "http://127.0.0.1:3000")
-FILES_ROOT        = os.environ.get("FILES_ROOT", "/home/droplet/Documents/droplet-pi-platform/.data/files")
+FILES_ROOT        = os.environ.get("FILES_ROOT", "/home/droplet/Documents/droplet-onboard-services/.data/files")
 
 BRIDGE_PORT       = int(os.environ.get("BRIDGE_PORT", "9090"))
 # Bind host — default loopback so the bridge is only reachable from the
@@ -88,7 +133,7 @@ if not os.access(os.path.dirname(STATE_FILE) or "/", os.W_OK):
 # run rotates the bridge env to SERVICE_TOKEN_DISPLAY.
 #
 # Even with the bridge bound to loopback, any unprivileged process on
-# the Jetson could currently POST to /openwrt/wifi/rotate or
+# the inference host could currently POST to /openwrt/wifi/rotate or
 # /wifi/connect — requiring the token moves that capability from
 # "anyone with a shell" to "anyone with the secret".
 BRIDGE_AUTH_TOKEN = (
@@ -110,6 +155,30 @@ ROTATION_MIN_INTERVAL_S = int(os.environ.get(
 # In-process lock: only one rotation at a time (an SSH+UCI+wifi-up run
 # takes ~4s and the HTTP server is threaded).
 _ROTATION_LOCK = threading.Lock()
+
+# In-process lock for the single-box hostapd WRITE (WARP-808). The HTTP server is
+# threaded, so two concurrent POST /openwrt/wifi/hostapd would both exec the host
+# script AND both `systemctl restart droplet-openwrt-attach` — interleaving the
+# env-file write + double-bouncing the AP. Serialize them exactly like
+# _ROTATION_LOCK does for rotation: non-blocking acquire, 409 on contention.
+_HOSTAPD_LOCK = threading.Lock()
+
+# In-process lock for the factory reset (WARP-825). The HTTP server is threaded,
+# so two concurrent POST /system/factory-reset would each _spawn_detached the
+# wipe script — two `docker compose down -v` runs racing the same teardown.
+# Serialize the spawn decision exactly like _HOSTAPD_LOCK: non-blocking acquire,
+# 409 on contention.
+_FACTORY_RESET_LOCK = threading.Lock()
+
+# Handle to the in-flight wipe's detached process (WARP-825 hardening). On a
+# successful spawn the lock is held for the wipe's whole lifetime — the wipe is
+# meant to tear this bridge down, so a SUCCESSFUL wipe never returns to this
+# process at all. If a LATER reset request finds the lock held, polling this
+# handle distinguishes a live wipe (poll() is None → genuinely in progress →
+# 409) from one that exited WITHOUT completing the teardown (poll() is not None
+# → the wipe FAILED mid-run → reclaim the stale lock so the owner can retry,
+# instead of wedging every future reset at 409 for the life of the bridge).
+_factory_reset_proc = None
 
 
 # ---------------------------------------------------------------------------
@@ -152,10 +221,20 @@ if [ -z "$target" ]; then echo "ERR no active AP" >&2; exit 1; fi
 
 
 def _ssh_openwrt(remote_cmd, timeout=20):
+    # Pin the router host key to a persistent known_hosts and trust-on-first-use
+    # (accept-new): first contact records the key, every later connect verifies
+    # it, so a mid-stream key swap by a MITM is rejected rather than silently
+    # accepted. Best-effort ensure the parent dir exists (systemd StateDirectory
+    # normally creates it; this also covers manual/dev runs) — ssh surfaces any
+    # real permission error itself.
+    try:
+        os.makedirs(os.path.dirname(OPENWRT_KNOWN_HOSTS) or ".", exist_ok=True)
+    except OSError:
+        pass
     ssh_args = [
         "ssh",
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", f"UserKnownHostsFile={OPENWRT_KNOWN_HOSTS}",
         "-o", f"ConnectTimeout={SSH_TIMEOUT}",
         "-o", "LogLevel=ERROR",
         f"{OPENWRT_USER}@{OPENWRT_HOST}",
@@ -220,9 +299,9 @@ def openwrt_wifi_credentials():
     """Read the active AP's SSID + WPA key from UCI.
 
     "Active" = wifi-iface with mode=ap AND iface-level disabled!=1 AND
-    its parent radio also not disabled. This matters on the Pi 5 router
-    where the first 4 radios (radio0..3) are `disabled '1'` because only
-    the onboard BCM4345/6 on radio4 actually works as an AP — without
+    its parent radio also not disabled. This matters on the router host
+    where the first 4 radios (radio0..3) may be `disabled '1'` because
+    only the Wi-Fi radio on radio4 actually works as an AP — without
     the radio-level check we'd hand the dashboard the stale default
     'Droplet/ChangeMe!2024' creds from default_radio0 that are never on
     the air.
@@ -266,10 +345,10 @@ def _openwrt_connected_ssid():
     """Return the SSID the router is currently broadcasting (active AP).
 
     Uses the same _FIND_AP_SH helper as openwrt_wifi_credentials so we
-    can't return the stale default_radio0 "Droplet" name on this Pi 5
-    where only radio4 actually runs as an AP. STA-mode lookup (client
-    mode) stays first for the rare deployment where OpenWrt is an
-    upstream client.
+    can't return the stale default_radio0 "Droplet" name on the router
+    host where only one radio actually runs as an AP. STA-mode lookup
+    (client mode) stays first for the rare deployment where OpenWrt is
+    an upstream client.
     """
     script = (
         "sta=$(uci -q get wireless.sta.ssid 2>/dev/null || true); "
@@ -282,7 +361,210 @@ def _openwrt_connected_ssid():
 
 
 # ---------------------------------------------------------------------------
-# Jetson-local nmcli fallback
+# Single-box hostapd AP credentials
+# ---------------------------------------------------------------------------
+# The single-box deployment shape runs a raw hostapd AP on the host (via the
+# droplet-openwrt-attach script) instead of OpenWrt/UCI. There's no router to
+# SSH into and `uci show wireless` is empty, so the multi-box creds lookup
+# returns "no active AP" and the pairing QR comes back blank (WARP-654).
+#
+# Creds come from DROPLET_AP_SSID / DROPLET_AP_PSK (the host env the attach
+# script already sets). When those aren't set we parse /etc/hostapd.conf out
+# of the droplet-openwrt container, which is hostapd's own source of truth.
+
+def _parse_hostapd_conf(text):
+    """Parse SSID + WPA passphrase from a hostapd.conf body.
+
+    hostapd.conf is a flat `key=value` file. We only need `ssid` and
+    `wpa_passphrase`. Values may be quoted and/or carry surrounding
+    whitespace; both are stripped. Returns (creds, err) mirroring
+    openwrt_wifi_credentials() so the QR builder treats both shapes the
+    same. The encryption is reported as "psk2" (WPA2-PSK) — the mode the
+    attach script configures — so the shared QR/security plumbing keys off
+    a WPA marker, identical to the UCI path.
+    """
+    ssid = key = None
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip()
+        v = v.strip().strip('"')
+        if k == "ssid" and ssid is None:
+            ssid = v
+        elif k == "wpa_passphrase" and key is None:
+            key = v
+    if not ssid:
+        return None, "no ssid in hostapd.conf"
+    return ({
+        "ssid": ssid,
+        "key": key or "",
+        "encryption": "psk2",
+        "hidden": False,
+        "disabled": False,
+    }, None)
+
+
+def _read_hostapd_conf_creds():
+    """Read the hostapd AP creds from the droplet-openwrt container.
+
+    `docker exec <container> cat /etc/hostapd.conf` then parse. Read-only —
+    never mutates the container. Returns (creds, err)."""
+    rc, out, err = _run(
+        ["docker", "exec", AP_HOSTAPD_CONTAINER, "cat", AP_HOSTAPD_CONF_PATH],
+        timeout=8)
+    if rc != 0:
+        return None, (err.strip() or "hostapd.conf unreadable")
+    return _parse_hostapd_conf(out)
+
+
+def _read_persisted_psk():
+    """Read the per-box AP PSK from the persisted 0600 file (WARP-819).
+
+    droplet-openwrt-attach generates the PSK once and writes it here; this is
+    the SAME value hostapd serves. Returns the stripped key, or "" when the
+    file is absent/unreadable/empty. Never raises."""
+    try:
+        with open(AP_PSK_FILE) as f:
+            return f.read().strip()
+    except Exception:                                               # noqa: BLE001
+        return ""
+
+
+def hostapd_wifi_credentials():
+    """Return the single-box hostapd AP's SSID + PSK.
+
+    Source order for the PSK, all coherent with what hostapd serves:
+      1. DROPLET_AP_PSK env (cleanest; mirrored in by droplet-openwrt-attach);
+      2. the persisted 0600 file AP_PSK_FILE (the attach script's source of
+         truth — covers a bridge started before its env was refreshed);
+      3. /etc/hostapd.conf inside the droplet-openwrt container (last resort).
+    Returns (creds, err) with the same dict shape as openwrt_wifi_credentials().
+    """
+    if AP_SSID:
+        # Env PSK first, else the persisted per-box file (WARP-819). Both are the
+        # value the attach script fed hostapd, so the displayed creds match the
+        # live AP either way.
+        key = AP_PSK or _read_persisted_psk()
+        if key:
+            return ({
+                "ssid": AP_SSID,
+                "key": key,
+                "encryption": "psk2",
+                "hidden": False,
+                "disabled": False,
+            }, None)
+        # WARP-819 boot race: SSID is configured but neither the env nor the
+        # persisted 0600 file has the PSK yet (droplet-openwrt-attach hasn't run,
+        # or _read_persisted_psk() hit a PermissionError and swallowed it). Do
+        # NOT return key:"" — that renders an unscannable `WIFI:T:WPA;S:..;P:;;`
+        # QR a phone joins as a named-but-open network and then can't reach the
+        # box. Fall through to the live hostapd.conf (the value hostapd actually
+        # serves). _hostapd_conf_creds_or_error() rejects an empty-passphrase
+        # conf too, so the caller emits NO QR rather than a broken one.
+        return _hostapd_conf_creds_or_error()
+    return _hostapd_conf_creds_or_error()
+
+
+def _hostapd_conf_creds_or_error():
+    """Read hostapd.conf creds, rejecting an empty/missing passphrase.
+
+    Wraps _read_hostapd_conf_creds() so a parsed-but-keyless conf (an AP whose
+    wpa_passphrase line is empty, or a container still mid-boot) degrades to
+    (None, err) instead of leaking creds with key:"". The QR builder then emits
+    an error placeholder rather than an empty-passphrase QR (WARP-819)."""
+    creds, err = _read_hostapd_conf_creds()
+    if creds is not None and not creds.get("key"):
+        return None, "hostapd AP passphrase not available yet"
+    return creds, err
+
+
+def _hostapd_wifi_payload(ssid, key):
+    """Format the WiFi QR payload for a WPA hostapd AP.
+
+    hostapd's single-box AP is always WPA2-PSK, so the security type is a
+    fixed `WPA`. Field order is T;S;P (the order the single-box pairing
+    flow + PyPortal firmware expect). Escapes the WiFi-QR metacharacters
+    (\\, ;, ,, :, ") per the de-facto standard so an SSID/PSK containing
+    them still scans correctly.
+    """
+    def esc(s):
+        return (s or "").replace("\\", "\\\\").replace(";", "\\;") \
+                        .replace(",", "\\,").replace(":", "\\:") \
+                        .replace('"', '\\"')
+
+    return "WIFI:T:WPA;S:{};P:{};;".format(esc(ssid), esc(key))
+
+
+# Cache the deployment-shape decision. In `auto` mode with no DROPLET_AP_SSID the
+# decision requires a UCI probe over SSH — an up-to-12s round trip via
+# openwrt_wifi_credentials(). qr_snapshot() calls _use_hostapd_mode() on every
+# GET /openwrt/qr and the POST /openwrt/wifi/hostapd handler calls it on every
+# Wi-Fi write; under ThreadingHTTPServer those run concurrently, so an uncached
+# probe blocks every display/orchestrator poll for up to 12s AND opens a fresh
+# SSH session each time. The mode is effectively static: DROPLET_AP_MODE is read
+# once at import, and in `auto` the only dynamic input is whether UCI answers —
+# which can't change without an explicit reconfiguration. A short TTL bounds any
+# staleness (e.g. UCI flapping) while keeping the hot path cheap. The probe runs
+# under _hostapd_mode_lock (single-flight) so a concurrent burst shares ONE probe
+# instead of each opening a parallel SSH session (WARP-834 findings 2 + 3).
+_HOSTAPD_MODE_TTL_S = 60.0
+_hostapd_mode_lock = threading.Lock()
+_hostapd_mode_cache = {"value": None, "at": 0.0}
+
+
+def _compute_hostapd_mode():
+    """Uncached deployment-shape decision — the real logic behind
+    _use_hostapd_mode().
+
+    - hostapd  -> always hostapd.
+    - uci      -> always UCI/SSH (back-compat default).
+    - auto     -> hostapd when a DROPLET_AP_SSID is configured (a clear
+                  single-box signal) OR when UCI wireless is empty/
+                  unreachable; otherwise UCI.
+
+    Only the `auto` path with no DROPLET_AP_SSID issues the (up to 12s) SSH
+    probe; `hostapd` and `uci` decide from process-static env alone.
+    """
+    if AP_MODE == "hostapd":
+        return True
+    if AP_MODE == "auto":
+        if AP_SSID:
+            return True
+        # No explicit single-box signal — probe UCI. If the router answers
+        # with a live AP, stay on the multi-box path; otherwise fall through
+        # to hostapd (covers a single-box host where uci is empty).
+        creds, _err = openwrt_wifi_credentials()
+        return creds is None
+    return False
+
+
+def _use_hostapd_mode():
+    """Whether to source the QR creds from hostapd vs. UCI, cached for
+    _HOSTAPD_MODE_TTL_S.
+
+    Without the cache the `auto`-mode UCI probe (an SSH round trip up to 12s)
+    would run on every GET /openwrt/qr and every Wi-Fi write — continuously
+    degrading those endpoints under ThreadingHTTPServer. The explicit `hostapd`
+    and `uci` modes never probe, so the cache is essentially free there; it
+    matters on the `auto` shape. Computed single-flight under _hostapd_mode_lock
+    so a concurrent burst shares one probe rather than opening parallel SSH
+    sessions.
+    """
+    now = time.monotonic()
+    with _hostapd_mode_lock:
+        cached = _hostapd_mode_cache["value"]
+        if cached is not None and (now - _hostapd_mode_cache["at"]) < _HOSTAPD_MODE_TTL_S:
+            return cached
+        value = _compute_hostapd_mode()
+        _hostapd_mode_cache["value"] = value
+        _hostapd_mode_cache["at"] = time.monotonic()
+        return value
+
+
+# ---------------------------------------------------------------------------
+# Appliance-local nmcli fallback
 # ---------------------------------------------------------------------------
 
 def scan_via_nmcli():
@@ -335,7 +617,7 @@ def wifi_snapshot():
     out = {
         "networks": [], "source": None, "adapter": None,
         "connected_to": None, "state": "unknown",
-        "scanned_at": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "scanned_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "error": None,
     }
     networks, err = scan_via_openwrt()
@@ -350,7 +632,7 @@ def wifi_snapshot():
     nets, meta = scan_via_nmcli()
     if nets is not None and meta:
         out["networks"] = nets[:20]
-        out["source"] = "jetson-nmcli"
+        out["source"] = "host-nmcli"
         out["adapter"] = meta.get("adapter")
         out["state"] = meta.get("state") or "unknown"
         out["connected_to"] = meta.get("connected_to")
@@ -364,7 +646,8 @@ def wifi_snapshot():
 # ---------------------------------------------------------------------------
 # Pure-Python QR encoder.
 # Handles the subset we actually need: WIFI payload strings, byte mode,
-# error-correction level L, auto version bump. No external deps.
+# error-correction level Q (L fallback for oversized pathological payloads),
+# auto version bump. No external deps.
 
 def _wifi_payload(ssid, key, encryption):
     """Format a WiFi:...; QR payload per the de-facto standard."""
@@ -384,43 +667,94 @@ def _wifi_payload(ssid, key, encryption):
                                            esc(key) if sec != "nopass" else "")
 
 
+# Hard cap on the QR matrix we ship to the panel — mirrors ClaimRequest's
+# wifi_qr_matrix max_length=64 (main.py): a v-large QR would OOM the
+# PyPortal. At Q only a pathological fully-escaped SSID+PSK (~200+ chars)
+# exceeds it; _qr_encode degrades those to L, which always fits.
+_QR_MAX_ROWS = 64
+
+
 def _qr_encode(text):
     """Generate a QR code bit-matrix for `text` using the `qrcode` lib
-    (apt: python3-qrcode). Returns (matrix, version)."""
+    (apt: python3-qrcode). Returns (matrix, version).
+
+    ERROR_CORRECT_Q (~25% codeword recovery), NOT L: the PyPortal's QR card
+    (_v3_qr_card in pyportal/code.py) paints a 32x32px white droplet-mark
+    pad dead-centre over the symbol, and at L the pad corrupts more
+    codewords than Reed-Solomon can recover — the rendered card fails to
+    decode for every typical Wi-Fi payload (verified empirically; same
+    finding as the scan-to-claim QR in the PR #550 review). Typical WPA
+    payloads land at v4 (33x33) at Q, well inside the firmware's 64-row
+    tolerance. A payload too big for 64 rows at Q degrades to L — the same
+    matrix the encoder always shipped for those — rather than risking the
+    panel heap.
+    """
     import qrcode
-    from qrcode.constants import ERROR_CORRECT_L
-    q = qrcode.QRCode(
-        error_correction=ERROR_CORRECT_L,
-        border=0,       # we pad on the display side
-        box_size=1,
-    )
-    q.add_data(text)
-    q.make(fit=True)
-    matrix = [[1 if cell else 0 for cell in row] for row in q.get_matrix()]
-    return matrix, q.version
+    from qrcode.constants import ERROR_CORRECT_L, ERROR_CORRECT_Q
+
+    def _encode(level):
+        q = qrcode.QRCode(
+            error_correction=level,
+            border=0,       # we pad on the display side
+            box_size=1,
+        )
+        q.add_data(text)
+        q.make(fit=True)
+        matrix = [[1 if cell else 0 for cell in row]
+                  for row in q.get_matrix()]
+        return matrix, q.version
+
+    matrix, version = _encode(ERROR_CORRECT_Q)
+    if len(matrix) > _QR_MAX_ROWS:
+        matrix, version = _encode(ERROR_CORRECT_L)
+    return matrix, version
 
 
 def qr_snapshot():
-    """Fetch OpenWrt wifi creds and return a QR-matrix + payload.
+    """Fetch the live AP wifi creds and return a QR-matrix + payload.
 
-    TTL/interval fields are only populated when rotation is enabled; with
-    rotation off (the production default) the UI hides the countdown chip
-    because the password never expires.
+    Sources creds from whichever deployment shape this box is (DROPLET_AP_MODE):
+    the single-box hostapd AP or the multi-box OpenWrt/UCI router. The returned
+    dict shape is identical for both so the PyPortal client is shape-agnostic.
+
+    TTL/interval fields: rotation is only available on the UCI/SSH path, so
+    `ttl_seconds` is populated (and `rotation_interval_seconds` added) only
+    when rotation is enabled there. In hostapd mode rotation is always
+    disabled — there's no UCI to push a new PSK to — so `rotation_enabled` is
+    forced false and `ttl_seconds` is 0; the PyPortal gates its Rotate pill on
+    `rotation_enabled` and the countdown chip on a non-zero TTL.
     """
+    hostapd = _use_hostapd_mode()
+    rotation_enabled = False if hostapd else ROTATION_ENABLED
     out = {
         "ok": False, "ssid": None, "security": None, "hidden": False,
         "disabled": False, "payload": None, "matrix": None,
         "version": None, "error": None,
-        "rotation_enabled": ROTATION_ENABLED,
+        "rotation_enabled": rotation_enabled,
+        # Always present so the client never has to branch on its absence;
+        # 0 means "no expiry" (the production posture in both shapes unless
+        # UCI-mode rotation is explicitly enabled).
+        "ttl_seconds": 0,
     }
-    if ROTATION_ENABLED:
+    if rotation_enabled:
         out["ttl_seconds"] = _key_ttl_seconds()
         out["rotation_interval_seconds"] = ROTATION_INTERVAL_S
-    creds, err = openwrt_wifi_credentials()
+
+    if hostapd:
+        creds, err = hostapd_wifi_credentials()
+    else:
+        creds, err = openwrt_wifi_credentials()
     if creds is None:
-        out["error"] = err or "router unreachable"
+        out["error"] = err or ("hostapd AP unavailable" if hostapd
+                               else "router unreachable")
         return out
-    payload = _wifi_payload(creds["ssid"], creds["key"], creds["encryption"])
+
+    if hostapd:
+        # Single-box hostapd AP is WPA2-PSK; use the fixed-security T;S;P
+        # payload the single-box pairing flow expects.
+        payload = _hostapd_wifi_payload(creds["ssid"], creds["key"])
+    else:
+        payload = _wifi_payload(creds["ssid"], creds["key"], creds["encryption"])
     try:
         matrix, ver = _qr_encode(payload)
     except Exception as e:                                           # noqa: BLE001
@@ -428,13 +762,14 @@ def qr_snapshot():
         return out
     out.update({
         "ok": True, "ssid": creds["ssid"],
-        "security": creds["encryption"], "hidden": creds["hidden"],
+        "security": "WPA" if hostapd else creds["encryption"],
+        "hidden": creds["hidden"],
         "disabled": creds["disabled"], "payload": payload,
         # Cleartext key is already inside `payload` (the phone QR scanner
         # reads it from there), so exposing it as a dedicated field costs
-        # nothing extra but lets the PyPortal render it legibly under the
-        # QR without parsing the payload. Endpoint is loopback-only and
-        # auth-gated for mutating routes.
+        # nothing extra but lets the status display render it legibly
+        # under the QR without parsing the payload. Endpoint is
+        # loopback-only and auth-gated for mutating routes.
         "key": creds["key"],
         "matrix": matrix, "version": ver,
     })
@@ -566,7 +901,7 @@ def rotate_wifi_key():
     try:
         # Rate-limit: reject if we just rotated. The min interval defends
         # against both stuck clients (retrying every frame) and fat-finger
-        # double-clicks from the PyPortal.
+        # double-clicks from the status display.
         st = _load_state()
         last = st.get("wifi_key_rotated_at") or 0
         elapsed = time.time() - float(last)
@@ -661,12 +996,12 @@ def files_snapshot():
         "size_bytes": total_size,
         "recent": [
             {"name": n, "size": sz,
-             "modified": datetime.datetime.utcfromtimestamp(m)
+             "modified": datetime.datetime.fromtimestamp(m, tz=datetime.timezone.utc)
                                .strftime("%Y-%m-%dT%H:%M:%SZ")}
             for m, n, sz in recent
         ],
         "orchestrator": sync_state,
-        "snapshot_at": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "snapshot_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     _files_cache["snapshot"] = snap
     _files_cache["at"] = now
@@ -695,6 +1030,141 @@ def _bytes_for(path):
         return 0, 0, 0
 
 
+def _bus_for(device):
+    """Real bus transport for a block device — read from the kernel via lsblk,
+    not guessed from the device name. A SATA disk is `/dev/sd*` too, so the old
+    name heuristic mislabeled SATA/SAS data drives as 'usb'; ADR-011 forbids
+    that kind of hardware assumption.
+
+    lsblk reports TRAN on the *whole disk*, not the partition, so resolve the
+    parent (PKNAME) first, then read its transport. Returns the kernel's own
+    label (sata/usb/nvme/sas/scsi/mmc/virtio); falls back to a name heuristic
+    only if lsblk is unavailable. Presentation only (card icon + connection
+    chip) — NEVER an eject/mount/security gate; that's `removable`.
+    """
+    base = os.path.basename(device or "")
+    if not base:
+        return "disk"
+    try:
+        _rc, pk, _e = _run(["lsblk", "-ndo", "PKNAME", device], timeout=4)
+        parent = (pk or "").strip().splitlines()
+        parent = parent[0].strip() if parent else ""
+        target = "/dev/" + parent if parent else device
+        _rc, tr, _e = _run(["lsblk", "-ndo", "TRAN", target], timeout=4)
+        rows = (tr or "").strip().splitlines()
+        tran = rows[0].strip().lower() if rows else ""
+        if tran in ("sata", "usb", "nvme", "sas", "scsi", "mmc", "virtio"):
+            return tran
+    except Exception:                                              # noqa: BLE001
+        pass
+    # Fallback — no lsblk / odd device. Stay neutral for sd* rather than
+    # guessing USB (it could be SATA/SAS).
+    if base.startswith("nvme"):
+        return "nvme"
+    if base.startswith("mmcblk"):
+        return "mmc"
+    return "disk"
+
+
+# WARP-827: hide partitions that live on the OS/root disk. The automounter can
+# mount the install disk's EFI/boot partitions under /mnt/droplet/<uuid> (they
+# look like generic data volumes), which then surface as confusing "drives" —
+# and, worse, as reformat targets. We resolve each candidate's whole disk and
+# drop it when that disk also backs root "/". Fails OPEN: if root's disk can't
+# be resolved we hide nothing, so a real data drive is never lost.
+_os_disk_cache = {"disk": None, "at": 0.0}
+
+
+def _whole_disk(device):
+    """Whole-disk kernel name backing a device/partition. Uses lsblk's inverse
+    dependency walk (-s) so it resolves partitions (nvme0n1p2 -> nvme0n1) AND
+    device-mapper/LVM (a root LV -> its PV's physical disk) — a plain PKNAME
+    lookup returns nothing for dm devices, which is why the LVM root never
+    matched. -r keeps the NAME column free of tree-drawing glyphs. Returns the
+    deepest TYPE=disk in the chain, or "" when it can't be resolved."""
+    dev = device or ""
+    if not dev:
+        return ""
+    try:
+        _rc, out, _e = _run(["lsblk", "-rnso", "NAME,TYPE", dev], timeout=4)
+        disk = ""
+        for line in (out or "").splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[1] == "disk":
+                disk = parts[0].strip()  # last (deepest) disk in the chain
+        if disk:
+            return disk
+    except Exception:                                                  # noqa: BLE001
+        pass
+    return os.path.basename(dev)
+
+
+def _os_disk():
+    """Whole-disk kernel name that backs root "/" (cached ~5 min; topology is
+    stable). "" when undeterminable — callers then hide nothing (fail open)."""
+    now = time.time()
+    if _os_disk_cache["disk"] is not None and now - _os_disk_cache["at"] < 300:
+        return _os_disk_cache["disk"]
+    disk = ""
+    try:
+        _rc, src, _e = _run(["findmnt", "-fno", "SOURCE", "/"], timeout=4)
+        rows = (src or "").strip().splitlines()
+        root_src = rows[0].strip() if rows else ""
+        if root_src:
+            disk = _whole_disk(root_src)
+    except Exception:                                                  # noqa: BLE001
+        disk = ""
+    _os_disk_cache["disk"] = disk
+    _os_disk_cache["at"] = now
+    return disk
+
+
+# WARP-612: SMART health + temperature. OFF by default — smartctl spins up
+# disks and adds a subprocess per drive, which we don't want on the 10s drive
+# poll. Operators opt in with DRIVE_SMART_ENABLED=true; results are cached per
+# device for 5 min so even then smartctl isn't hammered. Best-effort: any
+# failure (smartctl absent, not root, a USB bridge without SAT passthrough)
+# yields (None, None) and the dashboard simply hides the SMART/temp chips.
+SMART_ENABLED = os.environ.get(
+    "DRIVE_SMART_ENABLED", "false").lower() in ("1", "true", "yes", "on")
+_smart_cache = {}  # device -> (checked_at, health, temp_c)
+_SMART_TTL_S = 300
+
+
+def _smart_for(device):
+    """Return (health, temp_c) for a device. health is 'PASSED'/'FAILED'/None;
+    temp_c is an int °C or None. Gated by DRIVE_SMART_ENABLED, cached 5 min,
+    never raises."""
+    if not SMART_ENABLED or not device:
+        return None, None
+    now = time.time()
+    hit = _smart_cache.get(device)
+    if hit and now - hit[0] < _SMART_TTL_S:
+        return hit[1], hit[2]
+    health = None
+    temp = None
+    # `-j` (JSON) so we read the canonical fields instead of scraping columns:
+    # `temperature.current` is the real °C, and `smart_status.passed` is an
+    # unambiguous bool. The old `-A` text scrape took the first plausible int on
+    # the Temperature_Celsius row — usually the *normalized* value (~100), not
+    # the raw temperature, so the chip showed the wrong number.
+    _rc, out, _err = _run(["smartctl", "-j", "-H", "-A", device], timeout=8)
+    try:
+        data = json.loads(out or "{}")
+        passed = data.get("smart_status", {}).get("passed")
+        if passed is True:
+            health = "PASSED"
+        elif passed is False:
+            health = "FAILED"
+        cur = data.get("temperature", {}).get("current")
+        if isinstance(cur, int) and 0 < cur < 120:  # plausible drive temp in °C
+            temp = cur
+    except (ValueError, AttributeError):
+        pass  # non-JSON output (smartctl absent / too old) → no SMART chips
+    _smart_cache[device] = (now, health, temp)
+    return health, temp
+
+
 # Filesystem types we consider "data storage" worth surfacing in the UI.
 # Excludes tmpfs, devtmpfs, cgroup, overlay, squashfs, procfs, sysfs, etc.
 _DATA_FSTYPES = {"ext4", "ext3", "ext2", "xfs", "btrfs", "f2fs",
@@ -710,8 +1180,8 @@ _DATA_FSTYPES = {"ext4", "ext3", "ext2", "xfs", "btrfs", "f2fs",
 _EXCLUDED_MOUNT_POINTS = {"/mnt/droplet"}
 
 # Ignore trivially small filesystems (< 100 MB) like CIRCUITPY flash
-# drives on microcontrollers (PyPortal, etc.) that technically mount
-# but aren't user storage.
+# drives on microcontrollers (the status display, etc.) that technically
+# mount but aren't user storage.
 _MIN_DRIVE_BYTES = 100 * 1024 * 1024
 
 
@@ -740,6 +1210,20 @@ def _label_and_uuid_for(device):
     return label, uuid
 
 
+# /proc/mounts octal-escapes whitespace + backslash in the mount path
+# (space -> \040, tab -> \011, newline -> \012, backslash -> \134). Unescape so
+# the keys/paths match the real ones the automount state file + statvfs use;
+# backslash is decoded last so an escaped backslash can't swallow the digits
+# of a following escape.
+def _unescape_mount(path: str) -> str:
+    return (
+        path.replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\012", "\n")
+        .replace("\\134", "\\")
+    )
+
+
 def drives_snapshot(invalidate=False):
     """Return every 'data' drive mounted on /mnt/*, from both the automount
     state file (hot-plug USB/NVMe) and /proc/mounts (fstab-installed
@@ -751,6 +1235,27 @@ def drives_snapshot(invalidate=False):
         return _drives_cache["snap"]
 
     by_mount = {}  # mount-point -> entry, so state + /proc/mounts merge cleanly
+    os_disk = _os_disk()  # WARP-827: whole disk backing root "/"; "" = unknown
+
+    # Filesystem type + read-only flag per mount, parsed once from
+    # /proc/mounts so both the automount and fstab branches below can
+    # annotate their entries (fs/readonly) without a second pass or a
+    # blkid subprocess. Read-only — never mutates anything.
+    mount_meta = {}  # mount-point -> (fstype, readonly)
+    try:
+        with open("/proc/mounts") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 4:
+                    # Key on the unescaped path so lookups by the real mount
+                    # point (automount state / statvfs) match even when the path
+                    # contains a space or other escaped char.
+                    mount_meta[_unescape_mount(parts[1])] = (
+                        parts[2],
+                        "ro" in parts[3].split(","),
+                    )
+    except Exception:
+        pass
 
     # 1) Hot-plug automount state (authoritative label/uuid for USB drives)
     state_path = "/var/lib/droplet-automount/mounts.json"
@@ -767,9 +1272,20 @@ def drives_snapshot(invalidate=False):
             # pass below will pick up the current location if any.
             if not os.path.ismount(mp):
                 continue
+            device = m.get("device")
+            parent_disk = _whole_disk(device)
+            if os_disk and parent_disk and parent_disk == os_disk:
+                continue  # WARP-827: partition on the OS/root disk, not a data drive
             total, used, free = _bytes_for(mp)
+            # Fail SAFE on a /proc/mounts miss: report read-only, never a false
+            # "writable". The UI renders mount status from this flag and the
+            # deferred eject/fsck work will trust it — for a data-integrity-first
+            # product an unknown state must not present as writable.
+            fs, readonly = mount_meta.get(mp, ("", True))
+            smart, temp = _smart_for(device)  # one smartctl pass, not two
             by_mount[mp] = {
-                "device": m.get("device"),
+                "device": device,
+                "parent_disk": parent_disk,
                 "mount": mp,
                 "label": m.get("label") or "",
                 "uuid": m.get("uuid") or "",
@@ -777,6 +1293,13 @@ def drives_snapshot(invalidate=False):
                 "used_bytes": used,
                 "free_bytes": free,
                 "mounted": True,
+                "fs": fs,
+                "bus": _bus_for(m.get("device")),
+                "readonly": readonly,
+                "smart": smart,
+                "temp_c": temp,
+                # Hot-plug auto-mounted → removable/ejectable regardless of bus.
+                "removable": True,
                 "source": "automount",
             }
     except Exception:
@@ -791,7 +1314,7 @@ def drives_snapshot(invalidate=False):
                 parts = line.split()
                 if len(parts) < 3:
                     continue
-                dev, mp, fs = parts[0], parts[1], parts[2]
+                dev, mp, fs = parts[0], _unescape_mount(parts[1]), parts[2]
                 if not mp.startswith("/mnt/"):
                     continue
                 if fs not in _DATA_FSTYPES:
@@ -803,16 +1326,21 @@ def drives_snapshot(invalidate=False):
                 # Zombie mounts: /proc/mounts keeps the entry even after a
                 # USB drive is yanked without a clean unmount, and statvfs
                 # on such a path falls through to the parent filesystem
-                # (so a pulled PyPortal reports 113 GB of the eMMC root).
+                # (so a pulled USB device reports eMMC root size instead).
                 # Skip if the backing block device is gone.
                 if dev.startswith("/dev/") and not os.path.exists(dev):
                     continue
                 total, used, free = _bytes_for(mp)
                 if total < _MIN_DRIVE_BYTES:
                     continue
+                parent_disk = _whole_disk(dev)
+                if os_disk and parent_disk and parent_disk == os_disk:
+                    continue  # WARP-827: partition on the OS/root disk, not a data drive
                 label, uuid = _label_and_uuid_for(dev)
+                smart, temp = _smart_for(dev)  # one smartctl pass, not two
                 by_mount[mp] = {
                     "device": dev,
+                    "parent_disk": parent_disk,
                     "mount": mp,
                     "label": label,
                     "uuid": uuid,
@@ -820,32 +1348,777 @@ def drives_snapshot(invalidate=False):
                     "used_bytes": used,
                     "free_bytes": free,
                     "mounted": True,
+                    "fs": fs,
+                    "bus": _bus_for(dev),
+                    # Same fail-safe default as the automount branch above.
+                    "readonly": mount_meta.get(mp, (fs, True))[1],
+                    "smart": smart,
+                    "temp_c": temp,
+                    # Installed (fstab) storage — not hot-plug, not ejectable.
+                    "removable": False,
                     "source": "fstab",
                 }
     except Exception:
         pass
 
-    # Stable order: fstab first (usually the big data drives), then
-    # automount (hot-plug), each group sorted by mount path for a
-    # predictable on-screen list.
-    mounts = sorted(by_mount.values(),
-                    key=lambda d: (d["source"] != "fstab", d["mount"]))
+    # WARP-827: one card per PHYSICAL drive. A drive can be mounted at more than
+    # one path (e.g. a friendly /mnt/droplet/data + the automount
+    # /mnt/droplet/data-<uuid>), which otherwise shows the same disk twice.
+    # Collapse by backing device, keeping the friendliest mount (fstab first,
+    # then the shortest path), and preserve ejectability if any duplicate was
+    # removable.
+    ordered = sorted(
+        by_mount.values(),
+        key=lambda d: (d.get("source") != "fstab", len(d.get("mount", "")), d.get("mount", "")),
+    )
+    by_device = {}
+    for e in ordered:
+        dev = e.get("device") or e.get("mount")
+        if dev in by_device:
+            if e.get("removable"):
+                by_device[dev]["removable"] = True
+            continue
+        by_device[dev] = e
+    mounts = list(by_device.values())
 
     snap = {
         "drives": mounts,
         "count": len(mounts),
-        "snapshot_at": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "os_disk": os_disk,
+        "snapshot_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     _drives_cache["snap"] = snap
     _drives_cache["at"] = now
     return snap
 
 
+def _device_at_mountpoint(mountpoint):
+    """The backing device the kernel currently has mounted at `mountpoint`, or
+    None. Reads /proc/mounts (the kernel's source of truth) so a tampered
+    automount state file can't misrepresent what is actually mounted where."""
+    try:
+        with open("/proc/mounts") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2 and _unescape_mount(parts[1]) == mountpoint:
+                    return parts[0]
+    except Exception:                                               # noqa: BLE001
+        pass
+    return None
+
+
+def eject_drive(uuid):
+    """Safely unmount + forget a hot-plug auto-mounted drive by FS UUID
+    (WARP-612). Bus-agnostic per ADR-011 — works for USB, external NVMe, SD,
+    SATA docks, anything the automounter mounted.
+
+    Guarded hard — only ever acts on a drive that (a) is in the automount
+    state file and (b) is mounted under /mnt/droplet/<…>. Internal/boot disks
+    and fstab-installed mounts are never in that set, so they are never
+    ejectable. Does not use `umount -l`: a busy drive should fail loudly so the
+    user closes files and retries, not silently lazy-unmount.
+    Returns (ok, message_or_dict). Never raises.
+    """
+    if not uuid:
+        return False, "missing uuid"
+    state_path = "/var/lib/droplet-automount/mounts.json"
+    try:
+        with open(state_path) as f:
+            state = json.load(f)
+    except Exception as e:                                          # noqa: BLE001
+        return False, "automount state unreadable: {}".format(e)
+    mounts = state.get("mounts", [])
+    target = next((m for m in mounts if (m.get("uuid") or "") == uuid), None)
+    if not target:
+        return False, "no hot-plug drive with that uuid"
+    mp = (target.get("mount") or "").rstrip("/")
+    # Bus-agnostic (ADR-011): any hot-plug drive the automounter placed under
+    # /mnt/droplet/ is ejectable — USB, external NVMe, SD, SATA dock, etc.
+    # System/boot disks are never in the automount state, so membership + the
+    # /mnt/droplet/ prefix is the gate; bus is irrelevant.
+    #
+    # Defense in depth: the automount state file is writable state, so a
+    # malformed/poisoned entry must not be able to redirect the umount. Resolve
+    # symlinks/traversal and re-check the prefix on the real path; require it to
+    # actually be a mountpoint now; and confirm the kernel has the *expected*
+    # device mounted there (/proc/mounts) before touching anything.
+    real_mp = os.path.realpath(mp)
+    if not real_mp.startswith("/mnt/droplet/") or real_mp == "/mnt/droplet":
+        return False, "refusing to eject a non-/mnt/droplet mount"
+    if not os.path.ismount(real_mp):
+        return False, "drive is not currently mounted"
+    expected_dev = target.get("device") or ""
+    actual_dev = _device_at_mountpoint(real_mp)
+    if (
+        expected_dev
+        and actual_dev
+        and os.path.realpath(actual_dev) != os.path.realpath(expected_dev)
+    ):
+        return False, "mount/device mismatch — refusing to eject"
+    _run(["sync"], timeout=10)
+    rc, _out, err = _run(["umount", real_mp], timeout=20)
+    if rc != 0:
+        return False, (err.strip() or "umount failed — the drive may be in use")
+    # Forget it so the next snapshot drops it. umount already succeeded, so a
+    # write failure here only leaves a stale entry that self-heals (the next
+    # snapshot skips it via the os.path.ismount check).
+    state["mounts"] = [m for m in mounts if (m.get("uuid") or "") != uuid]
+    try:
+        tmp = state_path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(state, f)
+        os.replace(tmp, state_path)
+    except Exception as e:                                          # noqa: BLE001
+        logger.warning(
+            "eject: failed to rewrite automount state (%s); the stale entry "
+            "self-heals on the next snapshot via the ismount check", e
+        )
+    drives_snapshot(invalidate=True)
+    return True, {"ejected": uuid, "mount": mp}
+
+
+# ---------------------------------------------------------------------------
+# Storage pools (mdadm software RAID) — READ-ONLY (BUG-3 / ADR-019)
+# ---------------------------------------------------------------------------
+# Reads /proc/mdstat (+ mdadm --detail --scan) and maps the raw md state onto
+# the ADR-019 explicit enums. NEVER mutates an array — create/destroy/format
+# live behind the auth-gated destructive POST (run_pool_command), which hands
+# the op to the root executor unit that runs the repo-tracked host script —
+# never mdadm directly. Returns [] honestly when md has no arrays (the
+# owner's "no fake pool" constraint at the read layer).
+
+_pools_cache = {"snap": None, "at": 0}
+
+# md raid token (from /proc/mdstat) -> ADR-019 ArrayLevel enum value.
+_MD_LEVEL_MAP = {
+    "raid0": "raid0",
+    "raid1": "raid1",
+    "raid4": "raid5",   # raid4 is a parity variant; surface as raid5-class
+    "raid5": "raid5",
+    "raid6": "raid6",
+    "raid10": "raid10",
+    "linear": "jbod",   # md calls JBOD/concat "linear"
+}
+
+
+def _array_level_from_md(token):
+    """Map a raw md raid token to an ADR-019 ArrayLevel value.
+
+    Unknown tokens fall back to 'jbod' (the safest "we don't model this as
+    real RAID" bucket) rather than guessing a parity level."""
+    return _MD_LEVEL_MAP.get((token or "").strip().lower(), "jbod")
+
+
+def _pool_status_from_md(md_state, health_block, resyncing=False):
+    """Map raw md status onto an ADR-019 PoolStatus value.
+
+    - resyncing (a rebuild/resync line present) wins over everything — the
+      array is being repaired right now.
+    - an inactive/failed/empty md_state is `failed`.
+    - a `[U_U]`-style health block with any '_' (a down member) is `degraded`.
+    - an all-`U` (or absent) health block on an active array is `active`.
+
+    Always returns one of the five explicit enum values, never a raw md string
+    (rule 10 — the dashboard branches on the enum, never parses mdstat)."""
+    state = (md_state or "").strip().lower()
+    if resyncing:
+        return "resyncing"
+    if state in ("inactive", "failed", "broken", ""):
+        return "failed"
+    if "_" in (health_block or ""):
+        return "degraded"
+    return "active"
+
+
+def _parse_mdstat(text):
+    """Parse /proc/mdstat into a list of pool dicts.
+
+    Each entry: {device, level, status, members:[bare disk names]}. The status
+    is an explicit PoolStatus enum value (never a raw md string). A trailing
+    `resync`/`recovery` progress line on a device flips it to `resyncing`.
+
+    Pure text parsing — no subprocess — so it's cheap and host-independent
+    (the fixture-driven tests feed it canned mdstat text)."""
+    pools = []
+    current = None
+    for raw in (text or "").splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+        # Device header lines start at column 0 and look like
+        #   "md0 : active raid1 sdb[1] sda[0]"
+        if line and not line[0].isspace() and " : " in line:
+            name, _, rest = line.partition(" : ")
+            name = name.strip()
+            if not name.startswith("md"):
+                current = None
+                continue
+            toks = rest.split()
+            # toks[0] = md_state (active/inactive/...), toks[1] = raid token
+            md_state = toks[0] if toks else ""
+            level_token = ""
+            members = []
+            for t in toks[1:]:
+                if t.startswith("raid") or t == "linear":
+                    level_token = t
+                    continue
+                # member entries look like "sdb[1]" / "nvme0n1[0]" / with (S)/(F)
+                base = t.split("[")[0]
+                if base and base not in ("level",):
+                    members.append(base)
+            current = {
+                "device": name,
+                "_md_state": md_state,
+                "level": _array_level_from_md(level_token),
+                "members": members,
+                "_health": "",
+                "_resyncing": False,
+            }
+            pools.append(current)
+            continue
+        if current is None:
+            continue
+        # Continuation lines (indented): capture the [U_U] health block and
+        # any resync/recovery progress marker.
+        if "[" in stripped and "]" in stripped:
+            # The health block is the last [..] token made only of U/_ chars.
+            for chunk in stripped.replace("]", "] ").split():
+                inner = chunk.strip("[]")
+                if inner and set(inner) <= {"U", "_"}:
+                    current["_health"] = "[" + inner + "]"
+        low = stripped.lower()
+        if "resync" in low or "recovery" in low or "rebuild" in low:
+            current["_resyncing"] = True
+
+    # Finalise: compute the explicit status, drop internal scratch fields.
+    out = []
+    for p in pools:
+        status = _pool_status_from_md(p["_md_state"], p["_health"], p["_resyncing"])
+        out.append({
+            "device": p["device"],
+            "level": p["level"],
+            "status": status,
+            "members": p["members"],
+        })
+    return out
+
+
+def _read_mdstat():
+    """Return the raw /proc/mdstat text, or None if md isn't present on this
+    host. Read-only. Isolated so tests can feed canned text without a real
+    md stack."""
+    try:
+        with open("/proc/mdstat") as f:
+            return f.read()
+    except Exception:                                               # noqa: BLE001
+        return None
+
+
+def pools_snapshot(invalidate=False):
+    """Return {pools, count, snapshot_at} for the md arrays on this host.
+
+    READ-ONLY. Returns an empty list honestly when md has no arrays (or no md
+    at all) — it NEVER synthesises a pool from loose drives. Cached ~10s like
+    the drives snapshot so the front panel / dashboard poll is cheap."""
+    now = time.time()
+    if not invalidate and _pools_cache["snap"] and now - _pools_cache["at"] < 10:
+        return _pools_cache["snap"]
+
+    pools = _parse_mdstat(_read_mdstat())
+    snap = {
+        "pools": pools,
+        "count": len(pools),
+        "snapshot_at": datetime.datetime.now(datetime.timezone.utc)
+                              .strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    _pools_cache["snap"] = snap
+    _pools_cache["at"] = now
+    return snap
+
+
+# Destructive pool operations the bridge will forward to the host script.
+# This is an allow-list — anything else is refused before we shell out. These
+# are Tier-3-class (data-destroying); they are owner-only + confirm-token-gated
+# at the orchestrator and reach this bridge route only with the bridge auth
+# token. The bridge NEVER runs mdadm/mkfs itself; the host script does, behind
+# its own hard pre-flight.
+_POOL_OPS = frozenset({
+    "pool_create",
+    "pool_destroy",
+    "pool_format",
+    "pool_set_level",
+    "pool_add_spare",
+    "pool_remove_disk",
+    # WARP-662: adopt (wipe + reformat + mount) a previously-used disk. Same
+    # auth + single-use-confirm-token + host-script-only posture as the pool
+    # ops; the host script enforces the OS-disk refusal.
+    "drive_adopt",
+})
+
+# ADR-019 follow-up: the bridge CANNOT exec droplet-storage-pool.sh itself —
+# this process runs as User=droplet inside ProtectSystem=strict +
+# NoNewPrivileges, where mdadm/mkfs/mount all fail (EPERM on the root:disk
+# 0660 block devices, EROFS under /mnt) and the script's blkid "has data"
+# probe silently degrades (an unprivileged blkid can't open the device,
+# prints nothing, and the guard passes). Verified on the shipping box. So,
+# same posture as the WARP-808 hostapd Wi-Fi write but with a different
+# split (mdadm is a direct binary — there is no unit to polkit-restart):
+# the bridge writes the owner-confirmed request into a spool inside its own
+# StateDirectory, then `systemctl start`s a root oneshot
+# (droplet-storage-pool-apply.service — authorized for the droplet user by
+# 50-droplet-device-bridge.rules, start verb only) which runs the pool
+# script as root and writes a result file back into the spool.
+POOL_SPOOL_DIR = os.environ.get(
+    "DROPLET_POOL_SPOOL_DIR", "/var/lib/droplet-bridge/pool-spool").strip()
+POOL_APPLY_UNIT = os.environ.get(
+    "DROPLET_POOL_APPLY_UNIT", "droplet-storage-pool-apply.service").strip()
+
+# Serialize concurrent pool writes (mirrors _HOSTAPD_LOCK). The spool holds
+# exactly ONE request/result pair, so two racing POSTs would clobber each
+# other's files; non-blocking acquire → the second caller is refused, not
+# queued.
+_POOL_LOCK = threading.Lock()
+
+
+def run_pool_command(operation, params):
+    """Forward an owner-confirmed destructive pool op to the root executor.
+
+    The bridge does NOT run mdadm/mkfs — and (ADR-019 follow-up) it does not
+    exec droplet-storage-pool.sh either, because this sandbox can't grant the
+    root that script needs. It writes {request_id, operation, params} to the
+    pool spool and starts the root apply unit, whose ExecStart consumes the
+    request, runs the pool script (whose hard pre-flight — refuse mounted /
+    has-data / OS-disk, require the typed double-confirm — is the real safety
+    gate, and actually works under root), and writes back a result file
+    carrying the script's rc/stdout/stderr. This function only (a) refuses
+    operations outside the allow-list, (b) refuses a second in-flight write,
+    and (c) surfaces the executor's result honestly. Returns (ok, info);
+    never raises — mirrors eject_drive()."""
+    if operation not in _POOL_OPS:
+        return False, "unknown pool operation: {}".format(operation)
+    if not _POOL_LOCK.acquire(blocking=False):
+        logger.warning("pool command %s rejected: another storage operation "
+                       "is already in progress", operation)
+        return False, "another storage operation is already in progress"
+    try:
+        return _run_pool_via_executor(operation, params)
+    finally:
+        _POOL_LOCK.release()
+
+
+def _run_pool_via_executor(operation, params):
+    """Spool the request, start the root apply unit, collect the result.
+
+    Split out of run_pool_command so the lock handling above stays trivially
+    correct. Same (ok, info) contract; never raises."""
+    request_id = secrets.token_hex(8)
+    req_path = os.path.join(POOL_SPOOL_DIR, "request.json")
+    res_path = os.path.join(POOL_SPOOL_DIR, "result.json")
+    try:
+        # 0700 like the StateDirectory it lives in — only the bridge user
+        # (or root) may place a request. os.makedirs ignores `mode` when the
+        # directory already exists, so explicitly chmod it on every start to
+        # close the window where a prior install left a looser umask (0755).
+        os.makedirs(POOL_SPOOL_DIR, mode=0o700, exist_ok=True)
+        os.chmod(POOL_SPOOL_DIR, 0o700)
+        # Drop any stale pair from an interrupted earlier run so the executor
+        # can never consume an old request and we never read an old result.
+        for stale in (req_path, res_path):
+            try:
+                os.remove(stale)
+            except FileNotFoundError:
+                pass
+        tmp = req_path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"request_id": request_id, "operation": operation,
+                       "params": params or {}}, f)
+        # Atomic rename: the executor never sees a half-written request.
+        os.replace(tmp, req_path)
+    except Exception as e:                                          # noqa: BLE001
+        logger.warning("pool command %s failed to spool request: %s",
+                       operation, e)
+        return False, "could not spool the pool request"
+    try:
+        # Blocking start of a Type=oneshot unit returns when its ExecStart
+        # exits, i.e. when the result file is already in place. mdadm/mkfs on
+        # a large array can take a while; generous but bounded (the unit's
+        # own TimeoutStartSec sits just under this).
+        rc, out, err = _run(["systemctl", "start", POOL_APPLY_UNIT],
+                            timeout=600)
+    except Exception as e:                                          # noqa: BLE001
+        logger.warning("pool command %s failed to start executor unit: %s",
+                       operation, e)
+        rc, out, err = 1, "", str(e)
+    if rc != 0:
+        # The unit never ran (polkit denied / not installed) or died at the
+        # executor level (no/malformed request). Remove the unconsumed
+        # request so it can't be picked up by a later start.
+        try:
+            os.remove(req_path)
+        except OSError:
+            pass
+        msg = (err.strip() or out.strip() or "pool executor failed to start")
+        logger.warning("pool command %s executor start failed (rc=%s): %s",
+                       operation, rc, msg)
+        return False, msg
+    try:
+        with open(res_path) as f:
+            result = json.load(f)
+    except Exception as e:                                          # noqa: BLE001
+        logger.warning("pool command %s: executor wrote no readable result: %s",
+                       operation, e)
+        return False, "pool executor returned no readable result"
+    finally:
+        try:
+            os.remove(res_path)
+        except OSError:
+            pass
+    if result.get("request_id") != request_id:
+        # A leftover from some other run — never report it as ours.
+        logger.warning("pool command %s: stale executor result ignored",
+                       operation)
+        return False, "pool executor result did not match this request"
+    script_rc = result.get("rc")
+    script_out = result.get("stdout") or ""
+    script_err = result.get("stderr") or ""
+    if script_rc is None or script_rc != 0:
+        msg = (script_err.strip() or script_out.strip()
+               or "host script refused")
+        logger.warning("pool command %s refused/failed (rc=%s): %s",
+                       operation, script_rc, msg)
+        return False, msg
+    # Invalidate the pools cache so the next GET /pools reflects the change.
+    pools_snapshot(invalidate=True)
+    # Any pool op can change which drives are free vs. in-use (pool_create,
+    # pool_destroy, pool_format, pool_add_spare, pool_remove_disk all alter
+    # md membership; drive_adopt also mounts under /mnt/droplet). Invalidate
+    # drives unconditionally so the next GET /drives reflects the new state
+    # within the cache TTL. NB this deliberately BROADENS the previous
+    # behavior (main invalidated drives only for drive_adopt; pools_snapshot
+    # was the unconditional one) — every pool op changes free/in-use drive
+    # state, so they all deserve the invalidation.
+    drives_snapshot(invalidate=True)
+    try:
+        return True, json.loads(script_out or "{}")
+    except (ValueError, TypeError):
+        return True, {"message": script_out.strip()}
+
+
+# ---------------------------------------------------------------------------
+# Single-box hostapd Wi-Fi WRITE (WARP-808)
+# ---------------------------------------------------------------------------
+#
+# The single-box AP is a raw `hostapd -B` in the droplet-openwrt container,
+# configured from /etc/hostapd.conf which droplet-openwrt-attach regenerates
+# from DROPLET_AP_SSID/DROPLET_AP_PSK. So writing the customer's Wi-Fi name +
+# key is a host action: upsert those two keys in the attach service's env file
+# and restart the service. Exactly like the destructive pool ops, the bridge
+# NEVER writes /etc/hostapd.conf or restarts hostapd itself — it shells the
+# repo-tracked host script (scripts/host/droplet-set-hostapd.sh, installed to
+# /usr/local/sbin by setup.sh), whose hard validation (SSID 1-32 / PSK 8-63,
+# reject-before-write) is the real gate. The PSK is a per-device secret and is
+# NEVER logged here.
+
+HOSTAPD_SCRIPT = os.environ.get(
+    "DROPLET_HOSTAPD_SCRIPT", "/usr/local/sbin/droplet-set-hostapd.sh").strip()
+
+
+def run_set_hostapd(params):
+    """Forward an owner-confirmed single-box Wi-Fi write to the host script.
+
+    `params` is {"ssid": str, "psk": str}. The bridge does NOT touch hostapd /
+    systemctl — it execs droplet-set-hostapd.sh with the params as a single JSON
+    argument; the script validates (SSID 1-32 / PSK 8-63) BEFORE writing,
+    upserts the attach env file, and restarts droplet-openwrt-attach.service.
+    Never raises — mirrors run_pool_command()/eject_drive().
+
+    Returns a structured (ok, code, info) triple so the HTTP handler keys the
+    status code on a stable machine `code`, NOT a substring of the human
+    message (WARP-834 finding 1):
+      - (True,  "ok",           <host-script JSON dict>) — applied
+      - (False, "busy",         <msg>) — another write holds the lock → 409
+      - (False, "script_error", <msg>) — host-script validation/run failure → 422
+      - (False, "exec_error",   <msg>) — couldn't exec the host script → 422
+    The host script restarts droplet-openwrt-attach.service, whose systemd
+    stderr can itself contain the words "in progress" (e.g. "Job is already
+    queued or in progress for ..."); keying contention on `code == "busy"`
+    instead of `"in progress" in msg` stops that from being misread as a 409.
+    The PSK is never logged (architecture-guard rule 19)."""
+    ssid = (params or {}).get("ssid", "")
+    psk = (params or {}).get("psk", "")
+    payload = json.dumps({"ssid": ssid, "psk": psk})
+    # Serialize concurrent writes (mirrors rotate_wifi_key's _ROTATION_LOCK). Two
+    # threads racing here would interleave the env-file write and double-restart
+    # the attach service / bounce hostapd. Non-blocking: a second in-flight write
+    # is rejected (the handler maps code == "busy" to 409) rather than queued.
+    if not _HOSTAPD_LOCK.acquire(blocking=False):
+        logger.warning("set_hostapd rejected: a Wi-Fi write is already in progress")
+        return False, "busy", "hostapd write already in progress"
+    try:
+        try:
+            # Writing the env file + restarting the attach service (which respawns
+            # hostapd) takes a few seconds; allow a bounded window.
+            rc, out, err = _run([HOSTAPD_SCRIPT, payload], timeout=60)
+        except Exception as e:                                      # noqa: BLE001
+            # Log the SSID only — never the params dict (it carries the PSK).
+            logger.warning("set_hostapd failed to exec host script (ssid=%r): %s",
+                           ssid, e)
+            return False, "exec_error", "host script unavailable"
+        if rc != 0:
+            msg = (err.strip() or out.strip() or "host script refused")
+            logger.warning("set_hostapd refused/failed (rc=%s, ssid=%r): %s",
+                           rc, ssid, msg)
+            return False, "script_error", msg
+        # qr_snapshot() re-reads the creds on every call (the cached value is only
+        # the hostapd-vs-uci *mode*, which a Wi-Fi write never changes) and the
+        # hostapd creds fall back to parsing the container's regenerated
+        # /etc/hostapd.conf, so the next GET /openwrt/qr reflects the new SSID with
+        # no invalidation.
+        try:
+            return True, "ok", json.loads(out or "{}")
+        except (ValueError, TypeError):
+            return True, "ok", {"message": (out or "").strip()}
+    finally:
+        _HOSTAPD_LOCK.release()
+
+
+# ---------------------------------------------------------------------------
+# Factory reset (WARP-825)
+# ---------------------------------------------------------------------------
+#
+# A factory reset wipes every data volume + the generated secrets and bounces
+# the whole stack (scripts/factory-reset.sh runs `docker compose down -v`, which
+# kills the orchestrator AND eventually this device-bridge). So unlike every
+# other host action here — which shells a host script via the BLOCKING `_run`
+# and waits for the result — the reset MUST be spawned DETACHED: we hand the
+# wipe to the repo-tracked host script (scripts/host/droplet-factory-reset.sh,
+# installed to /usr/local/sbin by setup.sh) with a non-blocking Popen and return
+# ~immediately, so the wipe survives the bridge's own teardown.
+#
+# The bridge NEVER runs `docker compose down -v` itself — the host script (which
+# wraps scripts/factory-reset.sh --yes) is the real executor.
+
+RESET_SCRIPT = os.environ.get(
+    "DROPLET_FACTORY_RESET_SCRIPT",
+    "/usr/local/sbin/droplet-factory-reset.sh").strip()
+
+
+def _spawn_detached(cmd):
+    """Spawn a long-running host command fully detached from this process.
+
+    Returns (proc, error). `proc` is the live `subprocess.Popen` on a
+    successful launch — NOT a finished wipe (we deliberately don't wait; the
+    wipe outlives us). The caller keeps the handle so a LATER reset request can
+    poll() it: a detached wipe that exits without tearing this bridge down has
+    failed, and polling lets us reclaim the stale lock instead of wedging every
+    future reset at 409. A launch failure (script missing / not executable)
+    returns (None, <reason>).
+
+    Detached so the child keeps running after the bridge is torn down by the
+    very wipe it kicked off: new session (setsid / new process group), stdio
+    redirected away from our pipes so the child isn't tied to our lifetime.
+    """
+    try:
+        kwargs = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "close_fds": True,
+        }
+        # Detach into its own session so a teardown of the bridge's process
+        # group doesn't take the wipe down with it. start_new_session is the
+        # portable (POSIX) way; guard for platforms without it.
+        if hasattr(os, "setsid"):
+            kwargs["start_new_session"] = True
+        proc = subprocess.Popen(cmd, **kwargs)  # noqa: S603 — fixed argv, no shell
+        return proc, None
+    except FileNotFoundError:
+        return None, "host script not found"
+    except Exception as e:                                          # noqa: BLE001
+        return None, str(e)
+
+
+def run_factory_reset(params):
+    """Dispatch an owner-confirmed factory reset to the host script, DETACHED.
+
+    `params` is {"jobId": str, "targetName": str} (informational — the host
+    script wipes the whole box regardless; we pass them so the host log can
+    attribute the reset). The bridge does NOT touch docker/volumes/.env itself —
+    it spawns droplet-factory-reset.sh detached. Returns (ok, info); never raises
+    — mirrors run_pool_command()/run_set_hostapd().
+
+    `ok` means the wipe was LAUNCHED, not that it finished: a factory reset
+    cannot report completion (the stack it would report through is being wiped).
+    """
+    job_id = str((params or {}).get("jobId", ""))
+    payload = json.dumps({
+        "jobId": job_id,
+        "targetName": (params or {}).get("targetName", ""),
+    })
+    global _factory_reset_proc
+    # Serialize the spawn decision (mirrors run_set_hostapd's _HOSTAPD_LOCK). Two
+    # threads racing here would each launch the wipe — two `docker compose down
+    # -v` runs racing the same teardown. Non-blocking: a second in-flight reset is
+    # rejected (the handler maps code == "busy" to 409) rather than queued.
+    if not _FACTORY_RESET_LOCK.acquire(blocking=False):
+        # The lock is held. Either a wipe is genuinely in flight, or a previous
+        # wipe FAILED mid-run — it exited without tearing this bridge down and
+        # left the lock held forever, so every later reset 409s for the life of
+        # the process (manual SSH to restart the bridge was the only recovery).
+        # Poll the tracked process to tell the two apart.
+        prior = _factory_reset_proc
+        if prior is None or prior.poll() is None:
+            # No tracked process, or it is still running → genuinely in progress.
+            logger.warning("factory reset rejected: a reset is already in progress")
+            return False, "busy"
+        # The prior wipe exited without completing the teardown → it failed.
+        # Reclaim the stale lock so this attempt can proceed.
+        logger.warning(
+            "factory reset: prior wipe exited (rc=%s) without completing the "
+            "teardown — reclaiming the stale lock for a retry", prior.returncode)
+        _factory_reset_proc = None
+        _FACTORY_RESET_LOCK.release()
+        if not _FACTORY_RESET_LOCK.acquire(blocking=False):
+            # Lost the race to a concurrent retry — treat as in-progress.
+            logger.warning("factory reset rejected: a reset is already in progress")
+            return False, "busy"
+    released = False
+    try:
+        try:
+            # Pass the job context as a single JSON arg, same convention as the
+            # pool / hostapd host scripts.
+            proc, err = _spawn_detached([RESET_SCRIPT, payload])
+        except Exception as e:                                      # noqa: BLE001
+            logger.warning("factory reset failed to spawn host script: %s", e)
+            return False, "host script unavailable"
+        if proc is None:
+            logger.warning("factory reset host script not launched: %s", err)
+            return False, (err or "host script refused")
+        # Launched. Track the process so a later reset can distinguish a live
+        # wipe from one that failed (see _factory_reset_proc). Do NOT release the
+        # lock: the wipe is now tearing the box (and this process) down, and a
+        # release here would re-open the double-fire window for a request that
+        # lands before teardown completes. On the failure paths above we DO
+        # release (via finally) so a retry after a failed launch can proceed.
+        _factory_reset_proc = proc
+        released = True
+        logger.warning("factory reset dispatched to host script (job=%s)", job_id)
+        return True, {"dispatched": True, "jobId": job_id}
+    finally:
+        if not released:
+            _FACTORY_RESET_LOCK.release()
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics log bundle (WARP-823) — READ-ONLY, via the host collector script
+# ---------------------------------------------------------------------------
+#
+# The Settings → "Download diagnostics" feature ships the box's service logs
+# (journald units + container logs) to the owner. The bridge does NOT read
+# journald / `docker logs` itself — it execs the repo-tracked host collector
+# (scripts/host/droplet-collect-logs.sh, installed to /usr/local/sbin by
+# setup.sh / install-device-bridge.sh), which bounds the window + per-service
+# size AND redacts secrets on the host. The orchestrator redacts AGAIN before
+# zipping, so a stale collector can never leak past that gate.
+#
+# Mirrors run_pool_command()/run_set_hostapd(): allow-listed shape, host-script
+# only, surfaces the script's exit honestly, never raises.
+
+LOGS_SCRIPT = os.environ.get(
+    "DROPLET_LOGS_SCRIPT", "/usr/local/sbin/droplet-collect-logs.sh").strip()
+
+# Bounded look-back window the collector accepts (hours). Matches the
+# orchestrator route's cap so a client can't ask the host for an unbounded
+# journald history.
+_LOGS_MIN_HOURS = 1
+_LOGS_MAX_HOURS = 168  # 7 days
+
+
+def collect_logs(window_hours, service):
+    """Collect bounded, host-side-redacted service logs via the host script.
+
+    `window_hours` is clamped to [1, 168] BEFORE it reaches the script so the
+    bridge never requests an unbounded history. `service`, when set, is an
+    optional single-service filter passed through. The bridge execs
+    droplet-collect-logs.sh with the window as a positional arg and the service
+    as a second arg; the script returns a JSON bundle on stdout. Returns
+    (ok, info); never raises — mirrors run_pool_command()/eject_drive()."""
+    try:
+        hours = int(window_hours)
+    except (TypeError, ValueError):
+        hours = 24
+    hours = max(_LOGS_MIN_HOURS, min(_LOGS_MAX_HOURS, hours))
+    # Pass the service filter only when it is a sane, shell-safe token. The
+    # orchestrator already validates it, but the bridge is defense-in-depth: an
+    # empty/garbage value becomes "" (the script treats that as "all services").
+    # A leading dash is rejected explicitly: `isalnum()` after stripping "-"/"_"
+    # still accepts a flag-shaped value like "--orchestrator", which would reach
+    # droplet-collect-logs.sh as an option argument rather than a service name.
+    svc = service if (isinstance(service, str)
+                      and not service.startswith("-")
+                      and service.replace("-", "").replace("_", "").isalnum()
+                      and 0 < len(service) <= 64) else ""
+    cmd = [LOGS_SCRIPT, str(hours), svc]
+    try:
+        # Collecting + redacting logs across services can take a moment on a busy
+        # box; allow a bounded window (the orchestrator fetch has its own outer
+        # timeout).
+        rc, out, err = _run(cmd, timeout=45)
+    except Exception as e:                                          # noqa: BLE001
+        logger.warning("collect_logs failed to exec host script: %s", e)
+        return False, "host script unavailable"
+    if rc != 0:
+        msg = (err.strip() or out.strip() or "host script refused")
+        logger.warning("collect_logs refused/failed (rc=%s): %s", rc, msg)
+        return False, msg
+    try:
+        return True, json.loads(out or "{}")
+    except (ValueError, TypeError):
+        # A 0-exit script that printed non-JSON: surface honestly rather than
+        # pretend it failed (mirrors run_pool_command()).
+        return True, {"message": (out or "").strip()}
+
+
+# --- ADR-023 (C2): gateway-nginx reload host executor -----------------------
+# The orchestrator's tls-issuance cron writes a freshly-issued LE fullchain into
+# docker/certs/droplet.crt and then POSTs /tls/reload here. The bridge execs the
+# repo-tracked host wrapper (scripts/host/droplet-tls-reload.sh, installed to
+# /usr/local/sbin by setup.sh / install-device-bridge.sh), which delegates to the
+# shared scripts/lib/tls-reload.sh::reload_gateway_nginx — the SAME reload path
+# the self-signed bootstrap uses. The orchestrator deliberately does NOT mount
+# the docker socket (ADR-023), so the `docker compose exec gateway nginx -s
+# reload` has to run on the host.
+#
+# Mirrors collect_logs(): allow-listed shape (no args), host-script only,
+# synchronous + bounded, surfaces the script's exit honestly, never raises.
+
+TLS_RELOAD_SCRIPT = os.environ.get(
+    "DROPLET_TLS_RELOAD_SCRIPT", "/usr/local/sbin/droplet-tls-reload.sh").strip()
+
+
+def run_tls_reload():
+    """Reload the gateway nginx so a freshly-installed cert is served at once.
+
+    Takes no parameters — the cert files are already on disk (the orchestrator
+    wrote them atomically before calling). Returns (ok, info); never raises —
+    mirrors collect_logs()/run_pool_command()."""
+    try:
+        # A reload is fast; a stuck `docker compose exec` is the only slow case.
+        rc, out, err = _run([TLS_RELOAD_SCRIPT], timeout=30)
+    except Exception as e:                                          # noqa: BLE001
+        logger.warning("tls reload failed to exec host script: %s", e)
+        return False, "host script unavailable"
+    if rc != 0:
+        msg = (err.strip() or out.strip() or "host script refused")
+        logger.warning("tls reload refused/failed (rc=%s): %s", rc, msg)
+        return False, msg
+    return True, {"message": (out or "").strip() or "gateway reloaded"}
+
+
 def cameras_snapshot():
     out = {
         "online": 0, "total": 0, "events": [],
         "source": None, "error": None,
-        "snapshot_at": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "snapshot_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     # Try Frigate first — it's the source of truth for motion/object events.
     try:
@@ -928,13 +2201,48 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/wifi":
                 return self._send(200, wifi_snapshot())
             if path == "/openwrt/qr":
+                # WARP-659: this read endpoint returns the LAN SSID + PSK
+                # (credential material). With BRIDGE_BIND=0.0.0.0 it is
+                # LAN-reachable, so it MUST require the shared secret — a
+                # wired/mgmt client without the token can no longer lift the
+                # Wi-Fi password. Local display + orchestrator both send it.
+                if not self._authed():
+                    return self._send(401, {"error": "unauthorized"})
                 return self._send(200, qr_snapshot())
             if path == "/files":
                 return self._send(200, files_snapshot())
             if path == "/cameras":
                 return self._send(200, cameras_snapshot())
             if path == "/drives":
+                # WARP-659: drive inventory (labels, mount points, usage) is
+                # box-internal; gate it like /openwrt/qr now that the bridge
+                # binds all interfaces. Both consumers (display, orchestrator)
+                # send the token.
+                if not self._authed():
+                    return self._send(401, {"error": "unauthorized"})
                 return self._send(200, drives_snapshot())
+            if path == "/pools":
+                # BUG-3 / ADR-019: read-only mdadm array inventory. Returns []
+                # honestly when no array exists — never a fabricated pool.
+                return self._send(200, pools_snapshot())
+            if path == "/logs/bundle":
+                # WARP-823: diagnostics log bundle. Auth-gated like /openwrt/qr
+                # and /drives — the logs can carry box-internal (and, pre-host-
+                # redaction, secret) material, so a token is required even on a
+                # loopback bind. collect_logs() shells the repo-tracked host
+                # collector (which bounds + redacts); the orchestrator redacts
+                # again before zipping.
+                if not self._authed():
+                    return self._send(401, {"error": "unauthorized"})
+                q = parse_qs(urlparse(self.path).query)
+                hours = (q.get("hours") or ["24"])[0]
+                service = (q.get("service") or [""])[0] or None
+                ok, info = collect_logs(hours, service)
+                if not ok:
+                    # 502 — the host collector failed/refused (journalctl absent,
+                    # script error). The orchestrator maps this to a clean error.
+                    return self._send(502, {"error": info})
+                return self._send(200, info)
             if path == "/health":
                 return self._send(200, {"ok": True})
         except Exception as e:                                       # noqa: BLE001
@@ -942,20 +2250,191 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, {"error": "not found"})
 
     def do_POST(self):
+        # Mirror do_GET: wrap the whole dispatch so a handler that raises
+        # before responding (a non-numeric Content-Length -> ValueError on
+        # int(...), or rfile.read().decode() blowing up) returns a clean JSON
+        # error instead of escaping the handler — which would otherwise leave
+        # the client with a dangling/!200 connection and a stack trace in the
+        # bridge log. The real routing lives in _dispatch_post.
+        try:
+            return self._dispatch_post()
+        except ValueError as e:                                      # noqa: BLE001
+            # Bad Content-Length (or other malformed-request value): 400.
+            return self._send(400, {"ok": False, "error": str(e)})
+        except Exception as e:                                       # noqa: BLE001
+            # Do not surface str(e) — subprocess errors include the full command
+            # line (which may contain OPENWRT_PASS in plaintext). Log for the
+            # bridge operator and return a sanitised message to the HTTP client.
+            logger.exception("unhandled error in do_POST: %s", e)
+            return self._send(500, {"ok": False, "error": "internal server error"})
+
+    def _dispatch_post(self):
         if self.path == "/drives/changed":
             # Invalidate the cache — the automount script calls this
             # whenever a drive is added or removed. Body is ignored;
             # we just want to force the next GET /drives to re-read.
+            # Auth-gated like the other mutating routes (WARP-659 left this one
+            # open): with BRIDGE_BIND=0.0.0.0 the bridge is LAN-reachable, so an
+            # unauthenticated caller could force cache churn. The automount
+            # script presents the shared token (X-Droplet-Auth).
+            if not self._authed():
+                return self._send(401, {"ok": False, "error": "unauthorized"})
             drives_snapshot(invalidate=True)
             return self._send(200, {"ok": True})
+        if self.path.startswith("/drives/") and self.path.endswith("/eject"):
+            # WARP-612: unmount + forget a hot-plug USB drive. Auth-gated like
+            # the other mutating routes; eject_drive() itself refuses anything
+            # that isn't a USB mount under /mnt/droplet/.
+            if not self._authed():
+                return self._send(401, {"ok": False, "error": "unauthorized"})
+            uuid = unquote(self.path[len("/drives/"):-len("/eject")])
+            ok, info = eject_drive(uuid)
+            if not ok:
+                # 409 Conflict — the drive is busy or not ejectable; the
+                # caller surfaces the message and the user retries.
+                return self._send(409, {"ok": False, "error": info})
+            return self._send(200, {"ok": True, **(info if isinstance(info, dict) else {})})
+        if self.path == "/pools/command":
+            # BUG-3 / ADR-019: destructive mdadm op. Auth-gated exactly like
+            # /drives/:uuid/eject. The orchestrator only reaches here after an
+            # owner session + a valid single-use confirm-token; the bridge
+            # requires its own auth token on top, and run_pool_command() hands
+            # the op to the root executor unit via the StateDirectory spool
+            # (the host script's hard pre-flight is the last safety gate) —
+            # it never runs mdadm/mkfs itself.
+            if not self._authed():
+                return self._send(401, {"ok": False, "error": "unauthorized"})
+            n = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(n).decode() if n else ""
+            try:
+                j = json.loads(raw) if raw else {}
+            except Exception:                                       # noqa: BLE001
+                return self._send(400, {"ok": False, "error": "bad json"})
+            operation = j.get("operation", "")
+            params = j.get("params", {})
+            ok, info = run_pool_command(operation, params)
+            if not ok:
+                # 422 — the host-script pre-flight refused (mounted/has-data/
+                # OS-disk/bad confirm) or the op was outside the allow-list.
+                return self._send(422, {"ok": False, "error": info})
+            return self._send(200, {"ok": True,
+                                    **(info if isinstance(info, dict) else {"info": info})})
+        if self.path == "/openwrt/wifi/hostapd":
+            # WARP-808: single-box Wi-Fi write. Auth-gated exactly like
+            # /pools/command. The orchestrator only reaches here after an
+            # owner/admin session (+ the Tier-2 confirm on the password path);
+            # the bridge requires its own auth token on top, and run_set_hostapd
+            # shells the host script (whose hard validation is the last gate) —
+            # it never writes hostapd.conf / restarts hostapd itself.
+            if not self._authed():
+                return self._send(401, {"ok": False, "error": "unauthorized"})
+            # This write only makes sense on the single-box hostapd shape. On a
+            # uci / multi-box box there is no host hostapd to write — refuse with
+            # 409 Conflict (wrong deployment shape) and NEVER invoke the host
+            # script. This is the regression guard that keeps a uci box's Wi-Fi
+            # path (UCI/SSH via the routing service) completely unaffected.
+            if not _use_hostapd_mode():
+                return self._send(409, {
+                    "ok": False, "error": "not_hostapd_mode",
+                    "hint": ("This box's Wi-Fi AP is managed via UCI, not host "
+                             "hostapd; the Wi-Fi write goes through the routing "
+                             "service on this deployment shape."),
+                })
+            n = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(n).decode() if n else ""
+            try:
+                j = json.loads(raw) if raw else {}
+            except Exception:                                       # noqa: BLE001
+                return self._send(400, {"ok": False, "error": "bad json"})
+            # Never log the body — it carries the PSK (rule 19).
+            ok, code, info = run_set_hostapd({
+                "ssid": j.get("ssid", ""),
+                "psk": j.get("psk", ""),
+            })
+            if not ok:
+                # 409 Conflict ONLY for true lock contention (another Wi-Fi write
+                # already in flight) — same non-blocking-acquire posture as
+                # rotate_wifi_key. Everything else (host-script validation refusal:
+                # SSID/PSK out of range, exec/write failure) is 422, same shape as
+                # /pools/command. Keyed on the machine `code`, NEVER a substring of
+                # the human message: the host script restarts
+                # droplet-openwrt-attach.service, whose systemd stderr can contain
+                # "in progress" ("Job is already queued or in progress for ...")
+                # and must not be misread as 409 (WARP-834 finding 1).
+                status = 409 if code == "busy" else 422
+                return self._send(status, {"ok": False, "error": info})
+            return self._send(200, {"ok": True,
+                                    **(info if isinstance(info, dict) else {"info": info})})
+        if self.path == "/system/factory-reset":
+            # WARP-825: owner-confirmed factory reset. Auth-gated exactly like
+            # /pools/command + /openwrt/wifi/hostapd. The orchestrator only
+            # reaches here after an owner session + the server-side
+            # type-to-confirm check; the bridge requires its own auth token on
+            # top, and run_factory_reset spawns the host script DETACHED (it
+            # NEVER runs `docker compose down -v` itself). Returns 202 the
+            # instant the wipe is launched — it does not (cannot) wait for the
+            # wipe, which is tearing down this very process.
+            if not self._authed():
+                return self._send(401, {"ok": False, "error": "unauthorized"})
+            n = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(n).decode() if n else ""
+            try:
+                j = json.loads(raw) if raw else {}
+            except Exception:                                       # noqa: BLE001
+                return self._send(400, {"ok": False, "error": "bad json"})
+            ok, info = run_factory_reset({
+                "jobId": j.get("jobId", ""),
+                "targetName": j.get("targetName", ""),
+            })
+            if not ok:
+                # 409 Conflict ONLY for true lock contention (another reset
+                # already in flight) — same non-blocking-acquire posture as
+                # /openwrt/wifi/hostapd. Keyed on the machine `info == "busy"`,
+                # never a substring of a human message. Everything else (host
+                # script missing / not executable) is 502; the box is untouched.
+                if info == "busy":
+                    return self._send(409, {
+                        "ok": False,
+                        "error": "reset already in progress",
+                    })
+                return self._send(502, {"ok": False, "error": info})
+            return self._send(202, {"ok": True,
+                                    **(info if isinstance(info, dict) else {"info": info})})
+        if self.path == "/tls/reload":
+            # ADR-023 (C2): reload the gateway nginx so a freshly-installed LE
+            # cert is served immediately. Auth-gated exactly like the other
+            # mutating routes. The orchestrator wrote docker/certs/droplet.crt +
+            # .key atomically BEFORE calling; the bridge only triggers the
+            # `docker compose exec gateway nginx -s reload` on the host (the
+            # orchestrator has no docker socket). Synchronous + bounded — unlike
+            # the detached factory-reset, a reload completes in well under the
+            # 30 s host-script timeout, so we wait and report the outcome.
+            if not self._authed():
+                return self._send(401, {"ok": False, "error": "unauthorized"})
+            ok, info = run_tls_reload()
+            if not ok:
+                # 502: the host script is missing / the reload command failed.
+                # The cert files are already on disk, so the box keeps serving
+                # the OLD cert until a later reload (or a gateway restart) lands.
+                return self._send(502, {"ok": False, "error": info})
+            return self._send(200, {"ok": True,
+                                    **(info if isinstance(info, dict) else {"info": info})})
         if self.path == "/openwrt/wifi/rotate":
             if not self._authed():
                 return self._send(401, {"ok": False, "error": "unauthorized"})
+            if _use_hostapd_mode():
+                # Single-box / hostapd mode: no router host to SSH into —
+                # return the same rotation_disabled sentinel as qr_snapshot()
+                # so callers (PyPortal UI, scheduled timer) gracefully no-op.
+                return self._send(410, {
+                    "ok": False, "error": "rotation_disabled",
+                    "hint": "Rotation is disabled in hostapd (single-box) mode.",
+                })
             if not ROTATION_ENABLED:
                 # 410 Gone signals "this route exists in code but is not
-                # operational in this deployment" — callers (PyPortal UI,
-                # scheduled timer) can look at this and gracefully no-op
-                # instead of retrying or surfacing an error.
+                # operational in this deployment" — callers (the status
+                # display UI, scheduled timer) can look at this and
+                # gracefully no-op instead of retrying or surfacing an error.
                 return self._send(410, {
                     "ok": False, "error": "rotation_disabled",
                     "hint": ("Set WIFI_KEY_ROTATION_ENABLED=true in "
@@ -981,6 +2460,37 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"error": "bad json"})
             ssid = j.get("ssid", "")
             password = j.get("password", "")
+            # Validate the SSID before handing it to nmcli. With shell=False there
+            # is no shell injection, but nmcli parses positional args by its own
+            # grammar — an SSID like "--delete" would be read as an option, not a
+            # network name. Mirror the hostapd host-script gate: strip control
+            # characters, require 1–32 chars, and reject a leading dash.
+            if not isinstance(ssid, str):
+                ssid = ""
+            # Length check runs on the raw value (before stripping) so a 33-byte
+            # input that contains control chars isn't silently accepted after
+            # strip reduces it to 32 printable chars (802.11 limit is 32 bytes).
+            if not ssid or len(ssid) > 32:
+                return self._send(400, {
+                    "ok": False,
+                    "error": "invalid SSID (1-32 chars, no control characters, no leading dash)",
+                })
+            ssid = "".join(ch for ch in ssid if ord(ch) >= 32 and ord(ch) != 127)
+            if not ssid or ssid.startswith("-"):
+                return self._send(400, {
+                    "ok": False,
+                    "error": "invalid SSID (1-32 chars, no control characters, no leading dash)",
+                })
+            if not isinstance(password, str):
+                password = ""
+            # Mirror the hostapd host-script PSK gate: WPA2 PSK must be 8–63
+            # chars (IEEE 802.11 §H.4.1). An empty string means open-network
+            # (nmcli connect without a password keyword), which is allowed.
+            if password and (len(password) < 8 or len(password) > 63):
+                return self._send(400, {
+                    "ok": False,
+                    "error": "invalid password (8-63 chars for WPA2 PSK)",
+                })
             rc, out, err = _run(
                 ["nmcli", "device", "wifi", "connect", ssid] +
                 (["password", password] if password else []),

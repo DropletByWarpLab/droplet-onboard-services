@@ -19,6 +19,7 @@ import { useCameras } from "@/lib/hooks/useCameras";
 import { fetchCameraSettings, patchCameraSettings } from "@/lib/api";
 import { ZoneEditor } from "@/components/settings/ZoneEditor";
 import { MotionMaskEditor } from "@/components/settings/MotionMaskEditor";
+import { ShellPage } from "@/components/shell/ShellPage";
 import type {
   CameraInfo,
   CameraSettings,
@@ -54,8 +55,9 @@ const COMMON_LABELS = [
  * + global defaults; the dashboard treats the camera-level filter as
  * authoritative and writes back camera-level overrides only.
  *
- * Zones + motion masks render as read-only here (with a "Coming in
- * Phase 4.2" hint) — they need a polygon editor we haven't built yet.
+ * Zones + motion masks are edited inline via the interactive polygon
+ * editors (`ZoneEditor` / `MotionMaskEditor`) — draw/drag vertices,
+ * changes merge into the local draft and ship with the same Save.
  */
 export default function CameraSettingsPage() {
   const params = useParams<{ name: string }>();
@@ -202,37 +204,40 @@ export default function CameraSettingsPage() {
 
   if (!name) return null;
 
-  return (
-    <div className="p-6">
-      <div className="flex items-center gap-3 mb-4">
-        <button
-          onClick={() => router.push(`/cameras/${encodeURIComponent(name)}`)}
-          className="p-2 -ml-2 rounded-full hover:bg-surface-secondary transition-colors"
-          aria-label="Back to camera"
-        >
-          <ArrowLeft size={20} />
-        </button>
-        <div className="flex-1 min-w-0">
-          <h1 className="type-large-title text-label-primary truncate">
-            {camera?.displayName ?? name} · Settings
-          </h1>
-          <p className="type-subheadline text-label-tertiary mt-0.5">
-            Detection, objects, retention. Saving restarts the camera so changes take effect.
-          </p>
-        </div>
-        <button
-          onClick={() => mutate()}
-          disabled={isLoading}
-          className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
-        >
-          <RefreshCw size={16} className={isLoading ? "animate-spin" : ""} />
-          <span className="type-subheadline">Refresh</span>
-        </button>
-      </div>
+  const actions = (
+    <>
+      <button
+        onClick={() => router.push(`/cameras/${encodeURIComponent(name)}`)}
+        className="btn ghost"
+        type="button"
+      >
+        <ArrowLeft size={15} />
+        Camera
+      </button>
+      <button
+        onClick={() => mutate()}
+        disabled={isLoading}
+        className="icon-btn"
+        aria-label="Refresh"
+        title="Refresh"
+        type="button"
+      >
+        <RefreshCw size={16} className={isLoading ? "animate-spin" : ""} />
+      </button>
+    </>
+  );
 
+  return (
+    <ShellPage
+      icon={<Camera size={15} />}
+      label="Settings"
+      title={`${camera?.displayName ?? name} · Settings`}
+      sub="Detection, objects, retention. Saving restarts the camera so changes take effect."
+      actions={actions}
+    >
       {error && (
-        <div className="dp-card p-4 mb-4 text-system-red">
-          <p className="type-subheadline">
+        <div className="card" style={{ color: "#ef4444", marginBottom: 16 }}>
+          <p>
             Couldn&apos;t load settings:{" "}
             {error instanceof Error ? error.message : String(error)}
           </p>
@@ -242,13 +247,13 @@ export default function CameraSettingsPage() {
       {!draft ? (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {Array.from({ length: 4 }).map((_, i) => (
-            <div key={i} className="dp-card h-48 animate-pulse bg-surface-secondary" />
+            <div key={i} className="card" style={{ height: 192, background: "var(--surface-2)" }} />
           ))}
         </div>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {/* Detection */}
-          <div className="dp-card p-4 space-y-3">
+          <div className="card space-y-3">
             <div className="flex items-center gap-2">
               <Camera size={16} className="text-accent" />
               <h2 className="type-headline text-label-primary">Detection</h2>
@@ -274,7 +279,7 @@ export default function CameraSettingsPage() {
           </div>
 
           {/* Recording */}
-          <div className="dp-card p-4 space-y-3">
+          <div className="card space-y-3">
             <div className="flex items-center gap-2">
               <Shield size={16} className="text-accent" />
               <h2 className="type-headline text-label-primary">Recording</h2>
@@ -312,7 +317,7 @@ export default function CameraSettingsPage() {
           </div>
 
           {/* Tracked objects + filters — full-width on lg */}
-          <div className="dp-card p-4 space-y-3 lg:col-span-2">
+          <div className="card space-y-3 lg:col-span-2">
             <div className="flex items-center justify-between">
               <h2 className="type-headline text-label-primary">Tracked objects</h2>
               <span className="type-caption-2 text-label-tertiary">
@@ -411,7 +416,7 @@ export default function CameraSettingsPage() {
           </div>
 
           {/* Zones — interactive polygon editor (Phase 4.2) */}
-          <div className="dp-card p-4 space-y-3 lg:col-span-2">
+          <div className="card space-y-3 lg:col-span-2">
             <div className="flex items-center justify-between">
               <h2 className="type-headline text-label-primary">Zones</h2>
               <span className="type-caption-2 text-label-tertiary">
@@ -429,7 +434,7 @@ export default function CameraSettingsPage() {
           </div>
 
           {/* Motion mask — interactive editor (Phase 4.3) */}
-          <div className="dp-card p-4 space-y-3 lg:col-span-2">
+          <div className="card space-y-3 lg:col-span-2">
             <div className="flex items-center justify-between">
               <h2 className="type-headline text-label-primary">Motion mask</h2>
               <span className="type-caption-2 text-label-tertiary">
@@ -454,7 +459,7 @@ export default function CameraSettingsPage() {
 
       {/* Sticky save bar */}
       {draft && (
-        <div className="sticky bottom-4 mt-6 flex items-center justify-between gap-3 dp-card p-3 backdrop-blur-md bg-[var(--color-surface-primary)]/95">
+        <div className="card sticky bottom-4 mt-6 flex items-center justify-between gap-3 backdrop-blur-md" style={{ padding: 12 }}>
           <div className="flex items-center gap-2 min-w-0">
             {saveMsg ? (
               <>
@@ -485,14 +490,16 @@ export default function CameraSettingsPage() {
             <button
               onClick={handleDiscard}
               disabled={!dirty || saving}
-              className="dp-btn-secondary px-3 py-2 rounded-lg type-subheadline disabled:opacity-50"
+              className="btn ghost"
+              type="button"
             >
               Discard
             </button>
             <button
               onClick={handleSave}
               disabled={!dirty || saving}
-              className="dp-btn-primary flex items-center gap-2 px-3 py-2 rounded-lg type-subheadline disabled:opacity-50"
+              className="btn primary"
+              type="button"
             >
               {saving ? (
                 <Loader2 size={14} className="animate-spin" />
@@ -504,7 +511,7 @@ export default function CameraSettingsPage() {
           </div>
         </div>
       )}
-    </div>
+    </ShellPage>
   );
 }
 

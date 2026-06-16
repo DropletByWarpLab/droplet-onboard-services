@@ -121,6 +121,30 @@ class SwitchDriver(ABC):
         """Get status of a single port."""
         ...
 
+    async def get_port_status(self) -> list[dict]:
+        """Live link state + speed per port — the real link/speed source.
+
+        Returns one dict per physical port::
+
+            {"port": int, "link_up": bool, "speed": str, "is_sfp": bool}
+
+        ``speed`` is a display label ("1 Gb" / "10 Gb" / "" when down). A driver
+        whose primary port read (``get_ports``) cannot report link state (e.g.
+        the Lantronix WebStaX ``vlan_port_stat`` carries only PVID/tagging)
+        overrides this with a dedicated read. The default derives from
+        ``get_ports`` so every driver — and the test fakes — answer this without
+        bespoke code. The orchestrator §7 aggregation joins this read in.
+        """
+        out: list[dict] = []
+        for p in await self.get_ports():
+            out.append({
+                "port": p.get("port"),
+                "link_up": bool(p.get("link_up")),
+                "speed": p.get("speed") or "",
+                "is_sfp": bool(p.get("is_sfp")),
+            })
+        return out
+
     @abstractmethod
     async def set_port_enabled(self, port: int, enabled: bool) -> None:
         """Enable or disable a port."""

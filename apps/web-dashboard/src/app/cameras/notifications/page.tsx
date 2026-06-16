@@ -19,6 +19,7 @@ import {
   updateCameraNotifications,
 } from "@/lib/api";
 import { PushSubscriptionCard } from "@/components/notifications/PushSubscriptionCard";
+import { ShellPage } from "@/components/shell/ShellPage";
 import type { CameraInfo, NotificationPrefs } from "@/lib/types";
 
 type RowState = NotificationPrefs & {
@@ -148,44 +149,56 @@ export default function NotificationsPage() {
 
   const dirtyCount = Object.values(rows).filter((r) => r.dirty).length;
 
-  return (
-    <div className="p-6">
-      <div className="flex items-center gap-3 mb-4">
-        <button
-          onClick={() => router.push("/cameras")}
-          className="p-2 -ml-2 rounded-full hover:bg-surface-secondary transition-colors"
-          aria-label="Back to cameras"
-        >
-          <ArrowLeft size={20} />
-        </button>
-        <div className="flex-1 min-w-0">
-          <h1 className="type-large-title text-label-primary">Notifications</h1>
-          <p className="type-subheadline text-label-tertiary mt-0.5">
-            Per-camera push notification preferences. Click a category to
-            toggle; saves apply per row.
-          </p>
-        </div>
-        <button
-          onClick={() => {
-            hydratedRef.current.clear();
-            refresh();
-          }}
-          className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
-        >
-          <RefreshCw size={16} />
-          <span className="type-subheadline">Refresh</span>
-        </button>
-      </div>
+  const actions = (
+    <button
+      onClick={() => {
+        hydratedRef.current.clear();
+        refresh();
+      }}
+      className="icon-btn"
+      aria-label="Refresh"
+      title="Refresh"
+      type="button"
+    >
+      <RefreshCw size={16} />
+    </button>
+  );
 
+  return (
+    <ShellPage
+      icon={<Bell size={15} />}
+      label="Notifications"
+      title="Notifications"
+      sub="Per-camera push notification preferences. Click a category to toggle; saves apply per row."
+      actions={
+        <>
+          <button onClick={() => router.push("/cameras")} className="btn ghost" type="button">
+            <ArrowLeft size={15} />
+            Cameras
+          </button>
+          {actions}
+        </>
+      }
+    >
       {/* Push subscription state — handles its own permission flow.
           Lives above the per-camera prefs grid so the operator
           enables push first, then dials in what triggers it. */}
       <PushSubscriptionCard />
 
       {dirtyCount > 0 && (
-        <div className="dp-card p-3 mb-3 bg-system-yellow/10 text-system-yellow flex items-center gap-2">
+        <div
+          className="card"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "12px 16px",
+            background: "rgba(217,163,92,0.12)",
+            borderLeft: "2px solid #d9a35c",
+          }}
+        >
           <Bell size={14} />
-          <span className="type-caption-1">
+          <span style={{ fontSize: 12.5 }}>
             {dirtyCount} unsaved row{dirtyCount === 1 ? "" : "s"} — use the
             Save button on each row to apply.
           </span>
@@ -193,27 +206,28 @@ export default function NotificationsPage() {
       )}
 
       {camerasLoading && cameras.length === 0 ? (
-        <div className="dp-card p-4 space-y-2">
+        <div className="card space-y-2">
           {Array.from({ length: 3 }).map((_, i) => (
             <div
               key={i}
-              className="h-12 rounded animate-pulse bg-surface-secondary"
+              className="h-12 rounded animate-pulse"
+              style={{ background: "var(--surface-2)" }}
             />
           ))}
         </div>
       ) : cameras.length === 0 ? (
-        <div className="dp-card text-center py-12">
-          <Bell size={32} className="mx-auto text-label-quaternary mb-3" />
-          <h2 className="type-title-3 text-label-primary mb-1">
-            No cameras configured
-          </h2>
-          <p className="type-subheadline text-label-tertiary max-w-md mx-auto">
-            Add a camera first — notifications fire per-camera, so there&apos;s
-            nothing to dial in until at least one is set up.
-          </p>
+        <div className="card">
+          <div className="empty">
+            <span className="ei"><Bell size={24} /></span>
+            <span className="eh">No cameras configured</span>
+            <span style={{ maxWidth: "44ch" }}>
+              Add a camera first — notifications fire per-camera, so there&apos;s
+              nothing to dial in until at least one is set up.
+            </span>
+          </div>
         </div>
       ) : (
-        <div className="dp-card overflow-hidden">
+        <div className="card" style={{ padding: 0, overflow: "hidden" }}>
           {/* Header */}
           <div className="hidden sm:grid grid-cols-[1fr_repeat(4,_4.5rem)_5rem] gap-2 px-4 py-2 border-b border-separator type-caption-2 text-label-tertiary uppercase tracking-wide">
             <span>Camera</span>
@@ -237,7 +251,7 @@ export default function NotificationsPage() {
           </ul>
         </div>
       )}
-    </div>
+    </ShellPage>
   );
 }
 
@@ -328,7 +342,8 @@ function CameraNotificationRow({
             type="button"
             onClick={onSave}
             disabled={!dirty || loading}
-            className="dp-btn-primary flex items-center justify-center gap-1.5 h-9 rounded-lg type-caption-1 disabled:opacity-50"
+            className="btn primary"
+            style={{ height: 36, width: "100%", padding: "0 8px", fontSize: 12.5 }}
           >
             {loading ? (
               <Loader2 size={12} className="animate-spin" />

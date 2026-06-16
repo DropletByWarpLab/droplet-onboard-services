@@ -10,7 +10,9 @@
  *     the current user owns.
  *   - The button carries an aria-label naming the action AND the
  *     row's primary identifier (deviceLabel).
- *   - p-2.5-or-larger hit-target token.
+ *   - The design system's icon-button hit-target token (`k-iconbtn`,
+ *     a fixed 30×30px area per droplet-shell.css — above the WCAG
+ *     2.5.8 24px floor; replaced the old Tailwind `p-2.5`).
  *   - Clicking opens <ConfirmDialog> with deviceLabel in the title
  *     (preserved from WARP-291).
  */
@@ -32,6 +34,21 @@ vi.mock("@/lib/api", () => ({
   deleteVpnPeer: (...a: any[]) => deleteVpnPeerMock(...a),
   fetchDuckDnsStatus: (...a: any[]) => fetchDuckDnsStatusMock(...a),
   setDuckDnsConfig: (...a: any[]) => setDuckDnsConfigMock(...a),
+  // ShellPage's status chip reads /api/orchestrator/health via this fetcher.
+  fetchSystemHealth: () => Promise.resolve({ status: "ok" }),
+}));
+
+// ShellPage's status chip also calls useDevice (which would pull fetchDevices
+// / fetchHealth off the api mock) — stub the hook like the other shell-page
+// suites do.
+vi.mock("@/lib/hooks/useDevice", () => ({
+  useDevice: () => ({
+    device: null,
+    devices: [],
+    health: null,
+    isLoading: false,
+    error: null,
+  }),
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -96,8 +113,8 @@ describe("Remote Access — PeerRow revoke action (WARP-292)", () => {
     const container = revokeBtn.closest("div");
     expect(container?.className ?? "").not.toMatch(/opacity-0/);
 
-    // Hit-target floor.
-    expect(revokeBtn.className).toMatch(/(^|\s)p-2\.5(\s|$)/);
+    // Hit-target floor — the shell's 30×30px icon-button token.
+    expect(revokeBtn.className).toMatch(/(^|\s)k-iconbtn(\s|$)/);
   });
 
   it("revoke aria-label falls back to peer id when deviceLabel is empty", async () => {

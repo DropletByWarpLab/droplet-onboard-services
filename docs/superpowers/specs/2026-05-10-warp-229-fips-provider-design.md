@@ -195,7 +195,7 @@ For each application service:
 
 | Risk | Likelihood | Mitigation |
 |---|---|---|
-| Node 20 + Bookworm-slim adds ~80 MB per Node image vs Alpine ~50 MB | high | Accept; resource budget on Jetson has 6-9 GB headroom (design doc §7.6). |
+| Node 20 + Bookworm-slim adds ~80 MB per Node image vs Alpine ~50 MB | high | Accept; resource budget on the inference host has 6-9 GB headroom (design doc §7.6). |
 | FIPS provider rejects an unexpected library call path | medium | Boot self-test fails closed; caught at first PR-CI run, not in production. |
 | `cryptography._fips_enabled` is internal API — may change | low | Behind our `assert_fips_at_boot` helper; one place to fix on upgrade. |
 | Two-line escape misused as silencing | medium | Escape requires registry-doc resolution; new entries trigger code-review for the doc. Annual review process. |

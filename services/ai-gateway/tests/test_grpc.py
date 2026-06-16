@@ -61,6 +61,8 @@ def _install_proto_stubs() -> None:
     pb2_mod.Usage = MagicMock(name="Usage")
     pb2_mod.EmbedResponse = MagicMock(name="EmbedResponse")
     pb2_mod.FloatArray = MagicMock(name="FloatArray")
+    pb2_mod.RerankResponse = MagicMock(name="RerankResponse")
+    pb2_mod.ClassifyQueryResponse = MagicMock(name="ClassifyQueryResponse")
 
     pb2_grpc_mod = types.ModuleType(pb2_grpc_name)
     # The servicer base must be a real class so `class InferenceServicer(Base)`
@@ -255,3 +257,107 @@ class TestListModelsErrorHandling:
 
         context.set_code.assert_called_once()
         context.set_details.assert_called_once()
+
+
+_SECRET_GRPC = "https://api.openai.com/v1/chat sk-LEAKED-grpc-upstream-secret"
+
+
+def _detail_is_opaque(context) -> None:
+    """GW-08: set_details carries the generic correlation-id'd message, never
+    the raw upstream exception text."""
+    context.set_code.assert_called_once()
+    context.set_details.assert_called_once()
+    detail = context.set_details.call_args[0][0]
+    assert _SECRET_GRPC not in detail
+    assert "sk-LEAKED" not in detail
+    assert "Upstream provider error" in detail
+    assert "ref:" in detail
+
+
+def _stub_module(monkeypatch, name: str, **attrs) -> None:
+    mod = types.ModuleType(name)
+    mod.__path__ = []  # type: ignore[attr-defined]
+    for k, v in attrs.items():
+        setattr(mod, k, v)
+    monkeypatch.setitem(sys.modules, name, mod)
+
+
+class TestGrpcProviderErrorDisclosure:
+    """GW-08: the unary handlers must not echo raw provider/exception text via
+    `context.set_details` — they route through `_provider_error_detail`, which
+    logs the cause server-side and returns only a correlation-id'd message."""
+
+    @pytest.mark.asyncio
+    async def test_list_models_error_is_opaque(self):
+        from grpc_server import InferenceServicer
+
+        router = _make_mock_router()
+        router.list_all_models = AsyncMock(side_effect=RuntimeError(_SECRET_GRPC))
+        servicer = InferenceServicer(router, _make_mock_scheduler())
+        context = _make_mock_context()
+
+        await servicer.ListModels(MagicMock(), context)
+        _detail_is_opaque(context)
+
+    @pytest.mark.asyncio
+    async def test_embed_text_error_is_opaque(self, monkeypatch):
+        def _boom(*a, **k):
+            raise RuntimeError(_SECRET_GRPC)
+
+        # EmbedText lazily does `from providers.embeddings import embed_texts`.
+        _stub_module(monkeypatch, "providers")
+        _stub_module(monkeypatch, "providers.embeddings", embed_texts=_boom)
+
+        from grpc_server import InferenceServicer
+
+        servicer = InferenceServicer(_make_mock_router(), _make_mock_scheduler())
+        request = MagicMock()
+        request.texts = ["hello"]
+        request.HasField = MagicMock(return_value=False)
+        context = _make_mock_context()
+
+        await servicer.EmbedText(request, context)
+        _detail_is_opaque(context)
+
+    @pytest.mark.asyncio
+    async def test_rerank_error_is_opaque(self, monkeypatch):
+        class _Singleton:
+            @staticmethod
+            def instance():
+                raise RuntimeError(_SECRET_GRPC)
+
+        # Rerank lazily does `from reranker import RerankerSingleton`.
+        _stub_module(monkeypatch, "reranker", RerankerSingleton=_Singleton)
+
+        from grpc_server import InferenceServicer
+
+        servicer = InferenceServicer(_make_mock_router(), _make_mock_scheduler())
+        request = MagicMock()
+        request.model = ""  # proto default — passes the supported-model check
+        request.query = "q"
+        request.passages = ["p1", "p2"]
+        context = _make_mock_context()
+
+        await servicer.Rerank(request, context)
+        _detail_is_opaque(context)
+
+    @pytest.mark.asyncio
+    async def test_classify_query_error_is_opaque(self, monkeypatch):
+        class _Singleton:
+            @staticmethod
+            def instance():
+                raise RuntimeError(_SECRET_GRPC)
+
+        # ClassifyQuery lazily does
+        # `from query_classifier import QueryClassifierSingleton`.
+        _stub_module(monkeypatch, "query_classifier", QueryClassifierSingleton=_Singleton)
+
+        from grpc_server import InferenceServicer
+
+        servicer = InferenceServicer(_make_mock_router(), _make_mock_scheduler())
+        request = MagicMock()
+        request.query = "what is the weather"
+        context = _make_mock_context()
+
+        await servicer.ClassifyQuery(request, context)
+        _detail_is_opaque(context)

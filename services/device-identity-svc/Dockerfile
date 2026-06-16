@@ -58,7 +58,7 @@ ENV PYTHONPATH=/app
 
 # Drop privileges. The Compose file bind-mounts /var/lib/droplet/tpm/
 # + /var/run/droplet/ from the host; the droplet user needs to own
-# both. /dev/tpm0 access (real backend on Jetson) is granted via the
+# both. /dev/tpm0 access (real backend in production) is granted via the
 # `tss` group on the host; runtime grouping wiring is a Compose-side
 # concern.
 RUN groupadd -r droplet && useradd -r -g droplet -d /app droplet && \

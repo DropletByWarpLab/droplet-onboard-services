@@ -2,6 +2,7 @@
 
 import pytest
 
+from auth import keystore
 from auth.keystore import store_key, get_key, delete_key, list_providers_with_keys
 
 
@@ -43,9 +44,43 @@ class TestKeystore:
         assert result == "new-key"
 
     async def test_encryption_is_applied(self, keys_dir):
-        """Verify the stored file is not plaintext."""
+        """Verify the stored file is not plaintext.
+
+        WARP-561: a no-user store lands in the shared namespace subdir."""
         await store_key("test", "my-secret-key")
-        enc_file = keys_dir / "test.enc"
+        enc_file = keys_dir / keystore._SHARED_NAMESPACE / "test.enc"
         assert enc_file.exists()
         raw = enc_file.read_bytes()
         assert b"my-secret-key" not in raw
+
+
+class TestDeviceSecretSafety:
+    """GW-09: refuse / warn when DEVICE_SECRET is the public dev default."""
+
+    def test_real_secret_is_silent(self, monkeypatch, caplog):
+        monkeypatch.setattr(keystore, "DEVICE_SECRET", "a-real-per-device-secret")
+        monkeypatch.setenv("DROPLET_ENV", "production")
+        with caplog.at_level("ERROR", logger="auth.keystore"):
+            keystore._assert_device_secret_safe()  # must not raise
+        assert not any("DEVICE_SECRET" in r.getMessage() for r in caplog.records)
+
+    def test_dev_default_logs_error_but_does_not_raise_in_dev(self, monkeypatch, caplog):
+        monkeypatch.setattr(keystore, "DEVICE_SECRET", keystore._DEV_DEFAULT_SECRET)
+        monkeypatch.delenv("DROPLET_ENV", raising=False)
+        monkeypatch.delenv("DROPLET_FIPS_REQUIRED", raising=False)
+        with caplog.at_level("ERROR", logger="auth.keystore"):
+            keystore._assert_device_secret_safe()  # dev: warn, don't crash
+        assert any("DEVICE_SECRET" in r.getMessage() for r in caplog.records)
+
+    def test_dev_default_fails_closed_in_production(self, monkeypatch):
+        monkeypatch.setattr(keystore, "DEVICE_SECRET", keystore._DEV_DEFAULT_SECRET)
+        monkeypatch.setenv("DROPLET_ENV", "production")
+        with pytest.raises(RuntimeError, match="DEVICE_SECRET"):
+            keystore._assert_device_secret_safe()
+
+    def test_dev_default_fails_closed_when_fips_required(self, monkeypatch):
+        monkeypatch.setattr(keystore, "DEVICE_SECRET", keystore._DEV_DEFAULT_SECRET)
+        monkeypatch.delenv("DROPLET_ENV", raising=False)
+        monkeypatch.setenv("DROPLET_FIPS_REQUIRED", "true")
+        with pytest.raises(RuntimeError, match="DEVICE_SECRET"):
+            keystore._assert_device_secret_safe()

@@ -39,7 +39,7 @@ Justification:
 - The catalog is structured as **techniques, not frameworks.** Every technique we want from it (HyDE, contextual headers, small-to-big, adaptive retrieval, CRAG-lite, semantic chunking, CLIP) is a <300-LOC change to `chunker.py`, `file-search.service.ts`, or the orchestrator's agent loop — each adds one capability, each is independently gated on an eval delta, each preserves the abstractions that already work.
 - For **evaluation only**, RAGAS gives us faithfulness / context-relevance / answer-correctness metrics that NDCG@10 doesn't cover. It runs offline as a Python script inside `tests/retrieval-eval/`, never in the production path. Its judge LLM can be the local Ollama model for routine runs and a cloud model for golden runs — no production dependency on a cloud judge.
 
-**Adoption priority is set by three filters, in order:** (a) edge-viable on Jetson Orin Nano with local Ollama, (b) measurable in the existing eval harness (NDCG@10 today, RAGAS metrics after Phase 2), (c) leverage proportional to cost.
+**Adoption priority is set by three filters, in order:** (a) edge-viable on the appliance's inference host with local Ollama, (b) measurable in the existing eval harness (NDCG@10 today, RAGAS metrics after Phase 2), (c) leverage proportional to cost.
 
 ## Options considered
 
@@ -145,7 +145,7 @@ Each step row carries:
 | 2.3 | Implement `ragas_runner.py`: load goldens, call orchestrator's `/api/admin/retrieval-eval/search` for each query, build a `Dataset`, run `evaluate(..., metrics=[Faithfulness, LLMContextRecall, LLMContextPrecision, AnswerRelevancy, FactualCorrectness], llm=local_llm)`. Emit JSON + Markdown summary. | `tests/retrieval-eval/ragas/ragas_runner.py` | 2.1, 2.2 | B |
 | 2.4 | Add `RAGAS_ENABLED=1` mode to `tests/retrieval-eval/run.integration.test.ts` that shells out to `ragas_runner.py` and asserts threshold envelopes (set in 2.7). | `tests/retrieval-eval/run.integration.test.ts` | 2.3 | C |
 | 2.5 | Add `--with-ragas` flag + `RAGAS_JUDGE={local\|cloud}` env handling to `scripts/test-rag.sh`. Default judge: local Ollama. Cloud judge requires explicit env var. | `scripts/test-rag.sh` | 2.3 | C |
-| 2.6 | Add nightly GitHub Actions job that runs `RAGAS_ENABLED=1 ./scripts/test-rag.sh --with-ragas` on the appliance test runner. PR CI stays NDCG-only (RAGAS too slow per-PR). | `.github/workflows/rag-eval-nightly.yml` (new) | 2.5 | C |
+| 2.6 | Run RAGAS on a schedule via an on-appliance service (`services/rag-eval/`, opt-in via Compose profile `eval`), invoking `ragas_runner.py` against the running stack — not via GitHub Actions (project convention: GHA is for dev tasks, not on-machine functionality). PR CI stays NDCG-only (RAGAS too slow per-PR; the appliance cadence is hourly off-hours). | `services/rag-eval/` (new) | 2.5 | C |
 | 2.7 | Run baselines 5×, record p50/p95 per metric, set thresholds at `baseline_p50 - 1.5 × IQR` as the regression envelope. Commit baselines to `tests/retrieval-eval/ragas/baselines.json`. | `tests/retrieval-eval/ragas/baselines.json` | 2.4 | D |
 | 2.8 | Document RAGAS metrics + judge-LLM policy + threshold rationale in a new `## RAGAS metrics` section of `docs/RAG_TESTING.md`. | `docs/RAG_TESTING.md` | 2.7 | E |
 
@@ -237,7 +237,7 @@ Each step row carries:
 
 | # | Step | Files / surfaces | Depends on | Batch |
 |---|---|---|---|---|
-| 5.1 | Add `moondream` to the Ollama pre-pulled-models list in the device-jetson-ai sibling repo. Coordinate with that repo's setup (`scripts/setup-jetson-ai.sh` or equivalent). **Cross-repo dependency: needs a PR there first.** | `droplet-jetson-ai/scripts/setup-jetson-ai.sh` (sibling repo) | — | A |
+| 5.1 | Add `moondream` to the Ollama pre-pulled-models list in the inference sibling repo. Coordinate with that repo's setup (`scripts/setup.sh` or equivalent). **Cross-repo dependency: needs a PR there first.** | `droplet-local-LLM/scripts/setup.sh` (sibling repo) | — | A |
 | 5.2 | Author Prisma migration adding `modality: enum('text', 'image_caption')` to `FileContentChunk`. Default `text` for backfill. Add index `(userId, modality, indexedAt)` for filtered queries. | `apps/orchestrator/prisma/schema.prisma`, `apps/orchestrator/prisma/migrations/<ts>_add_modality/` | — | A |
 | 5.3 | Extend `tests/retrieval-eval/queries.yaml` with 10 image-grounded queries (PDF with figures, image-only chat attachments). Add fixture images to `tests/fixtures/`. | `tests/retrieval-eval/queries.yaml`, `tests/fixtures/` | — | A |
 | 5.4 | Add `CaptionImage` RPC to ai-gateway gRPC server. Input: `(image_bytes, length='normal')`. Output: caption string. Calls Ollama's `moondream` model via OpenAI-compat vision API. Lazy-loaded singleton like reranker/classifier/grader. | `services/ai-gateway/grpc_server.py`, `services/ai-gateway/captioner.py` (new), `services/ai-gateway/protos/*.proto` | 5.1 | B |
@@ -251,7 +251,7 @@ Each step row carries:
 **Files changed:** ~7 files in this repo + 1 in the sibling repo, ~400 LOC, 1 Prisma migration.
 **Eval gate:** Above.
 **Calendar:** 8–12 working days *after* the sibling repo's Ollama pre-pull lands (Step 5.1).
-**Hard blockers:** Step 5.1 needs inference-engine / droplet-jetson-ai capacity confirmation. The actual model fits the budget; the question is whether ops wants to ship a second model on the device. Coordinate before starting.
+**Hard blockers:** Step 5.1 needs droplet-local-LLM capacity confirmation. The actual model fits the budget; the question is whether ops wants to ship a second model on the device. Coordinate before starting.
 
 ---
 
@@ -284,25 +284,37 @@ Each step row carries:
 
 ## Tickets
 
-JIRA epic + child stories live in the **WARP** project on `warp-lab.atlassian.net`. The branch `feat/rag-techniques-adoption` is the work-tracking root.
+JIRA epic + child stories live in the **WARP** project on `warp-lab.atlassian.net`.
+
+> **Living status:** [`docs/RAG_UPGRADE_STATUS.md`](RAG_UPGRADE_STATUS.md) is the
+> up-to-date handoff page — current state per phase, the eval-service follow-ups,
+> and the ordered "what to do next". This table is the design-time snapshot; the
+> status doc is the source of truth for *where the work is*.
 
 | Phase | Ticket | Status |
 |---|---|---|
 | Epic | [WARP-434](https://warp-lab.atlassian.net/browse/WARP-434) | In Progress |
-| Phase 1 — Ingest enrichment | [WARP-435](https://warp-lab.atlassian.net/browse/WARP-435) | In Progress — shipped batches A + B + D (sentence-aware chunker, per-extractor sectionPath, contextual-header prefix on every chunk, docs). Batch C (live re-index + eval gate) deferred to the integration-stack run. |
-| Phase 2 — RAGAS eval harness | [WARP-436](https://warp-lab.atlassian.net/browse/WARP-436) | In Progress — batches A/B/C/E landed; batch D scaffolded (needs first Linux/CI run to populate baselines.json) |
-| Phase 3 — Query enhancement | [WARP-437](https://warp-lab.atlassian.net/browse/WARP-437) | In Progress — design + plan landed on `feat/warp-437-query-enhancement`; Tasks 1–10 implemented (ClassifyQuery RPC, deberta singleton, HyDE / multi-query service, queryEnhancement mirror across orchestrator + mcp-server, search_content `enhance` input, adaptive routing via `_meta._enhancement`, `hybrid-enhanced` eval variant, per-class slicing). Per-class eval gates run in recording mode until `tests/retrieval-eval/ragas/baselines.json` is populated by a Linux CI run; production wiring of `EnhancementDeps` in `apps/orchestrator/src/server.ts` is the remaining follow-up. |
-| Phase 4 — CRAG-lite | [WARP-438](https://warp-lab.atlassian.net/browse/WARP-438) | To Do (blocked by WARP-436, WARP-437) |
-| Phase 5 — Multimodal | [WARP-439](https://warp-lab.atlassian.net/browse/WARP-439) | To Do (blocked on droplet-jetson-ai capacity) |
+| Phase 1 — Ingest enrichment | [WARP-435](https://warp-lab.atlassian.net/browse/WARP-435) | **Merged** — batches A + B + D (sentence-aware chunker, per-extractor sectionPath, contextual-header prefix, docs). Batch C (live re-index + eval gate) deferred to the integration-stack run. |
+| Phase 2 — RAGAS eval harness | [WARP-436](https://warp-lab.atlassian.net/browse/WARP-436) | **Merged** — batches A/B/C/E landed; batch D (populate `baselines.json`) now done via the `services/rag-eval/` service's `bootstrap --runs 5` on the appliance, not CI. Until that runs, the integration test is in recording mode. |
+| Phase 3 — Query enhancement | [WARP-437](https://warp-lab.atlassian.net/browse/WARP-437) | **Done** — merged in [#271](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/271). HyDE + multi-query + adaptive routing via `_meta._enhancement`. Shipping dark behind `WARP_437_ENHANCEMENT_ENABLED`; per-class gates in recording mode until baselines land. |
+| Phase 4 — CRAG-lite | [WARP-438](https://warp-lab.atlassian.net/browse/WARP-438) | To Do — WARP-437 blocker cleared; remaining blocker is the WARP-436 baselines. |
+| Phase 5 — Multimodal | [WARP-439](https://warp-lab.atlassian.net/browse/WARP-439) | To Do (blocked on droplet-local-LLM `moondream` pre-pull, cross-repo). |
+| Eval service | (no phase ticket) | **Merged** in [#299](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/299) — `services/rag-eval/` runs the harness on the appliance (Compose profile `eval`). Follow-ups in review: [WARP-519](https://warp-lab.atlassian.net/browse/WARP-519) HTTP trigger ([#315](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/315)), [WARP-520](https://warp-lab.atlassian.net/browse/WARP-520) stream output ([#312](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/312)), [WARP-521](https://warp-lab.atlassian.net/browse/WARP-521) aggregator tests ([#313](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/313)). |
 
 All assigned to Romain. Labels: `origin-ai`, `size-{m\|l}`, `rag`, plus a per-phase topical tag (`ingest`, `eval`, `query`, `grading`, `multimodal`).
 
 Blocking relations wired in Jira:
-- WARP-436 blocks WARP-437
+- WARP-436 blocks WARP-437 (cleared — both progressed)
 - WARP-436 blocks WARP-438
-- WARP-437 blocks WARP-438
+- WARP-437 blocks WARP-438 (cleared — WARP-437 merged)
 
-WARP-439's blocker is cross-repo (droplet-jetson-ai sibling) and isn't represented as a Jira link.
+WARP-439's blocker is cross-repo (droplet-local-LLM sibling) and isn't represented as a Jira link.
+
+> **Note on the original "GitHub Actions nightly" plan (step 2.6):** the eval is
+> NOT run via GitHub Actions. Per repo convention GHA is for dev tasks (PR CI,
+> unit tests, image-build verification); on-machine functionality like running
+> RAGAS lives in the `services/rag-eval/` service. The earlier
+> `.github/workflows/rag-eval-nightly.yml` was removed accordingly.
 
 ---
 
@@ -322,7 +334,7 @@ These map onto the GTM milestone style. Suggested placement: under Stage 3 (Prod
 ### M-RAG.2 RAGAS eval harness (Phase 2 of ADR-003)
 - **Scope:** Faithfulness / context-relevance / answer-correctness metrics.
 - **Framework:** ragas==0.4.x with native Ollama via OpenAI-compat.
-- **Files:** tests/retrieval-eval/ragas/, scripts/test-rag.sh, .github/workflows/rag-eval-nightly.yml
+- **Files:** tests/retrieval-eval/ragas/, scripts/test-rag.sh, services/rag-eval/
 - **Status:** [ ] Not started
 - **Eval gate:** Baselines established; thresholds set for M-RAG.3+.
 - **Ticket:** WARP-RAG.2
@@ -349,7 +361,7 @@ These map onto the GTM milestone style. Suggested placement: under Stage 3 (Prod
 - **Framework:** moondream2 (~1.5 GB) via Ollama as `moondream`. Reserves Qwen2.5-VL 3B as fallback.
 - **Files:** services/file-indexer/extractors/image.py, services/ai-gateway/captioner.py (new CaptionImage RPC), prisma schema (add modality enum)
 - **Status:** [ ] Not started
-- **Blockers:** droplet-jetson-ai Ollama pre-pull PR (cross-repo).
+- **Blockers:** droplet-local-LLM Ollama pre-pull PR (cross-repo).
 - **Ticket:** WARP-RAG.5
 ```
 

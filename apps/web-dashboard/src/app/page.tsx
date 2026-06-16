@@ -1,564 +1,454 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
+/**
+ * Droplet Home — a chat-centered bento dashboard.
+ *
+ * The chat hero is the centerpiece (a bare, card-less block — the page IS the
+ * chat), surrounded by modular widgets the user can rearrange and resize in an
+ * explicit Edit-layout mode: drag to reorder with live reflow + split-to-share,
+ * drag a corner to resize, and the board auto-fills gaps on settle. Display
+ * density (Balanced / Dense / Airy) lives in a Settings panel and persists, as
+ * does each density's layout. Below 760px it collapses to a sound single-column
+ * stack (the app shell already supplies the mobile bottom nav).
+ *
+ * The app shell (AuthGate) provides the violet Sidebar + mobile nav around this
+ * `<main>`. This file is just the Home surface content. The indigo identity and
+ * all generic class names are scoped under `.droplet-home` (see the two CSS
+ * imports) so nothing leaks into the rest of the dashboard, and it tracks the
+ * repo's light/dark theme via the `.dark` class on <html>.
+ *
+ * Note: chat / files / cameras / models / system-status read live data via the
+ * dashboard's SWR hooks; calendar, activity, tasks, notes, tools and the
+ * smart-home toggles are representative local content for now.
+ */
+
+import { useEffect, useMemo, useState } from "react";
 import useSWR from "swr";
 import {
-  ArrowUpRight,
-  ArrowRight,
-  FolderOpen,
-  Home as HomeIcon,
-  Sparkles,
-  Lightbulb,
-  Thermometer,
-  Video,
-  Network as NetworkIcon,
-  HardDrive,
-  Cpu,
-  Cloud,
-  MessageSquare,
-  Settings,
-  Users,
-  Clock,
-  type LucideIcon,
+  Check,
+  LayoutGrid,
+  Plus,
+  RefreshCw,
+  Settings as SettingsIcon,
+  Crosshair,
+  X,
 } from "lucide-react";
-import { ContextWidget } from "@/components/context/ContextWidget";
-import { useDevice } from "@/lib/hooks/useDevice";
-import { useModels } from "@/lib/hooks/useModels";
-import { useStorage } from "@/lib/hooks/useStorage";
-import { useRecents } from "@/lib/hooks/useRecents";
-import { useSmartHome } from "@/lib/hooks/useSmartHome";
 import { useAuth } from "@/lib/auth";
+import { useDevice } from "@/lib/hooks/useDevice";
 import { fetchSystemHealth, type SystemHealth } from "@/lib/api";
-import type { FileEntryInfo } from "@/lib/types";
+import { resolveHealthCopy } from "./health-copy";
+import { BentoBoard } from "@/components/home/BentoBoard";
+import { AmbientLayer } from "@/components/home/AmbientLayer";
+import { WIDGETS, CATALOG } from "@/components/home/widgets";
+import { fillGaps, type LayoutItem } from "@/components/home/bento-engine";
+import "@/components/home/home-bento.css";
+import "@/components/home/home-widgets.css";
 
-// ─────────────────────────────── helpers ───────────────────────────────
+/* The chat capsule carries `focus-within:ring-2 focus-within:ring-accent/40`
+   and the textarea an `aria-label="Ask Droplet"` (WARP-298) — both defined in
+   components/home/widgets.tsx (ChatWidget), which is also where the WARP-298
+   source-guard test (home.hero-focus.test.tsx) asserts the contract. */
 
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(1024));
-  const value = bytes / Math.pow(1024, i);
-  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[i]}`;
+type DensityKey = "balanced" | "dense" | "airy";
+
+interface Density {
+  label: string;
+  cols: number;
+  gap: number;
+  rowH: number;
+  desc: string;
+  cells: number;
 }
 
-function greeting(): string {
-  const h = new Date().getHours();
-  if (h < 5) return "Still up";
-  if (h < 12) return "Good morning";
-  if (h < 18) return "Good afternoon";
-  if (h < 22) return "Good evening";
+const DIRECTIONS: Record<DensityKey, Density> = {
+  balanced: { label: "Balanced", cols: 12, gap: 16, rowH: 96, desc: "Comfortable spacing. The default home.", cells: 6 },
+  dense: { label: "Dense", cols: 12, gap: 12, rowH: 78, desc: "Tighter grid — more on screen at once.", cells: 9 },
+  airy: { label: "Airy", cols: 12, gap: 22, rowH: 104, desc: "Generous spacing — calmer, larger cards.", cells: 4 },
+};
+
+const DEFAULTS: Record<DensityKey, LayoutItem[]> = {
+  balanced: [
+    { id: "chat", w: 8, h: 5 }, { id: "calendar", w: 4, h: 3 }, { id: "status", w: 4, h: 2 },
+    { id: "activity", w: 4, h: 3 }, { id: "files", w: 4, h: 3 }, { id: "cameras", w: 4, h: 3 },
+    { id: "tasks", w: 3, h: 3 }, { id: "scenes", w: 3, h: 3 }, { id: "models", w: 3, h: 3 },
+    { id: "tools", w: 3, h: 3 }, { id: "notes", w: 12, h: 2 },
+  ],
+  dense: [
+    { id: "chat", w: 6, h: 5 }, { id: "status", w: 3, h: 2 }, { id: "calendar", w: 3, h: 5 },
+    { id: "models", w: 3, h: 2 }, { id: "cameras", w: 4, h: 3 }, { id: "activity", w: 4, h: 4 },
+    { id: "files", w: 4, h: 4 }, { id: "tasks", w: 3, h: 2 }, { id: "tools", w: 3, h: 2 },
+    { id: "scenes", w: 3, h: 2 }, { id: "notes", w: 12, h: 2 },
+  ],
+  airy: [
+    { id: "chat", w: 7, h: 5 }, { id: "calendar", w: 5, h: 5 }, { id: "activity", w: 4, h: 3 },
+    { id: "tasks", w: 4, h: 3 }, { id: "scenes", w: 4, h: 3 }, { id: "status", w: 6, h: 2 },
+    { id: "notes", w: 6, h: 2 },
+  ],
+};
+
+const ADD_SIZE: Record<string, { w: number; h: number }> = {
+  chat: { w: 6, h: 5 }, calendar: { w: 3, h: 4 }, status: { w: 3, h: 2 }, activity: { w: 4, h: 3 },
+  files: { w: 3, h: 3 }, scenes: { w: 3, h: 3 }, cameras: { w: 4, h: 3 }, models: { w: 3, h: 3 },
+  tools: { w: 3, h: 3 }, tasks: { w: 3, h: 3 }, notes: { w: 3, h: 2 },
+};
+
+const LS = "droplet-home-bento-v1-";
+const VALID_IDS = Object.keys(WIDGETS);
+
+// The default layout, minus any widget not in the active registry (a
+// feature-flagged widget whose backend isn't built yet is absent from
+// WIDGETS), repacked so removing it leaves no gap.
+function defaultsFor(dir: DensityKey): LayoutItem[] {
+  const valid = DEFAULTS[dir].filter((x) => VALID_IDS.includes(x.id)).map((x) => ({ ...x }));
+  return fillGaps(valid, DIRECTIONS[dir].cols, WIDGETS);
+}
+
+function loadLayout(dir: DensityKey): LayoutItem[] {
+  if (typeof window === "undefined") return defaultsFor(dir);
+  try {
+    const raw = JSON.parse(window.localStorage.getItem(LS + dir) ?? "null");
+    if (Array.isArray(raw) && raw.length) {
+      // Bound w/h so a corrupted or crafted entry can't blow up the board:
+      // width never exceeds the grid; height capped well above any real widget.
+      const cols = DIRECTIONS[dir].cols;
+      const clean = raw.filter(
+        (it) =>
+          it &&
+          VALID_IDS.includes(it.id) &&
+          Number.isFinite(it.w) &&
+          it.w > 0 &&
+          it.w <= cols &&
+          Number.isFinite(it.h) &&
+          it.h > 0 &&
+          it.h <= 20,
+      );
+      if (clean.length) return fillGaps(clean, cols, WIDGETS);
+    }
+  } catch {
+    /* ignore */
+  }
+  return defaultsFor(dir);
+}
+
+function useIsMobile(): boolean {
+  const [m, setM] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 760px)");
+    const on = () => setM(mq.matches);
+    on();
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, []);
+  return m;
+}
+
+function greetingNow(): string {
+  const hr = new Date().getHours();
+  if (hr < 5) return "Still up";
+  if (hr < 12) return "Good morning";
+  if (hr < 18) return "Good afternoon";
+  if (hr < 22) return "Good evening";
   return "Working late";
 }
 
-const SUGGESTIONS = [
-  "Summarize the files I uploaded today",
-  "Dim the living-room lights to 30%",
-  "What's using the most storage?",
-  "Draft a changelog from recent notes",
-];
+/* ─────────────────────────── Settings (density) ─────────────────────────── */
+function SettingsModal({
+  open,
+  onClose,
+  dir,
+  setDir,
+}: {
+  open: boolean;
+  onClose: () => void;
+  dir: DensityKey;
+  setDir: (d: DensityKey) => void;
+}) {
+  // Keep the modal mounted through its exit animation, then unmount.
+  const [render, setRender] = useState(open);
+  const [closing, setClosing] = useState(false);
+  useEffect(() => {
+    if (open) {
+      setRender(true);
+      setClosing(false);
+      return;
+    }
+    if (render) {
+      setClosing(true);
+      const t = window.setTimeout(() => {
+        setRender(false);
+        setClosing(false);
+      }, 150);
+      return () => window.clearTimeout(t);
+    }
+  }, [open, render]);
 
-const HEALTH_COPY: Record<SystemHealth["status"], { label: string; dot: string }> = {
-  ok:       { label: "All systems operational", dot: "bg-system-green" },
-  degraded: { label: "Degraded",                dot: "bg-system-orange" },
-  down:     { label: "Needs attention",         dot: "bg-system-red" },
-};
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
 
-// ─────────────────────────────── page ───────────────────────────────
-
-export default function DashboardPage() {
-  const router = useRouter();
-  const { user } = useAuth();
-  const { device, health } = useDevice();
-  const { models } = useModels();
-  const { storage } = useStorage();
-  const { items: recents } = useRecents(5);
-  const { grouped, totalDevices } = useSmartHome();
-  const { data: systemHealth } = useSWR<SystemHealth>(
-    "/api/orchestrator/health",
-    fetchSystemHealth,
-    { refreshInterval: 15_000 },
+  if (!render) return null;
+  return (
+    <div className={"dh-modal-overlay" + (closing ? " closing" : "")} onClick={onClose}>
+      <div className="dh-modal" role="dialog" aria-modal="true" aria-label="Settings" onClick={(e) => e.stopPropagation()}>
+        <div className="dh-modal-head">
+          <span className="dh-modal-title">Settings</span>
+          <button className="dh-modal-x" onClick={onClose} aria-label="Close" type="button">
+            <X size={16} />
+          </button>
+        </div>
+        <div className="dh-modal-body">
+          <div className="dh-set-h">
+            <span className="dh-set-ico"><LayoutGrid size={15} /></span>
+            <div>
+              <div className="t">Display density</div>
+              <div className="d">Choose how much information fits on screen. Applies to the Home board.</div>
+            </div>
+          </div>
+          <div className="dh-density" role="radiogroup" aria-label="Display density">
+            {(Object.keys(DIRECTIONS) as DensityKey[]).map((k) => {
+              const o = DIRECTIONS[k];
+              const active = dir === k;
+              return (
+                <button
+                  key={k}
+                  className={"dh-opt" + (active ? " active" : "")}
+                  onClick={() => setDir(k)}
+                  role="radio"
+                  aria-checked={active}
+                  type="button"
+                >
+                  <span className={"dh-prev " + k}>
+                    {Array.from({ length: o.cells }).map((_, i) => <i key={i} />)}
+                  </span>
+                  <span className="dh-opt-txt">
+                    <span className="t">{o.label}</span>
+                    <span className="d">{o.desc}</span>
+                  </span>
+                  <span className="dh-radio" />
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    </div>
   );
+}
+
+/* ─────────────────────────── Mobile (single column) ─────────────────────────── */
+function MobileBoard({ items }: { items: LayoutItem[] }) {
+  return (
+    <div className="dh-m-board">
+      {items.map((it) => {
+        const reg = WIDGETS[it.id];
+        if (!reg) return null;
+        const Comp = reg.Comp;
+        const Icon = reg.icon;
+        return (
+          <div key={it.id} className={"bento" + (reg.feature ? " bento--hero" : "")}>
+            {!reg.feature && (
+              <div className="bento-head">
+                <span className="wi"><Icon size={14} /></span>
+                <span className="wt">{reg.title}</span>
+              </div>
+            )}
+            <div className={"bento-body" + (reg.scroll ? " scroll" : "")}>
+              <Comp w={4} h={Math.max(it.h, 3)} editing={false} />
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ─────────────────────────── Page ─────────────────────────── */
+export default function DashboardPage() {
+  const { user } = useAuth();
+  const { device } = useDevice();
+  const isMobile = useIsMobile();
+
+  const [dir, setDir] = useState<DensityKey>("balanced");
+  const [editMode, setEditMode] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [layouts, setLayouts] = useState<Record<DensityKey, LayoutItem[]>>({
+    balanced: defaultsFor("balanced"),
+    dense: defaultsFor("dense"),
+    airy: defaultsFor("airy"),
+  });
+
+  // Hydrate persisted density + layouts after mount (avoids SSR mismatch).
+  useEffect(() => {
+    const d = window.localStorage.getItem(LS + "dir") as DensityKey | null;
+    setDir(d && DIRECTIONS[d] ? d : "balanced");
+    setLayouts({
+      balanced: loadLayout("balanced"),
+      dense: loadLayout("dense"),
+      airy: loadLayout("airy"),
+    });
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(LS + "dir", dir);
+    } catch {
+      /* ignore */
+    }
+  }, [dir]);
+
+  const items = layouts[dir];
+  const cfg = DIRECTIONS[dir];
+
+  const persist = (next: LayoutItem[]) => {
+    setLayouts((L) => {
+      const n = { ...L, [dir]: next };
+      try {
+        window.localStorage.setItem(LS + dir, JSON.stringify(next));
+      } catch {
+        /* ignore */
+      }
+      return n;
+    });
+  };
+
+  const onChange = (next: LayoutItem[]) => persist(next);
+  const onRemove = (id: string) =>
+    persist(fillGaps(items.filter((it) => it.id !== id), cfg.cols, WIDGETS));
+  const onAdd = (id: string) => {
+    const s = ADD_SIZE[id] || { w: 3, h: 3 };
+    persist(fillGaps([...items, { id, ...s }], cfg.cols, WIDGETS));
+  };
+  const onReset = () => persist(defaultsFor(dir));
+
+  const hidden = CATALOG.filter((c) => !items.some((it) => it.id === c.id));
 
   const firstName = useMemo(() => {
     const raw = user?.displayName || user?.username || "";
     return raw.split(/[\s@.]/)[0] || "";
   }, [user]);
 
-  const localModels = models.filter((m) => m.provider === "ollama");
-  const cloudModels = models.filter((m) => m.provider !== "ollama");
+  const greeting = greetingNow();
+  const dateStr = new Date().toLocaleDateString(undefined, {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+  });
+  const host = device?.hostname || "droplet";
 
-  // Hero chat — type here, hit ⏎, land in /chat with the question queued
-  const [prompt, setPrompt] = useState("");
-  const taRef = useRef<HTMLTextAreaElement>(null);
+  // Live rolled-up system health (WARP-43) drives the always-visible toolbar
+  // chip — dot colour + label track ok / degraded / down rather than being
+  // hardcoded green. `unknown` covers loading, fetch errors, and any status
+  // outside the union (resolveHealthCopy is total — see app/health-copy.ts).
+  const { data: systemHealth } = useSWR<SystemHealth>(
+    "/api/orchestrator/health",
+    fetchSystemHealth,
+    { refreshInterval: 15_000 },
+  );
+  const healthStatus = systemHealth?.status ?? "unknown";
+  const healthCopy = resolveHealthCopy(healthStatus);
 
-  const send = (text?: string) => {
-    const body = (text ?? prompt).trim();
-    if (!body) return;
-    try {
-      window.sessionStorage.setItem("droplet.pendingPrompt", body);
-    } catch {
-      /* private mode — /chat will still open */
-    }
-    router.push("/chat");
-  };
-
-  const handleKey = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      send();
-    }
-  };
-
-  const autoGrow = () => {
-    const el = taRef.current;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, 180)}px`;
-  };
-
-  useEffect(autoGrow, [prompt]);
-
-  const hasPrompt = prompt.trim().length > 0;
-  const storagePct =
-    storage && storage.total > 0 ? (storage.used / storage.total) * 100 : 0;
-  const deviceCounts = grouped
-    ? {
-        lights: grouped.lights.length,
-        climate: grouped.climate.length,
-        cameras: 0, // cameras live in their own page; surfaced below
-      }
-    : { lights: 0, climate: 0, cameras: 0 };
+  if (isMobile) {
+    return (
+      <div className="droplet-home dh-mobile">
+        <AmbientLayer />
+        <h1 className="sr-only">Droplet Home</h1>
+        <div className="dh-m-greet">
+          <div className="g">{greeting}{firstName && <b>, {firstName}</b>}</div>
+          <div className="d">{dateStr.toLowerCase()} · {host}</div>
+        </div>
+        <MobileBoard items={items} />
+        <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} dir={dir} setDir={setDir} />
+      </div>
+    );
+  }
 
   return (
-    <div className="relative min-h-screen">
-      {/* ── Aurora backdrop ─────────────────────────────── */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-x-0 top-0 h-[520px] aurora-bg opacity-[0.55] animate-aurora"
-      />
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-x-0 top-[420px] h-32 bg-gradient-to-b from-surface-secondary/0 to-surface-secondary"
-      />
+    <div className={"droplet-home" + (editMode ? " editing" : "")}>
+      <AmbientLayer />
+      <h1 className="sr-only">Droplet Home</h1>
 
-      <div className="relative p-6 lg:p-12 max-w-6xl mx-auto">
-        {/* ── Header strip ─────────────────────────────── */}
-        <div className="flex items-start justify-between mb-10 animate-fade-rise">
-          <div>
-            <p className="type-caption-1 text-label-tertiary uppercase tracking-[0.18em]">
-              {greeting()}
-              {firstName && <span className="text-label-secondary">, {firstName}</span>}
-            </p>
-            <p className="type-footnote text-label-tertiary mt-1">
-              {new Date().toLocaleDateString(undefined, {
-                weekday: "long",
-                month: "long",
-                day: "numeric",
-              })}
-            </p>
-          </div>
-
-          {systemHealth && (
-            <div
-              className="dp-status-chip animate-fade-rise"
-              style={{ animationDelay: "80ms" }}
-              title={
-                device
-                  ? `${device.hostname} • ${device.ip ?? "no ip"}`
-                  : "Device status"
-              }
-            >
-              <span className={`w-1.5 h-1.5 rounded-full ${HEALTH_COPY[systemHealth.status].dot}`} />
-              <span className="text-label-primary font-medium">
-                {device?.hostname ?? "Droplet"}
-              </span>
-              <span className="text-label-tertiary">·</span>
-              <span>{HEALTH_COPY[systemHealth.status].label}</span>
-            </div>
-          )}
+      <div className="dh-top">
+        <div className="dh-greet">
+          <span className="g">{greeting}{firstName && <b>, {firstName}</b>}</span>
+          <span className="d">{dateStr.toLowerCase()}</span>
         </div>
 
-        {/* ── AI HERO ─────────────────────────────── */}
-        <section
-          className="mb-14 animate-fade-rise"
-          style={{ animationDelay: "120ms" }}
-        >
-          <h1 className="type-display text-label-primary text-[56px] sm:text-[72px] lg:text-[88px] mb-8 max-w-4xl">
-            What can I{" "}
-            <span className="type-display-italic" style={{ color: "var(--aurora-ink)" }}>
-              help you
-            </span>{" "}
-            with today?
-          </h1>
+        <span className="dh-spring" />
 
-          {/* Chat capsule */}
-          {/*
-            WARP-298: focus-within ring on the capsule so keyboard users can
-            see where focus is when the textarea is active. focus:outline-none
-            on the textarea was unreplaced — now the capsule itself gains a
-            visible ring whenever any of its children has focus.
-          */}
-          <div
-            className="aurora-ring rounded-[22px] shadow-[var(--shadow-hero)] focus-within:ring-2 focus-within:ring-accent/40 transition-shadow"
-            style={{ background: "var(--color-surface-raised)" }}
-          >
-            <div className="flex items-end gap-3 p-3 pl-5">
-              <Sparkles size={18} className="self-center flex-shrink-0" style={{ color: "var(--aurora-ink)" }} />
-              <textarea
-                ref={taRef}
-                rows={1}
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                onKeyDown={handleKey}
-                placeholder="Ask anything — run a command, search your files, control a device…"
-                aria-label="Ask Droplet"
-                className="flex-1 resize-none bg-transparent py-3 type-body text-label-primary
-                           placeholder:text-label-tertiary focus:outline-none min-h-[44px] max-h-[180px]"
-              />
-              <button
-                onClick={() => send()}
-                disabled={!hasPrompt}
-                aria-label="Send to chat"
-                className={`
-                  h-11 px-4 rounded-full flex items-center gap-1.5
-                  type-subheadline font-medium transition-all duration-200 ease-smooth
-                  ${hasPrompt
-                    ? "bg-accent text-white hover:opacity-90 active:scale-[0.97]"
-                    : "bg-surface-secondary text-label-tertiary cursor-not-allowed"}
-                `}
-              >
-                Ask
-                <ArrowUpRight size={16} strokeWidth={2.5} />
-              </button>
-            </div>
-          </div>
-
-          {/* Suggestions */}
-          <div className="flex flex-wrap gap-2 mt-5">
-            {SUGGESTIONS.map((s) => (
-              <button
-                key={s}
-                onClick={() => send(s)}
-                className="px-3.5 h-8 inline-flex items-center type-footnote
-                           text-label-secondary rounded-full border border-separator
-                           bg-surface-raised hover:border-accent/40
-                           hover:text-accent transition-colors"
-                style={{ background: "var(--color-surface-raised)" }}
-              >
-                {s}
-              </button>
-            ))}
-          </div>
-
-          <div className="mt-5 flex items-center gap-3 type-caption-1 text-label-tertiary">
-            <Cpu size={12} />
-            <span>
-              {localModels.length > 0
-                ? `${localModels.length} local model${localModels.length > 1 ? "s" : ""} ready`
-                : "Local models unavailable"}
-            </span>
-            <span className="text-label-quaternary">·</span>
-            <Cloud size={12} />
-            <span>
-              {cloudModels.length > 0
-                ? `${cloudModels.length} cloud model${cloudModels.length > 1 ? "s" : ""}`
-                : "No cloud keys configured"}
-            </span>
-          </div>
-        </section>
-
-        {/* ── CONTEXT WIDGET (WARP-225) ─────────────────── */}
-        {/* Compact tile that shows files indexed, chunks searchable, and
-            queued/failed callouts. Click-through to /context for the
-            full analytics page. Animated counter ticks on each 30s poll. */}
-        <section
-          className="mb-6 animate-fade-rise"
-          style={{ animationDelay: "180ms" }}
-        >
-          <ContextWidget />
-        </section>
-
-        {/* ── PRIMARY TILES: Files & Devices ─────────────── */}
-        <section
-          className="grid grid-cols-1 lg:grid-cols-2 gap-5 mb-10 animate-fade-rise"
-          style={{ animationDelay: "220ms" }}
-        >
-          {/* FILES TILE */}
-          <Link
-            href="/files"
-            className="dp-tile dp-tile-interactive p-6 flex flex-col gap-5 group"
-          >
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <span className="w-10 h-10 rounded-xl bg-accent-subtle flex items-center justify-center">
-                  <FolderOpen size={18} className="text-accent" />
-                </span>
-                <div>
-                  <h3 className="type-headline text-label-primary">Files</h3>
-                  <p className="type-footnote text-label-tertiary">
-                    {storage && storage.total > 0
-                      ? `${formatBytes(storage.used)} of ${formatBytes(storage.total)} used`
-                      : "Ready to sync"}
-                  </p>
-                </div>
-              </div>
-              <ArrowRight
-                size={16}
-                className="text-label-tertiary group-hover:text-accent group-hover:translate-x-1 transition-all"
-              />
-            </div>
-
-            {/* Storage meter */}
-            <div>
-              <div className="h-[6px] rounded-full overflow-hidden bg-surface-secondary">
-                <div
-                  className="h-full rounded-full transition-all duration-700"
-                  style={{
-                    width: `${Math.max(2, Math.min(100, storagePct))}%`,
-                    background:
-                      storagePct > 90
-                        ? "var(--color-system-red)"
-                        : storagePct > 75
-                          ? "var(--color-system-orange)"
-                          : "var(--color-accent)",
-                  }}
-                />
-              </div>
-              <div className="flex items-center justify-between mt-2 type-caption-1 text-label-tertiary">
-                <span>
-                  {storage && storage.total > 0
-                    ? `${Math.round(storagePct)}% used`
-                    : "Measuring…"}
-                </span>
-                <span>
-                  {storage?.available ? `${formatBytes(storage.available)} free` : " "}
-                </span>
-              </div>
-            </div>
-
-            {/* Recents preview */}
-            <div className="border-t border-separator pt-4">
-              <p className="type-caption-1 text-label-tertiary uppercase tracking-wider mb-3 flex items-center gap-1.5">
-                <Clock size={11} /> Recent
-              </p>
-              {recents.length === 0 ? (
-                <p className="type-footnote text-label-tertiary italic">No recent files yet.</p>
-              ) : (
-                <ul className="space-y-2">
-                  {recents.slice(0, 4).map((f: FileEntryInfo) => (
-                    <li
-                      key={f.path}
-                      className="flex items-center justify-between gap-3 type-footnote"
-                    >
-                      <span className="truncate text-label-primary">{f.name}</span>
-                      <span className="type-caption-2 text-label-tertiary flex-shrink-0">
-                        {f.isDirectory ? "folder" : formatBytes(f.size)}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          </Link>
-
-          {/* DEVICES TILE */}
-          <Link
-            href="/devices"
-            className="dp-tile dp-tile-interactive p-6 flex flex-col gap-5 group"
-          >
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <span className="w-10 h-10 rounded-xl bg-accent-subtle flex items-center justify-center">
-                  <HomeIcon size={18} className="text-accent" />
-                </span>
-                <div>
-                  <h3 className="type-headline text-label-primary">Connected devices</h3>
-                  <p className="type-footnote text-label-tertiary">
-                    {totalDevices > 0
-                      ? `${totalDevices} device${totalDevices === 1 ? "" : "s"} online`
-                      : "No devices paired yet"}
-                  </p>
-                </div>
-              </div>
-              <ArrowRight
-                size={16}
-                className="text-label-tertiary group-hover:text-accent group-hover:translate-x-1 transition-all"
-              />
-            </div>
-
-            {/* Device breakdown */}
-            <div className="grid grid-cols-3 gap-3">
-              <DeviceStat
-                icon={Lightbulb}
-                label="Lights"
-                count={deviceCounts.lights}
-              />
-              <DeviceStat
-                icon={Thermometer}
-                label="Climate"
-                count={deviceCounts.climate}
-              />
-              <DeviceStat icon={Video} label="Cameras" count={deviceCounts.cameras} hint="Scan" />
-            </div>
-
-            {/* Active preview or empty */}
-            <div className="border-t border-separator pt-4 type-footnote text-label-tertiary italic flex items-center gap-2">
-              <span
-                className={`w-1.5 h-1.5 rounded-full ${
-                  totalDevices > 0 ? "bg-system-green animate-pulse" : "bg-label-quaternary"
-                }`}
-              />
-              {totalDevices > 0
-                ? "Matter controller discovering on your network"
-                : "Pair a Matter device to see it here"}
-            </div>
-          </Link>
-        </section>
-
-        {/* ── SECONDARY: quick-access row ────────────────── */}
-        <section
-          className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-10 animate-fade-rise"
-          style={{ animationDelay: "320ms" }}
-        >
-          <QuickLink href="/chat" label="Chats" icon={MessageSquare} />
-          <QuickLink href="/cameras" label="Cameras" icon={Video} />
-          <QuickLink href="/network" label="Network" icon={NetworkIcon} />
-          <QuickLink href="/users" label="Users" icon={Users} />
-        </section>
-
-        {/* ── STATUS RIBBON ─────────────────────────────── */}
-        <section
-          className="animate-fade-rise"
-          style={{ animationDelay: "400ms" }}
-        >
-          <div className="dp-tile px-5 py-4 flex flex-col sm:flex-row sm:items-center gap-4 sm:gap-0 sm:divide-x sm:divide-separator">
-            <StatusSegment
-              icon={HardDrive}
-              primary={
-                storage && storage.total > 0
-                  ? `${Math.round(storagePct)}%`
-                  : "—"
-              }
-              secondary="Storage"
-            />
-            <StatusSegment
-              icon={Cpu}
-              primary={`${localModels.length + cloudModels.length}`}
-              secondary="AI models"
-            />
-            <StatusSegment
-              icon={NetworkIcon}
-              primary={device?.ip ?? "—"}
-              secondary={device?.networkMode?.toUpperCase() ?? "Network"}
-              mono
-            />
-            <StatusSegment
-              icon={Sparkles}
-              primary={health ? formatUptime(health.uptime) : "—"}
-              secondary={`v${health?.version ?? "0.1.0"}`}
-            />
-
-            <Link
-              href="/settings"
-              className="sm:ml-auto sm:pl-6 type-footnote text-label-tertiary hover:text-accent
-                         flex items-center gap-1.5 transition-colors"
-            >
-              <Settings size={13} />
-              Settings
-            </Link>
-          </div>
-        </section>
-      </div>
-    </div>
-  );
-}
-
-// ─────────────────────────────── subcomponents ───────────────────────────────
-
-function DeviceStat({
-  icon: Icon,
-  label,
-  count,
-  hint,
-}: {
-  icon: LucideIcon;
-  label: string;
-  count: number;
-  hint?: string;
-}) {
-  return (
-    <div className="rounded-xl bg-surface-secondary/70 p-3 flex flex-col gap-1">
-      <div className="flex items-center justify-between">
-        <Icon size={14} className="text-label-tertiary" />
-        <span className="type-title-3 text-label-primary tabular-nums">
-          {count}
+        <span className={"dh-status-chip is-" + healthStatus}>
+          <span className="dot" />
+          <span className="host">{host}</span>
+          <span className="mid extra">·</span>
+          <span className="extra">{healthCopy.label}</span>
         </span>
-      </div>
-      <p className="type-caption-1 text-label-tertiary">
-        {count === 0 && hint ? hint : label}
-      </p>
-    </div>
-  );
-}
 
-function QuickLink({
-  href,
-  label,
-  icon: Icon,
-}: {
-  href: string;
-  label: string;
-  icon: LucideIcon;
-}) {
-  return (
-    <Link
-      href={href}
-      className="dp-tile dp-tile-interactive px-4 py-4 flex items-center gap-3 group"
-    >
-      <span className="w-8 h-8 rounded-lg bg-surface-secondary flex items-center justify-center">
-        <Icon size={15} className="text-label-secondary group-hover:text-accent transition-colors" />
-      </span>
-      <span className="type-subheadline text-label-primary flex-1">{label}</span>
-      <ArrowRight
-        size={13}
-        className="text-label-quaternary group-hover:text-accent group-hover:translate-x-0.5 transition-all"
-      />
-    </Link>
-  );
-}
-
-function StatusSegment({
-  icon: Icon,
-  primary,
-  secondary,
-  mono,
-}: {
-  icon: LucideIcon;
-  primary: string;
-  secondary: string;
-  mono?: boolean;
-}) {
-  return (
-    <div className="flex items-center gap-3 sm:px-5 first:sm:pl-0">
-      <Icon size={14} className="text-label-tertiary" />
-      <div className="min-w-0">
-        <p
-          className={`type-subheadline text-label-primary truncate ${mono ? "font-mono tabular-nums" : "font-medium"}`}
+        <button
+          className="dh-icon-btn"
+          onClick={() => setSettingsOpen(true)}
+          title="Settings — display density"
+          aria-label="Settings"
+          type="button"
         >
-          {primary}
-        </p>
-        <p className="type-caption-2 text-label-tertiary uppercase tracking-wider">
-          {secondary}
-        </p>
+          <SettingsIcon size={16} />
+        </button>
+
+        <button
+          className={"dh-edit-toggle" + (editMode ? " on" : "")}
+          onClick={() => setEditMode((v) => !v)}
+          type="button"
+        >
+          {editMode ? <Check size={15} strokeWidth={2.2} /> : <LayoutGrid size={14} />}
+          {editMode ? "Done" : "Edit layout"}
+        </button>
       </div>
+
+      <div className="dh-edit-bar">
+        <div className="dh-edit-bar-pad">
+          <span className="dh-edit-hint">
+            <Crosshair size={14} style={{ color: "var(--brand)" }} />
+            Drag a card to rearrange · drag its corner <span className="k">⌟</span> to resize
+          </span>
+          <span className="dh-divider" />
+          <div className="dh-tray">
+            <span className="dh-tray-label">Add</span>
+            {hidden.length === 0 && <span className="dh-tray-empty">all widgets placed</span>}
+            {hidden.map((c) => {
+              const Icon = c.icon;
+              return (
+                <button key={c.id} className="dh-tray-chip" onClick={() => onAdd(c.id)} type="button">
+                  <Icon size={14} />
+                  {c.title}
+                  <span className="pl"><Plus size={13} strokeWidth={2.2} /></span>
+                </button>
+              );
+            })}
+          </div>
+          <span className="dh-tray-spring" />
+          <button className="dh-reset-btn" onClick={onReset} type="button">
+            <RefreshCw size={13} />Reset {cfg.label}
+          </button>
+        </div>
+      </div>
+
+      <div className="dh-board-scroll">
+        <BentoBoard
+          items={items}
+          onChange={onChange}
+          onRemove={onRemove}
+          editMode={editMode}
+          cols={cfg.cols}
+          gap={cfg.gap}
+          rowH={cfg.rowH}
+          registry={WIDGETS}
+        />
+      </div>
+
+      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} dir={dir} setDir={setDir} />
     </div>
   );
-}
-
-function formatUptime(seconds: number): string {
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }

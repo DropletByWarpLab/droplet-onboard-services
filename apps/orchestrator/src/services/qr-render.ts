@@ -1,7 +1,7 @@
 /**
- * QR code → PNG buffer for the PyPortal screen.
+ * QR code → PNG buffer for the status display screen.
  *
- * The PyPortal Titano is 480×320. The QR is sized at QR_SIZE (280) px
+ * The status display is 480×320. The QR is sized at QR_SIZE (280) px
  * and left-aligned with a 20 px inset, leaving ~164 px to the right
  * for a caption strip. Both compose into one PNG so the display
  * service's `POST /display/custom` (which takes a single image) can
@@ -21,7 +21,7 @@
  */
 import QRCode from "qrcode";
 
-/** Target dimensions for the PyPortal Titano. */
+/** Target dimensions for the status display. */
 export const SCREEN_WIDTH = 480;
 export const SCREEN_HEIGHT = 320;
 
@@ -41,7 +41,7 @@ export interface QRRender {
 
 /**
  * Encode `payload` as a QR code, centered on a black 480×320 canvas
- * sized for the PyPortal. Returns the composed PNG.
+ * sized for the status display. Returns the composed PNG.
  *
  * `caption` is rendered to the right of the QR if provided — useful
  * for "Scan to set up" or "VPN peer added" labels.

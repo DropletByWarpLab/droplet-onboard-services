@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install the Droplet USB auto-mount service on the Jetson host.
+# Install the Droplet USB auto-mount service on the appliance host.
 #
 # Idempotent: re-running won't duplicate anything. Safe to re-run after
 # editing any of the service files.

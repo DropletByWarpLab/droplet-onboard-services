@@ -24,6 +24,7 @@ export type RouterErrorCode =
   | "AUTH"
   | "ROLLED_BACK"
   | "DISABLED"
+  | "SCAN_UNSUPPORTED"
   | "UNKNOWN";
 
 export class RouterError extends Error {
@@ -45,10 +46,16 @@ export class RouterError extends Error {
   }
 
   static unreachable(message: string, opts?: { label?: string; cause?: unknown }): RouterError {
-    return new RouterError("UNREACHABLE", message, opts);
+    // WARP-807: the routing service / OpenWrt is an upstream dependency. When it
+    // can't be reached the correct HTTP status is 503 Service Unavailable, not a
+    // bare 500. Carrying it here lets the global error handler's `resolveStatus`
+    // return 503 (instead of null → 500) and surface the actionable message.
+    return new RouterError("UNREACHABLE", message, { ...opts, status: 503 });
   }
   static timeout(message: string, opts?: { label?: string; cause?: unknown }): RouterError {
-    return new RouterError("TIMEOUT", message, opts);
+    // WARP-807: a timeout talking to the upstream router is also a 503 — the
+    // dependency is unavailable (slow / not responding), not an orchestrator bug.
+    return new RouterError("TIMEOUT", message, { ...opts, status: 503 });
   }
   static auth(message: string, opts?: { label?: string; status?: number }): RouterError {
     return new RouterError("AUTH", message, opts);
@@ -65,7 +72,29 @@ export class RouterError extends Error {
    * dashboard renders a "Router supervision disabled" banner.
    */
   static disabled(label = "router"): RouterError {
-    return new RouterError("DISABLED", "Router supervision is disabled", { label });
+    // WARP-807: `ROUTING_MODE=disabled` means the router-supervision dependency
+    // is intentionally unavailable. A WRITE that needs it gets 503 (the wizard
+    // surfaces "finish this from Settings later" + keeps Skip), not a 500.
+    return new RouterError("DISABLED", "Router supervision is disabled", { label, status: 503 });
+  }
+  /**
+   * WARP-816: a Wi-Fi scan can't run because the radio is in an AP/Master role
+   * (the single-box broadcasts its own network on its only radio, so it can't
+   * station-scan). Distinct from a successful scan that finds zero networks —
+   * the routing service signals this with HTTP 409 + code `SCAN_UNSUPPORTED`.
+   *
+   * 409 (not 503): the dependency is reachable and working — this is a stable,
+   * terminal capability fact about the hardware shape, not a reachability
+   * outage. The dashboard branches on the code to render calm "scanning
+   * unavailable while broadcasting" copy + disable the Scan control, never the
+   * raw code. The `message` is surfaced verbatim, so it must read as
+   * user-facing prose.
+   */
+  static scanUnsupported(
+    message = "Your Droplet can't scan for other Wi-Fi networks while it's broadcasting its own. That's expected on this setup — nothing's wrong.",
+    opts?: { label?: string; cause?: unknown },
+  ): RouterError {
+    return new RouterError("SCAN_UNSUPPORTED", message, { ...opts, status: 409 });
   }
 
   /** Shape sent over the wire to the dashboard. */

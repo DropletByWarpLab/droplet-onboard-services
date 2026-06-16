@@ -113,3 +113,4 @@ If a suite is unaffected by the diff (verified via `git diff --name-only main...
 - Review UX, copy, a11y, responsive behavior — that's the UI/UX agent's job.
 - Decide whether to open a PR — that's the Manager's job.
 - Fix anything you find — return FAIL with details.
+- Post the QA report to GitHub. It's an **internal artifact** for the controller / Manager — never a PR comment. Findings loop back through Dev (fixed locally + pushed); only genuinely-deferred items reach the PR body self-review.

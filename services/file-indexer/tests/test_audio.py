@@ -30,12 +30,16 @@ def test_extract_returns_extracted_doc_for_wav():
     result = audio.extract(FIXTURES / "sample.wav", mime="audio/wav")
     assert result is not None
     assert isinstance(result, dict)  # ExtractedDoc is TypedDict; runtime is dict
-    assert "text" in result
+    # WARP-287: extractors emit `spans`, not a flat `text` blob.
+    assert "spans" in result
     assert "metadata" in result
-    assert "duration_sec" in result["metadata"]
+    assert "duration_seconds" in result["metadata"]
+    # Each span carries the document-level section breadcrumb (filename).
+    for span in result["spans"]:
+        assert span.section_path == ["sample.wav"]
     # We don't assert specific text content because the fixture may be a tone
     # generator — the integration test is where we'd assert phrase content.
-    assert result["metadata"]["duration_sec"] > 0
+    assert result["metadata"]["duration_seconds"] > 0
 
 
 def test_extract_returns_none_for_unsupported_mime():

@@ -1,0 +1,42 @@
+name: rag-eval-tests
+
+# Pytest for tests/retrieval-eval/ragas/test_aggregate.py. Path-filtered so
+# it only runs when the runner or the test file itself changes. No Compose
+# stack or Ollama — purely unit-level arithmetic tests (WARP-521).
+
+on:
+  pull_request:
+    paths:
+      - tests/retrieval-eval/ragas/ragas_runner.py
+      - tests/retrieval-eval/ragas/test_aggregate.py
+      - .github/workflows/rag-eval-tests.yml
+  workflow_dispatch:
+
+concurrency:
+  group: rag-eval-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        # pandas: core aggregation arithmetic under test.
+        # pyyaml + datasets: top-level imports in ragas_runner.py that must
+        #   resolve when the module is imported (ragas itself is deferred and
+        #   NOT installed here — that's the whole point of this lightweight lane).
+        # pytest: test runner.
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas pyyaml datasets pytest
+
+      - name: Run pytest
+        run: pytest tests/retrieval-eval/ragas/test_aggregate.py -v

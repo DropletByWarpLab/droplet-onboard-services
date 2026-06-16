@@ -39,8 +39,8 @@ describe("LoginPage — typed error → friendly copy (WARP-294)", () => {
 
     render(<LoginPage />);
 
-    fireEvent.change(screen.getByPlaceholderText("Username"), {
-      target: { value: "alice" },
+    fireEvent.change(screen.getByLabelText("Work email"), {
+      target: { value: "alice@acme.co" },
     });
     fireEvent.change(screen.getByPlaceholderText("Password"), {
       target: { value: "hunter2" },

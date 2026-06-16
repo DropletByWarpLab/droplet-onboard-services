@@ -13,6 +13,31 @@
  */
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 
+/** WARP-845 — audience ladder (mirror of the orchestrator's
+ *  memory-audience.ts; tools-core cannot import orchestrator code).
+ *  A caller reads audiences at or below their role rank; absent role →
+ *  guest view (most restrictive). */
+const ROLE_RANK: Record<string, number> = {
+  owner: 3,
+  admin: 2,
+  family: 1,
+  service: 1,
+  guest: 0,
+};
+const AUDIENCES = ["owner", "admin", "family", "guest"] as const;
+const AUDIENCE_RANK: Record<(typeof AUDIENCES)[number], number> = {
+  owner: 3,
+  admin: 2,
+  family: 1,
+  guest: 0,
+};
+function visibleAudiences(
+  role: string | undefined,
+): (typeof AUDIENCES)[number][] {
+  const rank = ROLE_RANK[role ?? ""] ?? 0;
+  return AUDIENCES.filter((a) => AUDIENCE_RANK[a] <= rank) as (typeof AUDIENCES)[number][];
+}
+
 const inputSchema = {
   type: "object",
   properties: {
@@ -61,6 +86,8 @@ async function handler(
   const facts = await ctx.prisma.memoryFact.findMany({
     where: {
       active: true,
+      // WARP-845 — the model only recalls facts the CALLER may read.
+      audience: { in: visibleAudiences(ctx.role) },
       ...(category ? { category } : {}),
       fact: { contains: query, mode: "insensitive" },
     },

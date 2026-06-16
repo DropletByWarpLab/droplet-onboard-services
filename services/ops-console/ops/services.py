@@ -53,8 +53,8 @@ import httpx
 logger = logging.getLogger("ops.services")
 
 # Timeouts: tight enough to flag real wedging, loose enough that a
-# busy Pi under load does not get marked down. 1.5s connect + 3s read
-# matches what a human would call "felt slow" in a UI.
+# busy appliance host under load does not get marked down. 1.5s connect + 3s
+# read matches what a human would call "felt slow" in a UI.
 _PROBE_TIMEOUT = httpx.Timeout(connect=1.5, read=3.0, write=3.0, pool=3.0)
 
 # Slow threshold for "degraded" classification on 2xx. If the request
