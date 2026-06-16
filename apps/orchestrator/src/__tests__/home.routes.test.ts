@@ -105,7 +105,9 @@ describe("WARP-469 — home aggregation", () => {
     });
     const payload = await getHomePayload(
       prisma as unknown as import("@prisma/client").PrismaClient,
-      { displayName: "Stefan", username: "stefan" },
+      // role gates the timeline (owner/admin only — privacy boundary added
+      // after this test was written; family/guest get an empty timeline).
+      { displayName: "Stefan", username: "stefan", role: "owner" },
       new Date("2026-05-27T10:00:00"),
     );
     expect(payload.greeting.text).toBe("Good morning, Stefan");
@@ -140,7 +142,7 @@ describe("WARP-469 — home aggregation", () => {
     });
     const payload = await getHomePayload(
       prisma as unknown as import("@prisma/client").PrismaClient,
-      { username: "s" },
+      { username: "s", role: "owner" },
       new Date("2026-05-27T10:00:00"),
     );
     expect(payload.timeline).toHaveLength(2);

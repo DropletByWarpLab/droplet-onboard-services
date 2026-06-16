@@ -1,19 +1,20 @@
 """
 Droplet OpenWrt SDK
 ===================
-Python client for the Jetson AI module to control all aspects of the
+Python client for the appliance AI module to control all aspects of the
 OpenWrt routing layer via the ubus JSON-RPC API.
 
 Usage:
     from droplet_openwrt_sdk import DropletRouter
 
-    router = DropletRouter("10.0.0.1", username="droplet-ai", password="SECRET")
+    router = DropletRouter("192.168.50.1", username="droplet-ai", password="SECRET")
 
     # Get network status
     status = router.network.interface_status("lan")
 
-    # Change WiFi SSID
-    router.wireless.set_ssid("radio0", "default_radio0", "My-New-SSID")
+    # Change WiFi SSID (radio / iface-section names are deployment-specific;
+    # the shipped router host uses radio3 / default_radio3 — see schemas.py)
+    router.wireless.set_ssid("radio3", "default_radio3", "My-New-SSID")
     router.apply_changes("wireless")
 
     # Block a device
@@ -26,14 +27,80 @@ Usage:
 """
 
 import json
+import os
 import time
 import logging
 from contextlib import contextmanager
+from enum import Enum
+from http.client import HTTPException
 from typing import Any, Optional
 from urllib.request import Request, urlopen
-from urllib.error import URLError
 
 logger = logging.getLogger("droplet.openwrt")
+
+
+# ---------------------------------------------------------------------------
+# Deployment topology (ADR-018 Decision 2)
+# ---------------------------------------------------------------------------
+class DeploymentTopology(str, Enum):
+    """How this Droplet box sits on the network — an EXPLICIT, indexable state,
+    never derived from the absence of a field (rule 10; mirrors the
+    ``ApDeviceStatus`` / ``BrainMemoryItemStatus`` enum pattern, and the
+    ``interface_stub(present=…)`` presence signal).
+
+    * ``PRIMARY_ROUTER`` — the box owns the WAN uplink (ISP): the WAN-facing
+      interface is present and up, with no upstream router handing it a default
+      gateway. It IS the edge.
+    * ``DOWNSTREAM_ROUTER`` — the box is plugged into an existing upstream
+      network; its WAN-facing interface has an upstream default-route gateway
+      (it is a DHCP client of the home/ISP router). It keeps its own LAN for
+      devices and NATs them out the WAN. The upstream network is NEVER mutated —
+      detection is read-only probing only.
+    * ``UNKNOWN`` — the WAN-facing interface is not present on this deployment
+      shape (the LAN-only single-box that motivated ADR-018), so the posture
+      cannot be determined. We refuse to GUESS one of the two real postures from
+      that absence; this is the explicit "undetermined" member, with the
+      evidence dict carrying ``wan_present=False`` so the caller knows why.
+
+    ``str``-valued so it round-trips cleanly through JSON on the endpoint and is
+    indexable by name (``DeploymentTopology["PRIMARY_ROUTER"]``).
+    """
+
+    PRIMARY_ROUTER = "PRIMARY_ROUTER"
+    DOWNSTREAM_ROUTER = "DOWNSTREAM_ROUTER"
+    UNKNOWN = "UNKNOWN"
+
+
+# The logical interface the SDK treats as the WAN uplink across every shape —
+# the same one `get_all_interface_statuses()`, `_resolve_wan_device`, and the
+# DuckDNS interface selection already interrogate. Named so the probe never
+# invents a second "which interface is the WAN" path.
+WAN_INTERFACE_NAME = "wan"
+
+# Default-route targets that mean "upstream gateway" on the WAN interface's
+# ubus `route` list. OpenWrt reports a default route as target 0.0.0.0/0 (IPv4)
+# or ::/0 (IPv6) with a `nexthop` pointing at the upstream router.
+_DEFAULT_ROUTE_TARGETS = frozenset({"0.0.0.0", "::"})
+
+
+# ---------------------------------------------------------------------------
+# Wireless scan/info device default is deployment-shape-specific.
+#
+# `wlan0` is the wrong NIC name on every current shape (the router host's
+# MT7922 enumerates via its `radio3` sections; a single-box's radio is
+# `wlp14s0`/similar). Resolve from `DROPLET_WIFI_SCAN_DEVICE` so the shipped
+# compose can name the real interface; the literal is only a last-resort
+# fallback when the env is unset (NET-02). A future follow-up can derive the
+# active device from `wireless.status()` / `iwinfo` and drop the literal.
+# ---------------------------------------------------------------------------
+def _default_wifi_scan_device() -> str:
+    # The single-box compose passes `DROPLET_WIFI_SCAN_DEVICE=${...:-}`, so on a
+    # blank `.env` the var arrives set-but-empty (""). A bare
+    # `os.environ.get(key, "wlan0")` only fires its default when the key is
+    # ABSENT, so an empty/whitespace value would slip through and
+    # `iwinfo scan {"device": ""}` raises ubus INVALID_ARGUMENT. Coalesce
+    # unset OR empty/whitespace → the last-resort literal.
+    return (os.environ.get("DROPLET_WIFI_SCAN_DEVICE") or "").strip() or "wlan0"
 
 
 # ---------------------------------------------------------------------------
@@ -50,7 +117,40 @@ UBUS_STATUS = {
     7: "TIMEOUT",
 }
 
+# Named ubus status codes (subset) used for shape-agnostic error handling —
+# a deployment may legitimately lack an interface/device the SDK asks about
+# (e.g. a single-box with no `wan`); see ADR-011.
+UBUS_STATUS_INVALID_ARGUMENT = 2
+UBUS_STATUS_NOT_FOUND = 4
+UBUS_STATUS_NO_DATA = 5
+UBUS_STATUS_TIMEOUT = 7
+
 NULL_SESSION = "00000000000000000000000000000000"
+
+# Fresh placeholder status for an interface the SDK can't read live. Mirrors the
+# `InterfaceStatus` wire shape (orchestrator `types/network.ts`) so the Network
+# overview renders instead of 500-ing. `present` is the canonical presence
+# signal (CLAUDE.md coding-standard #2 — never derive state from the absence of
+# a field): `present=False` means the interface isn't configured on this box,
+# distinct from a configured-but-down interface (`present=True, up=False`).
+# Returns a NEW dict each call so callers never share the nested `data`/lists.
+def interface_stub(present: bool) -> dict:
+    return {
+        "up": False,
+        "pending": False,
+        "available": False,
+        "autostart": False,
+        "device": "",
+        "proto": "",
+        "uptime": 0,
+        "l3_device": "",
+        "ipv4-address": [],
+        "ipv6-address": [],
+        "route": [],
+        "dns-server": [],
+        "present": present,
+        "data": {},
+    }
 
 
 class UbusError(Exception):
@@ -63,8 +163,88 @@ class UbusError(Exception):
 
 
 class ConnectionLost(Exception):
-    """Raised when the Jetson can no longer reach the OpenWrt device."""
+    """Raised when the appliance can no longer reach the OpenWrt device."""
     pass
+
+
+# WARP-816: radio operating modes (from `iwinfo info` → `mode`) in which a
+# single-radio card is broadcasting an AP and therefore CANNOT station-scan.
+# On the single-box `wlp14s0` is `mode == "Master"` (hostapd AP for the Droplet
+# network); `iw dev wlp14s0 scan` returns "Not supported (-95)", but ubus
+# `iwinfo scan` swallows that to `{"results": []}` with no error — so the radio
+# mode is the only reliable discriminator between "can't scan here" and
+# "scanned, found nothing". Matched case-insensitively; "AP" is included for
+# builds/drivers that label the role that way instead of "Master".
+_AP_SCAN_BLOCKING_MODES = frozenset({"master", "ap"})
+
+
+class ScanUnsupportedError(Exception):
+    """Raised when a Wi-Fi scan can't run on this radio in its current mode.
+
+    Distinct from a successful scan that finds zero networks (which returns
+    `[]`): this means the radio is in an AP/Master role and physically cannot
+    station-scan. The `/wireless/scan` route maps it to a typed HTTP 409 +
+    stable ``code`` so the orchestrator can surface a RouterError and the
+    dashboard can explain "scanning isn't available while broadcasting" instead
+    of rendering an empty results list.
+    """
+
+    #: Stable, wire-facing classification — mirrored verbatim by the
+    #: orchestrator RouterError and the dashboard copy map. Never renumber.
+    code = "SCAN_UNSUPPORTED"
+
+    def __init__(self, device: str, mode: Optional[str] = None):
+        self.device = device
+        self.mode = mode
+        detail = f" (radio mode: {mode})" if mode else ""
+        super().__init__(
+            f"Wi-Fi scan is not available on {device}{detail} — the radio is "
+            "broadcasting its own network and can't scan while it does."
+        )
+
+
+def _ubus_object_absent(exc: UbusError) -> bool:
+    """True when a UbusError means "this object isn't present on this deployment".
+
+    Two shapes map to the same "not on this build" meaning (ADR-011):
+
+    * A **per-object** miss reports a numeric ``NOT_FOUND``/``NO_DATA`` code —
+      same class `get_all_interface_statuses()` already degrades on.
+    * A **whole missing ubus object** (no ``network.wireless`` / ``dhcp`` /
+      ``firewall`` registered at all) surfaces as a top-level JSON-RPC error,
+      which the low-level client raises as ``UbusError(-1, "Object not found")``
+      (code -1, status ``UNKNOWN(-1)``). This is the exact 500 root-caused on the
+      single-box. Matched by message so an unrelated -1 (e.g. "Empty result")
+      stays a real fault.
+
+    Everything else — ``PERMISSION_DENIED`` (auth), ``INVALID_ARGUMENT`` (caller
+    bug), any other code — is NOT absence and must propagate.
+    """
+    if exc.code in (UBUS_STATUS_NOT_FOUND, UBUS_STATUS_NO_DATA):
+        return True
+    return exc.code == -1 and "not found" in str(exc).lower()
+
+
+def _section_or(call, fallback):
+    """Run an optional network-summary section, degrading a missing ubus object
+    to ``fallback`` instead of 500-ing the whole summary (ADR-011 — a missing
+    optional surface is data, not a crash). Mirrors `interface_stub(present=False)`.
+
+    Only the "object not present on this deployment" class (see
+    :func:`_ubus_object_absent`) degrades; genuine ubus faults and a total
+    transport loss (`ConnectionLost`) propagate so real problems still surface.
+    The ``fallback`` is passed by the caller (never shared/mutated here).
+    """
+    try:
+        return call()
+    except UbusError as exc:
+        if _ubus_object_absent(exc):
+            logger.warning(
+                "ubus object absent on this deployment (%s); degrading section "
+                "to empty for shape-agnostic summary", exc,
+            )
+            return fallback
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +262,43 @@ class UbusClient:
         self._request_id += 1
         return self._request_id
 
+    def _post(self, data: bytes, label: str) -> dict | list:
+        """One HTTP POST to the ubus endpoint, with WARP-868 transport rigor.
+
+        uhttpd resets connections under concurrent load (stock
+        `max_requests=3` vs the orchestrator's network-summary fan-out), and
+        a reset during the response read surfaces as a NAKED
+        `ConnectionResetError` — an `OSError` that is NOT a `URLError`, so
+        the old `except URLError` let it escape the SDK entirely and the
+        FastAPI route answered an untyped 500 (observed live on the .87 box,
+        2026-06-11: 10× `ConnectionResetError: [Errno 104]`). Every transport
+        failure now maps to `ConnectionLost` — which `handle_router_error`
+        turns into the typed 503 the dashboard knows how to soften — after
+        ONE bounded retry on a fresh connection (each call already opens its
+        own socket; a single retry rides out the transient reset without
+        hammering a genuinely-down router).
+        """
+        req = Request(
+            self.base_url, data=data, headers={"Content-Type": "application/json"}
+        )
+        last_exc: Exception | None = None
+        for attempt in (1, 2):
+            try:
+                with urlopen(req, timeout=self.timeout) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except (OSError, HTTPException, ValueError) as exc:
+                # OSError covers URLError, ConnectionResetError, timeouts;
+                # http.client.HTTPException covers IncompleteRead /
+                # RemoteDisconnected variants; ValueError covers a JSON body
+                # truncated by a mid-read reset. All are transport-integrity
+                # failures, never ubus-level answers.
+                last_exc = exc
+                if attempt == 1:
+                    time.sleep(0.1)
+        raise ConnectionLost(
+            f"{label} failed against OpenWrt at {self.base_url}: {last_exc}"
+        ) from last_exc
+
     def raw_call(self, method: str, params: list) -> dict:
         """Send a single JSON-RPC request and return the parsed response."""
         payload = {
@@ -91,12 +308,12 @@ class UbusClient:
             "params": params,
         }
         data = json.dumps(payload).encode("utf-8")
-        req = Request(self.base_url, data=data, headers={"Content-Type": "application/json"})
-        try:
-            with urlopen(req, timeout=self.timeout) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except URLError as exc:
-            raise ConnectionLost(f"Cannot reach OpenWrt at {self.base_url}: {exc}") from exc
+        result = self._post(data, "Request")
+        if not isinstance(result, dict):
+            raise ConnectionLost(
+                f"Malformed JSON-RPC response from {self.base_url}: expected object"
+            )
+        return result
 
     def call(self, session: str, obj: str, method: str, args: Optional[dict] = None) -> Any:
         """
@@ -140,15 +357,20 @@ class UbusClient:
             })
 
         data = json.dumps(payloads).encode("utf-8")
-        req = Request(self.base_url, data=data, headers={"Content-Type": "application/json"})
-        try:
-            with urlopen(req, timeout=self.timeout) as resp:
-                responses = json.loads(resp.read().decode("utf-8"))
-        except URLError as exc:
-            raise ConnectionLost(f"Batch call failed: {exc}") from exc
+        # Same WARP-868 transport rigor as raw_call (reset → retry once →
+        # typed ConnectionLost), via the shared _post helper.
+        responses = self._post(data, "Batch call")
+        if not isinstance(responses, list):
+            raise ConnectionLost(
+                f"Malformed JSON-RPC batch response from {self.base_url}: expected array"
+            )
 
-        # Match responses by ID (JSON-RPC batch responses may arrive in any order)
-        response_by_id = {r["id"]: r for r in responses}
+        # Match responses by ID (JSON-RPC batch responses may arrive in any
+        # order). rpcd can emit bare error objects WITHOUT an "id" key for
+        # malformed batch members — .get() keys them under None instead of
+        # raising KeyError; the per-request lookup below then reports any
+        # missing match as a typed UbusError.
+        response_by_id = {r.get("id"): r for r in responses}
         results = []
         for req_id in request_ids:
             r = response_by_id.get(req_id)
@@ -305,12 +527,53 @@ class NetworkApi:
         return self._r._call("network", "restart")
 
     def get_all_interface_statuses(self) -> dict[str, dict]:
-        """Batch-fetch status of lan, wan, and wan6 interfaces."""
-        results = self._r._batch_call([
-            (f"network.interface.lan", "status", {}),
-            (f"network.interface.wan", "status", {}),
-        ])
-        return {"lan": results[0], "wan": results[1]}
+        """Status of the standard `lan`/`wan` interfaces, deployment-shape-agnostic.
+
+        Queries each interface independently with an explicit degradation
+        contract so a single interface never 500s the whole Network overview
+        (ADR-011):
+
+        * **Not present on this box** — e.g. a single-box where WAN is handled by
+          the host, not the containerised OpenWrt — reported as an explicit
+          ``present: False`` stub. Covers BOTH shapes of "absent" via
+          :func:`_ubus_object_absent`: a configured-but-missing interface (numeric
+          ubus ``NOT_FOUND``/``NO_DATA``) AND a whole missing ubus object, which
+          the low-level client surfaces as ``UbusError(-1, "Object not found")``
+          (the live single-box case — `network.interface.wan` simply isn't
+          registered, so `ubus call` returns a top-level JSON-RPC error, not a
+          numeric code).
+        * **Transient read failure** of a configured interface (ubus
+          ``TIMEOUT``) — reported as ``present: True, up: False`` and a warning
+          logged, so a blip on one interface degrades to "down" and self-heals
+          on the next poll rather than taking the page down.
+        * **Any other ubus error** (e.g. ``PERMISSION_DENIED``,
+          ``INVALID_ARGUMENT``) is a real fault and propagates — it is not
+          masked as "down".
+        * A **total transport loss** (``ConnectionLost`` — the router is
+          unreachable at all) also propagates, so a genuinely offline router
+          surfaces as offline upstream instead of as fake all-interfaces-down.
+
+        Consumers read ``present`` to warn on a configured-but-down interface
+        distinctly from one that simply isn't on this hardware shape.
+        """
+        out: dict[str, dict] = {}
+        for name in ("lan", "wan"):
+            try:
+                status = self.interface_status(name)
+                status["present"] = True
+                out[name] = status
+            except UbusError as exc:
+                if _ubus_object_absent(exc):
+                    out[name] = interface_stub(present=False)
+                elif exc.code == UBUS_STATUS_TIMEOUT:
+                    logger.warning(
+                        "interface_status(%s) timed out; degrading to down for "
+                        "this poll", name,
+                    )
+                    out[name] = interface_stub(present=True)
+                else:
+                    raise
+        return out
 
     def set_lan_ip(self, ipaddr: str, netmask: str = "255.255.255.0"):
         """Change the LAN IP address via UCI."""
@@ -351,8 +614,23 @@ class WirelessApi:
         self._r = router
 
     def status(self) -> dict:
-        """Get status of all wireless radios and interfaces."""
-        return self._r._call("network.wireless", "status")
+        """Get status of all wireless radios and interfaces.
+
+        Returns an empty dict when this box has no ``network.wireless`` ubus
+        object at all (the single-box shape: the containerised OpenWrt exposes
+        only ``network.interface.lan`` + ``loopback``). A whole missing object
+        surfaces as ``UbusError(-1, "Object not found")``; degrading it to ``{}``
+        instead of 500-ing mirrors how ``get_network_summary`` already treats the
+        same wireless section (ADR-011, shape-agnostic — a missing optional
+        surface is data, not a crash). Genuine faults (PERMISSION_DENIED,
+        transport ``ConnectionLost``, unrelated ubus errors) still propagate.
+        """
+        try:
+            return self._r._call("network.wireless", "status")
+        except UbusError as exc:
+            if _ubus_object_absent(exc):
+                return {}
+            raise
 
     def up(self) -> dict:
         """Enable all wireless interfaces."""
@@ -362,19 +640,125 @@ class WirelessApi:
         """Disable all wireless interfaces."""
         return self._r._call("network.wireless", "down")
 
-    def scan(self, device: str = "wlan0") -> list[dict]:
-        """Scan for nearby WiFi networks."""
-        result = self._r._call("iwinfo", "scan", {"device": device})
+    def scan(self, device: Optional[str] = None) -> list[dict]:
+        """Scan for nearby WiFi networks.
+
+        Returns an empty list when `device` isn't present on this box (ubus
+        ``NOT_FOUND`` / ``NO_DATA`` — e.g. the default ``wlan0`` on a box whose
+        radio is named differently): a radio that isn't there can't scan and
+        shouldn't 500 the page (ADR-011, shape-agnostic). Mirrors
+        :meth:`connected_clients`.
+
+        ``INVALID_ARGUMENT`` (a malformed `device` — a caller bug) and every
+        other code propagate, so a real fault is never masked as "no networks".
+
+        WARP-816: an *empty* result on a radio that's in an AP/Master role is
+        NOT "found nothing" — the card is broadcasting its own network and
+        physically can't station-scan (``iw … scan`` → "Not supported (-95)",
+        which ubus ``iwinfo scan`` silently degrades to ``{"results": []}``).
+        Since the empty list is indistinguishable from a genuine zero-network
+        scan at the scan call, classify by the radio's operating mode
+        (``iwinfo info`` → ``mode``): an AP-role mode raises
+        :class:`ScanUnsupportedError` (→ typed 409 at the route), while any
+        scannable mode that finds nothing keeps returning ``[]``. The mode is
+        probed ONLY on an empty result — the happy path stays a single call.
+
+        ``device`` defaults to ``DROPLET_WIFI_SCAN_DEVICE`` (last-resort
+        ``wlan0``) when not supplied — see ``_default_wifi_scan_device``.
+        """
+        device = device or _default_wifi_scan_device()
+        try:
+            result = self._r._call("iwinfo", "scan", {"device": device})
+        except UbusError as exc:
+            if exc.code in (UBUS_STATUS_NOT_FOUND, UBUS_STATUS_NO_DATA):
+                return []
+            raise
+        # `{"results": null}` (key present, value null) is a valid reply shape;
+        # `dict.get` only falls back to the default when the key is ABSENT, so
+        # coalesce the null to `[]` to preserve the `list[dict]` contract (and
+        # so a null result still triggers the AP-mode probe, like `[]`).
+        results = result.get("results", []) or []
+        if not results:
+            blocked, mode = self._scan_blocked_by_ap_mode(device)
+            if blocked:
+                raise ScanUnsupportedError(device, mode=mode)
+        return results
+
+    def _scan_blocked_by_ap_mode(self, device: str) -> tuple[bool, Optional[str]]:
+        """Return ``(blocked, mode)`` for `device`'s current operating mode.
+
+        ``blocked`` is True when the mode means the radio can't station-scan
+        (mode ∈ :data:`_AP_SCAN_BLOCKING_MODES`, case-insensitive); ``mode`` is
+        the raw mode string read (or ``None`` if it couldn't be read / wasn't a
+        string). The mode is RETURNED as a local — never stashed on ``self`` —
+        because ``WirelessApi`` is a module-level singleton (``get_router().
+        wireless``) and FastAPI runs the sync ``/wireless/scan`` route in a
+        threadpool: a shared ``self._last_probed_mode`` would race across
+        concurrent scans (WARP-816 review, Romain). The caller unpacks the tuple
+        and raises ``ScanUnsupportedError(device, mode=mode)`` from its own
+        local.
+
+        Defensive: if the follow-up info call can't be read (device vanished
+        between calls, a transient ubus fault), return ``(False, None)`` —
+        "couldn't prove it's AP-mode" falls back to the historical empty-``[]``
+        behavior rather than inventing an unsupported signal or crashing. Only
+        called on an empty scan result.
+        """
+        try:
+            info = self._r._call("iwinfo", "info", {"device": device})
+        except (UbusError, ConnectionLost):
+            return False, None
+        mode = info.get("mode") if isinstance(info, dict) else None
+        if not isinstance(mode, str):
+            return False, None
+        return mode.strip().lower() in _AP_SCAN_BLOCKING_MODES, mode
+
+    def connected_clients(self, device: Optional[str] = None) -> list[dict]:
+        """Get list of connected wireless clients for `device`.
+
+        Returns an empty list when `device` isn't present on this box (ubus
+        ``NOT_FOUND`` / ``NO_DATA`` — e.g. the default `wlan0` on a box whose
+        radio is named `wlp14s0`): a missing radio has no clients and shouldn't
+        500 the page (ADR-011, shape-agnostic).
+
+        ``INVALID_ARGUMENT`` is deliberately NOT swallowed — it signals a
+        malformed `device` argument (a caller bug), so converting it to "zero
+        clients" would silently mask the error. It propagates instead.
+
+        ``device`` defaults to ``DROPLET_WIFI_SCAN_DEVICE`` (last-resort
+        ``wlan0``) when not supplied — see ``_default_wifi_scan_device``.
+        """
+        device = device or _default_wifi_scan_device()
+        try:
+            result = self._r._call("iwinfo", "assoclist", {"device": device})
+        except UbusError as exc:
+            if exc.code in (UBUS_STATUS_NOT_FOUND, UBUS_STATUS_NO_DATA):
+                return []
+            raise
         return result.get("results", [])
 
-    def connected_clients(self, device: str = "wlan0") -> list[dict]:
-        """Get list of connected wireless clients."""
-        result = self._r._call("iwinfo", "assoclist", {"device": device})
-        return result.get("results", [])
+    def radio_info(self, device: Optional[str] = None) -> dict:
+        """Get radio information (frequency, txpower, channel, etc.).
 
-    def radio_info(self, device: str = "wlan0") -> dict:
-        """Get radio information (frequency, txpower, channel, etc.)."""
-        return self._r._call("iwinfo", "info", {"device": device})
+        Returns an empty dict when `device` isn't present on this box (ubus
+        ``NOT_FOUND`` / ``NO_DATA`` — e.g. the default ``wlan0`` on a box whose
+        radio is named differently): an absent radio has no info and shouldn't
+        500 the page (ADR-011, shape-agnostic). Mirrors :meth:`connected_clients`.
+
+        ``INVALID_ARGUMENT`` (a malformed `device` — a caller bug) and every
+        other code propagate, so a real fault is never masked as "no radio".
+
+        ``device`` defaults to ``DROPLET_WIFI_SCAN_DEVICE`` (last-resort
+        ``wlan0``) when not supplied — see ``_default_wifi_scan_device``.
+        """
+        device = device or _default_wifi_scan_device()
+        try:
+            result = self._r._call("iwinfo", "info", {"device": device})
+        except UbusError as exc:
+            if exc.code in (UBUS_STATUS_NOT_FOUND, UBUS_STATUS_NO_DATA):
+                return {}
+            raise
+        return result
 
     def set_ssid(self, radio: str, iface_section: str, ssid: str):
         """Change the SSID of a wireless interface."""
@@ -594,12 +978,117 @@ class FirewallApi:
         self.reload()
 
     def unblock_device(self, mac: str):
-        """Remove all firewall rules blocking a specific MAC address."""
+        """Remove all firewall rules blocking a specific MAC address.
+
+        Idempotent: when no matching REJECT rule exists — e.g. the schedule
+        ticker re-asserting the desired "unblocked" state for a device that was
+        never blocked — we skip the commit/reload entirely and return cleanly.
+        Previously this committed + reloaded even on zero matches, which the
+        safe-apply path rejected and surfaced as a recurring "Unblock device:
+        500" (code ROLLED_BACK) every tick.
+        """
         config = self._r.uci.get("firewall", type="rule")
+        removed = False
         for section_name, section_data in config.get("values", {}).items():
             if section_data.get("src_mac", "").upper() == mac.upper():
                 if section_data.get("target") == "REJECT":
                     self._r.uci.delete("firewall", section_name)
+                    removed = True
+        # Nothing matched → no-op (idempotent). Don't commit/reload an empty
+        # changeset; that's what was 500-ing on every schedule tick.
+        if not removed:
+            return
+        self._r.uci.commit("firewall")
+        self.reload()
+
+    # WARP-613: phone-home egress control. Softer than block_device — denies a
+    # device's WAN egress but keeps NTP (time) working; LAN DNS is already
+    # permitted by the shipped Allow-DNS-LAN rule. Rules are named
+    # `phonehome-<mac>` / `phonehome-ntp-<mac>` so they never collide with the
+    # schedule ticker's `block-<mac>` full-block rules.
+    def _remove_phone_home_rules(self, mac: str) -> None:
+        """Delete this MAC's phone-home rules. Does NOT commit (callers do)."""
+        suffix = mac.replace(":", "")
+        names = {f"phonehome-{suffix}", f"phonehome-ntp-{suffix}"}
+        config = self._r.uci.get("firewall", type="rule")
+        for section_name, section_data in config.get("values", {}).items():
+            if section_data.get("name") in names:
+                self._r.uci.delete("firewall", section_name)
+
+    def block_phone_home(self, mac: str):
+        """Block a device (by MAC) from phoning home: REJECT WAN egress while
+        allowing NTP. The NTP ACCEPT is added BEFORE the REJECT so fw4 matches
+        it first. Idempotent — clears any prior phone-home rules first."""
+        suffix = mac.replace(":", "")
+        self._remove_phone_home_rules(mac)
+        self._r.uci.add("firewall", "rule", {
+            "name": f"phonehome-ntp-{suffix}",
+            "src": "lan",
+            "src_mac": mac,
+            "dest": "wan",
+            "proto": "udp",
+            "dest_port": "123",
+            "target": "ACCEPT",
+            "enabled": "1",
+        })
+        self._r.uci.add("firewall", "rule", {
+            "name": f"phonehome-{suffix}",
+            "src": "lan",
+            "src_mac": mac,
+            "dest": "wan",
+            "target": "REJECT",
+            "enabled": "1",
+        })
+        self._r.uci.commit("firewall")
+        self.reload()
+
+    def unblock_phone_home(self, mac: str):
+        """Remove a device's phone-home rules (REJECT + NTP allow)."""
+        self._remove_phone_home_rules(mac)
+        self._r.uci.commit("firewall")
+        self.reload()
+
+    def set_camera_phone_home(self, blocked: bool):
+        """Toggle the whole camera VLAN's ability to phone home. When blocked,
+        drop the broad `cameras → wan` forwarding and add an NTP allow so camera
+        clocks/timestamps stay correct (camera DNS to the router is already
+        permitted by Allow-Camera-DNS). When unblocked, restore the forwarding
+        and drop the NTP allow. Idempotent."""
+        fw = self._r.uci.get("firewall")
+        fwd_sections: list[str] = []
+        ntp_sections: list[str] = []
+        if isinstance(fw, dict):
+            for section_name, section in fw.items():
+                if not isinstance(section, dict):
+                    continue
+                if (section.get(".type") == "forwarding"
+                        and section.get("src") == "cameras"
+                        and section.get("dest") == "wan"):
+                    fwd_sections.append(section_name)
+                if (section.get(".type") == "rule"
+                        and section.get("name") == "Allow-Camera-NTP"):
+                    ntp_sections.append(section_name)
+        if blocked:
+            for s in fwd_sections:
+                self._r.uci.delete("firewall", s)
+            if not ntp_sections:
+                self._r.uci.add("firewall", "rule", {
+                    "name": "Allow-Camera-NTP",
+                    "src": "cameras",
+                    "dest": "wan",
+                    "proto": "udp",
+                    "dest_port": "123",
+                    "target": "ACCEPT",
+                    "enabled": "1",
+                })
+        else:
+            if not fwd_sections:
+                self._r.uci.add("firewall", "forwarding", {
+                    "src": "cameras",
+                    "dest": "wan",
+                })
+            for s in ntp_sections:
+                self._r.uci.delete("firewall", s)
         self._r.uci.commit("firewall")
         self.reload()
 
@@ -1088,7 +1577,7 @@ class ApApi:
             {
                 "mac": "B8:27:EB:12:34:56",
                 "model": "raspberrypi,5-model-b",
-                "serial": "RPi5-00000000a1b2c3d4",
+                "serial": "AP-00000000a1b2c3d4",
                 "version": "1.0",
                 "last_ip": "192.168.50.42",
                 "hostname": "droplet-extender-b827eb123456",
@@ -1336,14 +1825,116 @@ def get_network_summary(router: DropletRouter) -> dict:
     Returns a dict with interfaces, wireless, DHCP leases, and system info
     that can be fed into the LLM's context window.
     """
+    # Shape-agnostic (ADR-011): a minimal deployment may not expose every
+    # optional ubus object. The interface path already degrades a missing `wan`
+    # to a present:False stub; each independent optional section below degrades
+    # the same way (a missing object is data, not a crash) so the whole summary
+    # never 500s and the dashboard doesn't read the router as offline. `system`
+    # (board_info) is intentionally NOT degraded — it's a core object on every
+    # build, so its absence is a genuinely broken router, which should surface.
+    interfaces = router.network.get_all_interface_statuses()
     return {
         "system": router.system.board_info(),
-        "resources": router.system.resource_info(),
-        "lan": router.network.interface_status("lan"),
-        "wan": router.network.interface_status("wan"),
-        "wireless": router.wireless.status(),
-        "dhcp_leases": router.dhcp.active_leases(),
-        "firewall_zones": router.firewall.get_zones(),
+        "resources": _section_or(router.system.resource_info, {}),
+        "lan": interfaces.get("lan", interface_stub(present=False)),
+        "wan": interfaces.get("wan", interface_stub(present=False)),
+        "wireless": _section_or(router.wireless.status, {}),
+        "dhcp_leases": _section_or(router.dhcp.active_leases, []),
+        "firewall_zones": _section_or(router.firewall.get_zones, {}),
+    }
+
+
+def _find_upstream_gateway(wan_status: dict) -> Optional[str]:
+    """Return the upstream default-route gateway on the WAN interface, or None.
+
+    Reads the interface's ubus ``route`` list (same status shape
+    `get_all_interface_statuses()` returns; `interface_stub` declares
+    ``route: []``). An upstream gateway is a default route — target 0.0.0.0/0
+    (IPv4) or ::/0 (IPv6) — carrying a non-empty ``nexthop``. The presence of
+    such a route is the evidence that *something upstream* is routing for us,
+    i.e. the box is plugged into an existing network rather than owning the edge.
+
+    Read-only: this only inspects status the SDK already fetched; it never
+    issues a write or touches the upstream.
+    """
+    routes = wan_status.get("route")
+    if not isinstance(routes, list):
+        return None
+    for route in routes:
+        if not isinstance(route, dict):
+            continue
+        target = route.get("target")
+        # A default route has mask 0; tolerate the field being absent on odd
+        # builds by keying primarily on the 0.0.0.0 / :: target.
+        mask = route.get("mask", 0)
+        nexthop = route.get("nexthop")
+        if (
+            target in _DEFAULT_ROUTE_TARGETS
+            and (mask in (0, "0") or mask == 0)
+            and isinstance(nexthop, str)
+            and nexthop
+        ):
+            return nexthop
+    return None
+
+
+def detect_deployment_topology(router: DropletRouter) -> dict:
+    """Determine this box's :class:`DeploymentTopology` by probing the WAN-facing
+    interface for an upstream gateway — ADR-018 Decision 2.
+
+    Reuses ``NetworkApi.get_all_interface_statuses()`` (the SAME shape-detection
+    mechanism `get_network_summary` and the DuckDNS interface selection use, per
+    ADR-011) so there is exactly one "which interfaces are present" path. The
+    posture is an EXPLICIT enum, never inferred from a null/absent field
+    (rule 10):
+
+    * WAN present + up + an upstream default-route gateway → ``DOWNSTREAM_ROUTER``.
+    * WAN present + no upstream gateway → ``PRIMARY_ROUTER`` (the box owns the edge).
+    * WAN not present on this shape → ``UNKNOWN`` (we do not guess a posture from
+      absence; the LAN-only single-box case).
+
+    Returns ``{"posture": DeploymentTopology, "evidence": {...}}``. The evidence
+    surfaces *why* the posture was chosen: which interface is the WAN, whether it
+    is present/up, and whether an upstream gateway was found. This is detection
+    only — it issues no writes and never mutates the upstream network. Genuine
+    ubus faults (e.g. PERMISSION_DENIED) and transport loss propagate to the
+    caller rather than being masked as a posture.
+    """
+    statuses = router.network.get_all_interface_statuses()
+    wan = statuses.get(WAN_INTERFACE_NAME)
+
+    # Absent WAN — either no entry at all, or the explicit present:False stub a
+    # LAN-only shape returns. Either way the posture is undetermined, NOT guessed.
+    wan_present = isinstance(wan, dict) and wan.get("present") is True
+    if not wan_present:
+        return {
+            "posture": DeploymentTopology.UNKNOWN,
+            "evidence": {
+                "wan_interface": WAN_INTERFACE_NAME,
+                "wan_present": False,
+                "wan_up": False,
+                "wan_device": "",
+                "upstream_gateway_present": False,
+                "upstream_gateway": None,
+            },
+        }
+
+    gateway = _find_upstream_gateway(wan)
+    posture = (
+        DeploymentTopology.DOWNSTREAM_ROUTER
+        if gateway is not None
+        else DeploymentTopology.PRIMARY_ROUTER
+    )
+    return {
+        "posture": posture,
+        "evidence": {
+            "wan_interface": WAN_INTERFACE_NAME,
+            "wan_present": True,
+            "wan_up": bool(wan.get("up")),
+            "wan_device": wan.get("l3_device") or wan.get("device") or "",
+            "upstream_gateway_present": gateway is not None,
+            "upstream_gateway": gateway,
+        },
     }
 
 
@@ -1366,6 +1957,10 @@ def describe_network_for_llm(router: DropletRouter) -> str:
     wan_ip = "unknown"
     if wan.get("ipv4-address"):
         wan_ip = wan["ipv4-address"][0]["address"]
+    elif wan.get("present") is False:
+        # WAN not configured on this box (e.g. single-box: WAN handled by the
+        # host, not the containerised OpenWrt) — distinct from a down WAN.
+        wan_ip = "n/a (WAN handled by host)"
 
     uptime_hours = resources.get("uptime", 0) // 3600
     mem_total = resources.get("memory", {}).get("total", 0) // (1024 * 1024)

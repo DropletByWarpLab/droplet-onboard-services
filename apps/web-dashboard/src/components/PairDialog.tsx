@@ -12,6 +12,7 @@ import {
   CheckCircle2,
 } from "lucide-react";
 import { createPairingCode, getPairingCodeStatus } from "@/lib/api";
+import { translateError } from "@/lib/friendly-errors";
 import type { PairingCodeInfo } from "@/lib/types";
 import { Dialog } from "./Dialog";
 
@@ -76,7 +77,7 @@ export function PairDialog({ onClose, onPaired }: PairDialogProps) {
       setPairing(info);
       setStep("waiting");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to generate code");
+      setError(translateError(err, "device"));
     } finally {
       setSubmitting(false);
     }

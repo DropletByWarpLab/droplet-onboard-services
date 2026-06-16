@@ -41,6 +41,88 @@ model Drive {
   updatedAt   DateTime @updatedAt
 }
 
+/// BUG-3 / ADR-019: software-RAID (mdadm) storage pool.
+///
+/// Pools are OPTIONAL and owner-driven — nothing auto-creates a row here.
+/// The box runs fine with zero StoragePool rows; "no pool" is the ABSENCE
+/// of any row, which is distinct from a row whose `status` is `none`.
+///
+/// `status` / `level` are EXPLICIT enum columns, never derived from absence
+/// (handbook rule 10; canonical precedent WARP-218 BrainMemoryItemStatus).
+/// Live array state (active/degraded/resyncing) is read from /proc/mdstat by
+/// the device-bridge; the row carries the owner's chosen name/notes + the
+/// last-known status, mirroring how the `Drive` table carries owner labels
+/// alongside the bridge's live inventory.
+///
+/// `device` is the md device the owner created (e.g. "md0") — never a
+/// host-specific default (rule 12); the owner chooses members + level at
+/// create time.
+model StoragePool {
+  /// md device name without the /dev/ prefix (e.g. "md0"). Stable id.
+  device      String        @id
+  displayName String
+  level       ArrayLevel
+  status      PoolStatus    @default(none)
+  notes       String?
+  members     PoolMember[]
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@index([status])
+}
+
+/// BUG-3 / ADR-019: one disk's membership in a StoragePool.
+///
+/// `role` is an EXPLICIT enum (active/spare/failed/unassigned), never guessed
+/// from null. A member's identity is the block device path the owner assigned
+/// at create time; `uuid` (FS/array UUID) is recorded when known so the
+/// dashboard can cross-reference the `Drive`/bridge inventory.
+model PoolMember {
+  id         String      @id @default(uuid())
+  pool       StoragePool @relation(fields: [poolDevice], references: [device], onDelete: Cascade)
+  poolDevice String
+  /// Block device path of this member (e.g. "/dev/sda"). Owner-chosen.
+  device     String
+  /// FS/array UUID when known (from the bridge inventory); null until resolved.
+  uuid       String?
+  role       DiskRole    @default(unassigned)
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+
+  @@unique([poolDevice, device])
+  @@index([poolDevice])
+}
+
+/// BUG-3 / ADR-019: live pool health. EXPLICIT (rule 10), never derived from
+/// absence. `none` is a first-class value for a pre-create / torn-down record;
+/// "no pool at all" is the absence of any StoragePool row.
+enum PoolStatus {
+  active
+  degraded
+  resyncing
+  failed
+  none
+}
+
+/// BUG-3 / ADR-019: a disk's role within an array. EXPLICIT (rule 10).
+enum DiskRole {
+  active
+  spare
+  failed
+  unassigned
+}
+
+/// BUG-3 / ADR-019: the RAID level of an array. Owner-chosen at create time —
+/// never a host-specific default (rule 12). `jbod` = linear/concat (no RAID).
+enum ArrayLevel {
+  raid0
+  raid1
+  raid5
+  raid6
+  raid10
+  jbod
+}
+
 /// WARP-304: per-user persistent chat sessions for the /chat page.
 /// `userId` is the Nextcloud username from the auth middleware. The dashboard
 /// only ever lists / reads sessions for the requesting user — owner/admin do
@@ -49,18 +131,46 @@ model Drive {
 /// The pre-WARP-104 `model`/`provider` columns are kept (nullable now) for
 /// backwards compatibility with any existing rows; the new rows record them
 /// from the first turn's chat request.
+/// WARP-845 — per-user chat projects: folders in the history sidebar
+/// plus a default persona (systemPrompt) applied to new chats started
+/// inside the project. Strictly per-user (product call): no sharing,
+/// owner/admin get no visibility into other users' projects.
+model ChatProject {
+  id           String        @id @default(uuid())
+  userId       String
+  name         String
+  systemPrompt String?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @default(now()) @updatedAt
+  sessions     ChatSession[]
+
+  @@index([userId, updatedAt(sort: Desc)])
+}
+
 model ChatSession {
   id        String        @id @default(uuid())
   userId    String
   title     String?
   model     String?
   provider  String?
+  /// WARP-845 — optional project membership. SetNull on project delete:
+  /// the chats survive, falling back to the ungrouped date list.
+  projectId String?
+  project   ChatProject?  @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  /// WARP-844 — the caller-supplied system prompt this conversation is
+  /// held under. Persisted from the request's system message on every
+  /// turn (latest wins) and returned on GET so the dashboard restores
+  /// the textarea when the thread is reloaded. NULL = no custom prompt.
+  systemPrompt String?
   createdAt DateTime      @default(now())
   updatedAt DateTime      @default(now()) @updatedAt
   messages  ChatMessage[]
   pins      ContextPin[]
 
   @@index([userId, updatedAt(sort: Desc)])
+  /// WARP-845 — Postgres doesn't auto-index FK columns; per-project
+  /// counts and the SET NULL cascade on project delete scan on this.
+  @@index([projectId])
 }
 
 /// WARP-460 — Context pins per chat session. The dashboard's right-side
@@ -105,17 +215,33 @@ enum ContextPinKind {
 /// `active` is a soft-disable flag so users can pause a fact without
 /// deleting the row (preserving evidence chain).
 model MemoryFact {
-  id              String              @id @default(uuid())
-  category        MemoryFactCategory
-  fact            String
-  addedBy         String
-  evidenceChatId  String?
-  active          Boolean             @default(true)
-  addedAt         DateTime            @default(now())
-  updatedAt       DateTime            @default(now()) @updatedAt
+  id             String             @id @default(uuid())
+  category       MemoryFactCategory
+  fact           String
+  addedBy        String
+  evidenceChatId String?
+  active         Boolean            @default(true)
+  /// WARP-845 — role audience (minimum-role ladder owner > admin >
+  /// family > guest). A fact is visible to callers whose role rank is
+  /// AT OR ABOVE the audience's rank: audience=guest distributes to the
+  /// whole household incl. guests; audience=owner keeps it owner-only.
+  /// Default family = every member, no guests. Explicit column, never
+  /// derived (no-guessing rule).
+  audience       MemoryFactAudience @default(family)
+  addedAt        DateTime           @default(now())
+  updatedAt      DateTime           @default(now()) @updatedAt
 
   @@index([category, active])
   @@index([active, addedAt(sort: Desc)])
+  @@index([active, audience])
+}
+
+/// WARP-845 — who a memory fact is distributed to (minimum role).
+enum MemoryFactAudience {
+  owner
+  admin
+  family
+  guest
 }
 
 /// WARP-461 — per FEATURES.md §5 fact taxonomy. Explicit enum, never
@@ -141,9 +267,9 @@ enum MemoryFactCategory {
 /// briefly burst > 2³¹. Retention: a nightly cron prunes rows
 /// older than 30 days alongside the existing daily-purge.
 model NetworkThroughputSample {
-  ts          DateTime @id @default(now())
-  wanDownBps  BigInt
-  wanUpBps    BigInt
+  ts         DateTime @id @default(now())
+  wanDownBps BigInt
+  wanUpBps   BigInt
 
   @@index([ts(sort: Desc)])
 }
@@ -200,9 +326,9 @@ model DnsBlockSample {
 /// turns do not carry reasoning content (small models, tool-only turns,
 /// system messages).
 model ChatMessage {
-  id          String      @id @default(uuid())
+  id          String            @id @default(uuid())
   sessionId   String
-  session     ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  session     ChatSession       @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   role        String
   content     String
   toolCalls   Json?
@@ -211,11 +337,20 @@ model ChatMessage {
   status      ChatMessageStatus @default(completed)
   completedAt DateTime?
   reasoning   String?
-  createdAt   DateTime    @default(now())
+  /// WARP-844 — user rating on an assistant turn (explicit column per the
+  /// no-guessing rule). NULL = unrated. Feeds the admin RAG-eval loop.
+  feedback    ChatMessageFeedback?
+  createdAt   DateTime          @default(now())
 
   @@index([sessionId, createdAt])
   @@index([sessionId, turnId])
   @@index([sessionId, status])
+}
+
+/// WARP-844 — thumbs rating on an assistant message.
+enum ChatMessageFeedback {
+  up
+  down
 }
 
 /// WARP-329: lifecycle of a single ChatMessage row.
@@ -288,8 +423,36 @@ model UserInvite {
   revokedAt    DateTime?
   createdAt    DateTime  @default(now())
 
+  // BUG-11 — invite-email delivery state. Issuing an invite WRITES the row;
+  // delivering the accept-link email is a separate, fallible step over the
+  // operator's SMTP relay (EmailChannelSetting). Per the no-guessing rule
+  // (CLAUDE.md): delivery is an explicit enum column, NOT derived from a
+  // nullable timestamp — `sendStatus = 'failed'` is a first-class, queryable,
+  // retryable state. A send that fails NEVER rolls back the invite (the row is
+  // still valid and the link still works if delivered out-of-band); the
+  // dashboard surfaces `failed` with a Retry affordance.
+  sendStatus   InviteSendStatus @default(pending)
+  sentAt       DateTime?
+  sendError    String? // last SMTP error (operator-facing; never the token)
+  sendAttempts Int              @default(0)
+
   @@index([token])
   @@index([expiresAt])
+  @@index([sendStatus])
+}
+
+/// BUG-11 — invite-email delivery lifecycle. Mirrors the EmailDraftStatus
+/// pattern (draft → queued → sent → failed) but for the outbound INVITE
+/// channel. Explicit enum so "this invite's email bounced" is a queryable
+/// state the dashboard can filter + retry, never inferred from a null
+/// `sentAt`. Values:
+///   - pending — row created, email not yet attempted (or SMTP unconfigured).
+///   - sent    — SMTP relay accepted the message for delivery.
+///   - failed  — the relay rejected it / transport errored; retryable.
+enum InviteSendStatus {
+  pending
+  sent
+  failed
 }
 
 /// WARP-171: canonical role enum for the orchestrator. Mirrors the
@@ -315,6 +478,21 @@ enum Role {
   family
   guest
   service
+}
+
+/// WARP (SCIM directory sync) — soft-deactivation lifecycle for a directory
+/// user. An explicit enum column (NOT derived from a NULL / row-delete) so
+/// "this account is disabled" is a first-class, queryable state and the
+/// login path can fail closed on it. SCIM `active:false` (PATCH/PUT) and
+/// DELETE map to DEACTIVATED; SCIM `active:true` re-activates. We never hard
+/// delete a SCIM-provisioned user — Okta owns the lifecycle and may
+/// re-activate the same person later (re-link must preserve User.id).
+///   - ACTIVE      — normal; can sign in, counts against the directory.
+///   - DEACTIVATED — disabled by the directory; denied at /auth/login and
+///                   SSO callback, retained for audit + possible re-activate.
+enum DirectoryUserStatus {
+  ACTIVE
+  DEACTIVATED
 }
 
 // Short-lived codes generated by the dashboard, consumed by a native
@@ -359,6 +537,55 @@ model NetworkConfigSnapshot {
   createdAt DateTime @default(now())
 
   @@index([config, createdAt])
+}
+
+/// WARP-825: lifecycle of a factory-reset job (Settings Danger Zone).
+///
+/// Status is an EXPLICIT enum, never inferred from the absence of a column
+/// (handbook rule 10 / project CLAUDE.md "no guessing"; precedent WARP-218
+/// BrainMemoryItemStatus, BUG-3 PoolStatus). A reset is high-blast-radius:
+/// it wipes every data volume + secrets and bounces the orchestrator
+/// container itself, so the orchestrator can NEVER report "succeeded" — the
+/// process is gone before the wipe finishes. Honest states are therefore:
+///   requested  — owner confirmed; audit row written; about to dispatch.
+///   dispatched — handed to the device-bridge host executor; the wipe is
+///                running detached from the orchestrator (which will die).
+///   failed     — the dispatch itself failed (bridge unreachable / refused)
+///                BEFORE anything was wiped. The box is untouched and usable.
+/// There is deliberately no `succeeded`: a completed reset returns the box to
+/// first-run, where this table no longer exists (the db volume is wiped). The
+/// dashboard treats `dispatched` as terminal-success for its progress view.
+enum ResetJobStatus {
+  requested
+  dispatched
+  failed
+}
+
+/// WARP-825: one factory-reset attempt. At most ONE row may be in a
+/// non-terminal (`requested` or `dispatched`) state at a time — the
+/// double-fire guard (a second confirmed reset while one is in flight is
+/// refused). `confirmToken` is the device name the owner typed to clear the
+/// type-to-confirm friction step; it is validated SERVER-side before a row is
+/// ever created, and stored only for the audit trail. No host-specific
+/// default for the target name (handbook rule 12) — it is read from device
+/// identity at request time.
+model ResetJob {
+  id           String         @id @default(cuid())
+  status       ResetJobStatus @default(requested)
+  /// User.id (UUID) of the owner who confirmed. Never null in practice — the
+  /// route is requireRole("owner") — but nullable so an orphaned audit write
+  /// never blocks on a missing session id.
+  requestedBy  String?
+  /// The device/host name the reset targets + that the owner had to type to
+  /// confirm. Recorded for the audit trail.
+  targetName   String
+  /// Set when status transitions to `failed`; the human-readable dispatch
+  /// failure (bridge unreachable / refused). Null while requested/dispatched.
+  failureReason String?
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  @@index([status, createdAt])
 }
 
 // --- Camera / Frigate NVR ---
@@ -585,6 +812,20 @@ enum BrainMemoryItemStatus {
   failed
 }
 
+// ── WARP-613: phone-home egress policy ──
+// Explicit applied-state for the egress reconciler (handbook "state is
+// explicit, never derive from absence"). Distinct from the schedule ticker's
+// boolean full-block state on `lastAppliedBlocked`.
+//   - open               → no phone-home rule on the router
+//   - phone_home_blocked → WAN egress denied except NTP + local DNS
+//   - full_blocked       → all WAN denied (owned by the schedule ticker; the
+//                          egress reconciler never sets this, only yields to it)
+enum DeviceEgressState {
+  open
+  phone_home_blocked
+  full_blocked
+}
+
 // ── WARP-80: Device intelligence ──
 // Per-client-device registry (laptops, phones, smart bulbs, printers on the LAN).
 // Populated by the reconciler (WARP-81) from routing-service leases/ARP snapshots.
@@ -607,6 +848,10 @@ model NetworkDevice {
   // orchestrator restart this field reconstitutes the ticker's state so we
   // don't re-dispatch every device. See WARP critical-fix-cron-state.
   lastAppliedBlocked Boolean?
+  // WARP-613: last egress policy the egress-reconciler pushed to the router.
+  // Maintained independently of lastAppliedBlocked (which the schedule ticker
+  // owns). See enum DeviceEgressState above.
+  lastAppliedEgress  DeviceEgressState   @default(open)
   groups             DeviceGroup[]       @relation("DeviceGroups")
   presenceDays       DevicePresenceDay[]
   schedules          Schedule[]          @relation("DeviceSchedules")
@@ -622,15 +867,20 @@ model NetworkDevice {
 // NetworkDevice — a device can be in multiple groups (e.g. "Living Room"
 // and "Media"). Seeded with 5 default rooms by the migration.
 model DeviceGroup {
-  id        String             @id @default(cuid())
-  name      String             @unique
-  color     String?
-  icon      String?
-  devices   NetworkDevice[]    @relation("DeviceGroups")
-  schedules Schedule[]         @relation("GroupSchedules")
-  overrides ScheduleOverride[] @relation("GroupOverrides")
-  createdAt DateTime           @default(now())
-  updatedAt DateTime           @updatedAt
+  id             String             @id @default(cuid())
+  name           String             @unique
+  color          String?
+  icon           String?
+  // WARP-613: when true AND the master toggle
+  // (WorkspaceSetting `network.block_phone_home_enabled`) is on, every device
+  // in this group gets a phone-home WAN-egress block (NTP + local DNS still
+  // allowed). Enforced by the egress reconciler.
+  blockPhoneHome Boolean            @default(false)
+  devices        NetworkDevice[]    @relation("DeviceGroups")
+  schedules      Schedule[]         @relation("GroupSchedules")
+  overrides      ScheduleOverride[] @relation("GroupOverrides")
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
 }
 
 // Daily presence roll-up — one row per (device, calendar day) with the
@@ -833,6 +1083,11 @@ model VpnPeer {
 
   @@index([userId])
   @@index([status])
+  // WARP-565: a PARTIAL unique index enforces "at most one ACTIVE peer per
+  // assignedIp" at the DB layer (revoked rows' IPs are reusable). Prisma can't
+  // express partial-unique declaratively, so it lives as raw SQL in migration
+  // 20260614000000_vpn_peer_unique_active_ip. This @@index stays for the
+  // non-unique read path the allocator uses.
   @@index([assignedIp])
 }
 
@@ -883,7 +1138,7 @@ model ApDevice {
   mac              String         @id
   // Operator-friendly label set at approval time. Defaults to the
   // model name + last-3-octets of the MAC if the operator doesn't
-  // override it (e.g. "Pi5 AP (12:34:56)"). Editable from the
+  // override it (e.g. "AP (12:34:56)"). Editable from the
   // dashboard later (PATCH /api/aps/:mac).
   displayName      String?
   // mDNS-reported product info — useful for the dashboard's "what is
@@ -983,13 +1238,28 @@ enum ApDeviceStatus {
 // keeping the column lets the dashboard render the "Local" vs "OCS"
 // affordance without a schema migration when mirroring lands.
 model User {
-  id          String   @id @default(uuid())
+  id                String   @id @default(uuid())
   // Login handle. Unique across the directory. For Nextcloud-mirror
   // rows this matches the OCS user id so `req.user.username` from the
   // auth middleware resolves directly to this row.
-  username    String   @unique
-  displayName String
-  email       String?
+  username          String   @unique
+  displayName       String
+  // ADR-013: email is the stable directory login key — the Aurora login
+  // (PR #370) sends "Work email" as the identifier and POST /auth/login
+  // resolves the row by email before the argon2id verify. Unique so two
+  // rows can't both claim one login identity (an auth ambiguity).
+  // Still nullable: service-only principals and locally-minted rows that
+  // predate ADR-013 may have no email; the login route fails closed when
+  // email or passwordHash is null.
+  email             String?  @unique
+  // ADR-013: argon2id PHC hash — the built-in directory is the auth
+  // source of truth (Nextcloud is demoted to downstream WebDAV
+  // provisioning). Written at account-creation (/auth/setup, invite
+  // accept) and verified at /auth/login via password.service. NEVER
+  // contains plaintext; NEVER logged. Nullable because service-only
+  // principals and pre-first-login invitees may not have one yet — the
+  // login route fails closed (no enumeration leak) when it's null.
+  passwordHash      String?
   // WARP-485: stable mapping key from the Nextcloud OCS user id
   // (`ocs.data.id`, e.g. `stefan-cruceru`) to this row's UUID. The auth
   // middleware looks up `User` by `nextcloudUsername` on the OCS
@@ -1002,30 +1272,214 @@ model User {
   // from `username` to keep the local display handle decoupled from the
   // OCS-mapping key — they often match today but the dashboard may
   // edit `username` in the future without breaking OCS resolution.
-  nextcloudUsername String? @unique
-  role        Role     @default(family)
+  nextcloudUsername String?  @unique
+  role              Role     @default(family)
   // Locally provisioned vs. mirrored from Nextcloud. Today every row
   // is local — the dashboard's People surface is the only writer. The
   // delete handler refuses when isLocal=false to keep OCS-owned
   // identities off-limits.
-  isLocal     Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  isLocal           Boolean  @default(true)
+  // WARP (SCIM directory sync): soft-deactivation status. Defaults ACTIVE
+  // so every existing + password/SSO-created row is unaffected. SCIM sets
+  // DEACTIVATED on `active:false` / DELETE (soft — never a row delete) and
+  // back to ACTIVE on re-activate. The login route + SSO callback fail
+  // closed when this is DEACTIVATED. Explicit enum, never IS-NULL-derived.
+  directoryStatus   DirectoryUserStatus @default(ACTIVE)
+  // WARP-824: admin-created users get a temporary password and must change
+  // it on first login. This is the EXPLICIT persistent signal for that gate
+  // — never derived from password age, a null/sentinel hash, or "row was
+  // created by an admin" inference (project no-guessing rule; same posture
+  // as `directoryStatus` above and `TotpCredential.confirmedAt`). Set true
+  // by POST /auth/users when the operator leaves "require change on first
+  // login" on (the default); cleared to false by POST /auth/change-password
+  // once the user picks their own password. The post-auth gate
+  // (`requirePasswordChangeGate`) reads this FRESH from the row on every
+  // request, so it can't be bypassed by a stale/forged JWT. Defaults false so
+  // every existing row + self-service signup (/auth/setup, invite-accept) is
+  // unaffected.
+  mustChangePassword Boolean @default(false)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
 
   // Many-to-many to Group via GroupMembership (explicit join model
   // so future per-membership metadata — joinedAt, addedBy — has a
   // place to land).
-  memberships GroupMembership[]
+  memberships         GroupMembership[]
   // Per-user scope bindings — controls which scopes this user can
   // act inside via requireScope() (see src/middleware/scope.ts).
-  scopeBindings ScopeBinding[]
+  scopeBindings       ScopeBinding[]
   // Optional guest time-box. Non-null when this user was minted as a
   // guest with an expiry; the nightly `guest-expiry-sweep` cron walks
   // GuestExpiry rows directly (no IS-NULL guessing — status is an
   // explicit enum on GuestExpiry).
-  guestExpiry GuestExpiry?
+  guestExpiry         GuestExpiry?
+  // ADR-013 (SSO OIDC): external-IdP identities (Google / Entra / Okta)
+  // linked to this local user. A user may have several (e.g. both Google
+  // and Entra resolve to the same work email → both link to one local row).
+  // The link preserves this row's UUID — SSO never mints a second local
+  // User for an email that already has one.
+  ssoIdentities       SsoIdentity[]
+  // PR #377 (WARP-___): FIDO2/WebAuthn passkeys registered to this user.
+  // A user may enrol several (a platform authenticator on the laptop, a
+  // roaming security key, the phone's passkey). Each row carries its own
+  // signature counter for clone detection. Deleting the user cascades the
+  // credentials (see WebAuthnCredential.user onDelete: Cascade).
+  webauthnCredentials WebAuthnCredential[]
+  // PR #377: outstanding WebAuthn challenges minted FOR this user (the
+  // registration ceremony, and any authenticate ceremony where the email
+  // was supplied up front). Anonymous passwordless-authenticate challenges
+  // have a null userId, so they are NOT in this relation.
+  webauthnChallenges  WebAuthnChallenge[]
+
+  // PR #375 — TOTP second factor (ADR-013 directory). One credential row
+  // per user (the secret is encrypted at rest). `confirmedAt` is the
+  // explicit "TOTP enabled" signal — the login gate reads it directly
+  // rather than inferring enablement from row presence.
+  totpCredential TotpCredential?
+  // One-time recovery codes (argon2id-hashed). Consumed rows keep an
+  // explicit `usedAt` so a replay matches nothing.
+  recoveryCodes RecoveryCode[]
 
   @@index([role])
+}
+
+/// ADR-013 (SSO OIDC) — maps an external IdP identity to a LOCAL User.
+///
+/// `subject` is the IdP's stable `sub` claim (NOT the email — emails can
+/// be reassigned at the IdP, `sub` cannot). `(provider, subject)` is
+/// unique so one IdP identity resolves to exactly one local user; a
+/// second local row claiming the same identity would be an auth
+/// ambiguity. `userId` FKs to `User` so the link is referential and the
+/// existing `User.id` UUID is preserved (consistent with WARP-485 —
+/// JWT.sub / Redis keys stay on the UUID).
+///
+/// Account-linking policy (route): on callback we resolve the validated
+/// `sub` here first; on a hit we sign in that user. On a miss we look up
+/// the local User by NORMALIZED email (#374 trim+lowercase) — if one
+/// exists we LINK (create this row pointing at it), else we CREATE the
+/// local User per the directory model and link. We never create a
+/// login-unable row.
+model SsoIdentity {
+  id        String   @id @default(uuid())
+  userId    String
+  provider  String // "google" | "entra" | "okta"
+  subject   String // IdP 'sub' claim (OIDC SSO) or SCIM resource id (directory provisioning)
+  // Email seen at link time (already normalized). Audit/debug only — the
+  // login key on User.email remains authoritative; this is not a second
+  // source of truth.
+  email     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, subject])
+  @@index([userId])
+}
+
+/// ADR-013 (SSO OIDC) — server-side, single-use, time-bound login state.
+///
+/// The OIDC `state` (CSRF) + `nonce` (ID-token replay) + PKCE
+/// `codeVerifier` are minted at /sso/oidc/authorize and persisted HERE,
+/// not in the redirect or a client-readable cookie. The browser only
+/// carries the opaque `state` (in the authorize redirect and matched back
+/// at /callback), so a tampered or replayed callback can't smuggle its
+/// own nonce/verifier.
+///
+/// Single-use: `consumedAt` is stamped the moment the callback claims the
+/// row (same idiom as UserInvite.acceptedAt — the established single-use
+/// pattern in this codebase). A second callback with the same `state`
+/// finds `consumedAt` already set and is rejected. Time-bound:
+/// `expiresAt` (short, ~10 min) bounds the authorize→callback window so
+/// an abandoned flow can't be resumed later. A periodic sweep can delete
+/// expired rows; correctness does not depend on the sweep (the callback
+/// re-checks `expiresAt`).
+model SsoLoginState {
+  id           String    @id @default(uuid())
+  state        String    @unique
+  nonce        String
+  codeVerifier String
+  provider     String // "google" | "entra" | "okta"
+  // Where to send the browser after a successful sign-in (defaults to
+  // "/"). Validated to a same-origin relative path at issue time so it
+  // can't become an open redirect.
+  returnTo     String    @default("/")
+  consumedAt   DateTime?
+  expiresAt    DateTime
+  createdAt    DateTime  @default(now())
+
+  @@index([expiresAt])
+}
+
+// PR #375 — TOTP (RFC 6238) enrollment for the built-in directory's
+// second factor. One row per user; created on enroll, marked enabled on
+// the first successful verify.
+model TotpCredential {
+  id          String   @id @default(uuid())
+  // FK to the owning directory user. Unique → at most one TOTP secret
+  // per account. Cascade-delete so removing a user clears their factor.
+  userId      String   @unique
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // The Base32 TOTP secret, encrypted at rest with the aes-256-gcm
+  // encryption.service (DEVICE_SECRET_KEY). NEVER plaintext; NEVER logged.
+  secretEnc   String
+  // Explicit enablement signal (no IS-NULL inference for state — project
+  // rule). Null while enrollment is pending; set to the verify timestamp
+  // on the first successful code. The login gate requires TOTP only when
+  // this is non-null.
+  confirmedAt DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// PR #375 — one-time backup codes for the TOTP factor. Each row stores an
+// argon2id hash (reusing password.service); the plaintext is shown to the
+// user exactly once at generation. Single-use: `usedAt` is stamped on
+// consumption so a replay of the same code matches no unused row.
+model RecoveryCode {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // argon2id PHC hash of the code. NEVER plaintext; NEVER logged.
+  codeHash  String
+  // Explicit consumption marker (no IS-NULL state inference). Null = the
+  // code is still spendable; non-null = already used at that timestamp.
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+
+  // The login/recovery path scans a user's UNUSED codes — index the
+  // hot lookup key.
+  @@index([userId])
+}
+
+/// WARP (SCIM directory sync) — a group Okta pushed to the box via
+/// `/scim/v2/Groups`. We persist the group so role mapping is idempotent
+/// across Okta's retries and survives restarts (the mapping is not derived
+/// on the fly from a request body that may arrive in any order).
+///
+/// `externalId` is Okta's stable group id (the SCIM `id` we mint is this
+/// row's `id`; `externalId` is the IdP-side id when supplied). `displayName`
+/// is the human group name ("Droplet Admins"). `mappedRole` is the LOCAL
+/// Role this group grants — resolved from the group's display name via the
+/// explicit policy in scim-role-mapping.service.ts (default least-privilege
+/// `family`). A user's effective role is the HIGHEST-privilege mapped role
+/// across the groups they belong to (computed at provisioning time, written
+/// to User.role), so a member of both "Admins" and "Everyone" lands on
+/// owner, not family.
+model ScimGroup {
+  id          String   @id @default(uuid())
+  // Okta-side stable id (SCIM `externalId`). Unique so retries upsert the
+  // same row instead of forking duplicates. Nullable because a minimal SCIM
+  // client may omit it; when absent we key on displayName.
+  externalId  String?  @unique
+  displayName String   @unique
+  // The local Role this group grants. Explicit column (not recomputed from
+  // displayName on every read) so an operator override survives re-sync.
+  mappedRole  Role     @default(family)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([mappedRole])
 }
 
 // User-curated grouping (households, family branches, work cohorts).
@@ -1043,12 +1497,12 @@ model Group {
 // listed twice in the same group. `joinedAt` lets the dashboard show
 // "added X days ago" without a separate audit query.
 model GroupMembership {
-  id        String   @id @default(uuid())
-  userId    String
-  groupId   String
-  joinedAt  DateTime @default(now())
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  group     Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  id       String   @id @default(uuid())
+  userId   String
+  groupId  String
+  joinedAt DateTime @default(now())
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  group    Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
 
   @@unique([userId, groupId])
   @@index([userId])
@@ -1123,19 +1577,19 @@ model ScopeBinding {
 // only "expired" once the cron has actually denylisted their session).
 // WARP-218's BrainMemoryItemStatus is the canonical precedent.
 model GuestExpiry {
-  id        String              @id @default(uuid())
-  userId    String              @unique
+  id        String            @id @default(uuid())
+  userId    String            @unique
   // When the guest's session should be revoked. The cron sweep
   // compares this against `now()` and flips status when it's past.
   expiresAt DateTime
-  status    GuestExpiryStatus   @default(ACTIVE)
+  status    GuestExpiryStatus @default(ACTIVE)
   // When the cron actually flipped the row to EXPIRED. Non-null
   // only when status = EXPIRED. Useful for the dashboard's
   // "expired N hours ago" copy without re-querying ActivityRow.
   expiredAt DateTime?
-  createdAt DateTime            @default(now())
-  updatedAt DateTime            @updatedAt
-  user      User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+  user      User              @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([expiresAt])
   @@index([status, expiresAt])
@@ -1148,6 +1602,88 @@ model GuestExpiry {
 enum GuestExpiryStatus {
   ACTIVE
   EXPIRED
+}
+
+/// PR #377 (WARP-___): a registered FIDO2/WebAuthn credential (passkey or
+/// roaming security key) bound to a directory User (ADR-013).
+///
+/// Phishing-resistant, passwordless sign-in alternative to the argon2id
+/// login (PR #374). The orchestrator never sees a private key — only the
+/// public key the authenticator emits at registration, plus the rolling
+/// `counter` used for clone detection.
+///
+/// Stored fields map 1:1 onto `@simplewebauthn/server`'s `WebAuthnCredential`
+/// shape: `credentialId` (its `id`), `publicKey`, `counter`, `transports`.
+model WebAuthnCredential {
+  id           String    @id @default(uuid())
+  userId       String
+  // The authenticator's credential id, base64url-encoded. Globally unique
+  // — the same physical authenticator must not be registered twice, and
+  // the authenticate ceremony looks the credential up by this value.
+  credentialId String    @unique
+  // COSE public key bytes emitted at registration. NOT a secret (it's the
+  // public half), but treated as opaque and never logged.
+  publicKey    Bytes
+  // Signature counter. Monotonic clone-detection signal: the authenticator
+  // increments it on every assertion. A verify whose `newCounter` is not
+  // strictly greater than the stored value (when the stored value is > 0)
+  // means a cloned authenticator — the assertion is rejected and this row
+  // is left untouched. `@simplewebauthn/server` enforces the comparison;
+  // we persist the returned `newCounter` on every successful assertion.
+  counter      Int       @default(0)
+  // CSV of AuthenticatorTransportFuture values ("usb,nfc,ble,internal,
+  // hybrid"). Optional — older authenticators omit it. Used only as a UX
+  // hint to the browser on the next authenticate ceremony.
+  transports   String?
+  createdAt    DateTime  @default(now())
+  // Bumped on every successful assertion so the dashboard can show
+  // "last used 3 days ago" without a separate audit query.
+  lastUsedAt   DateTime?
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+/// PR #377 (WARP-___): a single-use, time-bound WebAuthn ceremony challenge.
+///
+/// Replay defence for both the registration and authentication ceremonies.
+/// The server mints a random challenge, persists it here with an `expiresAt`,
+/// and hands the base64url challenge to the browser. On verify the row is
+/// looked up by `challenge`, checked for expiry, and DELETED — so a captured
+/// challenge can never be replayed (single-use = consume-by-delete;
+/// time-bound = expiresAt). A short background sweep prunes abandoned rows.
+///
+/// `userId` is non-null for the registration ceremony (you register a passkey
+/// for the signed-in user) and null for the passwordless authenticate
+/// ceremony (no user is known until the assertion resolves the credential).
+model WebAuthnChallenge {
+  id        String                @id @default(uuid())
+  // The base64url challenge handed to the browser. Unique so a verify can
+  // resolve exactly one row, and so two ceremonies can't collide.
+  challenge String                @unique
+  // Which ceremony this challenge belongs to. Explicit enum (no guessing
+  // from the presence/absence of userId) so verify can refuse a challenge
+  // minted for the wrong ceremony — a registration challenge must not be
+  // accepted by the authenticate verify and vice-versa.
+  type      WebAuthnChallengeType
+  // Non-null for registration (bound to the signed-in user). Null for the
+  // passwordless authenticate ceremony.
+  userId    String?
+  // Hard expiry. Verify rejects (and deletes) any row past this instant.
+  expiresAt DateTime
+  createdAt DateTime              @default(now())
+  user      User?                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@index([userId])
+}
+
+/// PR #377: which WebAuthn ceremony a challenge was minted for. Keeps the
+/// registration and authentication challenge pools from cross-contaminating
+/// (a register challenge must never satisfy an authenticate verify).
+enum WebAuthnChallengeType {
+  REGISTRATION
+  AUTHENTICATION
 }
 
 // ── WARP-455: File scope registry ──
@@ -1361,27 +1897,27 @@ enum SettingType {
 /// CLAUDE.md no-derived-state rule: connectivity state is a column,
 /// not an IS NULL.
 model EmailAccount {
-  id            String              @id @default(uuid())
-  userId        String?
-  displayName   String
-  address       String              @unique
-  imapHost      String
-  imapPort      Int                 @default(993)
-  imapTls       Boolean             @default(true)
-  smtpHost      String
-  smtpPort      Int                 @default(465)
-  smtpTls       Boolean             @default(true)
-  username      String
-  passwordEnc   String
-  imapStatus    EmailImapStatus     @default(paused)
-  lastIdleAt    DateTime?
-  lastErrorAt   DateTime?
-  lastError     String?
-  createdAt     DateTime            @default(now())
-  updatedAt     DateTime            @updatedAt
-  threads       EmailThread[]
-  messages      EmailMessage[]
-  drafts        EmailDraft[]
+  id          String          @id @default(uuid())
+  userId      String?
+  displayName String
+  address     String          @unique
+  imapHost    String
+  imapPort    Int             @default(993)
+  imapTls     Boolean         @default(true)
+  smtpHost    String
+  smtpPort    Int             @default(465)
+  smtpTls     Boolean         @default(true)
+  username    String
+  passwordEnc String
+  imapStatus  EmailImapStatus @default(paused)
+  lastIdleAt  DateTime?
+  lastErrorAt DateTime?
+  lastError   String?
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  threads     EmailThread[]
+  messages    EmailMessage[]
+  drafts      EmailDraft[]
 
   @@index([userId, address])
 }
@@ -1395,21 +1931,21 @@ model EmailAccount {
 /// dashboard can render the right tab badge without joining the
 /// messages.
 model EmailThread {
-  id            String              @id @default(uuid())
-  accountId     String
-  account       EmailAccount        @relation(fields: [accountId], references: [id], onDelete: Cascade)
-  threadKey     String
-  subject       String
-  lastSender    String?
-  snippet       String?
-  messageCount  Int                 @default(0)
-  triageStatus  EmailTriageStatus   @default(inbox)
-  draftedByDroplet Boolean          @default(false)
-  lastMessageAt DateTime
-  createdAt     DateTime            @default(now())
-  updatedAt     DateTime            @updatedAt
-  messages      EmailMessage[]
-  drafts        EmailDraft[]
+  id               String            @id @default(uuid())
+  accountId        String
+  account          EmailAccount      @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  threadKey        String
+  subject          String
+  lastSender       String?
+  snippet          String?
+  messageCount     Int               @default(0)
+  triageStatus     EmailTriageStatus @default(inbox)
+  draftedByDroplet Boolean           @default(false)
+  lastMessageAt    DateTime
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  messages         EmailMessage[]
+  drafts           EmailDraft[]
 
   @@unique([accountId, threadKey])
   @@index([accountId, triageStatus, lastMessageAt(sort: Desc)])
@@ -1423,22 +1959,22 @@ model EmailThread {
 /// present. Both are nullable — multipart messages may carry one or
 /// the other.
 model EmailMessage {
-  id           String       @id @default(uuid())
-  accountId    String
-  account      EmailAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
-  threadId     String
-  thread       EmailThread  @relation(fields: [threadId], references: [id], onDelete: Cascade)
-  messageId    String
-  inReplyTo    String?
-  fromAddr     String
-  fromName     String?
-  toAddrs      Json
-  ccAddrs      Json?
-  subject      String
-  bodyText     String?
-  bodyHtml     String?
-  receivedAt   DateTime
-  createdAt    DateTime     @default(now())
+  id         String       @id @default(uuid())
+  accountId  String
+  account    EmailAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  threadId   String
+  thread     EmailThread  @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  messageId  String
+  inReplyTo  String?
+  fromAddr   String
+  fromName   String?
+  toAddrs    Json
+  ccAddrs    Json?
+  subject    String
+  bodyText   String?
+  bodyHtml   String?
+  receivedAt DateTime
+  createdAt  DateTime     @default(now())
 
   @@unique([accountId, messageId])
   @@index([threadId, receivedAt(sort: Desc)])
@@ -1452,22 +1988,22 @@ model EmailMessage {
 /// `status` is the send lifecycle: `draft | queued | sent | failed`.
 /// `sentAt` is set on `sent`, `error` on `failed`.
 model EmailDraft {
-  id              String           @id @default(uuid())
-  accountId       String
-  account         EmailAccount     @relation(fields: [accountId], references: [id], onDelete: Cascade)
-  threadId        String?
-  thread          EmailThread?     @relation(fields: [threadId], references: [id], onDelete: Cascade)
-  toAddrs         Json
-  ccAddrs         Json?
-  bccAddrs        Json?
-  subject         String
-  body            String           @default("")
-  draftedByDroplet Boolean         @default(false)
-  status          EmailDraftStatus @default(draft)
-  sentAt          DateTime?
-  error           String?
-  createdAt       DateTime         @default(now())
-  updatedAt       DateTime         @updatedAt
+  id               String           @id @default(uuid())
+  accountId        String
+  account          EmailAccount     @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  threadId         String?
+  thread           EmailThread?     @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  toAddrs          Json
+  ccAddrs          Json?
+  bccAddrs         Json?
+  subject          String
+  body             String           @default("")
+  draftedByDroplet Boolean          @default(false)
+  status           EmailDraftStatus @default(draft)
+  sentAt           DateTime?
+  error            String?
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
 
   @@index([accountId, status, updatedAt(sort: Desc)])
 }
@@ -1501,6 +2037,49 @@ enum EmailDraftStatus {
   failed
 }
 
+/// BUG-11 — operator-supplied OUTBOUND SMTP relay config (the appliance is a
+/// self-hosted box; the owner brings their own mail provider's SMTP — Gmail
+/// app-password, Fastmail, a corporate relay, etc. — we never run an MTA).
+/// Single-row table (id is pinned to a constant by the service) so the
+/// dashboard edits one channel; `@@unique` is unnecessary for a singleton but
+/// the service enforces the constant id on every upsert.
+///
+/// SECRET HANDLING (CLAUDE.md rule 19): `passwordEnc` is the SMTP password
+/// encrypted at rest with aes-256-gcm via encryption.service (the same
+/// DEVICE_SECRET_KEY-backed primitive that protects per-device Nextcloud app
+/// passwords). The plaintext password is NEVER stored, NEVER returned by the
+/// settings API (GET redacts to a `hasPassword` boolean), and NEVER logged.
+/// Nothing secret lives in a tracked file — only the operator-entered,
+/// at-rest-encrypted blob in this DB row.
+model EmailChannelSetting {
+  id           String                @id
+  enabled      Boolean               @default(false)
+  host         String                @default("")
+  port         Int                   @default(587)
+  username     String                @default("")
+  // aes-256-gcm blob (encryption.service). Empty string = no password set.
+  passwordEnc  String                @default("")
+  fromAddress  String                @default("")
+  fromName     String                @default("Droplet")
+  security     EmailChannelSecurity  @default(starttls)
+  // Last verify/send outcome for the dashboard banner (operator-facing only).
+  lastError    String?
+  lastTestedAt DateTime?
+  updatedAt    DateTime              @updatedAt
+  updatedBy    String?
+}
+
+/// BUG-11 — SMTP transport security mode. `starttls` (default, port 587) opens
+/// plaintext then upgrades; `tls` (port 465) is implicit TLS from connect;
+/// `none` is plaintext (a LAN relay only — discouraged, but some self-hosted
+/// Postfix relays expect it). Explicit enum so the transport builder can't
+/// drift from a free-form string.
+enum EmailChannelSecurity {
+  starttls
+  tls
+  none
+}
+
 /// WARP-462 — Phase C1. Productized workflow spec ("call carrier-delay
 /// recap every weekday morning"). Distinct from `packages/tools-core`
 /// (the capability registry) — a ToolSpec composes capabilities into
@@ -1519,20 +2098,20 @@ enum EmailDraftStatus {
 /// otherwise. Together (writes && !reversible) gates a confirm_action
 /// card before run-now (handled in route layer + C2 scheduler).
 model ToolSpec {
-  id          String          @id @default(uuid())
-  slug        String          @unique
+  id          String         @id @default(uuid())
+  slug        String         @unique
   name        String
   category    String?
   description String?
-  version     Int             @default(1)
-  status      ToolSpecStatus  @default(draft)
+  version     Int            @default(1)
+  status      ToolSpecStatus @default(draft)
   ownerId     String?
   share       String?
-  safety      Int             @default(1)
-  writes      Boolean         @default(false)
-  reversible  Boolean         @default(true)
-  createdAt   DateTime        @default(now())
-  updatedAt   DateTime        @updatedAt
+  safety      Int            @default(1)
+  writes      Boolean        @default(false)
+  reversible  Boolean        @default(true)
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
   steps       ToolStep[]
   runs        ToolRun[]
   schedules   ToolSchedule[]
@@ -1548,12 +2127,12 @@ model ToolSpec {
 /// idx is the explicit ordering column; the imperative walker
 /// (services/tool-spec-runner.service.ts) walks ascending.
 model ToolStep {
-  id      String   @id @default(uuid())
-  specId  String
-  spec    ToolSpec @relation(fields: [specId], references: [id], onDelete: Cascade)
-  idx     Int
-  kind    String   @default("call")
-  args    Json
+  id     String   @id @default(uuid())
+  specId String
+  spec   ToolSpec @relation(fields: [specId], references: [id], onDelete: Cascade)
+  idx    Int
+  kind   String   @default("call")
+  args   Json
 
   @@index([specId, idx])
 }
@@ -1568,15 +2147,15 @@ model ToolStep {
 /// `failed` runs; null otherwise. `trace` captures per-step results so
 /// the dashboard's run-detail drawer can show "step 2 of 5 failed: ...".
 model ToolRun {
-  id        String        @id @default(uuid())
-  specId    String
-  spec      ToolSpec      @relation(fields: [specId], references: [id], onDelete: Cascade)
+  id          String        @id @default(uuid())
+  specId      String
+  spec        ToolSpec      @relation(fields: [specId], references: [id], onDelete: Cascade)
   triggeredBy String?
-  startedAt DateTime      @default(now())
-  endedAt   DateTime?
-  status    ToolRunStatus @default(pending)
-  error     String?
-  trace     Json?
+  startedAt   DateTime      @default(now())
+  endedAt     DateTime?
+  status      ToolRunStatus @default(pending)
+  error       String?
+  trace       Json?
 
   @@index([specId, startedAt(sort: Desc)])
 }
@@ -1587,14 +2166,14 @@ model ToolRun {
 /// the §7 example carrier-delay spec has both a 09:00 weekday cron
 /// and an ad-hoc "high-priority client" trigger.
 model ToolSchedule {
-  id          String   @id @default(uuid())
-  specId      String
-  spec        ToolSpec @relation(fields: [specId], references: [id], onDelete: Cascade)
-  rrule       String
-  nextFireAt  DateTime
-  enabled     Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id         String   @id @default(uuid())
+  specId     String
+  spec       ToolSpec @relation(fields: [specId], references: [id], onDelete: Cascade)
+  rrule      String
+  nextFireAt DateTime
+  enabled    Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 
   @@index([nextFireAt])
   @@index([specId])
@@ -1654,9 +2233,9 @@ model Scene {
 /// `sendMatterCommand` — see matter.service.ts for the per-command
 /// shape (e.g. on/off has no args, levelControl wants `level`).
 model SceneAction {
-  id           String   @id @default(uuid())
+  id           String @id @default(uuid())
   sceneId      String
-  scene        Scene    @relation(fields: [sceneId], references: [id], onDelete: Cascade)
+  scene        Scene  @relation(fields: [sceneId], references: [id], onDelete: Cascade)
   idx          Int
   deviceNodeId String
   command      String
@@ -1682,12 +2261,12 @@ model SceneAction {
 /// expedition. Per ADR-005, off-LAN channels are sovereignty surface —
 /// changes are owner+admin only.
 model OffLanAllowlistChannel {
-  key             OffLanChannelKey @id
-  enabled         Boolean
-  requiresAdmin   Boolean          @default(true)
-  lastChangedBy   String?
-  lastChangedAt   DateTime         @default(now())
-  reason          String?
+  key           OffLanChannelKey @id
+  enabled       Boolean
+  requiresAdmin Boolean          @default(true)
+  lastChangedBy String?
+  lastChangedAt DateTime         @default(now())
+  reason        String?
 }
 
 /// WARP-467 — closed set of off-LAN egress channels. Extending the
@@ -1749,10 +2328,257 @@ model FileCitation {
 /// to monthly billing windows; 90 d covers a quarter-on-quarter
 /// review without bloating the table.
 model OffLanEgressSample {
-  ts        DateTime         @default(now())
-  channel   OffLanChannelKey
-  bytes     BigInt
+  ts      DateTime         @default(now())
+  channel OffLanChannelKey
+  bytes   BigInt
 
   @@id([ts, channel])
   @@index([channel, ts(sort: Desc)])
+}
+
+/// ADR-007 + ADR-009: workspace type for this Droplet — Home (single
+/// person / household) vs Business (multi-role with Roles matrix,
+/// Groups, Sessions, full People, Plan/Billing).
+///
+/// Singleton row pinned to `id = 1`. The dashboard's WorkspaceProvider
+/// hydrates from `/api/settings/workspace`; only the setup wizard and
+/// owner-only POST to `/api/settings/workspace` can flip it.
+///
+/// Defaults to HOME if the row doesn't exist yet — matches the
+/// localStorage fallback already in
+/// `apps/web-dashboard/src/lib/workspace.tsx`.
+enum WorkspaceType {
+  HOME
+  BUSINESS
+}
+
+model Workspace {
+  // Singleton — exactly one row per Droplet. id = 1 lets every CRUD
+  // path use a fixed primary key + prisma upsert without inventing one.
+  id          Int           @id @default(1)
+  type        WorkspaceType @default(HOME)
+  /// Optional human-readable name ("Stefan's Home" / "Acme HQ").
+  /// Surfaced in the chrome workspace pill + setup wizard.
+  displayName String?
+  /// PR #380 (WARP onb org) — the onboarding ORG step fields. The org step
+  /// names this single workspace (the "company brain") and reserves its
+  /// `droplet.local/<slug>` host. Everyone the owner invites joins this ONE
+  /// workspace, so the org data lives on the SAME singleton row rather than a
+  /// second workspace table.
+  ///
+  /// `slug` is UNIQUE and validated `[a-z0-9-]` (setup-org.service.ts); it
+  /// reserves `droplet.local/<slug>`. Nullable because the pre-#380 Home/
+  /// Business path (and a box that hasn't run the org step yet) has no slug.
+  ///
+  /// `industry` / `size` are LOCAL smart-default hints ONLY — folder
+  /// structure, example tools, camera policy. NEVER sent off the box
+  /// (FEATURES.md §10). `logoPath` is the on-NVMe path of the optional logo.
+  slug        String?        @unique
+  tz          String?
+  industry    String?
+  size        String?
+  logoPath    String?
+  /// PR #380 — EXPLICIT completion flag for the org step. The wizard / state
+  /// machine reads THIS, never `slug IS NULL` (CLAUDE.md no-guessing rule;
+  /// WARP-218 / ClaimCodeState precedent). False until the org step persists;
+  /// the org step is NOT skippable.
+  orgConfigured Boolean      @default(false)
+  /// Whoever last flipped the type (Nextcloud username from the auth
+  /// middleware). Nullable: setup wizard runs before any user exists.
+  setBy       String?
+  setAt       DateTime      @default(now())
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+}
+
+/// PR #372 — first-run setup is RESUMABLE and EXPLICIT.
+///
+/// Before this model, setup was stateless: the dashboard derived a
+/// boolean `setupRequired` from Nextcloud's `installed` flag
+/// (`GET /api/auth/setup`), so a refresh mid-wizard lost the customer's
+/// place and there was no `unclaimed → ready` lifecycle. `ApplianceSetup`
+/// makes the state a first-class, persisted, explicit column.
+///
+/// `setupStep` is the resumability anchor — the orchestrator persists it
+/// as the customer advances the wizard, so a refresh routes them back to
+/// the exact same step (the headline AC). It is the `SetupStep` enum, not
+/// a free-form string, per CLAUDE.md's no-guessing rule (canonical
+/// precedent: WARP-218 `BrainMemoryItemStatus`).
+///
+/// `state` is the appliance lifecycle: "unclaimed" (first-run not
+/// finished) vs "ready" (wizard complete). DELIBERATELY a column the
+/// finish-handler flips, NEVER derived from `setupStep == done` or from
+/// Nextcloud's `installed` flag — the same no-derived-state rule. Kept as
+/// a 2-value String (not an enum) to match the spec's data-model block in
+/// docs/ONBOARDING_STATE_MACHINE.md verbatim; the service is the single
+/// writer and validates the two legal values.
+///
+/// `userTourCompleted` gates the post-claim product tour: a ready
+/// appliance whose owner hasn't seen the tour routes to the tour, not the
+/// dashboard. Independent of `state` (claiming the box and finishing the
+/// tour are distinct events).
+///
+/// Singleton — exactly one row per appliance, pinned to a fixed `id` the
+/// same way `Workspace` pins `id = 1`, so every read/write is an upsert
+/// against a known primary key with no "which row?" ambiguity. Persisted
+/// on the encrypted NVMe (FEATURES.md §10) alongside the rest of the
+/// orchestrator's Postgres state.
+model ApplianceSetup {
+  // Fixed singleton key — there is only ever one appliance-setup row.
+  // Not a generated uuid: a uuid default would mint a new row on every
+  // upsert-create and break the singleton invariant.
+  id                String    @id @default("singleton")
+  // "unclaimed" | "ready". Explicit lifecycle column — never derived.
+  state             String    @default("unclaimed")
+  setupStep         SetupStep @default(welcome)
+  userTourCompleted Boolean   @default(false)
+  // M6 (PR #372 re-review): `@default(now())` emits a DB-level
+  // DEFAULT CURRENT_TIMESTAMP so a raw INSERT omitting `updatedAt` (the
+  // singleton migration seed) can't violate NOT NULL; `@updatedAt` still
+  // bumps it on every Prisma write.
+  updatedAt         DateTime  @updatedAt @default(now())
+  createdAt         DateTime  @default(now())
+}
+
+/// PR #372 — ordered first-run wizard steps. The set mirrors the
+/// dashboard wizard's `STEPS` array in
+/// `apps/web-dashboard/src/app/setup/page.tsx` 1:1, so the persisted
+/// resume-point can never reference a step the wizard can't render.
+///
+/// GATE (PR #372): listed only the 9 SHIPPED steps and documented that the
+/// claim / org / team steps EXTEND this enum — and the wizard array, and the
+/// route validation — in one coherent change when they ship.
+///
+/// PR #373 (this change) — `claim` ships. It slots FIRST (after the welcome
+/// splash, before account): the customer binds the appliance to their
+/// workspace before any account exists, per #371 handoff §1
+/// (`welcome → claim → account → …`). The value is appended at the END of the
+/// enum DECLARATION (not inserted between `welcome` and `account`) because
+/// Postgres enums are ordered by their physical declaration order and
+/// `ALTER TYPE … ADD VALUE` can only append cheaply; the WIZARD ORDER lives in
+/// `SETUP_STEPS` (setup.service.ts) and the dashboard `STEPS` array, which both
+/// place `claim` second. The enum is an unordered membership set here — nothing
+/// reads its declaration order — so appending is safe and keeps the additive
+/// migration trivial.
+///
+/// PR #380 (WARP onb org) — `org` ships. It slots AFTER account
+/// (`welcome → claim → account → org → internet → …`): the customer names the
+/// single workspace and reserves its `droplet.local/<slug>` once the owner
+/// account exists. Appended at the END of the declaration for the same
+/// append-only `ALTER TYPE … ADD VALUE` reason as `claim`; the wizard order
+/// lives in `SETUP_STEPS` / the dashboard `STEPS` array.
+///
+/// PR #381 (WARP onb team) — `team` ships, the LAST onboarding step to wire.
+/// It slots near the END of the WIZARD, after `ai` and before `done`
+/// (`… → ai → team → done`): once the box is set up, the owner brings people
+/// in — invite by email + role, or note directory-sync over SSO. The step IS
+/// skippable ("I'll invite people later"; a solo owner is a valid end state),
+/// so the value is reachable but not gating. Appended at the END of the
+/// declaration for the same append-only `ALTER TYPE … ADD VALUE` reason as
+/// `claim` / `org` — declaration order is membership-only; the wizard ORDER
+/// (team before done) lives in `SETUP_STEPS` + the dashboard `STEPS` array.
+enum SetupStep {
+  welcome
+  account
+  internet
+  storage
+  discovery
+  cameras
+  vpn
+  ai
+  done
+  claim
+  org
+  team
+}
+
+/// PR #373 — claim-code lifecycle. EXPLICIT, never derived from absence.
+///
+/// `available` — the code can still bind the appliance.
+/// `consumed`  — the code has bound the appliance (single-use; terminal).
+///
+/// The "is this code still claimable?" decision reads this column, NOT
+/// `usedAt IS NULL` (CLAUDE.md no-guessing rule; canonical precedent WARP-218
+/// `BrainMemoryItemStatus`). `usedAt` exists for AUDIT only — when the bind
+/// happened — and is written in the same atomic transaction that flips the
+/// state, so the two can never disagree. Mirrors the `state`-column discipline
+/// `ApplianceSetup` uses for the appliance lifecycle.
+enum ClaimCodeState {
+  available
+  consumed
+}
+
+/// PR #373 — a single-use code that binds a fresh appliance to its workspace
+/// (the onboarding Claim step). The customer reads the code off the PyPortal
+/// lid display and confirms it; `POST /api/setup/claim` verifies it and flips
+/// the appliance to "ready".
+///
+/// SECURITY POSTURE (per docs/ONBOARDING_CLAIM.md + #371 handoff §2):
+///   - `codeHash` stores a one-way hash, NEVER the plaintext code, so a DB
+///     read (backup, breach, hand-edit) can't recover a live claim code.
+///     Verification re-hashes the candidate and compares in constant time
+///     (timingSafeEqual) — no plaintext at rest, no early-exit byte compare.
+///   - `state` (ClaimCodeState) is the explicit single-use guard. The atomic
+///     consume is a conditional `updateMany WHERE state = 'available'` inside a
+///     `$transaction` (the WARP-564 pairing-claim pattern): the Postgres row
+///     lock serializes concurrent claimers, the loser flips zero rows and is
+///     rejected, so a code can bind the box exactly once even under a race.
+///   - `attempts` counts wrong-code guesses against this code for lockout /
+///     observability; the live rate-limit BUDGET is enforced in the route via
+///     the shared cache-counter helper (no busy-loop), and a wrong guess
+///     decrements that budget without revealing the real code.
+///
+/// MINTING / ROTATION IS OUT OF SCOPE for this PR (it belongs to the PyPortal
+/// display-service — a separate PR). Here a code is seeded via env/fixture
+/// (`CLAIM_CODE` / a test fixture) and only VERIFIED. `expiresAt` is carried so
+/// the rotation owner can expire codes later; the consume already treats expiry
+/// as authoritative (`expiresAt > now` in the conditional update).
+model ClaimCode {
+  id        String         @id @default(uuid())
+  // One-way hash of the claim code. Never the plaintext.
+  codeHash  String         @unique
+  // Explicit single-use lifecycle — never inferred from `usedAt`.
+  state     ClaimCodeState @default(available)
+  // When the code expires. The rotation owner (PyPortal service, future PR)
+  // sets this; the consume treats it as authoritative.
+  expiresAt DateTime
+  // Audit-only: when the successful bind happened. Written in the same
+  // transaction that flips `state` → consumed. Null while available.
+  usedAt    DateTime?
+  // Wrong-guess counter for this code (lockout / observability).
+  attempts  Int            @default(0)
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+}
+
+/// ADR-023 (C2): the lifecycle state of the per-device TLS serving cert.
+/// EXPLICIT (architecture-guard rule 10 + ADR-023 §C2): the tls-issuance cron
+/// reads this enum to decide issue-vs-renew-vs-noop — it NEVER infers the state
+/// from a null/expired cert file.
+///   BOOTSTRAP_SELF_SIGNED — the secrets.sh self-signed bootstrap cert is
+///                           installed; HQ issuance has not yet succeeded.
+///   LE_ISSUED             — a publicly-trusted Let's Encrypt fullchain is
+///                           installed and current.
+///   LE_RENEWING           — a renewal/issuance order is in flight.
+///   LE_RENEW_FAILED       — HQ was unreachable or the order didn't go active;
+///                           the box keeps serving its current cert and retries
+///                           on the next daily tick.
+enum TlsCertState {
+  BOOTSTRAP_SELF_SIGNED
+  LE_ISSUED
+  LE_RENEWING
+  LE_RENEW_FAILED
+}
+
+/// ADR-023 (C2): one row per opaque per-device FQDN tracking the installed TLS
+/// cert's state + expiry. Keyed by `fqdn` (`d-<hmac>.devices.warp-lab.ai`) so a
+/// box that ever learns a new FQDN gets a fresh row rather than overwriting the
+/// old one. `notAfter` mirrors the installed leaf's expiry and drives the
+/// 30-day renewal threshold; null until the first LE cert is installed.
+model TlsCert {
+  fqdn      String       @id
+  state     TlsCertState @default(BOOTSTRAP_SELF_SIGNED)
+  notAfter  DateTime?
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
 }

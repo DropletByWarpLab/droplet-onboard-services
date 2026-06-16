@@ -5,11 +5,12 @@ import type { ToolContext } from "../../../src/types.js";
 function ctxWithGet(get: ReturnType<typeof vi.fn>): ToolContext {
   return {
     http: {
-      routing: { get, post: vi.fn(), patch: vi.fn(), delete: vi.fn() },
+      routing: {} as ToolContext["http"]["routing"],
       cameras: {} as ToolContext["http"]["cameras"],
       switchSvc: {} as ToolContext["http"]["switchSvc"],
       fileIndexer: {} as ToolContext["http"]["fileIndexer"],
       nextcloud: {} as ToolContext["http"]["nextcloud"],
+      orchestrator: { get, post: vi.fn(), patch: vi.fn(), delete: vi.fn() },
     },
     prisma: {} as ToolContext["prisma"],
     matter: {} as ToolContext["matter"],
@@ -23,11 +24,11 @@ describe("get_wifi_settings", () => {
     expect(getWifiSettings.requiresWrite).toBe(false);
   });
 
-  it("returns the routing /wifi body verbatim", async () => {
+  it("returns the orchestrator /api/network/wifi body verbatim", async () => {
     const body = { ssid: "Droplet", channel: "6" };
     const get = vi.fn().mockResolvedValue(new Response(JSON.stringify(body), { status: 200 }));
     const r = await getWifiSettings.handler({}, ctxWithGet(get));
-    expect(get).toHaveBeenCalledWith("/wifi", expect.anything());
+    expect(get).toHaveBeenCalledWith("/api/network/wifi", expect.anything());
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.data).toEqual(body);
   });

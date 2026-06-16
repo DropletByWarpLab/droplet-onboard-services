@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { searchFiles } from "../api";
+import { translateError } from "../friendly-errors";
 import type { FileEntryInfo } from "../types";
 
 /**
@@ -40,7 +41,7 @@ export function useFileSearch(query: string, debounceMs = 300) {
         }
       } catch (err) {
         if (!ctrl.signal.aborted) {
-          setError(err instanceof Error ? err.message : "Search failed");
+          setError(translateError(err, "files"));
           setItems([]);
           setIsLoading(false);
         }

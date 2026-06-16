@@ -38,7 +38,9 @@ pre-existing infrastructure as of 2026-05-15:
 
 ### Gap 1: MCP-server's Matter dep is stubbed
 
-`services/mcp-server/src/index.ts:159-166`:
+> **✅ RESOLVED (2026-06-01).** The stub is gone. `services/mcp-server/src/index.ts` now wires `matter: createMatterController(createHttpClient("orchestrator"))`, proxying to the orchestrator over HTTP with service-token auth — exactly the decision recorded below. The 7 smart-home tools in `packages/tools-core` (list/get/control/discover/commission/history/run_scene) are reachable by the agent loop today, and `matter.controller.test.ts` covers the proxy contract (21 tests). The snippet and line numbers below are historical.
+
+`services/mcp-server/src/index.ts:159-166` (historical):
 
 ```typescript
 matter: {

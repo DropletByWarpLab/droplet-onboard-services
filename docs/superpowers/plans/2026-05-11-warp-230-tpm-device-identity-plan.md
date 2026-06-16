@@ -6,7 +6,7 @@
 
 **Architecture:** New Python gRPC sidecar at `services/device-identity-svc/` listening on a Unix socket. Backend selected by `DROPLET_TPM_BACKEND` env (`real` = tpm2-pytss against `/dev/tpm0`; `mock` = pure-Python in-memory). Orchestrator TS gRPC client wraps the four methods. `scripts/provision-device-identity.sh` runs in `setup.sh` Phase 4 (Secrets). Reseal path guarded by a new `require-recent-mfa` middleware. Mock backend stores state at `/var/lib/droplet/tpm/` so file-format tests exercise the same paths as real hardware.
 
-**Tech Stack:** Python 3.12 (sidecar), TypeScript (orchestrator client + middleware + admin routes), gRPC over Unix domain socket, ECC P-256 (FIPS-approved), tpm2-pytss (real backend on Jetson), `cryptography` library (mock + cert signing), Prisma (read existing session-state for MFA-recency check), pytest + vitest.
+**Tech Stack:** Python 3.12 (sidecar), TypeScript (orchestrator client + middleware + admin routes), gRPC over Unix domain socket, ECC P-256 (FIPS-approved), tpm2-pytss (real backend on the appliance), `cryptography` library (mock + cert signing), Prisma (read existing session-state for MFA-recency check), pytest + vitest.
 
 ---
 
@@ -249,7 +249,7 @@ grpcio>=1.62.0
 grpcio-tools>=1.62.0
 cryptography>=42.0.0
 click>=8.0.0
-# tpm2-pytss is only needed for the real backend (Jetson). Installed
+# tpm2-pytss is only needed for the real backend (the appliance). Installed
 # in Task 3's Dockerfile change. Listed as optional here to keep
 # mock-only environments working without TPM headers.
 # tpm2-pytss>=2.2.0
@@ -405,7 +405,7 @@ Create `services/device-identity-svc/backends/__init__.py`:
 
 Two implementations:
   - backends.mock.MockBackend     — pure-Python in-memory (dev + CI)
-  - backends.real.RealBackend     — tpm2-pytss + /dev/tpm0 (Jetson)
+  - backends.real.RealBackend     — tpm2-pytss + /dev/tpm0 (the appliance)
 
 Both satisfy the same Protocol so the gRPC handler is implementation-
 agnostic.
@@ -993,7 +993,7 @@ Create `services/device-identity-svc/main.py`:
 """WARP-230 — device-identity-svc entrypoint.
 
 Binds a gRPC server to /var/run/droplet/device-identity.sock. Backend
-selected by DROPLET_TPM_BACKEND (default: real on Jetson, mock elsewhere).
+selected by DROPLET_TPM_BACKEND (default: real on the appliance, mock elsewhere).
 """
 from __future__ import annotations
 
@@ -1426,7 +1426,7 @@ class RealBackend:
     # docs for the canonical patterns.
 
     def _read_or_synth_ek_cert(self, esapi) -> bytes:
-        # Jetson modules don't ship pre-installed EK certs. Synthesize a
+        # The appliance TPM may not ship pre-installed EK certs. Synthesize a
         # self-signed cert over the EK public key.
         # Real implementation queries NV index 0x01c00002 for the cert
         # (if present), falls back to self-signing.
@@ -2323,7 +2323,7 @@ In `.env.example`, add to the Application section:
 
 ```
 # --- Device identity (WARP-230) ---
-# 'real' = use /dev/tpm0 via tpm2-pytss (Jetson production).
+# 'real' = use /dev/tpm0 via tpm2-pytss (production appliance).
 # 'mock' = pure-Python in-memory mock for dev/CI.
 DROPLET_TPM_BACKEND=real
 DROPLET_DEVICE_ID=droplet
@@ -2615,7 +2615,7 @@ In `docker/docker-compose.yml`, after the existing `orchestrator` service (befor
       DROPLET_DEVICE_ID: ${DROPLET_DEVICE_ID:-droplet}
       DROPLET_AUTO_PROVISION: "1"
     devices:
-      # /dev/tpm0 passthrough on Jetson. Skipped silently when the device
+      # /dev/tpm0 passthrough on the appliance. Skipped silently when the device
       # doesn't exist on the host (Mac dev, CI without TPM).
       - "/dev/tpm0:/dev/tpm0"
     volumes:
@@ -2681,7 +2681,7 @@ a Unix domain socket (`/var/run/droplet/device-identity.sock`).
 
 | Backend | Selected when | Behavior |
 |---|---|---|
-| `real` | `DROPLET_TPM_BACKEND=real` (Jetson production) | tpm2-pytss against `/dev/tpm0`; ECC P-256 key sealed to PCRs |
+| `real` | `DROPLET_TPM_BACKEND=real` (production appliance) | tpm2-pytss against `/dev/tpm0`; ECC P-256 key sealed to PCRs |
 | `mock` | `DROPLET_TPM_BACKEND=mock` (dev, CI) | Pure-Python in-memory; persists artifacts to `/var/lib/droplet/tpm/` for cross-process interchangeability |
 
 The orchestrator can't tell the difference — `getDeviceIdentityStatus()` returns the same shape from both.
@@ -2731,7 +2731,7 @@ For v1, no peers exist yet (cloud connector path = Phase D), so recovery is low-
 - ECC P-256 + SHA-256 — FIPS 140-3 approved (matches WARP-229's allowlist)
 - ECDSA — FIPS-approved
 - AES-256-GCM (wrapping key inside TPM, when backend = real) — FIPS-approved
-- TPM 2.0 hardware module — FIPS 140-2 Level 2 (most Infineon SLB 96xx series on Jetson)
+- TPM 2.0 hardware module — FIPS 140-2 Level 2 (most Infineon SLB 96xx series appliance TPM modules)
 
 The sidecar Dockerfile uses the WARP-229 FIPS provider pattern (`OPENSSL_CONF=/etc/ssl/openssl-fips.cnf`).
 
@@ -2745,7 +2745,7 @@ The sidecar Dockerfile uses the WARP-229 FIPS provider pattern (`OPENSSL_CONF=/e
 ## Risk register
 
 - **Mock backend in production:** sidecar logs a warning at startup if `DROPLET_TPM_BACKEND=mock` + `DROPLET_ENV=production`. Operator must set `real` explicitly.
-- **PCR set drift between vendors:** PCRs `[0, 2, 4, 7]` are canonical for x86/UEFI; Jetson's cboot may not match exactly. Detect actual PCR values during provisioning + persist to `provisioned.json`. Override the set via `DROPLET_TPM_PCRS=0,2,4,7` (env).
+- **PCR set drift between vendors:** PCRs `[0, 2, 4, 7]` are canonical for standard UEFI boot; some bootloaders may not match exactly. Detect actual PCR values during provisioning + persist to `provisioned.json`. Override the set via `DROPLET_TPM_PCRS=0,2,4,7` (env).
 - **Reseal lock-out:** if MFA system is broken AND reseal is needed (after firmware update), operator must fall back to the recovery flow.
 
 ## Out of scope
@@ -2753,7 +2753,7 @@ The sidecar Dockerfile uses the WARP-229 FIPS provider pattern (`OPENSSL_CONF=/e
 - CSR / CA-issued device certs — future ticket
 - mTLS to cloud connectors using this identity — Phase D
 - Physical button for reseal trigger — future federal-customer ticket
-- External TPM module hardware variant — single-Jetson assumption
+- External TPM module hardware variant — single-appliance assumption
 ```
 
 - [ ] **Step 4: Run all relevant tests one more time**

@@ -4,8 +4,24 @@ name: web-dashboard-tests
 # changes trigger a run.
 
 on:
-  # Temporarily disabled: manual-only until GitHub Actions testing minutes
-  # are restored. Restore the pull_request/push triggers from git history.
+  # Re-enabled 2026-06-10: Actions minutes are flowing again (docker-build's
+  # ~18-min job has run green on every PR/push since 2026-06-05). The month
+  # this sat dispatch-only let three dashboard suites rot red on main.
+  pull_request:
+    paths:
+      - "apps/web-dashboard/**"
+      - "package.json"
+      - "package-lock.json"
+      - "scripts/check-dashboard-classes.sh"
+      - ".github/workflows/web-dashboard-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "apps/web-dashboard/**"
+      - "package.json"
+      - "package-lock.json"
+      - "scripts/check-dashboard-classes.sh"
+      - ".github/workflows/web-dashboard-tests.yml"
   workflow_dispatch:
 
 concurrency:

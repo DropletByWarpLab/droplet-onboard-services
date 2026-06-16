@@ -5,6 +5,7 @@ import { X, Download, FileText } from "lucide-react";
 import { getDownloadUrl, getThumbnailUrl } from "@/lib/api";
 import { authFetch } from "@/lib/auth";
 import type { FileEntryInfo } from "@/lib/types";
+import { ReindexButton } from "./ReindexButton";
 
 interface PreviewPaneProps {
   file: FileEntryInfo;
@@ -93,6 +94,11 @@ export function PreviewPane({ file, onClose, onDownload }: PreviewPaneProps) {
             </p>
           </div>
           <div className="flex items-center gap-1.5">
+            {/* WARP-287: admin-only re-index trigger. The orchestrator's
+                /api/admin/files/:id/reindex enforces RBAC + recent-MFA,
+                so non-admins get a 403/401 and the button surfaces the
+                "MFA required" path inline rather than failing silently. */}
+            <ReindexButton fileId={file.path} />
             <button
               onClick={onDownload}
               className="p-2.5 rounded-full text-label-tertiary hover:text-accent hover:bg-accent-subtle transition-colors"

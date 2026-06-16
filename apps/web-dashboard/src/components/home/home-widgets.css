@@ -1,0 +1,884 @@
+/* ============================================================
+   Droplet Home — widget internals. Ported from the design handoff
+   (widgets.css). Every selector is prefixed with `.droplet-home`
+   so these generic class names stay isolated from the rest of the
+   dashboard. Colors come from the scoped tokens in home-bento.css.
+   ============================================================ */
+
+/* ---------- Chat (centerpiece) ---------- */
+.droplet-home .w-chat {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.droplet-home .w-chat-aurora {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: var(--hero-aurora-opacity);
+  background: radial-gradient(
+      55% 80% at 10% 0%,
+      rgba(129, 140, 248, 0.4) 0%,
+      transparent 60%
+    ),
+    radial-gradient(
+      60% 85% at 95% 8%,
+      rgba(79, 70, 229, 0.36) 0%,
+      transparent 62%
+    ),
+    radial-gradient(
+      80% 100% at 45% 60%,
+      rgba(99, 102, 241, 0.16) 0%,
+      transparent 60%
+    ),
+    radial-gradient(
+      75% 95% at 55% 120%,
+      rgba(165, 180, 252, 0.24) 0%,
+      transparent 65%
+    );
+  animation: dh-aurora-drift 18s ease-in-out infinite;
+}
+@keyframes dh-aurora-drift {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(-2%, 1%, 0) scale(1.04);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .droplet-home .w-chat-aurora {
+    animation: none;
+  }
+}
+.droplet-home .w-chat > * {
+  position: relative;
+  z-index: 1;
+}
+.droplet-home .w-chat-display {
+  font-family: var(--font-space-grotesk), var(--font-ui);
+  font-weight: 500;
+  letter-spacing: -0.018em;
+  line-height: 1.12;
+  color: var(--text);
+  margin: 0;
+  text-wrap: balance;
+}
+.droplet-home .w-chat-display em {
+  font-style: normal;
+  font-weight: 500;
+  color: var(--brand);
+}
+.droplet-home .w-chat-capsule {
+  margin-top: 18px;
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+  border: 1px solid var(--card-bd);
+  border-radius: 18px;
+  padding: 10px 10px 10px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.droplet-home .w-chat-capsule textarea {
+  border: none;
+  outline: none;
+  background: transparent;
+  resize: none;
+  font: inherit;
+  font-size: 15px;
+  line-height: 1.4;
+  color: var(--text);
+  min-height: 22px;
+  max-height: 96px;
+  width: 100%;
+}
+.droplet-home .w-chat-capsule textarea::placeholder {
+  color: var(--text-muted);
+}
+.droplet-home .w-chat-cap-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.droplet-home .w-chat-model {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: var(--radius-pill);
+  background: var(--card-inner);
+  border: 1px solid var(--card-bd);
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+.droplet-home .w-chat-model .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+}
+.droplet-home .w-chat-send {
+  margin-left: auto;
+  height: 36px;
+  padding: 0 16px;
+  border-radius: var(--radius-pill);
+  border: none;
+  background: var(--brand);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  transition: background 200ms var(--ease), transform 120ms var(--ease);
+}
+.dark .droplet-home .w-chat-send {
+  color: #0f1117;
+}
+.droplet-home .w-chat-send:hover {
+  background: var(--brand-hover);
+}
+.droplet-home .w-chat-send:active {
+  transform: scale(0.97);
+}
+.droplet-home .w-chat-iconbtn {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-input);
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 180ms var(--ease), color 180ms var(--ease);
+}
+.droplet-home .w-chat-iconbtn:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.droplet-home .w-chat-suggest {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+.droplet-home .w-sug {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px;
+  height: 32px;
+  border-radius: var(--radius-pill);
+  background: var(--card-inner);
+  border: 1px solid var(--card-bd);
+  font-size: 13px;
+  color: var(--text-muted);
+  transition: border-color 200ms var(--ease), color 200ms var(--ease);
+}
+.droplet-home .w-sug:hover {
+  border-color: color-mix(in srgb, var(--brand) 45%, var(--border));
+  color: var(--text);
+}
+.droplet-home .w-sug svg {
+  color: var(--brand-soft);
+  flex-shrink: 0;
+}
+.droplet-home .w-sug span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- Calendar ---------- */
+.droplet-home .w-cal {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.droplet-home .w-cal-h {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.droplet-home .w-cal-h .mo {
+  font-size: 13px;
+  font-weight: 600;
+  flex: 1;
+  color: var(--text);
+}
+.droplet-home .w-cal-nav {
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 180ms var(--ease), color 180ms var(--ease);
+}
+.droplet-home .w-cal-nav:hover {
+  background: var(--card-inner);
+  color: var(--text);
+}
+.droplet-home .w-cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 1px 0;
+}
+.droplet-home .w-cal-grid .dow {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  text-align: center;
+  padding-bottom: 4px;
+}
+.droplet-home .w-cal-cell {
+  aspect-ratio: 1.34;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  font-size: 12px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  border-radius: 7px;
+  transition: background 150ms var(--ease);
+}
+.droplet-home .w-cal-cell.out {
+  color: var(--text-muted);
+  opacity: 0.5;
+}
+.droplet-home .w-cal-cell:hover:not(.out) {
+  background: var(--card-inner);
+}
+.droplet-home .w-cal-cell.today {
+  background: var(--brand);
+  color: #fff;
+  font-weight: 600;
+}
+.dark .droplet-home .w-cal-cell.today {
+  color: #0f1117;
+}
+.droplet-home .w-cal-cell .ev {
+  position: absolute;
+  bottom: 3px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--brand-soft);
+}
+.droplet-home .w-cal-cell.today .ev {
+  background: #fff;
+}
+.droplet-home .w-cal-agenda {
+  flex: 1;
+  min-height: 0;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid transparent;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: hidden;
+}
+.droplet-home .w-cal-agenda.has-items {
+  border-top-color: var(--card-bd);
+}
+.droplet-home .w-ag {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+.droplet-home .w-ag .t {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  width: 40px;
+  flex-shrink: 0;
+  padding-top: 1px;
+}
+.droplet-home .w-ag .bar {
+  width: 2px;
+  border-radius: 2px;
+  align-self: stretch;
+  background: var(--brand);
+  flex-shrink: 0;
+}
+.droplet-home .w-ag .tx {
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.3;
+  color: var(--text);
+}
+.droplet-home .w-ag .tx small {
+  display: block;
+  font-weight: 400;
+  color: var(--text-muted);
+  font-size: 12px;
+  margin-top: 1px;
+}
+
+/* ---------- System status (stat grid) ---------- */
+.droplet-home .w-stat {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  grid-template-rows: 1fr 1fr;
+  gap: 10px;
+  height: 100%;
+}
+.droplet-home .w-stat-cell {
+  background: color-mix(in srgb, var(--text) 2.2%, transparent);
+  border: 1px solid var(--card-bd);
+  border-radius: 12px;
+  padding: 11px 13px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1px;
+  min-height: 0;
+  overflow: hidden;
+}
+.droplet-home .w-stat-cell .e {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.droplet-home .w-stat-cell .v {
+  font-size: 25px;
+  font-weight: 600;
+  line-height: 1.1;
+  margin-top: 4px;
+  letter-spacing: -0.5px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.droplet-home .w-stat-cell .s {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  margin-top: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.droplet-home .w-stat-cell .s .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+/* compact System status — used when the tile is < 3 cols or < 3 rows */
+.droplet-home .w-stat-list {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  justify-content: center;
+  gap: 2px;
+}
+.droplet-home .w-stat-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 2px;
+  min-height: 0;
+}
+.droplet-home .w-stat-row .ico {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--card-inner);
+  color: var(--text-muted);
+}
+.droplet-home .w-stat-row .lbl {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.droplet-home .w-stat-row .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.droplet-home .w-stat-row .val {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── General responsive rules: drop secondary data when narrow ── */
+.droplet-home .sz-narrow .w-row .sub,
+.droplet-home .sz-narrow .w-row .meta,
+.droplet-home .sz-narrow .w-task .when,
+.droplet-home .sz-narrow .w-ag .t,
+.droplet-home .sz-narrow .bento-head .wmeta {
+  display: none;
+}
+.droplet-home .sz-narrow .w-cam .lb {
+  font-size: 10px;
+}
+.droplet-home .sz-tiny .w-cam .ts {
+  display: none;
+}
+
+/* ---------- Cameras ---------- */
+.droplet-home .w-cams {
+  display: grid;
+  gap: 8px;
+  height: 100%;
+  grid-auto-rows: 1fr;
+}
+.droplet-home .w-cam {
+  position: relative;
+  border-radius: 12px;
+  overflow: hidden;
+  min-height: 0;
+}
+.droplet-home .w-cam::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: repeating-linear-gradient(
+    0deg,
+    rgba(255, 255, 255, 0.02) 0 1px,
+    transparent 1px 3px
+  );
+}
+.droplet-home .w-cam .rec {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #ef4444;
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.22);
+  animation: dh-scan-pulse 2s ease-in-out infinite;
+}
+@keyframes dh-scan-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .droplet-home .w-cam .rec {
+    animation: none;
+  }
+}
+.droplet-home .w-cam .ts {
+  position: absolute;
+  top: 7px;
+  right: 8px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: #e4e4e7;
+  background: rgba(0, 0, 0, 0.45);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+.droplet-home .w-cam .lb {
+  position: absolute;
+  bottom: 7px;
+  left: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+}
+.droplet-home .w-cam .mo {
+  position: absolute;
+  bottom: 7px;
+  right: 8px;
+  font-size: 9px;
+  color: #fff;
+  background: var(--brand);
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+.droplet-home .w-cam .cam-more {
+  position: absolute;
+  bottom: 7px;
+  right: 8px;
+  font-size: 9px;
+  color: #fff;
+  font-weight: 600;
+  background: rgba(99, 102, 241, 0.92);
+  padding: 1px 7px;
+  border-radius: 9999px;
+}
+
+/* ---------- Scenes / smart home ---------- */
+.droplet-home .w-scenes {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  height: 100%;
+  min-height: 0;
+}
+.droplet-home .w-scene-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.droplet-home .w-scene {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 11px;
+  border-radius: var(--radius-pill);
+  background: var(--card-inner);
+  border: 1px solid transparent;
+  font-size: 13px;
+  color: var(--text-muted);
+  transition: background 200ms var(--ease), border-color 200ms var(--ease),
+    color 200ms var(--ease);
+}
+.droplet-home .w-scene svg {
+  color: var(--text-muted);
+}
+.droplet-home .w-scene.active {
+  background: var(--brand-subtle);
+  border-color: color-mix(in srgb, var(--brand) 35%, transparent);
+  color: var(--brand);
+}
+.droplet-home .w-scene.active svg {
+  color: var(--brand);
+}
+.droplet-home .w-dev-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 2px;
+  overflow-y: auto;
+  min-height: 0;
+}
+.droplet-home .w-dev {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 2px;
+  cursor: pointer;
+}
+.droplet-home .w-dev .di {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--card-inner);
+  color: var(--text-muted);
+  flex-shrink: 0;
+  transition: background 200ms var(--ease), color 200ms var(--ease);
+}
+.droplet-home .w-dev.on .di {
+  background: var(--brand-subtle);
+  color: var(--brand);
+}
+.droplet-home .w-dev .dn {
+  flex: 1;
+  min-width: 0;
+}
+.droplet-home .w-dev .dn .nm {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+}
+.droplet-home .w-dev .dn .sb {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.droplet-home .w-toggle {
+  width: 36px;
+  height: 20px;
+  border-radius: var(--radius-pill);
+  background: var(--card-inner);
+  border: 1px solid var(--card-bd);
+  display: flex;
+  align-items: center;
+  padding: 0 2px;
+  flex-shrink: 0;
+  transition: background 200ms var(--ease), border-color 200ms var(--ease);
+}
+.droplet-home .w-toggle .ball {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: transform 200ms var(--ease), background 200ms var(--ease);
+}
+.droplet-home .w-dev.on .w-toggle {
+  background: var(--brand);
+  border-color: var(--brand);
+}
+.droplet-home .w-dev.on .w-toggle .ball {
+  background: #fff;
+  transform: translateX(16px);
+}
+
+/* ---------- Generic list rows (files / models / tools) ---------- */
+.droplet-home .w-list {
+  display: flex;
+  flex-direction: column;
+}
+.droplet-home .w-list > * + * {
+  border-top: 1px solid var(--card-bd);
+}
+.droplet-home .w-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 2px;
+  min-height: 38px;
+}
+.droplet-home .w-row .grow {
+  flex: 1;
+  min-width: 0;
+}
+.droplet-home .w-row .nm {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.droplet-home .w-row .sub {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  margin-top: 1px;
+}
+.droplet-home .w-row .meta {
+  font-size: 12px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.droplet-home .w-row .meta.mono {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.droplet-home .w-badge {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+.droplet-home .w-badge.local {
+  background: rgba(34, 197, 94, 0.16);
+  color: #15803d;
+}
+.dark .droplet-home .w-badge.local {
+  color: #4ade80;
+}
+.droplet-home .w-badge.cloud {
+  background: var(--brand-subtle);
+  color: var(--brand-deep);
+}
+.dark .droplet-home .w-badge.cloud {
+  color: var(--brand-soft);
+}
+.droplet-home .w-gear {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: var(--brand-subtle);
+  color: var(--brand);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.droplet-home .f-ico {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.droplet-home .f-ico.doc,
+.droplet-home .f-ico.pdf {
+  background: var(--brand-subtle);
+  color: var(--brand);
+}
+.droplet-home .f-ico.sheet {
+  background: rgba(34, 197, 94, 0.16);
+  color: #15803d;
+}
+.dark .droplet-home .f-ico.sheet {
+  color: #4ade80;
+}
+.droplet-home .f-ico.video,
+.droplet-home .f-ico.image {
+  background: var(--card-inner);
+  color: var(--text-muted);
+}
+
+/* ---------- Activity timeline ---------- */
+.droplet-home .timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.droplet-home .timeline-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 6px 0;
+}
+.droplet-home .timeline-time {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  width: 38px;
+  flex-shrink: 0;
+  padding-top: 2px;
+}
+.droplet-home .timeline-ico {
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.droplet-home .timeline-ico.ok {
+  background: var(--brand-subtle);
+  color: var(--brand);
+}
+.droplet-home .timeline-ico.warn {
+  background: var(--card-inner);
+  color: var(--text-muted);
+}
+.droplet-home .timeline-ico.err {
+  background: rgba(127, 29, 29, 0.18);
+  color: #b91c1c;
+}
+.dark .droplet-home .timeline-ico.err {
+  background: rgba(127, 29, 29, 0.4);
+  color: #fca5a5;
+}
+.droplet-home .timeline-text .h {
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.35;
+}
+
+/* ---------- Tasks ---------- */
+.droplet-home .w-tasks {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  height: 100%;
+  overflow-y: auto;
+  min-height: 0;
+}
+.droplet-home .w-task {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 2px;
+  cursor: pointer;
+}
+.droplet-home .w-task .box {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  border: 1.5px solid var(--text-muted);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  transition: background 180ms var(--ease), border-color 180ms var(--ease);
+}
+.droplet-home .w-task.done .box {
+  background: var(--brand);
+  border-color: var(--brand);
+}
+.droplet-home .w-task .lbl {
+  font-size: 13px;
+  color: var(--text);
+  transition: color 180ms var(--ease);
+}
+.droplet-home .w-task.done .lbl {
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+.droplet-home .w-task .when {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  flex-shrink: 0;
+}
+.droplet-home .w-task-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 2px;
+  color: var(--text-muted);
+  font-size: 13px;
+  background: none;
+  border: none;
+}
+.droplet-home .w-task-add svg {
+  color: var(--brand);
+}
+
+/* ---------- Notes ---------- */
+.droplet-home .w-notes {
+  height: 100%;
+  width: 100%;
+  border: none;
+  outline: none;
+  resize: none;
+  background: transparent;
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text);
+}
+.droplet-home .w-notes::placeholder {
+  color: var(--text-muted);
+}

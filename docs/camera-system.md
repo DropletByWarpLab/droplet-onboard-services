@@ -122,8 +122,8 @@ curl -X POST http://localhost:3000/api/switch/setup/cameras
 
 **Manual on existing OpenWrt:**
 ```bash
-scp openwrt/scripts/setup-camera-subnet.sh root@10.0.0.1:/tmp/
-ssh root@10.0.0.1 'sh /tmp/setup-camera-subnet.sh'
+scp openwrt/scripts/setup-camera-subnet.sh root@192.168.50.1:/tmp/
+ssh root@192.168.50.1 'sh /tmp/setup-camera-subnet.sh'
 ```
 
 ## Remote Access
@@ -147,7 +147,7 @@ Base config at `docker/frigate/config.yml`:
 
 | Setting | Value | Notes |
 |---------|-------|-------|
-| Detector | TensorRT (Jetson GPU) | Hardware-accelerated AI detection |
+| Detector | TensorRT (NVIDIA GPU) | Hardware-accelerated AI detection |
 | Record retention | 7 days (motion), 14 days (events) | Configurable |
 | Snapshot retention | 14 days | |
 | Detection FPS | 5 | Per camera |

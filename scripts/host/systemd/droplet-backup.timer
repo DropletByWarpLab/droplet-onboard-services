@@ -1,0 +1,21 @@
+# =============================================================================
+# WARP-570 — Daily trigger for droplet-backup.service
+# =============================================================================
+#
+# Runs the full-device backup once a day at 02:30 local time, with a randomized
+# delay so a fleet doesn't stampede, and Persistent=true so a missed run (device
+# powered off) fires on next boot. See droplet-backup.service for install steps.
+# Rotation (BACKUP_KEEP, default 7) is handled by device-backup.sh itself.
+# =============================================================================
+[Unit]
+Description=Daily Droplet full-device backup
+Documentation=https://warp-lab.atlassian.net/browse/WARP-570
+
+[Timer]
+OnCalendar=*-*-* 02:30:00
+RandomizedDelaySec=900
+Persistent=true
+Unit=droplet-backup.service
+
+[Install]
+WantedBy=timers.target

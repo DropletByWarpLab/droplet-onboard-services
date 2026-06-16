@@ -1,0 +1,239 @@
+/**
+ * WARP-836 — `/models` read-only status surface.
+ *
+ * The page shows local LLMs + opt-in cloud providers + KPIs, all read-only.
+ * These tests drive the data states (loading / error / empty-degraded /
+ * populated) against a mocked `useModelsPage` hook, and — critically — pin the
+ * one-model-rule guardrail (architecture-guard #13): there must be NO
+ * pull / swap / benchmark / delete / add-model control anywhere on the page.
+ * They also pin the honest-placeholder contract: not-yet-wired metrics render
+ * as "—"/"Unavailable", and cloud spend as "$0.00", never fabricated values.
+ */
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { render, screen, within } from "@testing-library/react";
+import type { ModelsPagePayload } from "@/lib/types";
+
+const useModelsPageMock = vi.fn();
+vi.mock("@/lib/hooks/useModelsPage", () => ({
+  useModelsPage: () => useModelsPageMock(),
+}));
+
+import ModelsPage from "./page";
+
+function payload(over: Partial<ModelsPagePayload> = {}): ModelsPagePayload {
+  return {
+    local: [
+      {
+        name: "llama3.1:70b",
+        family: "llama",
+        provider: "ollama",
+        contextLength: 131072,
+        gbOnDisk: null,
+        role: null,
+        status: "ready",
+        tokensPerSec: null,
+        diskBarPct: null,
+      },
+    ],
+    cloud: [
+      { provider: "anthropic", enabled: false, lastUsedAt: null, spendUsd: 0 },
+      { provider: "openai", enabled: false, lastUsedAt: null, spendUsd: 0 },
+      { provider: "gemini", enabled: false, lastUsedAt: null, spendUsd: 0 },
+    ],
+    gpu: null,
+    avgLatencyMs: 0,
+    cloudSpendUsd: 0,
+    ...over,
+  };
+}
+
+function ready(over: Partial<ModelsPagePayload> = {}) {
+  useModelsPageMock.mockReturnValue({
+    data: payload(over),
+    error: undefined,
+    isLoading: false,
+    refresh: vi.fn(),
+  });
+}
+
+/** All the model-mutation verbs the one-model rule forbids. The page must
+ *  expose NONE of these as a control (button/link/menuitem). */
+const FORBIDDEN_MUTATION = /pull|swap|benchmark|delete|remove|add model|install|download|uninstall/i;
+
+beforeEach(() => {
+  useModelsPageMock.mockReset();
+});
+
+describe("<ModelsPage /> (WARP-836)", () => {
+  it("shows a loading state while fetching", () => {
+    useModelsPageMock.mockReturnValue({
+      data: undefined,
+      error: undefined,
+      isLoading: true,
+      refresh: vi.fn(),
+    });
+    render(<ModelsPage />);
+    expect(screen.getByText(/loading/i)).toBeInTheDocument();
+  });
+
+  it("shows an error state with a retry affordance", () => {
+    const refresh = vi.fn();
+    useModelsPageMock.mockReturnValue({
+      data: undefined,
+      error: new Error("boom"),
+      isLoading: false,
+      refresh,
+    });
+    render(<ModelsPage />);
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    const retry = screen.getByRole("button", { name: /retry|try again/i });
+    expect(retry).toBeInTheDocument();
+  });
+
+  it("renders the KPI strip with model store, GPU, avg latency and cloud spend", () => {
+    ready();
+    render(<ModelsPage />);
+    expect(screen.getByText(/model store/i)).toBeInTheDocument();
+    expect(screen.getByText(/^GPU$/i)).toBeInTheDocument();
+    expect(screen.getByText(/avg latency/i)).toBeInTheDocument();
+    expect(screen.getByText(/cloud spend/i)).toBeInTheDocument();
+    // Cloud spend is the one KPI with a real (zero) value — shown as $0.00.
+    expect(screen.getByText(/\$0\.00/)).toBeInTheDocument();
+  });
+
+  it("renders a local model card with name, family, context length and the local-only shield", () => {
+    ready();
+    render(<ModelsPage />);
+    expect(screen.getByText("llama3.1:70b")).toBeInTheDocument();
+    // family shown somewhere on the card
+    expect(screen.getAllByText(/llama/i).length).toBeGreaterThanOrEqual(1);
+    // context length humanised (131072 → 128k); accept either exact or k-form.
+    expect(screen.getByText(/128k|131072|131,072/i)).toBeInTheDocument();
+    // the "local-only" shield copy
+    expect(screen.getByText(/local-only/i)).toBeInTheDocument();
+  });
+
+  it("maps status 'ready' to a 'running' chip on the local card", () => {
+    ready();
+    render(<ModelsPage />);
+    expect(screen.getByText(/running/i)).toBeInTheDocument();
+  });
+
+  it("maps status 'loading' and 'error' to the right chips", () => {
+    useModelsPageMock.mockReturnValue({
+      data: payload({
+        local: [
+          {
+            name: "qwen2.5-coder:32b",
+            family: "qwen",
+            provider: "ollama",
+            contextLength: 65536,
+            gbOnDisk: null,
+            role: null,
+            status: "loading",
+            tokensPerSec: null,
+            diskBarPct: null,
+          },
+          {
+            name: "broken-model",
+            family: "other",
+            provider: "ollama",
+            contextLength: null,
+            gbOnDisk: null,
+            role: null,
+            status: "error",
+            tokensPerSec: null,
+            diskBarPct: null,
+          },
+        ],
+      }),
+      error: undefined,
+      isLoading: false,
+      refresh: vi.fn(),
+    });
+    render(<ModelsPage />);
+    expect(screen.getByText(/loading/i)).toBeInTheDocument();
+    expect(screen.getByText(/error/i)).toBeInTheDocument();
+  });
+
+  it("renders the three cloud provider rows (Anthropic, OpenAI, Gemini)", () => {
+    ready();
+    render(<ModelsPage />);
+    expect(screen.getByText(/anthropic/i)).toBeInTheDocument();
+    expect(screen.getByText(/openai/i)).toBeInTheDocument();
+    expect(screen.getByText(/gemini/i)).toBeInTheDocument();
+  });
+
+  it("renders cloud toggles as read-only/disabled (enabling happens in settings)", () => {
+    ready();
+    render(<ModelsPage />);
+    // The cloud toggles are switches reflecting enabled:false; on this surface
+    // they are non-interactive (disabled). There must be one per provider.
+    const switches = screen.getAllByRole("switch");
+    expect(switches.length).toBe(3);
+    for (const sw of switches) {
+      expect(sw).toBeDisabled();
+      expect(sw).toHaveAttribute("aria-checked", "false");
+    }
+    // Copy points the user at settings to actually enable a provider.
+    expect(screen.getByText(/settings/i)).toBeInTheDocument();
+  });
+
+  it("renders honest placeholders for not-yet-wired metrics (no fabricated values)", () => {
+    ready();
+    render(<ModelsPage />);
+    // gbOnDisk / tokensPerSec / role / gpu / avgLatency are all null/0 in the
+    // fixture — the page must show an em-dash / "unavailable", never a number.
+    const dashes = screen.getAllByText(/—|unavailable|not available|n\/a/i);
+    expect(dashes.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("renders a degraded/empty local state when local is [] (ai-gateway down)", () => {
+    ready({ local: [] });
+    render(<ModelsPage />);
+    // The page still renders (KPIs + cloud), and shows an explicit empty note
+    // for the local section rather than a blank gap. Query the heading by role
+    // so it's unambiguous (the KPI tiles also legitimately say "Unavailable").
+    expect(screen.getByText(/cloud spend/i)).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: /no local models/i }),
+    ).toBeInTheDocument();
+    // Cloud rows still render in the degraded state.
+    expect(screen.getByText(/anthropic/i)).toBeInTheDocument();
+  });
+});
+
+// ── One-model rule (architecture-guard #13) — status-only, NO mutations ──
+
+describe("<ModelsPage /> one-model-rule guardrail (WARP-836)", () => {
+  it("exposes NO model-mutation controls (no pull/swap/benchmark/delete/add)", () => {
+    ready();
+    render(<ModelsPage />);
+    const buttons = screen.queryAllByRole("button");
+    for (const b of buttons) {
+      expect(b).not.toHaveTextContent(FORBIDDEN_MUTATION);
+      expect(b.getAttribute("aria-label") ?? "").not.toMatch(FORBIDDEN_MUTATION);
+    }
+    const links = screen.queryAllByRole("link");
+    for (const l of links) {
+      expect(l).not.toHaveTextContent(FORBIDDEN_MUTATION);
+    }
+  });
+
+  it("exposes no mutation controls even in the degraded (local empty) state", () => {
+    ready({ local: [] });
+    render(<ModelsPage />);
+    const buttons = screen.queryAllByRole("button");
+    for (const b of buttons) {
+      expect(b).not.toHaveTextContent(FORBIDDEN_MUTATION);
+    }
+  });
+
+  it("the only switches are the disabled cloud toggles — none are operable", () => {
+    ready();
+    render(<ModelsPage />);
+    const switches = screen.getAllByRole("switch");
+    // Every switch on the page is disabled — there is no actionable toggle.
+    expect(switches.every((s) => (s as HTMLButtonElement).disabled)).toBe(true);
+  });
+});

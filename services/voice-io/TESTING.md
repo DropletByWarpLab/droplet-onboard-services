@@ -61,7 +61,7 @@ service workflows pending the GitHub-Actions-minutes restoration.
 `TestDetectBus` (5)
   Bus classification from `/sys/class/sound/cardN/` sysfs paths.
   USB (controller name `usbN` anywhere in resolved path), PCI
-  (`pci0000:...` prefix), platform (Jetson I²S codec), unknown
+  (`pci0000:...` prefix), platform (appliance I²S codec), unknown
   (card not in sysfs, or card number None).
 
 `TestScoring` (5)
@@ -82,7 +82,7 @@ service workflows pending the GitHub-Actions-minutes restoration.
   Full-stack scenario per README compatibility table:
     - POC box (x86 Ryzen, 3 onboard PCI cards, no USB)
     - POC + ReSpeaker 4-Mic USB array
-    - Production v2.6 (Jetson + I/O Brick I²S codec)
+    - Production v2.6 (appliance + I/O Brick I²S codec)
     - Generic dev box (USB headset)
 
 `tests/test_wake.py` (18) — wake-word detector contract:
@@ -168,6 +168,6 @@ Container is internal-only (port 8086 not host-exposed), so curl
 from inside the container or via `docker exec`:
 
 ```
-sudo docker exec droplet-pi-platform-voice-io-1 \
+sudo docker exec droplet-voice-io-1 \
   curl -s http://localhost:8086/audio/devices | python3 -m json.tool
 ```

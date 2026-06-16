@@ -24,7 +24,9 @@ import Link from "next/link";
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, CheckCircle2, Lightbulb, Loader2 } from "lucide-react";
-import { commissionMatterDevice } from "@/lib/api";
+import { commissionMatterDevice, fetchMatterCapabilities } from "@/lib/api";
+import { translateError } from "@/lib/friendly-errors";
+import { BleUnavailableNotice } from "@/components/smart-home/BleUnavailableNotice";
 
 // WARP-102: lazy-load the QR scanner. `@zxing/browser` + `@zxing/library`
 // are ~200 KB minified each and not tree-shakeable (the decoder pulls a
@@ -66,6 +68,27 @@ export default function AddMatterDevicePage() {
   // an in-flight QR commission. See PR #233 review.
   const commissioningRef = useRef(false);
 
+  // WARP-851: BLE-commissioning capability. `null` = unknown (probe in
+  // flight or failed) — show nothing rather than warn on a guess.
+  // `false` = the box can only add devices already on the home network;
+  // say so above the scanner instead of letting the customer retry a
+  // Bluetooth-only device forever.
+  const [bleAvailable, setBleAvailable] = useState<boolean | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const caps = await fetchMatterCapabilities();
+        if (!cancelled) setBleAvailable(caps.bleCommissioning);
+      } catch {
+        // Capability unknown — leave the notice hidden.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const handleCode = useCallback(async (pairingCode: string) => {
     if (commissioningRef.current) return;
     commissioningRef.current = true;
@@ -74,7 +97,7 @@ export default function AddMatterDevicePage() {
       const result = await commissionMatterDevice(pairingCode);
       setState({ phase: "done", nodeId: result.nodeId });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Commissioning failed";
+      const msg = translateError(err, "device");
       // Keep customer's manually-entered code in mind for retry — but
       // the textbox lives inside MatterQrScanner so we can't repopulate
       // without lifting state. For now, restart at scan with the error.
@@ -113,6 +136,9 @@ export default function AddMatterDevicePage() {
               onDismiss={() => setState({ phase: "scan", error: null })}
             />
           )}
+          {/* WARP-851: until the box can hear BLE devices (WARP-850),
+              be honest about what scanning a code can actually add. */}
+          {bleAvailable === false && <BleUnavailableNotice className="mb-4" />}
           <MatterQrScanner
             onResult={handleCode}
             disabled={state.phase !== "scan"}
@@ -151,9 +177,10 @@ function CommissioningErrorBanner({
       className="mb-4 px-4 py-3 bg-system-red/10 border border-system-red/30 rounded-lg flex items-start gap-3"
       role="alert"
     >
-      <p className="type-footnote text-system-red flex-1">
-        <span className="font-medium">Couldn't commission:</span> {message}
-      </p>
+      {/* WARP-856 (item 3): no prefix — the curated messages are complete
+          sentences ("Couldn't find the device…"), so a "Couldn't commission:"
+          label doubled the copy and "commission" is installer jargon. */}
+      <p className="type-footnote text-system-red flex-1">{message}</p>
       <button
         onClick={onDismiss}
         className="type-footnote text-system-red hover:underline"
@@ -182,7 +209,7 @@ function CommissioningProgress({ startedAt }: { startedAt: number }) {
     elapsedS < 5
       ? "Finding the device on your network…"
       : elapsedS < 15
-        ? "Setting up secure pairing (PASE)…"
+        ? "Setting up secure pairing…"
         : elapsedS < 25
           ? "Sharing Wi-Fi credentials with the device…"
           : "Almost done — installing the device certificate…";

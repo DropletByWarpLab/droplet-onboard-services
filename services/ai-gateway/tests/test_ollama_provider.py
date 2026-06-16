@@ -10,7 +10,12 @@ import httpx
 import pytest
 import respx
 
-from providers.ollama_local import OllamaLocalProvider, _LimitsCache, prettify_ollama_name
+from providers.ollama_local import (
+    _MAX_CONNECTIONS,
+    OllamaLocalProvider,
+    _LimitsCache,
+    prettify_ollama_name,
+)
 from schemas import ChatMessage, ToolDefinition, ToolFunction
 
 
@@ -81,6 +86,38 @@ async def provider():
 
 
 # ---------------------------------------------------------------------------
+# Connection pool sizing (GW-13)
+# ---------------------------------------------------------------------------
+
+
+class TestConnectionPoolSizing:
+    """The httpx pool must NOT be pinned to construction-time num_parallel (1).
+
+    GW-13: the pool used to be built with max_connections=num_parallel, which is
+    1 before the first /health refresh. A later scale-up resized the in-flight
+    semaphore but left the pool serializing every chat through one connection.
+    The pool is now sized to a generous fixed cap; the semaphore is the real
+    concurrency gate.
+    """
+
+    @staticmethod
+    def _pool_max_connections(provider: OllamaLocalProvider) -> int | None:
+        # httpx AsyncClient → AsyncHTTPTransport → httpcore AsyncConnectionPool.
+        pool = provider.client._transport._pool  # type: ignore[attr-defined]
+        return getattr(pool, "_max_connections", None)
+
+    async def test_pool_not_pinned_to_num_parallel(self):
+        provider = OllamaLocalProvider(base_url="http://test-ollama:11434")
+        try:
+            # num_parallel starts at 1; the pool must be larger than that.
+            assert provider._limits.num_parallel == 1
+            assert self._pool_max_connections(provider) == _MAX_CONNECTIONS
+            assert _MAX_CONNECTIONS > 1
+        finally:
+            await provider.close()
+
+
+# ---------------------------------------------------------------------------
 # _LimitsCache
 # ---------------------------------------------------------------------------
 
@@ -89,13 +126,25 @@ class TestLimitsCache:
     """Unit tests for the appliance-limits cache."""
 
     def test_health_url_strips_proxy_suffix(self):
+        # The opt-in /proxy chat path IS the manager (:8002), so /health is
+        # derived from it (back-compat with the manager deploy).
         cache = _LimitsCache("http://ollama:8002/proxy")
         assert cache.health_url == "http://ollama:8002/health"
 
-    def test_health_url_no_proxy_suffix_left_alone(self):
-        # removesuffix is a no-op when the suffix isn't present.
-        cache = _LimitsCache("http://ollama:8002")
-        assert cache.health_url == "http://ollama:8002/health"
+    def test_health_url_none_on_direct_path(self):
+        # XR-05: a direct Ollama URL (no /proxy) with no OLLAMA_MANAGER_URL has
+        # NO manager /health to probe — health_url is None so refresh() skips
+        # the probe instead of 404-ing against Ollama :11434.
+        cache = _LimitsCache("http://ollama:11434")
+        assert cache.health_url is None
+
+    def test_health_url_prefers_explicit_manager_url(self, monkeypatch):
+        # XR-05: OLLAMA_MANAGER_URL decouples /health from the chat URL.
+        import providers.ollama_local as ol
+
+        monkeypatch.setattr(ol, "OLLAMA_MANAGER_URL", "http://manager:8002")
+        cache = _LimitsCache("http://ollama:11434")
+        assert cache.health_url == "http://manager:8002/health"
 
     def test_initial_defaults(self):
         cache = _LimitsCache(TEST_BASE_URL)
@@ -103,6 +152,19 @@ class TestLimitsCache:
         assert cache.max_queue == 16
         assert cache.max_loaded_models == 1
         assert cache._last_refresh == 0.0
+
+    @respx.mock
+    async def test_refresh_skips_probe_on_direct_path(self):
+        # XR-05: with no manager wired, refresh() must NOT issue any HTTP GET
+        # (no 404 against Ollama) and must keep the default limits.
+        route = respx.get(url__regex=r".*/health").mock(
+            return_value=httpx.Response(200, json=_limits_payload(num_parallel=9))
+        )
+        cache = _LimitsCache("http://ollama:11434")  # direct path → health_url None
+        async with httpx.AsyncClient() as client:
+            await cache.refresh(client)
+        assert route.call_count == 0
+        assert cache.num_parallel == 1  # unchanged default
 
     @respx.mock
     async def test_refresh_success_parses_limits(self):

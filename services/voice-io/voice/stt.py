@@ -48,6 +48,7 @@ from __future__ import annotations
 import json
 import logging
 import socket
+import time
 from abc import ABC, abstractmethod
 from typing import Optional
 
@@ -59,7 +60,11 @@ DEFAULT_STT_HOST = "wyoming-faster-whisper"
 DEFAULT_STT_PORT = 10300
 DEFAULT_STT_LANGUAGE = "en"
 DEFAULT_CONNECT_TIMEOUT_S = 5.0
-DEFAULT_TRANSCRIPT_TIMEOUT_S = 10.0  # max wait for final transcript after audio-stop
+DEFAULT_TRANSCRIPT_TIMEOUT_S = 10.0  # max wait per recv for final transcript after audio-stop
+# Total wall-clock ceiling on _read_transcript, independent of the per-recv
+# timeout above (which resets on every event). Bounds a chatty/misbehaving
+# server that drips non-transcript events forever. See GW-16.
+_TOTAL_DEADLINE_MULTIPLIER = 2.0
 
 # Audio payload metadata (Wyoming requires this on every audio event).
 SAMPLE_RATE = 16_000
@@ -136,11 +141,20 @@ class _WyomingSession(STTSession):
         sock: socket.socket,
         language: str,
         transcript_timeout_s: float,
+        total_deadline_s: float | None = None,
     ):
         self._sock = sock
         self._closed = False
         self._language = language
         self._transcript_timeout_s = transcript_timeout_s
+        # Total wall-clock budget for _read_transcript. Defaults to a multiple
+        # of the per-recv timeout so a chatty server can't hold the worker
+        # thread indefinitely (GW-16).
+        self._total_deadline_s = (
+            total_deadline_s
+            if total_deadline_s is not None
+            else transcript_timeout_s * _TOTAL_DEADLINE_MULTIPLIER
+        )
         # `transcribe` is the "start a new transcription" event; data
         # carries the language hint. The server uses this to seed the
         # decoder language without us needing to ship a language-
@@ -193,11 +207,37 @@ class _WyomingSession(STTSession):
         for the final one (the one sent after `audio-stop`). In practice
         the server only emits ONE transcript per session in batch mode,
         so the first event is also the last.
+
+        GW-16: ``settimeout`` only bounds each individual ``recv``, and it's
+        reset on every event. A misbehaving/old server that streams a steady
+        drip of non-transcript events (partials, acks) would keep resetting the
+        per-recv clock forever, so the total time the (single-threaded) pipeline
+        worker is blocked in ``finish()`` is unbounded — wake detection stalls
+        indefinitely. We therefore also enforce a TOTAL wall-clock deadline
+        (``_total_deadline_s``) across all events, independent of per-recv
+        resets.
         """
         self._sock.settimeout(self._transcript_timeout_s)
+        deadline = time.monotonic() + self._total_deadline_s
         try:
             while True:
+                if time.monotonic() >= deadline:
+                    raise STTUnavailable(
+                        f"transcript wall-clock deadline exceeded "
+                        f"({self._total_deadline_s:.1f} s) — server streamed "
+                        f"events but no final transcript"
+                    )
                 event = _read_event(self._sock)
+                # Re-check deadline after _read_event returns: the recv can block
+                # for up to _transcript_timeout_s, so the deadline may have passed
+                # during the call.  Without this second check the actual worst-case
+                # block is total_deadline_s + transcript_timeout_s, not total_deadline_s.
+                if time.monotonic() >= deadline:
+                    raise STTUnavailable(
+                        f"transcript wall-clock deadline exceeded "
+                        f"({self._total_deadline_s:.1f} s) — server streamed "
+                        f"events but no final transcript"
+                    )
                 if event is None:
                     raise STTUnavailable("server closed connection before transcript")
                 header, _payload = event  # payload already drained by _read_event
@@ -222,12 +262,16 @@ class WyomingSTT(StreamingSTT):
         language: str = DEFAULT_STT_LANGUAGE,
         connect_timeout_s: float = DEFAULT_CONNECT_TIMEOUT_S,
         transcript_timeout_s: float = DEFAULT_TRANSCRIPT_TIMEOUT_S,
+        total_deadline_s: float | None = None,
     ):
         self._host = host
         self._port = port
         self._language = language
         self._connect_timeout_s = connect_timeout_s
         self._transcript_timeout_s = transcript_timeout_s
+        # Total wall-clock ceiling for the transcript read (GW-16). None →
+        # the session derives it from transcript_timeout_s.
+        self._total_deadline_s = total_deadline_s
 
     @property
     def available(self) -> bool:
@@ -268,6 +312,7 @@ class WyomingSTT(StreamingSTT):
         return _WyomingSession(
             sock, language=self._language,
             transcript_timeout_s=self._transcript_timeout_s,
+            total_deadline_s=self._total_deadline_s,
         )
 
 

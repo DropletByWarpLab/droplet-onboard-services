@@ -82,7 +82,7 @@ fast-forward-eligible noise once main and feat are aligned on content.
 
 Already in flight as PRs:
 
-- **#247** — `secrets.sh` default `JETSON_OLLAMA_URL` fix
+- **#247** — `secrets.sh` default `OLLAMA_URL` fix
 - **#249** — Phase 0 capture (`scripts/host/`)
 - **#250** — Phase 1 unify compose under `profiles: [poc]`
 - **#251** — Phase 2 `setup.sh --poc` automation (stacked on #250)
@@ -143,7 +143,7 @@ git branch -D feat/poc-single-box-rebuild  # local delete
 
 ```bash
 # From a dev machine:
-gh api -X DELETE repos/DropletByWarpLab/droplet-pi-platform/git/refs/heads/feat/poc-single-box-rebuild
+gh api -X DELETE repos/DropletByWarpLab/droplet-onboard-services/git/refs/heads/feat/poc-single-box-rebuild
 ```
 
 ### Step 4 — Update the photo-studio snapshot

@@ -18,6 +18,7 @@
  * service-principal flow still works after the guards are wired in.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import os from "node:os";
 import request from "supertest";
 import express, { Request, Response, NextFunction, Router } from "express";
 
@@ -29,6 +30,10 @@ vi.mock("../config.js", () => ({
     SERVICE_TOKEN_VOICE: "test-voice-token-32chars-padding-xyz",
     SERVICE_TOKEN_MCP: "test-mcp-token-32chars-padding-1234a",
     JWT_SECRET: "test-secret-32-bytes-long-aaaaaaaa",
+    // The owner reset path dispatches to the device-bridge; without a configured
+    // URL the service reports BRIDGE_UNREACHABLE → 503, so the owner "guard
+    // passes" assertion (status < 500) fails. Mirror the dedicated handler test.
+    DEVICE_BRIDGE_URL: "http://bridge.test:9090",
   },
 }));
 
@@ -37,8 +42,58 @@ vi.mock("../services/cache.service.js", () => ({
   cacheSet: vi.fn().mockResolvedValue(undefined),
 }));
 
+// WARP-559: stub the switch hardware client + network-safety tier so the
+// real `createSwitchRouter` wiring test below exercises only the guard,
+// never the downstream switch service or Prisma. Each mutating handler's
+// safety evaluation resolves `{ allowed: true }` so a permitted role
+// reaches a 2xx (proving the guard let it through); a denied role is
+// short-circuited by `requireRole` at 403 before any of these run.
+vi.mock("../services/switch.client.js", () => ({
+  fetchPorts: vi.fn().mockResolvedValue([]),
+  fetchPort: vi.fn().mockResolvedValue({}),
+  fetchVlans: vi.fn().mockResolvedValue([]),
+  fetchVlanMembership: vi.fn().mockResolvedValue({}),
+  fetchPoeStatus: vi.fn().mockResolvedValue([]),
+  fetchPortPoe: vi.fn().mockResolvedValue({}),
+  fetchSystemInfo: vi.fn().mockResolvedValue({}),
+  enablePort: vi.fn().mockResolvedValue(undefined),
+  disablePort: vi.fn().mockResolvedValue(undefined),
+  createVlan: vi.fn().mockResolvedValue(undefined),
+  deleteVlan: vi.fn().mockResolvedValue(undefined),
+  setVlanMembership: vi.fn().mockResolvedValue(undefined),
+  enablePortPoe: vi.fn().mockResolvedValue(undefined),
+  disablePortPoe: vi.fn().mockResolvedValue(undefined),
+  detectWanPort: vi.fn().mockResolvedValue({ wan_port: 9 }),
+  setupCameraPorts: vi.fn().mockResolvedValue({ status: "ok" }),
+  // §7 additions (ADDON §7).
+  fetchPortStatus: vi.fn().mockResolvedValue([]),
+  fetchProvisionConfig: vi.fn().mockResolvedValue({
+    vlan_profile: "flat-lan", auto_managed: false, protected_port: 0,
+    camera_ports: [], ap_ports: [], client_ports: [], poe_budget_w: 130,
+    last_provisioned_at: null,
+  }),
+  provisionSwitch: vi.fn().mockResolvedValue({ status: "applied" }),
+}));
+
+// §7 read routes call the aggregation service; mock it so the RBAC wiring test
+// exercises only the guard, not the join (covered in switch-aggregation.test).
+vi.mock("../services/switch-aggregation.service.js", () => ({
+  fetchSwitchStatus: vi.fn().mockResolvedValue({ connected: true }),
+  fetchSwitchPorts: vi.fn().mockResolvedValue([]),
+  fetchSwitchVlans: vi.fn().mockResolvedValue([]),
+}));
+
+vi.mock("../services/network-safety.service.js", () => ({
+  evaluateNetworkCommand: vi.fn().mockResolvedValue({ allowed: true }),
+  confirmNetworkCommand: vi
+    .fn()
+    .mockResolvedValue({ confirmed: true, operation: "switch_port_enable", params: { port: 3 } }),
+}));
+
 import { requireRole, authMiddleware, type AuthUser } from "../middleware/auth.js";
 import type { Role } from "../services/jwt.service.js";
+import { createSwitchRouter } from "../routes/switch.js";
+import { createSystemResetRouter } from "../routes/system-reset.routes.js";
 
 // ── Test fixtures ──────────────────────────────────────────────────
 
@@ -92,6 +147,24 @@ const MATRIX: GuardedRoute[] = [
   { method: "post", path: "/api/aps/AA:BB:CC:DD:EE:FF/approve", allowed: ["owner", "admin"] },
   { method: "post", path: "/api/aps/AA:BB:CC:DD:EE:FF/decommission", allowed: ["owner", "admin"] },
 
+  // WARP-559: managed-switch control — same owner+admin posture as the
+  // rest of the network-infrastructure surface (`/api/network/*`,
+  // `/api/vpn/*`). Every mutating switch route shipped unguarded (the
+  // mount in app.ts had no requireRole wrapper, and the in-handler
+  // `evalSwitchCommand` is a WARP-76 safety/confirmation tier, not authz),
+  // letting a guest/family session disable PoE/ports/VLANs. Status GETs
+  // (`/api/switch/*`) stay open to every auth role.
+  { method: "post", path: "/api/switch/ports/3/enable", allowed: ["owner", "admin"] },
+  { method: "post", path: "/api/switch/ports/3/disable", allowed: ["owner", "admin"] },
+  { method: "post", path: "/api/switch/vlans", allowed: ["owner", "admin"] },
+  { method: "delete", path: "/api/switch/vlans/100", allowed: ["owner", "admin"] },
+  { method: "post", path: "/api/switch/vlans/100/membership", allowed: ["owner", "admin"] },
+  { method: "post", path: "/api/switch/poe/3/enable", allowed: ["owner", "admin"] },
+  { method: "post", path: "/api/switch/poe/3/disable", allowed: ["owner", "admin"] },
+  { method: "post", path: "/api/switch/wan/detect", allowed: ["owner", "admin"] },
+  { method: "post", path: "/api/switch/setup/cameras", allowed: ["owner", "admin"] },
+  { method: "post", path: "/api/switch/command/confirm", allowed: ["owner", "admin"] },
+
   // WARP-455: A1 local user directory — same admin-only posture as the
   // existing user-management routes (POST /api/auth/users etc.). Reads
   // and mutations are both gated; only the permissions matrix read
@@ -103,6 +176,11 @@ const MATRIX: GuardedRoute[] = [
 
   // ── service restart ── (owner only — destructive, may interrupt the box) ──
   { method: "post", path: "/api/network/system/reboot", allowed: ["owner"] },
+
+  // WARP-825: factory reset — the single most destructive action on the box
+  // (wipes every data volume + secrets, returns to first-run). owner ONLY,
+  // strictest possible guard (ADR-004 §3 destructive-system-action posture).
+  { method: "post", path: "/api/system/reset", allowed: ["owner"] },
 
   // ── cameras / matter / smart-home ── (owner + admin + family) ──
   { method: "post", path: "/api/cameras", allowed: ["owner", "admin", "family"] },
@@ -329,5 +407,215 @@ describe("service-principal regression (WARP-171 AC #6)", () => {
       .set("Authorization", "Bearer test-voice-token-32chars-padding-xyz")
       .send({});
     expect(res.status).toBe(200);
+  });
+});
+
+// ── Switch router RBAC wiring (WARP-559) ───────────────────────────
+// The MATRIX above proves the guard *contract* against synthetic
+// stand-in routes. This block mounts the REAL `createSwitchRouter` to
+// prove the production router actually wires `requireRole("owner",
+// "admin")` onto every mutating route — the exact gap WARP-559 fixes
+// (the switch router shipped with no guard while every sibling
+// hardware router has one). The switch hardware client + network-safety
+// tier are mocked at the top of this file, so a permitted role reaches
+// a 2xx (the guard let it through to the mocked downstream) and a denied
+// role is rejected at the guard before any downstream call. This block
+// is the AC5 regression canary: on `main` (no guard) the guest/family
+// "→ 403" cases fail because the mutation is reachable.
+
+describe("switch router RBAC wiring (WARP-559)", () => {
+  /** Every mutating switch route × a concrete test path + body. */
+  const MUTATING: { method: "post" | "delete"; path: string; body?: unknown }[] = [
+    { method: "post", path: "/api/switch/ports/3/enable" },
+    { method: "post", path: "/api/switch/ports/3/disable" },
+    { method: "post", path: "/api/switch/vlans", body: { vlan_id: 100, name: "cams" } },
+    { method: "delete", path: "/api/switch/vlans/100" },
+    { method: "post", path: "/api/switch/vlans/100/membership", body: { ports: [1, 2] } },
+    { method: "post", path: "/api/switch/poe/3/enable" },
+    { method: "post", path: "/api/switch/poe/3/disable" },
+    { method: "post", path: "/api/switch/wan/detect" },
+    {
+      method: "post",
+      path: "/api/switch/setup/cameras",
+      body: { vlan_id: 100, camera_ports: [1], uplink_ports: [9] },
+    },
+    { method: "post", path: "/api/switch/command/confirm", body: { confirmationToken: "tok" } },
+    // §7 write routes (ADDON §7) — the dashboard panel's write surface.
+    { method: "post", path: "/api/switch/ports/4/vlan", body: { vlan_id: 100 } },
+    { method: "post", path: "/api/switch/ports/3/poe", body: { enabled: true } },
+    { method: "post", path: "/api/switch/provision", body: {} },
+  ];
+
+  /** Read GETs must stay open to every authenticated role. */
+  const READS = [
+    "/api/switch/ports",
+    "/api/switch/vlans",
+    "/api/switch/poe",
+    "/api/switch/system",
+  ];
+
+  function buildSwitchApp(user: AuthUser | null): express.Express {
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      if (user) (req as Request & { user: AuthUser }).user = user;
+      next();
+    });
+    // Cast: the router only touches prisma via the mocked network-safety
+    // service, which ignores the client entirely.
+    app.use("/api", createSwitchRouter({} as never));
+    return app;
+  }
+
+  describe("mutating routes reject guest/family/no-session, allow owner/admin", () => {
+    for (const route of MUTATING) {
+      const label = `${route.method.toUpperCase()} ${route.path}`;
+
+      it(`${label}: guest → 403`, async () => {
+        const app = buildSwitchApp(mkUser("guest"));
+        const res = await request(app)[route.method](route.path).send(route.body ?? {});
+        expect(res.status).toBe(403);
+      });
+
+      it(`${label}: family → 403`, async () => {
+        const app = buildSwitchApp(mkUser("family"));
+        const res = await request(app)[route.method](route.path).send(route.body ?? {});
+        expect(res.status).toBe(403);
+      });
+
+      it(`${label}: no session → 403`, async () => {
+        const app = buildSwitchApp(null);
+        const res = await request(app)[route.method](route.path).send(route.body ?? {});
+        expect(res.status).toBe(403);
+      });
+
+      it(`${label}: owner → not 403`, async () => {
+        const app = buildSwitchApp(mkUser("owner"));
+        const res = await request(app)[route.method](route.path).send(route.body ?? {});
+        // Guard let it through; downstream is mocked to succeed. Assert
+        // "not forbidden" + "not a 5xx" so the test stays robust to each
+        // route's normal success shape.
+        expect(res.status).not.toBe(403);
+        expect(res.status).toBeLessThan(500);
+      });
+
+      it(`${label}: admin → not 403`, async () => {
+        const app = buildSwitchApp(mkUser("admin"));
+        const res = await request(app)[route.method](route.path).send(route.body ?? {});
+        expect(res.status).not.toBe(403);
+        expect(res.status).toBeLessThan(500);
+      });
+    }
+  });
+
+  describe("status GETs stay open to viewers (no over-restriction)", () => {
+    for (const path of READS) {
+      it(`GET ${path}: guest → 200`, async () => {
+        const app = buildSwitchApp(mkUser("guest"));
+        const res = await request(app).get(path);
+        expect(res.status).toBe(200);
+      });
+
+      it(`GET ${path}: family → 200`, async () => {
+        const app = buildSwitchApp(mkUser("family"));
+        const res = await request(app).get(path);
+        expect(res.status).toBe(200);
+      });
+    }
+  });
+});
+
+// ── Real createSystemResetRouter wiring (WARP-825) ─────────────────
+// Mounts the REAL factory-reset router to prove POST /api/system/reset (the
+// single most destructive box action) actually carries requireRole("owner") —
+// admin/family/guest/no-session are rejected at the guard before the service
+// (and the device-bridge dispatch) is ever reached. SAFETY: fetch is stubbed
+// and the typed confirm never matches for the denied roles, so no wipe is ever
+// dispatched here. Mirrors the switch-router wiring block above.
+
+describe("system-reset router RBAC wiring (WARP-825)", () => {
+  function buildResetApp(user: AuthUser | null): express.Express {
+    // Minimal prisma double: the owner-allowed path needs resetJob +
+    // commandAuditLog, but for the DENIED roles the guard short-circuits before
+    // any of these are touched.
+    const prisma = {
+      // requestFactoryReset wraps the double-fire guard + audit + job create in
+      // prisma.$transaction(fn, { isolationLevel: Serializable }); without this
+      // the double's $transaction is undefined → TypeError → 500 (not the 202
+      // the owner-passes-guard assertion expects). Run the fn against the double.
+      $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma)),
+      resetJob: {
+        count: vi.fn(async () => 0),
+        create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
+          id: "job-rbac",
+          status: "requested",
+          requestedBy: data.requestedBy ?? null,
+          targetName: data.targetName,
+          failureReason: null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        })),
+        update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
+          id: "job-rbac",
+          status: data.status ?? "dispatched",
+          targetName: "x",
+          failureReason: data.failureReason ?? null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        })),
+        findFirst: vi.fn(async () => null),
+      },
+      commandAuditLog: { create: vi.fn(async () => ({ id: "a" })) },
+    } as never;
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      if (user) (req as Request & { user: AuthUser }).user = user;
+      next();
+    });
+    app.use("/api", createSystemResetRouter(prisma));
+    return app;
+  }
+
+  const DENIED: Role[] = ["admin", "family", "guest"];
+
+  for (const role of DENIED) {
+    it(`POST /api/system/reset: ${role} → 403`, async () => {
+      const app = buildResetApp(mkUser(role));
+      const res = await request(app)
+        .post("/api/system/reset")
+        .send({ confirm: "anything" });
+      expect(res.status).toBe(403);
+    });
+  }
+
+  it("POST /api/system/reset: no session → 403", async () => {
+    const app = buildResetApp(null);
+    const res = await request(app).post("/api/system/reset").send({ confirm: "x" });
+    expect(res.status).toBe(403);
+  });
+
+  it("POST /api/system/reset: owner → not 403 (guard passes)", async () => {
+    // Owner passes the guard. Give it a bridge token + a stubbed-ok fetch and a
+    // matching confirm so the dispatch path completes to 202 rather than a 5xx.
+    const prevToken = process.env.BRIDGE_AUTH_TOKEN;
+    process.env.BRIDGE_AUTH_TOKEN = "tok-rbac";
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true }),
+    } as unknown as Awaited<ReturnType<typeof fetch>>);
+    try {
+      const app = buildResetApp(mkUser("owner"));
+      const res = await request(app)
+        .post("/api/system/reset")
+        .send({ confirm: os.hostname() });
+      expect(res.status).not.toBe(403);
+      expect(res.status).toBeLessThan(500);
+    } finally {
+      fetchSpy.mockRestore();
+      if (prevToken === undefined) delete process.env.BRIDGE_AUTH_TOKEN;
+      else process.env.BRIDGE_AUTH_TOKEN = prevToken;
+    }
   });
 });

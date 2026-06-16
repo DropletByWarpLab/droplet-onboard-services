@@ -29,7 +29,7 @@ One pass per ticket. Each gate must pass before the next fires.
 | **Manager** | `.superpowers/agents/manager.md` | QA + UX + ticket | `READY_FOR_PR` or `SEND_BACK_TO_DEV` or `HANDOFF_TO_HUMAN` | `READY_FOR_PR` |
 | **PR** | Manager invokes `gh pr create` | PR body + title | PR number + URL | PR created |
 | **CI** | GitHub Actions | PR | 8 workflows green | all green |
-| **Code Reviewer** | `.superpowers/agents/code-reviewer.md` | PR diff + spec + QA + UX | single PR comment (APPROVE / APPROVE_WITH_COMMENTS / REQUEST_CHANGES) | Reviewer verdict ≠ REQUEST_CHANGES |
+| **Code Reviewer** | `.superpowers/agents/code-reviewer.md` | PR diff + spec + QA + UX | single review verdict — internal artifact, NOT posted to GitHub (APPROVE / APPROVE_WITH_COMMENTS / REQUEST_CHANGES) | Reviewer verdict ≠ REQUEST_CHANGES |
 | **Human** | project lead | everything above | merge or defer | human clicks merge |
 
 ### Non-dashboard tickets
@@ -162,7 +162,7 @@ PR #<n> is ready for human merge.
 - QA: PASS
 - UX: APPROVED (or N/A)
 - CI: 8/8 green
-- Code Reviewer: APPROVE (or APPROVE_WITH_COMMENTS — see comment)
+- Code Reviewer: APPROVE (or APPROVE_WITH_COMMENTS — see controller summary)
 Merge when ready.
 ```
 
@@ -199,7 +199,7 @@ git checkout <branch>
 # Controller
 # Input: ticket, AC, QA report, UX review (or "N/A"), commit list, diff stats
 # Manager returns:
-#   - READY_FOR_PR → Manager opens PR, posts QA + UX as comments, return PR number
+#   - READY_FOR_PR → Manager opens PR (QA + UX stay internal — NOT posted as comments; folded into the PR body self-review), return PR number
 #   - SEND_BACK_TO_DEV → loop to 5.1 with Manager's note of what to fix
 #   - HANDOFF_TO_HUMAN → §4
 ```
@@ -219,10 +219,17 @@ gh pr checks <n>
 # Controller
 # Input: PR diff, spec, AC, QA report, UX review, Manager's PR body Concerns
 # Invoke superpowers:code-reviewer wrapper (.superpowers/agents/code-reviewer.md)
-# Code Reviewer posts one comment.
+# Code Reviewer returns one verdict + findings to the controller (internal artifact — NOT posted to GitHub).
 # Controller reads verdict:
 #   - APPROVE → §4 pre-merge handoff
-#   - APPROVE_WITH_COMMENTS → §4 pre-merge handoff, flag comments in summary
+#   - APPROVE_WITH_COMMENTS → loop findings back through Dev (fix locally + push), then
+#       RE-RUN the Code Reviewer on the new commits. Re-run until the verdict is APPROVE
+#       with no new non-trivial findings (or only deferred-to-PR-body items remain).
+#       Bound this to 2 re-review rounds; if it hasn't converged by then, HANDOFF_TO_HUMAN
+#       (the findings are deeper than a quick local fix — note the harness gap). Only once
+#       the Reviewer lands on a clean APPROVE → §4 pre-merge handoff. This guarantees the
+#       human reviewer's first sight of the branch is the clean, final PR — not the
+#       pre-fix commits.
 #   - REQUEST_CHANGES → SEND_BACK_TO_DEV (rare; note harness gap)
 ```
 
@@ -239,13 +246,15 @@ Every harness run produces:
 | Artifact | Location | Retained |
 |---|---|---|
 | Dev self-assessment | controller transcript | transcript only |
-| QA report | PR comment | indefinitely (on the PR) |
-| UX review | PR comment (if applicable) | indefinitely |
+| QA report | controller transcript (internal — not posted to GitHub) | transcript only |
+| UX review | controller transcript (internal — not posted to GitHub) | transcript only |
 | Manager PR body | PR body | indefinitely |
-| Code Reviewer comment | PR review comment | indefinitely |
+| Code Reviewer verdict | controller transcript (internal — not posted to GitHub) | transcript only |
 | Dry-run traces | `docs/superpowers/harness-runs/WARP-XX-*.md` | committed for first ticket of each phase |
 
 New phases don't require a new dry-run unless the harness itself changes. If the role prompts are edited mid-phase, trigger a fresh dry-run on the next ticket.
+
+> **Internal reviews stay local.** The QA report, UX review, and Code Reviewer verdict are the *publisher's own* internal reviews — they are **never posted as GitHub PR comments**. Non-clean findings are fixed locally (loop back through Dev) and pushed to the branch; only genuinely-deferred items surface in the PR body self-review. What the human reviewer (Romain) sees on GitHub is a clean, final PR — body + code — not a thread of internal-review comments. (Posting a review *to* GitHub is correct only when reviewing *someone else's* PR — external review, per `droplet-pr-sweep` / `droplet-pr-test-review`.)
 
 ---
 

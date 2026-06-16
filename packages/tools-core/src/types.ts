@@ -77,6 +77,10 @@ export interface ToolContext {
     }>
   >;
   userId?: string;
+  /** Caller's role. HTTP transport: from JWT claims. Stdio: forwarded by
+   *  the orchestrator via `_meta.userRole` (WARP-845 role-scoped memory
+   *  reads). Absent → role-scoped handlers use the most-restrictive
+   *  guest view. */
   role?: Role;
   ncToken?: string;
   /**

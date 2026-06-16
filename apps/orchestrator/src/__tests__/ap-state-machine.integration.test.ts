@@ -194,6 +194,11 @@ describe("AP state machine — full lifecycle (WARP-446 integration)", () => {
     expect(row.approvedAt).toBeInstanceOf(Date);
     expect(row.approvedSsid).toBe("Droplet");
     expect(row.lastOperationId).toBe("op-abc");
+    // The default display name is derived from the device-tree model
+    // (`raspberrypi,5-model-b`, still the literal match string) but is
+    // hardware-agnostic in the operator-facing label (ADR-011): no "Pi5".
+    expect(row.displayName).toBe("AP (12:34:56)");
+    expect(row.displayName).not.toMatch(/Pi5/);
 
     // 4. Decommission.
     (openwrt.decommissionAp as any).mockResolvedValue({

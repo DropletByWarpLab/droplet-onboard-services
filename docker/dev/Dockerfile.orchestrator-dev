@@ -1,0 +1,65 @@
+# Dev image for the orchestrator. Runs `npm install` + `tsx watch` against
+# a bind-mounted workspace so edits on the Windows host hot-reload inside
+# the container. Production uses apps/orchestrator/Dockerfile (multi-stage
+# build, FIPS posture, etc.); this image is intentionally minimal —
+# bookworm-slim + Node 20 + the system deps Prisma needs.
+#
+# Companion files:
+#   docker/docker-compose.dev.yml  — references this Dockerfile
+#   docker/dev/README.md           — Windows quickstart
+#
+# WHY bookworm-slim (not alpine):
+#   Prisma's engine binary expects a glibc-flavored Linux. The musl
+#   variant works but requires the prisma `binaryTargets` to include
+#   `linux-musl-openssl-3.0.x`. The schema already lists it, but
+#   bookworm avoids the periodic "engine not found" trap when a fresh
+#   `npm install` lands a different Prisma version.
+
+FROM node:20-bookworm-slim
+
+# System deps:
+#   - openssl + ca-certs: Prisma + outbound HTTPS
+#   - python3 / make / g++: native node-gyp modules (some optional deps
+#     of Prisma + tsx still trigger native builds on first install)
+#   - git: prisma queries the repo for some workspace patterns; harmless
+#     to include
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      openssl ca-certificates python3 make g++ git tini && \
+    rm -rf /var/lib/apt/lists/*
+
+# Drop FIPS enforcement — dev images don't have the FIPS provider
+# layered on, and the orchestrator's boot self-test exits non-zero
+# without it. The production Dockerfile keeps the strict posture.
+ENV DROPLET_FIPS_REQUIRED=false
+
+# Use the host-mounted node_modules layout. The compose file mounts:
+#   - the repo root         at /workspace
+#   - a named volume        over /workspace/node_modules
+#   - a named volume        over /workspace/apps/orchestrator/node_modules
+#   - a named volume        over /workspace/services/mcp-server/node_modules
+#   - a named volume        over /workspace/packages/tools-core/node_modules
+#   - a named volume        over /workspace/packages/fips-selftest/node_modules
+# Named volumes shadow the bind mount so the Windows filesystem never
+# has to serve thousands of dependency files (which is murderously slow
+# over Docker Desktop's 9p mount).
+WORKDIR /workspace/apps/orchestrator
+
+# The compose file invokes /workspace/docker/dev/entrypoint-orchestrator.sh
+# as the container command. That script:
+#   1. cd /workspace && npm install --prefer-offline --no-audit --workspaces
+#   2. cd apps/orchestrator
+#   3. npx prisma generate
+#   4. npx prisma migrate deploy
+#   5. (if DROPLET_DEV_SEED=1) npx tsx prisma/seed.dev.ts
+#   6. npm run dev   (tsx watch src/index.ts)
+#
+# Keeping the boot logic in a shell script (not CMD here) lets ops
+# tweak it without rebuilding the image.
+
+EXPOSE 3000
+
+# tini reaps zombies + forwards signals to tsx so Ctrl-C in the
+# compose foreground cleanly stops the watcher.
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["bash", "/workspace/docker/dev/entrypoint-orchestrator.sh"]

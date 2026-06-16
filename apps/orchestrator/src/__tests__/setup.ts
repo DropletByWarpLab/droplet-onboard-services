@@ -67,7 +67,7 @@ vi.mock("@prisma/client", () => {
         {
           id: "test-uuid",
           deviceId: "droplet-dev-001",
-          hostname: "droplet-pi",
+          hostname: "droplet-dev",
           hardwareRev: "dev",
           networkMode: "dhcp",
           ip: "192.168.1.100",
@@ -78,9 +78,29 @@ vi.mock("@prisma/client", () => {
       ]),
       update: vi.fn().mockResolvedValue({}),
     },
+    // BUG-11: app.ts installs requirePasswordChangeGate on every request;
+    // the gate calls `prisma.user.findUnique` synchronously inside the
+    // handler, so a mock without a `user` table throws a TypeError
+    // (bypassing the gate's fail-open .catch) and 500s every gated route.
+    // `null` means "no directory row" → the gate fails open, matching a
+    // fresh auth-disabled dev session.
+    user: {
+      findUnique: vi.fn().mockResolvedValue(null),
+    },
   };
   return {
     PrismaClient: vi.fn(() => mockPrisma),
-    Prisma: { PrismaClientKnownRequestError },
+    Prisma: {
+      PrismaClientKnownRequestError,
+      // Mirrors the generated client's const-object enum — reset.service opens
+      // its double-fire-guard transaction with
+      // `Prisma.TransactionIsolationLevel.Serializable` (pr-reviewer #549).
+      TransactionIsolationLevel: {
+        ReadUncommitted: "ReadUncommitted",
+        ReadCommitted: "ReadCommitted",
+        RepeatableRead: "RepeatableRead",
+        Serializable: "Serializable",
+      },
+    },
   };
 });

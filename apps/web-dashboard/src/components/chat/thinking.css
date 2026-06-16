@@ -1,0 +1,76 @@
+/* ============================================================
+   "Droplet is thinking" indicator (Claude Design handoff — Option B).
+
+   Shown on the assistant turn while the model is generating but has not
+   emitted its first token yet. Replaces the old blinking-cursor bubble:
+   a faceted Droplet mark whose facets gently breathe, beside a shimmering
+   "Droplet is thinking" label. Reuses the global label/brand tokens so it
+   tracks light/dark, and fully respects prefers-reduced-motion.
+   ============================================================ */
+
+.ds-thinking {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.ds-thinking-avatar {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: ds-think-bob 2.2s ease-in-out infinite;
+}
+.ds-thinking-avatar svg {
+  width: 22px;
+  height: 25px;
+  filter: drop-shadow(0 2px 6px rgba(99, 102, 241, 0.35));
+}
+.ds-thinking-avatar .facet-mid {
+  animation: ds-think-shine 1.8s ease-in-out infinite;
+  transform-origin: center;
+}
+
+.ds-thinking-label {
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: -0.1px;
+  background: linear-gradient(
+    90deg,
+    var(--color-label-tertiary) 0%,
+    var(--color-label-primary) 50%,
+    var(--color-label-tertiary) 100%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  animation: ds-think-shimmer 1.7s linear infinite;
+}
+
+@keyframes ds-think-bob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-2px); }
+}
+@keyframes ds-think-shine {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+@keyframes ds-think-shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ds-thinking-avatar,
+  .ds-thinking-avatar .facet-mid { animation: none; }
+  .ds-thinking-label {
+    animation: none;
+    -webkit-text-fill-color: var(--color-label-secondary);
+    color: var(--color-label-secondary);
+    background: none;
+  }
+}

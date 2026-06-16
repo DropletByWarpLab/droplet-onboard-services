@@ -54,6 +54,14 @@ vi.mock("../services/display.client.js", async () => {
   };
 });
 
+vi.mock("../services/file-indexer.client.js", async () => {
+  const actual: any = await vi.importActual("../services/file-indexer.client.js");
+  return {
+    ...actual,
+    healthCheck: vi.fn().mockResolvedValue(true),
+  };
+});
+
 import {
   classifyAggregate,
   runAllProbes,
@@ -67,6 +75,7 @@ import { isRedisHealthy } from "../services/cache.service.js";
 import { healthCheck as routingHealth } from "../services/openwrt.client.js";
 import { ncPing } from "../services/nextcloud.client.js";
 import { healthCheck as aiGatewayHealth } from "../services/ai-gateway.client.js";
+import { healthCheck as fileIndexerHealth } from "../services/file-indexer.client.js";
 
 function mkComponent(name: any, status: "ok" | "down"): ComponentHealth {
   return {
@@ -148,7 +157,16 @@ describe("runAllProbes (WARP-43)", () => {
     // WARP-165 added `display` to the probe set (PyPortal sidecar);
     // it's degraded-class only (auto-falls back to a sim backend when
     // /dev/ttyACM* is absent) and never trips the aggregate to down.
-    expect(names).toEqual(["ai-gateway", "display", "nextcloud", "postgres", "redis", "routing"]);
+    // WARP-598 added `file-indexer` (also degraded-class / SOFT).
+    expect(names).toEqual([
+      "ai-gateway",
+      "display",
+      "file-indexer",
+      "nextcloud",
+      "postgres",
+      "redis",
+      "routing",
+    ]);
     expect(results.every((r) => r.status === "ok")).toBe(true);
   });
 
@@ -174,6 +192,21 @@ describe("runAllProbes (WARP-43)", () => {
     const routing = results.find((r) => r.name === "routing");
 
     expect(routing?.status).toBe("down");
+  });
+
+  it("marks file-indexer down when the probe throws, and it stays SOFT (degraded)", async () => {
+    (fileIndexerHealth as any).mockRejectedValueOnce(new Error("ECONNREFUSED"));
+    const prisma = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+    } as unknown as PrismaClient;
+
+    const results = await runAllProbes(prisma);
+    const fi = results.find((r) => r.name === "file-indexer");
+
+    expect(fi?.status).toBe("down");
+    // file-indexer is a SOFT dependency — a down indexer must not trip
+    // the aggregate to `down`.
+    expect(classifyAggregate(results)).toBe("degraded");
   });
 
   it("marks components down when probes return false", async () => {
@@ -214,6 +247,9 @@ describe("GET /api/orchestrator/health", () => {
     stopHealthMonitor();
     const prisma = {
       $queryRaw: vi.fn().mockResolvedValue([]),
+      // BUG-11: requirePasswordChangeGate reads prisma.user.findUnique on
+      // every request; null = no directory row = fail-open.
+      user: { findUnique: vi.fn().mockResolvedValue(null) },
     } as unknown as PrismaClient;
     initDeviceService(prisma);
     app = createApp(prisma);
@@ -236,7 +272,7 @@ describe("GET /api/orchestrator/health", () => {
     expect(res.body).toHaveProperty("status");
     expect(res.body).toHaveProperty("components");
     expect(Array.isArray(res.body.components)).toBe(true);
-    expect(res.body.components.length).toBe(6);
+    expect(res.body.components.length).toBe(7);
     expect(res.body.version).toBe("0.1.0");
     expect(typeof res.body.uptime).toBe("number");
   });

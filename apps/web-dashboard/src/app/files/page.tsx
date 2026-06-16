@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { FolderPlus, Link as LinkIcon, X, Eye, Star } from "lucide-react";
+import { Folder, FolderPlus, Link as LinkIcon, X, Eye, Star } from "lucide-react";
+import { ShellPage } from "@/components/shell/ShellPage";
 import { useToast } from "@/components/Toast";
 import { BreadcrumbNav } from "@/components/BreadcrumbNav";
 import { UploadZone, UploadButton } from "@/components/UploadZone";
@@ -37,6 +38,7 @@ import {
   bulkCopyFiles,
 } from "@/lib/api";
 import { authFetch } from "@/lib/auth";
+import { translateError } from "@/lib/friendly-errors";
 import type { FileEntryInfo } from "@/lib/types";
 
 function formatBytes(bytes: number): string {
@@ -108,7 +110,7 @@ export default function FilesPage() {
         await refresh();
         setUploadProgress(null);
       } catch (err) {
-        toast(err instanceof Error ? err.message : "Upload failed");
+        toast(translateError(err, "files"));
         setUploadProgress(null);
       } finally {
         setIsUploading(false);
@@ -165,7 +167,7 @@ export default function FilesPage() {
       setPendingDeletePath(null);
       await refresh();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Delete failed");
+      toast(translateError(err, "files"));
       throw err;
     }
   }, [pendingDeletePath, selectedFile, refresh, toast, fm]);
@@ -187,7 +189,7 @@ export default function FilesPage() {
       setPendingBulkDelete(false);
       await refresh();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Bulk delete failed");
+      toast(translateError(err, "files"));
       throw err;
     }
   }, [fm, refresh, toast]);
@@ -205,7 +207,7 @@ export default function FilesPage() {
       setShowNewFolder(false);
       await refresh();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Failed to create folder");
+      toast(translateError(err, "files"));
     }
   }, [currentPath, newFolderName, refresh, toast]);
 
@@ -229,7 +231,7 @@ export default function FilesPage() {
         if (selectedFile?.path === file.path) setSelectedFile(null);
         await refresh();
       } catch (err) {
-        toast(err instanceof Error ? err.message : "Rename failed");
+        toast(translateError(err, "files"));
         fm.endRename();
       }
     },
@@ -254,7 +256,7 @@ export default function FilesPage() {
         setMoveDialog(null);
         await refresh();
       } catch (err) {
-        toast(err instanceof Error ? err.message : "Operation failed");
+        toast(translateError(err, "files"));
       }
     },
     [moveDialog, fm, refresh, toast]
@@ -276,7 +278,7 @@ export default function FilesPage() {
       fm.clearSelection();
       await refresh();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Paste failed");
+      toast(translateError(err, "files"));
     }
   }, [fm, currentPath, refresh, toast]);
 
@@ -412,33 +414,40 @@ export default function FilesPage() {
     return moveDialog.paths.map((p) => p.split("/").pop() || p);
   }, [moveDialog]);
 
-  return (
-    <div className="p-6 lg:p-8 max-w-7xl">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-4 gap-4">
-        <h1 className="type-large-title text-label-primary flex-shrink-0">Files</h1>
-        <div className="flex items-center gap-2 flex-shrink-0">
-          <button
-            onClick={() => setShowNewFolder(true)}
-            className="dp-btn-secondary type-subheadline !py-2 !px-4 !min-h-[36px]"
-          >
-            <FolderPlus size={14} />
-            <span className="hidden sm:inline">New Folder</span>
-          </button>
-          <UploadButton onClick={() => fileInputRef.current?.click()} />
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple
-            className="hidden"
-            onChange={(e) => {
-              if (e.target.files) handleUpload(e.target.files);
-              e.target.value = "";
-            }}
-          />
-        </div>
-      </div>
+  // ShellPage header action slot: New Folder + Upload. The file-system
+  // BreadcrumbNav stays BELOW the header — it's intra-page navigation
+  // (path within Files), distinct from the page-level "Files" header.
+  const filesActions = (
+    <>
+      <button
+        onClick={() => setShowNewFolder(true)}
+        className="btn ghost"
+        type="button"
+      >
+        <FolderPlus size={14} />
+        <span className="hidden sm:inline">New folder</span>
+      </button>
+      <UploadButton onClick={() => fileInputRef.current?.click()} />
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          if (e.target.files) handleUpload(e.target.files);
+          e.target.value = "";
+        }}
+      />
+    </>
+  );
 
+  return (
+    <ShellPage
+      icon={<Folder size={15} />}
+      label="Files"
+      title="Files"
+      actions={filesActions}
+    >
       {/* Search bar */}
       <div className="mb-4">
         <SearchBar
@@ -465,7 +474,7 @@ export default function FilesPage() {
 
       {/* New folder dialog */}
       {showNewFolder && (
-        <div className="flex items-center gap-2 mb-4 p-3 dp-card">
+        <div className="card flex items-center gap-2 mb-4" style={{ padding: 12 }}>
           <input
             autoFocus
             value={newFolderName}
@@ -477,12 +486,13 @@ export default function FilesPage() {
             placeholder="Folder name..."
             className="dp-input flex-1"
           />
-          <button onClick={handleCreateFolder} className="dp-btn-primary !min-h-[38px]">
+          <button onClick={handleCreateFolder} className="btn primary" type="button">
             Create
           </button>
           <button
             onClick={() => setShowNewFolder(false)}
-            className="type-subheadline text-accent hover:text-accent-hover px-3 py-2 transition-colors"
+            className="btn ghost"
+            type="button"
           >
             Cancel
           </button>
@@ -581,7 +591,7 @@ export default function FilesPage() {
         {/* Detail panel */}
         {selectedFile && !selectedFile.isDirectory && (
           <div className="hidden lg:block w-72 flex-shrink-0">
-            <div className="dp-card p-4 sticky top-6 space-y-4">
+            <div className="card sticky top-6 space-y-4">
               <div className="flex items-center justify-between gap-2">
                 <h3 className="type-headline text-label-primary truncate flex-1">
                   {selectedFile.name}
@@ -627,14 +637,16 @@ export default function FilesPage() {
               <div className="flex flex-col gap-2 pt-2">
                 <button
                   onClick={() => handlePreview(selectedFile)}
-                  className="dp-btn-secondary type-footnote !min-h-[36px] !py-1.5"
+                  className="btn ghost sm"
+                  type="button"
                 >
                   <Eye size={14} />
                   Preview
                 </button>
                 <button
                   onClick={() => handleShare(selectedFile)}
-                  className="dp-btn-secondary type-footnote !min-h-[36px] !py-1.5"
+                  className="btn ghost sm"
+                  type="button"
                 >
                   <LinkIcon size={14} />
                   Share…
@@ -714,6 +726,6 @@ export default function FilesPage() {
         confirmLabel="Move to Trash"
         variant="destructive"
       />
-    </div>
+    </ShellPage>
   );
 }

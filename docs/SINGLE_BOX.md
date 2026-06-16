@@ -7,7 +7,7 @@ shapes differ only in hardware layout.
 | Shape | Hardware | Activation |
 |---|---|---|
 | **`single-box`** | One x86 host with dGPU (Ollama) + iGPU (Frigate) + MT7922 Wi-Fi card (in-container OpenWrt AP) | `COMPOSE_PROFILES=single-box` in `.env` |
-| **`multi-box`** | Separate Jetson Orin (Compute Brick) + Pi 5 OpenWrt router + Lantronix switch | Default — no extra env |
+| **`multi-box`** | Separate inference host (Compute Brick) + OpenWrt router host + managed switch | Default — no extra env |
 | **`v2-6`** (future) | Custom 9-PCB chassis from `pcb-claude-tool` | TBD as that hardware lands |
 
 This doc covers the **single-box** shape. The other two have their own
@@ -20,13 +20,13 @@ profile flag just picks which optional services bundle into the host.
 On a fresh Ubuntu 24.04 host with an AMD dGPU + iGPU + MT7922 Wi-Fi card:
 
 ```bash
-git clone git@github.com:DropletByWarpLab/droplet-pi-platform.git
-cd droplet-pi-platform
+git clone git@github.com:DropletByWarpLab/droplet-onboard-services.git
+cd droplet-onboard-services
 ./scripts/setup.sh
 ```
 
 That's it. The setup script's auto-detection sees the dGPU + iGPU + no
-separate Jetson on the LAN, enables single-box mode automatically, and:
+separate inference host on the LAN, enables single-box mode automatically, and:
 
 - generates per-device secrets in `.env` via `secrets.sh`
 - appends the single-box knobs to `.env` (`COMPOSE_PROFILES=linux,single-box`,
@@ -54,11 +54,37 @@ Auto-detection is conservative. Override with:
 
 Detection sources (in order — see `scripts/lib/single-box.sh::detect_single_box_mode`):
 
-1. **Separate Jetson reachable** (`192.168.50.197:11434` answers
+1. **Separate inference host reachable** (`192.168.50.197:11434` answers
    `/api/version` OR `inference-engine.local:11434` answers) → multi-box,
    NOT single-box.
 2. **2+ DRM render nodes + dGPU silicon present** → single-box.
 3. **Anything else** → not single-box; setup.sh continues in standard mode.
+
+### Install from the autoinstall ISO (zero keystrokes)
+
+The clone-then-`setup.sh` flow above presumes you've already installed Ubuntu
+and cloned the repo. The **appliance autoinstall ISO** (WARP-663 / ADR-020) does
+all of that for you: flash an SSD, boot, and the box installs Ubuntu 24.04
+unattended, clones this repo to `/home/droplet/edge-platform`, and runs
+`setup.sh --single-box --systemd` on first boot — replicating this quick-start
+with zero human keystrokes.
+
+```bash
+# On a Linux build host with Docker (the ISO repack uses dockerized xorriso):
+./scripts/droplet-image build --version <X.Y.Z>      # -> output/droplet-single-box-<X.Y.Z>.iso
+
+# Flash it (the confirm phrase MUST name the target device):
+./scripts/droplet-image flash \
+    --image output/droplet-single-box-<X.Y.Z>.iso \
+    --device /dev/sdX \
+    --confirm "ERASE /dev/sdX"
+```
+
+No per-device secret is baked into the ISO — the initial `droplet` login
+password is locked and every real secret is generated at first boot by
+`secrets.sh`, exactly as on a manual install. Full pipeline (manifest, signing,
+key custody, the manual flash+boot acceptance gate):
+[`IMAGE_PIPELINE.md`](IMAGE_PIPELINE.md).
 
 ## What the `single-box` profile activates
 
@@ -76,15 +102,63 @@ Plus 3 named volumes:
 
 All three are wiped by `./scripts/factory-reset.sh`.
 
+## Always-on customer services (no profile gate)
+
+Some services run on the orchestrator host regardless of deployment shape
+(`single-box` AND `multi-box`). They share the host's RAM + SSD with the
+profile-gated services above and the orchestrator stack itself.
+
+### Embedded Plane PM stack (WARP-501 / ADR-010)
+
+Spec OQ1 chose dedicated `postgres-pm` + `redis-pm` over sharing with the
+orchestrator's main DB so backup granularity (WARP-514) is per-volume and
+Plane's Django migrations are quarantined from Prisma's.
+
+| Container | Image | Port | RAM (idle, ~) | RAM (busy P95) |
+|---|---|---|---|---|
+| `pm-web` | `makeplane/plane-frontend:v0.24.1` | 3000 (internal, Nginx /pm/) | ~120 MB | ~250 MB |
+| `pm-api` | `makeplane/plane-backend:v0.24.1` | 8000 (internal) | ~180 MB | ~400 MB |
+| `pm-worker` | `makeplane/plane-backend:v0.24.1` + `./bin/docker-entrypoint-worker.sh` | — | ~140 MB | ~300 MB |
+| `pm-migrator` (one-shot) | `makeplane/plane-backend:v0.24.1` + `./bin/docker-entrypoint-migrator.sh` | — | — (exits) | ~250 MB transient |
+| `postgres-pm` | `postgres:15-alpine` | 5432 (internal) | ~30 MB | ~80 MB |
+| `redis-pm` | `redis:7-alpine` | 6379 (internal) | ~10 MB | ~25 MB |
+| `pm-health` (sidecar) | `services/pm/Dockerfile` | 8090 (internal) | ~25 MB | ~30 MB |
+
+**Total Plane stack footprint at idle: ~500 MB RAM.** Acceptable on every
+shipping deployment shape (a large-memory single-box has 32 GB; a
+memory-constrained single-box has 8 GB minus other services). For
+memory-constrained deployments operating near RAM ceiling, monitor
+`pm-worker` first — Celery's per-task memory dominates.
+
+**Storage budget (per spec OQ1 cascade):**
+- `postgres-pm-data` — Plane DB. ~10 MB seed, ~50 MB per 1k issues with
+  full comment history. Linear growth.
+- `pm-attachments-data` — file uploads attached to issues. Operator-cap
+  via Plane's per-workspace attachment limit; defaults to 5 MB per upload,
+  no global cap. Document customer storage budget in their pilot doc.
+
+**Backup:** Use `scripts/host/pm-backup.sh` (WARP-514). Restore via
+`scripts/host/pm-restore.sh`. Both wipe + reload, not merge.
+
+**Reverse-proxy:** Nginx serves Plane at `https://<gateway>/pm/` per
+WARP-502. Websocket upgrade headers are forwarded; CSP `frame-ancestors`
+(per spec OQ2 iframe decision) tracked in `services/pm/PATCHES.md`.
+
 ## Host-level integration (installed by `setup.sh` in single-box mode)
 
 The single-box shape needs three host-level integrations that the compose
 stack alone doesn't cover. `scripts/lib/single-box.sh::install_single_box_host_integration`
 installs all three when single-box mode is active:
 
-1. **MT7922 → OpenWrt netns attach** — moves the Wi-Fi PHY into the
-   container so OpenWrt's hostapd can drive it as an AP.
-   `/usr/local/sbin/droplet-openwrt-attach` + `droplet-openwrt-attach.service`.
+1. **Wi-Fi PHY → OpenWrt netns attach** — moves the Wi-Fi PHY into the
+   container so OpenWrt's hostapd can drive it as an AP. The PHY + its netdev
+   name are **auto-detected** at attach time (WARP-826) — `/sys/class/ieee80211`
+   for the phy, `iw dev` for the iface — so it works on whatever card the box
+   ships (MT7922 → `phy0`/`wlp14s0`, AX210 → `phy1`/`wlp7s0`, others → `wlan0`).
+   An explicit `DROPLET_AP_PHY` / `DROPLET_AP_IFACE` in
+   `/etc/default/droplet-openwrt-attach` stays authoritative (used verbatim,
+   detection skipped). `/usr/local/sbin/droplet-openwrt-attach` +
+   `droplet-openwrt-attach.service`.
 
 2. **br-lan host DHCP + Lantronix route** — dedicated dnsmasq on the
    host's `br-lan` so the Lantronix switch + downstream cameras get IPs,
@@ -118,6 +192,76 @@ installs all three when single-box mode is active:
 > `droplet-host-net` (or similar) name and updates the systemd unit +
 > bind paths in lockstep. Until that lands, the filenames stay as-is
 > to avoid breaking the captured-vs-installed parity check.
+
+## Box-side verification checklist — router + AP bring-up (WARP-826)
+
+Run this on-LAN, on the box, after a fresh provision / factory-reset+`setup.sh`
+to confirm the OpenWrt router **and** the default Wi-Fi AP actually came up. This
+is the human gate for WARP-826 — the code fixes (phy/iface auto-detect, the
+readiness poll that gates the attach re-kick, and the reachability-derived
+`routerConnected`) are verified statically by unit tests, but the live radio +
+on-LAN path can only be confirmed on hardware. SSH in as `droplet@<box-ip>`.
+
+1. **The radio was detected (not the old hardcoded phy1/wlp7s0).**
+   ```bash
+   sudo journalctl -u droplet-openwrt-attach | grep -E "AP radio detected|no wireless phy"
+   ```
+   Expect `AP radio detected — phy=<phyN> iface=<name>` matching the card the box
+   actually has (`ls /sys/class/ieee80211` + `iw dev` to cross-check). A
+   `no wireless phy/iface resolved` WARN means the card isn't seen — **stop and
+   check the hardware** (seated? `lspci | grep -i net`?); pin `DROPLET_AP_PHY` /
+   `DROPLET_AP_IFACE` in `/etc/default/droplet-openwrt-attach` only if the card
+   is present but enumerates oddly.
+
+2. **The PHY moved into the container netns.**
+   ```bash
+   # Host should NO LONGER see the AP phy; the container should.
+   iw dev                                   # AP iface absent on host
+   docker exec droplet-openwrt iw dev       # AP iface present in container
+   ```
+
+3. **The container is READY (Running AND ubus answering) — the readiness poll.**
+   ```bash
+   docker inspect -f '{{.State.Running}}' droplet-openwrt   # true
+   docker exec droplet-openwrt ubus -t 1 list >/dev/null && echo "ubus OK"
+   ```
+   On a freshly recreated container the attach must have waited for ubus before
+   running; if `provision_single_box_openwrt` logged
+   `not READY (Running + ubus) within budget`, the container never came up — check
+   `docker logs droplet-openwrt`.
+
+4. **hostapd is up and beaconing the default SSID.**
+   ```bash
+   docker exec droplet-openwrt pgrep -a hostapd          # running, -P /run/hostapd.pid
+   docker exec droplet-openwrt cat /etc/hostapd.conf | grep -E "^interface|^ssid"
+   ```
+   `interface=` must equal the detected/declared AP iface; `ssid=` the configured
+   `DROPLET_AP_SSID` (default `Droplet`).
+
+5. **A client can associate, get a DHCP lease, and resolve the local name.**
+   From a phone/laptop: join the `Droplet` SSID with the per-box PSK
+   (`sudo cat /etc/droplet/ap-psk`). Confirm it gets a `192.168.20.x` lease
+   (`docker exec droplet-openwrt cat /tmp/dhcp.leases`) and that
+   `https://droplet.local/` loads the dashboard (DNAT to the gateway container).
+
+6. **`routerConnected` is honest — the dashboard shows ONLINE, not OFFLINE.**
+   ```bash
+   # /health carries the explicit topology posture; connected reflects real ubus.
+   curl -fsS -H "Authorization: Bearer $ROUTING_SERVICE_TOKEN" \
+     "$ROUTING_SERVICE_URL/health" | python3 -m json.tool
+   ```
+   Expect `"connected": true` and a `"topology"` of `UNKNOWN` on a LAN-only
+   single-box (WAN handled by the host — **this is correct, not an error**) or
+   `DOWNSTREAM_ROUTER` if a WAN uplink with an upstream gateway is present. The
+   orchestrator's `/api/network/status` then returns `routerConnected: true` and
+   the dashboard Network page reads ONLINE. A `connected: false` here is a genuine
+   unreachable router — not the WAN-absence false-offline this ticket fixed.
+
+> WAN-absence is **not** offline: the single-box's containerized OpenWrt has no
+> `wan` logical interface (the host owns the WAN), so the routing SDK returns a
+> `present:false` wan stub and the topology posture is the explicit `UNKNOWN`.
+> Neither makes the router offline — `routerConnected` is derived from live ubus
+> reachability (`/health`), never from the presence of a WAN interface.
 
 ## Migrating an existing single-box host away from `docker-compose.override.yml`
 

@@ -161,7 +161,7 @@ Create `services/ai-gateway/query_classifier.py`:
 Mirrors the lazy-init pattern of `reranker.RerankerSingleton`. Model is
 ~110 MB int8 ONNX, cached to /var/cache/droplet/models/. First call
 pays the load cost; subsequent calls are CPU-bound NLI scoring (~50 ms
-on x86_64 / Jetson Orin).
+on the inference host).
 
 Returns one of QUERY_CLASSES, or "unknown" when top-1 confidence is
 below CLASSIFIER_CONFIDENCE_FLOOR (we don't route on noise — CLAUDE.md

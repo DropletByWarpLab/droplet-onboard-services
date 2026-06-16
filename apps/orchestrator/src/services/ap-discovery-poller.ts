@@ -24,6 +24,7 @@
 import pino from "pino";
 import type { PrismaClient } from "@prisma/client";
 import { reconcileDiscovered } from "./ap-onboard.service.js";
+import { logRouterError } from "./openwrt.client.js";
 import type { CronRuntime } from "./cron-runtime.service.js";
 
 const logger = pino({ name: "ap-discovery-poller" });
@@ -91,8 +92,9 @@ export function createApDiscoveryPoller(
         // Routing service down, schema drift, etc. — degrade to a logged
         // no-op so the cron-runtime doesn't go into its consecutive-
         // failures backoff for a transient routing outage. Next tick
-        // retries.
-        logger.warn({ err }, "ap-discovery: pollOnce failed");
+        // retries. Cold-start-aware: an UNREACHABLE during the boot grace
+        // window logs at debug instead of flooding warn on every fresh boot.
+        logRouterError(logger, err, "ap-discovery: pollOnce failed");
       }
     },
   };

@@ -8,7 +8,11 @@ The Droplet platform prevents the AI assistant (and any API client) from perform
 |------|----------|---------|
 | **Tier 1** | Auto-execute (with rate limiting) | Read port status, list VLANs, get camera list, WiFi scan |
 | **Tier 2** | Requires user confirmation token | Delete camera, disable PoE, create/delete VLAN, change SSID, firewall rules |
-| **Tier 3** | Blocked for AI entirely | Reboot, factory reset, VPN config, disable Jetson's switch port |
+| **Tier 3** | Blocked for AI entirely | Reboot, factory reset, VPN config, disable the appliance's switch port |
+
+### Desktop-client tools (the *target axis*)
+
+[ADR-014](ADR-014-llm-client-dispatched-actions.md) extends this same model with a **target axis** — a tool call targets either `self` (the appliance, the default everything above assumes) or `client:{device_id}` (a paired desktop). Tier-2 client-target confirmations prompt on the **target device's native modal**, not the dashboard. Desktop tools are **default-off** (every tool is `block` until the user opts in per tool). `get_clipboard` and `screenshot` are **Tier-3 (blocked) on clients** in V1, pending the deep-assist ADR (WARP-549) + enrollment gate (WARP-550).
 
 ## How Confirmation Works
 
@@ -27,10 +31,10 @@ Tokens expire after 60 seconds. Each confirmation is logged to the audit trail.
 |-----------|------|-----|
 | `switch_port_enable` | 2 | Could re-enable a quarantined port |
 | `switch_port_disable` | 2 | Could disconnect a device |
-| `switch_disable_protected_port` | **3** | Would sever Jetson's management connection |
+| `switch_disable_protected_port` | **3** | Would sever the appliance's management connection |
 | `switch_create_vlan` | 2 | Network topology change |
 | `switch_delete_vlan` | 2 | Could orphan devices |
-| `switch_set_vlan_membership` | 2 | Could isolate the Jetson |
+| `switch_set_vlan_membership` | 2 | Could isolate the appliance |
 | `switch_poe_enable` | 2 | Could power unexpected devices |
 | `switch_poe_disable` | 2 | Could kill camera power |
 | `switch_setup_cameras` | 2 | Bulk VLAN reassignment |
@@ -54,9 +58,17 @@ Tokens expire after 60 seconds. Each confirmation is logged to the audit trail.
 | `reboot` | **3** | Service interruption |
 | `factory_reset` | **3** | Total data loss |
 
+Enforcement detail: `set_wifi_ssid` / `set_wifi_channel` confirmations are
+enforced **in the tool handler** — the orchestrator's human-facing SSID/channel
+routes are Tier 1 (the setup wizard applies them with no confirmation, see
+`SETUP_WIZARD_WALKTHROUGH.md`), so the tool refuses to post until the LLM
+re-calls it with `confirmed: true` after an explicit user yes in chat. The
+firewall writes get their 202 + token from the orchestrator's network-safety
+evaluator as described above.
+
 ## Protected Port
 
-The `SWITCH_PROTECTED_PORT` environment variable designates the switch port the Jetson is connected to. Disabling this port is classified as Tier 3 (blocked for AI), preventing the LLM from ever severing its own management connection.
+The `SWITCH_PROTECTED_PORT` environment variable designates the switch port the appliance is connected to. Disabling this port is classified as Tier 3 (blocked for AI), preventing the LLM from ever severing its own management connection.
 
 Set in docker-compose or .env:
 ```

@@ -20,7 +20,7 @@ vi.mock("framer-motion", async () => {
 });
 
 vi.mock("@/lib/auth", () => ({
-  useAuth: () => ({ completeSetup: vi.fn() }),
+  useAuth: () => ({ completeSetup: vi.fn(), setupState: { appliance: "unclaimed", setupStep: "welcome", userTourCompleted: false } }),
 }));
 
 const fetchDevicesMock = vi.fn(async () => ({
@@ -35,8 +35,29 @@ const fetchDevicesMock = vi.fn(async () => ({
 }));
 
 vi.mock("@/lib/api", () => ({
+  // WARP-867 — AccountStep probes setup status on mount to pick its mode;
+  // "required" keeps these walks on the normal create form.
+  checkSetupRequired: vi.fn(async () => "required"),
   setupAdmin: vi.fn(async () => undefined),
+  patchSetupStep: vi.fn(async () => undefined),
   loginUser: vi.fn(async () => undefined),
+  // PR #373 — claim slots before account; the Claim step calls these.
+  fetchApplianceContract: vi.fn(async () => ({
+    appliance_id: "droplet-appliance-test",
+    compute: { label: "Compute", value: "Local AI compute", online: true },
+    storage: { label: "Storage", value: "Encrypted at rest", online: true },
+    network: { label: "Network", value: "Local network", online: true },
+    display: { label: "Display", value: "Front-panel display", online: true },
+    supply_chain: { taa_compliant: true, ndaa_889_clear: true, summary: "Verified" },
+  })),
+  postClaim: vi.fn(async () => ({ claimed: true, next_step: "account" })),
+  // PR #380 — org slots after account; the Org step calls postOrg.
+  postOrg: vi.fn(async () => ({
+    ok: true,
+    slug: "acme",
+    reserved_host: "droplet.local/acme",
+    next_step: "internet",
+  })),
   fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
   setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
   // Storage step auto-skips on empty drive list — let it pass straight
@@ -61,21 +82,24 @@ vi.mock("@/lib/api", () => ({
 }));
 
 import SetupPage from "@/app/setup/page";
+import { passClaimStep } from "./helpers/claim-step";
+import { passOrgStep } from "./helpers/org-step";
 
 async function advanceToDiscovery() {
-  // Click "Get Started" then fill account form.
+  // Click "Get Started", pass the Claim step, then fill account form.
   fireEvent.click(screen.getByRole("button", { name: /get started/i }));
-  fireEvent.change(screen.getByPlaceholderText(/your-username/i), {
-    target: { value: "owner" },
+  await passClaimStep();
+  fireEvent.change(screen.getByPlaceholderText(/you@company\.com/i), {
+    target: { value: "owner@warp.test" },
   });
   fireEvent.change(screen.getByPlaceholderText(/your name/i), {
     target: { value: "Robin" },
   });
-  fireEvent.change(screen.getByPlaceholderText(/min\. 8 characters/i), {
-    target: { value: "longenoughpw" },
+  fireEvent.change(screen.getByPlaceholderText(/create a password/i), {
+    target: { value: "Abcdefghijk1" },
   });
   fireEvent.change(screen.getByPlaceholderText(/repeat password/i), {
-    target: { value: "longenoughpw" },
+    target: { value: "Abcdefghijk1" },
   });
   await act(async () => {
     fireEvent.click(screen.getByRole("button", { name: /create account/i }));
@@ -84,14 +108,29 @@ async function advanceToDiscovery() {
     await Promise.resolve();
     await Promise.resolve();
   });
-  // Account → Internet. The Internet step (WARP-174) sits between account
-  // and discovery — skip it so the polling-bounds tests can land on the
-  // discovery surface they exercise. Flush once for InternetStep's
-  // fetchDuckDnsStatus effect, then click the always-rendered skip link.
+  // PR #380 — pass through the org step (account → org → …).
+  await passOrgStep();
+  // PR #375 — TwoFactor step → skip (org → twofactor → wifi).
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+  });
+  // Onboarding-Flow redesign — the single Internet step is now two (Wi-Fi then
+  // Address) between account and discovery. Skip both so the polling-bounds
+  // tests land on the discovery surface they exercise. Wi-Fi has no async mount
+  // load; the Address step's fetchDuckDnsStatus effect resolves before its skip.
   await act(async () => {
     await Promise.resolve();
     await Promise.resolve();
-    fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /skip — i'll do this later/i }),
+    );
+  });
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+    fireEvent.click(
+      screen.getByRole("button", { name: /skip — no remote access/i }),
+    );
   });
 }
 

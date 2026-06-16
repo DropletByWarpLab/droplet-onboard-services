@@ -5,13 +5,20 @@
  * `focus-within:ring-*` utilities so keyboard users see focus.
  * Behavioural rendering of the home page requires SWR + auth shims that
  * outweigh the value of asserting Tailwind utility names.
+ *
+ * Asserted against `components/home/widgets.tsx` (ChatWidget) — the file that
+ * actually renders the capsule — so a refactor of the home page entry point
+ * can't false-pass (or false-break) the contract via a stale comment anchor.
  */
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const here = path.dirname(new URL(import.meta.url).pathname);
-const srcPath = path.resolve(here, "../app/page.tsx");
+// fileURLToPath, not `new URL(...).pathname` — the latter yields "/C:/..."
+// on Windows, which path.resolve doubles into "C:\C:\...".
+const here = path.dirname(fileURLToPath(import.meta.url));
+const srcPath = path.resolve(here, "../components/home/widgets.tsx");
 
 describe("WARP-298 home hero focus ring", () => {
   it("chat capsule has focus-within ring utilities", () => {

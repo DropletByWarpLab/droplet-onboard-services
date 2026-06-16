@@ -11,10 +11,10 @@ and docker-compose wiring.
 
 > **History:** an earlier version of this service also supported a direct-SPI
 > path (`luma.lcd` ILI9486 over `/dev/spidev0.0`) and an `fbtft` framebuffer
-> path (`/dev/fb1`) for Pi-shield TFTs. Both were removed because Tegra's
-> GPIO/SPI driver stack on L4T is incompatible with the Pi-form-factor TFT
-> shields we originally targeted (see WARP-127). The PyPortal pivot sidesteps
-> that entirely — a stock Jetson just enumerates the Titano as USB-ACM and
+> path (`/dev/fb1`) for GPIO-header TFT shields. Both were removed because the
+> appliance host's GPIO/SPI driver stack was incompatible with the header-mount
+> TFT shields we originally targeted (see WARP-127). The PyPortal pivot sidesteps
+> that entirely — a stock appliance host just enumerates the Titano as USB-ACM and
 > we drive it over serial, no GPIO/kernel module required.
 
 ## Display backends
@@ -38,7 +38,7 @@ cp services/oled-display/pyportal/{boot.py,code.py} /media/$USER/CIRCUITPY/
 cp -r ~/Adafruit_CircuitPython_Bundle/lib/adafruit_display_text /media/$USER/CIRCUITPY/lib/
 cp ~/Adafruit_CircuitPython_Bundle/lib/adafruit_touchscreen.mpy /media/$USER/CIRCUITPY/lib/
 # 3. Reset the PyPortal, plug into any USB-A on the host.
-# 4. docker compose -p docker -f docker/docker-compose.yml --profile full up -d oled-display
+# 4. docker compose -f docker/docker-compose.yml --profile full up -d oled-display
 ```
 
 Full protocol and debugging notes: [`pyportal/README.md`](./pyportal/README.md).
@@ -52,6 +52,9 @@ Full protocol and debugging notes: [`pyportal/README.md`](./pyportal/README.md).
 | POST | `/display/home`        | Navigate to the Stats screen |
 | POST | `/display/stats`       | Navigate to the Stats screen (4 half-donut gauges + rollup cards) |
 | POST | `/display/logo`        | Navigate to the Idle screen (clock + mark + info chips) |
+| POST | `/display/boot`        | Boot screen `{stage, detail?, pct?}` — omit `pct` for an indeterminate band |
+| POST | `/display/shutdown`    | Shutdown screen `{reason?, phase?}` — `phase=halted` shows "Safe to power off" |
+| POST | `/display/claim`       | Onboarding claim screen `{code, setup_url, wifi_*?}` (WARP-632 / ADR-017). Design-handoff two-column layout: code hero + link steps left, scan QR card right. The QR is the host-encoded setup deep link (`<setup_url>?c=<CODE>`) or, when the optional Wi-Fi creds are supplied (WARP-819), the Wi-Fi join QR with readable SSID/PSK |
 | POST | `/display/message`     | Custom text `{title, lines[]}` — up to 10 lines |
 | POST | `/display/custom`      | Upload image (multipart, max 8 MB) |
 | POST | `/display/brightness`  | Set brightness `{value: 0–255}` (PyPortal only) |
@@ -71,6 +74,35 @@ not a billboard). Set `AUTO_CYCLE=1` to restore the logo → stats carousel for
 headless demos. When an LLM calls `/display/message`, cycling pauses for 30 s
 before resuming.
 
+## Boot & shutdown screens
+
+The panel has two host-driven lifecycle screens (modal — not part of the
+swipe carousel):
+
+- **Boot** — the service constructs in boot mode, so the first frame on a
+  cold start is "Starting Droplet" rather than a live screen. A bounded
+  readiness check (hosted on the existing display cycle thread — no separate
+  scheduler) flips the panel to the live UI once the system is healthy. It
+  probes `BOOT_READINESS_URL` (default: the same-host orchestrator behind the
+  gateway, on loopback) about every 2 s; a `2xx` means ready. If readiness is
+  never observed within `BOOT_MAX_SECONDS` (default 90) the live UI is
+  surfaced anyway so a degraded stack still shows something. `POST
+  /display/boot` lets the host's startup orchestration push finer-grained
+  stage/progress while the stack comes up.
+- **Shutdown** — `POST /display/shutdown` shows "Shutting down" and freezes
+  the panel on that frame (the cycle loop is stopped so nothing overwrites
+  it). `phase=halted` switches the copy to "Safe to power off".
+
+The shutdown screen is driven at teardown by a systemd oneshot,
+`droplet-shutdown-screen.service`, whose `ExecStop` runs the host script
+`/usr/local/sbin/droplet-shutdown-screen.sh`. The unit is ordered
+`After=docker.service` so systemd stops it **before** the docker stack on
+shutdown — while the `oled-display` container is still alive to receive the
+POST. The script is best-effort and time-bounded (`curl -m 5`), so it can
+never block the shutdown sequence. `scripts/install-device-bridge.sh`
+installs the unit + script and enables the unit; `scripts/factory-reset.sh`
+removes them.
+
 ## Environment
 
 | Variable | Default | Description |
@@ -83,6 +115,13 @@ before resuming.
 | `DISPLAY_TIMEZONE` | `America/Los_Angeles` | Timezone for the wall-clock pushed to the PyPortal |
 | `SERVICE_SECRET` | _(empty)_ | Bearer token required on all non-`/health` routes |
 | `BRIDGE_AUTH_TOKEN` | falls back to `SERVICE_SECRET` | Token the container sends to `device-bridge` when calling `POST /openwrt/wifi/rotate` |
+| `DROPLET_AP_MODE` | `uci` | Pairing-QR creds source: `uci` (multi-box, read SSID/PSK over SSH), `hostapd` (single-box, read from env / `/etc/hostapd.conf`), or `auto` |
+| `DROPLET_AP_SSID` | _(empty)_ | hostapd-mode AP SSID. When set, used directly (and forces `auto` to hostapd) |
+| `DROPLET_AP_PSK` | _(empty)_ | hostapd-mode AP passphrase (paired with `DROPLET_AP_SSID`) |
+| `DROPLET_AP_CONTAINER` | `droplet-openwrt` | Container the hostapd.conf fallback reads via `docker exec` |
+| `DROPLET_AP_HOSTAPD_CONF` | `/etc/hostapd.conf` | hostapd.conf path inside that container |
+| `BOOT_READINESS_URL` | `http://127.0.0.1/api/health` | Health endpoint polled to leave the boot screen (loopback orchestrator behind the gateway) |
+| `BOOT_MAX_SECONDS` | `90` | Timeout fallback — surface the live UI even if readiness never reports healthy |
 | `SIM_OUTPUT` | `/tmp/tft_preview.png` | Simulated output path (also used as preview cache for PyPortal) |
 
 ## Wi-Fi QR (static password, default)
@@ -97,6 +136,37 @@ The password is **static by default**. Rotating it would kick every
 joined station and break "auto-connect when I get home" on phones, so
 the default production posture is: set a memorable key once, let guests
 rejoin from saved credentials, done.
+
+### Deployment shapes: where the QR creds come from (`DROPLET_AP_MODE`)
+
+The two shipping deployment shapes broadcast the pairing AP differently,
+so the bridge sources the QR creds differently per `DROPLET_AP_MODE`:
+
+| Mode | Shape | Source |
+|------|-------|--------|
+| `uci` (default) | multi-box | OpenWrt router's UCI `wireless.*` over SSH (`OPENWRT_*`) |
+| `hostapd` | single-box | `DROPLET_AP_SSID` / `DROPLET_AP_PSK` from the bridge env; falls back to parsing `/etc/hostapd.conf` inside the `droplet-openwrt` container |
+| `auto` | either | hostapd when `DROPLET_AP_SSID` is set or UCI wireless is empty/unreachable; otherwise uci |
+
+The single-box shape runs a **raw hostapd AP on the host** (via the
+`droplet-openwrt-attach` script), not OpenWrt/UCI — so `uci show wireless`
+is empty there and the multi-box lookup returns "no active AP", leaving
+the pairing QR blank. Set `DROPLET_AP_MODE=hostapd` in
+`/etc/droplet/device-bridge.env` on a single-box install so `GET
+/openwrt/qr` builds the QR from the hostapd creds instead (WARP-654):
+
+```bash
+# /etc/droplet/device-bridge.env (single-box)
+DROPLET_AP_MODE=hostapd
+DROPLET_AP_SSID=Droplet          # or omit to read /etc/hostapd.conf
+DROPLET_AP_PSK=Droplet123!
+```
+
+**Rotation is always disabled in hostapd mode** (there's no UCI to push a
+new PSK to). `GET /openwrt/qr` returns `rotation_enabled: false` and
+`POST /openwrt/wifi/rotate` returns `rotation_disabled` as before, so the
+PyPortal hides the Rotate pill + TTL chip. The dict shape is otherwise
+identical to the multi-box path, so the PyPortal client is shape-agnostic.
 
 To change the password, SSH to the router and:
 ```bash
@@ -134,7 +204,7 @@ Rotation is rate-limited to 30 s between calls and serialized by an
 in-process lock. With rotation disabled, the endpoint returns `410
 Gone` and the PyPortal UI hides the Rotate button + TTL chip entirely.
 
-### Install on the Jetson
+### Install on the appliance
 
 ```bash
 sudo ./scripts/install-device-bridge.sh

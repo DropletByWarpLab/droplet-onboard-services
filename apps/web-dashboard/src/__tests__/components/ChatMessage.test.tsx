@@ -211,6 +211,110 @@ describe("ChatMessage", () => {
     });
   });
 
+  // WARP-640: a run_scene confirmation carries a single-use token, so the
+  // approval block grows an "Approve & run" button that completes the action
+  // in-chat. Confirmations WITHOUT a `confirmation` handle (firewall tools,
+  // etc.) still resolve on their dedicated dashboard surface — no button.
+  describe("scene-run approval button (WARP-640)", () => {
+    function sceneConfirmMessage(
+      partial: Partial<ChatToolCall> = {},
+    ): ChatMessageType {
+      return {
+        id: "asst-9",
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          {
+            id: "call-scene",
+            name: "run_scene",
+            args: { scene: "Movie night" },
+            ok: true,
+            status: "confirmation_required",
+            message: 'Running "Movie night" will run 2 device action(s).',
+            confirmation: {
+              kind: "scene_run",
+              sceneId: "11111111-2222-3333-4444-555555555555",
+              confirmationToken: "tok-abc123",
+            },
+            ...partial,
+          },
+        ],
+      };
+    }
+
+    it("renders an 'Approve & run' button and calls onApproveScene with (messageId, toolCallId)", () => {
+      const onApproveScene = vi.fn();
+      render(
+        <ChatMessage
+          message={sceneConfirmMessage()}
+          onApproveScene={onApproveScene}
+        />,
+      );
+      const btn = screen.getByTestId("scene-approve-run");
+      expect(btn).toBeInTheDocument();
+      expect(btn).toHaveAttribute("aria-label", "Approve and run this scene");
+      fireEvent.click(btn);
+      expect(onApproveScene).toHaveBeenCalledTimes(1);
+      expect(onApproveScene).toHaveBeenCalledWith("asst-9", "call-scene");
+    });
+
+    it("does NOT render the button for a confirmation chip with no re-issue handle (firewall tool)", () => {
+      const onApproveScene = vi.fn();
+      render(
+        <ChatMessage
+          message={{
+            id: "asst-fw",
+            role: "assistant",
+            content: "",
+            toolCalls: [
+              {
+                id: "call-fw",
+                name: "block_network_device",
+                args: { mac: "AA:BB:CC:DD:EE:FF" },
+                ok: true,
+                status: "confirmation_required",
+                message: "Open the dashboard to approve",
+                // no `confirmation` handle
+              },
+            ],
+          }}
+          onApproveScene={onApproveScene}
+        />,
+      );
+      expect(screen.queryByTestId("scene-approve-run")).not.toBeInTheDocument();
+      // The inline message still surfaces.
+      expect(screen.getByText("Open the dashboard to approve")).toBeInTheDocument();
+    });
+
+    it("does NOT render the button when onApproveScene is not wired", () => {
+      render(<ChatMessage message={sceneConfirmMessage()} />);
+      expect(screen.queryByTestId("scene-approve-run")).not.toBeInTheDocument();
+    });
+
+    it("disables the button and shows 'Running…' while confirmState is 'running'", () => {
+      render(
+        <ChatMessage
+          message={sceneConfirmMessage({ confirmState: "running" })}
+          onApproveScene={vi.fn()}
+        />,
+      );
+      const btn = screen.getByTestId("scene-approve-run") as HTMLButtonElement;
+      expect(btn).toBeDisabled();
+      expect(btn.textContent).toMatch(/running/i);
+    });
+
+    it("shows a 'ask again to retry' note (no button) when confirmState is 'failed'", () => {
+      render(
+        <ChatMessage
+          message={sceneConfirmMessage({ confirmState: "failed" })}
+          onApproveScene={vi.fn()}
+        />,
+      );
+      expect(screen.queryByTestId("scene-approve-run")).not.toBeInTheDocument();
+      expect(screen.getByTestId("scene-approve-failed")).toBeInTheDocument();
+    });
+  });
+
   describe("error state + retry affordance", () => {
     it("renders the friendly error message and a Try again button when onRetry is supplied", () => {
       const onRetry = vi.fn();
@@ -401,7 +505,10 @@ describe("ChatMessage", () => {
     // were `px-2 py-1` (~24 px). Bumped to `px-3 py-2` so the height
     // crosses the 32 px floor (≈ 36-40 px depending on icon + label) while
     // preserving the row's visual rhythm under the bubble.
-    it("Copy / Quote / Regenerate use ≥ 32 px hit-target padding (px-3 py-2, WARP-301)", () => {
+    it("actions render as design-handoff msg-act buttons (WARP-855)", () => {
+      // The Ask AI handoff replaces the px-3/py-2 Tailwind buttons with
+      // 26 px-high `.msg-act` pills (chat-indigo.css) — above WCAG
+      // 2.5.8 AA's 24 px minimum, matching the prototype's action row.
       render(
         <ChatMessage
           message={assistantMsg()}
@@ -413,17 +520,16 @@ describe("ChatMessage", () => {
       );
       for (const name of [/copy message/i, /quote message/i, /regenerate response/i]) {
         const btn = screen.getByRole("button", { name });
-        expect(btn.className).toMatch(/(^|\s)px-3(\s|$)/);
-        expect(btn.className).toMatch(/(^|\s)py-2(\s|$)/);
-        // Regression guard against the old sub-WCAG sizing.
-        expect(btn.className).not.toMatch(/(^|\s)px-2(\s|$)/);
-        expect(btn.className).not.toMatch(/(^|\s)py-1(\s|$)/);
+        expect(btn.className).toMatch(/(^|\s)msg-act(\s|$)/);
       }
     });
 
-    it("toolbar still reveals on focus-within (keyboard reachable)", () => {
-      // Preserve the WARP-295 behavior: opacity-0 default, focus-within
-      // surfaces it. Regression guard while bumping padding.
+    it("toolbar still reveals on hover/focus via the msg-actions contract", () => {
+      // WARP-295's keyboard reachability now lives in chat-indigo.css:
+      // `.msg:focus-within .msg-actions { opacity: 1 }`. jsdom can't
+      // compute external stylesheets, so the structural contract is the
+      // testable surface: the toolbar carries .msg-actions inside a .msg
+      // row (the selector pair that drives the reveal).
       render(
         <ChatMessage
           message={assistantMsg()}
@@ -432,8 +538,8 @@ describe("ChatMessage", () => {
         />,
       );
       const toolbar = screen.getByTestId("message-actions");
-      expect(toolbar.className).toMatch(/focus-within:opacity-100/);
-      expect(toolbar.className).toMatch(/opacity-0/);
+      expect(toolbar.className).toMatch(/(^|\s)msg-actions(\s|$)/);
+      expect(toolbar.closest(".msg")).not.toBeNull();
     });
 
     it("toolbar does NOT add `mt-1` when there are no citations to crowd against", () => {
@@ -502,8 +608,162 @@ describe("ChatMessage", () => {
     });
   });
 
-  describe("citation chips (WARP-295)", () => {
-    it("renders a row of <CitationChip> chips below assistant messages with citations", () => {
+  describe("thumbs feedback (WARP-844)", () => {
+    it("rates up, and clicking the active thumb clears", () => {
+      const onFeedback = vi.fn();
+      const { rerender } = render(
+        <ChatMessage
+          message={{ id: "a1", role: "assistant", content: "Answer" }}
+          onFeedback={onFeedback}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Good response" }));
+      expect(onFeedback).toHaveBeenCalledWith("a1", "up");
+
+      rerender(
+        <ChatMessage
+          message={{
+            id: "a1",
+            role: "assistant",
+            content: "Answer",
+            feedback: "up",
+          }}
+          onFeedback={onFeedback}
+        />,
+      );
+      expect(
+        screen.getByRole("button", { name: "Good response" }),
+      ).toHaveAttribute("aria-pressed", "true");
+      fireEvent.click(screen.getByRole("button", { name: "Good response" }));
+      expect(onFeedback).toHaveBeenLastCalledWith("a1", null);
+    });
+
+    it("renders no thumbs on user rows", () => {
+      render(
+        <ChatMessage
+          message={{ id: "u1", role: "user", content: "hi" }}
+          onFeedback={vi.fn()}
+        />,
+      );
+      expect(
+        screen.queryByRole("button", { name: "Good response" }),
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  describe("edit & resend (WARP-844)", () => {
+    it("shows an Edit pencil on user rows and submits the edited text", () => {
+      const onEdit = vi.fn();
+      render(
+        <ChatMessage
+          message={{ id: "u1", role: "user", content: "original" }}
+          onEdit={onEdit}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Edit message" }));
+      const box = screen.getByRole("textbox", { name: "Edit message" });
+      fireEvent.change(box, { target: { value: "edited text" } });
+      fireEvent.click(screen.getByRole("button", { name: /save & resend/i }));
+      expect(onEdit).toHaveBeenCalledWith("u1", "edited text");
+    });
+
+    it("cancel restores the bubble without calling onEdit", () => {
+      const onEdit = vi.fn();
+      render(
+        <ChatMessage
+          message={{ id: "u1", role: "user", content: "original" }}
+          onEdit={onEdit}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Edit message" }));
+      fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
+      expect(onEdit).not.toHaveBeenCalled();
+      expect(screen.getByText("original")).toBeInTheDocument();
+    });
+
+    it("renders no pencil when onEdit is withheld or the row is assistant", () => {
+      const { rerender } = render(
+        <ChatMessage message={{ id: "u1", role: "user", content: "x" }} />,
+      );
+      expect(
+        screen.queryByRole("button", { name: "Edit message" }),
+      ).not.toBeInTheDocument();
+      rerender(
+        <ChatMessage
+          message={{ id: "a1", role: "assistant", content: "x" }}
+          onEdit={vi.fn()}
+        />,
+      );
+      expect(
+        screen.queryByRole("button", { name: "Edit message" }),
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  describe("reasoning disclosure (WARP-458)", () => {
+    it("renders a collapsed 'Thought process' disclosure when reasoning is present", () => {
+      render(
+        <ChatMessage
+          message={{
+            id: "asst-r",
+            role: "assistant",
+            content: "Answer.",
+            reasoning: "Step one.\n\nStep two.",
+          }}
+        />,
+      );
+      const toggle = screen.getByRole("button", { name: /thought process/i });
+      expect(toggle).toHaveAttribute("aria-expanded", "false");
+      // Collapsed: the trace text is not in the document yet.
+      expect(screen.queryByText(/Step one\./)).not.toBeInTheDocument();
+
+      fireEvent.click(toggle);
+      expect(toggle).toHaveAttribute("aria-expanded", "true");
+      expect(screen.getByText(/Step one\./)).toBeInTheDocument();
+    });
+
+    it("renders no disclosure when the message has no reasoning", () => {
+      render(
+        <ChatMessage
+          message={{ id: "asst-n", role: "assistant", content: "Hi." }}
+        />,
+      );
+      expect(
+        screen.queryByRole("button", { name: /thought process/i }),
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  describe("code blocks — highlighting + copy (Claude parity)", () => {
+    const CODE_MESSAGE = {
+      id: "asst-code",
+      role: "assistant" as const,
+      content: "```js\nconst x = 1;\n```",
+    };
+
+    it("applies hljs token classes to fenced code blocks", () => {
+      const { container } = render(<ChatMessage message={CODE_MESSAGE} />);
+      // rehype-highlight tokenizes `const` as a keyword.
+      const keyword = container.querySelector(".hljs-keyword");
+      expect(keyword).not.toBeNull();
+      expect(keyword!.textContent).toBe("const");
+    });
+
+    it("renders a copy button on the block that writes the code to the clipboard", async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      Object.assign(navigator, { clipboard: { writeText } });
+
+      render(<ChatMessage message={CODE_MESSAGE} />);
+      const btn = screen.getByRole("button", { name: "Copy code" });
+      fireEvent.click(btn);
+
+      await screen.findByRole("button", { name: "Copied" });
+      expect(writeText).toHaveBeenCalledWith("const x = 1;\n");
+    });
+  });
+
+  describe("citation chips (WARP-295/WARP-287)", () => {
+    it("renders a row of <CitationCard> chips below assistant messages with citations", () => {
       const { container } = render(
         <ChatMessage
           message={{
@@ -532,11 +792,14 @@ describe("ChatMessage", () => {
 
       const row = screen.getByTestId("chat-citations");
       expect(row).toBeInTheDocument();
-      // Both chips render through the shared component.
-      const chips = container.querySelectorAll("[data-citation-path]");
+      // WARP-287: chat citations carry no per-chunk anchor, so both project
+      // into CitationHit with anchor: null and render via <FileCitation>
+      // (data-testid="file-card") — the same chip the old <CitationChip>
+      // rendered. The card shows the filename (last path segment).
+      const chips = container.querySelectorAll('[data-testid="file-card"]');
       expect(chips).toHaveLength(2);
-      expect(chips[0].getAttribute("data-citation-source")).toBe("brain");
-      expect(chips[1].getAttribute("data-citation-source")).toBe("nextcloud");
+      expect(chips[0].textContent).toContain("wireguard-cheatsheet.md");
+      expect(chips[1].textContent).toContain("vpn-setup.md");
     });
 
     it("renders no citation row when the assistant message has no citations", () => {

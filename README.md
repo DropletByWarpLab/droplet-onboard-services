@@ -11,7 +11,7 @@
   Orchestration, web dashboard, AI routing, file management, and file sync — all on-device.
 </p>
 
-> **Architecture note:** This repo is the **intelligence layer** (orchestrator, agent loop, MCP server, AI gateway). Inference (Ollama) lives in the sibling repo [`droplet-local-LLM`](https://github.com/DropletByWarpLab/droplet-local-LLM). Both repos deploy side-by-side on the same Jetson. See [`docs/agentic-workflows.md`](docs/agentic-workflows.md) for the full picture.
+> **Architecture note:** This repo is the **intelligence layer** (orchestrator, agent loop, MCP server, AI gateway). Inference (Ollama) lives in the sibling repo [`droplet-local-LLM`](https://github.com/DropletByWarpLab/droplet-local-LLM). Both repos deploy side-by-side on the same inference host. See [`docs/agentic-workflows.md`](docs/agentic-workflows.md) for the full picture.
 
 ![Node.js](https://img.shields.io/badge/Node.js-20+-339933?logo=node.js&logoColor=white)
 ![Python](https://img.shields.io/badge/Python-3.12+-3776AB?logo=python&logoColor=white)
@@ -310,7 +310,7 @@ FastAPI service that unifies local and cloud AI inference behind a single API. T
 
 #### Routing logic
 
-- Model names are routed to providers by prefix/pattern (e.g. `llama*` → local Ollama on the inference engine, `claude*` → Anthropic via LiteLLM, `gpt*` → OpenAI via LiteLLM).
+- Model names are routed to providers by prefix/pattern (e.g. `llama*`/`gpt-oss*` → local Ollama, `claude*` → Anthropic via LiteLLM, `gpt*`/`o1`/`o3` → OpenAI via LiteLLM). **Two collision guards (WARP-604):** `gpt-oss` is OpenAI's *open-weights* model served **locally by Ollama**, so it is matched before the cloud `gpt` prefix; and the one configured `LLM_MODEL` always resolves to local Ollama regardless of name. Without these, the local model is misrouted to the cloud provider and blocked by the off-LAN gate (the live chat-failure root cause).
 - Provider keys are stored Fernet-encrypted on disk (cryptography 42.0); the key store is read at request time.
 
 #### Endpoints (internal, called by orchestrator)
@@ -366,7 +366,7 @@ All services run as Docker Compose containers behind an Nginx reverse proxy.
 | **broker** | `eclipse-mosquitto:2` | — | Internal. MQTT bus for orchestrator ↔ file-sync |
 | **file-sync** | local build | — | Background daemon |
 
-Smart-home control runs through the orchestrator's native Matter controller (`apps/orchestrator/src/services/matter.service.ts`).
+Smart-home control runs through the `matter-controller` host-network sidecar (`services/matter-controller/`, ADR-022), fronted by the orchestrator's `/api/matter/*` routes (`apps/orchestrator/src/services/matter.service.ts` is the HTTP client).
 
 App services (orchestrator, web-dashboard, ai-gateway) are **not exposed to the host** — all traffic goes through Nginx on port 80. This avoids conflicts with local dev servers running on the same ports.
 
@@ -508,7 +508,7 @@ Everything Droplet runs on-device is open-source and free. No paid subscriptions
 | Frigate NVR | MIT | OSS models only — no Frigate Plus / paid model subscription |
 | Nextcloud | AGPLv3 | Self-hosted; no Nextcloud paid hub or remote cloud |
 | Matter (matter.js) | Apache 2.0 | Native controller in the orchestrator — no Home Assistant, no Nabu Casa |
-| OpenWrt | GPLv2 | Routes the cameras VLAN; runs on the user's own Pi |
+| OpenWrt | GPLv2 | Routes the cameras VLAN; runs on the router host |
 | FastAPI / Express / Next.js / Prisma / SWR / lucide-react / hls.js / web-push | MIT or Apache 2.0 | All OSS, all free |
 | LiteLLM | MIT | Multi-provider LLM proxy. The operator brings their own LLM API keys (BYOK) — no Droplet-side subscription |
 | PostgreSQL / Redis / Mosquitto | OSS (PostgreSQL / BSD / EPL) | Self-hosted infra |

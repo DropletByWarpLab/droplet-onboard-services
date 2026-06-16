@@ -15,6 +15,7 @@ import {
 import { createShare, updateShare, deleteShare } from "@/lib/api";
 import type { ShareDetail } from "@/lib/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { translateError } from "@/lib/friendly-errors";
 
 interface ShareDialogProps {
   filePath: string;
@@ -88,7 +89,7 @@ export function ShareDialog({
       setExpireDate("");
       onChange?.();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Share creation failed");
+      setError(translateError(err, "files"));
     } finally {
       setCreating(false);
     }
@@ -107,7 +108,7 @@ export function ShareDialog({
       setRevokeTargetId(null);
       onChange?.();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Revoke failed");
+      setError(translateError(err, "files"));
       throw err;
     }
   };
@@ -129,7 +130,7 @@ export function ShareDialog({
       );
       onChange?.();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Update failed");
+      setError(translateError(err, "files"));
     }
   };
 

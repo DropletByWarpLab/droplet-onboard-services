@@ -7,8 +7,8 @@
 # Can be SCP'd to any existing OpenWrt 23+ instance and executed.
 #
 # Usage:
-#   scp setup-camera-subnet.sh root@10.0.0.1:/tmp/
-#   ssh root@10.0.0.1 'sh /tmp/setup-camera-subnet.sh'
+#   scp setup-camera-subnet.sh root@192.168.50.1:/tmp/
+#   ssh root@192.168.50.1 'sh /tmp/setup-camera-subnet.sh'
 #
 # Options:
 #   --vlan-id <id>      VLAN ID (default: 100)

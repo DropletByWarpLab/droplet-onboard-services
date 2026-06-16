@@ -40,6 +40,7 @@ from voice.pipeline import (
     PipelineStatus,
     WakePipeline,
     classify_tool_choice,
+    transcript_is_actionable,
 )
 from voice.llm import LLMClient, LLMUnavailable, MockLLM
 from voice.stt import MockSTT, STTUnavailable, StreamingSTT
@@ -143,6 +144,22 @@ class _RaisingDetector(WakeWordDetector):
 
     def predict(self, audio_frame: np.ndarray) -> dict[str, float]:
         raise RuntimeError("predict failed (test)")
+
+
+class _ResetCountingDetector(_ScriptedDetector):
+    """A scripted detector that also records reset() calls. Used to pin
+    the contract that the pipeline resets the wake detector when it
+    returns to 'listening' after a transcription cycle — so a stateful
+    recognizer (Vosk's KaldiRecognizer) doesn't carry a stale utterance
+    across the STT excursion. (WARP-154 review item 1)
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.reset_calls = 0
+
+    def reset(self) -> None:
+        self.reset_calls += 1
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -329,6 +346,42 @@ class TestOnFrameDecision:
         s = pipe.status()
         assert s.state == "error"
         assert "predict failed" in (s.error_message or "")
+
+    def test_error_state_does_not_resume_wake_detection(self):
+        # Once we're in 'error', a later frame must NOT silently resume
+        # wake detection: a wake fire would overwrite _state with
+        # 'wake_detected' while the stale _error_message lingered, masking
+        # the fault on /voice/status. Pre-fix, 'error' hit the fall-through
+        # to _run_wake_detect. Recovery from error is an explicit
+        # transition, never an implicit one off the next mic frame.
+        fires: list[WakeEvent] = []
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.99}]),
+            input_device_index=0,
+            threshold=0.5,
+            on_wake=fires.append,
+        )
+        pipe._set_error("STT session failed (test)")
+        pipe._on_frame(_silence_frame())  # high-scoring frame
+        assert fires == []                       # no wake fired
+        assert pipe._state == "error"            # still latched in error
+        assert "STT session failed" in (pipe.status().error_message or "")
+
+    def test_no_mic_state_does_not_resume_wake_detection(self):
+        # Same contract for 'no_mic': the supervising loop owns the
+        # recovery transition back to 'listening'; _on_frame must not
+        # resume wake detection from a no_mic latch on its own.
+        fires: list[WakeEvent] = []
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.99}]),
+            input_device_index=0,
+            threshold=0.5,
+            on_wake=fires.append,
+        )
+        pipe._set_state("no_mic")
+        pipe._on_frame(_silence_frame())
+        assert fires == []
+        assert pipe._state == "no_mic"
 
     def test_callback_exception_does_not_propagate(self):
         # The on_wake hook is operator-supplied (commit 7 wires it to
@@ -537,7 +590,14 @@ class TestLoopIntegration:
         assert fake_sd.opened_with["channels"] == 1
         assert fake_sd.opened_with["dtype"] == "int16"
 
-    def test_loop_records_error_when_stream_raises(self):
+    def test_loop_treats_open_oserror_as_recoverable_no_mic(self):
+        # CONTRACT CHANGE (fix/voice-wake-loop-resilience): an OSError /
+        # PortAudioError raised by InputStream() open is a RECOVERABLE
+        # device error (the reSpeaker re-enumerated, the card index
+        # shifted, PortAudio's cached device went invalid) — NOT a fatal
+        # 'error'. The loop must pin state='no_mic' and keep retrying
+        # with bounded backoff rather than exit. A device that NEVER
+        # comes back keeps the loop alive in 'no_mic' until _shutdown.
         class _ExplodingSd:
             def InputStream(self, **kwargs):  # noqa: N802
                 raise OSError("PortAudio: device disappeared")
@@ -546,11 +606,500 @@ class TestLoopIntegration:
             detector=MockWakeWordDetector(),
             input_device_index=0,
             sd_module=_ExplodingSd(),
+            recover_backoff_initial_s=0.0,
+            recover_backoff_max_s=0.0,
         )
+        # Stop the supervising retry after a couple of failed attempts so
+        # the synchronous _loop() call returns instead of looping forever
+        # on a permanently-absent mic.
+        calls = {"n": 0}
+        real_wait = pipe._shutdown.wait
+
+        def _wait(timeout=None):
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                pipe._shutdown.set()
+            return real_wait(0)
+
+        pipe._shutdown.wait = _wait  # type: ignore[assignment]
         pipe._loop()
         s = pipe.status()
+        # Recoverable: ended parked in no_mic, NOT in fatal error.
+        assert s.state == "no_mic"
+        assert s.error_message is None
+        # It actually retried (didn't just give up after one open).
+        assert calls["n"] >= 2
+
+
+# ────────────────────────────────────────────────────────────────────
+# Device-disconnect self-heal (fix/voice-wake-loop-resilience)
+# ────────────────────────────────────────────────────────────────────
+#
+# The reSpeaker XVF3800 USB mic re-enumerates under Docker: the open
+# InputStream goes invalid and stream.read() raises PortAudioError, OR a
+# subsequent open raises. The wake loop must self-heal — refresh
+# PortAudio's enumeration, re-resolve the (possibly shifted) device
+# index, reopen, and return to 'listening' — instead of exiting the
+# worker thread permanently. These tests pin that recovery contract with
+# a fully-mocked sounddevice (CI-importable; the real device is not).
+
+
+class _PortAudioError(Exception):
+    """Stand-in for sounddevice.PortAudioError for the mocked module."""
+
+
+class _RecoveringStream:
+    """A single InputStream 'session'. Reads scripted frames; a frame of
+    the sentinel value RAISE makes .read() raise the supplied device
+    error (simulating a mid-stream re-enumeration). When frames run out
+    it sets the pipeline shutdown event so a synchronous _loop() returns.
+    """
+
+    RAISE = object()
+
+    def __init__(self, frames, shutdown_event, error_factory):
+        self._frames = list(frames)
+        self._shutdown = shutdown_event
+        self._error_factory = error_factory
+        self.closed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.closed = True
+        return False
+
+    def read(self, n):
+        if not self._frames:
+            self._shutdown.set()
+            return _silence_frame().reshape(-1, 1), False
+        item = self._frames.pop(0)
+        if item is self.RAISE:
+            raise self._error_factory()
+        return item.reshape(-1, 1), False
+
+
+class _RecoveringSoundDevice:
+    """Mock sounddevice whose InputStream() yields a NEW _RecoveringStream
+    per open, driven by a scripted list of 'sessions'. Each session is
+    either a list of frames (possibly containing _RecoveringStream.RAISE)
+    or an exception instance to raise from the open call itself.
+
+    Records every device index it was opened with (to assert
+    re-resolution picks up a shifted index) and counts _terminate /
+    _initialize calls (to assert the enumeration cache was refreshed
+    before re-resolving).
+    """
+
+    PortAudioError = _PortAudioError
+
+    def __init__(self, sessions, shutdown_event):
+        self._sessions = list(sessions)
+        self._shutdown = shutdown_event
+        self.opened_devices: list = []
+        self.streams: list = []
+        self.terminate_calls = 0
+        self.initialize_calls = 0
+
+    # PortAudio re-enumeration hooks the pipeline calls defensively.
+    def _terminate(self):
+        self.terminate_calls += 1
+
+    def _initialize(self):
+        self.initialize_calls += 1
+
+    def query_devices(self, index=None):
+        # 1-channel mono device — keeps the downmix path identical to a
+        # healthy run.
+        return {"max_input_channels": 1}
+
+    def InputStream(self, **kwargs):  # noqa: N802 — matches real API
+        self.opened_devices.append(kwargs.get("device"))
+        if not self._sessions:
+            # No more scripted sessions — wind the loop down cleanly.
+            self._shutdown.set()
+            return _RecoveringStream([], self._shutdown, _PortAudioError)
+        session = self._sessions.pop(0)
+        if isinstance(session, BaseException):
+            raise session
+        stream = _RecoveringStream(session, self._shutdown, _PortAudioError)
+        self.streams.append(stream)
+        return stream
+
+
+class _FrameRecordingDetector(WakeWordDetector):
+    """Records every mono frame the pipeline hands to predict()."""
+
+    def __init__(self):
+        self.frames: list[np.ndarray] = []
+
+    @property
+    def model_name(self) -> str:
+        return "recorder"
+
+    @property
+    def loaded(self) -> bool:
+        return True
+
+    def predict(self, audio_frame: np.ndarray) -> dict[str, float]:
+        self.frames.append(audio_frame.copy())
+        return {}
+
+    def reset(self) -> None:
+        pass
+
+
+class _StereoStream:
+    """One stream session yielding scripted (1280, 2) int16 frames; sets
+    shutdown when exhausted so a synchronous _loop() returns."""
+
+    def __init__(self, frames, shutdown_event):
+        self._frames = list(frames)
+        self._shutdown = shutdown_event
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self, n):
+        if not self._frames:
+            self._shutdown.set()
+            return np.zeros((n, 2), dtype=np.int16), False
+        return self._frames.pop(0), False
+
+
+class _StereoSoundDevice:
+    PortAudioError = _PortAudioError
+
+    def __init__(self, frames, shutdown_event):
+        self._frames = frames
+        self._shutdown = shutdown_event
+
+    def query_devices(self, index=None):
+        return {"max_input_channels": 2}
+
+    def InputStream(self, **kwargs):  # noqa: N802 — matches real API
+        return _StereoStream(self._frames, self._shutdown)
+
+
+class TestCaptureDownmix:
+    """Multichannel→mono contract. The reSpeaker XVF3800 carries
+    beamformed voice on channel 0 and AEC residual on channel 1 —
+    averaging them halved the voice and mixed in junk (the "have to
+    talk really loud" report). Default consumes channel 0; "mean" stays
+    available for plain stereo mics; VOICE_INPUT_GAIN applies after."""
+
+    def _run(self, frames, **pipe_kwargs):
+        shutdown = threading.Event()
+        det = _FrameRecordingDetector()
+        pipe = WakePipeline(
+            detector=det,
+            input_device_index=4,
+            threshold=0.5,
+            sd_module=_StereoSoundDevice(frames, shutdown),
+            **pipe_kwargs,
+        )
+        pipe._shutdown = shutdown
+        pipe._loop()
+        return det.frames
+
+    @staticmethod
+    def _stereo_frame(left: int, right: int) -> np.ndarray:
+        f = np.zeros((1280, 2), dtype=np.int16)
+        f[:, 0] = left
+        f[:, 1] = right
+        return f
+
+    def test_default_consumes_primary_channel_only(self):
+        frames = self._run([self._stereo_frame(left=1000, right=0)])
+        # Old mean() behaviour would deliver 500 — half the voice.
+        assert len(frames) >= 1
+        assert int(frames[0][0]) == 1000
+
+    def test_mean_downmix_available_via_config(self):
+        frames = self._run(
+            [self._stereo_frame(left=1000, right=0)],
+            input_downmix="mean",
+        )
+        assert int(frames[0][0]) == 500
+
+    def test_input_gain_scales_and_clips(self):
+        frames = self._run(
+            [self._stereo_frame(left=1000, right=0),
+             self._stereo_frame(left=30000, right=0)],
+            input_gain=2.0,
+        )
+        assert int(frames[0][0]) == 2000          # 1000 × 2.0
+        assert int(frames[1][0]) == 32767         # 30000 × 2.0 clips, no wrap
+
+    def test_unknown_downmix_falls_back_to_default(self):
+        frames = self._run(
+            [self._stereo_frame(left=1000, right=0)],
+            input_downmix="bogus",
+        )
+        assert int(frames[0][0]) == 1000          # "first" semantics
+
+    def test_nonpositive_gain_falls_back_to_unity(self):
+        frames = self._run(
+            [self._stereo_frame(left=1000, right=0)],
+            input_gain=0.0,
+        )
+        assert int(frames[0][0]) == 1000
+
+
+class TestLoopDeviceRecovery:
+    """Self-heal contract for audio-device disconnects."""
+
+    def _wake_script(self, n_low: int):
+        # n_low quiet frames then a wake-strength frame.
+        return _ScriptedDetector(
+            [{"hey_jarvis": 0.05}] * n_low + [{"hey_jarvis": 0.9}],
+        )
+
+    def test_read_portaudioerror_recovers_and_resumes_dispatch(self):
+        # Session 1: two quiet frames, then read() raises PortAudioError.
+        # Session 2 (after recovery): a wake-strength frame → fires, then
+        # runs dry. Asserts: loop does NOT exit, state goes
+        # listening → no_mic → listening, frames dispatch again, worker
+        # thread stays alive.
+        shutdown = threading.Event()
+        S = _RecoveringStream.RAISE
+        sessions = [
+            [_silence_frame(), _silence_frame(), S],  # then disconnect
+            [_silence_frame()],                        # reopened → wake frame
+        ]
+        fake_sd = _RecoveringSoundDevice(sessions, shutdown)
+        det = self._wake_script(2)  # 2 quiet then wake on the 3rd predict
+        fires: list[WakeEvent] = []
+        seen_states: list[str] = []
+
+        pipe = WakePipeline(
+            detector=det,
+            input_device_index=4,
+            threshold=0.5,
+            on_wake=fires.append,
+            sd_module=fake_sd,
+            recover_backoff_initial_s=0.0,
+            recover_backoff_max_s=0.0,
+        )
+        pipe._shutdown = shutdown
+
+        # Observe the state the moment we sit in the recovery wait.
+        real_wait = shutdown.wait
+
+        def _wait(timeout=None):
+            seen_states.append(pipe.status().state)
+            return real_wait(0)
+
+        shutdown.wait = _wait  # type: ignore[assignment]
+
+        t = threading.Thread(target=pipe._loop, daemon=True)
+        t.start()
+        t.join(timeout=5.0)
+
+        assert not t.is_alive(), "worker thread must not hang"
+        # Recovered far enough to reopen and fire the post-recovery wake.
+        assert len(fires) == 1
+        # While recovering, we reported no_mic.
+        assert "no_mic" in seen_states
+        # Reopened the stream (two opens: original + recovery).
+        assert len(fake_sd.opened_devices) >= 2
+        # Both stream sessions were entered/exited (proves we returned to
+        # active listening after the disconnect).
+        assert fake_sd.streams[0].closed is True
+
+    def test_open_error_backs_off_then_recovers(self):
+        # InputStream() open raises for the first 3 attempts, then the
+        # 4th open succeeds and yields a frame. Asserts bounded backoff +
+        # recovery, and that state is no_mic while retrying.
+        shutdown = threading.Event()
+        sessions = [
+            _PortAudioError("open failed 1"),
+            _PortAudioError("open failed 2"),
+            OSError("open failed 3"),
+            [_silence_frame()],  # 4th open succeeds
+        ]
+        fake_sd = _RecoveringSoundDevice(sessions, shutdown)
+        waits: list[float] = []
+        states_during_wait: list[str] = []
+
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=0,
+            sd_module=fake_sd,
+            recover_backoff_initial_s=0.01,
+            recover_backoff_max_s=0.04,
+        )
+        pipe._shutdown = shutdown
+        real_wait = shutdown.wait
+
+        def _wait(timeout=None):
+            waits.append(timeout)
+            states_during_wait.append(pipe.status().state)
+            return real_wait(0)  # don't actually sleep in the test
+
+        shutdown.wait = _wait  # type: ignore[assignment]
+
+        pipe._loop()
+
+        # 4 opens total (3 failed + 1 success).
+        assert len(fake_sd.opened_devices) == 4
+        # 3 backoff waits between the failures.
+        assert len(waits) == 3
+        # Bounded + capped exponential: 0.01, 0.02, 0.04 (<= max).
+        assert waits[0] == pytest.approx(0.01)
+        assert waits[1] == pytest.approx(0.02)
+        assert waits[2] == pytest.approx(0.04)
+        assert all(w <= 0.04 for w in waits)
+        # State was no_mic throughout the retry window.
+        assert states_during_wait and all(s == "no_mic" for s in states_during_wait)
+
+    def test_reopen_uses_newly_resolved_index_after_card_shift(self):
+        # The card index shifts on re-enumeration. The re-resolution hook
+        # returns a DIFFERENT index; assert the reopen uses the new one
+        # (proves we re-resolve via the injected path, not the stale
+        # constructor value).
+        shutdown = threading.Event()
+        S = _RecoveringStream.RAISE
+        sessions = [
+            [_silence_frame(), S],  # disconnect after one frame
+            [_silence_frame()],     # reopened on the new index
+        ]
+        fake_sd = _RecoveringSoundDevice(sessions, shutdown)
+        resolutions = iter([11])  # next resolve() returns the shifted idx
+
+        def _resolve_input():
+            return next(resolutions, 11)
+
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=10,  # original index
+            sd_module=fake_sd,
+            resolve_input_device=_resolve_input,
+            recover_backoff_initial_s=0.0,
+            recover_backoff_max_s=0.0,
+        )
+        pipe._shutdown = shutdown
+        pipe._loop()
+
+        # First open used the original index, the reopen used the
+        # re-resolved (shifted) index.
+        assert fake_sd.opened_devices[0] == 10
+        assert fake_sd.opened_devices[1] == 11
+        # PortAudio enumeration was refreshed before re-resolving.
+        assert fake_sd.terminate_calls >= 1
+        assert fake_sd.initialize_calls >= 1
+
+    def test_reresolution_to_none_stays_no_mic(self):
+        # If re-resolution finds no device at all (mic genuinely gone),
+        # the loop parks in no_mic and keeps retrying — it must not crash
+        # or fall through to opening device=None.
+        shutdown = threading.Event()
+        S = _RecoveringStream.RAISE
+        sessions = [[_silence_frame(), S]]  # disconnect, no further session
+        fake_sd = _RecoveringSoundDevice(sessions, shutdown)
+
+        def _resolve_input():
+            return None  # nothing to pick now
+
+        waits = {"n": 0}
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=3,
+            sd_module=fake_sd,
+            resolve_input_device=_resolve_input,
+            recover_backoff_initial_s=0.0,
+            recover_backoff_max_s=0.0,
+        )
+        pipe._shutdown = shutdown
+        real_wait = shutdown.wait
+
+        def _wait(timeout=None):
+            waits["n"] += 1
+            if waits["n"] >= 2:
+                shutdown.set()
+            return real_wait(0)
+
+        shutdown.wait = _wait  # type: ignore[assignment]
+        pipe._loop()
+
+        assert pipe.status().state == "no_mic"
+        # Only the original device was ever opened; we never tried to open
+        # device=None after re-resolution returned nothing.
+        assert fake_sd.opened_devices == [3]
+        assert waits["n"] >= 2
+
+    def test_backoff_exits_promptly_on_shutdown_mid_wait(self):
+        # A genuinely-absent mic must not hot-loop, and must drop out the
+        # instant _shutdown is set — even mid-backoff. We assert the loop
+        # uses the interruptible _shutdown.wait (not time.sleep) for its
+        # delay, and returns as soon as shutdown fires.
+        shutdown = threading.Event()
+        # Every open fails → permanently-absent mic.
+        sessions = [OSError("gone") for _ in range(50)]
+        fake_sd = _RecoveringSoundDevice(sessions, shutdown)
+
+        used_shutdown_wait = {"v": False}
+        real_wait = shutdown.wait
+
+        def _wait(timeout=None):
+            used_shutdown_wait["v"] = True
+            shutdown.set()  # simulate stop() landing mid-backoff
+            return real_wait(timeout if timeout else 0)
+
+        pipe = WakePipeline(
+            detector=MockWakeWordDetector(),
+            input_device_index=0,
+            sd_module=fake_sd,
+            recover_backoff_initial_s=30.0,  # would hang if not interruptible
+            recover_backoff_max_s=30.0,
+        )
+        pipe._shutdown = shutdown
+        shutdown.wait = _wait  # type: ignore[assignment]
+
+        t = threading.Thread(target=pipe._loop, daemon=True)
+        t.start()
+        t.join(timeout=5.0)
+
+        assert not t.is_alive(), "loop must exit promptly on _shutdown mid-backoff"
+        assert used_shutdown_wait["v"], "backoff must use interruptible _shutdown.wait"
+        # We bailed after the first failed open — didn't burn all 50.
+        assert len(fake_sd.opened_devices) <= 2
+
+    def test_non_device_exception_surfaces_as_error_not_retried(self):
+        # A bug in the frame-handling path (here: detector.predict raises
+        # a non-device error) must surface as 'error' and be logged — NOT
+        # silently retried forever. The device-recovery scope is tight: it
+        # only catches PortAudio/OS device errors around open + read.
+        shutdown = threading.Event()
+        sessions = [[_silence_frame(), _silence_frame()]]  # healthy stream
+        fake_sd = _RecoveringSoundDevice(sessions, shutdown)
+
+        pipe = WakePipeline(
+            detector=_RaisingDetector(),  # predict() raises RuntimeError
+            input_device_index=0,
+            sd_module=fake_sd,
+            recover_backoff_initial_s=0.0,
+            recover_backoff_max_s=0.0,
+        )
+        pipe._shutdown = shutdown
+
+        t = threading.Thread(target=pipe._loop, daemon=True)
+        t.start()
+        t.join(timeout=5.0)
+
+        assert not t.is_alive()
+        s = pipe.status()
+        # _RaisingDetector errors are caught inside _run_wake_detect and
+        # routed to 'error' (existing contract). The recovery supervisor
+        # must NOT convert that into a no_mic retry loop.
         assert s.state == "error"
-        assert "PortAudio" in (s.error_message or "")
+        assert "predict failed" in (s.error_message or "")
+        # Did not reopen the stream chasing a non-device error.
+        assert len(fake_sd.opened_devices) == 1
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -687,6 +1236,58 @@ class TestTranscribingFlow:
         assert s.last_transcript_at is not None
         assert s.state == "transcript_ready"
 
+    def test_vad_ends_capture_on_trailing_silence(self):
+        # Once the user has actually spoken, a short run of trailing
+        # silence ends the capture EARLY — before the (long) max-record
+        # window. This is "stop listening the moment they finish".
+        stt = _RecordingSTT(scripted_transcripts=["turn on the lights"])
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
+            input_device_index=0,
+            threshold=0.5,
+            stt=stt,
+            stt_max_record_s=100.0,   # long — VAD must be what finishes it
+            vad_silence_s=0.2,        # ~3 frames (0.08 s each) of silence
+            vad_min_speech_s=0.0,     # don't gate on wall-clock in the test
+            vad_speech_rms=300.0,
+        )
+        pipe._stt_available = True
+        speech = np.full(WAKE_FRAME_SAMPLES, 6000, dtype=np.int16)
+
+        pipe._on_frame(_silence_frame())   # wake (scripted; content irrelevant)
+        pipe._on_frame(speech)             # begin transcription + first speech chunk
+        assert pipe.status().state == "transcribing"
+        pipe._on_frame(speech)             # more speech
+        for _ in range(4):                 # trailing silence trips VAD
+            pipe._on_frame(_silence_frame())
+        s = pipe.status()
+        assert stt.finished is True
+        assert s.state == "transcript_ready"
+        assert s.last_transcript == "turn on the lights"
+
+    def test_vad_does_not_fire_before_any_speech(self):
+        # Pure silence after wake must NOT trip VAD (no speech detected
+        # yet) — otherwise a false wake would instantly "finish" on an
+        # empty capture. Only the max-record cap ends a silent capture.
+        stt = _RecordingSTT(scripted_transcripts=["x"])
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
+            input_device_index=0,
+            threshold=0.5,
+            stt=stt,
+            stt_max_record_s=100.0,
+            vad_silence_s=0.2,
+            vad_min_speech_s=0.0,
+            vad_speech_rms=300.0,
+        )
+        pipe._stt_available = True
+        pipe._on_frame(_silence_frame())   # wake
+        pipe._on_frame(_silence_frame())   # begin transcription
+        for _ in range(10):
+            pipe._on_frame(_silence_frame())   # all silence, never any speech
+        assert stt.finished is False
+        assert pipe.status().state == "transcribing"
+
     def test_transcript_ready_decays_to_listening(self):
         stt = _RecordingSTT(scripted_transcripts=["test"])
         pipe = WakePipeline(
@@ -706,6 +1307,51 @@ class TestTranscribingFlow:
         time.sleep(0.1)
         # Read-time decay flips it back to listening
         assert pipe.status().state == "listening"
+
+    def test_detector_reset_on_resume_to_listening_after_transcription(self):
+        # WARP-154 review item 1: a stateful recognizer (Vosk) carries
+        # decoder state across calls. After a wake fires, frames are routed
+        # to STT and the recognizer is starved; when we return to 'listening'
+        # the next AcceptWaveform would otherwise continue the STALE
+        # utterance. The pipeline must reset() the detector on the
+        # transcription → listening transition so each turn starts fresh.
+        det = _ResetCountingDetector([{"hey_jarvis": 0.9}])
+        stt = _RecordingSTT(scripted_transcripts=["what time is it"])
+        pipe = WakePipeline(
+            detector=det,
+            input_device_index=0,
+            threshold=0.5,
+            stt=stt,
+            stt_max_record_s=0.01,
+            visual_decay_s=0.05,
+        )
+        pipe._stt_available = True
+        pipe._on_frame(_silence_frame())  # wake → wake_detected
+        pipe._on_frame(_silence_frame())  # begin transcription
+        time.sleep(0.05)
+        pipe._on_frame(_silence_frame())  # finish → transcript_ready
+        assert pipe.status().state == "transcript_ready"
+        assert det.reset_calls == 0       # not yet — still in the wake cycle
+        time.sleep(0.1)
+        pipe._on_frame(_silence_frame())  # decays to listening → reset fires
+        assert pipe.status().state == "listening"
+        assert det.reset_calls == 1, "detector not reset on resume to listening"
+
+    def test_detector_not_reset_while_merely_listening(self):
+        # The reset is tied to the transcription → listening transition, not
+        # to every frame. A detector that's just listening (no wake, no STT
+        # excursion) must never be reset — that would throw away in-progress
+        # partial recognition mid-phrase. (WARP-154 review item 1)
+        det = _ResetCountingDetector([{"hey_jarvis": 0.1}])
+        pipe = WakePipeline(
+            detector=det,
+            input_device_index=0,
+            threshold=0.5,
+        )
+        pipe._set_state("listening")
+        for _ in range(5):
+            pipe._on_frame(_silence_frame())  # all below threshold, no wake
+        assert det.reset_calls == 0
 
     def test_transcript_callback_fires_with_text(self):
         captured: list[str] = []
@@ -849,9 +1495,10 @@ class TestTranscribingFlow:
         assert s.listening is True
 
     def test_default_stt_max_record_constant(self):
-        # Drift detector — make sure README's "5-second post-wake window"
-        # documentation still matches the default.
-        assert DEFAULT_STT_MAX_RECORD_S == 5.0
+        # Drift detector — this is the HARD cap on capture length; the
+        # end-of-speech VAD cuts sooner when the room goes quiet. Kept
+        # short so a noisy room (no detectable silence) still stops fast.
+        assert DEFAULT_STT_MAX_RECORD_S == 3.0
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -1005,6 +1652,46 @@ class TestSpeak:
         assert pipe.status().state == "error"
         assert "synth blew up" in (pipe.status().error_message or "")
 
+    def test_playback_failure_arms_post_speak_cooldown(self, monkeypatch):
+        # A mid-playback failure still drove the speaker for part of the
+        # reply, so the anti-feedback cooldown must engage — otherwise the
+        # partial Piper output can bleed into the mic and self-trigger a
+        # wake. Pre-fix, _speak_ended_at was set only on the success path
+        # (_restore_state_after_speak), so the except left it None.
+        def _raising_play(audio, samplerate, device):
+            raise RuntimeError("PortAudio write failed (test)")
+
+        import voice.audio_io as _audio_io
+        monkeypatch.setattr(_audio_io, "play", _raising_play)
+
+        tts = _RecordingTTS()
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.99}]),
+            input_device_index=0,
+            output_device_index=0,
+            threshold=0.5,
+            tts=tts,
+        )
+        pipe._tts_available = True
+        pipe._state = "listening"
+
+        result = pipe.speak("hello")
+        assert result["ok"] is False
+        assert pipe.status().state == "error"
+        # The load-bearing assertion: the cooldown timestamp is armed even
+        # though playback raised, so wake detection is suppressed for the
+        # post-speak window.
+        assert pipe._speak_ended_at is not None
+        now = time.time()
+        assert now - pipe._speak_ended_at < pipe._post_speak_cooldown_s
+
+        # And _run_wake_detect honours it: a high-scoring frame inside the
+        # cooldown window does NOT fire a wake.
+        fires: list[WakeEvent] = []
+        pipe._on_wake = fires.append
+        pipe._run_wake_detect(_silence_frame())
+        assert fires == []
+
     def test_speak_transitions_into_and_out_of_speaking_state(self, monkeypatch):
         # We can't observe the intermediate 'speaking' state from outside
         # because speak() blocks for the duration. But we CAN verify the
@@ -1103,13 +1790,17 @@ class _RecordingLLM(LLMClient):
         self._available = available
         self._raise_on_reply = raise_on_reply
         self.requests: list[str] = []
+        # Records tool_choice values for parity with MockLLM so tests can
+        # assert the intent gate's decision is threaded through to the LLM.
+        self.tool_choices: list = []
 
     @property
     def available(self) -> bool:
         return self._available
 
-    def reply(self, user_text: str) -> str:
+    def reply(self, user_text: str, *, tool_choice=None) -> str:
         self.requests.append(user_text)
+        self.tool_choices.append(tool_choice)
         if self._raise_on_reply:
             raise LLMUnavailable("LLM blew up (test)")
         return self._scripts.pop(0) if self._scripts else ""
@@ -1160,13 +1851,49 @@ class TestClosedLoop:
         assert s.last_transcript == "what time is it"
         assert s.last_response == "it is three p.m."
 
+    def test_fragment_transcript_stays_quiet(self, monkeypatch):
+        # A residual false wake (TV phonetic near-collision) captures a
+        # fragment like "it." — the box must NOT send it to the LLM and
+        # must NOT speak, or it ends up chatting with the television.
+        # Observed live on the single-box: wake at conf 1.00 off TV
+        # audio, transcript 'it.', spoken reply into an empty room.
+        play_calls = _patch_play(monkeypatch)
+        llm = _RecordingLLM(scripted_replies=["should never be asked"])
+        tts = _RecordingTTS(scripted_audio=SynthesizedAudio(
+            pcm=b"\x00" * 200, sample_rate=22050, sample_width=2, channels=1,
+        ))
+        stt = _RecordingSTT(scripted_transcripts=["it."])
+        pipe = WakePipeline(
+            detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
+            input_device_index=0,
+            output_device_index=7,
+            threshold=0.5,
+            stt=stt,
+            tts=tts,
+            llm=llm,
+            stt_max_record_s=0.05,
+        )
+        pipe._stt_available = True
+        pipe._tts_available = True
+        pipe._llm_available = True
+        pipe._on_frame(_silence_frame())  # wake
+        pipe._on_frame(_silence_frame())  # begin transcription + chunk
+        time.sleep(0.08)
+        pipe._on_frame(_silence_frame())  # exceed window → finish
+
+        assert llm.requests == []           # fragment never reaches the LLM
+        assert tts.texts_received == []     # nothing synthesized
+        assert play_calls == []             # nothing spoken
+        # The transcript still lands in status for diagnosis.
+        assert pipe.status().last_transcript == "it."
+
     def test_llm_unavailable_does_not_break_wake_loop(self, monkeypatch):
         # If the orchestrator is down, the wake → STT → transcript path
         # still works (transcript visible in status), just no spoken
         # reply. Pipeline must NOT enter error state.
         _patch_play(monkeypatch)
         llm = _RecordingLLM(available=False)  # never reachable
-        stt = _RecordingSTT(scripted_transcripts=["hi"])
+        stt = _RecordingSTT(scripted_transcripts=["what time is it"])
         tts = _RecordingTTS()
         pipe = WakePipeline(
             detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
@@ -1187,7 +1914,7 @@ class TestClosedLoop:
         pipe._on_frame(_silence_frame())
 
         # Transcript landed:
-        assert pipe.status().last_transcript == "hi"
+        assert pipe.status().last_transcript == "what time is it"
         # No LLM call attempted (because llm_available is False, skip):
         assert llm.requests == []
         # No TTS playback:
@@ -1201,7 +1928,7 @@ class TestClosedLoop:
         # error message surfaces via /voice/status.
         _patch_play(monkeypatch)
         llm = _RecordingLLM(raise_on_reply=True)
-        stt = _RecordingSTT(scripted_transcripts=["hi"])
+        stt = _RecordingSTT(scripted_transcripts=["what time is it"])
         tts = _RecordingTTS()
         pipe = WakePipeline(
             detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
@@ -1232,7 +1959,7 @@ class TestClosedLoop:
         # input. We should NOT push empty audio through Piper.
         _patch_play(monkeypatch)
         llm = _RecordingLLM(scripted_replies=[""])
-        stt = _RecordingSTT(scripted_transcripts=["..."])
+        stt = _RecordingSTT(scripted_transcripts=["play some music"])
         tts = _RecordingTTS()
         pipe = WakePipeline(
             detector=_ScriptedDetector([{"hey_jarvis": 0.9}]),
@@ -1252,7 +1979,7 @@ class TestClosedLoop:
         time.sleep(0.08)
         pipe._on_frame(_silence_frame())
 
-        assert llm.requests == ["..."]
+        assert llm.requests == ["play some music"]
         assert tts.texts_received == []  # no Piper call for empty reply
 
     def test_status_exposes_llm_loaded_after_probe(self):
@@ -1328,7 +2055,7 @@ class _FlippableLLM(LLMClient):
         self.probe_count += 1
         return self._available
 
-    def reply(self, user_text):
+    def reply(self, user_text, *, tool_choice=None):
         return ""
 
 
@@ -1607,3 +2334,42 @@ class TestIntentClassifier:
         # Defensive: pipeline never passes None, but make sure the
         # signature handles it without raising.
         assert classify_tool_choice(None) is None  # type: ignore[arg-type]
+
+
+class TestTranscriptActionable:
+    """transcript_is_actionable — the fragment gate on the LLM→speak path.
+    Pure-function contract: a real command always carries at least one
+    word of ≥3 letters; ambient fragments captured by a residual false
+    wake don't."""
+
+    @pytest.mark.parametrize("transcript", [
+        "it.",
+        "uh",
+        "ah.",
+        "no",
+        "ok",
+        "",
+        "   ",
+        "a b c",
+        "I'm ok",          # contractions of short words only
+        "...",
+        "24 7",            # digits aren't command words
+    ])
+    def test_fragments_are_not_actionable(self, transcript: str):
+        assert transcript_is_actionable(transcript) is False
+
+    @pytest.mark.parametrize("transcript", [
+        "stop",
+        "lights",
+        "what time is it",
+        "turn on the kitchen light",
+        "what's the weather",
+        "play some music",
+        "who are you",
+        "set a timer for ten minutes",
+    ])
+    def test_commands_are_actionable(self, transcript: str):
+        assert transcript_is_actionable(transcript) is True
+
+    def test_none_input_is_not_actionable(self):
+        assert transcript_is_actionable(None) is False  # type: ignore[arg-type]

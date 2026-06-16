@@ -122,3 +122,4 @@ From ADR-002 and spec §8 — enforce these hard:
 - Comment on data model, API shape, migration correctness — that's QA / Code Reviewer.
 - Open the PR — Manager's job.
 - Suggest code refactors — Code Reviewer's job.
+- Post the UX review to GitHub. It's an **internal artifact** for the controller / Manager — never a PR comment. CHANGES_REQUESTED loops back to Dev (fixed locally + pushed); APPROVED_WITH_NOTES items the Manager folds into the PR body self-review.

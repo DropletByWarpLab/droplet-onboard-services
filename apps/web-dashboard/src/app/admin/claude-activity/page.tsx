@@ -13,9 +13,10 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { ShieldOff } from "lucide-react";
+import { ShieldOff, Activity } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { authFetch } from "@/lib/auth";
+import { ShellPage } from "@/components/shell/ShellPage";
 import { ClaudeNow } from "@/components/claude-activity/ClaudeNow";
 import { ActivityFeed } from "@/components/claude-activity/ActivityFeed";
 import { OpenPRs } from "@/components/claude-activity/OpenPRs";
@@ -100,59 +101,52 @@ export default function ClaudeActivityPage() {
     };
   }, [authLoading, user?.role]);
 
+  const icon = <Activity size={15} />;
+  const SUB = "Live view of what the AI engineer is doing on this repo. Polls every 30 seconds.";
+
   if (authLoading || (loading && !data)) {
     return (
-      <div className="p-6 lg:p-8 max-w-6xl">
-        <h1 className="type-large-title text-label-primary mb-6">
-          Claude activity
-        </h1>
-        <div className="dp-card p-12 text-center text-label-tertiary type-subheadline">
+      <ShellPage icon={icon} label="Activity" title="Claude activity" sub={SUB}>
+        <div className="card" style={{ textAlign: "center", padding: 48, color: "var(--text-muted)" }}>
           Loading…
         </div>
-      </div>
+      </ShellPage>
     );
   }
 
   if (!isAdminRole(user?.role)) {
     return (
-      <div className="p-6 lg:p-8 max-w-3xl">
-        <h1 className="type-large-title text-label-primary mb-4">
-          Claude activity
-        </h1>
-        <div className="dp-card py-16 flex flex-col items-center text-label-tertiary">
-          <ShieldOff size={32} className="mb-3 text-label-quaternary" />
-          <p className="type-subheadline">Admin access required</p>
-          <p className="type-caption-1 mt-1 text-label-quaternary max-w-sm text-center">
-            This dashboard is only visible to <code>admin</code> /{" "}
-            <code>owner</code> roles. Ask an admin to grant you the{" "}
-            <code>admin</code> Nextcloud group membership.
-          </p>
+      <ShellPage icon={icon} label="Activity" title="Claude activity">
+        <div className="card">
+          <div className="empty">
+            <span className="ei">
+              <ShieldOff size={24} />
+            </span>
+            <span className="eh">Admin access required</span>
+            <span>
+              This dashboard is only visible to <code>admin</code> / <code>owner</code> roles. Ask an
+              admin to grant you the <code>admin</code> Nextcloud group membership.
+            </span>
+          </div>
         </div>
-      </div>
+      </ShellPage>
     );
   }
 
-  return (
-    <div className="p-6 lg:p-8 max-w-6xl">
-      <header className="mb-6 flex items-end justify-between gap-4 flex-wrap">
-        <div>
-          <h1 className="type-large-title text-label-primary">Claude activity</h1>
-          <p className="type-caption-1 text-label-tertiary mt-1">
-            Live view of what the AI engineer is doing on this repo. Polls
-            every 30 seconds.
-          </p>
-        </div>
-        <div className="type-caption-2 text-label-quaternary text-right">
-          {error ? (
-            <span className="text-system-red">Error: {error}</span>
-          ) : lastFetched ? (
-            <span>Refreshed {relativeTime(lastFetched.toISOString())}</span>
-          ) : (
-            <span>Refreshing…</span>
-          )}
-        </div>
-      </header>
+  const refreshStatus = (
+    <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+      {error ? (
+        <span style={{ color: "#ef4444" }}>Error: {error}</span>
+      ) : lastFetched ? (
+        <span>Refreshed {relativeTime(lastFetched.toISOString())}</span>
+      ) : (
+        <span>Refreshing…</span>
+      )}
+    </span>
+  );
 
+  return (
+    <ShellPage icon={icon} label="Activity" title="Claude activity" sub={SUB} actions={refreshStatus}>
       {data && (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           {/* Top row — Claude now spans full width on its own */}
@@ -163,10 +157,7 @@ export default function ClaudeActivityPage() {
           {/* Left column — Activity feed (tall) */}
           <div className="lg:col-span-2 space-y-4">
             <ActivityFeed data={data} />
-            <ChainProgress
-              jira={data.jira}
-              fallbackQueue={data.compliance?.queue}
-            />
+            <ChainProgress jira={data.jira} fallbackQueue={data.compliance?.queue} />
             <WorkstreamRollup rows={data.compliance?.workstreams} />
           </div>
 
@@ -178,6 +169,6 @@ export default function ClaudeActivityPage() {
           </div>
         </div>
       )}
-    </div>
+    </ShellPage>
   );
 }

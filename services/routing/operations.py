@@ -7,6 +7,9 @@ the dashboard so the UI can distinguish:
 
   - pending      — the apply is still in flight
   - applied      — the router accepted the change (HTTP 2xx)
+  - rejected     — the caller's request was refused before any router state
+                    change (HTTP 4xx: auth / validation). A neutral no-change
+                    outcome — NOT a successful apply, NOT a reverted change.
   - rolled_back  — the router reverted (HTTP 5xx, or a ConnectionLost from
                     safe_apply's rollback path)
 
@@ -22,7 +25,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Literal, Optional
 
-OperationState = Literal["pending", "applied", "rolled_back"]
+OperationState = Literal["pending", "applied", "rejected", "rolled_back"]
 
 # Matches safe_apply's 60s timeout × 5 — enough headroom for dashboard polling
 # through a slow apply followed by a rollback without evicting the record mid-flight.
@@ -53,6 +56,15 @@ def register() -> str:
 
 def mark_applied(op_id: str) -> None:
     _update_terminal(op_id, "applied", None)
+
+
+def mark_rejected(op_id: str, reason: str) -> None:
+    """Caller error (HTTP 4xx: auth / validation) — the request was refused
+    before any router state change. A terminal, neutral no-change outcome:
+    distinct from `applied` (which previously mis-recorded 401/422 as a
+    successful router change) and from `rolled_back` (which implies a real
+    change was reverted)."""
+    _update_terminal(op_id, "rejected", reason)
 
 
 def mark_rolled_back(op_id: str, reason: str) -> None:

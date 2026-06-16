@@ -789,3 +789,65 @@ export async function addCamera(
 
   return resp.ok;
 }
+
+/**
+ * Reconcile Frigate's `config.cameras` against the orchestrator DB (#11).
+ * Frigate persists camera blocks in its own /config volume, which outlives a
+ * Postgres wipe (factory-reset, version migration). The result is orphaned
+ * camera entries — e.g. `camera_192_168_20_176` — that no DELETE /cameras/:name
+ * can reach (the dashboard never lists a camera the DB doesn't know about).
+ *
+ * SET reconciliation: every Frigate camera whose name is NOT in `dbCameraNames`
+ * is dropped; survivors keep their FULL existing block (ffmpeg inputs, detect,
+ * zones, masks, per-camera settings). We do NOT rebuild survivors from the DB —
+ * the Camera row doesn't persist the RTSP URL, so regenerating would destroy
+ * working stream config. Replace-not-merge applies to the `cameras` MAP
+ * (orphans removed), not to each camera's internals.
+ *
+ * Reuses the verified full-config save path (POST /api/config/save?
+ * save_option=restart, JSON-as-text/plain) that camera-settings.service already
+ * uses against this Frigate version. A bare {cameras:{…}} body fails Frigate's
+ * schema validation (it requires mqtt/detectors), so we read the full config,
+ * swap only `cameras`, and write the whole thing back. No-op fast path when
+ * there are no orphans (skips the camera-dropping restart). Returns the names
+ * removed.
+ */
+export async function syncCamerasFromDb(
+  dbCameraNames: string[],
+): Promise<string[]> {
+  const wanted = new Set(dbCameraNames);
+  const fullConfig = (await fetchConfig()) as Record<string, unknown>;
+  const cameras = (fullConfig.cameras ?? {}) as Record<string, unknown>;
+
+  const removed = Object.keys(cameras).filter((name) => !wanted.has(name));
+  if (removed.length === 0) {
+    return [];
+  }
+
+  const pruned: Record<string, unknown> = {};
+  for (const [name, block] of Object.entries(cameras)) {
+    if (wanted.has(name)) pruned[name] = block;
+  }
+  fullConfig.cameras = pruned;
+
+  const resp = await fetch(
+    `${FRIGATE_URL}/api/config/save?save_option=restart`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: JSON.stringify(fullConfig),
+      signal: timeout(30_000),
+    },
+  );
+  if (!resp.ok) {
+    const errBody = await resp.text().catch(() => "");
+    logger.warn(
+      { status: resp.status, removed, body: errBody.slice(0, 200) },
+      "Frigate config/save rejected during camera sync",
+    );
+    throw new Error(`Frigate rejected the config: ${resp.status}`);
+  }
+
+  logger.info({ removed }, "Pruned orphaned cameras from Frigate config");
+  return removed;
+}

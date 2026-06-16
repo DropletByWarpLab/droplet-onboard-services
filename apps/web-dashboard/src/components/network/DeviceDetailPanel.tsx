@@ -12,6 +12,7 @@ import { DeviceSparkline } from "./DeviceSparkline";
 import { IconPicker, type DeviceIconName } from "./IconPicker";
 import { GroupTypeahead } from "./GroupTypeahead";
 import { useDeviceMutations } from "@/lib/hooks/useDeviceMutations";
+import { translateError } from "@/lib/friendly-errors";
 import { useDeviceBlockMutation } from "@/lib/hooks/useDeviceBlockMutation";
 import { useSchedules } from "@/lib/hooks/useSchedules";
 import { useActiveOverrides } from "@/lib/hooks/useActiveOverrides";
@@ -483,7 +484,7 @@ function ScheduleSection({ mac, deviceGroups, onError }: ScheduleSectionProps) {
     try {
       await cancelOverride(activeOverride.id);
     } catch (err) {
-      onError(err instanceof Error ? err.message : "Could not cancel override");
+      onError(translateError(err, "network"));
     }
   }
 

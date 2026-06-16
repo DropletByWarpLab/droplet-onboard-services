@@ -80,6 +80,15 @@ from voice.wake import (
 logger = logging.getLogger("voice.pipeline")
 
 
+class _DeviceError(Exception):
+    """Internal marker for a RECOVERABLE audio-device failure (mic
+    re-enumeration, shifted ALSA card index, invalidated PortAudio
+    handle). Raised inside the capture session from the stream open/read
+    and caught by the supervising loop, which re-resolves + reopens. Kept
+    private — callers see the public state machine (state='no_mic' while
+    recovering), never this type."""
+
+
 # ────────────────────────────────────────────────────────────────────
 # Intent gate — suppress speculative tool calls
 # ────────────────────────────────────────────────────────────────────
@@ -113,11 +122,15 @@ logger = logging.getLogger("voice.pipeline")
 # caught before the next deploy.
 
 _INTENT_NO_TOOLS_PATTERNS: tuple[re.Pattern[str], ...] = (
-    # Greetings and check-ins — whole utterance only. The optional
-    # wake-word prefix ("hey jarvis", "hey droplet") matches the way
-    # users naturally re-trigger after the wake fires.
+    # Greetings and check-ins — whole utterance only. A bare greeting
+    # may stand alone or take an optional "there" suffix ("hi there",
+    # "hello there", "hey there") — applied uniformly to all three so a
+    # new greeting word can't be added on one branch but forgotten on
+    # the other. The optional wake-word prefix ("hey jarvis", "hey
+    # droplet") matches the way users naturally re-trigger after the
+    # wake fires.
     re.compile(
-        r"^\s*(hi|hello|hey|hey there|hi there|yo|sup|"
+        r"^\s*((hi|hello|hey)(\s+there)?|yo|sup|"
         r"hey\s+(jarvis|droplet|assistant)|"
         r"hello\s+(jarvis|droplet|assistant))"
         r"[\s!.,?]*$",
@@ -184,12 +197,34 @@ def classify_tool_choice(transcript: str) -> Optional[ToolChoice]:
             return "none"
     return None
 
+
+def transcript_is_actionable(transcript: str) -> bool:
+    """Whether a post-wake transcript looks like an actual command.
+
+    Residual false wakes (phonetic near-collisions — the TV saying
+    "hey, drop it") capture ambient fragments: "it.", "uh", "yeah.".
+    Every real command or question carries at least one word of three
+    or more letters ("stop", "lights", "what's the weather"), so gate
+    the LLM → speak path on that. False wakes then decay silently
+    instead of the box answering the television; a false NEGATIVE here
+    would require a genuine command made entirely of ≤2-letter words,
+    which doesn't occur in practice.
+
+    Pure function — no I/O, no state. Safe to call from any thread.
+    """
+    return bool(re.search(r"[a-zA-Z]{3,}", transcript or ""))
+
 # Default tuning. Overridable via env at construct time (read by
 # main.py's wiring, not by this module directly).
 DEFAULT_THRESHOLD = 0.3
 DEFAULT_DEBOUNCE_S = 2.0
 DEFAULT_VISUAL_DECAY_S = 2.0
-DEFAULT_STT_MAX_RECORD_S = 5.0  # captured audio per wake (no VAD yet — fixed window)
+DEFAULT_STT_MAX_RECORD_S = 3.0  # hard cap on captured audio per wake. The
+                                # end-of-speech VAD cuts sooner when the room
+                                # goes quiet; this cap guarantees the capture
+                                # always stops (e.g. in a room with continuous
+                                # background audio where no silence is ever
+                                # detected). Overridable via STT_MAX_RECORD_S.
 DEFAULT_UPSTREAM_PROBE_INTERVAL_S = 30.0  # how often to re-probe STT/TTS/LLM
 # Window after TTS playback ends during which wake detection is suppressed.
 # The reSpeaker XVF3800 is both speaker and mic on the same USB endpoint;
@@ -201,6 +236,51 @@ DEFAULT_UPSTREAM_PROBE_INTERVAL_S = 30.0  # how often to re-probe STT/TTS/LLM
 # room reverb, short enough that a deliberate second "hey jarvis" still
 # wakes promptly.
 DEFAULT_POST_SPEAK_COOLDOWN_S = 2.0
+
+# End-of-speech (VAD) for the STT capture window. Once the user has
+# actually started talking, the capture ends after a short run of
+# trailing silence — so the box stops listening the moment they finish
+# their statement instead of always holding the mic for the full
+# max-record window. Energy-based on frame RMS; the max-record window
+# stays the hard cap for noisy rooms where a clean silence never arrives.
+DEFAULT_VAD_SILENCE_S = 1.0       # trailing silence (s) that ends the turn
+DEFAULT_VAD_SPEECH_RMS = 700.0    # int16 frame RMS above which a frame = "speech"
+                                  # (sits between a typical room floor ~400
+                                  # and normal speech ~1000+; tune per-room
+                                  # via VAD_SPEECH_RMS).
+DEFAULT_VAD_MIN_SPEECH_S = 0.4    # min CUMULATIVE speech before end-of-speech
+                                  # may fire — keeps the wake-word tail + a
+                                  # pause before the command from ending early
+
+# Multichannel capture → mono for the detector + STT.
+#
+# "first" (default): consume CHANNEL 0 only. Mic arrays put the primary
+# processed signal there — the reSpeaker XVF3800 ships beamformed voice
+# on L and AEC *residual* on R, so the old mean-of-channels downmix
+# halved the voice amplitude and mixed in residual noise. That cost
+# ~6 dB of effective sensitivity ("you have to talk really loud") and
+# fed the VAD/wake/STT a dirtier signal. "mean" stays available via
+# VOICE_INPUT_DOWNMIX for plain stereo mics where both channels carry
+# the room.
+DEFAULT_INPUT_DOWNMIX = "first"
+# Digital gain applied to the mono frame after downmix (int16-clipped).
+# 1.0 = untouched. For a quiet capture chain raise via VOICE_INPUT_GAIN
+# (e.g. 2.0 ≈ +6 dB) — cheaper and persistent vs. volatile DSP-side
+# gain set over xvf_host (lost on every chip reboot).
+DEFAULT_INPUT_GAIN = 1.0
+
+# Audio-device self-heal backoff. When the mic re-enumerates (the
+# reSpeaker XVF3800 USB array shifts its card index under Docker), the
+# open InputStream goes invalid and read() — or the next open() — raises
+# a PortAudioError/OSError. Rather than letting the worker thread die
+# (which leaves voice stuck at state=error until a container restart), the
+# loop refreshes PortAudio's device enumeration, re-resolves the input
+# index, and reopens. Between attempts it waits with a capped exponential
+# backoff so a genuinely-absent mic doesn't hot-loop the CPU while still
+# recovering a flapping device within a few seconds. The wait is on the
+# shutdown Event so stop() drops out of a backoff immediately.
+DEFAULT_RECOVER_BACKOFF_INITIAL_S = 0.5  # first retry delay after a disconnect
+DEFAULT_RECOVER_BACKOFF_MAX_S = 5.0      # cap — a missing mic retries every 5 s
 
 # State enumeration. The string form is what /voice/status exposes so
 # the dashboard can switch on it directly. Kept as a typedef rather
@@ -285,7 +365,16 @@ class WakePipeline:
         llm: Optional[LLMClient] = None,
         upstream_probe_interval_s: float = DEFAULT_UPSTREAM_PROBE_INTERVAL_S,
         post_speak_cooldown_s: float = DEFAULT_POST_SPEAK_COOLDOWN_S,
+        vad_silence_s: float = DEFAULT_VAD_SILENCE_S,
+        vad_speech_rms: float = DEFAULT_VAD_SPEECH_RMS,
+        vad_min_speech_s: float = DEFAULT_VAD_MIN_SPEECH_S,
         sd_module: Any = None,
+        resolve_input_device: Optional[Callable[[], Optional[int]]] = None,
+        recover_backoff_initial_s: float = DEFAULT_RECOVER_BACKOFF_INITIAL_S,
+        recover_backoff_max_s: float = DEFAULT_RECOVER_BACKOFF_MAX_S,
+        sd_reinit: Optional[Callable[[Any], None]] = None,
+        input_downmix: str = DEFAULT_INPUT_DOWNMIX,
+        input_gain: float = DEFAULT_INPUT_GAIN,
     ):
         self._detector = detector
         self._input_device_index = input_device_index
@@ -314,7 +403,38 @@ class WakePipeline:
         # to absorb TTS bleed-back + user "ok thanks" follow-up talk.
         self._post_speak_cooldown_s = post_speak_cooldown_s
         self._speak_ended_at: Optional[float] = None
+        # End-of-speech (VAD) config + per-utterance state (reset each turn
+        # in _begin_transcription).
+        self._vad_silence_s = vad_silence_s
+        self._vad_speech_rms = vad_speech_rms
+        self._vad_min_speech_s = vad_min_speech_s
+        self._frame_s = WAKE_FRAME_SAMPLES / float(WAKE_SAMPLE_RATE)
+        self._stt_speech_started = False
+        self._stt_silence_s = 0.0
+        self._stt_speech_s = 0.0
         self._sd_module = sd_module  # dependency injection for tests
+        # Device self-heal hooks (fix/voice-wake-loop-resilience).
+        # `resolve_input_device` recomputes the input index after a mic
+        # re-enumeration — main.py wires it to the same resolve_devices()
+        # path used at startup so the scoring logic in voice/devices.py
+        # stays the single source of truth (we never re-rank here). None
+        # means "no re-resolution available" → reuse the existing index.
+        self._resolve_input_device = resolve_input_device
+        self._recover_backoff_initial_s = max(0.0, recover_backoff_initial_s)
+        self._recover_backoff_max_s = max(
+            self._recover_backoff_initial_s, recover_backoff_max_s,
+        )
+        # Hook to refresh PortAudio's cached device list before
+        # re-resolving. Defaults to sd._terminate()+sd._initialize();
+        # injectable for tests / alternate bindings.
+        self._sd_reinit = sd_reinit or self._default_sd_reinit
+        # Multichannel→mono strategy + digital input gain (see the
+        # DEFAULT_INPUT_DOWNMIX / DEFAULT_INPUT_GAIN docstrings).
+        self._input_downmix = (
+            input_downmix if input_downmix in ("first", "mean")
+            else DEFAULT_INPUT_DOWNMIX
+        )
+        self._input_gain = input_gain if input_gain > 0 else DEFAULT_INPUT_GAIN
 
         self._thread: Optional[threading.Thread] = None
         self._probe_thread: Optional[threading.Thread] = None
@@ -521,6 +641,15 @@ class WakePipeline:
                 self._play_pcm(audio)
             except Exception as exc:
                 self._set_error(f"playback failed: {exc}")
+                # Mid-playback failure still drove the speaker for some of
+                # the reply, so the same anti-feedback window applies: the
+                # partial Piper output can bleed into the mic and score
+                # above threshold. Arm the post-speak cooldown here too —
+                # _restore_state_after_speak (which normally sets it) does
+                # NOT run on this path because _set_error moved us out of
+                # 'speaking' into 'error'.
+                with self._lock:
+                    self._speak_ended_at = time.time()
                 return {"ok": False, "error": str(exc), "duration_s": audio.duration_s}
 
             self._restore_state_after_speak(prev_state)
@@ -639,33 +768,202 @@ class WakePipeline:
                 self._set_error(f"sounddevice unavailable: {exc}")
                 return
 
+        # Supervising loop: one _run_capture_session() == one open-stream
+        # lifetime. A recoverable audio-device error (mic re-enumerated,
+        # card index shifted, PortAudio handle invalid) raises _DeviceError
+        # out of the session; we flip to no_mic, refresh PortAudio's device
+        # cache, re-resolve the input index, back off, and reopen — instead
+        # of letting the worker thread die. Any OTHER exception is a genuine
+        # bug (e.g. in the frame-handling path) and surfaces as 'error'.
+        backoff = self._recover_backoff_initial_s
+        while not self._shutdown.is_set():
+            try:
+                self._run_capture_session(sd)
+                # Clean return == shutdown requested (or scripted EOF in
+                # tests). Nothing to recover; leave the loop.
+                return
+            except _DeviceError as exc:
+                if self._shutdown.is_set():
+                    return
+                logger.warning(
+                    "wake pipeline: recoverable audio-device error (%s) — "
+                    "re-resolving + reopening", exc,
+                )
+                self._set_state("no_mic")
+                # Refresh PortAudio's cached device list, then re-resolve
+                # the (possibly shifted) input index BEFORE the next open.
+                self._refresh_audio_enumeration(sd)
+                self._reresolve_input_device()
+                # Bounded, interruptible backoff so a genuinely-absent mic
+                # doesn't hot-loop. Stays in no_mic while waiting; drops
+                # out instantly if stop() fires mid-wait.
+                if self._shutdown.wait(backoff):
+                    return
+                backoff = min(
+                    self._recover_backoff_max_s,
+                    backoff * 2 if backoff > 0 else self._recover_backoff_max_s,
+                ) if self._recover_backoff_max_s > 0 else 0.0
+                continue
+            except Exception as exc:
+                # Non-device error — a real logic bug. Surface loudly; do
+                # NOT silently retry forever.
+                self._set_error(f"wake loop crashed: {exc}")
+                logger.exception("wake pipeline crashed")
+                return
+
+    def _run_capture_session(self, sd: Any) -> None:
+        """Open the mic, set 'listening', and pump frames until shutdown.
+
+        Recoverable PortAudio/OS device errors raised by the stream open
+        or read are re-raised as `_DeviceError` for the supervising loop
+        to recover from. Exceptions from `_on_frame` (the detector / STT /
+        callback path) are deliberately NOT caught here — they propagate
+        so a genuine logic bug surfaces as 'error' rather than being
+        masked as a device flap.
+        """
+        # PortAudioError isn't defined on the injected fake sd used in
+        # tests, so look it up defensively. OSError covers ALSA -EPIPE /
+        # device-removed cases the binding raises directly.
+        pa_error = getattr(sd, "PortAudioError", ())
+        device_errors: tuple = (
+            (pa_error, OSError) if pa_error else (OSError,)
+        )
+
+        # No resolved input device (re-resolution found the mic gone, or
+        # it was never present). Treat as a recoverable device error so the
+        # supervisor parks in no_mic + backoff and re-resolves next cycle —
+        # never opens device=None.
+        if self._input_device_index is None:
+            raise _DeviceError("no input device resolved")
+
+        # Capture at the device's NATIVE input-channel count. Many USB mic
+        # arrays — notably the ReSpeaker XVF3800 — expose ONLY a 2-channel
+        # capture interface (no mono altset) and hand back digital silence
+        # when opened as mono on the raw hw device. We open the native count
+        # (capped at 2) and downmix to a 1-D mono frame, which is what the
+        # detector + STT both expect.
+        # Best-effort channel-count probe — broad except on purpose: a
+        # failure here just falls back to mono (1 ch), it is NOT the
+        # device-disconnect trigger (the load-bearing open/read below is).
+        in_channels = 1
         try:
-            with sd.InputStream(
+            info = sd.query_devices(self._input_device_index)
+            in_channels = max(1, min(2, int(info.get("max_input_channels") or 1)))
+        except Exception:
+            in_channels = 1
+
+        try:
+            stream_cm = sd.InputStream(
                 samplerate=WAKE_SAMPLE_RATE,
-                channels=1,
+                channels=in_channels,
                 dtype="int16",
                 device=self._input_device_index,
                 blocksize=WAKE_FRAME_SAMPLES,
-            ) as stream:
-                logger.info(
-                    "wake pipeline: listening on device %s, model=%s, threshold=%.2f",
-                    self._input_device_index,
-                    self._detector.model_name,
-                    self._threshold,
-                )
-                self._set_state("listening")
-                while not self._shutdown.is_set():
+            )
+        except device_errors as exc:
+            raise _DeviceError(str(exc) or exc.__class__.__name__) from exc
+
+        with stream_cm as stream:
+            logger.info(
+                "wake pipeline: listening on device %s (%d ch), model=%s, threshold=%.2f",
+                self._input_device_index,
+                in_channels,
+                self._detector.model_name,
+                self._threshold,
+            )
+            self._set_state("listening")
+            while not self._shutdown.is_set():
+                # Tight device-I/O scope: ONLY the read is wrapped, so a
+                # re-enumeration mid-stream becomes a recoverable
+                # _DeviceError. _on_frame() runs outside this scope.
+                try:
                     frames, overflowed = stream.read(WAKE_FRAME_SAMPLES)
-                    if overflowed:
-                        # Capture buffer outran our predict() pace. Common
-                        # on first run while ONNX kernels JIT; logs once
-                        # to avoid spam.
-                        logger.debug("wake pipeline: input buffer overflow")
-                    # frames is shape (1280, 1) int16; flatten for openWakeWord.
-                    self._on_frame(frames.flatten())
-        except Exception as exc:
-            self._set_error(f"wake loop crashed: {exc}")
-            logger.exception("wake pipeline crashed")
+                except device_errors as exc:
+                    raise _DeviceError(str(exc) or exc.__class__.__name__) from exc
+                if overflowed:
+                    # Capture buffer outran our predict() pace. Common
+                    # on first run while ONNX kernels JIT; logs once
+                    # to avoid spam.
+                    logger.debug("wake pipeline: input buffer overflow")
+                # frames is shape (1280, in_channels) int16. Reduce to a
+                # mono 1-D frame for the detector + STT: channel 0 by
+                # default (the primary/processed channel on mic arrays —
+                # see DEFAULT_INPUT_DOWNMIX), mean across channels when
+                # configured; a 1-channel device just flattens.
+                if frames.ndim > 1 and frames.shape[1] > 1:
+                    if self._input_downmix == "mean":
+                        mono = frames.mean(axis=1).astype("int16")
+                    else:
+                        mono = np.ascontiguousarray(frames[:, 0])
+                else:
+                    mono = frames.reshape(-1)
+                if self._input_gain != 1.0:
+                    # Digital boost for quiet capture chains; clip into
+                    # int16 so an over-eager gain distorts instead of
+                    # wrapping around.
+                    mono = np.clip(
+                        mono.astype(np.float32) * self._input_gain,
+                        -32768.0,
+                        32767.0,
+                    ).astype(np.int16)
+                self._on_frame(mono)
+
+    def _refresh_audio_enumeration(self, sd: Any) -> None:
+        """Drop PortAudio's cached device list so a re-enumerated mic
+        becomes visible to the next resolve/open. PortAudio snapshots the
+        host's devices at first query; without a terminate+initialize the
+        re-plugged reSpeaker never reappears. Defensive: a binding without
+        the private hooks (or one that raises) must not crash the loop."""
+        try:
+            self._sd_reinit(sd)
+        except Exception:
+            logger.exception(
+                "wake pipeline: PortAudio re-init failed (continuing)",
+            )
+
+    @staticmethod
+    def _default_sd_reinit(sd: Any) -> None:
+        terminate = getattr(sd, "_terminate", None)
+        initialize = getattr(sd, "_initialize", None)
+        if callable(terminate):
+            terminate()
+        if callable(initialize):
+            initialize()
+
+    def _reresolve_input_device(self) -> None:
+        """Recompute the input device index after a re-enumeration, using
+        the injected resolver (main.py wires it to resolve_devices() so the
+        scoring in voice/devices.py stays authoritative). On any failure,
+        or when no resolver is wired, keep the current index and let the
+        next open attempt decide — we never fall through to opening
+        device=None."""
+        resolver = self._resolve_input_device
+        if resolver is None:
+            return
+        try:
+            new_index = resolver()
+        except Exception:
+            logger.exception(
+                "wake pipeline: input re-resolution raised (keeping index %s)",
+                self._input_device_index,
+            )
+            return
+        if new_index is None:
+            logger.info(
+                "wake pipeline: re-resolution found no input device — "
+                "staying in no_mic",
+            )
+            # Drop the stale index so the supervisor doesn't reopen a
+            # device that's gone; it keeps retrying re-resolution while
+            # parked in no_mic until a real index comes back.
+            self._input_device_index = None
+            return
+        if new_index != self._input_device_index:
+            logger.info(
+                "wake pipeline: input device index shifted %s → %s after "
+                "re-enumeration", self._input_device_index, new_index,
+            )
+        self._input_device_index = new_index
 
     def _on_frame(self, frame: np.ndarray) -> None:
         # Apply visual-decay BEFORE dispatch so a stale wake_detected /
@@ -697,6 +995,16 @@ class WakePipeline:
             # incoming mic frames entirely. Piper's voice would otherwise
             # tip the wake detector on a self-spoken "hey jarvis ...".
             return
+        if state in ("error", "no_mic"):
+            # Latched fault states. Do NOT auto-resume wake detection from
+            # here: a wake fire would overwrite _state with 'wake_detected'
+            # while leaving the now-stale _error_message in place, masking
+            # the fault on /voice/status. Recovery is an explicit transition
+            # — the supervising _loop re-opens the stream and calls
+            # _set_state("listening") after a genuine device recovery; an
+            # 'error' is cleared only by a deliberate _set_state/restart.
+            # Until then, drop frames silently.
+            return
 
         # state == "listening" (or 'loading' on the first tick — harmless,
         # detector.predict on background audio just returns ~0 scores).
@@ -709,7 +1017,15 @@ class WakePipeline:
         of state matches what callers see via the API. Without this,
         a frame could route to wake_detected even though status() would
         have decayed it back to listening 5 seconds ago.
+
+        When a decay actually returns us to `listening` after a wake /
+        transcription excursion, reset the wake detector so a stateful
+        recognizer (Vosk) doesn't carry a stale, half-decoded utterance
+        into the next turn (WARP-154 review item 1). The reset is done
+        OUTSIDE the lock — Vosk's Reset() is cheap but we don't hold the
+        status lock across detector calls.
         """
+        decayed_to_listening = False
         with self._lock:
             state = self._state
             now = time.time()
@@ -719,12 +1035,25 @@ class WakePipeline:
                 and now - self._last_wake_at > self._visual_decay_s
             ):
                 self._state = "listening"
+                decayed_to_listening = True
             elif (
                 state == "transcript_ready"
                 and self._last_transcript_at is not None
                 and now - self._last_transcript_at > self._visual_decay_s
             ):
                 self._state = "listening"
+                decayed_to_listening = True
+        if decayed_to_listening:
+            self._reset_detector()
+
+    def _reset_detector(self) -> None:
+        """Reset the wake detector's recognition state. Tolerates a
+        detector whose reset() raises so a flaky backend can't crash the
+        wake loop on a state transition."""
+        try:
+            self._detector.reset()
+        except Exception:
+            logger.exception("wake detector reset() raised")
 
     def _run_wake_detect(self, frame: np.ndarray) -> None:
         """Wake-word path: predict, threshold-check, debounce, fire."""
@@ -792,6 +1121,10 @@ class WakePipeline:
             return
         self._stt_session = session
         self._transcribe_started_at = time.time()
+        # Reset end-of-speech (VAD) state for this turn.
+        self._stt_speech_started = False
+        self._stt_silence_s = 0.0
+        self._stt_speech_s = 0.0
         with self._lock:
             self._state = "transcribing"
         logger.info("transcribing: capture window opened")
@@ -809,12 +1142,42 @@ class WakePipeline:
         except STTUnavailable as exc:
             self._abort_transcription(f"send_chunk: {exc}")
             return
-        # Time-bound the capture. VAD-based cutoff lands in a follow-up
-        # commit; for now we use a fixed window. 5 s covers most short
-        # commands ("turn off the lights", "what's on the news"); longer
-        # phrases get truncated for now.
+
         elapsed = time.time() - self._transcribe_started_at
+
+        # End-of-speech (VAD): once the user has actually started talking,
+        # finish as soon as we see a short run of trailing silence — so the
+        # box stops listening the moment they finish their statement rather
+        # than holding the mic for the whole max-record window.
+        rms = (
+            float(np.sqrt(np.mean(np.square(frame.astype(np.float64)))))
+            if frame.size
+            else 0.0
+        )
+        if rms >= self._vad_speech_rms:
+            self._stt_speech_started = True
+            self._stt_speech_s += self._frame_s
+            self._stt_silence_s = 0.0
+        elif self._stt_speech_started:
+            self._stt_silence_s += self._frame_s
+        # End only once we've heard enough ACTUAL speech (so the brief
+        # wake-word tail + any pause before the command don't end the turn
+        # prematurely) followed by a run of trailing silence.
+        if (
+            self._stt_speech_s >= self._vad_min_speech_s
+            and self._stt_silence_s >= self._vad_silence_s
+        ):
+            logger.info(
+                "transcribing: end-of-speech (%.1fs speech, %.1fs trailing silence)",
+                self._stt_speech_s, self._stt_silence_s,
+            )
+            self._finish_transcription()
+            return
+
+        # Hard cap so a noisy room (VAD never sees a clean silence) or a
+        # runaway never holds the mic open forever.
         if elapsed >= self._stt_max_record_s:
+            logger.info("transcribing: max-record cap reached (%.1fs)", elapsed)
             self._finish_transcription()
 
     def _finish_transcription(self) -> None:
@@ -889,6 +1252,18 @@ class WakePipeline:
         behaviour (e.g. dashboard-driven dispatch in commit 8).
         """
         if not transcript:
+            return
+        if not transcript_is_actionable(transcript):
+            # Residual false wakes (a phonetic near-collision on the TV —
+            # "hey, drop it") capture room fragments like "it." or "uh".
+            # A real post-wake command always carries at least one
+            # substantive word; don't send fragments to the LLM, and
+            # especially don't speak an answer to the television. The
+            # transcript still lands in /voice/status for diagnosis.
+            logger.info(
+                "transcript %r is a fragment, not a command — staying quiet",
+                transcript,
+            )
             return
         if self._llm is None or not self._llm_available:
             logger.info(
