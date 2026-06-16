@@ -55,8 +55,9 @@ const COMMON_LABELS = [
  * + global defaults; the dashboard treats the camera-level filter as
  * authoritative and writes back camera-level overrides only.
  *
- * Zones + motion masks render as read-only here (with a "Coming in
- * Phase 4.2" hint) — they need a polygon editor we haven't built yet.
+ * Zones + motion masks are edited inline via the interactive polygon
+ * editors (`ZoneEditor` / `MotionMaskEditor`) — draw/drag vertices,
+ * changes merge into the local draft and ship with the same Save.
  */
 export default function CameraSettingsPage() {
   const params = useParams<{ name: string }>();
