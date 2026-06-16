@@ -386,8 +386,20 @@ export function createEmailRouter(
         // disabled the operator has explicitly opted out of letting
         // mail leave the LAN; 451 (Unavailable For Legal Reasons) is
         // the sovereignty signal — same posture as the ai-gateway
-        // cloud_model_escape refusal.
-        const allowed = await gate.outboundEmailEnabled();
+        // cloud_model_escape refusal. The gate throws on DB errors
+        // (as opposed to returning false for a deliberate disable) so
+        // we can return 503 rather than the misleading 451.
+        let allowed: boolean;
+        try {
+          allowed = await gate.outboundEmailEnabled();
+        } catch {
+          res.status(503).json({
+            error: "off_lan_gate_unavailable",
+            channel: "outbound_email",
+            message: "Off-LAN egress gate temporarily unavailable; try again shortly.",
+          });
+          return;
+        }
         if (!allowed) {
           res.status(451).json({
             error: "off_lan_blocked",
