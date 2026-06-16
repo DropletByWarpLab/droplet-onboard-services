@@ -190,7 +190,7 @@ class InferenceServicer:
 - First run: pulls from Hugging Face with sha256 checksum verification, ~280 MB.
 - Subsequent runs: load from cache (~3 s cold-start).
 - Inference via `optimum.onnxruntime.ORTModelForSequenceClassification` on CPU.
-- Future: TensorRT backend on Jetson (separate ticket; not in v1 scope).
+- Future: TensorRT backend on the inference host (separate ticket; not in v1 scope).
 
 ### Orchestrator caller
 

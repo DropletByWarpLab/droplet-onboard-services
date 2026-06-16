@@ -2,8 +2,8 @@
 
 Baseline coverage for the CI guard:
   - Core modules import cleanly (catches syntax errors + missing deps).
-  - `chunker.chunk_text` obeys its documented invariants for empty and
-    small inputs.
+  - `chunker.chunk_spans` obeys its documented invariants for empty and
+    small inputs (WARP-287 replaced the old `chunk_text(str)` API).
 """
 
 from __future__ import annotations
@@ -24,11 +24,13 @@ def test_main_imports():
 
 
 def test_chunker_handles_empty_and_small_inputs():
-    from chunker import chunk_text
+    from anchor_schema import NoneAnchor
+    from chunker import chunk_spans
+    from extractors.spans import Span
 
-    assert chunk_text("") == []
-    assert chunk_text("   \n  ") == []
+    assert chunk_spans([]) == []
 
-    out = chunk_text("one two three four five")
+    out = chunk_spans([Span(text="one two three four five", anchor=NoneAnchor())])
     assert len(out) == 1
-    assert out[0] == "one two three four five"
+    assert out[0].text == "one two three four five"
+    assert out[0].anchor.kind == "none"

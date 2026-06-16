@@ -25,15 +25,36 @@ vi.mock("framer-motion", async () => {
 });
 
 vi.mock("@/lib/auth", () => ({
-  useAuth: () => ({ completeSetup: vi.fn() }),
+  useAuth: () => ({ completeSetup: vi.fn(), setupState: { appliance: "unclaimed", setupStep: "welcome", userTourCompleted: false } }),
 }));
 
 const fetchModelsMock = vi.fn();
 const sendChatMock = vi.fn();
 
 vi.mock("@/lib/api", () => ({
+  // WARP-867 — AccountStep probes setup status on mount to pick its mode;
+  // "required" keeps these walks on the normal create form.
+  checkSetupRequired: vi.fn(async () => "required"),
   setupAdmin: vi.fn(async () => undefined),
+  patchSetupStep: vi.fn(async () => undefined),
   loginUser: vi.fn(async () => undefined),
+  // PR #373 — claim slots before account; the Claim step calls these.
+  fetchApplianceContract: vi.fn(async () => ({
+    appliance_id: "droplet-appliance-test",
+    compute: { label: "Compute", value: "Local AI compute", online: true },
+    storage: { label: "Storage", value: "Encrypted at rest", online: true },
+    network: { label: "Network", value: "Local network", online: true },
+    display: { label: "Display", value: "Front-panel display", online: true },
+    supply_chain: { taa_compliant: true, ndaa_889_clear: true, summary: "Verified" },
+  })),
+  postClaim: vi.fn(async () => ({ claimed: true, next_step: "account" })),
+  // PR #380 — org slots after account; the Org step calls postOrg.
+  postOrg: vi.fn(async () => ({
+    ok: true,
+    slug: "acme",
+    reserved_host: "droplet.local/acme",
+    next_step: "internet",
+  })),
   fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
   setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
   fetchDrives: vi.fn(async () => ({ drives: [], count: 0 })),
@@ -47,6 +68,11 @@ vi.mock("@/lib/api", () => ({
   createVpnPeer: vi.fn(),
   fetchModels: () => fetchModelsMock(),
   sendChat: (req: unknown) => sendChatMock(req),
+  // PR #381 — team slots after ai; TeamStep imports postTeamInvite.
+  postTeamInvite: vi.fn(async () => ({
+    ok: true, token: "tok", email: "x@acme.co", role: "family",
+    expires_at: "2026-06-04T00:00:00.000Z",
+  })),
   fetchMatterDevices: vi.fn(async () => ({
     lights: [],
     switches: [],
@@ -60,20 +86,23 @@ vi.mock("@/lib/api", () => ({
 }));
 
 import SetupPage from "@/app/setup/page";
+import { passClaimStep } from "./helpers/claim-step";
+import { passOrgStep } from "./helpers/org-step";
 
 async function advanceToAi() {
   fireEvent.click(screen.getByRole("button", { name: /get started/i }));
-  fireEvent.change(screen.getByPlaceholderText(/your-username/i), {
-    target: { value: "owner" },
+  await passClaimStep();
+  fireEvent.change(screen.getByPlaceholderText(/you@company\.com/i), {
+    target: { value: "owner@warp.test" },
   });
   fireEvent.change(screen.getByPlaceholderText(/your name/i), {
     target: { value: "Robin" },
   });
-  fireEvent.change(screen.getByPlaceholderText(/min\. 8 characters/i), {
-    target: { value: "longenoughpw" },
+  fireEvent.change(screen.getByPlaceholderText(/create a password/i), {
+    target: { value: "Abcdefghijk1" },
   });
   fireEvent.change(screen.getByPlaceholderText(/repeat password/i), {
-    target: { value: "longenoughpw" },
+    target: { value: "Abcdefghijk1" },
   });
   await act(async () => {
     fireEvent.click(screen.getByRole("button", { name: /create account/i }));
@@ -81,11 +110,26 @@ async function advanceToAi() {
     await Promise.resolve();
     await Promise.resolve();
   });
-  // Internet → skip
+  // PR #380 — pass through the org step (account → org → …).
+  await passOrgStep();
+  // PR #375 — TwoFactor step → skip (org → twofactor → wifi).
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+  });
+  // Onboarding-Flow redesign — Internet split into Wi-Fi then Address. Skip both.
   await act(async () => {
     await Promise.resolve();
     await Promise.resolve();
-    fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /skip — i'll do this later/i }),
+    );
+  });
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+    fireEvent.click(
+      screen.getByRole("button", { name: /skip — no remote access/i }),
+    );
   });
   // Storage auto-skip → Discovery → skip → Cameras auto-skip → VPN
   // preCheck → skip → AI.
@@ -211,13 +255,14 @@ describe("setup AI step (WARP-174)", () => {
     expect(
       screen.getByText(/i can help with files, cameras/i),
     ).toBeInTheDocument();
-    // Primary CTA flipped.
+    // Primary CTA flipped (the label is "Continue" — this is not the terminal
+    // step, so it must not claim to finish setup / go to the dashboard).
     expect(
-      screen.getByRole("button", { name: /take me to the dashboard/i }),
+      screen.getByRole("button", { name: /^continue$/i }),
     ).toBeInTheDocument();
   });
 
-  it("Take me to the dashboard advances to done", async () => {
+  it("the post-response Continue CTA advances to the team step (PR #381)", async () => {
     fetchModelsMock.mockResolvedValue({ models: [LOCAL_MODEL] });
     sendChatMock.mockResolvedValue({
       ok: true,
@@ -234,14 +279,16 @@ describe("setup AI step (WARP-174)", () => {
     });
     await act(async () => {
       fireEvent.click(
-        screen.getByRole("button", { name: /take me to the dashboard/i }),
+        screen.getByRole("button", { name: /^continue$/i }),
       );
     });
 
-    expect(screen.getByTestId("welcome-flourish")).toBeInTheDocument();
+    // PR #381 — team now slots after ai (… → ai → team → done), so the AI step
+    // advances onto the Team step, not straight to the done flourish.
+    expect(screen.getByText(/bring in your team/i)).toBeInTheDocument();
   });
 
-  it("Skip for now advances to done without calling sendChat", async () => {
+  it("Skip for now advances to the team step without calling sendChat", async () => {
     fetchModelsMock.mockResolvedValue({ models: [LOCAL_MODEL] });
     render(<SetupPage />);
     await advanceToAi();
@@ -251,7 +298,7 @@ describe("setup AI step (WARP-174)", () => {
     });
 
     expect(sendChatMock).not.toHaveBeenCalled();
-    expect(screen.getByTestId("welcome-flourish")).toBeInTheDocument();
+    expect(screen.getByText(/bring in your team/i)).toBeInTheDocument();
   });
 
   it("surfaces an inline error when the chat request fails", async () => {

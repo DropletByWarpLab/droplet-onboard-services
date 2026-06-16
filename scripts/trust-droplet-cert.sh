@@ -4,13 +4,23 @@
 # system trust store so https://droplet-ai.local and https://droplet-ai.lan
 # stop showing the "Not secure" browser warning.
 #
-# Why this exists:
-#   The Droplet ships a self-signed cert for its own hostnames (droplet-ai.local,
-#   droplet-ai.lan, droplet.local, droplet.lan, localhost, +IPs). Browsers warn
-#   on self-signed certs even when the hostname matches — the only way to clear
-#   the warning without a public CA is to tell the client OS to trust this
-#   specific cert as a root. That's what this script does, per-client,
-#   one-time.
+# BOOTSTRAP-WINDOW / AIR-GAPPED FALLBACK ONLY (ADR-023).
+#   You normally do NOT need this. The Droplet now obtains a publicly-trusted
+#   certificate automatically (HQ-mediated ACME), so every client gets a green
+#   padlock at home AND over the VPN with no per-device install. Use this script
+#   only in two cases:
+#     1. The bootstrap window — the few minutes after setup before the first
+#        trusted cert is issued, when the box still serves the self-signed cert.
+#     2. An air-gapped / HQ-unreachable box that can never obtain a public cert.
+#   On a normally-connected box, just wait for the padlock to turn green.
+#
+# Why this exists (the fallback case):
+#   In those two cases the Droplet serves a self-signed cert for its own
+#   hostnames (droplet-ai.local, droplet-ai.lan, droplet.local, droplet.lan,
+#   localhost, the per-device FQDN, +IPs). Browsers warn on self-signed certs
+#   even when the hostname matches — the only way to clear the warning without a
+#   public CA is to tell the client OS to trust this specific cert as a root.
+#   That's what this script does, per-client, one-time.
 #
 # Platforms:
 #   - Linux (Debian/Ubuntu and Fedora/RHEL families)
@@ -24,7 +34,7 @@
 #
 # The cert is fetched from the running device over the network (not from the
 # repo) so the script works on any client without filesystem access to the
-# Jetson.
+# appliance.
 # =============================================================================
 set -euo pipefail
 

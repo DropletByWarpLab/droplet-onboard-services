@@ -390,11 +390,15 @@ export async function decommissionAp(
 }
 
 function defaultDisplayName(mac: string, model: string | null): string {
-  // "Pi5 AP (12:34:56)" — model + the last 3 octets so the operator
+  // "AP (12:34:56)" — model + the last 3 octets so the operator
   // can tell two extenders apart in the dashboard before they pick a
-  // displayName of their own.
+  // displayName of their own. The device-tree compatible string
+  // `raspberrypi,5-model-b` is the literal value Pi-based APs emit on
+  // /proc/device-tree/compatible — matched here for detection (do NOT
+  // rename it), but the operator-facing label stays hardware-agnostic
+  // (ADR-011).
   const last3 = mac.split(":").slice(-3).join(":");
-  if (model && model.includes("raspberrypi,5")) return `Pi5 AP (${last3})`;
+  if (model && model.includes("raspberrypi,5")) return `AP (${last3})`;
   if (model) return `${model} AP (${last3})`;
   return `Extender (${last3})`;
 }

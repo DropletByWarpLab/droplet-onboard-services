@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useId, useState, type RefObject } from "react";
+import { useCallback, useId, useState, type ReactNode, type RefObject } from "react";
 import { Loader2 } from "lucide-react";
 import { Dialog } from "./Dialog";
 
@@ -57,6 +57,13 @@ export interface ConfirmDialogProps {
    * monospace token under the description if present.
    */
   confirmedIdentifier?: string;
+  /**
+   * Optional content rendered between the description and the button row —
+   * e.g. a safety-tier chip ("Write · confirm to apply") on a Tier-2
+   * network/switch write. Purely additive: existing callsites omit it and
+   * render exactly as before.
+   */
+  accessory?: ReactNode;
 }
 
 export function ConfirmDialog({
@@ -70,6 +77,7 @@ export function ConfirmDialog({
   cancelLabel = "Cancel",
   variant = "destructive",
   confirmedIdentifier,
+  accessory,
 }: ConfirmDialogProps) {
   const headingId = useId();
   const descId = useId();
@@ -123,6 +131,7 @@ export function ConfirmDialog({
             </p>
           )}
         </div>
+        {accessory && <div>{accessory}</div>}
         <div className="flex items-center justify-end gap-2 pt-1">
           <button
             type="button"

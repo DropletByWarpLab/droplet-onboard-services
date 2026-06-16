@@ -14,6 +14,7 @@
  * `"type": "module"`, so `import.meta.url` would trip tsc.
  */
 import path from "node:path";
+import { config } from "../config.js";
 import { McpClientService } from "./mcp-client.service.js";
 
 const SERVER_BIN =
@@ -26,7 +27,22 @@ export const mcpClient = new McpClientService({
   // Pass MCP_TRUSTED so the future HTTP-transport child knows the parent
   // is the trusted principal (no JWT to verify) — see spec §7.2. Stdio
   // ignores it today, but flagging it now keeps the wiring explicit.
-  env: { MCP_TRUSTED: "1" },
+  //
+  // ORCHESTRATOR_TOKEN: the child's network/tool handlers call BACK into
+  // this orchestrator's /api surface and inject
+  // `process.env.ORCHESTRATOR_TOKEN` as the bearer
+  // (services/mcp-server/src/index.ts). Compose defines SERVICE_TOKEN_MCP on
+  // the orchestrator container but never ORCHESTRATOR_TOKEN (that name is
+  // only wired on the SIBLING http mcp-server container), so on a
+  // provisioned box (AUTH_ENABLED=true) every chat-path tool call 401'd one
+  // hop in — the exact failure class this PR fixes (review blocker). Hand
+  // the service-principal token to the child explicitly.
+  env: {
+    MCP_TRUSTED: "1",
+    ...(config.SERVICE_TOKEN_MCP
+      ? { ORCHESTRATOR_TOKEN: config.SERVICE_TOKEN_MCP }
+      : {}),
+  },
 });
 
 let started = false;

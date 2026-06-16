@@ -1,0 +1,39 @@
+[Unit]
+Description=Droplet front-panel shutdown screen (pushes "Shutting down" on teardown)
+# Order AFTER docker + network so that, on shutdown, systemd stops THIS unit
+# BEFORE it stops the docker stack (shutdown is the reverse of start order).
+# That ordering is what guarantees the oled-display container is still alive
+# to receive the POST our ExecStop sends. Wants= (not Requires=) keeps this
+# unit best-effort — a missing docker.service must never wedge boot/shutdown.
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# The boot screen is self-driven by the oled-display service itself, so there
+# is nothing to do on start — /bin/true just lets the unit reach "active" so
+# its ExecStop runs on the way down.
+ExecStart=/usr/bin/true
+# On stop, push the shutdown frame. The script is best-effort and time-bounded
+# so it can never block the shutdown sequence.
+ExecStop=/usr/local/sbin/droplet-shutdown-screen.sh
+# The bearer token lives in the operator-managed bridge env file (0600,
+# root:root), same file droplet-device-bridge.service reads. "-" => tolerate
+# the file being absent (the script also handles a missing token gracefully).
+EnvironmentFile=-/etc/droplet/device-bridge.env
+
+# --- Hardening (mirrors droplet-device-bridge.service) ---
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+NoNewPrivileges=true
+# Only needs IPv4/IPv6 + Unix sockets to reach the loopback HTTP endpoint.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

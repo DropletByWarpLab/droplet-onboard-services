@@ -20,6 +20,7 @@ import {
   subscribeStateChanges,
   subscribeConnectionChanges,
   isMatterInitialized,
+  getMatterCapabilities,
 } from "../services/matter.service.js";
 import {
   evaluateCommand,
@@ -27,13 +28,50 @@ import {
   getAuditLog,
 } from "../services/safety-tier.service.js";
 import { requireRole } from "../middleware/auth.js";
+import { isUpstreamUnavailable } from "../lib/upstream-unavailable.js";
 
 const logger = pino({ name: "matter-routes" });
 
-/** Validate that a nodeId string is a safe numeric value for BigInt conversion. */
+/**
+ * Empty grouped-devices payload served when the matter-controller sidecar can't
+ * answer — either it was never initialized, or it's reachable-but-down at GET
+ * time. Same shape the dashboard already handles for the "disconnected" case so
+ * the Devices page renders empty groups instead of dead-ending on a 500 during a
+ * sidecar outage (mirrors models-summary.service.ts). Never cached — self-heals
+ * on the next poll once the sidecar is back.
+ */
+const DISCONNECTED_DEVICES = {
+  lights: [],
+  switches: [],
+  sensors: [],
+  climate: [],
+  media: [],
+  covers: [],
+  locks: [],
+  other: [],
+  _status: "disconnected",
+} as const;
+
+/** Matter node IDs are uint64 — 18446744073709551615 is the ceiling. */
+const NODE_ID_MAX = 18446744073709551615n;
+
+/**
+ * Validate that a nodeId string is a safe numeric value for BigInt
+ * conversion AND inside the uint64 range — 20 digits can exceed the
+ * ceiling (e.g. "99999999999999999999"), which would blow up inside
+ * the controller as a 500 instead of this validator's 400.
+ */
 function isValidNodeId(id: string): boolean {
-  return /^\d{1,20}$/.test(id);
+  return /^\d{1,20}$/.test(id) && BigInt(id) <= NODE_ID_MAX;
 }
+
+/**
+ * WARP-851: shared copy for every "the box can't see the device on the
+ * network" failure mode. Used by both the explicit discovery-failure
+ * branch and the generic network/BLE branch below.
+ */
+const NETWORK_DISCOVERY_COPY =
+  "Couldn't find the device on the network. Make sure it's powered on, in pairing mode, and on the same Wi-Fi as the Droplet.";
 
 /**
  * WARP-102: translate matter.js commissioning errors into customer-
@@ -48,8 +86,10 @@ function isValidNodeId(id: string): boolean {
  * error-code surface because matter.js doesn't export one yet
  * (project-chip/matter.js#1438). Promote to a typed enum once that
  * upstream issue ships.
+ *
+ * Exported for unit tests (matter.commission-errors.test.ts).
  */
-function translateCommissionError(err: unknown): {
+export function translateCommissionError(err: unknown): {
   status: number;
   message: string;
   internalReason: string;
@@ -71,6 +111,22 @@ function translateCommissionError(err: unknown): {
       // promise a universal sequence — point the user at the device's
       // own instructions.
       message: "This device is already paired with the Droplet. Open it from the Devices page, or factory-reset it following the device's instructions if you want to re-pair.",
+      internalReason: raw,
+    };
+  }
+  // WARP-851: mDNS/BLE discovery found nothing before the waiter
+  // expired. matter.js (@matter/protocol ControllerDiscovery) throws
+  // CommissionableDeviceDiscoveryFailedError with "No device discovered
+  // using identifier {…}! Please check that the relevant device is
+  // online." — note "discovered", which the generic /discovery/ pattern
+  // below does NOT match, so this used to fall through to the 500 whose
+  // copy says to factory-reset the device. On a box that can't hear the
+  // device (no BLE, no LAN mDNS — see WARP-850), that advice is harmful:
+  // resetting the customer's device can never fix the box's reachability.
+  if (/no device discovered|check that the relevant device is online/i.test(raw)) {
+    return {
+      status: 502,
+      message: NETWORK_DISCOVERY_COPY,
       internalReason: raw,
     };
   }
@@ -97,7 +153,7 @@ function translateCommissionError(err: unknown): {
   if (/network|wifi|wi-?fi|ble|bluetooth|discovery/i.test(raw)) {
     return {
       status: 502,
-      message: "Couldn't find the device on the network. Make sure it's powered on, in pairing mode, and on the same Wi-Fi as the Droplet.",
+      message: NETWORK_DISCOVERY_COPY,
       internalReason: raw,
     };
   }
@@ -108,11 +164,19 @@ function translateCommissionError(err: unknown): {
   };
 }
 
-/** Map Matter command names to domain/service for safety tier classification. */
-function commandToDomainService(
-  category: string,
-  command: string,
-): { domain: string; service: string } {
+/**
+ * Map a device category to the safety-rule domain prefix used when minting
+ * entityIds (e.g. "lock.12345"). The confirm route deliberately does NOT
+ * re-derive this — it binds on the mint-time pending record instead, so a
+ * device that degrades to endpoint-0-only mid-confirm-window can't break
+ * the WARP-41 echo check.
+ *
+ * Every category must map to its own distinct domain: TIER_2_DOMAINS and
+ * TIER_2_OVERRIDES in safety-rules.ts are keyed on these strings, and an
+ * alias (e.g. binary_sensor → sensor) would make rules for the aliased key
+ * silently unmatchable.
+ */
+function categoryToDomain(category: string): string {
   const domainMap: Record<string, string> = {
     light: "light",
     switch: "switch",
@@ -122,11 +186,19 @@ function commandToDomainService(
     fan: "fan",
     media_player: "media_player",
     sensor: "sensor",
-    binary_sensor: "sensor",
+    binary_sensor: "binary_sensor",
     vacuum: "vacuum",
     camera: "camera",
   };
-  const domain = domainMap[category] ?? category;
+  return domainMap[category] ?? category;
+}
+
+/** Map Matter command names to domain/service for safety tier classification. */
+function commandToDomainService(
+  category: string,
+  command: string,
+): { domain: string; service: string } {
+  const domain = categoryToDomain(category);
 
   const serviceMap: Record<string, string> = {
     turn_on: "turn_on",
@@ -149,21 +221,18 @@ export function createMatterRouter(prisma: PrismaClient): Router {
   router.get("/matter/devices", async (_req, res, next) => {
     try {
       if (!isMatterInitialized()) {
-        return res.json({
-          lights: [],
-          switches: [],
-          sensors: [],
-          climate: [],
-          media: [],
-          covers: [],
-          locks: [],
-          other: [],
-          _status: "disconnected",
-        });
+        return res.json(DISCONNECTED_DEVICES);
       }
       const grouped = await getCommissionedDevices();
       res.json(grouped);
     } catch (err) {
+      if (isUpstreamUnavailable(err)) {
+        logger.warn(
+          { err },
+          "matter-controller unreachable; serving empty device list",
+        );
+        return res.json(DISCONNECTED_DEVICES);
+      }
       next(err);
     }
   });
@@ -208,6 +277,20 @@ export function createMatterRouter(prisma: PrismaClient): Router {
       unsubState();
       unsubConn();
     });
+  });
+
+  // --- Controller capabilities ---
+  // WARP-851: read-only surface for the dashboard so the wizard and
+  // /devices/add-matter can be honest about which commissioning paths
+  // work on this box. Since WARP-850 this proxies the matter-controller
+  // sidecar's real state (bleCommissioning=true when its BLE transport
+  // registered at process start). Intentionally NOT gated on
+  // isMatterInitialized(): the sidecar answers before its controller
+  // finishes booting, the wizard needs the answer early, and the
+  // service degrades to { bleCommissioning: false } instead of
+  // throwing when the sidecar is unreachable.
+  router.get("/matter/capabilities", async (_req, res) => {
+    res.json(await getMatterCapabilities());
   });
 
   // --- Discover uncommissioned Matter devices ---
@@ -391,13 +474,14 @@ export function createMatterRouter(prisma: PrismaClient): Router {
       }
 
       const userId = (req as any).user?.id;
-      // The nodeId in the URL determines the expected entityId. The safety-tier
-      // service now enforces the match centrally (WARP-41). "matter" domain is
-      // hardcoded because this router only mounts under /devices/matter.
-      const expectedEntityId = `matter.${req.params.nodeId}`;
+      // The nodeId in the URL must match the node the token was minted for.
+      // The safety-tier service enforces this centrally against the mint-time
+      // pending record (WARP-41) — no live getDevice() here, because a device
+      // that is offline or mid-reconnect reports a degraded category and a
+      // re-derived entityId would 400 the legitimate confirm.
       const result = await confirmCommand(prisma, confirmationToken, userId, {
         service,
-        entityId: expectedEntityId,
+        nodeId: req.params.nodeId,
       });
 
       if (!result.confirmed) {
@@ -434,7 +518,10 @@ export function createMatterRouter(prisma: PrismaClient): Router {
       if (!isValidNodeId(req.params.nodeId)) {
         return res.status(400).json({ error: "Invalid node ID format" });
       }
-      await decommissionDevice(req.params.nodeId);
+      const removed = await decommissionDevice(req.params.nodeId);
+      if (!removed) {
+        return res.status(404).json({ error: "Device not found" });
+      }
       res.json({ status: "decommissioned", nodeId: req.params.nodeId });
     } catch (err) {
       next(err);

@@ -1,53 +1,96 @@
 """
-code.py — Droplet PyPortal Titano firmware (swipe dashboard)
+code.py — Droplet front-panel firmware (py-v3 editorial UI)
 =============================================================
-Three-screen swipe carousel: Stats ← Idle (logo) → QR.
+Two live states + host-driven power sequences. This is the on-device port of
+the design handoff in
+``services/oled-display/design`` (README.md + preview.html) — every
+coordinate/color below maps 1:1 to that 480x320 reference.
 
-  idle   Full-screen Droplet mark, dimmed. Default screensaver after
-         30 s of no touch. Any tap wakes → Stats.
-  stats  Ubiquiti-style overview (CPU / MEM / DISK / TEMP dials,
-         rolled-up Network / Storage / Cameras / Wi-Fi cards).
-         Red "!" bubble in the top-right if there are open alerts
-         (Frigate parameter hits or system errors) — tap opens the
-         alerts drawer with per-row clear + Clear-all.
-  qr     "Join Droplet-AI" QR with a rotation TTL chip + "Rotate
-         now" button that kicks a ROTATE_KEY serial line back at
-         the host (device-bridge handles the actual UCI change).
+  idle    Editorial hero clock (132px, weight ~800, -6 tracking) with a
+          blinking colon, a tappable 12/24 segmented toggle (top-right,
+          PERSISTED on-device), the droplet mark + DROPLET eyebrow
+          (top-left), a 56x3 accent rule under the clock, date bottom-left,
+          green-dot + SSID bottom-right, and a full-width seconds progress
+          hairline along the very bottom edge. Default screensaver after
+          30 s of no touch; any tap wakes → system.
+  system  ONE combined System + Wi-Fi screen (replaces the old separate
+          stats + QR screens). Header band (SYSTEM eyebrow left; clock +
+          status pill / alert badge right). Vertical divider at x=288.
+          LEFT = system: CPU hero + 48-sample sparkline + MEM/DISK/TEMP/CAM
+          tabular row + detail line + hostname·ip strip. RIGHT = Wi-Fi:
+          PAIR·WI-FI eyebrow + white QR card with the droplet mark inset +
+          NETWORK/SSID + PASSWORD + a full-width KEY rotate pill.
+          Open alerts surface as a red "!" badge in the header — tap to open
+          the Alerts drawer (per-row dismiss + Clear all). The QR matrix is
+          supplied by the host (mode:qr); the firmware never encodes on-device.
 
 Navigation
 ----------
-  swipe left   next screen in carousel (stats → idle → qr → [edge])
-  swipe right  previous screen
-  tap          activates whatever region the finger landed on; on
-               the idle screen any tap = wake to stats
-  30 s idle    auto-drop back to idle + dim brightness to ~38 %
+  swipe        idle ⇄ system only (one non-idle screen; swipes on system
+               rubber-band). swipe left wakes idle → system.
+  tap          activates whatever region the finger landed on; on the idle
+               screen any tap (except the toggle) wakes to system.
+  30 s idle    auto-drop back to idle and close any open drawer.
 
-Host → PyPortal (one JSON per line, unchanged for back-compat)
-  {"mode":"idle"|"stats"|"qr"|"logo"|"home"}    # logo/home map to idle/stats
-  {"mode":"stats",  "data":{cpu,mem,disk,temp,ip,hostname,uptime,now}}
+Lifecycle screens (host-driven, modal — not in the swipe nav):
+  boot      Opened by main() on cold power-on: the droplet "vessel" fills
+            with accent liquid (eased) + DROPLET wordmark + a 4-stage status
+            line + a 184px progress bar + a "Droplet OS · v2.4" footer. The
+            host moves the panel to the live UI once it's ready (or after its
+            readiness timeout). A bare-mode {"mode":"boot"} just navigates;
+            {"mode":"boot","data":{stage,detail,pct}} drives the fill/status.
+  shutdown  The liquid drains + a status line, then a CRT collapse (content
+            thins to a phosphor line → dot → black). phase=="halted" shows
+            the fully-collapsed safe-to-power-off frame. Pushed by the host's
+            systemd ExecStop.
+  standby   Dim mark + STANDBY + "tap to power on" (host-pushed; tap wakes).
+  claim     Onboarding claim screen (WARP-632 / ADR-017), design-handoff
+            two-column layout: header band (mark + FIRST-TIME SETUP), the
+            claim code as dash-separated groups with accent dash bars + the
+            numbered link steps on the left, a white scan QR card on the
+            right, WAITING TO BE CLAIMED dots over a 2px scan track at the
+            foot. The QR is the host-encoded setup deep link
+            (setup_qr_matrix) or, when Wi-Fi creds are pushed (WARP-819),
+            the Wi-Fi join QR + readable SSID/PSK. Host-driven by the
+            orchestrator while the box is unclaimed; cleared (host
+            navigates away) once claimed.
+
+Host → display (one JSON per line, contract UNCHANGED for back-compat)
+  {"mode":"idle"|"stats"|"qr"|"logo"|"home"|"system"}  # see _ALIASES below;
+        # stats/qr/wifi/cameras/drives/home all land on the combined "system"
+        # screen now, logo→idle. Bare-mode (no data) = navigation.
+  {"mode":"boot",   "data":{stage,detail,pct}}     # pct optional (indeterminate)
+  {"mode":"shutdown","data":{reason,phase}}        # phase: stopping|halted
+  {"mode":"claim",  "data":{code, setup_url, setup_qr_matrix,
+                             wifi_qr_matrix, wifi_ssid, wifi_psk}}
+        # onboarding claim code; matrices host-encoded, at most one per frame
+  {"mode":"stats",  "data":{cpu,mem,disk,temp,ip,hostname,uptime,now,date}}
   {"mode":"wifi",   "data":{networks, connected_to, adapter, state, ssid,
-                             clients, channel, band, key_ttl_seconds}}
+                             clients, channel, band, key_ttl_seconds, password}}
   {"mode":"cameras","data":{online, total, events:[...], source, error}}
   {"mode":"drives", "data":{drives:[...], count}}
   {"mode":"files",  "data":{count, size_bytes, recent:[...]}}
   {"mode":"qr",     "data":{matrix, ssid, security, payload, version, ok,
-                             ttl_seconds}}
+                             ttl_seconds}}    # matrix supplied by the host
   {"mode":"alert",  "data":{type:"cam"|"sys", title, detail, time}}
   {"mode":"message","data":{title, lines:[...]}}
   {"mode":"brightness","value":0..255}
   {"mode":"ping"}
 
-PyPortal → Host
-  READY / OK / ERR:<reason>
+Display → Host  (lines UNCHANGED, plus MEM: added in WARP-638)
+  READY / OK / ERR:<reason> / REQUEST_STATE / REQUEST_QR
   TOUCH:<x>,<y>,<p> / TOUCH:release
   TAP:<screen>:<region>
   SWIPE:<left|right>:<from-screen>
   NAV:<screen>
   ROTATE_KEY
+  MEM:<free-bytes>            # emitted on {"mode":"ping"} — free heap after a
+                             # gc.collect(), so on-device headroom is
+                             # verifiable from the host after flashing.
 """
 
 import gc
-import math
+import os
 import time
 import json
 
@@ -65,6 +108,17 @@ try:
 except ImportError:
     adafruit_touchscreen = None
 
+# Hero numeral font (digits/colon/AM-PM/°/% subset) — loaded best-effort from
+# /lib/fonts/. terminalio scaled to 132px is too blocky for the editorial
+# clock (design_handoff §"Hero font"), so we bundle a heavy bitmap face and
+# load it via adafruit_bitmap_font. If the library or the asset is missing —
+# or the FS is in a state where it can't be read — we fall back to
+# terminalio-scaled heroes so a font problem never bricks the panel.
+try:
+    from adafruit_bitmap_font import bitmap_font
+except ImportError:
+    bitmap_font = None
+
 
 _HEAP_PANIC_BYTES = 18 * 1024
 _PALETTES = {}
@@ -80,29 +134,44 @@ def _palette(color):
 
 
 # ---------------------------------------------------------------------------
-# Design tokens (mirror web-dashboard dark mode + preview.html)
-# Deeper near-black background + indigo-tinted surfaces + punchier accents
-# for a modern OLED-style look that matches the web dashboard.
+# Design tokens — py-v3 palette (design_handoff README "Design Tokens").
+# Every value maps 1:1 to a row in the handoff token table; the rgba tokens
+# (accentSubtle, the orange KEY-pill fill, the sparkline fill) are flattened
+# to the nearest solid over the #050507 background.
 # ---------------------------------------------------------------------------
-BG            = 0x050507
-PANEL         = 0x0D0D12
-SURFACE       = 0x141420
-SURFACE_2     = 0x1D1D2E
-SEPARATOR     = 0x2A2A38
-SEPARATOR_2   = 0x3A3A4A
-TEXT          = 0xFFFFFF
-LABEL_2       = 0xC8C8D4
-LABEL_3       = 0x8B8B9C
-LABEL_4       = 0x545466
-ACCENT        = 0x8B93FF
-ACCENT_PRI    = 0x7C7FFF
-ACCENT_LIGHT  = 0xB4BAFF
-ACCENT_SUBTLE = 0x1E1E3E
-GAUGE_TRACK   = 0x24243A
-GREEN         = 0x3DFF9F
-ORANGE        = 0xFFB347
-RED           = 0xFF5C7A
-WHITE         = 0xFFFFFF
+BG            = 0x050507   # screen background
+PANEL         = 0x0D0D12   # alerts drawer background
+SURFACE       = 0x141420   # chips, inactive pills
+SURFACE_2     = 0x1D1D2E   # alert rows, "Clear all"
+SEPARATOR     = 0x2A2A38   # hairline dividers
+SEPARATOR_2   = 0x3A3A4A   # stronger borders
+TEXT          = 0xFFFFFF   # primary numerics & values
+LABEL_2       = 0xC8C8D4   # clock time, button labels
+LABEL_3       = 0x8B8B9C   # eyebrows / captions
+LABEL_4       = 0x545466   # faint / standby text
+ACCENT        = 0x818CF8   # sparkline, rule, SSID, mark
+ACCENT_DIM    = 0x5B62C7   # seconds hairline
+ACCENT_INK    = 0xB4BAFF   # mark highlight, password text
+# accentSubtle rgba(129,140,248,0.18) over bg -> nearest solid (active toggle).
+ACCENT_SUBTLE = 0x1B1D32
+# Claim-screen waiting dots at rest — accent @ 30% over bg, flattened.
+ACCENT_FAINT  = 0x2B2F52
+# rgba(255,159,10,0.18) over bg -> KEY-pill fill when <60s.
+ORANGE_SUBTLE = 0x322108
+# sparkline fill #818cf822 over bg -> nearest solid.
+SPARK_FILL    = 0x161727
+TRACK         = 0x1F1F30   # progress / seconds track
+GREEN         = 0x30D158   # OK status, cameras online
+ORANGE        = 0xFF9F0A   # warnings, key-expiring
+RED           = 0xFF453A   # alerts, critical
+WHITE         = 0xFFFFFF   # QR card
+PHOSPHOR      = 0xEAEAFF   # CRT-collapse line on shutdown
+
+# Accent aliases for the vector droplet mark (_mark_poly). ACCENT_PRI is the
+# body fill, ACCENT_LIGHT the inner highlight — both point at the py-v3 indigo
+# so the mark reads on every screen.
+ACCENT_PRI    = ACCENT
+ACCENT_LIGHT  = ACCENT_INK
 
 DISPLAY_W = board.DISPLAY.width
 DISPLAY_H = board.DISPLAY.height
@@ -133,8 +202,8 @@ def _stroked_rect(x, y, w, h, color, sw=1):
     return g
 
 
-def _text(s, *, x, y, scale=2, color=TEXT, anchor=None):
-    lbl = label.Label(terminalio.FONT, text=s, color=color, scale=scale)
+def _text(s, *, x, y, scale=2, color=TEXT, anchor=None, font=None):
+    lbl = label.Label(font or terminalio.FONT, text=s, color=color, scale=scale)
     if anchor is not None:
         lbl.anchor_point = anchor
         lbl.anchored_position = (x, y)
@@ -142,6 +211,45 @@ def _text(s, *, x, y, scale=2, color=TEXT, anchor=None):
         lbl.x = x
         lbl.y = y
     return lbl
+
+
+def _tracked(g, s, *, x, y, scale=2, color=TEXT, anchor_y=0, tracking=0,
+             align="left", font=None):
+    """Draw a string with manual per-character letter-spacing (tracking).
+
+    terminalio/label has no tracking, and the editorial look leans on it
+    (eyebrows +1.2..+2, the hero clock -6). We lay out each glyph as its own
+    Label so the spacing matches the design_handoff reference. Coordinates are
+    in device px; `tracking` is added between glyphs (terminalio glyph cell is
+    6px wide * scale). `align` left/center/right positions the whole run at x.
+    Returns the total advance width (px) so callers can re-center lockups.
+    """
+    use_font = font or terminalio.FONT
+    # Per-glyph advance: terminalio is a fixed 6px cell; for the bitmap hero
+    # font we measure via a throwaway Label bounding box.
+    def adv(ch):
+        if use_font is terminalio.FONT:
+            return 6 * scale
+        try:
+            lbl = label.Label(use_font, text=ch, scale=scale)
+            return lbl.bounding_box[2] * scale
+        except Exception:
+            return 6 * scale
+    widths = [adv(ch) for ch in s]
+    total = sum(widths) + tracking * (len(s) - 1) if s else 0
+    if align == "center":
+        cx = x - total / 2
+    elif align == "right":
+        cx = x - total
+    else:
+        cx = x
+    for ch, w in zip(s, widths):
+        lbl = label.Label(use_font, text=ch, color=color, scale=scale)
+        lbl.anchor_point = (0.0, anchor_y)
+        lbl.anchored_position = (int(cx), y)
+        g.append(lbl)
+        cx += w + tracking
+    return int(total)
 
 
 def _circle(cx, cy, r, color):
@@ -171,141 +279,16 @@ def _rounded_rect(g, x, y, w, h, r, color):
     g.append(_circle(x + w - r, y + h - r, r, color))
 
 
-# vectorio has no arc primitive, so half-donuts are drawn as a 2*N-vertex
-# Polygon (outer sweep + inner sweep back). Circle end-caps round the tips
-# for the "rounded half donut" look requested — cheap heap-wise because
-# vectorio stores just the vertex list, not a rasterised bitmap.
-def _half_donut(g, cx, cy, r_outer, thickness, pct, fill_color,
-                track_color=GAUGE_TRACK, segments=28):
-    """Draw a 180° half-donut gauge, flat edge facing down.
-
-    Args:
-        cx, cy: center of the flat edge (the donut curves *up* from here)
-        r_outer: outer radius
-        thickness: band thickness; inner radius = r_outer - thickness
-        pct: 0..100 fill percentage (fills left-to-right along the arc)
-        fill_color, track_color: palette entries
-        segments: polygon tessellation — 28 reads smooth at r=40
-    """
-    r_inner = max(2, r_outer - thickness)
-    pct = max(0.0, min(100.0, float(pct)))
-
-    def arc_ring(start_frac, end_frac):
-        # Build a polygon ring between start_frac..end_frac of the 180° sweep.
-        # 0 = left (angle pi), 1 = right (angle 0).
-        pts = []
-        n = max(2, int(segments * abs(end_frac - start_frac) + 0.5))
-        # Outer: start -> end
-        for i in range(n + 1):
-            frac = start_frac + (end_frac - start_frac) * (i / n)
-            a = math.pi * (1.0 - frac)
-            pts.append((int(cx + r_outer * math.cos(a)),
-                        int(cy - r_outer * math.sin(a))))
-        # Inner: end -> start (reverse)
-        for i in range(n + 1):
-            frac = end_frac - (end_frac - start_frac) * (i / n)
-            a = math.pi * (1.0 - frac)
-            pts.append((int(cx + r_inner * math.cos(a)),
-                        int(cy - r_inner * math.sin(a))))
-        return pts
-
-    # Track (full 180°)
-    g.append(vectorio.Polygon(
-        pixel_shader=_palette(track_color),
-        points=arc_ring(0.0, 1.0),
-        x=0, y=0,
-    ))
-    # Rounded caps on the track ends
-    cap_r = thickness // 2
-    g.append(_circle(cx - (r_outer + r_inner) // 2, cy, cap_r, track_color))
-    g.append(_circle(cx + (r_outer + r_inner) // 2, cy, cap_r, track_color))
-
-    if pct <= 0.5:
-        return
-
-    # Fill (0..pct of 180°)
-    end_frac = pct / 100.0
-    g.append(vectorio.Polygon(
-        pixel_shader=_palette(fill_color),
-        points=arc_ring(0.0, end_frac),
-        x=0, y=0,
-    ))
-    # Rounded caps on fill: left start + head of the fill arc
-    g.append(_circle(cx - (r_outer + r_inner) // 2, cy, cap_r, fill_color))
-    ang = math.pi * (1.0 - end_frac)
-    head_r = (r_outer + r_inner) // 2
-    g.append(_circle(int(cx + head_r * math.cos(ang)),
-                     int(cy - head_r * math.sin(ang)),
-                     cap_r, fill_color))
-
-
 # ---------------------------------------------------------------------------
-# Droplet mark (scanline-filled polygon, geometry from DropletMark.tsx)
+# Droplet mark (vectorio polygon, geometry from DropletMark.tsx)
 # ---------------------------------------------------------------------------
 
-def _make_mark_bmp(size):
-    w = int(size * 52 / 60)
-    h = size
-    bmp = displayio.Bitmap(w, h, 3)
-    pal = displayio.Palette(3)
-    pal[0] = BG
-    pal[1] = ACCENT_PRI
-    pal[2] = ACCENT_LIGHT
-    pal.make_transparent(0)
-
-    def sx(px): return int(px / 52 * w)
-    def sy(py): return int(py / 60 * h)
-
-    def fill_poly(pts, idx):
-        ys = [p[1] for p in pts]
-        y0 = max(0, sy(min(ys)))
-        y1 = min(h - 1, sy(max(ys)))
-        n = len(pts)
-        for yy in range(y0, y1 + 1):
-            xmin = xmax = None
-            for i in range(n):
-                ax, ay = pts[i]
-                bx, by = pts[(i + 1) % n]
-                ax, ay = sx(ax), sy(ay)
-                bx, by = sx(bx), sy(by)
-                if ay == by:
-                    continue
-                if min(ay, by) <= yy <= max(ay, by):
-                    t = (yy - ay) / (by - ay)
-                    x = int(ax + t * (bx - ax))
-                    if xmin is None or x < xmin:
-                        xmin = x
-                    if xmax is None or x > xmax:
-                        xmax = x
-            if xmin is None:
-                continue
-            for xx in range(max(0, xmin), min(w - 1, xmax) + 1):
-                bmp[xx, yy] = idx
-
-    fill_poly([(26, 0), (44, 28), (36, 48), (16, 48), (8, 28)], 1)
-    fill_poly([(26, 0), (44, 28), (26, 36)], 2)
-    return bmp, pal
-
-
-_MARK_SMALL = _make_mark_bmp(26)
-_MARK_MED   = _make_mark_bmp(52)
-_MARK_LARGE = _make_mark_bmp(160)
-
-
-def _mark_tg(size, x, y):
-    if size >= 140:
-        bmp, pal = _MARK_LARGE
-    elif size >= 48:
-        bmp, pal = _MARK_MED
-    else:
-        bmp, pal = _MARK_SMALL
-    return displayio.TileGrid(bmp, pixel_shader=pal, x=x, y=y)
-
-
-# Vector version of the mark — cheap for any size, no bitmap cache. Used
-# when we want a hero-scale logo (idle screen) without paying the
-# bitmap-rasterisation heap cost at init. Geometry mirrors
-# _make_mark_bmp exactly (52x60 source coordinate space).
+# The mark is drawn as two vectorio Polygons (body + inner highlight) at any
+# size — cheap heap-wise (vectorio stores just the vertex list). The old
+# bitmap path (_make_mark_bmp / the _MARK_SMALL/_MARK_MED/_MARK_LARGE caches /
+# _mark_tg) was removed in WARP-638: the 160px _MARK_LARGE alone pinned several
+# KB of bitmap for the whole process lifetime, and every mark on every screen
+# now goes through this vector path (52x60 source coordinate space).
 def _mark_poly(g, size, x, y):
     w = int(size * 52 / 60)
     h = size
@@ -360,13 +343,138 @@ def _local_ss():
 
 
 # ---------------------------------------------------------------------------
+# Hero numeral font (lazy, best-effort). Loaded once on first use; cached.
+# ---------------------------------------------------------------------------
+_HERO_FONT = None
+_HERO_FONT_TRIED = False
+_HERO_FONT_PATH = "/lib/fonts/Inter-Hero-66.bdf"
+
+
+# Glyphs actually drawn in the hero face, so load_glyphs preloads ONLY what
+# renders (WARP-638). Hero draw sites:
+#   * idle clock  — digits + ":" + " " (the colon blinks to a space)
+#   * CPU hero    — digits + "%"
+# The redesigned claim screen is terminalio-only (its 248px column can't fit
+# the 66px face), so A-Z and "-" are no longer hero glyphs — preloading them
+# pinned ~27 dead 66px bitmaps (~8-10 KB) in the cache for nothing. AM/PM
+# and the TEMP "°" are drawn in terminalio, NOT the hero face, so they are
+# intentionally NOT preloaded either. The bundled BDF (tools/
+# make_hero_font.py) still carries every glyph; this just narrows what gets
+# rasterised into the live glyph cache.
+_HERO_GLYPHS = b"0123456789: %"
+
+
+def _hero_font():
+    """Return the bundled hero bitmap font, or None to fall back to terminalio.
+
+    Loaded ONCE on first use and cached in the module-level ``_HERO_FONT``;
+    every subsequent call (and every render) returns the same object — the
+    BDF is never re-read or re-rasterised. ``_HERO_FONT_TRIED`` guards the
+    load so a missing/corrupt asset is probed at most once and never raises
+    into a render path. ``load_glyphs`` runs exactly once here over
+    ``_HERO_GLYPHS`` so the first idle/claim/CPU frame doesn't pay per-glyph
+    rasterisation cost mid-draw.
+    """
+    global _HERO_FONT, _HERO_FONT_TRIED
+    if _HERO_FONT_TRIED:
+        return _HERO_FONT
+    _HERO_FONT_TRIED = True
+    if bitmap_font is None:
+        return None
+    try:
+        f = bitmap_font.load_font(_HERO_FONT_PATH)
+        try:
+            f.load_glyphs(_HERO_GLYPHS)
+        except Exception:
+            pass
+        _HERO_FONT = f
+    except Exception:
+        _HERO_FONT = None
+    return _HERO_FONT
+
+
+# ---------------------------------------------------------------------------
+# 12/24 clock mode — PERSISTED on-device (design_handoff §1).
+# The CIRCUITPY FS is read-only-to-CircuitPython when the host has it mounted
+# over USB-MSC, so writes can fail with OSError(EROFS). We persist to
+# /clock_mode.txt when we can and ALWAYS keep an in-RAM copy, defaulting to
+# '24', so a read-only FS never crashes the panel — it just doesn't survive a
+# reboot in that state.
+# ---------------------------------------------------------------------------
+_CLOCK_MODE_PATH = "/clock_mode.txt"
+_clock_mode = {"value": "24"}
+
+
+def _load_clock_mode():
+    try:
+        with open(_CLOCK_MODE_PATH, "r") as fh:
+            v = fh.read().strip()
+        if v in ("12", "24"):
+            _clock_mode["value"] = v
+    except Exception:
+        # No file yet / unreadable FS — keep the default.
+        pass
+
+
+def _set_clock_mode(mode):
+    if mode not in ("12", "24"):
+        return
+    _clock_mode["value"] = mode
+    try:
+        with open(_CLOCK_MODE_PATH, "w") as fh:
+            fh.write(mode)
+    except OSError:
+        # Read-only FS (USB-mounted) — the in-RAM value still took effect.
+        _send("ERR:clock_persist:readonly_fs")
+    except Exception as exc:                                    # noqa: BLE001
+        _send("ERR:clock_persist:{}".format(exc))
+
+
+def _fmt_clock_parts():
+    """12/24 split of the local clock (idle hero + system header reuse this).
+
+    Mirrors the sim/preview fmtClock(): 12h drops the leading hour zero and
+    carries an AM/PM suffix; 24h pads the hour. Built off the same monotonic
+    anchor as _local_hhmm so seconds tick between host pushes.
+    """
+    hhmm = _local_hhmm()
+    try:
+        hh24 = int(hhmm.split(":")[0])
+        mm = hhmm.split(":")[1]
+    except (ValueError, IndexError):
+        return {"hh": "--", "mm": "--", "suffix": "", "is12": False,
+                "str": hhmm}
+    is12 = _clock_mode["value"] == "12"
+    if is12:
+        suffix = "PM" if hh24 >= 12 else "AM"
+        h = ((hh24 + 11) % 12) + 1
+        hh = str(h)
+    else:
+        suffix = ""
+        hh = "{:02d}".format(hh24)
+    return {"hh": hh, "mm": mm, "suffix": suffix, "is12": is12,
+            "str": hh + ":" + mm + ((" " + suffix) if is12 else "")}
+
+
+# ---------------------------------------------------------------------------
 # State
 # ---------------------------------------------------------------------------
 
-# Carousel order while the device is awake — logo idle is NOT part of this
-# list. Tapping / swiping out of idle drops straight to the first active
-# screen (stats); from there left-swipe → qr, right-swipe → stats.
-SCREENS = ("stats", "qr")
+# Awake nav order — idle is NOT in this list. The redesign collapses the old
+# stats + qr screens into ONE combined "system" screen, so there is a single
+# non-idle screen. Tapping/swiping out of idle drops to it; swipes on it
+# rubber-band (no lateral neighbours). Host pushes for stats/qr/wifi/cameras/
+# drives all render onto "system" (see _ALIASES).
+SCREENS = ("system",)
+# Lifecycle screens (WARP-624) — host-driven, NOT user-navigable. They stay up
+# until the host pushes another mode, so the idle-timeout below skips them
+# (otherwise a >30 s cold boot would self-drop boot -> idle while the host
+# still believes it's showing the boot splash). They aren't in SCREENS, so
+# swipe is already a no-op on them. NB: "message" is intentionally NOT here —
+# it keeps its existing behaviour of dropping back to idle after the timeout.
+# "claim" (WARP-632) IS modal too: while the box is unclaimed the host wants
+# the code on the lid continuously, so it must not self-drop to idle either.
+LIFECYCLE_SCREENS = ("boot", "shutdown", "standby", "claim")
 IDLE_TIMEOUT_S = 30.0
 # Brightness holds steady at 70 % whether the logo screensaver is up or a
 # live screen is — the panel is already pretty dim at 70 %, dropping it
@@ -378,6 +486,8 @@ state = {
     "screen": "idle",
     "cpu": 0, "mem": 0, "disk": 0, "temp": 0,
     "ip": "-", "uptime": "-", "hostname": "droplet", "now": "--:--",
+    # Detail-line fields for the combined system screen.
+    "wan_latency_ms": 0, "lan_clients": 0,
     "brightness": ACTIVE_BRIGHTNESS,
     "msg_title": "",
     "msg_lines": [],
@@ -392,6 +502,7 @@ state = {
         "channel": 0,
         "band": "",
         "key_ttl_seconds": 0,
+        "password": "",
     },
     "files": {"count": 0, "size_bytes": 0, "recent": []},
     "cameras": {"online": 0, "total": 0, "events": [], "error": None, "source": None},
@@ -399,12 +510,23 @@ state = {
     "qr": None,   # {matrix, ssid, security, payload, version, ok, ttl_seconds}
     "alerts": [],  # [{type, title, detail, time, cleared}]
     "events_open": False,
+    # Power sequences (modal — not in SCREENS). _frac/_t0 drive the self-running
+    # liquid fill/drain animation; pct (boot) overrides _frac when host-pushed.
+    "boot": {"stage": None, "detail": "", "pct": None, "_frac": 0.0, "_t0": 0.0},
+    "shutdown": {"reason": "", "phase": "stopping", "_frac": 0.0, "_t0": 0.0},
+    # Onboarding claim screen (WARP-632 / ADR-017). Modal, host-driven.
+    # WARP-819: optional Wi-Fi-connect creds (matrix/ssid/psk) so the claim
+    # screen can also show how to join the box's Wi-Fi. Absent => claim-only,
+    # whose scan QR is the host-encoded setup deep link (setup_qr_matrix).
+    # The host sends at most ONE matrix per claim frame (heap posture).
+    "claim": {"code": "", "setup_url": "", "setup_qr_matrix": None,
+              "wifi_qr_matrix": None, "wifi_ssid": "", "wifi_psk": ""},
     # Rolling sparkline history for the gauges. Each list is a ring buffer
     # capped at _SPARK_LEN; _record_sparks appends on every stats push.
     "sparks": {"cpu": [], "mem": [], "disk": [], "temp": []},
 }
 
-_SPARK_LEN = 24  # ~3 min of history at the host's 8s stats cadence
+_SPARK_LEN = 48  # design_handoff §2: 48-sample CPU sparkline
 
 touch_regions = []
 _nav_debounce_until = 0.0
@@ -474,358 +596,262 @@ def _clear_all_alerts():
 
 
 def _clear_alert(idx):
+    # Mark cleared (not pop) so the row greys out in place — matches the
+    # design_handoff drawer behavior and the sim.
     if 0 <= idx < len(state["alerts"]):
-        state["alerts"].pop(idx)
+        state["alerts"][idx]["cleared"] = True
     _render_with_gc(state["screen"])
 
 
 # ---------------------------------------------------------------------------
-# Shared chrome
+# Shared helpers for the redesigned screens
 # ---------------------------------------------------------------------------
 
-def _header(g, title, sub=None, show_bubble=True):
-    """Compact 42 px header: mark + title/sub on the left, clock + status/alert on the right."""
-    bar_h = 42
-    g.append(_rect(0, 0, DISPLAY_W, bar_h, PANEL))
-    g.append(_rect(0, bar_h, DISPLAY_W, 1, SEPARATOR))
-    g.append(_mark_tg(26, 12, 8))
-    g.append(_text(title[:22], x=44, y=12, scale=2, color=TEXT))
-    if sub:
-        g.append(_text(str(sub)[:40], x=44, y=28, scale=1, color=LABEL_3))
-
-    clock = _local_hhmm()
-    g.append(_text(clock, x=DISPLAY_W - 52, y=21, scale=2, color=LABEL_2,
-                   anchor=(1.0, 0.5)))
-
-    if show_bubble:
-        n = _open_alerts_count()
-        if n > 0:
-            cx, cy, r = DISPLAY_W - 22, 21, 11
-            g.append(_circle(cx, cy, r, RED))
-            g.append(_text("!", x=cx, y=cy, scale=2, color=WHITE,
-                           anchor=(0.5, 0.5)))
-            if n > 1:
-                g.append(_circle(cx + r - 2, cy - r + 2, 7, WHITE))
-                g.append(_text(str(n)[:2], x=cx + r - 2, y=cy - r + 2,
-                               scale=1, color=RED, anchor=(0.5, 0.5)))
-            _region("alert_bubble", cx - r - 6, cy - r - 6,
-                    (r + 6) * 2, (r + 6) * 2, _open_alerts_drawer)
-        else:
-            # All clear — small green dot + "OK"
-            g.append(_circle(DISPLAY_W - 34, 21, 3, GREEN))
-            g.append(_text("OK", x=DISPLAY_W - 24, y=21, scale=1,
-                           color=GREEN, anchor=(0.0, 0.5)))
-
-    return bar_h + 4
-
-
-def _card(g, x, y, w, h):
-    g.append(_rect(x, y, w, h, SURFACE))
-    g.append(_stroked_rect(x, y, w, h, SEPARATOR, 1))
-
-
-def _status_dot(g, x, y, color):
-    g.append(_rect(x - 3, y - 3, 6, 6, color))
-
-
-# Labels + icons for the bottom nav — keep order in sync with SCREENS.
-_NAV_LABELS = {
-    "stats": "System",
-    "qr":    "Join Wi-Fi",
-}
-
-
-def _nav_bar(g):
-    """Bottom nav — big rounded pills, one per active screen, current one
-    highlighted. Comfortable finger targets (~50 px tall) and soft round
-    endcaps so it reads modern instead of dated."""
-    h = 44
-    y = DISPLAY_H - h
-    # No hard separator — the pills float on BG for a cleaner look.
-    g.append(_rect(0, y, DISPLAY_W, h, BG))
-
-    pills = len(SCREENS)
-    pad = 14
-    gap = 12
-    pw = (DISPLAY_W - pad * 2 - gap * (pills - 1)) // pills
-    ph = h - 16  # pill height (~28)
-    pr = ph // 2  # end-cap radius
-
-    current = state.get("screen")
-    for i, name in enumerate(SCREENS):
-        px = pad + i * (pw + gap)
-        py = y + (h - ph) // 2
-        is_cur = (name == current)
-        fill = ACCENT_SUBTLE if is_cur else SURFACE
-        color = ACCENT_LIGHT if is_cur else LABEL_2
-        # Rounded pill: center rect + two circles for the endcaps.
-        g.append(_rect(px, py, pw, ph, fill))
-        g.append(_circle(px, py + ph // 2, pr, fill))
-        g.append(_circle(px + pw, py + ph // 2, pr, fill))
-        if is_cur:
-            # Soft indigo halo dot below the active pill (the "you are here"
-            # indicator — takes the place of an underline on sharp-corner
-            # designs).
-            g.append(_circle(px + pw // 2, py + ph + 4, 2, ACCENT))
-        g.append(_text(_NAV_LABELS.get(name, name.upper()),
-                       x=px + pw // 2, y=py + ph // 2,
-                       scale=2, color=color, anchor=(0.5, 0.5)))
-        # Tappable target extends to the pill caps.
-        _region("nav_{}".format(name), px - pr, py, pw + pr * 2, ph,
-                (lambda n=name: set_screen(n)))
-
-
-# ---------------------------------------------------------------------------
-# Stats (overview)
-# ---------------------------------------------------------------------------
-
-def _sparkline(g, x, y, w, h, series, color, baseline=None):
-    """Tiny bar-chart sparkline — one thin vertical rect per datapoint.
-
-    vectorio has no line primitive, so we fake a sparkline with narrow
-    rectangles. Reads as a dense bar chart at this resolution and keeps
-    heap bounded (one rect per point, no polygon). Points are drawn from
-    right → left so the newest value sits on the right edge.
-    """
-    if not series:
-        return
-    n = len(series)
-    lo = min(series)
-    hi = max(series)
-    span = max(1, hi - lo)
-    # Reserve a 1px base strip so a flat series still reads
-    base = baseline if baseline is not None else SEPARATOR
-    g.append(_rect(x, y + h - 1, w, 1, base))
-    bar_w = max(1, w // max(n, 1))
-    for i, v in enumerate(series[-n:]):
-        bh = max(1, int((v - lo) / span * (h - 1)))
-        bx = x + i * bar_w
-        by = y + h - bh
-        g.append(_rect(bx, by, max(1, bar_w - 1), bh, color))
-
-
-def _dial(g, cx, cy, w, h, lbl, value_str, pct, warn=80, crit=95, spark_key=None):
-    """Half-donut gauge: rounded 180° arc with track + colored fill, value
-    text inside the arc, label underneath, and an optional sparkline band
-    below showing recent history.
-
-    Reads sleeker than a flat bar at normal viewing distance and matches
-    the modern dashboard aesthetic the user asked for.
-    """
-    color = ACCENT if pct < warn else (ORANGE if pct < crit else RED)
-    r_outer = min(w // 2 - 6, 40)
-    thickness = max(8, r_outer // 4)
-    # The donut is anchored so its flat edge sits just below the value
-    # text; bump the center down slightly so the arc visually frames
-    # rather than floats above the number.
-    arc_cy = cy + 12
-    _half_donut(g, cx, arc_cy, r_outer, thickness, pct, color)
-    # Big value centered inside the arc
-    g.append(_text(value_str, x=cx, y=arc_cy - r_outer // 2 + 4, scale=2,
-                   color=TEXT, anchor=(0.5, 0.5)))
-    # Sparkline band under the arc (if a history series is available),
-    # then the label sits just under the sparkline.
-    spark_drawn = False
-    if spark_key:
-        series = state.get("sparks", {}).get(spark_key) or []
-        if len(series) >= 2:
-            spark_w = min(70, r_outer * 2 - 4)
-            _sparkline(g, cx - spark_w // 2, arc_cy + 3, spark_w, 8,
-                       series, color)
-            spark_drawn = True
-    label_y = arc_cy + (18 if spark_drawn else 10)
-    g.append(_text(lbl, x=cx, y=label_y, scale=1, color=LABEL_3,
-                   anchor=(0.5, 0.5)))
-
-
-def _network_card(g, x, y, w, h):
-    _card(g, x, y, w, h)
-    g.append(_text("NETWORK", x=x + 12, y=y + 12, scale=1, color=LABEL_3))
-    wifi = state.get("wifi") or {}
-    up = bool(wifi.get("connected_to")) or (state.get("ip") not in (None, "-", ""))
-    _status_dot(g, x + w - 16, y + 15, GREEN if up else RED)
-    g.append(_text("UP" if up else "DOWN", x=x + w - 24, y=y + 15, scale=1,
-                   color=GREEN if up else RED, anchor=(1.0, 0.5)))
-    # IP is the hero — full scale=2
-    g.append(_text(str(state.get("ip") or "-")[:16], x=x + 12, y=y + 34,
-                   scale=2, color=TEXT))
-    # Wi-Fi row — ssid + client count + band/channel chip, compact
-    ssid = str(wifi.get("ssid") or wifi.get("connected_to") or "-")[:14]
-    clients = wifi.get("clients") or 0
-    band = wifi.get("band") or ""
-    g.append(_text("Wi-Fi " + ssid, x=x + 12, y=y + 58,
-                   scale=1, color=LABEL_2))
-    g.append(_text("{} client{} · {}".format(
-                       clients, "" if clients == 1 else "s", band or "-"),
-                   x=x + 12, y=y + 72, scale=1, color=LABEL_3))
-    g.append(_text("up " + str(state.get("uptime") or "-")[:14],
-                   x=x + 12, y=y + 86, scale=1, color=LABEL_3))
-
-
-def _fmt_bytes(n):
-    try:
-        n = int(n)
-    except Exception:
-        return "-"
-    for unit in ("B", "K", "M", "G", "T"):
-        if n < 1024:
-            return "{}{}".format(int(n), unit) if unit == "B" else "{:.0f}{}".format(n, unit)
-        n /= 1024
-    return "{:.0f}P".format(n)
-
-
-def _storage_card(g, x, y, w, h):
-    _card(g, x, y, w, h)
-    g.append(_text("STORAGE", x=x + 10, y=y + 10, scale=1, color=LABEL_3))
-    drives = state.get("drives") or {}
-    items = drives.get("drives") or []
-    count = drives.get("count") or 0
-    total = sum(d.get("size_bytes") or 0 for d in items)
-    used = sum(d.get("used_bytes") or 0 for d in items)
-    pct = int((used * 100) / total) if total else 0
-    color = ACCENT if pct < 80 else (ORANGE if pct < 95 else RED)
-    _status_dot(g, x + w - 14, y + 13, color)
-    g.append(_text("{} drive{}".format(count, "" if count == 1 else "s"),
-                   x=x + w - 22, y=y + 13, scale=1,
-                   color=color, anchor=(1.0, 0.5)))
-    g.append(_text(_fmt_bytes(used), x=x + 10, y=y + 30, scale=2, color=TEXT))
-    g.append(_text("of " + _fmt_bytes(total), x=x + 10, y=y + 52,
-                   scale=1, color=LABEL_3))
-    bar_x = x + 10
-    bar_y = y + h - 14
-    bar_w = w - 20
-    g.append(_rect(bar_x, bar_y, bar_w, 5, SURFACE_2))
-    fw = int(bar_w * max(0, min(100, pct)) / 100)
-    if fw > 0:
-        g.append(_rect(bar_x, bar_y, fw, 5, color))
-    g.append(_text("{}%".format(pct), x=x + w - 10, y=bar_y - 4,
-                   scale=1, color=color, anchor=(1.0, 1.0)))
-
-
-def _cameras_card(g, x, y, w, h):
-    _card(g, x, y, w, h)
-    g.append(_text("CAMERAS", x=x + 12, y=y + 12, scale=1, color=LABEL_3))
-    cams = state.get("cameras") or {}
-    online = cams.get("online") or 0
-    total = cams.get("total") or 0
-    if total == 0:
-        col = LABEL_3
-    elif online == total:
-        col = GREEN
-    elif online == 0:
-        col = RED
-    else:
-        col = ORANGE
-    _status_dot(g, x + w - 16, y + 15, col)
-    g.append(_text("{}/{} online".format(online, total),
-                   x=x + w - 24, y=y + 15, scale=1,
-                   color=col, anchor=(1.0, 0.5)))
-    evs = cams.get("events") or []
-    if evs:
-        # Hero — most recent event (camera + label + confidence)
-        ev = evs[0]
-        cam_name = str(ev.get("camera") or "cam")[:14]
-        g.append(_text(cam_name, x=x + 12, y=y + 34, scale=2, color=TEXT))
-        score = ev.get("score")
-        score_s = " {:.0%}".format(score) if isinstance(score, (int, float)) else ""
-        g.append(_text(str(ev.get("label") or "event")[:12] + score_s,
-                       x=x + 12, y=y + 58, scale=1, color=ACCENT))
-        # Secondary — previous 2 events as tight lines (if any), keeps
-        # the card useful at a glance without being a full event log.
-        for i, prev in enumerate(evs[1:3]):
-            line_y = y + 78 + i * 14
-            if line_y + 10 > y + h - 8:
-                break
-            detail = "{} · {}".format(
-                str(prev.get("camera") or "-")[:10],
-                str(prev.get("label") or "event")[:10])
-            g.append(_text(detail, x=x + 12, y=line_y,
-                           scale=1, color=LABEL_3))
-    else:
-        g.append(_text("No events", x=x + 12, y=y + 40,
-                       scale=2, color=LABEL_3))
-        if cams.get("error"):
-            g.append(_text("Frigate unreachable", x=x + 12, y=y + 66,
-                           scale=1, color=RED))
-        elif total == 0:
-            g.append(_text("No cameras paired yet",
-                           x=x + 12, y=y + 66, scale=1, color=LABEL_3))
-
-
-def _wifi_card(g, x, y, w, h):
-    _card(g, x, y, w, h)
-    g.append(_text("WI-FI", x=x + 10, y=y + 10, scale=1, color=LABEL_3))
-    wifi = state.get("wifi") or {}
-    _status_dot(g, x + w - 14, y + 13, ACCENT)
-    band = wifi.get("band") or ""
-    ch = wifi.get("channel") or 0
-    chip = "ch {} {}".format(ch, band) if ch else (band or "ready")
-    g.append(_text(chip[:14], x=x + w - 22, y=y + 13,
-                   scale=1, color=ACCENT, anchor=(1.0, 0.5)))
-    ssid = wifi.get("ssid") or (wifi.get("connected_to") or "Droplet-AI")
-    g.append(_text(str(ssid)[:14], x=x + 10, y=y + 30, scale=2, color=TEXT))
-    clients = wifi.get("clients") or 0
-    g.append(_text("{} client{}".format(clients, "" if clients == 1 else "s"),
-                   x=x + 10, y=y + 54, scale=1, color=LABEL_2))
-    ttl = wifi.get("key_ttl_seconds") or 0
-    if ttl > 0:
-        g.append(_text("key {}".format(_fmt_short_ttl(ttl)),
-                       x=x + 10, y=y + 68, scale=1, color=LABEL_3))
+def _hairline(g, x, y, w, color=SEPARATOR):
+    g.append(_rect(x, y, w, 1, color))
 
 
 def _fmt_short_ttl(s):
     try:
         s = int(s)
     except Exception:
-        return "--"
-    if s >= 3600:
-        return "{}h{:02d}".format(s // 3600, (s % 3600) // 60)
+        return "--:--"
     return "{}:{:02d}".format(s // 60, s % 60)
 
 
-def render_stats():
+def _v3_sparkline(g, x, y, w, h, series, color, fill_color):
+    """Polyline sparkline with a filled area below (design_handoff §2).
+
+    vectorio has no polyline; we approximate the accent line with a thin rect
+    per segment (the segments are near-vertical between adjacent samples so a
+    1.5px rect reads as a connected line at 48 samples across ~246px). The
+    fill below is one Polygon (the sample points + the two baseline corners),
+    which is cheap heap-wise (vertex list only). Baseline hairline always
+    drawn so a flat series still reads.
+    """
+    g.append(_rect(x, y + h - 1, w, 1, SEPARATOR))
+    n = len(series)
+    if n < 2:
+        return
+    lo = min(series)
+    hi = max(series)
+    span = hi - lo
+    if span < 1:
+        span = 1
+
+    def pt(i):
+        px = x + int((i / (n - 1)) * w)
+        py = y + h - int(((series[i] - lo) / span) * h)
+        return px, py
+
+    pts = [pt(i) for i in range(n)]
+    # Filled area below the line.
+    poly = list(pts) + [(x + w, y + h), (x, y + h)]
+    g.append(vectorio.Polygon(pixel_shader=_palette(fill_color),
+                              points=poly, x=0, y=0))
+    # Accent line as connected segments (thin rects).
+    for i in range(n - 1):
+        x0, y0 = pts[i]
+        x1, y1 = pts[i + 1]
+        seg_x = min(x0, x1)
+        seg_w = max(1, abs(x1 - x0))
+        seg_y = min(y0, y1)
+        seg_h = max(2, abs(y1 - y0) + 2)
+        g.append(_rect(seg_x, seg_y, seg_w, seg_h, color))
+
+
+def _v3_header(g, now=None):
+    """System screen header band (design_handoff §2 header).
+
+    SYSTEM eyebrow left; clock right; status pill (green OK) or alert badge
+    (red ! + count, opens the drawer) just left of the clock; hairline at
+    y=32. Returns nothing — the caller draws the columns below.
+    """
+    _tracked(g, "SYSTEM", x=20, y=12, scale=1, color=LABEL_3, tracking=2)
+    clk = _fmt_clock_parts()["str"]
+    g.append(_text(clk, x=DISPLAY_W - 20, y=15, scale=2, color=LABEL_2,
+                   anchor=(1.0, 0.5)))
+    # terminalio scale=2 cell is 12px wide; estimate the clock width to place
+    # the status to its left.
+    time_w = len(clk) * 12
+    n = _open_alerts_count()
+    if n > 0:
+        r = 11
+        cx = DISPLAY_W - 20 - time_w - 20 - r
+        cy = 15
+        g.append(_circle(cx, cy, r, RED))
+        g.append(_text("!", x=cx, y=cy, scale=2, color=WHITE,
+                       anchor=(0.5, 0.5)))
+        if n > 1:
+            g.append(_circle(cx + r - 2, cy - r + 2, 7, WHITE))
+            g.append(_text(str(n)[:2], x=cx + r - 2, y=cy - r + 2,
+                           scale=1, color=RED, anchor=(0.5, 0.5)))
+        _region("alert_badge", cx - r - 6, cy - r - 6,
+                (r + 6) * 2, (r + 6) * 2, _open_alerts_drawer)
+    else:
+        sxs = DISPLAY_W - 20 - time_w - 14
+        g.append(_circle(sxs, 15, 4, GREEN))
+        g.append(_text("OK", x=sxs - 8, y=15, scale=1, color=GREEN,
+                       anchor=(1.0, 0.5)))
+    _hairline(g, 20, 32, DISPLAY_W - 40, SEPARATOR)
+
+
+def _v3_qr_card(g, x, y, size, matrix=None):
+    """White QR card + the host-supplied matrix + droplet mark inset.
+
+    The matrix is ALWAYS host-supplied (NOT encoded on-device — contract) and
+    rendered by _render_qr_matrix_plain. If no matrix has arrived yet, the card
+    shows just the mark on white so the layout still reads while we wait for the
+    host's push.
+
+    By default the matrix is sourced from the System screen's {"mode":"qr"}
+    push (state["qr"]). WARP-819: callers may pass an explicit `matrix` instead
+    — the claim screen carries its OWN Wi-Fi QR in state["claim"], so it passes
+    that directly rather than depending on the System screen's qr state.
+    """
+    _rounded_rect(g, x, y, size, size, 12, WHITE)
+    if matrix is None:
+        qr = state.get("qr") or {}
+        matrix = qr.get("matrix") if (qr and qr.get("ok")) else None
+    inset = 9
+    inner = size - inset * 2
+    if matrix:
+        n = len(matrix)
+        module_px = max(1, inner // n)
+        qpx = module_px * n
+        ox = x + (size - qpx) // 2
+        oy = y + (size - qpx) // 2
+        _render_qr_matrix_plain(g, matrix, ox, oy, module_px)
+    # Droplet mark on a white pad, dead-centre.
+    mc = 26
+    mcx = x + size // 2 - mc // 2
+    mcy = y + size // 2 - mc // 2
+    _rounded_rect(g, mcx - 3, mcy - 3, mc + 6, mc + 6, 6, WHITE)
+    _mark_poly(g, 26, mcx, mcy)
+
+
+# ---------------------------------------------------------------------------
+# System + Wi-Fi (combined primary screen — replaces stats + qr)
+# ---------------------------------------------------------------------------
+
+def render_system():
     global touch_regions
     touch_regions = []
+    # Release the previous frame's display tree (which holds the prior QR
+    # bitmap) BEFORE building the new one, then gc — so we never hold two
+    # full-matrix QR bitmaps alive at once. This is the peak that OOMed on the
+    # rotate / REQUEST_QR re-render (WARP-638): without it, the old root_group
+    # stays referenced until the new `g` is assigned at the end of this
+    # function, doubling the QR heap for the duration of the build.
+    board.DISPLAY.root_group = None
+    gc.collect()
     g = displayio.Group()
     g.append(_rect(0, 0, DISPLAY_W, DISPLAY_H, BG))
 
-    y0 = _header(g,
-                 str(state.get("hostname") or "droplet")[:18],
-                 sub="{} · {}".format(state.get("ip") or "-",
-                                      state.get("uptime") or "-"))
+    _v3_header(g)
 
-    # Row 1: 4 half-donut gauges with sparkline history bands under each.
-    # Gauges span the full width, generous breathing room above and below.
-    row1_y = y0 + 28
-    col_w = DISPLAY_W // 4
-    dials = (
-        ("CPU",  state["cpu"],  "{}%".format(int(state["cpu"])),  "cpu"),
-        ("MEM",  state["mem"],  "{}%".format(int(state["mem"])),  "mem"),
-        ("DISK", state["disk"], "{}%".format(int(state["disk"])), "disk"),
-        ("TEMP", state["temp"], "{}C".format(int(state["temp"])), "temp"),
+    DIV = 288
+    INW = DIV - 20 - 22
+    g.append(_rect(DIV, 46, 1, DISPLAY_H - 46 - 24, SEPARATOR))
+
+    # ===== LEFT: system =====
+    _tracked(g, "CPU LOAD", x=20, y=46, scale=1, color=LABEL_3, tracking=2)
+    # CPU hero — bitmap hero font if available, else terminalio scaled up.
+    hero = _hero_font()
+    cpu_str = "{}%".format(int(state.get("cpu") or 0))
+    if hero is not None:
+        g.append(_text(cpu_str, x=20, y=84, scale=1, color=TEXT, anchor=(0.0, 0.5),
+                       font=hero))
+    else:
+        g.append(_text(cpu_str, x=20, y=84, scale=5, color=TEXT,
+                       anchor=(0.0, 0.5)))
+
+    # sparkline (48-sample CPU history).
+    sp = state.get("sparks", {}).get("cpu") or []
+    _v3_sparkline(g, 20, 120, INW, 40, sp, ACCENT, SPARK_FILL)
+
+    _hairline(g, 20, 172, INW, SEPARATOR)
+
+    # tabular metrics row.
+    cams = state.get("cameras") or {}
+    cols = (
+        ("MEM", "{}%".format(int(state.get("mem") or 0)), TEXT),
+        ("DISK", "{}%".format(int(state.get("disk") or 0)), TEXT),
+        ("TEMP", "{}".format(int(state.get("temp") or 0)) + "°", TEXT),
+        ("CAM", "{}/{}".format(cams.get("online") or 0,
+                               cams.get("total") or 0), GREEN),
     )
-    for i, (lbl, pct, val, key) in enumerate(dials):
-        cx = col_w * i + col_w // 2
-        _dial(g, cx, row1_y, col_w, 72, lbl, val, pct, spark_key=key)
+    col_w = INW // 4
+    for i, (lbl, val, col) in enumerate(cols):
+        cxx = 20 + i * col_w
+        _tracked(g, lbl, x=cxx, y=182, scale=1, color=LABEL_3, tracking=1)
+        g.append(_text(val, x=cxx, y=200, scale=2, color=col))
 
-    # Row 2: single row of two wider cards. Cameras (left) — latest event
-    # + two older ones so the NVR side of the appliance has a permanent
-    # at-a-glance surface. Network+Wi-Fi merged (right). Storage was the
-    # previous left card but wasn't carrying its weight; drive counts
-    # still show up on the storage gauge in the dial row and cameras is
-    # more actionable on an edge NVR.
-    pad = 10
-    cw = (DISPLAY_W - 3 * pad) // 2
-    nav_h = 44
-    top = row1_y + 60
-    ch = DISPLAY_H - nav_h - top - 12
-    _cameras_card(g, pad, top, cw, ch)
-    _network_card(g, 2 * pad + cw, top, cw, ch)
+    # detail line.
+    g.append(_text("WAN {}ms  ·  UP {}  ·  LAN {}".format(
+                       state.get("wan_latency_ms") or 0,
+                       state.get("uptime") or "-",
+                       state.get("lan_clients") or 0),
+                   x=20, y=244, scale=1, color=LABEL_3))
 
-    # Bottom nav
-    _nav_bar(g)
+    # bottom strip.
+    g.append(_text("{} · {}".format(state.get("hostname") or "-",
+                                          state.get("ip") or "-")[:42],
+                   x=20, y=DISPLAY_H - 24, scale=1, color=LABEL_3))
 
-    # If the alerts drawer is open, stack it on top
+    # ===== RIGHT: Wi-Fi pairing =====
+    RX = 300
+    RW = DISPLAY_W - 20 - RX  # 160
+    _tracked(g, "PAIR · WI-FI", x=RX, y=46, scale=1, color=ACCENT,
+             tracking=1)
+
+    wifi = state.get("wifi") or {}
+    card_w = 132
+    card_x = RX + (RW - card_w) // 2
+    card_y = 60
+    _v3_qr_card(g, card_x, card_y, card_w)
+
+    yy = card_y + card_w + 14
+    _tracked(g, "NETWORK", x=RX, y=yy, scale=1, color=LABEL_3, tracking=1)
+    g.append(_text(str(wifi.get("ssid") or "Droplet-AI")[:18], x=RX, y=yy + 18,
+                   scale=2, color=TEXT))
+    _tracked(g, "PASSWORD", x=RX, y=yy + 34, scale=1, color=LABEL_3, tracking=1)
+    g.append(_text(str(wifi.get("password") or "")[:20], x=RX, y=yy + 50,
+                   scale=1, color=ACCENT_INK))
+
+    # KEY rotate pill + TTL chip — ONLY when key rotation is enabled.
+    # WARP-638: the box default is rotation OFF (the bridge's qr_snapshot
+    # returns rotation_enabled=False; a rotate attempt comes back
+    # "rotation_disabled"). Tapping the pill in that state fired ROTATE_KEY ->
+    # a fresh-QR re-render that OOMed the SAMD51. So when rotation is disabled
+    # we draw NO pill and register NO tap region — there is simply no way to
+    # trigger the rotate path. The TTL is meaningless without rotation too, so
+    # the whole chip is gated together. rotation_enabled is sourced from the
+    # host-supplied QR data (state["qr"]); absent/false => hidden.
+    qr = state.get("qr") or {}
+    rotation_enabled = bool(qr.get("rotation_enabled"))
+    if rotation_enabled:
+        secs = wifi.get("key_ttl_seconds")
+        if secs is None:
+            secs = qr.get("ttl_seconds") or 0
+        try:
+            secs = int(secs)
+        except (TypeError, ValueError):
+            secs = 0
+        warn = secs < 60
+        pill_y = yy + 68
+        pill_h = 26
+        g.append(_rect(RX, pill_y, RW, pill_h,
+                       ORANGE_SUBTLE if warn else SURFACE))
+        g.append(_stroked_rect(RX, pill_y, RW, pill_h,
+                               ORANGE if warn else SEPARATOR_2, 1))
+        # ASCII-safe rotate marker on the bitmap-less terminalio font.
+        g.append(_text("KEY {}".format(_fmt_short_ttl(secs)),
+                       x=RX + RW // 2, y=pill_y + pill_h // 2, scale=1,
+                       color=ORANGE if warn else LABEL_2, anchor=(0.5, 0.5)))
+        _region("key_rotate", RX, pill_y - 3, RW, pill_h + 6, _rotate_key)
+
+    # Alerts drawer overlay.
     if state.get("events_open"):
         _render_alerts_drawer(g)
 
@@ -837,26 +863,27 @@ def render_stats():
 # ---------------------------------------------------------------------------
 
 def _render_alerts_drawer(g):
-    # Dim background
-    g.append(_rect(0, 0, DISPLAY_W, DISPLAY_H, 0x000000))
-    # Drawer from the right
+    """300px right drawer over the system screen (design_handoff §3)."""
+    # Dim the screen behind the drawer (flat near-black; vectorio has no
+    # alpha, so a solid wash is the device-faithful path).
+    g.append(_rect(0, 0, DISPLAY_W, DISPLAY_H, 0x020203))
     dw = 300
     dx = DISPLAY_W - dw
     g.append(_rect(dx, 0, dw, DISPLAY_H, PANEL))
     g.append(_rect(dx, 0, 1, DISPLAY_H, SEPARATOR))
 
-    g.append(_text("ALERTS", x=dx + 14, y=16, scale=1, color=LABEL_2))
+    _tracked(g, "ALERTS", x=dx + 14, y=16, scale=1, color=LABEL_2, tracking=1)
     n = _open_alerts_count()
-    g.append(_text("{} open".format(n), x=dx + dw - 60, y=16,
-                   scale=1, color=LABEL_3))
-    # Close X
+    # Close control far right; count right-aligned just left of it.
     g.append(_text("x", x=dx + dw - 16, y=16, scale=2, color=LABEL_2,
-                   anchor=(1.0, 0.5)))
-    _region("drawer_close", dx + dw - 34, 2, 30, 30, _close_alerts_drawer)
+                   anchor=(0.5, 0.5)))
+    g.append(_text("{} open".format(n), x=dx + dw - 34, y=16,
+                   scale=1, color=LABEL_3, anchor=(1.0, 0.5)))
+    _region("drawer_close", dx + dw - 32, 2, 30, 30, _close_alerts_drawer)
 
     alerts = state.get("alerts") or []
-    list_y = 34
-    row_h = 54
+    list_y = 44
+    row_h = 58
     visible = alerts[:4]
     if not visible:
         g.append(_text("No alerts.", x=dx + dw // 2, y=DISPLAY_H // 2,
@@ -869,29 +896,26 @@ def _render_alerts_drawer(g):
                            SURFACE if cleared else SURFACE_2))
             g.append(_stroked_rect(dx + 10, ry, dw - 20, row_h - 6,
                                    SEPARATOR, 1))
-            icon = "!" if a.get("type") == "cam" else "*"
-            ic_col = LABEL_3 if cleared else (RED if a.get("type") == "cam" else ORANGE)
-            g.append(_text(icon, x=dx + 22, y=ry + (row_h - 6) // 2,
-                           scale=2, color=ic_col, anchor=(0.5, 0.5)))
-            title = str(a.get("title") or "")[:28]
-            detail = str(a.get("detail") or "")[:32]
+            ic_col = LABEL_3 if cleared else (
+                RED if a.get("type") == "cam" else ORANGE)
+            g.append(_circle(dx + 24, ry + 24, 5, ic_col))
+            g.append(_text(str(a.get("title") or "")[:26], x=dx + 40, y=ry + 12,
+                           scale=1, color=LABEL_3 if cleared else TEXT))
+            g.append(_text(str(a.get("detail") or "")[:30], x=dx + 40,
+                           y=ry + 26, scale=1, color=LABEL_3))
             tm = str(a.get("time") or "")[:16]
-            g.append(_text(title, x=dx + 38, y=ry + 10, scale=1,
-                           color=LABEL_3 if cleared else TEXT))
-            g.append(_text(detail, x=dx + 38, y=ry + 24, scale=1,
-                           color=LABEL_3))
             if tm:
-                g.append(_text(tm, x=dx + 38, y=ry + 36, scale=1, color=LABEL_4))
+                g.append(_text(tm, x=dx + 40, y=ry + 40, scale=1, color=LABEL_4))
             if not cleared:
-                g.append(_text("x", x=dx + dw - 26, y=ry + (row_h - 6) // 2,
+                g.append(_text("x", x=dx + dw - 24, y=ry + 26,
                                scale=2, color=LABEL_3, anchor=(0.5, 0.5)))
                 _region("drawer_clear_{}".format(i),
-                        dx + dw - 44, ry, 32, row_h - 6,
+                        dx + dw - 36, ry + 4, 30, row_h - 12,
                         (lambda ii=i: _clear_alert(ii)))
 
-    # Clear all
-    bh = 32
-    by = DISPLAY_H - bh - 10
+    # Clear all (full-width, 40px, radius 12).
+    bh = 40
+    by = DISPLAY_H - 52
     g.append(_rect(dx + 14, by, dw - 28, bh, SURFACE_2))
     g.append(_stroked_rect(dx + 14, by, dw - 28, bh, SEPARATOR_2, 1))
     g.append(_text("Clear all", x=dx + dw // 2, y=by + bh // 2,
@@ -901,12 +925,12 @@ def _render_alerts_drawer(g):
 
 def _open_alerts_drawer():
     state["events_open"] = True
-    _render_with_gc("stats")
+    _render_with_gc("system")
 
 
 def _close_alerts_drawer():
     state["events_open"] = False
-    _render_with_gc("stats")
+    _render_with_gc("system")
 
 
 # ---------------------------------------------------------------------------
@@ -918,257 +942,159 @@ def _close_alerts_drawer():
 _idle_refs = {"clock": None, "colon_on": True}
 
 
-def render_idle():
-    """Hero composition: huge off-centre droplet mark on the left paired
-    with a large HH:MM inline on its right. The mark fills most of the
-    vertical space (no black bars top/bottom), both pieces are biased
-    left-of-centre so the layout feels intentional. Clock is scale=5
-    (~40 px tall) — readable from across the room.
+def _hero_clock_string(parts, colon_on=True):
+    """HH<sep>MM for the idle hero, colon blinking per second."""
+    return parts["hh"] + (":" if colon_on else " ") + parts["mm"]
 
-    Uses the vector mark (_mark_poly) so we can scale the logo without
-    rasterising a new bitmap each time / blowing the heap.
+
+def render_idle():
+    """Editorial hero clock (design_handoff §1 / preview.html drawIdle).
+
+    Brand bug + DROPLET eyebrow top-left; tappable 12/24 toggle top-right;
+    132px hero clock (colon blink, 12h AM/PM suffix in accent); 56x3 accent
+    rule; date bottom-left; green-dot + SSID bottom-right; seconds progress
+    hairline along the bottom edge.
+
+    The hero numerals use the bundled bitmap hero font when available (a
+    single Label so the per-second idle tick can cheaply rewrite `.text`),
+    falling back to terminalio scaled x6 if the font is missing.
     """
     global touch_regions
     touch_regions = []
     g = displayio.Group()
     g.append(_rect(0, 0, DISPLAY_W, DISPLAY_H, BG))
 
-    # Mark sized to fill most of the display height. Bias left so there's
-    # room for the inline clock + a secondary line of metadata.
-    mark_size = 260
-    mark_w = int(mark_size * 52 / 60)           # ~225 px at size=260
-    mark_x = 20
-    mark_y = (DISPLAY_H - mark_size) // 2        # vertically centred
-    mark_cy = mark_y + mark_size // 2
-    _mark_poly(g, mark_size, mark_x, mark_y)
+    # Brand bug top-left.
+    _mark_poly(g, 26, 20, 14)
+    _tracked(g, "DROPLET", x=50, y=24, scale=1, color=LABEL_3, tracking=2)
 
-    # Clock inline to the right of the mark. scale=5 gives ~40 px char
-    # height — comfortably readable from 6–8 ft away. Anchored so the
-    # baseline matches the mark's vertical centre minus a small optical
-    # adjustment.
-    clock_x = mark_x + mark_w + 28
-    clock_lbl = _text(_local_hhmm(),
-                      x=clock_x, y=mark_cy - 14, scale=5, color=TEXT,
-                      anchor=(0.0, 0.5))
-    g.append(clock_lbl)
-    _idle_refs["clock"] = clock_lbl
+    # 12/24 segmented toggle top-right (two 38px cells, h26).
+    seg_w, seg_h, tg_y = 38, 26, 17
+    tg_x = DISPLAY_W - 20 - seg_w * 2
+    g.append(_rect(tg_x, tg_y, seg_w * 2, seg_h, SURFACE))
+    g.append(_stroked_rect(tg_x, tg_y, seg_w * 2, seg_h, SEPARATOR, 1))
+    for i, opt in enumerate(("12", "24")):
+        cx0 = tg_x + i * seg_w
+        on = _clock_mode["value"] == opt
+        if on:
+            g.append(_rect(cx0, tg_y, seg_w, seg_h, ACCENT_SUBTLE))
+        g.append(_text(opt, x=cx0 + seg_w // 2, y=tg_y + seg_h // 2, scale=2,
+                       color=ACCENT_INK if on else LABEL_4, anchor=(0.5, 0.5)))
+        _region("toggle_" + opt, cx0, tg_y - 4, seg_w, seg_h + 8,
+                (lambda o=opt: _toggle_clock(o)))
+    g.append(_rect(tg_x + seg_w, tg_y + 5, 1, seg_h - 10, SEPARATOR))
 
-    # Date directly under the clock, same left edge — small, muted.
-    date_str = _clock.get("date_str") or ""
+    # Hero clock.
+    parts = _fmt_clock_parts()
+    colon_on = (_local_ss() % 2) == 0
+    _idle_refs["colon_on"] = colon_on
+    time_str = _hero_clock_string(parts, colon_on)
+    clock_y = 150
+    hero = _hero_font()
+    if hero is not None:
+        # Single Label, scale=2 toward the 132px hero (base font is 66px).
+        clk = _text(time_str, x=DISPLAY_W // 2, y=clock_y, scale=2, color=TEXT,
+                    anchor=(0.5, 0.5), font=hero)
+        if parts["is12"]:
+            # Nudge the time lockup left to make room for the AM/PM suffix and
+            # keep the whole thing optically centred.
+            try:
+                lock_w = clk.bounding_box[2] * 2
+            except Exception:
+                lock_w = len(time_str) * 70
+            suffix_w = 48
+            clk.anchored_position = (DISPLAY_W // 2 - suffix_w // 2, clock_y)
+            g.append(clk)
+            g.append(_text(parts["suffix"],
+                           x=DISPLAY_W // 2 - suffix_w // 2 + lock_w // 2 + 14,
+                           y=clock_y, scale=3, color=ACCENT, anchor=(0.0, 0.5)))
+        else:
+            g.append(clk)
+    else:
+        # Fallback: terminalio scaled x6 (~48px). Clearly the deviation path.
+        clk = _text(time_str, x=DISPLAY_W // 2, y=clock_y, scale=6, color=TEXT,
+                    anchor=(0.5, 0.5))
+        g.append(clk)
+        if parts["is12"]:
+            g.append(_text(parts["suffix"], x=DISPLAY_W // 2 + len(time_str) * 18,
+                           y=clock_y, scale=3, color=ACCENT, anchor=(0.0, 0.5)))
+    _idle_refs["clock"] = clk
+
+    # 56x3 accent rule under the clock at y=220.
+    rule_w = 56
+    g.append(_rect(DISPLAY_W // 2 - rule_w // 2, clock_y + 70, rule_w, 3,
+                   ACCENT))
+
+    # Bottom-left date.
+    date_str = (_clock.get("date_str") or "").upper()
     if date_str:
-        g.append(_text(date_str, x=clock_x, y=mark_cy + 24,
-                       scale=2, color=LABEL_3, anchor=(0.0, 0.5)))
+        _tracked(g, date_str[:32], x=20, y=DISPLAY_H - 23, scale=1,
+                 color=LABEL_3, anchor_y=0.5, tracking=2)
 
-    # Metadata line under the date — hostname · ip · ssid. Degrades to a
-    # "syncing..." hint when the host hasn't pushed yet.
-    host = str(state.get("hostname") or "").strip()
-    ip = str(state.get("ip") or "").strip()
+    # Bottom-right green dot + SSID.
     wifi = state.get("wifi") or {}
-    ssid = str(wifi.get("ssid") or wifi.get("connected_to") or "").strip()
-    parts = [p for p in (host, ip, ssid) if p and p != "-"]
-    footer = "  ·  ".join(parts) if parts else "syncing..."
-    g.append(_text(footer[:36], x=clock_x, y=mark_cy + 56,
-                   scale=1, color=LABEL_4, anchor=(0.0, 0.5)))
+    ssid = str(wifi.get("ssid") or wifi.get("connected_to") or "Droplet-AI")
+    ssid_w = len(ssid) * 12  # scale=2 terminalio cell ~12px
+    g.append(_circle(DISPLAY_W - 20 - ssid_w - 12, DISPLAY_H - 22, 3, GREEN))
+    g.append(_text(ssid[:18], x=DISPLAY_W - 20, y=DISPLAY_H - 22, scale=2,
+                   color=ACCENT, anchor=(1.0, 0.5)))
 
-    # Tap anywhere wakes to stats.
+    # Seconds progress hairline along the bottom edge.
+    sec = _local_ss()
+    g.append(_rect(0, DISPLAY_H - 2, DISPLAY_W, 2, TRACK))
+    g.append(_rect(0, DISPLAY_H - 2, max(2, int(DISPLAY_W * sec / 60)), 2,
+                   ACCENT_DIM))
+
+    # Tap anywhere (except the toggle) wakes to the system screen.
     _region("idle_wake", 0, 0, DISPLAY_W, DISPLAY_H,
-            lambda: set_screen("stats"))
+            lambda: set_screen("system"))
     board.DISPLAY.root_group = g
 
 
-def _fmt_clock(hhmm, colon_on=True):
-    """HH:MM with a soft-blinking colon — the colon toggles every second
-    on the idle tick, giving the clock a subtle sign of life without a
-    full re-render."""
-    if not hhmm or len(hhmm) < 4:
-        return hhmm or "--:--"
-    if ":" not in hhmm:
-        return hhmm
-    a, b = hhmm.split(":", 1)
-    sep = ":" if colon_on else " "
-    return a + sep + b
-
-
-def _chip(g, x, y, text_str, color, anchor_right=False):
-    """Low-key rounded info chip for the idle screen footer."""
-    # Approximate chip width from char count — terminalio scale=1 is ~6 px/char.
-    pad_x = 10
-    tw = len(text_str) * 6 + pad_x * 2
-    th = 18
-    cx = x - tw if anchor_right else x
-    g.append(_rect(cx, y, tw, th, SURFACE))
-    g.append(_circle(cx, y + th // 2, th // 2, SURFACE))
-    g.append(_circle(cx + tw, y + th // 2, th // 2, SURFACE))
-    g.append(_text(text_str, x=cx + tw // 2, y=y + th // 2,
-                   scale=1, color=color, anchor=(0.5, 0.5)))
-
-
-def _mini_chip(g, x, y, text_str, color):
-    """Small uppercase metadata pill (used e.g. for WPA2, key TTL).
-
-    Returns the right-edge x so callers can stack chips horizontally.
-    """
-    pad_x = 8
-    tw = len(text_str) * 6 + pad_x * 2
-    th = 16
-    pr = th // 2
-    g.append(_rect(x, y, tw, th, ACCENT_SUBTLE))
-    g.append(_circle(x, y + pr, pr, ACCENT_SUBTLE))
-    g.append(_circle(x + tw, y + pr, pr, ACCENT_SUBTLE))
-    g.append(_text(text_str.upper(), x=x + tw // 2, y=y + pr,
-                   scale=1, color=color, anchor=(0.5, 0.5)))
-    return x + tw + pr
-
-
-def _pill_button(g, label_str, x, y, w, h, color, action,
-                 region_name=None):
-    """Pill-shaped tappable button. `color` sets the text + matches the
-    nav-bar language; fill stays ACCENT_SUBTLE for low visual weight.
-    """
-    pr = h // 2
-    g.append(_rect(x, y, w, h, ACCENT_SUBTLE))
-    g.append(_circle(x, y + pr, pr, ACCENT_SUBTLE))
-    g.append(_circle(x + w, y + pr, pr, ACCENT_SUBTLE))
-    g.append(_text(label_str, x=x + w // 2, y=y + h // 2,
-                   scale=2, color=color, anchor=(0.5, 0.5)))
-    if region_name:
-        _region(region_name, x - pr, y, w + 2 * pr, h, action)
+def _toggle_clock(mode):
+    _set_clock_mode(mode)
+    _render_with_gc("idle")
 
 
 # ---------------------------------------------------------------------------
-# QR (Join Droplet-AI)
+# QR matrix (host-supplied; rendered into the system screen's white card)
 # ---------------------------------------------------------------------------
 
-def _render_qr_matrix(g, matrix, ox, oy, module_px):
+def _render_qr_matrix_plain(g, matrix, ox, oy, module_px):
+    """Paint the host-supplied QR matrix as black modules — NO card/frame.
+
+    The white card + droplet-mark inset are drawn by _v3_qr_card; this just
+    fills the dark modules. The matrix is ALWAYS host-supplied (the firmware
+    never encodes a QR on-device — contract).
+
+    WARP-638 (the main OOM fix): the whole matrix is drawn into a SINGLE
+    ``displayio.Bitmap`` (size*module_px square) backed by one 2-colour
+    palette and carried by one TileGrid. The previous renderer allocated one
+    Bitmap + one Palette + one TileGrid PER ROW (3*N objects for an N-row
+    matrix, e.g. ~75+ objects for a 25-row v2 QR) — the re-render on rotate /
+    REQUEST_QR is exactly the path that OOMed the SAMD51 (`ERR:oom:system`).
+    One contiguous bitmap is both far fewer heap objects and a single
+    allocation the GC can place/track cheaply.
+    """
     size = len(matrix)
-    # Tight quiet zone — QR spec asks for 4 modules but 2 is fine for
-    # phone cameras at arm's length. Keeps the card visibly compact so
-    # the sleek border stands out.
-    pad = module_px * 2
-    border_w = 1
-    frame_w = size * module_px + pad * 2
-    corner_r = min(pad, 10)
-
-    # Slightly larger ACCENT rounded rect behind = the thin border.
-    _rounded_rect(g, ox - pad - border_w, oy - pad - border_w,
-                  frame_w + border_w * 2, frame_w + border_w * 2,
-                  corner_r + border_w, ACCENT)
-    # White card on top, inset by border_w on each side so the ACCENT
-    # shows as a 2 px frame around the card.
-    _rounded_rect(g, ox - pad, oy - pad, frame_w, frame_w, corner_r, WHITE)
-
-    # QR modules use a very dark indigo (not pure black) for a subtle
-    # brand tint that's still ~19:1 contrast against white — phone
-    # scanners read it identically to black.
-    module_color = 0x0A0A1E
+    if size <= 0:
+        return
+    module_color = 0x0A0A1E   # very dark indigo; ~19:1 on white, scans as black
+    dim = size * module_px
+    bmp = displayio.Bitmap(dim, dim, 2)
+    pal = displayio.Palette(2)
+    pal[0] = WHITE
+    pal[1] = module_color
     for row_idx, row in enumerate(matrix):
-        bmp = displayio.Bitmap(size * module_px, module_px, 2)
-        pal = displayio.Palette(2)
-        pal[0] = WHITE
-        pal[1] = module_color
+        y0 = row_idx * module_px
         for col_idx, v in enumerate(row):
             if v:
-                for dx in range(module_px):
-                    for dy in range(module_px):
-                        bmp[col_idx * module_px + dx, dy] = 1
-        tg = displayio.TileGrid(bmp, pixel_shader=pal,
-                                x=ox, y=oy + row_idx * module_px)
-        g.append(tg)
-
-
-def render_qr():
-    global touch_regions
-    touch_regions = []
-    g = displayio.Group()
-    g.append(_rect(0, 0, DISPLAY_W, DISPLAY_H, BG))
-
-    # Simpler header — just "Join Wi-Fi" as the title, no sub. Keeps the
-    # eye on the QR card below.
-    y0 = _header(g, "Join Wi-Fi", show_bubble=False)
-
-    qr = state.get("qr") or {}
-    wifi = state.get("wifi") or {}
-    ssid = (qr.get("ssid") if qr else None) or wifi.get("ssid") or "Droplet-AI"
-    rotation_on = bool(qr.get("rotation_enabled"))
-    ttl = (qr.get("ttl_seconds") or 0) if rotation_on else 0
-
-    # Empty / error state: one centered message + pill-shaped Retry. Same
-    # language as the rotate button so it feels like a family.
-    if not qr or not qr.get("ok") or not qr.get("matrix"):
-        msg = "Waiting for router..."
-        if qr and qr.get("error"):
-            msg = str(qr["error"])[:50]
-        g.append(_text(msg, x=DISPLAY_W // 2, y=(DISPLAY_H - 44) // 2,
-                       scale=2, color=LABEL_3, anchor=(0.5, 0.5)))
-        _pill_button(g, "Retry", (DISPLAY_W - 160) // 2,
-                     DISPLAY_H - 44 - 44, 160, 34, ACCENT_LIGHT, _request_qr,
-                     region_name="qr_retry")
-        _nav_bar(g)
-        board.DISPLAY.root_group = g
-        return
-
-    matrix = qr["matrix"]
-    size = len(matrix)
-    nav_h = 44
-
-    # QR card: fills the left ~half. Larger modules than before so it's
-    # easier to scan at arm's length.
-    avail_h = DISPLAY_H - y0 - nav_h - 16
-    module_px = max(3, min(8, avail_h // size))
-    qr_px = size * module_px
-    ox = 22
-    oy = y0 + (avail_h - qr_px) // 2 + 4
-    _render_qr_matrix(g, matrix, ox, oy, module_px)
-
-    # Right panel: hero SSID, small security chip, single-line password,
-    # muted instruction. All left-aligned on a shared column.
-    card_right = ox + qr_px + module_px * 3  # right edge of QR card + padding
-    side_x = card_right + 22
-    side_w = DISPLAY_W - side_x - 18
-
-    # Hero SSID (scale=3) in accent_light
-    g.append(_text(str(ssid)[:14], x=side_x, y=y0 + 24, scale=3,
-                   color=ACCENT_LIGHT))
-
-    # Security + key-rotation TTL as two inline chips under the SSID
-    chip_y = y0 + 56
-    sec = (qr.get("security") or "WPA2")
-    chip_x = _mini_chip(g, side_x, chip_y, str(sec)[:8], ACCENT)
-    if rotation_on:
-        ttl_col = ORANGE if ttl and ttl < 60 else LABEL_2
-        ttl_str = _fmt_short_ttl(ttl) if ttl else "--:--"
-        _mini_chip(g, chip_x + 8, chip_y, "key " + ttl_str, ttl_col)
-
-    # Password — single line if it fits at scale=2; otherwise fall back
-    # to a compact scale=1 single line. No split, no "all lowercase" tip
-    # line — if you can see the chars, you already know the case.
-    key = qr.get("key") or ""
-    if key:
-        g.append(_text("PASSWORD", x=side_x, y=y0 + 90, scale=1,
-                       color=LABEL_3))
-        # scale=2 terminalio is ~12 px/char. If the key fits, use scale=2.
-        if len(key) * 12 <= side_w:
-            g.append(_text(key, x=side_x, y=y0 + 112, scale=2, color=TEXT))
-        else:
-            g.append(_text(key, x=side_x, y=y0 + 108, scale=1, color=TEXT))
-
-    # Muted instruction — tells the user exactly what to do with the
-    # card on the left.
-    g.append(_text("Scan with camera, or type",
-                   x=side_x, y=y0 + 140, scale=1, color=LABEL_3))
-    g.append(_text("the password manually.",
-                   x=side_x, y=y0 + 154, scale=1, color=LABEL_3))
-
-    # Rotate button, pill-shaped, sized to the sidebar width.
-    if rotation_on:
-        bh = 32
-        by = DISPLAY_H - nav_h - bh - 10
-        _pill_button(g, "Rotate key", side_x, by, side_w, bh,
-                     ACCENT_LIGHT, _rotate_key, region_name="qr_rotate")
-
-    _nav_bar(g)
-
-    board.DISPLAY.root_group = g
+                x0 = col_idx * module_px
+                for dy in range(module_px):
+                    yy = y0 + dy
+                    for dx in range(module_px):
+                        bmp[x0 + dx, yy] = 1
+    g.append(displayio.TileGrid(bmp, pixel_shader=pal, x=ox, y=oy))
 
 
 def _request_qr():
@@ -1176,11 +1102,14 @@ def _request_qr():
 
 
 def _rotate_key():
+    # Contract: tell the host to roll the key; bridge does the UCI change and
+    # pushes a fresh {"mode":"qr"} matrix back. Optimistically reset the local
+    # TTL so the pill updates immediately; the next push corrects it.
     _send("ROTATE_KEY")
-    state["wifi"]["key_ttl_seconds"] = 60 * 60  # optimistic; bridge will correct
+    state["wifi"]["key_ttl_seconds"] = 60 * 60
     if state.get("qr"):
         state["qr"]["ttl_seconds"] = 60 * 60
-    _render_with_gc("qr")
+    _render_with_gc("system")
 
 
 # ---------------------------------------------------------------------------
@@ -1188,21 +1117,487 @@ def _rotate_key():
 # ---------------------------------------------------------------------------
 
 def render_message():
+    """Host-pushed notification card (mode:message — still supported)."""
     global touch_regions
     touch_regions = []
     g = displayio.Group()
     g.append(_rect(0, 0, DISPLAY_W, DISPLAY_H, BG))
-    title = state.get("msg_title") or "Message"
-    y0 = _header(g, title[:24], show_bubble=False)
-    g.append(_rect(16, y0 + 6, DISPLAY_W - 32, DISPLAY_H - y0 - 22,
-                   SURFACE))
-    yy = y0 + 18
+    # Minimal py-v3 header: mark + title eyebrow + hairline.
+    _mark_poly(g, 26, 20, 12)
+    title = str(state.get("msg_title") or "Message")[:24]
+    g.append(_text(title, x=52, y=20, scale=2, color=TEXT, anchor=(0.0, 0.5)))
+    _hairline(g, 20, 44, DISPLAY_W - 40, SEPARATOR)
+    g.append(_rect(20, 54, DISPLAY_W - 40, DISPLAY_H - 54 - 16, SURFACE))
+    yy = 66
     for line in (state.get("msg_lines") or [])[:8]:
-        g.append(_text(str(line)[:52], x=28, y=yy, scale=2, color=TEXT))
-        yy += 28
+        g.append(_text(str(line)[:52], x=32, y=yy, scale=2, color=TEXT))
+        yy += 26
     _region("message_home", 0, 0, DISPLAY_W, DISPLAY_H,
-            lambda: set_screen("stats"))
+            lambda: set_screen("system"))
     board.DISPLAY.root_group = g
+
+
+# ---------------------------------------------------------------------------
+# Power sequences (boot / shutdown / standby) — host-driven, modal.
+# The vessel fills (boot) / drains (shutdown) with accent liquid; shutdown
+# ends in a CRT collapse. The main loop advances state[...]["_frac"] each tick
+# so the fill animates even on a bare {"mode":"boot"}; a host-pushed pct (boot)
+# overrides the self-driven fraction. Geometry from design_handoff §4.
+# ---------------------------------------------------------------------------
+
+def _mark_vessel(g, x, y, size, frac):
+    """Mark drawn as a vessel filled to `frac` (0..1) with accent liquid.
+
+    vectorio has no clip; we approximate the liquid by painting the body
+    polygon dim, then overlaying a SECOND body polygon whose vertices are
+    clamped to at/below the liquid level (so only the filled portion shows in
+    accent). Cheap: 2 polygons. Mirrors preview.html drawMarkLiquid intent.
+    """
+    mw = int(size * 52 / 60)
+    xo = x + (size - mw) // 2
+
+    def sx(px):
+        return xo + int(px / 52 * mw)
+
+    def sy(py):
+        return y + int(py / 60 * size)
+
+    body = [(26, 0), (44, 28), (36, 48), (16, 48), (8, 28)]
+    # Empty shell (dim).
+    g.append(vectorio.Polygon(pixel_shader=_palette(0x181828),
+                              points=[(sx(px), sy(py)) for px, py in body],
+                              x=0, y=0))
+    frac = max(0.0, min(1.0, frac))
+    if frac <= 0.01:
+        return
+    bottom_v = 48
+    top_v = 0
+    level_v = bottom_v - (bottom_v - top_v) * frac
+    # Clamp each body vertex's y up to the liquid level (in viewbox space) so
+    # the overlay only covers the filled lower portion.
+    filled = [(px, py if py >= level_v else level_v) for px, py in body]
+    g.append(vectorio.Polygon(pixel_shader=_palette(ACCENT),
+                              points=[(sx(px), sy(py)) for px, py in filled],
+                              x=0, y=0))
+
+
+def render_boot():
+    """Boot power sequence (design_handoff §4 boot).
+
+    Vessel fills with accent liquid (fraction = host pct, else the self-driven
+    state["boot"]["_frac"]); DROPLET wordmark; 4-stage status line; 184px
+    progress bar; "Droplet OS · v2.4" footer. A host stage string overrides
+    the derived stage label.
+    """
+    global touch_regions
+    touch_regions = []
+    g = displayio.Group()
+    g.append(_rect(0, 0, DISPLAY_W, DISPLAY_H, BG))
+
+    boot = state.get("boot") or {}
+    pct = boot.get("pct")
+    if pct is not None:
+        try:
+            frac = max(0, min(100, int(pct))) / 100.0
+        except (TypeError, ValueError):
+            frac = boot.get("_frac", 0.0)
+    else:
+        frac = boot.get("_frac", 0.0)
+
+    size = 116
+    mx = (DISPLAY_W - size) // 2
+    my = 44
+    mb = my + int(size * 48 / 60)
+    if frac >= 0.999:
+        _mark_poly(g, size, mx, my)   # full accent mark
+    else:
+        _mark_vessel(g, mx, my, size, frac)
+
+    _tracked(g, "DROPLET", x=DISPLAY_W // 2, y=mb + 22, scale=2, color=TEXT,
+             anchor_y=0.5, tracking=5, align="center")
+
+    stages = ("Mounting storage", "Starting network", "Loading models", "Ready")
+    host_stage = boot.get("stage")
+    if host_stage:
+        status = str(host_stage)[:34]
+        done = (pct is not None and pct >= 100) or status == "Ready"
+    else:
+        si = min(len(stages) - 1, int(frac * len(stages)))
+        status = stages[si]
+        done = si == len(stages) - 1
+    g.append(_text(status, x=DISPLAY_W // 2, y=mb + 46, scale=1,
+                   color=GREEN if done else LABEL_3, anchor=(0.5, 0.5)))
+    detail = str(boot.get("detail") or "")[:40]
+    if detail and not done:
+        g.append(_text(detail, x=DISPLAY_W // 2, y=mb + 62, scale=1,
+                       color=LABEL_4, anchor=(0.5, 0.5)))
+
+    bw = 184
+    bx = (DISPLAY_W - bw) // 2
+    byy = mb + 70
+    g.append(_rect(bx, byy, bw, 3, TRACK))
+    fw = max(3, int(bw * frac))
+    g.append(_rect(bx, byy, fw, 3, GREEN if done else ACCENT))
+
+    g.append(_text("Droplet OS · v2.4", x=DISPLAY_W // 2, y=DISPLAY_H - 22,
+                   scale=1, color=LABEL_4, anchor=(0.5, 0.5)))
+    board.DISPLAY.root_group = g
+
+
+def render_shutdown():
+    """Shutdown power sequence (design_handoff §4 shutdown).
+
+    Drains the vessel + a status line; once phase == 'halted' (or the
+    self-driven _frac completes), a CRT collapse — content thins to a phosphor
+    line, then a dot, then black. _frac runs 0..1 across the sequence.
+    """
+    global touch_regions
+    touch_regions = []
+    g = displayio.Group()
+    g.append(_rect(0, 0, DISPLAY_W, DISPLAY_H, BG))
+
+    sd = state.get("shutdown") or {}
+    halted = sd.get("phase") == "halted"
+    frac = 1.0 if halted else sd.get("_frac", 0.0)
+
+    size = 116
+    mx = (DISPLAY_W - size) // 2
+    my = 44
+    mb = my + int(size * 48 / 60)
+    collapse_start = 0.80
+    if frac < collapse_start:
+        drain = 1.0 - (frac / collapse_start)
+        _mark_vessel(g, mx, my, size, drain)
+        _tracked(g, "DROPLET", x=DISPLAY_W // 2, y=mb + 22, scale=2,
+                 color=LABEL_2, anchor_y=0.5, tracking=5, align="center")
+        stages = ("Stopping services", "Unmounting storage", "Powering off")
+        reason = str(sd.get("reason") or "")
+        if reason:
+            status = reason[:34]
+        else:
+            si = min(len(stages) - 1, int((frac / collapse_start) * len(stages)))
+            status = stages[si]
+        g.append(_text(status, x=DISPLAY_W // 2, y=mb + 46, scale=1,
+                       color=LABEL_3, anchor=(0.5, 0.5)))
+    else:
+        cp = (frac - collapse_start) / (1.0 - collapse_start)
+        if cp < 0.55:
+            h = int((1 - cp / 0.55) * 9 + 2)
+            g.append(_rect(0, DISPLAY_H // 2 - h // 2, DISPLAY_W, h, PHOSPHOR))
+        elif cp < 0.93:
+            w = max(3, int((1 - (cp - 0.55) / 0.38) * DISPLAY_W + 3))
+            g.append(_rect(DISPLAY_W // 2 - w // 2, DISPLAY_H // 2 - 1, w, 2,
+                           PHOSPHOR))
+        # else: black (frame already BG).
+    board.DISPLAY.root_group = g
+
+
+def render_standby():
+    """Powered-off standby (design_handoff §4 standby): dim mark + STANDBY +
+    'tap to power on'. A tap wakes via the existing boot path."""
+    global touch_regions
+    touch_regions = []
+    g = displayio.Group()
+    g.append(_rect(0, 0, DISPLAY_W, DISPLAY_H, BG))
+    size = 78
+    mw = int(size * 52 / 60)
+    mx = (DISPLAY_W - mw) // 2
+    my = DISPLAY_H // 2 - int(size * 0.55)
+    mb = my + int(size * 48 / 60)
+
+    def sx(px):
+        return mx + int(px / 52 * mw)
+
+    def sy(py):
+        return my + int(py / 60 * size)
+
+    outer = [(sx(26), sy(0)), (sx(44), sy(28)), (sx(36), sy(48)),
+             (sx(16), sy(48)), (sx(8), sy(28))]
+    inner = [(sx(26), sy(0)), (sx(44), sy(28)), (sx(26), sy(36))]
+    g.append(vectorio.Polygon(pixel_shader=_palette(0x141422),
+                              points=outer, x=0, y=0))
+    g.append(vectorio.Polygon(pixel_shader=_palette(0x1A1A30),
+                              points=inner, x=0, y=0))
+    _tracked(g, "STANDBY", x=DISPLAY_W // 2, y=mb + 20, scale=1, color=LABEL_4,
+             anchor_y=0.5, tracking=3, align="center")
+    g.append(_text("tap to power on", x=DISPLAY_W // 2, y=mb + 38, scale=1,
+                   color=LABEL_3, anchor=(0.5, 0.5)))
+    # Tapping standby asks the host to power on (mirrors the preview's
+    # tap-to-boot); the host owns the actual power state.
+    _region("standby_wake", 0, 0, DISPLAY_W, DISPLAY_H, _request_power_on)
+    board.DISPLAY.root_group = g
+
+
+def _request_power_on():
+    _send("NAV:power_on")
+
+
+def _valid_matrix(m):
+    """Return `m` if it is a well-formed QR bit-matrix, else None.
+
+    The host encodes and caps the matrices, but the serial wire is still
+    just JSON: a malformed value (non-list, ragged rows) would raise
+    mid-render — AFTER render_claim has released the live display tree —
+    stranding the panel black on a modal screen (_render_with_gc only
+    catches MemoryError, and the claim screen is exempt from the idle
+    timeout). Validate up front; the 64-row cap mirrors the host-side
+    firmware-tolerance contract (main.py ClaimRequest).
+    """
+    try:
+        if not m or not isinstance(m, list) or len(m) > 64:
+            return None
+        n = len(m[0])
+        if n == 0:
+            return None
+        for row in m:
+            if not isinstance(row, list) or len(row) != n:
+                return None
+        return m
+    except Exception:
+        return None
+
+
+def render_claim():
+    """Onboarding claim screen (WARP-632 / ADR-017), design-handoff
+    two-column layout ("PyPortal First Boot — Claim Code").
+
+    Header band (mark + DROPLET wordmark, FIRST-TIME SETUP status), then two
+    columns split by a hairline: LEFT is the hero — the claim code drawn as
+    its dash-separated groups with accent dash bars between them, an accent
+    rule and the numbered link steps; RIGHT is a white scan QR card. The foot
+    carries the WAITING TO BE CLAIMED dots (animated by _claim_dots_tick —
+    palette mutation only, no rebuild) over a 2px scan track. Tokens, mark and
+    spacing match the boot/idle/system screens. Mirrors host display.py
+    render_claim() 1:1.
+
+    The QR is whichever single matrix the host pushed: the setup deep-link
+    (claim["setup_qr_matrix"], `<setup_url>?c=<CODE>`) in the claim-only
+    layout, or — when the Wi-Fi creds are supplied (WARP-819) — the Wi-Fi
+    join QR with readable SSID/PSK under the card (camera-less manual join)
+    and a leading "Join Wi-Fi" step. The firmware never encodes on-device;
+    with no matrix at all the card degrades to the mark on white. A partial
+    Wi-Fi block degrades to the claim-only layout.
+
+    Modal + host-driven (not in the SCREENS carousel); the host navigates
+    away once the box is claimed. Terminalio-only text — the 66px hero face
+    doesn't fit the column, and a fixed bitmap face can't scale down.
+
+    Deliberate descopes from the handoff card (revisit knowingly, not by
+    accident): the bottom-left DEVICE id line (no device identity exists in
+    the claim-frame contract), the claimed-success confirm screen
+    (drawClaimed — needs a new orchestrator-pushed mode), and the header-dot
+    pulse + scan-track shimmer (static; the WAITING dots are this screen's
+    only motion — heap discipline).
+    """
+    global touch_regions
+    touch_regions = []
+    _claim_refs["dots"] = []
+    _claim_refs["active"] = 0
+
+    claim = state.get("claim") or {}
+    code = str(claim.get("code") or "").strip().upper()
+    setup_url = str(claim.get("setup_url") or "").strip()
+    setup_matrix = _valid_matrix(claim.get("setup_qr_matrix"))
+    wifi_matrix = _valid_matrix(claim.get("wifi_qr_matrix"))
+    wifi_ssid = str(claim.get("wifi_ssid") or "").strip()
+    wifi_psk = str(claim.get("wifi_psk") or "")
+    has_wifi = bool(wifi_matrix and wifi_ssid)
+    qr_matrix = wifi_matrix if has_wifi else setup_matrix
+    has_qr = bool(qr_matrix)
+
+    # OOM safety (WARP-638 pattern): release the prior frame's display tree
+    # + gc BEFORE building this one — ALWAYS, not just on matrix frames. The
+    # redesigned tree is the heaviest in the firmware (~100 elements), so a
+    # matrix-less re-push holding two trees alive would be its own OOM risk
+    # on the ~165 KB Titano heap. The matrix shape is validated above, so
+    # nothing after this release can raise on malformed wire data and strand
+    # the panel black (render errors on a modal screen never self-recover).
+    board.DISPLAY.root_group = None
+    gc.collect()
+
+    g = displayio.Group()
+    g.append(_rect(0, 0, DISPLAY_W, DISPLAY_H, BG))
+
+    # ---- Header band: mark + wordmark, first-time-setup status -------------
+    _mark_poly(g, 20, 20, 17)
+    _tracked(g, "DROPLET", x=50, y=21, scale=1, color=LABEL_3, tracking=2)
+    slw = _tracked(g, "FIRST-TIME SETUP", x=DISPLAY_W - 20, y=21, scale=1,
+                   color=ACCENT, tracking=1, align="right")
+    g.append(_circle(DISPLAY_W - 20 - slw - 12, 26, 3, ACCENT))
+    g.append(_rect(20, 44, DISPLAY_W - 40, 1, SEPARATOR))
+
+    # ---- Column divider -----------------------------------------------------
+    div_x = 284
+    g.append(_rect(div_x, 58, 1, DISPLAY_H - 58 - 26, SEPARATOR))
+
+    # ================= LEFT — claim code hero + steps ========================
+    _tracked(g, "CLAIM CODE", x=20, y=56, scale=1, color=ACCENT, tracking=2)
+
+    # Hero code — dash-separated groups with accent dash bars between them.
+    # terminalio is a fixed 6px cell, so the run is measured arithmetically;
+    # drop the scale until the run fits the column (a CLAIM_CODE env override
+    # can be longer than DRPL-XXXX-XXXX).
+    code_y = 76
+    left_max = div_x - 20 - 16
+    groups = [grp for grp in code.split("-") if grp]
+    if groups:
+        gap, dash_w = 3, 8
+        scale = 3
+        while scale > 1:
+            total = (sum(len(grp) * 6 * scale for grp in groups)
+                     + (len(groups) - 1) * (gap * 2 + dash_w))
+            if total <= left_max:
+                break
+            scale -= 1
+        code_h = 12 * scale
+        code_cy = code_y + code_h // 2
+        cx = 20
+        for i, grp in enumerate(groups):
+            g.append(_text(grp, x=cx, y=code_cy, scale=scale, color=TEXT,
+                           anchor=(0.0, 0.5)))
+            cx += len(grp) * 6 * scale
+            if i < len(groups) - 1:
+                cx += gap
+                _rounded_rect(g, cx, code_cy - 2, dash_w, 4, 2, ACCENT)
+                cx += dash_w + gap
+    else:
+        # Host hasn't pushed a code yet — defensive placeholder.
+        code_h = 36
+        g.append(_text("----  ----", x=20, y=code_y + code_h // 2, scale=3,
+                       color=LABEL_4, anchor=(0.0, 0.5)))
+
+    # Accent rule under the code.
+    _rounded_rect(g, 20, code_y + code_h + 14, 56, 3, 1, ACCENT)
+
+    # Numbered link steps. With Wi-Fi creds the join step leads — a fresh
+    # phone can't reach the setup URL before it's on the box's network.
+    host = setup_url
+    for prefix in ("https://", "http://"):
+        if host.startswith(prefix):
+            host = host[len(prefix):]
+            break
+    host = host.rstrip("/")
+
+    _tracked(g, "TO LINK THIS DEVICE", x=20, y=148, scale=1, color=LABEL_3,
+             tracking=1)
+    steps = []
+    if has_wifi:
+        steps.append(("Join Wi-Fi ", wifi_ssid[:18]))
+    if host:
+        # A DUCKDNS-style hostname overflows the inline slot — wrap the
+        # address onto its own line rather than truncating the /setup path
+        # away (in the Wi-Fi layout this text is the only typed setup
+        # pointer; the setup QR is deliberately off that card).
+        steps.append(("Go to ", host[:37]))
+    steps.append(("Enter the code above", ""))
+
+    sy = 168
+    for i, (lead, em) in enumerate(steps):
+        _rounded_rect(g, 20, sy, 18, 18, 5, ACCENT_SUBTLE)
+        g.append(_text(str(i + 1), x=29, y=sy + 9, scale=1, color=ACCENT_INK,
+                       anchor=(0.5, 0.5)))
+        g.append(_text(lead, x=46, y=sy + 9, scale=1, color=LABEL_2,
+                       anchor=(0.0, 0.5)))
+        if em and len(em) > 26:
+            g.append(_text(em, x=46, y=sy + 23, scale=1,
+                           color=ACCENT_INK, anchor=(0.0, 0.5)))
+            sy += 14
+        elif em:
+            g.append(_text(em, x=46 + len(lead) * 6, y=sy + 9, scale=1,
+                           color=ACCENT_INK, anchor=(0.0, 0.5)))
+        sy += 28
+
+    # ================= RIGHT — scan QR card ==================================
+    rx = div_x + 16
+    rw = DISPLAY_W - 20 - rx
+    # The eyebrow stays honest: a card with no scannable matrix (older host
+    # that doesn't send setup_qr_matrix, or the host's encode degrading)
+    # must never instruct a scan that cannot work.
+    if has_wifi:
+        eyebrow_r = "SCAN TO JOIN WI-FI"
+    elif has_qr:
+        eyebrow_r = "SCAN TO CLAIM"
+    else:
+        eyebrow_r = "SETUP"
+    _tracked(g, eyebrow_r, x=rx, y=56, scale=1, color=ACCENT, tracking=1)
+
+    card_w = 128
+    card_x = rx + (rw - card_w) // 2
+    card_y = 72
+    # The System screen's QR-card renderer, fed the claim's OWN matrix so the
+    # claim screen never depends on a {"mode":"qr"} push. No matrix yet ->
+    # mark-on-white placeholder (the layout still reads).
+    _v3_qr_card(g, card_x, card_y, card_w, matrix=qr_matrix or [])
+
+    cap_y = card_y + card_w + 12
+    if has_wifi:
+        g.append(_text("Joins this Droplet's Wi-Fi", x=rx + rw // 2, y=cap_y,
+                       scale=1, color=LABEL_3, anchor=(0.5, 0.0)))
+        # Readable creds — camera-less manual join (WARP-819). The PSK is the
+        # thing a camera-less user types by hand, so it must be shown in FULL:
+        # truncating a longer passphrase silently breaks the join. terminalio
+        # is a fixed 6px cell at scale=1, so the card holds rw//6 chars per
+        # line — wrap the PSK across as many lines as it needs.
+        g.append(_text(wifi_ssid[:18], x=rx + rw // 2, y=cap_y + 17, scale=1,
+                       color=TEXT, anchor=(0.5, 0.0)))
+        psk_cpl = max(1, rw // 6)
+        psk_y = cap_y + 34
+        for i in range(0, len(wifi_psk), psk_cpl):
+            g.append(_text(wifi_psk[i:i + psk_cpl], x=rx + rw // 2, y=psk_y,
+                           scale=1, color=ACCENT_INK, anchor=(0.5, 0.0)))
+            psk_y += 12
+    else:
+        g.append(_text("Opens setup on your phone" if has_qr
+                       else "Use the address above",
+                       x=rx + rw // 2, y=cap_y,
+                       scale=1, color=LABEL_3, anchor=(0.5, 0.0)))
+
+    # ---- Foot: waiting status + scan track ----------------------------------
+    wlw = _tracked(g, "WAITING TO BE CLAIMED", x=DISPLAY_W - 20,
+                   y=DISPLAY_H - 27, scale=1, color=ACCENT, tracking=1,
+                   align="right")
+    for i in range(3):
+        # Dedicated palette per dot — _palette() caches by colour, and the
+        # ticker mutates these in place (a shared palette would tint every
+        # same-colour shape on screen).
+        pal = displayio.Palette(1)
+        pal[0] = ACCENT if i == 0 else ACCENT_FAINT
+        dot = vectorio.Circle(pixel_shader=pal, radius=2,
+                              x=int(DISPLAY_W - 20 - wlw - 22 + i * 7),
+                              y=DISPLAY_H - 23)
+        _claim_refs["dots"].append(dot)
+        g.append(dot)
+
+    # 2px scan track with a static accent segment (the waiting affordance).
+    g.append(_rect(0, DISPLAY_H - 2, DISPLAY_W, 2, TRACK))
+    g.append(_rect((DISPLAY_W - 90) // 2, DISPLAY_H - 2, 90, 2, ACCENT))
+
+    board.DISPLAY.root_group = g
+
+
+# WAITING TO BE CLAIMED dot ticker — the claim screen's only motion. Same
+# cheap-update discipline as the idle colon: mutate the three dots' dedicated
+# palettes in place, never rebuild the frame (a rebuild would churn the QR
+# bitmap on the ~165 KB heap). Armed by render_claim, advanced from the main
+# loop while on the claim screen, disarmed by set_screen on nav-away.
+_claim_refs = {"dots": [], "active": 0, "last": 0.0}
+_CLAIM_DOT_PERIOD_S = 0.4
+
+
+def _claim_dots_tick(now_mono):
+    if state.get("screen") != "claim" or not _claim_refs["dots"]:
+        return
+    if now_mono - _claim_refs["last"] < _CLAIM_DOT_PERIOD_S:
+        return
+    _claim_refs["last"] = now_mono
+    _claim_refs["active"] = (_claim_refs["active"] + 1) % len(
+        _claim_refs["dots"])
+    for i, dot in enumerate(_claim_refs["dots"]):
+        try:
+            dot.pixel_shader[0] = (ACCENT if i == _claim_refs["active"]
+                                   else ACCENT_FAINT)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -1210,17 +1605,25 @@ def render_message():
 # ---------------------------------------------------------------------------
 
 RENDERERS = {
-    "stats":   render_stats,
-    "idle":    render_idle,
-    "qr":      render_qr,
-    "message": render_message,
+    "system":   render_system,
+    "idle":     render_idle,
+    "message":  render_message,
+    "boot":     render_boot,
+    "shutdown": render_shutdown,
+    "standby":  render_standby,
+    "claim":    render_claim,
 }
 
-# Back-compat aliases so the old bridge's bare-mode pushes still route.
+# Back-compat aliases — the host's existing bare-mode pushes still route. The
+# old separate stats + qr screens are folded into "system", so stats/qr/wifi/
+# cameras/drives/network/files/home all land there; logo → idle. This keeps
+# the serial contract intact: device-bridge/display.py push {"mode":"stats"},
+# {"mode":"qr"}, etc. unchanged and the firmware renders the combined screen.
 _ALIASES = {
-    "home": "stats", "logo": "idle",
-    "network": "stats", "info": "stats",
-    "files": "stats", "cameras": "stats", "drives": "stats", "wifi": "stats",
+    "home": "system", "logo": "idle",
+    "stats": "system", "qr": "system", "wifi": "system",
+    "network": "system", "info": "system",
+    "files": "system", "cameras": "system", "drives": "system",
 }
 
 
@@ -1243,16 +1646,19 @@ def set_screen(name):
     name = _ALIASES.get(name, name)
     if name not in RENDERERS:
         return
+    if name != "claim":
+        # Disarm the claim dot ticker on nav-away (drops the refs so the old
+        # frame's dots can be collected; render_claim re-arms on entry).
+        _claim_refs["dots"] = []
     state["screen"] = name
     # Brightness: dim on idle, full elsewhere
     set_brightness(IDLE_BRIGHTNESS if name == "idle" else ACTIVE_BRIGHTNESS)
     _render_with_gc(name)
     _send("NAV:" + name)
-    # When entering the QR screen, always pull a fresh matrix from the
-    # host — otherwise the first visit sits on "Waiting for router..."
-    # until the user manually taps Retry. Cheap round-trip via the
-    # existing REQUEST_QR handler.
-    if name == "qr":
+    # The combined system screen carries the Wi-Fi QR card, so pull a fresh
+    # matrix from the host on entry (the host encodes the QR; the firmware
+    # never does — contract). Cheap round-trip via the existing REQUEST_QR.
+    if name == "system":
         _send("REQUEST_QR")
     global _nav_debounce_until
     _nav_debounce_until = time.monotonic() + 0.35
@@ -1354,11 +1760,12 @@ def handle(msg):
         return "OK"
 
     if mode == "stats":
-        for k in ("cpu", "mem", "disk", "temp", "ip", "uptime", "hostname", "now"):
+        for k in ("cpu", "mem", "disk", "temp", "ip", "uptime", "hostname",
+                  "now", "wan_latency_ms", "lan_clients"):
             if k in data and data[k] is not None:
                 state[k] = data[k]
-        # Append latest cpu/mem/disk/temp values to the sparkline rings so
-        # the dashboard can draw tiny history bars under each gauge.
+        # Append latest cpu/mem/disk/temp values to the sparkline rings (the
+        # combined screen draws the 48-sample CPU history).
         sparks = state["sparks"]
         for k in ("cpu", "mem", "disk", "temp"):
             try:
@@ -1373,49 +1780,97 @@ def handle(msg):
         # Optional "date" field feeds the idle-screen date line.
         if data.get("now"):
             _set_clock(data.get("now"), data.get("date"))
-        if state["screen"] == "stats":
-            _render_with_gc("stats")
+        if state["screen"] == "system":
+            _render_with_gc("system")
         elif state["screen"] == "idle" and _idle_refs.get("clock") is not None:
-            # Keep the idle clock in sync with the latest push without a
-            # full re-render.
-            _idle_refs["clock"].text = _fmt_clock(
-                _local_hhmm(), _idle_refs.get("colon_on", True))
+            # Keep the idle hero clock in sync with the latest push without a
+            # full re-render (uses the 12/24 formatter + current colon state).
+            _idle_refs["clock"].text = _hero_clock_string(
+                _fmt_clock_parts(), _idle_refs.get("colon_on", True))
     elif mode == "wifi":
         # Merge — the old fields (networks, adapter, etc.) live alongside
-        # new ones (ssid, clients, channel, band, key_ttl_seconds).
+        # new ones (ssid, clients, channel, band, key_ttl_seconds, password).
         for k, v in data.items():
             state["wifi"][k] = v
-        if state["screen"] in ("stats", "qr"):
-            _render_with_gc(state["screen"])
+        if state["screen"] == "system":
+            _render_with_gc("system")
     elif mode == "files":
         state["files"] = data
-        if state["screen"] == "stats":
-            _render_with_gc("stats")
+        if state["screen"] == "system":
+            _render_with_gc("system")
     elif mode == "cameras":
         state["cameras"] = data
         _sync_alerts_from_cameras()
-        if state["screen"] == "stats":
-            _render_with_gc("stats")
+        if state["screen"] == "system":
+            _render_with_gc("system")
     elif mode == "drives":
         state["drives"] = data
-        if state["screen"] == "stats":
-            _render_with_gc("stats")
+        if state["screen"] == "system":
+            _render_with_gc("system")
     elif mode == "qr":
         state["qr"] = data
-        if state["screen"] == "qr":
-            _render_with_gc("qr")
+        if state["screen"] == "system":
+            _render_with_gc("system")
     elif mode == "alert":
         _push_alert(data)
-        if state["screen"] == "stats":
-            _render_with_gc("stats")
+        if state["screen"] == "system":
+            _render_with_gc("system")
     elif mode == "message":
         state["msg_title"] = data.get("title", "")
         state["msg_lines"] = data.get("lines", []) or []
         set_screen("message")
+    elif mode == "boot":
+        # Merge so a {stage} update keeps a previously-pushed pct, etc. Reset
+        # the self-driven fill anchor when a boot is (re)started so the vessel
+        # animates from empty unless the host is driving pct directly.
+        if state["screen"] != "boot":
+            state["boot"]["_frac"] = 0.0
+            state["boot"]["_t0"] = time.monotonic()
+        for k in ("stage", "detail", "pct"):
+            if k in data:
+                state["boot"][k] = data[k]
+        set_screen("boot")
+    elif mode == "shutdown":
+        if state["screen"] != "shutdown":
+            state["shutdown"]["_frac"] = 0.0
+            state["shutdown"]["_t0"] = time.monotonic()
+        for k in ("reason", "phase"):
+            if k in data:
+                state["shutdown"][k] = data[k]
+        set_screen("shutdown")
+    elif mode == "claim":
+        # WARP-632: merge so a partial push (e.g. just the code) keeps the URL.
+        # WARP-819: the host may also send the Wi-Fi-connect QR matrix + ssid +
+        # psk so the claim screen shows how to join the box's Wi-Fi. Unlike
+        # code/setup_url, the Wi-Fi creds must NOT persist across a push that
+        # omits them: when the bridge is down the host sends a {code,setup_url}-
+        # only frame, and a kept-over stale QR/password could no longer match
+        # the live AP. So RESET the wifi_* keys BEFORE the merge — absent keys
+        # then clear, present keys land. (The host already only puts a wifi_*
+        # key on the wire when it is non-empty.)
+        # The setup deep-link matrix embeds the claim code in its payload, so
+        # like the wifi_* keys it must not survive a push that omits it — a
+        # stale matrix would deep-link a code that no longer matches the hero.
+        state["claim"]["setup_qr_matrix"] = None
+        state["claim"]["wifi_qr_matrix"] = None
+        state["claim"]["wifi_ssid"] = ""
+        state["claim"]["wifi_psk"] = ""
+        for k in ("code", "setup_url", "setup_qr_matrix",
+                  "wifi_qr_matrix", "wifi_ssid", "wifi_psk"):
+            if k in data:
+                state["claim"][k] = data[k]
+        set_screen("claim")
     elif mode == "brightness":
         set_brightness(msg.get("value", ACTIVE_BRIGHTNESS))
     elif mode == "ping":
-        pass
+        # WARP-638: report free heap so on-device headroom is verifiable from
+        # the host after flashing (you can't read gc.mem_free() off the
+        # SAMD51 otherwise). gc.collect() first so the number is reclaimed-
+        # free, i.e. the real ceiling a render has to fit under vs the 18 KB
+        # _HEAP_PANIC_BYTES floor. Emitted as a side-channel line in addition
+        # to the OK ack so the existing ping liveness check is unaffected.
+        gc.collect()
+        _send("MEM:{}".format(gc.mem_free()))
     else:
         return "ERR:unknown_mode:{}".format(mode)
     return "OK"
@@ -1426,7 +1881,16 @@ def handle(msg):
 # ---------------------------------------------------------------------------
 
 def main():
-    set_screen("idle")
+    # Restore the persisted 12/24 mode before the first render (best-effort;
+    # a read-only/USB-mounted FS just leaves the '24' default).
+    _load_clock_mode()
+    # Open on the boot screen so a cold power-on reads the boot sequence
+    # immediately. The host moves us off boot once it's ready (or after its
+    # readiness timeout). boot/shutdown/standby are modal — not in SCREENS —
+    # so the idle-timeout + swipe logic below treats them as no-ops until the
+    # host navigates away.
+    state["boot"]["_t0"] = time.monotonic()
+    set_screen("boot")
     _send("READY")
     # Ask the host to (re-)push its full state. Host may or may not honour
     # it — if it doesn't, we just fall through to normal steady-state pushes.
@@ -1438,24 +1902,54 @@ def main():
     press_start = None          # (x, y) — where the finger first landed
     last_activity = time.monotonic()
     last_idle_tick = 0.0
+    last_anim_tick = 0.0
 
-    last_idle_hhmm = ""
+    last_idle_colon = None
+    # Self-driven power-sequence durations (ms). A host-pushed boot pct
+    # overrides the boot fill; otherwise the vessel fills/drains on these.
+    boot_fill_ms = 3000.0
+    shut_seq_ms = 2350.0
     while True:
-        # Idle clock tick — only runs while the idle screen is up. Updates
-        # the HH:MM label *only when the minute changes* (no per-second
-        # colon blink — too distracting for a sleep screen). Checks once
-        # a second but the label.text write is skipped unless the digits
-        # actually moved.
         now_mono = time.monotonic()
+
+        # Idle clock tick — per-second colon blink on the hero (design_handoff
+        # §1). Cheap: rewrite the single hero Label's .text; skip when nothing
+        # changed. The minute itself comes from the monotonic clock anchor.
         if (state["screen"] == "idle"
                 and _idle_refs.get("clock") is not None
-                and now_mono - last_idle_tick >= 1.0):
+                and now_mono - last_idle_tick >= 0.5):
             last_idle_tick = now_mono
             try:
-                cur = _local_hhmm()
-                if cur != last_idle_hhmm:
-                    _idle_refs["clock"].text = cur
-                    last_idle_hhmm = cur
+                colon_on = (_local_ss() % 2) == 0
+                if colon_on != last_idle_colon:
+                    _idle_refs["colon_on"] = colon_on
+                    _idle_refs["clock"].text = _hero_clock_string(
+                        _fmt_clock_parts(), colon_on)
+                    last_idle_colon = colon_on
+            except Exception:
+                pass
+
+        # Claim-screen waiting dots — palette mutation only (see
+        # _claim_dots_tick); interval-gated internally.
+        if state["screen"] == "claim":
+            _claim_dots_tick(now_mono)
+
+        # Power-sequence self-animation. Advance the fill/drain fraction and
+        # re-render at ~12.5fps while a boot/shutdown is up and not host-driven
+        # by pct. A bare {"mode":"boot"} thus still shows the liquid fill.
+        if (state["screen"] in ("boot", "shutdown")
+                and now_mono - last_anim_tick >= 0.08):
+            last_anim_tick = now_mono
+            try:
+                if state["screen"] == "boot" and state["boot"].get("pct") is None:
+                    el = (now_mono - state["boot"].get("_t0", now_mono)) * 1000
+                    state["boot"]["_frac"] = min(1.0, el / boot_fill_ms)
+                    _render_with_gc("boot")
+                elif state["screen"] == "shutdown" \
+                        and state["shutdown"].get("phase") != "halted":
+                    el = (now_mono - state["shutdown"].get("_t0", now_mono)) * 1000
+                    state["shutdown"]["_frac"] = min(1.0, el / shut_seq_ms)
+                    _render_with_gc("shutdown")
             except Exception:
                 pass
 
@@ -1514,7 +2008,11 @@ def main():
                 last_activity = time.monotonic()
 
         # Idle timer — drop back to idle after IDLE_TIMEOUT_S with no touch.
+        # Skip the host-driven lifecycle screens (boot/shutdown): they stay up
+        # until the host navigates away, so we don't self-drop to idle while a
+        # cold boot or a shutdown is in progress.
         if (state["screen"] != "idle" and
+                state["screen"] not in LIFECYCLE_SCREENS and
                 (time.monotonic() - last_activity) >= IDLE_TIMEOUT_S):
             state["events_open"] = False
             set_screen("idle")

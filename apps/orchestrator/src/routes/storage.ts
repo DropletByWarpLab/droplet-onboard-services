@@ -5,6 +5,13 @@ import type { PrismaClient } from "@prisma/client";
 import { ncGetUserQuota } from "../services/nextcloud.client.js";
 import { resolveNcToken } from "../services/nextcloud-session.service.js";
 import type { StorageStats } from "../types/index.js";
+import { requireRole } from "../middleware/auth.js";
+import {
+  evaluateStorageCommand,
+  confirmStorageCommand,
+} from "../services/storage-safety.service.js";
+import { config } from "../config.js";
+import { isBridgeConnectionError } from "../lib/bridge-errors.js";
 
 // Drive labels are device-wide config that any user (incl. family
 // accounts) shares, so PATCH is admin-only — mirrors the gate around
@@ -18,14 +25,39 @@ function isAdmin(req: Request): boolean {
 const logger = pino({ name: "storage-route" });
 
 /**
- * The device-bridge runs on the Jetson host and exposes auto-mounted
- * USB drives at /drives. The orchestrator reads through so the
- * dashboard doesn't need to know about host-side plumbing.
+ * The device-bridge runs on the host and exposes auto-mounted USB drives at
+ * /drives. The orchestrator reads through so the dashboard doesn't need to
+ * know about host-side plumbing.
+ *
+ * URL comes from the shared `config.DEVICE_BRIDGE_URL` (default
+ * `http://host.docker.internal:9090`) — the SAME value screen-qr.service.ts
+ * uses. The previous hardcoded `172.17.0.1` (docker0 gateway) default could
+ * not reach the bridge on the single-box, whose orchestrator container is on
+ * the `droplet_default` bridge network (gateway 172.18.0.1) with docker0 down.
+ * `host.docker.internal` resolves via the orchestrator's
+ * `extra_hosts: host-gateway` mapping. `BRIDGE_URL` is still honored as a
+ * legacy env alias (see config.ts).
  */
-const BRIDGE_URL = process.env.BRIDGE_URL || "http://172.17.0.1:9090";
+const BRIDGE_URL = config.DEVICE_BRIDGE_URL;
+
+// WARP-612: shared secret the device-bridge requires on mutating routes
+// (eject). Mirrors the bridge's own env precedence. Read per-request (see the
+// eject handler) so a deployment that injects the secret after boot — and the
+// tests — see the current value rather than a boot-time snapshot.
+function bridgeAuthToken(): string {
+  return (
+    process.env.BRIDGE_AUTH_TOKEN ||
+    process.env.SERVICE_TOKEN_DISPLAY ||
+    ""
+  ).trim();
+}
 
 interface BridgeDrive {
   device: string;
+  /** WARP-827: whole-disk kernel name backing `device` (e.g. nvme0n1), set by
+   *  the bridge so the orchestrator can drop partitions that live on the OS
+   *  disk. Optional — an older bridge omits it. */
+  parent_disk?: string;
   mount: string;
   label: string;
   uuid: string;
@@ -33,12 +65,188 @@ interface BridgeDrive {
   used_bytes: number;
   free_bytes: number;
   mounted: boolean;
+  /** WARP-612: read-only enrichment from the device-bridge. Optional so an
+   *  older bridge that predates the enrichment still type-checks; `bus` is
+   *  re-derived server-side (deriveBus) when the bridge omits it. */
+  fs?: string;
+  bus?: string;
+  readonly?: boolean;
+  /** WARP-612: SMART health ("PASSED"/"FAILED") + temperature °C. Present
+   *  only when the bridge has DRIVE_SMART_ENABLED and smartctl can read the
+   *  device; null/absent otherwise. The dashboard hides the chips when null. */
+  smart?: string | null;
+  temp_c?: number | null;
+  /** WARP-612: hot-plug auto-mounted (ejectable) vs installed/fstab — the
+   *  bus-agnostic ejectability signal (ADR-011). The UI shows Eject on this,
+   *  not on bus. */
+  removable?: boolean;
 }
+
+/** Fallback bus class for the icon when the bridge omits `bus` (older bridge).
+ *  The bridge sends the *real* transport (it reads lsblk on the host); the
+ *  orchestrator runs in a container without the host's block devices, so it
+ *  can only name-guess. Stay neutral for sd* rather than guessing 'usb' — a
+ *  /dev/sd* drive is just as likely SATA/SAS (ADR-011). Presentation-only. */
+function deriveBus(device: string): string {
+  const base = (device || "").split("/").pop() || "";
+  if (base.startsWith("nvme")) return "nvme";
+  if (base.startsWith("mmcblk")) return "mmc";
+  return "disk";
+}
+
+// ── WARP-827: data-drive inclusion filter ──
+//
+// What the home-user (ADR-002) is allowed to see on the /storage page is
+// ONLY real, user-relevant data drives. They must NEVER see firmware/boot/
+// swap/loop pseudo-devices or the OS/system disk dressed up as "your drive".
+//
+// Layered rule (defense in depth):
+//   • The device-bridge (services/oled-display/device-bridge.py) is the FIRST
+//     layer: it already scopes enumeration to /mnt/* mounts, restricts to a
+//     data-fstype allow-list (ext*/xfs/btrfs/f2fs/vfat/exfat/ntfs/zfs — no
+//     tmpfs/swap/squashfs/overlay/proc/sys), excludes the /mnt/droplet OS-root
+//     bind, skips zombie mounts, and drops trivially small (<100 MB) volumes.
+//   • This predicate is the SECOND layer at the orchestrator boundary — the
+//     CI-testable one (the bridge is host-side Python). It re-applies the same
+//     intent so an older bridge (predating that scoping), a future bridge, a
+//     mis-scoped/dev bridge, or a tampered snapshot can never leak junk to a
+//     customer. It is purposely conservative: it only EXCLUDES things that are
+//     unambiguously not user data, and never fabricates or mutates a drive.
+//
+// A drive is included iff ALL hold:
+//   1. it is mounted (an unmounted entry has no browsable contents);
+//   2. its mount path is a real user-storage location — under /mnt/ AND not
+//      the /mnt/droplet OS-root bind itself (children /mnt/droplet/<x> are
+//      fine). Pseudo mounts (/, /boot/efi, [SWAP], /snap/*, /proc, …) are out;
+//   3. its filesystem (when the bridge reports one) is a data fstype, never
+//      swap/squashfs/overlay/tmpfs/devtmpfs/proc/sysfs/cgroup.
+// `fs`/`mount` are presentation/host facts from the bridge — this is a
+// read-only display gate, never a security or eject gate (those stay in the
+// bridge + storage-safety framework). The empty-list degradation below is
+// preserved: a fully-junk snapshot yields [] honestly, not an error.
+
+/** Filesystem types we treat as browsable user storage. Mirrors the bridge's
+ *  `_DATA_FSTYPES`. An entry whose `fs` is set but absent from this set (swap,
+ *  squashfs, overlay, tmpfs, …) is excluded. An entry with no `fs` is allowed
+ *  to pass the fs check (an older bridge omits it) and is still gated by the
+ *  mount-path rule. */
+const DATA_FSTYPES = new Set([
+  "ext4", "ext3", "ext2", "xfs", "btrfs", "f2fs",
+  "vfat", "exfat", "ntfs", "ntfs3", "zfs",
+]);
+
+/** The OS-root shared-mount bind the automounter creates. Backed by the OS
+ *  disk, so surfacing it would show the install as a "drive". Children
+ *  (/mnt/droplet/<label-uuid>) are real hot-plug drives and ARE included. */
+const OS_ROOT_BIND_MOUNT = "/mnt/droplet";
+
+/** Predicate: is this bridge drive a real, user-relevant DATA drive worth
+ *  showing on the home-user storage page? See the rule block above. */
+function isUserDataDrive(d: BridgeDrive, osDisk?: string): boolean {
+  if (!d.mounted) return false;
+  const mount = (d.mount || "").replace(/\/+$/, "") || d.mount;
+  // Rule 2: must be a real user-storage location under /mnt/, excluding the
+  // OS-root bind itself. This rejects /, /boot/efi, [SWAP], /snap/*, etc.
+  if (!mount.startsWith("/mnt/")) return false;
+  if (mount === OS_ROOT_BIND_MOUNT) return false;
+  // Rule 3: data fstype only (when the bridge reports one).
+  if (d.fs && !DATA_FSTYPES.has(d.fs.toLowerCase())) return false;
+  // Rule 4 (WARP-827): never a partition that lives on the OS/root disk. The
+  // automounter can mount the install disk's EFI/boot partitions under /mnt/,
+  // where rules 2-3 would pass them. The bridge already drops these (primary
+  // gate); this is the defense-in-depth boundary check, exercised when the
+  // bridge tags drives (parent_disk) + reports os_disk. Fails open: with no
+  // os_disk we hide nothing, so a real data drive is never lost.
+  if (osDisk && d.parent_disk && d.parent_disk === osDisk) return false;
+  return true;
+}
+
+// The device-bridge only runs with the OLED/display compose profile. On a host
+// without it, the fetch fails with ECONNREFUSED ("fetch failed" + a
+// `cause.code` of ECONNREFUSED/ENOTFOUND/etc.). That's an EXPECTED condition —
+// not an error — so we degrade cleanly (200 + `reason: "bridge_unavailable"`)
+// and log at info level rather than warn/error. Real failures (a reachable
+// bridge that times out or returns garbage) still log louder.
+// (Classifier shared with hostapd-bridge.service.ts — see lib/bridge-errors.ts.)
 
 interface BridgeDrivesSnapshot {
   drives: BridgeDrive[];
   count: number;
+  /** WARP-827: whole-disk kernel name backing root "/" (e.g. nvme0n1); lets the
+   *  orchestrator exclude any drive whose parent_disk matches. Absent when the
+   *  bridge can't resolve it (then we hide nothing — fail open). */
+  os_disk?: string;
   snapshot_at: string;
+}
+
+// ── BUG-3 / ADR-019: storage pools ──
+
+/** One md array as the device-bridge reports it (read-only, from /proc/mdstat).
+ *  `status` / `level` are the ADR-019 enum *values* the bridge already mapped —
+ *  the orchestrator never re-parses mdstat. */
+interface BridgePool {
+  device: string;
+  level: string;
+  status: string;
+  members: string[];
+}
+
+interface BridgePoolsSnapshot {
+  pools: BridgePool[];
+  count: number;
+  snapshot_at?: string;
+}
+
+/** Destructive storage operations, mapped to the bridge `/pools/command`
+ *  `operation` field. Keep in lock-step with STORAGE_TIER_3_OPERATIONS and the
+ *  host script's allow-list. */
+const STORAGE_OPS = [
+  "pool_create",
+  "pool_destroy",
+  "pool_format",
+  "pool_set_level",
+  "pool_add_spare",
+  "pool_remove_disk",
+  "drive_adopt", // WARP-662: wipe + reformat + mount a previously-used disk
+] as const;
+type StorageOp = (typeof STORAGE_OPS)[number];
+
+/**
+ * Forward an owner-confirmed destructive op to the device-bridge's auth-gated
+ * POST /pools/command. Mirrors the eject path's auth + connection-error
+ * handling. Returns the bridge's parsed body; throws on a non-ok bridge reply
+ * so the route can surface it.
+ */
+async function bridgePoolCommand(
+  operation: StorageOp,
+  params: Record<string, unknown>,
+): Promise<{ ok: boolean; body: Record<string, unknown> }> {
+  const bridgeToken = bridgeAuthToken();
+  if (!bridgeToken) {
+    // Fail closed: with no bridge auth token we cannot safely invoke a
+    // data-destroying host action.
+    const err = new Error("bridge_auth_unconfigured");
+    (err as { code?: string }).code = "BRIDGE_AUTH_UNCONFIGURED";
+    throw err;
+  }
+  const ctrl = new AbortController();
+  // The host script runs mdadm/mkfs which can take minutes on a large array.
+  const timer = setTimeout(() => ctrl.abort(), 600_000);
+  try {
+    const r = await fetch(`${BRIDGE_URL}/pools/command`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Droplet-Auth": bridgeToken,
+      },
+      body: JSON.stringify({ operation, params }),
+      signal: ctrl.signal,
+    });
+    const body = (await r.json().catch(() => ({}))) as Record<string, unknown>;
+    return { ok: r.ok, body };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -96,7 +304,7 @@ export function createStorageRouter(prisma: PrismaClient): Router {
   });
 
   /**
-   * GET /api/storage/drives — USB drives auto-mounted on the Jetson host.
+   * GET /api/storage/drives — USB drives auto-mounted on the appliance host.
    *
    * Reads from the device-bridge (services/oled-display/device-bridge.py)
    * running on the host at :9090. Bridge reads from the automount
@@ -111,7 +319,13 @@ export function createStorageRouter(prisma: PrismaClient): Router {
     try {
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), 4000);
-      const r = await fetch(`${BRIDGE_URL}/drives`, { signal: ctrl.signal });
+      // WARP-659: /drives is now token-gated on the bridge (it's LAN-reachable
+      // via BRIDGE_BIND=0.0.0.0). Send the same shared secret the eject path uses.
+      const token = bridgeAuthToken();
+      const r = await fetch(`${BRIDGE_URL}/drives`, {
+        signal: ctrl.signal,
+        ...(token ? { headers: { "X-Droplet-Auth": token } } : {}),
+      });
       clearTimeout(timer);
       if (!r.ok) {
         res.status(502).json({ drives: [], count: 0,
@@ -120,27 +334,53 @@ export function createStorageRouter(prisma: PrismaClient): Router {
       }
       const snap = (await r.json()) as BridgeDrivesSnapshot;
 
+      // WARP-827: drop firmware/boot/swap/loop pseudo-devices and the OS disk
+      // at the orchestrator boundary so the home-user only ever sees real data
+      // drives. See isUserDataDrive() for the documented rule. Done BEFORE the
+      // Drive-table join so we never query labels for junk.
+      const dataDrives = (snap.drives ?? []).filter((d) => isUserDataDrive(d, snap.os_disk));
+
       // Single batched lookup — Drive table is tiny (one row per
       // physical drive the customer has named), so an unfiltered
       // findMany is fine. The Map keeps the join O(n) total.
-      const uuids = snap.drives.map((d) => d.uuid).filter(Boolean);
+      const uuids = dataDrives.map((d) => d.uuid).filter(Boolean);
       const labels = uuids.length
         ? await prisma.drive.findMany({ where: { uuid: { in: uuids } } })
         : [];
       const byUuid = new Map(labels.map((l) => [l.uuid, l]));
 
-      const drives: DriveWithLabel[] = snap.drives.map((d) => {
+      const drives: DriveWithLabel[] = dataDrives.map((d) => {
         const label = byUuid.get(d.uuid);
         return {
           ...d,
+          // Guarantee a bus class for the dashboard even if the bridge is
+          // older than the WARP-612 enrichment.
+          bus: d.bus ?? deriveBus(d.device),
           displayName: label?.displayName ?? null,
           icon: label?.icon ?? null,
           notes: label?.notes ?? null,
         };
       });
 
-      res.json({ drives, count: snap.count, snapshot_at: snap.snapshot_at });
+      // count reflects the FILTERED set the dashboard renders, not the raw
+      // bridge count (which may include the junk we just dropped).
+      res.json({ drives, count: drives.length, snapshot_at: snap.snapshot_at });
     } catch (err) {
+      // The device-bridge is optional (OLED/display profile only). A
+      // connection refusal means it simply isn't running on this host — an
+      // expected deployment shape, not an error. Degrade cleanly: 200 with an
+      // empty drive list and a typed reason the dashboard can branch on.
+      if (isBridgeConnectionError(err)) {
+        logger.info(
+          { bridgeUrl: BRIDGE_URL },
+          "device-bridge not reachable; reporting no drives (bridge_unavailable)",
+        );
+        res.json({ drives: [], count: 0, reason: "bridge_unavailable" });
+        return;
+      }
+      // A reachable-but-misbehaving bridge (timeout, bad JSON, etc.) is a real
+      // problem worth a louder log; still return the 200 empty shape so the
+      // dashboard renders.
       logger.warn({ err }, "Failed to fetch drives from device-bridge");
       res.json({ drives: [], count: 0,
         error: (err as Error).message || "bridge unreachable" });
@@ -216,6 +456,493 @@ export function createStorageRouter(prisma: PrismaClient): Router {
       res.json(drive);
     } catch (err) {
       logger.warn({ err, uuid: req.params.uuid }, "Failed to update Drive label");
+      next(err);
+    }
+  });
+
+  /**
+   * POST /api/storage/drives/rescan — refresh the device-bridge's drive
+   * snapshot (it caches ~10s). Proxies the bridge's existing
+   * `/drives/changed` cache-invalidation hook — the same one the automount
+   * udev rule calls on hot-plug — so this only drops a cache; it never
+   * mounts or unmounts. Admin-only because it's a device-control action.
+   */
+  router.post("/storage/drives/rescan", async (req, res) => {
+    if (!isAdmin(req)) {
+      return res.status(403).json({ error: "Admin access required" });
+    }
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 4000);
+      // /drives/changed is auth-gated on the bridge now (this PR) — without
+      // the shared token every rescan 401s and the dashboard rescan dies as
+      // a 502 (review blocker on this PR).
+      const r = await fetch(`${BRIDGE_URL}/drives/changed`, {
+        method: "POST",
+        headers: { "X-Droplet-Auth": bridgeAuthToken() },
+        signal: ctrl.signal,
+      });
+      clearTimeout(timer);
+      if (!r.ok) {
+        return res.status(502).json({ ok: false, error: `bridge returned ${r.status}` });
+      }
+      return res.json({ ok: true });
+    } catch (err) {
+      // The device-bridge is optional (OLED/display profile only). A connection
+      // refusal means it simply isn't running on this host — degrade cleanly
+      // with a typed reason instead of leaking the raw "fetch failed" string.
+      if (isBridgeConnectionError(err)) {
+        logger.warn({ err }, "device-bridge not reachable (bridge_unavailable)");
+        return res.status(503).json({
+          ok: false,
+          reason: "bridge_unavailable",
+          error: "The storage service isn't reachable right now.",
+        });
+      }
+      logger.warn({ err }, "Failed to trigger drive rescan");
+      return res
+        .status(502)
+        .json({ ok: false, error: (err as Error).message || "bridge unreachable" });
+    }
+  });
+
+  /**
+   * POST /api/storage/drives/:uuid/eject — unmount + forget a hot-plug
+   * auto-mounted drive (WARP-612). Admin-only. Forwards to the device-bridge's
+   * auth-gated /drives/:uuid/eject, which gates on automount-state membership +
+   * a /mnt/droplet/ mount (bus-agnostic per ADR-011 — USB, external NVMe, SD,
+   * SATA dock, etc.), not on bus type. Requires a bridge auth token; 503 if the
+   * deployment hasn't provisioned one. A 409 (drive busy) is surfaced so the
+   * user can close files and retry; other bridge errors return a generic
+   * message and are logged server-side.
+   */
+  router.post("/storage/drives/:uuid/eject", async (req, res) => {
+    if (!isAdmin(req)) {
+      return res.status(403).json({ error: "Admin access required" });
+    }
+    const { uuid } = req.params;
+    if (!/^[A-Za-z0-9:-]{1,64}$/.test(uuid)) {
+      return res.status(400).json({ error: "Invalid drive UUID" });
+    }
+    const bridgeToken = bridgeAuthToken();
+    if (!bridgeToken) {
+      return res.status(503).json({
+        ok: false,
+        error: "Drive eject is unavailable — the device-bridge auth token is not configured.",
+      });
+    }
+    try {
+      const ctrl = new AbortController();
+      // The bridge's eject runs sync (≤10s) + umount (≤20s) = ~30s worst case,
+      // so wait longer than that: aborting at 25s would 502 an eject the bridge
+      // actually completed, leaving the user retrying an already-unmounted drive.
+      const timer = setTimeout(() => ctrl.abort(), 35000);
+      const r = await fetch(`${BRIDGE_URL}/drives/${encodeURIComponent(uuid)}/eject`, {
+        method: "POST",
+        headers: { "X-Droplet-Auth": bridgeToken },
+        signal: ctrl.signal,
+      });
+      clearTimeout(timer);
+      const body = (await r.json().catch(() => ({}))) as { error?: string };
+      if (!r.ok) {
+        // Log the bridge's raw message server-side; only the 409 "busy" case is
+        // actionable enough to surface (and bridge errors can carry mount
+        // internals, so other statuses get a generic message).
+        logger.warn({ uuid, status: r.status, bridgeError: body.error }, "Drive eject rejected by bridge");
+        return res.status(r.status === 409 ? 409 : 502).json({
+          ok: false,
+          error:
+            r.status === 409
+              ? body.error || "The drive is in use — close any open files and try again."
+              : "The device-bridge could not complete the eject.",
+        });
+      }
+      return res.json({ ok: true });
+    } catch (err) {
+      // The device-bridge is optional (OLED/display profile only). A connection
+      // refusal means it simply isn't running on this host — degrade cleanly
+      // with a typed reason instead of leaking the raw "fetch failed" string.
+      if (isBridgeConnectionError(err)) {
+        logger.warn({ err, uuid }, "device-bridge not reachable (bridge_unavailable)");
+        return res.status(503).json({
+          ok: false,
+          reason: "bridge_unavailable",
+          error: "The storage service isn't reachable right now.",
+        });
+      }
+      logger.warn({ err, uuid }, "Failed to eject drive");
+      return res
+        .status(502)
+        .json({ ok: false, error: (err as Error).message || "bridge unreachable" });
+    }
+  });
+
+  // =====================================================================
+  // BUG-3 / ADR-019 — storage pools (mdadm software RAID)
+  // =====================================================================
+
+  /**
+   * GET /api/storage/pools — read-only mdadm array inventory.
+   *
+   * Reads from the device-bridge GET /pools (which parses /proc/mdstat
+   * read-only) and joins the owner-chosen displayName / notes from the
+   * StoragePool table, exactly as /storage/drives joins the Drive table.
+   *
+   * Returns an HONEST empty list when no array exists — never a fabricated
+   * "pooled storage" sum of loose drives (ADR-019 D2). No role gate: reading
+   * array health is safe and is the source for the dashboard's degraded banner.
+   */
+  router.get("/storage/pools", async (_req, res) => {
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 4000);
+      const r = await fetch(`${BRIDGE_URL}/pools`, { signal: ctrl.signal });
+      clearTimeout(timer);
+      if (!r.ok) {
+        res.status(502).json({ pools: [], count: 0, error: `bridge returned ${r.status}` });
+        return;
+      }
+      const snap = (await r.json()) as BridgePoolsSnapshot;
+      const rows = await prisma.storagePool.findMany();
+      const byDevice = new Map(rows.map((p) => [p.device, p]));
+
+      const pools = (snap.pools ?? []).map((p) => {
+        const row = byDevice.get(p.device);
+        return {
+          ...p,
+          displayName: row?.displayName ?? null,
+          notes: row?.notes ?? null,
+        };
+      });
+      res.json({ pools, count: pools.length, snapshot_at: snap.snapshot_at });
+    } catch (err) {
+      // Same optional-bridge degradation as /storage/drives: a connection
+      // refusal means the bridge simply isn't running on this host — report
+      // "no pools" honestly rather than 500.
+      if (isBridgeConnectionError(err)) {
+        logger.info({ bridgeUrl: BRIDGE_URL }, "device-bridge not reachable; reporting no pools");
+        res.json({ pools: [], count: 0, reason: "bridge_unavailable" });
+        return;
+      }
+      logger.warn({ err }, "Failed to fetch pools from device-bridge");
+      res.json({ pools: [], count: 0, error: (err as Error).message || "bridge unreachable" });
+    }
+  });
+
+  /**
+   * Execute a confirmed destructive storage op against the bridge and surface
+   * the result. Shared by the confirm route. The bridge (and the host script
+   * behind it) is the real executor + last-line pre-flight; here we only
+   * forward and translate the bridge's reply.
+   */
+  async function executeStorageOp(
+    res: import("express").Response,
+    service: StorageOp,
+    resourceId: string,
+    params: Record<string, unknown>,
+  ) {
+    try {
+      const { ok, body } = await bridgePoolCommand(service, {
+        ...params,
+        device: resourceId,
+      });
+      if (!ok) {
+        // The host-script pre-flight refused (mounted / has-data / OS-disk /
+        // bad confirm) — surface its message; it's owner-actionable.
+        logger.warn({ service, resourceId, body }, "Storage op refused by host script");
+        return res.status(422).json({
+          ok: false,
+          error: (body.error as string) || "The storage service refused this operation.",
+        });
+      }
+      return res.json({ ok: true, status: "ok", operation: service, device: resourceId, ...body });
+    } catch (err) {
+      if ((err as { code?: string }).code === "BRIDGE_AUTH_UNCONFIGURED") {
+        return res.status(503).json({
+          ok: false,
+          error: "Storage management is unavailable — the device-bridge auth token is not configured.",
+        });
+      }
+      if (isBridgeConnectionError(err)) {
+        logger.warn({ err, service, resourceId }, "device-bridge not reachable for storage op");
+        return res.status(503).json({
+          ok: false,
+          reason: "bridge_unavailable",
+          error: "The storage service isn't reachable right now.",
+        });
+      }
+      logger.warn({ err, service, resourceId }, "Failed to run storage op");
+      return res.status(502).json({ ok: false, error: (err as Error).message || "bridge unreachable" });
+    }
+  }
+
+  /**
+   * POST /api/storage/command/confirm — confirm + execute a destructive
+   * storage op. Owner/admin only (confirming EXECUTES, so it carries the same
+   * guard as the routes that mint the token — mirrors switch.ts WARP-559).
+   *
+   * The caller MUST echo {service, resourceId}; a mismatch or an
+   * unknown/expired token is refused and never reaches the bridge.
+   */
+  router.post(
+    "/storage/command/confirm",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        const { confirmationToken, service, resourceId } = req.body || {};
+        if (!confirmationToken) {
+          return res.status(400).json({ error: "Missing confirmationToken" });
+        }
+        const result = await confirmStorageCommand(prisma, confirmationToken, req.user?.id, {
+          service,
+          resourceId,
+        });
+        if (!result.confirmed) {
+          return res.status(400).json({ error: result.reason, code: result.code });
+        }
+        return executeStorageOp(
+          res,
+          result.service as StorageOp,
+          result.resourceId,
+          (result.params as Record<string, unknown>) || {},
+        );
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // ── Destructive routes: each EVALUATES (mints a confirm token), never
+  //    executes directly. Owner/admin only. The AI never reaches these
+  //    (and the ops aren't in tools-core at all). ──
+
+  /** md device name must look like md<N> — never a host-specific default. */
+  function validMdDevice(d: unknown): d is string {
+    return typeof d === "string" && /^md\d{1,3}$/.test(d);
+  }
+  /** Member block-device path allow-list (no shell metacharacters). */
+  function validMember(m: unknown): m is string {
+    return typeof m === "string" && /^\/dev\/[A-Za-z0-9/_-]{1,64}$/.test(m);
+  }
+  const VALID_LEVELS = new Set(["raid0", "raid1", "raid5", "raid6", "raid10", "jbod"]);
+  // WARP-662 drive_adopt: a WHOLE-disk kernel name (never a partition, never
+  // md<N>). The host script + bridge add the OS-disk refusal; this is just a
+  // shape/allow-list guard against shell-metacharacter injection.
+  function validAdoptDevice(d: unknown): d is string {
+    return typeof d === "string" &&
+      /^(sd[a-z]{1,2}|nvme\d+n\d+|mmcblk\d+|vd[a-z]{1,2})$/.test(d);
+  }
+  const VALID_FSTYPES = new Set(["ext4", "xfs", "btrfs"]);
+  const VALID_WIPE = new Set(["quick", "secure"]);
+
+  function evalAndRespond(
+    res: import("express").Response,
+    prismaArg: PrismaClient,
+    service: StorageOp,
+    resourceId: string,
+    params: Record<string, unknown>,
+    userId?: string,
+  ) {
+    return evaluateStorageCommand(prismaArg, service, resourceId, params, userId, "api").then(
+      (result) => {
+        // `requiresConfirmation` is the positive discriminant on the union;
+        // anything else is the blocked branch (e.g. too many pending).
+        if (!("requiresConfirmation" in result)) {
+          return res.status(403).json({ error: result.reason, tier: result.tier, blocked: true });
+        }
+        // Tier 3 via dashboard → 202 + token. Caller confirms to execute.
+        return res.status(202).json({
+          status: "confirmation_required",
+          confirmationToken: result.confirmationToken,
+          reason: result.reason,
+          service,
+          resourceId,
+          tier: result.tier,
+          expiresIn: 60,
+        });
+      },
+    );
+  }
+
+  // POST /api/storage/pools — create a pool (DESTRUCTIVE).
+  router.post("/storage/pools", requireRole("owner", "admin"), async (req, res, next) => {
+    try {
+      const { device, level, members, confirmPhrase } = req.body || {};
+      if (!validMdDevice(device)) {
+        return res.status(400).json({ error: "Invalid pool device (expected md<N>)" });
+      }
+      if (typeof level !== "string" || !VALID_LEVELS.has(level)) {
+        return res.status(400).json({ error: "Invalid RAID level" });
+      }
+      if (!Array.isArray(members) || members.length < 1 || !members.every(validMember)) {
+        return res.status(400).json({ error: "Invalid members — expected /dev/* paths" });
+      }
+      return evalAndRespond(
+        res,
+        prisma,
+        "pool_create",
+        device,
+        { level, members, confirm_phrase: confirmPhrase ?? "" },
+        req.user?.id,
+      );
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /api/storage/drives/adopt — wipe + reformat + mount a previously-used
+  // disk into the Droplet (DESTRUCTIVE, WARP-662). Owner/admin only; mints a
+  // confirm token. The OS/boot disk is refused server-side by the host script —
+  // this route never trusts the client's device choice for that guard.
+  router.post("/storage/drives/adopt", requireRole("owner", "admin"), async (req, res, next) => {
+    try {
+      const { device, fstype, wipeMethod, label, confirmPhrase } = req.body || {};
+      if (!validAdoptDevice(device)) {
+        return res.status(400).json({
+          error: "Invalid drive (expected a whole-disk name like sdb or nvme0n1)",
+        });
+      }
+      const fs = typeof fstype === "string" && fstype ? fstype : "ext4";
+      if (!VALID_FSTYPES.has(fs)) {
+        return res.status(400).json({ error: "Invalid filesystem type" });
+      }
+      const wipe = typeof wipeMethod === "string" && wipeMethod ? wipeMethod : "quick";
+      if (!VALID_WIPE.has(wipe)) {
+        return res.status(400).json({ error: "Invalid wipe method (expected quick or secure)" });
+      }
+      if (label != null && !/^[A-Za-z0-9_-]{1,16}$/.test(String(label))) {
+        return res.status(400).json({ error: "Invalid label (1-16 chars: letters, digits, _ or -)" });
+      }
+      return evalAndRespond(
+        res,
+        prisma,
+        "drive_adopt",
+        device,
+        {
+          fstype: fs,
+          wipe_method: wipe,
+          ...(label != null ? { label: String(label) } : {}),
+          confirm_phrase: confirmPhrase ?? "",
+        },
+        req.user?.id,
+      );
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // DELETE /api/storage/pools/:device — destroy a pool (DESTRUCTIVE).
+  router.delete("/storage/pools/:device", requireRole("owner", "admin"), async (req, res, next) => {
+    try {
+      const { device } = req.params;
+      if (!validMdDevice(device)) {
+        return res.status(400).json({ error: "Invalid pool device" });
+      }
+      return evalAndRespond(
+        res,
+        prisma,
+        "pool_destroy",
+        device,
+        { confirm_phrase: req.body?.confirmPhrase ?? "" },
+        req.user?.id,
+      );
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /api/storage/pools/:device/format — format the array (DESTRUCTIVE).
+  router.post("/storage/pools/:device/format", requireRole("owner", "admin"), async (req, res, next) => {
+    try {
+      const { device } = req.params;
+      if (!validMdDevice(device)) {
+        return res.status(400).json({ error: "Invalid pool device" });
+      }
+      const fstype = req.body?.fstype;
+      if (fstype !== undefined && !/^[a-z0-9]{1,12}$/.test(String(fstype))) {
+        return res.status(400).json({ error: "Invalid fstype" });
+      }
+      return evalAndRespond(
+        res,
+        prisma,
+        "pool_format",
+        device,
+        { fstype, confirm_phrase: req.body?.confirmPhrase ?? "" },
+        req.user?.id,
+      );
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /api/storage/pools/:device/level — change RAID level (DESTRUCTIVE).
+  router.post("/storage/pools/:device/level", requireRole("owner", "admin"), async (req, res, next) => {
+    try {
+      const { device } = req.params;
+      const { level } = req.body || {};
+      if (!validMdDevice(device)) {
+        return res.status(400).json({ error: "Invalid pool device" });
+      }
+      if (typeof level !== "string" || !VALID_LEVELS.has(level)) {
+        return res.status(400).json({ error: "Invalid RAID level" });
+      }
+      return evalAndRespond(
+        res,
+        prisma,
+        "pool_set_level",
+        device,
+        { level, confirm_phrase: req.body?.confirmPhrase ?? "" },
+        req.user?.id,
+      );
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /api/storage/pools/:device/spare — add a spare disk (DESTRUCTIVE — wipes the new disk).
+  router.post("/storage/pools/:device/spare", requireRole("owner", "admin"), async (req, res, next) => {
+    try {
+      const { device } = req.params;
+      const { member } = req.body || {};
+      if (!validMdDevice(device)) {
+        return res.status(400).json({ error: "Invalid pool device" });
+      }
+      if (!validMember(member)) {
+        return res.status(400).json({ error: "Invalid member device" });
+      }
+      return evalAndRespond(
+        res,
+        prisma,
+        "pool_add_spare",
+        device,
+        { member, confirm_phrase: req.body?.confirmPhrase ?? "" },
+        req.user?.id,
+      );
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /api/storage/pools/:device/remove-disk — fail+remove a member (DESTRUCTIVE).
+  router.post("/storage/pools/:device/remove-disk", requireRole("owner", "admin"), async (req, res, next) => {
+    try {
+      const { device } = req.params;
+      const { member } = req.body || {};
+      if (!validMdDevice(device)) {
+        return res.status(400).json({ error: "Invalid pool device" });
+      }
+      if (!validMember(member)) {
+        return res.status(400).json({ error: "Invalid member device" });
+      }
+      return evalAndRespond(
+        res,
+        prisma,
+        "pool_remove_disk",
+        device,
+        { member, confirm_phrase: req.body?.confirmPhrase ?? "" },
+        req.user?.id,
+      );
+    } catch (err) {
       next(err);
     }
   });

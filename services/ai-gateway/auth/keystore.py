@@ -20,10 +20,95 @@ from cryptography.hazmat.primitives import hashes
 logger = logging.getLogger(__name__)
 
 KEYS_DIR = Path(os.getenv("KEYS_DIR", "/data/keys"))
-DEVICE_SECRET = os.getenv("DEVICE_SECRET", "dev-secret-change-in-production")
+
+# The literal fallback used when DEVICE_SECRET is unset. Every device that
+# boots without setup.sh's per-device secret would otherwise derive its Fernet
+# key from this single public string — i.e. encrypt its cloud BYOK keys under a
+# key whose entropy is zero and known to anyone with the source. We keep the
+# constant named so we can detect when it's active and refuse to ship with it.
+_DEV_DEFAULT_SECRET = "dev-secret-change-in-production"
+DEVICE_SECRET = os.getenv("DEVICE_SECRET", _DEV_DEFAULT_SECRET)
+
+
+def _is_production() -> bool:
+    """Whether we're running in a non-dev deployment.
+
+    Mirrors the FIPS boot self-test gating in main.py (DROPLET_FIPS_REQUIRED):
+    an explicit production signal opts into fail-closed behaviour, while dev/CI
+    (no signal) stays permissive so the local default keeps working. We treat
+    either ``DROPLET_ENV in {production, prod}`` or ``DROPLET_FIPS_REQUIRED``
+    being truthy as "this is a shipping box".
+    """
+    env = (os.getenv("DROPLET_ENV") or "").strip().lower()
+    if env in ("production", "prod"):
+        return True
+    fips = (os.getenv("DROPLET_FIPS_REQUIRED") or "").strip().lower()
+    return fips in ("true", "1", "yes")
+
+
+def _assert_device_secret_safe() -> None:
+    """Refuse to use the public dev default for real key material.
+
+    Fail-closed in production (raise at import, before the app serves a
+    request — same posture as the FIPS self-test). In dev/CI, log an ERROR so
+    the weak default is at least visible. A device that encrypts BYOK keys
+    under the dev default and later receives a real DEVICE_SECRET silently
+    loses every stored key (InvalidToken → None), so surfacing this early is
+    the cheapest way to avoid a baffling "key not configured" later.
+    """
+    if DEVICE_SECRET and DEVICE_SECRET != _DEV_DEFAULT_SECRET:
+        return  # a real per-device secret is in use — nothing to warn about
+    if _is_production():
+        raise RuntimeError(
+            "DEVICE_SECRET is unset or equal to the public dev default in a "
+            "production deployment. BYOK keys would be encrypted under a known "
+            "key. Set a per-device DEVICE_SECRET (setup.sh generates one) "
+            "before booting. Refusing to start."
+        )
+    logger.error(
+        "DEVICE_SECRET is unset or equal to the public dev default "
+        "(%r). BYOK API keys will be encrypted under a known, zero-entropy "
+        "key — acceptable only for dev/test. Set a per-device DEVICE_SECRET "
+        "for any real deployment.",
+        _DEV_DEFAULT_SECRET,
+    )
+
+
+_assert_device_secret_safe()
 
 _SALT_FILE = KEYS_DIR / ".salt"
 _KDF_ITERATIONS = 480_000  # OWASP 2023 recommendation for PBKDF2-HMAC-SHA256
+
+# WARP-561: per-user BYOK namespacing. Keys are stored under
+# `{user_id}/{provider}.enc` so one household member's cloud key is never
+# readable by another. `user_id is None` is the SHARED/device namespace
+# (`_shared/{provider}.enc`) — used by server-side callers that have no
+# per-request identity (model listing, gRPC EmbedText, router reload). The
+# segment is sanitised so a hostile id can never escape KEYS_DIR via
+# traversal or absolute paths.
+_SHARED_NAMESPACE = "_shared"
+
+
+def _user_namespace(user_id: str | None) -> str:
+    """Map a caller identity to a filesystem-safe key namespace.
+
+    None / blank → the shared device namespace. Otherwise the id is reduced
+    to a conservative `[A-Za-z0-9._-]` token (collapsing anything else to
+    `_`) so it can never contain a path separator, `..`, or a drive/root
+    prefix. This is the only place a user id touches the path.
+    """
+    if not user_id or not user_id.strip():
+        return _SHARED_NAMESPACE
+    safe = "".join(c if (c.isalnum() or c in "._-") else "_" for c in user_id.strip())
+    # A token of only dots ("." / "..") would still be a traversal token.
+    if not safe or set(safe) <= {"."}:
+        return _SHARED_NAMESPACE
+    return safe
+
+
+def _key_path(provider: str, user_id: str | None) -> Path:
+    """Return the on-disk path for a provider key in a user's namespace."""
+    return KEYS_DIR / _user_namespace(user_id) / f"{provider}.enc"
 
 
 def _get_or_create_salt() -> bytes:
@@ -58,19 +143,19 @@ def _get_fernet() -> Fernet:
     return Fernet(key)
 
 
-async def store_key(provider: str, api_key: str) -> None:
-    """Encrypt and store an API key for a provider."""
-    KEYS_DIR.mkdir(parents=True, exist_ok=True)
+async def store_key(provider: str, api_key: str, user_id: str | None = None) -> None:
+    """Encrypt and store an API key for a provider in the caller's namespace."""
+    key_path = _key_path(provider, user_id)
+    key_path.parent.mkdir(parents=True, exist_ok=True)
     fernet = _get_fernet()
     encrypted = fernet.encrypt(api_key.encode())
-    key_path = KEYS_DIR / f"{provider}.enc"
     key_path.write_bytes(encrypted)
-    logger.info("Stored API key for provider: %s", provider)
+    logger.info("Stored API key for provider: %s (namespace: %s)", provider, key_path.parent.name)
 
 
-async def get_key(provider: str) -> str | None:
-    """Retrieve and decrypt an API key for a provider."""
-    key_path = KEYS_DIR / f"{provider}.enc"
+async def get_key(provider: str, user_id: str | None = None) -> str | None:
+    """Retrieve and decrypt an API key for a provider in the caller's namespace."""
+    key_path = _key_path(provider, user_id)
     if not key_path.exists():
         return None
 
@@ -83,18 +168,19 @@ async def get_key(provider: str) -> str | None:
         return None
 
 
-async def delete_key(provider: str) -> bool:
-    """Remove a stored API key."""
-    key_path = KEYS_DIR / f"{provider}.enc"
+async def delete_key(provider: str, user_id: str | None = None) -> bool:
+    """Remove a stored API key from the caller's namespace."""
+    key_path = _key_path(provider, user_id)
     if key_path.exists():
         key_path.unlink()
-        logger.info("Deleted API key for provider: %s", provider)
+        logger.info("Deleted API key for provider: %s (namespace: %s)", provider, key_path.parent.name)
         return True
     return False
 
 
-async def list_providers_with_keys() -> list[str]:
-    """Return provider names that have stored keys."""
-    if not KEYS_DIR.exists():
+async def list_providers_with_keys(user_id: str | None = None) -> list[str]:
+    """Return provider names that have stored keys in the caller's namespace."""
+    ns_dir = KEYS_DIR / _user_namespace(user_id)
+    if not ns_dir.exists():
         return []
-    return [p.stem for p in KEYS_DIR.glob("*.enc")]
+    return [p.stem for p in ns_dir.glob("*.enc")]

@@ -1,0 +1,328 @@
+/**
+ * BUG-3 / ADR-019 — storage pool routes.
+ *
+ * Covers:
+ *   - GET /api/storage/pools left-joins the StoragePool table onto the
+ *     device-bridge GET /pools inventory, and returns an honest empty list
+ *     (NOT a fabricated sum) when the bridge reports no array.
+ *   - The destructive routes (pool create/destroy/format/...) are owner-gated
+ *     and refuse to EXECUTE without a valid confirm token: the create route
+ *     returns 202 + token, and only /storage/command/confirm with a matching
+ *     token reaches the bridge.
+ *   - A confirm with a mismatched {service, resourceId} never reaches the
+ *     bridge.
+ *
+ * Mocks the device-bridge fetch + builds an in-memory Prisma stand-in, exactly
+ * like storage.test.ts. No real bridge, no real mdadm.
+ */
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import request from "supertest";
+import express from "express";
+
+vi.mock("../services/nextcloud-session.service.js", () => ({
+  resolveNcToken: vi.fn(async () => null),
+}));
+vi.mock("../services/nextcloud.client.js", () => ({
+  ncGetUserQuota: vi.fn(),
+}));
+
+import { createStorageRouter } from "../routes/storage.js";
+
+// ── Prisma stand-in: Drive (existing) + StoragePool + PoolMember ──
+function createPrismaMock() {
+  const pools = new Map<string, any>();
+  const members: any[] = [];
+  return {
+    pools,
+    members,
+    drive: {
+      findMany: vi.fn(async () => []),
+    },
+    storagePool: {
+      findMany: vi.fn(async () => [...pools.values()]),
+      findUnique: vi.fn(async ({ where }: any) => pools.get(where.device) ?? null),
+    },
+    poolMember: {
+      findMany: vi.fn(async ({ where }: any = {}) =>
+        members.filter((m) => !where?.poolDevice || m.poolDevice === where.poolDevice),
+      ),
+    },
+  } as any;
+}
+
+// Owner-session middleware stub: every request is an authenticated owner so we
+// exercise the safety-tier gate, not the auth gate (auth is covered elsewhere).
+function ownerAuth(req: any, _res: any, next: any) {
+  req.user = { id: "owner-1", role: "owner" };
+  next();
+}
+
+function makeApp(prisma: any, bridgeFetch: typeof fetch) {
+  vi.stubGlobal("fetch", bridgeFetch);
+  const app = express();
+  app.use(express.json());
+  app.use(ownerAuth);
+  app.use("/api", createStorageRouter(prisma));
+  return app;
+}
+
+function bridgePoolsResponse(pools: any[]) {
+  return vi.fn(async (url: string) => {
+    if (String(url).endsWith("/pools")) {
+      return {
+        ok: true,
+        json: async () => ({ pools, count: pools.length, snapshot_at: "2026-06-04T00:00:00Z" }),
+      } as any;
+    }
+    // Destructive POST to the bridge.
+    return { ok: true, json: async () => ({ ok: true, device: "md0" }) } as any;
+  }) as unknown as typeof fetch;
+}
+
+beforeEach(() => {
+  vi.unstubAllGlobals();
+  process.env.BRIDGE_AUTH_TOKEN = "test-bridge-token";
+});
+
+describe("GET /api/storage/pools (read-only, honest empty)", () => {
+  it("returns the bridge's arrays joined with owner labels", async () => {
+    const prisma = createPrismaMock();
+    prisma.pools.set("md0", { device: "md0", displayName: "Vault", level: "raid1", status: "active", notes: null });
+    const app = makeApp(
+      prisma,
+      bridgePoolsResponse([
+        { device: "md0", level: "raid1", status: "active", members: ["sda", "sdb"] },
+      ]),
+    );
+    const res = await request(app).get("/api/storage/pools");
+    expect(res.status).toBe(200);
+    expect(res.body.count).toBe(1);
+    expect(res.body.pools[0].device).toBe("md0");
+    expect(res.body.pools[0].displayName).toBe("Vault");
+  });
+
+  it("returns an honest empty list when the bridge reports no array (no fake sum)", async () => {
+    const prisma = createPrismaMock();
+    const app = makeApp(prisma, bridgePoolsResponse([]));
+    const res = await request(app).get("/api/storage/pools");
+    expect(res.status).toBe(200);
+    expect(res.body.pools).toEqual([]);
+    expect(res.body.count).toBe(0);
+  });
+
+  it("degrades to an empty list (not a 500) when the bridge is unreachable", async () => {
+    const prisma = createPrismaMock();
+    const econn = Object.assign(new Error("fetch failed"), {
+      cause: { code: "ECONNREFUSED" },
+    });
+    const app = makeApp(
+      prisma,
+      vi.fn(async () => {
+        throw econn;
+      }) as unknown as typeof fetch,
+    );
+    const res = await request(app).get("/api/storage/pools");
+    expect(res.status).toBe(200);
+    expect(res.body.pools).toEqual([]);
+    expect(res.body.reason).toBe("bridge_unavailable");
+  });
+});
+
+describe("destructive pool routes — no execution without a valid confirm token", () => {
+  it("pool create returns 202 + a confirm token, and does NOT touch the bridge yet", async () => {
+    const prisma = createPrismaMock();
+    const bridge = bridgePoolsResponse([]);
+    const app = makeApp(prisma, bridge);
+    const res = await request(app)
+      .post("/api/storage/pools")
+      .send({ device: "md0", level: "raid1", members: ["/dev/sda", "/dev/sdb"], confirmPhrase: "ERASE sda sdb" });
+    expect(res.status).toBe(202);
+    expect(res.body.confirmationToken).toBeTruthy();
+    // The bridge POST /pools/command must NOT have been called during evaluate.
+    const calledBridgeCommand = (bridge as any).mock.calls.some((c: any[]) =>
+      String(c[0]).endsWith("/pools/command"),
+    );
+    expect(calledBridgeCommand).toBe(false);
+  });
+
+  it("confirm with a matching token reaches the bridge and executes", async () => {
+    const prisma = createPrismaMock();
+    const bridge = bridgePoolsResponse([]);
+    const app = makeApp(prisma, bridge);
+    const create = await request(app)
+      .post("/api/storage/pools")
+      .send({ device: "md0", level: "raid1", members: ["/dev/sda", "/dev/sdb"], confirmPhrase: "ERASE sda sdb" });
+    const token = create.body.confirmationToken;
+
+    const confirm = await request(app)
+      .post("/api/storage/command/confirm")
+      .send({ confirmationToken: token, service: "pool_create", resourceId: "md0" });
+    expect(confirm.status).toBe(200);
+    const calledBridgeCommand = (bridge as any).mock.calls.some((c: any[]) =>
+      String(c[0]).endsWith("/pools/command"),
+    );
+    expect(calledBridgeCommand).toBe(true);
+  });
+
+  it("confirm with a MISMATCHED resourceId is refused and never reaches the bridge", async () => {
+    const prisma = createPrismaMock();
+    const bridge = bridgePoolsResponse([]);
+    const app = makeApp(prisma, bridge);
+    const create = await request(app)
+      .post("/api/storage/pools")
+      .send({ device: "md0", level: "raid1", members: ["/dev/sda", "/dev/sdb"], confirmPhrase: "ERASE sda sdb" });
+    const token = create.body.confirmationToken;
+
+    const confirm = await request(app)
+      .post("/api/storage/command/confirm")
+      .send({ confirmationToken: token, service: "pool_create", resourceId: "md1" });
+    expect(confirm.status).toBeGreaterThanOrEqual(400);
+    const calledBridgeCommand = (bridge as any).mock.calls.some((c: any[]) =>
+      String(c[0]).endsWith("/pools/command"),
+    );
+    expect(calledBridgeCommand).toBe(false);
+  });
+
+  // WARP-662 — drive_adopt goes through the SAME gated flow as the pool ops.
+  it("drive adopt returns 202 + a confirm token, and does NOT touch the bridge yet", async () => {
+    const prisma = createPrismaMock();
+    const bridge = bridgePoolsResponse([]);
+    const app = makeApp(prisma, bridge);
+    const res = await request(app)
+      .post("/api/storage/drives/adopt")
+      .send({ device: "sdb", fstype: "ext4", wipeMethod: "quick", confirmPhrase: "ERASE sdb" });
+    expect(res.status).toBe(202);
+    expect(res.body.confirmationToken).toBeTruthy();
+    expect(res.body.service).toBe("drive_adopt");
+    const hit = (bridge as any).mock.calls.some((c: any[]) =>
+      String(c[0]).endsWith("/pools/command"),
+    );
+    expect(hit).toBe(false);
+  });
+
+  it("drive adopt confirm with a matching token reaches the bridge and executes", async () => {
+    const prisma = createPrismaMock();
+    const bridge = bridgePoolsResponse([]);
+    const app = makeApp(prisma, bridge);
+    const create = await request(app)
+      .post("/api/storage/drives/adopt")
+      .send({ device: "sdb", wipeMethod: "secure", confirmPhrase: "ERASE sdb" });
+    const token = create.body.confirmationToken;
+    const confirm = await request(app)
+      .post("/api/storage/command/confirm")
+      .send({ confirmationToken: token, service: "drive_adopt", resourceId: "sdb" });
+    expect(confirm.status).toBe(200);
+    const hit = (bridge as any).mock.calls.some((c: any[]) =>
+      String(c[0]).endsWith("/pools/command"),
+    );
+    expect(hit).toBe(true);
+  });
+
+  it("drive adopt rejects a partition / md / injection device (whole-disk only)", async () => {
+    const prisma = createPrismaMock();
+    const bridge = bridgePoolsResponse([]);
+    const app = makeApp(prisma, bridge);
+    for (const bad of ["sdb1", "md0", "/dev/sdb", "sdb; rm -rf /"]) {
+      const res = await request(app)
+        .post("/api/storage/drives/adopt")
+        .send({ device: bad, confirmPhrase: `ERASE ${bad}` });
+      expect(res.status).toBe(400);
+    }
+  });
+
+  it("confirm with no/invalid token is refused", async () => {
+    const prisma = createPrismaMock();
+    const bridge = bridgePoolsResponse([]);
+    const app = makeApp(prisma, bridge);
+    const confirm = await request(app)
+      .post("/api/storage/command/confirm")
+      .send({ confirmationToken: "garbage", service: "pool_create", resourceId: "md0" });
+    expect(confirm.status).toBeGreaterThanOrEqual(400);
+  });
+
+  // WARP-828 — the Settings "Danger Zone" reformat-a-drive flow reuses this
+  // same drive_adopt → confirm path. The owner gate has to hold on the SERVER,
+  // never on the client: a family/guest session must be refused at BOTH the
+  // mint (adopt) and the execute (confirm) step, and the bridge must never be
+  // touched. Mirrors the eject/rescan "forbids non-admins" tests, generalised
+  // to the two-step destructive flow these routes carry.
+  it("drive adopt is refused for a non-owner/non-admin (family) and never reaches the bridge", async () => {
+    const prisma = createPrismaMock();
+    const bridge = bridgePoolsResponse([]);
+    // Real requireRole gate: inject a family-role session, not the owner stub.
+    vi.stubGlobal("fetch", bridge);
+    const app = express();
+    app.use(express.json());
+    app.use((req: any, _res, next) => {
+      req.user = { id: "fam-1", role: "family" };
+      next();
+    });
+    app.use("/api", createStorageRouter(prisma));
+
+    const res = await request(app)
+      .post("/api/storage/drives/adopt")
+      .send({ device: "sdb", wipeMethod: "quick", confirmPhrase: "ERASE sdb" });
+    expect(res.status).toBe(403);
+    const hit = (bridge as any).mock.calls.some((c: any[]) =>
+      String(c[0]).endsWith("/pools/command"),
+    );
+    expect(hit).toBe(false);
+  });
+
+  it("storage command confirm is refused for a non-owner/non-admin (family)", async () => {
+    const prisma = createPrismaMock();
+    const bridge = bridgePoolsResponse([]);
+    vi.stubGlobal("fetch", bridge);
+    const app = express();
+    app.use(express.json());
+    app.use((req: any, _res, next) => {
+      req.user = { id: "guest-1", role: "guest" };
+      next();
+    });
+    app.use("/api", createStorageRouter(prisma));
+
+    // Even with a plausible-looking token the role gate must reject before the
+    // token is ever evaluated, and the bridge must stay untouched.
+    const confirm = await request(app)
+      .post("/api/storage/command/confirm")
+      .send({ confirmationToken: "a".repeat(64), service: "drive_adopt", resourceId: "sdb" });
+    expect(confirm.status).toBe(403);
+    const hit = (bridge as any).mock.calls.some((c: any[]) =>
+      String(c[0]).endsWith("/pools/command"),
+    );
+    expect(hit).toBe(false);
+  });
+
+  // WARP-828 — an EXPIRED token must be refused (the Danger Zone holds the
+  // owner on screen for the type-to-confirm friction, which can outlive the
+  // 60s token). The safety service stamps expiresAt; we force the clock past it
+  // and assert the confirm is rejected and the bridge is never touched.
+  it("drive adopt confirm with an EXPIRED token is refused and never reaches the bridge", async () => {
+    vi.useFakeTimers();
+    try {
+      const prisma = createPrismaMock();
+      const bridge = bridgePoolsResponse([]);
+      const app = makeApp(prisma, bridge);
+      const create = await request(app)
+        .post("/api/storage/drives/adopt")
+        .send({ device: "sdb", wipeMethod: "quick", confirmPhrase: "ERASE sdb" });
+      expect(create.status).toBe(202);
+      const token = create.body.confirmationToken;
+
+      // STORAGE_CONFIRMATION_TOKEN_EXPIRY_MS is 60s; jump well past it.
+      vi.advanceTimersByTime(120_000);
+
+      const confirm = await request(app)
+        .post("/api/storage/command/confirm")
+        .send({ confirmationToken: token, service: "drive_adopt", resourceId: "sdb" });
+      expect(confirm.status).toBe(400);
+      expect(confirm.body.code).toBe("TOKEN_EXPIRED");
+      const hit = (bridge as any).mock.calls.some((c: any[]) =>
+        String(c[0]).endsWith("/pools/command"),
+      );
+      expect(hit).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

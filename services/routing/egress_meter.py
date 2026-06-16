@@ -53,8 +53,14 @@ logger = logging.getLogger(__name__)
 EGRESS_SAMPLE_INTERVAL_SECONDS = int(
     os.environ.get("OFF_LAN_EGRESS_SAMPLE_SEC", "60")
 )
+# `routing` runs with network_mode: host in docker-compose, so Docker compose
+# service DNS names ("orchestrator") DON'T resolve here — the orchestrator is
+# reachable on the loopback interface via its host port mapping. Default to
+# localhost to match scheduler.py (same process, same host-network constraint);
+# a compose-service-name default silently fails DNS and drops every off-LAN
+# sample when ORCHESTRATOR_URL isn't explicitly set (NET-08).
 ORCHESTRATOR_URL = os.environ.get(
-    "ORCHESTRATOR_URL", "http://orchestrator:3000"
+    "ORCHESTRATOR_URL", "http://localhost:3000"
 ).rstrip("/")
 ORCHESTRATOR_SAMPLER_TOKEN = (
     os.environ.get("ORCHESTRATOR_SAMPLER_TOKEN") or ""

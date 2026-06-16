@@ -3,8 +3,8 @@
  */
 
 // Match the schema default in config.ts. The display service runs with
-// `network_mode: host` on the Jetson, so `localhost` from inside the
-// orchestrator container would never resolve to it — the host gateway
+// `network_mode: host` on the inference host, so `localhost` from inside
+// the orchestrator container would never resolve to it — the host gateway
 // alias must be used. Compose sets DISPLAY_SERVICE_URL explicitly; this
 // fallback only trips in local/unit-test contexts where the env isn't set.
 const DISPLAY_URL = process.env.DISPLAY_SERVICE_URL || "http://host.docker.internal:8082";
@@ -71,6 +71,25 @@ export async function showHome(): Promise<boolean> {
   }
 }
 
+/**
+ * Navigate the panel to the combined System + Wi-Fi screen (py-v3).
+ *
+ * Sends a BARE `{"mode":"system"}` nav (no data) via `POST /display/system`, so
+ * the firmware leaves whatever screen it is on — in particular the modal claim
+ * screen once the box is claimed — and renders the live System screen (stats +
+ * the built-in Wi-Fi pairing QR). Distinct from `showStats()`, which streams a
+ * stats *data* frame the firmware only re-renders when already on System (it
+ * does NOT navigate off the claim screen).
+ */
+export async function showSystem(): Promise<boolean> {
+  try {
+    const res = await displayFetch("/display/system", { method: "POST" });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export async function showMessage(title: string, lines: string[]): Promise<boolean> {
   try {
     const res = await displayFetch("/display/message", {
@@ -84,7 +103,7 @@ export async function showMessage(title: string, lines: string[]): Promise<boole
 }
 
 /**
- * Push a PNG buffer to the PyPortal screen via the display service's
+ * Push a PNG buffer to the status display via the display service's
  * `POST /display/custom` multipart endpoint.
  *
  * `png` is the raw bytes (Buffer or Uint8Array) — already a valid PNG.
@@ -124,7 +143,7 @@ export async function pushCustomImage(
       headers["Authorization"] = `Bearer ${SERVICE_SECRET}`;
     }
     // 5s ceiling so a stalled display service can't pin the orchestrator's
-    // event loop on this multipart upload. The PyPortal write path is
+    // event loop on this multipart upload. The status display write path is
     // serial USB-serial; under normal load a push completes in ~200 ms.
     // 5s is a generous upper bound that still lets the screen-qr
     // single-flight guard reset and try again next tick.
@@ -132,6 +151,68 @@ export async function pushCustomImage(
       method: "POST",
       body: form,
       headers,
+      signal: AbortSignal.timeout(5_000),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Push the CLAIM screen to the status display via the display service's
+ * `POST /display/claim` endpoint (WARP-632 / ADR-017).
+ *
+ * This is the orchestrator → display half of the claim-code render path:
+ * `screen-qr.service.ts` calls this with the freshly-minted code + the setup
+ * URL while the box is unclaimed; the display service renders a dedicated
+ * `claim` mode on the PyPortal (large code + setup URL) rather than going
+ * through the preview-only `/display/custom` image path.
+ *
+ * `code` is the plaintext DRPL-XXXX-XXXX (already grouped for the lid);
+ * `setupUrl` is where the customer points their phone (e.g. https://<ip>/setup).
+ *
+ * WARP-819: the optional `wifi` arg adds the box's Wi-Fi-connect QR matrix +
+ * SSID + PSK so the claim screen can also show "join this box's Wi-Fi" creds
+ * (scan or type, no camera needed). It is OPTIONAL and BACKWARD-COMPATIBLE:
+ * when omitted, the body is exactly the original `{ code, setup_url }` so an
+ * older display service / firmware renders the claim-only layout untouched.
+ * The PSK is plaintext here, but this is a LAN-only, SERVICE_TOKEN_DISPLAY-
+ * gated host call (same posture as the existing claim push), and the same
+ * creds are about to be drawn on the physical panel anyway.
+ *
+ * Returns true on 2xx, false on any non-2xx or thrown error — surface the
+ * failure via the caller's signature/metrics rather than throw, mirroring the
+ * other helpers in this file. 5s ceiling so a stalled display service can't
+ * pin the orchestrator's event loop on this push (same bound as
+ * `pushCustomImage`).
+ */
+export interface ClaimWifi {
+  /** Host-encoded QR bit-matrix (0/1 rows) — the firmware never encodes on-device. */
+  matrix: number[][];
+  ssid: string;
+  /** Plaintext WPA2 passphrase to render as readable text under the QR. */
+  psk: string;
+}
+
+export async function pushClaimCode(
+  code: string,
+  setupUrl: string,
+  wifi?: ClaimWifi,
+): Promise<boolean> {
+  try {
+    const body: Record<string, unknown> = { code, setup_url: setupUrl };
+    // Only attach the wifi_* keys when we actually have a matrix — keeps the
+    // payload byte-for-byte identical to the pre-WARP-819 shape otherwise, so
+    // graceful degradation on the firmware side is "the keys simply aren't there".
+    if (wifi && wifi.matrix) {
+      body.wifi_qr_matrix = wifi.matrix;
+      body.wifi_ssid = wifi.ssid;
+      body.wifi_psk = wifi.psk;
+    }
+    const res = await displayFetch("/display/claim", {
+      method: "POST",
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(5_000),
     });
     return res.ok;

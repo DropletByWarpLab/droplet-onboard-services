@@ -38,9 +38,11 @@ function formatTime(iso: string, allDay: boolean): string {
 interface Props {
   events: CalendarEvent[];
   onSelect?: (ev: CalendarEvent) => void;
+  /** Resolves the source calendar's color for an event row's left accent. */
+  colorOf?: (ev: CalendarEvent) => string | undefined;
 }
 
-export function AgendaView({ events, onSelect }: Props) {
+export function AgendaView({ events, onSelect, colorOf }: Props) {
   const groups = useMemo(() => groupByDay(events), [events]);
 
   if (groups.length === 0) {
@@ -66,6 +68,7 @@ export function AgendaView({ events, onSelect }: Props) {
                 <button
                   type="button"
                   onClick={() => onSelect?.(ev)}
+                  style={colorOf?.(ev) ? { borderLeft: `3px solid ${colorOf(ev)}` } : undefined}
                   className="w-full text-left dp-card p-3 hover:bg-surface-secondary transition flex items-start gap-3"
                 >
                   <div className="w-20 shrink-0 type-subheadline text-label-tertiary tabular-nums">

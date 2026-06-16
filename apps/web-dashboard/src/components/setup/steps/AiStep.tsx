@@ -1,11 +1,34 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertCircle, MessageSquare, Sparkles } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AlertCircle, Loader2, MessageSquare, Sparkles } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import rehypeHighlight from "rehype-highlight";
 import { fetchModels, sendChat } from "@/lib/api";
 import type { ModelInfo } from "@/lib/types";
+import { CodeBlock } from "@/components/CodeBlock";
 import { StepShell } from "@/components/setup/StepShell";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
+
+// Module-level constants so ReactMarkdown receives stable references across
+// re-renders (model-poll ticks, error state toggles). Inline object/array
+// literals create new references on every render and cause full markdown
+// re-parses on long AI responses (WARP-866 finding 2).
+const REMARK_PLUGINS = [remarkGfm];
+const REHYPE_PLUGINS = [rehypeHighlight];
+const MARKDOWN_COMPONENTS = {
+  // WARP-295 parity: keep wide GFM tables from blowing out the answer card
+  // on narrow viewports.
+  table: ({ node, ...props }: any) => (
+    <div className="overflow-x-auto">
+      <table {...props} />
+    </div>
+  ),
+  // Hover copy button on every fenced code block — matches ChatMessage.tsx
+  // so wizard AI responses are visually consistent with in-app chat (WARP-866).
+  pre: ({ node, ...props }: any) => <CodeBlock {...props} />,
+};
 
 /**
  * Wizard step — show the customer their local AI works and what it
@@ -26,8 +49,9 @@ import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
  *   - POST /api/llm/chat with stream:false and that single user
  *     message. Non-streaming for wizard MVP; the main /chat page
  *     handles streaming for ongoing use.
- *   - Render the response inline. "Take me to the dashboard" finishes
- *     setup.
+ *   - Render the response inline (Markdown, in a scrollable region).
+ *     "Continue" advances to the next step (team) — this is NOT the
+ *     terminal step, so it must not claim to finish setup.
  *
  * Privacy callout is in the LearnMoreCard — explicit reassurance that
  * the prompt + conversation never leave the box, per ADR-002's
@@ -37,7 +61,30 @@ import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
  * fresh boot, or the box is in a configuration with cloud-only
  * routing), the picker just shows what's there and the privacy text
  * adjusts. We never block the wizard on AI specifically.
+ *
+ * WARP-849 — first-boot model pull. After a factory reset the
+ * configured model re-pulls on first boot (13 GB — minutes). A customer
+ * reaching this step mid-pull used to hit a dead end: fetchModels()
+ * returned empty, the picker said "No models available yet", and the
+ * once-only load never re-fetched. Now an empty registry renders an
+ * explicit "still downloading" state and the step re-polls fetchModels
+ * on a bounded interval (setInterval with React cleanup — never a
+ * while-true) until a model appears or the step unmounts. Skip stays
+ * available throughout.
  */
+
+/** WARP-849 — how often to re-poll /api/llm/models while the registry
+ *  is empty (first-boot pull in progress). Bounded by React cleanup:
+ *  the interval is cleared on unmount and as soon as a model appears. */
+const MODEL_POLL_INTERVAL_MS = 8_000;
+
+/** WARP-849 — completion budget for the sample probe. The configured
+ *  local model (gpt-oss:20b) is a REASONING model: it spends completion
+ *  tokens on a separate reasoning channel BEFORE any user-visible
+ *  content, and an exhausted budget (finish_reason "length") returns
+ *  EMPTY content — the old 400 false-failed the probe on a healthy box.
+ *  Local inference is cost-free, so size for reasoning + answer. */
+const SAMPLE_PROMPT_MAX_TOKENS = 2_000;
 export function AiStep({
   onComplete,
   onSkip,
@@ -53,6 +100,11 @@ export function AiStep({
   const [response, setResponse] = useState<string>("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // WARP-849 — soft, retryable "warming up" state: the model answered
+  // with reasoning but ran out of budget before any visible content.
+  // Kept separate from `error` so it renders as a neutral note, not
+  // the red failure box.
+  const [notice, setNotice] = useState<string | null>(null);
 
   // Three curated prompts tuned to the home-user persona — short,
   // sensible, demonstrate that the AI knows what it's running on.
@@ -62,7 +114,15 @@ export function AiStep({
     "What kinds of files might I want to back up here?",
   ];
 
+  // Re-entrancy guard: the 8s poll must not stack a second fetch on a
+  // slow one (the gateway can be sluggish exactly when this step shows —
+  // Ollama busy with a first-boot pull). Without it, out-of-order
+  // resolutions could overwrite a discovered model list with a stale
+  // empty one.
+  const loadInFlight = useRef(false);
   const load = useCallback(async () => {
+    if (loadInFlight.current) return;
+    loadInFlight.current = true;
     try {
       const resp = await fetchModels();
       const list = resp.models ?? [];
@@ -73,6 +133,7 @@ export function AiStep({
       // Ollama may still be warming up after a fresh boot. The step
       // stays renderable with an empty picker + a skip option.
     } finally {
+      loadInFlight.current = false;
       setLoading(false);
     }
   }, []);
@@ -80,6 +141,19 @@ export function AiStep({
   useEffect(() => {
     load();
   }, [load]);
+
+  // WARP-849 — while the initial load came back empty (model still
+  // pulling on first boot, or the gateway still waking), re-poll on a
+  // bounded interval. The dependency on `models.length` clears the
+  // interval automatically the moment a model appears; unmount cleanup
+  // stops it when the customer skips ahead.
+  useEffect(() => {
+    if (loading || models.length > 0) return;
+    const timer = setInterval(() => {
+      void load();
+    }, MODEL_POLL_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [loading, models.length, load]);
 
   const localModels = useMemo(
     () => models.filter(isLocalModel),
@@ -110,6 +184,7 @@ export function AiStep({
       return;
     }
     setError(null);
+    setNotice(null);
     setResponse("");
     setSubmitting(true);
     try {
@@ -117,7 +192,8 @@ export function AiStep({
         model: selectedModel,
         messages: [{ role: "user", content: promptToSend }],
         stream: false,
-        max_tokens: 400,
+        // WARP-849: reasoning-sized budget — see SAMPLE_PROMPT_MAX_TOKENS.
+        max_tokens: SAMPLE_PROMPT_MAX_TOKENS,
         // WARP-174: the wizard's sample prompt is a throwaway "does
         // local AI work on this box" check. Without this flag every
         // first-run customer ends up with the wizard's probe at the
@@ -135,6 +211,19 @@ export function AiStep({
       const data = await res.json();
       const content = data?.message?.content;
       if (typeof content !== "string" || !content.trim()) {
+        // WARP-849 — reasoning models (gpt-oss) can exhaust the budget
+        // on the reasoning channel and return EMPTY content while the
+        // message still carries a non-empty `reasoning` trace. That's a
+        // healthy box mid-thought, not a failure: surface a soft
+        // retryable note. The raw reasoning text is NEVER rendered as
+        // the answer.
+        const reasoning = data?.message?.reasoning;
+        if (typeof reasoning === "string" && reasoning.trim()) {
+          setNotice(
+            "The model is still warming up its answer — try once more.",
+          );
+          return;
+        }
         throw new Error(
           "Got an empty response. The model may need to load — try again in a moment.",
         );
@@ -158,11 +247,11 @@ export function AiStep({
   const selectedIsLocal = localSelected ? isLocalModel(localSelected) : true;
 
   return (
-    <StepShell
+    <StepShell current="ai"
       title="Your private AI is ready"
       subtitle="Try it — it runs entirely on your hardware."
       primary={{
-        label: response ? "Take me to the dashboard" : "Ask the AI",
+        label: response ? "Continue" : "Ask the AI",
         loadingLabel: "Thinking…",
         onClick: response ? onComplete : handleAsk,
         isLoading: submitting,
@@ -209,6 +298,30 @@ export function AiStep({
               </optgroup>
             )}
           </select>
+
+          {/* WARP-849 — empty registry = the first-boot pull is still
+              running. Say so explicitly (the bare "No models available
+              yet" read as "the GPT model doesn't link anymore") and
+              keep checking in the background. Neutral note styling —
+              this is expected behavior, not an error. */}
+          {!loading && models.length === 0 && (
+            <div
+              data-testid="model-downloading"
+              role="status"
+              className="mt-2 flex items-start gap-2 type-footnote text-label-secondary bg-surface-secondary rounded-sm px-3 py-2 motion-safe:animate-in motion-safe:fade-in motion-safe:duration-200"
+            >
+              <Loader2
+                size={14}
+                className="mt-0.5 flex-shrink-0 text-label-tertiary motion-safe:animate-spin"
+                aria-hidden="true"
+              />
+              <span>
+                Your AI model is still downloading — this can take a few
+                minutes on first boot. We&rsquo;ll keep checking, or you can
+                skip and come back from the Chat page later.
+              </span>
+            </div>
+          )}
         </div>
 
         <div>
@@ -219,7 +332,7 @@ export function AiStep({
             {SAMPLE_PROMPTS.map((p, i) => (
               <label
                 key={i}
-                className={`flex items-start gap-3 dp-card !py-3 cursor-pointer transition-colors ${
+                className={`flex items-start gap-3 dp-card px-4 !py-3 cursor-pointer transition-colors ${
                   selectedPrompt === i
                     ? "ring-2 ring-accent"
                     : "hover:bg-surface-secondary"
@@ -239,7 +352,7 @@ export function AiStep({
               </label>
             ))}
             <label
-              className={`flex items-start gap-3 dp-card !py-3 cursor-pointer transition-colors ${
+              className={`flex items-start gap-3 dp-card px-4 !py-3 cursor-pointer transition-colors ${
                 selectedPrompt === SAMPLE_PROMPTS.length
                   ? "ring-2 ring-accent"
                   : "hover:bg-surface-secondary"
@@ -280,9 +393,37 @@ export function AiStep({
                 {localSelected?.name ?? selectedModel}
               </span>
             </div>
-            <p className="type-body text-label-primary whitespace-pre-wrap">
-              {response}
-            </p>
+            <div className="chat-markdown type-body text-label-primary max-h-[40vh] overflow-y-auto">
+              {/* Same plugin set as ChatMessage so the wizard answer renders
+                  identically to the in-app chat (GFM tables, code highlight,
+                  per-block copy button). Stable module-level refs avoid
+                  full re-parses on poll ticks. */}
+              <ReactMarkdown
+                remarkPlugins={REMARK_PLUGINS}
+                rehypePlugins={REHYPE_PLUGINS}
+                components={MARKDOWN_COMPONENTS}
+              >
+                {response}
+              </ReactMarkdown>
+            </div>
+          </div>
+        )}
+
+        {/* WARP-849 — soft retryable state (reasoning spent the budget
+            before any visible answer). Neutral note styling, mirroring
+            the StorageStep pattern — deliberately NOT the red error. */}
+        {notice && (
+          <div
+            data-testid="ai-warming-up"
+            role="status"
+            className="flex items-start gap-2 type-footnote text-label-secondary bg-surface-secondary rounded-sm px-3 py-2 motion-safe:animate-in motion-safe:fade-in motion-safe:duration-200"
+          >
+            <AlertCircle
+              size={14}
+              className="mt-0.5 flex-shrink-0 text-label-tertiary"
+              aria-hidden="true"
+            />
+            <span>{notice}</span>
           </div>
         )}
 

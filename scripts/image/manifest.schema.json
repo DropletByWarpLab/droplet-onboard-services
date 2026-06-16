@@ -1,0 +1,91 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/DropletByWarpLab/releases/manifest.schema.json",
+  "title": "Droplet appliance image release manifest",
+  "description": "WARP-663 / ADR-020. The signed catalogue of built appliance images. One manifest.json per releases repo; `droplet-image verify` checks the detached ECDSA-P256 signature over this file AND each listed asset's sha256, fail-closed. The M3.4 OTA agent consumes this same contract.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "images"],
+  "properties": {
+    "schemaVersion": {
+      "description": "Manifest format version. Bumped only on a breaking change to this schema.",
+      "type": "integer",
+      "const": 1
+    },
+    "images": {
+      "description": "Every published appliance image, newest-first by convention (not enforced).",
+      "type": "array",
+      "items": { "$ref": "#/definitions/image" }
+    }
+  },
+  "definitions": {
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "shape",
+        "version",
+        "format",
+        "file",
+        "url",
+        "size",
+        "sha256",
+        "gitSha",
+        "buildDate",
+        "minDiskGiB"
+      ],
+      "properties": {
+        "shape": {
+          "description": "Deployment shape this image provisions. Named by what it IS (ADR-018) — no lifecycle-stage names.",
+          "type": "string",
+          "enum": ["single-box", "multi-box"]
+        },
+        "version": {
+          "description": "Semver of the release (matches the git tag vMAJOR.MINOR.PATCH and root package.json version).",
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+        },
+        "format": {
+          "description": "Artifact format. Phase 1 ships `iso` (autoinstall); Phase 2 adds the preinstalled golden `raw`.",
+          "type": "string",
+          "enum": ["iso", "raw"]
+        },
+        "file": {
+          "description": "Bare artifact filename, e.g. droplet-single-box-0.2.0.iso.",
+          "type": "string",
+          "minLength": 1
+        },
+        "url": {
+          "description": "Where the asset lives. Abstracted so a too-large ISO can move to compression/object-storage without changing the CLI contract.",
+          "type": "string",
+          "pattern": "^https://"
+        },
+        "size": {
+          "description": "Artifact size in bytes.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "description": "Lowercase hex SHA-256 of the artifact bytes. `verify` recomputes and compares, fail-closed.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "gitSha": {
+          "description": "Exact 40-char git commit the image was built from — a box's version is never ambiguous.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "buildDate": {
+          "description": "RFC3339 / ISO-8601 UTC build timestamp.",
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+        },
+        "minDiskGiB": {
+          "description": "Minimum target disk size in GiB the flasher should accept for this image.",
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  }
+}

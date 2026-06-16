@@ -10,8 +10,11 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const here = path.dirname(new URL(import.meta.url).pathname);
+// fileURLToPath, not `new URL(...).pathname` — the latter yields "/C:/..."
+// on Windows, which path.resolve doubles into "C:\C:\...".
+const here = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(here, "..");
 
 function read(rel: string): string {
@@ -20,12 +23,16 @@ function read(rel: string): string {
 
 describe("WARP-298 icon-only button aria-labels", () => {
   it("login show/hide password button has dynamic aria-label", () => {
-    const src = read("app/login/page.tsx");
+    // The aurora re-skin extracted the login form into SignInForm; the
+    // toggle (and its label contract) lives there now.
+    const src = read("components/auth/SignInForm.tsx");
     expect(src).toMatch(/aria-label=\{showPassword \? "Hide password" : "Show password"\}/);
   });
 
   it("setup show/hide password button has dynamic aria-label", () => {
-    const src = read("app/setup/page.tsx");
+    // The setup wizard's account form was extracted into AccountStep;
+    // the toggle (and its label contract) lives there now.
+    const src = read("components/setup/steps/AccountStep.tsx");
     expect(src).toMatch(/aria-label=\{showPassword \? "Hide password" : "Show password"\}/);
   });
 

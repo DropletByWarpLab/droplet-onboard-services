@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import sys
+import uuid
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 
@@ -42,10 +43,13 @@ def _run_fips_boot_self_test() -> None:
 _run_fips_boot_self_test()
 
 
+import hmac
+
 import httpx
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from auth import keystore
 from auth.byok import save_api_key, delete_api_key
@@ -72,6 +76,87 @@ from scheduler import InferenceScheduler, QueueFullError
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# WARP-560: inbound service-to-service authentication
+# ---------------------------------------------------------------------------
+# The gateway had NO inbound auth — every /ai/* route was reachable by anything
+# that could open the socket (chat, session read, BYOK key CRUD). It is a
+# service-to-service component whose sole legitimate caller is the orchestrator,
+# so we require a shared bearer service token (same proven shape as
+# services/switch/main.py's ServiceAuthMiddleware). Empty token = unauthenticated
+# (logged loudly) so dev/CI keeps working; setup.sh provisions a real one.
+SERVICE_TOKEN_AI_GATEWAY = (os.environ.get("SERVICE_TOKEN_AI_GATEWAY") or "").strip()
+if not SERVICE_TOKEN_AI_GATEWAY:
+    logger.warning(
+        "SERVICE_TOKEN_AI_GATEWAY not set — /ai/* endpoints are unauthenticated. "
+        "Set SERVICE_TOKEN_AI_GATEWAY to enable service-to-service auth."
+    )
+
+# Header the orchestrator sets to forward the end-user principal so the gateway
+# can namespace BYOK keys (WARP-561) and scope session ownership (WARP-560).
+PRINCIPAL_HEADER = "X-Droplet-User"
+
+# Paths that bypass the inbound auth gate. /ai/health is the liveness probe
+# wired into the compose healthcheck and ops-console probe; it must answer
+# without a token (mirrors switch's /health exemption).
+_AUTH_EXEMPT_PATHS = frozenset({"/ai/health"})
+
+
+class ServiceAuthMiddleware(BaseHTTPMiddleware):
+    """Reject /ai/* requests without a valid SERVICE_TOKEN_AI_GATEWAY bearer.
+
+    On success it records the forwarded end-user principal on
+    ``request.state.principal`` (None for an identity-less service call) so the
+    route handlers can scope per-user BYOK keys and session ownership.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        # Let CORS preflight through untouched (no Authorization header on it).
+        if request.method == "OPTIONS":
+            return await call_next(request)
+        if request.url.path in _AUTH_EXEMPT_PATHS:
+            request.state.principal = None
+            return await call_next(request)
+        if SERVICE_TOKEN_AI_GATEWAY:
+            auth = request.headers.get("Authorization", "")
+            token = auth.removeprefix("Bearer ").strip()
+            if not hmac.compare_digest(token, SERVICE_TOKEN_AI_GATEWAY):
+                return JSONResponse(
+                    status_code=401,
+                    content={"error": "Invalid or missing service token"},
+                )
+        principal = request.headers.get(PRINCIPAL_HEADER, "").strip() or None
+        request.state.principal = principal
+        return await call_next(request)
+
+
+def _principal(request: Request) -> str | None:
+    """Return the forwarded end-user principal recorded by the auth middleware.
+
+    Falls back to reading the header directly so handlers stay correct even if
+    the middleware is bypassed (e.g. the unauthenticated dev path)."""
+    principal = getattr(request.state, "principal", None)
+    if principal is not None:
+        return principal
+    return request.headers.get(PRINCIPAL_HEADER, "").strip() or None
+
+
+def _provider_error_detail(exc: Exception, context: str) -> str:
+    """GW-08: log the full provider/LiteLLM exception server-side and return a
+    generic, non-leaky message to the client.
+
+    LiteLLM/provider exceptions frequently embed the upstream provider's raw
+    error body, request URL, and model names; echoing ``str(exc)`` to the
+    caller leaks internal endpoints and turns the gateway into a provider-state
+    oracle. We attach a short correlation id so an operator can tie the opaque
+    client message back to the detailed server-side log line.
+    """
+    correlation_id = uuid.uuid4().hex[:12]
+    logger.error("%s [correlation_id=%s]: %s", context, correlation_id, exc)
+    return f"Upstream provider error (ref: {correlation_id})"
+
 
 # Global instances
 provider_router: ProviderRouter | None = None
@@ -128,16 +213,27 @@ if "*" in _cors_origins:
         "Set an explicit origin list."
     )
 
+# Middleware execution order is the REVERSE of add order (Starlette prepends).
+# We want, outermost → innermost: CORS → ServiceAuth → RateLimit → app, so:
+#   - CORS outermost so OPTIONS preflight + CORS headers apply even to 401s,
+#   - ServiceAuth next so unauthenticated traffic is rejected before it can
+#     consume a rate-limit bucket,
+#   - RateLimit innermost (only authenticated requests get metered).
+# Add in reverse of that order.
+
+# --- Rate limiting ---
+app.add_middleware(RateLimitMiddleware)
+
+# --- Inbound service auth (WARP-560) ---
+app.add_middleware(ServiceAuthMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Request-Priority"],
+    allow_headers=["Authorization", "Content-Type", "X-Request-Priority", PRINCIPAL_HEADER],
 )
-
-# --- Rate limiting ---
-app.add_middleware(RateLimitMiddleware)
 
 
 # --- Health ---
@@ -145,28 +241,41 @@ app.add_middleware(RateLimitMiddleware)
 
 @app.get("/ai/health")
 async def health():
-    jetson_reachable = False
+    inference_reachable = False
     if provider_router:
-        jetson_reachable = await provider_router.ollama.is_reachable()
-    return {"status": "ok", "jetson_reachable": jetson_reachable}
+        inference_reachable = await provider_router.ollama.is_reachable()
+    return {"status": "ok", "inference_reachable": inference_reachable}
 
 
 @app.get("/ai/readiness")
 async def readiness():
     """Reflect the underlying appliance health for orchestration purposes.
 
-    Pulls /health from the Jetson appliance (ollama-manager) so the orchestrator
-    can decide whether to accept inference traffic. Distinct from /ai/health,
-    which only reports gateway-side liveness.
+    Pulls /health from ollama-manager (:8002) so the orchestrator can decide
+    whether to accept inference traffic. Distinct from /ai/health, which only
+    reports gateway-side liveness.
+
+    XR-05: /health lives on ollama-manager, not on Ollama (:11434). On the
+    direct chat path (single-box default) no manager is wired, so we report
+    "ok" with appliance=None instead of GETting a non-existent /health and
+    reporting a perpetual "degraded".
     """
     if provider_router is None:
         return {"status": "starting", "appliance": None}
-    provider = provider_router.ollama
+    health_url = provider_router.ollama._limits.health_url
+    if health_url is None:
+        # No ollama-manager configured (direct path). Gateway-side readiness is
+        # governed by /ai/health; nothing to probe here.
+        return {
+            "status": "ok",
+            "appliance": None,
+            "detail": "ollama-manager not configured (direct path); "
+            "set OLLAMA_MANAGER_URL to surface appliance health.",
+        }
     appliance: dict | None = None
     try:
         async with httpx.AsyncClient(timeout=3.0) as c:
-            root = provider.base_url.removesuffix("/proxy")
-            resp = await c.get(f"{root}/health")
+            resp = await c.get(health_url)
             if resp.status_code == 200:
                 appliance = resp.json()
     except Exception as e:
@@ -180,7 +289,13 @@ async def readiness():
 
 @app.get("/ai/models", response_model=ModelsResponse)
 async def list_models():
-    """Return available models from all providers."""
+    """Return available models from all providers.
+
+    Model discovery is device-wide (the cached list is shared), so this uses
+    the shared/device key namespace rather than a per-user one — a user's own
+    BYOK key only changes which CLOUD models their CHAT turns can reach, gated
+    separately in /ai/chat (WARP-561) and the off-LAN allowlist (WARP-468).
+    """
     if not model_registry or not provider_router:
         raise HTTPException(status_code=503, detail="Service not ready")
     models = await model_registry.get_models(provider_router)
@@ -191,7 +306,11 @@ async def list_models():
 
 
 @app.post("/ai/chat")
-async def chat(request: ChatRequest, x_request_priority: int = Header(default=0, alias="X-Request-Priority")):
+async def chat(
+    request: ChatRequest,
+    http_request: Request,
+    x_request_priority: int = Header(default=0, alias="X-Request-Priority"),
+):
     """Unified chat endpoint — routes to the selected provider.
 
     Priority scheduling (via X-Request-Priority header or query param):
@@ -201,6 +320,9 @@ async def chat(request: ChatRequest, x_request_priority: int = Header(default=0,
     """
     if not provider_router or not inference_scheduler:
         raise HTTPException(status_code=503, detail="Service not ready")
+
+    # WARP-561: the requesting user's BYOK keys (not a device-global key).
+    principal = _principal(http_request)
 
     # Enqueue with priority
     try:
@@ -213,20 +335,59 @@ async def chat(request: ChatRequest, x_request_priority: int = Header(default=0,
             headers={"Retry-After": str(e.retry_after)},
         )
 
-    try:
-        result = await provider_router.chat(request)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.error("Chat error: %s", e)
-        raise HTTPException(status_code=502, detail=f"Provider error: {str(e)}")
-    finally:
-        await inference_scheduler.release()
+    # The scheduler slot is now held. It MUST stay held until the work is
+    # actually done — and for a streaming response the work isn't done when
+    # provider_router.chat() returns (it hands back an async generator that
+    # hasn't touched the model yet). Releasing here would let the scheduler
+    # admit the next request while N streams are still flowing against the
+    # model, defeating max_concurrent for streaming (GW-06). So:
+    #   - non-streaming: release as soon as chat() returns (work is complete).
+    #   - streaming: hand the slot's release to a wrapper that fires it when
+    #     the generator is exhausted OR closed (client disconnect / error /
+    #     GC). Exactly one release per acquired slot, in both paths.
+    released = False
 
-    # Streaming response
+    async def _release_once() -> None:
+        nonlocal released
+        if not released:
+            released = True
+            await inference_scheduler.release()
+
+    try:
+        result = await provider_router.chat(request, user_id=principal)
+    except ValueError as e:
+        await _release_once()
+        raise HTTPException(status_code=400, detail=str(e))
+    except BaseException as e:
+        # GW-06: release the held slot on ANY exit from the awaited chat() —
+        # including asyncio.CancelledError (a BaseException, raised when the
+        # client disconnects mid-await), which a bare `except Exception` would
+        # miss, leaking the slot and eventually deadlocking the scheduler at
+        # max_concurrent=1. _release_once is idempotent. There is deliberately
+        # NO `finally` here: on the streaming SUCCESS path the slot must stay
+        # held until the stream drains (released by _slot_held_stream below),
+        # so a finally would free it too early.
+        await _release_once()
+        if isinstance(e, Exception):
+            # GW-08: don't echo upstream/LiteLLM error text to the client.
+            raise HTTPException(
+                status_code=502, detail=_provider_error_detail(e, "Chat error")
+            )
+        raise  # re-raise CancelledError / KeyboardInterrupt after releasing
+
+    # Streaming response — hold the slot for the lifetime of the stream.
     if request.stream:
+        async def _slot_held_stream():
+            try:
+                async for chunk in result:
+                    yield chunk
+            finally:
+                # Fires when the generator is exhausted, or when Starlette
+                # calls aclose() on client disconnect / mid-stream error.
+                await _release_once()
+
         return StreamingResponse(
-            result,
+            _slot_held_stream(),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -235,7 +396,8 @@ async def chat(request: ChatRequest, x_request_priority: int = Header(default=0,
             },
         )
 
-    # Non-streaming response
+    # Non-streaming response — work is complete, release the slot now.
+    await _release_once()
     return result
 
 
@@ -278,57 +440,84 @@ def _session_to_detail(session) -> SessionDetailOut:
     )
 
 
+def _assert_session_owner(session, principal: str | None) -> None:
+    """WARP-560: refuse cross-user access to a session.
+
+    A session created by an identified principal can only be read/mutated by
+    that same principal. Legacy/identity-less sessions (``owner is None``) stay
+    open so existing data and the unauthenticated dev path keep working; once a
+    real principal owns a session, everyone else gets 404 (not 403 — we don't
+    confirm the session exists to a non-owner).
+    """
+    owner = getattr(session, "owner", None)
+    if owner is not None and owner != principal:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+
 @app.post("/ai/sessions", response_model=SessionOut, status_code=201)
-async def create_session(body: SessionCreateRequest):
-    """Create a new chat session."""
+async def create_session(body: SessionCreateRequest, request: Request):
+    """Create a new chat session owned by the calling principal."""
     if not session_store:
         raise HTTPException(status_code=503, detail="Service not ready")
     session = await session_store.create(
-        model=body.model, title=body.title, system_prompt=body.system_prompt
+        model=body.model,
+        title=body.title,
+        system_prompt=body.system_prompt,
+        owner=_principal(request),
     )
     return _session_to_out(session)
 
 
 @app.get("/ai/sessions", response_model=SessionListResponse)
 async def list_sessions(
+    request: Request,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ):
-    """List chat sessions, most recent first."""
+    """List chat sessions for the calling principal, most recent first."""
     if not session_store:
         raise HTTPException(status_code=503, detail="Service not ready")
-    sessions = await session_store.list_sessions(limit=limit, offset=offset)
+    sessions = await session_store.list_sessions(limit=limit, offset=offset, owner=_principal(request))
     return SessionListResponse(sessions=[_session_to_out(s) for s in sessions])
 
 
 @app.get("/ai/sessions/{session_id}", response_model=SessionDetailOut)
-async def get_session(session_id: str):
-    """Get a session with all its messages."""
+async def get_session(session_id: str, request: Request):
+    """Get a session with all its messages (owner-scoped)."""
     if not session_store:
         raise HTTPException(status_code=503, detail="Service not ready")
     session = await session_store.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    _assert_session_owner(session, _principal(request))
     return _session_to_detail(session)
 
 
 @app.patch("/ai/sessions/{session_id}", response_model=SessionOut)
-async def update_session(session_id: str, body: SessionUpdateRequest):
-    """Update session title."""
+async def update_session(session_id: str, body: SessionUpdateRequest, request: Request):
+    """Update session title (owner-scoped)."""
     if not session_store:
         raise HTTPException(status_code=503, detail="Service not ready")
-    updated = await session_store.update_title(session_id, body.title)
-    if not updated:
-        raise HTTPException(status_code=404, detail="Session not found")
     session = await session_store.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _assert_session_owner(session, _principal(request))
+    await session_store.update_title(session_id, body.title)
+    session = await session_store.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
     return _session_to_out(session)
 
 
 @app.delete("/ai/sessions/{session_id}")
-async def delete_session(session_id: str):
-    """Delete a session and its messages."""
+async def delete_session(session_id: str, request: Request):
+    """Delete a session and its messages (owner-scoped)."""
     if not session_store:
         raise HTTPException(status_code=503, detail="Service not ready")
+    session = await session_store.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _assert_session_owner(session, _principal(request))
     deleted = await session_store.delete(session_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -336,7 +525,7 @@ async def delete_session(session_id: str):
 
 
 @app.post("/ai/sessions/{session_id}/chat")
-async def session_chat(session_id: str, body: SessionChatRequest):
+async def session_chat(session_id: str, body: SessionChatRequest, request: Request):
     """Chat within a session — messages are automatically persisted.
 
     The full conversation history is sent to the provider so the model has context.
@@ -345,9 +534,11 @@ async def session_chat(session_id: str, body: SessionChatRequest):
     if not session_store or not provider_router:
         raise HTTPException(status_code=503, detail="Service not ready")
 
+    principal = _principal(request)
     session = await session_store.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    _assert_session_owner(session, principal)
 
     # Save user message
     await session_store.add_message(session_id, "user", body.message)
@@ -370,33 +561,77 @@ async def session_chat(session_id: str, body: SessionChatRequest):
     )
 
     try:
-        result = await provider_router.chat(chat_request)
+        result = await provider_router.chat(chat_request, user_id=principal)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error("Session chat error: %s", e)
-        raise HTTPException(status_code=502, detail=f"Provider error: {str(e)}")
+        # GW-08: generic message + correlation id; full error logged server-side.
+        raise HTTPException(
+            status_code=502, detail=_provider_error_detail(e, "Session chat error")
+        )
 
     if body.stream:
-        # For streaming, we collect tokens to save the full response afterward
+        # For streaming, we collect tokens to save the full response afterward.
+        #
+        # GW-07: the assistant turn is persisted in a `finally`, not only after
+        # the generator fully drains. A client disconnect (browser close, nginx
+        # timeout) closes the generator with GeneratorExit, and an upstream
+        # error raises mid-stream — in both cases the previous code never
+        # reached the save line, so the user turn was stored with NO assistant
+        # reply (silent history loss) and the partial text the user already saw
+        # was lost. We now save whatever was collected exactly once, whether the
+        # stream finished normally or was cut short.
         async def stream_and_save():
-            collected = []
-            async for chunk in result:
-                yield chunk
-                # Extract content from SSE data for persistence
-                if chunk.startswith("data: ") and chunk.strip() != "data: [DONE]":
-                    try:
-                        import json
-                        parsed = json.loads(chunk[6:].strip())
-                        delta = parsed.get("choices", [{}])[0].get("delta", {}).get("content")
-                        if delta:
-                            collected.append(delta)
-                    except (json.JSONDecodeError, IndexError, KeyError):
-                        pass
-            # Save the full assistant response
-            full_response = "".join(collected)
-            if full_response:
-                await session_store.add_message(session_id, "assistant", full_response)
+            collected: list[str] = []
+            completed = False
+            saved = False
+
+            async def _persist() -> None:
+                nonlocal saved
+                if saved:
+                    return
+                saved = True
+                full_response = "".join(collected)
+                if not full_response:
+                    return
+                if not completed:
+                    logger.warning(
+                        "session %s: stream ended early (client disconnect or "
+                        "upstream error) — persisting partial assistant reply "
+                        "(%d chars)",
+                        session_id,
+                        len(full_response),
+                    )
+                try:
+                    await session_store.add_message(
+                        session_id, "assistant", full_response
+                    )
+                except Exception:
+                    # Never let a cleanup-time store failure mask the original
+                    # disconnect/error; just log it.
+                    logger.exception(
+                        "session %s: failed to persist assistant reply", session_id
+                    )
+
+            try:
+                async for chunk in result:
+                    yield chunk
+                    # Extract content from SSE data for persistence
+                    if chunk.startswith("data: ") and chunk.strip() != "data: [DONE]":
+                        try:
+                            import json
+                            parsed = json.loads(chunk[6:].strip())
+                            delta = parsed.get("choices", [{}])[0].get("delta", {}).get("content")
+                            if delta:
+                                collected.append(delta)
+                        except (json.JSONDecodeError, IndexError, KeyError):
+                            pass
+                completed = True
+            finally:
+                # Runs on normal completion, on client disconnect (GeneratorExit),
+                # and on a mid-stream upstream error — so the assistant turn is
+                # never silently dropped.
+                await _persist()
 
         return StreamingResponse(
             stream_and_save(),
@@ -422,10 +657,10 @@ async def session_chat(session_id: str, body: SessionChatRequest):
 
 
 @app.post("/ai/keys/{provider}")
-async def store_key(provider: str, body: ApiKeyRequest):
-    """Store an API key for a cloud provider."""
+async def store_key(provider: str, body: ApiKeyRequest, request: Request):
+    """Store an API key for a cloud provider in the caller's namespace."""
     try:
-        await save_api_key(provider, body.api_key)
+        await save_api_key(provider, body.api_key, user_id=_principal(request))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -437,16 +672,16 @@ async def store_key(provider: str, body: ApiKeyRequest):
 
 
 @app.get("/ai/keys", response_model=KeyStatusResponse)
-async def list_keys():
+async def list_keys(request: Request):
     """List which providers have stored API keys (no key values returned)."""
-    providers = await keystore.list_providers_with_keys()
+    providers = await keystore.list_providers_with_keys(user_id=_principal(request))
     return KeyStatusResponse(providers=providers)
 
 
 @app.delete("/ai/keys/{provider}")
-async def remove_key(provider: str):
-    """Remove a stored API key."""
-    deleted = await delete_api_key(provider)
+async def remove_key(provider: str, request: Request):
+    """Remove a stored API key from the caller's namespace."""
+    deleted = await delete_api_key(provider, user_id=_principal(request))
     if not deleted:
         raise HTTPException(status_code=404, detail=f"No key stored for {provider}")
 

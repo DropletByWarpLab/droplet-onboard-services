@@ -33,6 +33,10 @@ const DOMAINS: ErrorDomain[] = [
   "push",
   "knowledge",
   "media",
+  "network",
+  "vpn",
+  "camera",
+  "device",
   "generic",
 ];
 
@@ -85,6 +89,35 @@ describe("translateError — auth domain", () => {
     const result = translateError({ message: "OCS 401" }, "auth");
     expect(result).not.toContain("OCS");
     expect(result).not.toContain("401");
+  });
+
+  // The two-factor (TOTP) codes live in CODES.auth but had no coverage; the
+  // generic auth fallback talks about username/password, which is wrong for
+  // a 2FA flow, so these must map to their own dedicated strings.
+  it("maps the two-factor enrollment codes to 2FA-specific copy", () => {
+    const notEnrolled = translateError({ code: "TOTP_NOT_ENROLLED" }, "auth");
+    const alreadyEnabled = translateError({ code: "TOTP_ALREADY_ENABLED" }, "auth");
+    expect(notEnrolled.toLowerCase()).toContain("two-factor");
+    expect(notEnrolled.toLowerCase()).not.toMatch(/username|password/);
+    expect(alreadyEnabled.toLowerCase()).toContain("two-factor");
+    expect(alreadyEnabled.toLowerCase()).not.toMatch(/username|password/);
+  });
+});
+
+describe("translateError — vpn domain", () => {
+  // Parity gap fix (WARP-646 review): inferCodeFromMessage can infer TIMEOUT
+  // for a VPN op (e.g. addWireguardDevice hitting a network timeout), but the
+  // vpn domain previously had no TIMEOUT entry, so it silently fell through to
+  // the domain fallback. Assert TIMEOUT now resolves to its own string.
+  it("maps a TIMEOUT code (and an inferred timeout message) to the timeout string", () => {
+    const fallback = translateError({ code: "TOTALLY_UNKNOWN_CODE" }, "vpn");
+    const byCode = translateError({ code: "TIMEOUT" }, "vpn");
+    const byMessage = translateError({ message: "connection timed out" }, "vpn");
+    expect(byCode).not.toBe(fallback);
+    expect(byCode.toLowerCase()).toContain("too long");
+    // The message-inferred path lands on the same dedicated TIMEOUT copy,
+    // not the generic vpn fallback.
+    expect(byMessage).toBe(byCode);
   });
 });
 
@@ -186,5 +219,58 @@ describe("translateError — invite domain (parity with /invite/[token])", () =>
     expect(translateError({ code: "USED" }, "invite").toLowerCase()).toMatch(/used|already/);
     expect(translateError({ code: "EXPIRED" }, "invite").toLowerCase()).toMatch(/expired|fresh/);
     expect(translateError({ code: "INVALID_PASSWORD" }, "invite").toLowerCase()).toMatch(/password/);
+  });
+});
+
+// WARP-646 — domains added so the ~46 raw-`err.message` toasts across the
+// dashboard (files, network, remote-access, device pairing, cameras, …)
+// route through the translator instead of leaking orchestrator strings.
+describe("translateError — network / vpn / camera / device domains (WARP-646)", () => {
+  it("returns a friendly fallback for every new domain and never leaks the raw message", () => {
+    const raw = "ECONNREFUSED 127.0.0.1:3000";
+    for (const domain of ["network", "vpn", "camera", "device"] as ErrorDomain[]) {
+      const result = translateError({ message: raw }, domain);
+      expect(result.length, `domain=${domain}`).toBeGreaterThan(0);
+      expect(result, `domain=${domain}`).not.toContain("ECONNREFUSED");
+      expect(result, `domain=${domain}`).not.toContain("3000");
+    }
+  });
+
+  it("maps a NETWORK substring to a connection-aware string per domain", () => {
+    for (const domain of ["network", "vpn", "camera", "device"] as ErrorDomain[]) {
+      const result = translateError({ message: "Failed to fetch" }, domain);
+      expect(result.toLowerCase(), `domain=${domain}`).toMatch(
+        /connection|reach|powered|connected|moment/,
+      );
+    }
+  });
+
+  it("camera AUTH_REQUIRED mentions credentials", () => {
+    const result = translateError({ code: "AUTH_REQUIRED" }, "camera");
+    expect(result.toLowerCase()).toMatch(/username|password|credential/);
+  });
+
+  // network was the odd domain out: inferCodeFromMessage returns "TIMEOUT"
+  // for timeout-like messages, but the network CODES table only had
+  // NETWORK / NOT_FOUND, so a network-op timeout silently fell through to
+  // the domain fallback. The TIMEOUT entry restores parity with
+  // device / chat / generic.
+  it("maps a network-domain timeout message to the TIMEOUT copy, not the fallback", () => {
+    const result = translateError({ message: "request timed out" }, "network");
+    const fallback = translateError({ code: "TOTALLY_UNKNOWN_CODE" }, "network");
+    expect(result.toLowerCase()).toMatch(/took too long/);
+    expect(result).not.toBe(fallback);
+  });
+});
+
+describe("translateError — auth domain two-factor codes (WARP-646)", () => {
+  it("maps TOTP_INVALID to a code-mismatch string, not a username/password one", () => {
+    const result = translateError({ code: "TOTP_INVALID" }, "auth");
+    expect(result.toLowerCase()).toMatch(/code|authenticator/);
+  });
+
+  it("maps RECOVERY_INVALID to a recovery-code string", () => {
+    const result = translateError({ code: "RECOVERY_INVALID" }, "auth");
+    expect(result.toLowerCase()).toMatch(/recovery|code/);
   });
 });

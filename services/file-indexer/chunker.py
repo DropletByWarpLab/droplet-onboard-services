@@ -1,45 +1,58 @@
-"""Sentence-aware tokenizer-driven chunker (ADR-003 Phase 1 / WARP-435).
+"""Span-aware, sentence-aware chunker (WARP-287 anchors + WARP-435 chunking).
 
-Replaces the legacy fixed-window word-split chunker with
-``semantic-text-splitter`` driven by the embedder's actual HuggingFace
-tokenizer. Chunks now respect Unicode sentence + word boundaries and
-honour the embedder's true token budget (capacity in real tokens, not
-the 0.75-words/token approximation the old splitter used).
+Two designs converge here:
 
-Why this change (ADR-003 §"Phase 1 — Ingest enrichment"):
+* **WARP-287** introduced span-scoped chunking: extractors emit `Span`s
+  (text + positional anchor + section path), and the chunker chunks
+  *within* each span and *never across* — crossing a span boundary would
+  make the anchor ambiguous. The public entry point is
+  ``chunk_spans(spans) -> list[Chunk]`` where each ``Chunk`` carries
+  ``text``, ``anchor`` and ``section_path``.
+
+* **WARP-435** replaced the legacy fixed-window word-split splitter with
+  ``semantic-text-splitter`` driven by the embedder's HuggingFace
+  tokenizer. Chunks now respect Unicode sentence + word boundaries and
+  honour the embedder's true token budget (capacity in real tokens, not
+  the 0.75-words/token approximation the old splitter used).
+
+The unified design: ``chunk_spans`` runs the sentence-aware splitter
+(``chunk_text``) on *each span's text* and emits one ``Chunk`` per
+resulting string, inheriting the span's anchor and section path. The
+word-window loop is gone from the chunking path — it survives only as
+``_fallback_word_split`` for the offline-Hub degradation case.
+
+Why sentence-awareness (WARP-435 §"Phase 1 — Ingest enrichment"):
 
 * The old splitter cut mid-sentence on word boundaries with a hardcoded
   ``0.75 * words ≈ tokens`` heuristic. That over-counted on agglutinative
   / punctuation-dense passages and under-counted on short-word English
-  prose, producing chunks that were anywhere from 60% to 110% of the
-  intended ``CHUNK_SIZE_TOKENS`` budget.
+  prose, producing chunks anywhere from 60% to 110% of the intended
+  ``CHUNK_SIZE_TOKENS`` budget.
 * ``semantic-text-splitter`` (Rust-backed, ~8 MB wheel) walks the text
-  with Unicode-aware sentence segmentation, then with word boundaries,
-  then with character boundaries — only resorting to mid-sentence cuts
-  when a single sentence overruns ``capacity``. That keeps semantically-
-  coherent passages whole, which the embedder cares about more than
-  exact token alignment.
+  with Unicode-aware sentence segmentation, then word boundaries, then
+  character boundaries — only resorting to mid-sentence cuts when a
+  single sentence overruns ``capacity``. That keeps semantically-coherent
+  passages whole, which the embedder cares about more than exact token
+  alignment.
 * Capacity is the embedder tokenizer's real token count via
   ``TextSplitter.from_huggingface_tokenizer(tokenizer, capacity, overlap)``,
-  so a chunk that fits at index time is guaranteed to fit at query time —
-  no more "ai-gateway returned 512-token-truncated embeddings" warnings
-  from the gRPC side.
+  so a chunk that fits at index time is guaranteed to fit at query time.
 
-Public signature ``chunk_text(text: str) -> list[str]`` is preserved so
-``watcher.py``, ``brain_ingest.py``, and ``transcription_worker.py`` keep
-working without per-caller changes. The hierarchical-prefix step (1.7)
-prepends the document / section path to each chunk *outside* this module,
-in ``db.upsert_chunk``'s caller, so this file stays purely about
-splitting.
+The contextual-header step (``format_chunk_with_header``) prepends the
+document / section path to each chunk *outside* the splitter, applied by
+``brain_ingest``/``watcher``/``transcription_worker`` just before the
+embedder call, so this module stays purely about splitting.
 """
-
 from __future__ import annotations
 
 import logging
 import threading
+from dataclasses import dataclass, field
 from typing import Optional
 
+from anchor_schema import Anchor
 from config import CHUNK_OVERLAP_RATIO, CHUNK_SIZE_TOKENS, EMBEDDING_MODEL
+from extractors.spans import Span
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +79,7 @@ def _build_splitter(capacity: int, overlap: int):
     """
     # Local imports keep module load cheap for callers that don't chunk
     # (e.g. the brain-ingest worker imports chunker.py at startup but
-    # only invokes chunk_text when an item actually lands).
+    # only invokes chunking when an item actually lands).
     from semantic_text_splitter import TextSplitter  # noqa: PLC0415
     from tokenizers import Tokenizer  # noqa: PLC0415
 
@@ -96,6 +109,13 @@ def _get_splitter(capacity: int, overlap: int):
         return _splitter
 
 
+@dataclass(frozen=True)
+class Chunk:
+    text: str
+    anchor: Anchor  # type: ignore[valid-type]  # discriminated union, see anchor_schema
+    section_path: list[str] = field(default_factory=list)  # WARP-435 breadcrumb
+
+
 def chunk_text(
     text: str,
     chunk_size: int = CHUNK_SIZE_TOKENS,
@@ -115,6 +135,9 @@ def chunk_text(
         whitespace-split chunker so indexing degrades gracefully rather
         than failing the row. The fallback emits a one-shot warning so
         operators see the degradation.
+
+    Used internally by ``chunk_spans`` (one call per span). Still public
+    for direct callers / tests that exercise the sentence-aware contract.
     """
     if not text or not text.strip():
         return []
@@ -137,6 +160,34 @@ def chunk_text(
     return [c.strip() for c in chunks if c and c.strip()]
 
 
+def chunk_spans(
+    spans: list[Span],
+    chunk_size: int = CHUNK_SIZE_TOKENS,
+    overlap_ratio: float = CHUNK_OVERLAP_RATIO,
+) -> list[Chunk]:
+    """Chunk each span independently; chunks inherit their span's anchor.
+
+    For each span, the sentence-aware splitter (``chunk_text``) runs over
+    ``span.text``; every resulting string becomes a ``Chunk`` carrying the
+    span's ``anchor`` and ``section_path``. A chunk never spans two source
+    spans — that would make the anchor ambiguous.
+    """
+    if not spans:
+        return []
+
+    out: list[Chunk] = []
+    for span in spans:
+        for chunk_str in chunk_text(span.text, chunk_size, overlap_ratio):
+            out.append(
+                Chunk(
+                    text=chunk_str,
+                    anchor=span.anchor,
+                    section_path=list(span.section_path),
+                )
+            )
+    return out
+
+
 def chunk_text_with_offsets(
     text: str,
     chunk_size: int = CHUNK_SIZE_TOKENS,
@@ -144,11 +195,13 @@ def chunk_text_with_offsets(
 ) -> list[tuple[int, str]]:
     """Sentence-aware chunker that also returns each chunk's start offset.
 
-    Returns ``(start_char_offset, chunk_text)`` tuples. The offset is
-    the byte index into the original ``text`` where the chunk begins —
-    needed by the WARP-435 contextual-header plumbing to look up the
-    enclosing section path from the extractor's ``section_paths``
-    metadata.
+    Returns ``(start_char_offset, chunk_text)`` tuples. The offset is the
+    byte index into the original ``text`` where the chunk begins.
+
+    Retained from WARP-435 for any caller that still works in global-offset
+    terms. The span-scoped ingest path (``chunk_spans``) no longer needs
+    this — section_path now rides on the span — but the function is kept
+    (it's exercised by ``test_chunker``) and is harmless.
 
     Uses ``TextSplitter.chunk_indices`` (returns ``(offset, chunk)``
     pairs) when the splitter is available; otherwise falls back to the
@@ -189,12 +242,16 @@ def chunk_text_with_offsets(
 def section_path_for_offset(
     offset: int, section_paths: list[tuple[int, list[str]]] | None
 ) -> list[str]:
-    """Look up the section path covering ``offset`` via binary search.
+    """Look up the section path covering ``offset`` via linear scan.
 
     ``section_paths`` is the ``(char_offset, path)`` tuple list emitted
     by the extractors. Returns the path of the most recent entry whose
     offset is <= the chunk's offset. Empty list when no entry applies
     (caller falls back to ``[filename]``).
+
+    Retained from WARP-435. The span-scoped ingest path no longer calls
+    this (section_path is carried per-span on the Chunk), but it stays for
+    the offset-based helpers above and is exercised by ``test_chunker``.
     """
     if not section_paths:
         return []
@@ -261,7 +318,7 @@ def format_chunk_with_header(
 ) -> str:
     """Prepend the WARP-435 contextual header to a chunk.
 
-    Header format (ADR-003 Phase 1):
+    Header format (WARP-435):
         Document: {filename} / Section: {a > b > c}
 
         {chunk_text}

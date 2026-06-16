@@ -5,11 +5,12 @@ import type { ToolContext } from "../../../src/types.js";
 function ctxWithPost(post: ReturnType<typeof vi.fn>): ToolContext {
   return {
     http: {
-      routing: { get: vi.fn(), post, patch: vi.fn(), delete: vi.fn() },
+      routing: {} as ToolContext["http"]["routing"],
       cameras: {} as ToolContext["http"]["cameras"],
       switchSvc: {} as ToolContext["http"]["switchSvc"],
       fileIndexer: {} as ToolContext["http"]["fileIndexer"],
       nextcloud: {} as ToolContext["http"]["nextcloud"],
+      orchestrator: { get: vi.fn(), post, patch: vi.fn(), delete: vi.fn() },
     },
     prisma: {} as ToolContext["prisma"],
     matter: {} as ToolContext["matter"],
@@ -29,13 +30,20 @@ describe("set_wifi_channel", () => {
     if (!r.ok) expect(r.error.code).toBe("INVALID_ARGS");
   });
 
-  it("returns confirmation_required on 202", async () => {
-    const post = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ reason: "needs confirmation" }), { status: 202 }),
-    );
+  it("returns confirmation_required without confirmed: true — no HTTP call", async () => {
+    const post = vi.fn();
     const r = await setWifiChannel.handler({ channel: "6" }, ctxWithPost(post));
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.status).toBe("confirmation_required");
-    expect(post).toHaveBeenCalledWith("/wifi/channel", { channel: "6" });
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it("posts channel to the orchestrator wifi route when confirmed", async () => {
+    const post = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    );
+    const r = await setWifiChannel.handler({ channel: "6", confirmed: true }, ctxWithPost(post));
+    expect(post).toHaveBeenCalledWith("/api/network/wifi/channel", { channel: "6" });
+    expect(r.ok).toBe(true);
   });
 });

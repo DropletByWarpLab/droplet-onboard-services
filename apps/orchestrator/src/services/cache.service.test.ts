@@ -14,13 +14,15 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   __setRedisForTesting,
+  cacheIncr,
+  cacheSetNx,
   invalidatePrefix,
   withSwrCache,
 } from "./cache.service.js";
 
 type Entry = { value: string; expiresAt: number };
 
-function makeFakeRedis(opts: { errorOn?: "get" | "set" | "scan" } = {}) {
+function makeFakeRedis(opts: { errorOn?: "get" | "set" | "scan" | "eval" } = {}) {
   const store = new Map<string, Entry>();
   const api = {
     store,
@@ -40,8 +42,17 @@ function makeFakeRedis(opts: { errorOn?: "get" | "set" | "scan" } = {}) {
         v: string,
         _mode?: string,
         ttl?: number,
+        nx?: string,
       ) => {
         if (opts.errorOn === "set") throw new Error("boom-set");
+        // Honor `SET … NX`: when the key already exists, redis replies null
+        // and does not overwrite. This is what makes cacheSetNx atomic.
+        if (nx === "NX") {
+          const existing = store.get(k);
+          const live =
+            existing && (!existing.expiresAt || Date.now() <= existing.expiresAt);
+          if (live) return null;
+        }
         store.set(k, {
           value: v,
           expiresAt: ttl ? Date.now() + ttl * 1000 : 0,
@@ -49,6 +60,35 @@ function makeFakeRedis(opts: { errorOn?: "get" | "set" | "scan" } = {}) {
         return "OK";
       },
     ),
+    incr: vi.fn(async (k: string) => {
+      const e = store.get(k);
+      const live = e && (!e.expiresAt || Date.now() <= e.expiresAt);
+      const next = (live ? Number(e!.value) : 0) + 1;
+      // INCR resets the TTL-less counter; EXPIRE is set separately (or via the
+      // Lua eval path below), matching real Redis where INCR never touches TTL.
+      store.set(k, { value: String(next), expiresAt: live ? e!.expiresAt : 0 });
+      return next;
+    }),
+    expire: vi.fn(async (k: string, ttl: number, mode?: string) => {
+      const e = store.get(k);
+      if (!e) return 0;
+      // EXPIRE … NX only sets a TTL when the key currently has none.
+      if (mode === "NX" && e.expiresAt) return 0;
+      e.expiresAt = Date.now() + ttl * 1000;
+      return 1;
+    }),
+    // Fake EVAL just enough to run the cacheIncr Lua script: INCR the key, and
+    // set the TTL only when the counter was freshly created (INCR returned 1).
+    eval: vi.fn(async (_script: string, _numKeys: number, key: string, ttlArg: string) => {
+      if (opts.errorOn === "eval") throw new Error("boom-eval");
+      const e = store.get(key);
+      const live = e && (!e.expiresAt || Date.now() <= e.expiresAt);
+      const next = (live ? Number(e!.value) : 0) + 1;
+      const expiresAt =
+        next === 1 ? Date.now() + Number(ttlArg) * 1000 : live ? e!.expiresAt : 0;
+      store.set(key, { value: String(next), expiresAt });
+      return next;
+    }),
     del: vi.fn(async (...keys: string[]) => {
       let n = 0;
       for (const k of keys) if (store.delete(k)) n++;
@@ -163,6 +203,105 @@ describe("cache.service (WARP-90)", () => {
       const value2 = await withSwrCache("k", 5, producer);
       expect(value2).toEqual({ ok: true });
       expect(producer).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe("cacheSetNx (ORCH-03 atomic claim)", () => {
+    it("grants the claim once and refuses every subsequent claim on the same key", async () => {
+      process.env.REDIS_URL = "redis://fake";
+      const fake = makeFakeRedis();
+      __setRedisForTesting(fake as any);
+
+      const first = await cacheSetNx("jwt:rotate:tok", true, 30);
+      const second = await cacheSetNx("jwt:rotate:tok", true, 30);
+      const third = await cacheSetNx("jwt:rotate:tok", true, 30);
+
+      expect(first).toBe(true);
+      expect(second).toBe(false);
+      expect(third).toBe(false);
+      // Issued as a single SET … EX … NX round-trip (atomic), not GET+SET.
+      expect(fake.set).toHaveBeenCalledWith(
+        "jwt:rotate:tok",
+        JSON.stringify(true),
+        "EX",
+        30,
+        "NX",
+      );
+    });
+
+    it("lets exactly ONE of many concurrent claims win the same token (TOCTOU proof)", async () => {
+      process.env.REDIS_URL = "redis://fake";
+      const fake = makeFakeRedis();
+      __setRedisForTesting(fake as any);
+
+      // Fire 12 claims for the same key concurrently. With a non-atomic
+      // GET-then-SET, several would observe "absent" and all win; the atomic
+      // NX write guarantees a single winner — the property ORCH-03 requires.
+      const results = await Promise.all(
+        Array.from({ length: 12 }, () =>
+          cacheSetNx("jwt:rotate:concurrent", true, 30),
+        ),
+      );
+      expect(results.filter((r) => r === true)).toHaveLength(1);
+      expect(results.filter((r) => r === false)).toHaveLength(11);
+    });
+
+    it("returns false (fail-closed) on a Redis SET error", async () => {
+      process.env.REDIS_URL = "redis://fake";
+      const fake = makeFakeRedis({ errorOn: "set" });
+      __setRedisForTesting(fake as any);
+
+      const won = await cacheSetNx("jwt:rotate:err", true, 30);
+      expect(won).toBe(false);
+    });
+  });
+
+  describe("cacheIncr (fixed-window rate-limit counter)", () => {
+    it("increments and returns the running count", async () => {
+      process.env.REDIS_URL = "redis://fake";
+      const fake = makeFakeRedis();
+      __setRedisForTesting(fake as any);
+
+      expect(await cacheIncr("rl:ip", 60)).toBe(1);
+      expect(await cacheIncr("rl:ip", 60)).toBe(2);
+      expect(await cacheIncr("rl:ip", 60)).toBe(3);
+    });
+
+    it("sets the TTL only when the key is first created (fixed, not sliding, window)", async () => {
+      process.env.REDIS_URL = "redis://fake";
+      const fake = makeFakeRedis();
+      __setRedisForTesting(fake as any);
+
+      // First call creates the key and stamps a TTL ~60s out.
+      await cacheIncr("rl:ip", 60);
+      const firstExpiry = fake.store.get("rl:ip")!.expiresAt;
+      expect(firstExpiry).toBeGreaterThan(0);
+
+      // A later call within the window must NOT push the expiry out — that would
+      // make the window slide and the counter never reset (the Finding-2 bug).
+      await new Promise((r) => setTimeout(r, 15));
+      await cacheIncr("rl:ip", 60);
+      const secondExpiry = fake.store.get("rl:ip")!.expiresAt;
+      expect(secondExpiry).toBe(firstExpiry);
+    });
+
+    it("never leaves the key TTL-less (the EXPIRE always lands atomically with INCR)", async () => {
+      process.env.REDIS_URL = "redis://fake";
+      const fake = makeFakeRedis();
+      __setRedisForTesting(fake as any);
+
+      await cacheIncr("rl:ip", 60);
+      // The very first increment must carry a TTL; a non-atomic INCR-then-EXPIRE
+      // could crash between the two and strand the key forever.
+      expect(fake.store.get("rl:ip")!.expiresAt).toBeGreaterThan(0);
+    });
+
+    it("returns null (caller fails OPEN) on a Redis error", async () => {
+      process.env.REDIS_URL = "redis://fake";
+      const fake = makeFakeRedis({ errorOn: "eval" });
+      __setRedisForTesting(fake as any);
+
+      expect(await cacheIncr("rl:ip", 60)).toBeNull();
     });
   });
 

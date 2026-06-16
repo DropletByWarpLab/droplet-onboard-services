@@ -29,8 +29,12 @@ export interface WelcomeFlourishProps {
   displayName?: string;
   /** Second-line copy. Defaults to "Your Droplet is ready." */
   subtitle?: string;
-  /** Where to push after the timer elapses. Defaults to "/". */
-  redirectTo?: string;
+  /**
+   * Where to push after the timer elapses. Defaults to "/". Pass `null` when
+   * the parent owns navigation (e.g. DoneStep sequencing into the embedded
+   * tour, #9) — then only `onComplete` fires and no internal push happens.
+   */
+  redirectTo?: string | null;
   /** How long the full motion phase lasts before redirect. Defaults to 2500ms. */
   redirectAfterMs?: number;
   /** Fires once when the redirect timer elapses OR Skip is clicked. */
@@ -64,7 +68,10 @@ export function WelcomeFlourish({
     if (firedRef.current) return;
     firedRef.current = true;
     onComplete?.();
-    router.push(redirectTo);
+    // `redirectTo === null` → the parent owns navigation; don't push.
+    if (redirectTo !== null) {
+      router.push(redirectTo);
+    }
   }, [onComplete, router, redirectTo]);
 
   useEffect(() => {

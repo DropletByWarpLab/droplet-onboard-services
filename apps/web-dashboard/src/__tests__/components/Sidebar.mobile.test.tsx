@@ -51,6 +51,23 @@ vi.mock("@/lib/theme", () => ({
   useTheme: () => ({ theme: "system", setTheme: vi.fn() }),
 }));
 
+// 2026-05-18 — Sidebar consults useWorkspace() to decide which Phase 3
+// (Roles/Groups/Sessions/Billing) entries to surface and to render the
+// "Home"/"Business" pill in the header. Mock with the Home defaults so
+// the existing mobile-drawer expectations (which only know about Phase 1
+// routes) still hold. Phase 3 will add a parallel test file for the
+// Business-mode drawer surface.
+vi.mock("@/lib/workspace", () => ({
+  useWorkspace: () => ({
+    workspaceType: "home" as const,
+    setWorkspaceType: vi.fn(),
+    isHome: true,
+    isBusiness: false,
+    homeVariant: "B" as const,
+  }),
+  getHomeVariant: () => "B" as const,
+}));
+
 // Pathname for active-tab assertions. Tests can override per-case via
 // the `usePathname` mock setter below.
 const pathnameRef = { current: "/" as string };
@@ -68,6 +85,19 @@ vi.mock("framer-motion", async () => {
   const actual: any = await vi.importActual("framer-motion");
   return { ...actual, useReducedMotion: () => true };
 });
+
+// #14/#15 — Sidebar gates the Activity + RAG-eval entries on backend
+// capabilities (GET /api/admin/capabilities). A settable ref lets cases flip
+// them; default OFF (hidden) so the existing drawer expectations hold.
+const capsRef = {
+  current: { claudeActivity: false, ragEval: false } as {
+    claudeActivity: boolean;
+    ragEval: boolean;
+  },
+};
+vi.mock("@/lib/hooks/useCapabilities", () => ({
+  useCapabilities: () => capsRef.current,
+}));
 
 import { Sidebar } from "@/components/Sidebar";
 import { Home as HomeIcon } from "lucide-react";
@@ -162,6 +192,7 @@ describe("<Sidebar> mobile branch (WARP-290)", () => {
 
     // Displaced primary items (not in the 5-tab bar):
     expect(within(dialog).getByRole("link", { name: /calendar/i })).toHaveAttribute("href", "/calendar");
+    expect(within(dialog).getByRole("link", { name: /projects/i })).toHaveAttribute("href", "/projects");
     expect(within(dialog).getByRole("link", { name: /knowledge/i })).toHaveAttribute("href", "/knowledge");
     expect(within(dialog).getByRole("link", { name: /context/i })).toHaveAttribute("href", "/context");
 
@@ -377,5 +408,44 @@ describe("<Sidebar> desktop branch a11y (WARP-290)", () => {
     expect(settingsLink).toHaveAttribute("aria-current", "page");
     const homeLink = within(aside).getByRole("link", { name: /home/i });
     expect(homeLink).not.toHaveAttribute("aria-current");
+  });
+});
+
+// ── #14/#15 — capability-gated admin nav entries ────────────────────────
+describe("Sidebar — admin capability nav-gating (#14/#15)", () => {
+  beforeEach(() => {
+    pathnameRef.current = "/";
+    capsRef.current = { claudeActivity: false, ragEval: false };
+  });
+
+  it("hides Activity + RAG eval when their capabilities are off", () => {
+    render(<Sidebar />);
+    const bottomNav = screen.getByRole("navigation", {
+      name: /bottom navigation/i,
+    });
+    fireEvent.click(within(bottomNav).getByRole("button", { name: /more/i }));
+    const dialog = screen.getByRole("dialog");
+    expect(
+      within(dialog).queryByRole("link", { name: /^activity$/i }),
+    ).toBeNull();
+    expect(
+      within(dialog).queryByRole("link", { name: /rag eval/i }),
+    ).toBeNull();
+  });
+
+  it("shows Activity + RAG eval once their capabilities are wired", () => {
+    capsRef.current = { claudeActivity: true, ragEval: true };
+    render(<Sidebar />);
+    const bottomNav = screen.getByRole("navigation", {
+      name: /bottom navigation/i,
+    });
+    fireEvent.click(within(bottomNav).getByRole("button", { name: /more/i }));
+    const dialog = screen.getByRole("dialog");
+    expect(
+      within(dialog).getByRole("link", { name: /^activity$/i }),
+    ).toHaveAttribute("href", "/admin/claude-activity");
+    expect(
+      within(dialog).getByRole("link", { name: /rag eval/i }),
+    ).toHaveAttribute("href", "/admin/rag-eval");
   });
 });

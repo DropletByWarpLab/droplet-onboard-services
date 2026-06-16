@@ -25,10 +25,14 @@ vi.mock("../config.js", () => ({
   },
 }));
 
-// Force the cache to always miss so we exercise the Nextcloud path.
+// Force the cache to always miss by default so we exercise the Nextcloud path.
+// Individual tests override cacheGet via mockResolvedValueOnce for cache-hit
+// coverage. cacheDel is wired because the cache-hit re-validation purges a
+// stale entry when it finds the user has been deactivated.
 vi.mock("../services/cache.service.js", () => ({
   cacheGet: vi.fn().mockResolvedValue(null),
   cacheSet: vi.fn().mockResolvedValue(undefined),
+  cacheDel: vi.fn().mockResolvedValue(undefined),
 }));
 
 // Force JWT verification to fail so we fall through to Nextcloud OCS.
@@ -39,7 +43,12 @@ vi.mock("../services/jwt.service.js", () => ({
   REFRESH_TOKEN_TTL_SECONDS: 60 * 60 * 24 * 30,
 }));
 
-import { authMiddleware, _setAuthPrismaForTests } from "./auth.js";
+import {
+  authMiddleware,
+  requirePasswordChangeGate,
+  _setAuthPrismaForTests,
+} from "./auth.js";
+import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
 
 function mockReq(token: string): Request {
   return {
@@ -157,6 +166,85 @@ describe("authMiddleware — Nextcloud OCS validation", () => {
     expect(next).not.toHaveBeenCalled();
   });
 
+  it("rejects a SCIM-deactivated user on the cache-MISS path and does not cache them (ADR-013)", async () => {
+    // OCS validates fine upstream, but the local row is DEACTIVATED. The middleware
+    // must 401 and must NOT write the deactivated user into the token cache (a
+    // cached entry would otherwise pass auth for up to TOKEN_CACHE_TTL).
+    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: vi.fn().mockResolvedValue({
+        ocs: {
+          meta: { status: "ok" },
+          data: { id: "carol", "display-name": "Carol", groups: [] },
+        },
+      }),
+    } as unknown as Response);
+    _setAuthPrismaForTests({
+      user: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: "u-uuid-carol-0003",
+          username: "carol",
+          displayName: "Carol",
+          nextcloudUsername: "carol",
+          role: "family",
+          isLocal: false,
+          directoryStatus: "DEACTIVATED",
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        }),
+      },
+    } as any);
+    // These cache mocks are module-level and not reset between tests, so clear
+    // the call history we assert on here.
+    (cacheSet as ReturnType<typeof vi.fn>).mockClear();
+
+    const req = mockReq("deactivated-ocs-token");
+    const res = mockRes();
+    const next = vi.fn() as unknown as NextFunction;
+
+    authMiddleware(req, res, next);
+    await new Promise((r) => setImmediate(r));
+
+    expect((res.status as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(401);
+    expect(next).not.toHaveBeenCalled();
+    // Critical: the deactivated user is never written to the token cache.
+    expect(cacheSet).not.toHaveBeenCalled();
+  });
+
+  it("rejects a deactivated user on the cache-HIT path and purges the stale entry (ADR-013)", async () => {
+    // The token is warm in the cache, but the user was deactivated since it was
+    // written. The cache-hit re-validation must catch it (indexed single-column
+    // select), 401, purge the entry, and never touch the OCS fetch.
+    (cacheGet as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      id: "u-uuid-dave-0004",
+      username: "dave",
+      displayName: "Dave",
+      role: "family",
+    });
+    const findUnique = vi.fn().mockResolvedValue({ directoryStatus: "DEACTIVATED" });
+    _setAuthPrismaForTests({ user: { findUnique } } as any);
+    (cacheDel as ReturnType<typeof vi.fn>).mockClear();
+
+    const req = mockReq("warm-but-deactivated-token");
+    const res = mockRes();
+    const next = vi.fn() as unknown as NextFunction;
+
+    authMiddleware(req, res, next);
+    await new Promise((r) => setImmediate(r));
+
+    expect((res.status as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(401);
+    expect(next).not.toHaveBeenCalled();
+    // Re-validated by a single-column select on the primary key, not a full row.
+    expect(findUnique).toHaveBeenCalledWith({
+      where: { id: "u-uuid-dave-0004" },
+      select: { directoryStatus: true },
+    });
+    // Stale cache entry purged; OCS fetch never reached on a hit.
+    expect(cacheDel).toHaveBeenCalled();
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
   it("returns 500 if validation throws unexpectedly (separate from timeout)", async () => {
     (global.fetch as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
       // Throw synchronously inside fetch — separate from abort.
@@ -173,5 +261,70 @@ describe("authMiddleware — Nextcloud OCS validation", () => {
     // validateNextcloudToken catches errors and returns null, so the
     // middleware should 401, not 500. Confirm this is still the contract.
     expect((res.status as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(401);
+  });
+});
+
+describe("requirePasswordChangeGate — allowed-path matching", () => {
+  // A must-change user must always be able to REACH the remediation endpoint.
+  // The allow-list is exact-match, so a trailing slash on the path used to slip
+  // past it and 403 the user out of the very endpoint that clears the flag.
+  function gateReq(path: string): Request {
+    return {
+      user: { id: "u-1", role: "owner" },
+      path,
+    } as unknown as Request;
+  }
+
+  // findUnique resolves AFTER the allow-path short-circuit; if the gate reaches
+  // it for an allowed path, mustChangePassword:true would (wrongly) 403.
+  const prisma = {
+    user: {
+      findUnique: vi.fn().mockResolvedValue({ mustChangePassword: true }),
+    },
+  } as unknown as Parameters<typeof requirePasswordChangeGate>[0];
+
+  beforeEach(() => {
+    (prisma.user.findUnique as ReturnType<typeof vi.fn>).mockClear();
+  });
+
+  it("allows the change-password endpoint WITH a trailing slash", async () => {
+    const gate = requirePasswordChangeGate(prisma);
+    const req = gateReq("/api/auth/change-password/");
+    const res = mockRes();
+    const next = vi.fn() as unknown as NextFunction;
+
+    gate(req, res, next);
+    await new Promise((r) => setImmediate(r));
+
+    expect(next).toHaveBeenCalledTimes(1);
+    expect((res.status as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    // The allow-path short-circuit fires before any DB read.
+    expect(prisma.user.findUnique as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+  });
+
+  it("allows the change-password endpoint without a trailing slash", async () => {
+    const gate = requirePasswordChangeGate(prisma);
+    const req = gateReq("/api/auth/change-password");
+    const res = mockRes();
+    const next = vi.fn() as unknown as NextFunction;
+
+    gate(req, res, next);
+    await new Promise((r) => setImmediate(r));
+
+    expect(next).toHaveBeenCalledTimes(1);
+    expect((res.status as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+  });
+
+  it("still 403s a must-change user on a protected (non-allowed) path", async () => {
+    const gate = requirePasswordChangeGate(prisma);
+    const req = gateReq("/api/llm/models");
+    const res = mockRes();
+    const next = vi.fn() as unknown as NextFunction;
+
+    gate(req, res, next);
+    await new Promise((r) => setImmediate(r));
+
+    expect((res.status as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(403);
+    expect(next).not.toHaveBeenCalled();
   });
 });

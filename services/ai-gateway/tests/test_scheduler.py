@@ -245,6 +245,108 @@ async def test_fifo_within_same_priority():
 
 
 @pytest.mark.asyncio
+async def test_streaming_holds_slot_until_stream_drains():
+    """GW-06: the scheduler slot must be held for the LIFETIME of a streamed
+    response, not released as soon as the generator object is obtained.
+
+    This mirrors main.py's `_slot_held_stream` wrapper: release() fires in the
+    generator's `finally`, so a second request stays queued until the first
+    stream is fully consumed. Pre-fix, release() ran immediately after chat()
+    returned the (not-yet-started) generator, so max_concurrent was not
+    enforced for streaming and the second request dispatched early.
+    """
+    scheduler = InferenceScheduler(max_concurrent=1)
+    await scheduler.start()
+
+    try:
+        # Simulate the upstream streaming generator: it yields a couple of
+        # chunks and blocks on an event between them, so we can assert state
+        # while the stream is still flowing.
+        gate = asyncio.Event()
+
+        async def upstream_stream():
+            yield "data: chunk-1\n\n"
+            await gate.wait()  # hold the stream open
+            yield "data: chunk-2\n\n"
+
+        # The endpoint wrapper: hold the slot until the stream is exhausted.
+        async def slot_held_stream(result):
+            try:
+                async for chunk in result:
+                    yield chunk
+            finally:
+                await scheduler.release()
+
+        # First request acquires the only slot.
+        f1 = await scheduler.enqueue(Priority.USER, "stream-req")
+        await asyncio.wait_for(f1, timeout=1.0)
+        assert scheduler.active_requests == 1
+
+        stream = slot_held_stream(upstream_stream())
+
+        # Pull the first chunk — the stream is now mid-flight.
+        first = await stream.__anext__()
+        assert first == "data: chunk-1\n\n"
+
+        # A second request enqueued now MUST stay queued: the slot is still held.
+        f2 = await scheduler.enqueue(Priority.USER, "queued-req")
+        await asyncio.sleep(0.05)
+        assert not f2.done(), "second request dispatched while first stream was still open"
+        assert scheduler.active_requests == 1
+        assert scheduler.queue_depth == 1
+
+        # Let the stream finish; draining it runs the wrapper's finally → release().
+        gate.set()
+        rest = [chunk async for chunk in stream]
+        assert rest == ["data: chunk-2\n\n"]
+
+        # Now the second request dispatches.
+        result = await asyncio.wait_for(f2, timeout=1.0)
+        assert result == "queued-req"
+        assert scheduler.active_requests == 1
+    finally:
+        await scheduler.stop()
+
+
+@pytest.mark.asyncio
+async def test_streaming_releases_slot_on_early_close():
+    """GW-06: closing the stream early (client disconnect / error) must still
+    release the slot exactly once, via the wrapper's finally / aclose()."""
+    scheduler = InferenceScheduler(max_concurrent=1)
+    await scheduler.start()
+
+    try:
+        async def upstream_stream():
+            yield "data: chunk-1\n\n"
+            yield "data: chunk-2\n\n"
+
+        async def slot_held_stream(result):
+            try:
+                async for chunk in result:
+                    yield chunk
+            finally:
+                await scheduler.release()
+
+        f1 = await scheduler.enqueue(Priority.USER, "stream-req")
+        await asyncio.wait_for(f1, timeout=1.0)
+        assert scheduler.active_requests == 1
+
+        stream = slot_held_stream(upstream_stream())
+        await stream.__anext__()  # consume one chunk, then abandon
+
+        # Simulate Starlette closing the response generator on disconnect.
+        await stream.aclose()
+
+        # The slot is freed, so a queued request can now run.
+        f2 = await scheduler.enqueue(Priority.USER, "after-close")
+        result = await asyncio.wait_for(f2, timeout=1.0)
+        assert result == "after-close"
+        assert scheduler.active_requests == 1
+    finally:
+        await scheduler.stop()
+
+
+@pytest.mark.asyncio
 async def test_release_frees_slot_and_dispatches_next():
     """Calling release() should free a slot and dispatch the next queued request."""
     scheduler = InferenceScheduler(max_concurrent=1)

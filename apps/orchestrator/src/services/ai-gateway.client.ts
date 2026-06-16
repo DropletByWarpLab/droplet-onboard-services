@@ -4,8 +4,32 @@ import type { ChatRequest, ModelsResponse } from "../types/index.js";
 const BASE_URL = config.AI_GATEWAY_URL;
 
 /**
- * Default timeout for non-streaming gateway calls. The Ollama Orin Nano can
- * stall briefly under inference load, but anything over 10 seconds for a
+ * WARP-560: service-to-service auth headers for the ai-gateway, which now
+ * requires a Bearer service token on every /ai/* route. Mirrors
+ * switch.client.ts's `authHeaders()`: SERVICE_TOKEN_AI_GATEWAY is the dedicated
+ * bearer (compose wires the ai-gateway's SERVICE_TOKEN_AI_GATEWAY to the same
+ * value); SERVICE_SECRET is the legacy shared-secret fallback for installs
+ * whose .env predates the dedicated token.
+ *
+ * `userId` (optional) is forwarded as `X-Droplet-User` so the gateway can scope
+ * per-user BYOK keys (WARP-561) and session ownership (WARP-560). Omitted →
+ * the gateway uses its shared/device namespace (background / service calls).
+ */
+function authHeaders(userId?: string): Record<string, string> {
+  const headers: Record<string, string> = {};
+  const token = config.SERVICE_TOKEN_AI_GATEWAY || config.SERVICE_SECRET;
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+  if (userId) {
+    headers["X-Droplet-User"] = userId;
+  }
+  return headers;
+}
+
+/**
+ * Default timeout for non-streaming gateway calls. The local Ollama instance
+ * can stall briefly under inference load, but anything over 10 seconds for a
  * model-list or key CRUD is broken upstream — failing fast lets the dashboard
  * keep its 30 s SWR poll loop healthy instead of stacking hung requests
  * (WARP-303).
@@ -37,7 +61,10 @@ function wrapTimeout(err: unknown, op: string, ms: number): Error {
 
 export async function listModels(): Promise<ModelsResponse> {
   try {
-    const res = await fetch(`${BASE_URL}/ai/models`, { signal: timeout() });
+    const res = await fetch(`${BASE_URL}/ai/models`, {
+      headers: authHeaders(),
+      signal: timeout(),
+    });
     if (!res.ok) throw new Error(`AI Gateway error: ${res.status}`);
     return (await res.json()) as ModelsResponse;
   } catch (err) {
@@ -45,14 +72,24 @@ export async function listModels(): Promise<ModelsResponse> {
   }
 }
 
-export async function chat(request: ChatRequest): Promise<Response> {
+export async function chat(
+  request: ChatRequest,
+  signal?: AbortSignal,
+  userId?: string
+): Promise<Response> {
   // Streaming chat: no timeout — inference can legitimately take minutes on
   // local Ollama. The orchestrator's agent loop owns turn-level timeouts.
   // Return raw Response so the route handler can pipe streaming bodies.
+  //
+  // WARP-329 — `signal` is the client-disconnect AbortSignal threaded from
+  // the /api/llm/chat route's `req.on("close")`. Aborting it cancels the
+  // in-flight inference fetch so a disconnected client doesn't keep the
+  // model running.
   const res = await fetch(`${BASE_URL}/ai/chat`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders(userId) },
     body: JSON.stringify(request),
+    signal,
   });
   if (!res.ok && !request.stream) {
     const body = await res.text();
@@ -63,11 +100,12 @@ export async function chat(request: ChatRequest): Promise<Response> {
 
 export async function saveKey(
   provider: string,
-  apiKey: string
+  apiKey: string,
+  userId?: string
 ): Promise<void> {
   const res = await fetch(`${BASE_URL}/ai/keys/${provider}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders(userId) },
     body: JSON.stringify({ api_key: apiKey }),
     signal: timeout(),
   });
@@ -77,9 +115,12 @@ export async function saveKey(
   }
 }
 
-export async function listKeys(): Promise<string[]> {
+export async function listKeys(userId?: string): Promise<string[]> {
   try {
-    const res = await fetch(`${BASE_URL}/ai/keys`, { signal: timeout() });
+    const res = await fetch(`${BASE_URL}/ai/keys`, {
+      headers: authHeaders(userId),
+      signal: timeout(),
+    });
     if (!res.ok) throw new Error(`AI Gateway error: ${res.status}`);
     const data = (await res.json()) as { providers: string[] };
     return data.providers;
@@ -88,9 +129,13 @@ export async function listKeys(): Promise<string[]> {
   }
 }
 
-export async function deleteKey(provider: string): Promise<void> {
+export async function deleteKey(
+  provider: string,
+  userId?: string
+): Promise<void> {
   const res = await fetch(`${BASE_URL}/ai/keys/${provider}`, {
     method: "DELETE",
+    headers: authHeaders(userId),
     signal: timeout(),
   });
   if (!res.ok) {
@@ -101,6 +146,8 @@ export async function deleteKey(provider: string): Promise<void> {
 
 export async function healthCheck(): Promise<boolean> {
   try {
+    // /ai/health is the only route the gateway leaves unauthenticated (the
+    // compose healthcheck + ops probe hit it tokenless), so no auth header here.
     const res = await fetch(`${BASE_URL}/ai/health`, {
       signal: AbortSignal.timeout(2000),
     });

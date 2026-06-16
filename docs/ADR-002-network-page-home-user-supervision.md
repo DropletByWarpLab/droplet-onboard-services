@@ -137,7 +137,7 @@ Ships before any new features are built on the router surface.
 
 ## Action items
 
-1. [ ] Review and merge [PR #5](https://github.com/Nahast/droplet-pi-platform/pull/5)
+1. [ ] Review and merge [PR #5](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/5)
 2. [ ] Phase 0.5 — integration hardening (items 1–9 above, tracked as individual issues)
 3. [ ] Prisma migration for `NetworkDevice` + `NetworkEvent`
 4. [ ] Home-user IA wireframe and sign-off

@@ -133,8 +133,11 @@ describe("WARP-468 — GET /api/network/off-lan", () => {
       { ts, channel: "outbound_email", bytes: 2000n },
     ]);
     const app = buildApp(prisma, mkUser("family"));
+    // Pin the window to the seeded sample's day — the route's default
+    // window is month-to-date off the REAL clock, so an unpinned query
+    // breaks every calendar-month rollover after the fixture date.
     const res = await request(app).get(
-      "/api/network/off-lan?channel=cloud_model_escape",
+      `/api/network/off-lan?channel=cloud_model_escape&from=${encodeURIComponent("2026-05-27T00:00:00.000Z")}&to=${encodeURIComponent("2026-05-27T23:59:59.000Z")}`,
     );
     expect(res.status).toBe(200);
     // Other channels still shown as 0 — the chart wants all 5 bars.

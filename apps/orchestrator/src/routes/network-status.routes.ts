@@ -30,7 +30,7 @@ import {
 } from "../services/network-safety.service.js";
 import type { createNetworkDeviceService } from "../services/network-device.service.js";
 import { handleRegistryError } from "./network-error-handler.js";
-import { requireRole } from "../middleware/auth.js";
+import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 
 export interface StatusDeps {
   prisma: PrismaClient;
@@ -170,7 +170,7 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
   // do this without confirmation from the install-time owner"). For
   // the moment we encode that as a single-role allow; if a future
   // ticket adds an MFA gate (WARP-230/238) it layers on top of this.
-  router.post("/network/system/reboot", requireRole("owner"), async (req, res, next) => {
+  router.post("/network/system/reboot", requireRoleOrMcpService("owner"), async (req, res, next) => {
     try {
       const userId = req.user?.id;
       const result = await evaluateNetworkCommand(
@@ -200,7 +200,14 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
   });
 
   // --- Confirm Tier 2/3 network command ---
-  router.post("/network/command/confirm", async (req, res, next) => {
+  // Human-only by design, mirroring /switch/command/confirm: with the MCP
+  // principal admitted to the Tier-2 mint routes (requireRoleOrMcpService),
+  // an unguarded confirm would let that principal consume its OWN token —
+  // confirmNetworkCommand's user-match check passes when minter and
+  // confirmer are the same id — and execute the write with no human in the
+  // loop. Every mint route is owner/admin (reboot owner-only), so
+  // owner/admin is the complete legitimate caller set.
+  router.post("/network/command/confirm", requireRole("owner", "admin"), async (req, res, next) => {
     try {
       const { confirmationToken, operation, entityId } = req.body;
       if (!confirmationToken || typeof confirmationToken !== "string") {
@@ -248,9 +255,14 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
           );
           break;
         case "set_wifi_password":
+          // WARP-808 review #2: the Tier-2 confirm runs in a SEPARATE request
+          // from the original /wifi/ssid stage; pass the same authenticated
+          // userId so applyWifi consumes THIS user's staged SSID (single-box
+          // hostapd path) rather than a process-global slot.
           writeResult = await setWifiPassword(
             (params?.iface_section as string) || "default_radio0",
-            params?.password as string
+            params?.password as string,
+            userId
           );
           break;
         case "reboot":

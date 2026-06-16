@@ -1,20 +1,21 @@
 """
 Droplet TFT Display Driver
 ===========================
-Drives the front-panel 480x320 TFT via an Adafruit PyPortal Titano connected
-over USB-serial. The PyPortal's own SAMD51 + ILI9341 handles rendering; this
-module streams JSON commands over /dev/ttyACM* and mirrors every frame to a
-preview PNG so the dashboard can show what's on the panel.
+Drives the front-panel 480x320 TFT via an Adafruit PyPortal Titano (the status
+display) connected over USB-serial. The display's own SAMD51 + ILI9341 handles
+rendering; this module streams JSON commands over /dev/ttyACM* and mirrors every
+frame to a preview PNG so the dashboard can show what's on the panel.
 
 Backends:
-  1. pyportal   - USB-serial to an Adafruit PyPortal Titano (primary)
+  1. pyportal   - USB-serial to an Adafruit PyPortal Titano / status display (primary)
   2. simulated  - writes a PNG to SIM_OUTPUT (dev/CI fallback, auto-used
-                  when no PyPortal is present)
+                  when no status display is present)
 
 The direct-SPI / luma.lcd / fbtft-framebuffer paths were removed after the
-pivot to PyPortal (Tegra's GPIO/SPI driver stack is incompatible with the
-Pi-shield TFTs we originally targeted; see WARP-127). gpio_shim,
-Jetson.GPIO, RPi.GPIO, luma, spidev, and the XPT2046 touch code are gone.
+pivot to the status display (the inference host's GPIO/SPI driver stack is
+incompatible with the GPIO-header TFT shields we originally targeted; see WARP-127).
+gpio_shim, the old GPIO library, luma, spidev, and the XPT2046 touch code
+are gone.
 
 The visual system mirrors the web dashboard (`apps/web-dashboard/`) so the
 on-device screen looks like a compact version of the admin UI: same Droplet
@@ -24,6 +25,7 @@ same tile / status-chip layout.
 """
 
 import os
+import ssl
 import time
 import json
 import socket
@@ -32,6 +34,7 @@ import threading
 import urllib.request
 import urllib.error
 from datetime import datetime
+from datetime import datetime as _dt_datetime
 from pathlib import Path
 from typing import Optional, List, Any, Callable, Tuple
 
@@ -40,7 +43,7 @@ try:
 except ImportError:  # py<3.9
     ZoneInfo = None  # type: ignore
 
-# Timezone for the wall-clock we push to the PyPortal. The container
+# Timezone for the wall-clock we push to the status display. The container
 # itself runs UTC (standard for Docker images), so we compute local
 # time explicitly here. Override via DISPLAY_TIMEZONE if needed.
 _TZ_NAME = os.environ.get("DISPLAY_TIMEZONE", "America/Los_Angeles")
@@ -60,16 +63,16 @@ HEIGHT = int(os.environ.get("LCD_HEIGHT", "320"))
 # ---------------------------------------------------------------------------
 # Backend selection
 # ---------------------------------------------------------------------------
-# "auto" (default) probes the PyPortal on USB-serial and falls back to "sim".
+# "auto" (default) probes the status display on USB-serial and falls back to "sim".
 # "pyportal" / "sim" force a specific backend (primarily for CI / dev).
 BACKEND = os.environ.get("DISPLAY_BACKEND", "auto").lower()
 
-# PyPortal backend (USB-serial-connected Adafruit PyPortal Titano).
+# Status display backend (USB-serial-connected Adafruit PyPortal Titano).
 PYPORTAL_TTY = os.environ.get("PYPORTAL_TTY", "/dev/ttyACM1")
 PYPORTAL_BAUD = int(os.environ.get("PYPORTAL_BAUD", "115200"))
 
 # Host-side device-bridge URL (see services/oled-display/device-bridge.py).
-# The bridge runs on the Jetson host and exposes /wifi, /files, /cameras,
+# The bridge runs on the appliance host and exposes /wifi, /files, /cameras,
 # /drives, /openwrt/qr so the container gets live data without mounting
 # NetworkManager/DBus/etc. inside. Default 127.0.0.1 because the bridge
 # binds to loopback by default (see BRIDGE_BIND in device-bridge.py).
@@ -114,6 +117,44 @@ TEMP_WARN        = STATUS_ORANGE
 TEMP_CRIT        = STATUS_RED
 
 # ---------------------------------------------------------------------------
+# py-v3 palette (design_handoff_pyportal_touchscreen/README.md "Design Tokens")
+# The redesigned idle / System+Wi-Fi / power-sequence screens use this token
+# set verbatim. Kept separate from the legacy dashboard-mirror tokens above so
+# the older home/chat/devices/settings renderers (still reachable for
+# back-compat) are untouched. Every value below maps 1:1 to a row in the
+# handoff token table; rgba tokens are flattened to the nearest solid.
+# ---------------------------------------------------------------------------
+V3_BG        = (0x05, 0x05, 0x07)   # #050507 screen background
+V3_PANEL     = (0x0D, 0x0D, 0x12)   # #0d0d12 alerts drawer background
+V3_SURFACE   = (0x14, 0x14, 0x20)   # #141420 chips, inactive pills
+V3_SURFACE2  = (0x1D, 0x1D, 0x2E)   # #1d1d2e alert rows, "Clear all"
+V3_SEP       = (0x2A, 0x2A, 0x38)   # #2a2a38 hairline dividers
+V3_SEP2      = (0x3A, 0x3A, 0x4A)   # #3a3a4a stronger borders
+V3_TEXT      = (0xFF, 0xFF, 0xFF)   # #ffffff primary numerics & values
+V3_LABEL2    = (0xC8, 0xC8, 0xD4)   # #c8c8d4 clock time, button labels
+V3_LABEL3    = (0x8B, 0x8B, 0x9C)   # #8b8b9c eyebrows / captions
+V3_LABEL4    = (0x54, 0x54, 0x66)   # #545466 faint / standby text
+V3_ACCENT    = (0x81, 0x8C, 0xF8)   # #818cf8 sparkline, rule, SSID, mark
+V3_ACCENT_DIM = (0x5B, 0x62, 0xC7)  # #5b62c7 seconds hairline
+V3_ACCENT_INK = (0xB4, 0xBA, 0xFF)  # #b4baff mark highlight, password text
+# accentSubtle rgba(129,140,248,0.18) over #050507 -> nearest solid fill for
+# the active toggle cell (0.18*accent + 0.82*bg, per-channel).
+V3_ACCENT_SUBTLE = (0x1B, 0x1D, 0x32)  # ~#1b1d32
+# Waiting dots at rest on the claim screen — #818cf8 @ 30% over the bg.
+V3_ACCENT_FAINT = (0x2B, 0x2F, 0x52)
+# rgba(255,159,10,0.18) over #050507 -> orange-tinted KEY-pill fill when <60s.
+V3_ORANGE_SUBTLE = (0x32, 0x21, 0x08)  # ~#322108
+V3_TRACK     = (0x1F, 0x1F, 0x30)   # #1f1f30 progress/seconds track
+V3_GREEN     = (0x30, 0xD1, 0x58)   # #30d158 OK status, cameras online
+V3_ORANGE    = (0xFF, 0x9F, 0x0A)   # #ff9f0a warnings, key-expiring
+V3_RED       = (0xFF, 0x45, 0x3A)   # #ff453a alerts, critical
+V3_WHITE     = (0xFF, 0xFF, 0xFF)   # #ffffff QR card
+# sparkline fill #818cf822 (accent @ ~13% alpha) over bg -> nearest solid.
+V3_SPARK_FILL = (0x16, 0x17, 0x27)  # ~#161727
+# CRT phosphor line on shutdown collapse (#eaeaff).
+V3_PHOSPHOR  = (0xEA, 0xEA, 0xFF)   # #eaeaff
+
+# ---------------------------------------------------------------------------
 # Assets + cycle timing
 # ---------------------------------------------------------------------------
 ASSETS_DIR = Path(__file__).parent / "assets"
@@ -123,6 +164,74 @@ SIM_OUTPUT = Path(os.environ.get("SIM_OUTPUT", "/tmp/tft_preview.png"))
 # for interaction, not a billboard. Setting AUTO_CYCLE=1 restores the
 # old logo -> stats carousel for headless demos.
 AUTO_CYCLE = os.environ.get("AUTO_CYCLE", "0") == "1"
+
+# ---------------------------------------------------------------------------
+# Boot readiness (WARP-624; redirect/TLS fix WARP-638)
+# ---------------------------------------------------------------------------
+# The panel opens on the boot screen at construction and stays there until
+# the system is healthy, then flips to the live UI. Health is probed against
+# the same-host orchestrator behind the nginx gateway (loopback — matches
+# droplet-device-bridge.service's ORCHESTRATOR_URL=http://127.0.0.1). A 2xx
+# means "ready". If we never see a 2xx within BOOT_MAX_SECONDS we surface the
+# UI anyway so a degraded stack still shows something instead of a stuck
+# splash. Both knobs are overridable; defaults stay on loopback so there are
+# no host-specific defaults baked in.
+#
+# WARP-638: nginx :80 issues `301 -> https://$host$request_uri`, and the HTTPS
+# vhost serves a SELF-SIGNED cert. urllib follows the redirect to
+# https://127.0.0.1/api/health and, with default verification, raises
+# SSLCertVerificationError — so the probe returned False on EVERY tick and the
+# splash sat for the full 90s on every (re)start. The probe now uses an
+# unverified SSL context (loopback to our own gateway's self-signed cert —
+# there's nothing to verify against), so a warm stack reads ready in ~1 probe.
+BOOT_READINESS_URL = os.environ.get(
+    "BOOT_READINESS_URL", "http://127.0.0.1/api/health")
+# Unverified context for the loopback HTTPS hop after the :80->:443 redirect.
+# Scoped to the readiness probe only; nothing else in this module makes TLS
+# calls (the bridge endpoints are plain-HTTP loopback).
+_READINESS_SSL_CTX = ssl.create_default_context()
+_READINESS_SSL_CTX.check_hostname = False
+_READINESS_SSL_CTX.verify_mode = ssl.CERT_NONE
+
+
+def _env_positive_int(name: str, default: int, raw: Optional[str] = None) -> int:
+    """Read a positive-int env var, degrading gracefully instead of raising.
+
+    L1 (WARP-624): a malformed value (e.g. ``BOOT_MAX_SECONDS=ninety``) would
+    otherwise raise ValueError at import and kill the whole service. We fall
+    back to ``default`` on anything non-integer and clamp non-positive values
+    to ``default`` too — a zero/negative boot budget would make the timeout
+    fallback fire instantly (or never make sense). ``raw`` is injectable for
+    deterministic tests.
+    """
+    if raw is None:
+        raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "%s=%r is not an integer — falling back to %s", name, raw, default)
+        return default
+    if value <= 0:
+        logger.warning(
+            "%s=%r must be positive — falling back to %s", name, raw, default)
+        return default
+    return value
+
+
+BOOT_MAX_SECONDS = _env_positive_int("BOOT_MAX_SECONDS", 90)
+# How often the cycle loop actually probes readiness. The loop ticks ~12.5x/s;
+# gating the probe to every 2s keeps it cheap.
+BOOT_READINESS_INTERVAL = float(os.environ.get("BOOT_READINESS_INTERVAL", "2.0"))
+# How often the cycle loop verifies the live PyPortal link (WARP-638): stat the
+# ttyACM node to spot a USB re-enumeration after a device reset. Same 2s cadence
+# as the readiness probe — cheap, but fast enough that a reset is noticed and
+# the port reopened within a couple seconds instead of the device sitting on
+# its boot screen against a stale host fd.
+LIVENESS_CHECK_INTERVAL = float(
+    os.environ.get("LIVENESS_CHECK_INTERVAL", "2.0"))
 LOGO_DURATION = 5
 STATS_DURATION = 10
 MESSAGE_HOLD = 30
@@ -130,16 +239,99 @@ MESSAGE_HOLD = 30
 MESSAGE_RETURN_HOME_AFTER = MESSAGE_HOLD
 
 
-def _get_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
-    try:
-        variant = "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
-        for search in ["/usr/share/fonts/truetype/dejavu/", "/usr/share/fonts/"]:
-            path = Path(search) / variant
-            if path.exists():
-                return ImageFont.truetype(str(path), size)
-    except Exception:
-        pass
-    return ImageFont.load_default()
+# Font discovery for the sim. The handoff renders in Inter (weights 300-800)
+# and leans on heavy weights (800) for hero numerals. On the device this is a
+# bundled bitmap font; in the CPython sim we want a real proportional TTF so
+# the preview PNG reads like the design. We search a small candidate list per
+# weight class (Inter first if present, then a heavy platform default) and
+# cache the resolved FreeType faces by (size, weight). The sim font is purely
+# cosmetic — it does NOT affect what the device draws.
+_FONT_CACHE: dict = {}
+
+# Candidate face files, ordered best-first, per weight bucket. "heavy" backs
+# the 800-weight heroes; "bold" backs 700; "regular" backs 400-600.
+_FONT_CANDIDATES = {
+    "heavy": [
+        "Inter-ExtraBold.ttf", "Inter-Bold.ttf", "Inter_28pt-ExtraBold.ttf",
+        # Windows
+        "C:/Windows/Fonts/segoeuib.ttf", "C:/Windows/Fonts/arialbd.ttf",
+        # Linux (container)
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "DejaVuSans-Bold.ttf",
+        # macOS
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    ],
+    "bold": [
+        "Inter-Bold.ttf", "Inter-SemiBold.ttf",
+        "C:/Windows/Fonts/segoeuib.ttf", "C:/Windows/Fonts/arialbd.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "DejaVuSans-Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    ],
+    "regular": [
+        "Inter-Regular.ttf", "Inter-Medium.ttf",
+        "C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "DejaVuSans.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+    ],
+}
+
+# Extra directories Inter might live in (bundled alongside the device font, or
+# dropped into the service dir during dev).
+_FONT_SEARCH_DIRS = [
+    Path(__file__).parent / "pyportal" / "lib" / "fonts",
+    Path(__file__).parent / "assets" / "fonts",
+    Path("/usr/share/fonts/truetype/inter"),
+    Path("/usr/share/fonts/opentype/inter"),
+    Path("C:/Windows/Fonts"),
+]
+
+
+def _resolve_font_file(name: str) -> Optional[str]:
+    p = Path(name)
+    if p.is_absolute():
+        return str(p) if p.exists() else None
+    for d in _FONT_SEARCH_DIRS:
+        cand = d / name
+        if cand.exists():
+            return str(cand)
+    # Bare DejaVu names resolve via the legacy /usr/share search too.
+    for search in ("/usr/share/fonts/truetype/dejavu/", "/usr/share/fonts/"):
+        cand = Path(search) / name
+        if cand.exists():
+            return str(cand)
+    return None
+
+
+def _get_font(size: int, bold: bool = False,
+              weight: str = "") -> ImageFont.FreeTypeFont:
+    """Resolve a FreeType face for the sim at `size` px.
+
+    `weight` is one of "heavy" (800 heroes) / "bold" (700) / "regular";
+    `bold=True` is kept for back-compat and maps to the "bold" bucket. Falls
+    back to PIL's built-in bitmap font only if no TTF is found anywhere.
+    """
+    bucket = weight or ("bold" if bold else "regular")
+    if bucket not in _FONT_CANDIDATES:
+        bucket = "regular"
+    key = (size, bucket)
+    cached = _FONT_CACHE.get(key)
+    if cached is not None:
+        return cached
+    face = None
+    for name in _FONT_CANDIDATES[bucket]:
+        resolved = _resolve_font_file(name)
+        if resolved:
+            try:
+                face = ImageFont.truetype(resolved, size)
+                break
+            except Exception:
+                continue
+    if face is None:
+        face = ImageFont.load_default()
+    _FONT_CACHE[key] = face
+    return face
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +369,169 @@ def draw_droplet_mark(
     draw.polygon([proj(p) for p in _MARK_RIGHT], fill=highlight)
 
 
+def draw_droplet_mark_liquid(
+    img: Image.Image, draw: ImageDraw.ImageDraw,
+    x: int, y: int, size: int, frac: float,
+):
+    """Draw the mark as a vessel filled to `frac` (0..1) with accent liquid.
+
+    Used by the boot (fill) / shutdown (drain) power sequences. The empty
+    shell is a dim outline of MARK_LEFT; the liquid is the accent fill clipped
+    to the body silhouette. Mirrors preview.html drawMarkLiquid /
+    markSilhouette. `img` is the frame `draw` is bound to (PIL gives no public
+    way back from a Draw to its Image, so callers pass both).
+    """
+    vw, vh = _MARK_VIEWBOX
+    scale = size / vh
+    x_off = x + (size - int(vw * scale)) // 2
+    y_off = y
+
+    def proj(pt):
+        return (int(x_off + pt[0] * scale), int(y_off + pt[1] * scale))
+
+    body = [proj(p) for p in _MARK_LEFT]
+    # Empty shell — dim flat fill so the vessel reads before it fills.
+    draw.polygon(body, fill=(0x18, 0x18, 0x28))
+    frac = max(0.0, min(1.0, frac))
+    if frac <= 0.002:
+        return
+    # Liquid level rises from the bottom of the body (viewbox y=48) upward.
+    top = y_off
+    bottom = y_off + int(48 * scale)
+    level = bottom - int((bottom - top) * frac)
+    # Build a clip mask = body silhouette ∩ (everything at/below the level).
+    from PIL import ImageChops
+    body_mask = Image.new("L", img.size, 0)
+    ImageDraw.Draw(body_mask).polygon(body, fill=255)
+    level_mask = Image.new("L", img.size, 0)
+    ImageDraw.Draw(level_mask).rectangle(
+        [x_off - 4, level, x_off + int(vw * scale) + 4, bottom + 6], fill=255)
+    liquid = Image.new("RGB", img.size, V3_ACCENT)
+    img.paste(liquid, (0, 0), ImageChops.multiply(body_mask, level_mask))
+
+
+def _v3_text(draw: ImageDraw.ImageDraw, s: str, x: int, y: int, *,
+             font: ImageFont.FreeTypeFont, fill, anchor: str = "la",
+             tracking: float = 0.0):
+    """Draw text with optional per-character letter-spacing (tracking).
+
+    PIL has no tracking, so when `tracking != 0` we lay out glyphs manually.
+    `anchor` follows PIL's two-letter convention but we only special-case the
+    horizontal part for tracked text (l/m/r); vertical uses the PIL anchor.
+    Returns the total advance width drawn. Mirrors preview.html text()'s
+    letter-spacing handling. (design_handoff: eyebrow +1.2..+2, clock -6.)
+    """
+    if not tracking:
+        draw.text((x, y), s, font=font, fill=fill, anchor=anchor)
+        return int(draw.textlength(s, font=font))
+    # Manual tracked layout.
+    widths = [draw.textlength(ch, font=font) for ch in s]
+    total = sum(widths) + tracking * (len(s) - 1) if s else 0
+    halign = anchor[0] if anchor else "l"
+    if halign == "m":
+        cx = x - total / 2
+    elif halign == "r":
+        cx = x - total
+    else:
+        cx = x
+    vanchor = "l" + (anchor[1] if len(anchor) > 1 else "a")
+    for ch, w in zip(s, widths):
+        draw.text((cx, y), ch, font=font, fill=fill, anchor=vanchor)
+        cx += w + tracking
+    return int(total)
+
+
+def _v3_text_width(draw: ImageDraw.ImageDraw, s: str,
+                   font: ImageFont.FreeTypeFont, tracking: float = 0.0) -> float:
+    if not s:
+        return 0.0
+    w = sum(draw.textlength(ch, font=font) for ch in s)
+    return w + tracking * (len(s) - 1)
+
+
+def _rrect(draw: ImageDraw.ImageDraw, x, y, w, h, r, *, fill=None,
+           outline=None, width=1):
+    """Rounded rect convenience wrapper (clamps radius)."""
+    r = int(max(0, min(r, w / 2, h / 2)))
+    draw.rounded_rectangle([(x, y), (x + w, y + h)], radius=r,
+                           fill=fill, outline=outline, width=width)
+
+
+def _wifi_qr_payload(ssid: str, key: str) -> str:
+    """Format a WPA WiFi-join QR payload with metacharacter escaping (WARP-819).
+
+    The single-box AP is always WPA2-PSK, so the security type is a fixed
+    `WPA` and the field order is T;S;P — identical to device-bridge.py's
+    `_hostapd_wifi_payload`. Escapes the WiFi-QR metacharacters (\\ ; , : ")
+    per the de-facto standard so an SSID/PSK containing them still scans. This
+    is the sim-only encode path; on the device the firmware paints the
+    host-supplied matrix verbatim (the bridge does the real encode), so the two
+    stay byte-identical.
+    """
+    def esc(s: str) -> str:
+        return (s or "").replace("\\", "\\\\").replace(";", "\\;") \
+                        .replace(",", "\\,").replace(":", "\\:") \
+                        .replace('"', '\\"')
+
+    return "WIFI:T:WPA;S:{};P:{};;".format(esc(ssid), esc(key))
+
+
+def _setup_qr_payload(setup_url: str, code: str) -> str:
+    """Build the scan-to-claim deep link: `<setup_url>?c=<CODE>`.
+
+    Design-handoff claim screen: scanning the QR lands the phone in the setup
+    wizard with the claim code in the `c` query param (ClaimStep prefills it).
+    The code goes bare — separators stripped, upper-cased — matching the
+    orchestrator's normalizeClaimCode(), which ignores non-alphanumerics; the
+    bare form also keeps the QR a version smaller. Returns "" when either part
+    is missing (no deep link to encode — the card degrades to mark-only).
+    """
+    url = (setup_url or "").strip()
+    bare = "".join(ch for ch in (code or "") if ch.isalnum()).upper()
+    if not url or not bare:
+        return ""
+    return "{}{}c={}".format(url, "&" if "?" in url else "?", bare)
+
+
+# Hard cap on the claim QR matrix we put on the serial wire — mirrors
+# ClaimRequest's wifi_qr_matrix max_length=64 (main.py), which exists because
+# a v-large QR would OOM the PyPortal. The internal encode path must honor the
+# same firmware-tolerance contract: an oversized payload (e.g. a long custom
+# setup_url) degrades to the no-QR variant rather than shipping a heap bomb.
+_CLAIM_QR_MAX_ROWS = 64
+
+
+def _encode_qr_matrix(payload: str) -> Optional[List[List[int]]]:
+    """Encode `payload` into a 0/1 QR bit-matrix, host-side.
+
+    The firmware never encodes on-device (same contract as the Wi-Fi QR the
+    bridge encodes) — this is the host half that feeds the claim frame's
+    `setup_qr_matrix`. ERROR_CORRECT_Q (~25% recovery), NOT the M the generic
+    `_draw_qr` fallback uses: the claim card paints a 32px white droplet-mark
+    pad dead-centre over the symbol, which at M corrupts more codewords than
+    Reed-Solomon can recover (the padded symbol fails to decode at M and
+    decodes cleanly at Q for the typical deep-link payload). Returns None
+    when the `qrcode` dep is unavailable or the symbol would exceed
+    `_CLAIM_QR_MAX_ROWS` — the claim screen then renders the no-QR variant
+    (graceful degradation, never a firmware heap risk).
+    """
+    if not payload:
+        return None
+    try:
+        import qrcode
+        qr = qrcode.QRCode(
+            border=0, error_correction=qrcode.constants.ERROR_CORRECT_Q)
+        qr.add_data(payload)
+        qr.make(fit=True)
+        matrix = [[1 if cell else 0 for cell in row]
+                  for row in qr.get_matrix()]
+        if len(matrix) > _CLAIM_QR_MAX_ROWS:
+            return None
+        return matrix
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Touch regions
 # ---------------------------------------------------------------------------
@@ -200,7 +555,7 @@ class TouchRegion:
 
 
 class TFTDisplay:
-    """PyPortal-backed 480x320 TFT controller with touch-driven screens."""
+    """Status-display-backed 480x320 TFT controller with touch-driven screens."""
 
     # Screen ids — mirror the dashboard's top-level routes where it makes
     # sense: home tile grid, chat-prep, stats/health, device summary,
@@ -212,6 +567,18 @@ class TFTDisplay:
     SETTINGS = "settings"
     LOGO = "logo"
     MESSAGE = "message"
+    # Lifecycle overlays (WARP-624) — modal, not part of the touch carousel.
+    BOOT = "boot"
+    SHUTDOWN = "shutdown"
+    # Onboarding claim screen (WARP-632 / ADR-017) — modal, host-driven. Shown
+    # while the box is unclaimed; the orchestrator mints the code and pushes it.
+    CLAIM = "claim"
+    # py-v3 redesign live states. IDLE = editorial clock; SYSTEM = combined
+    # System+Wi-Fi (replaces the old separate stats + qr screens); STANDBY =
+    # powered-off "tap to power on". The device firmware mirrors these 1:1.
+    IDLE = "idle"
+    SYSTEM = "system"
+    STANDBY = "standby"
 
     def __init__(self):
         self._pyportal = None
@@ -225,6 +592,10 @@ class TFTDisplay:
         # fires. A periodic `os.path.exists(self._pyportal_path)` check is
         # the cheapest reliable way to spot a dead fd.
         self._pyportal_path: Optional[str] = None
+        # Throttle for the periodic liveness check (WARP-638). The cycle loop
+        # calls _check_pyportal_liveness() every tick (~12.5x/s) but the actual
+        # /dev stat only runs once per LIVENESS_CHECK_INTERVAL.
+        self._last_liveness_check = 0.0
         # Set by `_probe_pyportal` on every successful probe; cleared by the
         # cycle loop after it runs `_push_full_state`. Probe always discards
         # the firmware's pre-probe READY/REQUEST_STATE handshake (the probe
@@ -235,7 +606,50 @@ class TFTDisplay:
         # (files = 30s) — i.e. "the screen doesn't auto-fill on reboot".
         self._needs_resync = False
         self._backend = "sim"
-        self._current_mode = self.HOME
+        # Open on the boot screen (WARP-624): a cold power-on must read
+        # "Starting Droplet" until the readiness check (or its timeout)
+        # flips us to the live UI.
+        self._current_mode = self.BOOT
+        # Boot/shutdown caption state, rendered by render_boot/render_shutdown.
+        self._boot_stage = "Starting up"
+        self._boot_detail = ""
+        self._boot_pct: Optional[int] = None
+        self._shutdown_reason = ""
+        self._shutdown_phase = "stopping"
+        # Claim screen state (WARP-632). Set by show_claim from the
+        # orchestrator's minted code; retained so a live re-render keeps showing
+        # the same code + setup URL.
+        self._claim_code = ""
+        self._claim_setup_url = ""
+        # WARP-819: optional Wi-Fi-connect creds shown on the claim screen so a
+        # first-boot user can join the box's Wi-Fi with no prior config. Empty
+        # by default; render_claim falls back to the claim-only layout when the
+        # matrix/ssid/psk are absent (an older orchestrator that doesn't send
+        # them, or the bridge being down at claim time).
+        self._claim_wifi_ssid = ""
+        self._claim_wifi_psk = ""
+        self._claim_wifi_qr_matrix = None
+        # Design-handoff scan-to-claim QR: the setup deep-link matrix, derived
+        # host-side by show_claim (the firmware never encodes) and retained so
+        # re-renders keep painting the same QR the panel shows.
+        self._claim_setup_qr_matrix = None
+        # Signature of the last claim frame sent — show_claim no-ops an
+        # unchanged push (the orchestrator re-pushes every poll tick while
+        # unclaimed; an identical frame would make the firmware tear down and
+        # rebuild the same tree, blanking the panel for nothing).
+        self._claim_frame_sig = None
+        # Readiness transition state. `_boot_complete` is an explicit flag —
+        # we never infer "done" from the absence of something. `_boot_started_at`
+        # anchors the timeout; `_last_readiness_check` gates the probe cadence.
+        self._boot_complete = False
+        self._boot_started_at = time.time()
+        self._last_readiness_check = 0.0
+        # WARP-638: set once a real stats frame has been ingested. On a WARM
+        # start the orchestrator is already up and pushing stats, so a live
+        # link + fresh data IS readiness — the warm-start short-circuit in
+        # _readiness_tick uses this to surface the UI in a few seconds instead
+        # of waiting on the HTTP probe (or, worse, the 90s timeout).
+        self._got_live_data = False
         self._current_image: Optional[Image.Image] = None
         self._custom_title: Optional[str] = None
         self._custom_lines: Optional[List[str]] = None
@@ -249,6 +663,27 @@ class TFTDisplay:
         # Touch regions for the current frame
         self._touch_regions: List[TouchRegion] = []
         self._touch_regions_lock = threading.Lock()
+
+        # --- py-v3 redesign live state (idle / System+Wi-Fi / alerts) -------
+        # 12/24 clock mode. Persisted on the device to /clock_mode.txt; in the
+        # host sim it lives in RAM (the sim has no device FS). Default '24'.
+        self._clock_mode = "24"
+        # Live data snapshot the redesigned screens render from, seeded with the
+        # handoff sample shape so a cold sim renders something sensible.
+        self._v3 = {
+            "cpu": 0, "mem": 0, "disk": 0, "temp": 0,
+            "ip": "-", "hostname": "droplet", "uptime": "-", "now": "",
+            "date": "",
+            "sparks_cpu": [],
+            "wifi": {"ssid": "Droplet-AI", "clients": 0, "channel": 0,
+                     "band": "", "key_ttl_seconds": 0, "password": ""},
+            "cameras": {"online": 0, "total": 0},
+            "wan_latency_ms": 0, "lan_clients": 0,
+        }
+        self._v3_spark_len = 48  # handoff: 48-sample CPU history
+        # Alerts drawer state — list of {type, title, detail, time, cleared}.
+        self._alerts: List[dict] = []
+        self._events_open = False
         # Live touch feedback: momentary highlight after a tap
         self._last_tap_region: Optional[str] = None
         self._last_tap_at: float = 0.0
@@ -261,10 +696,10 @@ class TFTDisplay:
     # ----- Backend init -------------------------------------------------
 
     def _init_device(self):
-        # PyPortal takes several seconds to finish USB enumeration after a
-        # Jetson reboot, so retry a few times before falling through to sim.
-        # Otherwise a cold boot leaves the user with a blank screen until
-        # the container is restarted.
+        # The status display takes several seconds to finish USB enumeration
+        # after the host reboots, so retry a few times before falling through
+        # to sim. Otherwise a cold boot leaves the user with a blank screen
+        # until the container is restarted.
         if BACKEND in ("auto", "pyportal"):
             attempts = 6 if BACKEND == "auto" else 1
             for attempt in range(attempts):
@@ -273,15 +708,15 @@ class TFTDisplay:
                 if attempt < attempts - 1:
                     time.sleep(2)
         self._backend = "sim"
-        logger.warning("Using simulated display (no PyPortal detected on USB)")
+        logger.warning("Using simulated display (no status display detected on USB)")
 
     def _try_pyportal(self) -> bool:
         try:
             import serial
         except ImportError:
             return False
-        # PyPortal can re-enumerate as ttyACM0/1/2 depending on which
-        # USB interface ends up as "data" vs "console" at boot. Try each
+        # The status display can re-enumerate as ttyACM0/1/2 depending on
+        # which USB interface ends up as "data" vs "console" at boot. Try each
         # candidate and pick the first that responds.
         candidates = []
         if Path(PYPORTAL_TTY).exists():
@@ -312,7 +747,7 @@ class TFTDisplay:
             s.write(b'{"mode":"ping"}\n')
             s.flush()
             # Expect an OK or READY within 800ms; otherwise treat as a
-            # different serial device (e.g. PyPortal's REPL console).
+            # different serial device (e.g. the display's REPL console).
             deadline = time.time() + 0.8
             saw_ok = False
             while time.time() < deadline:
@@ -335,14 +770,33 @@ class TFTDisplay:
             # explicit resync, the firmware would render empty fields
             # until the slowest periodic push tick (30s).
             self._needs_resync = True
-            logger.info("TFT initialised via PyPortal on %s @ %d baud",
+            logger.info("TFT initialised via status display on %s @ %d baud",
                         path, PYPORTAL_BAUD)
             return True
         except Exception as e:
-            logger.debug("PyPortal probe %s failed: %s", path, e)
+            logger.debug("status display probe %s failed: %s", path, e)
             return False
 
+    def _mirror_to_v3(self, mode: str, data: Optional[dict]) -> None:
+        """Feed the host's own py-v3 preview from the SAME frames we send the
+        device, so the rendered PNG matches what the panel shows. Best-effort;
+        unknown modes are ignored."""
+        if not data:
+            return
+        try:
+            if mode == "stats":
+                self.update_stats(data)
+            elif mode == "wifi":
+                self.update_wifi(data)
+            elif mode == "cameras":
+                self.update_cameras(data)
+        except Exception as e:                                  # noqa: BLE001
+            logger.debug("v3 mirror (%s) failed: %s", mode, e)
+
     def _pyportal_send(self, mode: str, data: Optional[dict] = None):
+        # Mirror into the host preview store before the connection check so the
+        # sim preview stays live even when no physical panel is attached.
+        self._mirror_to_v3(mode, data)
         if self._pyportal is None:
             return
         payload: dict[str, Any] = {"mode": mode}
@@ -353,11 +807,11 @@ class TFTDisplay:
                 self._pyportal.write(json.dumps(payload).encode("utf-8") + b"\n")
                 self._pyportal.flush()
         except Exception as e:
-            # I/O error usually means the PyPortal re-enumerated on USB
-            # (e.g. firmware reloaded) and our file handle is stale.
+            # I/O error usually means the status display re-enumerated on
+            # USB (e.g. firmware reloaded) and our file handle is stale.
             # Drop the handle, try to re-probe; subsequent calls will
-            # either reconnect or stay quiet until the PyPortal is back.
-            logger.warning("PyPortal write failed (mode=%s): %s — reconnecting", mode, e)
+            # either reconnect or stay quiet until the display is back.
+            logger.warning("status display write failed (mode=%s): %s — reconnecting", mode, e)
             try:
                 with self._pyportal_lock:
                     try:
@@ -437,9 +891,9 @@ class TFTDisplay:
     # ----- Push to display ---------------------------------------------
 
     def _push(self, image: Image.Image):
-        # Both backends write the preview PNG: PyPortal renders the frame
-        # itself from the data commands we stream over serial, and the sim
-        # backend has nothing else to do with the image.
+        # Both backends write the preview PNG: the status display renders the
+        # frame itself from the data commands we stream over serial, and the
+        # sim backend has nothing else to do with the image.
         self._current_image = image
         SIM_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -1023,6 +1477,869 @@ class TFTDisplay:
             y += 24
         return img
 
+    def render_boot(self, stage=None, detail: str = "",
+                    pct: Optional[int] = None, *,
+                    progress: Optional[float] = None) -> Image.Image:
+        """Boot power sequence — the droplet vessel fills with accent liquid.
+
+        Two call shapes (one renderer, no derived state):
+          * ``render_boot(progress=0.0..1.0)`` — the py-v3 animated frame
+            driven by an explicit fill fraction (used by the animation/PNG
+            path).
+          * ``render_boot(stage, detail, pct)`` — the WARP-624 host call
+            (readiness/show_boot). ``pct`` (0..100) maps to the same fill
+            fraction; a 4-stage status line is derived from ``stage`` only
+            when ``progress`` is not given.
+
+        Layout from design_handoff README §4 / preview.html drawBootFrame:
+        116px vessel ~y=44, DROPLET wordmark, 4-stage status line, 184px
+        progress bar, ``Droplet OS · v2.4`` footer.
+        """
+        if progress is None:
+            progress = (max(0, min(100, int(pct))) / 100.0) if pct is not None else 0.45
+        progress = max(0.0, min(1.0, progress))
+
+        img = Image.new("RGB", (WIDTH, HEIGHT), V3_BG)
+        draw = ImageDraw.Draw(img)
+        with self._touch_regions_lock:
+            self._touch_regions = []
+
+        size = 116
+        mx = (WIDTH - size) // 2
+        my = 44
+        mb = my + int(size * 48 / 60)
+        if progress >= 0.999:
+            draw_droplet_mark(draw, mx, my, size, primary=V3_ACCENT,
+                              highlight=V3_ACCENT_INK)
+        else:
+            draw_droplet_mark_liquid(img, draw, mx, my, size, progress)
+
+        font_word = _get_font(14, weight="heavy")
+        _v3_text(draw, "DROPLET", WIDTH // 2, mb + 22, font=font_word,
+                 fill=V3_TEXT, anchor="ma", tracking=5)
+
+        # 4-stage status line. If a host stage string was supplied and no
+        # explicit progress, surface that text; otherwise derive from fill.
+        stages = ["Mounting storage", "Starting network",
+                  "Loading models", "Ready"]
+        if stage and pct is not None:
+            status = str(stage)[:40]
+            done = pct is not None and pct >= 100
+        else:
+            si = min(len(stages) - 1, int(progress * len(stages)))
+            status = stages[si]
+            done = si == len(stages) - 1
+        font_status = _get_font(12, weight="regular")
+        _v3_text(draw, status, WIDTH // 2, mb + 46, font=font_status,
+                 fill=V3_GREEN if done else V3_LABEL3, anchor="ma", tracking=0.4)
+        if detail and not done:
+            font_detail = _get_font(11, weight="regular")
+            _v3_text(draw, str(detail)[:48], WIDTH // 2, mb + 62,
+                     font=font_detail, fill=V3_LABEL4, anchor="ma")
+
+        # 184px progress bar.
+        bw = 184
+        bx = (WIDTH - bw) // 2
+        byy = mb + 70
+        _rrect(draw, bx, byy, bw, 3, 1.5, fill=V3_TRACK)
+        fw = max(3, int(bw * progress))
+        _rrect(draw, bx, byy, fw, 3, 1.5,
+               fill=V3_GREEN if done else V3_ACCENT)
+
+        font_foot = _get_font(10, weight="regular")
+        _v3_text(draw, "Droplet OS · v2.4", WIDTH // 2, HEIGHT - 22,
+                 font=font_foot, fill=V3_LABEL4, anchor="ma", tracking=0.5)
+        return img
+
+    def render_shutdown(self, reason: str = "", phase: str = "stopping", *,
+                        progress: Optional[float] = None) -> Image.Image:
+        """Shutdown power sequence — liquid drains, then a CRT collapse.
+
+        Two call shapes (one renderer):
+          * ``render_shutdown(progress=0.0..1.0)`` — animated frame. The first
+            ~80% drains the vessel + shows the status line; the last ~20% is
+            the CRT collapse (content thins to a phosphor line, then a dot).
+          * ``render_shutdown(reason, phase)`` — WARP-624 host call. A bare
+            ``stopping`` shows the drain frame; ``halted`` shows the
+            fully-collapsed phosphor dot ("safe to power off").
+
+        Layout from design_handoff README §4 / preview.html drawShutdownFrame.
+        """
+        if progress is None:
+            progress = 0.95 if phase == "halted" else 0.35
+        progress = max(0.0, min(1.0, progress))
+
+        img = Image.new("RGB", (WIDTH, HEIGHT), V3_BG)
+        draw = ImageDraw.Draw(img)
+        with self._touch_regions_lock:
+            self._touch_regions = []
+
+        size = 116
+        mx = (WIDTH - size) // 2
+        my = 44
+        mb = my + int(size * 48 / 60)
+        # collapse phase begins at 80% of the sequence.
+        collapse_start = 0.80
+        if progress < collapse_start:
+            drain_p = 1.0 - (progress / collapse_start)
+            draw_droplet_mark_liquid(img, draw, mx, my, size, drain_p)
+            font_word = _get_font(14, weight="heavy")
+            _v3_text(draw, "DROPLET", WIDTH // 2, mb + 22, font=font_word,
+                     fill=V3_LABEL2, anchor="ma", tracking=5)
+            stages = ["Stopping services", "Unmounting storage", "Powering off"]
+            prog = progress / collapse_start
+            si = min(len(stages) - 1, int(prog * len(stages)))
+            font_status = _get_font(12, weight="regular")
+            _v3_text(draw, stages[si], WIDTH // 2, mb + 46, font=font_status,
+                     fill=V3_LABEL3, anchor="ma", tracking=0.4)
+        else:
+            cp = (progress - collapse_start) / (1.0 - collapse_start)
+            if cp < 0.55:
+                h = int((1 - cp / 0.55) * 9 + 2)
+                draw.rectangle([0, HEIGHT // 2 - h // 2, WIDTH,
+                                HEIGHT // 2 - h // 2 + h], fill=V3_PHOSPHOR)
+            elif cp < 0.93:
+                w = int((1 - (cp - 0.55) / 0.38) * WIDTH + 3)
+                w = max(3, w)
+                draw.rectangle([WIDTH // 2 - w // 2, HEIGHT // 2 - 1,
+                                WIDTH // 2 - w // 2 + w, HEIGHT // 2 + 1],
+                               fill=V3_PHOSPHOR)
+            # else: fully black (frame already V3_BG).
+        return img
+
+    # ------------------------------------------------------------------
+    # py-v3 redesign renderers (idle / System+Wi-Fi / standby + alerts)
+    # Mirror services/oled-display/pyportal/code.py 1:1; coordinates &
+    # colors come from design_handoff README + preview.html.
+    # ------------------------------------------------------------------
+
+    @property
+    def clock_mode(self) -> str:
+        return self._clock_mode
+
+    def set_clock_mode(self, mode: str) -> None:
+        """Set 12/24 mode. Only '12'/'24' accepted (garbage is ignored)."""
+        if mode in ("12", "24"):
+            self._clock_mode = mode
+
+    def _fmt_clock_parts(self, now: Optional[_dt_datetime] = None) -> dict:
+        """Shared 12/24 clock formatter (idle hero + System header reuse it).
+
+        Mirrors preview.html fmtClock(): 12h drops the leading hour zero and
+        carries an AM/PM suffix; 24h pads the hour. Returns the pieces so the
+        caller can lay out the hero (colon blink, AM/PM placement) itself.
+        """
+        if now is None:
+            now = _dt_datetime.now(_TZ) if _TZ else _dt_datetime.now()
+        is12 = self._clock_mode == "12"
+        h = now.hour
+        suffix = "PM" if h >= 12 else "AM"
+        if is12:
+            h = ((h + 11) % 12) + 1
+            hh = str(h)
+        else:
+            hh = "{:02d}".format(h)
+        mm = "{:02d}".format(now.minute)
+        return {"hh": hh, "mm": mm, "suffix": suffix if is12 else "",
+                "is12": is12, "second": now.second,
+                "str": hh + ":" + mm + ((" " + suffix) if is12 else "")}
+
+    # ----- alerts -------------------------------------------------------
+
+    def push_alert(self, alert: dict) -> None:
+        a = dict(alert)
+        a.setdefault("type", "sys")
+        a.setdefault("cleared", False)
+        a.setdefault("detail", "")
+        a.setdefault("time", "")
+        self._alerts.insert(0, a)
+        if len(self._alerts) > 20:
+            self._alerts = self._alerts[:20]
+
+    def _open_alerts_count(self) -> int:
+        return sum(1 for a in self._alerts if not a.get("cleared"))
+
+    # ----- live-data updates -------------------------------------------
+
+    def update_stats(self, data: dict) -> None:
+        # A real stats frame landed — mark live data present for the warm-start
+        # readiness short-circuit (WARP-638).
+        self._got_live_data = True
+        for k in ("cpu", "mem", "disk", "temp", "ip", "hostname", "uptime",
+                  "now", "date"):
+            if k in data and data[k] is not None:
+                self._v3[k] = data[k]
+        try:
+            self._v3["sparks_cpu"].append(float(self._v3.get("cpu") or 0))
+            if len(self._v3["sparks_cpu"]) > self._v3_spark_len:
+                self._v3["sparks_cpu"] = \
+                    self._v3["sparks_cpu"][-self._v3_spark_len:]
+        except (TypeError, ValueError):
+            pass
+
+    def update_wifi(self, data: dict) -> None:
+        for k, v in data.items():
+            self._v3["wifi"][k] = v
+
+    def update_cameras(self, data: dict) -> None:
+        self._v3["cameras"] = {"online": data.get("online", 0),
+                               "total": data.get("total", 0)}
+
+    def update_net(self, data: dict) -> None:
+        if "wan_latency_ms" in data:
+            self._v3["wan_latency_ms"] = data["wan_latency_ms"]
+        if "lan_clients" in data:
+            self._v3["lan_clients"] = data["lan_clients"]
+
+    def seed_cpu_history(self, value: float, n: Optional[int] = None) -> None:
+        """Fill the CPU sparkline buffer with jittered samples around `value`
+        so a freshly-seeded sim renders a believable sparkline (dev/PNG only)."""
+        import random
+        n = n or self._v3_spark_len
+        self._v3["sparks_cpu"] = [
+            max(3.0, min(92.0, value + random.uniform(-6, 6))) for _ in range(n)
+        ]
+
+    # ----- the redesigned frames ---------------------------------------
+
+    def render_idle(self, now: Optional[_dt_datetime] = None) -> Image.Image:
+        """Editorial hero clock (design_handoff §1 / preview.html drawIdle)."""
+        if now is None:
+            now = _dt_datetime.now(_TZ) if _TZ else _dt_datetime.now()
+        img = Image.new("RGB", (WIDTH, HEIGHT), V3_BG)
+        draw = ImageDraw.Draw(img)
+        with self._touch_regions_lock:
+            self._touch_regions = []
+
+        # Brand bug — top-left mark + DROPLET eyebrow.
+        draw_droplet_mark(draw, 20, 18, 20, primary=V3_ACCENT,
+                          highlight=V3_ACCENT_INK)
+        _v3_text(draw, "DROPLET", 50, 24, font=_get_font(9, weight="bold"),
+                 fill=V3_LABEL3, tracking=2)
+
+        # 12/24 segmented toggle — top-right (two 38px cells, h26).
+        seg_w, seg_h, tg_y = 38, 26, 17
+        tg_x = WIDTH - 20 - seg_w * 2
+        _rrect(draw, tg_x, tg_y, seg_w * 2, seg_h, 8, fill=V3_SURFACE)
+        _rrect(draw, tg_x, tg_y, seg_w * 2, seg_h, 8, outline=V3_SEP, width=1)
+        for i, opt in enumerate(("12", "24")):
+            cx = tg_x + i * seg_w
+            on = self._clock_mode == opt
+            if on:
+                _rrect(draw, cx, tg_y, seg_w, seg_h, 8, fill=V3_ACCENT_SUBTLE)
+            _v3_text(draw, opt, cx + seg_w // 2, tg_y + seg_h // 2,
+                     font=_get_font(12, weight="heavy" if on else "regular"),
+                     fill=V3_ACCENT_INK if on else V3_LABEL4, anchor="mm")
+            self._touch_regions.append(TouchRegion(
+                "toggle_" + opt, cx, tg_y - 4, seg_w, seg_h + 8,
+                (lambda o=opt: self.set_clock_mode(o))))
+        # 1px divider between cells.
+        draw.rectangle([tg_x + seg_w, tg_y + 5, tg_x + seg_w,
+                        tg_y + seg_h - 5], fill=V3_SEP)
+
+        # Hero clock — 132px, weight 800, -6 tracking, colon blink.
+        parts = self._fmt_clock_parts(now)
+        colon = ":" if (parts["second"] % 2 == 0) else " "
+        time_str = parts["hh"] + colon + parts["mm"]
+        clock_y = 150
+        hero = _get_font(132, weight="heavy")
+        tw = _v3_text_width(draw, time_str, hero, tracking=-6)
+        suffix_gap = 14
+        suffix_font = _get_font(24, weight="heavy")
+        suffix_w = (_v3_text_width(draw, parts["suffix"], suffix_font, 1)
+                    + suffix_gap) if parts["is12"] else 0
+        cx_center = WIDTH / 2 - suffix_w / 2
+        _v3_text(draw, time_str, int(cx_center), clock_y, font=hero,
+                 fill=V3_TEXT, anchor="mm", tracking=-6)
+        if parts["is12"]:
+            right_edge = cx_center + tw / 2
+            _v3_text(draw, parts["suffix"], int(right_edge + suffix_gap),
+                     clock_y, font=suffix_font, fill=V3_ACCENT, anchor="lm",
+                     tracking=1)
+
+        # 56x3 accent rule under the clock at y=220.
+        rule_w = 56
+        _rrect(draw, WIDTH // 2 - rule_w // 2, clock_y + 70, rule_w, 3, 1.5,
+               fill=V3_ACCENT)
+
+        # Bottom-left date.
+        date_str = (self._v3.get("date") or
+                    now.strftime("%A, %b %d")).upper()
+        _v3_text(draw, date_str, 20, HEIGHT - 28,
+                 font=_get_font(11, weight="bold"), fill=V3_LABEL3, tracking=1.6)
+
+        # Bottom-right green dot + SSID.
+        ssid = str(self._v3["wifi"].get("ssid") or "Droplet-AI")
+        ssid_font = _get_font(11, weight="bold")
+        ssid_w = _v3_text_width(draw, ssid, ssid_font)
+        draw.ellipse([WIDTH - 20 - ssid_w - 14 - 3, HEIGHT - 23 - 3,
+                      WIDTH - 20 - ssid_w - 14 + 3, HEIGHT - 23 + 3],
+                     fill=V3_GREEN)
+        _v3_text(draw, ssid, WIDTH - 20, HEIGHT - 28, font=ssid_font,
+                 fill=V3_ACCENT, anchor="ra")
+
+        # Seconds progress hairline along the bottom edge.
+        sec_frac = parts["second"] / 60.0
+        draw.rectangle([0, HEIGHT - 2, WIDTH, HEIGHT], fill=V3_TRACK)
+        draw.rectangle([0, HEIGHT - 2, max(2, int(WIDTH * sec_frac)), HEIGHT],
+                       fill=V3_ACCENT_DIM)
+
+        self._touch_regions.append(TouchRegion(
+            "idle_wake", 0, 0, WIDTH, HEIGHT, lambda: self._go_system()))
+        return img
+
+    def render_system(self, now: Optional[_dt_datetime] = None) -> Image.Image:
+        """Combined System + Wi-Fi screen (design_handoff §2 / drawStats)."""
+        if now is None:
+            now = _dt_datetime.now(_TZ) if _TZ else _dt_datetime.now()
+        img = Image.new("RGB", (WIDTH, HEIGHT), V3_BG)
+        draw = ImageDraw.Draw(img)
+        with self._touch_regions_lock:
+            self._touch_regions = []
+        v = self._v3
+        open_count = self._open_alerts_count()
+
+        # ---- header band ----
+        _v3_text(draw, "SYSTEM", 20, 12, font=_get_font(9, weight="bold"),
+                 fill=V3_LABEL3, tracking=1.6)
+        clk = self._fmt_clock_parts(now)["str"]
+        clk_font = _get_font(13, weight="bold")
+        _v3_text(draw, clk, WIDTH - 20, 9, font=clk_font, fill=V3_LABEL2,
+                 anchor="ra")
+        time_w = _v3_text_width(draw, clk, clk_font)
+        if open_count > 0:
+            br = 11
+            bx = int(WIDTH - 20 - time_w - 20 - br)
+            by = 17
+            draw.ellipse([bx - br, by - br, bx + br, by + br], fill=V3_RED)
+            _v3_text(draw, "!", bx, by, font=_get_font(15, weight="heavy"),
+                     fill=V3_WHITE, anchor="mm")
+            if open_count > 1:
+                cw, cch = 15, 12
+                _rrect(draw, bx + br - 5, by - br - 3, cw, cch, cch // 2,
+                       fill=V3_WHITE)
+                _v3_text(draw, str(open_count), bx + br - 5 + cw // 2,
+                         by - br - 3 + cch // 2,
+                         font=_get_font(8, weight="bold"), fill=V3_RED,
+                         anchor="mm")
+            self._touch_regions.append(TouchRegion(
+                "alert_badge", bx - br - 6, by - br - 7, br * 2 + 14,
+                br * 2 + 14, self._open_drawer))
+        else:
+            sxs = int(WIDTH - 20 - time_w - 16)
+            draw.ellipse([sxs - 4, 16 - 4, sxs + 4, 16 + 4], fill=V3_GREEN)
+            _v3_text(draw, "OK", sxs - 8, 16, font=_get_font(11, weight="bold"),
+                     fill=V3_GREEN, anchor="rm")
+        draw.rectangle([20, 32, WIDTH - 20, 32], fill=V3_SEP)
+
+        # ---- column divider at x=288 ----
+        DIV = 288
+        INW = DIV - 20 - 22
+        draw.rectangle([DIV, 46, DIV, HEIGHT - 24], fill=V3_SEP)
+
+        # ===== LEFT: system =====
+        _v3_text(draw, "CPU LOAD", 20, 46, font=_get_font(9, weight="bold"),
+                 fill=V3_LABEL3, tracking=1.6)
+        _v3_text(draw, "{}%".format(int(v.get("cpu") or 0)), 20, 58,
+                 font=_get_font(52, weight="heavy"), fill=V3_TEXT, tracking=-2)
+
+        # sparkline (48-sample CPU history).
+        sp = v.get("sparks_cpu") or []
+        sx, sy, sw, sh = 20, 120, INW, 40
+        draw.rectangle([sx, sy + sh - 1, sx + sw, sy + sh - 1], fill=V3_SEP)
+        if len(sp) >= 2:
+            lo, hi = min(sp), max(sp)
+            span = max(1.0, hi - lo)
+            pts = [(sx + (i / (len(sp) - 1)) * sw,
+                    sy + sh - ((val - lo) / span) * sh)
+                   for i, val in enumerate(sp)]
+            # filled area under the line.
+            draw.polygon(pts + [(sx + sw, sy + sh), (sx, sy + sh)],
+                         fill=V3_SPARK_FILL)
+            draw.line(pts, fill=V3_ACCENT, width=2, joint="curve")
+
+        draw.rectangle([20, 172, 20 + INW, 172], fill=V3_SEP)
+
+        # tabular metrics row (MEM / DISK / TEMP / CAM).
+        cams = v.get("cameras") or {}
+        cols = [
+            ("MEM", "{}%".format(int(v.get("mem") or 0)), V3_TEXT),
+            ("DISK", "{}%".format(int(v.get("disk") or 0)), V3_TEXT),
+            ("TEMP", "{}°".format(int(v.get("temp") or 0)), V3_TEXT),
+            ("CAM", "{}/{}".format(cams.get("online", 0),
+                                   cams.get("total", 0)), V3_GREEN),
+        ]
+        col_w = INW / 4
+        for i, (lbl, val, col) in enumerate(cols):
+            x = int(20 + i * col_w)
+            _v3_text(draw, lbl, x, 182, font=_get_font(9, weight="bold"),
+                     fill=V3_LABEL3, tracking=1.2)
+            _v3_text(draw, val, x, 196, font=_get_font(22, weight="heavy"),
+                     fill=col)
+
+        # detail line.
+        _v3_text(draw, "WAN {}ms   ·   UP {}   ·   LAN {}".format(
+                     v.get("wan_latency_ms", 0), v.get("uptime", "-"),
+                     v.get("lan_clients", 0)),
+                 20, 244, font=_get_font(10, weight="regular"), fill=V3_LABEL3)
+
+        # bottom strip.
+        _v3_text(draw, "{} · {}".format(v.get("hostname", "-"),
+                                              v.get("ip", "-")),
+                 20, HEIGHT - 24, font=_get_font(10, weight="regular"),
+                 fill=V3_LABEL3)
+
+        # ===== RIGHT: Wi-Fi pairing =====
+        RX = 300
+        RW = WIDTH - 20 - RX  # 160
+        _v3_text(draw, "PAIR · WI-FI", RX, 46,
+                 font=_get_font(9, weight="bold"), fill=V3_ACCENT, tracking=1.6)
+
+        # QR card (132x132, white, radius 12) + droplet mark inset center.
+        card_w = 132
+        card_x = RX + (RW - card_w) // 2
+        card_y = 60
+        _rrect(draw, card_x, card_y, card_w, card_w, 12, fill=V3_WHITE)
+        wifi = v.get("wifi") or {}
+        # WARP-819: escape WiFi-QR metachars (same helper as the claim screen)
+        # so a special-char SSID/PSK still scans, matching device-bridge.py.
+        payload = _wifi_qr_payload(
+            wifi.get("ssid") or "Droplet-AI", wifi.get("password") or "")
+        self._draw_qr(img, draw, card_x + 9, card_y + 9, card_w - 18,
+                      payload=payload)
+        mc = 26
+        mcx = card_x + 9 + (card_w - 18) // 2 - mc // 2
+        mcy = card_y + 9 + (card_w - 18) // 2 - mc // 2
+        _rrect(draw, mcx - 3, mcy - 3, mc + 6, mc + 6, 6, fill=V3_WHITE)
+        draw_droplet_mark(draw, mcx, mcy, mc, primary=V3_ACCENT,
+                          highlight=V3_ACCENT_INK)
+
+        yy = card_y + card_w + 14
+        _v3_text(draw, "NETWORK", RX, yy, font=_get_font(9, weight="bold"),
+                 fill=V3_LABEL3, tracking=1.2)
+        _v3_text(draw, str(wifi.get("ssid") or "Droplet-AI"), RX, yy + 12,
+                 font=_get_font(14, weight="bold"), fill=V3_TEXT)
+        _v3_text(draw, "PASSWORD", RX, yy + 34, font=_get_font(9, weight="bold"),
+                 fill=V3_LABEL3, tracking=1.2)
+        _v3_text(draw, str(wifi.get("password") or ""), RX, yy + 46,
+                 font=_get_font(13, weight="regular"), fill=V3_ACCENT_INK)
+
+        # KEY rotate pill + TTL chip — ONLY when key rotation is enabled.
+        # WARP-638: mirrors the firmware. The box default is rotation OFF (the
+        # bridge's qr_snapshot returns rotation_enabled=False), and tapping the
+        # pill in that state drove a fresh-QR re-render that OOMed the SAMD51.
+        # When rotation is disabled we draw NO pill and register NO tap region,
+        # so the host preview matches the panel and there's no rotate affordance.
+        if bool(wifi.get("rotation_enabled")):
+            secs = int(wifi.get("key_ttl_seconds") or 0)
+            warn = secs < 60
+            pill_y = yy + 68
+            pill_h = 26
+            _rrect(draw, RX, pill_y, RW, pill_h, 8,
+                   fill=V3_ORANGE_SUBTLE if warn else V3_SURFACE)
+            _rrect(draw, RX, pill_y, RW, pill_h, 8,
+                   outline=V3_ORANGE if warn else V3_SEP2, width=1)
+            # U+21BB (↻) reads as the handoff's ⟳ rotate glyph and, unlike ⟳
+            # (U+27F3), is present in Inter — so the sim PNG shows a real arrow,
+            # not tofu.
+            _v3_text(draw, "↻  KEY {}:{:02d}".format(secs // 60, secs % 60),
+                     RX + RW // 2, pill_y + pill_h // 2,
+                     font=_get_font(11, weight="bold"),
+                     fill=V3_ORANGE if warn else V3_LABEL2, anchor="mm")
+            self._touch_regions.append(TouchRegion(
+                "key_rotate", RX, pill_y - 3, RW, pill_h + 6,
+                self._rotate_key))
+
+        # Alerts drawer overlay.
+        if self._events_open:
+            self._render_alerts_drawer(draw)
+        return img
+
+    def _draw_qr(self, img: Image.Image, draw: ImageDraw.ImageDraw,
+                 x: int, y: int, size: int, payload: str = None,
+                 matrix: Optional[List[List[int]]] = None) -> None:
+        """Render a Wi-Fi join QR into the white card.
+
+        Two sources, in priority order:
+          1. an explicit host-supplied `matrix` (0/1 rows) — painted verbatim.
+             This is the production-faithful path: the firmware paints the same
+             host-encoded matrix on the device, so passing it here keeps the sim
+             preview byte-identical to the panel (WARP-819).
+          2. otherwise encode `payload` with the `qrcode` package (a service
+             dep) — the sim-only fallback when no matrix was supplied.
+        Falls back to a deterministic pseudo-matrix purely so the sim/PNG still
+        shows a card if neither a matrix nor qrcode is available.
+        """
+        if not matrix and payload is not None:
+            try:
+                import qrcode
+                qr = qrcode.QRCode(
+                    border=0,
+                    error_correction=qrcode.constants.ERROR_CORRECT_M)
+                qr.add_data(payload)
+                qr.make(fit=True)
+                matrix = qr.get_matrix()
+            except Exception:
+                matrix = None
+        if not matrix:
+            # Deterministic pseudo-matrix (layout only).
+            n = 25
+            matrix = [[((i * 73856093) ^ (j * 19349663)) >> 8 & 1
+                       for j in range(n)] for i in range(n)]
+        n = len(matrix)
+        cell = size / n
+        for i, row in enumerate(matrix):
+            for j, val in enumerate(row):
+                if val:
+                    px = x + j * cell
+                    py = y + i * cell
+                    draw.rectangle([px, py, px + cell + 0.6, py + cell + 0.6],
+                                   fill=(0x0A, 0x0A, 0x1E))
+
+    def _render_alerts_drawer(self, draw: ImageDraw.ImageDraw) -> None:
+        """300px right drawer over the System screen (design_handoff §3)."""
+        # Dim — emulate rgba(0,0,0,0.55) with a flat dark wash (sim has no
+        # alpha-composite here; the device dims via a solid black overlay too).
+        dim = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 140))
+        # Paint dim onto the frame the caller is drawing into.
+        # (draw is bound to the system image; reuse it via blend.)
+        # Simpler: draw a near-black flat over everything.
+        draw.rectangle([0, 0, WIDTH, HEIGHT], fill=(2, 2, 3))
+        _ = dim  # documented intent; flat fill is the device-faithful path
+        dw = 300
+        dx = WIDTH - dw
+        draw.rectangle([dx, 0, WIDTH, HEIGHT], fill=V3_PANEL)
+        draw.rectangle([dx, 0, dx, HEIGHT], fill=V3_SEP)
+
+        _v3_text(draw, "ALERTS", dx + 14, 16, font=_get_font(11, weight="bold"),
+                 fill=V3_LABEL2, tracking=1.4)
+        n = self._open_alerts_count()
+        # Close control on the far right; the "n open" count is right-aligned
+        # just left of it with clearance so the two never collide. U+00D7 (×)
+        # reads as a close glyph and renders in Inter (unlike ✕ / U+2715).
+        _v3_text(draw, "×", dx + dw - 16, 14,
+                 font=_get_font(20, weight="regular"), fill=V3_LABEL2,
+                 anchor="ma")
+        _v3_text(draw, "{} open".format(n), dx + dw - 36, 16,
+                 font=_get_font(10, weight="regular"), fill=V3_LABEL3,
+                 anchor="ra")
+        self._touch_regions.append(TouchRegion(
+            "drawer_close", dx + dw - 32, 6, 28, 28, self._close_drawer))
+
+        y = 44
+        row_h = 58
+        visible = self._alerts[:4]
+        if not visible:
+            _v3_text(draw, "No alerts.", dx + dw // 2, HEIGHT // 2,
+                     font=_get_font(14, weight="regular"), fill=V3_LABEL3,
+                     anchor="mm")
+        else:
+            for i, a in enumerate(visible):
+                cleared = a.get("cleared")
+                _rrect(draw, dx + 10, y, dw - 20, row_h - 6, 8,
+                       fill=V3_SURFACE if cleared else V3_SURFACE2)
+                _rrect(draw, dx + 10, y, dw - 20, row_h - 6, 8,
+                       outline=V3_SEP, width=1)
+                icon = (V3_LABEL3 if cleared else
+                        (V3_RED if a.get("type") == "cam" else V3_ORANGE))
+                draw.ellipse([dx + 24 - 5, y + 24 - 5, dx + 24 + 5, y + 24 + 5],
+                             fill=icon)
+                _v3_text(draw, str(a.get("title") or "")[:26], dx + 40, y + 10,
+                         font=_get_font(12, weight="bold"),
+                         fill=V3_LABEL3 if cleared else V3_TEXT)
+                _v3_text(draw, str(a.get("detail") or "")[:30], dx + 40, y + 26,
+                         font=_get_font(10, weight="regular"), fill=V3_LABEL3)
+                _v3_text(draw, str(a.get("time") or "")[:16], dx + 40, y + 40,
+                         font=_get_font(9, weight="regular"), fill=V3_LABEL4)
+                if not cleared:
+                    _v3_text(draw, "×", dx + dw - 22, y + 26,
+                             font=_get_font(18, weight="regular"),
+                             fill=V3_LABEL3, anchor="mm")
+                    self._touch_regions.append(TouchRegion(
+                        "drawer_clear_{}".format(i), dx + dw - 36, y + 4, 30,
+                        row_h - 12, (lambda ii=i: self._clear_alert(ii))))
+                y += row_h
+
+        cbtn_y = HEIGHT - 52
+        _rrect(draw, dx + 14, cbtn_y, dw - 28, 40, 12, fill=V3_SURFACE2)
+        _rrect(draw, dx + 14, cbtn_y, dw - 28, 40, 12, outline=V3_SEP2, width=1)
+        _v3_text(draw, "Clear all", dx + dw // 2, cbtn_y + 20,
+                 font=_get_font(13, weight="regular"), fill=V3_LABEL2,
+                 anchor="mm")
+        self._touch_regions.append(TouchRegion(
+            "drawer_clear_all", dx + 14, cbtn_y, dw - 28, 40,
+            self._clear_all_alerts))
+
+    def render_standby(self) -> Image.Image:
+        """Powered-off standby screen (design_handoff §4 Standby)."""
+        img = Image.new("RGB", (WIDTH, HEIGHT), V3_BG)
+        draw = ImageDraw.Draw(img)
+        with self._touch_regions_lock:
+            self._touch_regions = []
+        size = 78
+        mx = (WIDTH - size) // 2
+        my = HEIGHT // 2 - int(size * 0.55)
+        mb = my + int(size * 48 / 60)
+        draw_droplet_mark(draw, mx, my, size, primary=(0x14, 0x14, 0x22),
+                          highlight=(0x1A, 0x1A, 0x30))
+        _v3_text(draw, "STANDBY", WIDTH // 2, mb + 20,
+                 font=_get_font(10, weight="bold"), fill=V3_LABEL4, anchor="ma",
+                 tracking=3)
+        _v3_text(draw, "tap to power on", WIDTH // 2, mb + 38,
+                 font=_get_font(11, weight="regular"), fill=V3_LABEL3,
+                 anchor="ma")
+        self._touch_regions.append(TouchRegion(
+            "standby_wake", 0, 0, WIDTH, HEIGHT, lambda: self._go_system()))
+        return img
+
+    def render_claim(self, code: str, setup_url: str,
+                     wifi_ssid: Optional[str] = None,
+                     wifi_psk: Optional[str] = None,
+                     wifi_qr_matrix: Optional[List[List[int]]] = None,
+                     setup_qr_matrix: Optional[List[List[int]]] = None
+                     ) -> Image.Image:
+        """Onboarding claim screen (WARP-632 / ADR-017), design-handoff
+        two-column layout ("PyPortal First Boot — Claim Code").
+
+        A header band (brand mark + DROPLET wordmark, FIRST-TIME SETUP status
+        on the right), then two columns split by a hairline: the LEFT column
+        is the hero — the claim code drawn as its dash-separated groups with
+        accent dash bars between them, an accent rule, and the numbered
+        link steps — and the RIGHT column is a white scan QR card. The foot
+        carries the WAITING TO BE CLAIMED dots over a 2px scan track.
+        Tokens, mark and spacing match the boot/idle/System screens. Mirrors
+        the firmware's render_claim() 1:1.
+
+        Without a Wi-Fi block the QR deep-links the setup wizard
+        (`<setup_url>?c=<CODE>` — host-encoded `setup_qr_matrix` preferred,
+        sim-side payload encode as the fallback) so a scan lands with the
+        code prefilled. WARP-819: when the box's Wi-Fi-connect creds are
+        supplied, the join-QR takes the card instead (joining the box's
+        Wi-Fi is the one step a fresh phone can't do by hand) with the
+        SSID/PSK as readable text under it (camera-less manual join), and
+        the steps gain a "Join Wi-Fi" first step. A partial Wi-Fi block
+        degrades to the claim-only layout, unchanged.
+
+        Modal + host-driven: the orchestrator mints the code and pushes it
+        while the box is unclaimed; the host navigates away once it's claimed.
+
+        Deliberate descopes from the handoff card (revisit knowingly, not by
+        accident): the bottom-left DEVICE id line (no device identity exists
+        in the claim-frame contract — adding one is an orchestrator change),
+        the claimed-success confirm screen (drawClaimed — needs a new
+        orchestrator-pushed mode; today the host simply navigates away), and
+        the header-dot pulse + scan-track shimmer (static on both halves;
+        the WAITING dots are the claim screen's only motion, firmware heap
+        discipline).
+        """
+        has_wifi = bool(wifi_qr_matrix and wifi_ssid)
+
+        img = Image.new("RGB", (WIDTH, HEIGHT), V3_BG)
+        draw = ImageDraw.Draw(img)
+        with self._touch_regions_lock:
+            self._touch_regions = []
+
+        # ---- Header band: mark + wordmark, first-time-setup status --------
+        font_eyebrow = _get_font(9, weight="bold")
+        draw_droplet_mark(draw, 20, 17, 20,
+                          primary=V3_ACCENT, highlight=V3_ACCENT_INK)
+        _v3_text(draw, "DROPLET", 50, 21, font=font_eyebrow,
+                 fill=V3_LABEL3, tracking=2)
+        setup_lbl = "FIRST-TIME SETUP"
+        slw = _v3_text_width(draw, setup_lbl, font_eyebrow, 1.4)
+        _v3_text(draw, setup_lbl, WIDTH - 20, 21, font=font_eyebrow,
+                 fill=V3_ACCENT, anchor="ra", tracking=1.4)
+        # Status dot left of the label. Static on BOTH halves — the design's
+        # slow alpha pulse is dropped on firmware (heap discipline: the
+        # WAITING dots carry the claim screen's only motion).
+        dcx = int(WIDTH - 20 - slw - 12)
+        draw.ellipse([dcx - 3, 23, dcx + 3, 29], fill=V3_ACCENT)
+        draw.rectangle([20, 44, WIDTH - 20, 44], fill=V3_SEP)
+
+        # ---- Column divider ------------------------------------------------
+        div_x = 284
+        draw.rectangle([div_x, 58, div_x, HEIGHT - 26], fill=V3_SEP)
+
+        # ================= LEFT — claim code hero + steps ===================
+        _v3_text(draw, "CLAIM CODE", 20, 56, font=font_eyebrow,
+                 fill=V3_ACCENT, tracking=1.6)
+
+        # Hero code — the dash-separated groups drawn with accent dash bars
+        # between them; auto-fits the heavy face into the column.
+        code_text = (code or "").strip().upper()
+        groups = [g for g in code_text.split("-") if g]
+        code_y = 76
+        left_max = div_x - 20 - 16
+        if groups:
+            size = 30
+            font_code = _get_font(size, weight="heavy")
+            while size > 14:
+                font_code = _get_font(size, weight="heavy")
+                gap = max(5, int(size * 0.30))
+                dash_w = max(6, int(size * 0.30))
+                total = (sum(_v3_text_width(draw, g, font_code, 1)
+                             for g in groups)
+                         + (len(groups) - 1) * (gap * 2 + dash_w))
+                if total <= left_max:
+                    break
+                size -= 1
+            dash_h = max(3, int(size * 0.09))
+            cx = 20.0
+            for i, group in enumerate(groups):
+                cx += _v3_text(draw, group, int(cx), code_y, font=font_code,
+                               fill=V3_TEXT, tracking=1)
+                if i < len(groups) - 1:
+                    cx += gap
+                    _rrect(draw, cx, code_y + size * 0.55 - dash_h / 2,
+                           dash_w, dash_h, dash_h // 2, fill=V3_ACCENT)
+                    cx += dash_w + gap
+            code_h = size
+        else:
+            # Host hasn't pushed a code yet — defensive placeholder, like the
+            # firmware's "----  ----".
+            _v3_text(draw, "— — — —", 20, code_y,
+                     font=_get_font(30, weight="heavy"), fill=V3_LABEL4)
+            code_h = 30
+
+        # Accent rule under the code.
+        _rrect(draw, 20, code_y + code_h + 16, 56, 3, 1, fill=V3_ACCENT)
+
+        # Numbered link steps. With Wi-Fi creds the join step leads — a fresh
+        # phone can't reach the setup URL before it's on the box's network.
+        host = (setup_url or "").strip()
+        for prefix in ("https://", "http://"):
+            if host.startswith(prefix):
+                host = host[len(prefix):]
+                break
+        host = host.rstrip("/")
+
+        _v3_text(draw, "TO LINK THIS DEVICE", 20, 148,
+                 font=font_eyebrow, fill=V3_LABEL3, tracking=1.2)
+        steps = []
+        if has_wifi:
+            steps.append(("Join Wi-Fi", str(wifi_ssid or "")[:18]))
+        if host:
+            # A DUCKDNS-style hostname overflows the inline slot — wrap the
+            # address onto its own line rather than truncating the /setup
+            # path away (in the Wi-Fi layout this text is the only typed
+            # setup pointer; the setup QR is deliberately off that card).
+            steps.append(("Go to", host[:37]))
+        steps.append(("Enter the code above", ""))
+
+        font_step = _get_font(12, weight="regular")
+        font_step_b = _get_font(12, weight="bold")
+        font_badge = _get_font(11, weight="heavy")
+        sy = 168
+        for i, (lead, em) in enumerate(steps):
+            _rrect(draw, 20, sy, 18, 18, 5, fill=V3_ACCENT_SUBTLE)
+            _v3_text(draw, str(i + 1), 29, sy + 9, font=font_badge,
+                     fill=V3_ACCENT_INK, anchor="mm")
+            if em and len(em) > 26:
+                _v3_text(draw, lead, 46, sy + 9, font=font_step,
+                         fill=V3_LABEL2, anchor="lm")
+                _v3_text(draw, em, 46, sy + 23, font=font_step_b,
+                         fill=V3_ACCENT_INK, anchor="lm")
+                sy += 14
+            elif em:
+                lead_w = _v3_text(draw, lead + " ", 46, sy + 9, font=font_step,
+                                  fill=V3_LABEL2, anchor="lm")
+                _v3_text(draw, em, 46 + lead_w, sy + 9, font=font_step_b,
+                         fill=V3_ACCENT_INK, anchor="lm")
+            else:
+                _v3_text(draw, lead, 46, sy + 9, font=font_step,
+                         fill=V3_LABEL2, anchor="lm")
+            sy += 28
+
+        # ================= RIGHT — scan QR card =============================
+        rx = div_x + 16
+        rw = WIDTH - 20 - rx
+        # Resolve the card's matrix FIRST so the eyebrow/caption stay honest:
+        # a card with no scannable matrix must never read "SCAN TO CLAIM".
+        # The firmware applies the same rule, so preview and panel agree in
+        # the no-matrix skew window too — no pseudo-QR paper-over here.
+        if has_wifi:
+            qr_payload = _wifi_qr_payload(wifi_ssid or "", wifi_psk or "")
+            qr_matrix = wifi_qr_matrix
+        else:
+            qr_payload = _setup_qr_payload(setup_url, code_text)
+            qr_matrix = setup_qr_matrix or _encode_qr_matrix(qr_payload)
+        has_qr = bool(qr_matrix)
+        if has_wifi:
+            eyebrow_r = "SCAN TO JOIN WI-FI"
+        else:
+            eyebrow_r = "SCAN TO CLAIM" if has_qr else "SETUP"
+        _v3_text(draw, eyebrow_r, rx, 56, font=font_eyebrow, fill=V3_ACCENT,
+                 tracking=1.2)
+
+        card_w = 128
+        card_x = rx + (rw - card_w) // 2
+        card_y = 72
+        _rrect(draw, card_x, card_y, card_w, card_w, 12, fill=V3_WHITE)
+        qx, qy, qz = card_x + 9, card_y + 9, card_w - 18
+        if has_qr:
+            # Production-faithful: paint the host-encoded matrix (what the
+            # firmware paints) so preview and panel match (WARP-819 idiom).
+            self._draw_qr(img, draw, qx, qy, qz,
+                          payload=qr_payload or None, matrix=qr_matrix)
+        # Centre mark pad: sits inside the ECC budget — the setup matrix is
+        # encoded at ERROR_CORRECT_Q for exactly this overlay (see
+        # _encode_qr_matrix).
+        mc = 26
+        mcx = card_x + card_w // 2 - mc // 2
+        mcy = card_y + card_w // 2 - mc // 2
+        _rrect(draw, mcx - 3, mcy - 3, mc + 6, mc + 6, 6, fill=V3_WHITE)
+        draw_droplet_mark(draw, mcx, mcy, mc, primary=V3_ACCENT,
+                          highlight=V3_ACCENT_INK)
+
+        cap_y = card_y + card_w + 12
+        if has_wifi:
+            _v3_text(draw, "Joins this Droplet's Wi-Fi", rx + rw // 2, cap_y,
+                     font=_get_font(10, weight="regular"), fill=V3_LABEL3,
+                     anchor="ma")
+            # Readable creds under the card — camera-less manual join
+            # (WARP-819): the SSID and the password as text.
+            _v3_text(draw, str(wifi_ssid or "")[:20], rx + rw // 2, cap_y + 17,
+                     font=_get_font(12, weight="bold"), fill=V3_TEXT,
+                     anchor="ma")
+            # The PSK is the thing a camera-less user types by hand, so it must
+            # be shown in FULL: truncating a longer passphrase silently breaks
+            # the join. Mirror the firmware (pyportal/code.py): the card holds
+            # rw // 6 chars per line, so wrap the PSK across as many lines as it
+            # needs (WARP-819 preview/panel parity).
+            psk_text = str(wifi_psk or "")
+            psk_cpl = max(1, rw // 6)
+            psk_font = _get_font(11, weight="regular")
+            psk_y = cap_y + 34
+            for i in range(0, len(psk_text), psk_cpl):
+                _v3_text(draw, psk_text[i:i + psk_cpl], rx + rw // 2, psk_y,
+                         font=psk_font, fill=V3_ACCENT_INK, anchor="ma")
+                psk_y += 12
+        else:
+            _v3_text(draw,
+                     "Opens setup on your phone" if has_qr
+                     else "Use the address above",
+                     rx + rw // 2, cap_y,
+                     font=_get_font(10, weight="regular"), fill=V3_LABEL3,
+                     anchor="ma")
+
+        # ---- Foot: waiting status + scan track -----------------------------
+        waiting = "WAITING TO BE CLAIMED"
+        wlw = _v3_text_width(draw, waiting, font_eyebrow, 0.6)
+        _v3_text(draw, waiting, WIDTH - 20, HEIGHT - 27, font=font_eyebrow,
+                 fill=V3_ACCENT, anchor="ra", tracking=0.6)
+        for i in range(3):
+            ddx = int(WIDTH - 20 - wlw - 22 + i * 7)
+            draw.ellipse([ddx - 2, HEIGHT - 25, ddx + 2, HEIGHT - 21],
+                         fill=V3_ACCENT if i == 0 else V3_ACCENT_FAINT)
+
+        # 2px scan track with an accent segment. Static on BOTH halves — the
+        # design's travelling shimmer is dropped on firmware (same heap
+        # discipline; the WAITING dots are the only claim-screen motion).
+        draw.rectangle([0, HEIGHT - 2, WIDTH, HEIGHT], fill=V3_TRACK)
+        seg_x = (WIDTH - 90) // 2
+        draw.rectangle([seg_x, HEIGHT - 2, seg_x + 90, HEIGHT], fill=V3_ACCENT)
+        return img
+
     @staticmethod
     def _draw_metric_card(draw, x, y, w, h, label, value, pct,
                           font_label, font_value, font_sm, danger_thresh=(80, 95)):
@@ -1069,10 +2386,11 @@ class TFTDisplay:
 
     @staticmethod
     def _get_cpu_temp() -> float:
-        # psutil.sensors_temperatures() blows up on Jetson because some
-        # thermal zones (soc0-thermal, BCPU-therm, PLL-therm) return
-        # blank strings from /sys — psutil can't parse them. Read the
-        # thermal zones directly instead and pick the hottest valid one.
+        # psutil.sensors_temperatures() can fail on some inference hosts
+        # because certain thermal zones (soc0-thermal, BCPU-therm,
+        # PLL-therm) return blank strings from /sys — psutil can't parse
+        # them. Read the thermal zones directly instead and pick the
+        # hottest valid one.
         best = 0.0
         try:
             for zone in sorted(os.listdir("/sys/class/thermal")):
@@ -1128,6 +2446,21 @@ class TFTDisplay:
             self._pyportal_send("stats", self._gather_stats())
             self._render_current_locked()
 
+    def show_system(self):
+        """Navigate the panel to the combined System + Wi-Fi screen (py-v3).
+
+        Sends a BARE {"mode":"system"} nav (no data) so the firmware leaves
+        whatever screen it is on — notably the modal claim screen once the box
+        is claimed — and renders the live System screen (stats + built-in Wi-Fi
+        pairing QR). Distinct from show_stats(), which streams a stats *data*
+        frame the firmware only re-renders when already on System; that path
+        does NOT navigate off the claim screen.
+        """
+        with self._lock:
+            self._current_mode = self.SYSTEM
+            self._pyportal_send("system")
+            self._render_current_locked()
+
     def show_message(self, title: str, lines: List[str]):
         with self._lock:
             self._current_mode = self.MESSAGE
@@ -1137,6 +2470,123 @@ class TFTDisplay:
             self._message_clear_at = time.time() + MESSAGE_RETURN_HOME_AFTER
             self._pyportal_send("message", {"title": title, "lines": list(lines)})
             self._render_current_locked()
+
+    def show_boot(self, stage: str, detail: str = "",
+                  pct: Optional[int] = None):
+        """Show the boot screen with a stage caption + optional progress.
+
+        Self-driven by the service (the readiness loop and lifespan call
+        this); also exposed via POST /display/boot for finer-grained boot
+        progress from the host's startup orchestration.
+        """
+        with self._lock:
+            self._current_mode = self.BOOT
+            self._boot_stage = stage
+            self._boot_detail = detail
+            self._boot_pct = pct
+            self._pyportal_send("boot", {
+                "stage": stage, "detail": detail, "pct": pct,
+            })
+            self._render_current_locked()
+
+    def show_shutdown(self, reason: str = "", phase: str = "stopping"):
+        """Show the shutdown screen and freeze the panel on it.
+
+        Stops the cycle loop first so no periodic re-render or auto-cycle
+        tick overwrites the shutdown frame while the host tears the stack
+        down. `phase == 'halted'` switches the copy to "Safe to power off".
+        """
+        # Stop cycling outside the lock — stop_cycle only flips a flag and
+        # the loop checks it each tick; doing it first guarantees nothing
+        # races the frame we are about to push.
+        self.stop_cycle()
+        with self._lock:
+            self._current_mode = self.SHUTDOWN
+            self._shutdown_reason = reason
+            self._shutdown_phase = phase
+            self._pyportal_send("shutdown", {
+                "reason": reason, "phase": phase,
+            })
+            self._render_current_locked()
+
+    def show_claim(self, code: str, setup_url: str,
+                   wifi_ssid: Optional[str] = None,
+                   wifi_psk: Optional[str] = None,
+                   wifi_qr_matrix: Optional[List[List[int]]] = None):
+        """Show the onboarding claim screen (WARP-632 / ADR-017).
+
+        Host-driven: the orchestrator mints the claim code and POSTs it to
+        /display/claim while the box is unclaimed. We set the `claim` mode,
+        stream a `claim` frame to the firmware (the render path to the PHYSICAL
+        panel — NOT the preview-only /display/custom image path), and render a
+        sim preview frame so the dashboard preview works too.
+
+        WARP-819: the optional wifi_* args add the box's Wi-Fi-connect QR matrix
+        + SSID + PSK so the claim screen also shows how to join the box's Wi-Fi
+        (scan, or type the creds on a camera-less PC). They are stored and
+        forwarded to the firmware in the same `claim` frame; absent → the
+        original claim-only layout renders (graceful degradation). Only the
+        wifi_* keys actually present are put on the wire so the firmware merge
+        never clobbers prior creds with nulls.
+        """
+        with self._lock:
+            sig = (code, setup_url, wifi_ssid or "", wifi_psk or "",
+                   wifi_qr_matrix or None)
+            if sig == self._claim_frame_sig and \
+                    self._current_mode == self.CLAIM:
+                # Unchanged push from the orchestrator's poll tick — no-op.
+                # Re-sending an identical frame makes the firmware tear down
+                # and rebuild the same ~100-element tree (blanking the panel)
+                # and re-encoding the same QR is pure waste. The
+                # READY/REQUEST_STATE resync path re-sends explicitly via
+                # _resend_claim_locked, so firmware-reload recovery is not
+                # gated on this signature.
+                return
+            self._current_mode = self.CLAIM
+            self._claim_code = code
+            self._claim_setup_url = setup_url
+            self._claim_wifi_ssid = wifi_ssid or ""
+            self._claim_wifi_psk = wifi_psk or ""
+            self._claim_wifi_qr_matrix = wifi_qr_matrix or None
+            has_wifi = bool(wifi_qr_matrix and wifi_ssid)
+            # Scan-to-claim deep link (design handoff): encode the setup QR
+            # host-side — the firmware paints the matrix verbatim, same
+            # contract as the Wi-Fi QR. Only when the Wi-Fi join QR is NOT
+            # taking the card: at most one matrix per claim frame so the
+            # firmware never holds two QR bitmaps on its ~165 KB heap
+            # (WARP-638 posture).
+            self._claim_setup_qr_matrix = (
+                None if has_wifi
+                else _encode_qr_matrix(_setup_qr_payload(setup_url, code)))
+            self._claim_frame_sig = sig
+            self._resend_claim_locked()
+            self._render_current_locked()
+
+    def _resend_claim_locked(self):
+        """Send the retained claim frame to the firmware. Assumes _lock held.
+
+        Used by show_claim (fresh or changed push) and by the
+        READY/REQUEST_STATE resync: the claim screen is modal + host-driven,
+        so after a firmware reload the panel won't show it again until a
+        frame arrives — and show_claim's unchanged-push dedup would swallow
+        the orchestrator's next tick. Re-sending here makes firmware-reload
+        recovery immediate instead of one poll tick late.
+        """
+        frame = {"code": self._claim_code,
+                 "setup_url": self._claim_setup_url}
+        if self._claim_wifi_qr_matrix and self._claim_wifi_ssid:
+            frame["wifi_qr_matrix"] = self._claim_wifi_qr_matrix
+            frame["wifi_ssid"] = self._claim_wifi_ssid
+            # Only put wifi_psk on the wire when it is non-empty. The
+            # firmware resets the wifi_* keys before merging each claim
+            # frame, so OMITTING psk here clears any stale psk rather than
+            # re-sending wifi_psk:"" (WARP-819) — matching show_claim's
+            # "only the keys actually present are put on the wire" contract.
+            if self._claim_wifi_psk:
+                frame["wifi_psk"] = self._claim_wifi_psk
+        elif self._claim_setup_qr_matrix:
+            frame["setup_qr_matrix"] = self._claim_setup_qr_matrix
+        self._pyportal_send("claim", frame)
 
     def show_custom_image(self, image: Image.Image):
         with self._lock:
@@ -1162,7 +2612,7 @@ class TFTDisplay:
                         )
                         self._pyportal.flush()
             except Exception as e:
-                logger.warning("PyPortal brightness write failed: %s", e)
+                logger.warning("status display brightness write failed: %s", e)
         # Re-render settings page if that's where we are so the number
         # and bar update instantly.
         with self._lock:
@@ -1186,6 +2636,54 @@ class TFTDisplay:
     def _go_settings(self):
         self._set_mode(self.SETTINGS)
 
+    # --- py-v3 nav + alert actions (bound to the redesigned touch regions) --
+    def _go_idle(self):
+        self._set_mode(self.IDLE, pause_cycle=False)
+
+    def _go_system(self):
+        self._events_open = False
+        self._set_mode(self.SYSTEM)
+
+    def _open_drawer(self):
+        self._events_open = True
+        with self._lock:
+            self._render_current_locked()
+
+    def _close_drawer(self):
+        self._events_open = False
+        with self._lock:
+            self._render_current_locked()
+
+    def _clear_alert(self, idx: int):
+        if 0 <= idx < len(self._alerts):
+            self._alerts[idx]["cleared"] = True
+        with self._lock:
+            self._render_current_locked()
+
+    def _clear_all_alerts(self):
+        self._alerts = []
+        self._events_open = False
+        with self._lock:
+            self._render_current_locked()
+
+    def _rotate_key(self):
+        """KEY-pill tap: roll the Wi-Fi key via the bridge + push a fresh QR.
+
+        Reuses the same bridge round-trip as the firmware's ROTATE_KEY line so
+        the host behavior is identical whether the tap originates on the device
+        or in the sim. Optimistically resets the local TTL so the pill updates
+        immediately; the next /openwrt/qr push corrects it.
+        """
+        self._v3["wifi"]["key_ttl_seconds"] = 60 * 60
+        self.push_alert({"type": "sys", "title": "Wi-Fi key rotated",
+                         "detail": "Droplet-AI · scan new QR", "time": "just now"})
+        try:
+            self.rotate_wifi_key()
+        except Exception as e:                                  # noqa: BLE001
+            logger.debug("rotate_key bridge call failed: %s", e)
+        with self._lock:
+            self._render_current_locked()
+
     def _toggle_cycle(self):
         if self._cycle_running and self._cycle_paused_until < time.time():
             self.stop_cycle()
@@ -1204,7 +2702,27 @@ class TFTDisplay:
     def _render_current_locked(self):
         """Render whatever the current screen is. Assumes _lock held."""
         mode = self._current_mode
-        if mode == self.LOGO:
+        if mode == self.BOOT:
+            img = self.render_boot(self._boot_stage, self._boot_detail,
+                                   self._boot_pct)
+        elif mode == self.SHUTDOWN:
+            img = self.render_shutdown(self._shutdown_reason,
+                                       self._shutdown_phase)
+        elif mode == self.CLAIM:
+            img = self.render_claim(
+                self._claim_code, self._claim_setup_url,
+                wifi_ssid=self._claim_wifi_ssid,
+                wifi_psk=self._claim_wifi_psk,
+                wifi_qr_matrix=self._claim_wifi_qr_matrix,
+                setup_qr_matrix=self._claim_setup_qr_matrix,
+            )
+        elif mode == self.IDLE:
+            img = self.render_idle()
+        elif mode == self.SYSTEM:
+            img = self.render_system()
+        elif mode == self.STANDBY:
+            img = self.render_standby()
+        elif mode == self.LOGO:
             img = self.render_logo()
         elif mode == self.STATS:
             img = self.render_stats()
@@ -1221,7 +2739,7 @@ class TFTDisplay:
             img = self.render_home()
         self._push(img)
 
-    # ----- Structured-data helpers (used by PyPortal backend) ----------
+    # ----- Structured-data helpers (used by status display backend) ----------
 
     def _gather_stats(self) -> dict:
         try:
@@ -1253,8 +2771,8 @@ class TFTDisplay:
             "ip": self._get_ip(),
             "hostname": socket.gethostname(),
             "uptime": uptime,
-            # Wall-clock for the PyPortal header. The PyPortal has no RTC
-            # and time.localtime() there counts from boot, so we push
+            # Wall-clock for the status display header. The display has no
+            # RTC and time.localtime() there counts from boot, so we push
             # local time on every stats update. Container runs UTC so
             # we compute the zoned time explicitly.
             "now": (datetime.now(_TZ) if _TZ else datetime.now()).strftime("%H:%M"),
@@ -1284,13 +2802,32 @@ class TFTDisplay:
                     self._pyportal_send(mode, snap)
             except Exception as e:                          # noqa: BLE001
                 logger.warning("resync %s failed: %s", mode, e)
+        # The claim screen is modal + host-driven: if it's what we're
+        # showing, the resync must restore it too — the periodic stats/wifi
+        # pushes won't, and show_claim's unchanged-push dedup would swallow
+        # the orchestrator's next identical tick.
+        try:
+            with self._lock:
+                if self._current_mode == self.CLAIM and self._claim_code:
+                    self._resend_claim_locked()
+        except Exception as e:                              # noqa: BLE001
+            logger.warning("resync claim failed: %s", e)
 
     # ----- Wi-Fi helper -------------------------------------------------
 
     def _bridge_get(self, path: str, timeout: float = 6.0) -> Optional[dict]:
+        # WARP-659: the bridge now gates its credential-bearing reads
+        # (/openwrt/qr, /drives) on the shared secret, so send it on every GET
+        # (harmless on the still-open /wifi /files /cameras). Same env
+        # precedence as the rotate/connect POSTs above.
+        token = (os.environ.get("BRIDGE_AUTH_TOKEN")
+                 or os.environ.get("SERVICE_SECRET")
+                 or os.environ.get("DEVICE_SECRET_KEY")
+                 or "").strip()
+        headers = {"X-Droplet-Auth": token} if token else {}
         try:
-            with urllib.request.urlopen(
-                    WIFI_HELPER_URL + path, timeout=timeout) as r:
+            req = urllib.request.Request(WIFI_HELPER_URL + path, headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout) as r:
                 return json.loads(r.read().decode("utf-8"))
         except Exception as e:                                       # noqa: BLE001
             logger.debug("bridge %s fetch failed: %s", path, e)
@@ -1310,9 +2847,9 @@ class TFTDisplay:
 
     def rotate_wifi_key(self, timeout: float = 30.0) -> Optional[dict]:
         """Ask device-bridge to roll the Droplet-AI WPA key. Used by the
-        PyPortal's "Rotate now" button on the QR screen — the board sends
-        `ROTATE_KEY` over serial, we POST here, then re-push /openwrt/qr
-        so the display shows the new QR immediately.
+        status display's "Rotate now" button on the QR screen — the board
+        sends `ROTATE_KEY` over serial, we POST here, then re-push
+        /openwrt/qr so the display shows the new QR immediately.
 
         Sends the bridge auth token as `X-Droplet-Auth` so the bridge's
         rate-limited rotate endpoint accepts it. Token comes from
@@ -1407,6 +2944,129 @@ class TFTDisplay:
                 return r.name
         return None
 
+    # ----- Boot readiness ----------------------------------------------
+
+    def _check_pyportal_liveness(self, now: Optional[float] = None) -> bool:
+        """Verify the live PyPortal link is still real; drop a stale fd.
+
+        WARP-638: when the PyPortal is reset its USB CDC re-enumerates. The
+        kernel renumbers ttyACM* and the old node disappears, but our open fd
+        to it doesn't fail — writes silently succeed-with-no-effect and reads
+        return zero bytes, so the reconnect-on-IOError path in `_pyportal_send`
+        never fires and the device sits on its boot screen forever against a
+        dead host fd. The cheapest reliable signal is `os.path.exists()` on the
+        node we opened: if it's gone, drop the fd and fall back to sim so the
+        cycle loop's promotion block re-probes whatever ttyACM* is now live
+        (which sets `_needs_resync`, so the firmware refills on reconnect).
+
+        Returns True if it dropped the link this call (the caller should re-probe
+        immediately), else False. Throttled to LIVENESS_CHECK_INTERVAL so it
+        doesn't stat /dev on every ~80ms cycle tick. `now` is injectable for
+        deterministic tests.
+        """
+        if self._backend != "pyportal" or not self._pyportal_path:
+            return False
+        if now is None:
+            now = time.time()
+        if now - self._last_liveness_check < LIVENESS_CHECK_INTERVAL:
+            return False
+        self._last_liveness_check = now
+        if os.path.exists(self._pyportal_path):
+            return False
+        logger.warning(
+            "status display %s vanished (USB re-enumeration?) — dropping fd "
+            "and re-probing", self._pyportal_path)
+        try:
+            with self._pyportal_lock:
+                try:
+                    if self._pyportal is not None:
+                        self._pyportal.close()
+                except Exception:
+                    pass
+                self._pyportal = None
+                self._pyportal_path = None
+                self._backend = "sim"
+        except Exception:
+            pass
+        return True
+
+    def _check_readiness(self) -> bool:
+        """Probe the readiness URL; True only on a 2xx.
+
+        Cheap and fail-safe: any connection error / non-2xx reads as "not
+        ready yet" (returns False, never raises) so a still-starting stack
+        doesn't crash the cycle loop.
+
+        WARP-638: passes an unverified SSL context so urllib can follow nginx's
+        :80 -> :443 redirect onto the self-signed loopback cert instead of
+        dying on cert verification (the 90s-every-boot root cause). For a
+        plain-HTTP URL the context is simply unused.
+        """
+        try:
+            req = urllib.request.Request(BOOT_READINESS_URL, method="GET")
+            with urllib.request.urlopen(
+                    req, timeout=2.0, context=_READINESS_SSL_CTX) as r:
+                return 200 <= getattr(r, "status", 0) < 300
+        except Exception as e:                                       # noqa: BLE001
+            logger.debug("readiness probe failed: %s", e)
+            return False
+
+    def _readiness_tick(self, now: Optional[float] = None) -> None:
+        """Advance the boot->live transition. Called from the cycle loop.
+
+        No-op once boot is complete (we never yank the user back, and never
+        re-probe). Otherwise, at most once per BOOT_READINESS_INTERVAL,
+        probe readiness; flip to the live UI when the probe passes OR when
+        BOOT_MAX_SECONDS have elapsed (timeout fallback so a degraded stack
+        still surfaces the UI). `now` is injectable for deterministic tests.
+        """
+        if self._boot_complete:
+            return
+        if now is None:
+            now = time.time()
+        # Timeout fallback first so a hung readiness endpoint can't pin the
+        # splash past the budget.
+        if now - self._boot_started_at >= BOOT_MAX_SECONDS:
+            logger.warning(
+                "boot readiness timed out after %ss — surfacing live UI",
+                BOOT_MAX_SECONDS)
+            self._complete_boot()
+            return
+        # WARP-638 warm-start short-circuit: if the firmware link is live AND a
+        # real stats frame has already been ingested, the stack is plainly up —
+        # surface the UI now instead of waiting on the HTTP probe (let alone the
+        # 90s timeout). This is the common (re)start case: the orchestrator was
+        # never down, it's already pushing stats. Cold boot (sim backend / no
+        # data yet) falls through to the probe below, preserving the cold path.
+        if self._backend == "pyportal" and self._got_live_data:
+            logger.info("warm start — live link + fresh stats; surfacing UI")
+            self._complete_boot()
+            return
+        if now - self._last_readiness_check < BOOT_READINESS_INTERVAL:
+            return
+        self._last_readiness_check = now
+        if self._check_readiness():
+            logger.info("boot readiness satisfied — surfacing live UI")
+            self._complete_boot()
+
+    def _complete_boot(self) -> None:
+        """Mark boot done and drop to the live UI (combined System screen).
+
+        Emit a BARE stats frame ({"mode":"stats"}, no data) so the firmware
+        navigates off the boot splash: code.py's handle() only calls
+        set_screen() on a bare-mode message, while a data-laden push merely
+        updates state. The firmware aliases bare "stats" -> the combined
+        "system" screen (py-v3), so the WIRE frame stays "stats" — the
+        navigation contract is unchanged — while the host's own preview
+        renders the new SYSTEM screen. Without the bare frame the real
+        PyPortal would stay frozen on the boot sequence forever. (WARP-624/B1)
+        """
+        self._boot_complete = True
+        # Bare nav frame on the wire (firmware aliases stats -> system).
+        self._pyportal_send(self.STATS)
+        # Host-side preview lands on the combined System+Wi-Fi screen.
+        self._set_mode(self.SYSTEM, pause_cycle=False)
+
     # ----- Auto-cycle / interactive loop -------------------------------
 
     def start_cycle(self):
@@ -1436,8 +3096,8 @@ class TFTDisplay:
           1. Checks for a new touch press->release and dispatches it.
           2. Re-renders live screens (stats/home/settings) so metrics
              and tap highlights stay fresh.
-          3. Pushes stats + wifi scan snapshots to the PyPortal so its
-             screens stay current.
+          3. Pushes stats + wifi scan snapshots to the status display so
+             its screens stay current.
           4. Optionally auto-advances if AUTO_CYCLE=1 and we're idle.
         """
         last_press = 0
@@ -1448,45 +3108,22 @@ class TFTDisplay:
         last_files_push = 0.0
         last_cams_push = 0.0
         last_backend_retry = 0.0
-        last_liveness_check = 0.0
         serial_buf = b""
         while self._cycle_running:
-            # Liveness check: detect a stale PyPortal serial fd left behind
-            # by a USB re-enumeration. The kernel renumbers ttyACM* on
-            # firmware reset / replug / hub reset, but our open fd to the
-            # old node doesn't fail — writes silently succeed-with-no-effect
-            # and reads return zero bytes, so the existing reconnect-on-
-            # IOError path in `_pyportal_send` never triggers. If our path
-            # has vanished from /dev, drop the fd and let the promotion
-            # block below re-probe whatever ttyACM* is now live.
-            if (self._backend == "pyportal" and self._pyportal_path
-                    and time.time() - last_liveness_check > 2.0):
-                last_liveness_check = time.time()
-                if not os.path.exists(self._pyportal_path):
-                    logger.warning(
-                        "PyPortal device %s vanished (USB re-enumeration?) "
-                        "— dropping fd and re-probing",
-                        self._pyportal_path)
-                    try:
-                        with self._pyportal_lock:
-                            try:
-                                if self._pyportal is not None:
-                                    self._pyportal.close()
-                            except Exception:
-                                pass
-                            self._pyportal = None
-                            self._pyportal_path = None
-                            self._backend = "sim"
-                    except Exception:
-                        pass
-                    # Force the next iteration's promotion block to retry
-                    # immediately rather than waiting out a fresh 5s window.
-                    last_backend_retry = 0.0
+            # Liveness check (WARP-638): detect a stale status display serial fd
+            # left behind by a USB re-enumeration (firmware reset / replug / hub
+            # reset). If the node we opened has vanished from /dev, the helper
+            # drops the fd and falls back to sim; we then force the promotion
+            # block below to re-probe immediately (which sets _needs_resync, so
+            # the firmware refills on reconnect) instead of waiting out a fresh
+            # 5s window. Throttled internally to LIVENESS_CHECK_INTERVAL.
+            if self._check_pyportal_liveness():
+                last_backend_retry = 0.0
 
             # If we started on sim because USB enumeration hadn't finished
             # yet, keep probing every 5s and promote to pyportal once it
-            # appears. Covers the cold-boot race where the Jetson starts
-            # the container before /dev/ttyACM* is ready.
+            # appears. Covers the cold-boot race where the inference host
+            # starts the container before /dev/ttyACM* is ready.
             if self._backend != "pyportal":
                 if time.time() - last_backend_retry > 5.0:
                     last_backend_retry = time.time()
@@ -1527,6 +3164,11 @@ class TFTDisplay:
 
             now = time.time()
 
+            # Boot -> live transition (WARP-624). Hosted on this managed
+            # cycle thread (no separate scheduler). Internally gated to
+            # ~every BOOT_READINESS_INTERVAL and a no-op once boot is done.
+            self._readiness_tick(now)
+
             # Return home after a message timeout
             if (self._current_mode == self.MESSAGE and
                     self._message_clear_at and
@@ -1534,16 +3176,18 @@ class TFTDisplay:
                 self._message_clear_at = 0
                 self._go_home()
 
-            # Live re-render of time-sensitive screens
-            live = (self._current_mode in (self.HOME, self.STATS, self.SETTINGS))
+            # Live re-render of time-sensitive screens (incl. the py-v3 idle
+            # clock + combined System screen so the preview stays current).
+            live = (self._current_mode in (self.HOME, self.STATS, self.SETTINGS,
+                                           self.IDLE, self.SYSTEM))
             if live and (now - last_full_render) > 1.0:
                 with self._lock:
                     self._render_current_locked()
                 last_full_render = now
 
-            # Keep the PyPortal's local data snapshot fresh. The PyPortal
-            # renders locally; we push data every few seconds so every
-            # screen has live numbers when the user navigates to it.
+            # Keep the status display's local data snapshot fresh. The
+            # display renders locally; we push data every few seconds so
+            # every screen has live numbers when the user navigates to it.
             # A longer cadence (8s) keeps perceived flicker low — the
             # firmware re-renders the active screen on each push.
             if self._backend == "pyportal" and (now - last_stats_push) > 8.0:
@@ -1574,7 +3218,7 @@ class TFTDisplay:
                         self._pyportal_send("drives", drv)
                     self._last_drives_push = now
 
-            # Handle async requests from the PyPortal firmware. The
+            # Handle async requests from the status display firmware. The
             # firmware emits plain TEXT:arg lines on its side channel —
             # we drain them here and trigger a one-shot refresh.
             if self._backend == "pyportal" and self._pyportal is not None:
@@ -1602,9 +3246,9 @@ class TFTDisplay:
                         # Full-snapshot resync: fired when the firmware boots
                         # (READY) or explicitly asks for state (REQUEST_STATE,
                         # which our firmware sends right after READY). Without
-                        # this, a code.py auto-reload would leave the PyPortal
-                        # rendering empty screens until each periodic push
-                        # cycle ticks over (up to 30s worst-case). The
+                        # this, a code.py auto-reload would leave the status
+                        # display rendering empty screens until each periodic
+                        # push cycle ticks over (up to 30s worst-case). The
                         # post-probe resync block above also calls
                         # `_push_full_state` for the host-side path (fresh
                         # probe / re-probe after USB re-enumeration); both
@@ -1623,9 +3267,9 @@ class TFTDisplay:
                         if qr is not None:
                             self._pyportal_send("qr", qr)
                     elif txt == "ROTATE_KEY":
-                        # PyPortal asked us to roll the Wi-Fi key. Ask the
-                        # bridge to do the UCI change on OpenWrt, then push
-                        # the fresh QR so the user can scan it right away.
+                        # The status display asked us to roll the Wi-Fi key.
+                        # Ask the bridge to do the UCI change on OpenWrt,
+                        # then push the fresh QR so the user can scan it.
                         resp = self.rotate_wifi_key()
                         logger.info("pyportal: rotate -> %s", resp)
                         qr = self.fetch_qr()

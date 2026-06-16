@@ -1,16 +1,26 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
+  ArrowRight,
+  BadgeCheck,
+  Building2,
   Cpu,
   FolderOpen,
   Globe,
   HardDrive,
   MessageSquare,
+  Search,
   Sparkles,
+  Users,
   Video,
+  Wifi,
 } from "lucide-react";
 import { WizardReplay } from "@/components/help/WizardReplay";
+import { searchHelp } from "@/lib/help-index";
+import { ShellPage } from "@/components/shell/ShellPage";
+import { LifeBuoy } from "lucide-react";
 
 /**
  * /help — single-page customer-facing manual for Droplet.
@@ -25,7 +35,31 @@ import { WizardReplay } from "@/components/help/WizardReplay";
  * The page is plain-text on purpose — no markdown library needed.
  */
 export default function HelpPage() {
+  const router = useRouter();
   const [replayOpen, setReplayOpen] = useState(false);
+  const [query, setQuery] = useState("");
+
+  const trimmed = query.trim();
+  const searching = trimmed.length > 0;
+  // Ranked matches from the local in-repo index. Memoized so we don't
+  // re-rank on unrelated re-renders.
+  const results = useMemo(
+    () => (searching ? searchHelp(trimmed) : []),
+    [searching, trimmed],
+  );
+
+  // Hand the query to on-device chat using the same pendingPrompt handoff the
+  // home-page hero uses (sessionStorage → /chat auto-sends once a model is
+  // ready). No new endpoint — "Ask Droplet AI" is local chat, not a cloud
+  // search.
+  const askDropletAI = () => {
+    try {
+      window.sessionStorage.setItem("droplet.pendingPrompt", trimmed);
+    } catch {
+      /* private mode — /chat still opens, just without the prefilled prompt */
+    }
+    router.push("/chat");
+  };
 
   // If the URL carries a hash (#internet, #cameras, etc.) and the page
   // mounted before the hash was processed, scroll to the section after
@@ -46,68 +80,102 @@ export default function HelpPage() {
     }
   }, []);
 
+  const howItWorks = (
+    <button type="button" onClick={() => setReplayOpen(true)} className="btn">
+      <Sparkles size={16} aria-hidden="true" />
+      How Droplet works
+    </button>
+  );
+
   return (
-    <div className="p-6 lg:p-8 max-w-3xl mx-auto">
-      <header className="mb-8">
-        <h1 className="type-large-title text-label-primary mb-2">Help</h1>
-        <p className="type-body text-label-secondary mb-5">
-          Plain answers to the questions that come up most often. Looking
-          for the original setup walkthrough? Tap the button below.
-        </p>
-        <button
-          type="button"
-          onClick={() => setReplayOpen(true)}
-          className="dp-btn-secondary"
-        >
-          <Sparkles size={16} aria-hidden="true" />
-          How Droplet works
-        </button>
-      </header>
+    <ShellPage
+      icon={<LifeBuoy size={15} />}
+      label="Help"
+      title="Help"
+      sub="Plain answers to the questions that come up most often. Looking for the original setup walkthrough? Tap the button on the right."
+      actions={howItWorks}
+    >
+      {/* Search over the local help index. Offline — no cloud round-trip. */}
+      <div className="search" style={{ maxWidth: "none", marginBottom: 24 }}>
+        <Search size={18} aria-hidden="true" />
+        <input
+          type="search"
+          role="searchbox"
+          aria-label="Search help"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search help — cameras, VPN, storage…"
+        />
+      </div>
 
-      <nav
-        aria-label="Help table of contents"
-        className="dp-card !p-4 mb-8"
-      >
-        <p className="type-subheadline text-label-primary mb-2">
-          On this page
-        </p>
-        <ul className="space-y-1 type-footnote text-label-secondary">
-          {SECTIONS.map((s) => (
-            <li key={s.anchor}>
-              <a
-                href={`#${s.anchor}`}
-                className="text-accent hover:underline"
-              >
-                {s.title}
-              </a>
-            </li>
-          ))}
-        </ul>
-      </nav>
-
-      {SECTIONS.map((section) => (
-        <section
-          key={section.anchor}
-          id={section.anchor}
-          className="mb-10 scroll-mt-20"
-        >
-          <div className="flex items-center gap-2 mb-3">
-            <section.Icon size={20} className="text-accent" />
-            <h2 className="type-title-2 text-label-primary">
-              {section.title}
-            </h2>
-          </div>
-          <div className="space-y-3 type-body text-label-secondary">
-            {section.body}
-          </div>
+      {searching ? (
+        <section aria-label="Search results">
+          {results.length === 0 ? (
+            <div className="card">
+              <div className="empty">
+                <span className="eh">No results for &ldquo;{trimmed}&rdquo;</span>
+                <span>
+                  Nothing in the on-box help matched. Ask the local AI — it can answer in your own
+                  words, privately on this Droplet.
+                </span>
+                <button type="button" onClick={askDropletAI} className="btn primary" style={{ marginTop: 10 }}>
+                  <MessageSquare size={16} aria-hidden="true" />
+                  Ask Droplet AI
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <p style={{ fontSize: 13, color: "var(--text-muted)" }}>
+                {results.length} result{results.length !== 1 ? "s" : ""}
+              </p>
+              {results.map((r) => (
+                <a key={r.id} href={`#${r.id}`} onClick={() => setQuery("")} className="card hover" style={{ display: "block" }}>
+                  <p style={{ fontSize: 14, fontWeight: 600, color: "var(--text)", marginBottom: 4 }}>{r.title}</p>
+                  <p className="clamp2" style={{ fontSize: 13, color: "var(--text-muted)" }}>{r.summary}</p>
+                </a>
+              ))}
+              <button type="button" onClick={askDropletAI} className="btn">
+                <MessageSquare size={16} aria-hidden="true" />
+                Ask Droplet AI instead
+                <ArrowRight size={16} aria-hidden="true" />
+              </button>
+            </div>
+          )}
         </section>
-      ))}
+      ) : (
+        <>
+          <nav aria-label="Help table of contents" className="card" style={{ marginBottom: 28 }}>
+            <p style={{ fontSize: 14, fontWeight: 600, color: "var(--text)", marginBottom: 8 }}>On this page</p>
+            <ul style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 13 }}>
+              {SECTIONS.map((s) => (
+                <li key={s.anchor}>
+                  <a href={`#${s.anchor}`} className="text-accent hover:underline">
+                    {s.title}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </nav>
 
-      <WizardReplay
-        open={replayOpen}
-        onClose={() => setReplayOpen(false)}
-      />
-    </div>
+          {SECTIONS.map((section) => (
+            <section key={section.anchor} id={section.anchor} style={{ marginBottom: 36, scrollMarginTop: 80 }}>
+              <div className="sect">
+                <h2 style={{ display: "inline-flex", alignItems: "center", gap: 9, fontSize: 20 }}>
+                  <section.Icon size={20} style={{ color: "var(--brand)" }} />
+                  {section.title}
+                </h2>
+              </div>
+              <div className="ds-help-prose" style={{ display: "flex", flexDirection: "column", gap: 12, color: "var(--text-muted)", lineHeight: 1.6 }}>
+                {section.body}
+              </div>
+            </section>
+          ))}
+        </>
+      )}
+
+      <WizardReplay open={replayOpen} onClose={() => setReplayOpen(false)} />
+    </ShellPage>
   );
 }
 
@@ -123,6 +191,96 @@ interface Section {
 }
 
 const SECTIONS: Section[] = [
+  {
+    anchor: "claim",
+    title: "Claiming your Droplet",
+    Icon: BadgeCheck,
+    body: (
+      <>
+        <p>
+          Claiming binds this specific box to your workspace, so only you
+          can set it up and control it. It&rsquo;s a one-time step the first
+          time you turn the Droplet on.
+        </p>
+        <p>
+          <strong>Where&rsquo;s the code?</strong> A short code shaped like{" "}
+          <span className="font-mono">DRPL-XXXX-XXXX</span> appears on the
+          display on the front of the unit. Type it into the Claim step, or
+          scan the on-screen QR code with your phone to jump straight there.
+        </p>
+        <p>
+          <strong>No code showing?</strong> Make sure the box is powered on
+          and the display is awake, then try again. The code only ever shows
+          on the unit itself — it never leaves your network.
+        </p>
+      </>
+    ),
+  },
+  {
+    anchor: "workspace",
+    title: "Your workspace",
+    Icon: Building2,
+    body: (
+      <>
+        <p>
+          A workspace is the shared home for everyone who uses this
+          Droplet — your files, chats, cameras, and people all live inside
+          it. Most homes need just one.
+        </p>
+        <p>
+          <strong>Name and address:</strong> the workspace name is what
+          people see; the short web address (the &ldquo;slug&rdquo;) is used
+          in links. You can rename the workspace later from Settings.
+        </p>
+      </>
+    ),
+  },
+  {
+    anchor: "roles",
+    title: "Team & roles",
+    Icon: Users,
+    body: (
+      <>
+        <p>
+          Invite the people who share this Droplet from the People page (or
+          the wizard&rsquo;s team step). Everyone signs in with their own
+          account — nothing is shared by password.
+        </p>
+        <p>
+          <strong>Roles:</strong> owners can do everything, including
+          factory-reset and managing other people; admins handle day-to-day
+          settings and devices; and members use the Droplet&rsquo;s files,
+          chat, and cameras without changing how it&rsquo;s set up.
+        </p>
+        <p>
+          <strong>To invite someone:</strong> open People in the sidebar,
+          tap Invite, choose a role, and share the invite link. You can
+          change or remove someone&rsquo;s access at any time.
+        </p>
+      </>
+    ),
+  },
+  {
+    anchor: "extenders",
+    title: "Wi-Fi extenders",
+    Icon: Wifi,
+    body: (
+      <>
+        <p>
+          If parts of your home are out of the Droplet&rsquo;s Wi-Fi range,
+          add a Droplet extender to widen coverage. Plug it in on the same
+          network and it shows up on the Network page for one-tap approval —
+          usually within about 30 seconds.
+        </p>
+        <p>
+          <strong>To approve one:</strong> open Network in the sidebar, find
+          the pending extender, and tap Approve. It joins your
+          Droplet&rsquo;s Wi-Fi and starts relaying right away — no separate
+          app or account needed.
+        </p>
+      </>
+    ),
+  },
   {
     anchor: "internet",
     title: "Internet (DuckDNS)",

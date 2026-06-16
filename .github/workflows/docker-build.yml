@@ -67,8 +67,11 @@ jobs:
       # Validate compose YAML before eating the full build cost.
       # Ignore the "variable not set" warnings from unbaked secrets —
       # those are only used at runtime, not at build time.
+      # `--profile eval` covers services/rag-eval/ even though it doesn't
+      # auto-start at runtime — image build is still gated by CI so a
+      # Dockerfile typo in the eval lane fails the PR.
       - name: Validate compose file
-        run: docker compose -f docker/docker-compose.yml --profile full config --quiet
+        run: docker compose -f docker/docker-compose.yml --profile full --profile eval config --quiet
 
       - name: Build all images
-        run: docker compose -f docker/docker-compose.yml --profile full build --pull
+        run: docker compose -f docker/docker-compose.yml --profile full --profile eval build --pull

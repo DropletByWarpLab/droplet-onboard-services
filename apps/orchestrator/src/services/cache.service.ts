@@ -70,11 +70,86 @@ export async function cacheSet(
   }
 }
 
+/**
+ * Atomic set-if-not-exists. Writes `value` only when `key` does not already
+ * exist, with a TTL, in a single Redis round-trip (`SET … NX EX`). Returns
+ * `true` when the caller created the key (won the race), `false` when the key
+ * already existed (lost the race).
+ *
+ * Unlike `cacheGet`/`cacheSet`, this is a correctness primitive, not an
+ * optimization: it backs the refresh-token rotation claim (jwt.service), where
+ * a non-atomic check-then-set lets two concurrent callers both "win". For that
+ * reason it fails CLOSED — any Redis error (or a missing client) returns
+ * `false` (claim not granted) rather than silently succeeding. A caller that
+ * gets `false` must reject the operation it was guarding.
+ */
+export async function cacheSetNx(
+  key: string,
+  value: unknown,
+  ttlSeconds: number = 60,
+): Promise<boolean> {
+  try {
+    const reply = await getRedis().set(
+      key,
+      JSON.stringify(value),
+      "EX",
+      ttlSeconds,
+      "NX",
+    );
+    // ioredis returns "OK" when the key was set, null when NX prevented it.
+    return reply === "OK";
+  } catch {
+    // Fail closed: a security primitive must not grant the claim on a Redis
+    // outage. Returning false makes the guarded caller reject.
+    return false;
+  }
+}
+
 export async function cacheDel(key: string): Promise<void> {
   try {
     await getRedis().del(key);
   } catch {
     // Cache failures are non-fatal
+  }
+}
+
+/**
+ * Atomic fixed-window increment. Runs INCR and a first-creation-only EXPIRE in
+ * a single Lua script (one server round-trip, executed atomically by Redis), so:
+ *
+ *   - the counter and its TTL can never diverge — there is no window between the
+ *     two commands in which a crash/Redis-error leaves the key TTL-less and the
+ *     limiter stuck "tripped" forever (the old INCR-then-EXPIRE bug); and
+ *   - the TTL is stamped ONLY when the counter is first created (INCR == 1), so
+ *     the window is FIXED: it expires `ttlSeconds` after the first hit and the
+ *     counter resets, instead of sliding forward on every call (which would let
+ *     a steady trickle of requests keep the key — and thus the limit — alive
+ *     indefinitely, contradicting the "resets after the window" intent).
+ *
+ * Returns the new counter value, or null on a Redis error (caller fails OPEN).
+ */
+const INCR_FIXED_WINDOW_LUA = `
+local n = redis.call('INCR', KEYS[1])
+if n == 1 then
+  redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return n
+`;
+
+export async function cacheIncr(
+  key: string,
+  ttlSeconds: number,
+): Promise<number | null> {
+  try {
+    const next = (await getRedis().eval(
+      INCR_FIXED_WINDOW_LUA,
+      1,
+      key,
+      String(ttlSeconds),
+    )) as number;
+    return next;
+  } catch {
+    return null;
   }
 }
 

@@ -650,6 +650,15 @@ export function createEmailRouter(
     requireRole("owner", "admin", "family"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
+        const account = await assertAccountAccessible(
+          prisma,
+          req,
+          req.params.accountId,
+        );
+        if (!account) {
+          res.status(404).json({ error: "Thread not found" });
+          return;
+        }
         const thread = (await prisma.emailThread.findUnique({
           where: { id: req.params.threadId },
           include: { messages: { orderBy: { receivedAt: "asc" } } },

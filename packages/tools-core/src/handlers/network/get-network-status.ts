@@ -3,14 +3,14 @@ import type { Tool, ToolContext, ToolResult } from "../../types.js";
 const inputSchema = { type: "object", properties: {}, additionalProperties: false } as const;
 
 async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-  const res = await ctx.http.routing.get("/status", { headers: { Accept: "application/json" } });
+  const res = await ctx.http.orchestrator.get("/api/network/status", { headers: { Accept: "application/json" } });
   if (!res.ok) {
     return {
       ok: false,
       status: "error",
       error: {
         code: "ROUTING_UNAVAILABLE",
-        message: `routing service returned ${res.status}`,
+        message: `orchestrator returned ${res.status}`,
       },
     };
   }
