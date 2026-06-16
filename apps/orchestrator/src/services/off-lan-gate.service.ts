@@ -3,12 +3,11 @@
  *
  * The `outbound_email` channel of the WARP-467 `OffLanAllowlistChannel`
  * allowlist decides whether the orchestrator may send mail off the LAN.
- * This read is a SOVEREIGNTY control, so it FAILS CLOSED: a DB error, a
- * missing/unprovisioned row, or a disabled channel all resolve to
- * `false` (no egress). That matches the cross-service posture documented
- * in `services/ai-gateway/middleware/off_lan_gating.py` — "the
- * sovereignty contract is more load-bearing than chat availability." A
- * `false` result surfaces as the 451 refusal in `routes/email.ts`.
+ * This read is a SOVEREIGNTY control: a missing/unprovisioned row or a
+ * disabled channel resolves to `false` (no egress). A DB error is
+ * re-thrown so the caller can surface a 503 (gate temporarily
+ * unavailable) rather than a 451 (channel deliberately disabled) — the
+ * two failure modes require different operator remediation steps.
  *
  * WARP-467 is merged: the `OffLanAllowlistChannel` model is in the
  * generated Prisma client, so we use the typed `findUnique` read here.
@@ -17,7 +16,7 @@
  * defaulted OPEN, which is exactly the wrong way for a sovereignty gate
  * to fail.
  */
-import type { PrismaClient } from "@prisma/client";
+import { type PrismaClient, OffLanChannelKey } from "@prisma/client";
 import pino from "pino";
 
 const logger = pino({ name: "off-lan-gate" });
@@ -27,22 +26,23 @@ type OffLanGatePrisma = Pick<PrismaClient, "offLanAllowlistChannel">;
 
 /**
  * True only when the `outbound_email` off-LAN channel is explicitly
- * enabled. Fails CLOSED (`false`) on any error or missing row — a
- * transient DB hiccup must never silently open the egress path.
+ * enabled. Returns `false` when the row is missing or the channel is
+ * disabled. Throws on DB errors so callers can distinguish a transient
+ * infrastructure failure (503) from a deliberate channel disable (451).
  */
 export async function outboundEmailGate(
   prisma: OffLanGatePrisma,
 ): Promise<boolean> {
   try {
     const row = await prisma.offLanAllowlistChannel.findUnique({
-      where: { key: "outbound_email" },
+      where: { key: OffLanChannelKey.outbound_email },
     });
     return row?.enabled === true;
   } catch (err) {
     logger.warn(
       { err },
-      "outbound_email off-LAN gate read failed — failing closed (no egress)",
+      "outbound_email off-LAN gate read failed — re-throwing for 503 response",
     );
-    return false;
+    throw err;
   }
 }
