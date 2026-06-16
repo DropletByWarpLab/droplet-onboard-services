@@ -90,6 +90,30 @@ function createPrismaMock(over: {
         });
         return data;
       }),
+      // Mirrors the production createMany({ skipDuplicates: true }) on the
+      // `ts` PK: a row whose ts already exists is silently dropped, so a
+      // replayed timestamp can't 500 or duplicate. Returns { count } of
+      // rows actually inserted, matching Prisma's BatchPayload.
+      createMany: vi.fn(
+        async ({
+          data,
+          skipDuplicates,
+        }: {
+          data: DnsBlockRow[];
+          skipDuplicates?: boolean;
+        }) => {
+          let inserted = 0;
+          for (const row of data) {
+            const dup = dnsBlockSamples.some(
+              (s) => s.ts.getTime() === row.ts.getTime(),
+            );
+            if (dup && skipDuplicates) continue;
+            dnsBlockSamples.push({ ts: row.ts, blockedCount: row.blockedCount });
+            inserted += 1;
+          }
+          return { count: inserted };
+        },
+      ),
       deleteMany: vi.fn(async () => ({ count: 0 })),
     },
   };
@@ -152,6 +176,19 @@ describe("WARP-470 — /api/network/summary", () => {
     expect(res.body.offLanBytesThisMonth).toBe(123_456);
     // Aggregate runs with a month-start lower bound, not the latest row.
     expect(prisma.offLanEgressSample.aggregate).toHaveBeenCalledTimes(1);
+    // Guard the date-bound where clause: a regression that drops the
+    // month-start filter (returning an all-time total) would otherwise be
+    // invisible because the mock's return value is argument-independent.
+    expect(prisma.offLanEgressSample.aggregate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          ts: expect.objectContaining({
+            gte: expect.any(Date),
+            lte: expect.any(Date),
+          }),
+        }),
+      }),
+    );
   });
 
   it("sums dnsBlockSample blockedCount day-to-date", async () => {
@@ -161,6 +198,20 @@ describe("WARP-470 — /api/network/summary", () => {
     expect(res.status).toBe(200);
     expect(res.body.dnsBlockedToday).toBe(42);
     expect(prisma.dnsBlockSample.aggregate).toHaveBeenCalledTimes(1);
+    // Guard the date-bound where clause: a regression that drops the
+    // day-start filter (returning an all-time blocked count) would
+    // otherwise be invisible because the mock's return value is
+    // argument-independent.
+    expect(prisma.dnsBlockSample.aggregate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          ts: expect.objectContaining({
+            gte: expect.any(Date),
+            lte: expect.any(Date),
+          }),
+        }),
+      }),
+    );
   });
 
   it("returns 0 dnsBlockedToday/offLanBytesThisMonth when aggregates are null", async () => {
@@ -310,5 +361,24 @@ describe("WARP-468 — POST /api/network/dns-block-sample", () => {
       .post("/api/network/dns-block-sample")
       .send({ blockedCount: -1 });
     expect(res.status).toBe(400);
+  });
+
+  it("is idempotent on a replayed ts — no 500, no duplicate row", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma, mkUser("service", "_service"));
+    const ts = "2026-05-27T10:00:00.000Z";
+    const first = await request(app)
+      .post("/api/network/dns-block-sample")
+      .send({ blockedCount: 9, ts });
+    expect(first.status).toBe(201);
+    // Same ts replayed (retry / restart race / deliberate replay): the
+    // ts PK would collide with P2002 → 500 under a bare create(). With
+    // createMany({ skipDuplicates: true }) the replay is a clean 201 and
+    // the row count stays at 1.
+    const second = await request(app)
+      .post("/api/network/dns-block-sample")
+      .send({ blockedCount: 9, ts });
+    expect(second.status).toBe(201);
+    expect(prisma.dnsBlockSamples).toHaveLength(1);
   });
 });

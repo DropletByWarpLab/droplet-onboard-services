@@ -207,11 +207,16 @@ export function createNetworkThroughputRouter(prisma: PrismaClient): Router {
           return;
         }
         const ts = parsed.data.ts ? new Date(parsed.data.ts) : new Date();
-        await prisma.dnsBlockSample.create({
-          data: {
-            ts,
-            blockedCount: parsed.data.blockedCount,
-          },
+        // `ts` is the PK (DateTime @id). Two ticks landing on the same
+        // millisecond — a caller-supplied ts replay, retry, or a
+        // restart race between two routing instances — would otherwise
+        // collide with P2002 → 500 → silent sample loss. skipDuplicates
+        // makes the insert idempotent, matching the migration's stated
+        // posture (the first write for a ts wins; the delta is already
+        // captured).
+        await prisma.dnsBlockSample.createMany({
+          data: [{ ts, blockedCount: parsed.data.blockedCount }],
+          skipDuplicates: true,
         });
         res.status(201).json({ ok: true, ts: ts.toISOString() });
       } catch (err) {

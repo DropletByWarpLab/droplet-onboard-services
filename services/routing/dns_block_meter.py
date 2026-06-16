@@ -49,8 +49,13 @@ logger = logging.getLogger(__name__)
 DNS_BLOCK_SAMPLE_INTERVAL_SECONDS = int(
     os.environ.get("DNS_BLOCK_SAMPLE_SEC", "60")
 )
+# Routing runs with network_mode: host, so Docker's internal DNS is
+# unavailable and the compose-service hostname `orchestrator` never
+# resolves — every sample POST would fail and dnsBlockedToday would stay
+# 0 forever. Default to localhost to match scheduler.py + egress_meter.py
+# (same host-network constraint, NET-08).
 ORCHESTRATOR_URL = os.environ.get(
-    "ORCHESTRATOR_URL", "http://orchestrator:3000"
+    "ORCHESTRATOR_URL", "http://localhost:3000"
 ).rstrip("/")
 ORCHESTRATOR_SAMPLER_TOKEN = (
     os.environ.get("ORCHESTRATOR_SAMPLER_TOKEN") or ""
@@ -66,7 +71,15 @@ class _CounterSnapshot:
 # Module-level cache so successive scheduler ticks can diff. Cleared
 # when the scheduler restarts; the next tick re-primes.
 _previous: Optional[_CounterSnapshot] = None
+# Two DISTINCT warn-once flags. `_overlay_warning_logged` covers the
+# stub-not-implemented path (NotImplementedError) which fires on every
+# tick until the ubus method is pinned. `_connectivity_warning_logged`
+# covers real runtime failures (ConnectionLost / UbusError) once the
+# real `router._call(...)` is wired in. Keeping them separate means a
+# later router outage is still logged instead of being pre-suppressed by
+# the startup stub firing NotImplementedError (see finding #3 / WARP-468).
 _overlay_warning_logged = False
+_connectivity_warning_logged = False
 _token_warning_logged = False
 
 
@@ -83,7 +96,7 @@ def read_counters_via_ubus(router: DropletRouter) -> Optional[int]:
     >>> parsing a single cumulative int out of the result. Do NOT invent
     >>> a method name here — a wrong name would 500 or silently mis-read.
     """
-    global _overlay_warning_logged
+    global _overlay_warning_logged, _connectivity_warning_logged
     try:
         # FAIL-SOFT: the blocked-query ubus method is not confirmed yet,
         # so we deliberately do NOT call any ubus method. Mirrors
@@ -95,7 +108,10 @@ def read_counters_via_ubus(router: DropletRouter) -> Optional[int]:
         raise NotImplementedError(
             "DNS blocked-query ubus method not confirmed"
         )
-    except (ConnectionLost, UbusError, AttributeError, NotImplementedError) as exc:
+    except NotImplementedError as exc:
+        # Stub-not-implemented: fires every tick until the overlay lands.
+        # Tracked by its OWN flag so it does not pre-suppress the
+        # connectivity warning below once the real call is wired in.
         if not _overlay_warning_logged:
             logger.warning(
                 "DNS blocked-query counter unavailable (%s). The OpenWrt "
@@ -105,6 +121,19 @@ def read_counters_via_ubus(router: DropletRouter) -> Optional[int]:
                 exc,
             )
             _overlay_warning_logged = True
+        return None
+    except (ConnectionLost, UbusError, AttributeError) as exc:
+        # Real runtime failure once the overlay is pinned (router outage,
+        # ubus method renamed, etc.). Distinct flag so an outage is
+        # logged even after the stub above has already warned at startup.
+        if not _connectivity_warning_logged:
+            logger.warning(
+                "DNS blocked-query counter read failed (%s). The router or "
+                "the adblock/blocklist ubus method is unreachable — the "
+                "scheduler keeps ticking with zero samples. See WARP-468.",
+                exc,
+            )
+            _connectivity_warning_logged = True
         return None
 
 
@@ -198,7 +227,9 @@ def start_dns_block_meter(router: DropletRouter) -> AsyncIOScheduler:
 
 def _reset_state_for_tests() -> None:
     """Test-only: clear all module-level caches between runs."""
-    global _previous, _overlay_warning_logged, _token_warning_logged
+    global _previous, _overlay_warning_logged, _connectivity_warning_logged
+    global _token_warning_logged
     _previous = None
     _overlay_warning_logged = False
+    _connectivity_warning_logged = False
     _token_warning_logged = False
