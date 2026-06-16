@@ -187,6 +187,12 @@ class LantronixDriver(SwitchDriver):
         self._client: httpx.AsyncClient | None = None
         self._auth_lock = asyncio.Lock()
         self._keepalive_scheduler: AsyncIOScheduler | None = None
+        # Held for the duration of a single `_keepalive_tick` so `disconnect()`
+        # can drain an in-flight ping before closing the client (WARP-221).
+        # `shutdown(wait=False)` stops *new* ticks firing but does not await a
+        # tick already suspended inside `_ping()`; without this lock that tick
+        # would resume against a closed httpx client and raise.
+        self._keepalive_lock = asyncio.Lock()
         self._last_ok_at: float = 0.0
         self._last_auth_failure_at: float = 0.0
 
@@ -244,6 +250,12 @@ class LantronixDriver(SwitchDriver):
         # Mark the startup auth as a fresh ok so is_connected() reports true
         # before the first keepalive tick has landed.
         self._last_ok_at = time.monotonic()
+        # A direct re-connect() without an intervening disconnect() must not
+        # orphan the previous scheduler — otherwise two interval jobs would
+        # ping the switch concurrently. Tear the old one down first.
+        if self._keepalive_scheduler is not None:
+            self._keepalive_scheduler.shutdown(wait=False)
+            self._keepalive_scheduler = None
         # WARP-221: keepalive runs on apscheduler, not a while-True loop.
         # coalesce=True + max_instances=1 stop a slow ping from overlapping
         # or stampeding the next tick.
@@ -265,13 +277,22 @@ class LantronixDriver(SwitchDriver):
         logger.info("Connected to managed switch at %s:%d", self._host, self._port)
 
     async def disconnect(self) -> None:
+        # Stop the scheduler first so no *new* keepalive tick can fire, then
+        # drain any tick already in flight before tearing down the client.
+        # `shutdown(wait=False)` returns immediately and does NOT await a tick
+        # suspended inside `_ping()`'s `await self._client.get(...)`; closing
+        # the client out from under that coroutine raises
+        # "Cannot send a request, as the client has been closed" (WARP-221
+        # HIGH). Acquiring `_keepalive_lock` — held for the whole tick body —
+        # blocks here until the in-flight ping has fully returned.
         if self._keepalive_scheduler:
             self._keepalive_scheduler.shutdown(wait=False)
             self._keepalive_scheduler = None
-        if self._client:
-            await self._client.aclose()
-            self._client = None
-        self._last_ok_at = 0.0
+        async with self._keepalive_lock:
+            if self._client:
+                await self._client.aclose()
+                self._client = None
+            self._last_ok_at = 0.0
         logger.info("Disconnected from switch")
 
     async def is_connected(self) -> bool:
@@ -416,11 +437,15 @@ class LantronixDriver(SwitchDriver):
         are logged but never propagate — losing the switch for a while is
         surfaced via `is_connected()` going False, not by crashing.
 
+        The whole body holds `_keepalive_lock` so `disconnect()` can wait for
+        an in-flight ping to finish before closing the httpx client (WARP-221
+        HIGH — avoids a use-after-close race on graceful shutdown/reconnect).
         """
-        try:
-            await self._ping()
-        except Exception as exc:  # noqa: BLE001 — any failure is interesting
-            logger.warning("Keepalive ping failed: %s", exc)
+        async with self._keepalive_lock:
+            try:
+                await self._ping()
+            except Exception as exc:  # noqa: BLE001 — any failure is interesting
+                logger.warning("Keepalive ping failed: %s", exc)
 
     async def _ping(self) -> None:
         """One keepalive cycle: GET sysinfo, re-auth if expired, record time."""

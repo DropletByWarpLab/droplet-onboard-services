@@ -43,6 +43,22 @@ def _make_driver(ca_cert):
     )
 
 
+class _FakeScheduler:
+    """Stand-in for AsyncIOScheduler so connect() wires the keepalive job
+    without starting a real interval scheduler. WARP-221 replaced the old
+    `_keepalive_loop` task with an AsyncIOScheduler job; these NET-07 tests
+    only care about the httpx `verify=` kwarg, not the scheduler."""
+
+    def add_job(self, *a, **k):
+        return None
+
+    def start(self, *a, **k):
+        return None
+
+    def shutdown(self, *a, **k):
+        return None
+
+
 def _patch_client_and_auth(monkeypatch):
     monkeypatch.setattr("drivers.lantronix.httpx.AsyncClient", _FakeAsyncClient)
 
@@ -50,7 +66,7 @@ def _patch_client_and_auth(monkeypatch):
         return None
 
     monkeypatch.setattr(LantronixDriver, "_authenticate", _noop)
-    monkeypatch.setattr(LantronixDriver, "_keepalive_loop", _noop)
+    monkeypatch.setattr("drivers.lantronix.AsyncIOScheduler", _FakeScheduler)
 
 
 def test_factory_reads_ca_cert_env(monkeypatch, tmp_path):

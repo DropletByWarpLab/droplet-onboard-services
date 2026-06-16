@@ -96,3 +96,64 @@ def test_keepalive_tick_swallows_ping_errors(event_loop, monkeypatch, caplog):
     # Must not raise.
     _run(driver._keepalive_tick(), event_loop)
     assert any("Keepalive ping failed" in r.message for r in caplog.records)
+
+
+def test_disconnect_drains_in_flight_keepalive_tick(event_loop, monkeypatch):
+    """WARP-221 HIGH: disconnect() must wait for a tick suspended inside
+    _ping() to finish before closing the httpx client, so the resumed tick
+    never hits a closed client. We model that by having _ping() block on an
+    event the test releases only after disconnect() has started, then assert
+    the client was still open while the ping was in flight and that no
+    use-after-close error escaped."""
+    driver = _make_driver(monkeypatch)
+    _run(driver.connect(), event_loop)
+
+    ping_started = asyncio.Event()
+    release_ping = asyncio.Event()
+    client_open_during_ping = {"value": None}
+
+    async def _blocking_ping():
+        ping_started.set()
+        await release_ping.wait()
+        # While we were suspended, disconnect() must NOT have closed/nulled
+        # the client (it should be blocked on _keepalive_lock).
+        client_open_during_ping["value"] = driver._client is not None
+
+    monkeypatch.setattr(driver, "_ping", _blocking_ping)
+
+    async def _scenario():
+        tick = asyncio.create_task(driver._keepalive_tick())
+        await ping_started.wait()
+        disc = asyncio.create_task(driver.disconnect())
+        # Give disconnect() a chance to run up to the lock acquire; it must
+        # block there because the tick holds _keepalive_lock.
+        await asyncio.sleep(0.05)
+        assert not disc.done(), "disconnect() should block until the tick drains"
+        assert driver._client is not None, "client closed before tick finished"
+        release_ping.set()
+        await asyncio.gather(tick, disc)
+
+    _run(_scenario(), event_loop)
+    assert client_open_during_ping["value"] is True
+    assert driver._client is None  # fully torn down afterward
+
+
+def test_reconnect_without_disconnect_does_not_orphan_scheduler(
+    event_loop, monkeypatch
+):
+    """WARP-221 LOW: a second connect() without an intervening disconnect()
+    must shut the previous scheduler down rather than leaking it, so only one
+    keepalive job ever pings the switch."""
+    driver = _make_driver(monkeypatch)
+    try:
+        _run(driver.connect(), event_loop)
+        first = driver._keepalive_scheduler
+        assert first is not None and first.running is True
+        _run(driver.connect(), event_loop)
+        second = driver._keepalive_scheduler
+        assert second is not None and second is not first
+        assert first.running is False, "old scheduler left running (orphaned)"
+        assert second.running is True
+        assert len(second.get_jobs()) == 1
+    finally:
+        _run(driver.disconnect(), event_loop)
