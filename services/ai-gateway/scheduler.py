@@ -3,7 +3,7 @@
 Implements priority-based request scheduling per design doc Section 14:
 - Priority levels: USER=0, AUTOMATION=5, BACKGROUND=10
 - Rejects low-priority (>=5) when queue has >=5 pending requests
-- Concurrency limit: max active inferences (default 1, Jetson single-stream)
+- Concurrency limit: max active inferences (default 1, single-stream)
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ class Priority(IntEnum):
 # Thresholds
 DEFAULT_MAX_QUEUE_SIZE = 20
 DEFAULT_REJECT_THRESHOLD = 5  # reject priority >= 5 when this many pending
-DEFAULT_MAX_CONCURRENT = 1    # single-stream inference on Jetson
+DEFAULT_MAX_CONCURRENT = 1    # single-stream inference on the appliance
 
 
 @dataclass

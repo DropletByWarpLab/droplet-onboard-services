@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { X, Folder, ChevronRight, ChevronDown, Home } from "lucide-react";
 import { fetchFiles } from "@/lib/api";
+import { translateError } from "@/lib/friendly-errors";
 import type { FileEntryInfo } from "@/lib/types";
 
 interface MoveCopyDialogProps {
@@ -69,7 +70,7 @@ export function MoveCopyDialog({
         }))
       );
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load folders");
+      setError(translateError(err, "files"));
       setTree((prev) =>
         updateNode(prev, dirPath, (node) => ({ ...node, loading: false }))
       );
@@ -106,7 +107,7 @@ export function MoveCopyDialog({
     try {
       await onConfirm(selectedPath);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed");
+      setError(translateError(err, "files"));
       setSubmitting(false);
     }
   }, [selectedPath, isForbidden, onConfirm]);

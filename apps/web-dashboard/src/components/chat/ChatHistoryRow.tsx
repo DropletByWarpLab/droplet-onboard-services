@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { MoreHorizontal, Pencil, Trash2 } from "lucide-react";
+import { Download, FolderInput, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
 
 export interface ChatHistoryRowProps {
   id: string;
@@ -10,6 +10,10 @@ export interface ChatHistoryRowProps {
   onSelect: () => void;
   onRenameSubmit: (newTitle: string) => Promise<void>;
   onDeleteRequest: () => void;
+  /** Download this conversation as a Markdown transcript. */
+  onExport: () => void;
+  /** WARP-845 — open the move-to-project chooser for this chat. */
+  onMoveRequest: () => void;
 }
 
 const DISPLAY_TITLE = (title: string | null) => title?.trim() || "Untitled chat";
@@ -21,6 +25,8 @@ export function ChatHistoryRow({
   onSelect,
   onRenameSubmit,
   onDeleteRequest,
+  onExport,
+  onMoveRequest,
 }: ChatHistoryRowProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -67,9 +73,9 @@ export function ChatHistoryRow({
   };
 
   return (
-    <div className="group relative" data-chat-id={id}>
+    <div className="conv-row group relative" data-chat-id={id}>
       {renaming ? (
-        <div className="flex items-center gap-1 px-2 h-8 rounded-md bg-surface-secondary">
+        <div className="conv-search !m-0 !h-9">
           <input
             ref={inputRef}
             aria-label="Chat title"
@@ -87,7 +93,6 @@ export function ChatHistoryRow({
             }}
             onBlur={submitRename}
             maxLength={64}
-            className="flex-1 bg-transparent type-footnote text-label-primary outline-none"
           />
         </div>
       ) : (
@@ -97,23 +102,14 @@ export function ChatHistoryRow({
           aria-current={active ? "page" : undefined}
           onClick={onSelect}
           onKeyDown={onRowKeyDown}
-          className={`
-            w-full text-left px-2 h-8 rounded-md type-footnote
-            flex items-center
-            transition-colors duration-150
-            ${
-              active
-                ? "bg-accent-subtle text-accent font-medium"
-                : "text-label-secondary hover:bg-surface-secondary hover:text-label-primary"
-            }
-          `}
+          className={`conv-item ${active ? "is-active" : ""}`}
         >
-          <span className="truncate flex-1">{DISPLAY_TITLE(title)}</span>
+          <span className="conv-it-t">{DISPLAY_TITLE(title)}</span>
         </button>
       )}
 
       {!renaming && (
-        <div className="absolute right-1 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 focus-within:opacity-100">
+        <div className="conv-acts">
           <button
             type="button"
             aria-label={`More actions for ${DISPLAY_TITLE(title)}`}
@@ -123,21 +119,22 @@ export function ChatHistoryRow({
               e.stopPropagation();
               setMenuOpen((v) => !v);
             }}
-            className="p-1 rounded text-label-tertiary hover:text-label-primary hover:bg-surface-tertiary"
+            className="chat-iconbtn !w-7 !h-7"
           >
             <MoreHorizontal size={14} />
           </button>
           {menuOpen && (
             <div
               role="menu"
-              className="absolute right-0 mt-1 w-32 bg-surface-elevated dp-material rounded-md shadow-lg border border-separator z-10"
+              className="absolute right-0 top-full mt-1 w-36 rounded-[9px] border z-10"
+              style={{ background: "var(--surface)", borderColor: "var(--border)", boxShadow: "var(--lift)" }}
               onMouseLeave={() => setMenuOpen(false)}
             >
               <button
                 type="button"
                 role="menuitem"
                 onClick={openRename}
-                className="w-full flex items-center gap-2 px-3 py-2 type-footnote text-label-primary hover:bg-surface-secondary"
+                className="msg-act w-full !justify-start !h-8"
               >
                 <Pencil size={12} /> Rename
               </button>
@@ -146,9 +143,31 @@ export function ChatHistoryRow({
                 role="menuitem"
                 onClick={() => {
                   setMenuOpen(false);
+                  onMoveRequest();
+                }}
+                className="msg-act w-full !justify-start !h-8"
+              >
+                <FolderInput size={12} /> Move to project
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onExport();
+                }}
+                className="msg-act w-full !justify-start !h-8"
+              >
+                <Download size={12} /> Export
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setMenuOpen(false);
                   onDeleteRequest();
                 }}
-                className="w-full flex items-center gap-2 px-3 py-2 type-footnote text-system-red hover:bg-system-red/10"
+                className="msg-act w-full !justify-start !h-8 text-system-red hover:!text-system-red"
               >
                 <Trash2 size={12} /> Delete
               </button>

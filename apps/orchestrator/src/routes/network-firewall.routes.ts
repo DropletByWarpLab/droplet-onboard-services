@@ -13,7 +13,7 @@ import {
   addPortForward,
 } from "../services/network.service.js";
 import { evaluateNetworkCommand } from "../services/network-safety.service.js";
-import { requireRole } from "../middleware/auth.js";
+import { requireRoleOrMcpService } from "../middleware/auth.js";
 
 export interface FirewallDeps {
   prisma: PrismaClient;
@@ -34,8 +34,10 @@ export function registerFirewallRoutes(router: Router, deps: FirewallDeps): void
   // WARP-171: per-route guard. owner + admin only — blocking a device
   // cuts a household member's connectivity, so this stays in the
   // household-admin tier even though the network-safety evaluator
-  // also gates it via the tier system.
-  router.post("/network/firewall/block", requireRole("owner", "admin"), async (req, res, next) => {
+  // also gates it via the tier system. The MCP principal is admitted
+  // so the block_network_device tool reaches that evaluator — Tier 2
+  // still answers 202, never executes.
+  router.post("/network/firewall/block", requireRoleOrMcpService("owner", "admin"), async (req, res, next) => {
     try {
       const { mac, name } = req.body;
       if (!mac || typeof mac !== "string") {
@@ -70,8 +72,9 @@ export function registerFirewallRoutes(router: Router, deps: FirewallDeps): void
     }
   });
 
-  // WARP-171: per-route guard. owner + admin only.
-  router.post("/network/firewall/unblock", requireRole("owner", "admin"), async (req, res, next) => {
+  // WARP-171: per-route guard. owner + admin only, plus the MCP
+  // principal (unblock_network_device tool — Tier 2, 202 only).
+  router.post("/network/firewall/unblock", requireRoleOrMcpService("owner", "admin"), async (req, res, next) => {
     try {
       const { mac } = req.body;
       if (!mac || typeof mac !== "string") {
@@ -108,8 +111,9 @@ export function registerFirewallRoutes(router: Router, deps: FirewallDeps): void
 
   // WARP-171: per-route guard. owner + admin only — port-forwarding
   // exposes a LAN service to the public internet; never a family-tier
-  // operation.
-  router.post("/network/firewall/port-forward", requireRole("owner", "admin"), async (req, res, next) => {
+  // operation. The MCP principal is admitted for the add_port_forward
+  // tool — Tier 2, 202 only.
+  router.post("/network/firewall/port-forward", requireRoleOrMcpService("owner", "admin"), async (req, res, next) => {
     try {
       const { name, src_port, dest_ip, dest_port, proto = "tcp" } = req.body;
       if (!name || !src_port || !dest_ip || !dest_port) {

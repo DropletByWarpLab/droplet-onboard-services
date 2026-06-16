@@ -1,8 +1,8 @@
 # AI Gateway — Testing Guide
 
-## Local Testing (No Jetson Required)
+## Local Testing (No Inference Host Required)
 
-The ai-gateway can be fully tested on macOS/Linux without Jetson hardware using the included mock Ollama server.
+The ai-gateway can be fully tested on macOS/Linux without inference host hardware using the included mock Ollama server.
 
 ### 1. Run the mock Ollama server
 
@@ -76,22 +76,22 @@ Then start the mock Ollama on the host machine.
 
 ---
 
-## Remote Jetson Testing
+## Remote Inference Host Testing
 
-When you have access to a Jetson device (physical or remote):
+When you have access to an inference host (physical or remote):
 
-### Option A: Jetson on local network
+### Option A: Inference host on local network
 
-1. Deploy Ollama on the Jetson:
+1. Deploy Ollama on the inference host:
    ```bash
-   # On the Jetson
+   # On the inference host
    cd droplet-local-LLM/docker && docker compose up -d
    ```
 
-2. Point the ai-gateway to the Jetson:
+2. Point the ai-gateway to the inference host:
    ```bash
    # On your dev machine
-   OLLAMA_URL=http://<jetson-ip>:11434 python -m uvicorn main:app --reload
+   OLLAMA_URL=http://<inference-host-ip>:11434 python -m uvicorn main:app --reload
    ```
 
 3. Ensure the model is provisioned on the appliance. Model lifecycle is
@@ -100,8 +100,8 @@ When you have access to a Jetson device (physical or remote):
    repo, not a manual `pull` script in this repo. The canonical path is:
 
    ```bash
-   # On the Jetson — idempotent sync against models/model-manifest.json
-   curl -X POST http://<jetson-ip>:8002/models/sync
+   # On the inference host — idempotent sync against models/model-manifest.json
+   curl -X POST http://<inference-host-ip>:8002/models/sync
    ```
 
    See `droplet-local-LLM/services/ollama-manager/` for the full
@@ -115,38 +115,38 @@ When you have access to a Jetson device (physical or remote):
    > See [CLAUDE.md](../../CLAUDE.md) and
    > `docs/agentic-workflows.md` for the rationale.
 
-### Option B: SSH tunnel to remote Jetson
+### Option B: SSH tunnel to remote inference host
 
-If the Jetson is behind a firewall or on a different network:
+If the inference host is behind a firewall or on a different network:
 
 ```bash
 # Create SSH tunnel
-ssh -L 11434:localhost:11434 user@jetson-host
+ssh -L 11434:localhost:11434 user@inference-host
 
 # In another terminal, run ai-gateway
 OLLAMA_URL=http://localhost:11434 python -m uvicorn main:app --reload
 ```
 
-### Option C: Docker Compose with real Jetson
+### Option C: Docker Compose with real inference host
 
 Edit `edge-platform/docker/docker-compose.yml` and change `OLLAMA_URL`:
 
 ```yaml
 ai-gateway:
   environment:
-    - OLLAMA_URL=http://<jetson-ip>:11434
+    - OLLAMA_URL=http://<inference-host-ip>:11434
 ```
 
 ---
 
 ## What Can't Be Tested Locally
 
-| Feature | Requires Jetson | Workaround |
-|---------|----------------|------------|
+| Feature | Requires inference host | Workaround |
+|---------|------------------------|------------|
 | Real LLM inference | Yes | Mock Ollama returns canned responses |
 | GPU telemetry | Yes | Mock returns `{"available": false}` |
 | TensorRT-LLM | Yes | Not applicable locally |
-| PCIe latency | Yes (production PCB) | HTTP over LAN is functional equivalent |
+| PCIe latency | Yes (production hardware) | HTTP over LAN is functional equivalent |
 | Model hot-swap | Yes (GPU memory) | Mock always reports models loaded |
 
-The mock covers all API contract testing. Real inference quality and latency must be validated on Jetson hardware.
+The mock covers all API contract testing. Real inference quality and latency must be validated on the inference host.

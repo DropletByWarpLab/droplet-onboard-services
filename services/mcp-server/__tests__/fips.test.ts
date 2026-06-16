@@ -77,7 +77,7 @@ describe("mcp-server /_/fips HTTP endpoint", () => {
     server = startHttp({
       port: 0,
       jwtSecret: SECRET,
-      buildServer: () => createServer({ deps, claims: undefined } as never),
+      buildServer: (claims) => createServer(deps, { kind: "authenticated", claims }),
     });
     await new Promise<void>((resolve) =>
       server.once("listening", () => resolve()),

@@ -1,7 +1,7 @@
 # Roadmap — edge-platform
 
 Source: `droplet-gtm-strategy.docx` (April 2026 internal GTM strategy & risk analysis)
-Last updated: 2026-04-15
+Last updated: 2026-06-15
 
 This roadmap projects every GTM milestone that touches this repo onto the actual file layout. Milestone IDs (M1.1–M3.6) are the GTM doc's; status is this repo's current reality. See `docs/gtm-mapping.md` for the path-by-path bridge between the GTM reference architecture and what's on disk today.
 
@@ -45,28 +45,27 @@ Status legend:
 
 ### M1.4 HTTPS
 - **GTM scope:** Self-signed TLS certificate auto-generated on first boot; nginx termination.
-- **This repo's slice:** Nginx gateway already listens on `:443` with cert/key volume mount; `scripts/setup.sh` generates per-device secrets. Certificate auto-generation on first boot needs verification; `docker/certs/` is referenced.
-- **Files involved:** `docker/docker-compose.yml` (gateway `:443` mapping), `docker/nginx.conf`, `docker/certs/`, `scripts/setup.sh`
-- **Status:** `[~]` Partial
-- **Blockers:** Confirm setup.sh generates a self-signed cert if `docker/certs/` is empty; confirm HTTPS redirect is configured in `nginx.conf`.
-- **Next action:** Trace `scripts/setup.sh` and `docker/certs/` lifecycle; add explicit cert-generation step if missing.
+- **This repo's slice:** Nginx terminates TLS on `:443` (`docker/nginx.conf`: `listen 443 ssl` with `droplet.crt`/`droplet.key`) and 301-redirects `:80` → `https://$host$request_uri`. The self-signed cert is auto-generated/regenerated on first boot by `_generate_tls_cert` in `scripts/lib/secrets.sh` (also re-issues if the cert is missing, near expiry, or lacks the expected SANs).
+- **Files involved:** `docker/docker-compose.yml` (gateway `:443` mapping), `docker/nginx.conf` (`listen 80` → `return 301`; `listen 443 ssl`), `scripts/lib/secrets.sh` (`_generate_tls_cert`)
+- **Status:** `[x]` Done
+- **What was done:** Verified the 80→443 redirect block and 443 TLS termination in `nginx.conf`; confirmed `_generate_tls_cert` generates/regenerates the self-signed cert on first boot.
+- **Next action:** None — optional follow-up is Let's Encrypt/ACME for non-self-signed certs once a public hostname exists.
 
 ### M1.5 Conversation persistence
 - **GTM scope:** SQLite or PostgreSQL backend for chat history, accessible across sessions.
-- **This repo's slice:** PostgreSQL (`postgres:16-alpine`) is provisioned in `docker/docker-compose.yml` under service `db`. Orchestrator owns the `Prisma` schema. Per `README.md`, sessions are stored in the AI gateway, not orchestrator — the ai-gateway has a `sessions/` directory.
-- **Files involved:** `apps/orchestrator/prisma/schema.prisma`, `services/ai-gateway/sessions/`, `apps/orchestrator/src/routes/llm.ts` (session CRUD endpoints)
-- **Status:** `[~]` Partial — endpoints exist and Postgres is available; verify session persistence actually writes to the DB (not just in-memory).
-- **Blockers:** Verify AI gateway's session storage backend (DB vs. in-memory).
-- **Next action:** Inspect `services/ai-gateway/sessions/` and either back it with Postgres or move session ownership into the orchestrator + Prisma.
+- **This repo's slice:** Chat history is persisted in PostgreSQL via the orchestrator's `ChatSession` / `ChatMessage` Prisma models. `apps/orchestrator/src/services/chat-persistence.service.ts` owns create/find/list/delete of sessions and transactional message writes, with `updatedAt` maintenance. Session ownership lives in the orchestrator + Prisma — NOT in-memory and NOT in the ai-gateway.
+- **Files involved:** `apps/orchestrator/prisma/schema.prisma` (`ChatSession`, `ChatMessage`), `apps/orchestrator/src/services/chat-persistence.service.ts`, `apps/orchestrator/src/routes/llm.ts` (session CRUD endpoints)
+- **Status:** `[x]` Done — chat history is Postgres-backed and survives across sessions.
+- **What was done:** Session/message persistence moved into the orchestrator (`chat-persistence.service.ts`) against Postgres; the earlier `README` note about ai-gateway-owned sessions is obsolete.
+- **Next action:** None — optional follow-up is retention/pruning policy for old sessions.
 
 ### M1.6 Response streaming
 - **GTM scope:** SSE or WebSocket streaming from Ollama through FastAPI to the UI.
-- **This repo's slice:** Orchestrator `routes/llm.ts` and ai-gateway `main.py` reference streaming; `sse-starlette` is in the AI gateway stack. End-to-end behaviour depends on the **inference-engine** repo's OpenClaw/Ollama streaming support, which per cross-repo notes is **not implemented** upstream — so the full chain is not yet verified.
-- **Files involved:** `apps/orchestrator/src/routes/llm.ts`, `services/ai-gateway/main.py`, `services/ai-gateway/router.py`, `services/ai-gateway/providers/`, `apps/web-dashboard/src/app/chat/page.tsx`
-- **Status:** `[~]` Partial — plumbing exists; inference-engine upstream gap blocks true streaming.
-- **Cross-ref:** `inference-engine/docs/ROADMAP.md` (M1.6 is flagged there as the single biggest upstream gap).
-- **Blockers:** inference-engine streaming support (Ollama passthrough).
-- **Next action:** Coordinate with Agent 2 (inference-engine); add an e2e streaming integration test here once upstream is unblocked.
+- **This repo's slice:** SSE streaming is implemented in-repo. `apps/orchestrator/src/routes/llm.ts` accepts `stream:true`, opens a `text/event-stream` response, and emits `encodeSSE` events (see `apps/orchestrator/src/types/sse-events.ts`) from the agent run's `onEvent` callback, with WARP-329 debounced persistence of streamed content to Postgres and `X-Conversation-Id` + assistant-row-id headers set identically on streaming and non-streaming paths.
+- **Files involved:** `apps/orchestrator/src/routes/llm.ts`, `apps/orchestrator/src/types/sse-events.ts`, `apps/orchestrator/src/services/llm-agent.service.ts`, `apps/web-dashboard/src/app/chat/page.tsx`
+- **Status:** `[~]` Partial — the SSE wire format is complete; the remaining work is in-repo only.
+- **Real gap (in-repo, not upstream):** the orchestrator agent loop in `apps/orchestrator/src/services/llm-agent.service.ts` (~line 361) currently calls the model with `stream:false`, so per-token deltas are not yet forwarded through the SSE channel — the client receives the assistant turn once the loop completes rather than token-by-token. Wiring the agent loop to request a streamed completion and relay deltas to `onEvent` is being addressed separately. This is NOT an `inference-engine` upstream blocker — the earlier claim that streaming depended on an unimplemented upstream Ollama passthrough was a mis-attribution.
+- **Next action:** Flip the agent loop's `stream:false` to a streamed completion and relay token deltas to the existing `onEvent`/`encodeSSE` SSE path; add an e2e streaming integration test.
 
 ### M1.7 Test suite foundation
 - **GTM scope:** Unit tests for tools.py, llm.py, Device API endpoints; integration test for full tool-calling loop.
@@ -78,11 +77,11 @@ Status legend:
 
 ### M1.8 CI/CD pipeline
 - **GTM scope:** GitHub Actions — lint, test, build Docker images, push to GHCR.
-- **This repo's slice:** `.github/` exists but contains only logo assets — **no workflows**. `scripts/verify.sh` and `scripts/test-security.sh` exist for local/manual CI-like runs.
-- **Files involved:** `.github/workflows/` *(does not exist)*, `turbo.json`, `scripts/verify.sh`, `scripts/test-security.sh`
-- **Status:** `[ ]` Not started
+- **This repo's slice:** 19 GitHub Actions workflows live under `.github/workflows/` — per-service test suites (orchestrator, web-dashboard, ai-gateway, mcp-server, routing, camera-discovery, file-indexer, switch, voice-io, device-identity), plus `ci-coverage.yml`, `docker-build.yml`, `security-tests.yml`, `test-fips.yml`, `setup-tests.yml` / `setup-e2e.yml`, `rag-tests.yml` + nightly `rag-eval-nightly.yml`, and `refresh-oui.yml`.
+- **Files involved:** `.github/workflows/` (19 workflows), `turbo.json`, `scripts/verify.sh`, `scripts/test-security.sh`
+- **Status:** `[x]` Done
 - **Blockers:** None.
-- **Next action:** Add `.github/workflows/ci.yml` running `npm test`, `npm run build`, and `turbo lint`; add an image-build workflow gated on `main` pushes.
+- **Next action:** None — maintain workflows as services are added; optional follow-up is a GHCR image-push gate on `main`.
 
 ---
 
@@ -98,19 +97,19 @@ Status legend:
 
 ### M2.2 Full RBAC
 - **GTM scope:** Four-role system (owner/admin/family/guest) with per-endpoint authorization.
-- **This repo's slice:** Orchestrator has an auth middleware stub but no role concept; `/api/auth/users` admin endpoint exists but no `role` column in user store.
-- **Files involved:** `apps/orchestrator/src/middleware/auth.ts`, `apps/orchestrator/src/routes/auth.ts`, `apps/orchestrator/prisma/schema.prisma`
-- **Status:** `[ ]` Not started
-- **Blockers:** Depends on M1.3 (JWT/auth-model decision).
-- **Next action:** After M1.3 lands, add `role` enum to Prisma, `requireRole()` middleware, and per-route guards.
+- **This repo's slice:** `Role` enum on the Prisma `User` model (`apps/orchestrator/prisma/schema.prisma`, `enum Role`); `requireRole(...)` middleware (`apps/orchestrator/src/middleware/auth.ts`, scope helper in `middleware/scope.ts`) is applied per-route — e.g. `routes/aps.ts` (`requireRole("owner", "admin")`), `routes/activity.ts`, `routes/auth.ts`.
+- **Files involved:** `apps/orchestrator/src/middleware/auth.ts`, `apps/orchestrator/src/middleware/scope.ts`, `apps/orchestrator/src/routes/auth.ts`, `apps/orchestrator/prisma/schema.prisma` (`enum Role`), tests at `apps/orchestrator/src/__tests__/rbac.test.ts` + `require-role.middleware.test.ts`
+- **Status:** `[x]` Done
+- **Blockers:** None.
+- **What was done:** Added the `Role` enum + role column on `User`, the `requireRole()` middleware, and per-route guards across privileged routes; covered by `rbac.test.ts` + `require-role.middleware.test.ts`.
 
 ### M2.3 Device pairing flow
 - **GTM scope:** QR-code or PIN-based pairing flow for new clients.
-- **This repo's slice:** Not present. Setup flow creates a first admin user (`/setup`) but there is no device-pairing endpoint or QR surface.
-- **Files involved:** `apps/orchestrator/src/routes/auth.ts` (new pairing route TBD), `apps/web-dashboard/src/app/setup/` (wizard extension)
-- **Status:** `[ ]` Not started
-- **Blockers:** None architecturally; depends on mobile-app for the scanning side.
-- **Next action:** Design ADR for pairing protocol (QR payload + PIN fallback + mDNS discovery).
+- **This repo's slice:** QR/PIN pairing is implemented in `apps/orchestrator/src/routes/device-clients.ts`: `POST /api/devices/pair` mints a short-lived 6-char code and a `droplet://pair?server=...&code=...` QR payload, `GET /api/devices/pair/:code/status` lets the initiator poll, and `POST /api/devices/pair/claim` completes the pairing (publishing `droplet/devices/<user>/paired` over MQTT).
+- **Files involved:** `apps/orchestrator/src/routes/device-clients.ts` (`/devices/pair`, `/devices/pair/:code/status`, `/devices/pair/claim`)
+- **Status:** `[x]` Done
+- **Blockers:** None — client-side scanning is handled by the native apps.
+- **What was done:** Added the pair/claim endpoints with a code + TTL, the `droplet://pair` QR payload, status polling, and the paired-device MQTT notification.
 
 ### M2.4 Mobile-responsive UI / PWA
 - **GTM scope:** Responsive web UI or progressive web app (PWA) that works well on phones.
@@ -143,7 +142,7 @@ Status legend:
   - `apps/orchestrator/src/__tests__/vpn.test.ts` (13 tests)
   - `apps/web-dashboard/src/app/remote-access/page.tsx` — list + Add Device dialog (QR via `qrcode.react`) + DuckDNS card
   - `apps/web-dashboard/src/components/Sidebar.tsx` — "Remote Access" nav entry (Globe icon)
-- **Status:** `[x]` Done — verified live on the lab Jetson + OpenWrt router (49+16+13 tests pass; full setup + peer mint + nft rules + .conf rendering exercised end-to-end).
+- **Status:** `[x]` Done — verified live on the lab appliance + OpenWrt router (49+16+13 tests pass; full setup + peer mint + nft rules + .conf rendering exercised end-to-end).
 - **Architectural decisions made along the way:**
   1. **WireGuard on OpenWrt, not Docker.** Aligns with the SDK's existing ubus-based control plane and gives kernel-speed encryption.
   2. **Server-side keypair generation** (priv returned once in the API response). Client-side keygen would require a multi-step pairing flow; not worth the UX cost for v1.
@@ -162,12 +161,12 @@ Status legend:
 - **Next action:** Add output schema validation for tool-call responses; audit for remaining prompt-injection vectors.
 
 ### M2.8 SD card image
-- **GTM scope:** Downloadable `.img` file with Ubuntu + Docker + Droplet pre-installed.
-- **This repo's slice:** `openwrt/build.sh` builds an OpenWrt image for the router path. An Ubuntu/Pi-OS image-build flow for the full stack does not exist yet. `scripts/build-image.sh` is related but scope needs confirmation.
-- **Files involved:** `openwrt/build.sh`, `scripts/build-image.sh`, `scripts/setup.sh`
-- **Status:** `[~]` Partial — OpenWrt image builder exists; full appliance image (Ubuntu + preloaded containers) does not.
-- **Blockers:** Architecture call: OpenWrt-only image vs. dual-image (OpenWrt for networking core + Ubuntu for app stack).
-- **Next action:** Inspect `scripts/build-image.sh`; decide image topology; document in `openwrt/README.md`.
+- **GTM scope:** Downloadable image with Ubuntu + Docker + Droplet pre-installed.
+- **This repo's slice:** **Phase 1 landed** (WARP-663 / ADR-020). The appliance and the OpenWrt router are orthogonal images for orthogonal layers, each with its own pinned builder (no combined "dual image"). The appliance ships as an Ubuntu 24.04 autoinstall ISO built by `scripts/image/build-iso.sh` and driven by the `scripts/droplet-image` CLI (build|manifest|sign|verify|list|publish|flash); first boot runs `setup.sh --single-box --systemd`, so provisioning stays single-sourced. Phase 2 (preinstalled golden raw `.img`, offline flash-and-boot) is the follow-on.
+- **Files involved:** `scripts/droplet-image`, `scripts/lib/image.sh`, `scripts/image/build-iso.sh`, `scripts/image/autoinstall/{user-data,meta-data}`, `scripts/image/grub-autoinstall.cfg`, `scripts/image/{manifest.schema.json,manifest.json,gen-manifest.py}`, `scripts/image/keys/`, `scripts/build-image.sh`, `openwrt/build.sh` (router, separate), `scripts/setup.sh`, `docs/IMAGE_PIPELINE.md`, `docs/ADR-020-appliance-image-build-and-flash-pipeline.md`.
+- **Status:** `[~]` Partial — Phase 1 (autoinstall ISO + signed-manifest + `droplet-image` CLI) shipped; Phase 2 (golden raw `.img`) + the first live publish remain.
+- **Blockers:** Resolved by ADR-020 — the image-topology call is made (orthogonal appliance ISO + router image; ISO-first).
+- **Next action:** Phase 2 golden raw `.img` (`--format raw`); validate the manual flash+boot gate on a Linux host; then **M3.4** consumes the signed manifest/verify substrate this built.
 
 ---
 
@@ -180,24 +179,46 @@ Only milestones that touch this repo are listed. M3.1 (revenue-model decision), 
 - **This repo's slice:** `services/file-indexer/` already has an `embedder.py` and `chunker.py`. Image-specific embedding (CLIP) is not yet present; current embedder is likely text-only.
 - **Files involved:** `services/file-indexer/embedder.py`, `services/file-indexer/extractors/`, `services/file-indexer/db.py`
 - **Status:** `[~]` Partial — text indexing plumbing exists; image embedding not.
-- **Blockers:** Inference-engine capacity for a CLIP model alongside the chat model (single-threaded Ollama risk from GTM §5.3).
+- **Blockers:** `inference-engine` capacity for a CLIP model alongside the chat model (single-threaded Ollama risk from GTM §5.3).
 - **Next action:** Add CLIP pipeline to `file-indexer/extractors/` + image-vector column in `db.py`.
 
 ### M3.4 OTA update system
 - **GTM scope:** Secure update mechanism for the entire stack (containers, configs, models).
-- **This repo's slice:** `releases/` repo (external) holds manifests. This repo needs an update agent/endpoint that pulls a signed manifest, verifies it, and applies container + OpenWrt image updates atomically.
-- **Files involved:** `openwrt/` (A/B partition hooks), `apps/orchestrator/src/routes/` (new `updates.ts`), `scripts/` (new update runner)
-- **Status:** `[ ]` Not started
-- **Blockers:** Signing key infrastructure; A/B partition scheme choice.
-- **Next action:** ADR on update protocol; prototype a read-only `/api/updates/check` endpoint against a static manifest.
+- **This repo's slice:** The external `DropletByWarpLab/releases` repo holds the signed manifests + release assets. ADR-020 / WARP-663 already built the **substrate this consumes**: the `manifest.json` schema, `droplet-image sign`/`verify` (detached ECDSA-P256 over the manifest + per-asset sha256, fail-closed), and the releases-repo layout. M3.4 adds the update **agent/endpoint** that pulls a signed manifest, `verify`s it, and applies container + OpenWrt image updates atomically (A/B partitions are M3.4's to add).
+- **Files involved:** `scripts/image/` (manifest + verify substrate — done), `openwrt/` (A/B partition hooks), `apps/orchestrator/src/routes/` (new `updates.ts`), `scripts/` (new update runner)
+- **Status:** `[ ]` Not started (the signed-manifest/verify substrate from ADR-020 is in place).
+- **Blockers:** Signing key infrastructure (the ECDSA-P256 key custody + rotation model is defined by ADR-020 / `scripts/image/keys/README.md`; the real keypair is minted at first publish); A/B partition scheme choice.
+- **Next action:** ADR on update protocol; prototype a read-only `/api/updates/check` endpoint against the signed manifest in `DropletByWarpLab/releases`.
 
 ### M3.6 Community marketplace
 - **GTM scope:** Framework for community-contributed tool extensions and integrations.
 - **This repo's slice:** Orchestrator would host the extension registry API; web-dashboard would host the browse/install UI. Tool execution sandbox lives in `inference-engine` (OpenClaw), so the boundary here is about surfacing and provisioning extensions — not running them.
 - **Files involved:** `apps/orchestrator/src/routes/` (new `extensions.ts`), `apps/web-dashboard/src/app/` (new `/extensions` route), `apps/orchestrator/prisma/schema.prisma` (new `Extension` model)
 - **Status:** `[ ]` Not started
-- **Blockers:** Sandbox contract with inference-engine's OpenClaw; signing/trust model.
+- **Blockers:** Sandbox contract with `inference-engine`'s OpenClaw; signing/trust model.
 - **Next action:** ADR on extension manifest format; align with `inference-engine` OpenClaw agent config schema.
+
+---
+
+## Architecture initiatives (ADR-driven, cross-cutting)
+
+Work that doesn't map to a single GTM milestone number but cuts across several. Each is anchored by an ADR in `docs/`; status mirrors the ADR's action-item checklist.
+
+### NET-UNIFY Deployment-topology auto-detection + single-box network unification + WAN passthrough
+- **ADR:** [`docs/ADR-018-deployment-topology-and-network-unification.md`](ADR-018-deployment-topology-and-network-unification.md) (builds on ADR-002 network persona, ADR-005 AP auto-onboarding, ADR-009 canonical architecture, ADR-011 hardware-agnostic shapes).
+- **Scope:** Make Droplet a true auto-configuring router in either posture — `PRIMARY_ROUTER` (owns the ISP uplink) or `DOWNSTREAM_ROUTER` (plugged into an existing upstream; keeps its own LAN for devices and NATs them out the WAN, never touching the upstream network). Detect the posture as explicit state (a `DeploymentTopology` enum, event-driven re-eval — never guessed from absence). Unify the `single-box` shape onto the same OpenWrt-owned network model the `multi-box` reference already uses (OpenWrt owns `br-lan` DHCP / client list / Wi-Fi / camera VLAN), retiring the ad-hoc host dnsmasq. Root-fixes the dashboard "0 connected devices" and "camera-not-found" symptoms and makes Wi-Fi usable via ADR-005 AP onboarding instead of the on-board radio.
+- **This repo's slice:** spans the routing service (WAN-probe + topology enum), the OpenWrt overlay + `setup.sh` host provisioning (retire `droplet-poc-host-net`; de-`poc` naming sweep), the orchestrator + dashboard client/lease list and network-page posture, and camera-discovery enablement + `CAMERA_SUBNET` alignment.
+- **Files involved (by action item — see the ADR for the authoritative list):**
+  - `services/routing/` — `DeploymentTopology` WAN probe + explicit-state enum + event-driven re-eval + pytest mock-router fixtures *(item 2)*
+  - `openwrt/` overlay + `scripts/setup.sh` + `scripts/lib/single-box.sh` + `scripts/host/` — OpenWrt owns `br-lan`; retire `droplet-poc-host-net`; fold into `setup.sh` *(item 3, largest — may split)*
+  - `apps/orchestrator/src/routes/` (client/lease list) + `apps/web-dashboard/` network page — unified OpenWrt source on all shapes; render topology posture *(item 4)*
+  - `services/camera-discovery/` + `docker/docker-compose.yml` (`camera-discovery` enablement) + `CAMERA_SUBNET` *(item 5)*
+  - `services/routing/` masquerade / forwarding / DNS verification in `DOWNSTREAM_ROUTER` posture *(item 6)*
+  - `openwrt/` AP flash path (reuse ADR-005) for the TEW-932DAP / a supported AP *(item 7)*
+  - `docs/ROADMAP.md` + `scripts/test/ship-check.sh` (`lifecycle-naming` check guarding new `poc`-style naming) *(item 8 — this entry)*
+- **Status:** `[~]` Partial — ADR-018 proposed (pending human-gate review); action item 8 (this ROADMAP entry + the `lifecycle-naming` ship-check guard against new `poc`-style naming) done. Items 1–7 are scoped harness tickets, not yet started.
+- **Blockers:** ADR-018 acceptance (human gate). Item 3 is invasive (changes LAN/DHCP ownership on a deployed box) — staged rollout with `safe_apply` rollback required; validated via `./scripts/test/ship-check.sh --full`, never a live hand-edit.
+- **Next action:** Land the ADR review, then execute items 2→3→4→5→6→7 through the harness in dependency order (topology enum first; the single-box unification is the root-fix the device-list + camera + Wi-Fi symptoms all hang off).
 
 ---
 
@@ -207,7 +228,7 @@ Each risk is reproduced from the GTM doc with severity, and mapped to the compon
 
 | Risk | Severity | Likelihood | Owner in this repo | Notes |
 |---|---|---|---|---|
-| LLM inference too slow on Pi (10–30s/response) | High | Certain | `services/ai-gateway/` (streaming passthrough) | Primary mitigation is M1.6 streaming; hardware path is inference-engine/Jetson. |
+| LLM inference too slow on a low-power host (10–30s/response) | High | Certain | `services/ai-gateway/` (streaming passthrough) | Primary mitigation is M1.6 streaming; hardware path is inference-engine / the inference host. |
 | Small-model tool-calling unreliability | High | High | `services/ai-gateway/schemas.py` (output schema validation) | Depth-defence in inference-engine's OpenClaw tool policy. |
 | Prompt injection via user input | Critical | Medium | `services/ai-gateway/middleware/`, `services/ai-gateway/schemas.py` | M2.7. Input layer lives here; sandbox + guardrails live in inference-engine. |
 | Privileged container escape from router/NAS | Critical | Low | `openwrt/` (replaces privileged Docker approach) | Architecture already mitigates: router is OpenWrt, not a `--privileged` container. |
@@ -223,7 +244,7 @@ Each risk is reproduced from the GTM doc with severity, and mapped to the compon
 ## Coordination checklist (what depends on which repo)
 
 - **M1.3 JWT auth** — entirely in this repo, but shared-api specs should be updated too (Agent 4).
-- **M1.6 Streaming** — this repo's ai-gateway is the proxy; inference-engine is the source (Agent 2).
+- **M1.6 Streaming** — implemented in-repo (orchestrator `routes/llm.ts` SSE path). The remaining work is the orchestrator agent loop's `stream:false` (see M1.6); not a `inference-engine` dependency.
 - **M2.7 Prompt-injection hardening** — input layer here; sandbox layer in inference-engine (Agent 2).
 - **M3.2 Native mobile app** — not this repo; mobile-app (Agent 3) consumes the orchestrator via `@droplet/shared-api` (Agent 4).
 - **M3.4 OTA** — this repo owns the update agent; `releases/` holds the manifests.

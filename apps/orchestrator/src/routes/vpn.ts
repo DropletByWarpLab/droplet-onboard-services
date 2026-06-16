@@ -30,7 +30,7 @@ import {
   RouterError,
 } from "../services/openwrt.client.js";
 import {
-  allocatePeerIp,
+  allocateMintAndPersistPeer,
   parseVpnSubnet,
   renderPeerConf,
   VpnConfigError,
@@ -147,10 +147,18 @@ export function createVpnRouter(prisma: PrismaClient): Router {
       const endpointHost = await resolveEndpointHost();
       const endpointConfigured = endpointHost !== "";
       const exposeEndpointHost = isAdmin(req);
+      // ADR-023 (C4): the publicly-trusted per-device FQDN. Unlike endpointHost
+      // (which can leak the box's public reachability), the FQDN is already
+      // published to Certificate Transparency for everyone — it carries no PII
+      // and no A record — so it is safe to surface to any authenticated user so
+      // the Remote Access page can show the one address that works at home AND
+      // over the tunnel. Empty until the box learns it from HQ.
+      const publicFqdn = config.DROPLET_PUBLIC_FQDN || null;
       if (!status) {
         return res.json({
           configured: false,
           endpointConfigured,
+          publicFqdn,
           message: "VPN not yet bootstrapped — POST /api/vpn/peers to start.",
         });
       }
@@ -158,6 +166,7 @@ export function createVpnRouter(prisma: PrismaClient): Router {
         configured: true,
         endpointConfigured,
         endpointHost: exposeEndpointHost ? (endpointHost || null) : null,
+        publicFqdn,
         listenPort: status.listen_port,
         serverPublicKey: status.public_key,
         addresses: status.addresses,
@@ -243,43 +252,52 @@ export function createVpnRouter(prisma: PrismaClient): Router {
         address: serverAddressFromSubnet(config.WIREGUARD_VPN_SUBNET),
       });
 
-      // 2. Allocate next free IP. We allocate then mint then persist; if
-      //    persist fails we delete the routing-side peer to avoid orphans.
-      const peerIp = await allocatePeerIp(prisma, config.WIREGUARD_VPN_SUBNET);
-
-      // 3. Ask routing to mint a keypair + install the peer.
-      const minted = await createVpnPeer({
-        description: parsed.data.deviceLabel,
-        allowedIps: [`${peerIp}/32`],
-      });
-
-      // 4. Persist. On failure, tear down the routing-side peer so we
-      //    don't leak silent peers that nobody owns from the orchestrator's POV.
-      let saved;
-      try {
-        saved = await prisma.vpnPeer.create({
-          data: {
-            userId: user.username,
-            deviceLabel: parsed.data.deviceLabel,
-            publicKey: minted.public_key,
-            assignedIp: peerIp,
+      // 2-4. Allocate next free IP, mint the router-side peer with it, and
+      //    persist — as one retryable unit. WARP-565: the allocate-then-persist
+      //    sequence is a read-then-write race (two concurrent setup calls can
+      //    pick the same "free" IP). The partial unique index on (assignedIp)
+      //    WHERE status = 'active' makes the loser's INSERT fail P2002, which
+      //    allocateMintAndPersistPeer catches and re-allocates around (re-minting
+      //    the router peer with the new IP). Any failed attempt's router peer is
+      //    rolled back so we never leak an orphan peer pinned to an unkept IP.
+      const { peerIp, minted, saved } = await allocateMintAndPersistPeer(
+        prisma,
+        config.WIREGUARD_VPN_SUBNET,
+        {
+          userId: user.username,
+          deviceLabel: parsed.data.deviceLabel,
+          mint: (ip) =>
+            createVpnPeer({
+              description: parsed.data.deviceLabel,
+              allowedIps: [`${ip}/32`],
+            }),
+          rollbackMint: async (m, terminal) => {
+            // A retryable active-IP race that re-allocates and succeeds is the
+            // normal happy-path under concurrent setup calls — logging it at
+            // error would false-page any alerting keyed on logger.error (up to
+            // maxRetries-1 spurious errors per successful POST). Only a terminal
+            // rollback (genuine final failure) keeps error severity (WARP-565).
+            const rollbackLog = terminal ? logger.error.bind(logger) : logger.warn.bind(logger);
+            rollbackLog(
+              { publicKey: m.public_key, terminal },
+              terminal
+                ? "vpn: persist failed after routing mint — rolling back routing-side peer"
+                : "vpn: active-IP race after routing mint — rolling back and retrying",
+            );
+            try {
+              await deleteVpnPeer({ publicKey: m.public_key });
+            } catch (rollbackErr) {
+              // A failed rollback delete always leaves an orphan peer needing
+              // manual cleanup, regardless of whether the parent attempt was
+              // retryable — so this stays at error level.
+              logger.error(
+                { err: rollbackErr, publicKey: m.public_key },
+                "vpn: rollback delete failed — orphan peer on router; admin must clean up manually",
+              );
+            }
           },
-        });
-      } catch (persistErr) {
-        logger.error(
-          { err: persistErr, publicKey: minted.public_key },
-          "vpn: persist failed after routing mint — rolling back routing-side peer",
-        );
-        try {
-          await deleteVpnPeer({ publicKey: minted.public_key });
-        } catch (rollbackErr) {
-          logger.error(
-            { err: rollbackErr, publicKey: minted.public_key },
-            "vpn: rollback delete failed — orphan peer on router; admin must clean up manually",
-          );
-        }
-        throw persistErr;
-      }
+        },
+      );
 
       const conf = renderPeerConf({
         privateKey: minted.private_key,
@@ -292,7 +310,7 @@ export function createVpnRouter(prisma: PrismaClient): Router {
         vpnSubnet: config.WIREGUARD_VPN_SUBNET,
       });
 
-      // PyPortal screen QR — surface this peer for ~60 s so a phone
+      // Status display screen QR — surface this peer for ~60 s so a phone
       // next to the box can scan it directly without the dashboard
       // browser. Best-effort: notePeerCreated() never throws (catches
       // any push failure internally), so the API response stays clean.

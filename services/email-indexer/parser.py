@@ -101,6 +101,24 @@ def _first_reference(value: Optional[str]) -> Optional[str]:
     return None
 
 
+def _parse_date_header(value: Optional[str]):
+    """Parse an RFC 5322 `Date:` header to a datetime, tolerating garbage.
+
+    `email.utils.parsedate_to_datetime` returns None for some malformed inputs
+    but *raises* (ValueError/TypeError) for others (e.g. an empty/whitespace
+    string, or a value with a parseable date but an out-of-range field). A
+    single bad header must not bubble up and abort the whole IDLE batch
+    (IDX-07) — treat any unparseable Date as "no timestamp" → None, same as a
+    missing header.
+    """
+    if not value:
+        return None
+    try:
+        return email.utils.parsedate_to_datetime(value)
+    except (ValueError, TypeError):
+        return None
+
+
 def _extract_bodies(msg: Message) -> tuple[Optional[str], Optional[str]]:
     """Walk a (possibly multipart) message; return (text, html)."""
     text: Optional[str] = None
@@ -183,8 +201,7 @@ def parse_message(
             return None
     cc_addrs = _split_address_list(_decode_header(msg.get("Cc")))
     subject = _decode_header(msg.get("Subject"))
-    date_header = msg.get("Date")
-    received_at = email.utils.parsedate_to_datetime(date_header) if date_header else None
+    received_at = _parse_date_header(msg.get("Date"))
     if received_at is None:
         return None
 

@@ -393,6 +393,12 @@ describe("PATCH /api/people/:id/scope", () => {
     );
     expect(prisma.scopeBinding.deleteMany).toHaveBeenCalledTimes(1);
     expect(prisma.scopeBinding.create).toHaveBeenCalledTimes(2);
+    // Data-integrity (pr-reviewer HIGH): the deleteMany + recreate pair MUST
+    // run inside a single $transaction so a crash between the delete and the
+    // last create can't leave the user with zero scope bindings (locked out
+    // of every scope-guarded route). Mirrors the PATCH /role last-owner
+    // invariant transaction above.
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
     expect(recordActivityMock).toHaveBeenCalledTimes(1);
     const recorded = recordActivityMock.mock.calls[0][0];
     expect(recorded.kind).toBe("system");

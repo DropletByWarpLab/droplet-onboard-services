@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import jwt from "jsonwebtoken";
 import { config } from "../config.js";
-import { cacheGet, cacheSet } from "./cache.service.js";
+import { cacheGet, cacheSet, cacheSetNx } from "./cache.service.js";
 
 export type Role = "owner" | "admin" | "family" | "guest" | "service";
 
@@ -10,6 +10,14 @@ export interface JwtPayload {
   username: string;
   displayName: string;
   role: Role;
+  /**
+   * PR #375 — ISO timestamp of the most-recent successful MFA challenge
+   * (TOTP code or recovery code at login). Optional: only present when the
+   * session was minted behind a second factor. The auth middleware copies
+   * it onto `req.user.lastMfaAt` so `require-recent-mfa` (WARP-230) can
+   * gate sensitive routes. Absent for password-only sessions.
+   */
+  lastMfaAt?: string;
 }
 
 // Single source of truth for token lifetimes. Both the jwt `expiresIn` option
@@ -34,6 +42,39 @@ export function roleFromGroups(groups: string[]): Role {
   return "family";
 }
 
+/**
+ * Privilege ladder for the household role taxonomy (ADR-004 §3). Higher
+ * number = more authority. Used to stop a lower-ranked operator from
+ * minting an invite that assigns a role outranking their own — the
+ * privilege-escalation vector on the invite-creation routes (an
+ * owner/admin invite is granted an `owner` session role on accept).
+ *
+ * Mirrors the ascending ladder in `scim-role-mapping.service.ts`
+ * (`ROLE_PRIVILEGE`, the SCIM directory branch) — keep the two in sync
+ * until they're unified. `service` is the non-human inbound principal: it
+ * sits at the floor so it can never outrank a human role in a comparison,
+ * and it is never invite-assignable (the invite role enum excludes it)
+ * nor clears the owner/admin route guard, so it only appears here for
+ * total coverage of the Role union.
+ */
+export const ROLE_RANK: Record<Role, number> = {
+  service: -1,
+  guest: 0,
+  family: 1,
+  admin: 2,
+  owner: 3,
+};
+
+/**
+ * True iff role `a` holds strictly more privilege than role `b`. Drives
+ * the invite-creation rank cap: reject when the assigned role outranks
+ * the authenticated inviter's own role (owner→owner is allowed; an admin
+ * may not mint an owner invite).
+ */
+export function roleOutranks(a: Role, b: Role): boolean {
+  return ROLE_RANK[a] > ROLE_RANK[b];
+}
+
 function getSecret(): string {
   return config.JWT_SECRET;
 }
@@ -47,6 +88,8 @@ export function signAccessToken(user: {
   username: string;
   displayName: string;
   role: Role;
+  /** PR #375 — stamp when this session passed a TOTP/recovery challenge. */
+  lastMfaAt?: string;
 }): string {
   return jwt.sign(
     {
@@ -54,6 +97,9 @@ export function signAccessToken(user: {
       username: user.username,
       displayName: user.displayName,
       role: user.role,
+      // Only include the claim when present so password-only sessions
+      // (and every existing caller) keep their current token shape.
+      ...(user.lastMfaAt ? { lastMfaAt: user.lastMfaAt } : {}),
       type: "access",
     },
     getSecret(),
@@ -102,6 +148,9 @@ export function verifyAccessToken(token: string): JwtPayload | null {
       username: decoded.username,
       displayName: decoded.displayName ?? decoded.username,
       role: decoded.role as Role,
+      ...(typeof decoded.lastMfaAt === "string"
+        ? { lastMfaAt: decoded.lastMfaAt }
+        : {}),
     };
   } catch {
     return null;
@@ -172,20 +221,24 @@ export async function denyRefreshToken(token: string): Promise<void> {
  * Prevents concurrent /auth/refresh calls (e.g. a browser double-submit on
  * flaky networks) from both issuing new token pairs.
  *
- * Implementation: writes a short-TTL entry into the same denylist namespace
- * so subsequent `verifyRefreshToken` calls treat the token as revoked. The
- * caller that wins the claim should still call `denyRefreshToken` to write
- * the full-lifetime entry, ensuring the rotated token stays revoked past
- * this short TTL.
+ * Implementation: a single atomic `SET key … NX EX 30` into the same denylist
+ * namespace so subsequent `verifyRefreshToken` calls treat the token as
+ * revoked. The atomic NX write is what makes the claim race-safe — a previous
+ * non-atomic GET-then-SET let two concurrent /auth/refresh calls both observe
+ * "absent" and both win, forking the token into two live session lineages
+ * (ORCH-03). The caller that wins the claim should still call
+ * `denyRefreshToken` to write the full-lifetime entry, ensuring the rotated
+ * token stays revoked past this short TTL.
+ *
+ * Fails CLOSED: `cacheSetNx` returns false on any Redis error, so a Redis
+ * outage rejects the rotation rather than allowing unbounded concurrent
+ * rotation of the same token.
  */
 export async function claimRefreshRotation(token: string): Promise<boolean> {
   const key = REFRESH_DENYLIST_PREFIX + tokenHash(token);
-  const existing = await cacheGet<boolean>(key);
-  if (existing) return false;
   // 30s is long enough to cover the in-flight refresh call; denyRefreshToken
   // will overwrite this with the full remaining token lifetime.
-  await cacheSet(key, true, 30);
-  return true;
+  return cacheSetNx(key, true, 30);
 }
 
 /**

@@ -3,18 +3,18 @@
 # Droplet Router Firmware Upgrade
 # =============================================================================
 #
-# Upgrades a running OpenWrt instance on the Pi 5 without re-flashing the SD
+# Upgrades a running OpenWrt instance on the router host without re-flashing the SD
 # card. Uses OpenWrt's sysupgrade mechanism which preserves UCI configuration
 # files (/etc/config/*) across upgrades.
 #
-# Run this from the Jetson (or any machine on the LAN), NOT on the router.
+# Run this from the inference host (or any machine on the LAN), NOT on the router.
 #
 # Usage:
 #   ./scripts/upgrade-router.sh <firmware-image>
 #   ./scripts/upgrade-router.sh output/openwrt-*-sysupgrade.img.gz
 #
 # Options:
-#   --host <ip>         Router IP (default: from OPENWRT_HOST env or 10.0.0.1)
+#   --host <ip>         Router IP (default: from OPENWRT_HOST env or 192.168.50.1)
 #   --user <user>       SSH user (default: root)
 #   --no-preserve       Don't preserve config (clean flash with new defaults)
 #   --force             Skip compatibility check
@@ -41,7 +41,9 @@
 set -euo pipefail
 
 # --- Defaults ---
-ROUTER_HOST="${OPENWRT_HOST:-10.0.0.1}"
+# WARP-815: single documented OPENWRT_HOST default — the multi-box router host
+# (matches docker/docker-compose.yml + services/routing/main.py + docs).
+ROUTER_HOST="${OPENWRT_HOST:-192.168.50.1}"
 ROUTER_USER="root"
 PRESERVE_CONFIG=true
 FORCE=false
@@ -88,7 +90,7 @@ done
 
 if [ -z "$FIRMWARE_FILE" ]; then
     err "Usage: $0 <firmware-image> [options]"
-    err "  e.g.: $0 output/openwrt-24.10.0-bcm27xx-bcm2712-rpi-5-droplet-squashfs-sysupgrade.img.gz"
+    err "  e.g.: $0 output/openwrt-*-droplet-squashfs-sysupgrade.img.gz"
     exit 1
 fi
 
@@ -131,9 +133,12 @@ printf "  /tmp free: %s\n" "$FLASH_FREE"
 
 # --- Step 3: Compatibility check ---
 if [ "$FORCE" != "true" ]; then
-    # Check the firmware filename contains the right target
-    if ! echo "$FIRMWARE_NAME" | grep -qi "bcm27xx\|bcm2712\|rpi-5\|rpi5"; then
-        warn "Firmware file doesn't appear to be for bcm2712/rpi-5"
+    # Sanity-check the firmware filename looks like an OpenWrt sysupgrade image
+    # for this router. The target board is read live from the router below
+    # (ubus system board); this is just a fast filename guard against an
+    # obviously-wrong file. Use --force to skip.
+    if ! echo "$FIRMWARE_NAME" | grep -qi "openwrt\|sysupgrade"; then
+        warn "Firmware file doesn't look like an OpenWrt sysupgrade image"
         warn "File: $FIRMWARE_NAME"
         printf "  Continue anyway? [y/N] "
         read -r answer

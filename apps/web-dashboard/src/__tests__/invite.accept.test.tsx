@@ -95,7 +95,7 @@ describe("InviteAcceptPage", () => {
     expect(document.querySelectorAll('input[type="password"]').length).toBeGreaterThanOrEqual(2);
   });
 
-  it("rejects passwords shorter than 8 chars without calling acceptInvite", async () => {
+  it("rejects passwords that don't meet policy without calling acceptInvite", async () => {
     getInviteMock.mockResolvedValueOnce({
       username: "alice",
       displayName: "Alice",
@@ -115,7 +115,7 @@ describe("InviteAcceptPage", () => {
     fireEvent.click(screen.getByRole("button", { name: /accept|join|set password/i }));
 
     await waitFor(() => {
-      expect(screen.getByText(/at least 8/i)).toBeInTheDocument();
+      expect(screen.getByText(/doesn't meet the requirements/i)).toBeInTheDocument();
     });
     expect(acceptInviteMock).not.toHaveBeenCalled();
   });
@@ -135,12 +135,12 @@ describe("InviteAcceptPage", () => {
     );
 
     const inputs = document.querySelectorAll('input[type="password"]');
-    fireEvent.change(inputs[0], { target: { value: "longenough1" } });
-    fireEvent.change(inputs[1], { target: { value: "different1" } });
+    fireEvent.change(inputs[0], { target: { value: "Abcdefghijk1" } });
+    fireEvent.change(inputs[1], { target: { value: "Abcdefghijk2" } });
     fireEvent.click(screen.getByRole("button", { name: /accept|join|set password/i }));
 
     await waitFor(() => {
-      expect(screen.getByText(/match|do not match|don't match/i)).toBeInTheDocument();
+      expect(screen.getByText(/do not match|don't match/i)).toBeInTheDocument();
     });
     expect(acceptInviteMock).not.toHaveBeenCalled();
   });
@@ -163,14 +163,14 @@ describe("InviteAcceptPage", () => {
     );
 
     const inputs = document.querySelectorAll('input[type="password"]');
-    fireEvent.change(inputs[0], { target: { value: "longenoughpw" } });
-    fireEvent.change(inputs[1], { target: { value: "longenoughpw" } });
+    fireEvent.change(inputs[0], { target: { value: "Abcdefghijk1" } });
+    fireEvent.change(inputs[1], { target: { value: "Abcdefghijk1" } });
     fireEvent.click(screen.getByRole("button", { name: /accept|join|set password/i }));
 
     await waitFor(() => {
       expect(screen.getByTestId("welcome-flourish")).toBeInTheDocument();
     });
-    expect(acceptInviteMock).toHaveBeenCalledWith("valid", "longenoughpw");
+    expect(acceptInviteMock).toHaveBeenCalledWith("valid", "Abcdefghijk1");
   });
 
   it("translates err.code=USED into friendly copy and never surfaces the raw message", async () => {
@@ -191,8 +191,8 @@ describe("InviteAcceptPage", () => {
     );
 
     const inputs = document.querySelectorAll('input[type="password"]');
-    fireEvent.change(inputs[0], { target: { value: "longenoughpw" } });
-    fireEvent.change(inputs[1], { target: { value: "longenoughpw" } });
+    fireEvent.change(inputs[0], { target: { value: "Abcdefghijk1" } });
+    fireEvent.change(inputs[1], { target: { value: "Abcdefghijk1" } });
     fireEvent.click(screen.getByRole("button", { name: /accept|join|set password/i }));
 
     await waitFor(() => {
@@ -225,14 +225,14 @@ describe("InviteAcceptPage", () => {
     );
 
     const inputs = document.querySelectorAll('input[type="password"]');
-    fireEvent.change(inputs[0], { target: { value: "longenoughpw" } });
-    fireEvent.change(inputs[1], { target: { value: "longenoughpw" } });
+    fireEvent.change(inputs[0], { target: { value: "Abcdefghijk1" } });
+    fireEvent.change(inputs[1], { target: { value: "Abcdefghijk1" } });
 
     // Press Enter on the Password (first) field — should submit the form.
     fireEvent.keyDown(inputs[0], { key: "Enter" });
 
     await waitFor(() => {
-      expect(acceptInviteMock).toHaveBeenCalledWith("valid", "longenoughpw");
+      expect(acceptInviteMock).toHaveBeenCalledWith("valid", "Abcdefghijk1");
     });
   });
 
@@ -252,8 +252,8 @@ describe("InviteAcceptPage", () => {
     );
 
     const inputs = document.querySelectorAll('input[type="password"]');
-    fireEvent.change(inputs[0], { target: { value: "longenoughpw" } });
-    fireEvent.change(inputs[1], { target: { value: "longenoughpw" } });
+    fireEvent.change(inputs[0], { target: { value: "Abcdefghijk1" } });
+    fireEvent.change(inputs[1], { target: { value: "Abcdefghijk1" } });
     fireEvent.click(screen.getByRole("button", { name: /accept|join|set password/i }));
 
     await waitFor(() => {

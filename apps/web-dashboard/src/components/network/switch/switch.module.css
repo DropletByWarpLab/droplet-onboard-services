@@ -1,0 +1,118 @@
+/*
+ * Scoped faceplate visuals for the managed-switch panel.
+ *
+ * This module carries ONLY the bespoke hardware-look pieces that have no
+ * Tailwind-utility equivalent: the metallic RJ45/SFP jack gradients, the
+ * link/PoE LED glows, and the drawer slide keyframes. Everything else in the
+ * panel (layout, type, spacing, status chips, the PoE bars) is plain
+ * utilities + design tokens on the components themselves.
+ *
+ * Tokens only — no literal hex. The PoE-bar gradient uses var(--color-accent)
+ * (violet #6d28d9 live); the design's stale #6366f1 indigo is intentionally
+ * dropped. The dark jack body is a fixed metallic ramp (physical hardware
+ * reads the same in light + dark), expressed against the design's gradient.
+ */
+
+/* ── RJ45 / SFP jack ─────────────────────────────────────────────── */
+.jack {
+  position: relative;
+  width: 38px;
+  height: 30px;
+  border-radius: 4px 4px 5px 5px;
+  background: linear-gradient(180deg, #3a3f4b 0%, #23262f 100%);
+  box-shadow:
+    inset 0 -3px 4px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.jack::after {
+  content: "";
+  position: absolute;
+  bottom: -3px;
+  width: 16px;
+  height: 5px;
+  border-radius: 0 0 3px 3px;
+  background: #23262f;
+}
+.jack.up {
+  background: linear-gradient(180deg, #3f4654 0%, #262b36 100%);
+}
+.jackSfp {
+  width: 52px;
+  height: 22px;
+  border-radius: 4px;
+}
+.jackSfp::after {
+  display: none;
+}
+.jackX {
+  color: var(--color-system-red);
+  display: flex;
+}
+
+/* ── Link / PoE LEDs ─────────────────────────────────────────────── */
+.led {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.18);
+}
+.ledLink {
+  position: absolute;
+  top: 3px;
+  left: 4px;
+}
+.ledPoe {
+  position: absolute;
+  top: 3px;
+  right: 4px;
+  background: var(--color-system-orange);
+  box-shadow: 0 0 5px rgba(255, 149, 0, 0.8);
+}
+.ledLinkOn {
+  background: var(--color-system-green);
+  box-shadow: 0 0 5px rgba(52, 199, 89, 0.8);
+}
+/* inline LED used in the table / drawer rows (no absolute positioning) */
+.ledInline {
+  position: static;
+  display: inline-block;
+  vertical-align: middle;
+}
+
+/* ── PoE meter fills ─────────────────────────────────────────────── */
+.poeBudgetFill {
+  display: block;
+  height: 100%;
+  border-radius: 9999px;
+  background: linear-gradient(90deg, var(--color-system-green), var(--color-accent));
+}
+.poeMiniFill {
+  display: block;
+  height: 100%;
+  border-radius: 9999px;
+  background: var(--color-system-orange);
+}
+
+/* ── Faceplate jack-cell slide-in (reused by the drawer too) ─────── */
+@keyframes swSlide {
+  from {
+    transform: translateX(20px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+/* Reduced-motion: the LED glows are static; only suppress the slide. The
+ * Dialog primitive that hosts the drawer already gates its own transition on
+ * prefers-reduced-motion, so this keyframe is only used by in-panel reveals. */
+@media (prefers-reduced-motion: reduce) {
+  .swSlide {
+    animation: none;
+  }
+}

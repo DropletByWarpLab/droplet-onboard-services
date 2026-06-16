@@ -32,7 +32,7 @@ the sidecar.
 
 | Backend | Selected when | Behavior |
 |---|---|---|
-| `real` | `DROPLET_TPM_BACKEND=real` (Jetson production) | tpm2-pytss against `/dev/tpm0`; ECC P-256 key sealed to PCRs |
+| `real` | `DROPLET_TPM_BACKEND=real` (production appliance) | tpm2-pytss against `/dev/tpm0`; ECC P-256 key sealed to PCRs |
 | `mock` | `DROPLET_TPM_BACKEND=mock` (dev, CI) | Pure-Python in-memory; persists artifacts to `/var/lib/droplet/tpm/` for cross-process interchangeability |
 
 `scripts/lib/secrets.sh` picks the default at install time: `real` when
@@ -51,8 +51,8 @@ it exits 0. Otherwise, on first sidecar start (the Compose service runs
 with `DROPLET_AUTO_PROVISION=1`), the sidecar:
 
 1. Detects TPM presence (real backend) or skips straight to step 4 (mock).
-2. Reads or synthesizes the Endorsement Key Certificate. Jetson modules
-   don't ship a pre-installed EK cert; the real backend synthesizes a
+2. Reads or synthesizes the Endorsement Key Certificate. The appliance TPM
+   may not ship a pre-installed EK cert; the real backend synthesizes a
    self-signed cert over the EK public key.
 3. Creates the Storage Root Key, persistent at handle `0x81000001`.
 4. Generates the device identity key: ECC P-256, scheme `ECDSA + SHA-256`,
@@ -70,7 +70,7 @@ Artifacts at `/var/lib/droplet/tpm/`:
 
 | File | Contents |
 |---|---|
-| `ek-cert.pem` | Endorsement Key cert (synthesized for Jetson) |
+| `ek-cert.pem` | Endorsement Key cert (synthesized on the appliance) |
 | `srk-pub.pem` | Storage Root Key public component |
 | `device-id-pub.pem` | Device identity public key |
 | `device-id-cert.pem` | Self-signed X.509 cert |
@@ -126,7 +126,7 @@ introduced.
 - **ECDSA** — FIPS-approved signature scheme.
 - **AES-256-GCM** (TPM-internal wrapping key, real backend) — FIPS-approved.
 - **TPM 2.0 hardware module** — FIPS 140-2 Level 2 on most Infineon
-  SLB 96xx series shipping on Jetson modules.
+  SLB 96xx series appliance TPM modules.
 
 The sidecar Dockerfile uses the WARP-229 FIPS provider pattern:
 `/etc/ssl/openssl-fips.cnf` ships in the image, the runtime
@@ -154,7 +154,7 @@ FIPS module is layered on. The boot self-test is gated by
   `DROPLET_TPM_BACKEND=mock` + `DROPLET_ENV=production`. Operator must
   set `real` explicitly when shipping.
 - **PCR set drift between vendors.** PCRs `[0, 2, 4, 7]` are canonical
-  for x86/UEFI; Jetson's cboot may not match exactly. The sidecar
+  for standard UEFI boot; some bootloaders may not match exactly. The sidecar
   detects actual PCR values during provisioning and persists the SET
   used to `provisioned.json`. Override the set via `DROPLET_TPM_PCRS`
   env (e.g. `DROPLET_TPM_PCRS=0,4,7`).
@@ -174,7 +174,7 @@ FIPS module is layered on. The boot self-test is gated by
 - CSR / CA-issued device certs — future ticket
 - mTLS to cloud connectors using this identity — Phase D
 - Physical button for reseal trigger — future federal-customer ticket
-- External TPM module hardware variant — single-Jetson assumption
+- External TPM module hardware variant — single-appliance assumption
 - WebAuthn MFA for reseal (vs current TOTP) — WARP-238 hooks in once it
   ships
 - Audit log integration — WARP-237 ingestor picks up the structured-JSON

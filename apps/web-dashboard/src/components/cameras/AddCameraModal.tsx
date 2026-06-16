@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { X, Plus, Loader2 } from "lucide-react";
 import { addCameraManual } from "@/lib/api";
+import { translateError } from "@/lib/friendly-errors";
 
 interface AddCameraModalProps {
   onClose: () => void;
@@ -32,7 +33,7 @@ export function AddCameraModal({ onClose, onAdded }: AddCameraModalProps) {
       onAdded();
       onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to add camera");
+      setError(translateError(err, "camera"));
     } finally {
       setLoading(false);
     }

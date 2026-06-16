@@ -32,23 +32,30 @@ COPY package.json package-lock.json ./
 COPY apps/orchestrator/package.json ./apps/orchestrator/package.json
 COPY apps/web-dashboard/package.json ./apps/web-dashboard/package.json
 COPY services/ai-gateway/package.json ./services/ai-gateway/package.json
+COPY services/matter-controller/package.json ./services/matter-controller/package.json
 COPY services/mcp-server/package.json ./services/mcp-server/package.json
 COPY packages/tools-core/package.json ./packages/tools-core/package.json
 COPY packages/fips-selftest/package.json ./packages/fips-selftest/package.json
+COPY packages/shared-types/package.json ./packages/shared-types/package.json
+COPY packages/auth-policy/package.json ./packages/auth-policy/package.json
 
 # Targeted install: only the orchestrator workspace and its in-repo
-# dependencies (tools-core + mcp-server + fips-selftest). Excludes
-# web-dashboard's Next.js + React stack from the orchestrator image.
+# dependencies (tools-core + mcp-server + fips-selftest + shared-types).
+# Excludes web-dashboard's Next.js + React stack from the orchestrator image.
 RUN npm ci \
     -w @droplet/orchestrator \
     -w @droplet/tools-core \
     -w @droplet/mcp-server \
     -w @droplet/fips-selftest \
+    -w @droplet/shared-types \
+    -w @droplet/auth-policy \
     --include-workspace-root
 
 # Copy sources for the workspaces this image builds.
 COPY packages/tools-core ./packages/tools-core
 COPY packages/fips-selftest ./packages/fips-selftest
+COPY packages/shared-types ./packages/shared-types
+COPY packages/auth-policy ./packages/auth-policy
 COPY services/mcp-server ./services/mcp-server
 COPY apps/orchestrator ./apps/orchestrator
 
@@ -58,6 +65,8 @@ COPY apps/orchestrator ./apps/orchestrator
 RUN npm run -w @droplet/orchestrator db:generate
 
 # Build in dependency order.
+RUN npm run -w @droplet/shared-types build
+RUN npm run -w @droplet/auth-policy build
 RUN npm run -w @droplet/tools-core build
 RUN npm run -w @droplet/fips-selftest build
 RUN npm run -w @droplet/mcp-server build
@@ -70,9 +79,36 @@ FROM node:20-bookworm-slim
 # base image already ships `openssl` and `libssl3`, which together
 # provide the FIPS module config (`/etc/ssl/fipsmodule.cnf`). We
 # explicitly apt-install to pin it across image rebuilds.
+#
+# WARP-573: also install `postgresql-client-16` so the guarded boot
+# entrypoint (scripts/migrate-and-start.sh) can run psql / pg_dump /
+# pg_restore for the advisory lock + pre-migration snapshot + auto-recovery.
+#
+# postgresql-client-16 is NOT in Debian Bookworm's base repos (Bookworm ships
+# postgresql-client-15), so we pull major 16 from the official PostgreSQL APT
+# repository (PGDG). WARP-573's assumption that the base image carried it was
+# wrong; once the cached apt index rolled over, the build began failing with
+# `E: Unable to locate package postgresql-client-16` (exit 100).
+#
+# Why major 16 specifically: pg_dump refuses to dump a server NEWER than
+# itself, so the client major must be >= every Postgres server it touches.
+# Deployed servers (`db`, `postgres-pm`) are postgres:15; the integration-test
+# server (tests/docker-compose.test.yml) is postgres:16. Client 16 covers both
+# (16 >= 16 >= 15). If any server major is raised, bump this pin in lockstep.
+#
+# `curl` is pulled in only to fetch the (ASCII-armored) PGDG signing key for
+# apt's `signed-by`, then purged so it doesn't linger in the runtime image.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      openssl ca-certificates && \
+      openssl ca-certificates curl && \
+    install -d /usr/share/postgresql-common/pgdg && \
+    curl --fail -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+      https://www.postgresql.org/media/keys/ACCC4CF8.asc && \
+    echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+      > /etc/apt/sources.list.d/pgdg.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends postgresql-client-16 && \
+    apt-get purge -y --auto-remove curl && \
     rm -rf /var/lib/apt/lists/*
 
 # WARP-229: activate the OpenSSL 3 FIPS provider. Both the Node process
@@ -98,14 +134,34 @@ COPY --from=builder /app/packages/tools-core/package.json ./packages/tools-core/
 COPY --from=builder /app/packages/tools-core/dist ./packages/tools-core/dist
 COPY --from=builder /app/packages/fips-selftest/package.json ./packages/fips-selftest/package.json
 COPY --from=builder /app/packages/fips-selftest/dist ./packages/fips-selftest/dist
+COPY --from=builder /app/packages/shared-types/package.json ./packages/shared-types/package.json
+COPY --from=builder /app/packages/shared-types/dist ./packages/shared-types/dist
+COPY --from=builder /app/packages/auth-policy/package.json ./packages/auth-policy/package.json
+COPY --from=builder /app/packages/auth-policy/dist ./packages/auth-policy/dist
 COPY --from=builder /app/services/mcp-server/package.json ./services/mcp-server/package.json
 COPY --from=builder /app/services/mcp-server/dist ./services/mcp-server/dist
+# WARP-858: the embedding + reranker gRPC clients in the mcp-server stdio
+# child use @grpc/proto-loader to read inference.proto AT RUNTIME (their
+# last-resort lookup is /app/proto/inference.proto). Without this copy,
+# every `search_content` call in a containerized orchestrator throws at
+# embed time and surfaces as SEARCH_FAILED — hybrid search worked in dev
+# (repo-relative resolution) and silently never in Docker. Mirrors the
+# same COPY in services/mcp-server/Dockerfile.
+COPY proto ./proto
 COPY --from=builder /app/apps/orchestrator/package.json ./apps/orchestrator/package.json
 COPY --from=builder /app/apps/orchestrator/dist ./apps/orchestrator/dist
 COPY --from=builder /app/apps/orchestrator/prisma ./apps/orchestrator/prisma
+# WARP-573: guarded migration-on-boot entrypoint (advisory lock +
+# pre-migration snapshot + auto-recovery). Replaces the old inline
+# `migrate deploy && node` CMD.
+COPY --from=builder /app/apps/orchestrator/scripts ./apps/orchestrator/scripts
+RUN chmod +x ./apps/orchestrator/scripts/migrate-and-start.sh
 # WARP-81: bundle the IEEE OUI vendor registry snapshot. oui-lookup.service
 # reads this at startup to resolve MAC prefixes → vendor names.
 COPY --from=builder /app/apps/orchestrator/data/oui.csv ./apps/orchestrator/data/oui.csv
+# Droplet identity prompt — leads the base system prompt for every
+# /api/llm/chat surface (identity-prompt.ts reads it at first chat).
+COPY --from=builder /app/apps/orchestrator/data/droplet-identity.md ./apps/orchestrator/data/droplet-identity.md
 
 WORKDIR /app/apps/orchestrator
 
@@ -143,5 +199,13 @@ WORKDIR /app/apps/orchestrator
 #   Until a provider is installed, set `DROPLET_FIPS_REQUIRED=false`
 #   in the container env to skip the boot self-test and run in a
 #   non-FIPS posture (development / CI / staging).
+# WARP-573: boot through the guarded migration entrypoint instead of the old
+# unguarded `npx prisma migrate deploy && node dist/index.js`. The script takes
+# a Postgres advisory lock (so concurrent/looping starts can't race the
+# _prisma_migrations table), snapshots the DB before applying pending
+# migrations, auto-recovers a power-cut-induced failed migration, and on
+# unrecoverable failure exits non-zero with a loud, greppable banner + recovery
+# runbook instead of silently restart-looping. See scripts/migrate-and-start.sh
+# and .superpowers/brainstorm/WARP-573.md.
 EXPOSE 3000
-CMD ["sh", "-c", "npx prisma migrate deploy && node dist/index.js"]
+CMD ["./scripts/migrate-and-start.sh"]

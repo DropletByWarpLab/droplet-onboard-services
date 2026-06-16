@@ -187,6 +187,32 @@ describe("storage routes (WARP-174)", () => {
       expect(res.status).toBe(502);
       expect(res.body.drives).toEqual([]);
     });
+
+    // WARP-645: the device-bridge only runs with the OLED/display compose
+    // profile. On hosts without it the fetch throws ECONNREFUSED — an expected
+    // deployment shape, not an error. Degrade to 200 + reason rather than the
+    // raw "fetch failed" error string.
+    it("degrades cleanly when the bridge is not running (ECONNREFUSED)", async () => {
+      const connErr = Object.assign(new TypeError("fetch failed"), {
+        cause: Object.assign(new Error("connect ECONNREFUSED 172.17.0.1:9090"), {
+          code: "ECONNREFUSED",
+        }),
+      });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          throw connErr;
+        }),
+      );
+      const app = buildApp(createPrismaMock());
+      const res = await request(app).get("/api/storage/drives");
+      expect(res.status).toBe(200);
+      expect(res.body.drives).toEqual([]);
+      expect(res.body.count).toBe(0);
+      expect(res.body.reason).toBe("bridge_unavailable");
+      // The raw error string must NOT leak through on this expected path.
+      expect(res.body.error).toBeUndefined();
+    });
   });
 
   describe("PATCH /api/storage/drives/:uuid", () => {
@@ -255,6 +281,542 @@ describe("storage routes (WARP-174)", () => {
         .send({ displayName: "X" });
       expect(res.status).toBe(400);
       expect(res.body.error).toMatch(/Invalid drive UUID/i);
+    });
+  });
+});
+
+describe("storage routes — data-drive inclusion filter (WARP-827)", () => {
+  // The home-user persona (ADR-002) must never see firmware/boot/swap/loop
+  // pseudo-devices or the OS/system disk presented as "your drives". The
+  // device-bridge already scopes its /mnt/* enumeration (it excludes
+  // /mnt/droplet, non-data fstypes, and trivially small mounts), but the
+  // orchestrator is the CI-testable boundary and must defend in depth against
+  // a bridge — older, future, or mis-scoped — that leaks junk. This fixture
+  // mixes representative junk in with two real data drives and asserts only
+  // the real ones survive.
+  const junkAndDataSnapshot = {
+    drives: [
+      // EFI system partition — firmware, never user storage.
+      {
+        device: "/dev/sda1",
+        mount: "/boot/efi",
+        label: "EFI",
+        uuid: "U-EFI",
+        size_bytes: 536_870_912,
+        used_bytes: 30_000_000,
+        free_bytes: 506_870_912,
+        mounted: true,
+        fs: "vfat",
+      },
+      // Swap — not a filesystem the user browses.
+      {
+        device: "/dev/sda2",
+        mount: "[SWAP]",
+        label: "",
+        uuid: "U-SWAP",
+        size_bytes: 8_589_934_592,
+        used_bytes: 0,
+        free_bytes: 8_589_934_592,
+        mounted: true,
+        fs: "swap",
+      },
+      // Loop device — squashfs snap/appimage backing mount.
+      {
+        device: "/dev/loop0",
+        mount: "/snap/core/1234",
+        label: "",
+        uuid: "",
+        size_bytes: 104_857_600,
+        used_bytes: 104_857_600,
+        free_bytes: 0,
+        mounted: true,
+        fs: "squashfs",
+      },
+      // The OS / system disk mounted at root — the install, not a data drive.
+      {
+        device: "/dev/nvme0n1p2",
+        mount: "/",
+        label: "ubuntu",
+        uuid: "U-OSROOT",
+        size_bytes: 256_060_514_304,
+        used_bytes: 60_000_000_000,
+        free_bytes: 196_060_514_304,
+        mounted: true,
+        fs: "ext4",
+      },
+      // The OS-root shared-mount bind the automounter creates — backed by the
+      // OS disk, so it would show the install as a "drive" (device-bridge
+      // hides this at /mnt/droplet; defend here too).
+      {
+        device: "/dev/nvme0n1p2",
+        mount: "/mnt/droplet",
+        label: "ubuntu",
+        uuid: "U-OSROOT",
+        size_bytes: 256_060_514_304,
+        used_bytes: 60_000_000_000,
+        free_bytes: 196_060_514_304,
+        mounted: true,
+        fs: "ext4",
+      },
+      // A real external data drive (hot-plug, under /mnt/droplet/<name>).
+      {
+        device: "/dev/sdb1",
+        mount: "/mnt/droplet/photos-ab12cd34",
+        label: "TOSHIBA EXT",
+        uuid: "U-DATA-1",
+        size_bytes: 2_000_000_000_000,
+        used_bytes: 100_000_000_000,
+        free_bytes: 1_900_000_000_000,
+        mounted: true,
+        fs: "ext4",
+        removable: true,
+      },
+      // A real installed data drive (fstab) under /mnt/.
+      {
+        device: "/dev/sdc1",
+        mount: "/mnt/cloud-storage",
+        label: "VAULT",
+        uuid: "U-DATA-2",
+        size_bytes: 4_000_000_000_000,
+        used_bytes: 1_000_000_000_000,
+        free_bytes: 3_000_000_000_000,
+        mounted: true,
+        fs: "xfs",
+      },
+    ],
+    count: 7,
+    snapshot_at: "2026-06-06T00:00:00Z",
+  };
+
+  it("returns only real data drives — drops EFI/swap/loop/OS-disk/OS-root", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ ok: true, json: async () => junkAndDataSnapshot })),
+    );
+    const app = buildApp(createPrismaMock());
+    const res = await request(app).get("/api/storage/drives");
+    expect(res.status).toBe(200);
+    const uuids = res.body.drives.map((d: any) => d.uuid).sort();
+    expect(uuids).toEqual(["U-DATA-1", "U-DATA-2"]);
+    // count must reflect the FILTERED set, not the raw bridge count.
+    expect(res.body.count).toBe(2);
+    // None of the junk leaks through.
+    const mounts = res.body.drives.map((d: any) => d.mount);
+    expect(mounts).not.toContain("/boot/efi");
+    expect(mounts).not.toContain("[SWAP]");
+    expect(mounts).not.toContain("/snap/core/1234");
+    expect(mounts).not.toContain("/");
+    expect(mounts).not.toContain("/mnt/droplet");
+  });
+
+  it("does NOT drop everything — a snapshot of only data drives passes through intact", async () => {
+    // Regression guard against an over-aggressive predicate: the original
+    // WARP-174 fixture (all real /mnt/droplet drives) must survive unchanged.
+    const app = buildApp(createPrismaMock());
+    const res = await request(app).get("/api/storage/drives");
+    expect(res.status).toBe(200);
+    expect(res.body.drives).toHaveLength(3);
+    expect(res.body.count).toBe(3);
+  });
+
+  it("preserves the bridge_unavailable degradation (filter never fabricates drives)", async () => {
+    const connErr = Object.assign(new TypeError("fetch failed"), {
+      cause: Object.assign(new Error("connect ECONNREFUSED 172.17.0.1:9090"), {
+        code: "ECONNREFUSED",
+      }),
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw connErr;
+      }),
+    );
+    const app = buildApp(createPrismaMock());
+    const res = await request(app).get("/api/storage/drives");
+    expect(res.status).toBe(200);
+    expect(res.body.drives).toEqual([]);
+    expect(res.body.reason).toBe("bridge_unavailable");
+  });
+
+  it("returns an empty list (not an error) when every drive is junk", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          drives: [
+            { device: "/dev/sda1", mount: "/boot/efi", label: "EFI", uuid: "U-EFI", size_bytes: 5e8, used_bytes: 0, free_bytes: 5e8, mounted: true, fs: "vfat" },
+            { device: "/dev/loop1", mount: "/snap/x/1", label: "", uuid: "", size_bytes: 1e8, used_bytes: 1e8, free_bytes: 0, mounted: true, fs: "squashfs" },
+          ],
+          count: 2,
+          snapshot_at: "2026-06-06T00:00:00Z",
+        }),
+      })),
+    );
+    const app = buildApp(createPrismaMock());
+    const res = await request(app).get("/api/storage/drives");
+    expect(res.status).toBe(200);
+    expect(res.body.drives).toEqual([]);
+    expect(res.body.count).toBe(0);
+  });
+
+  it("drops an OS-disk partition auto-mounted as a data drive (os_disk/parent_disk — the real .87 case)", async () => {
+    // The automounter mounted the install disk's EFI/boot partitions under
+    // /mnt/droplet/drive-<uuid>: they pass rules 2-3 (ext4/vfat, under /mnt/,
+    // not the bind) yet live on the OS disk. The bridge tags parent_disk +
+    // reports os_disk so the orchestrator drops them. Mirrors what the live
+    // single-box (.87) actually returned: nvme0n1p1/p2 -> nvme0n1 == root.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          os_disk: "nvme0n1",
+          drives: [
+            { device: "/dev/nvme0n1p1", parent_disk: "nvme0n1", mount: "/mnt/droplet/drive-13EE-1E3", label: "drive", uuid: "U-EFI-AUTO", size_bytes: 1_073_741_824, used_bytes: 5e7, free_bytes: 1e9, mounted: true, fs: "vfat" },
+            { device: "/dev/nvme0n1p2", parent_disk: "nvme0n1", mount: "/mnt/droplet/drive-538963df", label: "drive", uuid: "U-BOOT-AUTO", size_bytes: 2_147_483_648, used_bytes: 3e8, free_bytes: 1.8e9, mounted: true, fs: "ext4" },
+            { device: "/dev/sdb1", parent_disk: "sdb", mount: "/mnt/droplet/data2-1380a14d", label: "data2", uuid: "U-DATA-REAL", size_bytes: 2e12, used_bytes: 1e11, free_bytes: 1.9e12, mounted: true, fs: "ext4", removable: true },
+          ],
+          count: 3,
+          snapshot_at: "2026-06-06T00:00:00Z",
+        }),
+      })),
+    );
+    const app = buildApp(createPrismaMock());
+    const res = await request(app).get("/api/storage/drives");
+    expect(res.status).toBe(200);
+    expect(res.body.drives.map((d: any) => d.uuid)).toEqual(["U-DATA-REAL"]);
+    expect(res.body.count).toBe(1);
+    const mounts = res.body.drives.map((d: any) => d.mount);
+    expect(mounts).not.toContain("/mnt/droplet/drive-13EE-1E3");
+    expect(mounts).not.toContain("/mnt/droplet/drive-538963df");
+  });
+
+  it("fails open: with no os_disk reported, a parent_disk tag never hides a real drive", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          drives: [
+            { device: "/dev/sdb1", parent_disk: "sdb", mount: "/mnt/droplet/data2", label: "data2", uuid: "U-NO-OSDISK", size_bytes: 2e12, used_bytes: 1e11, free_bytes: 1.9e12, mounted: true, fs: "ext4", removable: true },
+          ],
+          count: 1,
+          snapshot_at: "2026-06-06T00:00:00Z",
+        }),
+      })),
+    );
+    const app = buildApp(createPrismaMock());
+    const res = await request(app).get("/api/storage/drives");
+    expect(res.status).toBe(200);
+    expect(res.body.drives.map((d: any) => d.uuid)).toEqual(["U-NO-OSDISK"]);
+  });
+});
+
+describe("storage routes — device-bridge URL (WARP-660)", () => {
+  // Regression lock: the bridge URL default MUST be the host.docker.internal
+  // form, NOT the docker0 gateway (172.17.0.1). On the single-box deployment
+  // shape the orchestrator container is on the `droplet_default` bridge
+  // network (gateway 172.18.0.1) and docker0 is down, so a 172.17.0.1 default
+  // can never reach the host-side device-bridge — drives silently enumerate
+  // empty. host.docker.internal resolves via the orchestrator's
+  // `extra_hosts: host-gateway` mapping (same mechanism screen-qr already
+  // uses for /openwrt/qr), so it's the proven-reachable address.
+  it("fetches drives from host.docker.internal, not the docker0 gateway", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => fixtureSnapshot,
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const app = buildApp(createPrismaMock());
+    const res = await request(app).get("/api/storage/drives");
+    expect(res.status).toBe(200);
+    const url = String((fetchMock.mock.calls[0] as unknown as [string])[0]);
+    expect(url).toBe("http://host.docker.internal:9090/drives");
+    // Explicitly assert the buggy docker0 default is gone.
+    expect(url).not.toContain("172.17.0.1");
+  });
+
+  // Backward-compat: storage.ts historically read the `BRIDGE_URL` env var.
+  // The value now flows through `config.DEVICE_BRIDGE_URL`, which is resolved
+  // at module-load time (like every other *_SERVICE_URL in config.ts), so we
+  // assert the alias resolution against a fresh config load with the env set
+  // rather than a per-request stub (config snapshots env at import).
+  it("honors a legacy BRIDGE_URL env var via config (alias)", async () => {
+    vi.stubEnv("DEVICE_BRIDGE_URL", "");
+    vi.stubEnv("BRIDGE_URL", "http://192.0.2.10:9090");
+    vi.resetModules();
+    const { config } = await import("../config.js");
+    expect(config.DEVICE_BRIDGE_URL).toBe("http://192.0.2.10:9090");
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  it("prefers DEVICE_BRIDGE_URL over the legacy BRIDGE_URL when both are set", async () => {
+    vi.stubEnv("DEVICE_BRIDGE_URL", "http://198.51.100.5:9090");
+    vi.stubEnv("BRIDGE_URL", "http://192.0.2.10:9090");
+    vi.resetModules();
+    const { config } = await import("../config.js");
+    expect(config.DEVICE_BRIDGE_URL).toBe("http://198.51.100.5:9090");
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  it("targets host.docker.internal for the rescan cache-invalidation too", async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({ ok: true }) }));
+    vi.stubGlobal("fetch", fetchMock);
+    const app = buildApp(createPrismaMock());
+    await request(app).post("/api/storage/drives/rescan");
+    const url = String((fetchMock.mock.calls[0] as unknown as [string])[0]);
+    expect(url).toBe("http://host.docker.internal:9090/drives/changed");
+  });
+
+  it("sends the bridge auth token on the rescan proxy (this PR gates /drives/changed — a bare POST 401s and rescan dies as 502)", async () => {
+    vi.stubEnv("BRIDGE_AUTH_TOKEN", "secret-token");
+    const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({ ok: true }) }));
+    vi.stubGlobal("fetch", fetchMock);
+    const app = buildApp(createPrismaMock());
+    const res = await request(app).post("/api/storage/drives/rescan");
+    expect(res.status).toBe(200);
+    const init = (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1];
+    expect(
+      (init.headers as Record<string, string>)["X-Droplet-Auth"],
+    ).toBe("secret-token");
+    vi.unstubAllEnvs();
+  });
+
+  it("targets host.docker.internal for the eject path too", async () => {
+    vi.stubEnv("BRIDGE_AUTH_TOKEN", "secret-token");
+    const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({ ok: true }) }));
+    vi.stubGlobal("fetch", fetchMock);
+    const app = buildApp(createPrismaMock());
+    await request(app).post("/api/storage/drives/UUID-MAIN-DRIVE/eject");
+    const url = String((fetchMock.mock.calls[0] as unknown as [string])[0]);
+    expect(url).toBe("http://host.docker.internal:9090/drives/UUID-MAIN-DRIVE/eject");
+    vi.unstubAllEnvs();
+  });
+});
+
+describe("storage routes — bus enrichment + rescan (WARP-612)", () => {
+  it("falls back to a neutral bus class when the bridge omits it", async () => {
+    // The bridge sends the real transport (it reads lsblk on the host). When
+    // an older bridge omits it, the orchestrator name-guesses: nvme is
+    // unambiguous, but sd* stays neutral 'disk' — it could be SATA/SAS, not
+    // necessarily USB (ADR-011, no hardware assumption).
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          drives: [
+            { device: "/dev/nvme0n1p1", mount: "/mnt/droplet/vault", label: "Vault", uuid: "U-NVME", size_bytes: 4e12, used_bytes: 1e12, free_bytes: 3e12, mounted: true },
+            { device: "/dev/sda1", mount: "/mnt/droplet/data", label: "Data", uuid: "U-SD", size_bytes: 2e12, used_bytes: 0, free_bytes: 2e12, mounted: true },
+          ],
+          count: 2,
+          snapshot_at: "2026-05-31T00:00:00Z",
+        }),
+      })),
+    );
+    const app = buildApp(createPrismaMock());
+    const res = await request(app).get("/api/storage/drives");
+    expect(res.status).toBe(200);
+    const byUuid = Object.fromEntries(res.body.drives.map((d: any) => [d.uuid, d]));
+    expect(byUuid["U-NVME"].bus).toBe("nvme");
+    expect(byUuid["U-SD"].bus).toBe("disk");
+  });
+
+  it("passes through the bridge's fs/bus/readonly when present", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          drives: [
+            { device: "/dev/sda1", mount: "/mnt/x", label: "X", uuid: "U1", size_bytes: 1e9, used_bytes: 0, free_bytes: 1e9, mounted: true, bus: "usb", fs: "exfat", readonly: true },
+          ],
+          count: 1,
+          snapshot_at: "2026-05-31T00:00:00Z",
+        }),
+      })),
+    );
+    const app = buildApp(createPrismaMock());
+    const res = await request(app).get("/api/storage/drives");
+    expect(res.body.drives[0].bus).toBe("usb");
+    expect(res.body.drives[0].fs).toBe("exfat");
+    expect(res.body.drives[0].readonly).toBe(true);
+  });
+
+  describe("POST /api/storage/drives/rescan", () => {
+    it("returns ok when the bridge accepts the cache-invalidation", async () => {
+      vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({ ok: true }) })));
+      const app = buildApp(createPrismaMock());
+      const res = await request(app).post("/api/storage/drives/rescan");
+      expect(res.status).toBe(200);
+      expect(res.body.ok).toBe(true);
+    });
+
+    it("502s when the bridge is unreachable", async () => {
+      vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 502, json: async () => ({}) })));
+      const app = buildApp(createPrismaMock());
+      const res = await request(app).post("/api/storage/drives/rescan");
+      expect(res.status).toBe(502);
+      expect(res.body.ok).toBe(false);
+    });
+
+    // WARP-645: a connection error (bridge not running) must degrade with a
+    // typed reason instead of leaking the raw "fetch failed" string.
+    it("degrades with 503 + reason when the bridge is not running (ECONNREFUSED)", async () => {
+      const connErr = Object.assign(new TypeError("fetch failed"), {
+        cause: Object.assign(new Error("connect ECONNREFUSED 172.17.0.1:9090"), {
+          code: "ECONNREFUSED",
+        }),
+      });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          throw connErr;
+        }),
+      );
+      const app = buildApp(createPrismaMock());
+      const res = await request(app).post("/api/storage/drives/rescan");
+      expect(res.status).toBe(503);
+      expect(res.body.ok).toBe(false);
+      expect(res.body.reason).toBe("bridge_unavailable");
+      // The raw error string must NOT leak through on this expected path.
+      expect(res.body.error).not.toMatch(/fetch failed/i);
+    });
+
+    it("forbids non-admins", async () => {
+      const app = express();
+      app.use(express.json());
+      app.use((req, _res, next) => {
+        (req as unknown as { user: { id: string; username: string; displayName: string; role: string } }).user = {
+          id: "fam",
+          username: "fam",
+          displayName: "Fam",
+          role: "family",
+        };
+        next();
+      });
+      app.use("/api", createStorageRouter(createPrismaMock() as any));
+      const res = await request(app).post("/api/storage/drives/rescan");
+      expect(res.status).toBe(403);
+    });
+
+    it("fails closed when no authenticated user is present", async () => {
+      // No synthetic user injected — mirrors a request that never passed
+      // authMiddleware. isAdmin() must treat a missing req.user.role as
+      // not-admin (fail closed): 403, not a throw and not an allow.
+      const app = express();
+      app.use(express.json());
+      app.use("/api", createStorageRouter(createPrismaMock() as any));
+      const res = await request(app).post("/api/storage/drives/rescan");
+      expect(res.status).toBe(403);
+    });
+  });
+});
+
+describe("storage routes — SMART + eject (WARP-612)", () => {
+  it("passes through SMART health + temperature when the bridge provides them", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          drives: [
+            { device: "/dev/sda1", mount: "/mnt/droplet/x", label: "X", uuid: "U1", size_bytes: 1e9, used_bytes: 0, free_bytes: 1e9, mounted: true, smart: "PASSED", temp_c: 41 },
+          ],
+          count: 1,
+          snapshot_at: "2026-05-31T00:00:00Z",
+        }),
+      })),
+    );
+    const app = buildApp(createPrismaMock());
+    const res = await request(app).get("/api/storage/drives");
+    expect(res.body.drives[0].smart).toBe("PASSED");
+    expect(res.body.drives[0].temp_c).toBe(41);
+  });
+
+  describe("POST /api/storage/drives/:uuid/eject", () => {
+    it("forbids non-admins", async () => {
+      const app = express();
+      app.use(express.json());
+      app.use((req, _res, next) => {
+        (req as unknown as { user: { id: string; username: string; displayName: string; role: string } }).user = {
+          id: "fam", username: "fam", displayName: "Fam", role: "family",
+        };
+        next();
+      });
+      app.use("/api", createStorageRouter(createPrismaMock() as any));
+      const res = await request(app).post("/api/storage/drives/U1/eject");
+      expect(res.status).toBe(403);
+    });
+
+    it("rejects an invalid UUID", async () => {
+      const app = buildApp(createPrismaMock());
+      const res = await request(app).post("/api/storage/drives/has spaces/eject");
+      expect(res.status).toBe(400);
+    });
+
+    it("503s when no device-bridge auth token is configured", async () => {
+      vi.stubEnv("BRIDGE_AUTH_TOKEN", "");
+      vi.stubEnv("SERVICE_TOKEN_DISPLAY", "");
+      const app = buildApp(createPrismaMock());
+      const res = await request(app).post("/api/storage/drives/U1/eject");
+      expect(res.status).toBe(503);
+      vi.unstubAllEnvs();
+    });
+
+    it("forwards to the bridge with auth + returns ok on success", async () => {
+      vi.stubEnv("BRIDGE_AUTH_TOKEN", "secret-token");
+      const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({ ok: true, ejected: "U1" }) }));
+      vi.stubGlobal("fetch", fetchMock);
+      const app = buildApp(createPrismaMock());
+      const res = await request(app).post("/api/storage/drives/U1/eject");
+      expect(res.status).toBe(200);
+      expect(res.body.ok).toBe(true);
+      const [url, init] = fetchMock.mock.calls[0] as unknown as [string, { headers: Record<string, string> }];
+      expect(String(url)).toMatch(/\/drives\/U1\/eject$/);
+      expect(init.headers["X-Droplet-Auth"]).toBe("secret-token");
+      vi.unstubAllEnvs();
+    });
+
+    // WARP-645: a connection error (bridge not running) must degrade with a
+    // typed reason instead of leaking the raw "fetch failed" string.
+    it("degrades with 503 + reason when the bridge is not running (ECONNREFUSED)", async () => {
+      vi.stubEnv("BRIDGE_AUTH_TOKEN", "secret-token");
+      const connErr = Object.assign(new TypeError("fetch failed"), {
+        cause: Object.assign(new Error("connect ECONNREFUSED 172.17.0.1:9090"), {
+          code: "ECONNREFUSED",
+        }),
+      });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          throw connErr;
+        }),
+      );
+      const app = buildApp(createPrismaMock());
+      const res = await request(app).post("/api/storage/drives/U1/eject");
+      expect(res.status).toBe(503);
+      expect(res.body.ok).toBe(false);
+      expect(res.body.reason).toBe("bridge_unavailable");
+      // The raw error string must NOT leak through on this expected path.
+      expect(res.body.error).not.toMatch(/fetch failed/i);
+      vi.unstubAllEnvs();
+    });
+
+    it("surfaces a 409 from the bridge (drive busy / not ejectable)", async () => {
+      vi.stubEnv("BRIDGE_AUTH_TOKEN", "secret-token");
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => ({ ok: false, status: 409, json: async () => ({ ok: false, error: "umount failed — the drive may be in use" }) })),
+      );
+      const app = buildApp(createPrismaMock());
+      const res = await request(app).post("/api/storage/drives/U1/eject");
+      expect(res.status).toBe(409);
+      expect(res.body.error).toMatch(/in use/i);
+      vi.unstubAllEnvs();
     });
   });
 });

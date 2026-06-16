@@ -21,7 +21,7 @@ describe("createServer", () => {
     // exposes `serverInfo` with the expected name. This avoids leaning on
     // SDK private fields like `_serverInfo`, which can rename across
     // patch versions of @modelcontextprotocol/sdk.
-    const server = createServer(buildDeps());
+    const server = createServer(buildDeps(), { kind: "local-trusted" });
 
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client(

@@ -5,6 +5,7 @@ import type { EnrichedNetworkDevice } from "@/lib/types";
 import { DeviceSparkline } from "./DeviceSparkline";
 import { useDeviceBlockMutation } from "@/lib/hooks/useDeviceBlockMutation";
 import { toastForError } from "@/lib/hooks/useDeviceMutations";
+import { translateError } from "@/lib/friendly-errors";
 import { QuickSchedulePopover } from "./QuickSchedulePopover";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 
@@ -186,10 +187,7 @@ function BlockActionButton({
     try {
       await toggleBlock(device);
     } catch (err) {
-      const friendly = toastForError(
-        err,
-        err instanceof Error ? err.message : "Failed to update block state",
-      );
+      const friendly = toastForError(err, translateError(err, "network"));
       if (onError) onError(friendly);
       setError(friendly);
       // Re-throw so the ConfirmDialog keeps itself open and the user can

@@ -34,10 +34,11 @@ export interface HttpServerOptions {
   /**
    * Factory that builds a fresh MCP `Server` for the given claims. Called
    * per-request so the server's RBAC sees the right role for each caller.
-   * The mcp-server's `createServer` already accepts `claims` and feeds it
-   * into the `ToolContext`.
+   * `claims` is non-optional: `verifyJwt` runs first and always yields a
+   * verified `Claims` before this factory is invoked, so the HTTP path can
+   * never construct a server without an authenticated principal (WARP-563).
    */
-  buildServer: (claims: Claims | undefined) => Server;
+  buildServer: (claims: Claims) => Server;
 }
 
 const HEALTH_PATH = "/health";

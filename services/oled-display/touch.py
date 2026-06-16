@@ -1,12 +1,12 @@
 """
-Touch stub for the PyPortal-only display.
+Touch stub for the status display.
 
-Touch events on the PyPortal come back over the USB-serial link as
-`TOUCH:x,y,pressure` lines and are parsed directly by `display.py`'s
-cycle loop. The local `TouchReader` no longer reads any kernel input
-device or SPI controller — it's kept as a thin shim so `main.py` can
-keep its existing `TouchReader(...).start()/stop()/get_state()` calls
-without conditional wiring.
+Touch events come back over the USB-serial link as `TOUCH:x,y,pressure`
+lines and are parsed directly by `display.py`'s cycle loop. The local
+`TouchReader` no longer reads any kernel input device or SPI controller —
+it's kept as a thin shim so `main.py` can keep its existing
+`TouchReader(...).start()/stop()/get_state()` calls without conditional
+wiring.
 
 The direct-XPT2046 (spidev) and evdev paths, plus the calibration env
 vars, were removed when we dropped the direct-SPI TFT backend.
@@ -17,7 +17,7 @@ class TouchReader:
 
     Kept so `main.py`'s lifespan hook stays unchanged. Returns a state
     dict that always reports "not pressed"; real touches come from the
-    PyPortal over serial and are dispatched by `TFTDisplay.handle_touch`.
+    status display over serial and are dispatched by `TFTDisplay.handle_touch`.
     """
 
     def __init__(self, width: int = 480, height: int = 320):

@@ -48,6 +48,25 @@ class TestOperationsStore:
         assert op.state == "rolled_back"
         assert op.reason == "connectivity lost"
 
+    def test_mark_rejected_records_reason(self):
+        op_id = operations.register()
+        operations.mark_rejected(op_id, "HTTP 422")
+        op = operations.get(op_id)
+        assert op is not None
+        assert op.state == "rejected"
+        assert op.reason == "HTTP 422"
+
+    def test_rejected_is_terminal_and_sticky(self):
+        """A rejected op must not later flip to applied/rolled_back."""
+        op_id = operations.register()
+        operations.mark_rejected(op_id, "HTTP 401")
+        operations.mark_applied(op_id)
+        operations.mark_rolled_back(op_id, "too late")
+        op = operations.get(op_id)
+        assert op is not None
+        assert op.state == "rejected"
+        assert op.reason == "HTTP 401"
+
     def test_terminal_state_is_sticky(self):
         """Once applied, a later mark_rolled_back must not flip the state."""
         op_id = operations.register()
@@ -168,8 +187,14 @@ class TestOperationTrackingMiddleware:
         assert op.state == "rolled_back"
         assert "503" in (op.reason or "")
 
-    def test_post_write_4xx_marks_applied(self, connected_client):
-        """4xx means caller error — no router state change, don't scare the UI."""
+    def test_post_write_4xx_marks_rejected(self, connected_client):
+        """4xx means the request was refused before any router state change.
+
+        Security regression: this used to mark `applied`, recording a 401/422 as
+        a successful router change and masking auth/validation failures from
+        operators. It must now mark the neutral `rejected` terminal, carrying the
+        status code as the reason.
+        """
         resp = connected_client.post(
             "/wireless/ssid",
             headers={"Authorization": "Bearer pytest-fake-token"},
@@ -182,4 +207,5 @@ class TestOperationTrackingMiddleware:
         op_id = resp.headers["X-Operation-Id"]
         op = operations.get(op_id)
         assert op is not None
-        assert op.state == "applied"
+        assert op.state == "rejected"
+        assert str(resp.status_code) in (op.reason or "")

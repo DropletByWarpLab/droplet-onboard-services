@@ -16,6 +16,27 @@ REQUIRED_ENV_VARS=(
   NEXTCLOUD_ADMIN_PASSWORD
   DEVICE_SECRET
   DEVICE_SECRET_KEY
+  # WARP-501: embedded Plane PM stack. Fail-closed contract for the
+  # three Plane-required secrets enforced HERE (per Romain's PR #242
+  # prescription: keep compose `:-` so the file always parses, move
+  # secret validation to this layer). DROPLET_PM_WEB_URL is included
+  # because the Plane API container refuses to start without a valid
+  # public URL — empty is a misconfiguration, not a sensible default.
+  DROPLET_PM_DB_PASSWORD
+  DROPLET_PM_SECRET_KEY
+  DROPLET_PM_WEB_URL
+  # Plane v0.24.1 broker + object storage. Used WITHOUT `:-` fallbacks in
+  # docker-compose.yml (AMQP_URL, MINIO_ROOT_USER/PASSWORD), so a box that
+  # updates code WITHOUT running setup.sh (no migrate_env backfill) must fail
+  # validation here, not start with empty RabbitMQ / MinIO credentials.
+  DROPLET_PM_MQ_PASSWORD
+  DROPLET_PM_MINIO_ACCESS_KEY
+  DROPLET_PM_MINIO_SECRET_KEY
+  # WARP-834: per-device OpenWrt root / rpcd credential. Without this the
+  # routing service silently starts with an empty ubus password and loses
+  # the router (the WARP-826 symptom). Fail-closed here per the convention
+  # set by the Plane secrets block above.
+  OPENWRT_PASSWORD
 )
 
 _validate_env() {
@@ -31,7 +52,10 @@ _validate_env() {
   local var val
 
   for var in "${REQUIRED_ENV_VARS[@]}"; do
-    val=$(grep -E "^${var}=" "$env_file" 2>/dev/null | head -1 | cut -d= -f2-)
+    # `|| true`: a missing var makes grep exit 1, which under `set -euo
+    # pipefail` would abort here instead of recording it in missing[] (the
+    # whole point of this loop). Empty val → flagged as missing below.
+    val=$(grep -E "^${var}=" "$env_file" 2>/dev/null | head -1 | cut -d= -f2- || true)
     if [ -z "$val" ] || [ "$val" = "change-me" ]; then
       missing+=("$var")
     fi
@@ -77,7 +101,7 @@ prepare_and_build() {
   # logs`) silently default secrets to empty strings and break auth services.
   ln -sfn ../.env "$REPO_ROOT/docker/.env"
 
-  # --- Pull base images (sequential for slow Pi connections) ---
+  # --- Pull base images (sequential for slow appliance connections) ---
   log_info "Pulling base container images..."
   local images=(
     "postgres:16-alpine"
@@ -90,8 +114,11 @@ prepare_and_build() {
   )
   # Frigate is gated to the `linux` compose profile (see docker-compose.yml);
   # skip the ~2GB pull on macOS where it can never run.
+  # Use the same pinned tag (and .env override) the compose file resolves to,
+  # so the pre-pull lands the exact image Compose runs instead of pulling a
+  # floating `:stable` that's then re-pulled as `:0.17.1` on `up`.
   if [ "$(uname)" = "Linux" ]; then
-    images+=("ghcr.io/blakeblackshear/frigate:stable")
+    images+=("${FRIGATE_IMAGE:-ghcr.io/blakeblackshear/frigate:0.17.1}")
   fi
 
   local failed=0
@@ -137,6 +164,8 @@ prepare_and_build() {
     web-dashboard
     ai-gateway
     routing
+    # WARP-850: Matter controller host-network sidecar (BLE + LAN mDNS)
+    matter-controller
     # full profile (hardware-facing services)
     file-indexer
     switch
@@ -146,14 +175,61 @@ prepare_and_build() {
     # macOS Docker Desktop from trying to mount /dev/snd which doesn't exist)
     voice-io
   )
-  # Both profiles active so compose sees every profile-gated service.
-  # Without --profile linux, `build voice-io` errors out because
-  # the service is invisible to compose's view of the project. The default-
-  # profile services are visible regardless of --profile flags.
+
+  # pm profile: the Plane PM stack runs upstream pre-built images (makeplane/*)
+  # which `up -d` pulls, EXCEPT pm-health, the Droplet-side /health sidecar
+  # built from services/pm/Dockerfile. pm-health is `["pm"]`-profiled, so when
+  # `pm` is in the active set `up -d` tries to start it; `up` does not build on
+  # demand, so without a pre-build the start fails with "No such image:
+  # docker-pm-health". Build it ONLY when PM is enabled for this deployment —
+  # the same opt-OUT gate scripts/lib/single-box.sh uses (DROPLET_PM_ENABLED,
+  # default ON). A disabled-PM single-box (DROPLET_PM_ENABLED=0) never appends
+  # `pm` to COMPOSE_PROFILES, so it must NOT pull/build the Plane sidecar either.
+  #
+  # Gate token check inlined (kept in sync with _droplet_pm_enabled in
+  # scripts/lib/single-box.sh): enabled unless the value is 0/false/no.
+  local build_pm_health=1
+  local pm_enabled_val
+  # `|| true`: DROPLET_PM_ENABLED is opt-out/default-on, so a fresh .env has no
+  # such line; grep exits 1 and (the `2>/dev/null` only hides stderr, not the
+  # exit code) under `set -euo pipefail` aborts build_images() silently — this
+  # is the bug that killed the reflash at "Building application containers".
+  pm_enabled_val=$(grep -E '^DROPLET_PM_ENABLED=' "$COMPOSE_ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- | tr '[:upper:]' '[:lower:]' || true)
+  case "$pm_enabled_val" in
+    0|false|no) build_pm_health=0 ;;
+  esac
+  if [ "$build_pm_health" -eq 1 ]; then
+    build_services+=(pm-health)
+  else
+    log_info "Plane PM disabled (DROPLET_PM_ENABLED=$pm_enabled_val) — skipping pm-health build"
+  fi
+
+  # eval profile: rag-eval (RAGAS scoring) is `["eval"]`-profiled and has a
+  # `build:` section, so `up -d` with eval active fails with "No such image:
+  # docker-rag-eval" unless it's pre-built. Build it ONLY when the active
+  # COMPOSE_PROFILES set (in .env) contains `eval` — single-box enables it by
+  # default via scripts/lib/single-box.sh; macOS-dev / multi-box leave it off,
+  # so they skip the heavy RAGAS image build. Same build-only-when-active idiom
+  # as pm-health above. `|| true`: grep exits 1 when the key is absent (fresh /
+  # profile-less .env), which would abort build_images() under `set -euo pipefail`.
+  local active_profiles
+  active_profiles=$(grep -E '^COMPOSE_PROFILES=' "$COMPOSE_ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  case ",${active_profiles}," in
+    *,eval,*) build_services+=(rag-eval) ;;
+  esac
+
+  # All profiles that carry a buildable service in the list above must be active
+  # so compose can see every one. Without --profile linux, `build voice-io`
+  # errors out because the service is invisible to compose's view of the
+  # project; without --profile pm the same is true for pm-health, and without
+  # --profile eval the same is true for rag-eval. (pm-health / rag-eval are only
+  # in build_services when their profile is enabled, so the extra --profile
+  # flags are harmless otherwise.) Default-profile services are visible
+  # regardless of --profile.
   for svc in "${build_services[@]}"; do
     if ! run_with_spinner "Building $svc" \
-      run_docker_compose --profile full --profile linux \
-        -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" \
+      run_docker_compose --profile full --profile linux --profile pm --profile eval --env-file "$COMPOSE_ENV_FILE" \
+        -f "$COMPOSE_FILE" \
         build "$svc"; then
       log_error "Failed to build $svc"
       _suggest_build_fix

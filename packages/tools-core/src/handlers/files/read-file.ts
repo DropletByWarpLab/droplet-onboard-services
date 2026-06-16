@@ -1,4 +1,5 @@
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
+import { validateNcPath } from "./_paths.js";
 
 const inputSchema = {
   type: "object",
@@ -12,16 +13,33 @@ const inputSchema = {
 const MAX_TEXT_CHARS = 10000;
 
 async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-  const path = typeof args.path === "string" ? args.path : null;
-  if (!path) {
+  // TOOLS-03: read_file must enforce the SAME boundary the write
+  // file-tools do — an authenticated Nextcloud session (userId+ncToken)
+  // and `validateNcPath` traversal defense. Previously this tool ran
+  // even with no token (leaning entirely on the Nextcloud sidecar for
+  // authz) and never rejected `..`/null-byte/percent-encoded-traversal
+  // at the tool boundary. read tools aren't in WRITE_TOOLS, so a
+  // low-privilege role (family/guest) can reach them.
+  if (!ctx.userId || !ctx.ncToken) {
     return {
       ok: false,
       status: "error",
-      error: { code: "INVALID_ARGS", message: "path is required" },
+      error: { code: "AUTH_REQUIRED", message: "auth_required" },
     };
   }
-  const headers: Record<string, string> = {};
-  if (ctx.ncToken) headers["X-Nextcloud-Token"] = ctx.ncToken;
+  const v = validateNcPath(args.path);
+  if (!v.ok) {
+    return {
+      ok: false,
+      status: "error",
+      error: { code: "INVALID_PATH", message: v.error },
+    };
+  }
+  const path = v.path;
+  const headers: Record<string, string> = {
+    "X-Nextcloud-Token": ctx.ncToken,
+    "X-Nextcloud-User": ctx.userId,
+  };
   const res = await ctx.http.nextcloud.get(`/download?path=${encodeURIComponent(path)}`, { headers });
   if (!res.ok) {
     return {
@@ -48,7 +66,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "read_file",
   description:
-    "Read the text content of a file on the Droplet's Nextcloud. Returns up to 10,000 characters; binary files are rejected with an explanatory note.",
+    "Read the text content of a file on the Droplet's Nextcloud. Returns up to 10,000 characters; binary files are rejected with an explanatory note. NOTE: files attached in chat live in brain memory, not here — use search_content for those.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

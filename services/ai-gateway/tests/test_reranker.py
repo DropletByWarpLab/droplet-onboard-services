@@ -1,8 +1,13 @@
-"""WARP-286 — Rerank gRPC handler.
+"""WARP-286 / WARP-644 — Rerank gRPC handler.
 
 The handler delegates to reranker.RerankerSingleton.compute_score(). We
-mock the singleton in these tests so we don't load the real model
-(~280 MB int8 ONNX from Hugging Face).
+mock the singleton in these tests so we don't load the real BGE-reranker-base
+ONNX model from Hugging Face.
+
+WARP-644 adds a graceful-degrade path: when the model can't be imported or
+loaded, the singleton raises RerankerUnavailable and the handler returns
+empty scores (OK status) instead of a 500. See
+test_rerank_unavailable_degrades_to_empty_scores.
 
 The handler is async and lives on `grpc_server.InferenceServicer` (not
 `main.py`); these tests follow the same pattern as `test_grpc.py`.
@@ -125,6 +130,10 @@ def _make_request(query: str, passages, model: str = ""):
     return req
 
 
+class _FakeRerankerUnavailable(RuntimeError):
+    """Stand-in for reranker.RerankerUnavailable in the fake module."""
+
+
 def _install_fake_reranker(scores):
     """Install a `reranker` module with a RerankerSingleton stub."""
     mod = types.ModuleType("reranker")
@@ -137,6 +146,7 @@ def _install_fake_reranker(scores):
             return inst
 
     mod.RerankerSingleton = _Singleton
+    mod.RerankerUnavailable = _FakeRerankerUnavailable
     sys.modules["reranker"] = mod
     return inst
 
@@ -229,6 +239,7 @@ async def test_rerank_model_error_returns_internal():
             return inst
 
     mod.RerankerSingleton = _Singleton
+    mod.RerankerUnavailable = _FakeRerankerUnavailable
     sys.modules["reranker"] = mod
 
     servicer = _make_servicer()
@@ -237,3 +248,40 @@ async def test_rerank_model_error_returns_internal():
 
     await servicer.Rerank(req, ctx)
     ctx.set_code.assert_called_once_with(grpc.StatusCode.INTERNAL)
+
+
+@pytest.mark.asyncio
+async def test_rerank_unavailable_degrades_to_empty_scores():
+    """WARP-644: if the model can't be imported/loaded, the singleton raises
+    RerankerUnavailable. The handler must degrade gracefully — return empty
+    scores with OK status (no INTERNAL error), so the orchestrator falls back
+    to unranked retrieval rather than getting a 500."""
+    mod = types.ModuleType("reranker")
+
+    class _Singleton:
+        @classmethod
+        def instance(cls):
+            raise _FakeRerankerUnavailable("optimum/onnxruntime import failed")
+
+    mod.RerankerSingleton = _Singleton
+    mod.RerankerUnavailable = _FakeRerankerUnavailable
+    sys.modules["reranker"] = mod
+
+    servicer = _make_servicer()
+    req = _make_request(query="x", passages=["y", "z"])
+    ctx = _make_context()
+
+    captured = {}
+
+    def _capture_response(**kwargs):
+        captured.update(kwargs)
+        return MagicMock(scores=kwargs.get("scores", []))
+
+    import grpc_generated.inference_pb2 as pb2
+
+    pb2.RerankResponse.side_effect = _capture_response
+
+    await servicer.Rerank(req, ctx)
+    # Graceful degrade: empty scores, OK status (never set INTERNAL).
+    assert captured["scores"] == []
+    ctx.set_code.assert_not_called()

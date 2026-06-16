@@ -8,7 +8,9 @@ import { useFavorites } from "@/lib/hooks/useFavorites";
 import { useToast } from "@/components/Toast";
 import { getDownloadUrl, toggleFavorite } from "@/lib/api";
 import { authFetch } from "@/lib/auth";
+import { translateError } from "@/lib/friendly-errors";
 import type { FileEntryInfo } from "@/lib/types";
+import { ShellPage } from "@/components/shell/ShellPage";
 
 export default function FavoritesPage() {
   const router = useRouter();
@@ -45,27 +47,23 @@ export default function FavoritesPage() {
       await toggleFavorite(file.path, false);
       await refresh();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Failed to unfavorite");
+      toast(translateError(err, "files"));
     }
   };
 
   return (
-    <div className="p-6 lg:p-8 max-w-5xl">
-      <div className="flex items-center gap-3 mb-6">
-        <Link
-          href="/files"
-          className="p-1.5 rounded-full text-label-tertiary hover:text-label-primary hover:bg-surface-secondary transition-colors"
-          aria-label="Back to files"
-        >
-          <ArrowLeft size={18} />
+    <ShellPage
+      icon={<Star size={15} />}
+      label="Favorites"
+      title="Favorites"
+      sub="Files and folders you've marked as favorites for quick access."
+      actions={
+        <Link href="/files" className="btn ghost" aria-label="Back to files">
+          <ArrowLeft size={15} />
+          Files
         </Link>
-        <h1 className="type-large-title text-label-primary">Favorites</h1>
-      </div>
-
-      <p className="type-footnote text-label-tertiary mb-4">
-        Files and folders you&apos;ve marked as favorites for quick access.
-      </p>
-
+      }
+    >
       <FileListSimple
         files={items}
         isLoading={isLoading}
@@ -78,6 +76,6 @@ export default function FavoritesPage() {
         onRemove={handleUnfavorite}
         removeTooltip="Remove from favorites"
       />
-    </div>
+    </ShellPage>
   );
 }

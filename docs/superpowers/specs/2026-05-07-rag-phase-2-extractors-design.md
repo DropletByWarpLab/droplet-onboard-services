@@ -179,7 +179,7 @@ Adds to `services/file-indexer/Dockerfile`:
 
 ## 6. GPU contention with Ollama
 
-The Ollama runtime in the sibling `droplet-jetson-ai` repo holds the GPU during LLM inference. ASR also wants the GPU. We cooperate, never compete:
+The Ollama runtime in the sibling `droplet-local-LLM` repo holds the GPU during LLM inference. ASR also wants the GPU. We cooperate, never compete:
 
 1. **Single-worker queue** ensures only one ASR job at a time inside file-indexer.
 2. **CUDA-first attempt** with a one-shot try/except on `RuntimeError` / CUDA-out-of-memory.
@@ -187,7 +187,7 @@ The Ollama runtime in the sibling `droplet-jetson-ai` repo holds the GPU during 
 4. **Lazy model load** — model is instantiated on first call (5–10 s warm-up cost), cached on the module afterward. Restart of file-indexer drops the cache; not a problem.
 5. **Visibility** via the `transcripts_pending` MQTT field so the dashboard can show queue depth.
 
-Worst case: Ollama is mid-inference on a long generation, ASR job lands, CUDA OOM, ASR runs on CPU at ~2–3× real-time on Jetson Orin. User sees a `gpu_unavailable` warning on that chunk's metadata. Acceptable.
+Worst case: Ollama is mid-inference on a long generation, ASR job lands, CUDA OOM, ASR runs on CPU at ~2–3× real-time on the inference host. User sees a `gpu_unavailable` warning on that chunk's metadata. Acceptable.
 
 ## 7. Recursion semantics
 

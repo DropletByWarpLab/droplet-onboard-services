@@ -21,8 +21,10 @@ Notes (speaker notes) are concatenated at the end of each slide's body.
 from __future__ import annotations
 
 import logging
-from typing import cast
+import os
 
+from anchor_schema import NoneAnchor
+from extractors.spans import Span
 from extractors.types import ExtractedDoc
 
 logger = logging.getLogger(__name__)
@@ -114,12 +116,17 @@ def extract(path: str) -> ExtractedDoc:
     from pptx import Presentation  # noqa: PLC0415
 
     presentation = Presentation(path)
+    filename = os.path.basename(path) or "presentation"
 
-    parts: list[str] = []
-    section_paths: list[tuple[int, list[str]]] = []
-    cum_offset = 0
+    # WARP-287 + WARP-435: emit one Span per slide. PPTX is non-MVP for
+    # positional anchors (no slide-anchor kind in the schema), so every
+    # Span carries ``NoneAnchor``; the per-slide section path (section
+    # name → slide title) rides on ``Span.section_path``, falling back to
+    # ``[filename]`` for untitled / unsectioned slides.
+    spans: list[Span] = []
+    word_count = 0
 
-    for slide_idx, slide in enumerate(presentation.slides):
+    for slide in presentation.slides:
         title = _slide_title(slide)
         section_name = _section_name_for_slide(presentation, slide)
 
@@ -130,7 +137,7 @@ def extract(path: str) -> ExtractedDoc:
         elif section_name:
             path_list = [section_name]
         else:
-            path_list = []
+            path_list = [filename]
 
         slide_parts: list[str] = []
         if title:
@@ -154,26 +161,19 @@ def extract(path: str) -> ExtractedDoc:
             continue
 
         slide_text = "\n".join(slide_parts)
-        section_paths.append((cum_offset, list(path_list)))
-        parts.append(slide_text)
-        cum_offset += len(slide_text) + 2  # +2 for the join
+        word_count += len(slide_text.split())
+        spans.append(
+            Span(text=slide_text, anchor=NoneAnchor(), section_path=path_list)
+        )
 
-    full_text = "\n\n".join(parts)
-
-    return cast(
-        ExtractedDoc,
-        {
-            "text": full_text,
-            "page_breaks": [],
-            "language": None,
-            "metadata": {
-                "extractor_name": "pptx",
-                "extractor_version": "1.0",
-                "slide_count": len(presentation.slides),
-                "word_count": len(full_text.split()),
-                # WARP-435: per-slide section path (see module docstring).
-                "section_paths": section_paths,
-            },
-            "warnings": [],
+    return ExtractedDoc(
+        spans=spans,
+        language=None,
+        metadata={
+            "extractor_name": "pptx",
+            "extractor_version": "2",
+            "slide_count": len(presentation.slides),
+            "word_count": word_count,
         },
+        warnings=[],
     )

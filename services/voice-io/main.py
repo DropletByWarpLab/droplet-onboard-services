@@ -33,6 +33,8 @@ from voice.devices import (
 )
 from voice.pipeline import (
     DEFAULT_DEBOUNCE_S,
+    DEFAULT_INPUT_DOWNMIX,
+    DEFAULT_INPUT_GAIN,
     DEFAULT_POST_SPEAK_COOLDOWN_S,
     DEFAULT_STT_MAX_RECORD_S,
     DEFAULT_THRESHOLD,
@@ -41,7 +43,11 @@ from voice.pipeline import (
 from voice.llm import build_llm_from_env
 from voice.stt import build_stt_from_env
 from voice.tts import build_tts_from_env
-from voice.wake import build_detector_from_env
+from voice.wake import (
+    VOSK_DEFAULT_THRESHOLD,
+    VoskWakeWordDetector,
+    build_detector_from_env,
+)
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -50,7 +56,42 @@ logging.basicConfig(
 logger = logging.getLogger("voice.main")
 
 SAMPLE_RATE = int(os.environ.get("VOICE_SAMPLE_RATE", "16000"))
-WAKE_THRESHOLD = float(os.environ.get("WAKE_THRESHOLD", str(DEFAULT_THRESHOLD)))
+
+
+def resolve_wake_threshold(detector: object) -> float:
+    """Wake threshold for the pipeline. An explicit WAKE_THRESHOLD env
+    always wins; otherwise the default follows the ACTUAL detector type.
+    The defaults differ because the score semantics differ: Vosk scores
+    are min-per-word confidences (real acoustic evidence, ~0.9+ for a
+    genuinely spoken phrase → default VOSK_DEFAULT_THRESHOLD) while
+    openWakeWord scores are sigmoid outputs (default DEFAULT_THRESHOLD,
+    0.3). Keyed off the detector instance, not WAKE_ENGINE, because
+    build_detector_from_env has fallbacks (unknown engine → vosk;
+    vosk-without-model → openWakeWord) that make the env string
+    unreliable for this decision."""
+    env = (os.environ.get("WAKE_THRESHOLD") or "").strip()
+    if env:
+        return float(env)
+    return (
+        VOSK_DEFAULT_THRESHOLD
+        if isinstance(detector, VoskWakeWordDetector)
+        else DEFAULT_THRESHOLD
+    )
+
+
+# Display-only fallback for /voice/status before the pipeline exists
+# (no mic / startup bailed). The live pipeline reports its own value.
+# Compose passes WAKE_THRESHOLD through as "" when unset — treat empty
+# the same as absent (resolve_wake_threshold does too). Falls back to
+# the engine-agnostic DEFAULT_THRESHOLD: before build_detector_from_env
+# runs the detector type is unknowable, and reporting the Vosk 0.7 on a
+# box that would resolve to openWakeWord (live gate 0.3) sends an
+# operator down the wrong path. resolve_wake_threshold owns the real,
+# engine-aware value once the pipeline exists.
+WAKE_THRESHOLD = float(
+    (os.environ.get("WAKE_THRESHOLD") or "").strip()
+    or str(DEFAULT_THRESHOLD),
+)
 WAKE_DEBOUNCE_S = float(
     os.environ.get("WAKE_DEBOUNCE_S", str(DEFAULT_DEBOUNCE_S))
 )
@@ -59,6 +100,16 @@ STT_MAX_RECORD_S = float(
 )
 POST_SPEAK_COOLDOWN_S = float(
     os.environ.get("POST_SPEAK_COOLDOWN_S", str(DEFAULT_POST_SPEAK_COOLDOWN_S))
+)
+# Multichannel→mono strategy + digital input gain (see pipeline.py's
+# DEFAULT_INPUT_DOWNMIX / DEFAULT_INPUT_GAIN). Empty env = default.
+VOICE_INPUT_DOWNMIX = (
+    (os.environ.get("VOICE_INPUT_DOWNMIX") or "").strip().lower()
+    or DEFAULT_INPUT_DOWNMIX
+)
+VOICE_INPUT_GAIN = float(
+    (os.environ.get("VOICE_INPUT_GAIN") or "").strip()
+    or str(DEFAULT_INPUT_GAIN),
 )
 
 app = FastAPI(title="voice-io", version="0.1.0")
@@ -107,6 +158,29 @@ def _resolve() -> DeviceResolution:
     return _resolution
 
 
+def _reresolve_input_index() -> Optional[int]:
+    """Force a fresh device resolution and return the picked input index
+    (or None if no mic is present now).
+
+    Wired into WakePipeline as its `resolve_input_device` hook so the wake
+    loop can recompute the input index after the mic re-enumerates — the
+    reSpeaker XVF3800's ALSA card index shifts under Docker, so the index
+    captured at startup goes stale. Reuses the same `resolve_devices()`
+    scoring path used at boot (voice/devices.py stays authoritative); we
+    only invalidate the cache so it actually re-enumerates. Runs on the
+    pipeline worker thread on a device disconnect — a benign race with a
+    concurrent /audio/devices?refresh=1 at worst repeats an idempotent
+    resolve."""
+    global _resolution
+    _resolution = None  # drop the cached pick so _resolve() re-enumerates
+    try:
+        r = _resolve()
+    except Exception:  # pragma: no cover — defensive; resolve is best-effort
+        logger.exception("voice re-resolution failed")
+        return None
+    return r.input_device.index if r.input_device else None
+
+
 @app.on_event("startup")
 async def startup() -> None:
     # Resolve audio devices on boot so the first /health hit is cheap.
@@ -138,6 +212,19 @@ async def startup() -> None:
         stt = build_stt_from_env()
         tts = build_tts_from_env()
         llm = await asyncio.to_thread(build_llm_from_env)
+        wake_threshold = resolve_wake_threshold(detector)
+        # Announce the EFFECTIVE threshold: boxes that relied on the old
+        # compose default (`:-0.3`) silently moved to the engine-aware
+        # default when the passthrough became `:-` — this line is how an
+        # operator sees what the container actually runs at.
+        logger.info(
+            "wake threshold: %.2f (engine: %s%s)",
+            wake_threshold,
+            type(detector).__name__,
+            ""
+            if (os.environ.get("WAKE_THRESHOLD") or "").strip()
+            else " — engine default; set WAKE_THRESHOLD to override",
+        )
         _pipeline = WakePipeline(
             detector=detector,
             stt=stt,
@@ -145,10 +232,16 @@ async def startup() -> None:
             llm=llm,
             input_device_index=r.input_device.index if r.input_device else None,
             output_device_index=r.output_device.index if r.output_device else None,
-            threshold=WAKE_THRESHOLD,
+            threshold=wake_threshold,
             debounce_s=WAKE_DEBOUNCE_S,
             stt_max_record_s=STT_MAX_RECORD_S,
             post_speak_cooldown_s=POST_SPEAK_COOLDOWN_S,
+            # Self-heal hook: recompute the input index after the mic
+            # re-enumerates (reSpeaker card-index shift under Docker) so
+            # the wake loop reopens the right device instead of dying.
+            resolve_input_device=_reresolve_input_index,
+            input_downmix=VOICE_INPUT_DOWNMIX,
+            input_gain=VOICE_INPUT_GAIN,
         )
         await asyncio.to_thread(_pipeline.start)
     except Exception as exc:

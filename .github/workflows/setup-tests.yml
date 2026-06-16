@@ -4,8 +4,17 @@ name: setup-tests
 # .env permissions, idempotency, compose.sh psql wiring. < 5s, no Docker.
 
 on:
-  # Temporarily disabled: manual-only until GitHub Actions testing minutes
-  # are restored. Restore the pull_request/push triggers from git history.
+  pull_request:
+    paths:
+      - "scripts/**"
+      - "tests/setup.test.sh"
+      - ".github/workflows/setup-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "scripts/**"
+      - "tests/setup.test.sh"
+      - ".github/workflows/setup-tests.yml"
   workflow_dispatch:
 
 concurrency:
@@ -15,6 +24,11 @@ concurrency:
 jobs:
   setup-unit:
     runs-on: ubuntu-latest
+    # A hung test must fail the job fast, not burn the 6h default runner
+    # allocation. Despite the name this is the fast unit suite (<5s, no
+    # Docker — docker is stubbed on PATH); the heavy from-scratch image build
+    # lives in setup-e2e.yml. 15 min is a very wide ceiling here.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Run setup unit tests

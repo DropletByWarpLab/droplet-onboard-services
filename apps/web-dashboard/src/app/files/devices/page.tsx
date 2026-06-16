@@ -9,7 +9,9 @@ import { ClientDetailPanel } from "@/components/ClientDetailPanel";
 import { PairDialog } from "@/components/PairDialog";
 import { useToast } from "@/components/Toast";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { translateError } from "@/lib/friendly-errors";
 import type { DeviceClientInfo } from "@/lib/types";
+import { ShellPage } from "@/components/shell/ShellPage";
 
 export default function SyncDevicesPage() {
   const { items, isLoading, isRefreshing, refresh } = useDeviceClients();
@@ -34,45 +36,42 @@ export default function SyncDevicesPage() {
       await refresh();
       setSelectedClient(null);
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Revoke failed");
+      toast(translateError(err, "files"));
       throw err;
     }
   }
 
-  return (
-    <div className="p-6 lg:p-8 max-w-7xl">
-      {/* Header */}
-      <div className="flex items-start justify-between mb-6">
-        <div>
-          <h1 className="type-large-title text-label-primary">Sync Devices</h1>
-          <p className="type-subheadline text-label-tertiary mt-1">
-            {activeItems.length > 0
-              ? `${activeItems.length} device${activeItems.length !== 1 ? "s" : ""} paired`
-              : "No devices paired"}
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => setPairOpen(true)}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-lg type-subheadline text-accent hover:text-accent-hover hover:bg-accent-subtle transition-colors"
-          >
-            <Plus size={16} />
-            <span>Pair Device</span>
-          </button>
-          <button
-            onClick={() => refresh()}
-            disabled={isRefreshing}
-            className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
-          >
-            <RefreshCw
-              size={16}
-              className={isRefreshing ? "animate-spin" : ""}
-            />
-            <span className="type-subheadline">Refresh</span>
-          </button>
-        </div>
-      </div>
+  const actions = (
+    <>
+      <button onClick={() => setPairOpen(true)} className="btn primary" type="button">
+        <Plus size={15} />
+        Pair device
+      </button>
+      <button
+        onClick={() => refresh()}
+        disabled={isRefreshing}
+        className="icon-btn"
+        aria-label="Refresh"
+        title="Refresh"
+        type="button"
+      >
+        <RefreshCw size={16} className={isRefreshing ? "animate-spin" : ""} />
+      </button>
+    </>
+  );
 
+  return (
+    <ShellPage
+      icon={<Laptop size={15} />}
+      label="Sync devices"
+      title="Sync devices"
+      sub={
+        activeItems.length > 0
+          ? `${activeItems.length} device${activeItems.length !== 1 ? "s" : ""} paired`
+          : "No devices paired"
+      }
+      actions={actions}
+    >
       {/* Content with refresh fade */}
       <div
         className={`transition-opacity duration-300 ${isRefreshing ? "opacity-60" : "opacity-100"}`}
@@ -83,7 +82,8 @@ export default function SyncDevicesPage() {
             {Array.from({ length: 3 }).map((_, i) => (
               <div
                 key={i}
-                className="dp-card h-24 animate-pulse bg-surface-secondary"
+                className="card animate-pulse"
+                style={{ height: 96, background: "var(--surface-2)" }}
               />
             ))}
           </div>
@@ -91,18 +91,15 @@ export default function SyncDevicesPage() {
           <>
             {/* Empty state */}
             {items.length === 0 && (
-              <div className="dp-card text-center py-12">
-                <Laptop
-                  size={32}
-                  className="mx-auto text-label-quaternary mb-3"
-                />
-                <h2 className="type-title-3 text-label-primary mb-1">
-                  No devices paired yet
-                </h2>
-                <p className="type-subheadline text-label-tertiary max-w-md mx-auto">
-                  Pair a laptop or phone to sync files with this Droplet.
-                  Click <strong>Pair Device</strong> to get started.
-                </p>
+              <div className="card">
+                <div className="empty">
+                  <span className="ei"><Laptop size={24} /></span>
+                  <span className="eh">No devices paired yet</span>
+                  <span style={{ maxWidth: "44ch" }}>
+                    Pair a laptop or phone to sync files with this Droplet.
+                    Click <strong>Pair device</strong> to get started.
+                  </span>
+                </div>
               </div>
             )}
 
@@ -176,6 +173,6 @@ export default function SyncDevicesPage() {
         confirmLabel="Revoke"
         variant="destructive"
       />
-    </div>
+    </ShellPage>
   );
 }

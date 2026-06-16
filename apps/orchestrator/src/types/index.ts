@@ -172,7 +172,7 @@ export interface HealthResponse {
     router: boolean;
     frigate: boolean;
     switch: boolean;
-    // PyPortal Titano screen (services/oled-display). `true` when the
+    // Status display screen (services/oled-display). `true` when the
     // service is up — note this stays `true` even in "simulated" mode
     // (no physical USB device); query /display/status for the backend.
     display: boolean;

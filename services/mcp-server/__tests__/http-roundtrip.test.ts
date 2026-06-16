@@ -53,7 +53,7 @@ describe("http roundtrip", () => {
       port: 0,
       host: "127.0.0.1",
       jwtSecret: SECRET,
-      buildServer: (claims) => createServer(deps, claims),
+      buildServer: (claims) => createServer(deps, { kind: "authenticated", claims }),
     });
     await new Promise<void>((resolve) => server.once("listening", resolve));
     const addr = server.address();

@@ -6,8 +6,17 @@ name: device-identity-svc-tests
 # tests, which is what we cover on PR-time CI.
 
 on:
-  # Temporarily disabled: manual-only until GitHub Actions testing minutes
-  # are restored. Restore the pull_request/push triggers from git history.
+  pull_request:
+    paths:
+      - "services/device-identity-svc/**"
+      - "proto/**"
+      - ".github/workflows/device-identity-svc-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "services/device-identity-svc/**"
+      - "proto/**"
+      - ".github/workflows/device-identity-svc-tests.yml"
   workflow_dispatch:
 
 concurrency:
@@ -17,6 +26,10 @@ concurrency:
 jobs:
   pytest:
     runs-on: ubuntu-latest
+    # A hung test must fail the job fast, not burn the 6h default runner
+    # allocation. Higher than the plain pytest suites because the install
+    # step apt-builds libtss2-dev + compiles the tpm2-pytss C extension.
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: services/device-identity-svc

@@ -13,8 +13,19 @@ name: ci-coverage
 # Exemptions (rare): add the path one per line to `.github/ci-coverage-exempt`.
 
 on:
-  # Temporarily disabled: manual-only until GitHub Actions testing minutes
-  # are restored. Restore the pull_request/push triggers from git history.
+  # Still manual-only — but no longer for minutes (those are flowing again
+  # as of 2026-06: docker-build's ~18-min job runs green on every PR).
+  # Re-enabling this audit today would fail every PR because:
+  #   1. The 12 test workflows still disabled by #220 lost their `paths:`
+  #      filters along with their triggers — restore each `on:` block from
+  #      110efe7c^ (the #220 parent).
+  #   2. services/email-indexer, services/ops-console and services/pm have
+  #      no test workflow at all — add one each, or exempt them in
+  #      .github/ci-coverage-exempt with a reason.
+  # Once `bash scripts/check-ci-coverage.sh` exits 0 on main, restore:
+  #   pull_request:
+  #   push:
+  #     branches: [main]
   workflow_dispatch:
 
 concurrency:

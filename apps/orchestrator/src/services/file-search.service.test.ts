@@ -12,6 +12,7 @@ import {
   rerankPassages,
   searchByLexical,
   searchHybrid,
+  shapeHitsForResponse,
   type SearchHit,
 } from "./file-search.service.js";
 
@@ -472,6 +473,46 @@ describe("searchHybrid with reranker", () => {
     });
     // RRF candidate set survives because rerankPassages pass-throughs on error.
     expect(hits.map((h) => h.path)).toEqual(["/a.pdf"]);
+  });
+});
+
+describe("file-search anchor surfacing", () => {
+  it("surfaces a valid metadata.anchor as a top-level anchor field", async () => {
+    const fakeRow = {
+      ncFileId: "f1", chunkIdx: 0, score: 0.9, chunkText: "x",
+      source: "brain", path: "/x.pdf", pageNumber: 4, brainItemId: null,
+      metadata: { anchor: { kind: "pdf-page", page: 4 } },
+    };
+    const hits = shapeHitsForResponse([fakeRow] as any);
+    expect(hits[0].anchor).toEqual({ kind: "pdf-page", page: 4 });
+  });
+
+  it("returns anchor:null when metadata.anchor is malformed, logs a warning, does not drop the hit", async () => {
+    const logSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fakeRow = {
+      ncFileId: "f1", chunkIdx: 0, score: 0.9, chunkText: "x",
+      source: "brain", path: "/x.pdf", pageNumber: null, brainItemId: null,
+      metadata: { anchor: { kind: "pdf-page", page: 0 } },  // page must be >= 1
+    };
+    const hits = shapeHitsForResponse([fakeRow] as any);
+    expect(hits[0].anchor).toBeNull();
+    expect(hits.length).toBe(1);
+    expect(logSpy).toHaveBeenCalled();
+    logSpy.mockRestore();
+  });
+
+  it("returns anchor:null cleanly when metadata.anchor is missing (legacy row)", async () => {
+    const logSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fakeRow = {
+      ncFileId: "f1", chunkIdx: 0, score: 0.9, chunkText: "x",
+      source: "brain", path: "/x.pdf", pageNumber: null, brainItemId: null,
+      metadata: { chain: ["wrap.zip"] },  // WARP-214 metadata, but no anchor
+    };
+    const hits = shapeHitsForResponse([fakeRow] as any);
+    expect(hits[0].anchor).toBeNull();
+    expect(hits.length).toBe(1);
+    expect(logSpy).not.toHaveBeenCalled();
+    logSpy.mockRestore();
   });
 });
 

@@ -1,32 +1,56 @@
 """Pydantic models for the routing service REST API."""
 
+import os
 import re
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import Optional, Union
 
 
+# ---------------------------------------------------------------------------
+# Wireless defaults are deployment-shape-specific and MUST NOT be hardcoded.
+#
+# The historical `radio0` / `default_radio0` / `wlan0` literals only ever
+# matched a long-gone build. The shipped router host runs an MT7922 whose
+# radio section is `radio3` / `default_radio3` (see
+# openwrt/files/etc/config/wireless); a single-box's radio enumerates as
+# `wlp14s0`/similar. Defaulting writes (`/wireless/ssid`, `/wireless/channel`,
+# AP approve) to `radio0`/`default_radio0` therefore `uci set`s a section that
+# doesn't exist on the real router → ubus NOT_FOUND or an orphan section that
+# never reaches a radio. That is the "no host-specific hardcoded defaults;
+# must be shape-agnostic or configured" rule (NET-02).
+#
+# Resolution order: explicit per-request field > deployment env > last-resort
+# literal. The shipped compose sets DROPLET_WIFI_* for its shape; a future
+# follow-up can auto-detect the active radio/device from `wireless.status()`
+# / `iwinfo` and drop the literal fallback entirely.
+_DEFAULT_WIFI_RADIO = os.environ.get("DROPLET_WIFI_RADIO", "radio0")
+_DEFAULT_WIFI_IFACE_SECTION = os.environ.get(
+    "DROPLET_WIFI_IFACE_SECTION", "default_radio0"
+)
+
+
 # --- Request models ---
 
 class SetSsidRequest(BaseModel):
-    radio: str = Field(default="radio0", description="Radio device name")
-    iface_section: str = Field(default="default_radio0", description="Wireless interface UCI section")
+    radio: str = Field(default_factory=lambda: _DEFAULT_WIFI_RADIO, description="Radio device name")
+    iface_section: str = Field(default_factory=lambda: _DEFAULT_WIFI_IFACE_SECTION, description="Wireless interface UCI section")
     ssid: str = Field(..., min_length=1, max_length=32, description="New SSID name")
 
 
 class SetPasswordRequest(BaseModel):
-    iface_section: str = Field(default="default_radio0", description="Wireless interface UCI section")
+    iface_section: str = Field(default_factory=lambda: _DEFAULT_WIFI_IFACE_SECTION, description="Wireless interface UCI section")
     password: str = Field(..., min_length=8, max_length=63, description="New WiFi password")
     encryption: str = Field(default="sae-mixed", description="Encryption method")
 
 
 class SetChannelRequest(BaseModel):
-    radio_section: str = Field(default="radio0", description="Radio UCI section")
+    radio_section: str = Field(default_factory=lambda: _DEFAULT_WIFI_RADIO, description="Radio UCI section")
     channel: str = Field(..., description="Channel number or 'auto'")
 
 
 class CreateGuestNetworkRequest(BaseModel):
-    radio: str = Field(default="radio0", description="Radio device name")
+    radio: str = Field(default_factory=lambda: _DEFAULT_WIFI_RADIO, description="Radio device name")
     ssid: str = Field(..., min_length=1, max_length=32, description="Guest network SSID")
     password: str = Field(..., min_length=8, max_length=63, description="Guest network password")
     network: str = Field(default="guest", description="Network name for the guest zone")
@@ -49,6 +73,25 @@ class SetDnsRequest(BaseModel):
 # normalizing on the way in avoids duplicate-section edge cases.
 _HOSTNAME_PATTERN = r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$"
 _IPV4_PATTERN = r"^(?:(?:25[0-5]|2[0-4]\d|[01]?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d?\d)$"
+# A single TCP/UDP port or a `lo-hi` range. The pattern bounds the shape
+# (1-5 digits, optional `-range`); the field_validator below enforces the
+# numeric 1-65535 bounds and lo<=hi that a regex can't express cleanly.
+_PORT_OR_RANGE_PATTERN = r"^\d{1,5}(-\d{1,5})?$"
+
+
+def _validate_port_or_range(value: str) -> str:
+    """Enforce that each port in a single-port or `lo-hi` range is 1-65535
+    and (for ranges) lo <= hi. Raises ValueError → pydantic 422."""
+    parts = value.split("-")
+    nums = []
+    for p in parts:
+        n = int(p)  # pattern already guarantees digits
+        if not (1 <= n <= 65535):
+            raise ValueError(f"port {n} out of range (1-65535)")
+        nums.append(n)
+    if len(nums) == 2 and nums[0] > nums[1]:
+        raise ValueError(f"port range start {nums[0]} > end {nums[1]}")
+    return value
 
 
 class DnsHostnameRequest(BaseModel):
@@ -74,11 +117,53 @@ class UnblockDeviceRequest(BaseModel):
 
 
 class PortForwardRequest(BaseModel):
-    name: str = Field(..., min_length=1, description="Rule name")
-    src_port: str = Field(..., description="External port")
-    dest_ip: str = Field(..., description="Internal destination IP")
-    dest_port: str = Field(..., description="Internal destination port")
+    """NET-09: validate the only previously-unvalidated network mutator.
+
+    Port-forwarding exposes WAN ingress, so loose validation here is the
+    riskiest place to skip it. `dest_ip` must be a literal IPv4 (reusing
+    the same `_IPV4_PATTERN` as DnsHostnameRequest), and the port fields
+    must be a single port or a `lo-hi` range with each endpoint in
+    1-65535 — rejecting hostnames, CIDRs, whitespace, and garbage with a
+    clean 422 instead of silently writing a broken/never-matching DNAT
+    rule into UCI. This is validation only; no port forward is created.
+    """
+
+    name: str = Field(..., min_length=1, max_length=63, description="Rule name")
+    src_port: str = Field(
+        ..., pattern=_PORT_OR_RANGE_PATTERN,
+        description="External port or 'lo-hi' range (1-65535)",
+    )
+    dest_ip: str = Field(
+        ..., pattern=_IPV4_PATTERN, description="Internal destination IPv4"
+    )
+    dest_port: str = Field(
+        ..., pattern=_PORT_OR_RANGE_PATTERN,
+        description="Internal destination port or 'lo-hi' range (1-65535)",
+    )
     proto: str = Field(default="tcp", description="Protocol (tcp, udp, tcpudp)")
+
+    @field_validator("src_port", "dest_port")
+    @classmethod
+    def _check_port_bounds(cls, v: str) -> str:
+        return _validate_port_or_range(v)
+
+    @field_validator("proto")
+    @classmethod
+    def _check_proto(cls, v: str) -> str:
+        allowed = {"tcp", "udp", "tcpudp"}
+        if v not in allowed:
+            raise ValueError(f"proto must be one of {sorted(allowed)}")
+        return v
+
+
+# WARP-613: phone-home egress control.
+class PhoneHomeDeviceRequest(BaseModel):
+    mac: str = Field(..., pattern=r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$", description="MAC address")
+    blocked: bool = Field(..., description="True to block phone-home (WAN egress), False to restore")
+
+
+class PhoneHomeCamerasRequest(BaseModel):
+    blocked: bool = Field(..., description="True to block the camera VLAN from phoning home, False to restore")
 
 
 class ApplyConfigRequest(BaseModel):
@@ -247,14 +332,16 @@ _MAC_PATTERN = r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$"
 class ApApproveRequest(BaseModel):
     """Approve a discovered extender AP and push wireless config.
 
-    `radio` defaults to `radio0` which is the MT7922 5 GHz AP on the
-    Pi 5 build (see `openwrt/build.sh` for the radio numbering); the
-    dashboard's wizard surfaces this as the primary household band.
-    `encryption` defaults to `psk2+ccmp` (WPA2-PSK, AES-only) — same
-    posture as the main router's default config.
+    `radio` defaults to the deployment's configured primary radio
+    (`DROPLET_WIFI_RADIO`, falling back to `radio0` only when unset). On the
+    shipped router host the MT7922's primary 5 GHz AP is `radio3`, so the
+    compose for that shape sets `DROPLET_WIFI_RADIO=radio3`; the dashboard's
+    wizard surfaces this as the primary household band. `encryption` defaults
+    to `psk2+ccmp` (WPA2-PSK, AES-only) — same posture as the main router's
+    default config.
     """
 
-    radio: str = Field(default="radio0", min_length=1, max_length=16)
+    radio: str = Field(default_factory=lambda: _DEFAULT_WIFI_RADIO, min_length=1, max_length=16)
     ssid: str = Field(..., min_length=1, max_length=32)
     encryption: str = Field(default="psk2+ccmp", min_length=3, max_length=32)
     # 8 chars = WPA2-PSK minimum; 63 chars = max passphrase length.
@@ -287,6 +374,13 @@ class HealthResponse(BaseModel):
     router_host: str
     board: Optional[dict] = None
     error: Optional[str] = None
+    # WARP-826: the explicit deployment-topology posture
+    # (PRIMARY_ROUTER | DOWNSTREAM_ROUTER | UNKNOWN), carried alongside `connected`
+    # so the orchestrator derives `routerConnected` from real reachability and can
+    # tell a LAN-only single-box (WAN handled by the host → UNKNOWN) apart from an
+    # unreachable router instead of rendering it OFFLINE. Best-effort: null when the
+    # router is unreachable or the (non-fatal) topology probe fails.
+    topology: Optional[str] = None
 
 
 class ErrorResponse(BaseModel):

@@ -2,7 +2,8 @@
 
 import { useMemo, useState } from "react";
 import useSWR from "swr";
-import { useRouter } from "next/navigation";
+import Link from "next/link";
+import { useRouter, usePathname } from "next/navigation";
 import {
   RefreshCw,
   Video,
@@ -13,7 +14,9 @@ import {
   Bell,
   User,
   Car,
+  type LucideIcon,
 } from "lucide-react";
+import { ShellPage } from "@/components/shell/ShellPage";
 import { useCameras } from "@/lib/hooks/useCameras";
 import { useCameraEvents } from "@/lib/hooks/useCameraEvents";
 import { useCameraGroups } from "@/lib/hooks/useCameraGroups";
@@ -145,140 +148,98 @@ export default function CamerasPage() {
 
   if (isLoading) {
     return (
-      <div className="p-6 space-y-6">
-        <div className="space-y-2">
-          <div className="h-8 w-48 bg-surface-secondary rounded animate-pulse" />
-          <div className="h-4 w-32 bg-surface-secondary rounded animate-pulse" />
-        </div>
+      <ShellPage icon={<Video size={15} />} label="Cameras" title="Cameras" sub="Loading your cameras…">
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
           {Array.from({ length: 4 }).map((_, i) => (
-            <div key={i} className="dp-card aspect-video animate-pulse bg-surface-secondary" />
+            <div key={i} className="card aspect-video animate-pulse" style={{ background: "var(--surface-2)" }} />
           ))}
         </div>
-      </div>
+      </ShellPage>
     );
   }
 
   if (error) {
     return (
-      <div className="p-6">
-        <div className="dp-card text-center py-12">
-          <Video size={32} className="mx-auto text-label-quaternary mb-3" />
-          <h2 className="type-title-3 text-label-primary mb-1">
-            Camera service is offline
-          </h2>
-          <p className="type-subheadline text-label-tertiary max-w-md mx-auto mb-4">
-            Make sure this Droplet is powered on and the camera service is
-            running. Try again in a moment, or contact support if this
-            persists.
-          </p>
-          <button
-            onClick={refresh}
-            disabled={isRefreshing}
-            className="dp-btn-secondary inline-flex items-center gap-2 px-4 py-2 rounded-lg"
-          >
-            <RefreshCw size={16} className={isRefreshing ? "animate-spin" : ""} />
-            <span className="type-subheadline">Retry</span>
-          </button>
+      <ShellPage icon={<Video size={15} />} label="Cameras" title="Cameras">
+        <div className="card">
+          <div className="empty">
+            <span className="ei"><Video size={24} /></span>
+            <span className="eh">Camera service is offline</span>
+            <span style={{ maxWidth: "44ch" }}>
+              Make sure this Droplet is powered on and the camera service is
+              running. Try again in a moment, or contact support if this persists.
+            </span>
+            <button
+              onClick={refresh}
+              disabled={isRefreshing}
+              className="btn"
+              type="button"
+              style={{ marginTop: 8 }}
+            >
+              <RefreshCw size={16} className={isRefreshing ? "animate-spin" : ""} />
+              Retry
+            </button>
+          </div>
         </div>
-      </div>
+      </ShellPage>
     );
   }
 
+  // Header subtitle — tells the operator at a glance how the fleet's doing.
+  const sub = totalCameras === 0
+    ? "No cameras connected yet — add one or scan your network."
+    : `${totalCameras} camera${totalCameras === 1 ? "" : "s"} connected.`;
+
+  // Header actions — kept to the two operator-frequent ones (Add + Refresh).
+  // The other nav targets (Birdseye / People / Plates / Notifications /
+  // System / Scan) live in the sub-nav chip row — they're navigation.
+  const actions = (
+    <>
+      <button onClick={() => setShowAddModal(true)} className="btn primary" type="button">
+        <Plus size={15} />
+        Add camera
+      </button>
+      <button
+        onClick={refresh}
+        disabled={isRefreshing}
+        className="icon-btn"
+        aria-label="Refresh cameras"
+        title="Refresh"
+        type="button"
+      >
+        <RefreshCw size={16} className={isRefreshing ? "animate-spin" : ""} />
+      </button>
+    </>
+  );
+
   return (
-    <div className="p-6">
-      {/* Notifications */}
+    <ShellPage
+      icon={<Video size={15} />}
+      label="Cameras"
+      title="Cameras"
+      sub={sub}
+      actions={actions}
+    >
+      {/* Notifications — fixed-positioned toaster, renders outside flow */}
       <CameraNotificationToast
         notifications={notifications}
         onDismiss={dismissNotification}
       />
 
-      {/* Header */}
-      <div className="flex items-start justify-between mb-6">
-        <div>
-          <h1 className="type-large-title text-label-primary">Cameras</h1>
-          <p className="type-subheadline text-label-tertiary mt-1">
-            {totalCameras > 0
-              ? `${totalCameras} camera${totalCameras !== 1 ? "s" : ""} connected`
-              : "No cameras found"}
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => setShowAddModal(true)}
-            className="dp-btn-primary flex items-center gap-2 px-3 py-2 rounded-lg"
-          >
-            <Plus size={16} />
-            <span className="type-subheadline">Add Camera</span>
-          </button>
-          <button
-            onClick={async () => {
-              setScanning(true);
-              try {
-                await triggerCameraScan();
-                refresh();
-              } catch { /* scan service may not be running */ }
-              setScanning(false);
-            }}
-            disabled={scanning}
-            className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
-          >
-            <Radar size={16} className={scanning ? "animate-pulse" : ""} />
-            <span className="type-subheadline">Scan</span>
-          </button>
-          <button
-            onClick={() => router.push("/cameras/birdseye")}
-            className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
-            title="Auto-composited multi-camera view"
-          >
-            <LayoutGrid size={16} />
-            <span className="type-subheadline">Birdseye</span>
-          </button>
-          <button
-            onClick={() => router.push("/cameras/people")}
-            className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
-            title="Known faces (face recognition)"
-          >
-            <User size={16} />
-            <span className="type-subheadline hidden lg:inline">People</span>
-          </button>
-          <button
-            onClick={() => router.push("/cameras/plates")}
-            className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
-            title="Detected license plates"
-          >
-            <Car size={16} />
-            <span className="type-subheadline hidden lg:inline">Plates</span>
-          </button>
-          <button
-            onClick={() => router.push("/cameras/notifications")}
-            className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
-            title="Per-camera notification preferences"
-          >
-            <Bell size={16} />
-            <span className="type-subheadline hidden lg:inline">Notifications</span>
-          </button>
-          <button
-            onClick={() => router.push("/cameras/system")}
-            className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
-            title="Recognition engine health"
-          >
-            <Server size={16} />
-            <span className="type-subheadline">System</span>
-          </button>
-          <button
-            onClick={refresh}
-            disabled={isRefreshing}
-            className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
-          >
-            <RefreshCw
-              size={16}
-              className={isRefreshing ? "animate-spin" : ""}
-            />
-            <span className="type-subheadline">Refresh</span>
-          </button>
-        </div>
-      </div>
+      {/* Secondary sub-nav (chip row) for the camera-related sub-routes —
+          People / Plates / Notifications / System / Birdseye — plus the
+          "Scan network" discovery action. */}
+      <CamerasSubNav
+        scanning={scanning}
+        onScan={async () => {
+          setScanning(true);
+          try {
+            await triggerCameraScan();
+            refresh();
+          } catch { /* scan service may not be running */ }
+          setScanning(false);
+        }}
+      />
 
       {/* Network isolation */}
       <CameraSubnetCard config={subnetConfig} onRefresh={() => mutateSubnet()} />
@@ -312,35 +273,33 @@ export default function CamerasPage() {
 
       {/* Empty state */}
       {totalCameras === 0 && discovered.length === 0 && (
-        <div className="dp-card text-center py-12">
-          <Video size={32} className="mx-auto text-label-quaternary mb-3" />
-          <h2 className="type-title-3 text-label-primary mb-1">
-            No Cameras Yet
-          </h2>
-          <p className="type-subheadline text-label-tertiary max-w-md mx-auto mb-4">
-            The camera service is running and ready. Add a camera manually with
-            its RTSP URL, or scan your network to auto-discover ONVIF cameras.
-          </p>
-          <div className="flex items-center justify-center gap-3">
-            <button
-              onClick={() => setShowAddModal(true)}
-              className="dp-btn-primary flex items-center gap-2 px-4 py-2.5 rounded-lg"
-            >
-              <Plus size={16} />
-              Add Camera
-            </button>
-            <button
-              onClick={async () => {
-                setScanning(true);
-                try { await triggerCameraScan(); refresh(); } catch {}
-                setScanning(false);
-              }}
-              disabled={scanning}
-              className="dp-btn-secondary flex items-center gap-2 px-4 py-2.5 rounded-lg"
-            >
-              <Radar size={16} className={scanning ? "animate-pulse" : ""} />
-              Scan Network
-            </button>
+        <div className="card">
+          <div className="empty">
+            <span className="ei"><Video size={24} /></span>
+            <span className="eh">No cameras yet</span>
+            <span style={{ maxWidth: "44ch" }}>
+              The camera service is running and ready. Add a camera manually with
+              its RTSP URL, or scan your network to auto-discover ONVIF cameras.
+            </span>
+            <div className="flex items-center justify-center gap-3" style={{ marginTop: 8 }}>
+              <button onClick={() => setShowAddModal(true)} className="btn primary" type="button">
+                <Plus size={16} />
+                Add camera
+              </button>
+              <button
+                onClick={async () => {
+                  setScanning(true);
+                  try { await triggerCameraScan(); refresh(); } catch {}
+                  setScanning(false);
+                }}
+                disabled={scanning}
+                className="btn"
+                type="button"
+              >
+                <Radar size={16} className={scanning ? "animate-pulse" : ""} />
+                Scan network
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -350,20 +309,18 @@ export default function CamerasPage() {
           float their priority cameras. The Pinned section is hidden if
           empty. */}
       {selectedGroupId && filteredCameras.length === 0 ? (
-        <div className="dp-card text-center py-10">
-          <p className="type-subheadline text-label-tertiary">
-            No cameras in this group yet. Edit the group to add some.
-          </p>
+        <div className="card">
+          <div className="empty">
+            <span>No cameras in this group yet. Edit the group to add some.</span>
+          </div>
         </div>
       ) : (
         <>
           {pinnedCameras.length > 0 && (
             <div className="mb-6">
-              <div className="flex items-center gap-2 mb-3">
-                <h2 className="type-title-3 text-label-primary">Pinned</h2>
-                <span className="type-caption-2 text-label-tertiary">
-                  {pinnedCameras.length}
-                </span>
+              <div className="sect">
+                <h2>Pinned</h2>
+                <span className="sx">{pinnedCameras.length}</span>
               </div>
               <CameraGrid
                 cameras={pinnedCameras}
@@ -376,11 +333,9 @@ export default function CamerasPage() {
           {unpinnedCameras.length > 0 && (
             <>
               {pinnedCameras.length > 0 && (
-                <div className="flex items-center gap-2 mb-3">
-                  <h2 className="type-title-3 text-label-primary">All cameras</h2>
-                  <span className="type-caption-2 text-label-tertiary">
-                    {unpinnedCameras.length}
-                  </span>
+                <div className="sect">
+                  <h2>All cameras</h2>
+                  <span className="sx">{unpinnedCameras.length}</span>
                 </div>
               )}
               <CameraGrid
@@ -459,6 +414,67 @@ export default function CamerasPage() {
         confirmLabel="Delete group"
         variant="destructive"
       />
+    </ShellPage>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Secondary sub-nav strip for /cameras/*. Renders a horizontal row of
+// pill links + a "Scan" action button. Visually mirrors the redesign's
+// chip-tab pattern: outlined pills with the active route filled-violet.
+// ─────────────────────────────────────────────────────────────────
+
+interface CamerasSubNavProps {
+  scanning: boolean;
+  onScan: () => void;
+}
+
+function CamerasSubNav({ scanning, onScan }: CamerasSubNavProps) {
+  const pathname = usePathname();
+
+  const items: Array<{ href: string; label: string; icon: LucideIcon; titleAttr: string }> = [
+    { href: "/cameras/birdseye",      label: "Birdseye",      icon: LayoutGrid, titleAttr: "Auto-composited multi-camera view" },
+    { href: "/cameras/people",        label: "People",        icon: User,       titleAttr: "Known faces (face recognition)" },
+    { href: "/cameras/plates",        label: "Plates",        icon: Car,        titleAttr: "Detected license plates" },
+    { href: "/cameras/notifications", label: "Notifications", icon: Bell,       titleAttr: "Per-camera notification preferences" },
+    { href: "/cameras/system",        label: "System",        icon: Server,     titleAttr: "Recognition engine health" },
+  ];
+
+  const isActive = (href: string) => pathname === href;
+
+  return (
+    <div className="chiprow" style={{ overflowX: "auto" }}>
+      {items.map((item) => {
+        const Icon = item.icon;
+        const active = isActive(item.href);
+        return (
+          <Link
+            key={item.href}
+            href={item.href}
+            title={item.titleAttr}
+            aria-current={active ? "page" : undefined}
+            className={"chip" + (active ? " on" : "")}
+          >
+            <Icon size={14} strokeWidth={active ? 2 : 1.5} />
+            <span>{item.label}</span>
+          </Link>
+        );
+      })}
+
+      {/* The Scan action lives in the sub-nav because the camera-discovery
+          surfaces are right next to it conceptually. Bumped to the right
+          with margin-left:auto so it doesn't crowd the navigation pills. */}
+      <button
+        onClick={onScan}
+        disabled={scanning}
+        className="chip"
+        style={{ marginLeft: "auto" }}
+        title="Scan the LAN for ONVIF cameras"
+        type="button"
+      >
+        <Radar size={14} className={scanning ? "animate-pulse" : ""} />
+        <span>{scanning ? "Scanning…" : "Scan network"}</span>
+      </button>
     </div>
   );
 }

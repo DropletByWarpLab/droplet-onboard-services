@@ -2,15 +2,25 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  ArrowRight,
+  AlertCircle,
+  Check,
+  KeyRound,
   Lightbulb,
   Radar,
   ThermometerSun,
   ToggleRight,
   Wifi,
 } from "lucide-react";
-import { fetchMatterDevices } from "@/lib/api";
+import {
+  commissionMatterDevice,
+  fetchMatterCapabilities,
+  fetchMatterDevices,
+} from "@/lib/api";
+import { translateError } from "@/lib/friendly-errors";
 import type { MatterDevice, MatterGrouped } from "@/lib/types";
+import { StepShell } from "@/components/setup/StepShell";
+import { ScrollRegion } from "@/components/setup/ScrollRegion";
+import { BleUnavailableNotice } from "@/components/smart-home/BleUnavailableNotice";
 
 const CATEGORY_ICONS: Record<string, typeof Lightbulb> = {
   light: Lightbulb,
@@ -71,6 +81,40 @@ export function DiscoveryStep({
   const timerRef = useRef<ReturnType<typeof setInterval>>();
   const seenIdsRef = useRef<Set<string>>(new Set());
   const lastFoundAtSecRef = useRef<number>(0);
+
+  // WARP-102 follow-up: inline manual Matter pairing-code entry. The standalone
+  // QR scanner lives at /devices/add-matter, but navigating there mid-wizard
+  // bounces the customer back (AuthGate guards every non-setup route while the
+  // appliance is unclaimed) — which read as "the QR option breaks setup and
+  // loops". The pairing code printed on the device / its packaging / under the
+  // QR is the same value the QR encodes, so a text field covers both the "QR
+  // handy" and "written code" cases without ever leaving setup.
+  const [manualCode, setManualCode] = useState("");
+  const [manualBusy, setManualBusy] = useState(false);
+  const [manualError, setManualError] = useState<string | null>(null);
+  const [manualOk, setManualOk] = useState<string | null>(null);
+
+  // WARP-851: BLE-commissioning capability. `null` = unknown (probe
+  // failed or still in flight) — show nothing rather than warn on a
+  // guess. `false` = the box can only add devices already on the home
+  // network, so say so near the pairing-code input instead of letting
+  // the customer retry a Bluetooth-only device forever.
+  const [bleAvailable, setBleAvailable] = useState<boolean | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const caps = await fetchMatterCapabilities();
+        if (!cancelled) setBleAvailable(caps.bleCommissioning);
+      } catch {
+        // Capability unknown (controller booting / transient failure) —
+        // leave the notice hidden.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Read latest scanSeconds inside pollOnce via a ref so the callback's
   // identity stays stable across re-renders (we don't want startDiscovery
@@ -191,11 +235,44 @@ export function DiscoveryStep({
     onContinue(discoveredDevices.length);
   }
 
+  // Commission a device straight from the typed pairing code. Matter codes are
+  // 11 digits (short) or 21 digits (long); strip the spaces/dashes people copy
+  // off a label before validating. On success the active poll surfaces the new
+  // device (seenIdsRef dedups), so we just nudge one immediate poll.
+  async function handleManualAdd() {
+    const code = manualCode.replace(/[\s-]/g, "");
+    if (!/^(\d{11}|\d{21})$/.test(code)) {
+      setManualOk(null);
+      setManualError(
+        "Enter the 11- or 21-digit pairing code from the device, its box, or under the QR label.",
+      );
+      return;
+    }
+    setManualError(null);
+    setManualOk(null);
+    setManualBusy(true);
+    try {
+      await commissionMatterDevice(code);
+      setManualCode("");
+      setManualOk("Device added — it'll show up in the list in a moment.");
+      void pollOnce();
+    } catch (e) {
+      // WARP-856 (item 2): never render e.message verbatim on a first-run
+      // screen — a non-JSON error body yields "Failed to commission device:
+      // 502". commissionMatterDevice attaches err.status (WARP-851), so
+      // translateError maps the curated 502/503/504 commissioning copy and
+      // falls back to a calm generic line for everything else.
+      setManualError(translateError(e, "device"));
+    } finally {
+      setManualBusy(false);
+    }
+  }
+
   return (
-    <div className="animate-in fade-in duration-300">
-      {/* Scanning header */}
-      <div className="text-center mb-8">
-        <div className="relative w-16 h-16 mx-auto mb-5">
+    <StepShell
+      current="discovery"
+      icon={
+        <div className="relative w-16 h-16">
           <div className="absolute inset-0 rounded-full bg-accent/10 animate-scan-pulse" />
           <div
             className="absolute inset-2 rounded-full bg-accent/20 animate-scan-pulse"
@@ -205,21 +282,24 @@ export function DiscoveryStep({
             <Wifi size={28} className="text-accent" />
           </div>
         </div>
-
-        <h1 className="type-title-1 text-label-primary mb-2">
-          Discovering your devices
-        </h1>
-        <p className="type-subheadline text-label-tertiary">
-          {discoveredDevices.length === 0
-            ? "Scanning your network for smart home devices..."
-            : `${discoveredDevices.length} device${
-                discoveredDevices.length !== 1 ? "s" : ""
-              } found`}
-        </p>
-      </div>
-
-      {/* Discovered devices grid */}
-      <div className="space-y-2 mb-8 max-h-[320px] overflow-y-auto">
+      }
+      title="Discovering your devices"
+      subtitle={
+        discoveredDevices.length === 0
+          ? "Scanning your network for smart home devices..."
+          : `${discoveredDevices.length} device${
+              discoveredDevices.length !== 1 ? "s" : ""
+            } found`
+      }
+      primary={{ label: "Continue", onClick: handleFinish, showArrow: true }}
+      skip={{ label: "Skip for now", onClick: handleFinish }}
+    >
+      {/* Discovered devices grid. WARP-820: the device list is unbounded, so
+          it lives in a <ScrollRegion> (the wizard's single scroll surface) —
+          the title, "N devices found" subtitle, and the CTA stay pinned in the
+          StepShell while only this list scrolls. The bound is viewport-relative
+          (was a fixed max-h-[320px]) so it shrinks on a short landscape phone. */}
+      <ScrollRegion aria-label="Discovered devices" className="space-y-2 mb-8">
         {discoveredDevices.map((device, index) => {
           const Icon = CATEGORY_ICONS[device.category] || Wifi;
           return (
@@ -262,7 +342,7 @@ export function DiscoveryStep({
             ))}
           </div>
         )}
-      </div>
+      </ScrollRegion>
 
       {/* Scanning timer + lifecycle hints (WARP-298). */}
       {isScanning && scanPhase === "active" && (
@@ -305,55 +385,74 @@ export function DiscoveryStep({
         </div>
       )}
 
-      {/* WARP-102 — Add-by-QR affordance. For devices that aren't yet
-          on the LAN (still in packaging) or that the customer wants to
-          scan from a label. /devices/add-matter is the canonical
-          scanner; linking here so first-run customers find it without
-          hunting through the dashboard. Returns to the wizard via
-          browser back. */}
+      {/* WARP-102 follow-up — inline manual pairing-code entry. Replaces the
+          link to the standalone /devices/add-matter scanner, which bounced the
+          customer out of the wizard mid-setup (AuthGate guards non-setup routes
+          while the appliance is unclaimed). The QR code on a Matter device
+          encodes this same code, so typing it off the QR label / packaging
+          works without a camera and without leaving setup. */}
       <div className="border-t border-separator-default pt-4 mt-2 mb-4">
-        <a
-          href="/devices/add-matter"
-          className="block w-full text-left p-3 bg-fill-tertiary hover:bg-fill-secondary border border-separator-default rounded-lg transition-colors"
+        <label
+          htmlFor="matter-manual-code"
+          className="flex items-center gap-2 type-subheadline font-medium text-label-primary mb-1"
         >
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="type-subheadline font-medium text-label-primary">
-                Have a device&apos;s QR code handy?
-              </p>
-              <p className="type-footnote text-label-tertiary mt-0.5">
-                Scan it now — most Matter devices ship with one on the
-                packaging or label.
-              </p>
-            </div>
-            <ArrowRight
-              size={16}
-              className="text-label-tertiary flex-shrink-0"
+          <KeyRound size={14} aria-hidden="true" />
+          Have a pairing code or QR handy?
+        </label>
+        <p className="type-footnote text-label-tertiary mb-2">
+          Type the 11- or 21-digit code from the device, its box, or under its QR
+          label.
+        </p>
+        {/* WARP-851: until the box can hear BLE devices (WARP-850), be
+            honest about what a pairing code can actually add. */}
+        {bleAvailable === false && <BleUnavailableNotice className="mb-3" />}
+        <div className="flex gap-2">
+          <input
+            id="matter-manual-code"
+            type="text"
+            inputMode="numeric"
+            value={manualCode}
+            onChange={(e) => setManualCode(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handleManualAdd();
+            }}
+            placeholder="3497-0112-3320"
+            className="dp-input flex-1 font-mono"
+            disabled={manualBusy}
+            autoComplete="off"
+          />
+          <button
+            type="button"
+            onClick={handleManualAdd}
+            disabled={manualBusy || !manualCode.trim()}
+            className="dp-btn-secondary"
+          >
+            {manualBusy ? "Adding…" : "Add device"}
+          </button>
+        </div>
+        {manualError && (
+          <div className="flex items-start gap-2 type-footnote text-system-red mt-2">
+            <AlertCircle
+              size={14}
+              className="mt-0.5 flex-shrink-0"
               aria-hidden="true"
             />
+            <span>{manualError}</span>
           </div>
-        </a>
+        )}
+        {manualOk && (
+          <div className="flex items-start gap-2 type-footnote text-system-green mt-2">
+            <Check
+              size={14}
+              className="mt-0.5 flex-shrink-0"
+              aria-hidden="true"
+            />
+            <span>{manualOk}</span>
+          </div>
+        )}
       </div>
 
-      {/* Actions */}
-      <div className="space-y-3">
-        <button
-          onClick={handleFinish}
-          className={`dp-btn-primary w-full transition-all duration-300 ${
-            discoveredDevices.length > 0 ? "opacity-100" : "opacity-60"
-          }`}
-        >
-          {discoveredDevices.length > 0 ? "Continue" : "Continue"}
-          <ArrowRight size={16} />
-        </button>
-        <button
-          onClick={handleFinish}
-          className="w-full type-subheadline text-label-tertiary hover:text-label-secondary py-2 transition-colors"
-        >
-          Skip for now
-        </button>
-      </div>
-    </div>
+    </StepShell>
   );
 }
 

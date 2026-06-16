@@ -45,27 +45,8 @@ import pino from "pino";
 
 const logger = pino({ name: "model-readiness" });
 
-// Backward compatibility: the legacy `JETSON_OLLAMA_URL` env var is still
-// read as a fallback for .env files that pre-date the rename to the
-// hardware-agnostic `OLLAMA_URL`. setup.sh's migrate_env copies the old
-// name to the new on next run; this fallback keeps the orchestrator
-// functional during the transition window.
-const OLLAMA_URL =
-  process.env.OLLAMA_URL ??
-  process.env.JETSON_OLLAMA_URL ??
-  "http://host.docker.internal:11434";
+const OLLAMA_URL = process.env.OLLAMA_URL ?? "http://host.docker.internal:11434";
 const LLM_MODEL = process.env.LLM_MODEL ?? "";
-
-if (process.env.JETSON_OLLAMA_URL && !process.env.OLLAMA_URL) {
-  // Use console.warn here (not the pino logger) because this runs at
-  // module load, before the orchestrator's logger is set up.
-  // eslint-disable-next-line no-console
-  console.warn(
-    "[model-readiness] JETSON_OLLAMA_URL is deprecated — rename to OLLAMA_URL " +
-      "(legacy hardware-specific naming; the variable is hardware-agnostic). " +
-      "setup.sh migrate_env will rename it on next run.",
-  );
-}
 
 interface OllamaTagsResponse {
   models?: Array<{ name: string; size?: number; modified_at?: string }>;

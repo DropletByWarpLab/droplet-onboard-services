@@ -25,7 +25,7 @@
 #   - dGPU reserved for Ollama -> Frigate's render node remapped to iGPU.
 #   - Ollama runs in-container with native gfx1200 (no HSA_OVERRIDE), pinned
 #     to the dGPU, models persisted in named volume.
-#   - OpenWrt runs in-container, owns the MT7921 WiFi card (passed via netns
+#   - OpenWrt runs in-container, owns the Wi-Fi radio (passed via netns
 #     by scripts/poc-attach-wifi.sh after start) for the customer AP.
 services:
   orchestrator:
@@ -40,7 +40,7 @@ services:
     environment:
       OPENSSL_CONF: ""
       DROPLET_FIPS_REQUIRED: "false"
-      JETSON_OLLAMA_URL: "http://ollama:11434"
+      OLLAMA_URL: "http://ollama:11434"
   device-identity-svc:
     environment:
       DROPLET_TPM_BACKEND: "mock"

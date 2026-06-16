@@ -140,5 +140,10 @@ describe("CoverageExtendersPanel (WARP-446)", () => {
     // Last-3-octets surfaced for disambiguation when there are multiple
     // unnamed extenders.
     expect(await screen.findByText(/12:34:56/i)).toBeInTheDocument();
+    // The auto-generated label is hardware-agnostic (ADR-011): the device-tree
+    // match string is still `raspberrypi,5-model-b`, but the operator-facing
+    // fallback name must NOT carry the "Pi5" framing.
+    expect(screen.getByText(/AP \(12:34:56\)/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Pi5/i)).not.toBeInTheDocument();
   });
 });

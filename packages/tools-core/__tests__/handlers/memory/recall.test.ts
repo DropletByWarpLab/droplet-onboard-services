@@ -31,11 +31,37 @@ describe("memory_recall", () => {
     expect(findMany).toHaveBeenCalledWith({
       where: {
         active: true,
+        // WARP-845 — no role on the ctx → most-restrictive guest view.
+        audience: { in: ["guest"] },
         fact: { contains: "tone", mode: "insensitive" },
       },
       orderBy: { addedAt: "desc" },
       take: 10,
     });
+  });
+
+  it("widens the audience window with the caller's role (WARP-845)", async () => {
+    const findMany = vi.fn().mockResolvedValue([]);
+    const ctx = { ...ctxWith(findMany), role: "family" as const };
+    await memoryRecall.handler({ query: "tone" }, ctx);
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          audience: { in: ["family", "guest"] },
+        }),
+      }),
+    );
+
+    const findManyOwner = vi.fn().mockResolvedValue([]);
+    const ctxOwner = { ...ctxWith(findManyOwner), role: "owner" as const };
+    await memoryRecall.handler({ query: "tone" }, ctxOwner);
+    expect(findManyOwner).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          audience: { in: ["owner", "admin", "family", "guest"] },
+        }),
+      }),
+    );
   });
 
   it("applies category filter when valid", async () => {

@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+# =============================================================================
+# Regression guard — factory-reset.sh must REALLY wipe the DB volume, fatally.
+#
+# A reflash of the single-box silently left a stale Postgres DB and then
+# stranded the box: factory-reset reported success while droplet_pgdata
+# survived, so the new db container re-mounted the OLD PGDATA, kept the OLD role
+# password, and crash-looped the orchestrator (migrate_boot "could not establish
+# migration lock session") + file-indexer against the freshly-rotated
+# POSTGRES_PASSWORD in .env.
+#
+# Two root causes, both guarded here:
+#   1. The project name was guessed as `basename $(dirname compose.yml)` =
+#      "docker", so the remove + verify loops targeted nonexistent "docker_*"
+#      volumes and trivially "passed" while the real droplet_pgdata survived.
+#      The fix DERIVES the live project from the compose `name:` (droplet).
+#   2. The destructive `down -v` and the `docker volume rm` loop were all
+#      wrapped in `|| true` / `2>/dev/null`, so a failure (volume still in use
+#      during a brick-safe reflash) was swallowed as success. The fix VERIFIES
+#      via `docker volume ls` that no `*_pgdata` survives and ABORTS if it does.
+#
+# It must also stay SAFE: the bare `docker` compose project belongs to the
+# sibling droplet-local-LLM repo (Ollama) — sweeping docker_* would nuke the
+# model cache. Only droplet_* (live) and droplet-pi-platform_* (retired
+# pre-WARP-605 name) are ours to remove.
+#
+# This is a STATIC source-assertion test (same idiom as
+# tests/factory-reset-purge-scope.test.sh): it greps the executable lines of
+# factory-reset.sh. It does NOT run Docker or factory-reset.sh — the live
+# reset->provision->login path is covered by tests/factory-reset.test.sh.
+#
+# Runtime: < 1 second.
+# =============================================================================
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+RESET="$REPO_ROOT/scripts/factory-reset.sh"
+FAILURES=0
+TESTS=0
+
+pass() { TESTS=$((TESTS + 1)); printf "  \033[32m✓\033[0m %s\n" "$1"; }
+fail() { TESTS=$((TESTS + 1)); FAILURES=$((FAILURES + 1)); printf "  \033[31m✗\033[0m %s\n" "$1"; }
+
+echo ""
+echo "  ================================================"
+echo "  factory-reset.sh volume-wipe robustness guard"
+echo "  ================================================"
+echo ""
+
+# --- Preconditions -----------------------------------------------------------
+if [ -f "$RESET" ]; then
+  pass "factory-reset.sh exists"
+else
+  fail "factory-reset.sh missing at $RESET"
+  echo "FAILURES=$FAILURES"; exit 1
+fi
+
+# Strip comments + blank lines so assertions see only executable shell. Several
+# fixes mention the bug in comments (e.g. why we don't sweep docker_*), so a
+# naive whole-file grep would be a false positive.
+CODE="$(grep -vE '^[[:space:]]*#' "$RESET" | grep -vE '^[[:space:]]*$')"
+
+# --- Root cause 1: correct project name, not the basename guess --------------
+echo "--- Project name is derived, not guessed from the directory basename ---"
+
+# The old bug: COMPOSE_PROJECT=$(basename "$(dirname "$COMPOSE_FILE")") = "docker".
+if printf '%s\n' "$CODE" | grep -qE 'basename[[:space:]]+"?\$\(dirname[[:space:]]+"?\$COMPOSE_FILE'; then
+  fail "project name is still derived via basename \$(dirname compose.yml) = 'docker' (the bug)"
+else
+  pass "no basename \$(dirname compose.yml) project derivation (the 'docker' bug is gone)"
+fi
+
+# The fix derives the live project from the compose file's `name:` field.
+if printf '%s\n' "$CODE" | grep -qE "grep[[:space:]].*'?\^name:.*\"?\\\$COMPOSE_FILE"; then
+  pass "project name is derived from the compose 'name:' field"
+else
+  fail "project name is not derived from the compose 'name:' field"
+fi
+
+# --- Root cause 2: an authoritative, fatal verify gate -----------------------
+echo "--- Surviving volumes are verified via docker volume ls and fatal ---"
+
+# The verify must enumerate live volumes with `docker volume ls`, not re-inspect
+# a hardcoded (possibly wrong-prefixed) name list.
+if printf '%s\n' "$CODE" | grep -qE 'docker[[:space:]]+volume[[:space:]]+ls'; then
+  pass "post-removal verify enumerates live volumes (docker volume ls)"
+else
+  fail "no 'docker volume ls' verify — a surviving volume can't be detected"
+fi
+
+# A pgdata match in the verify regex — *_pgdata is the headline failure.
+if printf '%s\n' "$CODE" | grep -qE 'pgdata'; then
+  pass "verify accounts for the *_pgdata DB volume"
+else
+  fail "verify does not reference pgdata (the stale-DB volume this fix exists for)"
+fi
+
+# The non-force failure path must ABORT (exit 1), not warn-and-continue.
+if printf '%s\n' "$CODE" | grep -qE 'could not be removed' \
+   && printf '%s\n' "$CODE" | grep -qE '^[[:space:]]*exit[[:space:]]+1'; then
+  pass "a surviving volume is FATAL (exit 1), not swallowed as success"
+else
+  fail "a surviving volume does not abort the reset (exit 1 path missing)"
+fi
+
+# The primary destructive `down` no longer swallows its stderr to /dev/null on
+# the same line (the original `down ... --remove-orphans 2>/dev/null || true`).
+if printf '%s\n' "$CODE" | grep -qE 'remove-orphans[[:space:]]+2>/dev/null'; then
+  fail "the primary 'down --remove-orphans' still swallows stderr to /dev/null"
+else
+  pass "the primary 'down --remove-orphans' no longer swallows stderr inline"
+fi
+
+# --- Legacy cleanup + sibling safety -----------------------------------------
+echo "--- Legacy droplet-pi-platform swept; sibling docker_* left alone ---"
+
+# The retired pre-WARP-605 project's orphaned volumes are swept.
+if printf '%s\n' "$CODE" | grep -qE 'droplet-pi-platform'; then
+  pass "retired droplet-pi-platform project volumes are swept (pre-WARP-605 orphans)"
+else
+  fail "no droplet-pi-platform sweep — pre-rename orphaned volumes linger"
+fi
+
+# Safety: must NOT blanket-remove the sibling repo's `docker_*` volumes. A
+# `^docker_` anchor in a volume-ls filter, or a `-p docker` teardown, would.
+if printf '%s\n' "$CODE" | grep -qE "'\^docker_'|\"\^docker_\"|-p[[:space:]]+docker[[:space:]]"; then
+  fail "executable code targets the sibling 'docker' project (would nuke Ollama's model cache)"
+else
+  pass "sibling 'docker' project (droplet-local-LLM/Ollama) is never swept"
+fi
+
+# --- Wipe-list completeness: customer-data volumes must be in the fallback ----
+echo "--- Wipe list mirrors compose; customer-data volumes are not omitted ---"
+
+# brain-memory-data (assistant memory: embeddings of personal files) + ops-audit
+# (the audit trail) are customer/operator data device-backup.sh captures. Both
+# were once missing from the explicit wipe list, so a swallowed `down -v` left
+# them on the box after a "factory reset" — data remanence. Guard against it.
+for v in brain-memory-data ops-audit; do
+  if printf '%s\n' "$CODE" | grep -qE "\"$v\""; then
+    pass "wipe list includes customer-data volume $v"
+  else
+    fail "wipe list OMITS customer-data volume $v (data remanence after reset)"
+  fi
+done
+
+# `filedata` is a dead legacy name no compose volume creates — its presence was
+# always a no-op soft-fail. Keep it out so the list stays honest.
+if printf '%s\n' "$CODE" | grep -qE '"filedata"'; then
+  fail "wipe list still contains the dead 'filedata' entry (no such compose volume)"
+else
+  pass "no dead 'filedata' entry in the wipe list"
+fi
+
+# =============================================================================
+# Results
+# =============================================================================
+echo ""
+echo "  ================================================"
+printf "  Results: %d/%d passed" "$((TESTS - FAILURES))" "$TESTS"
+if [ "$FAILURES" -gt 0 ]; then
+  printf " (\033[31m%d failed\033[0m)" "$FAILURES"
+fi
+printf "\n"
+echo "  ================================================"
+echo ""
+
+exit "$FAILURES"

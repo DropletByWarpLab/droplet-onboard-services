@@ -8,3 +8,37 @@
 Dockerfile text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+
+# Extensionless host executables deployed to the box (e.g. /usr/local/sbin
+# systemd ExecStart targets). No file extension, so the *.sh rule above
+# doesn't catch them — pin explicitly so a Windows checkout never ships
+# CRLF and breaks the shebang (203/EXEC) on the appliance.
+scripts/host/usr-local-sbin/* text eol=lf
+
+# WARP-663 / ADR-020 — extensionless CLI dispatcher (sibling of droplet-admin).
+# Same shebang-CRLF hazard as the host executables above; pin to LF so a
+# Windows checkout never ships CRLF and breaks the shebang on the appliance.
+scripts/droplet-image text eol=lf
+# The release manifest + its schema are read by gen-manifest.py and the manifest
+# is signed byte-for-byte; pin to LF so a Windows checkout doesn't alter the
+# bytes the ECDSA signature covers. The public verify key likewise.
+scripts/image/manifest.json text eol=lf
+scripts/image/manifest.schema.json text eol=lf
+scripts/image/keys/*.pub text eol=lf
+# Autoinstall seed + GRUB menu are baked onto the ISO and parsed by cloud-init
+# / GRUB on the appliance — CRLF would break both. Extensionless / .cfg, so the
+# rules above don't catch them; pin explicitly.
+scripts/image/autoinstall/* text eol=lf
+scripts/image/grub-autoinstall.cfg text eol=lf
+
+# Anchor codegen artifacts. schemas/__tests__/codegen-drift.test.ts re-runs
+# scripts/gen-anchor-schema.mjs and byte-compares its output against the
+# checked-in TS + Python mirrors. The generator always emits LF (Node
+# normalizes template-literal newlines to LF), and the Python mirror is
+# already pinned by `*.py text eol=lf` above — but the generated TS had no
+# pin, so a Windows checkout (core.autocrlf=true) materialized it as CRLF
+# and the byte-compare failed (LF regen vs CRLF on disk). Pin the whole
+# anchor codegen triplet to LF so the comparison holds on every platform.
+schemas/anchor.schema.json text eol=lf
+scripts/gen-anchor-schema.mjs text eol=lf
+packages/shared-types/src/anchor.ts text eol=lf

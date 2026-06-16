@@ -51,7 +51,10 @@ def client(monkeypatch):
         def reload(self): pass
 
     class _Containers:
-        def list(self, all=False): return [_StubContainer()]
+        # `filters=` matches the real docker SDK signature; list_containers()
+        # passes filters={"label": "com.docker.compose.project=..."} to scope
+        # to our compose project (see ops/docker_client.py).
+        def list(self, all=False, filters=None): return [_StubContainer()]
         def get(self, name):
             from docker.errors import NotFound
             if name in ("stub", "stub01"):

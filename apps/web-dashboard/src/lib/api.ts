@@ -23,6 +23,7 @@ import type {
   DetectionEvent,
   DeviceInfo,
   DiscoveredCamera,
+  MatterCapabilities,
   MatterDevice,
   MatterDiscoveredDevice,
   MatterGrouped,
@@ -33,10 +34,13 @@ import type {
   FirewallConfig,
   HealthResponse,
   ModelsResponse,
+  ModelsPagePayload,
   NetworkCommandResult,
   NetworkOverview,
   StorageStats,
   DrivesResponse,
+  PoolsResponse,
+  PoolInfo,
   DriveLabel,
   WirelessScanResult,
   AuthUser,
@@ -48,6 +52,12 @@ import type {
   ShareDetail,
   ShareCreateOptions,
   ShareUpdateOptions,
+  ApplianceContract,
+  ClaimResult,
+  OrgInput,
+  OrgResult,
+  TeamInviteRequest,
+  TeamInviteResult,
   DeviceClientInfo,
   PairingCodeInfo,
   PairingCodeStatus,
@@ -55,44 +65,356 @@ import type {
   VpnStatusInfo,
   VpnPeerCreatedInfo,
   DuckDnsStatus,
+  ToolCatalogResponse,
 } from "./types";
+import type {
+  EmailAccount,
+  EmailAccountsResponse,
+  EmailFilter,
+  ThreadSummary,
+  ThreadsResponse,
+  ThreadDetail,
+  ThreadAnalysis,
+  DraftRow,
+  CreateDraftInput,
+  PatchDraftInput,
+  SendDraftResult,
+} from "./types-email";
 import { authFetch } from "./auth";
 
 const BASE = "";
 
 // --- Auth ---
 
-export async function checkSetupRequired(): Promise<boolean> {
-  const res = await authFetch(`${BASE}/api/auth/setup`);
-  if (!res.ok) return true;
-  const data = await res.json();
-  return data.setupRequired;
+/**
+ * Tri-state result of probing `GET /api/auth/setup` (WARP-577).
+ *
+ * - `'required'`  — orchestrator explicitly answered `setupRequired: true`.
+ * - `'complete'`  — orchestrator explicitly answered `setupRequired: false`.
+ * - `'unknown'`   — indeterminate: any non-2xx, network error, probe timeout,
+ *                   or a 2xx body that omits the `setupRequired` boolean.
+ *
+ * Callers MUST treat `'unknown'` as fail-CLOSED — i.e. never route a user into
+ * the first-run `/setup` wizard on an indeterminate answer. Only an explicit
+ * `'required'` may do that. This avoids guessing setup state from the absence
+ * of a clean response (the repo's "no guessing" standard).
+ */
+export type SetupStatus = "required" | "complete" | "unknown";
+
+/** Wall-clock budget for the setup probe before we treat it as `'unknown'`. */
+const SETUP_PROBE_TIMEOUT_MS = 5000;
+
+export async function checkSetupRequired(): Promise<SetupStatus> {
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(),
+    SETUP_PROBE_TIMEOUT_MS,
+  );
+
+  try {
+    // `/api/auth/setup` is a public, pre-auth probe (no session required), so
+    // we call `fetch` directly rather than `authFetch` — there is no 401 to
+    // refresh through, and the AbortController signal must reach the network
+    // call unaltered for the probe timeout to fire.
+    const res = await fetch(`${BASE}/api/auth/setup`, {
+      credentials: "same-origin",
+      signal: controller.signal,
+    });
+    // Any non-2xx (5xx cold-boot, 502 gateway, etc.) is indeterminate — never
+    // collapse "couldn't reach the orchestrator" into "setup is needed".
+    if (!res.ok) return "unknown";
+
+    let data: unknown;
+    try {
+      data = await res.json();
+    } catch {
+      // 2xx with an unparseable body — still indeterminate.
+      return "unknown";
+    }
+
+    const setupRequired = (data as { setupRequired?: unknown } | null)
+      ?.setupRequired;
+    // Only an explicit boolean is trusted; a missing field is NOT "complete".
+    if (setupRequired === true) return "required";
+    if (setupRequired === false) return "complete";
+    return "unknown";
+  } catch {
+    // Network error or aborted/timed-out probe → indeterminate.
+    return "unknown";
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 export async function setupAdmin(
-  username: string,
+  email: string,
   password: string,
   displayName?: string
 ): Promise<void> {
   const res = await authFetch(`${BASE}/api/auth/setup`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username, password, displayName }),
+    body: JSON.stringify({ email, password, displayName }),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || "Setup failed");
+    const err = new Error(data.error || "Setup failed") as Error & { code?: string };
+    err.code = data.code;
+    throw err;
   }
 }
 
+/**
+ * PR #372 — persist the wizard step so a mid-wizard refresh resumes here.
+ * Fire-and-forget from the caller's perspective: a failure to persist must
+ * never block the customer from advancing the wizard locally, so we
+ * swallow network errors (the in-memory step still moves forward; the next
+ * successful PATCH re-syncs). Public endpoint — runs before any user
+ * exists, like POST /api/auth/setup.
+ */
+export async function patchSetupStep(setupStep: string): Promise<void> {
+  try {
+    await fetch(`${BASE}/api/setup/state`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ setup_step: setupStep }),
+    });
+  } catch {
+    /* non-fatal — local wizard progress is the source of truth mid-step */
+  }
+}
+
+/**
+ * PR #372 — the wizard-FINISH transition: durably flip the appliance to
+ * `ready` server-side (orchestrator `markApplianceReady`). This is the write
+ * that survives a hard refresh — without it `ApplianceSetup.state` stays
+ * `unclaimed` and `AuthGate` re-traps the owner in the first-run wizard.
+ * The server also lands `setup_step` on `done`, so the persisted row is
+ * internally consistent. markApplianceReady on an already-ready appliance is
+ * a 200 no-op, so finishing twice / refreshing on `/done` is safe.
+ *
+ * The wizard authenticated at the account step (loginUser sets the
+ * `droplet_session` cookie), and the orchestrator gates the `ready` claim
+ * on that session, so we send credentials with the request.
+ *
+ * M4 (PR #372 re-review) — this used to swallow EVERY error (network AND
+ * non-2xx). That left the UI showing "ready" (the optimistic in-memory flip)
+ * while the server stayed `unclaimed`, so the next refresh re-trapped the
+ * owner with no signal anything went wrong. We now THROW on a failed PATCH
+ * (network error or non-2xx) so the caller can roll back the optimistic flip
+ * and surface a retry. The server transition is idempotent, so retrying is
+ * always safe.
+ */
+export async function patchSetupReady(): Promise<void> {
+  const res = await fetch(`${BASE}/api/setup/state`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
+    body: JSON.stringify({ appliance: "ready" }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(
+      data.error || `Failed to finalize setup (appliance:ready): ${res.status}`,
+    );
+  }
+}
+
+/**
+ * PR #382 — mark the post-setup product tour complete. PATCHes
+ * `{ user_tour_completed: true }` to the same `/api/setup/state` machine #372
+ * shipped (orchestrator `markTourCompleted`, an idempotent flip that can only
+ * move false → true). Once persisted, AuthGate's "ready + tour pending → tour"
+ * branch stops firing and the owner passes through to the dashboard.
+ *
+ * Public endpoint, same as the other setup-state writes (the tour runs
+ * immediately post-claim, before any session-refresh concerns), so the plain
+ * `fetch` — no authFetch refresh dance. We swallow a transient network error:
+ * the optimistic in-memory flip in `completeTour` already routed the owner
+ * onward, and the next `/api/setup/state` GET re-syncs. Re-running the tour
+ * later is an explicit Help-page action, never an accidental re-trap.
+ */
+export async function patchTourCompleted(): Promise<void> {
+  try {
+    await fetch(`${BASE}/api/setup/state`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_tour_completed: true }),
+    });
+  } catch {
+    /* non-fatal — optimistic flip already routed; next GET re-syncs */
+  }
+}
+
+/**
+ * PR #373 — fetch the read-only hardware contract the Claim step renders.
+ * PUBLIC (runs before any account exists, like the rest of the wizard's
+ * pre-account calls), so a bare `fetch` with no credentials. Throws on a
+ * non-2xx so the Claim step can show the "We can't see your Droplet yet"
+ * retry state and BLOCK continue (the appliance-unreachable edge).
+ */
+export async function fetchApplianceContract(): Promise<ApplianceContract> {
+  const res = await fetch(`${BASE}/api/setup/appliance`);
+  if (!res.ok) {
+    throw new Error(`Failed to fetch appliance contract: ${res.status}`);
+  }
+  return res.json();
+}
+
+/** PR #373 — error carrying the claim failure kind so the Claim step can show
+ *  the right inline message (wrong code vs rate-limited) without leaking the
+ *  real code. */
+export class ClaimError extends Error {
+  /** Server `code` — e.g. CLAIM_CODE_INVALID, CLAIM_RATE_LIMITED. */
+  readonly code: string;
+  /** True when the failure was the per-IP rate-limit lock (HTTP 429). */
+  readonly rateLimited: boolean;
+  /** WARP-631 — seconds the client must wait before retrying (429 only). The
+   *  Claim step starts a live m:ss countdown from this and re-enables the form
+   *  when it elapses. */
+  readonly retryAfterSeconds?: number;
+  constructor(
+    message: string,
+    code: string,
+    rateLimited: boolean,
+    retryAfterSeconds?: number,
+  ) {
+    super(message);
+    this.name = "ClaimError";
+    this.code = code;
+    this.rateLimited = rateLimited;
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
+/**
+ * PR #373 — verify + consume a claim code, binding the appliance. PUBLIC
+ * (claiming precedes account creation) → bare `fetch`. On the happy path /
+ * already-claimed short-circuit the server returns 200; on a wrong code (400)
+ * or a rate-limit lock (429) we throw a `ClaimError` the step renders inline.
+ * The server never echoes the real code, so neither do we.
+ *
+ * WARP-631 — a 429 carries `retryAfterSeconds` (the progressive-backoff wait);
+ * we thread it onto the ClaimError so the step can run a live countdown.
+ */
+export async function postClaim(code: string): Promise<ClaimResult> {
+  const res = await fetch(`${BASE}/api/setup/claim`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    const retryAfterSeconds =
+      typeof data.retryAfterSeconds === "number" && data.retryAfterSeconds > 0
+        ? data.retryAfterSeconds
+        : undefined;
+    throw new ClaimError(
+      data.error || "That claim code didn't match. Try again.",
+      data.code || "CLAIM_FAILED",
+      res.status === 429,
+      retryAfterSeconds,
+    );
+  }
+  return res.json();
+}
+
+/** PR #380 — error carrying the org failure kind so the Org step can show the
+ *  right inline message (slug taken vs slug invalid vs generic) on the right
+ *  field. */
+export class OrgError extends Error {
+  /** Server `code` — e.g. ORG_SLUG_TAKEN, ORG_SLUG_INVALID, ORG_FIELDS_REQUIRED. */
+  readonly code: string;
+  /** True when the slug is already reserved (409) — the URL field error. */
+  readonly slugTaken: boolean;
+  /** True when the slug is malformed (400 ORG_SLUG_INVALID) — the URL field error. */
+  readonly slugInvalid: boolean;
+  constructor(message: string, code: string) {
+    super(message);
+    this.name = "OrgError";
+    this.code = code;
+    this.slugTaken = code === "ORG_SLUG_TAKEN";
+    this.slugInvalid = code === "ORG_SLUG_INVALID";
+  }
+}
+
+/**
+ * PR #380 — name the single workspace + reserve droplet.local/<slug>. Org slots
+ * AFTER account, but shares the wizard's public posture (the route is
+ * allow-listed), so a bare `fetch` with same-origin credentials. On a taken
+ * (409) or invalid (400) slug we throw an `OrgError` the step renders inline on
+ * the URL field; the server validates the slug shape + uniqueness server-side.
+ */
+export async function postOrg(input: OrgInput): Promise<OrgResult> {
+  const res = await fetch(`${BASE}/api/setup/org`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new OrgError(
+      data.error || "Couldn't save your workspace. Try again in a moment.",
+      data.code || "ORG_FAILED",
+    );
+  }
+  return res.json();
+}
+
+/** PR #381 — error carrying the invite failure kind so the Team step can show
+ *  the right inline message (bad email vs bad role vs generic) on the right
+ *  field. */
+export class InviteError extends Error {
+  /** Server `code` — e.g. INVITE_EMAIL_INVALID, INVITE_ROLE_INVALID. */
+  readonly code: string;
+  /** True when the email was malformed (400 INVITE_EMAIL_INVALID) — the
+   *  email-field error. */
+  readonly emailInvalid: boolean;
+  /** True when the role wasn't a valid household role (400 INVITE_ROLE_INVALID). */
+  readonly roleInvalid: boolean;
+  constructor(message: string, code: string) {
+    super(message);
+    this.name = "InviteError";
+    this.code = code;
+    this.emailInvalid = code === "INVITE_EMAIL_INVALID";
+    this.roleInvalid = code === "INVITE_ROLE_INVALID";
+  }
+}
+
+/**
+ * PR #381 — invite a teammate by email + role (the onboarding TEAM step). The
+ * TEAM step runs after the owner has authenticated (account step), so this is
+ * an authenticated call (owner/admin-guarded on the orchestrator). On a bad
+ * email (400) or bad role (400) we throw an `InviteError` the step renders
+ * inline; the server is authoritative on email shape + the role vocabulary.
+ */
+export async function postTeamInvite(
+  input: TeamInviteRequest,
+): Promise<TeamInviteResult> {
+  const res = await authFetch(`${BASE}/api/people/invite`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new InviteError(
+      data.error || "Couldn't send that invite. Try again in a moment.",
+      data.code || "INVITE_FAILED",
+    );
+  }
+  return res.json();
+}
+
 export async function loginUser(
-  username: string,
+  email: string,
   password: string
 ): Promise<{ user: AuthUser }> {
   const res = await authFetch(`${BASE}/api/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username, password }),
+    body: JSON.stringify({ email, password }),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -114,18 +436,50 @@ export async function fetchUsers(): Promise<{ users: AuthUser[] }> {
 }
 
 export async function createUser(
-  username: string,
+  email: string,
   password: string,
-  displayName?: string
+  displayName?: string,
+  // WARP-824: when true (the default), the new user must change this temporary
+  // password on first login. Passed through to POST /auth/users which sets the
+  // explicit `User.mustChangePassword` flag.
+  mustChangePassword = true,
 ): Promise<void> {
   const res = await authFetch(`${BASE}/api/auth/users`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username, password, displayName }),
+    body: JSON.stringify({ email, password, displayName, mustChangePassword }),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || "Failed to create user");
+    const err = new Error(data.error || "Failed to create user") as Error & { code?: string };
+    err.code = data.code;
+    throw err;
+  }
+}
+
+/**
+ * WARP-824 — self-service password change. Used by the forced-change screen an
+ * admin-created user lands on, and reusable for any user rotating their own
+ * password. Posts the current + new password to the orchestrator, which
+ * verifies the current one, enforces the shared policy on the new one, and
+ * clears the forced-change flag. Throws an Error carrying the server `code`
+ * (INVALID_PASSWORD / WEAK_PASSWORD / SAME_PASSWORD) so the UI can map it to
+ * friendly copy.
+ */
+export async function changePassword(
+  currentPassword: string,
+  newPassword: string,
+): Promise<void> {
+  const res = await authFetch(`${BASE}/api/auth/change-password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ currentPassword, newPassword }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    const err = new Error(data.error || "Failed to change password") as Error & { code?: string };
+    err.code = data.code;
+    throw err;
   }
 }
 
@@ -134,6 +488,53 @@ export async function deleteUser(username: string): Promise<void> {
     method: "DELETE",
   });
   if (!res.ok) throw new Error(`Failed to delete user: ${res.status}`);
+}
+
+// --- PR #375 — TOTP 2FA enrollment ---
+
+export interface TotpEnrollResponse {
+  /** otpauth:// URI for manual entry into an authenticator app. */
+  otpauthUri: string;
+  /** Pre-rendered QR data-url (data:image/png;base64,…) for <img src>. */
+  qrDataUrl: string;
+  issuer: string;
+}
+
+export interface TotpVerifyResponse {
+  enabled: boolean;
+  /** Present only on the first successful verify — shown to the user once. */
+  recoveryCodes?: string[];
+}
+
+/** Begin TOTP enrollment: returns the QR + otpauth URI for the current user. */
+export async function enrollTotp(): Promise<TotpEnrollResponse> {
+  const res = await authFetch(`${BASE}/api/auth/totp/enroll`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || "Could not start two-factor setup");
+  }
+  return res.json();
+}
+
+/**
+ * Confirm a 6-digit code. On the first success the response carries the
+ * one-time recovery codes (shown once); a later call enables nothing new.
+ */
+export async function verifyTotp(code: string): Promise<TotpVerifyResponse> {
+  const res = await authFetch(`${BASE}/api/auth/totp/verify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || "That code didn't match. Try again.");
+  }
+  return res.json();
 }
 
 // --- WARP-217 invites ---
@@ -152,7 +553,9 @@ export async function createInvite(
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || "Failed to create invite");
+    const err = new Error(data.error || "Failed to create invite") as Error & { code?: string };
+    err.code = data.code;
+    throw err;
   }
   return res.json();
 }
@@ -224,6 +627,35 @@ export async function acceptInvite(
     throw err;
   }
   return res.json();
+}
+
+/**
+ * WARP-629 — runtime SSO discovery. Returns the provider IDs this appliance
+ * has actually configured (e.g. `["google"]`), so the login page renders only
+ * usable IdP buttons instead of a fixed build-time set. PUBLIC + pre-session
+ * (the login page has no cookie yet), so a bare `fetch` — no authFetch refresh
+ * dance, like checkSetupRequired / fetchSystemHealth.
+ *
+ * The body is provider IDs ONLY (no issuer/client-id/secret/redirect). Throws
+ * on any non-2xx or malformed body; the caller treats a rejection as "no SSO"
+ * and keeps the local-first password path standing (SSO is purely additive).
+ */
+export async function getEnabledSsoProviders(): Promise<string[]> {
+  // Bound the request so a *hung* orchestrator (not just a rejected one) still
+  // falls back to the password-only path instead of leaving discovery pending
+  // forever. AbortSignal.timeout fires a TimeoutError → the caller's .catch
+  // treats it as "no SSO" (review follow-up on #403).
+  const res = await fetch(`${BASE}/api/sso/oidc/providers`, {
+    credentials: "same-origin",
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to fetch SSO providers: ${res.status}`);
+  }
+  const data = (await res.json()) as { providers?: unknown };
+  // Defensive: only trust a string[] under `providers`. Anything else → [].
+  if (!Array.isArray(data.providers)) return [];
+  return data.providers.filter((p): p is string => typeof p === "string");
 }
 
 // --- WARP-225: per-user context-meter ---
@@ -329,6 +761,176 @@ export async function fetchDrives(): Promise<DrivesResponse> {
 }
 
 /**
+ * BUG-3 / ADR-019: read-only mdadm pool inventory. Returns an honest empty
+ * list when no pool exists — never a fabricated pooled-storage sum.
+ */
+export async function fetchPools(): Promise<PoolsResponse> {
+  const res = await authFetch(`${BASE}/api/storage/pools`);
+  if (!res.ok) throw new Error(`Failed to fetch pools: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * BUG-3 / ADR-019: destructive pool ops are TWO-STEP. Step 1 evaluates and
+ * returns a single-use confirm token (202); step 2 confirms it to execute.
+ * Owner/admin only (enforced server-side). Never auto, never AI.
+ */
+export interface PoolCommandToken {
+  status: "confirmation_required";
+  confirmationToken: string;
+  service: string;
+  resourceId: string;
+  reason?: string;
+  expiresIn?: number;
+}
+
+/** Step 1: create a pool — returns a confirm token (does NOT create yet). */
+export async function requestCreatePool(input: {
+  device: string;
+  level: PoolInfo["level"];
+  members: string[];
+  confirmPhrase: string;
+}): Promise<PoolCommandToken> {
+  const res = await authFetch(`${BASE}/api/storage/pools`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (res.status !== 202) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Could not start pool creation: ${res.status}`);
+  }
+  return res.json();
+}
+
+/** Step 1: destroy a pool — returns a confirm token (does NOT destroy yet). */
+export async function requestDestroyPool(
+  device: string,
+  confirmPhrase: string,
+): Promise<PoolCommandToken> {
+  const res = await authFetch(`${BASE}/api/storage/pools/${encodeURIComponent(device)}`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirmPhrase }),
+  });
+  if (res.status !== 202) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Could not start pool removal: ${res.status}`);
+  }
+  return res.json();
+}
+
+/** WARP-662 step 1: adopt (wipe + reformat + mount) a previously-used disk —
+ *  returns a confirm token (does NOT wipe yet). `device` is the WHOLE-disk
+ *  kernel name (e.g. "sdb" / "nvme0n1"), never a partition. The owner confirms
+ *  via confirmPoolCommand to actually execute. The OS disk is refused
+ *  server-side by the host script. */
+export async function requestAdoptDrive(input: {
+  device: string;
+  wipeMethod: "quick" | "secure";
+  fstype?: string;
+  label?: string;
+  confirmPhrase: string;
+}): Promise<PoolCommandToken> {
+  const res = await authFetch(`${BASE}/api/storage/drives/adopt`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (res.status !== 202) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Could not start drive adopt: ${res.status}`);
+  }
+  return res.json();
+}
+
+/** Step 2: confirm + execute a queued destructive pool op. */
+export async function confirmPoolCommand(input: {
+  confirmationToken: string;
+  service: string;
+  resourceId: string;
+}): Promise<{ ok: boolean; error?: string }> {
+  const res = await authFetch(`${BASE}/api/storage/command/confirm`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Could not complete the operation: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * WARP-828 — the Settings "Danger zone" reformat-a-drive entry points.
+ *
+ * These are the AC-named, typed aliases for the two-step destructive flow the
+ * pool/adopt UI already uses. They wrap the same orchestrator routes
+ * (`POST /api/storage/drives/adopt` → 202 token, then
+ * `POST /api/storage/command/confirm`) so there is ONE wire path and one place
+ * the contract lives; the Danger zone calls these by their intent-named handles
+ * rather than the pool-flavoured originals.
+ */
+
+/** Step 1: request a confirm token to wipe + reformat + mount a whole disk.
+ *  `device` is the WHOLE-disk kernel name ("sdb" / "nvme0n1"), never a
+ *  partition — derive it from a DriveInfo with `wholeDiskName()`. Returns 202 +
+ *  a single-use token; nothing is erased until {@link confirmStorageCommand}.
+ *  Owner/admin only + OS-disk refusal are enforced server-side. */
+export async function adoptDrive(input: {
+  device: string;
+  wipeMethod: "quick" | "secure";
+  fstype?: string;
+  label?: string;
+  confirmPhrase: string;
+}): Promise<PoolCommandToken> {
+  return requestAdoptDrive(input);
+}
+
+/** Step 2: confirm + execute a queued destructive storage op. MUST echo the
+ *  `service` + `resourceId` from the minted token (the server refuses a
+ *  mismatch). Owner/admin only, enforced server-side. */
+export async function confirmStorageCommand(input: {
+  confirmationToken: string;
+  service: string;
+  resourceId: string;
+}): Promise<{ ok: boolean; error?: string }> {
+  return confirmPoolCommand(input);
+}
+
+/**
+ * WARP-612: ask the device-bridge to refresh its drive snapshot (admin-only;
+ * proxies the bridge's /drives/changed cache hook — no mount side effects).
+ */
+export async function rescanDrives(): Promise<{ ok: boolean; error?: string }> {
+  const res = await authFetch(`${BASE}/api/storage/drives/rescan`, { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to rescan drives: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * WARP-612: unmount + forget a hot-plug USB drive (admin-only). The
+ * orchestrator + bridge refuse anything that isn't a USB mount under
+ * /mnt/droplet/. Throws a friendly message on 409 (busy) / 503 (not
+ * configured) so the caller can surface it.
+ */
+export async function ejectDrive(uuid: string): Promise<{ ok: boolean }> {
+  const res = await authFetch(
+    `${BASE}/api/storage/drives/${encodeURIComponent(uuid)}/eject`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to eject drive: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
  * WARP-174: upsert the customer's friendly name (+ optional icon + notes)
  * for a drive. Used by the setup wizard's Storage step and the
  * post-setup `/storage` page.
@@ -413,6 +1015,10 @@ export type RouterErrorCode =
   | "AUTH"
   | "ROLLED_BACK"
   | "DISABLED"
+  // WARP-816: the radio is broadcasting the Droplet's own Wi-Fi on its only
+  // radio and can't station-scan. A stable capability fact (HTTP 409), distinct
+  // from a successful scan that finds zero networks.
+  | "SCAN_UNSUPPORTED"
   | "UNKNOWN";
 
 export class RouterStatusError extends Error {
@@ -424,6 +1030,101 @@ export class RouterStatusError extends Error {
     this.code = code;
     this.status = status;
   }
+}
+
+/**
+ * WARP-807: codes that mean "the router/routing service can't be reached right
+ * now" — a soft, recoverable condition during onboarding (the box's AP may not
+ * be up yet), NOT a destructive failure the customer must fix. The orchestrator
+ * returns these at HTTP 503.
+ */
+const ROUTER_UNREACHABLE_CODES: ReadonlySet<RouterErrorCode> = new Set([
+  "UNREACHABLE",
+  "TIMEOUT",
+  "DISABLED",
+]);
+
+/**
+ * The fixed lead-in of the wizard's "router isn't reachable" notice. The
+ * trailing destination is supplied per-surface (see {@link routerUnreachableNotice})
+ * because the place to finish the work later differs by step — Wi-Fi/DuckDNS
+ * live at the "Network" page, WireGuard peers at "Remote Access". The caller
+ * renders the destination as a monospaced span, so it is intentionally kept out
+ * of this prefix. (WARP-807 UX review: the old single string pointed everyone at
+ * "Settings", which has none of these controls — a dead end.)
+ */
+export const ROUTER_UNREACHABLE_PREFIX =
+  "Your router isn't reachable yet — you can finish this from";
+
+/** The actionable notice, split so the caller can monospace the destination. */
+export interface RouterUnreachableNotice {
+  /** Lead-in sentence up to (but excluding) the destination name. */
+  prefix: string;
+  /** The dashboard surface that owns this setting, e.g. "Network". */
+  destination: string;
+}
+
+/**
+ * If `e` represents a router-reachability problem (a `RouterStatusError` with an
+ * UNREACHABLE/TIMEOUT/DISABLED code, or any error carrying HTTP 503), return the
+ * actionable notice the wizard should render in place of the raw message — split
+ * into `{ prefix, destination }` so the caller can monospace the destination and
+ * append " later." Otherwise return `null` so the caller falls back to the real
+ * error text.
+ *
+ * @param destination the dashboard surface where this setting can be finished
+ *   later (e.g. "Network" for the Internet step, "Remote Access" for VPN).
+ */
+export function routerUnreachableNotice(
+  e: unknown,
+  destination: string,
+): RouterUnreachableNotice | null {
+  const notice = (): RouterUnreachableNotice => ({
+    prefix: ROUTER_UNREACHABLE_PREFIX,
+    destination,
+  });
+  if (e instanceof RouterStatusError) {
+    if (ROUTER_UNREACHABLE_CODES.has(e.code) || e.status === 503) {
+      return notice();
+    }
+    return null;
+  }
+  // Defensive: a plain error that still carries a 503 status (shouldn't happen
+  // for the typed write paths, but keeps callers robust to other surfaces).
+  if (
+    e &&
+    typeof e === "object" &&
+    (e as { status?: unknown }).status === 503
+  ) {
+    return notice();
+  }
+  return null;
+}
+
+/**
+ * WARP-807: shared error-mapper for network WRITE endpoints. The orchestrator's
+ * global error handler returns a flat `{ error, message, code }` body. When a
+ * trusted RouterError surfaces (e.g. a 503 with code UNREACHABLE), throw a typed
+ * `RouterStatusError` so the wizard can branch on `code`/`status` and render an
+ * actionable message instead of the raw text. Falls back to a plain `Error`
+ * (preserving the prior behavior) for everything else.
+ *
+ * The caller must pass the already-parsed body (or `{}` on a non-JSON response).
+ */
+function throwNetworkWriteError(
+  body: { error?: unknown; message?: unknown; code?: unknown },
+  status: number,
+  fallback: string,
+): never {
+  const code = typeof body.code === "string" ? (body.code as RouterErrorCode) : undefined;
+  const message =
+    (typeof body.message === "string" && body.message) ||
+    (typeof body.error === "string" && body.error) ||
+    `${fallback}: ${status}`;
+  if (code) {
+    throw new RouterStatusError(code, message, status);
+  }
+  throw new Error(message);
 }
 
 export async function fetchNetworkStatus(): Promise<NetworkOverview> {
@@ -460,7 +1161,26 @@ export async function fetchWifiSettings(): Promise<Record<string, unknown>> {
 
 export async function scanWifiNetworks(): Promise<WirelessScanResult[]> {
   const res = await authFetch(`${BASE}/api/network/wifi/scan`);
-  if (!res.ok) throw new Error(`Failed to scan wifi: ${res.status}`);
+  if (!res.ok) {
+    // WARP-816: the orchestrator returns 409 with a flat typed body
+    // `{ code: "SCAN_UNSUPPORTED", message }` when the radio is in AP mode and
+    // can't station-scan. Surface it as a RouterStatusError so the WiFi panel
+    // renders calm "scanning unavailable while broadcasting" copy + disables
+    // Scan, instead of an empty list — and never the raw code (WARP-807).
+    let body: { code?: unknown; message?: unknown } = {};
+    try {
+      body = await res.json();
+    } catch {
+      /* non-JSON fallthrough */
+    }
+    const code = typeof body.code === "string" ? (body.code as RouterErrorCode) : undefined;
+    if (code) {
+      const message =
+        (typeof body.message === "string" && body.message) || `Failed to scan wifi: ${res.status}`;
+      throw new RouterStatusError(code, message, res.status);
+    }
+    throw new Error(`Failed to scan wifi: ${res.status}`);
+  }
   const data = await res.json();
   return data.results;
 }
@@ -471,8 +1191,8 @@ export async function setWifiSsid(ssid: string): Promise<NetworkCommandResult> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ssid }),
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || `Failed to set SSID: ${res.status}`);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to set SSID");
   return data;
 }
 
@@ -482,8 +1202,8 @@ export async function setWifiPassword(password: string): Promise<NetworkCommandR
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ password }),
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || `Failed to set password: ${res.status}`);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to set password");
   return data;
 }
 
@@ -556,9 +1276,80 @@ export async function fetchRouterSystemInfo(): Promise<Record<string, unknown>> 
   return res.json();
 }
 
+// --- Managed switch writes (ADDON-network-switch-management.md §7) ---------
+//
+// Each is a Tier-2 (Write) command: the POST returns a 202 with a
+// confirmation token (`requiresConfirmation: true`), which the caller then
+// echoes back through `confirmNetworkCommand` to actually apply. We mirror
+// the firewall block/unblock contract precisely — a non-ok response is only
+// an error when the server did NOT ask for confirmation (the 202 itself is
+// the happy path, not a failure). See useSwitch for the dance.
+
+export async function switchSetPortVlan(
+  port: number,
+  vlanId: number,
+): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/switch/ports/${port}/vlan`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ vlan_id: vlanId }),
+  });
+  const data = await res.json();
+  if (!res.ok && !data.requiresConfirmation)
+    throw new Error(data.error || `Failed to change VLAN: ${res.status}`);
+  return data;
+}
+
+export async function switchSetPortPoe(
+  port: number,
+  enabled: boolean,
+): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/switch/ports/${port}/poe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  const data = await res.json();
+  if (!res.ok && !data.requiresConfirmation)
+    throw new Error(data.error || `Failed to toggle PoE: ${res.status}`);
+  return data;
+}
+
+export async function switchSetPortEnabled(
+  port: number,
+  enabled: boolean,
+): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/switch/ports/${port}/enable`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  const data = await res.json();
+  if (!res.ok && !data.requiresConfirmation)
+    throw new Error(data.error || `Failed to set port state: ${res.status}`);
+  return data;
+}
+
+export async function switchProvision(): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/switch/provision`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  const data = await res.json();
+  if (!res.ok && !data.requiresConfirmation)
+    throw new Error(data.error || `Failed to re-apply switch config: ${res.status}`);
+  return data;
+}
+
 export type NetworkOperation = {
   id: string;
-  state: "pending" | "applied" | "rolled_back";
+  // DASH-07: "unknown" is a distinct, non-success terminal state used when the
+  // orchestrator can't account for the operation (404). It must NOT be treated
+  // as "applied" — see fetchNetworkOperation.
+  // "rejected" (routing service) is a neutral no-change terminal state for a 4xx
+  // (auth / validation) — the request was refused before any router change, so
+  // it is neither a success ("applied") nor a reverted change ("rolled_back").
+  state: "pending" | "applied" | "rejected" | "rolled_back" | "unknown";
   startedAt: number;
   finishedAt: number | null;
   reason: string | null;
@@ -583,18 +1374,59 @@ export async function confirmNetworkCommand(
   return { operationId: body?.operationId ?? null };
 }
 
+/**
+ * Reboot the router (WARP-871). Owner-only (the orchestrator route enforces
+ * it). "reboot" is a Tier-3 operation confirmable via the dashboard, so the
+ * POST returns 202 + a confirmation token; the Restart click IS the consent,
+ * so we echo it straight back through confirmNetworkCommand. Returns the
+ * operationId (or null) so the caller can show a "rebooting…" state.
+ */
+export async function rebootRouter(): Promise<{ operationId: string | null }> {
+  const res = await authFetch(`${BASE}/api/network/system/reboot`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (res.status === 202) {
+    if (!body?.confirmationToken || !body?.operation) {
+      throw new Error(
+        "Unexpected 202 response: missing confirmationToken or operation",
+      );
+    }
+    return confirmNetworkCommand(body.confirmationToken, body.operation);
+  }
+  if (res.ok) {
+    // Tier dropped to immediate (no confirmation needed) — already executing.
+    return { operationId: body?.operationId ?? null };
+  }
+  if (res.status === 403) {
+    throw new Error(
+      (body as { error?: string }).error ||
+        "Only the owner can restart the router.",
+    );
+  }
+  throw new Error(
+    (body as { error?: string }).error || `Failed to restart router: ${res.status}`,
+  );
+}
+
 export async function fetchNetworkOperation(id: string): Promise<NetworkOperation> {
   const res = await authFetch(`${BASE}/api/network/operations/${encodeURIComponent(id)}`);
   if (res.status === 404) {
-    // Orchestrator surfaces 404 for unknown / expired ops. Treat as applied so
-    // the UI isn't stuck in pending — a terminal record is either too old to
-    // track or the dashboard lost the flow (e.g. after refresh).
+    // DASH-07: the orchestrator returns 404 for an operation it can't account
+    // for. That's genuinely indeterminate — the op may have expired after a
+    // refresh, never applied, been rolled back, or the id was wrong. We must
+    // NOT report "applied" (a false success that could tell the operator a
+    // firewall/port-forward change took effect when it may not have). Surface a
+    // distinct terminal "unknown" state so the UI can ask the user to re-check
+    // the device list rather than asserting success.
     return {
       id,
-      state: "applied",
+      state: "unknown",
       startedAt: 0,
       finishedAt: null,
-      reason: "Operation record expired",
+      reason: "We couldn't confirm this change — re-check the device list.",
     };
   }
   if (!res.ok) throw new Error(`Failed to fetch operation: ${res.status}`);
@@ -1085,14 +1917,47 @@ export async function enableCamera(name: string): Promise<void> {
   if (!res.ok) throw new Error(`Failed to enable camera: ${res.status}`);
 }
 
+/** Consume a camera-domain Tier-2 confirmation token (WARP-861).
+ *  Pairs with POST /api/cameras/command/confirm — the camera analogue of
+ *  /switch/command/confirm. The operation echo is required (WARP-41). */
+async function confirmCameraCommand(
+  confirmationToken: string,
+  operation: string,
+): Promise<void> {
+  const res = await authFetch(`${BASE}/api/cameras/command/confirm`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirmationToken, operation }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { error?: string }).error || `Confirm failed: ${res.status}`);
+  }
+}
+
 export async function disableCamera(name: string): Promise<void> {
   const res = await authFetch(`${BASE}/api/cameras/${encodeURIComponent(name)}/disable`, { method: "POST" });
   if (!res.ok) throw new Error(`Failed to disable camera: ${res.status}`);
+  // disable_camera is Tier 2: the route 202s with a token and does nothing
+  // until the token is consumed (WARP-861 — previously this silently
+  // no-opped). The user already confirmed in the UI dialog that invoked us,
+  // so complete the two-step handshake here.
+  if (res.status === 202) {
+    const body = (await res.json().catch(() => ({}))) as { confirmationToken?: string };
+    if (!body.confirmationToken) throw new Error("Disable requires confirmation but no token was issued");
+    await confirmCameraCommand(body.confirmationToken, "disable_camera");
+  }
 }
 
 export async function removeCamera(name: string): Promise<void> {
   const res = await authFetch(`${BASE}/api/cameras/${encodeURIComponent(name)}`, { method: "DELETE" });
   if (!res.ok) throw new Error(`Failed to remove camera: ${res.status}`);
+  // delete_camera is Tier 2 — same two-step handshake as disableCamera.
+  if (res.status === 202) {
+    const body = (await res.json().catch(() => ({}))) as { confirmationToken?: string };
+    if (!body.confirmationToken) throw new Error("Remove requires confirmation but no token was issued");
+    await confirmCameraCommand(body.confirmationToken, "delete_camera");
+  }
 }
 
 export function getCameraSnapshotUrl(name: string): string {
@@ -1322,8 +2187,28 @@ export async function commissionMatterDevice(pairingCode: string): Promise<{ nod
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Failed to commission device: ${res.status}`);
+    // WARP-851: carry the HTTP status so translateError's status-based
+    // dispatch can map the orchestrator's curated commissioning copy
+    // (e.g. the 502 discovery failure → network-discovery copy) instead
+    // of flattening every failure onto the generic device fallback.
+    const err = new Error(
+      body.error || `Failed to commission device: ${res.status}`,
+    ) as Error & { status?: number };
+    err.status = res.status;
+    throw err;
   }
+  return res.json();
+}
+
+/**
+ * WARP-851: controller capability surface. Lets the wizard and
+ * /devices/add-matter be honest about which commissioning paths work on
+ * this box (no BLE today — devices needing Bluetooth first-time setup
+ * can't pair until WARP-850 lands).
+ */
+export async function fetchMatterCapabilities(): Promise<MatterCapabilities> {
+  const res = await authFetch(`${BASE}/api/matter/capabilities`);
+  if (!res.ok) throw new Error(`Failed to fetch Matter capabilities: ${res.status}`);
   return res.json();
 }
 
@@ -1339,6 +2224,22 @@ export async function decommissionMatterDevice(nodeId: string): Promise<void> {
 export async function fetchModels(): Promise<ModelsResponse> {
   const res = await authFetch(`${BASE}/api/llm/models`);
   if (!res.ok) throw new Error(`Failed to fetch models: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * WARP-836 — the read-only Models surface payload (`GET /api/models`).
+ *
+ * Distinct from {@link fetchModels} (`/api/llm/models`, the chat model
+ * selector): this is the status page composer the orchestrator's
+ * `models-summary.service` returns — local LLMs + cloud opt-in providers +
+ * GPU/latency/spend KPIs. Authenticated GET (open to any principal per
+ * ADR-004 §3); `authFetch` carries the session + 401-refresh. `local` may be
+ * `[]` when ai-gateway is down, which is a valid 200 the page renders.
+ */
+export async function fetchModelsPage(): Promise<ModelsPagePayload> {
+  const res = await authFetch(`${BASE}/api/models`);
+  if (!res.ok) throw new Error(`Failed to fetch models page: ${res.status}`);
   return res.json();
 }
 
@@ -1361,6 +2262,57 @@ export async function sendChat(
 }
 
 /**
+ * WARP-640 — outcome of a confirmed scene run, i.e. the 200 body from
+ * `POST /api/scenes/:id/run` once the single-use confirmation token has been
+ * accepted. `successCount < actionCount` means a partial run (some device
+ * actions failed); the per-action breakdown rides along in `results`.
+ */
+export interface SceneRunOutcome {
+  sceneId: string;
+  successCount: number;
+  actionCount: number;
+  results: Array<{
+    idx: number;
+    deviceNodeId: string;
+    command: string;
+    ok: boolean;
+    status?: string;
+    error?: string;
+  }>;
+}
+
+/**
+ * WARP-640 — complete an in-chat `run_scene` confirmation. The chat chip mints
+ * nothing itself: the orchestrator already replied `202 confirmation_required`
+ * with a single-use `confirmationToken`, which the "Approve & run" button
+ * echoes straight back here. The route consumes the token (replay-proof) and
+ * runs the scene server-side, so the dashboard never has to forge the
+ * `?confirm=true` gate the way an operator-initiated run would. A non-2xx
+ * (expired/replayed token → 403, pressure → 429, run failure → 5xx) throws so
+ * the chip can flip to its failed state and let the user re-ask.
+ */
+export async function runSceneConfirmed(
+  sceneId: string,
+  confirmationToken: string,
+): Promise<SceneRunOutcome> {
+  const res = await authFetch(`${BASE}/api/scenes/${sceneId}/run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirmationToken }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    const err = new Error(
+      data.error || data.message || `Failed to run scene (${res.status})`,
+    ) as Error & { code?: string; status?: number };
+    err.code = data.code;
+    err.status = res.status;
+    throw err;
+  }
+  return res.json();
+}
+
+/**
  * WARP-304: shape returned by `GET /api/llm/conversations/:id`. The
  * dashboard hydrates `useChat.messages` from this on page mount when the
  * URL carries a `?c=<id>` hash.
@@ -1370,6 +2322,8 @@ export interface PersistedConversation {
   title: string | null;
   model: string | null;
   provider: string | null;
+  /** WARP-844 — persisted caller system prompt, or null/absent. */
+  systemPrompt?: string | null;
   createdAt: string;
   updatedAt: string;
   messages: Array<{
@@ -1385,10 +2339,27 @@ export interface PersistedConversation {
           status?: string;
           message?: string;
           data?: unknown;
+          /**
+           * WARP-640 — re-issue handle for an in-chat confirmation (run_scene).
+           * Returned by the orchestrator so a reloaded chip in
+           * `confirmation_required` can still render "Approve & run". (review #497)
+           */
+          confirmation?: {
+            kind: string;
+            sceneId?: string;
+            confirmationToken: string;
+          };
         }>
       | null;
     toolCallId: string | null;
     turnId: string | null;
+    /**
+     * WARP-458 — concatenated reasoning trace persisted for this
+     * assistant row, or null/absent when the model produced none.
+     */
+    reasoning?: string | null;
+    /** WARP-844 — thumbs rating, or null when unrated. */
+    feedback?: "up" | "down" | null;
     /**
      * Lifecycle status of the persisted row. The client uses
      * it to drive failureKind on reloaded messages. Optional because
@@ -1422,6 +2393,8 @@ export interface ConversationSummary {
   title: string | null;
   model: string | null;
   provider: string | null;
+  /** WARP-845 — owning project, or null when ungrouped. */
+  projectId?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -1429,11 +2402,17 @@ export interface ConversationSummary {
 export async function listConversations(args: {
   limit: number;
   offset: number;
+  /** WARP-844 — search needle matching the title or any message content. */
+  q?: string;
+  /** WARP-845 — restrict to one project's chats (sidebar folder expand). */
+  projectId?: string;
 }): Promise<ConversationSummary[]> {
   const qs = new URLSearchParams({
     limit: String(args.limit),
     offset: String(args.offset),
   });
+  if (args.q) qs.set("q", args.q);
+  if (args.projectId) qs.set("projectId", args.projectId);
   const res = await authFetch(`${BASE}/api/llm/conversations?${qs}`);
   if (!res.ok) throw new Error(`Failed to list conversations: ${res.status}`);
   const body = (await res.json()) as { conversations: ConversationSummary[] };
@@ -1532,6 +2511,317 @@ export async function uploadBrainFile(
   return res.json();
 }
 
+// --- Voice input (WARP-844) ---
+
+export class SttUnavailable extends Error {
+  constructor() {
+    super("stt-unavailable");
+    this.name = "SttUnavailable";
+  }
+}
+
+/**
+ * Transcribe raw 16-bit LE mono PCM via the orchestrator's Wyoming STT
+ * proxy. Throws SttUnavailable on 503 (whisper sidecar not deployed —
+ * macOS dev or non-linux profile) so the composer can hide the mic.
+ */
+export async function transcribeAudio(
+  pcm: ArrayBuffer,
+  rate: number,
+): Promise<{ text: string }> {
+  const res = await authFetch(`${BASE}/api/stt?rate=${rate}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/octet-stream" },
+    body: pcm,
+  });
+  if (res.status === 503) throw new SttUnavailable();
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Transcription failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+// --- Edit & resend (WARP-844) ---
+
+/**
+ * Truncate a conversation from a message onward (the message itself plus
+ * everything after it). Called before re-sending an edited prompt so the
+ * persisted thread matches the visible one.
+ */
+export async function truncateConversation(
+  conversationId: string,
+  messageId: string,
+): Promise<{ deleted: number }> {
+  const res = await authFetch(
+    `${BASE}/api/llm/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to truncate: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * WARP-844 — set (or clear, with null) the thumbs rating on an assistant
+ * message. On this appliance the signal feeds the admin retrieval-eval
+ * loop rather than any cloud RLHF.
+ */
+export async function setMessageFeedback(
+  conversationId: string,
+  messageId: string,
+  feedback: "up" | "down" | null,
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/llm/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/feedback`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ feedback }),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to save feedback: ${res.status}`);
+  }
+}
+
+// --- Durable memory facts (WARP-461) ---
+
+/** One durable memory fact — workspace-global, injected into the chat
+ *  base prompt and managed via /api/memory/facts. */
+export interface MemoryFact {
+  id: string;
+  category: "Tone" | "Workflow" | "Scope" | "Schedule" | "Other";
+  fact: string;
+  addedBy: string;
+  evidenceChatId: string | null;
+  active: boolean;
+  /** WARP-845 — who the fact is distributed to (minimum-role ladder
+   *  owner > admin > family > guest). */
+  audience: "owner" | "admin" | "family" | "guest";
+  addedAt: string;
+  updatedAt: string;
+}
+
+export async function listMemoryFacts(
+  opts: { category?: MemoryFact["category"]; active?: boolean; limit?: number } = {},
+): Promise<{ facts: MemoryFact[] }> {
+  const params = new URLSearchParams();
+  if (opts.category) params.set("category", opts.category);
+  if (opts.active !== undefined) params.set("active", String(opts.active));
+  if (opts.limit !== undefined) params.set("limit", String(opts.limit));
+  const qs = params.toString();
+  const res = await authFetch(`${BASE}/api/memory/facts${qs ? `?${qs}` : ""}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to load memory: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function createMemoryFact(input: {
+  category: MemoryFact["category"];
+  fact: string;
+  evidenceChatId?: string;
+  audience?: MemoryFact["audience"];
+}): Promise<{ fact: MemoryFact }> {
+  const res = await authFetch(`${BASE}/api/memory/facts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to save fact: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function updateMemoryFact(
+  id: string,
+  patch: {
+    category?: MemoryFact["category"];
+    fact?: string;
+    active?: boolean;
+    audience?: MemoryFact["audience"];
+  },
+): Promise<{ fact: MemoryFact }> {
+  const res = await authFetch(
+    `${BASE}/api/memory/facts/${encodeURIComponent(id)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to update fact: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function deleteMemoryFact(id: string): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/memory/facts/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok && res.status !== 404) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to delete fact: ${res.status}`);
+  }
+}
+
+// --- Chat projects (WARP-845) ---
+
+/** A per-user chat project: a sidebar folder plus a default persona the
+ *  dashboard seeds into new chats started inside it. */
+export interface ChatProject {
+  id: string;
+  name: string;
+  systemPrompt: string | null;
+  chatCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function listChatProjects(): Promise<{ projects: ChatProject[] }> {
+  const res = await authFetch(`${BASE}/api/llm/projects`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to load projects: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function createChatProject(input: {
+  name: string;
+  systemPrompt?: string | null;
+}): Promise<{ project: ChatProject }> {
+  const res = await authFetch(`${BASE}/api/llm/projects`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to create project: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function updateChatProject(
+  id: string,
+  patch: { name?: string; systemPrompt?: string | null },
+): Promise<{ project: ChatProject }> {
+  const res = await authFetch(
+    `${BASE}/api/llm/projects/${encodeURIComponent(id)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to update project: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function deleteChatProject(id: string): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/llm/projects/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok && res.status !== 404) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to delete project: ${res.status}`);
+  }
+}
+
+/** Move a conversation into (or out of, with null) one of the caller's
+ *  projects. Chats survive project deletion server-side (FK SET NULL). */
+export async function setConversationProject(
+  conversationId: string,
+  projectId: string | null,
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/llm/conversations/${encodeURIComponent(conversationId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projectId }),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to move conversation: ${res.status}`);
+  }
+}
+
+// --- Context pins (WARP-460) ---
+
+/** One per-session context pin — injected into the system prompt on
+ *  every turn of the session by the orchestrator (routes/llm.ts). */
+export interface ContextPin {
+  id: string;
+  sessionId: string;
+  kind: "folder" | "file" | "email_thread" | "camera" | "camera_window";
+  ref: string;
+  meta?: Record<string, unknown> | null;
+  addedAt: string;
+}
+
+export async function listContextPins(
+  sessionId: string,
+): Promise<{ pins: ContextPin[] }> {
+  const res = await authFetch(
+    `${BASE}/api/llm/${encodeURIComponent(sessionId)}/pins`,
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to load pins: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function createContextPin(
+  sessionId: string,
+  pin: { kind: ContextPin["kind"]; ref: string; meta?: Record<string, unknown> },
+): Promise<{ pin: ContextPin }> {
+  const res = await authFetch(
+    `${BASE}/api/llm/${encodeURIComponent(sessionId)}/pins`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(pin),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to add pin: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function deleteContextPin(
+  sessionId: string,
+  pinId: string,
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/llm/${encodeURIComponent(sessionId)}/pins/${encodeURIComponent(pinId)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok && res.status !== 404) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to remove pin: ${res.status}`);
+  }
+}
+
 // --- Provider keys ---
 
 export async function saveProviderKey(
@@ -1561,6 +2851,54 @@ export async function deleteProviderKey(provider: string): Promise<void> {
     method: "DELETE",
   });
   if (!res.ok) throw new Error(`Failed to delete key: ${res.status}`);
+}
+
+// --- Outbound email channel (BUG-11) ---
+
+/** The redacted SMTP-channel config the orchestrator returns (no secret). */
+export interface EmailChannelConfig {
+  enabled: boolean;
+  host: string;
+  port: number;
+  username: string;
+  fromAddress: string;
+  fromName: string;
+  security: "starttls" | "tls" | "none";
+  /** Whether a password is stored — the password itself is never returned. */
+  hasPassword: boolean;
+}
+
+/** What the operator submits. `password` is write-only: omit to keep existing. */
+export interface EmailChannelUpdate {
+  enabled: boolean;
+  host: string;
+  port: number;
+  username: string;
+  password?: string;
+  fromAddress: string;
+  fromName: string;
+  security: "starttls" | "tls" | "none";
+}
+
+export async function getEmailChannel(): Promise<EmailChannelConfig> {
+  const res = await authFetch(`${BASE}/api/settings/email`);
+  if (!res.ok) throw new Error(`Failed to load email settings: ${res.status}`);
+  return res.json();
+}
+
+export async function saveEmailChannel(
+  update: EmailChannelUpdate,
+): Promise<EmailChannelConfig> {
+  const res = await authFetch(`${BASE}/api/settings/email`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(update),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Failed to save email settings: ${body}`);
+  }
+  return res.json();
 }
 
 // WARP-311: the dashboard's legacy session-CRUD helpers (createSession,
@@ -2180,7 +3518,7 @@ export async function createVpnPeer(deviceLabel: string): Promise<VpnPeerCreated
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Failed to create peer: ${res.status}`);
+    throwNetworkWriteError(body, res.status, "Failed to create peer");
   }
   return res.json();
 }
@@ -2222,7 +3560,7 @@ export async function setDuckDnsConfig(opts: {
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Failed to update DuckDNS: ${res.status}`);
+    throwNetworkWriteError(body, res.status, "Failed to update DuckDNS");
   }
   return res.json();
 }
@@ -2288,6 +3626,29 @@ export interface KnowledgeSearchHit {
   snippet: string;
   // WARP-214: surfaced verbatim from the orchestrator. Null on legacy rows.
   metadata?: ChunkMetadata | null;
+  /**
+   * WARP-287: opaque Nextcloud file id, surfaced so the dashboard can
+   * build canonical refs (downloads, admin reindex). Optional because
+   * legacy hits / brain hits may not carry it yet — callers fall back
+   * to `path` for routing when this is missing.
+   */
+  ncFileId?: string | null;
+  /**
+   * WARP-287: per-chunk anchor decoded by the orchestrator. `null` on
+   * legacy chunks; the dashboard renders those via `<FileCitation>`.
+   * Loose type here because the wire schema is owned by the
+   * `@droplet/shared-types` `AnchorSchema` — we trust the orchestrator
+   * to validate before publishing.
+   */
+  anchor?: unknown;
+  /**
+   * WARP-287: full chunk text (not the snippet — the citation viewer
+   * for emails renders this in the modal). Optional; falls back to
+   * `snippet` when absent.
+   */
+  chunkText?: string | null;
+  /** WARP-287: MIME type of the underlying file (derived path fallback in UI). */
+  mimeType?: string | null;
 }
 
 export interface SearchKnowledgeResponse {
@@ -2364,11 +3725,22 @@ export async function searchKnowledge(opts: {
  * an `unavailable` flag so the dashboard tab can render a friendly
  * placeholder rather than an error toast.
  */
-export async function getBrainMemoryItems(): Promise<{
+export async function getBrainMemoryItems(
+  opts: {
+    /** Filter to items uploaded in one chat (BrainMemoryItem.originatingChatId).
+     *  Used to rehydrate the composer's attachment chips on conversation load. */
+    originatingChatId?: string;
+  } = {},
+): Promise<{
   items: BrainMemoryItemInfo[];
   unavailable?: boolean;
 }> {
-  const res = await authFetch(`${BASE}/api/files/brain`);
+  const params = new URLSearchParams();
+  if (opts.originatingChatId) {
+    params.set("originatingChatId", opts.originatingChatId);
+  }
+  const qs = params.toString();
+  const res = await authFetch(`${BASE}/api/files/brain${qs ? `?${qs}` : ""}`);
   if (res.status === 404) {
     return { items: [], unavailable: true };
   }
@@ -2409,4 +3781,282 @@ export async function transcribeNow(
     throw new Error(body.error || `transcribe-now failed: ${res.status}`);
   }
   return res.json();
+}
+
+// --- Tools (WARP-555) ---
+
+/**
+ * Read-only catalog of the built-in tools the agent can call, grouped by
+ * domain, for the `/tools` surface. Backed by `GET /api/llm/tools/catalog`
+ * which reads `@droplet/tools-core`'s in-process registry (no MCP child),
+ * so it stays available even when the agent runtime is mid-restart. The
+ * orchestrator RBAC-filters write tools for non-privileged roles.
+ */
+export async function fetchToolCatalog(): Promise<ToolCatalogResponse> {
+  const res = await authFetch(`${BASE}/api/llm/tools/catalog`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to load tools: ${res.status}`);
+  }
+  return res.json();
+}
+
+// --- Admin capabilities (nav-gating for optional admin surfaces) ---
+
+export interface AdminCapabilities {
+  /** /admin/claude-activity is wired (GitHub token OR Jira configured). */
+  claudeActivity: boolean;
+  /** /admin/rag-eval is wired (RAG_EVAL_URL set). */
+  ragEval: boolean;
+}
+
+/**
+ * Probe which optional admin surfaces the orchestrator has configured, so the
+ * sidebar can hide nav entries that would otherwise lead to a dead page
+ * (#14 Activity, #15 RAG eval). Admin-only on the backend (403 for non-admins);
+ * the consuming hook treats any failure as "all off".
+ */
+export async function fetchCapabilities(): Promise<AdminCapabilities> {
+  const res = await authFetch(`${BASE}/api/admin/capabilities`);
+  if (!res.ok) throw new Error(`Failed to fetch capabilities: ${res.status}`);
+  return res.json();
+}
+
+// --- WARP-825: Settings Danger Zone — factory reset ---
+
+/** Lifecycle of a factory-reset job, mirroring the orchestrator ResetJobStatus
+ *  enum. There is no `succeeded` — a completed reset wipes the db this row lives
+ *  in; the dashboard treats `dispatched` as terminal-success for its progress
+ *  view. */
+export type ResetJobStatus = "requested" | "dispatched" | "failed";
+
+export interface ResetJob {
+  id: string;
+  status: ResetJobStatus;
+  targetName: string;
+  failureReason: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ResetStatusResponse {
+  /**
+   * MASKED hint of the device name (e.g. "d••••••t"). The API deliberately
+   * never returns the verbatim confirm value — the owner types the real name
+   * from Settings → Device information, and the server validates it. (A
+   * verbatim value here let the modal display the exact string to copy/paste,
+   * removing the per-device type-to-confirm friction.) `job.targetName` in
+   * this response is masked with the same rule.
+   */
+  targetHint: string;
+  /** The latest reset job, or null on a box that has never been reset. */
+  job: ResetJob | null;
+}
+
+/** GET the reset status: a masked hint of the target name + the latest job. */
+export async function getResetStatus(): Promise<ResetStatusResponse> {
+  const res = await authFetch(`${BASE}/api/system/reset`);
+  if (!res.ok) throw new Error(`Failed to load reset status: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Trigger the factory reset. `confirm` is the device name the owner typed; it is
+ * re-validated SERVER-side (the client gate is not the authority). Resolves to
+ * the dispatched job; throws with the orchestrator's friendly message on a
+ * mismatch (400), an in-flight reset (409), or an unavailable executor (503).
+ */
+export async function triggerFactoryReset(confirm: string): Promise<{
+  status: ResetJobStatus;
+  id: string;
+  targetName: string;
+}> {
+  const res = await authFetch(`${BASE}/api/system/reset`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirm }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Factory reset failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+// --- Diagnostics log bundle (WARP-823) ---
+
+export interface LogBundleOptions {
+  /** Look-back window in hours (1-168). Defaults server-side to 24. */
+  windowHours?: number;
+  /** Optional single-service filter. */
+  service?: string;
+}
+
+/**
+ * Download the secret-redacted diagnostics log bundle as a .zip Blob.
+ *
+ * POSTs to `/api/logs/bundle` (owner/admin only) and returns the archive bytes.
+ * The orchestrator redacts every secret value before the bytes leave the box;
+ * the caller just hands the Blob to the browser's download plumbing. On any
+ * non-2xx the bridge/route error message is surfaced for the friendly UI line —
+ * never a stack.
+ */
+export async function downloadLogBundle(
+  opts: LogBundleOptions = {},
+): Promise<Blob> {
+  const res = await authFetch(`${BASE}/api/logs/bundle`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(opts),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(
+      body.error || body.message || `Couldn't collect logs: ${res.status}`,
+    );
+  }
+  return res.blob();
+}
+
+// --- Email (WARP-837) ---
+//
+// Front-end client for the orchestrator's `/api/email/*` routes (verified
+// against origin/main). Reads follow the file's throw-on-non-2xx convention;
+// the one deliberate exception is `sendDraft`, which maps the server's 451
+// `off_lan_blocked` into a TYPED result rather than throwing, so the UI can
+// render a calm, actionable message instead of a crash (mirrors the 202/429
+// typed-result shape used by `retryFailedContextItem`).
+
+/** List the household's connected mailboxes (RBAC-scoped server-side). */
+export async function fetchEmailAccounts(): Promise<EmailAccount[]> {
+  const res = await authFetch(`${BASE}/api/email/accounts`);
+  if (!res.ok) throw new Error(`Failed to fetch email accounts: ${res.status}`);
+  const body = (await res.json()) as EmailAccountsResponse;
+  return body.accounts ?? [];
+}
+
+/**
+ * List threads in `filter` for an account. The filter is wired into the query
+ * string the route reads; a foreign / missing account returns 404 (the IDOR
+ * guard) which we surface as a throw for the hook's error channel.
+ */
+export async function fetchEmailThreads(
+  accountId: string,
+  filter: EmailFilter,
+): Promise<ThreadSummary[]> {
+  const params = new URLSearchParams({ filter });
+  const res = await authFetch(
+    `${BASE}/api/email/${encodeURIComponent(accountId)}/threads?${params}`,
+  );
+  if (!res.ok) throw new Error(`Failed to fetch threads: ${res.status}`);
+  const body = (await res.json()) as ThreadsResponse;
+  return body.threads ?? [];
+}
+
+/** Fetch a full thread with its messages (ascending receivedAt). */
+export async function fetchEmailThread(
+  accountId: string,
+  threadId: string,
+): Promise<ThreadDetail> {
+  const res = await authFetch(
+    `${BASE}/api/email/${encodeURIComponent(accountId)}/threads/${encodeURIComponent(threadId)}`,
+  );
+  if (!res.ok) throw new Error(`Failed to fetch thread: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Fetch the AI side-panel analysis for a thread. The route answers 503 when the
+ * analysis service isn't wired yet — we throw so SWR's retry kicks in (the
+ * orchestrator comment explicitly chose 503 over 500 for that reason).
+ */
+export async function fetchThreadAnalysis(
+  accountId: string,
+  threadId: string,
+): Promise<ThreadAnalysis> {
+  const res = await authFetch(
+    `${BASE}/api/email/${encodeURIComponent(accountId)}/threads/${encodeURIComponent(threadId)}/analysis`,
+  );
+  if (!res.ok) throw new Error(`Failed to fetch thread analysis: ${res.status}`);
+  return res.json();
+}
+
+/** Create a draft on an account (optionally tied to a thread). Returns 201. */
+export async function createDraft(
+  accountId: string,
+  input: CreateDraftInput,
+): Promise<DraftRow> {
+  const res = await authFetch(
+    `${BASE}/api/email/${encodeURIComponent(accountId)}/drafts`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to create draft: ${res.status}`);
+  }
+  return res.json();
+}
+
+/** Edit a draft. 409 once the draft is no longer in `draft` status. */
+export async function patchDraft(
+  id: string,
+  patch: PatchDraftInput,
+): Promise<DraftRow> {
+  const res = await authFetch(
+    `${BASE}/api/email/drafts/${encodeURIComponent(id)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to update draft: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * The friendly fallback shown if the server's 451 carries no `message`. Mirrors
+ * the off-LAN allowlist vocabulary (FEATURES §8) and points the user at the one
+ * place this is changed — Settings — never this surface.
+ */
+const OFF_LAN_BLOCKED_FALLBACK =
+  "Sending email leaves your Droplet, and outbound email is currently turned off. An admin can enable it in Settings under the off-LAN allowlist.";
+
+/**
+ * Queue a draft for send (owner/admin only, server-enforced). Returns a TYPED
+ * result:
+ *   - 202 → `{ status: "queued", id }`
+ *   - 451 → `{ status: "off_lan_blocked", message, channel }` (NOT a throw) so
+ *           the UI renders an actionable "outbound email is off" message.
+ * Any other non-2xx (404 not found, 409 already dispatched, 5xx) throws.
+ */
+export async function sendDraft(id: string): Promise<SendDraftResult> {
+  const res = await authFetch(
+    `${BASE}/api/email/drafts/${encodeURIComponent(id)}/send`,
+    { method: "POST" },
+  );
+  if (res.status === 451) {
+    const body = (await res.json().catch(() => ({}))) as {
+      message?: string;
+      channel?: string;
+    };
+    return {
+      status: "off_lan_blocked",
+      message: body.message || OFF_LAN_BLOCKED_FALLBACK,
+      channel: body.channel || "outbound_email",
+    };
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to send draft: ${res.status}`);
+  }
+  const body = (await res.json()) as { id: string; status: string };
+  return { status: "queued", id: body.id };
 }

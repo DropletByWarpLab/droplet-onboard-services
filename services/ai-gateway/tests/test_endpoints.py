@@ -12,7 +12,7 @@ class TestHealthEndpoint:
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "ok"
-        assert "jetson_reachable" in data
+        assert "inference_reachable" in data
 
 
 class TestModelsEndpoint:
@@ -87,3 +87,26 @@ class TestKeysEndpoints:
     async def test_delete_nonexistent_key(self, client, keys_dir):
         resp = await client.delete("/ai/keys/nonexistent")
         assert resp.status_code == 404
+
+
+class TestReadinessEndpoint:
+    """XR-05: /ai/readiness must not 404 against Ollama on the direct path."""
+
+    async def test_readiness_ok_when_no_manager_configured(self, client):
+        # conftest sets OLLAMA_URL to the direct :11434 path (no /proxy) and no
+        # OLLAMA_MANAGER_URL, so there's no manager /health to probe. The
+        # endpoint must report ok with appliance=None, NOT a perpetual degraded.
+        import main
+        from router import ProviderRouter
+
+        if main.provider_router is None:
+            main.provider_router = ProviderRouter()
+
+        # Sanity: the resolved manager health URL is None on this deploy shape.
+        assert main.provider_router.ollama._limits.health_url is None
+
+        resp = await client.get("/ai/readiness")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert data["appliance"] is None

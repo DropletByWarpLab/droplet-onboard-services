@@ -33,6 +33,13 @@ vi.mock("@/lib/api", () => ({
   getRecentFiles: vi.fn().mockResolvedValue({ items: [], nextBefore: null }),
   searchKnowledge: vi.fn().mockResolvedValue({ hits: [] }),
   getBrainMemoryItems: vi.fn().mockResolvedValue({ items: [], unavailable: true }),
+  // Used by the ShellPage chrome's device/health status chip (useDevice +
+  // the rolled-up health SWR).
+  fetchDevices: vi.fn().mockResolvedValue([]),
+  fetchHealth: vi.fn().mockResolvedValue({ status: "ok" }),
+  fetchSystemHealth: vi
+    .fn()
+    .mockResolvedValue({ status: "ok", components: [], uptime: 0, version: "0.0.0" }),
 }));
 
 vi.mock("@/lib/auth", () => ({

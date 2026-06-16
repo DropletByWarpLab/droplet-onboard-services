@@ -1,0 +1,50 @@
+name: schemas-tests
+
+# Codegen drift test for schemas/anchor.schema.json. Runs on PRs that touch
+# the schema, the generator, the generated outputs, or this workflow itself.
+# Re-runs `scripts/gen-anchor-schema.mjs` into a tmp dir and byte-compares
+# against the checked-in files — any churn fails the build.
+
+on:
+  pull_request:
+    paths:
+      - "schemas/**"
+      - "scripts/gen-anchor-schema.mjs"
+      - "services/file-indexer/anchor_schema.py"
+      - "packages/shared-types/src/anchor.ts"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/schemas-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "schemas/**"
+      - "scripts/gen-anchor-schema.mjs"
+      - "services/file-indexer/anchor_schema.py"
+      - "packages/shared-types/src/anchor.ts"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/schemas-tests.yml"
+
+concurrency:
+  group: schemas-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies (npm workspaces, root install)
+        run: npm ci
+
+      - name: Run codegen drift test
+        run: npx vitest run schemas/__tests__/codegen-drift.test.ts
