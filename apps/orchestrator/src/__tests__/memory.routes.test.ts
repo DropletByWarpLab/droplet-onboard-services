@@ -15,6 +15,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
 import express, { Request, Response, NextFunction } from "express";
+import type { AuthUser } from "../middleware/auth.js";
+import type { Role } from "../services/jwt.service.js";
 
 vi.mock("../config.js", () => ({
   config: { AUTH_ENABLED: false },
@@ -121,20 +123,19 @@ function createPrismaMock(seed: MockFact[] = []) {
   };
 }
 
+function mkUser(role: Role, username?: string): AuthUser {
+  const name = username ?? "stefan";
+  return { id: "u-stefan", username: name, displayName: name, role };
+}
+
 function buildApp(
   prismaMock: ReturnType<typeof createPrismaMock>,
-  asUser: { id?: string; username?: string; role?: string },
+  user: AuthUser,
 ) {
   const app = express();
   app.use(express.json());
   app.use((req: Request, _res: Response, next: NextFunction) => {
-    // Cast through `unknown`: the Express `Request.user` augmentation is
-    // typed `AuthUser` (required id/username/displayName/role), so an
-    // intersection cast forces `asUser` to satisfy `AuthUser` and rejects
-    // the intentionally-partial mock users this suite uses to exercise
-    // missing-field behavior. `unknown` detaches from the augmented base
-    // type so the partial mock assigns cleanly.
-    (req as unknown as { user?: typeof asUser }).user = asUser;
+    (req as Request & { user: AuthUser }).user = user;
     next();
   });
   app.use("/api", createMemoryRouter(prismaMock as unknown as import("@prisma/client").PrismaClient));
@@ -165,7 +166,7 @@ describe("WARP-461 — /api/memory/facts CRUD", () => {
       seedFact({ id: "a", category: "Tone" }),
       seedFact({ id: "b", category: "Schedule", active: false }),
     ]);
-    const app = buildApp(prisma, { username: "stefan", role: "family" });
+    const app = buildApp(prisma, mkUser("family"));
     const res = await request(app).get("/api/memory/facts");
     expect(res.status).toBe(200);
     expect(res.body.facts).toHaveLength(2);
@@ -176,7 +177,7 @@ describe("WARP-461 — /api/memory/facts CRUD", () => {
       seedFact({ id: "a", category: "Tone" }),
       seedFact({ id: "b", category: "Workflow" }),
     ]);
-    const app = buildApp(prisma, { username: "stefan", role: "owner" });
+    const app = buildApp(prisma, mkUser("owner"));
     const res = await request(app).get("/api/memory/facts?category=Tone");
     expect(res.status).toBe(200);
     expect(res.body.facts).toHaveLength(1);
@@ -185,7 +186,7 @@ describe("WARP-461 — /api/memory/facts CRUD", () => {
 
   it("POST creates a fact with valid category", async () => {
     const prisma = createPrismaMock();
-    const app = buildApp(prisma, { username: "stefan", role: "owner" });
+    const app = buildApp(prisma, mkUser("owner"));
     const res = await request(app)
       .post("/api/memory/facts")
       .send({ category: "Workflow", fact: "You ship on Friday afternoons" });
@@ -196,7 +197,7 @@ describe("WARP-461 — /api/memory/facts CRUD", () => {
 
   it("POST rejects invalid category with 400", async () => {
     const prisma = createPrismaMock();
-    const app = buildApp(prisma, { username: "stefan", role: "owner" });
+    const app = buildApp(prisma, mkUser("owner"));
     const res = await request(app)
       .post("/api/memory/facts")
       .send({ category: "MadeUp", fact: "x" });
@@ -205,7 +206,7 @@ describe("WARP-461 — /api/memory/facts CRUD", () => {
 
   it("PATCH updates the fact text + active flag", async () => {
     const prisma = createPrismaMock([seedFact({ id: "mf-x" })]);
-    const app = buildApp(prisma, { username: "stefan", role: "owner" });
+    const app = buildApp(prisma, mkUser("owner"));
     const res = await request(app)
       .patch("/api/memory/facts/mf-x")
       .send({ fact: "Updated fact", active: false });
@@ -216,14 +217,14 @@ describe("WARP-461 — /api/memory/facts CRUD", () => {
 
   it("PATCH with empty body returns 400", async () => {
     const prisma = createPrismaMock([seedFact({ id: "mf-x" })]);
-    const app = buildApp(prisma, { username: "stefan", role: "owner" });
+    const app = buildApp(prisma, mkUser("owner"));
     const res = await request(app).patch("/api/memory/facts/mf-x").send({});
     expect(res.status).toBe(400);
   });
 
   it("DELETE removes the fact (atomic deleteMany)", async () => {
     const prisma = createPrismaMock([seedFact({ id: "mf-x" })]);
-    const app = buildApp(prisma, { username: "stefan", role: "owner" });
+    const app = buildApp(prisma, mkUser("owner"));
     const res = await request(app).delete("/api/memory/facts/mf-x");
     expect(res.status).toBe(204);
     expect(prisma.rows).toHaveLength(0);
@@ -231,7 +232,7 @@ describe("WARP-461 — /api/memory/facts CRUD", () => {
 
   it("DELETE on missing id returns 404", async () => {
     const prisma = createPrismaMock();
-    const app = buildApp(prisma, { username: "stefan", role: "owner" });
+    const app = buildApp(prisma, mkUser("owner"));
     const res = await request(app).delete("/api/memory/facts/nope");
     expect(res.status).toBe(404);
   });
@@ -247,7 +248,7 @@ describe("WARP-845 — role-scoped audiences", () => {
 
   it("family GET sees family+guest audiences only", async () => {
     const prisma = createPrismaMock(LADDER.map((f) => ({ ...f })));
-    const app = buildApp(prisma, { username: "kid", role: "family" });
+    const app = buildApp(prisma, mkUser("family", "kid"));
     const res = await request(app).get("/api/memory/facts");
     expect(res.status).toBe(200);
     expect(res.body.facts.map((f: MockFact) => f.id).sort()).toEqual([
@@ -258,21 +259,21 @@ describe("WARP-845 — role-scoped audiences", () => {
 
   it("guest GET sees guest-audience facts only", async () => {
     const prisma = createPrismaMock(LADDER.map((f) => ({ ...f })));
-    const app = buildApp(prisma, { username: "visitor", role: "guest" });
+    const app = buildApp(prisma, mkUser("guest", "visitor"));
     const res = await request(app).get("/api/memory/facts");
     expect(res.body.facts.map((f: MockFact) => f.id)).toEqual(["f-guest"]);
   });
 
   it("admin GET sees everything (panel management)", async () => {
     const prisma = createPrismaMock(LADDER.map((f) => ({ ...f })));
-    const app = buildApp(prisma, { username: "boss", role: "admin" });
+    const app = buildApp(prisma, mkUser("admin", "boss"));
     const res = await request(app).get("/api/memory/facts");
     expect(res.body.facts).toHaveLength(4);
   });
 
   it("POST defaults the audience to family", async () => {
     const prisma = createPrismaMock();
-    const app = buildApp(prisma, { username: "stefan", role: "family" });
+    const app = buildApp(prisma, mkUser("family"));
     const res = await request(app)
       .post("/api/memory/facts")
       .send({ category: "Tone", fact: "Be concise" });
@@ -282,7 +283,7 @@ describe("WARP-845 — role-scoped audiences", () => {
 
   it("family cannot mint an owner-audience fact", async () => {
     const prisma = createPrismaMock();
-    const app = buildApp(prisma, { username: "kid", role: "family" });
+    const app = buildApp(prisma, mkUser("family", "kid"));
     const res = await request(app)
       .post("/api/memory/facts")
       .send({ category: "Tone", fact: "secret", audience: "owner" });
@@ -293,7 +294,7 @@ describe("WARP-845 — role-scoped audiences", () => {
 
   it("family can widen a fact to guest but not raise it to admin", async () => {
     const prisma = createPrismaMock([seedFact({ id: "f1", audience: "family" })]);
-    const app = buildApp(prisma, { username: "kid", role: "family" });
+    const app = buildApp(prisma, mkUser("family", "kid"));
 
     const denied = await request(app)
       .patch("/api/memory/facts/f1")
@@ -314,7 +315,7 @@ describe("WARP-845 — role-scoped audiences", () => {
     const prisma = createPrismaMock([
       seedFact({ id: "f-owner", audience: "owner", fact: "owner secret" }),
     ]);
-    const app = buildApp(prisma, { username: "kid", role: "family" });
+    const app = buildApp(prisma, mkUser("family", "kid"));
 
     const patched = await request(app)
       .patch("/api/memory/facts/f-owner")
@@ -332,7 +333,7 @@ describe("WARP-845 — role-scoped audiences", () => {
     const prisma = createPrismaMock([
       seedFact({ id: "f-owner", audience: "owner" }),
     ]);
-    const app = buildApp(prisma, { username: "boss", role: "admin" });
+    const app = buildApp(prisma, mkUser("admin", "boss"));
     const res = await request(app)
       .patch("/api/memory/facts/f-owner")
       .send({ active: false });
