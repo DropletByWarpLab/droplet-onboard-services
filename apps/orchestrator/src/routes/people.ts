@@ -92,7 +92,13 @@ const scopeSchema = z.object({
   // delete-style operation that doesn't belong on PATCH; empty arrays
   // are almost certainly a UX bug (the dashboard sent [] when it meant
   // ["team"]) and 400 prevents accidentally locking a user out.
-  scopes: z.array(z.enum(SCOPE_VALUES)).min(1).max(SCOPE_VALUES.length),
+  scopes: z
+    .array(z.enum(SCOPE_VALUES))
+    .min(1)
+    .max(SCOPE_VALUES.length)
+    .refine((arr) => new Set(arr).size === arr.length, {
+      message: "Duplicate scopes not allowed",
+    }),
 });
 
 // PR #381 — onboarding TEAM-invite body. The wizard invites by EMAIL + ROLE.
@@ -485,15 +491,14 @@ export function createPeopleRouter(
           await tx.scopeBinding.deleteMany({
             where: { userId: targetUserId },
           });
-          for (const scope of parsed.data.scopes) {
-            await tx.scopeBinding.create({
-              data: {
-                userId: targetUserId,
-                scope: scope as any, // Scope enum literal; cast for Prisma input
-                grantedBy: actor,
-              },
-            });
-          }
+          await tx.scopeBinding.createMany({
+            data: parsed.data.scopes.map((scope) => ({
+              userId: targetUserId,
+              scope: scope as any, // Scope enum literal; cast for Prisma input
+              grantedBy: actor,
+            })),
+            skipDuplicates: true,
+          });
         });
 
         await recordActivity({
