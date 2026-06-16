@@ -22,7 +22,12 @@
 
 import { Router, type Request, type Response, type NextFunction } from "express";
 import multer, { MulterError } from "multer";
-import { BrainMemoryItemStatus, type PrismaClient } from "@prisma/client";
+import { createHash } from "node:crypto";
+import {
+  BrainMemoryItemStatus,
+  type BrainMemoryItem,
+  type PrismaClient,
+} from "@prisma/client";
 import pino from "pino";
 import {
   writeOriginal,
@@ -171,6 +176,86 @@ function serialize(item: Record<string, unknown>): Record<string, unknown> {
   );
 }
 
+/**
+ * WARP-864 — a byte-identical re-upload reuses the existing item instead
+ * of creating a duplicate row, storage dir, and re-ingest. Re-upload
+ * signals current intent, so the item is re-homed to the new chat (the
+ * attachment chip resolves in the conversation it was just used in). A
+ * `failed` item gets its ingestion re-triggered instead of returning a
+ * dead row. The stored filename is kept even when the re-upload used a
+ * different name — `storagePath` embeds it, and the bytes are what we
+ * deduplicate on.
+ */
+async function reuseExistingItem(
+  prisma: PrismaClient,
+  existing: BrainMemoryItem,
+  chatId: string | null,
+): Promise<{
+  itemId: string;
+  status: BrainMemoryItemStatus;
+  deduplicated: true;
+}> {
+  const isAudioOrVideo =
+    existing.mimeType?.startsWith("audio/") === true ||
+    existing.mimeType?.startsWith("video/") === true;
+
+  const data: { originatingChatId?: string } & Record<string, unknown> = {};
+  if (chatId && chatId !== existing.originatingChatId) {
+    data.originatingChatId = chatId;
+  }
+  const retrigger = existing.status === BrainMemoryItemStatus.failed;
+  if (retrigger) {
+    data.status = isAudioOrVideo
+      ? BrainMemoryItemStatus.queued_for_transcription
+      : BrainMemoryItemStatus.indexing;
+    data.failureReason = null;
+  }
+
+  let item = existing;
+  if (Object.keys(data).length > 0) {
+    item = await prisma.brainMemoryItem.update({
+      where: { id: existing.id },
+      data: data as never,
+    });
+    await writeManifest(item.userId, item.id, serialize(item));
+  }
+
+  if (retrigger) {
+    try {
+      if (isAudioOrVideo) {
+        // Audio/video re-ingest is driven by transcription_worker.run_one,
+        // which subscribes to RUN_ONE_TOPIC — NOT droplet/files/brain/uploaded
+        // (whose handler explicitly drops `queued_for_transcription` rows).
+        // This mirrors the transcribe-now route. The worker's own
+        // claim_attempt() still enforces the rolling-hour retry cap, so a
+        // re-upload respects thrash-protection exactly like transcribe-now.
+        publishRunOne(
+          { publish: mqttPublish },
+          { itemId: item.id, userId: item.userId },
+        );
+      } else {
+        // Documents: handle_brain_uploaded does delete-then-insert on this
+        // topic, re-extracting + re-embedding the existing bytes.
+        mqttPublish("droplet/files/brain/uploaded", {
+          itemId: item.id,
+          userId: item.userId,
+          path: item.storagePath,
+          mimeType: item.mimeType,
+          filename: item.filename,
+          originatingChatId: item.originatingChatId,
+        });
+      }
+    } catch (e) {
+      logger.warn(
+        { err: e, itemId: item.id },
+        "MQTT publish for deduplicated re-upload failed (non-fatal)",
+      );
+    }
+  }
+
+  return { itemId: item.id, status: item.status, deduplicated: true };
+}
+
 export function createFilesBrainRouter(prisma: PrismaClient): Router {
   const router = Router();
 
@@ -232,21 +317,64 @@ export function createFilesBrainRouter(prisma: PrismaClient): Router {
         const initialStatus: BrainMemoryItemStatus = isAudioOrVideo
           ? BrainMemoryItemStatus.queued_for_transcription
           : BrainMemoryItemStatus.indexing;
-        const item = await prisma.brainMemoryItem.create({
-          data: {
-            userId,
-            filename: file.originalname,
-            mimeType: file.mimetype,
-            bytes: BigInt(file.size),
-            storagePath: "",
-            // Cast through unknown rather than importing the Prisma enum
-            // — the Prisma 5 generator emits a union type that this
-            // string literal satisfies but TypeScript widens to `string`.
-            source: "chat_attachment" as unknown as never,
-            originatingChatId: chatId,
-            status: initialStatus,
-          },
+
+        // WARP-864: content-hash dedup. Re-uploading identical bytes
+        // reuses the existing item (per user) instead of creating a
+        // duplicate row + storage dir + full re-ingest.
+        //
+        // Known limitation (WARP-871): if a prior upload was hard-killed
+        // between create() and writeOriginal(), its row carries this same
+        // sha256 with storagePath="" and no bytes on disk. We still treat
+        // it as a hit here — we can't synchronously tell that orphan apart
+        // from a mid-write concurrent winner, and re-driving the latter
+        // would reintroduce double-ingest. The orphan is DELETE-recoverable;
+        // WARP-871 tracks reaping stale byte-less rows from the watchdog.
+        const sha256 = createHash("sha256").update(file.buffer).digest("hex");
+        const existing = await prisma.brainMemoryItem.findUnique({
+          where: { userId_sha256: { userId, sha256 } },
         });
+        if (existing) {
+          res
+            .status(202)
+            .json(await reuseExistingItem(prisma, existing, chatId));
+          return;
+        }
+
+        let item: BrainMemoryItem;
+        try {
+          item = await prisma.brainMemoryItem.create({
+            data: {
+              userId,
+              filename: file.originalname,
+              mimeType: file.mimetype,
+              bytes: BigInt(file.size),
+              storagePath: "",
+              // Cast through unknown rather than importing the Prisma enum
+              // — the Prisma 5 generator emits a union type that this
+              // string literal satisfies but TypeScript widens to `string`.
+              source: "chat_attachment" as unknown as never,
+              originatingChatId: chatId,
+              status: initialStatus,
+              sha256,
+            },
+          });
+        } catch (e) {
+          // Concurrent identical upload (double-click submit) lost the
+          // race to the unique (userId, sha256) constraint — reuse the
+          // winner's row instead of surfacing a 409.
+          if ((e as { code?: unknown })?.code === "P2002") {
+            const winner = await prisma.brainMemoryItem.findUnique({
+              where: { userId_sha256: { userId, sha256 } },
+            });
+            if (winner) {
+              res
+                .status(202)
+                .json(await reuseExistingItem(prisma, winner, chatId));
+              return;
+            }
+          }
+          throw e;
+        }
         const path = await writeOriginal(
           userId,
           item.id,

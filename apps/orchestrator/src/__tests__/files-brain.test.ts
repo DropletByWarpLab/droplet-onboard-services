@@ -127,6 +127,8 @@ type Item = {
   lastAttemptedAt: Date | null;
   recentAttemptCount: number;
   recentAttemptWindowStartedAt: Date | null;
+  // WARP-864
+  sha256: string | null;
 };
 const itemStore = new Map<string, Item>();
 let cuidCounter = 0;
@@ -142,6 +144,18 @@ vi.mock("@prisma/client", () => {
     },
     brainMemoryItem: {
       create: vi.fn(async ({ data }: { data: Partial<Item> }) => {
+        // WARP-864 — mirror the real unique (userId, sha256) constraint
+        // so the route's race-fallback path is exercisable. NULL sha256
+        // rows never collide (Postgres NULLs-distinct semantics).
+        if (data.sha256) {
+          for (const r of itemStore.values()) {
+            if (r.userId === data.userId && r.sha256 === data.sha256) {
+              throw Object.assign(new Error("Unique constraint failed"), {
+                code: "P2002",
+              });
+            }
+          }
+        }
         const id = `bmi-${++cuidCounter}`;
         const record: Item = {
           id,
@@ -161,6 +175,7 @@ vi.mock("@prisma/client", () => {
           lastAttemptedAt: data.lastAttemptedAt ?? null,
           recentAttemptCount: data.recentAttemptCount ?? 0,
           recentAttemptWindowStartedAt: data.recentAttemptWindowStartedAt ?? null,
+          sha256: data.sha256 ?? null,
         };
         itemStore.set(id, record);
         return record;
@@ -180,8 +195,29 @@ vi.mock("@prisma/client", () => {
         },
       ),
       findUnique: vi.fn(
-        async ({ where }: { where: { id: string } }) =>
-          itemStore.get(where.id) ?? null,
+        async ({
+          where,
+        }: {
+          where: {
+            id?: string;
+            userId_sha256?: { userId: string; sha256: string };
+          };
+        }) => {
+          if (where.id) return itemStore.get(where.id) ?? null;
+          // WARP-864 — compound-unique lookup used by upload dedup.
+          if (where.userId_sha256) {
+            for (const r of itemStore.values()) {
+              if (
+                r.userId === where.userId_sha256.userId &&
+                r.sha256 === where.userId_sha256.sha256
+              ) {
+                return r;
+              }
+            }
+            return null;
+          }
+          return null;
+        },
       ),
       findMany: vi.fn(
         async ({
@@ -511,6 +547,182 @@ describe("POST /api/files/brain/upload", () => {
     expect(res.status).toBe(202);
     const item = itemStore.get(res.body.itemId)!;
     expect(item.status).toBe("indexing");
+  });
+});
+
+describe("POST /api/files/brain/upload — content-hash dedup (WARP-864)", () => {
+  const BYTES = Buffer.from("identical file content for dedup");
+
+  async function uploadOnce(
+    opts: { filename?: string; chatId?: string } = {},
+  ) {
+    const req = request(app)
+      .post("/api/files/brain/upload")
+      .attach("file", BYTES, {
+        filename: opts.filename ?? "doc.txt",
+        contentType: "text/plain",
+      });
+    if (opts.chatId) req.field("chatId", opts.chatId);
+    return req;
+  }
+
+  it("re-uploading identical bytes reuses the existing item — one row, one ingest", async () => {
+    const first = await uploadOnce();
+    expect(first.status).toBe(202);
+    expect(first.body.deduplicated).toBeUndefined();
+
+    const second = await uploadOnce();
+    expect(second.status).toBe(202);
+    expect(second.body.itemId).toBe(first.body.itemId);
+    expect(second.body.deduplicated).toBe(true);
+
+    // One row, one MQTT ingest trigger — the duplicate caused neither.
+    expect(itemStore.size).toBe(1);
+    expect(publishMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("dedup response carries the item's CURRENT status (chip flips ready instantly)", async () => {
+    const first = await uploadOnce();
+    itemStore.get(first.body.itemId)!.status = "ready";
+
+    const second = await uploadOnce();
+    expect(second.body.itemId).toBe(first.body.itemId);
+    expect(second.body.status).toBe("ready");
+  });
+
+  it("re-upload re-homes the item to the new chat (re-upload signals current intent)", async () => {
+    const first = await uploadOnce({ chatId: "chat-old" });
+    expect(itemStore.get(first.body.itemId)!.originatingChatId).toBe(
+      "chat-old",
+    );
+
+    await uploadOnce({ chatId: "chat-new" });
+    expect(itemStore.get(first.body.itemId)!.originatingChatId).toBe(
+      "chat-new",
+    );
+  });
+
+  it("bytes-identical upload under a different filename still dedups (bytes are canonical)", async () => {
+    const first = await uploadOnce({ filename: "report-v1.txt" });
+    const second = await uploadOnce({ filename: "report-final.txt" });
+    expect(second.body.itemId).toBe(first.body.itemId);
+    // Stored filename is kept — storagePath embeds it.
+    expect(itemStore.get(first.body.itemId)!.filename).toBe("report-v1.txt");
+  });
+
+  it("re-upload of a failed item re-triggers ingestion instead of returning a dead row", async () => {
+    const first = await uploadOnce();
+    const row = itemStore.get(first.body.itemId)!;
+    row.status = "failed";
+    row.failureReason = "extractor exploded";
+    publishMock.mockClear();
+
+    const second = await uploadOnce();
+    expect(second.body.itemId).toBe(first.body.itemId);
+    expect(second.body.status).toBe("indexing");
+    expect(row.status).toBe("indexing");
+    expect(row.failureReason).toBeNull();
+    // Ingestion re-triggered exactly once, pointing at the EXISTING bytes.
+    expect(publishMock).toHaveBeenCalledTimes(1);
+    expect(publishMock).toHaveBeenCalledWith(
+      "droplet/files/brain/uploaded",
+      expect.objectContaining({
+        itemId: first.body.itemId,
+        path: row.storagePath,
+      }),
+    );
+  });
+
+  it("re-upload of a failed AUDIO item re-triggers via the run-one topic, not brain/uploaded", async () => {
+    // Audio/video re-ingest is driven by transcription_worker.run_one,
+    // which subscribes to droplet/transcription/run-one. Publishing to
+    // droplet/files/brain/uploaded would be silently dropped (its handler
+    // ignores queued_for_transcription rows).
+    const AUDIO = Buffer.from("fake audio bytes for dedup");
+    const first = await request(app)
+      .post("/api/files/brain/upload")
+      .attach("file", AUDIO, { filename: "clip.mp3", contentType: "audio/mpeg" });
+    expect(first.body.status).toBe("queued_for_transcription");
+    const row = itemStore.get(first.body.itemId)!;
+    row.status = "failed";
+    row.failureReason = "asr exploded";
+    publishMock.mockClear();
+
+    const second = await request(app)
+      .post("/api/files/brain/upload")
+      .attach("file", AUDIO, { filename: "clip.mp3", contentType: "audio/mpeg" });
+    expect(second.body.itemId).toBe(first.body.itemId);
+    expect(second.body.status).toBe("queued_for_transcription");
+    expect(row.status).toBe("queued_for_transcription");
+    expect(row.failureReason).toBeNull();
+    // Re-triggered on the run-one topic — NOT brain/uploaded.
+    expect(publishMock).toHaveBeenCalledTimes(1);
+    expect(publishMock).toHaveBeenCalledWith("droplet/transcription/run-one", {
+      itemId: first.body.itemId,
+      userId: "alice",
+    });
+    expect(publishMock).not.toHaveBeenCalledWith(
+      "droplet/files/brain/uploaded",
+      expect.anything(),
+    );
+  });
+
+  it("same bytes from different users stay separate items (per-user isolation)", async () => {
+    const setUser = (app as unknown as { __setUser: (u: string) => void })
+      .__setUser;
+    const aliceRes = await uploadOnce();
+    setUser("bob");
+    const bobRes = await uploadOnce();
+
+    expect(bobRes.status).toBe(202);
+    expect(bobRes.body.deduplicated).toBeUndefined();
+    expect(bobRes.body.itemId).not.toBe(aliceRes.body.itemId);
+    expect(itemStore.size).toBe(2);
+  });
+
+  it("different bytes never false-dedup", async () => {
+    const a = await request(app)
+      .post("/api/files/brain/upload")
+      .attach("file", Buffer.from("content A"), {
+        filename: "a.txt",
+        contentType: "text/plain",
+      });
+    const b = await request(app)
+      .post("/api/files/brain/upload")
+      .attach("file", Buffer.from("content B"), {
+        filename: "b.txt",
+        contentType: "text/plain",
+      });
+    expect(a.body.itemId).not.toBe(b.body.itemId);
+    expect(itemStore.size).toBe(2);
+  });
+
+  it("concurrent identical uploads: loser of the insert race reuses the winner's row", async () => {
+    const first = await uploadOnce();
+
+    // Simulate the race: the pre-insert lookup misses (as it would for
+    // two in-flight requests), so the route attempts the insert, hits
+    // the unique (userId, sha256) constraint, and falls back to reuse.
+    vi.mocked(prisma.brainMemoryItem.findUnique).mockResolvedValueOnce(
+      null as never,
+    );
+
+    const second = await uploadOnce();
+    expect(second.status).toBe(202);
+    expect(second.body.itemId).toBe(first.body.itemId);
+    expect(second.body.deduplicated).toBe(true);
+    expect(itemStore.size).toBe(1);
+  });
+
+  it("rows persisted before WARP-864 (sha256 NULL) are exempt — no dedup against them", async () => {
+    const first = await uploadOnce();
+    // Backdate the row to the pre-dedup era.
+    itemStore.get(first.body.itemId)!.sha256 = null;
+
+    const second = await uploadOnce();
+    expect(second.status).toBe(202);
+    expect(second.body.itemId).not.toBe(first.body.itemId);
+    expect(itemStore.size).toBe(2);
   });
 });
 
