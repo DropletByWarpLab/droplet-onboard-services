@@ -11,10 +11,11 @@ import transcription_worker as worker
 
 
 def _fake_dispatch_returns_doc():
-    """Stub registry.dispatch returning a minimal ExtractedDoc."""
+    """Stub registry.dispatch returning a minimal spans-based ExtractedDoc."""
+    from anchor_schema import NoneAnchor
+    from extractors.spans import Span
     return MagicMock(return_value={
-        "text": "transcript",
-        "page_breaks": [],
+        "spans": [Span(text="transcript", anchor=NoneAnchor())],
         "language": "en",
         "metadata": {},
         "warnings": [],

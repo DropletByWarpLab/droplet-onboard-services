@@ -7,8 +7,8 @@
  * FileText icon; image/* uses ImageIcon. Unknown MIMEs fall back to FileText.
  *
  * Single source of truth — every dashboard surface (RecentlyIndexedTab,
- * BrainMemoryTab, SearchTab, CitationChip, Breadcrumbs) imports `iconForMime`
- * so adding a new MIME class is a one-line edit.
+ * BrainMemoryTab, SearchTab, citation viewers, Breadcrumbs) imports
+ * `iconForMime` so adding a new MIME class is a one-line edit.
  */
 
 import {

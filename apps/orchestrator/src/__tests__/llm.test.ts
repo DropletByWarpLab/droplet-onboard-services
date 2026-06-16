@@ -4,6 +4,7 @@ import { PrismaClient } from "@prisma/client";
 import type { Request, Response, NextFunction } from "express";
 import { createApp } from "../app.js";
 import { initDeviceService } from "../services/device.service.js";
+import { cacheGet, cacheSet } from "../services/cache.service.js";
 
 // Stub auth middleware — pulls a role from `x-test-role` so tests can
 // exercise both authenticated and unauthenticated paths. Matches the
@@ -23,6 +24,10 @@ vi.mock("../middleware/auth.js", () => ({
     next();
   },
   requireRole: () => (_req: Request, _res: Response, next: NextFunction) => next(),
+  requireRoleOrMcpService: () => (_req: Request, _res: Response, next: NextFunction) => next(),
+  // BUG-11 follow-up: app.ts now installs requirePasswordChangeGate on
+  // every request; stub it as a pass-through like requireRole.
+  requirePasswordChangeGate: () => (_req: Request, _res: Response, next: NextFunction) => next(),
   // WARP-485: app.ts calls setAuthPrisma() at boot to wire the OCS
   // fallback to Prisma. This mock stubs out auth entirely, so the
   // singleton init is a no-op — but the export must exist or app
@@ -79,6 +84,24 @@ vi.mock("../services/ai-gateway.client.js", () => ({
   deleteKey: (...args: any[]) => mockDeleteKey(...args),
 }));
 
+// Mock the cache so the model-list cache path is deterministic instead of
+// silently depending on REDIS_URL being unset. Keep every other cache export
+// (cacheDel, cacheSetNx, getRedis, withSwrCache, …) real — `createApp` mounts
+// the whole route tree and many of those importers run during construction /
+// per-request, so a bare {cacheGet, cacheSet} factory would hand them
+// `undefined`. Only cacheGet/cacheSet are overridden, as controllable spies, so
+// the no-cache-on-degrade invariant can be asserted.
+vi.mock("../services/cache.service.js", async () => {
+  const actual = await vi.importActual<
+    typeof import("../services/cache.service.js")
+  >("../services/cache.service.js");
+  return {
+    ...actual,
+    cacheGet: vi.fn().mockResolvedValue(null),
+    cacheSet: vi.fn().mockResolvedValue(undefined),
+  };
+});
+
 // Stub the MCP singleton so /api/llm/chat can drive the (now in-process)
 // agent loop without spawning the mcp-server child. Since WARP-101 the
 // orchestrator owns the loop and reads tools from this client.
@@ -90,6 +113,9 @@ vi.mock("../services/mcp-client.singleton.js", () => ({
   ensureMcpStarted: vi.fn().mockResolvedValue(undefined),
   stopMcp: vi.fn().mockResolvedValue(undefined),
 }));
+
+const mockCacheGet = vi.mocked(cacheGet);
+const mockCacheSet = vi.mocked(cacheSet);
 
 describe("LLM routes", () => {
   let app: ReturnType<typeof createApp>;
@@ -108,6 +134,9 @@ describe("LLM routes", () => {
         { id: "llama3:8b", provider: "ollama", name: "llama3:8b", context_window: null },
       ],
     });
+    // Default to a cache miss so /api/llm/models exercises the gateway path.
+    mockCacheGet.mockResolvedValue(null);
+    mockCacheSet.mockResolvedValue(undefined);
   });
 
   describe("GET /api/llm/models", () => {
@@ -122,6 +151,60 @@ describe("LLM routes", () => {
       await request(app).get("/api/llm/models");
       // listModels may or may not be called depending on cache, but endpoint should not error
       expect(mockListModels).toBeDefined();
+    });
+
+    it("degrades to an empty list (not 500) when ai-gateway is unreachable", async () => {
+      // Setup wizard / dashboard SWR must not get a 500 when the gateway is
+      // down or disabled (dev: AI_GATEWAY_URL=ai-gateway-disabled → ENOTFOUND).
+      mockListModels.mockRejectedValueOnce(
+        new Error("fetch failed: getaddrinfo ENOTFOUND ai-gateway-disabled")
+      );
+      const res = await request(app).get("/api/llm/models");
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ models: [] });
+    });
+
+    it("degrades on a timeout (AbortSignal.timeout fired)", async () => {
+      mockListModels.mockRejectedValueOnce(
+        new Error("AI Gateway timeout after 10000ms during listModels")
+      );
+      const res = await request(app).get("/api/llm/models");
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ models: [] });
+    });
+
+    it("does NOT cache the empty fallback (list self-heals next request)", async () => {
+      mockListModels.mockRejectedValueOnce(
+        new Error("fetch failed: getaddrinfo ENOTFOUND ai-gateway-disabled")
+      );
+      const res = await request(app).get("/api/llm/models");
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ models: [] });
+      // The degraded path must not poison the cache — otherwise the empty list
+      // would be served for the full TTL even after the gateway recovers.
+      expect(mockCacheSet).not.toHaveBeenCalled();
+    });
+
+    it("re-throws (500) when a reachable gateway returns a 5xx", async () => {
+      // A reachable gateway erroring (503/500) or returning malformed JSON is a
+      // real failure, NOT an unreachable gateway — it must surface as an error,
+      // not be masked as an empty 200.
+      mockListModels.mockRejectedValueOnce(
+        new Error("AI Gateway error: 503")
+      );
+      const res = await request(app).get("/api/llm/models");
+      expect(res.status).toBe(500);
+      expect(mockCacheSet).not.toHaveBeenCalled();
+    });
+
+    it("caches a successful model list", async () => {
+      const res = await request(app).get("/api/llm/models");
+      expect(res.status).toBe(200);
+      expect(mockCacheSet).toHaveBeenCalledWith(
+        "llm:models",
+        expect.objectContaining({ models: expect.any(Array) }),
+        expect.any(Number)
+      );
     });
   });
 
@@ -194,6 +277,35 @@ describe("LLM routes", () => {
       expect(Array.isArray(res.body.trace)).toBe(true);
       expect(mockChat).toHaveBeenCalledOnce();
     });
+
+    it("persists an empty completion as a FAILED turn (WARP-854)", async () => {
+      // Zero output + zero tool calls used to finalize `completed`, leaving
+      // an invisible ghost turn in history. It must persist as `failed` so
+      // the rehydrated UI shows the retry chip.
+      mockChat.mockResolvedValueOnce({
+        ok: true,
+        json: vi.fn().mockResolvedValue({
+          choices: [
+            { index: 0, message: { role: "assistant", content: "" }, finish_reason: "length" },
+          ],
+        }),
+      });
+
+      const res = await request(app)
+        .post("/api/llm/chat")
+        .set("x-test-role", "owner")
+        .send({
+          model: "llama3:8b",
+          messages: [{ role: "user", content: "hello" }],
+          stream: false,
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.stop_reason).toBe("error");
+      expect(mockFinalizeAssistantMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ status: "failed" }),
+      );
+    });
   });
 
   describe("Key management", () => {
@@ -244,20 +356,48 @@ describe("LLM routes", () => {
       );
     });
 
-    it("returns 400 when title is missing or not a string", async () => {
+    it("returns 400 when neither title nor projectId is provided", async () => {
       const res1 = await request(app)
         .patch("/api/llm/conversations/abc")
         .set("x-test-role", "owner")
         .send({});
       expect(res1.status).toBe(400);
-      expect(res1.body).toMatchObject({ error: "title_required" });
+      // WARP-845 widened the PATCH to also accept projectId moves.
+      expect(res1.body).toMatchObject({ error: "title_or_project_required" });
 
       const res2 = await request(app)
         .patch("/api/llm/conversations/abc")
         .set("x-test-role", "owner")
         .send({ title: 42 });
       expect(res2.status).toBe(400);
-      expect(res2.body).toMatchObject({ error: "title_required" });
+      // A non-string title with no projectId falls through to the same
+      // "nothing actionable in the body" rejection.
+      expect(res2.body).toMatchObject({ error: "title_or_project_required" });
+    });
+
+    it("rejects an empty-string projectId outright (review fix)", async () => {
+      // "" would skip setConversationProject's truthiness-guarded
+      // ownership check and then violate the FK → 500. 400 instead.
+      const res = await request(app)
+        .patch("/api/llm/conversations/abc")
+        .set("x-test-role", "owner")
+        .send({ projectId: "" });
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({ error: "invalid_project_id" });
+      expect(mockRenameConversationForUser).not.toHaveBeenCalled();
+    });
+
+    it("rejects a malformed title even when a projectId rides along (review fix)", async () => {
+      // Previously the title leg was silently dropped and the move
+      // applied — a half-honored request. Now the whole PATCH 400s
+      // before mutating anything.
+      const res = await request(app)
+        .patch("/api/llm/conversations/abc")
+        .set("x-test-role", "owner")
+        .send({ title: 42, projectId: "11111111-1111-1111-1111-111111111111" });
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({ error: "title_or_project_required" });
+      expect(mockRenameConversationForUser).not.toHaveBeenCalled();
     });
 
     it("returns 400 when service rejects an empty title", async () => {

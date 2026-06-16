@@ -122,8 +122,8 @@ export function registerDeviceRoutes(router: Router, deps: DeviceDeps): void {
 
   router.patch("/network/groups/:id", requireRole("owner", "admin"), async (req, res, next) => {
     try {
-      const { name, color, icon } = req.body ?? {};
-      const patch: { name?: string; color?: string; icon?: string } = {};
+      const { name, color, icon, blockPhoneHome } = req.body ?? {};
+      const patch: { name?: string; color?: string; icon?: string; blockPhoneHome?: boolean } = {};
       if (name !== undefined) {
         if (typeof name !== "string") {
           return res.status(400).json({ error: "name must be a string" });
@@ -141,6 +141,13 @@ export function registerDeviceRoutes(router: Router, deps: DeviceDeps): void {
           return res.status(400).json({ error: "icon must be a string" });
         }
         patch.icon = icon;
+      }
+      // WARP-613: per-group phone-home flag (egress reconciler enforces it).
+      if (blockPhoneHome !== undefined) {
+        if (typeof blockPhoneHome !== "boolean") {
+          return res.status(400).json({ error: "blockPhoneHome must be a boolean" });
+        }
+        patch.blockPhoneHome = blockPhoneHome;
       }
       const group = await networkDeviceService.renameGroup(req.params.id, patch);
       res.json({ group });

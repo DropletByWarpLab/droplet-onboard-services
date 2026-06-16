@@ -84,7 +84,8 @@ export interface ContextDeps {
  *   - HTTP transport — `claims.sub` is authoritative. `metaUserId` is
  *     ignored even if a malicious client tried to set `_meta.userId`,
  *     because the JWT-derived `claims.sub` is the trust boundary.
- *   - Stdio transport (trusted, `claims === undefined`) — fall back to
+ *   - Stdio transport (trusted, `local-trusted` posture → `claims` is
+ *     `undefined`) — fall back to
  *     `metaUserId` plumbed by the orchestrator's mcp-client. The
  *     orchestrator is the only producer here and synthesizes it from
  *     `req.user.username`, so the transitive trust comes from
@@ -98,6 +99,7 @@ export function buildContext(
   ncToken?: string,
   metaUserId?: string,
   metaEnhancement?: PrivateEnhancement,
+  metaUserRole?: string,
 ): ToolContext {
   const userId = claims?.sub ?? metaUserId;
   // WARP-286: bind the searchHybrid shim with the authenticated userId
@@ -138,7 +140,16 @@ export function buildContext(
     embedText: deps.embedText,
     searchHybrid,
     userId,
-    role: claims?.role,
+    // HTTP: the JWT claim is authoritative. Stdio (no claims): the
+    // orchestrator forwards the caller's role via _meta.userRole
+    // (WARP-845) — validated against the Role union, anything else
+    // drops to undefined (handlers then use the guest view).
+    role:
+      claims?.role ??
+      (metaUserRole &&
+      ["owner", "admin", "family", "guest", "service"].includes(metaUserRole)
+        ? (metaUserRole as import("@droplet/tools-core").Role)
+        : undefined),
     ncToken,
     _enhancement: metaEnhancement,
     signal,

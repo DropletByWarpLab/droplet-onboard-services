@@ -624,7 +624,7 @@ If the helper plumbing is wrong, the failure surfaces here:
 ./scripts/test-rag.sh --only end-to-end
 ```
 
-Expected on first run: PDF + PNG pass; audio test passes IF the WAV was indexed during beforeAll AND the model called `search_content`. If LLM is offline (Jetson unreachable), the agent may iteration-limit with no `search_content` call — that's the same caveat as the existing PDF flow's 5-loop determinism. The retry that the existing harness does (5 loops on PDF) catches this; for new flows, accept that single-shot tests may flake on a fully off-line model. We add the determinism loop in Task 9.
+Expected on first run: PDF + PNG pass; audio test passes IF the WAV was indexed during beforeAll AND the model called `search_content`. If LLM is offline (inference host unreachable), the agent may iteration-limit with no `search_content` call — that's the same caveat as the existing PDF flow's 5-loop determinism. The retry that the existing harness does (5 loops on PDF) catches this; for new flows, accept that single-shot tests may flake on a fully off-line model. We add the determinism loop in Task 9.
 
 If the failure is "no citation for warp224-audio.wav" but `search_content` WAS called and returned hits for OTHER files — that's a real bug: the indexer didn't write chunks for the WAV. Capture file-indexer logs and triage faster-whisper.
 
@@ -1439,7 +1439,7 @@ Same reasoning as the existing test header: same chunks, same file, same sentine
 
 ### LLM offline acceptance
 
-If `ai-gateway` routes Ollama to an unreachable Jetson (the default
+If `ai-gateway` routes Ollama to an unreachable inference host (the default
 on a developer laptop), the agent hits `max_iter` and returns
 `stop_reason: "iteration_limit"`. That's acceptable as long as
 `search_content` was still called and hits came back. The test

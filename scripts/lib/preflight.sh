@@ -32,10 +32,15 @@ preflight_check() {
   # non-interactive deploys (nohup, ansible, systemd-run). `sudo -n true`
   # is the correct primitive for "can this user sudo without prompting":
   # it actually runs a command non-interactively and respects NOPASSWD.
+  #
+  # The fallback drops `-n` ON PURPOSE: on a provisioned box the firstboot
+  # NOPASSWD drop-in is gone (it is removed when provisioning succeeds), so
+  # an operator re-running setup.sh must get a real password prompt. With a
+  # TTY sudo prompts; without one it errors out immediately — never hangs.
   if [ "${SKIP_DOCKER:-false}" != "true" ]; then
     if ! sudo -n true 2>/dev/null; then
       log_info "sudo access required. Please enter your password."
-      if ! sudo -n true; then
+      if ! sudo true; then
         log_error "Could not obtain sudo access."
         return 1
       fi

@@ -1,135 +1,220 @@
 /**
- * Matter controller service — native Matter device discovery, commissioning, and control.
+ * Matter controller client — HTTP client for the matter-controller
+ * host-network sidecar (WARP-850).
  *
- * Embeds matter.js directly in the orchestrator process. Handles:
- *  - mDNS-SD discovery of uncommissioned devices
- *  - PASE commissioning via pairing codes
- *  - Cluster-based device control (OnOff, LevelControl, Thermostat, etc.)
- *  - Real-time state subscriptions via attribute change events
+ * History: this module used to embed matter.js (CommissioningController)
+ * directly in the orchestrator process. The orchestrator container sits
+ * on the compose bridge network, which has no BLE (no HCI access) and
+ * no LAN mDNS — so BLE-only devices could never be commissioned and
+ * mDNS discovery saw nothing (WARP-850/WARP-851). The controller now
+ * runs in services/matter-controller with `network_mode: host`
+ * (raw HCI + native multicast on the home LAN and the in-container
+ * OpenWrt AP's br-lan host bridge); this file kept its module path and
+ * export surface so every consumer — routes/matter.ts, the scenes
+ * router's injected sendCommand (app.ts), health.ts, index.ts — is
+ * unchanged.
+ *
+ * Contract notes:
+ *  - Errors: the sidecar passes raw matter.js failures through as
+ *    `{ errorClass, errorMessage }`; we reconstruct a local Error with
+ *    the untouched message (name = errorClass) so routes/matter.ts's
+ *    translateCommissionError() message-pattern mapping — pinned by the
+ *    WARP-851 tests — behaves exactly as it did in-process.
+ *  - WARP-456 activity rows: the signed ActivityRow wrappers for
+ *    commission / decommission / command outcomes stay HERE (the
+ *    sidecar has no Prisma and must not own the audit chain).
+ *  - Events: one long-lived SSE consumer of the sidecar's /events
+ *    stream re-emits into the local EventEmitter, so the orchestrator's
+ *    dashboard-facing /api/matter/devices/events SSE route is
+ *    unchanged. The bridge auto-reconnects, which also makes
+ *    isMatterInitialized() self-healing when the sidecar restarts.
+ *  - Capabilities: getMatterCapabilities() now proxies the sidecar's
+ *    real BLE state (true when the BLE transport registered at sidecar
+ *    process start) and degrades to false when the sidecar is
+ *    unreachable. Route contract is unchanged: { bleCommissioning }.
  */
 
 import { EventEmitter } from "node:events";
-import * as fs from "node:fs";
 import pino from "pino";
-import { Environment, type Duration } from "@matter/main";
-import { NodeId } from "@matter/main/types";
-import {
-  CommissioningController,
-  type NodeCommissioningOptions,
-} from "@project-chip/matter.js";
-import { NodeStates, type PairedNode } from "@project-chip/matter.js/device";
-import { GeneralCommissioning } from "@matter/main/clusters";
-import { ManualPairingCodeCodec, QrPairingCodeCodec } from "@matter/main/types";
-import type { CommissionableDevice } from "@matter/protocol";
 import { config } from "../config.js";
 import type {
   MatterCommissionedDevice,
   MatterDiscoveredDevice,
-  MatterEndpointInfo,
   MatterGrouped,
-  SmartHomeCategory,
 } from "../types/smart-home.js";
 import { recordActivity } from "./activity.singleton.js";
 
 const logger = pino({ name: "matter" });
 
-// --- Matter device type IDs to SmartHomeCategory mapping ---
-const DEVICE_TYPE_CATEGORY: Record<number, SmartHomeCategory> = {
-  // Lighting
-  0x0100: "light",      // On/Off Light
-  0x0101: "light",      // Dimmable Light
-  0x010c: "light",      // Color Temperature Light
-  0x010d: "light",      // Extended Color Light
-  // Switches / Plugs
-  0x0103: "switch",     // On/Off Plug-in Unit
-  0x010a: "switch",     // On/Off Light Switch
-  0x010b: "switch",     // Dimmer Switch
-  // Sensors
-  0x0302: "sensor",     // Temperature Sensor
-  0x0305: "sensor",     // Pressure Sensor
-  0x0307: "sensor",     // Humidity Sensor
-  0x0106: "sensor",     // Light Sensor
-  0x0044: "sensor",     // Occupancy Sensor
-  0x0015: "binary_sensor", // Contact Sensor
-  // Climate
-  0x0301: "climate",    // Thermostat
-  0x002b: "climate",    // Fan
-  // Media
-  0x0028: "media_player", // Basic Video Player
-  0x0023: "media_player", // Casting Video Player
-  0x0022: "media_player", // Speaker
-  // Covers
-  0x0202: "cover",      // Window Covering
-  // Locks
-  0x000a: "lock",       // Door Lock
-  // Other
-  0x000f: "vacuum",     // Robotic Vacuum Cleaner
-};
-
-// Cluster IDs for capability detection
-const CLUSTER_ID = {
-  ON_OFF: 0x0006,
-  LEVEL_CONTROL: 0x0008,
-  COLOR_CONTROL: 0x0300,
-  THERMOSTAT: 0x0201,
-  DOOR_LOCK: 0x0101,
-  WINDOW_COVERING: 0x0102,
-  FAN_CONTROL: 0x0202,
-  MEDIA_PLAYBACK: 0x0506,
-  TEMPERATURE_MEASUREMENT: 0x0402,
-  HUMIDITY_MEASUREMENT: 0x0405,
-  OCCUPANCY_SENSING: 0x0406,
-} as const;
+// --- Timeouts (ms) ---
+// Health/capabilities are cheap local-host hops; commissioning rides
+// PASE + (optionally) BLE + network provisioning and legitimately runs
+// long; discovery's budget follows the caller-supplied scan window.
+const HEALTH_TIMEOUT_MS = 3_000;
+const CAPABILITIES_TIMEOUT_MS = 3_000;
+const DEFAULT_TIMEOUT_MS = 30_000;
+const COMMISSION_TIMEOUT_MS = 120_000;
+const DISCOVERY_MARGIN_MS = 10_000;
+const BRIDGE_RECONNECT_MS = 3_000;
+// How often to re-probe /health while the SSE stream is open — the
+// stream staying alive says nothing about the controller (see
+// runEventBridge). 15 s bounds the staleness window without meaningful
+// load (one local GET).
+const HEALTH_REPROBE_MS = 15_000;
 
 // --- Module state ---
-
-let controller: CommissioningController | null = null;
-let _initialized = false;
+let sidecarReachable = false;
+let sidecarInitialized = false;
+let bridgeAbort: AbortController | null = null;
 const stateEvents = new EventEmitter();
 
-// --- Initialization ---
+function baseUrl(): string {
+  // Strip a trailing slash so path joins stay canonical.
+  return config.DROPLET_MATTER_SERVICE_URL.replace(/\/+$/, "");
+}
+
+function authHeaders(): Record<string, string> {
+  return {
+    // Shared token header following the device-bridge precedent
+    // (services/oled-display/device-bridge.py). Generated by setup.sh
+    // into .env as DROPLET_MATTER_SERVICE_TOKEN; the sidecar fails
+    // closed when its copy is empty.
+    "X-Droplet-Auth": config.DROPLET_MATTER_SERVICE_TOKEN,
+    "Content-Type": "application/json",
+  };
+}
+
+/**
+ * Rebuild a local Error from the sidecar's structured error body so the
+ * raw matter.js class name + message survive the HTTP hop (WARP-850
+ * requirement #4 — translateCommissionError depends on the message).
+ */
+interface SidecarErrorBody {
+  error?: string;
+  errorClass?: string;
+  errorMessage?: string;
+}
+
+async function toSidecarError(res: Response): Promise<Error> {
+  let body: SidecarErrorBody | null = null;
+  try {
+    body = (await res.json()) as SidecarErrorBody;
+  } catch {
+    // Non-JSON body — fall through to the status-bearing message.
+  }
+  const message =
+    body?.errorMessage ??
+    body?.error ??
+    `matter-controller returned HTTP ${res.status}`;
+  const err = new Error(message);
+  if (body?.errorClass) err.name = body.errorClass;
+  return err;
+}
+
+async function sidecarJson<T>(
+  path: string,
+  init: RequestInit = {},
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+): Promise<T> {
+  const res = await fetch(`${baseUrl()}${path}`, {
+    ...init,
+    headers: { ...authHeaders(), ...(init.headers ?? {}) },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!res.ok) throw await toSidecarError(res);
+  return (await res.json()) as T;
+}
+
+/**
+ * Audit-row writes must never change a Matter operation's outcome: a
+ * Prisma hiccup after a successful commission would otherwise surface
+ * as a false 500 (the device IS commissioned — a retry then hits
+ * "already commissioned" and the device looks orphaned), and one inside
+ * sendMatterCommand's finally block would REPLACE the real matter.js
+ * error with a Prisma error that translateCommissionError can't map.
+ * The operation result is the truth; a lost audit row is a warn line.
+ */
+async function auditQuietly(
+  entry: Parameters<typeof recordActivity>[0],
+): Promise<void> {
+  try {
+    await recordActivity(entry);
+  } catch (err) {
+    logger.warn("Matter audit row write failed (non-fatal): %s", err);
+  }
+}
+
+// --- Initialization / lifecycle ---
 
 export async function initMatterService(): Promise<void> {
-  // Ensure storage directory exists
-  fs.mkdirSync(config.MATTER_STORAGE_PATH, { recursive: true });
+  ensureEventBridge();
 
-  controller = new CommissioningController({
-    environment: {
-      environment: Environment.default,
-      id: "droplet-controller",
-    },
-    autoConnect: true,
-    adminFabricLabel: config.DROPLET_MATTER_CONTROLLER_NAME,
+  const res = await fetch(`${baseUrl()}/health`, {
+    headers: authHeaders(),
+    signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
   });
-
-  await controller.start();
-  _initialized = true;
-
-  const nodes = controller.getCommissionedNodes();
-  logger.info(
-    "Matter controller started — %d commissioned node(s)",
-    nodes.length,
-  );
-
-  // Set up state change listeners for all existing nodes
-  for (const nodeId of nodes) {
-    setupNodeListeners(nodeId).catch((err) => {
-      logger.debug("Failed to setup listeners for node %s: %s", nodeId, err);
-    });
+  if (!res.ok) {
+    throw new Error(`matter-controller health probe returned HTTP ${res.status}`);
   }
+  const health = (await res.json()) as { ok?: boolean; initialized?: boolean };
+  sidecarReachable = true;
+  sidecarInitialized = health.initialized === true;
+  if (!sidecarInitialized) {
+    throw new Error(
+      "matter-controller sidecar is reachable but its controller is not initialized",
+    );
+  }
+  logger.info("Connected to matter-controller sidecar at %s", baseUrl());
 }
 
 export function isMatterInitialized(): boolean {
-  return _initialized;
+  return sidecarReachable && sidecarInitialized;
 }
 
 export async function shutdownMatterService(): Promise<void> {
-  if (controller) {
-    await controller.close();
-    controller = null;
+  bridgeAbort?.abort();
+  bridgeAbort = null;
+  sidecarReachable = false;
+  sidecarInitialized = false;
+  logger.info("Matter sidecar client stopped");
+}
+
+// --- Capabilities ---
+
+export interface MatterCapabilities {
+  /**
+   * Whether BLE commissioning is available on this box. True when the
+   * matter-controller sidecar registered its BLE transport
+   * (@matter/nodejs-ble on the host's HCI adapter) at process start;
+   * false when the box is IP-only OR the sidecar is unreachable.
+   */
+  bleCommissioning: boolean;
+}
+
+/**
+ * WARP-851 capability surface, now proxying the sidecar's real state
+ * (WARP-850 requirement #5). Deliberately NOT gated on
+ * isMatterInitialized(): the sidecar answers /capabilities before its
+ * controller finishes booting, and the setup wizard needs the BLE
+ * answer early. Degrades to false — never throws — because "can't
+ * reach the controller" and "no BLE" are the same honest answer for
+ * the add-device wizard.
+ */
+export async function getMatterCapabilities(): Promise<MatterCapabilities> {
+  try {
+    const caps = await sidecarJson<{ bleCommissioning?: boolean }>(
+      "/capabilities",
+      {},
+      CAPABILITIES_TIMEOUT_MS,
+    );
+    return { bleCommissioning: caps.bleCommissioning === true };
+  } catch (err) {
+    logger.debug(
+      "matter-controller capabilities probe failed: %s",
+      (err as Error).message,
+    );
+    return { bleCommissioning: false };
   }
-  _initialized = false;
-  logger.info("Matter controller stopped");
 }
 
 // --- Discovery ---
@@ -137,39 +222,12 @@ export async function shutdownMatterService(): Promise<void> {
 export async function discoverDevices(
   timeoutMs = 15_000,
 ): Promise<MatterDiscoveredDevice[]> {
-  if (!controller) throw new Error("Matter controller not initialized");
-
-  logger.info("Starting Matter device discovery (timeout: %dms)", timeoutMs);
-
-  const timeoutSec = (timeoutMs / 1000) as Duration;
-  const devices = await controller.discoverCommissionableDevices(
-    {} as any, // Empty identifier = discover all
-    undefined,
-    undefined,
-    timeoutSec,
+  const data = await sidecarJson<{ devices: MatterDiscoveredDevice[] }>(
+    `/discover?timeout=${encodeURIComponent(timeoutMs)}`,
+    {},
+    timeoutMs + DISCOVERY_MARGIN_MS,
   );
-
-  return devices.map(commissionableToDiscovered);
-}
-
-function commissionableToDiscovered(
-  device: CommissionableDevice,
-): MatterDiscoveredDevice {
-  const vp = device.VP?.split("+");
-  return {
-    deviceIdentifier: device.deviceIdentifier,
-    discriminator: device.D,
-    vendorId: vp?.[0] ? parseInt(vp[0], 10) : undefined,
-    productId: vp?.[1] ? parseInt(vp[1], 10) : undefined,
-    deviceName: device.DN,
-    deviceType: device.DT,
-    commissioningMode: device.CM,
-    addresses: device.addresses.map((a) => ({
-      ip: "ip" in a ? a.ip : "",
-      port: "port" in a ? a.port : 0,
-      type: a.type,
-    })),
-  };
+  return data.devices;
 }
 
 // --- Commissioning ---
@@ -177,82 +235,55 @@ function commissionableToDiscovered(
 export async function commissionDevice(
   pairingCode: string,
 ): Promise<{ nodeId: string }> {
-  if (!controller) throw new Error("Matter controller not initialized");
-
-  const trimmed = pairingCode.trim();
-  let options: NodeCommissioningOptions;
-
-  if (trimmed.startsWith("MT:")) {
-    // QR code payload — decode returns an array, take the first entry
-    const qrList = QrPairingCodeCodec.decode(trimmed);
-    const qr = qrList[0];
-    if (!qr) throw new Error("Invalid QR pairing code");
-    options = {
-      commissioning: {
-        regulatoryLocation:
-          GeneralCommissioning.RegulatoryLocationType.IndoorOutdoor,
-        regulatoryCountryCode: "XX",
-      },
-      discovery: {
-        identifierData: { longDiscriminator: qr.discriminator },
-      },
-      passcode: qr.passcode,
-    };
-  } else {
-    // Manual pairing code (11 or 21 digit number)
-    const manual = ManualPairingCodeCodec.decode(trimmed);
-    options = {
-      commissioning: {
-        regulatoryLocation:
-          GeneralCommissioning.RegulatoryLocationType.IndoorOutdoor,
-        regulatoryCountryCode: "XX",
-      },
-      discovery: {
-        identifierData: { shortDiscriminator: manual.shortDiscriminator },
-      },
-      passcode: manual.passcode,
-    };
-  }
-
-  logger.info("Commissioning device with pairing code...");
-  const nodeId = await controller.commissionNode(options);
-  logger.info("Device commissioned successfully: nodeId=%s", nodeId);
-
-  // Set up listeners for the new node
-  await setupNodeListeners(nodeId);
+  const result = await sidecarJson<{ nodeId: string }>(
+    "/commission",
+    {
+      method: "POST",
+      body: JSON.stringify({ pairing_code: pairingCode }),
+    },
+    COMMISSION_TIMEOUT_MS,
+  );
 
   // WARP-456: audit row for the commission write. Commissioning is the
   // highest-impact Matter operation — the appliance now owns the
-  // device's network credentials and can drive it.
-  await recordActivity({
+  // device's network credentials and can drive it. Stays orchestrator-
+  // side so the signed ActivityRow chain lives in one process.
+  await auditQuietly({
     kind: "smart_home",
     severity: "ok",
     sourceIcon: "plug",
     what: "Commissioned Matter device",
-    sub: `nodeId ${String(nodeId)}`,
-    refs: { nodeId: String(nodeId) },
+    sub: `nodeId ${result.nodeId}`,
+    refs: { nodeId: result.nodeId },
   });
 
-  return { nodeId: String(nodeId) };
+  return result;
 }
 
 // --- Decommissioning ---
 
-export async function decommissionDevice(nodeIdStr: string): Promise<void> {
-  if (!controller) throw new Error("Matter controller not initialized");
-
-  const nodeId = NodeId(BigInt(nodeIdStr));
-  const node = await controller.getNode(nodeId);
-  try {
-    await node.decommission();
-  } catch (err) {
-    logger.warn("Graceful decommission failed, removing node: %s", err);
-    await controller.removeNode(nodeId, false);
-  }
+/**
+ * @returns false when the sidecar reports the node isn't commissioned
+ * (its 404) — the route layer maps that to its own 404, mirroring
+ * getDevice, instead of reconstructing it from a thrown error.
+ */
+export async function decommissionDevice(
+  nodeIdStr: string,
+): Promise<boolean> {
+  const res = await fetch(
+    `${baseUrl()}/devices/${encodeURIComponent(nodeIdStr)}`,
+    {
+      method: "DELETE",
+      headers: authHeaders(),
+      signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+    },
+  );
+  if (res.status === 404) return false;
+  if (!res.ok) throw await toSidecarError(res);
   logger.info("Device decommissioned: %s", nodeIdStr);
 
   // WARP-456: audit row for the destructive write.
-  await recordActivity({
+  await auditQuietly({
     kind: "smart_home",
     severity: "warn",
     sourceIcon: "unplug",
@@ -260,227 +291,30 @@ export async function decommissionDevice(nodeIdStr: string): Promise<void> {
     sub: `nodeId ${nodeIdStr}`,
     refs: { nodeId: nodeIdStr },
   });
+  return true;
 }
 
 // --- Device listing ---
 
 export async function getCommissionedDevices(): Promise<MatterGrouped> {
-  if (!controller) throw new Error("Matter controller not initialized");
-
-  const grouped: MatterGrouped = {
-    lights: [],
-    switches: [],
-    sensors: [],
-    climate: [],
-    media: [],
-    covers: [],
-    locks: [],
-    other: [],
-  };
-
-  const nodeIds = controller.getCommissionedNodes();
-
-  for (const nodeId of nodeIds) {
-    try {
-      const device = await buildDeviceInfo(nodeId);
-      if (!device) continue;
-
-      switch (device.category) {
-        case "light":
-          grouped.lights.push(device);
-          break;
-        case "switch":
-          grouped.switches.push(device);
-          break;
-        case "sensor":
-        case "binary_sensor":
-          grouped.sensors.push(device);
-          break;
-        case "climate":
-        case "fan":
-          grouped.climate.push(device);
-          break;
-        case "media_player":
-          grouped.media.push(device);
-          break;
-        case "cover":
-          grouped.covers.push(device);
-          break;
-        case "lock":
-          grouped.locks.push(device);
-          break;
-        default:
-          grouped.other.push(device);
-          break;
-      }
-    } catch (err) {
-      logger.debug("Failed to build info for node %s: %s", nodeId, err);
-    }
-  }
-
-  return grouped;
+  return sidecarJson<MatterGrouped>("/devices");
 }
 
 export async function getDevice(
   nodeIdStr: string,
 ): Promise<MatterCommissionedDevice | null> {
-  if (!controller) throw new Error("Matter controller not initialized");
-
-  const nodeId = NodeId(BigInt(nodeIdStr));
-  if (!controller.isNodeCommissioned(nodeId)) return null;
-
-  return buildDeviceInfo(nodeId);
-}
-
-async function buildDeviceInfo(
-  nodeId: NodeId,
-): Promise<MatterCommissionedDevice | null> {
-  if (!controller) return null;
-
-  const node = await controller.getNode(nodeId);
-  const basicInfo = node.basicInformation;
-
-  // Build endpoint info
-  const endpoints: MatterEndpointInfo[] = [];
-  let primaryCategory: SmartHomeCategory = "switch"; // default
-  const attributes: Record<string, unknown> = {};
-
-  for (const [epId, endpoint] of node.parts) {
-    // Access device types and server clusters from the Descriptor cluster
-    const descriptor = endpoint.state?.descriptor;
-    const deviceTypes = (descriptor?.deviceTypeList ?? []).map((dt: any) => ({
-      deviceType: Number(dt.deviceType),
-      revision: Number(dt.revision ?? 1),
-    }));
-    const clusters = (descriptor?.serverList ?? []).map((c: any) => Number(c));
-
-    endpoints.push({
-      endpointId: epId,
-      deviceTypes,
-      clusters,
-    });
-
-    // Determine category from the first non-root endpoint's device type
-    if (epId > 0) {
-      for (const dt of deviceTypes) {
-        const cat = DEVICE_TYPE_CATEGORY[dt.deviceType];
-        if (cat) {
-          primaryCategory = cat;
-          break;
-        }
-      }
-
-      // Fallback: infer from clusters if no device type match
-      if (primaryCategory === "switch" && clusters.length > 0) {
-        if (clusters.includes(CLUSTER_ID.LEVEL_CONTROL))
-          primaryCategory = "light";
-        else if (clusters.includes(CLUSTER_ID.THERMOSTAT))
-          primaryCategory = "climate";
-        else if (clusters.includes(CLUSTER_ID.DOOR_LOCK))
-          primaryCategory = "lock";
-        else if (clusters.includes(CLUSTER_ID.WINDOW_COVERING))
-          primaryCategory = "cover";
-        else if (clusters.includes(CLUSTER_ID.TEMPERATURE_MEASUREMENT))
-          primaryCategory = "sensor";
-        else if (clusters.includes(CLUSTER_ID.MEDIA_PLAYBACK))
-          primaryCategory = "media_player";
-      }
-
-      // Read state attributes from the endpoint
-      try {
-        readEndpointAttributes(endpoint, attributes);
-      } catch {
-        // Attributes may not be available if not connected
-      }
-    }
-  }
-
-  // Determine state string
-  const state = deriveStateString(primaryCategory, attributes, node);
-
-  // Map NodeStates enum to string
-  const connectionStateMap: Record<number, MatterCommissionedDevice["connectionState"]> = {
-    [NodeStates.Connected]: "connected",
-    [NodeStates.Disconnected]: "disconnected",
-    [NodeStates.Reconnecting]: "reconnecting",
-    [NodeStates.WaitingForDeviceDiscovery]: "waiting",
-  };
-
-  return {
-    nodeId: String(nodeId),
-    name:
-      basicInfo?.nodeLabel ||
-      basicInfo?.productName ||
-      `Matter Device ${nodeId}`,
-    category: primaryCategory,
-    state,
-    connectionState:
-      connectionStateMap[node.connectionState] ?? "disconnected",
-    vendorName: basicInfo?.vendorName,
-    vendorId: basicInfo?.vendorId ? Number(basicInfo.vendorId) : undefined,
-    productName: basicInfo?.productName,
-    productId: basicInfo?.productId,
-    serialNumber: basicInfo?.serialNumber,
-    endpoints,
-    attributes,
-  };
-}
-
-function readEndpointAttributes(
-  endpoint: any,
-  attributes: Record<string, unknown>,
-): void {
-  // Try to read common cluster attributes from cached state
-  try {
-    const onOff = endpoint.state?.onOff;
-    if (onOff !== undefined) {
-      attributes.onOff =
-        typeof onOff === "object" ? onOff.onOff : Boolean(onOff);
-    }
-  } catch { /* cluster not present */ }
-
-  try {
-    const level = endpoint.state?.levelControl;
-    if (level !== undefined) {
-      attributes.currentLevel = level.currentLevel;
-    }
-  } catch { /* cluster not present */ }
-
-  try {
-    const thermo = endpoint.state?.thermostat;
-    if (thermo !== undefined) {
-      attributes.localTemperature = thermo.localTemperature;
-      attributes.occupiedHeatingSetpoint = thermo.occupiedHeatingSetpoint;
-      attributes.occupiedCoolingSetpoint = thermo.occupiedCoolingSetpoint;
-      attributes.systemMode = thermo.systemMode;
-    }
-  } catch { /* cluster not present */ }
-
-  try {
-    const temp = endpoint.state?.temperatureMeasurement;
-    if (temp !== undefined) {
-      attributes.measuredValue = temp.measuredValue;
-    }
-  } catch { /* cluster not present */ }
-}
-
-function deriveStateString(
-  category: SmartHomeCategory,
-  attributes: Record<string, unknown>,
-  node: PairedNode,
-): string {
-  if (node.connectionState !== NodeStates.Connected) return "unavailable";
-
-  if (attributes.onOff !== undefined) {
-    return attributes.onOff ? "on" : "off";
-  }
-  if (attributes.measuredValue !== undefined) {
-    return String(Number(attributes.measuredValue) / 100);
-  }
-  if (attributes.localTemperature !== undefined) {
-    return String(Number(attributes.localTemperature) / 100);
-  }
-  return "unknown";
+  const res = await fetch(
+    `${baseUrl()}/devices/${encodeURIComponent(nodeIdStr)}`,
+    {
+      headers: authHeaders(),
+      signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+    },
+  );
+  // 404 is a real condition the route layer maps to its own 404 — not
+  // an error to reconstruct.
+  if (res.status === 404) return null;
+  if (!res.ok) throw await toSidecarError(res);
+  return (await res.json()) as MatterCommissionedDevice;
 }
 
 // --- Commands ---
@@ -491,24 +325,28 @@ export async function sendMatterCommand(
   data?: Record<string, unknown>,
 ): Promise<{ status: string; result?: unknown }> {
   // WARP-456: wrap the dispatcher so every Matter write — success or
-  // failure — lands as one signed ActivityRow. `_sendMatterCommandInner`
-  // does the real work; the wrapper only reacts to the outcome.
-  let result: { status: string; result?: unknown } | undefined;
+  // failure — lands as one signed ActivityRow. The HTTP hop to the
+  // sidecar does the real work; the wrapper only reacts to the outcome.
   let threw: unknown = null;
   try {
-    result = await _sendMatterCommandInner(nodeIdStr, command, data);
-    return result;
+    return await sidecarJson<{ status: string; result?: unknown }>(
+      `/devices/${encodeURIComponent(nodeIdStr)}/command`,
+      {
+        method: "POST",
+        body: JSON.stringify({ command, data }),
+      },
+    );
   } catch (err) {
     threw = err;
     throw err;
   } finally {
-    await recordActivity({
+    // auditQuietly, NOT recordActivity: a throw inside a finally block
+    // replaces the in-flight matter.js error with the audit failure.
+    await auditQuietly({
       kind: "smart_home",
       severity: threw ? "err" : "ok",
       sourceIcon: "home",
-      what: threw
-        ? `Matter ${command} failed`
-        : `Matter ${command}`,
+      what: threw ? `Matter ${command} failed` : `Matter ${command}`,
       sub: `nodeId ${nodeIdStr}`,
       refs: {
         nodeId: nodeIdStr,
@@ -518,150 +356,7 @@ export async function sendMatterCommand(
   }
 }
 
-async function _sendMatterCommandInner(
-  nodeIdStr: string,
-  command: string,
-  data?: Record<string, unknown>,
-): Promise<{ status: string; result?: unknown }> {
-  if (!controller) throw new Error("Matter controller not initialized");
-
-  const nodeId = NodeId(BigInt(nodeIdStr));
-  const node = await controller.getNode(nodeId);
-
-  if (node.connectionState !== NodeStates.Connected) {
-    throw new Error(`Device ${nodeIdStr} is not connected`);
-  }
-
-  // Find the first functional endpoint (skip root endpoint 0)
-  const endpointId = data?.endpoint_id
-    ? Number(data.endpoint_id)
-    : findFunctionalEndpoint(node);
-
-  const endpoint = node.parts.get(endpointId);
-  if (!endpoint) throw new Error(`Endpoint ${endpointId} not found on device`);
-
-  switch (command) {
-    case "turn_on":
-      await invokeClusterCommand(endpoint, "onOff", "on");
-      return { status: "ok" };
-
-    case "turn_off":
-      await invokeClusterCommand(endpoint, "onOff", "off");
-      return { status: "ok" };
-
-    case "toggle":
-      await invokeClusterCommand(endpoint, "onOff", "toggle");
-      return { status: "ok" };
-
-    case "set_brightness": {
-      const level = Math.round(
-        (Number(data?.brightness ?? 100) / 100) * 254,
-      );
-      await invokeClusterCommand(endpoint, "levelControl", "moveToLevel", {
-        level,
-        transitionTime: data?.transition_time ?? 10,
-        optionsMask: 0,
-        optionsOverride: 0,
-      });
-      return { status: "ok" };
-    }
-
-    case "set_temperature": {
-      const temp = Number(data?.temperature ?? 21);
-      const mode = Number(data?.mode ?? 0); // 0=heat, 1=cool
-      // Write absolute setpoint (Matter uses units of 0.01 degC)
-      const setpoint = Math.round(temp * 100);
-      const thermoState = (endpoint.state as any)?.thermostat;
-      if (!thermoState) throw new Error("Thermostat cluster not found on endpoint");
-      if (mode === 1) {
-        // Cooling
-        await writeClusterAttribute(endpoint, "thermostat", "occupiedCoolingSetpoint", setpoint);
-      } else {
-        // Heating (default)
-        await writeClusterAttribute(endpoint, "thermostat", "occupiedHeatingSetpoint", setpoint);
-      }
-      return { status: "ok" };
-    }
-
-    case "lock":
-      await invokeClusterCommand(endpoint, "doorLock", "lockDoor", {});
-      return { status: "ok" };
-
-    case "unlock":
-      await invokeClusterCommand(endpoint, "doorLock", "unlockDoor", {});
-      return { status: "ok" };
-
-    default:
-      throw new Error(`Unknown command: ${command}`);
-  }
-}
-
-function findFunctionalEndpoint(node: PairedNode): number {
-  for (const [epId] of node.parts) {
-    if (epId > 0) return epId;
-  }
-  throw new Error("No functional endpoint found on device");
-}
-
-async function invokeClusterCommand(
-  endpoint: any,
-  clusterName: string,
-  commandName: string,
-  args?: Record<string, unknown>,
-): Promise<void> {
-  const commands = endpoint.commands?.[clusterName];
-  if (!commands) {
-    throw new Error(`Cluster '${clusterName}' not found on endpoint`);
-  }
-  const fn = commands[commandName];
-  if (typeof fn !== "function") {
-    throw new Error(
-      `Command '${commandName}' not found on cluster '${clusterName}'`,
-    );
-  }
-  await fn(args ?? {});
-}
-
-async function writeClusterAttribute(
-  endpoint: any,
-  clusterName: string,
-  attributeName: string,
-  value: unknown,
-): Promise<void> {
-  // Use the endpoint's InteractionClient to write attributes
-  const cluster = endpoint.getClusterClientById?.(clusterName) ??
-    endpoint.getClusterClient?.(clusterName);
-  if (cluster && typeof cluster.setAttribute === "function") {
-    await cluster.setAttribute(attributeName, value);
-    return;
-  }
-  // Fallback: attempt via commands if a set command exists
-  const setCommand = `set${attributeName.charAt(0).toUpperCase()}${attributeName.slice(1)}`;
-  await invokeClusterCommand(endpoint, clusterName, setCommand, { [attributeName]: value });
-}
-
-// --- State subscriptions ---
-
-async function setupNodeListeners(nodeId: NodeId): Promise<void> {
-  if (!controller) return;
-
-  const node = await controller.getNode(nodeId);
-
-  node.events.attributeChanged.on((data: any) => {
-    stateEvents.emit("state_changed", {
-      nodeId: String(nodeId),
-      path: data.path,
-      value: data.value,
-    });
-  });
-
-  node.events.stateChanged.on((newState: NodeStates) => {
-    stateEvents.emit("connection_changed", {
-      nodeId: String(nodeId),
-      connectionState: newState,
-    });
-  });
-}
+// --- State subscriptions (SSE bridge) ---
 
 export function subscribeStateChanges(
   callback: (event: any) => void,
@@ -675,4 +370,130 @@ export function subscribeConnectionChanges(
 ): () => void {
   stateEvents.on("connection_changed", callback);
   return () => stateEvents.off("connection_changed", callback);
+}
+
+/**
+ * Long-lived consumer of the sidecar's /events SSE stream. Started by
+ * initMatterService(), stopped by shutdownMatterService(). Reconnects
+ * with a fixed backoff; every (re)connect refreshes the health flags so
+ * isMatterInitialized() self-heals after a sidecar restart without an
+ * orchestrator restart.
+ */
+function ensureEventBridge(): void {
+  if (bridgeAbort) return;
+  const abort = new AbortController();
+  bridgeAbort = abort;
+  void runEventBridge(abort.signal).catch((err) => {
+    logger.warn("matter event bridge stopped unexpectedly: %s", err);
+  });
+}
+
+async function runEventBridge(signal: AbortSignal): Promise<void> {
+  while (!signal.aborted) {
+    try {
+      const res = await fetch(`${baseUrl()}/events`, {
+        headers: authHeaders(),
+        signal,
+      });
+      if (res.ok && res.body) {
+        await refreshHealthFlags();
+        // The connect-time snapshot of sidecarInitialized goes stale
+        // while the stream lives: the sidecar's HTTP server + SSE
+        // heartbeats keep running when its controller fails
+        // non-fatally (routes 503), so the TCP stream never closes and
+        // the flag would stay true indefinitely. Re-probe /health on
+        // an interval for as long as the stream is open so
+        // isMatterInitialized() tracks the controller, not the socket.
+        const reprobe = setInterval(() => {
+          void refreshHealthFlags();
+        }, HEALTH_REPROBE_MS);
+        reprobe.unref?.();
+        try {
+          await consumeSseStream(res.body, signal);
+        } finally {
+          clearInterval(reprobe);
+        }
+      } else {
+        await res.body?.cancel().catch(() => undefined);
+      }
+    } catch {
+      // Connection refused / reset / aborted — handled by the loop.
+    }
+    sidecarReachable = false;
+    if (signal.aborted) return;
+    await sleep(BRIDGE_RECONNECT_MS, signal);
+  }
+}
+
+async function refreshHealthFlags(): Promise<void> {
+  try {
+    const res = await fetch(`${baseUrl()}/health`, {
+      headers: authHeaders(),
+      signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
+    });
+    if (res.ok) {
+      const health = (await res.json()) as { initialized?: boolean };
+      sidecarReachable = true;
+      sidecarInitialized = health.initialized === true;
+      return;
+    }
+  } catch {
+    // fall through
+  }
+  sidecarReachable = false;
+}
+
+async function consumeSseStream(
+  body: ReadableStream<Uint8Array>,
+  signal: AbortSignal,
+): Promise<void> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (!signal.aborted) {
+      const { done, value } = await reader.read();
+      if (done) return;
+      buffer += decoder.decode(value, { stream: true });
+      let frameEnd: number;
+      while ((frameEnd = buffer.indexOf("\n\n")) >= 0) {
+        const frame = buffer.slice(0, frameEnd);
+        buffer = buffer.slice(frameEnd + 2);
+        for (const line of frame.split("\n")) {
+          if (line.startsWith("data: ")) handleSseEvent(line.slice(6));
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function handleSseEvent(payload: string): void {
+  let event: { type?: string } & Record<string, unknown>;
+  try {
+    event = JSON.parse(payload);
+  } catch {
+    return;
+  }
+  const { type, ...rest } = event;
+  // Re-emit without the wire `type` discriminator — local subscribers
+  // (the dashboard-facing SSE route) historically received the bare
+  // event and add their own `type` when serializing.
+  if (type === "state_changed") stateEvents.emit("state_changed", rest);
+  else if (type === "connection_changed")
+    stateEvents.emit("connection_changed", rest);
+}
+
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, ms);
+    timer.unref?.();
+    signal.addEventListener("abort", done, { once: true });
+    function done() {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    }
+  });
 }

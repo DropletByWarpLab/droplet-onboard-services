@@ -9,13 +9,36 @@ Wants=network-online.target docker.service
 Type=simple
 User=droplet
 Group=droplet
-# Runtime config is loaded from an operator-managed env file. The file
-# is created by `setup.sh` with 0600 perms and holds the OpenWrt SSH
-# password, Frigate URL, etc. Keeping these out of the committed unit
-# file so git history never carries live credentials.
-EnvironmentFile=-/etc/droplet/device-bridge.env
 # Sensible defaults for endpoints that are always the same on a Droplet
-# deployment. Credentials come from EnvironmentFile above.
+# deployment. The operator env file is loaded AFTER these (see below) so it
+# can OVERRIDE any of them — including BRIDGE_BIND (WARP-659): systemd applies
+# Environment/EnvironmentFile in source order, last wins, so the file must come
+# last or an operator's setting is silently ignored.
+#
+# WARP-815 (K2): OPENWRT_HOST/USER/IFACE below feed the SSH/UCI path in
+# device-bridge.py — the `iwinfo <OPENWRT_IFACE> scan` and credential lookups
+# that target an OpenWrt router at OPENWRT_HOST. 192.168.50.1 is the single
+# documented OPENWRT_HOST default (matches docker/docker-compose.yml +
+# services/routing/main.py).
+#
+# These are DEFAULTS, not a claim that they fit every shape:
+#   - The SINGLE-BOX shape has no router at 192.168.50.1. It relies on
+#     DROPLET_AP_MODE=hostapd (set via the EnvironmentFile below) so that AP
+#     credential resolution (hostapd_wifi_credentials / _use_hostapd_mode in
+#     device-bridge.py) reads from the host hostapd / the droplet-openwrt
+#     container's hostapd.conf instead of these UCI/SSH defaults. If that env
+#     is unset or hasn't been mirrored into the bridge before it starts, the
+#     UCI/SSH `scan_via_openwrt` path is used and the bridge tries to reach
+#     192.168.50.1 — which does not exist on single-box. So these are safe on
+#     single-box only when DROPLET_AP_MODE=hostapd is in effect, not
+#     unconditionally.
+#   - OPENWRT_IFACE is just the SSH-path default here; this unit is NOT the
+#     authority on radio/NIC naming. The interface name that is actually
+#     correct for a given shape is resolved by the routing SDK — see
+#     services/routing/droplet_openwrt_sdk.py (_default_wifi_scan_device and
+#     the surrounding NET-02 note), which documents why a single literal does
+#     not fit every shape.
+# Either shape can re-pin all three via the operator env file (loaded last).
 Environment=OPENWRT_HOST=192.168.50.1
 Environment=OPENWRT_USER=root
 Environment=OPENWRT_IFACE=wlan0
@@ -27,9 +50,50 @@ Environment=OPENWRT_IFACE=wlan0
 Environment=FRIGATE_URL=http://127.0.0.1:5000
 Environment=ORCHESTRATOR_URL=http://127.0.0.1
 Environment=BRIDGE_PORT=9090
-Environment=BRIDGE_BIND=127.0.0.1
+# Bind all interfaces, NOT loopback. The orchestrator container is on the
+# `droplet_default` bridge network and reaches the bridge via
+# `host.docker.internal` (its `extra_hosts: host-gateway` mapping → the
+# host's docker-gateway IP, e.g. 172.18.0.1). A 127.0.0.1 bind refuses that
+# gateway connection, so GET /drives and GET /openwrt/qr from the
+# orchestrator silently fail and the dashboard's Drives panel + setup
+# storage step show nothing. This mirrors the oled-display service, which
+# binds 0.0.0.0:8082 for the same cross-container reachability. Safe because
+# every mutating endpoint (/wifi/connect, /openwrt/wifi/rotate,
+# /drives/<uuid>/eject) AND every credential-bearing read (/openwrt/qr — the
+# Wi-Fi PSK — plus /drives) is gated on BRIDGE_AUTH_TOKEN (WARP-659), and the
+# bridge refuses to start without that token (see device-bridge.py
+# _boot_banner). The remaining open reads (/wifi scan, /files, /cameras,
+# /health) carry no credential material. The in-code default stays 127.0.0.1;
+# an operator can re-pin the bind via the env file below (loaded last).
+Environment=BRIDGE_BIND=0.0.0.0
 Environment=BRIDGE_STATE_FILE=/var/lib/droplet-bridge/state.json
-ExecStart=/usr/bin/python3 /home/droplet/Documents/droplet-pi-platform/services/oled-display/device-bridge.py
+# WARP-808 follow-up: the hostapd Wi-Fi write (droplet-set-hostapd.sh, shelled
+# by POST /openwrt/wifi/hostapd) runs INSIDE this unit's sandbox — User=droplet
+# + ProtectSystem=strict make its default target /etc/default/droplet-openwrt-
+# attach unwritable (mktemp EROFS — the setup wizard's Home Wi-Fi save failed
+# with exactly that on the shipping box). Point the write at the bridge's own
+# StateDirectory instead; the attach script's customer_ap_creds block parses
+# ONLY DROPLET_AP_SSID/DROPLET_AP_PSK out of that file with hard validation
+# (NOT an EnvironmentFile — drop-in ordering would clobber it, and a
+# droplet-writable file must never inject arbitrary env into a root unit), so
+# a customer Wi-Fi write overrides provisioning defaults without root. A
+# factory reset wipes the StateDirectory AND /etc/droplet/ap-psk, so the AP
+# returns to the /etc/default SSID with a freshly generated per-box PSK.
+# The restart half of the write goes through polkit (50-droplet-device-
+# bridge.rules), not privilege escalation: NoNewPrivileges stays true.
+Environment=DROPLET_HOSTAPD_ENV_FILE=/var/lib/droplet-bridge/openwrt-attach.env
+# Operator-managed runtime config, loaded LAST so it overrides the inline
+# defaults above (BRIDGE_BIND, OPENWRT_*, etc.). Created by `setup.sh` with
+# 0600 perms; holds the OpenWrt SSH password, BRIDGE_AUTH_TOKEN, Frigate URL.
+# Kept out of the committed unit so git history never carries live credentials.
+EnvironmentFile=-/etc/droplet/device-bridge.env
+# @REPO_ROOT@ is filled in with the real repo path by
+# scripts/install-device-bridge.sh at install time, so the unit is not pinned
+# to one clone location. The old hardcoded
+# /home/droplet/Documents/droplet-onboard-services path does not exist on the
+# shipping box (repo lives at /home/droplet/edge-platform), so the service
+# exited 2/INVALIDARGUMENT and crash-looped.
+ExecStart=/usr/bin/python3 @REPO_ROOT@/services/oled-display/device-bridge.py
 Restart=on-failure
 RestartSec=5
 StandardOutput=append:/var/log/droplet-device-bridge.log

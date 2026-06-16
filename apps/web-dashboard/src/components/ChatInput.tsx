@@ -1,8 +1,18 @@
 "use client";
 
-import { useState, useRef, useCallback, useImperativeHandle, forwardRef } from "react";
-import { ArrowUp, Paperclip, Square } from "lucide-react";
-import type { ChatAttachment } from "@/lib/types";
+import {
+  useState,
+  useRef,
+  useMemo,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  forwardRef,
+} from "react";
+import { ArrowUpRight, Loader2, Mic, Paperclip, Square, Wrench } from "lucide-react";
+import { transcribeAudio, SttUnavailable } from "@/lib/api";
+import { canCaptureAudio, PcmRecorder } from "@/lib/audio-capture";
+import type { ChatAttachment, ToolCatalogEntry } from "@/lib/types";
 import { AttachmentChip } from "./AttachmentChip";
 
 interface ChatInputProps {
@@ -26,6 +36,16 @@ interface ChatInputProps {
    */
   isStreaming?: boolean;
   onStop?: () => void;
+  /**
+   * Slash-command tool menu. When a non-empty `slashTools` list is provided,
+   * typing "/" at the START of an empty-ish composer opens a filterable menu
+   * of tools; picking one fires `onToolCommand(tool)` (the chat page seeds the
+   * composer + shows its "Ready to use X" indicator, mirroring the WARP-829
+   * /tools hand-off). Omitted everywhere else (home hero, etc.) so those
+   * composers don't fetch the catalog or grow a menu.
+   */
+  slashTools?: ToolCatalogEntry[];
+  onToolCommand?: (tool: ToolCatalogEntry) => void;
 }
 
 /**
@@ -36,6 +56,14 @@ interface ChatInputProps {
  */
 export interface ChatInputHandle {
   insertQuote: (text: string) => void;
+  /**
+   * WARP-829: seed the composer with a starter line and hand the user the
+   * caret. Unlike `insertQuote` (which prepends a `> quote` block ahead of
+   * any draft), `seed` REPLACES the value — it's used when `/tools` primes
+   * the chat with a tool's starter sentence for the user to finish and
+   * send. Seeding never sends; the user edits and submits themselves.
+   */
+  seed: (text: string) => void;
 }
 
 export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput({
@@ -46,11 +74,104 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   onRemoveAttachment,
   isStreaming,
   onStop,
+  slashTools,
+  onToolCommand,
 }, ref) {
   const [value, setValue] = useState("");
   const [isDragging, setIsDragging] = useState(false);
+  // WARP-844 — voice input. "unavailable" hides the mic after the
+  // orchestrator answers 503 (whisper sidecar not deployed); jsdom and
+  // non-secure contexts hide it via canCaptureAudio().
+  const [voiceState, setVoiceState] = useState<
+    "idle" | "recording" | "transcribing" | "unavailable"
+  >(typeof window !== "undefined" && canCaptureAudio() ? "idle" : "unavailable");
+  const recorderRef = useRef<PcmRecorder | null>(null);
+
+  // Release the microphone if the composer unmounts mid-recording
+  // (navigation away) — otherwise the tab's mic indicator stays on and
+  // the capture stream leaks until the page is torn down.
+  useEffect(() => {
+    return () => {
+      const rec = recorderRef.current;
+      recorderRef.current = null;
+      if (rec) void rec.stop().catch(() => undefined);
+    };
+  }, []);
+
+  const toggleRecording = async () => {
+    if (voiceState === "transcribing" || voiceState === "unavailable") return;
+    if (voiceState === "recording") {
+      setVoiceState("transcribing");
+      try {
+        const rec = recorderRef.current;
+        recorderRef.current = null;
+        if (!rec) {
+          setVoiceState("idle");
+          return;
+        }
+        const { pcm, rate } = await rec.stop();
+        const { text } = await transcribeAudio(pcm, rate);
+        if (text) {
+          setValue((prev) => (prev ? `${prev} ${text}` : text));
+          textareaRef.current?.focus();
+        }
+        setVoiceState("idle");
+      } catch (err) {
+        if (err instanceof SttUnavailable) {
+          setVoiceState("unavailable");
+        } else {
+          // eslint-disable-next-line no-console
+          console.warn("[voice] transcription failed:", err);
+          setVoiceState("idle");
+        }
+      }
+      return;
+    }
+    try {
+      const rec = new PcmRecorder();
+      await rec.start();
+      recorderRef.current = rec;
+      setVoiceState("recording");
+    } catch {
+      // Mic permission denied / no device — treat as unavailable for
+      // this session rather than erroring on every click.
+      setVoiceState("unavailable");
+    }
+  };
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Slash-command tool menu (gated on `slashTools`). Opens when the composer
+  // text starts with "/"; the query is everything after it. A "/" anywhere
+  // other than the start is just a literal slash, so normal messages are
+  // unaffected.
+  const slashEnabled = Boolean(slashTools && slashTools.length > 0 && onToolCommand);
+  const [slashActiveIdx, setSlashActiveIdx] = useState(0);
+  const slashQuery =
+    slashEnabled && value.startsWith("/") ? value.slice(1).trimStart() : null;
+  const slashOpen = slashQuery !== null;
+  const slashMatches = useMemo(() => {
+    if (!slashEnabled || slashQuery === null) return [];
+    const q = slashQuery.toLowerCase();
+    const list = q
+      ? (slashTools ?? []).filter(
+          (t) =>
+            t.name.toLowerCase().includes(q) ||
+            t.homeDescription.toLowerCase().includes(q),
+        )
+      : (slashTools ?? []);
+    return list.slice(0, 8);
+  }, [slashEnabled, slashQuery, slashTools]);
+
+  const pickTool = useCallback(
+    (tool: ToolCatalogEntry) => {
+      // Hand off to the page (seeds the composer + shows the indicator). The
+      // seed REPLACES the "/query" text, so the menu closes on its own.
+      onToolCommand?.(tool);
+      setSlashActiveIdx(0);
+    },
+    [onToolCommand],
+  );
 
   const handleSubmit = useCallback(() => {
     const trimmed = value.trim();
@@ -68,6 +189,30 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     // the message. Reading `nativeEvent.isComposing` covers the cases
     // React's synthetic event misses on Safari/Firefox.
     if (e.nativeEvent.isComposing) return;
+    // Slash-menu keyboard nav takes precedence while it's open with matches.
+    if (slashOpen && slashMatches.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSlashActiveIdx((i) => Math.min(i + 1, slashMatches.length - 1));
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSlashActiveIdx((i) => Math.max(i - 1, 0));
+        return;
+      }
+      if (e.key === "Enter") {
+        e.preventDefault();
+        pickTool(slashMatches[Math.min(slashActiveIdx, slashMatches.length - 1)]);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        // Drop the leading "/" so the menu closes but any typed text stays.
+        setValue((v) => v.replace(/^\/+/, ""));
+        return;
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSubmit();
@@ -121,6 +266,18 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     handleFiles(e.dataTransfer.files);
   };
 
+  // Paste-to-attach: a clipboard paste carrying files (screenshot, file
+  // copied from Finder/Explorer, ...) routes through the same attach path
+  // as drag-and-drop. Text-only pastes fall through to the default
+  // textarea behavior untouched.
+  const onPaste: React.ClipboardEventHandler<HTMLTextAreaElement> = (e) => {
+    if (!onAttach) return;
+    const files = e.clipboardData?.files;
+    if (!files || files.length === 0) return;
+    e.preventDefault();
+    handleFiles(files);
+  };
+
   // Expose insertQuote to the parent — see ChatInputHandle. Wraps the
   // text in markdown blockquote syntax (matches what users would type
   // by hand) and focuses the textarea so they can keep typing their
@@ -150,6 +307,21 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
         });
       },
+      // WARP-829: replace the composer value with a starter line (from the
+      // /tools "Use in chat" hand-off) and focus the textarea with the caret
+      // at the end so the user keeps typing. No send — the user submits.
+      seed: (text: string) => {
+        setValue(text);
+        queueMicrotask(() => {
+          const el = textareaRef.current;
+          if (!el) return;
+          el.focus();
+          const end = el.value.length;
+          el.setSelectionRange(end, end);
+          el.style.height = "auto";
+          el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+        });
+      },
     }),
     [],
   );
@@ -170,15 +342,17 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}
-      className={`p-3 border-t border-separator bg-[var(--color-toolbar-bg)] dp-material
-        relative
-        ${isDragging ? "ring-2 ring-accent ring-inset" : ""}
-      `}
+      className="chat-composer relative"
     >
+      {/* Design-handoff composer card. The card is the visual focus
+          boundary — chat-indigo.css suppresses every inner focus ring. */}
+      <div
+        className={`chat-composer-inner ${isDragging ? "ring-2 ring-accent ring-inset" : ""}`}
+      >
       {showAttachmentRow ? (
         <div
           data-testid="attachment-row"
-          className="mb-2 flex flex-wrap gap-1.5"
+          className="flex flex-wrap gap-1.5"
         >
           {attachments!.map((a) => (
             <AttachmentChip
@@ -189,7 +363,63 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           ))}
         </div>
       ) : null}
-      <div className="flex items-end gap-2">
+      {slashOpen && slashMatches.length > 0 ? (
+        <ul
+          role="listbox"
+          aria-label="Tools"
+          data-testid="slash-tool-menu"
+          className="absolute bottom-full left-3 right-3 mb-2 max-h-64 overflow-y-auto
+            rounded-xl border border-separator bg-surface-primary dp-material shadow-lg z-50 py-1"
+        >
+          {slashMatches.map((tool, idx) => (
+            <li
+              key={tool.name}
+              role="option"
+              aria-selected={idx === slashActiveIdx}
+              onMouseDown={(e) => {
+                // preventDefault so the textarea keeps focus through the click.
+                e.preventDefault();
+                pickTool(tool);
+              }}
+              onMouseEnter={() => setSlashActiveIdx(idx)}
+              className={`flex items-start gap-2.5 px-3 py-2 cursor-pointer ${
+                idx === slashActiveIdx
+                  ? "bg-accent-subtle"
+                  : "hover:bg-surface-secondary"
+              }`}
+            >
+              <Wrench
+                size={14}
+                className="mt-0.5 flex-none text-accent"
+                aria-hidden="true"
+              />
+              <span className="min-w-0">
+                <span className="block type-footnote font-medium text-label-primary">
+                  {humanizeToolName(tool.name)}
+                </span>
+                <span className="block type-caption-1 text-label-tertiary line-clamp-2">
+                  {tool.homeDescription}
+                </span>
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      <textarea
+        ref={textareaRef}
+        value={value}
+        onChange={(e) => {
+          setValue(e.target.value);
+          setSlashActiveIdx(0);
+        }}
+        onKeyDown={handleKeyDown}
+        onInput={handleInput}
+        onPaste={onPaste}
+        placeholder="Ask Droplet anything…"
+        disabled={disabled}
+        rows={1}
+      />
+      <div className="chat-crow">
         {dropEnabled ? (
           <>
             <input
@@ -206,67 +436,65 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
               onClick={() => fileInputRef.current?.click()}
               disabled={disabled}
               aria-label="Attach a file"
-              className="w-11 h-11 rounded-full flex items-center justify-center
-                bg-surface-secondary text-label-secondary
-                hover:text-label-primary hover:bg-label-quaternary/40
-                transition-colors duration-150
-                disabled:opacity-50 disabled:cursor-not-allowed"
+              className="chat-iconbtn"
             >
-              <Paperclip size={18} strokeWidth={2.5} />
+              <Paperclip size={15} />
             </button>
           </>
         ) : null}
-        <textarea
-          ref={textareaRef}
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          onKeyDown={handleKeyDown}
-          onInput={handleInput}
-          placeholder="Send a message..."
-          disabled={disabled}
-          rows={1}
-          className="flex-1 resize-none bg-surface-secondary rounded-[22px] px-4 py-2.5
-            type-body text-label-primary placeholder:text-label-tertiary
-            focus:outline-none focus:ring-2 focus:ring-accent/30
-            disabled:opacity-50 disabled:cursor-not-allowed
-            transition-all duration-200 ease-smooth"
-        />
+        {voiceState !== "unavailable" ? (
+          <button
+            type="button"
+            onClick={() => void toggleRecording()}
+            disabled={disabled || voiceState === "transcribing"}
+            aria-label={
+              voiceState === "recording"
+                ? "Stop recording"
+                : voiceState === "transcribing"
+                  ? "Transcribing…"
+                  : "Dictate a message"
+            }
+            aria-pressed={voiceState === "recording"}
+            className={`chat-iconbtn ${voiceState === "recording" ? "is-rec animate-pulse" : ""}`}
+          >
+            {voiceState === "transcribing" ? (
+              <Loader2 size={15} className="animate-spin" />
+            ) : (
+              <Mic size={15} />
+            )}
+          </button>
+        ) : null}
         {showStop ? (
           <button
             type="button"
             onClick={onStop}
             aria-label="Stop generating"
-            className="
-              w-11 h-11 rounded-full flex items-center justify-center
-              bg-surface-secondary text-system-red
-              hover:bg-system-red/10
-              transition-all duration-200 ease-smooth
-              active:scale-90
-            "
+            className="chat-send chat-stop"
           >
-            <Square size={14} strokeWidth={2.5} fill="currentColor" aria-hidden="true" />
+            <Square size={13} fill="currentColor" aria-hidden="true" />
           </button>
         ) : (
           <button
             onClick={handleSubmit}
             disabled={disabled || !hasText}
             aria-label="Send message"
-            className={`
-              w-11 h-11 rounded-full flex items-center justify-center
-              transition-all duration-200 ease-smooth
-              ${
-                hasText
-                  ? "bg-accent text-white scale-100 opacity-100"
-                  : "bg-label-quaternary text-label-tertiary scale-90 opacity-60"
-              }
-              disabled:cursor-not-allowed
-              active:scale-90
-            `}
+            className="chat-send"
           >
-            <ArrowUp size={18} strokeWidth={2.5} />
+            <ArrowUpRight size={15} strokeWidth={2.4} />
           </button>
         )}
       </div>
+      </div>
+      <p className="chat-hint">
+        Responses are generated locally on your Droplet — nothing leaves the
+        device.
+      </p>
     </div>
   );
 });
+
+/** "block_network_device" → "Block network device" for the slash menu. */
+function humanizeToolName(name: string): string {
+  const spaced = name.replace(/_/g, " ").trim();
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}

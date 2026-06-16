@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createServer } from "../src/server.js";
+import { createServer, type TrustContext } from "../src/server.js";
 import type { ContextDeps } from "../src/context.js";
 
 /**
@@ -22,8 +22,13 @@ function buildDeps(): ContextDeps {
 }
 
 async function connectClient(role: "admin" | "family" | "guest" | undefined) {
-  const claims = role === undefined ? undefined : { sub: `u-${role}`, role };
-  const server = createServer(buildDeps(), claims);
+  // role === undefined models the trusted stdio in-proc principal;
+  // a concrete role models an authenticated HTTP caller (WARP-563).
+  const trust: TrustContext =
+    role === undefined
+      ? { kind: "local-trusted" }
+      : { kind: "authenticated", claims: { sub: `u-${role}`, role } };
+  const server = createServer(buildDeps(), trust);
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "rbac-test", version: "0.0.1" }, { capabilities: {} });
   await Promise.all([
@@ -81,7 +86,10 @@ describe("server-level RBAC", () => {
   // undefined}` (NOT `claims = undefined`). That must NOT be treated as
   // the trusted-stdio principal — it gets read-only access.
   it("HTTP-shaped claims with role: undefined sees read-only tools, not writes", async () => {
-    const server = createServer(buildDeps(), { sub: "u-no-role", role: undefined });
+    const server = createServer(buildDeps(), {
+      kind: "authenticated",
+      claims: { sub: "u-no-role", role: undefined },
+    });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "rbac-test", version: "0.0.1" }, { capabilities: {} });
     await Promise.all([
@@ -98,7 +106,10 @@ describe("server-level RBAC", () => {
   });
 
   it("HTTP-shaped claims with role: undefined gets forbidden_tool_for_role on a write call", async () => {
-    const server = createServer(buildDeps(), { sub: "u-no-role", role: undefined });
+    const server = createServer(buildDeps(), {
+      kind: "authenticated",
+      claims: { sub: "u-no-role", role: undefined },
+    });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "rbac-test", version: "0.0.1" }, { capabilities: {} });
     await Promise.all([

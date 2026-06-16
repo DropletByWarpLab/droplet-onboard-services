@@ -224,25 +224,25 @@ def test_synthetic_nc_file_id_is_deterministic():
 def test_handle_uploaded_image_only_is_ready_not_failed(
     fake_io, tmp_path, monkeypatch
 ):
-    """WARP-305: image-only attachments (PNG / JPEG / HEIC) have no text
-    to extract. The previous behavior published status='failed' with
-    reason='empty_extraction', which surfaced as "Something went wrong on
-    this turn" in the chat surface. The fix: skip text extraction entirely
-    for image MIME types, mark the row indexed with warning 'image_only',
-    and publish status='ready' so the chip shows ✓ instead of ⚠.
+    """WARP-305 → WARP-844: a photo with no OCR-able text must land as
+    ✓ Ready with the `image_only` warning (NOT ⚠ Failed). Since WARP-844
+    the handler tries OCR first (screenshots are worth indexing) and only
+    falls back to this outcome when the extractor finds nothing — here the
+    stubbed dispatch returns None, the "OCR backend unavailable /
+    nothing extractable" case.
     """
     import brain_ingest
 
-    # Drop a fake "image" file at the expected path. The handler doesn't
-    # actually read the bytes when the MIME is image/* — it just records
-    # the manifest and marks the row ready.
+    # Drop a fake "image" file at the expected path. The stubbed dispatch
+    # below answers None, so the handler records the manifest and marks
+    # the row ready without touching the bytes.
     item_dir = tmp_path / "alice" / "item-img"
     item_dir.mkdir(parents=True, exist_ok=True)
     fake_image = item_dir / "original.png"
     fake_image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
 
-    # Track whether the extractor / embedder ran — they MUST NOT for
-    # image-only files.
+    # WARP-844: OCR IS attempted now — record the call and answer None
+    # (no text found / backend unavailable).
     dispatch_calls: list[tuple] = []
     monkeypatch.setattr(
         brain_ingest,
@@ -262,9 +262,9 @@ def test_handle_uploaded_image_only_is_ready_not_failed(
         }
     )
 
-    # No text extraction attempted.
-    assert dispatch_calls == []
-    # No chunks upserted.
+    # OCR was attempted (WARP-844) but produced nothing…
+    assert len(dispatch_calls) == 1
+    # …so no chunks were upserted.
     assert fake_io["upserts"] == []
     # Row IS marked indexed with the image_only warning so the chip stops
     # spinning. WARP-330: status='ready' is now persisted explicitly so
@@ -292,6 +292,61 @@ def test_handle_uploaded_image_only_is_ready_not_failed(
     assert parsed["mimeType"] == "image/png"
     assert parsed["chunks"] == 0
     assert "image_only" in parsed["extractorWarnings"]
+
+
+def test_handle_uploaded_image_with_text_is_ocr_indexed(
+    fake_io, tmp_path, monkeypatch
+):
+    """WARP-844: a screenshot / scanned document carries OCR-able text —
+    it goes through the NORMAL pipeline (chunks upserted, embedded,
+    status='ready' with no image_only warning), exactly like a text file.
+    """
+    import brain_ingest
+    from extractors.spans import Span
+    from anchor_schema import NoneAnchor
+
+    item_dir = tmp_path / "alice" / "item-shot"
+    item_dir.mkdir(parents=True, exist_ok=True)
+    fake_image = item_dir / "original.png"
+    fake_image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+
+    ocr_text = "Quarterly revenue rose twelve percent compared to last year."
+    monkeypatch.setattr(
+        brain_ingest,
+        "dispatch",
+        lambda *_a, **_k: {
+            "spans": [
+                Span(text=ocr_text, anchor=NoneAnchor(), section_path=["original.png"])
+            ],
+            "warnings": [],
+        },
+    )
+    monkeypatch.setattr(brain_ingest, "_fetch_item_status", lambda _i: None)
+
+    brain_ingest.handle_brain_uploaded(
+        {
+            "itemId": "item-shot",
+            "userId": "alice",
+            "path": str(fake_image),
+            "mimeType": "image/png",
+            "filename": "screenshot.png",
+        }
+    )
+
+    # Chunks landed with the brain tagging — the screenshot is searchable.
+    assert len(fake_io["upserts"]) >= 1
+    for u in fake_io["upserts"]:
+        assert u["source"] == "brain"
+        assert u["brain_item_id"] == "item-shot"
+    # Embedded like any document.
+    assert fake_io["embed_calls"], "expected the OCR text to be embedded"
+    # Ready WITHOUT the image_only warning — this is a real indexed doc.
+    assert any(
+        m["item_id"] == "item-shot"
+        and m["status"] == "ready"
+        and "image_only" not in m["warnings"]
+        for m in fake_io["marked"]
+    ), fake_io["marked"]
 
 
 def test_handle_uploaded_skips_when_status_is_queued_for_transcription(
@@ -510,3 +565,208 @@ def test_handle_uploaded_pdf_end_to_end_no_section_path_exception(
         "droplet/files/alice/brain/indexed",
         {"itemId": "item-pdf", "status": "ready"},
     ) in fake_io["published"]
+
+
+# ── IDX-05: admin re-index must apply the WARP-435 contextual header ──
+#
+# `reindex_one` (the orchestrator's /api/admin/files/:id/reindex target)
+# historically embedded + stored the RAW chunk text, dropping the WARP-435
+# "Document: {name} / Section: {a > b}" header that all three primary
+# ingest paths (handle_brain_uploaded, watcher, transcription_worker)
+# apply. That silently produced different embeddings AND different stored
+# text for an admin-re-indexed file vs a watcher-indexed one, degrading
+# retrieval and breaking cross-path consistency. This test pins the parity:
+# the embedder must see the prefixed text, the stored `text` column must be
+# the prefixed text, and metadata must carry `sectionPath`.
+
+
+class _FakeCursor:
+    """Captures execute() args; supports the `with conn.cursor() as cur` form."""
+
+    def __init__(self, store):
+        self._store = store
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        self._store.append((sql, params))
+
+
+class _FakeConn:
+    def __init__(self, store):
+        self._store = store
+        self.autocommit = True
+        self.committed = False
+
+    def cursor(self):
+        return _FakeCursor(self._store)
+
+    def commit(self):
+        self.committed = True
+
+    def rollback(self):  # pragma: no cover - not exercised in happy path
+        pass
+
+    def close(self):
+        pass
+
+
+def test_reindex_one_applies_warp435_contextual_header(monkeypatch, tmp_path):
+    import brain_ingest
+    import db as db_mod
+
+    # Real text file so the production chunker runs and yields real chunks.
+    item_dir = tmp_path / "alice" / "bmi-reindex"
+    item_dir.mkdir(parents=True, exist_ok=True)
+    target = item_dir / "original.txt"
+    target.write_text(
+        "alpha beta gamma delta epsilon zeta eta theta iota kappa",
+        encoding="utf-8",
+    )
+
+    # fetch_item / get_conn are re-imported from `db` inside reindex_one.
+    monkeypatch.setattr(
+        db_mod,
+        "fetch_item",
+        lambda conn, *, item_id: {
+            "id": item_id,
+            "userId": "alice",
+            "storagePath": str(target),
+            "mimeType": "text/plain",
+        },
+    )
+    monkeypatch.setattr(db_mod, "get_conn", lambda: object())
+    monkeypatch.setattr(
+        db_mod, "mark_brain_item_indexed", lambda *a, **k: None
+    )
+
+    # Capture what the embedder is handed (must be the PREFIXED text).
+    embed_inputs: list[list[str]] = []
+
+    def _embed(texts):
+        embed_inputs.append(list(texts))
+        return [[float(i)] * 384 for i in range(len(texts))]
+
+    monkeypatch.setattr(brain_ingest, "embed_texts", _embed)
+
+    # Capture the INSERT rows via a fake psycopg2 connection. reindex_one
+    # does a *function-local* `import psycopg2`, so we patch connect() on
+    # the real module object in sys.modules (a module-attr on brain_ingest
+    # would be ignored by the local import).
+    executed: list[tuple] = []
+    import psycopg2 as _p2
+
+    monkeypatch.setattr(
+        _p2, "connect", lambda *a, **k: _FakeConn(executed)
+    )
+    # register_vector is imported as `from pgvector.psycopg2 import
+    # register_vector` inside the function — stub the module attr.
+    import pgvector.psycopg2 as _pgv
+
+    monkeypatch.setattr(_pgv, "register_vector", lambda conn: None)
+
+    result = brain_ingest.reindex_one("bmi-reindex")
+
+    assert result["chunksWritten"] >= 1
+
+    # 1) The embedder saw the prefixed text on every chunk.
+    assert embed_inputs, "embed_texts was never called"
+    for txt in embed_inputs[0]:
+        assert txt.startswith("Document: original.txt"), txt[:80]
+
+    # 2) Stored `text` column carries the prefix, and metadata has
+    #    sectionPath — parity with the primary ingest paths.
+    inserts = [
+        params
+        for (sql, params) in executed
+        if 'INSERT INTO "FileContentChunk"' in sql
+    ]
+    assert inserts, "no INSERT executed"
+    for params in inserts:
+        # Column order: userId, ncFileId, path, chunkIdx, text, embedding,
+        # source, brainItemId, pageNumber, warnings, metadata(json str).
+        stored_text = params[4]
+        metadata_json = params[10]
+        assert stored_text.startswith("Document: original.txt"), stored_text[:80]
+        assert '"sectionPath"' in metadata_json, metadata_json
+
+    # 3) The embedded strings and the stored strings are identical
+    #    (the embedder saw exactly what we persisted).
+    stored_texts = [params[4] for params in inserts]
+    assert stored_texts == embed_inputs[0]
+
+
+def test_reindex_one_malformed_anchor_falls_back_to_null(monkeypatch, tmp_path):
+    """IDX-05: a chunk whose ``anchor.model_dump()`` raises must NOT abort the
+    whole re-index transaction (which would roll back and drop every chunk for
+    the file). The chunk still lands with ``anchor=null`` and a
+    ``malformed_anchor`` warning — parity with handle_brain_uploaded (WARP-287).
+    """
+    import brain_ingest
+    import db as db_mod
+
+    item_dir = tmp_path / "alice" / "bmi-bad-anchor"
+    item_dir.mkdir(parents=True, exist_ok=True)
+    target = item_dir / "original.txt"
+    target.write_text(
+        "alpha beta gamma delta epsilon zeta eta theta iota kappa",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        db_mod,
+        "fetch_item",
+        lambda conn, *, item_id: {
+            "id": item_id,
+            "userId": "alice",
+            "storagePath": str(target),
+            "mimeType": "text/plain",
+        },
+    )
+    monkeypatch.setattr(db_mod, "get_conn", lambda: object())
+    monkeypatch.setattr(db_mod, "mark_brain_item_indexed", lambda *a, **k: None)
+    monkeypatch.setattr(
+        brain_ingest, "embed_texts", lambda texts: [[0.0] * 384 for _ in texts]
+    )
+
+    # Force a chunk whose anchor serialization blows up.
+    class _BadAnchor:
+        def model_dump(self):
+            raise ValueError("boom")
+
+    class _FakeChunk:
+        text = "alpha beta gamma delta"
+        section_path = ("Intro",)
+        anchor = _BadAnchor()
+
+    monkeypatch.setattr(
+        brain_ingest, "_chunk_spans_from_doc", lambda doc: [_FakeChunk()]
+    )
+
+    executed: list[tuple] = []
+    import psycopg2 as _p2
+
+    monkeypatch.setattr(_p2, "connect", lambda *a, **k: _FakeConn(executed))
+    import pgvector.psycopg2 as _pgv
+
+    monkeypatch.setattr(_pgv, "register_vector", lambda conn: None)
+
+    # Must NOT raise — the whole point of the guard.
+    result = brain_ingest.reindex_one("bmi-bad-anchor")
+    assert result["chunksWritten"] == 1
+
+    inserts = [
+        params
+        for (sql, params) in executed
+        if 'INSERT INTO "FileContentChunk"' in sql
+    ]
+    assert inserts, "no INSERT executed — the malformed anchor aborted the txn"
+    params = inserts[0]
+    # warnings column (index 9) carries the fallback marker.
+    assert "malformed_anchor" in params[9]
+    # metadata (index 10) stored anchor as null rather than crashing.
+    assert '"anchor": null' in params[10]

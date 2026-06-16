@@ -19,14 +19,14 @@ Project scoping (WARP-337)
 docker.sock = host root, but the application layer should still scope
 its affordances to its own compose project. Every list / inspect /
 restart call filters / asserts on the
-`com.docker.compose.project=droplet-pi-platform` label. A bearer-token
+`com.docker.compose.project=droplet` label. A bearer-token
 holder can therefore see and restart containers belonging to THIS
 stack, but cannot touch unrelated containers running on the same
 docker daemon (system containers, other compose stacks, etc.). This
 also makes the operator's view of `/ops/containers` match what they
 expect from `docker compose ps`.
 
-The project name is hard-coded to match the `name: droplet-pi-platform`
+The project name is hard-coded to match the `name: droplet`
 top-level field in docker-compose.yml. If we ever ship a multi-stack
 appliance, lift this to an env var.
 
@@ -67,7 +67,7 @@ DEFAULT_LOG_TAIL = 200
 # top-level `name:` field in docker-compose.yml. Used by list / get /
 # restart to scope the docker.sock surface to our own stack.
 ALLOWED_PROJECT = os.environ.get(
-    "OPS_COMPOSE_PROJECT", "droplet-pi-platform"
+    "OPS_COMPOSE_PROJECT", "droplet"
 )
 
 # Cap the docker SDK's socket timeout so a hung daemon can't pin a

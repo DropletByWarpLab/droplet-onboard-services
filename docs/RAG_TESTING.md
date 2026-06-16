@@ -7,9 +7,11 @@ the embedding plumbing, start here.
 
 > **RAGAS metrics layered on top of NDCG@10:** see the [RAGAS metrics](#ragas-metrics-warp-436)
 > section below for faithfulness / context-precision / context-recall /
-> answer-relevancy / factual-correctness. Runs nightly on Linux CI via
-> `.github/workflows/rag-eval-nightly.yml`; can be run locally on Linux
-> with `RAGAS_ENABLED=1 ./scripts/test-rag.sh --with-ragas`.
+> answer-relevancy / factual-correctness. Runs hourly during off-hours
+> on the appliance via the `services/rag-eval/` container (Compose
+> profile `eval`); can be run locally on Linux against an already-up
+> Compose stack with `python tests/retrieval-eval/ragas/ragas_runner.py
+> --variant hybrid --limit 10`.
 
 ## What gets tested
 
@@ -163,7 +165,7 @@ case that single-shot tests would call green and ship.
 
 ### LLM offline acceptance
 
-If `ai-gateway` routes Ollama to an unreachable Jetson (the default
+If `ai-gateway` routes Ollama to an unreachable inference host (the default
 on a developer laptop), the agent hits `max_iter` and returns
 `stop_reason: "iteration_limit"`. That's acceptable as long as
 `search_content` was still called and hits came back. The test
@@ -332,33 +334,44 @@ runs) rather than a single-shot threshold.
 
 | Judge | When | Cost | How to invoke |
 |---|---|---|---|
-| `local` (default) | nightly + PR-of-Phase-3-or-4 | free (local Ollama, ~50 min runner time on cold) | `RAGAS_JUDGE=local` (default) |
-| `cloud` | release-candidate builds, goldens-recalibration | OpenAI tokens, see budget tracker | `RAGAS_JUDGE=cloud` + `OPENAI_API_KEY` |
+| `local` (default) | scheduled appliance runs (hourly off-hours), dev sanity checks | free (local Ollama on the appliance) | `RAGAS_JUDGE=local` (default) |
+| `cloud` | release-candidate verification, goldens-recalibration | OpenAI tokens, see budget tracker | `RAGAS_JUDGE=cloud` + `OPENAI_API_KEY` |
 
-PR CI **never** spends cloud judge tokens. The nightly workflow
-defaults to local. The cloud judge is reserved for release-candidate
-verification where the noise floor of the local judge would mask a
-real regression.
+The cloud judge is reserved for release-candidate verification where
+the noise floor of the local judge would mask a real regression.
 
 ### How to run
 
-```bash
-# Local (Linux only; macOS dev path can't bring up the full stack
-# — see "macOS dev-machine note" above):
-RAGAS_ENABLED=1 ./scripts/test-rag.sh --with-ragas
+The canonical scheduled path lives in `services/rag-eval/`. On a test
+or staging appliance, opt in via the `eval` Compose profile and the
+container fires hourly off-hours (see `services/rag-eval/README.md`
+for the cron expression and env-var knobs). Ad-hoc runs from inside
+that container:
 
-# Or by-hand against an already-running stack:
+```bash
+# Single ad-hoc run on the appliance
+docker exec droplet-rag-eval-1 \
+    python /opt/rag-eval/main.py run-once
+
+# Bootstrap baselines (N sequential runs + aggregate)
+docker exec droplet-rag-eval-1 \
+    python /opt/rag-eval/main.py bootstrap --runs 5
+```
+
+For dev iteration against an already-running Compose stack on Linux,
+the canonical runner can also be invoked directly:
+
+```bash
 python tests/retrieval-eval/ragas/ragas_runner.py \
     --variant hybrid --limit 10 --judge local \
     --out tests/retrieval-eval/ragas/results.json
-
-# Via CI:
-gh workflow run rag-eval-nightly --ref <branch>
 ```
 
-Outputs land in `tests/retrieval-eval/ragas/results.{json,md}`. The
-nightly workflow uploads both as artifacts (`ragas-results-<run_id>`,
-30-day retention).
+Scheduled runs write per-run JSON + Markdown under
+`/data/rag-eval/runs/` on the appliance's named volume; bootstrap
+mode writes a `baselines.candidate.json` at the volume root that you
+copy back into `tests/retrieval-eval/ragas/baselines.json` to
+promote.
 
 ### Goldens
 
@@ -389,15 +402,19 @@ warning to stderr.
 metric over 5 runs, plus the derived floor (`p50 − 1.5 × IQR`). The
 WARP-436 integration test asserts every metric's mean is ≥ floor.
 
-**Today** that file is a placeholder (all-zero floors). The first
-nightly run on Linux CI populates it. To rebaseline after a change to
-goldens or to the judge model:
+**Today** that file is a placeholder (all-zero floors). Populate it
+with one bootstrap run on a deployed appliance with the `eval` Compose
+profile active:
 
-1. Run the nightly workflow 5 times: `gh workflow run rag-eval-nightly` × 5.
-2. Pull the `results.json` artifacts from each.
-3. Compute p50 / p95 / IQR per metric, write to `baselines.json`.
-4. Commit `baselines.json` in a PR titled `chore(rag-eval): rebaseline
+1. `docker exec droplet-rag-eval-1 python /opt/rag-eval/main.py bootstrap --runs 5`
+   — ~1 h on the appliance GPU. Writes `/data/rag-eval/baselines.candidate.json`
+   with p50 / p95 / IQR / floor per metric and per class.
+2. Copy out: `docker cp droplet-rag-eval-1:/data/rag-eval/baselines.candidate.json tests/retrieval-eval/ragas/baselines.json`.
+3. Commit `baselines.json` in a PR titled `chore(rag-eval): rebaseline
    RAGAS — <reason>` so the rebaseline event is auditable.
+
+The same flow applies after any change to goldens, judge model, or
+retrieval pipeline that shifts metrics enough to warrant new floors.
 
 ### Triaging a RAGAS failure
 
@@ -415,7 +432,7 @@ goldens or to the judge model:
 - `tests/retrieval-eval/ragas/README.md` — per-batch landing status,
   isolation contract, file inventory.
 - `tests/retrieval-eval/ragas/ragas_runner.py` — the runner itself.
-- `.github/workflows/rag-eval-nightly.yml` — nightly CI workflow.
+- `services/rag-eval/` — scheduled appliance service that drives the runner hourly off-hours.
 - [`docs/ADR-003-rag-techniques-adoption.md`](ADR-003-rag-techniques-adoption.md) — full Phase 2 design.
 
 ## LLM determinism caveat (e2e test)
@@ -429,7 +446,7 @@ file, same sentinel — stays stable across model invocations. Free-text
 output is allowed to vary; that's a model property, not a RAG one. The
 header comment in the test file spells out which axes are deterministic.
 
-If your ai-gateway routes to an off-line Jetson (the default in this
+If your ai-gateway routes to an off-line inference host (the default in this
 repo), the e2e test will hit the iteration limit on the agent loop —
 `stop_reason: "iteration_limit"` is acceptable as long as
 `search_content` was called and returned hits. Set

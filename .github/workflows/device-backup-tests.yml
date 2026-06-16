@@ -1,0 +1,39 @@
+name: device-backup-tests
+
+# WARP-570 — full-device backup + restore drill. Static checks gate the
+# scripts' structure + the factory-reset safeguard; with Docker present the
+# job also runs the backup→mutate→restore round-trip against a disposable
+# compose project. Docker is available on ubuntu-latest runners.
+
+on:
+  pull_request:
+    paths:
+      - "scripts/**"
+      - "docker/**"
+      - "tests/device-backup.test.sh"
+      - ".github/workflows/device-backup-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "scripts/**"
+      - "docker/**"
+      - "tests/device-backup.test.sh"
+      - ".github/workflows/device-backup-tests.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: device-backup-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  device-backup:
+    runs-on: ubuntu-latest
+    # A hung test must fail the job fast, not burn the 6h default runner
+    # allocation. Runs a backup→mutate→restore Docker round-trip against a
+    # disposable compose project (pulls only postgres:16-alpine, no image
+    # build) — 20 min covers the pull + round-trip with headroom.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run full-device backup + restore drill
+        run: bash tests/device-backup.test.sh

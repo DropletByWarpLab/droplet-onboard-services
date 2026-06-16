@@ -15,6 +15,19 @@ export interface ChatToolCall {
   data?: unknown;
   status?: string;
   message?: string;
+  /**
+   * WARP-640 — one-click re-issue handle for a confirmation the chat chip can
+   * complete itself (e.g. `run_scene`). When present, the chip renders an
+   * "Approve & run" button that re-POSTs with the single-use token to finish
+   * the action. Absent for tools confirmed on a dedicated dashboard surface.
+   */
+  confirmation?: {
+    kind: string;
+    sceneId?: string;
+    confirmationToken: string;
+  };
+  /** Local approve-button state: undefined = idle, then running → ran/failed. */
+  confirmState?: "running" | "ran" | "failed";
 }
 
 export interface ChatMessage {
@@ -23,6 +36,15 @@ export interface ChatMessage {
   content: string;
   /** Tool dispatches surfaced on this assistant turn (if any). */
   toolCalls?: ChatToolCall[];
+  /**
+   * WARP-458 — concatenated deep-reasoning trace for this assistant
+   * turn. Accumulated live from `reasoning_step` SSE events and carried
+   * through loadConversation from the persisted row. Rendered as the
+   * collapsed "Thought process" disclosure above the bubble.
+   */
+  reasoning?: string;
+  /** WARP-844 — thumbs rating on an assistant turn (null/absent = unrated). */
+  feedback?: "up" | "down" | null;
   /**
    * Set on an assistant message when the turn failed (network error,
    * ai-gateway down, MCP child crashed, model returned `stop_reason:
@@ -56,6 +78,15 @@ export interface ChatMessage {
    * is populated exclusively by `loadConversation`.
    */
   failureKind?: "failed" | "aborted" | "interrupted" | "missing";
+  /**
+   * WARP-859 — files attached on a user turn. Snapshotted from the
+   * composer at send time so the file rides visibly onto the message it
+   * was sent with (and leaves the input). Display-only; the live status
+   * is frozen at send. Absent on assistant turns and on rehydrated
+   * history (server doesn't link brain items to individual messages —
+   * the conversation-scoped list drives SessionHeader instead).
+   */
+  attachments?: ChatAttachment[];
 }
 
 /**
@@ -102,6 +133,21 @@ export interface ChatRequest {
   /** WARP-174: skip /chat history persistence for throwaway turns
    * (setup wizard "Ask the AI" probe, health checks). Default false. */
   ephemeral?: boolean;
+  /** Brain-memory items attached to this conversation (WARP-203). Sent
+   * on every turn; the orchestrator verifies ownership and injects the
+   * extracted content as a system message so the model actually sees
+   * what the user attached. */
+  attachments?: { itemId: string }[];
+  /** WARP-458 — ask the orchestrator to emit `reasoning_step` SSE events
+   * before the answer. Persistence of the trace happens server-side
+   * regardless; this only gates the live wire. */
+  captureReasoning?: boolean;
+  /** Client-minted draft chat id, sent on the FIRST turn so the server
+   * adopts draft-phase brain uploads into the new conversation. */
+  draftChatId?: string;
+  /** WARP-845 — file a newly-created conversation under this project
+   * (first turn only; ownership-validated server-side). */
+  projectId?: string;
 }
 
 export interface ModelInfo {
@@ -113,6 +159,62 @@ export interface ModelInfo {
 
 export interface ModelsResponse {
   models: ModelInfo[];
+}
+
+// ── WARP-836: read-only Models surface (`/models`) ──
+//
+// Wire shape of `GET /api/models` — the status page payload, distinct from
+// `/api/llm/models` (the chat model selector above). Mirrors the orchestrator
+// `models-summary.service.ts` types 1:1. Many fields are intentionally
+// null/0 today: they are DOCUMENTED PLACEHOLDERS for metrics ai-gateway
+// doesn't expose yet (gbOnDisk, role, tokensPerSec, diskBarPct, gpu,
+// avgLatencyMs) — never fabricated by the dashboard. The page renders them
+// as an honest "—"/"Unavailable" and `cloudSpendUsd` as "$0.00".
+
+/** One local LLM served on the box. */
+export interface LocalModelRow {
+  name: string;
+  family: string;
+  provider: string;
+  contextLength: number | null;
+  /** GB on disk — null until ai-gateway exposes per-model disk usage. */
+  gbOnDisk: number | null;
+  /** "chat" | "embed" | "vision" | … — null until ai-gateway tags models. */
+  role: string | null;
+  /** Lifecycle of the model in the runtime. Drives the status chip. */
+  status: "ready" | "loading" | "error";
+  /** Sustained tokens/sec from the most recent benchmark; null until wired. */
+  tokensPerSec: number | null;
+  /** 0–100 fill for the on-disk usage meter; null until gbOnDisk has a value. */
+  diskBarPct: number | null;
+}
+
+/** One opt-in cloud provider. Read-only on this surface — enabling a provider
+ *  happens in Settings (the off-LAN allowlist), never here. */
+export interface CloudProviderRow {
+  provider: "anthropic" | "openai" | "gemini";
+  /** Always false today (cloud escape default-off per FEATURES.md §8). */
+  enabled: boolean;
+  /** ISO timestamp of the last cloud-escape call, or null. */
+  lastUsedAt: string | null;
+  /** Cumulative spend this billing period; 0 until egress aggregation lands. */
+  spendUsd: number;
+}
+
+/** GPU stats block — null until ai-gateway exposes a `/gpu` probe. */
+export interface ModelsGpuInfo {
+  name: string;
+  vramGb: number;
+  utilPct: number;
+  tempC: number;
+}
+
+export interface ModelsPagePayload {
+  local: LocalModelRow[];
+  cloud: CloudProviderRow[];
+  gpu: ModelsGpuInfo | null;
+  avgLatencyMs: number;
+  cloudSpendUsd: number;
 }
 
 // WARP-311: legacy session types removed alongside the orchestrator
@@ -216,6 +318,11 @@ export interface VpnStatusInfo {
   configured: boolean;
   endpointConfigured: boolean;
   endpointHost?: string | null;
+  /** ADR-023: the publicly-trusted per-device FQDN `d-<hmac>.devices.warp-lab.ai`.
+   *  The one address that works at home AND over the tunnel with a green padlock.
+   *  Null until the box learns it from HQ. Safe to show to any user (it is
+   *  published to Certificate Transparency anyway, carries no PII, has no A record). */
+  publicFqdn?: string | null;
   listenPort?: number;
   serverPublicKey?: string;
   addresses?: string[];
@@ -290,9 +397,8 @@ export interface AuthUser {
 export type InviteRole = "user" | "admin";
 
 export interface InviteCreateRequest {
-  username: string;
+  email: string;
   displayName?: string;
-  email?: string;
   role?: InviteRole;
   ttlHours?: number;
 }
@@ -380,6 +486,12 @@ export interface StorageStats {
 
 export interface DriveInfo {
   device: string;
+  /** WARP-827: whole-disk kernel name backing `device` (e.g. "sda",
+   *  "nvme0n1"), set by the device-bridge. Lets the UI group the partitions of
+   *  one physical disk together and act on the whole disk (reclaim/pool wipe the
+   *  disk, not a single partition). Absent on an older bridge — callers derive
+   *  it from `device` instead. */
+  parent_disk?: string;
   mount: string;
   /** FS-provided label from the bridge (e.g. "TOSHIBA EXT") — different
    *  from the customer-chosen displayName below. */
@@ -389,6 +501,21 @@ export interface DriveInfo {
   used_bytes: number;
   free_bytes: number;
   mounted: boolean;
+  /** WARP-612: read-only enrichment from the device-bridge. `bus`
+   *  (nvme/usb/mmc/disk) is always present — the orchestrator derives it as a
+   *  fallback; `fs` + `readonly` are best-effort and may be absent on an
+   *  older bridge. */
+  bus?: string;
+  fs?: string;
+  readonly?: boolean;
+  /** WARP-612: SMART health ("PASSED"/"FAILED") + temperature °C. Present only
+   *  when the bridge has DRIVE_SMART_ENABLED and smartctl can read the device;
+   *  the UI hides the chips when absent. */
+  smart?: string | null;
+  temp_c?: number | null;
+  /** WARP-612: hot-plug auto-mounted (ejectable) vs installed storage —
+   *  bus-agnostic (ADR-011). The Eject action is gated on this, not on bus. */
+  removable?: boolean;
   /** WARP-174: customer's friendly name from the setup wizard's Storage
    *  step. `null` until a Drive row is upserted via
    *  PATCH /api/storage/drives/:uuid. */
@@ -412,6 +539,109 @@ export interface DrivesResponse {
   count: number;
   snapshot_at?: string;
   error?: string;
+  reason?: string;
+}
+
+/** BUG-3 / ADR-019: one mdadm software-RAID pool as the bridge reports it,
+ *  joined with the owner's chosen displayName / notes. `status` / `level` are
+ *  the explicit ADR-019 enum values (never raw mdstat). */
+export interface PoolInfo {
+  /** md device name without /dev/ (e.g. "md0"). */
+  device: string;
+  level: "raid0" | "raid1" | "raid5" | "raid6" | "raid10" | "jbod";
+  status: "active" | "degraded" | "resyncing" | "failed" | "none";
+  members: string[];
+  /** Owner-chosen name from the StoragePool row; null until set. */
+  displayName?: string | null;
+  notes?: string | null;
+}
+
+export interface PoolsResponse {
+  pools: PoolInfo[];
+  count: number;
+  snapshot_at?: string;
+  error?: string;
+  reason?: string;
+}
+
+/** PR #373 — one subsystem descriptor in the onboarding Claim hardware card. */
+export interface ApplianceSpec {
+  label: string;
+  value: string;
+  online: boolean;
+}
+
+/** PR #373 — GET /api/setup/appliance. The read-only hardware contract the
+ *  Claim wizard step renders (a DOCUMENTED STUB on the backend; see
+ *  docs/ONBOARDING_CLAIM.md). */
+export interface ApplianceContract {
+  appliance_id: string;
+  compute: ApplianceSpec;
+  storage: ApplianceSpec;
+  network: ApplianceSpec;
+  display: ApplianceSpec;
+  supply_chain: {
+    taa_compliant: boolean;
+    ndaa_889_clear: boolean;
+    summary: string;
+  };
+}
+
+/** PR #373 — POST /api/setup/claim result. */
+export interface ClaimResult {
+  claimed: boolean;
+  /** True when the box was already bound (idempotent re-run short-circuit). */
+  already_claimed?: boolean;
+  /** The wizard step to advance to after a successful claim. */
+  next_step: string;
+}
+
+/** PR #380 — the onboarding ORG step form values. `industry`/`size` are LOCAL
+ *  smart-default hints only — never sent off the box (FEATURES §10). The
+ *  orchestrator still records them to pick local defaults. */
+export interface OrgInput {
+  name: string;
+  slug: string;
+  tz: string;
+  industry?: string;
+  size?: string;
+  /** On-NVMe logo path (optional). */
+  logo?: string;
+}
+
+/** PR #380 — POST /api/setup/org result. */
+export interface OrgResult {
+  ok: boolean;
+  /** The normalized, reserved slug. */
+  slug: string;
+  /** The reserved `droplet.local/<slug>` host. */
+  reserved_host: string;
+  /** The wizard step to advance to after a successful persist (`internet`). */
+  next_step: string;
+}
+
+/** PR #381 — the roles the onboarding TEAM step can assign. The SHIPPED
+ *  HOUSEHOLD model (mirrors the orchestrator Role enum minus `service`). */
+export type TeamInviteRole = "owner" | "admin" | "family" | "guest";
+
+/** PR #381 — onboarding TEAM-invite request body. The wizard invites by
+ *  email + role; the orchestrator normalizes the email + validates the role. */
+export interface TeamInviteRequest {
+  email: string;
+  role: TeamInviteRole;
+}
+
+/** PR #381 — POST /api/people/invite result. */
+export interface TeamInviteResult {
+  ok: boolean;
+  /** The single-use invite token (bearer credential — not displayed). */
+  token: string;
+  /** The normalized (lowercased) invitee email. */
+  email: string;
+  /** The role the invite assigns. */
+  role: TeamInviteRole;
+  /** ISO timestamp the invite expires. */
+  expires_at: string;
 }
 
 // --- Health types ---
@@ -428,7 +658,7 @@ export interface HealthResponse {
     router: boolean;
     frigate: boolean;
     switch: boolean;
-    // PyPortal Titano screen (services/oled-display). `true` when the
+    // Status display screen (services/oled-display). `true` when the
     // service is up — stays true in simulated mode too (no physical
     // device); /display/status surfaces the backend if needed.
     display: boolean;
@@ -491,6 +721,15 @@ export interface MatterDiscoveredDevice {
   deviceType?: number;
   commissioningMode: number;
   addresses: Array<{ ip: string; port: number; type: string }>;
+}
+
+/**
+ * WARP-851: controller capability surface (GET /api/matter/capabilities).
+ * `bleCommissioning: false` means devices that need Bluetooth for
+ * first-time setup cannot be paired on this box yet (see WARP-850).
+ */
+export interface MatterCapabilities {
+  bleCommissioning: boolean;
 }
 
 // --- Camera / Frigate types ---
@@ -846,6 +1085,10 @@ export interface CameraSSEEvent {
 
 export interface InterfaceStatus {
   up: boolean;
+  /** Whether this interface is configured on this box. `false` = absent on this
+   *  hardware shape (e.g. no `wan` on a single-box), distinct from a configured
+   *  interface that is currently down (`present: true, up: false`). */
+  present?: boolean;
   pending?: boolean;
   available?: boolean;
   autostart?: boolean;
@@ -1055,4 +1298,56 @@ export interface ScheduleEvent {
   transition: "blocked" | "unblocked";
   reason: string;
   occurredAt: string;
+}
+
+// WARP-555 — read-only tool capability catalog (`/tools` surface).
+// Mirrors the `GET /api/llm/tools/catalog` wire shape, which is derived
+// from `@droplet/tools-core`'s TOOL_CATALOG. `domain` is one of the
+// orchestrator's declared tool domains; it arrives as a string so the
+// dashboard never has to stay in lockstep with the registry's union.
+export interface ToolCatalogEntry {
+  name: string;
+  /** Agent-facing description from the registry (may contain jargon). */
+  description: string;
+  /** Plain-language, home-user-facing copy — what `/tools` renders (ADR-002). */
+  homeDescription: string;
+  domain: string;
+  requiresWrite: boolean;
+  requiresConfirmation: boolean;
+}
+
+export interface ToolCatalogResponse {
+  tools: ToolCatalogEntry[];
+  /** Domains in the orchestrator's canonical IA order — drives filter order. */
+  domains: string[];
+}
+
+/**
+ * WARP-829 — the one-shot payload the `/tools` page writes to
+ * `sessionStorage["droplet.pendingComposer"]` before routing to `/chat`.
+ *
+ * Distinct from `droplet.pendingPrompt` (the hero hand-off, which the chat
+ * page AUTO-SENDS): this payload only SEEDS the composer. Clicking a tool
+ * primes the chat input with a starter line and pins a "acting on <tool>"
+ * indicator — nothing runs until the user edits and sends, at which point
+ * the model invokes the tool and the existing in-chat confirmation gate
+ * applies (see `docs/llm-safety-tiers.md`). The dashboard never dispatches
+ * a tool; dispatch stays in the orchestrator's MCP path.
+ *
+ * `kind` is a discriminant so the chat page can grow other seed sources
+ * later without overloading the key.
+ */
+export const PENDING_COMPOSER_KEY = "droplet.pendingComposer";
+
+export interface PendingComposerPayload {
+  kind: "tool";
+  /** Registry tool name, e.g. `block_network_device`. Identity for the chip. */
+  toolName: string;
+  /** Human-readable tool title, e.g. "Block network device" — chip label. */
+  label: string;
+  /** Mirrors the registry safety flags so the chip can show the right chip. */
+  requiresWrite: boolean;
+  requiresConfirmation: boolean;
+  /** Plain-language starter line dropped into the composer for the user to edit. */
+  seedText: string;
 }

@@ -1,0 +1,53 @@
+# Warp fleet HQ — standalone deploy for the TLS issuance service
+# (ADR-023, C1). This runs on hq.warp-lab.com, NOT on a Droplet box —
+# it is deliberately SEPARATE from the box monorepo docker-compose.yml.
+#
+# All secrets come from the host env / a .env file that is NEVER tracked
+# (Cloudflare token, DATABASE_URL, HQ_LABEL_SECRET). The ACME account key
+# is persisted in the named volume, generated on first boot.
+
+services:
+  fleet-server-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-fleet}
+      POSTGRES_USER: ${POSTGRES_USER:-fleet}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the HQ env}
+    volumes:
+      - fleet-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fleet}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  fleet-server:
+    build:
+      context: .
+    restart: unless-stopped
+    depends_on:
+      fleet-server-db:
+        condition: service_healthy
+    environment:
+      # DB
+      DATABASE_URL: postgresql://${POSTGRES_USER:-fleet}:${POSTGRES_PASSWORD}@fleet-server-db:5432/${POSTGRES_DB:-fleet}
+      # Issuance / labelling
+      HQ_LABEL_SECRET: ${HQ_LABEL_SECRET:?set HQ_LABEL_SECRET in the HQ env}
+      ISSUANCE_DOMAIN_BASE: ${ISSUANCE_DOMAIN_BASE:-devices.warp-lab.ai}
+      # Cloudflare DNS-01 (HQ-only token, Zone:DNS:Edit scoped to the zone)
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:?set CLOUDFLARE_API_TOKEN in the HQ env}
+      CLOUDFLARE_ZONE_ID: ${CLOUDFLARE_ZONE_ID:?set CLOUDFLARE_ZONE_ID in the HQ env}
+      # ACME — defaults to LE STAGING; flip to prod only after verification.
+      ACME_DIRECTORY_URL: ${ACME_DIRECTORY_URL:-https://acme-staging-v02.api.letsencrypt.org/directory}
+      ACME_CONTACT_EMAIL: ${ACME_CONTACT_EMAIL:-}
+      ACME_ACCOUNT_KEY_PATH: /data/fleet-server/acme-account.key
+    volumes:
+      # Persist the ACME account key across restarts.
+      - fleet-acme:/data/fleet-server
+    ports:
+      - "8088:8088"
+
+volumes:
+  fleet-pgdata:
+  fleet-acme:

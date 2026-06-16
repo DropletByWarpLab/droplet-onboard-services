@@ -197,7 +197,7 @@ npx prisma studio
 **Mocking strategy:**
 - API Server tests mock Prisma, Redis, MQTT, and the AI Gateway client
 - Dashboard tests mock `fetch`, Next.js navigation, and the API layer
-- AI Gateway tests use a real FastAPI test client but mock external services (Jetson, cloud providers)
+- AI Gateway tests use a real FastAPI test client but mock external services (the inference host, cloud providers)
 
 ### Integration Tests
 
@@ -224,7 +224,7 @@ schemas.py               Pydantic models for all requests/responses
 router.py                Model-to-provider routing logic
 providers/
   base.py                Abstract BaseProvider interface
-  ollama_local.py        Jetson Ollama via httpx
+  ollama_local.py        Inference-host Ollama via httpx
   anthropic_cloud.py     Claude via LiteLLM
   openai_cloud.py        GPT via LiteLLM
 auth/

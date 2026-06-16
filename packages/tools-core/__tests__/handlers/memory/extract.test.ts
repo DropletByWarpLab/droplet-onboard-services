@@ -49,7 +49,59 @@ describe("memory_extract_fact", () => {
     expect(create).not.toHaveBeenCalled();
   });
 
-  it("persists with ctx.userId as addedBy", async () => {
+  // ── Confirmation enforcement ──
+  //
+  // The tool declares requiresConfirmation and its contract says the
+  // write only happens after the user approves. Nothing enforces the
+  // flag generically (neither the MCP server nor the agent loop), so
+  // the handler itself must refuse to write until the model re-issues
+  // the call with `confirmed: true` AFTER the user said yes in chat.
+
+  it("does NOT write on the first call — returns confirmation_required", async () => {
+    const create = vi.fn();
+    const res = await memoryExtractFact.handler(
+      { category: "Workflow", fact: "Recap under 200 words" },
+      ctxWith(create, "alice"),
+    );
+    expect(create).not.toHaveBeenCalled();
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.status).toBe("confirmation_required");
+      expect(res.error.code).toBe("CONFIRMATION_REQUIRED");
+      // The message carries the fact so the user can approve/decline
+      // exactly what would be remembered.
+      expect(res.error.message).toContain("Recap under 200 words");
+      expect(res.error.details).toMatchObject({
+        type: "memory_fact_save",
+        category: "Workflow",
+        fact: "Recap under 200 words",
+      });
+    }
+  });
+
+  it("explicit confirmed:false also returns confirmation_required", async () => {
+    const create = vi.fn();
+    const res = await memoryExtractFact.handler(
+      { category: "Tone", fact: "Be concise", confirmed: false },
+      ctxWith(create, "alice"),
+    );
+    expect(create).not.toHaveBeenCalled();
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.status).toBe("confirmation_required");
+  });
+
+  it("validation still runs before the confirmation gate", async () => {
+    const create = vi.fn();
+    const res = await memoryExtractFact.handler(
+      { category: "BogusBucket", fact: "x", confirmed: true },
+      ctxWith(create),
+    );
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("INVALID_ARGS");
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("persists on a confirmed re-issue, with ctx.userId as addedBy", async () => {
     const at = new Date("2026-05-28T12:00:00Z");
     const create = vi.fn().mockResolvedValue({
       id: "f1",
@@ -62,6 +114,7 @@ describe("memory_extract_fact", () => {
         category: "Workflow",
         fact: "Recap under 200 words",
         evidenceChatId: "session-uuid",
+        confirmed: true,
       },
       ctxWith(create, "alice"),
     );
@@ -71,6 +124,9 @@ describe("memory_extract_fact", () => {
         fact: "Recap under 200 words",
         evidenceChatId: "session-uuid",
         addedBy: "alice",
+        // WARP-845 — model-extracted facts default to the household
+        // audience; widening/narrowing is a human Memory-panel action.
+        audience: "family",
       },
     });
     expect(res.ok).toBe(true);
@@ -92,7 +148,7 @@ describe("memory_extract_fact", () => {
       addedAt: new Date(),
     });
     await memoryExtractFact.handler(
-      { category: "Tone", fact: "Be concise" },
+      { category: "Tone", fact: "Be concise", confirmed: true },
       ctxWith(create, undefined),
     );
     const callArgs = create.mock.calls[0]?.[0] as {

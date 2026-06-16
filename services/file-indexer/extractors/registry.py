@@ -168,9 +168,12 @@ def dispatch(path: str, mime: str, depth: int = 0) -> Optional[ExtractedDoc]:
     output it already accumulated.
     """
     if depth > MAX_RECURSION_DEPTH:
+        # WARP-287: ExtractedDoc is now spans-based. Return an empty
+        # spans list rather than the old text/page_breaks shape; the
+        # `max_recursion_depth_exceeded` warning is what callers key
+        # off of.
         return ExtractedDoc(
-            text="",
-            page_breaks=[],
+            spans=[],
             language=None,
             metadata={"mime": mime, "depth": depth},
             warnings=["max_recursion_depth_exceeded"],
@@ -206,10 +209,35 @@ def dispatch(path: str, mime: str, depth: int = 0) -> Optional[ExtractedDoc]:
     if doc is None:
         return None
 
-    # Truncate-and-warn if the extracted text is huge.
-    text = doc.get("text", "")
-    if len(text) > MAX_INDEX_CHARS:
-        doc["text"] = text[:MAX_INDEX_CHARS]
+    # WARP-287: truncate-and-warn if the cumulative spans text exceeds
+    # MAX_INDEX_CHARS. We walk spans in order and drop / clip whichever
+    # one crosses the threshold so each surviving span keeps a valid
+    # anchor. The dropped tail is reported in `warnings`.
+    spans = doc.get("spans", []) or []
+    total = sum(len(s.text) for s in spans)
+    if total > MAX_INDEX_CHARS:
+        budget = MAX_INDEX_CHARS
+        kept: list = []
+        for span in spans:
+            if budget <= 0:
+                break
+            if len(span.text) <= budget:
+                kept.append(span)
+                budget -= len(span.text)
+            else:
+                # Clip this span; keep its anchor. Span rejects
+                # empty/whitespace-only text in __post_init__, so guard
+                # before constructing.
+                clipped_text = span.text[:budget]
+                if clipped_text.strip():
+                    clipped = span.__class__(
+                        text=clipped_text,
+                        anchor=span.anchor,
+                        section_path=list(span.section_path),
+                    )
+                    kept.append(clipped)
+                budget = 0
+        doc["spans"] = kept
         warnings = doc.setdefault("warnings", [])
         warnings.append(f"truncated_at_{MAX_INDEX_CHARS}_chars")
 

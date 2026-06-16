@@ -23,13 +23,13 @@
 #
 # Both default to `droplet-ai*` to avoid collisions with the OpenWrt router:
 #   - mDNS: OpenWrt's umdns publishes `droplet.local` for the router itself,
-#     so an Avahi claim of `droplet.local` on the Jetson loses the tiebreak
+#     so an Avahi claim of `droplet.local` on the appliance loses the tiebreak
 #     and falls back to `droplet-2.local` — defeating the whole point.
 #   - Router DNS: dnsmasq's `expand_hosts=1` makes the router's own hostname
 #     (`Droplet`) resolve as `droplet.lan`, so a static hostrecord on
 #     `droplet.lan` competes with it (round-robin) — clients land on the
 #     router's web UI half the time instead of the dashboard.
-# `droplet-ai*` matches the Jetson's system hostname (`droplet-AI`) and has
+# `droplet-ai*` matches the appliance's system hostname (`droplet-AI`) and has
 # no such collision from anything else on the LAN.
 DROPLET_MDNS_HOSTNAME="${DROPLET_MDNS_HOSTNAME:-droplet-ai}"
 DROPLET_LAN_HOSTNAME="${DROPLET_LAN_HOSTNAME:-droplet-ai.lan}"
@@ -307,10 +307,127 @@ setup_router_dns() {
 }
 
 # =============================================================================
+# ADR-023 (C3): split-horizon DNS for the opaque per-device FQDN
+# =============================================================================
+# The publicly-trusted per-device FQDN `d-<hmac>.devices.warp-lab.ai` has NO
+# public A/AAAA record (the box's home IP is never published). It resolves to
+# the box via SPLIT HORIZON:
+#   - LAN clients using the OpenWrt router's DNS  -> the box's LAN IP, via the
+#     SAME routing-service POST /dhcp/hostnames mechanism setup_router_dns uses.
+#   - WireGuard tunnel clients -> 192.168.20.1 (the WG gateway), because the
+#     rendered peer .conf's DNS= already points at 192.168.20.1.
+# So the one FQDN works at home AND over the tunnel, with a green padlock.
+#
+# Registers the FQDN against 192.168.20.1 (the gateway address that is reachable
+# both on the single-box LAN and over the tunnel). On a multi-box LAN the
+# operator can override DROPLET_PUBLIC_FQDN_IP if the box's LAN IP differs.
+DROPLET_PUBLIC_FQDN="${DROPLET_PUBLIC_FQDN:-}"
+DROPLET_PUBLIC_FQDN_IP="${DROPLET_PUBLIC_FQDN_IP:-192.168.20.1}"
+
+# Host dnsmasq config for the at-home single-box LAN plane (ADR-018-transitional).
+# Today's single-box LAN clients lease DNS from the host dnsmasq instance
+# (scripts/host/etc-droplet-poc-host-net/lan-dhcp.conf), NOT the OpenWrt
+# container's. So the routing-service host-record above does not reach them; we
+# ALSO write a MANAGED host-record line into the host dnsmasq config. This whole
+# leg is retired when ADR-018 unifies the network onto the OpenWrt plane.
+_HOST_DNSMASQ_CONF="/etc/droplet-poc-host-net/lan-dhcp.conf"
+_HOST_RECORD_MARKER="# ADR-023 managed host-record (split-horizon FQDN) — do not edit by hand"
+
+setup_public_fqdn_dns() {
+  if [ -z "$DROPLET_PUBLIC_FQDN" ]; then
+    # The box hasn't learned its FQDN from HQ yet — nothing to register. The
+    # bootstrap self-signed cert + .lan/.local names keep the box reachable.
+    log_info "Skipping public-FQDN DNS (DROPLET_PUBLIC_FQDN not set yet)"
+    return 0
+  fi
+
+  if ! _valid_hostname "$DROPLET_PUBLIC_FQDN"; then
+    log_error "DROPLET_PUBLIC_FQDN='${DROPLET_PUBLIC_FQDN}' is not a valid hostname — refusing to register split-horizon DNS"
+    return 0
+  fi
+
+  # --- Leg 1: OpenWrt dnsmasq via the routing service (LAN + tunnel) ---
+  local routing_mode="${ROUTING_MODE:-real}"
+  if [ "$routing_mode" = "disabled" ]; then
+    log_info "Skipping public-FQDN router-DNS registration (ROUTING_MODE=disabled)"
+  else
+    local routing_url="${ROUTING_SERVICE_URL:-http://localhost:8080}"
+    local token="${ROUTING_SERVICE_TOKEN:-}"
+    if ! curl -sf --max-time 5 "${routing_url}/health" >/dev/null 2>&1; then
+      log_warn "Routing service not responding at ${routing_url} — ${DROPLET_PUBLIC_FQDN} will resolve once routing is back"
+    else
+      local auth_header=()
+      [ -n "$token" ] && auth_header=(-H "Authorization: Bearer ${token}")
+      local payload
+      payload=$(printf '{"hostname":"%s","ip":"%s"}' "$DROPLET_PUBLIC_FQDN" "$DROPLET_PUBLIC_FQDN_IP")
+      local resp_file=""
+      resp_file="$(mktemp -t droplet-fqdn-resp.XXXXXX 2>/dev/null || mktemp)"
+      trap 'rm -f "${resp_file:-}"' RETURN
+      local http_code
+      http_code="$(curl -sS --max-time 10 -o "$resp_file" -w "%{http_code}" \
+                     -X POST "${routing_url}/dhcp/hostnames" \
+                     -H "Content-Type: application/json" \
+                     "${auth_header[@]}" \
+                     --data "$payload" 2>>"$LOG_FILE" || echo "000")"
+      case "$http_code" in
+        200) log_success "Split-horizon DNS: ${_CYAN}${DROPLET_PUBLIC_FQDN}${_RESET} → ${DROPLET_PUBLIC_FQDN_IP} (OpenWrt dnsmasq)" ;;
+        *)   log_warn "Public-FQDN router-DNS registration returned HTTP ${http_code}: $(cat "$resp_file" 2>/dev/null || true)" ;;
+      esac
+    fi
+  fi
+
+  # --- Leg 2: host dnsmasq host-record (ADR-018-transitional) ---
+  _write_host_dnsmasq_record
+}
+
+# Add (idempotently) a MANAGED host-record line to the host dnsmasq config so
+# at-home single-box LAN clients (which lease DNS from the host dnsmasq, not the
+# OpenWrt container) resolve the FQDN until ADR-018 retires the host plane.
+# ADR-018-TRANSITIONAL — delete this leg when the host network plane is gone.
+_write_host_dnsmasq_record() {
+  if [ ! -f "$_HOST_DNSMASQ_CONF" ]; then
+    # No host dnsmasq plane on this box (multi-box / dev) — the routing-service
+    # leg above covers it.
+    return 0
+  fi
+
+  local desired="host-record=${DROPLET_PUBLIC_FQDN},${DROPLET_PUBLIC_FQDN_IP}"
+
+  # Already present + current? No-op (keeps re-runs clean — no dnsmasq restart).
+  if grep -qxF "$desired" "$_HOST_DNSMASQ_CONF" 2>/dev/null; then
+    log_info "Host dnsmasq host-record already current for ${DROPLET_PUBLIC_FQDN}"
+    return 0
+  fi
+
+  # Strip any prior managed line(s) + their marker, then append the fresh pair.
+  # sudo because the file is root-owned (installed by single-box.sh).
+  local tmp
+  tmp="$(mktemp -t droplet-hostdns.XXXXXX 2>/dev/null || mktemp)"
+  sudo grep -vF "$_HOST_RECORD_MARKER" "$_HOST_DNSMASQ_CONF" 2>/dev/null \
+    | grep -vE '^host-record=.*\.devices\.warp-lab\.ai,' > "$tmp" || true
+  {
+    printf '\n%s\n' "$_HOST_RECORD_MARKER"
+    printf '%s\n' "$desired"
+  } >> "$tmp"
+  sudo cp "$tmp" "$_HOST_DNSMASQ_CONF"
+  sudo chmod 644 "$_HOST_DNSMASQ_CONF"
+  rm -f "$tmp"
+  log_success "Host dnsmasq host-record: ${DROPLET_PUBLIC_FQDN} → ${DROPLET_PUBLIC_FQDN_IP} (ADR-018-transitional)"
+
+  # Best-effort reload of the dedicated host dnsmasq so the record goes live now.
+  if command -v systemctl >/dev/null 2>&1; then
+    sudo systemctl reload droplet-poc-host-net.service 2>/dev/null \
+      || sudo systemctl restart droplet-poc-host-net.service 2>/dev/null || true
+  fi
+}
+
+# =============================================================================
 # Public entry point
 # =============================================================================
 setup_local_dns() {
   log_info "Configuring local DNS (mDNS + OpenWrt dnsmasq)..."
   setup_mdns
   setup_router_dns
+  # ADR-023 (C3): register the split-horizon FQDN when the box knows its name.
+  setup_public_fqdn_dns
 }

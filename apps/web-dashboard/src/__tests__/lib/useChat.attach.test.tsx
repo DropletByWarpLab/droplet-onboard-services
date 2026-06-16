@@ -10,35 +10,69 @@ import { act, render, waitFor } from "@testing-library/react";
 
 const mockSendChat = vi.fn();
 const mockUploadBrainFile = vi.fn();
+const mockFetchConversation = vi.fn();
+const mockGetBrainMemoryItems = vi.fn();
 vi.mock("@/lib/api", () => ({
   sendChat: (...args: unknown[]) => mockSendChat(...args),
   uploadBrainFile: (...args: unknown[]) => mockUploadBrainFile(...args),
+  fetchConversation: (...args: unknown[]) => mockFetchConversation(...args),
+  getBrainMemoryItems: (...args: unknown[]) => mockGetBrainMemoryItems(...args),
 }));
 
 import { useChat } from "@/lib/hooks/useChat";
 
 interface ProbeValue {
   attachments: ReturnType<typeof useChat>["attachments"];
+  sessionAttachments: ReturnType<typeof useChat>["sessionAttachments"];
   attach: ReturnType<typeof useChat>["attach"];
   removeAttachment: ReturnType<typeof useChat>["removeAttachment"];
   clearAttachments: ReturnType<typeof useChat>["clearAttachments"];
+  sendMessage: ReturnType<typeof useChat>["sendMessage"];
+  loadConversation: ReturnType<typeof useChat>["loadConversation"];
 }
 
 function Probe({
   onValue,
+  onMessages,
   chatId,
+  projectId,
 }: {
   onValue: (v: ProbeValue) => void;
+  onMessages?: (m: ReturnType<typeof useChat>["messages"]) => void;
   chatId?: string;
+  projectId?: string | null;
 }) {
-  const hook = useChat({ chatId });
+  const hook = useChat({ chatId, projectId });
   onValue({
     attachments: hook.attachments,
+    sessionAttachments: hook.sessionAttachments,
     attach: hook.attach,
     removeAttachment: hook.removeAttachment,
     clearAttachments: hook.clearAttachments,
+    sendMessage: hook.sendMessage,
+    loadConversation: hook.loadConversation,
   });
+  onMessages?.(hook.messages);
   return null;
+}
+
+/** Build an SSE response that ends immediately (one `done` frame). */
+function quickSseResponse(): Response {
+  const stream = new ReadableStream<Uint8Array>({
+    start(c) {
+      const enc = new TextEncoder();
+      c.enqueue(
+        enc.encode(
+          `event: done\ndata: {"iterations":1,"stop_reason":"model_done"}\n\n`,
+        ),
+      );
+      c.close();
+    },
+  });
+  return new Response(stream, {
+    status: 200,
+    headers: { "Content-Type": "text/event-stream" },
+  });
 }
 
 // Stub the WebSocket that useChat opens for MQTT status updates so the
@@ -68,6 +102,9 @@ class StubWebSocket {
 beforeEach(() => {
   mockSendChat.mockReset();
   mockUploadBrainFile.mockReset();
+  mockFetchConversation.mockReset();
+  mockGetBrainMemoryItems.mockReset();
+  mockGetBrainMemoryItems.mockResolvedValue({ items: [] });
   StubWebSocket.last = null;
   // Replace the global WebSocket while the test runs; restore in afterEach.
   vi.stubGlobal("WebSocket", StubWebSocket as unknown);
@@ -214,6 +251,411 @@ describe("useChat.attach (WARP-203)", () => {
     await waitFor(() => {
       expect(value!.attachments[0].status).toBe("ready");
     });
+  });
+
+  it("sends attachment itemIds with the chat turn so the model sees them", async () => {
+    mockUploadBrainFile.mockResolvedValueOnce({
+      itemId: "bmi-42",
+      status: "indexing",
+    });
+    mockSendChat.mockResolvedValueOnce(quickSseResponse());
+
+    let value: ProbeValue | null = null;
+    render(<Probe onValue={(v) => (value = v)} />);
+
+    await act(async () => {
+      await value!.attach(
+        new File(["hi"], "notes.md", { type: "text/markdown" }),
+      );
+    });
+    await act(async () => {
+      await value!.sendMessage("summarize my notes", "llama3");
+    });
+
+    expect(mockSendChat).toHaveBeenCalledOnce();
+    const body = mockSendChat.mock.calls[0]![0] as {
+      attachments?: { itemId: string }[];
+    };
+    expect(body.attachments).toEqual([{ itemId: "bmi-42" }]);
+  });
+
+  it("omits attachments from the turn when no chip has an itemId yet", async () => {
+    // Upload never resolves — the chip stays in "uploading" with no itemId.
+    mockUploadBrainFile.mockImplementationOnce(() => new Promise(() => {}));
+    mockSendChat.mockResolvedValueOnce(quickSseResponse());
+
+    let value: ProbeValue | null = null;
+    render(<Probe onValue={(v) => (value = v)} />);
+
+    act(() => {
+      void value!.attach(new File(["x"], "x.txt", { type: "text/plain" }));
+    });
+    await act(async () => {
+      await value!.sendMessage("hello", "llama3");
+    });
+
+    const body = mockSendChat.mock.calls[0]![0] as {
+      attachments?: { itemId: string }[];
+    };
+    expect(body.attachments).toBeUndefined();
+  });
+
+  it("tags uploads with the server conversationId once one exists", async () => {
+    // First turn establishes conv-9 via the response header.
+    mockSendChat.mockResolvedValueOnce(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(c) {
+            c.enqueue(
+              new TextEncoder().encode(
+                `event: done\ndata: {"iterations":1,"stop_reason":"model_done"}\n\n`,
+              ),
+            );
+            c.close();
+          },
+        }),
+        {
+          status: 200,
+          headers: {
+            "Content-Type": "text/event-stream",
+            "X-Conversation-Id": "conv-9",
+          },
+        },
+      ),
+    );
+    mockUploadBrainFile.mockResolvedValueOnce({
+      itemId: "bmi-1",
+      status: "indexing",
+    });
+
+    let value: ProbeValue | null = null;
+    render(<Probe onValue={(v) => (value = v)} chatId="chat-draft" />);
+
+    await act(async () => {
+      await value!.sendMessage("hello", "m1");
+    });
+    await act(async () => {
+      await value!.attach(new File(["x"], "x.txt", { type: "text/plain" }));
+    });
+
+    // Post-first-turn uploads carry the durable server id, not the
+    // client-minted draft chatId.
+    expect(mockUploadBrainFile).toHaveBeenCalledWith(expect.anything(), "conv-9");
+  });
+
+  it("rehydrates attachment chips from brain items on loadConversation", async () => {
+    mockFetchConversation.mockResolvedValueOnce({
+      id: "conv-55",
+      title: "Docs chat",
+      model: "m1",
+      provider: "ollama",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      messages: [
+        {
+          id: "m1",
+          role: "user",
+          content: "summarize",
+          toolCalls: null,
+          toolCallId: null,
+          turnId: "t1",
+          createdAt: new Date().toISOString(),
+        },
+      ],
+    });
+    mockGetBrainMemoryItems.mockResolvedValueOnce({
+      items: [
+        {
+          id: "bmi-9",
+          filename: "report.pdf",
+          mimeType: "application/pdf",
+          bytes: 1234,
+          status: "ready",
+        },
+        {
+          id: "bmi-10",
+          filename: "meeting.mp3",
+          mimeType: "audio/mpeg",
+          bytes: 999,
+          status: "queued_for_transcription",
+        },
+      ],
+    });
+
+    let value: ProbeValue | null = null;
+    render(<Probe onValue={(v) => (value = v)} />);
+
+    await act(async () => {
+      await value!.loadConversation("conv-55");
+    });
+
+    expect(mockGetBrainMemoryItems).toHaveBeenCalledWith({
+      originatingChatId: "conv-55",
+    });
+    // WARP-859 — on reload the chat's attachments are conversation history,
+    // not staged input: they land in the conversation-scoped session list
+    // (drives SessionHeader), and the composer stays empty.
+    await waitFor(() => {
+      expect(value!.sessionAttachments).toHaveLength(2);
+    });
+    expect(value!.attachments).toHaveLength(0);
+    expect(value!.sessionAttachments[0]).toMatchObject({
+      itemId: "bmi-9",
+      filename: "report.pdf",
+      status: "ready",
+    });
+    // queued_for_transcription renders as the indexing chip state.
+    expect(value!.sessionAttachments[1]).toMatchObject({
+      itemId: "bmi-10",
+      status: "indexing",
+    });
+  });
+
+  it("sends draftChatId on the first turn only (draft-upload adoption)", async () => {
+    const quick = (convId: string) =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(c) {
+            c.enqueue(
+              new TextEncoder().encode(
+                `event: done\ndata: {"iterations":1,"stop_reason":"model_done"}\n\n`,
+              ),
+            );
+            c.close();
+          },
+        }),
+        {
+          status: 200,
+          headers: {
+            "Content-Type": "text/event-stream",
+            "X-Conversation-Id": convId,
+          },
+        },
+      );
+    mockSendChat
+      .mockResolvedValueOnce(quick("conv-5"))
+      .mockResolvedValueOnce(quick("conv-5"));
+
+    let value: ProbeValue | null = null;
+    render(<Probe onValue={(v) => (value = v)} chatId="chat-draft-77" />);
+
+    await act(async () => {
+      await value!.sendMessage("first", "m1");
+    });
+    expect(mockSendChat.mock.calls[0]![0]).toMatchObject({
+      draftChatId: "chat-draft-77",
+    });
+
+    await act(async () => {
+      await value!.sendMessage("second", "m1");
+    });
+    const second = mockSendChat.mock.calls[1]![0] as { draftChatId?: string };
+    expect(second.draftChatId).toBeUndefined();
+  });
+
+  it("sends projectId on the first turn only (WARP-845 project stamping)", async () => {
+    const quick = (convId: string) =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(c) {
+            c.enqueue(
+              new TextEncoder().encode(
+                `event: done\ndata: {"iterations":1,"stop_reason":"model_done"}\n\n`,
+              ),
+            );
+            c.close();
+          },
+        }),
+        {
+          status: 200,
+          headers: {
+            "Content-Type": "text/event-stream",
+            "X-Conversation-Id": convId,
+          },
+        },
+      );
+    mockSendChat
+      .mockResolvedValueOnce(quick("conv-9"))
+      .mockResolvedValueOnce(quick("conv-9"));
+
+    let value: ProbeValue | null = null;
+    render(<Probe onValue={(v) => (value = v)} projectId="proj-1" />);
+
+    await act(async () => {
+      await value!.sendMessage("first", "m1");
+    });
+    expect(mockSendChat.mock.calls[0]![0]).toMatchObject({
+      projectId: "proj-1",
+    });
+
+    // Second turn: conversation already exists server-side — membership is
+    // already stamped, so projectId must not be re-sent.
+    await act(async () => {
+      await value!.sendMessage("second", "m1");
+    });
+    const second2 = mockSendChat.mock.calls[1]![0] as { projectId?: string };
+    expect(second2.projectId).toBeUndefined();
+  });
+
+  it("WARP-859: a staged attachment rides onto the sent message and clears the composer", async () => {
+    const quick = (convId: string) =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(c) {
+            c.enqueue(
+              new TextEncoder().encode(
+                `event: done\ndata: {"iterations":1,"stop_reason":"model_done"}\n\n`,
+              ),
+            );
+            c.close();
+          },
+        }),
+        {
+          status: 200,
+          headers: {
+            "Content-Type": "text/event-stream",
+            "X-Conversation-Id": convId,
+          },
+        },
+      );
+    mockUploadBrainFile.mockResolvedValueOnce({ itemId: "bmi-77", status: "ready" });
+    mockSendChat.mockResolvedValueOnce(quick("conv-77"));
+
+    let value: ProbeValue | null = null;
+    let messages: ReturnType<typeof useChat>["messages"] = [];
+    render(
+      <Probe
+        onValue={(v) => (value = v)}
+        onMessages={(m) => (messages = m)}
+      />,
+    );
+
+    await act(async () => {
+      await value!.attach(new File(["x"], "report.pdf", { type: "application/pdf" }));
+    });
+    expect(value!.attachments).toHaveLength(1);
+
+    await act(async () => {
+      await value!.sendMessage("summarize this", "m1");
+    });
+
+    // The turn sent the itemId…
+    expect(mockSendChat.mock.calls[0]![0]).toMatchObject({
+      attachments: [{ itemId: "bmi-77" }],
+    });
+    // …the composer cleared…
+    expect(value!.attachments).toHaveLength(0);
+    // …the file rode onto the user message…
+    const userMsg = messages.find((m) => m.role === "user");
+    expect(userMsg?.attachments?.[0]).toMatchObject({ itemId: "bmi-77", filename: "report.pdf" });
+    // …and it stays attached to the conversation for SessionHeader.
+    expect(value!.sessionAttachments.map((a) => a.itemId)).toEqual(["bmi-77"]);
+  });
+
+  it("refuses the 9th attachment with a visible failed chip (review fix)", async () => {
+    mockUploadBrainFile.mockResolvedValue({ itemId: "bmi", status: "indexing" });
+    let value: ProbeValue | null = null;
+    render(<Probe onValue={(v) => (value = v)} />);
+
+    await act(async () => {
+      for (let i = 0; i < 8; i++) {
+        await value!.attach(new File(["x"], `f${i}.txt`, { type: "text/plain" }));
+      }
+    });
+    expect(mockUploadBrainFile).toHaveBeenCalledTimes(8);
+
+    await act(async () => {
+      await value!.attach(new File(["x"], "ninth.txt", { type: "text/plain" }));
+    });
+    // No 9th upload; the chip surfaces the limit instead of silently
+    // rendering as attached-but-never-sent.
+    expect(mockUploadBrainFile).toHaveBeenCalledTimes(8);
+    const ninth = value!.attachments.find((a) => a.filename === "ninth.txt")!;
+    expect(ninth.status).toBe("failed");
+    expect(ninth.error).toMatch(/limit/i);
+  });
+
+  it("drops a stale chip rehydration when another conversation loaded meanwhile (review fix)", async () => {
+    const conv = (id: string) => ({
+      id,
+      title: id,
+      model: "m1",
+      provider: "ollama",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      messages: [
+        {
+          id: `${id}-m1`,
+          role: "user",
+          content: "hi",
+          toolCalls: null,
+          toolCallId: null,
+          turnId: "t1",
+          createdAt: new Date().toISOString(),
+        },
+      ],
+    });
+    mockFetchConversation.mockImplementation(async (id: string) => conv(id));
+
+    // Conversation A's chip fetch hangs until we release it; B's resolves
+    // immediately.
+    let releaseA: (v: { items: unknown[] }) => void = () => {};
+    mockGetBrainMemoryItems.mockImplementation(
+      async ({ originatingChatId }: { originatingChatId: string }) => {
+        if (originatingChatId === "conv-A") {
+          return new Promise((res) => {
+            releaseA = res;
+          });
+        }
+        return {
+          items: [
+            {
+              id: "bmi-B",
+              filename: "b.pdf",
+              mimeType: "application/pdf",
+              bytes: 1,
+              status: "ready",
+              uploadedAt: "2026-06-09T10:00:00.000Z",
+            },
+          ],
+        };
+      },
+    );
+
+    let value: ProbeValue | null = null;
+    render(<Probe onValue={(v) => (value = v)} />);
+
+    let loadA!: Promise<boolean>;
+    await act(async () => {
+      loadA = value!.loadConversation("conv-A");
+      // A's messages resolve; its chip fetch is now pending.
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await value!.loadConversation("conv-B");
+    });
+    await waitFor(() => {
+      // WARP-859 — rehydration lands in the conversation-scoped list now.
+      expect(value!.sessionAttachments.map((a) => a.itemId)).toEqual(["bmi-B"]);
+    });
+
+    // The slow loser resolves late — it must NOT clobber B's chips.
+    await act(async () => {
+      releaseA({
+        items: [
+          {
+            id: "bmi-A",
+            filename: "a.pdf",
+            mimeType: "application/pdf",
+            bytes: 1,
+            status: "ready",
+            uploadedAt: "2026-06-09T09:00:00.000Z",
+          },
+        ],
+      });
+      await loadA;
+    });
+    expect(value!.sessionAttachments.map((a) => a.itemId)).toEqual(["bmi-B"]);
   });
 
   it("ignores WS messages that aren't brain/indexed or for a different itemId", async () => {

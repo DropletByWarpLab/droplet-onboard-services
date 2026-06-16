@@ -1,5 +1,5 @@
 #!/bin/bash
-# droplet-automount.sh — auto-mount USB drives on Jetson and register them
+# droplet-automount.sh — auto-mount USB drives on the inference host and register them
 # with Nextcloud + the device-bridge. Invoked by a systemd template unit
 # triggered from a udev rule on add/remove.
 #
@@ -24,6 +24,17 @@ LOG_FILE="/var/log/droplet-automount.log"
 NEXTCLOUD_CONTAINER="${NEXTCLOUD_CONTAINER:-docker-nextcloud-1}"
 NEXTCLOUD_USER="${NEXTCLOUD_USER:-admin}"
 BRIDGE_URL="${BRIDGE_URL:-http://127.0.0.1:9090}"
+# The device-bridge requires its shared token on /drives/changed (it gates the
+# mutating routes). Read it from the same env file the bridge itself reads
+# (/etc/droplet/device-bridge.env, key BRIDGE_AUTH_TOKEN), unless already
+# provided in the environment. We grep the single line rather than sourcing the
+# file so an unrelated assignment can't run as root here.
+BRIDGE_ENV_FILE="${BRIDGE_ENV_FILE:-/etc/droplet/device-bridge.env}"
+if [ -z "${BRIDGE_AUTH_TOKEN:-}" ] && [ -r "$BRIDGE_ENV_FILE" ]; then
+  BRIDGE_AUTH_TOKEN="$(grep -E '^BRIDGE_AUTH_TOKEN=' "$BRIDGE_ENV_FILE" 2>/dev/null \
+    | head -1 | cut -d= -f2- || true)"
+fi
+BRIDGE_AUTH_TOKEN="${BRIDGE_AUTH_TOKEN:-}"
 # Auto-registering every plugged-in USB drive as Nextcloud external storage
 # is convenient but also a supply-chain vector: anyone with physical access
 # to the appliance can drop a drive and get it exposed to Nextcloud admin.
@@ -42,9 +53,10 @@ if [ -z "$ACTION" ] || [ -z "$DEVICE" ]; then
   exit 1
 fi
 
-# Never touch the boot medium. The Jetson boots from eMMC (/dev/mmcblk*)
-# so that's an absolute skip. NVMe is user-modular storage — DO include
-# it, but re-check at runtime that it doesn't hold the root fs.
+# Never touch the boot medium. The inference host boots from eMMC
+# (/dev/mmcblk*) so that's an absolute skip. NVMe is user-modular
+# storage — DO include it, but re-check at runtime that it doesn't
+# hold the root fs.
 case "$DEVICE" in
   /dev/mmcblk*|/dev/loop*|/dev/ram*|/dev/zram*|/dev/dm-*)
     log "skip $DEVICE (boot / virtual device)"; exit 0 ;;
@@ -62,10 +74,10 @@ if [ "$DEVICE" = "$boot_src" ] || [ "$dev_base" = "$boot_parent" ] \
   exit 0
 fi
 
-# Reject the PyPortal screen's firmware flash regardless of how it shows
+# Reject the status display's firmware flash regardless of how it shows
 # up — it's a display, not storage.
 if [ -n "${ID_VENDOR_ID:-}" ] && [ "$ID_VENDOR_ID" = "239a" ]; then
-  log "skip $DEVICE (Adafruit vendor — PyPortal screen)"; exit 0
+  log "skip $DEVICE (Adafruit vendor — status display)"; exit 0
 fi
 
 # Size guard — anything < 100 MiB is almost certainly firmware or an
@@ -80,8 +92,16 @@ notify_bridge() {
   # Non-blocking notify. The bridge caches drive state itself via
   # /drives, but an explicit hint lets it refresh its display
   # immediately instead of waiting for the next poll.
+  # /drives/changed is auth-gated: present the shared token. Build the auth
+  # header only when a token is available so a misconfigured box still attempts
+  # the (now-401) call rather than silently dropping the flag in `set -u`.
+  local auth_args=()
+  if [ -n "${BRIDGE_AUTH_TOKEN:-}" ]; then
+    auth_args=(-H "X-Droplet-Auth: ${BRIDGE_AUTH_TOKEN}")
+  fi
   curl -s -X POST -m 3 "${BRIDGE_URL}/drives/changed" \
     -H 'Content-Type: application/json' \
+    "${auth_args[@]}" \
     -d "{\"action\":\"$1\",\"device\":\"$2\",\"mount\":\"$3\"}" \
     >/dev/null 2>&1 || true
 }

@@ -44,6 +44,7 @@ vi.mock("../services/activity.singleton.js", () => ({
 }));
 
 import { createPeopleRouter } from "../routes/people.js";
+import type { ScopeName } from "../middleware/scope.js";
 
 interface MockUser {
   id: string;
@@ -194,7 +195,17 @@ function buildApp(
     };
     next();
   });
-  app.use("/api", createPeopleRouter(prismaMock));
+  // WARP-455: createPeopleRouter now takes a scope loader (the second
+  // RBAC axis). Every caller in this suite is owner/admin (loader
+  // short-circuited) or family (rejected by requireRole before the
+  // loader runs), so a fixed loader keeps every assertion intact.
+  app.use(
+    "/api",
+    createPeopleRouter(
+      prismaMock,
+      async () => new Set<ScopeName>(["exec_only"]),
+    ),
+  );
   return app;
 }
 
@@ -382,6 +393,12 @@ describe("PATCH /api/people/:id/scope", () => {
     );
     expect(prisma.scopeBinding.deleteMany).toHaveBeenCalledTimes(1);
     expect(prisma.scopeBinding.create).toHaveBeenCalledTimes(2);
+    // Data-integrity (pr-reviewer HIGH): the deleteMany + recreate pair MUST
+    // run inside a single $transaction so a crash between the delete and the
+    // last create can't leave the user with zero scope bindings (locked out
+    // of every scope-guarded route). Mirrors the PATCH /role last-owner
+    // invariant transaction above.
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
     expect(recordActivityMock).toHaveBeenCalledTimes(1);
     const recorded = recordActivityMock.mock.calls[0][0];
     expect(recorded.kind).toBe("system");

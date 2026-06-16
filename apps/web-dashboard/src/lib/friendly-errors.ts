@@ -44,6 +44,10 @@ export type ErrorDomain =
   | "push"
   | "knowledge"
   | "media"
+  | "network"
+  | "vpn"
+  | "camera"
+  | "device"
   | "generic";
 
 /** Domain-fallback copy. NEVER `err.message`. */
@@ -66,6 +70,14 @@ const FALLBACK: Record<ErrorDomain, string> = {
     "We couldn't load your recently indexed files right now. Try again in a moment.",
   media:
     "We couldn't play that recording. Try a different segment, or reload the page.",
+  network:
+    "We couldn't update your network settings right now. Try again in a moment.",
+  vpn:
+    "We couldn't update remote access right now. Try again in a moment.",
+  camera:
+    "We couldn't add that camera right now. Check it's powered on and connected, then try again.",
+  device:
+    "We couldn't reach that device right now. Check it's powered on and nearby, then try again.",
   generic:
     "We couldn't reach this Droplet right now. Try again in a moment.",
 };
@@ -79,6 +91,31 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "That username or password didn't match. Try again.",
     NETWORK:
       "We can't reach this Droplet right now. Check the connection and try again.",
+    WEAK_PASSWORD:
+      "That password doesn't meet the requirements. Use at least 12 characters with a mix of letters, numbers, and symbols.",
+    INVALID_EMAIL:
+      "That email address doesn't look right. Check it and try again.",
+    INVALID_REQUEST:
+      "Some of those details weren't valid. Check the form and try again.",
+    // Two-factor (TOTP) verify / enrollment — codes emitted by
+    // apps/orchestrator/src/routes/auth.ts. The plain "auth" fallback
+    // talks about username/password, which is wrong for a 2FA code, so
+    // map these explicitly.
+    TOTP_INVALID:
+      "That code didn't match. Check your authenticator app and try again.",
+    RECOVERY_INVALID:
+      "That recovery code didn't match. Try another one of your saved codes.",
+    TOTP_NOT_ENROLLED:
+      "Two-factor setup hasn't started yet. Begin again to get a fresh code.",
+    TOTP_ALREADY_ENABLED:
+      "Two-factor is already turned on for this account.",
+    // WARP-824 — self-service / forced password change. The "auth" fallback
+    // talks about signing in, which is wrong on the change-password screen, so
+    // map the orchestrator's change-password codes explicitly.
+    INVALID_PASSWORD:
+      "That current password didn't match. Try again.",
+    SAME_PASSWORD:
+      "Choose a password different from your current one.",
   },
   files: {
     UPLOAD_TOO_LARGE: "That file is too large to upload here.",
@@ -111,7 +148,9 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
     USED: "This invite has already been used. Please ask for a fresh link.",
     EXPIRED: "This invite has expired. Please ask for a fresh link.",
     INVALID_PASSWORD:
-      "That password didn't meet the requirements. It must be at least 8 characters.",
+      "That password didn't meet the requirements. Use at least 12 characters with a mix of letters, numbers, and symbols.",
+    WEAK_PASSWORD:
+      "That password didn't meet the requirements. Use at least 12 characters with a mix of letters, numbers, and symbols.",
     NOT_FOUND:
       "We couldn't find this invite. It may have been revoked or the link copied incorrectly.",
   },
@@ -190,6 +229,52 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "We had trouble streaming that recording. Check the connection and try again.",
     UNSUPPORTED:
       "This browser doesn't support HLS playback. Try Safari or a recent Chrome / Edge / Firefox.",
+  },
+  network: {
+    NETWORK:
+      "We can't reach this Droplet right now. Check the connection and try again.",
+    NOT_FOUND: "We couldn't find that device on your network anymore.",
+    TIMEOUT: "That took too long. Try again in a moment.",
+  },
+  vpn: {
+    NETWORK:
+      "We can't reach this Droplet right now. Check the connection and try again.",
+    NOT_FOUND: "That remote-access profile is no longer available.",
+    TIMEOUT: "That took too long. Try again in a moment.",
+  },
+  camera: {
+    NETWORK:
+      "We couldn't reach that camera. Check it's powered on and connected, then try again.",
+    AUTH_REQUIRED:
+      "That camera needs a username and password. Check the credentials and try again.",
+    NOT_FOUND: "We couldn't find that camera on your network.",
+  },
+  device: {
+    NETWORK:
+      "We couldn't reach that device. Check it's powered on and nearby, then try again.",
+    NOT_FOUND: "We couldn't find that device.",
+    TIMEOUT: "That device took too long to respond. Try again in a moment.",
+    // WARP-851: the orchestrator's Matter commissioning route returns
+    // 502 when discovery can't find the device on the network (matter.js
+    // CommissionableDeviceDiscoveryFailedError, or any network/BLE-class
+    // failure). Mirror its curated copy here — translateError never
+    // surfaces err.message verbatim, so without this entry the honest
+    // copy was flattened to the generic device fallback.
+    "502":
+      "Couldn't find the device on the network. Make sure it's powered on, in pairing mode, and on the same Wi-Fi as the Droplet.",
+    // WARP-856 (item 1): same bug class as the 502 above, for the other two
+    // statuses the commissioning route actually answers. The orchestrator's
+    // curated 504 copy ("Put it into pairing mode again…") reached the
+    // client with err.status = 504 but no entry existed here, so the
+    // actionable step was flattened to the generic device fallback;
+    // `inferCodeFromMessage` only matches /timeout|timed out/, which that
+    // copy doesn't contain. 503 is the controller-still-starting answer
+    // ("Matter controller not started") — jargon a first-run customer
+    // shouldn't see verbatim.
+    "504":
+      "Couldn't reach the device in time. Put it into pairing mode again, make sure it's within a few feet of the Droplet, and retry.",
+    "503":
+      "The Droplet's smart-home service is still starting up. Give it a few seconds and try again.",
   },
   generic: {
     NETWORK:

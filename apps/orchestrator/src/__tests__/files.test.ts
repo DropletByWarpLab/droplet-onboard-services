@@ -23,6 +23,9 @@ vi.mock("../config.js", () => ({
     MAX_UPLOAD_SIZE_MB: 10,
     NEXTCLOUD_URL: "http://nextcloud.test",
     AUTH_ENABLED: false,
+    // camera-retention-purge.service.ts derefs this at module scope;
+    // the real config defaults it, so the mock must carry it too.
+    FRIGATE_URL: "http://frigate:5000",
   },
 }));
 
@@ -139,6 +142,98 @@ describe("File Operations (Nextcloud-backed routes)", () => {
       const res = await request(app).get("/api/files");
       expect(res.status).toBe(200);
       expect(ncMock.ncListFiles).toHaveBeenCalledWith(expect.any(String), "dev", "/");
+    });
+  });
+
+  // ── Degrade-on-outage (Nextcloud down → 200 empty, not 500) ──
+  //
+  // When Nextcloud is unreachable a dashboard-polled GET must serve the
+  // endpoint's empty shape so the file surfaces don't dead-end on a 500
+  // during a backing-service outage (mirrors models-summary.service.ts).
+  // Connectivity is simulated two ways: an undici "fetch failed" + a
+  // cause.code, and a reachable-but-5xx WebDAV response.
+  describe("Nextcloud-down degrade (read endpoints)", () => {
+    const fetchFailed = () => {
+      const e = new Error("fetch failed");
+      (e as { cause?: unknown }).cause = { code: "ECONNREFUSED" };
+      return e;
+    };
+
+    it("GET /api/files → 200 [] when Nextcloud is unreachable", async () => {
+      ncMock.ncListFiles.mockRejectedValue(fetchFailed());
+      const res = await request(app).get("/api/files?path=/");
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual([]);
+    });
+
+    it("GET /api/files/trash → 200 { items: [] } on a 5xx upstream", async () => {
+      ncMock.ncListTrash.mockRejectedValue(
+        new Error("WebDAV PROPFIND trashbin failed: 503"),
+      );
+      const res = await request(app).get("/api/files/trash");
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ items: [] });
+    });
+
+    it("GET /api/files/favorites → 200 { items: [] } when Nextcloud is unreachable", async () => {
+      ncMock.ncListFavorites.mockRejectedValue(fetchFailed());
+      const res = await request(app).get("/api/files/favorites");
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ items: [] });
+    });
+
+    it("GET /api/files/recents → 200 { items: [] } when Nextcloud is unreachable", async () => {
+      ncMock.ncListRecents.mockRejectedValue(fetchFailed());
+      const res = await request(app).get("/api/files/recents");
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ items: [] });
+    });
+
+    it("GET /api/files/shared-with-me → 200 { shares: [] } when Nextcloud is unreachable", async () => {
+      ncMock.ncListSharedWithMe.mockRejectedValue(fetchFailed());
+      const res = await request(app).get("/api/files/shared-with-me");
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ shares: [] });
+    });
+
+    it("does NOT degrade a real (non-connectivity) error — a 403 still surfaces, not a 200 empty list", async () => {
+      // A WebDAV 403 is a genuine authorization failure, not "Nextcloud is
+      // down" — it must keep its non-degraded behavior (untyped → 500),
+      // never be masked as an empty 200 list.
+      ncMock.ncListFiles.mockRejectedValue(
+        new Error("WebDAV PROPFIND failed: 403"),
+      );
+      const res = await request(app).get("/api/files?path=/");
+      expect(res.status).toBe(500);
+      expect(res.body).not.toEqual([]);
+    });
+
+    it("GET /api/files → 200 [] when a list fn throws NextcloudOcsError(503) (degrade ordering contract)", async () => {
+      // Locks handleFileError's ORDERING CONTRACT: the NextcloudOcsError
+      // instanceof check runs before the degrade branch, but a 5xx OCS status
+      // is an outage — so a read endpoint must still fall through to the empty
+      // fallback rather than 503. Today list fns throw plain Error; this guards
+      // against a future refactor that throws NextcloudOcsError on 5xx silently
+      // making the degrade path unreachable.
+      const { NextcloudOcsError } = nc as typeof import("../services/nextcloud.client.js");
+      ncMock.ncListFiles.mockRejectedValue(
+        new NextcloudOcsError("OCS PROPFIND failed (503)", 503),
+      );
+      const res = await request(app).get("/api/files?path=/");
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual([]);
+    });
+
+    it("still surfaces a NextcloudOcsError(403) verbatim — a 4xx OCS status is NOT an outage", async () => {
+      // The 5xx carve-out must not bleed into 4xx: a real OCS authorization
+      // error keeps its upstream status even on a read endpoint.
+      const { NextcloudOcsError } = nc as typeof import("../services/nextcloud.client.js");
+      ncMock.ncListFiles.mockRejectedValue(
+        new NextcloudOcsError("OCS forbidden", 403),
+      );
+      const res = await request(app).get("/api/files?path=/");
+      expect(res.status).toBe(403);
+      expect(res.body).not.toEqual([]);
     });
   });
 

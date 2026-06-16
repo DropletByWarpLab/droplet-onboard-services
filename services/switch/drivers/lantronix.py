@@ -1,13 +1,24 @@
 """Lantronix SM8TAT2SA managed switch driver.
 
-Controls the switch via its HTTPS JSON REST API (lighttpd backend).
-Authentication uses session cookies obtained from POST /config/login.
+Controls the switch via its WebStaX HTTPS JSON API. Authentication uses
+client-generated session cookies plus a userip handshake against
+POST /config/login (the firmware issues no Set-Cookie).
 
-API pattern (discovered by probing the switch at 192.168.1.77):
-- Auth:   POST /config/login  (form data: username + password → session cookie)
-- Read:   GET  /stat/{page}   (returns JSON)
-- Write:  POST /stat/{page}   (JSON body, applies config)
-- Write:  POST /config/{op}   (JSON body, for system-level operations)
+Verified API (read-only discovery against firmware v1.04.0079, 2026-06-03 —
+ADR-018 item 10):
+- Auth:  GET  /config/login   → JSON carrying `userip`
+         POST /config/login   → {"users_login_auth": {agent, username, password, userip}}
+- Reads (confirmed HTTP 200, JSON):
+         GET /stat/sysinfo               model / firmware / MAC
+         GET /stat/vlan_membership_stat  [[vid, name, members[], untagged[]], ...]
+         GET /stat/vlan_port_stat        per-port PVID + tagging (trunk via txtag)
+         GET /stat/poe_status            per-port PoE
+- Writes (pattern-inferred, NOT hardware-confirmed — gated by `plan_only`):
+         POST /config/<name> with a body shaped like the matching /stat/<name>.
+
+The legacy prototype VLAN endpoints (/stat/vlan, /stat/port,
+/stat/vlan_membership, /config/vlan_membership) return 404 on v1.04.0079 and
+have been removed — they were never reachable on shipping firmware.
 
 Port layout: 8x GbE copper PoE (1-8) + 2x SFP (9-10)
 """
@@ -17,8 +28,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import secrets
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
@@ -43,6 +56,9 @@ SFP_PORT_MAX = 10
 POE_PORT_MIN = 1
 POE_PORT_MAX = 8
 
+# Default untagged VLAN a port falls back to when its PVID can't be read.
+LAN_VLAN = 1
+
 # Session management tuning.
 #
 # The SM8TAT2SA firmware (v1.04.0079, April 2026) idles its web session after
@@ -61,6 +77,63 @@ _LIVENESS_WINDOW_S = _KEEPALIVE_INTERVAL_S * 2
 # Back-off between failed re-auths so a dead/rebooting switch doesn't get
 # hammered with login POSTs from concurrent callers.
 _REAUTH_BACKOFF_S = 5.0
+
+# A trunk port on WebStaX carries `txtag` = "All except-native" (it tags every
+# VLAN except its native/untagged PVID). Access ports carry "None".
+_TRUNK_TXTAG = "All except-native"
+
+
+def _format_speed_mbps(speed_mbps: int) -> str:
+    """Render a link speed (Mbps from /stat/port_status) as the §7 label.
+
+    0 (or anything falsy) -> "" so the dashboard shows "—" for a down link.
+    Clean 1000-multiples render as "N Gb" (1000 -> "1 Gb", 10000 -> "10 Gb");
+    anything else renders as "N Mb" rather than fabricating a fractional Gb
+    label the firmware never reported.
+    """
+    try:
+        mbps = int(speed_mbps)
+    except (TypeError, ValueError):
+        return ""
+    if mbps <= 0:
+        return ""
+    if mbps % 1000 == 0:
+        return f"{mbps // 1000} Gb"
+    return f"{mbps} Mb"
+
+
+def _parse_vlan_membership_stat(data: dict) -> dict[int, dict]:
+    """Parse a GET /stat/vlan_membership_stat payload into a per-VLAN map.
+
+    Input rows are ``[vlan_id:int, name:str, members:int[], untagged:int[]]``.
+    Tagged ports are ``members - untagged``. Returns::
+
+        {vid: {"name": str,
+               "ports": [{"port": int, "tagged": bool, "member": True}, ...]}}
+
+    Shared by ``get_vlans`` (all VLANs) and ``get_vlan_membership`` (one VLAN)
+    so both expose the identical base-class membership shape from one parser.
+    """
+    out: dict[int, dict] = {}
+    rows = data.get("data", []) if isinstance(data, dict) else []
+    if not isinstance(rows, list):
+        return out
+    for row in rows:
+        if not isinstance(row, (list, tuple)) or len(row) < 4:
+            continue
+        vid, name, members, untagged = row[0], row[1], row[2], row[3]
+        try:
+            vid = int(vid)
+        except (TypeError, ValueError):
+            continue
+        members = [int(p) for p in (members or [])]
+        untagged_set = {int(p) for p in (untagged or [])}
+        ports = [
+            {"port": p, "tagged": p not in untagged_set, "member": True}
+            for p in sorted(members)
+        ]
+        out[vid] = {"name": str(name or ""), "ports": ports}
+    return out
 
 
 class LantronixDriver(SwitchDriver):
@@ -84,11 +157,33 @@ class LantronixDriver(SwitchDriver):
       canonical pattern in services/file-indexer/scheduler_service.py.)
     """
 
-    def __init__(self, host: str, port: int, username: str, password: str):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        username: str,
+        password: str,
+        ca_cert: str | None = None,
+        plan_only: bool = True,
+    ):
         self._host = host
         self._port = port
         self._username = username
         self._password = password
+        # Optional CA bundle / cert path for TLS verification of the switch
+        # (SWITCH_CA_CERT). When None, verification stays disabled with a
+        # warning (self-signed embedded cert) — NET-07.
+        self._ca_cert = ca_cert
+        # Write-safety gate (ADR-018 item 10 "Driver caveat"). The WebStaX
+        # WRITE shape (`POST /config/<name>` mirroring the `/stat/<name>` read)
+        # is pattern-inferred from the confirmed reads but NOT yet verified on
+        # firmware v1.04.0079 — writes are not GET-verifiable, so they could not
+        # be confirmed in the read-only discovery session. While `plan_only` is
+        # True (the default) every write method COMPUTES and returns the
+        # intended change without issuing the POST. Flipping it to False
+        # requires a one-time supervised confirmation per firmware; only then
+        # does a write actually hit the wire (and it is read-back-verified).
+        self._plan_only = plan_only
         self._client: httpx.AsyncClient | None = None
         self._auth_lock = asyncio.Lock()
         self._keepalive_scheduler: AsyncIOScheduler | None = None
@@ -101,14 +196,37 @@ class LantronixDriver(SwitchDriver):
         # Must be awaited from inside a running asyncio event loop (it is —
         # the FastAPI lifespan awaits it on uvicorn's loop). AsyncIOScheduler
         # binds to the running loop when .start() is called below.
-        logger.warning(
-            "TLS certificate verification disabled for switch at %s:%d "
-            "(self-signed cert expected). Set SWITCH_CA_CERT to enable verification.",
-            self._host, self._port,
-        )
+        #
+        # NET-07: honour SWITCH_CA_CERT. When the operator points it at a CA
+        # bundle / cert, pass that path to httpx `verify=` so the TLS session
+        # to the switch is actually verified. Without it, fall back to the
+        # historical insecure behaviour (self-signed embedded cert) with a
+        # warning. A configured-but-unreadable cert fails closed rather than
+        # silently downgrading to verify=False — silent downgrade is the very
+        # false-assurance trap this fix removes.
+        if self._ca_cert:
+            if not os.path.isfile(self._ca_cert):
+                raise ValueError(
+                    f"SWITCH_CA_CERT is set to '{self._ca_cert}' but no such file "
+                    f"exists; refusing to fall back to unverified TLS. Fix the path "
+                    f"or unset SWITCH_CA_CERT to use the (insecure) self-signed default."
+                )
+            verify: bool | str = self._ca_cert
+            logger.info(
+                "TLS certificate verification ENABLED for switch at %s:%d "
+                "(CA cert: %s).",
+                self._host, self._port, self._ca_cert,
+            )
+        else:
+            verify = False  # Self-signed cert on embedded switch
+            logger.warning(
+                "TLS certificate verification disabled for switch at %s:%d "
+                "(self-signed cert expected). Set SWITCH_CA_CERT to enable verification.",
+                self._host, self._port,
+            )
         self._client = httpx.AsyncClient(
             base_url=f"https://{self._host}:{self._port}",
-            verify=False,  # Self-signed cert on embedded switch
+            verify=verify,
             timeout=15.0,
             follow_redirects=False,
         )
@@ -144,7 +262,7 @@ class LantronixDriver(SwitchDriver):
             "Keepalive scheduled (interval=%.1fs, liveness window=%.1fs)",
             _KEEPALIVE_INTERVAL_S, _LIVENESS_WINDOW_S,
         )
-        logger.info("Connected to Lantronix switch at %s:%d", self._host, self._port)
+        logger.info("Connected to managed switch at %s:%d", self._host, self._port)
 
     async def disconnect(self) -> None:
         if self._keepalive_scheduler:
@@ -297,6 +415,7 @@ class LantronixDriver(SwitchDriver):
         matches the old loop's "sleep first, then ping" cadence. Exceptions
         are logged but never propagate — losing the switch for a while is
         surfaced via `is_connected()` going False, not by crashing.
+
         """
         try:
             await self._ping()
@@ -374,6 +493,46 @@ class LantronixDriver(SwitchDriver):
         except httpx.HTTPStatusError as exc:
             raise SwitchAPIError(exc.response.status_code, str(exc))
 
+    async def _gated_write(
+        self,
+        config_path: str,
+        body: dict,
+        plan: dict,
+        verify: "Callable[[], Awaitable[bool]] | None" = None,
+    ) -> dict | None:
+        """Apply a write, or return its plan when ``plan_only`` is set.
+
+        The WebStaX write shape (``POST /config/<name>`` mirroring the matching
+        ``/stat/<name>`` read) is pattern-inferred from the confirmed reads and
+        has NOT been verified on firmware v1.04.0079 — writes are not
+        GET-verifiable, so the read-only discovery session could not confirm
+        them. This is the ADR-018 item 10 "Driver caveat": flipping the driver
+        out of plan-only requires a one-time supervised confirmation per
+        firmware.
+
+        * ``plan_only`` True  → return ``{**plan, "dry_run": True}``; no POST.
+        * ``plan_only`` False → POST the body, then run ``verify`` (a read-back)
+          and raise ``SwitchAPIError`` if the change didn't take. Returns
+          ``{**plan, "dry_run": False}`` on success.
+        """
+        if self._plan_only:
+            logger.info(
+                "switch write PLANNED (plan_only) — not applied: POST %s %s",
+                config_path, plan,
+            )
+            return {**plan, "dry_run": True}
+
+        await self._request("POST", config_path, json=body)
+        if verify is not None and not await verify():
+            raise SwitchAPIError(
+                500,
+                f"write to {config_path} did not verify on read-back "
+                f"(plan: {plan}). The v1.04 write shape is unconfirmed — "
+                f"see the LantronixDriver ADR-018 item 10 caveat.",
+            )
+        logger.info("switch write APPLIED + verified: POST %s %s", config_path, plan)
+        return {**plan, "dry_run": False}
+
     def _validate_port(self, port: int) -> None:
         """Validate port number is in range."""
         if not PORT_MIN <= port <= PORT_MAX:
@@ -392,10 +551,12 @@ class LantronixDriver(SwitchDriver):
     # --- System ---
 
     async def get_system_info(self) -> dict:
+        # Verified: GET /stat/sysinfo → {"data": {"Model Name": ...,
+        # "Firmware Version": ..., "MAC Address": ..., "System Name": ...}}.
         data = await self._request("GET", "/stat/sysinfo")
         raw = data.get("data", data)
         return {
-            "model": raw.get("System Name", raw.get("Model", "SM8TAT2SA")),
+            "model": raw.get("Model Name", raw.get("Model", "SM8TAT2SA")),
             "firmware_version": raw.get("Firmware Version", raw.get("Software Version", "")),
             "mac_address": raw.get("MAC Address", raw.get("System MAC", "")),
             "uptime": raw.get("System Uptime", raw.get("Uptime", "")),
@@ -408,49 +569,49 @@ class LantronixDriver(SwitchDriver):
     # --- Port Management ---
 
     async def get_ports(self) -> list[dict]:
-        data = await self._request("GET", "/stat/port")
-        raw_ports = data.get("data", data.get("portStatus", []))
+        # Verified: GET /stat/vlan_port_stat → {"data": [{"port": N,
+        # "element": [{"pvid": int, "txtag": "None"|"All except-native", ...}]}]}.
+        # `pvid` is the port's untagged (access) VLAN; a trunk port carries
+        # txtag "All except-native". (The legacy `/stat/port` 404s on v1.04.0079;
+        # link/speed/duplex are not exposed here and surface as empty/false —
+        # the provisioner only consumes `port`, `vlan`, and `is_sfp`.)
+        data = await self._request("GET", "/stat/vlan_port_stat")
+        raw_ports = data.get("data", []) if isinstance(data, dict) else []
 
-        ports = []
+        ports: list[dict] = []
         if isinstance(raw_ports, list):
             for entry in raw_ports:
-                port_num = entry.get("port", entry.get("Port", 0))
-                if isinstance(port_num, str):
-                    try:
-                        port_num = int(port_num)
-                    except ValueError:
-                        continue
-
-                ports.append({
-                    "port": port_num,
-                    "name": f"Port {port_num}",
-                    "enabled": entry.get("enabled", entry.get("State", "")) != "Disabled",
-                    "link_up": entry.get("link", entry.get("Link", "")) == "Up",
-                    "speed": entry.get("speed", entry.get("Speed", "")),
-                    "duplex": entry.get("duplex", entry.get("Duplex", "")),
-                    "is_sfp": port_num >= SFP_PORT_MIN,
-                    "vlan": entry.get("pvid", entry.get("PVID", 1)),
-                })
-        elif isinstance(raw_ports, dict):
-            # Some firmware returns ports as a dict keyed by port number
-            for key, entry in raw_ports.items():
+                if not isinstance(entry, dict):
+                    continue
+                port_num = entry.get("port")
                 try:
-                    port_num = int(key)
-                except ValueError:
+                    port_num = int(port_num)
+                except (TypeError, ValueError):
                     continue
 
+                element = entry.get("element") or [{}]
+                el = element[0] if isinstance(element, list) and element else {}
+                pvid = el.get("pvid", el.get("PVID", LAN_VLAN))
+                try:
+                    pvid = int(pvid)
+                except (TypeError, ValueError):
+                    pvid = LAN_VLAN
+                txtag = str(el.get("txtag", "")).strip()
+
                 ports.append({
                     "port": port_num,
                     "name": f"Port {port_num}",
-                    "enabled": entry.get("enabled", True),
-                    "link_up": entry.get("link", "Down") == "Up",
-                    "speed": entry.get("speed", ""),
-                    "duplex": entry.get("duplex", ""),
+                    # vlan_port_stat carries PVID/tagging, not link state.
+                    "enabled": True,
+                    "link_up": False,
+                    "speed": "",
+                    "duplex": "",
                     "is_sfp": port_num >= SFP_PORT_MIN,
-                    "vlan": entry.get("pvid", 1),
+                    "is_trunk": txtag == _TRUNK_TXTAG,
+                    "vlan": pvid,
                 })
 
-        # Ensure all ports are represented
+        # Ensure all ports are represented even if the firmware omits one.
         existing = {p["port"] for p in ports}
         for i in range(PORT_MIN, PORT_MAX + 1):
             if i not in existing:
@@ -462,7 +623,8 @@ class LantronixDriver(SwitchDriver):
                     "speed": "",
                     "duplex": "",
                     "is_sfp": i >= SFP_PORT_MIN,
-                    "vlan": 1,
+                    "is_trunk": False,
+                    "vlan": LAN_VLAN,
                 })
 
         return sorted(ports, key=lambda p: p["port"])
@@ -475,8 +637,68 @@ class LantronixDriver(SwitchDriver):
                 return p
         raise SwitchAPIError(404, f"Port {port} not found")
 
+    async def get_port_status(self) -> list[dict]:
+        """Read live link state + speed from GET /stat/port_status.
+
+        Newly confirmed on v1.04.0079 (ADR-018 item 12) — this is the REAL
+        link/speed source. `/stat/vlan_port_stat` (consumed by ``get_ports``)
+        carries only PVID/tagging, so ``get_ports`` cannot report link state;
+        the orchestrator aggregation joins this read in to fill it.
+
+        Firmware row shape::
+
+            {"port": int, "link": "up"|"down", "media": "copper"|"fiber",
+             "speed": int (Mbps; 0 = down), "olink": 0|1}
+
+        Returns one dict per physical port (1-10), sorted by port::
+
+            {"port": int, "link_up": bool, "speed": str, "is_sfp": bool}
+
+        ``speed`` is the §7 label ("1 Gb"/"10 Gb"/"" when down). All ports are
+        represented even if the firmware omits a row (omitted -> down).
+        """
+        data = await self._request("GET", "/stat/port_status")
+        raw_rows = data.get("data", []) if isinstance(data, dict) else []
+
+        by_port: dict[int, dict] = {}
+        if isinstance(raw_rows, list):
+            for entry in raw_rows:
+                if not isinstance(entry, dict):
+                    continue
+                port_num = entry.get("port")
+                try:
+                    port_num = int(port_num)
+                except (TypeError, ValueError):
+                    continue
+                link_up = str(entry.get("link", "")).strip().lower() == "up"
+                speed = _format_speed_mbps(entry.get("speed", 0)) if link_up else ""
+                by_port[port_num] = {
+                    "port": port_num,
+                    "link_up": link_up,
+                    "speed": speed,
+                    "is_sfp": port_num >= SFP_PORT_MIN,
+                }
+
+        # Represent every physical port even when the firmware omits a row;
+        # an omitted port is reported down (never inferred as up from absence).
+        for i in range(PORT_MIN, PORT_MAX + 1):
+            by_port.setdefault(i, {
+                "port": i,
+                "link_up": False,
+                "speed": "",
+                "is_sfp": i >= SFP_PORT_MIN,
+            })
+
+        return [by_port[i] for i in range(PORT_MIN, PORT_MAX + 1)]
+
     async def set_port_enabled(self, port: int, enabled: bool) -> None:
         self._validate_port(port)
+        if self._plan_only:
+            logger.info(
+                "Port %d enable=%s PLANNED (plan_only) — not applied.",
+                port, enabled,
+            )
+            return
         await self._request(
             "POST",
             "/config/ports",
@@ -487,34 +709,30 @@ class LantronixDriver(SwitchDriver):
     # --- VLAN Management ---
 
     async def get_vlans(self) -> list[dict]:
-        data = await self._request("GET", "/stat/vlan")
-        raw = data.get("data", data.get("vlans", []))
-
-        vlans = []
-        if isinstance(raw, list):
-            for entry in raw:
-                vlans.append({
-                    "vlan_id": entry.get("vid", entry.get("vlan_id", 0)),
-                    "name": entry.get("name", entry.get("Name", "")),
-                    "ports": entry.get("ports", []),
-                })
-        elif isinstance(raw, dict):
-            for vid, entry in raw.items():
-                try:
-                    vlan_id = int(vid)
-                except ValueError:
-                    continue
-                vlans.append({
-                    "vlan_id": vlan_id,
-                    "name": entry.get("name", ""),
-                    "ports": entry.get("ports", []),
-                })
-
-        return vlans
+        # Verified: GET /stat/vlan_membership_stat →
+        # {"data": [[vid, name, members[], untagged[]], ...]}. The shared parser
+        # turns each row into the base-class membership shape (tagged = members
+        # − untagged). (The legacy `/stat/vlan` 404s on v1.04.0079.)
+        data = await self._request("GET", "/stat/vlan_membership_stat")
+        parsed = _parse_vlan_membership_stat(data)
+        return [
+            {"vlan_id": vid, "name": info["name"], "ports": info["ports"]}
+            for vid, info in sorted(parsed.items())
+        ]
 
     async def create_vlan(self, vlan_id: int, name: str = "") -> None:
+        # On WebStaX a VLAN is created implicitly by writing membership for a
+        # new vid; this explicit call posts the VLAN row first. Gated by
+        # `plan_only` so plan mode stays fully write-free (the membership write
+        # that follows is the change that's read-back-verified).
         if not 2 <= vlan_id <= 4094:
             raise SwitchAPIError(400, f"VLAN ID {vlan_id} out of range (2-4094)")
+        if self._plan_only:
+            logger.info(
+                "Create VLAN %d (%s) PLANNED (plan_only) — not applied.",
+                vlan_id, name,
+            )
+            return
         await self._request(
             "POST",
             "/config/vlan",
@@ -525,6 +743,9 @@ class LantronixDriver(SwitchDriver):
     async def delete_vlan(self, vlan_id: int) -> None:
         if vlan_id == 1:
             raise SwitchAPIError(400, "Cannot delete default VLAN 1")
+        if self._plan_only:
+            logger.info("Delete VLAN %d PLANNED (plan_only) — not applied.", vlan_id)
+            return
         await self._request(
             "POST",
             "/config/vlan_delete",
@@ -533,35 +754,60 @@ class LantronixDriver(SwitchDriver):
         logger.info("Deleted VLAN %d", vlan_id)
 
     async def get_vlan_membership(self, vlan_id: int) -> dict:
-        data = await self._request("GET", f"/stat/vlan_membership")
-        # Parse membership for the requested VLAN
-        raw = data.get("data", data)
-        membership = {"vlan_id": vlan_id, "ports": []}
-
-        if isinstance(raw, list):
-            for entry in raw:
-                if entry.get("vid") == vlan_id:
-                    membership["ports"] = entry.get("ports", [])
-                    break
-        elif isinstance(raw, dict):
-            vlan_data = raw.get(str(vlan_id), {})
-            membership["ports"] = vlan_data.get("ports", [])
-
-        return membership
+        # Verified: GET /stat/vlan_membership_stat carries every VLAN's
+        # membership; we parse all rows and pick the requested vid. A VLAN that
+        # doesn't exist returns an empty port list (not an error) so the
+        # provisioner's read-back-verify can distinguish "absent" from
+        # "unreadable". (The legacy `/stat/vlan_membership` 404s on v1.04.0079.)
+        data = await self._request("GET", "/stat/vlan_membership_stat")
+        parsed = _parse_vlan_membership_stat(data)
+        info = parsed.get(vlan_id)
+        return {
+            "vlan_id": vlan_id,
+            "ports": info["ports"] if info else [],
+        }
 
     async def set_vlan_membership(
         self, vlan_id: int, membership: list[dict]
-    ) -> None:
-        await self._request(
-            "POST",
-            "/config/vlan_membership",
-            json={"vid": vlan_id, "ports": membership},
+    ) -> dict | None:
+        # Write counterpart of GET /stat/vlan_membership_stat. WebStaX
+        # convention: POST /config/<name> with a body shaped like the matching
+        # /stat/<name> read. Gated by `plan_only` (see _gated_write) — the write
+        # shape is pattern-inferred, NOT confirmed on v1.04.0079. In apply mode
+        # we read /stat/vlan_membership_stat back and confirm every requested
+        # untagged member actually landed as an untagged member of the VLAN.
+        body = {
+            "data": [
+                {"vid": vlan_id, "ports": membership},
+            ]
+        }
+        plan = {"vlan_id": vlan_id, "membership": membership}
+
+        async def _verify() -> bool:
+            current = await self.get_vlan_membership(vlan_id)
+            present = {
+                (e["port"], bool(e.get("tagged")))
+                for e in current.get("ports", [])
+                if e.get("member")
+            }
+            for entry in membership:
+                if not entry.get("member"):
+                    continue
+                want = (entry["port"], bool(entry.get("tagged")))
+                if want not in present:
+                    return False
+            return True
+
+        result = await self._gated_write(
+            "/config/vlan_membership_stat", body, plan, verify=_verify
         )
         logger.info(
-            "Updated VLAN %d membership: %d ports",
+            "VLAN %d membership %s: %d ports",
             vlan_id,
+            "planned" if self._plan_only else "updated",
             len(membership),
         )
+        return result
 
     # --- PoE Control ---
 
@@ -620,14 +866,32 @@ class LantronixDriver(SwitchDriver):
             "max_power_mw": 30000,
         }
 
-    async def set_port_poe(self, port: int, enabled: bool) -> None:
+    async def set_port_poe(self, port: int, enabled: bool) -> dict | None:
+        # Write counterpart of GET /stat/poe_status. WebStaX convention:
+        # POST /config/poe_config. Gated by `plan_only` (pattern-inferred write
+        # shape, unconfirmed on v1.04.0079). In apply mode the read-back
+        # confirms the port's admin-enabled state matches the request.
         self._validate_poe_port(port)
-        await self._request(
-            "POST",
-            "/config/poe",
-            json={"port": port, "enabled": enabled},
+        body = {"data": [{"port": port, "enabled": enabled}]}
+        plan = {"port": port, "enabled": enabled}
+
+        async def _verify() -> bool:
+            for entry in await self.get_poe_status():
+                if entry.get("port") == port:
+                    return bool(entry.get("enabled")) == enabled
+            # No PoE row for the port after the write — can't confirm it took.
+            return False
+
+        result = await self._gated_write(
+            "/config/poe_config", body, plan, verify=_verify
         )
-        logger.info("Port %d PoE %s", port, "enabled" if enabled else "disabled")
+        logger.info(
+            "Port %d PoE %s",
+            port,
+            ("planned " if self._plan_only else "")
+            + ("enable" if enabled else "disable"),
+        )
+        return result
 
     # --- Higher-Level Operations ---
 

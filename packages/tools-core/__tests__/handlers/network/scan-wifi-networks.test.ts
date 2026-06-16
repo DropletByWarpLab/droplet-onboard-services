@@ -5,11 +5,12 @@ import type { ToolContext } from "../../../src/types.js";
 function ctxWithGet(get: ReturnType<typeof vi.fn>): ToolContext {
   return {
     http: {
-      routing: { get, post: vi.fn(), patch: vi.fn(), delete: vi.fn() },
+      routing: {} as ToolContext["http"]["routing"],
       cameras: {} as ToolContext["http"]["cameras"],
       switchSvc: {} as ToolContext["http"]["switchSvc"],
       fileIndexer: {} as ToolContext["http"]["fileIndexer"],
       nextcloud: {} as ToolContext["http"]["nextcloud"],
+      orchestrator: { get, post: vi.fn(), patch: vi.fn(), delete: vi.fn() },
     },
     prisma: {} as ToolContext["prisma"],
     matter: {} as ToolContext["matter"],
@@ -18,11 +19,11 @@ function ctxWithGet(get: ReturnType<typeof vi.fn>): ToolContext {
 }
 
 describe("scan_wifi_networks", () => {
-  it("returns the routing /wifi/scan body", async () => {
+  it("returns the orchestrator /api/network/wifi/scan body", async () => {
     const body = { networks: [{ ssid: "Foo", signal: -42 }] };
     const get = vi.fn().mockResolvedValue(new Response(JSON.stringify(body), { status: 200 }));
     const r = await scanWifiNetworks.handler({}, ctxWithGet(get));
-    expect(get).toHaveBeenCalledWith("/wifi/scan", expect.anything());
+    expect(get).toHaveBeenCalledWith("/api/network/wifi/scan", expect.anything());
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.data).toEqual(body);
   });

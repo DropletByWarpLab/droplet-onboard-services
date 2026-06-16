@@ -13,7 +13,7 @@ cd edge-platform
 ./scripts/setup.sh
 ```
 
-This single command provisions a fresh device (Raspberry Pi or Linux dev machine) with everything needed to run the Droplet stack.
+This single command provisions a fresh device (router host, inference host, or Linux dev machine) with everything needed to run the Droplet stack.
 
 ---
 
@@ -25,7 +25,7 @@ The script runs six phases, each idempotent (safe to re-run):
 |-------|-------------|
 | **1. Preflight** | Checks OS (Debian/Raspbian/Ubuntu), architecture (ARM64 or x86_64), disk (≥ 8 GB), memory (≥ 2 GB), internet |
 | **2. Docker** | Installs Docker Engine 25+ and Compose v2 if not present. Adds user to `docker` group |
-| **3. Camera Drivers** | Installs UVC/V4L2 kernel modules, v4l-utils, ffmpeg, udev rules for USB cameras |
+| **3. Camera Drivers** | Installs UVC/V4L2 kernel modules, v4l-utils, ffmpeg, udev rules for USB cameras. Also preps host Bluetooth for Matter BLE commissioning (WARP-850): bluez + rfkill installed, `bluetooth.service` enabled, radio rfkill-unblocked, adapter powered — bluetoothd stays RUNNING (noble's raw-channel HCI socket coexists with it; see `lib/bluetooth.sh`) |
 | **4. Secrets** | Generates unique-per-device passwords and encryption keys. Writes `.env` (chmod 600) |
 | **5. Build** | Pulls 7 base images, builds every service with a local `Dockerfile` — orchestrator, web-dashboard, ai-gateway, routing, plus the profile-gated file-indexer, switch, and camera-discovery. Previously the `full`-profile images were skipped, so `COMPOSE_PROFILES=full docker compose up -d` on a fresh install would fail with "No such image". |
 | **6. Start** | Starts the full Docker Compose stack with health-check waits |
@@ -42,6 +42,7 @@ Each device gets its own random secrets — no two devices share credentials:
 | `REDIS_PASSWORD` | cache, orchestrator, ai-gateway, nextcloud | Redis authentication |
 | `MQTT_PASSWORD` | broker, orchestrator, file-indexer | Mosquitto MQTT authentication |
 | `NEXTCLOUD_ADMIN_PASSWORD` | nextcloud | Nextcloud bootstrap admin |
+| `DROPLET_MATTER_SERVICE_TOKEN` | orchestrator, matter-controller | X-Droplet-Auth bearer for the Matter host-network sidecar (WARP-850) |
 
 ---
 
@@ -64,7 +65,7 @@ Each device gets its own random secrets — no two devices share credentials:
 ### Examples
 
 ```bash
-# Full setup on a fresh Pi
+# Full setup on a fresh appliance host
 ./scripts/setup.sh
 
 # See what would happen without doing anything
@@ -121,7 +122,7 @@ Each check exists because a specific bug class shipped to droplet-sys during the
 | `shellcheck` | shellcheck warning-severity across `setup.sh`, `factory-reset.sh`, `lib/*.sh`, with **no global excludes** — every waiver is a per-line `# shellcheck disable=SCxxxx` directive with rationale (WARP-486) | bash bugs caught by static analysis (parse errors, quoting, declared-outside-function) |
 | `matter-env-allowlist` | Delegates to `scripts/test-security.sh` Test 7 | architecture-guard rule 11 — `MATTER_*` env outside the allowlist collides with matter.js's auto-imported `VariableService` and crashes controller init |
 | `exec-bits` | `git ls-files --stage` assert mode 100755 for every operator-facing script (setup, factory-reset, camera-drivers, install-device-bridge, ship-check, ship-check.test, openwrt/scripts/upgrade-router) | WARP-487 — index-100644 ships to main, so `./<path>/<name>.sh` invocations documented in the script's own `--help` are silent no-ops on filesystems that honour the index bit (WARP-489 extended the sweep to `openwrt/scripts/`) |
-| `stale-repo-names` | Walk curated user-facing surfaces (README, service READMEs/TESTING.md, top-level `scripts/*.sh`, `apps/orchestrator/src/**/*.ts`, `services/ai-gateway/**/*.py`, `services/voice-io/**/*.py`, `docker/docker-compose.yml`) and FAIL on any reference to the legacy repo names `inference-engine` / `droplet-jetson-ai`; canonical name is `droplet-local-LLM`. Allowlists the mDNS hostname `inference-engine.local` and the compose project-name + container-label call sites tied to it | WARP-494 — stale repo-name refs accumulating in user-facing surfaces after the canonical DropletByWarpLab remote rename; new refs reach for the old name out of habit |
+| `stale-repo-names` | Walk curated user-facing surfaces (README, service READMEs/TESTING.md, top-level `scripts/*.sh`, `apps/orchestrator/src/**/*.ts`, `services/ai-gateway/**/*.py`, `services/voice-io/**/*.py`, `docker/docker-compose.yml`) and FAIL on any reference to the legacy inference-repo names that predate the canonical `droplet-local-LLM` (the exact blocked strings live in `scripts/test/ship-check.sh`). Allowlists the mDNS hostname `inference-engine.local` and the compose project-name + container-label call sites tied to it | WARP-494 — stale repo-name refs accumulating in user-facing surfaces after the canonical DropletByWarpLab remote rename; new refs reach for the old name out of habit |
 | `docker-build-smoke` (`--full` only) | `setup.sh --skip-docker --skip-build --skip-start --skip-drivers` inside a fresh `ubuntu:24.04` container | PR #263 set-u/RETURN-trap class + bash-version drift between macOS and the production target host |
 
 Each subcommand can be invoked individually (`./scripts/test/ship-check.sh shellcheck`) for fast iteration on a single failure. `--help` lists everything.
@@ -155,7 +156,7 @@ The setup script handles this automatically during its run by falling back to `s
 
 ### Build fails with out-of-memory
 
-On Raspberry Pi 4 (2 GB), builds may run out of memory:
+On memory-constrained ARM64 hosts (2 GB RAM), builds may run out of memory:
 
 ```bash
 # Free up Docker resources
@@ -213,6 +214,7 @@ Wipes **all** user data, credentials, and configuration — returning the device
 ### What gets deleted
 
 - Docker volumes: database, uploaded files, Nextcloud data, AI keys, Matter fabric state
+- The Docker **build cache** — reclaimed on **every** reset. It's the largest rebuildable disk consumer (`docker compose down --rmi all` leaves it behind; it has grown past 57 GB on a long-lived box, enough to fill the OS NVMe) and is never user data. This is why the next `setup.sh` after a reset is a cold (slower) rebuild — an intentional trade so the OS drive doesn't silently fill over time.
 - Device secrets (`.env`)
 - TLS certificates and MQTT credentials
 - Setup logs
@@ -222,7 +224,9 @@ Wipes **all** user data, credentials, and configuration — returning the device
 ```
   --yes            Skip interactive confirmation
   --reinstall      After wiping, auto-run setup.sh to re-provision
-  --purge-images   Also remove built Docker images (slower rebuild)
+  --purge-images   Also remove built Docker images + dangling images/networks
+                   (a scoped reclaim — not a daemon-wide system prune, so
+                   sibling project images such as Ollama are left intact)
   -h, --help       Show help
 ```
 
@@ -303,5 +307,6 @@ scripts/
     ├── secrets.sh         .env generation with openssl rand
     ├── compose.sh         Image pull, build, start, health wait
     ├── systemd.sh         Optional boot service
-    └── camera-drivers.sh  Camera driver library (sourced by setup.sh)
+    ├── camera-drivers.sh  Camera driver library (sourced by setup.sh)
+    └── bluetooth.sh       Host Bluetooth prep for Matter BLE (WARP-850)
 ```

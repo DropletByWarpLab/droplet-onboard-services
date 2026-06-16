@@ -23,6 +23,12 @@ __pycache__/
 # reader is documented against, so we keep it tracked.
 .claude/*
 !.claude/session-state.example.json
+# Project subagent definitions and shared project settings are team-shared
+# Claude Code config and must be tracked (settings.local.json stays ignored
+# via the `.claude/*` rule above).
+!.claude/agents/
+!.claude/skills/
+!.claude/settings.json
 .claude/session-state.json
 *.tsbuildinfo
 .DS_Store
@@ -50,3 +56,12 @@ docker/secrets/
 # device-bridge runtime env (live credentials). Only .example is tracked.
 services/oled-display/device-bridge.env
 /etc/droplet/device-bridge.env
+
+# WARP-663 / ADR-020 — the appliance image-release PRIVATE signing key is
+# NEVER committed (referenced only via $DROPLET_RELEASE_SIGNING_KEY). Only the
+# public verify key (scripts/image/keys/droplet-release.pub) is tracked.
+scripts/image/keys/*.key
+# Built appliance images (large; published as GitHub release assets, not tracked).
+output/
+# build-iso.sh's transient working dir (upstream ISO download + extract tree).
+scripts/image/.build/

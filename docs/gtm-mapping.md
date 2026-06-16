@@ -36,7 +36,7 @@ edge-platform/
     routing/                FastAPI — OpenWrt ubus JSON-RPC client
     camera-discovery/       FastAPI — ONVIF/RTSP + Frigate client
     file-indexer/           Python — filesystem watcher + embedder + MQTT
-  openwrt/                  OpenWrt image builder + config overlay (replaces Pi-Docker router)
+  openwrt/                  OpenWrt image builder + config overlay (replaces the old Docker-based router)
   docker/
     docker-compose.yml      Unified Compose stack (20 services)
     nginx.conf              Reverse proxy
@@ -72,11 +72,11 @@ edge-platform/
 | `deploy/droplet-assistant.service` | `openwrt/scripts/droplet-router-monitor.service` + (optional) systemd unit installed by `scripts/setup.sh --systemd` | Systemd for the **router** side lives under `openwrt/`; boot-persistence for the app stack is opt-in via the `--systemd` flag on `setup.sh`. |
 | `docker-compose.yml` (root, router/NAS) | `docker/docker-compose.yml` | No separate root/infra compose files exist. The single file at `docker/docker-compose.yml` manages all 20 services. |
 | `infra/docker-compose.yml` (assistant) | folded into `docker/docker-compose.yml` | No separate `infra/` directory. Stack convergence (GTM M1.1) is already done by this structural change. |
-| dnsmasq, iptables, hostapd (Pi-Docker router) | `openwrt/` (OpenWrt image) | The router stack runs OpenWrt natively instead of Docker. dnsmasq / firewall / WiFi AP are OpenWrt packages, controlled via ubus JSON-RPC from `services/routing/`. |
+| dnsmasq, iptables, hostapd (Docker-based router) | `openwrt/` (OpenWrt image) | The router stack runs OpenWrt natively instead of Docker. dnsmasq / firewall / WiFi AP are OpenWrt packages, controlled via ubus JSON-RPC from `services/routing/`. |
 
 ## Deltas / divergences
 
-### 1. Router/NAS moved from Pi-Docker to OpenWrt
+### 1. Router/NAS moved from Docker-based router to OpenWrt
 The GTM doc describes a privileged Docker container running dnsmasq + iptables + hostapd + Samba + NFS + SSH as the router/NAS stack. This repo instead runs **OpenWrt** as the router OS, and the `services/routing/` FastAPI service talks to OpenWrt via ubus JSON-RPC. Consequences:
 
 - GTM's "privileged container escape" critical risk (§5.1) is **already mitigated** — there is no privileged Docker container for routing.
@@ -128,4 +128,4 @@ Coverage gaps remain (streaming E2E, browser E2E), but the "no tests" framing in
 GTM M1.4 lists HTTPS as P0 future work. The `gateway` service already binds `:443` and mounts `docker/certs/`; the missing piece is confirming a self-signed cert is auto-generated on first boot by `scripts/setup.sh`. M1.4 should be `[~]` Partial, not `[ ]` Not started.
 
 ### 9. Model name and hardware assumption
-The GTM doc's §5.1 latency risk mentions **phi3:mini** on Pi hardware. Per cross-repo notes, the `inference-engine` repo runs **llama3.2:3b** on **Jetson**, not phi3:mini on Pi. Mapping impact: the "10–30s per response" risk quantity is calibrated for the wrong model+hardware pair and should be re-measured; the qualitative risk (latency hurts UX → streaming is the mitigation) still applies. Tracked authoritatively in `inference-engine/docs/gtm-mapping.md`.
+The GTM doc's §5.1 latency risk mentions **phi3:mini** on a low-power host. Per cross-repo notes, the `inference-engine` repo runs **llama3.2:3b** on the inference host, not phi3:mini on a low-power host. Mapping impact: the "10–30s per response" risk quantity is calibrated for the wrong model+hardware pair and should be re-measured; the qualitative risk (latency hurts UX → streaming is the mitigation) still applies. Tracked authoritatively in `inference-engine/docs/gtm-mapping.md`.

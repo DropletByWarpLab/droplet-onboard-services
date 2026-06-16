@@ -1,7 +1,7 @@
 /**
  * Screen-QR state machine + poller.
  *
- * Owns "what QR should currently be on the PyPortal screen". Three
+ * Owns "what QR should currently be on the status display screen". Three
  * states, in priority order:
  *
  *   1. setup-URL  — when no admin user exists yet (first boot).
@@ -30,10 +30,14 @@
  *   - Poller stop()s cleanly on app shutdown so test suites can run
  *     the whole orchestrator without leaking timers.
  */
+import { createHash } from "node:crypto";
 import { networkInterfaces } from "node:os";
 import pino from "pino";
+import type { PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
-import { pushCustomImage } from "./display.client.js";
+import { pushClaimCode, pushCustomImage, showSystem } from "./display.client.js";
+import type { ClaimWifi } from "./display.client.js";
+import { ensureClaimCode, isClaimed } from "./claim-code.service.js";
 import { renderQRToScreenPng } from "./qr-render.js";
 
 const logger = pino({ name: "screen-qr" });
@@ -49,7 +53,7 @@ const PEER_DISPLAY_WINDOW_MS = 60_000;
  *
  * Off by default. When a WireGuard peer is created, this service can
  * render the peer's full WireGuard `.conf` (which includes the client
- * `PrivateKey`) as a QR on the PyPortal for 60 s so the operator's
+ * `PrivateKey`) as a QR on the status display for 60 s so the operator's
  * phone can scan + import directly via the WireGuard mobile app's
  * built-in QR scanner. That's slick UX in a trusted physical space
  * (private home, locked office) — but in a shared-space deployment
@@ -72,11 +76,15 @@ const PEER_DISPLAY_WINDOW_MS = 60_000;
 const PEER_QR_ENABLED =
   (process.env.SCREEN_PEER_QR_ENABLED ?? "false").toLowerCase() === "true";
 
-/** device-bridge runs on the host with network_mode: host (port 9090). */
-const DEVICE_BRIDGE_URL =
-  process.env.DEVICE_BRIDGE_URL || "http://host.docker.internal:9090";
+/**
+ * device-bridge runs on the host (systemd, port 9090). Shared with
+ * storage.ts via `config.DEVICE_BRIDGE_URL` (default
+ * `http://host.docker.internal:9090`) so both bridge consumers resolve the
+ * one host-gateway address instead of two divergent hardcoded URLs.
+ */
+const DEVICE_BRIDGE_URL = config.DEVICE_BRIDGE_URL;
 
-export type ScreenQRMode = "setup" | "peer" | "wifi" | "none";
+export type ScreenQRMode = "setup" | "peer" | "wifi" | "system" | "none";
 
 export interface ScreenQRDecision {
   mode: ScreenQRMode;
@@ -98,6 +106,23 @@ interface PeerEvent {
 /** In-memory peer-event state. Cleared on restart. */
 let lastPeerEvent: PeerEvent | null = null;
 
+/**
+ * Prisma handle for the claim-screen branch. Set by `startScreenQRPoller`
+ * (which receives it from app.ts, same as the reminders poller). Null until
+ * the poller starts; the claim branch is skipped while null so unit tests of
+ * the QR logic don't need a DB.
+ */
+let prismaRef: PrismaClient | null = null;
+
+/** Production collaborators for `decideClaimScreen`. Real DB + display client. */
+const claimScreenDeps: ClaimScreenDeps = {
+  isClaimed,
+  ensureClaimCode,
+  pushClaimCode,
+  setupUrl,
+  fetchWifiQR: fetchClaimWifiFromBridge,
+};
+
 /** The signature of whatever's currently on screen (avoids re-pushes). */
 let activeSignature = "";
 
@@ -109,7 +134,7 @@ let pollerInterval: NodeJS.Timeout | null = null;
  * even if a previous tick is still in `pushCustomImage` (multipart
  * upload over the host bridge). Without this guard, a slow display
  * push can stack concurrent ticks that all race on `activeSignature`,
- * double-push the same image to the PyPortal, and burn the display
+ * double-push the same image to the status display, and burn the display
  * service's small worker pool. Single-flight is the right shape: if
  * a refresh is already running, skip this tick.
  */
@@ -145,21 +170,51 @@ export function notePeerCreated(config: string, name?: string): void {
   );
 }
 
+/** Build the peer-import QR decision. Shared by the claimed + unclaimed paths. */
+function peerDecision(peer: PeerEvent): ScreenQRDecision {
+  return {
+    mode: "peer",
+    payload: peer.config,
+    caption: peer.name
+      ? `Scan to add VPN peer ${peer.name}`
+      : "Scan to add VPN peer",
+    signature: `peer:${peer.createdAt}:${peer.name || ""}`,
+  };
+}
+
 /**
  * Decide what QR should be on screen right now. Pure function over
- * the inputs (real-user count, peer event freshness, WiFi info).
+ * the inputs (real-user count, peer event freshness, WiFi info, claimed).
  * Tested in isolation in screen-qr.service.test.ts.
  *
  * `realUserCount` is the count of Nextcloud users with the system
  * admin filtered out — the system admin is created by the Nextcloud
  * container and isn't a "real" customer account.
+ *
+ * `claimed` is whether the box has been claimed (its claim code consumed).
+ * Once claimed, the panel shows the native System screen — see Priority 0.
  */
 export async function decideScreenQR(
   realUserCount: number,
   peer: PeerEvent | null,
   now: number,
   fetchWifiQR: () => Promise<{ payload: string; ssid: string } | null>,
+  claimed = false,
 ): Promise<ScreenQRDecision> {
+  // Priority 0 (claim-screen exit): once the box is CLAIMED, the panel shows the
+  // native py-v3 System screen (live stats + the built-in Wi-Fi pairing QR). This
+  // is the path that unsticks the modal claim screen after setup. It MUST always
+  // resolve to a concrete screen — never "none" (which means "leave the panel on
+  // whatever it last showed", i.e. the consumed claim code) and never the legacy
+  // full-screen setup/WiFi QR images, which don't belong on the redesigned panel.
+  // A freshly-created WireGuard peer (trust mode) still wins for its short window.
+  if (claimed) {
+    if (peer && now - peer.createdAt < PEER_DISPLAY_WINDOW_MS) {
+      return peerDecision(peer);
+    }
+    return { mode: "system", payload: "", caption: "System", signature: "system" };
+  }
+
   // Priority 1: no real user yet → show setup URL.
   if (realUserCount === 0) {
     const url = setupUrl();
@@ -173,14 +228,7 @@ export async function decideScreenQR(
 
   // Priority 2: recent peer-creation event.
   if (peer && now - peer.createdAt < PEER_DISPLAY_WINDOW_MS) {
-    return {
-      mode: "peer",
-      payload: peer.config,
-      caption: peer.name
-        ? `Scan to add VPN peer ${peer.name}`
-        : "Scan to add VPN peer",
-      signature: `peer:${peer.createdAt}:${peer.name || ""}`,
-    };
+    return peerDecision(peer);
   }
 
   // Priority 3: WiFi SSID QR. Returns null if device-bridge is down —
@@ -197,6 +245,91 @@ export async function decideScreenQR(
   }
 
   return { mode: "none", payload: "", caption: "", signature: "none" };
+}
+
+/**
+ * Collaborators `decideClaimScreen` needs, injected so the decision is
+ * unit-testable with no DB and no network (AC6). Production wiring passes the
+ * real claim-code service + display client + setupUrl.
+ */
+export interface ClaimScreenDeps {
+  isClaimed: (prisma: PrismaClient) => Promise<boolean>;
+  ensureClaimCode: (prisma: PrismaClient) => Promise<string | null>;
+  pushClaimCode: (code: string, setupUrl: string, wifi?: ClaimWifi) => Promise<boolean>;
+  setupUrl: () => string;
+  /**
+   * WARP-819: fetch the box's Wi-Fi-connect QR matrix + ssid + psk so the claim
+   * screen can also show "join this box's Wi-Fi" creds. Returns null when the
+   * bridge is down / the AP creds aren't available yet — the claim code still
+   * renders (graceful degradation). Injected so the claim decision stays
+   * unit-testable with no network.
+   */
+  fetchWifiQR: () => Promise<ClaimWifi | null>;
+}
+
+export interface ClaimScreenResult {
+  /** True if the claim screen owns this tick — the caller MUST skip the QR
+   *  image push. False means "fall through to the QR/peer/wifi logic". */
+  handled: boolean;
+  /** Set only when handled: the push outcome (false = display outage). */
+  pushed?: boolean;
+  /** Set only when handled: claim-scoped, changes only when the code rotates,
+   *  so the poller can skip re-pushing the same code every tick. */
+  signature?: string;
+}
+
+/** Short, stable signature fragment for a claim code (8 hex chars of its
+ *  hash). We never put the plaintext code in the signature/log. */
+function claimSignature(code: string): string {
+  const h = createHash("sha256").update(code).digest("hex").slice(0, 8);
+  return `claim:${h}`;
+}
+
+/**
+ * HIGHEST-priority branch of the refresh path (WARP-632 / ADR-017): while the
+ * box is NOT claimed, render the minted claim code on the lid and SKIP the QR
+ * image push for this tick. Once claimed, hand back to the QR/peer/wifi logic.
+ *
+ * Single owner: the orchestrator already owns the first-boot PyPortal screen
+ * via this service, so the claim screen lives here too (no second pusher racing
+ * the display). The mint + seed is a write to the orchestrator's own Prisma DB
+ * (`ensureClaimCode`), so this is the natural home.
+ *
+ * Returns `{ handled: false }` when claimed, or when a race means the code was
+ * just consumed (ensureClaimCode → null) — both fall through to the QR logic.
+ * When a code is minted we push it and return `{ handled: true, pushed, signature }`.
+ * We report `handled: true` even on a failed push so we don't briefly show the
+ * WiFi QR on a display blip while the box is still unclaimed; the caller only
+ * records the signature on a successful push, so the next tick retries.
+ */
+export async function decideClaimScreen(
+  prisma: PrismaClient,
+  deps: ClaimScreenDeps,
+): Promise<ClaimScreenResult> {
+  if (await deps.isClaimed(prisma)) {
+    return { handled: false };
+  }
+  const code = await deps.ensureClaimCode(prisma);
+  if (!code) {
+    // Race: isClaimed said false but the code was just consumed. Don't push a
+    // stale claim screen — fall through.
+    return { handled: false };
+  }
+  // WARP-819: also surface the box's Wi-Fi-connect QR + creds on the claim
+  // screen so the user can join with zero prior config (scan, or type the
+  // SSID/password for a camera-less PC). The bridge fetch is best-effort: any
+  // failure (bridge down, AP not up yet, thrown error) degrades to a claim-only
+  // push — the claim code is the load-bearing element and must never be blocked
+  // by a Wi-Fi-QR hiccup.
+  let wifi: ClaimWifi | undefined;
+  try {
+    wifi = (await deps.fetchWifiQR()) ?? undefined;
+  } catch (err) {
+    logger.warn({ err }, "screen-qr: claim WiFi-QR fetch failed; pushing claim code only");
+    wifi = undefined;
+  }
+  const pushed = await deps.pushClaimCode(code, deps.setupUrl(), wifi);
+  return { handled: true, pushed, signature: claimSignature(code) };
 }
 
 /**
@@ -240,6 +373,46 @@ function lanHostname(): string {
 }
 
 /**
+ * Raw `/openwrt/qr` fetch from device-bridge. Returns the parsed body (which
+ * carries `payload`, `ssid`, `key`, and the QR `matrix`) or null on any error.
+ * Both the steady-state WiFi-QR decision and the WARP-819 claim-screen WiFi
+ * creds source from this one call so the auth/timeout posture stays in one place.
+ */
+async function fetchBridgeQR(): Promise<{
+  payload?: string;
+  ssid?: string;
+  key?: string;
+  matrix?: number[][];
+  ok?: boolean;
+} | null> {
+  try {
+    // WARP-659: /openwrt/qr now requires the bridge shared secret (it returns
+    // the Wi-Fi PSK). Same env precedence as storage.ts's bridgeAuthToken();
+    // read per-call so a secret injected after boot is picked up.
+    const token = (
+      process.env.BRIDGE_AUTH_TOKEN ||
+      process.env.SERVICE_TOKEN_DISPLAY ||
+      ""
+    ).trim();
+    const res = await fetch(`${DEVICE_BRIDGE_URL}/openwrt/qr`, {
+      // device-bridge is local-only; short timeout.
+      signal: AbortSignal.timeout(2_000),
+      ...(token ? { headers: { "X-Droplet-Auth": token } } : {}),
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as {
+      payload?: string;
+      ssid?: string;
+      key?: string;
+      matrix?: number[][];
+      ok?: boolean;
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Fetch the WiFi-hotspot QR payload from device-bridge.
  * Returns null on any error — the poller treats null as "skip this
  * tick, leave the screen alone".
@@ -247,18 +420,26 @@ function lanHostname(): string {
 async function fetchWifiQRFromBridge(): Promise<
   { payload: string; ssid: string } | null
 > {
-  try {
-    const res = await fetch(`${DEVICE_BRIDGE_URL}/openwrt/qr`, {
-      // device-bridge is local-only; short timeout.
-      signal: AbortSignal.timeout(2_000),
-    });
-    if (!res.ok) return null;
-    const data = (await res.json()) as { payload?: string; ssid?: string };
-    if (!data.payload || !data.ssid) return null;
-    return { payload: data.payload, ssid: data.ssid };
-  } catch {
+  const data = await fetchBridgeQR();
+  if (!data || !data.payload || !data.ssid) return null;
+  return { payload: data.payload, ssid: data.ssid };
+}
+
+/**
+ * WARP-819: fetch the box's Wi-Fi-connect QR for the CLAIM screen — the QR
+ * bit-matrix (the firmware paints it; it never encodes on-device) plus the
+ * SSID and plaintext PSK so the panel can show readable "type-it" creds under
+ * the QR. Returns null unless the bridge gave us a usable matrix + ssid + key;
+ * the claim code still renders without it (graceful degradation).
+ */
+async function fetchClaimWifiFromBridge(): Promise<ClaimWifi | null> {
+  const data = await fetchBridgeQR();
+  if (!data || data.ok === false) return null;
+  const { matrix, ssid, key } = data;
+  if (!matrix || !Array.isArray(matrix) || matrix.length === 0 || !ssid || !key) {
     return null;
   }
+  return { matrix, ssid, psk: key };
 }
 
 /**
@@ -281,6 +462,35 @@ async function refreshNow(): Promise<ScreenQRDecision | null> {
   refreshInFlight = true;
 
   try {
+    // Priority 0 (WARP-632 / ADR-017): while the box is NOT claimed, the claim
+    // code owns the lid. Mint + push it and skip the QR image push entirely.
+    // Only when claimed do we fall through to the setup/peer/wifi QR logic.
+    let claimed = false;
+    if (prismaRef) {
+      try {
+        const claim = await decideClaimScreen(prismaRef, claimScreenDeps);
+        if (claim.handled) {
+          // Record the signature only on a successful push so a display blip
+          // is retried next tick rather than silently latched.
+          if (claim.pushed && claim.signature) {
+            if (claim.signature !== activeSignature) {
+              activeSignature = claim.signature;
+              logger.info("screen-qr: pushed claim screen");
+            }
+          }
+          return null;
+        }
+        // handled:false → the box is claimed (or the code was just consumed).
+        // Either way the panel must leave the claim screen; decideScreenQR
+        // resolves a claimed box to the System screen below.
+        claimed = true;
+      } catch (err) {
+        // A claim-branch failure (DB down, etc.) must not blank the screen or
+        // crash the poller — log and fall through to the QR logic.
+        logger.warn({ err }, "screen-qr: claim branch failed; falling through to QR");
+      }
+    }
+
     const userCount = await countRealNextcloudUsers().catch((err) => {
       // Treat "Nextcloud unreachable" as "first boot, still" — better
       // to default to the setup-URL QR (which is the safe initial state)
@@ -294,12 +504,29 @@ async function refreshNow(): Promise<ScreenQRDecision | null> {
       lastPeerEvent,
       Date.now(),
       fetchWifiQRFromBridge,
+      claimed,
     );
 
     // Skip re-push if signature unchanged.
     if (decision.signature === activeSignature) {
       return decision;
     }
+
+    // A claimed box navigates to the native System screen via a BARE mode nav
+    // (no full-screen QR image) — the path that unsticks the panel from the
+    // claim screen after setup. Never falls back to "none" (which would leave
+    // the consumed claim code parked on the panel).
+    if (decision.mode === "system") {
+      const ok = await showSystem();
+      if (ok) {
+        activeSignature = decision.signature;
+        logger.info("screen-qr: navigated panel to System (box claimed)");
+      } else {
+        logger.warn("screen-qr: System nav push failed; will retry next tick");
+      }
+      return decision;
+    }
+
     if (decision.mode === "none") {
       // Nothing to push — but record the signature so we don't retry
       // every tick on a flapping device-bridge.
@@ -333,15 +560,28 @@ async function refreshNow(): Promise<ScreenQRDecision | null> {
   }
 }
 
+/**
+ * Kick an immediate refresh — used right after the box is claimed so the panel
+ * transitions off the claim screen without waiting up to POLL_INTERVAL_MS.
+ * Mirrors the `notePeerCreated` → `refreshNow` kick; safe no-op before the
+ * poller has started (refreshNow short-circuits on `!started`).
+ */
+export function kickScreenQRRefresh(): void {
+  refreshNow().catch((err) =>
+    logger.warn({ err }, "screen-qr: post-claim refresh kick failed"),
+  );
+}
+
 /** Set by start(); skips ticks before the app is up. */
 let started = false;
 
 /**
  * Boot the poller. Idempotent — calling twice replaces the handle.
- * `app.ts` calls this once during boot. Doesn't need Prisma (user
- * count goes through Nextcloud's OCS API).
+ * `app.ts` calls this once during boot. `prisma` is used by the claim-screen
+ * branch (WARP-632); the user-count leg still goes through Nextcloud's OCS API.
  */
-export function startScreenQRPoller(): void {
+export function startScreenQRPoller(prisma: PrismaClient): void {
+  prismaRef = prisma;
   started = true;
   if (pollerInterval) {
     clearInterval(pollerInterval);
@@ -367,6 +607,7 @@ export function stopScreenQRPoller(): void {
     pollerInterval = null;
   }
   started = false;
+  prismaRef = null;
 }
 
 /**
@@ -376,6 +617,7 @@ export function stopScreenQRPoller(): void {
 export function _resetForTests(): void {
   lastPeerEvent = null;
   activeSignature = "";
+  prismaRef = null;
   if (pollerInterval) {
     clearInterval(pollerInterval);
     pollerInterval = null;

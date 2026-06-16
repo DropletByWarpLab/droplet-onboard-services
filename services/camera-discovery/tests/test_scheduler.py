@@ -1,116 +1,165 @@
-"""WARP-221: AsyncIOScheduler wiring for the periodic camera-discovery scan.
+"""WARP-221 — tests for the camera-discovery scan scheduler.
 
-Verifies the startup handler builds a single interval-triggered job that
-targets the scan wrapper, that the first run is scheduled immediately, and
-that shutdown stops the scheduler — all without touching a real Frigate,
-MQTT broker, or the network.
+These mirror the routing service's scheduler tests (services/routing/
+tests/test_egress_meter.py + test_aps.py): assert the interval job is
+registered with the expected id + cadence, assert run_scan actually
+invokes the scan, and assert a single failing scan does not propagate
+out of run_scan (so the AsyncIOScheduler keeps ticking).
+
+A regression guard greps main.py's source for the banned
+`while True` + `asyncio.sleep` scan-scheduling loop and fails if it
+ever comes back — this is the standard CLAUDE.md prohibits.
 """
 
 from __future__ import annotations
 
-import asyncio
+import importlib
+import inspect
+import re
 
 import pytest
 
 
-@pytest.fixture
-def event_loop():
-    """AsyncIOScheduler.start() expects a running/current loop. Create +
-    tear down one per test rather than relying on pytest-asyncio."""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    yield loop
-    loop.close()
-
-
-def _run(coro, loop):
-    return loop.run_until_complete(coro)
-
-
-def _patch_startup_externals(monkeypatch, main):
-    """Stub out MQTT + Frigate so startup() does no network I/O."""
-    monkeypatch.setattr(main, "_connect_mqtt", lambda: None)
-
-    async def _ready():
-        return True
-
-    async def _noop():
-        return None
-
-    monkeypatch.setattr(main.frigate, "health_check", _ready)
-    monkeypatch.setattr(main, "_reconcile_with_frigate", _noop)
-    monkeypatch.setattr(main, "_wait_for_frigate", _noop)
-
-
-def test_startup_builds_interval_scheduler(event_loop, monkeypatch):
+def _fresh_main():
+    """Import main fresh. conftest already seeds the env + sys.path."""
     import main
 
-    _patch_startup_externals(monkeypatch, main)
-    try:
-        _run(main.startup(), event_loop)
-        assert main._scheduler is not None
-        jobs = main._scheduler.get_jobs()
-        assert len(jobs) == 1
+    return importlib.reload(main)
+
+
+class TestSchedulerFactory:
+    # NOTE: build_scan_scheduler() returns an *unstarted* scheduler. We
+    # deliberately don't call .shutdown() in these tests — on an
+    # AsyncIOScheduler that was never .start()ed there is no bound event
+    # loop, and .shutdown() raises AttributeError trying to reach
+    # `self._eventloop.call_soon_threadsafe`. Inspecting the registered
+    # job (id / trigger / coalesce / next_run_time) needs no running loop,
+    # which is exactly what these factory tests assert. The started-loop
+    # lifecycle (start + shutdown) is exercised by TestRunScan and by the
+    # uvicorn boot smoke in QA.
+    def test_build_scheduler_registers_single_scan_job(self):
+        main = _fresh_main()
+        assert hasattr(
+            main, "build_scan_scheduler"
+        ), "main must expose build_scan_scheduler()"
+
+        scheduler = main.build_scan_scheduler()
+        jobs = scheduler.get_jobs()
+        assert len(jobs) == 1, f"expected exactly one job, got {len(jobs)}"
         job = jobs[0]
-        assert job.id == "camera_discovery_scan"
-        assert "interval" in str(job.trigger).lower()
-        assert job.max_instances == 1
+        assert job.id == "camera-discovery-scan"
+
+    def test_job_interval_matches_scan_interval(self):
+        main = _fresh_main()
+        scheduler = main.build_scan_scheduler()
+        job = scheduler.get_job("camera-discovery-scan")
+        assert job is not None
+        # IntervalTrigger stores the cadence as a timedelta.
+        assert job.trigger.interval.total_seconds() == float(main.SCAN_INTERVAL)
+
+    def test_job_coalesces_and_caps_instances(self):
+        main = _fresh_main()
+        scheduler = main.build_scan_scheduler()
+        job = scheduler.get_job("camera-discovery-scan")
         assert job.coalesce is True
-    finally:
-        if main._scheduler is not None:
-            main._scheduler.shutdown(wait=False)
-            main._scheduler = None
+        assert job.max_instances == 1
+        # misfire_grace_time is set to a full SCAN_INTERVAL (not the 1s
+        # default) so a tick missed while a long scan runs is treated as a
+        # coalescable misfire and caught up, not silently dropped.
+        assert job.misfire_grace_time == main.SCAN_INTERVAL
+
+    def test_first_run_fires_immediately(self):
+        """next_run_time is set so the first scan fires at startup,
+        preserving the old loop's "scan, then sleep" cadence (not
+        "sleep, then scan").
+
+        Asserting `is not None` alone is vacuous — every interval job has
+        a next_run_time. Pin it to ~now so this actually guards the
+        immediate-first-scan behavior and would catch a regression to the
+        default (first fire one full SCAN_INTERVAL out)."""
+        from datetime import datetime
+
+        main = _fresh_main()
+        scheduler = main.build_scan_scheduler()
+        job = scheduler.get_job("camera-discovery-scan")
+        assert job.next_run_time is not None
+        # First fire must be ~now, not SCAN_INTERVAL away. Allow a small
+        # window for build/scheduling latency; SCAN_INTERVAL is >= 2s.
+        delta = abs((job.next_run_time.replace(tzinfo=None) - datetime.now()).total_seconds())
+        assert delta < 2, (
+            f"first scan should fire immediately (~now), but next_run_time is "
+            f"{delta:.1f}s away"
+        )
 
 
-def test_scan_job_targets_scan_wrapper(event_loop, monkeypatch):
-    import main
+class TestRunScan:
+    @pytest.mark.asyncio
+    async def test_run_scan_invokes_scan_and_discover(self, monkeypatch):
+        main = _fresh_main()
+        calls = {"n": 0}
 
-    _patch_startup_externals(monkeypatch, main)
-    try:
-        _run(main.startup(), event_loop)
-        job = main._scheduler.get_jobs()[0]
-        assert job.func is main._scan_job
-    finally:
-        if main._scheduler is not None:
-            main._scheduler.shutdown(wait=False)
-            main._scheduler = None
+        async def fake_scan():
+            calls["n"] += 1
+
+        monkeypatch.setattr(main, "scan_and_discover", fake_scan)
+        await main.run_scan()
+        assert calls["n"] == 1
+
+    @pytest.mark.asyncio
+    async def test_run_scan_swallows_failing_scan(self, monkeypatch):
+        """A single failing scan must not raise out of run_scan — the
+        scheduler has to survive a transient sweep error and keep
+        ticking."""
+        main = _fresh_main()
+
+        async def boom():
+            raise RuntimeError("simulated scan failure")
+
+        monkeypatch.setattr(main, "scan_and_discover", boom)
+        # Must NOT raise.
+        await main.run_scan()
+
+    @pytest.mark.asyncio
+    async def test_run_scan_survives_then_recovers(self, monkeypatch):
+        """One failing scan followed by a good one — the good scan still
+        runs (run_scan is idempotent and self-contained per call)."""
+        main = _fresh_main()
+        outcomes = iter([RuntimeError("boom"), None])
+
+        async def flaky():
+            outcome = next(outcomes)
+            if isinstance(outcome, Exception):
+                raise outcome
+
+        monkeypatch.setattr(main, "scan_and_discover", flaky)
+        await main.run_scan()  # fails internally, swallowed
+        await main.run_scan()  # succeeds
 
 
-def test_shutdown_stops_scheduler(event_loop, monkeypatch):
-    import main
+class TestNoWhileTrueRegressionGuard:
+    """Hard regression guard: the banned `while True` + `asyncio.sleep`
+    scan-scheduling loop must never reappear in main.py."""
 
-    _patch_startup_externals(monkeypatch, main)
+    def test_no_while_true_sleep_scan_loop(self):
+        import main
 
-    async def _noop():
-        return None
+        source = inspect.getsource(main)
+        # Look for a `while True:` whose body (next ~12 lines) contains an
+        # `asyncio.sleep(...)` — the hand-rolled scheduling pattern.
+        lines = source.splitlines()
+        for idx, line in enumerate(lines):
+            if re.match(r"\s*while\s+True\s*:", line):
+                window = "\n".join(lines[idx : idx + 12])
+                assert "asyncio.sleep" not in window, (
+                    "Banned while-True + asyncio.sleep scheduling loop found in "
+                    "main.py — use AsyncIOScheduler (WARP-221 / CLAUDE.md "
+                    "scheduling standard)."
+                )
 
-    # frigate.close / routing_client.aclose are awaited in shutdown().
-    monkeypatch.setattr(main.frigate, "close", _noop)
-    monkeypatch.setattr(main.routing_client, "aclose", _noop)
+    def test_discovery_loop_removed(self):
+        """The old hand-rolled driver + its task handle are dead code
+        and must be gone."""
+        import main
 
-    _run(main.startup(), event_loop)
-    sched = main._scheduler
-    assert sched is not None and sched.running is True
-    _run(main.shutdown(), event_loop)
-    assert sched.running is False
-
-
-def test_scan_job_swallows_scan_errors(event_loop, monkeypatch):
-    """_scan_job logs but never raises when scan_and_discover blows up."""
-    import main
-
-    async def _boom():
-        raise RuntimeError("scan exploded")
-
-    monkeypatch.setattr(main, "scan_and_discover", _boom)
-    # Should not raise.
-    _run(main._scan_job(), event_loop)
-
-
-def test_no_while_true_scheduling_loop():
-    """WARP-221 acceptance: the banned discovery loop is gone and the
-    scheduler hook is in place."""
-    import main
-
-    assert hasattr(main, "_scheduler")
-    assert not hasattr(main, "discovery_loop")
+        assert not hasattr(main, "discovery_loop"), "discovery_loop must be deleted"
+        assert not hasattr(main, "_discovery_task"), "_discovery_task must be deleted"

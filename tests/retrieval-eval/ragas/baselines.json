@@ -1,6 +1,6 @@
 {
   "_comment": "WARP-436 — RAGAS metric baselines, schema-only scaffold.",
-  "_status": "PLACEHOLDER. Populate via the rag-eval-nightly workflow's first successful run on a Linux runner (the macOS dev path can't bring up the full Compose stack — see docs/RAG_TESTING.md 'macOS dev-machine note'). The integration test in tests/retrieval-eval/run.integration.test.ts treats the all-zero floors as 'recording mode' and skips assertions when zero.",
+  "_status": "PLACEHOLDER. Populate via the services/rag-eval/ container on a deployed appliance with COMPOSE_PROFILES=...,eval set: `docker exec droplet-rag-eval-1 python /opt/rag-eval/main.py bootstrap --runs 5` writes /data/rag-eval/baselines.candidate.json, then `docker cp` it back here and commit. See services/rag-eval/README.md + docs/RAG_TESTING.md §'Baselines + thresholds'. The integration test in tests/retrieval-eval/run.integration.test.ts treats the all-zero floors as 'recording mode' and skips assertions when zero.",
   "recorded_at": null,
   "judge": "local",
   "n_queries": 20,

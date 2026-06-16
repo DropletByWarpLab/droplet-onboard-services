@@ -38,14 +38,13 @@ from urllib.parse import urlparse
 import httpx
 import paho.mqtt.client as mqtt
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from driver_checker import full_driver_report, auto_fix_drivers
 from frigate_client import FrigateClient
 from onvif_scanner import discover_cameras, probe_onvif_device
-from rtsp_prober import probe_camera
+from rtsp_prober import probe_camera, verify_stream
 from vendor_init import check_status as vendor_status_check
 from vendor_init import initialize_camera as vendor_initialize
 
@@ -251,7 +250,7 @@ async def _subnet_sweep(network: ipaddress.IPv4Network) -> list[str]:
     lease shows up. Capped to /22 (~1k hosts) and throttled to 64
     in-flight connections — without the semaphore a /24 bursts 250+
     sockets at once and we trip the default ``ulimit -n`` on the
-    Jetson (RLIMIT_NOFILE=1024 out of the box).
+    inference host (RLIMIT_NOFILE=1024 out of the box).
     """
     if network.num_addresses > 1024:
         logger.warning(
@@ -503,7 +502,13 @@ async def scan_and_discover() -> None:
                     # Hostname suggests camera but no streams found — add as pending
                     camera_info = candidate
                 else:
-                    # Not a camera
+                    # Not a camera (e.g. a TP-Link AP that has 554 open but
+                    # doesn't speak RTSP — probe_camera returns None for it).
+                    # Drop any prior pending/known entry so a device that was
+                    # mis-classified before this confirmation clears without a
+                    # restart, instead of lingering in the discovered list.
+                    pending_cameras.pop(mac, None)
+                    known_cameras.pop(mac, None)
                     continue
 
         camera_name = _sanitize_camera_name(
@@ -519,24 +524,77 @@ async def scan_and_discover() -> None:
             rtsp_url = None
             camera_info["rtsp_url"] = None
 
-        # If we have a valid RTSP URL, auto-add to Frigate
-        if rtsp_url:
-            success = await frigate.add_camera(camera_name, camera_info["rtsp_url"])
-            if success:
-                camera_info["status"] = "active"
-                known_cameras[mac] = camera_info
-                logger.info(
-                    "Auto-added camera: %s (%s) at %s",
+        # Only auto-add to Frigate a stream we have VERIFIED actually answers
+        # — never a port-open guess. The prober emits an unverified
+        # `rtsp://<ip>:554/stream1` placeholder for "ports open, no stream
+        # confirmed" (detection_method == "rtsp_port_open"); the old code
+        # pushed that straight into Frigate as `status: active` and cached it
+        # in `known_cameras`. Two failures resulted: Frigate sat at 0 fps on a
+        # dead URL, AND the camera was now "known" so the candidate loop
+        # skipped it forever — it never re-probed, so a camera that came good
+        # later (finished first-boot, operator set credentials) was never
+        # picked up. STAGNANT.
+        #
+        # Now: verify the stream (real DESCRIBE → 200) before promoting. A
+        # camera that doesn't verify stays in `pending_cameras` — surfaced to
+        # the wizard as "needs setup", re-probed every scan, and auto-promoted
+        # the instant a real stream appears. A genuinely working stream
+        # (open, default-credential, or ONVIF-provided) verifies and is added
+        # exactly as before.
+        detection_method = camera_info.get("detection_method")
+        verified = False
+        if detection_method == "rtsp_default_credentials":
+            # probe_rtsp_with_credentials already confirmed a live 200 DESCRIBE;
+            # repeating verify_stream would open an identical TCP connection for
+            # no new information. Mark verified directly.
+            verified = bool(rtsp_url)
+        elif rtsp_url and detection_method != "rtsp_port_open":
+            try:
+                verified = await verify_stream(rtsp_url)
+            except Exception as exc:  # transient network error — retry next scan
+                logger.debug("Stream verify raised for %s: %s", ip, exc)
+                verified = False
+
+        # Guard the Frigate call: a 5xx / connection-refused / timeout from
+        # frigate.add_camera must NOT escape and abort the candidate loop —
+        # that would silently skip every remaining candidate this sweep. A
+        # failed add is logged and treated like an unverified stream: the
+        # camera stays pending + re-probeable and is NEVER cached in
+        # known_cameras (so it can't go stagnant on a stream Frigate refused).
+        added = False
+        if verified:
+            try:
+                added = await frigate.add_camera(camera_name, rtsp_url)
+            except Exception as exc:
+                logger.warning(
+                    "Frigate add_camera failed for %s at %s: %s — keeping "
+                    "pending, will retry next scan",
                     camera_name,
-                    camera_info.get("manufacturer", "unknown"),
                     ip,
+                    exc,
                 )
-            else:
-                camera_info["status"] = "pending"
-                pending_cameras[mac] = camera_info
+                added = False
+
+        if added:
+            camera_info["status"] = "active"
+            known_cameras[mac] = camera_info
+            pending_cameras.pop(mac, None)
+            logger.info(
+                "Auto-added camera: %s (%s) at %s",
+                camera_name,
+                camera_info.get("manufacturer", "unknown"),
+                ip,
+            )
         else:
-            camera_info["status"] = "pending"
+            # Unverified / dead-guess / Frigate-add-failed → keep it pending and
+            # re-probeable. NEVER cache it in known_cameras, or the candidate
+            # loop would skip it and it would go stagnant on a stream that does
+            # not work.
+            camera_info["status"] = (
+                "needs_setup" if rtsp_url else "pending"
+            )
             pending_cameras[mac] = camera_info
+            known_cameras.pop(mac, None)
 
         # Publish discovery event
         publish_discovery({
@@ -554,44 +612,58 @@ async def scan_and_discover() -> None:
         })
 
 
-# --- Background scheduling (WARP-221) ---
+# --- Scan scheduler (WARP-221) ---
 #
-# The periodic discovery scan runs on an apscheduler AsyncIOScheduler
-# instead of a hand-rolled ``while True: ... await asyncio.sleep(N)`` loop
-# (banned per CLAUDE.md "no `while True` scheduling loops" rule; the
-# canonical replacement is services/file-indexer/scheduler_service.py,
-# WARP-218). The scheduler binds to uvicorn's running event loop when
-# ``start()`` is called from the FastAPI startup handler.
+# The periodic discovery sweep runs on an apscheduler AsyncIOScheduler
+# interval job rather than a hand-rolled `while True: ... asyncio.sleep`
+# loop. This is the canonical pattern (CLAUDE.md "No `while True` loops
+# for scheduling"; mirrors services/routing/scheduler.py). apscheduler
+# gives us coalesce + max_instances overlap protection and graceful
+# shutdown the bare loop lacked.
 
-_scheduler: AsyncIOScheduler | None = None
-
-
-async def _wait_for_frigate() -> None:
-    """One-shot, bounded warm-up: wait for Frigate to come up.
-
-    This is a terminating ``for`` loop, not a scheduling loop, so it is
-    allowed under WARP-221. Mirrors the readiness wait the old discovery
-    loop did before its first scan.
-    """
-    for _ in range(30):
-        if await frigate.health_check():
-            return
-        logger.info("Waiting for Frigate to be ready...")
-        await asyncio.sleep(5)
+_scan_scheduler: AsyncIOScheduler | None = None
 
 
-async def _scan_job() -> None:
-    """Scheduler job wrapper: run one discovery scan, log-but-swallow errors.
+async def run_scan() -> None:
+    """One discovery sweep, with the try/except the old loop body had.
 
-    Preserves the old loop's contract that a single scan failure is
-    logged via the service logger and never propagates (apscheduler would
-    otherwise log it at ERROR through its own job-error handler, losing
-    the 'Discovery scan error' grep target).
+    A failing scan is logged and swallowed so a transient sweep error
+    never tears down the schedule — the next interval tick retries.
     """
     try:
         await scan_and_discover()
-    except Exception as e:  # noqa: BLE001 — keep the scheduler ticking
+    except Exception as e:
         logger.error("Discovery scan error: %s", e)
+
+
+def build_scan_scheduler() -> AsyncIOScheduler:
+    """Build (but do not start) the AsyncIOScheduler that drives the
+    periodic discovery sweep.
+
+    ``next_run_time=datetime.now()`` fires the first scan immediately,
+    preserving the old loop's "scan, then sleep" cadence.
+    ``coalesce=True`` + ``max_instances=1`` mean a scan that overruns
+    SCAN_INTERVAL never overlaps itself, and the backed-up ticks that
+    piled up while it ran collapse into a single catch-up run instead of
+    a burst — a guarantee the bare while-True loop didn't make. We set
+    ``misfire_grace_time`` generously (one full SCAN_INTERVAL) so those
+    missed ticks are actually treated as misfires eligible for coalescing
+    rather than silently dropped by the default 1 s grace window; the net
+    effect for idempotent discovery is a delayed catch-up scan, never a
+    lost one.
+    """
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(
+        run_scan,
+        "interval",
+        seconds=SCAN_INTERVAL,
+        id="camera-discovery-scan",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=SCAN_INTERVAL,
+        next_run_time=datetime.now(),
+    )
+    return scheduler
 
 
 # --- FastAPI app ---
@@ -630,7 +702,7 @@ async def _reconcile_with_frigate() -> None:
 
 @app.on_event("startup")
 async def startup():
-    global mqtt_client, _scheduler
+    global mqtt_client, _scan_scheduler
     try:
         mqtt_client = _connect_mqtt()
         logger.info("Connected to MQTT broker")
@@ -639,7 +711,9 @@ async def startup():
 
     # Wait briefly for Frigate to be ready, then reconcile our cache with
     # its view of the world so a prior-run known_cameras doesn't block
-    # re-adoption of a camera that Frigate forgot.
+    # re-adoption of a camera that Frigate forgot. This Frigate-readiness
+    # wait is a one-time startup step — the scan scheduler below doesn't
+    # repeat it per tick.
     for _ in range(12):
         if await frigate.health_check():
             await _reconcile_with_frigate()
@@ -647,34 +721,22 @@ async def startup():
         logger.info("Waiting for Frigate to be ready...")
         await asyncio.sleep(5)
 
-    # Bounded warm-up wait so the first scan doesn't fire before Frigate
-    # is up (the old loop did this inline before its first iteration).
-    await _wait_for_frigate()
-
-    # WARP-221: periodic discovery runs on apscheduler, not a while-True
-    # loop. ``next_run_time=datetime.now()`` preserves the old behavior of
-    # running the first scan immediately rather than waiting one full
-    # SCAN_INTERVAL. coalesce=True + max_instances=1 stop a slow scan from
-    # overlapping or stampeding the next tick.
-    _scheduler = AsyncIOScheduler()
-    _scheduler.add_job(
-        _scan_job,
-        trigger=IntervalTrigger(seconds=SCAN_INTERVAL),
-        id="camera_discovery_scan",
-        name="ONVIF/RTSP camera discovery scan",
-        replace_existing=True,
-        coalesce=True,
-        max_instances=1,
-        next_run_time=datetime.now(),
+    # WARP-221: drive the periodic sweep with apscheduler instead of a
+    # hand-rolled while-True loop. next_run_time fires the first scan now.
+    _scan_scheduler = build_scan_scheduler()
+    _scan_scheduler.start()
+    logger.info(
+        "Camera discovery scan scheduler started (interval: %ds)", SCAN_INTERVAL
     )
-    _scheduler.start()
-    logger.info("Camera discovery scheduler started (interval: %ds)", SCAN_INTERVAL)
 
 
 @app.on_event("shutdown")
 async def shutdown():
-    if _scheduler:
-        _scheduler.shutdown(wait=False)
+    if _scan_scheduler is not None:
+        try:
+            _scan_scheduler.shutdown(wait=False)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("scan scheduler shutdown failed: %s", exc)
     if mqtt_client:
         mqtt_client.loop_stop()
         mqtt_client.disconnect()
@@ -694,20 +756,36 @@ async def health():
 
 
 @app.get("/cameras/discovered")
-async def get_discovered():
-    """Return pending (not yet added to Frigate) cameras."""
+async def get_discovered(request: Request):
+    """Return pending (not yet added to Frigate) cameras.
+
+    Gated by DEVICE_SECRET (NET-05): pending records carry the discovered
+    RTSP URL, which for default-credential cameras embeds ``user:pass@`` —
+    reconnaissance-grade data that must not be readable by any LAN peer.
+    """
+    _require_auth(request)
     return list(pending_cameras.values())
 
 
 @app.get("/cameras/known")
-async def get_known():
-    """Return all known (active in Frigate) cameras."""
+async def get_known(request: Request):
+    """Return all known (active in Frigate) cameras.
+
+    Gated by DEVICE_SECRET (NET-05): leaks camera inventory, RTSP URLs
+    (may embed ``user:pass@``), MACs and models otherwise.
+    """
+    _require_auth(request)
     return list(known_cameras.values())
 
 
 @app.post("/cameras/discovered/{mac}/accept")
-async def accept_camera(mac: str):
-    """Accept a pending camera — add it to Frigate."""
+async def accept_camera(mac: str, request: Request):
+    """Accept a pending camera — add it to Frigate.
+
+    Gated by DEVICE_SECRET (NET-05): pushing an arbitrary pending camera
+    into Frigate is a privileged write, not a public action.
+    """
+    _require_auth(request)
     camera = pending_cameras.pop(mac, None)
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found in pending list")
@@ -716,6 +794,24 @@ async def accept_camera(mac: str):
     if not rtsp_url:
         pending_cameras[mac] = camera  # Put back
         raise HTTPException(status_code=400, detail="No RTSP URL available for this camera")
+
+    # Verify the stream actually answers before committing it to Frigate, so a
+    # manual accept of a port-open guess can't install a permanently-0-fps
+    # camera. A camera that doesn't verify needs credentials / a corrected URL
+    # first — stays pending so the operator can supply them, rather than
+    # silently landing a dead feed.
+    if not await verify_stream(rtsp_url):
+        pending_cameras[mac] = camera  # Put back
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Camera stream did not verify — the RTSP path or credentials "
+                "are likely wrong. Many cameras (e.g. Hikvision/Dahua) gate "
+                "their real stream behind a vendor-specific path that the "
+                "discovery placeholder can't guess, so a corrected RTSP "
+                "URL/path (or credentials) is needed before it can be added."
+            ),
+        )
 
     name = camera.get("name", _sanitize_camera_name(camera.get("hostname", ""), camera["ip"]))
     success = await frigate.add_camera(name, rtsp_url)
@@ -731,8 +827,13 @@ async def accept_camera(mac: str):
 
 
 @app.post("/cameras/discovered/{mac}/reject")
-async def reject_camera(mac: str):
-    """Reject a discovered camera — won't be discovered again."""
+async def reject_camera(mac: str, request: Request):
+    """Reject a discovered camera — won't be discovered again.
+
+    Gated by DEVICE_SECRET (NET-05): mutates the rejected-MAC set, a
+    privileged write.
+    """
+    _require_auth(request)
     camera = pending_cameras.pop(mac, None)
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
@@ -742,8 +843,14 @@ async def reject_camera(mac: str):
 
 
 @app.post("/scan")
-async def trigger_scan():
-    """Manually trigger a discovery scan."""
+async def trigger_scan(request: Request):
+    """Manually trigger a discovery scan.
+
+    Gated by DEVICE_SECRET (NET-05): an on-demand subnet sweep +
+    RTSP/ONVIF/default-credential probe is a privileged, resource-intensive
+    action — an unauthenticated LAN peer must not be able to launch it.
+    """
+    _require_auth(request)
     await scan_and_discover()
     return {
         "status": "scan_complete",
@@ -831,8 +938,13 @@ async def camera_initialize(ip: str, request: Request):
 
 
 @app.get("/subnet/status")
-async def subnet_status():
-    """Report which subnet is being scanned for cameras."""
+async def subnet_status(request: Request):
+    """Report which subnet is being scanned for cameras.
+
+    Gated by DEVICE_SECRET (NET-05): exposes the camera subnet/CIDR and
+    isolation state — network-topology reconnaissance.
+    """
+    _require_auth(request)
     return {
         "camera_subnet": CAMERA_SUBNET or "all_private",
         "isolation_active": _camera_network is not None,
@@ -844,8 +956,13 @@ async def subnet_status():
 
 
 @app.get("/drivers")
-async def get_driver_status():
-    """Get full camera driver status report."""
+async def get_driver_status(request: Request):
+    """Get full camera driver status report.
+
+    Gated by DEVICE_SECRET (NET-05): matches the existing ``/drivers/fix``
+    gate — the read leaks host kernel-module / driver state.
+    """
+    _require_auth(request)
     return full_driver_report()
 
 

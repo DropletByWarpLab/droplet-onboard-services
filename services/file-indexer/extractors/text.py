@@ -2,13 +2,17 @@
 
 HTML uses readability-lxml to strip nav/ads/boilerplate before chunking;
 falls back to a crude tag-strip if readability is missing or chokes.
+
+WARP-287: emits a single `Span` with `NoneAnchor` — text/markdown/etc.
+don't carry positional info, so the whole body lives in one span.
 """
 from __future__ import annotations
 
 import os
 import re
-from typing import cast
 
+from anchor_schema import NoneAnchor
+from extractors.spans import Span
 from extractors.types import ExtractedDoc
 
 
@@ -54,26 +58,28 @@ def extract(path: str) -> ExtractedDoc:
     text = text.strip()
     word_count = len(text.split())
 
-    # WARP-435 (ADR-003 Phase 1): flat-text formats have no in-file
-    # structure, so the "section" is just the filename. The chunker
-    # plumbing in db.upsert_chunk's caller will use this as the path
-    # in the contextual-header prefix. Single entry covers the whole
-    # doc — every chunk inherits ``[filename]``.
-    filename = os.path.basename(path) or "document"
-    section_paths: list[tuple[int, list[str]]] = [(0, [filename])]
+    metadata = {
+        "extractor_name": "text",
+        "extractor_version": "2",
+        "word_count": word_count,
+    }
 
-    return cast(
-        ExtractedDoc,
-        {
-            "text": text,
-            "page_breaks": [],
-            "language": None,
-            "metadata": {
-                "extractor_name": "text",
-                "extractor_version": "1.1",
-                "word_count": word_count,
-                "section_paths": section_paths,
-            },
-            "warnings": [],
-        },
+    if not text:
+        return ExtractedDoc(
+            spans=[],
+            language=None,
+            metadata=metadata,
+            warnings=[],
+        )
+
+    # WARP-435: flat-text formats have no in-file structure, so the
+    # "section" is just the filename. Every chunk derived from this span
+    # inherits ``[filename]`` as its contextual-header section path.
+    filename = os.path.basename(path) or "document"
+
+    return ExtractedDoc(
+        spans=[Span(text=text, anchor=NoneAnchor(), section_path=[filename])],
+        language=None,
+        metadata=metadata,
+        warnings=[],
     )

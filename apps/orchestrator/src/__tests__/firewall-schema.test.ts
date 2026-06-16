@@ -51,6 +51,19 @@ describe("FirewallZoneSchema (WARP-42)", () => {
     const parsed = FirewallZoneSchema.parse({});
     expect(parsed.name).toBeUndefined();
   });
+
+  it("accepts a null field (uci omits masq on a non-masquerading zone)", () => {
+    // The lan zone has no `masq`; ubus surfaces the omitted field as `null`.
+    // `.nullish()` must accept it — `.optional()` alone rejected null and 500'd
+    // the firewall fetch on single-box deployments (the router showed offline).
+    const parsed = FirewallZoneSchema.parse({
+      name: "lan",
+      masq: null,
+      network: null,
+    });
+    expect(parsed.name).toBe("lan");
+    expect(parsed.masq).toBeNull();
+  });
 });
 
 describe("FirewallRuleSchema (WARP-42)", () => {
@@ -101,6 +114,15 @@ describe("Firewall*CollectionSchema (WARP-42)", () => {
     });
     expect(Object.keys(parsed.values)).toHaveLength(2);
     expect(parsed.values.cfg01abc.name).toBe("lan");
+  });
+
+  it("zones collection tolerates a null masq on the lan zone (single-box)", () => {
+    // Exact shape that 500'd /api/network on 192.168.1.87: the lan zone's
+    // omitted `masq` arrives as null inside the zones collection.
+    const parsed = FirewallZonesSchema.parse({
+      values: { cfg02dc81: { name: "lan", input: "ACCEPT", masq: null } },
+    });
+    expect(parsed.values.cfg02dc81.masq).toBeNull();
   });
 
   it("rules collection empty", () => {

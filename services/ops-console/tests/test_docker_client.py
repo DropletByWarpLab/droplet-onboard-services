@@ -41,7 +41,7 @@ class _FakeContainer:
         self.status = status
         self.image = _FakeImage(image_tag)
         # Default project label matches what docker_client.ALLOWED_PROJECT
-        # expects (`droplet-pi-platform`, mirroring the top-level `name:`
+        # expects (`droplet`, mirroring the top-level `name:`
         # field in docker/docker-compose.yml). Tests that want to exercise
         # the "not in our project" gate pass an explicit attrs dict.
         self.attrs = attrs or {
@@ -53,7 +53,7 @@ class _FakeContainer:
             },
             "Config": {
                 "Labels": {
-                    "com.docker.compose.project": "droplet-pi-platform",
+                    "com.docker.compose.project": "droplet",
                     "com.docker.compose.service": name,
                 },
             },
@@ -166,7 +166,7 @@ class TestListContainers:
         assert s.image == "myimage:latest"
         assert s.status == "running"
         assert s.health == "healthy"
-        assert s.project == "droplet-pi-platform"
+        assert s.project == "droplet"
         assert s.service == "orchestrator"
         assert s.restart_count == 0
 
@@ -177,7 +177,7 @@ class TestListContainers:
             # `_summarise` path is what we're testing here, not the
             # project-scoping. The "container belongs to our project
             # but has no healthcheck" case is the real one.
-            "Config": {"Labels": {"com.docker.compose.project": "droplet-pi-platform"}},
+            "Config": {"Labels": {"com.docker.compose.project": "droplet"}},
         })])
         out = dc.list_containers()
         assert out[0].health is None

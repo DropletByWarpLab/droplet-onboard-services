@@ -5,6 +5,7 @@ import { X } from "lucide-react";
 import type { CalendarEvent } from "@/lib/hooks/useCalendar";
 import { createEvent, updateEvent, deleteEvent } from "@/lib/hooks/useCalendar";
 import { useToast } from "@/components/Toast";
+import { translateError } from "@/lib/friendly-errors";
 import { Dialog } from "@/components/Dialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PlaceCombobox } from "@/components/calendar/PlaceCombobox";
@@ -12,6 +13,9 @@ import { PlaceCombobox } from "@/components/calendar/PlaceCombobox";
 interface Props {
   open: boolean;
   initial?: CalendarEvent | null;
+  /** For a NEW event, pre-seed the start day (e.g. the calendar day the user
+   *  clicked). Ignored when `initial` is set (editing an existing event). */
+  initialDate?: Date;
   onClose: () => void;
   onSaved: () => void;
 }
@@ -28,7 +32,7 @@ function localInputToIso(local: string): string {
   return new Date(local).toISOString();
 }
 
-export function EventForm({ open, initial, onClose, onSaved }: Props) {
+export function EventForm({ open, initial, initialDate, onClose, onSaved }: Props) {
   const { toast } = useToast();
   const editing = initial != null;
   const externallySynced = editing && initial?.source === "external";
@@ -85,16 +89,20 @@ export function EventForm({ open, initial, onClose, onSaved }: Props) {
       setEndsAt(isoToLocalInput(initial.endsAt));
       setAllDay(initial.allDay);
     } else {
-      const now = new Date();
-      const inAnHour = new Date(now.getTime() + 60 * 60 * 1000);
+      // New event. If a day was clicked (initialDate), start at 9am on that
+      // day so the date is pre-filled; otherwise default to now. End +1h.
+      const base = initialDate
+        ? new Date(initialDate.getFullYear(), initialDate.getMonth(), initialDate.getDate(), 9, 0)
+        : new Date();
+      const end = new Date(base.getTime() + 60 * 60 * 1000);
       setTitle("");
       setDescription("");
       setLocation("");
-      setStartsAt(isoToLocalInput(now.toISOString()));
-      setEndsAt(isoToLocalInput(inAnHour.toISOString()));
+      setStartsAt(isoToLocalInput(base.toISOString()));
+      setEndsAt(isoToLocalInput(end.toISOString()));
       setAllDay(false);
     }
-  }, [open, initial]);
+  }, [open, initial, initialDate]);
 
   // No early return — pass `open` through to <Dialog>, which handles
   // mount/unmount via its AnimatePresence wrapper.
@@ -134,8 +142,7 @@ export function EventForm({ open, initial, onClose, onSaved }: Props) {
       onSaved();
       onClose();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Save failed";
-      toast(msg, "error");
+      toast(translateError(err, "calendar"), "error");
     } finally {
       setSaving(false);
     }
@@ -156,8 +163,7 @@ export function EventForm({ open, initial, onClose, onSaved }: Props) {
       onSaved();
       onClose();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Delete failed";
-      toast(msg, "error");
+      toast(translateError(err, "calendar"), "error");
       throw err;
     } finally {
       setSaving(false);

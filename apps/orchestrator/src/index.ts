@@ -32,26 +32,63 @@ import { createCronRuntime } from "./services/cron-runtime.service.js";
 import { createDeviceReconcilePoller } from "./services/device-reconcile-poller.js";
 import { startApDiscoveryPoller } from "./services/ap-discovery-poller.js";
 import { sweepExpiredGuests } from "./services/guest-expiry-sweep.service.js";
+import { purgeCameraArtifacts } from "./services/camera-retention-purge.service.js";
+import { createTlsIssuanceService } from "./services/tls-issuance.service.js";
+import {
+  createHqIssuanceClient,
+  createPrismaTlsCertStore,
+  createDiskTlsFileOps,
+  bridgeNginxReloader,
+} from "./services/tls-issuance.adapters.js";
+import { createDeviceIdentityClient } from "./services/device-identity.client.js";
 import {
   createScheduleTicker,
   type FirewallClient,
 } from "./services/schedule-ticker.js";
 import {
+  createEgressReconciler,
+  type EgressClient,
+} from "./services/egress-reconciler.js";
+import {
   purgeScheduleEvents,
   purgeExpiredOverrides,
 } from "./services/schedule-purge.js";
+import { purgeAuditLogs } from "./services/audit-retention-purge.service.js";
 import { tickToolSchedules } from "./services/tool-schedule-ticker.service.js";
 import { mcpClient } from "./services/mcp-client.singleton.js";
 import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { mineToolCallPatterns } from "./services/pattern-miner.service.js";
-import { purgeNetworkThroughputSamples } from "./routes/network-throughput.js";
+import {
+  purgeNetworkThroughputSamples,
+  purgeDnsBlockSamples,
+} from "./routes/network-throughput.js";
 import { purgeOffLanEgressSamples } from "./routes/off-lan-network.js";
 import { startContextStatsInvalidator } from "./services/context-stats-invalidation.service.js";
 import { initActivityRecorder, recordActivity } from "./services/activity.singleton.js";
 import { attachFileIndexerActivityBridge } from "./services/activity-file-indexer-bridge.js";
 import { ensureDefaultModelPulled } from "./services/model-readiness.service.js";
+import { bootstrapPlaneInstanceInBackground } from "./services/pm-bootstrap.service.js";
 
 const logger = pino({ name: "orchestrator" });
+
+// WARP-572: re-entrancy guard for the graceful-shutdown path. After an
+// uncaughtException the process is (by Node's contract) in an undefined state
+// and the event loop keeps turning while teardown `await`s resolve. A second
+// uncaughtException — or an overlapping SIGTERM/SIGINT during teardown — would
+// otherwise re-enter `shutdown` and run a second concurrent teardown (double
+// `$disconnect`, double `process.exit`, interleaved SDK closes). The flag is
+// module-scoped so it is shared across every shutdown trigger.
+let shuttingDown = false;
+
+// WARP-572: how long the graceful teardown is allowed to run before we hard-
+// exit regardless. The fatal/SIGTERM paths await `shutdownMatterService()`,
+// `shutdownCameraService()`, `stopMcp()`, and `prisma.$disconnect()`; if any
+// of those hangs (the exact silent-hang WARP-572 targets) the normal
+// `process.exit()` at the end of `shutdown` never runs. An unref'd timer armed
+// at the top of `shutdown` bounds that — see registerShutdown.
+const SHUTDOWN_FORCE_EXIT_MS = Number(
+  process.env.SHUTDOWN_FORCE_EXIT_MS ?? 10_000,
+);
 
 // WARP-229: FIPS 140-3 boot self-test. Runs synchronously before any
 // async crypto operation (Prisma connect, TLS to Redis/MQTT, etc.).
@@ -191,6 +228,12 @@ async function main() {
     );
   }
 
+  // WARP-860: Plane CE has no headless setup — complete its god-mode
+  // instance configuration in the background so the embedded Projects
+  // surface works without the "Welcome aboard Plane" wall, even when the
+  // owner skips the wizard's PM step. Bounded retries inside; never throws.
+  bootstrapPlaneInstanceInBackground();
+
   // WARP-81: device-intelligence reconciler. Loads the bundled OUI CSV once
   // at startup (best-effort — missing file is logged, lookups degrade to
   // null) and constructs the registry that drives NetworkDevice /
@@ -219,13 +262,57 @@ async function main() {
   // the handler; the others silently skip. Each distinct cron task gets
   // its own lock key so they don't starve each other.
   const cronRuntime = createCronRuntime(prisma);
+
+  // Router-dependent schedulers only run when routing supervision is active.
+  // With ROUTING_MODE=disabled (dev / CI / router-less deploys) every openwrt
+  // call short-circuits to RouterError.disabled, so scheduling these would emit
+  // a warn-level error every tick — a 47h dev-stack run logged 16k+
+  // "firewall error; preserving state" lines this way. Surface the disabled
+  // state once at boot instead. No-op in production (ROUTING_MODE=real).
+  const routerSupervisionEnabled = config.ROUTING_MODE !== "disabled";
+  if (!routerSupervisionEnabled) {
+    logger.warn(
+      "ROUTING_MODE=disabled — skipping router-dependent schedulers " +
+        "(schedule-ticker, egress-reconciler, device-reconcile, ap-discovery). " +
+        "API writes to schedule/phone-home/firewall state will be persisted to the " +
+        "database but will NOT be enforced on the router until ROUTING_MODE is set " +
+        "to real or mock.",
+    );
+  }
+
   const scheduleTicker = createScheduleTicker(prisma, firewall);
   const tickMs = Number(process.env.SCHEDULE_TICK_MS ?? 30_000);
-  cronRuntime.scheduleInterval(
-    tickMs,
-    () => scheduleTicker.tickOnce(),
-    { lockKey: "droplet:schedule-ticker" },
-  );
+  if (routerSupervisionEnabled) {
+    cronRuntime.scheduleInterval(
+      tickMs,
+      () => scheduleTicker.tickOnce(),
+      { lockKey: "droplet:schedule-ticker" },
+    );
+  }
+
+  // WARP-613: phone-home egress reconciler (ADR-012). Additive sibling to the
+  // schedule ticker — enforces per-group/master phone-home WAN-egress blocks
+  // (and the camera-VLAN toggle) using distinct `phonehome-*` rules, yielding
+  // to any full block the schedule ticker holds. Same advisory-lock pattern.
+  const egressClient: EgressClient = {
+    async blockPhoneHome(mac) {
+      await openwrt.blockPhoneHome(mac);
+    },
+    async unblockPhoneHome(mac) {
+      await openwrt.unblockPhoneHome(mac);
+    },
+    async setCameraPhoneHome(blocked) {
+      await openwrt.setCameraPhoneHome(blocked);
+    },
+  };
+  const egressReconciler = createEgressReconciler(prisma, egressClient);
+  if (routerSupervisionEnabled) {
+    cronRuntime.scheduleInterval(
+      tickMs,
+      () => egressReconciler.tickOnce(),
+      { lockKey: "droplet:egress-reconciler" },
+    );
+  }
 
   // WARP-89: device-intelligence reconciler poller + daily presence purge.
   // Reuses the same cron runtime as the schedule ticker. The poller pulls
@@ -239,12 +326,14 @@ async function main() {
     openwrt,
     reconcileMs,
   );
-  cronRuntime.scheduleInterval(
-    reconcileMs,
-    () => reconcilePoller.pollOnce(),
-    { lockKey: "droplet:device-reconcile-poller" },
-  );
-  logger.info({ reconcileMs }, "device reconcile poller started");
+  if (routerSupervisionEnabled) {
+    cronRuntime.scheduleInterval(
+      reconcileMs,
+      () => reconcilePoller.pollOnce(),
+      { lockKey: "droplet:device-reconcile-poller" },
+    );
+    logger.info({ reconcileMs }, "device reconcile poller started");
+  }
 
   // WARP-463 (C2): tool-schedule-ticker. Every 60s scans due
   // ToolSchedule rows, dispatches via the imperative walker shared
@@ -285,7 +374,9 @@ async function main() {
   // schedule ticker / reconcile poller above so multi-instance
   // deploys don't double-fire.
   const apDiscoveryIntervalMs = config.DROPLET_AP_DISCOVERY_INTERVAL * 1000;
-  startApDiscoveryPoller(cronRuntime, prisma, openwrt, apDiscoveryIntervalMs);
+  if (routerSupervisionEnabled) {
+    startApDiscoveryPoller(cronRuntime, prisma, openwrt, apDiscoveryIntervalMs);
+  }
 
   cronRuntime.scheduleCron(
     "0 3 * * *",
@@ -301,6 +392,24 @@ async function main() {
       // than throughput (30 d) because totals roll up to monthly
       // billing windows; 90 d covers QoQ review without bloat.
       const offLanDeleted = await purgeOffLanEgressSamples(prisma, 90);
+      // WARP-468: DnsBlockSample retention. 30 days mirrors throughput —
+      // the "DNS blocked today" chip only reads day-to-date, so a longer
+      // horizon would just bloat the table.
+      const dnsBlockDeleted = await purgeDnsBlockSamples(prisma, 30);
+      // WARP-586: retention purge for the append-only audit/log tables
+      // (ActivityRow, CommandAuditLog, NotificationLog). Window is
+      // operator-tunable via DROPLET_AUDIT_RETENTION_DAYS (default 90);
+      // <= 0 disables the purge. ActivityRow is hash-chained, so this is
+      // an id-contiguous oldest-prefix seal-and-truncate, not a mid-chain
+      // delete — see audit-retention-purge.service.ts for the integrity
+      // argument. Deletes are batched and capped per run so a months-deep
+      // first-run backlog can't push this handler past the 60 s
+      // advisory-lock transaction (cron-runtime withAdvisoryLock) into a
+      // permanent P2028 retry loop; the backlog drains over nights.
+      const auditPurge = await purgeAuditLogs(
+        prisma,
+        config.DROPLET_AUDIT_RETENTION_DAYS,
+      );
       logger.info(
         {
           eventsDeleted,
@@ -308,6 +417,11 @@ async function main() {
           presenceDeleted: presenceDeleted.count,
           throughputDeleted,
           offLanDeleted,
+          dnsBlockDeleted,
+          activityDeleted: auditPurge.activityDeleted,
+          commandAuditDeleted: auditPurge.commandAuditDeleted,
+          notificationDeleted: auditPurge.notificationDeleted,
+          auditRetentionSkipped: auditPurge.skipped,
         },
         "daily purges complete",
       );
@@ -353,6 +467,66 @@ async function main() {
     { lockKey: "droplet:pattern-miner-hourly" },
   );
 
+  // WARP-475 (G3): nightly camera-retention purge. Fires at 03:30 so
+  // it doesn't contend with the 03:00 daily purge or the 03:15 guest
+  // sweep on the advisory-lock pool. Reads retention from
+  // WorkspaceSetting on every tick (no in-process cache that could
+  // drift past a dashboard edit) and calls Frigate's delete API.
+  //
+  // Let errors propagate naked to cron-runtime's `safeRun` — same
+  // posture as the pattern-miner above and every other cron handler
+  // in this file. Swallowing here would zero out the per-handler
+  // `consecutiveFailures` counter that downstream alerting reads.
+  // Per-call Frigate API failures are already absorbed inside
+  // `purgeCameraArtifacts` (the service logs WARN and returns a
+  // result with `clipsSkipped/eventsSkipped` flags), so this only
+  // bubbles up the unexpected — Prisma down, programming errors —
+  // which are exactly what the canary should escalate. Romain on
+  // PR #292 round 2 caught the inner try/catch wrapper that
+  // contradicted this convention.
+  cronRuntime.scheduleCron(
+    "30 3 * * *",
+    async () => {
+      const result = await purgeCameraArtifacts(prisma);
+      if (
+        result.clipsDeleted > 0 ||
+        result.eventsDeleted > 0 ||
+        !result.clipsSkipped ||
+        !result.eventsSkipped
+      ) {
+        logger.info(result, "camera-retention-purge complete");
+      }
+    },
+    { lockKey: "droplet:camera-retention-purge" },
+  );
+
+  // ADR-023 (C2): daily public-CA TLS issuance / renewal. Fires at 04:00 so it
+  // doesn't contend with the 03:00 daily purge, 03:15 guest sweep, or 03:30
+  // camera purge on the advisory-lock pool. Reads the explicit TlsCert state
+  // row + the installed cert: a BOOTSTRAP_SELF_SIGNED box issues a publicly-
+  // trusted cert now; an LE_ISSUED cert renews when <=30 days remain. HQ-
+  // unreachable keeps the current cert and sets LE_RENEW_FAILED inside the
+  // service (it does NOT throw), so a flaky HQ never increments the canary;
+  // only an unexpected (programming) error bubbles up here — exactly what the
+  // canary should escalate, same posture as the purge handlers above.
+  const tlsIssuance = createTlsIssuanceService({
+    fqdn: config.DROPLET_PUBLIC_FQDN,
+    deviceId: config.DROPLET_DEVICE_ID,
+    hq: createHqIssuanceClient(),
+    identity: createDeviceIdentityClient(),
+    store: createPrismaTlsCertStore(prisma),
+    files: createDiskTlsFileOps(),
+    reloadNginx: bridgeNginxReloader,
+    logger,
+  });
+  cronRuntime.scheduleCron(
+    "0 4 * * *",
+    async () => {
+      await tlsIssuance.runOnce();
+    },
+    { lockKey: "droplet:tls-renewal" },
+  );
+
   // Start Express on top of a raw http.Server so we can attach the
   // WebSocket bridge (MQTT → browser) to the same listen socket.
   const app = createApp(prisma);
@@ -362,9 +536,10 @@ async function main() {
     logger.info("API server listening on port %d", config.PORT);
   });
 
-  // Graceful shutdown
-  const shutdown = async () => {
-    logger.info("Shutting down...");
+  // Graceful shutdown. `exitCode` defaults to 0 so SIGTERM/SIGINT keep their
+  // clean-exit semantics; the uncaughtException path (WARP-572) passes 1 so
+  // Docker's restart policy brings a fresh instance back.
+  const shutdown = createShutdownRunner(logger, async () => {
     cronRuntime.stop();
     stopHealthMonitor();
     // WARP-165: stop the screen-QR poller's setInterval so integration
@@ -377,20 +552,136 @@ async function main() {
     await shutdownCameraService();
     // Stop the MCP stdio child first so it doesn't keep its Prisma
     // connection pool alive past our $disconnect below. stopMcp() is
-    // best-effort; even if the SDK close hangs we time out via
-    // process.exit(0) regardless.
+    // best-effort; if the SDK close throws we log and continue, and if it
+    // hangs the force-exit timer armed inside createShutdownRunner bounds
+    // the wait.
     await stopMcp().catch((err) => {
       logger.warn("MCP stdio child stop failed: %s", (err as Error).message);
     });
     await prisma.$disconnect();
-    process.exit(0);
-  };
+  });
 
-  process.on("SIGTERM", shutdown);
-  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", () => void shutdown(0));
+  process.on("SIGINT", () => void shutdown(0));
+
+  // WARP-572: process-level safety net. The orchestrator is an always-on
+  // control plane that fires many background promises outside the request
+  // lifecycle (cron ticks, pollers, the streaming flush timer, best-effort
+  // MQTT / activity writes). On modern Node an unhandled rejection or
+  // uncaught exception terminates the process by default — so one stray
+  // background throw could take down the whole appliance with only Node's
+  // default stderr dump. Wire structured handlers so the failure is logged
+  // and recovery is deterministic. onFatal runs the graceful shutdown with a
+  // non-zero exit code.
+  registerProcessSafetyNet(logger, () => void shutdown(1));
 }
 
-main().catch((err) => {
-  logger.fatal({ err }, "Failed to start API server");
-  process.exit(1);
-});
+// WARP-572: graceful-shutdown runner, extracted so the re-entrancy guard and
+// force-exit failsafe are unit-testable without booting Prisma/Redis/MQTT (see
+// src/__tests__/process-safety-net.test.ts). `teardown` is the injectable body
+// — in production it stops the cron runtime, Matter/Camera/MCP services and
+// disconnects Prisma; in tests it's a stub.
+//
+// Behavior:
+//   - Re-entrancy guard: a second call (second uncaughtException, or a SIGTERM
+//     arriving mid-teardown) short-circuits — no double teardown, no double
+//     process.exit. Shared via the module-scope `shuttingDown` flag.
+//   - Force-exit failsafe: an unref'd timer is armed before teardown begins, so
+//     a hung teardown step can't strand the corrupted process. unref() keeps
+//     the timer from holding the loop open when teardown finishes first.
+export function createShutdownRunner(
+  log: pino.Logger,
+  teardown: () => Promise<void>,
+): (exitCode?: number) => Promise<void> {
+  return async (exitCode = 0) => {
+    if (shuttingDown) {
+      log.warn("Shutdown already in progress, ignoring re-entry");
+      return;
+    }
+    shuttingDown = true;
+
+    const forceExit = setTimeout(() => {
+      log.fatal(
+        { code: "shutdownForceExit", timeoutMs: SHUTDOWN_FORCE_EXIT_MS },
+        "Graceful shutdown timed out, forcing exit",
+      );
+      process.exit(exitCode);
+    }, SHUTDOWN_FORCE_EXIT_MS);
+    forceExit.unref();
+
+    log.info("Shutting down...");
+    await teardown();
+    clearTimeout(forceExit);
+    process.exit(exitCode);
+  };
+}
+
+// Test-only: reset the shutdown re-entrancy latch so each unit test starts
+// clean. Not called from production code paths.
+export function __resetShutdownGuardForTests(): void {
+  shuttingDown = false;
+}
+
+// WARP-572: extracted so the handler wiring is unit-testable without booting
+// the full stack (see src/__tests__/process-safety-net.test.ts). Kept in
+// index.ts so process lifecycle stays centralized.
+//
+// - unhandledRejection is logged-but-survivable: log at error with a stable,
+//   greppable `code` and DO NOT exit, so a single stray background throw
+//   degrades rather than kills the control plane. This mirrors the
+//   never-silently-swallow posture of cron-runtime's safeRun logging.
+// - uncaughtException is fatal-after-flush: log at fatal (matching the
+//   boot-failure handler below), then run the caller's onFatal (graceful
+//   shutdown + non-zero exit). Logged synchronously before onFatal so the
+//   diagnostic lands in container logs even if exit races a pino flush.
+// Idempotency guard: a double call (e.g. a botched merge wiring it from both
+// main() and a test harness) must not attach two listeners that would log the
+// same rejection twice and fire onFatal twice. Tracked at module scope so the
+// guard survives across calls within one process.
+let safetyNetRegistered = false;
+
+export function registerProcessSafetyNet(
+  log: pino.Logger,
+  onFatal: () => void,
+): void {
+  if (safetyNetRegistered) {
+    log.warn(
+      { code: "safetyNetAlreadyRegistered" },
+      "Process safety net already registered, skipping duplicate wiring",
+    );
+    return;
+  }
+  safetyNetRegistered = true;
+
+  process.on("unhandledRejection", (reason) => {
+    log.error(
+      { err: reason, code: "unhandledRejection" },
+      "Unhandled promise rejection (surviving)",
+    );
+  });
+  process.on("uncaughtException", (err) => {
+    log.fatal({ err, code: "uncaughtException" }, "Uncaught exception, shutting down");
+    onFatal();
+  });
+}
+
+// Test-only: reset the idempotency latch so each unit test starts clean. Not
+// called from production code paths.
+export function __resetProcessSafetyNetForTests(): void {
+  safetyNetRegistered = false;
+}
+
+// Only boot the stack when this module is the process entrypoint. Importing
+// it from a test (vitest) must not run main() — the runner is the entrypoint
+// then, so this guard is false. The orchestrator package has no
+// `"type": "module"`, so even with tsconfig `module: NodeNext` this file
+// emits CommonJS — hence the `require.main`/`module` idiom rather than
+// `import.meta` (which tsc rejects with TS1470 in CJS output). Works under
+// `tsx src/index.ts` (dev) and `node dist/index.js` (prod); under vitest
+// `require.main` is the runner, so the guard stays false.
+if (require.main === module) {
+  main().catch((err) => {
+    logger.fatal({ err }, "Failed to start API server");
+    process.exit(1);
+  });
+}

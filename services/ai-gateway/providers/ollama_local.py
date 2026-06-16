@@ -39,19 +39,35 @@ logger = logging.getLogger(__name__)
 # static IP. Override via OLLAMA_URL to opt into the /proxy if you want
 # the tool-call repair + circuit-breaker for a specific deploy.
 # See ADR-004 in the droplet-local-LLM repo for the original rationale.
-#
-# Backward compatibility: the legacy `JETSON_OLLAMA_URL` env var is
-# still read as a fallback for .env files that pre-date the rename.
-# Setup.sh's migrate_env renames it in-place on next run.
-OLLAMA_URL = os.getenv("OLLAMA_URL") or os.getenv(
-    "JETSON_OLLAMA_URL", "http://host.docker.internal:11434"
-)
-if os.getenv("JETSON_OLLAMA_URL") and not os.getenv("OLLAMA_URL"):
-    logger.warning(
-        "JETSON_OLLAMA_URL is deprecated — rename to OLLAMA_URL "
-        "(legacy hardware-specific naming; the variable is hardware-agnostic). "
-        "Setup.sh migrate_env will rename it on next run."
-    )
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://host.docker.internal:11434")
+
+# XR-05: /health (the appliance limits + readiness contract) lives on
+# ollama-manager (:8002), NOT on Ollama (:11434). On the canonical DIRECT chat
+# path OLLAMA_URL points at :11434, so probing "{OLLAMA_URL}/health" 404s — the
+# limits never size (outbound concurrency stuck at 1) and /ai/readiness is
+# perpetually "degraded". OLLAMA_MANAGER_URL decouples the lifecycle/health
+# endpoint from the chat endpoint. When it's unset AND OLLAMA_URL isn't the
+# opt-in /proxy path (i.e. the manager isn't deployed — single-box today), we
+# skip the probe entirely and run with sane default limits rather than spamming
+# 404s. See droplet-local-LLM/services/ollama-manager (the /health owner).
+OLLAMA_MANAGER_URL = os.getenv("OLLAMA_MANAGER_URL") or None
+
+
+def _resolve_manager_health_url(base_url: str) -> str | None:
+    """Return the ollama-manager /health URL, or None if no manager is wired.
+
+    Precedence:
+      1. explicit OLLAMA_MANAGER_URL → ``{manager}/health``
+      2. OLLAMA_URL ending in ``/proxy`` (the opt-in manager chat path) →
+         strip ``/proxy`` and use that root's ``/health`` (preserves the prior
+         behavior for that specific deploy)
+      3. otherwise None — the manager isn't deployed; skip the probe.
+    """
+    if OLLAMA_MANAGER_URL:
+        return f"{OLLAMA_MANAGER_URL.rstrip('/')}/health"
+    if base_url.endswith("/proxy"):
+        return f"{base_url[: -len('/proxy')].rstrip('/')}/health"
+    return None
 
 # Cold-loading a large model can take 30-90s (e.g. 8B Q4 with partial GPU
 # offload), and long completions can stream for minutes. The previous flat
@@ -65,6 +81,25 @@ _OLLAMA_TIMEOUT = httpx.Timeout(
     write=30.0,
     pool=10.0,
 )
+
+# Upper bound on the httpx connection pool. The REAL concurrency gate is the
+# in-flight semaphore (`_sema`), which is sized from the appliance's
+# `num_parallel` and resized on a 503 scale-up. The connection pool only has to
+# stay at-or-above whatever the semaphore admits, so we size it to a generous
+# fixed cap rather than pinning it at construction-time `num_parallel` (which is
+# 1 before the first /health refresh — the GW-13 bug, where a later scale-up
+# resized the semaphore but left the pool serializing every chat through one
+# connection). Connection reuse to a single Ollama host is cheap; an over-large
+# cap costs nothing because the semaphore never lets that many requests run at
+# once. Override for exotic deploys via OLLAMA_MAX_CONNECTIONS.
+_MAX_CONNECTIONS = int(os.getenv("OLLAMA_MAX_CONNECTIONS", "64"))
+
+# We ALWAYS talk to Ollama's OpenAI-compatible chat endpoint, never the native
+# `/api/chat`. This keeps the request/response shape identical to the cloud
+# providers (one code path in router.py) and is the canonical direct-to-:11434
+# contract. The body therefore uses OpenAI field names (top-level
+# `temperature` / `max_tokens`); see the note in `chat()` (GW-12).
+_CHAT_PATH = "/v1/chat/completions"
 
 
 class _LimitsCache:
@@ -115,6 +150,13 @@ class _LimitsCache:
         self.max_loaded_models = 1
         self._last_refresh = 0.0
         self._refresh_min_interval = 30.0  # seconds; debounce
+        # XR-05: the ollama-manager /health URL, or None when no manager is
+        # deployed (the direct :11434 path). None → skip the probe + keep
+        # default limits instead of 404-ing against Ollama.
+        self._manager_health_url: str | None = _resolve_manager_health_url(base_url)
+        # Logged-once flag so a no-manager deploy notes the skip a single time
+        # rather than on every refresh attempt.
+        self._logged_no_manager = False
         # Track the last observed schema version so we only log on each new
         # observation, not on every refresh while the version is "wrong".
         # Starts at a sentinel distinct from None so a missing version key
@@ -122,10 +164,9 @@ class _LimitsCache:
         self._last_seen_schema_version: object = self._SCHEMA_VERSION_UNOBSERVED
 
     @property
-    def health_url(self) -> str:
-        # base_url is the proxy URL; strip /proxy to hit /health on :8002 root.
-        root = self.base_url.removesuffix("/proxy")
-        return f"{root}/health"
+    def health_url(self) -> str | None:
+        """ollama-manager's /health URL, or None when no manager is wired."""
+        return self._manager_health_url
 
     def _check_schema_version(self, body: dict) -> None:
         """Compare the appliance's schema_version against what we know.
@@ -179,8 +220,26 @@ class _LimitsCache:
         if now - self._last_refresh < self._refresh_min_interval:
             return
         self._last_refresh = now
+        # XR-05: no ollama-manager wired (direct :11434 path) → don't probe a
+        # non-existent /health on Ollama. Keep the sane defaults and note it
+        # once. Marking _last_refresh above means _ensure_limits treats limits
+        # as "settled" (at defaults) and won't retry every call.
+        health_url = self.health_url
+        if health_url is None:
+            if not self._logged_no_manager:
+                self._logged_no_manager = True
+                logger.info(
+                    "appliance_limits_probe_skipped: no OLLAMA_MANAGER_URL and "
+                    "OLLAMA_URL is the direct path — using default limits "
+                    "(num_parallel=%d, max_queue=%d, max_loaded_models=%d). "
+                    "Set OLLAMA_MANAGER_URL to size outbound concurrency.",
+                    self.num_parallel,
+                    self.max_queue,
+                    self.max_loaded_models,
+                )
+            return
         try:
-            resp = await client.get(self.health_url, timeout=5.0)
+            resp = await client.get(health_url, timeout=5.0)
             if resp.status_code == 200:
                 body = resp.json()
                 self._check_schema_version(body)
@@ -239,12 +298,16 @@ class OllamaLocalProvider(BaseProvider):
         # not the original size), which can't be relied on for resize decisions
         # mid-flight or across Python versions. We keep our own copy.
         self._sema_size: int = 0
-        # Outbound connection cap matches the appliance's parallel slot count.
-        # Refreshed on first chat via _ensure_limits.
+        # Connection pool is sized to a generous fixed cap, NOT to
+        # `num_parallel`. The in-flight semaphore (`_sema`, resized on scale-up)
+        # is the authoritative concurrency limit; the pool just has to stay at
+        # or above it. Pinning the pool at construction-time `num_parallel` (1,
+        # pre-first-refresh) was GW-13: a later semaphore resize was defeated
+        # because httpx still serialized every chat through a single connection.
         self.client = httpx.AsyncClient(
             base_url=self.base_url,
             timeout=_OLLAMA_TIMEOUT,
-            limits=httpx.Limits(max_connections=self._limits.num_parallel),
+            limits=httpx.Limits(max_connections=_MAX_CONNECTIONS),
         )
 
     def _build_sema(self, num_parallel: int) -> None:
@@ -318,7 +381,19 @@ class OllamaLocalProvider(BaseProvider):
         # When tools are present, default temperature=0 so tool-call output is stable.
         if has_tools and kwargs.get("temperature") is None:
             body["temperature"] = 0.0
-        # Pass through supported kwargs (caller's explicit value overrides our default).
+        # Pass through supported generation controls (caller's explicit value
+        # overrides our default).
+        #
+        # GW-12: these are OpenAI-compat field names — `temperature` and
+        # `max_tokens` at the TOP LEVEL — which is correct because we always
+        # POST to Ollama's OpenAI-compat `/v1/chat/completions` (see
+        # _CHAT_PATH and the direct-to-:11434 rule in this module's header).
+        # Ollama's NATIVE `/api/chat` ignores these top-level keys and instead
+        # reads `options.{temperature,num_predict}`, so `max_tokens` would
+        # silently become a no-op there. We deliberately do NOT support the
+        # native endpoint; if that ever changes, map max_tokens→
+        # options.num_predict and temperature→options.temperature here rather
+        # than dropping them.
         for k in ("temperature", "max_tokens"):
             if kwargs.get(k) is not None:
                 body[k] = kwargs[k]
@@ -331,7 +406,7 @@ class OllamaLocalProvider(BaseProvider):
         if not stream:
             assert self._sema is not None  # set by _ensure_limits
             async with self._sema:
-                resp = await self.client.post("/v1/chat/completions", json=body)
+                resp = await self.client.post(_CHAT_PATH, json=body)
             if resp.status_code == 503:
                 # Appliance overload (model_loading / circuit_open / queue full).
                 # Refresh limits + rebuild sema, then bubble up so the caller can
@@ -350,7 +425,7 @@ class OllamaLocalProvider(BaseProvider):
         assert self._sema is not None  # set by _ensure_limits in chat()
         async with self._sema:
             async with self.client.stream(
-                "POST", "/v1/chat/completions", json=body
+                "POST", _CHAT_PATH, json=body
             ) as resp:
                 if resp.status_code == 503:
                     # Same handler the non-streaming branch uses, so a scale-up

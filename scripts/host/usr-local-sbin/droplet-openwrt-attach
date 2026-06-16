@@ -8,22 +8,260 @@
 set +e
 
 # --- Customer-facing knobs (override via env) -----------------------------
-AP_SSID="${DROPLET_AP_SSID:-Droplet-POC}"
-AP_PSK="${DROPLET_AP_PSK:-droplet-poc-password}"
+AP_SSID="${DROPLET_AP_SSID:-Droplet}"
+# WARP-819: AP_PSK is resolved by resolve_ap_psk() below — NEVER a shared
+# hardcoded default. An explicit DROPLET_AP_PSK (real, non-placeholder) wins;
+# otherwise a strong per-box PSK is generated ONCE, persisted 0600, and re-read
+# on every subsequent boot. Seed it from the env here so the resolver can honor
+# an operator override; the resolver overwrites it with the persisted/generated
+# value when no real override is set.
+AP_PSK="${DROPLET_AP_PSK:-}"
 AP_DOMAIN="${DROPLET_AP_DOMAIN:-droplet.local}"
 AP_HOSTNAME="${DROPLET_AP_HOSTNAME:-droplet}"
-# Which wireless phy to move into the container netns, and what interface
-# name it surfaces with. On the photo-studio Ryzen box the MT7922 is phy0
-# (named wlp14s0) and supports Wi-Fi 6 at full 22 dBm on 2.4 GHz; the AX210
-# (phy1, wlp7s0) is firmware-capped at 3 dBm in AP mode. Defaults below keep
-# the original AX210 path; the env file overrides for this customer.
-AP_PHY="${DROPLET_AP_PHY:-phy1}"
-AP_IFACE="${DROPLET_AP_IFACE:-wlp7s0}"
-GATEWAY_CONTAINER="${DROPLET_GATEWAY_CONTAINER:-droplet-pi-platform-gateway-1}"
+# Where the per-box AP PSK is persisted host-side (0600). Stable across reboots;
+# generated once if absent. Overridable for tests.
+AP_PSK_FILE="${AP_PSK_FILE:-/etc/droplet/ap-psk}"
+# The device-bridge env file the bridge reads DROPLET_AP_PSK from. We mirror the
+# resolved PSK into it so the pairing QR/text the bridge renders ALWAYS equals
+# the PSK hostapd actually serves (WARP-819 coherence AC). Overridable for tests.
+DEVICE_BRIDGE_ENV_FILE="${DEVICE_BRIDGE_ENV_FILE:-/etc/droplet/device-bridge.env}"
+
+# >>> customer_ap_creds (WARP-808 follow-up)
+# The setup wizard's Wi-Fi write lands in the device-bridge's StateDirectory
+# (droplet-set-hostapd.sh writes it there — the bridge sandbox can't touch
+# root-owned /etc/default). Parse ONLY the two AP keys out of that
+# droplet-owned file instead of EnvironmentFile-ing it into this root unit:
+#   - a file an unprivileged account can write must never inject arbitrary
+#     env into a root process (defense-in-depth — PR #551 review), and
+#   - systemd EnvironmentFile ordering is fragile under drop-ins (the
+#     pre-existing override.conf re-loads /etc/default LAST, which silently
+#     clobbered the customer's values — the PR #551 review blocker).
+# Customer creds, when present and valid, win over the /etc/default
+# provisioning defaults; resolve_ap_psk() then treats the customer PSK as an
+# explicit real value, keeps it, and mirrors it to the pairing QR. Re-validated
+# here with the same bounds droplet-set-hostapd.sh enforces (SSID 1-32,
+# PSK 8-63, no control characters) because root must not trust the file.
+CUSTOMER_AP_ENV="${DROPLET_CUSTOMER_AP_ENV:-/var/lib/droplet-bridge/openwrt-attach.env}"
+if [ -f "$CUSTOMER_AP_ENV" ]; then
+  c_ssid="$(grep -m1 '^DROPLET_AP_SSID=' "$CUSTOMER_AP_ENV" 2>/dev/null | cut -d= -f2- | tr -d '\r\n')"
+  c_psk="$(grep -m1 '^DROPLET_AP_PSK=' "$CUSTOMER_AP_ENV" 2>/dev/null | cut -d= -f2- | tr -d '\r\n')"
+  case "$c_ssid" in *[[:cntrl:]]*) c_ssid="";; esac
+  case "$c_psk"  in *[[:cntrl:]]*) c_psk="";;  esac
+  if [ -n "$c_ssid" ] && [ "${#c_ssid}" -le 32 ]; then
+    AP_SSID="$c_ssid"
+  fi
+  if [ -n "$c_psk" ] && [ "${#c_psk}" -ge 8 ] && [ "${#c_psk}" -le 63 ]; then
+    AP_PSK="$c_psk"
+  fi
+fi
+# <<< customer_ap_creds
+
+# Which wireless phy to move into the container netns, and what interface name
+# it surfaces with. These are AUTO-DETECTED below (detect_ap_radio) so the
+# attach works on whatever Wi-Fi card the box actually ships — the MT7922
+# single-box enumerates phy0/wlp14s0, an AX210 box phy1/wlp7s0, others wlan0,
+# etc. Hardcoding one card's layout (WARP-826: was phy1/wlp7s0) meant a
+# mismatched card left the radio un-moved into the netns and hostapd binding a
+# nonexistent iface → the AP never appeared. An explicit DROPLET_AP_PHY /
+# DROPLET_AP_IFACE env override stays AUTHORITATIVE: if set (non-empty) it is
+# used verbatim and detection is skipped, so an operator can always pin the
+# radio (e.g. to force the full-power MT7922 over a weaker AX210 on a dual-card
+# box). Seed from the env here; detect_ap_radio fills any unset side.
+AP_PHY="${DROPLET_AP_PHY:-}"
+AP_IFACE="${DROPLET_AP_IFACE:-}"
+GATEWAY_CONTAINER="${DROPLET_GATEWAY_CONTAINER:-droplet-gateway-1}"
 # Phase L: root password for OpenWrt rpcd. Read from the docker secret
 # the routing service also reads, so both sides stay in lockstep.
 OPENWRT_PASSWORD_FILE="${OPENWRT_PASSWORD_FILE:-/home/droplet/edge-platform/docker/secrets/openwrt_password}"
 # --------------------------------------------------------------------------
+
+# WARP-819: resolve the per-box AP PSK. Replaces the old shared hardcoded
+# fallback (`droplet-default-wifi`) so every box ships a UNIQUE Wi-Fi password
+# with zero prior config. Priority:
+#   1. an explicit, REAL DROPLET_AP_PSK env (operator override) — used verbatim;
+#   2. the persisted 0600 secret file ($AP_PSK_FILE) if present + non-empty
+#      — read it (NEVER regenerate; the SSID/PSK must be stable across reboots);
+#   3. otherwise GENERATE a strong 16-char passphrase ONCE, persist it 0600,
+#      and use it.
+# Placeholder/shared sentinels (empty, the old shared default, the setup-wizard
+# placeholder) are treated as "not set" so a stale .env can't reinstate a shared
+# password. The resolved value is mirrored into the device-bridge env so the
+# pairing QR/text the bridge renders always equals the PSK hostapd serves
+# (coherence AC). Idempotent; sentinel-delimited so it is unit-testable in
+# isolation (tests/openwrt-attach-ap-psk.test.sh).
+# >>> resolve_ap_psk (WARP-819)
+resolve_ap_psk() {
+  psk_file="${AP_PSK_FILE:-/etc/droplet/ap-psk}"
+  bridge_env="${DEVICE_BRIDGE_ENV_FILE:-/etc/droplet/device-bridge.env}"
+
+  # Is the candidate a real PSK, or a placeholder/shared sentinel to ignore?
+  _is_placeholder() {
+    case "$1" in
+      ""|droplet-default-wifi|CHANGE_ME_VIA_SETUP_WIZARD|changeme|CHANGEME)
+        return 0 ;;
+      *) return 1 ;;
+    esac
+  }
+
+  # 1) Explicit operator override (real value only).
+  if ! _is_placeholder "${AP_PSK:-}"; then
+    : # keep AP_PSK as-is
+  # 2) Persisted per-box secret.
+  elif [ -r "$psk_file" ] && [ -s "$psk_file" ]; then
+    AP_PSK="$(tr -d '\r\n' < "$psk_file")"
+  fi
+
+  # 3) Still nothing real → generate once.
+  if _is_placeholder "${AP_PSK:-}"; then
+    # 16 chars from a url-safe-ish alphabet (no quotes/backslash/$ so it is a
+    # safe hostapd wpa_passphrase + safe to single-quote downstream). First char
+    # forced to a digit so iOS/Android password fields don't auto-capitalize it
+    # (silent auto-cap → user types lowercase, submits capitalized → PSK
+    # mismatch). ~80 bits of entropy — far past any practical WPA2 attack.
+    gen="$( { openssl rand -base64 48 2>/dev/null || head -c 96 /dev/urandom 2>/dev/null | base64; } \
+            | tr -dc 'A-Za-z0-9' | cut -c1-15 )"
+    # WARP-821: STRONG entropy only. If neither openssl nor /dev/urandom produced
+    # a full-length key, HARD-FAIL rather than fall back to a weak PRNG — a
+    # low-entropy Wi-Fi password silently shipping is worse than a loud failure a
+    # human can fix. (Unreachable on the box; both sources are always present.)
+    if [ "${#gen}" -lt 15 ]; then
+      echo "droplet-openwrt-attach: FATAL — no strong entropy source (openssl or readable /dev/urandom) to generate the AP PSK; refusing to ship a weak Wi-Fi password. Install openssl or make /dev/urandom readable, then retry." >&2
+      exit 1
+    fi
+    # Leading digit (2-9) sampled UNIFORMLY from the SAME strong source (no PRNG)
+    # so the passphrase starts numeric (mobile auto-cap guard) → 16 chars total.
+    # One random byte (0..255) reduced mod 8 and mapped to {2..9}: 256 is a
+    # multiple of 8, so the modulo is bias-free. The previous version took the
+    # first digit of a base64 stream and fell back to a constant 7 whenever the
+    # stream had no digit (or it was 0/1) — a hardcoded value, not "the same
+    # strong source", that over-represented 7. Entropy of the body is unchanged
+    # (~89 bits); this only debiases the one leading digit.
+    rbyte="$( { openssl rand -hex 1 2>/dev/null || head -c 1 /dev/urandom 2>/dev/null | od -An -tx1; } | tr -dc '0-9a-f' | cut -c1-2 )"
+    if [ -z "$rbyte" ]; then
+      echo "droplet-openwrt-attach: FATAL — no strong entropy source (openssl or readable /dev/urandom) to sample the AP PSK leading digit; refusing to ship a weak Wi-Fi password." >&2
+      exit 1
+    fi
+    first=$(( 2 + (0x$rbyte % 8) ))
+    AP_PSK="${first}${gen}"
+  fi
+
+  # Persist the resolved PSK 0600 so subsequent boots read the SAME value.
+  # mkdir -p the parent (idempotent); write atomically; tighten perms.
+  if [ -n "${AP_PSK:-}" ]; then
+    psk_dir="$(dirname "$psk_file")"
+    mkdir -p "$psk_dir" 2>/dev/null || true
+    umask 077
+    printf '%s\n' "$AP_PSK" > "$psk_file.tmp" 2>/dev/null && mv "$psk_file.tmp" "$psk_file" 2>/dev/null || true
+    chmod 0600 "$psk_file" 2>/dev/null || true
+
+    # Mirror into the device-bridge env (coherence AC): upsert the
+    # DROPLET_AP_PSK line so the bridge's pairing QR/text matches the live AP.
+    bridge_dir="$(dirname "$bridge_env")"
+    mkdir -p "$bridge_dir" 2>/dev/null || true
+    umask 077
+    if [ -f "$bridge_env" ]; then
+      grep -v '^DROPLET_AP_PSK=' "$bridge_env" > "$bridge_env.tmp" 2>/dev/null || true
+    else
+      : > "$bridge_env.tmp"
+    fi
+    printf 'DROPLET_AP_PSK=%s\n' "$AP_PSK" >> "$bridge_env.tmp"
+    mv "$bridge_env.tmp" "$bridge_env" 2>/dev/null || true
+    chmod 0600 "$bridge_env" 2>/dev/null || true
+  fi
+}
+resolve_ap_psk
+# <<< resolve_ap_psk (WARP-819)
+
+# WARP-826: auto-detect the wireless phy + its netdev name so the attach works
+# on ANY card, instead of the old hardcoded phy1/wlp7s0 (the AX210 layout) that
+# silently no-op'd on the MT7922 single-box (phy0/wlp14s0) — radio never moved
+# into the container netns, hostapd bound a nonexistent iface, AP never came up.
+#
+# Override stays authoritative: an explicit DROPLET_AP_PHY / DROPLET_AP_IFACE
+# (seeded into AP_PHY/AP_IFACE above) is used verbatim; detection only fills the
+# side(s) left empty. Detection reads /sys/class/ieee80211 for the phy and
+# `iw dev` for the iface (parsing the `phy#N` / `Interface <name>` grouping),
+# preferring the phy that the chosen/declared iface belongs to and otherwise the
+# first phy present. No wireless hardware → both stay empty and the downstream
+# guards (the `[ -e /sys/class/ieee80211/$AP_PHY ]` netns move + hostapd bring-up)
+# handle the absence; the function never aborts the attach.
+#
+# Sentinel-delimited so it is unit-testable in isolation against a fake sysfs +
+# stub `iw` (tests/openwrt-attach-iface-detect.test.sh), mirroring
+# resolve_ap_psk / ap_firewall_zone. SYS_CLASS_IEEE80211 is overridable for that
+# test; in production it defaults to the real /sys path.
+# >>> detect_ap_radio (WARP-826)
+detect_ap_radio() {
+  sysfs="${SYS_CLASS_IEEE80211:-/sys/class/ieee80211}"
+
+  # phy -> netdev name and netdev -> phy, parsed once from `iw dev`. `iw dev`
+  # groups interfaces under a `phy#N` header followed by `\tInterface <name>`:
+  #   phy#0
+  #       Interface wlp14s0
+  #           type managed
+  # Build two newline-delimited maps ("phyN<TAB>iface") we can grep. `iw` absent
+  # (no wireless tooling) -> empty maps; we then fall back to sysfs-only for the
+  # phy and leave the iface empty.
+  _iwmap=""
+  if command -v iw >/dev/null 2>&1; then
+    _cur_phy=""
+    while IFS= read -r line; do
+      case "$line" in
+        phy#*)
+          # "phy#0" -> "phy0"
+          _n="${line#phy#}"
+          _cur_phy="phy${_n}"
+          ;;
+        *Interface\ *)
+          _if="${line##*Interface }"
+          _if="${_if%% *}"
+          [ -n "$_cur_phy" ] && [ -n "$_if" ] && \
+            _iwmap="${_iwmap}${_cur_phy}	${_if}
+"
+          ;;
+      esac
+    done <<EOF
+$(iw dev 2>/dev/null)
+EOF
+  fi
+
+  # 1) If an iface is pinned/known but the phy is not, recover the phy from the
+  #    iface's grouping in the iw map (never leave a known iface with a blank phy).
+  if [ -n "$AP_IFACE" ] && [ -z "$AP_PHY" ]; then
+    AP_PHY="$(printf '%s' "$_iwmap" | awk -F '\t' -v i="$AP_IFACE" '$2==i{print $1; exit}')"
+  fi
+
+  # 2) If the phy is pinned/known but the iface is not, fill the iface from that
+  #    phy's grouping.
+  if [ -n "$AP_PHY" ] && [ -z "$AP_IFACE" ]; then
+    AP_IFACE="$(printf '%s' "$_iwmap" | awk -F '\t' -v p="$AP_PHY" '$1==p{print $2; exit}')"
+  fi
+
+  # 3) Nothing declared yet — pick the first wireless phy present in sysfs, then
+  #    resolve its iface from the iw map. sysfs is the source of truth for "which
+  #    phys exist"; iw maps a phy to its netdev.
+  if [ -z "$AP_PHY" ]; then
+    if [ -d "$sysfs" ]; then
+      for d in "$sysfs"/phy*; do
+        [ -e "$d" ] || continue   # nullglob-safe: skip the literal when no match
+        AP_PHY="$(basename "$d")"
+        break
+      done
+    fi
+  fi
+  if [ -n "$AP_PHY" ] && [ -z "$AP_IFACE" ]; then
+    AP_IFACE="$(printf '%s' "$_iwmap" | awk -F '\t' -v p="$AP_PHY" '$1==p{print $2; exit}')"
+  fi
+
+  if [ -n "$AP_PHY" ] && [ -n "$AP_IFACE" ]; then
+    echo "droplet-openwrt-attach: AP radio detected — phy=$AP_PHY iface=$AP_IFACE"
+  else
+    echo "droplet-openwrt-attach: WARN: no wireless phy/iface resolved (phy='${AP_PHY}' iface='${AP_IFACE}'); set DROPLET_AP_PHY/DROPLET_AP_IFACE if the card is present — AP will not come up otherwise"
+  fi
+  return 0
+}
+detect_ap_radio
+# <<< detect_ap_radio (WARP-826)
 
 for i in $(seq 1 60); do
   state=$(docker inspect -f '{{.State.Running}}' droplet-openwrt 2>/dev/null)
@@ -113,17 +351,88 @@ docker exec -i \
   # custom Dockerfile baked into compose build context for production).
   # Phase L: added wireguard-tools, kmod-wireguard, luci-proto-wireguard
   # so the routing service can mint VPN peers against this container.
+  # WARP-839: added ddns-scripts, luci-app-ddns so the single-box container has
+  # the DuckDNS updater (the legacy router image baked these too; this
+  # runtime list mirrors openwrt/singlebox-image/Dockerfile). ddns is NOT added
+  # to the hard-verify gate below — it is not load-bearing for the AP and must
+  # not block AP bring-up.
   NEED_INSTALL=0
   command -v hostapd >/dev/null || NEED_INSTALL=1
   command -v wg >/dev/null      || NEED_INSTALL=1
   [ -f /lib/netifd/proto/wireguard.sh ] || NEED_INSTALL=1
+  # Fresh-provision fix: umdns is the mDNS daemon the routing service
+  # browses for _droplet-ap._tcp (AP auto-discovery, ADR-005). Stock
+  # openwrt/rootfs ships without it, so a fresh container / post-factory-
+  # reset box loses AP discovery entirely until it is installed. Trigger a
+  # (re)install when the binary is absent.
+  [ -x /usr/sbin/umdns ] || NEED_INSTALL=1
+  # >>> install_ap_pkgs (WARP-826b)
+  # Install the AP/router packages, hardened against the first-boot race where
+  # the container has no internet yet — a single opkg attempt then silently
+  # fails and the AP never installs (the failure mode at L276, seen live on the
+  # .87 box: hostapd + iw absent, attach still exited 0). Wait for the feed,
+  # retry update + install, and NEVER hide a persistent failure. Knobs default to
+  # prod values; the unit tests shrink them: OPKG_FEED_TRIES / OPKG_INSTALL_TRIES
+  # / OPKG_RETRY_SLEEP.
+  install_ap_pkgs() {
+    _feed_tries="${OPKG_FEED_TRIES:-12}"
+    _inst_tries="${OPKG_INSTALL_TRIES:-3}"
+    _nap="${OPKG_RETRY_SLEEP:-5}"
+    # Capture (do NOT swallow) the last opkg output so a hard-fail can SURFACE the
+    # real error — a generic "feed unreachable" line hides whether it was DNS, no
+    # route, a 404 feed, or a dependency conflict, which is what an operator needs.
+    _upd_out=""
+    _inst_out=""
+    _i=1
+    _feed_ok=0
+    while [ "$_i" -le "$_feed_tries" ]; do
+      _upd_out="$(opkg update 2>&1)"; _upd_rc=$?
+      if [ "$_upd_rc" -eq 0 ]; then _feed_ok=1; break; fi
+      sleep "$_nap"
+      _i=$((_i + 1))
+    done
+    [ "$_feed_ok" = 1 ] || echo "droplet-openwrt-attach: ERROR: opkg feed unreachable after ${_feed_tries} tries — AP/router packages cannot install until container connectivity returns" >&2
+    _i=1
+    while [ "$_i" -le "$_inst_tries" ]; do
+      _inst_out="$(opkg install \
+        hostapd-mbedtls hostapd-utils wireless-regdb iw-full \
+        uhttpd uhttpd-mod-ubus rpcd rpcd-mod-rpcsys rpcd-mod-iwinfo rpcd-mod-file \
+        umdns \
+        wireguard-tools kmod-wireguard luci-proto-wireguard \
+        ddns-scripts luci-app-ddns \
+        2>&1)"; _inst_rc=$?
+      [ "$_inst_rc" -eq 0 ] && break
+      sleep "$_nap"
+      _i=$((_i + 1))
+    done
+    # Hard-verify the load-bearing AP binaries actually landed — BOTH hostapd and
+    # iw (iw is required for nl80211 phy/iface control; a present hostapd with no
+    # iw still cannot bring the radio into AP mode). Do NOT return success with a
+    # silently-broken AP (the recurring L276 failure this guards).
+    if command -v hostapd >/dev/null 2>&1 && command -v iw >/dev/null 2>&1; then
+      return 0
+    fi
+    echo "droplet-openwrt-attach: ERROR: AP prerequisites still missing after opkg install retries — the default Wi-Fi AP cannot start:" >&2
+    command -v hostapd >/dev/null 2>&1 || echo "  - hostapd not installed" >&2
+    command -v iw >/dev/null 2>&1      || echo "  - iw not installed" >&2
+    # Surface the captured opkg output so the journal shows the ROOT cause, not
+    # just the symptom (the brief: do not swallow opkg output on the failure path).
+    echo "droplet-openwrt-attach: last opkg update output:" >&2
+    printf "%s\n" "$_upd_out" >&2
+    echo "droplet-openwrt-attach: last opkg install output:" >&2
+    printf "%s\n" "$_inst_out" >&2
+    return 1
+  }
+  # <<< install_ap_pkgs (WARP-826b)
   if [ "$NEED_INSTALL" = 1 ]; then
-    opkg update >/dev/null 2>&1
-    opkg install \
-      hostapd-mbedtls hostapd-utils wireless-regdb iw-full \
-      uhttpd uhttpd-mod-ubus rpcd rpcd-mod-rpcsys rpcd-mod-iwinfo rpcd-mod-file \
-      wireguard-tools kmod-wireguard luci-proto-wireguard \
-      >/dev/null 2>&1
+    # Propagate a persistent install failure: exit the docker-exec body non-zero
+    # so EXEC_RC in the outer script carries a failed status to the oneshot
+    # systemd unit. Limping on with no hostapd/iw is the silent no-AP this whole
+    # change exists to prevent (the live .87 failure) — fail loud + visible, do
+    # NOT mask it with `|| true`.
+    if ! install_ap_pkgs; then
+      exit 1
+    fi
     # netifd was started before luci-proto-wireguard arrived, so it didnt
     # load the wireguard protocol handler. Restart it so ifup wg0 works
     # for any subsequent peer-add via the routing service.
@@ -139,10 +448,129 @@ docker exec -i \
     /etc/init.d/uhttpd restart >/dev/null 2>&1
   fi
 
+  # Fresh-provision fix: enable + start umdns every attach (idempotent). The
+  # routing service browses it for _droplet-ap._tcp; without it the
+  # /aps/discovered call returns a ubus error and AP auto-discovery never
+  # sees a plugged-in AP.
+  /etc/init.d/umdns enable >/dev/null 2>&1
+  /etc/init.d/umdns restart >/dev/null 2>&1
+  echo "droplet-openwrt-attach: umdns enabled + started (_droplet-ap._tcp discovery)"
+
+  # Fresh-provision fix: unbridge_eth0 (above) pulls eth0 out of br-lan,
+  # which also drops it out of the lan firewall zone, so fw4 DROPs input on
+  # eth0 and the host docker-proxy:8181 -> uhttpd ubus path is refused. The
+  # routing service then crash-loops at startup (Connection reset by peer).
+  # Re-add eth0 as a device on the lan zone so management input (ubus on
+  # :80) is accepted on the host-only docker interface. Idempotent; eth0 is
+  # a host-only docker veth (172.18.0.0/16), never the LAN or WAN.
+  trust_eth0_fw() {
+    lansec=$(uci show firewall 2>/dev/null | grep "\.name=.lan." | head -1 | cut -d. -f2)
+    [ -n "$lansec" ] || { echo "droplet-openwrt-attach: WARN: no lan firewall zone found; eth0 left untrusted (router may be unreachable)"; return 0; }
+    uci -q get "firewall.$lansec.device" 2>/dev/null | grep -qw eth0 || \
+      uci add_list "firewall.$lansec.device=eth0"
+    # A read-only overlay right after a docker restart (see the session-cache
+    # note below) makes commit/reload fail silently, leaving the router
+    # unreachable with no breadcrumb — warn so the attach log shows why ubus
+    # input is refused, matching the OPENWRT_ROOT_PW warn above.
+    if uci -q commit firewall && /etc/init.d/firewall reload >/dev/null 2>&1; then
+      echo "droplet-openwrt-attach: eth0 trusted on lan zone '$lansec' (ubus input accepted)"
+    else
+      echo "droplet-openwrt-attach: WARN: firewall commit/reload failed; eth0 may stay DROPped (router unreachable)"
+    fi
+  }
+  trust_eth0_fw
+
+  # WARP-810: put the AP iface ($AP_IFACE, e.g. wlp14s0) into its own fw4
+  # firewall zone. Field-confirmed bug on the single-box: the AP comes up at
+  # 192.168.20.1/24 with dnsmasq-ap serving DHCP, but $AP_IFACE is in NO zone.
+  # The inet fw4 input chain is policy-drop and only accepts new input from the
+  # lan zone (eth0 + br-lan), so a client DHCP DISCOVER (new, not established)
+  # is DROPped -> the phone associates to hostapd but never gets a lease (~15s
+  # timeout, looks like "cannot connect"). The fix:
+  #   - a zone named "ap" covering $AP_IFACE with input=ACCEPT, so DHCP (:67)
+  #     and DNS (:53) reach dnsmasq-ap. This is the critical "get an IP" fix.
+  #   - forwarding ap -> lan, because on the single-box the real uplink is the
+  #     docker veth eth0, which trust_eth0_fw (above) places in the lan zone;
+  #     the baked lan->wan forwarding then chains AP egress onward when a wan
+  #     member exists. (The baked wan zone has no live member on this box, so
+  #     forwarding to wan would be a dead end here.)
+  #   - a fw4 NAT MASQUERADE scoped to the AP subnet (192.168.20.0/24) leaving
+  #     the lan zone, so AP clients reach the internet. Scoping to src_ip keeps
+  #     it from double-NATing the lan zone own clients on the multi-box shape
+  #     (their 192.168.50.x source never matches).
+  # Mechanism is UCI + fw4 reload, mirroring trust_eth0_fw. Idempotent: every
+  # section is upserted by a stable name (zone "ap" / forwarding
+  # "droplet_ap_fwd" / nat "droplet_ap_masq"), and the device list is guarded,
+  # so re-running the attach never duplicates config. Default-drop input stays
+  # intact for every other interface (no global defaults flip, no policy
+  # accept). NB: NO APOSTROPHES in this block (single-quoted docker exec body).
+  # >>> ap_firewall_zone (WARP-810)
+  ap_firewall_zone() {
+    apif="${AP_IFACE:-wlp14s0}"
+    # Egress zone = wherever the uplink iface lives. On the single-box eth0 is
+    # pulled into the lan zone by trust_eth0_fw; on multi-box lan is br-lan.
+    lansec=$(uci show firewall 2>/dev/null | grep "\.name=.lan." | head -1 | cut -d. -f2)
+    if [ -z "$lansec" ]; then
+      echo "droplet-openwrt-attach: WARN: no lan firewall zone found; AP zone left unrouted (Wi-Fi clients get no internet)"
+    fi
+
+    # --- AP zone (named, so it is upsert-able) ---------------------------
+    if ! uci -q get firewall.droplet_ap >/dev/null 2>&1; then
+      uci set firewall.droplet_ap=zone
+    fi
+    uci set firewall.droplet_ap.name=ap
+    uci set firewall.droplet_ap.input=ACCEPT
+    uci set firewall.droplet_ap.output=ACCEPT
+    # forward=REJECT on the zone itself keeps AP clients from reaching the LAN
+    # unfiltered; cross-zone routing is opened explicitly via the forwarding
+    # section below (ap -> lan -> wan), never a blanket forward.
+    uci set firewall.droplet_ap.forward=REJECT
+    # Bind the AP iface to the zone by device. Guarded so a second run does not
+    # append a duplicate (uci add_list has list semantics and would dupe).
+    if ! uci -q get firewall.droplet_ap.device 2>/dev/null | grep -qw "$apif"; then
+      uci add_list "firewall.droplet_ap.device=$apif"
+    fi
+
+    # --- forwarding ap -> lan (egress path) ------------------------------
+    if [ -n "$lansec" ]; then
+      lanname=$(uci -q get "firewall.$lansec.name" 2>/dev/null)
+      [ -n "$lanname" ] || lanname=lan
+      if ! uci -q get firewall.droplet_ap_fwd >/dev/null 2>&1; then
+        uci set firewall.droplet_ap_fwd=forwarding
+      fi
+      uci set firewall.droplet_ap_fwd.src=ap
+      uci set firewall.droplet_ap_fwd.dest="$lanname"
+
+      # --- NAT: masquerade AP-subnet egress out the lan (uplink) zone ----
+      if ! uci -q get firewall.droplet_ap_masq >/dev/null 2>&1; then
+        uci set firewall.droplet_ap_masq=nat
+      fi
+      uci set firewall.droplet_ap_masq.name=droplet_ap_masq
+      uci set firewall.droplet_ap_masq.src="$lanname"
+      uci set firewall.droplet_ap_masq.src_ip=192.168.20.0/24
+      uci set firewall.droplet_ap_masq.target=MASQUERADE
+    fi
+
+    if uci -q commit firewall && /etc/init.d/firewall reload >/dev/null 2>&1; then
+      echo "droplet-openwrt-attach: AP zone configured ($apif input=ACCEPT, forward ap->${lanname:-lan}, masq 192.168.20.0/24) — Wi-Fi clients can DHCP + reach internet"
+    else
+      echo "droplet-openwrt-attach: WARN: firewall commit/reload failed; AP zone may not be active (Wi-Fi clients may not get a lease)"
+    fi
+  }
+  ap_firewall_zone
+  # <<< ap_firewall_zone (WARP-810)
+
   # Phase L: set root password from $OPENWRT_ROOT_PW so the routing services
-  # rpcd login works. Idempotent: only re-set if the current password fails.
+  # rpcd login works. Idempotent. WARP-834: stock OpenWrt ships root with an
+  # EMPTY password hash, and rpcd accepts ANY password against an empty-hash
+  # account (field-confirmed on the box: ubus session login returned a session
+  # for a bogus password while /etc/shadow showed "root:"). So the bare
+  # login-with-the-secret probe never fails on a passwordless root and passwd
+  # would be skipped, leaving root unprotected. Force the set when the hash is
+  # still empty ("^root::"); otherwise fall back to the login probe so a later
+  # rotation (hash already set to some OTHER value) still re-applies.
   if [ -n "$OPENWRT_ROOT_PW" ]; then
-    if ! ubus call session login "{\"username\":\"root\",\"password\":\"$OPENWRT_ROOT_PW\"}" >/dev/null 2>&1; then
+    if grep -q "^root::" /etc/shadow || ! ubus call session login "{\"username\":\"root\",\"password\":\"$OPENWRT_ROOT_PW\"}" >/dev/null 2>&1; then
       printf "%s\n%s\n" "$OPENWRT_ROOT_PW" "$OPENWRT_ROOT_PW" | passwd root >/dev/null 2>&1
       # rpcd caches sometimes; nudge it to re-read shadow
       /etc/init.d/rpcd restart >/dev/null 2>&1
@@ -298,6 +726,17 @@ ETHWD
   # while everything else passes through to the real internet.
   nft add rule ip nat prerouting iifname \"$AP_IFACE\" ip daddr 192.168.20.1 tcp dport 443 dnat to ${GATEWAY_IP}:443
   nft add rule ip nat prerouting iifname \"$AP_IFACE\" ip daddr 192.168.20.1 tcp dport 80  dnat to ${GATEWAY_IP}:80
+  # WireGuard remote-access clients land on the same dashboard. Their peer
+  # .conf (apps/orchestrator/src/services/vpn.service.ts) advertises
+  # AllowedIPs = 192.168.20.0/24 + the tunnel subnet and DNS = 192.168.20.1,
+  # so a connected phone's only route to the dashboard is
+  # https://192.168.20.1 — which arrives on wg0, not $AP_IFACE. Without
+  # these two mirror rules the AP-scoped DNAT above never matches VPN
+  # ingress and the dashboard is unreachable over the tunnel even with a
+  # healthy handshake (observed on the .87 single-box, 2026-06-10). Same
+  # daddr predicate, same hijack-avoidance rationale.
+  nft add rule ip nat prerouting iifname \"wg0\" ip daddr 192.168.20.1 tcp dport 443 dnat to ${GATEWAY_IP}:443
+  nft add rule ip nat prerouting iifname \"wg0\" ip daddr 192.168.20.1 tcp dport 80  dnat to ${GATEWAY_IP}:80
   # ----------------------------------------------------------------------
 
   # Stop procd dnsmasq so our manual one can bind 192.168.20.1
@@ -374,11 +813,94 @@ DNSMASQ
   ip link set "$AP_IFACE" up 2>/dev/null
   ip addr show "$AP_IFACE" | grep -q 192.168.20.1 || ip addr add 192.168.20.1/24 dev "$AP_IFACE"
 
+  # >>> start_hostapd (WARP-826b)
+  # Start hostapd and VERIFY it actually came up. The old fire-and-forget
+  # (pgrep || hostapd -B) hid launch failures — a dead AP while the attach
+  # reported success (seen live on .87). Retry a few times, then log loudly so a
+  # broken AP is never silent. Knobs: HOSTAPD_START_TRIES / HOSTAPD_START_SLEEP.
+  #
+  # Verification is two-layered: the hostapd -B PROCESS must be alive AND the AP
+  # iface must actually be in AP mode (`iw dev <if> info` -> `type AP`). The iface
+  # check is the real proof — a hostapd that started but failed to bind the radio
+  # exits, and even a lingering process would not have put the iface into AP mode
+  # (the pgrep-only check would false-pass on a bind failure). iw should always be
+  # present (install_ap_pkgs hard-verifies it); if it is somehow unavailable we
+  # fall back to the process check rather than false-fail a working AP.
+  start_hostapd() {
+    _htries="${HOSTAPD_START_TRIES:-3}"
+    _hnap="${HOSTAPD_START_SLEEP:-1}"
+    _haperr=/tmp/hostapd-start.err
+
+    _ap_running() {
+      pgrep -f "hostapd -B" >/dev/null 2>&1 || return 1
+      # Confirm AP mode when iw is usable; otherwise accept the live process.
+      if command -v iw >/dev/null 2>&1; then
+        iw dev "${AP_IFACE}" info 2>/dev/null | grep -qE "type[[:space:]]+AP" || return 1
+      fi
+      return 0
+    }
+
+    if _ap_running; then return 0; fi
+    _h=1
+    while [ "$_h" -le "$_htries" ]; do
+      # Capture hostapds stderr (the -B daemon detaches and would otherwise
+      # swallow its startup error) so the loud failure below can show the cause.
+      hostapd -B -P /run/hostapd.pid /etc/hostapd.conf >/dev/null 2>>"$_haperr" || true
+      sleep "$_hnap"
+      if _ap_running; then
+        echo "droplet-openwrt-attach: hostapd up on ${AP_IFACE} (type AP)"
+        return 0
+      fi
+      _h=$((_h + 1))
+    done
+    echo "droplet-openwrt-attach: ERROR: hostapd failed to bring up the AP after ${_htries} tries — default Wi-Fi AP is DOWN (hostapd installed? iface ${AP_IFACE} present + type AP? /etc/hostapd.conf valid?)" >&2
+    # Surface the captured hostapd error (do not swallow it on the failure path).
+    [ -s "$_haperr" ] && { echo "droplet-openwrt-attach: last hostapd error:" >&2; tail -10 "$_haperr" >&2; }
+    return 1
+  }
+  # <<< start_hostapd (WARP-826b)
   if [ "$HOSTAPD_CHANGED" = 1 ]; then
     pgrep -f "hostapd -B" | xargs -r kill 2>/dev/null
     sleep 1
   fi
-  pgrep -f "hostapd -B" >/dev/null || hostapd -B -P /run/hostapd.pid /etc/hostapd.conf
+  # Propagate a persistent hostapd failure to the oneshot unit (no `|| true`
+  # masking): a dead AP that reported success is exactly the live .87 bug.
+  if ! start_hostapd; then
+    exit 1
+  fi
+
+  # --- hostapd watchdog --------------------------------------------------
+  # start_hostapd verifies the AP at ATTACH time, but the attach is a oneshot —
+  # if hostapd later crashes (a transient nl80211/driver hiccup, an OOM kill)
+  # nothing brings it back and the AP silently disappears until reboot. Rather
+  # than a host-side .timer that would re-run this whole heavyweight attach
+  # (opkg, firewall, routing restart) every tick — disproportionate — add a
+  # lightweight in-container respawn loop modeled EXACTLY on the eth0 watchdog
+  # below: a 2-second loop that idempotently re-launches hostapd if pgrep shows
+  # it gone. Same /tmp storage rationale as eth0-keepalive (the overlay housing
+  # /usr/local/sbin is briefly read-only right after a docker restart; /tmp is a
+  # tmpfs mounted before procd, so writes always succeed; the file being wiped
+  # on restart is fine because this attach rewrites it every run). Best-effort by
+  # design — the LOUD failure signal is the start_hostapd verify above (which
+  # fails the unit); this just keeps a healthy AP healthy across crashes.
+  cat > /tmp/hostapd-keepalive <<"HOSTAPDWD"
+#!/bin/sh
+# hostapd watchdog. Re-launch hostapd -B if procd/a crash left it gone.
+# Idempotent: the pgrep guard makes the no-change case a cheap noop.
+CONF="${1:-/etc/hostapd.conf}"
+PIDF="${2:-/run/hostapd.pid}"
+while true; do
+  pgrep -f "hostapd -B" >/dev/null 2>&1 || hostapd -B -P "$PIDF" "$CONF" 2>/dev/null
+  sleep 2
+done
+HOSTAPDWD
+  chmod +x /tmp/hostapd-keepalive
+
+  start-stop-daemon -K -q -p /var/run/hostapd-keepalive.pid 2>/dev/null
+  rm -f /var/run/hostapd-keepalive.pid
+  start-stop-daemon -S -b -m -p /var/run/hostapd-keepalive.pid \
+    -x /tmp/hostapd-keepalive -- /etc/hostapd.conf /run/hostapd.pid
+  # ---------------------------------------------------------------------
 
   if [ "$DNSMASQ_CHANGED" = 1 ]; then
     pgrep -f "dnsmasq -C /etc/dnsmasq-ap.conf" | xargs -r kill 2>/dev/null
@@ -407,8 +929,70 @@ DNSMASQ
   unbridge_eth0
   bootstrap_net
 '
+# Capture the docker-exec exit status. The body above `exit 1`s on a hard-fail
+# (opkg could not install the AP prerequisites, or hostapd never brought up the
+# AP) — that exit becomes docker exec`s exit code. The outer script runs
+# `set +e`, so without capturing + re-exiting here a failed container body would
+# be MASKED and the oneshot unit would report success on a silent no-AP. Record
+# it, finish the best-effort host-side tail (rpcd ACL + routing recovery — still
+# worth attempting), then exit non-zero at the end so the systemd unit shows
+# failed and the failure is visible.
+EXEC_RC=$?
 
 echo "droplet-openwrt-attach: done (gateway=$GATEWAY_IP, ssid=$AP_SSID, domain=$AP_DOMAIN)"
+if [ "$EXEC_RC" -ne 0 ]; then
+  echo "droplet-openwrt-attach: WARN: container bring-up reported failure (rc=$EXEC_RC) — AP/package prerequisites did not satisfy; see errors above. Continuing host-side recovery, then failing the unit." >&2
+fi
+
+# Fresh-provision fix: install the droplet rpcd ACL so the routing service
+# session (root) is granted `umdns: [browse, update]` plus dhcp/iwinfo
+# reads. Without it ubus returns "Access denied" on umdns browse and
+# /aps/discovered 500s — AP auto-discovery cannot work.
+#
+# WARP-868: the singlebox image now BAKES this file (openwrt/singlebox-image/
+# Dockerfile), but the host-side canonical ACL still WINS on every attach:
+# the copy is UNCONDITIONAL whenever the host source is readable, so a
+# long-lived container never sits on a stale ACL after new grants land on
+# the host (/usr/share is not persisted, so the copy is cheap). The
+# image-baked file is only the fallback when the host source is unreadable.
+# And the path is no longer silenced: the 2026-06-11 reflash hit a docker-cp
+# failure that `>/dev/null 2>&1` swallowed entirely, leaving /dhcp/leases,
+# /aps/discovered and the wizard's DDNS write 500ing with zero log signal.
+# A copy or rpcd-restart failure now logs loudly and FAILS the unit
+# (systemd's on-failure retry re-runs us).
+DROPLET_RPCD_ACL="${DROPLET_RPCD_ACL:-/home/droplet/edge-platform/openwrt/files/usr/share/rpcd/acl.d/droplet-ai.json}"
+if [ -r "$DROPLET_RPCD_ACL" ]; then
+  if docker cp "$DROPLET_RPCD_ACL" droplet-openwrt:/usr/share/rpcd/acl.d/droplet-ai.json; then
+    if docker exec droplet-openwrt /etc/init.d/rpcd restart; then
+      echo "droplet-openwrt-attach: installed rpcd ACL (umdns browse/update + file reads) and restarted rpcd"
+    else
+      RPCD_RESTART_RC=$?
+      echo "droplet-openwrt-attach: ERROR: rpcd restart failed (rc=$RPCD_RESTART_RC) after ACL copy — new grants will not load until rpcd restarts. Failing the unit so systemd retries." >&2
+      EXEC_RC=1
+    fi
+  else
+    echo "droplet-openwrt-attach: ERROR: rpcd ACL copy failed — /dhcp/leases + /aps/discovered will answer 500 (Access denied) until it lands. Failing the unit so systemd retries." >&2
+    EXEC_RC=1
+  fi
+elif docker exec droplet-openwrt test -r /usr/share/rpcd/acl.d/droplet-ai.json 2>/dev/null; then
+  echo "droplet-openwrt-attach: WARN: host ACL source unreadable at $DROPLET_RPCD_ACL — relying on the image-baked ACL already in the container (may be stale)." >&2
+else
+  echo "droplet-openwrt-attach: ERROR: rpcd ACL missing from container AND source unreadable at $DROPLET_RPCD_ACL — network reads will answer 500 (Access denied). Failing the unit so systemd retries." >&2
+  EXEC_RC=1
+fi
+
+# WARP-868: enforce the uhttpd concurrency cap for containers created from
+# pre-bake images (fresh containers get it via the image's uci-defaults).
+# Stock max_requests=3 drops/resets the slowest rpcd invocations under the
+# orchestrator's network-summary fan-out. Idempotent: only writes + restarts
+# uhttpd when the value differs.
+if [ "$(docker exec droplet-openwrt uci -q get uhttpd.main.max_requests 2>/dev/null)" != "10" ]; then
+  if docker exec droplet-openwrt sh -c "uci set uhttpd.main.max_requests='10' && uci commit uhttpd && /etc/init.d/uhttpd restart" >/dev/null 2>&1; then
+    echo "droplet-openwrt-attach: raised uhttpd max_requests to 10 (WARP-868)"
+  else
+    echo "droplet-openwrt-attach: WARN: could not raise uhttpd max_requests — concurrent ubus calls may reset under load" >&2
+  fi
+fi
 
 # Routing service caches its OpenWrt session at startup and does not
 # reconnect on RPC failure (the python-uci SDK holds the session token
@@ -427,8 +1011,15 @@ echo "droplet-openwrt-attach: done (gateway=$GATEWAY_IP, ssid=$AP_SSID, domain=$
 # `docker restart` against an absent container is a hard error, so
 # guard on `docker ps`.
 if command -v docker >/dev/null 2>&1; then
-  if docker ps --format '{{.Names}}' | grep -qx droplet-pi-platform-routing-1; then
+  if docker ps --format '{{.Names}}' | grep -qx droplet-routing-1; then
     echo "droplet-openwrt-attach: restarting routing to drop any stale OpenWrt session"
-    docker restart droplet-pi-platform-routing-1 >/dev/null 2>&1 || true
+    docker restart droplet-routing-1 >/dev/null 2>&1 || true
   fi
 fi
+
+# Propagate the container bring-up status as the script (and therefore the
+# oneshot unit) exit code. Best-effort host-side recovery above always runs, but
+# if the AP/package prerequisites failed inside the container we exit non-zero so
+# `systemctl status droplet-openwrt-attach` shows failed instead of masking a
+# silent no-AP behind a success.
+exit "${EXEC_RC:-0}"

@@ -1,4 +1,11 @@
 # --- Build stage ---
+# Workspace-aware build. The web-dashboard depends on @droplet/shared-types
+# (a workspace package) for `import type` only — the types are erased at
+# compile time, but npm still has to resolve the workspace symlink at
+# install time, so the image must build from the repo-root context as a
+# workspace member (see docker/docker-compose.yml `context: ..`). Mirrors
+# the orchestrator's repo-root workspace build (6af516e).
+#
 # Build stage stays on `node:20-alpine` because the Next.js compile is
 # pure JS — no cryptographic operations happen at build time, so there's
 # no FIPS-provider requirement for this layer. Trims ~30 MB off the
@@ -6,11 +13,31 @@
 FROM node:20-alpine AS builder
 
 WORKDIR /app
-COPY package.json ./
-RUN npm install
 
-COPY . .
-RUN npm run build
+# Workspace manifests + lockfile so npm ci can resolve the workspace
+# symlinks (the lockfile's link: true entries point at the in-repo
+# packages; npm fails the link if the target package.json is missing).
+COPY package.json package-lock.json ./
+COPY apps/web-dashboard/package.json ./apps/web-dashboard/package.json
+COPY packages/shared-types/package.json ./packages/shared-types/package.json
+COPY packages/auth-policy/package.json ./packages/auth-policy/package.json
+
+# Targeted install: only the web-dashboard workspace and its in-repo
+# dependencies (shared-types is type-only; auth-policy ships runtime code
+# that next.config transpiles — see transpilePackages).
+RUN npm ci -w @droplet/web-dashboard -w @droplet/shared-types -w @droplet/auth-policy --include-workspace-root
+
+# Sources for the workspaces this image builds. auth-policy's source is
+# required (not just its package.json): next build transpiles it from .ts
+# via transpilePackages, so the .ts sources must be present in the context.
+COPY packages/shared-types ./packages/shared-types
+COPY packages/auth-policy ./packages/auth-policy
+COPY apps/web-dashboard ./apps/web-dashboard
+
+# shared-types is type-only for web-dashboard, but build it so the
+# require() condition has a dist too (harmless, matches orchestrator).
+RUN npm run -w @droplet/shared-types build
+RUN npm run -w @droplet/web-dashboard build
 
 # --- Run stage ---
 # Runtime migrates to `node:20-bookworm-slim` so the OpenSSL FIPS
@@ -65,11 +92,14 @@ ENV OPENSSL_CONF=/etc/ssl/openssl-fips.cnf
 
 WORKDIR /app
 
-COPY --from=builder /app/.next/standalone ./
-COPY --from=builder /app/.next/static ./.next/static
-COPY --from=builder /app/public ./public
+# Monorepo standalone layout: with outputFileTracingRoot at the repo root,
+# Next emits the hoisted node_modules + root package.json at the standalone
+# root and nests the workspace's server.js under apps/web-dashboard/.
+COPY --from=builder /app/apps/web-dashboard/.next/standalone ./
+COPY --from=builder /app/apps/web-dashboard/.next/static ./apps/web-dashboard/.next/static
+COPY --from=builder /app/apps/web-dashboard/public ./apps/web-dashboard/public
 
 ENV PORT=3001
 EXPOSE 3001
 
-CMD ["node", "server.js"]
+CMD ["node", "apps/web-dashboard/server.js"]

@@ -25,11 +25,11 @@ describe("list_recent_files", () => {
     expect(r.ok).toBe(false);
   });
 
-  it("calls /recent?limit=30 with token", async () => {
+  it("calls /recents?limit=30 with token", async () => {
     const get = vi.fn().mockResolvedValue(new Response("[]", { status: 200 }));
     await listRecentFiles.handler({}, ctxWith(get, "tok"));
     expect(get).toHaveBeenCalledWith(
-      "/recent?limit=30",
+      "/recents?limit=30",
       expect.objectContaining({ headers: expect.objectContaining({ "X-Nextcloud-Token": "tok" }) }),
     );
   });

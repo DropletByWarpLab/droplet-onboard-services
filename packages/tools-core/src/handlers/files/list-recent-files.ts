@@ -11,7 +11,7 @@ async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promis
     };
   }
   const headers: Record<string, string> = { "X-Nextcloud-Token": ctx.ncToken };
-  const res = await ctx.http.nextcloud.get("/recent?limit=30", { headers });
+  const res = await ctx.http.nextcloud.get("/recents?limit=30", { headers });
   if (!res.ok) {
     return {
       ok: false,

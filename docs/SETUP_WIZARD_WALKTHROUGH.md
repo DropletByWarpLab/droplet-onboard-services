@@ -11,8 +11,10 @@
 Extend the existing first-run wizard at `apps/web-dashboard/src/app/setup/page.tsx`
 so a non-technical customer can stand the box up alone, end-to-end:
 
-1. **Internet** — connect the box to the outside world (DuckDNS subdomain +
-   token so the VPN endpoint resolves from anywhere).
+1. **Internet** ("Set up your network") — name the **Home Wi-Fi the box
+   broadcasts** (SSID + password the household joins, since the Droplet is the
+   router), then connect the box to the outside world with a DuckDNS subdomain +
+   token so the VPN endpoint resolves from anywhere.
 2. **Storage** — name the drives the box discovered ("Wedding Photos",
    "Headshots", etc.) so they show up labelled in Files.
 3. **Cameras** — auto-detect ONVIF cameras on the LAN; if any are present,
@@ -43,6 +45,7 @@ Each new walkthrough topic also has a *backend* already shipped:
 
 | Topic | Endpoints | Dashboard API helpers |
 |---|---|---|
+| Home Wi-Fi | `POST /api/network/wifi/ssid`, `POST /api/network/wifi/password` (Tier 2 → `POST /api/network/command/confirm`, `GET /api/network/operations/:id`) | `setWifiSsid`, `setWifiPassword`, `confirmNetworkCommand`, `fetchNetworkOperation` |
 | DuckDNS | `GET/PUT /api/ddns/duckdns` | `fetchDuckDnsStatus`, `setDuckDnsConfig` |
 | Storage | `GET /api/storage`, `GET /api/storage/drives` | `fetchStorageStats`, `fetchDrives` |
 | Cameras | `GET /api/cameras/discovered`, `GET/POST /api/cameras/groups`, `GET/POST /api/cameras/:name/settings` | (search `cameras` in lib/api.ts) |
@@ -139,50 +142,93 @@ Each step gets a section. Format:
 - **Edge cases** — what we show when things fail
 - **Tests** — what `__tests__/setup.*` files cover
 
-### Step: Internet (DuckDNS)
+### Step: Internet — "Set up your network" (Home Wi-Fi + DuckDNS)
 
-**Purpose**: Customer types a DuckDNS subdomain ("studiofotonia") and the
-token from their DuckDNS account. We verify it, save it, and explain why
-this matters (so their phone can reach the box from outside).
+**Purpose** (WARP-657): Two sections, because the Droplet IS the home router.
+First the customer names the **Home Wi-Fi the box broadcasts** (the SSID +
+password every device at home joins). Then they give the box a **web address**
+via DuckDNS (a subdomain + token from their own DuckDNS account) so their phone
+can reach the box from outside. Both sections are optional and skippable.
 
 **Backend calls**:
-- `GET /api/ddns/duckdns` on mount → `{ configured, subdomain?, token? }`. If already configured, show "Already set up — `<subdomain>.duckdns.org`" and a "Reconfigure" button.
-- `PUT /api/ddns/duckdns` with `{ subdomain, token, enabled: true }` → validates, persists. On 2xx, we re-fetch status to confirm.
+- *Section A — Home Wi-Fi* (only when an SSID is entered):
+  - `POST /api/network/wifi/ssid` with `{ ssid }` — Tier 1, applies immediately
+    (`setWifiSsid`).
+  - `POST /api/network/wifi/password` with `{ password }` — Tier 2
+    (`setWifiPassword`). May return `202 { status: "confirmation_required",
+    operation: "set_wifi_password", confirmationToken }` because the radio
+    restart drops every connected device. The wizard **auto-confirms** — the
+    "Save and continue" click is itself the consent, there is no extra modal —
+    via `POST /api/network/command/confirm` (`confirmNetworkCommand`), then
+    polls `GET /api/network/operations/:id` (`fetchNetworkOperation`) until the
+    operation reaches a terminal state (`applied` / `rolled_back` / `unknown`).
+- *Section B — DuckDNS* (only when a subdomain is entered):
+  - `GET /api/ddns/duckdns` on mount → `{ configured, subdomain?, tokenSet? }`.
+    If already configured, show "Already set up — `<subdomain>.duckdns.org`".
+  - `PUT /api/ddns/duckdns` with `{ subdomain, token?, enabled }` → validates,
+    persists (`setDuckDnsConfig`). `token` is omitted on the "keep stored token"
+    path. On 2xx we re-fetch status to confirm.
+
+Wi-Fi is submitted before DuckDNS, so a single "Save and continue" applies both.
 
 **UI**:
 ```
-Title:     Connect to the internet
-Subtitle:  Give your Droplet a name people can find from anywhere.
+Title:     Set up your network
+Subtitle:  Name the Wi-Fi your Droplet broadcasts at home, then give it a web
+           address you can reach from anywhere.
 
+── HOME WI-FI ──────────────────────────────────  (wifi icon)
+[ Network name (SSID) ] Studio Fotonia
+[ Wi-Fi password      ] ••••••••••  (show/hide)
+🛡 WPA2 / WPA3 · broadcast on 2.4 & 5 GHz — this becomes your home network
+
+────────────────────────────────────────────────  (thin divider)
+
+── INTERNET ADDRESS · DUCKDNS ──────────────────  (globe icon)
 [ Subdomain ] yourstudio  .duckdns.org
 [ Token     ] **********
+☑ Keep the address up to date automatically
 
-[ Continue ]
-[ Skip — I'll do this later ]
+[ Save and continue ]
+[ Skip for now ]
 
 ╭─ How does this work? ─────────────────────────╮
-│ DuckDNS gives your box a permanent web address│
-│ (yourstudio.duckdns.org) that always finds it,│
-│ even if your home internet's IP changes.      │
-│ Your phone uses this address to connect to the│
-│ Droplet's VPN from outside the studio.        │
-│                                               │
-│ Don't have a DuckDNS account?                 │
+│ Your Wi-Fi name and password are what every   │
+│ device at home joins — the Droplet is your    │
+│ router now. DuckDNS then gives the box a       │
+│ permanent web address (yourstudio.duckdns.org) │
+│ that always finds it, even if your home        │
+│ internet's IP changes — that's how your phone  │
+│ reaches the VPN from outside.                  │
 │ → Sign up free at duckdns.org                 │
 ╰───────────────────────────────────────────────╯
 ```
 
+**Validation** (client-side, mirrors `services/routing/schemas.py`):
+- SSID: 1–32 chars. PSK: 8–63 chars. Only enforced when an SSID is entered; a
+  network name with no password (or a too-short one) is rejected inline without
+  an API call.
+- DuckDNS subdomain regex (`[a-z0-9-]`, no leading/trailing hyphen, ≤63);
+  token 10–128 chars (or omitted on the keep-stored path). Only enforced when a
+  subdomain is entered.
+
 **Edge cases**:
-- Subdomain regex fails (`[a-z0-9-]`, no leading/trailing hyphen): inline error under the field, don't submit.
-- Token < 10 chars: inline error.
-- PUT 5xx: toast error, keep state, let user retry.
-- Skipped: stash a `setup.internetSkipped` flag in localStorage so the VPN step knows to force-skip too.
+- Wi-Fi password 202 confirmation token expires (60s TTL) or the apply rolls
+  back: surfaced as an inline error so the customer doesn't trust a Wi-Fi change
+  that didn't land. The step does not crash.
+- DuckDNS PUT 5xx: inline error, keep state, let the user retry.
+- Skipped: the VPN step downstream surfaces a "set up internet first" view and
+  points back here.
 
 **Tests** (`__tests__/setup.internet.test.tsx`):
-- Renders "Already configured" view when GET returns `configured: true`.
-- Validates subdomain client-side before PUT.
-- Shows DuckDNS link in the Learn More card.
-- Skip button advances without calling PUT.
+- Renders the two-section step (Home Wi-Fi inputs + section labels); title is
+  "Set up your network".
+- SSID > 32 / PSK < 8 → inline validation error, no `setWifiSsid` /
+  `setWifiPassword` call.
+- Valid Wi-Fi + DuckDNS → `setWifiSsid` then `setWifiPassword` then
+  `setDuckDnsConfig`.
+- 202 path → `confirmNetworkCommand` called, `fetchNetworkOperation` polled.
+- Existing "Already configured" view, DuckDNS-only submit, and skip still pass.
 
 ### Step: Storage
 

@@ -29,6 +29,15 @@ requests==2.32.3          # huggingface_hub's HTTP layer
 # but unavoidable as long as we're on openwakeword < 0.7.
 scikit-learn==1.5.2
 
+# Vosk wake backend (default WAKE_ENGINE=vosk, WARP-154).
+#
+# Recognizes the configured wake phrase ("hey droplet") out of the box
+# via a grammar-constrained small acoustic model — no per-phrase model
+# training and no licensing fee (Apache-2.0), unlike Porcupine-style
+# engines. The ~40 MB model itself is baked into the image by the
+# Dockerfile, not pulled from PyPI. Ships manylinux wheels for py3.12.
+vosk==0.3.45
+
 # STT / TTS pull their own deps in subsequent commits:
 #   commit 5 — wyoming-faster-whisper is a separate container in the
 #              compose stack, not bundled here.

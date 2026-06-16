@@ -15,6 +15,7 @@ import {
   Loader2,
   ShieldOff,
 } from "lucide-react";
+import { ShellPage } from "@/components/shell/ShellPage";
 import { useAuth } from "@/lib/auth";
 import {
   fetchVpnStatus,
@@ -33,6 +34,8 @@ import type {
 import { Dialog } from "@/components/Dialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useToast } from "@/components/Toast";
+import { translateError } from "@/lib/friendly-errors";
+import { dashboardUrlFromConf } from "@/lib/wireguard";
 
 /**
  * Remote Access — WireGuard VPN management page.
@@ -67,7 +70,7 @@ export default function RemoteAccessPage() {
       setStatus(s);
       setPeers(p.peers || []);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load Remote Access");
+      setError(translateError(err, "vpn"));
     } finally {
       setLoading(false);
     }
@@ -85,7 +88,7 @@ export default function RemoteAccessPage() {
       setRevokeTarget(null);
       await reload();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Revoke failed", "error");
+      toast(translateError(err, "vpn"), "error");
       throw err;
     }
   };
@@ -93,52 +96,57 @@ export default function RemoteAccessPage() {
   const activePeers = peers.filter((p) => p.status === "active");
   const endpointMissing = status && !status.endpointConfigured;
 
-  return (
-    <div className="p-6 lg:p-8 max-w-4xl">
-      <div className="flex items-start justify-between gap-4 mb-6">
-        <div>
-          <h1 className="type-large-title text-label-primary">Remote Access</h1>
-          <p className="type-subheadline text-label-tertiary mt-1 max-w-xl">
-            Connect your phone or laptop to your home network from anywhere.
-            Add a device, scan the QR code in the WireGuard app, and you&rsquo;re in.
-          </p>
-        </div>
-        <button
-          onClick={() => setShowAdd(true)}
-          disabled={endpointMissing === true}
-          className="dp-btn-primary type-subheadline !py-2 !px-4 !min-h-[36px] flex-shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
-        >
-          <Plus size={14} />
-          Add a device
-        </button>
-      </div>
+  const addAction = (
+    <button
+      className="btn primary"
+      onClick={() => setShowAdd(true)}
+      disabled={endpointMissing === true}
+      type="button"
+    >
+      <Plus size={15} />
+      <span>Add device</span>
+    </button>
+  );
 
+  return (
+    <ShellPage
+      icon={<Globe size={15} />}
+      label="Remote Access"
+      title="Remote Access"
+      sub="Connect your phone or laptop to your home network from anywhere. Add a device, scan the QR code in the WireGuard app, and you’re in."
+      actions={addAction}
+    >
       {error && (
-        <div className="mb-4 p-3 bg-system-red/10 border border-system-red/20 rounded type-footnote text-system-red flex items-center justify-between">
-          <span>{error}</span>
-          <button onClick={() => setError(null)}>
+        <div
+          className="card"
+          style={{ marginBottom: 14, display: "flex", alignItems: "center", justifyContent: "space-between", borderColor: "rgba(239,68,68,0.3)", color: "#ef4444" }}
+        >
+          <span style={{ fontSize: 13 }}>{error}</span>
+          <button onClick={() => setError(null)} type="button" aria-label="Dismiss error" className="icon-btn" style={{ width: 28, height: 28 }}>
             <X size={12} />
           </button>
         </div>
       )}
 
       {endpointMissing && (
-        <div className="mb-4 p-3 bg-system-orange/10 border border-system-orange/20 rounded type-footnote text-system-orange flex items-start gap-2">
-          <AlertCircle size={14} className="mt-0.5 flex-shrink-0" />
-          <div>
-            <p className="font-medium">Endpoint host not configured</p>
-            <p className="type-caption-1 mt-0.5">
-              Set <code className="font-mono">WIREGUARD_ENDPOINT_HOST</code> in
-              <code className="font-mono"> .env</code> to your DuckDNS subdomain
-              or your home router&rsquo;s public IP, then restart the orchestrator.
-            </p>
+        <div className="card" style={{ marginBottom: 14, borderColor: "rgba(217,163,92,0.3)" }}>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+            <AlertCircle size={16} style={{ color: "#d9a35c", flexShrink: 0, marginTop: 2 }} />
+            <div>
+              <p style={{ fontWeight: 600, color: "var(--text)", fontSize: 13.5 }}>Endpoint host not configured</p>
+              <p style={{ fontSize: 12.5, color: "var(--text-muted)", marginTop: 2 }}>
+                Set <code style={{ fontFamily: "var(--font-mono)" }}>WIREGUARD_ENDPOINT_HOST</code> in{" "}
+                <code style={{ fontFamily: "var(--font-mono)" }}>.env</code> to your DuckDNS subdomain or your
+                home router’s public IP, then restart the orchestrator.
+              </p>
+            </div>
           </div>
         </div>
       )}
 
       {/* Server status card — small, only when configured */}
       {status?.configured && (
-        <div className="dp-card p-4 mb-4 grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
+        <div className="card grid c4" style={{ marginBottom: 16 }}>
           <Stat label="Endpoint" value={status.endpointHost ? `${status.endpointHost}:${status.listenPort}` : "—"} />
           <Stat label="VPN subnet" value={status.addresses?.[0] ?? "—"} />
           <Stat label="Active devices" value={String(activePeers.length)} />
@@ -147,18 +155,14 @@ export default function RemoteAccessPage() {
       )}
 
       {/* Peer list */}
-      <div className="dp-group">
+      <div className="card rows" style={{ padding: "4px 18px" }}>
         {loading && peers.length === 0 ? (
-          <div className="dp-row flex items-center justify-center text-label-tertiary type-subheadline">
-            Loading…
-          </div>
+          <div className="lrow" style={{ justifyContent: "center", color: "var(--text-muted)" }}>Loading…</div>
         ) : peers.length === 0 ? (
-          <div className="dp-row flex flex-col items-center justify-center py-12 text-center">
-            <Globe size={32} className="text-label-quaternary mb-3" />
-            <p className="type-subheadline text-label-tertiary">No devices yet</p>
-            <p className="type-caption-1 text-label-quaternary mt-1 max-w-xs">
-              Tap &ldquo;Add a device&rdquo; to set up your first phone or laptop.
-            </p>
+          <div className="empty">
+            <span className="ei"><Globe size={24} /></span>
+            <span className="eh">No devices yet</span>
+            <span>Tap “Add device” to set up your first phone or laptop.</span>
           </div>
         ) : (
           peers.map((peer) => (
@@ -172,15 +176,14 @@ export default function RemoteAccessPage() {
         )}
       </div>
 
-      {/* DuckDNS card — only renders when the user is an admin (the API
-          returns 403 for non-admins; we treat that as "hide the section"
-          rather than an error since families don't need to see it). */}
+      {/* DuckDNS card — only renders when the user is an admin. */}
       <DuckDnsCard />
 
       {showAdd && (
         <AddDeviceDialog
           onClose={() => setShowAdd(false)}
           onAdded={reload}
+          publicFqdn={status?.publicFqdn ?? null}
         />
       )}
 
@@ -193,7 +196,7 @@ export default function RemoteAccessPage() {
         confirmLabel="Revoke"
         variant="destructive"
       />
-    </div>
+    </ShellPage>
   );
 }
 
@@ -227,7 +230,7 @@ function DuckDnsCard() {
       if (msg.startsWith("403")) {
         setAdminVisible(false);
       } else {
-        setErr(msg);
+        setErr(translateError(e, "vpn"));
       }
     }
   }, []);
@@ -251,50 +254,42 @@ function DuckDnsCard() {
       setToken("");
       setEditing(false);
     } catch (e) {
-      setErr(e instanceof Error ? e.message : "Failed to save");
+      setErr(translateError(e, "vpn"));
     } finally {
       setSaving(false);
     }
   };
 
   return (
-    <div className="dp-card p-5 mt-6">
-      <div className="flex items-start justify-between gap-3 mb-3">
+    <div className="card" style={{ marginTop: 24 }}>
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, marginBottom: 12 }}>
         <div>
-          <h2 className="type-headline text-label-primary">Domain name (DuckDNS)</h2>
-          <p className="type-caption-1 text-label-tertiary mt-1 max-w-lg">
-            Free dynamic DNS so your tunnel keeps working when your home
-            router&rsquo;s public IP changes. Sign up at{" "}
-            <a
-              href="https://www.duckdns.org/"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-accent hover:text-accent-hover underline-offset-2 hover:underline"
-            >
+          <h2 style={{ fontSize: 16, fontWeight: 600, color: "var(--text)" }}>Domain name (DuckDNS)</h2>
+          <p style={{ fontSize: 12.5, color: "var(--text-muted)", marginTop: 4, maxWidth: "32rem" }}>
+            Free dynamic DNS so your tunnel keeps working when your home router&rsquo;s public IP
+            changes. Sign up at{" "}
+            <a href="https://www.duckdns.org/" target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
               duckdns.org
             </a>{" "}
             to get a subdomain and token.
           </p>
         </div>
         {status?.configured && !editing && (
-          <button
-            onClick={() => setEditing(true)}
-            className="dp-btn-secondary type-footnote !min-h-[32px] !py-1 !px-3 flex-shrink-0"
-          >
+          <button onClick={() => setEditing(true)} className="btn sm" type="button" style={{ flexShrink: 0 }}>
             Edit
           </button>
         )}
       </div>
 
       {err && (
-        <div className="mb-3 p-2 bg-system-red/10 border border-system-red/20 rounded type-footnote text-system-red flex items-start gap-2">
-          <AlertCircle size={14} className="mt-0.5 flex-shrink-0" />
+        <div style={{ marginBottom: 12, padding: 10, borderRadius: 10, border: "1px solid rgba(239,68,68,0.25)", background: "rgba(239,68,68,0.08)", color: "#ef4444", fontSize: 13, display: "flex", alignItems: "flex-start", gap: 8 }}>
+          <AlertCircle size={14} style={{ marginTop: 2, flexShrink: 0 }} />
           <span>{err}</span>
         </div>
       )}
 
       {status?.configured && !editing ? (
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-sm">
+        <div className="grid c3">
           <Stat label="Domain" value={status.fullDomain} />
           <Stat label="Token" value={status.tokenSet ? "Stored" : "Missing"} />
           <Stat label="Status" value={status.enabled ? "Enabled" : "Disabled"} />
@@ -342,7 +337,7 @@ function DuckDnsCard() {
             />
             Run dynamic DNS updates
           </label>
-          <div className="flex items-center justify-end gap-2 pt-1">
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 8, paddingTop: 4 }}>
             {editing && (
               <button
                 onClick={() => {
@@ -350,16 +345,13 @@ function DuckDnsCard() {
                   setErr(null);
                   setToken("");
                 }}
-                className="type-subheadline text-accent hover:text-accent-hover px-3 py-2 transition-colors"
+                className="btn ghost"
+                type="button"
               >
                 Cancel
               </button>
             )}
-            <button
-              onClick={handleSave}
-              disabled={saving}
-              className="dp-btn-primary type-subheadline !min-h-[36px] !py-1.5"
-            >
+            <button onClick={handleSave} disabled={saving} className="btn primary" type="button">
               {saving ? (
                 <>
                   <Loader2 size={14} className="animate-spin" />
@@ -387,8 +379,12 @@ function DuckDnsCard() {
 function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <p className="type-caption-2 text-label-quaternary uppercase tracking-wider">{label}</p>
-      <p className="type-callout text-label-primary font-medium truncate">{value}</p>
+      <p style={{ fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--text-muted)" }}>{label}</p>
+      <p
+        style={{ fontSize: 15, fontWeight: 600, color: "var(--text)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+      >
+        {value}
+      </p>
     </div>
   );
 }
@@ -408,45 +404,29 @@ function PeerRow({
   // the WARP-220 pattern applied site-wide in WARP-292.
   const label = peer.deviceLabel?.trim() ? peer.deviceLabel : peer.id;
   return (
-    <div className="dp-row group">
-      <div className="flex items-center gap-3 flex-1 min-w-0">
-        <div
-          className={`w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 ${
-            isRevoked
-              ? "bg-label-quaternary/10 text-label-quaternary"
-              : "bg-accent/15 text-accent"
-          }`}
-        >
-          <Smartphone size={14} />
-        </div>
-        <div className="min-w-0 flex-1">
-          <p className="type-callout text-label-primary truncate">
-            {peer.deviceLabel}
-            {isRevoked && (
-              <span className="ml-2 type-caption-1 text-label-quaternary">
-                · revoked
-              </span>
-            )}
-          </p>
-          <p className="type-caption-1 text-label-tertiary truncate">
-            {peer.assignedIp} · {peer.userId}
-          </p>
-        </div>
-      </div>
+    <div className="lrow">
+      <span className={"ri" + (isRevoked ? "" : " brand")}>
+        <Smartphone size={16} />
+      </span>
+      <span className="rt">
+        <span className="nm">
+          {peer.deviceLabel}
+          {isRevoked && <span style={{ marginLeft: 8, fontSize: 12, color: "var(--text-faint)" }}>· revoked</span>}
+        </span>
+        <span className="sub mono">
+          {peer.assignedIp} · {peer.userId}
+        </span>
+      </span>
       {!isRevoked && isOwner && (
-        // Always rendered (no opacity-gate) so touch + keyboard users can
-        // reach the action. p-2.5 → 14 px icon + 20 px padding = 34 px
-        // hit-target, clearing the ≥ 32 px ui-ux floor.
-        <div className="flex items-center gap-0.5">
-          <button
-            onClick={onRevoke}
-            aria-label={`Revoke device ${label}`}
-            className="p-2.5 rounded-sm text-label-quaternary hover:text-system-red hover:bg-system-red/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors"
-            title="Revoke"
-          >
-            <Trash2 size={14} />
-          </button>
-        </div>
+        <button
+          onClick={onRevoke}
+          aria-label={`Revoke device ${label}`}
+          className="k-iconbtn danger"
+          title="Revoke"
+          type="button"
+        >
+          <Trash2 size={14} />
+        </button>
       )}
     </div>
   );
@@ -465,9 +445,11 @@ function PeerRow({
 function AddDeviceDialog({
   onClose,
   onAdded,
+  publicFqdn,
 }: {
   onClose: () => void;
   onAdded: () => void;
+  publicFqdn: string | null;
 }) {
   const [step, setStep] = useState<"form" | "ready">("form");
   const [deviceLabel, setDeviceLabel] = useState("");
@@ -492,7 +474,7 @@ function AddDeviceDialog({
       setStep("ready");
       onAdded();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to add device");
+      setError(translateError(err, "vpn"));
     } finally {
       setSubmitting(false);
     }
@@ -602,8 +584,38 @@ function AddDeviceDialog({
                 Open the app, tap <strong>+</strong>, choose <strong>Create from QR code</strong>,
                 and scan the code below.
               </li>
-              <li>Activate the new tunnel — done.</li>
+              <li>
+                Activate the tunnel, then open{" "}
+                <strong className="font-mono break-all">
+                  {/* ADR-023: prefer the publicly-trusted per-device FQDN — the
+                      one address that works at home AND over the tunnel with a
+                      green padlock. Falls back to the box-side gateway IP from
+                      the conf's DNS line (parsed + IPv4-validated in
+                      lib/wireguard.ts) until the box learns its FQDN from HQ. */}
+                  {dashboardUrlFromConf(created.conf, publicFqdn ?? undefined)}
+                </strong>{" "}
+                in the browser — that&rsquo;s your Droplet from anywhere.
+              </li>
             </ol>
+            <p className="type-caption-1 text-label-tertiary">
+              {publicFqdn ? (
+                <>
+                  This is the same address you use at home — it works on your
+                  Wi-Fi <em>and</em> over the tunnel, with a secure padlock and
+                  nothing to install. (On this Droplet&rsquo;s own Wi-Fi the
+                  tunnel can&rsquo;t loop back, and you don&rsquo;t need it
+                  there.)
+                </>
+              ) : (
+                <>
+                  Test it away from home (cellular works) — on this
+                  Droplet&rsquo;s own Wi-Fi the tunnel can&rsquo;t loop back, and
+                  you don&rsquo;t need it there. Names like{" "}
+                  <span className="font-mono">droplet.local</span> only work at
+                  home, not over the tunnel.
+                </>
+              )}
+            </p>
 
             <div className="flex justify-center">
               <div className="p-4 bg-white rounded-lg">

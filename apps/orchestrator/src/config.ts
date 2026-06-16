@@ -1,10 +1,48 @@
-import * as path from "node:path";
 import { z } from "zod";
 
-const defaultMatterStorage =
-  process.env.NODE_ENV === "production"
-    ? "/data/matter-storage"
-    : path.resolve(".data/matter-storage");
+// WARP-580 — production JWT-secret strength guard. A production boot must
+// reject a secret that is too short OR is one of the shipped dev placeholders
+// (a copy-paste from .env.example is the realistic foot-gun). setup.sh mints a
+// 64-byte hex value, so a real deployment clears 32 chars with room to spare.
+const JWT_SECRET_MIN_LENGTH = 32;
+const KNOWN_DEV_JWT_SECRETS: readonly string[] = [
+  "dev-jwt-secret-do-not-use-in-production",
+  "changeme",
+  "secret",
+  "your-secret-here",
+];
+
+/** PURE — true when `s` is unfit for production use. Exported for tests. */
+export function isWeakJwtSecret(s: string): boolean {
+  return s.length < JWT_SECRET_MIN_LENGTH || KNOWN_DEV_JWT_SECRETS.includes(s);
+}
+
+/**
+ * WARP-580 — resolve the EFFECTIVE auth posture (fail-closed).
+ *
+ * Auth is on unless an operator EXPLICITLY opts out in a non-production
+ * environment. We read the LITERAL env string here rather than zod's coerced
+ * boolean: `z.coerce.boolean()` runs JS `Boolean(...)`, so the string "false"
+ * (non-empty) coerces to TRUE — it cannot represent an explicit opt-out. The
+ * opt-out is therefore an explicit falsey token ("false"/"0"/"no"/"off",
+ * case-insensitive); anything else (including an absent var) stays ON. In
+ * production we force-ON regardless of the var, so the middleware's
+ * owner-injection-when-disabled branch can never fire on a shipped box even if
+ * `.env` carries a stale `AUTH_ENABLED=false`.
+ */
+const FALSEY_ENV_TOKENS: ReadonlySet<string> = new Set(["false", "0", "no", "off"]);
+export function resolveAuthEnabled(
+  rawAuthEnv: string | undefined,
+  nodeEnv: string,
+): boolean {
+  // Production: fail-closed — auth is always on.
+  if (nodeEnv === "production") return true;
+  // Non-production: honour an EXPLICIT falsey opt-out only. An unset var stays ON.
+  if (rawAuthEnv !== undefined && FALSEY_ENV_TOKENS.has(rawAuthEnv.trim().toLowerCase())) {
+    return false;
+  }
+  return true;
+}
 
 const envSchema = z.object({
   DATABASE_URL: z.string().default("postgresql://droplet:droplet@localhost:5432/droplet"),
@@ -15,9 +53,32 @@ const envSchema = z.object({
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
   MAX_UPLOAD_SIZE_MB: z.coerce.number().default(100),
 
+  // --- CORS (WARP-562) ---
+  // Comma-separated allowlist of browser Origins permitted to make
+  // credentialed cross-origin requests against the orchestrator API. We keep
+  // `credentials: true` (cookie-based `droplet_session` auth), so the allowlist
+  // MUST be exact-match — never `origin: true`, which reflects any Origin and
+  // hands `Access-Control-Allow-Origin: <attacker>` +
+  // `Access-Control-Allow-Credentials: true` to any site the owner visits.
+  //
+  // Parsed into `config.corsAllowedOrigins` below. When unset it defaults to
+  // the appliance's LAN dashboard origin (https://droplet-ai.local — already
+  // covered by the TLS cert SANs, see DROPLET_PM_WEB_URL and
+  // scripts/lib/secrets.sh) plus http://localhost:3000 in non-production for
+  // the Next.js dev server. A `*` value is rejected at startup (see the
+  // wildcard guard after parse), mirroring services/ai-gateway/main.py.
+  CORS_ALLOWED_ORIGINS: z.string().default(""),
+
   // --- Nextcloud (single file storage backend) ---
   NEXTCLOUD_URL: z.string().default("http://localhost:8080"),
-  AUTH_ENABLED: z.coerce.boolean().default(false),
+  // WARP-580 — auth is FAIL-CLOSED. The default is `true`; the only way to run
+  // with auth off is an EXPLICIT `AUTH_ENABLED=false` AND a non-production
+  // NODE_ENV (see resolveAuthEnabled below). A bare/missing var, or `=false`
+  // in production, both resolve to auth ENABLED. The middleware's
+  // owner-injection-when-disabled path (middleware/auth.ts) therefore can
+  // never fire in production. Parsed here as the raw operator INTENT; the
+  // effective value is `config.AUTH_ENABLED` after resolveAuthEnabled.
+  AUTH_ENABLED: z.coerce.boolean().default(true),
 
   // --- Device pairing ---
   // 32-byte base64 key used to encrypt per-device Nextcloud app passwords
@@ -26,39 +87,90 @@ const envSchema = z.object({
   // closed via encryption.service.ts when the key is missing.
   DEVICE_SECRET_KEY: z.string().default(""),
 
-  // --- Matter (native controller) ---
+  // --- Matter (host-network sidecar client, WARP-850) ---
   //
-  // DO NOT ADD NEW `MATTER_*` ENV VARS HERE.
+  // DO NOT ADD NEW `MATTER_*` ENV VARS — ANYWHERE IN THE STACK.
   //
   // matter.js scans the entire process.env for `MATTER_*` at startup
   // (NodeJsEnvironment.js → vars.addUnixEnvStyle(process.env)) and folds
   // each one into its internal VariableService under a dot-namespaced
-  // key. For example, `MATTER_CONTROLLER_NAME=Droplet` becomes the var
-  // `controller.name`. When matter.js later activates an endpoint's
-  // behavior whose id matches that namespace — e.g. the root node's
-  // internal `controller` behavior — it merges those vars into the
-  // behavior's defaults and casts them against the behavior's schema.
-  // Any key the schema doesn't declare (like `name`) throws
-  //   UnsupportedCastError: Property "name" is unsupported
-  // and the whole controller init fails.
+  // key (`MATTER_CONTROLLER_NAME` → var `controller.name`), which can
+  // collide with root-node behavior schemas and crash controller init
+  // with UnsupportedCastError. matter.js no longer runs in THIS process
+  // — it moved to services/matter-controller (WARP-850) — but the rule
+  // still applies there, and scripts/test-security.sh enforces it
+  // repo-wide. `MATTER_STORAGE_PATH` is the single allow-listed
+  // survivor and now lives in the sidecar's env (it deliberately folds
+  // to matter.js's `storage.path`, pointing the fabric storage at the
+  // matter-data volume).
   //
-  // Use a non-`MATTER_` prefix for anything we want to configure
-  // ourselves. `MATTER_STORAGE_PATH` below predates this rule and
-  // currently does not collide (no root-node behavior has id
-  // `storage`), so leaving it in place to avoid churning existing
-  // .env files — but prefer `DROPLET_MATTER_*` for new additions.
-  MATTER_STORAGE_PATH: z.string().default(defaultMatterStorage),
-  DROPLET_MATTER_CONTROLLER_NAME: z.string().default("Droplet"),
+  // The orchestrator is now an HTTP client of the sidecar
+  // (services/matter.service.ts). Same host-gateway rationale as
+  // ROUTING_SERVICE_URL: the sidecar runs with `network_mode: host`
+  // (raw HCI for BLE + native LAN mDNS), so the bridged orchestrator
+  // reaches it via host.docker.internal on the host-service port
+  // ladder (routing 8080, switch 8081, display 8082 → matter 8083).
+  DROPLET_MATTER_SERVICE_URL: z
+    .string()
+    .default("http://host.docker.internal:8083"),
+  // Shared bearer presented in the X-Droplet-Auth header (device-bridge
+  // precedent). Generated by scripts/setup.sh into .env; the sidecar
+  // fails closed (401s everything) when its copy is empty. Rotate both
+  // sides in lockstep — orchestrator + matter-controller read the same
+  // .env key via compose.
+  DROPLET_MATTER_SERVICE_TOKEN: z.string().default(""),
+
+  // --- WARP-505/506/507/511 — embedded Plane PM stack (ADR-010, spec WARP-498) ---
+  // All vars use DROPLET_PM_* prefix per architecture-guard rule 11.
+  // Defaults work on a brand-new install OR fail loud (rule 14).
+  DROPLET_PM_API_URL: z.string().url().default("http://pm-api:8000"),
+  // Plane's dedicated TLS origin (spec WARP-498 OQ2 amendment): the vanilla
+  // frontend is built with basePath:"" so it must own an origin root — the
+  // gateway serves it on :8443, not under /pm/.
+  DROPLET_PM_WEB_URL: z.string().url().default("https://droplet-ai.local:8443"),
+  // WARP-867: NOT a Plane API key — Plane CE only authenticates its own
+  // server-generated service tokens, which pm-bootstrap.service mints at
+  // runtime and serves via GET /api/pm/service-token. This secret is the
+  // seed for the bootstrap admin identity (the Plane admin password is
+  // HMAC-derived from it — see planeAdminPassword()).
+  DROPLET_PM_ADMIN_TOKEN: z.string().default(""),
+  // WARP-860 — identity of the auto-bootstrapped Plane instance admin.
+  // Plane CE has no OIDC and no headless setup, so pm-bootstrap.service.ts
+  // completes the god-mode instance setup programmatically with this email
+  // and a password derived from DROPLET_PM_ADMIN_TOKEN. The owner signs in
+  // to the embedded Plane with these credentials (surfaced once in the
+  // setup wizard's PM step).
+  DROPLET_PM_ADMIN_EMAIL: z.string().email().default("admin@droplet.local"),
+  // HMAC signing key for Plane → orchestrator webhooks (WARP-511).
+  // Empty default = webhook receiver fail-CLOSED (every payload 401s) per
+  // engineering-handbook 04-coding-standards/security-rules.md §1.
+  DROPLET_PM_WEBHOOK_SECRET: z.string().default(""),
+  // WARP-505 OIDC IdP (spec WARP-498 OQ6). The orchestrator runs a minimal
+  // OIDC provider that Plane points at as its relying-party IdP. ID tokens
+  // are signed RS256 (HMAC won't work — Plane verifies via JWKS). setup.sh
+  // generates a 2048-bit RSA keypair on first run and pins both halves
+  // below. Empty defaults make the OIDC endpoints 500 with a clear error
+  // (signIdToken throws) until setup.sh has populated .env.
+  DROPLET_PM_OIDC_PRIVATE_KEY_PEM: z.string().default(""),
+  DROPLET_PM_OIDC_KID: z.string().default(""),
+  DROPLET_PM_OIDC_CLIENT_ID: z.string().default("plane"),
+  DROPLET_PM_OIDC_CLIENT_SECRET: z.string().default(""),
 
   // --- JWT ---
   // In production this must be set — setup.sh generates a 64-byte random hex value.
   // The default is intentionally weak so tests work without env setup.
+  //
+  // WARP-580 — production secret-strength guard. In production the secret must
+  // be at least JWT_SECRET_MIN_LENGTH chars AND must not match any known dev
+  // placeholder. Outside production the weak default is allowed so tests + dev
+  // laptops run without env setup. The refine runs at parse time (config load),
+  // so a misconfigured production boot dies loud before serving a request.
   JWT_SECRET: z
     .string()
     .default("dev-jwt-secret-do-not-use-in-production")
     .refine(
-      (s) => process.env.NODE_ENV !== "production" || s !== "dev-jwt-secret-do-not-use-in-production",
-      "JWT_SECRET must be set to a strong random value in production",
+      (s) => process.env.NODE_ENV !== "production" || !isWeakJwtSecret(s),
+      `JWT_SECRET must be a strong random value in production (at least ${JWT_SECRET_MIN_LENGTH} characters and not a dev placeholder)`,
     ),
 
   // --- OAuth2 ---
@@ -66,13 +178,68 @@ const envSchema = z.object({
   OAUTH2_CLIENT_ID: z.string().default(""),
   OAUTH2_CLIENT_SECRET: z.string().default(""),
 
+  // --- SSO (external-IdP OIDC: Google Workspace + Microsoft Entra) ---
+  // ADR-013 (PR #378). The orchestrator acts as an OIDC RELYING PARTY (the
+  // mirror of the DROPLET_PM_OIDC_* block above, where it is the IdP). One
+  // group of four vars per provider; ALL FOUR must be set for that provider's
+  // SSO button to go live (getOidcProviderConfig fails closed otherwise —
+  // half-configured providers render disabled). Empty defaults keep tests +
+  // un-configured appliances from minting half-built authorize URLs.
+  //
+  // The CLIENT_SECRET values are real provider secrets — they live ONLY in
+  // `.env` (populated by the operator / setup.sh; never tracked) exactly like
+  // OAUTH2_CLIENT_SECRET and DROPLET_PM_OIDC_CLIENT_SECRET. They are read here
+  // and never re-emitted, never logged.
+  //
+  // ISSUER is the provider's discovery base; openid-client appends
+  // /.well-known/openid-configuration and pulls the JWKS from it (ID-token
+  // signature validation). No host is hardcoded in code — the issuer is the
+  // single source.
+  //   - Google:  https://accounts.google.com
+  //   - Entra:   https://login.microsoftonline.com/<tenant>/v2.0
+  //   - Okta:    https://<org>.okta.com/oauth2/<authServerId> (or the org
+  //              root issuer when no custom authorization server is used)
+  // REDIRECT_URI must exactly match the redirect registered at the IdP and the
+  // /api/sso/oidc/callback route this orchestrator serves.
+  DROPLET_SSO_GOOGLE_ISSUER: z.string().default(""),
+  DROPLET_SSO_GOOGLE_CLIENT_ID: z.string().default(""),
+  DROPLET_SSO_GOOGLE_CLIENT_SECRET: z.string().default(""),
+  DROPLET_SSO_GOOGLE_REDIRECT_URI: z.string().default(""),
+  DROPLET_SSO_ENTRA_ISSUER: z.string().default(""),
+  DROPLET_SSO_ENTRA_CLIENT_ID: z.string().default(""),
+  DROPLET_SSO_ENTRA_CLIENT_SECRET: z.string().default(""),
+  DROPLET_SSO_ENTRA_REDIRECT_URI: z.string().default(""),
+  // WARP — Okta SSO. Okta is a plain OIDC provider; the orchestrator reuses
+  // the same authorize/callback RP path as Google/Entra (sso-oidc.service.ts
+  // / routes/sso.ts). All four must be set for the Okta button to go live.
+  DROPLET_SSO_OKTA_ISSUER: z.string().default(""),
+  DROPLET_SSO_OKTA_CLIENT_ID: z.string().default(""),
+  DROPLET_SSO_OKTA_CLIENT_SECRET: z.string().default(""),
+  DROPLET_SSO_OKTA_REDIRECT_URI: z.string().default(""),
+
+  // --- SCIM 2.0 directory provisioning (Okta pushes users/groups here) ---
+  // WARP — Okta's SCIM client authenticates to /scim/v2/* with a DEDICATED
+  // provisioning bearer token (NOT a user session, NOT one of the
+  // SERVICE_TOKEN_* principals — those carry the `service` ROLE for inbound
+  // LLM/tool calls; SCIM provisioning is a separate trust boundary with its
+  // own secret and its own middleware). This is the SCIM bearer; it is
+  // validated (constant-time) on EVERY SCIM request and NEVER logged.
+  //
+  // EMPTY DEFAULT = FAIL CLOSED: with no token configured, every /scim/v2/*
+  // request 401s (scim-auth middleware refuses an unset secret), so an
+  // appliance that hasn't been wired for directory sync never accepts an
+  // unauthenticated — or empty-bearer — provisioning call. Same posture as
+  // DROPLET_PM_WEBHOOK_SECRET. Lives ONLY in .env (operator / setup.sh
+  // generates it); never tracked, never re-emitted.
+  DROPLET_SCIM_BEARER_TOKEN: z.string().default(""),
+
   // --- gRPC ---
   AI_GATEWAY_GRPC_URL: z.string().default("localhost:50051"),
 
   // --- OpenWrt Routing ---
   // Default uses `host.docker.internal` so the bridged orchestrator can
   // reach the routing service, which runs with `network_mode: host` (bound
-  // to the Jetson host's :8080). `localhost` would be the orchestrator
+  // to the appliance host's :8080). `localhost` would be the orchestrator
   // container itself and never resolve to :8080. The orchestrator compose
   // service wires `host.docker.internal` via `extra_hosts: host-gateway`.
   ROUTING_SERVICE_URL: z.string().default("http://host.docker.internal:8080"),
@@ -105,6 +272,26 @@ const envSchema = z.object({
   WIREGUARD_LAN_CIDR: z.string().default("192.168.50.0/24"),
   WIREGUARD_DNS: z.string().default("192.168.50.1"),
 
+  // --- Public-CA per-device TLS (ADR-023) ---
+  // DROPLET_PUBLIC_FQDN — the opaque per-device subdomain
+  //   `d-<hmac>.devices.warp-lab.ai`. The box CANNOT compute the HQ-keyed HMAC,
+  //   so it learns this from the HQ challenge response and persists it back to
+  //   .env (scripts/lib/secrets.sh). Empty until first HQ contact — the
+  //   tls-issuance cron is a no-op while empty and the bootstrap self-signed
+  //   cert keeps the box serving TLS. When set it is the TOP-priority canonical
+  //   origin (trusted-origin.ts) and the one address that works at home AND
+  //   over the WireGuard tunnel.
+  DROPLET_PUBLIC_FQDN: z.string().default(""),
+  // HQ_ISSUANCE_URL — base URL of the fleet HQ issuance API
+  //   (hq.warp-lab.com). Plain outbound HTTPS; does NOT require the fleet
+  //   WireGuard tunnel. Empty disables live issuance (the cron skips), which is
+  //   the correct posture for dev laptops + CI.
+  HQ_ISSUANCE_URL: z.string().default(""),
+  // DROPLET_DEVICE_ID — the device's HQ registry id. Mirrors the value the
+  //   device-identity sidecar reads (docker-compose.yml). Defaults to the
+  //   hostname-derived `droplet` placeholder (matches scripts/lib/secrets.sh).
+  DROPLET_DEVICE_ID: z.string().default("droplet"),
+
   // --- Coverage extender APs (WARP-446) ---
   // Per ADR-005. `DROPLET_AP_*` prefix is mandatory (see the long
   // MATTER_* warning above for why — same risk).
@@ -126,6 +313,38 @@ const envSchema = z.object({
   DROPLET_AP_DAWN_ENABLED: z.coerce.boolean().default(true),
   DROPLET_AP_DEFAULT_TXPOWER: z.coerce.number().default(20),
 
+  // WARP-586: retention window (days) for the append-only audit/log tables
+  // ActivityRow, CommandAuditLog, NotificationLog. The daily 03:00 cron
+  // (index.ts) deletes rows older than this. 90 days balances "enough
+  // history for the dashboard's activity feed + an incident look-back"
+  // against unbounded table growth. Set 0 to disable the purge entirely —
+  // the safe "keep forever" stance, NOT a sentinel: 0 parses here and
+  // audit-retention-purge.service.ts treats <= 0 as "skip" (defense in
+  // depth). A negative window is nonsensical input, so the schema rejects
+  // it at startup (fail fast) rather than silently treating it as disable;
+  // .int() rejects sub-day floats and .finite() rejects Infinity.
+  DROPLET_AUDIT_RETENTION_DAYS: z.coerce.number().int().min(0).finite().default(90),
+
+  // WARP-808: which deployment shape broadcasts the home Wi-Fi AP. This is the
+  // SAME knob the device-bridge reads (services/oled-display/device-bridge.py)
+  // and that single-box.sh's configure_single_box_env upserts into .env.
+  //   uci      — multi-box: a router-host OpenWrt holds the AP in UCI. Home
+  //              Wi-Fi SSID/PSK writes go through the routing service (UCI/SSH),
+  //              exactly as before. This is the back-compat default.
+  //   hostapd  — single-box: the host runs a raw hostapd AP (no UCI), so a UCI
+  //              write hits a nonexistent section (ubus NOT_FOUND → 500).
+  //              network.service routes the SSID/PSK write through the
+  //              device-bridge's POST /openwrt/wifi/hostapd instead.
+  //   auto     — reserved for the bridge's auto-detect; the orchestrator treats
+  //              anything other than "hostapd" as the UCI path (a box that wants
+  //              the hostapd write path sets DROPLET_AP_MODE=hostapd explicitly,
+  //              which single-box.sh does).
+  // Defaulting to `uci` keeps every multi-box install behaving exactly as before.
+  DROPLET_AP_MODE: z.enum(["uci", "hostapd", "auto"]).default("uci"),
+
+  // --- File indexer (WARP-287 re-index + WARP-598 health probe) ---
+  FILE_INDEXER_URL: z.string().default("http://file-indexer:8090"),
+
   // --- Frigate NVR ---
   FRIGATE_URL: z.string().default("http://localhost:5000"),
   CAMERA_DISCOVERY_URL: z.string().default("http://localhost:8085"),
@@ -138,12 +357,49 @@ const envSchema = z.object({
 
   // --- OLED / TFT Display ---
   // Same rationale again: the display service runs with `network_mode: host`
-  // on the Jetson (uvicorn on :8082). `localhost` inside the orchestrator
+  // on the appliance (uvicorn on :8082). `localhost` inside the orchestrator
   // container would never resolve to it, so default to the host gateway.
   DISPLAY_SERVICE_URL: z.string().default("http://host.docker.internal:8082"),
 
+  // --- Device-bridge (host-side wifi/drives/QR API) ---
+  // The device-bridge (services/oled-display/device-bridge.py) runs on the
+  // host (systemd, port 9090) and serves the auto-mounted drive snapshot
+  // (storage.ts) and the Wi-Fi/pairing QR (screen-qr.service.ts). Same
+  // host-gateway rationale as the URLs above: the orchestrator is on the
+  // bridge network, so `localhost`/`172.17.0.1` (docker0 — DOWN on the
+  // single-box, whose gateway is 172.18.0.1) never reach the host bridge.
+  // `host.docker.internal` resolves via the orchestrator's
+  // `extra_hosts: host-gateway` mapping and IS reachable — but ONLY once the
+  // bridge binds an interface the gateway can hit (BRIDGE_BIND=0.0.0.0 in
+  // droplet-device-bridge.service; a 127.0.0.1 bind refuses the gateway
+  // connection). This single key replaces the two divergent hardcoded
+  // defaults storage.ts (BRIDGE_URL → 172.17.0.1) and screen-qr
+  // (DEVICE_BRIDGE_URL) used to carry. `BRIDGE_URL` is honored as a
+  // backward-compatible alias for any deployment that already set it.
+  DEVICE_BRIDGE_URL: z.string().default("http://host.docker.internal:9090"),
+
   // --- Service-to-service auth (shared secret for routing/switch/discovery services) ---
   SERVICE_SECRET: z.string().default(""),
+
+  // SERVICE_TOKEN_SWITCH — dedicated outbound bearer for switch.client.ts →
+  // switch service, replacing the legacy shared SERVICE_SECRET on that path
+  // (same per-service-token shape as SERVICE_TOKEN_DISPLAY / WARP-165: the
+  // switch container's SERVICE_SECRET used to be wired to DEVICE_SECRET_KEY,
+  // the FIPS-sealed master encryption key, which this keeps off the wire).
+  // Compose wires both ends to ${SERVICE_TOKEN_SWITCH}; switch.client.ts
+  // falls back to SERVICE_SECRET so installs that pinned the legacy shared
+  // secret keep working until setup.sh re-mints.
+  SERVICE_TOKEN_SWITCH: z.string().default(""),
+
+  // SERVICE_TOKEN_AI_GATEWAY — WARP-560. Dedicated outbound bearer for
+  // ai-gateway.client.ts → ai-gateway, which previously had NO inbound auth
+  // (/ai/chat, /ai/sessions/*, /ai/keys/* were all reachable by anything that
+  // could open the socket). The ai-gateway's ServiceAuthMiddleware now requires
+  // this Bearer on every /ai/* route (except /ai/health). Compose wires both
+  // ends to ${SERVICE_TOKEN_AI_GATEWAY}; ai-gateway.client.ts falls back to
+  // SERVICE_SECRET so installs whose .env predates this token keep working
+  // until setup.sh re-mints. Empty = unauthenticated (dev/CI default).
+  SERVICE_TOKEN_AI_GATEWAY: z.string().default(""),
 
   // --- Service-principal bearer tokens (inbound) ---
   // Per shared_brain `agentic-workflows.md` + `LLM_AGENT.md`: services that
@@ -233,5 +489,88 @@ const envSchema = z.object({
   JIRA_API_TOKEN: z.string().default(""),
 });
 
-export const config = envSchema.parse(process.env);
-export type Config = z.infer<typeof envSchema>;
+// Backward-compat: storage.ts historically read `BRIDGE_URL`; screen-qr read
+// `DEVICE_BRIDGE_URL`. We standardize on `DEVICE_BRIDGE_URL` (config key
+// above) but honor a legacy `BRIDGE_URL` when the canonical key is unset, so
+// an existing deployment that set `BRIDGE_URL` in .env isn't silently
+// repointed at the default.
+// Treat an empty/whitespace value as unset so a templated `.env` with a bare
+// `DEVICE_BRIDGE_URL=` (or `BRIDGE_URL=`) line falls through to the alias and
+// then the schema default, rather than parsing as an empty URL.
+const firstNonEmpty = (...vals: (string | undefined)[]): string | undefined =>
+  vals.find((v) => v !== undefined && v.trim() !== "");
+const envForParse: NodeJS.ProcessEnv = {
+  ...process.env,
+  DEVICE_BRIDGE_URL: firstNonEmpty(
+    process.env.DEVICE_BRIDGE_URL,
+    process.env.BRIDGE_URL,
+  ),
+};
+
+const parsed = envSchema.parse(envForParse);
+
+// --- WARP-562: resolve the CORS origin allowlist ---
+// Comma-separated → trimmed, empties dropped. When the operator hasn't set
+// CORS_ALLOWED_ORIGINS, fall back to the appliance's own LAN dashboard origin
+// (covered by the TLS cert SANs) plus the dev dashboard origin outside prod.
+function resolveCorsAllowedOrigins(
+  raw: string,
+  nodeEnv: string,
+  publicFqdn: string,
+): string[] {
+  const explicit = raw
+    .split(",")
+    .map((o) => o.trim())
+    .filter((o) => o.length > 0);
+
+  const origins =
+    explicit.length > 0
+      ? explicit
+      : [
+          "https://droplet-ai.local",
+          // Dev dashboard origin: the Next.js dev server runs on :3001
+          // (`apps/web-dashboard/package.json` → `next dev -p 3001`). :3000 is
+          // the orchestrator's own PORT, so it would grant nothing useful here.
+          ...(nodeEnv !== "production" ? ["http://localhost:3001"] : []),
+        ];
+
+  // ADR-023 (C4): the publicly-trusted per-device FQDN is a first-class
+  // browser origin — the dashboard is served on it at home AND over the
+  // tunnel. Add it whether the operator set an explicit allowlist or fell
+  // through to the defaults, deduped, so credentialed CORS never rejects the
+  // canonical address. Empty until first HQ contact.
+  const fqdn = publicFqdn.trim();
+  if (fqdn) {
+    const fqdnOrigin = `https://${fqdn}`;
+    if (!origins.includes(fqdnOrigin)) origins.push(fqdnOrigin);
+  }
+
+  // Fail-fast on wildcard + credentials, mirroring ai-gateway's guard
+  // (services/ai-gateway/main.py:125-129). `credentials: true` is always on
+  // for the orchestrator, so a `*` allowlist is never acceptable: the browser
+  // would receive `Access-Control-Allow-Origin: *` with credentials, or — with
+  // the `cors` package — silently reflect every origin. Die loud instead.
+  if (origins.includes("*")) {
+    throw new Error(
+      "CORS_ALLOWED_ORIGINS contains a wildcard ('*'), which is not allowed " +
+        "with credentialed CORS. Set an explicit, comma-separated origin list " +
+        "(e.g. https://droplet-ai.local).",
+    );
+  }
+
+  return origins;
+}
+
+export const config = {
+  ...parsed,
+  // WARP-580 — `AUTH_ENABLED` on the exported config is the EFFECTIVE,
+  // fail-closed posture (resolved from the literal env string). Production
+  // always resolves to true; non-production honours an explicit opt-out only.
+  AUTH_ENABLED: resolveAuthEnabled(process.env.AUTH_ENABLED, parsed.NODE_ENV),
+  corsAllowedOrigins: resolveCorsAllowedOrigins(
+    parsed.CORS_ALLOWED_ORIGINS,
+    parsed.NODE_ENV,
+    parsed.DROPLET_PUBLIC_FQDN,
+  ),
+};
+export type Config = typeof config;

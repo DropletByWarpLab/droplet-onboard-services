@@ -32,8 +32,13 @@ from droplet_openwrt_sdk import (
     DropletRouter,
     ConnectionLost,
     UbusError,
+    ScanUnsupportedError,
+    UBUS_STATUS_NOT_FOUND,
+    UBUS_STATUS_NO_DATA,
+    _ubus_object_absent,
     get_network_summary,
     describe_network_for_llm,
+    detect_deployment_topology,
 )
 from schemas import (
     HealthResponse,
@@ -47,6 +52,8 @@ from schemas import (
     BlockDeviceRequest,
     UnblockDeviceRequest,
     PortForwardRequest,
+    PhoneHomeDeviceRequest,
+    PhoneHomeCamerasRequest,
     ApplyConfigRequest,
     CreateVlanRequest,
     CameraSubnetSetupRequest,
@@ -128,24 +135,58 @@ if not OPENWRT_PASSWORD:
     )
 
 # Shared bearer for orchestrator / camera-discovery → routing (WARP-36).
-# When unset the service runs open — intended for local dev only; production
-# bring-up via scripts/setup.sh always generates a token.
+# Production bring-up via scripts/setup.sh always generates a token. When the
+# token is unset the service FAILS CLOSED — every non-/health route returns 503
+# — because routing binds 0.0.0.0:8080 under network_mode: host, so a missing or
+# failed secret injection at deploy time would otherwise expose every mutation
+# endpoint (VPN, firewall, SSID) to any host on the LAN. Set ROUTING_ALLOW_NO_AUTH=1
+# to opt back into open mode for local dev only.
 ROUTING_SERVICE_TOKEN = os.environ.get("ROUTING_SERVICE_TOKEN", "").strip()
+ROUTING_ALLOW_NO_AUTH = os.environ.get("ROUTING_ALLOW_NO_AUTH", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 if not ROUTING_SERVICE_TOKEN:
-    logger.warning(
-        "ROUTING_SERVICE_TOKEN is empty — auth disabled. Set it in production."
-    )
+    if ROUTING_ALLOW_NO_AUTH:
+        logger.warning(
+            "ROUTING_SERVICE_TOKEN is empty and ROUTING_ALLOW_NO_AUTH is set — "
+            "auth disabled. Local dev only; NEVER set this in production."
+        )
+    else:
+        logger.error(
+            "ROUTING_SERVICE_TOKEN is empty — failing closed (503) on all "
+            "non-/health routes. Set the token, or ROUTING_ALLOW_NO_AUTH=1 for "
+            "local dev."
+        )
 
 # Paths exempt from bearer auth (used by Docker healthcheck / orchestrator health roll-up).
 AUTH_EXEMPT_PATHS = frozenset({"/health"})
 
 
 def require_bearer(request: Request) -> None:
-    """Reject requests without a matching `Authorization: Bearer <token>` header."""
-    if not ROUTING_SERVICE_TOKEN:
-        return
+    """Reject requests without a matching `Authorization: Bearer <token>` header.
+
+    Fails CLOSED when no token is configured: an unset `ROUTING_SERVICE_TOKEN`
+    (e.g. a failed secret injection at deploy) yields 503 on every non-/health
+    route rather than silently opening the host-network service. Opt into the
+    old open behaviour for local dev with `ROUTING_ALLOW_NO_AUTH=1`.
+    """
+    # /health stays reachable without a token (Docker healthcheck / health
+    # roll-up) regardless of how auth is configured.
     if request.url.path in AUTH_EXEMPT_PATHS:
         return
+    if not ROUTING_SERVICE_TOKEN:
+        if ROUTING_ALLOW_NO_AUTH:
+            return
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Routing auth is not configured (ROUTING_SERVICE_TOKEN unset). "
+                "Set the token, or ROUTING_ALLOW_NO_AUTH=1 for local dev."
+            ),
+        )
     header = request.headers.get("authorization", "")
     scheme, _, token = header.partition(" ")
     if scheme.lower() != "bearer" or not hmac.compare_digest(token.strip(), ROUTING_SERVICE_TOKEN):
@@ -201,6 +242,47 @@ async def lifespan(app: FastAPI):
         logger.warning("Could not connect to OpenWrt router: %s", exc)
         router_instance = None
 
+    # ADR-018: log the detected deployment-topology posture once on startup so
+    # operators can see it without polling /network/topology. Re-evaluation is
+    # event-driven — the /network/topology endpoint re-probes on every request
+    # (the request IS the event); there is deliberately NO busy loop / periodic
+    # tick here (rule 9), since the posture only needs a fresh read when the
+    # dashboard/orchestrator asks. Non-fatal: a probe failure must not stop the
+    # service from serving.
+    if router_instance is not None:
+        try:
+            topology = detect_deployment_topology(router_instance)
+            logger.info(
+                "deployment topology detected: posture=%s wan_present=%s "
+                "upstream_gateway=%s",
+                topology["posture"].value,
+                topology["evidence"]["wan_present"],
+                topology["evidence"]["upstream_gateway"],
+            )
+        except ConnectionLost as exc:
+            # Transient — the router dropped mid-probe. Benign at startup.
+            logger.warning("deployment-topology probe failed at startup: %s", exc)
+        except UbusError as exc:
+            # Mirror the SDK's degrade-on-absence contract (ADR-011, same
+            # discipline as get_all_interface_statuses / get_camera_subnet and
+            # the /network/topology endpoint): a missing ubus object
+            # (NOT_FOUND/NO_DATA, or the -1 "object not found" shape) just means
+            # this deployment lacks it — benign. Any OTHER code
+            # (PERMISSION_DENIED, INVALID_ARGUMENT, …) is a real misconfiguration
+            # and must NOT be silently downgraded to a transient-looking warning.
+            # This lifespan probe is deliberately non-fatal (a probe must not stop
+            # the service from serving), so a genuine fault is surfaced at ERROR
+            # rather than re-raised (which would crash startup).
+            if _ubus_object_absent(exc):
+                logger.warning("deployment-topology probe (object absent): %s", exc)
+            else:
+                logger.error(
+                    "deployment-topology probe hit a real ubus fault "
+                    "(code=%s) — check the OpenWrt ACL / config: %s",
+                    exc.code,
+                    exc,
+                )
+
     # WARP-470: start the 60 s WAN throughput sampler once we have a
     # real router connection. Skipped in mock mode (the mock doesn't
     # carry traffic counters worth sampling). Failure to start is
@@ -226,6 +308,18 @@ async def lifespan(app: FastAPI):
         except Exception as exc:  # noqa: BLE001 — non-fatal startup task
             logger.warning("off-LAN egress meter failed to start: %s", exc)
 
+    # WARP-468: start the 60 s DNS-block meter. Non-fatal — until the
+    # OpenWrt adblock/blocklist ubus method is pinned the meter logs
+    # once and emits zero samples (read_counters_via_ubus fail-soft).
+    dns_block_scheduler = None
+    if router_instance is not None:
+        try:
+            from dns_block_meter import start_dns_block_meter
+
+            dns_block_scheduler = start_dns_block_meter(router_instance)
+        except Exception as exc:  # noqa: BLE001 — non-fatal startup task
+            logger.warning("dns-block meter failed to start: %s", exc)
+
     yield
 
     if throughput_scheduler is not None:
@@ -239,6 +333,12 @@ async def lifespan(app: FastAPI):
             egress_meter_scheduler.shutdown(wait=False)
         except Exception as exc:  # noqa: BLE001
             logger.warning("off-LAN egress meter shutdown failed: %s", exc)
+
+    if dns_block_scheduler is not None:
+        try:
+            dns_block_scheduler.shutdown(wait=False)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("dns-block meter shutdown failed: %s", exc)
 
     if router_instance:
         router_instance.disconnect()
@@ -273,17 +373,19 @@ class OperationTrackingMiddleware(BaseHTTPMiddleware):
             operations.mark_rolled_back(op_id, f"handler raised: {exc.__class__.__name__}")
             raise
 
-        # 2xx = router accepted the change.
-        # 5xx = upstream failure, conservatively mark as rolled back so the
-        #       dashboard warns the user.
-        # 4xx = caller error (bad input, auth, etc.) — no router state change,
-        #       treat as applied so the dashboard doesn't scare the user.
+        # 2xx/3xx = router accepted the change.
+        # 5xx     = upstream failure, conservatively mark as rolled back so the
+        #           dashboard warns the user.
+        # 4xx     = caller error (bad input, auth, etc.) — the request was
+        #           refused before any router state change. Mark as `rejected`,
+        #           NOT `applied`: recording a 401/422 as an applied router
+        #           change masked auth/validation failures from operators.
         if 200 <= response.status_code < 400:
             operations.mark_applied(op_id)
         elif response.status_code >= 500:
             operations.mark_rolled_back(op_id, f"HTTP {response.status_code}")
         else:
-            operations.mark_applied(op_id)
+            operations.mark_rejected(op_id, f"HTTP {response.status_code}")
 
         response.headers["X-Operation-Id"] = op_id
         return response
@@ -308,6 +410,27 @@ async def generic_exception_handler(request, exc):
 # ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
+def _best_effort_topology() -> Optional[str]:
+    """Return the explicit deployment-topology posture string, or None on any
+    failure. WARP-826: `/health` carries the posture so the orchestrator can
+    derive `routerConnected` from real reachability and distinguish a LAN-only
+    single-box (WAN handled by the host → UNKNOWN) from an unreachable router.
+
+    Strictly best-effort: the topology probe must NEVER turn a reachable router
+    (board_info() already succeeded) into a failed /health. Any exception — a
+    transient ubus fault, a genuine error, anything — degrades to None, leaving
+    `connected` as the single source of truth for reachability.
+    """
+    if router_instance is None:
+        return None
+    try:
+        # `posture` is a DeploymentTopology(str, Enum); use `.value` so the wire
+        # value is the bare name ("UNKNOWN"), not "DeploymentTopology.UNKNOWN".
+        return detect_deployment_topology(router_instance)["posture"].value
+    except Exception:  # noqa: BLE001 — health must not 500 on a posture hiccup
+        return None
+
+
 @app.get("/health", response_model=HealthResponse)
 def health():
     if router_instance is None:
@@ -319,7 +442,13 @@ def health():
         )
     try:
         board = router_instance.system.board_info()
-        return HealthResponse(status="ok", connected=True, router_host=OPENWRT_HOST, board=board)
+        return HealthResponse(
+            status="ok",
+            connected=True,
+            router_host=OPENWRT_HOST,
+            board=board,
+            topology=_best_effort_topology(),
+        )
     except (ConnectionLost, UbusError) as exc:
         return HealthResponse(
             status="error",
@@ -371,6 +500,30 @@ def network_summary_text():
         handle_router_error(exc)
 
 
+@app.get("/network/topology")
+def network_topology():
+    """Report the explicit deployment-topology posture + the evidence behind it
+    (ADR-018 Decision 2).
+
+    Read-only: probes the WAN-facing interface for an upstream gateway by
+    reusing the SDK's `get_all_interface_statuses()` shape-detection — it never
+    mutates the router or the upstream network. Returns:
+
+        {"posture": "PRIMARY_ROUTER" | "DOWNSTREAM_ROUTER" | "UNKNOWN",
+         "evidence": {wan_interface, wan_present, wan_up, wan_device,
+                      upstream_gateway_present, upstream_gateway}}
+
+    The posture is an explicit enum value, never inferred from a null field
+    (rule 10). A genuine ubus fault while probing propagates as an error (so the
+    dashboard can tell "router unreachable / misconfigured" apart from a real
+    posture) rather than being flattened to UNKNOWN.
+    """
+    try:
+        return detect_deployment_topology(get_router())
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
 @app.get("/network/interfaces")
 def network_interfaces():
     try:
@@ -417,15 +570,28 @@ def wireless_status():
 
 
 @app.get("/wireless/scan")
-def wireless_scan(device: str = "wlan0"):
+def wireless_scan(device: Optional[str] = None):
+    # device=None → SDK resolves DROPLET_WIFI_SCAN_DEVICE (last-resort wlan0).
     try:
         return {"results": get_router().wireless.scan(device)}
+    except ScanUnsupportedError as exc:
+        # WARP-816: the radio is in an AP/Master role and can't station-scan
+        # (single-box `wlp14s0`). This is NOT a 200 `[]` (which the dashboard
+        # reads as "no networks") and NOT a retryable 5xx — it's a stable,
+        # terminal capability fact. Return 409 with a machine-readable `code`
+        # so the orchestrator maps it to a typed RouterError and the dashboard
+        # renders calm "scanning unavailable while broadcasting" copy.
+        return JSONResponse(
+            status_code=409,
+            content={"code": exc.code, "message": str(exc), "device": exc.device},
+        )
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
 
 
 @app.get("/wireless/clients")
-def wireless_clients(device: str = "wlan0"):
+def wireless_clients(device: Optional[str] = None):
+    # device=None → SDK resolves DROPLET_WIFI_SCAN_DEVICE (last-resort wlan0).
     try:
         return {"clients": get_router().wireless.connected_clients(device)}
     except (ConnectionLost, UbusError) as exc:
@@ -648,6 +814,33 @@ def add_port_forward(req: PortForwardRequest):
         handle_router_error(exc)
 
 
+# WARP-613: phone-home egress control (see ADR-012).
+@app.post("/firewall/phone-home/device")
+def set_device_phone_home(req: PhoneHomeDeviceRequest):
+    try:
+        fw = get_router().firewall
+        if req.blocked:
+            fw.block_phone_home(req.mac)
+        else:
+            fw.unblock_phone_home(req.mac)
+        return {"status": "ok", "mac": req.mac, "blocked": req.blocked}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.post("/firewall/phone-home/cameras")
+def set_cameras_phone_home(req: PhoneHomeCamerasRequest):
+    # The camera zone toggle only affects the camera VLAN's WAN egress — it
+    # cannot sever the orchestrator's (LAN/mgmt-side) management path, so it
+    # commits+reloads directly like block_device rather than wrapping in
+    # safe_apply (which would conflict with the SDK method's own commit/reload).
+    try:
+        get_router().firewall.set_camera_phone_home(req.blocked)
+        return {"status": "ok", "scope": "cameras", "blocked": req.blocked}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
 # ---------------------------------------------------------------------------
 # VLANs / Camera Subnet
 # ---------------------------------------------------------------------------
@@ -696,37 +889,58 @@ def create_vlan(req: CreateVlanRequest):
 
 @app.get("/network/subnets/cameras")
 def get_camera_subnet():
-    """Get camera subnet configuration status."""
+    """Get camera subnet configuration status.
+
+    NET-13: distinguish "camera subnet legitimately not configured" from a
+    genuine router fault. Only a ubus NOT_FOUND/NO_DATA on the `cameras`
+    section means "not configured" → `{"enabled": False}`. Any other
+    UbusError (e.g. PERMISSION_DENIED, METHOD_NOT_FOUND) and every
+    ConnectionLost propagate to `handle_router_error`, so the dashboard
+    can tell "no camera subnet" apart from "router unreachable / token
+    wrong" instead of mis-rendering both as not-configured. Mirrors the
+    `_read_duckdns` / `interface_exists` discipline.
+    """
     try:
         r = get_router()
-        # Check if the cameras interface exists
+        # Check if the cameras interface exists. A NOT_FOUND/NO_DATA here is
+        # the only signal that means "not configured"; let anything else
+        # bubble to the outer (ConnectionLost, UbusError) handler.
         try:
             iface = r.uci.get("network", "cameras")
-            zone = None
-            # Find the cameras firewall zone
-            fw_config = r.uci.get("firewall")
-            if isinstance(fw_config, dict):
-                for name, section in fw_config.items():
-                    if isinstance(section, dict) and section.get("name") == "cameras":
-                        zone = section
-                        break
-            # Check DHCP pool
-            dhcp_pool = None
-            try:
-                dhcp_pool = r.uci.get("dhcp", "cameras")
-            except Exception:
-                pass
-
-            return {
-                "enabled": True,
-                "interface": iface if isinstance(iface, dict) else {},
-                "firewall_zone": zone,
-                "dhcp_pool": dhcp_pool if isinstance(dhcp_pool, dict) else None,
-                "subnet": iface.get("ipaddr", "192.168.100.1") if isinstance(iface, dict) else None,
-                "netmask": iface.get("netmask", "255.255.255.0") if isinstance(iface, dict) else None,
-            }
-        except Exception:
+        except UbusError as exc:
+            if exc.code in (UBUS_STATUS_NOT_FOUND, UBUS_STATUS_NO_DATA):
+                return {"enabled": False}
+            raise
+        # An empty/non-dict section also means the interface isn't set up.
+        if not isinstance(iface, dict) or not iface:
             return {"enabled": False}
+
+        zone = None
+        # Find the cameras firewall zone
+        fw_config = r.uci.get("firewall")
+        if isinstance(fw_config, dict):
+            for name, section in fw_config.items():
+                if isinstance(section, dict) and section.get("name") == "cameras":
+                    zone = section
+                    break
+        # Check DHCP pool. A missing pool (NOT_FOUND/NO_DATA) is benign —
+        # the subnet can exist without a DHCP section — so swallow only
+        # that class; a real fault still propagates.
+        dhcp_pool = None
+        try:
+            dhcp_pool = r.uci.get("dhcp", "cameras")
+        except UbusError as exc:
+            if exc.code not in (UBUS_STATUS_NOT_FOUND, UBUS_STATUS_NO_DATA):
+                raise
+
+        return {
+            "enabled": True,
+            "interface": iface,
+            "firewall_zone": zone,
+            "dhcp_pool": dhcp_pool if isinstance(dhcp_pool, dict) else None,
+            "subnet": iface.get("ipaddr", "192.168.100.1"),
+            "netmask": iface.get("netmask", "255.255.255.0"),
+        }
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
 
@@ -1077,6 +1291,33 @@ def vpn_delete_peer(req: VpnPeerDeleteRequest):
 
 DUCKDNS_SECTION = "duckdns"
 
+# Order DuckDNS prefers to bind its watch `interface` to. `wan` first (the
+# router/multi-box shape's uplink), falling back to `lan` for a LAN-only
+# single-box where `wan` isn't a logical interface at all (root-caused live on
+# 192.168.1.87 — its bridges are `br-lan` + a host-carried mgmt uplink). The
+# binding only governs which hotplug events trigger an immediate re-check, so
+# any PRESENT interface is a valid trigger; the published IP itself comes from
+# the `web` ip_source regardless (see `ddns_duckdns_set`).
+_DUCKDNS_INTERFACE_PREFERENCE = ("wan", "lan")
+
+
+def _select_ddns_interface(router) -> str | None:
+    """Pick a logical interface for the DuckDNS section that is PRESENT on this
+    deployment shape, or ``None`` if none of the candidates exist.
+
+    Presence is read from `NetworkApi.get_all_interface_statuses()` — the same
+    shape-detection mechanism `get_network_summary` uses (ADR-011) — so we never
+    invent a second presence path or a new env var. An interface is "present"
+    when its status carries `present: True`; a shape that lacks it returns the
+    `interface_stub(present=False)` placeholder. Returning ``None`` lets the
+    caller omit `interface` entirely rather than bind to a phantom one.
+    """
+    statuses = router.network.get_all_interface_statuses()
+    for name in _DUCKDNS_INTERFACE_PREFERENCE:
+        if statuses.get(name, {}).get("present") is True:
+            return name
+    return None
+
 
 def _read_duckdns(router) -> dict:
     """Read the duckdns ddns section, returning a redacted view.
@@ -1137,6 +1378,15 @@ def ddns_duckdns_set(req: DuckDnsConfigRequest):
             else:
                 raise
 
+        # Bind the section's watch `interface` to one that's actually PRESENT on
+        # this deployment shape (ADR-011). Hardcoding `wan` broke the LAN-only
+        # single-box (192.168.1.87 has no `wan` logical interface), so
+        # ddns-scripts watched a phantom interface and the update path was dead.
+        # Prefer `wan`, fall back to the LAN-facing interface, omit entirely if
+        # neither is present (the `web` ip_source + timer below still drives
+        # updates — `interface` only gates the immediate hotplug re-check).
+        watch_interface = _select_ddns_interface(r)
+
         # When the caller omits the token, keep the value already on disk
         # (the wizard's "keep stored token" path so returning customers
         # don't have to re-type it). Only seed `password` when we have a
@@ -1146,8 +1396,6 @@ def ddns_duckdns_set(req: DuckDnsConfigRequest):
             "service_name": "duckdns.org",
             "domain": req.subdomain,
             "enabled": "1" if req.enabled else "0",
-            # Watch WAN for IP changes; DuckDNS is for IPv4 by default.
-            "interface": "wan",
             # Use `web` (not `network`): the WAN interface address may itself
             # be a private IP behind another NAT layer (common when the
             # Droplet is plugged into a home router as a downstream device).
@@ -1166,6 +1414,12 @@ def ddns_duckdns_set(req: DuckDnsConfigRequest):
             "force_interval": "72",
             "force_unit": "hours",
         }
+
+        # Only set `interface` when one is present on this shape; omitting it on
+        # a shape with neither `wan` nor `lan` is preferable to binding a phantom
+        # interface (the `web` ip_source + timer above still drive updates).
+        if watch_interface is not None:
+            values["interface"] = watch_interface
 
         if req.token is not None:
             values["password"] = req.token

@@ -4,10 +4,10 @@ httpx==0.28.1
 paho-mqtt==2.1.0
 onvif-zeep==0.2.12
 wsdiscovery==2.0.0
-# WARP-221 — periodic discovery scan runs on AsyncIOScheduler instead of a
-# banned `while True: await asyncio.sleep(N)` loop. Pinned to match
-# services/file-indexer (apscheduler 3.x and 4.x have incompatible APIs).
-# IntervalTrigger is tz-agnostic, so no tzlocal is needed here.
-apscheduler==3.10.4
+# WARP-221: the periodic discovery sweep runs on an AsyncIOScheduler
+# interval job (main.py:build_scan_scheduler) instead of a hand-rolled
+# `while True` loop — the canonical scheduling pattern per CLAUDE.md.
+# Pinned to the same version services/routing/requirements.txt uses.
+APScheduler==3.10.4
 # RSA-OAEP/PKCS1v15 for vendor_init.py (Hanwha first-run password encryption)
 cryptography==44.0.0

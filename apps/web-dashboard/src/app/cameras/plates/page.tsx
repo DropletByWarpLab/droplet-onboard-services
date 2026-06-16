@@ -21,6 +21,7 @@ import {
 import type { KnownPlate } from "@/lib/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useToast } from "@/components/Toast";
+import { ShellPage } from "@/components/shell/ShellPage";
 
 /**
  * License plate management (Phase 7.6).
@@ -101,61 +102,60 @@ export default function PlatesPage() {
     }
   };
 
-  return (
-    <div className="p-6 max-w-3xl mx-auto">
-      <div className="flex items-center gap-3 mb-4">
-        <button
-          onClick={() => router.push("/cameras")}
-          className="p-2 -ml-2 rounded-full hover:bg-surface-secondary"
-          aria-label="Back to cameras"
-        >
-          <ArrowLeft size={20} />
-        </button>
-        <div className="flex-1 min-w-0">
-          <h1 className="type-large-title text-label-primary">License plates</h1>
-          <p className="type-subheadline text-label-tertiary mt-0.5">
-            License plates this Droplet has read. Name them so notifications
-            show <span className="font-mono">&ldquo;Alice&apos;s Civic
-            arrived&rdquo;</span> instead of a string of characters.
-          </p>
-        </div>
-        <button
-          onClick={() => void refresh()}
-          disabled={loading}
-          className="dp-btn-secondary flex items-center gap-2 px-3 py-2 rounded-lg"
-        >
-          <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
-          <span className="type-subheadline">Refresh</span>
-        </button>
-      </div>
+  const actions = (
+    <>
+      <button onClick={() => router.push("/cameras")} className="btn ghost" type="button">
+        <ArrowLeft size={15} />
+        Cameras
+      </button>
+      <button
+        onClick={() => void refresh()}
+        disabled={loading}
+        className="icon-btn"
+        aria-label="Refresh"
+        title="Refresh"
+        type="button"
+      >
+        <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
+      </button>
+    </>
+  );
 
+  return (
+    <ShellPage
+      icon={<Car size={15} />}
+      label="License plates"
+      title="License plates"
+      sub="License plates this Droplet has read. Name them so notifications show “Alice’s Civic arrived” instead of a string of characters."
+      actions={actions}
+    >
       {error && (
-        <div className="dp-card p-4 mb-3 text-system-red flex items-center gap-2">
+        <div className="card" style={{ display: "flex", alignItems: "center", gap: 8, color: "#ef4444" }}>
           <AlertTriangle size={14} />
-          <span className="type-subheadline">{error}</span>
+          <span>{error}</span>
         </div>
       )}
 
       {loading && !plates ? (
-        <div className="dp-card p-4 space-y-2">
+        <div className="card space-y-2">
           {Array.from({ length: 3 }).map((_, i) => (
-            <div key={i} className="h-12 rounded animate-pulse bg-surface-secondary" />
+            <div key={i} className="h-12 rounded animate-pulse" style={{ background: "var(--surface-2)" }} />
           ))}
         </div>
       ) : !plates || plates.length === 0 ? (
-        <div className="dp-card text-center py-12">
-          <Car size={32} className="mx-auto text-label-quaternary mb-3" />
-          <h2 className="type-title-3 text-label-primary mb-1">
-            No plates read yet
-          </h2>
-          <p className="type-subheadline text-label-tertiary max-w-md mx-auto">
-            License-plate recognition isn&apos;t enabled, or no vehicle has
-            driven by yet. Plates appear here after the first event with a
-            readable plate.
-          </p>
+        <div className="card">
+          <div className="empty">
+            <span className="ei"><Car size={24} /></span>
+            <span className="eh">No plates read yet</span>
+            <span style={{ maxWidth: "44ch" }}>
+              License-plate recognition isn&apos;t enabled, or no vehicle has
+              driven by yet. Plates appear here after the first event with a
+              readable plate.
+            </span>
+          </div>
         </div>
       ) : (
-        <ul className="dp-card divide-y divide-separator">
+        <ul className="card divide-y divide-separator" style={{ padding: 0 }}>
           {plates.map((p) => (
             <li
               key={p.plate}
@@ -253,6 +253,6 @@ export default function PlatesPage() {
         confirmLabel="Forget"
         variant="destructive"
       />
-    </div>
+    </ShellPage>
   );
 }

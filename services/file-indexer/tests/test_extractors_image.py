@@ -1,7 +1,10 @@
-"""Unit tests for the image OCR extractor.
+"""Unit tests for the image OCR extractor (spans shape — WARP-287).
 
 Skips automatically if the local environment doesn't have Tesseract
-installed (CI installs it via the Dockerfile change in this task).
+installed (CI installs it via the Dockerfile build).
+
+Anchor-shape coverage (single NoneAnchor span) is in
+test_non_mvp_extractors_emit_none_anchor.py.
 """
 from __future__ import annotations
 
@@ -22,9 +25,13 @@ from extractors.image import extract  # noqa: E402  (import after the skip guard
 FIXTURE = Path(__file__).parent / "fixtures" / "sample.png"
 
 
+def _full_text(doc) -> str:
+    return " ".join(s.text for s in doc.get("spans", []))
+
+
 def test_extract_image_ocr():
     doc = extract(str(FIXTURE))
-    assert "echofoxtrot" in doc["text"].lower()
+    assert "echofoxtrot" in _full_text(doc).lower()
     assert doc["metadata"]["extractor_name"] == "image"
 
 
@@ -47,6 +54,6 @@ def test_low_confidence_warning_present_when_text_is_garbage(tmp_path):
     f = tmp_path / "noise.png"
     img.save(f)
     doc = extract(str(f))
-    # Either: text is empty AND no warning, OR text exists with the warning.
-    if doc["text"]:
+    # Either: spans is empty AND no warning, OR spans exist with the warning.
+    if _full_text(doc):
         assert "low_confidence_ocr" in doc["warnings"]

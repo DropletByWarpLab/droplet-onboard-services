@@ -26,12 +26,7 @@ import mimetypes
 import os
 from pathlib import Path
 
-from chunker import (
-    chunk_text,
-    chunk_text_with_offsets,
-    format_chunk_with_header,
-    section_path_for_offset,
-)
+from chunker import Chunk, chunk_spans, format_chunk_with_header
 from db import (
     delete_chunks_for_brain_item,
     mark_brain_item_indexed,
@@ -56,8 +51,10 @@ def _fetch_item_status(item_id: str) -> str | None:
     """
     import db
 
-    conn = db.get_conn()
-    with conn.cursor() as cur:
+    # IDX-01: this raw-cursor read runs on the shared module connection, so it
+    # must take the same lock db.py's helpers use to avoid concurrent execute()
+    # on one psycopg2 connection.
+    with db._db_lock, db.get_conn().cursor() as cur:
         cur.execute(
             'SELECT "status" FROM "BrainMemoryItem" WHERE "id" = %s',
             (item_id,),
@@ -106,6 +103,23 @@ def _extract_text_path(storage_path: str) -> Path:
 
 def _manifest_path(storage_path: str) -> Path:
     return Path(storage_path).parent / "manifest.json"
+
+
+def _full_text_from_doc(doc: dict) -> str:
+    """Concatenate every span's text for the empty-extraction guard +
+    extracted.txt side file. Spans are joined with blank lines so the
+    output stays human-readable when re-read from the side file."""
+    spans = doc.get("spans") if isinstance(doc, dict) else None
+    if not spans:
+        return ""
+    return "\n\n".join(s.text for s in spans if getattr(s, "text", ""))
+
+
+def _chunk_spans_from_doc(doc: dict) -> list[Chunk]:
+    """Test seam: lets `tests/test_brain_ingest_anchor.py` substitute a
+    fixed list of `Chunk`s without standing up a real extractor."""
+    spans = doc.get("spans") if isinstance(doc, dict) else None
+    return chunk_spans(spans or [])
 
 
 def handle_brain_uploaded(payload: dict) -> None:
@@ -173,22 +187,23 @@ def handle_brain_uploaded(payload: dict) -> None:
         "brain_ingest: indexing item=%s user=%s mime=%s", item_id, user_id, mime
     )
 
-    # WARP-305: image-only attachments. There's no text to extract from a
-    # bare PNG/JPEG/HEIC, so running the extractor → "< 10 chars" check
-    # used to mark the chip as `failed` with reason=`empty_extraction`.
-    # That bubbled up as the "Something went wrong on this turn" toast in
-    # the chat surface because `empty_extraction` had no friendly mapping.
+    # WARP-305 → WARP-844: chat-attached images take an OCR-FIRST path.
     #
-    # The image IS successfully stored (the bytes live under the item dir
-    # for future retrieval and the row is in BrainMemoryItem) — it just
-    # isn't searchable by text content. Mark it `ready` with an
-    # `image_only` warning so the dashboard chip renders ✓ Ready with a
-    # softer subtitle instead of ⚠ Failed. Multimodal chat (sending
-    # images straight to the model as content_parts) is a separate
-    # follow-up; this fix is about not lying to the user.
-    if isinstance(mime, str) and mime.startswith("image/"):
+    # WARP-305 skipped extraction for image/* entirely because a photo
+    # with no text used to land as ⚠ Failed (`empty_extraction`) — but
+    # that also threw away the text in screenshots and scanned documents,
+    # which is exactly what users attach to a chat. WARP-844 runs the
+    # image OCR extractor like any other MIME and only falls back to the
+    # WARP-305 "✓ Ready (image_only)" outcome when OCR finds nothing —
+    # photos keep the friendly chip, screenshots become searchable and
+    # get inlined into the chat turn like every other attachment.
+    # Multimodal chat (image bytes to a vision model) remains a separate
+    # follow-up.
+    is_image = isinstance(mime, str) and mime.startswith("image/")
+
+    def _finish_image_only() -> None:
         logger.info(
-            "brain_ingest: image-only attachment, skipping text extraction for %s",
+            "brain_ingest: image attachment with no OCR-able text for %s",
             path,
         )
         try:
@@ -222,11 +237,15 @@ def handle_brain_uploaded(payload: dict) -> None:
             logger.warning(
                 "brain_ingest: failed to write image-only manifest: %s", e
             )
-        return
 
     # Extract.
     doc = dispatch(path, mime)
     if doc is None:
+        if is_image:
+            # OCR backend unavailable / unsupported variant — same
+            # user-facing outcome as "no text in the image".
+            _finish_image_only()
+            return
         logger.info(
             "brain_ingest: dispatch returned None (unsupported / oversized) for %s",
             path,
@@ -246,9 +265,17 @@ def handle_brain_uploaded(payload: dict) -> None:
             logger.exception("brain_ingest: failed to mark item failed")
         return
 
-    text = doc.get("text", "")
     warnings = list(doc.get("warnings", []))
-    if not text or len(text.strip()) < 10:
+    # WARP-287: extractors emit `spans: list[Span]` rather than a flat
+    # `text` blob. Derive the full text from the spans for the
+    # empty-extraction guard + extracted.txt side file; the chunker
+    # consumes spans directly so it can attach each chunk's anchor.
+    full_text = _full_text_from_doc(doc)
+    if not full_text or len(full_text.strip()) < 10:
+        if is_image:
+            # A photo, not a document — the WARP-305 friendly outcome.
+            _finish_image_only()
+            return
         logger.info("brain_ingest: extracted text too small for %s", path)
         warnings.append("empty_extraction")
         _publish_status(user_id, item_id, "failed", reason="empty_extraction")
@@ -263,16 +290,13 @@ def handle_brain_uploaded(payload: dict) -> None:
             logger.exception("brain_ingest: failed to mark item failed")
         return
 
-    # Chunk + embed. WARP-435 (ADR-003 Phase 1): chunk_text_with_offsets
-    # returns (start_offset, chunk_text) tuples so we can look up each
-    # chunk's enclosing sectionPath from the extractor's
-    # metadata.section_paths and prepend a contextual header
-    # ("Document: foo / Section: bar > baz\n\n...") before embedding.
-    # The same prefixed text is what we persist on FileContentChunk.text
-    # so search results carry the path string the embedder saw — no
-    # divergence between embedding input and stored representation.
-    chunk_pairs = chunk_text_with_offsets(text)
-    chunks = [c for _off, c in chunk_pairs]
+    # Chunk + embed. Chunks are `Chunk(text, anchor, section_path)`:
+    #  * WARP-287 — the anchor flows into per-chunk metadata so the
+    #    dashboard can cite "Page N of foo.pdf" rather than a bare index.
+    #  * WARP-435 — the section_path (sentence-aware splitter runs per
+    #    span, so each chunk keeps its span's breadcrumb) drives the
+    #    contextual header prepended before embedding.
+    chunks = _chunk_spans_from_doc(doc)
     if not chunks:
         logger.info("brain_ingest: chunker produced 0 chunks for %s", path)
         warnings.append("no_chunks")
@@ -290,19 +314,13 @@ def handle_brain_uploaded(payload: dict) -> None:
 
     # WARP-435: build prefixed chunk texts. Filename resolution priority:
     # MQTT payload's `filename` field (user-friendly), falling back to
-    # the storage-path basename. The section_paths lookup is best-effort
-    # — empty list → header is just "Document: filename".
-    doc_metadata_pre = doc.get("metadata") if isinstance(doc, dict) else None
-    section_paths_meta = (
-        doc_metadata_pre.get("section_paths") if doc_metadata_pre else None
-    )
+    # the storage-path basename. The section_path rides on each Chunk
+    # (set by its source span) — empty → header is just "Document: name".
     display_filename = payload.get("filename") or os.path.basename(path) or "document"
-    prefixed_chunks: list[str] = []
-    for offset, chunk_str in chunk_pairs:
-        sp = section_path_for_offset(offset, section_paths_meta)
-        prefixed_chunks.append(
-            format_chunk_with_header(chunk_str, display_filename, sp)
-        )
+    prefixed_chunks: list[str] = [
+        format_chunk_with_header(chunk.text, display_filename, chunk.section_path)
+        for chunk in chunks
+    ]
 
     try:
         vectors = embed_texts(prefixed_chunks)
@@ -342,6 +360,9 @@ def handle_brain_uploaded(payload: dict) -> None:
     # WARP-214: surface the extractor's metadata (chain[], subtitle_source) so
     # the dashboard can render breadcrumbs + source-channel badges from
     # /api/files/knowledge/{recent,search}.
+    # WARP-287: also overlay each chunk's anchor under metadata.anchor so the
+    # dashboard's citation surfaces can show "Page N of foo.pdf" rather than
+    # a bare chunk index.
     doc_metadata = doc.get("metadata") if isinstance(doc, dict) else None
 
     # Upsert (delete-then-insert to keep brain rows independent of the
@@ -351,7 +372,27 @@ def handle_brain_uploaded(payload: dict) -> None:
     # citation surface both reflect the contextual header.
     try:
         delete_chunks_for_brain_item(item_id)
-        for idx, (chunk, vec) in enumerate(zip(prefixed_chunks, vectors)):
+        for idx, (chunk, prefixed_text, vec) in enumerate(
+            zip(chunks, prefixed_chunks, vectors)
+        ):
+            chunk_metadata = dict(doc_metadata or {})
+            # WARP-287: serialize the chunk's anchor for citation surfaces.
+            # A malformed anchor must not abort the whole file — fall back
+            # to null + warn so the chunk still lands (searchable, just
+            # without a deep-link target).
+            try:
+                chunk_metadata["anchor"] = chunk.anchor.model_dump()
+            except Exception as e:  # pragma: no cover - defensive
+                logger.warning(
+                    "brain_ingest: anchor serialize failed for %s chunk %d: %s",
+                    item_id,
+                    idx,
+                    e,
+                )
+                chunk_metadata["anchor"] = None
+                warnings.append("malformed_anchor")
+            # WARP-435: persist the section breadcrumb alongside the anchor.
+            chunk_metadata["sectionPath"] = list(chunk.section_path)
             upsert_chunk(
                 user_id=user_id,
                 # Use a deterministic synthetic ncFileId so the existing
@@ -363,12 +404,15 @@ def handle_brain_uploaded(payload: dict) -> None:
                 nc_file_id=_synthetic_nc_file_id(item_id),
                 path=path,
                 chunk_idx=idx,
-                text=chunk,
+                # WARP-435: persist the prefixed text — the exact string
+                # the embedder saw — so searchHybrid's lexical arm and the
+                # citation surface both reflect the contextual header.
+                text=prefixed_text,
                 embedding=vec,
                 source="brain",
                 brain_item_id=item_id,
                 warnings=warnings,
-                metadata=doc_metadata,
+                metadata=chunk_metadata,
             )
         mark_brain_item_indexed(item_id, status="ready", warnings=warnings)
     except Exception as e:
@@ -390,7 +434,7 @@ def handle_brain_uploaded(payload: dict) -> None:
     # Persist extracted.txt + updated manifest so backups + the
     # WARP-205 export route can reconstruct without DB access.
     try:
-        _extract_text_path(path).write_text(text, encoding="utf-8")
+        _extract_text_path(path).write_text(full_text, encoding="utf-8")
         manifest_p = _manifest_path(path)
         manifest = {
             "itemId": item_id,
@@ -455,3 +499,190 @@ def start_brain_ingest() -> None:
     """Wire the MQTT subscription. Idempotent."""
     subscribe(BRAIN_UPLOADED_TOPIC, handle_brain_uploaded)
     logger.info("brain_ingest: subscribed to %s", BRAIN_UPLOADED_TOPIC)
+
+
+def reindex_one(nc_file_id: str) -> dict:
+    """WARP-287 — re-extract + re-chunk a single file (BrainMemoryItem).
+
+    Atomic chunk replacement: DELETE + N×INSERT runs inside a single
+    Postgres transaction on a private (non-autocommit) connection.
+    Either every new chunk lands together with the old ones gone, or
+    nothing changes. Mid-flight failure ROLLBACKs.
+
+    Why a private connection rather than `db.get_conn()`: the module-
+    level connection is set to `autocommit=True` for the existing
+    watcher/MQTT path, which would commit each INSERT individually and
+    leave partial rows on failure. We open a fresh psycopg2 connection
+    here so we can BEGIN/COMMIT/ROLLBACK explicitly.
+
+    Looks up the file by BrainMemoryItem.id (the orchestrator's
+    `/api/admin/files/:id/reindex` route passes that id through). Files
+    indexed exclusively via the Nextcloud watcher (no BrainMemoryItem
+    row) aren't reachable here — those go through the watcher's normal
+    rescan path and aren't a v1 admin-reindex target.
+
+    Returns: {"chunksWritten": int}
+    Raises:
+        ValueError: item not found / file missing / dispatch returned None.
+        RuntimeError: extractor produced no text or no chunks.
+        Any psycopg2 / extractor / embedder error propagates (rolled back).
+    """
+    import json as _json
+
+    import psycopg2
+
+    from config import DATABASE_URL
+    from db import fetch_item
+
+    # Reuse the autocommit conn just for the item lookup (read-only).
+    from db import get_conn as _get_conn
+
+    info = fetch_item(_get_conn(), item_id=nc_file_id)
+    if info is None:
+        raise ValueError(f"reindex_one: BrainMemoryItem {nc_file_id} not found")
+    user_id = info["userId"]
+    path = info["storagePath"]
+    mime = info["mimeType"] or "application/octet-stream"
+
+    if not os.path.exists(path):
+        raise ValueError(f"reindex_one: file missing on disk: {path}")
+
+    logger.info(
+        "reindex_one: re-indexing item=%s user=%s mime=%s",
+        nc_file_id,
+        user_id,
+        mime,
+    )
+
+    # Re-run extractor → spans → chunks → embeddings. These steps are
+    # idempotent (no DB side effects), so doing them BEFORE the
+    # transaction keeps the lock window small.
+    doc = dispatch(path, mime)
+    if doc is None:
+        raise ValueError(
+            f"reindex_one: extractor returned None for {path} ({mime})"
+        )
+    full_text = _full_text_from_doc(doc)
+    if not full_text or len(full_text.strip()) < 10:
+        raise RuntimeError(f"reindex_one: empty extraction for {path}")
+    chunks = _chunk_spans_from_doc(doc)
+    if not chunks:
+        raise RuntimeError(f"reindex_one: chunker produced 0 chunks for {path}")
+    # WARP-435: embed (and below, persist) the *prefixed* chunk text — the
+    # contextual "Document: {name} / Section: {a > b}" header — exactly like
+    # the three primary ingest paths (handle_brain_uploaded, watcher,
+    # transcription_worker). Re-indexing must produce the same embeddings
+    # and stored text as a normal ingest, otherwise admin re-index silently
+    # diverges from watcher-indexed rows for identical content. fetch_item
+    # carries no friendly filename, so fall back to the storage-path
+    # basename (the same fallback the other paths use when no payload
+    # filename is present).
+    display_filename = os.path.basename(path) or "document"
+    prefixed_chunks = [
+        format_chunk_with_header(chunk.text, display_filename, chunk.section_path)
+        for chunk in chunks
+    ]
+    vectors = embed_texts(prefixed_chunks)
+    if len(vectors) != len(chunks):
+        raise RuntimeError(
+            f"reindex_one: embedding count mismatch ({len(vectors)} vs {len(chunks)})"
+        )
+
+    doc_metadata = doc.get("metadata") if isinstance(doc, dict) else None
+    warnings = list(doc.get("warnings", []))
+    synthetic_nc_file_id = _synthetic_nc_file_id(nc_file_id)
+
+    # Atomic DELETE + INSERT inside a single private transaction. A
+    # mid-flight failure rolls everything back, including the DELETE,
+    # leaving the file's pre-reindex chunks intact — strictly better
+    # than the watcher/MQTT path's per-chunk autocommit.
+    from pgvector.psycopg2 import register_vector
+
+    conn = psycopg2.connect(DATABASE_URL)
+    try:
+        conn.autocommit = False
+        register_vector(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                'DELETE FROM "FileContentChunk" WHERE "brainItemId" = %s',
+                (nc_file_id,),
+            )
+            for idx, (chunk, prefixed_text, vec) in enumerate(
+                zip(chunks, prefixed_chunks, vectors)
+            ):
+                chunk_metadata = dict(doc_metadata or {})
+                # WARP-287: a malformed anchor must not abort the whole
+                # re-index transaction — fall back to null + warn so the
+                # chunk still lands (searchable, just without a deep-link
+                # target). Mirrors handle_brain_uploaded and the watcher path.
+                try:
+                    chunk_metadata["anchor"] = chunk.anchor.model_dump()
+                except Exception as e:  # pragma: no cover - defensive
+                    logger.warning(
+                        "reindex_one: anchor serialize failed for %s chunk %d: %s",
+                        nc_file_id,
+                        idx,
+                        e,
+                    )
+                    chunk_metadata["anchor"] = None
+                    warnings.append("malformed_anchor")
+                # WARP-435: persist the section breadcrumb alongside the
+                # anchor, matching the primary ingest paths.
+                chunk_metadata["sectionPath"] = list(chunk.section_path)
+                cur.execute(
+                    """
+                    INSERT INTO "FileContentChunk"
+                        ("userId", "ncFileId", "path", "chunkIdx", "text",
+                         "embedding", "indexedAt", "source", "brainItemId",
+                         "pageNumber", "warnings", "metadata")
+                    VALUES (%s, %s, %s, %s, %s, %s::vector, NOW(),
+                            %s::"FileContentSource", %s, %s, %s, %s::jsonb)
+                    """,
+                    (
+                        user_id,
+                        synthetic_nc_file_id,
+                        path,
+                        idx,
+                        # WARP-435: store the prefixed text — the exact
+                        # string the embedder saw — so searchHybrid's
+                        # lexical arm and the citation surface both reflect
+                        # the contextual header (parity with normal ingest).
+                        prefixed_text,
+                        vec,
+                        "brain",
+                        nc_file_id,
+                        None,
+                        warnings,
+                        _json.dumps(chunk_metadata),
+                    ),
+                )
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    # mark_brain_item_indexed uses the autocommit module conn — safe to
+    # call OUTSIDE the private transaction. A failure here leaves the
+    # new chunks in place but doesn't bump indexedAt, which is the
+    # benign direction (a follow-up reindex / watcher pass will retry).
+    try:
+        from db import mark_brain_item_indexed
+
+        mark_brain_item_indexed(nc_file_id, warnings=warnings)
+    except Exception:
+        logger.exception(
+            "reindex_one: mark_brain_item_indexed failed for %s", nc_file_id
+        )
+
+    logger.info(
+        "reindex_one: indexed item=%s -> %d chunks", nc_file_id, len(chunks)
+    )
+    return {"chunksWritten": len(chunks)}

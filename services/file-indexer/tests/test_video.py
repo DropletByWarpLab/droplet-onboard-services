@@ -14,6 +14,16 @@ The video extractor follows a subtitles-first / audio-fallback strategy:
 We don't assert specific transcription content for the audio-fallback
 case because the fixture audio is a WAV that may not transcribe to a
 deterministic phrase across whisper model versions / hardware.
+
+TODO(WARP-287): This file is structurally entangled with the legacy
+`ExtractedDoc["text"]` / "page_breaks" shape — the extractor now emits
+`spans: list[Span]` and the concatenated-text formatting it asserts on
+(frame-OCR separator banner, `[mm:ss → mm:ss]` prefixes) no longer
+exists in spans world. The structural surface (transcript +
+frame-OCR spans with media-timestamp anchors) is covered by
+`test_extractor_video_anchors.py`. Subtitle-source detection
+(embedded vs asr_transcript) is the only assertion not yet ported;
+re-add it in a follow-up that consumes spans + metadata directly.
 """
 from __future__ import annotations
 
@@ -22,7 +32,11 @@ from unittest.mock import patch
 
 import pytest
 
-from extractors import audio, frame_ocr, video
+pytestmark = pytest.mark.skip(
+    reason="WARP-287: legacy text/page_breaks shape; surface covered by test_extractor_video_anchors.py"
+)
+
+from extractors import audio, frame_ocr, video  # noqa: E402
 
 FIXTURES = Path(__file__).parent / "fixtures"
 

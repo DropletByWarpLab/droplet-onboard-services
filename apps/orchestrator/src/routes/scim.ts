@@ -1,0 +1,244 @@
+/**
+ * WARP (SCIM directory sync) — SCIM 2.0 server (Okta provisions users/groups
+ * to the box). Mounted on the PUBLIC router segment (Okta has no human
+ * session) BEHIND its own dedicated bearer guard (scimAuthMiddleware) — this
+ * surface never touches authMiddleware or a user cookie.
+ *
+ *   POST   /scim/v2/Users            create        (idempotent on Okta retry)
+ *   GET    /scim/v2/Users?filter=…    list / userName-eq existence probe
+ *   GET    /scim/v2/Users/:id         read one
+ *   PUT    /scim/v2/Users/:id         replace       (active toggle)
+ *   PATCH  /scim/v2/Users/:id         partial       (Okta's active:false op)
+ *   DELETE /scim/v2/Users/:id         de-provision  → SOFT-deactivate, no delete
+ *   POST   /scim/v2/Groups           group + role mapping
+ *
+ * The route is thin: parsing/serialization lives in scim-resource.ts, all DB
+ * writes in scim.service.ts. Errors are thrown as ScimError and rendered once
+ * by a shared catch into the SCIM Error envelope (application/scim+json).
+ */
+import { Router, type Request, type Response } from "express";
+import pino from "pino";
+
+import { scimAuthMiddleware } from "../middleware/scim-auth.js";
+import {
+  toScimUser,
+  toScimListResponse,
+  parseUserNameEqFilter,
+  parseScimUser,
+  ScimError,
+  SCIM_CONTENT_TYPE,
+  SCIM_GROUP_SCHEMA,
+  type LocalUserForScim,
+} from "../services/scim-resource.js";
+import {
+  provisionUser,
+  findUserById,
+  findUserByUserName,
+  setUserActive,
+  deactivateUser,
+  provisionGroup,
+} from "../services/scim.service.js";
+
+const logger = pino({ name: "scim-route" });
+
+type PrismaClient = import("@prisma/client").PrismaClient;
+
+/** Narrow a Prisma User row to the SCIM-render shape. */
+function asScimSource(u: {
+  id: string;
+  username: string;
+  displayName: string;
+  email: string | null;
+  role: string;
+  directoryStatus: string;
+  createdAt: Date;
+  updatedAt: Date;
+}): LocalUserForScim {
+  return {
+    id: u.id,
+    username: u.username,
+    displayName: u.displayName,
+    email: u.email,
+    role: u.role,
+    directoryStatus: u.directoryStatus === "DEACTIVATED" ? "DEACTIVATED" : "ACTIVE",
+    createdAt: u.createdAt,
+    updatedAt: u.updatedAt,
+  };
+}
+
+/**
+ * Extract an `active` boolean from a SCIM PATCH PatchOp body. Handles the two
+ * shapes Okta + SCIM clients send for the deactivate/reactivate op:
+ *   - { op:"replace", path:"active", value:false }
+ *   - { op:"replace", value:{ active:false } }
+ * Returns undefined when no Operation touches `active`.
+ */
+function activeFromPatch(body: unknown): boolean | undefined {
+  const ops = (body as { Operations?: unknown })?.Operations;
+  if (!Array.isArray(ops)) return undefined;
+  let result: boolean | undefined;
+  for (const op of ops) {
+    const o = op as { op?: string; path?: string; value?: unknown };
+    if (typeof o.path === "string" && o.path.toLowerCase() === "active") {
+      if (typeof o.value === "boolean") result = o.value;
+    } else if (o.value && typeof o.value === "object" && "active" in (o.value as object)) {
+      const v = (o.value as { active?: unknown }).active;
+      if (typeof v === "boolean") result = v;
+    }
+  }
+  return result;
+}
+
+export function createScimRouter(prisma?: PrismaClient): Router {
+  const router = Router();
+
+  // Dedicated SCIM bearer guard on the whole surface — never authMiddleware.
+  router.use("/scim/v2", scimAuthMiddleware);
+
+  /** Shared async wrapper: renders a thrown ScimError into the SCIM Error
+   *  envelope; anything else 500s as a SCIM error WITHOUT leaking internals. */
+  const handle =
+    (fn: (req: Request, res: Response) => Promise<void>) =>
+    async (req: Request, res: Response): Promise<void> => {
+      try {
+        if (!prisma) throw new ScimError(500, "SCIM is not available");
+        await fn(req, res);
+      } catch (err) {
+        if (err instanceof ScimError) {
+          res.status(err.status).type(SCIM_CONTENT_TYPE).json(err.toScim());
+          return;
+        }
+        logger.error({ err: (err as Error).message }, "SCIM request failed");
+        res.status(500).type(SCIM_CONTENT_TYPE).json(new ScimError(500, "Internal error").toScim());
+      }
+    };
+
+  // ── Users ──
+
+  router.post(
+    "/scim/v2/Users",
+    handle(async (req, res) => {
+      const parsed = parseScimUser(req.body);
+      const { user, created } = await provisionUser(prisma!, parsed);
+      res
+        .status(created ? 201 : 200)
+        .type(SCIM_CONTENT_TYPE)
+        .location(`/scim/v2/Users/${user.id}`)
+        .json(toScimUser(asScimSource(user)));
+    }),
+  );
+
+  router.get(
+    "/scim/v2/Users",
+    handle(async (req, res) => {
+      const filter = typeof req.query.filter === "string" ? req.query.filter : undefined;
+      // The only supported filter is `userName eq "..."` (Okta's existence
+      // probe). An unsupported/absent filter returns an empty ListResponse
+      // rather than a 400 that would wedge Okta's reconciliation.
+      const email = parseUserNameEqFilter(filter);
+      if (!email) {
+        res.status(200).type(SCIM_CONTENT_TYPE).json(toScimListResponse([], 0, 1));
+        return;
+      }
+      const user = await findUserByUserName(prisma!, email);
+      const resources = user ? [toScimUser(asScimSource(user))] : [];
+      res.status(200).type(SCIM_CONTENT_TYPE).json(toScimListResponse(resources, resources.length, 1));
+    }),
+  );
+
+  router.get(
+    "/scim/v2/Users/:id",
+    handle(async (req, res) => {
+      const user = await findUserById(prisma!, req.params.id);
+      if (!user) throw ScimError.notFound("User not found");
+      res.status(200).type(SCIM_CONTENT_TYPE).json(toScimUser(asScimSource(user)));
+    }),
+  );
+
+  // PUT = full replace. Okta sends the whole resource; we key by the path id
+  // and apply displayName + active in a SINGLE update. (userName/email is the
+  // immutable login key — we do not re-key an existing row here.)
+  router.put(
+    "/scim/v2/Users/:id",
+    handle(async (req, res) => {
+      const existing = await findUserById(prisma!, req.params.id);
+      if (!existing) throw ScimError.notFound("User not found");
+      const parsed = parseScimUser(req.body);
+      const updated = await prisma!.user.update({
+        where: { id: existing.id },
+        data: {
+          displayName: parsed.displayName,
+          directoryStatus: parsed.active ? "ACTIVE" : "DEACTIVATED",
+        },
+      });
+      res.status(200).type(SCIM_CONTENT_TYPE).json(toScimUser(asScimSource(updated)));
+    }),
+  );
+
+  // PATCH = partial. The op Okta uses for (de)activation is replace on
+  // `active`; we honor that and ignore other ops (we don't support arbitrary
+  // attribute patches — out of scope per the AC).
+  router.patch(
+    "/scim/v2/Users/:id",
+    handle(async (req, res) => {
+      const existing = await findUserById(prisma!, req.params.id);
+      if (!existing) throw ScimError.notFound("User not found");
+      const active = activeFromPatch(req.body);
+      if (active === undefined) {
+        // Nothing we act on — return the current resource unchanged (a no-op
+        // PATCH is not an error in SCIM).
+        res.status(200).type(SCIM_CONTENT_TYPE).json(toScimUser(asScimSource(existing)));
+        return;
+      }
+      const updated = await setUserActive(prisma!, existing.id, active);
+      res.status(200).type(SCIM_CONTENT_TYPE).json(toScimUser(asScimSource(updated ?? existing)));
+    }),
+  );
+
+  // DELETE de-provisions. Per the directory model this is a SOFT deactivate
+  // (architecture-guard rule 10), NOT a row delete — Okta may re-activate the
+  // same person later and we must preserve User.id + audit history.
+  router.delete(
+    "/scim/v2/Users/:id",
+    handle(async (req, res) => {
+      const result = await deactivateUser(prisma!, req.params.id);
+      if (!result) throw ScimError.notFound("User not found");
+      res.status(204).end();
+    }),
+  );
+
+  // ── Groups ──
+  // Minimal: upsert the group (role mapping) and apply its mapped role to the
+  // listed members. Membership detail / the gated Team UI is explicitly NOT
+  // built here (AC).
+  router.post(
+    "/scim/v2/Groups",
+    handle(async (req, res) => {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const displayName = typeof body.displayName === "string" ? body.displayName.trim() : "";
+      if (displayName.length === 0) {
+        throw ScimError.badRequest("displayName is required for a Group");
+      }
+      const externalId =
+        typeof body.externalId === "string" && body.externalId.length > 0 ? body.externalId : undefined;
+      const members = Array.isArray(body.members) ? body.members : [];
+      const memberUserIds = members
+        .map((m) => (m as { value?: unknown }).value)
+        .filter((v): v is string => typeof v === "string");
+
+      const group = await provisionGroup(prisma!, { displayName, externalId, memberUserIds });
+      res
+        .status(201)
+        .type(SCIM_CONTENT_TYPE)
+        .location(`/scim/v2/Groups/${group.id}`)
+        .json({
+          schemas: [SCIM_GROUP_SCHEMA],
+          id: group.id,
+          displayName: group.displayName,
+          meta: { resourceType: "Group", location: `/scim/v2/Groups/${group.id}` },
+        });
+    }),
+  );
+
+  return router;
+}

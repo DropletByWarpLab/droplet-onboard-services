@@ -48,6 +48,7 @@ import {
   Loader2,
   Plus,
   AlertTriangle,
+  Info,
   Clock,
   Trash2,
   ArrowUpRight,
@@ -64,6 +65,7 @@ import {
 import type { ApDeviceInfo, ApDeviceStatus } from "@/lib/types";
 import { Dialog } from "@/components/Dialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { translateError } from "@/lib/friendly-errors";
 
 // ────────────────────────────────────────────────────────────────────
 // Status display metadata. Centralised so the panel and any future
@@ -215,7 +217,11 @@ function timeAgo(iso: string | null | undefined): string {
 function displayNameFor(ap: ApDeviceInfo): string {
   if (ap.displayName) return ap.displayName;
   const last3 = ap.mac.split(":").slice(-3).join(":");
-  if (ap.model?.includes("raspberrypi,5")) return `Pi5 AP (${last3})`;
+  // The device-tree compatible string `raspberrypi,5-model-b` is the literal
+  // value Pi-based APs emit on /proc/device-tree/compatible — matched here for
+  // detection (do NOT rename it), but the operator-facing label stays
+  // hardware-agnostic (ADR-011).
+  if (ap.model?.includes("raspberrypi,5")) return `AP (${last3})`;
   if (ap.model) return `${ap.model} AP (${last3})`;
   return `Extender (${last3})`;
 }
@@ -230,6 +236,9 @@ type OperationStatus =
   | { state: "idle" }
   | { state: "pending"; id: string; mac: string; verb: "approve" | "remove" }
   | { state: "applied"; id: string; mac: string }
+  // Neutral no-change terminal (routing 4xx): the request was refused before any
+  // router change. Distinct from rolled_back (a change made then reverted).
+  | { state: "rejected"; id: string; mac: string; reason: string | null }
   | { state: "rolled_back"; id: string; mac: string; reason: string | null };
 
 interface ApCardProps {
@@ -401,12 +410,33 @@ export function CoverageExtendersPanel() {
             mac: opStatus.mac,
           });
           await mutate("/api/aps");
+        } else if (op.state === "rejected") {
+          // Neutral no-change terminal — the router refused the request (4xx),
+          // nothing was applied or reverted. Don't present the rollback alarm.
+          setOpStatus({
+            state: "rejected",
+            id: op.id,
+            mac: opStatus.mac,
+            reason: op.reason,
+          });
+          await mutate("/api/aps");
         } else if (op.state === "rolled_back") {
           setOpStatus({
             state: "rolled_back",
             id: op.id,
             mac: opStatus.mac,
             reason: op.reason,
+          });
+          await mutate("/api/aps");
+        } else if (op.state === "unknown") {
+          // DASH-07: 404 from the orchestrator — indeterminate, not a success.
+          // Present as unconfirmed (rolled_back banner) and re-check the AP
+          // list rather than reporting the change as applied.
+          setOpStatus({
+            state: "rolled_back",
+            id: op.id,
+            mac: opStatus.mac,
+            reason: op.reason ?? "We couldn't confirm this change — re-check the device list.",
           });
           await mutate("/api/aps");
         } else if (Date.now() - startedAt > 70_000) {
@@ -461,10 +491,7 @@ export function CoverageExtendersPanel() {
       setApproveDialogOpen(false);
       setApproveTarget(null);
     } catch (err) {
-      const copy = copyForError(
-        err,
-        err instanceof Error ? err.message : undefined,
-      );
+      const copy = copyForError(err, translateError(err, "network"));
       setErrorCopy(copy);
       setErrorMsg(`${copy.title}. ${copy.body}`);
       throw err; // keep dialog open so user can retry
@@ -489,10 +516,7 @@ export function CoverageExtendersPanel() {
         });
       }
     } catch (err) {
-      const copy = copyForError(
-        err,
-        err instanceof Error ? err.message : undefined,
-      );
+      const copy = copyForError(err, translateError(err, "network"));
       setErrorCopy(copy);
       setErrorMsg(`${copy.title}. ${copy.body}`);
       throw err;
@@ -565,6 +589,31 @@ export function CoverageExtendersPanel() {
           <p className="type-subheadline text-label-primary flex-1">
             Finishing setup… the router is applying the new configuration.
           </p>
+        </div>
+      )}
+      {opStatus.state === "rejected" && (
+        <div
+          role="status"
+          className="mb-3 dp-card border border-separator bg-surface-secondary flex items-center gap-3 px-3 py-2"
+        >
+          <Info size={16} className="text-label-secondary" />
+          <div className="flex-1">
+            <p className="type-subheadline text-label-primary font-medium">
+              No change made
+            </p>
+            <p className="type-footnote text-label-tertiary">
+              {opStatus.reason ??
+                "The router rejected the request, so nothing was changed."}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setOpStatus({ state: "idle" })}
+            className="dp-btn-secondary type-footnote !min-h-[36px] !py-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            aria-label="Dismiss"
+          >
+            Dismiss
+          </button>
         </div>
       )}
       {opStatus.state === "rolled_back" && (
@@ -650,8 +699,8 @@ export function CoverageExtendersPanel() {
         </div>
       )}
 
-      {/* WARP-446 (blocker #3): masked-PSK dialog replaces the old
-          window.prompt(). Read-only network name + show/hide eyeball
+      {/* WARP-446 (blocker #3): masked-PSK dialog that replaced the old
+          native browser prompt. Read-only network name + show/hide eyeball
           + inline 8–63-char validation. */}
       <ApproveExtenderDialog
         open={approveDialogOpen}
@@ -716,7 +765,7 @@ function EmptyState({ onAdd }: { onAdd: () => void }) {
           <Plus size={14} aria-hidden /> Add extender
         </button>
         <a
-          href="https://droplet.lan/help#extenders"
+          href="/help#extenders"
           className="type-footnote text-label-tertiary hover:text-label-primary inline-flex items-center gap-1 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded-sm"
         >
           Learn more <ArrowUpRight size={12} aria-hidden />
@@ -791,11 +840,7 @@ function ApproveExtenderDialog({
       // The parent surfaces the friendly error in the panel banner;
       // here we keep the dialog open AND show the error inline so the
       // user can re-type the password without losing context.
-      setLocalError(
-        err instanceof Error
-          ? err.message
-          : "Couldn't set up the extender. Try again.",
-      );
+      setLocalError(translateError(err, "network"));
     } finally {
       setSubmitting(false);
     }

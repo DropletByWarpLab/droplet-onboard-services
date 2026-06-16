@@ -7,7 +7,9 @@
 
 import pino from "pino";
 import * as openwrt from "./openwrt.client.js";
+import * as hostapdBridge from "./hostapd-bridge.service.js";
 import { cacheGet, cacheSet, cacheDel } from "./cache.service.js";
+import { config } from "../config.js";
 import { RouterError } from "../types/router-error.js";
 import type {
   NetworkSummary,
@@ -94,19 +96,34 @@ export async function getNetworkOverview(): Promise<Result<NetworkOverview, Rout
   if (cached) return ok(cached);
 
   try {
-    const [interfaces, wireless, systemInfo, leases] = await Promise.all([
-      openwrt.fetchInterfaces(),
-      openwrt.fetchWirelessStatus(),
-      openwrt.fetchSystemInfo(),
-      openwrt.fetchDhcpLeases(),
-    ]);
+    // WARP-826: `routerConnected` is DERIVED from a live reachability probe, not
+    // hardcoded `true`. `healthCheck()` mirrors the routing service's `/health`
+    // `connected` flag — a real ubus `board_info()` probe — so the flag is honest:
+    //   * a reachable LAN-only single-box (WAN handled by the host → the SDK
+    //     returns a `present:false` wan stub, NOT an error) reports connected:true
+    //     and is ONLINE — WAN-absence must never read as offline; and
+    //   * an unreachable router reports connected:false and is OFFLINE, which the
+    //     constant `true` could never represent.
+    // Run it alongside the status fetches so there's no extra round-trip latency.
+    // healthCheck() swallows its own errors and returns false, but `.catch` guards
+    // the derivation regardless: a probe hiccup degrades to "not connected", it
+    // never throws the whole overview into the 503 arm (a genuine *fetch* failure
+    // still does, below — reachability derivation must not mask real summary faults).
+    const [interfaces, wireless, systemInfo, leases, routerConnected] =
+      await Promise.all([
+        openwrt.fetchInterfaces(),
+        openwrt.fetchWirelessStatus(),
+        openwrt.fetchSystemInfo(),
+        openwrt.fetchDhcpLeases(),
+        openwrt.healthCheck().catch(() => false),
+      ]);
 
     const overview: NetworkOverview = {
       interfaces,
       wireless,
       system: systemInfo,
       connectedDeviceCount: leases.length,
-      routerConnected: true,
+      routerConnected,
     };
 
     await cacheSet(CACHE_KEYS.overview, overview, CACHE_TTL_SHORT);
@@ -213,8 +230,22 @@ export async function getSystemInfo(): Promise<RouterSystemInfo> {
 export async function setWifiSsid(
   radio: string,
   ifaceSection: string,
-  ssid: string
+  ssid: string,
+  // WARP-808 review #2: the per-user key for the staged SSID. The SSID write and
+  // the password/confirm write are separate HTTP requests, so the staged value
+  // is keyed by the authenticated user (isolating concurrent wizard sessions)
+  // rather than held in one shared global.
+  userId?: string | null
 ): Promise<openwrt.WriteResult> {
+  // WARP-808: on the single-box (hostapd) shape the AP is a raw host hostapd,
+  // not a UCI router — a UCI write 500s. STAGE the SSID instead; the password
+  // write (which hostapd needs alongside the SSID) does the single AP reload.
+  // Every other shape keeps the UCI path verbatim (AC2 regression guard).
+  if (config.DROPLET_AP_MODE === "hostapd") {
+    hostapdBridge.stageSsid(ssid, userId);
+    // A stage isn't an operation record (no safe-apply/rollback for hostapd).
+    return { operationId: null };
+  }
   const result = await openwrt.setWirelessSsid(radio, ifaceSection, ssid);
   await invalidateNetworkCache();
   return result;
@@ -222,8 +253,19 @@ export async function setWifiSsid(
 
 export async function setWifiPassword(
   ifaceSection: string,
-  password: string
+  password: string,
+  // WARP-808 review #2: same per-user key used to stage the SSID; applyWifi
+  // consumes that user's staged value (or falls back to the live AP SSID).
+  userId?: string | null
 ): Promise<openwrt.WriteResult> {
+  // WARP-808: single-box hostapd shape — APPLY the staged SSID + this PSK via
+  // the device-bridge in one call (one AP reload per submit). Other shapes keep
+  // the UCI path verbatim.
+  if (config.DROPLET_AP_MODE === "hostapd") {
+    const result = await hostapdBridge.applyWifi(password, userId);
+    await invalidateNetworkCache();
+    return result;
+  }
   const result = await openwrt.setWirelessPassword(ifaceSection, password);
   await invalidateNetworkCache();
   return result;
@@ -256,6 +298,26 @@ export async function blockDevice(mac: string, name?: string): Promise<openwrt.W
 
 export async function unblockDevice(mac: string): Promise<openwrt.WriteResult> {
   const result = await openwrt.unblockDevice(mac);
+  await invalidateNetworkCache();
+  return result;
+}
+
+// WARP-613: phone-home egress control. Dispatched by the egress reconciler
+// (devices) and the phone-home routes (cameras). See ADR-012.
+export async function blockPhoneHome(mac: string): Promise<openwrt.WriteResult> {
+  const result = await openwrt.blockPhoneHome(mac);
+  await invalidateNetworkCache();
+  return result;
+}
+
+export async function unblockPhoneHome(mac: string): Promise<openwrt.WriteResult> {
+  const result = await openwrt.unblockPhoneHome(mac);
+  await invalidateNetworkCache();
+  return result;
+}
+
+export async function setCameraPhoneHome(blocked: boolean): Promise<openwrt.WriteResult> {
+  const result = await openwrt.setCameraPhoneHome(blocked);
   await invalidateNetworkCache();
   return result;
 }

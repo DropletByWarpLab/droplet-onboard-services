@@ -1,6 +1,6 @@
 {
   "droplet-ai": {
-    "description": "Network management access for Droplet AI agent (Jetson)",
+    "description": "Network management access for Droplet AI agent (appliance)",
     "read": {
       "ubus": {
         "system": ["board", "info"],

@@ -1,7 +1,7 @@
 """
 Droplet TFT Display Service
 =============================
-FastAPI wrapper for the 480x320 PyPortal Titano (ILI9341) TFT display.
+FastAPI wrapper for the 480x320 status display (ILI9341) TFT.
 Exposes REST endpoints for the orchestrator and AI gateway to control
 what's shown on the physical display and to read / simulate touch input.
 
@@ -32,7 +32,7 @@ from typing import List, Optional
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.responses import JSONResponse, FileResponse
 from starlette.middleware.base import BaseHTTPMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from PIL import Image, UnidentifiedImageError
 
 from display import TFTDisplay, SIM_OUTPUT, WIDTH, HEIGHT
@@ -89,6 +89,18 @@ async def lifespan(app: FastAPI):
                 display._backend, touch._backend)
     yield
     display.stop_cycle()
+    # M1 (WARP-624): render the shutdown frame from here as a best-effort
+    # fallback. The systemd ExecStop oneshot only fires on a systemd-driven
+    # halt; `docker compose down`, a container crash/OOM, or a host without
+    # the unit would otherwise freeze the last live frame on the panel — the
+    # exact "stale frame" this feature set out to fix. This runs inside the
+    # container before teardown, so it covers every teardown path. It MUST be
+    # best-effort: show_shutdown() bounds its own serial write, and we swallow
+    # any error so a display fault can never wedge container shutdown.
+    try:
+        display.show_shutdown(reason="System stopping", phase="stopping")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("shutdown-frame fallback failed (non-fatal): %s", e)
     touch.stop()
     logger.info("TFT display service stopped")
 
@@ -117,6 +129,70 @@ class TapRequest(BaseModel):
 class WifiConnectRequest(BaseModel):
     ssid: str = Field(..., min_length=1, max_length=64)
     password: str = Field("", max_length=128)
+
+
+class BootRequest(BaseModel):
+    stage: str = Field(..., max_length=48, description="Current boot stage caption")
+    detail: str = Field("", max_length=54, description="Optional detail line")
+    pct: Optional[int] = Field(
+        None, ge=0, le=100,
+        description="Progress 0-100; omit for an indeterminate band")
+
+
+class ShutdownRequest(BaseModel):
+    reason: str = Field("", max_length=54, description="Why we're shutting down")
+    phase: str = Field(
+        "stopping", max_length=16,
+        description="'stopping' (in progress) or 'halted' (safe to power off)")
+
+
+class ClaimRequest(BaseModel):
+    # WARP-632 / ADR-017: the orchestrator mints the claim code and pushes it
+    # here while the box is unclaimed. `code` is the DRPL-XXXX-XXXX plaintext
+    # (already grouped for the lid); `setup_url` is where the customer points
+    # their phone. Bounds are generous but cap obvious abuse on this LAN-only,
+    # SERVICE_SECRET-guarded endpoint.
+    code: str = Field(..., min_length=1, max_length=32, description="Claim code")
+    setup_url: str = Field(..., max_length=200, description="Setup wizard URL")
+    # WARP-819: optional Wi-Fi-connect creds so the claim screen ALSO shows how
+    # to join the box's Wi-Fi with no prior config — the host-encoded QR
+    # bit-matrix (the firmware never encodes on-device) plus the SSID and
+    # plaintext PSK for the readable "type-it" text under the QR. All optional
+    # and backward-compatible: an older orchestrator that omits them renders the
+    # original claim-only layout. The matrix is capped (a v-large QR would OOM
+    # the PyPortal); a Wi-Fi WPA2 join QR is small (≤ ~33x33), so 64 is headroom.
+    wifi_qr_matrix: Optional[List[List[int]]] = Field(
+        None, max_length=64, description="Host-encoded Wi-Fi QR bit-matrix (0/1 rows)")
+    wifi_ssid: Optional[str] = Field(
+        None, max_length=64, description="AP SSID for the readable creds line")
+    wifi_psk: Optional[str] = Field(
+        None, max_length=128, description="AP WPA2 passphrase for the readable creds line")
+
+    @model_validator(mode="after")
+    def _wifi_fields_all_or_nothing(self) -> "ClaimRequest":
+        """Reject a PARTIAL Wi-Fi block (WARP-819).
+
+        The three wifi_* fields are individually Optional only so a claim push
+        can omit the whole block (graceful degradation to the claim-only
+        layout). A partial block is a footgun: an ssid with no psk would render
+        a blank-password QR (`WIFI:T:WPA;S:Droplet;P:;;`) — an unjoinable,
+        named-but-open network, the same hazard the bridge boot-race guard
+        prevents. So all three must be present TOGETHER or none at all. An empty
+        string counts as absent: a present-but-empty psk is exactly the
+        blank-password case we must refuse, and the matrix must be non-empty to
+        paint anything.
+        """
+        present = (
+            bool(self.wifi_qr_matrix),       # non-empty matrix
+            bool(self.wifi_ssid),            # non-empty ssid
+            bool(self.wifi_psk),             # non-empty psk
+        )
+        if any(present) and not all(present):
+            raise ValueError(
+                "wifi_qr_matrix, wifi_ssid and wifi_psk must all be provided "
+                "together (and be non-empty) — a partial Wi-Fi block would "
+                "render a blank-password QR")
+        return self
 
 
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 MB
@@ -164,6 +240,19 @@ async def show_stats():
     return {"ok": True, "mode": "stats"}
 
 
+@app.post("/display/system")
+async def show_system():
+    """Navigate the panel to the combined System + Wi-Fi screen (py-v3).
+
+    Bare-nav endpoint the orchestrator's screen-qr poller calls once the box is
+    claimed, so the panel leaves the modal claim screen and shows the live UI.
+    """
+    if not display:
+        raise HTTPException(503, "Display not initialized")
+    display.show_system()
+    return {"ok": True, "mode": "system"}
+
+
 @app.post("/display/logo")
 async def show_logo():
     if not display:
@@ -178,6 +267,57 @@ async def show_message(req: MessageRequest):
         raise HTTPException(503, "Display not initialized")
     display.show_message(req.title, req.lines)
     return {"ok": True, "mode": "message", "hold_seconds": 30}
+
+
+@app.post("/display/boot")
+async def show_boot(req: BootRequest):
+    """Show the boot/startup screen with a stage caption + optional progress.
+
+    The boot screen is otherwise self-driven (the service opens on it and the
+    readiness loop clears it); this endpoint lets the host's startup
+    orchestration push finer-grained stage/progress updates while the stack
+    comes up.
+    """
+    if not display:
+        raise HTTPException(503, "Display not initialized")
+    display.show_boot(req.stage, req.detail, req.pct)
+    return {"ok": True, "mode": "boot"}
+
+
+@app.post("/display/shutdown")
+async def show_shutdown(req: ShutdownRequest):
+    """Show the shutdown screen and freeze the panel on it.
+
+    Driven by the host's systemd ExecStop oneshot (droplet-shutdown-screen)
+    at teardown so the last thing on the panel is "Shutting down" rather than
+    a frozen live screen. `phase=halted` switches the copy to
+    "Safe to power off".
+    """
+    if not display:
+        raise HTTPException(503, "Display not initialized")
+    display.show_shutdown(req.reason, req.phase)
+    return {"ok": True, "mode": "shutdown"}
+
+
+@app.post("/display/claim")
+async def show_claim(req: ClaimRequest):
+    """Show the onboarding claim screen (WARP-632 / ADR-017).
+
+    Driven by the orchestrator's screen-qr service while the box is unclaimed:
+    it mints the claim code and pushes it here. We render a dedicated `claim`
+    mode on the PyPortal (large code + setup URL) — NOT the preview-only
+    /display/custom image path. SERVICE_SECRET-guarded like the other display
+    routes (the middleware enforces the bearer).
+    """
+    if not display:
+        raise HTTPException(503, "Display not initialized")
+    display.show_claim(
+        req.code, req.setup_url,
+        wifi_ssid=req.wifi_ssid,
+        wifi_psk=req.wifi_psk,
+        wifi_qr_matrix=req.wifi_qr_matrix,
+    )
+    return {"ok": True, "mode": "claim"}
 
 
 @app.post("/display/custom")
@@ -285,7 +425,7 @@ async def wifi_scan():
     snap = display.fetch_wifi()
     if snap is None:
         raise HTTPException(502, "Wi-Fi helper unreachable")
-    # Also push to PyPortal so the on-screen list refreshes immediately
+    # Also push to the status display so the on-screen list refreshes immediately
     display._pyportal_send("wifi", snap)
     return snap
 

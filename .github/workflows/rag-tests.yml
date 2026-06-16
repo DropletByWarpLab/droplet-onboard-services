@@ -212,7 +212,8 @@ jobs:
             rag-brain-upload.integration.test.ts \
             rag-knowledge.integration.test.ts \
             rag-brain-export.integration.test.ts \
-            rag-end-to-end.integration.test.ts
+            rag-end-to-end.integration.test.ts \
+            rag-anchors.integration.test.ts
 
       # Always dump container logs on test failure — without this a
       # broken integration test at 03:00 is impossible to triage from
