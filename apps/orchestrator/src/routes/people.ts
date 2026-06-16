@@ -30,6 +30,7 @@ import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import pino from "pino";
 import { requireRole } from "../middleware/auth.js";
+import { requireScope, type ScopeLoader } from "../middleware/scope.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import {
   createTeamInvite,
@@ -173,6 +174,7 @@ const PERMISSIONS_MATRIX = {
 
 export function createPeopleRouter(
   prisma: PrismaClient,
+  loadUserScopes: ScopeLoader,
   sendOptions: SendOptions = {},
 ): Router {
   const router = Router();
@@ -327,6 +329,11 @@ export function createPeopleRouter(
   router.patch(
     "/people/:id/role",
     requireRole("owner", "admin"),
+    // Scope axis (WARP-455): runs AFTER requireRole per scope.ts module
+    // comment. owner/admin short-circuit before the loader, so today this
+    // is defense-in-depth + makes the axis live; it bites if the role
+    // allowlist ever widens to family/guest.
+    requireScope("exec_only", loadUserScopes),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         // WARP-480 self-action guard. Runs FIRST so the refusal path
@@ -434,6 +441,8 @@ export function createPeopleRouter(
   router.patch(
     "/people/:id/scope",
     requireRole("owner", "admin"),
+    // Scope axis (WARP-455) — second guard, see PATCH /people/:id/role.
+    requireScope("exec_only", loadUserScopes),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         // WARP-480 self-action guard. See the matching block on
@@ -462,26 +471,30 @@ export function createPeopleRouter(
           return res.status(404).json({ error: "User not found" });
         }
 
-        // Drop the old bindings, write the new ones. Two separate
-        // Prisma calls (deleteMany + N creates) — production wiring
-        // wraps these in a $transaction so a partial failure can't
-        // leave the user with zero bindings; the test mock skips the
-        // transaction wrapper for shape simplicity.
+        // Drop the old bindings, write the new ones. The deleteMany +
+        // recreate pair runs inside a single interactive $transaction so a
+        // transient DB error or process crash between the delete commit and
+        // the last create can't leave the user with zero bindings — which
+        // would silently lock them out of every scope-guarded route. Same
+        // shape as the PATCH /role last-owner invariant transaction above;
+        // serializable isolation is Prisma's $transaction default on Postgres.
         const targetUserId = req.params.id;
         const actor = req.user?.username ?? null;
 
-        await prisma.scopeBinding.deleteMany({
-          where: { userId: targetUserId },
-        });
-        for (const scope of parsed.data.scopes) {
-          await prisma.scopeBinding.create({
-            data: {
-              userId: targetUserId,
-              scope: scope as any, // Scope enum literal; cast for Prisma input
-              grantedBy: actor,
-            },
+        await prisma.$transaction(async (tx) => {
+          await tx.scopeBinding.deleteMany({
+            where: { userId: targetUserId },
           });
-        }
+          for (const scope of parsed.data.scopes) {
+            await tx.scopeBinding.create({
+              data: {
+                userId: targetUserId,
+                scope: scope as any, // Scope enum literal; cast for Prisma input
+                grantedBy: actor,
+              },
+            });
+          }
+        });
 
         await recordActivity({
           kind: "system",
@@ -516,6 +529,8 @@ export function createPeopleRouter(
   router.delete(
     "/people/:id",
     requireRole("owner", "admin"),
+    // Scope axis (WARP-455) — second guard, see PATCH /people/:id/role.
+    requireScope("exec_only", loadUserScopes),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         // WARP-480 self-action guard. An owner could otherwise DELETE

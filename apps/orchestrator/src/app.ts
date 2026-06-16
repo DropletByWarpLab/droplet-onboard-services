@@ -65,6 +65,10 @@ import { createFipsRouter } from "./routes/fips.js";
 import { createActivityRouter } from "./routes/activity.js";
 import { createLogsRouter } from "./routes/logs.js";
 import { createPeopleRouter } from "./routes/people.js";
+import {
+  initScopeLoader,
+  loadUserEffectiveScopes,
+} from "./services/scope-loader.service.js";
 import { createSettingsRouter } from "./routes/settings.js";
 import { createSettingsEmailRouter } from "./routes/settings-email.js";
 import { createEmailRouter, wireEmailAnalysis } from "./routes/email.js";
@@ -201,6 +205,14 @@ export function createApp(prisma: PrismaClient) {
   // branch instead of regressing the OCS-username-as-id leak.
   setAuthPrisma(prisma);
 
+  // WARP-455 — bind the scope-loader singleton to the same Prisma client
+  // before the first request, for the same reason as setAuthPrisma above:
+  // requireScope()'s injected loader (loadUserEffectiveScopes) reads
+  // ScopeBinding/GuestExpiry through this singleton, and the very first
+  // post-boot request to a scope-guarded route must find it populated.
+  // Idempotent — a second createApp() in tests is a no-op.
+  initScopeLoader(prisma);
+
   // Auth middleware (controlled by AUTH_ENABLED env var)
   app.use(authMiddleware);
 
@@ -310,7 +322,7 @@ export function createApp(prisma: PrismaClient) {
   // WARP-455: A1 local user directory + role/scope mutations. Mutations
   // emit ActivityRow rows via recordActivity (auth kind for lifecycle,
   // system kind for permission edits).
-  app.use("/api", createPeopleRouter(prisma));
+  app.use("/api", createPeopleRouter(prisma, loadUserEffectiveScopes));
   // ADR-007 + ADR-009: workspace-type (Home vs Business) singleton.
   // GET available to any authenticated user (drives chrome pill);
   // POST is owner-only (flip the workspace type).

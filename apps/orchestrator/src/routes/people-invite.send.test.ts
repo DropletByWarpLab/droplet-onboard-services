@@ -38,6 +38,7 @@ vi.mock("../services/activity.singleton.js", () => ({
 }));
 
 import { createPeopleRouter } from "./people.js";
+import type { ScopeName } from "../middleware/scope.js";
 import {
   EMAIL_CHANNEL_SINGLETON_ID,
   type EmailChannelConfig,
@@ -106,9 +107,16 @@ function buildApp(prismaMock: any, sendMail = vi.fn().mockResolvedValue({ accept
     (req as any).user = { id: "owner-id", username: "stefan", role: "owner" };
     next();
   });
+  // WARP-455 — scope-loader axis is arg 2; sendOptions moves to arg 3. The
+  // resend route is gated by requireRole only, so the loader is never
+  // invoked here.
   app.use(
     "/api",
-    createPeopleRouter(prismaMock, { transportFactory: () => ({ sendMail }) as never }),
+    createPeopleRouter(
+      prismaMock,
+      async () => new Set<ScopeName>(["team"]),
+      { transportFactory: () => ({ sendMail }) as never },
+    ),
   );
   return { app, sendMail };
 }
