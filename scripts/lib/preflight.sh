@@ -97,17 +97,6 @@ preflight_check() {
   esac
 
   # --- Disk space ---
-  # Appliance-image ordering dependency (M2.8 SD-card image): on a freshly
-  # flashed appliance image, the rootfs partition is small (~the baked image
-  # size) until it auto-expands. The image's first boot MUST run the rootfs
-  # auto-expand (raspi-config `do_expand_rootfs` / pi-gen's default
-  # init=.../resize2fs_once) BEFORE droplet-firstboot.service invokes
-  # setup.sh, or this >=8 GB free gate fails on an otherwise-large SD card.
-  # The baked Pi OS first-boot resize runs in early boot (before
-  # multi-user.target), and droplet-firstboot.service is ordered
-  # After=network-online.target docker.service (well after the resize), so the
-  # ordering holds by construction. If you bake a custom image that disables
-  # the auto-expand, size the rootfs partition >= 12 GB so this check passes.
   local avail_kb avail_gb
   avail_kb=$(df --output=avail "$REPO_ROOT" 2>/dev/null | tail -1 | tr -d ' ')
   if [ -n "$avail_kb" ]; then
