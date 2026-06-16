@@ -1,0 +1,9 @@
+ca-certificates
+curl
+git
+openssl
+jq
+apparmor
+gnupg
+lsb-release
+uidmap
