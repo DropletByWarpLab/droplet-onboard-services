@@ -111,6 +111,17 @@ function buildApp(user: AuthUser): express.Express {
     createNetworkThroughputRouter({
       networkThroughputSample: { findFirst: vi.fn().mockResolvedValue(null) },
       networkDevice: { count: vi.fn().mockResolvedValue(0) },
+      // WARP-468: the summary handler now sums real off-LAN bytes
+      // (month-to-date) and DNS-blocked counts (day-to-date). This RBAC
+      // test only pins the auth boundary, so null sums (→ 0 in the body)
+      // are sufficient — but the delegates must exist or the property
+      // access throws and the route 500s before auth is even asserted.
+      offLanEgressSample: {
+        aggregate: vi.fn().mockResolvedValue({ _sum: { bytes: null } }),
+      },
+      dnsBlockSample: {
+        aggregate: vi.fn().mockResolvedValue({ _sum: { blockedCount: null } }),
+      },
     } as unknown as PrismaClient),
   );
   return app;
