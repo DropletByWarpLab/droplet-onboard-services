@@ -112,9 +112,13 @@ export async function ensureDefaultModelPulled(): Promise<void> {
   void backgroundPull(LLM_MODEL);
 }
 
-async function backgroundPull(model: string): Promise<void> {
+// Exported for testing: the streaming progress parser is the unit under
+// regression test (completed:0 must be forwarded as pct=0).
+export async function backgroundPull(model: string): Promise<void> {
   const startedAt = Date.now();
-  let lastLoggedPercent = -1;
+  // Seed at -10 (not -1) so the very first event (pct=0) clears the +10
+  // throttle below and logs the start of the pull.
+  let lastLoggedPercent = -10;
   try {
     const resp = await fetch(`${OLLAMA_URL}/api/pull`, {
       method: "POST",
@@ -158,9 +162,20 @@ async function backgroundPull(model: string): Promise<void> {
           logger.error({ model, error: ev.error }, "Ollama reported pull error");
           return;
         }
-        if (ev.total && ev.completed) {
+        // Guard on null/undefined, NOT falsiness: Ollama emits the first
+        // progress event for each new blob/layer with `completed: 0`. A
+        // falsy check (`ev.total && ev.completed`) silently drops that event,
+        // so the front-panel/dashboard progress bar appears frozen at the
+        // previous layer's high-water mark on multi-layer pulls. Forwarding
+        // `completed: 0` lets pct=0 be logged at the start of every layer.
+        if (ev.total != null && ev.completed != null) {
           const pct = Math.floor((ev.completed / ev.total) * 100);
-          if (pct >= lastLoggedPercent + 10) {
+          // Log every +10% within a layer, AND whenever progress resets to a
+          // lower value: Ollama restarts at completed:0 for each new blob/layer,
+          // so a decrease signals a new layer whose 0% start must be logged —
+          // otherwise the log sticks at the previous layer's high-water mark on
+          // multi-layer pulls (the bar appears frozen).
+          if (pct >= lastLoggedPercent + 10 || pct < lastLoggedPercent) {
             logger.info(
               {
                 model,
