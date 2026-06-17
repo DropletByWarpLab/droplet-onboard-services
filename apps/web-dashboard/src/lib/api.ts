@@ -149,18 +149,65 @@ export async function checkSetupRequired(): Promise<SetupStatus> {
 export async function setupAdmin(
   email: string,
   password: string,
-  displayName?: string
+  displayName?: string,
+  // WARP-165 — the front-panel claim code, sent ONLY when the physical-presence
+  // claim gate is on (checkClaimGateEnabled). Omitted on the default un-gated
+  // path so the request body is byte-identical to before. The orchestrator
+  // verifies it read-only against the persisted ClaimCode and answers 403
+  // CLAIM_CODE_REQUIRED / CLAIM_CODE_INVALID, surfaced via the thrown `code`.
+  claimCode?: string,
 ): Promise<void> {
   const res = await authFetch(`${BASE}/api/auth/setup`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password, displayName }),
+    body: JSON.stringify({
+      email,
+      password,
+      displayName,
+      ...(claimCode ? { claimCode } : {}),
+    }),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     const err = new Error(data.error || "Setup failed") as Error & { code?: string };
     err.code = data.code;
     throw err;
+  }
+}
+
+/**
+ * WARP-165 — probe whether the physical-presence claim gate is on. Reads the
+ * same public, pre-auth `GET /api/auth/setup` endpoint as `checkSetupRequired`
+ * (which now also returns `claimGateEnabled`). The setup wizard's Account step
+ * uses this to decide whether to show the claim-code field and require it.
+ *
+ * Fail-SAFE toward NOT showing the field: any non-2xx, network error, timeout,
+ * or a body that omits an explicit `true` resolves to `false`. A box where the
+ * gate is genuinely on will get an explicit `true`; anything indeterminate must
+ * not block a legitimate first-run setup behind a field the server won't
+ * actually enforce — mirrors the default-OFF, never-lock-out posture of the
+ * gate itself.
+ */
+export async function checkClaimGateEnabled(): Promise<boolean> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), SETUP_PROBE_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${BASE}/api/auth/setup`, {
+      credentials: "same-origin",
+      signal: controller.signal,
+    });
+    if (!res.ok) return false;
+    let data: unknown;
+    try {
+      data = await res.json();
+    } catch {
+      return false;
+    }
+    return (data as { claimGateEnabled?: unknown } | null)?.claimGateEnabled === true;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 

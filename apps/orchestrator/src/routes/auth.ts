@@ -73,6 +73,7 @@ import QRCode from "qrcode";
 import { config } from "../config.js";
 import { purgeUserData } from "../services/brain-memory.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
+import { verifyClaimCodePresence } from "../services/setup-claim.service.js";
 import {
   passwordZod,
   baseUserIdFromEmail,
@@ -125,6 +126,13 @@ const setupSchema = z.object({
   // ADR-013: email is the directory login key and the sole user-facing
   // identifier. Username is derived server-side (deriveUniqueUserId).
   email: emailField,
+  // WARP-165 — front-panel claim code. OPTIONAL in the schema (default-off
+  // back-compat: the un-gated path never sends it). Only ENFORCED when
+  // config.DROPLET_CLAIM_GATE_ENABLED is on, where its absence is a 403
+  // CLAIM_CODE_REQUIRED (handled in the route, not the schema, so the
+  // owner-already-exists guard can run first). Bounded so a junk payload is
+  // cheap; verified read-only against the persisted ClaimCode.
+  claimCode: z.string().min(1).max(64).optional(),
 });
 
 // ADR-013: the directory login key is email. The Aurora login (PR #370)
@@ -565,7 +573,15 @@ export function createPublicAuthRouter(
   router.get("/auth/setup", async (_req, res, next) => {
     try {
       const setupRequired = await ncCheckSetupRequired();
-      res.json({ setupRequired });
+      // WARP-165 — surface whether the physical-presence claim gate is on so
+      // the setup wizard's Account step knows to show + require the claim-code
+      // field. Reading config (not the DB) keeps this probe cheap; the field
+      // is verified server-side at POST /auth/setup regardless of what the
+      // client chooses to render.
+      res.json({
+        setupRequired,
+        claimGateEnabled: config.DROPLET_CLAIM_GATE_ENABLED,
+      });
     } catch (err) {
       next(err);
     }
@@ -638,6 +654,57 @@ export function createPublicAuthRouter(
           code: "OWNER_EXISTS",
         });
         return;
+      }
+
+      // ── WARP-165: physical-presence claim gate. ──
+      // When enabled, the genuine first-owner request must carry the claim
+      // code shown on the device's front panel — proof the operator is
+      // physically at the box, not merely on its LAN. This closes the
+      // first-boot window where any LAN client could create the owner.
+      //
+      // POSITIONED AFTER the N1 owner-exists guard ON PURPOSE: a
+      // dropped-response RETRY (the original setup committed but its response
+      // was lost) must hit the benign 409 OWNER_EXISTS above, NOT a fresh
+      // claim 403. So the code is only validated on the genuine
+      // first-owner-creation path (existingOwners === 0).
+      //
+      // VERIFY-ONLY, never consume: the consume that flips the ClaimCode to
+      // `consumed` is owned by the cloud-bind step (POST /api/setup/claim),
+      // and `isClaimed()` reads the consumed count. In the real wizard the box
+      // is claimed BEFORE the owner is created, so the row is already
+      // `consumed` by the time we get here — `verifyClaimCodePresence` matches
+      // either state and never mutates, so it neither double-binds nor breaks
+      // the cloud-claim flow. Default-off (DROPLET_CLAIM_GATE_ENABLED) keeps a
+      // half-shipped gate from locking anyone out.
+      if (config.DROPLET_CLAIM_GATE_ENABLED) {
+        const claimCode = parsed.data.claimCode?.trim() ?? "";
+        if (!claimCode) {
+          // Never log the (absent) code; warn for the operator only.
+          logger.warn(
+            { email },
+            "setup: rejected — claim gate ON and no claim code supplied (WARP-165)",
+          );
+          res.status(403).json({
+            error:
+              "A claim code from the device's front panel is required to complete setup.",
+            code: "CLAIM_CODE_REQUIRED",
+          });
+          return;
+        }
+        const present = await verifyClaimCodePresence(prisma, claimCode);
+        if (!present) {
+          // Never echo or log the submitted/real code (secret-in-logs gate).
+          logger.warn(
+            { email },
+            "setup: rejected — claim code did not match the front-panel code (WARP-165)",
+          );
+          res.status(403).json({
+            error:
+              "That claim code doesn't match the one shown on your device's front panel.",
+            code: "CLAIM_CODE_INVALID",
+          });
+          return;
+        }
       }
 
       // Romain PR #279 round 2: order matters here because the two

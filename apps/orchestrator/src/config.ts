@@ -313,6 +313,28 @@ const envSchema = z.object({
   DROPLET_AP_DAWN_ENABLED: z.coerce.boolean().default(true),
   DROPLET_AP_DEFAULT_TXPOWER: z.coerce.number().default(20),
 
+  // --- Front-panel claim gate (WARP-165) ---
+  // Physical-presence gate for POST /auth/setup: when ON, the first-owner
+  // request must carry the claim code shown on the device's front panel
+  // (verified read-only against the persisted ClaimCode — WARP-632/ADR-017
+  // primitives), proving the operator is physically at the box and not merely
+  // on its LAN. Closes the first-boot window where ANY LAN client could create
+  // the owner before a physical operator does.
+  //
+  // DEFAULT OFF — a half-shipped gate (panel/firmware not yet present, or a
+  // dashboard build that doesn't send the field) must never lock a user out of
+  // their own box; existing setups stay back-compatible. Flip on only once the
+  // panel CLAIM screen and the dashboard /setup code field both ship.
+  //
+  // EXPLICIT string→bool, NOT z.coerce.boolean(): coerce runs Boolean(...), so
+  // the non-empty strings "0"/"false" would BOTH coerce to true and could
+  // silently ENABLE the gate (a lockout foot-gun). Only "1"/"true" enable it;
+  // anything else (including an absent var) leaves it OFF.
+  DROPLET_CLAIM_GATE_ENABLED: z
+    .string()
+    .default("0")
+    .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
+
   // WARP-586: retention window (days) for the append-only audit/log tables
   // ActivityRow, CommandAuditLog, NotificationLog. The daily 03:00 cron
   // (index.ts) deletes rows older than this. 90 days balances "enough

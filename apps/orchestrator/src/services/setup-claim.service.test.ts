@@ -32,6 +32,7 @@ import {
   hashClaimCode,
   normalizeClaimCode,
   consumeClaimCode,
+  verifyClaimCodePresence,
   CLAIM_OUTCOME,
 } from "./setup-claim.service.js";
 
@@ -221,5 +222,81 @@ describe("consumeClaimCode — atomic, single-use, constant-time (PR #373)", () 
 
     expect(result.outcome).toBe(CLAIM_OUTCOME.INVALID);
     expect(prisma.claimCode._rows()[0].state).toBe("available");
+  });
+});
+
+/**
+ * WARP-165 — physical-presence VERIFY (non-consuming).
+ *
+ * The /auth/setup claim gate needs to confirm the operator typed the code off
+ * the front panel WITHOUT consuming it: the consume is owned by the cloud-bind
+ * step (POST /api/setup/claim → consumeClaimCode), and `isClaimed()` reads the
+ * `consumed` count, so a second consume here would either double-bind or (more
+ * likely, since the wizard claims BEFORE creating the owner) find no available
+ * row and wrongly reject a legitimately-claimed box. `verifyClaimCodePresence`
+ * is read-only: it hashes the candidate and constant-time matches it against
+ * ANY persisted ClaimCode row (available OR consumed) — proof of presence,
+ * independent of the consume lifecycle. It NEVER mutates state.
+ */
+describe("verifyClaimCodePresence — read-only physical-presence proof (WARP-165)", () => {
+  beforeEach(() => {
+    process.env.DEVICE_SECRET = "test-device-secret";
+  });
+  afterEach(() => {
+    delete process.env.DEVICE_SECRET;
+  });
+
+  it("returns true for the correct code and does NOT consume it", async () => {
+    const prisma = createPrismaMock();
+    prisma.claimCode._seed({ codeHash: hashClaimCode("DRPL-7K2Q-9F4M") });
+
+    const ok = await verifyClaimCodePresence(prisma as never, "DRPL · 7K2Q · 9F4M");
+
+    expect(ok).toBe(true);
+    // Read-only: the code is still available and unconsumed.
+    const row = prisma.claimCode._rows()[0];
+    expect(row.state).toBe("available");
+    expect(row.usedAt).toBeNull();
+  });
+
+  it("still matches a code whose row was already CONSUMED (wizard claims before /auth/setup)", async () => {
+    // Real flow: the cloud-bind step consumed the code first, so by the time
+    // /auth/setup runs the only row is `consumed`. Presence must still verify.
+    const prisma = createPrismaMock();
+    prisma.claimCode._seed({
+      codeHash: hashClaimCode("DRPL-7K2Q-9F4M"),
+      state: "consumed",
+      usedAt: new Date(),
+    });
+
+    const ok = await verifyClaimCodePresence(prisma as never, "DRPL-7K2Q-9F4M");
+
+    expect(ok).toBe(true);
+    // Untouched — still exactly one consumed row, audit timestamp intact.
+    expect(prisma.claimCode._rows().filter((r) => r.state === "consumed")).toHaveLength(1);
+  });
+
+  it("returns false for a wrong/unknown code without revealing the real one", async () => {
+    const prisma = createPrismaMock();
+    prisma.claimCode._seed({ codeHash: hashClaimCode("DRPL-7K2Q-9F4M") });
+
+    const ok = await verifyClaimCodePresence(prisma as never, "WRON-GGGG-GGGG");
+
+    expect(ok).toBe(false);
+    // Real code stays untouched.
+    expect(prisma.claimCode._rows()[0].state).toBe("available");
+  });
+
+  it("returns false when no claim code has ever been minted", async () => {
+    const prisma = createPrismaMock(); // no rows
+    const ok = await verifyClaimCodePresence(prisma as never, "DRPL-7K2Q-9F4M");
+    expect(ok).toBe(false);
+  });
+
+  it("returns false for an empty candidate", async () => {
+    const prisma = createPrismaMock();
+    prisma.claimCode._seed({ codeHash: hashClaimCode("DRPL-7K2Q-9F4M") });
+    expect(await verifyClaimCodePresence(prisma as never, "")).toBe(false);
+    expect(await verifyClaimCodePresence(prisma as never, "   ")).toBe(false);
   });
 });

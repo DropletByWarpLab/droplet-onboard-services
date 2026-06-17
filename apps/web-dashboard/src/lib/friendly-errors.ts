@@ -116,6 +116,13 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "That current password didn't match. Try again.",
     SAME_PASSWORD:
       "Choose a password different from your current one.",
+    // WARP-165 — physical-presence claim gate on POST /auth/setup. The "auth"
+    // fallback talks about username/password, which is wrong for the claim
+    // code, so map these explicitly.
+    CLAIM_CODE_REQUIRED:
+      "Enter the claim code shown on your device's front panel to finish setup.",
+    CLAIM_CODE_INVALID:
+      "That claim code doesn't match the one on your device's front panel. Check it and try again.",
   },
   files: {
     UPLOAD_TOO_LARGE: "That file is too large to upload here.",

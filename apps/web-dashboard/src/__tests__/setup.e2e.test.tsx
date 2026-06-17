@@ -48,6 +48,9 @@ vi.mock("@/lib/api", () => ({
   // WARP-867 — AccountStep probes setup status on mount to pick its mode;
   // "required" keeps these walks on the normal create form.
   checkSetupRequired: vi.fn(async () => "required"),
+  // WARP-165 — AccountStep also probes the claim gate on mount; false keeps
+  // these walks on the un-gated create form (no claim-code field).
+  checkClaimGateEnabled: vi.fn(async () => false),
   // Forwarders use typed Parameters<typeof …> so spread inference passes
   // tsc --noEmit (the original `...args: unknown[]` form tripped TS2556
   // because the real signatures aren't variadic). Uncovered by WARP-482's
