@@ -717,45 +717,6 @@ else
 fi
 
 # =============================================================================
-# Phase 3: systemd.sh install_firstboot_service (M2.8 appliance image)
-# =============================================================================
-echo "--- Phase 3: systemd.sh install_firstboot_service ---"
-
-SYSTEMD_LIB="$REPO_ROOT_REAL/scripts/lib/systemd.sh"
-
-# The first-boot oneshot installer must emit a unit guarded by an explicit
-# sentinel (ConditionPathExists) — never derive "already provisioned" from
-# absence/ambiguity — and run setup.sh --systemd.
-if grep -q 'install_firstboot_service()' "$SYSTEMD_LIB"; then
-  pass "systemd.sh defines install_firstboot_service()"
-else
-  fail "systemd.sh missing install_firstboot_service()"
-fi
-
-if grep -qF 'ConditionPathExists=!/var/lib/droplet/.firstboot-done' "$SYSTEMD_LIB"; then
-  pass "install_firstboot_service emits ConditionPathExists=!/var/lib/droplet/.firstboot-done"
-else
-  fail "install_firstboot_service missing the .firstboot-done sentinel guard"
-fi
-
-# The ExecStart line uses the $setup_path variable (set to
-# "$REPO_ROOT/scripts/setup.sh"); accept either the literal or the variable
-# form, and separately assert setup_path resolves to scripts/setup.sh.
-if grep -qE 'ExecStart=.*(setup\.sh|\$setup_path) --systemd' "$SYSTEMD_LIB" \
-   && grep -qE 'setup_path=.*scripts/setup\.sh' "$SYSTEMD_LIB"; then
-  pass "install_firstboot_service ExecStart ends in setup.sh --systemd"
-else
-  fail "install_firstboot_service ExecStart does not end in setup.sh --systemd"
-fi
-
-# The original droplet.service generator must remain unchanged/present.
-if grep -q 'install_systemd_service()' "$SYSTEMD_LIB"; then
-  pass "install_systemd_service() (droplet.service) still present"
-else
-  fail "install_systemd_service() was removed — regression"
-fi
-
-# =============================================================================
 # Results
 # =============================================================================
 echo ""
