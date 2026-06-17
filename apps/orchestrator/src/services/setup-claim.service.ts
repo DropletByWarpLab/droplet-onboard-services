@@ -174,6 +174,43 @@ export async function consumeClaimCode(
 }
 
 /**
+ * WARP-165 — READ-ONLY physical-presence verify. Returns true iff `code`
+ * matches the claim code that was minted for THIS box, WITHOUT consuming it.
+ *
+ * This is the primitive behind the optional `/auth/setup` claim gate
+ * (DROPLET_CLAIM_GATE_ENABLED). It deliberately does NOT consume:
+ *   - The consume is owned by the cloud-bind step (POST /api/setup/claim →
+ *     `consumeClaimCode`), which flips the single `available` row → `consumed`.
+ *     `isClaimed()` counts `consumed` rows, so a second consume here would
+ *     corrupt the bind lifecycle.
+ *   - In the real wizard order the box is CLAIMED first (so the row is already
+ *     `consumed`) and the owner is created second. Matching against ANY row —
+ *     available OR consumed — therefore lets a legitimately-claimed box pass
+ *     the gate, while an attacker who never read the panel code cannot.
+ *
+ * Security mirrors `consumeClaimCode`'s lookup phase: hash the candidate over
+ * its normalized form (DEVICE_SECRET-keyed HMAC), look the row up by the unique
+ * `codeHash`, then re-confirm in CONSTANT TIME so the match can't leak the code
+ * via response timing. An empty/whitespace candidate, an unminted box, or a
+ * wrong code all return false without revealing the real code.
+ */
+export async function verifyClaimCodePresence(
+  prisma: PrismaClient,
+  code: string,
+): Promise<boolean> {
+  if (!code || !code.trim()) return false;
+  const candidateHash = hashClaimCode(code);
+  // No state filter: presence is independent of the consume lifecycle (the
+  // row may already be `consumed` by the cloud-bind step). `codeHash` is the
+  // unique index, so this is at most one row.
+  const row = await prisma.claimCode.findFirst({
+    where: { codeHash: candidateHash },
+  });
+  if (!row) return false;
+  return constantTimeEqualHex(row.codeHash, candidateHash);
+}
+
+/**
  * Idempotently materialize a seeded claim code (env/fixture provisioning).
  * MINTING/ROTATION is out of scope — this only writes the hash of an
  * externally-provided code so `consumeClaimCode` can verify it. Re-seeding the
