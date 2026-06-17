@@ -16,10 +16,12 @@ import { AccountStep } from "./AccountStep";
 const setupAdmin = vi.fn();
 const loginUser = vi.fn();
 const checkSetupRequired = vi.fn();
+const checkClaimGateEnabled = vi.fn();
 vi.mock("@/lib/api", () => ({
   setupAdmin: (...a: unknown[]) => setupAdmin(...a),
   loginUser: (...a: unknown[]) => loginUser(...a),
   checkSetupRequired: (...a: unknown[]) => checkSetupRequired(...a),
+  checkClaimGateEnabled: (...a: unknown[]) => checkClaimGateEnabled(...a),
 }));
 
 // The step adopts the wizard auto-login into the auth context (so AuthGate
@@ -38,6 +40,9 @@ beforeEach(() => {
   });
   // Default: a genuinely fresh box — the create form is the normal mode.
   checkSetupRequired.mockResolvedValue("required");
+  // WARP-165 — default OFF so the existing tests above run the un-gated form
+  // (no claim-code field). Gate tests override this per-case.
+  checkClaimGateEnabled.mockResolvedValue(false);
 });
 
 function fill(email: string, pw: string, confirm = pw) {
@@ -246,5 +251,88 @@ describe("AccountStep — owner already exists (WARP-867)", () => {
     expect(
       screen.getByRole("button", { name: /sign in & continue/i }),
     ).toBeInTheDocument();
+  });
+});
+
+/**
+ * WARP-165 — physical-presence claim-code field. When the orchestrator's
+ * claim gate is ON (checkClaimGateEnabled → true), the create-account form
+ * shows a "Claim code" field and POST /auth/setup requires it. When OFF (the
+ * default), the field is absent and setup is unchanged.
+ */
+describe("AccountStep — claim-code gate field (WARP-165)", () => {
+  const claimInput = () => screen.getByPlaceholderText(/DRPL-/i);
+
+  it("does NOT render the claim-code field when the gate is off (default)", async () => {
+    render(<AccountStep onComplete={vi.fn()} />);
+    await waitFor(() => expect(checkClaimGateEnabled).toHaveBeenCalled());
+    expect(screen.queryByPlaceholderText(/DRPL-/i)).not.toBeInTheDocument();
+    // And setup is still called with no claim code (the un-gated 3-arg shape).
+    fill("scruceru@warp-lab.ai", "Warp123!@#xy");
+    fireEvent.click(cta());
+    await waitFor(() =>
+      expect(setupAdmin).toHaveBeenCalledWith(
+        "scruceru@warp-lab.ai",
+        "Warp123!@#xy",
+        undefined,
+      ),
+    );
+  });
+
+  it("renders the claim-code field when the gate is on, with a front-panel hint", async () => {
+    checkClaimGateEnabled.mockResolvedValue(true);
+    render(<AccountStep onComplete={vi.fn()} />);
+    expect(await screen.findByPlaceholderText(/DRPL-/i)).toBeInTheDocument();
+    // The hint tells the user where the code comes from.
+    expect(screen.getByText(/front panel/i)).toBeInTheDocument();
+  });
+
+  it("keeps the CTA disabled until a claim code is entered when the gate is on", async () => {
+    checkClaimGateEnabled.mockResolvedValue(true);
+    render(<AccountStep onComplete={vi.fn()} />);
+    await screen.findByPlaceholderText(/DRPL-/i);
+
+    // A fully valid email + password is NOT enough while the code is empty.
+    fill("scruceru@warp-lab.ai", "Warp123!@#xy");
+    expect(cta()).toBeDisabled();
+
+    fireEvent.change(claimInput(), { target: { value: "DRPL-7K2Q-9F4M" } });
+    expect(cta()).toBeEnabled();
+  });
+
+  it("sends the claim code to setupAdmin when the gate is on", async () => {
+    checkClaimGateEnabled.mockResolvedValue(true);
+    render(<AccountStep onComplete={vi.fn()} />);
+    await screen.findByPlaceholderText(/DRPL-/i);
+
+    fill("scruceru@warp-lab.ai", "Warp123!@#xy");
+    fireEvent.change(claimInput(), { target: { value: "DRPL-7K2Q-9F4M" } });
+    fireEvent.click(cta());
+
+    await waitFor(() =>
+      expect(setupAdmin).toHaveBeenCalledWith(
+        "scruceru@warp-lab.ai",
+        "Warp123!@#xy",
+        undefined,
+        "DRPL-7K2Q-9F4M",
+      ),
+    );
+  });
+
+  it("surfaces a friendly error if the claim code is rejected by the server", async () => {
+    checkClaimGateEnabled.mockResolvedValue(true);
+    const err = new Error("claim invalid") as Error & { code?: string };
+    err.code = "CLAIM_CODE_INVALID";
+    setupAdmin.mockRejectedValueOnce(err);
+    render(<AccountStep onComplete={vi.fn()} />);
+    await screen.findByPlaceholderText(/DRPL-/i);
+
+    fill("scruceru@warp-lab.ai", "Warp123!@#xy");
+    fireEvent.change(claimInput(), { target: { value: "DRPL-WRON-GGGG" } });
+    fireEvent.click(cta());
+
+    expect(await screen.findByText(/claim code/i)).toBeInTheDocument();
+    // The raw cause is never shown.
+    expect(screen.queryByText(/^claim invalid$/i)).not.toBeInTheDocument();
   });
 });

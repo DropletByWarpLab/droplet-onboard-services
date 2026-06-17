@@ -573,7 +573,15 @@ export function createPublicAuthRouter(
   router.get("/auth/setup", async (_req, res, next) => {
     try {
       const setupRequired = await ncCheckSetupRequired();
-      res.json({ setupRequired });
+      // WARP-165 — surface whether the physical-presence claim gate is on so
+      // the setup wizard's Account step knows to show + require the claim-code
+      // field. Reading config (not the DB) keeps this probe cheap; the field
+      // is verified server-side at POST /auth/setup regardless of what the
+      // client chooses to render.
+      res.json({
+        setupRequired,
+        claimGateEnabled: config.DROPLET_CLAIM_GATE_ENABLED,
+      });
     } catch (err) {
       next(err);
     }

@@ -1,8 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Eye, EyeOff, Lock, Mail, UserCheck } from "lucide-react";
-import { setupAdmin, loginUser, checkSetupRequired } from "@/lib/api";
+import { Eye, EyeOff, KeyRound, Lock, Mail, UserCheck } from "lucide-react";
+import {
+  setupAdmin,
+  loginUser,
+  checkSetupRequired,
+  checkClaimGateEnabled,
+} from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { StepShell } from "@/components/setup/StepShell";
 import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
@@ -54,6 +59,12 @@ export function AccountStep({
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  // WARP-165 — physical-presence claim gate. When the orchestrator reports the
+  // gate is on, the create flow shows a claim-code field (read off the device's
+  // front panel) and POST /auth/setup requires it. Default OFF so the field
+  // never appears — and can never block setup — on a box that isn't gated.
+  const [claimGateOn, setClaimGateOn] = useState(false);
+  const [claimCode, setClaimCode] = useState("");
 
   // WARP-867 — proactive owner-exists detection. Tri-state probe: only an
   // EXPLICIT "complete" flips to sign-in; "unknown" (cold boot, 5xx, timeout)
@@ -70,13 +81,32 @@ export function AccountStep({
     };
   }, []);
 
+  // WARP-165 — probe whether the claim gate is on. Fail-safe: any indeterminate
+  // answer resolves to false (checkClaimGateEnabled), so a transient failure
+  // never hides the normal first-run create form behind a field the server
+  // wouldn't enforce.
+  useEffect(() => {
+    let cancelled = false;
+    void checkClaimGateEnabled().then((on) => {
+      if (!cancelled) setClaimGateOn(on);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const emailOk = isValidEmail(email);
   const pwOk = validatePassword(password).ok;
   const matchOk = password.length > 0 && password === confirmPassword;
+  // The claim code only gates the CREATE flow (a returning owner signing in
+  // already proved presence at their first run). It's satisfied by any
+  // non-empty value; the server is the authority on whether it actually
+  // matches the front-panel code.
+  const claimOk = !claimGateOn || mode === "signin" || claimCode.trim().length > 0;
   const canSubmit =
     mode === "signin"
       ? emailOk && password.length > 0 && !isSubmitting
-      : emailOk && pwOk && matchOk && !isSubmitting;
+      : emailOk && pwOk && matchOk && claimOk && !isSubmitting;
 
   // Spell out the first thing still blocking submission so the disabled CTA is
   // never an unexplained dead end. A 10-char password clears the character-class
@@ -103,14 +133,28 @@ export function AccountStep({
             ? "Your password doesn't meet all the requirements yet."
             : !matchOk
               ? "Re-enter the same password to confirm it."
-              : null;
+              : !claimOk
+                ? "Enter the claim code from your device's front panel to continue."
+                : null;
 
   async function handleCreateAccount() {
     setError(null);
     if (!canSubmit) return;
     setIsSubmitting(true);
     try {
-      await setupAdmin(email, password, displayName || undefined);
+      // WARP-165 — pass the claim code ONLY when the gate is on. On the
+      // default un-gated path we make the original 3-arg call so the request
+      // body (and call shape) is byte-identical to main.
+      if (claimGateOn) {
+        await setupAdmin(
+          email,
+          password,
+          displayName || undefined,
+          claimCode.trim(),
+        );
+      } else {
+        await setupAdmin(email, password, displayName || undefined);
+      }
       // Auto-login for the authed steps that follow, and adopt the session
       // into the auth context so AuthGate knows the owner is signed in.
       // (Read defensively — step harnesses stub loginUser without a body.)
@@ -185,6 +229,42 @@ export function AccountStep({
               Use the email and password you chose earlier in setup. To start
               over with a different account, factory-reset the Droplet first.
             </p>
+          </div>
+        )}
+
+        {/* WARP-165 — physical-presence claim code. Create flow only, and only
+            when the orchestrator reports the gate is on. Mirrors the Work email
+            field pattern (dp-input + left icon + type-subheadline label) for a
+            cohesive form; the caption tells the user where to read the code. */}
+        {mode === "create" && claimGateOn && (
+          <div>
+            <label className="type-subheadline text-label-secondary block mb-1">
+              Claim code
+            </label>
+            <p
+              id="account-claim-hint"
+              className="type-caption-1 text-label-secondary mb-1.5"
+            >
+              Enter the code shown on your Droplet&apos;s front panel to confirm
+              you&apos;re setting it up in person.
+            </p>
+            <div className="relative">
+              <KeyRound
+                size={16}
+                className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary"
+              />
+              <input
+                type="text"
+                value={claimCode}
+                onChange={(e) => setClaimCode(e.target.value)}
+                placeholder="DRPL-XXXX-XXXX"
+                autoComplete="off"
+                autoCapitalize="characters"
+                spellCheck={false}
+                aria-describedby="account-claim-hint"
+                className="dp-input pl-10 font-mono tracking-wide"
+              />
+            </div>
           </div>
         )}
 

@@ -18,6 +18,8 @@ vi.mock("@/lib/api", () => ({
   // WARP-867 — the step probes setup status on mount to pick its mode;
   // "required" keeps these tests on the create form they assert.
   checkSetupRequired: vi.fn(async () => "required"),
+  // WARP-165 — AccountStep probes the claim gate on mount; false = un-gated.
+  checkClaimGateEnabled: vi.fn(async () => false),
 }));
 
 // The step adopts its auto-login into the auth context; this harness renders

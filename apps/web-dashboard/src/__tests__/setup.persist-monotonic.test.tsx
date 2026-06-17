@@ -51,6 +51,8 @@ vi.mock("@/lib/api", () => ({
   // WARP-867 — AccountStep probes setup status on mount to pick its mode;
   // "required" keeps these walks on the normal create form.
   checkSetupRequired: vi.fn(async () => "required"),
+  // WARP-165 — AccountStep probes the claim gate on mount; false = un-gated.
+  checkClaimGateEnabled: vi.fn(async () => false),
   setupAdmin: vi.fn(async () => undefined),
   loginUser: vi.fn(async () => undefined),
   patchSetupStep: (setupStep: string) => patchSetupStepMock(setupStep),
