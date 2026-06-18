@@ -263,6 +263,15 @@ class _MockFirewall:
     def set_camera_phone_home(self, blocked: bool) -> None:
         logger.info("mock: set_camera_phone_home blocked=%s — no-op", blocked)
 
+    def upnp_status(self) -> dict[str, Any]:
+        # The mock single-box has no miniupnpd — the secure default (Droplet
+        # never opens ports automatically). Tests that need the available path
+        # override this method.
+        return {"available": False, "enabled": False}
+
+    def set_upnp(self, enabled: bool) -> None:
+        logger.info("mock: set_upnp enabled=%s — no-op", enabled)
+
     def reload(self) -> None:
         pass
 

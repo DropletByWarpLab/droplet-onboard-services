@@ -465,6 +465,24 @@ export async function createGuestNetwork(
   return opFrom(res);
 }
 
+// --- UPnP / NAT-PMP ---
+
+export interface UpnpStatus {
+  /** miniupnpd present on the box. False = the secure default (no auto ports). */
+  available: boolean;
+  /** Automatic port opening currently on. */
+  enabled: boolean;
+}
+
+export async function fetchUpnp(): Promise<UpnpStatus> {
+  return routingFetchJson<UpnpStatus>("/upnp", { label: "UPnP status" });
+}
+
+export async function setUpnp(enabled: boolean): Promise<WriteResult> {
+  const res = await postJson("/upnp", { enabled }, "Set UPnP");
+  return opFrom(res);
+}
+
 // --- DHCP ---
 
 export async function fetchDhcpLeases(): Promise<DhcpLease[]> {

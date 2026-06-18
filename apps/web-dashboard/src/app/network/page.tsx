@@ -35,6 +35,7 @@ import { CoverageExtendersPanel } from "@/components/network/CoverageExtendersPa
 import { PhoneHomeCard } from "@/components/network/PhoneHomeCard";
 import { CameraPrivacyCard } from "@/components/network/CameraPrivacyCard";
 import { GuestWifiCard } from "@/components/network/GuestWifiCard";
+import { UpnpCard } from "@/components/network/UpnpCard";
 import { NetworkSimple } from "@/components/network/NetworkSimple";
 import { SwitchPanel } from "@/components/network/switch/SwitchPanel";
 import { WifiScanPanel } from "@/components/network/WifiScanPanel";
@@ -1003,6 +1004,10 @@ function FirewallTab({ firewall }: { firewall: FirewallConfig | undefined }) {
           <p className="type-subheadline text-label-tertiary">No port forwards configured.</p>
         )}
       </div>
+
+      {/* UPnP / NAT-PMP — automatic port opening, off by default. Reflects the
+          box's real state (read-only "not available" when miniupnpd is absent). */}
+      <UpnpCard />
     </div>
   );
 }

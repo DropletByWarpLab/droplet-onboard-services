@@ -1285,6 +1285,30 @@ export async function createGuestWifi(
   return data;
 }
 
+/** UPnP / NAT-PMP state. `available` false = miniupnpd isn't on the box. */
+export interface UpnpStatus {
+  available: boolean;
+  enabled: boolean;
+}
+
+export async function fetchUpnp(): Promise<UpnpStatus> {
+  const res = await authFetch(`${BASE}/api/network/upnp`);
+  if (!res.ok) throw new Error(`Failed to fetch UPnP status: ${res.status}`);
+  return res.json();
+}
+
+/** Toggle UPnP/NAT-PMP. Tier 2 — may answer 202 `confirmation_required`. */
+export async function setUpnp(enabled: boolean): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/upnp`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to update UPnP");
+  return data;
+}
+
 export async function fetchDhcpLeases(): Promise<Record<string, unknown>[]> {
   const res = await authFetch(`${BASE}/api/network/dhcp/leases`);
   if (!res.ok) throw new Error(`Failed to fetch DHCP leases: ${res.status}`);

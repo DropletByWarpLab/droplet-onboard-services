@@ -963,6 +963,34 @@ class FirewallApi:
         """Read all port forward / NAT redirect rules."""
         return self._r.uci.get("firewall", type="redirect")
 
+    def upnp_status(self) -> dict:
+        """Read UPnP / NAT-PMP (miniupnpd) state → ``{available, enabled}``.
+
+        miniupnpd ships ``/etc/config/upnpd`` only when the package is
+        installed; a privacy appliance that never auto-opens ports usually
+        won't have it. A missing config surfaces as a UbusError ("uci entry not
+        found"), which we degrade to ``available=False`` — the honest, secure
+        default — rather than 500-ing. Mirrors how ``WirelessApi.status``
+        degrades a missing optional surface to data, not a crash (ADR-011).
+        """
+        try:
+            res = self._r.uci.get("upnpd", "config", "enable_upnp")
+            val = res.get("value") if isinstance(res, dict) else res
+            return {"available": True, "enabled": str(val) in ("1", "true", "True")}
+        except UbusError:
+            return {"available": False, "enabled": False}
+
+    def set_upnp(self, enabled: bool) -> None:
+        """Enable/disable UPnP + NAT-PMP automatic port opening.
+
+        Callers must check ``upnp_status().available`` first — setting on a box
+        without miniupnpd raises (no ``upnpd`` config to write).
+        """
+        flag = "1" if enabled else "0"
+        self._r.uci.set("upnpd", "config", {"enable_upnp": flag, "enable_natpmp": flag})
+        self._r.uci.commit("upnpd")
+        self.reload()
+
     def block_device(self, mac: str, name: Optional[str] = None):
         """Block a device (by MAC address) from accessing the internet."""
         rule_name = name or f"block-{mac.replace(':', '')}"

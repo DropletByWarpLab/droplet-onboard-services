@@ -46,6 +46,7 @@ from schemas import (
     SetPasswordRequest,
     SetChannelRequest,
     CreateGuestNetworkRequest,
+    SetUpnpRequest,
     StaticLeaseRequest,
     SetDnsRequest,
     DnsHostnameRequest,
@@ -646,6 +647,39 @@ def create_guest_network(req: CreateGuestNetworkRequest):
         r.wireless.create_guest_network(req.radio, req.ssid, req.password, req.network)
         r.apply_changes("wireless")
         return {"status": "ok", "ssid": req.ssid, "network": req.network}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# UPnP / NAT-PMP (miniupnpd)
+# ---------------------------------------------------------------------------
+@app.get("/upnp")
+def upnp_status():
+    # Reflective read of automatic port-opening state. Degrades to
+    # {available: false, enabled: false} when miniupnpd isn't installed — the
+    # secure default for a privacy appliance.
+    try:
+        return get_router().firewall.upnp_status()
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.post("/upnp")
+def set_upnp(req: SetUpnpRequest):
+    try:
+        r = get_router()
+        if not r.firewall.upnp_status().get("available"):
+            # Never pretend to toggle a service that isn't on the box.
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "code": "UPNP_UNAVAILABLE",
+                    "message": "UPnP/NAT-PMP isn't installed on this Droplet — it never opens ports automatically.",
+                },
+            )
+        r.firewall.set_upnp(req.enabled)
+        return {"status": "ok", "enabled": req.enabled}
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
 

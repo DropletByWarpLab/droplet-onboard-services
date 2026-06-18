@@ -293,6 +293,19 @@ export async function setGuestWifi(
   return result;
 }
 
+// UPnP / NAT-PMP. Read reflects the box's real state (available=false when
+// miniupnpd isn't installed). The write is Tier 2 — exposing automatic port
+// opening is a firewall-class change.
+export async function getUpnp(): Promise<openwrt.UpnpStatus> {
+  return openwrt.fetchUpnp();
+}
+
+export async function setUpnp(enabled: boolean): Promise<openwrt.WriteResult> {
+  const result = await openwrt.setUpnp(enabled);
+  await invalidateNetworkCache();
+  return result;
+}
+
 export async function addStaticDhcpLease(
   name: string,
   mac: string,
