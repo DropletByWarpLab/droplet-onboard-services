@@ -36,23 +36,27 @@ echo ""
 [ -r "$ATTACH" ] || { echo "cannot read $ATTACH"; exit 1; }
 
 # Opening line: the body starts at the line ending in `sh -c '`.
-open=$(grep -nE "sh -c '$" "$ATTACH" | head -1 | cut -d: -f1)
-# Closing line: the first lone-apostrophe line after the opener.
-close=$(awk -v o="$open" 'NR>o && $0 ~ /^[[:space:]]*\x27[[:space:]]*$/ {print NR; exit}' "$ATTACH")
+# `|| true` so a missing opener under `set -o pipefail` (grep exits 1) prints
+# the fail message below instead of silently aborting the script.
+open=$(grep -nE "sh -c '$" "$ATTACH" | head -1 | cut -d: -f1) || true
 
 if [ -z "$open" ]; then
   fail "located the 'sh -c' body opener"
-elif [ -z "$close" ]; then
-  fail "located the body closer (lone apostrophe line after the opener)"
 else
-  pass "located docker-exec body (lines ${open}..${close})"
-  stray=$(awk -v o="$open" -v c="$close" \
-    'NR>o && NR<c && index($0, "\x27")>0 {print "      line "NR": "$0}' "$ATTACH")
-  if [ -z "$stray" ]; then
-    pass "no stray apostrophe inside the single-quoted body"
+  # Closing line: the first lone-apostrophe line after the opener.
+  close=$(awk -v o="$open" 'NR>o && $0 ~ /^[[:space:]]*\x27[[:space:]]*$/ {print NR; exit}' "$ATTACH")
+  if [ -z "$close" ]; then
+    fail "located the body closer (lone apostrophe line after the opener)"
   else
-    fail "stray apostrophe(s) inside the body — breaks the quote, AP loses forwarding:"
-    printf '%s\n' "$stray"
+    pass "located docker-exec body (lines ${open}..${close})"
+    stray=$(awk -v o="$open" -v c="$close" \
+      'NR>o && NR<c && index($0, "\x27")>0 {print "      line "NR": "$0}' "$ATTACH")
+    if [ -z "$stray" ]; then
+      pass "no stray apostrophe inside the single-quoted body"
+    else
+      fail "stray apostrophe(s) inside the body — breaks the quote, AP loses forwarding:"
+      printf '%s\n' "$stray"
+    fi
   fi
 fi
 
