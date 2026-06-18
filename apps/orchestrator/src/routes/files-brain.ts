@@ -372,6 +372,12 @@ export function createFilesBrainRouter(prisma: PrismaClient): Router {
                 .json(await reuseExistingItem(prisma, winner, chatId));
               return;
             }
+            // P2002 fired but the winner is gone — it was deleted in the
+            // microseconds between the constraint failure and this lookup.
+            // The sha256 is free again, so a retry will succeed; surface a
+            // typed 409 rather than re-throwing the raw Prisma error.
+            res.status(409).json({ error: "concurrent_upload_conflict" });
+            return;
           }
           throw e;
         }

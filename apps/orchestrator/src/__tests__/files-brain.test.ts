@@ -714,6 +714,25 @@ describe("POST /api/files/brain/upload — content-hash dedup (WARP-864)", () =>
     expect(itemStore.size).toBe(1);
   });
 
+  it("P2002 with a vanished winner returns a clean 409, not a leaked Prisma error", async () => {
+    // Pre-insert lookup misses, create hits the unique constraint (P2002),
+    // and the winner is GONE by the fallback lookup (deleted in the race
+    // window). Both findUnique calls must return null for this request.
+    const create = vi.mocked(prisma.brainMemoryItem.create);
+    create.mockRejectedValueOnce(
+      Object.assign(new Error("Unique constraint failed"), { code: "P2002" }),
+    );
+    vi.mocked(prisma.brainMemoryItem.findUnique)
+      .mockResolvedValueOnce(null as never) // pre-insert dedup lookup
+      .mockResolvedValueOnce(null as never); // post-P2002 winner lookup
+
+    const res = await uploadOnce();
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("concurrent_upload_conflict");
+    // No raw Prisma "P2002" / "Unique constraint" string leaked to the client.
+    expect(JSON.stringify(res.body)).not.toMatch(/P2002|Unique constraint/);
+  });
+
   it("rows persisted before WARP-864 (sha256 NULL) are exempt — no dedup against them", async () => {
     const first = await uploadOnce();
     // Backdate the row to the pre-dedup era.
