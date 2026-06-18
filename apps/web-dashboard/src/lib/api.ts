@@ -2360,6 +2360,52 @@ export async function runSceneConfirmed(
 }
 
 /**
+ * A smart-home routine (Scene, WARP-474) as listed by `GET /api/scenes` — a
+ * named batch of device actions an owner can run in one tap. `actionCount` is
+ * how many device commands the routine fires.
+ */
+export interface Scene {
+  id: string;
+  name: string;
+  icon: string | null;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  actionCount: number;
+}
+
+/** List the saved routines (scenes). Any signed-in role may read. */
+export async function fetchScenes(): Promise<Scene[]> {
+  const res = await authFetch(`${BASE}/api/scenes`);
+  if (!res.ok) {
+    throw new Error(`Failed to load routines (${res.status})`);
+  }
+  const data = await res.json();
+  return Array.isArray(data?.scenes) ? data.scenes : [];
+}
+
+/**
+ * Operator-initiated routine run. A routine batches Tier-2 device actions, so
+ * the server gates it: the dashboard pops its own confirm dialog and then calls
+ * with `?confirm=true` (mirrors the scenes page contract — the chat path uses a
+ * minted token via {@link runSceneConfirmed} instead). A non-2xx throws so the
+ * caller can surface the failure.
+ */
+export async function runScene(sceneId: string): Promise<SceneRunOutcome> {
+  const res = await authFetch(
+    `${BASE}/api/scenes/${sceneId}/run?confirm=true`,
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+  );
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(
+      data.error || data.message || `Failed to run routine (${res.status})`,
+    );
+  }
+  return res.json();
+}
+
+/**
  * WARP-304: shape returned by `GET /api/llm/conversations/:id`. The
  * dashboard hydrates `useChat.messages` from this on page mount when the
  * URL carries a `?c=<id>` hash.
