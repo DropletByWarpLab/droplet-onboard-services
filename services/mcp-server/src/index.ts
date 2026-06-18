@@ -63,7 +63,17 @@ function baseUrlFor(target: HttpTarget): string {
     case "fileIndexer":
       return process.env.FILE_INDEXER_URL ?? "http://file-indexer:8000";
     case "nextcloud":
-      return process.env.NEXTCLOUD_URL ?? "http://nextcloud";
+      // WARP-861: despite the target's historical name, the files-domain
+      // tools speak the ORCHESTRATOR's /api/files contract (JSON entries,
+      // /download?path=, /mkdir, /move, …) — NOT raw Nextcloud (which is
+      // WebDAV/XML and, behind the TLS gateway, redirects plain HTTP to an
+      // unserved :443). Pointing this at NEXTCLOUD_URL is exactly the bug
+      // that made every file tool fail in Docker. The orchestrator
+      // validates the per-user X-Nextcloud-Token/-User headers for the
+      // mcp service principal and proxies to Nextcloud itself.
+      return (
+        process.env.FILES_API_URL ?? "http://orchestrator:3000/api/files"
+      );
     case "orchestrator":
       // WARP-102: Matter tool calls + audit-log + safety-tier proxy
       // back to the orchestrator's REST surface from here. Compose
@@ -74,7 +84,13 @@ function baseUrlFor(target: HttpTarget): string {
 }
 
 function joinUrl(base: string, path: string, params?: Record<string, unknown>): string {
-  const url = new URL(path.startsWith("/") ? path : `/${path}`, base.endsWith("/") ? base : `${base}/`);
+  // WARP-861: resolve RELATIVE to the base so a base that carries a path
+  // segment (the files API at http://orchestrator:3000/api/files) keeps it.
+  // `new URL("/x", "http://h/api/files/")` would discard "/api/files";
+  // stripping the leading slash makes "/x" resolve to "/api/files/x".
+  // Host-only bases (every other target) resolve identically either way.
+  const rel = path.startsWith("/") ? path.slice(1) : path;
+  const url = new URL(rel, base.endsWith("/") ? base : `${base}/`);
   if (params) {
     for (const [k, v] of Object.entries(params)) {
       if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
@@ -106,8 +122,13 @@ function createHttpClient(target: HttpTarget): HttpClient {
   // ${SERVICE_TOKEN_MCP} value). Other targets (routing, switch,
   // file-indexer) carry their own service tokens that handlers pass
   // via opts.headers, so this hook only fires for the orchestrator path.
+  //
+  // WARP-861: the "nextcloud" target now points at the orchestrator's
+  // /api/files surface, so it needs the same service bearer — the
+  // per-user X-Nextcloud-Token/-User headers ride alongside it and the
+  // files routes only honor them for this trusted principal.
   const orchestratorToken =
-    target === "orchestrator"
+    target === "orchestrator" || target === "nextcloud"
       ? (process.env.ORCHESTRATOR_TOKEN ?? "").trim() || null
       : null;
   if (target === "orchestrator" && !orchestratorToken) {

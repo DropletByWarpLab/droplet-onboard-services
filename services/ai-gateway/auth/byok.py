@@ -34,18 +34,18 @@ async def validate_key_format(provider: str, api_key: str) -> bool:
     return True
 
 
-async def save_api_key(provider: str, api_key: str) -> None:
-    """Validate and store an API key."""
+async def save_api_key(provider: str, api_key: str, user_id: str | None = None) -> None:
+    """Validate and store an API key in the caller's namespace (WARP-561)."""
     if not await validate_key_format(provider, api_key):
         raise ValueError(f"Invalid API key format for {provider}")
-    await keystore.store_key(provider, api_key)
+    await keystore.store_key(provider, api_key, user_id=user_id)
 
 
-async def get_api_key(provider: str) -> str | None:
-    """Retrieve a stored API key."""
-    return await keystore.get_key(provider)
+async def get_api_key(provider: str, user_id: str | None = None) -> str | None:
+    """Retrieve a stored API key from the caller's namespace (WARP-561)."""
+    return await keystore.get_key(provider, user_id=user_id)
 
 
-async def delete_api_key(provider: str) -> bool:
-    """Remove a stored API key."""
-    return await keystore.delete_key(provider)
+async def delete_api_key(provider: str, user_id: str | None = None) -> bool:
+    """Remove a stored API key from the caller's namespace (WARP-561)."""
+    return await keystore.delete_key(provider, user_id=user_id)

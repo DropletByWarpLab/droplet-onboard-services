@@ -12,7 +12,7 @@
  * step the wizard lands on, not that step's own behaviour.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 
 const useReducedMotionMock = vi.fn(() => true);
 vi.mock("framer-motion", async () => {
@@ -29,6 +29,11 @@ vi.mock("@/lib/auth", () => ({
 
 // Stub the API surface the steps call so a resumed step can mount quietly.
 vi.mock("@/lib/api", () => ({
+  // WARP-867 — AccountStep probes setup status on mount to pick its mode;
+  // "required" keeps these walks on the normal create form.
+  checkSetupRequired: vi.fn(async () => "required"),
+  // WARP-165 — AccountStep probes the claim gate on mount; false = un-gated.
+  checkClaimGateEnabled: vi.fn(async () => false),
   setupAdmin: vi.fn(async () => undefined),
   loginUser: vi.fn(async () => undefined),
   patchSetupStep: vi.fn(async () => undefined),
@@ -62,15 +67,69 @@ describe("setup wizard — resumable from setupState (PR #372)", () => {
     vi.clearAllMocks();
   });
 
-  it("starts at welcome when there is no persisted step", () => {
+  it("holds the wizard on a connecting surface while setupState is unresolved (WARP-867)", () => {
+    // Pre-fix this rendered the Welcome step: the step machine hydrated from
+    // a still-null setupState in a run-once useState initializer, so EVERY
+    // cold load of /setup "resumed" at welcome and the persisted step was
+    // ignored — the field report's reboot walked itself back into the
+    // unsatisfiable account step that way. A null state now renders the
+    // calm connecting surface instead of guessing welcome.
     useAuthMock.mockReturnValue({
       completeSetup: vi.fn(),
       setupState: null,
+      setupProbeError: null,
+      setupAutoRetrying: false,
+      retrySetupProbe: vi.fn(),
     });
     render(<SetupPage />);
+    expect(screen.getByText(/connecting to your droplet/i)).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: /get started/i }),
-    ).toBeInTheDocument();
+      screen.queryByRole("button", { name: /get started/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("mounts the wizard at the persisted step once setupState resolves late (WARP-867)", () => {
+    // The cold-load order AuthGate guarantees: public pages render BEFORE the
+    // boot probes settle. So the page first sees null (connecting surface),
+    // then the resolved state — and must resume at the persisted step, never
+    // welcome.
+    useAuthMock.mockReturnValue({
+      completeSetup: vi.fn(),
+      setupState: null,
+      setupProbeError: null,
+      setupAutoRetrying: false,
+      retrySetupProbe: vi.fn(),
+    });
+    const view = render(<SetupPage />);
+    expect(screen.getByText(/connecting to your droplet/i)).toBeInTheDocument();
+
+    useAuthMock.mockReturnValue({
+      completeSetup: vi.fn(),
+      setupState: { appliance: "unclaimed", setupStep: "internet", userTourCompleted: false },
+    });
+    view.rerender(<SetupPage />);
+    expect(
+      screen.queryByRole("button", { name: /get started/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getAllByText(/set up your home wi-fi/i).length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("surfaces the probe error + retry when the lifecycle probe failed (WARP-867)", () => {
+    const retrySetupProbe = vi.fn();
+    useAuthMock.mockReturnValue({
+      completeSetup: vi.fn(),
+      setupState: null,
+      setupProbeError: "Couldn't reach the appliance to read setup state.",
+      setupAutoRetrying: false,
+      retrySetupProbe,
+    });
+    render(<SetupPage />);
+    expect(screen.getByText(/can't reach your appliance/i)).toBeInTheDocument();
+    const retry = screen.getByRole("button", { name: /retry/i });
+    fireEvent.click(retry);
+    expect(retrySetupProbe).toHaveBeenCalledTimes(1);
   });
 
   it("starts at welcome when the persisted step IS welcome", () => {

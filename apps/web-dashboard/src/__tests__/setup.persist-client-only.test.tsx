@@ -35,7 +35,7 @@ vi.mock("framer-motion", async () => {
 });
 
 vi.mock("@/lib/auth", () => ({
-  useAuth: () => ({ setupState: undefined }),
+  useAuth: () => ({ setupState: { appliance: "unclaimed", setupStep: "welcome", userTourCompleted: false } }),
 }));
 
 const patchSetupStepMock = vi.fn(async (_setupStep: string) => undefined);

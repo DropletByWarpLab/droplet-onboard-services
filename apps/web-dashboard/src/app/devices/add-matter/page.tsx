@@ -177,9 +177,10 @@ function CommissioningErrorBanner({
       className="mb-4 px-4 py-3 bg-system-red/10 border border-system-red/30 rounded-lg flex items-start gap-3"
       role="alert"
     >
-      <p className="type-footnote text-system-red flex-1">
-        <span className="font-medium">Couldn't commission:</span> {message}
-      </p>
+      {/* WARP-856 (item 3): no prefix — the curated messages are complete
+          sentences ("Couldn't find the device…"), so a "Couldn't commission:"
+          label doubled the copy and "commission" is installer jargon. */}
+      <p className="type-footnote text-system-red flex-1">{message}</p>
       <button
         onClick={onDismiss}
         className="type-footnote text-system-red hover:underline"
@@ -208,7 +209,7 @@ function CommissioningProgress({ startedAt }: { startedAt: number }) {
     elapsedS < 5
       ? "Finding the device on your network…"
       : elapsedS < 15
-        ? "Setting up secure pairing (PASE)…"
+        ? "Setting up secure pairing…"
         : elapsedS < 25
           ? "Sharing Wi-Fi credentials with the device…"
           : "Almost done — installing the device certificate…";

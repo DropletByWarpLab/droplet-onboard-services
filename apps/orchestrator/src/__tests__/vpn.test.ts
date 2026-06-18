@@ -47,8 +47,12 @@ import * as openwrt from "../services/openwrt.client.js";
 function createPrismaMock() {
   const rows: any[] = [];
   let counter = 0;
-  return {
+  const mock: any = {
     rows,
+    // WARP-565: allocateMintAndPersistPeer wraps the create in a
+    // $transaction. Run the callback against this same mock so `tx` shares
+    // the in-memory store (mirrors claim-code.service.test.ts's pattern).
+    $transaction: vi.fn(async (fn: any) => fn(mock)),
     vpnPeer: {
       findMany: vi.fn(async ({ where, orderBy, select }: any = {}) => {
         let result = [...rows];
@@ -73,12 +77,24 @@ function createPrismaMock() {
         return rows.find((r) => r.id === where.id) ?? null;
       }),
       create: vi.fn(async ({ data }: any) => {
-        const dup = rows.find(
-          (r) => r.publicKey === data.publicKey,
-        );
-        if (dup) {
+        // publicKey is unique across ALL rows (active + revoked); tag the
+        // P2002 with meta.target so isActiveIpViolation() routes it to the
+        // non-retryable path the rollback test depends on.
+        if (rows.find((r) => r.publicKey === data.publicKey)) {
           const e: any = new Error("Unique constraint failed on publicKey");
           e.code = "P2002";
+          e.meta = { target: ["publicKey"] };
+          throw e;
+        }
+        // WARP-565: model the partial unique index — assignedIp is unique
+        // among ACTIVE rows only (revoked rows' IPs are reusable).
+        if (
+          data.status !== "revoked" &&
+          rows.find((r) => r.status === "active" && r.assignedIp === data.assignedIp)
+        ) {
+          const e: any = new Error("Unique constraint failed on assignedIp");
+          e.code = "P2002";
+          e.meta = { target: ["assignedIp"] };
           throw e;
         }
         const row = {
@@ -103,6 +119,7 @@ function createPrismaMock() {
       }),
     },
   };
+  return mock;
 }
 
 // WARP-171: default test user is `owner` so all the VPN tests (which

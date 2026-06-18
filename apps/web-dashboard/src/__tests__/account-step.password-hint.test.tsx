@@ -15,6 +15,17 @@ import { AccountStep } from "@/components/setup/steps/AccountStep";
 vi.mock("@/lib/api", () => ({
   setupAdmin: vi.fn(),
   loginUser: vi.fn(),
+  // WARP-867 — the step probes setup status on mount to pick its mode;
+  // "required" keeps these tests on the create form they assert.
+  checkSetupRequired: vi.fn(async () => "required"),
+  // WARP-165 — AccountStep probes the claim gate on mount; false = un-gated.
+  checkClaimGateEnabled: vi.fn(async () => false),
+}));
+
+// The step adopts its auto-login into the auth context; this harness renders
+// it bare, so stub useAuth with the one method it reads.
+vi.mock("@/lib/auth", () => ({
+  useAuth: () => ({ setUserFromPasskey: vi.fn() }),
 }));
 
 describe("AccountStep — password requirement stated up front (WARP-668)", () => {

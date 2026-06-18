@@ -60,7 +60,7 @@ Options:
                      host scripts, writes single-box knobs to .env,
                      activates the `single-box` compose profile).
                      Auto-detected on Linux hosts with dGPU + iGPU and
-                     no separate Jetson on the LAN; use this to force or
+                     no separate inference host on the LAN; use this to force or
                      skip auto-detect.
   --no-single-box    Force single-box off (multi-box / v2-6 deployment).
   --regenerate-env   Force-regenerate .env (backs up existing)
@@ -100,6 +100,8 @@ source "$SCRIPT_DIR/lib/logging.sh"
 source "$SCRIPT_DIR/lib/preflight.sh"
 # shellcheck source=lib/docker.sh
 source "$SCRIPT_DIR/lib/docker.sh"
+# shellcheck source=lib/tls-reload.sh
+source "$SCRIPT_DIR/lib/tls-reload.sh"
 # shellcheck source=lib/secrets.sh
 source "$SCRIPT_DIR/lib/secrets.sh"
 # shellcheck source=lib/compose.sh
@@ -108,6 +110,8 @@ source "$SCRIPT_DIR/lib/compose.sh"
 source "$SCRIPT_DIR/lib/systemd.sh"
 # shellcheck source=lib/camera-drivers.sh
 source "$SCRIPT_DIR/lib/camera-drivers.sh"
+# shellcheck source=lib/bluetooth.sh
+source "$SCRIPT_DIR/lib/bluetooth.sh"
 # shellcheck source=lib/local-dns.sh
 source "$SCRIPT_DIR/lib/local-dns.sh"
 # shellcheck source=lib/single-box.sh
@@ -172,15 +176,28 @@ LOCK_FILE="$REPO_ROOT/.data/.setup.lock"
 _acquire_lock() {
   mkdir -p "$(dirname "$LOCK_FILE")"
   if [ -f "$LOCK_FILE" ]; then
-    local lock_age
-    lock_age=$(( $(date +%s) - $(stat -c %Y "$LOCK_FILE" 2>/dev/null || stat -f %m "$LOCK_FILE" 2>/dev/null || echo 0) ))
-    if [ "$lock_age" -gt 3600 ]; then
-      log_warn "Removing stale lock file (${lock_age}s old)"
+    local lock_pid lock_age
+    lock_pid=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
+    # Stale-aware reclaim: if the recorded PID is empty/garbage or no longer
+    # alive, the previous run died (a SIGKILL or power loss bypasses the EXIT
+    # trap below) and stranded its lock — reclaim it instead of refusing. This
+    # is what made the box un-reprovisionable after an interrupted setup.
+    if [ -z "$lock_pid" ] || ! kill -0 "$lock_pid" 2>/dev/null; then
+      log_warn "Reclaiming stale lock (pid ${lock_pid:-unreadable} not alive)"
       rm -f "$LOCK_FILE"
     else
-      log_error "Another setup is running (lock: $LOCK_FILE)"
-      log_error "If this is a mistake, remove the lock: rm $LOCK_FILE"
-      exit 1
+      # PID is alive — a real concurrent run, or (rarely) PID reuse by an
+      # unrelated process. Fall back to the age guard so even a reused-PID
+      # lock clears after an hour rather than blocking forever.
+      lock_age=$(( $(date +%s) - $(stat -c %Y "$LOCK_FILE" 2>/dev/null || stat -f %m "$LOCK_FILE" 2>/dev/null || echo 0) ))
+      if [ "$lock_age" -gt 3600 ]; then
+        log_warn "Removing stale lock file (${lock_age}s old)"
+        rm -f "$LOCK_FILE"
+      else
+        log_error "Another setup is running (lock: $LOCK_FILE, pid: $lock_pid)"
+        log_error "If this is a mistake, remove the lock: rm $LOCK_FILE"
+        exit 1
+      fi
     fi
   fi
   echo $$ > "$LOCK_FILE"
@@ -193,7 +210,8 @@ _release_lock() {
 # --- Error trap ---
 _on_error() {
   log_error "Setup failed. See log: $LOG_FILE"
-  _release_lock
+  # Lock release is handled by the EXIT trap (set right after _acquire_lock),
+  # so it runs on EVERY exit path — not just this one. exit here fires it.
   exit 1
 }
 
@@ -220,6 +238,9 @@ if [ "$DRY_RUN" = "true" ]; then
   log_info "  Would load kernel modules: uvcvideo, videodev, videobuf2_v4l2"
   log_info "  Would persist modules for boot, install udev rules"
   log_info "  Would detect connected USB cameras"
+  log_info "  Would prep host Bluetooth for Matter BLE commissioning (WARP-850):"
+  log_info "                  install bluez + rfkill, enable bluetooth.service,"
+  log_info "                  rfkill unblock bluetooth, power on the adapter"
 
   log_step 4 $TOTAL_STEPS "Secret generation"
   if [ -f "$REPO_ROOT/.env" ] && [ "$REGENERATE_ENV" != "true" ]; then
@@ -307,6 +328,12 @@ main() {
   trap _on_error ERR
 
   _acquire_lock
+  # Release the lock on ANY exit (success, error, or `set -e` abort). The ERR
+  # trap fires only on a failed command; the benign "seeder failed (exit 1)"
+  # path and other non-error early exits would otherwise leave .setup.lock
+  # behind and make the next run abort with "Another setup is running".
+  # Set AFTER a successful acquire so we never delete another run's lock.
+  trap _release_lock EXIT
 
   local total_steps=7
   [ "$SKIP_DOCKER" = "true" ] || true
@@ -342,6 +369,19 @@ main() {
     log_divider
   else
     install_camera_drivers
+  fi
+
+  # WARP-850: host Bluetooth prep for the matter-controller sidecar's
+  # BLE commissioning (bluez + bluetoothd enabled/active + rfkill
+  # unblock + adapter powered). Idempotent and non-fatal — a box
+  # without Bluetooth still ships IP-only Matter. Rides the same
+  # --skip-drivers escape hatch as the camera modules (both are
+  # host-hardware prep).
+  if [ "$SKIP_DRIVERS" = "true" ]; then
+    log_info "Skipping Bluetooth host prep (--skip-drivers)"
+    log_divider
+  else
+    setup_bluetooth_host
   fi
 
   # --- Phase 4: Secrets ---
@@ -504,7 +544,7 @@ main() {
   fi
 
   # --- Done ---
-  _release_lock
+  # Lock is released by the EXIT trap set right after _acquire_lock.
 
   log_divider
   printf "\n"
@@ -513,13 +553,28 @@ main() {
   printf "  Dashboard:     ${_CYAN}https://droplet-ai.local${_RESET} (mDNS) or ${_CYAN}https://droplet-ai.lan${_RESET} (router DNS)\n"
   printf "                 ${_DIM}https://localhost also works on this device${_RESET}\n"
   printf "  API:           ${_CYAN}https://droplet-ai.local/api/health${_RESET}\n"
+  # ADR-023: surface the publicly-trusted per-device FQDN as the PRIMARY URL
+  # when it's known — the one address that works at home AND over the VPN with
+  # a green padlock and no per-client install. Read straight from .env; empty
+  # until the box has learned it from HQ on its first issuance run.
+  _public_fqdn=""
+  if [ -f "$REPO_ROOT/.env" ]; then
+    _public_fqdn="$(grep -E '^DROPLET_PUBLIC_FQDN=' "$REPO_ROOT/.env" | tail -1 | cut -d= -f2- | tr -d '"' || true)"
+  fi
+  if [ -n "$_public_fqdn" ]; then
+    printf "\n"
+    printf "  ${_BOLD}Your one address, everywhere:${_RESET} ${_CYAN}https://%s${_RESET}\n" "$_public_fqdn"
+    printf "  Works at home AND over the VPN, with a trusted padlock — nothing to install.\n"
+  fi
   printf "\n"
-  printf "  ${_BOLD}To silence the browser \"Not secure\" warning${_RESET} (one-time, per client):\n"
-  printf "    macOS / Linux: ${_CYAN}./scripts/trust-droplet-cert.sh${_RESET}\n"
-  printf "    Windows:       ${_CYAN}powershell -ExecutionPolicy Bypass -File scripts\\trust-droplet-cert.ps1${_RESET}  ${_DIM}(run as Administrator)${_RESET}\n"
-  printf "  The script downloads the Droplet's self-signed cert and installs it\n"
-  printf "  into your OS trust store — the Droplet signs for droplet-ai.local,\n"
-  printf "  droplet-ai.lan, droplet.local, droplet.lan, localhost, and LAN IPs.\n"
+  printf "  ${_BOLD}About the browser padlock${_RESET}\n"
+  printf "  The Droplet gets a publicly-trusted certificate automatically — no\n"
+  printf "  per-device install is needed. The first few minutes after setup it may\n"
+  printf "  serve a temporary self-signed cert (you'll see a one-time \"Not secure\"\n"
+  printf "  warning) until the trusted certificate is issued; it then turns into a\n"
+  printf "  green padlock on its own.\n"
+  printf "  ${_DIM}Offline / air-gapped fallback only: ./scripts/trust-droplet-cert.sh${_RESET}\n"
+  printf "  ${_DIM}Windows: powershell -ExecutionPolicy Bypass -File scripts\\trust-droplet-cert.ps1${_RESET}\n"
   printf "\n"
   printf "  Open the dashboard to complete setup — a guided wizard\n"
   printf "  will walk you through creating your admin account.\n"

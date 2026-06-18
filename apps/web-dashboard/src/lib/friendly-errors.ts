@@ -116,6 +116,13 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "That current password didn't match. Try again.",
     SAME_PASSWORD:
       "Choose a password different from your current one.",
+    // WARP-165 — physical-presence claim gate on POST /auth/setup. The "auth"
+    // fallback talks about username/password, which is wrong for the claim
+    // code, so map these explicitly.
+    CLAIM_CODE_REQUIRED:
+      "Enter the claim code shown on your device's front panel to finish setup.",
+    CLAIM_CODE_INVALID:
+      "That claim code doesn't match the one on your device's front panel. Check it and try again.",
   },
   files: {
     UPLOAD_TOO_LARGE: "That file is too large to upload here.",
@@ -262,6 +269,19 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
     // copy was flattened to the generic device fallback.
     "502":
       "Couldn't find the device on the network. Make sure it's powered on, in pairing mode, and on the same Wi-Fi as the Droplet.",
+    // WARP-856 (item 1): same bug class as the 502 above, for the other two
+    // statuses the commissioning route actually answers. The orchestrator's
+    // curated 504 copy ("Put it into pairing mode again…") reached the
+    // client with err.status = 504 but no entry existed here, so the
+    // actionable step was flattened to the generic device fallback;
+    // `inferCodeFromMessage` only matches /timeout|timed out/, which that
+    // copy doesn't contain. 503 is the controller-still-starting answer
+    // ("Matter controller not started") — jargon a first-run customer
+    // shouldn't see verbatim.
+    "504":
+      "Couldn't reach the device in time. Put it into pairing mode again, make sure it's within a few feet of the Droplet, and retry.",
+    "503":
+      "The Droplet's smart-home service is still starting up. Give it a few seconds and try again.",
   },
   generic: {
     NETWORK:

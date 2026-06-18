@@ -26,7 +26,7 @@ vi.mock("framer-motion", async () => {
 });
 
 vi.mock("@/lib/auth", () => ({
-  useAuth: () => ({ setupState: undefined }),
+  useAuth: () => ({ setupState: { appliance: "unclaimed", setupStep: "welcome", userTourCompleted: false } }),
 }));
 
 const fetchApplianceContractMock = vi.fn();
@@ -66,7 +66,7 @@ const FIXTURE_CONTRACT = {
   },
   storage: { label: "Storage", value: "Encrypted at rest", online: true },
   network: { label: "Network", value: "On your local network", online: true },
-  display: { label: "Display", value: "PyPortal lid display", online: true },
+  display: { label: "Display", value: "Front-panel display", online: true },
   supply_chain: {
     taa_compliant: true,
     ndaa_889_clear: true,
@@ -168,7 +168,7 @@ describe("setup Claim step (PR #373)", () => {
     fetchApplianceContractMock.mockResolvedValue(FIXTURE_CONTRACT);
     postClaimMock.mockRejectedValue(
       new ClaimError(
-        "That claim code didn't match. Check the PyPortal display and try again.",
+        "That claim code didn't match. Check the display and try again.",
         "CLAIM_CODE_INVALID",
         false,
       ),
@@ -419,7 +419,7 @@ describe("setup Claim step — rate-limit countdown (WARP-631)", () => {
     fetchApplianceContractMock.mockResolvedValue(FIXTURE_CONTRACT);
     postClaimMock.mockRejectedValue(
       new ClaimError(
-        "That claim code didn't match. Check the PyPortal display and try again.",
+        "That claim code didn't match. Check the display and try again.",
         "CLAIM_CODE_INVALID",
         false,
       ),

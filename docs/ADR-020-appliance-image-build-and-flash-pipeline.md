@@ -10,7 +10,7 @@
 
 A `single-box` Droplet is provisioned today by running [`scripts/setup.sh`](../scripts/setup.sh) on an **already-installed** Ubuntu host. It installs Docker, generates per-device secrets, builds/pulls ~22 containers, and first-boot-pulls the model. This is correct and stays the canonical provisioning path — but it presumes a human has already installed an OS and cloned the repo. There is **no shippable artifact**: nothing you can hand to an operator (or a customer) to *flash an SSD and boot a working Droplet*.
 
-The only image builder that exists is [`openwrt/build.sh`](../openwrt/build.sh), which builds the **router** image (Raspberry Pi 5 OpenWrt SD card) — a different layer of the system. [`scripts/build-image.sh`](../scripts/build-image.sh) is a five-line stub (`echo "TODO: Implement Pi image build (pi-gen)"`).
+At the time of this decision the only image builder that existed was the legacy multi-box `openwrt/build.sh`, which built the bare-metal **router** image (router-host OpenWrt SD card) — a different layer of the system. (That bare-metal router image builder has since been **retired** per ADR-011; the router now runs in a container on single-box, see `openwrt/singlebox-image/`.) [`scripts/build-image.sh`](../scripts/build-image.sh) was a five-line stub that only echoed a build-image TODO.
 
 ROADMAP **M2.8** ("Downloadable image with Ubuntu + Docker + Droplet pre-installed") has been blocked, verbatim, on *"Architecture call: OpenWrt-only image vs. dual-image"* with the next action *"decide image topology."* ROADMAP **M3.4** (OTA) further commits to a *"`releases/` repo (external) [that] holds manifests"* and an agent that *"pulls a signed manifest, verifies it, and applies … updates atomically."*
 
@@ -20,7 +20,7 @@ This ADR makes the topology call, defines the build + versioning + flashing cont
 
 ### D1 — Topology: a single-box **appliance** image, autoinstall ISO first, golden raw `.img` second
 
-The artifact is the **appliance image** — the x86 single-box *host* (Ubuntu + Docker + the Droplet stack). This is a distinct layer from `openwrt/build.sh`'s **router** image (per ADR-018 the router is its own deployment element, containerized on single-box and a separate Pi on multi-box). The M2.8 "OpenWrt-only vs dual-image" framing is therefore resolved as: **neither** — they are orthogonal images for orthogonal layers, each built by its own pinned builder. There is no combined image.
+The artifact is the **appliance image** — the x86 single-box *host* (Ubuntu + Docker + the Droplet stack). This is a distinct layer from the **router** image (per ADR-018 the router is its own deployment element, containerized on single-box via `openwrt/singlebox-image/` and, on the legacy multi-box, a separate router host). The M2.8 "OpenWrt-only vs dual-image" framing is therefore resolved as: **neither** — they are orthogonal images for orthogonal layers, each built by its own pinned builder. There is no combined image.
 
 The appliance image ships in two phases:
 
@@ -79,7 +79,7 @@ The signed `manifest.json` + `verify` (signature + per-asset sha256, fail-closed
 
 ## Alternatives considered
 
-- **Golden raw `.img` first (pi-gen / debos / mkosi).** Rejected as the *first* step: larger, slower to iterate, and it would duplicate the provisioning logic that `setup.sh` already owns. Kept as Phase 2 where its offline flash-and-boot speed is worth the cost.
+- **Golden raw `.img` first (debos / mkosi).** Rejected as the *first* step: larger, slower to iterate, and it would duplicate the provisioning logic that `setup.sh` already owns. Kept as Phase 2 where its offline flash-and-boot speed is worth the cost.
 - **A combined "dual" OpenWrt+Ubuntu image** (the M2.8 framing). Rejected: per ADR-018 the router and the host are different layers; bundling them couples two independently-versioned artifacts. Each keeps its own builder.
 - **Minisign / signify (Ed25519).** Rejected: Ed25519 is forbidden by the FIPS policy. OpenSSL ECDSA-P256 is the compliant, zero-new-dependency equivalent; cosign is the strategic upgrade.
 - **Off-the-shelf only (balenaEtcher + GitHub Releases + a runbook).** Rejected: no integrity verification, no one-command flow, no machine-readable version catalog for M3.4 to build on.

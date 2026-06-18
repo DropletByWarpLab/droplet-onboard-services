@@ -1,7 +1,7 @@
 """
 Droplet OpenWrt SDK
 ===================
-Python client for the Jetson AI module to control all aspects of the
+Python client for the appliance AI module to control all aspects of the
 OpenWrt routing layer via the ubus JSON-RPC API.
 
 Usage:
@@ -13,7 +13,7 @@ Usage:
     status = router.network.interface_status("lan")
 
     # Change WiFi SSID (radio / iface-section names are deployment-specific;
-    # the shipped Pi-5 router uses radio3 / default_radio3 — see schemas.py)
+    # the shipped router host uses radio3 / default_radio3 — see schemas.py)
     router.wireless.set_ssid("radio3", "default_radio3", "My-New-SSID")
     router.apply_changes("wireless")
 
@@ -32,9 +32,9 @@ import time
 import logging
 from contextlib import contextmanager
 from enum import Enum
+from http.client import HTTPException
 from typing import Any, Optional
 from urllib.request import Request, urlopen
-from urllib.error import URLError
 
 logger = logging.getLogger("droplet.openwrt")
 
@@ -86,7 +86,7 @@ _DEFAULT_ROUTE_TARGETS = frozenset({"0.0.0.0", "::"})
 # ---------------------------------------------------------------------------
 # Wireless scan/info device default is deployment-shape-specific.
 #
-# `wlan0` is the wrong NIC name on every current shape (the Pi-5 router's
+# `wlan0` is the wrong NIC name on every current shape (the router host's
 # MT7922 enumerates via its `radio3` sections; a single-box's radio is
 # `wlp14s0`/similar). Resolve from `DROPLET_WIFI_SCAN_DEVICE` so the shipped
 # compose can name the real interface; the literal is only a last-resort
@@ -163,7 +163,7 @@ class UbusError(Exception):
 
 
 class ConnectionLost(Exception):
-    """Raised when the Jetson can no longer reach the OpenWrt device."""
+    """Raised when the appliance can no longer reach the OpenWrt device."""
     pass
 
 
@@ -262,6 +262,43 @@ class UbusClient:
         self._request_id += 1
         return self._request_id
 
+    def _post(self, data: bytes, label: str) -> dict | list:
+        """One HTTP POST to the ubus endpoint, with WARP-868 transport rigor.
+
+        uhttpd resets connections under concurrent load (stock
+        `max_requests=3` vs the orchestrator's network-summary fan-out), and
+        a reset during the response read surfaces as a NAKED
+        `ConnectionResetError` — an `OSError` that is NOT a `URLError`, so
+        the old `except URLError` let it escape the SDK entirely and the
+        FastAPI route answered an untyped 500 (observed live on the .87 box,
+        2026-06-11: 10× `ConnectionResetError: [Errno 104]`). Every transport
+        failure now maps to `ConnectionLost` — which `handle_router_error`
+        turns into the typed 503 the dashboard knows how to soften — after
+        ONE bounded retry on a fresh connection (each call already opens its
+        own socket; a single retry rides out the transient reset without
+        hammering a genuinely-down router).
+        """
+        req = Request(
+            self.base_url, data=data, headers={"Content-Type": "application/json"}
+        )
+        last_exc: Exception | None = None
+        for attempt in (1, 2):
+            try:
+                with urlopen(req, timeout=self.timeout) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except (OSError, HTTPException, ValueError) as exc:
+                # OSError covers URLError, ConnectionResetError, timeouts;
+                # http.client.HTTPException covers IncompleteRead /
+                # RemoteDisconnected variants; ValueError covers a JSON body
+                # truncated by a mid-read reset. All are transport-integrity
+                # failures, never ubus-level answers.
+                last_exc = exc
+                if attempt == 1:
+                    time.sleep(0.1)
+        raise ConnectionLost(
+            f"{label} failed against OpenWrt at {self.base_url}: {last_exc}"
+        ) from last_exc
+
     def raw_call(self, method: str, params: list) -> dict:
         """Send a single JSON-RPC request and return the parsed response."""
         payload = {
@@ -271,12 +308,12 @@ class UbusClient:
             "params": params,
         }
         data = json.dumps(payload).encode("utf-8")
-        req = Request(self.base_url, data=data, headers={"Content-Type": "application/json"})
-        try:
-            with urlopen(req, timeout=self.timeout) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except URLError as exc:
-            raise ConnectionLost(f"Cannot reach OpenWrt at {self.base_url}: {exc}") from exc
+        result = self._post(data, "Request")
+        if not isinstance(result, dict):
+            raise ConnectionLost(
+                f"Malformed JSON-RPC response from {self.base_url}: expected object"
+            )
+        return result
 
     def call(self, session: str, obj: str, method: str, args: Optional[dict] = None) -> Any:
         """
@@ -320,15 +357,20 @@ class UbusClient:
             })
 
         data = json.dumps(payloads).encode("utf-8")
-        req = Request(self.base_url, data=data, headers={"Content-Type": "application/json"})
-        try:
-            with urlopen(req, timeout=self.timeout) as resp:
-                responses = json.loads(resp.read().decode("utf-8"))
-        except URLError as exc:
-            raise ConnectionLost(f"Batch call failed: {exc}") from exc
+        # Same WARP-868 transport rigor as raw_call (reset → retry once →
+        # typed ConnectionLost), via the shared _post helper.
+        responses = self._post(data, "Batch call")
+        if not isinstance(responses, list):
+            raise ConnectionLost(
+                f"Malformed JSON-RPC batch response from {self.base_url}: expected array"
+            )
 
-        # Match responses by ID (JSON-RPC batch responses may arrive in any order)
-        response_by_id = {r["id"]: r for r in responses}
+        # Match responses by ID (JSON-RPC batch responses may arrive in any
+        # order). rpcd can emit bare error objects WITHOUT an "id" key for
+        # malformed batch members — .get() keys them under None instead of
+        # raising KeyError; the per-request lookup below then reports any
+        # missing match as a typed UbusError.
+        response_by_id = {r.get("id"): r for r in responses}
         results = []
         for req_id in request_ids:
             r = response_by_id.get(req_id)
@@ -1535,7 +1577,7 @@ class ApApi:
             {
                 "mac": "B8:27:EB:12:34:56",
                 "model": "raspberrypi,5-model-b",
-                "serial": "RPi5-00000000a1b2c3d4",
+                "serial": "AP-00000000a1b2c3d4",
                 "version": "1.0",
                 "last_ip": "192.168.50.42",
                 "hostname": "droplet-extender-b827eb123456",

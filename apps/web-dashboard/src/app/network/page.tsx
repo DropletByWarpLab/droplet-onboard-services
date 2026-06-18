@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
+  AlertCircle,
   CalendarClock,
   CheckCircle2,
   Globe,
@@ -19,6 +20,8 @@ import {
   XCircle,
 } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { useAuth } from "@/lib/auth";
 import { useWorkspace } from "@/lib/workspace";
 import { useNetwork } from "@/lib/hooks/useNetwork";
 import { useNetworkDevices } from "@/lib/hooks/useNetworkDevices";
@@ -35,10 +38,8 @@ import { SwitchPanel } from "@/components/network/switch/SwitchPanel";
 import { WifiScanPanel } from "@/components/network/WifiScanPanel";
 import { WifiSettingsForm } from "@/components/network/WifiSettingsForm";
 import {
-  setWifiSsid,
-  setWifiChannel,
-  confirmNetworkCommand,
   fetchNetworkOperation,
+  rebootRouter,
   type NetworkOperation,
 } from "@/lib/api";
 import type {
@@ -46,7 +47,6 @@ import type {
   FirewallConfig,
   FirewallRedirect,
   FirewallRule,
-  NetworkCommandResult,
   NetworkOverview,
 } from "@/lib/types";
 
@@ -106,8 +106,13 @@ export default function NetworkPage() {
     refresh,
   } = useNetwork();
   const [activeTab, setActiveTab] = useState<Tab>("overview");
-  const [pendingConfirm, setPendingConfirm] = useState<NetworkCommandResult | null>(null);
   const [opStatus, setOpStatus] = useState<OperationStatus>({ state: "idle" });
+  // WARP-871 follow-up: while an owner-initiated reboot is in flight the router
+  // is expected to drop for ~30-90s, which makes the status SWR poll fail. Lift
+  // the reboot-in-progress signal here (set by RouterRebootCard) so the
+  // (error || !routerConnected) early return defers to the calm "restarting"
+  // state during that window instead of flashing the alarming full-page error.
+  const [rebooting, setRebooting] = useState(false);
 
   // WARP-612: Simple ⟷ Advanced mode (Droplet Design System). Home installs
   // default to Simple — the everyday Overview only — while Business installs
@@ -190,7 +195,12 @@ export default function NetworkPage() {
     );
   }
 
-  if (error || !routerConnected) {
+  // WARP-871 follow-up: suppress the alarming full-page error while a reboot is
+  // in progress — the dropped connection is expected and RouterRebootCard is
+  // already showing the reassuring "restarting" banner. Once connectivity
+  // returns the SWR poll clears `error`/sets `routerConnected` and normal
+  // rendering resumes.
+  if ((error || !routerConnected) && !rebooting) {
     // WARP-39: render per-code copy when available so the user can act on the
     // specific cause. Falls back to UNKNOWN text when the error didn't come
     // from the typed Result path (older SDK, unrelated failure, etc.).
@@ -282,53 +292,6 @@ export default function NetworkPage() {
           Refresh
         </button>
       </div>
-
-      {/* Confirmation Banner */}
-      {pendingConfirm?.requiresConfirmation && (
-        <div
-          className="card mb-4 flex items-center justify-between"
-          style={{ borderColor: "#d9a35c", background: "rgba(217,163,92,0.06)" }}
-        >
-          <div>
-            <p className="type-subheadline text-label-primary font-medium">
-              Confirmation Required
-            </p>
-            <p className="type-footnote text-label-tertiary">
-              {pendingConfirm.reason}
-            </p>
-          </div>
-          <div className="flex gap-2">
-            <button
-              onClick={() => setPendingConfirm(null)}
-              className="btn ghost sm"
-              type="button"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={async () => {
-                if (pendingConfirm.confirmationToken && pendingConfirm.operation) {
-                  const { operationId } = await confirmNetworkCommand(
-                    pendingConfirm.confirmationToken,
-                    pendingConfirm.operation,
-                  );
-                  setPendingConfirm(null);
-                  // WARP-40: start polling the apply/rollback status.
-                  if (operationId) {
-                    setOpStatus({ state: "pending", id: operationId });
-                  } else {
-                    refresh();
-                  }
-                }
-              }}
-              className="btn primary sm"
-              type="button"
-            >
-              Confirm
-            </button>
-          </div>
-        </div>
-      )}
 
       {/* WARP-40: Operation-status banner — visible while a write is in flight
           or just after it completed. Auto-dismissed when the user clicks × or
@@ -543,7 +506,9 @@ export default function NetworkPage() {
         tabIndex={0}
         hidden={activeTab !== "system"}
       >
-        {activeTab === "system" && <SystemTab overview={overview} />}
+        {activeTab === "system" && (
+          <SystemTab overview={overview} onRebootingChange={setRebooting} />
+        )}
       </div>
       </div>
     </ShellPage>
@@ -941,7 +906,13 @@ function FirewallTab({ firewall }: { firewall: FirewallConfig | undefined }) {
 }
 
 // --- System Tab ---
-function SystemTab({ overview }: { overview: NetworkOverview | undefined }) {
+function SystemTab({
+  overview,
+  onRebootingChange,
+}: {
+  overview: NetworkOverview | undefined;
+  onRebootingChange: (rebooting: boolean) => void;
+}) {
   const board = overview?.system?.board;
   const resources = overview?.system?.resources;
 
@@ -983,6 +954,120 @@ function SystemTab({ overview }: { overview: NetworkOverview | undefined }) {
           <InfoRow label="Memory Free" value={`${memFreeMB} MB`} />
         </div>
       </div>
+
+      {/* WARP-871: the reboot endpoint (owner-only, Tier-3 confirmable) was
+          fully wired server-side but had no UI path — the only ways to restart
+          the router were the LLM tool or curl. */}
+      <RouterRebootCard onRebootingChange={onRebootingChange} />
+    </div>
+  );
+}
+
+// --- Router reboot (WARP-871) ---
+// Owner-only restart with a typed double-confirm. "reboot" is Tier 3 — the
+// orchestrator answers the POST with a 202 + token, and the dashboard
+// confirmation IS the consent (rebootRouter echoes it straight back).
+function RouterRebootCard({
+  onRebootingChange,
+}: {
+  onRebootingChange: (rebooting: boolean) => void;
+}) {
+  const { user } = useAuth();
+  const isOwner = user?.role === "owner";
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [status, setStatus] = useState<
+    { kind: "idle" } | { kind: "rebooting" } | { kind: "error"; message: string }
+  >({ kind: "idle" });
+  const triggerRef = useRef<HTMLButtonElement>(null);
+
+  // WARP-871 follow-up: mirror the local "rebooting" state up to NetworkPage so
+  // its (error || !routerConnected) early return defers to this card's calm
+  // "restarting" banner during the expected ~30-90s outage. Reset on unmount
+  // (e.g. tab switch mid-reboot) so a stale flag can't mask a real outage.
+  const rebooting = status.kind === "rebooting";
+  useEffect(() => {
+    onRebootingChange(rebooting);
+    return () => onRebootingChange(false);
+  }, [rebooting, onRebootingChange]);
+
+  if (!isOwner) return null;
+
+  async function doReboot() {
+    setStatus({ kind: "rebooting" });
+    try {
+      await rebootRouter();
+      // Command accepted — clear rebooting flag so subsequent outages
+      // (router going offline, coming back) are surfaced normally by the
+      // SWR poll instead of being masked by a permanent rebooting=true.
+      setStatus({ kind: "idle" });
+    } catch (e) {
+      setStatus({
+        kind: "error",
+        message:
+          e instanceof Error ? e.message : "Couldn't restart the router. Try again.",
+      });
+    }
+  }
+
+  return (
+    <div className="card">
+      <h3 className="type-headline text-label-primary mb-1">Restart router</h3>
+      <p className="type-subheadline text-label-tertiary mb-4">
+        Restarting the router drops every connected device for about a minute
+        while it reboots. Wi-Fi and internet come back automatically.
+      </p>
+      <button
+        ref={triggerRef}
+        type="button"
+        onClick={() => setConfirmOpen(true)}
+        disabled={status.kind === "rebooting"}
+        className="dp-btn-secondary flex items-center gap-2 text-system-red"
+      >
+        {status.kind === "rebooting" ? (
+          <Loader2 size={16} className="animate-spin" />
+        ) : (
+          <RefreshCw size={16} />
+        )}
+        {status.kind === "rebooting" ? "Restarting…" : "Restart router"}
+      </button>
+
+      {status.kind === "rebooting" && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="mt-4 flex items-start gap-2 type-footnote text-label-primary bg-system-orange/10 rounded-sm px-3 py-2"
+        >
+          <Info size={14} className="mt-0.5 flex-shrink-0 text-system-orange" aria-hidden="true" />
+          <span>
+            Router is restarting — devices will reconnect on their own in a
+            minute or so.
+          </span>
+        </div>
+      )}
+
+      {status.kind === "error" && (
+        <div
+          role="alert"
+          className="mt-4 flex items-start gap-2 type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2"
+        >
+          <AlertCircle size={14} className="mt-0.5 flex-shrink-0" aria-hidden="true" />
+          <span>{status.message}</span>
+        </div>
+      )}
+
+      <ConfirmDialog
+        open={confirmOpen}
+        triggerRef={triggerRef}
+        title="Restart the router?"
+        description="Every connected device — including this one — will lose its connection for about a minute while the router reboots."
+        confirmLabel="Restart"
+        variant="destructive"
+        onConfirm={async () => {
+          setConfirmOpen(false);
+          await doReboot();
+        }}
+        onCancel={() => setConfirmOpen(false)}
+      />
     </div>
   );
 }

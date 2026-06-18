@@ -35,7 +35,9 @@ generate_env() {
   log_info "Generating device-unique secrets..."
 
   # --- Generate all secrets ---
-  local pg_password redis_password mqtt_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display service_token_switch ops_token service_token_mcp service_token_email orchestrator_sampler_token ai_gateway_sampler_token ollama_url openwrt_password
+  local pg_password redis_password mqtt_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display service_token_switch service_token_ai_gateway ops_token service_token_mcp service_token_email orchestrator_sampler_token ai_gateway_sampler_token ollama_url openwrt_password
+  # WARP-850: orchestrator -> matter-controller sidecar bearer (X-Droplet-Auth).
+  local droplet_matter_service_token
   # WARP-503 — embedded Plane PM stack secrets (ADR-010, spec WARP-498).
   local pm_db_password pm_secret_key pm_admin_token pm_webhook_secret pm_web_url
   # Plane v0.24.1 also needs a RabbitMQ broker (celery) + MinIO object storage.
@@ -81,6 +83,13 @@ generate_env() {
   # MUST read the same value; compose wires both ends to
   # ${SERVICE_TOKEN_SWITCH}.
   service_token_switch=$(openssl rand -hex 32)
+  # WARP-560: bearer the orchestrator presents on every outbound call to
+  # the ai-gateway. The gateway's ServiceAuthMiddleware requires it on all
+  # /ai/* routes (except /ai/health) — before this the gateway had NO
+  # inbound auth. Both ai-gateway.client.ts (orchestrator, outbound) and the
+  # ai-gateway container's SERVICE_TOKEN_AI_GATEWAY MUST read the same value;
+  # compose wires both ends to ${SERVICE_TOKEN_AI_GATEWAY}.
+  service_token_ai_gateway=$(openssl rand -hex 32)
   # WARP-337: ops-console support-client bearer. Used by Warp Lab
   # support to authenticate against the on-device /ops/* API when
   # troubleshooting a deployed Droplet. The service binds loopback-only
@@ -95,6 +104,14 @@ generate_env() {
   # attribute correctly (`_service:mcp` vs `_service:voice`). Compose
   # wires mcp-server's ORCHESTRATOR_TOKEN to ${SERVICE_TOKEN_MCP}.
   service_token_mcp=$(openssl rand -hex 32)
+  # WARP-850: shared bearer the orchestrator presents in the
+  # X-Droplet-Auth header on every call to the matter-controller
+  # host-network sidecar (services/matter-controller, port 8083).
+  # Same device-bridge auth pattern as SERVICE_TOKEN_DISPLAY; the
+  # sidecar fails CLOSED (401s everything) when this is empty. Both
+  # ends read the same .env key via compose — rotate in lockstep and
+  # restart orchestrator + matter-controller together.
+  droplet_matter_service_token=$(openssl rand -hex 32)
   # WARP-465: bearer the email-indexer service presents on POST to
   # /api/email/_ingest/* and PATCH /api/email/_ingest/drafts/:id. Same
   # authMiddleware path as voice/mcp — distinct token so the principal
@@ -141,15 +158,13 @@ generate_env() {
   pm_web_url="${DROPLET_PM_WEB_URL:-https://droplet-ai.local:8443}"
 
   # OLLAMA_URL — picks the bundled droplet-ollama container by default
-  # (single-box PoC). Override before running setup.sh for a multi-box
+  # (single-box). Override before running setup.sh for a multi-box
   # deployment with a separate inference host on the LAN, e.g.
   # `OLLAMA_URL=http://192.168.50.197:11434 ./scripts/setup.sh`.
-  # The legacy `JETSON_OLLAMA_URL` env var is still read as a fallback
-  # for back-compat with operators who have it set in their shell.
   # NEVER set this to `inference-engine.local:11434` — mDNS does not
   # resolve from inside Docker containers and you'll get
   # "Temporary failure in name resolution" on every chat.
-  ollama_url="${OLLAMA_URL:-${JETSON_OLLAMA_URL:-http://droplet-ollama:11434}}"
+  ollama_url="${OLLAMA_URL:-http://droplet-ollama:11434}"
 
   # --- Write .env directly (single source of truth — no template, no sed) ---
   cat > "$env_file" << EOF
@@ -183,13 +198,13 @@ NEXTCLOUD_URL=http://nextcloud:80
 # --- AI Gateway ---
 AI_GATEWAY_URL=http://ai-gateway:8000
 # Default targets the bundled \`droplet-ollama\` container on the compose
-# default network — works out of the box on the single-box PoC where
+# default network — works out of the box on the single-box deployment where
 # Ollama runs alongside the rest of the stack. Override BEFORE running
 # setup.sh if you're deploying against a separate inference host on the
 # LAN (\`OLLAMA_URL=http://192.168.50.197:11434 ./scripts/setup.sh\`).
 # The old \`inference-engine.local\` mDNS name does NOT resolve from
-# inside Docker containers on Linux/macOS, which is why every fresh PoC
-# install used to come up with a broken model list and ai-gateway logs
+# inside Docker containers on Linux/macOS, which is why every fresh
+# single-box install used to come up with a broken model list and ai-gateway logs
 # full of "Temporary failure in name resolution". See CLAUDE.md
 # "Ollama call path" for the full rationale.
 OLLAMA_URL=${ollama_url}
@@ -211,9 +226,9 @@ ROUTING_SERVICE_TOKEN=$routing_service_token
 # routing/main.py) uses it for ubus auth, AND droplet-openwrt-attach sets the
 # OpenWrt container's root password to match. An empty value previously left
 # the router root password unset, so ubus auth never came up. Rotate via
-# `sudo systemctl restart droplet-openwrt-attach.service` (sets the container
-# root pw + restarts routing together) — NOT a bare `docker compose restart
-# routing`, which would present the new pw to a container still on the old one.
+# \`sudo systemctl restart droplet-openwrt-attach.service\` (sets the container
+# root pw + restarts routing together) — NOT a bare \`docker compose restart
+# routing\`, which would present the new pw to a container still on the old one.
 OPENWRT_PASSWORD=$openwrt_password
 
 # --- Voice service bearer (voice-io → orchestrator /api/llm/chat) ---
@@ -243,6 +258,14 @@ SERVICE_TOKEN_DISPLAY=$service_token_display
 # both ends to \${SERVICE_TOKEN_SWITCH}.
 SERVICE_TOKEN_SWITCH=$service_token_switch
 
+# --- AI gateway service bearer (orchestrator → ai-gateway HTTP) ---
+# WARP-560. Required by the ai-gateway's ServiceAuthMiddleware on every
+# /ai/* route (chat, sessions, BYOK key CRUD) except /ai/health — the
+# gateway previously had NO inbound auth at all. Both ai-gateway.client.ts
+# and the ai-gateway container's SERVICE_TOKEN_AI_GATEWAY MUST read the
+# same value; compose wires both ends to \${SERVICE_TOKEN_AI_GATEWAY}.
+SERVICE_TOKEN_AI_GATEWAY=$service_token_ai_gateway
+
 # --- ops-console support-client bearer (WARP-337) ---
 # Used by Warp Lab support to authenticate to the on-device /ops/*
 # API. Loopback-only bind + reverse tunnel is the first line of defense;
@@ -257,6 +280,15 @@ OPS_TOKEN=$ops_token
 # so the two service consumers rotate independently. Compose wires
 # mcp-server's ORCHESTRATOR_TOKEN to \${SERVICE_TOKEN_MCP}.
 SERVICE_TOKEN_MCP=$service_token_mcp
+
+# --- Matter controller sidecar bearer (orchestrator → matter-controller) ---
+# WARP-850. The matter.js controller runs in the matter-controller
+# host-network sidecar (raw HCI for BLE commissioning + native LAN
+# mDNS); the orchestrator authenticates to it with this token in the
+# X-Droplet-Auth header (device-bridge precedent). The sidecar fails
+# closed when the value is empty. Rotate both sides in lockstep —
+# change here, restart orchestrator + matter-controller.
+DROPLET_MATTER_SERVICE_TOKEN=$droplet_matter_service_token
 
 # --- Email indexer service bearer (email-indexer → orchestrator REST) ---
 # WARP-465. Bearer the email-indexer presents on ingest POSTs.
@@ -318,7 +350,7 @@ DROPLET_PM_WEB_URL=$pm_web_url
 
 # Plane v0.24.1 Celery broker (RabbitMQ) — internal-only, no host port. Plane
 # builds CELERY_BROKER_URL from these (plane/settings/common.py). User is
-# `plane` (NOT the default `guest`, which RabbitMQ restricts to loopback and
+# \`plane\` (NOT the default \`guest\`, which RabbitMQ restricts to loopback and
 # would refuse cross-container celery connections).
 DROPLET_PM_MQ_USER=plane
 DROPLET_PM_MQ_PASSWORD=$pm_mq_password
@@ -346,6 +378,20 @@ MAX_UPLOAD_SIZE_MB=100
 #   mock = pure-Python in-memory mock (dev / CI / hosts without a TPM).
 DROPLET_TPM_BACKEND=$([ -e /dev/tpm0 ] && printf 'real' || printf 'mock')
 DROPLET_DEVICE_ID=$(hostname 2>/dev/null || echo droplet)
+
+# --- Public-CA per-device TLS (ADR-023) ---
+# DROPLET_PUBLIC_FQDN: the opaque per-device subdomain
+#   d-HMAC.devices.warp-lab.ai. The box CANNOT compute the HQ-keyed HMAC, so it
+#   starts EMPTY and is populated when the tls-issuance cron learns the FQDN
+#   from the HQ challenge response and persists it back here. Empty is the
+#   correct first-boot value: the bootstrap self-signed cert keeps the box
+#   serving TLS, and the FQDN becomes the canonical origin + a bootstrap-SAN
+#   entry once known.
+DROPLET_PUBLIC_FQDN=
+# HQ_ISSUANCE_URL: base URL of the fleet HQ issuance API (hq.warp-lab.com).
+#   Empty disables live issuance (dev / pre-fleet). Plain outbound HTTPS; does
+#   NOT require the fleet WireGuard tunnel.
+HQ_ISSUANCE_URL=
 
 # --- Compose profiles ---
 # Linux defaults to "linux,display,eval":
@@ -383,6 +429,7 @@ EOF
   log_info "  DISPLAY_TOKEN     : ${service_token_display:0:8}****"
   log_info "  OPS_TOKEN         : ${ops_token:0:8}****"
   log_info "  MCP_TOKEN         : ${service_token_mcp:0:8}****"
+  log_info "  MATTER_TOKEN      : ${droplet_matter_service_token:0:8}****"
   log_info "  PM_DB_PASSWORD    : ${pm_db_password:0:4}****"
   log_info "  PM_SECRET_KEY     : ${pm_secret_key:0:8}****"
   log_info "  PM_ADMIN_TOKEN    : ${pm_admin_token:0:8}****"
@@ -433,31 +480,6 @@ migrate_env() {
     fi
   }
 
-  # --- One-time rename: JETSON_OLLAMA_URL -> OLLAMA_URL ----------------
-  # The env var was originally named with a hardware-specific prefix
-  # (Jetson was one of multiple possible inference hosts). The variable
-  # is hardware-agnostic — it's just where Ollama is reachable — so we
-  # renamed it to OLLAMA_URL. Code still reads JETSON_OLLAMA_URL as a
-  # fallback during the transition window, but this migration moves the
-  # value to the new name on next setup.sh run so the .env stops
-  # carrying the legacy name.
-  if grep -qE '^JETSON_OLLAMA_URL=' "$env_file" 2>/dev/null \
-     && ! grep -qE '^OLLAMA_URL=' "$env_file" 2>/dev/null; then
-    if [ "$backed_up" = "false" ]; then
-      # shellcheck disable=SC2155  # Same rationale as lines 29, 352: `date +%s` cannot meaningfully fail; the masked return value carries no signal we'd act on.
-      local backup="$env_file.bak.$(date +%s)"
-      cp "$env_file" "$backup"
-      log_info "Backed up existing .env to $backup before migration"
-      backed_up=true
-    fi
-    # Rename in-place: change the first JETSON_OLLAMA_URL line to OLLAMA_URL.
-    # sed -i with a portable backup suffix that we immediately remove,
-    # which works on both BSD (Darwin) and GNU sed.
-    sed -i.tmp 's/^JETSON_OLLAMA_URL=/OLLAMA_URL=/' "$env_file"
-    rm -f "$env_file.tmp"
-    log_success "Migrated .env: renamed JETSON_OLLAMA_URL -> OLLAMA_URL (hardware-agnostic)"
-  fi
-
   # Default ROUTING_MODE to `mock` on macOS (no local OpenWrt), `real` on
   # Linux. Only set when missing — never overwrite a user's choice.
   local routing_mode_default="real"
@@ -500,6 +522,13 @@ migrate_env() {
   # compose rewire to ${SERVICE_TOKEN_SWITCH} on both ends) restores the
   # orchestrator → switch path and keeps DEVICE_SECRET_KEY off the wire.
   _migrate_ensure_key SERVICE_TOKEN_SWITCH "$(openssl rand -hex 32)"
+  # WARP-560 backfill: existing installs predate the ai-gateway inbound-auth
+  # token. Minting it (and the compose wire on both ends) closes the gap where
+  # /ai/chat, /ai/sessions/*, and /ai/keys/* were reachable with no auth.
+  # Until the gateway also reads SERVICE_TOKEN_AI_GATEWAY it stays open, so the
+  # orchestrator already sending a bearer is harmless; once both ends have the
+  # key the gateway enforces it.
+  _migrate_ensure_key SERVICE_TOKEN_AI_GATEWAY "$(openssl rand -hex 32)"
   # WARP-337 backfill: ops-console support client bearer. Without this
   # key the service falls through to an ephemeral token that regenerates
   # on every container restart, so support's saved credential invalidates
@@ -510,6 +539,11 @@ migrate_env() {
   # path; without this key mcp-server's outbound calls to orchestrator
   # /api/matter/* will 401 when AUTH_ENABLED=true.
   _migrate_ensure_key SERVICE_TOKEN_MCP "$(openssl rand -hex 32)"
+  # WARP-850 backfill: existing installs predate the matter-controller
+  # sidecar; without this key the sidecar's auth wall fails closed and
+  # every orchestrator Matter call 401s (dashboard shows the controller
+  # as disconnected).
+  _migrate_ensure_key DROPLET_MATTER_SERVICE_TOKEN "$(openssl rand -hex 32)"
 
   # WARP-503 backfill: embedded Plane PM stack (ADR-010). Existing installs
   # predate the PM stack; without these keys docker compose up will refuse
@@ -891,6 +925,19 @@ _generate_tls_cert() {
   hn=$(hostname 2>/dev/null || echo "droplet")
   san="$san,DNS:$hn,DNS:${hn}.local"
 
+  # ADR-023 (C2): the opaque per-device FQDN (`d-<hmac>.devices.warp-lab.ai`).
+  # The box can't compute the HQ-keyed HMAC, so it learns its FQDN from the HQ
+  # challenge response and persists it to .env (DROPLET_PUBLIC_FQDN). When it is
+  # known, add it to the bootstrap self-signed SAN so the box serves a
+  # name-matching cert for the FQDN even BEFORE the first LE cert is issued
+  # (works offline / pre-issuance). The LE cert later overwrites these same
+  # files with a publicly-trusted fullchain. Empty on first ever boot — harmless.
+  local public_fqdn="${DROPLET_PUBLIC_FQDN:-}"
+  if [ -n "$public_fqdn" ]; then
+    san="$san,DNS:$public_fqdn"
+    log_info "  Including per-device FQDN in SAN: $public_fqdn"
+  fi
+
   # Add all non-loopback IPv4 addresses
   local ip
   for ip in $(ip -4 addr show scope global 2>/dev/null \
@@ -924,17 +971,15 @@ _generate_tls_cert() {
   # --sync-secrets flow), ask nginx to reload so the new cert is served
   # immediately. On a fresh install this is a no-op because gateway isn't
   # up yet — nginx will just pick up the cert on first start.
-  if command -v docker >/dev/null 2>&1; then
-    local compose_file="$REPO_ROOT/docker/docker-compose.yml"
-    if [ -f "$compose_file" ] && \
-       docker compose -f "$compose_file" ps --services --filter status=running 2>/dev/null \
-         | grep -qx gateway; then
-      if docker compose -f "$compose_file" exec -T gateway nginx -s reload 2>/dev/null; then
-        log_info "  Hot-reloaded gateway nginx with the new cert"
-      else
-        log_warn "  Could not nginx -s reload the gateway container — restart it manually:"
-        log_warn "    docker compose -f docker/docker-compose.yml restart gateway"
-      fi
-    fi
+  #
+  # ADR-023 (C2): the reload is now the shared scripts/lib/tls-reload.sh helper,
+  # so the SELF-SIGNED bootstrap path here and the LE-RENEW path (orchestrator →
+  # device-bridge) use exactly one reload implementation.
+  if ! declare -F reload_gateway_nginx >/dev/null 2>&1; then
+    # Defensive: secrets.sh is normally sourced after tls-reload.sh by setup.sh,
+    # but source it directly if a caller sourced secrets.sh standalone.
+    # shellcheck source=tls-reload.sh
+    source "$(dirname "${BASH_SOURCE[0]}")/tls-reload.sh"
   fi
+  reload_gateway_nginx || true
 }

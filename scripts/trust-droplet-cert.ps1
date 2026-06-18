@@ -3,6 +3,13 @@
 # root store so https://droplet-ai.local / https://droplet-ai.lan stop showing
 # the "Not secure" browser warning.
 #
+# BOOTSTRAP-WINDOW / AIR-GAPPED FALLBACK ONLY (ADR-023).
+#   You normally do NOT need this. The Droplet now obtains a publicly-trusted
+#   certificate automatically (HQ-mediated ACME), so Windows gets a green padlock
+#   at home AND over the VPN with no install. Use this only during the bootstrap
+#   window (the few minutes before the first trusted cert is issued) or on an
+#   air-gapped / HQ-unreachable box. On a normal box, just wait for the padlock.
+#
 # By default installs into CurrentUser\Root (no admin needed). Pass
 # -SystemWide from an elevated shell to trust for all users on the machine.
 # Either way, Windows will show a one-time security prompt asking you to

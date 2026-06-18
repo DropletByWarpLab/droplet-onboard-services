@@ -14,6 +14,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   __setRedisForTesting,
+  cacheIncr,
   cacheSetNx,
   invalidatePrefix,
   withSwrCache,
@@ -21,7 +22,7 @@ import {
 
 type Entry = { value: string; expiresAt: number };
 
-function makeFakeRedis(opts: { errorOn?: "get" | "set" | "scan" } = {}) {
+function makeFakeRedis(opts: { errorOn?: "get" | "set" | "scan" | "eval" } = {}) {
   const store = new Map<string, Entry>();
   const api = {
     store,
@@ -59,6 +60,35 @@ function makeFakeRedis(opts: { errorOn?: "get" | "set" | "scan" } = {}) {
         return "OK";
       },
     ),
+    incr: vi.fn(async (k: string) => {
+      const e = store.get(k);
+      const live = e && (!e.expiresAt || Date.now() <= e.expiresAt);
+      const next = (live ? Number(e!.value) : 0) + 1;
+      // INCR resets the TTL-less counter; EXPIRE is set separately (or via the
+      // Lua eval path below), matching real Redis where INCR never touches TTL.
+      store.set(k, { value: String(next), expiresAt: live ? e!.expiresAt : 0 });
+      return next;
+    }),
+    expire: vi.fn(async (k: string, ttl: number, mode?: string) => {
+      const e = store.get(k);
+      if (!e) return 0;
+      // EXPIRE … NX only sets a TTL when the key currently has none.
+      if (mode === "NX" && e.expiresAt) return 0;
+      e.expiresAt = Date.now() + ttl * 1000;
+      return 1;
+    }),
+    // Fake EVAL just enough to run the cacheIncr Lua script: INCR the key, and
+    // set the TTL only when the counter was freshly created (INCR returned 1).
+    eval: vi.fn(async (_script: string, _numKeys: number, key: string, ttlArg: string) => {
+      if (opts.errorOn === "eval") throw new Error("boom-eval");
+      const e = store.get(key);
+      const live = e && (!e.expiresAt || Date.now() <= e.expiresAt);
+      const next = (live ? Number(e!.value) : 0) + 1;
+      const expiresAt =
+        next === 1 ? Date.now() + Number(ttlArg) * 1000 : live ? e!.expiresAt : 0;
+      store.set(key, { value: String(next), expiresAt });
+      return next;
+    }),
     del: vi.fn(async (...keys: string[]) => {
       let n = 0;
       for (const k of keys) if (store.delete(k)) n++;
@@ -223,6 +253,55 @@ describe("cache.service (WARP-90)", () => {
 
       const won = await cacheSetNx("jwt:rotate:err", true, 30);
       expect(won).toBe(false);
+    });
+  });
+
+  describe("cacheIncr (fixed-window rate-limit counter)", () => {
+    it("increments and returns the running count", async () => {
+      process.env.REDIS_URL = "redis://fake";
+      const fake = makeFakeRedis();
+      __setRedisForTesting(fake as any);
+
+      expect(await cacheIncr("rl:ip", 60)).toBe(1);
+      expect(await cacheIncr("rl:ip", 60)).toBe(2);
+      expect(await cacheIncr("rl:ip", 60)).toBe(3);
+    });
+
+    it("sets the TTL only when the key is first created (fixed, not sliding, window)", async () => {
+      process.env.REDIS_URL = "redis://fake";
+      const fake = makeFakeRedis();
+      __setRedisForTesting(fake as any);
+
+      // First call creates the key and stamps a TTL ~60s out.
+      await cacheIncr("rl:ip", 60);
+      const firstExpiry = fake.store.get("rl:ip")!.expiresAt;
+      expect(firstExpiry).toBeGreaterThan(0);
+
+      // A later call within the window must NOT push the expiry out — that would
+      // make the window slide and the counter never reset (the Finding-2 bug).
+      await new Promise((r) => setTimeout(r, 15));
+      await cacheIncr("rl:ip", 60);
+      const secondExpiry = fake.store.get("rl:ip")!.expiresAt;
+      expect(secondExpiry).toBe(firstExpiry);
+    });
+
+    it("never leaves the key TTL-less (the EXPIRE always lands atomically with INCR)", async () => {
+      process.env.REDIS_URL = "redis://fake";
+      const fake = makeFakeRedis();
+      __setRedisForTesting(fake as any);
+
+      await cacheIncr("rl:ip", 60);
+      // The very first increment must carry a TTL; a non-atomic INCR-then-EXPIRE
+      // could crash between the two and strand the key forever.
+      expect(fake.store.get("rl:ip")!.expiresAt).toBeGreaterThan(0);
+    });
+
+    it("returns null (caller fails OPEN) on a Redis error", async () => {
+      process.env.REDIS_URL = "redis://fake";
+      const fake = makeFakeRedis({ errorOn: "eval" });
+      __setRedisForTesting(fake as any);
+
+      expect(await cacheIncr("rl:ip", 60)).toBeNull();
     });
   });
 

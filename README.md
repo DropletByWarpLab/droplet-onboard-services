@@ -366,7 +366,7 @@ All services run as Docker Compose containers behind an Nginx reverse proxy.
 | **broker** | `eclipse-mosquitto:2` | — | Internal. MQTT bus for orchestrator ↔ file-sync |
 | **file-sync** | local build | — | Background daemon |
 
-Smart-home control runs through the orchestrator's native Matter controller (`apps/orchestrator/src/services/matter.service.ts`).
+Smart-home control runs through the `matter-controller` host-network sidecar (`services/matter-controller/`, ADR-022), fronted by the orchestrator's `/api/matter/*` routes (`apps/orchestrator/src/services/matter.service.ts` is the HTTP client).
 
 App services (orchestrator, web-dashboard, ai-gateway) are **not exposed to the host** — all traffic goes through Nginx on port 80. This avoids conflicts with local dev servers running on the same ports.
 

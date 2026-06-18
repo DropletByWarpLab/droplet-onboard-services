@@ -33,6 +33,14 @@ import { createDeviceReconcilePoller } from "./services/device-reconcile-poller.
 import { startApDiscoveryPoller } from "./services/ap-discovery-poller.js";
 import { sweepExpiredGuests } from "./services/guest-expiry-sweep.service.js";
 import { purgeCameraArtifacts } from "./services/camera-retention-purge.service.js";
+import { createTlsIssuanceService } from "./services/tls-issuance.service.js";
+import {
+  createHqIssuanceClient,
+  createPrismaTlsCertStore,
+  createDiskTlsFileOps,
+  bridgeNginxReloader,
+} from "./services/tls-issuance.adapters.js";
+import { createDeviceIdentityClient } from "./services/device-identity.client.js";
 import {
   createScheduleTicker,
   type FirewallClient,
@@ -45,16 +53,21 @@ import {
   purgeScheduleEvents,
   purgeExpiredOverrides,
 } from "./services/schedule-purge.js";
+import { purgeAuditLogs } from "./services/audit-retention-purge.service.js";
 import { tickToolSchedules } from "./services/tool-schedule-ticker.service.js";
 import { mcpClient } from "./services/mcp-client.singleton.js";
 import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { mineToolCallPatterns } from "./services/pattern-miner.service.js";
-import { purgeNetworkThroughputSamples } from "./routes/network-throughput.js";
+import {
+  purgeNetworkThroughputSamples,
+  purgeDnsBlockSamples,
+} from "./routes/network-throughput.js";
 import { purgeOffLanEgressSamples } from "./routes/off-lan-network.js";
 import { startContextStatsInvalidator } from "./services/context-stats-invalidation.service.js";
 import { initActivityRecorder, recordActivity } from "./services/activity.singleton.js";
 import { attachFileIndexerActivityBridge } from "./services/activity-file-indexer-bridge.js";
 import { ensureDefaultModelPulled } from "./services/model-readiness.service.js";
+import { bootstrapPlaneInstanceInBackground } from "./services/pm-bootstrap.service.js";
 
 const logger = pino({ name: "orchestrator" });
 
@@ -215,6 +228,12 @@ async function main() {
     );
   }
 
+  // WARP-860: Plane CE has no headless setup — complete its god-mode
+  // instance configuration in the background so the embedded Projects
+  // surface works without the "Welcome aboard Plane" wall, even when the
+  // owner skips the wizard's PM step. Bounded retries inside; never throws.
+  bootstrapPlaneInstanceInBackground();
+
   // WARP-81: device-intelligence reconciler. Loads the bundled OUI CSV once
   // at startup (best-effort — missing file is logged, lookups degrade to
   // null) and constructs the registry that drives NetworkDevice /
@@ -243,13 +262,33 @@ async function main() {
   // the handler; the others silently skip. Each distinct cron task gets
   // its own lock key so they don't starve each other.
   const cronRuntime = createCronRuntime(prisma);
+
+  // Router-dependent schedulers only run when routing supervision is active.
+  // With ROUTING_MODE=disabled (dev / CI / router-less deploys) every openwrt
+  // call short-circuits to RouterError.disabled, so scheduling these would emit
+  // a warn-level error every tick — a 47h dev-stack run logged 16k+
+  // "firewall error; preserving state" lines this way. Surface the disabled
+  // state once at boot instead. No-op in production (ROUTING_MODE=real).
+  const routerSupervisionEnabled = config.ROUTING_MODE !== "disabled";
+  if (!routerSupervisionEnabled) {
+    logger.warn(
+      "ROUTING_MODE=disabled — skipping router-dependent schedulers " +
+        "(schedule-ticker, egress-reconciler, device-reconcile, ap-discovery). " +
+        "API writes to schedule/phone-home/firewall state will be persisted to the " +
+        "database but will NOT be enforced on the router until ROUTING_MODE is set " +
+        "to real or mock.",
+    );
+  }
+
   const scheduleTicker = createScheduleTicker(prisma, firewall);
   const tickMs = Number(process.env.SCHEDULE_TICK_MS ?? 30_000);
-  cronRuntime.scheduleInterval(
-    tickMs,
-    () => scheduleTicker.tickOnce(),
-    { lockKey: "droplet:schedule-ticker" },
-  );
+  if (routerSupervisionEnabled) {
+    cronRuntime.scheduleInterval(
+      tickMs,
+      () => scheduleTicker.tickOnce(),
+      { lockKey: "droplet:schedule-ticker" },
+    );
+  }
 
   // WARP-613: phone-home egress reconciler (ADR-012). Additive sibling to the
   // schedule ticker — enforces per-group/master phone-home WAN-egress blocks
@@ -267,11 +306,13 @@ async function main() {
     },
   };
   const egressReconciler = createEgressReconciler(prisma, egressClient);
-  cronRuntime.scheduleInterval(
-    tickMs,
-    () => egressReconciler.tickOnce(),
-    { lockKey: "droplet:egress-reconciler" },
-  );
+  if (routerSupervisionEnabled) {
+    cronRuntime.scheduleInterval(
+      tickMs,
+      () => egressReconciler.tickOnce(),
+      { lockKey: "droplet:egress-reconciler" },
+    );
+  }
 
   // WARP-89: device-intelligence reconciler poller + daily presence purge.
   // Reuses the same cron runtime as the schedule ticker. The poller pulls
@@ -285,12 +326,14 @@ async function main() {
     openwrt,
     reconcileMs,
   );
-  cronRuntime.scheduleInterval(
-    reconcileMs,
-    () => reconcilePoller.pollOnce(),
-    { lockKey: "droplet:device-reconcile-poller" },
-  );
-  logger.info({ reconcileMs }, "device reconcile poller started");
+  if (routerSupervisionEnabled) {
+    cronRuntime.scheduleInterval(
+      reconcileMs,
+      () => reconcilePoller.pollOnce(),
+      { lockKey: "droplet:device-reconcile-poller" },
+    );
+    logger.info({ reconcileMs }, "device reconcile poller started");
+  }
 
   // WARP-463 (C2): tool-schedule-ticker. Every 60s scans due
   // ToolSchedule rows, dispatches via the imperative walker shared
@@ -331,7 +374,9 @@ async function main() {
   // schedule ticker / reconcile poller above so multi-instance
   // deploys don't double-fire.
   const apDiscoveryIntervalMs = config.DROPLET_AP_DISCOVERY_INTERVAL * 1000;
-  startApDiscoveryPoller(cronRuntime, prisma, openwrt, apDiscoveryIntervalMs);
+  if (routerSupervisionEnabled) {
+    startApDiscoveryPoller(cronRuntime, prisma, openwrt, apDiscoveryIntervalMs);
+  }
 
   cronRuntime.scheduleCron(
     "0 3 * * *",
@@ -347,6 +392,24 @@ async function main() {
       // than throughput (30 d) because totals roll up to monthly
       // billing windows; 90 d covers QoQ review without bloat.
       const offLanDeleted = await purgeOffLanEgressSamples(prisma, 90);
+      // WARP-468: DnsBlockSample retention. 30 days mirrors throughput —
+      // the "DNS blocked today" chip only reads day-to-date, so a longer
+      // horizon would just bloat the table.
+      const dnsBlockDeleted = await purgeDnsBlockSamples(prisma, 30);
+      // WARP-586: retention purge for the append-only audit/log tables
+      // (ActivityRow, CommandAuditLog, NotificationLog). Window is
+      // operator-tunable via DROPLET_AUDIT_RETENTION_DAYS (default 90);
+      // <= 0 disables the purge. ActivityRow is hash-chained, so this is
+      // an id-contiguous oldest-prefix seal-and-truncate, not a mid-chain
+      // delete — see audit-retention-purge.service.ts for the integrity
+      // argument. Deletes are batched and capped per run so a months-deep
+      // first-run backlog can't push this handler past the 60 s
+      // advisory-lock transaction (cron-runtime withAdvisoryLock) into a
+      // permanent P2028 retry loop; the backlog drains over nights.
+      const auditPurge = await purgeAuditLogs(
+        prisma,
+        config.DROPLET_AUDIT_RETENTION_DAYS,
+      );
       logger.info(
         {
           eventsDeleted,
@@ -354,6 +417,11 @@ async function main() {
           presenceDeleted: presenceDeleted.count,
           throughputDeleted,
           offLanDeleted,
+          dnsBlockDeleted,
+          activityDeleted: auditPurge.activityDeleted,
+          commandAuditDeleted: auditPurge.commandAuditDeleted,
+          notificationDeleted: auditPurge.notificationDeleted,
+          auditRetentionSkipped: auditPurge.skipped,
         },
         "daily purges complete",
       );
@@ -430,6 +498,33 @@ async function main() {
       }
     },
     { lockKey: "droplet:camera-retention-purge" },
+  );
+
+  // ADR-023 (C2): daily public-CA TLS issuance / renewal. Fires at 04:00 so it
+  // doesn't contend with the 03:00 daily purge, 03:15 guest sweep, or 03:30
+  // camera purge on the advisory-lock pool. Reads the explicit TlsCert state
+  // row + the installed cert: a BOOTSTRAP_SELF_SIGNED box issues a publicly-
+  // trusted cert now; an LE_ISSUED cert renews when <=30 days remain. HQ-
+  // unreachable keeps the current cert and sets LE_RENEW_FAILED inside the
+  // service (it does NOT throw), so a flaky HQ never increments the canary;
+  // only an unexpected (programming) error bubbles up here — exactly what the
+  // canary should escalate, same posture as the purge handlers above.
+  const tlsIssuance = createTlsIssuanceService({
+    fqdn: config.DROPLET_PUBLIC_FQDN,
+    deviceId: config.DROPLET_DEVICE_ID,
+    hq: createHqIssuanceClient(),
+    identity: createDeviceIdentityClient(),
+    store: createPrismaTlsCertStore(prisma),
+    files: createDiskTlsFileOps(),
+    reloadNginx: bridgeNginxReloader,
+    logger,
+  });
+  cronRuntime.scheduleCron(
+    "0 4 * * *",
+    async () => {
+      await tlsIssuance.runOnce();
+    },
+    { lockKey: "droplet:tls-renewal" },
   );
 
   // Start Express on top of a raw http.Server so we can attach the

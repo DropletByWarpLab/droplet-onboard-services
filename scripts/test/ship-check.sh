@@ -106,6 +106,7 @@ ALL_CHECKS=(
   pm-invariants
   lifecycle-naming
   image-pipeline
+  tls-invariants
 )
 FULL_ONLY_CHECKS=(
   docker-build-smoke
@@ -131,7 +132,7 @@ SUBCOMMAND
                         tsc-full, compose-config, frigate-env-scan,
                         shellcheck, matter-env-allowlist, exec-bits,
                         stale-repo-names, pm-invariants, lifecycle-naming,
-                        image-pipeline, docker-build-smoke
+                        image-pipeline, tls-invariants, docker-build-smoke
                       Useful for iterating on a single failure.
 
 EXAMPLES
@@ -1163,16 +1164,12 @@ run_check_lifecycle_naming() {
   #   inference-engine.local). Affected files: scripts/lib/single-box.sh,
   #   scripts/setup.sh.
   #
-  #   Tier 2 — free-text "PoC" comment mentions (per-line allowlist; these are
-  #   stable prose, few, and not a naming surface — they describe the
-  #   single-box deployment's history). Each is a comment, none names a
-  #   profile/env/flag/service:
-  #     docker/docker-compose.yml:181   "The dev/POC compromise: override …"
-  #     docker/docker-compose.yml:1131  "Defaults verified live on POC 2026-05-15."
-  #     .env.example:33                 "Single-box PoC (Ollama in the bundled …"
-  #     scripts/lib/secrets.sh:117      "(single-box PoC). Override before …"
-  #     scripts/lib/secrets.sh:159      "works out of the box on the single-box PoC"
-  #     scripts/lib/secrets.sh:164      "which is why every fresh PoC …"
+  #   Tier 2 — RETIRED (WARP-850). The six free-text "PoC" comment mentions
+  #   that used to live here (docker-compose.yml ×2, .env.example ×1,
+  #   scripts/lib/secrets.sh ×3) were line-number-pinned, which broke the
+  #   moment WARP-850's compose/secrets insertions shifted them. Instead of
+  #   re-pinning, the prose itself was de-PoC'd ("single-box" framing), so
+  #   the allowlist is empty. Add new entries ONLY with a retirement owner.
   #
   # TOKEN PATTERN: whole-word `poc` / `prototype` (case-insensitive — catches
   # `poc`, `POC`, `PoC`, `prototype`) PLUS structural `-dev` / `-test` /
@@ -1213,13 +1210,10 @@ run_check_lifecycle_naming() {
   fi
 
   # --- Tier 2 per-line allowlist (file:line → 1). Documented above. --------
+  # Empty since WARP-850 retired the grandfathered prose mentions. The
+  # declaration stays so the lookup below keeps working when a future
+  # (owner-tracked) entry is added.
   declare -A allowlist
-  allowlist["docker/docker-compose.yml:181"]=1
-  allowlist["docker/docker-compose.yml:1131"]=1
-  allowlist[".env.example:33"]=1
-  allowlist["scripts/lib/secrets.sh:117"]=1
-  allowlist["scripts/lib/secrets.sh:159"]=1
-  allowlist["scripts/lib/secrets.sh:164"]=1
 
   # Tier 1 grandfathered legacy identifiers — stripped from each line BEFORE
   # the token re-scan, so they're allowed wherever they appear (robust to
@@ -1291,6 +1285,75 @@ run_check_lifecycle_naming() {
   printf "    | by ADR-018 action item 3) or another tracked exception, add it to\n" >&2
   printf "    | the grandfather allowlist in run_check_lifecycle_naming WITH a\n" >&2
   printf "    | retirement owner — never as a silent exception.\n" >&2
+  CHECK_RESULTS[$label]=fail
+  return 1
+}
+
+run_check_tls_invariants() {
+  # ADR-023 (C2/C3): invariants the public-CA per-device TLS work must hold so
+  # the box never ships certless and the LE cert installs without an nginx
+  # config change. Three static asserts:
+  #   1. _generate_tls_cert adds the per-device FQDN (DROPLET_PUBLIC_FQDN) to the
+  #      bootstrap self-signed SAN — so the box serves a name-matching cert for
+  #      the FQDN even before the first LE issuance / offline.
+  #   2. nginx.conf still references droplet.crt + droplet.key on BOTH server
+  #      blocks (:443 and :8443) — the LE fullchain overwrites droplet.crt, so a
+  #      rename of those paths would silently break the zero-config handoff.
+  #   3. factory-reset.sh deregisters the FQDN (DELETE /dhcp/hostnames/<fqdn>).
+  local label="tls-invariants"
+  local secrets_sh="$REPO_ROOT/scripts/lib/secrets.sh"
+  local nginx_conf="$REPO_ROOT/docker/nginx.conf"
+  local factory_reset="$REPO_ROOT/scripts/factory-reset.sh"
+  local failures=0
+
+  # 1. Bootstrap SAN includes the per-device FQDN.
+  if [ -f "$secrets_sh" ]; then
+    if ! grep -qE 'DNS:\$public_fqdn|DNS:\$\{DROPLET_PUBLIC_FQDN' "$secrets_sh" \
+       && ! grep -qE 'DROPLET_PUBLIC_FQDN.*san|san.*public_fqdn' "$secrets_sh"; then
+      printf "  ${_RED}FAIL${_RESET}  %s — _generate_tls_cert does not add the FQDN to the bootstrap SAN\n" "$label"
+      printf "    | (ADR-023 C2: add DNS:\$public_fqdn near the hostname SAN in secrets.sh.)\n" >&2
+      failures=$((failures + 1))
+    fi
+  else
+    printf "  ${_RED}FAIL${_RESET}  %s — scripts/lib/secrets.sh not found\n" "$label"
+    failures=$((failures + 1))
+  fi
+
+  # 2. nginx references droplet.crt + droplet.key on BOTH server blocks.
+  if [ -f "$nginx_conf" ]; then
+    local crt_refs key_refs
+    crt_refs="$(grep -cE 'ssl_certificate[[:space:]].*droplet\.crt' "$nginx_conf" 2>/dev/null || echo 0)"
+    key_refs="$(grep -cE 'ssl_certificate_key[[:space:]].*droplet\.key' "$nginx_conf" 2>/dev/null || echo 0)"
+    if [ "$crt_refs" -lt 2 ] || [ "$key_refs" -lt 2 ]; then
+      printf "  ${_RED}FAIL${_RESET}  %s — nginx.conf must reference droplet.crt/.key on BOTH servers (found crt=%s key=%s)\n" "$label" "$crt_refs" "$key_refs"
+      printf "    | (ADR-023 C2: the LE fullchain overwrites droplet.crt — do not rename these paths.)\n" >&2
+      failures=$((failures + 1))
+    fi
+  else
+    printf "  ${_RED}FAIL${_RESET}  %s — docker/nginx.conf not found\n" "$label"
+    failures=$((failures + 1))
+  fi
+
+  # 3. factory-reset deregisters the FQDN host-record. The curl uses `-X DELETE`
+  #    with the URL on the following line, so assert on BOTH parts independently:
+  #    a DELETE verb AND the /dhcp/hostnames/<fqdn> path.
+  if [ -f "$factory_reset" ]; then
+    if ! grep -qE '\-X[[:space:]]+DELETE' "$factory_reset" \
+       || ! grep -qE '\/dhcp\/hostnames\/\$\{?_?DEREGISTER_FQDN' "$factory_reset"; then
+      printf "  ${_RED}FAIL${_RESET}  %s — factory-reset.sh does not deregister the FQDN (DELETE /dhcp/hostnames/<fqdn>)\n" "$label"
+      printf "    | (ADR-023 C3: drop the split-horizon host-record on reset.)\n" >&2
+      failures=$((failures + 1))
+    fi
+  else
+    printf "  ${_RED}FAIL${_RESET}  %s — scripts/factory-reset.sh not found\n" "$label"
+    failures=$((failures + 1))
+  fi
+
+  if [ "$failures" -eq 0 ]; then
+    printf "  ${_GREEN}PASS${_RESET}  %s (FQDN SAN + nginx cert paths + factory-reset deregistration)\n" "$label"
+    CHECK_RESULTS[$label]=pass
+    return 0
+  fi
   CHECK_RESULTS[$label]=fail
   return 1
 }
@@ -1659,6 +1722,7 @@ _dispatch_check() {
     pm-invariants)        run_check_pm_invariants ;;
     lifecycle-naming)     run_check_lifecycle_naming ;;
     image-pipeline)       run_check_image_pipeline ;;
+    tls-invariants)       run_check_tls_invariants ;;
     docker-build-smoke)   run_check_docker_build_smoke ;;
     *)
       printf "${_RED}error:${_RESET} unknown check '%s'\n" "$1" >&2

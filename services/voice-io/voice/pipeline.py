@@ -197,6 +197,23 @@ def classify_tool_choice(transcript: str) -> Optional[ToolChoice]:
             return "none"
     return None
 
+
+def transcript_is_actionable(transcript: str) -> bool:
+    """Whether a post-wake transcript looks like an actual command.
+
+    Residual false wakes (phonetic near-collisions — the TV saying
+    "hey, drop it") capture ambient fragments: "it.", "uh", "yeah.".
+    Every real command or question carries at least one word of three
+    or more letters ("stop", "lights", "what's the weather"), so gate
+    the LLM → speak path on that. False wakes then decay silently
+    instead of the box answering the television; a false NEGATIVE here
+    would require a genuine command made entirely of ≤2-letter words,
+    which doesn't occur in practice.
+
+    Pure function — no I/O, no state. Safe to call from any thread.
+    """
+    return bool(re.search(r"[a-zA-Z]{3,}", transcript or ""))
+
 # Default tuning. Overridable via env at construct time (read by
 # main.py's wiring, not by this module directly).
 DEFAULT_THRESHOLD = 0.3
@@ -234,6 +251,23 @@ DEFAULT_VAD_SPEECH_RMS = 700.0    # int16 frame RMS above which a frame = "speec
 DEFAULT_VAD_MIN_SPEECH_S = 0.4    # min CUMULATIVE speech before end-of-speech
                                   # may fire — keeps the wake-word tail + a
                                   # pause before the command from ending early
+
+# Multichannel capture → mono for the detector + STT.
+#
+# "first" (default): consume CHANNEL 0 only. Mic arrays put the primary
+# processed signal there — the reSpeaker XVF3800 ships beamformed voice
+# on L and AEC *residual* on R, so the old mean-of-channels downmix
+# halved the voice amplitude and mixed in residual noise. That cost
+# ~6 dB of effective sensitivity ("you have to talk really loud") and
+# fed the VAD/wake/STT a dirtier signal. "mean" stays available via
+# VOICE_INPUT_DOWNMIX for plain stereo mics where both channels carry
+# the room.
+DEFAULT_INPUT_DOWNMIX = "first"
+# Digital gain applied to the mono frame after downmix (int16-clipped).
+# 1.0 = untouched. For a quiet capture chain raise via VOICE_INPUT_GAIN
+# (e.g. 2.0 ≈ +6 dB) — cheaper and persistent vs. volatile DSP-side
+# gain set over xvf_host (lost on every chip reboot).
+DEFAULT_INPUT_GAIN = 1.0
 
 # Audio-device self-heal backoff. When the mic re-enumerates (the
 # reSpeaker XVF3800 USB array shifts its card index under Docker), the
@@ -339,6 +373,8 @@ class WakePipeline:
         recover_backoff_initial_s: float = DEFAULT_RECOVER_BACKOFF_INITIAL_S,
         recover_backoff_max_s: float = DEFAULT_RECOVER_BACKOFF_MAX_S,
         sd_reinit: Optional[Callable[[Any], None]] = None,
+        input_downmix: str = DEFAULT_INPUT_DOWNMIX,
+        input_gain: float = DEFAULT_INPUT_GAIN,
     ):
         self._detector = detector
         self._input_device_index = input_device_index
@@ -392,6 +428,13 @@ class WakePipeline:
         # re-resolving. Defaults to sd._terminate()+sd._initialize();
         # injectable for tests / alternate bindings.
         self._sd_reinit = sd_reinit or self._default_sd_reinit
+        # Multichannel→mono strategy + digital input gain (see the
+        # DEFAULT_INPUT_DOWNMIX / DEFAULT_INPUT_GAIN docstrings).
+        self._input_downmix = (
+            input_downmix if input_downmix in ("first", "mean")
+            else DEFAULT_INPUT_DOWNMIX
+        )
+        self._input_gain = input_gain if input_gain > 0 else DEFAULT_INPUT_GAIN
 
         self._thread: Optional[threading.Thread] = None
         self._probe_thread: Optional[threading.Thread] = None
@@ -598,6 +641,15 @@ class WakePipeline:
                 self._play_pcm(audio)
             except Exception as exc:
                 self._set_error(f"playback failed: {exc}")
+                # Mid-playback failure still drove the speaker for some of
+                # the reply, so the same anti-feedback window applies: the
+                # partial Piper output can bleed into the mic and score
+                # above threshold. Arm the post-speak cooldown here too —
+                # _restore_state_after_speak (which normally sets it) does
+                # NOT run on this path because _set_error moved us out of
+                # 'speaking' into 'error'.
+                with self._lock:
+                    self._speak_ended_at = time.time()
                 return {"ok": False, "error": str(exc), "duration_s": audio.duration_s}
 
             self._restore_state_after_speak(prev_state)
@@ -833,13 +885,27 @@ class WakePipeline:
                     # on first run while ONNX kernels JIT; logs once
                     # to avoid spam.
                     logger.debug("wake pipeline: input buffer overflow")
-                # frames is shape (1280, in_channels) int16. Downmix to a
-                # mono 1-D frame (mean across channels) for the detector
-                # + STT; a 1-channel device just flattens.
+                # frames is shape (1280, in_channels) int16. Reduce to a
+                # mono 1-D frame for the detector + STT: channel 0 by
+                # default (the primary/processed channel on mic arrays —
+                # see DEFAULT_INPUT_DOWNMIX), mean across channels when
+                # configured; a 1-channel device just flattens.
                 if frames.ndim > 1 and frames.shape[1] > 1:
-                    mono = frames.mean(axis=1).astype("int16")
+                    if self._input_downmix == "mean":
+                        mono = frames.mean(axis=1).astype("int16")
+                    else:
+                        mono = np.ascontiguousarray(frames[:, 0])
                 else:
                     mono = frames.reshape(-1)
+                if self._input_gain != 1.0:
+                    # Digital boost for quiet capture chains; clip into
+                    # int16 so an over-eager gain distorts instead of
+                    # wrapping around.
+                    mono = np.clip(
+                        mono.astype(np.float32) * self._input_gain,
+                        -32768.0,
+                        32767.0,
+                    ).astype(np.int16)
                 self._on_frame(mono)
 
     def _refresh_audio_enumeration(self, sd: Any) -> None:
@@ -928,6 +994,16 @@ class WakePipeline:
             # Anti-feedback: while we're driving the speaker, ignore
             # incoming mic frames entirely. Piper's voice would otherwise
             # tip the wake detector on a self-spoken "hey jarvis ...".
+            return
+        if state in ("error", "no_mic"):
+            # Latched fault states. Do NOT auto-resume wake detection from
+            # here: a wake fire would overwrite _state with 'wake_detected'
+            # while leaving the now-stale _error_message in place, masking
+            # the fault on /voice/status. Recovery is an explicit transition
+            # — the supervising _loop re-opens the stream and calls
+            # _set_state("listening") after a genuine device recovery; an
+            # 'error' is cleared only by a deliberate _set_state/restart.
+            # Until then, drop frames silently.
             return
 
         # state == "listening" (or 'loading' on the first tick — harmless,
@@ -1176,6 +1252,18 @@ class WakePipeline:
         behaviour (e.g. dashboard-driven dispatch in commit 8).
         """
         if not transcript:
+            return
+        if not transcript_is_actionable(transcript):
+            # Residual false wakes (a phonetic near-collision on the TV —
+            # "hey, drop it") capture room fragments like "it." or "uh".
+            # A real post-wake command always carries at least one
+            # substantive word; don't send fragments to the LLM, and
+            # especially don't speak an answer to the television. The
+            # transcript still lands in /voice/status for diagnosis.
+            logger.info(
+                "transcript %r is a fragment, not a command — staying quiet",
+                transcript,
+            )
             return
         if self._llm is None or not self._llm_available:
             logger.info(

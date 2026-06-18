@@ -149,18 +149,65 @@ export async function checkSetupRequired(): Promise<SetupStatus> {
 export async function setupAdmin(
   email: string,
   password: string,
-  displayName?: string
+  displayName?: string,
+  // WARP-165 — the front-panel claim code, sent ONLY when the physical-presence
+  // claim gate is on (checkClaimGateEnabled). Omitted on the default un-gated
+  // path so the request body is byte-identical to before. The orchestrator
+  // verifies it read-only against the persisted ClaimCode and answers 403
+  // CLAIM_CODE_REQUIRED / CLAIM_CODE_INVALID, surfaced via the thrown `code`.
+  claimCode?: string,
 ): Promise<void> {
   const res = await authFetch(`${BASE}/api/auth/setup`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password, displayName }),
+    body: JSON.stringify({
+      email,
+      password,
+      displayName,
+      ...(claimCode ? { claimCode } : {}),
+    }),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     const err = new Error(data.error || "Setup failed") as Error & { code?: string };
     err.code = data.code;
     throw err;
+  }
+}
+
+/**
+ * WARP-165 — probe whether the physical-presence claim gate is on. Reads the
+ * same public, pre-auth `GET /api/auth/setup` endpoint as `checkSetupRequired`
+ * (which now also returns `claimGateEnabled`). The setup wizard's Account step
+ * uses this to decide whether to show the claim-code field and require it.
+ *
+ * Fail-SAFE toward NOT showing the field: any non-2xx, network error, timeout,
+ * or a body that omits an explicit `true` resolves to `false`. A box where the
+ * gate is genuinely on will get an explicit `true`; anything indeterminate must
+ * not block a legitimate first-run setup behind a field the server won't
+ * actually enforce — mirrors the default-OFF, never-lock-out posture of the
+ * gate itself.
+ */
+export async function checkClaimGateEnabled(): Promise<boolean> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), SETUP_PROBE_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${BASE}/api/auth/setup`, {
+      credentials: "same-origin",
+      signal: controller.signal,
+    });
+    if (!res.ok) return false;
+    let data: unknown;
+    try {
+      data = await res.json();
+    } catch {
+      return false;
+    }
+    return (data as { claimGateEnabled?: unknown } | null)?.claimGateEnabled === true;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -1374,6 +1421,43 @@ export async function confirmNetworkCommand(
   return { operationId: body?.operationId ?? null };
 }
 
+/**
+ * Reboot the router (WARP-871). Owner-only (the orchestrator route enforces
+ * it). "reboot" is a Tier-3 operation confirmable via the dashboard, so the
+ * POST returns 202 + a confirmation token; the Restart click IS the consent,
+ * so we echo it straight back through confirmNetworkCommand. Returns the
+ * operationId (or null) so the caller can show a "rebooting…" state.
+ */
+export async function rebootRouter(): Promise<{ operationId: string | null }> {
+  const res = await authFetch(`${BASE}/api/network/system/reboot`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (res.status === 202) {
+    if (!body?.confirmationToken || !body?.operation) {
+      throw new Error(
+        "Unexpected 202 response: missing confirmationToken or operation",
+      );
+    }
+    return confirmNetworkCommand(body.confirmationToken, body.operation);
+  }
+  if (res.ok) {
+    // Tier dropped to immediate (no confirmation needed) — already executing.
+    return { operationId: body?.operationId ?? null };
+  }
+  if (res.status === 403) {
+    throw new Error(
+      (body as { error?: string }).error ||
+        "Only the owner can restart the router.",
+    );
+  }
+  throw new Error(
+    (body as { error?: string }).error || `Failed to restart router: ${res.status}`,
+  );
+}
+
 export async function fetchNetworkOperation(id: string): Promise<NetworkOperation> {
   const res = await authFetch(`${BASE}/api/network/operations/${encodeURIComponent(id)}`);
   if (res.status === 404) {
@@ -1880,14 +1964,47 @@ export async function enableCamera(name: string): Promise<void> {
   if (!res.ok) throw new Error(`Failed to enable camera: ${res.status}`);
 }
 
+/** Consume a camera-domain Tier-2 confirmation token (WARP-861).
+ *  Pairs with POST /api/cameras/command/confirm — the camera analogue of
+ *  /switch/command/confirm. The operation echo is required (WARP-41). */
+async function confirmCameraCommand(
+  confirmationToken: string,
+  operation: string,
+): Promise<void> {
+  const res = await authFetch(`${BASE}/api/cameras/command/confirm`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirmationToken, operation }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { error?: string }).error || `Confirm failed: ${res.status}`);
+  }
+}
+
 export async function disableCamera(name: string): Promise<void> {
   const res = await authFetch(`${BASE}/api/cameras/${encodeURIComponent(name)}/disable`, { method: "POST" });
   if (!res.ok) throw new Error(`Failed to disable camera: ${res.status}`);
+  // disable_camera is Tier 2: the route 202s with a token and does nothing
+  // until the token is consumed (WARP-861 — previously this silently
+  // no-opped). The user already confirmed in the UI dialog that invoked us,
+  // so complete the two-step handshake here.
+  if (res.status === 202) {
+    const body = (await res.json().catch(() => ({}))) as { confirmationToken?: string };
+    if (!body.confirmationToken) throw new Error("Disable requires confirmation but no token was issued");
+    await confirmCameraCommand(body.confirmationToken, "disable_camera");
+  }
 }
 
 export async function removeCamera(name: string): Promise<void> {
   const res = await authFetch(`${BASE}/api/cameras/${encodeURIComponent(name)}`, { method: "DELETE" });
   if (!res.ok) throw new Error(`Failed to remove camera: ${res.status}`);
+  // delete_camera is Tier 2 — same two-step handshake as disableCamera.
+  if (res.status === 202) {
+    const body = (await res.json().catch(() => ({}))) as { confirmationToken?: string };
+    if (!body.confirmationToken) throw new Error("Remove requires confirmation but no token was issued");
+    await confirmCameraCommand(body.confirmationToken, "delete_camera");
+  }
 }
 
 export function getCameraSnapshotUrl(name: string): string {

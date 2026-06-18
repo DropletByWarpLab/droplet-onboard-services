@@ -28,12 +28,41 @@ import {
   getAuditLog,
 } from "../services/safety-tier.service.js";
 import { requireRole } from "../middleware/auth.js";
+import { isUpstreamUnavailable } from "../lib/upstream-unavailable.js";
 
 const logger = pino({ name: "matter-routes" });
 
-/** Validate that a nodeId string is a safe numeric value for BigInt conversion. */
+/**
+ * Empty grouped-devices payload served when the matter-controller sidecar can't
+ * answer — either it was never initialized, or it's reachable-but-down at GET
+ * time. Same shape the dashboard already handles for the "disconnected" case so
+ * the Devices page renders empty groups instead of dead-ending on a 500 during a
+ * sidecar outage (mirrors models-summary.service.ts). Never cached — self-heals
+ * on the next poll once the sidecar is back.
+ */
+const DISCONNECTED_DEVICES = {
+  lights: [],
+  switches: [],
+  sensors: [],
+  climate: [],
+  media: [],
+  covers: [],
+  locks: [],
+  other: [],
+  _status: "disconnected",
+} as const;
+
+/** Matter node IDs are uint64 — 18446744073709551615 is the ceiling. */
+const NODE_ID_MAX = 18446744073709551615n;
+
+/**
+ * Validate that a nodeId string is a safe numeric value for BigInt
+ * conversion AND inside the uint64 range — 20 digits can exceed the
+ * ceiling (e.g. "99999999999999999999"), which would blow up inside
+ * the controller as a 500 instead of this validator's 400.
+ */
 function isValidNodeId(id: string): boolean {
-  return /^\d{1,20}$/.test(id);
+  return /^\d{1,20}$/.test(id) && BigInt(id) <= NODE_ID_MAX;
 }
 
 /**
@@ -192,21 +221,18 @@ export function createMatterRouter(prisma: PrismaClient): Router {
   router.get("/matter/devices", async (_req, res, next) => {
     try {
       if (!isMatterInitialized()) {
-        return res.json({
-          lights: [],
-          switches: [],
-          sensors: [],
-          climate: [],
-          media: [],
-          covers: [],
-          locks: [],
-          other: [],
-          _status: "disconnected",
-        });
+        return res.json(DISCONNECTED_DEVICES);
       }
       const grouped = await getCommissionedDevices();
       res.json(grouped);
     } catch (err) {
+      if (isUpstreamUnavailable(err)) {
+        logger.warn(
+          { err },
+          "matter-controller unreachable; serving empty device list",
+        );
+        return res.json(DISCONNECTED_DEVICES);
+      }
       next(err);
     }
   });
@@ -256,12 +282,15 @@ export function createMatterRouter(prisma: PrismaClient): Router {
   // --- Controller capabilities ---
   // WARP-851: read-only surface for the dashboard so the wizard and
   // /devices/add-matter can be honest about which commissioning paths
-  // work on this box (no BLE today — see WARP-850). Intentionally NOT
-  // gated on isMatterInitialized(): the capability is derived from the
-  // matter.js environment, not controller state, and the wizard needs
-  // the answer while the controller may still be booting.
-  router.get("/matter/capabilities", (_req, res) => {
-    res.json(getMatterCapabilities());
+  // work on this box. Since WARP-850 this proxies the matter-controller
+  // sidecar's real state (bleCommissioning=true when its BLE transport
+  // registered at process start). Intentionally NOT gated on
+  // isMatterInitialized(): the sidecar answers before its controller
+  // finishes booting, the wizard needs the answer early, and the
+  // service degrades to { bleCommissioning: false } instead of
+  // throwing when the sidecar is unreachable.
+  router.get("/matter/capabilities", async (_req, res) => {
+    res.json(await getMatterCapabilities());
   });
 
   // --- Discover uncommissioned Matter devices ---
@@ -489,7 +518,10 @@ export function createMatterRouter(prisma: PrismaClient): Router {
       if (!isValidNodeId(req.params.nodeId)) {
         return res.status(400).json({ error: "Invalid node ID format" });
       }
-      await decommissionDevice(req.params.nodeId);
+      const removed = await decommissionDevice(req.params.nodeId);
+      if (!removed) {
+        return res.status(404).json({ error: "Device not found" });
+      }
       res.json({ status: "decommissioned", nodeId: req.params.nodeId });
     } catch (err) {
       next(err);

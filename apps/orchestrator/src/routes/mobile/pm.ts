@@ -5,7 +5,10 @@
  * WARP-513 — per spec WARP-498 OQ4 (resolved 2026-05-28 to A): the
  * orchestrator transforms Plane's `work-item` shape into the existing
  * mobile envelope. Mobile clients NEVER call Plane directly; they hit
- * these wrappers which forward via DROPLET_PM_ADMIN_TOKEN.
+ * these wrappers, which authenticate upstream with the runtime-minted
+ * Plane service token (WARP-867 — DROPLET_PM_ADMIN_TOKEN was never a
+ * valid Plane credential). Workspace listing goes through the session
+ * app API since Plane CE's /api/v1/ has no workspace list.
  *
  * Endpoints (full shapes in docs/mobile-api-contract.md):
  *   GET /api/mobile/pm/workspaces
@@ -24,18 +27,17 @@ import {
   getWorkItem,
   listProjects,
   listWorkItems,
-  listWorkspaces,
   PlaneApiError,
   type PlaneWorkItem,
 } from "../../services/pm.client.js";
-import { config } from "../../config.js";
+import {
+  getPlaneServiceToken,
+  listPlaneWorkspaces,
+  PmBootstrapError,
+} from "../../services/pm-bootstrap.service.js";
 import { requireRole } from "../../middleware/auth.js";
 
 const logger = pino({ name: "pm-mobile-route" });
-
-function adminKey(): string {
-  return config.DROPLET_PM_ADMIN_TOKEN;
-}
 
 function capPerPage(raw: unknown): number {
   const n = Number(raw);
@@ -82,6 +84,15 @@ function mapPmError(
   res: Response,
   resource: "workspace" | "project" | "work_item",
 ): Response | null {
+  // WARP-867: the service token / session is minted at runtime through
+  // pm-bootstrap; until the PM stack is up (or a workspace exists) those
+  // throw PmBootstrapError — surface as "not ready", not a route crash.
+  if (err instanceof PmBootstrapError) {
+    logger.warn({ err: err.message, code: err.code }, "PM not ready");
+    return res
+      .status(503)
+      .json({ error: "Plane is not ready yet", code: err.code });
+  }
   if (!(err instanceof PlaneApiError)) return null;
   if (err.status === 404) {
     const code =
@@ -120,7 +131,9 @@ export function createPmMobileRouter(): Router {
     HUMAN_GET,
     async (_req: Request, res: Response, next: NextFunction) => {
       try {
-        const workspaces = await listWorkspaces(adminKey());
+        // WARP-867: `GET /api/v1/workspaces/` does not exist on Plane CE —
+        // the list comes from the session app API via pm-bootstrap.
+        const workspaces = await listPlaneWorkspaces();
         return res.json({
           workspaces: workspaces.map((w) => ({
             id: w.id,
@@ -148,7 +161,7 @@ export function createPmMobileRouter(): Router {
             .json({ error: "workspace query param required" });
         }
         const projects = await listProjects(
-          adminKey(),
+          await getPlaneServiceToken(),
           workspace,
           capPerPage(req.query.per_page),
         );
@@ -180,7 +193,7 @@ export function createPmMobileRouter(): Router {
             .json({ error: "workspace and project_id query params required" });
         }
         const work_items = await listWorkItems(
-          adminKey(),
+          await getPlaneServiceToken(),
           workspace,
           projectId,
           {
@@ -215,7 +228,7 @@ export function createPmMobileRouter(): Router {
             .json({ error: "workspace and project_id query params required" });
         }
         const work_item = await getWorkItem(
-          adminKey(),
+          await getPlaneServiceToken(),
           workspace,
           projectId,
           workItemId,

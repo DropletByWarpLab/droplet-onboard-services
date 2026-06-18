@@ -36,6 +36,7 @@ vi.mock("../services/activity.singleton.js", () => ({
 }));
 
 import { createPeopleRouter } from "../routes/people.js";
+import type { ScopeName } from "../middleware/scope.js";
 
 /** Prisma stub exposing just the userInvite.create the team service calls. */
 function createPrismaMock() {
@@ -75,7 +76,14 @@ function buildApp(prismaMock: any, inviterRole: string) {
     };
     next();
   });
-  app.use("/api", createPeopleRouter(prismaMock));
+  // WARP-455 — createPeopleRouter now takes the scope-loader axis as arg 2.
+  // The invite routes are gated by requireRole only (never requireScope), so
+  // the loader is never invoked here; a fixed loader keeps every assertion
+  // intact.
+  app.use(
+    "/api",
+    createPeopleRouter(prismaMock, async () => new Set<ScopeName>(["team"])),
+  );
   return app;
 }
 

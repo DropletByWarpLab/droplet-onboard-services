@@ -27,7 +27,7 @@
  *
  * # On LLM determinism
  *
- * The default ai-gateway routes Ollama → the Jetson appliance, which
+ * The default ai-gateway routes Ollama → the inference host, which
  * is unreachable on a CI runner / a developer laptop. We can't make
  * the agent loop emit deterministic prose either way, so we assert
  * the *retrieval* axis:

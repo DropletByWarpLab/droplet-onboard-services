@@ -25,6 +25,11 @@ const sampleSchema = z.object({
   ts: z.string().datetime().optional(),
 });
 
+const dnsBlockSampleSchema = z.object({
+  blockedCount: z.number().int().nonnegative(),
+  ts: z.string().datetime().optional(),
+});
+
 const throughputQuerySchema = z.object({
   window: z.enum(["1h", "6h", "24h", "7d"]).optional().default("24h"),
 });
@@ -67,20 +72,44 @@ export function createNetworkThroughputRouter(prisma: PrismaClient): Router {
         // returns every device ever registered (blocked, long-inactive),
         // diverging from the network page's "active" label.
         const onlineSince = new Date(Date.now() - 2 * 60_000);
-        const [latest, clientCount] = await Promise.all([
+        // Month-to-date for off-LAN bytes, day-to-date for DNS blocks.
+        // UTC boundaries match off-lan-network.ts's month-start logic so
+        // the summary chip and the dedicated /network/off-lan aggregator
+        // never disagree on where "this month" begins. NOTE: "today" is a
+        // UTC day here — see the day-boundary flag in the PR notes.
+        const now = new Date();
+        const monthStart = new Date(
+          Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1),
+        );
+        const dayStart = new Date(
+          Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
+        );
+        const [latest, clientCount, offLan, dnsBlock] = await Promise.all([
           prisma.networkThroughputSample.findFirst({ orderBy: { ts: "desc" } }),
           prisma.networkDevice
             .count({ where: { lastSeen: { gte: onlineSince } } })
             .catch(() => 0),
+          // offLanEgressSample.bytes is BigInt → _sum is bigint | null.
+          prisma.offLanEgressSample
+            .aggregate({
+              _sum: { bytes: true },
+              where: { ts: { gte: monthStart, lte: now } },
+            })
+            .catch(() => ({ _sum: { bytes: null } })),
+          // dnsBlockSample.blockedCount is Int → _sum is number | null.
+          prisma.dnsBlockSample
+            .aggregate({
+              _sum: { blockedCount: true },
+              where: { ts: { gte: dayStart, lte: now } },
+            })
+            .catch(() => ({ _sum: { blockedCount: null } })),
         ]);
         res.json({
           wanDownBps: latest ? fromBigInt(latest.wanDownBps) : 0,
           wanUpBps: latest ? fromBigInt(latest.wanUpBps) : 0,
           clientCount,
-          // Phase E2 OffLanEgressSample dependency — placeholder 0
-          // preserves the shape until WARP-468 wires real aggregation.
-          dnsBlockedToday: 0,
-          offLanBytesThisMonth: 0,
+          dnsBlockedToday: dnsBlock._sum.blockedCount ?? 0,
+          offLanBytesThisMonth: fromBigInt(offLan._sum.bytes ?? 0n),
           lastSampleAt: latest ? latest.ts.toISOString() : null,
         });
       } catch (err) {
@@ -162,6 +191,40 @@ export function createNetworkThroughputRouter(prisma: PrismaClient): Router {
     },
   );
 
+  // Service-principal push from the routing service's dns_block_meter
+  // apscheduler job. Same `service` gate + ORCHESTRATOR_SAMPLER_TOKEN
+  // bearer as /network/throughput-sample and the off-LAN samplers.
+  router.post(
+    "/network/dns-block-sample",
+    requireRole("service"),
+    async (req, res, next) => {
+      try {
+        const parsed = dnsBlockSampleSchema.safeParse(req.body);
+        if (!parsed.success) {
+          res
+            .status(400)
+            .json({ error: "Invalid sample", details: parsed.error.flatten() });
+          return;
+        }
+        const ts = parsed.data.ts ? new Date(parsed.data.ts) : new Date();
+        // `ts` is the PK (DateTime @id). Two ticks landing on the same
+        // millisecond — a caller-supplied ts replay, retry, or a
+        // restart race between two routing instances — would otherwise
+        // collide with P2002 → 500 → silent sample loss. skipDuplicates
+        // makes the insert idempotent, matching the migration's stated
+        // posture (the first write for a ts wins; the delta is already
+        // captured).
+        await prisma.dnsBlockSample.createMany({
+          data: [{ ts, blockedCount: parsed.data.blockedCount }],
+          skipDuplicates: true,
+        });
+        res.status(201).json({ ok: true, ts: ts.toISOString() });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
   return router;
 }
 
@@ -172,6 +235,18 @@ export async function purgeNetworkThroughputSamples(
 ): Promise<number> {
   const cutoff = new Date(Date.now() - olderThanDays * 86400_000);
   const r = await prisma.networkThroughputSample.deleteMany({
+    where: { ts: { lt: cutoff } },
+  });
+  return r.count;
+}
+
+/** Retention helper called from the daily 03:00 cron in index.ts. */
+export async function purgeDnsBlockSamples(
+  prisma: PrismaClient,
+  olderThanDays = 30,
+): Promise<number> {
+  const cutoff = new Date(Date.now() - olderThanDays * 86400_000);
+  const r = await prisma.dnsBlockSample.deleteMany({
     where: { ts: { lt: cutoff } },
   });
   return r.count;

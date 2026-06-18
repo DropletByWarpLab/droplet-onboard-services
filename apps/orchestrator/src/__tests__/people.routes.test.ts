@@ -44,6 +44,7 @@ vi.mock("../services/activity.singleton.js", () => ({
 }));
 
 import { createPeopleRouter } from "../routes/people.js";
+import type { ScopeName } from "../middleware/scope.js";
 
 interface MockUser {
   id: string;
@@ -194,7 +195,17 @@ function buildApp(
     };
     next();
   });
-  app.use("/api", createPeopleRouter(prismaMock));
+  // WARP-455: createPeopleRouter now takes a scope loader (the second
+  // RBAC axis). Every caller in this suite is owner/admin (loader
+  // short-circuited) or family (rejected by requireRole before the
+  // loader runs), so a fixed loader keeps every assertion intact.
+  app.use(
+    "/api",
+    createPeopleRouter(
+      prismaMock,
+      async () => new Set<ScopeName>(["exec_only"]),
+    ),
+  );
   return app;
 }
 
@@ -382,12 +393,44 @@ describe("PATCH /api/people/:id/scope", () => {
     );
     expect(prisma.scopeBinding.deleteMany).toHaveBeenCalledTimes(1);
     expect(prisma.scopeBinding.create).toHaveBeenCalledTimes(2);
+    // Data-integrity (pr-reviewer HIGH): the deleteMany + recreate pair MUST
+    // run inside a single $transaction so a crash between the delete and the
+    // last create can't leave the user with zero scope bindings (locked out
+    // of every scope-guarded route). Mirrors the PATCH /role last-owner
+    // invariant transaction above.
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
     expect(recordActivityMock).toHaveBeenCalledTimes(1);
     const recorded = recordActivityMock.mock.calls[0][0];
     expect(recorded.kind).toBe("system");
     expect(recorded.refs.scopes).toEqual(
       expect.arrayContaining(["team", "finance"]),
     );
+  });
+
+  it("rolls back the deleteMany when a create fails — no zero-binding window, no ActivityRow", async () => {
+    const prisma = createPrismaMock([seedUser({ id: "u1" })]);
+    const app = buildApp(prisma);
+
+    // Make the SECOND scopeBinding.create reject mid-rewrite.
+    let calls = 0;
+    prisma.scopeBinding.create.mockImplementation(async () => {
+      calls += 1;
+      if (calls === 2) throw new Error("insert failed");
+      return {};
+    });
+
+    const res = await request(app)
+      .patch("/api/people/u1/scope")
+      .send({ scopes: ["team", "finance"] });
+
+    expect(res.status).toBe(500);
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(prisma.scopeBinding.deleteMany).toHaveBeenCalledTimes(1);
+    // The audit emit is gated behind transaction success, so a failed
+    // rewrite produces no ActivityRow. On real Postgres the deleteMany
+    // is rolled back too, so the user never observes zero bindings; the
+    // passthrough mock can only prove the ordering + the gated emit.
+    expect(recordActivityMock).not.toHaveBeenCalled();
   });
 
   it("rejects an empty scopes array with 400 (force at least one binding)", async () => {

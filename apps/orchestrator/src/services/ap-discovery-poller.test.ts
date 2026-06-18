@@ -92,7 +92,7 @@ describe("ap-discovery-poller (WARP-446)", () => {
         {
           mac: "B8:27:EB:00:00:01",
           model: "raspberrypi,5-model-b",
-          serial: "RPi5-12345",
+          serial: "AP-12345",
           version: "1.0",
           last_ip: "192.168.50.42",
           hostname: "droplet-extender-1",

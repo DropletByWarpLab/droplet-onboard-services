@@ -33,6 +33,7 @@ import { createScimRouter } from "./routes/scim.js";
 import { createMatterRouter } from "./routes/matter.js";
 import { createPmWebhookRouter } from "./routes/pm-webhook.js";
 import { createPmOnboardRouter } from "./routes/pm-onboard.js";
+import { createPmProxyRouter } from "./routes/pm-proxy.js";
 import { createPmMobileRouter } from "./routes/mobile/pm.js";
 import { createPmRouter } from "./routes/pm.js";
 import { createScenesRouter } from "./routes/scenes.js";
@@ -64,6 +65,10 @@ import { createFipsRouter } from "./routes/fips.js";
 import { createActivityRouter } from "./routes/activity.js";
 import { createLogsRouter } from "./routes/logs.js";
 import { createPeopleRouter } from "./routes/people.js";
+import {
+  initScopeLoader,
+  loadUserEffectiveScopes,
+} from "./services/scope-loader.service.js";
 import { createSettingsRouter } from "./routes/settings.js";
 import { createSettingsEmailRouter } from "./routes/settings-email.js";
 import { createEmailRouter, wireEmailAnalysis } from "./routes/email.js";
@@ -78,6 +83,7 @@ import { createDeviceIdentityClient } from "./services/device-identity.client.js
 import { startRemindersPoller } from "./services/reminders-poller.js";
 import { startScreenQRPoller } from "./services/screen-qr.service.js";
 import { initPushDispatch } from "./services/push-dispatch.service.js";
+import { outboundEmailGate } from "./services/off-lan-gate.service.js";
 import {
   seedWorkspaceSettings,
   seedOffLanChannels,
@@ -200,6 +206,14 @@ export function createApp(prisma: PrismaClient) {
   // branch instead of regressing the OCS-username-as-id leak.
   setAuthPrisma(prisma);
 
+  // WARP-455 — bind the scope-loader singleton to the same Prisma client
+  // before the first request, for the same reason as setAuthPrisma above:
+  // requireScope()'s injected loader (loadUserEffectiveScopes) reads
+  // ScopeBinding/GuestExpiry through this singleton, and the very first
+  // post-boot request to a scope-guarded route must find it populated.
+  // Idempotent — a second createApp() in tests is a no-op.
+  initScopeLoader(prisma);
+
   // Auth middleware (controlled by AUTH_ENABLED env var)
   app.use(authMiddleware);
 
@@ -237,6 +251,9 @@ export function createApp(prisma: PrismaClient) {
   app.use("/api", createMatterRouter(prisma));
   // WARP-507 — Plane onboarding endpoint for the setup wizard.
   app.use(createPmOnboardRouter());
+  // WARP-867 — Plane service-token mint + app-API proxies (workspace
+  // list, search) for the v1 surfaces Plane CE doesn't provide.
+  app.use(createPmProxyRouter());
   // WARP-513 — read-only mobile wrappers around Plane upstream
   // (workspaces, projects, work-items). iOS/Android/Windows consume.
   app.use(createPmMobileRouter());
@@ -306,7 +323,7 @@ export function createApp(prisma: PrismaClient) {
   // WARP-455: A1 local user directory + role/scope mutations. Mutations
   // emit ActivityRow rows via recordActivity (auth kind for lifecycle,
   // system kind for permission edits).
-  app.use("/api", createPeopleRouter(prisma));
+  app.use("/api", createPeopleRouter(prisma, loadUserEffectiveScopes));
   // ADR-007 + ADR-009: workspace-type (Home vs Business) singleton.
   // GET available to any authenticated user (drives chrome pill);
   // POST is owner-only (flip the workspace type).
@@ -345,29 +362,14 @@ export function createApp(prisma: PrismaClient) {
   // WARP-465 (D1): email backbone — accounts list, threads list +
   // detail, draft CRUD, queue-send. Send is gated by the WARP-467/468
   // off-LAN `outbound_email` allowlist channel; refusal raises 451.
-  // The OffLanAllowlistChannel model lands in WARP-467 — until that
-  // PR is in main, this gate falls back to default-allow on any error
-  // (missing table, missing key, etc.) so chat → reply doesn't 451 on
-  // a stack that hasn't merged E1 yet.
+  // WARP-467 is merged, so the gate now uses the typed Prisma read in
+  // off-lan-gate.service.ts and FAILS CLOSED (no egress) on any DB
+  // error or missing row — a sovereignty control must not default-open
+  // on a transient hiccup (mirrors ai-gateway/middleware/off_lan_gating.py).
   app.use(
     "/api",
     createEmailRouter(prisma, {
-      outboundEmailEnabled: async () => {
-        try {
-          // Use the raw client so the type checker doesn't trip when
-          // the model is absent on stacks pre-WARP-467.
-          const rows = await prisma.$queryRawUnsafe<
-            Array<{ enabled: boolean }>
-          >(
-            `SELECT enabled FROM "OffLanAllowlistChannel" WHERE key = 'outbound_email' LIMIT 1`,
-          );
-          if (rows.length === 0) return true;
-          return rows[0].enabled === true;
-        } catch {
-          // Table missing (pre-WARP-467) → default-allow.
-          return true;
-        }
-      },
+      outboundEmailEnabled: () => outboundEmailGate(prisma),
     }),
   );
 

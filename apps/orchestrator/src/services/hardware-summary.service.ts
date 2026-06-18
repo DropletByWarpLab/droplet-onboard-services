@@ -121,7 +121,7 @@ async function getStorage(prisma: PrismaClient): Promise<HardwareStorage> {
 }
 
 function getCompute(): HardwareCompute {
-  // Pi 5 vs Jetson vs x86: the canonical answer comes from the same
+  // Across host types: the canonical answer comes from the same
   // signals scripts/lib/single-box.sh::detect_single_box_mode uses
   // (render-node count + lspci dGPU). Wiring that into a runtime
   // probe is a follow-up; v1 reports the OS hostname-derived best

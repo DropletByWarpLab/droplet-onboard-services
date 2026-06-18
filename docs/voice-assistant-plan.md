@@ -11,7 +11,7 @@
   50 tools in `packages/tools-core`).
 - Mic and speaker live IN the device — the hardware abstraction must
   handle the single-box shape (x86 + onboard Realtek ALC662, no USB
-  audio yet) AND the v2-6 hardware (Jetson + I/O-Brick I²S codec)
+  audio yet) AND the v2-6 hardware (the appliance + I/O-Brick I²S codec)
   AND any USB headset a dev plugs in.
 - "Basically all functionality" — the voice loop talks to the existing
   agent runtime, so anything the LLM can do via text it can do via
@@ -52,7 +52,7 @@ tests under `tests/test_devices.py::TestRealHardwareScenarios`):
    USB array Stefan's ordered. Resolution: USB array wins for input on
    score, onboard codec wins for output (or USB speaker if also plugged
    in).
-3. **v2-6 (Jetson + I/O Brick)** — I²S codec on platform bus.
+3. **v2-6 (appliance + I/O Brick)** — I²S codec on platform bus.
    Resolution: platform-bus codec wins both ways. Same code path, no
    special case.
 4. **Generic dev box** — laptop with onboard audio + USB headset.

@@ -20,6 +20,7 @@ import { publish as mqttPublish } from "../services/mqtt.service.js";
 import { requireRole } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { visibleAudiences } from "../services/memory-audience.js";
+import { loadIdentityPrompt } from "../services/identity-prompt.js";
 
 /** WARP-456: severity bucket the dashboard renders for the activity feed. */
 function activitySeverityForTurnStatus(
@@ -231,7 +232,11 @@ async function narrowAllowedToolsForRole(
   if (isPrivilegedRole(role)) {
     return requestedAllowed;
   }
-  if (requestedAllowed?.length) {
+  // Distinguish `undefined` (no list supplied → fall through to the
+  // role default) from an explicit empty array (caller asked for ZERO
+  // tools). `.length` truthiness would conflate the two and grant the
+  // full non-write registry for an intentional `allowed_tools: []`.
+  if (requestedAllowed !== undefined) {
     return requestedAllowed.filter((n) => !WRITE_TOOLS.has(n));
   }
   // Default for unprivileged users: every tool the live MCP server
@@ -293,9 +298,10 @@ function replayedWriteToolAttempt(rawMessages: unknown): boolean {
  */
 function buildBaseSystemPrompt(allowed: string[] | undefined): string {
   const can = (name: string) => !allowed || allowed.includes(name);
-  const lines = [
-    "You are the Droplet AI assistant, running locally on the user's Droplet appliance.",
-  ];
+  // Identity leads: the full "who you are / what this box does" block
+  // from data/droplet-identity.md (fail-open to the legacy one-liner),
+  // shared by every surface — dashboard, voice, external MCP clients.
+  const lines = [loadIdentityPrompt()];
   const guidance: string[] = [];
   if (can("search_content")) {
     guidance.push(
@@ -474,7 +480,11 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   const router = Router();
   const persistence = new ChatPersistenceService(prisma);
 
-  // List available models
+  // List available models. Degrade gracefully when the AI gateway is
+  // unreachable (down / disabled / transient network blip): serve an empty
+  // model list instead of 500ing the dashboard's 30s SWR poll and the setup
+  // wizard's AI step. Mirrors /api/models (models-summary.service.ts), which
+  // already returns an empty local list on the same failure.
   router.get("/llm/models", async (_req, res, next) => {
     try {
       const cached = await cacheGet<ModelsResponse>(MODELS_CACHE_KEY);
@@ -483,7 +493,30 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         return;
       }
 
-      const models = await aiGateway.listModels();
+      let models: ModelsResponse;
+      try {
+        models = await aiGateway.listModels();
+      } catch (err) {
+        // Only degrade for an UNREACHABLE gateway (down / disabled / transient
+        // network blip). A reachable gateway that 5xxs, or a malformed-JSON
+        // response, is a real failure and must surface as an error — not be
+        // masked as an empty 200. `listModels()` throws a TypeError from
+        // fetch() on network failure (ENOTFOUND / ECONNREFUSED) and an
+        // Error("AI Gateway timeout …") on an AbortSignal.timeout; anything
+        // else (e.g. "AI Gateway error: 503", a SyntaxError from res.json())
+        // re-throws to the outer next(err) handler.
+        const isUnreachable =
+          err instanceof TypeError ||
+          (err instanceof Error &&
+            /ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|timeout/i.test(err.message));
+        if (!isUnreachable) throw err;
+        // Do NOT cache the empty fallback — the next request retries the
+        // gateway so the list self-heals once it is reachable again.
+        console.warn("[llm/models] ai-gateway unreachable; serving empty list:", err);
+        const empty: ModelsResponse = { models: [] };
+        res.json(empty);
+        return;
+      }
       await cacheSet(MODELS_CACHE_KEY, models, MODELS_CACHE_TTL);
       res.json(models);
     } catch (err) {
@@ -691,7 +724,14 @@ export function createLlmRouter(prisma: PrismaClient): Router {
 
       const deps: AgentDeps = {
         mcp: mcpClient,
-        aiGateway: { chat: aiGateway.chat },
+        // WARP-561: close over the requesting user's id so the gateway scopes
+        // BYOK key resolution to their namespace for every agent-loop turn.
+        // WARP-329: forward the agent loop's client-disconnect AbortSignal so an
+        // in-flight inference fetch is cancelled when the client goes away.
+        aiGateway: {
+          chat: (chatReq, signal) =>
+            aiGateway.chat(chatReq, signal, (req as AuthedRequest).user?.id),
+        },
         enhancement: createEnhancementDeps({
           aiGatewayGrpcUrl,
           defaultModel: defaultChatModel,
@@ -1034,10 +1074,20 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         let emptyCompletion = false;
         // WARP-329: detect client-side abort. req.on("close") fires when
         // the client disconnects mid-stream; we still finalize but flag
-        // the turn as aborted so the row reflects reality.
+        // the turn as aborted so the row reflects reality. The
+        // AbortController additionally tears down the in-flight work:
+        // its signal is threaded into runAgent → the ai-gateway fetch
+        // (cancelling inference) and is checked between agent-loop
+        // iterations / before each tool dispatch, so a disconnect stops
+        // the loop instead of letting it run (and fire write tools) in
+        // the background.
         let clientAborted = false;
+        const abortController = new AbortController();
         req.on("close", () => {
-          if (!res.writableEnded) clientAborted = true;
+          if (!res.writableEnded) {
+            clientAborted = true;
+            abortController.abort();
+          }
         });
         try {
           const streamResult = await runAgent({ ...deps, onEvent }, {
@@ -1053,6 +1103,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             toolCallContext,
             captureReasoning: chatReq.captureReasoning,
             citationContext,
+            // WARP-329 — cancel inference + halt the loop on disconnect.
+            signal: abortController.signal,
           });
           // WARP-458 — the agent loop populates message.reasoning
           // REGARDLESS of captureReasoning (only the wire-emit is
@@ -1061,14 +1113,27 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           // without re-running inference.
           liveReasoning = streamResult.message.reasoning ?? null;
         } catch (err) {
-          terminal = "failed";
-          // eslint-disable-next-line no-console
-          console.error("[llm/chat] agent loop failed:", err);
+          // Use the name-based check rather than instanceof DOMException:
+          // aligns with the codebase pattern and stays robust against
+          // error-wrapping layers that re-throw as a plain Error with
+          // name:"AbortError" (retry wrappers, SDK updates, etc.).
+          const isAbortErr =
+            err instanceof Error && (err as Error).name === "AbortError";
+          if (!isAbortErr) {
+            // Only non-abort errors mark the row as failed. For AbortErrors,
+            // terminal stays "completed" so the clientAborted guard below
+            // can correctly set "aborted" for mid-inference disconnects.
+            terminal = "failed";
+            // eslint-disable-next-line no-console
+            console.error("[llm/chat] agent loop failed:", err);
+          }
         } finally {
           res.end();
         }
         if (emptyCompletion) terminal = "failed";
-        if (clientAborted) terminal = "aborted";
+        // Preserve the model-error label when emptyCompletion and clientAborted
+        // are both set (e.g. context-window overflow races a client disconnect).
+        if (clientAborted && terminal !== "failed") terminal = "aborted";
         await finalizeAndNotify(terminal);
         return;
       }
@@ -1476,16 +1541,17 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         res.status(400).json({ error: "api_key is required" });
         return;
       }
-      await aiGateway.saveKey(provider, api_key);
+      // WARP-561: forward the caller so the gateway namespaces the key per user.
+      await aiGateway.saveKey(provider, api_key, (req as AuthedRequest).user?.id);
       res.json({ status: "ok", provider });
     } catch (err) {
       next(err);
     }
   });
 
-  router.get("/llm/keys", async (_req, res, next) => {
+  router.get("/llm/keys", async (req, res, next) => {
     try {
-      const providers = await aiGateway.listKeys();
+      const providers = await aiGateway.listKeys((req as AuthedRequest).user?.id);
       res.json({ providers });
     } catch (err) {
       next(err);
@@ -1495,7 +1561,10 @@ export function createLlmRouter(prisma: PrismaClient): Router {
   // WARP-171: same posture as POST /llm/keys/:provider.
   router.delete("/llm/keys/:provider", requireRole("owner", "admin", "family"), async (req, res, next) => {
     try {
-      await aiGateway.deleteKey(req.params.provider);
+      await aiGateway.deleteKey(
+        req.params.provider,
+        (req as AuthedRequest).user?.id
+      );
       res.json({ status: "deleted" });
     } catch (err) {
       next(err);

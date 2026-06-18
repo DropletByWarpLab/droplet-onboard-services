@@ -168,6 +168,29 @@ describe("POST /api/llm/chat — base system prompt + memory injection", () => {
     expect(messages.at(-1)).toMatchObject({ role: "user", content: "hello" });
   });
 
+  it("leads the base system message with the shared Droplet identity block", async () => {
+    const app = buildApp(createPrismaMock([]));
+
+    const res = await request(app)
+      .post("/api/llm/chat")
+      .send({
+        model: "m1",
+        messages: [{ role: "user", content: "hello" }],
+      });
+
+    expect(res.status).toBe(200);
+    const sys = agentMessages()[0]!;
+    expect(sys.role).toBe("system");
+    // data/droplet-identity.md content (identity-prompt.ts), not the
+    // legacy one-liner — every surface shares this block.
+    expect(sys.content).toContain("You are Droplet");
+    expect(sys.content).toContain("What the box does");
+    // Identity leads; tool guidance follows it.
+    expect(sys.content!.indexOf("You are Droplet")).toBeLessThan(
+      sys.content!.indexOf("Tool guidance:"),
+    );
+  });
+
   it("inlines active memory facts into the base system message", async () => {
     const app = buildApp(
       createPrismaMock([
@@ -258,7 +281,9 @@ describe("POST /api/llm/chat — base system prompt + memory injection", () => {
     // to call the stripped write tool.
     expect(sys.content).not.toContain("memory_extract_fact");
     expect(sys.content).not.toContain("search_content");
-    expect(sys.content).toContain("Droplet AI assistant");
+    // Identity block (data/droplet-identity.md) still leads even when
+    // every tool is stripped.
+    expect(sys.content).toContain("You are Droplet");
   });
 
   it("skips the base prompt entirely when tool_choice is 'none'", async () => {

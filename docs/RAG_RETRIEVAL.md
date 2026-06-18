@@ -88,7 +88,7 @@ every developer's docker-compose).
 - 278M parameters; ~280 MB on disk
 - English-leaning (cross-lingual capability exists but is weaker than v2-m3)
 - MTEB rerank avg: 84.8
-- ~50 ms/req on CPU for top-50 (Jetson Orin int8)
+- ~50 ms/req on CPU for top-50 (inference host, int8)
 - Served by `services/ai-gateway` via the gRPC `Rerank` method
 - Cached at `/var/cache/droplet/models/bge-reranker-base/` after first
   pull from Hugging Face
@@ -346,7 +346,7 @@ through a single `queryEnhancement` block on `SearchHybridParams`.
   vector arms together before fusing with the lexical arm. Highest
   expected lift on multi-faceted analytical queries.
 - **Adaptive routing** uses a `MoritzLaurer/deberta-v3-base-zeroshot-v2.0`
-  zero-shot NLI classifier (~110 MB int8, ~50 ms CPU on Orin Nano) to
+  zero-shot NLI classifier (~110 MB int8, ~50 ms CPU on the inference host) to
   label each query and pick a preset. The classifier runs in ai-gateway
   behind the new `ClassifyQuery` gRPC RPC; results are SHA-256-keyed and
   cached for 24 h (`warp437:cls:` Redis prefix).
@@ -414,7 +414,7 @@ Per query, worst case (analytical class, both LLM calls active):
 | Stage | Cost (p95) |
 |---|---|
 | Classify (deberta zero-shot, CPU) | ~50 ms |
-| HyDE chat (Orin warm, mistral-7b) | ~600 ms |
+| HyDE chat (inference host warm, mistral-7b) | ~600 ms |
 | Multi-query chat | ~600 ms |
 | 4 parallel vector arms (raw + 3 paraphrases, pgvector) | ~30 ms (parallel) |
 | Reranker batch (BGE-base int8 ONNX) | ~120 ms |

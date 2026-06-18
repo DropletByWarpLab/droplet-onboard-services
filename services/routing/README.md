@@ -131,7 +131,7 @@ All config changes can be wrapped in `router.safe_apply(timeout=30)` for automat
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OPENWRT_HOST` | `192.168.50.1` | OpenWrt router IP. Default is the multi-box Pi-5 router. `scripts/lib/single-box.sh` overrides it to `127.0.0.1` (in-container OpenWrt on `:8181`) on the single-box shape. |
+| `OPENWRT_HOST` | `192.168.50.1` | OpenWrt router IP. Default is the legacy multi-box bare-metal router host. `scripts/lib/single-box.sh` overrides it to `127.0.0.1` (in-container OpenWrt on `:8181`) on the single-box shape. |
 | `OPENWRT_PORT` | `80` | OpenWrt uhttpd port (single-box override: `8181`). |
 | `OPENWRT_USERNAME` | `droplet-ai` | rpcd user (single-box override: `root`). |
 | `OPENWRT_PASSWORD_FILE` | `/run/secrets/openwrt_password` | Path to the Docker secret file containing the rpcd password. See "OpenWrt password" below. |

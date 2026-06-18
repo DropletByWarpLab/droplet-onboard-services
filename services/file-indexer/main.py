@@ -60,6 +60,46 @@ def _run_fips_boot_self_test() -> None:
     assert_fips_at_boot_or_exit("file-indexer")
 
 
+def build_http_app():
+    """Construct the file-indexer's FastAPI app.
+
+    Module-level (rather than inlined in the server thread) so the routes
+    are importable by tests without standing up uvicorn. Lives here, next
+    to its only caller, to keep the indexer's single HTTP surface in one
+    place.
+    """
+    from fastapi import FastAPI, HTTPException
+
+    api = FastAPI()
+
+    @api.get("/health")
+    def health() -> dict:
+        """Liveness probe for the orchestrator health-monitor + Docker
+        healthcheck (WARP-598). file-indexer is otherwise MQTT/watcher-
+        driven; a 200 here means the HTTP surface — and therefore the
+        process hosting the watcher + scheduler threads — is alive. Kept
+        dependency-free so the probe never blocks on the DB/MQTT/gRPC
+        backends, matching routing's best-effort posture.
+        """
+        return {"status": "ok", "service": "file-indexer"}
+
+    @api.post("/reindex/{file_id}")
+    def reindex_file_endpoint(file_id: str) -> dict:
+        """Re-extract a single file atomically. See brain_ingest.reindex_one."""
+        from brain_ingest import reindex_one
+
+        try:
+            return reindex_one(file_id)
+        except ValueError as e:
+            # not-found / file-missing / extractor-unavailable
+            raise HTTPException(status_code=404, detail=str(e))
+        except RuntimeError as e:
+            # empty extraction / chunker produced nothing
+            raise HTTPException(status_code=422, detail=str(e))
+
+    return api
+
+
 def main():
     from config import NEXTCLOUD_DATA_ROOT, AI_GATEWAY_GRPC_URL
 
@@ -167,37 +207,24 @@ def main():
     )
     sched_thread.start()
 
-    # WARP-287: admin re-index HTTP endpoint. file-indexer is otherwise
-    # MQTT-driven; the orchestrator's admin reindex route needs a
-    # request/response surface (so the orchestrator can return
-    # `chunksWritten` synchronously to the admin caller). Lives in a
-    # daemon thread alongside the watcher — uvicorn runs its own asyncio
-    # loop, independent of the apscheduler thread above.
+    # WARP-287/WARP-598: the file-indexer HTTP surface (admin re-index +
+    # /health). file-indexer is otherwise MQTT-driven; the orchestrator's
+    # admin reindex route needs a request/response surface (so it can
+    # return `chunksWritten` synchronously to the admin caller), and the
+    # orchestrator health-monitor polls /health. The app is built by
+    # build_http_app(); it runs in a daemon thread alongside the watcher —
+    # uvicorn runs its own asyncio loop, independent of the apscheduler
+    # thread above.
     def _http_server_thread():
         try:
             import uvicorn
-            from fastapi import FastAPI, HTTPException
 
-            api = FastAPI()
-
-            @api.post("/reindex/{file_id}")
-            def reindex_file_endpoint(file_id: str) -> dict:
-                """Re-extract a single file atomically. See brain_ingest.reindex_one."""
-                from brain_ingest import reindex_one
-
-                try:
-                    return reindex_one(file_id)
-                except ValueError as e:
-                    # not-found / file-missing / extractor-unavailable
-                    raise HTTPException(status_code=404, detail=str(e))
-                except RuntimeError as e:
-                    # empty extraction / chunker produced nothing
-                    raise HTTPException(status_code=422, detail=str(e))
-
+            api = build_http_app()
             port = int(os.environ.get("FILE_INDEXER_HTTP_PORT", "8090"))
             uvicorn.run(api, host="0.0.0.0", port=port, log_level="info")
         except Exception:
             logger.exception("file-indexer HTTP server failed to start")
+            os._exit(1)
 
     http_thread = threading.Thread(
         target=_http_server_thread, name="warp287-http", daemon=True

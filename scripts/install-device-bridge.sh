@@ -17,7 +17,7 @@
 # Usage:
 #   sudo ./scripts/install-device-bridge.sh
 #
-# Run from the Jetson host, not inside any container.
+# Run from the appliance host, not inside any container.
 # =============================================================================
 set -euo pipefail
 
@@ -39,7 +39,9 @@ for unit in droplet-device-bridge.service \
             droplet-wifi-rotate.service \
             droplet-wifi-rotate.timer \
             droplet-shutdown-screen.service \
-            droplet-storage-pool-apply.service; do
+            droplet-storage-pool-apply.service \
+            droplet-wifi-watchdog.service \
+            droplet-wifi-watchdog.timer; do
   src="$SRC_DIR/$unit"
   dst="$UNIT_DIR/$unit"
   if [[ ! -f "$src" ]]; then
@@ -126,6 +128,19 @@ fi
 install -m 0755 "$HOSTAPD_SCRIPT_SRC" "$HOSTAPD_SCRIPT_DST"
 log "installed $HOSTAPD_SCRIPT_DST"
 
+# --- 1d-ter) Install the Wi-Fi PCI watchdog (WARP-869) ---
+# Revives a silently-dead Wi-Fi PCI function (driver bound, phy/netdev gone)
+# via remove + rescan, then re-runs droplet-openwrt-attach so hostapd rebinds
+# the AP. Scheduled by droplet-wifi-watchdog.timer (unit installed in step 1).
+WIFI_WD_SRC="$REPO_ROOT/scripts/host/usr-local-sbin/droplet-wifi-watchdog"
+WIFI_WD_DST="/usr/local/sbin/droplet-wifi-watchdog"
+if [[ ! -f "$WIFI_WD_SRC" ]]; then
+  log "missing source: $WIFI_WD_SRC"
+  exit 1
+fi
+install -m 0755 "$WIFI_WD_SRC" "$WIFI_WD_DST"
+log "installed $WIFI_WD_DST"
+
 # --- 1d-bis) Polkit rules for the sandboxed bridge writes ---
 # The bridge unit runs as User=droplet inside ProtectSystem=strict +
 # NoNewPrivileges — it CANNOT write /etc/default or sudo (the shipping box
@@ -181,6 +196,21 @@ fi
 install -m 0755 "$LOGS_SCRIPT_SRC" "$LOGS_SCRIPT_DST"
 log "installed $LOGS_SCRIPT_DST"
 
+# ADR-023 (C2): gateway-nginx reload host executor. The orchestrator's
+# tls-issuance cron POSTs /tls/reload to the bridge after writing a fresh LE
+# fullchain; the bridge execs this wrapper, which delegates to the shared
+# scripts/lib/tls-reload.sh::reload_gateway_nginx (the orchestrator has no docker
+# socket). Repo-tracked (architecture-guard rule 20), installed here so
+# factory-reset removes it cleanly. Repo source is scripts/host/.
+TLS_RELOAD_SCRIPT_SRC="$REPO_ROOT/scripts/host/droplet-tls-reload.sh"
+TLS_RELOAD_SCRIPT_DST="/usr/local/sbin/droplet-tls-reload.sh"
+if [[ ! -f "$TLS_RELOAD_SCRIPT_SRC" ]]; then
+  log "missing source: $TLS_RELOAD_SCRIPT_SRC"
+  exit 1
+fi
+install -m 0755 "$TLS_RELOAD_SCRIPT_SRC" "$TLS_RELOAD_SCRIPT_DST"
+log "installed $TLS_RELOAD_SCRIPT_DST"
+
 # --- 2) Ensure the env file exists and contains the needed secrets ---
 install -d -m 0755 "$ENV_DIR"
 if [[ ! -f "$ENV_FILE" ]]; then
@@ -202,7 +232,7 @@ set_env_if_blank() {
     return 0
   fi
   if grep -qE "^#?\s*${key}=" "$ENV_FILE"; then
-    # Replace an empty or commented line (GNU sed — Jetson is Ubuntu).
+    # Replace an empty or commented line (GNU sed — the appliance is Ubuntu).
     sed -i -E "s|^#?\s*${key}=.*|${key}=${value}|" "$ENV_FILE"
   else
     printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"
@@ -250,7 +280,7 @@ if [[ -f "$REPO_ENV" ]]; then
 
   # Pairing-QR AP source (WARP-654). setup.sh --single-box records
   # DROPLET_AP_MODE=hostapd in the repo .env (scripts/lib/single-box.sh) because
-  # the single-box host runs the Wi-Fi AP via hostapd, not a Pi-5 UCI router.
+  # the single-box host runs the Wi-Fi AP via hostapd, not a standalone UCI router.
   # Mirror it into the bridge env so device-bridge.py reads the hostapd creds
   # instead of an empty `uci show wireless`. set_env_if_blank never clobbers an
   # operator override; multi-box installs leave the key unset in .env, so the
@@ -350,6 +380,12 @@ fi
 # starts it (ExecStart=/usr/bin/true reaches "active" immediately and its
 # ExecStop fires on the next shutdown). Idempotent. Independent of the bridge.
 systemctl enable --now droplet-shutdown-screen.service
+
+# WARP-869: Wi-Fi PCI watchdog — revives a silently-dead Wi-Fi function
+# (driver bound, phy/netdev gone; seen live on the shipping box) via PCI
+# remove + rescan, then re-runs droplet-openwrt-attach. Always on: the
+# healthy-path cost is a read-only sysfs scan every 2 minutes.
+systemctl enable --now droplet-wifi-watchdog.timer
 
 # Wi-Fi key rotation: off by default so saved credentials on phones keep
 # working after a restart. Enable only if the operator opts in via

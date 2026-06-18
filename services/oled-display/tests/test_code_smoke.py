@@ -240,6 +240,45 @@ def test_hero_glyphs_trimmed_to_live_draw_sites(fw):
     assert code._HERO_GLYPHS == b"0123456789: %"
 
 
+def test_claim_renders_full_psk_not_truncated(fw):
+    # WARP-819 camera-less manual join: a user without a camera TYPES the SSID +
+    # PSK by hand off the panel. The readable PSK must be shown in FULL — the
+    # old wifi_psk[:20] truncation silently dropped the tail of any passphrase
+    # longer than 20 chars, breaking the join. The firmware now wraps the PSK
+    # across as many terminalio lines as it needs.
+    code, _ = fw
+    matrix = [[1, 0, 1], [0, 1, 0], [1, 0, 1]]
+    long_psk = "abcdefghij0123456789KLMNOPQRSTUV"  # 32 chars, > old 20-cap
+    code.handle({"mode": "claim", "data": {
+        "code": "DRPL-7K2Q-9F4M", "setup_url": "https://x/setup",
+        "wifi_qr_matrix": matrix, "wifi_ssid": "Droplet",
+        "wifi_psk": long_psk,
+    }})
+    g = code.board.DISPLAY.root_group
+    assert g is not None
+
+    def _labels(group):
+        out = []
+        for child in group:
+            if isinstance(child, code.label.Label):
+                out.append(child)
+            elif isinstance(child, code.displayio.Group):
+                out.extend(_labels(child))
+        return out
+
+    texts = [lbl.text for lbl in _labels(g)]
+    # No single label is the truncated 20-char prefix (the old behaviour), and
+    # the FULL passphrase is recoverable from the (consecutively-appended) PSK
+    # line labels.
+    assert long_psk[:20] not in texts, "PSK was truncated to 20 chars"
+    assert long_psk in "".join(texts), "full PSK not rendered on the claim card"
+    # Each rendered chunk stays within the card's fixed-cell budget (no line
+    # overflows the right-hand Wi-Fi column).
+    psk_chunks = [t for t in texts if t and t in long_psk]
+    assert psk_chunks, "no PSK chunk labels were rendered"
+    assert all(len(t) <= 27 for t in psk_chunks)
+
+
 def test_claim_with_wifi_then_psk_omitted_clears_psk(fw):
     # If a later push carries the matrix + ssid but DROPS wifi_psk (the host
     # only puts psk on the wire when non-empty — WARP-819), the stale psk must

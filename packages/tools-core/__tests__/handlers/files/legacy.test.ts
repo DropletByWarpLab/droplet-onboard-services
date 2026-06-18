@@ -219,7 +219,7 @@ describe("delete_file", () => {
     expect(res.ok).toBe(true);
     if (res.ok) expect((res.data as { deleted: string }).deleted).toBe("/old/junk.txt");
     expect(ncDelete).toHaveBeenCalledWith(
-      `/files?path=${encodeURIComponent("/old/junk.txt")}`,
+      `/?path=${encodeURIComponent("/old/junk.txt")}`,
       expect.objectContaining({
         headers: expect.objectContaining({
           "X-Nextcloud-Token": ncToken,

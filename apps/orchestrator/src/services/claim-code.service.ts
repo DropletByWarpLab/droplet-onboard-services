@@ -29,7 +29,7 @@
  * caller invokes `ensureClaimCode`.
  */
 import { randomInt } from "node:crypto";
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient, Prisma } from "@prisma/client";
 import { hashClaimCode, seedClaimCode } from "./setup-claim.service.js";
 
 /**
@@ -74,8 +74,14 @@ export function generateClaimCode(): string {
  * True iff the appliance has been claimed — i.e. a `consumed` ClaimCode row
  * exists. Explicit `state` column, never inferred from `usedAt IS NULL`
  * (CLAUDE.md no-guessing rule; the same discipline the verify path uses).
+ *
+ * Accepts an interactive-transaction client too (WARP-867 / pr-reviewer on
+ * #599): `setup.service`'s atomic `advanceSetupStepToAtLeast` reads claim
+ * state inside its SERIALIZABLE transaction.
  */
-export async function isClaimed(prisma: PrismaClient): Promise<boolean> {
+export async function isClaimed(
+  prisma: PrismaClient | Prisma.TransactionClient,
+): Promise<boolean> {
   const consumed = await prisma.claimCode.count({ where: { state: "consumed" } });
   return consumed > 0;
 }

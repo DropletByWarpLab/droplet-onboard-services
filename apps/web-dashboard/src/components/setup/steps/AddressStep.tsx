@@ -14,6 +14,7 @@ import {
 import {
   fetchDuckDnsStatus,
   routerUnreachableNotice,
+  RouterStatusError,
   setDuckDnsConfig,
 } from "@/lib/api";
 import type { DuckDnsStatus } from "@/lib/types";
@@ -183,12 +184,33 @@ export function AddressStep({
     } catch (e) {
       // WARP-807: an unreachable router throws a RouterStatusError (503 /
       // UNREACHABLE). Surface the actionable "finish from Network later" notice
-      // in the soft amber tone; everything else keeps its real message.
+      // in the soft amber tone.
       const notice = routerUnreachableNotice(e, NETWORK_DESTINATION);
       if (notice) {
         setErrorTone("notice");
         setError(notice.prefix);
         setNoticeDestination(notice.destination);
+      } else if (
+        // A 4xx refusal carries an actionable, customer-fixable message (bad
+        // subdomain shape, token length) — show it in red, like WifiStep.
+        e instanceof RouterStatusError &&
+        (e.status === 400 || e.status === 422) &&
+        e.message.trim().length > 0
+      ) {
+        setErrorTone("error");
+        setError(e.message);
+      } else if (e instanceof RouterStatusError) {
+        // WARP-869 — any other routing-layer failure on the write. The live
+        // case (2026-06-11 wizard run): the DuckDNS set ROLLED_BACK while
+        // rpcd denied the routing service (WARP-868), and this step rendered
+        // the raw "DuckDNS set: 500 Internal Server Error" in red on a
+        // first-run screen. Mirror WifiStep's calm write-failure ladder rung
+        // instead: amber, skippable, names where to finish later.
+        setErrorTone("notice");
+        setError(
+          "We couldn't save the web address right now. You can skip this step and finish it from",
+        );
+        setNoticeDestination(NETWORK_DESTINATION);
       } else {
         setErrorTone("error");
         setError(
@@ -212,7 +234,7 @@ export function AddressStep({
     <StepShell
       current="address"
       title="Give your box a web address"
-      subtitle="A permanent address so you can reach this box from anywhere — only needed if you want remote access from outside your home."
+      subtitle="Optional. Your box already gets a secure web address automatically — DuckDNS is a legacy extra you can skip."
       primary={{
         label: nothingNewToSubmit ? "Continue" : "Save and continue",
         loadingLabel: "Saving…",
@@ -400,12 +422,16 @@ export function AddressStep({
 
         <LearnMoreCard helpAnchor="internet">
           <p>
-            Your home internet&rsquo;s address can change without warning.{" "}
-            <strong>DuckDNS</strong> is a free service that gives the box one
-            permanent web address — like{" "}
-            <span className="font-mono">yourstudio.duckdns.org</span> — that
-            always finds it. That address is what the <strong>Remote access</strong>{" "}
-            step hands your phone; without it the VPN has nowhere to dial.
+            Your box now gets its own secure web address automatically — the one
+            you already use at home works over remote access too, with a padlock
+            and nothing to install. <strong>You can skip this step.</strong>
+          </p>
+          <p>
+            <strong>DuckDNS</strong> is a legacy extra: a free service that gives
+            the box a second, custom address like{" "}
+            <span className="font-mono">yourstudio.duckdns.org</span>. Add it only
+            if you specifically want that name; it&rsquo;s no longer required for
+            remote access.
           </p>
           <p>
             Don&rsquo;t have a DuckDNS account?{" "}

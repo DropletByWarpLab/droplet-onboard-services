@@ -37,6 +37,12 @@ vi.mock("../config.js", () => ({
 // Stateful in-memory cache double — the change-password backoff (PR #549
 // follow-up) needs real get/set/del semantics, not a null stub.
 const cacheStore = vi.hoisted(() => new Map<string, unknown>());
+// When flipped to true, cacheIncr models the real Redis-error path: the
+// production signature is `cacheIncr(key, ttlSeconds): Promise<number | null>`
+// (cache.service.ts) and it returns `null` on a Redis outage, which auth.ts
+// treats as fail-open at the lockout write. Tests can force that branch
+// without it being dark.
+const cacheState = vi.hoisted(() => ({ incrReturnsNull: false }));
 vi.mock("../services/cache.service.js", () => ({
   cacheGet: vi.fn(async (key: string) => cacheStore.get(key) ?? null),
   cacheSet: vi.fn(async (key: string, value: unknown) => {
@@ -44,6 +50,18 @@ vi.mock("../services/cache.service.js", () => ({
   }),
   cacheDel: vi.fn(async (key: string) => {
     cacheStore.delete(key);
+  }),
+  // Faithful to the real contract: cacheIncr(key, ttlSeconds) -> number | null.
+  // Default behavior increments an in-memory counter (so the lockout reaches
+  // 429); when cacheState.incrReturnsNull is set, it returns null to model a
+  // Redis error so the fail-open branch (auth.ts: `if (next === null) return`)
+  // is exercised rather than dark. ttlSeconds is accepted to match the real
+  // signature even though the in-memory store ignores expiry.
+  cacheIncr: vi.fn(async (key: string, _ttlSeconds: number): Promise<number | null> => {
+    if (cacheState.incrReturnsNull) return null;
+    const next = ((cacheStore.get(key) as number) ?? 0) + 1;
+    cacheStore.set(key, next);
+    return next;
   }),
 }));
 
@@ -211,6 +229,7 @@ const session = (over: Partial<{ id: string; role: Role }> = {}) => ({
 beforeEach(() => {
   vi.clearAllMocks();
   cacheStore.clear();
+  cacheState.incrReturnsNull = false;
   hashPassword.mockImplementation(async (_pw: string) => "$argon2id$v=19$m=19456,t=2,p=1$bmV3c2FsdA$bmV3aGFzaA");
   verifyDummyPassword.mockResolvedValue(false);
 });
@@ -378,6 +397,28 @@ describe("POST /auth/change-password — current-password oracle hardening (PR #
     expect(Number(locked.headers["retry-after"])).toBeGreaterThan(0);
     // The locked request never reached the verifier — no extra oracle sample.
     expect(verifyPassword).toHaveBeenCalledTimes(6);
+  });
+
+  it("fails open (never 429) when the failure-counter store errors", async () => {
+    // Models a Redis outage: cacheIncr returns null (cache.service.ts contract),
+    // so recordPasswordChangeFailure returns early without writing a lock
+    // (auth.ts: `if (next === null) return`). The lockout must degrade open —
+    // a backing-store failure must not hard-lock a legitimate user out of their
+    // own password change.
+    cacheState.incrReturnsNull = true;
+    verifyPassword.mockResolvedValue(false);
+    const prisma = createPrismaMock([row()]);
+    const app = protectedApp(prisma, session());
+
+    // Far past the free tier + lock threshold — with a healthy store this would
+    // be a 429 by the 7th attempt; with the store erroring it stays 400 forever.
+    for (let i = 0; i < 9; i++) {
+      const res = await request(app)
+        .post("/api/auth/change-password")
+        .send({ currentPassword: `Wrong-secret-${i}23`, newPassword: "Brand-new-secret123" });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe("INVALID_PASSWORD");
+    }
   });
 
   it("a successful verify clears the failure counter", async () => {

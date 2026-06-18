@@ -44,9 +44,11 @@ class TestKeystore:
         assert result == "new-key"
 
     async def test_encryption_is_applied(self, keys_dir):
-        """Verify the stored file is not plaintext."""
+        """Verify the stored file is not plaintext.
+
+        WARP-561: a no-user store lands in the shared namespace subdir."""
         await store_key("test", "my-secret-key")
-        enc_file = keys_dir / "test.enc"
+        enc_file = keys_dir / keystore._SHARED_NAMESPACE / "test.enc"
         assert enc_file.exists()
         raw = enc_file.read_bytes()
         assert b"my-secret-key" not in raw

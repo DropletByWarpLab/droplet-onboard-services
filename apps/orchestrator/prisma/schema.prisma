@@ -274,6 +274,27 @@ model NetworkThroughputSample {
   @@index([ts(sort: Desc)])
 }
 
+/// WARP-468 — per-tick deltas of DNS queries blocked by the OpenWrt
+/// adblock / blocklist layer, sampled by the routing service.
+///
+/// A 60 s apscheduler tick in `services/routing/dns_block_meter.py`
+/// reads the cumulative blocked-query counter via ubus, diffs against
+/// the previous reading to derive a per-tick delta, and POSTs the
+/// delta into the orchestrator via /api/network/dns-block-sample. The
+/// Network page §2.6 KPI strip sums these rows day-to-date for the
+/// "DNS blocked today" chip.
+///
+/// `blockedCount` is Int (not BigInt like throughput's bps): a single
+/// 60 s window cannot accumulate > 2³¹ blocked queries, so a count
+/// delta fits comfortably in Int. Retention: a nightly cron prunes
+/// rows older than 30 days alongside the existing daily-purge.
+model DnsBlockSample {
+  ts            DateTime @id @default(now())
+  blockedCount  Int
+
+  @@index([ts(sort: Desc)])
+}
+
 /// WARP-304 / WARP-329: persisted message in a `ChatSession`. Stored in
 /// order of `createdAt`; for the same millisecond the `id` (uuid) breaks
 /// the tie.
@@ -1069,6 +1090,11 @@ model VpnPeer {
 
   @@index([userId])
   @@index([status])
+  // WARP-565: a PARTIAL unique index enforces "at most one ACTIVE peer per
+  // assignedIp" at the DB layer (revoked rows' IPs are reusable). Prisma can't
+  // express partial-unique declaratively, so it lives as raw SQL in migration
+  // 20260614000000_vpn_peer_unique_active_ip. This @@index stays for the
+  // non-unique read path the allocator uses.
   @@index([assignedIp])
 }
 
@@ -1119,7 +1145,7 @@ model ApDevice {
   mac              String         @id
   // Operator-friendly label set at approval time. Defaults to the
   // model name + last-3-octets of the MAC if the operator doesn't
-  // override it (e.g. "Pi5 AP (12:34:56)"). Editable from the
+  // override it (e.g. "AP (12:34:56)"). Editable from the
   // dashboard later (PATCH /api/aps/:mac).
   displayName      String?
   // mDNS-reported product info — useful for the dashboard's "what is
@@ -2530,4 +2556,36 @@ model ClaimCode {
   attempts  Int            @default(0)
   createdAt DateTime       @default(now())
   updatedAt DateTime       @updatedAt
+}
+
+/// ADR-023 (C2): the lifecycle state of the per-device TLS serving cert.
+/// EXPLICIT (architecture-guard rule 10 + ADR-023 §C2): the tls-issuance cron
+/// reads this enum to decide issue-vs-renew-vs-noop — it NEVER infers the state
+/// from a null/expired cert file.
+///   BOOTSTRAP_SELF_SIGNED — the secrets.sh self-signed bootstrap cert is
+///                           installed; HQ issuance has not yet succeeded.
+///   LE_ISSUED             — a publicly-trusted Let's Encrypt fullchain is
+///                           installed and current.
+///   LE_RENEWING           — a renewal/issuance order is in flight.
+///   LE_RENEW_FAILED       — HQ was unreachable or the order didn't go active;
+///                           the box keeps serving its current cert and retries
+///                           on the next daily tick.
+enum TlsCertState {
+  BOOTSTRAP_SELF_SIGNED
+  LE_ISSUED
+  LE_RENEWING
+  LE_RENEW_FAILED
+}
+
+/// ADR-023 (C2): one row per opaque per-device FQDN tracking the installed TLS
+/// cert's state + expiry. Keyed by `fqdn` (`d-<hmac>.devices.warp-lab.ai`) so a
+/// box that ever learns a new FQDN gets a fresh row rather than overwriting the
+/// old one. `notAfter` mirrors the installed leaf's expiry and drives the
+/// 30-day renewal threshold; null until the first LE cert is installed.
+model TlsCert {
+  fqdn      String       @id
+  state     TlsCertState @default(BOOTSTRAP_SELF_SIGNED)
+  notAfter  DateTime?
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
 }

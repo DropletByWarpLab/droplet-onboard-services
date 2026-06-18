@@ -30,7 +30,21 @@ vi.mock("../config.js", () => ({
     REDIS_URL: "redis://localhost:6379",
     SERVICE_TOKEN_VOICE: "",
     SERVICE_TOKEN_MCP: "",
+    // WARP-165 — default OFF; individual gate tests flip this on the mutable
+    // mock object. Default-off keeps every existing /auth/setup test (above)
+    // on the un-gated path with no claimCode field.
+    DROPLET_CLAIM_GATE_ENABLED: false,
   },
+}));
+
+// WARP-165 — control the read-only physical-presence verify so the gate tests
+// don't need a seeded ClaimCode row. The real primitive is unit-tested in
+// setup-claim.service.test.ts; here we only assert the ROUTE wires it correctly
+// (enabled→required+verified, disabled→untouched, ordered AFTER the N1 guard).
+const verifyClaimCodePresence = vi.fn(async (_p: unknown, _c: string) => true);
+vi.mock("../services/setup-claim.service.js", () => ({
+  verifyClaimCodePresence: (...args: unknown[]) =>
+    verifyClaimCodePresence(...(args as [unknown, string])),
 }));
 
 vi.mock("../services/nextcloud.client.js", () => {
@@ -103,6 +117,7 @@ vi.mock("../services/brain-memory.service.js", () => ({
 
 import { createPublicAuthRouter } from "./auth.js";
 import * as nc from "../services/nextcloud.client.js";
+import { config } from "../config.js";
 
 function createPrismaMock(seed: any[] = []) {
   const users: any[] = [...seed];
@@ -172,6 +187,10 @@ beforeEach(() => {
   vi.clearAllMocks();
   (nc.ncInstallAndCreateAdmin as any).mockClear();
   hashPassword.mockImplementation(async (_pw: string) => "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHQ$aGFzaGhhc2g");
+  // WARP-165 — reset the gate to OFF + verify-true between tests so a gate
+  // test can't leak its flag/stub into the un-gated suite above.
+  (config as any).DROPLET_CLAIM_GATE_ENABLED = false;
+  verifyClaimCodePresence.mockImplementation(async () => true);
 });
 
 describe("ADR-013 — POST /auth/setup writes the argon2id hash to the directory", () => {
@@ -393,5 +412,124 @@ describe("N2 — first owner cannot be created login-unable (email required at s
     const created = prisma._users.find((u: any) => u.email === "owner@warp.test");
     expect(created.username).toBe("owner-2");
     expect(created.nextcloudUsername).toBe("owner-2");
+  });
+});
+
+/**
+ * WARP-165 — physical-presence claim gate on POST /auth/setup.
+ *
+ * When DROPLET_CLAIM_GATE_ENABLED is ON, the first-owner request must carry the
+ * front-panel claim code, verified READ-ONLY (verifyClaimCodePresence — never
+ * consumed, so the cloud-bind step's consume lifecycle is untouched). The gate
+ * is positioned AFTER the N1 owner-exists guard so a dropped-response retry
+ * after a successful setup hits the benign 409 OWNER_EXISTS, NOT a new claim
+ * 403 (the finding-#2 regression we must not reintroduce). When OFF, the route
+ * behaves exactly as on main — no claim field required.
+ */
+describe("WARP-165 — /auth/setup physical-presence claim gate", () => {
+  it("gate OFF (default): setup succeeds with NO claim code and never verifies", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .post("/api/auth/setup")
+      .send({ email: "owner@warp.test", password: "Gate-off-secret1" });
+
+    expect(res.status).toBe(200);
+    expect(prisma._users).toHaveLength(1);
+    // The verify primitive is never even consulted on the un-gated path.
+    expect(verifyClaimCodePresence).not.toHaveBeenCalled();
+  });
+
+  it("gate ON + missing claim code → 403 CLAIM_CODE_REQUIRED, no owner created", async () => {
+    (config as any).DROPLET_CLAIM_GATE_ENABLED = true;
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .post("/api/auth/setup")
+      .send({ email: "owner@warp.test", password: "Gate-on-secret1" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("CLAIM_CODE_REQUIRED");
+    // No side effects: no owner row, no Nextcloud provisioning.
+    expect(prisma.user.upsert).not.toHaveBeenCalled();
+    expect(nc.ncInstallAndCreateAdmin).not.toHaveBeenCalled();
+  });
+
+  it("gate ON + WRONG claim code → 403 CLAIM_CODE_INVALID, no owner created", async () => {
+    (config as any).DROPLET_CLAIM_GATE_ENABLED = true;
+    verifyClaimCodePresence.mockImplementation(async () => false);
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .post("/api/auth/setup")
+      .send({
+        email: "owner@warp.test",
+        password: "Gate-on-secret1",
+        claimCode: "DRPL-WRON-GGGG",
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("CLAIM_CODE_INVALID");
+    expect(verifyClaimCodePresence).toHaveBeenCalledWith(prisma, "DRPL-WRON-GGGG");
+    expect(prisma.user.upsert).not.toHaveBeenCalled();
+    expect(nc.ncInstallAndCreateAdmin).not.toHaveBeenCalled();
+    // The 403 body must never echo the submitted/real code (secret-in-logs gate).
+    expect(JSON.stringify(res.body)).not.toContain("WRON");
+  });
+
+  it("gate ON + CORRECT claim code → setup succeeds and owner is created", async () => {
+    (config as any).DROPLET_CLAIM_GATE_ENABLED = true;
+    verifyClaimCodePresence.mockImplementation(async () => true);
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .post("/api/auth/setup")
+      .send({
+        email: "owner@warp.test",
+        password: "Gate-on-secret1",
+        claimCode: "DRPL-7K2Q-9F4M",
+      });
+
+    expect(res.status).toBe(200);
+    expect(prisma._users).toHaveLength(1);
+    expect(prisma._users[0].role).toBe("owner");
+    expect(verifyClaimCodePresence).toHaveBeenCalledWith(prisma, "DRPL-7K2Q-9F4M");
+  });
+
+  it("dropped-retry: gate ON, owner already exists → 409 OWNER_EXISTS, NOT a claim 403", async () => {
+    // The genuine first-owner-creation succeeded but its response was dropped;
+    // the client retries. With the gate ON this must NOT surface a new claim
+    // 403 — it must hit the benign owner-exists path (finding #2). The N1
+    // guard runs BEFORE the claim gate, so the claim code isn't even consulted.
+    (config as any).DROPLET_CLAIM_GATE_ENABLED = true;
+    const existingOwner = {
+      id: "u-owner",
+      username: "owner",
+      displayName: "The Owner",
+      email: "owner@warp.test",
+      nextcloudUsername: "owner",
+      passwordHash: "$argon2id$ORIGINAL-HASH",
+      role: "owner",
+      isLocal: true,
+    };
+    const prisma = createPrismaMock([existingOwner]);
+    const app = buildApp(prisma);
+
+    // Retry WITHOUT a claim code (a naive client retry of the original body).
+    const res = await request(app)
+      .post("/api/auth/setup")
+      .send({ email: "owner@warp.test", password: "Gate-on-secret1" });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("OWNER_EXISTS");
+    // The claim gate must be short-circuited by the earlier N1 guard.
+    expect(verifyClaimCodePresence).not.toHaveBeenCalled();
+    // The original owner is untouched.
+    expect(prisma._users).toHaveLength(1);
+    expect(prisma._users[0].passwordHash).toBe("$argon2id$ORIGINAL-HASH");
   });
 });

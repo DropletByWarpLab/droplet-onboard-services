@@ -141,7 +141,7 @@ functional state than the current box:
 | Host AP wired (MT7922 in netns) | ✅ | ❌ (no host script installed) |
 | br-lan DHCP for cameras | ✅ | ❌ (no host script installed) |
 | /32 route to Lantronix switch | ✅ | ❌ (same) |
-| `JETSON_OLLAMA_URL` correct | ✅ (manually fixed; PR #247 also fixes the default) | After PR #247 merges: ✅ default; without: ❌ |
+| `OLLAMA_URL` correct | ✅ (manually fixed; PR #247 also fixes the default) | After PR #247 merges: ✅ default; without: ❌ |
 | Frigate iGPU remap (renderD129→128) | ✅ (in override) | ❌ |
 | FIPS disabled for consumer Ryzen | ✅ (in override) | ❌ |
 | TPM=mock | ✅ (in override) | ❌ |

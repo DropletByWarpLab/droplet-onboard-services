@@ -1,7 +1,7 @@
 """
 Droplet device-bridge — host-side HTTP API for the on-device screen.
 
-Runs on the Jetson host (outside the oled-display container). Exposes a
+Runs on the appliance host (outside the oled-display container). Exposes a
 stable read-only API the display service polls, with each endpoint
 sourcing live data from the appropriate upstream:
 
@@ -58,7 +58,7 @@ OPENWRT_KNOWN_HOSTS = os.environ.get(
 # Access-point credentials source for the pairing QR. The two shipping
 # deployment shapes broadcast the AP differently:
 #
-#   uci      — multi-box: a Pi-5 OpenWrt router holds the AP in UCI
+#   uci      — multi-box: a router-host OpenWrt instance holds the AP in UCI
 #              (`wireless.*`). We read SSID+PSK over SSH (the historical
 #              path). This is the back-compat default.
 #   hostapd  — single-box: the host runs a raw hostapd AP via the
@@ -564,7 +564,7 @@ def _use_hostapd_mode():
 
 
 # ---------------------------------------------------------------------------
-# Jetson-local nmcli fallback
+# Appliance-local nmcli fallback
 # ---------------------------------------------------------------------------
 
 def scan_via_nmcli():
@@ -2078,6 +2078,42 @@ def collect_logs(window_hours, service):
         return True, {"message": (out or "").strip()}
 
 
+# --- ADR-023 (C2): gateway-nginx reload host executor -----------------------
+# The orchestrator's tls-issuance cron writes a freshly-issued LE fullchain into
+# docker/certs/droplet.crt and then POSTs /tls/reload here. The bridge execs the
+# repo-tracked host wrapper (scripts/host/droplet-tls-reload.sh, installed to
+# /usr/local/sbin by setup.sh / install-device-bridge.sh), which delegates to the
+# shared scripts/lib/tls-reload.sh::reload_gateway_nginx — the SAME reload path
+# the self-signed bootstrap uses. The orchestrator deliberately does NOT mount
+# the docker socket (ADR-023), so the `docker compose exec gateway nginx -s
+# reload` has to run on the host.
+#
+# Mirrors collect_logs(): allow-listed shape (no args), host-script only,
+# synchronous + bounded, surfaces the script's exit honestly, never raises.
+
+TLS_RELOAD_SCRIPT = os.environ.get(
+    "DROPLET_TLS_RELOAD_SCRIPT", "/usr/local/sbin/droplet-tls-reload.sh").strip()
+
+
+def run_tls_reload():
+    """Reload the gateway nginx so a freshly-installed cert is served at once.
+
+    Takes no parameters — the cert files are already on disk (the orchestrator
+    wrote them atomically before calling). Returns (ok, info); never raises —
+    mirrors collect_logs()/run_pool_command()."""
+    try:
+        # A reload is fast; a stuck `docker compose exec` is the only slow case.
+        rc, out, err = _run([TLS_RELOAD_SCRIPT], timeout=30)
+    except Exception as e:                                          # noqa: BLE001
+        logger.warning("tls reload failed to exec host script: %s", e)
+        return False, "host script unavailable"
+    if rc != 0:
+        msg = (err.strip() or out.strip() or "host script refused")
+        logger.warning("tls reload refused/failed (rc=%s): %s", rc, msg)
+        return False, msg
+    return True, {"message": (out or "").strip() or "gateway reloaded"}
+
+
 def cameras_snapshot():
     out = {
         "online": 0, "total": 0, "events": [],
@@ -2214,6 +2250,25 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, {"error": "not found"})
 
     def do_POST(self):
+        # Mirror do_GET: wrap the whole dispatch so a handler that raises
+        # before responding (a non-numeric Content-Length -> ValueError on
+        # int(...), or rfile.read().decode() blowing up) returns a clean JSON
+        # error instead of escaping the handler — which would otherwise leave
+        # the client with a dangling/!200 connection and a stack trace in the
+        # bridge log. The real routing lives in _dispatch_post.
+        try:
+            return self._dispatch_post()
+        except ValueError as e:                                      # noqa: BLE001
+            # Bad Content-Length (or other malformed-request value): 400.
+            return self._send(400, {"ok": False, "error": str(e)})
+        except Exception as e:                                       # noqa: BLE001
+            # Do not surface str(e) — subprocess errors include the full command
+            # line (which may contain OPENWRT_PASS in plaintext). Log for the
+            # bridge operator and return a sanitised message to the HTTP client.
+            logger.exception("unhandled error in do_POST: %s", e)
+            return self._send(500, {"ok": False, "error": "internal server error"})
+
+    def _dispatch_post(self):
         if self.path == "/drives/changed":
             # Invalidate the cache — the automount script calls this
             # whenever a drive is added or removed. Body is ignored;
@@ -2345,11 +2400,30 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(502, {"ok": False, "error": info})
             return self._send(202, {"ok": True,
                                     **(info if isinstance(info, dict) else {"info": info})})
+        if self.path == "/tls/reload":
+            # ADR-023 (C2): reload the gateway nginx so a freshly-installed LE
+            # cert is served immediately. Auth-gated exactly like the other
+            # mutating routes. The orchestrator wrote docker/certs/droplet.crt +
+            # .key atomically BEFORE calling; the bridge only triggers the
+            # `docker compose exec gateway nginx -s reload` on the host (the
+            # orchestrator has no docker socket). Synchronous + bounded — unlike
+            # the detached factory-reset, a reload completes in well under the
+            # 30 s host-script timeout, so we wait and report the outcome.
+            if not self._authed():
+                return self._send(401, {"ok": False, "error": "unauthorized"})
+            ok, info = run_tls_reload()
+            if not ok:
+                # 502: the host script is missing / the reload command failed.
+                # The cert files are already on disk, so the box keeps serving
+                # the OLD cert until a later reload (or a gateway restart) lands.
+                return self._send(502, {"ok": False, "error": info})
+            return self._send(200, {"ok": True,
+                                    **(info if isinstance(info, dict) else {"info": info})})
         if self.path == "/openwrt/wifi/rotate":
             if not self._authed():
                 return self._send(401, {"ok": False, "error": "unauthorized"})
             if _use_hostapd_mode():
-                # Single-box / hostapd mode: no Pi-5 router to SSH into —
+                # Single-box / hostapd mode: no router host to SSH into —
                 # return the same rotation_disabled sentinel as qr_snapshot()
                 # so callers (PyPortal UI, scheduled timer) gracefully no-op.
                 return self._send(410, {

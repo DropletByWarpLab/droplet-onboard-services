@@ -16,6 +16,7 @@ import {
   fetchMatterCapabilities,
   fetchMatterDevices,
 } from "@/lib/api";
+import { translateError } from "@/lib/friendly-errors";
 import type { MatterDevice, MatterGrouped } from "@/lib/types";
 import { StepShell } from "@/components/setup/StepShell";
 import { ScrollRegion } from "@/components/setup/ScrollRegion";
@@ -256,11 +257,12 @@ export function DiscoveryStep({
       setManualOk("Device added — it'll show up in the list in a moment.");
       void pollOnce();
     } catch (e) {
-      setManualError(
-        e instanceof Error
-          ? e.message
-          : "Couldn't add that device. Double-check the code and try again.",
-      );
+      // WARP-856 (item 2): never render e.message verbatim on a first-run
+      // screen — a non-JSON error body yields "Failed to commission device:
+      // 502". commissionMatterDevice attaches err.status (WARP-851), so
+      // translateError maps the curated 502/503/504 commissioning copy and
+      // falls back to a calm generic line for everything else.
+      setManualError(translateError(e, "device"));
     } finally {
       setManualBusy(false);
     }

@@ -26,13 +26,18 @@ vi.mock("framer-motion", async () => {
 });
 
 vi.mock("@/lib/auth", () => ({
-  useAuth: () => ({ completeSetup: vi.fn() }),
+  useAuth: () => ({ completeSetup: vi.fn(), setupState: { appliance: "unclaimed", setupStep: "welcome", userTourCompleted: false } }),
 }));
 
 const fetchVpnStatusMock = vi.fn();
 const createVpnPeerMock = vi.fn();
 
 vi.mock("@/lib/api", () => ({
+  // WARP-867 — AccountStep probes setup status on mount to pick its mode;
+  // "required" keeps these walks on the normal create form.
+  checkSetupRequired: vi.fn(async () => "required"),
+  // WARP-165 — AccountStep probes the claim gate on mount; false = un-gated.
+  checkClaimGateEnabled: vi.fn(async () => false),
   setupAdmin: vi.fn(async () => undefined),
   patchSetupStep: vi.fn(async () => undefined),
   loginUser: vi.fn(async () => undefined),
@@ -42,7 +47,7 @@ vi.mock("@/lib/api", () => ({
     compute: { label: "Compute", value: "Local AI compute", online: true },
     storage: { label: "Storage", value: "Encrypted at rest", online: true },
     network: { label: "Network", value: "Local network", online: true },
-    display: { label: "Display", value: "PyPortal lid display", online: true },
+    display: { label: "Display", value: "Front-panel display", online: true },
     supply_chain: { taa_compliant: true, ndaa_889_clear: true, summary: "Verified" },
   })),
   postClaim: vi.fn(async () => ({ claimed: true, next_step: "account" })),

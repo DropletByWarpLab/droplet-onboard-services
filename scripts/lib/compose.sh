@@ -101,7 +101,7 @@ prepare_and_build() {
   # logs`) silently default secrets to empty strings and break auth services.
   ln -sfn ../.env "$REPO_ROOT/docker/.env"
 
-  # --- Pull base images (sequential for slow Pi connections) ---
+  # --- Pull base images (sequential for slow appliance connections) ---
   log_info "Pulling base container images..."
   local images=(
     "postgres:16-alpine"
@@ -114,8 +114,11 @@ prepare_and_build() {
   )
   # Frigate is gated to the `linux` compose profile (see docker-compose.yml);
   # skip the ~2GB pull on macOS where it can never run.
+  # Use the same pinned tag (and .env override) the compose file resolves to,
+  # so the pre-pull lands the exact image Compose runs instead of pulling a
+  # floating `:stable` that's then re-pulled as `:0.17.1` on `up`.
   if [ "$(uname)" = "Linux" ]; then
-    images+=("ghcr.io/blakeblackshear/frigate:stable")
+    images+=("${FRIGATE_IMAGE:-ghcr.io/blakeblackshear/frigate:0.17.1}")
   fi
 
   local failed=0
@@ -161,6 +164,8 @@ prepare_and_build() {
     web-dashboard
     ai-gateway
     routing
+    # WARP-850: Matter controller host-network sidecar (BLE + LAN mDNS)
+    matter-controller
     # full profile (hardware-facing services)
     file-indexer
     switch

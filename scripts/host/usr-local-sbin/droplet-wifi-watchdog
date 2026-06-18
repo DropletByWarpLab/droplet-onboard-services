@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# =============================================================================
+# WARP-869 — Wi-Fi PCI function watchdog (silent firmware-death auto-recovery)
+# =============================================================================
+#
+# Field failure (diagnosed live on the .87 box, 2026-06-11): the Wi-Fi card's
+# PCI function dies silently mid-uptime — the device stays BOUND to its driver
+# but its phy + netdev vanish (`/sys/bus/pci/devices/<addr>/net` empty, no
+# `ieee80211/`), while the Bluetooth half (USB) keeps working so nothing looks
+# wrong. hostapd loses its interface, the Droplet AP goes dark, and
+# droplet-openwrt-attach hard-fails on its next run because the AP iface no
+# longer exists. Nothing recovers it short of a manual PCI remove + rescan.
+#
+# This watchdog runs from a systemd timer and:
+#   1. Scans PCI devices of class 0x028000 (network controller — Wi-Fi; wired
+#      NICs are class 0x020000 and never match). Hardware-agnostic per ADR-011:
+#      no vendor, address, or interface name is hardcoded.
+#   2. Flags the wedge signature: driver BOUND but neither a netdev nor a phy.
+#      An UNBOUND device is left alone (an operator may have unbound it
+#      deliberately), as is anything healthy or any non-Wi-Fi class.
+#   3. Re-checks after a settle delay so a card mid-(re)initialisation is
+#      never treated as dead.
+#   4. Revives via PCI remove + rescan (the exact manual recovery validated on
+#      the box: firmware reloads, the netdev reappears at the same address).
+#   5. Only after a successful revival, restarts droplet-openwrt-attach so
+#      hostapd rebinds the AP interface. It NEVER restarts the attach unit
+#      otherwise — an attach failing for unrelated reasons must not be
+#      re-triggered (heavyweight: opkg/firewall/routing restart) every tick.
+#
+# Healthy boxes: a cheap sysfs scan, no writes, no log spam (silent no-op).
+#
+# Repo-tracked (architecture-guard rule 20), installed to /usr/local/sbin by
+# scripts/install-device-bridge.sh, scheduled by droplet-wifi-watchdog.timer.
+#
+# Test hooks (tests/wifi-watchdog.test.sh — no root, no real PCI needed):
+#   DROPLET_WIFI_SYS_PCI=...   override /sys/bus/pci/devices (fake sysfs tree)
+#   DROPLET_WIFI_RESCAN=...    override /sys/bus/pci/rescan  (plain file)
+#   DROPLET_WIFI_SETTLE_S=0    skip the settle/wait sleeps
+#   DROPLET_WIFI_WAIT_S=0
+#   DROPLET_WIFI_ATTACH_UNIT=  unit to restart after a revival ("" disables)
+# =============================================================================
+set -u
+
+SYS_PCI="${DROPLET_WIFI_SYS_PCI:-/sys/bus/pci/devices}"
+RESCAN="${DROPLET_WIFI_RESCAN:-/sys/bus/pci/rescan}"
+SETTLE_S="${DROPLET_WIFI_SETTLE_S:-5}"
+WAIT_S="${DROPLET_WIFI_WAIT_S:-20}"
+ATTACH_UNIT="${DROPLET_WIFI_ATTACH_UNIT-droplet-openwrt-attach.service}"
+
+log() { printf 'droplet-wifi-watchdog: %s\n' "$*"; }
+
+# A device is "alive" when it exposes a netdev or an ieee80211 phy.
+has_netdev() { [ -n "$(ls -A "$1/net" 2>/dev/null)" ]; }
+has_phy()    { [ -n "$(ls -A "$1/ieee80211" 2>/dev/null)" ]; }
+alive()      { has_netdev "$1" || has_phy "$1"; }
+
+# First netdev name under the device (kernel-controlled names; glob, not ls).
+first_netdev() {
+  local n
+  for n in "$1"/net/*; do
+    [ -e "$n" ] && { basename "$n"; return 0; }
+  done
+  return 0
+}
+
+is_wifi_class() {
+  [ "$(cat "$1/class" 2>/dev/null)" = "0x028000" ]
+}
+
+revived=0
+for dev in "$SYS_PCI"/*; do
+  [ -d "$dev" ] || continue
+  is_wifi_class "$dev" || continue
+  [ -e "$dev/driver" ] || continue
+  alive "$dev" && continue
+
+  # Wedge candidate — settle, then re-check (never race normal bring-up).
+  sleep "$SETTLE_S"
+  # Re-check after settle: udev or operator may have unbound during the window
+  if [ ! -e "$dev/driver" ]; then
+    log "DEBUG: driver unbound during settle for $(basename "$dev") — skipping (not a watchdog concern)"
+    continue
+  fi
+  alive "$dev" && continue
+
+  addr="$(basename "$dev")"
+  log "Wi-Fi function $addr is wedged (driver bound, no phy/netdev) — PCI remove + rescan"
+  # WARNING: sysfs write can block in kernel D-state on a severely wedged slot.
+  # D-state processes ignore SIGTERM/SIGKILL — TimeoutStartSec=120 is the only exit.
+  if ! echo 1 > "$dev/remove" 2>/dev/null; then
+    log "WARN: could not remove $addr — skipping"
+    continue
+  fi
+  sleep 2
+  # WARNING: sysfs write can block in kernel D-state on a severely wedged slot.
+  # D-state processes ignore SIGTERM/SIGKILL — TimeoutStartSec=120 is the only exit.
+  if ! echo 1 > "$RESCAN" 2>/dev/null; then
+    log "WARN: PCI rescan write failed for $addr — check $RESCAN permissions; skipping revival"
+    continue
+  fi
+
+  waited=0
+  until alive "$dev" || [ "$waited" -ge "$WAIT_S" ]; do
+    sleep 2
+    waited=$((waited + 2))
+  done
+  # If the original address is still dead, the kernel may have re-enumerated the
+  # device at a different PCI address (e.g. 0000:0f:00.0 instead of 0000:0e:00.0).
+  # Search for any Wi-Fi-class device that is now alive and was not present before
+  # (no driver symlink would mean it predated us; alive() is the presence guard).
+  if ! alive "$dev"; then
+    for candidate in "$SYS_PCI"/*; do
+      [ -d "$candidate" ] || continue
+      [ "$candidate" = "$dev" ] && continue
+      is_wifi_class "$candidate" || continue
+      if alive "$candidate"; then
+        log "note: $addr re-enumerated at $(basename "$candidate") after rescan — updating path"
+        dev="$candidate"
+        addr="$(basename "$dev")"
+        break
+      fi
+    done
+  fi
+  if alive "$dev"; then
+    log "revived $addr ($(first_netdev "$dev"))"
+    revived=1
+  else
+    log "WARN: $addr did not come back within ${WAIT_S}s — manual intervention needed"
+  fi
+done
+
+# A revival means hostapd lost (and can now regain) its interface — re-run the
+# attach to rebind the AP. Gated on the unit actually existing so non-AP boxes
+# and dev machines stay no-ops.
+if [ "$revived" = 1 ] && [ -n "$ATTACH_UNIT" ]; then
+  if command -v systemctl >/dev/null 2>&1 \
+     && systemctl cat "$ATTACH_UNIT" >/dev/null 2>&1; then
+    log "restarting $ATTACH_UNIT to rebind the AP"
+    # NOTE: droplet-set-hostapd.sh may also restart this unit concurrently.
+    # systemd serializes activations per-unit, so the two runs queue and do not
+    # overlap — but the second run will re-apply config with the environment
+    # state at queue time (see scripts/host/droplet-set-hostapd.sh).
+    systemctl restart "$ATTACH_UNIT" || log "WARN: $ATTACH_UNIT restart failed — see its journal"
+  else
+    log "WARN: revived $addr but $ATTACH_UNIT not in systemd — AP interface not rebound; run: systemctl daemon-reload && systemctl enable --now $ATTACH_UNIT"
+  fi
+fi
+
+exit 0

@@ -173,7 +173,7 @@ def gated_assert_fips_at_boot(service: str) -> None:
       DROPLET_FIPS_REQUIRED unset        → skip with no output (dev/CI default).
 
     The default-off-when-unset posture is deliberate. Production
-    deployments (Jetson appliance) flip the env to "true" via the
+    deployments (the appliance) flip the env to "true" via the
     operator's compose env or systemd unit; dev / CI runs with
     `python:3.12-slim` (no validated `fips.so` available) skip silently.
     """

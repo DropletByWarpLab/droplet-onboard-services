@@ -25,7 +25,7 @@ vi.mock("framer-motion", async () => {
 });
 
 vi.mock("@/lib/auth", () => ({
-  useAuth: () => ({ completeSetup: vi.fn() }),
+  useAuth: () => ({ completeSetup: vi.fn(), setupState: { appliance: "unclaimed", setupStep: "welcome", userTourCompleted: false } }),
 }));
 
 const setupAdminMock = vi.fn(async () => undefined);
@@ -45,6 +45,12 @@ const sendChatMock = vi.fn();
 const postTeamInviteMock = vi.fn();
 
 vi.mock("@/lib/api", () => ({
+  // WARP-867 — AccountStep probes setup status on mount to pick its mode;
+  // "required" keeps these walks on the normal create form.
+  checkSetupRequired: vi.fn(async () => "required"),
+  // WARP-165 — AccountStep also probes the claim gate on mount; false keeps
+  // these walks on the un-gated create form (no claim-code field).
+  checkClaimGateEnabled: vi.fn(async () => false),
   // Forwarders use typed Parameters<typeof …> so spread inference passes
   // tsc --noEmit (the original `...args: unknown[]` form tripped TS2556
   // because the real signatures aren't variadic). Uncovered by WARP-482's
@@ -64,7 +70,7 @@ vi.mock("@/lib/api", () => ({
     compute: { label: "Compute", value: "Local AI compute", online: true },
     storage: { label: "Storage", value: "Encrypted at rest", online: true },
     network: { label: "Network", value: "Local network", online: true },
-    display: { label: "Display", value: "PyPortal lid display", online: true },
+    display: { label: "Display", value: "Front-panel display", online: true },
     supply_chain: { taa_compliant: true, ndaa_889_clear: true, summary: "Verified" },
   })),
   postClaim: (...args: Parameters<typeof postClaimMock>) => postClaimMock(...args),

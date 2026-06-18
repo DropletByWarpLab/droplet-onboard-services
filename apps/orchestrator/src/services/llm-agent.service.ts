@@ -70,18 +70,24 @@ export interface CitationDeps {
 export interface AgentDeps {
   mcp: McpClientService;
   aiGateway: {
-    chat: (req: {
-      model: string;
-      messages: ChatMessage[];
-      stream?: boolean;
-      temperature?: number;
-      max_tokens?: number;
-      tools?: {
-        type: "function";
-        function: { name: string; description: string; parameters: Record<string, unknown> };
-      }[];
-      tool_choice?: "auto" | "none";
-    }) => Promise<{ ok: boolean; status?: number; json: () => Promise<ChatResponse> }>;
+    chat: (
+      req: {
+        model: string;
+        messages: ChatMessage[];
+        stream?: boolean;
+        temperature?: number;
+        max_tokens?: number;
+        tools?: {
+          type: "function";
+          function: { name: string; description: string; parameters: Record<string, unknown> };
+        }[];
+        tool_choice?: "auto" | "none";
+      },
+      // WARP-329 — client-disconnect AbortSignal. The agent loop passes
+      // `req.signal` so an in-flight inference fetch is cancelled when the
+      // client goes away mid-turn.
+      signal?: AbortSignal,
+    ) => Promise<{ ok: boolean; status?: number; json: () => Promise<ChatResponse> }>;
   };
   /**
    * WARP-437 — when present, the agent loop classifies every
@@ -219,6 +225,17 @@ export interface AgentRequest {
    * those callers also leave `deps.citation` unset.
    */
   citationContext?: { userId: string; threadId: string; messageId: string };
+  /**
+   * WARP-329 — client-disconnect cancellation. When the dashboard closes
+   * the SSE stream mid-turn, the route aborts an `AbortController` tied to
+   * `req.on("close")` and passes its signal here. The loop forwards it to
+   * the ai-gateway fetch (cancelling in-flight inference) and checks
+   * `signal.aborted` between iterations and before each tool dispatch, so
+   * a disconnect stops both further inference and any further (possibly
+   * write) tool calls instead of running the turn to completion in the
+   * background.
+   */
+  signal?: AbortSignal;
 }
 
 export interface AgentTraceEntry {
@@ -357,7 +374,11 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // it impossible by construction.
   const toolChoice: "auto" | "none" = req.tool_choice ?? "auto";
   const allTools = toolChoice === "none" ? [] : await deps.mcp.listTools();
-  const filtered = req.allowed_tools?.length
+  // Distinguish `undefined` (no restriction → every tool) from an explicit
+  // empty array (caller asked for ZERO tools). Truthiness on `.length`
+  // would conflate the two and silently advertise the full registry for an
+  // intentional `allowed_tools: []`.
+  const filtered = req.allowed_tools
     ? allTools.filter((t) => req.allowed_tools!.includes(t.name))
     : allTools;
   const tools = filtered.map((t) => ({
@@ -394,18 +415,36 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   let consecutiveGuardHits = 0;
   let lastBadToolName = "";
 
+  // WARP-329 — the result returned when the client disconnects mid-turn.
+  // We don't emit a `done` event (the SSE consumer is gone) and the route
+  // labels the persisted row "aborted" via its own `clientAborted` flag.
+  const abortedResult = (iterations: number): AgentResult => ({
+    message: { role: "assistant", content: "" },
+    trace,
+    iterations,
+    stop_reason: "error",
+    error: "client_aborted",
+  });
+
   for (let iter = 0; iter < maxIter; iter++) {
-    const gw = await deps.aiGateway.chat({
-      model: req.model,
-      messages,
-      stream: false,
-      temperature: req.temperature,
-      // WARP-849 — forward the caller's completion budget (previously
-      // dropped here, making the wizard probe's max_tokens a no-op).
-      max_tokens: req.max_tokens,
-      tools,
-      tool_choice: toolChoice,
-    });
+    // WARP-329 — bail before issuing another inference call if the client
+    // already disconnected (e.g. during the previous iteration's tool work).
+    if (req.signal?.aborted) return abortedResult(iter);
+    const gw = await deps.aiGateway.chat(
+      {
+        model: req.model,
+        messages,
+        stream: false,
+        temperature: req.temperature,
+        // WARP-849 — forward the caller's completion budget (previously
+        // dropped here, making the wizard probe's max_tokens a no-op).
+        max_tokens: req.max_tokens,
+        tools,
+        tool_choice: toolChoice,
+      },
+      // WARP-329 — cancel the in-flight inference fetch on disconnect.
+      req.signal,
+    );
     if (!gw.ok) {
       const error = `ai-gateway ${gw.status ?? "error"}`;
       emit({ type: "done", iterations: iter, stop_reason: "error", error });
@@ -478,6 +517,10 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
     let iterGuardHits = 0;
     let iterRealDispatches = 0;
     for (const call of asst.tool_calls) {
+      // WARP-329 — stop before dispatching any further tool once the client
+      // has disconnected, so a mid-turn abort can't fire a (possibly write)
+      // tool call against a caller who is already gone.
+      if (req.signal?.aborted) return abortedResult(iter + 1);
       const args = safeParseArgs(call);
 
       // WARP-642 — hallucinated-tool guard. If the model named a tool that

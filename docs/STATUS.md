@@ -1,16 +1,6 @@
 # Implementation status — edge-platform
 
-> ⚠️ **STALE (as of 2026-05-30).** This file (last updated 2026-04-15) predates the
-> JWT/RBAC work, the embedded PM stack, the dashboard rebrand, and the CI build-out,
-> and the 2026-05-30 launch-readiness audit found it contradicting the actual code on
-> several points (it claims dashboard tokens live in `localStorage` — they're in
-> HTTP-only cookies; that the setup wizard is "stubbed" — it's a complete 9-step flow;
-> that `.github/` has no workflows — there are 20, just disabled). **Do not rely on it
-> for decisions.** For the current, code-verified picture see
-> [`LAUNCH_READINESS_AUDIT.md`](LAUNCH_READINESS_AUDIT.md). A full regeneration of this
-> file is tracked in Jira (launch-readiness docs-reconciliation ticket).
-
-Last updated: 2026-04-15
+Last updated: 2026-06-15
 Source context: `droplet-gtm-strategy.docx` (April 2026) and `git ls-files` at the branch point.
 
 This file is a walk-through of what's actually implemented in this repo, categorised by maturity. File references use the actual on-disk paths; `docs/gtm-mapping.md` covers how these map to the GTM doc's reference architecture.
@@ -27,6 +17,13 @@ This file is a walk-through of what's actually implemented in this repo, categor
 - Zod-validated env config (`apps/orchestrator/src/config.ts`).
 - First-run setup endpoint (`POST /api/auth/setup`) and public-path allowlist in auth middleware.
 
+### Security & access control
+- **RBAC with per-route guards.** `Role` enum on the Prisma `User` model (`apps/orchestrator/prisma/schema.prisma`, `enum Role`), `requireRole(...)` middleware (`apps/orchestrator/src/middleware/auth.ts`, scope helper in `middleware/scope.ts`) applied per-route (e.g. `routes/aps.ts`, `routes/activity.ts`, `routes/auth.ts`). Covered by `__tests__/rbac.test.ts` + `__tests__/require-role.middleware.test.ts`.
+- **Postgres-backed append-only audit log.** `ActivityRow` model (`schema.prisma`, WARP-456) with an HMAC-SHA256 hash-chain — each row signs over canonical JSON and hashes the prior signature so the chain is tamper-evident (`apps/orchestrator/src/services/audit-signing.service.ts`). Sealed export via `POST /api/activity/export` (`apps/orchestrator/src/routes/activity.ts`, owner/admin gated).
+- **HTTPS with auto-generated cert + HTTP→HTTPS redirect.** Nginx terminates TLS on `:443` (`docker/nginx.conf`: `listen 443 ssl` with `droplet.crt`/`droplet.key`) and 301-redirects `:80` → `https://` for all paths. The self-signed cert is generated/regenerated on first boot by `_generate_tls_cert` (`scripts/lib/secrets.sh`).
+- **QR/PIN device pairing.** `POST /api/devices/pair` mints a short-lived 6-char code + `droplet://pair?...` QR payload, `GET /api/devices/pair/:code/status` polls, and `POST /api/devices/pair/claim` completes the pairing (`apps/orchestrator/src/routes/device-clients.ts`).
+- **WireGuard remote access.** `VpnPeer` Prisma model (`schema.prisma`) + `routes/vpn.ts` + `services/vpn.service.ts` (IP allocation from `10.13.13.0/24`, `.conf` rendering); router-side keypair/peer provisioning via `services/routing/` (ubus/ACL). Dashboard "Remote Access" page renders the `.conf` as a QR.
+
 ### AI gateway
 - FastAPI app with routing, scheduler, gRPC server (`services/ai-gateway/main.py`, `router.py`, `scheduler.py`, `grpc_server.py`).
 - Pydantic request/response models (`services/ai-gateway/schemas.py`).
@@ -40,6 +37,9 @@ This file is a walk-through of what's actually implemented in this repo, categor
 - ONVIF + RTSP camera scanner + driver checker + Frigate client (`services/camera-discovery/onvif_scanner.py`, `rtsp_prober.py`, `driver_checker.py`, `frigate_client.py`, `main.py`).
 - Filesystem watcher + embedder + MQTT publisher (`services/file-indexer/watcher.py`, `chunker.py`, `embedder.py`, `db.py`, `mqtt_client.py`, `main.py`, `extractors/`).
 
+### Conversation persistence
+- **Postgres-backed chat history.** `ChatSession` / `ChatMessage` Prisma models (`apps/orchestrator/prisma/schema.prisma`) persisted via `apps/orchestrator/src/services/chat-persistence.service.ts` (create/find/list/delete sessions, transactional message writes, `updatedAt` maintenance). Chat survives across sessions; session state is owned by the orchestrator + Prisma (not in-memory and not the ai-gateway). GTM M1.5 is `[x]` Done.
+
 ### Web UI
 - Next.js 14 App Router with setup wizard, login, dashboard, files, chat, settings (`apps/web-dashboard/src/app/`).
 - Auth-gated routes; token flow via HTTP-only cookies (this line previously read `localStorage` — corrected per the stale-banner; prod is cookie-based, see `LAUNCH_READINESS_AUDIT.md`); `/setup` redirect when no users exist (`apps/web-dashboard/src/app/setup/`, `apps/web-dashboard/src/app/users/`, `apps/web-dashboard/src/app/settings/`).
@@ -47,12 +47,13 @@ This file is a walk-through of what's actually implemented in this repo, categor
 ### Infrastructure
 - **Unified Docker Compose stack** — 20 services in a single file (`docker/docker-compose.yml`).
 - Nginx reverse proxy terminating on `:80` and `:443` (`docker/nginx.conf`, `docker/certs/`).
-- PostgreSQL 16, Redis 7, Mosquitto 2 MQTT broker, Nextcloud 29 (apache), Frigate NVR (`docker/docker-compose.yml`, `docker/frigate/config.yml`, `docker/mosquitto.conf`, `docker/nextcloud-skeleton/`, `docker/init-nextcloud-db.sh`, `docker/nextcloud-init.sh`). Smart-home devices are controlled by the orchestrator's native Matter service (`apps/orchestrator/src/services/matter.service.ts`).
-- OpenWrt router image builder (`openwrt/build.sh`, `openwrt/files/`, `openwrt/scripts/`, `openwrt/README.md`).
+- PostgreSQL 16, Redis 7, Mosquitto 2 MQTT broker, Nextcloud 29 (apache), Frigate NVR (`docker/docker-compose.yml`, `docker/frigate/config.yml`, `docker/mosquitto.conf`, `docker/nextcloud-skeleton/`, `docker/init-nextcloud-db.sh`, `docker/nextcloud-init.sh`). Smart-home devices are controlled by the `matter-controller` host-network sidecar (`services/matter-controller/`, ADR-022/WARP-850 — BLE commissioning + LAN mDNS), fronted by the orchestrator's `/api/matter/*` routes.
+- OpenWrt single-box AP container image (`openwrt/singlebox-image/`) + UCI config overlay (`openwrt/files/`, `openwrt/scripts/`, `openwrt/README.md`). The legacy multi-box bare-metal router image builder (`openwrt/build.sh`) has been retired (ADR-011); the router runs in a container on single-box.
 - Setup + factory-reset scripts with flags for `--dry-run`, `--systemd`, `--regenerate-env`, etc. (`scripts/setup.sh`, `scripts/factory-reset.sh`, `scripts/README.md`).
 - Turbo 2.0 monorepo pipeline (`turbo.json`, `package.json`).
 - gRPC proto definitions (`proto/inference.proto`).
 - Helper scripts: `scripts/verify.sh`, `scripts/test-security.sh`, `scripts/build-image.sh`, `scripts/camera-drivers.sh`, `scripts/generate-grpc.sh`.
+- **CI/CD pipeline** — 19 GitHub Actions workflows under `.github/workflows/` (per-service test suites, `ci-coverage.yml`, `docker-build.yml`, `security-tests.yml`, `test-fips.yml`, `setup-e2e.yml`, nightly RAG eval, etc.). GTM M1.8 is `[x]` Done.
 
 ### Test coverage
 - Orchestrator unit tests (`apps/orchestrator/src/__tests__/`).
@@ -65,10 +66,8 @@ This file is a walk-through of what's actually implemented in this repo, categor
 
 ## 🟡 Partial / stubbed
 
-- **Auth middleware** (`apps/orchestrator/src/middleware/auth.ts`): JWT access tokens (15 min) + refresh tokens (7 days). Auth middleware verifies JWT first, falls back to Nextcloud OCS for legacy tokens. Role claim (owner/admin/family/guest) included in JWT. GTM M1.3 is `[x]` Done. **RBAC per-route guards (M2.2) not yet implemented.**
-- **HTTPS** (`docker/docker-compose.yml` `gateway`, `docker/nginx.conf`, `docker/certs/`): port `:443` is exposed and certs volume is mounted, but self-signed cert auto-generation on first boot needs to be verified inside `scripts/setup.sh`. GTM M1.4 is `[~]`.
-- **Conversation persistence** (`services/ai-gateway/sessions/`, `apps/orchestrator/src/routes/llm.ts`): session CRUD endpoints exist; whether the backing store is Postgres or in-memory is unverified — needs audit. GTM M1.5 is `[~]`.
-- **Response streaming** (`apps/orchestrator/src/routes/llm.ts`, `services/ai-gateway/main.py`, `services/ai-gateway/providers/`): `sse-starlette` is in the gateway's deps and streaming hooks exist, but true end-to-end streaming depends on upstream `inference-engine` which per cross-repo notes has not implemented Ollama-streaming passthrough yet. GTM M1.6 is `[~]`.
+- **Auth middleware** (`apps/orchestrator/src/middleware/auth.ts`): JWT access tokens (15 min) + refresh tokens (7 days). Auth middleware verifies JWT first, falls back to Nextcloud OCS for legacy tokens. Role claim (owner/admin/family/guest) included in JWT. GTM M1.3 is `[x]` Done. RBAC per-route guards (M2.2) are also `[x]` Done — see "Security & access control" above.
+- **Response streaming** (`apps/orchestrator/src/routes/llm.ts`): SSE streaming is implemented in-repo. `routes/llm.ts` accepts `stream:true`, opens a `text/event-stream` response, and emits `encodeSSE` events from the agent run's `onEvent` callback with WARP-329 debounced persistence of streamed content to Postgres (`X-Conversation-Id` + assistant row id headers set on both streaming and non-streaming paths). The remaining gap is in-repo only: the orchestrator agent loop (`apps/orchestrator/src/services/llm-agent.service.ts`, ~line 361) currently calls the model with `stream:false`, so per-token deltas are not yet wired through to the SSE channel — being addressed separately. This is NOT an `inference-engine` upstream blocker. GTM M1.6 is partially done — wire format complete, agent-loop token streaming pending.
 - **NVR integration** (`docker/frigate/config.yml`, `services/camera-discovery/`, `apps/orchestrator/src/routes/cameras.ts`): Frigate is wired into Compose; ONVIF scanner + Frigate client exist; event subscriptions and clip-export delegation need auditing. GTM M2.1 is `[~]`.
 - **Prompt-injection hardening** (`services/ai-gateway/middleware/rate_limit.py`, `services/ai-gateway/schemas.py`): Sliding-window rate limiter implemented (Redis + in-memory fallback) on chat endpoints. Input validation: `max_tokens` capped at 4096, messages capped at 100, content at 32k chars. CORS restricted to explicit origins. Remaining: output schema validation for tool-call responses. GTM M2.7 is `[~]`.
 - **Photo indexing** (`services/file-indexer/embedder.py`, `services/file-indexer/extractors/`): text indexing plumbing is present; image/CLIP embedding is not. GTM M3.3 is `[~]`.
@@ -80,14 +79,11 @@ This file is a walk-through of what's actually implemented in this repo, categor
 
 ## 🔴 Not started
 
-- **JWT authentication / RBAC** (GTM M1.3, M2.2). Auth layer needs an ADR and replacement of the Nextcloud-OCS-only path with JWT issuance + refresh + role enum on the `User` Prisma model.
-- **CI/CD pipeline** (GTM M1.8). `.github/` contains only logo assets — no `.github/workflows/` directory. Manual runs only (`scripts/verify.sh`, `npm test`, `turbo test`).
-- **Device pairing flow** (GTM M2.3). No QR/PIN pairing endpoint; mobile-app has no paired-entry point.
 - **PWA / mobile-responsive audit** (GTM M2.4). Next.js app responsiveness is untested; no PWA manifest.
-- **WireGuard remote access** (GTM M2.6). No WireGuard service in Compose or OpenWrt overlay.
 - **OTA update system** (GTM M3.4). No `updates.ts` route, no A/B partition scheme, no signed-manifest verification.
 - **Community marketplace** (GTM M3.6). No `Extension` model, no `/extensions` route, no extension registry.
-- **Audit logging** (GTM §2.3 Device Control API row): orchestrator logs via Pino but there is no Postgres-backed append-only audit trail.
+
+> JWT auth + RBAC (M1.3, M2.2), CI/CD (M1.8), device pairing (M2.3), WireGuard (M2.6), and Postgres-backed audit logging (GTM §2.3) have all shipped since this file was last revised — see "Working" above.
 
 ---
 
@@ -96,8 +92,8 @@ This file is a walk-through of what's actually implemented in this repo, categor
 | Phase | Name | Status here | Notes |
 |---|---|---|---|
 | PH1 | Repo + Runtime | `[x]` Complete | Turbo monorepo, 20-service Compose stack, setup/factory-reset scripts, per-workspace tests, OpenWrt image builder. |
-| PH2 | Device Control API — auth/RBAC | `[~]` Partial | JWT auth implemented (M1.3 done). Role claim in tokens. RBAC per-route guards (M2.2) not yet implemented — no `requireRole()` middleware or Prisma User/Role model. |
-| PH3 | Service stubs → real | `[~]` Partial | `services/routing/`, `services/camera-discovery/`, `services/file-indexer/` are real services (not stubs). Gaps: storage metrics endpoint completeness, audit log, full NVR clip-export path. |
+| PH2 | Device Control API — auth/RBAC | `[x]` Complete | JWT auth (M1.3) and RBAC per-route guards (M2.2) both done — `Role` enum on the Prisma `User` model + `requireRole()` middleware applied per-route. |
+| PH3 | Service stubs → real | `[~]` Partial | `services/routing/`, `services/camera-discovery/`, `services/file-indexer/` are real services (not stubs). Postgres-backed append-only audit log (`ActivityRow`, WARP-456) now shipped. Remaining gaps: storage metrics endpoint completeness, full NVR clip-export path. |
 | PH4 | Assistant tooling hardening | `[~]` (cross-repo) | This repo's `services/ai-gateway/` is the outer input layer; primary hardening (OpenClaw sandbox, tool policy) lives in `inference-engine`. Verify input-validation + rate-limit coverage here as part of M2.7. |
 | PH5 | Docs + polish | `[~]` Partial | README, CLAUDE.md, CONTRIBUTING.md, scripts/README.md, service-level TESTING.md exist. **Missing:** OpenAPI wiring (delegated to `shared-api` repo), threat model document, architecture diagrams beyond README ASCII art. |
 

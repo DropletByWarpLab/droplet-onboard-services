@@ -318,6 +318,11 @@ export interface VpnStatusInfo {
   configured: boolean;
   endpointConfigured: boolean;
   endpointHost?: string | null;
+  /** ADR-023: the publicly-trusted per-device FQDN `d-<hmac>.devices.warp-lab.ai`.
+   *  The one address that works at home AND over the tunnel with a green padlock.
+   *  Null until the box learns it from HQ. Safe to show to any user (it is
+   *  published to Certificate Transparency anyway, carries no PII, has no A record). */
+  publicFqdn?: string | null;
   listenPort?: number;
   serverPublicKey?: string;
   addresses?: string[];

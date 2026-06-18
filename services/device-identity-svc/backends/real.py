@@ -42,8 +42,8 @@ DEVICE_CERT_VALIDITY_DAYS = 365 * 5
 # Root Key derived from the Owner hierarchy.
 SRK_PERSISTENT_HANDLE = 0x81000001
 
-# NV index where Infineon-style EK certs are stored. Jetson modules
-# typically don't ship a pre-loaded EK cert; we synthesize one when
+# NV index where Infineon-style EK certs are stored. The appliance TPM
+# typically doesn't ship a pre-loaded EK cert; we synthesize one when
 # absent.
 EK_CERT_NV_INDEX = 0x01C00002
 

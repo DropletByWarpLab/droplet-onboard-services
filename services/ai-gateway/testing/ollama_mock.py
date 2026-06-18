@@ -1,4 +1,4 @@
-"""Mock Ollama server for local testing without a Jetson.
+"""Mock Ollama server for local testing without an inference host.
 
 Simulates Ollama's API surface so the ai-gateway can be tested locally
 on macOS/Linux without GPU hardware. Returns canned responses that
@@ -65,7 +65,7 @@ MOCK_MODELS = [
 ]
 
 CANNED_RESPONSES = {
-    "default": "I'm a mock AI running locally for testing. The real model would be running on the Jetson GPU.",
+    "default": "I'm a mock AI running locally for testing. The real model would be running on the inference host's GPU.",
     "hello": "Hello! I'm the Droplet AI assistant. How can I help you today?",
     "test": "This is a test response from the mock Ollama server. Everything is working correctly.",
 }

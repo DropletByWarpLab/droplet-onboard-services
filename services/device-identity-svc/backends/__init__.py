@@ -2,7 +2,7 @@
 
 Two implementations:
   - backends.mock.MockBackend     — pure-Python in-memory (dev + CI)
-  - backends.real.RealBackend     — tpm2-pytss + /dev/tpm0 (Jetson)
+  - backends.real.RealBackend     — tpm2-pytss + /dev/tpm0 (the appliance)
 
 Both satisfy the same Protocol so the gRPC handler is implementation-
 agnostic.

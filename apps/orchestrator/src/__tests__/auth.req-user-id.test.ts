@@ -61,6 +61,7 @@ import {
   _setAuthPrismaForTests,
 } from "../middleware/auth.js";
 import { createPeopleRouter } from "../routes/people.js";
+import type { ScopeName } from "../middleware/scope.js";
 
 // In-memory User table mock — keyed by nextcloudUsername for the OCS
 // lookup and by id for the people-routes lookups. Production wires
@@ -338,7 +339,15 @@ describe("WARP-485 — req.user.id normalization", () => {
     const app = express();
     app.use(express.json());
     app.use(authMiddleware);
-    app.use("/api", createPeopleRouter(prisma));
+    // WARP-455: scope-loader axis. Caller is owner (loader
+    // short-circuited), so a fixed loader preserves the 409 assertion.
+    app.use(
+      "/api",
+      createPeopleRouter(
+        prisma,
+        async () => new Set<ScopeName>(["exec_only"]),
+      ),
+    );
 
     const res = await request(app)
       .delete("/api/people/u-uuid-stefan-7777")

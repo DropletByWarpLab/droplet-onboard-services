@@ -8,7 +8,7 @@ The Droplet platform prevents the AI assistant (and any API client) from perform
 |------|----------|---------|
 | **Tier 1** | Auto-execute (with rate limiting) | Read port status, list VLANs, get camera list, WiFi scan |
 | **Tier 2** | Requires user confirmation token | Delete camera, disable PoE, create/delete VLAN, change SSID, firewall rules |
-| **Tier 3** | Blocked for AI entirely | Reboot, factory reset, VPN config, disable Jetson's switch port |
+| **Tier 3** | Blocked for AI entirely | Reboot, factory reset, VPN config, disable the appliance's switch port |
 
 ### Desktop-client tools (the *target axis*)
 
@@ -31,10 +31,10 @@ Tokens expire after 60 seconds. Each confirmation is logged to the audit trail.
 |-----------|------|-----|
 | `switch_port_enable` | 2 | Could re-enable a quarantined port |
 | `switch_port_disable` | 2 | Could disconnect a device |
-| `switch_disable_protected_port` | **3** | Would sever Jetson's management connection |
+| `switch_disable_protected_port` | **3** | Would sever the appliance's management connection |
 | `switch_create_vlan` | 2 | Network topology change |
 | `switch_delete_vlan` | 2 | Could orphan devices |
-| `switch_set_vlan_membership` | 2 | Could isolate the Jetson |
+| `switch_set_vlan_membership` | 2 | Could isolate the appliance |
 | `switch_poe_enable` | 2 | Could power unexpected devices |
 | `switch_poe_disable` | 2 | Could kill camera power |
 | `switch_setup_cameras` | 2 | Bulk VLAN reassignment |
@@ -68,7 +68,7 @@ evaluator as described above.
 
 ## Protected Port
 
-The `SWITCH_PROTECTED_PORT` environment variable designates the switch port the Jetson is connected to. Disabling this port is classified as Tier 3 (blocked for AI), preventing the LLM from ever severing its own management connection.
+The `SWITCH_PROTECTED_PORT` environment variable designates the switch port the appliance is connected to. Disabling this port is classified as Tier 3 (blocked for AI), preventing the LLM from ever severing its own management connection.
 
 Set in docker-compose or .env:
 ```

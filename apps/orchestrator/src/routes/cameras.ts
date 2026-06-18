@@ -60,10 +60,11 @@ import {
   restartFrigate,
   type PtzAction,
 } from "../services/frigate.client.js";
-import { getCameraSystemStatus } from "../services/camera-system.service.js";
+import { getCameraSystemStatus, type CameraSystemStatus } from "../services/camera-system.service.js";
+import { isUpstreamUnavailable } from "../lib/upstream-unavailable.js";
 import { pipeUpstreamBody } from "../lib/pipe-upstream.js";
 import { config } from "../config.js";
-import { evaluateNetworkCommand } from "../services/network-safety.service.js";
+import { evaluateNetworkCommand, confirmNetworkCommand } from "../services/network-safety.service.js";
 import { exportClip, signShareUrl, verifyShareUrl } from "../services/clips.service.js";
 import { resolveNcToken } from "../services/nextcloud-session.service.js";
 import { ncDownloadFile } from "../services/nextcloud.client.js";
@@ -81,6 +82,38 @@ import {
 import { z } from "zod";
 
 const logger = pino({ name: "cameras-routes" });
+
+/**
+ * Empty CameraSystemStatus served when Frigate is unreachable — the dashboard's
+ * System page renders "0 of 0 cameras live" rather than dead-ending on a 500
+ * during a Frigate outage. Mirrors models-summary.service.ts's empty-payload
+ * degrade. Self-heals on the next poll once Frigate is back (we never cache it).
+ *
+ * Frozen at declaration so a consumer can never `.push()` into one of the shared
+ * array fields and corrupt the constant for every later Frigate-down response
+ * (mirrors matter.ts's frozen DISCONNECTED_DEVICES). We keep the
+ * `: CameraSystemStatus` annotation for shape-checking and freeze at runtime —
+ * a bare `as const` would narrow the arrays to `readonly []`, which isn't
+ * assignable to the interface's mutable `Array<…>`. The freeze covers the object
+ * itself plus each empty array (a shallow object freeze alone would still leave
+ * `.cameraFps.push()` mutating the shared array).
+ */
+const EMPTY_SYSTEM_STATUS: CameraSystemStatus = {
+  version: "unknown",
+  uptimeSec: 0,
+  cameraCount: 0,
+  camerasLive: 0,
+  cameraFps: [],
+  detectors: [],
+  gpus: [],
+  storage: [],
+  cpuPct: 0,
+};
+Object.freeze(EMPTY_SYSTEM_STATUS.cameraFps);
+Object.freeze(EMPTY_SYSTEM_STATUS.detectors);
+Object.freeze(EMPTY_SYSTEM_STATUS.gpus);
+Object.freeze(EMPTY_SYSTEM_STATUS.storage);
+Object.freeze(EMPTY_SYSTEM_STATUS);
 
 /** Service-to-service auth headers for routing/discovery services. */
 function serviceAuthHeaders(): Record<string, string> {
@@ -641,6 +674,11 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       const status = await getCameraSystemStatus();
       res.json({ status });
     } catch (err) {
+      if (isUpstreamUnavailable(err)) {
+        logger.warn({ err }, "Frigate unreachable; serving empty system status");
+        res.json({ status: EMPTY_SYSTEM_STATUS });
+        return;
+      }
       next(err);
     }
   });
@@ -856,6 +894,11 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       });
       res.json(result);
     } catch (err) {
+      if (isUpstreamUnavailable(err)) {
+        logger.warn({ err }, "Frigate unreachable; serving empty events list");
+        res.json({ events: [], nextCursor: null });
+        return;
+      }
       next(err);
     }
   });
@@ -975,6 +1018,11 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       });
       res.json(result);
     } catch (err) {
+      if (isUpstreamUnavailable(err)) {
+        logger.warn({ err }, "Frigate unreachable; serving empty reviews list");
+        res.json({ reviews: [], nextCursor: null });
+        return;
+      }
       next(err);
     }
   });
@@ -1181,6 +1229,11 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       const events = await getRecentEvents(limit);
       res.json({ events });
     } catch (err) {
+      if (isUpstreamUnavailable(err)) {
+        logger.warn({ err }, "Frigate unreachable; serving empty recent events");
+        res.json({ events: [] });
+        return;
+      }
       next(err);
     }
   });
@@ -1410,6 +1463,100 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         return res.status(resp.status).json(data);
       }
       res.json(data);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // --- Confirm a camera-domain Tier 2 command (WARP-861) ---
+  // Mirrors /switch/command/confirm. The generic /network/command/confirm
+  // switch only executes router-domain operations, so the camera tokens
+  // minted above (delete_camera / disable_camera / camera_subnet_*) could
+  // never be consumed — every camera "Remove" 202'd and silently did
+  // nothing. The executors live in this module, so the consumer does too.
+  // Role: family stays admitted because the delete/disable mint routes admit
+  // family; confirmNetworkCommand pins each token to its minting user, so a
+  // family member can never confirm an owner/admin-minted subnet token.
+  router.post("/cameras/command/confirm", requireRole("owner", "admin", "family"), async (req, res, next) => {
+    try {
+      const userId = req.user?.id;
+      const { confirmationToken, operation } = req.body ?? {};
+      if (!confirmationToken || typeof confirmationToken !== "string") {
+        return res.status(400).json({ error: "Missing 'confirmationToken'", code: "TOKEN_MISSING" });
+      }
+      // WARP-41 parity with /network/command/confirm: callers must supply
+      // the operation name they originally requested (the 202 response does
+      // not include it) so a leaked token can't execute something the user
+      // never saw.
+      if (!operation || typeof operation !== "string") {
+        return res.status(400).json({
+          error: "Missing 'operation' — clients must supply the operation name they originally requested",
+          code: "TOKEN_OPERATION_MISMATCH",
+        });
+      }
+      if (!userId) return res.status(401).json({ error: "UNAUTHORIZED" });
+      const result = await confirmNetworkCommand(prisma, confirmationToken, userId, { operation });
+      if (!result.confirmed) {
+        return res.status(400).json({ error: result.reason, code: result.code });
+      }
+
+      const { operation: confirmedOp, params } = result;
+      const p = (params || {}) as Record<string, unknown>;
+      switch (confirmedOp) {
+        case "delete_camera": {
+          const name = p.name as string;
+          if (!isValidCameraName(name)) {
+            return res.status(400).json({ error: "Invalid camera name in confirmed command" });
+          }
+          await deleteCamera(name);
+          await prisma.camera.deleteMany({ where: { name } });
+          await reconcileFrigateCameras();
+          break;
+        }
+        case "disable_camera": {
+          const name = p.name as string;
+          if (!isValidCameraName(name)) {
+            return res.status(400).json({ error: "Invalid camera name in confirmed command" });
+          }
+          await disableDetection(name);
+          await prisma.camera.updateMany({ where: { name }, data: { enabled: false } });
+          break;
+        }
+        case "camera_subnet_setup": {
+          const resp = await fetch(`${config.ROUTING_SERVICE_URL}/network/subnets/cameras/setup`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...serviceAuthHeaders() },
+            body: JSON.stringify({
+              vlan_id: (p.vlanId as number) ?? 100,
+              subnet: (p.subnet as string) || "192.168.100.1",
+              netmask: (p.netmask as string) || "255.255.255.0",
+              dhcp_start: (p.dhcpStart as number) ?? 100,
+              dhcp_limit: (p.dhcpLimit as number) ?? 150,
+              leasetime: (p.leasetime as string) || "12h",
+            }),
+            signal: AbortSignal.timeout(30000),
+          });
+          if (!resp.ok) {
+            return res.status(resp.status).json(await resp.json().catch(() => ({})));
+          }
+          break;
+        }
+        case "camera_subnet_teardown": {
+          const resp = await fetch(`${config.ROUTING_SERVICE_URL}/network/subnets/cameras`, {
+            method: "DELETE",
+            headers: serviceAuthHeaders(),
+            signal: AbortSignal.timeout(30000),
+          });
+          if (!resp.ok) {
+            return res.status(resp.status).json(await resp.json().catch(() => ({})));
+          }
+          break;
+        }
+        default:
+          return res.status(400).json({ error: `Unknown operation: ${confirmedOp}` });
+      }
+
+      res.json({ status: "ok", operation: confirmedOp, confirmed: true });
     } catch (err) {
       next(err);
     }

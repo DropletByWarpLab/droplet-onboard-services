@@ -42,6 +42,10 @@ def _run(operation: str, params: dict, extra_env: dict | None = None):
         "DROPLET_POOL_TEST_MOUNTED": "",
         "DROPLET_POOL_TEST_HASDATA": "",
         "DROPLET_POOL_TEST_OSDISK": "",
+        # WARP-868: keep the host-namespace nsenter escape OFF so the PATH-shim
+        # umount/findmnt stubs are exercised (CI may run in a container whose
+        # mount ns differs from PID 1's, which would otherwise trigger nsenter).
+        "DROPLET_POOL_HOSTNS_DISABLE": "1",
     })
     if extra_env:
         env.update(extra_env)
@@ -349,6 +353,9 @@ def _exec_run(operation: str, params: dict, tmp_path: Path,
         "CMD_LOG": _posix(log),
         "FINDMNT_TABLE": _posix(table),
         "UMOUNT_FAIL": ",".join(umount_fail or []),
+        # WARP-868: exercise the PATH-shim umount/findmnt, never the real
+        # nsenter host-namespace escape.
+        "DROPLET_POOL_HOSTNS_DISABLE": "1",
         "PATH": str(stub_dir) + os.pathsep + env.get("PATH", ""),
     })
     if extra_env:
@@ -425,6 +432,25 @@ def test_adopt_execute_busy_unmount_still_refuses_and_never_wipes(tmp_path):
     assert "/mnt/droplet/data-abcd1234" in (proc.stderr + proc.stdout)
     assert _first(cmds, "wipefs") == -1, cmds
     assert _first(cmds, "mkfs.ext4") == -1, cmds
+
+
+def test_adopt_execute_tolerates_shared_propagation_duplicate(tmp_path):
+    # WARP-868: the Nextcloud /mnt/droplet bind-mount has shared propagation,
+    # so every data mount appears TWICE in findmnt (host root + bind peer, same
+    # target). mounts_backed_by enumerates both; the FIRST host-namespace
+    # umount clears the whole shared peer group (the stub drops every matching
+    # row), so the SECOND enumerated copy umounts "not mounted". That must be
+    # treated as already-gone (success), NOT the old die-busy regression that
+    # left create/adopt doing nothing after the warning (the 422).
+    proc, cmds = _exec_run(
+        "drive_adopt", _adopt_params(), tmp_path,
+        mounts=[("/dev/sdb1", "/mnt/droplet/data-dupe9999"),
+                ("/dev/sdb1", "/mnt/droplet/data-dupe9999")])
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout).get("ok") is True
+    # The wipe/format still happen — the duplicate didn't wedge the teardown.
+    assert _first(cmds, "wipefs") >= 0, cmds
+    assert _first(cmds, "mkfs.ext4") >= 0, cmds
 
 
 def test_create_execute_tears_down_mounted_members_then_runs_mdadm(tmp_path):

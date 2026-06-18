@@ -1,0 +1,16 @@
+#!/bin/sh
+# WARP-868 — raise uhttpd's concurrent-request cap for the ubus JSON-RPC
+# surface. Stock max_requests=3 limits concurrent rpcd invocations; the
+# orchestrator's network-summary fan-out (dhcp leases + umdns aps + wireless
+# clients + firewall rules + health, issued in parallel every poll) exceeds
+# it, so the slowest rpcd scripts get their HTTP connections reset under
+# load (observed live on the .87 box, 2026-06-11: ConnectionResetError
+# storms in the routing service). 10 fits the fan-out with headroom while
+# staying conservative for this container's footprint.
+#
+# uci-defaults run once on first boot, then the file is deleted by procd.
+# droplet-openwrt-attach applies the same setting idempotently at attach
+# time for containers created from pre-WARP-868 images.
+uci set uhttpd.main.max_requests='10'
+uci commit uhttpd
+exit 0
