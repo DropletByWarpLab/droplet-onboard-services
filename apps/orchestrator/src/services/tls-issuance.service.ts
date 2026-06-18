@@ -54,6 +54,7 @@ export type TlsCertStateValue =
   | "LE_RENEW_FAILED";
 
 // --- HQ issuance contract (must match the HQ fleet-server EXACTLY) ----------
+// Authoritative in repo DropletByWarpLab/droplet-fleet-hq (README); box mirrors HQ.
 
 export interface HqChallengeResponse {
   nonce: string;
