@@ -33,6 +33,7 @@ import { GroupManagerDialog } from "@/components/network/GroupManagerDialog";
 import { SchedulesTab } from "@/components/network/SchedulesTab";
 import { CoverageExtendersPanel } from "@/components/network/CoverageExtendersPanel";
 import { PhoneHomeCard } from "@/components/network/PhoneHomeCard";
+import { CameraPrivacyCard } from "@/components/network/CameraPrivacyCard";
 import { NetworkSimple } from "@/components/network/NetworkSimple";
 import { SwitchPanel } from "@/components/network/switch/SwitchPanel";
 import { WifiScanPanel } from "@/components/network/WifiScanPanel";
@@ -814,6 +815,11 @@ function WifiTab() {
           during onboarding can set the SSID/password here — same write path as
           the setup wizard's InternetStep. */}
       <WifiSettingsForm />
+
+      {/* Camera privacy — network isolation posture (honest, read-only) plus
+          the live "block cameras from the internet" toggle. Sits with the
+          everyday Wi-Fi/network controls per the design's Simple-mode layout. */}
+      <CameraPrivacyCard />
 
       {/* WARP-816: the scanner lives in WifiScanPanel so it can distinguish the
           AP-mode "scanning unavailable while broadcasting" state (typed
