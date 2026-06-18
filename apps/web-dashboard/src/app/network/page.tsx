@@ -615,7 +615,8 @@ function StatusCard({
 // --- Devices Tab (WARP-83: sectioned 3-col card grid) ---
 type DeviceSort = "name" | "lastSeen" | "vendor";
 
-function DevicesTab() {
+// Exported for unit testing the search/empty-state behavior (WARP-873).
+export function DevicesTab() {
   const [search, setSearch] = useState("");
   const [onlineOnly, setOnlineOnly] = useState(false);
   const [sort, setSort] = useState<DeviceSort>("name");
@@ -675,6 +676,11 @@ function DevicesTab() {
     .filter((g) => (byGroup.get(g.id) ?? []).length > 0)
     .sort((a, b) => a.name.localeCompare(b.name));
   const ungrouped = byGroup.get("__ungrouped") ?? [];
+  // WARP-873: with devices present, the only way every section is empty is an
+  // active search that matched nothing (onlineOnly filters server-side, so it
+  // empties `devices` instead). Distinguish that from the raw zero-devices case
+  // so the search miss gets its own empty state rather than a blank area.
+  const hasMatches = groupsWithMembers.length > 0 || ungrouped.length > 0;
 
   const isLoading = !devicesSwr.data && devicesSwr.isLoading;
 
@@ -754,7 +760,26 @@ function DevicesTab() {
         </div>
       )}
 
-      {!isLoading && devices.length > 0 && (
+      {!isLoading && devices.length > 0 && !hasMatches && search.trim() !== "" && (
+        <div className="card text-center" style={{ padding: "48px 20px" }}>
+          <Monitor size={32} className="mx-auto text-label-quaternary mb-3" />
+          <h3 className="type-title-3 text-label-primary mb-1">
+            No devices match &ldquo;{search}&rdquo;
+          </h3>
+          <p className="type-subheadline text-label-tertiary mb-4">
+            Try a different name, IP, or vendor.
+          </p>
+          <button
+            type="button"
+            onClick={() => setSearch("")}
+            className="btn ghost sm"
+          >
+            Clear search
+          </button>
+        </div>
+      )}
+
+      {!isLoading && devices.length > 0 && hasMatches && (
         <>
           {groupsWithMembers.map((g) => (
             <DeviceGridSection
