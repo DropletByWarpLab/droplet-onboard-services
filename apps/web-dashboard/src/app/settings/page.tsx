@@ -38,6 +38,9 @@ export default function SettingsPage() {
   const [newMustChange, setNewMustChange] = useState(true);
   const [userError, setUserError] = useState<string | null>(null);
   const [deleteUserTarget, setDeleteUserTarget] = useState<string | null>(null);
+  // WARP-874: guard against double-submit — disable Create + ignore re-entry
+  // while the create request is in flight.
+  const [creating, setCreating] = useState(false);
 
   const loadKeys = useCallback(async () => {
     try {
@@ -63,6 +66,7 @@ export default function SettingsPage() {
   }, [loadKeys, loadUsers]);
 
   const handleCreateUser = async () => {
+    if (creating) return;
     setUserError(null);
     if (!isValidEmail(newEmail)) {
       setUserError("Enter a valid email address.");
@@ -77,6 +81,7 @@ export default function SettingsPage() {
       return;
     }
 
+    setCreating(true);
     try {
       await createUser(newEmail, newPassword, newDisplayName || undefined, newMustChange);
       setNewEmail("");
@@ -87,6 +92,8 @@ export default function SettingsPage() {
       await loadUsers();
     } catch (err: any) {
       setUserError(err.message || "Failed to create user");
+    } finally {
+      setCreating(false);
     }
   };
 
@@ -218,8 +225,13 @@ export default function SettingsPage() {
               </span>
             </label>
             <div className="flex items-center gap-2 pt-1">
-              <button onClick={handleCreateUser} className="btn primary sm" type="button">
-                Create
+              <button
+                onClick={handleCreateUser}
+                disabled={creating}
+                className="btn primary sm"
+                type="button"
+              >
+                {creating ? "Creating…" : "Create"}
               </button>
               <button
                 onClick={() => { setShowAddUser(false); setUserError(null); }}
