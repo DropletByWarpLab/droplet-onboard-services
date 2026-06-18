@@ -793,6 +793,49 @@ class WirelessApi:
         })
         self._r.uci.commit("wireless")
 
+    def _find_guest_iface(self, network: str = "guest") -> tuple[Optional[str], dict]:
+        """Locate the wifi-iface bound to the guest network.
+
+        Returns ``(section_id, values)`` or ``(None, {})`` when no guest iface
+        exists (or there's no wireless config at all on this shape).
+        """
+        try:
+            res = self._r.uci.get("wireless", type="wifi-iface")
+        except UbusError:
+            return None, {}
+        values = res.get("values", res) if isinstance(res, dict) else {}
+        for section_id, cfg in (values or {}).items():
+            if isinstance(cfg, dict) and cfg.get("network") == network:
+                return section_id, cfg
+        return None, {}
+
+    def guest_status(self, network: str = "guest") -> dict:
+        """Read the guest network's current state.
+
+        ``configured`` false → no guest iface (the common single-box default).
+        Returns the SSID + key so the owner-facing dashboard can render the join
+        QR; gated to owner/admin at the orchestrator boundary.
+        """
+        section_id, cfg = self._find_guest_iface(network)
+        if section_id is None:
+            return {"configured": False, "enabled": False, "ssid": None, "password": None}
+        # OpenWrt convention: a section is enabled unless `disabled '1'`.
+        enabled = str(cfg.get("disabled", "0")) not in ("1", "true", "True")
+        return {
+            "configured": True,
+            "enabled": enabled,
+            "ssid": cfg.get("ssid"),
+            "password": cfg.get("key"),
+        }
+
+    def remove_guest_network(self, network: str = "guest") -> None:
+        """Tear down the guest network. Idempotent — a no-op when none exists."""
+        section_id, _ = self._find_guest_iface(network)
+        if section_id is None:
+            return
+        self._r.uci.delete("wireless", section_id)
+        self._r.uci.commit("wireless")
+
     def reload(self):
         """Reload wireless (down then up) to apply config changes."""
         self.down()

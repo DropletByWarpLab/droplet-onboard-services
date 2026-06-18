@@ -27,6 +27,13 @@ vi.mock("../services/network.service.js", () => ({
   setWifiPassword: vi.fn().mockResolvedValue({ operationId: "op-1" }),
   setWifiChannel: vi.fn().mockResolvedValue({ operationId: "op-2" }),
   setGuestWifi: vi.fn().mockResolvedValue({ operationId: "op-guest" }),
+  getGuestWifi: vi.fn().mockResolvedValue({
+    configured: false,
+    enabled: false,
+    ssid: null,
+    password: null,
+  }),
+  removeGuestWifi: vi.fn().mockResolvedValue({ operationId: "op-rm" }),
   // firewall route deps
   getFirewallConfig: vi.fn().mockResolvedValue({ zones: {}, rules: {}, redirects: {} }),
   blockDevice: vi.fn().mockResolvedValue({ operationId: "op-b" }),
@@ -118,6 +125,22 @@ describe("POST /api/network/wifi/guest", () => {
       .post("/api/network/wifi/guest")
       .send({ ssid: "Studio Guest", password: "short" });
     expect(res.status).toBe(400);
+  });
+});
+
+describe("guest wifi read + teardown", () => {
+  it("GET /api/network/wifi/guest reflects status from the service", async () => {
+    const res = await request(buildApp()).get("/api/network/wifi/guest");
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ configured: false, enabled: false });
+    expect(networkService.getGuestWifi).toHaveBeenCalledOnce();
+  });
+
+  it("DELETE /api/network/wifi/guest applies immediately (no confirm arm)", async () => {
+    const res = await request(buildApp()).delete("/api/network/wifi/guest");
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ status: "ok" });
+    expect(networkService.removeGuestWifi).toHaveBeenCalledOnce();
   });
 });
 

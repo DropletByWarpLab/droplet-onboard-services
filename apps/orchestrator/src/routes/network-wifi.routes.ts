@@ -12,6 +12,8 @@ import {
   setWifiPassword,
   setWifiChannel,
   setGuestWifi,
+  getGuestWifi,
+  removeGuestWifi,
 } from "../services/network.service.js";
 import { evaluateNetworkCommand } from "../services/network-safety.service.js";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
@@ -103,6 +105,30 @@ export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
       // staged on the preceding /wifi/ssid call (single-box hostapd path).
       const op = await setWifiPassword(iface_section, password, userId);
       res.json({ status: "ok", tier: result.tier, operationId: op.operationId });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Guest Wi-Fi read — owner/admin only (the body carries the guest PSK so the
+  // dashboard can render the join QR). A guest network is the household admin's
+  // to manage; family/guest roles don't see its password.
+  router.get("/network/wifi/guest", requireRole("owner", "admin"), async (_req, res, next) => {
+    try {
+      res.json(await getGuestWifi());
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Guest Wi-Fi teardown — owner/admin only. Turning guest Wi-Fi off only drops
+  // guest devices (never the household LAN) and is trivially reversible, so it
+  // applies immediately rather than through the Tier-2 confirm arm that
+  // creating a new broadcasting SSID warrants.
+  router.delete("/network/wifi/guest", requireRole("owner", "admin"), async (_req, res, next) => {
+    try {
+      const op = await removeGuestWifi();
+      res.json({ status: "ok", operationId: op.operationId });
     } catch (err) {
       next(err);
     }
