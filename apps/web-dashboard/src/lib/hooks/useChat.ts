@@ -1479,10 +1479,23 @@ export function useChat(options: UseChatOptions = {}) {
           file,
           conversationIdRef.current ?? chatIdRef.current,
         );
+        // Drive the chip from the server's reported status, not a hard-coded
+        // "indexing". A WARP-864 dedup hit against an already-processed file
+        // returns its CURRENT status (e.g. "ready"), and since no re-ingest
+        // runs there is no later WS `/brain/indexed` flip to rescue it — so
+        // the chip must reflect res.status now or it would spin forever.
+        // "queued_for_transcription" has no chip variant; it renders as the
+        // working spinner like "indexing".
+        const chipStatus: ChatAttachment["status"] =
+          res.status === "ready"
+            ? "ready"
+            : res.status === "failed"
+              ? "failed"
+              : "indexing";
         mutateAttachments((prev) =>
           prev.map((a) =>
             a.localId === localId
-              ? { ...a, itemId: res.itemId, status: "indexing" }
+              ? { ...a, itemId: res.itemId, status: chipStatus }
               : a,
           ),
         );

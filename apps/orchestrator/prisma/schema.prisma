@@ -795,6 +795,13 @@ model BrainMemoryItem {
   recentAttemptCount           Int                   @default(0)
   recentAttemptWindowStartedAt DateTime?
 
+  // WARP-864: content hash of the original bytes (hex). Re-uploading
+  // identical bytes reuses the existing row instead of ingesting a
+  // duplicate. Unique per user (Postgres treats NULLs as distinct, so
+  // pre-WARP-864 rows — which stay NULL until backfilled — are exempt).
+  sha256 String?
+
+  @@unique([userId, sha256])
   @@index([userId, uploadedAt])
   @@index([userId, originatingChatId])
   @@index([userId, status])

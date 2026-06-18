@@ -2510,7 +2510,16 @@ export async function deleteConversation(conversationId: string): Promise<boolea
 /** Response shape from POST /api/files/brain/upload. */
 export interface BrainUploadResponse {
   itemId: string;
-  status: "indexing";
+  /**
+   * The item's status at response time. A fresh upload is "indexing" (or
+   * "queued_for_transcription" for audio/video). A WARP-864 dedup hit
+   * against an already-processed file returns that item's CURRENT status
+   * — e.g. "ready" — so the chip can reflect it immediately.
+   */
+  status: "indexing" | "queued_for_transcription" | "ready" | "failed";
+  /** WARP-864: true when identical bytes were already uploaded and the
+   * existing item was reused instead of ingesting a duplicate. */
+  deduplicated?: boolean;
 }
 
 /**

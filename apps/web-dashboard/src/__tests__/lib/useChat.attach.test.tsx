@@ -154,6 +154,30 @@ describe("useChat.attach (WARP-203)", () => {
     });
   });
 
+  it("flips chip straight to ready on a WARP-864 dedup hit (no WS message needed)", async () => {
+    // Re-uploading an already-indexed file dedups server-side and returns
+    // the existing item's CURRENT status. No re-ingest runs, so there is
+    // no later WS `/brain/indexed` flip — the chip MUST reflect res.status
+    // immediately or it would spin on "indexing" forever.
+    mockUploadBrainFile.mockResolvedValueOnce({
+      itemId: "bmi-dedup",
+      status: "ready",
+      deduplicated: true,
+    });
+
+    let value: ProbeValue | null = null;
+    render(<Probe onValue={(v) => (value = v)} />);
+
+    await act(async () => {
+      await value!.attach(
+        new File(["dup"], "already-seen.md", { type: "text/markdown" }),
+      );
+    });
+
+    expect(value!.attachments[0].status).toBe("ready");
+    expect(value!.attachments[0].itemId).toBe("bmi-dedup");
+  });
+
   it("flips chip to failed when the upload route rejects", async () => {
     mockUploadBrainFile.mockRejectedValueOnce(
       new Error("Unsupported file type: video/mp4"),
