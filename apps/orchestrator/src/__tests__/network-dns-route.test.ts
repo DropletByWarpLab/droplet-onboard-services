@@ -27,6 +27,7 @@ vi.mock("../services/network.service.js", () => ({
   getSystemInfo: vi.fn().mockResolvedValue({}),
   addStaticDhcpLease: vi.fn().mockResolvedValue({ operationId: "op-lease" }),
   setDnsServers: vi.fn().mockResolvedValue({ operationId: "op-dns" }),
+  getTopology: vi.fn().mockResolvedValue({ posture: "UNKNOWN" }),
   blockDevice: vi.fn().mockResolvedValue({ operationId: null }),
   unblockDevice: vi.fn().mockResolvedValue({ operationId: null }),
   addPortForward: vi.fn().mockResolvedValue({ operationId: null }),

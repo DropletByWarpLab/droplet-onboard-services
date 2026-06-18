@@ -1371,6 +1371,31 @@ export async function fetchRouterSystemInfo(): Promise<Record<string, unknown>> 
   return res.json();
 }
 
+export type DeploymentPosture =
+  | "PRIMARY_ROUTER"
+  | "DOWNSTREAM_ROUTER"
+  | "UNKNOWN";
+
+export interface NetworkTopology {
+  posture: DeploymentPosture;
+  evidence?: Record<string, unknown>;
+}
+
+/**
+ * WARP-871: read the deployment posture (ADR-018) for the Overview badge.
+ * Best-effort — returns null on any failure so a topology hiccup never breaks
+ * the Overview tab.
+ */
+export async function getNetworkTopology(): Promise<NetworkTopology | null> {
+  try {
+    const res = await authFetch(`${BASE}/api/network/topology`);
+    if (!res.ok) return null;
+    return (await res.json()) as NetworkTopology;
+  } catch {
+    return null;
+  }
+}
+
 // --- Managed switch writes (ADDON-network-switch-management.md §7) ---------
 //
 // Each is a Tier-2 (Write) command: the POST returns a 202 with a

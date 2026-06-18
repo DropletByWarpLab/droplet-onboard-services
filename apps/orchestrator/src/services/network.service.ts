@@ -298,6 +298,11 @@ export async function setDnsServers(servers: string[]): Promise<openwrt.WriteRes
   return result;
 }
 
+// WARP-871: read-only deployment-posture probe (ADR-018). Pass-through.
+export async function getTopology(): Promise<openwrt.NetworkTopology> {
+  return openwrt.fetchTopology();
+}
+
 export async function blockDevice(mac: string, name?: string): Promise<openwrt.WriteResult> {
   const result = await openwrt.blockDevice(mac, name);
   await invalidateNetworkCache();

@@ -17,6 +17,7 @@ import {
   getSystemInfo,
   addStaticDhcpLease,
   setDnsServers,
+  getTopology,
   blockDevice,
   unblockDevice,
   addPortForward,
@@ -191,6 +192,19 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
       }
     },
   );
+
+  // WARP-871: read-only deployment-posture probe (ADR-018). Unguarded read,
+  // like /network/status — informs the dashboard's topology badge. A genuine
+  // ubus fault propagates so the dashboard can drop the badge rather than
+  // assert a posture.
+  router.get("/network/topology", async (_req, res, next) => {
+    try {
+      const topology = await getTopology();
+      res.json(topology);
+    } catch (err) {
+      next(err);
+    }
+  });
 
   // --- System ---
   router.get("/network/system", async (_req, res, next) => {

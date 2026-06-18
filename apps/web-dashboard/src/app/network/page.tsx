@@ -43,8 +43,10 @@ import { DhcpReservationForm } from "@/components/network/DhcpReservationForm";
 import { DnsServersForm } from "@/components/network/DnsServersForm";
 import {
   fetchNetworkOperation,
+  getNetworkTopology,
   rebootRouter,
   type NetworkOperation,
+  type NetworkTopology,
 } from "@/lib/api";
 import type {
   EnrichedNetworkDevice,
@@ -545,8 +547,34 @@ function OverviewTab({ overview }: { overview: NetworkOverview | undefined }) {
   const memFree = system?.resources?.memory?.free ?? 0;
   const memUsedPct = memTotal > 0 ? Math.round(((memTotal - memFree) / memTotal) * 100) : 0;
 
+  // WARP-871: best-effort deployment-posture badge (ADR-018). The routing
+  // GET /network/topology read existed but was never surfaced; the badge tells
+  // a primary router apart from a single-box sitting behind the home router.
+  const [topology, setTopology] = useState<NetworkTopology | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    getNetworkTopology().then((t) => {
+      if (!cancelled) setTopology(t);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const postureLabel =
+    topology?.posture === "PRIMARY_ROUTER"
+      ? "Primary router"
+      : topology?.posture === "DOWNSTREAM_ROUTER"
+        ? "Downstream router"
+        : null;
+
   return (
     <div className="space-y-6">
+      {postureLabel && (
+        <span className="inline-flex items-center gap-1.5 rounded-full bg-surface-secondary px-2.5 py-1 type-caption-1 text-label-secondary">
+          <Router size={12} aria-hidden="true" />
+          {postureLabel}
+        </span>
+      )}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <StatusCard
           icon={Globe}

@@ -473,6 +473,27 @@ export async function setDnsServers(servers: string[]): Promise<WriteResult> {
   return opFrom(res);
 }
 
+// --- Deployment topology (ADR-018) ---
+
+export type DeploymentPosture =
+  | "PRIMARY_ROUTER"
+  | "DOWNSTREAM_ROUTER"
+  | "UNKNOWN";
+
+export interface NetworkTopology {
+  posture: DeploymentPosture;
+  evidence?: Record<string, unknown>;
+}
+
+// WARP-871: read-only posture probe (GET /network/topology). Lets the dashboard
+// tell a primary router apart from a single-box sitting downstream of the
+// home router, instead of silently rendering an absent WAN as "offline".
+export async function fetchTopology(): Promise<NetworkTopology> {
+  return routingFetchJson<NetworkTopology>("/network/topology", {
+    label: "Network topology",
+  });
+}
+
 // --- Firewall ---
 
 // WARP-42: every firewall response is parsed through a zod schema so schema
