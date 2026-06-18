@@ -102,6 +102,7 @@ export function UpnpCard() {
             on={enabled}
             onToggle={onToggle}
             disabled={isLoading || saving}
+            ariaLabel="UPnP and NAT-PMP"
           />
         ) : (
           <span className="type-caption-2 font-medium px-2 py-0.5 rounded-full flex-shrink-0 bg-surface-secondary text-label-tertiary">

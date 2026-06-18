@@ -77,6 +77,28 @@ class TestWirelessApiGuest:
         WirelessApi(router).remove_guest_network()
         router.uci.delete.assert_not_called()
 
+    def test_create_adds_a_new_iface_when_absent(self) -> None:
+        router = MagicMock()
+        router.uci.get.return_value = {"values": {"cfg_lan": {"network": "lan"}}}
+        WirelessApi(router).create_guest_network("radio3", "Guests", "letmein8")
+        cfg, kind, values = router.uci.add.call_args.args
+        assert cfg == "wireless" and kind == "wifi-iface"
+        assert values["ssid"] == "Guests" and values["network"] == "guest"
+        router.uci.set.assert_not_called()
+
+    def test_create_updates_in_place_and_clears_disabled_when_present(self) -> None:
+        # Idempotent re-run / re-enable: update the existing iface, never stack a
+        # second SSID on the same network.
+        router = MagicMock()
+        router.uci.get.return_value = {
+            "values": {"cfg_guest": {"network": "guest", "disabled": "1"}}
+        }
+        WirelessApi(router).create_guest_network("radio3", "Guests", "letmein8")
+        router.uci.add.assert_not_called()
+        cfg, section, values = router.uci.set.call_args.args
+        assert cfg == "wireless" and section == "cfg_guest"
+        assert values["disabled"] == "0" and values["ssid"] == "Guests"
+
 
 # ---------------------------------------------------------------------------
 # 2. REST endpoints

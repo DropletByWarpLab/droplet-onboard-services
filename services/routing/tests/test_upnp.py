@@ -50,6 +50,13 @@ class TestFirewallApiUpnp:
         assert values == {"enable_upnp": "1", "enable_natpmp": "1"}
         router.uci.commit.assert_called_with("upnpd")
 
+    def test_set_restarts_miniupnpd_not_firewall(self) -> None:
+        # The uci write only takes effect once the OWNING daemon re-reads it; a
+        # firewall reload would be a silent no-op on the running system.
+        router = MagicMock()
+        FirewallApi(router).set_upnp(True)
+        router.exec_service.assert_called_once_with("miniupnpd", "restart")
+
     def test_set_disable_writes_zeros(self) -> None:
         router = MagicMock()
         FirewallApi(router).set_upnp(False)

@@ -15,7 +15,7 @@ import {
   setUpnp,
 } from "../services/network.service.js";
 import { evaluateNetworkCommand } from "../services/network-safety.service.js";
-import { requireRoleOrMcpService } from "../middleware/auth.js";
+import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 
 export interface FirewallDeps {
   prisma: PrismaClient;
@@ -46,7 +46,9 @@ export function registerFirewallRoutes(router: Router, deps: FirewallDeps): void
   // UPnP / NAT-PMP write — owner/admin only, Tier 2 (set_upnp). Turning on
   // automatic port opening can expose LAN services to the internet, so it
   // routes through the safety evaluator like the other firewall-class writes.
-  router.post("/network/upnp", requireRoleOrMcpService("owner", "admin"), async (req, res, next) => {
+  // No MCP principal: there is no set_upnp tool, and opening firewall holes is a
+  // deliberate human action, not an AI-driven one (mirrors the guest routes).
+  router.post("/network/upnp", requireRole("owner", "admin"), async (req, res, next) => {
     try {
       const { enabled } = req.body;
       if (typeof enabled !== "boolean") {
