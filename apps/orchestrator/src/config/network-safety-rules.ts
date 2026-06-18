@@ -29,6 +29,8 @@ const TIER_2_OPERATIONS = new Set([
   "set_lan_ip",
   "create_vlan",
   "create_guest_network",
+  // UPnP/NAT-PMP automatic port opening — a firewall-class exposure change.
+  "set_upnp",
   "create_firewall_zone",
   "add_firewall_rule",
   "delete_firewall_rule",

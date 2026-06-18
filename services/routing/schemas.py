@@ -56,6 +56,10 @@ class CreateGuestNetworkRequest(BaseModel):
     network: str = Field(default="guest", description="Network name for the guest zone")
 
 
+class SetUpnpRequest(BaseModel):
+    enabled: bool = Field(..., description="Enable UPnP + NAT-PMP automatic port opening")
+
+
 class StaticLeaseRequest(BaseModel):
     name: str = Field(..., min_length=1, description="Friendly device name")
     mac: str = Field(..., pattern=r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$", description="MAC address")
