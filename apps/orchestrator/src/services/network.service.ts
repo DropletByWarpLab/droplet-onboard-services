@@ -280,6 +280,19 @@ export async function setWifiChannel(
   return result;
 }
 
+// Create the isolated guest Wi-Fi network (own SSID + firewall zone, internet
+// only). Tier 2 — gated by the network-safety evaluator at the route boundary.
+export async function setGuestWifi(
+  radio: string,
+  ssid: string,
+  password: string,
+  network: string = "guest"
+): Promise<openwrt.WriteResult> {
+  const result = await openwrt.createGuestNetwork(radio, ssid, password, network);
+  await invalidateNetworkCache();
+  return result;
+}
+
 export async function addStaticDhcpLease(
   name: string,
   mac: string,

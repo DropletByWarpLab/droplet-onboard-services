@@ -445,6 +445,26 @@ export async function setWirelessChannel(
   return opFrom(res);
 }
 
+/**
+ * Create (or re-provision) the isolated guest Wi-Fi network. Maps to the
+ * routing service's `POST /wireless/guest` (CreateGuestNetworkRequest →
+ * wireless.create_guest_network), which stands up the guest SSID on its own
+ * firewall zone — internet only, no reach into the main LAN.
+ */
+export async function createGuestNetwork(
+  radio: string,
+  ssid: string,
+  password: string,
+  network: string = "guest"
+): Promise<WriteResult> {
+  const res = await postJson(
+    "/wireless/guest",
+    { radio, ssid, password, network },
+    "Create guest network",
+  );
+  return opFrom(res);
+}
+
 // --- DHCP ---
 
 export async function fetchDhcpLeases(): Promise<DhcpLease[]> {
