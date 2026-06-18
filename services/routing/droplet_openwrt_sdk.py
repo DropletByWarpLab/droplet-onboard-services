@@ -781,8 +781,15 @@ class WirelessApi:
 
     def create_guest_network(self, radio: str, ssid: str, password: str,
                              network: str = "guest"):
-        """Create an isolated guest WiFi network."""
-        self._r.uci.add("wireless", "wifi-iface", {
+        """Create (or update) the isolated guest WiFi network.
+
+        Idempotent: when a guest iface already exists, update it in place and
+        clear ``disabled`` — re-running setup must not stack a SECOND SSID on
+        the same network (which would orphan an iface that remove only half
+        deletes), and it doubles as the re-enable path for a disabled guest.
+        """
+        section_id, _ = self._find_guest_iface(network)
+        values = {
             "device": radio,
             "mode": "ap",
             "ssid": ssid,
@@ -790,7 +797,12 @@ class WirelessApi:
             "key": password,
             "network": network,
             "isolate": "1",
-        })
+            "disabled": "0",
+        }
+        if section_id is None:
+            self._r.uci.add("wireless", "wifi-iface", values)
+        else:
+            self._r.uci.set("wireless", section_id, values)
         self._r.uci.commit("wireless")
 
     def _find_guest_iface(self, network: str = "guest") -> tuple[Optional[str], dict]:
@@ -1032,7 +1044,10 @@ class FirewallApi:
         flag = "1" if enabled else "0"
         self._r.uci.set("upnpd", "config", {"enable_upnp": flag, "enable_natpmp": flag})
         self._r.uci.commit("upnpd")
-        self.reload()
+        # Restart the OWNING daemon — a firewall reload does NOT make the running
+        # miniupnpd re-read /etc/config/upnpd, so the toggle would be a silent
+        # no-op on the live system. Mirrors DHCPApi.reload restarting dnsmasq.
+        self._r.exec_service("miniupnpd", "restart")
 
     def block_device(self, mac: str, name: Optional[str] = None):
         """Block a device (by MAC address) from accessing the internet."""

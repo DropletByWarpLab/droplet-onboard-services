@@ -20,6 +20,8 @@ import {
   unblockDevice,
   addPortForward,
   setWifiPassword,
+  setGuestWifi,
+  setUpnp,
   rebootRouter,
   getRouterOperation,
 } from "../services/network.service.js";
@@ -264,6 +266,21 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
             params?.password as string,
             userId
           );
+          break;
+        case "create_guest_network":
+          // Tier-2 confirm for POST /network/wifi/guest. Thread all four pending
+          // params (radio default lives on the routing schema, but the route
+          // already filled it into the pending record).
+          writeResult = await setGuestWifi(
+            (params?.radio as string) || "radio3",
+            params?.ssid as string,
+            params?.password as string,
+            (params?.network as string) || "guest"
+          );
+          break;
+        case "set_upnp":
+          // Tier-2 confirm for POST /network/upnp.
+          writeResult = await setUpnp(params?.enabled as boolean);
           break;
         case "reboot":
           writeResult = await rebootRouter();

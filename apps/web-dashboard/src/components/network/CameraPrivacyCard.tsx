@@ -142,6 +142,7 @@ export function CameraPrivacyCard() {
           on={blocked}
           onToggle={toggleBlock}
           disabled={isLoading || saving || !data}
+          ariaLabel="Block cameras from the internet"
         />
       </div>
     </div>
