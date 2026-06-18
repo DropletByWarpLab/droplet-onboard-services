@@ -46,6 +46,9 @@ RESCAN="${DROPLET_WIFI_RESCAN:-/sys/bus/pci/rescan}"
 SETTLE_S="${DROPLET_WIFI_SETTLE_S:-5}"
 WAIT_S="${DROPLET_WIFI_WAIT_S:-20}"
 ATTACH_UNIT="${DROPLET_WIFI_ATTACH_UNIT-droplet-openwrt-attach.service}"
+# Container whose netns legitimately holds the AP radio on the single-box (its
+# phy is moved in by droplet-openwrt-attach). Empty disables the guard below.
+AP_CONTAINER="${DROPLET_WIFI_AP_CONTAINER-droplet-openwrt}"
 
 log() { printf 'droplet-wifi-watchdog: %s\n' "$*"; }
 
@@ -53,6 +56,36 @@ log() { printf 'droplet-wifi-watchdog: %s\n' "$*"; }
 has_netdev() { [ -n "$(ls -A "$1/net" 2>/dev/null)" ]; }
 has_phy()    { [ -n "$(ls -A "$1/ieee80211" 2>/dev/null)" ]; }
 alive()      { has_netdev "$1" || has_phy "$1"; }
+
+# On the single-box the AP radio's phy is deliberately moved INTO the
+# $AP_CONTAINER netns (droplet-openwrt-attach runs `iw phy <phy> set netns`).
+# From the host that PCI device then looks IDENTICAL to a wedge — driver bound,
+# no host phy/netdev — but it is perfectly healthy. Reviving it (PCI
+# remove+rescan) rips the radio out of the container and tears the live AP down.
+# So a phy-less host device is NOT wedged while the AP container's netns still
+# holds a wireless interface. netlink (iw) is netns-scoped, so `nsenter -n` into
+# the container sees the moved radio; sysfs class dirs are not (they need the
+# mount ns), which is why the bare host scan above cannot detect it.
+# Legacy host-AP boxes never move the phy, so this returns false and the
+# watchdog is unchanged for them. (Single-radio scope: if a box ran two Wi-Fi
+# cards with one in the container and a second genuinely wedged on the host,
+# this errs toward NOT reviving the second — tearing down the live AP is the
+# worse failure.)
+ap_radio_in_container() {
+  # Test hook: force the verdict without docker/nsenter/iw.
+  case "${DROPLET_WIFI_AP_IN_CONTAINER:-}" in
+    1|true|yes) return 0 ;;
+    0|false|no)  return 1 ;;
+  esac
+  [ -n "$AP_CONTAINER" ] || return 1
+  command -v docker  >/dev/null 2>&1 || return 1
+  command -v nsenter >/dev/null 2>&1 || return 1
+  command -v iw      >/dev/null 2>&1 || return 1
+  local cpid
+  cpid="$(docker inspect -f '{{.State.Pid}}' "$AP_CONTAINER" 2>/dev/null)" || return 1
+  [ -n "$cpid" ] && [ "$cpid" != "0" ] || return 1
+  nsenter -t "$cpid" -n iw dev 2>/dev/null | grep -q 'Interface'
+}
 
 # First netdev name under the device (kernel-controlled names; glob, not ls).
 first_netdev() {
@@ -73,6 +106,11 @@ for dev in "$SYS_PCI"/*; do
   is_wifi_class "$dev" || continue
   [ -e "$dev/driver" ] || continue
   alive "$dev" && continue
+
+  # Not alive on the host — but if the AP radio was deliberately moved into the
+  # container (single-box), this phy-less PCI device is EXPECTED, not a wedge;
+  # reviving it would tear down the live container AP.
+  ap_radio_in_container && continue
 
   # Wedge candidate — settle, then re-check (never race normal bring-up).
   sleep "$SETTLE_S"

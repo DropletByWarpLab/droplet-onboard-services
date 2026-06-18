@@ -276,8 +276,21 @@ GW=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}' 
 
 # Resolve dashboard gateway IP at attach time — it's stable in practice but
 # we read it fresh so a docker-compose recreate that shuffles IPs is handled.
-GATEWAY_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$GATEWAY_CONTAINER" 2>/dev/null)
-[ -z "$GATEWAY_IP" ] && { echo "$GATEWAY_CONTAINER not found — cannot wire DNAT"; exit 1; }
+# Wait for a valid IPv4 here: at boot this can run before the gateway container
+# has been assigned its IP, and wiring a DNAT with an empty/garbage value makes
+# the fw4 reload fail ("syntax error, unexpected colon"), so the AP zone never
+# activates — and the failed unit then triggers a systemd retry that re-moves
+# and re-indexes the radio (phy0->phy1), breaking the AP. Bounded ~60s.
+GATEWAY_IP=""
+for _gwtry in $(seq 1 30); do
+  _gw=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$GATEWAY_CONTAINER" 2>/dev/null)
+  case "$_gw" in
+    ''|*[!0-9.]*) sleep 2 ;;
+    *.*.*.*) GATEWAY_IP="$_gw"; break ;;
+    *) sleep 2 ;;
+  esac
+done
+[ -n "$GATEWAY_IP" ] || { echo "$GATEWAY_CONTAINER has no valid IPv4 after waiting — cannot wire DNAT"; exit 1; }
 
 # Phase L: read OpenWrt root password from the docker secret so we can
 # (re)set it inside the container on every attach. Empty -> skip the set,
@@ -473,7 +486,7 @@ docker exec -i \
     # unreachable with no breadcrumb — warn so the attach log shows why ubus
     # input is refused, matching the OPENWRT_ROOT_PW warn above.
     if uci -q commit firewall && /etc/init.d/firewall reload >/dev/null 2>&1; then
-      echo "droplet-openwrt-attach: eth0 trusted on lan zone '$lansec' (ubus input accepted)"
+      echo "droplet-openwrt-attach: eth0 trusted on lan zone $lansec (ubus input accepted)"
     else
       echo "droplet-openwrt-attach: WARN: firewall commit/reload failed; eth0 may stay DROPped (router unreachable)"
     fi
@@ -729,7 +742,7 @@ ETHWD
   # WireGuard remote-access clients land on the same dashboard. Their peer
   # .conf (apps/orchestrator/src/services/vpn.service.ts) advertises
   # AllowedIPs = 192.168.20.0/24 + the tunnel subnet and DNS = 192.168.20.1,
-  # so a connected phone's only route to the dashboard is
+  # so a connected phone has only one route to the dashboard:
   # https://192.168.20.1 — which arrives on wg0, not $AP_IFACE. Without
   # these two mirror rules the AP-scoped DNAT above never matches VPN
   # ingress and the dashboard is unreachable over the tunnel even with a
