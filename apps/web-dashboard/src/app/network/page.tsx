@@ -37,6 +37,9 @@ import { NetworkSimple } from "@/components/network/NetworkSimple";
 import { SwitchPanel } from "@/components/network/switch/SwitchPanel";
 import { WifiScanPanel } from "@/components/network/WifiScanPanel";
 import { WifiSettingsForm } from "@/components/network/WifiSettingsForm";
+import { WifiChannelCard } from "@/components/network/WifiChannelCard";
+import { PortForwardForm } from "@/components/network/PortForwardForm";
+import { DhcpReservationForm } from "@/components/network/DhcpReservationForm";
 import {
   fetchNetworkOperation,
   rebootRouter,
@@ -497,7 +500,7 @@ export default function NetworkPage() {
         tabIndex={0}
         hidden={activeTab !== "firewall"}
       >
-        {activeTab === "firewall" && <FirewallTab firewall={firewall} />}
+        {activeTab === "firewall" && <FirewallTab firewall={firewall} onApplied={refresh} />}
       </div>
       <div
         role="tabpanel"
@@ -814,6 +817,12 @@ function WifiTab() {
           the setup wizard's InternetStep. */}
       <WifiSettingsForm />
 
+      {/* WARP-871: the channel write path (orchestrator route + routing) shipped
+          at WARP-40 and api.ts already exported setWifiChannel, but the WiFi tab
+          never surfaced a channel picker — the one lever for dodging a congested
+          band. */}
+      <WifiChannelCard />
+
       {/* WARP-816: the scanner lives in WifiScanPanel so it can distinguish the
           AP-mode "scanning unavailable while broadcasting" state (typed
           SCAN_UNSUPPORTED signal) from a genuine empty scan. */}
@@ -823,10 +832,21 @@ function WifiTab() {
 }
 
 // --- Firewall Tab ---
-function FirewallTab({ firewall }: { firewall: FirewallConfig | undefined }) {
+function FirewallTab({
+  firewall,
+  onApplied,
+}: {
+  firewall: FirewallConfig | undefined;
+  onApplied?: () => void;
+}) {
   // WARP-42: typed Object.entries — each entry is [sectionId, typed section]
   // instead of [string, any], so a missing `target` or a `proto` type change
   // on the routing side now fails compile.
+  const { user } = useAuth();
+  // Port-forwarding exposes a LAN service to WAN ingress — owner/admin only,
+  // matching the orchestrator route guard (requireRoleOrMcpService("owner",
+  // "admin")). Family-tier members see the read-only lists but not the form.
+  const canEdit = user?.role === "owner" || user?.role === "admin";
   const rules: Array<[string, FirewallRule]> = firewall?.rules?.values
     ? Object.entries(firewall.rules.values)
     : [];
@@ -901,6 +921,12 @@ function FirewallTab({ firewall }: { firewall: FirewallConfig | undefined }) {
           <p className="type-subheadline text-label-tertiary">No port forwards configured.</p>
         )}
       </div>
+
+      {/* WARP-871: the add-port-forward write path (orchestrator route +
+          routing validator) shipped at NET-09, but the Firewall tab was
+          read-only — the only ways to create one were the LLM tool or curl.
+          Owner/admin only, matching the route guard. */}
+      {canEdit && <PortForwardForm onApplied={onApplied} />}
     </div>
   );
 }
@@ -931,6 +957,11 @@ function SystemTab({
   const load5 = (load[1] / 65536).toFixed(2);
   const load15 = (load[2] / 65536).toFixed(2);
 
+  // Static DHCP reservations shape the LAN's address map — owner/admin only,
+  // matching the orchestrator route guard (requireRole("owner", "admin")).
+  const { user } = useAuth();
+  const canEdit = user?.role === "owner" || user?.role === "admin";
+
   return (
     <div className="space-y-4">
       <div className="card">
@@ -954,6 +985,11 @@ function SystemTab({
           <InfoRow label="Memory Free" value={`${memFreeMB} MB`} />
         </div>
       </div>
+
+      {/* WARP-871: static DHCP reservations (owner/admin, Tier 1) were fully
+          wired server-side but had no UI — the only ways to pin a device to an
+          IP were the LLM tool or curl. */}
+      {canEdit && <DhcpReservationForm />}
 
       {/* WARP-871: the reboot endpoint (owner-only, Tier-3 confirmable) was
           fully wired server-side but had no UI path — the only ways to restart

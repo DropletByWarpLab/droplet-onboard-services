@@ -1254,14 +1254,22 @@ export async function setWifiPassword(password: string): Promise<NetworkCommandR
   return data;
 }
 
-export async function setWifiChannel(channel: string): Promise<NetworkCommandResult> {
+export async function setWifiChannel(
+  channel: string,
+  // WARP-871: pass the LIVE radio section name (read from GET /api/network/wifi)
+  // rather than relying on the orchestrator route's `radio0` default, which
+  // doesn't exist on the single-box AP radio. Omit to keep the server default.
+  radioSection?: string,
+): Promise<NetworkCommandResult> {
   const res = await authFetch(`${BASE}/api/network/wifi/channel`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ channel }),
+    body: JSON.stringify(
+      radioSection ? { channel, radio_section: radioSection } : { channel },
+    ),
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || `Failed to set channel: ${res.status}`);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to set channel");
   return data;
 }
 
@@ -1314,6 +1322,28 @@ export async function addNetworkPortForward(
   });
   const data = await res.json();
   if (!res.ok && !data.requiresConfirmation) throw new Error(data.error || `Failed to add port forward: ${res.status}`);
+  return data;
+}
+
+/**
+ * WARP-871: reserve a fixed IP for a device by MAC (DHCP static lease). The
+ * orchestrator route (POST /api/network/dhcp/static-lease, owner/admin) maps
+ * this to add_static_lease — Tier 1, applies immediately, so there is no 202
+ * confirmation step. Returns the NetworkCommandResult (with operationId at
+ * runtime) so callers can poll for the safe-apply outcome if they want.
+ */
+export async function addStaticDhcpLease(
+  name: string,
+  mac: string,
+  ip: string,
+): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/dhcp/static-lease`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, mac, ip }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to add reservation");
   return data;
 }
 
