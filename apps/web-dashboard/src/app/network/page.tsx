@@ -40,6 +40,7 @@ import { WifiSettingsForm } from "@/components/network/WifiSettingsForm";
 import { WifiChannelCard } from "@/components/network/WifiChannelCard";
 import { PortForwardForm } from "@/components/network/PortForwardForm";
 import { DhcpReservationForm } from "@/components/network/DhcpReservationForm";
+import { DnsServersForm } from "@/components/network/DnsServersForm";
 import {
   fetchNetworkOperation,
   rebootRouter,
@@ -990,6 +991,11 @@ function SystemTab({
           wired server-side but had no UI — the only ways to pin a device to an
           IP were the LLM tool or curl. */}
       {canEdit && <DhcpReservationForm />}
+
+      {/* WARP-871: upstream/custom DNS resolvers. The routing /dhcp/dns write +
+          openwrt.client.setDnsServers existed; this surfaces them via a new
+          thin orchestrator route (POST /api/network/dns, Tier 1). */}
+      {canEdit && <DnsServersForm />}
 
       {/* WARP-871: the reboot endpoint (owner-only, Tier-3 confirmable) was
           fully wired server-side but had no UI path — the only ways to restart

@@ -1347,6 +1347,24 @@ export async function addStaticDhcpLease(
   return data;
 }
 
+/**
+ * WARP-871: set the upstream/custom DNS resolvers the router forwards to
+ * (POST /api/network/dns, owner/admin, Tier 1). The orchestrator requires a
+ * non-empty list; the UI validates each entry is an IP client-side.
+ */
+export async function setDnsServers(
+  servers: string[],
+): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/dns`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ servers }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to set DNS servers");
+  return data;
+}
+
 export async function fetchRouterSystemInfo(): Promise<Record<string, unknown>> {
   const res = await authFetch(`${BASE}/api/network/system`);
   if (!res.ok) throw new Error(`Failed to fetch router system info: ${res.status}`);

@@ -290,6 +290,14 @@ export async function addStaticDhcpLease(
   return result;
 }
 
+// WARP-871: upstream/custom resolvers (e.g. Pi-hole, NextDNS, 1.1.1.1). Thin
+// pass-through to the existing routing /dhcp/dns endpoint + client method.
+export async function setDnsServers(servers: string[]): Promise<openwrt.WriteResult> {
+  const result = await openwrt.setDnsServers(servers);
+  await invalidateNetworkCache();
+  return result;
+}
+
 export async function blockDevice(mac: string, name?: string): Promise<openwrt.WriteResult> {
   const result = await openwrt.blockDevice(mac, name);
   await invalidateNetworkCache();

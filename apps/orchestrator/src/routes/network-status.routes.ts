@@ -16,6 +16,7 @@ import {
   getDhcpLeases,
   getSystemInfo,
   addStaticDhcpLease,
+  setDnsServers,
   blockDevice,
   unblockDevice,
   addPortForward,
@@ -148,6 +149,43 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
 
         const op = await addStaticDhcpLease(name, mac, ip);
         res.json({ status: "ok", name, mac, ip, tier: result.tier, operationId: op.operationId });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // WARP-871: set the upstream/custom DNS resolvers dnsmasq forwards to (e.g.
+  // Pi-hole, NextDNS, 1.1.1.1). owner/admin only — DNS shapes every device's
+  // name resolution. set_dns is Tier 1 (low-risk, no partition), so it applies
+  // immediately; the routing /dhcp/dns validator only requires a non-empty list.
+  router.post(
+    "/network/dns",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        const { servers } = req.body;
+        if (
+          !Array.isArray(servers) ||
+          servers.length === 0 ||
+          !servers.every((s) => typeof s === "string" && s.trim().length > 0)
+        ) {
+          return res
+            .status(400)
+            .json({ error: "Provide 'servers' as a non-empty list of IP strings" });
+        }
+
+        const userId = req.user?.id;
+        const result = await evaluateNetworkCommand(
+          prisma, "dhcp.dns", "set_dns", { servers }, userId
+        );
+
+        if ("blocked" in result && result.blocked) {
+          return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
+        }
+
+        const op = await setDnsServers(servers);
+        res.json({ status: "ok", servers, tier: result.tier, operationId: op.operationId });
       } catch (err) {
         next(err);
       }
