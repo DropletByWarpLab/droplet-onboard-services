@@ -47,6 +47,7 @@ import type {
   FirewallConfig,
   FirewallRedirect,
   FirewallRule,
+  FirewallZone,
   NetworkOverview,
 } from "@/lib/types";
 
@@ -823,10 +824,35 @@ function WifiTab() {
 }
 
 // --- Firewall Tab ---
+// A zone's input/output/forward policy chip — green for ACCEPT, red for the
+// restrictive policies (REJECT/DROP). Mirrors the design's zone-policy chips
+// (advanced Network · Firewall zones) and reuses the same status colors as the
+// rule target chips below.
+function PolicyChip({ policy }: { policy: string | undefined }) {
+  const value = (policy ?? "—").toUpperCase();
+  const accepting = value === "ACCEPT";
+  return (
+    <span
+      className={`type-caption-2 font-mono px-1.5 py-0.5 rounded-sm ${
+        value === "—"
+          ? "text-label-quaternary bg-surface-secondary/60"
+          : accepting
+            ? "text-system-green bg-system-green/10"
+            : "text-system-red bg-system-red/10"
+      }`}
+    >
+      {value}
+    </span>
+  );
+}
+
 function FirewallTab({ firewall }: { firewall: FirewallConfig | undefined }) {
   // WARP-42: typed Object.entries — each entry is [sectionId, typed section]
   // instead of [string, any], so a missing `target` or a `proto` type change
   // on the routing side now fails compile.
+  const zones: Array<[string, FirewallZone]> = firewall?.zones?.values
+    ? Object.entries(firewall.zones.values)
+    : [];
   const rules: Array<[string, FirewallRule]> = firewall?.rules?.values
     ? Object.entries(firewall.rules.values)
     : [];
@@ -836,6 +862,72 @@ function FirewallTab({ firewall }: { firewall: FirewallConfig | undefined }) {
 
   return (
     <div className="space-y-4">
+      {/* Zones — the foundational firewall structure (lan/wan/cameras/guest).
+          Read-only: the box auto-manages zone policies; the UI reflects them so
+          an owner can see, e.g., that the camera zone forwards to wan only. The
+          zone data already ships in getFirewallConfig(); this surfaces it. */}
+      <div className="card">
+        <h3 className="type-headline text-label-primary mb-1">
+          Zones ({zones.length})
+        </h3>
+        <p className="type-caption-1 text-label-tertiary mb-4">
+          Default input · output · forward policy per network zone. Managed by
+          the box.
+        </p>
+        {zones.length > 0 ? (
+          <div className="overflow-x-auto">
+            <table className="w-full type-caption-1">
+              <thead>
+                <tr className="text-label-tertiary text-left">
+                  <th className="font-medium pb-2 pr-4">Zone</th>
+                  <th className="font-medium pb-2 pr-4">Input</th>
+                  <th className="font-medium pb-2 pr-4">Output</th>
+                  <th className="font-medium pb-2 pr-4">Forward</th>
+                  <th className="font-medium pb-2">Networks</th>
+                </tr>
+              </thead>
+              <tbody>
+                {zones.map(([key, zone]) => {
+                  const nets = Array.isArray(zone.network)
+                    ? zone.network.join(", ")
+                    : zone.network;
+                  return (
+                    <tr key={key} className="border-t border-separator/60">
+                      <td className="py-2 pr-4">
+                        <span className="type-subheadline text-label-primary font-medium">
+                          {zone.name ?? key}
+                        </span>
+                        {zone.masq === "1" && (
+                          <span className="ml-2 type-caption-2 text-label-quaternary font-mono">
+                            masq
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-2 pr-4">
+                        <PolicyChip policy={zone.input} />
+                      </td>
+                      <td className="py-2 pr-4">
+                        <PolicyChip policy={zone.output} />
+                      </td>
+                      <td className="py-2 pr-4">
+                        <PolicyChip policy={zone.forward} />
+                      </td>
+                      <td className="py-2 text-label-tertiary font-mono">
+                        {nets || "—"}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <p className="type-subheadline text-label-tertiary">
+            No firewall zones reported.
+          </p>
+        )}
+      </div>
+
       <div className="card">
         <h3 className="type-headline text-label-primary mb-4">
           Firewall Rules ({rules.length})
