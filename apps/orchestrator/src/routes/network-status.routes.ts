@@ -18,6 +18,9 @@ import {
   addStaticDhcpLease,
   setDnsServers,
   getTopology,
+  getDnsHostnames,
+  addDnsHostname,
+  deleteDnsHostname,
   blockDevice,
   unblockDevice,
   addPortForward,
@@ -187,6 +190,78 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
 
         const op = await setDnsServers(servers);
         res.json({ status: "ok", servers, tier: result.tier, operationId: op.operationId });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // WARP-871: local DNS host-records (e.g. nas.lan -> 192.168.50.20). The
+  // routing /dhcp/hostnames endpoints have full read/write/delete; these front
+  // them. Reads are open to any authed user; writes are owner/admin and run
+  // through the safety evaluator (set/delete_dns_hostname classify Tier 1).
+  router.get("/network/dhcp/hostnames", async (_req, res, next) => {
+    try {
+      const entries = await getDnsHostnames();
+      res.json({ entries });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post(
+    "/network/dhcp/hostnames",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        const { hostname, ip } = req.body;
+        if (
+          !hostname ||
+          typeof hostname !== "string" ||
+          !ip ||
+          typeof ip !== "string"
+        ) {
+          return res.status(400).json({ error: "Missing 'hostname' or 'ip'" });
+        }
+
+        const userId = req.user?.id;
+        const result = await evaluateNetworkCommand(
+          prisma, "dhcp.hostname", "set_dns_hostname", { hostname, ip }, userId
+        );
+
+        if ("blocked" in result && result.blocked) {
+          return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
+        }
+
+        const op = await addDnsHostname(hostname, ip);
+        res.json({ status: "ok", hostname, ip, tier: result.tier, operationId: op.operationId });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  router.delete(
+    "/network/dhcp/hostnames/:hostname",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        const { hostname } = req.params;
+        if (!hostname) {
+          return res.status(400).json({ error: "Missing 'hostname'" });
+        }
+
+        const userId = req.user?.id;
+        const result = await evaluateNetworkCommand(
+          prisma, "dhcp.hostname", "delete_dns_hostname", { hostname }, userId
+        );
+
+        if ("blocked" in result && result.blocked) {
+          return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
+        }
+
+        const op = await deleteDnsHostname(hostname);
+        res.json({ status: "ok", hostname, tier: result.tier, operationId: op.operationId });
       } catch (err) {
         next(err);
       }

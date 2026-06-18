@@ -494,6 +494,44 @@ export async function fetchTopology(): Promise<NetworkTopology> {
   });
 }
 
+// --- Static DNS host-records (dnsmasq name → IP) ---
+
+export interface DnsHostRecord {
+  section: string;
+  hostname: string;
+  ip: string;
+}
+
+// WARP-871: local DNS names (e.g. nas.lan → 192.168.50.20). Routing /dhcp/
+// hostnames has full read/write/delete; these thin client methods front it.
+export async function fetchDnsHostnames(): Promise<DnsHostRecord[]> {
+  const data = await routingFetchJson<{ entries: DnsHostRecord[] }>(
+    "/dhcp/hostnames",
+    { label: "DNS hostnames" },
+  );
+  return data.entries;
+}
+
+export async function addDnsHostname(
+  hostname: string,
+  ip: string,
+): Promise<WriteResult> {
+  const res = await postJson(
+    "/dhcp/hostnames",
+    { hostname, ip },
+    "Add DNS hostname",
+  );
+  return opFrom(res);
+}
+
+export async function deleteDnsHostname(hostname: string): Promise<WriteResult> {
+  const res = await routingFetch(
+    `/dhcp/hostnames/${encodeURIComponent(hostname)}`,
+    { method: "DELETE", label: "Delete DNS hostname" },
+  );
+  return opFrom(res);
+}
+
 // --- Firewall ---
 
 // WARP-42: every firewall response is parsed through a zod schema so schema

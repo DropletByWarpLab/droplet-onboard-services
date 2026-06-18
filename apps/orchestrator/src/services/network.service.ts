@@ -303,6 +303,30 @@ export async function getTopology(): Promise<openwrt.NetworkTopology> {
   return openwrt.fetchTopology();
 }
 
+// WARP-871: local DNS host-records (name → IP). The read is cheap + uncached
+// (the dashboard re-fetches after each mutation); writes invalidate the
+// network cache like the other mutators.
+export async function getDnsHostnames(): Promise<openwrt.DnsHostRecord[]> {
+  return openwrt.fetchDnsHostnames();
+}
+
+export async function addDnsHostname(
+  hostname: string,
+  ip: string
+): Promise<openwrt.WriteResult> {
+  const result = await openwrt.addDnsHostname(hostname, ip);
+  await invalidateNetworkCache();
+  return result;
+}
+
+export async function deleteDnsHostname(
+  hostname: string
+): Promise<openwrt.WriteResult> {
+  const result = await openwrt.deleteDnsHostname(hostname);
+  await invalidateNetworkCache();
+  return result;
+}
+
 export async function blockDevice(mac: string, name?: string): Promise<openwrt.WriteResult> {
   const result = await openwrt.blockDevice(mac, name);
   await invalidateNetworkCache();

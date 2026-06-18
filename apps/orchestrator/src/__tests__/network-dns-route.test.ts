@@ -28,6 +28,11 @@ vi.mock("../services/network.service.js", () => ({
   addStaticDhcpLease: vi.fn().mockResolvedValue({ operationId: "op-lease" }),
   setDnsServers: vi.fn().mockResolvedValue({ operationId: "op-dns" }),
   getTopology: vi.fn().mockResolvedValue({ posture: "UNKNOWN" }),
+  getDnsHostnames: vi
+    .fn()
+    .mockResolvedValue([{ section: "cfg01", hostname: "nas.lan", ip: "192.168.50.20" }]),
+  addDnsHostname: vi.fn().mockResolvedValue({ operationId: null }),
+  deleteDnsHostname: vi.fn().mockResolvedValue({ operationId: null }),
   blockDevice: vi.fn().mockResolvedValue({ operationId: null }),
   unblockDevice: vi.fn().mockResolvedValue({ operationId: null }),
   addPortForward: vi.fn().mockResolvedValue({ operationId: null }),
@@ -119,5 +124,46 @@ describe("POST /network/dns", () => {
 
     expect(res.status).toBe(400);
     expect(networkService.setDnsServers).not.toHaveBeenCalled();
+  });
+});
+
+describe("DNS host-records routes (/network/dhcp/hostnames)", () => {
+  it("GET lists the current host-records", async () => {
+    const res = await request(buildApp()).get("/api/network/dhcp/hostnames");
+    expect(res.status).toBe(200);
+    expect(res.body.entries).toEqual([
+      { section: "cfg01", hostname: "nas.lan", ip: "192.168.50.20" },
+    ]);
+  });
+
+  it("POST adds a host-record: 200 + forwards hostname/ip", async () => {
+    const res = await request(buildApp())
+      .post("/api/network/dhcp/hostnames")
+      .send({ hostname: "printer.lan", ip: "192.168.50.30" });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ status: "ok", hostname: "printer.lan" });
+    expect(networkService.addDnsHostname).toHaveBeenCalledWith(
+      "printer.lan",
+      "192.168.50.30",
+    );
+  });
+
+  it("POST rejects a missing hostname/ip with 400 and never writes", async () => {
+    const res = await request(buildApp())
+      .post("/api/network/dhcp/hostnames")
+      .send({ hostname: "printer.lan" });
+
+    expect(res.status).toBe(400);
+    expect(networkService.addDnsHostname).not.toHaveBeenCalled();
+  });
+
+  it("DELETE removes a host-record by name", async () => {
+    const res = await request(buildApp()).delete(
+      "/api/network/dhcp/hostnames/nas.lan",
+    );
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ status: "ok", hostname: "nas.lan" });
+    expect(networkService.deleteDnsHostname).toHaveBeenCalledWith("nas.lan");
   });
 });

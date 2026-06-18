@@ -41,6 +41,7 @@ import { WifiChannelCard } from "@/components/network/WifiChannelCard";
 import { PortForwardForm } from "@/components/network/PortForwardForm";
 import { DhcpReservationForm } from "@/components/network/DhcpReservationForm";
 import { DnsServersForm } from "@/components/network/DnsServersForm";
+import { StaticDnsCard } from "@/components/network/StaticDnsCard";
 import {
   fetchNetworkOperation,
   getNetworkTopology,
@@ -1024,6 +1025,10 @@ function SystemTab({
           openwrt.client.setDnsServers existed; this surfaces them via a new
           thin orchestrator route (POST /api/network/dns, Tier 1). */}
       {canEdit && <DnsServersForm />}
+
+      {/* WARP-871: local DNS names (host-records). Routing /dhcp/hostnames had
+          full CRUD; new orchestrator routes + this card surface it. */}
+      {canEdit && <StaticDnsCard />}
 
       {/* WARP-871: the reboot endpoint (owner-only, Tier-3 confirmable) was
           fully wired server-side but had no UI path — the only ways to restart

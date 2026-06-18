@@ -1371,6 +1371,46 @@ export async function fetchRouterSystemInfo(): Promise<Record<string, unknown>> 
   return res.json();
 }
 
+// WARP-871: local DNS host-records (name → IP), e.g. nas.lan → 192.168.50.20.
+export interface DnsHostRecord {
+  section: string;
+  hostname: string;
+  ip: string;
+}
+
+export async function fetchDnsHostnames(): Promise<DnsHostRecord[]> {
+  const res = await authFetch(`${BASE}/api/network/dhcp/hostnames`);
+  if (!res.ok) throw new Error(`Failed to fetch DNS names: ${res.status}`);
+  const data = await res.json();
+  return data.entries ?? [];
+}
+
+export async function addDnsHostname(
+  hostname: string,
+  ip: string,
+): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/dhcp/hostnames`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ hostname, ip }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to add DNS name");
+  return data;
+}
+
+export async function deleteDnsHostname(
+  hostname: string,
+): Promise<NetworkCommandResult> {
+  const res = await authFetch(
+    `${BASE}/api/network/dhcp/hostnames/${encodeURIComponent(hostname)}`,
+    { method: "DELETE" },
+  );
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to delete DNS name");
+  return data;
+}
+
 export type DeploymentPosture =
   | "PRIMARY_ROUTER"
   | "DOWNSTREAM_ROUTER"
