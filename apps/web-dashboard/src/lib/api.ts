@@ -1265,6 +1265,26 @@ export async function setWifiChannel(channel: string): Promise<NetworkCommandRes
   return data;
 }
 
+/**
+ * Stand up the isolated guest Wi-Fi network (own SSID + firewall zone, internet
+ * only). Tier 2 — the orchestrator may answer 202 `confirmation_required`; the
+ * caller confirms via {@link confirmNetworkCommand} (the Save click is the
+ * consent) and then polls the returned operation.
+ */
+export async function createGuestWifi(
+  ssid: string,
+  password: string,
+): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/wifi/guest`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ssid, password }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to set up guest Wi-Fi");
+  return data;
+}
+
 export async function fetchDhcpLeases(): Promise<Record<string, unknown>[]> {
   const res = await authFetch(`${BASE}/api/network/dhcp/leases`);
   if (!res.ok) throw new Error(`Failed to fetch DHCP leases: ${res.status}`);
