@@ -1285,6 +1285,28 @@ export async function createGuestWifi(
   return data;
 }
 
+/** Current guest Wi-Fi state. `password` is the PSK (owner/admin read) for the QR. */
+export interface GuestWifiStatus {
+  configured: boolean;
+  enabled: boolean;
+  ssid: string | null;
+  password: string | null;
+}
+
+export async function fetchGuestWifi(): Promise<GuestWifiStatus> {
+  const res = await authFetch(`${BASE}/api/network/wifi/guest`);
+  if (!res.ok) throw new Error(`Failed to fetch guest Wi-Fi status: ${res.status}`);
+  return res.json();
+}
+
+/** Tear down the guest network. Applies immediately (drops guests only). */
+export async function removeGuestWifi(): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/wifi/guest`, { method: "DELETE" });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to turn off guest Wi-Fi");
+  return data;
+}
+
 /** UPnP / NAT-PMP state. `available` false = miniupnpd isn't on the box. */
 export interface UpnpStatus {
   available: boolean;

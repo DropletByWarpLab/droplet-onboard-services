@@ -640,6 +640,14 @@ def set_channel(req: SetChannelRequest):
         handle_router_error(exc)
 
 
+@app.get("/wireless/guest")
+def guest_status():
+    try:
+        return get_router().wireless.guest_status()
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
 @app.post("/wireless/guest")
 def create_guest_network(req: CreateGuestNetworkRequest):
     try:
@@ -647,6 +655,17 @@ def create_guest_network(req: CreateGuestNetworkRequest):
         r.wireless.create_guest_network(req.radio, req.ssid, req.password, req.network)
         r.apply_changes("wireless")
         return {"status": "ok", "ssid": req.ssid, "network": req.network}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.delete("/wireless/guest")
+def remove_guest_network():
+    try:
+        r = get_router()
+        r.wireless.remove_guest_network()
+        r.apply_changes("wireless")
+        return {"status": "ok"}
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
 

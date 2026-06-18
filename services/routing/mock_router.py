@@ -188,6 +188,13 @@ class _MockWireless:
     def create_guest_network(self, radio: str, ssid: str, password: str, network: str = "guest") -> None:
         logger.info("mock: create_guest_network ssid=%s — no-op", ssid)
 
+    def guest_status(self, network: str = "guest") -> dict[str, Any]:
+        # No guest network configured on the mock by default.
+        return {"configured": False, "enabled": False, "ssid": None, "password": None}
+
+    def remove_guest_network(self, network: str = "guest") -> None:
+        logger.info("mock: remove_guest_network network=%s — no-op", network)
+
 
 class _MockDhcp:
     # In-memory store of static hostrecord entries so upsert + list round-trips

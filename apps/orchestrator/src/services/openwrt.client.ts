@@ -465,6 +465,30 @@ export async function createGuestNetwork(
   return opFrom(res);
 }
 
+export interface GuestWifiStatus {
+  /** A guest wifi-iface exists. */
+  configured: boolean;
+  /** The guest iface is enabled (not uci-disabled). */
+  enabled: boolean;
+  ssid: string | null;
+  /** The guest PSK — returned so the owner dashboard can render the join QR. */
+  password: string | null;
+}
+
+export async function fetchGuestWifi(): Promise<GuestWifiStatus> {
+  return routingFetchJson<GuestWifiStatus>("/wireless/guest", {
+    label: "Guest Wi-Fi status",
+  });
+}
+
+export async function removeGuestNetwork(): Promise<WriteResult> {
+  const res = await routingFetch("/wireless/guest", {
+    method: "DELETE",
+    label: "Remove guest network",
+  });
+  return opFrom(res);
+}
+
 // --- UPnP / NAT-PMP ---
 
 export interface UpnpStatus {
