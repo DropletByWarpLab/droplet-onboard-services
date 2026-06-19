@@ -161,6 +161,34 @@ function createPrismaMock(initialRows: MockUser[] = []) {
           return { id: `sb-${Math.random()}`, ...data };
         },
       ),
+      // The scope-rewrite transaction inserts the new bindings in one bulk
+      // call (PATCH /people/:id/scope → tx.scopeBinding.createMany with
+      // skipDuplicates, #644). Returns Prisma's `{ count }` batch-payload
+      // shape; skipDuplicates is honoured by the backing Set.
+      createMany: vi.fn(
+        async ({
+          data,
+        }: {
+          data: Array<{
+            userId: string;
+            scope: string;
+            grantedBy?: string | null;
+          }>;
+          skipDuplicates?: boolean;
+        }) => {
+          let count = 0;
+          for (const row of data) {
+            if (!scopeBindings.has(row.userId)) {
+              scopeBindings.set(row.userId, new Set());
+            }
+            const set = scopeBindings.get(row.userId)!;
+            const before = set.size;
+            set.add(row.scope);
+            if (set.size > before) count += 1;
+          }
+          return { count };
+        },
+      ),
       findMany: vi.fn(
         async ({ where }: { where?: { userId?: string } } = {}) => {
           if (!where?.userId) return [];
@@ -392,10 +420,20 @@ describe("PATCH /api/people/:id/scope", () => {
       expect.arrayContaining(["team", "finance"]),
     );
     expect(prisma.scopeBinding.deleteMany).toHaveBeenCalledTimes(1);
-    expect(prisma.scopeBinding.create).toHaveBeenCalledTimes(2);
+    // The rewrite re-inserts the desired set in one bulk createMany call
+    // (#644 — deduped + skipDuplicates), not a per-scope create loop.
+    expect(prisma.scopeBinding.createMany).toHaveBeenCalledTimes(1);
+    expect(prisma.scopeBinding.createMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.arrayContaining([
+          expect.objectContaining({ scope: "team" }),
+          expect.objectContaining({ scope: "finance" }),
+        ]),
+      }),
+    );
     // Data-integrity (pr-reviewer HIGH): the deleteMany + recreate pair MUST
     // run inside a single $transaction so a crash between the delete and the
-    // last create can't leave the user with zero scope bindings (locked out
+    // bulk insert can't leave the user with zero scope bindings (locked out
     // of every scope-guarded route). Mirrors the PATCH /role last-owner
     // invariant transaction above.
     expect(prisma.$transaction).toHaveBeenCalledTimes(1);
@@ -407,17 +445,17 @@ describe("PATCH /api/people/:id/scope", () => {
     );
   });
 
-  it("rolls back the deleteMany when a create fails — no zero-binding window, no ActivityRow", async () => {
+  it("rolls back the deleteMany when the bulk insert fails — no zero-binding window, no ActivityRow", async () => {
     const prisma = createPrismaMock([seedUser({ id: "u1" })]);
     const app = buildApp(prisma);
 
-    // Make the SECOND scopeBinding.create reject mid-rewrite.
-    let calls = 0;
-    prisma.scopeBinding.create.mockImplementation(async () => {
-      calls += 1;
-      if (calls === 2) throw new Error("insert failed");
-      return {};
-    });
+    // Make the bulk scopeBinding.createMany reject mid-rewrite (e.g. a
+    // transient DB error). Because it runs inside the same $transaction as
+    // the deleteMany, the throw rolls the delete back too — the user never
+    // observes a zero-binding window — and the gated audit emit is skipped.
+    prisma.scopeBinding.createMany.mockRejectedValue(
+      new Error("insert failed"),
+    );
 
     const res = await request(app)
       .patch("/api/people/u1/scope")
@@ -586,7 +624,7 @@ describe("WARP-480 self-action invariants", () => {
     expect(res.status).toBe(409);
     expect(res.body.code).toBe("SELF_ACTION_NOT_ALLOWED");
     expect(prisma.scopeBinding.deleteMany).not.toHaveBeenCalled();
-    expect(prisma.scopeBinding.create).not.toHaveBeenCalled();
+    expect(prisma.scopeBinding.createMany).not.toHaveBeenCalled();
     expect(recordActivityMock).not.toHaveBeenCalled();
   });
 
