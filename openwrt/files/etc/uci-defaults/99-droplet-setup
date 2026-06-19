@@ -138,6 +138,41 @@ if [ -x /etc/init.d/dawn ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# 4b. EasyMesh controller (prplMesh) — CONTROLLER-ONLY, gated + idempotent
+# ---------------------------------------------------------------------------
+# ADR-024 Phase 4 — EasyMesh controller (prplMesh). DRAFT / UNVALIDATED:
+# prplMesh's HAL targets Intel/Qualcomm, NOT mt76 — controller-only mode +
+# hostapd Multi-AP fronthaul on mt76 needs real-hardware validation on the lab
+# box before this ships. See docs/ADR-024 §2.
+#
+# Enables prplMesh in CONTROLLER-ONLY mode (the box owns the 1905.1 control
+# plane + M1/M2 credential push; its mt76 radio is never an EasyMesh RF agent —
+# the certified third-party AP is the Agent). GATED so this whole block is a
+# NO-OP unless EasyMesh has been provisioned: it runs only when the provisioning
+# marker /etc/droplet/easymesh-controller exists AND the prplMesh init script is
+# installed (the controller package is a research-needed prpl-feed addition, see
+# openwrt/build.sh — absent on a stock image, so the -x guard skips cleanly).
+#
+# Idempotent like the umdns/dawn blocks above: each uci set is convergent and
+# the init-script enable is a no-op when already enabled, so re-running the
+# uci-defaults script (or droplet-openwrt-attach re-applying it) changes nothing.
+EASYMESH_MARKER=/etc/droplet/easymesh-controller
+if [ -f "${EASYMESH_MARKER}" ] && [ -x /etc/init.d/prplmesh_controller ]; then
+    # Controller-only: enable the controller role, explicitly DISABLE any local
+    # agent role (the box must not act as an mt76 EasyMesh agent — ADR-024 §2).
+    if [ -f /etc/config/prplmesh ]; then
+        uci set prplmesh.config.management_mode='Multi-AP-Controller'
+        uci set prplmesh.config.operating_mode='Controller'
+        uci set prplmesh.config.enable='1'
+        uci commit prplmesh
+    fi
+    /etc/init.d/prplmesh_controller enable 2>/dev/null || true
+    echo "Droplet: EasyMesh controller (prplMesh) enabled in controller-only mode."
+else
+    echo "Droplet: EasyMesh controller not provisioned (marker/init-script absent) — skipping (no-op)."
+fi
+
+# ---------------------------------------------------------------------------
 # 5. Enable and start essential services
 # ---------------------------------------------------------------------------
 for svc in uhttpd rpcd dnsmasq firewall network wireless umdns; do
