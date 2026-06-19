@@ -25,6 +25,7 @@ import logging
 import os
 import secrets
 import shlex
+import re
 import subprocess
 import threading
 import time
@@ -1938,6 +1939,83 @@ def _read_guest_env():
     }
 
 
+# --- Guest radio capability -------------------------------------------------
+# A guest network is a SECOND AP BSS on the same radio. Whether the card can do
+# that is hardware-dependent: mt76/MT7922 hosts many BSSes; iwlwifi/AX210 caps AP
+# interfaces at 1 (`iw phy` reports `#{ AP, ... } <= 1`), so a guest BSS is
+# IMPOSSIBLE there. We must report `supported` honestly per box so the dashboard
+# never offers (or fakes) a guest network the radio can't broadcast — and so the
+# write path refuses up front instead of leaning on the attach script's
+# home-AP-only fallback (which would leave a "configured" guest that never airs).
+#
+# Cached like _use_hostapd_mode: the AP-BSS limit is a static hardware property,
+# and the `iw phy` read is a docker exec we don't want on every status poll.
+_GUEST_RADIO_TTL_S = 300.0
+_guest_radio_lock = threading.Lock()
+_guest_radio_cache = {"value": None, "at": 0.0}
+
+
+def _ap_phy_in_container():
+    """Find the phy hosting the AP iface (`type AP`) inside the AP container.
+
+    Parses `iw dev`. Returns the phy name (e.g. "phy1") or None. Never raises."""
+    rc, out, _ = _run(["docker", "exec", AP_HOSTAPD_CONTAINER, "iw", "dev"], timeout=8)
+    if rc != 0:
+        return None
+    cur_phy = None
+    cur_if = None
+    for raw in (out or "").splitlines():
+        s = raw.strip()
+        m = re.match(r"phy#(\d+)", s)
+        if m:
+            cur_phy = "phy" + m.group(1)
+            cur_if = None
+            continue
+        m = re.match(r"Interface\s+(\S+)", s)
+        if m:
+            cur_if = m.group(1)
+            continue
+        if s == "type AP" and cur_phy and cur_if:
+            return cur_phy
+    return None
+
+
+def _radio_supports_second_bss(phy):
+    """True iff `phy` advertises an interface combination allowing >= 2 AP BSSes.
+
+    Reads `iw phy <phy> info` and scans the `valid interface combinations` for
+    any `#{ ...AP... } <= N` group with N >= 2. iwlwifi/AX210 -> N=1 (False);
+    mt76/MT7922 -> N>=2 (True). Never raises."""
+    if not phy:
+        return False
+    rc, out, _ = _run(
+        ["docker", "exec", AP_HOSTAPD_CONTAINER, "iw", "phy", phy, "info"], timeout=8)
+    if rc != 0:
+        return False
+    # `[^}]*` spans the wrapped, multi-line combination groups (it matches \n).
+    nums = [int(n) for grp, n in re.findall(r"#\{\s*([^}]*)\}\s*<=\s*(\d+)", out or "")
+            if re.search(r"\bAP\b", grp)]
+    return bool(nums) and max(nums) >= 2
+
+
+def guest_radio_supported():
+    """Whether the AP radio can host a guest (second) BSS. Cached + fail-CLOSED.
+
+    Returns False whenever the capability can't be determined (container/iw
+    unreachable) — we never claim a guest network the card may not be able to
+    broadcast. Recomputed at most every _GUEST_RADIO_TTL_S."""
+    now = time.time()
+    with _guest_radio_lock:
+        cached = _guest_radio_cache["value"]
+        if cached is not None and (now - _guest_radio_cache["at"]) < _GUEST_RADIO_TTL_S:
+            return cached
+    value = _radio_supports_second_bss(_ap_phy_in_container())
+    with _guest_radio_lock:
+        _guest_radio_cache["value"] = value
+        _guest_radio_cache["at"] = now
+    return value
+
+
 def run_set_guest_wifi(params):
     """Forward an owner-confirmed guest Wi-Fi create/update to the host script.
 
@@ -2340,7 +2418,13 @@ class Handler(BaseHTTPRequestHandler):
                                  "via UCI through the routing service, not the "
                                  "host hostapd bridge."),
                     })
-                return self._send(200, _read_guest_env())
+                # `supported` reflects the radio's REAL multi-BSS capability — a
+                # single-AP card (iwlwifi/AX210) cannot broadcast a guest BSS, so
+                # the dashboard shows an honest "not available" there instead of a
+                # setup form whose write would only fail.
+                status = _read_guest_env()
+                status["supported"] = guest_radio_supported()
+                return self._send(200, status)
             if path == "/files":
                 return self._send(200, files_snapshot())
             if path == "/cameras":
@@ -2543,6 +2627,17 @@ class Handler(BaseHTTPRequestHandler):
                     "hint": ("Guest Wi-Fi on this deployment shape is managed via "
                              "UCI through the routing service; the host guest "
                              "write does not apply."),
+                })
+            # Refuse up front on a radio that can't host a second BSS (iwlwifi/
+            # AX210). Without this the write would "succeed" (env written), the
+            # attach script's home-AP-only fallback would silently drop the guest
+            # BSS, and getGuestWifi would then report a guest that never airs.
+            if not guest_radio_supported():
+                return self._send(409, {
+                    "ok": False, "error": "guest_unsupported_radio",
+                    "hint": ("This Droplet's Wi-Fi card can broadcast only one "
+                             "network, so a separate guest Wi-Fi is not possible. "
+                             "A multi-SSID-capable radio is required."),
                 })
             n = int(self.headers.get("Content-Length") or 0)
             raw = self.rfile.read(n).decode() if n else ""

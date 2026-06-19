@@ -109,6 +109,7 @@ beforeEach(() => {
     enabled: true,
     ssid: "Visitors",
     password: "guestpass1",
+    supported: true,
   });
 });
 
@@ -189,7 +190,7 @@ describe("guest Wi-Fi — hostapd mode routes through the device-bridge", () => 
     configMock.DROPLET_AP_MODE = "hostapd";
   });
 
-  it("getGuestWifi reads the bridge (supported:true), never the UCI routing read", async () => {
+  it("getGuestWifi passes through the bridge status incl. radio-derived supported, never the UCI read", async () => {
     const res = await getGuestWifi();
     expect(bridgeGuestStatus).toHaveBeenCalledOnce();
     expect(fetchGuestWifi).not.toHaveBeenCalled();
@@ -202,7 +203,19 @@ describe("guest Wi-Fi — hostapd mode routes through the device-bridge", () => 
     });
   });
 
-  it("getGuestWifi degrades to not-configured (supported:true) when the bridge read fails", async () => {
+  it("getGuestWifi reports supported:false when the radio can't host a second BSS (AX210)", async () => {
+    bridgeGuestStatus.mockResolvedValueOnce({
+      configured: false,
+      enabled: false,
+      ssid: null,
+      password: null,
+      supported: false,
+    });
+    const res = await getGuestWifi();
+    expect(res.supported).toBe(false);
+  });
+
+  it("getGuestWifi degrades to unavailable (supported:false) when the bridge read fails", async () => {
     bridgeGuestStatus.mockRejectedValueOnce(new Error("device-bridge not reachable"));
     const res = await getGuestWifi();
     expect(res).toEqual({
@@ -210,7 +223,7 @@ describe("guest Wi-Fi — hostapd mode routes through the device-bridge", () => 
       enabled: false,
       ssid: null,
       password: null,
-      supported: true,
+      supported: false,
     });
     expect(fetchGuestWifi).not.toHaveBeenCalled();
   });

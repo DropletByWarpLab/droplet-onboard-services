@@ -307,27 +307,27 @@ export async function setGuestWifi(
 export async function getGuestWifi(): Promise<
   openwrt.GuestWifiStatus & { supported: boolean }
 > {
-  // Single-box hostapd shape: guest Wi-Fi IS supported now — read its live state
-  // from the device-bridge (the persisted DROPLET_GUEST_* the host script
-  // wrote). A transient bridge read failure must NOT make the card error or
-  // claim "unsupported", so degrade to a not-configured-yet view (the card then
-  // shows the setup form); the WRITE path surfaces real failures with actionable
+  // Single-box hostapd shape: read live state from the device-bridge, including
+  // the radio-derived `supported` flag — guest Wi-Fi is a SECOND BSS, which a
+  // single-AP card (iwlwifi/AX210) cannot broadcast, so support is per-box, not
+  // a blanket true. A transient bridge read failure degrades to "not available"
+  // (supported:false) rather than offering a feature we can't confirm the
+  // hardware delivers; the WRITE path surfaces real failures with actionable
   // copy. Every other shape reads the real UCI guest network.
   if (config.DROPLET_AP_MODE === "hostapd") {
     try {
-      const status = await hostapdBridge.guestStatusFromBridge();
-      return { ...status, supported: true };
+      return await hostapdBridge.guestStatusFromBridge();
     } catch (err) {
       logger.warn(
         { err: (err as Error)?.message },
-        "guest Wi-Fi status read via device-bridge failed; reporting not-configured"
+        "guest Wi-Fi status read via device-bridge failed; reporting unavailable"
       );
       return {
         configured: false,
         enabled: false,
         ssid: null,
         password: null,
-        supported: true,
+        supported: false,
       };
     }
   }

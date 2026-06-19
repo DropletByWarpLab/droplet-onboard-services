@@ -346,12 +346,13 @@ describe("removeGuestWifi", () => {
 });
 
 describe("guestStatusFromBridge", () => {
-  it("GETs /openwrt/wifi/guest and returns the parsed status", async () => {
+  it("GETs /openwrt/wifi/guest and returns the parsed status incl. supported", async () => {
     const fetchSpy = mockFetchOnce(200, {
       configured: true,
       enabled: true,
       ssid: "Visitors",
       password: "guestpass1",
+      supported: true,
     });
     const status = await guestStatusFromBridge();
 
@@ -364,10 +365,11 @@ describe("guestStatusFromBridge", () => {
       enabled: true,
       ssid: "Visitors",
       password: "guestpass1",
+      supported: true,
     });
   });
 
-  it("coerces a not-configured body to safe defaults", async () => {
+  it("fails closed: a body that omits `supported` parses as supported:false", async () => {
     mockFetchOnce(200, { configured: false, enabled: false, ssid: null, password: null });
     const status = await guestStatusFromBridge();
     expect(status).toEqual({
@@ -375,6 +377,7 @@ describe("guestStatusFromBridge", () => {
       enabled: false,
       ssid: null,
       password: null,
+      supported: false,
     });
   });
 

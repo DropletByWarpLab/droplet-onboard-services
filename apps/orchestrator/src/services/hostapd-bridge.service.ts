@@ -253,13 +253,15 @@ export async function applyWifi(
 
 const GUEST_LABEL = "Guest Wi-Fi";
 
-/** Guest Wi-Fi status as the device-bridge reports it (no `supported` flag — the
- *  caller adds that). `password` is the guest PSK for the owner-facing join QR. */
+/** Guest Wi-Fi status as the device-bridge reports it. `supported` reflects the
+ *  AP radio's real multi-BSS capability (false on a single-AP card like the
+ *  AX210). `password` is the guest PSK for the owner-facing join QR. */
 export interface GuestBridgeStatus {
   configured: boolean;
   enabled: boolean;
   ssid: string | null;
   password: string | null;
+  supported: boolean;
 }
 
 /**
@@ -386,6 +388,9 @@ export async function guestStatusFromBridge(): Promise<GuestBridgeStatus> {
     enabled: Boolean(data.enabled),
     ssid: typeof data.ssid === "string" ? data.ssid : null,
     password: typeof data.password === "string" ? data.password : null,
+    // Default to NOT supported when the bridge omits it (fail closed) — never
+    // claim a guest network the radio may not be able to broadcast.
+    supported: data.supported === true,
   };
 }
 

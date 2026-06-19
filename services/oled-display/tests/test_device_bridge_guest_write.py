@@ -279,12 +279,27 @@ def test_guest_post_requires_auth_token(monkeypatch):
 
 def test_guest_post_succeeds_with_token_in_hostapd_mode(monkeypatch):
     bridge = _load_bridge(monkeypatch)
+    monkeypatch.setattr(bridge, "guest_radio_supported", lambda: True)
     monkeypatch.setattr(bridge, "_run",
                         lambda *a, **k: (0, '{"ok": true, "enabled": true, "ssid": "Guests"}', ""))
     status, obj = _post(bridge, {"X-Droplet-Auth": "pytest-bridge-token"},
                         {"ssid": "Guests", "psk": "welcome123"})
     assert status == 200
     assert obj.get("ok") is True
+
+
+def test_guest_post_refused_on_single_ap_radio(monkeypatch):
+    # iwlwifi/AX210 cannot host a second BSS — refuse up front (409
+    # guest_unsupported_radio) and NEVER shell the host script.
+    bridge = _load_bridge(monkeypatch)
+    monkeypatch.setattr(bridge, "guest_radio_supported", lambda: False)
+    monkeypatch.setattr(bridge, "_run",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("host script invoked on a single-AP radio")))
+    status, obj = _post(bridge, {"X-Droplet-Auth": "pytest-bridge-token"},
+                        {"ssid": "Guests", "psk": "welcome123"})
+    assert status == 409
+    assert obj.get("error") == "guest_unsupported_radio"
 
 
 def test_guest_post_refused_in_uci_mode(monkeypatch):
@@ -300,6 +315,7 @@ def test_guest_post_refused_in_uci_mode(monkeypatch):
 
 def test_guest_post_validation_refusal_is_422(monkeypatch):
     bridge = _load_bridge(monkeypatch)
+    monkeypatch.setattr(bridge, "guest_radio_supported", lambda: True)
     monkeypatch.setattr(
         bridge, "_run",
         lambda *a, **k: (1, "", "droplet-set-guest-wifi: guest Wi-Fi password must be 8-63 characters (got 5)"))
@@ -311,6 +327,7 @@ def test_guest_post_validation_refusal_is_422(monkeypatch):
 
 def test_guest_post_rejects_bad_json(monkeypatch):
     bridge = _load_bridge(monkeypatch)
+    monkeypatch.setattr(bridge, "guest_radio_supported", lambda: True)
     monkeypatch.setattr(bridge, "_run",
                         lambda *a, **k: (_ for _ in ()).throw(
                             AssertionError("host script invoked on bad json")))
@@ -355,20 +372,104 @@ def test_guest_get_requires_auth(monkeypatch):
     assert status == 401
 
 
-def test_guest_get_returns_status_in_hostapd_mode(monkeypatch, tmp_path):
+def test_guest_get_returns_status_and_supported_in_hostapd_mode(monkeypatch, tmp_path):
     env_file = tmp_path / "openwrt-attach.env"
     env_file.write_text(
         "DROPLET_GUEST_ENABLED=1\nDROPLET_GUEST_SSID=Guests\nDROPLET_GUEST_PSK=welcome123\n",
         encoding="utf-8",
     )
     bridge = _load_bridge(monkeypatch, env={"DROPLET_GUEST_ENV_FILE": str(env_file)})
+    monkeypatch.setattr(bridge, "guest_radio_supported", lambda: True)
     status, obj = _get(bridge, {"X-Droplet-Auth": "pytest-bridge-token"})
     assert status == 200
     assert obj["configured"] is True
     assert obj["ssid"] == "Guests"
+    assert obj["supported"] is True
+
+
+def test_guest_get_reports_unsupported_on_single_ap_radio(monkeypatch, tmp_path):
+    env_file = tmp_path / "openwrt-attach.env"
+    env_file.write_text("DROPLET_GUEST_ENABLED=0\n", encoding="utf-8")
+    bridge = _load_bridge(monkeypatch, env={"DROPLET_GUEST_ENV_FILE": str(env_file)})
+    monkeypatch.setattr(bridge, "guest_radio_supported", lambda: False)
+    status, obj = _get(bridge, {"X-Droplet-Auth": "pytest-bridge-token"})
+    assert status == 200
+    assert obj["supported"] is False
 
 
 def test_guest_get_refused_in_uci_mode(monkeypatch):
     bridge = _load_bridge(monkeypatch, env={"DROPLET_AP_MODE": "uci"})
     status, obj = _get(bridge, {"X-Droplet-Auth": "pytest-bridge-token"})
     assert status == 409
+
+
+# ---------------------------------------------------------------------------
+# Radio multi-BSS capability detection (guest_radio_supported)
+# ---------------------------------------------------------------------------
+
+# Real `iw phy info` interface-combinations block from an Intel AX210 (iwlwifi)
+# — the card in the .87 lab box. AP is capped at 1, so NO guest BSS.
+_AX210_COMBOS = """\
+	valid interface combinations:
+		 * #{ managed } <= 1, #{ P2P-client, P2P-GO } <= 1, #{ P2P-device } <= 1,
+		   total <= 3, #channels <= 2
+		 * #{ managed } <= 1, #{ AP, P2P-client, P2P-GO } <= 1, #{ P2P-device } <= 1,
+		   total <= 3, #channels <= 1
+"""
+
+# MT7922 (mt76) hosts many BSSes.
+_MT7922_COMBOS = """\
+	valid interface combinations:
+		 * #{ managed } <= 1, #{ AP, mesh point } <= 16, total <= 16, #channels <= 1
+"""
+
+
+def test_radio_capability_ax210_is_unsupported(monkeypatch):
+    # The AX210 in the .87 lab box: AP capped at 1 → no second BSS possible.
+    bridge = _load_bridge(monkeypatch)
+    monkeypatch.setattr(bridge, "_run", lambda *a, **k: (0, _AX210_COMBOS, ""))
+    assert bridge._radio_supports_second_bss("phy1") is False
+
+
+def test_radio_capability_mt7922_is_supported(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    monkeypatch.setattr(bridge, "_run", lambda *a, **k: (0, _MT7922_COMBOS, ""))
+    assert bridge._radio_supports_second_bss("phy0") is True
+
+
+def test_radio_capability_fails_closed_when_iw_unavailable(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    monkeypatch.setattr(bridge, "_run", lambda *a, **k: (1, "", "iw: not found"))
+    assert bridge._radio_supports_second_bss("phy0") is False
+    # No phy resolved → also unsupported.
+    assert bridge._radio_supports_second_bss(None) is False
+
+
+def test_ap_phy_in_container_parses_iw_dev(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    iw_dev = (
+        "phy#1\n"
+        "\tInterface wlp14s0\n"
+        "\t\tifindex 5\n"
+        "\t\ttype AP\n"
+    )
+    monkeypatch.setattr(bridge, "_run", lambda *a, **k: (0, iw_dev, ""))
+    assert bridge._ap_phy_in_container() == "phy1"
+
+
+def test_guest_radio_supported_caches(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    calls = {"n": 0}
+
+    def fake_run(cmd, timeout=15):
+        calls["n"] += 1
+        if "dev" in cmd:
+            return 0, "phy#0\n\tInterface wlp14s0\n\t\ttype AP\n", ""
+        return 0, _MT7922_COMBOS, ""
+
+    monkeypatch.setattr(bridge, "_run", fake_run)
+    assert bridge.guest_radio_supported() is True
+    n_after_first = calls["n"]
+    # Second call within the TTL is served from cache — no new iw reads.
+    assert bridge.guest_radio_supported() is True
+    assert calls["n"] == n_after_first
