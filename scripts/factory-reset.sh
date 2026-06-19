@@ -665,6 +665,15 @@ if [ -f /usr/local/sbin/droplet-tls-reload.sh ]; then
   log_success "Removed TLS-reload host executor"
 fi
 
+# Public-FQDN write-back host executor (ADR-023 PR-1). Remove so a reset truly
+# returns to out-of-box; install-device-bridge.sh reinstalls it on re-provision.
+# It only persists DROPLET_PUBLIC_FQDN to .env + re-registers DNS — the .env
+# itself is wiped elsewhere in this reset, so the box re-learns its name from HQ.
+if [ -f /usr/local/sbin/droplet-set-public-fqdn.sh ]; then
+  sudo rm -f /usr/local/sbin/droplet-set-public-fqdn.sh 2>/dev/null || true
+  log_success "Removed public-FQDN write-back host executor"
+fi
+
 # Device-bridge state + logs (needs sudo because systemd StateDirectory
 # runs as root). Silent if not installed — dev machines won't have this.
 if [ -d /var/lib/droplet-bridge ] || [ -f /etc/droplet/device-bridge.env ]; then
