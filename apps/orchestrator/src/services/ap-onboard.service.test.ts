@@ -56,8 +56,10 @@ import {
   DROPLET_IMAGE_BACKEND,
   DISCOVERED_AP_LRU_CAP,
   resolveApBackend,
+  createUniFiBackend,
 } from "./ap-onboard.service.js";
 import * as openwrt from "./openwrt.client.js";
+import type { UniFiNetworkClient } from "./unifi-network.client.js";
 
 function createPrismaMock() {
   const rows = new Map<string, any>();
@@ -122,19 +124,18 @@ describe("ap-onboard backend registry (ADR-024 Phase 1)", () => {
     expect(AP_ONBOARD_BACKENDS.DROPLET_IMAGE).toBe(DROPLET_IMAGE_BACKEND);
   });
 
-  it("EASYMESH + UNIFI handlers are NotImplemented stubs this phase (registry shape is real, no behavior added)", async () => {
+  it("EASYMESH is still a NotImplemented stub this phase; UNIFI is the real Phase-3 handler", async () => {
     const prisma = createPrismaMock();
+    // EASYMESH lands in Phase 4 — still a stub.
     await expect(
       AP_ONBOARD_BACKENDS.EASYMESH.reconcile(prisma as any, []),
     ).rejects.toThrow(/not implemented/i);
+    // UNIFI is now the real Phase-3 handler (no longer 'not implemented'): its
+    // reconcile is the shared upsert path, so an empty snapshot resolves
+    // cleanly rather than throwing.
     await expect(
-      AP_ONBOARD_BACKENDS.UNIFI.approve(
-        prisma as any,
-        "AA:BB:CC:DD:EE:FF",
-        { ssid: "x", encryptionKey: "longenoughpw" },
-        { username: "stefan" },
-      ),
-    ).rejects.toThrow(/not implemented/i);
+      AP_ONBOARD_BACKENDS.UNIFI.reconcile(prisma as any, []),
+    ).resolves.toBeDefined();
   });
 
   it("resolveApBackend defaults a null/undefined/unknown backend to DROPLET_IMAGE (no state-from-absence)", () => {
@@ -331,5 +332,202 @@ describe("approveAp / decommissionAp → DropletImageBackend dispatch (ADR-024 P
     expect(decomSpy).toHaveBeenCalledTimes(1);
     expect((result.ap as any).status).toBe("DECOMMISSIONED");
     decomSpy.mockRestore();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// ADR-024 Phase 3 — UNIFI backend handler (official-API adopt + WLAN push).
+//
+// The handler drives a UniFiNetworkClient (mocked here — there is no real
+// controller on the laptop) and must mirror the DROPLET_IMAGE handler's
+// transition + audit discipline EXACTLY: PROVISIONING → ONLINE on success
+// (audit columns written), PROVISIONING → FAILED + failureReason on any
+// client error (no partial ONLINE), and forget → DECOMMISSIONED.
+// ─────────────────────────────────────────────────────────────────────────
+
+function fakeUniFiClient(
+  overrides: Partial<Record<keyof UniFiNetworkClient, any>> = {},
+): UniFiNetworkClient {
+  return {
+    listPendingDevices: vi.fn(async () => []),
+    adoptDevice: vi.fn(async () => ({ deviceId: "u-dev-1" })),
+    pushWlanConfig: vi.fn(async () => undefined),
+    getDeviceStatus: vi.fn(async () => ({ mac: "x", state: "connected" })),
+    forgetDevice: vi.fn(async () => undefined),
+    ...overrides,
+  } as UniFiNetworkClient;
+}
+
+describe("UNIFI backend handler (ADR-024 Phase 3)", () => {
+  const MAC = "AA:BB:CC:DD:EE:01";
+
+  function seedUnifiRow(prisma: ReturnType<typeof createPrismaMock>, status = "AWAITING_APPROVAL") {
+    prisma.rows.set(MAC, {
+      mac: MAC,
+      status,
+      backend: "UNIFI",
+      vendor: "Ubiquiti",
+      backendRef: "u-dev-1",
+      lastSeen: new Date(),
+    });
+  }
+
+  it("approve adopts then pushes WLAN, driving PROVISIONING → ONLINE with audit columns written", async () => {
+    const prisma = createPrismaMock();
+    seedUnifiRow(prisma);
+    const client = fakeUniFiClient();
+    const backend = createUniFiBackend(client);
+
+    const result = await backend.approve(
+      prisma as any,
+      MAC,
+      { ssid: "Droplet", encryptionKey: "longenoughpw" },
+      { username: "stefan" },
+    );
+
+    // adopt BEFORE push (order matters — can't configure an unadopted device)
+    expect(client.adoptDevice).toHaveBeenCalledTimes(1);
+    expect(client.pushWlanConfig).toHaveBeenCalledTimes(1);
+    const adoptOrder = (client.adoptDevice as any).mock.invocationCallOrder[0];
+    const pushOrder = (client.pushWlanConfig as any).mock.invocationCallOrder[0];
+    expect(adoptOrder).toBeLessThan(pushOrder);
+
+    const row = prisma.rows.get(MAC);
+    expect(row.status).toBe("ONLINE");
+    expect(row.approvedBy).toBe("stefan");
+    expect(row.approvedSsid).toBe("Droplet");
+    expect(row.approvedAt).toBeInstanceOf(Date);
+    expect((result.ap as any).status).toBe("ONLINE");
+  });
+
+  it("approve transitions PROVISIONING → FAILED with failureReason when the client throws, no partial ONLINE", async () => {
+    const prisma = createPrismaMock();
+    seedUnifiRow(prisma);
+    const client = fakeUniFiClient({
+      adoptDevice: vi.fn(async () => {
+        throw new Error("controller refused adoption");
+      }),
+      pushWlanConfig: vi.fn(async () => undefined),
+    });
+    const backend = createUniFiBackend(client);
+
+    await expect(
+      backend.approve(
+        prisma as any,
+        MAC,
+        { ssid: "Droplet", encryptionKey: "longenoughpw" },
+        { username: "stefan" },
+      ),
+    ).rejects.toThrow();
+
+    // WLAN push never ran (adopt failed first) — no partial config left behind.
+    expect(client.pushWlanConfig).not.toHaveBeenCalled();
+    const row = prisma.rows.get(MAC);
+    expect(row.status).toBe("FAILED");
+    expect(row.failureReason).toContain("controller refused adoption");
+    expect(row.approvedAt).toBeUndefined();
+  });
+
+  it("approve fails (FAILED) when adoption succeeds but the WLAN push throws", async () => {
+    const prisma = createPrismaMock();
+    seedUnifiRow(prisma);
+    const client = fakeUniFiClient({
+      pushWlanConfig: vi.fn(async () => {
+        throw new Error("wlan push rejected");
+      }),
+    });
+    const backend = createUniFiBackend(client);
+
+    await expect(
+      backend.approve(
+        prisma as any,
+        MAC,
+        { ssid: "Droplet", encryptionKey: "longenoughpw" },
+        { username: "stefan" },
+      ),
+    ).rejects.toThrow();
+
+    expect(client.adoptDevice).toHaveBeenCalledTimes(1);
+    const row = prisma.rows.get(MAC);
+    expect(row.status).toBe("FAILED");
+    expect(row.failureReason).toContain("wlan push rejected");
+  });
+
+  it("approve throws notFound when the MAC was never discovered", async () => {
+    const prisma = createPrismaMock();
+    const backend = createUniFiBackend(fakeUniFiClient());
+    await expect(
+      backend.approve(
+        prisma as any,
+        "AA:BB:CC:00:00:99",
+        { ssid: "Droplet", encryptionKey: "longenoughpw" },
+        { username: "stefan" },
+      ),
+    ).rejects.toThrow(/not found/i);
+  });
+
+  it("decommission forgets the device on the controller, driving → DECOMMISSIONED", async () => {
+    const prisma = createPrismaMock();
+    seedUnifiRow(prisma, "ONLINE");
+    const client = fakeUniFiClient();
+    const backend = createUniFiBackend(client);
+
+    const result = await backend.decommission(prisma as any, MAC);
+
+    expect(client.forgetDevice).toHaveBeenCalledTimes(1);
+    expect(prisma.rows.get(MAC).status).toBe("DECOMMISSIONED");
+    expect((result.ap as any).status).toBe("DECOMMISSIONED");
+  });
+
+  it("decommission is idempotent on an already-DECOMMISSIONED row (no forget re-fire)", async () => {
+    const prisma = createPrismaMock();
+    seedUnifiRow(prisma, "DECOMMISSIONED");
+    const client = fakeUniFiClient();
+    const backend = createUniFiBackend(client);
+
+    const result = await backend.decommission(prisma as any, MAC);
+
+    expect(client.forgetDevice).not.toHaveBeenCalled();
+    expect((result.ap as any).status).toBe("DECOMMISSIONED");
+  });
+
+  it("reconcile upserts a UNIFI observation the same way the DROPLET_IMAGE path does", async () => {
+    const prisma = createPrismaMock();
+    const backend = createUniFiBackend(fakeUniFiClient());
+    await backend.reconcile(prisma as any, [
+      { mac: MAC, backend: "UNIFI", vendor: "Ubiquiti", backendRef: "u-dev-1", model: "U6-Lite" },
+    ]);
+    const row = prisma.rows.get(MAC);
+    expect(row.status).toBe("AWAITING_APPROVAL");
+    expect(row.backend).toBe("UNIFI");
+    expect(row.backendRef).toBe("u-dev-1");
+  });
+
+  it("the registry dispatches a UNIFI row to the UniFi handler (DROPLET_IMAGE rows are unaffected)", async () => {
+    const prisma = createPrismaMock();
+    seedUnifiRow(prisma, "ONLINE");
+    // The registry's UNIFI entry is the real handler this phase (not a stub).
+    const unifiApproveStub = AP_ONBOARD_BACKENDS.UNIFI;
+    expect(unifiApproveStub.key).toBe("UNIFI");
+
+    // A UNIFI row routes through approveAp → the UNIFI handler. We assert the
+    // dispatch reached the UNIFI handler by spying on it.
+    const decomSpy = vi.spyOn(AP_ONBOARD_BACKENDS.UNIFI, "decommission");
+    // The registry handler talks to a client built from (empty) config, which
+    // would throw NOT_CONFIGURED — but the already-DECOMMISSIONED short-circuit
+    // is reached only via the ONLINE path's forget. To keep this a pure
+    // dispatch assertion, seed DECOMMISSIONED so no client call is needed.
+    prisma.rows.set(MAC, { mac: MAC, status: "DECOMMISSIONED", backend: "UNIFI", lastSeen: new Date() });
+    await decommissionAp(prisma as any, MAC);
+    expect(decomSpy).toHaveBeenCalledTimes(1);
+    decomSpy.mockRestore();
+  });
+
+  it("UNIFI is NO LONGER a NotImplemented stub (Phase 3 replaced it)", async () => {
+    const prisma = createPrismaMock();
+    // reconcile must NOT throw 'not implemented' anymore.
+    await expect(
+      AP_ONBOARD_BACKENDS.UNIFI.reconcile(prisma as any, []),
+    ).resolves.toBeDefined();
   });
 });

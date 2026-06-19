@@ -41,6 +41,10 @@ import {
   decommissionAp as routingDecommissionAp,
   RouterError,
 } from "./openwrt.client.js";
+import {
+  createUniFiNetworkClient,
+  type UniFiNetworkClient,
+} from "./unifi-network.client.js";
 
 const logger = pino({ name: "ap-onboard" });
 
@@ -168,6 +172,14 @@ export interface DiscoveredApObservation {
    * and the schema default.
    */
   backend?: ApOnboardBackendKey;
+  /**
+   * ADR-024 Phase 3: backend-scoped opaque id surfaced by discovery (the
+   * UniFi controller `device_id`, a 1905.1 AL-MAC, etc.). Persisted to
+   * `ApDevice.backendRef` on create so the approve path can address the
+   * device on the backend without re-deriving it. Optional — the
+   * DROPLET_IMAGE / mDNS source has no such id and omits it.
+   */
+  backendRef?: string;
   model?: string;
   serial?: string;
   version?: string;
@@ -238,6 +250,9 @@ async function dropletImageReconcile(
         // — the only live backend today and the schema default — so the
         // Phase-1 mDNS path is byte-for-byte unchanged.
         backend: obs.backend ?? "DROPLET_IMAGE",
+        // Backend-scoped opaque id (UniFi device_id, …), explicit on the
+        // observation. Null when the source has none (mDNS / DROPLET_IMAGE).
+        backendRef: obs.backendRef,
         vendor: obs.vendor,
         model: obs.model,
         serial: obs.serial,
@@ -542,12 +557,160 @@ function notImplementedBackend(
 export const EASYMESH_BACKEND: ApOnboardBackendHandler =
   notImplementedBackend("EASYMESH");
 
+// ─────────────────────────────────────────────────────────────────────────
+// UNIFI backend (ADR-024 §3, Phase 3) — official-API adopt + WLAN push.
+//
+// Droplet is a pure API client to a UniFi Network controller the household
+// ALREADY runs (Option B — customer-supplied; we never bundle/redistribute
+// the controller). The handler drives a `UniFiNetworkClient` and mirrors the
+// DROPLET_IMAGE handler's transition + audit discipline EXACTLY:
+//   - reconcile : upsert the discovery snapshot (delegates to the shared
+//                 dropletImageReconcile — the create path already stamps the
+//                 row's `backend`/`backendRef`/`vendor` from each EXPLICIT
+//                 observation tag, so a UNIFI observation lands as a UNIFI row).
+//   - approve   : adopt-by-MAC THEN push the household WLAN; PROVISIONING →
+//                 ONLINE on success (audit columns written), PROVISIONING →
+//                 FAILED + failureReason on ANY client error (no partial
+//                 ONLINE, no partial WLAN — adopt must complete before push).
+//   - decommission : forget the device on the controller → DECOMMISSIONED;
+//                 idempotent on an already-DECOMMISSIONED row.
+//
+// The state transitions are EXPLICIT `ApDeviceStatus` writes (CLAUDE.md
+// no-guessing rule), never derived from absence — identical to ADR-005.
+// ─────────────────────────────────────────────────────────────────────────
+
 /**
- * UNIFI backend — UBNT UDP 10001 discovery + UniFi Network API adoption
- * (ADR-024 §3). Stub until Phase 3.
+ * Build a UNIFI onboarding handler over a given `UniFiNetworkClient`. The
+ * client is the seam — production wires the config-built HTTP client, unit
+ * tests pass a mock (there is no controller on the dev laptop).
  */
-export const UNIFI_BACKEND: ApOnboardBackendHandler =
-  notImplementedBackend("UNIFI");
+export function createUniFiBackend(
+  client: UniFiNetworkClient,
+): ApOnboardBackendHandler {
+  return {
+    key: "UNIFI",
+
+    // The discovery snapshot is reconciled by the same shared upsert path as
+    // every other backend — the create path honors each observation's explicit
+    // `backend`/`backendRef`/`vendor` tags, so a UNIFI observation becomes a
+    // UNIFI row. No per-backend reconcile divergence (one state machine).
+    reconcile: dropletImageReconcile,
+
+    async approve(
+      prisma: PrismaClient,
+      rawMac: string,
+      opts: ApproveOptions,
+      actor: { username: string },
+    ): Promise<ApMutationResult> {
+      const mac = normalizeMac(rawMac);
+
+      const existing = await prisma.apDevice.findUnique({ where: { mac } });
+      if (!existing) {
+        throw ApOnboardError.notFound(mac);
+      }
+
+      // Mark provisioning BEFORE the controller calls so the dashboard's
+      // polling read sees "spinning" rather than the stale state — same as
+      // the DROPLET_IMAGE path.
+      await prisma.apDevice.update({
+        where: { mac },
+        data: { status: "PROVISIONING", failureReason: null },
+      });
+
+      try {
+        // 1. Adopt by MAC. The controller returns its device_id, which we
+        //    persist as backendRef so later operations can address the device.
+        const { deviceId } = await client.adoptDevice(mac);
+        // 2. Push the household WLAN (SSID + key). Only after adoption — an
+        //    unadopted device can't be configured. A throw here leaves the row
+        //    FAILED (caught below); we never leave a half-configured ONLINE.
+        await client.pushWlanConfig({
+          mac,
+          ssid: opts.ssid,
+          key: opts.encryptionKey,
+        });
+        const updated = await prisma.apDevice.update({
+          where: { mac },
+          data: {
+            status: "ONLINE",
+            approvedAt: new Date(),
+            approvedBy: actor.username,
+            approvedSsid: opts.ssid,
+            backendRef: deviceId,
+            displayName:
+              opts.displayName ??
+              existing.displayName ??
+              defaultDisplayName(mac, existing.model ?? null),
+            failureReason: null,
+          },
+        });
+        // The official API is request/response — there's no routing-service
+        // operation to poll, so operationId is null (the dashboard then polls
+        // the AP row directly, same as the idempotent DROPLET_IMAGE paths).
+        return { ap: updated, operationId: null };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        logger.warn(
+          { err, mac, ssid: opts.ssid },
+          "ap-onboard: UniFi approve failed; transitioning to FAILED",
+        );
+        await prisma.apDevice.update({
+          where: { mac },
+          data: { status: "FAILED", failureReason: message },
+        });
+        // Re-throw as the AP-onboard taxonomy. A typed UniFiClientError keeps
+        // its message; everything else bubbles a 502 (the controller hop is
+        // the gateway), same shape the DROPLET_IMAGE handler uses.
+        throw new ApOnboardError(message, 502, "UNKNOWN");
+      }
+    },
+
+    async decommission(
+      prisma: PrismaClient,
+      rawMac: string,
+    ): Promise<ApMutationResult> {
+      const mac = normalizeMac(rawMac);
+
+      const existing = await prisma.apDevice.findUnique({ where: { mac } });
+      if (!existing) {
+        throw ApOnboardError.notFound(mac);
+      }
+      if (existing.status === "DECOMMISSIONED") {
+        // Idempotent — operator already pulled the trigger. No forget re-fire.
+        return { ap: existing, operationId: null };
+      }
+
+      try {
+        await client.forgetDevice(mac);
+        const updated = await prisma.apDevice.update({
+          where: { mac },
+          data: {
+            status: "DECOMMISSIONED",
+            decommissionedAt: new Date(),
+            failureReason: null,
+          },
+        });
+        return { ap: updated, operationId: null };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        throw new ApOnboardError(message, 502, "UNKNOWN");
+      }
+    },
+  };
+}
+
+/**
+ * UNIFI backend — UBNT discovery + UniFi Network API adoption (ADR-024 §3).
+ * Wired to the config-built HTTP client (Option B — customer-supplied
+ * controller via `DROPLET_AP_UNIFI_CONTROLLER_URL` + `DROPLET_AP_UNIFI_API_KEY`).
+ * The client constructs even with empty config; its calls throw
+ * NOT_CONFIGURED until both are set, and the discovery source only invokes
+ * the backend when `DROPLET_AP_UNIFI_ENABLED` is on — so a default single-box
+ * never touches it.
+ */
+export const UNIFI_BACKEND: ApOnboardBackendHandler = createUniFiBackend(
+  createUniFiNetworkClient(),
+);
 
 /**
  * The backend registry, keyed by the `ApOnboardBackend` enum value.
