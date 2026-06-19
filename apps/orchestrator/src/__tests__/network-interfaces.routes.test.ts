@@ -1,9 +1,10 @@
 /**
  * Full interface enumeration read route.
  *
- * GET /network/interfaces/all returns every configured interface with
- * name/device/proto/address/zone/status. Read-only — no tier, no write. Pins
- * that the route returns the service's enumerated rows.
+ * Orchestrator GET /network/interfaces returns every configured interface with
+ * name/device/proto/address/zone/status (the `/all` suffix is the routing-service
+ * path, one layer down). Read-only — no tier, no write. Pins that the route
+ * returns the service's enumerated rows.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
