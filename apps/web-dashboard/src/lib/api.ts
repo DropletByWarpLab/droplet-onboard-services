@@ -2405,6 +2405,82 @@ export async function runScene(sceneId: string): Promise<SceneRunOutcome> {
   return res.json();
 }
 
+/** One device action in a routine: fire `command` (with optional `args`) on a device. */
+export interface SceneActionInput {
+  deviceNodeId: string;
+  command: string;
+  args?: Record<string, unknown>;
+}
+export interface SceneActionDetail extends SceneActionInput {
+  id: string;
+  idx: number;
+}
+/** A routine plus its ordered actions — `GET/POST/PATCH /api/scenes[/:id]`. */
+export interface SceneDetail {
+  id: string;
+  name: string;
+  icon: string | null;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  actions: SceneActionDetail[];
+}
+
+/** Full routine + ordered actions. */
+export async function getScene(id: string): Promise<SceneDetail> {
+  const res = await authFetch(`${BASE}/api/scenes/${id}`);
+  if (!res.ok) throw new Error(`Failed to load routine (${res.status})`);
+  return res.json();
+}
+
+/** Create a routine (owner/admin). Actions are saved in array order. */
+export async function createScene(body: {
+  name: string;
+  icon?: string | null;
+  actions: SceneActionInput[];
+}): Promise<SceneDetail> {
+  const res = await authFetch(`${BASE}/api/scenes`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Failed to create routine (${res.status})`);
+  }
+  return res.json();
+}
+
+/**
+ * Update a routine (owner/admin). Send `actions` in display order — the server
+ * rewrites `idx` from the array (the drag-reorder save path). Pass `icon: null`
+ * to clear an icon; omit a field to leave it unchanged.
+ */
+export async function updateScene(
+  id: string,
+  patch: { name?: string; icon?: string | null; actions?: SceneActionInput[] },
+): Promise<SceneDetail> {
+  const res = await authFetch(`${BASE}/api/scenes/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Failed to update routine (${res.status})`);
+  }
+  return res.json();
+}
+
+/** Delete a routine (owner/admin). */
+export async function deleteScene(id: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/scenes/${id}`, { method: "DELETE" });
+  if (!res.ok && res.status !== 404) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Failed to delete routine (${res.status})`);
+  }
+}
+
 /**
  * WARP-304: shape returned by `GET /api/llm/conversations/:id`. The
  * dashboard hydrates `useChat.messages` from this on page mount when the

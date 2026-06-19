@@ -1,28 +1,84 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { Play, Loader2, Sparkles } from "lucide-react";
+import { Play, Loader2, Sparkles, Plus, Pencil, Trash2 } from "lucide-react";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
-import { runScene, type Scene } from "@/lib/api";
+import { runScene, deleteScene, type Scene } from "@/lib/api";
+import { SceneEditorModal } from "./SceneEditorModal";
 
 /**
- * Routines (scenes, WARP-474) on the smart-home page — a list of saved device
- * batches an owner can run in one tap. Running a routine fires Tier-2 device
- * actions, so it is confirm-gated: the Run button opens a ConfirmDialog (the
- * Write-tier safety gate), then calls the server with ?confirm=true. Authoring
- * routines (the drag-reorder action editor) is out of scope here — this surface
- * lists and runs them.
+ * Routines (scenes, WARP-474) on the smart-home page — saved device batches an
+ * owner can run in one tap. Running fires Tier-2 device actions, so it is
+ * confirm-gated (ConfirmDialog → ?confirm=true). When `canAuthor` (owner/admin),
+ * the section also surfaces create / edit / delete via SceneEditorModal, wired
+ * to the /api/scenes CRUD. `onChanged` lets the parent revalidate (the KPI count
+ * + this list share the SWR cache, so a refresh updates both).
  */
-export function RoutinesSection({ scenes }: { scenes: Scene[] }) {
+type Editor = { mode: "create" } | { mode: "edit"; sceneId: string } | null;
+
+export function RoutinesSection({
+  scenes,
+  canAuthor = false,
+  onChanged,
+}: {
+  scenes: Scene[];
+  canAuthor?: boolean;
+  onChanged?: () => void;
+}) {
   const [pending, setPending] = useState<Scene | null>(null);
+  const [deleting, setDeleting] = useState<Scene | null>(null);
   const [running, setRunning] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [editor, setEditor] = useState<Editor>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
 
-  if (scenes.length === 0) {
-    return (
-      <section>
-        <h2 className="type-title-3 text-label-primary mb-3">Routines</h2>
+  async function doRun(scene: Scene) {
+    setRunning(scene.id);
+    try {
+      const { successCount, actionCount } = await runScene(scene.id);
+      setToast(
+        successCount === actionCount
+          ? `${scene.name} ran — ${actionCount} action${actionCount === 1 ? "" : "s"}`
+          : `${scene.name} ran with issues — ${successCount} of ${actionCount} succeeded`,
+      );
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : `Couldn't run ${scene.name}`);
+    } finally {
+      setRunning(null);
+    }
+  }
+
+  async function doDelete(scene: Scene) {
+    try {
+      await deleteScene(scene.id);
+      setToast(`${scene.name} deleted`);
+      onChanged?.();
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : `Couldn't delete ${scene.name}`);
+    }
+  }
+
+  const header = (
+    <div className="flex items-center justify-between mb-3">
+      <h2 className="type-title-3 text-label-primary">
+        Routines{" "}
+        {scenes.length > 0 && (
+          <span className="type-subheadline text-label-tertiary">({scenes.length})</span>
+        )}
+      </h2>
+      {canAuthor && (
+        <button type="button" className="btn sm" onClick={() => setEditor({ mode: "create" })}>
+          <Plus size={14} /> New routine
+        </button>
+      )}
+    </div>
+  );
+
+  return (
+    <section>
+      {header}
+
+      {scenes.length === 0 ? (
         <div className="card">
           <div className="empty">
             <span className="ei">
@@ -31,73 +87,74 @@ export function RoutinesSection({ scenes }: { scenes: Scene[] }) {
             <span className="eh">No routines yet</span>
             <span>
               Routines run several devices at once — like dimming the lights and
-              locking up for the night. Ask Droplet in chat to create one.
+              locking up for the night.
             </span>
+            {canAuthor && (
+              <button
+                type="button"
+                className="btn primary"
+                style={{ marginTop: 10 }}
+                onClick={() => setEditor({ mode: "create" })}
+              >
+                <Plus size={16} /> Create your first routine
+              </button>
+            )}
           </div>
         </div>
-      </section>
-    );
-  }
-
-  async function doRun(scene: Scene) {
-    setRunning(scene.id);
-    try {
-      const outcome = await runScene(scene.id);
-      const { successCount, actionCount } = outcome;
-      setToast(
-        successCount === actionCount
-          ? `${scene.name} ran — ${actionCount} action${actionCount === 1 ? "" : "s"}`
-          : `${scene.name} ran with issues — ${successCount} of ${actionCount} succeeded`,
-      );
-    } catch (e) {
-      setToast(
-        e instanceof Error ? e.message : `Couldn't run ${scene.name}`,
-      );
-    } finally {
-      setRunning(null);
-    }
-  }
-
-  return (
-    <section>
-      <h2 className="type-title-3 text-label-primary mb-3">
-        Routines{" "}
-        <span className="type-subheadline text-label-tertiary">
-          ({scenes.length})
-        </span>
-      </h2>
-      <div className="grid c3">
-        {scenes.map((scene) => (
-          <div key={scene.id} className="card flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 bg-accent/15 text-accent">
-              <Sparkles size={20} />
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="type-subheadline text-label-primary font-medium truncate">
-                {scene.name}
-              </p>
-              <p className="type-caption-1 text-label-tertiary">
-                {scene.actionCount} action{scene.actionCount === 1 ? "" : "s"}
-              </p>
-            </div>
-            <button
-              ref={pending?.id === scene.id ? triggerRef : undefined}
-              type="button"
-              className="btn sm"
-              disabled={running !== null}
-              onClick={() => setPending(scene)}
-              aria-label={`Run ${scene.name}`}
-            >
-              {running === scene.id ? (
-                <Loader2 size={14} className="animate-spin" />
-              ) : (
-                <Play size={14} />
+      ) : (
+        <div className="grid c3">
+          {scenes.map((scene) => (
+            <div key={scene.id} className="card flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 bg-accent/15 text-accent">
+                <Sparkles size={20} />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="type-subheadline text-label-primary font-medium truncate">
+                  {scene.name}
+                </p>
+                <p className="type-caption-1 text-label-tertiary">
+                  {scene.actionCount} action{scene.actionCount === 1 ? "" : "s"}
+                </p>
+              </div>
+              {canAuthor && (
+                <>
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    onClick={() => setEditor({ mode: "edit", sceneId: scene.id })}
+                    aria-label={`Edit ${scene.name}`}
+                  >
+                    <Pencil size={15} />
+                  </button>
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    onClick={() => setDeleting(scene)}
+                    aria-label={`Delete ${scene.name}`}
+                  >
+                    <Trash2 size={15} />
+                  </button>
+                </>
               )}
-              Run
-            </button>
-          </div>
-        ))}
-      </div>
+              <button
+                ref={pending?.id === scene.id ? triggerRef : undefined}
+                type="button"
+                className="btn sm"
+                disabled={running !== null}
+                onClick={() => setPending(scene)}
+                aria-label={`Run ${scene.name}`}
+              >
+                {running === scene.id ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : (
+                  <Play size={14} />
+                )}
+                Run
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
 
       <ConfirmDialog
         open={pending !== null}
@@ -117,6 +174,29 @@ export function RoutinesSection({ scenes }: { scenes: Scene[] }) {
         }}
         onCancel={() => setPending(null)}
       />
+
+      <ConfirmDialog
+        open={deleting !== null}
+        title={deleting ? `Delete “${deleting.name}”?` : "Delete routine?"}
+        description="This removes the routine. The devices it controlled are unaffected."
+        confirmLabel="Delete"
+        variant="destructive"
+        onConfirm={async () => {
+          const scene = deleting;
+          setDeleting(null);
+          if (scene) await doDelete(scene);
+        }}
+        onCancel={() => setDeleting(null)}
+      />
+
+      {editor && (
+        <SceneEditorModal
+          mode={editor.mode}
+          sceneId={editor.mode === "edit" ? editor.sceneId : undefined}
+          onClose={() => setEditor(null)}
+          onSaved={() => onChanged?.()}
+        />
+      )}
 
       {toast && (
         <div
