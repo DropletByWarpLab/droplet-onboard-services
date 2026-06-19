@@ -1163,6 +1163,21 @@ model ApDevice {
   // Last DHCP-reported hostname.
   hostname         String?
   status           ApDeviceStatus @default(DISCOVERED)
+  // ADR-024: which onboarding backend owns this row's discovery +
+  // provisioning. Explicit enum column (NOT derived from absence —
+  // CLAUDE.md no-guessing rule, same discipline as `status`). Every
+  // row created today is DROPLET_IMAGE (ADR-005's mDNS + uci path);
+  // EASYMESH / UNIFI land in later ADR-024 phases. The default keeps
+  // every existing row — and every reconcile that predates a backend
+  // being passed — pinned to the only discovery source that exists now.
+  backend          ApOnboardBackend @default(DROPLET_IMAGE)
+  // Backend-scoped opaque id: UniFi device_id, 1905.1 AL-MAC, etc.
+  // Null for DROPLET_IMAGE rows (the MAC is the only handle ADR-005
+  // needs).
+  backendRef       String?
+  // Human-readable vendor label surfaced in the dashboard + LLM
+  // ("TP-Link", "Ubiquiti"). Null for the Droplet-image extender.
+  vendor           String?
   // Non-null only when status = FAILED. Free text, surfaced verbatim
   // in the dashboard's "what went wrong" tile.
   failureReason    String?
@@ -1224,6 +1239,23 @@ enum ApDeviceStatus {
   ONLINE
   FAILED
   DECOMMISSIONED
+}
+
+/// ADR-024: the onboarding backend that owns a given ApDevice row's
+/// discovery + provisioning. A discriminator so one canonical entity,
+/// one state machine, and one LLM/dashboard surface can serve multiple
+/// vendor ecosystems instead of three forked features.
+///   - `DROPLET_IMAGE` — ADR-005: mDNS `_droplet-ap._tcp` discovery +
+///                       uci `wifi-iface` push. The only backend that
+///                       does anything today; the schema default.
+///   - `EASYMESH`      — IEEE 1905.1 discovery + prplMesh-controller
+///                       M1/M2 onboarding (ADR-024 §2). Phase 4.
+///   - `UNIFI`         — UBNT UDP 10001 discovery + UniFi Network API
+///                       adoption (ADR-024 §3). Phase 3.
+enum ApOnboardBackend {
+  DROPLET_IMAGE
+  EASYMESH
+  UNIFI
 }
 
 // ── WARP-455: A1 Local user directory + scope bindings + guest time-box ──
