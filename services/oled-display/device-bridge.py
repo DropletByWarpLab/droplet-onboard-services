@@ -23,6 +23,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import secrets
 import shlex
 import subprocess
@@ -2114,6 +2115,66 @@ def run_tls_reload():
     return True, {"message": (out or "").strip() or "gateway reloaded"}
 
 
+# --- ADR-023 PR-1: public-FQDN write-back host executor ---------------------
+# The orchestrator's tls-issuance service LEARNS the box's opaque per-device
+# FQDN from the HQ challenge response and POSTs it to /host/public-fqdn so it can
+# be persisted back to the host .env (DROPLET_PUBLIC_FQDN) for the next boot, and
+# so split-horizon DNS re-registers. The bridge execs the repo-tracked host
+# wrapper (scripts/host/droplet-set-public-fqdn.sh, installed to /usr/local/sbin
+# by install-device-bridge.sh). The orchestrator can't write the host .env
+# itself (no host mount), so — exactly like run_tls_reload for the docker socket
+# — the write has to run on the host.
+#
+# Mirrors run_set_hostapd()/run_tls_reload(): allow-listed shape, host-script
+# only, synchronous + bounded, surfaces the script's exit honestly, never raises.
+
+SET_PUBLIC_FQDN_SCRIPT = os.environ.get(
+    "DROPLET_SET_PUBLIC_FQDN_SCRIPT",
+    "/usr/local/sbin/droplet-set-public-fqdn.sh").strip()
+
+# STRICT validation BEFORE exec. Accept either the opaque per-device shape
+# (`d-<16 hex>.devices.warp-lab.ai`) or a conservative lowercase hostname charset
+# (defence in depth — the host script validates again). Anything with shell
+# metacharacters, whitespace, uppercase, path traversal, or absurd length is
+# refused here and the host script is NEVER invoked.
+_PUBLIC_FQDN_OPAQUE_RE = re.compile(r'^d-[0-9a-f]{16}\.devices\.warp-lab\.ai$')
+_PUBLIC_FQDN_CONSERVATIVE_RE = re.compile(r'^[a-z0-9.-]+$')
+
+
+def _valid_public_fqdn(fqdn):
+    if not isinstance(fqdn, str):
+        return False
+    if not (1 <= len(fqdn) <= 253):
+        return False
+    if _PUBLIC_FQDN_OPAQUE_RE.match(fqdn):
+        return True
+    # Conservative fallback: lowercase letters/digits/dot/hyphen only, and it
+    # must look like a dotted hostname (no leading/trailing dot or hyphen).
+    if not _PUBLIC_FQDN_CONSERVATIVE_RE.match(fqdn):
+        return False
+    if fqdn[0] in ".-" or fqdn[-1] in ".-":
+        return False
+    return "." in fqdn
+
+
+def run_set_public_fqdn(fqdn):
+    """Persist the learned DROPLET_PUBLIC_FQDN to the host .env via the host
+    script. Returns (ok, info); never raises — mirrors run_tls_reload()."""
+    if not _valid_public_fqdn(fqdn):
+        logger.warning("public-fqdn write-back refused: invalid fqdn shape")
+        return False, "invalid fqdn"
+    try:
+        rc, out, err = _run([SET_PUBLIC_FQDN_SCRIPT, fqdn], timeout=30)
+    except Exception as e:                                          # noqa: BLE001
+        logger.warning("public-fqdn write-back failed to exec host script: %s", e)
+        return False, "host script unavailable"
+    if rc != 0:
+        msg = (err.strip() or out.strip() or "host script refused")
+        logger.warning("public-fqdn write-back refused/failed (rc=%s): %s", rc, msg)
+        return False, msg
+    return True, {"message": (out or "").strip() or "public fqdn persisted"}
+
+
 def cameras_snapshot():
     out = {
         "online": 0, "total": 0, "events": [],
@@ -2416,6 +2477,33 @@ class Handler(BaseHTTPRequestHandler):
                 # 502: the host script is missing / the reload command failed.
                 # The cert files are already on disk, so the box keeps serving
                 # the OLD cert until a later reload (or a gateway restart) lands.
+                return self._send(502, {"ok": False, "error": info})
+            return self._send(200, {"ok": True,
+                                    **(info if isinstance(info, dict) else {"info": info})})
+        if self.path == "/host/public-fqdn":
+            # ADR-023 PR-1: persist the orchestrator-LEARNED DROPLET_PUBLIC_FQDN
+            # to the host .env (and re-register split-horizon DNS) via the host
+            # script. Auth-gated exactly like /tls/reload + /openwrt/wifi/hostapd.
+            # STRICT fqdn validation happens in run_set_public_fqdn BEFORE the
+            # host script is ever invoked; a junk fqdn is a 400, never an exec.
+            if not self._authed():
+                return self._send(401, {"ok": False, "error": "unauthorized"})
+            n = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(n).decode() if n else ""
+            try:
+                j = json.loads(raw) if raw else {}
+            except Exception:                                       # noqa: BLE001
+                return self._send(400, {"ok": False, "error": "bad json"})
+            fqdn = j.get("fqdn", "")
+            if not _valid_public_fqdn(fqdn):
+                # 400: the orchestrator sent a malformed name. The host script is
+                # NOT invoked — defence in depth before any exec.
+                return self._send(400, {"ok": False, "error": "invalid fqdn"})
+            ok, info = run_set_public_fqdn(fqdn)
+            if not ok:
+                # 502: the host script is missing / refused. The learned name is
+                # already in the orchestrator's cert-state row, so a failed
+                # write-back only means the next boot re-learns it from HQ.
                 return self._send(502, {"ok": False, "error": info})
             return self._send(200, {"ok": True,
                                     **(info if isinstance(info, dict) else {"info": info})})
