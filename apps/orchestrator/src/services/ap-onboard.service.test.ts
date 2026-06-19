@@ -51,8 +51,10 @@ import {
   reconcileDiscovered,
   approveAp,
   decommissionAp,
+  evictDiscoveredAps,
   AP_ONBOARD_BACKENDS,
   DROPLET_IMAGE_BACKEND,
+  DISCOVERED_AP_LRU_CAP,
   resolveApBackend,
 } from "./ap-onboard.service.js";
 import * as openwrt from "./openwrt.client.js";
@@ -152,6 +154,108 @@ describe("reconcileDiscovered → backend defaulting (ADR-024 Phase 1 AC)", () =
     const row = prisma.rows.get("B8:27:EB:AA:BB:CC");
     expect(row.status).toBe("AWAITING_APPROVAL");
     expect(row.backend).toBe("DROPLET_IMAGE");
+  });
+});
+
+describe("reconcileDiscovered → per-observation backend tag (ADR-024 Phase 2 AC)", () => {
+  it("creates a row with backend = EASYMESH when the observation is tagged EASYMESH", async () => {
+    const prisma = createPrismaMock();
+    // The create path must honor the EXPLICIT obs.backend, replacing the
+    // Phase-1 hardcoded DROPLET_IMAGE. Discovery is multiplexed now, so a
+    // single reconcile pass can carry observations from more than one source.
+    await reconcileDiscovered(prisma as any, [
+      { mac: "AA:BB:CC:DD:EE:01", backend: "EASYMESH", vendor: "TP-Link" },
+    ]);
+    const row = prisma.rows.get("AA:BB:CC:DD:EE:01");
+    expect(row.status).toBe("AWAITING_APPROVAL");
+    expect(row.backend).toBe("EASYMESH");
+  });
+
+  it("an observation with no backend tag still defaults to DROPLET_IMAGE (back-compat with the mDNS source)", async () => {
+    const prisma = createPrismaMock();
+    await reconcileDiscovered(prisma as any, [{ mac: "B8:27:EB:00:00:09" }]);
+    expect(prisma.rows.get("B8:27:EB:00:00:09").backend).toBe("DROPLET_IMAGE");
+  });
+
+  it("a mixed snapshot creates one row per backend in a single pass", async () => {
+    const prisma = createPrismaMock();
+    await reconcileDiscovered(prisma as any, [
+      { mac: "B8:27:EB:00:00:10", backend: "DROPLET_IMAGE" },
+      { mac: "AA:BB:CC:00:00:11", backend: "EASYMESH" },
+    ]);
+    expect(prisma.rows.get("B8:27:EB:00:00:10").backend).toBe("DROPLET_IMAGE");
+    expect(prisma.rows.get("AA:BB:CC:00:00:11").backend).toBe("EASYMESH");
+  });
+});
+
+describe("evictDiscoveredAps → LRU counts across ALL backends (ADR-024 Phase 2 AC #5)", () => {
+  // A richer in-memory mock that actually implements the count / findMany /
+  // deleteMany shapes evictDiscoveredAps uses, so we can assert the cap
+  // bounds the operator-actionable surface regardless of which backend
+  // discovered each row.
+  function createEvictionPrismaMock() {
+    const rows = new Map<string, any>();
+    return {
+      rows,
+      apDevice: {
+        count: vi.fn(async ({ where }: any = {}) => {
+          const statusIn: string[] | undefined = where?.status?.in;
+          let n = 0;
+          for (const row of rows.values()) {
+            if (!statusIn || statusIn.includes(row.status)) n += 1;
+          }
+          return n;
+        }),
+        findMany: vi.fn(async ({ where, orderBy, take }: any = {}) => {
+          const statusIn: string[] | undefined = where?.status?.in;
+          let list = [...rows.values()].filter(
+            (r) => !statusIn || statusIn.includes(r.status),
+          );
+          if (orderBy?.lastSeen === "asc") {
+            list = list.sort(
+              (a, b) => a.lastSeen.getTime() - b.lastSeen.getTime(),
+            );
+          }
+          if (typeof take === "number") list = list.slice(0, take);
+          return list.map((r) => ({ mac: r.mac }));
+        }),
+        deleteMany: vi.fn(async ({ where }: any) => {
+          const macs: string[] = where?.mac?.in ?? [];
+          let count = 0;
+          for (const mac of macs) {
+            if (rows.delete(mac)) count += 1;
+          }
+          return { count };
+        }),
+      },
+    };
+  }
+
+  it("counts AWAITING_APPROVAL + DISCOVERED across DROPLET_IMAGE AND EASYMESH rows when enforcing the cap", async () => {
+    const prisma = createEvictionPrismaMock();
+    // Seed CAP+5 actionable rows split across two backends — the eviction
+    // must treat them as one pool (the cap is a per-box budget on the
+    // operator-actionable surface, not a per-backend budget).
+    const total = DISCOVERED_AP_LRU_CAP + 5;
+    for (let i = 0; i < total; i += 1) {
+      const mac = `AA:BB:CC:00:${(i >> 8).toString(16).padStart(2, "0")}:${(i & 0xff).toString(16).padStart(2, "0")}`.toUpperCase();
+      prisma.rows.set(mac, {
+        mac,
+        status: i % 2 === 0 ? "AWAITING_APPROVAL" : "DISCOVERED",
+        // Alternate the backend so neither one alone exceeds the cap, but
+        // together they do — proves the count is cross-backend.
+        backend: i % 3 === 0 ? "EASYMESH" : "DROPLET_IMAGE",
+        lastSeen: new Date(i),
+      });
+    }
+
+    const evicted = await evictDiscoveredAps(prisma as any);
+
+    // 5 over the cap → 5 evicted, leaving exactly the cap.
+    expect(evicted).toBe(5);
+    expect(prisma.rows.size).toBe(DISCOVERED_AP_LRU_CAP);
+    // The 5 oldest (lowest lastSeen) went, regardless of backend.
+    expect(prisma.rows.has("AA:BB:CC:00:00:00")).toBe(false);
   });
 });
 

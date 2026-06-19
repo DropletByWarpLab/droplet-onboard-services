@@ -158,11 +158,23 @@ export interface ApMutationResult {
 
 export interface DiscoveredApObservation {
   mac: string;
+  /**
+   * ADR-024 Phase 2: the discovery source that produced this observation,
+   * carried as an EXPLICIT tag so the reconciler can stamp the row's
+   * `backend` column from it (never inferred — CLAUDE.md no-guessing
+   * rule). Optional for back-compat: the live mDNS source sets it to
+   * `DROPLET_IMAGE`, and an observation that omits it (a legacy caller)
+   * defaults to `DROPLET_IMAGE` on create — the only live backend today
+   * and the schema default.
+   */
+  backend?: ApOnboardBackendKey;
   model?: string;
   serial?: string;
   version?: string;
   lastIp?: string;
   hostname?: string;
+  /** Human vendor label surfaced in the dashboard/LLM ("TP-Link"). */
+  vendor?: string;
 }
 
 /**
@@ -219,10 +231,14 @@ async function dropletImageReconcile(
       create: {
         mac,
         status: "AWAITING_APPROVAL",
-        // ADR-024: mDNS `_droplet-ap._tcp` is today's only discovery
-        // source, so a freshly reconciled row is always DROPLET_IMAGE.
-        // Explicit column, never derived (CLAUDE.md no-guessing rule).
-        backend: "DROPLET_IMAGE",
+        // ADR-024 Phase 2: stamp the row's backend from the observation's
+        // EXPLICIT `backend` tag (set by the discovery source that found
+        // it), never derived from anything (CLAUDE.md no-guessing rule).
+        // A tag-less observation (legacy caller) defaults to DROPLET_IMAGE
+        // — the only live backend today and the schema default — so the
+        // Phase-1 mDNS path is byte-for-byte unchanged.
+        backend: obs.backend ?? "DROPLET_IMAGE",
+        vendor: obs.vendor,
         model: obs.model,
         serial: obs.serial,
         version: obs.version,
