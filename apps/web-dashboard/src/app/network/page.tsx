@@ -35,6 +35,7 @@ import { CoverageExtendersPanel } from "@/components/network/CoverageExtendersPa
 import { PhoneHomeCard } from "@/components/network/PhoneHomeCard";
 import { CameraPrivacyCard } from "@/components/network/CameraPrivacyCard";
 import { GuestWifiCard } from "@/components/network/GuestWifiCard";
+import { MaintenanceCards } from "@/components/network/MaintenanceCards";
 import { UpnpCard } from "@/components/network/UpnpCard";
 import { NetworkSimple } from "@/components/network/NetworkSimple";
 import { SwitchPanel } from "@/components/network/switch/SwitchPanel";
@@ -1066,6 +1067,13 @@ function SystemTab({
           fully wired server-side but had no UI path — the only ways to restart
           the router were the LLM tool or curl. */}
       <RouterRebootCard onRebootingChange={onRebootingChange} />
+
+      {/* Maintenance — Firmware + Factory reset. Honest, informational,
+          owner-only: the single-box runs OpenWrt in a container (no flashable
+          router firmware; a container UCI reset would desync the host AP), so
+          these explain the truth and point at the appliance-wide flows rather
+          than fake a router-only sysupgrade / reset. */}
+      <MaintenanceCards />
     </div>
   );
 }
