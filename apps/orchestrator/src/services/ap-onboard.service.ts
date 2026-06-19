@@ -1,6 +1,14 @@
 /**
  * AP onboarding service — discovery + state-machine transitions for the
- * coverage-extender flow per ADR-005.
+ * coverage-extender flow.
+ *
+ * ADR-024 (Phase 1) generalises this from a single-vendor (Droplet
+ * OpenWrt image, ADR-005) pipeline into backend-pluggable dispatch.
+ * `ApDevice.backend` is the explicit discriminator (CLAUDE.md
+ * no-guessing rule — never derived from absence) for which backend owns
+ * a row's discovery + provisioning. The public service functions become
+ * thin routers that select a handler by that column, defaulting to
+ * `DROPLET_IMAGE` (the only backend that does anything today).
  *
  * Layers:
  *   1. `reconcileDiscovered(prisma, observed)` — upserts a fresh mDNS
@@ -8,6 +16,7 @@
  *      (DISCOVERED is reserved for the per-tick interim state — the
  *      poller will collapse it to AWAITING_APPROVAL the same tick).
  *      Existing rows just bump `lastSeen` + any new model/version info.
+ *      All rows created here carry `backend = DROPLET_IMAGE`.
  *   2. `approveAp(prisma, mac, opts, actor)` — transitions
  *      AWAITING_APPROVAL → PROVISIONING → ONLINE (or FAILED). Pushes
  *      the wireless config through `openwrt.client.approveAp` and
@@ -17,7 +26,11 @@
  *      DECOMMISSIONED. Idempotent on already-DECOMMISSIONED rows.
  *
  * The service owns the state machine; the route layer is a thin
- * dispatch + RBAC veneer.
+ * dispatch + RBAC veneer. Within the service, the ADR-005 behavior lives
+ * verbatim inside `DropletImageBackend`; the exported functions route to
+ * it. EASYMESH / UNIFI handlers are registry stubs (later ADR-024
+ * phases) — present so the dispatch shape is real, but they add no
+ * behavior this phase.
  */
 
 import type { PrismaClient } from "@prisma/client";
@@ -30,6 +43,14 @@ import {
 } from "./openwrt.client.js";
 
 const logger = pino({ name: "ap-onboard" });
+
+/**
+ * Canonical backend keys — mirror the `ApOnboardBackend` Prisma enum
+ * (ADR-024 §1). Kept as a string union (not an import of the generated
+ * enum) so this module stays usable in the unit-test setup where
+ * `@prisma/client` is mocked.
+ */
+export type ApOnboardBackendKey = "DROPLET_IMAGE" | "EASYMESH" | "UNIFI";
 
 /**
  * Per ADR-005 §"Consequences": the discovered-list is capped to
@@ -167,7 +188,7 @@ export interface DiscoveredApObservation {
  *   - MAC in PROVISIONING / FAILED → touch lastSeen only. Failed APs
  *                             stay failed until re-approved.
  */
-export async function reconcileDiscovered(
+async function dropletImageReconcile(
   prisma: PrismaClient,
   observed: DiscoveredApObservation[],
 ): Promise<{ created: number; updated: number; evicted: number }> {
@@ -198,6 +219,10 @@ export async function reconcileDiscovered(
       create: {
         mac,
         status: "AWAITING_APPROVAL",
+        // ADR-024: mDNS `_droplet-ap._tcp` is today's only discovery
+        // source, so a freshly reconciled row is always DROPLET_IMAGE.
+        // Explicit column, never derived (CLAUDE.md no-guessing rule).
+        backend: "DROPLET_IMAGE",
         model: obs.model,
         serial: obs.serial,
         version: obs.version,
@@ -275,7 +300,7 @@ export interface ApproveOptions {
  * the operationId). `operationId` is null when the routing layer
  * didn't surface one (older builds, GET fallback).
  */
-export async function approveAp(
+async function dropletImageApprove(
   prisma: PrismaClient,
   rawMac: string,
   opts: ApproveOptions,
@@ -351,7 +376,7 @@ export async function approveAp(
  * already-DECOMMISSIONED short-circuit (no in-flight routing call to
  * poll) and when the routing layer didn't surface one.
  */
-export async function decommissionAp(
+async function dropletImageDecommission(
   prisma: PrismaClient,
   rawMac: string,
 ): Promise<ApMutationResult> {
@@ -401,4 +426,205 @@ function defaultDisplayName(mac: string, model: string | null): string {
   if (model && model.includes("raspberrypi,5")) return `AP (${last3})`;
   if (model) return `${model} AP (${last3})`;
   return `Extender (${last3})`;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// ADR-024 §1 — backend-pluggable dispatch
+//
+// One canonical entity (ApDevice), one state machine, one LLM/dashboard
+// surface — fanning out to a per-backend handler selected by the row's
+// `backend` column. Phase 1 wires the registry shape and moves the
+// ADR-005 logic verbatim behind `DropletImageBackend`; EASYMESH / UNIFI
+// are NotImplemented stubs so the dispatch shape is real but no behavior
+// is added until their phases (4 / 3 respectively).
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Per-backend onboarding handler. `reconcile` upserts one source's
+ * current discovery snapshot; `approve` / `decommission` drive that
+ * backend's provisioning. Mirrors the ADR-024 §1 interface (`discover`
+ * is realised here as `reconcile`, which both takes the observed
+ * snapshot AND writes it — the orchestrator owns the persistence, the
+ * backend owns the protocol).
+ */
+export interface ApOnboardBackendHandler {
+  /** Backend key — matches the row's `backend` column + the Prisma enum. */
+  readonly key: ApOnboardBackendKey;
+  /**
+   * Reconcile a fresh discovery snapshot for THIS backend into ApDevice.
+   * Returns the create/update/evict tallies the poller surfaces.
+   */
+  reconcile(
+    prisma: PrismaClient,
+    observed: DiscoveredApObservation[],
+  ): Promise<{ created: number; updated: number; evicted: number }>;
+  /** Approve a discovered AP and push its wireless config. */
+  approve(
+    prisma: PrismaClient,
+    rawMac: string,
+    opts: ApproveOptions,
+    actor: { username: string },
+  ): Promise<ApMutationResult>;
+  /** Decommission an AP. Idempotent on already-removed rows. */
+  decommission(prisma: PrismaClient, rawMac: string): Promise<ApMutationResult>;
+}
+
+/**
+ * Thrown by the EASYMESH / UNIFI stubs. Surfaces as a 501 so a caller
+ * that somehow routes a non-DROPLET_IMAGE row this phase gets an honest
+ * "not built yet" rather than a silent mis-dispatch.
+ */
+export class ApBackendNotImplementedError extends ApOnboardError {
+  constructor(backend: ApOnboardBackendKey, operation: string) {
+    super(
+      `AP backend ${backend} is not implemented yet (operation: ${operation})`,
+      501,
+      "UNKNOWN",
+    );
+    this.name = "ApBackendNotImplementedError";
+  }
+}
+
+/**
+ * ADR-005 backend — the Droplet OpenWrt extender image. Holds the
+ * existing mDNS + uci behavior verbatim by delegating to the module
+ * functions above; Phase 1 adds no behavior delta here.
+ */
+export const DROPLET_IMAGE_BACKEND: ApOnboardBackendHandler = {
+  key: "DROPLET_IMAGE",
+  reconcile: dropletImageReconcile,
+  approve: dropletImageApprove,
+  decommission: dropletImageDecommission,
+};
+
+/**
+ * Build a NotImplemented stub for a backend whose phase hasn't landed.
+ * The registry entry is REAL (so dispatch can find it and the shape is
+ * exercised) but every operation throws — no behavior is added.
+ */
+function notImplementedBackend(
+  key: Extract<ApOnboardBackendKey, "EASYMESH" | "UNIFI">,
+): ApOnboardBackendHandler {
+  return {
+    key,
+    async reconcile(): Promise<never> {
+      throw new ApBackendNotImplementedError(key, "reconcile");
+    },
+    async approve(): Promise<never> {
+      throw new ApBackendNotImplementedError(key, "approve");
+    },
+    async decommission(): Promise<never> {
+      throw new ApBackendNotImplementedError(key, "decommission");
+    },
+  };
+}
+
+/**
+ * EASYMESH backend — IEEE 1905.1 discovery + prplMesh-controller M1/M2
+ * onboarding (ADR-024 §2). Stub until Phase 4.
+ */
+export const EASYMESH_BACKEND: ApOnboardBackendHandler =
+  notImplementedBackend("EASYMESH");
+
+/**
+ * UNIFI backend — UBNT UDP 10001 discovery + UniFi Network API adoption
+ * (ADR-024 §3). Stub until Phase 3.
+ */
+export const UNIFI_BACKEND: ApOnboardBackendHandler =
+  notImplementedBackend("UNIFI");
+
+/**
+ * The backend registry, keyed by the `ApOnboardBackend` enum value.
+ * The single source of truth for "which arrow a row took" (ADR-024
+ * Architecture diagram).
+ */
+export const AP_ONBOARD_BACKENDS: Record<
+  ApOnboardBackendKey,
+  ApOnboardBackendHandler
+> = {
+  DROPLET_IMAGE: DROPLET_IMAGE_BACKEND,
+  EASYMESH: EASYMESH_BACKEND,
+  UNIFI: UNIFI_BACKEND,
+};
+
+/**
+ * Select the handler for a row's `backend` column. A null / undefined /
+ * unrecognised value falls back to DROPLET_IMAGE — the only backend that
+ * exists today, and the schema default. This is NOT state-from-absence
+ * (the column is explicit and defaulted at the DB level); the fallback
+ * only guards against rows seeded before the column existed and against
+ * a future enum value the running build doesn't yet know.
+ */
+export function resolveApBackend(
+  backend: string | null | undefined,
+): ApOnboardBackendHandler {
+  if (backend && backend in AP_ONBOARD_BACKENDS) {
+    return AP_ONBOARD_BACKENDS[backend as ApOnboardBackendKey];
+  }
+  return DROPLET_IMAGE_BACKEND;
+}
+
+/**
+ * Reconcile a fresh discovery snapshot into ApDevice.
+ *
+ * Today the only discovery source is the Droplet-image mDNS poller, so
+ * this routes straight to the DROPLET_IMAGE backend. Later phases add a
+ * discovery multiplexer (ADR-024 Phase 2) that fans the snapshot out per
+ * source; the public signature is unchanged so the poller wiring and the
+ * ADR-005 tests stay green.
+ */
+export async function reconcileDiscovered(
+  prisma: PrismaClient,
+  observed: DiscoveredApObservation[],
+): Promise<{ created: number; updated: number; evicted: number }> {
+  return DROPLET_IMAGE_BACKEND.reconcile(prisma, observed);
+}
+
+/**
+ * Approve a discovered AP — routes to the row's backend handler.
+ *
+ * The row must already exist (it was created by `reconcileDiscovered`);
+ * we read its `backend` column and dispatch. Unknown / missing backend
+ * defaults to DROPLET_IMAGE (see `resolveApBackend`). The DROPLET_IMAGE
+ * handler then runs the unchanged ADR-005 PROVISIONING → ONLINE walk and
+ * surfaces `notFound` itself if the MAC isn't present.
+ */
+export async function approveAp(
+  prisma: PrismaClient,
+  rawMac: string,
+  opts: ApproveOptions,
+  actor: { username: string },
+): Promise<ApMutationResult> {
+  const handler = await resolveBackendForMac(prisma, rawMac);
+  return handler.approve(prisma, rawMac, opts, actor);
+}
+
+/**
+ * Decommission an AP — routes to the row's backend handler. Same
+ * dispatch + default-to-DROPLET_IMAGE discipline as `approveAp`.
+ */
+export async function decommissionAp(
+  prisma: PrismaClient,
+  rawMac: string,
+): Promise<ApMutationResult> {
+  const handler = await resolveBackendForMac(prisma, rawMac);
+  return handler.decommission(prisma, rawMac);
+}
+
+/**
+ * Look up the backend handler that owns a given MAC's row. The lookup is
+ * cheap (single indexed `findUnique` on the PK) and the handler repeats
+ * the same read to fetch the full row + apply not-found semantics — that
+ * tiny duplication keeps each handler self-contained (it doesn't trust a
+ * row handed in by the router) and is the behavior-preserving choice for
+ * Phase 1. A missing row resolves to DROPLET_IMAGE so the handler raises
+ * the canonical `ApOnboardError.notFound`, exactly as ADR-005 did.
+ */
+async function resolveBackendForMac(
+  prisma: PrismaClient,
+  rawMac: string,
+): Promise<ApOnboardBackendHandler> {
+  const mac = normalizeMac(rawMac);
+  const existing = await prisma.apDevice.findUnique({ where: { mac } });
+  return resolveApBackend((existing as { backend?: string } | null)?.backend);
 }
