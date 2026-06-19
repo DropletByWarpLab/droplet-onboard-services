@@ -62,6 +62,20 @@ config dhcp 'cameras'
     option dhcpv6 'server'
     option ra 'server'
 
+# --- Guest subnet DHCP pool (192.168.30.100 — 192.168.30.249) ---
+# Serves leases to guest Wi-Fi clients on the isolated guest bridge. Same
+# dhcpv4/dhcpv6/ra requirement as the cameras pool: without those flags a
+# 'config dhcp' section is treated as an ignore-interface entry and no leases
+# are issued, so a joined guest would associate but never get an IP.
+config dhcp 'guest'
+    option interface 'guest'
+    option start '100'
+    option limit '150'
+    option leasetime '12h'
+    option dhcpv4 'server'
+    option dhcpv6 'server'
+    option ra 'server'
+
 # --- Static lease: appliance AI module ---
 # Uncomment and set the MAC address of the appliance's Ethernet port
 # config host

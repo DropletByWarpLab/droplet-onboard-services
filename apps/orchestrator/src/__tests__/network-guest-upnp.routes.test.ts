@@ -158,14 +158,23 @@ describe("POST /api/network/wifi/guest", () => {
     expect(res.status).toBe(400);
   });
 
-  it("refuses with 409 on the single-box hostapd shape (honesty gate)", async () => {
+  it("no longer refuses on the single-box hostapd shape — guest Wi-Fi is real there now", async () => {
+    // The old honesty gate (409 GUEST_WIFI_UNSUPPORTED) is gone: setGuestWifi
+    // branches to the device-bridge on hostapd, so the route flows through the
+    // SAME Tier-2 confirmation arm as uci. Still no write before confirmation.
     configMock.DROPLET_AP_MODE = "hostapd";
     const res = await request(buildApp())
       .post("/api/network/wifi/guest")
       .send({ ssid: "Studio Guest", password: "longenoughpw" });
-    expect(res.status).toBe(409);
-    expect(res.body).toMatchObject({ code: "GUEST_WIFI_UNSUPPORTED" });
+    expect(res.status).toBe(202);
+    expect(res.body).toMatchObject({
+      status: "confirmation_required",
+      operation: "create_guest_network",
+      tier: 2,
+    });
+    expect(res.body.code).toBeUndefined();
     expect(networkService.setGuestWifi).not.toHaveBeenCalled();
+    configMock.DROPLET_AP_MODE = "uci";
   });
 });
 
