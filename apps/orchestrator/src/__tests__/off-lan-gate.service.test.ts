@@ -38,12 +38,16 @@ describe("outboundEmailGate (off-LAN outbound_email gate)", () => {
     await expect(outboundEmailGate(prisma)).resolves.toBe(false);
   });
 
-  it("fails CLOSED on a DB error", async () => {
-    // The core regression: the old impl had `catch { return true }`.
+  it("throws on a DB error so the caller fails closed with a 503 (never a silent allow)", async () => {
+    // #643 changed the contract: the gate no longer collapses an infra error
+    // into a boolean. It re-throws so the caller (app.ts `outboundEmailEnabled`)
+    // can distinguish a transient DB failure (→ 503) from a deliberate channel
+    // disable (→ false/451). The regression guard is that a DB error must NEVER
+    // resolve to `true` (the old fail-OPEN `catch { return true }`).
     const prisma = mockPrisma(async () => {
       throw new Error("db unreachable");
     });
-    await expect(outboundEmailGate(prisma)).resolves.toBe(false);
+    await expect(outboundEmailGate(prisma)).rejects.toThrow("db unreachable");
   });
 
   it("reads the channel by its unique enum key", async () => {

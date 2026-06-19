@@ -4,6 +4,27 @@ import { PrismaClient } from "@prisma/client";
 import { createApp } from "../app.js";
 import { initDeviceService } from "../services/device.service.js";
 
+// #651 activated app-level scope/RBAC enforcement; with AUTH_ENABLED at its
+// real default (true) a tokenless supertest request now 401s before reaching
+// the route, so this read-only smoke test must disable auth — the same way the
+// sibling full-createApp tests (device-clients.test.ts) do. The mock must carry
+// every field createApp derefs at module scope, hence the full set below.
+vi.mock("../config.js", () => ({
+  config: {
+    DATABASE_URL: "postgresql://test:test@localhost:5432/test",
+    REDIS_URL: "redis://localhost:6379",
+    MQTT_BROKER: "mqtt://localhost:1883",
+    AI_GATEWAY_URL: "http://localhost:8000",
+    PORT: 3000,
+    NODE_ENV: "test",
+    MAX_UPLOAD_SIZE_MB: 10,
+    NEXTCLOUD_URL: "http://nextcloud.test",
+    AUTH_ENABLED: false,
+    FRIGATE_URL: "http://frigate:5000",
+    DEVICE_SECRET_KEY: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+  },
+}));
+
 vi.mock("../services/ai-gateway.client.js", () => ({
   healthCheck: vi.fn().mockResolvedValue(true),
   listModels: vi.fn().mockResolvedValue({ models: [] }),

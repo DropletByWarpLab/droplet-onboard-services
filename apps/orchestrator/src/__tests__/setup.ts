@@ -90,6 +90,19 @@ vi.mock("@prisma/client", () => {
   };
   return {
     PrismaClient: vi.fn(() => mockPrisma),
+    // Prisma generates string enums as runtime const objects and re-exports
+    // them as top-level named exports. Services that read the enum VALUE (not
+    // just the type) — e.g. off-lan-gate.service.ts uses
+    // `OffLanChannelKey.outbound_email` — fail at import with "No <Enum> export
+    // is defined on the @prisma/client mock" unless the factory returns it.
+    // Mirror the schema's `enum OffLanChannelKey` members verbatim.
+    OffLanChannelKey: {
+      software_updates: "software_updates",
+      cloud_model_escape: "cloud_model_escape",
+      outbound_email: "outbound_email",
+      telemetry: "telemetry",
+      web_fetch: "web_fetch",
+    },
     Prisma: {
       PrismaClientKnownRequestError,
       // Mirrors the generated client's const-object enum — reset.service opens
