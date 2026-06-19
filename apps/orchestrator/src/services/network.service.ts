@@ -293,8 +293,27 @@ export async function setGuestWifi(
   return result;
 }
 
-export async function getGuestWifi(): Promise<openwrt.GuestWifiStatus> {
-  return openwrt.fetchGuestWifi();
+export async function getGuestWifi(): Promise<
+  openwrt.GuestWifiStatus & { supported: boolean }
+> {
+  // Guest Wi-Fi needs a second AP/BSS that the single-box hostapd shape can't
+  // provision yet: there the home AP is a raw host hostapd (DROPLET_AP_MODE=
+  // hostapd) and the in-container OpenWrt has no radio, so the UCI wifi-iface
+  // create_guest_network adds is inert — no SSID ever broadcasts. Report it as
+  // unsupported there so the dashboard shows an honest "not available" state
+  // instead of reading the orphan UCI back and faking a live guest network.
+  // (Same posture as setWifiSsid/setWifiPassword branching on DROPLET_AP_MODE.)
+  if (config.DROPLET_AP_MODE === "hostapd") {
+    return {
+      configured: false,
+      enabled: false,
+      ssid: null,
+      password: null,
+      supported: false,
+    };
+  }
+  const status = await openwrt.fetchGuestWifi();
+  return { ...status, supported: true };
 }
 
 export async function removeGuestWifi(): Promise<openwrt.WriteResult> {

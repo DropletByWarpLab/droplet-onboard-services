@@ -70,11 +70,36 @@ export function GuestWifiCard() {
     return <div className="dp-card animate-pulse" style={{ height: 160, background: "var(--surface-2)" }} />;
   }
 
+  // Honest unavailable state — this appliance shape can't provision a guest
+  // network yet (single-box hostapd AP). Mirrors the UPnP card rather than
+  // showing a setup form that would fail (or a fabricated "live" network).
+  if (data && !data.supported) {
+    return <GuestUnavailable />;
+  }
+
   if (data?.configured && data.enabled && data.ssid) {
     return <GuestActive ssid={data.ssid} password={data.password ?? ""} onChanged={() => mutate()} />;
   }
 
   return <GuestSetup onConfigured={() => mutate()} />;
+}
+
+// --- Not available on this appliance shape ---
+function GuestUnavailable() {
+  return (
+    <div className="dp-card">
+      <div className="flex items-center gap-2 mb-1">
+        <Users size={18} className="text-label-tertiary" />
+        <h3 className="type-headline text-label-primary">Guest Wi-Fi</h3>
+        <span className="type-caption-2 font-medium px-2 py-0.5 rounded-full bg-surface-secondary text-label-tertiary">
+          Not available
+        </span>
+      </div>
+      <p className="type-subheadline text-label-tertiary">
+        A separate visitor network isn&apos;t available on this Droplet yet.
+      </p>
+    </div>
+  );
 }
 
 // --- Active guest network ---
