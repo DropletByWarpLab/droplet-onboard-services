@@ -171,6 +171,14 @@ class _MockNetwork:
     def get_all_interface_statuses(self) -> dict[str, Any]:
         return {"lan": _LAN_STATUS, "wan": _WAN_STATUS}
 
+    def list_all_interfaces(self) -> list[dict[str, Any]]:
+        return [
+            {"name": "lan", "device": "br-lan", "proto": "static",
+             "address": "10.0.0.1/24", "zone": "lan", "up": True, "present": True},
+            {"name": "wan", "device": "eth1", "proto": "dhcp",
+             "address": "192.168.1.87/24", "zone": "wan", "up": True, "present": True},
+        ]
+
     def interface_up(self, name: str) -> None:
         logger.info("mock: interface up %s — no-op", name)
 

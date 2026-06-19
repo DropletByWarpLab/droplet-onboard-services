@@ -575,6 +575,103 @@ class NetworkApi:
                     raise
         return out
 
+    def list_all_interfaces(self) -> list[dict]:
+        """Enumerate ALL configured interfaces with live state + zone membership.
+
+        Unlike :meth:`get_all_interface_statuses` (a hardcoded lan/wan tuple),
+        this scans ``uci.get("network")`` for every interface section — the same
+        proven enumeration primitive `/network/vlans` uses — and joins:
+
+        * live status (``interface_status``) per section, degraded to an explicit
+          ``present: False`` stub when the section has no live ubus object (e.g.
+          a VLAN/wan that's configured but not registered on the single-box), so
+          the table renders an honest "not on this box" row rather than a fake
+          "down" one. ``TIMEOUT`` degrades to ``present: True, up: False``.
+        * the IPv4 ``address`` flattened to ``ip/mask`` (first address) from the
+          live status, or ``None``.
+        * ``zone`` membership read from the firewall zones' ``network`` lists, so
+          the Zone column is real (``None`` when no zone references the section)
+          rather than fabricated.
+
+        Read-only — it cannot cut connectivity.
+        """
+        config = self._r.uci.get("network")
+        rows: list[dict] = []
+        if not isinstance(config, dict):
+            return rows
+
+        # Build a section-name → zone-name index from the firewall zones once.
+        zone_by_network: dict[str, str] = {}
+        try:
+            zones = self._r.firewall.get_zones()
+            values = zones.get("values", {}) if isinstance(zones, dict) else {}
+            for zone in values.values():
+                if not isinstance(zone, dict):
+                    continue
+                zname = zone.get("name")
+                nets = zone.get("network")
+                if isinstance(nets, str):
+                    nets = nets.split()
+                if isinstance(nets, list) and zname:
+                    for n in nets:
+                        zone_by_network[n] = zname
+        except (UbusError, ConnectionLost):
+            # Zone join is best-effort; without it the Zone column is None, not
+            # fabricated.
+            zone_by_network = {}
+
+        for name, section in config.items():
+            if not isinstance(section, dict):
+                continue
+            # Only real `config interface` sections — skip globals/device/etc and
+            # anonymous (@…) sections the enumeration shouldn't surface as ifaces.
+            if section.get(".type") not in (None, "interface"):
+                continue
+            if name.startswith("@"):
+                continue
+            if section.get(".type") is None and "proto" not in section:
+                # A bare section with no proto and no type isn't an interface.
+                continue
+
+            try:
+                status = self.interface_status(name)
+                present = True
+                up = bool(status.get("up", False))
+                addresses = status.get("ipv4-address") or []
+            except UbusError as exc:
+                if _ubus_object_absent(exc):
+                    status = {}
+                    present = False
+                    up = False
+                    addresses = []
+                elif exc.code == UBUS_STATUS_TIMEOUT:
+                    status = {}
+                    present = True
+                    up = False
+                    addresses = []
+                else:
+                    raise
+
+            address = None
+            if isinstance(addresses, list) and addresses:
+                first = addresses[0]
+                if isinstance(first, dict) and first.get("address") is not None:
+                    mask = first.get("mask")
+                    address = (
+                        f"{first['address']}/{mask}" if mask is not None else str(first["address"])
+                    )
+
+            rows.append({
+                "name": name,
+                "device": status.get("device") or section.get("device"),
+                "proto": status.get("proto") or section.get("proto"),
+                "address": address,
+                "zone": zone_by_network.get(name),
+                "up": up,
+                "present": present,
+            })
+        return rows
+
     def set_lan_ip(self, ipaddr: str, netmask: str = "255.255.255.0"):
         """Change the LAN IP address via UCI."""
         self._r.uci.set("network", "lan", {"ipaddr": ipaddr, "netmask": netmask})

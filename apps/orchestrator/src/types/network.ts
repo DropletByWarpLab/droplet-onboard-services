@@ -21,6 +21,24 @@ export interface InterfaceStatus {
   data: Record<string, unknown>;
 }
 
+/**
+ * One row of the full interface enumeration (GET /network/interfaces/all).
+ * Distinct from NetworkInterfaces (the lan/wan overview): this enumerates every
+ * configured interface incl. VLANs + WireGuard. `present:false` means the
+ * section is configured but has no live ubus object on this box (render as an
+ * honest "not on this box" row, never a fake "down"). `zone`/`address` are null
+ * when not joinable/reported, never fabricated.
+ */
+export interface NetworkInterfaceRow {
+  name: string;
+  device: string | null;
+  proto: string | null;
+  address: string | null;
+  zone: string | null;
+  up: boolean;
+  present: boolean;
+}
+
 export interface NetworkInterfaces {
   lan: InterfaceStatus;
   wan: InterfaceStatus;

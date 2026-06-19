@@ -139,6 +139,19 @@ export async function getNetworkOverview(): Promise<Result<NetworkOverview, Rout
   }
 }
 
+// Full interface enumeration (read-only). Kept OUT of the overview hot path —
+// the overview is a short-TTL cached read that feeds the simple view, and a
+// per-section ubus fan-out there would slow every Network page load. The table
+// uses this dedicated, separately-cached read instead.
+export async function getAllInterfaces(): Promise<openwrt.NetworkInterfaceRow[]> {
+  const cached = await cacheGet<openwrt.NetworkInterfaceRow[]>(CACHE_KEYS.interfaces);
+  if (cached) return cached;
+
+  const rows = await openwrt.fetchAllInterfaces();
+  await cacheSet(CACHE_KEYS.interfaces, rows, CACHE_TTL_SHORT);
+  return rows;
+}
+
 // --- Connected devices ---
 
 export async function getConnectedDevices(): Promise<ConnectedDevice[]> {

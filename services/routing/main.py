@@ -536,6 +536,16 @@ def network_interfaces():
         handle_router_error(exc)
 
 
+# MUST precede /network/interfaces/{name} — otherwise "all" matches {name} and
+# hits interface_status("all").
+@app.get("/network/interfaces/all")
+def network_interfaces_all():
+    try:
+        return {"interfaces": get_router().network.list_all_interfaces()}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
 @app.get("/network/interfaces/{name}")
 def network_interface_status(name: str):
     try:

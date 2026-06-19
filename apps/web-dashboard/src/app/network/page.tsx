@@ -37,6 +37,7 @@ import { CameraPrivacyCard } from "@/components/network/CameraPrivacyCard";
 import { DhcpPoolForm } from "@/components/network/DhcpPoolForm";
 import { DnsOverTlsCard } from "@/components/network/DnsOverTlsCard";
 import { GuestWifiCard } from "@/components/network/GuestWifiCard";
+import { InterfacesTable } from "@/components/network/InterfacesTable";
 import { MaintenanceCards } from "@/components/network/MaintenanceCards";
 import { RadioDetailCard } from "@/components/network/RadioDetailCard";
 import { SystemControlsCard } from "@/components/network/SystemControlsCard";
@@ -1078,6 +1079,11 @@ function SystemTab({
           single-box shape (no in-container LED surface; pinned host-hostapd
           country). */}
       <SystemControlsCard />
+
+      {/* Interfaces — read-only enumeration of every configured interface.
+          Add/Edit is deferred (UCI network rewrite can cut the served AP/LAN);
+          present:false rows render an honest 'not on this box' state. */}
+      <InterfacesTable />
 
       {/* DHCP & DNS — the live LAN pool range + lease-time editor (Tier-2
           confirm) plus the honest DNS-over-TLS gate (no DoT forwarder on this

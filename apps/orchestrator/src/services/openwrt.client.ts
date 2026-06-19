@@ -15,6 +15,7 @@ import {
 import type {
   NetworkSummary,
   NetworkInterfaces,
+  NetworkInterfaceRow,
   InterfaceStatus,
   WirelessStatus,
   WirelessScanResult,
@@ -34,7 +35,7 @@ import {
 
 export { RouterError } from "../types/router-error.js";
 export type { RouterErrorCode } from "../types/router-error.js";
-export type { SystemControls } from "../types/network.js";
+export type { SystemControls, NetworkInterfaceRow } from "../types/network.js";
 
 const logger = pino({ name: "openwrt-client" });
 
@@ -324,6 +325,16 @@ export async function fetchNetworkSummary(): Promise<NetworkSummary> {
 
 export async function fetchInterfaces(): Promise<NetworkInterfaces> {
   return routingFetchJson<NetworkInterfaces>("/network/interfaces", { label: "Router interfaces" });
+}
+
+/** Full interface enumeration (name/device/proto/address/zone/status) — reads
+ *  every configured interface, not just lan/wan. Read-only. */
+export async function fetchAllInterfaces(): Promise<NetworkInterfaceRow[]> {
+  const data = await routingFetchJson<{ interfaces: NetworkInterfaceRow[] }>(
+    "/network/interfaces/all",
+    { label: "Interface enumeration" },
+  );
+  return data.interfaces;
 }
 
 export async function fetchInterfaceStatus(name: string): Promise<InterfaceStatus> {

@@ -1200,6 +1200,26 @@ export async function fetchConnectedDevices(): Promise<ConnectedDevice[]> {
   return data.devices;
 }
 
+/** One row of the full interface enumeration. `present:false` = configured but
+ *  not live on this box (render "not on this box", never a fake "down").
+ *  `zone`/`address` are null when not joinable/reported, never fabricated. */
+export interface NetworkInterfaceRow {
+  name: string;
+  device: string | null;
+  proto: string | null;
+  address: string | null;
+  zone: string | null;
+  up: boolean;
+  present: boolean;
+}
+
+export async function fetchInterfaces(): Promise<NetworkInterfaceRow[]> {
+  const res = await authFetch(`${BASE}/api/network/interfaces`);
+  if (!res.ok) throw new Error(`Failed to fetch interfaces: ${res.status}`);
+  const data = await res.json();
+  return data.interfaces;
+}
+
 /** Read-only host-radio detail. Fields are null when iwinfo doesn't report
  *  them (shown as "not reported"); `supported:false`/`hostRadio:true` is the
  *  single combined-radio shape (no independent enable/disable). */

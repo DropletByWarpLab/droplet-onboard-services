@@ -15,6 +15,7 @@ import {
   getConnectedDevices,
   getDhcpLeases,
   getSystemInfo,
+  getAllInterfaces,
   addStaticDhcpLease,
   getDhcpPool,
   setDhcpPool,
@@ -120,6 +121,18 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
       clearInterval(pollInterval);
       clearInterval(heartbeat);
     });
+  });
+
+  // --- Interfaces (full enumeration, read-only) ---
+  // Every configured interface (name/device/proto/address/zone/status), not
+  // just lan/wan. Kept on its own service read (not the overview hot path).
+  router.get("/network/interfaces", async (_req, res, next) => {
+    try {
+      const interfaces = await getAllInterfaces();
+      res.json({ interfaces });
+    } catch (err) {
+      next(err);
+    }
   });
 
   // --- DHCP ---
