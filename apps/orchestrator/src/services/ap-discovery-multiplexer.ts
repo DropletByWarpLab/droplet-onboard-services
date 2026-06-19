@@ -45,6 +45,10 @@ import {
   UniFiClientError,
   type UniFiNetworkClient,
 } from "./unifi-network.client.js";
+import {
+  EasyMeshControllerError,
+  type EasyMeshControllerClient,
+} from "./easymesh-controller.client.js";
 
 const logger = pino({ name: "ap-discovery-multiplexer" });
 
@@ -116,29 +120,76 @@ export interface ScaffoldSourceOptions {
 }
 
 /**
- * SCAFFOLD (ADR-024 §2, Phase 4) — EasyMesh / IEEE 1905.1 discovery.
+ * LIVE source (ADR-024 §2, Phase 4) — EasyMesh discovery via the local
+ * prplMesh controller's 1905.1 topology.
  *
- * Gated behind `DROPLET_AP_EASYMESH_ENABLED` (default 0/off). When off —
- * which is ALWAYS this phase — `discover()` returns []. There is NO real
- * socket code here yet: Phase 4 adds the 1905.1 topology bridge that
- * surfaces newly-seen Agent AL-MACs as `backend=EASYMESH` observations,
- * onboarded by a prplMesh controller in Controller-only mode. Registered
- * now so the multiplexer shape is real and the off-path is tested, but it
- * contributes zero behavior until its phase lands.
+ * Gated behind `DROPLET_AP_EASYMESH_ENABLED` (default 0/off). When off — the
+ * shipping single-box default — `discover()` returns []. When on, it reads the
+ * controller's onboarding-Agents list (the 1905.1 topology: certified
+ * third-party APs currently visible / onboarding on the box's fronthaul BSS)
+ * and maps each Agent to a `backend: "EASYMESH"` observation, carrying the
+ * Agent's AL-MAC as both `mac` and `backendRef` so the approve path can address
+ * it. `vendor` comes from the Agent's 1905.1 device info WHEN PRESENT (else
+ * undefined — never guessed, CLAUDE.md no-guessing rule).
+ *
+ * The `EasyMeshControllerClient` is the SEAM — injected so this source
+ * unit-tests against a mock (there is no controller on the dev laptop, and
+ * prplMesh-on-mt76 is the ADR's open hardware risk; the ubus shapes are
+ * validated on the lab box later — see easymesh-controller.client.ts). When
+ * enabled but no client is wired (defensive — the poller always passes one when
+ * the flag is on), `discover()` yields [] rather than throwing, so a
+ * misconfiguration never crashes the discovery tick.
+ *
+ * The box runs prplMesh in CONTROLLER-ONLY mode: its mt76 radio is NOT an
+ * EasyMesh RF agent (ADR-024 §2). This source only reads the control plane.
  */
 export class EasyMeshDiscoverySource implements DiscoverySource {
-  constructor(private readonly options: ScaffoldSourceOptions) {}
+  constructor(
+    private readonly options: ScaffoldSourceOptions,
+    private readonly client?: EasyMeshControllerClient,
+  ) {}
 
   async discover(): Promise<DiscoveredApObservation[]> {
     if (!this.options.enabled) return [];
-    // Phase 4: open the IEEE 1905.1 topology bridge here and map newly
-    // seen Agent AL-MACs to { backend: "EASYMESH", ... }. Until then an
-    // enabled flag with no implementation still yields nothing rather than
-    // pretending — no state from absence.
-    logger.debug(
-      "easymesh discovery enabled but the 1905.1 bridge is a Phase-4 scaffold; yielding []",
-    );
-    return [];
+    if (!this.client) {
+      logger.warn(
+        "easymesh discovery enabled but no controller client wired; yielding []",
+      );
+      return [];
+    }
+    let agents;
+    try {
+      agents = await this.client.listOnboardingAgents();
+    } catch (err) {
+      // A household can flip DROPLET_AP_EASYMESH_ENABLED on BEFORE the prplMesh
+      // controller URL is set. That must never take down the whole discovery
+      // tick — the same safety pattern the Phase-3 UniFi source uses, so the
+      // live mDNS / DROPLET_IMAGE path survives a half-configured EasyMesh
+      // backend. NOT_CONFIGURED degrades to []; any OTHER error (auth,
+      // unreachable controller) propagates so the poller's cold-start-aware
+      // catch logs it and the next tick retries — we don't silently swallow a
+      // real, configured-but-failing controller.
+      if (
+        err instanceof EasyMeshControllerError &&
+        err.code === "NOT_CONFIGURED"
+      ) {
+        logger.debug(
+          "easymesh discovery enabled but controller URL not set; yielding [] until configured",
+        );
+        return [];
+      }
+      throw err;
+    }
+    return agents.map((a) => ({
+      mac: a.alMac,
+      // Explicit backend tag — the reconciler stamps ApDevice.backend from it.
+      backend: "EASYMESH" as const,
+      // 1905.1 AL-MAC is the backend-scoped opaque id the approve path uses.
+      backendRef: a.alMac,
+      // Vendor from the Agent's 1905.1 device info when present; else undefined.
+      vendor: a.vendor,
+      model: a.model,
+    }));
   }
 }
 

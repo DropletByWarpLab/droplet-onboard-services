@@ -41,6 +41,7 @@ import {
   type DiscoverySource,
 } from "./ap-discovery-multiplexer.js";
 import { createUniFiNetworkClient } from "./unifi-network.client.js";
+import { createEasyMeshControllerClient } from "./easymesh-controller.client.js";
 
 const logger = pino({ name: "ap-discovery-poller" });
 
@@ -96,7 +97,17 @@ export function createApDiscoveryPoller(
   // behaves byte-for-byte as the Phase-1 single-source path.
   const sources: DiscoverySource[] = [new MdnsDiscoverySource(openwrt)];
   if (flags.easymeshEnabled) {
-    sources.push(new EasyMeshDiscoverySource({ enabled: true }));
+    // ADR-024 Phase 4: the EasyMesh source reads the LOCAL prplMesh
+    // controller's 1905.1 topology (onboarding Agents) through the
+    // controller client built from DROPLET_AP_EASYMESH_CONTROLLER_URL. The box
+    // runs prplMesh in Controller-only mode — its mt76 radio is never an
+    // EasyMesh RF agent (ADR-024 §2).
+    sources.push(
+      new EasyMeshDiscoverySource(
+        { enabled: true },
+        createEasyMeshControllerClient(),
+      ),
+    );
   }
   if (flags.unifiEnabled) {
     // ADR-024 Phase 3: the UniFi source reads the customer-supplied

@@ -35,6 +35,7 @@ import {
   type DiscoverySource,
 } from "./ap-discovery-multiplexer.js";
 import type { DiscoveredApObservation } from "./ap-onboard.service.js";
+import { EasyMeshControllerError } from "./easymesh-controller.client.js";
 
 // In-memory ApDevice stand-in — mirrors ap-discovery-poller.test.ts so the
 // reconcile path (create honoring obs.backend, LRU eviction) is exercised
@@ -204,6 +205,76 @@ describe("MdnsDiscoverySource (ADR-024 Phase 2 — live source)", () => {
     const openwrt = { listDiscoveredAps: vi.fn(async () => []) };
     const mdns = new MdnsDiscoverySource(openwrt);
     expect(await mdns.discover()).toEqual([]);
+  });
+});
+
+describe("EasyMeshDiscoverySource (ADR-024 Phase 4 — live source)", () => {
+  /** Mock of the typed prplMesh controller client — Phase 4 tests the source
+   *  / handler against this, never a real controller (there is none on the
+   *  laptop, and prplMesh-on-mt76 is the ADR's open hardware risk). */
+  function fakeEasyMeshClient(
+    listImpl: () => Promise<any[]> = async () => [],
+  ) {
+    return {
+      listOnboardingAgents: vi.fn(listImpl),
+      onboardAgent: vi.fn(),
+      getAgentStatus: vi.fn(),
+      removeAgent: vi.fn(),
+    };
+  }
+
+  it("maps the 1905.1 topology agents to EASYMESH observations when enabled", async () => {
+    const client = fakeEasyMeshClient(async () => [
+      { alMac: "AA:BB:CC:00:00:01", vendor: "TP-Link", model: "RE700X" },
+      { alMac: "AA:BB:CC:00:00:02" },
+    ]);
+    const src = new EasyMeshDiscoverySource({ enabled: true }, client as any);
+    const observed = await src.discover();
+
+    expect(client.listOnboardingAgents).toHaveBeenCalledTimes(1);
+    expect(observed).toHaveLength(2);
+    expect(observed[0]).toMatchObject({
+      mac: "AA:BB:CC:00:00:01",
+      backend: "EASYMESH",
+      vendor: "TP-Link",
+      backendRef: "AA:BB:CC:00:00:01",
+      model: "RE700X",
+    });
+    // vendor comes from the Agent's 1905.1 device info; undefined when absent
+    // (never guessed) — backendRef is still the AL-MAC.
+    expect(observed[1]).toMatchObject({
+      mac: "AA:BB:CC:00:00:02",
+      backend: "EASYMESH",
+      backendRef: "AA:BB:CC:00:00:02",
+    });
+    expect(observed[1]!.vendor).toBeUndefined();
+  });
+
+  it("returns [] when no agents are onboarding (steady state)", async () => {
+    const client = fakeEasyMeshClient(async () => []);
+    const src = new EasyMeshDiscoverySource({ enabled: true }, client as any);
+    expect(await src.discover()).toEqual([]);
+  });
+
+  it("degrades NOT_CONFIGURED to [] (flag flipped on before the controller URL is set — never kills the live mDNS tick)", async () => {
+    const client = fakeEasyMeshClient(async () => {
+      throw EasyMeshControllerError.notConfigured();
+    });
+    const src = new EasyMeshDiscoverySource({ enabled: true }, client as any);
+    expect(await src.discover()).toEqual([]);
+  });
+
+  it("propagates a real (configured-but-failing) controller error so the poller's catch logs it and the next tick retries", async () => {
+    const client = fakeEasyMeshClient(async () => {
+      throw EasyMeshControllerError.unreachable("controller down");
+    });
+    const src = new EasyMeshDiscoverySource({ enabled: true }, client as any);
+    await expect(src.discover()).rejects.toBeInstanceOf(EasyMeshControllerError);
+  });
+
+  it("an enabled source with no client wired returns [] (defensive — never throws on discover)", async () => {
+    const src = new EasyMeshDiscoverySource({ enabled: true });
+    expect(await src.discover()).toEqual([]);
   });
 });
 

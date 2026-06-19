@@ -338,6 +338,19 @@ const envSchema = z.object({
     .default("0")
     .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
 
+  // ADR-024 Phase 4 (§2) — the box runs prplMesh in CONTROLLER-ONLY mode (its
+  // mt76 radio can't be an EasyMesh RF agent; the certified third-party AP is
+  // the Agent). This points the orchestrator's EASYMESH backend at the LOCAL
+  // prplMesh controller's ubus / IPC data-model endpoint (e.g. its
+  // ubus-over-HTTP address or socket path). The controller is a loopback/LAN
+  // local service, so this is an ADDRESS — not a secret — declared the same
+  // plain-string-empty-default way as DROPLET_AP_UNIFI_CONTROLLER_URL.
+  //
+  // Empty default: an unconfigured box's EasyMesh client throws NOT_CONFIGURED,
+  // but the discovery source only calls it when DROPLET_AP_EASYMESH_ENABLED is
+  // on (default off), so a default single-box never touches it.
+  DROPLET_AP_EASYMESH_CONTROLLER_URL: z.string().default(""),
+
   // ADR-024 Phase 3 (§3 + §"Open decision" Option B) — the box is a pure API
   // CLIENT to a UniFi Network controller the household ALREADY runs (a UDM /
   // CloudKey / self-host). We do NOT bundle or redistribute the controller;

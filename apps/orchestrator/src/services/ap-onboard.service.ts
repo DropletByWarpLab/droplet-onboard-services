@@ -45,6 +45,10 @@ import {
   createUniFiNetworkClient,
   type UniFiNetworkClient,
 } from "./unifi-network.client.js";
+import {
+  createEasyMeshControllerClient,
+  type EasyMeshControllerClient,
+} from "./easymesh-controller.client.js";
 
 const logger = pino({ name: "ap-onboard" });
 
@@ -501,9 +505,12 @@ export interface ApOnboardBackendHandler {
 }
 
 /**
- * Thrown by the EASYMESH / UNIFI stubs. Surfaces as a 501 so a caller
- * that somehow routes a non-DROPLET_IMAGE row this phase gets an honest
- * "not built yet" rather than a silent mis-dispatch.
+ * Surfaces as a 501 if a caller ever routes to a backend whose phase hasn't
+ * landed — an honest "not built yet" rather than a silent mis-dispatch. As of
+ * Phase 4 all three ADR-024 backends (DROPLET_IMAGE, UNIFI, EASYMESH) are real
+ * handlers, so nothing throws this today; it is kept as the dispatch-safety
+ * taxonomy for any future backend added to `ApOnboardBackend` before its
+ * handler is wired.
  */
 export class ApBackendNotImplementedError extends ApOnboardError {
   constructor(backend: ApOnboardBackendKey, operation: string) {
@@ -528,34 +535,161 @@ export const DROPLET_IMAGE_BACKEND: ApOnboardBackendHandler = {
   decommission: dropletImageDecommission,
 };
 
+// ─────────────────────────────────────────────────────────────────────────
+// EASYMESH backend (ADR-024 §2, Phase 4) — prplMesh Controller-only M1/M2.
+//
+// The box runs prplMesh in CONTROLLER-ONLY mode: its mt76 radio is NOT an
+// EasyMesh RF agent (the spike found prplMesh's HAL targets Intel/Qualcomm,
+// not mt76); the certified third-party AP is the Agent. The box owns only the
+// 1905.1 control plane + the M1/M2 credential push. The handler drives an
+// `EasyMeshControllerClient` and mirrors the DROPLET_IMAGE / UNIFI handler's
+// transition + audit discipline EXACTLY:
+//   - reconcile    : upsert the discovery snapshot (delegates to the shared
+//                    dropletImageReconcile — the create path stamps the row's
+//                    backend/backendRef/vendor from each EXPLICIT observation
+//                    tag, so an EASYMESH observation lands as an EASYMESH row).
+//   - approve      : run M1/M2 onboarding (push the household SSID/PSK to the
+//                    Agent by AL-MAC); PROVISIONING → ONLINE on success (audit
+//                    columns written), PROVISIONING → FAILED + failureReason on
+//                    ANY client error (no partial ONLINE).
+//   - decommission : remove the Agent on the controller → DECOMMISSIONED;
+//                    idempotent on an already-DECOMMISSIONED row.
+//
+// All state transitions are EXPLICIT `ApDeviceStatus` writes (CLAUDE.md
+// no-guessing rule), never derived from absence — identical to ADR-005.
+// operationId is null: the controller is request/response (no routing-service
+// operation to poll), same as the UNIFI handler.
+// ─────────────────────────────────────────────────────────────────────────
+
 /**
- * Build a NotImplemented stub for a backend whose phase hasn't landed.
- * The registry entry is REAL (so dispatch can find it and the shape is
- * exercised) but every operation throws — no behavior is added.
+ * Build an EASYMESH onboarding handler over a given `EasyMeshControllerClient`.
+ * The client is the seam — production wires the config-built client, unit tests
+ * pass a mock (there is no controller on the dev laptop, and prplMesh-on-mt76
+ * is the ADR's open hardware risk).
  */
-function notImplementedBackend(
-  key: Extract<ApOnboardBackendKey, "EASYMESH" | "UNIFI">,
+export function createEasyMeshBackend(
+  client: EasyMeshControllerClient,
 ): ApOnboardBackendHandler {
   return {
-    key,
-    async reconcile(): Promise<never> {
-      throw new ApBackendNotImplementedError(key, "reconcile");
+    key: "EASYMESH",
+
+    // One state machine: the EASYMESH discovery snapshot is reconciled by the
+    // same shared upsert path as every other backend; the create path honors
+    // each observation's explicit backend/backendRef/vendor tags.
+    reconcile: dropletImageReconcile,
+
+    async approve(
+      prisma: PrismaClient,
+      rawMac: string,
+      opts: ApproveOptions,
+      actor: { username: string },
+    ): Promise<ApMutationResult> {
+      const mac = normalizeMac(rawMac);
+
+      const existing = await prisma.apDevice.findUnique({ where: { mac } });
+      if (!existing) {
+        throw ApOnboardError.notFound(mac);
+      }
+
+      // Mark provisioning BEFORE the controller call so the dashboard's polling
+      // read sees "spinning" rather than the stale state — same as the
+      // DROPLET_IMAGE / UNIFI paths.
+      await prisma.apDevice.update({
+        where: { mac },
+        data: { status: "PROVISIONING", failureReason: null },
+      });
+
+      try {
+        // Run M1/M2 onboarding: the controller pushes the household SSID/PSK to
+        // the Agent's fronthaul/backhaul BSS, addressed by its 1905.1 AL-MAC
+        // (carried as backendRef from discovery; the normalized MAC is the same
+        // value for the EASYMESH backend). A throw here leaves the row FAILED
+        // (caught below); we never leave a half-onboarded ONLINE.
+        await client.onboardAgent(mac, {
+          ssid: opts.ssid,
+          key: opts.encryptionKey,
+        });
+        const updated = await prisma.apDevice.update({
+          where: { mac },
+          data: {
+            status: "ONLINE",
+            approvedAt: new Date(),
+            approvedBy: actor.username,
+            approvedSsid: opts.ssid,
+            displayName:
+              opts.displayName ??
+              existing.displayName ??
+              defaultDisplayName(mac, existing.model ?? null),
+            failureReason: null,
+          },
+        });
+        // The controller is request/response — there's no routing-service
+        // operation to poll, so operationId is null (the dashboard then polls
+        // the AP row directly, same as the UNIFI / idempotent DROPLET_IMAGE
+        // paths).
+        return { ap: updated, operationId: null };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        logger.warn(
+          { err, mac, ssid: opts.ssid },
+          "ap-onboard: EasyMesh approve failed; transitioning to FAILED",
+        );
+        await prisma.apDevice.update({
+          where: { mac },
+          data: { status: "FAILED", failureReason: message },
+        });
+        // Re-throw as the AP-onboard taxonomy. A typed EasyMeshControllerError
+        // keeps its message; everything else bubbles a 502 (the controller hop
+        // is the gateway), same shape the UNIFI handler uses.
+        throw new ApOnboardError(message, 502, "UNKNOWN");
+      }
     },
-    async approve(): Promise<never> {
-      throw new ApBackendNotImplementedError(key, "approve");
-    },
-    async decommission(): Promise<never> {
-      throw new ApBackendNotImplementedError(key, "decommission");
+
+    async decommission(
+      prisma: PrismaClient,
+      rawMac: string,
+    ): Promise<ApMutationResult> {
+      const mac = normalizeMac(rawMac);
+
+      const existing = await prisma.apDevice.findUnique({ where: { mac } });
+      if (!existing) {
+        throw ApOnboardError.notFound(mac);
+      }
+      if (existing.status === "DECOMMISSIONED") {
+        // Idempotent — operator already pulled the trigger. No remove re-fire.
+        return { ap: existing, operationId: null };
+      }
+
+      try {
+        await client.removeAgent(mac);
+        const updated = await prisma.apDevice.update({
+          where: { mac },
+          data: {
+            status: "DECOMMISSIONED",
+            decommissionedAt: new Date(),
+            failureReason: null,
+          },
+        });
+        return { ap: updated, operationId: null };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        throw new ApOnboardError(message, 502, "UNKNOWN");
+      }
     },
   };
 }
 
 /**
- * EASYMESH backend — IEEE 1905.1 discovery + prplMesh-controller M1/M2
- * onboarding (ADR-024 §2). Stub until Phase 4.
+ * EASYMESH backend — IEEE 1905.1 discovery + prplMesh Controller-only M1/M2
+ * onboarding (ADR-024 §2). Wired to the config-built controller client
+ * (`DROPLET_AP_EASYMESH_CONTROLLER_URL`). The client constructs even with empty
+ * config; its calls throw NOT_CONFIGURED until the URL is set, and the discovery
+ * source only invokes the backend when `DROPLET_AP_EASYMESH_ENABLED` is on — so
+ * a default single-box never touches it.
  */
-export const EASYMESH_BACKEND: ApOnboardBackendHandler =
-  notImplementedBackend("EASYMESH");
+export const EASYMESH_BACKEND: ApOnboardBackendHandler = createEasyMeshBackend(
+  createEasyMeshControllerClient(),
+);
 
 // ─────────────────────────────────────────────────────────────────────────
 // UNIFI backend (ADR-024 §3, Phase 3) — official-API adopt + WLAN push.

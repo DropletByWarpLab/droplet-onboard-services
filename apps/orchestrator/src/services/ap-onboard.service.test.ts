@@ -57,9 +57,11 @@ import {
   DISCOVERED_AP_LRU_CAP,
   resolveApBackend,
   createUniFiBackend,
+  createEasyMeshBackend,
 } from "./ap-onboard.service.js";
 import * as openwrt from "./openwrt.client.js";
 import type { UniFiNetworkClient } from "./unifi-network.client.js";
+import type { EasyMeshControllerClient } from "./easymesh-controller.client.js";
 
 function createPrismaMock() {
   const rows = new Map<string, any>();
@@ -124,15 +126,15 @@ describe("ap-onboard backend registry (ADR-024 Phase 1)", () => {
     expect(AP_ONBOARD_BACKENDS.DROPLET_IMAGE).toBe(DROPLET_IMAGE_BACKEND);
   });
 
-  it("EASYMESH is still a NotImplemented stub this phase; UNIFI is the real Phase-3 handler", async () => {
+  it("EASYMESH and UNIFI are both real handlers now (Phase 4 / Phase 3 replaced their stubs)", async () => {
     const prisma = createPrismaMock();
-    // EASYMESH lands in Phase 4 — still a stub.
+    // Phase 4 replaced the EASYMESH stub: its reconcile is the shared upsert
+    // path, so an empty snapshot resolves cleanly rather than throwing
+    // 'not implemented'.
     await expect(
       AP_ONBOARD_BACKENDS.EASYMESH.reconcile(prisma as any, []),
-    ).rejects.toThrow(/not implemented/i);
-    // UNIFI is now the real Phase-3 handler (no longer 'not implemented'): its
-    // reconcile is the shared upsert path, so an empty snapshot resolves
-    // cleanly rather than throwing.
+    ).resolves.toBeDefined();
+    // UNIFI is the real Phase-3 handler (same shared reconcile).
     await expect(
       AP_ONBOARD_BACKENDS.UNIFI.reconcile(prisma as any, []),
     ).resolves.toBeDefined();
@@ -529,5 +531,181 @@ describe("UNIFI backend handler (ADR-024 Phase 3)", () => {
     await expect(
       AP_ONBOARD_BACKENDS.UNIFI.reconcile(prisma as any, []),
     ).resolves.toBeDefined();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// ADR-024 Phase 4 — EASYMESH backend handler (prplMesh Controller-only M1/M2).
+//
+// The handler drives an EasyMeshControllerClient (mocked here — there is no
+// real controller on the laptop, and prplMesh-on-mt76 is the ADR's open
+// hardware risk) and must mirror the DROPLET_IMAGE / UNIFI handler's
+// transition + audit discipline EXACTLY: PROVISIONING → ONLINE on success
+// (audit columns written), PROVISIONING → FAILED + failureReason on any client
+// error (no partial ONLINE), and remove → DECOMMISSIONED. operationId is null
+// (the controller is request/response — no routing-service op to poll).
+// ─────────────────────────────────────────────────────────────────────────
+
+function fakeEasyMeshClient(
+  overrides: Partial<Record<keyof EasyMeshControllerClient, any>> = {},
+): EasyMeshControllerClient {
+  return {
+    listOnboardingAgents: vi.fn(async () => []),
+    onboardAgent: vi.fn(async () => undefined),
+    getAgentStatus: vi.fn(async () => ({ alMac: "x", state: "onboarded" })),
+    removeAgent: vi.fn(async () => undefined),
+    ...overrides,
+  } as EasyMeshControllerClient;
+}
+
+describe("EASYMESH backend handler (ADR-024 Phase 4)", () => {
+  const MAC = "AA:BB:CC:DD:EE:01";
+
+  function seedEasyMeshRow(
+    prisma: ReturnType<typeof createPrismaMock>,
+    status = "AWAITING_APPROVAL",
+  ) {
+    prisma.rows.set(MAC, {
+      mac: MAC,
+      status,
+      backend: "EASYMESH",
+      vendor: "TP-Link",
+      backendRef: MAC,
+      lastSeen: new Date(),
+    });
+  }
+
+  it("approve onboards the Agent (M1/M2), driving PROVISIONING → ONLINE with audit columns written", async () => {
+    const prisma = createPrismaMock();
+    seedEasyMeshRow(prisma);
+    const client = fakeEasyMeshClient();
+    const backend = createEasyMeshBackend(client);
+
+    const result = await backend.approve(
+      prisma as any,
+      MAC,
+      { ssid: "Droplet", encryptionKey: "longenoughpw" },
+      { username: "stefan" },
+    );
+
+    expect(client.onboardAgent).toHaveBeenCalledTimes(1);
+    // The credentials carried the household SSID + key (M1/M2 push).
+    const [alMac, creds] = (client.onboardAgent as any).mock.calls[0];
+    expect(alMac).toBe(MAC);
+    expect(creds).toMatchObject({ ssid: "Droplet", key: "longenoughpw" });
+
+    const row = prisma.rows.get(MAC);
+    expect(row.status).toBe("ONLINE");
+    expect(row.approvedBy).toBe("stefan");
+    expect(row.approvedSsid).toBe("Droplet");
+    expect(row.approvedAt).toBeInstanceOf(Date);
+    expect((result.ap as any).status).toBe("ONLINE");
+    // Controller is request/response — no routing-service op to poll.
+    expect(result.operationId).toBeNull();
+  });
+
+  it("approve transitions PROVISIONING → FAILED with failureReason when onboarding throws, no partial ONLINE", async () => {
+    const prisma = createPrismaMock();
+    seedEasyMeshRow(prisma);
+    const client = fakeEasyMeshClient({
+      onboardAgent: vi.fn(async () => {
+        throw new Error("controller refused M2 credential push");
+      }),
+    });
+    const backend = createEasyMeshBackend(client);
+
+    await expect(
+      backend.approve(
+        prisma as any,
+        MAC,
+        { ssid: "Droplet", encryptionKey: "longenoughpw" },
+        { username: "stefan" },
+      ),
+    ).rejects.toThrow();
+
+    const row = prisma.rows.get(MAC);
+    expect(row.status).toBe("FAILED");
+    expect(row.failureReason).toContain("controller refused M2 credential push");
+    // No audit columns written on the failure path — no partial ONLINE.
+    expect(row.approvedAt).toBeUndefined();
+  });
+
+  it("approve throws notFound when the AL-MAC was never discovered", async () => {
+    const prisma = createPrismaMock();
+    const backend = createEasyMeshBackend(fakeEasyMeshClient());
+    await expect(
+      backend.approve(
+        prisma as any,
+        "AA:BB:CC:00:00:99",
+        { ssid: "Droplet", encryptionKey: "longenoughpw" },
+        { username: "stefan" },
+      ),
+    ).rejects.toThrow(/not found/i);
+    // Never asked the controller to onboard a device we never saw.
+    const backend2 = fakeEasyMeshClient();
+    expect(backend2.onboardAgent).not.toHaveBeenCalled();
+  });
+
+  it("decommission removes the Agent on the controller, driving → DECOMMISSIONED", async () => {
+    const prisma = createPrismaMock();
+    seedEasyMeshRow(prisma, "ONLINE");
+    const client = fakeEasyMeshClient();
+    const backend = createEasyMeshBackend(client);
+
+    const result = await backend.decommission(prisma as any, MAC);
+
+    expect(client.removeAgent).toHaveBeenCalledTimes(1);
+    expect(prisma.rows.get(MAC).status).toBe("DECOMMISSIONED");
+    expect((result.ap as any).status).toBe("DECOMMISSIONED");
+    expect(result.operationId).toBeNull();
+  });
+
+  it("decommission is idempotent on an already-DECOMMISSIONED row (no remove re-fire)", async () => {
+    const prisma = createPrismaMock();
+    seedEasyMeshRow(prisma, "DECOMMISSIONED");
+    const client = fakeEasyMeshClient();
+    const backend = createEasyMeshBackend(client);
+
+    const result = await backend.decommission(prisma as any, MAC);
+
+    expect(client.removeAgent).not.toHaveBeenCalled();
+    expect((result.ap as any).status).toBe("DECOMMISSIONED");
+  });
+
+  it("reconcile upserts an EASYMESH observation the same way the other backends do", async () => {
+    const prisma = createPrismaMock();
+    const backend = createEasyMeshBackend(fakeEasyMeshClient());
+    await backend.reconcile(prisma as any, [
+      {
+        mac: MAC,
+        backend: "EASYMESH",
+        vendor: "TP-Link",
+        backendRef: MAC,
+        model: "RE700X",
+      },
+    ]);
+    const row = prisma.rows.get(MAC);
+    expect(row.status).toBe("AWAITING_APPROVAL");
+    expect(row.backend).toBe("EASYMESH");
+    expect(row.backendRef).toBe(MAC);
+  });
+
+  it("the registry dispatches an EASYMESH row to the EasyMesh handler (others unaffected)", async () => {
+    const prisma = createPrismaMock();
+    // The registry's EASYMESH entry is the real handler this phase (not a stub).
+    expect(AP_ONBOARD_BACKENDS.EASYMESH.key).toBe("EASYMESH");
+
+    const decomSpy = vi.spyOn(AP_ONBOARD_BACKENDS.EASYMESH, "decommission");
+    // Seed DECOMMISSIONED so the idempotent short-circuit is reached without
+    // needing a (NOT_CONFIGURED) client call — a pure dispatch assertion.
+    prisma.rows.set(MAC, {
+      mac: MAC,
+      status: "DECOMMISSIONED",
+      backend: "EASYMESH",
+      lastSeen: new Date(),
+    });
+    await decommissionAp(prisma as any, MAC);
+    expect(decomSpy).toHaveBeenCalledTimes(1);
+    decomSpy.mockRestore();
   });
 });
