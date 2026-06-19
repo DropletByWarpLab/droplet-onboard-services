@@ -39,7 +39,10 @@ import {
   createPrismaTlsCertStore,
   createDiskTlsFileOps,
   bridgeNginxReloader,
+  createBridgeFqdnPersister,
+  createRoutingDnsRegistrar,
 } from "./services/tls-issuance.adapters.js";
+import { scheduleTlsBootTick } from "./services/tls-issuance.boot-tick.js";
 import { createDeviceIdentityClient } from "./services/device-identity.client.js";
 import {
   createScheduleTicker,
@@ -516,6 +519,12 @@ async function main() {
   // service (it does NOT throw), so a flaky HQ never increments the canary;
   // only an unexpected (programming) error bubbles up here — exactly what the
   // canary should escalate, same posture as the purge handlers above.
+  // ADR-023 PR-1 — zero-touch. `hqConfigured` gates the empty-fqdn bootstrap
+  // path so a fresh box LEARNS its opaque name from HQ (and persists it back to
+  // .env via the bridge); `dns` registers that learned name with the routing
+  // service's split-horizon dnsmasq on every install. Both extra collaborators
+  // are best-effort — a persist/DNS failure never aborts issuance.
+  const hqConfigured = !!config.HQ_ISSUANCE_URL;
   const tlsIssuance = createTlsIssuanceService({
     fqdn: config.DROPLET_PUBLIC_FQDN,
     deviceId: config.DROPLET_DEVICE_ID,
@@ -525,6 +534,9 @@ async function main() {
     files: createDiskTlsFileOps(),
     reloadNginx: bridgeNginxReloader,
     logger,
+    hqConfigured,
+    persistFqdn: createBridgeFqdnPersister(),
+    dns: createRoutingDnsRegistrar(),
   });
   cronRuntime.scheduleCron(
     "0 4 * * *",
@@ -533,6 +545,17 @@ async function main() {
     },
     { lockKey: "droplet:tls-renewal" },
   );
+  // ADR-023 PR-1 (Gap 3) — immediate, idempotent, fail-soft boot tick so a
+  // reflash gets its publicly-trusted cert within seconds instead of waiting up
+  // to 24h for the 04:00 cron. Gated on HQ being configured (no-op on dev/CI);
+  // the service's provisioned-guard short-circuits an un-provisioned box inside
+  // runOnce(). The unref'd timer never holds the loop open and a rejection is
+  // caught (NOT via cron-runtime.safeRun, so it never churns the cron canary).
+  scheduleTlsBootTick({
+    hqConfigured,
+    runOnce: () => tlsIssuance.runOnce(),
+    logger,
+  });
 
   // Start Express on top of a raw http.Server so we can attach the
   // WebSocket bridge (MQTT → browser) to the same listen socket.

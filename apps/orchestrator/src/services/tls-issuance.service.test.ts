@@ -375,12 +375,196 @@ describe("tls-issuance.service — failure handling", () => {
 });
 
 describe("tls-issuance.service — no-fqdn guard", () => {
-  it("skips entirely (no HQ calls, no throw) when no fqdn is configured yet", async () => {
+  it("skips entirely (no HQ calls, no throw) when no fqdn is configured yet AND HQ is unconfigured", async () => {
     const hq = makeHqClient();
+    // hqConfigured omitted (undefined) preserves the dev/CI no-op posture.
     const deps = makeDeps({ fqdn: "", hq });
     const svc = createTlsIssuanceService(deps);
 
     await expect(svc.runOnce()).resolves.not.toThrow();
     expect(hq.challenge).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-023 PR-1 — zero-touch FQDN write-back (Gap 1)
+// ---------------------------------------------------------------------------
+
+describe("tls-issuance.service — zero-touch FQDN write-back", () => {
+  it("empty-fqdn + HQ configured + provisioned → bootstrap-issues, learns the fqdn, and keys the row on the LEARNED fqdn", async () => {
+    const store = makeStore(); // no row — a fresh zero-touch box
+    const hq = makeHqClient();
+    const persistFqdn = vi.fn(async () => {});
+    const deps = makeDeps({
+      fqdn: "", // box hasn't learned its name yet
+      hqConfigured: true,
+      store,
+      hq,
+      persistFqdn,
+    });
+    const svc = createTlsIssuanceService(deps);
+
+    await svc.runOnce();
+
+    // It reached HQ and issued despite the empty seed.
+    expect(hq.challenge).toHaveBeenCalledTimes(1);
+    expect(hq.order).toHaveBeenCalledTimes(1);
+    // NO row was keyed on '' — the upsert lands on the LEARNED fqdn only.
+    expect(store.rows.has("")).toBe(false);
+    expect((await store.get(FQDN))?.state).toBe("LE_ISSUED");
+    // The learned name was persisted back to .env (it differs from the '' seed).
+    expect(persistFqdn).toHaveBeenCalledWith(FQDN);
+  });
+
+  it("does NOT double-persist when the learned fqdn already equals the configured seed", async () => {
+    const persistFqdn = vi.fn(async () => {});
+    const deps = makeDeps({ fqdn: FQDN, persistFqdn });
+    const svc = createTlsIssuanceService(deps);
+
+    await svc.runOnce();
+
+    expect(persistFqdn).not.toHaveBeenCalled();
+  });
+
+  it("empty-fqdn + HQ unconfigured → no-op (no HQ calls, no persist) — preserves dev/CI posture", async () => {
+    const hq = makeHqClient();
+    const persistFqdn = vi.fn(async () => {});
+    const deps = makeDeps({ fqdn: "", hqConfigured: false, hq, persistFqdn });
+    const svc = createTlsIssuanceService(deps);
+
+    await expect(svc.runOnce()).resolves.not.toThrow();
+    expect(hq.challenge).not.toHaveBeenCalled();
+    expect(persistFqdn).not.toHaveBeenCalled();
+  });
+
+  it("empty-fqdn + HQ configured but device UNPROVISIONED → no-op (no HQ calls)", async () => {
+    const hq = makeHqClient();
+    const identity = makeDeviceIdentity();
+    identity.getDeviceIdentityStatus = vi.fn(async () => ({
+      provisioned: false,
+      backend: "mock" as const,
+      certSubject: "",
+      certFingerprint: "",
+      certExpiresAt: null,
+      sealingPcrs: [],
+      sealValid: false,
+      lastResealAt: null,
+      currentPcrSnapshot: {},
+    })) as never;
+    const deps = makeDeps({
+      fqdn: "",
+      hqConfigured: true,
+      hq,
+      identity: identity as unknown as TlsIssuanceDeps["identity"],
+    });
+    const svc = createTlsIssuanceService(deps);
+
+    await expect(svc.runOnce()).resolves.not.toThrow();
+    expect(hq.challenge).not.toHaveBeenCalled();
+  });
+
+  it("a persistFqdn failure is swallowed and never aborts a successful issuance", async () => {
+    const store = makeStore();
+    const persistFqdn = vi.fn(async () => {
+      throw new Error("write-back blew up");
+    });
+    const deps = makeDeps({ fqdn: "", hqConfigured: true, store, persistFqdn });
+    const svc = createTlsIssuanceService(deps);
+
+    // Even though persistFqdn rejects, the issuance completes cleanly.
+    await expect(svc.runOnce()).resolves.not.toThrow();
+    expect((await store.get(FQDN))?.state).toBe("LE_ISSUED");
+    expect(persistFqdn).toHaveBeenCalledWith(FQDN);
+  });
+
+  it("a FAILURE with an empty seed does NOT upsert an empty-key row (just warns)", async () => {
+    const store = makeStore();
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const hq = makeHqClient({
+      challenge: vi.fn(async () => {
+        const e = new Error("HQ /api/issuance/order/challenge returned 503: down");
+        throw e;
+      }),
+    });
+    const deps = makeDeps({ fqdn: "", hqConfigured: true, store, hq, logger });
+    const svc = createTlsIssuanceService(deps);
+
+    await expect(svc.runOnce()).resolves.not.toThrow();
+    // No '' row was ever written (TlsCert.fqdn @id must never be empty).
+    expect(store.rows.has("")).toBe(false);
+    expect(store.rows.size).toBe(0);
+    expect(logger.warn).toHaveBeenCalled();
+  });
+
+  it("issueOrRenew returns { fqdn, notAfter } — the learned name is surfaced, not discarded", async () => {
+    // White-box: drive runOnce with a seeded fqdn and assert the row keys on the
+    // HQ-returned ch.fqdn (which equals FQDN here) and carries a real notAfter.
+    const store = makeStore({ fqdn: FQDN, state: "BOOTSTRAP_SELF_SIGNED" });
+    const deps = makeDeps({ store });
+    const svc = createTlsIssuanceService(deps);
+
+    await svc.runOnce();
+
+    const row = await store.get(FQDN);
+    expect(row?.state).toBe("LE_ISSUED");
+    expect(row?.notAfter).toBeTruthy();
+    expect(Number.isNaN(new Date(row!.notAfter!).getTime())).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-023 PR-1 — split-horizon DNS registration on issuance (Gap 2)
+// ---------------------------------------------------------------------------
+
+describe("tls-issuance.service — split-horizon DNS registration", () => {
+  it("registers the LEARNED ch.fqdn after a successful install (after reloadNginx)", async () => {
+    const calls: string[] = [];
+    const reloadNginx = vi.fn(async () => {
+      calls.push("reload");
+    });
+    const dns = {
+      register: vi.fn(async (hostname: string) => {
+        calls.push(`dns:${hostname}`);
+      }),
+    };
+    const deps = makeDeps({ reloadNginx, dns });
+    const svc = createTlsIssuanceService(deps);
+
+    await svc.runOnce();
+
+    expect(dns.register).toHaveBeenCalledTimes(1);
+    expect(dns.register).toHaveBeenCalledWith(FQDN);
+    // DNS registration happens AFTER the nginx reload.
+    expect(calls).toEqual(["reload", `dns:${FQDN}`]);
+  });
+
+  it("a DNS-registration failure does NOT abort issuance (cert stays installed, no throw)", async () => {
+    const store = makeStore({ fqdn: FQDN, state: "BOOTSTRAP_SELF_SIGNED" });
+    const dns = {
+      register: vi.fn(async () => {
+        throw new Error("routing service down");
+      }),
+    };
+    const deps = makeDeps({ store, dns });
+    const svc = createTlsIssuanceService(deps);
+
+    await expect(svc.runOnce()).resolves.not.toThrow();
+    // The cert was still installed and the state advanced — DNS is best-effort.
+    expect((await store.get(FQDN))?.state).toBe("LE_ISSUED");
+  });
+
+  it("does NOT register DNS on the no-op branch (healthy cert, nothing to install)", async () => {
+    const store = makeStore({
+      fqdn: FQDN,
+      state: "LE_ISSUED",
+      notAfter: daysFromNow(45),
+    });
+    const dns = { register: vi.fn(async () => {}) };
+    const deps = makeDeps({ store, dns });
+    const svc = createTlsIssuanceService(deps);
+
+    await svc.runOnce();
+
+    expect(dns.register).not.toHaveBeenCalled();
   });
 });
