@@ -156,3 +156,14 @@ function startOfUtcWeek(d: Date): Date {
 export function _parseRruleForTests(rule: string): ParsedRrule | null {
   return parseRrule(rule);
 }
+
+/**
+ * Validity check for the supported RRULE subset. Returns true when the
+ * rule parses to a FREQ=DAILY|WEEKLY form the scheduler can advance.
+ * Used by the scene-schedules route to 400 a bad RRULE at the boundary
+ * rather than persist a row the ticker would immediately disable. Same
+ * UTC-only posture as `nextFireFromRrule`.
+ */
+export function isSupportedRrule(rule: string): boolean {
+  return parseRrule(rule) !== null;
+}
