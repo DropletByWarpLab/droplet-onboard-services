@@ -32,6 +32,10 @@ const TIER_2_OPERATIONS = new Set([
   // DHCP LAN pool reshape (start/limit/leasetime) — a LAN address-map change
   // that can strand connected clients if the pool is shrunk, so confirm it.
   "set_dhcp_pool",
+  // Hostname change re-keys mDNS/.local + the dashboard status line; the active
+  // session can briefly lose name resolution, so confirm it. (NTP toggle is
+  // deliberately NOT here — it's Tier 1, low-risk + reversible, applies now.)
+  "set_hostname",
   // UPnP/NAT-PMP automatic port opening — a firewall-class exposure change.
   "set_upnp",
   "create_firewall_zone",

@@ -174,6 +174,23 @@ export interface RouterSystemInfo {
   resources: RouterResources;
 }
 
+/**
+ * Editable system controls + honest gates for the deployment shape.
+ *
+ * `hostname` + `ntp` are real, editable controls on the in-container OpenWrt.
+ * `statusLed` + `country` carry a `supported` / `editable` flag so the UI can
+ * render an honest "not available on this appliance" state where the single-box
+ * shape can't really drive them (no system.led ubus surface; host-hostapd
+ * country is pinned) — same posture as the guest-wifi/UPnP gates. The flags are
+ * authoritative from the orchestrator's DROPLET_AP_MODE, not the box read.
+ */
+export interface SystemControls {
+  hostname: string | null;
+  ntpEnabled: boolean;
+  statusLed: { supported: boolean; enabled: boolean };
+  country: { value: string | null; editable: boolean };
+}
+
 export interface NetworkSummary {
   system: RouterBoardInfo;
   resources: RouterResources;

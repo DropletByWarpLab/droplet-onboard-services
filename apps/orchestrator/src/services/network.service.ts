@@ -435,6 +435,41 @@ export async function rebootRouter(): Promise<openwrt.WriteResult> {
   return openwrt.rebootRouter();
 }
 
+// --- System controls (hostname / NTP / status-LED / country) ---
+//
+// hostname (Tier 2) + NTP (Tier 1) are real, editable controls on the
+// in-container OpenWrt. Status-LED + country are HONEST-GATED on the single-box
+// hostapd shape: the front-panel LEDs are physical on the host SBC (no
+// system.led ubus surface in the container) and the AP country is pinned in the
+// host hostapd config (the in-container wireless has no live radio). Force their
+// supported/editable flags false here so the UI shows an honest "not available"
+// state instead of a control that 500s or writes inert UCI — same posture as
+// getGuestWifi/getUpnp. The flags are authoritative from DROPLET_AP_MODE here,
+// not from the box read.
+export async function getSystemControls(): Promise<openwrt.SystemControls> {
+  const controls = await openwrt.fetchSystemControls();
+  if (config.DROPLET_AP_MODE === "hostapd") {
+    return {
+      ...controls,
+      statusLed: { supported: false, enabled: false },
+      country: { value: controls.country.value, editable: false },
+    };
+  }
+  return controls;
+}
+
+export async function setHostname(hostname: string): Promise<openwrt.WriteResult> {
+  const result = await openwrt.setHostname(hostname);
+  await invalidateNetworkCache();
+  return result;
+}
+
+export async function setNtpEnabled(enabled: boolean): Promise<openwrt.WriteResult> {
+  const result = await openwrt.setNtpEnabled(enabled);
+  await invalidateNetworkCache();
+  return result;
+}
+
 export async function getRouterOperation(opId: string) {
   return openwrt.fetchOperation(opId);
 }

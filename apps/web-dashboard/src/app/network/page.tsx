@@ -38,6 +38,7 @@ import { DhcpPoolForm } from "@/components/network/DhcpPoolForm";
 import { DnsOverTlsCard } from "@/components/network/DnsOverTlsCard";
 import { GuestWifiCard } from "@/components/network/GuestWifiCard";
 import { MaintenanceCards } from "@/components/network/MaintenanceCards";
+import { SystemControlsCard } from "@/components/network/SystemControlsCard";
 import { UpnpCard } from "@/components/network/UpnpCard";
 import { NetworkSimple } from "@/components/network/NetworkSimple";
 import { SwitchPanel } from "@/components/network/switch/SwitchPanel";
@@ -1064,6 +1065,12 @@ function SystemTab({
           <InfoRow label="Memory Free" value={`${memFreeMB} MB`} />
         </div>
       </div>
+
+      {/* System controls — hostname (Tier-2) + time-sync (Tier-1) are real;
+          status-LED + Wi-Fi country render honest 'not available' rows on the
+          single-box shape (no in-container LED surface; pinned host-hostapd
+          country). */}
+      <SystemControlsCard />
 
       {/* DHCP & DNS — the live LAN pool range + lease-time editor (Tier-2
           confirm) plus the honest DNS-over-TLS gate (no DoT forwarder on this

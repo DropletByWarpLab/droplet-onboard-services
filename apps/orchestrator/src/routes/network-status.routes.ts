@@ -18,6 +18,9 @@ import {
   addStaticDhcpLease,
   getDhcpPool,
   setDhcpPool,
+  getSystemControls,
+  setHostname,
+  setNtpEnabled,
   blockDevice,
   unblockDevice,
   addPortForward,
@@ -239,6 +242,111 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
     }
   });
 
+  // --- System controls (hostname / NTP / status-LED / country) ---
+  // Read carries the honest gates (statusLed.supported / country.editable are
+  // forced false on the single-box shape in the service). Hostname is Tier 2
+  // (re-keys mDNS/.local → confirm); NTP is Tier 1 (applies immediately).
+  router.get("/network/system/controls", async (_req, res, next) => {
+    try {
+      const controls = await getSystemControls();
+      res.json(controls);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Same RFC-1123 label grammar as the routing HostnameRequest schema, so a bad
+  // hostname is rejected before a token is minted.
+  const HOSTNAME_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
+
+  router.post(
+    "/network/system/hostname",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        const { hostname } = req.body ?? {};
+        if (typeof hostname !== "string" || hostname.length > 63 || !HOSTNAME_RE.test(hostname)) {
+          return res.status(400).json({
+            error: "Provide a 'hostname' — lowercase letters, digits and hyphens, max 63 chars",
+          });
+        }
+
+        const userId = req.user?.id;
+        const result = await evaluateNetworkCommand(
+          prisma,
+          "system.hostname",
+          "set_hostname",
+          { hostname },
+          userId,
+        );
+
+        if ("requiresConfirmation" in result && result.requiresConfirmation) {
+          return res.status(202).json({
+            status: "confirmation_required",
+            operation: "set_hostname",
+            tier: result.tier,
+            reason: result.reason,
+            confirmationToken: result.confirmationToken,
+            expiresIn: 60,
+          });
+        }
+
+        if ("blocked" in result && result.blocked) {
+          return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
+        }
+
+        const op = await setHostname(hostname);
+        res.json({ status: "ok", tier: result.tier, operationId: op.operationId });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  router.post(
+    "/network/system/ntp",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        const { enabled } = req.body ?? {};
+        if (typeof enabled !== "boolean") {
+          return res.status(400).json({ error: "Provide a boolean 'enabled'" });
+        }
+
+        const userId = req.user?.id;
+        const result = await evaluateNetworkCommand(
+          prisma,
+          "system.ntp",
+          "set_ntp",
+          { enabled },
+          userId,
+        );
+
+        // set_ntp is Tier 1 — applies immediately. Guard the confirm/blocked
+        // arms anyway so a future tier bump can't silently no-op.
+        if ("requiresConfirmation" in result && result.requiresConfirmation) {
+          return res.status(202).json({
+            status: "confirmation_required",
+            operation: "set_ntp",
+            tier: result.tier,
+            reason: result.reason,
+            confirmationToken: result.confirmationToken,
+            expiresIn: 60,
+          });
+        }
+
+        if ("blocked" in result && result.blocked) {
+          return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
+        }
+
+        const op = await setNtpEnabled(enabled);
+        res.json({ status: "ok", enabled, tier: result.tier, operationId: op.operationId });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
   // WARP-171: per-route guard. owner ONLY — rebooting the router is
   // a destructive operation that drops every connected device. The
   // matrix carves this out as owner-only ("the household admin can't
@@ -363,6 +471,10 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
             params?.limit as number,
             params?.leasetime as string,
           );
+          break;
+        case "set_hostname":
+          // Tier-2 confirm for POST /network/system/hostname.
+          writeResult = await setHostname(params?.hostname as string);
           break;
         case "reboot":
           writeResult = await rebootRouter();

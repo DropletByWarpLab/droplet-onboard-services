@@ -48,6 +48,7 @@ const {
   bridgeApplyGuest,
   bridgeRemoveGuest,
   bridgeGuestStatus,
+  fetchSystemControls,
 } = vi.hoisted(() => ({
   setWirelessSsid: vi.fn(),
   setWirelessPassword: vi.fn(),
@@ -59,6 +60,7 @@ const {
   bridgeApplyGuest: vi.fn(),
   bridgeRemoveGuest: vi.fn(),
   bridgeGuestStatus: vi.fn(),
+  fetchSystemControls: vi.fn(),
 }));
 
 vi.mock("./openwrt.client.js", async () => {
@@ -70,6 +72,7 @@ vi.mock("./openwrt.client.js", async () => {
     fetchGuestWifi: (...a: unknown[]) => fetchGuestWifi(...a),
     createGuestNetwork: (...a: unknown[]) => createGuestNetwork(...a),
     removeGuestNetwork: (...a: unknown[]) => removeGuestNetwork(...a),
+    fetchSystemControls: (...a: unknown[]) => fetchSystemControls(...a),
   };
 });
 
@@ -87,6 +90,7 @@ import {
   getGuestWifi,
   setGuestWifi,
   removeGuestWifi,
+  getSystemControls,
 } from "./network.service.js";
 
 beforeEach(() => {
@@ -110,6 +114,13 @@ beforeEach(() => {
     ssid: "Visitors",
     password: "guestpass1",
     supported: true,
+  });
+  fetchSystemControls.mockResolvedValue({
+    hostname: "droplet-rack-01",
+    ntpEnabled: true,
+    // The raw box read reports these as "live" — the service must override.
+    statusLed: { supported: true, enabled: true },
+    country: { value: "US", editable: true },
   });
 });
 
@@ -267,5 +278,30 @@ describe("guest Wi-Fi — uci mode (multi-box) UNCHANGED", () => {
     expect(removeGuestNetwork).toHaveBeenCalledOnce();
     expect(bridgeRemoveGuest).not.toHaveBeenCalled();
     expect(res).toEqual({ operationId: "op-guest-rm-uci" });
+  });
+});
+
+// Status-LED + regulatory-domain can't be driven on the single-box hostapd
+// shape (no system.led ubus surface; host-hostapd country is pinned). The
+// authoritative gate lives in the service: it forces statusLed.supported and
+// country.editable to false there regardless of what the box read reports, so
+// the UI shows an honest "not available" state — same posture as guest-wifi.
+describe("getSystemControls honesty gate", () => {
+  it("hostapd mode → statusLed/country gated false; hostname + NTP pass through", async () => {
+    configMock.DROPLET_AP_MODE = "hostapd";
+    const res = await getSystemControls();
+    expect(res.statusLed.supported).toBe(false);
+    expect(res.country.editable).toBe(false);
+    // The live country VALUE is still surfaced read-only; the real controls pass.
+    expect(res.country.value).toBe("US");
+    expect(res.hostname).toBe("droplet-rack-01");
+    expect(res.ntpEnabled).toBe(true);
+  });
+
+  it("uci mode → passes the box read through unchanged (multi-box can edit)", async () => {
+    configMock.DROPLET_AP_MODE = "uci";
+    const res = await getSystemControls();
+    expect(res.statusLed.supported).toBe(true);
+    expect(res.country.editable).toBe(true);
   });
 });

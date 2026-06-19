@@ -21,6 +21,7 @@ import type {
   WirelessClient,
   DhcpLease,
   RouterSystemInfo,
+  SystemControls,
   FirewallZones,
   FirewallRules,
   FirewallRedirects,
@@ -33,6 +34,7 @@ import {
 
 export { RouterError } from "../types/router-error.js";
 export type { RouterErrorCode } from "../types/router-error.js";
+export type { SystemControls } from "../types/network.js";
 
 const logger = pino({ name: "openwrt-client" });
 
@@ -645,6 +647,38 @@ export async function fetchSystemInfo(): Promise<RouterSystemInfo> {
 
 export async function rebootRouter(): Promise<WriteResult> {
   const res = await routingFetch("/system/reboot", { method: "POST", label: "Reboot" });
+  return opFrom(res);
+}
+
+// --- System controls (hostname / NTP / status-LED / country) ---
+
+/** Wire shape of GET /system/controls (snake_case from the routing service). */
+interface SystemControlsWire {
+  hostname: string | null;
+  ntp_enabled: boolean;
+  status_led: { supported: boolean; enabled: boolean };
+  country: { value: string | null; editable: boolean };
+}
+
+export async function fetchSystemControls(): Promise<SystemControls> {
+  const raw = await routingFetchJson<SystemControlsWire>("/system/controls", {
+    label: "System controls",
+  });
+  return {
+    hostname: raw.hostname,
+    ntpEnabled: raw.ntp_enabled,
+    statusLed: raw.status_led,
+    country: raw.country,
+  };
+}
+
+export async function setHostname(hostname: string): Promise<WriteResult> {
+  const res = await postJson("/system/hostname", { hostname }, "Set hostname");
+  return opFrom(res);
+}
+
+export async function setNtpEnabled(enabled: boolean): Promise<WriteResult> {
+  const res = await postJson("/system/ntp", { enabled }, "Set NTP");
   return opFrom(res);
 }
 

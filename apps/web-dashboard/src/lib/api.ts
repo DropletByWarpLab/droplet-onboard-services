@@ -1425,6 +1425,47 @@ export async function fetchRouterSystemInfo(): Promise<Record<string, unknown>> 
   return res.json();
 }
 
+/** Editable system controls + honest gates. `statusLed.supported` /
+ *  `country.editable` are false on shapes that can't drive them (single-box). */
+export interface SystemControls {
+  hostname: string | null;
+  ntpEnabled: boolean;
+  statusLed: { supported: boolean; enabled: boolean };
+  country: { value: string | null; editable: boolean };
+}
+
+export async function fetchSystemControls(): Promise<SystemControls> {
+  const res = await authFetch(`${BASE}/api/network/system/controls`);
+  if (!res.ok) throw new Error(`Failed to fetch system controls: ${res.status}`);
+  return res.json();
+}
+
+/** Change the hostname. Tier 2 — may answer 202 `confirmation_required`. */
+export async function setHostname(hostname: string): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/system/hostname`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ hostname }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok && !data.requiresConfirmation) {
+    throwNetworkWriteError(data, res.status, "Failed to change hostname");
+  }
+  return data;
+}
+
+/** Toggle the appliance's OpenWrt NTP daemon. Tier 1 — applies immediately. */
+export async function setNtp(enabled: boolean): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/system/ntp`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to update time sync");
+  return data;
+}
+
 // --- Managed switch writes (ADDON-network-switch-management.md §7) ---------
 //
 // Each is a Tier-2 (Write) command: the POST returns a 202 with a

@@ -144,6 +144,21 @@ class _MockSystem:
     def reboot(self) -> None:
         logger.info("mock: reboot requested — no-op")
 
+    def set_hostname(self, hostname: str) -> None:
+        logger.info("mock: set_hostname %s — no-op", hostname)
+
+    def set_ntp_enabled(self, enabled: bool) -> None:
+        logger.info("mock: set_ntp_enabled %s — no-op", enabled)
+
+    def controls(self, ap_mode: str = "uci") -> dict[str, Any]:
+        gated = ap_mode == "hostapd"
+        return {
+            "hostname": _BOARD_INFO["hostname"],
+            "ntp_enabled": True,
+            "status_led": {"supported": not gated, "enabled": False},
+            "country": {"value": "US", "editable": not gated},
+        }
+
 
 class _MockNetwork:
     def interface_status(self, name: str) -> dict[str, Any]:

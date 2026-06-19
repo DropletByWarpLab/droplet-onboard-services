@@ -144,6 +144,26 @@ class DnsHostnameRequest(BaseModel):
     ip: str = Field(..., pattern=_IPV4_PATTERN, description="IPv4 address the hostname should resolve to")
 
 
+class HostnameRequest(BaseModel):
+    """Change the system hostname (`system @system[0] hostname`).
+
+    Reuses the same RFC-1123 label grammar as DnsHostnameRequest. A hostname
+    change re-keys mDNS/.local + the dashboard status line, so the orchestrator
+    gates it Tier 2 (confirmable) — this schema just validates the shape.
+    """
+
+    hostname: str = Field(
+        ..., min_length=1, max_length=63, pattern=_HOSTNAME_PATTERN,
+        description="New hostname (lowercase RFC-1123 label, e.g. 'studio-droplet')",
+    )
+
+
+class NtpRequest(BaseModel):
+    """Toggle the in-container OpenWrt time daemon (sysntpd)."""
+
+    enabled: bool = Field(..., description="Enable the appliance's OpenWrt NTP daemon")
+
+
 class BlockDeviceRequest(BaseModel):
     mac: str = Field(..., pattern=r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$", description="MAC address to block")
     name: Optional[str] = Field(default=None, description="Optional rule name")

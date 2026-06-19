@@ -49,6 +49,8 @@ from schemas import (
     SetUpnpRequest,
     StaticLeaseRequest,
     DhcpPoolRequest,
+    HostnameRequest,
+    NtpRequest,
     SetDnsRequest,
     DnsHostnameRequest,
     BlockDeviceRequest,
@@ -1560,6 +1562,43 @@ def system_reboot():
     try:
         get_router().system.reboot()
         return {"status": "ok", "action": "reboot"}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+# Deployment-shape discriminator (single-box = hostapd). The orchestrator
+# applies the AUTHORITATIVE honest gate at its service layer (mirroring the
+# guest-wifi/UPnP gate); routing's controls() default just keeps the read
+# honest if the orchestrator ever calls it directly.
+_AP_MODE = os.environ.get("DROPLET_AP_MODE", "uci").strip().lower()
+
+
+@app.get("/system/controls")
+def system_controls():
+    try:
+        return get_router().system.controls(ap_mode=_AP_MODE)
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.post("/system/hostname")
+def set_system_hostname(req: HostnameRequest):
+    try:
+        r = get_router()
+        r.system.set_hostname(req.hostname)
+        # system uci changes are picked up by hostname/dnsmasq services on
+        # commit; no reboot needed. The hostname write already commits.
+        return {"status": "ok", "hostname": req.hostname}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.post("/system/ntp")
+def set_system_ntp(req: NtpRequest):
+    try:
+        r = get_router()
+        r.system.set_ntp_enabled(req.enabled)
+        return {"status": "ok", "enabled": req.enabled}
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
 

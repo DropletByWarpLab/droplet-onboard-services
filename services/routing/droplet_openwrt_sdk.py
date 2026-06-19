@@ -1281,6 +1281,71 @@ class SystemApi:
         self._r.uci.set("system", "@system[0]", {"hostname": hostname})
         self._r.uci.commit("system")
 
+    def set_ntp_enabled(self, enabled: bool):
+        """Enable/disable the in-container OpenWrt time daemon (sysntpd).
+
+        Governs the appliance's OpenWrt sysntpd (`system.ntp.enabled` /
+        `.enable_server`), NOT the host SBC hardware clock — callers/UI must say
+        so. Reversible, low-risk → Tier 1 at the orchestrator boundary.
+        """
+        flag = "1" if enabled else "0"
+        self._r.uci.set("system", "ntp", {"enabled": flag, "enable_server": flag})
+        self._r.uci.commit("system")
+
+    def controls(self, ap_mode: str = "uci") -> dict:
+        """Read the editable system controls + honest gates for the box shape.
+
+        Returns ``{hostname, ntp_enabled, status_led, country}`` where:
+          * ``hostname`` — from board_info (live);
+          * ``ntp_enabled`` — the sysntpd `enabled` flag;
+          * ``status_led`` — ``{supported, enabled}``. The front-panel LEDs are
+            physical on the host SBC; the in-container OpenWrt has no
+            ``system.led`` ubus surface, so on the hostapd single-box shape there
+            is nothing to toggle → ``supported: False`` (honest gate, same shape
+            as the guest-wifi gate). A real OpenWrt radio host can light it up.
+          * ``country`` — ``{value, editable}``. On the single-box the AP is host
+            hostapd with a hardcoded country, and the in-container `wireless`
+            config has no live radio, so the country is read-only here
+            (``editable: False``) — the value still reflects what we can read.
+
+        ``ap_mode`` is the deployment discriminator (``"hostapd"`` = single-box).
+        """
+        gated = ap_mode == "hostapd"
+
+        try:
+            hostname = self.board_info().get("hostname")
+        except (UbusError, ConnectionLost):
+            hostname = None
+
+        ntp_enabled = False
+        try:
+            res = self._r.uci.get("system", "ntp", "enabled")
+            val = res.get("value") if isinstance(res, dict) else res
+            ntp_enabled = str(val) in ("1", "true", "True")
+        except UbusError:
+            ntp_enabled = False
+
+        country = None
+        try:
+            wireless = self._r.uci.get("wireless")
+            if isinstance(wireless, dict):
+                for section in wireless.values():
+                    if isinstance(section, dict) and section.get("country"):
+                        country = section.get("country")
+                        break
+        except UbusError:
+            country = None
+
+        return {
+            "hostname": hostname,
+            "ntp_enabled": ntp_enabled,
+            # On a non-gated (real OpenWrt radio) host these could be live; the
+            # service layer flips supported/editable per deployment shape. Here
+            # we report the honest container-shape default.
+            "status_led": {"supported": not gated, "enabled": False},
+            "country": {"value": country, "editable": not gated},
+        }
+
     def set_timezone(self, zonename: str, timezone_string: str):
         """
         Set the timezone.
