@@ -10,18 +10,42 @@ interface ClimateControlProps {
 
 const MODES = ["heat", "cool", "auto", "off"] as const;
 
+// Matter Thermostat SystemMode enum → label. Read from the device's `systemMode`
+// attribute (NOT device.state, which is the temperature string and could never
+// match a mode label, so the pill never highlighted). The tabs stay an honest
+// read-only indicator: writing systemMode needs a sidecar case that isn't
+// verified on hardware yet, and the design's Climate view is read-only — so we
+// don't fake an interactive mode switch.
+const SYSTEM_MODE_LABEL: Record<number, (typeof MODES)[number]> = {
+  0: "off",
+  1: "auto",
+  3: "cool",
+  4: "heat",
+};
+
 export function ClimateControl({ device, onCommand }: ClimateControlProps) {
   // Matter temperatures are in units of 0.01°C
   const rawCurrent = device.attributes.localTemperature as number | undefined;
   const rawHeating = device.attributes.occupiedHeatingSetpoint as number | undefined;
   const rawCooling = device.attributes.occupiedCoolingSetpoint as number | undefined;
+  const systemMode = device.attributes.systemMode as number | undefined;
+  const isCooling = systemMode === 3;
   const currentTemp = rawCurrent != null ? rawCurrent / 100 : undefined;
-  const targetTemp = rawHeating != null ? rawHeating / 100 : rawCooling != null ? rawCooling / 100 : undefined;
-  const hvacMode = device.state;
+  // Show — and adjust — the setpoint that matches the active mode. A cooling
+  // thermostat must target its COOLING setpoint, not the heating one.
+  const rawTarget = isCooling ? (rawCooling ?? rawHeating) : (rawHeating ?? rawCooling);
+  const targetTemp = rawTarget != null ? rawTarget / 100 : undefined;
+  const hvacMode = systemMode != null ? SYSTEM_MODE_LABEL[systemMode] : undefined;
 
   function adjustTemp(delta: number) {
     if (targetTemp == null) return;
-    onCommand("set_temperature", { temperature: targetTemp + delta });
+    // mode 1 = cooling setpoint, 0 = heating setpoint (matches the sidecar's
+    // set_temperature handler). Without this the write always lands on the
+    // heating setpoint even when the thermostat is cooling.
+    onCommand("set_temperature", {
+      temperature: targetTemp + delta,
+      mode: isCooling ? 1 : 0,
+    });
   }
 
   return (
