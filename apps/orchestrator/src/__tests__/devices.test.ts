@@ -4,6 +4,18 @@ import { PrismaClient } from "@prisma/client";
 import { createApp } from "../app.js";
 import { initDeviceService } from "../services/device.service.js";
 
+// GET /api/devices is an authenticated route, and `config.AUTH_ENABLED`
+// now defaults to ON (WARP-580: `resolveAuthEnabled` only disables auth on
+// an EXPLICIT `AUTH_ENABLED=false` in a non-production env). This unit test
+// exercises the device router itself, not the auth pipeline, so it runs with
+// auth disabled — `authMiddleware` then injects a dev `owner` session and the
+// request reaches the handler. Spread the real config so every field the full
+// app derefs at module load stays present; flip only AUTH_ENABLED.
+vi.mock("../config.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../config.js")>();
+  return { ...actual, config: { ...actual.config, AUTH_ENABLED: false } };
+});
+
 vi.mock("../services/ai-gateway.client.js", () => ({
   healthCheck: vi.fn().mockResolvedValue(true),
   listModels: vi.fn().mockResolvedValue({ models: [] }),
