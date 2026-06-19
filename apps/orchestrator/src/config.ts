@@ -338,6 +338,23 @@ const envSchema = z.object({
     .default("0")
     .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
 
+  // ADR-024 Phase 3 (§3 + §"Open decision" Option B) — the box is a pure API
+  // CLIENT to a UniFi Network controller the household ALREADY runs (a UDM /
+  // CloudKey / self-host). We do NOT bundle or redistribute the controller;
+  // these two vars point Droplet at the customer-supplied one.
+  //
+  // CONTROLLER_URL — local controller base URL (e.g. https://127.0.0.1:8443).
+  //   Empty default: an unconfigured box's UniFi client throws NOT_CONFIGURED,
+  //   but the discovery source only calls it when DROPLET_AP_UNIFI_ENABLED is
+  //   on, so a default single-box never touches it.
+  // API_KEY — **SECRET**. The official local API's API key (the 2024 key-auth
+  //   surface; the legacy :8443 login-cookie flow is NOT used). Sourced from
+  //   the secret store / .env, NEVER a tracked default — declared the same way
+  //   as every other secret here (DROPLET_PM_WEBHOOK_SECRET, ROUTING_SERVICE_
+  //   TOKEN, …): a plain string defaulting to empty. Never logged.
+  DROPLET_AP_UNIFI_CONTROLLER_URL: z.string().default(""),
+  DROPLET_AP_UNIFI_API_KEY: z.string().default(""),
+
   // --- Front-panel claim gate (WARP-165) ---
   // Physical-presence gate for POST /auth/setup: when ON, the first-owner
   // request must carry the claim code shown on the device's front panel
