@@ -34,6 +34,7 @@ import { SchedulesTab } from "@/components/network/SchedulesTab";
 import { CoverageExtendersPanel } from "@/components/network/CoverageExtendersPanel";
 import { PhoneHomeCard } from "@/components/network/PhoneHomeCard";
 import { CameraPrivacyCard } from "@/components/network/CameraPrivacyCard";
+import { AiAgentAccessCard } from "@/components/network/AiAgentAccessCard";
 import { DhcpPoolForm } from "@/components/network/DhcpPoolForm";
 import { DnsOverTlsCard } from "@/components/network/DnsOverTlsCard";
 import { GuestWifiCard } from "@/components/network/GuestWifiCard";
@@ -1084,6 +1085,11 @@ function SystemTab({
           Add/Edit is deferred (UCI network rewrite can cut the served AP/LAN);
           present:false rows render an honest 'not on this box' state. */}
       <InterfacesTable />
+
+      {/* AI agent access — read-only droplet-ai RPC scopes from the live ACL.
+          Rotate/Revoke are honest-gated (disabled): they'd need a coordinated
+          secret refresh that self-locks-out the Network tab. */}
+      <AiAgentAccessCard />
 
       {/* DHCP & DNS — the live LAN pool range + lease-time editor (Tier-2
           confirm) plus the honest DNS-over-TLS gate (no DoT forwarder on this

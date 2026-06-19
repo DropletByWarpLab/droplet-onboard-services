@@ -16,6 +16,7 @@ import type {
   NetworkSummary,
   NetworkInterfaces,
   NetworkInterfaceRow,
+  AiNetworkAccess,
   InterfaceStatus,
   WirelessStatus,
   WirelessScanResult,
@@ -35,7 +36,7 @@ import {
 
 export { RouterError } from "../types/router-error.js";
 export type { RouterErrorCode } from "../types/router-error.js";
-export type { SystemControls, NetworkInterfaceRow } from "../types/network.js";
+export type { SystemControls, NetworkInterfaceRow, AiNetworkAccess } from "../types/network.js";
 
 const logger = pino({ name: "openwrt-client" });
 
@@ -706,6 +707,33 @@ export async function setHostname(hostname: string): Promise<WriteResult> {
 export async function setNtpEnabled(enabled: boolean): Promise<WriteResult> {
   const res = await postJson("/system/ntp", { enabled }, "Set NTP");
   return opFrom(res);
+}
+
+// --- droplet-ai ubus RPC access (read-only) ---
+
+interface AiAccessWire {
+  user: string;
+  endpoint: string;
+  read_scopes: string[];
+  write_scopes: string[];
+  session: { active: boolean; expires_at: number | null; rotates: string };
+}
+
+export async function getAiNetworkAccess(): Promise<AiNetworkAccess> {
+  const raw = await routingFetchJson<AiAccessWire>("/ai-access", {
+    label: "AI agent access",
+  });
+  return {
+    user: raw.user,
+    endpoint: raw.endpoint,
+    readScopes: raw.read_scopes,
+    writeScopes: raw.write_scopes,
+    session: {
+      active: raw.session.active,
+      expiresAt: raw.session.expires_at,
+      rotates: raw.session.rotates,
+    },
+  };
 }
 
 // --- VPN (Remote Access / WireGuard) ---

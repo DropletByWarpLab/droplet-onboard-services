@@ -153,6 +153,33 @@ def interface_stub(present: bool) -> dict:
     }
 
 
+def parse_ai_acl_scopes(acl: dict) -> dict:
+    """Flatten the droplet-ai rpcd ACL into read/write scope chip strings.
+
+    The ACL (openwrt/files/usr/share/rpcd/acl.d/droplet-ai.json) groups grants
+    under ``droplet-ai.{read,write}.ubus`` as ``{object: [methods]}``. The
+    dashboard's scope chips are ``object.method`` strings (e.g. ``system.board``,
+    ``network.interface.*.status``), so flatten each object's methods into one
+    string per grant. Returns ``{"read": [...], "write": [...]}`` — empty lists on
+    a missing/empty ACL (so the card renders a calm empty state, never crashes).
+    """
+    out: dict[str, list[str]] = {"read": [], "write": []}
+    user = acl.get("droplet-ai", {}) if isinstance(acl, dict) else {}
+    for kind in ("read", "write"):
+        ubus = (user.get(kind, {}) or {}).get("ubus", {})
+        if not isinstance(ubus, dict):
+            continue
+        chips: list[str] = []
+        for obj, methods in ubus.items():
+            if isinstance(methods, list):
+                for method in methods:
+                    chips.append(f"{obj}.{method}")
+            else:
+                chips.append(str(obj))
+        out[kind] = chips
+    return out
+
+
 class UbusError(Exception):
     """Raised when a ubus call returns a non-zero status code."""
 
@@ -2015,6 +2042,20 @@ class DropletRouter:
     @property
     def session_token(self) -> str:
         return self._session.ensure_valid()
+
+    def session_info(self) -> dict:
+        """Current ubus session state (pure read of held SessionManager state).
+
+        Surfaces ``{active, expires_at, username}`` for the AI-access scopes card.
+        ubus sessions are short-lived tokens minted ~hourly by SessionManager and
+        auto-refreshed — they already rotate themselves, which is why the
+        dashboard's 'Rotate token' action is honest-gated rather than wired.
+        """
+        return {
+            "active": self._session.token is not None,
+            "expires_at": self._session.expires_at,
+            "username": self._session.username,
+        }
 
     def _call(self, obj: str, method: str, args: Optional[dict] = None) -> Any:
         """Make an authenticated ubus call."""

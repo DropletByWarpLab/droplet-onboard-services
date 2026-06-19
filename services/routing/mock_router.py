@@ -552,6 +552,15 @@ class _MockUci:
         return {"values": {}}
 
 
+class _MockFile:
+    def read(self, path: str) -> str:
+        # The dev stack has no on-box ACL file — raise so /ai-access falls back
+        # to its bundled canonical ACL (the real shipping scopes).
+        from droplet_openwrt_sdk import UbusError
+
+        raise UbusError(-1, f"mock: no file at {path}")
+
+
 class MockRouter:
     """Drop-in replacement for `DropletRouter` when ROUTING_MODE=mock.
 
@@ -569,6 +578,12 @@ class MockRouter:
         self.uci = _MockUci()
         self.vpn = _MockVpn()
         self.ap = _MockAp()  # WARP-446
+        self.file = _MockFile()
+
+    def session_info(self) -> dict[str, Any]:
+        # The mock has no real ubus session; report a stable active fixture so
+        # the AI-access scopes card renders on the dev stack.
+        return {"active": True, "expires_at": 0.0, "username": "droplet-ai"}
 
     def disconnect(self) -> None:
         pass

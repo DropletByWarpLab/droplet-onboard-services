@@ -75,6 +75,14 @@ const TIER_3_OPERATIONS = new Set([
   "add_vpn_peer",
   "setup_vpn_firewall",
   "network_restart",
+  // droplet-ai RPC access management — reserved Tier-3 (web-UI-only, AI-blocked)
+  // for the deferred real rotate/revoke. The routing service IS the droplet-ai
+  // user, so any rotate/revoke that desyncs the credential self-locks-out the
+  // whole Network tab (the WARP-868 failure class) — these must never be
+  // AI-triggerable. No dispatcher case until the coordinated on-box secret
+  // refresh exists; the dashboard renders them as honest-gated (disabled).
+  "rotate_ai_token",
+  "revoke_ai_access",
   // Switch — never let AI disable the port the appliance is on
   "switch_disable_protected_port",
 ]);

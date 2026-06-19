@@ -1465,6 +1465,22 @@ export async function fetchRouterSystemInfo(): Promise<Record<string, unknown>> 
   return res.json();
 }
 
+/** Read-only droplet-ai ubus RPC access. Scope chips reflect the live on-box
+ *  ACL. Rotate/Revoke aren't here — they're honest-gated (disabled) in the UI. */
+export interface AiNetworkAccess {
+  user: string;
+  endpoint: string;
+  readScopes: string[];
+  writeScopes: string[];
+  session: { active: boolean; expiresAt: number | null; rotates: string };
+}
+
+export async function fetchAiNetworkAccess(): Promise<AiNetworkAccess> {
+  const res = await authFetch(`${BASE}/api/network/ai-access`);
+  if (!res.ok) throw new Error(`Failed to fetch AI agent access: ${res.status}`);
+  return res.json();
+}
+
 /** Editable system controls + honest gates. `statusLed.supported` /
  *  `country.editable` are false on shapes that can't drive them (single-box). */
 export interface SystemControls {

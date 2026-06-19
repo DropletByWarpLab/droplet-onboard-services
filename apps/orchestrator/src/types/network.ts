@@ -229,6 +229,25 @@ export interface SystemControls {
   country: { value: string | null; editable: boolean };
 }
 
+/**
+ * droplet-ai ubus RPC access (read-only). The read/write scope chips are parsed
+ * from the live on-box ACL (the routing service authenticates as droplet-ai).
+ * Rotate-token / Revoke are deliberately absent — they need a coordinated
+ * secret refresh that would self-lockout the Network tab, so the dashboard
+ * renders them as honest-gated (disabled) controls, not real writes.
+ */
+export interface AiNetworkAccess {
+  user: string;
+  endpoint: string;
+  readScopes: string[];
+  writeScopes: string[];
+  session: {
+    active: boolean;
+    expiresAt: number | null;
+    rotates: string;
+  };
+}
+
 export interface NetworkSummary {
   system: RouterBoardInfo;
   resources: RouterResources;

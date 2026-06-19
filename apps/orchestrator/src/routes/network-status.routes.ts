@@ -30,6 +30,7 @@ import {
   setUpnp,
   rebootRouter,
   getRouterOperation,
+  getAiNetworkAccess,
 } from "../services/network.service.js";
 import {
   evaluateNetworkCommand,
@@ -390,6 +391,21 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
 
       const op = await rebootRouter();
       res.json({ status: "ok", action: "reboot", operationId: op.operationId });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // --- droplet-ai RPC access (read-only) ---
+  // Read-only scope chips + session, parsed from the live on-box ACL. The
+  // rotate/revoke writes are reserved Tier-3 (AI-blocked) with NO dispatcher
+  // case — they're honest-gated (disabled) in the UI until a coordinated on-box
+  // secret refresh exists (the routing service IS the droplet-ai user, so a
+  // desynced rotate self-locks-out the whole Network tab).
+  router.get("/network/ai-access", async (_req, res, next) => {
+    try {
+      const access = await getAiNetworkAccess();
+      res.json(access);
     } catch (err) {
       next(err);
     }

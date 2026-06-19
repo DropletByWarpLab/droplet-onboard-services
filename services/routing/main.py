@@ -39,7 +39,9 @@ from droplet_openwrt_sdk import (
     get_network_summary,
     describe_network_for_llm,
     detect_deployment_topology,
+    parse_ai_acl_scopes,
 )
+import json
 from schemas import (
     HealthResponse,
     SetSsidRequest,
@@ -1620,6 +1622,93 @@ def set_system_ntp(req: NtpRequest):
         r = get_router()
         r.system.set_ntp_enabled(req.enabled)
         return {"status": "ok", "enabled": req.enabled}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# droplet-ai ubus RPC scopes (read-only)
+# ---------------------------------------------------------------------------
+# The canonical ACL lives at this path on the box; the routing service reads it
+# via file.read (the droplet-ai ACL grants file.read) so the surfaced scopes
+# reflect on-box truth. The bundled fallback below mirrors
+# openwrt/files/usr/share/rpcd/acl.d/droplet-ai.json so the card still renders
+# read-only truth if the file read is denied or the box is briefly unreachable.
+_AI_ACL_PATH = "/usr/share/rpcd/acl.d/droplet-ai.json"
+_AI_ACL_FALLBACK = {
+    "droplet-ai": {
+        "read": {
+            "ubus": {
+                "system": ["board", "info"],
+                "network.interface.*": ["status", "dump"],
+                "network.device": ["status"],
+                "network.wireless": ["status"],
+                "iwinfo": ["info", "scan", "assoclist", "freqlist", "countrylist", "phyname"],
+                "dhcp": ["ipv4leases", "ipv6leases"],
+                "uci": ["get", "state", "configs"],
+                "file": ["read", "list", "stat"],
+                "service": ["list"],
+                "session": ["access", "list"],
+                "hostapd.*": ["get_clients", "get_status"],
+                "luci-rpc": [
+                    "getBoardJSON", "getNetworkDevices", "getWirelessDevices",
+                    "getDHCPLeases", "getHostHints",
+                ],
+                "umdns": ["browse", "update"],
+            },
+        },
+        "write": {
+            "ubus": {
+                "network": ["restart"],
+                "network.interface.*": ["up", "down"],
+                "network.wireless": ["up", "down", "reconf", "notify"],
+                "uci": [
+                    "set", "add", "delete", "rename", "reorder", "commit",
+                    "apply", "confirm", "rollback", "changes", "revert",
+                ],
+                "system": ["reboot"],
+                "service": ["set", "delete", "signal", "event"],
+                "session": ["login", "destroy"],
+                "hostapd.*": ["del_client"],
+                "wireguard": ["*"],
+            },
+        },
+    }
+}
+
+
+@app.get("/ai-access")
+def ai_access():
+    try:
+        r = get_router()
+        # Read the live on-box ACL so the chips reflect on-box truth; fall back
+        # to the bundled canonical ACL on any read failure (denied grant, parse
+        # error, brief unreachability) so the card still renders read-only truth.
+        acl = _AI_ACL_FALLBACK
+        try:
+            raw = r.file.read(_AI_ACL_PATH)
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict) and parsed.get("droplet-ai"):
+                acl = parsed
+        except (UbusError, ConnectionLost, ValueError, json.JSONDecodeError):
+            pass
+
+        scopes = parse_ai_acl_scopes(acl)
+        session = r.session_info()
+        # The endpoint reflects the live connection target (the in-container
+        # OpenWrt's /ubus), NOT the legacy multi-box 192.168.50.1.
+        endpoint = f"http://{OPENWRT_HOST}:{OPENWRT_PORT}/ubus"
+        return {
+            "user": session.get("username", OPENWRT_USERNAME),
+            "endpoint": endpoint,
+            "read_scopes": scopes["read"],
+            "write_scopes": scopes["write"],
+            "session": {
+                "active": session.get("active", False),
+                "expires_at": session.get("expires_at"),
+                "rotates": "hourly",
+            },
+        }
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
 

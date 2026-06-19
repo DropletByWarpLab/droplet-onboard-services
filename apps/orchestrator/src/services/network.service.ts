@@ -513,6 +513,14 @@ export async function getRouterOperation(opId: string) {
   return openwrt.fetchOperation(opId);
 }
 
+// Read-only droplet-ai ubus RPC scopes (parsed from the live on-box ACL by the
+// routing service). No write — Rotate/Revoke are honest-gated in the UI because
+// they'd require a coordinated secret refresh that self-locks-out the routing
+// service (it IS the droplet-ai user).
+export async function getAiNetworkAccess(): Promise<openwrt.AiNetworkAccess> {
+  return openwrt.getAiNetworkAccess();
+}
+
 // --- Cache helpers ---
 
 async function invalidateNetworkCache(): Promise<void> {
