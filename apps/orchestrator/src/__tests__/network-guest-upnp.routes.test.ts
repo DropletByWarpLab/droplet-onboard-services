@@ -12,12 +12,17 @@ import request from "supertest";
 import express, { type Request, type Response, type NextFunction } from "express";
 import type { PrismaClient } from "@prisma/client";
 
-vi.mock("../config.js", () => ({
-  config: {
+// Mutable config so a test can flip DROPLET_AP_MODE to exercise the hostapd
+// honesty gate on POST /network/wifi/guest. Defaults to "uci" so every other
+// test runs the normal Tier-2 path.
+const { configMock } = vi.hoisted(() => ({
+  configMock: {
     AUTH_ENABLED: true,
     JWT_SECRET: "test-secret-32-bytes-long-aaaaaaaa",
+    DROPLET_AP_MODE: "uci" as "uci" | "hostapd" | "auto",
   },
 }));
+vi.mock("../config.js", () => ({ config: configMock }));
 
 vi.mock("../services/network.service.js", () => ({
   // wifi route deps
@@ -32,6 +37,7 @@ vi.mock("../services/network.service.js", () => ({
     enabled: false,
     ssid: null,
     password: null,
+    supported: true,
   }),
   removeGuestWifi: vi.fn().mockResolvedValue({ operationId: "op-rm" }),
   // firewall route deps
@@ -105,6 +111,7 @@ function buildFullApp(): express.Express {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  configMock.DROPLET_AP_MODE = "uci";
 });
 
 describe("guest + upnp operation strings classify to Tier 2", () => {
@@ -149,6 +156,16 @@ describe("POST /api/network/wifi/guest", () => {
       .post("/api/network/wifi/guest")
       .send({ ssid: "Studio Guest", password: "short" });
     expect(res.status).toBe(400);
+  });
+
+  it("refuses with 409 on the single-box hostapd shape (honesty gate)", async () => {
+    configMock.DROPLET_AP_MODE = "hostapd";
+    const res = await request(buildApp())
+      .post("/api/network/wifi/guest")
+      .send({ ssid: "Studio Guest", password: "longenoughpw" });
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: "GUEST_WIFI_UNSUPPORTED" });
+    expect(networkService.setGuestWifi).not.toHaveBeenCalled();
   });
 });
 

@@ -1285,12 +1285,15 @@ export async function createGuestWifi(
   return data;
 }
 
-/** Current guest Wi-Fi state. `password` is the PSK (owner/admin read) for the QR. */
+/** Current guest Wi-Fi state. `password` is the PSK (owner/admin read) for the QR.
+ *  `supported` is false on shapes that can't provision a guest network yet (the
+ *  single-box hostapd AP) — the card then shows an honest unavailable state. */
 export interface GuestWifiStatus {
   configured: boolean;
   enabled: boolean;
   ssid: string | null;
   password: string | null;
+  supported: boolean;
 }
 
 export async function fetchGuestWifi(): Promise<GuestWifiStatus> {

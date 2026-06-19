@@ -17,6 +17,7 @@ import {
 } from "../services/network.service.js";
 import { evaluateNetworkCommand } from "../services/network-safety.service.js";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
+import { config } from "../config.js";
 
 export interface WifiDeps {
   prisma: PrismaClient;
@@ -141,6 +142,16 @@ export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
   // a deliberate household-admin action, not an AI-driven one.
   router.post("/network/wifi/guest", requireRole("owner", "admin"), async (req, res, next) => {
     try {
+      // Honesty gate: on the single-box hostapd shape the UCI create path is
+      // inert (no second BSS, no guest subnet/zone) — refuse rather than write a
+      // ghost iface the dashboard would then read back as a "live" guest network.
+      // The card hides the setup form when getGuestWifi reports supported:false.
+      if (config.DROPLET_AP_MODE === "hostapd") {
+        return res.status(409).json({
+          error: "Guest Wi-Fi isn't available on this Droplet yet.",
+          code: "GUEST_WIFI_UNSUPPORTED",
+        });
+      }
       const { radio = "radio3", ssid, password, network = "guest" } = req.body;
       // Mirror services/routing/schemas.py CreateGuestNetworkRequest (SSID 1–32,
       // PSK 8–63) so the box never sees a payload hostapd would reject.

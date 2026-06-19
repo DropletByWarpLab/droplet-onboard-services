@@ -37,12 +37,13 @@ vi.mock("./cache.service.js", () => ({
 
 // The UCI client (multi-box path) + the hostapd bridge (single-box path) spies.
 // Hoisted so the vi.mock factories can close over them.
-const { setWirelessSsid, setWirelessPassword, stageSsid, applyWifi } =
+const { setWirelessSsid, setWirelessPassword, stageSsid, applyWifi, fetchGuestWifi } =
   vi.hoisted(() => ({
     setWirelessSsid: vi.fn(),
     setWirelessPassword: vi.fn(),
     stageSsid: vi.fn(),
     applyWifi: vi.fn(),
+    fetchGuestWifi: vi.fn(),
   }));
 
 vi.mock("./openwrt.client.js", async () => {
@@ -51,6 +52,7 @@ vi.mock("./openwrt.client.js", async () => {
     ...actual,
     setWirelessSsid: (...a: unknown[]) => setWirelessSsid(...a),
     setWirelessPassword: (...a: unknown[]) => setWirelessPassword(...a),
+    fetchGuestWifi: (...a: unknown[]) => fetchGuestWifi(...a),
   };
 });
 
@@ -59,13 +61,19 @@ vi.mock("./hostapd-bridge.service.js", () => ({
   applyWifi: (...a: unknown[]) => applyWifi(...a),
 }));
 
-import { setWifiSsid, setWifiPassword } from "./network.service.js";
+import { setWifiSsid, setWifiPassword, getGuestWifi } from "./network.service.js";
 
 beforeEach(() => {
   vi.clearAllMocks();
   applyWifi.mockResolvedValue({ operationId: null });
   setWirelessSsid.mockResolvedValue({ operationId: "op-ssid" });
   setWirelessPassword.mockResolvedValue({ operationId: "op-pw" });
+  fetchGuestWifi.mockResolvedValue({
+    configured: true,
+    enabled: true,
+    ssid: "Guests",
+    password: "letmein8",
+  });
 });
 
 describe("uci mode (multi-box, default) — UNCHANGED", () => {
@@ -132,5 +140,31 @@ describe("hostapd mode (single-box) — routes through the device-bridge", () =>
     await setWifiPassword("default_radio0", "supersecret1", "user-abc");
     expect(stageSsid).toHaveBeenCalledWith("HomeNet", "user-abc");
     expect(applyWifi).toHaveBeenCalledWith("supersecret1", "user-abc");
+  });
+});
+
+// Guest Wi-Fi can't be provisioned on the single-box hostapd shape (no second
+// BSS / guest subnet). getGuestWifi must report supported:false there WITHOUT
+// reading the orphan UCI back, so the card shows an honest "not available"
+// state instead of a fabricated live guest network.
+describe("getGuestWifi honesty gate", () => {
+  it("hostapd mode → supported:false, never touches the routing read", async () => {
+    configMock.DROPLET_AP_MODE = "hostapd";
+    const res = await getGuestWifi();
+    expect(res).toEqual({
+      configured: false,
+      enabled: false,
+      ssid: null,
+      password: null,
+      supported: false,
+    });
+    expect(fetchGuestWifi).not.toHaveBeenCalled();
+  });
+
+  it("uci mode → supported:true, reflects the real routing read", async () => {
+    configMock.DROPLET_AP_MODE = "uci";
+    const res = await getGuestWifi();
+    expect(fetchGuestWifi).toHaveBeenCalledOnce();
+    expect(res).toMatchObject({ configured: true, ssid: "Guests", supported: true });
   });
 });
