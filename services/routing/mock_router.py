@@ -205,6 +205,8 @@ class _MockDhcp:
         self._hostrecords = [
             {"section": "cfg01hostrecord", "hostname": "droplet-ai.lan", "ip": "10.0.0.1"},
         ]
+        # In-memory LAN pool so GET/POST /dhcp/pool round-trips on the dev stack.
+        self._lan_pool: dict[str, Any] = {"start": "100", "limit": "150", "leasetime": "12h"}
 
     def get_leases(self) -> dict[str, Any]:
         # Shape matches the real SDK response (wrap list in 'leases').
@@ -215,6 +217,19 @@ class _MockDhcp:
 
     def active_leases(self) -> list[dict[str, Any]]:
         return _DHCP_LEASES
+
+    def get_lan_pool(self) -> dict[str, Any]:
+        return dict(self._lan_pool)
+
+    def set_lan_pool(self, start: int, limit: int, leasetime: str) -> None:
+        self._lan_pool = {
+            "start": str(start),
+            "limit": str(limit),
+            "leasetime": leasetime,
+        }
+        logger.info(
+            "mock: set_lan_pool start=%s limit=%s leasetime=%s", start, limit, leasetime
+        )
 
     def add_static_lease(self, name: str, mac: str, ip: str, leasetime: str = "infinite") -> None:
         logger.info("mock: add_static_lease name=%s mac=%s ip=%s — no-op", name, mac, ip)

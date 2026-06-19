@@ -48,6 +48,7 @@ from schemas import (
     CreateGuestNetworkRequest,
     SetUpnpRequest,
     StaticLeaseRequest,
+    DhcpPoolRequest,
     SetDnsRequest,
     DnsHostnameRequest,
     BlockDeviceRequest,
@@ -729,6 +730,33 @@ def add_static_lease(req: StaticLeaseRequest):
         r.dhcp.add_static_lease(req.name, req.mac, req.ip, req.leasetime)
         r.exec_service("dnsmasq", "restart")
         return {"status": "ok", "name": req.name, "mac": req.mac, "ip": req.ip}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.get("/dhcp/pool")
+def get_dhcp_pool():
+    try:
+        return get_router().dhcp.get_lan_pool()
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.post("/dhcp/pool")
+def set_dhcp_pool(req: DhcpPoolRequest):
+    try:
+        r = get_router()
+        r.dhcp.set_lan_pool(req.start, req.limit, req.leasetime)
+        # dnsmasq re-reads the pool on restart — same reload the static-lease
+        # route uses (the droplet-ai ACL denies file.exec, so this routes
+        # through the permitted service-control path in exec_service).
+        r.exec_service("dnsmasq", "restart")
+        return {
+            "status": "ok",
+            "start": req.start,
+            "limit": req.limit,
+            "leasetime": req.leasetime,
+        }
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
 

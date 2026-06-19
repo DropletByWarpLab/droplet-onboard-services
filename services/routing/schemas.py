@@ -71,6 +71,39 @@ class SetDnsRequest(BaseModel):
     servers: list[str] = Field(..., min_length=1, description="List of DNS server IPs")
 
 
+# dnsmasq lease-time grammar: a positive integer followed by a unit
+# (s/m/h/d/w — seconds/minutes/hours/days/weeks), or the literal `infinite`.
+# Mirrors what dnsmasq's `--dhcp-range` lease-time field accepts; a bad string
+# is silently ignored by dnsmasq, so we reject it at the boundary (a clean 422)
+# rather than write junk the box quietly drops.
+_LEASETIME_PATTERN = re.compile(r"^(infinite|\d+[smhdw])$")
+
+
+class DhcpPoolRequest(BaseModel):
+    """Reshape the LAN DHCP pool range + lease time (`dhcp lan` section).
+
+    `start`/`limit` bounds copy CameraSubnetSetupRequest's pool fields: start is
+    the first host octet handed out (2-254), limit is how many addresses the
+    pool spans (1-253). `leasetime` accepts dnsmasq formats only.
+    """
+
+    start: int = Field(..., ge=2, le=254, description="First host octet in the pool")
+    limit: int = Field(..., ge=1, le=253, description="Number of addresses in the pool")
+    leasetime: str = Field(
+        default="12h",
+        description="Lease duration: a dnsmasq value like '12h', '30m', or 'infinite'",
+    )
+
+    @field_validator("leasetime")
+    @classmethod
+    def _check_leasetime(cls, v: str) -> str:
+        if not _LEASETIME_PATTERN.match(v):
+            raise ValueError(
+                "leasetime must be a dnsmasq value like '12h', '30m', or 'infinite'"
+            )
+        return v
+
+
 # Hostname grammar: lowercase labels, up to 253 chars total, no trailing dot.
 # The label regex rejects leading/trailing hyphens per RFC 1123. We keep it
 # lowercase because dnsmasq treats hostnames case-insensitively anyway and

@@ -16,6 +16,8 @@ import {
   getDhcpLeases,
   getSystemInfo,
   addStaticDhcpLease,
+  getDhcpPool,
+  setDhcpPool,
   blockDevice,
   unblockDevice,
   addPortForward,
@@ -156,6 +158,77 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
     },
   );
 
+  // --- DHCP pool (range + lease time) ---
+  // Read is unguarded; the write is Tier 2 (a LAN address-map change that can
+  // strand clients) → 202 + token → /network/command/confirm dispatches it.
+  router.get("/network/dhcp/pool", async (_req, res, next) => {
+    try {
+      const pool = await getDhcpPool();
+      res.json(pool);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // dnsmasq lease-time grammar: positive integer + unit (s/m/h/d/w) or
+  // `infinite`. Mirrors the routing DhcpPoolRequest validator so junk is
+  // rejected before any router change (and before a token is minted).
+  const LEASETIME_RE = /^(infinite|\d+[smhdw])$/;
+
+  router.post(
+    "/network/dhcp/pool",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        const { start, limit, leasetime } = req.body ?? {};
+        if (
+          !Number.isInteger(start) ||
+          start < 2 ||
+          start > 254 ||
+          !Number.isInteger(limit) ||
+          limit < 1 ||
+          limit > 253 ||
+          typeof leasetime !== "string" ||
+          !LEASETIME_RE.test(leasetime)
+        ) {
+          return res.status(400).json({
+            error:
+              "Provide integer 'start' (2-254), integer 'limit' (1-253), and a 'leasetime' like '12h' or 'infinite'",
+          });
+        }
+
+        const userId = req.user?.id;
+        const result = await evaluateNetworkCommand(
+          prisma,
+          "dhcp.pool",
+          "set_dhcp_pool",
+          { start, limit, leasetime },
+          userId,
+        );
+
+        if ("requiresConfirmation" in result && result.requiresConfirmation) {
+          return res.status(202).json({
+            status: "confirmation_required",
+            operation: "set_dhcp_pool",
+            tier: result.tier,
+            reason: result.reason,
+            confirmationToken: result.confirmationToken,
+            expiresIn: 60,
+          });
+        }
+
+        if ("blocked" in result && result.blocked) {
+          return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
+        }
+
+        const op = await setDhcpPool(start, limit, leasetime);
+        res.json({ status: "ok", tier: result.tier, operationId: op.operationId });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
   // --- System ---
   router.get("/network/system", async (_req, res, next) => {
     try {
@@ -281,6 +354,15 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
         case "set_upnp":
           // Tier-2 confirm for POST /network/upnp.
           writeResult = await setUpnp(params?.enabled as boolean);
+          break;
+        case "set_dhcp_pool":
+          // Tier-2 confirm for POST /network/dhcp/pool. The route validated the
+          // bounds before minting; the pending record carries the staged values.
+          writeResult = await setDhcpPool(
+            params?.start as number,
+            params?.limit as number,
+            params?.leasetime as string,
+          );
           break;
         case "reboot":
           writeResult = await rebootRouter();

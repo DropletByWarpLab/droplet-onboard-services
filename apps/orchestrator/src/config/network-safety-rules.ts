@@ -29,6 +29,9 @@ const TIER_2_OPERATIONS = new Set([
   "set_lan_ip",
   "create_vlan",
   "create_guest_network",
+  // DHCP LAN pool reshape (start/limit/leasetime) — a LAN address-map change
+  // that can strand connected clients if the pool is shrunk, so confirm it.
+  "set_dhcp_pool",
   // UPnP/NAT-PMP automatic port opening — a firewall-class exposure change.
   "set_upnp",
   "create_firewall_zone",

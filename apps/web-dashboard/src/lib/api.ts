@@ -1341,6 +1341,39 @@ export async function fetchDhcpLeases(): Promise<Record<string, unknown>[]> {
   return data.leases;
 }
 
+/** LAN DHCP pool range + lease time. Fields are null when the box omits them
+ *  (a default applies — not "broken"). */
+export interface DhcpPool {
+  start: string | null;
+  limit: string | null;
+  leasetime: string | null;
+}
+
+export async function fetchDhcpPool(): Promise<DhcpPool> {
+  const res = await authFetch(`${BASE}/api/network/dhcp/pool`);
+  if (!res.ok) throw new Error(`Failed to fetch DHCP pool: ${res.status}`);
+  return res.json();
+}
+
+/** Reshape the LAN DHCP pool. Tier 2 — may answer 202 `confirmation_required`,
+ *  which the caller confirms via confirmNetworkCommand. */
+export async function setDhcpPool(
+  start: number,
+  limit: number,
+  leasetime: string,
+): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/dhcp/pool`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ start, limit, leasetime }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok && !data.requiresConfirmation) {
+    throwNetworkWriteError(data, res.status, "Failed to update DHCP pool");
+  }
+  return data;
+}
+
 export async function fetchFirewallConfig(): Promise<FirewallConfig> {
   const res = await authFetch(`${BASE}/api/network/firewall`);
   if (!res.ok) throw new Error(`Failed to fetch firewall config: ${res.status}`);

@@ -911,6 +911,39 @@ class DHCPApi:
                 return lease
         return None
 
+    def get_lan_pool(self) -> dict:
+        """Read the LAN DHCP pool range + lease time from the `dhcp lan` section.
+
+        Returns ``{start, limit, leasetime}`` (each a string or ``None`` when the
+        section omits it — OpenWrt drops keys when a default applies, so an
+        absent value means "dnsmasq default", not "broken"). The `dhcp lan`
+        section is the LAN-pool config the camera-subnet route already proves the
+        write side of (`uci.set("dhcp", ...)`).
+        """
+        section = self._r.uci.get("dhcp", "lan")
+        if not isinstance(section, dict):
+            section = {}
+        return {
+            "start": section.get("start"),
+            "limit": section.get("limit"),
+            "leasetime": section.get("leasetime"),
+        }
+
+    def set_lan_pool(self, start: int, limit: int, leasetime: str):
+        """Reshape the LAN DHCP pool range + lease time.
+
+        Writes start/limit/leasetime onto the `dhcp lan` section and commits.
+        dnsmasq re-reads the pool on the dnsmasq restart the route issues (same
+        reload the static-lease route uses), so no reboot is needed. Tier 2 at
+        the orchestrator boundary — shrinking the pool can strand live clients.
+        """
+        self._r.uci.set("dhcp", "lan", {
+            "start": str(start),
+            "limit": str(limit),
+            "leasetime": leasetime,
+        })
+        self._r.uci.commit("dhcp")
+
     def add_static_lease(self, name: str, mac: str, ip: str, leasetime: str = "infinite"):
         """Add a static DHCP reservation."""
         self._r.uci.add("dhcp", "host", {

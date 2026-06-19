@@ -535,6 +535,27 @@ export async function setDnsServers(servers: string[]): Promise<WriteResult> {
   return opFrom(res);
 }
 
+/** LAN DHCP pool range + lease time. Each field can be null when the box omits
+ *  it (a default applies — not "broken"). */
+export interface DhcpPool {
+  start: string | null;
+  limit: string | null;
+  leasetime: string | null;
+}
+
+export async function fetchDhcpPool(): Promise<DhcpPool> {
+  return routingFetchJson<DhcpPool>("/dhcp/pool", { label: "DHCP pool" });
+}
+
+export async function setDhcpPool(
+  start: number,
+  limit: number,
+  leasetime: string,
+): Promise<WriteResult> {
+  const res = await postJson("/dhcp/pool", { start, limit, leasetime }, "Set DHCP pool");
+  return opFrom(res);
+}
+
 // --- Firewall ---
 
 // WARP-42: every firewall response is parsed through a zod schema so schema

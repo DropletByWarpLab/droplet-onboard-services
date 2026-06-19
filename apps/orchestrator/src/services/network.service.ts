@@ -370,6 +370,23 @@ export async function addStaticDhcpLease(
   return result;
 }
 
+// LAN DHCP pool range + lease time. The read is unguarded; the write is Tier 2
+// (gated by the network-safety evaluator at the route) — reshaping the live
+// pool can strand connected clients.
+export async function getDhcpPool(): Promise<openwrt.DhcpPool> {
+  return openwrt.fetchDhcpPool();
+}
+
+export async function setDhcpPool(
+  start: number,
+  limit: number,
+  leasetime: string,
+): Promise<openwrt.WriteResult> {
+  const result = await openwrt.setDhcpPool(start, limit, leasetime);
+  await invalidateNetworkCache();
+  return result;
+}
+
 export async function blockDevice(mac: string, name?: string): Promise<openwrt.WriteResult> {
   const result = await openwrt.blockDevice(mac, name);
   await invalidateNetworkCache();

@@ -34,6 +34,8 @@ import { SchedulesTab } from "@/components/network/SchedulesTab";
 import { CoverageExtendersPanel } from "@/components/network/CoverageExtendersPanel";
 import { PhoneHomeCard } from "@/components/network/PhoneHomeCard";
 import { CameraPrivacyCard } from "@/components/network/CameraPrivacyCard";
+import { DhcpPoolForm } from "@/components/network/DhcpPoolForm";
+import { DnsOverTlsCard } from "@/components/network/DnsOverTlsCard";
 import { GuestWifiCard } from "@/components/network/GuestWifiCard";
 import { MaintenanceCards } from "@/components/network/MaintenanceCards";
 import { UpnpCard } from "@/components/network/UpnpCard";
@@ -1062,6 +1064,12 @@ function SystemTab({
           <InfoRow label="Memory Free" value={`${memFreeMB} MB`} />
         </div>
       </div>
+
+      {/* DHCP & DNS — the live LAN pool range + lease-time editor (Tier-2
+          confirm) plus the honest DNS-over-TLS gate (no DoT forwarder on this
+          build, so it renders inert rather than faking a toggle). */}
+      <DhcpPoolForm />
+      <DnsOverTlsCard />
 
       {/* WARP-871: the reboot endpoint (owner-only, Tier-3 confirmable) was
           fully wired server-side but had no UI path — the only ways to restart
