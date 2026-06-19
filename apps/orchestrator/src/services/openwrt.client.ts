@@ -400,6 +400,21 @@ export async function scanWireless(
   return data.results;
 }
 
+/** Raw iwinfo radio info (`GET /wireless/radio`). `{}` when the radio is absent
+ *  on this box (single-box where the live UCI/wireless source is empty). */
+export type RadioInfoWire = {
+  channel?: number;
+  htmode?: string;
+  txpower?: number;
+  country?: string;
+  mode?: string;
+  [key: string]: unknown;
+};
+
+export async function fetchRadioInfo(): Promise<RadioInfoWire> {
+  return routingFetchJson<RadioInfoWire>("/wireless/radio", { label: "Radio info" });
+}
+
 export async function fetchWirelessClients(device?: string): Promise<WirelessClient[]> {
   const query = device ? `?device=${encodeURIComponent(device)}` : "";
   const data = await routingFetchJson<{ clients: WirelessClient[] }>(

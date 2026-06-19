@@ -18,6 +18,7 @@ import type {
   WirelessStatus,
   WirelessScanResult,
   WirelessClient,
+  RadioDetail,
   DhcpLease,
   ConnectedDevice,
   FirewallConfig,
@@ -180,6 +181,31 @@ export async function getWifiSettings(): Promise<WirelessStatus> {
 
 export async function scanWifiNetworks(): Promise<WirelessScanResult[]> {
   return openwrt.scanWireless();
+}
+
+// Read-only host-radio detail (iwinfo). On the single-box hostapd shape there is
+// ONE combined host radio that can't be turned off independently (and the live
+// UCI/wireless source is empty), so we return supported:false/hostRadio:true as
+// the honesty envelope — the UI shows a read-only card with the single-radio
+// note and NO enable/disable toggle. We fill ONLY the iwinfo fields actually
+// reported (null otherwise → "not reported"), never the design's fabricated
+// literals. `broadcasting` is derived from the real iwinfo mode (Master/AP), not
+// hardcoded. Same supported-flag pattern as getGuestWifi.
+export async function getRadioDetail(): Promise<RadioDetail> {
+  const info = await openwrt.fetchRadioInfo();
+  const gated = config.DROPLET_AP_MODE === "hostapd";
+  const mode = typeof info.mode === "string" ? info.mode : null;
+  const broadcasting = mode != null && /master|ap/i.test(mode);
+  return {
+    supported: !gated,
+    hostRadio: gated,
+    broadcasting,
+    channel: typeof info.channel === "number" ? info.channel : null,
+    htmode: typeof info.htmode === "string" ? info.htmode : null,
+    txpower: typeof info.txpower === "number" ? info.txpower : null,
+    country: typeof info.country === "string" ? info.country : null,
+    mode,
+  };
 }
 
 // --- DHCP ---

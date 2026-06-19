@@ -1200,6 +1200,26 @@ export async function fetchConnectedDevices(): Promise<ConnectedDevice[]> {
   return data.devices;
 }
 
+/** Read-only host-radio detail. Fields are null when iwinfo doesn't report
+ *  them (shown as "not reported"); `supported:false`/`hostRadio:true` is the
+ *  single combined-radio shape (no independent enable/disable). */
+export interface RadioDetail {
+  supported: boolean;
+  hostRadio: boolean;
+  broadcasting: boolean;
+  channel: number | null;
+  htmode: string | null;
+  txpower: number | null;
+  country: string | null;
+  mode: string | null;
+}
+
+export async function fetchRadioDetail(): Promise<RadioDetail> {
+  const res = await authFetch(`${BASE}/api/network/wifi/radio`);
+  if (!res.ok) throw new Error(`Failed to fetch radio detail: ${res.status}`);
+  return res.json();
+}
+
 export async function fetchWifiSettings(): Promise<Record<string, unknown>> {
   const res = await authFetch(`${BASE}/api/network/wifi`);
   if (!res.ok) throw new Error(`Failed to fetch wifi settings: ${res.status}`);

@@ -49,6 +49,7 @@ const {
   bridgeRemoveGuest,
   bridgeGuestStatus,
   fetchSystemControls,
+  fetchRadioInfo,
 } = vi.hoisted(() => ({
   setWirelessSsid: vi.fn(),
   setWirelessPassword: vi.fn(),
@@ -61,6 +62,7 @@ const {
   bridgeRemoveGuest: vi.fn(),
   bridgeGuestStatus: vi.fn(),
   fetchSystemControls: vi.fn(),
+  fetchRadioInfo: vi.fn(),
 }));
 
 vi.mock("./openwrt.client.js", async () => {
@@ -73,6 +75,7 @@ vi.mock("./openwrt.client.js", async () => {
     createGuestNetwork: (...a: unknown[]) => createGuestNetwork(...a),
     removeGuestNetwork: (...a: unknown[]) => removeGuestNetwork(...a),
     fetchSystemControls: (...a: unknown[]) => fetchSystemControls(...a),
+    fetchRadioInfo: (...a: unknown[]) => fetchRadioInfo(...a),
   };
 });
 
@@ -91,6 +94,7 @@ import {
   setGuestWifi,
   removeGuestWifi,
   getSystemControls,
+  getRadioDetail,
 } from "./network.service.js";
 
 beforeEach(() => {
@@ -121,6 +125,13 @@ beforeEach(() => {
     // The raw box read reports these as "live" — the service must override.
     statusLed: { supported: true, enabled: true },
     country: { value: "US", editable: true },
+  });
+  fetchRadioInfo.mockResolvedValue({
+    channel: 6,
+    htmode: "HT20",
+    txpower: 20,
+    country: "US",
+    mode: "Master",
   });
 });
 
@@ -303,5 +314,40 @@ describe("getSystemControls honesty gate", () => {
     const res = await getSystemControls();
     expect(res.statusLed.supported).toBe(true);
     expect(res.country.editable).toBe(true);
+  });
+});
+
+// Radio detail is read-only. On the single-box hostapd shape it returns the
+// honesty envelope (supported:false/hostRadio:true — one combined radio that
+// can't be toggled independently) and surfaces ONLY the iwinfo fields read;
+// `broadcasting` is derived from the real iwinfo mode, never hardcoded.
+describe("getRadioDetail honesty envelope", () => {
+  it("hostapd mode → supported:false/hostRadio:true, broadcasting from iwinfo mode", async () => {
+    configMock.DROPLET_AP_MODE = "hostapd";
+    const res = await getRadioDetail();
+    expect(res.supported).toBe(false);
+    expect(res.hostRadio).toBe(true);
+    expect(res.broadcasting).toBe(true); // mode "Master"
+    expect(res.channel).toBe(6);
+    expect(res.country).toBe("US");
+  });
+
+  it("reports null (not a fabricated value) for fields iwinfo omits", async () => {
+    configMock.DROPLET_AP_MODE = "hostapd";
+    fetchRadioInfo.mockResolvedValueOnce({ channel: 6 }); // htmode/txpower/country absent
+    const res = await getRadioDetail();
+    expect(res.htmode).toBeNull();
+    expect(res.txpower).toBeNull();
+    expect(res.country).toBeNull();
+    expect(res.mode).toBeNull();
+    // mode absent → not broadcasting (never assumed true).
+    expect(res.broadcasting).toBe(false);
+  });
+
+  it("uci mode → supported:true (a real radio host can manage it)", async () => {
+    configMock.DROPLET_AP_MODE = "uci";
+    const res = await getRadioDetail();
+    expect(res.supported).toBe(true);
+    expect(res.hostRadio).toBe(false);
   });
 });

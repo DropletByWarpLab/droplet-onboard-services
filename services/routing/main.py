@@ -602,6 +602,17 @@ def wireless_clients(device: Optional[str] = None):
         handle_router_error(exc)
 
 
+@app.get("/wireless/radio")
+def wireless_radio_default():
+    # No device segment → let the SDK resolve DROPLET_WIFI_SCAN_DEVICE so the
+    # orchestrator can read the host AP radio without knowing its name. An absent
+    # radio degrades to {} (radio_info contract), not a 500.
+    try:
+        return get_router().wireless.radio_info(None)
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
 @app.get("/wireless/radio/{device}")
 def wireless_radio_info(device: str = "wlan0"):
     try:

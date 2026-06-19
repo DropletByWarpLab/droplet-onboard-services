@@ -38,6 +38,7 @@ import { DhcpPoolForm } from "@/components/network/DhcpPoolForm";
 import { DnsOverTlsCard } from "@/components/network/DnsOverTlsCard";
 import { GuestWifiCard } from "@/components/network/GuestWifiCard";
 import { MaintenanceCards } from "@/components/network/MaintenanceCards";
+import { RadioDetailCard } from "@/components/network/RadioDetailCard";
 import { SystemControlsCard } from "@/components/network/SystemControlsCard";
 import { UpnpCard } from "@/components/network/UpnpCard";
 import { NetworkSimple } from "@/components/network/NetworkSimple";
@@ -821,6 +822,12 @@ function WifiTab() {
           during onboarding can set the SSID/password here — same write path as
           the setup wizard's InternetStep. */}
       <WifiSettingsForm />
+
+      {/* Read-only host-radio detail (band/channel/width/country + a
+          Broadcasting chip). Honest for the single combined-radio shape — no
+          enable/disable toggle; every chip is a real iwinfo field or "not
+          reported". */}
+      <RadioDetailCard />
 
       {/* Guest Wi-Fi — an isolated visitor network (own SSID + firewall zone). */}
       <GuestWifiCard />

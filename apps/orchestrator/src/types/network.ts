@@ -55,6 +55,26 @@ export interface WirelessStatus {
   [radioName: string]: WirelessRadio;
 }
 
+/**
+ * Read-only host-radio detail from iwinfo (single-box: one combined hostapd
+ * radio). Every field is nullable — on the single-box the live UCI/wireless
+ * source is empty and iwinfo may not report every field, so the UI shows "not
+ * reported" rather than a fabricated value. `supported:false` + `hostRadio:true`
+ * is the honesty envelope for the single combined-radio shape (it can't be
+ * turned off independently); `broadcasting` is derived from the real iwinfo
+ * mode, never hardcoded.
+ */
+export interface RadioDetail {
+  supported: boolean;
+  hostRadio: boolean;
+  broadcasting: boolean;
+  channel: number | null;
+  htmode: string | null;
+  txpower: number | null;
+  country: string | null;
+  mode: string | null;
+}
+
 export interface WirelessScanResult {
   ssid: string;
   bssid: string;
