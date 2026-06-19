@@ -43,6 +43,7 @@ import { MaintenanceCards } from "@/components/network/MaintenanceCards";
 import { RadioDetailCard } from "@/components/network/RadioDetailCard";
 import { SystemControlsCard } from "@/components/network/SystemControlsCard";
 import { UpnpCard } from "@/components/network/UpnpCard";
+import { FirewallRuleForm, ZonePolicyEditor } from "@/components/network/FirewallRuleForm";
 import { NetworkSimple } from "@/components/network/NetworkSimple";
 import { SwitchPanel } from "@/components/network/switch/SwitchPanel";
 import { WifiScanPanel } from "@/components/network/WifiScanPanel";
@@ -116,6 +117,8 @@ export default function NetworkPage() {
     routerErrorMessage,
     refresh,
   } = useNetwork();
+  const { user } = useAuth();
+  const canAuthor = user?.role === "owner" || user?.role === "admin";
   const [activeTab, setActiveTab] = useState<Tab>("overview");
   const [opStatus, setOpStatus] = useState<OperationStatus>({ state: "idle" });
   // WARP-871 follow-up: while an owner-initiated reboot is in flight the router
@@ -508,7 +511,9 @@ export default function NetworkPage() {
         tabIndex={0}
         hidden={activeTab !== "firewall"}
       >
-        {activeTab === "firewall" && <FirewallTab firewall={firewall} />}
+        {activeTab === "firewall" && (
+          <FirewallTab firewall={firewall} canAuthor={canAuthor} onApplied={refresh} />
+        )}
       </div>
       <div
         role="tabpanel"
@@ -870,13 +875,22 @@ function PolicyChip({ policy }: { policy: string | undefined }) {
   );
 }
 
-function FirewallTab({ firewall }: { firewall: FirewallConfig | undefined }) {
+function FirewallTab({
+  firewall,
+  canAuthor,
+  onApplied,
+}: {
+  firewall: FirewallConfig | undefined;
+  canAuthor: boolean;
+  onApplied: () => void;
+}) {
   // WARP-42: typed Object.entries — each entry is [sectionId, typed section]
   // instead of [string, any], so a missing `target` or a `proto` type change
   // on the routing side now fails compile.
   const zones: Array<[string, FirewallZone]> = firewall?.zones?.values
     ? Object.entries(firewall.zones.values)
     : [];
+  const zoneNames = zones.map(([key, z]) => z.name ?? key);
   const rules: Array<[string, FirewallRule]> = firewall?.rules?.values
     ? Object.entries(firewall.rules.values)
     : [];
@@ -908,6 +922,7 @@ function FirewallTab({ firewall }: { firewall: FirewallConfig | undefined }) {
                   <th className="font-medium pb-2 pr-4">Output</th>
                   <th className="font-medium pb-2 pr-4">Forward</th>
                   <th className="font-medium pb-2">Networks</th>
+                  {canAuthor && <th className="font-medium pb-2 pl-4" />}
                 </tr>
               </thead>
               <tbody>
@@ -939,6 +954,17 @@ function FirewallTab({ firewall }: { firewall: FirewallConfig | undefined }) {
                       <td className="py-2 text-label-tertiary font-mono">
                         {nets || "—"}
                       </td>
+                      {canAuthor && (
+                        <td className="py-2 pl-4 align-top">
+                          <ZonePolicyEditor
+                            zone={zone.name ?? key}
+                            input={zone.input}
+                            output={zone.output}
+                            forward={zone.forward}
+                            onApplied={onApplied}
+                          />
+                        </td>
+                      )}
                     </tr>
                   );
                 })}
@@ -951,6 +977,10 @@ function FirewallTab({ firewall }: { firewall: FirewallConfig | undefined }) {
           </p>
         )}
       </div>
+
+      {/* Firewall authoring (owner/admin) — add a traffic rule. Zone policies
+          are edited inline per row above. Both are Tier-2 confirm-gated writes. */}
+      {canAuthor && <FirewallRuleForm zones={zoneNames} onApplied={onApplied} />}
 
       <div className="card">
         <h3 className="type-headline text-label-primary mb-4">

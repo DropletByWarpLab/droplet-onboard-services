@@ -213,6 +213,61 @@ class PortForwardRequest(BaseModel):
         return v
 
 
+_FW_TARGETS = {"ACCEPT", "REJECT", "DROP"}
+
+
+class AddFirewallRuleRequest(BaseModel):
+    """A generic firewall traffic rule. `target` and `proto` are validated at the
+    boundary so a malformed value can never reach UCI + choke a firewall reload."""
+
+    name: str = Field(..., min_length=1, max_length=63, description="Rule name")
+    src: str = Field(..., min_length=1, max_length=32, description="Source zone")
+    dest: str = Field(..., min_length=1, max_length=32, description="Destination zone")
+    proto: str = Field(default="tcp", description="Protocol (tcp, udp, tcpudp)")
+    dest_port: Optional[str] = Field(
+        default=None, pattern=_PORT_OR_RANGE_PATTERN,
+        description="Destination port or 'lo-hi' range (1-65535)",
+    )
+    src_port: Optional[str] = Field(
+        default=None, pattern=_PORT_OR_RANGE_PATTERN,
+        description="Source port or 'lo-hi' range (1-65535)",
+    )
+    target: str = Field(default="REJECT", description="ACCEPT | REJECT | DROP")
+    enabled: str = Field(default="1", description="'1' enabled, '0' disabled")
+
+    @field_validator("proto")
+    @classmethod
+    def _check_proto(cls, v: str) -> str:
+        allowed = {"tcp", "udp", "tcpudp"}
+        if v not in allowed:
+            raise ValueError(f"proto must be one of {sorted(allowed)}")
+        return v
+
+    @field_validator("target")
+    @classmethod
+    def _check_target(cls, v: str) -> str:
+        if v not in _FW_TARGETS:
+            raise ValueError(f"target must be one of {sorted(_FW_TARGETS)}")
+        return v
+
+
+class SetZonePolicyRequest(BaseModel):
+    """Set a zone's default input/output/forward policy. Each policy field is
+    optional (only the provided ones change) and restricted to the UCI targets."""
+
+    zone: str = Field(..., min_length=1, max_length=32, description="Zone name")
+    input: Optional[str] = Field(default=None, description="ACCEPT | REJECT | DROP")
+    output: Optional[str] = Field(default=None, description="ACCEPT | REJECT | DROP")
+    forward: Optional[str] = Field(default=None, description="ACCEPT | REJECT | DROP")
+
+    @field_validator("input", "output", "forward")
+    @classmethod
+    def _check_policy(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in _FW_TARGETS:
+            raise ValueError(f"policy must be one of {sorted(_FW_TARGETS)}")
+        return v
+
+
 # WARP-613: phone-home egress control.
 class PhoneHomeDeviceRequest(BaseModel):
     mac: str = Field(..., pattern=r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$", description="MAC address")

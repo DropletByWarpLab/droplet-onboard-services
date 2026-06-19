@@ -1431,6 +1431,51 @@ export async function blockNetworkDevice(mac: string, name?: string): Promise<Ne
   return data;
 }
 
+/** Add a generic firewall traffic rule. Tier-2 → may return confirmation_required. */
+export async function addFirewallRule(rule: {
+  name: string;
+  src: string;
+  dest: string;
+  proto?: string;
+  destPort?: string;
+  srcPort?: string;
+  target?: string;
+}): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/firewall/rule`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      name: rule.name,
+      src: rule.src,
+      dest: rule.dest,
+      proto: rule.proto ?? "tcp",
+      dest_port: rule.destPort,
+      src_port: rule.srcPort,
+      target: rule.target ?? "REJECT",
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok && !data.requiresConfirmation) throw new Error(data.error || `Failed to add rule: ${res.status}`);
+  return data;
+}
+
+/** Set a zone's default input/output/forward policy. Tier-2 → confirmation_required. */
+export async function setZonePolicy(policy: {
+  zone: string;
+  input?: string;
+  output?: string;
+  forward?: string;
+}): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/firewall/zone-policy`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(policy),
+  });
+  const data = await res.json();
+  if (!res.ok && !data.requiresConfirmation) throw new Error(data.error || `Failed to set zone policy: ${res.status}`);
+  return data;
+}
+
 export async function unblockNetworkDevice(mac: string): Promise<NetworkCommandResult> {
   const res = await authFetch(`${BASE}/api/network/firewall/unblock`, {
     method: "POST",

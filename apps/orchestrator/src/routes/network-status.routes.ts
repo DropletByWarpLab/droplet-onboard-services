@@ -25,6 +25,8 @@ import {
   blockDevice,
   unblockDevice,
   addPortForward,
+  addFirewallRule,
+  setZonePolicy,
   setWifiPassword,
   setGuestWifi,
   setUpnp,
@@ -506,6 +508,26 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
         case "set_hostname":
           // Tier-2 confirm for POST /network/system/hostname.
           writeResult = await setHostname(params?.hostname as string);
+          break;
+        case "add_firewall_rule":
+          writeResult = await addFirewallRule({
+            name: params?.name as string,
+            src: params?.src as string,
+            dest: params?.dest as string,
+            proto: (params?.proto as string) || "tcp",
+            destPort: params?.dest_port as string | undefined,
+            srcPort: params?.src_port as string | undefined,
+            target: (params?.target as string) || "REJECT",
+            enabled: (params?.enabled as string) || "1",
+          });
+          break;
+        case "set_zone_policy":
+          writeResult = await setZonePolicy({
+            zone: params?.zone as string,
+            input: params?.input as string | undefined,
+            output: params?.output as string | undefined,
+            forward: params?.forward as string | undefined,
+          });
           break;
         case "reboot":
           writeResult = await rebootRouter();
