@@ -1,51 +1,42 @@
 /**
- * feat/scene-schedules — render a stored UTC RRULE back to local copy, and
- * round-trip it against the build step so the list shows the owner the same
- * wall-clock time they typed.
+ * feat/scene-schedules — render a stored UTC RRULE back to local copy.
+ *
+ * describeRrule is the inverse of buildSceneRrule, so the strongest + most
+ * portable check is a round-trip: build a rule from a LOCAL wall-clock, then
+ * describe it back and assert the owner sees the SAME local time they typed.
+ * That holds under any runner TZ (UTC in CI, Pacific on a dev box, …) — no
+ * fragile hardcoded-offset strings, and no process.env.TZ pin (V8 ignores TZ
+ * changes at runtime, so the old pin only "worked" on a Pacific machine).
  */
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect } from "vitest";
 import { describeRrule } from "../../lib/rrule-describe";
 import { buildSceneRrule, type DayCode } from "../../lib/scene-rrule";
 
-describe("describeRrule — fixed TZ America/Los_Angeles (UTC-7 in June)", () => {
-  const orig = process.env.TZ;
-  beforeAll(() => {
-    process.env.TZ = "America/Los_Angeles";
-  });
-  afterAll(() => {
-    process.env.TZ = orig;
-  });
-  const now = new Date(2026, 5, 15, 12, 0, 0);
+describe("describeRrule round-trips a built rule back to the local summary", () => {
+  const now = new Date(2026, 5, 15, 12, 0, 0); // 2026-06-15 is a Monday
 
-  it("daily 14:00 UTC reads back as 7:00 AM local", () => {
-    expect(describeRrule("FREQ=DAILY;BYHOUR=14;BYMINUTE=0", now)).toBe(
-      "Every day at 7:00 AM",
-    );
+  const roundTrip = (days: DayCode[], hour: number, minute: number) =>
+    describeRrule(buildSceneRrule({ days, hour, minute }, now)!.rrule, now);
+
+  it("daily reads back as the typed local time", () => {
+    expect(roundTrip([], 7, 0)).toBe("Every day at 7:00 AM");
   });
 
-  it("weekly TU 06:00 UTC reads back shifted to Monday 11:00 PM local", () => {
-    // 06:00 UTC Tuesday = 23:00 PDT Monday.
-    expect(describeRrule("FREQ=WEEKLY;BYDAY=TU;BYHOUR=6;BYMINUTE=0", now)).toBe(
-      "Mon at 11:00 PM",
-    );
+  it("a single day reads back as that day + the typed local time (even when the build crossed the UTC boundary)", () => {
+    // 11:00 PM local can convert to a different UTC weekday; describe must shift
+    // it back so the owner sees their original Monday 11:00 PM.
+    expect(roundTrip(["MO"], 23, 0)).toBe("Mon at 11:00 PM");
   });
 
   it("recognises the weekdays bundle", () => {
-    // 15:00 UTC = 08:00 PDT, same day → MO-FR stays MO-FR.
-    expect(
-      describeRrule("FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=15;BYMINUTE=0", now),
-    ).toBe("Weekdays at 8:00 AM");
+    expect(roundTrip(["MO", "TU", "WE", "TH", "FR"], 8, 0)).toBe("Weekdays at 8:00 AM");
+  });
+
+  it("preserves a multi-day set + the typed local time across the round-trip", () => {
+    expect(roundTrip(["MO", "WE", "FR"], 18, 30)).toBe("Mon, Wed, Fri at 6:30 PM");
   });
 
   it("throws on an unsupported FREQ so the UI can show a neutral label", () => {
     expect(() => describeRrule("FREQ=MONTHLY;BYHOUR=7", now)).toThrow();
-  });
-
-  it("round-trips a built rule back to the original local summary", () => {
-    const days: DayCode[] = ["MO", "WE", "FR"];
-    const built = buildSceneRrule({ days, hour: 18, minute: 30 }, now)!;
-    // 18:30 PDT = 01:30 UTC next day → built shifts MO/WE/FR to TU/TH/SA;
-    // describe must shift them back so the owner sees their original days.
-    expect(describeRrule(built.rrule, now)).toBe("Mon, Wed, Fri at 6:30 PM");
   });
 });

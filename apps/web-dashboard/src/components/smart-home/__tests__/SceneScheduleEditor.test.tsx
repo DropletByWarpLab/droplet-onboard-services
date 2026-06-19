@@ -74,7 +74,10 @@ describe("SceneScheduleEditor", () => {
     render(
       <SceneScheduleEditor sceneId="scene-1" sceneName="Good night" onClose={() => {}} />,
     );
-    expect(screen.getByText(/utc/i)).toBeTruthy();
+    // Match the honesty copy specifically — a plain /utc/i is ambiguous when the
+    // runner's own timezone label is literally "UTC" (CI), which renders a second
+    // "UTC" in the "shown in <tz>" line.
+    expect(screen.getByText(/saved in utc/i)).toBeTruthy();
   });
 
   it("creates a schedule with a UTC RRULE built from the time field", async () => {

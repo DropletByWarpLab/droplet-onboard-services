@@ -7,7 +7,7 @@
  * hour from the same offset the browser would, so they pass in CI regardless
  * of the runner's TZ. A second block pins exact strings under a fixed TZ.
  */
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect } from "vitest";
 import {
   buildSceneRrule,
   describeLocalSchedule,
@@ -15,6 +15,23 @@ import {
   formatLocalTime,
   type DayCode,
 } from "../../lib/scene-rrule";
+
+// The UTC time + calendar-day delta the browser computes for a given LOCAL
+// wall-clock today — the SAME conversion buildSceneRrule does. Deriving the
+// expected values this way (instead of hardcoding one zone's offset via a
+// process.env.TZ pin, which V8 ignores at runtime) keeps these assertions exact
+// AND deterministic under any runner TZ (UTC in CI, Pacific on a dev box, …).
+const DAY_CODES = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"] as const;
+function utcOf(hour: number, minute = 0) {
+  const d = new Date(2026, 5, 15, hour, minute);
+  return {
+    h: d.getUTCHours(),
+    m: d.getUTCMinutes(),
+    delta: d.getUTCDate() - d.getDate(), // -1, 0, or +1 (mid-month: no wrap)
+  };
+}
+const shiftDay = (code: (typeof DAY_CODES)[number], delta: number) =>
+  DAY_CODES[(DAY_CODES.indexOf(code) + delta + 7) % 7];
 
 describe("buildSceneRrule — timezone-agnostic invariants", () => {
   const now = new Date(2026, 5, 15, 12, 0, 0); // local noon, mid-month (no wrap risk)
@@ -54,40 +71,41 @@ describe("buildSceneRrule — timezone-agnostic invariants", () => {
   });
 });
 
-describe("buildSceneRrule — fixed UTC offset (TZ=America/Los_Angeles, UTC-7 in June)", () => {
-  const orig = process.env.TZ;
-  beforeAll(() => {
-    process.env.TZ = "America/Los_Angeles";
-  });
-  afterAll(() => {
-    process.env.TZ = orig;
-  });
-  const now = new Date(2026, 5, 15, 12, 0, 0);
+describe("buildSceneRrule — UTC conversion + day-cross (timezone-robust)", () => {
+  const now = new Date(2026, 5, 15, 12, 0, 0); // 2026-06-15 is a Monday
 
-  it("Monday 06:00 PDT → 13:00 UTC, same weekday (no boundary cross)", () => {
+  it("weekly single day: BYHOUR is the UTC-converted hour; BYDAY shifts by the day delta", () => {
+    const u = utcOf(6, 0);
     const built = buildSceneRrule({ days: ["MO"], hour: 6, minute: 0 }, now);
-    expect(built!.rrule).toBe("FREQ=WEEKLY;BYDAY=MO;BYHOUR=13;BYMINUTE=0");
+    expect(built!.rrule).toBe(
+      `FREQ=WEEKLY;BYDAY=${shiftDay("MO", u.delta)};BYHOUR=${u.h};BYMINUTE=0`,
+    );
   });
 
-  it("daily 23:00 PDT → 06:00 UTC next day (daily ignores day shift)", () => {
+  it("daily ignores the day shift but keeps the UTC hour", () => {
+    const u = utcOf(23, 0);
     const built = buildSceneRrule({ days: [], hour: 23, minute: 0 }, now);
-    expect(built!.rrule).toBe("FREQ=DAILY;BYHOUR=6;BYMINUTE=0");
+    expect(built!.rrule).toBe(`FREQ=DAILY;BYHOUR=${u.h};BYMINUTE=0`);
   });
 
-  it("weekly Monday 23:00 PDT crosses to Tuesday 06:00 UTC → BYDAY shifts to TU", () => {
+  it("weekly day-cross: a late local time pushes BYDAY to the adjacent weekday", () => {
+    const u = utcOf(23, 0);
     const built = buildSceneRrule({ days: ["MO"], hour: 23, minute: 0 }, now);
-    expect(built!.rrule).toBe("FREQ=WEEKLY;BYDAY=TU;BYHOUR=6;BYMINUTE=0");
+    expect(built!.rrule).toBe(
+      `FREQ=WEEKLY;BYDAY=${shiftDay("MO", u.delta)};BYHOUR=${u.h};BYMINUTE=0`,
+    );
   });
 
   it("orders BYDAY Sunday-first regardless of click order", () => {
-    const built = buildSceneRrule(
-      { days: ["FR", "MO", "WE"], hour: 8, minute: 0 },
-      now,
-    );
-    // 08:00 PDT = 15:00 UTC, same day → no shift.
-    expect(built!.rrule).toBe(
-      "FREQ=WEEKLY;BYDAY=MO,WE,FR;BYHOUR=15;BYMINUTE=0",
-    );
+    const u = utcOf(8, 0);
+    const built = buildSceneRrule({ days: ["FR", "MO", "WE"], hour: 8, minute: 0 }, now);
+    // Each clicked day shifts by the same delta; assert the canonical
+    // Sunday-first ordering of the shifted set.
+    const ordered = ["MO", "WE", "FR"]
+      .map((d) => shiftDay(d as DayCode, u.delta))
+      .sort((a, b) => DAY_CODES.indexOf(a) - DAY_CODES.indexOf(b))
+      .join(",");
+    expect(built!.rrule).toBe(`FREQ=WEEKLY;BYDAY=${ordered};BYHOUR=${u.h};BYMINUTE=0`);
   });
 });
 
