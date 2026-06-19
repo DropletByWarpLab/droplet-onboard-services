@@ -313,6 +313,31 @@ const envSchema = z.object({
   DROPLET_AP_DAWN_ENABLED: z.coerce.boolean().default(true),
   DROPLET_AP_DEFAULT_TXPOWER: z.coerce.number().default(20),
 
+  // --- ADR-024 multi-backend coverage APs (Phase 2) ---
+  // Master switches for the third-party AP discovery backends. Both
+  // default OFF — a single-box with no extenders ships exactly as today
+  // (only the mDNS / DROPLET_IMAGE source runs). When off, the EasyMesh /
+  // UniFi discovery sources return [] and contribute nothing.
+  //
+  // EASYMESH_ENABLED — turns on the IEEE 1905.1 discovery + prplMesh
+  //   Controller-only onboarding path (ADR-024 §2). Real socket logic
+  //   lands in Phase 4; this phase the source is a scaffold.
+  // UNIFI_ENABLED — turns on the UBNT UDP 10001 discovery + UniFi Network
+  //   API adoption path (ADR-024 §3). Real adapter lands in Phase 3.
+  //
+  // EXPLICIT string→bool (same idiom as DROPLET_CLAIM_GATE_ENABLED below):
+  // z.coerce.boolean() would treat the non-empty strings "0"/"false" as
+  // true and silently enable a backend. Only "1"/"true" enable it; an
+  // absent var or anything else leaves it OFF.
+  DROPLET_AP_EASYMESH_ENABLED: z
+    .string()
+    .default("0")
+    .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
+  DROPLET_AP_UNIFI_ENABLED: z
+    .string()
+    .default("0")
+    .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
+
   // --- Front-panel claim gate (WARP-165) ---
   // Physical-presence gate for POST /auth/setup: when ON, the first-owner
   // request must carry the claim code shown on the device's front panel

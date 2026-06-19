@@ -204,6 +204,28 @@ describe("ap-discovery-poller (WARP-446)", () => {
     expect(row?.status).toBe("AWAITING_APPROVAL");
   });
 
+  it("ADR-024 Phase 2: with the EasyMesh flag ON, the scaffold is registered but contributes nothing (mDNS-only DROPLET_IMAGE rows)", async () => {
+    const prisma = createPrismaMock();
+    const openwrt = makeOpenwrt({
+      listDiscoveredAps: async () => [{ mac: "B8:27:EB:00:00:07" }],
+    });
+
+    // Flag ON — the scaffold source is registered, but this phase it
+    // returns [] (no real 1905.1 socket yet), so the only rows created are
+    // the live mDNS DROPLET_IMAGE ones. Proves the multiplexer wiring
+    // honors the flag without changing the live-path output.
+    const poller = createApDiscoveryPoller(prisma as any, openwrt, {
+      easymeshEnabled: true,
+      unifiEnabled: true,
+    });
+    await poller.pollOnce();
+
+    expect(prisma.apDevice.upsert).toHaveBeenCalledTimes(1);
+    const row = prisma.rows.get("B8:27:EB:00:00:07");
+    expect(row.status).toBe("AWAITING_APPROVAL");
+    expect(row.backend).toBe("DROPLET_IMAGE");
+  });
+
   it("re-observation of a known MAC touches lastSeen without flipping status", async () => {
     const prisma = createPrismaMock();
     const baseline = new Date(Date.now() - 60_000);
