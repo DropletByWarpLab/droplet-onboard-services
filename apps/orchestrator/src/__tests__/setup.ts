@@ -90,6 +90,18 @@ vi.mock("@prisma/client", () => {
   };
   return {
     PrismaClient: vi.fn(() => mockPrisma),
+    // Mirrors the generated client's top-level enum exports (const objects
+    // whose values equal their keys). off-lan-gate.service.ts imports the
+    // `OffLanChannelKey` value to key its `offLanAllowlistChannel.findUnique`
+    // read (WARP-467); the schema's `enum OffLanChannelKey { ... }` is the
+    // source of truth for this set.
+    OffLanChannelKey: {
+      software_updates: "software_updates",
+      cloud_model_escape: "cloud_model_escape",
+      outbound_email: "outbound_email",
+      telemetry: "telemetry",
+      web_fetch: "web_fetch",
+    },
     Prisma: {
       PrismaClientKnownRequestError,
       // Mirrors the generated client's const-object enum — reset.service opens
