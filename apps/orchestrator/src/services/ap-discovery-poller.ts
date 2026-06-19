@@ -40,6 +40,7 @@ import {
   UniFiDiscoverySource,
   type DiscoverySource,
 } from "./ap-discovery-multiplexer.js";
+import { createUniFiNetworkClient } from "./unifi-network.client.js";
 
 const logger = pino({ name: "ap-discovery-poller" });
 
@@ -98,7 +99,14 @@ export function createApDiscoveryPoller(
     sources.push(new EasyMeshDiscoverySource({ enabled: true }));
   }
   if (flags.unifiEnabled) {
-    sources.push(new UniFiDiscoverySource({ enabled: true }));
+    // ADR-024 Phase 3: the UniFi source reads the customer-supplied
+    // controller's pending-adoption list through the official local API
+    // client (built from DROPLET_AP_UNIFI_CONTROLLER_URL + API key). Option B
+    // — we never bundle the controller; the box just points at the one the
+    // household already runs.
+    sources.push(
+      new UniFiDiscoverySource({ enabled: true }, createUniFiNetworkClient()),
+    );
   }
   const multiplexer = createDiscoveryMultiplexer(prisma, sources);
 

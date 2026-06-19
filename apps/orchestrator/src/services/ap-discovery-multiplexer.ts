@@ -41,6 +41,10 @@ import {
   reconcileDiscovered,
   type DiscoveredApObservation,
 } from "./ap-onboard.service.js";
+import {
+  UniFiClientError,
+  type UniFiNetworkClient,
+} from "./unifi-network.client.js";
 
 const logger = pino({ name: "ap-discovery-multiplexer" });
 
@@ -139,26 +143,67 @@ export class EasyMeshDiscoverySource implements DiscoverySource {
 }
 
 /**
- * SCAFFOLD (ADR-024 §3, Phase 3) — UniFi / UBNT UDP 10001 discovery.
+ * LIVE source (ADR-024 §3, Phase 3) — UniFi discovery via the official local
+ * UniFi Network API.
  *
- * Gated behind `DROPLET_AP_UNIFI_ENABLED` (default 0/off). When off —
- * ALWAYS this phase — `discover()` returns []. There is NO real socket
- * code here yet: Phase 3 reads the UniFi Network controller's
- * pending-adoption list (and may additionally sniff UDP 10001) to surface
- * `backend=UNIFI` observations, adopted via the official local API.
- * Registered now for shape + an off-path test only.
+ * Gated behind `DROPLET_AP_UNIFI_ENABLED` (default 0/off). When off — the
+ * shipping single-box default — `discover()` returns []. When on, it reads
+ * the controller's *Pending Adoption* list (the primary discovery signal: a
+ * factory-default UniFi AP gets a lease, broadcasts UBNT discovery, and
+ * surfaces as pending on the controller) and maps each device to a
+ * `backend: "UNIFI", vendor: "Ubiquiti"` observation, carrying the
+ * controller `device_id` as `backendRef` so the approve path can address it.
+ *
+ * The `UniFiNetworkClient` is the SEAM — injected so this source unit-tests
+ * against a mock (there is no controller on the dev laptop; the wire shapes
+ * are validated against a real controller later, see unifi-network.client.ts).
+ * When enabled but no client is wired (defensive — the poller always passes
+ * one when the flag is on), `discover()` yields [] rather than throwing, so a
+ * misconfiguration never crashes the discovery tick.
  */
 export class UniFiDiscoverySource implements DiscoverySource {
-  constructor(private readonly options: ScaffoldSourceOptions) {}
+  constructor(
+    private readonly options: ScaffoldSourceOptions,
+    private readonly client?: UniFiNetworkClient,
+  ) {}
 
   async discover(): Promise<DiscoveredApObservation[]> {
     if (!this.options.enabled) return [];
-    // Phase 3: read the controller pending list (primary) + optional UDP
-    // 10001 sniff here and map to { backend: "UNIFI", ... }.
-    logger.debug(
-      "unifi discovery enabled but the controller adapter is a Phase-3 scaffold; yielding []",
-    );
-    return [];
+    if (!this.client) {
+      logger.warn(
+        "unifi discovery enabled but no controller client wired; yielding []",
+      );
+      return [];
+    }
+    let pending;
+    try {
+      pending = await this.client.listPendingDevices();
+    } catch (err) {
+      // A household can flip DROPLET_AP_UNIFI_ENABLED on BEFORE entering the
+      // controller URL / API key. That must never take down the whole
+      // discovery tick (the live mDNS / DROPLET_IMAGE path has to survive a
+      // half-configured UniFi backend). NOT_CONFIGURED degrades to [] — the
+      // box just hasn't been pointed at a controller yet. Any OTHER error
+      // (auth, unreachable controller) propagates so the poller's
+      // cold-start-aware catch logs it and the next tick retries — we don't
+      // silently swallow a real, configured-but-failing controller.
+      if (err instanceof UniFiClientError && err.code === "NOT_CONFIGURED") {
+        logger.debug(
+          "unifi discovery enabled but controller URL / API key not set; yielding [] until configured",
+        );
+        return [];
+      }
+      throw err;
+    }
+    return pending.map((d) => ({
+      mac: d.mac,
+      // Explicit backend tag — the reconciler stamps ApDevice.backend from it.
+      backend: "UNIFI" as const,
+      vendor: "Ubiquiti",
+      backendRef: d.deviceId,
+      model: d.model,
+      lastIp: d.ip,
+    }));
   }
 }
 

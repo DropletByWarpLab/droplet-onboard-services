@@ -207,6 +207,52 @@ describe("MdnsDiscoverySource (ADR-024 Phase 2 — live source)", () => {
   });
 });
 
+describe("UniFiDiscoverySource (ADR-024 Phase 3 — live source)", () => {
+  /** Mock of the typed UniFi client — Phase 3 tests the source/handler
+   *  against this, never a real controller (there is none on the laptop). */
+  function fakeUniFiClient(pending: any[]) {
+    return {
+      listPendingDevices: vi.fn(async () => pending),
+      adoptDevice: vi.fn(),
+      pushWlanConfig: vi.fn(),
+      getDeviceStatus: vi.fn(),
+      forgetDevice: vi.fn(),
+    };
+  }
+
+  it("maps the controller pending-adoption list to UNIFI/Ubiquiti observations when enabled", async () => {
+    const client = fakeUniFiClient([
+      { mac: "aa:bb:cc:00:00:01", deviceId: "u-1", model: "U6-Lite", ip: "192.168.20.50" },
+      { mac: "aa:bb:cc:00:00:02", deviceId: "u-2" },
+    ]);
+    const src = new UniFiDiscoverySource({ enabled: true }, client as any);
+    const observed = await src.discover();
+
+    expect(client.listPendingDevices).toHaveBeenCalledTimes(1);
+    expect(observed).toHaveLength(2);
+    expect(observed[0]).toMatchObject({
+      mac: "aa:bb:cc:00:00:01",
+      backend: "UNIFI",
+      vendor: "Ubiquiti",
+      backendRef: "u-1",
+      model: "U6-Lite",
+      lastIp: "192.168.20.50",
+    });
+    expect(observed[1]).toMatchObject({ mac: "aa:bb:cc:00:00:02", backend: "UNIFI", vendor: "Ubiquiti" });
+  });
+
+  it("returns [] when the controller has no pending devices (steady state)", async () => {
+    const client = fakeUniFiClient([]);
+    const src = new UniFiDiscoverySource({ enabled: true }, client as any);
+    expect(await src.discover()).toEqual([]);
+  });
+
+  it("an enabled source with no client wired returns [] (defensive — never throws on discover)", async () => {
+    const src = new UniFiDiscoverySource({ enabled: true });
+    expect(await src.discover()).toEqual([]);
+  });
+});
+
 describe("EasyMesh + UniFi scaffolds (ADR-024 Phase 2 — gated off)", () => {
   it("EasyMeshDiscoverySource contributes nothing when DROPLET_AP_EASYMESH_ENABLED=0 (default off)", async () => {
     const src = new EasyMeshDiscoverySource({ enabled: false });
