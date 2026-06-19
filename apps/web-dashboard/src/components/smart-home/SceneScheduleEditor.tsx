@@ -179,11 +179,12 @@ export function SceneScheduleEditor({
             <span>
               {built ? describeLocalSchedule(draft) : "Pick a valid time"} —{" "}
               shown in <strong className="font-medium text-label-secondary">{tz}</strong> (your
-              local time). Saved and run in UTC, so it always fires at{" "}
+              local time). Saved in UTC, so it fires at{" "}
               <strong className="font-medium text-label-secondary">
                 {formatLocalTime(hour, minute)}
               </strong>{" "}
-              where you are.
+              now — after a daylight-saving change the local time may shift by an
+              hour.
             </span>
           </p>
 
