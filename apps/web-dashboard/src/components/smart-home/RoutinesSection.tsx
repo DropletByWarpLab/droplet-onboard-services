@@ -1,10 +1,11 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { Play, Loader2, Sparkles, Plus, Pencil, Trash2 } from "lucide-react";
+import { Play, Loader2, Sparkles, Plus, Pencil, Trash2, CalendarClock } from "lucide-react";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { runScene, deleteScene, type Scene } from "@/lib/api";
 import { SceneEditorModal } from "./SceneEditorModal";
+import { SceneScheduleEditor } from "./SceneScheduleEditor";
 
 /**
  * Routines (scenes, WARP-474) on the smart-home page — saved device batches an
@@ -30,6 +31,7 @@ export function RoutinesSection({
   const [running, setRunning] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [editor, setEditor] = useState<Editor>(null);
+  const [scheduling, setScheduling] = useState<Scene | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
 
   async function doRun(scene: Scene) {
@@ -121,6 +123,14 @@ export function RoutinesSection({
                   <button
                     type="button"
                     className="icon-btn"
+                    onClick={() => setScheduling(scene)}
+                    aria-label={`Schedule ${scene.name}`}
+                  >
+                    <CalendarClock size={15} />
+                  </button>
+                  <button
+                    type="button"
+                    className="icon-btn"
                     onClick={() => setEditor({ mode: "edit", sceneId: scene.id })}
                     aria-label={`Edit ${scene.name}`}
                   >
@@ -195,6 +205,14 @@ export function RoutinesSection({
           sceneId={editor.mode === "edit" ? editor.sceneId : undefined}
           onClose={() => setEditor(null)}
           onSaved={() => onChanged?.()}
+        />
+      )}
+
+      {scheduling && (
+        <SceneScheduleEditor
+          sceneId={scheduling.id}
+          sceneName={scheduling.name}
+          onClose={() => setScheduling(null)}
         />
       )}
 

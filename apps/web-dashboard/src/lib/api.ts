@@ -2482,6 +2482,97 @@ export async function deleteScene(id: string): Promise<void> {
 }
 
 /**
+ * feat/scene-schedules — a recurring cadence bound to a routine (Scene). The
+ * orchestrator's scene-schedule ticker runs the routine when `nextFireAt`
+ * passes, then advances it from `rrule`. `rrule` is UTC-only (FREQ=DAILY|WEEKLY
+ * with BYHOUR/BYMINUTE/BYDAY) — the editor converts the owner's local wall-clock
+ * time to UTC before sending. `nextFireAt`/`lastFiredAt` are ISO instants;
+ * `lastFiredAt` is null until the first fire.
+ */
+export interface SceneSchedule {
+  id: string;
+  sceneId: string;
+  rrule: string;
+  nextFireAt: string;
+  enabled: boolean;
+  createdBy: string | null;
+  lastFiredAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** List the schedules for a routine. Any signed-in role may read. */
+export async function fetchSceneSchedules(
+  sceneId: string,
+): Promise<SceneSchedule[]> {
+  const res = await authFetch(`${BASE}/api/scenes/${sceneId}/schedules`);
+  if (!res.ok) {
+    throw new Error(`Failed to load schedules (${res.status})`);
+  }
+  const data = await res.json();
+  return Array.isArray(data?.schedules) ? data.schedules : [];
+}
+
+/**
+ * Create a schedule for a routine (owner/admin). `rrule` must be a supported
+ * UTC RRULE (the server 400s a malformed one); the editor builds it from the
+ * owner's chosen days + local time, converted to UTC.
+ */
+export async function createSceneSchedule(
+  sceneId: string,
+  rrule: string,
+): Promise<SceneSchedule> {
+  const res = await authFetch(`${BASE}/api/scenes/${sceneId}/schedules`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ rrule }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(
+      data.error || data.detail || `Failed to create schedule (${res.status})`,
+    );
+  }
+  return res.json();
+}
+
+/** Enable / disable a schedule (owner/admin). Re-enabling recomputes nextFireAt. */
+export async function toggleSceneSchedule(
+  sceneId: string,
+  scheduleId: string,
+  enabled: boolean,
+): Promise<SceneSchedule> {
+  const res = await authFetch(
+    `${BASE}/api/scenes/${sceneId}/schedules/${scheduleId}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    },
+  );
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Failed to update schedule (${res.status})`);
+  }
+  return res.json();
+}
+
+/** Delete a schedule (owner/admin). */
+export async function deleteSceneSchedule(
+  sceneId: string,
+  scheduleId: string,
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/scenes/${sceneId}/schedules/${scheduleId}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok && res.status !== 404) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Failed to delete schedule (${res.status})`);
+  }
+}
+
+/**
  * WARP-304: shape returned by `GET /api/llm/conversations/:id`. The
  * dashboard hydrates `useChat.messages` from this on page mount when the
  * URL carries a `?c=<id>` hash.
