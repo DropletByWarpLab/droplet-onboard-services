@@ -23,6 +23,7 @@ import {
   User,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
+import { fetchVpnStatus } from "@/lib/api";
 import { DropletMark } from "@/components/DropletMark";
 
 /**
@@ -206,16 +207,49 @@ function MotifCameras() {
   );
 }
 
-function MotifRemote() {
+// Two remote-access motifs, chosen at render by the live ADR-023 signal
+// (`VpnStatusInfo.publicFqdn`). Until the box learns its publicly-trusted
+// per-device FQDN from HQ, we show the WireGuard/DuckDNS baseline; once it
+// has one, we show the real one-URL-everywhere address with a green padlock.
+
+function MotifRemoteVpn() {
+  return (
+    <div className="flex w-full items-center gap-4 rounded-[14px] border border-separator bg-surface-secondary p-4 text-left">
+      <div className="flex h-[88px] w-[88px] flex-none items-center justify-center rounded-[12px] border border-separator bg-surface-primary text-label-primary">
+        {/* Decorative QR-ish glyph; the real QR is minted on the Remote Access page. */}
+        <Smartphone size={40} aria-hidden="true" />
+      </div>
+      <div className="min-w-0">
+        <div className="mb-1 flex items-center gap-2">
+          <Smartphone size={15} className="text-label-tertiary" aria-hidden="true" />
+          <span className="type-footnote font-semibold text-label-primary">
+            Your phone
+          </span>
+          <span className="inline-flex items-center gap-1 rounded-full bg-system-green/15 px-2 py-0.5 type-caption-2 font-semibold text-system-green">
+            connected
+          </span>
+        </div>
+        <div className="type-caption-1 font-mono text-label-secondary">
+          yourstudio.duckdns.org
+        </div>
+        <div className="mt-1.5 type-caption-1 text-label-tertiary">
+          WireGuard · keys generated on the box
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MotifRemoteFqdn({ fqdn }: { fqdn: string }) {
   return (
     <div className="flex w-full flex-col gap-3 rounded-[14px] border border-separator bg-surface-secondary p-4 text-left">
-      {/* A browser address bar: one trusted URL with a green padlock that resolves
-          the same on your home Wi-Fi and over the WireGuard tunnel (ADR-023
-          split-horizon). The opaque per-device name carries no PII. */}
+      {/* A browser address bar: the box's real publicly-trusted URL with a green
+          padlock, resolving the same on home Wi-Fi and over the WireGuard tunnel
+          (ADR-023 split-horizon). The opaque per-device name carries no PII. */}
       <div className="flex items-center gap-2 rounded-full border border-separator bg-surface-primary px-3 py-2">
         <Lock size={14} className="flex-none text-system-green" aria-hidden="true" />
         <span className="min-w-0 flex-1 truncate type-caption-1 font-mono text-label-secondary">
-          d-7f3a2c9e.devices.warp-lab.ai
+          {fqdn}
         </span>
         <span className="inline-flex flex-none items-center gap-1 rounded-full bg-system-green/15 px-2 py-0.5 type-caption-2 font-semibold text-system-green">
           trusted
@@ -277,10 +311,33 @@ export const TOUR_STEPS: readonly TourStep[] = [
     glyph: (cn) => <Globe size={26} className={cn} />,
     kicker: "Remote access",
     title: "Remote access is end-to-end encrypted",
-    body: "Off your home Wi-Fi, your phone reaches the Droplet over WireGuard — a modern VPN whose keys you generated on the box itself. Add a device from the Remote Access page, scan one QR code, and you're on. You then open the same secure web address at home or away — a real certificate and a green padlock, with no “Not secure” warning and nothing to install on each device.",
-    motif: () => <MotifRemote />,
+    body: "Off your home Wi-Fi, your phone reaches the Droplet over WireGuard — a modern VPN whose keys you generated on the box itself. Add a device from the Remote Access page and scan one QR code to connect.",
+    motif: () => <MotifRemoteVpn />,
   },
 ];
+
+/**
+ * The remote-access beat upgraded for a box that has learned its
+ * publicly-trusted per-device FQDN (ADR-023). Same WireGuard framing, plus the
+ * one-URL-everywhere + green-padlock payoff, showing the box's real address.
+ * Returned as a fresh array (same length/keys) so the resume index, beat dots,
+ * and tests are unaffected.
+ */
+function withFqdnRemoteStep(
+  steps: readonly TourStep[],
+  fqdn: string,
+): TourStep[] {
+  return steps.map((s) =>
+    s.key === "remote"
+      ? {
+          ...s,
+          body:
+            "Off your home Wi-Fi, your phone reaches the Droplet over WireGuard — a modern VPN whose keys you generated on the box itself. Add a device from the Remote Access page, scan one QR code, and you're on. You then open the same secure web address at home or away — a real certificate and a green padlock, with no “Not secure” warning and nothing to install on each device.",
+          motif: () => <MotifRemoteFqdn fqdn={fqdn} />,
+        }
+      : s,
+  );
+}
 
 const RESUME_KEY = "droplet-tour-step";
 
@@ -308,6 +365,25 @@ export function ProductTour({ onComplete }: { onComplete?: () => void } = {}) {
   // Guard the finish path so a double-click can't fire completeTour + navigate twice.
   const finishedRef = useRef(false);
 
+  // ADR-023: ask the box whether it has a publicly-trusted per-device FQDN. When
+  // it does, the remote-access beat upgrades to the one-URL/green-padlock story
+  // with the box's real address; until then the WireGuard/DuckDNS default stands.
+  // Best-effort — a failed/empty fetch just keeps the default (no over-promise).
+  const [remoteFqdn, setRemoteFqdn] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    fetchVpnStatus()
+      .then((s) => {
+        if (alive) setRemoteFqdn(s?.publicFqdn?.trim() || null);
+      })
+      .catch(() => {
+        /* no signal — keep the WireGuard/DuckDNS baseline */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   // Persist the active step so a refresh resumes here.
   useEffect(() => {
     try {
@@ -317,9 +393,10 @@ export function ProductTour({ onComplete }: { onComplete?: () => void } = {}) {
     }
   }, [index]);
 
+  const steps = remoteFqdn ? withFqdnRemoteStep(TOUR_STEPS, remoteFqdn) : TOUR_STEPS;
   const isFirst = index === 0;
-  const isLast = index === TOUR_STEPS.length - 1;
-  const step = TOUR_STEPS[index];
+  const isLast = index === steps.length - 1;
+  const step = steps[index];
 
   const finish = useCallback(async () => {
     if (finishedRef.current) return;
@@ -365,7 +442,7 @@ export function ProductTour({ onComplete }: { onComplete?: () => void } = {}) {
         <div className="dp-card p-8">
           {/* Clickable beat dots — quiet, accent on the active beat. */}
           <div className="mb-6 flex items-center gap-1.5">
-            {TOUR_STEPS.map((s, i) => (
+            {steps.map((s, i) => (
               <button
                 key={s.key}
                 type="button"

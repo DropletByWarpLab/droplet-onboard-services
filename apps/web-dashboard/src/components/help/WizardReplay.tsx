@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Cpu,
   FolderOpen,
@@ -9,6 +9,7 @@ import {
   X,
 } from "lucide-react";
 import { Dialog } from "@/components/Dialog";
+import { fetchVpnStatus } from "@/lib/api";
 
 /**
  * "How Droplet works" replay modal. Re-shows the four product-
@@ -28,6 +29,22 @@ export function WizardReplay({
   onClose: () => void;
 }) {
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  // ADR-023: when the box has a publicly-trusted per-device FQDN, the remote-
+  // access card shows the one-URL/green-padlock story with its real address;
+  // until then it stays generic. Best-effort fetch while the modal is open.
+  const [remoteFqdn, setRemoteFqdn] = useState<string | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    fetchVpnStatus()
+      .then((s) => {
+        if (alive) setRemoteFqdn(s?.publicFqdn?.trim() || null);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [open]);
 
   return (
     <Dialog
@@ -74,7 +91,11 @@ export function WizardReplay({
           <Card
             icon={<Globe size={18} className="text-accent" />}
             title="Remote access is end-to-end encrypted"
-            body="Your phone connects back to the Droplet via WireGuard — a modern VPN protocol. The handshake uses keys you generated on the Droplet, not credentials stored somewhere else. Off your home Wi-Fi, you reach the dashboard through the same name you saved during setup (yoursubdomain.duckdns.org)."
+            body={
+              remoteFqdn
+                ? `Your phone connects back to the Droplet via WireGuard — a modern VPN protocol. The handshake uses keys you generated on the Droplet, not credentials stored somewhere else. Off your home Wi-Fi, you open the very same address you use at home — ${remoteFqdn} — with a green padlock and nothing to install on each device.`
+                : "Your phone connects back to the Droplet via WireGuard — a modern VPN protocol. The handshake uses keys you generated on the Droplet, not credentials stored somewhere else. Off your home Wi-Fi, you reach the dashboard over that tunnel using the address you set up."
+            }
           />
         </div>
       </div>
