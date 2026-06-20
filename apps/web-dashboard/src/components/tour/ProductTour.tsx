@@ -12,6 +12,7 @@ import {
   Folder,
   FolderOpen,
   Globe,
+  Lock,
   Smartphone,
   Sparkles,
   Video,
@@ -207,27 +208,28 @@ function MotifCameras() {
 
 function MotifRemote() {
   return (
-    <div className="flex w-full items-center gap-4 rounded-[14px] border border-separator bg-surface-secondary p-4 text-left">
-      <div className="flex h-[88px] w-[88px] flex-none items-center justify-center rounded-[12px] border border-separator bg-surface-primary text-label-primary">
-        {/* Decorative QR-ish glyph; the real QR is minted on the Remote Access page. */}
-        <Smartphone size={40} aria-hidden="true" />
+    <div className="flex w-full flex-col gap-3 rounded-[14px] border border-separator bg-surface-secondary p-4 text-left">
+      {/* A browser address bar: one trusted URL with a green padlock that resolves
+          the same on your home Wi-Fi and over the WireGuard tunnel (ADR-023
+          split-horizon). The opaque per-device name carries no PII. */}
+      <div className="flex items-center gap-2 rounded-full border border-separator bg-surface-primary px-3 py-2">
+        <Lock size={14} className="flex-none text-system-green" aria-hidden="true" />
+        <span className="min-w-0 flex-1 truncate type-caption-1 font-mono text-label-secondary">
+          d-7f3a2c9e.devices.warp-lab.ai
+        </span>
+        <span className="inline-flex flex-none items-center gap-1 rounded-full bg-system-green/15 px-2 py-0.5 type-caption-2 font-semibold text-system-green">
+          trusted
+        </span>
       </div>
-      <div className="min-w-0">
-        <div className="mb-1 flex items-center gap-2">
-          <Smartphone size={15} className="text-label-tertiary" aria-hidden="true" />
-          <span className="type-footnote font-semibold text-label-primary">
-            Your phone
-          </span>
-          <span className="inline-flex items-center gap-1 rounded-full bg-system-green/15 px-2 py-0.5 type-caption-2 font-semibold text-system-green">
-            connected
-          </span>
-        </div>
-        <div className="type-caption-1 font-mono text-label-secondary">
-          yourstudio.duckdns.org
-        </div>
-        <div className="mt-1.5 type-caption-1 text-label-tertiary">
-          WireGuard · keys generated on the box
-        </div>
+      <div className="flex items-center gap-2">
+        <Smartphone size={15} className="flex-none text-label-tertiary" aria-hidden="true" />
+        <span className="type-caption-1 text-label-secondary">
+          Same secure address at home and away
+        </span>
+        <span className="ml-auto inline-flex flex-none items-center gap-1 type-caption-1 text-label-tertiary">
+          <ShieldCheck size={13} aria-hidden="true" />
+          WireGuard
+        </span>
       </div>
     </div>
   );
@@ -275,7 +277,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     glyph: (cn) => <Globe size={26} className={cn} />,
     kicker: "Remote access",
     title: "Remote access is end-to-end encrypted",
-    body: "Off your home Wi-Fi, your phone reaches the Droplet over WireGuard — a modern VPN whose keys you generated on the box itself. Add a device from the Remote Access page and scan one QR code to connect.",
+    body: "Off your home Wi-Fi, your phone reaches the Droplet over WireGuard — a modern VPN whose keys you generated on the box itself. Add a device from the Remote Access page, scan one QR code, and you're on. You then open the same secure web address at home or away — a real certificate and a green padlock, with no “Not secure” warning and nothing to install on each device.",
     motif: () => <MotifRemote />,
   },
 ];
