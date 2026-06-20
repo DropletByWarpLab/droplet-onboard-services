@@ -1142,6 +1142,70 @@ STUB
 }
 
 # =============================================================================
+# Test: tls-invariants catches a dropped public-CA-leaf clobber guard (ADR-023 PR-2)
+# =============================================================================
+#
+# Bug class this guards: the box-side tls-issuance cron installs the HQ-issued
+# publicly-trusted fullchain into docker/certs/droplet.{crt,key}. If a future
+# refactor drops the public-CA-leaf guard from _generate_tls_cert, a setup.sh /
+# --sync-secrets re-run that hits the SAN-incomplete OR expired trigger would
+# silently -newkey a self-signed cert OVER the live LE/ZeroSSL fullchain —
+# reverting the box to self-signed until the next 04:00 issuance and breaking
+# every client that trusted the original cert. The tls-invariants check asserts
+# the guard (the `_cert_is_public_ca_leaf` helper + its call + the openssl
+# self-verify it relies on) is present, so this regression proves it.
+#
+# Synthetic-worktree pattern: copy exactly the files tls-invariants reads into a
+# mktemp worktree (no real-tree mutation), assert it PASSES on the faithful
+# copy, then strip the guard from the copied secrets.sh and assert it FAILS.
+test_tls_invariants_catches_dropped_clobber_guard() {
+  local needed=(
+    "scripts/lib/secrets.sh"
+    "docker/nginx.conf"
+    "scripts/factory-reset.sh"
+  )
+  local rel
+  for rel in "${needed[@]}"; do
+    if [ ! -f "$REPO_ROOT_REAL/$rel" ]; then
+      printf "    required file missing from tree: %s\n" "$rel" >&2
+      return 1
+    fi
+  done
+
+  local synth
+  synth="$(mktemp -d)"
+  # shellcheck disable=SC2064  # capture $synth at trap-set time
+  trap "rm -rf '$synth'" RETURN
+
+  # ship-check's main() requires a .git marker at REPO_ROOT.
+  mkdir -p "$synth/.git"
+  mkdir -p "$synth/scripts/lib" "$synth/docker"
+  cp "$REPO_ROOT_REAL/scripts/lib/secrets.sh"   "$synth/scripts/lib/secrets.sh"
+  cp "$REPO_ROOT_REAL/docker/nginx.conf"        "$synth/docker/nginx.conf"
+  cp "$REPO_ROOT_REAL/scripts/factory-reset.sh" "$synth/scripts/factory-reset.sh"
+
+  # 1. Faithful copy → check PASSES.
+  if ! _assert_check_passes "$synth" tls-invariants; then
+    printf "    baseline tls-invariants failed against a faithful copy of the tree\n" >&2
+    return 1
+  fi
+
+  # 2. Regression: strip the guard. Delete every line that carries one of the
+  #    guard's signature tokens (the helper def/call and the openssl self-verify
+  #    it uses) from the copied secrets.sh. The check must now FAIL.
+  grep -vE '_cert_is_public_ca_leaf|openssl[[:space:]]+verify[[:space:]]+-CAfile' \
+    "$synth/scripts/lib/secrets.sh" > "$synth/scripts/lib/secrets.sh.tmp" \
+    && mv "$synth/scripts/lib/secrets.sh.tmp" "$synth/scripts/lib/secrets.sh"
+
+  if grep -qE '_cert_is_public_ca_leaf' "$synth/scripts/lib/secrets.sh"; then
+    printf "    regression mutation no-op — guard tokens still present\n" >&2
+    return 1
+  fi
+
+  _assert_check_fails "$synth" tls-invariants
+}
+
+# =============================================================================
 # Driver
 # =============================================================================
 printf "\n  ${_BOLD}Ship-check regression test suite${_RESET}\n"
@@ -1192,6 +1256,9 @@ _run_test "Disabling PM strips a previously-appended pm profile (symmetric opt-o
 
 _run_test "image-pipeline catches a stubbed scripts/build-image.sh (WARP-663)" \
   test_image_pipeline_catches_stubbed_build_image
+
+_run_test "tls-invariants catches a dropped public-CA-leaf clobber guard (ADR-023 PR-2)" \
+  test_tls_invariants_catches_dropped_clobber_guard
 
 printf "\n  ──────────────────────────────────\n"
 printf "  Results: %d/%d passed" "$PASSED" "$TOTAL"

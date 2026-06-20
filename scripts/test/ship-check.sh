@@ -1292,7 +1292,7 @@ run_check_lifecycle_naming() {
 run_check_tls_invariants() {
   # ADR-023 (C2/C3): invariants the public-CA per-device TLS work must hold so
   # the box never ships certless and the LE cert installs without an nginx
-  # config change. Three static asserts:
+  # config change. Four static asserts:
   #   1. _generate_tls_cert adds the per-device FQDN (DROPLET_PUBLIC_FQDN) to the
   #      bootstrap self-signed SAN — so the box serves a name-matching cert for
   #      the FQDN even before the first LE issuance / offline.
@@ -1300,6 +1300,10 @@ run_check_tls_invariants() {
   #      blocks (:443 and :8443) — the LE fullchain overwrites droplet.crt, so a
   #      rename of those paths would silently break the zero-config handoff.
   #   3. factory-reset.sh deregisters the FQDN (DELETE /dhcp/hostnames/<fqdn>).
+  #   4. (PR-2) _generate_tls_cert guards against CLOBBERING a public-CA leaf:
+  #      it must detect a non-self-signed installed cert (openssl self-verify)
+  #      and skip regeneration, so a setup.sh / --sync-secrets re-run never
+  #      reverts a live LE/ZeroSSL/GTS fullchain back to self-signed.
   local label="tls-invariants"
   local secrets_sh="$REPO_ROOT/scripts/lib/secrets.sh"
   local nginx_conf="$REPO_ROOT/docker/nginx.conf"
@@ -1349,8 +1353,27 @@ run_check_tls_invariants() {
     failures=$((failures + 1))
   fi
 
+  # 4. (PR-2) _generate_tls_cert must guard against clobbering a public-CA leaf.
+  #    Assert BOTH the detector helper exists AND it is invoked inside
+  #    _generate_tls_cert's regeneration path (a defined-but-never-called helper
+  #    would still let a re-run revert a live fullchain to self-signed). The
+  #    detector uses openssl self-verify — assert that primary mechanism too, so
+  #    a refactor that drops the self-verify check (the only public-CA signal
+  #    that doesn't depend on a CA-name string) is caught.
+  if [ -f "$secrets_sh" ]; then
+    if ! grep -qE '_cert_is_public_ca_leaf\(\)' "$secrets_sh" \
+       || ! grep -qE 'if[[:space:]]+_cert_is_public_ca_leaf[[:space:]]' "$secrets_sh" \
+       || ! grep -qE 'openssl[[:space:]]+verify[[:space:]]+-CAfile' "$secrets_sh"; then
+      printf "  ${_RED}FAIL${_RESET}  %s — _generate_tls_cert is missing the public-CA-leaf clobber guard\n" "$label"
+      printf "    | (ADR-023 PR-2: detect a non-self-signed installed cert via\n" >&2
+      printf "    |  '_cert_is_public_ca_leaf' (openssl verify -CAfile) and skip\n" >&2
+      printf "    |  regeneration so a re-run never reverts a live LE/ZeroSSL cert.)\n" >&2
+      failures=$((failures + 1))
+    fi
+  fi
+
   if [ "$failures" -eq 0 ]; then
-    printf "  ${_GREEN}PASS${_RESET}  %s (FQDN SAN + nginx cert paths + factory-reset deregistration)\n" "$label"
+    printf "  ${_GREEN}PASS${_RESET}  %s (FQDN SAN + nginx cert paths + factory-reset deregistration + public-CA-leaf clobber guard)\n" "$label"
     CHECK_RESULTS[$label]=pass
     return 0
   fi
