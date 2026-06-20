@@ -26,7 +26,7 @@ vi.mock("@/components/network/DeviceGridSection", () => ({
   DeviceGridSection: () => <div data-testid="device-grid" />,
 }));
 
-import { DevicesTab } from "@/app/network/page";
+import { DevicesTab } from "@/components/network/DevicesTab";
 
 const DEVICES = [
   { mac: "aa", displayName: "Living Room TV", hostname: "tv", vendor: "Samsung", lastIp: "192.168.1.5", groups: [] },
