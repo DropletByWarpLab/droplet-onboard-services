@@ -85,14 +85,37 @@ export interface HqOrderRequest {
 }
 
 /**
+ * ADR-023 PR-3 — DELETE /api/issuance/registration body. The deployed HQ Worker
+ * REQUIRES a signed TPM-PoP body to unbind a device (a bodyless DELETE 422s):
+ * it re-runs the SAME proof-of-possession check as order/renew (`verifyOrderAuth`)
+ * over a fresh single-use challenge nonce. `device_id` travels in BOTH the query
+ * string (read by the router) AND this body (read by the handler).
+ */
+export interface HqDeregisterRequest {
+  device_id: string;
+  nonce: string;
+  /** base64 of the TPM signature over the challenge string. */
+  signature: string;
+  sig_alg: "ecdsa-sha256";
+  key_fingerprint: string;
+}
+
+export interface HqDeregisterResponse {
+  device_id: string;
+  status: "revoked";
+}
+
+/**
  * Plain outbound HTTPS to the HQ fleet-server. The base URL comes from
- * `HQ_ISSUANCE_URL`; this client owns the five endpoints in the contract.
+ * `HQ_ISSUANCE_URL`; this client owns the contract's endpoints.
  */
 export interface HqIssuanceClient {
   challenge(deviceId: string): Promise<HqChallengeResponse>;
   order(req: HqOrderRequest): Promise<HqOrderResponse>;
   poll(orderId: string, deviceId: string): Promise<HqPollResponse>;
   renew(req: HqOrderRequest): Promise<HqOrderResponse>;
+  /** ADR-023 PR-3 — signed unbind on factory reset. */
+  deregister(req: HqDeregisterRequest): Promise<HqDeregisterResponse>;
 }
 
 // --- Persistence seam (the Prisma TlsCertState model) ----------------------
@@ -249,6 +272,141 @@ export function generateKeyPairAndCsr(fqdn: string): {
   };
 }
 
+// --- Shared challenge + sign (PoP) -----------------------------------------
+
+/** The collaborators `signChallenge` needs. A subset of `TlsIssuanceDeps` so
+ *  both the order/renew flow AND the standalone deregister CLI can reuse it. */
+export interface SignChallengeDeps {
+  deviceId: string;
+  hq: Pick<HqIssuanceClient, "challenge">;
+  identity: Pick<
+    DeviceIdentityClient,
+    "signWithDeviceKey" | "getDeviceIdentityStatus"
+  >;
+}
+
+/** The proof-of-possession material HQ checks on order / renew / deregister:
+ *  a single-use `nonce`, the base64 `signature` over the contract string, the
+ *  `sig_alg`, and the device `key_fingerprint`. `fqdn` + `public_label` are the
+ *  learned identity from the SAME challenge response (callers issuing a cert
+ *  reuse them; deregister ignores them). */
+export interface SignedChallenge {
+  nonce: string;
+  signature: string;
+  sig_alg: "ecdsa-sha256";
+  key_fingerprint: string;
+  fqdn: string;
+  public_label: string;
+}
+
+/**
+ * Fetch a FRESH HQ challenge and sign it with the device TPM key. The signed
+ * bytes are pinned by the issuance contract to exactly:
+ *
+ *   `droplet-cert:v1:<nonce>:<key_fingerprint>:<public_label>`
+ *
+ * (verified byte-for-byte against the HQ Worker's `buildSignedMessage`). HQ
+ * nonces are single-use, so this ALWAYS hits `hq.challenge` — never a cached
+ * nonce. Extracted from issueOrRenew so the factory-reset deregister proves
+ * possession the same way the order flow does (the comment in factory-reset.sh
+ * that claimed the box "can't compute the PoP" was wrong — it can, via this).
+ */
+export async function signChallenge(
+  deps: SignChallengeDeps,
+): Promise<SignedChallenge> {
+  const { deviceId, hq, identity } = deps;
+  const ch = await hq.challenge(deviceId);
+  const fingerprint = (await identity.getDeviceIdentityStatus()).certFingerprint;
+  const challengeStr = `${CHALLENGE_PREFIX}${ch.nonce}:${fingerprint}:${ch.public_label}`;
+  const sig = await identity.signWithDeviceKey(
+    new TextEncoder().encode(challengeStr),
+  );
+  return {
+    nonce: ch.nonce,
+    signature: Buffer.from(sig.signature).toString("base64"),
+    sig_alg: "ecdsa-sha256",
+    key_fingerprint: fingerprint,
+    fqdn: ch.fqdn,
+    public_label: ch.public_label,
+  };
+}
+
+// --- Factory-reset HQ deregistration (ADR-023 PR-3) ------------------------
+
+/** Outcome sentinels for `deregisterFromHq`. It NEVER throws (factory-reset
+ *  must always complete), so callers/tests branch on these instead. */
+export const DEREGISTER_RESULT_OK = "ok" as const;
+export const DEREGISTER_RESULT_SKIPPED = "skipped" as const;
+export const DEREGISTER_RESULT_FAILED = "failed" as const;
+export type DeregisterResult =
+  | typeof DEREGISTER_RESULT_OK
+  | typeof DEREGISTER_RESULT_SKIPPED
+  | typeof DEREGISTER_RESULT_FAILED;
+
+export interface DeregisterDeps {
+  deviceId: string;
+  hq: Pick<HqIssuanceClient, "challenge" | "deregister">;
+  identity: Pick<
+    DeviceIdentityClient,
+    "signWithDeviceKey" | "getDeviceIdentityStatus"
+  >;
+  logger: TlsLogger;
+}
+
+/**
+ * Signed unbind of this box from HQ, run during factory-reset (Phase 0b, while
+ * the stack is still UP). Signs a fresh challenge (proving possession of the
+ * device TPM key) and DELETEs the HQ registration with the full PoP body, so HQ
+ * frees the device row and revokes the cert.
+ *
+ * NON-FATAL by contract: a reset MUST complete even if HQ or the device-identity
+ * sidecar is unreachable. Every failure path returns a sentinel and logs a
+ * warning — this function never throws. (HQ also reaps stale registrations
+ * server-side, so a missed deregister is recoverable.)
+ *
+ *   - device not provisioned (no key to sign with)         → SKIPPED
+ *   - challenge / sign / DELETE failed                     → FAILED
+ *   - HQ acknowledged the unbind                           → OK
+ */
+export async function deregisterFromHq(
+  deps: DeregisterDeps,
+): Promise<DeregisterResult> {
+  const { deviceId, hq, identity, logger } = deps;
+  try {
+    // Don't even reach HQ if there's no provisioned identity — the sidecar can
+    // be down at reset time and we have no key to sign the PoP with.
+    const status = await identity.getDeviceIdentityStatus();
+    if (!status.provisioned) {
+      logger.info(
+        { deviceId },
+        "tls-deregister: device identity not provisioned — skipping HQ deregistration (nothing to unbind)",
+      );
+      return DEREGISTER_RESULT_SKIPPED;
+    }
+
+    const signed = await signChallenge({ deviceId, hq, identity });
+    const req: HqDeregisterRequest = {
+      device_id: deviceId,
+      nonce: signed.nonce,
+      signature: signed.signature,
+      sig_alg: signed.sig_alg,
+      key_fingerprint: signed.key_fingerprint,
+    };
+    const res = await hq.deregister(req);
+    logger.info(
+      { deviceId, status: res.status },
+      "tls-deregister: HQ acknowledged deregistration (device row freed, cert revoked)",
+    );
+    return DEREGISTER_RESULT_OK;
+  } catch (err) {
+    logger.warn(
+      { err, deviceId },
+      "tls-deregister: HQ deregistration failed — non-fatal, factory-reset continues (HQ reaps stale registrations server-side)",
+    );
+    return DEREGISTER_RESULT_FAILED;
+  }
+}
+
 export function createTlsIssuanceService(
   deps: TlsIssuanceDeps,
 ): TlsIssuanceService {
@@ -276,28 +434,21 @@ export function createTlsIssuanceService(
   async function issueOrRenew(
     mode: "issue" | "renew",
   ): Promise<{ fqdn: string; notAfter: string }> {
-    // 1. Challenge.
-    const ch = await hq.challenge(deviceId);
+    // 1-2. Fetch a fresh challenge + sign the exact contract string with the
+    //      device TPM key (shared with the factory-reset deregister path).
+    const signed = await signChallenge({ deviceId, hq, identity });
 
-    // 2. Sign the exact contract string with the device TPM key.
-    const fingerprint = (await identity.getDeviceIdentityStatus())
-      .certFingerprint;
-    const challengeStr = `${CHALLENGE_PREFIX}${ch.nonce}:${fingerprint}:${ch.public_label}`;
-    const sig = await identity.signWithDeviceKey(
-      new TextEncoder().encode(challengeStr),
-    );
-    const signatureB64 = Buffer.from(sig.signature).toString("base64");
-
-    // 3. Generate keypair + CSR locally (private key never transmitted).
-    const { csrPem, keyPem } = generateKeyPairAndCsr(ch.fqdn);
+    // 3. Generate keypair + CSR locally (private key never transmitted). The
+    //    learned FQDN comes from the SAME challenge response.
+    const { csrPem, keyPem } = generateKeyPairAndCsr(signed.fqdn);
 
     const orderReq: HqOrderRequest = {
       device_id: deviceId,
       csr_pem: csrPem,
-      nonce: ch.nonce,
-      signature: signatureB64,
-      sig_alg: "ecdsa-sha256",
-      key_fingerprint: fingerprint,
+      nonce: signed.nonce,
+      signature: signed.signature,
+      sig_alg: signed.sig_alg,
+      key_fingerprint: signed.key_fingerprint,
     };
 
     // 4. Submit the order (issue vs renew share the body shape).
@@ -347,16 +498,16 @@ export function createTlsIssuanceService(
     //    separately by droplet-set-public-fqdn.sh → setup_public_fqdn_dns.)
     if (dns) {
       try {
-        await dns.register(ch.fqdn);
+        await dns.register(signed.fqdn);
       } catch (err) {
         logger.warn(
-          { err, fqdn: ch.fqdn },
+          { err, fqdn: signed.fqdn },
           "tls-issuance: split-horizon DNS registration failed — cert installed, name resolves on next setup run",
         );
       }
     }
 
-    return { fqdn: ch.fqdn, notAfter: result.not_after };
+    return { fqdn: signed.fqdn, notAfter: result.not_after };
   }
 
   /**

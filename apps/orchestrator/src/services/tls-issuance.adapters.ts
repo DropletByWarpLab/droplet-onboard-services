@@ -23,6 +23,8 @@ import { routingFetch } from "./openwrt.client.js";
 import type {
   DnsRegistrar,
   HqChallengeResponse,
+  HqDeregisterRequest,
+  HqDeregisterResponse,
   HqIssuanceClient,
   HqOrderRequest,
   HqOrderResponse,
@@ -95,6 +97,17 @@ export function createHqIssuanceClient(): HqIssuanceClient {
         method: "POST",
         body: JSON.stringify(req),
       });
+    },
+    deregister(req: HqDeregisterRequest) {
+      // ADR-023 PR-3: the deployed HQ Worker reads device_id from BOTH the query
+      // string (router) AND the JSON body (handler), and requires the four PoP
+      // auth fields in the body. Send device_id in both so a stricter Worker
+      // build can't 422 us; the body carries the signed proof-of-possession.
+      const qs = new URLSearchParams({ device_id: req.device_id }).toString();
+      return hqFetch<HqDeregisterResponse>(
+        `/api/issuance/registration?${qs}`,
+        { method: "DELETE", body: JSON.stringify(req) },
+      );
     },
   };
 }
