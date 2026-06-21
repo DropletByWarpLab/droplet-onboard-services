@@ -147,7 +147,7 @@ detect_single_box_mode() {
 #     hardcoded `droplet`. setup.sh calls install_systemd_service after this
 #     so the auto-start unit always lands.
 #   * scripts/host/etc-dnsmasq.d/* — legacy AP configs superseded by the
-#     newer droplet-poc-host-net.service + lan-dhcp.conf. Captured in
+#     newer droplet-host-net.service + lan-dhcp.conf. Captured in
 #     scripts/host/ for historical reference only.
 install_single_box_host_integration() {
   if [ "$(uname)" != "Linux" ]; then
@@ -166,14 +166,14 @@ install_single_box_host_integration() {
   # --- /usr/local/sbin/ scripts -------------------------------------------
   sudo install -m 0755 "$host_src/usr-local-sbin/droplet-openwrt-attach" \
     /usr/local/sbin/droplet-openwrt-attach
-  sudo install -m 0755 "$host_src/usr-local-sbin/droplet-poc-host-net" \
-    /usr/local/sbin/droplet-poc-host-net
-  log_success "Installed /usr/local/sbin/droplet-openwrt-attach + droplet-poc-host-net"
+  sudo install -m 0755 "$host_src/usr-local-sbin/droplet-host-net" \
+    /usr/local/sbin/droplet-host-net
+  log_success "Installed /usr/local/sbin/droplet-openwrt-attach + droplet-host-net"
 
   # --- /etc/default/ envs -------------------------------------------------
-  # droplet-poc-host-net is committed as-is (no secrets). Copy directly.
-  sudo install -m 0644 "$host_src/etc-default/droplet-poc-host-net" \
-    /etc/default/droplet-poc-host-net
+  # droplet-host-net is committed as-is (no secrets). Copy directly.
+  sudo install -m 0644 "$host_src/etc-default/droplet-host-net" \
+    /etc/default/droplet-host-net
 
   # droplet-openwrt-attach has the AP PSK. The repo holds an .example with the
   # PSK redacted; we materialize a real one from the .env value if the operator
@@ -217,16 +217,16 @@ EOF
     log_info "/etc/default/droplet-openwrt-attach exists — keeping rotated value"
   fi
 
-  # --- /etc/droplet-poc-host-net/ -----------------------------------------
-  sudo install -d -m 0755 /etc/droplet-poc-host-net
-  sudo install -m 0644 "$host_src/etc-droplet-poc-host-net/lan-dhcp.conf" \
-    /etc/droplet-poc-host-net/lan-dhcp.conf
+  # --- /etc/droplet-host-net/ -----------------------------------------
+  sudo install -d -m 0755 /etc/droplet-host-net
+  sudo install -m 0644 "$host_src/etc-droplet-host-net/lan-dhcp.conf" \
+    /etc/droplet-host-net/lan-dhcp.conf
 
   # --- systemd units -----------------------------------------------------
   sudo install -m 0644 "$host_src/etc-systemd-system/droplet-openwrt-attach.service" \
     /etc/systemd/system/droplet-openwrt-attach.service
-  sudo install -m 0644 "$host_src/etc-systemd-system/droplet-poc-host-net.service" \
-    /etc/systemd/system/droplet-poc-host-net.service
+  sudo install -m 0644 "$host_src/etc-systemd-system/droplet-host-net.service" \
+    /etc/systemd/system/droplet-host-net.service
   sudo install -d -m 0755 /etc/systemd/system/droplet-openwrt-attach.service.d
   sudo install -m 0644 \
     "$host_src/etc-systemd-system/droplet-openwrt-attach.service.d/override.conf" \
@@ -243,12 +243,12 @@ EOF
   sudo systemctl daemon-reload
   sudo systemd-tmpfiles --create /etc/tmpfiles.d/droplet.conf 2>/dev/null || true
   sudo systemctl enable droplet-openwrt-attach.service >/dev/null 2>&1
-  sudo systemctl enable droplet-poc-host-net.service >/dev/null 2>&1
+  sudo systemctl enable droplet-host-net.service >/dev/null 2>&1
 
   log_success "single-box host integration installed"
-  log_info "  Boot-time:   droplet-openwrt-attach.service + droplet-poc-host-net.service"
-  log_info "  Status:      sudo systemctl status droplet-openwrt-attach droplet-poc-host-net"
-  log_info "  Logs:        sudo journalctl -u droplet-openwrt-attach -u droplet-poc-host-net"
+  log_info "  Boot-time:   droplet-openwrt-attach.service + droplet-host-net.service"
+  log_info "  Status:      sudo systemctl status droplet-openwrt-attach droplet-host-net"
+  log_info "  Logs:        sudo journalctl -u droplet-openwrt-attach -u droplet-host-net"
 }
 
 # WARP-826: poll for the OpenWrt container to be genuinely READY — Running AND
@@ -516,7 +516,7 @@ EOF
   # OpenWrt camera VLAN (openwrt/files/etc/config/dhcp `cameras`). The
   # single-box shape has no separate camera VLAN today — cameras attach to
   # the box's own LAN (br-lan, 192.168.20.0/24; see
-  # scripts/host/etc-droplet-poc-host-net/lan-dhcp.conf). Pinning the subnet
+  # scripts/host/etc-droplet-host-net/lan-dhcp.conf). Pinning the subnet
   # to the actual single-box camera network is what makes camera discovery
   # scan where the cameras are instead of an empty multi-box VLAN (ADR-018
   # Decision 4). When the OpenWrt single-box unification (ADR-018 T3) lands a

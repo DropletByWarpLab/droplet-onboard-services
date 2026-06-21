@@ -214,15 +214,15 @@ if [ -n "$_DEREGISTER_FQDN" ]; then
   # 2. Remove the managed host-record line from the host dnsmasq config
   #    (ADR-018-transitional leg). Best-effort; the file is wiped/regenerated on
   #    re-provision anyway, but stripping it now keeps a not-reinstalled box clean.
-  _host_dnsmasq_conf="/etc/droplet-poc-host-net/lan-dhcp.conf"
+  _host_dnsmasq_conf="/etc/droplet-host-net/lan-dhcp.conf"
   if [ -f "$_host_dnsmasq_conf" ]; then
     _tmp_dns="$(mktemp -t droplet-hostdns-rm.XXXXXX 2>/dev/null || mktemp)"
     sudo grep -vF "# ADR-023 managed host-record" "$_host_dnsmasq_conf" 2>/dev/null \
       | grep -vE '^host-record=.*\.devices\.warp-lab\.ai,' > "$_tmp_dns" || true
     sudo cp "$_tmp_dns" "$_host_dnsmasq_conf" 2>/dev/null || true
     rm -f "$_tmp_dns"
-    sudo systemctl reload droplet-poc-host-net.service 2>/dev/null \
-      || sudo systemctl restart droplet-poc-host-net.service 2>/dev/null || true
+    sudo systemctl reload droplet-host-net.service 2>/dev/null \
+      || sudo systemctl restart droplet-host-net.service 2>/dev/null || true
     log_success "Removed host dnsmasq host-record (ADR-018-transitional)"
   fi
 
