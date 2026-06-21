@@ -1300,6 +1300,11 @@ run_check_tls_invariants() {
   #      blocks (:443 and :8443) — the LE fullchain overwrites droplet.crt, so a
   #      rename of those paths would silently break the zero-config handoff.
   #   3. factory-reset.sh deregisters the FQDN (DELETE /dhcp/hostnames/<fqdn>).
+  #   4. factory-reset.sh sends the SIGNED HQ deregistration via the
+  #      tls-deregister CLI (ADR-023 PR-3) — NOT a bodyless `curl -X DELETE
+  #      …/api/issuance/registration`, which the deployed HQ Worker 422s (it
+  #      requires a TPM-PoP body). Regression: if anyone reverts to the bodyless
+  #      curl, this FAILs.
   local label="tls-invariants"
   local secrets_sh="$REPO_ROOT/scripts/lib/secrets.sh"
   local nginx_conf="$REPO_ROOT/docker/nginx.conf"
@@ -1344,13 +1349,31 @@ run_check_tls_invariants() {
       printf "    | (ADR-023 C3: drop the split-horizon host-record on reset.)\n" >&2
       failures=$((failures + 1))
     fi
+
+    # 4. SIGNED HQ deregistration via the tls-deregister CLI (ADR-023 PR-3).
+    #    Must invoke `tls-deregister` AND must NOT have regressed to a bodyless
+    #    `curl -X DELETE …/api/issuance/registration` (which HQ 422s). Match the
+    #    bodyless curl as a DELETE whose target is the registration endpoint with
+    #    no -d/--data flag on the same logical command — approximated by the
+    #    presence of the registration path on a curl line at all (the CLI does
+    #    the signed DELETE now, so the path should NEVER appear in factory-reset).
+    if ! grep -qE 'npm run -s tls-deregister|run tls-deregister' "$factory_reset"; then
+      printf "  ${_RED}FAIL${_RESET}  %s — factory-reset.sh does not invoke the tls-deregister CLI\n" "$label"
+      printf "    | (ADR-023 PR-3: HQ requires a signed PoP body; run the CLI while the stack is up.)\n" >&2
+      failures=$((failures + 1))
+    fi
+    if grep -qE 'curl.*api/issuance/registration' "$factory_reset"; then
+      printf "  ${_RED}FAIL${_RESET}  %s — factory-reset.sh still uses a bodyless curl to /api/issuance/registration\n" "$label"
+      printf "    | (ADR-023 PR-3 regression: the deployed HQ Worker 422s a DELETE with no TPM-PoP body — use the tls-deregister CLI.)\n" >&2
+      failures=$((failures + 1))
+    fi
   else
     printf "  ${_RED}FAIL${_RESET}  %s — scripts/factory-reset.sh not found\n" "$label"
     failures=$((failures + 1))
   fi
 
   if [ "$failures" -eq 0 ]; then
-    printf "  ${_GREEN}PASS${_RESET}  %s (FQDN SAN + nginx cert paths + factory-reset deregistration)\n" "$label"
+    printf "  ${_GREEN}PASS${_RESET}  %s (FQDN SAN + nginx cert paths + factory-reset FQDN + signed HQ deregister)\n" "$label"
     CHECK_RESULTS[$label]=pass
     return 0
   fi

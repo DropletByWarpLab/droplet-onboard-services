@@ -1142,6 +1142,75 @@ STUB
 }
 
 # =============================================================================
+# Test: tls-invariants catches a factory-reset HQ-deregister regression
+# (ADR-023 PR-3)
+# =============================================================================
+#
+# Original bug: factory-reset.sh Phase 0b sent a BODYLESS `curl -X DELETE
+# …/api/issuance/registration`, which the deployed HQ Worker 422s (it requires
+# a signed TPM-PoP body), so HQ never unbound the device. The fix runs the
+# `tls-deregister` CLI (signed DELETE) while the stack is still up.
+#
+# This test builds a synthetic worktree with the real secrets.sh + nginx.conf +
+# factory-reset.sh, asserts the check PASSES, then applies two regressions and
+# asserts each FAILS:
+#   (a) drop the `npm run -s tls-deregister` invocation,
+#   (b) re-introduce a bodyless curl to /api/issuance/registration.
+test_tls_invariants_catches_deregister_regression() {
+  local needed=(
+    "scripts/lib/secrets.sh"
+    "docker/nginx.conf"
+    "scripts/factory-reset.sh"
+    "scripts/lib/logging.sh"
+  )
+  local rel
+  for rel in "${needed[@]}"; do
+    if [ ! -f "$REPO_ROOT_REAL/$rel" ]; then
+      printf "    required file missing from tree: %s\n" "$rel" >&2
+      return 1
+    fi
+  done
+
+  local synth
+  synth="$(mktemp -d)"
+  # shellcheck disable=SC2064  # capture $synth at trap-set time
+  trap "rm -rf '$synth'" RETURN
+
+  mkdir -p "$synth/.git"
+  mkdir -p "$synth/scripts/lib" "$synth/docker"
+  cp "$REPO_ROOT_REAL/scripts/lib/secrets.sh"   "$synth/scripts/lib/secrets.sh"
+  cp "$REPO_ROOT_REAL/scripts/lib/logging.sh"   "$synth/scripts/lib/logging.sh"
+  cp "$REPO_ROOT_REAL/docker/nginx.conf"        "$synth/docker/nginx.conf"
+  cp "$REPO_ROOT_REAL/scripts/factory-reset.sh" "$synth/scripts/factory-reset.sh"
+
+  # 1. Faithful copy → check PASSES.
+  if ! _assert_check_passes "$synth" tls-invariants; then
+    printf "    baseline tls-invariants failed against a faithful copy of the tree\n" >&2
+    return 1
+  fi
+
+  # 2a. Regression: strip the signed tls-deregister CLI invocation. The check
+  #     must FAIL (factory-reset no longer signs the HQ unbind).
+  local stripped
+  stripped="$(grep -v 'npm run -s tls-deregister' "$synth/scripts/factory-reset.sh")"
+  printf '%s\n' "$stripped" > "$synth/scripts/factory-reset.sh"
+  if ! _assert_check_fails "$synth" tls-invariants; then
+    printf "    expected tls-invariants to FAIL after dropping the tls-deregister CLI\n" >&2
+    return 1
+  fi
+
+  # 2b. Regression: restore the CLI line AND re-introduce the bodyless curl to
+  #     /api/issuance/registration (the original 422 bug). The check must FAIL.
+  cp "$REPO_ROOT_REAL/scripts/factory-reset.sh" "$synth/scripts/factory-reset.sh"
+  cat >> "$synth/scripts/factory-reset.sh" <<'BODYLESS'
+# Synthetic regression for the ship-check self-test: the bodyless DELETE the
+# deployed HQ Worker 422s. tls-invariants must catch this.
+curl -sS -X DELETE "${HQ_ISSUANCE_URL%/}/api/issuance/registration?device_id=${DEV}" || true
+BODYLESS
+  _assert_check_fails "$synth" tls-invariants
+}
+
+# =============================================================================
 # Driver
 # =============================================================================
 printf "\n  ${_BOLD}Ship-check regression test suite${_RESET}\n"
@@ -1192,6 +1261,9 @@ _run_test "Disabling PM strips a previously-appended pm profile (symmetric opt-o
 
 _run_test "image-pipeline catches a stubbed scripts/build-image.sh (WARP-663)" \
   test_image_pipeline_catches_stubbed_build_image
+
+_run_test "tls-invariants catches a factory-reset HQ-deregister regression (ADR-023 PR-3)" \
+  test_tls_invariants_catches_deregister_regression
 
 printf "\n  ──────────────────────────────────\n"
 printf "  Results: %d/%d passed" "$PASSED" "$TOTAL"
