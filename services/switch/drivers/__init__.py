@@ -20,6 +20,49 @@ from .base import SwitchDriver
 logger = logging.getLogger("droplet.switch.factory")
 
 
+def _load_switch_password() -> str:
+    """Load the managed-switch credential, preferring the Docker secret file.
+
+    ADR-018 T1. Mirrors routing's ``_load_openwrt_password`` (WARP-37).
+    Resolution order:
+
+      1. ``SWITCH_PASSWORD_FILE`` (default ``/run/secrets/switch_password``) —
+         the Docker Compose file-based secret, written by
+         ``scripts/setup.sh --sync-secrets`` from the operator-supplied
+         ``SWITCH_PASSWORD`` in ``.env``. Preferred.
+      2. ``SWITCH_PASSWORD`` env var — deprecated, logged as a warning, kept for
+         local dev and upgrades.
+
+    Returns an empty string when nothing is configured. The factory then keeps
+    the historical graceful posture: the driver still constructs and the switch
+    reports ``disconnected`` at connect-time rather than crashing — so a box
+    without a managed switch is unaffected.
+    """
+    secret_path = os.environ.get("SWITCH_PASSWORD_FILE", "/run/secrets/switch_password")
+    try:
+        with open(secret_path, "r", encoding="utf-8") as fh:
+            value = fh.read().strip()
+        if value:
+            return value
+        logger.warning(
+            "Switch password secret file %s is empty — set SWITCH_PASSWORD in .env "
+            "and re-run ./scripts/setup.sh --sync-secrets",
+            secret_path,
+        )
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.warning("Could not read switch password from %s: %s", secret_path, exc)
+
+    env_value = os.environ.get("SWITCH_PASSWORD", "")
+    if env_value:
+        logger.warning(
+            "SWITCH_PASSWORD env var is deprecated — migrate to the Docker secret "
+            "at /run/secrets/switch_password (ADR-018 T1). Falling back to env for now."
+        )
+    return env_value
+
+
 def create_driver() -> SwitchDriver:
     """Create and return a switch driver instance based on SWITCH_DRIVER env var."""
 
@@ -31,7 +74,10 @@ def create_driver() -> SwitchDriver:
         host = os.environ.get("SWITCH_HOST", "192.168.1.77")
         port = int(os.environ.get("SWITCH_PORT", "443"))
         username = os.environ.get("SWITCH_USERNAME", "admin")
-        password = os.environ.get("SWITCH_PASSWORD", "")
+        # ADR-018 T1: resolve from the Docker secret file first
+        # (SWITCH_PASSWORD_FILE → /run/secrets/switch_password), falling back to
+        # the deprecated SWITCH_PASSWORD env var. Empty → graceful "disconnected".
+        password = _load_switch_password()
         # NET-07: optional CA bundle / cert path enabling TLS verification of
         # the switch. Empty/unset → driver keeps the insecure self-signed
         # default (with a warning). Honoured in LantronixDriver.connect().
@@ -52,7 +98,11 @@ def create_driver() -> SwitchDriver:
         )
 
         if not password:
-            logger.warning("SWITCH_PASSWORD not set — switch auth may fail")
+            logger.warning(
+                "Switch password not configured (no /run/secrets/switch_password "
+                "and no SWITCH_PASSWORD) — switch auth will fail and the switch "
+                "reports 'disconnected'. Boxes without a managed switch can ignore this."
+            )
 
         logger.info(
             "Creating managed switch driver for %s:%d (user: %s, writes: %s)",
