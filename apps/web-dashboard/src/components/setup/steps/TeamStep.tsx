@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
-import { AlertCircle, ChevronDown, Plus, Users, X } from "lucide-react";
-import { postTeamInvite, InviteError } from "@/lib/api";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AlertCircle, Check, ChevronDown, Plus, Users, X } from "lucide-react";
+import { getEnabledSsoProviders, postTeamInvite, InviteError } from "@/lib/api";
 import type { TeamInviteRole } from "@/lib/types";
 import { StepShell } from "@/components/setup/StepShell";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
@@ -94,6 +94,23 @@ function roleLabel(role: TeamInviteRole): string {
   return ROLE_OPTIONS.find((o) => o.value === role)?.label ?? role;
 }
 
+/** Friendly names for the SSO provider IDs `getEnabledSsoProviders` returns
+ *  (WARP-629). Unknown ids fall back to a capitalized id. */
+const SSO_PROVIDER_LABELS: Record<string, string> = {
+  google: "Google Workspace",
+  okta: "Okta",
+  entra: "Microsoft Entra",
+  azuread: "Microsoft Entra",
+  microsoft: "Microsoft Entra",
+};
+
+function ssoLabel(id: string): string {
+  return (
+    SSO_PROVIDER_LABELS[id.toLowerCase()] ??
+    id.charAt(0).toUpperCase() + id.slice(1)
+  );
+}
+
 export function TeamStep({
   onComplete,
   onSkip,
@@ -107,6 +124,29 @@ export function TeamStep({
   const [emailError, setEmailError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const emailRef = useRef<HTMLInputElement>(null);
+
+  // Directory-sync state, read from the real SSO discovery endpoint
+  // (`GET /api/sso/oidc/providers`, the same WARP-629 surface the login page
+  // uses). Best-effort: a rejection/timeout means "no directory configured" and
+  // the card stays the informational local-first invite path — never a no-op
+  // control. There is no in-wizard SSO *configuration* flow yet, so when none is
+  // configured we show the option as a note rather than a button that does
+  // nothing; when one IS configured we reflect that truthfully.
+  const [ssoProviders, setSsoProviders] = useState<string[]>([]);
+  useEffect(() => {
+    let alive = true;
+    getEnabledSsoProviders()
+      .then((p) => {
+        if (alive) setSsoProviders(p);
+      })
+      .catch(() => {
+        /* no directory configured — keep the local-first invite path */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+  const ssoConnected = ssoProviders.length > 0;
 
   const normalizedEmail = useMemo(() => email.trim().toLowerCase(), [email]);
 
@@ -169,19 +209,24 @@ export function TeamStep({
         <Users size={20} className="flex-shrink-0 text-accent" />
         <div className="min-w-0 flex-1">
           <p className="type-footnote font-semibold text-label-primary">
-            Sync your directory instead
+            {ssoConnected
+              ? "Directory sync is on"
+              : "Sync your directory instead"}
           </p>
           <p className="type-caption-1 text-label-tertiary mt-0.5">
-            Mirror Google Workspace, Microsoft Entra, or Okta over SSO (OIDC) —
-            stays on the LAN.
+            {ssoConnected
+              ? `Your directory is mirrored over SSO (${ssoProviders
+                  .map(ssoLabel)
+                  .join(", ")}) — all on the LAN. New people sign in with your provider.`
+              : "Mirror Google Workspace, Microsoft Entra, or Okta over SSO (OIDC) — stays on the LAN."}
           </p>
         </div>
-        <button
-          type="button"
-          className="dp-btn-secondary flex-shrink-0 !h-9 !px-3.5 type-footnote"
-        >
-          Connect SSO
-        </button>
+        {ssoConnected && (
+          <span className="inline-flex flex-shrink-0 items-center gap-1.5 rounded-full bg-system-green/15 px-3 py-1.5 type-caption-1 font-semibold text-system-green">
+            <Check size={13} aria-hidden="true" />
+            Synced
+          </span>
+        )}
       </div>
 
       {/* Invite row: email + role + Add */}
