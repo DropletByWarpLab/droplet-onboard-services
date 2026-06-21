@@ -297,6 +297,48 @@ test_expired_leaf_restores_bootstrap() {
 }
 
 # =============================================================================
+# Test 4: a corrupt/unreadable droplet.crt is REGENERATED, not preserved
+# =============================================================================
+#
+# A garbage/truncated droplet.crt also FAILS the openssl self-verify, so the
+# public-CA-leaf detector must NOT fail-safe-preserve it (that would pin a broken
+# file the gateway can't load, with no self-heal). The parse gate makes
+# _cert_is_public_ca_leaf return false on an unparseable cert, so
+# _generate_tls_cert falls through and mints a fresh, valid self-signed cert.
+test_corrupt_cert_is_regenerated_not_preserved() {
+  local sandbox certs crt key
+  sandbox="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$sandbox'" RETURN
+  certs="$sandbox/docker/certs"
+  mkdir -p "$certs"
+  crt="$certs/droplet.crt"; key="$certs/droplet.key"
+
+  # Install a corrupt cert (and a stand-in key). Both files exist so the
+  # function enters the existing-cert branch, but the cert does not parse.
+  printf 'this is not a valid certificate\n' > "$crt"
+  printf 'this is not a valid key\n' > "$key"
+
+  if ! _run_generate_tls_cert "$sandbox"; then
+    printf "    _generate_tls_cert returned non-zero on a corrupt installed cert\n" >&2
+    return 1
+  fi
+
+  # The corrupt cert must have been REPLACED by a real, parseable, SAN-complete
+  # self-signed cert — NOT preserved as the unreadable garbage.
+  if ! openssl x509 -in "$crt" -noout >/dev/null 2>&1; then
+    printf "    droplet.crt is still unparseable — a corrupt cert must be regenerated, not preserved\n" >&2
+    return 1
+  fi
+  if ! openssl x509 -in "$crt" -noout -ext subjectAltName 2>/dev/null | grep -q 'DNS:droplet.lan'; then
+    printf "    regenerated cert is SAN-incomplete (missing droplet.lan)\n" >&2
+    return 1
+  fi
+
+  return 0
+}
+
+# =============================================================================
 # Driver
 # =============================================================================
 printf "\n  ${_BOLD}secrets.sh TLS-clobber regression test suite${_RESET}\n"
@@ -311,6 +353,9 @@ _run_test "public-CA leaf is NOT clobbered (droplet.crt byte-identical)" \
 
 _run_test "expired leaf + valid .bootstrap is restored from bootstrap" \
   test_expired_leaf_restores_bootstrap
+
+_run_test "corrupt/unreadable droplet.crt is regenerated, not preserved" \
+  test_corrupt_cert_is_regenerated_not_preserved
 
 printf "\n  ──────────────────────────────────\n"
 printf "  Results: %d/%d passed" "$PASSED" "$TOTAL"

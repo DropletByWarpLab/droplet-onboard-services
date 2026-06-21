@@ -901,6 +901,12 @@ _cert_has_all_required_sans() {
 # has CA failover (ZeroSSL primary, Google Trust Services fallback), all
 # non-self-signed — matching on a CA name would miss the fallback issuers.
 #
+# Parse gate: a corrupt/truncated/garbage cert ALSO fails self-verify, so before
+# the fail-safe-toward-preserve below we require the file to parse as an X.509
+# cert (a readable issuer or subject). An unparseable droplet.crt is NOT a
+# preservable public-CA leaf — we fall through so the normal path regenerates a
+# fresh self-signed cert rather than pinning a broken file the gateway can't load.
+#
 # Returns 0 (true) when the cert is a public-CA leaf we must preserve.
 _cert_is_public_ca_leaf() {
   local cert_file="$1"
@@ -913,11 +919,25 @@ _cert_is_public_ca_leaf() {
 
   # Self-verify failed. Corroborate via issuer != subject before declaring it a
   # public-CA leaf (guards against an unrelated openssl error masquerading as a
-  # CA-signed result). If we can't read either DN, fall back to the self-verify
-  # signal alone (treat as public-CA leaf — fail safe toward NOT clobbering).
+  # CA-signed result).
   local issuer subject
   issuer="$(openssl x509 -in "$cert_file" -noout -issuer 2>/dev/null)"
   subject="$(openssl x509 -in "$cert_file" -noout -subject 2>/dev/null)"
+
+  # Parse gate: if the file does not parse as an X.509 cert at all (neither a
+  # readable issuer NOR subject), it is not a usable public-CA leaf — it is a
+  # corrupt/truncated/garbage droplet.crt. Preserving it would leave the gateway
+  # certless with no self-heal; instead fall through (return 1) so the normal
+  # regeneration path mints a fresh self-signed cert, matching pre-PR behaviour
+  # for an unreadable cert. (self-verify also fails on garbage, so without this
+  # gate the fail-safe-toward-preserve below would wrongly pin a broken file.)
+  if [ -z "$issuer" ] && [ -z "$subject" ]; then
+    return 1
+  fi
+
+  # The cert parses. If we can read both DNs, use the issuer != subject signal;
+  # if we can only read one, fall back to the self-verify signal alone (treat as
+  # public-CA leaf — fail safe toward NOT clobbering a live fullchain).
   if [ -n "$issuer" ] && [ -n "$subject" ]; then
     # Strip the leading `issuer=` / `subject=` label before comparing the DNs.
     if [ "${issuer#issuer=}" = "${subject#subject=}" ]; then
