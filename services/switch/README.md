@@ -97,11 +97,51 @@ This creates VLAN 100, assigns ports 1-8 as untagged access ports (cameras), and
 | `SWITCH_HOST` | `192.168.1.77` | Switch management IP |
 | `SWITCH_PORT` | `443` | Switch HTTPS port |
 | `SWITCH_USERNAME` | `admin` | Switch admin username |
-| `SWITCH_PASSWORD` | (required) | Switch admin password |
+| `SWITCH_PASSWORD_FILE` | `/run/secrets/switch_password` | Path to the Docker secret file holding the switch admin password. Resolved first. See "Switch password" below. |
+| `SWITCH_PASSWORD` | (empty) | **Deprecated** — env fallback kept for local dev and upgrades. Prefer the secret file. Empty → the switch reports `disconnected` (non-fatal). |
 | `SWITCH_CA_CERT` | (unset) | Path to a CA bundle/cert for TLS verification of the switch. When set, the HTTPS session to the switch is verified against it. When unset, verification is disabled (the embedded switch ships a self-signed cert) and a warning is logged. A configured-but-missing path fails closed (the driver refuses to start) rather than silently downgrading to unverified TLS. |
 | `SWITCH_DRIVER` | `lantronix` | Driver implementation (`lantronix` or `asic`) |
 | `SWITCH_LIVE_WRITES` | `0` (off) | ADR-018 item 10: the WebStaX write shape (`POST /config/<name>`) is pattern-inferred and not yet confirmed on firmware v1.04.0079. The Lantronix driver runs **plan-only** by default — writes compute the intended change and log it without POSTing. Set truthy (`1`/`true`/`yes`/`on`) ONLY after a one-time supervised confirmation of the write shape per firmware; live writes are then read-back-verified and raise on mismatch. |
 | `PORT` | `8081` | Service listen port |
+
+## Switch password
+
+The managed switch's admin credential is **operator-supplied** — unlike the
+per-device secrets `setup.sh` mints (the OpenWrt rpcd password, service tokens,
+the audit key), the switch is third-party hardware whose password the operator
+sets on the switch itself, so the platform never generates or commits one
+(ADR-018 T1).
+
+In production it is mounted as a Docker secret at `/run/secrets/switch_password`
+(0600). `drivers._load_switch_password()` resolves it in this order at startup:
+
+1. `SWITCH_PASSWORD_FILE` (default `/run/secrets/switch_password`) — preferred.
+2. `SWITCH_PASSWORD` env var — deprecated, logged as a warning.
+
+If neither is set the switch service still starts but logs a warning and reports
+`disconnected` (every authenticated call fails at login) — the same graceful
+degradation as when the switch is unreachable. **Boxes without a managed switch
+are unaffected:** they leave `SWITCH_PASSWORD` empty and the service idles
+disconnected.
+
+To configure (or rotate) the credential:
+
+```bash
+# 1. Set the operator-supplied password in .env (the password already set ON the
+#    switch — this command does NOT change the switch's password).
+sed -i 's/^SWITCH_PASSWORD=.*/SWITCH_PASSWORD=theswitchpassword/' .env \
+  || echo 'SWITCH_PASSWORD=theswitchpassword' >> .env
+
+# 2. Rewrite the secret file (writes atomically with chmod 600).
+./scripts/setup.sh --sync-secrets
+
+# 3. Restart the switch container.
+docker compose -f docker/docker-compose.yml restart switch
+```
+
+When `SWITCH_PASSWORD` is empty `setup.sh` writes an empty placeholder file so
+Docker Compose can still mount the secret and the service starts (degraded). It
+never generates a switch password.
 
 ## Running Locally
 
