@@ -123,8 +123,16 @@ export async function tickSceneSchedules(
       );
       skipped += 1;
     }
-    const didDisable = await advanceOrDisable(prisma, schedule, now);
-    if (didDisable) disabled += 1;
+    try {
+      const didDisable = await advanceOrDisable(prisma, schedule, now);
+      if (didDisable) disabled += 1;
+    } catch (err) {
+      logger.warn(
+        { err, sceneId: schedule.sceneId, scheduleId: schedule.id },
+        "scene-schedule-ticker: advanceOrDisable threw — skipping advance, will retry next tick",
+      );
+      skipped += 1;
+    }
   }
 
   return { inspected: due.length, fired, skipped, disabled };

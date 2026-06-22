@@ -166,5 +166,6 @@ export function _parseRruleForTests(rule: string): ParsedRrule | null {
  * UTC-only posture as `nextFireFromRrule`.
  */
 export function isSupportedRrule(rule: string): boolean {
-  return parseRrule(rule) !== null;
+  const parsed = parseRrule(rule);
+  return parsed !== null && parsed.interval === 1;
 }
