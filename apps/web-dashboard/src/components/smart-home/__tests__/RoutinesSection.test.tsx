@@ -16,9 +16,17 @@ vi.mock("framer-motion", async () => {
 
 vi.mock("@/lib/api", () => ({
   runScene: vi.fn(),
+  deleteScene: vi.fn(),
 }));
 
-import { runScene, type Scene } from "@/lib/api";
+// Stub the editor so author-mode tests don't pull in useSmartHome / the Dialog.
+vi.mock("../SceneEditorModal", () => ({
+  SceneEditorModal: ({ mode }: { mode: string }) => (
+    <div data-testid="scene-editor">{mode}</div>
+  ),
+}));
+
+import { runScene, deleteScene, type Scene } from "@/lib/api";
 import { RoutinesSection } from "../RoutinesSection";
 
 function scene(over: Partial<Scene> = {}): Scene {
@@ -80,5 +88,37 @@ describe("RoutinesSection", () => {
     render(<RoutinesSection scenes={[scene({ name: "Movie" })]} />);
     await clickRunThenConfirm(/run movie/i);
     await waitFor(() => expect(screen.getByText("boom")).toBeTruthy());
+  });
+});
+
+describe("RoutinesSection — author mode (owner/admin)", () => {
+  it("hides author affordances when canAuthor is false (default)", () => {
+    render(<RoutinesSection scenes={[scene()]} />);
+    expect(screen.queryByRole("button", { name: /new routine/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /edit good night/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /delete good night/i })).toBeNull();
+  });
+
+  it("shows New / Edit / Delete when canAuthor", () => {
+    render(<RoutinesSection scenes={[scene()]} canAuthor />);
+    expect(screen.getByRole("button", { name: /new routine/i })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /edit good night/i })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /delete good night/i })).toBeTruthy();
+  });
+
+  it("opens the editor in create mode from the empty state", () => {
+    render(<RoutinesSection scenes={[]} canAuthor />);
+    fireEvent.click(screen.getByRole("button", { name: /create your first routine/i }));
+    expect(screen.getByTestId("scene-editor").textContent).toBe("create");
+  });
+
+  it("deletes a routine after confirm and notifies the parent", async () => {
+    (deleteScene as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+    const onChanged = vi.fn();
+    render(<RoutinesSection scenes={[scene({ name: "Movie" })]} canAuthor onChanged={onChanged} />);
+    fireEvent.click(screen.getByRole("button", { name: /delete movie/i }));
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(deleteScene).toHaveBeenCalledWith("s1"));
+    await waitFor(() => expect(onChanged).toHaveBeenCalled());
   });
 });

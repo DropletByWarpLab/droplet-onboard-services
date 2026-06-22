@@ -2255,15 +2255,53 @@ enum ToolRunStatus {
 /// per-action (the run-handler captures and surfaces them) so a
 /// dead bulb mid-scene doesn't abort the lights that work.
 model Scene {
-  id        String        @id @default(uuid())
+  id        String          @id @default(uuid())
   name      String
   icon      String?
   createdBy String?
-  createdAt DateTime      @default(now())
-  updatedAt DateTime      @updatedAt
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
   actions   SceneAction[]
+  schedules SceneSchedule[]
 
   @@index([createdAt])
+}
+
+/// feat/scene-schedules — recurring cadence for a saved Scene (routine).
+///
+/// Lets an owner/admin schedule a routine to run on an RRULE cadence
+/// (e.g. `FREQ=DAILY;BYHOUR=7` → every day 07:00 UTC). The
+/// scene-schedule-ticker (60s interval, pg advisory lock) scans rows
+/// whose `enabled = true AND nextFireAt <= now()`, executes the parent
+/// Scene via the shared `executeScene` path with `triggeredBy="scheduler"`,
+/// then advances `nextFireAt` from the RRULE. This is the EXACT clone of
+/// the WARP-463 ToolSchedule pattern — one sanctioned scheduler, no
+/// hand-rolled timers.
+///
+/// State is the explicit `enabled` column + `nextFireAt` — NEVER derived
+/// from a NULL. A malformed RRULE or a deleted parent Scene flips
+/// `enabled = false` (+ an audit row) so a typo can't pin the ticker.
+/// `lastFiredAt` records the most recent successful tick fire (NULL =
+/// never fired yet — that is provenance, not state).
+///
+/// SAFETY: an unattended scheduled fire bypasses the per-run scene
+/// confirm-token (see scenes.ts run-handler). That is the deliberate
+/// owner/admin opt-in — *creating the schedule IS the confirmation* —
+/// and every fire is audited. Same justification as ToolSchedule.
+model SceneSchedule {
+  id          String    @id @default(uuid())
+  sceneId     String
+  scene       Scene     @relation(fields: [sceneId], references: [id], onDelete: Cascade)
+  rrule       String
+  nextFireAt  DateTime
+  enabled     Boolean   @default(true)
+  createdBy   String?
+  lastFiredAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([nextFireAt])
+  @@index([sceneId])
 }
 
 /// WARP-474 — one Matter command in a Scene. `idx` is the explicit
