@@ -2665,6 +2665,13 @@ enum PmStateGroup {
 /// Per-project workflow state (kanban column). Default seed set: Backlog /
 /// Todo / In Progress / Done / Cancelled. `isDefault` marks the landing state
 /// for newly created work items.
+///
+/// INVARIANT: at most ONE default state per project. Enforced by a partial
+/// unique index — `UNIQUE ("projectId") WHERE "isDefault" = true` — that lives
+/// in raw migration SQL because Prisma's schema language cannot express a
+/// WHERE-filtered (partial) unique index. See the
+/// `PmState_projectId_isDefault_key` index in the native_pm_foundation
+/// migration. State names are also unique per project (`@@unique` below).
 model PmState {
   id        String       @id @default(uuid())
   projectId String
@@ -2678,6 +2685,7 @@ model PmState {
   updatedAt DateTime     @default(now()) @updatedAt
   workItems PmWorkItem[]
 
+  @@unique([projectId, name])
   @@index([projectId, sortOrder])
 }
 
@@ -2689,6 +2697,7 @@ model PmLabel {
   name      String
   color     String?
   createdAt DateTime          @default(now())
+  updatedAt DateTime          @default(now()) @updatedAt
   items     PmWorkItemLabel[]
 
   @@unique([projectId, name])
@@ -2747,6 +2756,7 @@ model PmWorkItem {
   @@index([projectId, updatedAt(sort: Desc)])
   @@index([parentId])
   @@index([cycleId])
+  @@index([stateId])
 }
 
 /// Work-item ↔ assignee join. `userId` is a User.id.
@@ -2869,6 +2879,7 @@ model PmCustomProperty {
   options   Json?
   sortOrder Int                       @default(0)
   createdAt DateTime                  @default(now())
+  updatedAt DateTime                  @default(now()) @updatedAt
   values    PmWorkItemPropertyValue[]
 
   @@unique([projectId, name])
@@ -2899,7 +2910,7 @@ model PmAttachment {
   workItem     PmWorkItem @relation(fields: [workItemId], references: [id], onDelete: Cascade)
   fileName     String
   mimeType     String
-  sizeBytes    Int
+  sizeBytes    BigInt
   storageKey   String     @unique
   uploadedById String?
   createdAt    DateTime   @default(now())
@@ -2907,16 +2918,34 @@ model PmAttachment {
   @@index([workItemId])
 }
 
+enum PmActivityVerb {
+  created
+  updated
+  state_changed
+  commented
+  assigned
+  unassigned
+  priority_changed
+  due_date_changed
+  title_changed
+  description_changed
+  label_added
+  label_removed
+  archived
+  restored
+  cycle_added
+  cycle_removed
+}
+
 /// Append-only activity/history feed for a work item. `actorId` null = system /
-/// LLM. `verb` is a machine token ("created" | "updated" | "state_changed" |
-/// "commented" | "assigned" | …); for field updates `field`/`oldValue`/
+/// LLM. `verb` is a machine token; for field updates `field`/`oldValue`/
 /// `newValue` capture the diff.
 model PmActivity {
-  id         String     @id @default(uuid())
+  id         String          @id @default(uuid())
   workItemId String
-  workItem   PmWorkItem @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  workItem   PmWorkItem      @relation(fields: [workItemId], references: [id], onDelete: Cascade)
   actorId    String?
-  verb       String
+  verb       PmActivityVerb
   field      String?
   oldValue   String?
   newValue   String?
