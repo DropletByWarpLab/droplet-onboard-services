@@ -166,9 +166,9 @@ else
     # capture (caches / rebuildable state). The backup manifest's `excluded`
     # array is the machine-readable source of truth; this is the operator-
     # facing heads-up so nobody assumes "backup taken" == "everything saved".
-    log_warn "NOT in the safety backup (rebuilt on reinstall): redis-pm cache,"
-    log_warn "  frigate-config, rag-eval output, whisper/piper/ollama model"
-    log_warn "  caches, openwrt config/overlay. See manifest 'excluded' for the list."
+    log_warn "NOT in the safety backup (rebuilt on reinstall): frigate-config,"
+    log_warn "  rag-eval output, whisper/piper/ollama model caches, openwrt"
+    log_warn "  config/overlay. See manifest 'excluded' for the list."
   else
     log_error "Safety backup FAILED — aborting factory reset."
     log_error "Re-run with --no-backup to reset anyway (DATA WILL BE LOST)."
@@ -372,13 +372,6 @@ VOLUMES=(
   "openwrt-config"
   "openwrt-overlay"
   "switch-state"         # managed-switch state — re-provisioned by setup, like openwrt-*
-  # WARP-501 — embedded Plane PM stack (ADR-010): dedicated postgres + redis +
-  # object store + queue. All wiped on reset so a re-install starts with a clean
-  # Plane. (Full Plane backup incl. pm-minio attachments lands in WARP-514.)
-  "postgres-pm-data"
-  "redis-pm-data"
-  "pm-minio-data"
-  "pm-rabbitmq-data"
 )
 
 # Free any container still mounting a target volume so the removals below are

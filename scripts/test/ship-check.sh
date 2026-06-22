@@ -52,12 +52,10 @@
 #                           user-facing surfaces (compose profile names,
 #                           env-var names, CLI flags, service/file names,
 #                           log strings). Repo-wide net (docker-compose.yml,
-#                           .env.example, scripts/*.sh, scripts/lib/*.sh);
-#                           the services/pm/-scoped rule-17 sub-check lives
-#                           in pm-invariants. Grandfathers the KNOWN
-#                           droplet-poc-host-net debt (retired by ADR-018
-#                           action item 3) + a few "PoC" prose comments —
-#                           fails on any NEW occurrence.
+#                           .env.example, scripts/*.sh, scripts/lib/*.sh).
+#                           Grandfathers the KNOWN droplet-poc-host-net debt
+#                           (retired by ADR-018 action item 3) + a few "PoC"
+#                           prose comments — fails on any NEW occurrence.
 #   docker-build-smoke    — (--full only) End-to-end ./scripts/setup.sh
 #                           --skip-docker in an Ubuntu 24.04 container.
 #                           Catches WARP-456 (missing audit-key mount) and
@@ -103,7 +101,6 @@ ALL_CHECKS=(
   matter-env-allowlist
   exec-bits
   stale-repo-names
-  pm-invariants
   lifecycle-naming
   image-pipeline
   tls-invariants
@@ -131,7 +128,7 @@ SUBCOMMAND
   CHECK_NAME          Run only the named check. One of:
                         tsc-full, compose-config, frigate-env-scan,
                         shellcheck, matter-env-allowlist, exec-bits,
-                        stale-repo-names, pm-invariants, lifecycle-naming,
+                        stale-repo-names, lifecycle-naming,
                         image-pipeline, tls-invariants, docker-build-smoke
                       Useful for iterating on a single failure.
 
@@ -251,8 +248,6 @@ CHECKS
                         (retired by ADR-018 action item 3, matched as a
                         substring so it survives line moves) plus a handful of
                         free-text "PoC" prose comments (per-line allowlist).
-                        Distinct from pm-invariants' rule-17 sub-check, which
-                        owns services/pm/ with zero tolerance.
                         Prevents: ADR-018 §13 class — a new `profiles: [poc]`,
                         `COMPOSE_PROFILES=poc`, `setup.sh --poc`, or
                         `droplet-poc-*` service shipping to a customer box.
@@ -1013,101 +1008,6 @@ run_check_stale_repo_names() {
   return 1
 }
 
-run_check_pm_invariants() {
-  # WARP-504: invariants the embedded Plane PM stack (ADR-010, spec WARP-498)
-  # must hold on every PR that touches services/pm/, the Plane block in
-  # docker/docker-compose.yml, the /pm/ block in docker/nginx.conf, or the
-  # Plane secret section in scripts/lib/secrets.sh. Catches the four classes
-  # we already pay for in architecture-guard rules 11, 14, 17 plus the
-  # DROPLET_PM_* prefix requirement.
-  #
-  # Skipped (with PASS) when services/pm/ does not exist — the stack is
-  # additive; ship-check shouldn't fail on branches that pre-date WARP-500.
-  local label="pm-invariants"
-  local pm_dir="$REPO_ROOT/services/pm"
-  local env_example="$pm_dir/.env.example"
-
-  if [ ! -d "$pm_dir" ]; then
-    printf "  ${_DIM}SKIP${_RESET}  %s (services/pm/ not present — pre-WARP-500 branch)\n" "$label"
-    CHECK_RESULTS[$label]=skip
-    return 0
-  fi
-
-  local failures=0
-
-  # ----- Rule 17: no lifecycle-stage framing in user-facing surfaces -------
-  # Greps services/pm/ excluding tests/ (test names legitimately use "test_").
-  # Word-boundary match (\b... in PCRE) so substrings like "production-tested"
-  # don't trigger; we want the bare tokens.
-  local pm_files
-  pm_files="$(find "$pm_dir" -type f -not -path "*/tests/*" -not -name "PATCHES.md" 2>/dev/null)"
-  if [ -n "$pm_files" ]; then
-    local framing_hits
-    framing_hits="$(printf '%s\n' "$pm_files" | xargs grep -nIE '\b(poc|prototype)\b' 2>/dev/null || true)"
-    if [ -n "$framing_hits" ]; then
-      printf "  ${_RED}FAIL${_RESET}  %s — rule 17 violation: lifecycle-stage framing in services/pm/\n" "$label"
-      printf '%s\n' "$framing_hits" | sed 's/^/    | /' >&2
-      printf "    | (Name things by what they ARE, not by their lifecycle stage —\n" >&2
-      printf "    |  see 03-claude-harness/skills/droplet-architecture-guard rule 17.)\n" >&2
-      failures=$((failures + 1))
-    fi
-  fi
-
-  # ----- Rule 11: no MATTER_* env vars in Plane-touching paths -------------
-  # matter.js scans process.env at startup and auto-imports every MATTER_*
-  # into VariableService, colliding with root-node behavior ids and
-  # throwing UnsupportedCastError. Use DROPLET_MATTER_* for our own vars.
-  if [ -n "$pm_files" ]; then
-    local matter_hits
-    matter_hits="$(printf '%s\n' "$pm_files" | xargs grep -nIE '\bMATTER_[A-Z_]+' 2>/dev/null \
-                  | grep -v 'DROPLET_MATTER_' \
-                  | grep -v 'MATTER_STORAGE_PATH' || true)"
-    if [ -n "$matter_hits" ]; then
-      printf "  ${_RED}FAIL${_RESET}  %s — rule 11 violation: MATTER_* env var in services/pm/\n" "$label"
-      printf '%s\n' "$matter_hits" | sed 's/^/    | /' >&2
-      printf "    | (Use DROPLET_MATTER_* prefix or DROPLET_PM_* for PM-specific vars.)\n" >&2
-      failures=$((failures + 1))
-    fi
-  fi
-
-  # ----- Rule 14: no host-specific IP defaults -----------------------------
-  # Match private-range IPs that look like dev-machine defaults. The compose
-  # network's resolver line (`resolver 127.0.0.11`) is in nginx.conf, not
-  # services/pm/, so this scope avoids false positives.
-  if [ -n "$pm_files" ]; then
-    local ip_hits
-    ip_hits="$(printf '%s\n' "$pm_files" | xargs grep -nIE '\b(192\.168\.|10\.[0-9]+\.|172\.(1[6-9]|2[0-9]|3[01])\.|host\.docker\.internal)' 2>/dev/null || true)"
-    if [ -n "$ip_hits" ]; then
-      printf "  ${_RED}FAIL${_RESET}  %s — rule 14 violation: host-specific default in services/pm/\n" "$label"
-      printf '%s\n' "$ip_hits" | sed 's/^/    | /' >&2
-      printf "    | (Defaults must work on a brand-new install OR fail loud.)\n" >&2
-      failures=$((failures + 1))
-    fi
-  fi
-
-  # ----- Env-var prefix: every assignment in .env.example must be DROPLET_PM_*
-  # Skips comment and blank lines.
-  if [ -f "$env_example" ]; then
-    local bad_prefix
-    bad_prefix="$(grep -nE '^[A-Za-z_][A-Za-z0-9_]*=' "$env_example" \
-                  | grep -vE '^[0-9]+:DROPLET_PM_' || true)"
-    if [ -n "$bad_prefix" ]; then
-      printf "  ${_RED}FAIL${_RESET}  %s — env vars in .env.example must use DROPLET_PM_* prefix (rule 11)\n" "$label"
-      printf '%s\n' "$bad_prefix" | sed 's/^/    | /' >&2
-      failures=$((failures + 1))
-    fi
-  fi
-
-  if [ "$failures" -gt 0 ]; then
-    CHECK_RESULTS[$label]=fail
-    return 1
-  fi
-
-  printf "  ${_GREEN}PASS${_RESET}  %s (services/pm/ clean: rules 11, 14, 17 + DROPLET_PM_* prefix)\n" "$label"
-  CHECK_RESULTS[$label]=pass
-  return 0
-}
-
 run_check_lifecycle_naming() {
   # ADR-018 action item 8 + architecture-guard rule 17: every Droplet box is
   # the SHIPPING PRODUCT, so user-facing surfaces must be named by what the
@@ -1118,13 +1018,9 @@ run_check_lifecycle_naming() {
   # `setup.sh --poc` → `setup.sh --single-box`, `COMPOSE_PROFILES=poc` →
   # `COMPOSE_PROFILES=single-box`.
   #
-  # SCOPE vs pm-invariants: run_check_pm_invariants enforces the SAME rule 17
-  # but ONLY inside services/pm/, with ZERO tolerance (the Plane stack landed
-  # clean and must stay clean). This check is the REPO-WIDE net across the
-  # broad user-facing surface set below. The two never overlap — pm-invariants
-  # owns services/pm/; this check owns everything else listed here. We did not
-  # fold one into the other because their grandfather policies differ: pm has
-  # none; this surface carries the KNOWN droplet-poc-host-net debt.
+  # This check is the REPO-WIDE net for rule 17 across the broad user-facing
+  # surface set below. It carries the KNOWN droplet-poc-host-net debt as a
+  # tracked grandfather exception.
   #
   # COVERED SURFACES (curated — mirrors stale-repo-names' surface philosophy):
   #   docker/docker-compose.yml   (profile names, service names, env, comments)
@@ -1296,9 +1192,9 @@ run_check_tls_invariants() {
   #   1. _generate_tls_cert adds the per-device FQDN (DROPLET_PUBLIC_FQDN) to the
   #      bootstrap self-signed SAN — so the box serves a name-matching cert for
   #      the FQDN even before the first LE issuance / offline.
-  #   2. nginx.conf still references droplet.crt + droplet.key on BOTH server
-  #      blocks (:443 and :8443) — the LE fullchain overwrites droplet.crt, so a
-  #      rename of those paths would silently break the zero-config handoff.
+  #   2. nginx.conf still references droplet.crt + droplet.key on the :443 server
+  #      block — the LE fullchain overwrites droplet.crt, so a rename of those
+  #      paths would silently break the zero-config handoff.
   #   3. factory-reset.sh deregisters the FQDN (DELETE /dhcp/hostnames/<fqdn>).
   local label="tls-invariants"
   local secrets_sh="$REPO_ROOT/scripts/lib/secrets.sh"
@@ -1319,13 +1215,13 @@ run_check_tls_invariants() {
     failures=$((failures + 1))
   fi
 
-  # 2. nginx references droplet.crt + droplet.key on BOTH server blocks.
+  # 2. nginx references droplet.crt + droplet.key on the :443 server block.
   if [ -f "$nginx_conf" ]; then
     local crt_refs key_refs
     crt_refs="$(grep -cE 'ssl_certificate[[:space:]].*droplet\.crt' "$nginx_conf" 2>/dev/null || echo 0)"
     key_refs="$(grep -cE 'ssl_certificate_key[[:space:]].*droplet\.key' "$nginx_conf" 2>/dev/null || echo 0)"
-    if [ "$crt_refs" -lt 2 ] || [ "$key_refs" -lt 2 ]; then
-      printf "  ${_RED}FAIL${_RESET}  %s — nginx.conf must reference droplet.crt/.key on BOTH servers (found crt=%s key=%s)\n" "$label" "$crt_refs" "$key_refs"
+    if [ "$crt_refs" -lt 1 ] || [ "$key_refs" -lt 1 ]; then
+      printf "  ${_RED}FAIL${_RESET}  %s — nginx.conf must reference droplet.crt/.key on the :443 server (found crt=%s key=%s)\n" "$label" "$crt_refs" "$key_refs"
       printf "    | (ADR-023 C2: the LE fullchain overwrites droplet.crt — do not rename these paths.)\n" >&2
       failures=$((failures + 1))
     fi
@@ -1719,7 +1615,6 @@ _dispatch_check() {
     matter-env-allowlist) run_check_matter_env_allowlist ;;
     exec-bits)            run_check_exec_bits ;;
     stale-repo-names)     run_check_stale_repo_names ;;
-    pm-invariants)        run_check_pm_invariants ;;
     lifecycle-naming)     run_check_lifecycle_naming ;;
     image-pipeline)       run_check_image_pipeline ;;
     tls-invariants)       run_check_tls_invariants ;;

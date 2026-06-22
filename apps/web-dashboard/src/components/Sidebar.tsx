@@ -91,10 +91,10 @@ const NAV_GROUPS: NavGroup[] = [
       // NavItem type has no count field; out of scope).
       { href: "/email", label: "Email", icon: Mail },
       { href: "/calendar", label: "Calendar", icon: CalendarIcon },
-      // WARP-512: embedded Plane PM stack — workspace surface, sits next
-      // to Calendar (both are time/workflow-oriented) and ahead of
-      // Knowledge (which is the read-only search index). Page at
-      // /projects iframes Plane behind the OIDC IdP from WARP-505.
+      // ADR-026: native PM surface — sits next to Calendar (both are
+      // time/workflow-oriented) and ahead of Knowledge (the read-only search
+      // index). Page at /projects renders natively off /api/pm/* under the
+      // dashboard session — no embedded stack, no second login.
       { href: "/projects", label: "Projects", icon: FolderKanban },
       { href: "/knowledge", label: "Knowledge", icon: BookOpen },
       // WARP-225: per-user context-meter. Lives next to Knowledge so the

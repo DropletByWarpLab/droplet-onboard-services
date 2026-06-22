@@ -63,8 +63,8 @@ const envSchema = z.object({
   //
   // Parsed into `config.corsAllowedOrigins` below. When unset it defaults to
   // the appliance's LAN dashboard origin (https://droplet-ai.local — already
-  // covered by the TLS cert SANs, see DROPLET_PM_WEB_URL and
-  // scripts/lib/secrets.sh) plus http://localhost:3000 in non-production for
+  // covered by the TLS cert SANs, see scripts/lib/secrets.sh) plus
+  // http://localhost:3000 in non-production for
   // the Next.js dev server. A `*` value is rejected at startup (see the
   // wildcard guard after parse), mirroring services/ai-gateway/main.py.
   CORS_ALLOWED_ORIGINS: z.string().default(""),
@@ -120,42 +120,6 @@ const envSchema = z.object({
   // .env key via compose.
   DROPLET_MATTER_SERVICE_TOKEN: z.string().default(""),
 
-  // --- WARP-505/506/507/511 — embedded Plane PM stack (ADR-010, spec WARP-498) ---
-  // All vars use DROPLET_PM_* prefix per architecture-guard rule 11.
-  // Defaults work on a brand-new install OR fail loud (rule 14).
-  DROPLET_PM_API_URL: z.string().url().default("http://pm-api:8000"),
-  // Plane's dedicated TLS origin (spec WARP-498 OQ2 amendment): the vanilla
-  // frontend is built with basePath:"" so it must own an origin root — the
-  // gateway serves it on :8443, not under /pm/.
-  DROPLET_PM_WEB_URL: z.string().url().default("https://droplet-ai.local:8443"),
-  // WARP-867: NOT a Plane API key — Plane CE only authenticates its own
-  // server-generated service tokens, which pm-bootstrap.service mints at
-  // runtime and serves via GET /api/pm/service-token. This secret is the
-  // seed for the bootstrap admin identity (the Plane admin password is
-  // HMAC-derived from it — see planeAdminPassword()).
-  DROPLET_PM_ADMIN_TOKEN: z.string().default(""),
-  // WARP-860 — identity of the auto-bootstrapped Plane instance admin.
-  // Plane CE has no OIDC and no headless setup, so pm-bootstrap.service.ts
-  // completes the god-mode instance setup programmatically with this email
-  // and a password derived from DROPLET_PM_ADMIN_TOKEN. The owner signs in
-  // to the embedded Plane with these credentials (surfaced once in the
-  // setup wizard's PM step).
-  DROPLET_PM_ADMIN_EMAIL: z.string().email().default("admin@droplet.local"),
-  // HMAC signing key for Plane → orchestrator webhooks (WARP-511).
-  // Empty default = webhook receiver fail-CLOSED (every payload 401s) per
-  // engineering-handbook 04-coding-standards/security-rules.md §1.
-  DROPLET_PM_WEBHOOK_SECRET: z.string().default(""),
-  // WARP-505 OIDC IdP (spec WARP-498 OQ6). The orchestrator runs a minimal
-  // OIDC provider that Plane points at as its relying-party IdP. ID tokens
-  // are signed RS256 (HMAC won't work — Plane verifies via JWKS). setup.sh
-  // generates a 2048-bit RSA keypair on first run and pins both halves
-  // below. Empty defaults make the OIDC endpoints 500 with a clear error
-  // (signIdToken throws) until setup.sh has populated .env.
-  DROPLET_PM_OIDC_PRIVATE_KEY_PEM: z.string().default(""),
-  DROPLET_PM_OIDC_KID: z.string().default(""),
-  DROPLET_PM_OIDC_CLIENT_ID: z.string().default("plane"),
-  DROPLET_PM_OIDC_CLIENT_SECRET: z.string().default(""),
-
   // --- JWT ---
   // In production this must be set — setup.sh generates a 64-byte random hex value.
   // The default is intentionally weak so tests work without env setup.
@@ -179,16 +143,15 @@ const envSchema = z.object({
   OAUTH2_CLIENT_SECRET: z.string().default(""),
 
   // --- SSO (external-IdP OIDC: Google Workspace + Microsoft Entra) ---
-  // ADR-013 (PR #378). The orchestrator acts as an OIDC RELYING PARTY (the
-  // mirror of the DROPLET_PM_OIDC_* block above, where it is the IdP). One
-  // group of four vars per provider; ALL FOUR must be set for that provider's
+  // ADR-013 (PR #378). The orchestrator acts as an OIDC RELYING PARTY here.
+  // One group of four vars per provider; ALL FOUR must be set for that provider's
   // SSO button to go live (getOidcProviderConfig fails closed otherwise —
   // half-configured providers render disabled). Empty defaults keep tests +
   // un-configured appliances from minting half-built authorize URLs.
   //
   // The CLIENT_SECRET values are real provider secrets — they live ONLY in
   // `.env` (populated by the operator / setup.sh; never tracked) exactly like
-  // OAUTH2_CLIENT_SECRET and DROPLET_PM_OIDC_CLIENT_SECRET. They are read here
+  // OAUTH2_CLIENT_SECRET. They are read here
   // and never re-emitted, never logged.
   //
   // ISSUER is the provider's discovery base; openid-client appends
@@ -228,9 +191,8 @@ const envSchema = z.object({
   // EMPTY DEFAULT = FAIL CLOSED: with no token configured, every /scim/v2/*
   // request 401s (scim-auth middleware refuses an unset secret), so an
   // appliance that hasn't been wired for directory sync never accepts an
-  // unauthenticated — or empty-bearer — provisioning call. Same posture as
-  // DROPLET_PM_WEBHOOK_SECRET. Lives ONLY in .env (operator / setup.sh
-  // generates it); never tracked, never re-emitted.
+  // unauthenticated — or empty-bearer — provisioning call. Lives ONLY in .env
+  // (operator / setup.sh generates it); never tracked, never re-emitted.
   DROPLET_SCIM_BEARER_TOKEN: z.string().default(""),
 
   // --- gRPC ---

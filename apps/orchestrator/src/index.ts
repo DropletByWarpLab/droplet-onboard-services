@@ -67,7 +67,6 @@ import { startContextStatsInvalidator } from "./services/context-stats-invalidat
 import { initActivityRecorder, recordActivity } from "./services/activity.singleton.js";
 import { attachFileIndexerActivityBridge } from "./services/activity-file-indexer-bridge.js";
 import { ensureDefaultModelPulled } from "./services/model-readiness.service.js";
-import { bootstrapPlaneInstanceInBackground } from "./services/pm-bootstrap.service.js";
 
 const logger = pino({ name: "orchestrator" });
 
@@ -227,12 +226,6 @@ async function main() {
       (err as Error).message,
     );
   }
-
-  // WARP-860: Plane CE has no headless setup — complete its god-mode
-  // instance configuration in the background so the embedded Projects
-  // surface works without the "Welcome aboard Plane" wall, even when the
-  // owner skips the wizard's PM step. Bounded retries inside; never throws.
-  bootstrapPlaneInstanceInBackground();
 
   // WARP-81: device-intelligence reconciler. Loads the bundled OUI CSV once
   // at startup (best-effort — missing file is logged, lookups degrade to
