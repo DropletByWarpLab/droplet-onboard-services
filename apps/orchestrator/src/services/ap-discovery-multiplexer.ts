@@ -37,6 +37,7 @@
 
 import pino from "pino";
 import type { PrismaClient } from "@prisma/client";
+import { logRouterError } from "./openwrt.client.js";
 import {
   reconcileDiscovered,
   type DiscoveredApObservation,
@@ -295,7 +296,16 @@ export function createDiscoveryMultiplexer(
         if (result.status === "fulfilled") {
           merged.push(...result.value);
         } else {
-          logger.warn({ err: result.reason }, "ap-discovery: source failed, omitting its snapshot");
+          // Route through the cold-start-aware helper: on every boot the
+          // routing service isn't up yet, so the live mDNS source throws
+          // UNREACHABLE — logRouterError downgrades that to debug rather than
+          // warn-spamming the log on each tick, while still warning on genuine
+          // (non-cold-start) source failures.
+          logRouterError(
+            logger,
+            result.reason,
+            "ap-discovery: source failed, omitting its snapshot",
+          );
         }
       }
 
