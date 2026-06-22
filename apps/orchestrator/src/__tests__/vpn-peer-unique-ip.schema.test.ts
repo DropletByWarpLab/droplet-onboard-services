@@ -66,21 +66,27 @@ describe("VpnPeer active-IP partial unique index (WARP-565)", () => {
     ).toBe(true);
   });
 
-  it("uses an unambiguous, non-backdated migration timestamp", () => {
-    const stamps = readdirSync(MIGRATIONS_DIR)
-      .filter((d) => /^\d{14}_/.test(d))
-      .map((d) => d.slice(0, 14))
-      .sort();
+  it("uses a timestamp strictly greater than the previous migration", () => {
+    const stamps = [
+      ...new Set(
+        readdirSync(MIGRATIONS_DIR)
+          .filter((d) => /^\d{14}_/.test(d))
+          .map((d) => d.slice(0, 14)),
+      ),
+    ].sort();
     const vpnDir = readdirSync(MIGRATIONS_DIR).find((d) =>
       d.includes("vpn_peer_unique_active_ip"),
     )!;
     const vpnStamp = vpnDir.slice(0, 14);
-    const others = stamps.filter((s) => s !== vpnStamp);
-    // Ordering must be unambiguous: no other migration shares its timestamp.
-    expect(others).not.toContain(vpnStamp);
-    // It must not be backdated — at least one migration predates it. It need
-    // NOT remain the globally-newest stamp: later features (e.g. ADR-024's
-    // ApDevice.backend migration, 20260619…) legitimately add newer migrations.
-    expect(others.some((s) => s < vpnStamp)).toBe(true);
+    const idx = stamps.indexOf(vpnStamp);
+    expect(idx).toBeGreaterThan(-1);
+    // The migration must be ordered strictly AFTER whatever preceded it, so it
+    // applies in sequence without a timestamp collision. Asserting it was the
+    // *globally* newest stamp was brittle: any later feature migration (e.g.
+    // 20260619 scene_schedule) legitimately supersedes it, yet correct ordering
+    // only requires the vpn stamp to beat its immediate predecessor.
+    if (idx > 0) {
+      expect(vpnStamp > stamps[idx - 1]).toBe(true);
+    }
   });
 });

@@ -2604,6 +2604,219 @@ export async function runSceneConfirmed(
 }
 
 /**
+ * A smart-home routine (Scene, WARP-474) as listed by `GET /api/scenes` — a
+ * named batch of device actions an owner can run in one tap. `actionCount` is
+ * how many device commands the routine fires.
+ */
+export interface Scene {
+  id: string;
+  name: string;
+  icon: string | null;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  actionCount: number;
+}
+
+/** List the saved routines (scenes). Any signed-in role may read. */
+export async function fetchScenes(): Promise<Scene[]> {
+  const res = await authFetch(`${BASE}/api/scenes`);
+  if (!res.ok) {
+    throw new Error(`Failed to load routines (${res.status})`);
+  }
+  const data = await res.json();
+  return Array.isArray(data?.scenes) ? data.scenes : [];
+}
+
+/**
+ * Operator-initiated routine run. A routine batches Tier-2 device actions, so
+ * the server gates it: the dashboard pops its own confirm dialog and then calls
+ * with `?confirm=true` (mirrors the scenes page contract — the chat path uses a
+ * minted token via {@link runSceneConfirmed} instead). A non-2xx throws so the
+ * caller can surface the failure.
+ */
+export async function runScene(sceneId: string): Promise<SceneRunOutcome> {
+  const res = await authFetch(
+    `${BASE}/api/scenes/${sceneId}/run?confirm=true`,
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+  );
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(
+      data.error || data.message || `Failed to run routine (${res.status})`,
+    );
+  }
+  return res.json();
+}
+
+/** One device action in a routine: fire `command` (with optional `args`) on a device. */
+export interface SceneActionInput {
+  deviceNodeId: string;
+  command: string;
+  args?: Record<string, unknown>;
+}
+export interface SceneActionDetail extends SceneActionInput {
+  id: string;
+  idx: number;
+}
+/** A routine plus its ordered actions — `GET/POST/PATCH /api/scenes[/:id]`. */
+export interface SceneDetail {
+  id: string;
+  name: string;
+  icon: string | null;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  actions: SceneActionDetail[];
+}
+
+/** Full routine + ordered actions. */
+export async function getScene(id: string): Promise<SceneDetail> {
+  const res = await authFetch(`${BASE}/api/scenes/${id}`);
+  if (!res.ok) throw new Error(`Failed to load routine (${res.status})`);
+  return res.json();
+}
+
+/** Create a routine (owner/admin). Actions are saved in array order. */
+export async function createScene(body: {
+  name: string;
+  icon?: string | null;
+  actions: SceneActionInput[];
+}): Promise<SceneDetail> {
+  const res = await authFetch(`${BASE}/api/scenes`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Failed to create routine (${res.status})`);
+  }
+  return res.json();
+}
+
+/**
+ * Update a routine (owner/admin). Send `actions` in display order — the server
+ * rewrites `idx` from the array (the drag-reorder save path). Pass `icon: null`
+ * to clear an icon; omit a field to leave it unchanged.
+ */
+export async function updateScene(
+  id: string,
+  patch: { name?: string; icon?: string | null; actions?: SceneActionInput[] },
+): Promise<SceneDetail> {
+  const res = await authFetch(`${BASE}/api/scenes/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Failed to update routine (${res.status})`);
+  }
+  return res.json();
+}
+
+/** Delete a routine (owner/admin). */
+export async function deleteScene(id: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/scenes/${id}`, { method: "DELETE" });
+  if (!res.ok && res.status !== 404) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Failed to delete routine (${res.status})`);
+  }
+}
+
+/**
+ * feat/scene-schedules — a recurring cadence bound to a routine (Scene). The
+ * orchestrator's scene-schedule ticker runs the routine when `nextFireAt`
+ * passes, then advances it from `rrule`. `rrule` is UTC-only (FREQ=DAILY|WEEKLY
+ * with BYHOUR/BYMINUTE/BYDAY) — the editor converts the owner's local wall-clock
+ * time to UTC before sending. `nextFireAt`/`lastFiredAt` are ISO instants;
+ * `lastFiredAt` is null until the first fire.
+ */
+export interface SceneSchedule {
+  id: string;
+  sceneId: string;
+  rrule: string;
+  nextFireAt: string;
+  enabled: boolean;
+  createdBy: string | null;
+  lastFiredAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** List the schedules for a routine. Any signed-in role may read. */
+export async function fetchSceneSchedules(
+  sceneId: string,
+): Promise<SceneSchedule[]> {
+  const res = await authFetch(`${BASE}/api/scenes/${sceneId}/schedules`);
+  if (!res.ok) {
+    throw new Error(`Failed to load schedules (${res.status})`);
+  }
+  const data = await res.json();
+  return Array.isArray(data?.schedules) ? data.schedules : [];
+}
+
+/**
+ * Create a schedule for a routine (owner/admin). `rrule` must be a supported
+ * UTC RRULE (the server 400s a malformed one); the editor builds it from the
+ * owner's chosen days + local time, converted to UTC.
+ */
+export async function createSceneSchedule(
+  sceneId: string,
+  rrule: string,
+): Promise<SceneSchedule> {
+  const res = await authFetch(`${BASE}/api/scenes/${sceneId}/schedules`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ rrule }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(
+      data.error || data.detail || `Failed to create schedule (${res.status})`,
+    );
+  }
+  return res.json();
+}
+
+/** Enable / disable a schedule (owner/admin). Re-enabling recomputes nextFireAt. */
+export async function toggleSceneSchedule(
+  sceneId: string,
+  scheduleId: string,
+  enabled: boolean,
+): Promise<SceneSchedule> {
+  const res = await authFetch(
+    `${BASE}/api/scenes/${sceneId}/schedules/${scheduleId}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    },
+  );
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Failed to update schedule (${res.status})`);
+  }
+  return res.json();
+}
+
+/** Delete a schedule (owner/admin). */
+export async function deleteSceneSchedule(
+  sceneId: string,
+  scheduleId: string,
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/scenes/${sceneId}/schedules/${scheduleId}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok && res.status !== 404) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Failed to delete schedule (${res.status})`);
+  }
+}
+
+/**
  * WARP-304: shape returned by `GET /api/llm/conversations/:id`. The
  * dashboard hydrates `useChat.messages` from this on page mount when the
  * URL carries a `?c=<id>` hash.
