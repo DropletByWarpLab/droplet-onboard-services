@@ -887,25 +887,22 @@ _cert_has_all_required_sans() {
 # LE / ZeroSSL / Google Trust Services fullchain the box-side tls-issuance cron
 # installed) rather than our own self-signed bootstrap cert.
 #
-# Primary detector: `openssl verify -CAfile <cert> <cert>` succeeds ONLY when
-# the cert verifies against ITSELF — i.e. it is self-signed. A CA-signed leaf
-# fails self-verify (its issuer key isn't in the file), so a NON-zero exit here
-# means "public-CA leaf → do not clobber".
-#
-# Corroborating fallback: issuer != subject. A self-signed cert has
-# issuer == subject; any CA-signed leaf has a distinct issuer DN. We treat the
-# cert as a public-CA leaf when EITHER signal fires, so a single openssl quirk
-# can't cause us to silently overwrite a live publicly-trusted fullchain.
+# Detector: issuer != subject. A self-signed cert has issuer == subject; any
+# CA-signed leaf has a distinct issuer DN. `openssl x509` reads only the FIRST
+# PEM block in the file, so this correctly inspects just the leaf even when
+# cert_file is a fullchain (leaf + intermediate concatenated). NOTE: we do NOT
+# use `openssl verify -CAfile <cert> <cert>` — on a fullchain PEM, OpenSSL
+# loads all PEM blocks as trusted anchors, the intermediate verifies the leaf,
+# and the command exits 0, indistinguishable from self-signed.
 #
 # Deliberately NOT keyed on the literal string "Let's Encrypt": the HQ Worker
 # has CA failover (ZeroSSL primary, Google Trust Services fallback), all
 # non-self-signed — matching on a CA name would miss the fallback issuers.
 #
-# Parse gate: a corrupt/truncated/garbage cert ALSO fails self-verify, so before
-# the fail-safe-toward-preserve below we require the file to parse as an X.509
-# cert (a readable issuer or subject). An unparseable droplet.crt is NOT a
-# preservable public-CA leaf — we fall through so the normal path regenerates a
-# fresh self-signed cert rather than pinning a broken file the gateway can't load.
+# Parse gate: if either DN is unreadable (corrupt/truncated/garbage cert), we
+# require both to be non-empty before trusting the issuer!=subject result. An
+# unparseable droplet.crt is NOT a preservable public-CA leaf — fall through
+# so the normal path regenerates a fresh self-signed cert.
 #
 # Returns 0 (true) when the cert is a public-CA leaf we must preserve.
 _cert_is_public_ca_leaf() {
@@ -1001,12 +998,15 @@ _generate_tls_cert() {
     local boot_cert="$cert_file.bootstrap" boot_key="$key_file.bootstrap"
     if ! openssl x509 -checkend 86400 -noout -in "$cert_file" >/dev/null 2>&1 \
        && [ -f "$boot_cert" ] && [ -f "$boot_key" ] \
-       && openssl x509 -checkend 86400 -noout -in "$boot_cert" >/dev/null 2>&1; then
+       && openssl x509 -checkend 86400 -noout -in "$boot_cert" >/dev/null 2>&1 \
+       && _cert_has_all_required_sans "$boot_cert"; then
       log_warn "TLS certificate expired — restoring the trust-anchor bootstrap pair (ADR-023)"
-      cp "$boot_cert" "$cert_file"
-      cp "$boot_key" "$key_file"
-      chmod 600 "$key_file"
-      chmod 644 "$cert_file"
+      cp "$boot_cert" "${cert_file}.new"
+      cp "$boot_key"  "${key_file}.new"
+      chmod 600 "${key_file}.new"
+      chmod 644 "${cert_file}.new"
+      mv "${cert_file}.new" "$cert_file"
+      mv "${key_file}.new"  "$key_file"
       log_success "Restored TLS certificate from bootstrap copy:"
       log_info "  Cert: $cert_file"
       log_info "  Key:  $key_file"

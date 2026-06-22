@@ -1363,10 +1363,10 @@ run_check_tls_invariants() {
   if [ -f "$secrets_sh" ]; then
     if ! grep -qE '_cert_is_public_ca_leaf\(\)' "$secrets_sh" \
        || ! grep -qE 'if[[:space:]]+_cert_is_public_ca_leaf[[:space:]]' "$secrets_sh" \
-       || ! grep -qE 'openssl[[:space:]]+verify[[:space:]]+-CAfile' "$secrets_sh"; then
+       || ! grep -qE 'openssl[[:space:]]+x509[[:space:]].*-noout[[:space:]].*-issuer' "$secrets_sh"; then
       printf "  ${_RED}FAIL${_RESET}  %s — _generate_tls_cert is missing the public-CA-leaf clobber guard\n" "$label"
       printf "    | (ADR-023 PR-2: detect a non-self-signed installed cert via\n" >&2
-      printf "    |  '_cert_is_public_ca_leaf' (openssl verify -CAfile) and skip\n" >&2
+      printf "    |  '_cert_is_public_ca_leaf' (issuer != subject via openssl x509) and skip\n" >&2
       printf "    |  regeneration so a re-run never reverts a live LE/ZeroSSL cert.)\n" >&2
       failures=$((failures + 1))
     fi
