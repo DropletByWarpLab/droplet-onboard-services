@@ -352,6 +352,12 @@ export type ApDeviceStatus =
   | "FAILED"
   | "DECOMMISSIONED";
 
+/** Onboarding backend that owns this AP's discovery + provisioning,
+ *  mirrored from the Prisma `ApOnboardBackend` enum (ADR-024 §1). The
+ *  dashboard uses it only to derive a vendor label when `vendor` is
+ *  null — the approve flow is identical across all three (§4). */
+export type ApOnboardBackend = "DROPLET_IMAGE" | "EASYMESH" | "UNIFI";
+
 export interface ApDeviceInfo {
   mac: string;
   displayName: string | null;
@@ -361,6 +367,12 @@ export interface ApDeviceInfo {
   lastIp: string | null;
   hostname: string | null;
   status: ApDeviceStatus;
+  // ADR-024: which onboarding ecosystem this row belongs to + a human
+  // vendor label. `backend` always present (schema default
+  // DROPLET_IMAGE); `vendor` is null for the Droplet-image extender and
+  // for any backend that hasn't reported a brand string yet.
+  backend: ApOnboardBackend;
+  vendor: string | null;
   failureReason: string | null;
   approvedSsid: string | null;
   firstSeen: string;

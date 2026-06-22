@@ -220,6 +220,14 @@ Work that doesn't map to a single GTM milestone number but cuts across several. 
 - **Blockers:** ADR-018 acceptance (human gate). Item 3 is invasive (changes LAN/DHCP ownership on a deployed box) — staged rollout with `safe_apply` rollback required; validated via `./scripts/test/ship-check.sh --full`, never a live hand-edit.
 - **Next action:** Land the ADR review, then execute items 2→3→4→5→6→7 through the harness in dependency order (topology enum first; the single-box unification is the root-fix the device-list + camera + Wi-Fi symptoms all hang off).
 
+### AP-MULTI Multi-vendor coverage-AP onboarding (Droplet-image + EasyMesh + UniFi)
+- **ADR:** [`docs/ADR-024-multibackend-ap-onboarding.md`](ADR-024-multibackend-ap-onboarding.md) (extends ADR-005 AP auto-onboarding; threads ADR-002 persona, ADR-004 RBAC, ADR-014 LLM actions, ADR-018 network unification).
+- **Scope:** Generalize AP onboarding from Droplet's own OpenWrt extender to three pluggable backends behind ONE `ApDevice` state machine + ONE `approve_ap` LLM tool + ONE dashboard list: `DROPLET_IMAGE` (mDNS + uci, shipping per ADR-005), `EASYMESH` (IEEE 1905.1 + prplMesh **controller-only**; the box is the controller and third-party certified APs are the agents — sidesteps the mt76/prplMesh-HAL gap), `UNIFI` (UDP 10001 discovery + UniFi Network official-API adoption, **Option B / customer-supplied controller** — no bundling, which avoids the Ubiquiti-EULA + MongoDB-SSPL redistribution exposure). The backend is an explicit `ApOnboardBackend` column, never derived from absence.
+- **This repo's slice:** orchestrator backend-dispatch registry + discovery multiplexer + UniFi/EasyMesh client adapters (`apps/orchestrator/src/services/`), the `openwrt/` overlay draft for the prplMesh controller (UNVALIDATED), and the dashboard vendor badge (`apps/web-dashboard/src/components/network/`).
+- **Status:** `[~]` Partial — ADR-024 proposed (pending Romain sign-off). Phases 1–5 implemented green on `feat/adr-024-multibackend-ap-onboarding` (schema+dispatch, discovery multiplexer, UniFi backend, EasyMesh backend + overlay draft, dashboard vendor surface); both new backends default-off behind `DROPLET_AP_EASYMESH_ENABLED` / `DROPLET_AP_UNIFI_ENABLED`.
+- **Blockers:** (1) Open decision — UniFi controller bundling (Option A) needs a Ubiquiti OEM agreement + MongoDB-SSPL legal review; Option B built in the meantime. (2) Lab hardware validation — prplMesh-on-mt76 controller + a real TP-Link EasyMesh agent (overlay items R1–R5) and the UniFi official-API wire shapes against a live controller; both gated on AP hardware not yet on the lab LAN.
+- **Next action:** Romain ADR sign-off → push branch + harness QA/UX/review → merge → lab validation of the EasyMesh + UniFi tails once a TP-Link EasyMesh / Ubiquiti unit is plugged in.
+
 ---
 
 ## Cross-cutting risks (from GTM §5)

@@ -66,16 +66,21 @@ describe("VpnPeer active-IP partial unique index (WARP-565)", () => {
     ).toBe(true);
   });
 
-  it("uses a timestamp strictly greater than the previous latest migration", () => {
+  it("uses an unambiguous, non-backdated migration timestamp", () => {
     const stamps = readdirSync(MIGRATIONS_DIR)
       .filter((d) => /^\d{14}_/.test(d))
       .map((d) => d.slice(0, 14))
       .sort();
-    const ours = stamps.filter((s, i, arr) => arr.indexOf(s) === i).pop();
-    // The vpn migration must be the lexicographically-last (= newest) stamp.
     const vpnDir = readdirSync(MIGRATIONS_DIR).find((d) =>
       d.includes("vpn_peer_unique_active_ip"),
     )!;
-    expect(vpnDir.slice(0, 14)).toBe(ours);
+    const vpnStamp = vpnDir.slice(0, 14);
+    const others = stamps.filter((s) => s !== vpnStamp);
+    // Ordering must be unambiguous: no other migration shares its timestamp.
+    expect(others).not.toContain(vpnStamp);
+    // It must not be backdated — at least one migration predates it. It need
+    // NOT remain the globally-newest stamp: later features (e.g. ADR-024's
+    // ApDevice.backend migration, 20260619…) legitimately add newer migrations.
+    expect(others.some((s) => s < vpnStamp)).toBe(true);
   });
 });

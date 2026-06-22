@@ -375,7 +375,14 @@ async function main() {
   // deploys don't double-fire.
   const apDiscoveryIntervalMs = config.DROPLET_AP_DISCOVERY_INTERVAL * 1000;
   if (routerSupervisionEnabled) {
-    startApDiscoveryPoller(cronRuntime, prisma, openwrt, apDiscoveryIntervalMs);
+    // ADR-024 Phase 2: the poller drives the discovery multiplexer. The
+    // EasyMesh / UniFi sources are registered only when their flag is on;
+    // both default off, so the shipping single-box runs only the live
+    // mDNS source — the same single tick + advisory lock as Phase 1.
+    startApDiscoveryPoller(cronRuntime, prisma, openwrt, apDiscoveryIntervalMs, {
+      easymeshEnabled: config.DROPLET_AP_EASYMESH_ENABLED,
+      unifiEnabled: config.DROPLET_AP_UNIFI_ENABLED,
+    });
   }
 
   cronRuntime.scheduleCron(
