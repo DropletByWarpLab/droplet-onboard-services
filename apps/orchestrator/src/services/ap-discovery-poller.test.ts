@@ -204,6 +204,30 @@ describe("ap-discovery-poller (WARP-446)", () => {
     expect(row?.status).toBe("AWAITING_APPROVAL");
   });
 
+  it("with EasyMesh ON (Phase-4 scaffold) and UniFi ON-but-unconfigured, the live mDNS path is unaffected (DROPLET_IMAGE rows only)", async () => {
+    const prisma = createPrismaMock();
+    const openwrt = makeOpenwrt({
+      listDiscoveredAps: async () => [{ mac: "B8:27:EB:00:00:07" }],
+    });
+
+    // Both flags ON. EasyMesh is still a Phase-4 scaffold → []. UniFi is the
+    // real Phase-3 source, but the test config supplies no controller URL /
+    // API key, so its client throws NOT_CONFIGURED and the source degrades to
+    // [] (a household that enables UniFi before entering the controller URL
+    // must not break Droplet-image discovery). Net: only the live mDNS
+    // DROPLET_IMAGE row is created — the live path is byte-for-byte unchanged.
+    const poller = createApDiscoveryPoller(prisma as any, openwrt, {
+      easymeshEnabled: true,
+      unifiEnabled: true,
+    });
+    await poller.pollOnce();
+
+    expect(prisma.apDevice.upsert).toHaveBeenCalledTimes(1);
+    const row = prisma.rows.get("B8:27:EB:00:00:07");
+    expect(row.status).toBe("AWAITING_APPROVAL");
+    expect(row.backend).toBe("DROPLET_IMAGE");
+  });
+
   it("re-observation of a known MAC touches lastSeen without flipping status", async () => {
     const prisma = createPrismaMock();
     const baseline = new Date(Date.now() - 60_000);

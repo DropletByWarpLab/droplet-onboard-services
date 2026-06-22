@@ -29,8 +29,20 @@ const TIER_2_OPERATIONS = new Set([
   "set_lan_ip",
   "create_vlan",
   "create_guest_network",
+  // DHCP LAN pool reshape (start/limit/leasetime) — a LAN address-map change
+  // that can strand connected clients if the pool is shrunk, so confirm it.
+  "set_dhcp_pool",
+  // Hostname change re-keys mDNS/.local + the dashboard status line; the active
+  // session can briefly lose name resolution, so confirm it. (NTP toggle is
+  // deliberately NOT here — it's Tier 1, low-risk + reversible, applies now.)
+  "set_hostname",
+  // UPnP/NAT-PMP automatic port opening — a firewall-class exposure change.
+  "set_upnp",
   "create_firewall_zone",
   "add_firewall_rule",
+  // Rewriting a zone's default input/output/forward policy can sever the
+  // management path — Tier-2 (confirm + 60s SDK auto-rollback).
+  "set_zone_policy",
   "delete_firewall_rule",
   "add_forwarding",
   "interface_down",
@@ -66,6 +78,14 @@ const TIER_3_OPERATIONS = new Set([
   "add_vpn_peer",
   "setup_vpn_firewall",
   "network_restart",
+  // droplet-ai RPC access management — reserved Tier-3 (web-UI-only, AI-blocked)
+  // for the deferred real rotate/revoke. The routing service IS the droplet-ai
+  // user, so any rotate/revoke that desyncs the credential self-locks-out the
+  // whole Network tab (the WARP-868 failure class) — these must never be
+  // AI-triggerable. No dispatcher case until the coordinated on-box secret
+  // refresh exists; the dashboard renders them as honest-gated (disabled).
+  "rotate_ai_token",
+  "revoke_ai_access",
   // Switch — never let AI disable the port the appliance is on
   "switch_disable_protected_port",
 ]);

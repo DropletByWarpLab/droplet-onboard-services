@@ -15,13 +15,29 @@ import {
   getConnectedDevices,
   getDhcpLeases,
   getSystemInfo,
+  getAllInterfaces,
   addStaticDhcpLease,
+  setDnsServers,
+  getTopology,
+  getDnsHostnames,
+  addDnsHostname,
+  deleteDnsHostname,
+  getDhcpPool,
+  setDhcpPool,
+  getSystemControls,
+  setHostname,
+  setNtpEnabled,
   blockDevice,
   unblockDevice,
   addPortForward,
+  addFirewallRule,
+  setZonePolicy,
   setWifiPassword,
+  setGuestWifi,
+  setUpnp,
   rebootRouter,
   getRouterOperation,
+  getAiNetworkAccess,
 } from "../services/network.service.js";
 import {
   evaluateNetworkCommand,
@@ -115,6 +131,18 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
     });
   });
 
+  // --- Interfaces (full enumeration, read-only) ---
+  // Every configured interface (name/device/proto/address/zone/status), not
+  // just lan/wan. Kept on its own service read (not the overview hot path).
+  router.get("/network/interfaces", async (_req, res, next) => {
+    try {
+      const interfaces = await getAllInterfaces();
+      res.json({ interfaces });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // --- DHCP ---
   router.get("/network/dhcp/leases", async (_req, res, next) => {
     try {
@@ -154,6 +182,180 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
     },
   );
 
+  // WARP-871: set the upstream/custom DNS resolvers dnsmasq forwards to (e.g.
+  // Pi-hole, NextDNS, 1.1.1.1). owner/admin only — DNS shapes every device's
+  // name resolution. set_dns is Tier 1 (low-risk, no partition), so it applies
+  // immediately; the routing /dhcp/dns validator only requires a non-empty list.
+  router.post(
+    "/network/dns",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        const { servers } = req.body;
+        if (
+          !Array.isArray(servers) ||
+          servers.length === 0 ||
+          !servers.every((s) => typeof s === "string" && s.trim().length > 0)
+        ) {
+          return res
+            .status(400)
+            .json({ error: "Provide 'servers' as a non-empty list of IP strings" });
+        }
+
+        const userId = req.user?.id;
+        const result = await evaluateNetworkCommand(
+          prisma, "dhcp.dns", "set_dns", { servers }, userId
+        );
+
+        if ("blocked" in result && result.blocked) {
+          return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
+        }
+
+        const op = await setDnsServers(servers);
+        res.json({ status: "ok", servers, tier: result.tier, operationId: op.operationId });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // WARP-871: local DNS host-records (e.g. nas.lan -> 192.168.50.20). The
+  // routing /dhcp/hostnames endpoints have full read/write/delete; these front
+  // them. Reads are open to any authed user; writes are owner/admin and run
+  // through the safety evaluator (set/delete_dns_hostname classify Tier 1).
+  router.get("/network/dhcp/hostnames", async (_req, res, next) => {
+    try {
+      const entries = await getDnsHostnames();
+      res.json({ entries });
+  // --- DHCP pool (range + lease time) ---
+  // Read is unguarded; the write is Tier 2 (a LAN address-map change that can
+  // strand clients) → 202 + token → /network/command/confirm dispatches it.
+  router.get("/network/dhcp/pool", async (_req, res, next) => {
+    try {
+      const pool = await getDhcpPool();
+      res.json(pool);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post(
+    "/network/dhcp/hostnames",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        const { hostname, ip } = req.body;
+        if (
+          !hostname ||
+          typeof hostname !== "string" ||
+          !ip ||
+          typeof ip !== "string"
+        ) {
+          return res.status(400).json({ error: "Missing 'hostname' or 'ip'" });
+  // dnsmasq lease-time grammar: positive integer + unit (s/m/h/d/w) or
+  // `infinite`. Mirrors the routing DhcpPoolRequest validator so junk is
+  // rejected before any router change (and before a token is minted).
+  const LEASETIME_RE = /^(infinite|\d+[smhdw])$/;
+
+  router.post(
+    "/network/dhcp/pool",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        const { start, limit, leasetime } = req.body ?? {};
+        if (
+          !Number.isInteger(start) ||
+          start < 2 ||
+          start > 254 ||
+          !Number.isInteger(limit) ||
+          limit < 1 ||
+          limit > 253 ||
+          typeof leasetime !== "string" ||
+          !LEASETIME_RE.test(leasetime)
+        ) {
+          return res.status(400).json({
+            error:
+              "Provide integer 'start' (2-254), integer 'limit' (1-253), and a 'leasetime' like '12h' or 'infinite'",
+          });
+        }
+
+        const userId = req.user?.id;
+        const result = await evaluateNetworkCommand(
+          prisma, "dhcp.hostname", "set_dns_hostname", { hostname, ip }, userId
+        );
+
+          prisma,
+          "dhcp.pool",
+          "set_dhcp_pool",
+          { start, limit, leasetime },
+          userId,
+        );
+
+        if ("requiresConfirmation" in result && result.requiresConfirmation) {
+          return res.status(202).json({
+            status: "confirmation_required",
+            operation: "set_dhcp_pool",
+            tier: result.tier,
+            reason: result.reason,
+            confirmationToken: result.confirmationToken,
+            expiresIn: 60,
+          });
+        }
+
+        if ("blocked" in result && result.blocked) {
+          return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
+        }
+
+        const op = await addDnsHostname(hostname, ip);
+        res.json({ status: "ok", hostname, ip, tier: result.tier, operationId: op.operationId });
+        const op = await setDhcpPool(start, limit, leasetime);
+        res.json({ status: "ok", tier: result.tier, operationId: op.operationId });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  router.delete(
+    "/network/dhcp/hostnames/:hostname",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        const { hostname } = req.params;
+        if (!hostname) {
+          return res.status(400).json({ error: "Missing 'hostname'" });
+        }
+
+        const userId = req.user?.id;
+        const result = await evaluateNetworkCommand(
+          prisma, "dhcp.hostname", "delete_dns_hostname", { hostname }, userId
+        );
+
+        if ("blocked" in result && result.blocked) {
+          return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
+        }
+
+        const op = await deleteDnsHostname(hostname);
+        res.json({ status: "ok", hostname, tier: result.tier, operationId: op.operationId });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // WARP-871: read-only deployment-posture probe (ADR-018). Unguarded read,
+  // like /network/status — informs the dashboard's topology badge. A genuine
+  // ubus fault propagates so the dashboard can drop the badge rather than
+  // assert a posture.
+  router.get("/network/topology", async (_req, res, next) => {
+    try {
+      const topology = await getTopology();
+      res.json(topology);
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // --- System ---
   router.get("/network/system", async (_req, res, next) => {
     try {
@@ -163,6 +365,113 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
       next(err);
     }
   });
+
+  // --- System controls (hostname / NTP / status-LED / country) ---
+  // Read carries the honest gates (statusLed.supported / country.editable are
+  // forced false on the single-box shape in the service). Hostname is Tier 2
+  // (re-keys mDNS/.local → confirm); NTP is Tier 1 (applies immediately).
+  router.get("/network/system/controls", async (_req, res, next) => {
+    try {
+      const controls = await getSystemControls();
+      res.json(controls);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Same RFC-1123 label grammar as the routing HostnameRequest schema, so a bad
+  // hostname is rejected before a token is minted.
+  // Multi-label pattern matching the routing service's _HOSTNAME_PATTERN so the
+  // orchestrator pre-validation rejects exactly what the routing layer rejects.
+  const HOSTNAME_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/;
+
+  router.post(
+    "/network/system/hostname",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        const { hostname } = req.body ?? {};
+        if (typeof hostname !== "string" || hostname.length > 63 || !HOSTNAME_RE.test(hostname)) {
+          return res.status(400).json({
+            error: "Provide a 'hostname' — lowercase letters, digits and hyphens, max 63 chars",
+          });
+        }
+
+        const userId = req.user?.id;
+        const result = await evaluateNetworkCommand(
+          prisma,
+          "system.hostname",
+          "set_hostname",
+          { hostname },
+          userId,
+        );
+
+        if ("requiresConfirmation" in result && result.requiresConfirmation) {
+          return res.status(202).json({
+            status: "confirmation_required",
+            operation: "set_hostname",
+            tier: result.tier,
+            reason: result.reason,
+            confirmationToken: result.confirmationToken,
+            expiresIn: 60,
+          });
+        }
+
+        if ("blocked" in result && result.blocked) {
+          return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
+        }
+
+        const op = await setHostname(hostname);
+        res.json({ status: "ok", tier: result.tier, operationId: op.operationId });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  router.post(
+    "/network/system/ntp",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        const { enabled } = req.body ?? {};
+        if (typeof enabled !== "boolean") {
+          return res.status(400).json({ error: "Provide a boolean 'enabled'" });
+        }
+
+        const userId = req.user?.id;
+        const result = await evaluateNetworkCommand(
+          prisma,
+          "system.ntp",
+          "set_ntp",
+          { enabled },
+          userId,
+        );
+
+        // set_ntp is Tier 1 — applies immediately. Guard the confirm/blocked
+        // arms anyway so a future tier bump can't silently no-op.
+        if ("requiresConfirmation" in result && result.requiresConfirmation) {
+          return res.status(202).json({
+            status: "confirmation_required",
+            operation: "set_ntp",
+            tier: result.tier,
+            reason: result.reason,
+            confirmationToken: result.confirmationToken,
+            expiresIn: 60,
+          });
+        }
+
+        if ("blocked" in result && result.blocked) {
+          return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
+        }
+
+        const op = await setNtpEnabled(enabled);
+        res.json({ status: "ok", enabled, tier: result.tier, operationId: op.operationId });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
 
   // WARP-171: per-route guard. owner ONLY — rebooting the router is
   // a destructive operation that drops every connected device. The
@@ -194,6 +503,21 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
 
       const op = await rebootRouter();
       res.json({ status: "ok", action: "reboot", operationId: op.operationId });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // --- droplet-ai RPC access (read-only) ---
+  // Read-only scope chips + session, parsed from the live on-box ACL. The
+  // rotate/revoke writes are reserved Tier-3 (AI-blocked) with NO dispatcher
+  // case — they're honest-gated (disabled) in the UI until a coordinated on-box
+  // secret refresh exists (the routing service IS the droplet-ai user, so a
+  // desynced rotate self-locks-out the whole Network tab).
+  router.get("/network/ai-access", async (_req, res, next) => {
+    try {
+      const access = await getAiNetworkAccess();
+      res.json(access);
     } catch (err) {
       next(err);
     }
@@ -264,6 +588,54 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
             params?.password as string,
             userId
           );
+          break;
+        case "create_guest_network":
+          // Tier-2 confirm for POST /network/wifi/guest. Thread all four pending
+          // params (radio default lives on the routing schema, but the route
+          // already filled it into the pending record).
+          writeResult = await setGuestWifi(
+            (params?.radio as string) || "radio3",
+            params?.ssid as string,
+            params?.password as string,
+            (params?.network as string) || "guest"
+          );
+          break;
+        case "set_upnp":
+          // Tier-2 confirm for POST /network/upnp.
+          writeResult = await setUpnp(params?.enabled as boolean);
+          break;
+        case "set_dhcp_pool":
+          // Tier-2 confirm for POST /network/dhcp/pool. The route validated the
+          // bounds before minting; the pending record carries the staged values.
+          writeResult = await setDhcpPool(
+            params?.start as number,
+            params?.limit as number,
+            params?.leasetime as string,
+          );
+          break;
+        case "set_hostname":
+          // Tier-2 confirm for POST /network/system/hostname.
+          writeResult = await setHostname(params?.hostname as string);
+          break;
+        case "add_firewall_rule":
+          writeResult = await addFirewallRule({
+            name: params?.name as string,
+            src: params?.src as string,
+            dest: params?.dest as string,
+            proto: (params?.proto as string) || "tcp",
+            destPort: params?.dest_port as string | undefined,
+            srcPort: params?.src_port as string | undefined,
+            target: (params?.target as string) || "REJECT",
+            enabled: (params?.enabled as string) || "1",
+          });
+          break;
+        case "set_zone_policy":
+          writeResult = await setZonePolicy({
+            zone: params?.zone as string,
+            input: params?.input as string | undefined,
+            output: params?.output as string | undefined,
+            forward: params?.forward as string | undefined,
+          });
           break;
         case "reboot":
           writeResult = await rebootRouter();

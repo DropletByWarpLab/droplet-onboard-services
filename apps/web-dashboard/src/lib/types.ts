@@ -352,6 +352,12 @@ export type ApDeviceStatus =
   | "FAILED"
   | "DECOMMISSIONED";
 
+/** Onboarding backend that owns this AP's discovery + provisioning,
+ *  mirrored from the Prisma `ApOnboardBackend` enum (ADR-024 §1). The
+ *  dashboard uses it only to derive a vendor label when `vendor` is
+ *  null — the approve flow is identical across all three (§4). */
+export type ApOnboardBackend = "DROPLET_IMAGE" | "EASYMESH" | "UNIFI";
+
 export interface ApDeviceInfo {
   mac: string;
   displayName: string | null;
@@ -361,6 +367,12 @@ export interface ApDeviceInfo {
   lastIp: string | null;
   hostname: string | null;
   status: ApDeviceStatus;
+  // ADR-024: which onboarding ecosystem this row belongs to + a human
+  // vendor label. `backend` always present (schema default
+  // DROPLET_IMAGE); `vendor` is null for the Droplet-image extender and
+  // for any backend that hasn't reported a brand string yet.
+  backend: ApOnboardBackend;
+  vendor: string | null;
   failureReason: string | null;
   approvedSsid: string | null;
   firstSeen: string;
@@ -1213,6 +1225,12 @@ export interface NetworkCommandResult {
   reason?: string;
   expiresIn?: number;
   operation?: string;
+  // WARP-871: Tier-1 writes (channel, static lease) answer 200 with the
+  // operationId directly so the caller can poll /operations/:id for the
+  // safe-apply outcome without a confirmation round-trip.
+  /** WARP-40: present on a directly-applied (non-confirm) write so the caller
+   *  can poll /network/operations/:id for the apply-vs-rollback outcome. */
+  operationId?: string | null;
 }
 
 // --- WARP-83: enriched device types for the card-grid view ---

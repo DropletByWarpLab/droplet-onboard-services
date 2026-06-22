@@ -33,6 +33,8 @@ function makeAp(overrides: Partial<ApDeviceInfo> = {}): ApDeviceInfo {
     lastIp: "192.168.50.42",
     hostname: "droplet-extender",
     status: "ONLINE",
+    backend: "DROPLET_IMAGE",
+    vendor: null,
     failureReason: null,
     approvedSsid: "Droplet",
     firstSeen: new Date(Date.now() - 86_400_000).toISOString(),
