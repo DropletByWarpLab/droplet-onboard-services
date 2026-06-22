@@ -482,6 +482,16 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
     }
   });
 
+  // Activity feed (read-only timeline).
+  router.get("/pm/work-items/:id/activity", async (req, res, next) => {
+    try {
+      res.json({ activity: await pm.listActivity(prisma, req.params.id) });
+    } catch (err) {
+      if (mapServiceError(err, res)) return;
+      next(err);
+    }
+  });
+
   router.post(
     "/pm/work-items/:id/comments",
     requireRoleOrMcpService(...WRITE),

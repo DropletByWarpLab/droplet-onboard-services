@@ -12,6 +12,7 @@ import type {
   PmWorkItem,
   PmComment,
   PmSummary,
+  PmActivity,
   Person,
 } from "./types";
 
@@ -96,6 +97,15 @@ export function useComments(workItemId: string | null) {
   );
   return { comments: data?.comments, mutate };
 }
+
+export function useActivity(workItemId: string | null) {
+  const { data, mutate } = useSWR(
+    workItemId ? `/api/pm/work-items/${workItemId}/activity` : null,
+    (url: string) => getJson<{ activity: PmActivity[] }>(url),
+  );
+  return { activity: data?.activity, mutate };
+}
+
 
 interface DirectoryUser {
   id: string;

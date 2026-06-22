@@ -97,3 +97,14 @@ export interface Person {
 export function canWrite(role: string | undefined): boolean {
   return role === "owner" || role === "admin" || role === "family";
 }
+
+export interface PmActivity {
+  id: string;
+  workItemId: string;
+  actorId: string | null;
+  verb: string;
+  field: string | null;
+  oldValue: string | null;
+  newValue: string | null;
+  createdAt: string;
+}
