@@ -151,6 +151,16 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
     }
   });
 
+  // Index KPI strip.
+  router.get("/pm/summary", async (req, res, next) => {
+    try {
+      const slug = req.query.workspace ? String(req.query.workspace) : undefined;
+      res.json({ summary: await pm.getSummary(prisma, slug) });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // ── Projects ──
   router.get("/pm/projects", async (req, res, next) => {
     try {

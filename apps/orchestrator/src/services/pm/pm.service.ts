@@ -79,9 +79,32 @@ export interface ApiProject {
   color: string | null;
   leadId: string | null;
   archived: boolean;
+  /** Non-terminal items (backlog + unstarted + started). Present on list. */
+  openCount: number;
+  /** Items in a completed state. Present on list. */
+  doneCount: number;
+  /** Per-state-group counts, ordered for the index sparkline. Present on list. */
+  groups: Record<PmStateGroup, number>;
   createdAt: string;
   updatedAt: string;
 }
+
+export interface ApiPmSummary {
+  activeProjects: number;
+  itemsOpen: number;
+  doneThisWeek: number;
+  overdue: number;
+}
+
+type PmStateGroup = StateRow["group"];
+const EMPTY_GROUPS = (): Record<PmStateGroup, number> => ({
+  backlog: 0,
+  unstarted: 0,
+  started: 0,
+  completed: 0,
+  cancelled: 0,
+});
+const OPEN_GROUPS: PmStateGroup[] = ["backlog", "unstarted", "started"];
 
 export interface ApiState {
   id: string;
@@ -153,6 +176,9 @@ function mapProject(row: ProjectRow): ApiProject {
     color: row.color,
     leadId: row.leadId,
     archived: row.archivedAt !== null,
+    openCount: 0,
+    doneCount: 0,
+    groups: EMPTY_GROUPS(),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -293,7 +319,65 @@ export async function listProjects(
     include: { workspace: true },
     orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
   });
-  return rows.map(mapProject);
+  const projects = rows.map(mapProject);
+
+  // Attach per-project counts: one pass over the (non-archived) work items,
+  // grouped by project + state group. Cheap at household scale.
+  if (projects.length > 0) {
+    const items = await prisma.pmWorkItem.findMany({
+      where: { projectId: { in: projects.map((p) => p.id) }, archivedAt: null },
+      select: { projectId: true, state: { select: { group: true } } },
+    });
+    const byProject = new Map<string, Record<PmStateGroup, number>>();
+    for (const p of projects) byProject.set(p.id, EMPTY_GROUPS());
+    for (const it of items) {
+      const g = it.state?.group;
+      if (!g) continue;
+      const acc = byProject.get(it.projectId);
+      if (acc) acc[g] += 1;
+    }
+    for (const p of projects) {
+      const g = byProject.get(p.id) ?? EMPTY_GROUPS();
+      p.groups = g;
+      p.openCount = OPEN_GROUPS.reduce((n, grp) => n + g[grp], 0);
+      p.doneCount = g.completed;
+    }
+  }
+  return projects;
+}
+
+/** Index KPI strip: active projects, open items, done in the last 7 days, and
+ *  overdue (open items past their due date). One scan over the workspace. */
+export async function getSummary(
+  prisma: PrismaClient,
+  workspaceSlug: string = HOME_WORKSPACE_SLUG,
+): Promise<ApiPmSummary> {
+  const projects = await prisma.pmProject.findMany({
+    where: { workspace: { slug: workspaceSlug }, archivedAt: null },
+    select: { id: true },
+  });
+  if (projects.length === 0) {
+    return { activeProjects: 0, itemsOpen: 0, doneThisWeek: 0, overdue: 0 };
+  }
+  const items = await prisma.pmWorkItem.findMany({
+    where: { projectId: { in: projects.map((p) => p.id) }, archivedAt: null },
+    select: { dueDate: true, completedAt: true, state: { select: { group: true } } },
+  });
+  const now = new Date();
+  const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  let itemsOpen = 0;
+  let doneThisWeek = 0;
+  let overdue = 0;
+  for (const it of items) {
+    const g = it.state?.group;
+    const open = g === "backlog" || g === "unstarted" || g === "started";
+    if (open) {
+      itemsOpen += 1;
+      if (it.dueDate && it.dueDate < now) overdue += 1;
+    }
+    if (g === "completed" && it.completedAt && it.completedAt >= weekAgo) doneThisWeek += 1;
+  }
+  return { activeProjects: projects.length, itemsOpen, doneThisWeek, overdue };
 }
 
 export async function getProject(prisma: PrismaClient, projectId: string): Promise<ApiProject> {
