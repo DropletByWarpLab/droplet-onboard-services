@@ -19,6 +19,7 @@ import { VersionHistoryPanel } from "@/components/FileManager/VersionHistoryPane
 import { SearchBar } from "@/components/FileManager/SearchBar";
 import { PreviewPane } from "@/components/FileManager/PreviewPane";
 import { ShareDialog } from "@/components/FileManager/ShareDialog";
+import { SpaceSwitcher } from "@/components/FileManager/SpaceSwitcher";
 import { StarButton } from "@/components/FileManager/StarButton";
 import { Thumbnail } from "@/components/FileManager/Thumbnail";
 import { VolumesPanel } from "@/components/FileManager/VolumesPanel";
@@ -27,6 +28,7 @@ import { useFiles } from "@/lib/hooks/useFiles";
 import { useFileManager } from "@/lib/hooks/useFileManager";
 import { useFavorites } from "@/lib/hooks/useFavorites";
 import { useFileRealtime } from "@/lib/hooks/useFileRealtime";
+import { useSpaces } from "@/lib/hooks/useSpaces";
 import {
   uploadFiles,
   deleteFile,
@@ -36,10 +38,11 @@ import {
   bulkDeleteFiles,
   bulkMoveFiles,
   bulkCopyFiles,
+  fetchShares,
 } from "@/lib/api";
 import { authFetch } from "@/lib/auth";
 import { translateError } from "@/lib/friendly-errors";
-import type { FileEntryInfo } from "@/lib/types";
+import type { FileEntryInfo, FileSpaceId, ShareDetail } from "@/lib/types";
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
@@ -53,6 +56,10 @@ export default function FilesPage() {
   const searchParams = useSearchParams();
   const initialPath = searchParams?.get("path") ?? "/";
   const [currentPath, setCurrentPath] = useState(initialPath);
+  // WARP-883 — active Files space (My Files vs shared Household). Switching
+  // resets the path to that space's root and re-lists.
+  const [space, setSpace] = useState<FileSpaceId>("personal");
+  const { spaces, sharedAvailable } = useSpaces();
   const [isUploading, setIsUploading] = useState(false);
   const [uploadPercent, setUploadPercent] = useState(0);
   const [uploadProgress, setUploadProgress] = useState<string | null>(null);
@@ -87,8 +94,38 @@ export default function FilesPage() {
   // the CLI, or native clients show up immediately — no polling.
   useFileRealtime();
 
-  const { files, isLoading, refresh } = useFiles(currentPath);
+  // WARP-883 (WS-1 fast-follow) — load the shares already on a file the moment
+  // the share dialog opens for it, so the dialog shows pre-existing links.
+  useEffect(() => {
+    if (shareFile) loadExistingShares(shareFile.path);
+  }, [shareFile, loadExistingShares]);
+
+  const { files, isLoading, refresh } = useFiles(currentPath, space);
   const fm = useFileManager(currentPath);
+
+  // WARP-883 — switch space: jump to that space's root and clear selection so
+  // the previous space's selection/clipboard doesn't leak across.
+  const handleSpaceChange = useCallback(
+    (next: FileSpaceId) => {
+      if (next === space) return;
+      setSpace(next);
+      setCurrentPath("/");
+      fm.clearSelection();
+    },
+    [space, fm]
+  );
+
+  // WARP-883 (WS-1 fast-follow) — shares already on the file being shared, so
+  // the ShareDialog lists pre-existing links (not just session-created ones).
+  const [existingShares, setExistingShares] = useState<ShareDetail[]>([]);
+  const loadExistingShares = useCallback(async (filePath: string) => {
+    try {
+      setExistingShares(await fetchShares(filePath));
+    } catch {
+      // Non-fatal — the dialog still works for creating new links.
+      setExistingShares([]);
+    }
+  }, []);
   const { items: favoriteItems, refresh: refreshFavorites } = useFavorites();
   const favoritedPaths = useMemo(
     () => new Set(favoriteItems.map((f) => f.path)),
@@ -464,13 +501,22 @@ export default function FilesPage() {
         />
       </div>
 
+      {/* Space switcher (My Files / Household) — only when a shared space
+          exists, otherwise there's nothing to switch between. */}
+      {sharedAvailable && (
+        <div className="mb-4">
+          <SpaceSwitcher spaces={spaces} active={space} onChange={handleSpaceChange} />
+        </div>
+      )}
+
       {/* Breadcrumbs */}
       <div className="mb-4">
         <BreadcrumbNav path={currentPath} onNavigate={setCurrentPath} />
       </div>
 
-      {/* Volumes — only on root so it doesn't dominate deep folder views */}
-      {currentPath === "/" && <VolumesPanel />}
+      {/* Volumes — only on the personal root so it doesn't dominate deep
+          folder views or the shared space. */}
+      {space === "personal" && currentPath === "/" && <VolumesPanel />}
 
       {/* New folder dialog */}
       {showNewFolder && (
@@ -677,7 +723,12 @@ export default function FilesPage() {
         <ShareDialog
           filePath={shareFile.path}
           fileName={shareFile.name}
-          onClose={() => setShareFile(null)}
+          existingShares={existingShares}
+          onChange={() => loadExistingShares(shareFile.path)}
+          onClose={() => {
+            setShareFile(null);
+            setExistingShares([]);
+          }}
         />
       )}
 

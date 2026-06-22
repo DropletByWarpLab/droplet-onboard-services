@@ -203,10 +203,19 @@ export async function ncCreateShare(
   };
 }
 
+/**
+ * List the shares that exist ON a given path.
+ *
+ * WARP-883 (WS-1 fast-follow): returns the FULL ShareDetail shape (via
+ * mapShareRecord) — same record the create/shared-with-me paths return — so
+ * the dashboard's ShareDialog can render existing shares with their expiry,
+ * password flag, permissions, and note, not just a bare url. The OCS list
+ * endpoint returns the same per-share record shape mapShareRecord parses.
+ */
 export async function ncListShares(
   token: string,
   path: string
-): Promise<Array<{ id: number; url: string; shareType: number; permissions: number }>> {
+): Promise<ShareDetail[]> {
   const url = ocsUrl(
     `/ocs/v2.php/apps/files_sharing/api/v1/shares?path=${encodeURIComponent(path)}`
   );
@@ -219,12 +228,7 @@ export async function ncListShares(
   }
 
   const data = await resp.json();
-  return (data.ocs.data || []).map((s: any) => ({
-    id: s.id,
-    url: s.url,
-    shareType: s.share_type,
-    permissions: s.permissions,
-  }));
+  return ((data.ocs.data || []) as any[]).map((s) => mapShareRecord(s));
 }
 
 // ── OCS User Provisioning API ──
