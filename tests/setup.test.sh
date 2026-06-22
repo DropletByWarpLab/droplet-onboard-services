@@ -257,7 +257,7 @@ fi
 # The compose default CAMERA_SUBNET is 192.168.100.0/24 — the multi-box
 # OpenWrt camera VLAN (openwrt/files/etc/config/dhcp `cameras`). On the
 # single-box shape the cameras live on the box's own LAN (br-lan,
-# 192.168.20.0/24 per scripts/host/etc-droplet-poc-host-net/lan-dhcp.conf),
+# 192.168.20.0/24 per scripts/host/etc-droplet-host-net/lan-dhcp.conf),
 # NOT on a separate VLAN — so the multi-box default would scan an empty
 # subnet and find nothing (the live "camera scan finds nothing" symptom).
 # configure_single_box_env must pin CAMERA_SUBNET to the single-box camera

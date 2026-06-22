@@ -1,4 +1,4 @@
-# /etc/default/droplet-poc-host-net — env for droplet-poc-host-net.service
+# /etc/default/droplet-host-net — env for droplet-host-net.service
 #
 # Sourced by systemd via the EnvironmentFile= directive. Override any
 # of these to retarget the script without editing the body.
@@ -15,10 +15,10 @@
 #                        and adds the switch route via. enp12s0 must
 #                        be a member.
 # DNSMASQ_CONF         — full path to the dnsmasq config installed by
-#                        install-poc-host-net.sh. Override if you
+#                        scripts/lib/single-box.sh. Override if you
 #                        copy the file somewhere else.
 
 SWITCH_IP=192.168.1.77
 HOST_SWITCH_SIDE_IP=192.168.1.250
 LAN_BRIDGE=br-lan
-DNSMASQ_CONF=/etc/droplet-poc-host-net/lan-dhcp.conf
+DNSMASQ_CONF=/etc/droplet-host-net/lan-dhcp.conf

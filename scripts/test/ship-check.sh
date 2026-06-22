@@ -54,10 +54,10 @@
 #                           log strings). Repo-wide net (docker-compose.yml,
 #                           .env.example, scripts/*.sh, scripts/lib/*.sh);
 #                           the services/pm/-scoped rule-17 sub-check lives
-#                           in pm-invariants. Grandfathers the KNOWN
-#                           droplet-poc-host-net debt (retired by ADR-018
-#                           action item 3) + a few "PoC" prose comments —
-#                           fails on any NEW occurrence.
+#                           in pm-invariants. Fails on any NEW occurrence;
+#                           no grandfather entries remain (the legacy
+#                           droplet-poc-host-net debt was renamed to
+#                           droplet-host-net by the de-poc sweep).
 #   docker-build-smoke    — (--full only) End-to-end ./scripts/setup.sh
 #                           --skip-docker in an Ubuntu 24.04 container.
 #                           Catches WARP-456 (missing audit-key mount) and
@@ -245,12 +245,11 @@ CHECKS
                         COMPOSE_PROFILES= value, or --flag. Every Droplet box
                         is the shipping product (architecture-guard rule 17 +
                         ADR-018), so surfaces are named by what the deployment
-                        IS, not its lifecycle stage. Grandfathers the KNOWN
-                        legacy debt as TRACKED exceptions (NOT silent): the
-                        `droplet-poc-host-net` host-net service/file/path
-                        (retired by ADR-018 action item 3, matched as a
-                        substring so it survives line moves) plus a handful of
-                        free-text "PoC" prose comments (per-line allowlist).
+                        IS, not its lifecycle stage. No grandfather entries
+                        remain: the legacy `droplet-poc-host-net` host-net
+                        service/file/path/leasefile was renamed to
+                        `droplet-host-net` (de-`poc` sweep), so the tracked-
+                        exception allowlist is currently empty.
                         Distinct from pm-invariants' rule-17 sub-check, which
                         owns services/pm/ with zero tolerance.
                         Prevents: ADR-018 §13 class — a new `profiles: [poc]`,
@@ -1124,7 +1123,8 @@ run_check_lifecycle_naming() {
   # broad user-facing surface set below. The two never overlap — pm-invariants
   # owns services/pm/; this check owns everything else listed here. We did not
   # fold one into the other because their grandfather policies differ: pm has
-  # none; this surface carries the KNOWN droplet-poc-host-net debt.
+  # none; this surface formerly carried the droplet-poc-host-net debt (now
+  # renamed to droplet-host-net), so its grandfather allowlist is empty too.
   #
   # COVERED SURFACES (curated — mirrors stale-repo-names' surface philosophy):
   #   docker/docker-compose.yml   (profile names, service names, env, comments)
@@ -1136,33 +1136,33 @@ run_check_lifecycle_naming() {
   #
   # NOT covered (intentional exemptions):
   #   docs/ + ADRs + specs        Historical record; ADR-018 itself names the
-  #                               `poc-host-net` debt to retire it — flagging
+  #                               host-net debt to retire it — flagging
   #                               the doc that schedules the cleanup is noise.
   #   scripts/test/               This check's own regex + the regression test's
   #                               synthetic `poc` mutation strings live here;
   #                               scanning them would self-trip the gate.
   #   scripts/host/               The captured droplet-sys host artifacts
-  #                               (docker-compose.poc.yml, etc-systemd-system/
-  #                               droplet-poc-host-net.service, usr-local-sbin/
-  #                               droplet-poc-host-net, …) are a point-in-time
-  #                               CAPTURE of what shipped to the box (rule 20 /
-  #                               ADR-018 §13). They ARE the tracked debt, not a
-  #                               new leak; ADR-018 action item 3 retires them.
+  #                               (e.g. docker-compose.poc.yml) are a
+  #                               point-in-time CAPTURE of what shipped to the
+  #                               box (rule 20 / ADR-018 §13), exempt from this
+  #                               scan. The host-net service/script here were
+  #                               renamed droplet-poc-host-net → droplet-host-net
+  #                               by the de-poc sweep; ADR-018 action item 3
+  #                               still owns folding the plane into OpenWrt.
   #   CLAUDE.md / package.json    Not operator-facing product surfaces.
   #
   # GRANDFATHERED LEGACY DEBT (tracked, NOT a silent exception — every entry
   # below is real tech debt with a retirement owner):
   #
-  #   Tier 1 — the `droplet-poc-host-net` host-net debt (a SUBSTRING grandfather,
-  #   robust to line moves). The single-box host-integration installer and its
-  #   setup.sh log line reference the legacy `droplet-poc-host-net` service /
-  #   file / path / leasefile. ADR-018 action item 3 ("retire droplet-poc-host-net;
-  #   fold into the OpenWrt overlay + setup.sh; de-poc naming sweep") owns the
-  #   removal. Until then these literal identifiers are allowed wherever they
-  #   appear: we strip the known token and only flag a RESIDUAL lifecycle token
-  #   on the same line (same technique stale-repo-names uses for
-  #   inference-engine.local). Affected files: scripts/lib/single-box.sh,
-  #   scripts/setup.sh.
+  #   Tier 1 — RETIRED. The `droplet-poc-host-net` host-net service / file /
+  #   path / leasefile (plus the `droplet-poc-lan` leasefile token) used to be
+  #   stripped here as a SUBSTRING grandfather. The de-`poc` lifecycle-naming
+  #   sweep renamed them (droplet-poc-host-net → droplet-host-net, the
+  #   droplet-poc-lan.leases leasefile → droplet-lan.leases) across
+  #   scripts/lib/single-box.sh, scripts/lib/local-dns.sh, scripts/factory-reset.sh,
+  #   scripts/setup.sh, and the scripts/host/ capture, so no Tier-1 grandfather
+  #   is needed. (ADR-018 action item 3 still owns the broader removal — folding
+  #   the host plane into the OpenWrt overlay.)
   #
   #   Tier 2 — RETIRED (WARP-850). The six free-text "PoC" comment mentions
   #   that used to live here (docker-compose.yml ×2, .env.example ×1,
@@ -1215,32 +1215,18 @@ run_check_lifecycle_naming() {
   # (owner-tracked) entry is added.
   declare -A allowlist
 
-  # Tier 1 grandfathered legacy identifiers — stripped from each line BEFORE
-  # the token re-scan, so they're allowed wherever they appear (robust to
-  # line moves). Retirement owner: ADR-018 action item 3.
-  local -a grandfathered_tokens=(
-    "droplet-poc-host-net"
-    "droplet-poc-lan"
-  )
-
   # --- Scan. -----------------------------------------------------------------
   # Primary token: whole-word poc|prototype, case-insensitive. grep -nE gives
   # "<lineno>:<text>". We post-filter each hit through the grandfather tiers.
   local violations=""
-  local line lineno content residual t
+  local line lineno content residual
   for f in "${files[@]}"; do
     while IFS= read -r line; do
       [ -n "$line" ] || continue
       lineno="${line%%:*}"
       content="${line#*:}"
 
-      # Tier 1: strip every grandfathered legacy identifier, then re-test the
-      # residual for a lifecycle token. If nothing remains, this line's only
-      # hit was the known debt → allow.
       residual="$content"
-      for t in "${grandfathered_tokens[@]}"; do
-        residual="${residual//$t/}"
-      done
       if ! printf '%s' "$residual" | grep -qiwE '(poc|prototype)'; then
         continue
       fi
@@ -1281,10 +1267,9 @@ run_check_lifecycle_naming() {
   printf "    |   COMPOSE_PROFILES=poc    → COMPOSE_PROFILES=single-box\n" >&2
   printf "    |   setup.sh --poc          → setup.sh --single-box\n" >&2
   printf "    |   droplet-poc-* service   → name it by its role (e.g. -host-net)\n" >&2
-  printf "    | If your reference is the KNOWN droplet-poc-host-net debt (retired\n" >&2
-  printf "    | by ADR-018 action item 3) or another tracked exception, add it to\n" >&2
-  printf "    | the grandfather allowlist in run_check_lifecycle_naming WITH a\n" >&2
-  printf "    | retirement owner — never as a silent exception.\n" >&2
+  printf "    | If your reference is a genuinely tracked legacy exception, add\n" >&2
+  printf "    | it to the grandfather allowlist in run_check_lifecycle_naming\n" >&2
+  printf "    | WITH a retirement owner — never as a silent exception.\n" >&2
   CHECK_RESULTS[$label]=fail
   return 1
 }
