@@ -58,6 +58,7 @@ run_watchdog() { # extra env via leading VAR=val args
       DROPLET_WIFI_RESCAN="$WORK/rescan" \
       DROPLET_WIFI_SETTLE_S=0 \
       DROPLET_WIFI_WAIT_S=0 \
+      DROPLET_WIFI_AP_IN_CONTAINER=0 \
       "$@" \
       bash "$WATCHDOG" 2>&1
 }
@@ -96,6 +97,25 @@ if ! grep -q "restart" "$WORK/systemctl.log" 2>/dev/null; then
   pass "attach NOT restarted when the device never came back"
 else
   fail "attach restarted despite failed revival"
+fi
+
+# --- 3b. wedge signature BUT AP radio is in the container → NOT revived ------
+# On the single-box the AP phy is moved into the droplet-openwrt netns, so the
+# host PCI device looks exactly wedged (driver bound, no phy/netdev). The netns
+# guard must leave it alone — a PCI reset would rip the radio out of the
+# container and tear the live AP down (the regression this fix prevents).
+rm -rf "$WORK/pci" "$WORK/rescan" "$WORK/systemctl.log"
+mk_dev "0000:0e:00.0" "0x028000" bound
+out="$(run_watchdog DROPLET_WIFI_AP_IN_CONTAINER=1)"
+if [ ! -e "$WORK/pci/0000:0e:00.0/remove" ] && [ ! -e "$WORK/rescan" ]; then
+  pass "phy-in-container radio is NOT revived (no remove, no rescan)"
+else
+  fail "container-resident AP radio was wrongly revived: $out"
+fi
+if [ ! -s "$WORK/systemctl.log" ]; then
+  pass "attach NOT restarted for a container-resident radio"
+else
+  fail "attach restarted for a container-resident radio: $(cat "$WORK/systemctl.log" 2>/dev/null)"
 fi
 
 # --- 4. unbound device → untouched (operator may have unbound it) -----------

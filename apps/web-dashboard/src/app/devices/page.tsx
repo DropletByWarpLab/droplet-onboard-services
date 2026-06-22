@@ -5,9 +5,13 @@ import { useRouter } from "next/navigation";
 import { Plus, RefreshCw, Smartphone, Wifi, Cpu } from "lucide-react";
 import { useSmartHome } from "@/lib/hooks/useSmartHome";
 import { useSmartHomeEvents } from "@/lib/hooks/useSmartHomeEvents";
+import { useScenes } from "@/lib/hooks/useScenes";
+import { useAuth } from "@/lib/auth";
 import { DeviceGroup } from "@/components/smart-home/DeviceGroup";
 import { DiscoveryBanner } from "@/components/smart-home/DiscoveryBanner";
 import { DeviceDetailPanel } from "@/components/smart-home/DeviceDetailPanel";
+import { DeviceStats } from "@/components/smart-home/DeviceStats";
+import { RoutinesSection } from "@/components/smart-home/RoutinesSection";
 import { ShellPage } from "@/components/shell/ShellPage";
 import type { MatterDevice } from "@/lib/types";
 
@@ -27,6 +31,9 @@ export default function DevicesPage() {
     refresh,
   } = useSmartHome();
   useSmartHomeEvents();
+  const { scenes, refresh: refreshScenes } = useScenes();
+  const { user } = useAuth();
+  const canAuthor = user?.role === "owner" || user?.role === "admin";
 
   const [selectedDevice, setSelectedDevice] = useState<MatterDevice | null>(null);
 
@@ -105,6 +112,11 @@ export default function DevicesPage() {
           <div style={{ display: "flex", flexDirection: "column", gap: 28 }}>
             <DiscoveryBanner count={discovered.length} />
 
+            {/* KPI strip — lights / climate / locks / routines at a glance. */}
+            {totalDevices > 0 && (
+              <DeviceStats grouped={grouped} routineCount={scenes.length} />
+            )}
+
             {groups.map((group) => (
               <DeviceGroup
                 key={group.title}
@@ -114,6 +126,15 @@ export default function DevicesPage() {
                 onDeviceClick={setSelectedDevice}
               />
             ))}
+
+            {/* Routines — list + one-tap run (confirm-gated). */}
+            {totalDevices > 0 && (
+              <RoutinesSection
+                scenes={scenes}
+                canAuthor={canAuthor}
+                onChanged={refreshScenes}
+              />
+            )}
 
             {totalDevices === 0 && (
               <div className="card">

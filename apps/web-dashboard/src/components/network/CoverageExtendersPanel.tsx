@@ -62,7 +62,7 @@ import {
   decommissionApDevice,
   fetchNetworkOperation,
 } from "@/lib/api";
-import type { ApDeviceInfo, ApDeviceStatus } from "@/lib/types";
+import type { ApDeviceInfo, ApDeviceStatus, ApOnboardBackend } from "@/lib/types";
 import { Dialog } from "@/components/Dialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { translateError } from "@/lib/friendly-errors";
@@ -120,6 +120,26 @@ const STATUS_RANK: Record<ApDeviceStatus, number> = {
   FAILED: 3,
   DECOMMISSIONED: 4,
 };
+
+// ────────────────────────────────────────────────────────────────────
+// ADR-024 §4 — vendor labelling. The household sees ONE list regardless
+// of which ecosystem an extender belongs to; the only new affordance is
+// a small text badge naming the vendor. We prefer the explicit `vendor`
+// string the backend reports ("TP-Link", "Ubiquiti"); when it's null we
+// derive a plain-language label from the `backend` discriminator so the
+// badge is never blank (and never color-only — a11y).
+// ────────────────────────────────────────────────────────────────────
+const BACKEND_VENDOR_LABEL: Record<ApOnboardBackend, string> = {
+  DROPLET_IMAGE: "Droplet",
+  EASYMESH: "EasyMesh",
+  UNIFI: "Ubiquiti",
+};
+
+function vendorLabelFor(ap: ApDeviceInfo): string {
+  const reported = ap.vendor?.trim();
+  if (reported) return reported;
+  return BACKEND_VENDOR_LABEL[ap.backend] ?? "Droplet";
+}
 
 // ────────────────────────────────────────────────────────────────────
 // Home-user error copy keyed off ApOnboardErrorCode (blocker #7).
@@ -287,6 +307,13 @@ function ApCard({ ap, onApprove, onRequestRemove, busy }: ApCardProps) {
               className={`text-xs px-2 py-0.5 rounded-full font-medium ${meta.pillClass}`}
             >
               {meta.label}
+            </span>
+            {/* ADR-024 §4: quiet, text-only vendor badge. Neutral
+                (label tokens + separator border) so it reads as metadata
+                and never competes with the semantic status pill — and so
+                it carries meaning by text, not color (a11y). */}
+            <span className="text-xs px-2 py-0.5 rounded-full font-medium border border-separator text-label-secondary">
+              {vendorLabelFor(ap)}
             </span>
           </div>
           <div className="type-footnote text-label-tertiary mt-0.5">
@@ -753,8 +780,10 @@ function EmptyState({ onAdd }: { onAdd: () => void }) {
         No extra access points yet
       </p>
       <p className="type-footnote text-label-tertiary max-w-md">
-        Plug in a Droplet extender on the same network and it will appear here
-        for one-tap approval. New extenders show up within 30 seconds.
+        Plug a compatible access point into the same network and it will appear
+        here for one-tap approval — a Droplet extender, an EasyMesh access point
+        (such as TP-Link), or a Ubiquiti unit. New extenders show up within 30
+        seconds.
       </p>
       <div className="flex items-center gap-3 mt-4">
         <button
@@ -878,9 +907,10 @@ function ApproveExtenderDialog({
                 No extenders detected yet
               </p>
               <p>
-                Plug your Droplet extender into the same network with an
-                Ethernet cable, then come back in 30 seconds. We&apos;ll show
-                it here for one-tap approval.
+                Plug a compatible access point into the same network — a Droplet
+                extender, an EasyMesh access point, or a Ubiquiti unit — then
+                come back in 30 seconds. We&apos;ll show it here for one-tap
+                approval.
               </p>
             </div>
             <div className="flex items-center justify-end">

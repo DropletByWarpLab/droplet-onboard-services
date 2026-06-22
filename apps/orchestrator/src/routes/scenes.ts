@@ -20,12 +20,11 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
-import pino from "pino";
 import { requireRole } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
+import { executeScene } from "../services/scene-runner.service.js";
+import { isSupportedRrule, nextFireFromRrule } from "../utils/rrule.js";
 import { randomBytes } from "node:crypto";
-
-const logger = pino({ name: "scenes-route" });
 
 const sceneActionInputSchema = z.object({
   deviceNodeId: z.string().min(1),
@@ -44,6 +43,45 @@ const patchSceneSchema = z.object({
   icon: z.string().max(64).nullable().optional(),
   actions: z.array(sceneActionInputSchema).min(1).max(64).optional(),
 });
+
+// feat/scene-schedules — schedule a saved routine on an RRULE cadence.
+// `rrule` is validated against the supported FREQ=DAILY|WEEKLY subset
+// (isSupportedRrule) AFTER the shape check, so a malformed rule 400s at
+// the boundary rather than persisting a row the ticker would immediately
+// disable.
+const createScheduleSchema = z.object({
+  rrule: z.string().min(1).max(512),
+});
+const patchScheduleSchema = z.object({
+  enabled: z.boolean(),
+});
+
+interface SceneScheduleRow {
+  id: string;
+  sceneId: string;
+  rrule: string;
+  nextFireAt: Date;
+  enabled: boolean;
+  createdBy: string | null;
+  lastFiredAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/** Serialised shape returned to the dashboard. */
+function serializeSchedule(s: SceneScheduleRow) {
+  return {
+    id: s.id,
+    sceneId: s.sceneId,
+    rrule: s.rrule,
+    nextFireAt: s.nextFireAt,
+    enabled: s.enabled,
+    createdBy: s.createdBy,
+    lastFiredAt: s.lastFiredAt,
+    createdAt: s.createdAt,
+    updatedAt: s.updatedAt,
+  };
+}
 
 interface SceneRow {
   id: string;
@@ -370,70 +408,198 @@ export function createScenesRouter(
           return;
         }
 
-        // Walk actions in idx order. Partial-failure tolerant: a dead
-        // bulb on action 2 doesn't abort action 3 (the lights that work
-        // still work). The dashboard renders per-action status from the
-        // results array.
-        const results: Array<{
-          idx: number;
-          deviceNodeId: string;
-          command: string;
-          ok: boolean;
-          status?: string;
-          error?: string;
-        }> = [];
-        let successCount = 0;
-        for (const action of scene.actions) {
-          try {
-            const r = await matter.sendCommand(
-              action.deviceNodeId,
-              action.command,
-              (action.args ?? undefined) as Record<string, unknown> | undefined,
-            );
-            results.push({
-              idx: action.idx,
-              deviceNodeId: action.deviceNodeId,
-              command: action.command,
-              ok: true,
-              status: r.status,
-            });
-            successCount += 1;
-          } catch (err) {
-            results.push({
-              idx: action.idx,
-              deviceNodeId: action.deviceNodeId,
-              command: action.command,
-              ok: false,
-              error: (err as Error).message,
-            });
-            logger.warn(
-              { err, sceneId: scene.id, idx: action.idx },
-              "scene action failed (continuing)",
-            );
-          }
+        // Walk actions in idx order via the shared executor. Partial-
+        // failure tolerant: a dead bulb on action 2 doesn't abort action
+        // 3 (the lights that work still work). The same `executeScene`
+        // path the scene-schedule ticker uses, so an interactive run and
+        // an unattended scheduled run can't drift. The dashboard renders
+        // per-action status from the `results` array.
+        const run = await executeScene(prisma, matter, scene, {
+          triggeredBy: "user",
+          actor: req.user?.username ?? null,
+        });
+
+        res.json(run);
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // ── feat/scene-schedules — recurring routine schedules ──
+  //
+  // GET    /scenes/:id/schedules        owner/admin/family read
+  // POST   /scenes/:id/schedules        owner/admin author; bad RRULE → 400
+  // PATCH  /scenes/:id/schedules/:sid   owner/admin toggle enabled
+  // DELETE /scenes/:id/schedules/:sid   owner/admin
+  //
+  // SAFETY: a scheduled fire bypasses the per-run scene confirm-token
+  // (see the run handler above). That is OK ONLY because *creating a
+  // schedule IS the owner/admin opt-in* — the same justification the
+  // WARP-463 tool-schedule-ticker uses for "write-tier specs … pause
+  // until accept": here the accept happens at schedule-creation time, and
+  // every fire is audited by executeScene. So the author routes are
+  // owner/admin only; family can read the cadence but not arm it.
+
+  router.get(
+    "/scenes/:id/schedules",
+    requireRole("owner", "admin", "family"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const scene = await prisma.scene.findUnique({
+          where: { id: req.params.id },
+        });
+        if (!scene) {
+          res.status(404).json({ error: "Scene not found" });
+          return;
         }
+        const schedules = (await prisma.sceneSchedule.findMany({
+          where: { sceneId: req.params.id },
+          orderBy: { nextFireAt: "asc" },
+        })) as unknown as SceneScheduleRow[];
+        res.json({ schedules: schedules.map(serializeSchedule) });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  router.post(
+    "/scenes/:id/schedules",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const parsed = createScheduleSchema.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({
+            error: "Invalid schedule",
+            details: parsed.error.flatten(),
+          });
+          return;
+        }
+        // Validate the RRULE against the supported subset BEFORE the
+        // scene lookup write so a bad rule never persists a row the
+        // ticker would immediately disable. rrule.ts is UTC-only; the
+        // dashboard editor converts local wall-clock → UTC.
+        if (!isSupportedRrule(parsed.data.rrule)) {
+          res.status(400).json({
+            error: "Unsupported RRULE",
+            detail:
+              "Only FREQ=DAILY and FREQ=WEEKLY rules (with BYDAY/BYHOUR/BYMINUTE) are supported.",
+          });
+          return;
+        }
+        const scene = await prisma.scene.findUnique({
+          where: { id: req.params.id },
+        });
+        if (!scene) {
+          res.status(404).json({ error: "Scene not found" });
+          return;
+        }
+        const now = new Date();
+        const nextFireAt = nextFireFromRrule(parsed.data.rrule, now);
+        if (nextFireAt === null) {
+          // Defensive: isSupportedRrule passed but no future fire could be
+          // computed. Treat as a bad rule rather than persist a NULL.
+          res.status(400).json({ error: "Unsupported RRULE" });
+          return;
+        }
+        const actor = req.user?.username ?? null;
+        const created = (await prisma.sceneSchedule.create({
+          data: {
+            sceneId: req.params.id,
+            rrule: parsed.data.rrule,
+            nextFireAt,
+            enabled: true,
+            createdBy: actor,
+          },
+        })) as unknown as SceneScheduleRow;
 
         await recordActivity({
           kind: "smart_home",
-          severity: successCount === scene.actions.length ? "ok" : "warn",
-          sourceIcon: "home",
-          what: "Scene run",
-          sub: `${scene.name} (${successCount}/${scene.actions.length})`,
+          severity: "info",
+          sourceIcon: "clock",
+          what: "Scene schedule created",
+          sub: `${scene.name} (${parsed.data.rrule})`,
           refs: {
-            sceneId: scene.id,
-            sceneName: scene.name,
-            successCount,
-            actionCount: scene.actions.length,
-            actor: req.user?.username ?? null,
+            sceneId: req.params.id,
+            scheduleId: created.id,
+            rrule: parsed.data.rrule,
+            actor,
           },
         });
 
-        res.json({
-          sceneId: scene.id,
-          successCount,
-          actionCount: scene.actions.length,
-          results,
-        });
+        res.status(201).json(serializeSchedule(created));
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  router.patch(
+    "/scenes/:id/schedules/:sid",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const parsed = patchScheduleSchema.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({
+            error: "Invalid patch",
+            details: parsed.error.flatten(),
+          });
+          return;
+        }
+        const existing = (await prisma.sceneSchedule.findUnique({
+          where: { id: req.params.sid },
+        })) as unknown as SceneScheduleRow | null;
+        if (!existing || existing.sceneId !== req.params.id) {
+          res.status(404).json({ error: "Schedule not found" });
+          return;
+        }
+
+        // Re-enabling a (possibly long-stale) schedule recomputes a fresh
+        // future nextFireAt so it fires on cadence rather than instantly
+        // on the next tick. Disabling just flips the flag — state is the
+        // explicit `enabled` column, never derived.
+        const data: { enabled: boolean; nextFireAt?: Date } = {
+          enabled: parsed.data.enabled,
+        };
+        if (parsed.data.enabled && !existing.enabled) {
+          const next = nextFireFromRrule(existing.rrule, new Date());
+          if (next === null) {
+            res.status(400).json({
+              error: "Unsupported RRULE",
+              detail: "This schedule's RRULE can no longer be advanced.",
+            });
+            return;
+          }
+          data.nextFireAt = next;
+        }
+        const updated = (await prisma.sceneSchedule.update({
+          where: { id: req.params.sid },
+          data,
+        })) as unknown as SceneScheduleRow;
+        res.json(serializeSchedule(updated));
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  router.delete(
+    "/scenes/:id/schedules/:sid",
+    requireRole("owner", "admin"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const existing = (await prisma.sceneSchedule.findUnique({
+          where: { id: req.params.sid },
+        })) as unknown as SceneScheduleRow | null;
+        if (!existing || existing.sceneId !== req.params.id) {
+          res.status(404).json({ error: "Schedule not found" });
+          return;
+        }
+        await prisma.sceneSchedule.delete({ where: { id: req.params.sid } });
+        res.json({ id: req.params.sid, deleted: true });
       } catch (err) {
         next(err);
       }

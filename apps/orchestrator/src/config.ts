@@ -282,6 +282,15 @@ const envSchema = z.object({
   //   origin (trusted-origin.ts) and the one address that works at home AND
   //   over the WireGuard tunnel.
   DROPLET_PUBLIC_FQDN: z.string().default(""),
+  // DROPLET_PUBLIC_FQDN_IP — the IP the per-device FQDN resolves to via the
+  //   split-horizon dnsmasq (ADR-023 C3). Defaults to the WireGuard gateway
+  //   address 192.168.20.1, which is reachable on the single-box LAN AND over
+  //   the tunnel, so the one FQDN works at home and remotely. The routing-leg
+  //   registrar (createRoutingDnsRegistrar) POSTs {hostname, ip} to
+  //   /dhcp/hostnames with this value; matches the host-leg default in
+  //   scripts/lib/local-dns.sh::setup_public_fqdn_dns. Operators on a multi-box
+  //   LAN whose box IP differs can override it.
+  DROPLET_PUBLIC_FQDN_IP: z.string().default("192.168.20.1"),
   // HQ_ISSUANCE_URL — base URL of the fleet HQ issuance API
   //   (hq.warp-lab.com). Plain outbound HTTPS; does NOT require the fleet
   //   WireGuard tunnel. Empty disables live issuance (the cron skips), which is
@@ -312,6 +321,61 @@ const envSchema = z.object({
   DROPLET_AP_APPROVAL_TIMEOUT: z.coerce.number().default(60),
   DROPLET_AP_DAWN_ENABLED: z.coerce.boolean().default(true),
   DROPLET_AP_DEFAULT_TXPOWER: z.coerce.number().default(20),
+
+  // --- ADR-024 multi-backend coverage APs (Phase 2) ---
+  // Master switches for the third-party AP discovery backends. Both
+  // default OFF — a single-box with no extenders ships exactly as today
+  // (only the mDNS / DROPLET_IMAGE source runs). When off, the EasyMesh /
+  // UniFi discovery sources return [] and contribute nothing.
+  //
+  // EASYMESH_ENABLED — turns on the IEEE 1905.1 discovery + prplMesh
+  //   Controller-only onboarding path (ADR-024 §2). Real socket logic
+  //   lands in Phase 4; this phase the source is a scaffold.
+  // UNIFI_ENABLED — turns on the UBNT UDP 10001 discovery + UniFi Network
+  //   API adoption path (ADR-024 §3). Real adapter lands in Phase 3.
+  //
+  // EXPLICIT string→bool (same idiom as DROPLET_CLAIM_GATE_ENABLED below):
+  // z.coerce.boolean() would treat the non-empty strings "0"/"false" as
+  // true and silently enable a backend. Only "1"/"true" enable it; an
+  // absent var or anything else leaves it OFF.
+  DROPLET_AP_EASYMESH_ENABLED: z
+    .string()
+    .default("0")
+    .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
+  DROPLET_AP_UNIFI_ENABLED: z
+    .string()
+    .default("0")
+    .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
+
+  // ADR-024 Phase 4 (§2) — the box runs prplMesh in CONTROLLER-ONLY mode (its
+  // mt76 radio can't be an EasyMesh RF agent; the certified third-party AP is
+  // the Agent). This points the orchestrator's EASYMESH backend at the LOCAL
+  // prplMesh controller's ubus / IPC data-model endpoint (e.g. its
+  // ubus-over-HTTP address or socket path). The controller is a loopback/LAN
+  // local service, so this is an ADDRESS — not a secret — declared the same
+  // plain-string-empty-default way as DROPLET_AP_UNIFI_CONTROLLER_URL.
+  //
+  // Empty default: an unconfigured box's EasyMesh client throws NOT_CONFIGURED,
+  // but the discovery source only calls it when DROPLET_AP_EASYMESH_ENABLED is
+  // on (default off), so a default single-box never touches it.
+  DROPLET_AP_EASYMESH_CONTROLLER_URL: z.string().default(""),
+
+  // ADR-024 Phase 3 (§3 + §"Open decision" Option B) — the box is a pure API
+  // CLIENT to a UniFi Network controller the household ALREADY runs (a UDM /
+  // CloudKey / self-host). We do NOT bundle or redistribute the controller;
+  // these two vars point Droplet at the customer-supplied one.
+  //
+  // CONTROLLER_URL — local controller base URL (e.g. https://127.0.0.1:8443).
+  //   Empty default: an unconfigured box's UniFi client throws NOT_CONFIGURED,
+  //   but the discovery source only calls it when DROPLET_AP_UNIFI_ENABLED is
+  //   on, so a default single-box never touches it.
+  // API_KEY — **SECRET**. The official local API's API key (the 2024 key-auth
+  //   surface; the legacy :8443 login-cookie flow is NOT used). Sourced from
+  //   the secret store / .env, NEVER a tracked default — declared the same way
+  //   as every other secret here (DROPLET_PM_WEBHOOK_SECRET, ROUTING_SERVICE_
+  //   TOKEN, …): a plain string defaulting to empty. Never logged.
+  DROPLET_AP_UNIFI_CONTROLLER_URL: z.string().default(""),
+  DROPLET_AP_UNIFI_API_KEY: z.string().default(""),
 
   // --- Front-panel claim gate (WARP-165) ---
   // Physical-presence gate for POST /auth/setup: when ON, the first-owner

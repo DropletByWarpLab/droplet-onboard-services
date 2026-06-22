@@ -37,7 +37,7 @@ import { createPmProxyRouter } from "./routes/pm-proxy.js";
 import { createPmMobileRouter } from "./routes/mobile/pm.js";
 import { createPmRouter } from "./routes/pm.js";
 import { createPmNativeRouter } from "./routes/pm/native.js";
-import { createScenesRouter } from "./routes/scenes.js";
+import { createScenesRouter, type MatterDispatcher } from "./routes/scenes.js";
 import { sendMatterCommand } from "./services/matter.service.js";
 import { createNetworkRouter } from "./routes/network.js";
 import { createNetworkThroughputRouter } from "./routes/network-throughput.js";
@@ -91,7 +91,17 @@ import {
 } from "./services/workspace-settings.service.js";
 import pino from "pino";
 
-export function createApp(prisma: PrismaClient) {
+export function createApp(
+  prisma: PrismaClient,
+  // feat/scene-schedules — the Matter dispatcher is hoisted so index.ts can
+  // build ONE instance and share it between the scenes router (here) and the
+  // scene-schedule ticker. Tests / callers that pass only `prisma` get the
+  // default inline dispatcher, preserving the WARP-474 wiring.
+  matter: MatterDispatcher = {
+    sendCommand: (nodeId, command, args) =>
+      sendMatterCommand(nodeId, command, args),
+  },
+) {
   const app = express();
 
   // Trust the nginx reverse proxy so req.secure / X-Forwarded-Proto work
@@ -265,13 +275,7 @@ export function createApp(prisma: PrismaClient) {
   // WARP-474 (G2): smart-home scenes CRUD + batch-run. Run dispatches
   // each action through `sendMatterCommand` — partial-failure tolerant,
   // per-action results returned to the dashboard.
-  app.use(
-    "/api",
-    createScenesRouter(prisma, {
-      sendCommand: (nodeId, command, args) =>
-        sendMatterCommand(nodeId, command, args),
-    }),
-  );
+  app.use("/api", createScenesRouter(prisma, matter));
   app.use("/api", createNetworkRouter(prisma));
   // WARP-470: WAN throughput sampler + KPI rollup + 24 h time-series for §2.6
   // Network page. Service-principal POST for the routing sampler push.

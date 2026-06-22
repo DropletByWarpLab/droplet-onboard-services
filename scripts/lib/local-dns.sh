@@ -326,11 +326,11 @@ DROPLET_PUBLIC_FQDN_IP="${DROPLET_PUBLIC_FQDN_IP:-192.168.20.1}"
 
 # Host dnsmasq config for the at-home single-box LAN plane (ADR-018-transitional).
 # Today's single-box LAN clients lease DNS from the host dnsmasq instance
-# (scripts/host/etc-droplet-poc-host-net/lan-dhcp.conf), NOT the OpenWrt
+# (scripts/host/etc-droplet-host-net/lan-dhcp.conf), NOT the OpenWrt
 # container's. So the routing-service host-record above does not reach them; we
 # ALSO write a MANAGED host-record line into the host dnsmasq config. This whole
 # leg is retired when ADR-018 unifies the network onto the OpenWrt plane.
-_HOST_DNSMASQ_CONF="/etc/droplet-poc-host-net/lan-dhcp.conf"
+_HOST_DNSMASQ_CONF="/etc/droplet-host-net/lan-dhcp.conf"
 _HOST_RECORD_MARKER="# ADR-023 managed host-record (split-horizon FQDN) — do not edit by hand"
 
 setup_public_fqdn_dns() {
@@ -416,8 +416,8 @@ _write_host_dnsmasq_record() {
 
   # Best-effort reload of the dedicated host dnsmasq so the record goes live now.
   if command -v systemctl >/dev/null 2>&1; then
-    sudo systemctl reload droplet-poc-host-net.service 2>/dev/null \
-      || sudo systemctl restart droplet-poc-host-net.service 2>/dev/null || true
+    sudo systemctl reload droplet-host-net.service 2>/dev/null \
+      || sudo systemctl restart droplet-host-net.service 2>/dev/null || true
   fi
 }
 

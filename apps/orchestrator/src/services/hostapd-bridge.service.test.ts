@@ -23,6 +23,9 @@ vi.mock("../config.js", () => ({
 import {
   stageSsid,
   applyWifi,
+  applyGuestWifi,
+  removeGuestWifi,
+  guestStatusFromBridge,
   _resetForTests,
 } from "./hostapd-bridge.service.js";
 
@@ -265,5 +268,128 @@ describe("applyWifi — SSID-read failure classification (WARP-836)", () => {
       status: 422,
     });
     expect(fetchSpy).toHaveBeenCalledTimes(1); // never reached the POST
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Guest Wi-Fi (single-box second BSS) — POST/DELETE/GET /openwrt/wifi/guest
+// ---------------------------------------------------------------------------
+
+describe("applyGuestWifi", () => {
+  it("POSTs { ssid, psk } to /openwrt/wifi/guest with the auth header", async () => {
+    const fetchSpy = mockFetchOnce(200, { ok: true, enabled: true, ssid: "Visitors" });
+    const res = await applyGuestWifi("Visitors", "guestpass1");
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(String(url)).toBe("http://bridge.test:9090/openwrt/wifi/guest");
+    expect(init?.method).toBe("POST");
+    expect((init?.headers as Record<string, string>)["X-Droplet-Auth"]).toBe("tok-123");
+    expect(JSON.parse(String(init?.body))).toEqual({ ssid: "Visitors", psk: "guestpass1" });
+    // No UCI safe-apply/rollback record on the hostapd shape.
+    expect(res).toEqual({ operationId: null });
+  });
+
+  it("FAILS CLOSED with no bridge token (never sends the request)", async () => {
+    delete process.env.BRIDGE_AUTH_TOKEN;
+    delete process.env.SERVICE_TOKEN_DISPLAY;
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    await expect(applyGuestWifi("Visitors", "guestpass1")).rejects.toMatchObject({
+      code: "BRIDGE_AUTH_UNCONFIGURED",
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a 422 validation refusal from the host script", async () => {
+    mockFetchOnce(422, { ok: false, error: "guest Wi-Fi password must be 8-63 characters" });
+    await expect(applyGuestWifi("Visitors", "short")).rejects.toThrow(/8-63|password/i);
+  });
+
+  it("surfaces not_hostapd_mode when the bridge says 409 (defense in depth)", async () => {
+    mockFetchOnce(409, { ok: false, error: "not_hostapd_mode" });
+    await expect(applyGuestWifi("Visitors", "guestpass1")).rejects.toThrow(/not_hostapd_mode/i);
+  });
+
+  it("maps a transport failure to UNREACHABLE", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(
+      Object.assign(new Error("fetch failed"), { cause: { code: "ECONNREFUSED" } }),
+    );
+    await expect(applyGuestWifi("Visitors", "guestpass1")).rejects.toMatchObject({
+      code: "UNREACHABLE",
+    });
+  });
+});
+
+describe("removeGuestWifi", () => {
+  it("DELETEs /openwrt/wifi/guest with the auth header", async () => {
+    const fetchSpy = mockFetchOnce(200, { ok: true, enabled: false, removed: true });
+    const res = await removeGuestWifi();
+
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(String(url)).toBe("http://bridge.test:9090/openwrt/wifi/guest");
+    expect(init?.method).toBe("DELETE");
+    expect((init?.headers as Record<string, string>)["X-Droplet-Auth"]).toBe("tok-123");
+    // DELETE carries no body (no PSK on the wire for a teardown).
+    expect(init?.body).toBeUndefined();
+    expect(res).toEqual({ operationId: null });
+  });
+
+  it("FAILS CLOSED with no bridge token", async () => {
+    delete process.env.BRIDGE_AUTH_TOKEN;
+    delete process.env.SERVICE_TOKEN_DISPLAY;
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    await expect(removeGuestWifi()).rejects.toMatchObject({
+      code: "BRIDGE_AUTH_UNCONFIGURED",
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("guestStatusFromBridge", () => {
+  it("GETs /openwrt/wifi/guest and returns the parsed status incl. supported", async () => {
+    const fetchSpy = mockFetchOnce(200, {
+      configured: true,
+      enabled: true,
+      ssid: "Visitors",
+      password: "guestpass1",
+      supported: true,
+    });
+    const status = await guestStatusFromBridge();
+
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(String(url)).toBe("http://bridge.test:9090/openwrt/wifi/guest");
+    expect(init?.method ?? "GET").toBe("GET");
+    expect((init?.headers as Record<string, string>)["X-Droplet-Auth"]).toBe("tok-123");
+    expect(status).toEqual({
+      configured: true,
+      enabled: true,
+      ssid: "Visitors",
+      password: "guestpass1",
+      supported: true,
+    });
+  });
+
+  it("fails closed: a body that omits `supported` parses as supported:false", async () => {
+    mockFetchOnce(200, { configured: false, enabled: false, ssid: null, password: null });
+    const status = await guestStatusFromBridge();
+    expect(status).toEqual({
+      configured: false,
+      enabled: false,
+      ssid: null,
+      password: null,
+      supported: false,
+    });
+  });
+
+  it.each([401, 403])("maps a %s to AUTH (stale token), not UNREACHABLE", async (status) => {
+    mockFetchOnce(status, { error: "unauthorized" });
+    await expect(guestStatusFromBridge()).rejects.toMatchObject({ code: "AUTH" });
+  });
+
+  it("maps a transport failure to UNREACHABLE", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(
+      Object.assign(new Error("fetch failed"), { cause: { code: "ECONNREFUSED" } }),
+    );
+    await expect(guestStatusFromBridge()).rejects.toMatchObject({ code: "UNREACHABLE" });
   });
 });

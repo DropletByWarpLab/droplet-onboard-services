@@ -33,6 +33,19 @@ vi.mock("@/lib/auth", () => ({
   useAuth: () => ({ completeTour: completeTourMock }),
 }));
 
+// ProductTour's mount fires five live-data fetches (health/recents/models/
+// cameras/vpn). Mock @/lib/api so unmount-mid-flight (the resume test) doesn't
+// emit act() warnings from a real fetch resolving after teardown. Safe stubs —
+// this suite only asserts the walkthrough UX, not the live motifs.
+vi.mock("@/lib/api", () => ({
+  fetchSystemHealth: vi.fn().mockResolvedValue({ status: "ok" }),
+  fetchRecents: vi.fn().mockResolvedValue([]),
+  fetchModelsPage: vi.fn().mockResolvedValue({ local: [], cloud: [] }),
+  fetchCameras: vi.fn().mockResolvedValue([]),
+  fetchVpnStatus: vi.fn().mockResolvedValue({ publicFqdn: null }),
+  getCameraSnapshotUrl: (name: string) => `/api/cameras/${name}/snapshot`,
+}));
+
 import { ProductTour, TOUR_STEPS } from "@/components/tour/ProductTour";
 
 const RESUME_KEY = "droplet-tour-step";
