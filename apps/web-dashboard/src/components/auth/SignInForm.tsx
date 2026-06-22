@@ -1,54 +1,10 @@
 import { type ReactNode } from "react";
 import { Lock, Mail, Eye, EyeOff, KeyRound, ArrowRight } from "lucide-react";
 import { ONB_AUTH_FLAGS } from "./flags";
-
-/* ── Brand glyphs (mock marks, not official logos) ───────────────── */
-function GoogleGlyph() {
-  return (
-    <svg width="17" height="17" viewBox="0 0 48 48" aria-hidden="true">
-      <path fill="#4285F4" d="M45 24c0-1.5-.1-2.9-.4-4.3H24v8.5h11.8c-.5 2.7-2 5-4.4 6.6v5.5h7.1C42.7 36.5 45 30.8 45 24z" />
-      <path fill="#34A853" d="M24 46c5.9 0 10.9-2 14.5-5.3l-7.1-5.5c-2 1.3-4.5 2.1-7.4 2.1-5.7 0-10.5-3.8-12.2-9H4.5v5.7C8.1 41.1 15.5 46 24 46z" />
-      <path fill="#FBBC05" d="M11.8 28.3c-.4-1.3-.7-2.7-.7-4.3s.2-2.9.7-4.3v-5.7H4.5C3 17.1 2 20.4 2 24s1 6.9 2.5 10l7.3-5.7z" />
-      <path fill="#EA4335" d="M24 11.4c3.2 0 6.1 1.1 8.4 3.3l6.3-6.3C34.9 4.8 29.9 3 24 3 15.5 3 8.1 7.9 4.5 14l7.3 5.7c1.7-5.2 6.5-8.3 12.2-8.3z" />
-    </svg>
-  );
-}
-function MicrosoftGlyph() {
-  return (
-    <svg width="15" height="15" viewBox="0 0 23 23" aria-hidden="true">
-      <path fill="#F25022" d="M0 0h11v11H0z" />
-      <path fill="#7FBA00" d="M12 0h11v11H12z" />
-      <path fill="#00A4EF" d="M0 12h11v11H0z" />
-      <path fill="#FFB900" d="M12 12h11v11H12z" />
-    </svg>
-  );
-}
-function OktaGlyph() {
-  return (
-    <svg width="15" height="15" viewBox="0 0 24 24" aria-hidden="true">
-      <circle cx="12" cy="12" r="11" fill="none" stroke="#007DC1" strokeWidth="5" />
-    </svg>
-  );
-}
-
-/**
- * `providerId` is the wire value sent to /api/sso/oidc/authorize and MUST
- * match the orchestrator's SsoProvider union. Note "Continue with Microsoft"
- * maps to the `entra` provider id (Microsoft Entra is the IdP).
- *
- * This is the CANONICAL catalog (and render order): the login renders a subset
- * of these — exactly the providers runtime discovery reports as configured
- * (WARP-629) — by filtering this list, so order is always google → entra →
- * okta regardless of the discovery response order, and an unknown id from the
- * wire simply has no entry here and is skipped.
- */
-const SSO_PROVIDER_CATALOG = [
-  { providerId: "google", label: "Continue with Google", glyph: <GoogleGlyph /> },
-  { providerId: "entra", label: "Continue with Microsoft", glyph: <MicrosoftGlyph /> },
-  { providerId: "okta", label: "Continue with Okta", glyph: <OktaGlyph /> },
-] as const;
-
-type SsoProviderId = (typeof SSO_PROVIDER_CATALOG)[number]["providerId"];
+import {
+  SSO_PROVIDER_CATALOG,
+  normalizeSsoProviderId,
+} from "@/lib/sso-providers";
 
 /** A method whose backend hasn't shipped yet: visible, disabled, no-op. */
 function ComingSoon({
@@ -92,7 +48,7 @@ function SsoProviderButton({
   glyph,
   returnTo,
 }: {
-  providerId: SsoProviderId;
+  providerId: string;
   label: string;
   glyph: ReactNode;
   returnTo?: string;
@@ -161,8 +117,11 @@ export function SignInForm({
   // WARP-629: render exactly the configured providers, in canonical order, by
   // filtering the catalog against the runtime-discovered set. Filtering the
   // catalog (not mapping the wire list) gives canonical order for free and
-  // drops any unknown id the wire might carry.
-  const discovered = new Set(ssoProviders);
+  // drops any unknown id the wire might carry. Discovered ids are normalized
+  // through the shared alias map so a box reporting `azuread`/`microsoft` still
+  // matches the canonical `entra` entry (single source of truth — same as the
+  // Team step).
+  const discovered = new Set(ssoProviders.map(normalizeSsoProviderId));
   const visibleProviders = SSO_PROVIDER_CATALOG.filter((p) =>
     discovered.has(p.providerId),
   );
@@ -181,7 +140,7 @@ export function SignInForm({
               <SsoProviderButton
                 key={p.providerId}
                 providerId={p.providerId}
-                label={p.label}
+                label={p.loginLabel}
                 glyph={p.glyph}
                 returnTo={returnTo}
               />

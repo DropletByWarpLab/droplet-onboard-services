@@ -137,6 +137,15 @@ describe("SignInForm — canonical ordering + unknown-id filtering", () => {
     ).toHaveLength(1);
   });
 
+  it("resolves the azuread/microsoft aliases to the Microsoft (entra) button", () => {
+    // Shared catalog: a box that reports the `azuread` alias still renders the
+    // Microsoft Entra login button (same source of truth as the Team step).
+    renderForm({ ssoProviders: ["azuread"] });
+    const button = screen.getByRole("button", { name: /continue with microsoft/i });
+    const form = button.closest("form")!;
+    expect(within(form).getByDisplayValue("entra")).toHaveAttribute("name", "provider");
+  });
+
   it("renders every discovered provider as ENABLED (no dead buttons)", () => {
     renderForm({ ssoProviders: ["google", "entra"] });
     for (const b of screen.getAllByRole("button", { name: /continue with/i })) {
