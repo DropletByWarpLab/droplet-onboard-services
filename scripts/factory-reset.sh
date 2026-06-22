@@ -247,16 +247,34 @@ if [ -n "$_DEREGISTER_FQDN" ] || [ -n "$_DEREGISTER_DEVICE_ID" ]; then
   #    when HQ_ISSUANCE_URL is unset; this whole step is best-effort + NON-FATAL
   #    (`|| true`) — a reset must complete even if HQ or the sidecar is down (HQ
   #    also reaps stale registrations server-side).
+  #    GUARD (ADR-023 PR-3): require BOTH a live HQ url AND a real (non-default)
+  #    device id before we ever sign a DELETE. config.DROPLET_DEVICE_ID has a Zod
+  #    default of "droplet" (apps/orchestrator/src/config.ts), so a partially
+  #    provisioned / ID-less box with HQ_ISSUANCE_URL set must NOT be able to send
+  #    a signed DELETE for device_id="droplet" to HQ. `_DEREGISTER_REAL_DEVICE_ID`
+  #    is non-empty only when .env carries a genuine, non-default id. The inner
+  #    `deregisterFromHq` provisioning guard is the suspender to this belt.
   _hq_url="${HQ_ISSUANCE_URL:-}"
-  if [ -n "$_hq_url" ]; then
+  _DEREGISTER_REAL_DEVICE_ID=""
+  if [ -n "$_DEREGISTER_DEVICE_ID" ] && [ "$_DEREGISTER_DEVICE_ID" != "droplet" ]; then
+    _DEREGISTER_REAL_DEVICE_ID="$_DEREGISTER_DEVICE_ID"
+  fi
+  if [ -n "$_hq_url" ] && [ -n "$_DEREGISTER_REAL_DEVICE_ID" ]; then
     _dereg_env_flag=""
     [ -f "$REPO_ROOT/.env" ] && _dereg_env_flag="--env-file $REPO_ROOT/.env"
+    # Bound the whole exec with a shell `timeout` (re-establishing the bound the
+    # old `curl --max-time 10` had): the `docker compose exec` has no shell-level
+    # deadline, and the underlying gRPC calls to the device-identity sidecar can
+    # hang if the sidecar is present-but-wedged — without this, factory-reset
+    # blocks forever here and never reaches Phase 1 `down -v`. A `timeout` exit
+    # of 124 (deadline hit) is treated exactly like any other failure: log a warn
+    # and PROCEED to the wipe. The whole step stays best-effort + NON-FATAL.
     # shellcheck disable=SC2086  # word-splitting on $_dereg_env_flag is intended
-    if $DC -f "$COMPOSE_FILE" $_dereg_env_flag exec -T orchestrator \
+    if timeout 90 $DC -f "$COMPOSE_FILE" $_dereg_env_flag exec -T orchestrator \
          npm run -s tls-deregister >/dev/null 2>&1; then
-      log_success "Sent signed HQ deregistration for ${_DEREGISTER_DEVICE_ID:-this device}"
+      log_success "Sent signed HQ deregistration for ${_DEREGISTER_REAL_DEVICE_ID}"
     else
-      log_warn "Could not run signed HQ deregistration (non-fatal — HQ reaps stale registrations)"
+      log_warn "Could not run signed HQ deregistration (non-fatal — timed out or HQ/sidecar down; HQ reaps stale registrations)"
     fi
   fi
 

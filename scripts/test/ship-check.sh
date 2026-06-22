@@ -1362,7 +1362,9 @@ run_check_tls_invariants() {
       printf "    | (ADR-023 PR-3: HQ requires a signed PoP body; run the CLI while the stack is up.)\n" >&2
       failures=$((failures + 1))
     fi
-    if grep -qE 'curl.*api/issuance/registration' "$factory_reset"; then
+    # Strip comment lines before grepping so a future explanatory comment like
+    # `# was: curl -X DELETE …/api/issuance/registration` can't trip a false FAIL.
+    if grep -v '^[[:space:]]*#' "$factory_reset" | grep -qE 'curl.*api/issuance/registration'; then
       printf "  ${_RED}FAIL${_RESET}  %s — factory-reset.sh still uses a bodyless curl to /api/issuance/registration\n" "$label"
       printf "    | (ADR-023 PR-3 regression: the deployed HQ Worker 422s a DELETE with no TPM-PoP body — use the tls-deregister CLI.)\n" >&2
       failures=$((failures + 1))

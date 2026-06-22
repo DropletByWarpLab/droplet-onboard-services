@@ -1207,7 +1207,23 @@ test_tls_invariants_catches_deregister_regression() {
 # deployed HQ Worker 422s. tls-invariants must catch this.
 curl -sS -X DELETE "${HQ_ISSUANCE_URL%/}/api/issuance/registration?device_id=${DEV}" || true
 BODYLESS
-  _assert_check_fails "$synth" tls-invariants
+  if ! _assert_check_fails "$synth" tls-invariants; then
+    printf "    expected tls-invariants to FAIL after re-introducing a bodyless curl\n" >&2
+    return 1
+  fi
+
+  # 2c. A purely EXPLANATORY comment that mentions the old curl must NOT trip a
+  #     false FAIL — the grep strips comment lines first. Restore the faithful
+  #     copy + append only a comment referencing the bodyless curl; PASS again.
+  cp "$REPO_ROOT_REAL/scripts/factory-reset.sh" "$synth/scripts/factory-reset.sh"
+  cat >> "$synth/scripts/factory-reset.sh" <<'COMMENTONLY'
+# was: curl -X DELETE "${HQ_ISSUANCE_URL%/}/api/issuance/registration" (replaced
+# by the signed tls-deregister CLI; HQ 422'd the bodyless DELETE).
+COMMENTONLY
+  if ! _assert_check_passes "$synth" tls-invariants; then
+    printf "    tls-invariants false-FAILed on a comment that only MENTIONS the old curl\n" >&2
+    return 1
+  fi
 }
 
 # =============================================================================
