@@ -107,7 +107,7 @@ export function createPmMobileRouter(prisma: PrismaClient): Router {
         if (!workspace) {
           return res.status(400).json({ error: "workspace query param required" });
         }
-        const projects = await listProjects(prisma, { workspaceSlug: workspace });
+        const projects = await listProjects(prisma, { workspaceSlug: workspace, perPage: capPerPage(req.query.per_page) });
         return res.json({
           projects: projects.map((p) => ({ id: p.id, name: p.name, identifier: p.identifier })),
         });
@@ -149,12 +149,16 @@ export function createPmMobileRouter(prisma: PrismaClient): Router {
     HUMAN_GET,
     async (req: Request, res: Response, next: NextFunction) => {
       try {
-        if (!req.query.workspace || !req.query.project_id) {
+        const projectId = req.query.project_id as string | undefined;
+        if (!req.query.workspace || !projectId) {
           return res
             .status(400)
             .json({ error: "workspace and project_id query params required" });
         }
         const work_item = await getWorkItem(prisma, req.params.id);
+        if (work_item.projectId !== projectId) {
+          return res.status(404).json({ error: "work item not found", code: "PM_WORK_ITEM_NOT_FOUND" });
+        }
         return res.json({ work_item: projectWorkItem(work_item) });
       } catch (err) {
         const handled = mapPmError(err, res);
