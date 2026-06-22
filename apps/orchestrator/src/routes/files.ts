@@ -30,6 +30,7 @@ import {
   ncUpdateShare,
   ncDeleteShare,
   ncListSharedWithMe,
+  ncDirExists,
   NextcloudOcsError,
 } from "../services/nextcloud.client.js";
 import type { BulkOperationResult } from "../types/index.js";
@@ -101,6 +102,49 @@ function getUser(req: Request): string {
     return headerUser;
   }
   return req.user?.username || "admin";
+}
+
+// ────────────────────────────────────────────────────────────
+//  WARP-883 (ADR-027 WS-5) — Files spaces (My Files / Shared Household)
+// ────────────────────────────────────────────────────────────
+//
+// Every user already has a PRIVATE space — their own Nextcloud home (the
+// per-user `ncCreateUser` account + WebDAV root). What WS-5 adds is a SHARED
+// "Household" space, backed by the Nextcloud `groupfolders` app. The
+// groupfolders app mounts the group folder INTO each assigned member's home as
+// a top-level directory (e.g. `/Household`). So the "shared" space is NOT a
+// separate account or WebDAV root — it is just a well-known path prefix browsed
+// with the user's OWN existing token. That keeps the per-user routing already
+// in place and means a single config var (`DROPLET_SHARED_FOLDER_NAME`) defines
+// the whole feature.
+
+/** The top-level folder name the shared "Household" space lives under. */
+const SHARED_FOLDER_NAME = config.DROPLET_SHARED_FOLDER_NAME;
+/** Absolute home-relative path to the shared space root (e.g. "/Household"). */
+const SHARED_FOLDER_PATH = `/${SHARED_FOLDER_NAME}`;
+
+type Space = "personal" | "shared";
+
+/** Coerce an arbitrary `?space=` value to a known space (default personal). */
+function resolveSpace(raw: unknown): Space {
+  return raw === "shared" ? "shared" : "personal";
+}
+
+/**
+ * Map a (space, requested path) pair to the real WebDAV home-relative path.
+ *
+ * - personal: the path is used verbatim (the user's home root).
+ * - shared:   the path is resolved UNDER the shared-folder prefix, so
+ *             `?space=shared&path=/Trips` → `/Household/Trips` and the bare
+ *             shared root → `/Household`. The prefix is always applied here so
+ *             a caller can never escape the shared mount via this route.
+ */
+function rootForSpace(space: Space, requestedPath: string): string {
+  const rel = requestedPath.replace(/^\/+/, "");
+  if (space === "shared") {
+    return rel ? `${SHARED_FOLDER_PATH}/${rel}` : SHARED_FOLDER_PATH;
+  }
+  return requestedPath || "/";
 }
 
 /** Safely publish an MQTT message — failures are non-fatal. */
@@ -300,11 +344,26 @@ export function createFilesRouter(prisma: PrismaClient): Router {
   }
 
   // ── List directory contents ──
+  //
+  // WARP-883: accepts an optional `?space=personal|shared` (default personal).
+  // `shared` resolves the listing under the Household group-folder prefix; the
+  // user's OWN token still drives the request (groupfolders mounts the folder
+  // into their home). On the My-Files (personal) home ROOT we hide the shared
+  // folder entry so the Household folder isn't shown twice — once as a space in
+  // the switcher and once inline.
   router.get("/files", async (req, res, next) => {
     try {
-      const filePath = (req.query.path as string) || "/";
+      const requestedPath = (req.query.path as string) || "/";
+      const space = resolveSpace(req.query.space);
+      const filePath = rootForSpace(space, requestedPath);
       const user = getUser(req);
+      const isPersonalRoot = space === "personal" && filePath === "/";
 
+      // Cache key is keyed on the RESOLVED path (e.g. "/Household/Trips"), not
+      // the (space, requestedPath) pair — the shared prefix already makes the
+      // path distinct from any personal path, and keeping the same key shape
+      // means the existing write routes' `cacheDel(CACHE_PREFIX + user + ":" +
+      // path)` invalidations still land for shared-space mutations.
       const cacheKey = CACHE_PREFIX + user + ":" + filePath;
       const cached = await cacheGet<FileEntryInfo[]>(cacheKey);
       if (cached) {
@@ -312,11 +371,57 @@ export function createFilesRouter(prisma: PrismaClient): Router {
         return;
       }
 
-      const entries = await ncListFiles(await getToken(req), user, filePath);
+      const raw = await ncListFiles(await getToken(req), user, filePath);
+      // Hide the shared-folder mount from the personal home root only — a
+      // subfolder elsewhere (or inside the shared space) that happens to share
+      // the name must NOT be filtered.
+      const entries = isPersonalRoot
+        ? raw.filter((e) => e.name !== SHARED_FOLDER_NAME)
+        : raw;
       await cacheSet(cacheKey, entries, CACHE_TTL);
       res.json(entries);
     } catch (err) {
       handleFileError(err, res, next, []);
+    }
+  });
+
+  // ── Spaces (GET /api/files/spaces) ──
+  //
+  // WARP-883: tells the dashboard which spaces exist so it can show/hide the
+  // My-Files / Shared switcher. "personal" always exists (every user has a
+  // home); "shared" exists iff the Household group folder mounted into THIS
+  // user's home (the groupfolders provisioning ran + this user is in the
+  // household group). Read-only + degrades to shared-unavailable on a
+  // Nextcloud outage (never 500) — same posture as the other read endpoints.
+  router.get("/files/spaces", async (req, res, next) => {
+    try {
+      const user = getUser(req);
+      let sharedAvailable = false;
+      try {
+        sharedAvailable = await ncDirExists(
+          await getToken(req),
+          user,
+          SHARED_FOLDER_PATH
+        );
+      } catch (err) {
+        if (err instanceof MissingNcTokenError) throw err;
+        logger.warn({ err }, "files/spaces: shared-folder probe failed; reporting unavailable");
+        sharedAvailable = false;
+      }
+      res.json({
+        sharedAvailable,
+        spaces: [
+          { id: "personal", name: "My Files", available: true, root: "/" },
+          {
+            id: "shared",
+            name: SHARED_FOLDER_NAME,
+            available: sharedAvailable,
+            root: SHARED_FOLDER_PATH,
+          },
+        ],
+      });
+    } catch (err) {
+      handleFileError(err, res, next);
     }
   });
 

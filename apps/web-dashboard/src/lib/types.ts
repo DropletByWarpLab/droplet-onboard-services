@@ -242,6 +242,25 @@ export interface FileEntryInfo {
   modifiedAt: string;
 }
 
+// WARP-883 (ADR-027 WS-5) — Files spaces (My Files / shared Household).
+export type FileSpaceId = "personal" | "shared";
+
+/** A browsable Files space as reported by GET /api/files/spaces. */
+export interface FileSpace {
+  id: FileSpaceId;
+  /** Display name ("My Files" or the shared folder name, e.g. "Household"). */
+  name: string;
+  /** Whether the space exists for this user (drives switcher visibility). */
+  available: boolean;
+  /** Home-relative root path for the space ("/" or "/Household"). */
+  root: string;
+}
+
+export interface FileSpacesResponse {
+  sharedAvailable: boolean;
+  spaces: FileSpace[];
+}
+
 export interface TrashItemInfo {
   /** Nextcloud-assigned name used as restore key (e.g. "photo.jpg.d1712860391") */
   name: string;

@@ -71,6 +71,17 @@ const envSchema = z.object({
 
   // --- Nextcloud (single file storage backend) ---
   NEXTCLOUD_URL: z.string().default("http://localhost:8080"),
+
+  // WARP-883 (ADR-027 WS-5) — name of the shared "Household" group folder
+  // (Nextcloud `groupfolders` app). The groupfolders app mounts this folder
+  // into every member's Nextcloud home as a top-level directory, so the
+  // dashboard's "Shared" space is simply this well-known path prefix browsed
+  // with the user's OWN WebDAV token — no separate account or WebDAV root.
+  // The provisioning hook (docker/nextcloud-init.sh) creates the group folder
+  // under this exact name and the files route hides it from the My-Files root
+  // so it isn't shown twice. Deliberately NOT a `MATTER_*` var (no matter.js
+  // collision); plain string, default "Household".
+  DROPLET_SHARED_FOLDER_NAME: z.string().min(1).default("Household"),
   // WARP-580 — auth is FAIL-CLOSED. The default is `true`; the only way to run
   // with auth off is an EXPLICIT `AUTH_ENABLED=false` AND a non-production
   // NODE_ENV (see resolveAuthEnabled below). A bare/missing var, or `=false`
