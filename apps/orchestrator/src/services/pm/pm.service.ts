@@ -230,6 +230,18 @@ function deriveIdentifier(name: string): string {
   return base.length > 0 ? base : "PROJ";
 }
 
+/** Structural check for a Prisma known-request error code (`P2002` unique,
+ *  `P2025` record-not-found, `P2003` FK violation). Matches both the real
+ *  `PrismaClientKnownRequestError` and the test stand-ins the repo uses
+ *  (`name === "PrismaClientKnownRequestError"` + a string `code`) — see
+ *  middleware/error-handler.ts. Lets a check-then-write helper map the race a
+ *  concurrent mutation opens (between the read and the write) onto the same
+ *  typed string error the happy path throws, so the route layer returns the
+ *  correct HTTP status instead of leaking a raw 500. */
+function isPrismaCode(err: unknown, code: "P2002" | "P2025" | "P2003"): boolean {
+  return typeof err === "object" && err !== null && (err as { code?: unknown }).code === code;
+}
+
 async function writeActivity(
   db: Db,
   input: {
@@ -346,28 +358,38 @@ export async function createProject(
     identifier = `${base}${n}`;
   }
 
-  const created = await prisma.pmProject.create({
-    data: {
-      workspaceId: workspace.id,
-      name: input.name,
-      identifier,
-      description: input.description ?? null,
-      icon: input.icon ?? null,
-      color: input.color ?? null,
-      createdById: actorId,
-      states: {
-        create: DEFAULT_STATES.map((s) => ({
-          name: s.name,
-          group: s.group,
-          color: s.color,
-          sortOrder: s.sortOrder,
-          isDefault: s.isDefault,
-        })),
+  // The uniqueness loop above and this create are not one transaction, so two
+  // concurrent creates can both pass the loop and race to insert the same
+  // (workspaceId, identifier). The loser hits the unique constraint → Prisma
+  // P2002; map it to the same identifier_taken (→409) the explicit-clash path
+  // throws, rather than leaking a raw 500 (review finding: createProject race).
+  try {
+    const created = await prisma.pmProject.create({
+      data: {
+        workspaceId: workspace.id,
+        name: input.name,
+        identifier,
+        description: input.description ?? null,
+        icon: input.icon ?? null,
+        color: input.color ?? null,
+        createdById: actorId,
+        states: {
+          create: DEFAULT_STATES.map((s) => ({
+            name: s.name,
+            group: s.group,
+            color: s.color,
+            sortOrder: s.sortOrder,
+            isDefault: s.isDefault,
+          })),
+        },
       },
-    },
-    include: { workspace: true },
-  });
-  return mapProject(created);
+      include: { workspace: true },
+    });
+    return mapProject(created);
+  } catch (err) {
+    if (isPrismaCode(err, "P2002")) throw new Error("identifier_taken");
+    throw err;
+  }
 }
 
 export async function updateProject(
@@ -402,7 +424,15 @@ export async function updateProject(
 export async function deleteProject(prisma: PrismaClient, projectId: string): Promise<void> {
   const existing = await prisma.pmProject.findUnique({ where: { id: projectId } });
   if (!existing) throw new Error("project_not_found");
-  await prisma.pmProject.delete({ where: { id: projectId } });
+  // findUnique + delete is two round-trips: a concurrent delete between them
+  // makes this delete throw Prisma P2025. Map it to the same 404 the existence
+  // check would have raised (review finding: delete-helper TOCTOU → P2025).
+  try {
+    await prisma.pmProject.delete({ where: { id: projectId } });
+  } catch (err) {
+    if (isPrismaCode(err, "P2025")) throw new Error("project_not_found");
+    throw err;
+  }
 }
 
 // ── States ───────────────────────────────────────────────────────────────────
@@ -448,7 +478,24 @@ export async function updateState(
 export async function deleteState(prisma: PrismaClient, stateId: string): Promise<void> {
   const existing = await prisma.pmState.findUnique({ where: { id: stateId } });
   if (!existing) throw new Error("state_not_found");
-  await prisma.pmState.delete({ where: { id: stateId } });
+  // A project must always retain at least one state, and never lose its sole
+  // default landing state — otherwise createWorkItem's fallback chain finds no
+  // default and no states, silently setting stateId=null on every new item and
+  // destroying the kanban board (review finding: deleteState last/default).
+  const siblings = await prisma.pmState.count({ where: { projectId: existing.projectId } });
+  if (siblings <= 1) throw new Error("state_is_last");
+  if (existing.isDefault) {
+    const otherDefaults = await prisma.pmState.count({
+      where: { projectId: existing.projectId, isDefault: true, id: { not: stateId } },
+    });
+    if (otherDefaults === 0) throw new Error("state_is_default");
+  }
+  try {
+    await prisma.pmState.delete({ where: { id: stateId } });
+  } catch (err) {
+    if (isPrismaCode(err, "P2025")) throw new Error("state_not_found");
+    throw err;
+  }
 }
 
 // ── Labels ───────────────────────────────────────────────────────────────────
@@ -485,7 +532,12 @@ export async function updateLabel(
 export async function deleteLabel(prisma: PrismaClient, labelId: string): Promise<void> {
   const existing = await prisma.pmLabel.findUnique({ where: { id: labelId } });
   if (!existing) throw new Error("label_not_found");
-  await prisma.pmLabel.delete({ where: { id: labelId } });
+  try {
+    await prisma.pmLabel.delete({ where: { id: labelId } });
+  } catch (err) {
+    if (isPrismaCode(err, "P2025")) throw new Error("label_not_found");
+    throw err;
+  }
 }
 
 // ── Work items ───────────────────────────────────────────────────────────────
@@ -607,40 +659,51 @@ export async function createWorkItem(
       ? new Date()
       : null;
 
-  const created = await prisma.$transaction(async (tx) => {
-    // Bump the per-project counter atomically → the work item's number.
-    const bumped = await tx.pmProject.update({
-      where: { id: projectId },
-      data: { seqCounter: { increment: 1 } },
-      select: { seqCounter: true },
-    });
-    const sequenceId = bumped.seqCounter;
+  let created;
+  try {
+    created = await prisma.$transaction(async (tx) => {
+      // Bump the per-project counter atomically → the work item's number.
+      const bumped = await tx.pmProject.update({
+        where: { id: projectId },
+        data: { seqCounter: { increment: 1 } },
+        select: { seqCounter: true },
+      });
+      const sequenceId = bumped.seqCounter;
 
-    const item = await tx.pmWorkItem.create({
-      data: {
-        projectId,
-        sequenceId,
-        name: input.name,
-        descriptionHtml: input.descriptionHtml ?? null,
-        stateId,
-        priority: input.priority ?? "none",
-        parentId: input.parentId ?? null,
-        createdById: actorId,
-        startDate: input.startDate ?? null,
-        dueDate: input.dueDate ?? null,
-        sortOrder: sequenceId,
-        completedAt: initialCompletedAt,
-        assignees: input.assignees?.length
-          ? { create: input.assignees.map((userId) => ({ userId })) }
-          : undefined,
-        labels: input.labelIds?.length
-          ? { create: input.labelIds.map((labelId) => ({ labelId })) }
-          : undefined,
-      },
+      const item = await tx.pmWorkItem.create({
+        data: {
+          projectId,
+          sequenceId,
+          name: input.name,
+          descriptionHtml: input.descriptionHtml ?? null,
+          stateId,
+          priority: input.priority ?? "none",
+          parentId: input.parentId ?? null,
+          createdById: actorId,
+          startDate: input.startDate ?? null,
+          dueDate: input.dueDate ?? null,
+          sortOrder: sequenceId,
+          completedAt: initialCompletedAt,
+          assignees: input.assignees?.length
+            ? { create: input.assignees.map((userId) => ({ userId })) }
+            : undefined,
+          labels: input.labelIds?.length
+            ? { create: input.labelIds.map((labelId) => ({ labelId })) }
+            : undefined,
+        },
+      });
+      await writeActivity(tx, { workItemId: item.id, actorId, verb: "created" });
+      return item;
     });
-    await writeActivity(tx, { workItemId: item.id, actorId, verb: "created" });
-    return item;
-  });
+  } catch (err) {
+    // The parent existence check above runs before this transaction; if the
+    // parent (or a referenced state/label) is deleted in the window between the
+    // check and the insert, the FK constraint fails → Prisma P2003. Surface it
+    // as invalid_parent (→422) rather than a raw 500 (review finding: parent FK
+    // race → P2003).
+    if (isPrismaCode(err, "P2003")) throw new Error("invalid_parent");
+    throw err;
+  }
 
   return loadWorkItem(prisma, created.id, project.identifier);
 }
@@ -765,6 +828,19 @@ export async function updateWorkItem(
         newValue: fields.priority,
       });
     }
+    // Compare a supplied set field against the existing set, order-independent,
+    // so an identity PATCH (re-sending the same assignees/labels — common when
+    // the dashboard or an agent submits the full work item on every save) does
+    // not write a spurious `updated` activity row (review finding: scalarChanged
+    // fires on assignees/labelIds presence alone).
+    const setChanged = (next: string[] | undefined, current: string[]): boolean => {
+      if (next === undefined) return false;
+      if (next.length !== current.length) return true;
+      const have = new Set(current);
+      return next.some((v) => !have.has(v));
+    };
+    const existingAssignees = existing.assignees.map((a) => a.userId);
+    const existingLabelIds = existing.labels.map((l) => l.labelId);
     const scalarChanged =
       (fields.name !== undefined && fields.name !== existing.name) ||
       (fields.descriptionHtml !== undefined && fields.descriptionHtml !== existing.descriptionHtml) ||
@@ -772,8 +848,8 @@ export async function updateWorkItem(
         fields.dueDate?.toISOString() !== existing.dueDate?.toISOString()) ||
       (fields.startDate !== undefined &&
         fields.startDate?.toISOString() !== existing.startDate?.toISOString()) ||
-      fields.assignees !== undefined ||
-      fields.labelIds !== undefined;
+      setChanged(fields.assignees, existingAssignees) ||
+      setChanged(fields.labelIds, existingLabelIds);
     if (scalarChanged) {
       await writeActivity(tx, { workItemId: id, actorId, verb: "updated", field: "fields" });
     }
@@ -794,7 +870,12 @@ export async function transitionWorkItem(
 export async function deleteWorkItem(prisma: PrismaClient, id: string): Promise<void> {
   const existing = await prisma.pmWorkItem.findUnique({ where: { id } });
   if (!existing) throw new Error("work_item_not_found");
-  await prisma.pmWorkItem.delete({ where: { id } });
+  try {
+    await prisma.pmWorkItem.delete({ where: { id } });
+  } catch (err) {
+    if (isPrismaCode(err, "P2025")) throw new Error("work_item_not_found");
+    throw err;
+  }
 }
 
 // ── Comments ─────────────────────────────────────────────────────────────────
