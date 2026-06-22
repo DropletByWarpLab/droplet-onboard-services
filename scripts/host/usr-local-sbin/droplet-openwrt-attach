@@ -627,6 +627,12 @@ docker exec -i \
     gif="${GUEST_IFACE:-wlp14s0_g}"
     lansec=$(uci show firewall 2>/dev/null | grep "\.name=.lan." | head -1 | cut -d. -f2)
 
+    # Remove static image-overlay sections that share the same fw4 zone name;
+    # the dynamic droplet_guest* sections below are the canonical source.
+    for s in guest_zone guest_to_wan guest_dhcp guest_dns; do
+      uci -q delete "firewall.$s" 2>/dev/null
+    done
+
     # Teardown when guest is off: delete every guest section, then reload.
     if [ "${GUEST_ENABLED:-0}" != 1 ]; then
       for s in droplet_guest droplet_guest_fwd droplet_guest_masq droplet_guest_dhcp droplet_guest_dns; do
@@ -1117,12 +1123,13 @@ HOSTAPDWD
     ip link set "$GUEST_IFACE" up 2>/dev/null
     ip addr show "$GUEST_IFACE" 2>/dev/null | grep -q "${GUEST_GW}" || \
       ip addr add "${GUEST_GW}/24" dev "$GUEST_IFACE" 2>/dev/null
+    GUEST_NET=$(echo "$GUEST_GW" | cut -d. -f1-3)
 
     cat > /etc/dnsmasq-guest.conf.new <<DNSMASQGUEST
 interface=$GUEST_IFACE
 bind-interfaces
 dhcp-leasefile=/tmp/dhcp-guest.leases
-dhcp-range=192.168.30.10,192.168.30.100,255.255.255.0,12h
+dhcp-range=${GUEST_NET}.10,${GUEST_NET}.100,255.255.255.0,12h
 dhcp-option=3,$GUEST_GW
 dhcp-option=6,$GUEST_GW
 server=8.8.8.8

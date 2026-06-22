@@ -42,20 +42,24 @@ class TestFirewallApiUpnp:
         router.uci.get.side_effect = UbusError(-1, "uci entry not found")
         assert FirewallApi(router).upnp_status() == {"available": False, "enabled": False}
 
-    def test_set_writes_both_flags_and_commits(self) -> None:
+    def test_set_writes_both_flags_and_applies(self) -> None:
         router = MagicMock()
         FirewallApi(router).set_upnp(True)
         cfg, section, values = router.uci.set.call_args.args
         assert cfg == "upnpd" and section == "config"
         assert values == {"enable_upnp": "1", "enable_natpmp": "1"}
-        router.uci.commit.assert_called_with("upnpd")
+        # uci.apply (not commit + exec_service) — droplet-ai ACL denies file.exec
+        router.uci.apply.assert_called_once_with(timeout=5, rollback=False)
+        router.uci.commit.assert_not_called()
+        router.exec_service.assert_not_called()
 
-    def test_set_restarts_miniupnpd_not_firewall(self) -> None:
-        # The uci write only takes effect once the OWNING daemon re-reads it; a
-        # firewall reload would be a silent no-op on the running system.
+    def test_set_applies_not_exec_service(self) -> None:
+        # uci.apply triggers ucitrack to reload miniupnpd; exec_service maps to
+        # file.exec which the droplet-ai rpcd ACL does not grant.
         router = MagicMock()
         FirewallApi(router).set_upnp(True)
-        router.exec_service.assert_called_once_with("miniupnpd", "restart")
+        router.uci.apply.assert_called_once_with(timeout=5, rollback=False)
+        router.exec_service.assert_not_called()
 
     def test_set_disable_writes_zeros(self) -> None:
         router = MagicMock()

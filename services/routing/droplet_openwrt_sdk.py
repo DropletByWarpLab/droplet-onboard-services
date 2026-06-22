@@ -1201,11 +1201,10 @@ class FirewallApi:
         """
         flag = "1" if enabled else "0"
         self._r.uci.set("upnpd", "config", {"enable_upnp": flag, "enable_natpmp": flag})
-        self._r.uci.commit("upnpd")
-        # Restart the OWNING daemon — a firewall reload does NOT make the running
-        # miniupnpd re-read /etc/config/upnpd, so the toggle would be a silent
-        # no-op on the live system. Mirrors DHCPApi.reload restarting dnsmasq.
-        self._r.exec_service("miniupnpd", "restart")
+        # uci.apply commits the pending change and triggers ucitrack to reload
+        # miniupnpd — exec_service("miniupnpd","restart") maps to file.exec which
+        # the droplet-ai ACL does not grant.
+        self._r.uci.apply(timeout=5, rollback=False)
 
     def block_device(self, mac: str, name: Optional[str] = None):
         """Block a device (by MAC address) from accessing the internet."""
