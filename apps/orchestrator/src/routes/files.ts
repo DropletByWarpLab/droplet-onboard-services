@@ -358,7 +358,10 @@ export function createFilesRouter(prisma: PrismaClient): Router {
           ? { id }
           : { id, authorUserId: requesterId(req) };
         await prisma.fileComment.deleteMany({ where });
-        safePublish(`droplet/files/comment-deleted`, {
+        // Topic carries the {user} segment so the WS bridge forwards it
+        // (it subscribes to `droplet/files/{user}/#`); useFileRealtime then
+        // does its blanket `/api/files`-prefix SWR invalidation.
+        safePublish(`droplet/files/${getUser(req)}/comment-deleted`, {
           id,
           ncFileId: row.ncFileId,
         });
@@ -414,7 +417,9 @@ export function createFilesRouter(prisma: PrismaClient): Router {
             body: parsed.data.body,
           },
         });
-        safePublish(`droplet/files/comment-added`, {
+        // {user} segment so the WS bridge (droplet/files/{user}/#) forwards
+        // it → useFileRealtime invalidates the file SWR caches.
+        safePublish(`droplet/files/${getUser(req)}/comment-added`, {
           id: comment.id,
           ncFileId: fileId,
           authorUserId: comment.authorUserId,
@@ -474,7 +479,7 @@ export function createFilesRouter(prisma: PrismaClient): Router {
           // provenance (addedByUserId/createdAt) must NOT be overwritten.
           update: {},
         });
-        safePublish(`droplet/files/tag-added`, {
+        safePublish(`droplet/files/${getUser(req)}/tag-added`, {
           ncFileId: fileId,
           label: tag.label,
         });
@@ -495,7 +500,10 @@ export function createFilesRouter(prisma: PrismaClient): Router {
         if (fileId === null) return;
         const label = req.params.label;
         await prisma.fileTag.deleteMany({ where: { ncFileId: fileId, label } });
-        safePublish(`droplet/files/tag-removed`, { ncFileId: fileId, label });
+        safePublish(`droplet/files/${getUser(req)}/tag-removed`, {
+          ncFileId: fileId,
+          label,
+        });
         res.status(204).end();
       } catch (err) {
         handleFileError(err, res, next);
