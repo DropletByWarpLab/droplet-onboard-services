@@ -1,7 +1,5 @@
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
-
-import { listWorkItems, PlaneApiError } from "./pm-client.js";
-import { ensurePlaneToken } from "./ensure-token.js";
+import { callOrch, OrchPmError, toPlaneWorkItem } from "./pm-orch.js";
 
 const inputSchema = {
   type: "object",
@@ -25,24 +23,28 @@ interface Args {
 }
 
 async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-  // WARP-867: inject the orchestrator-minted Plane service token before
-  // the first /api/v1/ call (DROPLET_PM_ADMIN_TOKEN was never valid).
-  await ensurePlaneToken(ctx);
-  const { workspace_slug, project_id, state, assignee, per_page } = args as unknown as Args;
+  const { project_id, state, assignee, per_page } = args as unknown as Args;
+  const params = new URLSearchParams();
+  if (state) params.set("state", state);
+  if (assignee) params.set("assignee", assignee);
+  if (per_page) params.set("per_page", String(per_page));
+  const qs = params.toString();
   try {
-    const work_items = await listWorkItems(workspace_slug, project_id, {
-      perPage: per_page,
-      state,
-      assignee,
-    });
-    return { ok: true, data: { work_items } };
+    const data = await callOrch<{ work_items?: Parameters<typeof toPlaneWorkItem>[0][] }>(
+      ctx,
+      "get",
+      `/api/pm/projects/${encodeURIComponent(project_id)}/work-items${qs ? `?${qs}` : ""}`,
+    );
+    return { ok: true, data: { work_items: (data.work_items ?? []).map(toPlaneWorkItem) } };
   } catch (err) {
-    if (err instanceof PlaneApiError) {
-      return {
-        ok: false,
-        status: "error",
-        error: { code: "PM_API_ERROR", message: err.message },
-      };
+    if (err instanceof OrchPmError) {
+      const code =
+        err.status === 404 && err.message !== "project_not_found"
+          ? "PM_WORK_ITEM_NOT_FOUND"
+          : err.status === 404
+          ? "PM_PROJECT_NOT_FOUND"
+          : "PM_API_ERROR";
+      return { ok: false, status: "error", error: { code, message: err.message } };
     }
     throw err;
   }
@@ -51,7 +53,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "pm_list_work_items",
   description:
-    "List work items (Plane's name for issues/tickets) under a project. Optional filters on state and assignee. Page size capped at 100. Read-only.",
+    "List work items (issues/tickets) under a project. Optional filters on state and assignee. Page size capped at 100. Read-only.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

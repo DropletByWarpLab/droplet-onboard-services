@@ -1,7 +1,5 @@
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
-
-import { transitionWorkItem, PlaneApiError } from "./pm-client.js";
-import { ensurePlaneToken } from "./ensure-token.js";
+import { callOrch, OrchPmError, toPlaneWorkItem } from "./pm-orch.js";
 
 const inputSchema = {
   type: "object",
@@ -23,26 +21,19 @@ interface Args {
 }
 
 async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-  // WARP-867: inject the orchestrator-minted Plane service token before
-  // the first /api/v1/ call (DROPLET_PM_ADMIN_TOKEN was never valid).
-  await ensurePlaneToken(ctx);
-  const { workspace_slug, project_id, work_item_id, state_id } = args as unknown as Args;
+  const { work_item_id, state_id } = args as unknown as Args;
   try {
-    const work_item = await transitionWorkItem(
-      workspace_slug,
-      project_id,
-      work_item_id,
-      state_id,
+    const data = await callOrch<{ work_item: Parameters<typeof toPlaneWorkItem>[0] }>(
+      ctx,
+      "post",
+      `/api/pm/work-items/${encodeURIComponent(work_item_id)}/transition`,
+      { state_id },
     );
-    return { ok: true, data: { work_item } };
+    return { ok: true, data: { work_item: toPlaneWorkItem(data.work_item) } };
   } catch (err) {
-    if (err instanceof PlaneApiError) {
+    if (err instanceof OrchPmError) {
       const code = err.status === 404 ? "PM_WORK_ITEM_NOT_FOUND" : "PM_API_ERROR";
-      return {
-        ok: false,
-        status: "error",
-        error: { code, message: err.message },
-      };
+      return { ok: false, status: "error", error: { code, message: err.message } };
     }
     throw err;
   }
@@ -51,7 +42,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "pm_transition_work_item",
   description:
-    "Transition a Plane work item to a different state (e.g. in_progress → done). Requires confirmation. Returns the updated work item.",
+    "Transition a work item to a different state (e.g. in_progress → done). Requires confirmation. Returns the updated work item.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

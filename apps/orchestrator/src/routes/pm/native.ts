@@ -177,9 +177,11 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
   // ── Projects ──
   router.get("/pm/projects", async (req, res, next) => {
     try {
+      const perPage = req.query.per_page ? Number(req.query.per_page) : undefined;
       const projects = await pm.listProjects(prisma, {
         workspaceSlug: req.query.workspace ? String(req.query.workspace) : undefined,
         includeArchived: req.query.archived === "1" || req.query.archived === "true",
+        perPage,
       });
       res.json({ projects });
     } catch (err) {
@@ -379,6 +381,21 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
       }
     },
   );
+
+  // Workspace-wide search (backs pm_search_work_items). Registered before the
+  // /:id route — distinct path, no conflict.
+  router.get("/pm/work-items", async (req, res, next) => {
+    try {
+      const work_items = await pm.searchWorkItems(prisma, {
+        workspaceSlug: req.query.workspace ? String(req.query.workspace) : undefined,
+        q: req.query.q ? String(req.query.q) : "",
+        perPage: req.query.per_page ? Number(req.query.per_page) : undefined,
+      });
+      res.json({ work_items });
+    } catch (err) {
+      next(err);
+    }
+  });
 
   router.get("/pm/work-items/:id", async (req, res, next) => {
     try {
