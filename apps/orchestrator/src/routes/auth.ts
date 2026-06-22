@@ -755,7 +755,17 @@ export function createPublicAuthRouter(
         },
       });
 
-      await ncInstallAndCreateAdmin(username, password, displayName);
+      // WARP-883: the owner must join the household group too, otherwise the
+      // shared "Household" groupfolder never mounts for the primary user and
+      // GET /api/files/spaces reports sharedAvailable:false for them (the
+      // SpaceSwitcher never appears). buildNcGroups preserves the owner's
+      // existing "admin" group and appends the household group without
+      // duplication — same helper the invite-accept path uses.
+      const ownerGroups = buildNcGroups(
+        "owner",
+        householdGroupName(config.DROPLET_SHARED_FOLDER_NAME),
+      );
+      await ncInstallAndCreateAdmin(username, password, displayName, ownerGroups);
       logger.info({ username }, "Initial admin user created");
 
       res.json({ status: "ok", username });

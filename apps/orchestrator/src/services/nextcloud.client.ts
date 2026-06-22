@@ -291,7 +291,13 @@ export async function ncCheckSetupRequired(): Promise<boolean> {
 export async function ncInstallAndCreateAdmin(
   username: string,
   password: string,
-  displayName?: string
+  displayName?: string,
+  // WARP-883: the groups the owner joins at create time. Defaults to the
+  // pre-WARP-883 behaviour (the Nextcloud "admin" group only). Callers now pass
+  // the household group alongside "admin" so the shared "Household" groupfolder
+  // mounts for the primary owner — without it the owner is in NEITHER the
+  // literal "admin" nor the household group and the shared space never appears.
+  groups: string[] = ["admin"]
 ): Promise<void> {
   // Nextcloud must be installed before we can use the OCS API.
   // The container creates a default admin account (NEXTCLOUD_ADMIN_USER / NEXTCLOUD_ADMIN_PASSWORD).
@@ -355,7 +361,9 @@ export async function ncInstallAndCreateAdmin(
         ["userid", username],
         ["password", password],
         ["displayName", displayName || username],
-        ["groups[]", "admin"],
+        // OCS accepts repeated `groups[]` form fields; emit one per group so the
+        // owner joins both the "admin" role group AND the household group.
+        ...groups.map((g): [string, string] => ["groups[]", g]),
       ]),
     });
 

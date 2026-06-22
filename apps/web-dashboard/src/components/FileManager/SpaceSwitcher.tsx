@@ -52,7 +52,11 @@ export function SpaceSwitcher({ spaces, active, onChange }: SpaceSwitcherProps) 
                 : "text-label-secondary hover:text-label-primary"
             }`}
           >
-            <Icon size={14} className={isActive ? "text-accent" : "text-label-tertiary"} />
+            <Icon
+              size={14}
+              aria-hidden="true"
+              className={isActive ? "text-accent" : "text-label-tertiary"}
+            />
             {space.name}
           </button>
         );

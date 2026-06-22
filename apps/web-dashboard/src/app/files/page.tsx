@@ -94,6 +94,24 @@ export default function FilesPage() {
   // the CLI, or native clients show up immediately — no polling.
   useFileRealtime();
 
+  // WARP-883 (WS-1 fast-follow) — shares already on the file being shared, so
+  // the ShareDialog lists pre-existing links (not just session-created ones).
+  //
+  // NOTE: this useCallback MUST be declared ABOVE the useEffect that depends on
+  // it. The effect's dependency array `[shareFile, loadExistingShares]` is read
+  // during render; if the `const loadExistingShares` were declared later, the
+  // page would throw a temporal-dead-zone ReferenceError on first render and
+  // white-screen the whole Files surface (QA finding, WARP-883).
+  const [existingShares, setExistingShares] = useState<ShareDetail[]>([]);
+  const loadExistingShares = useCallback(async (filePath: string) => {
+    try {
+      setExistingShares(await fetchShares(filePath));
+    } catch {
+      // Non-fatal — the dialog still works for creating new links.
+      setExistingShares([]);
+    }
+  }, []);
+
   // WARP-883 (WS-1 fast-follow) — load the shares already on a file the moment
   // the share dialog opens for it, so the dialog shows pre-existing links.
   useEffect(() => {
@@ -115,17 +133,6 @@ export default function FilesPage() {
     [space, fm]
   );
 
-  // WARP-883 (WS-1 fast-follow) — shares already on the file being shared, so
-  // the ShareDialog lists pre-existing links (not just session-created ones).
-  const [existingShares, setExistingShares] = useState<ShareDetail[]>([]);
-  const loadExistingShares = useCallback(async (filePath: string) => {
-    try {
-      setExistingShares(await fetchShares(filePath));
-    } catch {
-      // Non-fatal — the dialog still works for creating new links.
-      setExistingShares([]);
-    }
-  }, []);
   const { items: favoriteItems, refresh: refreshFavorites } = useFavorites();
   const favoritedPaths = useMemo(
     () => new Set(favoriteItems.map((f) => f.path)),
