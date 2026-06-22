@@ -36,7 +36,7 @@
  * gRPC, or the network.
  */
 import * as forge from "node-forge";
-import type { DeviceIdentityClient } from "./device-identity.client.js";
+import type { DeviceIdentityClient, DeviceIdentityStatus } from "./device-identity.client.js";
 
 /** The exact bytes signed by the device TPM key, per the issuance contract:
  *  `droplet-cert:v1:<nonce>:<key_fingerprint>:<public_label>`. */
@@ -556,7 +556,19 @@ export function createTlsIssuanceService(
           );
           return;
         }
-        const idStatus = await identity.getDeviceIdentityStatus();
+        let idStatus: DeviceIdentityStatus;
+        try {
+          idStatus = await identity.getDeviceIdentityStatus();
+        } catch (err) {
+          if (isTransientNetworkError(err)) {
+            logger.info(
+              {},
+              "tls-issuance: device-identity sidecar unreachable on zero-touch provisioning check — will retry on next tick",
+            );
+            return;
+          }
+          throw err;
+        }
         if (!idStatus.provisioned) {
           logger.info(
             {},
@@ -627,7 +639,7 @@ export function createTlsIssuanceService(
         if (learnedFqdn) {
           await store.upsert(learnedFqdn, "LE_ISSUED", notAfter);
           if (seed && seed !== learnedFqdn) {
-            await store.upsert(seed, "LE_ISSUED", notAfter);
+            await store.upsert(seed, "BOOTSTRAP_SELF_SIGNED", null);
           }
         } else {
           logger.warn(

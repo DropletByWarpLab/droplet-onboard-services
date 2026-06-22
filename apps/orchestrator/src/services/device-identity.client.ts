@@ -113,7 +113,7 @@ function callUnary<Req, Res>(
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
-      reject(new Error(`gRPC call timed out after ${deadlineMs}ms`));
+      reject(Object.assign(new Error(`gRPC call timed out after ${deadlineMs}ms`), { code: "ETIMEDOUT" }));
     }, deadlineMs);
     if (typeof timer.unref === "function") timer.unref();
 

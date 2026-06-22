@@ -2150,6 +2150,8 @@ def _valid_public_fqdn(fqdn):
         return True
     # Conservative fallback: lowercase letters/digits/dot/hyphen only, and it
     # must look like a dotted hostname (no leading/trailing dot or hyphen).
+    if any(c in fqdn for c in (' ', '\n', '\r', '\t')):
+        return False
     if not _PUBLIC_FQDN_CONSERVATIVE_RE.match(fqdn):
         return False
     if fqdn[0] in ".-" or fqdn[-1] in ".-":
@@ -2491,7 +2493,7 @@ class Handler(BaseHTTPRequestHandler):
             # host script is ever invoked; a junk fqdn is a 400, never an exec.
             if not self._authed():
                 return self._send(401, {"ok": False, "error": "unauthorized"})
-            n = min(int(self.headers.get("Content-Length") or 0), 4096)
+            n = min(max(int(self.headers.get("Content-Length") or 0), 0), 4096)
             raw = self.rfile.read(n).decode() if n else ""
             try:
                 j = json.loads(raw) if raw else {}

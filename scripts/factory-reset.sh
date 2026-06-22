@@ -254,14 +254,14 @@ if [ -n "$_DEREGISTER_FQDN" ] || [ -n "$_DEREGISTER_DEVICE_ID" ]; then
   #    a signed DELETE for device_id="droplet" to HQ. `_DEREGISTER_REAL_DEVICE_ID`
   #    is non-empty only when .env carries a genuine, non-default id. The inner
   #    `deregisterFromHq` provisioning guard is the suspender to this belt.
-  _hq_url="${HQ_ISSUANCE_URL:-}"
+  _hq_url="${HQ_ISSUANCE_URL:-$(grep -E '^HQ_ISSUANCE_URL=' "$REPO_ROOT/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' || true)}"
   _DEREGISTER_REAL_DEVICE_ID=""
   if [ -n "$_DEREGISTER_DEVICE_ID" ] && [ "$_DEREGISTER_DEVICE_ID" != "droplet" ]; then
     _DEREGISTER_REAL_DEVICE_ID="$_DEREGISTER_DEVICE_ID"
   fi
   if [ -n "$_hq_url" ] && [ -n "$_DEREGISTER_REAL_DEVICE_ID" ]; then
-    _dereg_env_flag=""
-    [ -f "$REPO_ROOT/.env" ] && _dereg_env_flag="--env-file $REPO_ROOT/.env"
+    _dereg_env_flag_args=()
+    [ -f "$REPO_ROOT/.env" ] && _dereg_env_flag_args=(--env-file "$REPO_ROOT/.env")
     # Bound the whole exec with a shell `timeout` (re-establishing the bound the
     # old `curl --max-time 10` had): the `docker compose exec` has no shell-level
     # deadline, and the underlying gRPC calls to the device-identity sidecar can
@@ -269,7 +269,7 @@ if [ -n "$_DEREGISTER_FQDN" ] || [ -n "$_DEREGISTER_DEVICE_ID" ]; then
     # blocks forever here and never reaches Phase 1 `down -v`. A `timeout` exit
     # of 124 (deadline hit) is treated exactly like any other failure: log a warn
     # and PROCEED to the wipe. The whole step stays best-effort + NON-FATAL.
-    if timeout 90 $DC -f "$COMPOSE_FILE" ${_dereg_env_flag:+$_dereg_env_flag} exec -T orchestrator \
+    if timeout 90 $DC -f "$COMPOSE_FILE" "${_dereg_env_flag_args[@]}" exec -T orchestrator \
          npm run -s tls-deregister >/dev/null 2>&1; then
       log_success "Sent signed HQ deregistration for ${_DEREGISTER_REAL_DEVICE_ID}"
     else
