@@ -13,7 +13,12 @@
  * route layer maps to HTTP status (mirrors calendar.service.ts):
  *   workspace_not_found | project_not_found | state_not_found |
  *   label_not_found | work_item_not_found | comment_not_found |
- *   identifier_taken | invalid_parent
+ *   identifier_taken | invalid_parent | invalid_state
+ *
+ * Cross-project link guards (ADR-026 P2): a work item may only reference a
+ * parent/state that belongs to its own project. A referenced row that exists
+ * but lives in another project throws invalid_parent / invalid_state (→ 422),
+ * distinct from a row that does not exist at all (→ *_not_found, 404).
  */
 
 import type { Prisma, PrismaClient } from "@prisma/client";
@@ -230,7 +235,10 @@ async function writeActivity(
   input: {
     workItemId: string;
     actorId: string | null;
-    verb: string;
+    // PmActivity.verb is the PmActivityVerb enum (schema), so type the helper
+    // to the generated enum rather than a bare string — keeps the call sites
+    // honest and satisfies the Prisma create input.
+    verb: Prisma.PmActivityCreateManyInput["verb"];
     field?: string | null;
     oldValue?: string | null;
     newValue?: string | null;
@@ -561,6 +569,16 @@ export async function createWorkItem(
     if (!parent) throw new Error("invalid_parent");
   }
 
+  // An explicit state must belong to THIS project — mirror the parent guard so
+  // a work item can never reference a state from another project (review
+  // findings #4/#1). Missing id → state_not_found (404); wrong project →
+  // invalid_state (422).
+  if (input.stateId) {
+    const state = await prisma.pmState.findUnique({ where: { id: input.stateId } });
+    if (!state) throw new Error("state_not_found");
+    if (state.projectId !== projectId) throw new Error("invalid_state");
+  }
+
   // Landing state: explicit → isDefault → first by sortOrder → none.
   const stateId =
     input.stateId ??
@@ -636,13 +654,25 @@ export async function updateWorkItem(
     if (fields.stateId === null) {
       completedAt = null;
     } else {
-      const target = await prisma.pmState.findFirst({
-        where: { id: fields.stateId, projectId: existing.projectId },
-      });
+      // The target state must belong to THIS work item's project. Distinguish
+      // "no such state" (404) from "state belongs to another project" (422) so
+      // the cross-project guard mirrors the parent check's shape (findings
+      // #4/#2) rather than masking it as a generic not-found.
+      const target = await prisma.pmState.findUnique({ where: { id: fields.stateId } });
       if (!target) throw new Error("state_not_found");
+      if (target.projectId !== existing.projectId) throw new Error("invalid_state");
       completedAt =
         target.group === "completed" || target.group === "cancelled" ? new Date() : null;
     }
+  }
+
+  // A connected parent must live in the same project — mirror createWorkItem's
+  // guard so re-parenting can't cross a project boundary (findings #3/#1).
+  if (fields.parentId !== undefined && fields.parentId !== null) {
+    const parent = await prisma.pmWorkItem.findFirst({
+      where: { id: fields.parentId, projectId: existing.projectId },
+    });
+    if (!parent) throw new Error("invalid_parent");
   }
 
   await prisma.$transaction(async (tx) => {
