@@ -66,6 +66,8 @@ import type {
   VpnPeerCreatedInfo,
   DuckDnsStatus,
   ToolCatalogResponse,
+  DocsStatus,
+  DocEditorSession,
 } from "./types";
 import type {
   EmailAccount,
@@ -3543,6 +3545,46 @@ export async function fetchFiles(path: string): Promise<FileEntryInfo[]> {
 
 export function getDownloadUrl(path: string): string {
   return `${BASE}/api/files/download?path=${encodeURIComponent(path)}`;
+}
+
+// --- WARP-882: in-browser editing + co-authoring ---
+
+/**
+ * Document-server availability. Drives the gated "Edit" affordance — the button
+ * only renders when this returns `ready` AND the file is an editable Office MIME
+ * (no dead buttons). Cheap + ~10s-cached server-side.
+ */
+export async function getDocsStatus(): Promise<DocsStatus> {
+  const res = await authFetch(`${BASE}/api/files/docs/status`);
+  if (!res.ok) throw new Error(`docs status failed: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Open an editor session for a file. The orchestrator decides edit-vs-view
+ * SERVER-SIDE (owner / NC update permission); the client never asks for a mode.
+ * Throws on 401 (re-login), 503 (engine unavailable), 404 (file gone).
+ */
+export async function getEditorSession(path: string): Promise<DocEditorSession> {
+  const res = await authFetch(
+    `${BASE}/api/files/${path.split("/").filter(Boolean).map(encodeURIComponent).join("/")}/editor-session`,
+  );
+  if (!res.ok) {
+    // Read the body ONCE — a Response stream can't be consumed twice.
+    let detail = "";
+    try {
+      const body = await res.text();
+      try {
+        detail = JSON.parse(body)?.code ?? body;
+      } catch {
+        detail = body;
+      }
+    } catch {
+      /* body unavailable */
+    }
+    throw new Error(`editor session failed: ${res.status}${detail ? ` (${detail})` : ""}`);
+  }
+  return res.json();
 }
 
 export async function uploadFiles(

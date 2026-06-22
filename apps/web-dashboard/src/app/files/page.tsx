@@ -18,6 +18,7 @@ import { MoveCopyDialog } from "@/components/FileManager/MoveCopyDialog";
 import { VersionHistoryPanel } from "@/components/FileManager/VersionHistoryPanel";
 import { SearchBar } from "@/components/FileManager/SearchBar";
 import { PreviewPane } from "@/components/FileManager/PreviewPane";
+import { DocEditorPanel } from "@/components/FileManager/DocEditorPanel";
 import { ShareDialog } from "@/components/FileManager/ShareDialog";
 import { StarButton } from "@/components/FileManager/StarButton";
 import { Thumbnail } from "@/components/FileManager/Thumbnail";
@@ -62,6 +63,8 @@ export default function FilesPage() {
   const [newFolderName, setNewFolderName] = useState("");
   const [selectedFile, setSelectedFile] = useState<FileEntryInfo | null>(null);
   const [previewFile, setPreviewFile] = useState<FileEntryInfo | null>(null);
+  // WARP-882: the file currently open in the in-browser editor.
+  const [editorFile, setEditorFile] = useState<FileEntryInfo | null>(null);
   const [shareFile, setShareFile] = useState<FileEntryInfo | null>(null);
   const [contextMenu, setContextMenu] = useState<{
     x: number;
@@ -669,7 +672,17 @@ export default function FilesPage() {
           file={previewFile}
           onClose={() => setPreviewFile(null)}
           onDownload={() => handleDownload(previewFile.path)}
+          onEdit={() => {
+            // WARP-882: hand off from preview to the in-browser editor.
+            setEditorFile(previewFile);
+            setPreviewFile(null);
+          }}
         />
+      )}
+
+      {/* WARP-882: in-browser editor (OnlyOffice via the docserver engine) */}
+      {editorFile && (
+        <DocEditorPanel file={editorFile} onClose={() => setEditorFile(null)} />
       )}
 
       {/* Share dialog */}
