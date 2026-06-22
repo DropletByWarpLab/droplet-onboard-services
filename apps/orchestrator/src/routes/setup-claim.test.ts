@@ -68,9 +68,17 @@ vi.mock("../services/cache.service.js", () => {
 // service. In a unit test there's no router, and the real client would retry +
 // time out — simulate the single-box "router offline" path so the contract
 // falls back to its placeholder network spec deterministically.
-vi.mock("../services/openwrt.client.js", () => ({
-  fetchNetworkSummary: vi.fn().mockRejectedValue(new Error("router offline")),
-}));
+// Spread the real module so its other exports survive — returning only
+// fetchNetworkSummary drops the re-exported RouterError, which (under the
+// shared worker) poisons the module graph for every suite importing it.
+vi.mock("../services/openwrt.client.js", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../services/openwrt.client.js")>();
+  return {
+    ...actual,
+    fetchNetworkSummary: vi.fn().mockRejectedValue(new Error("router offline")),
+  };
+});
 
 import * as cacheService from "../services/cache.service.js";
 import { createSetupRouter } from "./setup.js";
