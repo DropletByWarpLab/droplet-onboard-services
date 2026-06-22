@@ -10,10 +10,7 @@ import { SafetyChip } from "./bits";
 import { PRIORITY_ORDER, PRIORITY } from "./config";
 import { pmActions, useProjectStates } from "./usePm";
 import type { PmProject, Priority } from "./types";
-
-function escapeHtml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
+import { escapeHtml } from "@/lib/escape-html";
 
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }): JSX.Element {
   return (
@@ -88,7 +85,9 @@ export function NewItemModal({
     try {
       await pmActions().createWorkItem(project.id, {
         name: name.trim(),
-        description_html: desc.trim() ? `<p>${escapeHtml(desc.trim())}</p>` : undefined,
+        description_html: desc.trim()
+          ? `<p>${escapeHtml(desc.trim()).split("\n").join("<br>")}</p>`
+          : undefined,
         state_id: stateId || undefined,
         priority,
         due_date: dueDate ? new Date(dueDate).toISOString() : undefined,

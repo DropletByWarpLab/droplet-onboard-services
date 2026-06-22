@@ -38,7 +38,12 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     return { ok: true, data: { work_items: (data.work_items ?? []).map(toPlaneWorkItem) } };
   } catch (err) {
     if (err instanceof OrchPmError) {
-      const code = err.status === 404 ? "PM_WORK_ITEM_NOT_FOUND" : "PM_API_ERROR";
+      const code =
+        err.status === 404 && err.message !== "project_not_found"
+          ? "PM_WORK_ITEM_NOT_FOUND"
+          : err.status === 404
+          ? "PM_PROJECT_NOT_FOUND"
+          : "PM_API_ERROR";
       return { ok: false, status: "error", error: { code, message: err.message } };
     }
     throw err;

@@ -13,10 +13,33 @@
  * route layer maps to HTTP status (mirrors calendar.service.ts):
  *   workspace_not_found | project_not_found | state_not_found |
  *   label_not_found | work_item_not_found | comment_not_found |
- *   identifier_taken | invalid_parent
+ *   identifier_taken | invalid_parent | invalid_state
+ *
+ * Cross-project link guards (ADR-026 P2): a work item may only reference a
+ * parent/state that belongs to its own project. A referenced row that exists
+ * but lives in another project throws invalid_parent / invalid_state (→ 422),
+ * distinct from a row that does not exist at all (→ *_not_found, 404).
  */
 
 import type { Prisma, PrismaClient } from "@prisma/client";
+import { sanitizePmHtml } from "./sanitize-html.js";
+
+// ── Stable error codes ────────────────────────────────────────────────────────
+// Shared so catch sites import the same string literals the throw sites emit;
+// a rename here produces a compile error on both sides.
+export const PM_ERRORS = {
+  WORKSPACE_NOT_FOUND: "workspace_not_found",
+  PROJECT_NOT_FOUND: "project_not_found",
+  STATE_NOT_FOUND: "state_not_found",
+  LABEL_NOT_FOUND: "label_not_found",
+  WORK_ITEM_NOT_FOUND: "work_item_not_found",
+  COMMENT_NOT_FOUND: "comment_not_found",
+  IDENTIFIER_TAKEN: "identifier_taken",
+  INVALID_PARENT: "invalid_parent",
+  INVALID_STATE: "invalid_state",
+  STATE_IS_LAST: "state_is_last",
+  STATE_IS_DEFAULT: "state_is_default",
+} as const;
 
 // ── Default workspace + state set ────────────────────────────────────────────
 
@@ -251,12 +274,27 @@ function deriveIdentifier(name: string): string {
   return base.length > 0 ? base : "PROJ";
 }
 
+/** Structural check for a Prisma known-request error code (`P2002` unique,
+ *  `P2025` record-not-found, `P2003` FK violation). Matches both the real
+ *  `PrismaClientKnownRequestError` and the test stand-ins the repo uses
+ *  (`name === "PrismaClientKnownRequestError"` + a string `code`) — see
+ *  middleware/error-handler.ts. Lets a check-then-write helper map the race a
+ *  concurrent mutation opens (between the read and the write) onto the same
+ *  typed string error the happy path throws, so the route layer returns the
+ *  correct HTTP status instead of leaking a raw 500. */
+function isPrismaCode(err: unknown, code: "P2002" | "P2025" | "P2003"): boolean {
+  return typeof err === "object" && err !== null && (err as { code?: unknown }).code === code;
+}
+
 async function writeActivity(
   db: Db,
   input: {
     workItemId: string;
     actorId: string | null;
-    verb: string;
+    // PmActivity.verb is the PmActivityVerb enum (schema), so type the helper
+    // to the generated enum rather than a bare string — keeps the call sites
+    // honest and satisfies the Prisma create input.
+    verb: Prisma.PmActivityCreateManyInput["verb"];
     field?: string | null;
     oldValue?: string | null;
     newValue?: string | null;
@@ -278,7 +316,7 @@ async function writeActivity(
  *  (shouldn't, inside the same request) — keeps the return type non-null. */
 async function loadWorkItem(db: Db, id: string, identifier: string): Promise<ApiWorkItem> {
   const row = await db.pmWorkItem.findUnique({ where: { id }, include: WORK_ITEM_INCLUDE });
-  if (!row) throw new Error("work_item_not_found");
+  if (!row) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
   return mapWorkItem(row, identifier);
 }
 
@@ -301,7 +339,7 @@ export async function listWorkspaces(prisma: PrismaClient): Promise<ApiWorkspace
 
 export async function getWorkspaceBySlug(prisma: PrismaClient, slug: string): Promise<ApiWorkspace> {
   const row = await prisma.pmWorkspace.findUnique({ where: { slug } });
-  if (!row) throw new Error("workspace_not_found");
+  if (!row) throw new Error(PM_ERRORS.WORKSPACE_NOT_FOUND);
   return mapWorkspace(row);
 }
 
@@ -309,15 +347,18 @@ export async function getWorkspaceBySlug(prisma: PrismaClient, slug: string): Pr
 
 export async function listProjects(
   prisma: PrismaClient,
-  opts: { workspaceSlug?: string; includeArchived?: boolean } = {},
+  opts: { workspaceSlug?: string; includeArchived?: boolean; perPage?: number } = {},
 ): Promise<ApiProject[]> {
   const where: Prisma.PmProjectWhereInput = {};
   if (opts.workspaceSlug) where.workspace = { slug: opts.workspaceSlug };
   if (!opts.includeArchived) where.archivedAt = null;
+  const take =
+    opts.perPage !== undefined ? Math.max(1, Math.min(200, opts.perPage)) : undefined;
   const rows = await prisma.pmProject.findMany({
     where,
     include: { workspace: true },
     orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+    ...(take !== undefined ? { take } : {}),
   });
   const projects = rows.map(mapProject);
 
@@ -332,9 +373,11 @@ export async function listProjects(
     for (const p of projects) byProject.set(p.id, EMPTY_GROUPS());
     for (const it of items) {
       const g = it.state?.group;
-      if (!g) continue;
       const acc = byProject.get(it.projectId);
-      if (acc) acc[g] += 1;
+      if (!acc) continue;
+      // Items with no state are open but uncategorised — count as unstarted so
+      // they appear in openCount and the sparkline rather than vanishing silently.
+      acc[g ?? "unstarted"] += 1;
     }
     for (const p of projects) {
       const g = byProject.get(p.id) ?? EMPTY_GROUPS();
@@ -370,12 +413,15 @@ export async function getSummary(
   let overdue = 0;
   for (const it of items) {
     const g = it.state?.group;
-    const open = g === "backlog" || g === "unstarted" || g === "started";
+    // Stateless items are uncategorised-but-open (mirrors listProjects bucketing
+    // them as "unstarted"); count them in itemsOpen so the KPI strip isn't
+    // understated, not silently dropped (finding #5).
+    const open = g === undefined || g === "backlog" || g === "unstarted" || g === "started";
     if (open) {
       itemsOpen += 1;
       if (it.dueDate && it.dueDate < now) overdue += 1;
     }
-    if (g === "completed" && it.completedAt && it.completedAt >= weekAgo) doneThisWeek += 1;
+    if ((g === "completed" || g === "cancelled") && it.completedAt && it.completedAt >= weekAgo) doneThisWeek += 1;
   }
   return { activeProjects: projects.length, itemsOpen, doneThisWeek, overdue };
 }
@@ -385,7 +431,7 @@ export async function getProject(prisma: PrismaClient, projectId: string): Promi
     where: { id: projectId },
     include: { workspace: true },
   });
-  if (!row) throw new Error("project_not_found");
+  if (!row) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
   return mapProject(row);
 }
 
@@ -418,32 +464,42 @@ export async function createProject(
       where: { workspaceId_identifier: { workspaceId: workspace.id, identifier } },
     });
     if (!clash) break;
-    if (input.identifier) throw new Error("identifier_taken");
+    if (input.identifier) throw new Error(PM_ERRORS.IDENTIFIER_TAKEN);
     identifier = `${base}${n}`;
   }
 
-  const created = await prisma.pmProject.create({
-    data: {
-      workspaceId: workspace.id,
-      name: input.name,
-      identifier,
-      description: input.description ?? null,
-      icon: input.icon ?? null,
-      color: input.color ?? null,
-      createdById: actorId,
-      states: {
-        create: DEFAULT_STATES.map((s) => ({
-          name: s.name,
-          group: s.group,
-          color: s.color,
-          sortOrder: s.sortOrder,
-          isDefault: s.isDefault,
-        })),
+  // The uniqueness loop above and this create are not one transaction, so two
+  // concurrent creates can both pass the loop and race to insert the same
+  // (workspaceId, identifier). The loser hits the unique constraint → Prisma
+  // P2002; map it to the same identifier_taken (→409) the explicit-clash path
+  // throws, rather than leaking a raw 500 (review finding: createProject race).
+  try {
+    const created = await prisma.pmProject.create({
+      data: {
+        workspaceId: workspace.id,
+        name: input.name,
+        identifier,
+        description: input.description ?? null,
+        icon: input.icon ?? null,
+        color: input.color ?? null,
+        createdById: actorId,
+        states: {
+          create: DEFAULT_STATES.map((s) => ({
+            name: s.name,
+            group: s.group,
+            color: s.color,
+            sortOrder: s.sortOrder,
+            isDefault: s.isDefault,
+          })),
+        },
       },
-    },
-    include: { workspace: true },
-  });
-  return mapProject(created);
+      include: { workspace: true },
+    });
+    return mapProject(created);
+  } catch (err) {
+    if (isPrismaCode(err, "P2002")) throw new Error(PM_ERRORS.IDENTIFIER_TAKEN);
+    throw err;
+  }
 }
 
 export async function updateProject(
@@ -459,7 +515,7 @@ export async function updateProject(
   },
 ): Promise<ApiProject> {
   const existing = await prisma.pmProject.findUnique({ where: { id: projectId } });
-  if (!existing) throw new Error("project_not_found");
+  if (!existing) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
   const data: Prisma.PmProjectUpdateInput = {};
   if (fields.name !== undefined) data.name = fields.name;
   if (fields.description !== undefined) data.description = fields.description;
@@ -477,8 +533,16 @@ export async function updateProject(
 
 export async function deleteProject(prisma: PrismaClient, projectId: string): Promise<void> {
   const existing = await prisma.pmProject.findUnique({ where: { id: projectId } });
-  if (!existing) throw new Error("project_not_found");
-  await prisma.pmProject.delete({ where: { id: projectId } });
+  if (!existing) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
+  // findUnique + delete is two round-trips: a concurrent delete between them
+  // makes this delete throw Prisma P2025. Map it to the same 404 the existence
+  // check would have raised (review finding: delete-helper TOCTOU → P2025).
+  try {
+    await prisma.pmProject.delete({ where: { id: projectId } });
+  } catch (err) {
+    if (isPrismaCode(err, "P2025")) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
+    throw err;
+  }
 }
 
 // ── States ───────────────────────────────────────────────────────────────────
@@ -497,7 +561,7 @@ export async function createState(
   input: { name: string; group: ApiState["group"]; color?: string; sortOrder?: number },
 ): Promise<ApiState> {
   const project = await prisma.pmProject.findUnique({ where: { id: projectId } });
-  if (!project) throw new Error("project_not_found");
+  if (!project) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
   const row = await prisma.pmState.create({
     data: {
       projectId,
@@ -516,15 +580,32 @@ export async function updateState(
   fields: { name?: string; group?: ApiState["group"]; color?: string | null; sortOrder?: number },
 ): Promise<ApiState> {
   const existing = await prisma.pmState.findUnique({ where: { id: stateId } });
-  if (!existing) throw new Error("state_not_found");
+  if (!existing) throw new Error(PM_ERRORS.STATE_NOT_FOUND);
   const row = await prisma.pmState.update({ where: { id: stateId }, data: fields });
   return mapState(row);
 }
 
 export async function deleteState(prisma: PrismaClient, stateId: string): Promise<void> {
   const existing = await prisma.pmState.findUnique({ where: { id: stateId } });
-  if (!existing) throw new Error("state_not_found");
-  await prisma.pmState.delete({ where: { id: stateId } });
+  if (!existing) throw new Error(PM_ERRORS.STATE_NOT_FOUND);
+  // A project must always retain at least one state, and never lose its sole
+  // default landing state — otherwise createWorkItem's fallback chain finds no
+  // default and no states, silently setting stateId=null on every new item and
+  // destroying the kanban board (review finding: deleteState last/default).
+  const siblings = await prisma.pmState.count({ where: { projectId: existing.projectId } });
+  if (siblings <= 1) throw new Error(PM_ERRORS.STATE_IS_LAST);
+  if (existing.isDefault) {
+    const otherDefaults = await prisma.pmState.count({
+      where: { projectId: existing.projectId, isDefault: true, id: { not: stateId } },
+    });
+    if (otherDefaults === 0) throw new Error(PM_ERRORS.STATE_IS_DEFAULT);
+  }
+  try {
+    await prisma.pmState.delete({ where: { id: stateId } });
+  } catch (err) {
+    if (isPrismaCode(err, "P2025")) throw new Error(PM_ERRORS.STATE_NOT_FOUND);
+    throw err;
+  }
 }
 
 // ── Labels ───────────────────────────────────────────────────────────────────
@@ -540,7 +621,7 @@ export async function createLabel(
   input: { name: string; color?: string },
 ): Promise<ApiLabel> {
   const project = await prisma.pmProject.findUnique({ where: { id: projectId } });
-  if (!project) throw new Error("project_not_found");
+  if (!project) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
   const row = await prisma.pmLabel.create({
     data: { projectId, name: input.name, color: input.color ?? null },
   });
@@ -553,15 +634,20 @@ export async function updateLabel(
   fields: { name?: string; color?: string | null },
 ): Promise<ApiLabel> {
   const existing = await prisma.pmLabel.findUnique({ where: { id: labelId } });
-  if (!existing) throw new Error("label_not_found");
+  if (!existing) throw new Error(PM_ERRORS.LABEL_NOT_FOUND);
   const row = await prisma.pmLabel.update({ where: { id: labelId }, data: fields });
   return mapLabel(row);
 }
 
 export async function deleteLabel(prisma: PrismaClient, labelId: string): Promise<void> {
   const existing = await prisma.pmLabel.findUnique({ where: { id: labelId } });
-  if (!existing) throw new Error("label_not_found");
-  await prisma.pmLabel.delete({ where: { id: labelId } });
+  if (!existing) throw new Error(PM_ERRORS.LABEL_NOT_FOUND);
+  try {
+    await prisma.pmLabel.delete({ where: { id: labelId } });
+  } catch (err) {
+    if (isPrismaCode(err, "P2025")) throw new Error(PM_ERRORS.LABEL_NOT_FOUND);
+    throw err;
+  }
 }
 
 // ── Work items ───────────────────────────────────────────────────────────────
@@ -581,7 +667,7 @@ export async function listWorkItems(
   } = {},
 ): Promise<ApiWorkItem[]> {
   const project = await prisma.pmProject.findUnique({ where: { id: projectId } });
-  if (!project) throw new Error("project_not_found");
+  if (!project) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
 
   const where: Prisma.PmWorkItemWhereInput = { projectId, archivedAt: null };
   if (filters.stateId) where.stateId = filters.stateId;
@@ -611,9 +697,10 @@ export async function listWorkItems(
 
 export async function getWorkItem(prisma: PrismaClient, id: string): Promise<ApiWorkItem> {
   const row = await prisma.pmWorkItem.findUnique({ where: { id }, include: WORK_ITEM_INCLUDE });
-  if (!row) throw new Error("work_item_not_found");
+  if (!row) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
   const project = await prisma.pmProject.findUnique({ where: { id: row.projectId } });
-  return mapWorkItem(row, project?.identifier ?? "");
+  if (!project) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
+  return mapWorkItem(row, project.identifier);
 }
 
 /** Workspace-wide free-text search over work-item name + description. Backs the
@@ -662,13 +749,34 @@ export async function createWorkItem(
     where: { id: projectId },
     include: { states: true },
   });
-  if (!project) throw new Error("project_not_found");
+  if (!project) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
 
   if (input.parentId) {
-    const parent = await prisma.pmWorkItem.findFirst({
-      where: { id: input.parentId, projectId },
+    const parent = await prisma.pmWorkItem.findUnique({ where: { id: input.parentId } });
+    if (!parent) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
+    if (parent.projectId !== projectId) throw new Error(PM_ERRORS.INVALID_PARENT);
+  }
+
+  // An explicit state must belong to THIS project — mirror the parent guard so
+  // a work item can never reference a state from another project (review
+  // findings #4/#1). Missing id → state_not_found (404); wrong project →
+  // invalid_state (422).
+  if (input.stateId) {
+    const state = await prisma.pmState.findUnique({ where: { id: input.stateId } });
+    if (!state) throw new Error(PM_ERRORS.STATE_NOT_FOUND);
+    if (state.projectId !== projectId) throw new Error(PM_ERRORS.INVALID_STATE);
+  }
+
+  // Labels must belong to THIS project — same cross-project isolation invariant
+  // as parentId and stateId.
+  if (input.labelIds?.length) {
+    const labels = await prisma.pmLabel.findMany({
+      where: { id: { in: input.labelIds } },
+      select: { id: true, projectId: true },
     });
-    if (!parent) throw new Error("invalid_parent");
+    for (const label of labels) {
+      if (label.projectId !== projectId) throw new Error("invalid_label");
+    }
   }
 
   // Landing state: explicit → isDefault → first by sortOrder → none.
@@ -678,39 +786,62 @@ export async function createWorkItem(
     [...project.states].sort((a, b) => a.sortOrder - b.sortOrder)[0]?.id ??
     null;
 
-  const created = await prisma.$transaction(async (tx) => {
-    // Bump the per-project counter atomically → the work item's number.
-    const bumped = await tx.pmProject.update({
-      where: { id: projectId },
-      data: { seqCounter: { increment: 1 } },
-      select: { seqCounter: true },
-    });
-    const sequenceId = bumped.seqCounter;
+  // Stamp completedAt when the resolved state is terminal (completed/cancelled).
+  const resolvedStateGroup = stateId
+    ? (project.states.find((s) => s.id === stateId)?.group ?? null)
+    : null;
+  const initialCompletedAt =
+    resolvedStateGroup === "completed" || resolvedStateGroup === "cancelled"
+      ? new Date()
+      : null;
 
-    const item = await tx.pmWorkItem.create({
-      data: {
-        projectId,
-        sequenceId,
-        name: input.name,
-        descriptionHtml: input.descriptionHtml ?? null,
-        stateId,
-        priority: input.priority ?? "none",
-        parentId: input.parentId ?? null,
-        createdById: actorId,
-        startDate: input.startDate ?? null,
-        dueDate: input.dueDate ?? null,
-        sortOrder: sequenceId,
-        assignees: input.assignees?.length
-          ? { create: input.assignees.map((userId) => ({ userId })) }
-          : undefined,
-        labels: input.labelIds?.length
-          ? { create: input.labelIds.map((labelId) => ({ labelId })) }
-          : undefined,
-      },
+  let created;
+  try {
+    created = await prisma.$transaction(async (tx) => {
+      // Bump the per-project counter atomically → the work item's number.
+      const bumped = await tx.pmProject.update({
+        where: { id: projectId },
+        data: { seqCounter: { increment: 1 } },
+        select: { seqCounter: true },
+      });
+      const sequenceId = bumped.seqCounter;
+
+      const item = await tx.pmWorkItem.create({
+        data: {
+          projectId,
+          sequenceId,
+          name: input.name,
+          // Stored HTML reaches the dashboard via dangerouslySetInnerHTML — sanitize
+          // against the strict PM allowlist at the write boundary (stored-XSS guard).
+          descriptionHtml: input.descriptionHtml ? sanitizePmHtml(input.descriptionHtml) : null,
+          stateId,
+          priority: input.priority ?? "none",
+          parentId: input.parentId ?? null,
+          createdById: actorId,
+          startDate: input.startDate ?? null,
+          dueDate: input.dueDate ?? null,
+          sortOrder: sequenceId,
+          completedAt: initialCompletedAt,
+          assignees: input.assignees?.length
+            ? { create: input.assignees.map((userId) => ({ userId })) }
+            : undefined,
+          labels: input.labelIds?.length
+            ? { create: input.labelIds.map((labelId) => ({ labelId })) }
+            : undefined,
+        },
+      });
+      await writeActivity(tx, { workItemId: item.id, actorId, verb: "created" });
+      return item;
     });
-    await writeActivity(tx, { workItemId: item.id, actorId, verb: "created" });
-    return item;
-  });
+  } catch (err) {
+    // The parent existence check above runs before this transaction; if the
+    // parent (or a referenced state/label) is deleted in the window between the
+    // check and the insert, the FK constraint fails → Prisma P2003. Surface it
+    // as invalid_parent (→422) rather than a raw 500 (review finding: parent FK
+    // race → P2003).
+    if (isPrismaCode(err, "P2003")) throw new Error(PM_ERRORS.INVALID_PARENT);
+    throw err;
+  }
 
   return loadWorkItem(prisma, created.id, project.identifier);
 }
@@ -736,9 +867,9 @@ export async function updateWorkItem(
     where: { id },
     include: { assignees: true, labels: true },
   });
-  if (!existing) throw new Error("work_item_not_found");
+  if (!existing) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
   const project = await prisma.pmProject.findUnique({ where: { id: existing.projectId } });
-  if (!project) throw new Error("project_not_found");
+  if (!project) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
 
   // When transitioning into a terminal-group state, stamp completedAt.
   let completedAt: Date | null | undefined;
@@ -746,19 +877,47 @@ export async function updateWorkItem(
     if (fields.stateId === null) {
       completedAt = null;
     } else {
-      const target = await prisma.pmState.findFirst({
-        where: { id: fields.stateId, projectId: existing.projectId },
-      });
-      if (!target) throw new Error("state_not_found");
+      // The target state must belong to THIS work item's project. Distinguish
+      // "no such state" (404) from "state belongs to another project" (422) so
+      // the cross-project guard mirrors the parent check's shape (findings
+      // #4/#2) rather than masking it as a generic not-found.
+      const target = await prisma.pmState.findUnique({ where: { id: fields.stateId } });
+      if (!target) throw new Error(PM_ERRORS.STATE_NOT_FOUND);
+      if (target.projectId !== existing.projectId) throw new Error(PM_ERRORS.INVALID_STATE);
       completedAt =
         target.group === "completed" || target.group === "cancelled" ? new Date() : null;
+    }
+  }
+
+  // A connected parent must live in the same project — mirror createWorkItem's
+  // guard so re-parenting can't cross a project boundary (findings #3/#1).
+  // Self-referential parent creates an infinite cycle; reject it explicitly.
+  if (fields.parentId !== undefined && fields.parentId !== null) {
+    if (fields.parentId === id) throw new Error(PM_ERRORS.INVALID_PARENT);
+    const parent = await prisma.pmWorkItem.findUnique({ where: { id: fields.parentId } });
+    if (!parent) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
+    if (parent.projectId !== existing.projectId) throw new Error(PM_ERRORS.INVALID_PARENT);
+  }
+
+  // Labels must belong to THIS project before the transaction mutates them.
+  if (fields.labelIds?.length) {
+    const labels = await prisma.pmLabel.findMany({
+      where: { id: { in: fields.labelIds } },
+      select: { id: true, projectId: true },
+    });
+    for (const label of labels) {
+      if (label.projectId !== existing.projectId) throw new Error("invalid_label");
     }
   }
 
   await prisma.$transaction(async (tx) => {
     const data: Prisma.PmWorkItemUpdateInput = {};
     if (fields.name !== undefined) data.name = fields.name;
-    if (fields.descriptionHtml !== undefined) data.descriptionHtml = fields.descriptionHtml;
+    if (fields.descriptionHtml !== undefined) {
+      // null clears the description; a string is sanitized at the write boundary
+      // (stored-XSS guard) before it can reach dangerouslySetInnerHTML.
+      data.descriptionHtml = fields.descriptionHtml ? sanitizePmHtml(fields.descriptionHtml) : null;
+    }
     if (fields.priority !== undefined) data.priority = fields.priority;
     if (fields.startDate !== undefined) data.startDate = fields.startDate;
     if (fields.dueDate !== undefined) data.dueDate = fields.dueDate;
@@ -811,12 +970,28 @@ export async function updateWorkItem(
         newValue: fields.priority,
       });
     }
+    // Compare a supplied set field against the existing set, order-independent,
+    // so an identity PATCH (re-sending the same assignees/labels — common when
+    // the dashboard or an agent submits the full work item on every save) does
+    // not write a spurious `updated` activity row (review finding: scalarChanged
+    // fires on assignees/labelIds presence alone).
+    const setChanged = (next: string[] | undefined, current: string[]): boolean => {
+      if (next === undefined) return false;
+      if (next.length !== current.length) return true;
+      const have = new Set(current);
+      return next.some((v) => !have.has(v));
+    };
+    const existingAssignees = existing.assignees.map((a) => a.userId);
+    const existingLabelIds = existing.labels.map((l) => l.labelId);
     const scalarChanged =
       (fields.name !== undefined && fields.name !== existing.name) ||
-      fields.descriptionHtml !== undefined ||
-      fields.dueDate !== undefined ||
-      fields.assignees !== undefined ||
-      fields.labelIds !== undefined;
+      (fields.descriptionHtml !== undefined && fields.descriptionHtml !== existing.descriptionHtml) ||
+      (fields.dueDate !== undefined &&
+        fields.dueDate?.toISOString() !== existing.dueDate?.toISOString()) ||
+      (fields.startDate !== undefined &&
+        fields.startDate?.toISOString() !== existing.startDate?.toISOString()) ||
+      setChanged(fields.assignees, existingAssignees) ||
+      setChanged(fields.labelIds, existingLabelIds);
     if (scalarChanged) {
       await writeActivity(tx, { workItemId: id, actorId, verb: "updated", field: "fields" });
     }
@@ -836,15 +1011,20 @@ export async function transitionWorkItem(
 
 export async function deleteWorkItem(prisma: PrismaClient, id: string): Promise<void> {
   const existing = await prisma.pmWorkItem.findUnique({ where: { id } });
-  if (!existing) throw new Error("work_item_not_found");
-  await prisma.pmWorkItem.delete({ where: { id } });
+  if (!existing) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
+  try {
+    await prisma.pmWorkItem.delete({ where: { id } });
+  } catch (err) {
+    if (isPrismaCode(err, "P2025")) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
+    throw err;
+  }
 }
 
 // ── Comments ─────────────────────────────────────────────────────────────────
 
 export async function listComments(prisma: PrismaClient, workItemId: string): Promise<ApiComment[]> {
   const item = await prisma.pmWorkItem.findUnique({ where: { id: workItemId } });
-  if (!item) throw new Error("work_item_not_found");
+  if (!item) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
   const rows = await prisma.pmComment.findMany({
     where: { workItemId },
     orderBy: { createdAt: "asc" },
@@ -859,10 +1039,13 @@ export async function addComment(
   commentHtml: string,
 ): Promise<ApiComment> {
   const item = await prisma.pmWorkItem.findUnique({ where: { id: workItemId } });
-  if (!item) throw new Error("work_item_not_found");
+  if (!item) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
+  // Comment HTML is rendered via dangerouslySetInnerHTML in the drawer — sanitize
+  // against the strict PM allowlist at the write boundary (stored-XSS guard).
+  const safeHtml = sanitizePmHtml(commentHtml);
   const row = await prisma.$transaction(async (tx) => {
     const comment = await tx.pmComment.create({
-      data: { workItemId, authorId: actorId, commentHtml },
+      data: { workItemId, authorId: actorId, commentHtml: safeHtml },
     });
     await writeActivity(tx, { workItemId, actorId, verb: "commented" });
     return comment;

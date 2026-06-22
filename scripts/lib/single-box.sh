@@ -147,7 +147,7 @@ detect_single_box_mode() {
 #     hardcoded `droplet`. setup.sh calls install_systemd_service after this
 #     so the auto-start unit always lands.
 #   * scripts/host/etc-dnsmasq.d/* — legacy AP configs superseded by the
-#     newer droplet-poc-host-net.service + lan-dhcp.conf. Captured in
+#     newer droplet-host-net.service + lan-dhcp.conf. Captured in
 #     scripts/host/ for historical reference only.
 install_single_box_host_integration() {
   if [ "$(uname)" != "Linux" ]; then
@@ -166,14 +166,14 @@ install_single_box_host_integration() {
   # --- /usr/local/sbin/ scripts -------------------------------------------
   sudo install -m 0755 "$host_src/usr-local-sbin/droplet-openwrt-attach" \
     /usr/local/sbin/droplet-openwrt-attach
-  sudo install -m 0755 "$host_src/usr-local-sbin/droplet-poc-host-net" \
-    /usr/local/sbin/droplet-poc-host-net
-  log_success "Installed /usr/local/sbin/droplet-openwrt-attach + droplet-poc-host-net"
+  sudo install -m 0755 "$host_src/usr-local-sbin/droplet-host-net" \
+    /usr/local/sbin/droplet-host-net
+  log_success "Installed /usr/local/sbin/droplet-openwrt-attach + droplet-host-net"
 
   # --- /etc/default/ envs -------------------------------------------------
-  # droplet-poc-host-net is committed as-is (no secrets). Copy directly.
-  sudo install -m 0644 "$host_src/etc-default/droplet-poc-host-net" \
-    /etc/default/droplet-poc-host-net
+  # droplet-host-net is committed as-is (no secrets). Copy directly.
+  sudo install -m 0644 "$host_src/etc-default/droplet-host-net" \
+    /etc/default/droplet-host-net
 
   # droplet-openwrt-attach has the AP PSK. The repo holds an .example with the
   # PSK redacted; we materialize a real one from the .env value if the operator
@@ -217,16 +217,16 @@ EOF
     log_info "/etc/default/droplet-openwrt-attach exists — keeping rotated value"
   fi
 
-  # --- /etc/droplet-poc-host-net/ -----------------------------------------
-  sudo install -d -m 0755 /etc/droplet-poc-host-net
-  sudo install -m 0644 "$host_src/etc-droplet-poc-host-net/lan-dhcp.conf" \
-    /etc/droplet-poc-host-net/lan-dhcp.conf
+  # --- /etc/droplet-host-net/ -----------------------------------------
+  sudo install -d -m 0755 /etc/droplet-host-net
+  sudo install -m 0644 "$host_src/etc-droplet-host-net/lan-dhcp.conf" \
+    /etc/droplet-host-net/lan-dhcp.conf
 
   # --- systemd units -----------------------------------------------------
   sudo install -m 0644 "$host_src/etc-systemd-system/droplet-openwrt-attach.service" \
     /etc/systemd/system/droplet-openwrt-attach.service
-  sudo install -m 0644 "$host_src/etc-systemd-system/droplet-poc-host-net.service" \
-    /etc/systemd/system/droplet-poc-host-net.service
+  sudo install -m 0644 "$host_src/etc-systemd-system/droplet-host-net.service" \
+    /etc/systemd/system/droplet-host-net.service
   sudo install -d -m 0755 /etc/systemd/system/droplet-openwrt-attach.service.d
   sudo install -m 0644 \
     "$host_src/etc-systemd-system/droplet-openwrt-attach.service.d/override.conf" \
@@ -239,16 +239,23 @@ EOF
   sudo install -m 0644 "$host_src/etc-avahi/services/droplet.service" \
     /etc/avahi/services/droplet.service
 
+  # --- Migrate from pre-rename service name if present -------------------
+  sudo systemctl disable --now droplet-poc-host-net.service 2>/dev/null || true
+  sudo rm -f /etc/systemd/system/droplet-poc-host-net.service \
+             /usr/local/sbin/droplet-poc-host-net \
+             /etc/default/droplet-poc-host-net
+  sudo rm -rf /etc/droplet-poc-host-net
+
   # --- Activate ----------------------------------------------------------
   sudo systemctl daemon-reload
   sudo systemd-tmpfiles --create /etc/tmpfiles.d/droplet.conf 2>/dev/null || true
   sudo systemctl enable droplet-openwrt-attach.service >/dev/null 2>&1
-  sudo systemctl enable droplet-poc-host-net.service >/dev/null 2>&1
+  sudo systemctl enable droplet-host-net.service >/dev/null 2>&1
 
   log_success "single-box host integration installed"
-  log_info "  Boot-time:   droplet-openwrt-attach.service + droplet-poc-host-net.service"
-  log_info "  Status:      sudo systemctl status droplet-openwrt-attach droplet-poc-host-net"
-  log_info "  Logs:        sudo journalctl -u droplet-openwrt-attach -u droplet-poc-host-net"
+  log_info "  Boot-time:   droplet-openwrt-attach.service + droplet-host-net.service"
+  log_info "  Status:      sudo systemctl status droplet-openwrt-attach droplet-host-net"
+  log_info "  Logs:        sudo journalctl -u droplet-openwrt-attach -u droplet-host-net"
 }
 
 # WARP-826: poll for the OpenWrt container to be genuinely READY — Running AND
@@ -334,34 +341,6 @@ provision_single_box_openwrt() {
 # duplicate appends are safe because the LAST occurrence of a key
 # wins in docker-compose env_file parsing.
 # ----------------------------------------------------------------------------
-# DROPLET_PM_ENABLED gate (WARP-496) — the embedded Plane PM stack is opt-OUT,
-# DEFAULT ON. Returns 0 (enabled) for an unset/empty value or anything that is
-# NOT an explicit disable token; returns 1 (disabled) only for the explicit
-# tokens 0 / false / no (case-insensitive). Explicit token list, no host-
-# specific default (architecture-guard rules 10/12). Canonical definition;
-# scripts/lib/compose.sh inlines the same token check for its build gate
-# (kept in sync — see the comment there).
-_droplet_pm_enabled() {
-  local v
-  v=$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')
-  case "$v" in
-    0|false|no) return 1 ;;
-    *)          return 0 ;;
-  esac
-}
-
-# Strip the `pm` token from a comma-separated COMPOSE_PROFILES value ($1).
-# Used by the gate-OFF path so DROPLET_PM_ENABLED=0 + a re-run actually drops
-# the Plane stack on an already-PM-provisioned box (symmetric with the enable
-# path's append). Comma-wrapped param-expansion replace (no sed) is
-# substring-safe: a profile named e.g. `pmx`/`xpm` is preserved.
-_strip_pm_profile() {
-  local wrapped=",${1:-},"
-  wrapped="${wrapped//,pm,/,}"
-  wrapped="${wrapped#,}"; wrapped="${wrapped%,}"
-  printf '%s' "$wrapped"
-}
-
 configure_single_box_env() {
   local env_file="$REPO_ROOT/.env"
   if [ ! -f "$env_file" ]; then
@@ -404,40 +383,10 @@ configure_single_box_env() {
     *)              merged_profiles="${existing_profiles},single-box" ;;
   esac
 
-  # Embedded Plane PM stack — opt-OUT gate, DEFAULT ON (WARP-496 / bug #10).
-  # The 7 PM services carry `profiles: ["pm"]` ONLY (compose profiles are
-  # static), so PM is reached on the single-box shape by APPENDING `pm` to
-  # COMPOSE_PROFILES here. The owner wants project management working out-of-
-  # the-box on capable boxes, so PM is enabled by default; a resource-
-  # constrained (~6 GB) box drops the ~2.5 GB always-on stack by setting
-  # DROPLET_PM_ENABLED=0 (or false/no) in .env. Explicit state — absence means
-  # enabled, and the disabled set is an explicit token list (architecture-guard
-  # rules 10/12: no host-specific default, no guessing from IS NULL).
-  local pm_enabled_val
-  # `|| true`: a fresh .env has no DROPLET_PM_ENABLED line, so grep exits 1 and
-  # would abort under `set -euo pipefail` (silently — inside a function, no ERR
-  # trap). Empty → enabled-by-default via _droplet_pm_enabled. This is the bug
-  # that bricked the first single-box reflash after the Plane-PM work landed.
-  pm_enabled_val=$(grep -E '^DROPLET_PM_ENABLED=' "$env_file" | tail -1 | cut -d= -f2- || true)
-  if _droplet_pm_enabled "$pm_enabled_val"; then
-    case ",${merged_profiles}," in
-      *,pm,*) : ;;                                  # already present — idempotent
-      ,,)     merged_profiles="pm" ;;
-      *)      merged_profiles="${merged_profiles},pm" ;;
-    esac
-    log_info "Plane PM stack ENABLED on single-box (DROPLET_PM_ENABLED=${pm_enabled_val:-<unset, default on>})"
-  else
-    # Gate OFF: STRIP any previously-appended `pm` token so disabling is
-    # symmetric — DROPLET_PM_ENABLED=0 + a re-run actually drops the stack on an
-    # already-PM-provisioned box, not only on a fresh provision.
-    merged_profiles="$(_strip_pm_profile "$merged_profiles")"
-    log_info "Plane PM stack DISABLED on single-box (DROPLET_PM_ENABLED=${pm_enabled_val}) — ~2.5 GB freed"
-  fi
-
   # RAG eval (RAGAS retrieval-quality scoring) — enabled by DEFAULT on the
   # single-box shape (bug #15). The `rag-eval` service is `["eval"]`-profiled,
   # so it's reached by APPENDING `eval` to COMPOSE_PROFILES here — the same
-  # mechanism as `single-box`/`pm` above. docker-compose.yml's eval-profile
+  # mechanism as `single-box` above. docker-compose.yml's eval-profile
   # comment calls RAGAS "GPU-bound, overkill on every appliance", but the
   # single-box shape always ships the dGPU RAGAS leans on (Ollama's local
   # judge), so that caveat doesn't apply here — the orchestrator's
@@ -459,20 +408,10 @@ configure_single_box_env() {
 # re-run setup.sh --regenerate-env to reset; see docs/SINGLE_BOX.md).
 #   COMPOSE_PROFILES     linux (Frigate) + display (OLED sim) + single-box
 #                        (single-box also activates camera-discovery — gated
-#                        to `full` otherwise). single-box.sh ALSO appends `pm`
-#                        by DEFAULT so the embedded Plane PM stack at /pm/ runs
-#                        out-of-the-box (bug #10) — see DROPLET_PM_ENABLED. It
-#                        ALSO appends `eval` by DEFAULT so the rag-eval (RAGAS)
-#                        service runs and /api/admin/rag-eval/* works out-of-the-
-#                        box (bug #15); set RAG_EVAL_DISABLED=1 to pause runs.
-#   DROPLET_PM_ENABLED   opt-OUT gate for the Plane PM stack, DEFAULT ON. The
-#                        7 PM services are `["pm"]`-profiled, so this knob
-#                        decides whether `pm` is appended to COMPOSE_PROFILES
-#                        above. Set to 0 (or false/no) on a memory-constrained
-#                        (~6 GB) box to drop the ~2.5 GB always-on Plane stack;
-#                        unset/anything-else keeps PM enabled. Its DROPLET_PM_*
-#                        secrets are generated unconditionally by
-#                        scripts/lib/secrets.sh regardless of this gate.
+#                        to `full` otherwise). single-box.sh ALSO appends
+#                        `eval` by DEFAULT so the rag-eval (RAGAS) service runs
+#                        and /api/admin/rag-eval/* works out-of-the-box
+#                        (bug #15); set RAG_EVAL_DISABLED=1 to pause runs.
 #   FRIGATE_RENDER_NODE  iGPU renderD129 (dGPU renderD128 is reserved Ollama)
 #   CAMERA_SUBNET        single-box camera network (br-lan 192.168.20.0/24);
 #                        overrides the multi-box VLAN default 192.168.100.0/24
@@ -516,7 +455,7 @@ EOF
   # OpenWrt camera VLAN (openwrt/files/etc/config/dhcp `cameras`). The
   # single-box shape has no separate camera VLAN today — cameras attach to
   # the box's own LAN (br-lan, 192.168.20.0/24; see
-  # scripts/host/etc-droplet-poc-host-net/lan-dhcp.conf). Pinning the subnet
+  # scripts/host/etc-droplet-host-net/lan-dhcp.conf). Pinning the subnet
   # to the actual single-box camera network is what makes camera discovery
   # scan where the cameras are instead of an empty multi-box VLAN (ADR-018
   # Decision 4). When the OpenWrt single-box unification (ADR-018 T3) lands a

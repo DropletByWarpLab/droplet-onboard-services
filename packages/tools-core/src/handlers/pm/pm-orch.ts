@@ -96,6 +96,8 @@ export function toPlaneWorkItem(w: ApiWorkItem): PlaneWorkItem {
 
 // ── HTTP helper ──────────────────────────────────────────────────────────────
 
+const ORCH_TIMEOUT_MS = 8000;
+
 export async function callOrch<T = unknown>(
   ctx: ToolContext,
   method: "get" | "post" | "patch" | "delete",
@@ -104,21 +106,26 @@ export async function callOrch<T = unknown>(
 ): Promise<T> {
   const http = ctx.http.orchestrator;
   const opts = { headers: { Accept: "application/json" } };
-  let res: Response;
-  switch (method) {
-    case "get":
-      res = await http.get(path, opts);
-      break;
-    case "delete":
-      res = await http.delete(path, opts);
-      break;
-    case "post":
-      res = await http.post(path, body, opts);
-      break;
-    case "patch":
-      res = await http.patch(path, body, opts);
-      break;
-  }
+
+  let timerId: ReturnType<typeof setTimeout>;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timerId = setTimeout(() => reject(new OrchPmError("orchestrator timeout", 504)), ORCH_TIMEOUT_MS);
+  });
+
+  const callPromise = (async (): Promise<Response> => {
+    switch (method) {
+      case "get":
+        return http.get(path, opts);
+      case "delete":
+        return http.delete(path, opts);
+      case "post":
+        return http.post(path, body, opts);
+      case "patch":
+        return http.patch(path, body, opts);
+    }
+  })().finally(() => clearTimeout(timerId));
+
+  const res = await Promise.race([callPromise, timeoutPromise]);
   const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   if (!res.ok) {
     const message =

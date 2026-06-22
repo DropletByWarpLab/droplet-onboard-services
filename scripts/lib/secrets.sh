@@ -38,10 +38,6 @@ generate_env() {
   local pg_password redis_password mqtt_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display service_token_switch service_token_ai_gateway ops_token service_token_mcp service_token_email orchestrator_sampler_token ai_gateway_sampler_token ollama_url openwrt_password
   # WARP-850: orchestrator -> matter-controller sidecar bearer (X-Droplet-Auth).
   local droplet_matter_service_token
-  # WARP-503 — embedded Plane PM stack secrets (ADR-010, spec WARP-498).
-  local pm_db_password pm_secret_key pm_admin_token pm_webhook_secret pm_web_url
-  # Plane v0.24.1 also needs a RabbitMQ broker (celery) + MinIO object storage.
-  local pm_mq_password pm_minio_access_key pm_minio_secret_key
   pg_password=$(_gen_password 24)
   redis_password=$(_gen_password 24)
   mqtt_password=$(_gen_password 24)
@@ -128,34 +124,6 @@ generate_env() {
   # (every cloud-LLM call 451s). Compose wires it to
   # ${AI_GATEWAY_SAMPLER_TOKEN}.
   ai_gateway_sampler_token=$(openssl rand -hex 32)
-
-  # WARP-503 — Plane secrets (ADR-010, spec WARP-498 OQ1/OQ5).
-  #   pm_db_password    — postgres-pm container password
-  #   pm_secret_key     — Plane Django SECRET_KEY (session signing etc.)
-  #   pm_admin_token    — orchestrator-only token for provisioning users via
-  #                       Plane API. NEVER exposed to dashboard or LLM agent.
-  #   pm_webhook_secret — HMAC key Plane signs outgoing webhooks with;
-  #                       orchestrator validates via /api/pm/webhook (WARP-511).
-  #                       Fail-CLOSED on signature mismatch per security-rules.md.
-  pm_db_password=$(_gen_password 24)
-  pm_secret_key=$(openssl rand -hex 50)
-  pm_admin_token=$(openssl rand -hex 32)
-  pm_webhook_secret=$(openssl rand -hex 32)
-  #   pm_mq_password    — RabbitMQ password for user `plane` (Celery broker).
-  #   pm_minio_*        — MinIO root creds (S3-compatible object storage for
-  #                       Plane file uploads/attachments). All internal-only.
-  pm_mq_password=$(_gen_password 24)
-  pm_minio_access_key=$(openssl rand -hex 16)
-  pm_minio_secret_key=$(_gen_password 32)
-  # pm_web_url — LAN-facing URL Plane bakes into generated emails / share
-  # links. Default uses the canonical mDNS hostname covered by the TLS cert
-  # SANs; override BEFORE running setup.sh if the customer uses a different
-  # LAN name (e.g. `DROPLET_PM_WEB_URL=https://pm.acme.lan ./scripts/setup.sh`).
-  # No host-specific IP defaults (rule 14) — DNS name only.
-  # :8443 is Plane's dedicated TLS origin (spec WARP-498 OQ2 amendment) —
-  # the vanilla frontend is built with basePath:"" and must own an origin
-  # root, so the gateway serves it on its own port instead of under /pm/.
-  pm_web_url="${DROPLET_PM_WEB_URL:-https://droplet-ai.local:8443}"
 
   # OLLAMA_URL — picks the bundled droplet-ollama container by default
   # (single-box). Override before running setup.sh for a multi-box
@@ -307,61 +275,6 @@ ORCHESTRATOR_SAMPLER_TOKEN=$orchestrator_sampler_token
 # the gate fails closed (every cloud-LLM call 451s).
 AI_GATEWAY_SAMPLER_TOKEN=$ai_gateway_sampler_token
 
-# --- WARP-503: embedded Plane PM stack (ADR-010, spec WARP-498) ---
-# Customer-facing project-management surface. Wraps upstream Plane (AGPL-3,
-# pinned by SHA per spec OQ3) behind Nginx at /pm/.
-#
-# OQ1 resolution: dedicated postgres-pm + redis-pm. OQ5: workspace-owner
-# downgrades surface as manual reconciliation alerts.
-#
-# All vars are DROPLET_PM_* prefixed (architecture-guard rule 11 — never
-# MATTER_*). Required secrets fail-CLOSED via compose ":?MSG" — no host-
-# specific defaults (rule 14).
-DROPLET_PM_DB_NAME=plane
-DROPLET_PM_DB_USER=plane
-DROPLET_PM_DB_PASSWORD=$pm_db_password
-DROPLET_PM_DB_HOST=postgres-pm
-DROPLET_PM_DB_PORT=5432
-
-DROPLET_PM_REDIS_HOST=redis-pm
-DROPLET_PM_REDIS_PORT=6379
-
-DROPLET_PM_SECRET_KEY=$pm_secret_key
-
-# Orchestrator-only — used to create/manage Plane users via Plane API.
-# NEVER exposed to dashboard or LLM agent. Rotates independently of other
-# tokens so a compromise can be contained without re-provisioning every
-# user identity.
-DROPLET_PM_ADMIN_TOKEN=$pm_admin_token
-
-# Plane signs outgoing webhook payloads with this; orchestrator's
-# /api/pm/webhook receiver (WARP-511) validates HMAC + replay window.
-# Fail-CLOSED on mismatch per security-rules.md.
-DROPLET_PM_WEBHOOK_SECRET=$pm_webhook_secret
-
-# Plane internal API URL — compose-network DNS so a container restart with
-# a fresh internal IP doesn't strand callers (same pattern as the gateway's
-# nginx resolver).
-DROPLET_PM_API_URL=http://pm-api:8000
-
-# LAN-facing URL — Plane bakes into generated emails / share links / OG
-# tags. Override BEFORE running setup.sh for non-default LAN hostnames.
-DROPLET_PM_WEB_URL=$pm_web_url
-
-# Plane v0.24.1 Celery broker (RabbitMQ) — internal-only, no host port. Plane
-# builds CELERY_BROKER_URL from these (plane/settings/common.py). User is
-# \`plane\` (NOT the default \`guest\`, which RabbitMQ restricts to loopback and
-# would refuse cross-container celery connections).
-DROPLET_PM_MQ_USER=plane
-DROPLET_PM_MQ_PASSWORD=$pm_mq_password
-DROPLET_PM_MQ_VHOST=plane
-
-# Plane v0.24.1 object storage (MinIO, S3-compatible) — file uploads/attachments.
-# Internal-only. Plane reads AWS_* + USE_MINIO; bucket auto-created on first use.
-DROPLET_PM_MINIO_ACCESS_KEY=$pm_minio_access_key
-DROPLET_PM_MINIO_SECRET_KEY=$pm_minio_secret_key
-DROPLET_PM_MINIO_BUCKET=uploads
-
 # --- Frigate NVR ---
 FRIGATE_MQTT_USER=droplet
 FRIGATE_MQTT_PASSWORD=$mqtt_password
@@ -430,13 +343,6 @@ EOF
   log_info "  OPS_TOKEN         : ${ops_token:0:8}****"
   log_info "  MCP_TOKEN         : ${service_token_mcp:0:8}****"
   log_info "  MATTER_TOKEN      : ${droplet_matter_service_token:0:8}****"
-  log_info "  PM_DB_PASSWORD    : ${pm_db_password:0:4}****"
-  log_info "  PM_SECRET_KEY     : ${pm_secret_key:0:8}****"
-  log_info "  PM_ADMIN_TOKEN    : ${pm_admin_token:0:8}****"
-  log_info "  PM_WEBHOOK_SECRET : ${pm_webhook_secret:0:8}****"
-  log_info "  PM_WEB_URL        : $pm_web_url"
-  log_info "  PM_MQ_PASSWORD    : ${pm_mq_password:0:4}****"
-  log_info "  PM_MINIO_KEY      : ${pm_minio_access_key:0:4}****"
   log_success "Secrets written to $env_file (chmod 600)"
 
   # NOTE: Artifact materialization (mosquitto password/conf, TLS cert, Docker
@@ -545,48 +451,6 @@ migrate_env() {
   # as disconnected).
   _migrate_ensure_key DROPLET_MATTER_SERVICE_TOKEN "$(openssl rand -hex 32)"
 
-  # WARP-503 backfill: embedded Plane PM stack (ADR-010). Existing installs
-  # predate the PM stack; without these keys docker compose up will refuse
-  # to start the pm-api / postgres-pm containers (compose-level :?MSG fail).
-  # Each is generated independently so a partial backfill (e.g. operator
-  # set DROPLET_PM_WEB_URL manually but no secrets yet) still works.
-  _migrate_ensure_key DROPLET_PM_DB_NAME "plane"
-  _migrate_ensure_key DROPLET_PM_DB_USER "plane"
-  _migrate_ensure_key DROPLET_PM_DB_PASSWORD "$(_gen_password 24)"
-  _migrate_ensure_key DROPLET_PM_DB_HOST "postgres-pm"
-  _migrate_ensure_key DROPLET_PM_DB_PORT "5432"
-  _migrate_ensure_key DROPLET_PM_REDIS_HOST "redis-pm"
-  _migrate_ensure_key DROPLET_PM_REDIS_PORT "6379"
-  _migrate_ensure_key DROPLET_PM_SECRET_KEY "$(openssl rand -hex 50)"
-  _migrate_ensure_key DROPLET_PM_ADMIN_TOKEN "$(openssl rand -hex 32)"
-  _migrate_ensure_key DROPLET_PM_WEBHOOK_SECRET "$(openssl rand -hex 32)"
-  _migrate_ensure_key DROPLET_PM_API_URL "http://pm-api:8000"
-  _migrate_ensure_key DROPLET_PM_WEB_URL "${DROPLET_PM_WEB_URL:-https://droplet-ai.local:8443}"
-  # One-time rewrite for the WARP-498 OQ2 amendment: Plane moved from the
-  # /pm subpath (which the vanilla basePath:"" frontend could never serve —
-  # the /projects iframe rendered black) to a dedicated :8443 origin. Only
-  # the exact pre-amendment default is rewritten — operator overrides keep
-  # their value.
-  if grep -qE '^DROPLET_PM_WEB_URL=https://droplet-ai\.local/pm/?$' "$env_file" 2>/dev/null; then
-    if [ "$backed_up" = "false" ]; then
-      # shellcheck disable=SC2155  # Same rationale as line 29: `date +%s` cannot meaningfully fail.
-      local backup="$env_file.bak.$(date +%s)"
-      cp "$env_file" "$backup"
-      log_info "Backed up existing .env to $backup before migration"
-      backed_up=true
-    fi
-    sed -i.tmp 's|^DROPLET_PM_WEB_URL=https://droplet-ai\.local/pm/\{0,1\}$|DROPLET_PM_WEB_URL=https://droplet-ai.local:8443|' "$env_file"
-    rm -f "$env_file.tmp"
-    log_success "Migrated .env: DROPLET_PM_WEB_URL /pm subpath -> :8443 dedicated origin (WARP-498 OQ2 amendment)"
-  fi
-  # Plane v0.24.1 broker + object storage (completing the #487 integration).
-  _migrate_ensure_key DROPLET_PM_MQ_USER "plane"
-  _migrate_ensure_key DROPLET_PM_MQ_PASSWORD "$(_gen_password 24)"
-  _migrate_ensure_key DROPLET_PM_MQ_VHOST "plane"
-  _migrate_ensure_key DROPLET_PM_MINIO_ACCESS_KEY "$(openssl rand -hex 16)"
-  _migrate_ensure_key DROPLET_PM_MINIO_SECRET_KEY "$(_gen_password 32)"
-  _migrate_ensure_key DROPLET_PM_MINIO_BUCKET "uploads"
-
   # WARP-230 device-identity. Pick backend based on /dev/tpm0 presence
   # on the host — hosts with a TPM hit 'real', everything else hits
   # 'mock'. Operator can override either by editing .env.
@@ -626,66 +490,6 @@ materialize_artifacts() {
   sync_openwrt_password_secret
   sync_switch_password_secret
   sync_audit_signing_key
-  sync_pm_oidc_keypair
-}
-
-# WARP-505 — Generate the OIDC IdP keypair on first run + backfill .env.
-#
-# Per spec WARP-498 OQ6: orchestrator runs a minimal OIDC IdP for the
-# embedded Plane PM stack. ID tokens are signed RS256 — Plane verifies
-# via JWKS (HMAC won't work). RSA-2048 is the OIDC interop floor.
-#
-# Idempotent — only generates + appends when the key is missing. Existing
-# installs with a key already in .env preserve it across re-runs.
-#
-# Stored as a single \n-escaped line so the .env file stays parseable by
-# every consumer (bash source, docker compose env interpolation, Zod
-# parser at orchestrator startup — pm-oidc.service.ts decodes back to PEM).
-sync_pm_oidc_keypair() {
-  local env_file="$REPO_ROOT/.env"
-  [ -f "$env_file" ] || return 0
-
-  if grep -qE '^DROPLET_PM_OIDC_PRIVATE_KEY_PEM=.+' "$env_file" 2>/dev/null; then
-    log_success "PM OIDC keypair already present — skipping"
-    return 0
-  fi
-
-  log_info "Generating PM OIDC keypair (RS256, 2048-bit)..."
-
-  local key_tmp escaped_pem kid client_secret
-  key_tmp="$(mktemp)"
-  if ! openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
-       -out "$key_tmp" 2>/dev/null; then
-    log_error "openssl genpkey failed — PM OIDC IdP will not work until this is fixed"
-    rm -f "$key_tmp"
-    return 1
-  fi
-  # Encode multi-line PEM as \n-separated single line so the .env line
-  # stays parseable. orchestrator's pm-oidc.service.ts decodes the
-  # literal `\n` back to a real newline before handing to jwt.sign.
-  escaped_pem="$(awk 'BEGIN{ORS="\\n"} {print}' "$key_tmp")"
-  rm -f "$key_tmp"
-
-  kid="$(openssl rand -hex 16)"
-  client_secret="$(openssl rand -hex 32)"
-
-  {
-    printf '\n# --- WARP-505 PM OIDC IdP (spec WARP-498 OQ6) ---\n'
-    # Single-quote the PEM. The \n-escaped value still contains spaces
-    # (-----BEGIN PRIVATE KEY-----), so an UNQUOTED assignment word-splits
-    # when .env is `source`d (setup.sh, verify.sh, compose.sh all do), failing
-    # with "line N: PRIVATE: command not found" and aborting the stack Start.
-    # Safe: the value is base64 + literal \n and never contains a single quote.
-    printf "DROPLET_PM_OIDC_PRIVATE_KEY_PEM='%s'\n" "$escaped_pem"
-    printf 'DROPLET_PM_OIDC_KID=%s\n' "$kid"
-    printf 'DROPLET_PM_OIDC_CLIENT_SECRET=%s\n' "$client_secret"
-  } >> "$env_file"
-  chmod 600 "$env_file"
-
-  log_success "PM OIDC keypair generated (kid ${kid:0:8}****)"
-  log_info "  Configure Plane god-mode /authentication/oidc/ with:"
-  log_info "    client_id     = plane (or override DROPLET_PM_OIDC_CLIENT_ID)"
-  log_info "    client_secret = ${client_secret:0:8}**** (full value in .env)"
 }
 
 # Generate /data/secrets/audit.key on first boot for WARP-456.
@@ -933,6 +737,83 @@ _cert_has_all_required_sans() {
   return 0
 }
 
+# ADR-023 PR-2: detect whether the installed leaf is a PUBLIC-CA cert (an
+# LE / ZeroSSL / Google Trust Services fullchain the box-side tls-issuance cron
+# installed) rather than our own self-signed bootstrap cert.
+#
+# Detector: issuer != subject. A self-signed cert has issuer == subject; any
+# CA-signed leaf has a distinct issuer DN. `openssl x509` reads only the FIRST
+# PEM block in the file, so this correctly inspects just the leaf even when
+# cert_file is a fullchain (leaf + intermediate concatenated). NOTE: we do NOT
+# use `openssl verify -CAfile <cert> <cert>` — on a fullchain PEM, OpenSSL
+# loads all PEM blocks as trusted anchors, the intermediate verifies the leaf,
+# and the command exits 0, indistinguishable from self-signed.
+#
+# Deliberately NOT keyed on the literal string "Let's Encrypt": the HQ Worker
+# has CA failover (ZeroSSL primary, Google Trust Services fallback), all
+# non-self-signed — matching on a CA name would miss the fallback issuers.
+#
+# Parse gate: if either DN is unreadable (corrupt/truncated/garbage cert), we
+# require both to be non-empty before trusting the issuer!=subject result. An
+# unparseable droplet.crt is NOT a preservable public-CA leaf — fall through
+# so the normal path regenerates a fresh self-signed cert.
+#
+# Returns 0 (true) when the cert is a public-CA leaf we must preserve.
+_cert_is_public_ca_leaf() {
+  local cert_file="$1"
+  [ -f "$cert_file" ] || return 1
+
+  # Read only the FIRST PEM block (openssl x509 stops at the first cert in the
+  # file), so this correctly reads the leaf even when cert_file is a fullchain
+  # (leaf + intermediate). Using openssl verify -CAfile with a fullchain would
+  # load ALL PEM blocks as trusted anchors, causing the intermediate to verify
+  # the leaf and exit 0 — indistinguishable from a self-signed cert.
+  local issuer subject
+  issuer="$(openssl x509 -in "$cert_file" -noout -issuer 2>/dev/null)"
+  subject="$(openssl x509 -in "$cert_file" -noout -subject 2>/dev/null)"
+
+  # Parse gate: if either DN is unreadable, not a valid public-CA leaf —
+  # corrupt/truncated/garbage cert. Fall through to regeneration.
+  if [ -z "$issuer" ] || [ -z "$subject" ]; then
+    return 1
+  fi
+
+  # Issuer != subject → signed by a different CA → preserve as a public-CA leaf.
+  # Strip the leading `issuer=` / `subject=` label before comparing.
+  if [ "${issuer#issuer=}" = "${subject#subject=}" ]; then
+    return 1
+  fi
+  return 0
+}
+
+# ADR-023 PR-2: write the self-signed bootstrap pair to droplet.{crt,key}.bootstrap
+# — the exact bytes clients import via trust-droplet-cert. Idempotent: never
+# overwrite an existing .bootstrap (the first self-signed cert ever generated is
+# the one clients trust; a later regeneration must not move the trust anchor).
+_write_tls_bootstrap_copy() {
+  local cert_file="$1" key_file="$2"
+  local boot_cert="$cert_file.bootstrap" boot_key="$key_file.bootstrap"
+
+  if [ ! -f "$cert_file" ] || [ ! -f "$key_file" ]; then
+    return 0
+  fi
+  # Write each bootstrap file independently — never overwrite an existing one.
+  # Writing them separately means a crash between the two copies leaves exactly
+  # one file present; the next run writes the missing half without touching the
+  # already-written one, rather than skipping both (OR guard) or overwriting the
+  # existing one (AND guard with fallthrough).
+  if [ ! -f "$boot_cert" ]; then
+    cp "$cert_file" "$boot_cert"
+    chmod 644 "$boot_cert"
+    log_info "  Saved trust-anchor bootstrap cert: $boot_cert"
+  fi
+  if [ ! -f "$boot_key" ]; then
+    cp "$key_file" "$boot_key"
+    chmod 600 "$boot_key"
+    log_info "  Saved trust-anchor bootstrap key: $boot_key"
+  fi
+}
+
 _generate_tls_cert() {
   local cert_dir="$REPO_ROOT/docker/certs"
   local cert_file="$cert_dir/droplet.crt"
@@ -949,6 +830,48 @@ _generate_tls_cert() {
       log_success "TLS certificate already exists, is valid, and covers all required SANs — skipping"
       return 0
     fi
+
+    # ADR-023 PR-2 — NEVER CLOBBER A PUBLIC-CA LEAF.
+    # The box-side tls-issuance cron installs the HQ-issued publicly-trusted
+    # fullchain into these SAME files. A re-run that reaches here (SAN-incomplete
+    # OR expired trigger) must NOT regenerate a self-signed cert over a live
+    # public-CA leaf — that silently reverts the box to self-signed until the
+    # next 04:00 issuance, and a fresh -newkey also breaks every client that
+    # imported the original cert. If the installed cert is a public-CA leaf,
+    # leave the fullchain in place and return success.
+    if _cert_is_public_ca_leaf "$cert_file"; then
+      log_success "TLS certificate is a publicly-trusted (public-CA) leaf — preserving it (ADR-023)"
+      return 0
+    fi
+
+    # ADR-023 PR-2 — EXPIRED + BOOTSTRAP RESTORE.
+    # If the installed (self-signed) cert is EXPIRED and a valid bootstrap pair
+    # exists, RESTORE the bootstrap pair instead of -newkey'ing a fresh keypair,
+    # so trust-store clients that imported the bootstrap cert still connect.
+    # Only -newkey below when there is no usable bootstrap.
+    local boot_cert="$cert_file.bootstrap" boot_key="$key_file.bootstrap"
+    if ! openssl x509 -checkend 86400 -noout -in "$cert_file" >/dev/null 2>&1 \
+       && [ -f "$boot_cert" ] && [ -f "$boot_key" ] \
+       && openssl x509 -checkend 86400 -noout -in "$boot_cert" >/dev/null 2>&1 \
+       && _cert_has_all_required_sans "$boot_cert"; then
+      log_warn "TLS certificate expired — restoring the trust-anchor bootstrap pair (ADR-023)"
+      cp "$boot_cert" "${cert_file}.new"
+      cp "$boot_key"  "${key_file}.new"
+      chmod 600 "${key_file}.new"
+      chmod 644 "${cert_file}.new"
+      mv "${cert_file}.new" "$cert_file"
+      mv "${key_file}.new"  "$key_file"
+      log_success "Restored TLS certificate from bootstrap copy:"
+      log_info "  Cert: $cert_file"
+      log_info "  Key:  $key_file"
+      if ! declare -F reload_gateway_nginx >/dev/null 2>&1; then
+        # shellcheck source=tls-reload.sh
+        source "$(dirname "${BASH_SOURCE[0]}")/tls-reload.sh"
+      fi
+      reload_gateway_nginx || true
+      return 0
+    fi
+
     if ! openssl x509 -checkend 86400 -noout -in "$cert_file" >/dev/null 2>&1; then
       log_warn "TLS certificate expired or invalid — regenerating"
     else
@@ -1016,6 +939,14 @@ _generate_tls_cert() {
   log_info "  Cert: $cert_file"
   log_info "  Key:  $key_file"
   log_info "  SANs: $san"
+
+  # ADR-023 PR-2 — BOOTSTRAP SIDE-COPY.
+  # Persist this self-signed pair as droplet.{crt,key}.bootstrap — the exact
+  # bytes clients import via trust-droplet-cert. Idempotent (never overwrites an
+  # existing .bootstrap), so the trust anchor stays pinned to the FIRST
+  # self-signed cert across re-runs. The expired-restore path above replays this
+  # pair instead of -newkey'ing a keypair the trust store has never seen.
+  _write_tls_bootstrap_copy "$cert_file" "$key_file"
 
   # If the gateway container is already running (setup.sh re-run or
   # --sync-secrets flow), ask nginx to reload so the new cert is served

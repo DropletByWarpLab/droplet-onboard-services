@@ -33,6 +33,16 @@ vi.mock("../config.js", () => ({
 
 vi.mock("../services/network.service.js", () => ({
   getWifiSettings: vi.fn().mockResolvedValue({}),
+  getRadioDetail: vi.fn().mockResolvedValue({
+    supported: false,
+    hostRadio: true,
+    broadcasting: true,
+    channel: 6,
+    htmode: "HT20",
+    txpower: 20,
+    country: "US",
+    mode: "Master",
+  }),
   scanWifiNetworks: vi.fn().mockResolvedValue([]),
   setWifiSsid: vi.fn().mockResolvedValue(undefined),
   setWifiPassword: vi.fn().mockResolvedValue({ operationId: "op-1" }),
@@ -123,5 +133,20 @@ describe("wifi routes through the real safety-tier service", () => {
     });
     expect(res.body.confirmationToken).toBeTruthy();
     expect(networkService.setWifiPassword).not.toHaveBeenCalled();
+  });
+});
+
+describe("GET /api/network/wifi/radio (read-only host-radio detail)", () => {
+  it("reflects the radio detail envelope from the service", async () => {
+    const res = await request(buildApp()).get("/api/network/wifi/radio");
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      supported: false,
+      hostRadio: true,
+      broadcasting: true,
+      channel: 6,
+      country: "US",
+    });
+    expect(networkService.getRadioDetail).toHaveBeenCalledOnce();
   });
 });

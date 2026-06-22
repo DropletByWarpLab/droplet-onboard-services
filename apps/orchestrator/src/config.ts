@@ -63,8 +63,8 @@ const envSchema = z.object({
   //
   // Parsed into `config.corsAllowedOrigins` below. When unset it defaults to
   // the appliance's LAN dashboard origin (https://droplet-ai.local — already
-  // covered by the TLS cert SANs, see DROPLET_PM_WEB_URL and
-  // scripts/lib/secrets.sh) plus http://localhost:3000 in non-production for
+  // covered by the TLS cert SANs, see scripts/lib/secrets.sh) plus
+  // http://localhost:3000 in non-production for
   // the Next.js dev server. A `*` value is rejected at startup (see the
   // wildcard guard after parse), mirroring services/ai-gateway/main.py.
   CORS_ALLOWED_ORIGINS: z.string().default(""),
@@ -120,42 +120,6 @@ const envSchema = z.object({
   // .env key via compose.
   DROPLET_MATTER_SERVICE_TOKEN: z.string().default(""),
 
-  // --- WARP-505/506/507/511 — embedded Plane PM stack (ADR-010, spec WARP-498) ---
-  // All vars use DROPLET_PM_* prefix per architecture-guard rule 11.
-  // Defaults work on a brand-new install OR fail loud (rule 14).
-  DROPLET_PM_API_URL: z.string().url().default("http://pm-api:8000"),
-  // Plane's dedicated TLS origin (spec WARP-498 OQ2 amendment): the vanilla
-  // frontend is built with basePath:"" so it must own an origin root — the
-  // gateway serves it on :8443, not under /pm/.
-  DROPLET_PM_WEB_URL: z.string().url().default("https://droplet-ai.local:8443"),
-  // WARP-867: NOT a Plane API key — Plane CE only authenticates its own
-  // server-generated service tokens, which pm-bootstrap.service mints at
-  // runtime and serves via GET /api/pm/service-token. This secret is the
-  // seed for the bootstrap admin identity (the Plane admin password is
-  // HMAC-derived from it — see planeAdminPassword()).
-  DROPLET_PM_ADMIN_TOKEN: z.string().default(""),
-  // WARP-860 — identity of the auto-bootstrapped Plane instance admin.
-  // Plane CE has no OIDC and no headless setup, so pm-bootstrap.service.ts
-  // completes the god-mode instance setup programmatically with this email
-  // and a password derived from DROPLET_PM_ADMIN_TOKEN. The owner signs in
-  // to the embedded Plane with these credentials (surfaced once in the
-  // setup wizard's PM step).
-  DROPLET_PM_ADMIN_EMAIL: z.string().email().default("admin@droplet.local"),
-  // HMAC signing key for Plane → orchestrator webhooks (WARP-511).
-  // Empty default = webhook receiver fail-CLOSED (every payload 401s) per
-  // engineering-handbook 04-coding-standards/security-rules.md §1.
-  DROPLET_PM_WEBHOOK_SECRET: z.string().default(""),
-  // WARP-505 OIDC IdP (spec WARP-498 OQ6). The orchestrator runs a minimal
-  // OIDC provider that Plane points at as its relying-party IdP. ID tokens
-  // are signed RS256 (HMAC won't work — Plane verifies via JWKS). setup.sh
-  // generates a 2048-bit RSA keypair on first run and pins both halves
-  // below. Empty defaults make the OIDC endpoints 500 with a clear error
-  // (signIdToken throws) until setup.sh has populated .env.
-  DROPLET_PM_OIDC_PRIVATE_KEY_PEM: z.string().default(""),
-  DROPLET_PM_OIDC_KID: z.string().default(""),
-  DROPLET_PM_OIDC_CLIENT_ID: z.string().default("plane"),
-  DROPLET_PM_OIDC_CLIENT_SECRET: z.string().default(""),
-
   // --- JWT ---
   // In production this must be set — setup.sh generates a 64-byte random hex value.
   // The default is intentionally weak so tests work without env setup.
@@ -179,16 +143,15 @@ const envSchema = z.object({
   OAUTH2_CLIENT_SECRET: z.string().default(""),
 
   // --- SSO (external-IdP OIDC: Google Workspace + Microsoft Entra) ---
-  // ADR-013 (PR #378). The orchestrator acts as an OIDC RELYING PARTY (the
-  // mirror of the DROPLET_PM_OIDC_* block above, where it is the IdP). One
-  // group of four vars per provider; ALL FOUR must be set for that provider's
+  // ADR-013 (PR #378). The orchestrator acts as an OIDC RELYING PARTY here.
+  // One group of four vars per provider; ALL FOUR must be set for that provider's
   // SSO button to go live (getOidcProviderConfig fails closed otherwise —
   // half-configured providers render disabled). Empty defaults keep tests +
   // un-configured appliances from minting half-built authorize URLs.
   //
   // The CLIENT_SECRET values are real provider secrets — they live ONLY in
   // `.env` (populated by the operator / setup.sh; never tracked) exactly like
-  // OAUTH2_CLIENT_SECRET and DROPLET_PM_OIDC_CLIENT_SECRET. They are read here
+  // OAUTH2_CLIENT_SECRET. They are read here
   // and never re-emitted, never logged.
   //
   // ISSUER is the provider's discovery base; openid-client appends
@@ -228,9 +191,8 @@ const envSchema = z.object({
   // EMPTY DEFAULT = FAIL CLOSED: with no token configured, every /scim/v2/*
   // request 401s (scim-auth middleware refuses an unset secret), so an
   // appliance that hasn't been wired for directory sync never accepts an
-  // unauthenticated — or empty-bearer — provisioning call. Same posture as
-  // DROPLET_PM_WEBHOOK_SECRET. Lives ONLY in .env (operator / setup.sh
-  // generates it); never tracked, never re-emitted.
+  // unauthenticated — or empty-bearer — provisioning call. Lives ONLY in .env
+  // (operator / setup.sh generates it); never tracked, never re-emitted.
   DROPLET_SCIM_BEARER_TOKEN: z.string().default(""),
 
   // --- gRPC ---
@@ -282,6 +244,15 @@ const envSchema = z.object({
   //   origin (trusted-origin.ts) and the one address that works at home AND
   //   over the WireGuard tunnel.
   DROPLET_PUBLIC_FQDN: z.string().default(""),
+  // DROPLET_PUBLIC_FQDN_IP — the IP the per-device FQDN resolves to via the
+  //   split-horizon dnsmasq (ADR-023 C3). Defaults to the WireGuard gateway
+  //   address 192.168.20.1, which is reachable on the single-box LAN AND over
+  //   the tunnel, so the one FQDN works at home and remotely. The routing-leg
+  //   registrar (createRoutingDnsRegistrar) POSTs {hostname, ip} to
+  //   /dhcp/hostnames with this value; matches the host-leg default in
+  //   scripts/lib/local-dns.sh::setup_public_fqdn_dns. Operators on a multi-box
+  //   LAN whose box IP differs can override it.
+  DROPLET_PUBLIC_FQDN_IP: z.string().default("192.168.20.1"),
   // HQ_ISSUANCE_URL — base URL of the fleet HQ issuance API
   //   (hq.warp-lab.com). Plain outbound HTTPS; does NOT require the fleet
   //   WireGuard tunnel. Empty disables live issuance (the cron skips), which is
@@ -312,6 +283,61 @@ const envSchema = z.object({
   DROPLET_AP_APPROVAL_TIMEOUT: z.coerce.number().default(60),
   DROPLET_AP_DAWN_ENABLED: z.coerce.boolean().default(true),
   DROPLET_AP_DEFAULT_TXPOWER: z.coerce.number().default(20),
+
+  // --- ADR-024 multi-backend coverage APs (Phase 2) ---
+  // Master switches for the third-party AP discovery backends. Both
+  // default OFF — a single-box with no extenders ships exactly as today
+  // (only the mDNS / DROPLET_IMAGE source runs). When off, the EasyMesh /
+  // UniFi discovery sources return [] and contribute nothing.
+  //
+  // EASYMESH_ENABLED — turns on the IEEE 1905.1 discovery + prplMesh
+  //   Controller-only onboarding path (ADR-024 §2). Real socket logic
+  //   lands in Phase 4; this phase the source is a scaffold.
+  // UNIFI_ENABLED — turns on the UBNT UDP 10001 discovery + UniFi Network
+  //   API adoption path (ADR-024 §3). Real adapter lands in Phase 3.
+  //
+  // EXPLICIT string→bool (same idiom as DROPLET_CLAIM_GATE_ENABLED below):
+  // z.coerce.boolean() would treat the non-empty strings "0"/"false" as
+  // true and silently enable a backend. Only "1"/"true" enable it; an
+  // absent var or anything else leaves it OFF.
+  DROPLET_AP_EASYMESH_ENABLED: z
+    .string()
+    .default("0")
+    .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
+  DROPLET_AP_UNIFI_ENABLED: z
+    .string()
+    .default("0")
+    .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
+
+  // ADR-024 Phase 4 (§2) — the box runs prplMesh in CONTROLLER-ONLY mode (its
+  // mt76 radio can't be an EasyMesh RF agent; the certified third-party AP is
+  // the Agent). This points the orchestrator's EASYMESH backend at the LOCAL
+  // prplMesh controller's ubus / IPC data-model endpoint (e.g. its
+  // ubus-over-HTTP address or socket path). The controller is a loopback/LAN
+  // local service, so this is an ADDRESS — not a secret — declared the same
+  // plain-string-empty-default way as DROPLET_AP_UNIFI_CONTROLLER_URL.
+  //
+  // Empty default: an unconfigured box's EasyMesh client throws NOT_CONFIGURED,
+  // but the discovery source only calls it when DROPLET_AP_EASYMESH_ENABLED is
+  // on (default off), so a default single-box never touches it.
+  DROPLET_AP_EASYMESH_CONTROLLER_URL: z.string().default(""),
+
+  // ADR-024 Phase 3 (§3 + §"Open decision" Option B) — the box is a pure API
+  // CLIENT to a UniFi Network controller the household ALREADY runs (a UDM /
+  // CloudKey / self-host). We do NOT bundle or redistribute the controller;
+  // these two vars point Droplet at the customer-supplied one.
+  //
+  // CONTROLLER_URL — local controller base URL (e.g. https://127.0.0.1:8443).
+  //   Empty default: an unconfigured box's UniFi client throws NOT_CONFIGURED,
+  //   but the discovery source only calls it when DROPLET_AP_UNIFI_ENABLED is
+  //   on, so a default single-box never touches it.
+  // API_KEY — **SECRET**. The official local API's API key (the 2024 key-auth
+  //   surface; the legacy :8443 login-cookie flow is NOT used). Sourced from
+  //   the secret store / .env, NEVER a tracked default — declared the same way
+  //   as every other secret here (DROPLET_PM_WEBHOOK_SECRET, ROUTING_SERVICE_
+  //   TOKEN, …): a plain string defaulting to empty. Never logged.
+  DROPLET_AP_UNIFI_CONTROLLER_URL: z.string().default(""),
+  DROPLET_AP_UNIFI_API_KEY: z.string().default(""),
 
   // --- Front-panel claim gate (WARP-165) ---
   // Physical-presence gate for POST /auth/setup: when ON, the first-owner

@@ -6,7 +6,6 @@
 # Snapshots ALL core customer-data surfaces into a single timestamped tarball:
 #
 #   - main orchestrator Postgres   (compose service `db`)         pg_dump
-#   - Plane PM Postgres            (compose service `postgres-pm`) pg_dump
 #   - nextcloud-data               volume (files)                 tar
 #   - aikeys                       volume (AI provider keys)       tar
 #   - matter-data                  volume (Matter fabric+storage)  tar
@@ -17,15 +16,14 @@
 # The volume names above are the REAL top-level volumes in
 # docker/docker-compose.yml — kept in lock-step with the destructive wipe list
 # in scripts/factory-reset.sh so the "safety backup before reset" actually
-# captures everything the reset destroys. The Postgres volumes (pgdata,
-# postgres-pm-data) are NOT tarred — they are captured transactionally via
-# pg_dump above. Pure caches / rebuildable state (redis-pm-data, frigate-config,
-# rag-eval-data, model caches, openwrt-*, ollama-data) are intentionally NOT
-# backed up. A static test asserts every name here exists as a real volume.
+# captures everything the reset destroys. The Postgres volume (pgdata) is NOT
+# tarred — it is captured transactionally via pg_dump above. Pure caches /
+# rebuildable state (frigate-config, rag-eval-data, model caches, openwrt-*,
+# ollama-data) are intentionally NOT backed up. A static test asserts every
+# name here exists as a real volume.
 #
-# Generalizes the per-service `pm-backup.sh` pattern into one device-wide
-# artifact. Restic (WARP-254) is the long-term home; this is the boring,
-# shell-based MVP that must exist before launch.
+# This is the device-wide DR artifact. Restic (WARP-254) is the long-term home;
+# this is the boring, shell-based MVP that must exist before launch.
 #
 # Usage:
 #   ./scripts/host/device-backup.sh [OUTPUT_DIR]
@@ -36,7 +34,6 @@
 #
 # Layout inside:
 #   postgres/main.sql.gz          pg_dump of the orchestrator DB | gzip
-#   postgres/pm.sql.gz            pg_dump of the Plane DB | gzip
 #   volumes/<name>/data.tar       tar of each named volume's contents
 #   manifest.json                 { taken_at, captured[], sizes, image pins }
 #
@@ -61,7 +58,6 @@
 #   DB_SERVICE    main Postgres service (db)
 #   DB_USER       main DB user (falls back to in-container $POSTGRES_USER)
 #   DB_NAME       main DB name (falls back to in-container $POSTGRES_DB)
-#   PM_SERVICE    Plane Postgres service (postgres-pm)
 #   BACKUP_KEEP   rotations to retain (7)
 #
 # Idempotent — concurrent invocations write to distinct timestamped files.
@@ -90,7 +86,6 @@ if [ -z "${PROJECT:-}" ]; then
 fi
 PROJECT="${PROJECT:-droplet}"
 DB_SERVICE="${DB_SERVICE:-db}"
-PM_SERVICE="${PM_SERVICE:-postgres-pm}"
 BACKUP_KEEP="${BACKUP_KEEP:-7}"
 
 # Data volumes to archive. These are the REAL top-level volume names from
@@ -114,7 +109,6 @@ DATA_VOLUMES=(
 # with factory-reset.sh's wipe list minus DATA_VOLUMES minus the pg_dump'd DBs.
 EXCLUDED_VOLUMES=(
   migration-snapshots # WARP-573 pre-migration DB snapshots — regenerated on fresh boot
-  redis-pm-data      # Plane redis cache — rebuilt on start
   frigate-config     # NVR config — regenerated from .env on setup
   rag-eval-data      # RAGAS eval output — not customer data
   whisper-models     # STT model cache (~470MB) — re-downloaded
@@ -123,8 +117,6 @@ EXCLUDED_VOLUMES=(
   openwrt-config     # single-box router config — re-provisioned
   openwrt-overlay    # single-box router overlay — re-provisioned
   switch-state       # managed-switch state — re-provisioned by setup
-  pm-minio-data      # Plane object store (attachments) — full backup is WARP-514
-  pm-rabbitmq-data   # Plane task queue — ephemeral, rebuilt on start
 )
 
 # --- Source logging library if present (matches setup.sh convention) ------
@@ -169,9 +161,9 @@ dump_pg() {
   # $4 = dbname override (may be empty)
   local svc="$1" out="$2" user="$3" db="$4"
   # Prefer explicit overrides, else read the container's own env vars so we
-  # never hard-code credentials (mirrors pm-backup.sh). We pass the overrides
-  # as container env (-e) and let the in-container shell fall back to the
-  # container's own $POSTGRES_USER/$POSTGRES_DB when they're empty — this
+  # never hard-code credentials. We pass the overrides as container env (-e)
+  # and let the in-container shell fall back to the container's own
+  # $POSTGRES_USER/$POSTGRES_DB when they're empty — this
   # avoids the fragile nested `${user:-${POSTGRES_USER}}` host-side expansion
   # (a stray `}` leaked into the role name otherwise).
   log_info "Dumping Postgres service '$svc'..."
@@ -189,13 +181,6 @@ if ! dump_pg "$DB_SERVICE" "$WORK_DIR/postgres/main.sql.gz" "${DB_USER:-}" "${DB
   exit 1
 fi
 CAPTURED+=("postgres:main")
-
-if dump_pg "$PM_SERVICE" "$WORK_DIR/postgres/pm.sql.gz" "" ""; then
-  CAPTURED+=("postgres:pm")
-else
-  log_warn "Plane Postgres ('$PM_SERVICE') not present — skipping (PM stack not provisioned?)"
-  printf 'pm-postgres-absent-at-backup-time\n' > "$WORK_DIR/postgres/pm.ABSENT"
-fi
 
 # --- Phase 2: Data volumes -----------------------------------------------
 for vol in "${DATA_VOLUMES[@]}"; do
@@ -248,7 +233,7 @@ add_checksum() {
 
 # gzip -t catches a truncated/corrupt dump; abort rather than ship a backup
 # that would fail mid-restore after the live DB has already been dropped.
-for dump in "$WORK_DIR/postgres/main.sql.gz" "$WORK_DIR/postgres/pm.sql.gz"; do
+for dump in "$WORK_DIR/postgres/main.sql.gz"; do
   [ -f "$dump" ] || continue
   if ! gzip -t "$dump" 2>/dev/null; then
     log_error "integrity check failed: $(basename "$dump") is not a valid gzip — aborting"
@@ -256,7 +241,7 @@ for dump in "$WORK_DIR/postgres/main.sql.gz" "$WORK_DIR/postgres/pm.sql.gz"; do
   fi
   add_checksum "postgres/$(basename "$dump")" "$dump"
 done
-log_success "Postgres dumps pass gzip integrity check"
+log_success "Postgres dump passes gzip integrity check"
 
 # Record a sha256 for each volume artifact too (verified on restore).
 for vol in "${DATA_VOLUMES[@]}"; do

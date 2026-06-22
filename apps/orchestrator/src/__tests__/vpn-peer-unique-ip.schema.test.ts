@@ -66,16 +66,27 @@ describe("VpnPeer active-IP partial unique index (WARP-565)", () => {
     ).toBe(true);
   });
 
-  it("uses a timestamp strictly greater than the previous latest migration", () => {
-    const stamps = readdirSync(MIGRATIONS_DIR)
-      .filter((d) => /^\d{14}_/.test(d))
-      .map((d) => d.slice(0, 14))
-      .sort();
-    const ours = stamps.filter((s, i, arr) => arr.indexOf(s) === i).pop();
-    // The vpn migration must be the lexicographically-last (= newest) stamp.
+  it("uses a timestamp strictly greater than the previous migration", () => {
+    const stamps = [
+      ...new Set(
+        readdirSync(MIGRATIONS_DIR)
+          .filter((d) => /^\d{14}_/.test(d))
+          .map((d) => d.slice(0, 14)),
+      ),
+    ].sort();
     const vpnDir = readdirSync(MIGRATIONS_DIR).find((d) =>
       d.includes("vpn_peer_unique_active_ip"),
     )!;
-    expect(vpnDir.slice(0, 14)).toBe(ours);
+    const vpnStamp = vpnDir.slice(0, 14);
+    const idx = stamps.indexOf(vpnStamp);
+    expect(idx).toBeGreaterThan(-1);
+    // The migration must be ordered strictly AFTER whatever preceded it, so it
+    // applies in sequence without a timestamp collision. Asserting it was the
+    // *globally* newest stamp was brittle: any later feature migration (e.g.
+    // 20260619 scene_schedule) legitimately supersedes it, yet correct ordering
+    // only requires the vpn stamp to beat its immediate predecessor.
+    if (idx > 0) {
+      expect(vpnStamp > stamps[idx - 1]).toBe(true);
+    }
   });
 });

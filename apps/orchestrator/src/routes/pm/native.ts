@@ -1,16 +1,13 @@
 /**
- * /api/pm/* — native project-management routes (ADR-026), replacing the
- * embedded Plane stack. Backs the dashboard Projects surface and (via the
- * orchestrator, P3) the 9 `pm_*` MCP tools.
+ * /api/pm/* — native project-management routes (ADR-026), the Droplet-owned
+ * project-management surface. Backs the dashboard Projects surface and (via the
+ * orchestrator) the 9 `pm_*` MCP tools.
  *
  * Auth: mounted AFTER authMiddleware. PM is household-shared — reads are open
  * to any authenticated role; writes are gated with `requireRole`. Work-item +
  * comment writes additionally admit the MCP service principal
  * (`requireRoleOrMcpService`) so the LLM's confirmed write tools can dispatch
  * through here (the tool layer owns the human-facing confirmation gate).
- *
- * Mount BEFORE `createPmProxyRouter()` so the native GET /api/pm/workspaces
- * supersedes the legacy Plane proxy of the same path (removed in P6).
  *
  * Errors: the service throws Error(code); we map codes → HTTP status here,
  * mirroring routes/calendar.ts.
@@ -40,10 +37,19 @@ function mapServiceError(err: unknown, res: Response): boolean {
     case "label_not_found":
     case "work_item_not_found":
     case "comment_not_found":
-    case "invalid_parent":
       res.status(404).json({ error: msg });
       return true;
+    case "invalid_parent":
+    case "invalid_state":
+    case "invalid_label":
+      res.status(422).json({ error: msg });
+      return true;
     case "identifier_taken":
+    case "state_is_last":
+    case "state_is_default":
+      // A project must keep at least one state and its sole default landing
+      // state — deleting the last/only-default one is a conflict (409), not a
+      // missing resource.
       res.status(409).json({ error: msg });
       return true;
     default:
@@ -118,11 +124,25 @@ const workItemPatchSchema = z.object({
   parent_id: z.string().max(64).nullable().optional(),
   start_date: z.string().datetime().nullable().optional(),
   due_date: z.string().datetime().nullable().optional(),
-  sortOrder: z.number().optional(),
+  // .int() already rejects floats and (via Number.isInteger) NaN/Infinity;
+  // .finite() makes the NaN/Infinity rejection explicit and self-documenting so
+  // a non-finite sortOrder can never reach Prisma's Int column (review finding:
+  // sortOrder admits NaN/Infinity).
+  sortOrder: z.number().int().finite().optional(),
 });
 
 const transitionSchema = z.object({ state_id: z.string().min(1).max(64) });
 const commentCreateSchema = z.object({ comment_html: z.string().min(1).max(100000) });
+
+// Pagination query params: a non-numeric `per_page` / `page` (e.g. `?per_page=abc`)
+// would coerce to NaN and reach Prisma's `skip`/`take` as NaN → a driver-level
+// crash surfacing as 500. Reject them at the route layer → 400 (review finding:
+// NaN pagination → Prisma crash). `z.coerce.number` turns the query string into
+// a number; `.int().positive()` rejects NaN, floats, and non-positive values.
+const paginationQuerySchema = z.object({
+  per_page: z.coerce.number().int().positive().max(200).optional(),
+  page: z.coerce.number().int().positive().optional(),
+});
 
 const WRITE = ["owner", "admin", "family"] as const;
 
@@ -164,9 +184,11 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
   // ── Projects ──
   router.get("/pm/projects", async (req, res, next) => {
     try {
+      const perPage = req.query.per_page ? Number(req.query.per_page) : undefined;
       const projects = await pm.listProjects(prisma, {
         workspaceSlug: req.query.workspace ? String(req.query.workspace) : undefined,
         includeArchived: req.query.archived === "1" || req.query.archived === "true",
+        perPage,
       });
       res.json({ projects });
     } catch (err) {
@@ -311,6 +333,13 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
   router.get("/pm/projects/:id/work-items", async (req, res, next) => {
     try {
       const q = req.query;
+      // Validate pagination before anything reaches the service/Prisma so a
+      // non-numeric per_page/page returns a clean 400 instead of NaN → 500.
+      const pageParsed = paginationQuerySchema.safeParse({
+        per_page: q.per_page,
+        page: q.page,
+      });
+      if (!pageParsed.success) return badRequest(res, pageParsed);
       const parentRaw = q.parent;
       const work_items = await pm.listWorkItems(prisma, req.params.id, {
         stateId: q.state ? String(q.state) : undefined,
@@ -323,8 +352,8 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
           : undefined,
         parentId: parentRaw === undefined ? undefined : parentRaw === "none" ? null : String(parentRaw),
         q: q.q ? String(q.q) : undefined,
-        perPage: q.per_page ? Number(q.per_page) : undefined,
-        page: q.page ? Number(q.page) : undefined,
+        perPage: pageParsed.data.per_page,
+        page: pageParsed.data.page,
       });
       res.json({ work_items });
     } catch (err) {

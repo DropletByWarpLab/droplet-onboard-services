@@ -1200,6 +1200,46 @@ export async function fetchConnectedDevices(): Promise<ConnectedDevice[]> {
   return data.devices;
 }
 
+/** One row of the full interface enumeration. `present:false` = configured but
+ *  not live on this box (render "not on this box", never a fake "down").
+ *  `zone`/`address` are null when not joinable/reported, never fabricated. */
+export interface NetworkInterfaceRow {
+  name: string;
+  device: string | null;
+  proto: string | null;
+  address: string | null;
+  zone: string | null;
+  up: boolean;
+  present: boolean;
+}
+
+export async function fetchInterfaces(): Promise<NetworkInterfaceRow[]> {
+  const res = await authFetch(`${BASE}/api/network/interfaces`);
+  if (!res.ok) throw new Error(`Failed to fetch interfaces: ${res.status}`);
+  const data = await res.json();
+  return data.interfaces;
+}
+
+/** Read-only host-radio detail. Fields are null when iwinfo doesn't report
+ *  them (shown as "not reported"); `supported:false`/`hostRadio:true` is the
+ *  single combined-radio shape (no independent enable/disable). */
+export interface RadioDetail {
+  supported: boolean;
+  hostRadio: boolean;
+  broadcasting: boolean;
+  channel: number | null;
+  htmode: string | null;
+  txpower: number | null;
+  country: string | null;
+  mode: string | null;
+}
+
+export async function fetchRadioDetail(): Promise<RadioDetail> {
+  const res = await authFetch(`${BASE}/api/network/wifi/radio`);
+  if (!res.ok) throw new Error(`Failed to fetch radio detail: ${res.status}`);
+  return res.json();
+}
+
 export async function fetchWifiSettings(): Promise<Record<string, unknown>> {
   const res = await authFetch(`${BASE}/api/network/wifi`);
   if (!res.ok) throw new Error(`Failed to fetch wifi settings: ${res.status}`);
@@ -1254,14 +1294,91 @@ export async function setWifiPassword(password: string): Promise<NetworkCommandR
   return data;
 }
 
-export async function setWifiChannel(channel: string): Promise<NetworkCommandResult> {
+export async function setWifiChannel(
+  channel: string,
+  // WARP-871: pass the LIVE radio section name (read from GET /api/network/wifi)
+  // rather than relying on the orchestrator route's `radio0` default, which
+  // doesn't exist on the single-box AP radio. Omit to keep the server default.
+  radioSection?: string,
+): Promise<NetworkCommandResult> {
   const res = await authFetch(`${BASE}/api/network/wifi/channel`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ channel }),
+    body: JSON.stringify(
+      radioSection ? { channel, radio_section: radioSection } : { channel },
+    ),
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || `Failed to set channel: ${res.status}`);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to set channel");
+  return data;
+}
+
+/**
+ * Stand up the isolated guest Wi-Fi network (own SSID + firewall zone, internet
+ * only). Tier 2 — the orchestrator may answer 202 `confirmation_required`; the
+ * caller confirms via {@link confirmNetworkCommand} (the Save click is the
+ * consent) and then polls the returned operation.
+ */
+export async function createGuestWifi(
+  ssid: string,
+  password: string,
+): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/wifi/guest`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ssid, password }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to set up guest Wi-Fi");
+  return data;
+}
+
+/** Current guest Wi-Fi state. `password` is the PSK (owner/admin read) for the QR.
+ *  `supported` is false on shapes that can't provision a guest network yet (the
+ *  single-box hostapd AP) — the card then shows an honest unavailable state. */
+export interface GuestWifiStatus {
+  configured: boolean;
+  enabled: boolean;
+  ssid: string | null;
+  password: string | null;
+  supported: boolean;
+}
+
+export async function fetchGuestWifi(): Promise<GuestWifiStatus> {
+  const res = await authFetch(`${BASE}/api/network/wifi/guest`);
+  if (!res.ok) throw new Error(`Failed to fetch guest Wi-Fi status: ${res.status}`);
+  return res.json();
+}
+
+/** Tear down the guest network. Applies immediately (drops guests only). */
+export async function removeGuestWifi(): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/wifi/guest`, { method: "DELETE" });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to turn off guest Wi-Fi");
+  return data;
+}
+
+/** UPnP / NAT-PMP state. `available` false = miniupnpd isn't on the box. */
+export interface UpnpStatus {
+  available: boolean;
+  enabled: boolean;
+}
+
+export async function fetchUpnp(): Promise<UpnpStatus> {
+  const res = await authFetch(`${BASE}/api/network/upnp`);
+  if (!res.ok) throw new Error(`Failed to fetch UPnP status: ${res.status}`);
+  return res.json();
+}
+
+/** Toggle UPnP/NAT-PMP. Tier 2 — may answer 202 `confirmation_required`. */
+export async function setUpnp(enabled: boolean): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/upnp`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to update UPnP");
   return data;
 }
 
@@ -1270,6 +1387,39 @@ export async function fetchDhcpLeases(): Promise<Record<string, unknown>[]> {
   if (!res.ok) throw new Error(`Failed to fetch DHCP leases: ${res.status}`);
   const data = await res.json();
   return data.leases;
+}
+
+/** LAN DHCP pool range + lease time. Fields are null when the box omits them
+ *  (a default applies — not "broken"). */
+export interface DhcpPool {
+  start: string | null;
+  limit: string | null;
+  leasetime: string | null;
+}
+
+export async function fetchDhcpPool(): Promise<DhcpPool> {
+  const res = await authFetch(`${BASE}/api/network/dhcp/pool`);
+  if (!res.ok) throw new Error(`Failed to fetch DHCP pool: ${res.status}`);
+  return res.json();
+}
+
+/** Reshape the LAN DHCP pool. Tier 2 — may answer 202 `confirmation_required`,
+ *  which the caller confirms via confirmNetworkCommand. */
+export async function setDhcpPool(
+  start: number,
+  limit: number,
+  leasetime: string,
+): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/dhcp/pool`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ start, limit, leasetime }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok && !data.requiresConfirmation) {
+    throwNetworkWriteError(data, res.status, "Failed to update DHCP pool");
+  }
+  return data;
 }
 
 export async function fetchFirewallConfig(): Promise<FirewallConfig> {
@@ -1286,6 +1436,51 @@ export async function blockNetworkDevice(mac: string, name?: string): Promise<Ne
   });
   const data = await res.json();
   if (!res.ok && !data.requiresConfirmation) throw new Error(data.error || `Failed to block device: ${res.status}`);
+  return data;
+}
+
+/** Add a generic firewall traffic rule. Tier-2 → may return confirmation_required. */
+export async function addFirewallRule(rule: {
+  name: string;
+  src: string;
+  dest: string;
+  proto?: string;
+  destPort?: string;
+  srcPort?: string;
+  target?: string;
+}): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/firewall/rule`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      name: rule.name,
+      src: rule.src,
+      dest: rule.dest,
+      proto: rule.proto ?? "tcp",
+      dest_port: rule.destPort,
+      src_port: rule.srcPort,
+      target: rule.target ?? "REJECT",
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok && !data.requiresConfirmation) throw new Error(data.error || `Failed to add rule: ${res.status}`);
+  return data;
+}
+
+/** Set a zone's default input/output/forward policy. Tier-2 → confirmation_required. */
+export async function setZonePolicy(policy: {
+  zone: string;
+  input?: string;
+  output?: string;
+  forward?: string;
+}): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/firewall/zone-policy`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(policy),
+  });
+  const data = await res.json();
+  if (!res.ok && !data.requiresConfirmation) throw new Error(data.error || `Failed to set zone policy: ${res.status}`);
   return data;
 }
 
@@ -1317,10 +1512,170 @@ export async function addNetworkPortForward(
   return data;
 }
 
+/**
+ * WARP-871: reserve a fixed IP for a device by MAC (DHCP static lease). The
+ * orchestrator route (POST /api/network/dhcp/static-lease, owner/admin) maps
+ * this to add_static_lease — Tier 1, applies immediately, so there is no 202
+ * confirmation step. Returns the NetworkCommandResult (with operationId at
+ * runtime) so callers can poll for the safe-apply outcome if they want.
+ */
+export async function addStaticDhcpLease(
+  name: string,
+  mac: string,
+  ip: string,
+): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/dhcp/static-lease`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, mac, ip }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to add reservation");
+  return data;
+}
+
+/**
+ * WARP-871: set the upstream/custom DNS resolvers the router forwards to
+ * (POST /api/network/dns, owner/admin, Tier 1). The orchestrator requires a
+ * non-empty list; the UI validates each entry is an IP client-side.
+ */
+export async function setDnsServers(
+  servers: string[],
+): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/dns`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ servers }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to set DNS servers");
+  return data;
+}
+
 export async function fetchRouterSystemInfo(): Promise<Record<string, unknown>> {
   const res = await authFetch(`${BASE}/api/network/system`);
   if (!res.ok) throw new Error(`Failed to fetch router system info: ${res.status}`);
   return res.json();
+}
+
+// WARP-871: local DNS host-records (name → IP), e.g. nas.lan → 192.168.50.20.
+export interface DnsHostRecord {
+  section: string;
+  hostname: string;
+  ip: string;
+}
+
+export async function fetchDnsHostnames(): Promise<DnsHostRecord[]> {
+  const res = await authFetch(`${BASE}/api/network/dhcp/hostnames`);
+  if (!res.ok) throw new Error(`Failed to fetch DNS names: ${res.status}`);
+  const data = await res.json();
+  return data.entries ?? [];
+}
+
+export async function addDnsHostname(
+  hostname: string,
+  ip: string,
+): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/dhcp/hostnames`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ hostname, ip }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to add DNS name");
+  return data;
+}
+
+export async function deleteDnsHostname(
+  hostname: string,
+): Promise<NetworkCommandResult> {
+  const res = await authFetch(
+    `${BASE}/api/network/dhcp/hostnames/${encodeURIComponent(hostname)}`,
+    { method: "DELETE" },
+  );
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to delete DNS name");
+  return data;
+}
+
+export type DeploymentPosture =
+  | "PRIMARY_ROUTER"
+  | "DOWNSTREAM_ROUTER"
+  | "UNKNOWN";
+
+export interface NetworkTopology {
+  posture: DeploymentPosture;
+  evidence?: Record<string, unknown>;
+}
+
+/**
+ * WARP-871: read the deployment posture (ADR-018) for the Overview badge.
+ * Best-effort — returns null on any failure so a topology hiccup never breaks
+ * the Overview tab.
+ */
+export async function getNetworkTopology(): Promise<NetworkTopology | null> {
+  try {
+    const res = await authFetch(`${BASE}/api/network/topology`);
+    if (!res.ok) return null;
+    return (await res.json()) as NetworkTopology;
+  } catch {
+    return null;
+  }
+/** Read-only droplet-ai ubus RPC access. Scope chips reflect the live on-box
+ *  ACL. Rotate/Revoke aren't here — they're honest-gated (disabled) in the UI. */
+export interface AiNetworkAccess {
+  user: string;
+  endpoint: string;
+  readScopes: string[];
+  writeScopes: string[];
+  session: { active: boolean; expiresAt: number | null; rotates: string };
+}
+
+export async function fetchAiNetworkAccess(): Promise<AiNetworkAccess> {
+  const res = await authFetch(`${BASE}/api/network/ai-access`);
+  if (!res.ok) throw new Error(`Failed to fetch AI agent access: ${res.status}`);
+  return res.json();
+}
+
+/** Editable system controls + honest gates. `statusLed.supported` /
+ *  `country.editable` are false on shapes that can't drive them (single-box). */
+export interface SystemControls {
+  hostname: string | null;
+  ntpEnabled: boolean;
+  statusLed: { supported: boolean; enabled: boolean };
+  country: { value: string | null; editable: boolean };
+}
+
+export async function fetchSystemControls(): Promise<SystemControls> {
+  const res = await authFetch(`${BASE}/api/network/system/controls`);
+  if (!res.ok) throw new Error(`Failed to fetch system controls: ${res.status}`);
+  return res.json();
+}
+
+/** Change the hostname. Tier 2 — may answer 202 `confirmation_required`. */
+export async function setHostname(hostname: string): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/system/hostname`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ hostname }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok && !data.requiresConfirmation) {
+    throwNetworkWriteError(data, res.status, "Failed to change hostname");
+  }
+  return data;
+}
+
+/** Toggle the appliance's OpenWrt NTP daemon. Tier 1 — applies immediately. */
+export async function setNtp(enabled: boolean): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/system/ntp`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to update time sync");
+  return data;
 }
 
 // --- Managed switch writes (ADDON-network-switch-management.md §7) ---------
@@ -2357,6 +2712,219 @@ export async function runSceneConfirmed(
     throw err;
   }
   return res.json();
+}
+
+/**
+ * A smart-home routine (Scene, WARP-474) as listed by `GET /api/scenes` — a
+ * named batch of device actions an owner can run in one tap. `actionCount` is
+ * how many device commands the routine fires.
+ */
+export interface Scene {
+  id: string;
+  name: string;
+  icon: string | null;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  actionCount: number;
+}
+
+/** List the saved routines (scenes). Any signed-in role may read. */
+export async function fetchScenes(): Promise<Scene[]> {
+  const res = await authFetch(`${BASE}/api/scenes`);
+  if (!res.ok) {
+    throw new Error(`Failed to load routines (${res.status})`);
+  }
+  const data = await res.json();
+  return Array.isArray(data?.scenes) ? data.scenes : [];
+}
+
+/**
+ * Operator-initiated routine run. A routine batches Tier-2 device actions, so
+ * the server gates it: the dashboard pops its own confirm dialog and then calls
+ * with `?confirm=true` (mirrors the scenes page contract — the chat path uses a
+ * minted token via {@link runSceneConfirmed} instead). A non-2xx throws so the
+ * caller can surface the failure.
+ */
+export async function runScene(sceneId: string): Promise<SceneRunOutcome> {
+  const res = await authFetch(
+    `${BASE}/api/scenes/${sceneId}/run?confirm=true`,
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+  );
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(
+      data.error || data.message || `Failed to run routine (${res.status})`,
+    );
+  }
+  return res.json();
+}
+
+/** One device action in a routine: fire `command` (with optional `args`) on a device. */
+export interface SceneActionInput {
+  deviceNodeId: string;
+  command: string;
+  args?: Record<string, unknown>;
+}
+export interface SceneActionDetail extends SceneActionInput {
+  id: string;
+  idx: number;
+}
+/** A routine plus its ordered actions — `GET/POST/PATCH /api/scenes[/:id]`. */
+export interface SceneDetail {
+  id: string;
+  name: string;
+  icon: string | null;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  actions: SceneActionDetail[];
+}
+
+/** Full routine + ordered actions. */
+export async function getScene(id: string): Promise<SceneDetail> {
+  const res = await authFetch(`${BASE}/api/scenes/${id}`);
+  if (!res.ok) throw new Error(`Failed to load routine (${res.status})`);
+  return res.json();
+}
+
+/** Create a routine (owner/admin). Actions are saved in array order. */
+export async function createScene(body: {
+  name: string;
+  icon?: string | null;
+  actions: SceneActionInput[];
+}): Promise<SceneDetail> {
+  const res = await authFetch(`${BASE}/api/scenes`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Failed to create routine (${res.status})`);
+  }
+  return res.json();
+}
+
+/**
+ * Update a routine (owner/admin). Send `actions` in display order — the server
+ * rewrites `idx` from the array (the drag-reorder save path). Pass `icon: null`
+ * to clear an icon; omit a field to leave it unchanged.
+ */
+export async function updateScene(
+  id: string,
+  patch: { name?: string; icon?: string | null; actions?: SceneActionInput[] },
+): Promise<SceneDetail> {
+  const res = await authFetch(`${BASE}/api/scenes/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Failed to update routine (${res.status})`);
+  }
+  return res.json();
+}
+
+/** Delete a routine (owner/admin). */
+export async function deleteScene(id: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/scenes/${id}`, { method: "DELETE" });
+  if (!res.ok && res.status !== 404) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Failed to delete routine (${res.status})`);
+  }
+}
+
+/**
+ * feat/scene-schedules — a recurring cadence bound to a routine (Scene). The
+ * orchestrator's scene-schedule ticker runs the routine when `nextFireAt`
+ * passes, then advances it from `rrule`. `rrule` is UTC-only (FREQ=DAILY|WEEKLY
+ * with BYHOUR/BYMINUTE/BYDAY) — the editor converts the owner's local wall-clock
+ * time to UTC before sending. `nextFireAt`/`lastFiredAt` are ISO instants;
+ * `lastFiredAt` is null until the first fire.
+ */
+export interface SceneSchedule {
+  id: string;
+  sceneId: string;
+  rrule: string;
+  nextFireAt: string;
+  enabled: boolean;
+  createdBy: string | null;
+  lastFiredAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** List the schedules for a routine. Any signed-in role may read. */
+export async function fetchSceneSchedules(
+  sceneId: string,
+): Promise<SceneSchedule[]> {
+  const res = await authFetch(`${BASE}/api/scenes/${sceneId}/schedules`);
+  if (!res.ok) {
+    throw new Error(`Failed to load schedules (${res.status})`);
+  }
+  const data = await res.json();
+  return Array.isArray(data?.schedules) ? data.schedules : [];
+}
+
+/**
+ * Create a schedule for a routine (owner/admin). `rrule` must be a supported
+ * UTC RRULE (the server 400s a malformed one); the editor builds it from the
+ * owner's chosen days + local time, converted to UTC.
+ */
+export async function createSceneSchedule(
+  sceneId: string,
+  rrule: string,
+): Promise<SceneSchedule> {
+  const res = await authFetch(`${BASE}/api/scenes/${sceneId}/schedules`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ rrule }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(
+      data.error || data.detail || `Failed to create schedule (${res.status})`,
+    );
+  }
+  return res.json();
+}
+
+/** Enable / disable a schedule (owner/admin). Re-enabling recomputes nextFireAt. */
+export async function toggleSceneSchedule(
+  sceneId: string,
+  scheduleId: string,
+  enabled: boolean,
+): Promise<SceneSchedule> {
+  const res = await authFetch(
+    `${BASE}/api/scenes/${sceneId}/schedules/${scheduleId}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    },
+  );
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Failed to update schedule (${res.status})`);
+  }
+  return res.json();
+}
+
+/** Delete a schedule (owner/admin). */
+export async function deleteSceneSchedule(
+  sceneId: string,
+  scheduleId: string,
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/scenes/${sceneId}/schedules/${scheduleId}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok && res.status !== 404) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Failed to delete schedule (${res.status})`);
+  }
 }
 
 /**

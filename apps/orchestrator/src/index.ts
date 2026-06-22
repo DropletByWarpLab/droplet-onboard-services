@@ -39,7 +39,10 @@ import {
   createPrismaTlsCertStore,
   createDiskTlsFileOps,
   bridgeNginxReloader,
+  createBridgeFqdnPersister,
+  createRoutingDnsRegistrar,
 } from "./services/tls-issuance.adapters.js";
+import { scheduleTlsBootTick } from "./services/tls-issuance.boot-tick.js";
 import { createDeviceIdentityClient } from "./services/device-identity.client.js";
 import {
   createScheduleTicker,
@@ -55,6 +58,9 @@ import {
 } from "./services/schedule-purge.js";
 import { purgeAuditLogs } from "./services/audit-retention-purge.service.js";
 import { tickToolSchedules } from "./services/tool-schedule-ticker.service.js";
+import { tickSceneSchedules } from "./services/scene-schedule-ticker.service.js";
+import type { MatterDispatcher } from "./routes/scenes.js";
+import { sendMatterCommand } from "./services/matter.service.js";
 import { mcpClient } from "./services/mcp-client.singleton.js";
 import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { mineToolCallPatterns } from "./services/pattern-miner.service.js";
@@ -67,7 +73,6 @@ import { startContextStatsInvalidator } from "./services/context-stats-invalidat
 import { initActivityRecorder, recordActivity } from "./services/activity.singleton.js";
 import { attachFileIndexerActivityBridge } from "./services/activity-file-indexer-bridge.js";
 import { ensureDefaultModelPulled } from "./services/model-readiness.service.js";
-import { bootstrapPlaneInstanceInBackground } from "./services/pm-bootstrap.service.js";
 
 const logger = pino({ name: "orchestrator" });
 
@@ -228,12 +233,6 @@ async function main() {
     );
   }
 
-  // WARP-860: Plane CE has no headless setup — complete its god-mode
-  // instance configuration in the background so the embedded Projects
-  // surface works without the "Welcome aboard Plane" wall, even when the
-  // owner skips the wizard's PM step. Bounded retries inside; never throws.
-  bootstrapPlaneInstanceInBackground();
-
   // WARP-81: device-intelligence reconciler. Loads the bundled OUI CSV once
   // at startup (best-effort — missing file is logged, lookups degrade to
   // null) and constructs the registry that drives NetworkDevice /
@@ -365,6 +364,28 @@ async function main() {
     { lockKey: "droplet:tool-schedule-ticker" },
   );
 
+  // feat/scene-schedules: scene-schedule-ticker. Every 60s scans due
+  // SceneSchedule rows and fires each routine via the SAME executeScene
+  // path the interactive POST /scenes/:id/run route uses. The dispatcher
+  // is hoisted here and shared with createScenesRouter (passed to
+  // createApp below) so the run route and the ticker dispatch through one
+  // Matter wrapper. NOT gated on ROUTING_MODE — Matter rides the sidecar,
+  // independent of OpenWrt router supervision (the router-dependent
+  // schedulers above short-circuit when ROUTING_MODE=disabled; Matter does
+  // not). Multi-instance deploys lock on `droplet:scene-schedule-ticker`
+  // so only one replica fires each due schedule.
+  const sceneMatterDispatcher: MatterDispatcher = {
+    sendCommand: (nodeId, command, args) =>
+      sendMatterCommand(nodeId, command, args),
+  };
+  cronRuntime.scheduleInterval(
+    60_000,
+    async () => {
+      await tickSceneSchedules(prisma, sceneMatterDispatcher);
+    },
+    { lockKey: "droplet:scene-schedule-ticker" },
+  );
+
   // WARP-446 (AC #1): mDNS coverage-extender discovery. Every
   // DROPLET_AP_DISCOVERY_INTERVAL seconds (default 10 s) the poller
   // queries the routing service's /aps/discovered endpoint and
@@ -375,7 +396,14 @@ async function main() {
   // deploys don't double-fire.
   const apDiscoveryIntervalMs = config.DROPLET_AP_DISCOVERY_INTERVAL * 1000;
   if (routerSupervisionEnabled) {
-    startApDiscoveryPoller(cronRuntime, prisma, openwrt, apDiscoveryIntervalMs);
+    // ADR-024 Phase 2: the poller drives the discovery multiplexer. The
+    // EasyMesh / UniFi sources are registered only when their flag is on;
+    // both default off, so the shipping single-box runs only the live
+    // mDNS source — the same single tick + advisory lock as Phase 1.
+    startApDiscoveryPoller(cronRuntime, prisma, openwrt, apDiscoveryIntervalMs, {
+      easymeshEnabled: config.DROPLET_AP_EASYMESH_ENABLED,
+      unifiEnabled: config.DROPLET_AP_UNIFI_ENABLED,
+    });
   }
 
   cronRuntime.scheduleCron(
@@ -509,6 +537,12 @@ async function main() {
   // service (it does NOT throw), so a flaky HQ never increments the canary;
   // only an unexpected (programming) error bubbles up here — exactly what the
   // canary should escalate, same posture as the purge handlers above.
+  // ADR-023 PR-1 — zero-touch. `hqConfigured` gates the empty-fqdn bootstrap
+  // path so a fresh box LEARNS its opaque name from HQ (and persists it back to
+  // .env via the bridge); `dns` registers that learned name with the routing
+  // service's split-horizon dnsmasq on every install. Both extra collaborators
+  // are best-effort — a persist/DNS failure never aborts issuance.
+  const hqConfigured = !!config.HQ_ISSUANCE_URL;
   const tlsIssuance = createTlsIssuanceService({
     fqdn: config.DROPLET_PUBLIC_FQDN,
     deviceId: config.DROPLET_DEVICE_ID,
@@ -518,6 +552,9 @@ async function main() {
     files: createDiskTlsFileOps(),
     reloadNginx: bridgeNginxReloader,
     logger,
+    hqConfigured,
+    persistFqdn: createBridgeFqdnPersister(),
+    dns: createRoutingDnsRegistrar(),
   });
   cronRuntime.scheduleCron(
     "0 4 * * *",
@@ -526,10 +563,23 @@ async function main() {
     },
     { lockKey: "droplet:tls-renewal" },
   );
+  // ADR-023 PR-1 (Gap 3) — immediate, idempotent, fail-soft boot tick so a
+  // reflash gets its publicly-trusted cert within seconds instead of waiting up
+  // to 24h for the 04:00 cron. Gated on HQ being configured (no-op on dev/CI);
+  // the service's provisioned-guard short-circuits an un-provisioned box inside
+  // runOnce(). The unref'd timer never holds the loop open and a rejection is
+  // caught (NOT via cron-runtime.safeRun, so it never churns the cron canary).
+  scheduleTlsBootTick({
+    hqConfigured,
+    runOnce: () => tlsIssuance.runOnce(),
+    logger,
+  });
 
   // Start Express on top of a raw http.Server so we can attach the
   // WebSocket bridge (MQTT → browser) to the same listen socket.
-  const app = createApp(prisma);
+  // feat/scene-schedules: pass the hoisted Matter dispatcher so the scenes
+  // router and the scene-schedule ticker share ONE instance.
+  const app = createApp(prisma, sceneMatterDispatcher);
   const server = createServer(app);
   attachWsBridge(server);
   server.listen(config.PORT, () => {

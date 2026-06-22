@@ -17,6 +17,8 @@ import {
 import { fmtISODate, isOverdue } from "./config";
 import { useActivity, useComments, useSubIssues, pmActions } from "./usePm";
 import type { PmWorkItem } from "./types";
+import { escapeHtml } from "@/lib/escape-html";
+import { formatRelativeTime } from "@/lib/relative-time";
 
 function PropRow({
   icon,
@@ -80,6 +82,10 @@ function Comment({ authorId, html, when }: { authorId: string | null; html: stri
           </span>
           <span style={{ fontSize: 11, color: "var(--text-4)" }}>{when}</span>
         </div>
+        {/* Comment HTML is server-sanitized against a strict allowlist at the
+            write boundary (orchestrator sanitizePmHtml in addComment) — every
+            persisted value, whether from the dashboard, the mobile API, or an
+            MCP tool call, is clean before it ever reaches this render. */}
         <div
           className={"pm-prose" + (ai ? " pm-ai-bubble" : "")}
           style={ai ? { padding: "9px 11px", borderRadius: 10 } : undefined}
@@ -90,20 +96,6 @@ function Comment({ authorId, html, when }: { authorId: string | null; html: stri
   );
 }
 
-function escapeHtml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-function relTime(iso: string): string {
-  const d = new Date(iso).getTime();
-  if (Number.isNaN(d)) return "";
-  const mins = Math.round((Date.now() - d) / 60000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.round(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  return `${Math.round(hrs / 24)}d ago`;
-}
 
 function humanizeActivity(verb: string, field: string | null): string {
   switch (verb) {
@@ -192,6 +184,9 @@ function DetailBody({ item, onChanged }: { item: PmWorkItem; onChanged: () => vo
           Description
         </div>
         {item.descriptionHtml ? (
+          // descriptionHtml is server-sanitized against a strict allowlist at the
+          // write boundary (orchestrator sanitizePmHtml in createWorkItem /
+          // updateWorkItem) — the stored value is always clean before render.
           <div className="pm-prose" dangerouslySetInnerHTML={{ __html: item.descriptionHtml }} />
         ) : (
           <div style={{ fontSize: 13, color: "var(--text-4)" }}>No description yet.</div>
@@ -257,7 +252,7 @@ function DetailBody({ item, onChanged }: { item: PmWorkItem; onChanged: () => vo
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           {list.length ? (
-            list.map((c) => <Comment key={c.id} authorId={c.authorId} html={c.commentHtml} when={relTime(c.createdAt)} />)
+            list.map((c) => <Comment key={c.id} authorId={c.authorId} html={c.commentHtml} when={formatRelativeTime(c.createdAt)} />)
           ) : (
             <div style={{ fontSize: 13, color: "var(--text-4)" }}>No comments yet.</div>
           )}

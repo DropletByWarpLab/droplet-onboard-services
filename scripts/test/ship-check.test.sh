@@ -820,12 +820,8 @@ test_stale_repo_names_catches_inference_engine_reintro() {
 # debt (slated for retirement by ADR-018 action item 3); the lifecycle-naming
 # check grandfathers that explicit set and FAILS only on NEW occurrences.
 #
-# This is the repo-wide net for rule 17. It is deliberately distinct from the
-# services/pm/-scoped rule-17 sub-check inside `pm-invariants` (that one stays
-# stricter — zero tolerance — because the Plane stack landed clean and must
-# stay clean). The two do not overlap: pm-invariants scans services/pm/;
-# lifecycle-naming scans docker-compose.yml + .env.example + top-level
-# scripts/*.sh + scripts/lib/*.sh.
+# This is the repo-wide net for rule 17: lifecycle-naming scans
+# docker-compose.yml + .env.example + top-level scripts/*.sh + scripts/lib/*.sh.
 #
 # Synthetic regression: inject a NEW `profiles: ["poc"]` line into
 # docker/docker-compose.yml (a covered surface) — the precise AC demonstration
@@ -870,186 +866,6 @@ test_lifecycle_naming_catches_new_poc_token() {
   # 3. lifecycle-naming should now FAIL — the new poc token is beyond the
   #    grandfather allowlist.
   _assert_check_fails "$REPO_ROOT_REAL" lifecycle-naming
-}
-
-# =============================================================================
-# Shared helpers for the PM-gate tests (WARP-496 / bug #10)
-# =============================================================================
-#
-# The seven Plane PM services (postgres-pm, redis-pm, pm-migrator, pm-api,
-# pm-worker, pm-web, pm-health) carry `profiles: ["pm"]`. On the single-box
-# shape they are reached not by a `single-box` profile membership but by
-# scripts/lib/single-box.sh conditionally APPENDING `pm` to COMPOSE_PROFILES —
-# an opt-OUT gate (default ON) keyed on DROPLET_PM_ENABLED. So the truest
-# invariant to assert is "the active profile set that single-box.sh composes
-# for a given gate state resolves PM in/out", which is exactly what
-# `docker compose config` does when it honors COMPOSE_PROFILES.
-_PM_SERVICES="postgres-pm redis-pm pm-migrator pm-api pm-worker pm-web pm-health"
-
-# Echo the compose `config --services` list for an explicit COMPOSE_PROFILES
-# value (passed as $1, may be empty for the bare default profile). Mirrors how
-# `docker compose up` reads COMPOSE_PROFILES from the env on a provisioned box,
-# rather than passing --profile flags (which is the build-time path).
-_pm_services_for_profiles() {
-  local profiles="$1" compose="$REPO_ROOT_REAL/docker/docker-compose.yml" env_file=""
-  if [ -f "$REPO_ROOT_REAL/.env.example" ]; then
-    env_file="$REPO_ROOT_REAL/.env.example"
-  elif [ -f "$REPO_ROOT_REAL/.env" ]; then
-    env_file="$REPO_ROOT_REAL/.env"
-  else
-    return 2
-  fi
-  COMPOSE_PROFILES="$profiles" \
-    docker compose -f "$compose" --env-file "$env_file" config --services 2>/dev/null
-}
-
-# Count how many of the 7 PM services appear in a `config --services` listing.
-_pm_count_present() {
-  local services="$1" svc n=0
-  for svc in $_PM_SERVICES; do
-    if printf '%s\n' "$services" | grep -qx "$svc"; then n=$((n + 1)); fi
-  done
-  printf '%s' "$n"
-}
-
-# =============================================================================
-# Test: PM stack present by DEFAULT on single-box (gate unset / =1) — WARP-496
-# =============================================================================
-#
-# Bug #10 ("project management missing"): the PM stack was orphaned on the
-# single-box shape, so the always-present nginx /pm/ route returned 502.
-#
-# Design (refined from PR #487's always-on `["pm","single-box"]`): PM is an
-# opt-OUT, DEFAULT-ON gate. scripts/lib/single-box.sh appends `pm` to
-# COMPOSE_PROFILES UNLESS DROPLET_PM_ENABLED is 0/false/no. The owner wants PM
-# working out-of-the-box on capable boxes, so the default (gate unset, or =1)
-# MUST resolve the full PM stack.
-#
-# This asserts the default-ON invariant against the real compose tree: the
-# single-box ACTIVE profile set (`linux,display,single-box,pm` — what
-# single-box.sh composes when the gate is enabled) must list all seven PM
-# services. Mirrors the camera-discovery profile precedent (ADR-018 Decision 4).
-test_pm_stack_active_when_gate_default() {
-  if ! command -v docker >/dev/null 2>&1; then
-    printf "    ${_YELLOW}SKIP${_RESET}  docker not on PATH — install Docker Desktop\n"
-    return 0
-  fi
-  if [ ! -f "$REPO_ROOT_REAL/docker/docker-compose.yml" ]; then
-    printf "    compose file missing\n" >&2
-    return 1
-  fi
-
-  # The active profile set single-box.sh composes when PM is ENABLED (the
-  # default): linux + display + single-box + pm.
-  local services
-  if ! services="$(_pm_services_for_profiles "linux,display,single-box,pm")"; then
-    printf "    docker compose config (gate-default profiles) failed\n" >&2
-    return 1
-  fi
-
-  local present
-  present="$(_pm_count_present "$services")"
-  if [ "$present" -ne 7 ]; then
-    printf "    expected all 7 PM services in the default single-box profile set, got %s\n" "$present" >&2
-    printf "    (PM is default-ON: single-box.sh must append 'pm' to COMPOSE_PROFILES unless DROPLET_PM_ENABLED=0)\n" >&2
-    return 1
-  fi
-  return 0
-}
-
-# =============================================================================
-# Test: PM stack EXCLUDED when DROPLET_PM_ENABLED=0 — WARP-496
-# =============================================================================
-#
-# The opt-OUT half of the gate: a resource-constrained (~6 GB) single-box must
-# be able to drop the ~2.5 GB always-on Plane stack by setting
-# DROPLET_PM_ENABLED=0. With PM gated OFF, scripts/lib/single-box.sh does NOT
-# append `pm` to COMPOSE_PROFILES, so the active profile set is
-# `linux,display,single-box` and — because the PM services carry `["pm"]` ONLY
-# (PR #487's `single-box` membership reverted) — NONE of the 7 resolve.
-#
-# Asserts BOTH:
-#   (a) the single-box active set WITHOUT `pm` excludes all 7 PM services, and
-#   (b) a bare default-profile run (no COMPOSE_PROFILES at all) also excludes
-#       them — proving the revert to `["pm"]` keeps PM off the default profile.
-test_pm_stack_disabled_via_env_gate() {
-  if ! command -v docker >/dev/null 2>&1; then
-    printf "    ${_YELLOW}SKIP${_RESET}  docker not on PATH — install Docker Desktop\n"
-    return 0
-  fi
-  if [ ! -f "$REPO_ROOT_REAL/docker/docker-compose.yml" ]; then
-    printf "    compose file missing\n" >&2
-    return 1
-  fi
-
-  # (a) PM gated OFF → single-box active set is linux,display,single-box (no pm).
-  local services_off present_off
-  if ! services_off="$(_pm_services_for_profiles "linux,display,single-box")"; then
-    printf "    docker compose config (gate-off profiles) failed\n" >&2
-    return 1
-  fi
-  present_off="$(_pm_count_present "$services_off")"
-  if [ "$present_off" -ne 0 ]; then
-    local svc leaked=()
-    for svc in $_PM_SERVICES; do
-      if printf '%s\n' "$services_off" | grep -qx "$svc"; then leaked+=("$svc"); fi
-    done
-    printf "    PM services leaked into the gated-OFF single-box set: %s\n" "${leaked[*]}" >&2
-    printf "    (revert PM services to profiles: [\"pm\"] so 'single-box' alone never resolves them)\n" >&2
-    return 1
-  fi
-
-  # (b) Bare default profile (no COMPOSE_PROFILES) must also exclude PM.
-  local services_default present_default
-  if ! services_default="$(_pm_services_for_profiles "")"; then
-    printf "    docker compose config (default profile) failed\n" >&2
-    return 1
-  fi
-  present_default="$(_pm_count_present "$services_default")"
-  if [ "$present_default" -ne 0 ]; then
-    printf "    PM services present in the bare default profile (expected 0, got %s)\n" "$present_default" >&2
-    return 1
-  fi
-
-  return 0
-}
-
-# =============================================================================
-# Test: disabling PM strips a previously-appended `pm` (symmetric opt-out) — WARP-496
-# =============================================================================
-#
-# PR #487 code-review follow-up: the gate-OFF path must STRIP an already-present
-# `pm` token so DROPLET_PM_ENABLED=0 + a re-run drops the stack on an
-# already-PM-provisioned box (not only on a fresh provision). Unit-tests the
-# pure `_strip_pm_profile` helper the disable branch calls. Substring-safe: a
-# profile named `pmx`/`xpm` must be preserved. No docker needed (single-box.sh
-# is define-only; sourced in a subshell so its funcs don't leak into the runner).
-test_pm_profile_strip_symmetric_disable() {
-  (
-    set +e
-    # shellcheck source=/dev/null
-    source "$REPO_ROOT_REAL/scripts/lib/single-box.sh" >/dev/null 2>&1 || { printf "    could not source single-box.sh\n" >&2; exit 2; }
-    type _strip_pm_profile >/dev/null 2>&1 || { printf "    _strip_pm_profile not defined\n" >&2; exit 3; }
-    local cases=(
-      "linux,display,single-box,pm|linux,display,single-box"
-      "single-box,pm|single-box"
-      "pm,single-box|single-box"
-      "pm|"
-      "linux,display,single-box|linux,display,single-box"
-      "linux,pmx,single-box,pm|linux,pmx,single-box"
-      "linux,xpm,single-box|linux,xpm,single-box"
-    )
-    local c in exp got
-    for c in "${cases[@]}"; do
-      in="${c%%|*}"; exp="${c#*|}"
-      got="$(_strip_pm_profile "$in")"
-      if [ "$got" != "$exp" ]; then
-        printf "    _strip_pm_profile '%s' -> '%s' (expected '%s')\n" "$in" "$got" "$exp" >&2
-        exit 1
-      fi
-    done
-    exit 0
-  )
 }
 
 # =============================================================================
@@ -1142,6 +958,91 @@ STUB
 }
 
 # =============================================================================
+# Test: tls-invariants catches a factory-reset HQ-deregister regression
+# (ADR-023 PR-3)
+# =============================================================================
+#
+# Original bug: factory-reset.sh Phase 0b sent a BODYLESS `curl -X DELETE
+# …/api/issuance/registration`, which the deployed HQ Worker 422s (it requires
+# a signed TPM-PoP body), so HQ never unbound the device. The fix runs the
+# `tls-deregister` CLI (signed DELETE) while the stack is still up.
+#
+# This test builds a synthetic worktree with the real secrets.sh + nginx.conf +
+# factory-reset.sh, asserts the check PASSES, then applies two regressions and
+# asserts each FAILS:
+#   (a) drop the `npm run -s tls-deregister` invocation,
+#   (b) re-introduce a bodyless curl to /api/issuance/registration.
+test_tls_invariants_catches_deregister_regression() {
+  local needed=(
+    "scripts/lib/secrets.sh"
+    "docker/nginx.conf"
+    "scripts/factory-reset.sh"
+    "scripts/lib/logging.sh"
+  )
+  local rel
+  for rel in "${needed[@]}"; do
+    if [ ! -f "$REPO_ROOT_REAL/$rel" ]; then
+      printf "    required file missing from tree: %s\n" "$rel" >&2
+      return 1
+    fi
+  done
+
+  local synth
+  synth="$(mktemp -d)"
+  # shellcheck disable=SC2064  # capture $synth at trap-set time
+  trap "rm -rf '$synth'" RETURN
+
+  mkdir -p "$synth/.git"
+  mkdir -p "$synth/scripts/lib" "$synth/docker"
+  cp "$REPO_ROOT_REAL/scripts/lib/secrets.sh"   "$synth/scripts/lib/secrets.sh"
+  cp "$REPO_ROOT_REAL/scripts/lib/logging.sh"   "$synth/scripts/lib/logging.sh"
+  cp "$REPO_ROOT_REAL/docker/nginx.conf"        "$synth/docker/nginx.conf"
+  cp "$REPO_ROOT_REAL/scripts/factory-reset.sh" "$synth/scripts/factory-reset.sh"
+
+  # 1. Faithful copy → check PASSES.
+  if ! _assert_check_passes "$synth" tls-invariants; then
+    printf "    baseline tls-invariants failed against a faithful copy of the tree\n" >&2
+    return 1
+  fi
+
+  # 2a. Regression: strip the signed tls-deregister CLI invocation. The check
+  #     must FAIL (factory-reset no longer signs the HQ unbind).
+  local stripped
+  stripped="$(grep -v 'npm run -s tls-deregister' "$synth/scripts/factory-reset.sh")"
+  printf '%s\n' "$stripped" > "$synth/scripts/factory-reset.sh"
+  if ! _assert_check_fails "$synth" tls-invariants; then
+    printf "    expected tls-invariants to FAIL after dropping the tls-deregister CLI\n" >&2
+    return 1
+  fi
+
+  # 2b. Regression: restore the CLI line AND re-introduce the bodyless curl to
+  #     /api/issuance/registration (the original 422 bug). The check must FAIL.
+  cp "$REPO_ROOT_REAL/scripts/factory-reset.sh" "$synth/scripts/factory-reset.sh"
+  cat >> "$synth/scripts/factory-reset.sh" <<'BODYLESS'
+# Synthetic regression for the ship-check self-test: the bodyless DELETE the
+# deployed HQ Worker 422s. tls-invariants must catch this.
+curl -sS -X DELETE "${HQ_ISSUANCE_URL%/}/api/issuance/registration?device_id=${DEV}" || true
+BODYLESS
+  if ! _assert_check_fails "$synth" tls-invariants; then
+    printf "    expected tls-invariants to FAIL after re-introducing a bodyless curl\n" >&2
+    return 1
+  fi
+
+  # 2c. A purely EXPLANATORY comment that mentions the old curl must NOT trip a
+  #     false FAIL — the grep strips comment lines first. Restore the faithful
+  #     copy + append only a comment referencing the bodyless curl; PASS again.
+  cp "$REPO_ROOT_REAL/scripts/factory-reset.sh" "$synth/scripts/factory-reset.sh"
+  cat >> "$synth/scripts/factory-reset.sh" <<'COMMENTONLY'
+# was: curl -X DELETE "${HQ_ISSUANCE_URL%/}/api/issuance/registration" (replaced
+# by the signed tls-deregister CLI; HQ 422'd the bodyless DELETE).
+COMMENTONLY
+  if ! _assert_check_passes "$synth" tls-invariants; then
+    printf "    tls-invariants false-FAILed on a comment that only MENTIONS the old curl\n" >&2
+    return 1
+  fi
+}
+
+# =============================================================================
 # Driver
 # =============================================================================
 printf "\n  ${_BOLD}Ship-check regression test suite${_RESET}\n"
@@ -1181,17 +1082,11 @@ _run_test "stale-repo-names catches inference-engine re-introduction (WARP-494)"
 _run_test "lifecycle-naming catches new poc token in user-facing surface (ADR-018)" \
   test_lifecycle_naming_catches_new_poc_token
 
-_run_test "Plane PM stack is active by default on single-box (bug #10, WARP-496)" \
-  test_pm_stack_active_when_gate_default
-
-_run_test "Plane PM stack excluded when DROPLET_PM_ENABLED=0 (WARP-496)" \
-  test_pm_stack_disabled_via_env_gate
-
-_run_test "Disabling PM strips a previously-appended pm profile (symmetric opt-out, WARP-496)" \
-  test_pm_profile_strip_symmetric_disable
-
 _run_test "image-pipeline catches a stubbed scripts/build-image.sh (WARP-663)" \
   test_image_pipeline_catches_stubbed_build_image
+
+_run_test "tls-invariants catches a factory-reset HQ-deregister regression (ADR-023 PR-3)" \
+  test_tls_invariants_catches_deregister_regression
 
 printf "\n  ──────────────────────────────────\n"
 printf "  Results: %d/%d passed" "$PASSED" "$TOTAL"
