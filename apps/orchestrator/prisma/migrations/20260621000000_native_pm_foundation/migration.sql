@@ -13,6 +13,9 @@ CREATE TYPE "PmModuleStatus" AS ENUM ('backlog', 'planned', 'in_progress', 'paus
 -- CreateEnum
 CREATE TYPE "PmPropertyType" AS ENUM ('text', 'number', 'date', 'boolean', 'select', 'multi_select', 'member');
 
+-- CreateEnum
+CREATE TYPE "PmActivityVerb" AS ENUM ('created', 'updated', 'state_changed', 'commented', 'assigned', 'unassigned', 'priority_changed', 'due_date_changed', 'title_changed', 'description_changed', 'label_added', 'label_removed', 'archived', 'restored', 'cycle_added', 'cycle_removed');
+
 -- CreateTable
 CREATE TABLE "PmWorkspace" (
     "id" TEXT NOT NULL,
@@ -66,6 +69,7 @@ CREATE TABLE "PmLabel" (
     "name" TEXT NOT NULL,
     "color" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT "PmLabel_pkey" PRIMARY KEY ("id")
 );
@@ -173,6 +177,7 @@ CREATE TABLE "PmCustomProperty" (
     "options" JSONB,
     "sortOrder" INTEGER NOT NULL DEFAULT 0,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT "PmCustomProperty_pkey" PRIMARY KEY ("id")
 );
@@ -194,7 +199,7 @@ CREATE TABLE "PmAttachment" (
     "workItemId" TEXT NOT NULL,
     "fileName" TEXT NOT NULL,
     "mimeType" TEXT NOT NULL,
-    "sizeBytes" INTEGER NOT NULL,
+    "sizeBytes" BIGINT NOT NULL,
     "storageKey" TEXT NOT NULL,
     "uploadedById" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -207,7 +212,7 @@ CREATE TABLE "PmActivity" (
     "id" TEXT NOT NULL,
     "workItemId" TEXT NOT NULL,
     "actorId" TEXT,
-    "verb" TEXT NOT NULL,
+    "verb" "PmActivityVerb" NOT NULL,
     "field" TEXT,
     "oldValue" TEXT,
     "newValue" TEXT,
@@ -245,6 +250,9 @@ CREATE INDEX "PmWorkItem_parentId_idx" ON "PmWorkItem"("parentId");
 
 -- CreateIndex
 CREATE INDEX "PmWorkItem_cycleId_idx" ON "PmWorkItem"("cycleId");
+
+-- CreateIndex
+CREATE INDEX "PmWorkItem_stateId_idx" ON "PmWorkItem"("stateId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "PmWorkItem_projectId_sequenceId_key" ON "PmWorkItem"("projectId", "sequenceId");

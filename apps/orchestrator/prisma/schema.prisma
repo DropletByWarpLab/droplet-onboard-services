@@ -2689,6 +2689,7 @@ model PmLabel {
   name      String
   color     String?
   createdAt DateTime          @default(now())
+  updatedAt DateTime          @default(now()) @updatedAt
   items     PmWorkItemLabel[]
 
   @@unique([projectId, name])
@@ -2747,6 +2748,7 @@ model PmWorkItem {
   @@index([projectId, updatedAt(sort: Desc)])
   @@index([parentId])
   @@index([cycleId])
+  @@index([stateId])
 }
 
 /// Work-item ↔ assignee join. `userId` is a User.id.
@@ -2869,6 +2871,7 @@ model PmCustomProperty {
   options   Json?
   sortOrder Int                       @default(0)
   createdAt DateTime                  @default(now())
+  updatedAt DateTime                  @default(now()) @updatedAt
   values    PmWorkItemPropertyValue[]
 
   @@unique([projectId, name])
@@ -2899,7 +2902,7 @@ model PmAttachment {
   workItem     PmWorkItem @relation(fields: [workItemId], references: [id], onDelete: Cascade)
   fileName     String
   mimeType     String
-  sizeBytes    Int
+  sizeBytes    BigInt
   storageKey   String     @unique
   uploadedById String?
   createdAt    DateTime   @default(now())
@@ -2907,16 +2910,34 @@ model PmAttachment {
   @@index([workItemId])
 }
 
+enum PmActivityVerb {
+  created
+  updated
+  state_changed
+  commented
+  assigned
+  unassigned
+  priority_changed
+  due_date_changed
+  title_changed
+  description_changed
+  label_added
+  label_removed
+  archived
+  restored
+  cycle_added
+  cycle_removed
+}
+
 /// Append-only activity/history feed for a work item. `actorId` null = system /
-/// LLM. `verb` is a machine token ("created" | "updated" | "state_changed" |
-/// "commented" | "assigned" | …); for field updates `field`/`oldValue`/
+/// LLM. `verb` is a machine token; for field updates `field`/`oldValue`/
 /// `newValue` capture the diff.
 model PmActivity {
-  id         String     @id @default(uuid())
+  id         String          @id @default(uuid())
   workItemId String
-  workItem   PmWorkItem @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  workItem   PmWorkItem      @relation(fields: [workItemId], references: [id], onDelete: Cascade)
   actorId    String?
-  verb       String
+  verb       PmActivityVerb
   field      String?
   oldValue   String?
   newValue   String?
