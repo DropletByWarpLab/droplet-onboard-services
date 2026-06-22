@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { Search, X, Loader2, Sparkles } from "lucide-react";
+import { Search, X, Loader2, Sparkles, Type } from "lucide-react";
 import { useFileSearch } from "@/lib/hooks/useFileSearch";
 import {
   searchFileContent,
@@ -37,31 +37,44 @@ function formatSize(bytes: number): string {
  * Implements keyboard nav (↑↓Enter Esc) and click-outside dismissal. The fetch
  * itself is debounced inside `useFileSearch`, so typing doesn't thrash the API.
  */
+/**
+ * Content-search modes share one debounced API path; `filename` uses the
+ * legacy Nextcloud name-match hook. WARP-880 / WS-2 surfaces the lexical
+ * (`keyword`) and pgvector (`semantic`) engines that already shipped under
+ * WARP-286.
+ */
+type SearchMode = "filename" | "keyword" | "semantic";
+
 export function SearchBar({ onPickResult }: SearchBarProps) {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const [activeIdx, setActiveIdx] = useState(0);
-  const [semantic, setSemantic] = useState(false);
+  const [mode, setMode] = useState<SearchMode>("filename");
   const inputRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Filename search (non-semantic)
+  // `keyword` and `semantic` both hit the content-search API; `filename`
+  // uses the name-match hook. The `content` flag is the union of the two
+  // content modes.
+  const isContentMode = mode === "keyword" || mode === "semantic";
+
+  // Filename search (name match)
   const { items: filenameItems, isLoading: filenameLoading, error: filenameError } = useFileSearch(
-    semantic ? "" : query  // skip filename search when in semantic mode
+    isContentMode ? "" : query  // skip filename search when in a content mode
   );
 
-  // Semantic content search
-  const [semanticItems, setSemanticItems] = useState<SemanticSearchResult[]>([]);
-  const [semanticLoading, setSemanticLoading] = useState(false);
-  const [semanticError, setSemanticError] = useState<string | null>(null);
-  const semanticTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Content search (keyword / semantic)
+  const [contentItems, setContentItems] = useState<SemanticSearchResult[]>([]);
+  const [contentLoading, setContentLoading] = useState(false);
+  const [contentError, setContentError] = useState<string | null>(null);
+  const contentTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // WARP-310: readiness probe. Fires once when the toggle flips on, so a
-  // user enabling AI search sees the green/yellow/red signal before
-  // they've even started typing.
+  // WARP-310: readiness probe. Semantic needs the AI gateway, so the
+  // green/yellow/red signal only applies there. Keyword is lexical-only and
+  // works gateway-down — it never fires the probe or shows the pill.
   const [readiness, setReadiness] = useState<SearchReadinessStatus | null>(null);
   useEffect(() => {
-    if (!semantic) {
+    if (mode !== "semantic") {
       setReadiness(null);
       return;
     }
@@ -72,50 +85,50 @@ export function SearchBar({ onPickResult }: SearchBarProps) {
     return () => {
       cancelled = true;
     };
-  }, [semantic]);
+  }, [mode]);
 
   useEffect(() => {
-    if (!semantic || query.trim().length < 2) {
-      setSemanticItems([]);
-      setSemanticLoading(false);
-      setSemanticError(null);
+    if (!isContentMode || query.trim().length < 2) {
+      setContentItems([]);
+      setContentLoading(false);
+      setContentError(null);
       return;
     }
-    setSemanticLoading(true);
-    setSemanticError(null);
+    setContentLoading(true);
+    setContentError(null);
     let cancelled = false;
-    if (semanticTimerRef.current) clearTimeout(semanticTimerRef.current);
-    semanticTimerRef.current = setTimeout(async () => {
+    if (contentTimerRef.current) clearTimeout(contentTimerRef.current);
+    contentTimerRef.current = setTimeout(async () => {
       try {
-        const results = await searchFileContent(query.trim());
-        if (!cancelled) setSemanticItems(results);
+        const results = await searchFileContent(query.trim(), 20, mode);
+        if (!cancelled) setContentItems(results);
       } catch (err) {
         if (!cancelled) {
-          setSemanticError(translateError(err, "files"));
-          setSemanticItems([]);
+          setContentError(translateError(err, "files"));
+          setContentItems([]);
         }
       } finally {
-        if (!cancelled) setSemanticLoading(false);
+        if (!cancelled) setContentLoading(false);
       }
     }, 500);
     return () => {
       cancelled = true;
-      if (semanticTimerRef.current) clearTimeout(semanticTimerRef.current);
-      setSemanticLoading(false);
+      if (contentTimerRef.current) clearTimeout(contentTimerRef.current);
+      setContentLoading(false);
     };
-  }, [query, semantic]);
+  }, [query, mode, isContentMode]);
 
   // Unified result count for keyboard nav and popover visibility.
-  // In semantic mode we navigate semanticItems; otherwise filenameItems.
+  // In a content mode we navigate contentItems; otherwise filenameItems.
   const items = filenameItems;
-  const resultCount = semantic ? semanticItems.length : items.length;
-  const isLoading = semantic ? semanticLoading : filenameLoading;
-  const error = semantic ? semanticError : filenameError;
+  const resultCount = isContentMode ? contentItems.length : items.length;
+  const isLoading = isContentMode ? contentLoading : filenameLoading;
+  const error = isContentMode ? contentError : filenameError;
   const showPopover = open && query.trim().length >= 2;
 
   useEffect(() => {
     setActiveIdx(0);
-  }, [items, semanticItems]);
+  }, [items, contentItems]);
 
   useEffect(() => {
     if (!showPopover) return;
@@ -145,9 +158,9 @@ export function SearchBar({ onPickResult }: SearchBarProps) {
       setActiveIdx((i) => Math.max(i - 1, 0));
     } else if (e.key === "Enter") {
       e.preventDefault();
-      if (semantic) {
-        const result = semanticItems[activeIdx];
-        if (result) pickSemanticResult(result);
+      if (isContentMode) {
+        const result = contentItems[activeIdx];
+        if (result) pickContentResult(result);
       } else {
         const picked = items[activeIdx];
         if (picked) pickResult(picked);
@@ -164,7 +177,7 @@ export function SearchBar({ onPickResult }: SearchBarProps) {
     inputRef.current?.blur();
   };
 
-  const pickSemanticResult = (result: SemanticSearchResult) => {
+  const pickContentResult = (result: SemanticSearchResult) => {
     const fileName = result.path.split("/").pop() || result.path;
     onPickResult({
       name: fileName,
@@ -186,8 +199,10 @@ export function SearchBar({ onPickResult }: SearchBarProps) {
           <div className="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none text-label-tertiary">
             {isLoading ? (
               <Loader2 size={14} className="animate-spin" />
-            ) : semantic ? (
+            ) : mode === "semantic" ? (
               <Sparkles size={14} />
+            ) : mode === "keyword" ? (
+              <Type size={14} />
             ) : (
               <Search size={14} />
             )}
@@ -220,55 +235,79 @@ export function SearchBar({ onPickResult }: SearchBarProps) {
           )}
         </div>
 
-        {/* Semantic toggle */}
-        <button
-          onClick={() => setSemantic((prev) => !prev)}
-          title={semantic ? "Switch to filename search" : "Switch to semantic (AI) search"}
-          className={`flex items-center gap-1.5 px-2.5 py-2 rounded-sm type-caption-1 whitespace-nowrap transition-colors ${
-            semantic
-              ? "bg-accent-subtle text-accent font-medium"
-              : "bg-surface-secondary text-label-tertiary hover:text-label-primary"
-          }`}
+        {/* WARP-880 / WS-2 — 3-segment mode control. Filename matches by
+            name; Keyword is lexical full-text (works gateway-down); Semantic
+            is pgvector meaning-match. The active segment carries the indigo
+            accent; the readiness pill only attaches to Semantic. */}
+        <div
+          role="radiogroup"
+          aria-label="Search mode"
+          className="flex items-center gap-0.5 p-0.5 rounded-sm bg-surface-secondary"
         >
-          <Sparkles size={12} />
-          {semantic ? "Semantic" : "AI"}
-          {/* WARP-310: readiness traffic light. Renders only when the
-              toggle is on AND we've gotten an answer back; otherwise
-              the button stays uncluttered. ARIA-live so screen readers
-              hear the status change, since the visual is just a dot. */}
-          {semantic && readiness && (
-            <span
-              data-testid="search-readiness"
-              data-state={readiness.state}
-              aria-live="polite"
-              aria-label={
-                readiness.state === "ready"
-                  ? `AI search ready — ${readiness.indexedCount} indexed`
-                  : readiness.state === "indexing"
-                    ? "AI search initializing — no files indexed yet"
-                    : "AI search unavailable — check indexer"
-              }
-              title={
-                readiness.state === "ready"
-                  ? `Searching ${readiness.indexedCount} indexed chunks`
-                  : readiness.state === "indexing"
-                    ? "Indexer is up but hasn't processed any files yet"
-                    : !readiness.gatewayHealthy
-                      ? "AI gateway not reachable"
-                      : !readiness.pgvectorReady
-                        ? "pgvector extension missing"
-                        : "AI search unavailable"
-              }
-              className={`inline-block w-1.5 h-1.5 rounded-full ${
-                readiness.state === "ready"
-                  ? "bg-system-green"
-                  : readiness.state === "indexing"
-                    ? "bg-system-orange"
-                    : "bg-system-red"
-              }`}
-            />
-          )}
-        </button>
+          {(
+            [
+              { id: "filename", label: "Name", icon: Search, title: "Match by file name" },
+              { id: "keyword", label: "Keyword", icon: Type, title: "Full-text keyword search — works without the AI gateway" },
+              { id: "semantic", label: "Semantic", icon: Sparkles, title: "Meaning-based search (AI)" },
+            ] as const
+          ).map((seg) => {
+            const Icon = seg.icon;
+            const active = mode === seg.id;
+            return (
+              <button
+                key={seg.id}
+                role="radio"
+                aria-checked={active}
+                aria-label={seg.label}
+                title={seg.title}
+                onClick={() => setMode(seg.id)}
+                className={`flex items-center gap-1 px-2 py-1.5 rounded-sm type-caption-1 whitespace-nowrap transition-colors duration-200 ${
+                  active
+                    ? "bg-accent-subtle text-accent font-medium"
+                    : "text-label-tertiary hover:text-label-primary"
+                }`}
+              >
+                <Icon size={12} />
+                {seg.label}
+                {/* WARP-310: readiness traffic light — semantic only. ARIA-live
+                    so screen readers hear the status change, since the visual
+                    is just a dot. Keyword is lexical-only and never shows it. */}
+                {seg.id === "semantic" && active && readiness && (
+                  <span
+                    data-testid="search-readiness"
+                    data-state={readiness.state}
+                    aria-live="polite"
+                    aria-label={
+                      readiness.state === "ready"
+                        ? `AI search ready — ${readiness.indexedCount} indexed`
+                        : readiness.state === "indexing"
+                          ? "AI search initializing — no files indexed yet"
+                          : "AI search unavailable — check indexer"
+                    }
+                    title={
+                      readiness.state === "ready"
+                        ? `Searching ${readiness.indexedCount} indexed chunks`
+                        : readiness.state === "indexing"
+                          ? "Indexer is up but hasn't processed any files yet"
+                          : !readiness.gatewayHealthy
+                            ? "AI gateway not reachable"
+                            : !readiness.pgvectorReady
+                              ? "pgvector extension missing"
+                              : "AI search unavailable"
+                    }
+                    className={`inline-block w-1.5 h-1.5 rounded-full ${
+                      readiness.state === "ready"
+                        ? "bg-system-green"
+                        : readiness.state === "indexing"
+                          ? "bg-system-orange"
+                          : "bg-system-red"
+                    }`}
+                  />
+                )}
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       {showPopover && (
@@ -276,13 +315,13 @@ export function SearchBar({ onPickResult }: SearchBarProps) {
           {error && (
             <div className="px-3 py-2 type-footnote text-system-red">{error}</div>
           )}
-          {!error && resultCount === 0 && !isLoading && !semantic && (
+          {!error && resultCount === 0 && !isLoading && !isContentMode && (
             <div className="px-3 py-6 text-center type-footnote text-label-tertiary">
               No results for &ldquo;{query.trim()}&rdquo;
             </div>
           )}
-          {/* Filename results (non-semantic) */}
-          {!semantic && items.map((file, idx) => (
+          {/* Filename results (name match) */}
+          {!isContentMode && items.map((file, idx) => (
             <button
               key={file.path}
               onMouseEnter={() => setActiveIdx(idx)}
@@ -308,28 +347,36 @@ export function SearchBar({ onPickResult }: SearchBarProps) {
             </button>
           ))}
 
-          {/* Semantic results */}
-          {semantic && !semanticLoading && semanticItems.length === 0 && !semanticError && (
+          {/* Content results (keyword / semantic) */}
+          {isContentMode && !contentLoading && contentItems.length === 0 && !contentError && (
             <div className="px-3 py-6 text-center type-footnote text-label-tertiary">
-              <Sparkles size={16} className="mx-auto mb-2 text-label-quaternary" />
+              {mode === "keyword" ? (
+                <Type size={16} className="mx-auto mb-2 text-label-quaternary" />
+              ) : (
+                <Sparkles size={16} className="mx-auto mb-2 text-label-quaternary" />
+              )}
               No content matches for &ldquo;{query.trim()}&rdquo;
             </div>
           )}
-          {semantic && semanticItems.map((result, idx) => {
+          {isContentMode && contentItems.map((result, idx) => {
             const fileName = result.path.split("/").pop() || result.path;
             const parentDir = result.path.replace(/\/[^/]*$/, "") || "/";
             return (
               <button
                 key={`${result.path}-${idx}`}
                 onMouseEnter={() => setActiveIdx(idx)}
-                onClick={() => pickSemanticResult(result)}
+                onClick={() => pickContentResult(result)}
                 className={`w-full flex items-start gap-3 px-3 py-2.5 text-left transition-colors ${
                   idx === activeIdx
                     ? "bg-accent-subtle"
                     : "hover:bg-surface-secondary"
                 }`}
               >
-                <Sparkles size={14} className="text-accent flex-shrink-0 mt-0.5" />
+                {mode === "keyword" ? (
+                  <Type size={14} className="text-accent flex-shrink-0 mt-0.5" />
+                ) : (
+                  <Sparkles size={14} className="text-accent flex-shrink-0 mt-0.5" />
+                )}
                 <div className="flex-1 min-w-0">
                   <p className="type-footnote text-label-primary truncate">
                     {fileName}
