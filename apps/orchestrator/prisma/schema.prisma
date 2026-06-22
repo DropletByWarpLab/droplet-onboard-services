@@ -2386,6 +2386,48 @@ model FileCitation {
   @@index([filePath, userId, citedAt(sort: Desc)])
 }
 
+/// WARP-881 / WS-3 (ADR-027) — native file comments. Nextcloud stays dumb
+/// storage (ADR-013); Droplet owns this metadata, exactly like FileCitation
+/// and ActivityRow. Keyed on `ncFileId` (oc:fileid, resolved via
+/// `ncGetFileId`) — the SAME identifier `File.ncFileId` /
+/// `FileContentChunk.ncFileId` use — so a comment SURVIVES a rename/move.
+/// (Deliberately NOT path-keyed like FileCitation, whose rows go stale on
+/// rename.)
+///
+/// IDOR: `authorUserId` is the LOCAL `User.id` UUID (`req.user.id`), NOT the
+/// Nextcloud username (`getUser(req)`). The read filter scopes a non-
+/// privileged user to `{ ncFileId, authorUserId: req.user.id }`; storing the
+/// username while filtering by the UUID would make a `family` user see zero
+/// of their own comments. Owner/admin see every household comment.
+model FileComment {
+  id           String   @id @default(uuid())
+  ncFileId     Int // oc:fileid; resolve via ncGetFileId — survives rename/move
+  authorUserId String // req.user.id (local User UUID), NOT getUser(req)/username
+  body         String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([ncFileId, createdAt(sort: Desc)])
+  @@index([authorUserId])
+}
+
+/// WARP-881 / WS-3 (ADR-027) — native file tags. File-scoped, NOT user-
+/// scoped: every reader sees every tag on a file (a household-shared
+/// taxonomy). `addedByUserId` records provenance only — it does NOT gate
+/// reads. Unique on `(ncFileId, label)` so a re-add is an idempotent upsert
+/// (the original `addedByUserId`/`createdAt` are preserved).
+model FileTag {
+  id            String   @id @default(uuid())
+  ncFileId      Int
+  label         String
+  addedByUserId String // req.user.id (local User UUID)
+  createdAt     DateTime @default(now())
+
+  @@unique([ncFileId, label])
+  @@index([ncFileId])
+  @@index([addedByUserId])
+}
+
 /// WARP-468 — Phase E2. 60 s egress byte counter per off-LAN channel.
 ///
 /// One row per (ts, channel). A 60 s apscheduler tick in

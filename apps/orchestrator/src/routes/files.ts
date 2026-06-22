@@ -277,6 +277,232 @@ export function createFilesRouter(prisma: PrismaClient): Router {
     },
   );
 
+  // ────────────────────────────────────────────────────────────
+  //  WARP-881 / WS-3 (ADR-027) — native file comments + tags
+  // ────────────────────────────────────────────────────────────
+  //
+  // Nextcloud stays dumb storage (ADR-013); Droplet owns this metadata in
+  // Prisma, keyed on `ncFileId` (oc:fileid) so it SURVIVES a rename/move —
+  // unlike the path-keyed FileCitation rows above, which go stale on rename.
+  //
+  // IDOR: the owner column is written AND filtered using `req.user.id` (the
+  // local User UUID) — NOT `getUser(req)`, which returns the Nextcloud
+  // username. Filtering by the UUID while storing the username would make a
+  // `family` user see ZERO of their own comments. Mirrors FileCitation's
+  // read filter (`req.user.id`) exactly. No caching — file metadata must be
+  // immediately consistent.
+
+  /** The local User UUID for the requester (NOT the NC username). */
+  const requesterId = (req: Request): string =>
+    (req as { user?: { id?: string } }).user?.id ?? "__none__";
+
+  /** owner/admin see every household row; family is scoped to its own. */
+  const isPrivilegedReq = (req: Request): boolean => {
+    const role = (req as { user?: { role?: string } }).user?.role;
+    return role === "owner" || role === "admin";
+  };
+
+  /**
+   * Resolve a request's `:filePath(*)` param to its Nextcloud numeric file
+   * id via `ncGetFileId(token, ncUser, path)`. Responds 404 and returns
+   * `null` when the path doesn't resolve (mirrors the versions route).
+   * `filePath` arrives WITHOUT a leading slash from the wildcard param.
+   */
+  async function resolveFileIdOr404(
+    req: Request,
+    res: Response,
+    filePath: string,
+  ): Promise<number | null> {
+    const normalizedPath = filePath
+      ? `/${filePath}`.replace(/\/+/g, "/")
+      : "";
+    if (normalizedPath === "" || normalizedPath === "/") {
+      res.status(400).json({ error: "filePath path-param is required" });
+      return null;
+    }
+    const token = await getToken(req);
+    const ncUser = getUser(req);
+    const fileId = await ncGetFileId(token, ncUser, normalizedPath);
+    if (fileId === null) {
+      res.status(404).json({ error: "File not found" });
+      return null;
+    }
+    return fileId;
+  }
+
+  // ── Comment delete (DELETE /api/files/comments/:id) ──
+  // REGISTERED BEFORE the `/files/:filePath(*)/...` routes so the wildcard
+  // doesn't shadow this literal path (`comments` would otherwise be captured
+  // as a filePath segment). Author-or-privileged: a family member may delete
+  // only their own comment; owner/admin may delete any.
+  router.delete(
+    "/files/comments/:id",
+    requireRole("owner", "admin", "family"),
+    async (req, res, next) => {
+      try {
+        const id = req.params.id;
+        const row = await prisma.fileComment.findUnique({ where: { id } });
+        if (!row) {
+          res.status(404).json({ error: "Comment not found" });
+          return;
+        }
+        // Author check uses the UUID owner column, never the username.
+        const isAuthor = row.authorUserId === requesterId(req);
+        if (!isAuthor && !isPrivilegedReq(req)) {
+          res.status(403).json({ error: "Not your comment" });
+          return;
+        }
+        // Re-assert the scope in the delete predicate (defense in depth):
+        // a privileged caller deletes by id; a family author by (id, owner).
+        const where = isPrivilegedReq(req)
+          ? { id }
+          : { id, authorUserId: requesterId(req) };
+        await prisma.fileComment.deleteMany({ where });
+        safePublish(`droplet/files/comment-deleted`, {
+          id,
+          ncFileId: row.ncFileId,
+        });
+        res.status(204).end();
+      } catch (err) {
+        handleFileError(err, res, next);
+      }
+    },
+  );
+
+  // ── Comments: list (GET /api/files/:filePath(*)/comments) ──
+  // User-scoped: a family member sees only its own comments; owner/admin see
+  // every household comment on the file.
+  router.get(
+    "/files/:filePath(*)/comments",
+    requireRole("owner", "admin", "family"),
+    async (req, res, next) => {
+      try {
+        const fileId = await resolveFileIdOr404(req, res, req.params.filePath);
+        if (fileId === null) return;
+        const where = isPrivilegedReq(req)
+          ? { ncFileId: fileId }
+          : { ncFileId: fileId, authorUserId: requesterId(req) };
+        const comments = await prisma.fileComment.findMany({
+          where,
+          orderBy: { createdAt: "desc" },
+        });
+        res.json({ ncFileId: fileId, comments });
+      } catch (err) {
+        handleFileError(err, res, next);
+      }
+    },
+  );
+
+  // ── Comments: create (POST /api/files/:filePath(*)/comments) ──
+  router.post(
+    "/files/:filePath(*)/comments",
+    requireRole("owner", "admin", "family"),
+    async (req, res, next) => {
+      try {
+        const schema = z.object({ body: z.string().min(1).max(4000) });
+        const parsed = schema.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({ error: "Comment body is required (1–4000 chars)" });
+          return;
+        }
+        const fileId = await resolveFileIdOr404(req, res, req.params.filePath);
+        if (fileId === null) return;
+        const comment = await prisma.fileComment.create({
+          data: {
+            ncFileId: fileId,
+            authorUserId: requesterId(req),
+            body: parsed.data.body,
+          },
+        });
+        safePublish(`droplet/files/comment-added`, {
+          id: comment.id,
+          ncFileId: fileId,
+          authorUserId: comment.authorUserId,
+        });
+        res.status(201).json({ comment });
+      } catch (err) {
+        handleFileError(err, res, next);
+      }
+    },
+  );
+
+  // ── Tags: list (GET /api/files/:filePath(*)/tags) ──
+  // FILE-scoped (NOT user-scoped): every reader sees every tag on the file —
+  // a household-shared taxonomy. `addedByUserId` is provenance only.
+  router.get(
+    "/files/:filePath(*)/tags",
+    requireRole("owner", "admin", "family"),
+    async (req, res, next) => {
+      try {
+        const fileId = await resolveFileIdOr404(req, res, req.params.filePath);
+        if (fileId === null) return;
+        const tags = await prisma.fileTag.findMany({
+          where: { ncFileId: fileId },
+          orderBy: { createdAt: "asc" },
+        });
+        res.json({ ncFileId: fileId, tags });
+      } catch (err) {
+        handleFileError(err, res, next);
+      }
+    },
+  );
+
+  // ── Tags: create (POST /api/files/:filePath(*)/tags) ──
+  // Upsert on the @@unique(ncFileId, label): a re-add is an idempotent no-op
+  // that preserves the original `addedByUserId` / `createdAt`.
+  router.post(
+    "/files/:filePath(*)/tags",
+    requireRole("owner", "admin", "family"),
+    async (req, res, next) => {
+      try {
+        const schema = z.object({ label: z.string().min(1).max(64) });
+        const parsed = schema.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({ error: "Tag label is required (1–64 chars)" });
+          return;
+        }
+        const fileId = await resolveFileIdOr404(req, res, req.params.filePath);
+        if (fileId === null) return;
+        const tag = await prisma.fileTag.upsert({
+          where: { ncFileId_label: { ncFileId: fileId, label: parsed.data.label } },
+          create: {
+            ncFileId: fileId,
+            label: parsed.data.label,
+            addedByUserId: requesterId(req),
+          },
+          // No-op on conflict — the unique row already exists and its
+          // provenance (addedByUserId/createdAt) must NOT be overwritten.
+          update: {},
+        });
+        safePublish(`droplet/files/tag-added`, {
+          ncFileId: fileId,
+          label: tag.label,
+        });
+        res.status(201).json({ tag });
+      } catch (err) {
+        handleFileError(err, res, next);
+      }
+    },
+  );
+
+  // ── Tags: delete (DELETE /api/files/:filePath(*)/tags/:label) ──
+  router.delete(
+    "/files/:filePath(*)/tags/:label",
+    requireRole("owner", "admin", "family"),
+    async (req, res, next) => {
+      try {
+        const fileId = await resolveFileIdOr404(req, res, req.params.filePath);
+        if (fileId === null) return;
+        const label = req.params.label;
+        await prisma.fileTag.deleteMany({ where: { ncFileId: fileId, label } });
+        safePublish(`droplet/files/tag-removed`, { ncFileId: fileId, label });
+        res.status(204).end();
+      } catch (err) {
+        handleFileError(err, res, next);
+      }
+    },
+  );
+
   // ── Multer error handler ──
   function handleUpload(req: Request, res: Response, next: NextFunction) {
     upload.array("files", 20)(req, res, (err) => {
