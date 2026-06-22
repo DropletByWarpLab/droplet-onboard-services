@@ -135,13 +135,18 @@ export function TeamStep({
   const [ssoProviders, setSsoProviders] = useState<string[]>([]);
   useEffect(() => {
     let alive = true;
-    getEnabledSsoProviders()
-      .then((p) => {
-        if (alive) setSsoProviders(p);
-      })
-      .catch(() => {
-        /* no directory configured — keep the local-first invite path */
-      });
+    // Best-effort: ANY failure — a rejected/timed-out request, or the discovery
+    // client simply being unavailable — leaves the local-first invite path
+    // standing. The try wraps the call itself (not just the promise) so a
+    // synchronous throw is caught too.
+    void (async () => {
+      try {
+        const providers = await getEnabledSsoProviders();
+        if (alive) setSsoProviders(providers);
+      } catch {
+        /* no directory configured */
+      }
+    })();
     return () => {
       alive = false;
     };

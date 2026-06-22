@@ -29,6 +29,8 @@ vi.mock("@/lib/api", async () => {
   return {
     ...actual,
     postTeamInvite: (input: unknown) => postTeamInviteMock(input),
+    // No directory configured by default — keeps the local-first invite path.
+    getEnabledSsoProviders: vi.fn(async () => [] as string[]),
   };
 });
 
@@ -79,11 +81,13 @@ describe("setup Team step (PR #381)", () => {
     expect(screen.getByText(/bring in your team/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/invite by email/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/^role$/i)).toBeInTheDocument();
-    // Directory-sync (SSO) alternative.
+    // Directory-sync (SSO) alternative — an informational note, not a no-op
+    // button (the dead "Connect SSO" control was removed; the card now reflects
+    // real discovery state, see TeamStep.sso.test.tsx).
     expect(screen.getByText(/sync your directory/i)).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: /connect sso/i }),
-    ).toBeInTheDocument();
+      screen.queryByRole("button", { name: /connect sso/i }),
+    ).not.toBeInTheDocument();
     // Skippable — solo owner is a valid end state.
     expect(
       screen.getByRole("button", { name: /invite (people |them )?later/i }),
