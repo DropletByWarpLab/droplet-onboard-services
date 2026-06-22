@@ -261,6 +261,29 @@ export interface FileVersionInfo {
   modifiedAt: string;
 }
 
+// --- WARP-881 / WS-3 (ADR-027): native file comments + tags ---
+
+/** A Droplet-owned comment on a file (keyed on the NC fileid server-side). */
+export interface FileCommentInfo {
+  id: string;
+  ncFileId: number;
+  /** Local User UUID of the author (matches AuthUser.id). */
+  authorUserId: string;
+  body: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A Droplet-owned tag on a file. File-scoped — every reader sees every tag. */
+export interface FileTagInfo {
+  id: string;
+  ncFileId: number;
+  label: string;
+  /** Local User UUID of whoever first added the tag (provenance only). */
+  addedByUserId: string;
+  createdAt: string;
+}
+
 export interface BulkOperationResult {
   path: string;
   ok: boolean;
