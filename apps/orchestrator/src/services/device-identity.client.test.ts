@@ -135,4 +135,26 @@ describe("device-identity.client", () => {
     createDeviceIdentityClient({ stubFactory: factory });
     expect(factory).toHaveBeenCalled();
   });
+
+  // A wedged sidecar that never invokes the gRPC callback must not hang the
+  // caller forever — the per-call deadline rejects (ADR-023 PR-3 regression
+  // guard: factory-reset's tls-deregister can't block at Phase 0b).
+  it("rejects when the sidecar never invokes the gRPC callback (deadline)", async () => {
+    vi.useFakeTimers();
+    try {
+      const stub = makeStub({
+        // Never calls cb — simulates a present-but-hung sidecar.
+        getStatus: () => undefined,
+      });
+      const client = createDeviceIdentityClient({ stubFactory: () => stub });
+      const pending = client.getDeviceIdentityStatus();
+      // Surface the rejection now so it isn't reported as unhandled when the
+      // fake clock advances past the deadline below.
+      const assertion = expect(pending).rejects.toThrow(/timed out/);
+      await vi.advanceTimersByTimeAsync(20_000);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

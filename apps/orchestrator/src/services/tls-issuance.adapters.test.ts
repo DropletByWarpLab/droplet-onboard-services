@@ -24,8 +24,10 @@ vi.mock("./openwrt.client.js", () => ({
 import { routingFetch } from "./openwrt.client.js";
 import {
   createBridgeFqdnPersister,
+  createHqIssuanceClient,
   createRoutingDnsRegistrar,
 } from "./tls-issuance.adapters.js";
+import { config } from "../config.js";
 
 const FQDN = "d-abc123def4567890.devices.warp-lab.ai";
 
@@ -117,5 +119,65 @@ describe("createBridgeFqdnPersister", () => {
 
     const persist = createBridgeFqdnPersister();
     await expect(persist(FQDN)).resolves.toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-023 PR-3 — HQ deregister adapter (DELETE /api/issuance/registration).
+//
+// The deployed HQ Worker reads device_id from BOTH the query string AND the
+// JSON body, and requires the four PoP auth fields in the body. Pin the exact
+// HTTP shape so a regression to a bodyless DELETE (the 422 bug) is caught.
+// ---------------------------------------------------------------------------
+describe("createHqIssuanceClient.deregister", () => {
+  const realFetch = globalThis.fetch;
+  const realHqUrl = config.HQ_ISSUANCE_URL;
+  beforeEach(() => {
+    // config is a plain object — override the base URL so hqFetch can build it.
+    (config as { HQ_ISSUANCE_URL: string }).HQ_ISSUANCE_URL =
+      "https://hq.example.test/";
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    (config as { HQ_ISSUANCE_URL: string }).HQ_ISSUANCE_URL = realHqUrl;
+  });
+
+  it("DELETEs /api/issuance/registration with device_id in BOTH query and body + the PoP body", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    globalThis.fetch = vi.fn(async (url: string, init: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ device_id: "droplet-test-01", status: "revoked" }),
+        text: async () => "",
+      } as Response;
+    }) as unknown as typeof fetch;
+
+    const client = createHqIssuanceClient();
+    const res = await client.deregister({
+      device_id: "droplet-test-01",
+      nonce: "nonce-xyz",
+      signature: "c2ln",
+      sig_alg: "ecdsa-sha256",
+      key_fingerprint: "sha256:deadbeef",
+    });
+
+    expect(calls).toHaveLength(1);
+    const { url, init } = calls[0];
+    // Trailing slash on the base URL is stripped; the path is exact.
+    expect(url).toBe(
+      "https://hq.example.test/api/issuance/registration?device_id=droplet-test-01",
+    );
+    expect(init.method).toBe("DELETE");
+    // device_id present in BOTH the query string AND the JSON body.
+    expect(url).toContain("device_id=droplet-test-01");
+    const body = JSON.parse(init.body as string);
+    expect(body.device_id).toBe("droplet-test-01");
+    expect(body.nonce).toBe("nonce-xyz");
+    expect(body.signature).toBe("c2ln");
+    expect(body.sig_alg).toBe("ecdsa-sha256");
+    expect(body.key_fingerprint).toBe("sha256:deadbeef");
+    expect(res.status).toBe("revoked");
   });
 });

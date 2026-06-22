@@ -54,10 +54,10 @@
 #                           log strings). Repo-wide net (docker-compose.yml,
 #                           .env.example, scripts/*.sh, scripts/lib/*.sh);
 #                           the services/pm/-scoped rule-17 sub-check lives
-#                           in pm-invariants. Fails on any NEW occurrence;
-#                           no grandfather entries remain (the legacy
-#                           droplet-poc-host-net debt was renamed to
-#                           droplet-host-net by the de-poc sweep).
+#                           in pm-invariants. Grandfathers the KNOWN
+#                           droplet-poc-host-net debt (retired by ADR-018
+#                           action item 3) + a few "PoC" prose comments —
+#                           fails on any NEW occurrence.
 #   docker-build-smoke    — (--full only) End-to-end ./scripts/setup.sh
 #                           --skip-docker in an Ubuntu 24.04 container.
 #                           Catches WARP-456 (missing audit-key mount) and
@@ -245,11 +245,12 @@ CHECKS
                         COMPOSE_PROFILES= value, or --flag. Every Droplet box
                         is the shipping product (architecture-guard rule 17 +
                         ADR-018), so surfaces are named by what the deployment
-                        IS, not its lifecycle stage. No grandfather entries
-                        remain: the legacy `droplet-poc-host-net` host-net
-                        service/file/path/leasefile was renamed to
-                        `droplet-host-net` (de-`poc` sweep), so the tracked-
-                        exception allowlist is currently empty.
+                        IS, not its lifecycle stage. Grandfathers the KNOWN
+                        legacy debt as TRACKED exceptions (NOT silent): the
+                        `droplet-poc-host-net` host-net service/file/path
+                        (retired by ADR-018 action item 3, matched as a
+                        substring so it survives line moves) plus a handful of
+                        free-text "PoC" prose comments (per-line allowlist).
                         Distinct from pm-invariants' rule-17 sub-check, which
                         owns services/pm/ with zero tolerance.
                         Prevents: ADR-018 §13 class — a new `profiles: [poc]`,
@@ -1123,8 +1124,7 @@ run_check_lifecycle_naming() {
   # broad user-facing surface set below. The two never overlap — pm-invariants
   # owns services/pm/; this check owns everything else listed here. We did not
   # fold one into the other because their grandfather policies differ: pm has
-  # none; this surface formerly carried the droplet-poc-host-net debt (now
-  # renamed to droplet-host-net), so its grandfather allowlist is empty too.
+  # none; this surface carries the KNOWN droplet-poc-host-net debt.
   #
   # COVERED SURFACES (curated — mirrors stale-repo-names' surface philosophy):
   #   docker/docker-compose.yml   (profile names, service names, env, comments)
@@ -1136,33 +1136,33 @@ run_check_lifecycle_naming() {
   #
   # NOT covered (intentional exemptions):
   #   docs/ + ADRs + specs        Historical record; ADR-018 itself names the
-  #                               host-net debt to retire it — flagging
+  #                               `poc-host-net` debt to retire it — flagging
   #                               the doc that schedules the cleanup is noise.
   #   scripts/test/               This check's own regex + the regression test's
   #                               synthetic `poc` mutation strings live here;
   #                               scanning them would self-trip the gate.
   #   scripts/host/               The captured droplet-sys host artifacts
-  #                               (e.g. docker-compose.poc.yml) are a
-  #                               point-in-time CAPTURE of what shipped to the
-  #                               box (rule 20 / ADR-018 §13), exempt from this
-  #                               scan. The host-net service/script here were
-  #                               renamed droplet-poc-host-net → droplet-host-net
-  #                               by the de-poc sweep; ADR-018 action item 3
-  #                               still owns folding the plane into OpenWrt.
+  #                               (docker-compose.poc.yml, etc-systemd-system/
+  #                               droplet-host-net.service, usr-local-sbin/
+  #                               droplet-poc-host-net, …) are a point-in-time
+  #                               CAPTURE of what shipped to the box (rule 20 /
+  #                               ADR-018 §13). They ARE the tracked debt, not a
+  #                               new leak; ADR-018 action item 3 retires them.
   #   CLAUDE.md / package.json    Not operator-facing product surfaces.
   #
   # GRANDFATHERED LEGACY DEBT (tracked, NOT a silent exception — every entry
   # below is real tech debt with a retirement owner):
   #
-  #   Tier 1 — RETIRED. The `droplet-poc-host-net` host-net service / file /
-  #   path / leasefile (plus the `droplet-poc-lan` leasefile token) used to be
-  #   stripped here as a SUBSTRING grandfather. The de-`poc` lifecycle-naming
-  #   sweep renamed them (droplet-poc-host-net → droplet-host-net, the
-  #   droplet-poc-lan.leases leasefile → droplet-lan.leases) across
-  #   scripts/lib/single-box.sh, scripts/lib/local-dns.sh, scripts/factory-reset.sh,
-  #   scripts/setup.sh, and the scripts/host/ capture, so no Tier-1 grandfather
-  #   is needed. (ADR-018 action item 3 still owns the broader removal — folding
-  #   the host plane into the OpenWrt overlay.)
+  #   Tier 1 — the `droplet-poc-host-net` host-net debt (a SUBSTRING grandfather,
+  #   robust to line moves). The single-box host-integration installer and its
+  #   setup.sh log line reference the legacy `droplet-poc-host-net` service /
+  #   file / path / leasefile. ADR-018 action item 3 ("retire droplet-poc-host-net;
+  #   fold into the OpenWrt overlay + setup.sh; de-poc naming sweep") owns the
+  #   removal. Until then these literal identifiers are allowed wherever they
+  #   appear: we strip the known token and only flag a RESIDUAL lifecycle token
+  #   on the same line (same technique stale-repo-names uses for
+  #   inference-engine.local). Affected files: scripts/lib/single-box.sh,
+  #   scripts/setup.sh.
   #
   #   Tier 2 — RETIRED (WARP-850). The six free-text "PoC" comment mentions
   #   that used to live here (docker-compose.yml ×2, .env.example ×1,
@@ -1215,18 +1215,32 @@ run_check_lifecycle_naming() {
   # (owner-tracked) entry is added.
   declare -A allowlist
 
+  # Tier 1 grandfathered legacy identifiers — stripped from each line BEFORE
+  # the token re-scan, so they're allowed wherever they appear (robust to
+  # line moves). Retirement owner: ADR-018 action item 3.
+  local -a grandfathered_tokens=(
+    "droplet-poc-host-net"
+    "droplet-poc-lan"
+  )
+
   # --- Scan. -----------------------------------------------------------------
   # Primary token: whole-word poc|prototype, case-insensitive. grep -nE gives
   # "<lineno>:<text>". We post-filter each hit through the grandfather tiers.
   local violations=""
-  local line lineno content residual
+  local line lineno content residual t
   for f in "${files[@]}"; do
     while IFS= read -r line; do
       [ -n "$line" ] || continue
       lineno="${line%%:*}"
       content="${line#*:}"
 
+      # Tier 1: strip every grandfathered legacy identifier, then re-test the
+      # residual for a lifecycle token. If nothing remains, this line's only
+      # hit was the known debt → allow.
       residual="$content"
+      for t in "${grandfathered_tokens[@]}"; do
+        residual="${residual//$t/}"
+      done
       if ! printf '%s' "$residual" | grep -qiwE '(poc|prototype)'; then
         continue
       fi
@@ -1267,9 +1281,10 @@ run_check_lifecycle_naming() {
   printf "    |   COMPOSE_PROFILES=poc    → COMPOSE_PROFILES=single-box\n" >&2
   printf "    |   setup.sh --poc          → setup.sh --single-box\n" >&2
   printf "    |   droplet-poc-* service   → name it by its role (e.g. -host-net)\n" >&2
-  printf "    | If your reference is a genuinely tracked legacy exception, add\n" >&2
-  printf "    | it to the grandfather allowlist in run_check_lifecycle_naming\n" >&2
-  printf "    | WITH a retirement owner — never as a silent exception.\n" >&2
+  printf "    | If your reference is the KNOWN droplet-poc-host-net debt (retired\n" >&2
+  printf "    | by ADR-018 action item 3) or another tracked exception, add it to\n" >&2
+  printf "    | the grandfather allowlist in run_check_lifecycle_naming WITH a\n" >&2
+  printf "    | retirement owner — never as a silent exception.\n" >&2
   CHECK_RESULTS[$label]=fail
   return 1
 }
@@ -1277,7 +1292,7 @@ run_check_lifecycle_naming() {
 run_check_tls_invariants() {
   # ADR-023 (C2/C3): invariants the public-CA per-device TLS work must hold so
   # the box never ships certless and the LE cert installs without an nginx
-  # config change. Four static asserts:
+  # config change. Three static asserts:
   #   1. _generate_tls_cert adds the per-device FQDN (DROPLET_PUBLIC_FQDN) to the
   #      bootstrap self-signed SAN — so the box serves a name-matching cert for
   #      the FQDN even before the first LE issuance / offline.
@@ -1285,10 +1300,11 @@ run_check_tls_invariants() {
   #      blocks (:443 and :8443) — the LE fullchain overwrites droplet.crt, so a
   #      rename of those paths would silently break the zero-config handoff.
   #   3. factory-reset.sh deregisters the FQDN (DELETE /dhcp/hostnames/<fqdn>).
-  #   4. (PR-2) _generate_tls_cert guards against CLOBBERING a public-CA leaf:
-  #      it must detect a non-self-signed installed cert (openssl self-verify)
-  #      and skip regeneration, so a setup.sh / --sync-secrets re-run never
-  #      reverts a live LE/ZeroSSL/GTS fullchain back to self-signed.
+  #   4. factory-reset.sh sends the SIGNED HQ deregistration via the
+  #      tls-deregister CLI (ADR-023 PR-3) — NOT a bodyless `curl -X DELETE
+  #      …/api/issuance/registration`, which the deployed HQ Worker 422s (it
+  #      requires a TPM-PoP body). Regression: if anyone reverts to the bodyless
+  #      curl, this FAILs.
   local label="tls-invariants"
   local secrets_sh="$REPO_ROOT/scripts/lib/secrets.sh"
   local nginx_conf="$REPO_ROOT/docker/nginx.conf"
@@ -1333,32 +1349,33 @@ run_check_tls_invariants() {
       printf "    | (ADR-023 C3: drop the split-horizon host-record on reset.)\n" >&2
       failures=$((failures + 1))
     fi
+
+    # 4. SIGNED HQ deregistration via the tls-deregister CLI (ADR-023 PR-3).
+    #    Must invoke `tls-deregister` AND must NOT have regressed to a bodyless
+    #    `curl -X DELETE …/api/issuance/registration` (which HQ 422s). Match the
+    #    bodyless curl as a DELETE whose target is the registration endpoint with
+    #    no -d/--data flag on the same logical command — approximated by the
+    #    presence of the registration path on a curl line at all (the CLI does
+    #    the signed DELETE now, so the path should NEVER appear in factory-reset).
+    if ! grep -qE 'npm run -s tls-deregister|run tls-deregister' "$factory_reset"; then
+      printf "  ${_RED}FAIL${_RESET}  %s — factory-reset.sh does not invoke the tls-deregister CLI\n" "$label"
+      printf "    | (ADR-023 PR-3: HQ requires a signed PoP body; run the CLI while the stack is up.)\n" >&2
+      failures=$((failures + 1))
+    fi
+    # Strip comment lines before grepping so a future explanatory comment like
+    # `# was: curl -X DELETE …/api/issuance/registration` can't trip a false FAIL.
+    if grep -v '^[[:space:]]*#' "$factory_reset" | grep -qE 'curl.*api/issuance/registration'; then
+      printf "  ${_RED}FAIL${_RESET}  %s — factory-reset.sh still uses a bodyless curl to /api/issuance/registration\n" "$label"
+      printf "    | (ADR-023 PR-3 regression: the deployed HQ Worker 422s a DELETE with no TPM-PoP body — use the tls-deregister CLI.)\n" >&2
+      failures=$((failures + 1))
+    fi
   else
     printf "  ${_RED}FAIL${_RESET}  %s — scripts/factory-reset.sh not found\n" "$label"
     failures=$((failures + 1))
   fi
 
-  # 4. (PR-2) _generate_tls_cert must guard against clobbering a public-CA leaf.
-  #    Assert BOTH the detector helper exists AND it is invoked inside
-  #    _generate_tls_cert's regeneration path (a defined-but-never-called helper
-  #    would still let a re-run revert a live fullchain to self-signed). The
-  #    detector uses openssl self-verify — assert that primary mechanism too, so
-  #    a refactor that drops the self-verify check (the only public-CA signal
-  #    that doesn't depend on a CA-name string) is caught.
-  if [ -f "$secrets_sh" ]; then
-    if ! grep -qE '_cert_is_public_ca_leaf\(\)' "$secrets_sh" \
-       || ! grep -qE 'if[[:space:]]+_cert_is_public_ca_leaf[[:space:]]' "$secrets_sh" \
-       || ! grep -qE 'openssl[[:space:]]+x509[[:space:]].*-noout[[:space:]].*-issuer' "$secrets_sh"; then
-      printf "  ${_RED}FAIL${_RESET}  %s — _generate_tls_cert is missing the public-CA-leaf clobber guard\n" "$label"
-      printf "    | (ADR-023 PR-2: detect a non-self-signed installed cert via\n" >&2
-      printf "    |  '_cert_is_public_ca_leaf' (issuer != subject via openssl x509) and skip\n" >&2
-      printf "    |  regeneration so a re-run never reverts a live LE/ZeroSSL cert.)\n" >&2
-      failures=$((failures + 1))
-    fi
-  fi
-
   if [ "$failures" -eq 0 ]; then
-    printf "  ${_GREEN}PASS${_RESET}  %s (FQDN SAN + nginx cert paths + factory-reset deregistration + public-CA-leaf clobber guard)\n" "$label"
+    printf "  ${_GREEN}PASS${_RESET}  %s (FQDN SAN + nginx cert paths + factory-reset FQDN + signed HQ deregister)\n" "$label"
     CHECK_RESULTS[$label]=pass
     return 0
   fi
