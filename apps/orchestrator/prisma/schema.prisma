@@ -2665,6 +2665,13 @@ enum PmStateGroup {
 /// Per-project workflow state (kanban column). Default seed set: Backlog /
 /// Todo / In Progress / Done / Cancelled. `isDefault` marks the landing state
 /// for newly created work items.
+///
+/// INVARIANT: at most ONE default state per project. Enforced by a partial
+/// unique index — `UNIQUE ("projectId") WHERE "isDefault" = true` — that lives
+/// in raw migration SQL because Prisma's schema language cannot express a
+/// WHERE-filtered (partial) unique index. See the
+/// `PmState_projectId_isDefault_key` index in the native_pm_foundation
+/// migration. State names are also unique per project (`@@unique` below).
 model PmState {
   id        String       @id @default(uuid())
   projectId String
@@ -2678,6 +2685,7 @@ model PmState {
   updatedAt DateTime     @default(now()) @updatedAt
   workItems PmWorkItem[]
 
+  @@unique([projectId, name])
   @@index([projectId, sortOrder])
 }
 

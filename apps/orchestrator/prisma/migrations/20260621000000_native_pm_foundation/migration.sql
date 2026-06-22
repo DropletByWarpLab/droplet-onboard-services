@@ -234,6 +234,20 @@ CREATE UNIQUE INDEX "PmProject_workspaceId_identifier_key" ON "PmProject"("works
 CREATE INDEX "PmState_projectId_sortOrder_idx" ON "PmState"("projectId", "sortOrder");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "PmState_projectId_name_key" ON "PmState"("projectId", "name");
+
+-- CreateIndex
+-- INVARIANT: at most ONE default state per project. Prisma's schema language
+-- cannot express a partial (WHERE-filtered) unique index, so this lives only
+-- in raw SQL — mirroring the repo precedent for "at most one" guarantees
+-- (20260610000000_resetjob_at_most_one_nonterminal,
+-- 20260614000000_vpn_peer_unique_active_ip). A second INSERT/UPDATE that would
+-- make two states default for the same project fails with a unique violation
+-- (Prisma P2002). Scoped to isDefault = true so any number of non-default
+-- states coexist.
+CREATE UNIQUE INDEX "PmState_projectId_isDefault_key" ON "PmState"("projectId") WHERE "isDefault" = true;
+
+-- CreateIndex
 CREATE INDEX "PmLabel_projectId_idx" ON "PmLabel"("projectId");
 
 -- CreateIndex
