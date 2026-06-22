@@ -18,6 +18,7 @@ import type {
   WirelessStatus,
   WirelessScanResult,
   WirelessClient,
+  RadioDetail,
   DhcpLease,
   ConnectedDevice,
   FirewallConfig,
@@ -138,6 +139,19 @@ export async function getNetworkOverview(): Promise<Result<NetworkOverview, Rout
   }
 }
 
+// Full interface enumeration (read-only). Kept OUT of the overview hot path —
+// the overview is a short-TTL cached read that feeds the simple view, and a
+// per-section ubus fan-out there would slow every Network page load. The table
+// uses this dedicated, separately-cached read instead.
+export async function getAllInterfaces(): Promise<openwrt.NetworkInterfaceRow[]> {
+  const cached = await cacheGet<openwrt.NetworkInterfaceRow[]>(CACHE_KEYS.interfaces);
+  if (cached) return cached;
+
+  const rows = await openwrt.fetchAllInterfaces();
+  await cacheSet(CACHE_KEYS.interfaces, rows, CACHE_TTL_SHORT);
+  return rows;
+}
+
 // --- Connected devices ---
 
 export async function getConnectedDevices(): Promise<ConnectedDevice[]> {
@@ -180,6 +194,31 @@ export async function getWifiSettings(): Promise<WirelessStatus> {
 
 export async function scanWifiNetworks(): Promise<WirelessScanResult[]> {
   return openwrt.scanWireless();
+}
+
+// Read-only host-radio detail (iwinfo). On the single-box hostapd shape there is
+// ONE combined host radio that can't be turned off independently (and the live
+// UCI/wireless source is empty), so we return supported:false/hostRadio:true as
+// the honesty envelope — the UI shows a read-only card with the single-radio
+// note and NO enable/disable toggle. We fill ONLY the iwinfo fields actually
+// reported (null otherwise → "not reported"), never the design's fabricated
+// literals. `broadcasting` is derived from the real iwinfo mode (Master/AP), not
+// hardcoded. Same supported-flag pattern as getGuestWifi.
+export async function getRadioDetail(): Promise<RadioDetail> {
+  const info = await openwrt.fetchRadioInfo();
+  const gated = config.DROPLET_AP_MODE === "hostapd";
+  const mode = typeof info.mode === "string" ? info.mode : null;
+  const broadcasting = mode != null && /master|ap/i.test(mode);
+  return {
+    supported: !gated,
+    hostRadio: gated,
+    broadcasting,
+    channel: typeof info.channel === "number" ? info.channel : null,
+    htmode: typeof info.htmode === "string" ? info.htmode : null,
+    txpower: typeof info.txpower === "number" ? info.txpower : null,
+    country: typeof info.country === "string" ? info.country : null,
+    mode,
+  };
 }
 
 // --- DHCP ---
@@ -370,6 +409,23 @@ export async function addStaticDhcpLease(
   return result;
 }
 
+// LAN DHCP pool range + lease time. The read is unguarded; the write is Tier 2
+// (gated by the network-safety evaluator at the route) — reshaping the live
+// pool can strand connected clients.
+export async function getDhcpPool(): Promise<openwrt.DhcpPool> {
+  return openwrt.fetchDhcpPool();
+}
+
+export async function setDhcpPool(
+  start: number,
+  limit: number,
+  leasetime: string,
+): Promise<openwrt.WriteResult> {
+  const result = await openwrt.setDhcpPool(start, limit, leasetime);
+  await invalidateNetworkCache();
+  return result;
+}
+
 export async function blockDevice(mac: string, name?: string): Promise<openwrt.WriteResult> {
   const result = await openwrt.blockDevice(mac, name);
   await invalidateNetworkCache();
@@ -418,8 +474,51 @@ export async function rebootRouter(): Promise<openwrt.WriteResult> {
   return openwrt.rebootRouter();
 }
 
+// --- System controls (hostname / NTP / status-LED / country) ---
+//
+// hostname (Tier 2) + NTP (Tier 1) are real, editable controls on the
+// in-container OpenWrt. Status-LED + country are HONEST-GATED on the single-box
+// hostapd shape: the front-panel LEDs are physical on the host SBC (no
+// system.led ubus surface in the container) and the AP country is pinned in the
+// host hostapd config (the in-container wireless has no live radio). Force their
+// supported/editable flags false here so the UI shows an honest "not available"
+// state instead of a control that 500s or writes inert UCI — same posture as
+// getGuestWifi/getUpnp. The flags are authoritative from DROPLET_AP_MODE here,
+// not from the box read.
+export async function getSystemControls(): Promise<openwrt.SystemControls> {
+  const controls = await openwrt.fetchSystemControls();
+  if (config.DROPLET_AP_MODE === "hostapd") {
+    return {
+      ...controls,
+      statusLed: { supported: false, enabled: false },
+      country: { value: controls.country?.value ?? null, editable: false },
+    };
+  }
+  return controls;
+}
+
+export async function setHostname(hostname: string): Promise<openwrt.WriteResult> {
+  const result = await openwrt.setHostname(hostname);
+  await invalidateNetworkCache();
+  return result;
+}
+
+export async function setNtpEnabled(enabled: boolean): Promise<openwrt.WriteResult> {
+  const result = await openwrt.setNtpEnabled(enabled);
+  await invalidateNetworkCache();
+  return result;
+}
+
 export async function getRouterOperation(opId: string) {
   return openwrt.fetchOperation(opId);
+}
+
+// Read-only droplet-ai ubus RPC scopes (parsed from the live on-box ACL by the
+// routing service). No write — Rotate/Revoke are honest-gated in the UI because
+// they'd require a coordinated secret refresh that self-locks-out the routing
+// service (it IS the droplet-ai user).
+export async function getAiNetworkAccess(): Promise<openwrt.AiNetworkAccess> {
+  return openwrt.getAiNetworkAccess();
 }
 
 // --- Cache helpers ---

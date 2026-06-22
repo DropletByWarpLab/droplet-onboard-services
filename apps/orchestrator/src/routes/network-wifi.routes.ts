@@ -7,6 +7,7 @@ import type { Router } from "express";
 import type { PrismaClient } from "@prisma/client";
 import {
   getWifiSettings,
+  getRadioDetail,
   scanWifiNetworks,
   setWifiSsid,
   setWifiPassword,
@@ -38,6 +39,19 @@ export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
     try {
       const results = await scanWifiNetworks();
       res.json({ results });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Read-only host-radio detail (iwinfo). No write, no Tier — the single-box has
+  // one combined hostapd radio that can't be toggled independently, so the
+  // service returns an honesty envelope (supported:false/hostRadio:true) and
+  // only the iwinfo fields it can actually read.
+  router.get("/network/wifi/radio", async (_req, res, next) => {
+    try {
+      const radio = await getRadioDetail();
+      res.json(radio);
     } catch (err) {
       next(err);
     }

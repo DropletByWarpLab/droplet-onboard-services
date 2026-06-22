@@ -48,6 +48,8 @@ const {
   bridgeApplyGuest,
   bridgeRemoveGuest,
   bridgeGuestStatus,
+  fetchSystemControls,
+  fetchRadioInfo,
 } = vi.hoisted(() => ({
   setWirelessSsid: vi.fn(),
   setWirelessPassword: vi.fn(),
@@ -59,6 +61,8 @@ const {
   bridgeApplyGuest: vi.fn(),
   bridgeRemoveGuest: vi.fn(),
   bridgeGuestStatus: vi.fn(),
+  fetchSystemControls: vi.fn(),
+  fetchRadioInfo: vi.fn(),
 }));
 
 vi.mock("./openwrt.client.js", async () => {
@@ -70,6 +74,8 @@ vi.mock("./openwrt.client.js", async () => {
     fetchGuestWifi: (...a: unknown[]) => fetchGuestWifi(...a),
     createGuestNetwork: (...a: unknown[]) => createGuestNetwork(...a),
     removeGuestNetwork: (...a: unknown[]) => removeGuestNetwork(...a),
+    fetchSystemControls: (...a: unknown[]) => fetchSystemControls(...a),
+    fetchRadioInfo: (...a: unknown[]) => fetchRadioInfo(...a),
   };
 });
 
@@ -87,6 +93,8 @@ import {
   getGuestWifi,
   setGuestWifi,
   removeGuestWifi,
+  getSystemControls,
+  getRadioDetail,
 } from "./network.service.js";
 
 beforeEach(() => {
@@ -110,6 +118,20 @@ beforeEach(() => {
     ssid: "Visitors",
     password: "guestpass1",
     supported: true,
+  });
+  fetchSystemControls.mockResolvedValue({
+    hostname: "droplet-rack-01",
+    ntpEnabled: true,
+    // The raw box read reports these as "live" — the service must override.
+    statusLed: { supported: true, enabled: true },
+    country: { value: "US", editable: true },
+  });
+  fetchRadioInfo.mockResolvedValue({
+    channel: 6,
+    htmode: "HT20",
+    txpower: 20,
+    country: "US",
+    mode: "Master",
   });
 });
 
@@ -267,5 +289,65 @@ describe("guest Wi-Fi — uci mode (multi-box) UNCHANGED", () => {
     expect(removeGuestNetwork).toHaveBeenCalledOnce();
     expect(bridgeRemoveGuest).not.toHaveBeenCalled();
     expect(res).toEqual({ operationId: "op-guest-rm-uci" });
+  });
+});
+
+// Status-LED + regulatory-domain can't be driven on the single-box hostapd
+// shape (no system.led ubus surface; host-hostapd country is pinned). The
+// authoritative gate lives in the service: it forces statusLed.supported and
+// country.editable to false there regardless of what the box read reports, so
+// the UI shows an honest "not available" state — same posture as guest-wifi.
+describe("getSystemControls honesty gate", () => {
+  it("hostapd mode → statusLed/country gated false; hostname + NTP pass through", async () => {
+    configMock.DROPLET_AP_MODE = "hostapd";
+    const res = await getSystemControls();
+    expect(res.statusLed.supported).toBe(false);
+    expect(res.country.editable).toBe(false);
+    // The live country VALUE is still surfaced read-only; the real controls pass.
+    expect(res.country.value).toBe("US");
+    expect(res.hostname).toBe("droplet-rack-01");
+    expect(res.ntpEnabled).toBe(true);
+  });
+
+  it("uci mode → passes the box read through unchanged (multi-box can edit)", async () => {
+    configMock.DROPLET_AP_MODE = "uci";
+    const res = await getSystemControls();
+    expect(res.statusLed.supported).toBe(true);
+    expect(res.country.editable).toBe(true);
+  });
+});
+
+// Radio detail is read-only. On the single-box hostapd shape it returns the
+// honesty envelope (supported:false/hostRadio:true — one combined radio that
+// can't be toggled independently) and surfaces ONLY the iwinfo fields read;
+// `broadcasting` is derived from the real iwinfo mode, never hardcoded.
+describe("getRadioDetail honesty envelope", () => {
+  it("hostapd mode → supported:false/hostRadio:true, broadcasting from iwinfo mode", async () => {
+    configMock.DROPLET_AP_MODE = "hostapd";
+    const res = await getRadioDetail();
+    expect(res.supported).toBe(false);
+    expect(res.hostRadio).toBe(true);
+    expect(res.broadcasting).toBe(true); // mode "Master"
+    expect(res.channel).toBe(6);
+    expect(res.country).toBe("US");
+  });
+
+  it("reports null (not a fabricated value) for fields iwinfo omits", async () => {
+    configMock.DROPLET_AP_MODE = "hostapd";
+    fetchRadioInfo.mockResolvedValueOnce({ channel: 6 }); // htmode/txpower/country absent
+    const res = await getRadioDetail();
+    expect(res.htmode).toBeNull();
+    expect(res.txpower).toBeNull();
+    expect(res.country).toBeNull();
+    expect(res.mode).toBeNull();
+    // mode absent → not broadcasting (never assumed true).
+    expect(res.broadcasting).toBe(false);
+  });
+
+  it("uci mode → supported:true (a real radio host can manage it)", async () => {
+    configMock.DROPLET_AP_MODE = "uci";
+    const res = await getRadioDetail();
+    expect(res.supported).toBe(true);
+    expect(res.hostRadio).toBe(false);
   });
 });
