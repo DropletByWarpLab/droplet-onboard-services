@@ -299,6 +299,13 @@ class _MockFirewall:
     def add_port_forward(self, name: str, src_port: str, dest_ip: str, dest_port: str, proto: str = "tcp") -> None:
         logger.info("mock: add_port_forward name=%s %s->%s:%s — no-op", name, src_port, dest_ip, dest_port)
 
+    def add_rule(self, name: str, src: str, dest: str, proto: str = "tcp", dest_port: Any = None,
+                 target: str = "REJECT", src_port: Any = None, enabled: str = "1") -> None:
+        logger.info("mock: add_rule name=%s %s->%s target=%s — no-op", name, src, dest, target)
+
+    def set_zone_policy(self, zone: str, input: Any = None, output: Any = None, forward: Any = None) -> None:
+        logger.info("mock: set_zone_policy zone=%s in=%s out=%s fwd=%s — no-op", zone, input, output, forward)
+
     def block_phone_home(self, mac: str) -> None:
         logger.info("mock: block_phone_home mac=%s — no-op", mac)
 

@@ -1375,6 +1375,55 @@ class FirewallApi:
         self._r.uci.add("firewall", "forwarding", {"src": src, "dest": dest})
         self._r.uci.commit("firewall")
 
+    def add_rule(self, name: str, src: str, dest: str, proto: str = "tcp",
+                 dest_port: Optional[str] = None, target: str = "REJECT",
+                 src_port: Optional[str] = None, enabled: str = "1"):
+        """Add a generic firewall traffic rule (modeled on block_device)."""
+        values = {
+            "name": name,
+            "src": src,
+            "dest": dest,
+            "proto": proto,
+            "target": target,
+            "enabled": enabled,
+        }
+        if dest_port is not None:
+            values["dest_port"] = str(dest_port)
+        if src_port is not None:
+            values["src_port"] = str(src_port)
+        self._r.uci.add("firewall", "rule", values)
+        self._r.uci.commit("firewall")
+        self.reload()
+
+    def set_zone_policy(self, zone: str, input: Optional[str] = None,
+                        output: Optional[str] = None, forward: Optional[str] = None):
+        """Set a zone's default input/output/forward policy.
+
+        Wrapped in safe_apply: flipping a zone (esp. lan/mgmt) input or forward
+        to REJECT/DROP can sever the dashboard's own management path, so the
+        change applies with the 60s auto-rollback timer that reverts on lost
+        connectivity (same posture as the VPN/wireless writes).
+        """
+        res = self._r.uci.get("firewall", type="zone")
+        values = res.get("values", res) if isinstance(res, dict) else {}
+        section_id = next(
+            (sid for sid, cfg in (values or {}).items()
+             if isinstance(cfg, dict) and cfg.get("name") == zone),
+            None,
+        )
+        if section_id is None:
+            raise UbusError(-1, f"firewall zone '{zone}' not found")
+        policy = {}
+        if input is not None:
+            policy["input"] = input
+        if output is not None:
+            policy["output"] = output
+        if forward is not None:
+            policy["forward"] = forward
+        with self._r.safe_apply(timeout=60):
+            self._r.uci.set("firewall", section_id, policy)
+            self._r.uci.commit("firewall")
+
     def reload(self):
         """Reload the firewall to apply changes."""
         self._r.exec_service("firewall", "reload")

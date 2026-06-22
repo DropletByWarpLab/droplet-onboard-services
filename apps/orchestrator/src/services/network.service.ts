@@ -470,6 +470,23 @@ export async function addPortForward(
   return result;
 }
 
+export async function addFirewallRule(opts: {
+  name: string; src: string; dest: string; proto?: string;
+  destPort?: string; srcPort?: string; target?: string; enabled?: string;
+}): Promise<openwrt.WriteResult> {
+  const result = await openwrt.addFirewallRule(opts);
+  await invalidateNetworkCache();
+  return result;
+}
+
+export async function setZonePolicy(opts: {
+  zone: string; input?: string; output?: string; forward?: string;
+}): Promise<openwrt.WriteResult> {
+  const result = await openwrt.setZonePolicy(opts);
+  await invalidateNetworkCache();
+  return result;
+}
+
 export async function rebootRouter(): Promise<openwrt.WriteResult> {
   return openwrt.rebootRouter();
 }

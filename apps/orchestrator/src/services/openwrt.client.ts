@@ -666,6 +666,47 @@ export async function addPortForward(
   return opFrom(res);
 }
 
+export async function addFirewallRule(opts: {
+  name: string;
+  src: string;
+  dest: string;
+  proto?: string;
+  destPort?: string;
+  srcPort?: string;
+  target?: string;
+  enabled?: string;
+}): Promise<WriteResult> {
+  const res = await postJson(
+    "/firewall/rule",
+    {
+      name: opts.name,
+      src: opts.src,
+      dest: opts.dest,
+      proto: opts.proto ?? "tcp",
+      dest_port: opts.destPort,
+      src_port: opts.srcPort,
+      target: opts.target ?? "REJECT",
+      enabled: opts.enabled ?? "1",
+    },
+    "Add firewall rule",
+  );
+  return opFrom(res);
+}
+
+export async function setZonePolicy(opts: {
+  zone: string;
+  input?: string;
+  output?: string;
+  forward?: string;
+}): Promise<WriteResult> {
+  const res = await postJson(
+    "/firewall/zone-policy",
+    { zone: opts.zone, input: opts.input, output: opts.output, forward: opts.forward },
+    "Set zone policy",
+  );
+  return opFrom(res);
+}
+
 // --- System ---
 
 export async function fetchSystemInfo(): Promise<RouterSystemInfo> {

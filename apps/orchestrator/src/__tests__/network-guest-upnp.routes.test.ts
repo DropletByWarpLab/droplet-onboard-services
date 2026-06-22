@@ -45,6 +45,8 @@ vi.mock("../services/network.service.js", () => ({
   blockDevice: vi.fn().mockResolvedValue({ operationId: "op-b" }),
   unblockDevice: vi.fn().mockResolvedValue({ operationId: "op-u" }),
   addPortForward: vi.fn().mockResolvedValue({ operationId: "op-pf" }),
+  addFirewallRule: vi.fn().mockResolvedValue({ operationId: "op-rule" }),
+  setZonePolicy: vi.fn().mockResolvedValue({ operationId: "op-zone" }),
   getUpnp: vi.fn().mockResolvedValue({ available: false, enabled: false }),
   setUpnp: vi.fn().mockResolvedValue({ operationId: "op-upnp" }),
 }));
@@ -256,6 +258,65 @@ describe("Tier-2 confirm dispatch reaches the service write", () => {
     expect(confirmed.body).toMatchObject({ status: "ok", operation: "set_upnp", confirmed: true });
     expect(networkService.setUpnp).toHaveBeenCalledOnce();
     expect(networkService.setUpnp).toHaveBeenCalledWith(true);
+  });
+
+  it("add_firewall_rule: 202 token confirms and runs addFirewallRule", async () => {
+    const app = buildFullApp();
+    const minted = await request(app)
+      .post("/api/network/firewall/rule")
+      .send({ name: "Allow-NAS", src: "wan", dest: "lan", proto: "tcp", dest_port: "443", target: "ACCEPT" });
+    expect(minted.status).toBe(202);
+    const token = minted.body.confirmationToken;
+
+    const confirmed = await request(app)
+      .post("/api/network/command/confirm")
+      .send({ confirmationToken: token, operation: "add_firewall_rule" });
+
+    expect(confirmed.status).toBe(200);
+    expect(networkService.addFirewallRule).toHaveBeenCalledOnce();
+    expect(networkService.addFirewallRule).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "Allow-NAS", src: "wan", dest: "lan", target: "ACCEPT" }),
+    );
+  });
+
+  it("set_zone_policy: 202 token confirms and runs setZonePolicy", async () => {
+    const app = buildFullApp();
+    const minted = await request(app)
+      .post("/api/network/firewall/zone-policy")
+      .send({ zone: "lan", input: "REJECT" });
+    expect(minted.status).toBe(202);
+    const token = minted.body.confirmationToken;
+
+    const confirmed = await request(app)
+      .post("/api/network/command/confirm")
+      .send({ confirmationToken: token, operation: "set_zone_policy" });
+
+    expect(confirmed.status).toBe(200);
+    expect(networkService.setZonePolicy).toHaveBeenCalledOnce();
+    expect(networkService.setZonePolicy).toHaveBeenCalledWith(
+      expect.objectContaining({ zone: "lan", input: "REJECT" }),
+    );
+  });
+});
+
+describe("firewall authoring ops classify Tier-2 + reject bad input", () => {
+  it("add_firewall_rule and set_zone_policy are Tier 2", () => {
+    expect(classifyNetworkCommand("add_firewall_rule").tier).toBe(2);
+    expect(classifyNetworkCommand("set_zone_policy").tier).toBe(2);
+  });
+
+  it("POST /api/network/firewall/rule rejects a bad target with 400", async () => {
+    const res = await request(buildApp())
+      .post("/api/network/firewall/rule")
+      .send({ name: "X", src: "lan", dest: "wan", target: "ALLOW" });
+    expect(res.status).toBe(400);
+  });
+
+  it("POST /api/network/firewall/zone-policy needs at least one policy field", async () => {
+    const res = await request(buildApp())
+      .post("/api/network/firewall/zone-policy")
+      .send({ zone: "lan" });
+    expect(res.status).toBe(400);
   });
 });
 

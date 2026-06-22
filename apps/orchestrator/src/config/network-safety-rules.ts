@@ -40,6 +40,9 @@ const TIER_2_OPERATIONS = new Set([
   "set_upnp",
   "create_firewall_zone",
   "add_firewall_rule",
+  // Rewriting a zone's default input/output/forward policy can sever the
+  // management path — Tier-2 (confirm + 60s SDK auto-rollback).
+  "set_zone_policy",
   "delete_firewall_rule",
   "add_forwarding",
   "interface_down",

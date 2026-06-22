@@ -58,6 +58,8 @@ from schemas import (
     BlockDeviceRequest,
     UnblockDeviceRequest,
     PortForwardRequest,
+    AddFirewallRuleRequest,
+    SetZonePolicyRequest,
     PhoneHomeDeviceRequest,
     PhoneHomeCamerasRequest,
     ApplyConfigRequest,
@@ -917,6 +919,29 @@ def add_port_forward(req: PortForwardRequest):
             req.name, req.src_port, req.dest_ip, req.dest_port, req.proto,
         )
         return {"status": "ok", "name": req.name}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.post("/firewall/rule")
+def add_firewall_rule(req: AddFirewallRuleRequest):
+    try:
+        get_router().firewall.add_rule(
+            req.name, req.src, req.dest, req.proto, req.dest_port,
+            req.target, req.src_port, req.enabled,
+        )
+        return {"status": "ok", "name": req.name}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.post("/firewall/zone-policy")
+def set_zone_policy(req: SetZonePolicyRequest):
+    try:
+        get_router().firewall.set_zone_policy(
+            req.zone, req.input, req.output, req.forward,
+        )
+        return {"status": "ok", "zone": req.zone}
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
 
