@@ -14,12 +14,20 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 const ROUTING_CALLS: Array<{ path: string; init: unknown }> = [];
 // Mock the routing client so the registrar's ROUTING_MODE short-circuit + the
 // /dhcp/hostnames payload are observable without a live routing service.
-vi.mock("./openwrt.client.js", () => ({
-  routingFetch: vi.fn(async (path: string, init: unknown) => {
-    ROUTING_CALLS.push({ path, init });
-    return { ok: true, status: 200, text: async () => "" } as unknown as Response;
-  }),
-}));
+// Spread the real module so its other exports survive the mock. Returning
+// only `routingFetch` drops `RouterError` (re-exported here, imported by other
+// modules), which under vitest's shared worker poisons the module graph and
+// makes ~28 unrelated suites fail with "No RouterError export ... on the mock".
+vi.mock("./openwrt.client.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./openwrt.client.js")>();
+  return {
+    ...actual,
+    routingFetch: vi.fn(async (path: string, init: unknown) => {
+      ROUTING_CALLS.push({ path, init });
+      return { ok: true, status: 200, text: async () => "" } as unknown as Response;
+    }),
+  };
+});
 
 import { routingFetch } from "./openwrt.client.js";
 import {
