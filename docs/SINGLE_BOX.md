@@ -108,41 +108,19 @@ Some services run on the orchestrator host regardless of deployment shape
 (`single-box` AND `multi-box`). They share the host's RAM + SSD with the
 profile-gated services above and the orchestrator stack itself.
 
-### Embedded Plane PM stack (WARP-501 / ADR-010)
+### Project management (native — ADR-026)
 
-Spec OQ1 chose dedicated `postgres-pm` + `redis-pm` over sharing with the
-orchestrator's main DB so backup granularity (WARP-514) is per-volume and
-Plane's Django migrations are quarantined from Prisma's.
+Project management is a **native orchestrator module** (ADR-026, superseding the
+embedded Plane stack of ADR-010). It adds **no containers, no profile, and no
+extra volumes**: PM data lives in `Pm*` Prisma models in the orchestrator's
+existing Postgres (`db`), is served by the orchestrator's `/api/pm/*` routes
+behind the normal dashboard session, and is rendered natively in the dashboard
+`/projects` surface. Attachments use a single orchestrator-managed volume served
+via an authenticated route — no MinIO, no dedicated PM Postgres/Redis.
 
-| Container | Image | Port | RAM (idle, ~) | RAM (busy P95) |
-|---|---|---|---|---|
-| `pm-web` | `makeplane/plane-frontend:v0.24.1` | 3000 (internal, Nginx /pm/) | ~120 MB | ~250 MB |
-| `pm-api` | `makeplane/plane-backend:v0.24.1` | 8000 (internal) | ~180 MB | ~400 MB |
-| `pm-worker` | `makeplane/plane-backend:v0.24.1` + `./bin/docker-entrypoint-worker.sh` | — | ~140 MB | ~300 MB |
-| `pm-migrator` (one-shot) | `makeplane/plane-backend:v0.24.1` + `./bin/docker-entrypoint-migrator.sh` | — | — (exits) | ~250 MB transient |
-| `postgres-pm` | `postgres:15-alpine` | 5432 (internal) | ~30 MB | ~80 MB |
-| `redis-pm` | `redis:7-alpine` | 6379 (internal) | ~10 MB | ~25 MB |
-| `pm-health` (sidecar) | `services/pm/Dockerfile` | 8090 (internal) | ~25 MB | ~30 MB |
-
-**Total Plane stack footprint at idle: ~500 MB RAM.** Acceptable on every
-shipping deployment shape (a large-memory single-box has 32 GB; a
-memory-constrained single-box has 8 GB minus other services). For
-memory-constrained deployments operating near RAM ceiling, monitor
-`pm-worker` first — Celery's per-task memory dominates.
-
-**Storage budget (per spec OQ1 cascade):**
-- `postgres-pm-data` — Plane DB. ~10 MB seed, ~50 MB per 1k issues with
-  full comment history. Linear growth.
-- `pm-attachments-data` — file uploads attached to issues. Operator-cap
-  via Plane's per-workspace attachment limit; defaults to 5 MB per upload,
-  no global cap. Document customer storage budget in their pilot doc.
-
-**Backup:** Use `scripts/host/pm-backup.sh` (WARP-514). Restore via
-`scripts/host/pm-restore.sh`. Both wipe + reload, not merge.
-
-**Reverse-proxy:** Nginx serves Plane at `https://<gateway>/pm/` per
-WARP-502. Websocket upgrade headers are forwarded; CSP `frame-ancestors`
-(per spec OQ2 iframe decision) tracked in `services/pm/PATCHES.md`.
+**Footprint:** the orchestrator's own RAM ceiling (no incremental always-on
+cost); PM rows ride the orchestrator's existing Postgres backup path — no
+separate PM backup/restore scripts.
 
 ## Host-level integration (installed by `setup.sh` in single-box mode)
 

@@ -1,160 +1,260 @@
 "use client";
 
 /**
- * Projects page — embedded Plane PM stack.
- *
- * WARP-512 — per spec WARP-498 OQ6 (resolved 2026-05-28), Plane SSO is
- * OIDC: Plane is the relying party, the orchestrator is the IdP. From
- * the dashboard's point of view, all we do is bounce the user to Plane.
- * Plane sees an unauthenticated request, redirects to its `/auth/oidc/`
- * endpoint, which redirects to the orchestrator's
- * `/api/pm/oidc/authorize` (WARP-505), which sees the dashboard session
- * cookie and round-trips an ID token back. The user lands in Plane
- * already authenticated with no second login.
- *
- * Per spec OQ2: iframe at `/pm/` keeps the Droplet chrome. The nginx
- * `/pm/` location block lands via WARP-502 (#303); the SSO bridge that
- * makes Plane actually authenticate lands via WARP-505 (#307). Until
- * both are deployed the iframe will surface upstream errors — the
- * "Open in new tab" link below the iframe is always visible so the
- * user has an explicit escape hatch independent of any CSP detector.
- *
- * Per architecture-guard rule 6: dashboard UI ships from
- * apps/web-dashboard/. droplet-windows Tauri shell loads this same UI.
+ * Projects — native PM surface (ADR-026 P4). Replaces the embedded Plane iframe
+ * with a first-class, Droplet-owned tracker wired to /api/pm/*. One login (the
+ * dashboard session), fully in the design system, light + dark, RBAC-gated
+ * writes, and the same data the in-app AI reads/writes through the MCP tools.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useMemo, useState } from "react";
+import Link from "next/link";
+import { FolderKanban } from "lucide-react";
+import { ShellPage } from "@/components/shell/ShellPage";
+import { useToast } from "@/components/Toast";
+import { useAuth } from "@/lib/auth";
+import "./projects.css";
 
-/**
- * Plane's dedicated TLS origin (spec WARP-498 OQ2 amendment). The vanilla
- * plane-frontend image is built with Next.js basePath:"" — its assets,
- * API calls, and client-side route pushes are all root-relative — so it
- * can never live under a /pm/ subpath (the first soft-nav inside the app
- * escapes the prefix, and /_next/* chunks 404 off the dashboard's Next
- * server: the black-iframe bug). The gateway serves it on its own port
- * with the same cert (docker/nginx.conf :8443 server block). Derived
- * from the page's own hostname so it works on any LAN name (mDNS or raw
- * IP) — same-site, so the dashboard session cookie story is unchanged.
- */
-const PLANE_PORT = 8443;
+import { PmIcon } from "@/components/projects/icons";
+import { PeopleContext } from "@/components/projects/bits";
+import { canWrite, type PmProject, type PmWorkItem } from "@/components/projects/types";
+import { isOverdue } from "@/components/projects/config";
+import {
+  useProjects,
+  useSummary,
+  useProjectStates,
+  useProjectItems,
+  usePeople,
+  pmActions,
+} from "@/components/projects/usePm";
+import { IndexView } from "@/components/projects/IndexView";
+import { BoardView, ListView, PlaceholderView, type Domain } from "@/components/projects/board";
+import { ViewSwitcher, SavedViews, FilterBar, type ProjectView, type SavedView } from "@/components/projects/chrome";
+import { DetailDrawer } from "@/components/projects/detail";
+import { NewItemModal, NewProjectModal } from "@/components/projects/modals";
 
-/**
- * Romain PR #320 review §1 (amended for the cross-origin move): the
- * sentinel branch — `load` never fires within 5s — is the primary
- * blocked/network-failure signal. Plane is now a cross-origin frame
- * (different port), so its document is opaque to us: contentDocument
- * is null (or access throws) on a HEALTHY frame. The empty-document
- * heuristic from #320 only applies when the document is readable
- * (same-origin error placeholders); an opaque document after `load`
- * means the frame is fine.
- */
-export default function ProjectsPage(): JSX.Element {
-  const [iframeBlocked, setIframeBlocked] = useState(false);
-  const [planeUrl, setPlaneUrl] = useState<string | null>(null);
-  const iframeRef = useRef<HTMLIFrameElement | null>(null);
-  const loadFiredRef = useRef(false);
+function matchQuery(item: PmWorkItem, q: string): boolean {
+  const needle = q.toLowerCase();
+  return item.name.toLowerCase().includes(needle) || item.key.toLowerCase().includes(needle);
+}
 
-  useEffect(() => {
-    // window is unavailable during prerender — derive the origin on mount.
-    setPlaneUrl(`https://${window.location.hostname}:${PLANE_PORT}/`);
-  }, []);
-
-  const checkBlocked = useCallback(() => {
-    const iframe = iframeRef.current;
-    if (!iframe) return;
-    try {
-      const doc = iframe.contentDocument;
-      if (doc === null) {
-        // Opaque cross-origin document — the healthy case for Plane's
-        // dedicated origin. `load` having fired is the success signal;
-        // refused/unreachable frames are caught by the 5s sentinel.
-        return;
-      }
-      // Readable document (same-origin placeholder): a refused frame is
-      // a near-empty document — no <body> children. A real page has
-      // dozens. Use `< 2` to be tolerant of a single `<noscript>` style
-      // child some browsers inject.
-      if (!doc.body || doc.body.childElementCount < 2) {
-        setIframeBlocked(true);
-      }
-    } catch {
-      // SecurityError — some browsers throw instead of returning null
-      // for a cross-origin document. Same meaning as doc === null:
-      // opaque and healthy-if-loaded.
-      return;
-    }
-  }, []);
-
-  useEffect(() => {
-    // 5s fallback: if `load` never fires (network failure, infinite
-    // redirect, upstream timeout, frame refused) flip the banner. Real
-    // loads complete within a second. Armed only once the iframe exists
-    // (planeUrl resolves on mount).
-    if (!planeUrl) return;
-    const timer = setTimeout(() => {
-      if (!loadFiredRef.current) {
-        setIframeBlocked(true);
-      } else {
-        checkBlocked();
-      }
-    }, 5000);
-    return () => clearTimeout(timer);
-  }, [checkBlocked, planeUrl]);
-
-  const handleLoad = useCallback(() => {
-    loadFiredRef.current = true;
-    // Run the empty-document check on the next tick — some browsers
-    // fire `load` before the error placeholder is fully painted.
-    setTimeout(checkBlocked, 50);
-  }, [checkBlocked]);
-
-  // Romain PR #320 review §4: AuthGate already wraps every page in a
-  // <main id="main">. A second <main> here is a duplicate ARIA
-  // landmark and announces incorrectly in screen readers. Use a <div>
-  // matching every other page in this app (cameras, network,
-  // remote-access, knowledge).
-  if (iframeBlocked) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-4 p-8">
-        <h1 className="type-title-2 text-label-primary">Open Projects</h1>
-        <p className="type-subheadline text-label-secondary">
-          The embedded view didn&apos;t load. Open Plane in a new tab:
-        </p>
-        <a
-          href={planeUrl ?? "#"}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="dp-btn-primary"
-        >
-          Open Plane →
-        </a>
-      </div>
-    );
+function applySavedView(items: PmWorkItem[], view: SavedView, uid: string | undefined): PmWorkItem[] {
+  switch (view) {
+    case "mine":
+      return uid ? items.filter((i) => i.assignees.includes(uid)) : [];
+    case "active":
+      return items.filter((i) => ["backlog", "unstarted", "started"].includes(i.state?.group ?? ""));
+    case "overdue":
+      return items.filter((i) => isOverdue(i));
+    case "noassignee":
+      return items.filter((i) => i.assignees.length === 0);
+    default:
+      return items;
   }
+}
+
+export default function ProjectsPage(): JSX.Element {
+  const { user } = useAuth();
+  const role = user?.role;
+  const readOnly = !canWrite(role);
+  const { toast } = useToast();
+  const { person } = usePeople();
+
+  const [view, setView] = useState<ProjectView | "index">("index");
+  const [projectId, setProjectId] = useState<string | null>(null);
+  const [savedView, setSavedView] = useState<SavedView>("all");
+  const [q, setQ] = useState("");
+  const [showArchived, setShowArchived] = useState(false);
+  const [drawer, setDrawer] = useState<PmWorkItem | null>(null);
+  const [modal, setModal] = useState<"newitem" | "newproject" | null>(null);
+
+  const { projects, error: projErr, isLoading: projLoading, mutate: mutateProjects } = useProjects(showArchived);
+  const { summary, mutate: mutateSummary } = useSummary();
+  const { states } = useProjectStates(projectId);
+  const { items, error: itemsErr, isLoading: itemsLoading, mutate: mutateItems } = useProjectItems(projectId);
+
+  const project = useMemo(() => projects?.find((p) => p.id === projectId) ?? null, [projects, projectId]);
+
+  const allItems = items ?? [];
+  const filtered = useMemo(() => {
+    let list = allItems;
+    if (q.trim()) list = list.filter((i) => matchQuery(i, q.trim()));
+    return applySavedView(list, savedView, user?.id);
+  }, [allItems, q, savedView, user?.id]);
+
+  const counts: Record<SavedView, number> = useMemo(
+    () => ({
+      all: allItems.length,
+      mine: applySavedView(allItems, "mine", user?.id).length,
+      active: applySavedView(allItems, "active", user?.id).length,
+      overdue: applySavedView(allItems, "overdue", user?.id).length,
+      noassignee: applySavedView(allItems, "noassignee", user?.id).length,
+    }),
+    [allItems, user?.id],
+  );
+
+  const filterActive = savedView !== "all" || q.trim() !== "";
+  const boardDomain: Domain = itemsLoading
+    ? "loading"
+    : itemsErr
+      ? "error"
+      : allItems.length === 0
+        ? "empty"
+        : filtered.length === 0 && filterActive
+          ? "filtered"
+          : "populated";
+
+  const refreshAll = () => {
+    void mutateProjects();
+    void mutateSummary();
+    if (projectId) void mutateItems();
+  };
+
+  const openProject = (p: PmProject) => {
+    setProjectId(p.id);
+    setView("board");
+    setSavedView("all");
+    setQ("");
+  };
+
+  const backToIndex = () => {
+    setView("index");
+    setProjectId(null);
+  };
+
+  const onTransition = async (item: PmWorkItem, stateId: string) => {
+    try {
+      await pmActions().transitionItem(item.id, stateId);
+      const fresh = await mutateItems();
+      void mutateProjects();
+      void mutateSummary();
+      if (drawer?.id === item.id && fresh) {
+        const up = fresh.work_items.find((i) => i.id === item.id);
+        if (up) setDrawer(up);
+      }
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "Couldn't move the item", "error");
+    }
+  };
+
+  const isProjectView = view === "board" || view === "list";
+
+  const headerTitle = view === "index" ? "Projects" : project?.name ?? "Projects";
+  const headerSub =
+    view === "index"
+      ? `${summary?.activeProjects ?? projects?.filter((p) => !p.archived).length ?? 0} projects · ${summary?.itemsOpen ?? 0} items open`
+      : project
+        ? `${project.openCount} open · ${project.doneCount} done`
+        : undefined;
+
+  const actions =
+    view === "index" ? (
+      <>
+        {!readOnly && (
+          <button className="dp-btn-primary" type="button" onClick={() => setModal("newproject")}>
+            <FolderKanban size={14} /> New project
+          </button>
+        )}
+        <button className="btn" type="button" onClick={refreshAll} aria-label="Refresh">
+          <PmIcon name="refresh" size={15} />
+        </button>
+      </>
+    ) : (
+      <>
+        <Link className="btn" href="/chat">
+          <PmIcon name="msg" size={14} /> Ask AI about this project
+        </Link>
+        {!readOnly && project && (
+          <button className="dp-btn-primary" type="button" onClick={() => setModal("newitem")}>
+            <PmIcon name="plus" size={14} /> New item
+          </button>
+        )}
+        <button className="btn" type="button" onClick={refreshAll} aria-label="Refresh">
+          <PmIcon name="refresh" size={15} />
+        </button>
+      </>
+    );
 
   return (
-    // Romain PR #320 review §3: `h-full` on the iframe collapses to
-    // 0px because the parent's height resolves to `auto`. AuthGate's
-    // <main> uses `min-h-dvh` (a MIN, not a fixed height). Use the
-    // same fixed-height context the chat page uses so the iframe has
-    // a parent with a real `height` value to fill — account for the
-    // dashboard top bar (56px) and iOS bottom safe area.
-    //
-    // Romain PR #320 review §4: <div> root, not <main>. See above.
-    <div className="h-[calc(100dvh-56px-env(safe-area-inset-bottom))] lg:h-dvh">
-      {planeUrl !== null && (
-        <iframe
-          ref={iframeRef}
-          id="pm-iframe"
-          src={planeUrl}
-          title="Plane — Projects"
-          className="h-full w-full border-0"
-          onLoad={handleLoad}
-          // sandbox not set — Plane needs full document permissions for
-          // its own OIDC flow (popup, navigation). Tightening this is a
-          // follow-up once we know Plane's exact CSP needs.
+    <PeopleContext.Provider value={person}>
+      <ShellPage icon={<FolderKanban size={15} />} label="Projects" title={headerTitle} sub={headerSub} actions={actions}>
+        <div className="pm-scope">
+          <div className="pm-page">
+            {view !== "index" && (
+              <button className="pm-btn ghost sm" type="button" onClick={backToIndex} style={{ alignSelf: "flex-start", marginBottom: 14 }}>
+                <PmIcon name="chevL" size={14} /> All projects
+              </button>
+            )}
+
+            {isProjectView && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 14 }}>
+                <div className="pm-row" style={{ justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+                  <ViewSwitcher view={view} onView={(v) => setView(v)} />
+                  <FilterBar q={q} onQ={setQ} />
+                </div>
+                <SavedViews active={savedView} onPick={setSavedView} counts={counts} />
+              </div>
+            )}
+            {(view === "cycles" || view === "modules") && (
+              <div style={{ marginBottom: 14 }}>
+                <ViewSwitcher view={view} onView={(v) => setView(v)} />
+              </div>
+            )}
+
+            <div style={{ flex: 1, minHeight: 0 }}>
+              {view === "index" && (
+                <IndexView
+                  projects={projects}
+                  summary={summary}
+                  loading={projLoading}
+                  error={Boolean(projErr)}
+                  readOnly={readOnly}
+                  showArchived={showArchived}
+                  onToggleArchived={() => setShowArchived((v) => !v)}
+                  onOpenProject={openProject}
+                  onNewProject={() => setModal("newproject")}
+                />
+              )}
+              {view === "board" && (
+                <BoardView
+                  states={states ?? []}
+                  items={filtered}
+                  domain={boardDomain}
+                  readOnly={readOnly}
+                  onOpen={setDrawer}
+                  onTransition={onTransition}
+                  onNewItem={() => setModal("newitem")}
+                />
+              )}
+              {view === "list" && (
+                <ListView states={states ?? []} items={filtered} domain={boardDomain} onOpen={setDrawer} />
+              )}
+              {view === "cycles" && <PlaceholderView kind="cycles" />}
+              {view === "modules" && <PlaceholderView kind="modules" />}
+            </div>
+          </div>
+        </div>
+      </ShellPage>
+
+      {drawer && (
+        <DetailDrawer
+          item={drawer}
+          onClose={() => setDrawer(null)}
+          onChanged={async () => {
+            const fresh = await mutateItems();
+            void mutateProjects();
+            void mutateSummary();
+            if (drawer && fresh) {
+              const up = fresh.work_items.find((i) => i.id === drawer.id);
+              if (up) setDrawer(up);
+            }
+          }}
         />
       )}
-    </div>
+      {modal === "newitem" && project && (
+        <NewItemModal project={project} onClose={() => setModal(null)} onCreated={refreshAll} />
+      )}
+      {modal === "newproject" && <NewProjectModal onClose={() => setModal(null)} onCreated={refreshAll} />}
+    </PeopleContext.Provider>
   );
 }

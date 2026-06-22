@@ -1,0 +1,252 @@
+/* Native Projects (PM) surface — ADR-026 P4.
+ *
+ * Self-contained, scoped under `.pm-scope`: all design styling lives here with
+ * `pm-`-prefixed classes (no collision with the shell's generic .card/.btn/.chip),
+ * and every alias token maps onto the real dashboard `--color-*` tokens so the
+ * surface inherits light/dark + the indigo brand with no invented values.
+ */
+
+.pm-scope {
+  /* identity → real tokens (flip automatically in dark) */
+  --accent: var(--color-accent);
+  --text: var(--color-label-primary);
+  --text-2: var(--color-label-secondary);
+  --text-3: rgba(60, 60, 67, 0.6);
+  --text-4: rgba(60, 60, 67, 0.4);
+  --bg-canvas: var(--color-surface-primary);
+  --bg-app: var(--color-surface-secondary);
+  --bg-sunken: #eef0f4;
+  --bg-tint: #f6f7f9;
+  --bg-hover: rgba(60, 60, 67, 0.06);
+  --border: var(--color-separator);
+  --border-strong: rgba(60, 60, 67, 0.22);
+  --ok: var(--color-system-green);
+  --warn: var(--color-system-orange);
+  --err: var(--color-system-red);
+  --info: var(--color-system-blue);
+  --ok-soft: rgba(52, 199, 89, 0.14);
+  --warn-soft: rgba(255, 149, 0, 0.16);
+  --err-soft: rgba(255, 59, 48, 0.13);
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+  --ease: cubic-bezier(0.25, 0.1, 0.25, 1);
+}
+.dark .pm-scope {
+  --text-3: rgba(235, 235, 245, 0.6);
+  --text-4: rgba(235, 235, 245, 0.38);
+  --bg-canvas: var(--color-surface-tertiary);
+  --bg-sunken: rgba(255, 255, 255, 0.07);
+  --bg-tint: rgba(255, 255, 255, 0.035);
+  --bg-hover: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(235, 235, 245, 0.24);
+  --ok-soft: rgba(48, 209, 88, 0.18);
+  --warn-soft: rgba(255, 159, 10, 0.18);
+  --err-soft: rgba(255, 69, 58, 0.18);
+}
+
+.pm-scope .pm-page { display: flex; flex-direction: column; min-height: 0; gap: 0; }
+
+/* ── primitives ─────────────────────────────────────────────────────────── */
+.pm-scope .pm-row { display: flex; align-items: center; }
+.pm-scope .pm-mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.pm-scope .pm-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block; }
+.pm-scope .pm-clamp2 {
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; text-wrap: pretty;
+}
+
+.pm-scope .pm-btn {
+  display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 13px;
+  border-radius: 8px; font-size: 13px; font-weight: 500; color: var(--text);
+  background: var(--bg-canvas); border: 1px solid var(--border); cursor: pointer;
+  transition: all 150ms var(--ease); white-space: nowrap; font-family: inherit;
+}
+.pm-scope .pm-btn:hover { background: var(--bg-hover); border-color: var(--border-strong); }
+.pm-scope .pm-btn:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); }
+.pm-scope .pm-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.pm-scope .pm-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.pm-scope .pm-btn.primary:hover { background: var(--color-accent-hover, var(--accent)); border-color: var(--color-accent-hover, var(--accent)); }
+.pm-scope .pm-btn.ghost { background: transparent; border-color: transparent; color: var(--text-2); }
+.pm-scope .pm-btn.ghost:hover { background: var(--bg-hover); color: var(--text); }
+.pm-scope .pm-btn.danger { background: var(--err); border-color: var(--err); color: #fff; }
+.pm-scope .pm-btn.sm { height: 28px; padding: 0 10px; font-size: 12px; }
+.pm-scope .pm-iconbtn {
+  display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px;
+  border-radius: 8px; color: var(--text-2); background: transparent; border: 1px solid transparent;
+  cursor: pointer; transition: all 150ms var(--ease);
+}
+.pm-scope .pm-iconbtn:hover { background: var(--bg-hover); color: var(--text); }
+.pm-scope .pm-iconbtn:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); }
+
+.pm-scope .pm-surface { background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 14px; }
+
+.pm-scope .pm-sect { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--text); }
+.pm-scope .pm-sect .sx { font-size: 12px; color: var(--text-4); font-variant-numeric: tabular-nums; font-weight: 500; }
+
+/* ── work-item / project card ───────────────────────────────────────────── */
+.pm-scope .pm-card {
+  position: relative; background: var(--bg-canvas); border: 1px solid var(--border);
+  border-radius: 12px; padding: 11px 12px 11px 14px; display: flex; flex-direction: column; gap: 8px;
+  transition: transform 200ms var(--ease), box-shadow 200ms var(--ease), border-color 200ms var(--ease);
+  cursor: pointer; overflow: hidden; text-align: left; width: 100%; font-family: inherit;
+}
+.pm-scope .pm-card::before {
+  content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--pm-accent, transparent);
+}
+.pm-scope .pm-card:hover {
+  transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--border));
+  box-shadow: 0 14px 30px -16px rgba(30, 30, 60, 0.28), 0 0 0 1px rgba(99, 102, 241, 0.18);
+}
+.pm-scope .pm-card:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 38%, transparent); }
+.pm-scope .pm-card.dragging {
+  transform: rotate(1.5deg); opacity: 0.95; border-color: var(--accent);
+  box-shadow: 0 18px 40px -16px rgba(30, 30, 60, 0.34), 0 0 0 1px rgba(99, 102, 241, 0.3);
+}
+.pm-scope .pm-card.pending {
+  border-color: color-mix(in srgb, var(--info) 55%, var(--border)); border-style: dashed;
+  background: color-mix(in srgb, var(--info) 6%, var(--bg-canvas)); cursor: default;
+}
+.pm-scope .pm-insertion { height: 2px; border-radius: 2px; background: var(--accent); margin: 2px 0; position: relative; }
+.pm-scope .pm-insertion::before, .pm-scope .pm-insertion::after { content: ""; position: absolute; top: -2px; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+.pm-scope .pm-insertion::before { left: -1px; }
+.pm-scope .pm-insertion::after { right: -1px; }
+
+/* ── board column ───────────────────────────────────────────────────────── */
+.pm-scope .pm-col {
+  display: flex; flex-direction: column; gap: 9px; background: var(--bg-tint);
+  border: 1px solid var(--border); border-radius: 12px; padding: 9px; min-width: 264px; align-self: flex-start;
+}
+.pm-scope .pm-col.dropzone { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 5%, var(--bg-tint)); }
+.pm-scope .pm-col-h { display: flex; align-items: center; justify-content: space-between; padding: 2px 3px 0; }
+
+/* ── skeleton shimmer ───────────────────────────────────────────────────── */
+.pm-scope .pm-skel {
+  background: linear-gradient(90deg, var(--bg-sunken) 25%, var(--bg-hover) 37%, var(--bg-sunken) 63%);
+  background-size: 400% 100%; animation: pm-shimmer 1.4s ease infinite; display: block;
+}
+@keyframes pm-shimmer { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
+
+/* ── saved-view chip + segmented pills ──────────────────────────────────── */
+.pm-scope .pm-chip {
+  display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px;
+  border-radius: 999px; background: var(--bg-canvas); border: 1px solid var(--border);
+  font-size: 12.5px; color: var(--text-3); white-space: nowrap; transition: all 120ms var(--ease);
+  cursor: pointer; font-family: inherit;
+}
+.pm-scope .pm-chip:hover { color: var(--text); border-color: var(--border-strong); }
+.pm-scope .pm-chip.on { background: rgba(99, 102, 241, 0.12); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); color: var(--accent); font-weight: 500; }
+.pm-scope .pm-chip .n { font-variant-numeric: tabular-nums; opacity: 0.8; }
+.pm-scope .pm-pills { display: inline-flex; background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 9px; padding: 3px; gap: 2px; }
+.pm-scope .pm-pills button { padding: 0 11px; height: 26px; border-radius: 6px; font-size: 12.5px; color: var(--text-3); display: inline-flex; align-items: center; gap: 6px; background: transparent; border: none; cursor: pointer; font-family: inherit; }
+.pm-scope .pm-pills button.on { background: rgba(99, 102, 241, 0.12); color: var(--accent); font-weight: 500; }
+.pm-scope .pm-pills button:not(.on):hover { color: var(--text); }
+
+/* ── state pill · label tag · identifier chip · due chip ────────────────── */
+.pm-scope .pm-statechip {
+  display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 9px;
+  border-radius: 999px; font-size: 11.5px; font-weight: 500; white-space: nowrap;
+  background: var(--bg-sunken); color: var(--text-3); border: none; cursor: default; font-family: inherit;
+}
+.pm-scope .pm-statechip.clickable { cursor: pointer; }
+.pm-scope .pm-statechip.unstarted { background: rgba(99, 102, 241, 0.13); color: var(--accent); }
+.pm-scope .pm-statechip.started { background: var(--warn-soft); color: #b45309; }
+.pm-scope .pm-statechip.completed { background: var(--ok-soft); color: #047857; }
+.pm-scope .pm-statechip.cancelled { background: var(--err-soft); color: #b91c1c; }
+.dark .pm-scope .pm-statechip.started { color: #fbbf24; }
+.dark .pm-scope .pm-statechip.completed { color: #4ade80; }
+.dark .pm-scope .pm-statechip.cancelled { color: #f87171; }
+
+.pm-scope .pm-tag {
+  display: inline-flex; align-items: center; gap: 5px; height: 20px; padding: 0 8px; border-radius: 999px;
+  font-size: 11px; font-weight: 500; color: var(--text-2); background: var(--bg-sunken); border: 1px solid var(--border); white-space: nowrap;
+}
+.pm-scope .pm-tag.sm { height: 18px; padding: 0 7px; font-size: 10.5px; }
+.pm-scope .pm-tag .swatch { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+
+.pm-scope .pm-linechip {
+  display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border-radius: 999px;
+  font-size: 11px; font-family: var(--font-mono); color: var(--text-3); background: transparent; border: 1px solid var(--border);
+}
+
+.pm-scope .pm-duechip {
+  display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px; border-radius: 999px;
+  font-size: 11px; background: var(--bg-sunken); color: var(--text-3);
+}
+.pm-scope .pm-duechip.warn { background: var(--warn-soft); color: #b45309; }
+.pm-scope .pm-duechip.info { background: rgba(0, 122, 255, 0.12); color: var(--info); }
+.dark .pm-scope .pm-duechip.warn { color: #fbbf24; }
+
+/* ── avatars ────────────────────────────────────────────────────────────── */
+.pm-scope .pm-av {
+  display: inline-flex; align-items: center; justify-content: center; border-radius: 50%;
+  font-weight: 600; color: #fff; flex: none; user-select: none;
+}
+.pm-scope .pm-av[data-tone="1"] { background: linear-gradient(135deg, #6366f1, #818cf8); }
+.pm-scope .pm-av[data-tone="2"] { background: linear-gradient(135deg, #06b6d4, #22d3ee); }
+.pm-scope .pm-av[data-tone="3"] { background: linear-gradient(135deg, #22c55e, #4ade80); }
+.pm-scope .pm-av[data-tone="4"] { background: linear-gradient(135deg, #f59e0b, #fbbf24); }
+.pm-scope .pm-av[data-tone="5"] { background: linear-gradient(135deg, #8b5cf6, #a78bfa); }
+.pm-scope .pm-av[data-tone="6"] { background: linear-gradient(135deg, #ef4444, #f87171); }
+.pm-scope .pm-av-none {
+  display: inline-flex; align-items: center; justify-content: center; border-radius: 50%;
+  border: 1.5px dashed var(--border-strong); color: var(--text-4); flex: none;
+}
+
+/* ── KPI tile ───────────────────────────────────────────────────────────── */
+.pm-scope .pm-kpi { background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 14px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+.pm-scope .pm-kpi .lbl { text-transform: uppercase; letter-spacing: 0.07em; font-size: 11px; color: var(--text-4); font-weight: 600; }
+.pm-scope .pm-kpi .val { font-size: 28px; font-weight: 700; letter-spacing: -0.02em; color: var(--text); font-variant-numeric: tabular-nums; line-height: 1; }
+.pm-scope .pm-kpi .meta { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-3); margin-top: 4px; }
+
+/* ── inputs / fields ────────────────────────────────────────────────────── */
+.pm-scope .pm-field label { display: block; font-size: 12px; color: var(--text-3); font-weight: 500; margin-bottom: 5px; }
+.pm-scope .pm-input {
+  width: 100%; height: 36px; padding: 0 11px; background: var(--bg-sunken); border: 1px solid var(--border);
+  border-radius: 8px; font-size: 13.5px; color: var(--text); font-family: inherit;
+  transition: box-shadow 120ms var(--ease), border-color 120ms var(--ease);
+}
+.pm-scope .pm-input::placeholder { color: var(--text-4); }
+.pm-scope .pm-input:focus { outline: none; border-color: color-mix(in srgb, var(--accent) 50%, var(--border)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 24%, transparent); }
+.pm-scope textarea.pm-input { height: auto; padding: 9px 11px; line-height: 1.5; resize: vertical; }
+.pm-scope .pm-search { position: relative; display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 10px; background: var(--bg-sunken); border: 1px solid var(--border); border-radius: 8px; color: var(--text-3); }
+.pm-scope .pm-search input { flex: 1; min-width: 0; background: transparent; border: none; outline: none; font-size: 13px; color: var(--text); font-family: inherit; }
+.pm-scope .pm-search input::placeholder { color: var(--text-4); }
+.pm-scope .pm-kbd { font-family: var(--font-mono); font-size: 10px; background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; color: var(--text-3); }
+
+/* ── detail: properties · prose · composer · ai ─────────────────────────── */
+.pm-scope .pm-prop { display: grid; grid-template-columns: 116px 1fr; gap: 10px; align-items: center; padding: 9px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.pm-scope .pm-prop:last-child { border-bottom: none; }
+.pm-scope .pm-prop .lab { font-size: 12px; color: var(--text-3); display: flex; align-items: center; gap: 7px; }
+.pm-scope .pm-prose { font-size: 13.5px; line-height: 1.6; color: var(--text-2); }
+.pm-scope .pm-prose p { margin: 0 0 9px; }
+.pm-scope .pm-prose ul { margin: 0 0 9px; padding-left: 20px; }
+.pm-scope .pm-prose li { margin: 2px 0; }
+.pm-scope .pm-ai-av { width: 28px; height: 28px; border-radius: 50%; flex: none; background: linear-gradient(135deg, #c7d2fe, #e9d5ff 55%, #fecdd3); color: #4338ca; display: flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 700; }
+.pm-scope .pm-ai-bubble { background: linear-gradient(135deg, rgba(199, 210, 254, 0.18), rgba(254, 205, 211, 0.14)); border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border)); }
+.pm-scope .pm-rt-bar { display: flex; gap: 1px; border: 1px solid var(--border); border-bottom: none; border-radius: 8px 8px 0 0; padding: 4px; background: var(--bg-tint); }
+.pm-scope .pm-rt-bar button { width: 28px; height: 28px; border-radius: 6px; color: var(--text-3); display: inline-flex; align-items: center; justify-content: center; font-size: 13px; background: transparent; border: none; cursor: pointer; font-family: inherit; }
+.pm-scope .pm-rt-bar button:hover { background: var(--bg-hover); color: var(--text); }
+
+/* ── safety chip ────────────────────────────────────────────────────────── */
+.pm-scope .pm-safety { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 10px; border-radius: 999px; font-size: 12px; font-weight: 600; color: var(--text); letter-spacing: -0.005em; white-space: nowrap; }
+.pm-scope .pm-safety.read { background: rgba(16, 185, 129, 0.15); }
+.pm-scope .pm-safety.write { background: rgba(245, 158, 11, 0.15); }
+
+/* ── empty / placeholder block ──────────────────────────────────────────── */
+.pm-scope .pm-empty { display: flex; flex-direction: column; align-items: center; text-align: center; padding: 44px 24px; gap: 4px; }
+.pm-scope .pm-empty .glyph { width: 52px; height: 52px; border-radius: 14px; display: flex; align-items: center; justify-content: center; margin-bottom: 10px; }
+.pm-scope .pm-empty h3 { font-size: 16px; font-weight: 600; color: var(--text); margin: 0; }
+.pm-scope .pm-empty p { font-size: 13px; color: var(--text-3); max-width: 44ch; line-height: 1.5; margin: 0; }
+
+.pm-scope .pm-board { display: flex; gap: 14px; align-items: flex-start; overflow-x: auto; padding-bottom: 8px; }
+.pm-scope .pm-grid-projects { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
+.pm-scope .pm-grid-kpi { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; }
+
+@media (max-width: 720px) {
+  .pm-scope .pm-grid-kpi { grid-template-columns: repeat(2, 1fr); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pm-scope .pm-card, .pm-scope .pm-skel { animation: none !important; transition: none !important; }
+  .pm-scope .pm-card:hover { transform: none; }
+}

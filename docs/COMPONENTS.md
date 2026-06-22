@@ -38,7 +38,7 @@ If you only read one thing: the [System map](#system-map) and
 ## System map
 
 The appliance is a **single Docker Compose stack** (`docker/docker-compose.yml`,
-30 services) fronted by one nginx `gateway`. The **orchestrator** is the brain —
+25 services) fronted by one nginx `gateway`. The **orchestrator** is the brain —
 every client request and every internal coordination path goes through it. There
 is deliberately **no separate API gateway service** in front of the orchestrator
 (ADR-009): the nginx `gateway` is only a TLS terminator + path router.
@@ -47,7 +47,7 @@ is deliberately **no separate API gateway service** in front of the orchestrator
                           ┌──────────── nginx gateway (:80/:443) ────────────┐
    clients (web / iOS /   │  /          → web-dashboard                       │
    android / desktop) ───►│  /api/      → orchestrator   /ai/  → ai-gateway   │
-   (on-LAN direct,        │  /nextcloud/→ nextcloud      /pm/  → pm-web        │
+   (on-LAN direct,        │  /nextcloud/→ nextcloud                           │
     off-LAN via WireGuard)│  /api/ws/   → orchestrator (WebSocket)            │
                           └───────────────────────┬──────────────────────────┘
                                                    │
@@ -59,7 +59,7 @@ is deliberately **no separate API gateway service** in front of the orchestrator
           │  switch     ── HTTP ───► switch service ──► managed switch
           │  cameras    ── HTTP ───► camera-discovery + frigate (NVR)
           │  display    ── HTTP ───► oled-display ;  voice ── HTTP ── voice-io
-          │  PM (Plane) ── HTTP ───► pm-api  (+ OIDC IdP, webhooks in orchestrator)
+          │  PM         ── native ─► orchestrator /api/pm/* routes + Pm* Prisma models (db)
           │  identity   ── gRPC ───► device-identity-svc (TPM 2.0, unix socket)
           │  state      ── PostgreSQL (db) + Redis (cache) + MQTT (broker)
           └───────────────────────────────────────────────────────────────────────
@@ -84,7 +84,6 @@ is deliberately **no separate API gateway service** in front of the orchestrator
 | **voice-io** | `services/voice-io/` | Python + FastAPI | Wake → STT → agent → TTS |
 | **oled-display** | `services/oled-display/` | Python + FastAPI | Front-panel TFT screen |
 | **ops-console** | `services/ops-console/` | Python + FastAPI | Support "what's running" console |
-| **pm** | `services/pm/` | Python + FastAPI | Plane health sidecar (embedded PM) |
 | **rag-eval** | `services/rag-eval/` | Python + RAGAS | Offline retrieval-quality harness |
 | **device-identity-svc** | `services/device-identity-svc/` | Python + gRPC | TPM 2.0 identity sidecar |
 | **automount** | `services/automount/` | Bash + udev | USB/NVMe auto-mount → Nextcloud |
@@ -118,7 +117,6 @@ network. Host-published ports and host-network services are called out.
 | ops-console | 8089→127.0.0.1:8087 | HTTP | loopback only (profile `ops`) |
 | file-indexer | 8090 | HTTP (admin reindex) | internal |
 | rag-eval | 8090 | HTTP (trigger) | internal (profile `eval`) |
-| pm-health (`pm`) | 8090 | HTTP | internal (profile `pm`) |
 | device-identity-svc | `unix:///var/run/droplet/device-identity.sock` | gRPC | unix socket |
 | frigate | 5000 | HTTP/RTSP | NVR (profile `linux`/`full`) |
 | db / cache / broker | 5432 / 6379 / 1883 | Postgres / Redis / MQTT | internal |
@@ -141,11 +139,11 @@ network. Host-published ports and host-network services are called out.
   (Redis, MQTT, Matter, OpenWrt, Frigate, MCP stdio child) → start cron-runtime
   → Express + WebSocket bridge → listen on `PORT` (3000). Build `tsc`; dev `tsx watch`.
 - **Surface:** **51 route modules** under `src/routes/`, all mounted under `/api/*`
-  (exceptions: `/_/fips`, the Plane OIDC IdP endpoints under `/api/pm/oidc/*`, and
-  the HMAC-signed Plane webhook receiver — these mount **before** auth middleware).
+  (exception: `/_/fips` mounts **before** auth middleware).
   Highlights: `llm` (chat / agent loop), `auth`, `devices`/`device-clients`
   (pairing), `files`/`files-knowledge` (Nextcloud + RAG), `cameras`, `network*`,
-  `switch`, `matter`/`scenes`, `vpn`, `calendar`, `reminders`, `email`, `pm*`,
+  `switch`, `matter`/`scenes`, `vpn`, `calendar`, `reminders`, `email`, `pm*`
+  (native project management — `/api/pm/*`, ADR-026, behind `authMiddleware`/`requireRole`),
   `activity` (signed audit log), `settings*`, `aps` (coverage-extender onboarding),
   `admin-*` (owner/admin-gated dashboards).
 - **Data model:** `prisma/schema.prisma` — **55 models, 21 enums**, PostgreSQL
@@ -158,11 +156,12 @@ network. Host-published ports and host-network services are called out.
   (HTTP client for the matter-controller host sidecar, ADR-022), `encryption.service.ts` (AES-256-GCM),
   `cron-runtime.service.ts` (Postgres advisory-lock scheduler — **the** sanctioned
   scheduler), `openwrt.client.ts`, `switch.client.ts`, `camera.service.ts`,
-  `nextcloud.client.ts`, `pm.client.ts`, plus pollers/tickers (device-reconcile,
+  `nextcloud.client.ts`, plus pollers/tickers (device-reconcile,
   AP discovery, schedule, reminders, tool-schedule, screen-QR).
 - **Talks to:** ai-gateway (gRPC + REST), mcp-server (stdio child), routing /
   switch / display / camera-discovery / frigate / nextcloud (HTTP), Redis,
-  MQTT, embedded Plane (`pm-api`), device-identity-svc (gRPC unix socket).
+  MQTT, device-identity-svc (gRPC unix socket). PM is served natively from the
+  orchestrator's own Postgres (ADR-026) — no external PM service.
 - **Auth:** Bearer JWT (HS256 access + refresh) with Nextcloud OCS fallback;
   roles `owner | admin | family | guest | service`; per-route RBAC via
   `requireRole` / `requireScope` (see [ADR-004](ADR-004-rbac-per-route-guards.md)).
@@ -176,8 +175,6 @@ network. Host-published ports and host-network services are called out.
     Only `MATTER_STORAGE_PATH` is allow-listed. (See `src/config.ts` comment.)
   - **All scheduling goes through `cron-runtime.service.ts`** with Postgres
     advisory locks (multi-instance-safe). No `while True`/`setInterval` schedulers.
-  - **OIDC + webhook routes mount before auth middleware** by design — don't move
-    them behind `authMiddleware` or the Plane SSO redirect chain breaks.
 
 ## apps/web-dashboard
 
@@ -211,7 +208,8 @@ network. Host-published ports and host-network services are called out.
 
 - **Purpose:** The single canonical LLM tool registry. **≈78 tools** across
   network, files, smart-home (Matter), cameras, calendar, reminders, email,
-  memory, and Plane PM domains.
+  memory, and PM (project management) domains. The 9 `pm_*` tools keep their exact
+  contract but now dispatch to the orchestrator's native `/api/pm/*` routes (ADR-026).
 - **Exports:** `TOOLS: ReadonlyMap<string, Tool>`, `getTool(name)`, the `Tool`
   interface (`name`, `description`, `inputSchema`, `requiresWrite`,
   `requiresConfirmation`, `handler`), `ToolContext`, `ToolResult`, and
@@ -358,14 +356,10 @@ network. Host-published ports and host-network services are called out.
   label); audit-logs every `/ops/*` call to a named volume. Profile `ops`,
   **not** customer-facing. `/healthz` is the only unauthenticated route.
 
-## services/pm
-
-- **Purpose:** Thin FastAPI **health sidecar** for the embedded Plane (AGPL-3) PM
-  stack (ADR-010). Polls `pm-api`; reports degraded if unreachable. The real PM
-  integration — OIDC IdP, API proxy, HMAC webhooks — lives in the **orchestrator**
-  (`pm*` routes + `pm.client.ts`), not here. Dedicated `postgres-pm` + `redis-pm`
-  keep Plane isolated from the main DB. Profile `pm`; 503-degrades until
-  `DROPLET_PM_*` secrets are populated by `setup.sh`.
+> **Project management is native (ADR-026).** There is no `services/pm` sidecar
+> and no embedded Plane stack. PM is served by the orchestrator's own `/api/pm/*`
+> routes against `Pm*` Prisma models in the main Postgres, rendered natively in the
+> dashboard `/projects` surface. See [ADR-026](ADR-026-native-pm-supersedes-plane.md).
 
 ## services/rag-eval
 
@@ -423,16 +417,16 @@ network. Host-published ports and host-network services are called out.
 
 ## docker/
 
-- **Compose:** `docker-compose.yml` (base, 30 services across all profiles) + `docker-compose.dev.yml`
+- **Compose:** `docker-compose.yml` (base, 25 services across all profiles) + `docker-compose.dev.yml`
   (local overrides) + `docker-compose.test.override.yml` (exposes orchestrator,
   disables auth, polling watcher for tests).
 - **Profiles:** `linux` (Frigate + voice-io + camera/audio), `display` (oled),
   `full` (switch + camera-discovery), `eval` (rag-eval), `ops` (ops-console),
-  `pm` (Plane stack), `single-box` (ollama + openwrt). On Linux, `setup.sh` sets
+  `single-box` (ollama + openwrt). On Linux, `setup.sh` sets
   `COMPOSE_PROFILES=linux,display`; macOS leaves it empty so GPU/audio mounts
-  never trip.
+  never trip. (PM is native to the orchestrator — no `pm` profile; ADR-026.)
 - **Gateway routing** (`nginx.conf`): `/api/ws/`→orchestrator (WebSocket),
-  `/api/`→orchestrator, `/ai/`→ai-gateway, `/nextcloud/`→nextcloud, `/pm/`→pm-web,
+  `/api/`→orchestrator, `/ai/`→ai-gateway, `/nextcloud/`→nextcloud,
   `/`→web-dashboard. Per-request DNS resolution (127.0.0.11) so container IP
   changes don't strand the proxy.
 - **Gotcha:** `docker restart` does **not** re-read `env_file`. After editing

@@ -1,16 +1,13 @@
 /**
- * /api/pm/* — native project-management routes (ADR-026), replacing the
- * embedded Plane stack. Backs the dashboard Projects surface and (via the
- * orchestrator, P3) the 9 `pm_*` MCP tools.
+ * /api/pm/* — native project-management routes (ADR-026), the Droplet-owned
+ * project-management surface. Backs the dashboard Projects surface and (via the
+ * orchestrator) the 9 `pm_*` MCP tools.
  *
  * Auth: mounted AFTER authMiddleware. PM is household-shared — reads are open
  * to any authenticated role; writes are gated with `requireRole`. Work-item +
  * comment writes additionally admit the MCP service principal
  * (`requireRoleOrMcpService`) so the LLM's confirmed write tools can dispatch
  * through here (the tool layer owns the human-facing confirmation gate).
- *
- * Mount BEFORE `createPmProxyRouter()` so the native GET /api/pm/workspaces
- * supersedes the legacy Plane proxy of the same path (removed in P6).
  *
  * Errors: the service throws Error(code); we map codes → HTTP status here,
  * mirroring routes/calendar.ts.
@@ -170,6 +167,16 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
       res.json({ workspace: await pm.getWorkspaceBySlug(prisma, req.params.slug) });
     } catch (err) {
       if (mapServiceError(err, res)) return;
+      next(err);
+    }
+  });
+
+  // Index KPI strip.
+  router.get("/pm/summary", async (req, res, next) => {
+    try {
+      const slug = req.query.workspace ? String(req.query.workspace) : undefined;
+      res.json({ summary: await pm.getSummary(prisma, slug) });
+    } catch (err) {
       next(err);
     }
   });

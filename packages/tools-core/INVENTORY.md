@@ -81,11 +81,11 @@ Authoritative inventory of every tool exposed by `@droplet/tools-core` after the
 | email_summarize_thread | email | Structured analysis of a thread (summary, callouts, suggested actions, related refs) for the AI side panel. WARP-466. | false | false | WARP-466 |
 | email_draft_reply | email | Draft a reply (writes EmailDraft, draftedByDroplet=true). Write tier, no confirm (draft is reversible); does NOT send. WARP-466. | true | false | WARP-466 |
 | email_send | email | Send a drafted email. Write tier + confirmation (mail leaves the LAN). WARP-466. | true | true | WARP-466 |
-| pm_create_work_item | pm | Create a Plane work item under a project. WARP-509. | true | true | orchestrator |
-| pm_update_work_item | pm | Update fields on an existing Plane work item. WARP-509. | true | true | orchestrator |
-| pm_add_work_item_comment | pm | Add a comment to a Plane work item. WARP-509. | true | true | orchestrator |
-| pm_transition_work_item | pm | Move a Plane work item into a new state. WARP-509. | true | true | orchestrator |
-| pm_list_workspaces | pm | List all Plane workspaces. WARP-508. | false | false | orchestrator |
+| pm_create_work_item | pm | Create a work item (issue) under a project. WARP-509. | true | true | orchestrator |
+| pm_update_work_item | pm | Update fields on an existing work item. WARP-509. | true | true | orchestrator |
+| pm_add_work_item_comment | pm | Add a comment to a work item. WARP-509. | true | true | orchestrator |
+| pm_transition_work_item | pm | Move a work item into a new state. WARP-509. | true | true | orchestrator |
+| pm_list_workspaces | pm | List all project workspaces. WARP-508. | false | false | orchestrator |
 | pm_list_projects | pm | List projects in a workspace. WARP-508. | false | false | orchestrator |
 | pm_list_work_items | pm | List work items in a project (optional state/assignee filters). WARP-508. | false | false | orchestrator |
 | pm_get_work_item | pm | Fetch a single work item by id. WARP-508. | false | false | orchestrator |
