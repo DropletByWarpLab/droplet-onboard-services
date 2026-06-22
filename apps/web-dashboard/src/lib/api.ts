@@ -52,6 +52,7 @@ import type {
   ShareDetail,
   ShareCreateOptions,
   ShareUpdateOptions,
+  ShareRecipient,
   ApplianceContract,
   ClaimResult,
   OrgInput,
@@ -3879,6 +3880,21 @@ export async function fetchSharedWithMe(): Promise<ShareDetail[]> {
   if (!res.ok) throw new Error(`Failed to fetch shared-with-me: ${res.status}`);
   const data = await res.json();
   return data.shares ?? [];
+}
+
+/**
+ * WARP-879 / WS-1 — household members the internal-sharing picker can target.
+ * The orchestrator reads the local directory (ADR-013), so this is reachable
+ * by every household role, not just admins.
+ */
+export async function fetchShareRecipients(): Promise<ShareRecipient[]> {
+  const res = await authFetch(`${BASE}/api/files/share-recipients`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to fetch share recipients: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.recipients ?? [];
 }
 
 // --- WARP-307: Calendar place autocomplete ---
