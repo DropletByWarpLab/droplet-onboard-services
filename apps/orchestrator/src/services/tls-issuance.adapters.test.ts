@@ -14,12 +14,20 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 const ROUTING_CALLS: Array<{ path: string; init: unknown }> = [];
 // Mock the routing client so the registrar's ROUTING_MODE short-circuit + the
 // /dhcp/hostnames payload are observable without a live routing service.
-vi.mock("./openwrt.client.js", () => ({
-  routingFetch: vi.fn(async (path: string, init: unknown) => {
-    ROUTING_CALLS.push({ path, init });
-    return { ok: true, status: 200, text: async () => "" } as unknown as Response;
-  }),
-}));
+// Spread the real module so its other exports survive the mock: returning only
+// `routingFetch` drops `RouterError` (re-exported here and used by the adapter's
+// catch), so the adapter's `instanceof RouterError` check would throw on an
+// undefined symbol instead of degrading gracefully.
+vi.mock("./openwrt.client.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./openwrt.client.js")>();
+  return {
+    ...actual,
+    routingFetch: vi.fn(async (path: string, init: unknown) => {
+      ROUTING_CALLS.push({ path, init });
+      return { ok: true, status: 200, text: async () => "" } as unknown as Response;
+    }),
+  };
+});
 
 import { routingFetch } from "./openwrt.client.js";
 import {
