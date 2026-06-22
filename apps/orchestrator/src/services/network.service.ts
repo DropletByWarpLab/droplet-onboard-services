@@ -442,6 +442,10 @@ export async function deleteDnsHostname(
   hostname: string
 ): Promise<openwrt.WriteResult> {
   const result = await openwrt.deleteDnsHostname(hostname);
+  await invalidateNetworkCache();
+  return result;
+}
+
 // LAN DHCP pool range + lease time. The read is unguarded; the write is Tier 2
 // (gated by the network-safety evaluator at the route) — reshaping the live
 // pool can strand connected clients.
