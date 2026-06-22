@@ -27,6 +27,7 @@
 
 import pino from "pino";
 import { config } from "../config.js";
+import { normalizeMac } from "../lib/mac.js";
 
 const logger = pino({ name: "unifi-network-client" });
 
@@ -141,10 +142,6 @@ export class UniFiClientError extends Error {
   }
 }
 
-/** Normalize a controller-reported MAC to the codebase canonical form. */
-function canonicalMac(raw: string): string {
-  return raw.replace(/[:\-.]/g, "").toUpperCase().match(/.{2}/g)?.join(":") ?? raw.toUpperCase();
-}
 
 /**
  * Concrete HTTP impl over the official local UniFi Network API.
@@ -215,7 +212,7 @@ class HttpUniFiNetworkClient implements UniFiNetworkClient {
     >("/proxy/network/integration/v1/devices/pending", { label: "UniFi pending devices" });
     const list = Array.isArray(raw) ? raw : [];
     return list.map((d) => ({
-      mac: canonicalMac(d.mac),
+      mac: normalizeMac(d.mac),
       deviceId: d.device_id,
       model: d.model,
       ip: d.ip,
@@ -226,7 +223,7 @@ class HttpUniFiNetworkClient implements UniFiNetworkClient {
     // VALIDATE against real controller — adopt-by-MAC endpoint + request body key
     const raw = await this.request<{ device_id?: string }>(
       "/proxy/network/integration/v1/devices/adopt",
-      { method: "POST", body: { mac: canonicalMac(mac) }, label: "UniFi adopt" },
+      { method: "POST", body: { mac: normalizeMac(mac) }, label: "UniFi adopt" },
     );
     const deviceId = raw?.device_id;
     if (!deviceId) {
@@ -242,7 +239,7 @@ class HttpUniFiNetworkClient implements UniFiNetworkClient {
     await this.request<unknown>("/proxy/network/integration/v1/devices/wlan", {
       method: "POST",
       body: {
-        mac: canonicalMac(cfg.mac),
+        mac: normalizeMac(cfg.mac),
         ssid: cfg.ssid,
         // The key is a secret on the wire; never logged by this client.
         passphrase: cfg.key,
@@ -253,13 +250,13 @@ class HttpUniFiNetworkClient implements UniFiNetworkClient {
   }
 
   async getDeviceStatus(mac: string): Promise<UniFiDeviceStatus | null> {
-    const target = canonicalMac(mac);
+    const target = normalizeMac(mac);
     // VALIDATE against real controller — device-list endpoint + state field name
     const raw = await this.request<
       Array<{ mac: string; state?: string; device_id?: string }>
     >("/proxy/network/integration/v1/devices", { label: "UniFi device status" });
     const list = Array.isArray(raw) ? raw : [];
-    const found = list.find((d) => canonicalMac(d.mac) === target);
+    const found = list.find((d) => normalizeMac(d.mac) === target);
     if (!found) return null;
     return { mac: target, state: found.state ?? "unknown", deviceId: found.device_id };
   }
@@ -268,7 +265,7 @@ class HttpUniFiNetworkClient implements UniFiNetworkClient {
     // VALIDATE against real controller — forget/remove endpoint + request body key
     await this.request<unknown>("/proxy/network/integration/v1/devices/forget", {
       method: "POST",
-      body: { mac: canonicalMac(mac) },
+      body: { mac: normalizeMac(mac) },
       label: "UniFi forget",
     });
   }

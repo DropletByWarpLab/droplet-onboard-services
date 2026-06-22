@@ -285,14 +285,19 @@ export function createDiscoveryMultiplexer(
 ): DiscoveryMultiplexer {
   return {
     async discoverAndReconcile() {
-      // Fan out concurrently and merge. A source's rejection propagates to
-      // the caller (the poller wraps this in its cold-start-aware
-      // `logRouterError` catch — the Phase-1 contract for the live mDNS
-      // source). The scaffold sources never throw (they return [] when
-      // off, always this phase), so today the only source that can reject
-      // is mDNS, and it must surface exactly as it did pre-multiplexer.
-      const snapshots = await Promise.all(sources.map((s) => s.discover()));
-      const merged: DiscoveredApObservation[] = snapshots.flat();
+      // Fan out concurrently, then merge only fulfilled sources. Using
+      // Promise.allSettled prevents a single failing backend (e.g. EasyMesh
+      // controller UNREACHABLE) from discarding mDNS results that already
+      // resolved, which would stall lastSeen updates for extenders that tick.
+      const results = await Promise.allSettled(sources.map((s) => s.discover()));
+      const merged: DiscoveredApObservation[] = [];
+      for (const result of results) {
+        if (result.status === "fulfilled") {
+          merged.push(...result.value);
+        } else {
+          logger.warn({ err: result.reason }, "ap-discovery: source failed, omitting its snapshot");
+        }
+      }
 
       if (merged.length === 0) {
         return { created: 0, updated: 0, evicted: 0 };

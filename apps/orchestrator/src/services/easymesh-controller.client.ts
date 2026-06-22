@@ -36,6 +36,7 @@
 
 import pino from "pino";
 import { config } from "../config.js";
+import { normalizeMac } from "../lib/mac.js";
 
 const logger = pino({ name: "easymesh-controller-client" });
 
@@ -145,10 +146,6 @@ export class EasyMeshControllerError extends Error {
   }
 }
 
-/** Normalize a controller-reported MAC to the codebase canonical form. */
-function canonicalMac(raw: string): string {
-  return raw.replace(/[:\-.]/g, "").toUpperCase().match(/.{2}/g)?.join(":") ?? raw.toUpperCase();
-}
 
 /**
  * Concrete impl over the local prplMesh controller's ubus / IPC data model,
@@ -216,7 +213,7 @@ class HttpEasyMeshControllerClient implements EasyMeshControllerClient {
     >("/topology/agents", { label: "EasyMesh topology" });
     const list = Array.isArray(raw) ? raw : [];
     return list.map((a) => ({
-      alMac: canonicalMac(a.al_mac),
+      alMac: normalizeMac(a.al_mac),
       // Vendor comes from the Agent's 1905.1 device info WHEN PRESENT — never
       // guessed when the topology omits it (CLAUDE.md no-guessing rule).
       vendor: a.manufacturer,
@@ -231,7 +228,7 @@ class HttpEasyMeshControllerClient implements EasyMeshControllerClient {
     await this.request<unknown>("/agents/onboard", {
       method: "POST",
       body: {
-        al_mac: canonicalMac(alMac),
+        al_mac: normalizeMac(alMac),
         ssid: creds.ssid,
         // The key is a secret on the wire; never logged by this client.
         key: creds.key,
@@ -241,14 +238,14 @@ class HttpEasyMeshControllerClient implements EasyMeshControllerClient {
   }
 
   async getAgentStatus(alMac: string): Promise<EasyMeshAgentStatus | null> {
-    const target = canonicalMac(alMac);
+    const target = normalizeMac(alMac);
     // VALIDATE against real prplMesh controller — agent-status / topology query
     // ubus method + the state field name.
     const raw = await this.request<
       Array<{ al_mac: string; state?: string }>
     >("/topology/agents", { label: "EasyMesh agent status" });
     const list = Array.isArray(raw) ? raw : [];
-    const found = list.find((a) => canonicalMac(a.al_mac) === target);
+    const found = list.find((a) => normalizeMac(a.al_mac) === target);
     if (!found) return null;
     return { alMac: target, state: found.state ?? "unknown" };
   }
@@ -258,7 +255,7 @@ class HttpEasyMeshControllerClient implements EasyMeshControllerClient {
     // ubus method + request body key.
     await this.request<unknown>("/agents/remove", {
       method: "POST",
-      body: { al_mac: canonicalMac(alMac) },
+      body: { al_mac: normalizeMac(alMac) },
       label: "EasyMesh remove",
     });
   }

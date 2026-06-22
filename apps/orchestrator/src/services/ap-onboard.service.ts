@@ -788,6 +788,19 @@ export function createUniFiBackend(
           { err, mac, ssid: opts.ssid },
           "ap-onboard: UniFi approve failed; transitioning to FAILED",
         );
+        // Roll back the adoption so retry can start from a clean state.
+        // Without this, adoptDevice() succeeds but pushWlanConfig() fails,
+        // leaving the device adopted on the controller while the DB row is
+        // FAILED — a re-adopt on the next retry would error and keep the row
+        // stuck indefinitely.
+        try {
+          await client.forgetDevice(mac);
+        } catch (forgetErr) {
+          logger.warn(
+            { err: forgetErr, mac },
+            "ap-onboard: forgetDevice rollback failed — device may still be adopted on the controller",
+          );
+        }
         await prisma.apDevice.update({
           where: { mac },
           data: { status: "FAILED", failureReason: message },
