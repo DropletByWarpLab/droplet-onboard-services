@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AlertCircle, CheckCircle2, Loader2, Plus } from "lucide-react";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import {
@@ -24,16 +24,20 @@ const TARGETS = ["ACCEPT", "REJECT", "DROP"] as const;
 type Target = (typeof TARGETS)[number];
 
 async function pollOperation(operationId: string): Promise<void> {
-  const startedAt = Date.now();
-  for (;;) {
-    const op = await fetchNetworkOperation(operationId);
-    if (op.state === "applied") return;
-    if (op.state === "rejected" || op.state === "rolled_back" || op.state === "unknown") {
-      throw new Error(op.reason ?? "The router didn't accept the change.");
+  const deadline = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error("Timed out waiting for the router.")), 70_000),
+  );
+  const pollingLoop = async () => {
+    for (;;) {
+      const op = await fetchNetworkOperation(operationId);
+      if (op.state === "applied") return;
+      if (op.state === "rejected" || op.state === "rolled_back" || op.state === "unknown") {
+        throw new Error(op.reason ?? "The router didn't accept the change.");
+      }
+      await new Promise((r) => setTimeout(r, 1_000));
     }
-    if (Date.now() - startedAt > 70_000) throw new Error("Timed out waiting for the router.");
-    await new Promise((r) => setTimeout(r, 1_000));
-  }
+  };
+  await Promise.race([pollingLoop(), deadline]);
 }
 
 /** Drive a Tier-2 firewall write through the 202 → confirm → poll flow. */
@@ -41,7 +45,10 @@ async function applyWrite(
   send: () => Promise<NetworkCommandResult>,
 ): Promise<{ needsConfirm: false } | { needsConfirm: true; token: string; operation: string }> {
   const result = await send();
-  if (result.status === "confirmation_required" && result.confirmationToken && result.operation) {
+  if (result.status === "confirmation_required") {
+    if (!result.confirmationToken || !result.operation) {
+      throw new Error("Server returned confirmation_required without a token — cannot proceed.");
+    }
     return { needsConfirm: true, token: result.confirmationToken, operation: result.operation };
   }
   if (result.operationId) await pollOperation(result.operationId);
@@ -214,6 +221,13 @@ export function ZonePolicyEditor({
     output: (output ?? "ACCEPT") as Target,
     forward: (forward ?? "REJECT") as Target,
   });
+  useEffect(() => {
+    setPolicy({
+      input: (input ?? "ACCEPT") as Target,
+      output: (output ?? "ACCEPT") as Target,
+      forward: (forward ?? "REJECT") as Target,
+    });
+  }, [input, output, forward]);
   const [status, setStatus] = useState<Status>({ kind: "idle" });
   const [pending, setPending] = useState<{ token: string; operation: string } | null>(null);
   const editRef = useRef<HTMLButtonElement>(null);

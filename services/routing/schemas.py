@@ -3,7 +3,7 @@
 import os
 import re
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing import Optional, Union
 
 
@@ -250,6 +250,13 @@ class AddFirewallRuleRequest(BaseModel):
             raise ValueError(f"target must be one of {sorted(_FW_TARGETS)}")
         return v
 
+    @field_validator("enabled")
+    @classmethod
+    def _check_enabled(cls, v: str) -> str:
+        if v not in {"0", "1"}:
+            raise ValueError("enabled must be '0' or '1'")
+        return v
+
 
 class SetZonePolicyRequest(BaseModel):
     """Set a zone's default input/output/forward policy. Each policy field is
@@ -266,6 +273,12 @@ class SetZonePolicyRequest(BaseModel):
         if v is not None and v not in _FW_TARGETS:
             raise ValueError(f"policy must be one of {sorted(_FW_TARGETS)}")
         return v
+
+    @model_validator(mode="after")
+    def _at_least_one_policy(self) -> "SetZonePolicyRequest":
+        if self.input is None and self.output is None and self.forward is None:
+            raise ValueError("at least one of input, output, or forward must be provided")
+        return self
 
 
 # WARP-613: phone-home egress control.
