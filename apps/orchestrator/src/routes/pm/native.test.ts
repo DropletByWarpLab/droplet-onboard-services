@@ -25,7 +25,29 @@ interface Row {
 let id = 0;
 const uid = (p: string) => `${p}-${++id}`;
 
-function makeFake() {
+/** A Prisma-shaped known-request error the service detects structurally
+ *  (`err.code`), matching the production stand-in used elsewhere in the repo
+ *  (`name === "PrismaClientKnownRequestError"` + a `code`). Lets a test force a
+ *  specific write to lose a race (P2002 / P2025 / P2003) without a real DB. */
+function prismaError(code: string): Error & { code: string } {
+  const e = new Error(`Prisma ${code}`) as Error & { code: string };
+  e.name = "PrismaClientKnownRequestError";
+  e.code = code;
+  return e;
+}
+
+/** Per-operation throw hooks: set `hooks["<op>"] = "<P-code>"` to make the next
+ *  matching write throw that Prisma error. Cleared after it fires (one-shot). */
+type Hooks = Record<string, string | undefined>;
+
+function makeFake(hooks: Hooks = {}) {
+  const fire = (op: string) => {
+    const code = hooks[op];
+    if (code) {
+      hooks[op] = undefined;
+      throw prismaError(code);
+    }
+  };
   const db = {
     workspaces: [] as Row[],
     projects: [] as Row[],
@@ -94,6 +116,7 @@ function makeFake() {
           ...(include?.workspace ? { workspace: db.workspaces.find((w) => w.id === p.workspaceId) } : {}),
         })),
       create: async ({ data, include }: { data: Row; include?: Row }) => {
+        fire("pmProject.create");
         const p: Row = {
           id: uid("proj"),
           seqCounter: 0,
@@ -128,6 +151,7 @@ function makeFake() {
         return out;
       },
       delete: async ({ where }: { where: Row }) => {
+        fire("pmProject.delete");
         db.projects = db.projects.filter((x) => x.id !== where.id);
         return {};
       },
@@ -135,6 +159,14 @@ function makeFake() {
 
     pmState: {
       findMany: async ({ where }: { where: Row }) => db.states.filter((s) => s.projectId === where.projectId),
+      count: async ({ where }: { where: Row }) =>
+        db.states.filter((s) => {
+          if (where.projectId && s.projectId !== where.projectId) return false;
+          if (where.isDefault !== undefined && s.isDefault !== where.isDefault) return false;
+          const not = (where.id as { not?: string } | undefined)?.not;
+          if (not && s.id === not) return false;
+          return true;
+        }).length,
       findUnique: async ({ where }: { where: Row }) => db.states.find((s) => s.id === where.id) ?? null,
       findFirst: async ({ where }: { where: Row }) =>
         db.states.find((s) => s.id === where.id && (!where.projectId || s.projectId === where.projectId)) ?? null,
@@ -149,6 +181,7 @@ function makeFake() {
         return s;
       },
       delete: async ({ where }: { where: Row }) => {
+        fire("pmState.delete");
         db.states = db.states.filter((x) => x.id !== where.id);
         return {};
       },
@@ -168,6 +201,7 @@ function makeFake() {
         return l;
       },
       delete: async ({ where }: { where: Row }) => {
+        fire("pmLabel.delete");
         db.labels = db.labels.filter((x) => x.id !== where.id);
         return {};
       },
@@ -188,6 +222,7 @@ function makeFake() {
         return rows.map((i) => resolveItem(i, include));
       },
       create: async ({ data }: { data: Row }) => {
+        fire("pmWorkItem.create");
         const it: Row = {
           id: uid("wi"),
           descriptionHtml: null,
@@ -229,6 +264,7 @@ function makeFake() {
         return it;
       },
       delete: async ({ where }: { where: Row }) => {
+        fire("pmWorkItem.delete");
         db.items = db.items.filter((i) => i.id !== where.id);
         return {};
       },
@@ -273,7 +309,7 @@ function makeFake() {
     },
   };
 
-  return { prisma, db };
+  return { prisma, db, hooks };
 }
 
 // ── App harness ──────────────────────────────────────────────────────────────
@@ -515,5 +551,211 @@ describe("native PM routes — cross-project link guards (ADR-026 P2)", () => {
       .patch(`/api/pm/work-items/${child.body.work_item.id}`)
       .send({ state_id: sameState });
     expect(patched.status).toBe(200);
+  });
+});
+
+describe("native PM routes — deleteState last/default guards", () => {
+  let prisma: unknown;
+  let pid: string;
+
+  beforeEach(async () => {
+    id = 0;
+    prisma = makeFake().prisma;
+    const proj = await request(makeApp(prisma, OWNER)).post("/api/pm/projects").send({ name: "Inbox" });
+    pid = proj.body.project.id;
+  });
+
+  it("refuses to delete the sole isDefault state (409)", async () => {
+    const states = await request(makeApp(prisma, OWNER)).get(`/api/pm/projects/${pid}/states`);
+    const dflt = states.body.states.find((s: { isDefault: boolean }) => s.isDefault);
+    const res = await request(makeApp(prisma, OWNER)).delete(`/api/pm/states/${dflt.id}`);
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("state_is_default");
+  });
+
+  it("deletes a non-default state when others remain (200)", async () => {
+    const states = await request(makeApp(prisma, OWNER)).get(`/api/pm/projects/${pid}/states`);
+    const nonDefault = states.body.states.find((s: { isDefault: boolean }) => !s.isDefault);
+    const res = await request(makeApp(prisma, OWNER)).delete(`/api/pm/states/${nonDefault.id}`);
+    expect(res.status).toBe(200);
+  });
+
+  it("refuses to delete the last remaining state (409)", async () => {
+    // Drain every non-default state, then the lone remaining default must be
+    // protected as both last-and-default.
+    const states = await request(makeApp(prisma, OWNER)).get(`/api/pm/projects/${pid}/states`);
+    for (const s of states.body.states.filter((x: { isDefault: boolean }) => !x.isDefault)) {
+      await request(makeApp(prisma, OWNER)).delete(`/api/pm/states/${s.id}`);
+    }
+    const remaining = await request(makeApp(prisma, OWNER)).get(`/api/pm/projects/${pid}/states`);
+    expect(remaining.body.states).toHaveLength(1);
+    const res = await request(makeApp(prisma, OWNER)).delete(`/api/pm/states/${remaining.body.states[0].id}`);
+    expect(res.status).toBe(409);
+  });
+});
+
+describe("native PM routes — Prisma race → typed HTTP mapping", () => {
+  it("createProject identifier race → P2002 → 409 identifier_taken", async () => {
+    id = 0;
+    const hooks: Hooks = { "pmProject.create": "P2002" };
+    const prisma = makeFake(hooks).prisma;
+    const res = await request(makeApp(prisma, OWNER)).post("/api/pm/projects").send({ name: "Inbox" });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("identifier_taken");
+  });
+
+  it("deleteProject concurrent-delete race → P2025 → 404", async () => {
+    id = 0;
+    const fake = makeFake();
+    const proj = await request(makeApp(fake.prisma, OWNER)).post("/api/pm/projects").send({ name: "Inbox" });
+    fake.hooks["pmProject.delete"] = "P2025";
+    const res = await request(makeApp(fake.prisma, OWNER)).delete(`/api/pm/projects/${proj.body.project.id}`);
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe("project_not_found");
+  });
+
+  it("deleteWorkItem concurrent-delete race → P2025 → 404", async () => {
+    id = 0;
+    const fake = makeFake();
+    const proj = await request(makeApp(fake.prisma, OWNER)).post("/api/pm/projects").send({ name: "Inbox" });
+    const wi = await request(makeApp(fake.prisma, OWNER))
+      .post(`/api/pm/projects/${proj.body.project.id}/work-items`)
+      .send({ name: "Doomed" });
+    fake.hooks["pmWorkItem.delete"] = "P2025";
+    const res = await request(makeApp(fake.prisma, OWNER)).delete(`/api/pm/work-items/${wi.body.work_item.id}`);
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe("work_item_not_found");
+  });
+
+  it("deleteState concurrent-delete race → P2025 → 404", async () => {
+    id = 0;
+    const fake = makeFake();
+    const proj = await request(makeApp(fake.prisma, OWNER)).post("/api/pm/projects").send({ name: "Inbox" });
+    const states = await request(makeApp(fake.prisma, OWNER)).get(`/api/pm/projects/${proj.body.project.id}/states`);
+    const nonDefault = states.body.states.find((s: { isDefault: boolean }) => !s.isDefault);
+    fake.hooks["pmState.delete"] = "P2025";
+    const res = await request(makeApp(fake.prisma, OWNER)).delete(`/api/pm/states/${nonDefault.id}`);
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe("state_not_found");
+  });
+
+  it("deleteLabel concurrent-delete race → P2025 → 404", async () => {
+    id = 0;
+    const fake = makeFake();
+    const proj = await request(makeApp(fake.prisma, OWNER)).post("/api/pm/projects").send({ name: "Inbox" });
+    const label = await request(makeApp(fake.prisma, OWNER))
+      .post(`/api/pm/projects/${proj.body.project.id}/labels`)
+      .send({ name: "bug" });
+    fake.hooks["pmLabel.delete"] = "P2025";
+    const res = await request(makeApp(fake.prisma, OWNER)).delete(`/api/pm/labels/${label.body.label.id}`);
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe("label_not_found");
+  });
+
+  it("createWorkItem parent FK race → P2003 → 422 invalid_parent", async () => {
+    id = 0;
+    const fake = makeFake();
+    const proj = await request(makeApp(fake.prisma, OWNER)).post("/api/pm/projects").send({ name: "Inbox" });
+    const parent = await request(makeApp(fake.prisma, OWNER))
+      .post(`/api/pm/projects/${proj.body.project.id}/work-items`)
+      .send({ name: "Parent" });
+    // Parent passes the existence check, then the FK is violated at insert time
+    // (parent deleted concurrently) → Prisma P2003.
+    fake.hooks["pmWorkItem.create"] = "P2003";
+    const res = await request(makeApp(fake.prisma, OWNER))
+      .post(`/api/pm/projects/${proj.body.project.id}/work-items`)
+      .send({ name: "Child", parent_id: parent.body.work_item.id });
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe("invalid_parent");
+  });
+});
+
+describe("native PM routes — pagination + sortOrder input validation", () => {
+  let prisma: unknown;
+  let pid: string;
+
+  beforeEach(async () => {
+    id = 0;
+    prisma = makeFake().prisma;
+    const proj = await request(makeApp(prisma, OWNER)).post("/api/pm/projects").send({ name: "Inbox" });
+    pid = proj.body.project.id;
+  });
+
+  it("rejects a non-numeric per_page (400)", async () => {
+    const res = await request(makeApp(prisma, OWNER)).get(`/api/pm/projects/${pid}/work-items?per_page=abc`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("invalid_request");
+  });
+
+  it("rejects a non-numeric page (400)", async () => {
+    const res = await request(makeApp(prisma, OWNER)).get(`/api/pm/projects/${pid}/work-items?page=xyz`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("invalid_request");
+  });
+
+  it("accepts a valid numeric per_page (200)", async () => {
+    const res = await request(makeApp(prisma, OWNER)).get(`/api/pm/projects/${pid}/work-items?per_page=10&page=1`);
+    expect(res.status).toBe(200);
+  });
+
+  it("rejects sortOrder=Infinity in a PATCH (400)", async () => {
+    const wi = await request(makeApp(prisma, OWNER))
+      .post(`/api/pm/projects/${pid}/work-items`)
+      .send({ name: "Item" });
+    const res = await request(makeApp(prisma, OWNER))
+      .patch(`/api/pm/work-items/${wi.body.work_item.id}`)
+      .send({ sortOrder: "Infinity" });
+    // a string "Infinity" or a float is rejected by the schema before Prisma
+    expect(res.status).toBe(400);
+  });
+});
+
+describe("native PM routes — identity PATCH writes no spurious activity row", () => {
+  let prisma: unknown;
+  let db: ReturnType<typeof makeFake>["db"];
+  let pid: string;
+  let wiId: string;
+
+  beforeEach(async () => {
+    id = 0;
+    const fake = makeFake();
+    prisma = fake.prisma;
+    db = fake.db;
+    const proj = await request(makeApp(prisma, OWNER)).post("/api/pm/projects").send({ name: "Inbox" });
+    pid = proj.body.project.id;
+    const wi = await request(makeApp(prisma, OWNER))
+      .post(`/api/pm/projects/${pid}/work-items`)
+      .send({ name: "Item", assignees: ["u1", "u2"], label_ids: [] });
+    wiId = wi.body.work_item.id;
+  });
+
+  it("re-PATCHing the SAME assignees writes no 'updated' activity row", async () => {
+    const before = db.activity.filter((a) => a.verb === "updated").length;
+    const res = await request(makeApp(prisma, OWNER))
+      .patch(`/api/pm/work-items/${wiId}`)
+      .send({ assignees: ["u1", "u2"] });
+    expect(res.status).toBe(200);
+    const after = db.activity.filter((a) => a.verb === "updated").length;
+    expect(after).toBe(before);
+  });
+
+  it("CHANGING the assignee set DOES write an 'updated' activity row", async () => {
+    const before = db.activity.filter((a) => a.verb === "updated").length;
+    const res = await request(makeApp(prisma, OWNER))
+      .patch(`/api/pm/work-items/${wiId}`)
+      .send({ assignees: ["u1", "u3"] });
+    expect(res.status).toBe(200);
+    const after = db.activity.filter((a) => a.verb === "updated").length;
+    expect(after).toBe(before + 1);
+  });
+
+  it("re-PATCHing the SAME (empty) labelIds writes no 'updated' activity row", async () => {
+    const before = db.activity.filter((a) => a.verb === "updated").length;
+    const res = await request(makeApp(prisma, OWNER))
+      .patch(`/api/pm/work-items/${wiId}`)
+      .send({ label_ids: [] });
+    expect(res.status).toBe(200);
+    const after = db.activity.filter((a) => a.verb === "updated").length;
+    expect(after).toBe(before);
   });
 });
