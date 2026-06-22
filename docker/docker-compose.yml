@@ -446,6 +446,12 @@ services:
       # is harmless to Nextcloud's space-separated trusted-domains list.
       - NEXTCLOUD_TRUSTED_DOMAINS=localhost nextcloud gateway droplet-ai.local droplet-ai.lan droplet.local droplet.lan ${DROPLET_PUBLIC_FQDN:-}
       - OVERWRITEPROTOCOL=https
+      # WARP-883 (ADR-027 WS-5) — shared "Household" group folder. The
+      # post-installation hook (nextcloud-init.sh) reads these to create the
+      # groupfolders-backed shared space idempotently. Quota accepts any
+      # `occ groupfolders:quota` value ("unlimited" or e.g. "50 GB").
+      - DROPLET_SHARED_FOLDER_NAME=${DROPLET_SHARED_FOLDER_NAME:-Household}
+      - DROPLET_SHARED_FOLDER_QUOTA=${DROPLET_SHARED_FOLDER_QUOTA:-unlimited}
     volumes:
       - nextcloud-data:/var/www/html
       - ./nextcloud-skeleton:/skeleton:ro

@@ -18,6 +18,7 @@ vi.mock("../config.js", () => ({
   config: {
     AUTH_ENABLED: true,
     NEXTCLOUD_URL: "http://nextcloud.test",
+    DROPLET_SHARED_FOLDER_NAME: "Household",
     JWT_SECRET: "test-secret-32-bytes-long-aaaaaaaa",
   },
 }));
@@ -186,12 +187,15 @@ describe("POST /api/auth/users — email-based user creation with derived userid
       .send({ email: "kid@warp.test", password: "Kid-secret123" });
 
     expect(res.status).toBe(201);
-    // userid derived from email local-part: "kid"
+    // userid derived from email local-part: "kid". WARP-883: the admin-created
+    // (family-role) user now also joins the household group so the shared
+    // "Household" folder mounts for them.
     expect(nc.ncCreateUser).toHaveBeenCalledWith(
       expect.anything(),
       "kid",
       "Kid-secret123",
       undefined,
+      ["household"],
     );
   });
 
