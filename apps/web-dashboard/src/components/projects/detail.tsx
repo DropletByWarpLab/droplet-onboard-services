@@ -159,7 +159,7 @@ function DetailBody({ item, onChanged }: { item: PmWorkItem; onChanged: () => vo
   const person = usePerson();
   const { subIssues } = useSubIssues(item.projectId, item.id);
   const { comments, mutate: mutateComments } = useComments(item.id);
-  const { activity } = useActivity(item.id);
+  const { activity, mutate: mutateActivity } = useActivity(item.id);
   const subs = subIssues ?? [];
   const list = comments ?? [];
   const acts = activity ?? [];
@@ -260,7 +260,11 @@ function DetailBody({ item, onChanged }: { item: PmWorkItem; onChanged: () => vo
         <Composer
           itemId={item.id}
           onSent={() => {
+            // addComment writes a PmComment AND a verb:commented PmActivity row in
+            // the same transaction — revalidate both so the timeline refreshes
+            // immediately instead of waiting for SWR window-focus. (ADR-026 P5)
             void mutateComments();
+            void mutateActivity();
             onChanged();
           }}
         />
