@@ -4,14 +4,19 @@ interface ToggleSwitchProps {
   on: boolean;
   onToggle: () => void;
   disabled?: boolean;
+  /** Accessible name — set when the visible label lives in a sibling element
+   *  (the switch renders no text of its own, so without this a screen reader
+   *  announces only "switch, on/off"). */
+  ariaLabel?: string;
 }
 
-export function ToggleSwitch({ on, onToggle, disabled }: ToggleSwitchProps) {
+export function ToggleSwitch({ on, onToggle, disabled, ariaLabel }: ToggleSwitchProps) {
   return (
     <button
       type="button"
       role="switch"
       aria-checked={on}
+      aria-label={ariaLabel}
       disabled={disabled}
       onClick={(e) => {
         e.stopPropagation();

@@ -1,0 +1,47 @@
+name: openwrt-attach-tests
+
+# Host-side single-box AP bring-up tooling: droplet-openwrt-attach (moves the
+# Wi-Fi phy into the openwrt container + wires hostapd/dnsmasq/fw4) and
+# droplet-wifi-watchdog (revives a silently-wedged radio). These pure shell
+# units ran against fake sysfs + stubs (no root/PCI/Docker) — fast, but until
+# now NOTHING in CI executed them, which is how a quote-break regression in the
+# attach body (AP comes up with no forwarding) and a watchdog false-wedge on the
+# container phy both shipped unnoticed.
+on:
+  pull_request:
+    paths:
+      - "scripts/host/usr-local-sbin/droplet-openwrt-attach"
+      - "scripts/host/usr-local-sbin/droplet-wifi-watchdog"
+      - "tests/openwrt-attach-*.test.sh"
+      - "tests/wifi-watchdog.test.sh"
+      - ".github/workflows/openwrt-attach-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "scripts/host/usr-local-sbin/droplet-openwrt-attach"
+      - "scripts/host/usr-local-sbin/droplet-wifi-watchdog"
+      - "tests/openwrt-attach-*.test.sh"
+      - "tests/wifi-watchdog.test.sh"
+      - ".github/workflows/openwrt-attach-tests.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: openwrt-attach-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  openwrt-attach:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run host AP bring-up + watchdog shell tests
+        run: |
+          set -u
+          fail=0
+          for t in tests/openwrt-attach-*.test.sh tests/wifi-watchdog.test.sh; do
+            echo "::group::$t"
+            if bash "$t"; then echo "ok: $t"; else echo "FAILED: $t"; fail=1; fi
+            echo "::endgroup::"
+          done
+          exit "$fail"

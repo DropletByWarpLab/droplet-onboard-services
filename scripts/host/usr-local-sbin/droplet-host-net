@@ -1,0 +1,48 @@
+#!/bin/bash
+# Bring up host-side LAN networking for the single-box. Idempotent — runs on
+# every boot via droplet-host-net.service.
+#
+# What it does:
+#   1. Adds a /32 host route to the Lantronix mgmt IP (192.168.1.77)
+#      via br-lan, so the orchestrator's switch service can reach the
+#      switch even though br-lan itself is on 192.168.20.0/24.
+#      Goes away once the smart-port rework re-IPs the switch into
+#      192.168.20.x natively (see docs/SMART_PORT_AUTOVLAN.md).
+#   2. Validates + runs a dedicated dnsmasq instance bound to br-lan,
+#      serving 192.168.20.100-200. Without this, the camera plugged
+#      into the Lantronix never gets an IP and the camera-discovery
+#      service has nothing to scan.
+#
+# Why a separate dnsmasq instance instead of the system dnsmasq.service:
+#   The system unit defaults to binding every interface, which collides
+#   with systemd-resolved on 127.0.0.53 and leaves the unit in a
+#   failed state on Ubuntu 24.04. Running our own dnsmasq with
+#   bind-interfaces + listen-address lets the two coexist cleanly.
+set -euo pipefail
+
+# --- Overridable knobs (override via /etc/default/droplet-host-net)
+SWITCH_IP="${SWITCH_IP:-192.168.1.77}"
+HOST_SWITCH_SIDE_IP="${HOST_SWITCH_SIDE_IP:-192.168.1.250}"
+LAN_BRIDGE="${LAN_BRIDGE:-br-lan}"
+DNSMASQ_CONF="${DNSMASQ_CONF:-/etc/droplet-host-net/lan-dhcp.conf}"
+# ---------------------------------------------------------------------
+
+# 1) Route to the switch mgmt IP via br-lan. The /32 host route + a
+#    same-subnet source IP is the minimum that lets the host originate
+#    packets to the switch without re-IPing either side. `ip route
+#    replace` is idempotent (creates or updates).
+ip addr replace "$HOST_SWITCH_SIDE_IP/32" dev "$LAN_BRIDGE"
+ip route replace "$SWITCH_IP/32" dev "$LAN_BRIDGE" src "$HOST_SWITCH_SIDE_IP"
+
+# 2) Validate the dnsmasq config before exec'ing — a typo here would
+#    otherwise leave systemd thrashing on Restart=on-failure.
+/usr/sbin/dnsmasq --test --conf-file="$DNSMASQ_CONF"
+
+# 3) Ensure the lease-file directory exists. The default
+#    /var/lib/misc/ ships on Debian/Ubuntu but a fresh container or a
+#    pruned host might be missing it.
+install -d -m 0755 /var/lib/misc
+
+# 4) Foreground exec under systemd. -k prevents dnsmasq from daemonizing
+#    so systemd sees the real PID and tracks restarts correctly.
+exec /usr/sbin/dnsmasq -k --conf-file="$DNSMASQ_CONF"

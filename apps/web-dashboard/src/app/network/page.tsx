@@ -33,20 +33,39 @@ import { GroupManagerDialog } from "@/components/network/GroupManagerDialog";
 import { SchedulesTab } from "@/components/network/SchedulesTab";
 import { CoverageExtendersPanel } from "@/components/network/CoverageExtendersPanel";
 import { PhoneHomeCard } from "@/components/network/PhoneHomeCard";
+import { CameraPrivacyCard } from "@/components/network/CameraPrivacyCard";
+import { AiAgentAccessCard } from "@/components/network/AiAgentAccessCard";
+import { DhcpPoolForm } from "@/components/network/DhcpPoolForm";
+import { DnsOverTlsCard } from "@/components/network/DnsOverTlsCard";
+import { GuestWifiCard } from "@/components/network/GuestWifiCard";
+import { InterfacesTable } from "@/components/network/InterfacesTable";
+import { MaintenanceCards } from "@/components/network/MaintenanceCards";
+import { RadioDetailCard } from "@/components/network/RadioDetailCard";
+import { SystemControlsCard } from "@/components/network/SystemControlsCard";
+import { UpnpCard } from "@/components/network/UpnpCard";
+import { FirewallRuleForm, ZonePolicyEditor } from "@/components/network/FirewallRuleForm";
 import { NetworkSimple } from "@/components/network/NetworkSimple";
 import { SwitchPanel } from "@/components/network/switch/SwitchPanel";
 import { WifiScanPanel } from "@/components/network/WifiScanPanel";
 import { WifiSettingsForm } from "@/components/network/WifiSettingsForm";
+import { WifiChannelCard } from "@/components/network/WifiChannelCard";
+import { PortForwardForm } from "@/components/network/PortForwardForm";
+import { DhcpReservationForm } from "@/components/network/DhcpReservationForm";
+import { DnsServersForm } from "@/components/network/DnsServersForm";
+import { StaticDnsCard } from "@/components/network/StaticDnsCard";
 import {
   fetchNetworkOperation,
+  getNetworkTopology,
   rebootRouter,
   type NetworkOperation,
+  type NetworkTopology,
 } from "@/lib/api";
 import type {
   EnrichedNetworkDevice,
   FirewallConfig,
   FirewallRedirect,
   FirewallRule,
+  FirewallZone,
   NetworkOverview,
 } from "@/lib/types";
 
@@ -105,6 +124,8 @@ export default function NetworkPage() {
     routerErrorMessage,
     refresh,
   } = useNetwork();
+  const { user } = useAuth();
+  const canAuthor = user?.role === "owner" || user?.role === "admin";
   const [activeTab, setActiveTab] = useState<Tab>("overview");
   const [opStatus, setOpStatus] = useState<OperationStatus>({ state: "idle" });
   // WARP-871 follow-up: while an owner-initiated reboot is in flight the router
@@ -497,7 +518,10 @@ export default function NetworkPage() {
         tabIndex={0}
         hidden={activeTab !== "firewall"}
       >
-        {activeTab === "firewall" && <FirewallTab firewall={firewall} />}
+        {activeTab === "firewall" && <FirewallTab firewall={firewall} onApplied={refresh} />}
+        {activeTab === "firewall" && (
+          <FirewallTab firewall={firewall} canAuthor={canAuthor} onApplied={refresh} />
+        )}
       </div>
       <div
         role="tabpanel"
@@ -541,8 +565,34 @@ function OverviewTab({ overview }: { overview: NetworkOverview | undefined }) {
   const memFree = system?.resources?.memory?.free ?? 0;
   const memUsedPct = memTotal > 0 ? Math.round(((memTotal - memFree) / memTotal) * 100) : 0;
 
+  // WARP-871: best-effort deployment-posture badge (ADR-018). The routing
+  // GET /network/topology read existed but was never surfaced; the badge tells
+  // a primary router apart from a single-box sitting behind the home router.
+  const [topology, setTopology] = useState<NetworkTopology | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    getNetworkTopology().then((t) => {
+      if (!cancelled) setTopology(t);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const postureLabel =
+    topology?.posture === "PRIMARY_ROUTER"
+      ? "Primary router"
+      : topology?.posture === "DOWNSTREAM_ROUTER"
+        ? "Downstream router"
+        : null;
+
   return (
     <div className="space-y-6">
+      {postureLabel && (
+        <span className="inline-flex items-center gap-1.5 rounded-full bg-surface-secondary px-2.5 py-1 type-caption-1 text-label-secondary">
+          <Router size={12} aria-hidden="true" />
+          {postureLabel}
+        </span>
+      )}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <StatusCard
           icon={Globe}
@@ -814,6 +864,25 @@ function WifiTab() {
           the setup wizard's InternetStep. */}
       <WifiSettingsForm />
 
+      {/* WARP-871: the channel write path (orchestrator route + routing) shipped
+          at WARP-40 and api.ts already exported setWifiChannel, but the WiFi tab
+          never surfaced a channel picker — the one lever for dodging a congested
+          band. */}
+      <WifiChannelCard />
+      {/* Read-only host-radio detail (band/channel/width/country + a
+          Broadcasting chip). Honest for the single combined-radio shape — no
+          enable/disable toggle; every chip is a real iwinfo field or "not
+          reported". */}
+      <RadioDetailCard />
+
+      {/* Guest Wi-Fi — an isolated visitor network (own SSID + firewall zone). */}
+      <GuestWifiCard />
+
+      {/* Camera privacy — network isolation posture (honest, read-only) plus
+          the live "block cameras from the internet" toggle. Sits with the
+          everyday Wi-Fi/network controls per the design's Simple-mode layout. */}
+      <CameraPrivacyCard />
+
       {/* WARP-816: the scanner lives in WifiScanPanel so it can distinguish the
           AP-mode "scanning unavailable while broadcasting" state (typed
           SCAN_UNSUPPORTED signal) from a genuine empty scan. */}
@@ -823,10 +892,55 @@ function WifiTab() {
 }
 
 // --- Firewall Tab ---
-function FirewallTab({ firewall }: { firewall: FirewallConfig | undefined }) {
+function FirewallTab({
+  firewall,
+  onApplied,
+}: {
+  firewall: FirewallConfig | undefined;
+  onApplied?: () => void;
+// A zone's input/output/forward policy chip — green for ACCEPT, red for the
+// restrictive policies (REJECT/DROP). Mirrors the design's zone-policy chips
+// (advanced Network · Firewall zones) and reuses the same status colors as the
+// rule target chips below.
+function PolicyChip({ policy }: { policy: string | undefined }) {
+  const value = (policy ?? "—").toUpperCase();
+  const accepting = value === "ACCEPT";
+  return (
+    <span
+      className={`type-caption-2 font-mono px-1.5 py-0.5 rounded-sm ${
+        value === "—"
+          ? "text-label-quaternary bg-surface-secondary/60"
+          : accepting
+            ? "text-system-green bg-system-green/10"
+            : "text-system-red bg-system-red/10"
+      }`}
+    >
+      {value}
+    </span>
+  );
+}
+
+function FirewallTab({
+  firewall,
+  canAuthor,
+  onApplied,
+}: {
+  firewall: FirewallConfig | undefined;
+  canAuthor: boolean;
+  onApplied: () => void;
+}) {
   // WARP-42: typed Object.entries — each entry is [sectionId, typed section]
   // instead of [string, any], so a missing `target` or a `proto` type change
   // on the routing side now fails compile.
+  const { user } = useAuth();
+  // Port-forwarding exposes a LAN service to WAN ingress — owner/admin only,
+  // matching the orchestrator route guard (requireRoleOrMcpService("owner",
+  // "admin")). Family-tier members see the read-only lists but not the form.
+  const canEdit = user?.role === "owner" || user?.role === "admin";
+  const zones: Array<[string, FirewallZone]> = firewall?.zones?.values
+    ? Object.entries(firewall.zones.values)
+    : [];
+  const zoneNames = zones.map(([key, z]) => z.name ?? key);
   const rules: Array<[string, FirewallRule]> = firewall?.rules?.values
     ? Object.entries(firewall.rules.values)
     : [];
@@ -836,6 +950,88 @@ function FirewallTab({ firewall }: { firewall: FirewallConfig | undefined }) {
 
   return (
     <div className="space-y-4">
+      {/* Zones — the foundational firewall structure (lan/wan/cameras/guest).
+          Read-only: the box auto-manages zone policies; the UI reflects them so
+          an owner can see, e.g., that the camera zone forwards to wan only. The
+          zone data already ships in getFirewallConfig(); this surfaces it. */}
+      <div className="card">
+        <h3 className="type-headline text-label-primary mb-1">
+          Zones ({zones.length})
+        </h3>
+        <p className="type-caption-1 text-label-tertiary mb-4">
+          Default input · output · forward policy per network zone. Managed by
+          the box.
+        </p>
+        {zones.length > 0 ? (
+          <div className="overflow-x-auto">
+            <table className="w-full type-caption-1">
+              <thead>
+                <tr className="text-label-tertiary text-left">
+                  <th className="font-medium pb-2 pr-4">Zone</th>
+                  <th className="font-medium pb-2 pr-4">Input</th>
+                  <th className="font-medium pb-2 pr-4">Output</th>
+                  <th className="font-medium pb-2 pr-4">Forward</th>
+                  <th className="font-medium pb-2">Networks</th>
+                  {canAuthor && <th className="font-medium pb-2 pl-4" />}
+                </tr>
+              </thead>
+              <tbody>
+                {zones.map(([key, zone]) => {
+                  const nets = Array.isArray(zone.network)
+                    ? zone.network.join(", ")
+                    : zone.network;
+                  return (
+                    <tr key={key} className="border-t border-separator/60">
+                      <td className="py-2 pr-4">
+                        <span className="type-subheadline text-label-primary font-medium">
+                          {zone.name ?? key}
+                        </span>
+                        {zone.masq === "1" && (
+                          <span className="ml-2 type-caption-2 text-label-quaternary font-mono">
+                            masq
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-2 pr-4">
+                        <PolicyChip policy={zone.input} />
+                      </td>
+                      <td className="py-2 pr-4">
+                        <PolicyChip policy={zone.output} />
+                      </td>
+                      <td className="py-2 pr-4">
+                        <PolicyChip policy={zone.forward} />
+                      </td>
+                      <td className="py-2 text-label-tertiary font-mono">
+                        {nets || "—"}
+                      </td>
+                      {canAuthor && (
+                        <td className="py-2 pl-4 align-top">
+                          <ZonePolicyEditor
+                            zone={zone.name ?? key}
+                            input={zone.input}
+                            output={zone.output}
+                            forward={zone.forward}
+                            onApplied={onApplied}
+                          />
+                        </td>
+                      )}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <p className="type-subheadline text-label-tertiary">
+            No firewall zones reported.
+          </p>
+        )}
+      </div>
+
+      {/* Firewall authoring (owner/admin) — add a traffic rule. Zone policies
+          are edited inline per row above. Both are Tier-2 confirm-gated writes. */}
+      {canAuthor && <FirewallRuleForm zones={zoneNames} onApplied={onApplied} />}
+
       <div className="card">
         <h3 className="type-headline text-label-primary mb-4">
           Firewall Rules ({rules.length})
@@ -901,6 +1097,15 @@ function FirewallTab({ firewall }: { firewall: FirewallConfig | undefined }) {
           <p className="type-subheadline text-label-tertiary">No port forwards configured.</p>
         )}
       </div>
+
+      {/* WARP-871: the add-port-forward write path (orchestrator route +
+          routing validator) shipped at NET-09, but the Firewall tab was
+          read-only — the only ways to create one were the LLM tool or curl.
+          Owner/admin only, matching the route guard. */}
+      {canEdit && <PortForwardForm onApplied={onApplied} />}
+      {/* UPnP / NAT-PMP — automatic port opening, off by default. Reflects the
+          box's real state (read-only "not available" when miniupnpd is absent). */}
+      <UpnpCard />
     </div>
   );
 }
@@ -931,6 +1136,11 @@ function SystemTab({
   const load5 = (load[1] / 65536).toFixed(2);
   const load15 = (load[2] / 65536).toFixed(2);
 
+  // Static DHCP reservations shape the LAN's address map — owner/admin only,
+  // matching the orchestrator route guard (requireRole("owner", "admin")).
+  const { user } = useAuth();
+  const canEdit = user?.role === "owner" || user?.role === "admin";
+
   return (
     <div className="space-y-4">
       <div className="card">
@@ -955,10 +1165,52 @@ function SystemTab({
         </div>
       </div>
 
+      {/* WARP-871: static DHCP reservations (owner/admin, Tier 1) were fully
+          wired server-side but had no UI — the only ways to pin a device to an
+          IP were the LLM tool or curl. */}
+      {canEdit && <DhcpReservationForm />}
+
+      {/* WARP-871: upstream/custom DNS resolvers. The routing /dhcp/dns write +
+          openwrt.client.setDnsServers existed; this surfaces them via a new
+          thin orchestrator route (POST /api/network/dns, Tier 1). */}
+      {canEdit && <DnsServersForm />}
+
+      {/* WARP-871: local DNS names (host-records). Routing /dhcp/hostnames had
+          full CRUD; new orchestrator routes + this card surface it. */}
+      {canEdit && <StaticDnsCard />}
+      {/* System controls — hostname (Tier-2) + time-sync (Tier-1) are real;
+          status-LED + Wi-Fi country render honest 'not available' rows on the
+          single-box shape (no in-container LED surface; pinned host-hostapd
+          country). */}
+      <SystemControlsCard />
+
+      {/* Interfaces — read-only enumeration of every configured interface.
+          Add/Edit is deferred (UCI network rewrite can cut the served AP/LAN);
+          present:false rows render an honest 'not on this box' state. */}
+      <InterfacesTable />
+
+      {/* AI agent access — read-only droplet-ai RPC scopes from the live ACL.
+          Rotate/Revoke are honest-gated (disabled): they'd need a coordinated
+          secret refresh that self-locks-out the Network tab. */}
+      <AiAgentAccessCard />
+
+      {/* DHCP & DNS — the live LAN pool range + lease-time editor (Tier-2
+          confirm) plus the honest DNS-over-TLS gate (no DoT forwarder on this
+          build, so it renders inert rather than faking a toggle). */}
+      <DhcpPoolForm />
+      <DnsOverTlsCard />
+
       {/* WARP-871: the reboot endpoint (owner-only, Tier-3 confirmable) was
           fully wired server-side but had no UI path — the only ways to restart
           the router were the LLM tool or curl. */}
       <RouterRebootCard onRebootingChange={onRebootingChange} />
+
+      {/* Maintenance — Firmware + Factory reset. Honest, informational,
+          owner-only: the single-box runs OpenWrt in a container (no flashable
+          router firmware; a container UCI reset would desync the host AP), so
+          these explain the truth and point at the appliance-wide flows rather
+          than fake a router-only sysupgrade / reset. */}
+      <MaintenanceCards />
     </div>
   );
 }

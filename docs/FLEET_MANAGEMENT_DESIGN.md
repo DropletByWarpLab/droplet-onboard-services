@@ -160,9 +160,15 @@ works under the existing host kernels untouched.
 
 ### 2. `fleet-server` (new service on HQ)
 
+> **2026-06-18:** the HQ services now live in their own repo —
+> **[`DropletByWarpLab/droplet-fleet-hq`](https://github.com/DropletByWarpLab/droplet-fleet-hq)**
+> (HQ-deployed, sibling to `droplet-analytics`). Its first component — the
+> per-device TLS **issuance** service (ADR-023) — is already there and
+> CI-green. The heartbeat / manifest / rollout routes described below remain
+> to be built **in that repo**, not in this box monorepo.
+
 FastAPI app on `hq.warp-lab.com`. Same conventions as the rest of the
-codebase (`services/fleet-server/` mirrors `services/ai-gateway/`
-layout — `main.py + tests/` + Dockerfile).
+codebase (`main.py + tests/` + Dockerfile).
 
 **Routes:**
 
@@ -271,7 +277,7 @@ Every layer assumes the previous failed:
 - [ ] `services/droplet-agent/`: minimal heartbeat-only build.
       No update polling yet, no tunnel proxy yet — just dial WG,
       POST heartbeat every 60 s.
-- [ ] `services/fleet-server/`: `POST /api/fleet/heartbeat` ingest,
+- [ ] `droplet-fleet-hq` (fleet-server): `POST /api/fleet/heartbeat` ingest,
       `GET /api/fleet/devices` list. Postgres + alembic.
 - [ ] Deploy both. Confirm POC heartbeats arriving at HQ.
 
@@ -435,7 +441,7 @@ overridden.**
 | Day 1 | Stefan | Provision Hetzner CX22 Frankfurt, Ubuntu 24.04 | 10 min |
 | Day 1 | Stefan | Point `hq.warp-lab.com` DNS at the CX22 IP | 5 min |
 | Day 2 AM | Claude | Build `services/droplet-agent/` heartbeat-only | ~3 h |
-| Day 2 PM | Claude | Build `services/fleet-server/` ingest + Postgres schema | ~4 h |
+| Day 2 PM | Claude | Build `droplet-fleet-hq` fleet-server ingest + Postgres schema | ~4 h |
 | Day 2 EVE | Stefan | `apt install wireguard postgresql-17`, `wg genkey`, `certbot` | 30 min |
 | Day 3 | Together | Deploy fleet-server to HQ, agent to POC, watch heartbeats land | ~1 h |
 

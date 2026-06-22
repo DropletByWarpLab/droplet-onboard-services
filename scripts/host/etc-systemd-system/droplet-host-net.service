@@ -1,0 +1,22 @@
+[Unit]
+# Host-side networking for the single-box:
+#   - persistent /32 route to the managed switch (192.168.1.77 via br-lan)
+#   - dedicated dnsmasq instance serving DHCP on br-lan (192.168.20.0/24)
+#
+# Without this, devices plugged into the managed switch never get an IP —
+# the OpenWrt container's dnsmasq is scoped to the AP-side LAN, not the
+# host's br-lan. See scripts/host/usr-local-sbin/droplet-host-net for details.
+Description=Droplet host networking (br-lan DHCP + managed switch route)
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/default/droplet-host-net
+ExecStart=/usr/local/sbin/droplet-host-net
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

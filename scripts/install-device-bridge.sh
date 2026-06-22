@@ -128,6 +128,23 @@ fi
 install -m 0755 "$HOSTAPD_SCRIPT_SRC" "$HOSTAPD_SCRIPT_DST"
 log "installed $HOSTAPD_SCRIPT_DST"
 
+# --- 1d-quater) Install the guest Wi-Fi host writer ---
+# Sibling of droplet-set-hostapd.sh: the device-bridge's POST/DELETE
+# /openwrt/wifi/guest shells this to enable/disable the OPTIONAL second BSS on
+# the single-box shape — it upserts DROPLET_GUEST_SSID/PSK/ENABLED in the SAME
+# attach env file and restarts droplet-openwrt-attach.service (which stands up
+# the guest BSS + 192.168.30.0/24 subnet + isolated firewall zone). Reuses the
+# EXISTING polkit grant (it restarts the same one unit), so no new privilege.
+# Validates SSID 1-32 / PSK 8-63 before writing and never logs the PSK.
+GUEST_SCRIPT_SRC="$REPO_ROOT/scripts/host/droplet-set-guest-wifi.sh"
+GUEST_SCRIPT_DST="/usr/local/sbin/droplet-set-guest-wifi.sh"
+if [[ ! -f "$GUEST_SCRIPT_SRC" ]]; then
+  log "missing source: $GUEST_SCRIPT_SRC"
+  exit 1
+fi
+install -m 0755 "$GUEST_SCRIPT_SRC" "$GUEST_SCRIPT_DST"
+log "installed $GUEST_SCRIPT_DST"
+
 # --- 1d-ter) Install the Wi-Fi PCI watchdog (WARP-869) ---
 # Revives a silently-dead Wi-Fi PCI function (driver bound, phy/netdev gone)
 # via remove + rescan, then re-runs droplet-openwrt-attach so hostapd rebinds
@@ -210,6 +227,22 @@ if [[ ! -f "$TLS_RELOAD_SCRIPT_SRC" ]]; then
 fi
 install -m 0755 "$TLS_RELOAD_SCRIPT_SRC" "$TLS_RELOAD_SCRIPT_DST"
 log "installed $TLS_RELOAD_SCRIPT_DST"
+
+# ADR-023 PR-1: public-FQDN write-back host executor. The orchestrator's
+# tls-issuance service POSTs /host/public-fqdn to the bridge once it has LEARNED
+# the box's opaque per-device FQDN from HQ; the bridge execs this wrapper, which
+# idempotently persists DROPLET_PUBLIC_FQDN into the repo .env and re-registers
+# split-horizon DNS (the orchestrator can't write the host .env itself).
+# Repo-tracked (architecture-guard rule 20), installed here so factory-reset
+# removes it cleanly. Repo source is scripts/host/.
+SET_FQDN_SCRIPT_SRC="$REPO_ROOT/scripts/host/droplet-set-public-fqdn.sh"
+SET_FQDN_SCRIPT_DST="/usr/local/sbin/droplet-set-public-fqdn.sh"
+if [[ ! -f "$SET_FQDN_SCRIPT_SRC" ]]; then
+  log "missing source: $SET_FQDN_SCRIPT_SRC"
+  exit 1
+fi
+install -m 0755 "$SET_FQDN_SCRIPT_SRC" "$SET_FQDN_SCRIPT_DST"
+log "installed $SET_FQDN_SCRIPT_DST"
 
 # --- 2) Ensure the env file exists and contains the needed secrets ---
 install -d -m 0755 "$ENV_DIR"

@@ -193,51 +193,88 @@ if [ -f "$REPO_ROOT/.env" ]; then
   _DEREGISTER_DEVICE_ID="$(grep -E '^DROPLET_DEVICE_ID=' "$REPO_ROOT/.env" | tail -1 | cut -d= -f2- | tr -d '"' || true)"
 fi
 
-if [ -n "$_DEREGISTER_FQDN" ]; then
-  log_step 0 4 "Deregistering public-FQDN DNS + HQ registration (${_DEREGISTER_FQDN})"
+# Gate on the FQDN *or* the device id: a zero-touch box (ADR-023 PR-1) issues a
+# cert + learns its FQDN lazily, so DROPLET_PUBLIC_FQDN can still be empty while
+# the box is already REGISTERED at HQ under DROPLET_DEVICE_ID. Gating on the FQDN
+# alone (the old behaviour) skipped HQ deregistration on exactly those boxes.
+if [ -n "$_DEREGISTER_FQDN" ] || [ -n "$_DEREGISTER_DEVICE_ID" ]; then
+  log_step 0 4 "Deregistering public-FQDN DNS + HQ registration (${_DEREGISTER_FQDN:-${_DEREGISTER_DEVICE_ID}})"
 
-  # 1. Remove the split-horizon host-record from the OpenWrt dnsmasq (routing).
-  _routing_url="${ROUTING_SERVICE_URL:-http://localhost:8080}"
-  _routing_token="${ROUTING_SERVICE_TOKEN:-}"
-  _routing_auth=()
-  [ -n "$_routing_token" ] && _routing_auth=(-H "Authorization: Bearer ${_routing_token}")
-  if curl -sf --max-time 5 "${_routing_url}/health" >/dev/null 2>&1; then
-    curl -sS --max-time 10 -X DELETE \
-      "${_routing_url}/dhcp/hostnames/${_DEREGISTER_FQDN}" \
-      "${_routing_auth[@]}" >/dev/null 2>&1 \
-      && log_success "Removed router DNS host-record for ${_DEREGISTER_FQDN}" \
-      || log_warn "Could not remove router DNS host-record (non-fatal)"
-  else
-    log_warn "Routing service unreachable — skipping router DNS deregistration (non-fatal)"
+  # The split-horizon DNS legs (router + host dnsmasq) are FQDN-keyed, so only
+  # run them when we actually have a learned FQDN. The HQ deregistration below
+  # is keyed on the device id and runs even on a zero-touch box that never
+  # populated DROPLET_PUBLIC_FQDN.
+  if [ -n "$_DEREGISTER_FQDN" ]; then
+    # 1. Remove the split-horizon host-record from the OpenWrt dnsmasq (routing).
+    _routing_url="${ROUTING_SERVICE_URL:-http://localhost:8080}"
+    _routing_token="${ROUTING_SERVICE_TOKEN:-}"
+    _routing_auth=()
+    [ -n "$_routing_token" ] && _routing_auth=(-H "Authorization: Bearer ${_routing_token}")
+    if curl -sf --max-time 5 "${_routing_url}/health" >/dev/null 2>&1; then
+      curl -sS --max-time 10 -X DELETE \
+        "${_routing_url}/dhcp/hostnames/${_DEREGISTER_FQDN}" \
+        "${_routing_auth[@]}" >/dev/null 2>&1 \
+        && log_success "Removed router DNS host-record for ${_DEREGISTER_FQDN}" \
+        || log_warn "Could not remove router DNS host-record (non-fatal)"
+    else
+      log_warn "Routing service unreachable — skipping router DNS deregistration (non-fatal)"
+    fi
+
+    # 2. Remove the managed host-record line from the host dnsmasq config
+    #    (ADR-018-transitional leg). Best-effort; the file is wiped/regenerated on
+    #    re-provision anyway, but stripping it now keeps a not-reinstalled box clean.
+    _host_dnsmasq_conf="/etc/droplet-host-net/lan-dhcp.conf"
+    if [ -f "$_host_dnsmasq_conf" ]; then
+      _tmp_dns="$(mktemp -t droplet-hostdns-rm.XXXXXX 2>/dev/null || mktemp)"
+      sudo grep -vF "# ADR-023 managed host-record" "$_host_dnsmasq_conf" 2>/dev/null \
+        | grep -vE '^host-record=.*\.devices\.warp-lab\.ai,' > "$_tmp_dns" || true
+      sudo cp "$_tmp_dns" "$_host_dnsmasq_conf" 2>/dev/null || true
+      rm -f "$_tmp_dns"
+      sudo systemctl reload droplet-host-net.service 2>/dev/null \
+        || sudo systemctl restart droplet-host-net.service 2>/dev/null || true
+      log_success "Removed host dnsmasq host-record (ADR-018-transitional)"
+    fi
   fi
 
-  # 2. Remove the managed host-record line from the host dnsmasq config
-  #    (ADR-018-transitional leg). Best-effort; the file is wiped/regenerated on
-  #    re-provision anyway, but stripping it now keeps a not-reinstalled box clean.
-  _host_dnsmasq_conf="/etc/droplet-poc-host-net/lan-dhcp.conf"
-  if [ -f "$_host_dnsmasq_conf" ]; then
-    _tmp_dns="$(mktemp -t droplet-hostdns-rm.XXXXXX 2>/dev/null || mktemp)"
-    sudo grep -vF "# ADR-023 managed host-record" "$_host_dnsmasq_conf" 2>/dev/null \
-      | grep -vE '^host-record=.*\.devices\.warp-lab\.ai,' > "$_tmp_dns" || true
-    sudo cp "$_tmp_dns" "$_host_dnsmasq_conf" 2>/dev/null || true
-    rm -f "$_tmp_dns"
-    sudo systemctl reload droplet-poc-host-net.service 2>/dev/null \
-      || sudo systemctl restart droplet-poc-host-net.service 2>/dev/null || true
-    log_success "Removed host dnsmasq host-record (ADR-018-transitional)"
+  # 3. Signed HQ deregistration (ADR-023 PR-3). The box CAN prove possession of
+  #    its device identity: the orchestrator signs a FRESH HQ challenge with the
+  #    device-identity sidecar (the SAME PoP the order flow uses) and DELETEs the
+  #    HQ registration with the required body {device_id, nonce, signature,
+  #    sig_alg, key_fingerprint}. The deployed Worker REQUIRES that body — the old
+  #    bodyless curl 422'd, so HQ never unbound the device. We run this HERE, in
+  #    Phase 0b, *while the stack is still UP* (Phase 1 `down -v` comes later) so
+  #    the orchestrator can reach the sidecar. The CLI always exits 0 and no-ops
+  #    when HQ_ISSUANCE_URL is unset; this whole step is best-effort + NON-FATAL
+  #    (`|| true`) — a reset must complete even if HQ or the sidecar is down (HQ
+  #    also reaps stale registrations server-side).
+  #    GUARD (ADR-023 PR-3): require BOTH a live HQ url AND a real (non-default)
+  #    device id before we ever sign a DELETE. config.DROPLET_DEVICE_ID has a Zod
+  #    default of "droplet" (apps/orchestrator/src/config.ts), so a partially
+  #    provisioned / ID-less box with HQ_ISSUANCE_URL set must NOT be able to send
+  #    a signed DELETE for device_id="droplet" to HQ. `_DEREGISTER_REAL_DEVICE_ID`
+  #    is non-empty only when .env carries a genuine, non-default id. The inner
+  #    `deregisterFromHq` provisioning guard is the suspender to this belt.
+  _hq_url="${HQ_ISSUANCE_URL:-$(grep -E '^HQ_ISSUANCE_URL=' "$REPO_ROOT/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' || true)}"
+  _DEREGISTER_REAL_DEVICE_ID=""
+  if [ -n "$_DEREGISTER_DEVICE_ID" ] && [ "$_DEREGISTER_DEVICE_ID" != "droplet" ]; then
+    _DEREGISTER_REAL_DEVICE_ID="$_DEREGISTER_DEVICE_ID"
   fi
-
-  # 3. Best-effort HQ deregistration. The box can't compute the HQ-keyed HMAC,
-  #    so HQ owns the label↔device unbind; we just notify it. A fresh challenge+
-  #    signature would normally authenticate this, but at factory-reset time the
-  #    device-identity sidecar may already be down — so this is fire-and-forget
-  #    and explicitly NON-FATAL. HQ also reaps stale registrations server-side.
-  _hq_url="${HQ_ISSUANCE_URL:-}"
-  if [ -n "$_hq_url" ] && [ -n "$_DEREGISTER_DEVICE_ID" ]; then
-    curl -sS --max-time 10 -X DELETE \
-      "${_hq_url%/}/api/issuance/registration?device_id=${_DEREGISTER_DEVICE_ID}" \
-      >/dev/null 2>&1 \
-      && log_success "Notified HQ to deregister ${_DEREGISTER_DEVICE_ID}" \
-      || log_warn "Could not reach HQ for deregistration (non-fatal — HQ reaps stale registrations)"
+  if [ -n "$_hq_url" ] && [ -n "$_DEREGISTER_REAL_DEVICE_ID" ]; then
+    _dereg_env_flag_args=()
+    [ -f "$REPO_ROOT/.env" ] && _dereg_env_flag_args=(--env-file "$REPO_ROOT/.env")
+    # Bound the whole exec with a shell `timeout` (re-establishing the bound the
+    # old `curl --max-time 10` had): the `docker compose exec` has no shell-level
+    # deadline, and the underlying gRPC calls to the device-identity sidecar can
+    # hang if the sidecar is present-but-wedged — without this, factory-reset
+    # blocks forever here and never reaches Phase 1 `down -v`. A `timeout` exit
+    # of 124 (deadline hit) is treated exactly like any other failure: log a warn
+    # and PROCEED to the wipe. The whole step stays best-effort + NON-FATAL.
+    if timeout 90 $DC -f "$COMPOSE_FILE" "${_dereg_env_flag_args[@]}" exec -T orchestrator \
+         npm run -s tls-deregister >/dev/null 2>&1; then
+      log_success "Sent signed HQ deregistration for ${_DEREGISTER_REAL_DEVICE_ID}"
+    else
+      log_warn "Could not run signed HQ deregistration (non-fatal — timed out or HQ/sidecar down; HQ reaps stale registrations)"
+    fi
   fi
 
   log_divider
@@ -557,6 +594,18 @@ for f in "$REPO_ROOT"/.env.bak.*; do
 done
 
 # TLS certificates
+# ADR-023 PR-3: explicitly wipe the bootstrap self-signed pair PR-2 stashes as
+# droplet.{crt,key}.bootstrap BEFORE the directory rm. A reset must never leak
+# the PRIOR device's bootstrap private key into the next provisioning — this is
+# named so the intent survives even if the dir-wide rm below is ever narrowed.
+for _bootstrap in \
+  "$REPO_ROOT/docker/certs/droplet.crt.bootstrap" \
+  "$REPO_ROOT/docker/certs/droplet.key.bootstrap"; do
+  if [ -e "$_bootstrap" ]; then
+    rm -f "$_bootstrap"
+    log_success "Removed $(basename "$_bootstrap") (bootstrap TLS material)"
+  fi
+done
 if [ -d "$REPO_ROOT/docker/certs" ]; then
   rm -rf "$REPO_ROOT/docker/certs"
   log_success "Removed docker/certs/ (TLS certificates)"
@@ -663,6 +712,15 @@ fi
 if [ -f /usr/local/sbin/droplet-tls-reload.sh ]; then
   sudo rm -f /usr/local/sbin/droplet-tls-reload.sh 2>/dev/null || true
   log_success "Removed TLS-reload host executor"
+fi
+
+# Public-FQDN write-back host executor (ADR-023 PR-1). Remove so a reset truly
+# returns to out-of-box; install-device-bridge.sh reinstalls it on re-provision.
+# It only persists DROPLET_PUBLIC_FQDN to .env + re-registers DNS — the .env
+# itself is wiped elsewhere in this reset, so the box re-learns its name from HQ.
+if [ -f /usr/local/sbin/droplet-set-public-fqdn.sh ]; then
+  sudo rm -f /usr/local/sbin/droplet-set-public-fqdn.sh 2>/dev/null || true
+  log_success "Removed public-FQDN write-back host executor"
 fi
 
 # Device-bridge state + logs (needs sudo because systemd StateDirectory

@@ -63,6 +63,26 @@ config interface 'cameras'
     option ipaddr '192.168.100.1'
     option netmask '255.255.255.0'
 
+# --- Guest network (isolated subnet for guest Wi-Fi) ---
+# An isolated bridge that the guest wifi-iface attaches to. The routing service's
+# create_guest_network adds a `config wifi-iface` with `option network 'guest'`
+# on demand; defining the bridge + interface statically here means that VAP gets
+# a real L3 (address, DHCP pool, firewall zone) the moment it is created. Without
+# it the wifi-iface would reference a phantom network and never broadcast.
+# Subnet 192.168.30.0/24 — distinct from lan (192.168.50/24) and cameras
+# (192.168.100/24), and matching the single-box guest subnet for cross-shape
+# consistency.
+config device
+    option type 'bridge'
+    option name 'br-guest'
+    option stp '0'
+
+config interface 'guest'
+    option device 'br-guest'
+    option proto 'static'
+    option ipaddr '192.168.30.1'
+    option netmask '255.255.255.0'
+
 # --- Globals ---
 config globals 'globals'
     option ula_prefix 'fdb2:c4a0:de07::/48'

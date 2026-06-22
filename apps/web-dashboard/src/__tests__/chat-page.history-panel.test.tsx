@@ -170,14 +170,27 @@ describe("/chat page mounts the history panel", () => {
       ).toBeInTheDocument(),
     );
 
+    // Deflake: the composer's model selector hydrates asynchronously (useModels),
+    // and the resend is a no-op until a model is selected — so clicking too early
+    // calls sendChat 0 times. Wait for the on-device model tag, which only renders
+    // once a local model is selected, before clicking Try-again.
+    await waitFor(
+      () => expect(screen.getByText(/on-device/i)).toBeInTheDocument(),
+      { timeout: 10000 },
+    );
+
     // Click Try-again.
     fireEvent.click(
       screen.getByRole("button", { name: /try sending this message again/i }),
     );
 
     // sendChat was called once, with the right replay shape.
-    await waitFor(() => expect(sendChatMock).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(sendChatMock).toHaveBeenCalledTimes(1), {
+      timeout: 10000,
+    });
     const replay = sendChatMock.mock.calls[0][0].messages;
     expect(replay.at(-1)).toEqual({ role: "user", content: "what time is it" });
-  });
+    // Slower CI runners need more than waitFor's 1s default for the
+    // click -> retryMessage -> sendMessage -> sendChat async chain.
+  }, 30000);
 });

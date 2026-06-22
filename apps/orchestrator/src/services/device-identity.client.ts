@@ -27,6 +27,14 @@ import {
 
 const DEFAULT_SOCKET = "/var/run/droplet/device-identity.sock";
 
+/**
+ * Per-call gRPC deadline (ms). The sidecar can be present-but-wedged (e.g. a
+ * stuck TPM op); without a deadline a single unary call hangs forever and any
+ * caller awaiting it (factory-reset's `tls-deregister`, the order flow) blocks
+ * indefinitely. 15s is generous for a TPM sign/seal yet bounded.
+ */
+const DEFAULT_CALL_DEADLINE_MS = 15_000;
+
 export interface DeviceIdentityStatus {
   provisioned: boolean;
   backend: "real" | "mock";
@@ -94,9 +102,25 @@ function callUnary<Req, Res>(
     cb: (err: ServiceError | null, res: Res | null) => void,
   ) => unknown,
   req: Req,
+  deadlineMs: number = DEFAULT_CALL_DEADLINE_MS,
 ): Promise<Res> {
   return new Promise<Res>((resolve, reject) => {
+    // Race the gRPC callback against a deadline so a wedged sidecar can never
+    // hang the caller. `settle()` guards against a late callback firing after
+    // the deadline already rejected (and vice-versa); the timer is `unref`'d so
+    // it never keeps the event loop / process alive on its own.
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(Object.assign(new Error(`gRPC call timed out after ${deadlineMs}ms`), { code: "ETIMEDOUT" }));
+    }, deadlineMs);
+    if (typeof timer.unref === "function") timer.unref();
+
     call(req, (err, res) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
       if (err) {
         reject(err);
         return;
