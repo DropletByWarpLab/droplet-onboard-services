@@ -277,6 +277,37 @@ export function createFilesRouter(prisma: PrismaClient): Router {
         }
 
         const session = await ncMintEditorSession(token, user, filePath, mode);
+
+        // Record/refresh the OPEN co-authoring session, keyed on ncFileId so a
+        // second editor joining the same document upserts the one row rather
+        // than duplicating it. `status` is an EXPLICIT column. This is an
+        // audit/coordination write — a failure must not block the editor from
+        // opening (same non-fatal posture as safePublish), so it is awaited but
+        // its rejection is swallowed with a warning.
+        try {
+          await prisma.fileEditSession.upsert({
+            where: { ncFileId: session.ncFileId },
+            create: {
+              ncFileId: session.ncFileId,
+              ncUser: user,
+              filePath,
+              mode: session.mode,
+              status: "open",
+              documentKey: session.documentKey,
+            },
+            update: {
+              ncUser: user,
+              filePath,
+              mode: session.mode,
+              status: "open",
+              lastActiveAt: new Date(),
+              closedAt: null,
+            },
+          });
+        } catch (persistErr) {
+          logger.warn({ err: persistErr, ncFileId: session.ncFileId }, "FileEditSession upsert failed (non-fatal)");
+        }
+
         res.json(session);
       } catch (err) {
         // The doc-server client throws a plain Error("File not found: …") when

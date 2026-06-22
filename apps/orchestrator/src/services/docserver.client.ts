@@ -47,6 +47,8 @@ export interface DocEditorSession {
   ncFileId: number;
   /** Resolved server-side mode (edit | view). */
   mode: DocEditorMode;
+  /** Opaque co-authoring document key (namespaces the shared session). */
+  documentKey: string;
 }
 
 /**
@@ -174,5 +176,6 @@ export async function ncMintEditorSession(
     accessTokenTtl: ttl,
     ncFileId,
     mode: requestedMode,
+    documentKey,
   };
 }

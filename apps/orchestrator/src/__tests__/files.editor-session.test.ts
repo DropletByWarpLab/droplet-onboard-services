@@ -98,7 +98,9 @@ vi.mock("../services/nextcloud-session.service.js", () => ({
   resolveNcToken: vi.fn().mockResolvedValue("nc-token"),
 }));
 
+import express from "express";
 import { createApp } from "../app.js";
+import { createFilesRouter } from "../routes/files.js";
 import * as nc from "../services/nextcloud.client.js";
 import * as docs from "../services/docserver.client.js";
 import * as ncSession from "../services/nextcloud-session.service.js";
@@ -131,6 +133,7 @@ describe("Editor session + docs status routes (WARP-882)", () => {
         accessTokenTtl: 1800,
         ncFileId: 42,
         mode,
+        documentKey: "doc-key-abc",
       }),
     );
   });
@@ -207,6 +210,58 @@ describe("Editor session + docs status routes (WARP-882)", () => {
       docsMock.ncMintEditorSession.mockRejectedValue(new Error("File not found: /x.docx"));
       const res = await request(app).get("/api/files/x.docx/editor-session");
       expect(res.status).toBe(404);
+    });
+  });
+
+  describe("FileEditSession persistence (mocked prisma)", () => {
+    // Build a standalone files router with a hand-rolled prisma stub that
+    // exposes fileEditSession.upsert, plus a synthetic owner so we can assert
+    // the upsert payload directly (the global @prisma/client mock has no
+    // fileEditSession model).
+    function buildAppWithPrisma(upsert: ReturnType<typeof vi.fn>) {
+      const prismaStub = {
+        fileEditSession: { upsert },
+        fileCitation: { findMany: vi.fn().mockResolvedValue([]) },
+        chatSession: { findMany: vi.fn().mockResolvedValue([]) },
+      } as unknown as PrismaClient;
+      const a = express();
+      a.use(express.json());
+      a.use((req, _res, next) => {
+        (req as express.Request & { user: unknown }).user = {
+          id: "owner-1",
+          username: "alice",
+          displayName: "Alice",
+          role: "owner",
+        };
+        next();
+      });
+      a.use("/api", createFilesRouter(prismaStub));
+      return a;
+    }
+
+    it("upserts an OPEN FileEditSession keyed on ncFileId when a session is minted", async () => {
+      const upsert = vi.fn().mockResolvedValue({});
+      const a = buildAppWithPrisma(upsert);
+      const res = await request(a).get("/api/files/Documents/report.docx/editor-session");
+      expect(res.status).toBe(200);
+      expect(upsert).toHaveBeenCalledTimes(1);
+      const arg = upsert.mock.calls[0][0];
+      expect(arg.where).toEqual({ ncFileId: 42 });
+      expect(arg.create).toMatchObject({
+        ncFileId: 42,
+        mode: "edit",
+        status: "open",
+        documentKey: "doc-key-abc",
+      });
+      expect(arg.update).toMatchObject({ status: "open", mode: "edit" });
+    });
+
+    it("still returns 200 (editor opens) when the FileEditSession upsert fails", async () => {
+      const upsert = vi.fn().mockRejectedValue(new Error("db down"));
+      const a = buildAppWithPrisma(upsert);
+      const res = await request(a).get("/api/files/Documents/report.docx/editor-session");
+      expect(res.status).toBe(200);
+      expect(res.body.mode).toBe("edit");
     });
   });
 
