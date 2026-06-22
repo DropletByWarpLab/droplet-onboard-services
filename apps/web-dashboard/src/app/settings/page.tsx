@@ -336,6 +336,12 @@ export default function SettingsPage() {
               hasKey={configuredProviders.includes("openai")}
               onUpdate={loadKeys}
             />
+            <ProviderKeyForm
+              provider="gemini"
+              label="Gemini (Google)"
+              hasKey={configuredProviders.includes("gemini")}
+              onUpdate={loadKeys}
+            />
           </div>
         </div>
 
