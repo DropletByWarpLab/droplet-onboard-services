@@ -17,6 +17,8 @@ import {
 import { fmtISODate, isOverdue } from "./config";
 import { useComments, useSubIssues, pmActions } from "./usePm";
 import type { PmWorkItem } from "./types";
+import { escapeHtml } from "@/lib/escape-html";
+import { formatRelativeTime } from "@/lib/relative-time";
 
 function PropRow({
   icon,
@@ -90,20 +92,6 @@ function Comment({ authorId, html, when }: { authorId: string | null; html: stri
   );
 }
 
-function escapeHtml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-function relTime(iso: string): string {
-  const d = new Date(iso).getTime();
-  if (Number.isNaN(d)) return "";
-  const mins = Math.round((Date.now() - d) / 60000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.round(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  return `${Math.round(hrs / 24)}d ago`;
-}
 
 function Composer({ itemId, onSent }: { itemId: string; onSent: () => void }): JSX.Element {
   const [text, setText] = useState("");
@@ -238,7 +226,7 @@ function DetailBody({ item, onChanged }: { item: PmWorkItem; onChanged: () => vo
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           {list.length ? (
-            list.map((c) => <Comment key={c.id} authorId={c.authorId} html={c.commentHtml} when={relTime(c.createdAt)} />)
+            list.map((c) => <Comment key={c.id} authorId={c.authorId} html={c.commentHtml} when={formatRelativeTime(c.createdAt)} />)
           ) : (
             <div style={{ fontSize: 13, color: "var(--text-4)" }}>No comments yet.</div>
           )}

@@ -332,9 +332,11 @@ export async function listProjects(
     for (const p of projects) byProject.set(p.id, EMPTY_GROUPS());
     for (const it of items) {
       const g = it.state?.group;
-      if (!g) continue;
       const acc = byProject.get(it.projectId);
-      if (acc) acc[g] += 1;
+      if (!acc) continue;
+      // Items with no state are open but uncategorised — count as unstarted so
+      // they appear in openCount and the sparkline rather than vanishing silently.
+      acc[g ?? "unstarted"] += 1;
     }
     for (const p of projects) {
       const g = byProject.get(p.id) ?? EMPTY_GROUPS();
@@ -375,7 +377,7 @@ export async function getSummary(
       itemsOpen += 1;
       if (it.dueDate && it.dueDate < now) overdue += 1;
     }
-    if (g === "completed" && it.completedAt && it.completedAt >= weekAgo) doneThisWeek += 1;
+    if ((g === "completed" || g === "cancelled") && it.completedAt && it.completedAt >= weekAgo) doneThisWeek += 1;
   }
   return { activeProjects: projects.length, itemsOpen, doneThisWeek, overdue };
 }

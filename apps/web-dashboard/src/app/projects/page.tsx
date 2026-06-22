@@ -125,9 +125,13 @@ export default function ProjectsPage(): JSX.Element {
   const onTransition = async (item: PmWorkItem, stateId: string) => {
     try {
       await pmActions().transitionItem(item.id, stateId);
-      void mutateItems();
+      const fresh = await mutateItems();
       void mutateProjects();
       void mutateSummary();
+      if (drawer?.id === item.id && fresh) {
+        const up = fresh.work_items.find((i) => i.id === item.id);
+        if (up) setDrawer(up);
+      }
     } catch (e) {
       toast(e instanceof Error ? e.message : "Couldn't move the item", "error");
     }
@@ -236,9 +240,14 @@ export default function ProjectsPage(): JSX.Element {
         <DetailDrawer
           item={drawer}
           onClose={() => setDrawer(null)}
-          onChanged={() => {
-            void mutateItems();
+          onChanged={async () => {
+            const fresh = await mutateItems();
             void mutateProjects();
+            void mutateSummary();
+            if (drawer && fresh) {
+              const up = fresh.work_items.find((i) => i.id === drawer.id);
+              if (up) setDrawer(up);
+            }
           }}
         />
       )}
