@@ -4,7 +4,8 @@
  * The pure state-machine lives in tls-issuance.service.ts and takes its
  * collaborators by injection so it unit-tests with fakes. This file wires the
  * real implementations:
- *   - HqIssuanceHttpClient  — plain outbound HTTPS to the HQ fleet-server.
+ *   - HqIssuanceHttpClient  — plain outbound HTTPS to the HQ fleet-server
+ *                            (repo DropletByWarpLab/droplet-fleet-hq).
  *   - PrismaTlsCertStore    — the explicit `TlsCert` enum-backed model.
  *   - DiskTlsFileOps        — atomic temp→fsync→rename writes into docker/certs.
  *   - bridgeNginxReloader   — triggers the host reload via the device-bridge.
