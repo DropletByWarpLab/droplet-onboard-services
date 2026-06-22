@@ -101,7 +101,7 @@ const ALL_ROLES: Role[] = ["owner", "admin", "family", "guest", "service"];
 
 interface GuardedRoute {
   /** HTTP method on the supertest agent. */
-  method: "post" | "put" | "patch" | "delete";
+  method: "get" | "post" | "put" | "patch" | "delete";
   /** URL path mounted under /api on the test app. */
   path: string;
   /** Allowed roles per ADR-004 §3. */
@@ -200,6 +200,11 @@ const MATRIX: GuardedRoute[] = [
   { method: "post", path: "/api/files/mkdir", allowed: ["owner", "admin", "family"] },
   { method: "post", path: "/api/files/rename", allowed: ["owner", "admin", "family"] },
   { method: "post", path: "/api/files/move", allowed: ["owner", "admin", "family"] },
+  // WARP-879 / WS-1: internal-sharing recipient roster. Same owner+admin+family
+  // posture as the other file-write routes — `family` MUST get 200 (the whole
+  // point of reading the local User table instead of OCS /cloud/users, which
+  // 403s for family). Read-only roster, no mutation.
+  { method: "get", path: "/api/files/share-recipients", allowed: ["owner", "admin", "family"] },
 
   // ── llm sessions (own) ── ──
   // POST /llm/chat: includes `service` because voice-io's principal
