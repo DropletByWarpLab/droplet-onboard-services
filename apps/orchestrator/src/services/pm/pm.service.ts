@@ -537,7 +537,8 @@ export async function getWorkItem(prisma: PrismaClient, id: string): Promise<Api
   const row = await prisma.pmWorkItem.findUnique({ where: { id }, include: WORK_ITEM_INCLUDE });
   if (!row) throw new Error("work_item_not_found");
   const project = await prisma.pmProject.findUnique({ where: { id: row.projectId } });
-  return mapWorkItem(row, project?.identifier ?? "");
+  if (!project) throw new Error("project_not_found");
+  return mapWorkItem(row, project.identifier);
 }
 
 export async function createWorkItem(
@@ -563,10 +564,9 @@ export async function createWorkItem(
   if (!project) throw new Error("project_not_found");
 
   if (input.parentId) {
-    const parent = await prisma.pmWorkItem.findFirst({
-      where: { id: input.parentId, projectId },
-    });
-    if (!parent) throw new Error("invalid_parent");
+    const parent = await prisma.pmWorkItem.findUnique({ where: { id: input.parentId } });
+    if (!parent) throw new Error("work_item_not_found");
+    if (parent.projectId !== projectId) throw new Error("invalid_parent");
   }
 
   // An explicit state must belong to THIS project — mirror the parent guard so
@@ -579,12 +579,33 @@ export async function createWorkItem(
     if (state.projectId !== projectId) throw new Error("invalid_state");
   }
 
+  // Labels must belong to THIS project — same cross-project isolation invariant
+  // as parentId and stateId.
+  if (input.labelIds?.length) {
+    const labels = await prisma.pmLabel.findMany({
+      where: { id: { in: input.labelIds } },
+      select: { id: true, projectId: true },
+    });
+    for (const label of labels) {
+      if (label.projectId !== projectId) throw new Error("invalid_label");
+    }
+  }
+
   // Landing state: explicit → isDefault → first by sortOrder → none.
   const stateId =
     input.stateId ??
     project.states.find((s) => s.isDefault)?.id ??
     [...project.states].sort((a, b) => a.sortOrder - b.sortOrder)[0]?.id ??
     null;
+
+  // Stamp completedAt when the resolved state is terminal (completed/cancelled).
+  const resolvedStateGroup = stateId
+    ? (project.states.find((s) => s.id === stateId)?.group ?? null)
+    : null;
+  const initialCompletedAt =
+    resolvedStateGroup === "completed" || resolvedStateGroup === "cancelled"
+      ? new Date()
+      : null;
 
   const created = await prisma.$transaction(async (tx) => {
     // Bump the per-project counter atomically → the work item's number.
@@ -608,6 +629,7 @@ export async function createWorkItem(
         startDate: input.startDate ?? null,
         dueDate: input.dueDate ?? null,
         sortOrder: sequenceId,
+        completedAt: initialCompletedAt,
         assignees: input.assignees?.length
           ? { create: input.assignees.map((userId) => ({ userId })) }
           : undefined,
@@ -668,11 +690,23 @@ export async function updateWorkItem(
 
   // A connected parent must live in the same project — mirror createWorkItem's
   // guard so re-parenting can't cross a project boundary (findings #3/#1).
+  // Self-referential parent creates an infinite cycle; reject it explicitly.
   if (fields.parentId !== undefined && fields.parentId !== null) {
-    const parent = await prisma.pmWorkItem.findFirst({
-      where: { id: fields.parentId, projectId: existing.projectId },
+    if (fields.parentId === id) throw new Error("invalid_parent");
+    const parent = await prisma.pmWorkItem.findUnique({ where: { id: fields.parentId } });
+    if (!parent) throw new Error("work_item_not_found");
+    if (parent.projectId !== existing.projectId) throw new Error("invalid_parent");
+  }
+
+  // Labels must belong to THIS project before the transaction mutates them.
+  if (fields.labelIds?.length) {
+    const labels = await prisma.pmLabel.findMany({
+      where: { id: { in: fields.labelIds } },
+      select: { id: true, projectId: true },
     });
-    if (!parent) throw new Error("invalid_parent");
+    for (const label of labels) {
+      if (label.projectId !== existing.projectId) throw new Error("invalid_label");
+    }
   }
 
   await prisma.$transaction(async (tx) => {
@@ -736,6 +770,8 @@ export async function updateWorkItem(
       (fields.descriptionHtml !== undefined && fields.descriptionHtml !== existing.descriptionHtml) ||
       (fields.dueDate !== undefined &&
         fields.dueDate?.toISOString() !== existing.dueDate?.toISOString()) ||
+      (fields.startDate !== undefined &&
+        fields.startDate?.toISOString() !== existing.startDate?.toISOString()) ||
       fields.assignees !== undefined ||
       fields.labelIds !== undefined;
     if (scalarChanged) {

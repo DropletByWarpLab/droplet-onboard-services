@@ -44,6 +44,7 @@ function mapServiceError(err: unknown, res: Response): boolean {
       return true;
     case "invalid_parent":
     case "invalid_state":
+    case "invalid_label":
       res.status(422).json({ error: msg });
       return true;
     case "identifier_taken":
@@ -121,7 +122,7 @@ const workItemPatchSchema = z.object({
   parent_id: z.string().max(64).nullable().optional(),
   start_date: z.string().datetime().nullable().optional(),
   due_date: z.string().datetime().nullable().optional(),
-  sortOrder: z.number().optional(),
+  sortOrder: z.number().int().optional(),
 });
 
 const transitionSchema = z.object({ state_id: z.string().min(1).max(64) });
@@ -316,8 +317,8 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
           : undefined,
         parentId: parentRaw === undefined ? undefined : parentRaw === "none" ? null : String(parentRaw),
         q: q.q ? String(q.q) : undefined,
-        perPage: q.per_page ? Number(q.per_page) : undefined,
-        page: q.page ? Number(q.page) : undefined,
+        perPage: q.per_page && Number.isFinite(Number(q.per_page)) ? Number(q.per_page) : undefined,
+        page: q.page && Number.isFinite(Number(q.page)) ? Number(q.page) : undefined,
       });
       res.json({ work_items });
     } catch (err) {
