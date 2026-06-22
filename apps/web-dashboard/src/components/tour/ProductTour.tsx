@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
+import useSWR from "swr";
 import { motion, useReducedMotion } from "framer-motion";
 import {
   ArrowLeft,
@@ -34,6 +35,7 @@ import {
   type SystemHealthStatus,
 } from "@/lib/api";
 import type { FileEntryInfo } from "@/lib/types";
+import { formatBytes } from "@/lib/format-bytes";
 import { DropletMark } from "@/components/DropletMark";
 
 /**
@@ -102,18 +104,6 @@ const EMPTY_LIVE: TourLiveData = {
   modelName: null,
   cameras: null,
 };
-
-/** Mirrors the Files page formatter so sizes read identically across surfaces. */
-function formatBytes(bytes: number): string {
-  if (!bytes || bytes <= 0) return "0 B";
-  const k = 1024;
-  const sizes = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.min(
-    Math.floor(Math.log(bytes) / Math.log(k)),
-    sizes.length - 1,
-  );
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
-}
 
 // ── Beat motifs ────────────────────────────────────────────────────
 // Token-only, live-data illustrative recaps that make each privacy beat land
@@ -252,6 +242,23 @@ function MotifCameras({
 }) {
   const tiles = (cameras ?? []).slice(0, 2);
   if (tiles.length === 0) {
+    // Distinguish loading from empty (TourLiveData contract: `null` = not loaded,
+    // `[]` = none yet). Without this, a box WITH cameras flashes the empty state
+    // for the first second while fetchCameras is still in flight.
+    if (cameras === null) {
+      return (
+        <div className="flex w-full flex-col items-center justify-center gap-1.5 rounded-[12px] border border-dashed border-separator bg-surface-secondary px-4 py-6 text-center">
+          <Camera
+            size={26}
+            className="animate-pulse text-label-quaternary"
+            aria-hidden="true"
+          />
+          <span className="type-footnote font-semibold text-label-tertiary">
+            Loading cameras…
+          </span>
+        </div>
+      );
+    }
     return (
       <div className="flex w-full flex-col items-center justify-center gap-1.5 rounded-[12px] border border-dashed border-separator bg-surface-secondary px-4 py-6 text-center">
         <Camera size={26} className="text-label-tertiary" aria-hidden="true" />
@@ -413,7 +420,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     kicker: "Remote access",
     title: "Remote access is end-to-end encrypted",
     body: "Off your home Wi-Fi, your phone reaches the Droplet over WireGuard — a modern VPN whose keys you generated on the box itself. Add a device from the Remote Access page and scan one QR code to connect.",
-    motif: () => <MotifRemoteVpn />,
+    motif: (_live) => <MotifRemoteVpn />,
   },
 ];
 
@@ -434,7 +441,7 @@ function withFqdnRemoteStep(
           ...s,
           body:
             "Off your home Wi-Fi, your phone reaches the Droplet over WireGuard — a modern VPN whose keys you generated on the box itself. Add a device from the Remote Access page, scan one QR code, and you're on. You then open the same secure web address at home or away — a real certificate and a green padlock, with no “Not secure” warning and nothing to install on each device.",
-          motif: () => <MotifRemoteFqdn fqdn={fqdn} />,
+          motif: (_live) => <MotifRemoteFqdn fqdn={fqdn} />,
         }
       : s,
   );
@@ -485,16 +492,28 @@ export function ProductTour({ onComplete }: { onComplete?: () => void } = {}) {
     };
   }, []);
 
-  // Live data for the recap / files / AI / cameras motifs — what the owner just
+  // Recap health rides the SAME SWR cache the shell status chip uses
+  // ("/api/orchestrator/health", 15s interval). Keying on the shared string
+  // dedupes the in-flight request instead of firing a duplicate fetch on every
+  // tour mount; the data shape into `live.health` is unchanged.
+  const { data: healthData } = useSWR<SystemHealthStatus | null>(
+    "/api/orchestrator/health",
+    () => fetchSystemHealth().then((h) => h?.status ?? null),
+    { refreshInterval: 15_000 },
+  );
+
+  // Live data for the files / AI / cameras motifs — what the owner just
   // configured, not fixtures. All best-effort and independent: each source that
   // resolves fills its beat; each that rejects leaves that beat's honest
   // fallback. `allSettled` so one slow/dead endpoint never blocks the others.
+  // After the batch settles, files/cameras flip from `null` (loading) to `[]`
+  // (settled, none) — even on rejection — so motifs distinguish "loading" from
+  // "none yet" (TourLiveData contract) and never strand on a loading state.
   const [live, setLive] = useState<TourLiveData>(EMPTY_LIVE);
   useEffect(() => {
     let alive = true;
     void (async () => {
-      const [healthR, filesR, modelsR, camsR] = await Promise.allSettled([
-        fetchSystemHealth(),
+      const [filesR, modelsR, camsR] = await Promise.allSettled([
         fetchRecents(3),
         fetchModelsPage(),
         fetchCameras(),
@@ -505,29 +524,26 @@ export function ProductTour({ onComplete }: { onComplete?: () => void } = {}) {
       const camsList =
         camsR.status === "fulfilled" && Array.isArray(camsR.value)
           ? camsR.value
-          : null;
-      setLive({
-        health:
-          healthR.status === "fulfilled" ? (healthR.value?.status ?? null) : null,
+          : [];
+      setLive((prev) => ({
+        ...prev,
         files:
           filesR.status === "fulfilled" && Array.isArray(filesR.value)
             ? filesR.value
-            : null,
+            : [],
         modelName:
           modelsR.status === "fulfilled"
             ? (modelsR.value?.local?.[0]?.name ?? null)
             : null,
         cameras: camsList
-          ? camsList
-              .filter((c) => c.enabled)
-              .slice(0, 2)
-              .map((c) => ({
-                name: c.name,
-                label: c.displayName || c.name,
-                live: c.status === "recording" || c.status === "detecting",
-              }))
-          : null,
-      });
+          .filter((c) => c.enabled)
+          .slice(0, 2)
+          .map((c) => ({
+            name: c.name,
+            label: c.displayName || c.name,
+            live: c.status === "recording" || c.status === "detecting",
+          })),
+      }));
     })();
     return () => {
       alive = false;
@@ -542,6 +558,9 @@ export function ProductTour({ onComplete }: { onComplete?: () => void } = {}) {
       /* private mode — resume just falls back to step 1, acceptable */
     }
   }, [index]);
+
+  // Merge the SWR-sourced health into the batched live data passed to motifs.
+  const liveData: TourLiveData = { ...live, health: healthData ?? null };
 
   const steps = remoteFqdn ? withFqdnRemoteStep(TOUR_STEPS, remoteFqdn) : TOUR_STEPS;
   const isFirst = index === 0;
@@ -632,7 +651,7 @@ export function ProductTour({ onComplete }: { onComplete?: () => void } = {}) {
               {step.title}
             </h1>
             <p className="type-body text-label-secondary mb-6">{step.body}</p>
-            {step.motif(live)}
+            {step.motif(liveData)}
           </motion.div>
 
           <div className="mt-8 flex items-center justify-between gap-3">
