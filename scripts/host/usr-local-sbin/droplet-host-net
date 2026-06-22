@@ -1,6 +1,6 @@
 #!/bin/bash
-# Bring up host-side LAN networking for the POC. Idempotent — runs on
-# every boot via droplet-poc-host-net.service.
+# Bring up host-side LAN networking for the single-box. Idempotent — runs on
+# every boot via droplet-host-net.service.
 #
 # What it does:
 #   1. Adds a /32 host route to the Lantronix mgmt IP (192.168.1.77)
@@ -20,11 +20,11 @@
 #   bind-interfaces + listen-address lets the two coexist cleanly.
 set -euo pipefail
 
-# --- Overridable knobs (override via /etc/default/droplet-poc-host-net)
+# --- Overridable knobs (override via /etc/default/droplet-host-net)
 SWITCH_IP="${SWITCH_IP:-192.168.1.77}"
 HOST_SWITCH_SIDE_IP="${HOST_SWITCH_SIDE_IP:-192.168.1.250}"
 LAN_BRIDGE="${LAN_BRIDGE:-br-lan}"
-DNSMASQ_CONF="${DNSMASQ_CONF:-/etc/droplet-poc-host-net/lan-dhcp.conf}"
+DNSMASQ_CONF="${DNSMASQ_CONF:-/etc/droplet-host-net/lan-dhcp.conf}"
 # ---------------------------------------------------------------------
 
 # 1) Route to the switch mgmt IP via br-lan. The /32 host route + a

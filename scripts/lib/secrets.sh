@@ -610,9 +610,9 @@ migrate_env() {
 materialize_artifacts() {
   log_info "Materializing setup artifacts (idempotent)..."
 
-  # Source .env so MQTT_PASSWORD / OPENWRT_PASSWORD / MQTT_USER are in scope
-  # for the helpers below. Reachable via setup.sh --sync-secrets where nothing
-  # else has loaded .env yet.
+  # Source .env so MQTT_PASSWORD / OPENWRT_PASSWORD / SWITCH_PASSWORD / MQTT_USER
+  # are in scope for the helpers below. Reachable via setup.sh --sync-secrets
+  # where nothing else has loaded .env yet.
   if [ -f "$REPO_ROOT/.env" ]; then
     set -a
     # shellcheck disable=SC1091
@@ -624,6 +624,7 @@ materialize_artifacts() {
   _write_mosquitto_conf
   _generate_tls_cert
   sync_openwrt_password_secret
+  sync_switch_password_secret
   sync_audit_signing_key
   sync_pm_oidc_keypair
 }
@@ -761,6 +762,55 @@ sync_openwrt_password_secret() {
 
   # Write atomically: stage to .tmp then rename, so a crashed write never leaves
   # a half-populated secret file that the routing container would then read.
+  local tmp="$secret_file.tmp"
+  printf '%s' "$password" > "$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$secret_file"
+  log_success "Wrote $secret_file (chmod 600)"
+}
+
+# ADR-018 T1 — Write the OPERATOR-SUPPLIED $SWITCH_PASSWORD (from env or .env)
+# into docker/secrets/switch_password so Docker Compose can mount it read-only at
+# /run/secrets/switch_password in the switch container. Mirrors
+# sync_openwrt_password_secret(), with one deliberate difference: the managed
+# switch is NOT a device we mint a secret for, so this NEVER generates a value —
+# it only materializes what the operator put in .env.
+#
+# When SWITCH_PASSWORD is unset/empty (a box without a managed switch, the common
+# case) we write an EMPTY placeholder rather than a real credential: the
+# `secrets:` mount in docker-compose.yml requires the file to exist for
+# `docker compose up switch` to start, and drivers._load_switch_password() treats
+# an empty file exactly like "no switch configured" — the switch service comes up
+# and reports "disconnected" without crashing. So non-switch boxes are unaffected.
+sync_switch_password_secret() {
+  local secret_dir="$REPO_ROOT/docker/secrets"
+  local secret_file="$secret_dir/switch_password"
+  local password="${SWITCH_PASSWORD:-}"
+
+  # Fall back to reading .env if the value isn't already in the shell environment.
+  # `|| true` keeps a missing SWITCH_PASSWORD line from tripping `set -euo pipefail`
+  # (grep exits 1 on no match). An empty password is handled gracefully below.
+  if [ -z "$password" ] && [ -f "$REPO_ROOT/.env" ]; then
+    password=$(grep -E '^SWITCH_PASSWORD=' "$REPO_ROOT/.env" | head -n 1 | cut -d= -f2- || true)
+  fi
+
+  mkdir -p "$secret_dir"
+  chmod 700 "$secret_dir"
+
+  if [ -z "$password" ]; then
+    # No operator credential supplied — write an empty placeholder so Compose can
+    # mount the secret and the switch service still starts (degraded → the switch
+    # reports "disconnected"). NEVER generate a switch password here. Boxes
+    # without a managed switch hit exactly this path and are unaffected.
+    : > "$secret_file"
+    chmod 600 "$secret_file"
+    log_info "SWITCH_PASSWORD not set in .env — wrote empty $secret_file (no managed switch)"
+    log_info "  For a managed switch: set SWITCH_PASSWORD in .env, then re-run ./scripts/setup.sh --sync-secrets"
+    return 0
+  fi
+
+  # Write atomically: stage to .tmp then rename, so a crashed write never leaves
+  # a half-populated secret file that the switch container would then read.
   local tmp="$secret_file.tmp"
   printf '%s' "$password" > "$tmp"
   chmod 600 "$tmp"

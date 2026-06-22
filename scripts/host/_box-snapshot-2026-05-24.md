@@ -110,20 +110,20 @@ Volume contents:
 In `/etc/systemd/system/multi-user.target.wants/`:
 - `droplet.service` — runs `docker compose up -d` on boot (without `-f`)
 - `droplet-openwrt-attach.service` — runs `/usr/local/sbin/droplet-openwrt-attach` after docker
-- `droplet-poc-host-net.service` — runs `/usr/local/sbin/droplet-poc-host-net`
+- `droplet-host-net.service` — runs `/usr/local/sbin/droplet-host-net`
 
 ## Host scripts (3 in `/usr/local/sbin/`)
 
 - `droplet-openwrt-attach` (20 KB) — current; captured here as `usr-local-sbin/droplet-openwrt-attach`
 - `droplet-openwrt-attach.bak` (13 KB) — earlier version kept on box; NOT captured (use git history of the new version instead)
-- `droplet-poc-host-net` (2.4 KB) — captured here as `usr-local-sbin/droplet-poc-host-net`
+- `droplet-host-net` (2.4 KB) — captured here as `usr-local-sbin/droplet-host-net`
 
 ## Host configs (outside compose)
 
 - `/etc/default/droplet-openwrt-attach` → captured as `etc-default/droplet-openwrt-attach.example` (PSK redacted)
-- `/etc/default/droplet-poc-host-net` → captured as `etc-default/droplet-poc-host-net`
-- `/etc/droplet-poc-host-net/lan-dhcp.conf` → captured as `etc-droplet-poc-host-net/lan-dhcp.conf`
-- `/etc/dnsmasq.d/droplet-ap.conf` + `.pre-bridge` → captured as `etc-dnsmasq.d/*` (LEGACY — superseded by `droplet-poc-host-net.service` + `etc-droplet-poc-host-net/lan-dhcp.conf`; system dnsmasq is disabled)
+- `/etc/default/droplet-host-net` → captured as `etc-default/droplet-host-net`
+- `/etc/droplet-host-net/lan-dhcp.conf` → captured as `etc-droplet-host-net/lan-dhcp.conf`
+- `/etc/dnsmasq.d/droplet-ap.conf` + `.pre-bridge` → captured as `etc-dnsmasq.d/*` (LEGACY — superseded by `droplet-host-net.service` + `etc-droplet-host-net/lan-dhcp.conf`; system dnsmasq is disabled)
 - `/etc/tmpfiles.d/droplet.conf` → captured as `etc-tmpfiles.d/droplet.conf`
 - `/etc/avahi/services/droplet.service` → captured as `etc-avahi/services/droplet.service`
 
