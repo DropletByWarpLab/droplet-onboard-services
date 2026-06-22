@@ -84,7 +84,12 @@ ap_radio_in_container() {
   local cpid
   cpid="$(docker inspect -f '{{.State.Pid}}' "$AP_CONTAINER" 2>/dev/null)" || return 1
   [ -n "$cpid" ] && [ "$cpid" != "0" ] || return 1
-  nsenter -t "$cpid" -n iw dev 2>/dev/null | grep -q 'Interface'
+  local _iw_out
+  if ! _iw_out=$(nsenter -t "$cpid" -n iw dev 2>&1); then
+    echo "ap_radio_in_container: nsenter -t $cpid failed: $_iw_out" >&2
+    return 1
+  fi
+  echo "$_iw_out" | grep -q 'Interface'
 }
 
 # First netdev name under the device (kernel-controlled names; glob, not ls).

@@ -283,10 +283,21 @@ GW=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}' 
 # and re-indexes the radio (phy0->phy1), breaking the AP. Bounded ~60s.
 GATEWAY_IP=""
 for _gwtry in $(seq 1 30); do
-  _gw=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$GATEWAY_CONTAINER" 2>/dev/null)
+  _gw=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$GATEWAY_CONTAINER" 2>/dev/null) || {
+    echo "$GATEWAY_CONTAINER container not found — cannot wire DNAT"; exit 1
+  }
   case "$_gw" in
     ''|*[!0-9.]*) sleep 2 ;;
-    *.*.*.*) GATEWAY_IP="$_gw"; break ;;
+    *.*.*.*)
+      # Reject multi-network concatenations (e.g. 172.18.0.5172.20.0.3) and
+      # transient 0.0.0.0: the glob *.*.*.*  accepts both, so require exactly
+      # four dot-separated decimal octets and a non-zero address.
+      if [[ "$_gw" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && [[ "$_gw" != "0.0.0.0" ]]; then
+        GATEWAY_IP="$_gw"; break
+      else
+        sleep 2
+      fi
+      ;;
     *) sleep 2 ;;
   esac
 done
