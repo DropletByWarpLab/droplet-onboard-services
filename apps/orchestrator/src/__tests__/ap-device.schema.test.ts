@@ -102,6 +102,54 @@ describe("Prisma schema — ApDevice model (WARP-446 AC #3, #5)", () => {
   });
 });
 
+describe("Prisma schema — ApOnboardBackend enum (ADR-024 Phase 1)", () => {
+  it("declares the ApOnboardBackend enum with the three backend values", () => {
+    const enumMatch = schema.match(/enum\s+ApOnboardBackend\s*\{([^}]+)\}/);
+    expect(
+      enumMatch,
+      "ApOnboardBackend enum must be declared in schema.prisma",
+    ).not.toBeNull();
+
+    const body = enumMatch![1];
+    for (const value of ["DROPLET_IMAGE", "EASYMESH", "UNIFI"]) {
+      expect(
+        new RegExp(`\\b${value}\\b`).test(body),
+        `ApOnboardBackend enum must include '${value}'`,
+      ).toBe(true);
+    }
+  });
+
+  it("adds backend/backendRef/vendor to ApDevice with an explicit DROPLET_IMAGE default (no state-from-absence)", () => {
+    const modelMatch = schema.match(/model\s+ApDevice\s*\{([\s\S]+?)\}\s*(?=\nenum|\nmodel|$)/);
+    const body = modelMatch![1];
+    // backend is an explicit enum column with a default — NOT derived
+    // from a nullable absence (CLAUDE.md no-guessing rule, same as status).
+    expect(body).toMatch(/backend\s+ApOnboardBackend\s+@default\(DROPLET_IMAGE\)/);
+    // backendRef + vendor are nullable additive columns.
+    expect(body).toMatch(/backendRef\s+String\?/);
+    expect(body).toMatch(/vendor\s+String\?/);
+  });
+});
+
+describe("Prisma migration — ADR-024 Phase 1 (ApOnboardBackend)", () => {
+  it("ships a migration that creates the enum + adds the columns idempotently", () => {
+    const dirs = readdirSync(MIGRATIONS_DIR);
+    const ours = dirs.find((d) => d.endsWith("adr_024_ap_onboard_backend"));
+    expect(ours, "expected an ADR-024 ap-onboard-backend migration directory").toBeDefined();
+
+    const sql = readFileSync(join(MIGRATIONS_DIR, ours!, "migration.sql"), "utf8");
+    // Idempotent enum creation pattern — mirror of WARP-446 / WARP-845.
+    expect(sql).toMatch(/CREATE TYPE "ApOnboardBackend"/);
+    expect(sql).toMatch(/EXCEPTION/i);
+    // Additive columns guarded with IF NOT EXISTS so a second migrate run
+    // on a converged DB is a no-op.
+    expect(sql).toMatch(/ADD COLUMN IF NOT EXISTS "backend"\s+"ApOnboardBackend"/);
+    expect(sql).toMatch(/DEFAULT 'DROPLET_IMAGE'/);
+    expect(sql).toMatch(/ADD COLUMN IF NOT EXISTS "backendRef"/);
+    expect(sql).toMatch(/ADD COLUMN IF NOT EXISTS "vendor"/);
+  });
+});
+
 describe("Prisma migration — WARP-446 (AC #3)", () => {
   it("ships a migration that creates the table + the enum", () => {
     const dirs = readdirSync(MIGRATIONS_DIR);

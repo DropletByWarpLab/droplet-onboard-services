@@ -112,3 +112,40 @@ config wifi-iface 'default_radio4'
     option key 'ChangeMe!2024'
     option ieee80211w '0'
     option disabled '1'
+
+# =============================================================================
+# ADR-024 Phase 4 — EasyMesh controller (prplMesh). DRAFT / UNVALIDATED:
+# prplMesh's HAL targets Intel/Qualcomm, NOT mt76 — controller-only mode +
+# hostapd Multi-AP fronthaul on mt76 needs real-hardware validation on the lab
+# box before this ships. See docs/ADR-024 §2.
+# =============================================================================
+#
+# Multi-AP FRONTHAUL BSS on the box's MT7922 5 GHz radio.
+#
+# `option multi_ap '1'` is the hostapd Multi-AP fronthaul flag — the
+# nl80211/mac80211-SUPPORTED EasyMesh onboarding primitive (WPS-style M1/M2
+# credential exchange happens over this BSS). mt76 IS an nl80211 driver, so
+# this fronthaul flag is the part of Multi-AP that CAN run on our radio — the
+# controller logic (1905.1 control plane, the part prplMesh's mt76-incompatible
+# HAL would otherwise own) runs in prplMesh CONTROLLER-only userspace, not in
+# the radio. The box is NEVER an EasyMesh RF agent (ADR-024 §2).
+#
+# multi_ap values: '1' = fronthaul (clients + onboarding; what we want on the
+# box), '2' = backhaul, '3' = both. We want fronthaul on the box's own BSS so a
+# certified third-party Agent can be onboarded through it.
+#
+# UNVALIDATED: that mt76 + this hostapd build honor `multi_ap '1'` cleanly, and
+# that a real TP-Link EasyMesh Agent onboards over it, is the Phase-4 lab exit
+# gate (ADR-024 §2 residual risk). This stanza is `disabled '1'` by default so
+# it is INERT until that validation passes and EasyMesh is provisioned.
+config wifi-iface 'droplet_easymesh_fh'
+    option device 'radio3'
+    option network 'lan'
+    option mode 'ap'
+    option ssid 'Droplet-AI'
+    option encryption 'psk2'
+    option key 'ChangeMe!2024'
+    option ieee80211w '0'
+    # hostapd Multi-AP fronthaul — the nl80211-supported onboarding primitive.
+    option multi_ap '1'
+    option disabled '1'

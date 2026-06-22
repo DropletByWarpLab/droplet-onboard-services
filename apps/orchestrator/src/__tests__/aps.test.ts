@@ -162,6 +162,43 @@ describe("GET /api/aps", () => {
     expect(res.status).toBe(200);
   });
 
+  it("serializes the ADR-024 backend + vendor columns (so the dashboard can label the vendor)", async () => {
+    // ADR-024 Phase 5 contract: the multi-backend dashboard surface reads
+    // `backend` + `vendor` off each row to render the vendor badge. The
+    // route returns the full ApDevice row (no `select`), so these columns
+    // must pass through verbatim — this pins that they don't get dropped
+    // by a future projection.
+    const prisma = createPrismaMock();
+    prisma.rows.set("AA:BB:CC:00:00:01", {
+      mac: "AA:BB:CC:00:00:01",
+      status: "ONLINE",
+      backend: "EASYMESH",
+      vendor: "TP-Link",
+      lastSeen: new Date(2),
+    });
+    prisma.rows.set("AA:BB:CC:00:00:02", {
+      mac: "AA:BB:CC:00:00:02",
+      status: "AWAITING_APPROVAL",
+      backend: "DROPLET_IMAGE",
+      vendor: null,
+      lastSeen: new Date(1),
+    });
+    const app = buildApp(prisma);
+    const res = await request(app).get("/api/aps");
+    expect(res.status).toBe(200);
+    const byMac = Object.fromEntries(
+      res.body.aps.map((a: any) => [a.mac, a]),
+    );
+    expect(byMac["AA:BB:CC:00:00:01"]).toMatchObject({
+      backend: "EASYMESH",
+      vendor: "TP-Link",
+    });
+    expect(byMac["AA:BB:CC:00:00:02"]).toMatchObject({
+      backend: "DROPLET_IMAGE",
+      vendor: null,
+    });
+  });
+
   it("surfaces the ADR-005 LRU cap as discoveredCap + discoveredCapReached", async () => {
     const prisma = createPrismaMock();
     const app = buildApp(prisma);
@@ -211,6 +248,25 @@ describe("GET /api/aps/discovered", () => {
     expect(res.body.discovered.map((a: any) => a.mac)).toEqual([
       "B8:27:EB:00:00:01",
     ]);
+  });
+
+  it("serializes backend + vendor on discovered rows (ADR-024 Phase 5 dashboard contract)", async () => {
+    const prisma = createPrismaMock();
+    prisma.rows.set("AA:BB:CC:00:00:09", {
+      mac: "AA:BB:CC:00:00:09",
+      status: "AWAITING_APPROVAL",
+      backend: "UNIFI",
+      vendor: "Ubiquiti",
+      lastSeen: new Date(5),
+    });
+    const app = buildApp(prisma);
+    const res = await request(app).get("/api/aps/discovered");
+    expect(res.status).toBe(200);
+    expect(res.body.discovered[0]).toMatchObject({
+      mac: "AA:BB:CC:00:00:09",
+      backend: "UNIFI",
+      vendor: "Ubiquiti",
+    });
   });
 });
 

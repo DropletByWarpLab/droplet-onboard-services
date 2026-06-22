@@ -39,6 +39,14 @@ const TOGGLEABLE = new Set<SmartHomeCategory>([
   "cover",
 ]);
 
+// The device's source/ecosystem, surfaced from the Matter fabric's vendorName.
+// Bridged ecosystems (Hue, SmartThings, etc.) surface their brand here; a plain
+// Matter device with no read-back vendor falls back to the calm "Matter" label.
+// Lead with plain meaning, keep the protocol a quiet secondary (ADR-002).
+function deviceSource(device: MatterDevice): string {
+  return device.vendorName?.trim() || "Matter";
+}
+
 interface DeviceCardProps {
   device: MatterDevice;
   onCommand: (nodeId: string, command: string, data?: Record<string, unknown>) => void;
@@ -97,14 +105,19 @@ export function DeviceCard({ device, onCommand, onClick }: DeviceCardProps) {
           {isConnected ? <Icon size={20} /> : <WifiOff size={20} />}
         </div>
 
-        {/* Name + state */}
+        {/* Name + state + source */}
         <div className="flex-1 min-w-0">
           <p className="type-subheadline text-label-primary font-medium truncate">
             {device.name}
           </p>
-          <p className="type-caption-1 text-label-tertiary capitalize">
-            {subtitle}
-          </p>
+          <div className="flex items-center gap-1.5 min-w-0">
+            <span className="type-caption-1 text-label-tertiary capitalize truncate">
+              {subtitle}
+            </span>
+            <span className="type-caption-2 text-label-quaternary px-1.5 py-0.5 rounded-sm bg-surface-secondary/70 flex-shrink-0 max-w-[120px] truncate">
+              {deviceSource(device)}
+            </span>
+          </div>
         </div>
 
         {/* Toggle for binary devices */}

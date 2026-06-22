@@ -33,3 +33,5 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run setup unit tests
         run: bash tests/setup.test.sh
+      - name: Run TLS secrets unit tests
+        run: bash scripts/test/secrets-tls.test.sh

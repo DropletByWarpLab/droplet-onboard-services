@@ -37,13 +37,33 @@ vi.mock("./cache.service.js", () => ({
 
 // The UCI client (multi-box path) + the hostapd bridge (single-box path) spies.
 // Hoisted so the vi.mock factories can close over them.
-const { setWirelessSsid, setWirelessPassword, stageSsid, applyWifi } =
-  vi.hoisted(() => ({
-    setWirelessSsid: vi.fn(),
-    setWirelessPassword: vi.fn(),
-    stageSsid: vi.fn(),
-    applyWifi: vi.fn(),
-  }));
+const {
+  setWirelessSsid,
+  setWirelessPassword,
+  stageSsid,
+  applyWifi,
+  fetchGuestWifi,
+  createGuestNetwork,
+  removeGuestNetwork,
+  bridgeApplyGuest,
+  bridgeRemoveGuest,
+  bridgeGuestStatus,
+  fetchSystemControls,
+  fetchRadioInfo,
+} = vi.hoisted(() => ({
+  setWirelessSsid: vi.fn(),
+  setWirelessPassword: vi.fn(),
+  stageSsid: vi.fn(),
+  applyWifi: vi.fn(),
+  fetchGuestWifi: vi.fn(),
+  createGuestNetwork: vi.fn(),
+  removeGuestNetwork: vi.fn(),
+  bridgeApplyGuest: vi.fn(),
+  bridgeRemoveGuest: vi.fn(),
+  bridgeGuestStatus: vi.fn(),
+  fetchSystemControls: vi.fn(),
+  fetchRadioInfo: vi.fn(),
+}));
 
 vi.mock("./openwrt.client.js", async () => {
   const actual = await vi.importActual<any>("./openwrt.client.js");
@@ -51,21 +71,68 @@ vi.mock("./openwrt.client.js", async () => {
     ...actual,
     setWirelessSsid: (...a: unknown[]) => setWirelessSsid(...a),
     setWirelessPassword: (...a: unknown[]) => setWirelessPassword(...a),
+    fetchGuestWifi: (...a: unknown[]) => fetchGuestWifi(...a),
+    createGuestNetwork: (...a: unknown[]) => createGuestNetwork(...a),
+    removeGuestNetwork: (...a: unknown[]) => removeGuestNetwork(...a),
+    fetchSystemControls: (...a: unknown[]) => fetchSystemControls(...a),
+    fetchRadioInfo: (...a: unknown[]) => fetchRadioInfo(...a),
   };
 });
 
 vi.mock("./hostapd-bridge.service.js", () => ({
   stageSsid: (...a: unknown[]) => stageSsid(...a),
   applyWifi: (...a: unknown[]) => applyWifi(...a),
+  applyGuestWifi: (...a: unknown[]) => bridgeApplyGuest(...a),
+  removeGuestWifi: (...a: unknown[]) => bridgeRemoveGuest(...a),
+  guestStatusFromBridge: (...a: unknown[]) => bridgeGuestStatus(...a),
 }));
 
-import { setWifiSsid, setWifiPassword } from "./network.service.js";
+import {
+  setWifiSsid,
+  setWifiPassword,
+  getGuestWifi,
+  setGuestWifi,
+  removeGuestWifi,
+  getSystemControls,
+  getRadioDetail,
+} from "./network.service.js";
 
 beforeEach(() => {
   vi.clearAllMocks();
   applyWifi.mockResolvedValue({ operationId: null });
   setWirelessSsid.mockResolvedValue({ operationId: "op-ssid" });
   setWirelessPassword.mockResolvedValue({ operationId: "op-pw" });
+  fetchGuestWifi.mockResolvedValue({
+    configured: true,
+    enabled: true,
+    ssid: "Guests",
+    password: "letmein8",
+  });
+  createGuestNetwork.mockResolvedValue({ operationId: "op-guest-uci" });
+  removeGuestNetwork.mockResolvedValue({ operationId: "op-guest-rm-uci" });
+  bridgeApplyGuest.mockResolvedValue({ operationId: null });
+  bridgeRemoveGuest.mockResolvedValue({ operationId: null });
+  bridgeGuestStatus.mockResolvedValue({
+    configured: true,
+    enabled: true,
+    ssid: "Visitors",
+    password: "guestpass1",
+    supported: true,
+  });
+  fetchSystemControls.mockResolvedValue({
+    hostname: "droplet-rack-01",
+    ntpEnabled: true,
+    // The raw box read reports these as "live" — the service must override.
+    statusLed: { supported: true, enabled: true },
+    country: { value: "US", editable: true },
+  });
+  fetchRadioInfo.mockResolvedValue({
+    channel: 6,
+    htmode: "HT20",
+    txpower: 20,
+    country: "US",
+    mode: "Master",
+  });
 });
 
 describe("uci mode (multi-box, default) — UNCHANGED", () => {
@@ -132,5 +199,155 @@ describe("hostapd mode (single-box) — routes through the device-bridge", () =>
     await setWifiPassword("default_radio0", "supersecret1", "user-abc");
     expect(stageSsid).toHaveBeenCalledWith("HomeNet", "user-abc");
     expect(applyWifi).toHaveBeenCalledWith("supersecret1", "user-abc");
+  });
+});
+
+// Guest Wi-Fi is now REAL on the single-box hostapd shape: a second BSS the
+// host script stands up via the device-bridge. getGuestWifi reads the live
+// state from the bridge (supported:true), setGuestWifi/removeGuestWifi route
+// through the bridge — never the UCI client — and a transient bridge read
+// failure degrades to "supported but not configured" so the card never errors.
+describe("guest Wi-Fi — hostapd mode routes through the device-bridge", () => {
+  beforeEach(() => {
+    configMock.DROPLET_AP_MODE = "hostapd";
+  });
+
+  it("getGuestWifi passes through the bridge status incl. radio-derived supported, never the UCI read", async () => {
+    const res = await getGuestWifi();
+    expect(bridgeGuestStatus).toHaveBeenCalledOnce();
+    expect(fetchGuestWifi).not.toHaveBeenCalled();
+    expect(res).toEqual({
+      configured: true,
+      enabled: true,
+      ssid: "Visitors",
+      password: "guestpass1",
+      supported: true,
+    });
+  });
+
+  it("getGuestWifi reports supported:false when the radio can't host a second BSS (AX210)", async () => {
+    bridgeGuestStatus.mockResolvedValueOnce({
+      configured: false,
+      enabled: false,
+      ssid: null,
+      password: null,
+      supported: false,
+    });
+    const res = await getGuestWifi();
+    expect(res.supported).toBe(false);
+  });
+
+  it("getGuestWifi degrades to unavailable (supported:false) when the bridge read fails", async () => {
+    bridgeGuestStatus.mockRejectedValueOnce(new Error("device-bridge not reachable"));
+    const res = await getGuestWifi();
+    expect(res).toEqual({
+      configured: false,
+      enabled: false,
+      ssid: null,
+      password: null,
+      supported: false,
+    });
+    expect(fetchGuestWifi).not.toHaveBeenCalled();
+  });
+
+  it("setGuestWifi applies via the bridge (ssid + psk), not the UCI client", async () => {
+    const res = await setGuestWifi("radio3", "Visitors", "guestpass1", "guest");
+    expect(bridgeApplyGuest).toHaveBeenCalledWith("Visitors", "guestpass1");
+    expect(createGuestNetwork).not.toHaveBeenCalled();
+    expect(res).toEqual({ operationId: null });
+  });
+
+  it("removeGuestWifi tears down via the bridge, not the UCI client", async () => {
+    const res = await removeGuestWifi();
+    expect(bridgeRemoveGuest).toHaveBeenCalledOnce();
+    expect(removeGuestNetwork).not.toHaveBeenCalled();
+    expect(res).toEqual({ operationId: null });
+  });
+});
+
+describe("guest Wi-Fi — uci mode (multi-box) UNCHANGED", () => {
+  beforeEach(() => {
+    configMock.DROPLET_AP_MODE = "uci";
+  });
+
+  it("getGuestWifi reflects the real routing read (supported:true)", async () => {
+    const res = await getGuestWifi();
+    expect(fetchGuestWifi).toHaveBeenCalledOnce();
+    expect(bridgeGuestStatus).not.toHaveBeenCalled();
+    expect(res).toMatchObject({ configured: true, ssid: "Guests", supported: true });
+  });
+
+  it("setGuestWifi creates the UCI guest network, never the bridge", async () => {
+    const res = await setGuestWifi("radio3", "Guests", "letmein8", "guest");
+    expect(createGuestNetwork).toHaveBeenCalledWith("radio3", "Guests", "letmein8", "guest");
+    expect(bridgeApplyGuest).not.toHaveBeenCalled();
+    expect(res).toEqual({ operationId: "op-guest-uci" });
+  });
+
+  it("removeGuestWifi removes the UCI guest network, never the bridge", async () => {
+    const res = await removeGuestWifi();
+    expect(removeGuestNetwork).toHaveBeenCalledOnce();
+    expect(bridgeRemoveGuest).not.toHaveBeenCalled();
+    expect(res).toEqual({ operationId: "op-guest-rm-uci" });
+  });
+});
+
+// Status-LED + regulatory-domain can't be driven on the single-box hostapd
+// shape (no system.led ubus surface; host-hostapd country is pinned). The
+// authoritative gate lives in the service: it forces statusLed.supported and
+// country.editable to false there regardless of what the box read reports, so
+// the UI shows an honest "not available" state — same posture as guest-wifi.
+describe("getSystemControls honesty gate", () => {
+  it("hostapd mode → statusLed/country gated false; hostname + NTP pass through", async () => {
+    configMock.DROPLET_AP_MODE = "hostapd";
+    const res = await getSystemControls();
+    expect(res.statusLed.supported).toBe(false);
+    expect(res.country.editable).toBe(false);
+    // The live country VALUE is still surfaced read-only; the real controls pass.
+    expect(res.country.value).toBe("US");
+    expect(res.hostname).toBe("droplet-rack-01");
+    expect(res.ntpEnabled).toBe(true);
+  });
+
+  it("uci mode → passes the box read through unchanged (multi-box can edit)", async () => {
+    configMock.DROPLET_AP_MODE = "uci";
+    const res = await getSystemControls();
+    expect(res.statusLed.supported).toBe(true);
+    expect(res.country.editable).toBe(true);
+  });
+});
+
+// Radio detail is read-only. On the single-box hostapd shape it returns the
+// honesty envelope (supported:false/hostRadio:true — one combined radio that
+// can't be toggled independently) and surfaces ONLY the iwinfo fields read;
+// `broadcasting` is derived from the real iwinfo mode, never hardcoded.
+describe("getRadioDetail honesty envelope", () => {
+  it("hostapd mode → supported:false/hostRadio:true, broadcasting from iwinfo mode", async () => {
+    configMock.DROPLET_AP_MODE = "hostapd";
+    const res = await getRadioDetail();
+    expect(res.supported).toBe(false);
+    expect(res.hostRadio).toBe(true);
+    expect(res.broadcasting).toBe(true); // mode "Master"
+    expect(res.channel).toBe(6);
+    expect(res.country).toBe("US");
+  });
+
+  it("reports null (not a fabricated value) for fields iwinfo omits", async () => {
+    configMock.DROPLET_AP_MODE = "hostapd";
+    fetchRadioInfo.mockResolvedValueOnce({ channel: 6 }); // htmode/txpower/country absent
+    const res = await getRadioDetail();
+    expect(res.htmode).toBeNull();
+    expect(res.txpower).toBeNull();
+    expect(res.country).toBeNull();
+    expect(res.mode).toBeNull();
+    // mode absent → not broadcasting (never assumed true).
+    expect(res.broadcasting).toBe(false);
+  });
+
+  it("uci mode → supported:true (a real radio host can manage it)", async () => {
+    configMock.DROPLET_AP_MODE = "uci";
+    const res = await getRadioDetail();
+    expect(res.supported).toBe(true);
+    expect(res.hostRadio).toBe(false);
   });
 });

@@ -4,7 +4,8 @@
  * The pure state-machine lives in tls-issuance.service.ts and takes its
  * collaborators by injection so it unit-tests with fakes. This file wires the
  * real implementations:
- *   - HqIssuanceHttpClient  — plain outbound HTTPS to the HQ fleet-server.
+ *   - HqIssuanceHttpClient  — plain outbound HTTPS to the HQ fleet-server
+ *                            (repo DropletByWarpLab/droplet-fleet-hq).
  *   - PrismaTlsCertStore    — the explicit `TlsCert` enum-backed model.
  *   - DiskTlsFileOps        — atomic temp→fsync→rename writes into docker/certs.
  *   - bridgeNginxReloader   — triggers the host reload via the device-bridge.
@@ -19,8 +20,12 @@ import pino from "pino";
 import type { PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
 import { bridgeAuthToken } from "../lib/bridge-errors.js";
+import { RouterError, routingFetch } from "./openwrt.client.js";
 import type {
+  DnsRegistrar,
   HqChallengeResponse,
+  HqDeregisterRequest,
+  HqDeregisterResponse,
   HqIssuanceClient,
   HqOrderRequest,
   HqOrderResponse,
@@ -93,6 +98,17 @@ export function createHqIssuanceClient(): HqIssuanceClient {
         method: "POST",
         body: JSON.stringify(req),
       });
+    },
+    deregister(req: HqDeregisterRequest) {
+      // ADR-023 PR-3: the deployed HQ Worker reads device_id from BOTH the query
+      // string (router) AND the JSON body (handler), and requires the four PoP
+      // auth fields in the body. Send device_id in both so a stricter Worker
+      // build can't 422 us; the body carries the signed proof-of-possession.
+      const qs = new URLSearchParams({ device_id: req.device_id }).toString();
+      return hqFetch<HqDeregisterResponse>(
+        `/api/issuance/registration?${qs}`,
+        { method: "DELETE", body: JSON.stringify(req) },
+      );
     },
   };
 }
@@ -220,6 +236,102 @@ export async function bridgeNginxReloader(): Promise<void> {
   } finally {
     clearTimeout(timer);
   }
+}
+
+// ---------------------------------------------------------------------------
+// ADR-023 PR-1 (Gap 1) — persist a learned FQDN back to .env via the bridge
+// ---------------------------------------------------------------------------
+
+/**
+ * Write a freshly-LEARNED `DROPLET_PUBLIC_FQDN` back to the host `.env` through
+ * the device-bridge's auth-gated POST /host/public-fqdn (which shells the
+ * repo-tracked host wrapper scripts/host/droplet-set-public-fqdn.sh). The
+ * orchestrator deliberately can't write the host `.env` itself (no host mount),
+ * so — exactly like bridgeNginxReloader for the docker socket — the write-back
+ * runs on the host behind the bridge.
+ *
+ * Fire-and-forget: every failure (no auth token, bridge unreachable, non-2xx,
+ * host-script refusal) is LOGGED, never thrown. The learned name is already in
+ * the running cert-state row, so a missed write-back only means the next boot
+ * re-learns it from HQ — no correctness loss.
+ */
+export function createBridgeFqdnPersister(): (fqdn: string) => Promise<void> {
+  return async function persistFqdn(fqdn: string): Promise<void> {
+    const token = bridgeAuthToken();
+    if (!token) {
+      logger.warn(
+        {},
+        "tls-issuance: device-bridge auth token not configured — cannot persist learned DROPLET_PUBLIC_FQDN; it will be re-learned next boot",
+      );
+      return;
+    }
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), HQ_HTTP_TIMEOUT_MS);
+    try {
+      const r = await fetch(`${config.DEVICE_BRIDGE_URL}/host/public-fqdn`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Droplet-Auth": token },
+        body: JSON.stringify({ fqdn }),
+        signal: ctrl.signal,
+      });
+      if (!r.ok) {
+        const body = await r.text().catch(() => "");
+        logger.warn(
+          { status: r.status, body: body.slice(0, 200), fqdn },
+          "tls-issuance: device-bridge public-fqdn write-back failed — DROPLET_PUBLIC_FQDN will be re-learned next boot",
+        );
+      }
+    } catch (err) {
+      logger.warn(
+        { err, fqdn },
+        "tls-issuance: could not reach device-bridge to persist DROPLET_PUBLIC_FQDN — it will be re-learned next boot",
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// ADR-023 PR-1 (Gap 2) — split-horizon DNS registrar (routing/container leg)
+// ---------------------------------------------------------------------------
+
+/**
+ * Register the learned per-device FQDN → `DROPLET_PUBLIC_FQDN_IP` (the WG
+ * gateway, default 192.168.20.1) with the routing service's dnsmasq via POST
+ * /dhcp/hostnames — the SAME mechanism setup_router_dns / setup_public_fqdn_dns
+ * use, so the name resolves on the LAN AND over the tunnel.
+ *
+ * Uses the shared `routingFetch` helper, so ROUTING_MODE=disabled short-circuits
+ * with RouterError.disabled() (no spurious retries against a non-existent
+ * service) and the shared bearer token is attached automatically. Best-effort:
+ * any failure — disabled mode, unreachable router, non-2xx — is swallowed +
+ * logged so a DNS hiccup NEVER aborts a successful cert install. (The host
+ * dnsmasq leg is owned by droplet-set-public-fqdn.sh → setup_public_fqdn_dns;
+ * this is the routing/container leg.)
+ */
+export function createRoutingDnsRegistrar(): DnsRegistrar {
+  return {
+    async register(hostname: string): Promise<void> {
+      try {
+        await routingFetch("/dhcp/hostnames", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            hostname,
+            ip: config.DROPLET_PUBLIC_FQDN_IP,
+          }),
+          label: "Split-horizon FQDN registration",
+        });
+      } catch (err) {
+        if (err instanceof RouterError && err.code === "DISABLED") return;
+        logger.warn(
+          { err, hostname, ip: config.DROPLET_PUBLIC_FQDN_IP },
+          "tls-issuance: split-horizon DNS registration failed — cert installed, name resolves on next setup run",
+        );
+      }
+    },
+  };
 }
 
 /** Stable fingerprint helper kept here so callers outside the service can
