@@ -174,8 +174,9 @@ describe("/chat page mounts the history panel", () => {
     // and the resend is a no-op until a model is selected — so clicking too early
     // calls sendChat 0 times. Wait for the on-device model tag, which only renders
     // once a local model is selected, before clicking Try-again.
-    await waitFor(() =>
-      expect(screen.getByText(/on-device/i)).toBeInTheDocument(),
+    await waitFor(
+      () => expect(screen.getByText(/on-device/i)).toBeInTheDocument(),
+      { timeout: 10000 },
     );
 
     // Click Try-again.

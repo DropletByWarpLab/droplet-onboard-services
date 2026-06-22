@@ -1294,14 +1294,22 @@ export async function setWifiPassword(password: string): Promise<NetworkCommandR
   return data;
 }
 
-export async function setWifiChannel(channel: string): Promise<NetworkCommandResult> {
+export async function setWifiChannel(
+  channel: string,
+  // WARP-871: pass the LIVE radio section name (read from GET /api/network/wifi)
+  // rather than relying on the orchestrator route's `radio0` default, which
+  // doesn't exist on the single-box AP radio. Omit to keep the server default.
+  radioSection?: string,
+): Promise<NetworkCommandResult> {
   const res = await authFetch(`${BASE}/api/network/wifi/channel`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ channel }),
+    body: JSON.stringify(
+      radioSection ? { channel, radio_section: radioSection } : { channel },
+    ),
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || `Failed to set channel: ${res.status}`);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to set channel");
   return data;
 }
 
@@ -1504,12 +1512,115 @@ export async function addNetworkPortForward(
   return data;
 }
 
+/**
+ * WARP-871: reserve a fixed IP for a device by MAC (DHCP static lease). The
+ * orchestrator route (POST /api/network/dhcp/static-lease, owner/admin) maps
+ * this to add_static_lease — Tier 1, applies immediately, so there is no 202
+ * confirmation step. Returns the NetworkCommandResult (with operationId at
+ * runtime) so callers can poll for the safe-apply outcome if they want.
+ */
+export async function addStaticDhcpLease(
+  name: string,
+  mac: string,
+  ip: string,
+): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/dhcp/static-lease`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, mac, ip }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to add reservation");
+  return data;
+}
+
+/**
+ * WARP-871: set the upstream/custom DNS resolvers the router forwards to
+ * (POST /api/network/dns, owner/admin, Tier 1). The orchestrator requires a
+ * non-empty list; the UI validates each entry is an IP client-side.
+ */
+export async function setDnsServers(
+  servers: string[],
+): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/dns`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ servers }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to set DNS servers");
+  return data;
+}
+
 export async function fetchRouterSystemInfo(): Promise<Record<string, unknown>> {
   const res = await authFetch(`${BASE}/api/network/system`);
   if (!res.ok) throw new Error(`Failed to fetch router system info: ${res.status}`);
   return res.json();
 }
 
+// WARP-871: local DNS host-records (name → IP), e.g. nas.lan → 192.168.50.20.
+export interface DnsHostRecord {
+  section: string;
+  hostname: string;
+  ip: string;
+}
+
+export async function fetchDnsHostnames(): Promise<DnsHostRecord[]> {
+  const res = await authFetch(`${BASE}/api/network/dhcp/hostnames`);
+  if (!res.ok) throw new Error(`Failed to fetch DNS names: ${res.status}`);
+  const data = await res.json();
+  return data.entries ?? [];
+}
+
+export async function addDnsHostname(
+  hostname: string,
+  ip: string,
+): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/dhcp/hostnames`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ hostname, ip }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to add DNS name");
+  return data;
+}
+
+export async function deleteDnsHostname(
+  hostname: string,
+): Promise<NetworkCommandResult> {
+  const res = await authFetch(
+    `${BASE}/api/network/dhcp/hostnames/${encodeURIComponent(hostname)}`,
+    { method: "DELETE" },
+  );
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to delete DNS name");
+  return data;
+}
+
+export type DeploymentPosture =
+  | "PRIMARY_ROUTER"
+  | "DOWNSTREAM_ROUTER"
+  | "UNKNOWN";
+
+export interface NetworkTopology {
+  posture: DeploymentPosture;
+  evidence?: Record<string, unknown>;
+}
+
+/**
+ * WARP-871: read the deployment posture (ADR-018) for the Overview badge.
+ * Best-effort — returns null on any failure so a topology hiccup never breaks
+ * the Overview tab.
+ */
+export async function getNetworkTopology(): Promise<NetworkTopology | null> {
+  try {
+    const res = await authFetch(`${BASE}/api/network/topology`);
+    if (!res.ok) return null;
+    return (await res.json()) as NetworkTopology;
+  } catch {
+    return null;
+  }
 /** Read-only droplet-ai ubus RPC access. Scope chips reflect the live on-box
  *  ACL. Rotate/Revoke aren't here — they're honest-gated (disabled) in the UI. */
 export interface AiNetworkAccess {

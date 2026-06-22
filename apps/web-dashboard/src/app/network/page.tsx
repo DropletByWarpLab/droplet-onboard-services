@@ -48,10 +48,17 @@ import { NetworkSimple } from "@/components/network/NetworkSimple";
 import { SwitchPanel } from "@/components/network/switch/SwitchPanel";
 import { WifiScanPanel } from "@/components/network/WifiScanPanel";
 import { WifiSettingsForm } from "@/components/network/WifiSettingsForm";
+import { WifiChannelCard } from "@/components/network/WifiChannelCard";
+import { PortForwardForm } from "@/components/network/PortForwardForm";
+import { DhcpReservationForm } from "@/components/network/DhcpReservationForm";
+import { DnsServersForm } from "@/components/network/DnsServersForm";
+import { StaticDnsCard } from "@/components/network/StaticDnsCard";
 import {
   fetchNetworkOperation,
+  getNetworkTopology,
   rebootRouter,
   type NetworkOperation,
+  type NetworkTopology,
 } from "@/lib/api";
 import type {
   EnrichedNetworkDevice,
@@ -511,6 +518,7 @@ export default function NetworkPage() {
         tabIndex={0}
         hidden={activeTab !== "firewall"}
       >
+        {activeTab === "firewall" && <FirewallTab firewall={firewall} onApplied={refresh} />}
         {activeTab === "firewall" && (
           <FirewallTab firewall={firewall} canAuthor={canAuthor} onApplied={refresh} />
         )}
@@ -557,8 +565,34 @@ function OverviewTab({ overview }: { overview: NetworkOverview | undefined }) {
   const memFree = system?.resources?.memory?.free ?? 0;
   const memUsedPct = memTotal > 0 ? Math.round(((memTotal - memFree) / memTotal) * 100) : 0;
 
+  // WARP-871: best-effort deployment-posture badge (ADR-018). The routing
+  // GET /network/topology read existed but was never surfaced; the badge tells
+  // a primary router apart from a single-box sitting behind the home router.
+  const [topology, setTopology] = useState<NetworkTopology | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    getNetworkTopology().then((t) => {
+      if (!cancelled) setTopology(t);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const postureLabel =
+    topology?.posture === "PRIMARY_ROUTER"
+      ? "Primary router"
+      : topology?.posture === "DOWNSTREAM_ROUTER"
+        ? "Downstream router"
+        : null;
+
   return (
     <div className="space-y-6">
+      {postureLabel && (
+        <span className="inline-flex items-center gap-1.5 rounded-full bg-surface-secondary px-2.5 py-1 type-caption-1 text-label-secondary">
+          <Router size={12} aria-hidden="true" />
+          {postureLabel}
+        </span>
+      )}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <StatusCard
           icon={Globe}
@@ -830,6 +864,11 @@ function WifiTab() {
           the setup wizard's InternetStep. */}
       <WifiSettingsForm />
 
+      {/* WARP-871: the channel write path (orchestrator route + routing) shipped
+          at WARP-40 and api.ts already exported setWifiChannel, but the WiFi tab
+          never surfaced a channel picker — the one lever for dodging a congested
+          band. */}
+      <WifiChannelCard />
       {/* Read-only host-radio detail (band/channel/width/country + a
           Broadcasting chip). Honest for the single combined-radio shape — no
           enable/disable toggle; every chip is a real iwinfo field or "not
@@ -853,6 +892,12 @@ function WifiTab() {
 }
 
 // --- Firewall Tab ---
+function FirewallTab({
+  firewall,
+  onApplied,
+}: {
+  firewall: FirewallConfig | undefined;
+  onApplied?: () => void;
 // A zone's input/output/forward policy chip — green for ACCEPT, red for the
 // restrictive policies (REJECT/DROP). Mirrors the design's zone-policy chips
 // (advanced Network · Firewall zones) and reuses the same status colors as the
@@ -887,6 +932,11 @@ function FirewallTab({
   // WARP-42: typed Object.entries — each entry is [sectionId, typed section]
   // instead of [string, any], so a missing `target` or a `proto` type change
   // on the routing side now fails compile.
+  const { user } = useAuth();
+  // Port-forwarding exposes a LAN service to WAN ingress — owner/admin only,
+  // matching the orchestrator route guard (requireRoleOrMcpService("owner",
+  // "admin")). Family-tier members see the read-only lists but not the form.
+  const canEdit = user?.role === "owner" || user?.role === "admin";
   const zones: Array<[string, FirewallZone]> = firewall?.zones?.values
     ? Object.entries(firewall.zones.values)
     : [];
@@ -1048,6 +1098,11 @@ function FirewallTab({
         )}
       </div>
 
+      {/* WARP-871: the add-port-forward write path (orchestrator route +
+          routing validator) shipped at NET-09, but the Firewall tab was
+          read-only — the only ways to create one were the LLM tool or curl.
+          Owner/admin only, matching the route guard. */}
+      {canEdit && <PortForwardForm onApplied={onApplied} />}
       {/* UPnP / NAT-PMP — automatic port opening, off by default. Reflects the
           box's real state (read-only "not available" when miniupnpd is absent). */}
       <UpnpCard />
@@ -1081,6 +1136,11 @@ function SystemTab({
   const load5 = (load[1] / 65536).toFixed(2);
   const load15 = (load[2] / 65536).toFixed(2);
 
+  // Static DHCP reservations shape the LAN's address map — owner/admin only,
+  // matching the orchestrator route guard (requireRole("owner", "admin")).
+  const { user } = useAuth();
+  const canEdit = user?.role === "owner" || user?.role === "admin";
+
   return (
     <div className="space-y-4">
       <div className="card">
@@ -1105,6 +1165,19 @@ function SystemTab({
         </div>
       </div>
 
+      {/* WARP-871: static DHCP reservations (owner/admin, Tier 1) were fully
+          wired server-side but had no UI — the only ways to pin a device to an
+          IP were the LLM tool or curl. */}
+      {canEdit && <DhcpReservationForm />}
+
+      {/* WARP-871: upstream/custom DNS resolvers. The routing /dhcp/dns write +
+          openwrt.client.setDnsServers existed; this surfaces them via a new
+          thin orchestrator route (POST /api/network/dns, Tier 1). */}
+      {canEdit && <DnsServersForm />}
+
+      {/* WARP-871: local DNS names (host-records). Routing /dhcp/hostnames had
+          full CRUD; new orchestrator routes + this card surface it. */}
+      {canEdit && <StaticDnsCard />}
       {/* System controls — hostname (Tier-2) + time-sync (Tier-1) are real;
           status-LED + Wi-Fi country render honest 'not available' rows on the
           single-box shape (no in-container LED surface; pinned host-hostapd

@@ -1225,6 +1225,9 @@ export interface NetworkCommandResult {
   reason?: string;
   expiresIn?: number;
   operation?: string;
+  // WARP-871: Tier-1 writes (channel, static lease) answer 200 with the
+  // operationId directly so the caller can poll /operations/:id for the
+  // safe-apply outcome without a confirmation round-trip.
   /** WARP-40: present on a directly-applied (non-confirm) write so the caller
    *  can poll /network/operations/:id for the apply-vs-rollback outcome. */
   operationId?: string | null;

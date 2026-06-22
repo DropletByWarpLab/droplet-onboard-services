@@ -564,6 +564,62 @@ export async function setDnsServers(servers: string[]): Promise<WriteResult> {
   return opFrom(res);
 }
 
+// --- Deployment topology (ADR-018) ---
+
+export type DeploymentPosture =
+  | "PRIMARY_ROUTER"
+  | "DOWNSTREAM_ROUTER"
+  | "UNKNOWN";
+
+export interface NetworkTopology {
+  posture: DeploymentPosture;
+  evidence?: Record<string, unknown>;
+}
+
+// WARP-871: read-only posture probe (GET /network/topology). Lets the dashboard
+// tell a primary router apart from a single-box sitting downstream of the
+// home router, instead of silently rendering an absent WAN as "offline".
+export async function fetchTopology(): Promise<NetworkTopology> {
+  return routingFetchJson<NetworkTopology>("/network/topology", {
+    label: "Network topology",
+  });
+}
+
+// --- Static DNS host-records (dnsmasq name → IP) ---
+
+export interface DnsHostRecord {
+  section: string;
+  hostname: string;
+  ip: string;
+}
+
+// WARP-871: local DNS names (e.g. nas.lan → 192.168.50.20). Routing /dhcp/
+// hostnames has full read/write/delete; these thin client methods front it.
+export async function fetchDnsHostnames(): Promise<DnsHostRecord[]> {
+  const data = await routingFetchJson<{ entries: DnsHostRecord[] }>(
+    "/dhcp/hostnames",
+    { label: "DNS hostnames" },
+  );
+  return data.entries;
+}
+
+export async function addDnsHostname(
+  hostname: string,
+  ip: string,
+): Promise<WriteResult> {
+  const res = await postJson(
+    "/dhcp/hostnames",
+    { hostname, ip },
+    "Add DNS hostname",
+  );
+  return opFrom(res);
+}
+
+export async function deleteDnsHostname(hostname: string): Promise<WriteResult> {
+  const res = await routingFetch(
+    `/dhcp/hostnames/${encodeURIComponent(hostname)}`,
+    { method: "DELETE", label: "Delete DNS hostname" },
+  );
 /** LAN DHCP pool range + lease time. Each field can be null when the box omits
  *  it (a default applies — not "broken"). */
 export interface DhcpPool {

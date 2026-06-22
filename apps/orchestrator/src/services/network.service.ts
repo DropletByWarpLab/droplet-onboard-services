@@ -409,6 +409,39 @@ export async function addStaticDhcpLease(
   return result;
 }
 
+// WARP-871: upstream/custom resolvers (e.g. Pi-hole, NextDNS, 1.1.1.1). Thin
+// pass-through to the existing routing /dhcp/dns endpoint + client method.
+export async function setDnsServers(servers: string[]): Promise<openwrt.WriteResult> {
+  const result = await openwrt.setDnsServers(servers);
+  await invalidateNetworkCache();
+  return result;
+}
+
+// WARP-871: read-only deployment-posture probe (ADR-018). Pass-through.
+export async function getTopology(): Promise<openwrt.NetworkTopology> {
+  return openwrt.fetchTopology();
+}
+
+// WARP-871: local DNS host-records (name → IP). The read is cheap + uncached
+// (the dashboard re-fetches after each mutation); writes invalidate the
+// network cache like the other mutators.
+export async function getDnsHostnames(): Promise<openwrt.DnsHostRecord[]> {
+  return openwrt.fetchDnsHostnames();
+}
+
+export async function addDnsHostname(
+  hostname: string,
+  ip: string
+): Promise<openwrt.WriteResult> {
+  const result = await openwrt.addDnsHostname(hostname, ip);
+  await invalidateNetworkCache();
+  return result;
+}
+
+export async function deleteDnsHostname(
+  hostname: string
+): Promise<openwrt.WriteResult> {
+  const result = await openwrt.deleteDnsHostname(hostname);
 // LAN DHCP pool range + lease time. The read is unguarded; the write is Tier 2
 // (gated by the network-safety evaluator at the route) — reshaping the live
 // pool can strand connected clients.

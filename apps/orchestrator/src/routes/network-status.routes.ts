@@ -17,6 +17,11 @@ import {
   getSystemInfo,
   getAllInterfaces,
   addStaticDhcpLease,
+  setDnsServers,
+  getTopology,
+  getDnsHostnames,
+  addDnsHostname,
+  deleteDnsHostname,
   getDhcpPool,
   setDhcpPool,
   getSystemControls,
@@ -177,6 +182,51 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
     },
   );
 
+  // WARP-871: set the upstream/custom DNS resolvers dnsmasq forwards to (e.g.
+  // Pi-hole, NextDNS, 1.1.1.1). owner/admin only — DNS shapes every device's
+  // name resolution. set_dns is Tier 1 (low-risk, no partition), so it applies
+  // immediately; the routing /dhcp/dns validator only requires a non-empty list.
+  router.post(
+    "/network/dns",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        const { servers } = req.body;
+        if (
+          !Array.isArray(servers) ||
+          servers.length === 0 ||
+          !servers.every((s) => typeof s === "string" && s.trim().length > 0)
+        ) {
+          return res
+            .status(400)
+            .json({ error: "Provide 'servers' as a non-empty list of IP strings" });
+        }
+
+        const userId = req.user?.id;
+        const result = await evaluateNetworkCommand(
+          prisma, "dhcp.dns", "set_dns", { servers }, userId
+        );
+
+        if ("blocked" in result && result.blocked) {
+          return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
+        }
+
+        const op = await setDnsServers(servers);
+        res.json({ status: "ok", servers, tier: result.tier, operationId: op.operationId });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // WARP-871: local DNS host-records (e.g. nas.lan -> 192.168.50.20). The
+  // routing /dhcp/hostnames endpoints have full read/write/delete; these front
+  // them. Reads are open to any authed user; writes are owner/admin and run
+  // through the safety evaluator (set/delete_dns_hostname classify Tier 1).
+  router.get("/network/dhcp/hostnames", async (_req, res, next) => {
+    try {
+      const entries = await getDnsHostnames();
+      res.json({ entries });
   // --- DHCP pool (range + lease time) ---
   // Read is unguarded; the write is Tier 2 (a LAN address-map change that can
   // strand clients) → 202 + token → /network/command/confirm dispatches it.
@@ -189,6 +239,19 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
     }
   });
 
+  router.post(
+    "/network/dhcp/hostnames",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        const { hostname, ip } = req.body;
+        if (
+          !hostname ||
+          typeof hostname !== "string" ||
+          !ip ||
+          typeof ip !== "string"
+        ) {
+          return res.status(400).json({ error: "Missing 'hostname' or 'ip'" });
   // dnsmasq lease-time grammar: positive integer + unit (s/m/h/d/w) or
   // `infinite`. Mirrors the routing DhcpPoolRequest validator so junk is
   // rejected before any router change (and before a token is minted).
@@ -218,6 +281,9 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
 
         const userId = req.user?.id;
         const result = await evaluateNetworkCommand(
+          prisma, "dhcp.hostname", "set_dns_hostname", { hostname, ip }, userId
+        );
+
           prisma,
           "dhcp.pool",
           "set_dhcp_pool",
@@ -240,6 +306,8 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
           return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
         }
 
+        const op = await addDnsHostname(hostname, ip);
+        res.json({ status: "ok", hostname, ip, tier: result.tier, operationId: op.operationId });
         const op = await setDhcpPool(start, limit, leasetime);
         res.json({ status: "ok", tier: result.tier, operationId: op.operationId });
       } catch (err) {
@@ -247,6 +315,46 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
       }
     },
   );
+
+  router.delete(
+    "/network/dhcp/hostnames/:hostname",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        const { hostname } = req.params;
+        if (!hostname) {
+          return res.status(400).json({ error: "Missing 'hostname'" });
+        }
+
+        const userId = req.user?.id;
+        const result = await evaluateNetworkCommand(
+          prisma, "dhcp.hostname", "delete_dns_hostname", { hostname }, userId
+        );
+
+        if ("blocked" in result && result.blocked) {
+          return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
+        }
+
+        const op = await deleteDnsHostname(hostname);
+        res.json({ status: "ok", hostname, tier: result.tier, operationId: op.operationId });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // WARP-871: read-only deployment-posture probe (ADR-018). Unguarded read,
+  // like /network/status — informs the dashboard's topology badge. A genuine
+  // ubus fault propagates so the dashboard can drop the badge rather than
+  // assert a posture.
+  router.get("/network/topology", async (_req, res, next) => {
+    try {
+      const topology = await getTopology();
+      res.json(topology);
+    } catch (err) {
+      next(err);
+    }
+  });
 
   // --- System ---
   router.get("/network/system", async (_req, res, next) => {
