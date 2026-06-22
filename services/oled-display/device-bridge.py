@@ -25,6 +25,7 @@ import logging
 import os
 import secrets
 import shlex
+import re
 import subprocess
 import threading
 import time
@@ -88,6 +89,15 @@ AP_HOSTAPD_CONTAINER = os.environ.get(
     "DROPLET_AP_CONTAINER", "droplet-openwrt").strip()
 AP_HOSTAPD_CONF_PATH = os.environ.get(
     "DROPLET_AP_HOSTAPD_CONF", "/etc/hostapd.conf").strip()
+
+# Where the guest Wi-Fi creds are persisted. droplet-set-guest-wifi.sh upserts
+# DROPLET_GUEST_SSID/PSK/ENABLED into the SAME droplet-openwrt-attach env file
+# the home-AP write uses; we read those keys back for GET /openwrt/wifi/guest.
+GUEST_ENV_FILE = (
+    os.environ.get("DROPLET_GUEST_ENV_FILE")
+    or os.environ.get("DROPLET_HOSTAPD_ENV_FILE")
+    or "/var/lib/droplet-bridge/openwrt-attach.env"
+).strip()
 
 FRIGATE_URL       = os.environ.get("FRIGATE_URL", "http://127.0.0.1:5000")
 ORCHESTRATOR_URL  = os.environ.get("ORCHESTRATOR_URL", "http://127.0.0.1:3000")
@@ -162,6 +172,12 @@ _ROTATION_LOCK = threading.Lock()
 # env-file write + double-bouncing the AP. Serialize them exactly like
 # _ROTATION_LOCK does for rotation: non-blocking acquire, 409 on contention.
 _HOSTAPD_LOCK = threading.Lock()
+
+# In-process lock for the single-box GUEST Wi-Fi write (sibling of
+# _HOSTAPD_LOCK). Serializes POST/DELETE /openwrt/wifi/guest so two concurrent
+# guest writes cannot interleave the env-file upsert + double-restart the attach
+# service. Non-blocking acquire, 409 on contention.
+_GUEST_LOCK = threading.Lock()
 
 # In-process lock for the factory reset (WARP-825). The HTTP server is threaded,
 # so two concurrent POST /system/factory-reset would each _spawn_detached the
@@ -1882,6 +1898,194 @@ def run_set_hostapd(params):
 
 
 # ---------------------------------------------------------------------------
+# Guest Wi-Fi write (single-box second BSS)
+# ---------------------------------------------------------------------------
+#
+# Sibling of run_set_hostapd. The guest network is an OPTIONAL, isolated second
+# hostapd BSS. The bridge NEVER writes hostapd.conf / restarts hostapd itself —
+# it shells the repo-tracked host script (scripts/host/droplet-set-guest-wifi.sh,
+# installed to /usr/local/sbin by setup.sh), whose hard validation (SSID 1-32 /
+# PSK 8-63, reject-before-write) is the real gate. The guest PSK is a per-device
+# secret and is NEVER logged here.
+GUEST_SCRIPT = os.environ.get(
+    "DROPLET_GUEST_SCRIPT", "/usr/local/sbin/droplet-set-guest-wifi.sh").strip()
+
+
+def _read_guest_env():
+    """Read the persisted guest Wi-Fi state from the attach env file.
+
+    droplet-set-guest-wifi.sh upserts DROPLET_GUEST_SSID/PSK/ENABLED there. We
+    parse only those three keys. Returns the orchestrator-facing status dict
+    {configured, enabled, ssid, password}; `configured` is False when no guest
+    SSID is set (the common default). Never raises."""
+    vals = {}
+    try:
+        with open(GUEST_ENV_FILE, encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if line.startswith("DROPLET_GUEST_") and "=" in line:
+                    key, _, val = line.partition("=")
+                    vals[key] = val
+    except Exception:                                               # noqa: BLE001
+        pass
+    ssid = vals.get("DROPLET_GUEST_SSID", "") or None
+    psk = vals.get("DROPLET_GUEST_PSK", "") or None
+    enabled = vals.get("DROPLET_GUEST_ENABLED", "0") == "1"
+    return {
+        "configured": ssid is not None,
+        "enabled": bool(ssid) and enabled,
+        "ssid": ssid,
+        "password": psk,
+    }
+
+
+# --- Guest radio capability -------------------------------------------------
+# A guest network is a SECOND AP BSS on the same radio. Whether the card can do
+# that is hardware-dependent: mt76/MT7922 hosts many BSSes; iwlwifi/AX210 caps AP
+# interfaces at 1 (`iw phy` reports `#{ AP, ... } <= 1`), so a guest BSS is
+# IMPOSSIBLE there. We must report `supported` honestly per box so the dashboard
+# never offers (or fakes) a guest network the radio can't broadcast — and so the
+# write path refuses up front instead of leaning on the attach script's
+# home-AP-only fallback (which would leave a "configured" guest that never airs).
+#
+# Cached like _use_hostapd_mode: the AP-BSS limit is a static hardware property,
+# and the `iw phy` read is a docker exec we don't want on every status poll.
+# Definitive hardware results (True/False) use the full 300 s TTL; a None result
+# (container/iw transiently unavailable) uses 30 s so a brief container restart
+# doesn't block writes on a capable radio for the full window.
+_GUEST_RADIO_TTL_S = 300.0
+_GUEST_RADIO_INFRA_TTL_S = 30.0
+_guest_radio_lock = threading.Lock()
+_guest_radio_cache = {"value": None, "at": 0.0}
+
+
+def _ap_phy_in_container():
+    """Find the phy hosting the AP iface (`type AP`) inside the AP container.
+
+    Parses `iw dev`. Returns the phy name (e.g. "phy1") or None. Never raises."""
+    rc, out, _ = _run(["docker", "exec", AP_HOSTAPD_CONTAINER, "iw", "dev"], timeout=8)
+    if rc != 0:
+        return None
+    cur_phy = None
+    cur_if = None
+    for raw in (out or "").splitlines():
+        s = raw.strip()
+        m = re.match(r"phy#(\d+)", s)
+        if m:
+            cur_phy = "phy" + m.group(1)
+            cur_if = None
+            continue
+        m = re.match(r"Interface\s+(\S+)", s)
+        if m:
+            cur_if = m.group(1)
+            continue
+        if s == "type AP" and cur_phy and cur_if:
+            return cur_phy
+    return None
+
+
+def _radio_supports_second_bss(phy):
+    """True iff `phy` advertises an interface combination allowing >= 2 AP BSSes.
+
+    Reads `iw phy <phy> info` and scans the `valid interface combinations` for
+    any `#{ ...AP... } <= N` group with N >= 2. iwlwifi/AX210 -> N=1 (False);
+    mt76/MT7922 -> N>=2 (True). Never raises."""
+    if not phy:
+        return False
+    rc, out, _ = _run(
+        ["docker", "exec", AP_HOSTAPD_CONTAINER, "iw", "phy", phy, "info"], timeout=8)
+    if rc != 0:
+        return False
+    # `[^}]*` spans the wrapped, multi-line combination groups (it matches \n).
+    nums = [int(n) for grp, n in re.findall(r"#\{\s*([^}]*)\}\s*<=\s*(\d+)", out or "")
+            if re.search(r"\bAP\b", grp)]
+    return bool(nums) and max(nums) >= 2
+
+
+def guest_radio_supported():
+    """Whether the AP radio can host a guest (second) BSS. Cached + fail-CLOSED.
+
+    Returns False whenever the capability can't be determined (container/iw
+    unreachable) — we never claim a guest network the card may not be able to
+    broadcast. Definitive hardware results (True/False) are cached for the full
+    _GUEST_RADIO_TTL_S; a None result (infra transiently unavailable) uses the
+    shorter _GUEST_RADIO_INFRA_TTL_S so a brief container restart doesn't block
+    writes on a capable radio for the full window."""
+    now = time.time()
+    with _guest_radio_lock:
+        cached = _guest_radio_cache["value"]
+        age = now - _guest_radio_cache["at"]
+        ttl = _GUEST_RADIO_INFRA_TTL_S if cached is None else _GUEST_RADIO_TTL_S
+        if _guest_radio_cache["at"] > 0.0 and age < ttl:
+            return False if cached is None else cached
+    value = _radio_supports_second_bss(_ap_phy_in_container())
+    with _guest_radio_lock:
+        _guest_radio_cache["value"] = value
+        _guest_radio_cache["at"] = now
+    return value if value is not None else False
+
+
+def run_set_guest_wifi(params):
+    """Forward an owner-confirmed guest Wi-Fi create/update to the host script.
+
+    `params` is {"ssid": str, "psk": str}. Mirrors run_set_hostapd: shells
+    droplet-set-guest-wifi.sh with a single JSON arg; the script validates,
+    upserts the guest keys, and restarts droplet-openwrt-attach.service (which
+    stands up the second BSS + guest subnet + isolated firewall zone). Never
+    raises. Returns (ok, code, info) with the SAME code vocabulary as
+    run_set_hostapd (ok / busy / script_error / exec_error). PSK never logged."""
+    ssid = (params or {}).get("ssid", "")
+    psk = (params or {}).get("psk", "")
+    payload = json.dumps({"ssid": ssid, "psk": psk})
+    if not _GUEST_LOCK.acquire(blocking=False):
+        logger.warning("set_guest_wifi rejected: a guest Wi-Fi write is already in progress")
+        return False, "busy", "guest Wi-Fi write already in progress"
+    try:
+        try:
+            rc, out, err = _run([GUEST_SCRIPT, payload], timeout=60)
+        except Exception as e:                                      # noqa: BLE001
+            logger.warning("set_guest_wifi failed to exec host script (ssid=%r): %s", ssid, e)
+            return False, "exec_error", "host script unavailable"
+        if rc != 0:
+            msg = (err.strip() or out.strip() or "host script refused")
+            logger.warning("set_guest_wifi refused/failed (rc=%s, ssid=%r): %s", rc, ssid, msg)
+            return False, "script_error", msg
+        try:
+            return True, "ok", json.loads(out or "{}")
+        except (ValueError, TypeError):
+            return True, "ok", {"message": (out or "").strip()}
+    finally:
+        _GUEST_LOCK.release()
+
+
+def run_remove_guest_wifi():
+    """Tear down the guest network via the host script ({"action":"remove"}).
+
+    Idempotent — a remove on a never-configured box is a clean no-op. Same lock +
+    (ok, code, info) contract as run_set_guest_wifi. No secret to log."""
+    payload = json.dumps({"action": "remove"})
+    if not _GUEST_LOCK.acquire(blocking=False):
+        logger.warning("remove_guest_wifi rejected: a guest Wi-Fi write is already in progress")
+        return False, "busy", "guest Wi-Fi write already in progress"
+    try:
+        try:
+            rc, out, err = _run([GUEST_SCRIPT, payload], timeout=60)
+        except Exception as e:                                      # noqa: BLE001
+            logger.warning("remove_guest_wifi failed to exec host script: %s", e)
+            return False, "exec_error", "host script unavailable"
+        if rc != 0:
+            msg = (err.strip() or out.strip() or "host script refused")
+            logger.warning("remove_guest_wifi failed (rc=%s): %s", rc, msg)
+            return False, "script_error", msg
+        try:
+            return True, "ok", json.loads(out or "{}")
+        except (ValueError, TypeError):
+            return True, "ok", {"message": (out or "").strip()}
+    finally:
+        _GUEST_LOCK.release()
+
+
+# ---------------------------------------------------------------------------
 # Factory reset (WARP-825)
 # ---------------------------------------------------------------------------
 #
@@ -2209,6 +2413,27 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._authed():
                     return self._send(401, {"error": "unauthorized"})
                 return self._send(200, qr_snapshot())
+            if path == "/openwrt/wifi/guest":
+                # Guest Wi-Fi status (the body carries the guest PSK for the join
+                # QR) — auth-gated like /openwrt/qr. Only meaningful on the
+                # single-box hostapd shape; on a uci/multi-box box the guest
+                # network lives in UCI (routing service), so refuse with 409.
+                if not self._authed():
+                    return self._send(401, {"error": "unauthorized"})
+                if not _use_hostapd_mode():
+                    return self._send(409, {
+                        "error": "not_hostapd_mode",
+                        "hint": ("Guest Wi-Fi on this deployment shape is managed "
+                                 "via UCI through the routing service, not the "
+                                 "host hostapd bridge."),
+                    })
+                # `supported` reflects the radio's REAL multi-BSS capability — a
+                # single-AP card (iwlwifi/AX210) cannot broadcast a guest BSS, so
+                # the dashboard shows an honest "not available" there instead of a
+                # setup form whose write would only fail.
+                status = _read_guest_env()
+                status["supported"] = guest_radio_supported()
+                return self._send(200, status)
             if path == "/files":
                 return self._send(200, files_snapshot())
             if path == "/cameras":
@@ -2266,6 +2491,35 @@ class Handler(BaseHTTPRequestHandler):
             # line (which may contain OPENWRT_PASS in plaintext). Log for the
             # bridge operator and return a sanitised message to the HTTP client.
             logger.exception("unhandled error in do_POST: %s", e)
+            return self._send(500, {"ok": False, "error": "internal server error"})
+
+    def do_DELETE(self):
+        # Only route today: DELETE /openwrt/wifi/guest (tear down the guest
+        # network). Wrapped like do_POST so a malformed request returns a clean
+        # JSON error instead of escaping the handler.
+        try:
+            if self.path == "/openwrt/wifi/guest":
+                # Auth-gated + hostapd-mode gated exactly like the guest POST.
+                if not self._authed():
+                    return self._send(401, {"ok": False, "error": "unauthorized"})
+                if not _use_hostapd_mode():
+                    return self._send(409, {
+                        "ok": False, "error": "not_hostapd_mode",
+                        "hint": ("Guest Wi-Fi on this deployment shape is managed "
+                                 "via UCI through the routing service; the host "
+                                 "guest teardown does not apply."),
+                    })
+                ok, code, info = run_remove_guest_wifi()
+                if not ok:
+                    status = 409 if code == "busy" else (500 if code == "exec_error" else 422)
+                    return self._send(status, {"ok": False, "error": info})
+                return self._send(200, {"ok": True,
+                                        **(info if isinstance(info, dict) else {"info": info})})
+            return self._send(404, {"ok": False, "error": "not found"})
+        except ValueError as e:                                      # noqa: BLE001
+            return self._send(400, {"ok": False, "error": str(e)})
+        except Exception as e:                                       # noqa: BLE001
+            logger.exception("unhandled error in do_DELETE: %s", e)
             return self._send(500, {"ok": False, "error": "internal server error"})
 
     def _dispatch_post(self):
@@ -2362,6 +2616,55 @@ class Handler(BaseHTTPRequestHandler):
                 # "in progress" ("Job is already queued or in progress for ...")
                 # and must not be misread as 409 (WARP-834 finding 1).
                 status = 409 if code == "busy" else 422
+                return self._send(status, {"ok": False, "error": info})
+            return self._send(200, {"ok": True,
+                                    **(info if isinstance(info, dict) else {"info": info})})
+        if self.path == "/openwrt/wifi/guest":
+            # Guest Wi-Fi create/update. Auth-gated + hostapd-mode gated exactly
+            # like /openwrt/wifi/hostapd. The orchestrator only reaches here after
+            # an owner/admin session (+ the Tier-2 confirm); run_set_guest_wifi
+            # shells the host script (whose hard validation is the last gate) —
+            # it never writes hostapd.conf / restarts hostapd itself.
+            if not self._authed():
+                return self._send(401, {"ok": False, "error": "unauthorized"})
+            if not _use_hostapd_mode():
+                # uci/multi-box: the guest network is provisioned via UCI through
+                # the routing service, not this host write — refuse with 409 and
+                # NEVER invoke the host script (regression guard for uci boxes).
+                return self._send(409, {
+                    "ok": False, "error": "not_hostapd_mode",
+                    "hint": ("Guest Wi-Fi on this deployment shape is managed via "
+                             "UCI through the routing service; the host guest "
+                             "write does not apply."),
+                })
+            # Refuse up front on a radio that can't host a second BSS (iwlwifi/
+            # AX210). Without this the write would "succeed" (env written), the
+            # attach script's home-AP-only fallback would silently drop the guest
+            # BSS, and getGuestWifi would then report a guest that never airs.
+            if not guest_radio_supported():
+                return self._send(409, {
+                    "ok": False, "error": "guest_unsupported_radio",
+                    "hint": ("This Droplet's Wi-Fi card can broadcast only one "
+                             "network, so a separate guest Wi-Fi is not possible. "
+                             "A multi-SSID-capable radio is required."),
+                })
+            n = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(n).decode() if n else ""
+            try:
+                j = json.loads(raw) if raw else {}
+            except Exception:                                       # noqa: BLE001
+                return self._send(400, {"ok": False, "error": "bad json"})
+            # Never log the body — it carries the guest PSK (rule 19).
+            ok, code, info = run_set_guest_wifi({
+                "ssid": j.get("ssid", ""),
+                "psk": j.get("psk", ""),
+            })
+            if not ok:
+                # 409 for lock contention (code == "busy"); 500 for infra failure
+                # (code == "exec_error" — host script unavailable, server-side);
+                # 422 for host-script validation refusal. Keyed on the machine
+                # `code`, never a substring of the message (WARP-834 finding 1).
+                status = 409 if code == "busy" else (500 if code == "exec_error" else 422)
                 return self._send(status, {"ok": False, "error": info})
             return self._send(200, {"ok": True,
                                     **(info if isinstance(info, dict) else {"info": info})})

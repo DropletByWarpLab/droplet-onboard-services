@@ -37,14 +37,29 @@ vi.mock("./cache.service.js", () => ({
 
 // The UCI client (multi-box path) + the hostapd bridge (single-box path) spies.
 // Hoisted so the vi.mock factories can close over them.
-const { setWirelessSsid, setWirelessPassword, stageSsid, applyWifi, fetchGuestWifi } =
-  vi.hoisted(() => ({
-    setWirelessSsid: vi.fn(),
-    setWirelessPassword: vi.fn(),
-    stageSsid: vi.fn(),
-    applyWifi: vi.fn(),
-    fetchGuestWifi: vi.fn(),
-  }));
+const {
+  setWirelessSsid,
+  setWirelessPassword,
+  stageSsid,
+  applyWifi,
+  fetchGuestWifi,
+  createGuestNetwork,
+  removeGuestNetwork,
+  bridgeApplyGuest,
+  bridgeRemoveGuest,
+  bridgeGuestStatus,
+} = vi.hoisted(() => ({
+  setWirelessSsid: vi.fn(),
+  setWirelessPassword: vi.fn(),
+  stageSsid: vi.fn(),
+  applyWifi: vi.fn(),
+  fetchGuestWifi: vi.fn(),
+  createGuestNetwork: vi.fn(),
+  removeGuestNetwork: vi.fn(),
+  bridgeApplyGuest: vi.fn(),
+  bridgeRemoveGuest: vi.fn(),
+  bridgeGuestStatus: vi.fn(),
+}));
 
 vi.mock("./openwrt.client.js", async () => {
   const actual = await vi.importActual<any>("./openwrt.client.js");
@@ -53,15 +68,26 @@ vi.mock("./openwrt.client.js", async () => {
     setWirelessSsid: (...a: unknown[]) => setWirelessSsid(...a),
     setWirelessPassword: (...a: unknown[]) => setWirelessPassword(...a),
     fetchGuestWifi: (...a: unknown[]) => fetchGuestWifi(...a),
+    createGuestNetwork: (...a: unknown[]) => createGuestNetwork(...a),
+    removeGuestNetwork: (...a: unknown[]) => removeGuestNetwork(...a),
   };
 });
 
 vi.mock("./hostapd-bridge.service.js", () => ({
   stageSsid: (...a: unknown[]) => stageSsid(...a),
   applyWifi: (...a: unknown[]) => applyWifi(...a),
+  applyGuestWifi: (...a: unknown[]) => bridgeApplyGuest(...a),
+  removeGuestWifi: (...a: unknown[]) => bridgeRemoveGuest(...a),
+  guestStatusFromBridge: (...a: unknown[]) => bridgeGuestStatus(...a),
 }));
 
-import { setWifiSsid, setWifiPassword, getGuestWifi } from "./network.service.js";
+import {
+  setWifiSsid,
+  setWifiPassword,
+  getGuestWifi,
+  setGuestWifi,
+  removeGuestWifi,
+} from "./network.service.js";
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -73,6 +99,17 @@ beforeEach(() => {
     enabled: true,
     ssid: "Guests",
     password: "letmein8",
+  });
+  createGuestNetwork.mockResolvedValue({ operationId: "op-guest-uci" });
+  removeGuestNetwork.mockResolvedValue({ operationId: "op-guest-rm-uci" });
+  bridgeApplyGuest.mockResolvedValue({ operationId: null });
+  bridgeRemoveGuest.mockResolvedValue({ operationId: null });
+  bridgeGuestStatus.mockResolvedValue({
+    configured: true,
+    enabled: true,
+    ssid: "Visitors",
+    password: "guestpass1",
+    supported: true,
   });
 });
 
@@ -143,13 +180,43 @@ describe("hostapd mode (single-box) — routes through the device-bridge", () =>
   });
 });
 
-// Guest Wi-Fi can't be provisioned on the single-box hostapd shape (no second
-// BSS / guest subnet). getGuestWifi must report supported:false there WITHOUT
-// reading the orphan UCI back, so the card shows an honest "not available"
-// state instead of a fabricated live guest network.
-describe("getGuestWifi honesty gate", () => {
-  it("hostapd mode → supported:false, never touches the routing read", async () => {
+// Guest Wi-Fi is now REAL on the single-box hostapd shape: a second BSS the
+// host script stands up via the device-bridge. getGuestWifi reads the live
+// state from the bridge (supported:true), setGuestWifi/removeGuestWifi route
+// through the bridge — never the UCI client — and a transient bridge read
+// failure degrades to "supported but not configured" so the card never errors.
+describe("guest Wi-Fi — hostapd mode routes through the device-bridge", () => {
+  beforeEach(() => {
     configMock.DROPLET_AP_MODE = "hostapd";
+  });
+
+  it("getGuestWifi passes through the bridge status incl. radio-derived supported, never the UCI read", async () => {
+    const res = await getGuestWifi();
+    expect(bridgeGuestStatus).toHaveBeenCalledOnce();
+    expect(fetchGuestWifi).not.toHaveBeenCalled();
+    expect(res).toEqual({
+      configured: true,
+      enabled: true,
+      ssid: "Visitors",
+      password: "guestpass1",
+      supported: true,
+    });
+  });
+
+  it("getGuestWifi reports supported:false when the radio can't host a second BSS (AX210)", async () => {
+    bridgeGuestStatus.mockResolvedValueOnce({
+      configured: false,
+      enabled: false,
+      ssid: null,
+      password: null,
+      supported: false,
+    });
+    const res = await getGuestWifi();
+    expect(res.supported).toBe(false);
+  });
+
+  it("getGuestWifi degrades to unavailable (supported:false) when the bridge read fails", async () => {
+    bridgeGuestStatus.mockRejectedValueOnce(new Error("device-bridge not reachable"));
     const res = await getGuestWifi();
     expect(res).toEqual({
       configured: false,
@@ -161,10 +228,44 @@ describe("getGuestWifi honesty gate", () => {
     expect(fetchGuestWifi).not.toHaveBeenCalled();
   });
 
-  it("uci mode → supported:true, reflects the real routing read", async () => {
+  it("setGuestWifi applies via the bridge (ssid + psk), not the UCI client", async () => {
+    const res = await setGuestWifi("radio3", "Visitors", "guestpass1", "guest");
+    expect(bridgeApplyGuest).toHaveBeenCalledWith("Visitors", "guestpass1");
+    expect(createGuestNetwork).not.toHaveBeenCalled();
+    expect(res).toEqual({ operationId: null });
+  });
+
+  it("removeGuestWifi tears down via the bridge, not the UCI client", async () => {
+    const res = await removeGuestWifi();
+    expect(bridgeRemoveGuest).toHaveBeenCalledOnce();
+    expect(removeGuestNetwork).not.toHaveBeenCalled();
+    expect(res).toEqual({ operationId: null });
+  });
+});
+
+describe("guest Wi-Fi — uci mode (multi-box) UNCHANGED", () => {
+  beforeEach(() => {
     configMock.DROPLET_AP_MODE = "uci";
+  });
+
+  it("getGuestWifi reflects the real routing read (supported:true)", async () => {
     const res = await getGuestWifi();
     expect(fetchGuestWifi).toHaveBeenCalledOnce();
+    expect(bridgeGuestStatus).not.toHaveBeenCalled();
     expect(res).toMatchObject({ configured: true, ssid: "Guests", supported: true });
+  });
+
+  it("setGuestWifi creates the UCI guest network, never the bridge", async () => {
+    const res = await setGuestWifi("radio3", "Guests", "letmein8", "guest");
+    expect(createGuestNetwork).toHaveBeenCalledWith("radio3", "Guests", "letmein8", "guest");
+    expect(bridgeApplyGuest).not.toHaveBeenCalled();
+    expect(res).toEqual({ operationId: "op-guest-uci" });
+  });
+
+  it("removeGuestWifi removes the UCI guest network, never the bridge", async () => {
+    const res = await removeGuestWifi();
+    expect(removeGuestNetwork).toHaveBeenCalledOnce();
+    expect(bridgeRemoveGuest).not.toHaveBeenCalled();
+    expect(res).toEqual({ operationId: "op-guest-rm-uci" });
   });
 });

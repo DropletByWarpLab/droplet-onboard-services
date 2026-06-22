@@ -288,6 +288,17 @@ export async function setGuestWifi(
   password: string,
   network: string = "guest"
 ): Promise<openwrt.WriteResult> {
+  // Single-box hostapd shape: the guest network is a SECOND hostapd BSS the
+  // in-container OpenWrt has no radio for, so a UCI wifi-iface add is inert.
+  // Provision it through the device-bridge (which shells the host script that
+  // stands up the BSS + guest subnet + isolated firewall zone) instead. The
+  // radio/network args are UCI concepts and do not apply here. Every other shape
+  // keeps the UCI path verbatim.
+  if (config.DROPLET_AP_MODE === "hostapd") {
+    const result = await hostapdBridge.applyGuestWifi(ssid, password);
+    await invalidateNetworkCache();
+    return result;
+  }
   const result = await openwrt.createGuestNetwork(radio, ssid, password, network);
   await invalidateNetworkCache();
   return result;
@@ -296,27 +307,41 @@ export async function setGuestWifi(
 export async function getGuestWifi(): Promise<
   openwrt.GuestWifiStatus & { supported: boolean }
 > {
-  // Guest Wi-Fi needs a second AP/BSS that the single-box hostapd shape can't
-  // provision yet: there the home AP is a raw host hostapd (DROPLET_AP_MODE=
-  // hostapd) and the in-container OpenWrt has no radio, so the UCI wifi-iface
-  // create_guest_network adds is inert — no SSID ever broadcasts. Report it as
-  // unsupported there so the dashboard shows an honest "not available" state
-  // instead of reading the orphan UCI back and faking a live guest network.
-  // (Same posture as setWifiSsid/setWifiPassword branching on DROPLET_AP_MODE.)
+  // Single-box hostapd shape: read live state from the device-bridge, including
+  // the radio-derived `supported` flag — guest Wi-Fi is a SECOND BSS, which a
+  // single-AP card (iwlwifi/AX210) cannot broadcast, so support is per-box, not
+  // a blanket true. A transient bridge read failure degrades to "not available"
+  // (supported:false) rather than offering a feature we can't confirm the
+  // hardware delivers; the WRITE path surfaces real failures with actionable
+  // copy. Every other shape reads the real UCI guest network.
   if (config.DROPLET_AP_MODE === "hostapd") {
-    return {
-      configured: false,
-      enabled: false,
-      ssid: null,
-      password: null,
-      supported: false,
-    };
+    try {
+      return await hostapdBridge.guestStatusFromBridge();
+    } catch (err) {
+      logger.warn(
+        { err: (err as Error)?.message },
+        "guest Wi-Fi status read via device-bridge failed; reporting unavailable"
+      );
+      return {
+        configured: false,
+        enabled: false,
+        ssid: null,
+        password: null,
+        supported: false,
+      };
+    }
   }
   const status = await openwrt.fetchGuestWifi();
   return { ...status, supported: true };
 }
 
 export async function removeGuestWifi(): Promise<openwrt.WriteResult> {
+  // Single-box hostapd shape: tear the guest BSS down via the device-bridge.
+  if (config.DROPLET_AP_MODE === "hostapd") {
+    const result = await hostapdBridge.removeGuestWifi();
+    await invalidateNetworkCache();
+    return result;
+  }
   const result = await openwrt.removeGuestNetwork();
   await invalidateNetworkCache();
   return result;

@@ -26,6 +26,24 @@ AP_PSK_FILE="${AP_PSK_FILE:-/etc/droplet/ap-psk}"
 # the PSK hostapd actually serves (WARP-819 coherence AC). Overridable for tests.
 DEVICE_BRIDGE_ENV_FILE="${DEVICE_BRIDGE_ENV_FILE:-/etc/droplet/device-bridge.env}"
 
+# --- Guest Wi-Fi knobs (optional second BSS) ------------------------------
+# The guest network is an OPTIONAL, isolated second hostapd BSS on the same
+# radio, with its own subnet (192.168.30.0/24), its own dnsmasq, and its own
+# default-deny firewall zone (internet only, no LAN, client-isolated). It is
+# configured on demand by droplet-set-guest-wifi.sh — which upserts these keys
+# into the customer env file below — and stays OFF unless DROPLET_GUEST_ENABLED=1
+# with a valid SSID + PSK. Seeded from the process env here so an operator can
+# pin it; the customer_guest_creds block overrides from the device-bridge file.
+GUEST_SSID="${DROPLET_GUEST_SSID:-}"
+GUEST_PSK="${DROPLET_GUEST_PSK:-}"
+GUEST_ENABLED="${DROPLET_GUEST_ENABLED:-0}"
+# The guest BSS surfaces as its own netdev; default "<ap_iface>_g" (resolved
+# after detect_ap_radio fills AP_IFACE). Overridable for an operator/test.
+GUEST_IFACE="${DROPLET_GUEST_IFACE:-}"
+# Guest L3 gateway. Distinct from the AP subnet (192.168.20.0/24) and mgmt
+# (192.168.10.0/24) so the zones never overlap.
+GUEST_GW="${DROPLET_GUEST_GW:-192.168.30.1}"
+
 # >>> customer_ap_creds (WARP-808 follow-up)
 # The setup wizard's Wi-Fi write lands in the device-bridge's StateDirectory
 # (droplet-set-hostapd.sh writes it there — the bridge sandbox can't touch
@@ -55,6 +73,33 @@ if [ -f "$CUSTOMER_AP_ENV" ]; then
   fi
 fi
 # <<< customer_ap_creds
+
+# >>> customer_guest_creds
+# The guest Wi-Fi SSID/PSK/enabled flag live in the SAME device-bridge file
+# (droplet-set-guest-wifi.sh writes them there). Parse them out with the same
+# hard validation root applies to the AP keys — a control char or out-of-range
+# value must never reach hostapd via a bss= stanza (it would take the WHOLE
+# radio down, home AP included). Customer values win over the env seed.
+if [ -f "$CUSTOMER_AP_ENV" ]; then
+  cg_ssid="$(grep -m1 '^DROPLET_GUEST_SSID=' "$CUSTOMER_AP_ENV" 2>/dev/null | cut -d= -f2- | tr -d '\r\n')"
+  cg_psk="$(grep -m1 '^DROPLET_GUEST_PSK=' "$CUSTOMER_AP_ENV" 2>/dev/null | cut -d= -f2- | tr -d '\r\n')"
+  cg_en="$(grep -m1 '^DROPLET_GUEST_ENABLED=' "$CUSTOMER_AP_ENV" 2>/dev/null | cut -d= -f2- | tr -d '\r\n')"
+  case "$cg_ssid" in *[[:cntrl:]]*) cg_ssid="";; esac
+  case "$cg_psk"  in *[[:cntrl:]]*) cg_psk="";;  esac
+  [ -n "$cg_ssid" ] && GUEST_SSID="$cg_ssid"
+  [ -n "$cg_psk" ]  && GUEST_PSK="$cg_psk"
+  [ -n "$cg_en" ]   && GUEST_ENABLED="$cg_en"
+fi
+# Guest needs BOTH a valid SSID (1-32) and PSK (8-63); otherwise force-disable
+# so a half-written/partial guest config can never feed hostapd a bad BSS.
+if [ "${GUEST_ENABLED:-0}" = 1 ]; then
+  if [ -z "$GUEST_SSID" ] || [ "${#GUEST_SSID}" -gt 32 ] || \
+     [ -z "$GUEST_PSK" ] || [ "${#GUEST_PSK}" -lt 8 ] || [ "${#GUEST_PSK}" -gt 63 ]; then
+    echo "droplet-openwrt-attach: WARN: guest Wi-Fi enabled but SSID/PSK invalid or missing — guest network NOT brought up"
+    GUEST_ENABLED=0
+  fi
+fi
+# <<< customer_guest_creds
 
 # Which wireless phy to move into the container netns, and what interface name
 # it surfaces with. These are AUTO-DETECTED below (detect_ap_radio) so the
@@ -263,6 +308,12 @@ EOF
 detect_ap_radio
 # <<< detect_ap_radio (WARP-826)
 
+# Guest BSS surfaces as its own netdev derived from the AP iface (e.g.
+# wlp14s0_g) now that detect_ap_radio has filled AP_IFACE. The short "_g" suffix
+# keeps it <=15 chars (IFNAMSIZ). Empty AP_IFACE (no radio) yields a harmless
+# "_g" that the GUEST_ENABLED guards below never act on.
+[ -n "$GUEST_IFACE" ] || GUEST_IFACE="${AP_IFACE}_g"
+
 for i in $(seq 1 60); do
   state=$(docker inspect -f '{{.State.Running}}' droplet-openwrt 2>/dev/null)
   [ "$state" = "true" ] && break
@@ -303,6 +354,9 @@ docker exec -i \
   -e AP_SSID="$AP_SSID" -e AP_PSK="$AP_PSK" \
   -e AP_IFACE="$AP_IFACE" \
   -e AP_DOMAIN="$AP_DOMAIN" -e AP_HOSTNAME="$AP_HOSTNAME" \
+  -e GUEST_SSID="$GUEST_SSID" -e GUEST_PSK="$GUEST_PSK" \
+  -e GUEST_ENABLED="$GUEST_ENABLED" -e GUEST_IFACE="$GUEST_IFACE" \
+  -e GUEST_GW="$GUEST_GW" \
   -e OPENWRT_ROOT_PW="$OPENWRT_ROOT_PW" \
   droplet-openwrt sh -c '
   # Container network bootstrap (CONT_IP/CONT_GW/GATEWAY_IP/AP_* from env).
@@ -560,6 +614,93 @@ docker exec -i \
   ap_firewall_zone
   # <<< ap_firewall_zone (WARP-810)
 
+  # Guest Wi-Fi firewall zone — mirrors droplet_ap but DEFAULT-DENY on input
+  # (only DHCP/DNS are opened, via explicit rules) so guests reach the internet
+  # ONLY, never the router/dashboard. forward=REJECT on the zone keeps guests off
+  # the LAN; an explicit guest->lan(uplink) forwarding + a masq scoped to the
+  # guest subnet (192.168.30.0/24) give internet egress. Client-to-client
+  # isolation is enforced at hostapd (ap_isolate=1 on the guest BSS). Idempotent,
+  # upsert-able by stable section names, and tears the zone DOWN when guest is
+  # disabled. NB: NO APOSTROPHES in this block (single-quoted docker exec body).
+  # >>> guest_firewall_zone (guest Wi-Fi)
+  guest_firewall_zone() {
+    gif="${GUEST_IFACE:-wlp14s0_g}"
+    lansec=$(uci show firewall 2>/dev/null | grep "\.name=.lan." | head -1 | cut -d. -f2)
+
+    # Teardown when guest is off: delete every guest section, then reload.
+    if [ "${GUEST_ENABLED:-0}" != 1 ]; then
+      for s in droplet_guest droplet_guest_fwd droplet_guest_masq droplet_guest_dhcp droplet_guest_dns; do
+        uci -q delete "firewall.$s" 2>/dev/null
+      done
+      if uci -q commit firewall && /etc/init.d/firewall reload >/dev/null 2>&1; then
+        echo "droplet-openwrt-attach: guest firewall zone removed (guest Wi-Fi off)"
+      fi
+      return 0
+    fi
+
+    # --- guest zone (named, upsert-able) ---------------------------------
+    if ! uci -q get firewall.droplet_guest >/dev/null 2>&1; then
+      uci set firewall.droplet_guest=zone
+    fi
+    uci set firewall.droplet_guest.name=guest
+    # input=REJECT: guests get NO router services except the DHCP/DNS opened by
+    # the two rules below (the brief: input ACCEPT for DHCP/DNS only).
+    uci set firewall.droplet_guest.input=REJECT
+    uci set firewall.droplet_guest.output=ACCEPT
+    uci set firewall.droplet_guest.forward=REJECT
+    if ! uci -q get firewall.droplet_guest.device 2>/dev/null | grep -qw "$gif"; then
+      uci add_list "firewall.droplet_guest.device=$gif"
+    fi
+
+    # --- DHCP + DNS input rules (the only input guests may reach) ---------
+    if ! uci -q get firewall.droplet_guest_dhcp >/dev/null 2>&1; then
+      uci set firewall.droplet_guest_dhcp=rule
+    fi
+    uci set firewall.droplet_guest_dhcp.name=Allow-Guest-DHCP
+    uci set firewall.droplet_guest_dhcp.src=guest
+    uci set firewall.droplet_guest_dhcp.proto=udp
+    uci set firewall.droplet_guest_dhcp.dest_port=67-68
+    uci set firewall.droplet_guest_dhcp.target=ACCEPT
+
+    if ! uci -q get firewall.droplet_guest_dns >/dev/null 2>&1; then
+      uci set firewall.droplet_guest_dns=rule
+    fi
+    uci set firewall.droplet_guest_dns.name=Allow-Guest-DNS
+    uci set firewall.droplet_guest_dns.src=guest
+    uci set firewall.droplet_guest_dns.proto=tcpudp
+    uci set firewall.droplet_guest_dns.dest_port=53
+    uci set firewall.droplet_guest_dns.target=ACCEPT
+
+    # --- forwarding guest -> lan (uplink) + masq the guest subnet --------
+    if [ -n "$lansec" ]; then
+      lanname=$(uci -q get "firewall.$lansec.name" 2>/dev/null)
+      [ -n "$lanname" ] || lanname=lan
+      if ! uci -q get firewall.droplet_guest_fwd >/dev/null 2>&1; then
+        uci set firewall.droplet_guest_fwd=forwarding
+      fi
+      uci set firewall.droplet_guest_fwd.src=guest
+      uci set firewall.droplet_guest_fwd.dest="$lanname"
+
+      if ! uci -q get firewall.droplet_guest_masq >/dev/null 2>&1; then
+        uci set firewall.droplet_guest_masq=nat
+      fi
+      uci set firewall.droplet_guest_masq.name=droplet_guest_masq
+      uci set firewall.droplet_guest_masq.src=guest
+      uci set firewall.droplet_guest_masq.src_ip=192.168.30.0/24
+      uci set firewall.droplet_guest_masq.target=MASQUERADE
+    else
+      echo "droplet-openwrt-attach: WARN: no lan firewall zone found; guest zone left unrouted (guests get no internet)"
+    fi
+
+    if uci -q commit firewall && /etc/init.d/firewall reload >/dev/null 2>&1; then
+      echo "droplet-openwrt-attach: guest zone configured ($gif input=REJECT+DHCP/DNS, forward guest->${lanname:-lan}, masq 192.168.30.0/24, client-isolated)"
+    else
+      echo "droplet-openwrt-attach: WARN: firewall commit/reload failed; guest zone may not be active"
+    fi
+  }
+  guest_firewall_zone
+  # <<< guest_firewall_zone (guest Wi-Fi)
+
   # Phase L: set root password from $OPENWRT_ROOT_PW so the routing services
   # rpcd login works. Idempotent. WARP-834: stock OpenWrt ships root with an
   # EMPTY password hash, and rpcd accepts ANY password against an empty-hash
@@ -708,6 +849,19 @@ ETHWD
   nft list chain ip nat postrouting | grep -q "192.168.20.0/24" || \
     nft add rule ip nat postrouting ip saddr 192.168.20.0/24 oifname \"eth0\" masquerade
 
+  # Guest subnet masq — same egress NAT, scoped to 192.168.30.0/24. Flush any
+  # prior guest masq rule by handle first, then re-add ONLY when guest is on, so
+  # a teardown (guest disabled) drops the rule too. (The fw4 droplet_guest_masq
+  # is the UCI-managed equivalent; this raw rule is the single-box belt-and-
+  # braces, mirroring the AP masq above whose fw4 masq may not fire when the
+  # uplink is the docker veth eth0.)
+  for h in $(nft -a list chain ip nat postrouting 2>/dev/null | grep "192.168.30.0/24" | grep -oE "handle [0-9]+" | awk "{print \$2}"); do
+    nft delete rule ip nat postrouting handle $h
+  done
+  if [ "${GUEST_ENABLED:-0}" = 1 ]; then
+    nft add rule ip nat postrouting ip saddr 192.168.30.0/24 oifname \"eth0\" masquerade
+  fi
+
   # prerouting: DNAT $AP_IFACE:80/:443 -> gateway container so phones can hit
   # https://droplet.local/ (which resolves to 192.168.20.1) and land on nginx
   nft list chain ip nat prerouting >/dev/null 2>&1 || \
@@ -770,6 +924,28 @@ wpa_pairwise=CCMP
 rsn_pairwise=CCMP
 ieee80211w=1
 HOSTAPD
+
+  # Guest BSS — appended as a SECOND hostapd BSS on the SAME radio when guest
+  # Wi-Fi is enabled with valid creds. The "# >>> droplet guest bss" marker lets
+  # the start-failure fallback strip it (home AP only) so a guest misconfig or a
+  # multi-BSS-unsupported card never takes the household Wi-Fi down. ap_isolate=1
+  # isolates guest clients from each other; the guest firewall zone isolates them
+  # from the LAN. NB: NO APOSTROPHES (single-quoted docker exec body).
+  if [ "${GUEST_ENABLED:-0}" = 1 ] && [ -n "$GUEST_SSID" ]; then
+    cat >> /etc/hostapd.conf.new <<HOSTAPDGUEST
+# >>> droplet guest bss
+bss=$GUEST_IFACE
+ssid=$GUEST_SSID
+auth_algs=1
+wpa=2
+wpa_passphrase=$GUEST_PSK
+wpa_key_mgmt=WPA-PSK
+wpa_pairwise=CCMP
+rsn_pairwise=CCMP
+ieee80211w=1
+ap_isolate=1
+HOSTAPDGUEST
+  fi
 
   HOSTAPD_CHANGED=0
   if [ ! -f /etc/hostapd.conf ] || ! cmp -s /etc/hostapd.conf /etc/hostapd.conf.new; then
@@ -866,7 +1042,28 @@ DNSMASQ
   # Propagate a persistent hostapd failure to the oneshot unit (no `|| true`
   # masking): a dead AP that reported success is exactly the live .87 bug.
   if ! start_hostapd; then
-    exit 1
+    # If a guest BSS is configured, it may be why hostapd refused (a guest
+    # misconfig, or a card that does not support multiple BSSes). Strip the
+    # guest stanza (everything from its marker to EOF — it is always appended
+    # LAST) and retry with the HOME AP ONLY, so guest Wi-Fi can never take the
+    # household network down. Roll back the guest firewall zone + nft masq we
+    # staged earlier this run; the guest L3/dnsmasq block below then takes its
+    # teardown branch because GUEST_ENABLED is now cleared. A home-only failure
+    # still fails the unit.
+    if [ "${GUEST_ENABLED:-0}" = 1 ] && grep -q "^# >>> droplet guest bss" /etc/hostapd.conf 2>/dev/null; then
+      echo "droplet-openwrt-attach: WARN: hostapd refused WITH the guest BSS; retrying home AP only (guest Wi-Fi disabled this boot)" >&2
+      sed -i "/^# >>> droplet guest bss/,\$d" /etc/hostapd.conf
+      GUEST_ENABLED=0
+      guest_firewall_zone
+      for h in $(nft -a list chain ip nat postrouting 2>/dev/null | grep "192.168.30.0/24" | grep -oE "handle [0-9]+" | awk "{print \$2}"); do
+        nft delete rule ip nat postrouting handle $h
+      done
+      pgrep -f "hostapd -B" | xargs -r kill 2>/dev/null
+      sleep 1
+      start_hostapd || exit 1
+    else
+      exit 1
+    fi
   fi
 
   # --- hostapd watchdog --------------------------------------------------
@@ -907,6 +1104,54 @@ HOSTAPDWD
     sleep 1
   fi
   pgrep -f "dnsmasq -C /etc/dnsmasq-ap.conf" >/dev/null || dnsmasq -C /etc/dnsmasq-ap.conf
+
+  # --- Guest L3 + dnsmasq -----------------------------------------------
+  # Bring up the guest BSS netdev (hostapd created it from the bss= stanza), give
+  # it the guest gateway IP, and serve DHCP/DNS on the isolated guest subnet via
+  # a SECOND dnsmasq. The guest dnsmasq deliberately does NOT advertise the
+  # dashboard hostnames (guests reach the internet only, never droplet.local).
+  # Same CHANGED-gate as dnsmasq-ap so an unchanged config never bounces guest
+  # clients. When guest is off (or the home-AP fallback cleared it), tear the
+  # guest dnsmasq down. NB: NO APOSTROPHES (single-quoted docker exec body).
+  if [ "${GUEST_ENABLED:-0}" = 1 ]; then
+    ip link set "$GUEST_IFACE" up 2>/dev/null
+    ip addr show "$GUEST_IFACE" 2>/dev/null | grep -q "${GUEST_GW}" || \
+      ip addr add "${GUEST_GW}/24" dev "$GUEST_IFACE" 2>/dev/null
+
+    cat > /etc/dnsmasq-guest.conf.new <<DNSMASQGUEST
+interface=$GUEST_IFACE
+bind-interfaces
+dhcp-leasefile=/tmp/dhcp-guest.leases
+dhcp-range=192.168.30.10,192.168.30.100,255.255.255.0,12h
+dhcp-option=3,$GUEST_GW
+dhcp-option=6,$GUEST_GW
+server=8.8.8.8
+server=1.1.1.1
+no-resolv
+DNSMASQGUEST
+
+    GUEST_DNSMASQ_CHANGED=0
+    if [ ! -f /etc/dnsmasq-guest.conf ] || ! cmp -s /etc/dnsmasq-guest.conf /etc/dnsmasq-guest.conf.new; then
+      mv /etc/dnsmasq-guest.conf.new /etc/dnsmasq-guest.conf
+      GUEST_DNSMASQ_CHANGED=1
+    else
+      rm -f /etc/dnsmasq-guest.conf.new
+    fi
+    if [ "$GUEST_DNSMASQ_CHANGED" = 1 ]; then
+      pgrep -f "dnsmasq -C /etc/dnsmasq-guest.conf" | xargs -r kill 2>/dev/null
+      sleep 1
+    fi
+    if pgrep -f "dnsmasq -C /etc/dnsmasq-guest.conf" >/dev/null || dnsmasq -C /etc/dnsmasq-guest.conf; then
+      echo "droplet-openwrt-attach: guest Wi-Fi up (ssid set, subnet 192.168.30.0/24 on $GUEST_IFACE, isolated)"
+    else
+      echo "droplet-openwrt-attach: WARN: guest dnsmasq failed to start — guest clients will not get a lease" >&2
+    fi
+  else
+    # Guest off / fell back: stop the guest dnsmasq + drop its config.
+    pgrep -f "dnsmasq -C /etc/dnsmasq-guest.conf" | xargs -r kill 2>/dev/null
+    rm -f /etc/dnsmasq-guest.conf 2>/dev/null
+  fi
+  # ---------------------------------------------------------------------
 
   # Final pass — re-run bootstrap_net AFTER everything else in this docker
   # exec block has run. Procd / hostapd / dnsmasq init can race against
