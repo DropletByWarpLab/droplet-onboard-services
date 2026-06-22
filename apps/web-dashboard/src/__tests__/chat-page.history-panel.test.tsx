@@ -174,8 +174,9 @@ describe("/chat page mounts the history panel", () => {
     // loaded CI runners the model auto-select effect can lag the
     // FailureChip render. Wait for the selected (ollama) model to apply
     // — the "local \u00b7 on-device" tag renders only once it has.
-    await waitFor(() =>
-      expect(screen.getByText(/on-device/i)).toBeInTheDocument(),
+    await waitFor(
+      () => expect(screen.getByText(/on-device/i)).toBeInTheDocument(),
+      { timeout: 10000 },
     );
 
     // Click Try-again.
