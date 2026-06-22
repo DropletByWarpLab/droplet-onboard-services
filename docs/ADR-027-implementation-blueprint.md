@@ -3,7 +3,7 @@
 Developer-ready companion to ADR-027. Per workstream: backend files+signatures, Prisma + migration, frontend, infra, failing-tests-first, effort. All paths absolute under `C:/Users/stefa/OneDrive/Documents/GitHub/droplet-wt-files-sharepoint/`. Worktree note: this is branch `docs/adr-027-files-sharepoint-parity` @ `fcd706e6`, **not** a clean `origin/main` checkout — rebase before opening PRs.
 
 **Two corrections from adversarial verification are load-bearing — apply them verbatim:**
-1. **WS-3 IDOR identifier:** write *and* read the comment owner column with `req.user.id` (the local User UUID), never `getUser(req)` (which returns `req.user.username`). This is how `FileCitation` works on both sides (`llm.ts:748-759` write, `files.ts:217` read). Using `getUser(req)` for the owner column is a correctness bug.
+1. **WS-3 IDOR identifier:** write *and* read the comment owner column with `req.user.id` (the local User UUID), never `getUser(req)` (which returns `req.user.username`). See `files.ts:217` for the clean UUID-only read pattern to follow. (`llm.ts:748-759` has a legacy `?? username` fallback for service principals — do NOT copy it; WS-3 must write `req.user.id` only.) Using `getUser(req)` for the owner column is a correctness bug.
 2. **WS-1 self-exclusion:** `getUser(req)` returns the local username, not `nextcloudUsername`. Resolve the caller's own `nextcloudUsername` from the local `User` row (keyed on `req.user.id`) and compare case-insensitively.
 
 ---
