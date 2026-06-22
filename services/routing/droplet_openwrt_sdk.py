@@ -153,6 +153,33 @@ def interface_stub(present: bool) -> dict:
     }
 
 
+def parse_ai_acl_scopes(acl: dict) -> dict:
+    """Flatten the droplet-ai rpcd ACL into read/write scope chip strings.
+
+    The ACL (openwrt/files/usr/share/rpcd/acl.d/droplet-ai.json) groups grants
+    under ``droplet-ai.{read,write}.ubus`` as ``{object: [methods]}``. The
+    dashboard's scope chips are ``object.method`` strings (e.g. ``system.board``,
+    ``network.interface.*.status``), so flatten each object's methods into one
+    string per grant. Returns ``{"read": [...], "write": [...]}`` — empty lists on
+    a missing/empty ACL (so the card renders a calm empty state, never crashes).
+    """
+    out: dict[str, list[str]] = {"read": [], "write": []}
+    user = acl.get("droplet-ai", {}) if isinstance(acl, dict) else {}
+    for kind in ("read", "write"):
+        ubus = (user.get(kind, {}) or {}).get("ubus", {})
+        if not isinstance(ubus, dict):
+            continue
+        chips: list[str] = []
+        for obj, methods in ubus.items():
+            if isinstance(methods, list):
+                for method in methods:
+                    chips.append(f"{obj}.{method}")
+            else:
+                chips.append(str(obj))
+        out[kind] = chips
+    return out
+
+
 class UbusError(Exception):
     """Raised when a ubus call returns a non-zero status code."""
 
@@ -575,6 +602,104 @@ class NetworkApi:
                     raise
         return out
 
+    def list_all_interfaces(self) -> list[dict]:
+        """Enumerate ALL configured interfaces with live state + zone membership.
+
+        Unlike :meth:`get_all_interface_statuses` (a hardcoded lan/wan tuple),
+        this scans ``uci.get("network")`` for every interface section — the same
+        proven enumeration primitive `/network/vlans` uses — and joins:
+
+        * live status (``interface_status``) per section, degraded to an explicit
+          ``present: False`` stub when the section has no live ubus object (e.g.
+          a VLAN/wan that's configured but not registered on the single-box), so
+          the table renders an honest "not on this box" row rather than a fake
+          "down" one. ``TIMEOUT`` degrades to ``present: True, up: False``.
+        * the IPv4 ``address`` flattened to ``ip/mask`` (first address) from the
+          live status, or ``None``.
+        * ``zone`` membership read from the firewall zones' ``network`` lists, so
+          the Zone column is real (``None`` when no zone references the section)
+          rather than fabricated.
+
+        Read-only — it cannot cut connectivity.
+        """
+        config = self._r.uci.get("network")
+        rows: list[dict] = []
+        if not isinstance(config, dict):
+            return rows
+
+        # Build a section-name → zone-name index from the firewall zones once.
+        zone_by_network: dict[str, str] = {}
+        try:
+            zones = self._r.firewall.get_zones()
+            values = zones.get("values", {}) if isinstance(zones, dict) else {}
+            for zone in values.values():
+                if not isinstance(zone, dict):
+                    continue
+                zname = zone.get("name")
+                nets = zone.get("network")
+                if isinstance(nets, str):
+                    nets = nets.split()
+                if isinstance(nets, list) and zname:
+                    for n in nets:
+                        zone_by_network[n] = zname
+        except (UbusError, ConnectionLost):
+            # Zone join is best-effort; without it the Zone column is None, not
+            # fabricated.
+            zone_by_network = {}
+
+        for name, section in config.items():
+            if not isinstance(section, dict):
+                continue
+            # Only explicit `config interface` sections. Sections without a
+            # `.type` key (absent rather than "interface") could be bare device
+            # entries that happen to carry a `proto` field on some builds —
+            # including them causes spurious dashboard rows. Requiring `.type
+            # == "interface"` is the correct filter: every `config interface`
+            # block in UCI output carries that key.
+            if section.get(".type") != "interface":
+                continue
+            if name.startswith("@"):
+                continue
+
+            try:
+                status = self.interface_status(name)
+                present = True
+                up = bool(status.get("up", False))
+                addresses = status.get("ipv4-address") or []
+            except UbusError as exc:
+                if _ubus_object_absent(exc):
+                    status = {}
+                    present = False
+                    up = False
+                    addresses = []
+                elif exc.code == UBUS_STATUS_TIMEOUT:
+                    status = {}
+                    present = True
+                    up = False
+                    addresses = []
+                else:
+                    raise
+
+            address = None
+            if isinstance(addresses, list) and addresses:
+                first = addresses[0]
+                if isinstance(first, dict) and first.get("address") is not None:
+                    mask = first.get("mask")
+                    address = (
+                        f"{first['address']}/{mask}" if mask is not None else str(first["address"])
+                    )
+
+            rows.append({
+                "name": name,
+                "device": status.get("device") or section.get("device"),
+                "proto": status.get("proto") or section.get("proto"),
+                "address": address,
+                "zone": zone_by_network.get(name),
+                "up": up,
+                "present": present,
+            })
+        return rows
+
     def set_lan_ip(self, ipaddr: str, netmask: str = "255.255.255.0"):
         """Change the LAN IP address via UCI."""
         self._r.uci.set("network", "lan", {"ipaddr": ipaddr, "netmask": netmask})
@@ -910,6 +1035,39 @@ class DHCPApi:
             if fragment in lease.get("hostname", "").lower():
                 return lease
         return None
+
+    def get_lan_pool(self) -> dict:
+        """Read the LAN DHCP pool range + lease time from the `dhcp lan` section.
+
+        Returns ``{start, limit, leasetime}`` (each a string or ``None`` when the
+        section omits it — OpenWrt drops keys when a default applies, so an
+        absent value means "dnsmasq default", not "broken"). The `dhcp lan`
+        section is the LAN-pool config the camera-subnet route already proves the
+        write side of (`uci.set("dhcp", ...)`).
+        """
+        section = self._r.uci.get("dhcp", "lan")
+        if not isinstance(section, dict):
+            section = {}
+        return {
+            "start": section.get("start"),
+            "limit": section.get("limit"),
+            "leasetime": section.get("leasetime"),
+        }
+
+    def set_lan_pool(self, start: int, limit: int, leasetime: str):
+        """Reshape the LAN DHCP pool range + lease time.
+
+        Writes start/limit/leasetime onto the `dhcp lan` section and commits.
+        dnsmasq re-reads the pool on the dnsmasq restart the route issues (same
+        reload the static-lease route uses), so no reboot is needed. Tier 2 at
+        the orchestrator boundary — shrinking the pool can strand live clients.
+        """
+        self._r.uci.set("dhcp", "lan", {
+            "start": str(start),
+            "limit": str(limit),
+            "leasetime": leasetime,
+        })
+        self._r.uci.commit("dhcp")
 
     def add_static_lease(self, name: str, mac: str, ip: str, leasetime: str = "infinite"):
         """Add a static DHCP reservation."""
@@ -1247,6 +1405,81 @@ class SystemApi:
         """Change the system hostname."""
         self._r.uci.set("system", "@system[0]", {"hostname": hostname})
         self._r.uci.commit("system")
+
+    def set_ntp_enabled(self, enabled: bool):
+        """Enable/disable the in-container OpenWrt time daemon (sysntpd).
+
+        Governs the appliance's OpenWrt sysntpd (`system.ntp.enabled` /
+        `.enable_server`), NOT the host SBC hardware clock — callers/UI must say
+        so. Reversible, low-risk → Tier 1 at the orchestrator boundary.
+        """
+        flag = "1" if enabled else "0"
+        # Use the anonymous section key so the write targets the same section
+        # the sysntpd daemon reads. On builds that store NTP config as a named
+        # 'ntp' section this also works (anonymous-index and named-section
+        # both resolve when the section exists). Writing to a named 'ntp' key
+        # on an anonymous-section build creates a new, isolated section that
+        # the daemon never reads, making the toggle a silent no-op.
+        self._r.uci.set("system", "@timeserver[0]", {"enabled": flag, "enable_server": flag})
+        self._r.uci.commit("system")
+
+    def controls(self, ap_mode: str = "uci") -> dict:
+        """Read the editable system controls + honest gates for the box shape.
+
+        Returns ``{hostname, ntp_enabled, status_led, country}`` where:
+          * ``hostname`` — from board_info (live);
+          * ``ntp_enabled`` — the sysntpd `enabled` flag;
+          * ``status_led`` — ``{supported, enabled}``. The front-panel LEDs are
+            physical on the host SBC; the in-container OpenWrt has no
+            ``system.led`` ubus surface, so on the hostapd single-box shape there
+            is nothing to toggle → ``supported: False`` (honest gate, same shape
+            as the guest-wifi gate). A real OpenWrt radio host can light it up.
+          * ``country`` — ``{value, editable}``. On the single-box the AP is host
+            hostapd with a hardcoded country, and the in-container `wireless`
+            config has no live radio, so the country is read-only here
+            (``editable: False``) — the value still reflects what we can read.
+
+        ``ap_mode`` is the deployment discriminator (``"hostapd"`` = single-box).
+        """
+        gated = ap_mode == "hostapd"
+
+        try:
+            hostname = self.board_info().get("hostname")
+        except (UbusError, ConnectionLost):
+            hostname = None
+
+        ntp_enabled = False
+        # Try @timeserver[0] first (anonymous section, matches what set_ntp_enabled
+        # writes); fall back to the named 'ntp' key for legacy configs.
+        for _ntp_key in ("@timeserver[0]", "ntp"):
+            try:
+                res = self._r.uci.get("system", _ntp_key, "enabled")
+                val = res.get("value") if isinstance(res, dict) else res
+                ntp_enabled = str(val) in ("1", "true", "True")
+                break
+            except UbusError:
+                continue
+
+        country = None
+        try:
+            wireless = self._r.uci.get("wireless")
+            if isinstance(wireless, dict):
+                for section in wireless.values():
+                    if isinstance(section, dict) and section.get("country") is not None:
+                        country = section.get("country")
+                        break
+        except UbusError:
+            country = None
+
+        return {
+            "hostname": hostname,
+            "ntp_enabled": ntp_enabled,
+            # On a non-gated (real OpenWrt radio) host these could be live; the
+            # service layer flips supported/editable per deployment shape. Here
+            # we report the honest container-shape default.
+            "status_led": {"supported": not gated, "enabled": False},
+            "country": {"value": country, "editable": not gated},
+        }
 
     def set_timezone(self, zonename: str, timezone_string: str):
         """
@@ -1820,6 +2053,20 @@ class DropletRouter:
     @property
     def session_token(self) -> str:
         return self._session.ensure_valid()
+
+    def session_info(self) -> dict:
+        """Current ubus session state (pure read of held SessionManager state).
+
+        Surfaces ``{active, expires_at, username}`` for the AI-access scopes card.
+        ubus sessions are short-lived tokens minted ~hourly by SessionManager and
+        auto-refreshed — they already rotate themselves, which is why the
+        dashboard's 'Rotate token' action is honest-gated rather than wired.
+        """
+        return {
+            "active": self._session.token is not None,
+            "expires_at": self._session.expires_at,
+            "username": self._session.username,
+        }
 
     def _call(self, obj: str, method: str, args: Optional[dict] = None) -> Any:
         """Make an authenticated ubus call."""

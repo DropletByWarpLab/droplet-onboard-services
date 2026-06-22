@@ -21,6 +21,24 @@ export interface InterfaceStatus {
   data: Record<string, unknown>;
 }
 
+/**
+ * One row of the full interface enumeration (GET /network/interfaces/all).
+ * Distinct from NetworkInterfaces (the lan/wan overview): this enumerates every
+ * configured interface incl. VLANs + WireGuard. `present:false` means the
+ * section is configured but has no live ubus object on this box (render as an
+ * honest "not on this box" row, never a fake "down"). `zone`/`address` are null
+ * when not joinable/reported, never fabricated.
+ */
+export interface NetworkInterfaceRow {
+  name: string;
+  device: string | null;
+  proto: string | null;
+  address: string | null;
+  zone: string | null;
+  up: boolean;
+  present: boolean;
+}
+
 export interface NetworkInterfaces {
   lan: InterfaceStatus;
   wan: InterfaceStatus;
@@ -53,6 +71,26 @@ export interface WirelessRadio {
 
 export interface WirelessStatus {
   [radioName: string]: WirelessRadio;
+}
+
+/**
+ * Read-only host-radio detail from iwinfo (single-box: one combined hostapd
+ * radio). Every field is nullable — on the single-box the live UCI/wireless
+ * source is empty and iwinfo may not report every field, so the UI shows "not
+ * reported" rather than a fabricated value. `supported:false` + `hostRadio:true`
+ * is the honesty envelope for the single combined-radio shape (it can't be
+ * turned off independently); `broadcasting` is derived from the real iwinfo
+ * mode, never hardcoded.
+ */
+export interface RadioDetail {
+  supported: boolean;
+  hostRadio: boolean;
+  broadcasting: boolean;
+  channel: number | null;
+  htmode: string | null;
+  txpower: number | null;
+  country: string | null;
+  mode: string | null;
 }
 
 export interface WirelessScanResult {
@@ -172,6 +210,42 @@ export interface RouterResources {
 export interface RouterSystemInfo {
   board: RouterBoardInfo;
   resources: RouterResources;
+}
+
+/**
+ * Editable system controls + honest gates for the deployment shape.
+ *
+ * `hostname` + `ntp` are real, editable controls on the in-container OpenWrt.
+ * `statusLed` + `country` carry a `supported` / `editable` flag so the UI can
+ * render an honest "not available on this appliance" state where the single-box
+ * shape can't really drive them (no system.led ubus surface; host-hostapd
+ * country is pinned) — same posture as the guest-wifi/UPnP gates. The flags are
+ * authoritative from the orchestrator's DROPLET_AP_MODE, not the box read.
+ */
+export interface SystemControls {
+  hostname: string | null;
+  ntpEnabled: boolean;
+  statusLed: { supported: boolean; enabled: boolean };
+  country: { value: string | null; editable: boolean };
+}
+
+/**
+ * droplet-ai ubus RPC access (read-only). The read/write scope chips are parsed
+ * from the live on-box ACL (the routing service authenticates as droplet-ai).
+ * Rotate-token / Revoke are deliberately absent — they need a coordinated
+ * secret refresh that would self-lockout the Network tab, so the dashboard
+ * renders them as honest-gated (disabled) controls, not real writes.
+ */
+export interface AiNetworkAccess {
+  user: string;
+  endpoint: string;
+  readScopes: string[];
+  writeScopes: string[];
+  session: {
+    active: boolean;
+    expiresAt: number | null;
+    rotates: string;
+  };
 }
 
 export interface NetworkSummary {

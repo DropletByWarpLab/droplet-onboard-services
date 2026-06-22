@@ -144,6 +144,21 @@ class _MockSystem:
     def reboot(self) -> None:
         logger.info("mock: reboot requested — no-op")
 
+    def set_hostname(self, hostname: str) -> None:
+        logger.info("mock: set_hostname %s — no-op", hostname)
+
+    def set_ntp_enabled(self, enabled: bool) -> None:
+        logger.info("mock: set_ntp_enabled %s — no-op", enabled)
+
+    def controls(self, ap_mode: str = "uci") -> dict[str, Any]:
+        gated = ap_mode == "hostapd"
+        return {
+            "hostname": _BOARD_INFO["hostname"],
+            "ntp_enabled": True,
+            "status_led": {"supported": not gated, "enabled": False},
+            "country": {"value": "US", "editable": not gated},
+        }
+
 
 class _MockNetwork:
     def interface_status(self, name: str) -> dict[str, Any]:
@@ -155,6 +170,14 @@ class _MockNetwork:
 
     def get_all_interface_statuses(self) -> dict[str, Any]:
         return {"lan": _LAN_STATUS, "wan": _WAN_STATUS}
+
+    def list_all_interfaces(self) -> list[dict[str, Any]]:
+        return [
+            {"name": "lan", "device": "br-lan", "proto": "static",
+             "address": "10.0.0.1/24", "zone": "lan", "up": True, "present": True},
+            {"name": "wan", "device": "eth1", "proto": "dhcp",
+             "address": "192.168.1.87/24", "zone": "wan", "up": True, "present": True},
+        ]
 
     def interface_up(self, name: str) -> None:
         logger.info("mock: interface up %s — no-op", name)
@@ -205,6 +228,8 @@ class _MockDhcp:
         self._hostrecords = [
             {"section": "cfg01hostrecord", "hostname": "droplet-ai.lan", "ip": "10.0.0.1"},
         ]
+        # In-memory LAN pool so GET/POST /dhcp/pool round-trips on the dev stack.
+        self._lan_pool: dict[str, Any] = {"start": "100", "limit": "150", "leasetime": "12h"}
 
     def get_leases(self) -> dict[str, Any]:
         # Shape matches the real SDK response (wrap list in 'leases').
@@ -215,6 +240,19 @@ class _MockDhcp:
 
     def active_leases(self) -> list[dict[str, Any]]:
         return _DHCP_LEASES
+
+    def get_lan_pool(self) -> dict[str, Any]:
+        return dict(self._lan_pool)
+
+    def set_lan_pool(self, start: int, limit: int, leasetime: str) -> None:
+        self._lan_pool = {
+            "start": str(start),
+            "limit": str(limit),
+            "leasetime": leasetime,
+        }
+        logger.info(
+            "mock: set_lan_pool start=%s limit=%s leasetime=%s", start, limit, leasetime
+        )
 
     def add_static_lease(self, name: str, mac: str, ip: str, leasetime: str = "infinite") -> None:
         logger.info("mock: add_static_lease name=%s mac=%s ip=%s — no-op", name, mac, ip)
@@ -514,6 +552,15 @@ class _MockUci:
         return {"values": {}}
 
 
+class _MockFile:
+    def read(self, path: str) -> str:
+        # The dev stack has no on-box ACL file — raise so /ai-access falls back
+        # to its bundled canonical ACL (the real shipping scopes).
+        from droplet_openwrt_sdk import UbusError
+
+        raise UbusError(-1, f"mock: no file at {path}")
+
+
 class MockRouter:
     """Drop-in replacement for `DropletRouter` when ROUTING_MODE=mock.
 
@@ -531,6 +578,12 @@ class MockRouter:
         self.uci = _MockUci()
         self.vpn = _MockVpn()
         self.ap = _MockAp()  # WARP-446
+        self.file = _MockFile()
+
+    def session_info(self) -> dict[str, Any]:
+        # The mock has no real ubus session; report a stable active fixture so
+        # the AI-access scopes card renders on the dev stack.
+        return {"active": True, "expires_at": 0.0, "username": "droplet-ai"}
 
     def disconnect(self) -> None:
         pass
