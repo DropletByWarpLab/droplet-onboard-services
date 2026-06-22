@@ -6,9 +6,8 @@ Scripts and units that run **on the device host** (not inside a container).
 
 | Script | Purpose |
 |--------|---------|
-| `device-backup.sh` | Full-device backup: `pg_dump` of both Postgres instances (`db` + `postgres-pm`) plus tar snapshots of every data volume → one timestamped `*.tar.gz` |
+| `device-backup.sh` | Full-device backup: `pg_dump` of the orchestrator Postgres (`db`) plus tar snapshots of every data volume → one timestamped `*.tar.gz` |
 | `device-restore.sh` | Restore a `device-backup-*.tar.gz` into the live stack (DESTRUCTIVE; confirm-gated, `--force` to skip) |
-| `pm-backup.sh` / `pm-restore.sh` | Older Plane-PM-only backup (WARP-514). `device-backup.sh` supersedes it for whole-device DR; pm-backup remains for PM-scoped pilot snapshots |
 
 ```bash
 # Back up everything (default /var/lib/droplet/backups, archive chmod 600)
@@ -21,22 +20,20 @@ BACKUP_KEEP=14 ./scripts/host/device-backup.sh
 ./scripts/host/device-restore.sh [--force] <device-backup-*.tar.gz>
 ```
 
-**Captured surfaces:** orchestrator Postgres (`db`), Plane Postgres
-(`postgres-pm`), and the `nextcloud-data`, `aikeys`, `matter-data`,
-`brain-memory-data`, `nvrdata` (NVR recordings), and `ops-audit` (WARP-337
-audit trail) volumes. These are the real top-level volumes in
-`docker/docker-compose.yml`; the backup script's `DATA_VOLUMES` list is kept in
-lock-step with `factory-reset.sh`'s wipe list, and a static test asserts every
-captured name is a genuine compose volume (a wrong name would otherwise
-auto-create an empty volume and silently back up nothing).
+**Captured surfaces:** orchestrator Postgres (`db`) and the `nextcloud-data`,
+`aikeys`, `matter-data`, `brain-memory-data`, `nvrdata` (NVR recordings), and
+`ops-audit` (WARP-337 audit trail) volumes. These are the real top-level
+volumes in `docker/docker-compose.yml`; the backup script's `DATA_VOLUMES` list
+is kept in lock-step with `factory-reset.sh`'s wipe list, and a static test
+asserts every captured name is a genuine compose volume (a wrong name would
+otherwise auto-create an empty volume and silently back up nothing).
 
-**Not captured (rebuilt on reinstall):** the Postgres data volumes themselves
-(`pgdata`, `postgres-pm-data` — captured transactionally via `pg_dump`
-instead), plus pure caches / rebuildable state: `redis-pm-data`,
-`frigate-config`, `rag-eval-data`, the whisper/piper/ollama model caches, and
-`openwrt-config`/`openwrt-overlay`. The backup manifest's `excluded` array is
-the machine-readable record, and `factory-reset.sh` prints the same list before
-it wipes.
+**Not captured (rebuilt on reinstall):** the Postgres data volume itself
+(`pgdata` — captured transactionally via `pg_dump` instead), plus pure caches /
+rebuildable state: `frigate-config`, `rag-eval-data`, the whisper/piper/ollama
+model caches, and `openwrt-config`/`openwrt-overlay`. The backup manifest's
+`excluded` array is the machine-readable record, and `factory-reset.sh` prints
+the same list before it wipes.
 
 **Integrity:** every dump is verified with `gzip -t` at backup time and a
 sha256 of each artifact is recorded in `manifest.json`. `device-restore.sh`

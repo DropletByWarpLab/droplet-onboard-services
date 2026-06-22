@@ -92,7 +92,7 @@ FROM node:20-bookworm-slim
 #
 # Why major 16 specifically: pg_dump refuses to dump a server NEWER than
 # itself, so the client major must be >= every Postgres server it touches.
-# Deployed servers (`db`, `postgres-pm`) are postgres:15; the integration-test
+# The deployed server (`db`) is postgres:15; the integration-test
 # server (tests/docker-compose.test.yml) is postgres:16. Client 16 covers both
 # (16 >= 16 >= 15). If any server major is raised, bump this pin in lockstep.
 #

@@ -31,11 +31,7 @@ import {
 import { createSetupRouter } from "./routes/setup.js";
 import { createScimRouter } from "./routes/scim.js";
 import { createMatterRouter } from "./routes/matter.js";
-import { createPmWebhookRouter } from "./routes/pm-webhook.js";
-import { createPmOnboardRouter } from "./routes/pm-onboard.js";
-import { createPmProxyRouter } from "./routes/pm-proxy.js";
 import { createPmMobileRouter } from "./routes/mobile/pm.js";
-import { createPmRouter } from "./routes/pm.js";
 import { createPmNativeRouter } from "./routes/pm/native.js";
 import { createScenesRouter, type MatterDispatcher } from "./routes/scenes.js";
 import { sendMatterCommand } from "./services/matter.service.js";
@@ -130,17 +126,6 @@ export function createApp(
   app.use(cookieParser());
   app.use(requestLogger);
 
-  // WARP-566 — Plane webhook HMAC must be verified over the EXACT bytes
-  // Plane signed, not a re-serialized JSON representation. Capture the raw
-  // body as a Buffer for the webhook path ONLY, mounted BEFORE the global
-  // express.json() so req.body stays a Buffer on that one route while every
-  // other route gets parsed JSON. `type: () => true` accepts any
-  // Content-Type (incl. charset suffixes) so the raw capture never misses.
-  app.use(
-    "/api/pm/webhook",
-    express.raw({ type: () => true, limit: "1mb" }),
-  );
-
   // Parse `application/json` AND `application/scim+json` (Okta's SCIM client
   // sends the latter for /scim/v2/* — without it, req.body would arrive empty
   // and every SCIM create/update would 400). The explicit `type` list keeps
@@ -184,24 +169,6 @@ export function createApp(
   // session; the HMAC-signed token in ?t=... is the authorization. Mounted
   // BEFORE auth middleware so forwarded links work without a Droplet account.
   app.use("/api", createCameraSharePublicRouter());
-
-  // WARP-511 — Plane → orchestrator webhook receiver. Plane has no
-  // dashboard session; HMAC-SHA256 signature over the timestamp + body is
-  // the only auth. Fail-CLOSED on any mismatch. Mounted BEFORE authMiddleware.
-  app.use(createPmWebhookRouter());
-
-  // WARP-505 — Plane OIDC IdP. Five endpoints under /api/pm/oidc/*:
-  //   - .well-known/openid-configuration + jwks.json (public discovery)
-  //   - authorize (verifies the dashboard `droplet_session` cookie INLINE
-  //     via jwt.service.ts — does NOT want authMiddleware to short-circuit
-  //     it with a 401 before the OIDC redirect chain can run)
-  //   - token (Plane → orchestrator server-to-server; client_secret auth)
-  //   - userinfo (validates its own RS256 access token, NOT the session
-  //     cookie)
-  // Every endpoint handles its own auth shape, so the router mounts
-  // BEFORE authMiddleware — matches the webhook + camera-share pattern
-  // above. Stefan flagged this explicitly in the PR redesign comment.
-  app.use(createPmRouter());
 
   // WARP-229: FIPS status endpoint. Mounted BEFORE auth middleware so a
   // stuck-auth incident doesn't hide the FIPS state from the operator.
@@ -261,14 +228,9 @@ export function createApp(
   app.use("/api", createSystemResetRouter(prisma));
   app.use("/api", createMatterRouter(prisma));
   // ADR-026 — native PM (projects, work-items, states, labels, comments).
-  // Mounted BEFORE the legacy Plane proxy so the native GET /api/pm/workspaces
-  // supersedes it; the embedded Plane surface is removed in P6.
+  // The Droplet-owned project-management surface: state in the orchestrator's
+  // own Postgres, dashboard session is the auth, no embedded third-party stack.
   app.use("/api", createPmNativeRouter(prisma));
-  // WARP-507 — Plane onboarding endpoint for the setup wizard.
-  app.use(createPmOnboardRouter());
-  // WARP-867 — Plane service-token mint + app-API proxies (workspace
-  // list, search) for the v1 surfaces Plane CE doesn't provide.
-  app.use(createPmProxyRouter());
   // ADR-026 — read-only mobile wrappers over the native PM service
   // (workspaces, projects, work-items). iOS/Android/Windows consume.
   app.use(createPmMobileRouter(prisma));

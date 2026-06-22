@@ -98,7 +98,7 @@ import emailSummarizeThread from "./handlers/email/summarize-thread.js";
 import emailDraftReply from "./handlers/email/draft-reply.js";
 import emailSend from "./handlers/email/send.js";
 
-// Embedded Plane PM stack (ADR-010, spec WARP-498)
+// Native PM module (ADR-026) — tools dispatch through the orchestrator
 // WARP-509 — write tools
 import pmCreateWorkItem from "./handlers/pm/create-work-item.js";
 import pmUpdateWorkItem from "./handlers/pm/update-work-item.js";
@@ -199,12 +199,12 @@ const allTools: Tool[] = [
   // WARP-461: durable memory facts
   memoryRecall,
   memoryExtractFact,
-  // WARP-509: embedded Plane PM (write tools — requiresWrite + requiresConfirmation)
+  // WARP-509: native PM (write tools — requiresWrite + requiresConfirmation)
   pmCreateWorkItem,
   pmUpdateWorkItem,
   pmAddWorkItemComment,
   pmTransitionWorkItem,
-  // WARP-508: embedded Plane PM (read tools — list/get/search)
+  // WARP-508: native PM (read tools — list/get/search)
   pmListWorkspaces,
   pmListProjects,
   pmListWorkItems,
