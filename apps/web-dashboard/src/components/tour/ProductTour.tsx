@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
+import useSWR from "swr";
 import { motion, useReducedMotion } from "framer-motion";
 import {
   ArrowLeft,
@@ -9,6 +10,7 @@ import {
   Camera,
   Check,
   Cpu,
+  File as FileIcon,
   Folder,
   FolderOpen,
   Globe,
@@ -23,7 +25,17 @@ import {
   User,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
-import { fetchVpnStatus } from "@/lib/api";
+import {
+  fetchCameras,
+  fetchModelsPage,
+  fetchRecents,
+  fetchSystemHealth,
+  fetchVpnStatus,
+  getCameraSnapshotUrl,
+  type SystemHealthStatus,
+} from "@/lib/api";
+import type { FileEntryInfo } from "@/lib/types";
+import { formatBytes } from "@/lib/format-bytes";
 import { DropletMark } from "@/components/DropletMark";
 
 /**
@@ -65,15 +77,39 @@ export interface TourStep {
   kicker: string;
   title: string;
   body: string;
-  /** Illustrative motif rendered under the copy. */
-  motif: () => ReactNode;
+  /** Illustrative motif rendered under the copy, bound to live box data. */
+  motif: (live: TourLiveData) => ReactNode;
 }
 
-// ── Beat motifs ────────────────────────────────────────────────────
-// Static, illustrative recaps that make each privacy beat land visually.
-// Token-only; no fixtures, no live data — this is a celebratory recap.
+// ── Live box data ───────────────────────────────────────────────────
+// The motifs bind to what the owner just configured rather than to fixtures.
+// Every field is best-effort: `null` means "not loaded / box unreachable", and
+// each motif renders an HONEST fallback (an empty state or a generic label)
+// rather than a fabricated value. Fetched once in ProductTour and passed down.
 
-function MotifRecap() {
+export interface TourLiveData {
+  /** Orchestrator health → the recap status word. null until loaded. */
+  health: SystemHealthStatus | null;
+  /** Most-recent files (already trimmed to a few). null = not loaded; [] = none yet. */
+  files: FileEntryInfo[] | null;
+  /** Name of the on-device model, e.g. "qwen2.5:7b". null = none/unknown. */
+  modelName: string | null;
+  /** Configured cameras (already trimmed). null = not loaded; [] = none yet. */
+  cameras: { name: string; label: string; live: boolean }[] | null;
+}
+
+const EMPTY_LIVE: TourLiveData = {
+  health: null,
+  files: null,
+  modelName: null,
+  cameras: null,
+};
+
+// ── Beat motifs ────────────────────────────────────────────────────
+// Token-only, live-data illustrative recaps that make each privacy beat land
+// visually. Each takes its slice of TourLiveData and degrades gracefully.
+
+function MotifRecap({ health }: { health: SystemHealthStatus | null }) {
   const pills: [typeof User, string][] = [
     [User, "Account"],
     [Wifi, "Wi-Fi"],
@@ -84,6 +120,16 @@ function MotifRecap() {
     [ShieldCheck, "Remote access"],
     [Sparkles, "Private AI"],
   ];
+  // Honest liveness word from the orchestrator; omitted entirely when unknown
+  // (never a green "online" claim we can't back).
+  const status =
+    health === "ok"
+      ? { label: "online", cls: "text-system-green" }
+      : health === "degraded"
+        ? { label: "degraded", cls: "text-system-orange" }
+        : health === "down"
+          ? { label: "offline", cls: "text-system-red" }
+          : null;
   return (
     <div className="w-full rounded-[14px] border border-separator bg-surface-secondary p-4">
       <div className="mb-3 flex items-center gap-2">
@@ -94,7 +140,13 @@ function MotifRecap() {
           Everything configured
         </span>
         <span className="type-caption-2 ml-auto text-label-tertiary">
-          droplet-rack-1 · online
+          This Droplet
+          {status ? (
+            <>
+              {" · "}
+              <span className={status.cls}>{status.label}</span>
+            </>
+          ) : null}
         </span>
       </div>
       <div className="flex flex-wrap gap-2">
@@ -113,12 +165,8 @@ function MotifRecap() {
   );
 }
 
-function MotifFiles() {
-  const rows: [string, string][] = [
-    ["Wedding Photos", "482 GB"],
-    ["Camera Footage", "1.2 TB"],
-    ["Client Backups", "96 GB"],
-  ];
+function MotifFiles({ files }: { files: FileEntryInfo[] | null }) {
+  const rows = (files ?? []).slice(0, 3);
   return (
     <div className="w-full overflow-hidden rounded-[14px] border border-separator bg-surface-primary text-left">
       <div className="flex items-center gap-2 border-b border-separator bg-surface-secondary px-3.5 py-2.5">
@@ -130,27 +178,39 @@ function MotifFiles() {
           local
         </span>
       </div>
-      {rows.map(([name, size], i) => (
-        <div
-          key={name}
-          className={`flex items-center gap-3 px-3.5 py-2.5 ${
-            i ? "border-t border-separator" : ""
-          }`}
-        >
-          <Folder size={16} className="text-accent" aria-hidden="true" />
-          <span className="flex-1 type-footnote font-semibold text-label-primary">
-            {name}
-          </span>
-          <span className="type-caption-1 font-mono text-label-tertiary">
-            {size}
-          </span>
+      {rows.length === 0 ? (
+        <div className="px-3.5 py-4 type-footnote text-label-tertiary">
+          {files === null
+            ? "Your files will appear here."
+            : "No files yet — add some from the Files page."}
         </div>
-      ))}
+      ) : (
+        rows.map((f, i) => (
+          <div
+            key={f.path}
+            className={`flex items-center gap-3 px-3.5 py-2.5 ${
+              i ? "border-t border-separator" : ""
+            }`}
+          >
+            {f.isDirectory ? (
+              <Folder size={16} className="text-accent" aria-hidden="true" />
+            ) : (
+              <FileIcon size={16} className="text-accent" aria-hidden="true" />
+            )}
+            <span className="flex-1 truncate type-footnote font-semibold text-label-primary">
+              {f.name}
+            </span>
+            <span className="type-caption-1 font-mono text-label-tertiary">
+              {f.isDirectory ? "Folder" : formatBytes(f.size)}
+            </span>
+          </div>
+        ))
+      )}
     </div>
   );
 }
 
-function MotifAi() {
+function MotifAi({ modelName }: { modelName: string | null }) {
   return (
     <div className="flex w-full flex-col gap-2.5 rounded-[14px] border border-separator bg-surface-secondary p-4 text-left">
       <div className="max-w-[78%] self-end rounded-[12px_12px_4px_12px] bg-accent px-3.5 py-2 type-footnote text-on-accent">
@@ -160,7 +220,7 @@ function MotifAi() {
         <div className="mb-1 flex items-center gap-1.5">
           <Sparkles size={12} className="text-accent" aria-hidden="true" />
           <span className="type-caption-2 font-bold text-label-secondary">
-            On-device model
+            {modelName ?? "On-device model"}
           </span>
           <span className="ml-auto inline-flex items-center gap-1 rounded-full bg-system-green/15 px-1.5 py-0.5 type-caption-2 font-semibold text-system-green">
             on-device
@@ -175,31 +235,79 @@ function MotifAi() {
   );
 }
 
-function MotifCameras() {
+function MotifCameras({
+  cameras,
+}: {
+  cameras: { name: string; label: string; live: boolean }[] | null;
+}) {
+  const tiles = (cameras ?? []).slice(0, 2);
+  if (tiles.length === 0) {
+    // Distinguish loading from empty (TourLiveData contract: `null` = not loaded,
+    // `[]` = none yet). Without this, a box WITH cameras flashes the empty state
+    // for the first second while fetchCameras is still in flight.
+    if (cameras === null) {
+      return (
+        <div className="flex w-full flex-col items-center justify-center gap-1.5 rounded-[12px] border border-dashed border-separator bg-surface-secondary px-4 py-6 text-center">
+          <Camera
+            size={26}
+            className="animate-pulse text-label-quaternary"
+            aria-hidden="true"
+          />
+          <span className="type-footnote font-semibold text-label-tertiary">
+            Loading cameras…
+          </span>
+        </div>
+      );
+    }
+    return (
+      <div className="flex w-full flex-col items-center justify-center gap-1.5 rounded-[12px] border border-dashed border-separator bg-surface-secondary px-4 py-6 text-center">
+        <Camera size={26} className="text-label-tertiary" aria-hidden="true" />
+        <span className="type-footnote font-semibold text-label-secondary">
+          No cameras yet
+        </span>
+        <span className="type-caption-1 text-label-tertiary">
+          Add one from the Cameras page — footage records here, never the cloud.
+        </span>
+      </div>
+    );
+  }
   return (
     <div className="grid w-full grid-cols-2 gap-3">
-      {["Front door", "Driveway"].map((label) => (
+      {tiles.map((cam) => (
         <div
-          key={label}
+          key={cam.name}
           className="relative h-[104px] overflow-hidden rounded-[12px] border border-separator bg-label-primary/90"
         >
+          {/* Placeholder glyph sits behind the live snapshot; if the snapshot
+              can't load (camera offline) the glyph remains. */}
           <span className="absolute inset-0 flex items-center justify-center text-white/15">
             <Camera size={34} aria-hidden="true" />
           </span>
-          <div className="absolute left-2.5 top-2.5 flex items-center gap-1.5">
-            <span
-              className="h-1.5 w-1.5 rounded-full bg-system-red"
-              aria-hidden="true"
-            />
-            <span className="type-caption-2 font-bold tracking-[0.08em] text-white">
-              REC
-            </span>
-          </div>
+          <img
+            src={getCameraSnapshotUrl(cam.name)}
+            alt=""
+            aria-hidden="true"
+            className="absolute inset-0 h-full w-full object-cover"
+            onError={(e) => {
+              e.currentTarget.style.display = "none";
+            }}
+          />
+          {cam.live && (
+            <div className="absolute left-2.5 top-2.5 flex items-center gap-1.5">
+              <span
+                className="h-1.5 w-1.5 rounded-full bg-system-red"
+                aria-hidden="true"
+              />
+              <span className="type-caption-2 font-bold tracking-[0.08em] text-white">
+                REC
+              </span>
+            </div>
+          )}
           <span className="absolute right-2.5 top-2.5 rounded bg-white/20 px-1.5 py-0.5 type-caption-2 font-bold tracking-[0.08em] text-white">
             LOCAL
           </span>
           <span className="absolute bottom-2 left-2.5 type-caption-1 font-semibold text-white">
-            {label}
+            {cam.label}
           </span>
         </div>
       ))}
@@ -280,7 +388,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     kicker: "You're all set",
     title: "Your Droplet is live",
     body: "Everything you just set up runs on this box, right here on your network. Take a minute to see what that actually means — files, AI, cameras, and remote access, all private by default.",
-    motif: () => <MotifRecap />,
+    motif: (live) => <MotifRecap health={live.health} />,
   },
   {
     key: "files",
@@ -288,7 +396,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     kicker: "Files",
     title: "Your files live here, not in the cloud",
     body: "When you upload a photo or document, it's stored on this Droplet's drives — no copies in someone else's data centre. If the Droplet is offline, the only thing affected is access. Your files don't disappear.",
-    motif: () => <MotifFiles />,
+    motif: (live) => <MotifFiles files={live.files} />,
   },
   {
     key: "ai",
@@ -296,7 +404,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     kicker: "Private AI",
     title: "The AI runs on your hardware",
     body: "The local models run on the GPU inside this box. Your questions, the model's answers, the whole conversation — none of it leaves the Droplet. Cloud models are an explicit opt-in with your own API key, never the default.",
-    motif: () => <MotifAi />,
+    motif: (live) => <MotifAi modelName={live.modelName} />,
   },
   {
     key: "cameras",
@@ -304,7 +412,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     kicker: "Cameras",
     title: "Your camera footage stays put",
     body: "Cameras record straight to the Droplet's NVR. Review footage, get motion alerts, grant remote access — but the video never streams out to a cloud service. You can isolate cameras on their own network from the Cameras page.",
-    motif: () => <MotifCameras />,
+    motif: (live) => <MotifCameras cameras={live.cameras} />,
   },
   {
     key: "remote",
@@ -312,7 +420,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     kicker: "Remote access",
     title: "Remote access is end-to-end encrypted",
     body: "Off your home Wi-Fi, your phone reaches the Droplet over WireGuard — a modern VPN whose keys you generated on the box itself. Add a device from the Remote Access page and scan one QR code to connect.",
-    motif: () => <MotifRemoteVpn />,
+    motif: (_live) => <MotifRemoteVpn />,
   },
 ];
 
@@ -333,7 +441,7 @@ function withFqdnRemoteStep(
           ...s,
           body:
             "Off your home Wi-Fi, your phone reaches the Droplet over WireGuard — a modern VPN whose keys you generated on the box itself. Add a device from the Remote Access page, scan one QR code, and you're on. You then open the same secure web address at home or away — a real certificate and a green padlock, with no “Not secure” warning and nothing to install on each device.",
-          motif: () => <MotifRemoteFqdn fqdn={fqdn} />,
+          motif: (_live) => <MotifRemoteFqdn fqdn={fqdn} />,
         }
       : s,
   );
@@ -384,6 +492,64 @@ export function ProductTour({ onComplete }: { onComplete?: () => void } = {}) {
     };
   }, []);
 
+  // Recap health rides the SAME SWR cache the shell status chip uses
+  // ("/api/orchestrator/health", 15s interval). Keying on the shared string
+  // dedupes the in-flight request instead of firing a duplicate fetch on every
+  // tour mount; the data shape into `live.health` is unchanged.
+  const { data: healthData } = useSWR<SystemHealthStatus | null>(
+    "/api/orchestrator/health",
+    () => fetchSystemHealth().then((h) => h?.status ?? null),
+    { refreshInterval: 15_000 },
+  );
+
+  // Live data for the files / AI / cameras motifs — what the owner just
+  // configured, not fixtures. All best-effort and independent: each source that
+  // resolves fills its beat; each that rejects leaves that beat's honest
+  // fallback. `allSettled` so one slow/dead endpoint never blocks the others.
+  // After the batch settles, files/cameras flip from `null` (loading) to `[]`
+  // (settled, none) — even on rejection — so motifs distinguish "loading" from
+  // "none yet" (TourLiveData contract) and never strand on a loading state.
+  const [live, setLive] = useState<TourLiveData>(EMPTY_LIVE);
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      const [filesR, modelsR, camsR] = await Promise.allSettled([
+        fetchRecents(3),
+        fetchModelsPage(),
+        fetchCameras(),
+      ]);
+      if (!alive) return;
+      // A resolved promise is not a trusted shape — a 200 with an unexpected
+      // body must degrade to the fallback, never crash the walkthrough.
+      const camsList =
+        camsR.status === "fulfilled" && Array.isArray(camsR.value)
+          ? camsR.value
+          : [];
+      setLive((prev) => ({
+        ...prev,
+        files:
+          filesR.status === "fulfilled" && Array.isArray(filesR.value)
+            ? filesR.value
+            : [],
+        modelName:
+          modelsR.status === "fulfilled"
+            ? (modelsR.value?.local?.[0]?.name ?? null)
+            : null,
+        cameras: camsList
+          .filter((c) => c.enabled)
+          .slice(0, 2)
+          .map((c) => ({
+            name: c.name,
+            label: c.displayName || c.name,
+            live: c.status === "recording" || c.status === "detecting",
+          })),
+      }));
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   // Persist the active step so a refresh resumes here.
   useEffect(() => {
     try {
@@ -392,6 +558,9 @@ export function ProductTour({ onComplete }: { onComplete?: () => void } = {}) {
       /* private mode — resume just falls back to step 1, acceptable */
     }
   }, [index]);
+
+  // Merge the SWR-sourced health into the batched live data passed to motifs.
+  const liveData: TourLiveData = { ...live, health: healthData ?? null };
 
   const steps = remoteFqdn ? withFqdnRemoteStep(TOUR_STEPS, remoteFqdn) : TOUR_STEPS;
   const isFirst = index === 0;
@@ -482,7 +651,7 @@ export function ProductTour({ onComplete }: { onComplete?: () => void } = {}) {
               {step.title}
             </h1>
             <p className="type-body text-label-secondary mb-6">{step.body}</p>
-            {step.motif()}
+            {step.motif(liveData)}
           </motion.div>
 
           <div className="mt-8 flex items-center justify-between gap-3">
