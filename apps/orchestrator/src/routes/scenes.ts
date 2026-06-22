@@ -564,7 +564,7 @@ export function createScenesRouter(
         const data: { enabled: boolean; nextFireAt?: Date } = {
           enabled: parsed.data.enabled,
         };
-        if (parsed.data.enabled) {
+        if (parsed.data.enabled && !existing.enabled) {
           const next = nextFireFromRrule(existing.rrule, new Date());
           if (next === null) {
             res.status(400).json({

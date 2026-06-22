@@ -121,8 +121,10 @@ export async function tickSceneSchedules(
         { err, sceneId: scene.id, scheduleId: schedule.id },
         "scheduled scene run threw (advancing anyway)",
       );
+      skipped += 1;
     }
-    await advanceOrDisable(prisma, schedule, now);
+    const didDisable = await advanceOrDisable(prisma, schedule, now);
+    if (didDisable) disabled += 1;
   }
 
   return { inspected: due.length, fired, skipped, disabled };
@@ -132,7 +134,7 @@ async function advanceOrDisable(
   prisma: PrismaClient,
   schedule: ScheduleRow,
   now: Date,
-): Promise<void> {
+): Promise<boolean> {
   const next = nextFireFromRrule(schedule.rrule, now);
   if (next === null) {
     // Malformed or unsupported rule. Disable + audit so an operator can
@@ -154,7 +156,7 @@ async function advanceOrDisable(
         rrule: schedule.rrule,
       },
     });
-    return;
+    return true;
   }
   // Set lastFiredAt + nextFireAt in one update (the fire just happened at
   // `now`; the next occurrence is `next`).
@@ -162,4 +164,5 @@ async function advanceOrDisable(
     where: { id: schedule.id },
     data: { lastFiredAt: now, nextFireAt: next },
   });
+  return false;
 }

@@ -78,6 +78,7 @@ function parseRrule(rule: string): ParsedRrule | null {
     }
     byDay = mapped;
   }
+  if (freqRaw === "WEEKLY" && byDay === null) return null;
   const byHour = parseInt0(params.BYHOUR, 0);
   const byMinute = parseInt0(params.BYMINUTE, 0);
   const bySecond = parseInt0(params.BYSECOND, 0);
@@ -116,7 +117,7 @@ export function nextFireFromRrule(
     // Strict ">" semantics: if today's BYHOUR:BYMINUTE has already
     // passed, advance INTERVAL days. interval=1 daily fires every day.
     const todayFire = buildAt(after, parsed, 0);
-    if (todayFire.getTime() > after.getTime()) return todayFire;
+    if (todayFire.getTime() > after.getTime() && parsed.interval === 1) return todayFire;
     return buildAt(after, parsed, parsed.interval);
   }
 
