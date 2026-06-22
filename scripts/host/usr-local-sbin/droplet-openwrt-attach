@@ -685,7 +685,7 @@ docker exec -i \
         uci set firewall.droplet_guest_masq=nat
       fi
       uci set firewall.droplet_guest_masq.name=droplet_guest_masq
-      uci set firewall.droplet_guest_masq.src="$lanname"
+      uci set firewall.droplet_guest_masq.src=guest
       uci set firewall.droplet_guest_masq.src_ip=192.168.30.0/24
       uci set firewall.droplet_guest_masq.target=MASQUERADE
     else

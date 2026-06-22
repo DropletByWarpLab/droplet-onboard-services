@@ -187,10 +187,10 @@ apply_restart() {
 # empty/disabled guest as "tear it all down" (BSS, subnet, dnsmasq, firewall).
 if [ "$ACTION" = "remove" ]; then
   write_env "0" "" ""
+  apply_restart
   printf '{"ok": true, "enabled": false, "removed": true, "restarted": %s, "dry_run": %s}\n' \
     "$([ -n "$DRY_RUN" ] && echo false || echo true)" \
     "$([ -n "$DRY_RUN" ] && echo true || echo false)"
-  apply_restart
   exit 0
 fi
 
@@ -218,11 +218,10 @@ if [ "$psk_len" -lt "$PSK_MIN" ] || [ "$psk_len" -gt "$PSK_MAX" ]; then
 fi
 
 write_env "1" "$SSID" "$PSK"
+apply_restart
 
 # Single-line JSON the bridge parses with json.loads. NEVER include the PSK.
 printf '{"ok": true, "enabled": true, "ssid": %s, "restarted": %s, "dry_run": %s}\n' \
   "$(SSID="$SSID" python3 -c 'import json,os;print(json.dumps(os.environ["SSID"]))')" \
   "$([ -n "$DRY_RUN" ] && echo false || echo true)" \
   "$([ -n "$DRY_RUN" ] && echo true || echo false)"
-
-apply_restart

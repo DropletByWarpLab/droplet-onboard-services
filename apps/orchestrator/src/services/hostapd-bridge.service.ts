@@ -361,11 +361,18 @@ export async function removeGuestWifi(): Promise<WriteResult> {
  */
 export async function guestStatusFromBridge(): Promise<GuestBridgeStatus> {
   const token = bridgeAuthToken();
+  if (!token) {
+    const err = new Error(
+      "Guest Wi-Fi status can't be read — the device-bridge auth token is not configured.",
+    );
+    (err as { code?: string }).code = "BRIDGE_AUTH_UNCONFIGURED";
+    throw err;
+  }
   let res: Response;
   try {
     res = await fetch(`${BRIDGE_URL}/openwrt/wifi/guest`, {
       signal: AbortSignal.timeout(3_000),
-      ...(token ? { headers: { "X-Droplet-Auth": token } } : {}),
+      headers: { "X-Droplet-Auth": token },
     });
   } catch (err) {
     if (isBridgeConnectionError(err) || isTimeoutOrAbort(err)) {

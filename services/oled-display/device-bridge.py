@@ -1930,7 +1930,7 @@ def _read_guest_env():
         pass
     ssid = vals.get("DROPLET_GUEST_SSID", "") or None
     psk = vals.get("DROPLET_GUEST_PSK", "") or None
-    enabled = vals.get("DROPLET_GUEST_ENABLED", "0") in ("1", "true", "True", "yes", "on")
+    enabled = vals.get("DROPLET_GUEST_ENABLED", "0") == "1"
     return {
         "configured": ssid is not None,
         "enabled": bool(ssid) and enabled,
@@ -1950,7 +1950,11 @@ def _read_guest_env():
 #
 # Cached like _use_hostapd_mode: the AP-BSS limit is a static hardware property,
 # and the `iw phy` read is a docker exec we don't want on every status poll.
+# Definitive hardware results (True/False) use the full 300 s TTL; a None result
+# (container/iw transiently unavailable) uses 30 s so a brief container restart
+# doesn't block writes on a capable radio for the full window.
 _GUEST_RADIO_TTL_S = 300.0
+_GUEST_RADIO_INFRA_TTL_S = 30.0
 _guest_radio_lock = threading.Lock()
 _guest_radio_cache = {"value": None, "at": 0.0}
 
@@ -2003,17 +2007,22 @@ def guest_radio_supported():
 
     Returns False whenever the capability can't be determined (container/iw
     unreachable) — we never claim a guest network the card may not be able to
-    broadcast. Recomputed at most every _GUEST_RADIO_TTL_S."""
+    broadcast. Definitive hardware results (True/False) are cached for the full
+    _GUEST_RADIO_TTL_S; a None result (infra transiently unavailable) uses the
+    shorter _GUEST_RADIO_INFRA_TTL_S so a brief container restart doesn't block
+    writes on a capable radio for the full window."""
     now = time.time()
     with _guest_radio_lock:
         cached = _guest_radio_cache["value"]
-        if cached is not None and (now - _guest_radio_cache["at"]) < _GUEST_RADIO_TTL_S:
-            return cached
+        age = now - _guest_radio_cache["at"]
+        ttl = _GUEST_RADIO_INFRA_TTL_S if cached is None else _GUEST_RADIO_TTL_S
+        if _guest_radio_cache["at"] > 0.0 and age < ttl:
+            return False if cached is None else cached
     value = _radio_supports_second_bss(_ap_phy_in_container())
     with _guest_radio_lock:
         _guest_radio_cache["value"] = value
         _guest_radio_cache["at"] = now
-    return value
+    return value if value is not None else False
 
 
 def run_set_guest_wifi(params):
@@ -2502,7 +2511,7 @@ class Handler(BaseHTTPRequestHandler):
                     })
                 ok, code, info = run_remove_guest_wifi()
                 if not ok:
-                    status = 409 if code == "busy" else 422
+                    status = 409 if code == "busy" else (500 if code == "exec_error" else 422)
                     return self._send(status, {"ok": False, "error": info})
                 return self._send(200, {"ok": True,
                                         **(info if isinstance(info, dict) else {"info": info})})
@@ -2651,10 +2660,11 @@ class Handler(BaseHTTPRequestHandler):
                 "psk": j.get("psk", ""),
             })
             if not ok:
-                # 409 ONLY for true lock contention (code == "busy"); a host-script
-                # validation refusal / exec failure is 422. Keyed on the machine
+                # 409 for lock contention (code == "busy"); 500 for infra failure
+                # (code == "exec_error" — host script unavailable, server-side);
+                # 422 for host-script validation refusal. Keyed on the machine
                 # `code`, never a substring of the message (WARP-834 finding 1).
-                status = 409 if code == "busy" else 422
+                status = 409 if code == "busy" else (500 if code == "exec_error" else 422)
                 return self._send(status, {"ok": False, "error": info})
             return self._send(200, {"ok": True,
                                     **(info if isinstance(info, dict) else {"info": info})})
