@@ -144,6 +144,41 @@ config rule 'cameras_ping'
     option target 'ACCEPT'
     option limit '5/sec'
 
+# --- Guest zone (isolated — internet only, no LAN/cameras, client-isolated) ---
+# Guest Wi-Fi clients reach the internet but NOTHING on the LAN or cameras.
+# input=REJECT (only DHCP/DNS are opened, via the two rules below); forward
+# REJECT; an explicit guest->wan forwarding gives internet via the wan zone's
+# masquerade. Client-to-client isolation is enforced on the guest wifi-iface
+# (option isolate '1', set by create_guest_network). Mirrors cameras_zone, but
+# egresses to wan (internet) rather than being reachable from lan.
+config zone 'guest_zone'
+    option name 'guest'
+    list network 'guest'
+    option input 'REJECT'
+    option output 'ACCEPT'
+    option forward 'REJECT'
+
+# Allow guests to reach the internet (NAT via the wan zone masquerade)
+config forwarding 'guest_to_wan'
+    option src 'guest'
+    option dest 'wan'
+
+# Allow guests to get DHCP from the router
+config rule 'guest_dhcp'
+    option name 'Allow-Guest-DHCP'
+    option src 'guest'
+    option proto 'udp'
+    option dest_port '67-68'
+    option target 'ACCEPT'
+
+# Allow guests to resolve DNS via the router
+config rule 'guest_dns'
+    option name 'Allow-Guest-DNS'
+    option src 'guest'
+    option proto 'tcpudp'
+    option dest_port '53'
+    option target 'ACCEPT'
+
 # --- Block WAN access to ubus API (IPv4) ---
 config rule
     option name 'Block-ubus-WAN-v4'
