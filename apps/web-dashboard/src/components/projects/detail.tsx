@@ -284,7 +284,7 @@ function DetailBody({ item, onChanged }: { item: PmWorkItem; onChanged: () => vo
                     {a.actorId ? person(a.actorId).name : "Droplet AI"}
                   </span>{" "}
                   {humanizeActivity(a.verb, a.field)}
-                  <span style={{ color: "var(--text-4)", marginLeft: 6 }}>{relTime(a.createdAt)}</span>
+                  <span style={{ color: "var(--text-4)", marginLeft: 6 }}>{formatRelativeTime(a.createdAt)}</span>
                 </div>
               </div>
             ))}
