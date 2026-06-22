@@ -491,7 +491,7 @@ export async function getSystemControls(): Promise<openwrt.SystemControls> {
     return {
       ...controls,
       statusLed: { supported: false, enabled: false },
-      country: { value: controls.country.value, editable: false },
+      country: { value: controls.country?.value ?? null, editable: false },
     };
   }
   return controls;

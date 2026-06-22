@@ -650,14 +650,15 @@ class NetworkApi:
         for name, section in config.items():
             if not isinstance(section, dict):
                 continue
-            # Only real `config interface` sections — skip globals/device/etc and
-            # anonymous (@…) sections the enumeration shouldn't surface as ifaces.
-            if section.get(".type") not in (None, "interface"):
+            # Only explicit `config interface` sections. Sections without a
+            # `.type` key (absent rather than "interface") could be bare device
+            # entries that happen to carry a `proto` field on some builds —
+            # including them causes spurious dashboard rows. Requiring `.type
+            # == "interface"` is the correct filter: every `config interface`
+            # block in UCI output carries that key.
+            if section.get(".type") != "interface":
                 continue
             if name.startswith("@"):
-                continue
-            if section.get(".type") is None and "proto" not in section:
-                # A bare section with no proto and no type isn't an interface.
                 continue
 
             try:
@@ -1413,7 +1414,13 @@ class SystemApi:
         so. Reversible, low-risk → Tier 1 at the orchestrator boundary.
         """
         flag = "1" if enabled else "0"
-        self._r.uci.set("system", "ntp", {"enabled": flag, "enable_server": flag})
+        # Use the anonymous section key so the write targets the same section
+        # the sysntpd daemon reads. On builds that store NTP config as a named
+        # 'ntp' section this also works (anonymous-index and named-section
+        # both resolve when the section exists). Writing to a named 'ntp' key
+        # on an anonymous-section build creates a new, isolated section that
+        # the daemon never reads, making the toggle a silent no-op.
+        self._r.uci.set("system", "@timeserver[0]", {"enabled": flag, "enable_server": flag})
         self._r.uci.commit("system")
 
     def controls(self, ap_mode: str = "uci") -> dict:
@@ -1442,12 +1449,16 @@ class SystemApi:
             hostname = None
 
         ntp_enabled = False
-        try:
-            res = self._r.uci.get("system", "ntp", "enabled")
-            val = res.get("value") if isinstance(res, dict) else res
-            ntp_enabled = str(val) in ("1", "true", "True")
-        except UbusError:
-            ntp_enabled = False
+        # Try @timeserver[0] first (anonymous section, matches what set_ntp_enabled
+        # writes); fall back to the named 'ntp' key for legacy configs.
+        for _ntp_key in ("@timeserver[0]", "ntp"):
+            try:
+                res = self._r.uci.get("system", _ntp_key, "enabled")
+                val = res.get("value") if isinstance(res, dict) else res
+                ntp_enabled = str(val) in ("1", "true", "True")
+                break
+            except UbusError:
+                continue
 
         country = None
         try:

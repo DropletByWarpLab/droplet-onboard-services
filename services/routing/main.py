@@ -772,10 +772,11 @@ def set_dhcp_pool(req: DhcpPoolRequest):
     try:
         r = get_router()
         r.dhcp.set_lan_pool(req.start, req.limit, req.leasetime)
-        # dnsmasq re-reads the pool on restart — same reload the static-lease
-        # route uses (the droplet-ai ACL denies file.exec, so this routes
-        # through the permitted service-control path in exec_service).
-        r.exec_service("dnsmasq", "restart")
+        # Use uci.apply (via _commit_and_reload_dhcp) — the droplet-ai ACL
+        # denies file.exec so exec_service("dnsmasq", "restart") raises
+        # PERMISSION_DENIED, commits the UCI change but leaves dnsmasq
+        # unsignaled. uci.apply is permitted and triggers the correct reload.
+        _commit_and_reload_dhcp(r)
         return {
             "status": "ok",
             "start": req.start,
@@ -1694,6 +1695,13 @@ def ai_access():
             pass
 
         scopes = parse_ai_acl_scopes(acl)
+        # Touch session_token to trigger ensure_valid() so the active flag in
+        # session_info() reflects reality even when file.read above failed
+        # before the session was established (e.g. cold-start PERMISSION_DENIED).
+        try:
+            _ = r.session_token
+        except (ConnectionLost, UbusError):
+            pass
         session = r.session_info()
         # The endpoint reflects the live connection target (the in-container
         # OpenWrt's /ubus), NOT the legacy multi-box 192.168.50.1.

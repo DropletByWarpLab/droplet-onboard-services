@@ -52,7 +52,11 @@ export function DhcpPoolForm() {
     if (!data) return;
     setStart(data.start ?? "100");
     setLimit(data.limit ?? "150");
-    if (data.leasetime && LEASE_OPTIONS.some((o) => o.value === data.leasetime)) {
+    // Always seed from the server value so a save never silently overwrites an
+    // unlisted leasetime (e.g. "2h", "30m") with the form default. If the
+    // value isn't in LEASE_OPTIONS the dropdown will show no selection,
+    // making the mismatch visible rather than transparent.
+    if (data.leasetime) {
       setLeasetime(data.leasetime);
     }
   }, [data]);

@@ -271,7 +271,9 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
 
   // Same RFC-1123 label grammar as the routing HostnameRequest schema, so a bad
   // hostname is rejected before a token is minted.
-  const HOSTNAME_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
+  // Multi-label pattern matching the routing service's _HOSTNAME_PATTERN so the
+  // orchestrator pre-validation rejects exactly what the routing layer rejects.
+  const HOSTNAME_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/;
 
   router.post(
     "/network/system/hostname",
