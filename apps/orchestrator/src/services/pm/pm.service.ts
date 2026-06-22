@@ -18,6 +18,20 @@
 
 import type { Prisma, PrismaClient } from "@prisma/client";
 
+// ── Stable error codes ────────────────────────────────────────────────────────
+// Shared so catch sites import the same string literals the throw sites emit;
+// a rename here produces a compile error on both sides.
+export const PM_ERRORS = {
+  WORKSPACE_NOT_FOUND: "workspace_not_found",
+  PROJECT_NOT_FOUND: "project_not_found",
+  STATE_NOT_FOUND: "state_not_found",
+  LABEL_NOT_FOUND: "label_not_found",
+  WORK_ITEM_NOT_FOUND: "work_item_not_found",
+  COMMENT_NOT_FOUND: "comment_not_found",
+  IDENTIFIER_TAKEN: "identifier_taken",
+  INVALID_PARENT: "invalid_parent",
+} as const;
+
 // ── Default workspace + state set ────────────────────────────────────────────
 
 export const HOME_WORKSPACE_SLUG = "home";

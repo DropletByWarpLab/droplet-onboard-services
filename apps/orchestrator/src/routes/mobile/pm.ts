@@ -24,6 +24,7 @@ import {
   listProjects,
   listWorkItems,
   getWorkItem,
+  PM_ERRORS,
   type ApiWorkItem,
 } from "../../services/pm/pm.service.js";
 import { requireRole } from "../../middleware/auth.js";
@@ -61,11 +62,11 @@ function projectWorkItem(w: ApiWorkItem): {
 function mapPmError(err: unknown, res: Response): Response | null {
   const msg = err instanceof Error ? err.message : "";
   switch (msg) {
-    case "workspace_not_found":
+    case PM_ERRORS.WORKSPACE_NOT_FOUND:
       return res.status(404).json({ error: "workspace not found", code: "PM_WORKSPACE_NOT_FOUND" });
-    case "project_not_found":
+    case PM_ERRORS.PROJECT_NOT_FOUND:
       return res.status(404).json({ error: "project not found", code: "PM_PROJECT_NOT_FOUND" });
-    case "work_item_not_found":
+    case PM_ERRORS.WORK_ITEM_NOT_FOUND:
       return res.status(404).json({ error: "work item not found", code: "PM_WORK_ITEM_NOT_FOUND" });
     default:
       return null;
