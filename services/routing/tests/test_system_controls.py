@@ -37,7 +37,7 @@ class TestSystemApiNtp:
         router = MagicMock()
         SystemApi(router).set_ntp_enabled(True)
         cfg, section, values = router.uci.set.call_args.args
-        assert cfg == "system" and section == "ntp"
+        assert cfg == "system" and section == "@timeserver[0]"
         assert values == {"enabled": "1", "enable_server": "1"}
         router.uci.commit.assert_called_with("system")
 
@@ -55,7 +55,7 @@ class TestSystemApiControls:
         router._call.return_value = {"hostname": "droplet-rack-01"}
 
         def uci_get(config, section=None, option=None, **kwargs):
-            if config == "system" and section == "ntp" and option == "enabled":
+            if config == "system" and section == "@timeserver[0]" and option == "enabled":
                 return {"value": "1"}
             if config == "wireless":
                 return {"radio0": {"country": "US"}}
@@ -77,7 +77,7 @@ class TestSystemApiControls:
         router._call.return_value = {"hostname": "h"}
 
         def uci_get(config, section=None, option=None, **kwargs):
-            if config == "system" and section == "ntp" and option == "enabled":
+            if config == "system" and section == "@timeserver[0]" and option == "enabled":
                 return {"value": "0"}
             return {}
 

@@ -753,7 +753,7 @@ def add_static_lease(req: StaticLeaseRequest):
     try:
         r = get_router()
         r.dhcp.add_static_lease(req.name, req.mac, req.ip, req.leasetime)
-        r.exec_service("dnsmasq", "restart")
+        _commit_and_reload_dhcp(r)
         return {"status": "ok", "name": req.name, "mac": req.mac, "ip": req.ip}
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)

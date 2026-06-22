@@ -74,7 +74,7 @@ export function AiAgentAccessCard() {
               Endpoint{" "}
               <span className="font-mono text-label-secondary">{data?.endpoint ?? "—"}</span>
             </p>
-            <p>Signs in as {data?.user ?? "droplet-ai"} · session rotates hourly</p>
+            <p>Signs in as {data?.user ?? "droplet-ai"} · session rotates {data?.session.rotates ?? "hourly"}</p>
           </div>
 
           {/* Honest gates — no real write. Disabled, with the "managed

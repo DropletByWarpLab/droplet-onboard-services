@@ -113,8 +113,9 @@ class TestDhcpPoolEndpoints:
         assert resp.status_code == 200, resp.text
         assert resp.json()["status"] == "ok"
         mock_router.dhcp.set_lan_pool.assert_called_once_with(120, 130, "24h")
-        # dnsmasq must re-read the pool — same reload the static-lease route uses.
-        mock_router.exec_service.assert_called_once_with("dnsmasq", "restart")
+        # dnsmasq must re-read the pool — uci.apply (via _commit_and_reload_dhcp)
+        # because the droplet-ai ACL denies file.exec / exec_service.
+        mock_router.uci.apply.assert_called_once_with(timeout=5, rollback=False)
 
     def test_post_422_on_bad_bounds(self, connected_client: TestClient, mock_router: MagicMock) -> None:
         resp = connected_client.post(

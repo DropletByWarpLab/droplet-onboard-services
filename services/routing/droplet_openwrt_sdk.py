@@ -1465,7 +1465,7 @@ class SystemApi:
             wireless = self._r.uci.get("wireless")
             if isinstance(wireless, dict):
                 for section in wireless.values():
-                    if isinstance(section, dict) and section.get("country"):
+                    if isinstance(section, dict) and section.get("country") is not None:
                         country = section.get("country")
                         break
         except UbusError:

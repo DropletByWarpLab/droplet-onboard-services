@@ -32,7 +32,7 @@ type HostnameStatus =
   | { kind: "saved" }
   | { kind: "error"; message: string };
 
-const HOSTNAME_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
+const HOSTNAME_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/;
 
 export function SystemControlsCard() {
   const { data, mutate } = useSWR<SystemControls>(
