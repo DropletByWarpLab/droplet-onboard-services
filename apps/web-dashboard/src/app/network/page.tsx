@@ -518,7 +518,6 @@ export default function NetworkPage() {
         tabIndex={0}
         hidden={activeTab !== "firewall"}
       >
-        {activeTab === "firewall" && <FirewallTab firewall={firewall} onApplied={refresh} />}
         {activeTab === "firewall" && (
           <FirewallTab firewall={firewall} canAuthor={canAuthor} onApplied={refresh} />
         )}
@@ -892,12 +891,6 @@ function WifiTab() {
 }
 
 // --- Firewall Tab ---
-function FirewallTab({
-  firewall,
-  onApplied,
-}: {
-  firewall: FirewallConfig | undefined;
-  onApplied?: () => void;
 // A zone's input/output/forward policy chip — green for ACCEPT, red for the
 // restrictive policies (REJECT/DROP). Mirrors the design's zone-policy chips
 // (advanced Network · Firewall zones) and reuses the same status colors as the

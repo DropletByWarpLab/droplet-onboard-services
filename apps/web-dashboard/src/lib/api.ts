@@ -1621,6 +1621,8 @@ export async function getNetworkTopology(): Promise<NetworkTopology | null> {
   } catch {
     return null;
   }
+}
+
 /** Read-only droplet-ai ubus RPC access. Scope chips reflect the live on-box
  *  ACL. Rotate/Revoke aren't here — they're honest-gated (disabled) in the UI. */
 export interface AiNetworkAccess {
