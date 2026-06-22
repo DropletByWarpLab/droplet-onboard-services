@@ -262,18 +262,46 @@ test_expired_leaf_restores_bootstrap() {
   local boot_crt_sha boot_key_sha
   boot_crt_sha="$(_sha "$crt.bootstrap")"; boot_key_sha="$(_sha "$key.bootstrap")"
 
-  # The INSTALLED cert is one that has already EXPIRED. openssl 3.x lets us pin
-  # notBefore/notAfter in the past via -not_before/-not_after, so we get a
-  # genuinely-expired leaf without clock games. (Self-signed is fine here — the
-  # expired+bootstrap restore path keys on expiry + a usable bootstrap, not on
-  # whether the expired cert was CA-signed.)
-  local past="19990101000000Z" past_end="19990102000000Z"
-  openssl req -x509 -nodes -newkey rsa:2048 \
-    -keyout "$key" -out "$crt" \
-    -subj "/CN=Droplet Edge Device" \
-    -addext "subjectAltName=$full_san" \
-    -not_before "$past" -not_after "$past_end" \
-    2>/dev/null
+  # The INSTALLED cert is one that has already EXPIRED. We can't mint one live
+  # here: `openssl req -x509 -not_before/-not_after` only exists in OpenSSL
+  # >= 3.2, and the CI runner (ubuntu-latest = Ubuntu 24.04) ships OpenSSL
+  # 3.0.13 — there those flags are rejected, no cert is written, and
+  # _generate_tls_cert then mints a FRESH self-signed cert (no installed cert to
+  # restore over), so the assertion below failed only on CI. `openssl req`/`x509`
+  # offer no other way to backdate notAfter on 3.0.x, so we freeze the bytes of a
+  # genuinely-expired SELF-SIGNED leaf (notBefore/notAfter pinned to 1999, issuer
+  # == subject) as a fixture. It is a public cert — no private key is embedded.
+  # (Self-signed is required here: it must NOT match _cert_is_public_ca_leaf, so
+  # the expired+bootstrap restore path is the one that fires.)
+  cat > "$crt" <<'EXPIRED_SELFSIGNED_CERT'
+-----BEGIN CERTIFICATE-----
+MIIDjjCCAnagAwIBAgIUJ+MiFDAKwfEVM8mcnrY5DruOJn8wDQYJKoZIhvcNAQEL
+BQAwHjEcMBoGA1UEAwwTRHJvcGxldCBFZGdlIERldmljZTAeFw05OTAxMDEwMDAw
+MDBaFw05OTAxMDIwMDAwMDBaMB4xHDAaBgNVBAMME0Ryb3BsZXQgRWRnZSBEZXZp
+Y2UwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCjoravziFWnkCYP2QI
+HxK0NA4V4kPKU5315DAxZk151P8GbnqNoLrl6XNP0MIy1p7PGdxTGK0sJCWoPkua
+eZwol30baGrSfG6/8qP2uiZvDIcWC/TOM1GGwB09V7v6DjJ4UMpFlMLDLoIuDwnc
+YG67KplGMQ4bUFJrgdm06KiDWZu051HifoZ6luiUf0hXxiPT7zo3Zo6kYmbRmMZu
+FXPsS1MlS8QUy4zbgb3+bAvqv1OMCcOvXLVMgbMenEw0IWqD8NM4cf5P3Md8xPZj
+0ZIrRTracGh8R13QsX+EN2BkHLMj8rCshwaCm4GklQGzaf0Afdf63MblMc/ZbeuM
+xd4bAgMBAAGjgcMwgcAwHQYDVR0OBBYEFPToxp41dwVP2GytIXOagCHnP1fZMB8G
+A1UdIwQYMBaAFPToxp41dwVP2GytIXOagCHnP1fZMA8GA1UdEwEB/wQFMAMBAf8w
+bQYDVR0RBGYwZIIJbG9jYWxob3N0ggdkcm9wbGV0gg1kcm9wbGV0LmxvY2Fsggtk
+cm9wbGV0LmxhboIKZHJvcGxldC1haYIQZHJvcGxldC1haS5sb2NhbIIOZHJvcGxl
+dC1haS5sYW6HBH8AAAEwDQYJKoZIhvcNAQELBQADggEBAC+plejnBZsu4F371VA8
+e5a4mYFeOt6rReF0csLNSp6eN0ldDve9dd86d055/KnyY7kI8Hppn450YhttM6WC
+4roxiTwc1TwF7PABOWfshArLOz2jYSYxWeZOOUwZ7Cc5mo09OM51132kxA+6UWvM
+fSe7+ORcA1xqBe6YHpRXSEL17ntaNXN5HSJnqL97grMlNDrgTWSvFS4lUdhxCFpd
+l+OF0oXHub7QmOJIavXVPmSrkMl01/pDw/YnneFNmPnRbuqtArcRGct1qcV3oVKC
+nWHa2H1P8p9YKZlpP54UDEmr9ZIpgW5Ulzlo1Qp3pTj5pEd8TJKKGTUVmA9ezUrY
+R0g=
+-----END CERTIFICATE-----
+EXPIRED_SELFSIGNED_CERT
+  # A key file must simply EXIST so _generate_tls_cert enters the existing-cert
+  # branch; the expired-restore path never reads the installed key (it overwrites
+  # it from the .bootstrap copy), so a non-PEM stub is deliberate — no private
+  # key material lives in the repo.
+  printf 'expired-fixture stub key — never read by the restore path\n' > "$key"
 
   # Sanity: the installed cert must actually be expired (checkend 0 fails).
   if openssl x509 -checkend 0 -noout -in "$crt" >/dev/null 2>&1; then
