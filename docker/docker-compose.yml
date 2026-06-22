@@ -879,6 +879,14 @@ services:
       - SWITCH_HOST=${SWITCH_HOST:-192.168.1.77}
       - SWITCH_PORT=${SWITCH_PORT:-443}
       - SWITCH_USERNAME=${SWITCH_USERNAME:-admin}
+      # ADR-018 T1: the managed-switch credential is read from the Docker secret
+      # file at /run/secrets/switch_password (mounted via the `secrets:` block
+      # below, written by scripts/setup.sh from the operator-supplied
+      # SWITCH_PASSWORD in .env). drivers._load_switch_password() resolves the
+      # file first, then this deprecated env var. Mirrors openwrt_password (WARP-37).
+      - SWITCH_PASSWORD_FILE=${SWITCH_PASSWORD_FILE:-/run/secrets/switch_password}
+      # Deprecated — env fallback kept for local dev / upgrades. Prefer the secret
+      # file above. Empty default → driver degrades to "disconnected" (non-fatal).
       - SWITCH_PASSWORD=${SWITCH_PASSWORD:-}
       - SWITCH_DRIVER=${SWITCH_DRIVER:-lantronix}
       # Dedicated orchestrator → switch bearer (same WARP-165 rationale as
@@ -912,6 +920,11 @@ services:
       # ADR-018 item 12: persist last_provisioned_at across container restarts.
       # provision_state.py writes to SWITCH_STATE_DIR (default /var/lib/droplet/switch).
       - switch-state:/var/lib/droplet/switch
+    secrets:
+      # ADR-018 T1: mounts at /run/secrets/switch_password (0600). Written by
+      # scripts/setup.sh from the operator-supplied SWITCH_PASSWORD in .env.
+      # No longer exposed via `docker inspect` once the operator sets it.
+      - switch_password
     profiles: ["full", "single-box"]
     restart: always
     <<: *default-logging
@@ -1882,6 +1895,14 @@ secrets:
   # in the routing container. Written by scripts/setup.sh from $OPENWRT_PASSWORD.
   openwrt_password:
     file: ../docker/secrets/openwrt_password
+  # ADR-018 T1: managed-switch (Lantronix) password mounted read-only at
+  # /run/secrets/switch_password in the switch container. The value is
+  # OPERATOR-SUPPLIED (the switch is not a device we mint secrets for) — setup.sh
+  # writes it from $SWITCH_PASSWORD in .env, never generated. The file is created
+  # (empty when unset) so this `file:` resolves and `docker compose up` works on
+  # boxes without a managed switch; an empty file → driver "disconnected".
+  switch_password:
+    file: ../docker/secrets/switch_password
 
 volumes:
   pgdata:

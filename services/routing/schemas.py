@@ -3,7 +3,7 @@
 import os
 import re
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing import Optional, Union
 
 
@@ -56,6 +56,10 @@ class CreateGuestNetworkRequest(BaseModel):
     network: str = Field(default="guest", description="Network name for the guest zone")
 
 
+class SetUpnpRequest(BaseModel):
+    enabled: bool = Field(..., description="Enable UPnP + NAT-PMP automatic port opening")
+
+
 class StaticLeaseRequest(BaseModel):
     name: str = Field(..., min_length=1, description="Friendly device name")
     mac: str = Field(..., pattern=r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$", description="MAC address")
@@ -65,6 +69,39 @@ class StaticLeaseRequest(BaseModel):
 
 class SetDnsRequest(BaseModel):
     servers: list[str] = Field(..., min_length=1, description="List of DNS server IPs")
+
+
+# dnsmasq lease-time grammar: a positive integer followed by a unit
+# (s/m/h/d/w — seconds/minutes/hours/days/weeks), or the literal `infinite`.
+# Mirrors what dnsmasq's `--dhcp-range` lease-time field accepts; a bad string
+# is silently ignored by dnsmasq, so we reject it at the boundary (a clean 422)
+# rather than write junk the box quietly drops.
+_LEASETIME_PATTERN = re.compile(r"^(infinite|\d+[smhdw])$")
+
+
+class DhcpPoolRequest(BaseModel):
+    """Reshape the LAN DHCP pool range + lease time (`dhcp lan` section).
+
+    `start`/`limit` bounds copy CameraSubnetSetupRequest's pool fields: start is
+    the first host octet handed out (2-254), limit is how many addresses the
+    pool spans (1-253). `leasetime` accepts dnsmasq formats only.
+    """
+
+    start: int = Field(..., ge=2, le=254, description="First host octet in the pool")
+    limit: int = Field(..., ge=1, le=253, description="Number of addresses in the pool")
+    leasetime: str = Field(
+        default="12h",
+        description="Lease duration: a dnsmasq value like '12h', '30m', or 'infinite'",
+    )
+
+    @field_validator("leasetime")
+    @classmethod
+    def _check_leasetime(cls, v: str) -> str:
+        if not _LEASETIME_PATTERN.match(v):
+            raise ValueError(
+                "leasetime must be a dnsmasq value like '12h', '30m', or 'infinite'"
+            )
+        return v
 
 
 # Hostname grammar: lowercase labels, up to 253 chars total, no trailing dot.
@@ -105,6 +142,26 @@ class DnsHostnameRequest(BaseModel):
     hostname: str = Field(..., min_length=1, max_length=253, pattern=_HOSTNAME_PATTERN,
                           description="Hostname to resolve (lowercase, e.g. 'droplet.lan')")
     ip: str = Field(..., pattern=_IPV4_PATTERN, description="IPv4 address the hostname should resolve to")
+
+
+class HostnameRequest(BaseModel):
+    """Change the system hostname (`system @system[0] hostname`).
+
+    Reuses the same RFC-1123 label grammar as DnsHostnameRequest. A hostname
+    change re-keys mDNS/.local + the dashboard status line, so the orchestrator
+    gates it Tier 2 (confirmable) — this schema just validates the shape.
+    """
+
+    hostname: str = Field(
+        ..., min_length=1, max_length=63, pattern=_HOSTNAME_PATTERN,
+        description="New hostname (lowercase RFC-1123 label, e.g. 'studio-droplet')",
+    )
+
+
+class NtpRequest(BaseModel):
+    """Toggle the in-container OpenWrt time daemon (sysntpd)."""
+
+    enabled: bool = Field(..., description="Enable the appliance's OpenWrt NTP daemon")
 
 
 class BlockDeviceRequest(BaseModel):
@@ -154,6 +211,74 @@ class PortForwardRequest(BaseModel):
         if v not in allowed:
             raise ValueError(f"proto must be one of {sorted(allowed)}")
         return v
+
+
+_FW_TARGETS = {"ACCEPT", "REJECT", "DROP"}
+
+
+class AddFirewallRuleRequest(BaseModel):
+    """A generic firewall traffic rule. `target` and `proto` are validated at the
+    boundary so a malformed value can never reach UCI + choke a firewall reload."""
+
+    name: str = Field(..., min_length=1, max_length=63, description="Rule name")
+    src: str = Field(..., min_length=1, max_length=32, description="Source zone")
+    dest: str = Field(..., min_length=1, max_length=32, description="Destination zone")
+    proto: str = Field(default="tcp", description="Protocol (tcp, udp, tcpudp)")
+    dest_port: Optional[str] = Field(
+        default=None, pattern=_PORT_OR_RANGE_PATTERN,
+        description="Destination port or 'lo-hi' range (1-65535)",
+    )
+    src_port: Optional[str] = Field(
+        default=None, pattern=_PORT_OR_RANGE_PATTERN,
+        description="Source port or 'lo-hi' range (1-65535)",
+    )
+    target: str = Field(default="REJECT", description="ACCEPT | REJECT | DROP")
+    enabled: str = Field(default="1", description="'1' enabled, '0' disabled")
+
+    @field_validator("proto")
+    @classmethod
+    def _check_proto(cls, v: str) -> str:
+        allowed = {"tcp", "udp", "tcpudp"}
+        if v not in allowed:
+            raise ValueError(f"proto must be one of {sorted(allowed)}")
+        return v
+
+    @field_validator("target")
+    @classmethod
+    def _check_target(cls, v: str) -> str:
+        if v not in _FW_TARGETS:
+            raise ValueError(f"target must be one of {sorted(_FW_TARGETS)}")
+        return v
+
+    @field_validator("enabled")
+    @classmethod
+    def _check_enabled(cls, v: str) -> str:
+        if v not in {"0", "1"}:
+            raise ValueError("enabled must be '0' or '1'")
+        return v
+
+
+class SetZonePolicyRequest(BaseModel):
+    """Set a zone's default input/output/forward policy. Each policy field is
+    optional (only the provided ones change) and restricted to the UCI targets."""
+
+    zone: str = Field(..., min_length=1, max_length=32, description="Zone name")
+    input: Optional[str] = Field(default=None, description="ACCEPT | REJECT | DROP")
+    output: Optional[str] = Field(default=None, description="ACCEPT | REJECT | DROP")
+    forward: Optional[str] = Field(default=None, description="ACCEPT | REJECT | DROP")
+
+    @field_validator("input", "output", "forward")
+    @classmethod
+    def _check_policy(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in _FW_TARGETS:
+            raise ValueError(f"policy must be one of {sorted(_FW_TARGETS)}")
+        return v
+
+    @model_validator(mode="after")
+    def _at_least_one_policy(self) -> "SetZonePolicyRequest":
+        if self.input is None and self.output is None and self.forward is None:
+            raise ValueError("at least one of input, output, or forward must be provided")
+        return self
 
 
 # WARP-613: phone-home egress control.

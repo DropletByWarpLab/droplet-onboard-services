@@ -170,10 +170,10 @@ describe("/chat page mounts the history panel", () => {
       ).toBeInTheDocument(),
     );
 
-    // handleRetry is a no-op while selectedModel is empty; on heavily
-    // loaded CI runners the model auto-select effect can lag the
-    // FailureChip render. Wait for the selected (ollama) model to apply
-    // — the "local \u00b7 on-device" tag renders only once it has.
+    // Deflake: the composer's model selector hydrates asynchronously (useModels),
+    // and the resend is a no-op until a model is selected — so clicking too early
+    // calls sendChat 0 times. Wait for the on-device model tag, which only renders
+    // once a local model is selected, before clicking Try-again.
     await waitFor(
       () => expect(screen.getByText(/on-device/i)).toBeInTheDocument(),
       { timeout: 10000 },

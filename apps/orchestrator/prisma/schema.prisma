@@ -1163,6 +1163,21 @@ model ApDevice {
   // Last DHCP-reported hostname.
   hostname         String?
   status           ApDeviceStatus @default(DISCOVERED)
+  // ADR-024: which onboarding backend owns this row's discovery +
+  // provisioning. Explicit enum column (NOT derived from absence —
+  // CLAUDE.md no-guessing rule, same discipline as `status`). Every
+  // row created today is DROPLET_IMAGE (ADR-005's mDNS + uci path);
+  // EASYMESH / UNIFI land in later ADR-024 phases. The default keeps
+  // every existing row — and every reconcile that predates a backend
+  // being passed — pinned to the only discovery source that exists now.
+  backend          ApOnboardBackend @default(DROPLET_IMAGE)
+  // Backend-scoped opaque id: UniFi device_id, 1905.1 AL-MAC, etc.
+  // Null for DROPLET_IMAGE rows (the MAC is the only handle ADR-005
+  // needs).
+  backendRef       String?
+  // Human-readable vendor label surfaced in the dashboard + LLM
+  // ("TP-Link", "Ubiquiti"). Null for the Droplet-image extender.
+  vendor           String?
   // Non-null only when status = FAILED. Free text, surfaced verbatim
   // in the dashboard's "what went wrong" tile.
   failureReason    String?
@@ -1224,6 +1239,23 @@ enum ApDeviceStatus {
   ONLINE
   FAILED
   DECOMMISSIONED
+}
+
+/// ADR-024: the onboarding backend that owns a given ApDevice row's
+/// discovery + provisioning. A discriminator so one canonical entity,
+/// one state machine, and one LLM/dashboard surface can serve multiple
+/// vendor ecosystems instead of three forked features.
+///   - `DROPLET_IMAGE` — ADR-005: mDNS `_droplet-ap._tcp` discovery +
+///                       uci `wifi-iface` push. The only backend that
+///                       does anything today; the schema default.
+///   - `EASYMESH`      — IEEE 1905.1 discovery + prplMesh-controller
+///                       M1/M2 onboarding (ADR-024 §2). Phase 4.
+///   - `UNIFI`         — UBNT UDP 10001 discovery + UniFi Network API
+///                       adoption (ADR-024 §3). Phase 3.
+enum ApOnboardBackend {
+  DROPLET_IMAGE
+  EASYMESH
+  UNIFI
 }
 
 // ── WARP-455: A1 Local user directory + scope bindings + guest time-box ──
@@ -2223,15 +2255,53 @@ enum ToolRunStatus {
 /// per-action (the run-handler captures and surfaces them) so a
 /// dead bulb mid-scene doesn't abort the lights that work.
 model Scene {
-  id        String        @id @default(uuid())
+  id        String          @id @default(uuid())
   name      String
   icon      String?
   createdBy String?
-  createdAt DateTime      @default(now())
-  updatedAt DateTime      @updatedAt
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
   actions   SceneAction[]
+  schedules SceneSchedule[]
 
   @@index([createdAt])
+}
+
+/// feat/scene-schedules — recurring cadence for a saved Scene (routine).
+///
+/// Lets an owner/admin schedule a routine to run on an RRULE cadence
+/// (e.g. `FREQ=DAILY;BYHOUR=7` → every day 07:00 UTC). The
+/// scene-schedule-ticker (60s interval, pg advisory lock) scans rows
+/// whose `enabled = true AND nextFireAt <= now()`, executes the parent
+/// Scene via the shared `executeScene` path with `triggeredBy="scheduler"`,
+/// then advances `nextFireAt` from the RRULE. This is the EXACT clone of
+/// the WARP-463 ToolSchedule pattern — one sanctioned scheduler, no
+/// hand-rolled timers.
+///
+/// State is the explicit `enabled` column + `nextFireAt` — NEVER derived
+/// from a NULL. A malformed RRULE or a deleted parent Scene flips
+/// `enabled = false` (+ an audit row) so a typo can't pin the ticker.
+/// `lastFiredAt` records the most recent successful tick fire (NULL =
+/// never fired yet — that is provenance, not state).
+///
+/// SAFETY: an unattended scheduled fire bypasses the per-run scene
+/// confirm-token (see scenes.ts run-handler). That is the deliberate
+/// owner/admin opt-in — *creating the schedule IS the confirmation* —
+/// and every fire is audited. Same justification as ToolSchedule.
+model SceneSchedule {
+  id          String    @id @default(uuid())
+  sceneId     String
+  scene       Scene     @relation(fields: [sceneId], references: [id], onDelete: Cascade)
+  rrule       String
+  nextFireAt  DateTime
+  enabled     Boolean   @default(true)
+  createdBy   String?
+  lastFiredAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([nextFireAt])
+  @@index([sceneId])
 }
 
 /// WARP-474 — one Matter command in a Scene. `idx` is the explicit

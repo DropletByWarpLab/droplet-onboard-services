@@ -610,9 +610,9 @@ migrate_env() {
 materialize_artifacts() {
   log_info "Materializing setup artifacts (idempotent)..."
 
-  # Source .env so MQTT_PASSWORD / OPENWRT_PASSWORD / MQTT_USER are in scope
-  # for the helpers below. Reachable via setup.sh --sync-secrets where nothing
-  # else has loaded .env yet.
+  # Source .env so MQTT_PASSWORD / OPENWRT_PASSWORD / SWITCH_PASSWORD / MQTT_USER
+  # are in scope for the helpers below. Reachable via setup.sh --sync-secrets
+  # where nothing else has loaded .env yet.
   if [ -f "$REPO_ROOT/.env" ]; then
     set -a
     # shellcheck disable=SC1091
@@ -624,6 +624,7 @@ materialize_artifacts() {
   _write_mosquitto_conf
   _generate_tls_cert
   sync_openwrt_password_secret
+  sync_switch_password_secret
   sync_audit_signing_key
   sync_pm_oidc_keypair
 }
@@ -768,6 +769,55 @@ sync_openwrt_password_secret() {
   log_success "Wrote $secret_file (chmod 600)"
 }
 
+# ADR-018 T1 — Write the OPERATOR-SUPPLIED $SWITCH_PASSWORD (from env or .env)
+# into docker/secrets/switch_password so Docker Compose can mount it read-only at
+# /run/secrets/switch_password in the switch container. Mirrors
+# sync_openwrt_password_secret(), with one deliberate difference: the managed
+# switch is NOT a device we mint a secret for, so this NEVER generates a value —
+# it only materializes what the operator put in .env.
+#
+# When SWITCH_PASSWORD is unset/empty (a box without a managed switch, the common
+# case) we write an EMPTY placeholder rather than a real credential: the
+# `secrets:` mount in docker-compose.yml requires the file to exist for
+# `docker compose up switch` to start, and drivers._load_switch_password() treats
+# an empty file exactly like "no switch configured" — the switch service comes up
+# and reports "disconnected" without crashing. So non-switch boxes are unaffected.
+sync_switch_password_secret() {
+  local secret_dir="$REPO_ROOT/docker/secrets"
+  local secret_file="$secret_dir/switch_password"
+  local password="${SWITCH_PASSWORD:-}"
+
+  # Fall back to reading .env if the value isn't already in the shell environment.
+  # `|| true` keeps a missing SWITCH_PASSWORD line from tripping `set -euo pipefail`
+  # (grep exits 1 on no match). An empty password is handled gracefully below.
+  if [ -z "$password" ] && [ -f "$REPO_ROOT/.env" ]; then
+    password=$(grep -E '^SWITCH_PASSWORD=' "$REPO_ROOT/.env" | head -n 1 | cut -d= -f2- || true)
+  fi
+
+  mkdir -p "$secret_dir"
+  chmod 700 "$secret_dir"
+
+  if [ -z "$password" ]; then
+    # No operator credential supplied — write an empty placeholder so Compose can
+    # mount the secret and the switch service still starts (degraded → the switch
+    # reports "disconnected"). NEVER generate a switch password here. Boxes
+    # without a managed switch hit exactly this path and are unaffected.
+    : > "$secret_file"
+    chmod 600 "$secret_file"
+    log_info "SWITCH_PASSWORD not set in .env — wrote empty $secret_file (no managed switch)"
+    log_info "  For a managed switch: set SWITCH_PASSWORD in .env, then re-run ./scripts/setup.sh --sync-secrets"
+    return 0
+  fi
+
+  # Write atomically: stage to .tmp then rename, so a crashed write never leaves
+  # a half-populated secret file that the switch container would then read.
+  local tmp="$secret_file.tmp"
+  printf '%s' "$password" > "$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$secret_file"
+  log_success "Wrote $secret_file (chmod 600)"
+}
+
 _generate_mosquitto_passwd() {
   local mqtt_password="$1"
   local mqtt_user="${MQTT_USER:-droplet}"
@@ -883,6 +933,83 @@ _cert_has_all_required_sans() {
   return 0
 }
 
+# ADR-023 PR-2: detect whether the installed leaf is a PUBLIC-CA cert (an
+# LE / ZeroSSL / Google Trust Services fullchain the box-side tls-issuance cron
+# installed) rather than our own self-signed bootstrap cert.
+#
+# Detector: issuer != subject. A self-signed cert has issuer == subject; any
+# CA-signed leaf has a distinct issuer DN. `openssl x509` reads only the FIRST
+# PEM block in the file, so this correctly inspects just the leaf even when
+# cert_file is a fullchain (leaf + intermediate concatenated). NOTE: we do NOT
+# use `openssl verify -CAfile <cert> <cert>` — on a fullchain PEM, OpenSSL
+# loads all PEM blocks as trusted anchors, the intermediate verifies the leaf,
+# and the command exits 0, indistinguishable from self-signed.
+#
+# Deliberately NOT keyed on the literal string "Let's Encrypt": the HQ Worker
+# has CA failover (ZeroSSL primary, Google Trust Services fallback), all
+# non-self-signed — matching on a CA name would miss the fallback issuers.
+#
+# Parse gate: if either DN is unreadable (corrupt/truncated/garbage cert), we
+# require both to be non-empty before trusting the issuer!=subject result. An
+# unparseable droplet.crt is NOT a preservable public-CA leaf — fall through
+# so the normal path regenerates a fresh self-signed cert.
+#
+# Returns 0 (true) when the cert is a public-CA leaf we must preserve.
+_cert_is_public_ca_leaf() {
+  local cert_file="$1"
+  [ -f "$cert_file" ] || return 1
+
+  # Read only the FIRST PEM block (openssl x509 stops at the first cert in the
+  # file), so this correctly reads the leaf even when cert_file is a fullchain
+  # (leaf + intermediate). Using openssl verify -CAfile with a fullchain would
+  # load ALL PEM blocks as trusted anchors, causing the intermediate to verify
+  # the leaf and exit 0 — indistinguishable from a self-signed cert.
+  local issuer subject
+  issuer="$(openssl x509 -in "$cert_file" -noout -issuer 2>/dev/null)"
+  subject="$(openssl x509 -in "$cert_file" -noout -subject 2>/dev/null)"
+
+  # Parse gate: if either DN is unreadable, not a valid public-CA leaf —
+  # corrupt/truncated/garbage cert. Fall through to regeneration.
+  if [ -z "$issuer" ] || [ -z "$subject" ]; then
+    return 1
+  fi
+
+  # Issuer != subject → signed by a different CA → preserve as a public-CA leaf.
+  # Strip the leading `issuer=` / `subject=` label before comparing.
+  if [ "${issuer#issuer=}" = "${subject#subject=}" ]; then
+    return 1
+  fi
+  return 0
+}
+
+# ADR-023 PR-2: write the self-signed bootstrap pair to droplet.{crt,key}.bootstrap
+# — the exact bytes clients import via trust-droplet-cert. Idempotent: never
+# overwrite an existing .bootstrap (the first self-signed cert ever generated is
+# the one clients trust; a later regeneration must not move the trust anchor).
+_write_tls_bootstrap_copy() {
+  local cert_file="$1" key_file="$2"
+  local boot_cert="$cert_file.bootstrap" boot_key="$key_file.bootstrap"
+
+  if [ ! -f "$cert_file" ] || [ ! -f "$key_file" ]; then
+    return 0
+  fi
+  # Write each bootstrap file independently — never overwrite an existing one.
+  # Writing them separately means a crash between the two copies leaves exactly
+  # one file present; the next run writes the missing half without touching the
+  # already-written one, rather than skipping both (OR guard) or overwriting the
+  # existing one (AND guard with fallthrough).
+  if [ ! -f "$boot_cert" ]; then
+    cp "$cert_file" "$boot_cert"
+    chmod 644 "$boot_cert"
+    log_info "  Saved trust-anchor bootstrap cert: $boot_cert"
+  fi
+  if [ ! -f "$boot_key" ]; then
+    cp "$key_file" "$boot_key"
+    chmod 600 "$boot_key"
+    log_info "  Saved trust-anchor bootstrap key: $boot_key"
+  fi
+}
+
 _generate_tls_cert() {
   local cert_dir="$REPO_ROOT/docker/certs"
   local cert_file="$cert_dir/droplet.crt"
@@ -899,6 +1026,48 @@ _generate_tls_cert() {
       log_success "TLS certificate already exists, is valid, and covers all required SANs — skipping"
       return 0
     fi
+
+    # ADR-023 PR-2 — NEVER CLOBBER A PUBLIC-CA LEAF.
+    # The box-side tls-issuance cron installs the HQ-issued publicly-trusted
+    # fullchain into these SAME files. A re-run that reaches here (SAN-incomplete
+    # OR expired trigger) must NOT regenerate a self-signed cert over a live
+    # public-CA leaf — that silently reverts the box to self-signed until the
+    # next 04:00 issuance, and a fresh -newkey also breaks every client that
+    # imported the original cert. If the installed cert is a public-CA leaf,
+    # leave the fullchain in place and return success.
+    if _cert_is_public_ca_leaf "$cert_file"; then
+      log_success "TLS certificate is a publicly-trusted (public-CA) leaf — preserving it (ADR-023)"
+      return 0
+    fi
+
+    # ADR-023 PR-2 — EXPIRED + BOOTSTRAP RESTORE.
+    # If the installed (self-signed) cert is EXPIRED and a valid bootstrap pair
+    # exists, RESTORE the bootstrap pair instead of -newkey'ing a fresh keypair,
+    # so trust-store clients that imported the bootstrap cert still connect.
+    # Only -newkey below when there is no usable bootstrap.
+    local boot_cert="$cert_file.bootstrap" boot_key="$key_file.bootstrap"
+    if ! openssl x509 -checkend 86400 -noout -in "$cert_file" >/dev/null 2>&1 \
+       && [ -f "$boot_cert" ] && [ -f "$boot_key" ] \
+       && openssl x509 -checkend 86400 -noout -in "$boot_cert" >/dev/null 2>&1 \
+       && _cert_has_all_required_sans "$boot_cert"; then
+      log_warn "TLS certificate expired — restoring the trust-anchor bootstrap pair (ADR-023)"
+      cp "$boot_cert" "${cert_file}.new"
+      cp "$boot_key"  "${key_file}.new"
+      chmod 600 "${key_file}.new"
+      chmod 644 "${cert_file}.new"
+      mv "${cert_file}.new" "$cert_file"
+      mv "${key_file}.new"  "$key_file"
+      log_success "Restored TLS certificate from bootstrap copy:"
+      log_info "  Cert: $cert_file"
+      log_info "  Key:  $key_file"
+      if ! declare -F reload_gateway_nginx >/dev/null 2>&1; then
+        # shellcheck source=tls-reload.sh
+        source "$(dirname "${BASH_SOURCE[0]}")/tls-reload.sh"
+      fi
+      reload_gateway_nginx || true
+      return 0
+    fi
+
     if ! openssl x509 -checkend 86400 -noout -in "$cert_file" >/dev/null 2>&1; then
       log_warn "TLS certificate expired or invalid — regenerating"
     else
@@ -966,6 +1135,14 @@ _generate_tls_cert() {
   log_info "  Cert: $cert_file"
   log_info "  Key:  $key_file"
   log_info "  SANs: $san"
+
+  # ADR-023 PR-2 — BOOTSTRAP SIDE-COPY.
+  # Persist this self-signed pair as droplet.{crt,key}.bootstrap — the exact
+  # bytes clients import via trust-droplet-cert. Idempotent (never overwrites an
+  # existing .bootstrap), so the trust anchor stays pinned to the FIRST
+  # self-signed cert across re-runs. The expired-restore path above replays this
+  # pair instead of -newkey'ing a keypair the trust store has never seen.
+  _write_tls_bootstrap_copy "$cert_file" "$key_file"
 
   # If the gateway container is already running (setup.sh re-run or
   # --sync-secrets flow), ask nginx to reload so the new cert is served
