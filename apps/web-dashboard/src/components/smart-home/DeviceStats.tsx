@@ -43,7 +43,7 @@ export function DeviceStats({
       icon: ThermometerSun,
       label: "Climate",
       value: climate.length,
-      sub: climate.length === 1 ? "thermostat" : "thermostats",
+      sub: climate.length === 1 ? "thermostat" : climate.length === 0 ? "none paired" : "thermostats",
     },
     {
       icon: Lock,
@@ -59,7 +59,7 @@ export function DeviceStats({
       icon: Play,
       label: "Routines",
       value: routineCount,
-      sub: routineCount === 1 ? "saved" : "saved",
+      sub: routineCount === 1 ? "routine" : "routines",
     },
   ];
 

@@ -64,7 +64,7 @@ describe("DeviceStats KPI strip", () => {
 
   it("shows honest empty states with no devices", () => {
     render(<DeviceStats grouped={grouped({})} routineCount={0} />);
-    // lights + locks both report "none paired"
-    expect(screen.getAllByText("none paired").length).toBe(2);
+    // lights + climate + locks all report "none paired"
+    expect(screen.getAllByText("none paired").length).toBe(3);
   });
 });

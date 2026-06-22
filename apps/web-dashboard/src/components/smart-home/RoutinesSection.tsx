@@ -39,7 +39,7 @@ export function RoutinesSection({
     try {
       const { successCount, actionCount } = await runScene(scene.id);
       setToast(
-        successCount === actionCount
+        actionCount > 0 && successCount === actionCount
           ? `${scene.name} ran — ${actionCount} action${actionCount === 1 ? "" : "s"}`
           : `${scene.name} ran with issues — ${successCount} of ${actionCount} succeeded`,
       );
@@ -179,8 +179,12 @@ export function RoutinesSection({
         variant="neutral"
         onConfirm={async () => {
           const scene = pending;
+          const btn = triggerRef.current;   // capture before setPending clears the conditional ref
           setPending(null);
-          if (scene) await doRun(scene);
+          if (scene) {
+            await doRun(scene);
+            requestAnimationFrame(() => btn?.focus());
+          }
         }}
         onCancel={() => setPending(null)}
       />
