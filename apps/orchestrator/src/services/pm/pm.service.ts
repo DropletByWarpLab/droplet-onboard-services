@@ -266,7 +266,7 @@ async function writeActivity(
  *  (shouldn't, inside the same request) — keeps the return type non-null. */
 async function loadWorkItem(db: Db, id: string, identifier: string): Promise<ApiWorkItem> {
   const row = await db.pmWorkItem.findUnique({ where: { id }, include: WORK_ITEM_INCLUDE });
-  if (!row) throw new Error("work_item_not_found");
+  if (!row) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
   return mapWorkItem(row, identifier);
 }
 
@@ -289,7 +289,7 @@ export async function listWorkspaces(prisma: PrismaClient): Promise<ApiWorkspace
 
 export async function getWorkspaceBySlug(prisma: PrismaClient, slug: string): Promise<ApiWorkspace> {
   const row = await prisma.pmWorkspace.findUnique({ where: { slug } });
-  if (!row) throw new Error("workspace_not_found");
+  if (!row) throw new Error(PM_ERRORS.WORKSPACE_NOT_FOUND);
   return mapWorkspace(row);
 }
 
@@ -297,15 +297,18 @@ export async function getWorkspaceBySlug(prisma: PrismaClient, slug: string): Pr
 
 export async function listProjects(
   prisma: PrismaClient,
-  opts: { workspaceSlug?: string; includeArchived?: boolean } = {},
+  opts: { workspaceSlug?: string; includeArchived?: boolean; perPage?: number } = {},
 ): Promise<ApiProject[]> {
   const where: Prisma.PmProjectWhereInput = {};
   if (opts.workspaceSlug) where.workspace = { slug: opts.workspaceSlug };
   if (!opts.includeArchived) where.archivedAt = null;
+  const take =
+    opts.perPage !== undefined ? Math.max(1, Math.min(200, opts.perPage)) : undefined;
   const rows = await prisma.pmProject.findMany({
     where,
     include: { workspace: true },
     orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+    ...(take !== undefined ? { take } : {}),
   });
   return rows.map(mapProject);
 }
@@ -315,7 +318,7 @@ export async function getProject(prisma: PrismaClient, projectId: string): Promi
     where: { id: projectId },
     include: { workspace: true },
   });
-  if (!row) throw new Error("project_not_found");
+  if (!row) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
   return mapProject(row);
 }
 
@@ -348,7 +351,7 @@ export async function createProject(
       where: { workspaceId_identifier: { workspaceId: workspace.id, identifier } },
     });
     if (!clash) break;
-    if (input.identifier) throw new Error("identifier_taken");
+    if (input.identifier) throw new Error(PM_ERRORS.IDENTIFIER_TAKEN);
     identifier = `${base}${n}`;
   }
 
@@ -389,7 +392,7 @@ export async function updateProject(
   },
 ): Promise<ApiProject> {
   const existing = await prisma.pmProject.findUnique({ where: { id: projectId } });
-  if (!existing) throw new Error("project_not_found");
+  if (!existing) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
   const data: Prisma.PmProjectUpdateInput = {};
   if (fields.name !== undefined) data.name = fields.name;
   if (fields.description !== undefined) data.description = fields.description;
@@ -407,7 +410,7 @@ export async function updateProject(
 
 export async function deleteProject(prisma: PrismaClient, projectId: string): Promise<void> {
   const existing = await prisma.pmProject.findUnique({ where: { id: projectId } });
-  if (!existing) throw new Error("project_not_found");
+  if (!existing) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
   await prisma.pmProject.delete({ where: { id: projectId } });
 }
 
@@ -427,7 +430,7 @@ export async function createState(
   input: { name: string; group: ApiState["group"]; color?: string; sortOrder?: number },
 ): Promise<ApiState> {
   const project = await prisma.pmProject.findUnique({ where: { id: projectId } });
-  if (!project) throw new Error("project_not_found");
+  if (!project) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
   const row = await prisma.pmState.create({
     data: {
       projectId,
@@ -446,14 +449,14 @@ export async function updateState(
   fields: { name?: string; group?: ApiState["group"]; color?: string | null; sortOrder?: number },
 ): Promise<ApiState> {
   const existing = await prisma.pmState.findUnique({ where: { id: stateId } });
-  if (!existing) throw new Error("state_not_found");
+  if (!existing) throw new Error(PM_ERRORS.STATE_NOT_FOUND);
   const row = await prisma.pmState.update({ where: { id: stateId }, data: fields });
   return mapState(row);
 }
 
 export async function deleteState(prisma: PrismaClient, stateId: string): Promise<void> {
   const existing = await prisma.pmState.findUnique({ where: { id: stateId } });
-  if (!existing) throw new Error("state_not_found");
+  if (!existing) throw new Error(PM_ERRORS.STATE_NOT_FOUND);
   await prisma.pmState.delete({ where: { id: stateId } });
 }
 
@@ -470,7 +473,7 @@ export async function createLabel(
   input: { name: string; color?: string },
 ): Promise<ApiLabel> {
   const project = await prisma.pmProject.findUnique({ where: { id: projectId } });
-  if (!project) throw new Error("project_not_found");
+  if (!project) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
   const row = await prisma.pmLabel.create({
     data: { projectId, name: input.name, color: input.color ?? null },
   });
@@ -483,14 +486,14 @@ export async function updateLabel(
   fields: { name?: string; color?: string | null },
 ): Promise<ApiLabel> {
   const existing = await prisma.pmLabel.findUnique({ where: { id: labelId } });
-  if (!existing) throw new Error("label_not_found");
+  if (!existing) throw new Error(PM_ERRORS.LABEL_NOT_FOUND);
   const row = await prisma.pmLabel.update({ where: { id: labelId }, data: fields });
   return mapLabel(row);
 }
 
 export async function deleteLabel(prisma: PrismaClient, labelId: string): Promise<void> {
   const existing = await prisma.pmLabel.findUnique({ where: { id: labelId } });
-  if (!existing) throw new Error("label_not_found");
+  if (!existing) throw new Error(PM_ERRORS.LABEL_NOT_FOUND);
   await prisma.pmLabel.delete({ where: { id: labelId } });
 }
 
@@ -511,7 +514,7 @@ export async function listWorkItems(
   } = {},
 ): Promise<ApiWorkItem[]> {
   const project = await prisma.pmProject.findUnique({ where: { id: projectId } });
-  if (!project) throw new Error("project_not_found");
+  if (!project) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
 
   const where: Prisma.PmWorkItemWhereInput = { projectId, archivedAt: null };
   if (filters.stateId) where.stateId = filters.stateId;
@@ -541,7 +544,7 @@ export async function listWorkItems(
 
 export async function getWorkItem(prisma: PrismaClient, id: string): Promise<ApiWorkItem> {
   const row = await prisma.pmWorkItem.findUnique({ where: { id }, include: WORK_ITEM_INCLUDE });
-  if (!row) throw new Error("work_item_not_found");
+  if (!row) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
   const project = await prisma.pmProject.findUnique({ where: { id: row.projectId } });
   return mapWorkItem(row, project?.identifier ?? "");
 }
@@ -592,13 +595,13 @@ export async function createWorkItem(
     where: { id: projectId },
     include: { states: true },
   });
-  if (!project) throw new Error("project_not_found");
+  if (!project) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
 
   if (input.parentId) {
     const parent = await prisma.pmWorkItem.findFirst({
       where: { id: input.parentId, projectId },
     });
-    if (!parent) throw new Error("invalid_parent");
+    if (!parent) throw new Error(PM_ERRORS.INVALID_PARENT);
   }
 
   // Landing state: explicit → isDefault → first by sortOrder → none.
@@ -666,9 +669,9 @@ export async function updateWorkItem(
     where: { id },
     include: { assignees: true, labels: true },
   });
-  if (!existing) throw new Error("work_item_not_found");
+  if (!existing) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
   const project = await prisma.pmProject.findUnique({ where: { id: existing.projectId } });
-  if (!project) throw new Error("project_not_found");
+  if (!project) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
 
   // When transitioning into a terminal-group state, stamp completedAt.
   let completedAt: Date | null | undefined;
@@ -679,7 +682,7 @@ export async function updateWorkItem(
       const target = await prisma.pmState.findFirst({
         where: { id: fields.stateId, projectId: existing.projectId },
       });
-      if (!target) throw new Error("state_not_found");
+      if (!target) throw new Error(PM_ERRORS.STATE_NOT_FOUND);
       completedAt =
         target.group === "completed" || target.group === "cancelled" ? new Date() : null;
     }
@@ -766,7 +769,7 @@ export async function transitionWorkItem(
 
 export async function deleteWorkItem(prisma: PrismaClient, id: string): Promise<void> {
   const existing = await prisma.pmWorkItem.findUnique({ where: { id } });
-  if (!existing) throw new Error("work_item_not_found");
+  if (!existing) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
   await prisma.pmWorkItem.delete({ where: { id } });
 }
 
@@ -774,7 +777,7 @@ export async function deleteWorkItem(prisma: PrismaClient, id: string): Promise<
 
 export async function listComments(prisma: PrismaClient, workItemId: string): Promise<ApiComment[]> {
   const item = await prisma.pmWorkItem.findUnique({ where: { id: workItemId } });
-  if (!item) throw new Error("work_item_not_found");
+  if (!item) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
   const rows = await prisma.pmComment.findMany({
     where: { workItemId },
     orderBy: { createdAt: "asc" },
@@ -789,7 +792,7 @@ export async function addComment(
   commentHtml: string,
 ): Promise<ApiComment> {
   const item = await prisma.pmWorkItem.findUnique({ where: { id: workItemId } });
-  if (!item) throw new Error("work_item_not_found");
+  if (!item) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
   const row = await prisma.$transaction(async (tx) => {
     const comment = await tx.pmComment.create({
       data: { workItemId, authorId: actorId, commentHtml },

@@ -154,9 +154,11 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
   // ── Projects ──
   router.get("/pm/projects", async (req, res, next) => {
     try {
+      const perPage = req.query.per_page ? Number(req.query.per_page) : undefined;
       const projects = await pm.listProjects(prisma, {
         workspaceSlug: req.query.workspace ? String(req.query.workspace) : undefined,
         includeArchived: req.query.archived === "1" || req.query.archived === "true",
+        perPage,
       });
       res.json({ projects });
     } catch (err) {

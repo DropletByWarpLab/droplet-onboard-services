@@ -107,9 +107,10 @@ export async function callOrch<T = unknown>(
   const http = ctx.http.orchestrator;
   const opts = { headers: { Accept: "application/json" } };
 
-  const timeoutPromise = new Promise<never>((_, reject) =>
-    setTimeout(() => reject(new OrchPmError("orchestrator timeout", 504)), ORCH_TIMEOUT_MS),
-  );
+  let timerId: ReturnType<typeof setTimeout>;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timerId = setTimeout(() => reject(new OrchPmError("orchestrator timeout", 504)), ORCH_TIMEOUT_MS);
+  });
 
   const callPromise = (async (): Promise<Response> => {
     switch (method) {
@@ -122,7 +123,7 @@ export async function callOrch<T = unknown>(
       case "patch":
         return http.patch(path, body, opts);
     }
-  })();
+  })().finally(() => clearTimeout(timerId));
 
   const res = await Promise.race([callPromise, timeoutPromise]);
   const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
