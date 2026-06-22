@@ -425,3 +425,95 @@ describe("native PM routes — work-item lifecycle", () => {
     expect(res.body.error).toBe("work_item_not_found");
   });
 });
+
+describe("native PM routes — cross-project link guards (ADR-026 P2)", () => {
+  let prisma: unknown;
+  let app: ReturnType<typeof makeApp>;
+  let projA: string;
+  let projB: string;
+
+  beforeEach(async () => {
+    id = 0;
+    prisma = makeFake().prisma;
+    app = makeApp(prisma, OWNER);
+    const a = await request(app).post("/api/pm/projects").send({ name: "Alpha" });
+    const b = await request(app).post("/api/pm/projects").send({ name: "Bravo" });
+    projA = a.body.project.id;
+    projB = b.body.project.id;
+  });
+
+  it("rejects creating a work item whose parent lives in another project (422)", async () => {
+    const parentInB = await request(app)
+      .post(`/api/pm/projects/${projB}/work-items`)
+      .send({ name: "Parent in B" });
+    const res = await request(app)
+      .post(`/api/pm/projects/${projA}/work-items`)
+      .send({ name: "Child in A", parent_id: parentInB.body.work_item.id });
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe("invalid_parent");
+  });
+
+  it("rejects updating a work item to a parent in another project (422)", async () => {
+    const childInA = await request(app)
+      .post(`/api/pm/projects/${projA}/work-items`)
+      .send({ name: "Child in A" });
+    const parentInB = await request(app)
+      .post(`/api/pm/projects/${projB}/work-items`)
+      .send({ name: "Parent in B" });
+    const res = await request(app)
+      .patch(`/api/pm/work-items/${childInA.body.work_item.id}`)
+      .send({ parent_id: parentInB.body.work_item.id });
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe("invalid_parent");
+  });
+
+  it("rejects creating a work item with a state from another project (422)", async () => {
+    const statesB = await request(app).get(`/api/pm/projects/${projB}/states`);
+    const stateInB = statesB.body.states[0].id;
+    const res = await request(app)
+      .post(`/api/pm/projects/${projA}/work-items`)
+      .send({ name: "Item in A", state_id: stateInB });
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe("invalid_state");
+  });
+
+  it("rejects updating a work item to a state from another project (422)", async () => {
+    const itemInA = await request(app)
+      .post(`/api/pm/projects/${projA}/work-items`)
+      .send({ name: "Item in A" });
+    const statesB = await request(app).get(`/api/pm/projects/${projB}/states`);
+    const stateInB = statesB.body.states[0].id;
+    const res = await request(app)
+      .patch(`/api/pm/work-items/${itemInA.body.work_item.id}`)
+      .send({ state_id: stateInB });
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe("invalid_state");
+  });
+
+  it("still 404s when the patched state id does not exist at all", async () => {
+    const itemInA = await request(app)
+      .post(`/api/pm/projects/${projA}/work-items`)
+      .send({ name: "Item in A" });
+    const res = await request(app)
+      .patch(`/api/pm/work-items/${itemInA.body.work_item.id}`)
+      .send({ state_id: "st-does-not-exist" });
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe("state_not_found");
+  });
+
+  it("allows a same-project parent and state (200/201) — guard is not over-broad", async () => {
+    const states = await request(app).get(`/api/pm/projects/${projA}/states`);
+    const sameState = states.body.states[0].id;
+    const parent = await request(app)
+      .post(`/api/pm/projects/${projA}/work-items`)
+      .send({ name: "Parent in A" });
+    const child = await request(app)
+      .post(`/api/pm/projects/${projA}/work-items`)
+      .send({ name: "Child in A", parent_id: parent.body.work_item.id, state_id: sameState });
+    expect(child.status).toBe(201);
+    const patched = await request(app)
+      .patch(`/api/pm/work-items/${child.body.work_item.id}`)
+      .send({ state_id: sameState });
+    expect(patched.status).toBe(200);
+  });
+});
