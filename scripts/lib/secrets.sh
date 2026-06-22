@@ -912,41 +912,25 @@ _cert_is_public_ca_leaf() {
   local cert_file="$1"
   [ -f "$cert_file" ] || return 1
 
-  # Self-verify: OK ⇒ self-signed ⇒ NOT a public-CA leaf.
-  if openssl verify -CAfile "$cert_file" "$cert_file" >/dev/null 2>&1; then
-    return 1
-  fi
-
-  # Self-verify failed. Corroborate via issuer != subject before declaring it a
-  # public-CA leaf (guards against an unrelated openssl error masquerading as a
-  # CA-signed result).
+  # Read only the FIRST PEM block (openssl x509 stops at the first cert in the
+  # file), so this correctly reads the leaf even when cert_file is a fullchain
+  # (leaf + intermediate). Using openssl verify -CAfile with a fullchain would
+  # load ALL PEM blocks as trusted anchors, causing the intermediate to verify
+  # the leaf and exit 0 — indistinguishable from a self-signed cert.
   local issuer subject
   issuer="$(openssl x509 -in "$cert_file" -noout -issuer 2>/dev/null)"
   subject="$(openssl x509 -in "$cert_file" -noout -subject 2>/dev/null)"
 
-  # Parse gate: if the file does not parse as an X.509 cert at all (neither a
-  # readable issuer NOR subject), it is not a usable public-CA leaf — it is a
-  # corrupt/truncated/garbage droplet.crt. Preserving it would leave the gateway
-  # certless with no self-heal; instead fall through (return 1) so the normal
-  # regeneration path mints a fresh self-signed cert, matching pre-PR behaviour
-  # for an unreadable cert. (self-verify also fails on garbage, so without this
-  # gate the fail-safe-toward-preserve below would wrongly pin a broken file.)
-  # Use || so a partially-parseable truncated cert (one field readable, one not)
-  # is also treated as non-public-CA and triggers regeneration rather than
-  # falling through to return 0 as a spurious public-CA leaf.
+  # Parse gate: if either DN is unreadable, not a valid public-CA leaf —
+  # corrupt/truncated/garbage cert. Fall through to regeneration.
   if [ -z "$issuer" ] || [ -z "$subject" ]; then
     return 1
   fi
 
-  # Both DNs parsed. Use the issuer != subject signal to confirm public-CA.
-  if [ -n "$issuer" ] && [ -n "$subject" ]; then
-    # Strip the leading `issuer=` / `subject=` label before comparing the DNs.
-    if [ "${issuer#issuer=}" = "${subject#subject=}" ]; then
-      # Issuer == subject but self-verify failed — ambiguous (e.g. a corrupt
-      # self-signed cert). Do NOT treat as a public-CA leaf; let the normal
-      # regeneration path handle it.
-      return 1
-    fi
+  # Issuer != subject → signed by a different CA → preserve as a public-CA leaf.
+  # Strip the leading `issuer=` / `subject=` label before comparing.
+  if [ "${issuer#issuer=}" = "${subject#subject=}" ]; then
+    return 1
   fi
   return 0
 }
@@ -959,17 +943,24 @@ _write_tls_bootstrap_copy() {
   local cert_file="$1" key_file="$2"
   local boot_cert="$cert_file.bootstrap" boot_key="$key_file.bootstrap"
 
-  if [ -f "$boot_cert" ] || [ -f "$boot_key" ]; then
-    return 0
-  fi
   if [ ! -f "$cert_file" ] || [ ! -f "$key_file" ]; then
     return 0
   fi
-  cp "$cert_file" "$boot_cert"
-  cp "$key_file" "$boot_key"
-  chmod 600 "$boot_key"
-  chmod 644 "$boot_cert"
-  log_info "  Saved trust-anchor bootstrap copy: $boot_cert"
+  # Write each bootstrap file independently — never overwrite an existing one.
+  # Writing them separately means a crash between the two copies leaves exactly
+  # one file present; the next run writes the missing half without touching the
+  # already-written one, rather than skipping both (OR guard) or overwriting the
+  # existing one (AND guard with fallthrough).
+  if [ ! -f "$boot_cert" ]; then
+    cp "$cert_file" "$boot_cert"
+    chmod 644 "$boot_cert"
+    log_info "  Saved trust-anchor bootstrap cert: $boot_cert"
+  fi
+  if [ ! -f "$boot_key" ]; then
+    cp "$key_file" "$boot_key"
+    chmod 600 "$boot_key"
+    log_info "  Saved trust-anchor bootstrap key: $boot_key"
+  fi
 }
 
 _generate_tls_cert() {

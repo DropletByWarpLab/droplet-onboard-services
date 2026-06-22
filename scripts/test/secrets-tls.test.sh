@@ -129,6 +129,10 @@ _make_ca_signed_leaf() {
     -days "$leaf_days" \
     -extfile "$extcnf" \
     -out "$leaf_crt" 2>/dev/null
+  # Append the CA cert to form a fullchain — production tls-issuance cron writes
+  # leaf + intermediate in one PEM; the fixture must match that shape so
+  # _cert_is_public_ca_leaf is tested against the actual production file format.
+  cat "$ca_crt" >> "$leaf_crt"
 }
 
 _sha() { openssl dgst -sha256 "$1" 2>/dev/null | awk '{print $NF}'; }
