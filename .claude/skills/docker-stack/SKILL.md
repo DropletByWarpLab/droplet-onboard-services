@@ -37,14 +37,12 @@ description: |
 | email-indexer  | —     | `full` | Mailbox indexer for RAG                    |
 | ollama         | 127.0.0.1:11434 | `single-box` | Local LLM inference on the single-box shape |
 | openwrt        | 127.0.0.1:8181→80 | `single-box` | In-container OpenWrt (router UI/ubus) |
-| pm-web / pm-api / pm-worker / pm-beat / pm-migrator / pm-health | — | `pm` | Embedded Plane PM stack (ADR-010), proxied at `/pm` |
-| postgres-pm / redis-pm / pm-mq / pm-minio | — | `pm` | Plane's dedicated datastores (separate from db/cache, OQ1) |
 | rag-eval       | —     | `eval` | RAG evaluation harness                     |
 | ops-console    | —     | `ops`  | Operator console                           |
 
 ## Profiles (`COMPOSE_PROFILES`)
 
-Profiles: `linux`, `display`, `full`, `single-box`, `pm`, `eval`, `ops`.
+Profiles: `linux`, `display`, `full`, `single-box`, `eval`, `ops`.
 `setup.sh` writes `COMPOSE_PROFILES` into `.env`:
 
 - **Linux:** `linux,display` — Frigate, the voice pipeline, and
@@ -60,8 +58,7 @@ Profiles: `linux`, `display`, `full`, `single-box`, `pm`, `eval`, `ops`.
   `full` profile (real hardware + operator-supplied credentials — a
   fresh install shouldn't scan the LAN or hit a missing switch).
   `full` also enables email-indexer.
-- `pm` enables the embedded Plane stack, `eval` the RAG evaluation
-  harness, `ops` the operator console.
+- `eval` enables the RAG evaluation harness, `ops` the operator console.
 
 ## Updating `.env` on a running stack
 

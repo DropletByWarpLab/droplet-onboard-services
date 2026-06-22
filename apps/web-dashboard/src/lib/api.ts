@@ -28,6 +28,8 @@ import type {
   MatterDiscoveredDevice,
   MatterGrouped,
   FileEntryInfo,
+  FileSpaceId,
+  FileSpacesResponse,
   FileVersionInfo,
   TrashItemInfo,
   BulkOperationResult,
@@ -1622,6 +1624,8 @@ export async function getNetworkTopology(): Promise<NetworkTopology | null> {
   } catch {
     return null;
   }
+}
+
 /** Read-only droplet-ai ubus RPC access. Scope chips reflect the live on-box
  *  ACL. Rotate/Revoke aren't here — they're honest-gated (disabled) in the UI. */
 export interface AiNetworkAccess {
@@ -3536,9 +3540,25 @@ export async function saveEmailChannel(
 
 // --- File operations ---
 
-export async function fetchFiles(path: string): Promise<FileEntryInfo[]> {
-  const res = await authFetch(`${BASE}/api/files?path=${encodeURIComponent(path)}`);
+export async function fetchFiles(
+  path: string,
+  space: FileSpaceId = "personal"
+): Promise<FileEntryInfo[]> {
+  const qs = new URLSearchParams({ path });
+  // Only send the space param for the shared space — keeps the personal
+  // request URL (and its SWR cache key) byte-identical to the pre-WARP-883
+  // shape so nothing else has to change.
+  if (space === "shared") qs.set("space", "shared");
+  const res = await authFetch(`${BASE}/api/files?${qs.toString()}`);
   if (!res.ok) throw new Error(`Failed to fetch files: ${res.status}`);
+  return res.json();
+}
+
+// WARP-883 (ADR-027 WS-5) — which Files spaces exist for this user. Drives the
+// My Files / Shared switcher; the switcher hides itself when shared is absent.
+export async function fetchSpaces(): Promise<FileSpacesResponse> {
+  const res = await authFetch(`${BASE}/api/files/spaces`);
+  if (!res.ok) throw new Error(`Failed to fetch spaces: ${res.status}`);
   return res.json();
 }
 
@@ -3619,11 +3639,14 @@ export async function createShareLink(path: string): Promise<ShareInfo> {
   return res.json();
 }
 
-export async function fetchShares(path: string): Promise<ShareInfo[]> {
+// WARP-883 (WS-1 fast-follow): the backend now returns the full ShareDetail
+// shape for a path's existing shares, so the ShareDialog can render them with
+// expiry/password/permissions. Returns [] on a missing `shares` field.
+export async function fetchShares(path: string): Promise<ShareDetail[]> {
   const res = await authFetch(`${BASE}/api/files/shares?path=${encodeURIComponent(path)}`);
   if (!res.ok) throw new Error(`Failed to fetch shares: ${res.status}`);
   const data = await res.json();
-  return data.shares;
+  return (data.shares ?? []) as ShareDetail[];
 }
 
 // --- File management (Phase 1) — rename / move / copy / bulk / trash / versions ---

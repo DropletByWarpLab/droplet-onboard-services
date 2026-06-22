@@ -251,13 +251,42 @@ describe("ADR-013 — POST /auth/setup writes the argon2id hash to the directory
       .send({ password: "Third-secret123", email: "owner3@warp.test" });
 
     expect(res.status).toBe(200);
+    // WARP-883: the owner is provisioned into the "admin" role group AND the
+    // household group so the shared "Household" groupfolder mounts for them.
+    // (The mocked config here lacks DROPLET_SHARED_FOLDER_NAME, so
+    // householdGroupName() falls back to its canonical "household" default.)
     expect(nc.ncInstallAndCreateAdmin).toHaveBeenCalledWith(
       "owner3",
       "Third-secret123",
       undefined,
+      ["admin", "household"],
     );
     // Idempotent local write lands BEFORE the one-shot NC provisioning.
     expect(prisma._callOrder).toEqual(["user.upsert", "ncInstallAndCreateAdmin"]);
+  });
+});
+
+describe("WARP-883 — /auth/setup adds the owner to the household group", () => {
+  it("provisions the owner into the household group (not just 'admin') so the shared space mounts", async () => {
+    const prisma = createPrismaMock(); // empty directory → genuine first owner
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .post("/api/auth/setup")
+      .send({ password: "Owner-secret123", email: "owner@warp.test" });
+
+    expect(res.status).toBe(200);
+    // The owner-provisioning call MUST include the household group. Without it
+    // the primary owner is in neither the literal "admin" nor the household
+    // group → GET /api/files/spaces returns sharedAvailable:false for them and
+    // the SpaceSwitcher never appears (the QA finding this guards against).
+    expect(nc.ncInstallAndCreateAdmin).toHaveBeenCalledTimes(1);
+    const groupsArg = (nc.ncInstallAndCreateAdmin as any).mock.calls[0][3] as string[];
+    expect(groupsArg).toContain("household");
+    // The owner keeps their existing Nextcloud "admin" group too.
+    expect(groupsArg).toContain("admin");
+    // No duplicate household entry.
+    expect(groupsArg.filter((g) => g === "household")).toHaveLength(1);
   });
 });
 

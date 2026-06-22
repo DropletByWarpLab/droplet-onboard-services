@@ -22,7 +22,7 @@ All findings are tracked under existing topical epics (no new epics were created
 | [WARP-321](https://warp-lab.atlassian.net/browse/WARP-321) | Networking, Router & Switch |
 | [WARP-320](https://warp-lab.atlassian.net/browse/WARP-320) | LLM Agent, MCP & Chat |
 | [WARP-319](https://warp-lab.atlassian.net/browse/WARP-319) | RAG & Knowledge |
-| [WARP-496](https://warp-lab.atlassian.net/browse/WARP-496) | Embedded PM (Plane) |
+| [WARP-496](https://warp-lab.atlassian.net/browse/WARP-496) | Embedded PM (Plane) — superseded by native PM (ADR-026); Plane removed |
 | [WARP-534](https://warp-lab.atlassian.net/browse/WARP-534) | OTA update system |
 
 ---
@@ -40,16 +40,16 @@ Ordered roughly by severity. Each carries a full fix plan in [`LAUNCH_READINESS_
 | [WARP-563](https://warp-lab.atlassian.net/browse/WARP-563) | High | MCP server grants **full tool trust from absent claims** with **no type-level enforcement of the stdio/HTTP split** — the HTTP transport always synthesizes verified `Claims`, so the invariant holds today, but it lives in a comment + the dev's head, not the type system; one new transport/refactor away from a silent full-privilege grant | `mcp-server/src/server.ts:30` (`claims === undefined ⇒ trusted`) |
 | [WARP-564](https://warp-lab.atlassian.net/browse/WARP-564) | High | Pairing-code claim is a **non-atomic check-then-act** → double redemption | `device-clients.ts:220-289` (false "single tx" comment) |
 | [WARP-565](https://warp-lab.atlassian.net/browse/WARP-565) | High | `VpnPeer.assignedIp` has **no unique constraint**; allocator race → duplicate tunnel IPs | `schema.prisma:808`; `vpn.ts:248` (no tx/retry the service comment assumes) |
-| [WARP-566](https://warp-lab.atlassian.net/browse/WARP-566) | High | Plane webhook **HMAC over re-serialized JSON**, not raw bytes (bug against WARP-511) | `pm-webhook.ts:96` |
+| [WARP-566](https://warp-lab.atlassian.net/browse/WARP-566) | High | ~~Plane webhook **HMAC over re-serialized JSON**, not raw bytes (bug against WARP-511)~~ — **moot:** the Plane webhook receiver was removed with the embedded stack (native PM has no webhook; ADR-026) | ~~`pm-webhook.ts:96`~~ |
 | [WARP-567](https://warp-lab.atlassian.net/browse/WARP-567) | High | Global error handler returns **HTTP 500 for every error** incl. client errors | `middleware/error-handler.ts:13` |
 | [WARP-568](https://warp-lab.atlassian.net/browse/WARP-568) | High | **18 orchestrator tests fail** on a correctly-bootstrapped `main` (email/scenes/home/tools) | `__tests__/{email,scenes,home,tools}.routes.test.ts` |
 | [WARP-569](https://warp-lab.atlassian.net/browse/WARP-569) | High | **No resource limits** on any container → one runaway OOM-kills the appliance | `docker-compose.yml` (no `mem_limit`/`cpus` anywhere) |
-| [WARP-570](https://warp-lab.atlassian.net/browse/WARP-570) | High | **No backup / DR** for core customer data (only Plane PM covered) | `factory-reset.sh:162-182`; only `pm-backup.sh` exists |
+| [WARP-570](https://warp-lab.atlassian.net/browse/WARP-570) | High | **No backup / DR** for core customer data | `factory-reset.sh:162-182` (the dedicated Plane `pm-backup.sh` was removed with the embedded stack — native PM data now lives in the orchestrator's own Postgres and rides its backup path; ADR-026) |
 | [WARP-571](https://warp-lab.atlassian.net/browse/WARP-571) | High | systemd boot unit omits `--env-file`/`--profile`; `ExecReload` uses `restart` → power-cycled box comes up wrong | `scripts/lib/systemd.sh:30-33` |
 | [WARP-572](https://warp-lab.atlassian.net/browse/WARP-572) | High | **No `unhandledRejection`/`uncaughtException` handler** — a background throw can kill the control plane | `index.ts` (none); `cron-runtime.service.ts:205`, `reminders-poller.ts:94` |
 | [WARP-573](https://warp-lab.atlassian.net/browse/WARP-573) | High | **Migration-on-boot is unguarded** (no advisory lock, no snapshot) → a power-cut mid-migrate bricks the orchestrator | `apps/orchestrator/Dockerfile:153` |
 | [WARP-574](https://warp-lab.atlassian.net/browse/WARP-574) | High | **CI is effectively disabled** — 16/20 workflows are `workflow_dispatch`-only; nothing gates `main` | `.github/workflows/*.yml` |
-| [WARP-575](https://warp-lab.atlassian.net/browse/WARP-575) | High | PM worker image `makeplane/plane-worker:v0.24.1` **404s** → enabling the `pm` profile aborts the stack | `docker-compose.yml:1071` (`FIXME(WARP-496)`) |
+| [WARP-575](https://warp-lab.atlassian.net/browse/WARP-575) | High | ~~PM worker image `makeplane/plane-worker:v0.24.1` **404s** → enabling the `pm` profile aborts the stack~~ — **moot:** the `pm` profile and all Plane images were removed (native PM; ADR-026) | ~~`docker-compose.yml:1071`~~ |
 | [WARP-576](https://warp-lab.atlassian.net/browse/WARP-576) | High | Dashboard has **no error boundary / not-found page** → any render throw white-screens the app | `apps/web-dashboard/src/app/` (missing `error.tsx` etc.); `page.tsx:431` |
 | [WARP-577](https://warp-lab.atlassian.net/browse/WARP-577) | High | Setup-detection **fails open into the wizard** → provisioned box stranded on `/setup` after a transient error | `lib/api.ts:65-70`, `AuthGate.tsx:22-25` |
 | [WARP-221](https://warp-lab.atlassian.net/browse/WARP-221) | — | **Enriched** (not new): camera-discovery top-level `discovery_loop` is a banned `while True` scheduler not previously in scope | `camera-discovery/main.py:570`; no `apscheduler` in requirements |

@@ -1,18 +1,23 @@
 /**
+ * ShareDialog tests — UNION of two independent suites:
+ *
  * WARP-879 / WS-1 — ShareDialog internal-sharing UI.
+ *   The dialog gains a Person / Link mode. In Person mode it loads the
+ *   household roster from fetchShareRecipients() and creates a named-member
+ *   share (shareType:0 + shareWith). Link mode keeps the public-link path
+ *   (shareType:3) unchanged.
+ *   Covered:
+ *     - defaults to Person mode and loads recipients on open
+ *     - Create in Person mode sends { shareType:0, shareWith, permissions }
+ *     - a person share (shareType:0) renders a chip, no copy-link affordance
+ *     - Link mode still creates with shareType:3
+ *     - empty roster → friendly empty state (no error styling)
+ *     - Create is disabled until a recipient is selected (Person mode)
  *
- * The dialog gains a Person / Link mode. In Person mode it loads the
- * household roster from fetchShareRecipients() and creates a named-member
- * share (shareType:0 + shareWith). Link mode keeps the public-link path
- * (shareType:3) unchanged.
- *
- * Covered:
- *   - defaults to Person mode and loads recipients on open
- *   - Create in Person mode sends { shareType:0, shareWith, permissions }
- *   - a person share (shareType:0) renders a chip, no copy-link affordance
- *   - Link mode still creates with shareType:3
- *   - empty roster → friendly empty state (no error styling)
- *   - Create is disabled until a recipient is selected (Person mode)
+ * WARP-883 (WS-1 fast-follow) — ShareDialog renders shares ALREADY on the file.
+ *   The Files page now fetches the file's existing shares and passes them as
+ *   `existingShares`; this pins that the dialog lists them on open (with their
+ *   link + permissions).
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
@@ -79,6 +84,27 @@ function makeLinkShare(overrides: Partial<ShareDetail> = {}): ShareDetail {
     uidOwner: "stef",
     ownerDisplayName: "Stefan",
     stime: 1712860391,
+    ...overrides,
+  };
+}
+
+// WARP-883 factory — a public-link share with droplet-ai.local host + null stime.
+function share(overrides: Partial<ShareDetail> = {}): ShareDetail {
+  return {
+    id: 7,
+    url: "https://droplet-ai.local/s/abc123",
+    token: "abc123",
+    shareType: 3,
+    permissions: 1,
+    path: "/Documents/report.pdf",
+    expireDate: null,
+    hasPassword: false,
+    note: null,
+    shareWith: null,
+    shareWithDisplayName: null,
+    uidOwner: "alice",
+    ownerDisplayName: "Alice",
+    stime: null,
     ...overrides,
   };
 }
@@ -176,5 +202,36 @@ describe("WARP-879 — ShareDialog internal sharing", () => {
 
     fireEvent.click(screen.getByText("Romain"));
     expect(createBtn).not.toBeDisabled();
+  });
+});
+
+describe("ShareDialog — existing shares (WS-1 fast-follow)", () => {
+  it("lists the pre-existing share link on open", () => {
+    render(
+      <ShareDialog
+        filePath="/Documents/report.pdf"
+        fileName="report.pdf"
+        existingShares={[share()]}
+        onClose={() => {}}
+      />
+    );
+    // #692's rewrite renames the existing-shares heading "Active links" → "Shared with"
+    // (the section now also covers named-member shares, not only public links).
+    expect(screen.getByText(/shared with/i)).toBeInTheDocument();
+    expect(
+      screen.getByDisplayValue("https://droplet-ai.local/s/abc123")
+    ).toBeInTheDocument();
+  });
+
+  it("shows no existing-shares section when there are no existing shares", () => {
+    render(
+      <ShareDialog
+        filePath="/Documents/report.pdf"
+        fileName="report.pdf"
+        existingShares={[]}
+        onClose={() => {}}
+      />
+    );
+    expect(screen.queryByText(/shared with/i)).not.toBeInTheDocument();
   });
 });

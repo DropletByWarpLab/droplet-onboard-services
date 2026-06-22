@@ -46,9 +46,8 @@ services/routing/       FastAPI — OpenWrt router control via ubus JSON-RPC
 services/file-indexer/  Python watchdog — filesystem indexer + embedder (formerly `file-sync`)
 services/camera-discovery/ Python FastAPI — ONVIF/RTSP camera auto-discovery
 services/switch/        FastAPI — Managed switch control (pluggable driver: managed-switch / future ASIC)
-services/pm/            Python FastAPI sidecar wrapping upstream Plane (AGPL-3) — embedded PM stack per ADR-010
 openwrt/                OpenWrt image builder + config overlay for the router host
-docker/                 Nginx, PostgreSQL 16, Redis 7, MQTT, Nextcloud 29, Frigate NVR, Plane (pm-web/api/worker + dedicated postgres-pm/redis-pm)
+docker/                 Nginx, PostgreSQL 16, Redis 7, MQTT, Nextcloud 29, Frigate NVR
 ```
 
 ## Tech stack
@@ -185,9 +184,6 @@ Full per-variable reference (defaults, ports, resource limits):
 - `RATE_LIMIT_TRUSTED_PROXIES` (ai-gateway) defaults empty → trust no
   forwarded client-IP headers (safe). Set to the nginx edge subnet to
   restore per-client rate buckets through the proxy.
-- `DROPLET_PM_ADMIN_TOKEN` is orchestrator-only — **never** exposed to
-  the dashboard or LLM agent. `DROPLET_PM_WEBHOOK_SECRET` empty →
-  webhook receiver fails CLOSED.
 - `FILES_API_URL` is the MCP file-tools target (default
   `http://orchestrator:3000/api/files`). Raw Nextcloud cannot serve
   these tools — see WARP-861.

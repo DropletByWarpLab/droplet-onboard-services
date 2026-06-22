@@ -1,7 +1,5 @@
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
-
-import { getWorkItem, PlaneApiError } from "./pm-client.js";
-import { ensurePlaneToken } from "./ensure-token.js";
+import { callOrch, OrchPmError, toPlaneWorkItem } from "./pm-orch.js";
 
 const inputSchema = {
   type: "object",
@@ -21,21 +19,18 @@ interface Args {
 }
 
 async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-  // WARP-867: inject the orchestrator-minted Plane service token before
-  // the first /api/v1/ call (DROPLET_PM_ADMIN_TOKEN was never valid).
-  await ensurePlaneToken(ctx);
-  const { workspace_slug, project_id, work_item_id } = args as unknown as Args;
+  const { work_item_id } = args as unknown as Args;
   try {
-    const work_item = await getWorkItem(workspace_slug, project_id, work_item_id);
-    return { ok: true, data: { work_item } };
+    const data = await callOrch<{ work_item: Parameters<typeof toPlaneWorkItem>[0] }>(
+      ctx,
+      "get",
+      `/api/pm/work-items/${encodeURIComponent(work_item_id)}`,
+    );
+    return { ok: true, data: { work_item: toPlaneWorkItem(data.work_item) } };
   } catch (err) {
-    if (err instanceof PlaneApiError) {
+    if (err instanceof OrchPmError) {
       const code = err.status === 404 ? "PM_WORK_ITEM_NOT_FOUND" : "PM_API_ERROR";
-      return {
-        ok: false,
-        status: "error",
-        error: { code, message: err.message },
-      };
+      return { ok: false, status: "error", error: { code, message: err.message } };
     }
     throw err;
   }
