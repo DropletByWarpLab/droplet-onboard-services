@@ -34,6 +34,11 @@ import {
 } from "../services/nextcloud.client.js";
 import type { BulkOperationResult } from "../types/index.js";
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
+import {
+  ncMintEditorSession,
+  docServerHealthy,
+  DocServerUnavailableError,
+} from "../services/docserver.client.js";
 import { resolveNcToken } from "../services/nextcloud-session.service.js";
 import { publish } from "../services/mqtt.service.js";
 import { config } from "../config.js";
@@ -145,6 +150,13 @@ function handleFileError(
     res.status(401).json({ error: err.message });
     return;
   }
+  // WARP-882: the document-server engine is an upstream dependency. When it is
+  // disabled or unreachable the correct status is 503, with the typed error's
+  // wire shape so the dashboard renders a calm "editing unavailable" state.
+  if (err instanceof DocServerUnavailableError) {
+    res.status(err.status).json(err.toJSON());
+    return;
+  }
   // A 5xx OCS status means Nextcloud is down, same as a connectivity failure —
   // so on a read endpoint (degradeTo supplied) it joins the degrade path below
   // instead of surfacing the 5xx (see ORDERING CONTRACT above).
@@ -173,6 +185,117 @@ function handleFileError(
 
 export function createFilesRouter(prisma: PrismaClient): Router {
   const router = Router();
+
+  // ════════════════════════════════════════════════════════════════════
+  // WARP-882 / WS-4 — in-browser editing + co-authoring (OnlyOffice)
+  // ════════════════════════════════════════════════════════════════════
+  // The configured engine (OnlyOffice Document Server CE today; an OEM/
+  // commercial license is required before GA — see docs/ADR-021 `docs`
+  // profile + the docserver.client.ts header) is reached via the Nextcloud
+  // `onlyoffice` connector over a WOPI-style handshake. The orchestrator stays
+  // engine-agnostic: it only mints sessions + reports status.
+
+  // The engine identifier surfaced on /files/docs/status. Config drives the
+  // actual engine; this string is informational for the dashboard.
+  const DOCS_ENGINE = "onlyoffice";
+
+  // 10s-cached doc-server readiness so the dashboard can gate the "Edit" entry
+  // without hammering the engine's health endpoint on every files-page load.
+  const DOCS_STATUS_CACHE_KEY = "files:docs:status";
+  const DOCS_STATUS_TTL = 10;
+
+  // ── Document-server status (GET /api/files/docs/status) ──
+  //
+  // Registered BEFORE the `:filePath(*)/editor-session` wildcard so the literal
+  // `docs/status` path is never captured as a file path. Returns
+  // { state: "ready"|"unavailable", engine }. Never 500s — an unhealthy engine
+  // is a "unavailable" state, not an error, so the files page renders calmly.
+  router.get(
+    "/files/docs/status",
+    requireRole("owner", "admin", "family"),
+    async (_req: Request, res: Response, next: NextFunction) => {
+      try {
+        const cached = await cacheGet<{ state: string; engine: string }>(
+          DOCS_STATUS_CACHE_KEY,
+        );
+        if (cached) {
+          res.json(cached);
+          return;
+        }
+        const healthy = await docServerHealthy();
+        const payload = {
+          state: healthy ? "ready" : "unavailable",
+          engine: DOCS_ENGINE,
+        };
+        await cacheSet(DOCS_STATUS_CACHE_KEY, payload, DOCS_STATUS_TTL);
+        res.json(payload);
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // ── Editor session (GET /api/files/:path/editor-session) ──
+  //
+  // Decides edit-vs-view SERVER-SIDE and never trusts a client-sent mode:
+  //   - `edit` if the caller OWNS the file (not present in shared-with-me), OR
+  //     it is shared to them WITH the Nextcloud update permission bit (2).
+  //   - `view` otherwise.
+  // A client `?mode=` query is deliberately ignored. Error mapping (via
+  // handleFileError): missing NC token → 401, DocServerUnavailableError → 503,
+  // not-found file → 404.
+  router.get(
+    "/files/:filePath(*)/editor-session",
+    requireRole("owner", "admin", "family"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const filePath = req.params.filePath
+          ? `/${req.params.filePath}`.replace(/\/+/g, "/")
+          : "";
+        if (filePath === "" || filePath === "/") {
+          res.status(400).json({ error: "filePath path-param is required" });
+          return;
+        }
+        const token = await getToken(req);
+        const user = getUser(req);
+
+        // Edit-vs-view: default to the owner's edit capability, then DOWNGRADE
+        // to the share's permission if this is a shared-with-me item. We never
+        // UPGRADE based on client input. `ncListSharedWithMe` returns the
+        // caller's inbound shares with their granted permission bitmask
+        // (bit 2 = update); a file the caller owns is absent from that list, so
+        // owners keep edit.
+        const NC_PERMISSION_UPDATE = 2;
+        let mode: "edit" | "view" = "edit";
+        const shares = await ncListSharedWithMe(token);
+        const inboundShare = shares.find((s) => s.path === filePath);
+        if (inboundShare) {
+          mode =
+            (inboundShare.permissions & NC_PERMISSION_UPDATE) === NC_PERMISSION_UPDATE
+              ? "edit"
+              : "view";
+        }
+
+        const session = await ncMintEditorSession(token, user, filePath, mode);
+        res.json(session);
+      } catch (err) {
+        // The doc-server client throws a plain Error("File not found: …") when
+        // the path resolves to no Nextcloud fileId — surface it as 404 here
+        // (mirrors the versions route's explicit null-fileId → 404), keeping
+        // the shared handleFileError 404 matcher narrow. DocServerUnavailable
+        // (→503) and MissingNcToken (→401) flow through handleFileError.
+        if (
+          err instanceof Error &&
+          !(err instanceof DocServerUnavailableError) &&
+          /file not found/i.test(err.message)
+        ) {
+          res.status(404).json({ error: "File not found" });
+          return;
+        }
+        handleFileError(err, res, next);
+      }
+    },
+  );
 
   // ── WARP-473 — file citations (related chats for §2.3 file drawer)
   // GET /api/files/:path(*)/citations?limit=20 — returns recent

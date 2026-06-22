@@ -101,7 +101,7 @@ const ALL_ROLES: Role[] = ["owner", "admin", "family", "guest", "service"];
 
 interface GuardedRoute {
   /** HTTP method on the supertest agent. */
-  method: "post" | "put" | "patch" | "delete";
+  method: "get" | "post" | "put" | "patch" | "delete";
   /** URL path mounted under /api on the test app. */
   path: string;
   /** Allowed roles per ADR-004 §3. */
@@ -200,6 +200,13 @@ const MATRIX: GuardedRoute[] = [
   { method: "post", path: "/api/files/mkdir", allowed: ["owner", "admin", "family"] },
   { method: "post", path: "/api/files/rename", allowed: ["owner", "admin", "family"] },
   { method: "post", path: "/api/files/move", allowed: ["owner", "admin", "family"] },
+
+  // ── files: in-browser editing (WARP-882) ── (owner + admin + family) ──
+  // Both are GETs but guarded: opening an editor session is a household-member
+  // capability (guests don't co-author), and the status read gates the dashboard
+  // "Edit" affordance. service is excluded — doc editing is a human action.
+  { method: "get", path: "/api/files/docs/status", allowed: ["owner", "admin", "family"] },
+  { method: "get", path: "/api/files/report.docx/editor-session", allowed: ["owner", "admin", "family"] },
 
   // ── llm sessions (own) ── ──
   // POST /llm/chat: includes `service` because voice-io's principal
