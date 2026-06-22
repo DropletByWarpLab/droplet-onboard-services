@@ -15,7 +15,7 @@ import {
   usePerson,
 } from "./bits";
 import { fmtISODate, isOverdue } from "./config";
-import { useComments, useSubIssues, pmActions } from "./usePm";
+import { useActivity, useComments, useSubIssues, pmActions } from "./usePm";
 import type { PmWorkItem } from "./types";
 
 function PropRow({
@@ -105,6 +105,23 @@ function relTime(iso: string): string {
   return `${Math.round(hrs / 24)}d ago`;
 }
 
+function humanizeActivity(verb: string, field: string | null): string {
+  switch (verb) {
+    case "created":
+      return "created this item";
+    case "state_changed":
+      return "changed the state";
+    case "commented":
+      return "added a comment";
+    case "assigned":
+      return "changed assignees";
+    case "updated":
+      return field === "priority" ? "changed the priority" : "updated the item";
+    default:
+      return verb.replace(/_/g, " ");
+  }
+}
+
 function Composer({ itemId, onSent }: { itemId: string; onSent: () => void }): JSX.Element {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -150,8 +167,10 @@ function DetailBody({ item, onChanged }: { item: PmWorkItem; onChanged: () => vo
   const person = usePerson();
   const { subIssues } = useSubIssues(item.projectId, item.id);
   const { comments, mutate: mutateComments } = useComments(item.id);
+  const { activity } = useActivity(item.id);
   const subs = subIssues ?? [];
   const list = comments ?? [];
+  const acts = activity ?? [];
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -253,24 +272,31 @@ function DetailBody({ item, onChanged }: { item: PmWorkItem; onChanged: () => vo
       </div>
 
       <div>
-        <div className="pm-sect" style={{ marginBottom: 8 }}>
-          Activity
+        <div className="pm-sect" style={{ marginBottom: 12 }}>
+          Activity <span className="sx">{acts.length}</span>
         </div>
-        <div
-          className="pm-row"
-          style={{
-            gap: 9,
-            padding: "12px 14px",
-            background: "var(--bg-tint)",
-            border: "1px dashed var(--border)",
-            borderRadius: 10,
-            fontSize: 12.5,
-            color: "var(--text-3)",
-          }}
-        >
-          <PmIcon name="clock" size={15} />
-          Activity history is recorded but you can&apos;t view it here yet.
-        </div>
+        {acts.length ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            {acts.map((a) => (
+              <div key={a.id} className="pm-row" style={{ gap: 9, alignItems: "flex-start" }}>
+                {a.actorId ? (
+                  <Avatar id={a.actorId} size={22} />
+                ) : (
+                  <span className="pm-ai-av" style={{ width: 22, height: 22, fontSize: 8 }}>AI</span>
+                )}
+                <div style={{ flex: 1, minWidth: 0, fontSize: 12.5, color: "var(--text-2)" }}>
+                  <span style={{ fontWeight: 600, color: "var(--text)" }}>
+                    {a.actorId ? person(a.actorId).name : "Droplet AI"}
+                  </span>{" "}
+                  {humanizeActivity(a.verb, a.field)}
+                  <span style={{ color: "var(--text-4)", marginLeft: 6 }}>{relTime(a.createdAt)}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div style={{ fontSize: 13, color: "var(--text-4)" }}>No activity yet.</div>
+        )}
       </div>
     </div>
   );

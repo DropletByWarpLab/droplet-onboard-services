@@ -869,3 +869,39 @@ export async function addComment(
   });
   return mapComment(row);
 }
+
+// ── Activity feed ────────────────────────────────────────────────────────────
+
+export interface ApiActivity {
+  id: string;
+  workItemId: string;
+  actorId: string | null;
+  verb: string;
+  field: string | null;
+  oldValue: string | null;
+  newValue: string | null;
+  createdAt: string;
+}
+
+/** Append-only activity for a work item, oldest to newest (timeline order). */
+export async function listActivity(
+  prisma: PrismaClient,
+  workItemId: string,
+): Promise<ApiActivity[]> {
+  const item = await prisma.pmWorkItem.findUnique({ where: { id: workItemId } });
+  if (!item) throw new Error("work_item_not_found");
+  const rows = await prisma.pmActivity.findMany({
+    where: { workItemId },
+    orderBy: { createdAt: "asc" },
+  });
+  return rows.map((r) => ({
+    id: r.id,
+    workItemId: r.workItemId,
+    actorId: r.actorId,
+    verb: r.verb,
+    field: r.field,
+    oldValue: r.oldValue,
+    newValue: r.newValue,
+    createdAt: r.createdAt.toISOString(),
+  }));
+}
