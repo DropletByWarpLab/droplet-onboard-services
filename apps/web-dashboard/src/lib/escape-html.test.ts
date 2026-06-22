@@ -13,8 +13,24 @@ describe("escapeHtml", () => {
   });
 
   it("neutralises a script tag so it cannot be parsed as markup", () => {
-    expect(escapeHtml("<script>alert(1)</script>")).toBe(
-      "&lt;script&gt;alert(1)&lt;/script&gt;",
+    expect(escapeHtml("<script>steal(1)</script>")).toBe(
+      "&lt;script&gt;steal(1)&lt;/script&gt;",
+    );
+  });
+
+  it("neutralises an inline on* event handler so it cannot fire", () => {
+    // The `<` and `>` are escaped, so the browser never builds an <img>
+    // element and the onerror= attribute can never run.
+    expect(escapeHtml('<img src=x onerror=steal()>')).toBe(
+      "&lt;img src=x onerror=steal()&gt;",
+    );
+  });
+
+  it("neutralises a javascript: scheme anchor so the tag cannot be built", () => {
+    // Escaping the angle brackets means the javascript: href is inert text,
+    // never an <a> the browser will navigate.
+    expect(escapeHtml('<a href="javascript:steal()">x</a>')).toBe(
+      "&lt;a href=\"javascript:steal()\"&gt;x&lt;/a&gt;",
     );
   });
 
