@@ -261,7 +261,7 @@ export function SearchBar({ onPickResult }: SearchBarProps) {
                 aria-label={seg.label}
                 title={seg.title}
                 onClick={() => setMode(seg.id)}
-                className={`flex items-center gap-1 px-2 py-1.5 rounded-sm type-caption-1 whitespace-nowrap transition-colors duration-200 ${
+                className={`flex items-center gap-1 px-2 py-1.5 rounded-sm type-caption-1 whitespace-nowrap transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-inset ${
                   active
                     ? "bg-accent-subtle text-accent font-medium"
                     : "text-label-tertiary hover:text-label-primary"
