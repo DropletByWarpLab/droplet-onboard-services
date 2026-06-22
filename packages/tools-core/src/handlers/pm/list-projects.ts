@@ -17,12 +17,13 @@ interface Args {
 }
 
 async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-  const { workspace_slug } = args as unknown as Args;
+  const { workspace_slug, per_page } = args as unknown as Args;
+  const url = `/api/pm/projects?workspace=${encodeURIComponent(workspace_slug)}${per_page !== undefined ? `&per_page=${per_page}` : ""}`;
   try {
     const data = await callOrch<{ projects?: Parameters<typeof toPlaneProject>[0][] }>(
       ctx,
       "get",
-      `/api/pm/projects?workspace=${encodeURIComponent(workspace_slug)}`,
+      url,
     );
     return { ok: true, data: { projects: (data.projects ?? []).map(toPlaneProject) } };
   } catch (err) {
