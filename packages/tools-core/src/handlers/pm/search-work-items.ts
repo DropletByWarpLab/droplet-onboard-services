@@ -1,4 +1,5 @@
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
+import { callOrch, OrchPmError, toPlaneWorkItem } from "./pm-orch.js";
 
 const inputSchema = {
   type: "object",
@@ -19,35 +20,28 @@ interface Args {
 
 async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
   const { workspace_slug, query, per_page } = args as unknown as Args;
-  // WARP-867: Plane CE's /api/v1/ has no search — the orchestrator proxies
-  // the app API's global search (GET /api/pm/search → results.issue).
-  const params = new URLSearchParams({ workspace_slug, query });
-  const res = await ctx.http.orchestrator.get(`/api/pm/search?${params.toString()}`, {
-    headers: { Accept: "application/json" },
-  });
-  if (!res.ok) {
-    const body = (await res.json().catch(() => ({}))) as { error?: string };
-    return {
-      ok: false,
-      status: "error",
-      error: {
-        code: "PM_API_ERROR",
-        message: body.error ?? `orchestrator returned ${res.status}`,
-      },
-    };
+  const params = new URLSearchParams({ workspace: workspace_slug, q: query });
+  if (per_page) params.set("per_page", String(per_page));
+  try {
+    const data = await callOrch<{ work_items?: Parameters<typeof toPlaneWorkItem>[0][] }>(
+      ctx,
+      "get",
+      `/api/pm/work-items?${params.toString()}`,
+    );
+    const items = (data.work_items ?? []).map(toPlaneWorkItem);
+    return { ok: true, data: { work_items: per_page ? items.slice(0, per_page) : items } };
+  } catch (err) {
+    if (err instanceof OrchPmError) {
+      return { ok: false, status: "error", error: { code: "PM_API_ERROR", message: err.message } };
+    }
+    throw err;
   }
-  const data = (await res.json()) as { work_items: unknown[] };
-  const items = data.work_items ?? [];
-  return {
-    ok: true,
-    data: { work_items: per_page ? items.slice(0, per_page) : items },
-  };
 }
 
 const tool: Tool = {
   name: "pm_search_work_items",
   description:
-    "Free-text search over work items in a Plane workspace. Returns up to 100 matches. Read-only.",
+    "Free-text search over work items in a project workspace. Returns up to 100 matches. Read-only.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

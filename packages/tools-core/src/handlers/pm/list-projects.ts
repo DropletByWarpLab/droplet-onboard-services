@@ -1,7 +1,5 @@
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
-
-import { listProjects, PlaneApiError } from "./pm-client.js";
-import { ensurePlaneToken } from "./ensure-token.js";
+import { callOrch, OrchPmError, toPlaneProject } from "./pm-orch.js";
 
 const inputSchema = {
   type: "object",
@@ -19,20 +17,17 @@ interface Args {
 }
 
 async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-  // WARP-867: inject the orchestrator-minted Plane service token before
-  // the first /api/v1/ call (DROPLET_PM_ADMIN_TOKEN was never valid).
-  await ensurePlaneToken(ctx);
-  const { workspace_slug, per_page } = args as unknown as Args;
+  const { workspace_slug } = args as unknown as Args;
   try {
-    const projects = await listProjects(workspace_slug, per_page);
-    return { ok: true, data: { projects } };
+    const data = await callOrch<{ projects?: Parameters<typeof toPlaneProject>[0][] }>(
+      ctx,
+      "get",
+      `/api/pm/projects?workspace=${encodeURIComponent(workspace_slug)}`,
+    );
+    return { ok: true, data: { projects: (data.projects ?? []).map(toPlaneProject) } };
   } catch (err) {
-    if (err instanceof PlaneApiError) {
-      return {
-        ok: false,
-        status: "error",
-        error: { code: "PM_API_ERROR", message: err.message },
-      };
+    if (err instanceof OrchPmError) {
+      return { ok: false, status: "error", error: { code: "PM_API_ERROR", message: err.message } };
     }
     throw err;
   }
@@ -41,7 +36,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "pm_list_projects",
   description:
-    "List projects under a Plane workspace. Returns project id, name, identifier, and parent workspace. Read-only.",
+    "List projects under a workspace. Returns project id, name, identifier, and parent workspace. Read-only.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

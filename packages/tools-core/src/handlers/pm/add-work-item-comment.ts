@@ -1,7 +1,5 @@
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
-
-import { addWorkItemComment, PlaneApiError } from "./pm-client.js";
-import { ensurePlaneToken } from "./ensure-token.js";
+import { callOrch, OrchPmError } from "./pm-orch.js";
 
 const inputSchema = {
   type: "object",
@@ -23,26 +21,19 @@ interface Args {
 }
 
 async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-  // WARP-867: inject the orchestrator-minted Plane service token before
-  // the first /api/v1/ call (DROPLET_PM_ADMIN_TOKEN was never valid).
-  await ensurePlaneToken(ctx);
-  const { workspace_slug, project_id, work_item_id, comment_html } = args as unknown as Args;
+  const { work_item_id, comment_html } = args as unknown as Args;
   try {
-    const comment = await addWorkItemComment(
-      workspace_slug,
-      project_id,
-      work_item_id,
-      comment_html,
+    const data = await callOrch<{ comment: unknown }>(
+      ctx,
+      "post",
+      `/api/pm/work-items/${encodeURIComponent(work_item_id)}/comments`,
+      { comment_html },
     );
-    return { ok: true, data: { comment } };
+    return { ok: true, data: { comment: data.comment } };
   } catch (err) {
-    if (err instanceof PlaneApiError) {
+    if (err instanceof OrchPmError) {
       const code = err.status === 404 ? "PM_WORK_ITEM_NOT_FOUND" : "PM_API_ERROR";
-      return {
-        ok: false,
-        status: "error",
-        error: { code, message: err.message },
-      };
+      return { ok: false, status: "error", error: { code, message: err.message } };
     }
     throw err;
   }
@@ -51,7 +42,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "pm_add_work_item_comment",
   description:
-    "Append an HTML comment to a Plane work item. Requires confirmation. Returns the new comment id.",
+    "Append an HTML comment to a work item. Requires confirmation. Returns the new comment id.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

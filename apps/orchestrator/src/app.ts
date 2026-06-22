@@ -259,9 +259,9 @@ export function createApp(prisma: PrismaClient) {
   // WARP-867 — Plane service-token mint + app-API proxies (workspace
   // list, search) for the v1 surfaces Plane CE doesn't provide.
   app.use(createPmProxyRouter());
-  // WARP-513 — read-only mobile wrappers around Plane upstream
+  // ADR-026 — read-only mobile wrappers over the native PM service
   // (workspaces, projects, work-items). iOS/Android/Windows consume.
-  app.use(createPmMobileRouter());
+  app.use(createPmMobileRouter(prisma));
   // WARP-474 (G2): smart-home scenes CRUD + batch-run. Run dispatches
   // each action through `sendMatterCommand` — partial-failure tolerant,
   // per-action results returned to the dashboard.

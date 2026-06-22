@@ -1,7 +1,5 @@
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
-
-import { createWorkItem, PlaneApiError } from "./pm-client.js";
-import { ensurePlaneToken } from "./ensure-token.js";
+import { callOrch, OrchPmError, toPlaneWorkItem } from "./pm-orch.js";
 
 const inputSchema = {
   type: "object",
@@ -35,26 +33,18 @@ interface Args {
 }
 
 async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-  // WARP-867: inject the orchestrator-minted Plane service token before
-  // the first /api/v1/ call (DROPLET_PM_ADMIN_TOKEN was never valid).
-  await ensurePlaneToken(ctx);
-  const { workspace_slug, project_id, name, description_html, assignees, labels } =
-    args as unknown as Args;
+  const { project_id, name, description_html, assignees, labels } = args as unknown as Args;
   try {
-    const work_item = await createWorkItem(workspace_slug, project_id, {
-      name,
-      description_html,
-      assignees,
-      labels,
-    });
-    return { ok: true, data: { work_item } };
+    const data = await callOrch<{ work_item: Parameters<typeof toPlaneWorkItem>[0] }>(
+      ctx,
+      "post",
+      `/api/pm/projects/${encodeURIComponent(project_id)}/work-items`,
+      { name, description_html, assignees, label_ids: labels },
+    );
+    return { ok: true, data: { work_item: toPlaneWorkItem(data.work_item) } };
   } catch (err) {
-    if (err instanceof PlaneApiError) {
-      return {
-        ok: false,
-        status: "error",
-        error: { code: "PM_API_ERROR", message: err.message },
-      };
+    if (err instanceof OrchPmError) {
+      return { ok: false, status: "error", error: { code: "PM_API_ERROR", message: err.message } };
     }
     throw err;
   }
@@ -63,7 +53,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "pm_create_work_item",
   description:
-    "Create a Plane work item (issue) under a project. Requires confirmation. Returns the created work item with its id.",
+    "Create a work item (issue) under a project. Requires confirmation. Returns the created work item with its id.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

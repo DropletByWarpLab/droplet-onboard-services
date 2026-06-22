@@ -532,6 +532,32 @@ export async function getWorkItem(prisma: PrismaClient, id: string): Promise<Api
   return mapWorkItem(row, project?.identifier ?? "");
 }
 
+/** Workspace-wide free-text search over work-item name + description. Backs the
+ *  `pm_search_work_items` MCP tool, which keys on workspace_slug (not project). */
+export async function searchWorkItems(
+  prisma: PrismaClient,
+  opts: { workspaceSlug?: string; q: string; perPage?: number },
+): Promise<ApiWorkItem[]> {
+  const q = opts.q.trim();
+  if (q.length === 0) return [];
+  const perPage = Math.max(1, Math.min(200, opts.perPage ?? 100));
+  const where: Prisma.PmWorkItemWhereInput = {
+    archivedAt: null,
+    OR: [
+      { name: { contains: q, mode: "insensitive" } },
+      { descriptionHtml: { contains: q, mode: "insensitive" } },
+    ],
+  };
+  if (opts.workspaceSlug) where.project = { workspace: { slug: opts.workspaceSlug } };
+  const rows = await prisma.pmWorkItem.findMany({
+    where,
+    include: { ...WORK_ITEM_INCLUDE, project: { select: { identifier: true } } },
+    orderBy: { updatedAt: "desc" },
+    take: perPage,
+  });
+  return rows.map((r) => mapWorkItem(r, r.project.identifier));
+}
+
 export async function createWorkItem(
   prisma: PrismaClient,
   actorId: string | null,
