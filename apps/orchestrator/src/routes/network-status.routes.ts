@@ -227,6 +227,11 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
     try {
       const entries = await getDnsHostnames();
       res.json({ entries });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // --- DHCP pool (range + lease time) ---
   // Read is unguarded; the write is Tier 2 (a LAN address-map change that can
   // strand clients) → 202 + token → /network/command/confirm dispatches it.
@@ -252,6 +257,25 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
           typeof ip !== "string"
         ) {
           return res.status(400).json({ error: "Missing 'hostname' or 'ip'" });
+        }
+
+        const userId = req.user?.id;
+        const result = await evaluateNetworkCommand(
+          prisma, "dhcp.hostname", "set_dns_hostname", { hostname, ip }, userId
+        );
+
+        if ("blocked" in result && result.blocked) {
+          return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
+        }
+
+        const op = await addDnsHostname(hostname, ip);
+        res.json({ status: "ok", hostname, ip, tier: result.tier, operationId: op.operationId });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
   // dnsmasq lease-time grammar: positive integer + unit (s/m/h/d/w) or
   // `infinite`. Mirrors the routing DhcpPoolRequest validator so junk is
   // rejected before any router change (and before a token is minted).
@@ -281,9 +305,6 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
 
         const userId = req.user?.id;
         const result = await evaluateNetworkCommand(
-          prisma, "dhcp.hostname", "set_dns_hostname", { hostname, ip }, userId
-        );
-
           prisma,
           "dhcp.pool",
           "set_dhcp_pool",
@@ -306,8 +327,6 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
           return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
         }
 
-        const op = await addDnsHostname(hostname, ip);
-        res.json({ status: "ok", hostname, ip, tier: result.tier, operationId: op.operationId });
         const op = await setDhcpPool(start, limit, leasetime);
         res.json({ status: "ok", tier: result.tier, operationId: op.operationId });
       } catch (err) {

@@ -620,6 +620,9 @@ export async function deleteDnsHostname(hostname: string): Promise<WriteResult> 
     `/dhcp/hostnames/${encodeURIComponent(hostname)}`,
     { method: "DELETE", label: "Delete DNS hostname" },
   );
+  return opFrom(res);
+}
+
 /** LAN DHCP pool range + lease time. Each field can be null when the box omits
  *  it (a default applies — not "broken"). */
 export interface DhcpPool {
