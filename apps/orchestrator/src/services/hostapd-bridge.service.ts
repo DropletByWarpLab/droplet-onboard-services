@@ -239,6 +239,168 @@ export async function applyWifi(
   return { operationId: null };
 }
 
+// ---------------------------------------------------------------------------
+// Guest Wi-Fi (single-box second BSS)
+// ---------------------------------------------------------------------------
+//
+// On the single-box hostapd shape the guest network is an OPTIONAL second BSS on
+// the same radio. The orchestrator drives it through the device-bridge's
+// auth-gated /openwrt/wifi/guest endpoints — POST to create/update, DELETE to
+// tear down, GET for status — exactly the way the home-AP write goes through
+// /openwrt/wifi/hostapd. The bridge shells the repo-tracked host script
+// (droplet-set-guest-wifi.sh), whose hard validation is the real gate. No
+// staging is needed here: a guest create carries both SSID + PSK in one call.
+
+const GUEST_LABEL = "Guest Wi-Fi";
+
+/** Guest Wi-Fi status as the device-bridge reports it. `supported` reflects the
+ *  AP radio's real multi-BSS capability (false on a single-AP card like the
+ *  AX210). `password` is the guest PSK for the owner-facing join QR. */
+export interface GuestBridgeStatus {
+  configured: boolean;
+  enabled: boolean;
+  ssid: string | null;
+  password: string | null;
+  supported: boolean;
+}
+
+/**
+ * Create/update or tear down the guest network via the device-bridge.
+ * `POST {ssid, psk}` stands up the second BSS + guest subnet + isolated firewall
+ * zone; `DELETE` removes it. Mirrors applyWifi's auth posture + error mapping.
+ * Returns `{ operationId: null }` — like the hostapd home-AP write there is no
+ * UCI safe-apply/rollback record.
+ */
+async function guestBridgeWrite(
+  method: "POST" | "DELETE",
+  body?: { ssid: string; psk: string },
+): Promise<WriteResult> {
+  const token = bridgeAuthToken();
+  if (!token) {
+    // Fail closed: with no bridge auth token we cannot safely mutate the host.
+    const err = new Error(
+      "Guest Wi-Fi can't be saved — the device-bridge auth token is not configured.",
+    );
+    (err as { code?: string }).code = "BRIDGE_AUTH_UNCONFIGURED";
+    throw err;
+  }
+
+  let res: Response;
+  try {
+    const ctrl = new AbortController();
+    // Writing the env file + restarting the attach service (which respawns
+    // hostapd with the second BSS) takes a few seconds; allow a bounded window.
+    const timer = setTimeout(() => ctrl.abort(), 60_000);
+    try {
+      res = await fetch(`${BRIDGE_URL}/openwrt/wifi/guest`, {
+        method,
+        headers: {
+          "Content-Type": "application/json",
+          "X-Droplet-Auth": token,
+        },
+        ...(body ? { body: JSON.stringify(body) } : {}),
+        signal: ctrl.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch (err) {
+    if (isBridgeConnectionError(err) || isTimeoutOrAbort(err)) {
+      logger.warn({ bridgeUrl: BRIDGE_URL }, "device-bridge not reachable for guest Wi-Fi write");
+      throw RouterError.unreachable(`${GUEST_LABEL}: device-bridge not reachable`, {
+        label: GUEST_LABEL,
+        cause: err,
+      });
+    }
+    throw RouterError.unknown(
+      `${GUEST_LABEL}: ${(err as Error).message || "bridge request failed"}`,
+      { label: GUEST_LABEL },
+    );
+  }
+
+  const respBody = (await res.json().catch(() => ({}))) as {
+    ok?: boolean;
+    error?: string;
+  };
+  if (!res.ok) {
+    // Host-script validation refusal (422), wrong shape (409), or some other
+    // bridge error. Surface the bridge's actionable message; NEVER log the PSK
+    // (the request body carries it, and we only ever log the response).
+    logger.warn(
+      { status: res.status, bridgeError: respBody.error },
+      "guest Wi-Fi write rejected by device-bridge",
+    );
+    throw RouterError.unknown(
+      respBody.error || "The guest Wi-Fi change could not be applied.",
+      { label: GUEST_LABEL, status: res.status },
+    );
+  }
+
+  return { operationId: null };
+}
+
+/** Create/update the guest network (second BSS) via the device-bridge. */
+export async function applyGuestWifi(
+  ssid: string,
+  psk: string,
+): Promise<WriteResult> {
+  return guestBridgeWrite("POST", { ssid, psk });
+}
+
+/** Tear down the guest network via the device-bridge. Idempotent on the box. */
+export async function removeGuestWifi(): Promise<WriteResult> {
+  return guestBridgeWrite("DELETE");
+}
+
+/**
+ * Read the guest network's current state from the device-bridge
+ * (GET /openwrt/wifi/guest). Failure classification mirrors
+ * currentSsidFromBridge: a transport failure → UNREACHABLE; an HTTP status error
+ * → classified (401/403 → AUTH) by routerErrorFromResponse. The caller
+ * (network.service.getGuestWifi) decides how to degrade.
+ */
+export async function guestStatusFromBridge(): Promise<GuestBridgeStatus> {
+  const token = bridgeAuthToken();
+  if (!token) {
+    const err = new Error(
+      "Guest Wi-Fi status can't be read — the device-bridge auth token is not configured.",
+    );
+    (err as { code?: string }).code = "BRIDGE_AUTH_UNCONFIGURED";
+    throw err;
+  }
+  let res: Response;
+  try {
+    res = await fetch(`${BRIDGE_URL}/openwrt/wifi/guest`, {
+      signal: AbortSignal.timeout(3_000),
+      headers: { "X-Droplet-Auth": token },
+    });
+  } catch (err) {
+    if (isBridgeConnectionError(err) || isTimeoutOrAbort(err)) {
+      throw RouterError.unreachable(`${GUEST_LABEL}: device-bridge not reachable`, {
+        label: GUEST_LABEL,
+        cause: err,
+      });
+    }
+    throw RouterError.unknown(
+      `${GUEST_LABEL}: ${(err as Error).message || "bridge request failed"}`,
+      { label: GUEST_LABEL },
+    );
+  }
+  if (!res.ok) {
+    throw routerErrorFromResponse(res, GUEST_LABEL);
+  }
+  const data = (await res.json().catch(() => ({}))) as Partial<GuestBridgeStatus>;
+  return {
+    configured: Boolean(data.configured),
+    enabled: Boolean(data.enabled),
+    ssid: typeof data.ssid === "string" ? data.ssid : null,
+    password: typeof data.password === "string" ? data.password : null,
+    // Default to NOT supported when the bridge omits it (fail closed) — never
+    // claim a guest network the radio may not be able to broadcast.
+    supported: data.supported === true,
+  };
+}
+
 /** Test-only: reset the in-memory staged SSIDs between tests. */
 export function _resetForTests(): void {
   stagedSsidByUser.clear();

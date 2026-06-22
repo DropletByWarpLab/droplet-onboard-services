@@ -1200,6 +1200,46 @@ export async function fetchConnectedDevices(): Promise<ConnectedDevice[]> {
   return data.devices;
 }
 
+/** One row of the full interface enumeration. `present:false` = configured but
+ *  not live on this box (render "not on this box", never a fake "down").
+ *  `zone`/`address` are null when not joinable/reported, never fabricated. */
+export interface NetworkInterfaceRow {
+  name: string;
+  device: string | null;
+  proto: string | null;
+  address: string | null;
+  zone: string | null;
+  up: boolean;
+  present: boolean;
+}
+
+export async function fetchInterfaces(): Promise<NetworkInterfaceRow[]> {
+  const res = await authFetch(`${BASE}/api/network/interfaces`);
+  if (!res.ok) throw new Error(`Failed to fetch interfaces: ${res.status}`);
+  const data = await res.json();
+  return data.interfaces;
+}
+
+/** Read-only host-radio detail. Fields are null when iwinfo doesn't report
+ *  them (shown as "not reported"); `supported:false`/`hostRadio:true` is the
+ *  single combined-radio shape (no independent enable/disable). */
+export interface RadioDetail {
+  supported: boolean;
+  hostRadio: boolean;
+  broadcasting: boolean;
+  channel: number | null;
+  htmode: string | null;
+  txpower: number | null;
+  country: string | null;
+  mode: string | null;
+}
+
+export async function fetchRadioDetail(): Promise<RadioDetail> {
+  const res = await authFetch(`${BASE}/api/network/wifi/radio`);
+  if (!res.ok) throw new Error(`Failed to fetch radio detail: ${res.status}`);
+  return res.json();
+}
+
 export async function fetchWifiSettings(): Promise<Record<string, unknown>> {
   const res = await authFetch(`${BASE}/api/network/wifi`);
   if (!res.ok) throw new Error(`Failed to fetch wifi settings: ${res.status}`);
@@ -1265,11 +1305,113 @@ export async function setWifiChannel(channel: string): Promise<NetworkCommandRes
   return data;
 }
 
+/**
+ * Stand up the isolated guest Wi-Fi network (own SSID + firewall zone, internet
+ * only). Tier 2 — the orchestrator may answer 202 `confirmation_required`; the
+ * caller confirms via {@link confirmNetworkCommand} (the Save click is the
+ * consent) and then polls the returned operation.
+ */
+export async function createGuestWifi(
+  ssid: string,
+  password: string,
+): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/wifi/guest`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ssid, password }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to set up guest Wi-Fi");
+  return data;
+}
+
+/** Current guest Wi-Fi state. `password` is the PSK (owner/admin read) for the QR.
+ *  `supported` is false on shapes that can't provision a guest network yet (the
+ *  single-box hostapd AP) — the card then shows an honest unavailable state. */
+export interface GuestWifiStatus {
+  configured: boolean;
+  enabled: boolean;
+  ssid: string | null;
+  password: string | null;
+  supported: boolean;
+}
+
+export async function fetchGuestWifi(): Promise<GuestWifiStatus> {
+  const res = await authFetch(`${BASE}/api/network/wifi/guest`);
+  if (!res.ok) throw new Error(`Failed to fetch guest Wi-Fi status: ${res.status}`);
+  return res.json();
+}
+
+/** Tear down the guest network. Applies immediately (drops guests only). */
+export async function removeGuestWifi(): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/wifi/guest`, { method: "DELETE" });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to turn off guest Wi-Fi");
+  return data;
+}
+
+/** UPnP / NAT-PMP state. `available` false = miniupnpd isn't on the box. */
+export interface UpnpStatus {
+  available: boolean;
+  enabled: boolean;
+}
+
+export async function fetchUpnp(): Promise<UpnpStatus> {
+  const res = await authFetch(`${BASE}/api/network/upnp`);
+  if (!res.ok) throw new Error(`Failed to fetch UPnP status: ${res.status}`);
+  return res.json();
+}
+
+/** Toggle UPnP/NAT-PMP. Tier 2 — may answer 202 `confirmation_required`. */
+export async function setUpnp(enabled: boolean): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/upnp`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to update UPnP");
+  return data;
+}
+
 export async function fetchDhcpLeases(): Promise<Record<string, unknown>[]> {
   const res = await authFetch(`${BASE}/api/network/dhcp/leases`);
   if (!res.ok) throw new Error(`Failed to fetch DHCP leases: ${res.status}`);
   const data = await res.json();
   return data.leases;
+}
+
+/** LAN DHCP pool range + lease time. Fields are null when the box omits them
+ *  (a default applies — not "broken"). */
+export interface DhcpPool {
+  start: string | null;
+  limit: string | null;
+  leasetime: string | null;
+}
+
+export async function fetchDhcpPool(): Promise<DhcpPool> {
+  const res = await authFetch(`${BASE}/api/network/dhcp/pool`);
+  if (!res.ok) throw new Error(`Failed to fetch DHCP pool: ${res.status}`);
+  return res.json();
+}
+
+/** Reshape the LAN DHCP pool. Tier 2 — may answer 202 `confirmation_required`,
+ *  which the caller confirms via confirmNetworkCommand. */
+export async function setDhcpPool(
+  start: number,
+  limit: number,
+  leasetime: string,
+): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/dhcp/pool`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ start, limit, leasetime }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok && !data.requiresConfirmation) {
+    throwNetworkWriteError(data, res.status, "Failed to update DHCP pool");
+  }
+  return data;
 }
 
 export async function fetchFirewallConfig(): Promise<FirewallConfig> {
@@ -1286,6 +1428,51 @@ export async function blockNetworkDevice(mac: string, name?: string): Promise<Ne
   });
   const data = await res.json();
   if (!res.ok && !data.requiresConfirmation) throw new Error(data.error || `Failed to block device: ${res.status}`);
+  return data;
+}
+
+/** Add a generic firewall traffic rule. Tier-2 → may return confirmation_required. */
+export async function addFirewallRule(rule: {
+  name: string;
+  src: string;
+  dest: string;
+  proto?: string;
+  destPort?: string;
+  srcPort?: string;
+  target?: string;
+}): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/firewall/rule`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      name: rule.name,
+      src: rule.src,
+      dest: rule.dest,
+      proto: rule.proto ?? "tcp",
+      dest_port: rule.destPort,
+      src_port: rule.srcPort,
+      target: rule.target ?? "REJECT",
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok && !data.requiresConfirmation) throw new Error(data.error || `Failed to add rule: ${res.status}`);
+  return data;
+}
+
+/** Set a zone's default input/output/forward policy. Tier-2 → confirmation_required. */
+export async function setZonePolicy(policy: {
+  zone: string;
+  input?: string;
+  output?: string;
+  forward?: string;
+}): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/firewall/zone-policy`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(policy),
+  });
+  const data = await res.json();
+  if (!res.ok && !data.requiresConfirmation) throw new Error(data.error || `Failed to set zone policy: ${res.status}`);
   return data;
 }
 
@@ -1321,6 +1508,63 @@ export async function fetchRouterSystemInfo(): Promise<Record<string, unknown>> 
   const res = await authFetch(`${BASE}/api/network/system`);
   if (!res.ok) throw new Error(`Failed to fetch router system info: ${res.status}`);
   return res.json();
+}
+
+/** Read-only droplet-ai ubus RPC access. Scope chips reflect the live on-box
+ *  ACL. Rotate/Revoke aren't here — they're honest-gated (disabled) in the UI. */
+export interface AiNetworkAccess {
+  user: string;
+  endpoint: string;
+  readScopes: string[];
+  writeScopes: string[];
+  session: { active: boolean; expiresAt: number | null; rotates: string };
+}
+
+export async function fetchAiNetworkAccess(): Promise<AiNetworkAccess> {
+  const res = await authFetch(`${BASE}/api/network/ai-access`);
+  if (!res.ok) throw new Error(`Failed to fetch AI agent access: ${res.status}`);
+  return res.json();
+}
+
+/** Editable system controls + honest gates. `statusLed.supported` /
+ *  `country.editable` are false on shapes that can't drive them (single-box). */
+export interface SystemControls {
+  hostname: string | null;
+  ntpEnabled: boolean;
+  statusLed: { supported: boolean; enabled: boolean };
+  country: { value: string | null; editable: boolean };
+}
+
+export async function fetchSystemControls(): Promise<SystemControls> {
+  const res = await authFetch(`${BASE}/api/network/system/controls`);
+  if (!res.ok) throw new Error(`Failed to fetch system controls: ${res.status}`);
+  return res.json();
+}
+
+/** Change the hostname. Tier 2 — may answer 202 `confirmation_required`. */
+export async function setHostname(hostname: string): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/system/hostname`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ hostname }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok && !data.requiresConfirmation) {
+    throwNetworkWriteError(data, res.status, "Failed to change hostname");
+  }
+  return data;
+}
+
+/** Toggle the appliance's OpenWrt NTP daemon. Tier 1 — applies immediately. */
+export async function setNtp(enabled: boolean): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/system/ntp`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throwNetworkWriteError(data, res.status, "Failed to update time sync");
+  return data;
 }
 
 // --- Managed switch writes (ADDON-network-switch-management.md §7) ---------

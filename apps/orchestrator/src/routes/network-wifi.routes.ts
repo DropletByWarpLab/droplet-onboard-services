@@ -7,10 +7,14 @@ import type { Router } from "express";
 import type { PrismaClient } from "@prisma/client";
 import {
   getWifiSettings,
+  getRadioDetail,
   scanWifiNetworks,
   setWifiSsid,
   setWifiPassword,
   setWifiChannel,
+  setGuestWifi,
+  getGuestWifi,
+  removeGuestWifi,
 } from "../services/network.service.js";
 import { evaluateNetworkCommand } from "../services/network-safety.service.js";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
@@ -35,6 +39,19 @@ export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
     try {
       const results = await scanWifiNetworks();
       res.json({ results });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Read-only host-radio detail (iwinfo). No write, no Tier — the single-box has
+  // one combined hostapd radio that can't be toggled independently, so the
+  // service returns an honesty envelope (supported:false/hostRadio:true) and
+  // only the iwinfo fields it can actually read.
+  router.get("/network/wifi/radio", async (_req, res, next) => {
+    try {
+      const radio = await getRadioDetail();
+      res.json(radio);
     } catch (err) {
       next(err);
     }
@@ -102,6 +119,85 @@ export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
       // staged on the preceding /wifi/ssid call (single-box hostapd path).
       const op = await setWifiPassword(iface_section, password, userId);
       res.json({ status: "ok", tier: result.tier, operationId: op.operationId });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Guest Wi-Fi read — owner/admin only (the body carries the guest PSK so the
+  // dashboard can render the join QR). A guest network is the household admin's
+  // to manage; family/guest roles don't see its password.
+  router.get("/network/wifi/guest", requireRole("owner", "admin"), async (_req, res, next) => {
+    try {
+      res.json(await getGuestWifi());
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Guest Wi-Fi teardown — owner/admin only. Turning guest Wi-Fi off only drops
+  // guest devices (never the household LAN) and is trivially reversible, so it
+  // applies immediately rather than through the Tier-2 confirm arm that
+  // creating a new broadcasting SSID warrants.
+  router.delete("/network/wifi/guest", requireRole("owner", "admin"), async (_req, res, next) => {
+    try {
+      const op = await removeGuestWifi();
+      res.json({ status: "ok", operationId: op.operationId });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Guest Wi-Fi — owner/admin only. Creating the guest network stands up a new
+  // SSID on its own isolated firewall zone, so it is Tier 2 (create_guest_network
+  // in network-safety-rules): the orchestrator may answer 202 + token, the
+  // dashboard confirm IS the consent. No MCP principal — guest-network setup is
+  // a deliberate household-admin action, not an AI-driven one.
+  router.post("/network/wifi/guest", requireRole("owner", "admin"), async (req, res, next) => {
+    try {
+      // Guest Wi-Fi is supported on BOTH shapes now: the single-box hostapd path
+      // provisions a second BSS via the device-bridge (setGuestWifi branches on
+      // DROPLET_AP_MODE), and the multi-box UCI path creates the guest wifi-iface
+      // against the overlay's guest network/zone/pool. No honesty gate here — the
+      // box-side provisioning is real on each shape.
+      const { radio = "radio3", ssid, password, network = "guest" } = req.body;
+      // Mirror services/routing/schemas.py CreateGuestNetworkRequest (SSID 1–32,
+      // PSK 8–63) so the box never sees a payload hostapd would reject.
+      if (!ssid || typeof ssid !== "string") {
+        return res.status(400).json({ error: "Missing 'ssid' in request body" });
+      }
+      if (ssid.length > 32) {
+        return res.status(400).json({ error: "Guest network name (SSID) must be 32 characters or fewer" });
+      }
+      if (!password || typeof password !== "string") {
+        return res.status(400).json({ error: "Missing 'password' in request body" });
+      }
+      if (password.length < 8 || password.length > 63) {
+        return res.status(400).json({ error: "Guest Wi-Fi password must be 8–63 characters" });
+      }
+
+      const userId = req.user?.id;
+      const result = await evaluateNetworkCommand(
+        prisma, "wireless.guest", "create_guest_network", { radio, ssid, password, network }, userId
+      );
+
+      if ("requiresConfirmation" in result && result.requiresConfirmation) {
+        return res.status(202).json({
+          status: "confirmation_required",
+          operation: "create_guest_network",
+          tier: result.tier,
+          reason: result.reason,
+          confirmationToken: result.confirmationToken,
+          expiresIn: 60,
+        });
+      }
+
+      if ("blocked" in result && result.blocked) {
+        return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
+      }
+
+      const op = await setGuestWifi(radio, ssid, password, network);
+      res.json({ status: "ok", ssid, network, tier: result.tier, operationId: op.operationId });
     } catch (err) {
       next(err);
     }

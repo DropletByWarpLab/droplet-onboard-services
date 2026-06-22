@@ -1225,6 +1225,9 @@ export interface NetworkCommandResult {
   reason?: string;
   expiresIn?: number;
   operation?: string;
+  /** WARP-40: present on a directly-applied (non-confirm) write so the caller
+   *  can poll /network/operations/:id for the apply-vs-rollback outcome. */
+  operationId?: string | null;
 }
 
 // --- WARP-83: enriched device types for the card-grid view ---

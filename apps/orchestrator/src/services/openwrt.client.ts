@@ -15,12 +15,15 @@ import {
 import type {
   NetworkSummary,
   NetworkInterfaces,
+  NetworkInterfaceRow,
+  AiNetworkAccess,
   InterfaceStatus,
   WirelessStatus,
   WirelessScanResult,
   WirelessClient,
   DhcpLease,
   RouterSystemInfo,
+  SystemControls,
   FirewallZones,
   FirewallRules,
   FirewallRedirects,
@@ -33,6 +36,7 @@ import {
 
 export { RouterError } from "../types/router-error.js";
 export type { RouterErrorCode } from "../types/router-error.js";
+export type { SystemControls, NetworkInterfaceRow, AiNetworkAccess } from "../types/network.js";
 
 const logger = pino({ name: "openwrt-client" });
 
@@ -324,6 +328,16 @@ export async function fetchInterfaces(): Promise<NetworkInterfaces> {
   return routingFetchJson<NetworkInterfaces>("/network/interfaces", { label: "Router interfaces" });
 }
 
+/** Full interface enumeration (name/device/proto/address/zone/status) — reads
+ *  every configured interface, not just lan/wan. Read-only. */
+export async function fetchAllInterfaces(): Promise<NetworkInterfaceRow[]> {
+  const data = await routingFetchJson<{ interfaces: NetworkInterfaceRow[] }>(
+    "/network/interfaces/all",
+    { label: "Interface enumeration" },
+  );
+  return data.interfaces;
+}
+
 export async function fetchInterfaceStatus(name: string): Promise<InterfaceStatus> {
   return routingFetchJson<InterfaceStatus>(
     `/network/interfaces/${encodeURIComponent(name)}`,
@@ -398,6 +412,21 @@ export async function scanWireless(
   return data.results;
 }
 
+/** Raw iwinfo radio info (`GET /wireless/radio`). `{}` when the radio is absent
+ *  on this box (single-box where the live UCI/wireless source is empty). */
+export type RadioInfoWire = {
+  channel?: number;
+  htmode?: string;
+  txpower?: number;
+  country?: string;
+  mode?: string;
+  [key: string]: unknown;
+};
+
+export async function fetchRadioInfo(): Promise<RadioInfoWire> {
+  return routingFetchJson<RadioInfoWire>("/wireless/radio", { label: "Radio info" });
+}
+
 export async function fetchWirelessClients(device?: string): Promise<WirelessClient[]> {
   const query = device ? `?device=${encodeURIComponent(device)}` : "";
   const data = await routingFetchJson<{ clients: WirelessClient[] }>(
@@ -445,6 +474,68 @@ export async function setWirelessChannel(
   return opFrom(res);
 }
 
+/**
+ * Create (or re-provision) the isolated guest Wi-Fi network. Maps to the
+ * routing service's `POST /wireless/guest` (CreateGuestNetworkRequest →
+ * wireless.create_guest_network), which stands up the guest SSID on its own
+ * firewall zone — internet only, no reach into the main LAN.
+ */
+export async function createGuestNetwork(
+  radio: string,
+  ssid: string,
+  password: string,
+  network: string = "guest"
+): Promise<WriteResult> {
+  const res = await postJson(
+    "/wireless/guest",
+    { radio, ssid, password, network },
+    "Create guest network",
+  );
+  return opFrom(res);
+}
+
+export interface GuestWifiStatus {
+  /** A guest wifi-iface exists. */
+  configured: boolean;
+  /** The guest iface is enabled (not uci-disabled). */
+  enabled: boolean;
+  ssid: string | null;
+  /** The guest PSK — returned so the owner dashboard can render the join QR. */
+  password: string | null;
+}
+
+export async function fetchGuestWifi(): Promise<GuestWifiStatus> {
+  return routingFetchJson<GuestWifiStatus>("/wireless/guest", {
+    label: "Guest Wi-Fi status",
+  });
+}
+
+export async function removeGuestNetwork(): Promise<WriteResult> {
+  const res = await routingFetch("/wireless/guest", {
+    method: "DELETE",
+    label: "Remove guest network",
+  });
+  return opFrom(res);
+}
+
+// --- UPnP / NAT-PMP ---
+
+export interface UpnpStatus {
+  /** miniupnpd present on the box. False = the secure default (no auto ports). */
+  available: boolean;
+  /** Automatic port opening currently on. */
+  enabled: boolean;
+}
+
+export async function fetchUpnp(): Promise<UpnpStatus> {
+  return routingFetchJson<UpnpStatus>("/upnp", { label: "UPnP status" });
+}
+
+export async function setUpnp(enabled: boolean): Promise<WriteResult> {
+  const res = await postJson("/upnp", { enabled }, "Set UPnP");
+  return opFrom(res);
+}
+
 // --- DHCP ---
 
 export async function fetchDhcpLeases(): Promise<DhcpLease[]> {
@@ -470,6 +561,27 @@ export async function addStaticLease(
 
 export async function setDnsServers(servers: string[]): Promise<WriteResult> {
   const res = await postJson("/dhcp/dns", { servers }, "Set DNS");
+  return opFrom(res);
+}
+
+/** LAN DHCP pool range + lease time. Each field can be null when the box omits
+ *  it (a default applies — not "broken"). */
+export interface DhcpPool {
+  start: string | null;
+  limit: string | null;
+  leasetime: string | null;
+}
+
+export async function fetchDhcpPool(): Promise<DhcpPool> {
+  return routingFetchJson<DhcpPool>("/dhcp/pool", { label: "DHCP pool" });
+}
+
+export async function setDhcpPool(
+  start: number,
+  limit: number,
+  leasetime: string,
+): Promise<WriteResult> {
+  const res = await postJson("/dhcp/pool", { start, limit, leasetime }, "Set DHCP pool");
   return opFrom(res);
 }
 
@@ -554,6 +666,47 @@ export async function addPortForward(
   return opFrom(res);
 }
 
+export async function addFirewallRule(opts: {
+  name: string;
+  src: string;
+  dest: string;
+  proto?: string;
+  destPort?: string;
+  srcPort?: string;
+  target?: string;
+  enabled?: string;
+}): Promise<WriteResult> {
+  const res = await postJson(
+    "/firewall/rule",
+    {
+      name: opts.name,
+      src: opts.src,
+      dest: opts.dest,
+      proto: opts.proto ?? "tcp",
+      dest_port: opts.destPort,
+      src_port: opts.srcPort,
+      target: opts.target ?? "REJECT",
+      enabled: opts.enabled ?? "1",
+    },
+    "Add firewall rule",
+  );
+  return opFrom(res);
+}
+
+export async function setZonePolicy(opts: {
+  zone: string;
+  input?: string;
+  output?: string;
+  forward?: string;
+}): Promise<WriteResult> {
+  const res = await postJson(
+    "/firewall/zone-policy",
+    { zone: opts.zone, input: opts.input, output: opts.output, forward: opts.forward },
+    "Set zone policy",
+  );
+  return opFrom(res);
+}
+
 // --- System ---
 
 export async function fetchSystemInfo(): Promise<RouterSystemInfo> {
@@ -563,6 +716,65 @@ export async function fetchSystemInfo(): Promise<RouterSystemInfo> {
 export async function rebootRouter(): Promise<WriteResult> {
   const res = await routingFetch("/system/reboot", { method: "POST", label: "Reboot" });
   return opFrom(res);
+}
+
+// --- System controls (hostname / NTP / status-LED / country) ---
+
+/** Wire shape of GET /system/controls (snake_case from the routing service). */
+interface SystemControlsWire {
+  hostname: string | null;
+  ntp_enabled: boolean;
+  status_led: { supported: boolean; enabled: boolean };
+  country: { value: string | null; editable: boolean };
+}
+
+export async function fetchSystemControls(): Promise<SystemControls> {
+  const raw = await routingFetchJson<SystemControlsWire>("/system/controls", {
+    label: "System controls",
+  });
+  return {
+    hostname: raw.hostname,
+    ntpEnabled: raw.ntp_enabled,
+    statusLed: raw.status_led,
+    country: raw.country,
+  };
+}
+
+export async function setHostname(hostname: string): Promise<WriteResult> {
+  const res = await postJson("/system/hostname", { hostname }, "Set hostname");
+  return opFrom(res);
+}
+
+export async function setNtpEnabled(enabled: boolean): Promise<WriteResult> {
+  const res = await postJson("/system/ntp", { enabled }, "Set NTP");
+  return opFrom(res);
+}
+
+// --- droplet-ai ubus RPC access (read-only) ---
+
+interface AiAccessWire {
+  user: string;
+  endpoint: string;
+  read_scopes: string[];
+  write_scopes: string[];
+  session: { active: boolean; expires_at: number | null; rotates: string };
+}
+
+export async function getAiNetworkAccess(): Promise<AiNetworkAccess> {
+  const raw = await routingFetchJson<AiAccessWire>("/ai-access", {
+    label: "AI agent access",
+  });
+  return {
+    user: raw.user,
+    endpoint: raw.endpoint,
+    readScopes: raw.read_scopes,
+    writeScopes: raw.write_scopes,
+    session: {
+      active: raw.session.active,
+      expiresAt: raw.session.expires_at,
+      rotates: raw.session.rotates,
+    },
+  };
 }
 
 // --- VPN (Remote Access / WireGuard) ---
