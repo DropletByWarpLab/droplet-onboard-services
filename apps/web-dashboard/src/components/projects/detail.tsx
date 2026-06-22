@@ -82,6 +82,10 @@ function Comment({ authorId, html, when }: { authorId: string | null; html: stri
           </span>
           <span style={{ fontSize: 11, color: "var(--text-4)" }}>{when}</span>
         </div>
+        {/* Comment HTML is server-sanitized against a strict allowlist at the
+            write boundary (orchestrator sanitizePmHtml in addComment) — every
+            persisted value, whether from the dashboard, the mobile API, or an
+            MCP tool call, is clean before it ever reaches this render. */}
         <div
           className={"pm-prose" + (ai ? " pm-ai-bubble" : "")}
           style={ai ? { padding: "9px 11px", borderRadius: 10 } : undefined}
@@ -161,6 +165,9 @@ function DetailBody({ item, onChanged }: { item: PmWorkItem; onChanged: () => vo
           Description
         </div>
         {item.descriptionHtml ? (
+          // descriptionHtml is server-sanitized against a strict allowlist at the
+          // write boundary (orchestrator sanitizePmHtml in createWorkItem /
+          // updateWorkItem) — the stored value is always clean before render.
           <div className="pm-prose" dangerouslySetInnerHTML={{ __html: item.descriptionHtml }} />
         ) : (
           <div style={{ fontSize: 13, color: "var(--text-4)" }}>No description yet.</div>

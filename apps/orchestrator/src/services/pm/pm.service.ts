@@ -22,6 +22,7 @@
  */
 
 import type { Prisma, PrismaClient } from "@prisma/client";
+import { sanitizePmHtml } from "./sanitize-html.js";
 
 // ── Stable error codes ────────────────────────────────────────────────────────
 // Shared so catch sites import the same string literals the throw sites emit;
@@ -412,7 +413,10 @@ export async function getSummary(
   let overdue = 0;
   for (const it of items) {
     const g = it.state?.group;
-    const open = g === "backlog" || g === "unstarted" || g === "started";
+    // Stateless items are uncategorised-but-open (mirrors listProjects bucketing
+    // them as "unstarted"); count them in itemsOpen so the KPI strip isn't
+    // understated, not silently dropped (finding #5).
+    const open = g === undefined || g === "backlog" || g === "unstarted" || g === "started";
     if (open) {
       itemsOpen += 1;
       if (it.dueDate && it.dueDate < now) overdue += 1;
@@ -807,7 +811,9 @@ export async function createWorkItem(
           projectId,
           sequenceId,
           name: input.name,
-          descriptionHtml: input.descriptionHtml ?? null,
+          // Stored HTML reaches the dashboard via dangerouslySetInnerHTML — sanitize
+          // against the strict PM allowlist at the write boundary (stored-XSS guard).
+          descriptionHtml: input.descriptionHtml ? sanitizePmHtml(input.descriptionHtml) : null,
           stateId,
           priority: input.priority ?? "none",
           parentId: input.parentId ?? null,
@@ -907,7 +913,11 @@ export async function updateWorkItem(
   await prisma.$transaction(async (tx) => {
     const data: Prisma.PmWorkItemUpdateInput = {};
     if (fields.name !== undefined) data.name = fields.name;
-    if (fields.descriptionHtml !== undefined) data.descriptionHtml = fields.descriptionHtml;
+    if (fields.descriptionHtml !== undefined) {
+      // null clears the description; a string is sanitized at the write boundary
+      // (stored-XSS guard) before it can reach dangerouslySetInnerHTML.
+      data.descriptionHtml = fields.descriptionHtml ? sanitizePmHtml(fields.descriptionHtml) : null;
+    }
     if (fields.priority !== undefined) data.priority = fields.priority;
     if (fields.startDate !== undefined) data.startDate = fields.startDate;
     if (fields.dueDate !== undefined) data.dueDate = fields.dueDate;
@@ -1030,9 +1040,12 @@ export async function addComment(
 ): Promise<ApiComment> {
   const item = await prisma.pmWorkItem.findUnique({ where: { id: workItemId } });
   if (!item) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
+  // Comment HTML is rendered via dangerouslySetInnerHTML in the drawer — sanitize
+  // against the strict PM allowlist at the write boundary (stored-XSS guard).
+  const safeHtml = sanitizePmHtml(commentHtml);
   const row = await prisma.$transaction(async (tx) => {
     const comment = await tx.pmComment.create({
-      data: { workItemId, authorId: actorId, commentHtml },
+      data: { workItemId, authorId: actorId, commentHtml: safeHtml },
     });
     await writeActivity(tx, { workItemId, actorId, verb: "commented" });
     return comment;
