@@ -37,6 +37,7 @@
 
 import pino from "pino";
 import type { PrismaClient } from "@prisma/client";
+import { logRouterError } from "./openwrt.client.js";
 import {
   reconcileDiscovered,
   type DiscoveredApObservation,
@@ -295,7 +296,16 @@ export function createDiscoveryMultiplexer(
         if (result.status === "fulfilled") {
           merged.push(...result.value);
         } else {
-          logger.warn({ err: result.reason }, "ap-discovery: source failed, omitting its snapshot");
+          // Route per-source failures through the cold-start-aware helper (the
+          // Phase-1 contract): a routing-hop RouterError logs at debug during
+          // the boot grace window, warn otherwise — instead of flooding warn on
+          // every fresh boot. allSettled still isolates the failure so other
+          // sources' snapshots survive.
+          logRouterError(
+            logger,
+            result.reason,
+            "ap-discovery: source failed, omitting its snapshot",
+          );
         }
       }
 
