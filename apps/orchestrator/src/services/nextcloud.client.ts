@@ -1396,6 +1396,31 @@ export async function ncGetFileId(
   return m ? parseInt(m[1], 10) : null;
 }
 
+/**
+ * WARP-883 (ADR-027 WS-5) — does a directory exist in this user's WebDAV home?
+ *
+ * Used by `GET /api/files/spaces` to detect whether the shared "Household"
+ * group folder mounted into the caller's home (the `groupfolders` app mounts
+ * the group folder as a top-level directory for every assigned member). A
+ * Depth:0 PROPFIND returns 207/2xx when the path exists, 404 when it doesn't.
+ * Any OTHER failure (connection refused, 5xx) THROWS so the route can decide
+ * how to degrade — it must not be silently reported as "exists" or "absent".
+ */
+export async function ncDirExists(
+  token: string,
+  user: string,
+  path: string
+): Promise<boolean> {
+  const url = webdavUrl(user, path);
+  const resp = await fetch(url, {
+    method: "PROPFIND",
+    headers: { ...davHeaders(token), Depth: "0" },
+  });
+  if (resp.ok || resp.status === 207) return true;
+  if (resp.status === 404) return false;
+  throw new Error(`WebDAV PROPFIND failed for ${path}: ${resp.status}`);
+}
+
 // ── Trash ──
 
 function trashUrl(user: string, sub: string): string {
