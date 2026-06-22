@@ -215,6 +215,8 @@ if [ -n "$_DEREGISTER_FQDN" ]; then
   #    (ADR-018-transitional leg). Best-effort; the file is wiped/regenerated on
   #    re-provision anyway, but stripping it now keeps a not-reinstalled box clean.
   _host_dnsmasq_conf="/etc/droplet-host-net/lan-dhcp.conf"
+  # Fallback for boxes provisioned before the de-poc rename sweep
+  [ -f "$_host_dnsmasq_conf" ] || _host_dnsmasq_conf="/etc/droplet-poc-host-net/lan-dhcp.conf"
   if [ -f "$_host_dnsmasq_conf" ]; then
     _tmp_dns="$(mktemp -t droplet-hostdns-rm.XXXXXX 2>/dev/null || mktemp)"
     sudo grep -vF "# ADR-023 managed host-record" "$_host_dnsmasq_conf" 2>/dev/null \

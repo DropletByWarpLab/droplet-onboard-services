@@ -239,6 +239,13 @@ EOF
   sudo install -m 0644 "$host_src/etc-avahi/services/droplet.service" \
     /etc/avahi/services/droplet.service
 
+  # --- Migrate from pre-rename service name if present -------------------
+  sudo systemctl disable --now droplet-poc-host-net.service 2>/dev/null || true
+  sudo rm -f /etc/systemd/system/droplet-poc-host-net.service \
+             /usr/local/sbin/droplet-poc-host-net \
+             /etc/default/droplet-poc-host-net
+  sudo rm -rf /etc/droplet-poc-host-net
+
   # --- Activate ----------------------------------------------------------
   sudo systemctl daemon-reload
   sudo systemd-tmpfiles --create /etc/tmpfiles.d/droplet.conf 2>/dev/null || true

@@ -1215,33 +1215,18 @@ run_check_lifecycle_naming() {
   # (owner-tracked) entry is added.
   declare -A allowlist
 
-  # Tier 1 grandfathered legacy identifiers — stripped from each line BEFORE
-  # the token re-scan, so they're allowed wherever they appear (robust to
-  # line moves). Empty since the de-`poc` sweep renamed droplet-poc-host-net →
-  # droplet-host-net and the droplet-poc-lan.leases leasefile → droplet-lan.leases;
-  # the declaration stays so a future (owner-tracked) entry can be added.
-  local -a grandfathered_tokens=()
-
   # --- Scan. -----------------------------------------------------------------
   # Primary token: whole-word poc|prototype, case-insensitive. grep -nE gives
   # "<lineno>:<text>". We post-filter each hit through the grandfather tiers.
   local violations=""
-  local line lineno content residual t
+  local line lineno content residual
   for f in "${files[@]}"; do
     while IFS= read -r line; do
       [ -n "$line" ] || continue
       lineno="${line%%:*}"
       content="${line#*:}"
 
-      # Tier 1: strip every grandfathered legacy identifier, then re-test the
-      # residual for a lifecycle token. If nothing remains, this line's only
-      # hit was the known debt → allow.
       residual="$content"
-      if [ "${#grandfathered_tokens[@]}" -gt 0 ]; then
-        for t in "${grandfathered_tokens[@]}"; do
-          residual="${residual//$t/}"
-        done
-      fi
       if ! printf '%s' "$residual" | grep -qiwE '(poc|prototype)'; then
         continue
       fi
