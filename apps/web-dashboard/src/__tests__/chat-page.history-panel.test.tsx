@@ -170,14 +170,26 @@ describe("/chat page mounts the history panel", () => {
       ).toBeInTheDocument(),
     );
 
+    // handleRetry is a no-op while selectedModel is empty; on heavily
+    // loaded CI runners the model auto-select effect can lag the
+    // FailureChip render. Wait for the selected (ollama) model to apply
+    // — the "local \u00b7 on-device" tag renders only once it has.
+    await waitFor(() =>
+      expect(screen.getByText(/on-device/i)).toBeInTheDocument(),
+    );
+
     // Click Try-again.
     fireEvent.click(
       screen.getByRole("button", { name: /try sending this message again/i }),
     );
 
     // sendChat was called once, with the right replay shape.
-    await waitFor(() => expect(sendChatMock).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(sendChatMock).toHaveBeenCalledTimes(1), {
+      timeout: 10000,
+    });
     const replay = sendChatMock.mock.calls[0][0].messages;
     expect(replay.at(-1)).toEqual({ role: "user", content: "what time is it" });
-  });
+    // Slower CI runners need more than waitFor's 1s default for the
+    // click -> retryMessage -> sendMessage -> sendChat async chain.
+  }, 30000);
 });
