@@ -816,9 +816,9 @@ test_stale_repo_names_catches_inference_engine_reintro() {
 # must be named by what the deployment IS, not by its lifecycle stage. A new
 # `profiles: ["poc"]`, `COMPOSE_PROFILES=poc`, `setup.sh --poc`, or a
 # `droplet-poc-*` service that ships to a customer is the exact drift rule 17
-# exists to stop. The lifecycle-naming check FAILS on any NEW occurrence; its
-# only past grandfather — the legacy `droplet-poc-host-net` host-net debt — was
-# renamed to `droplet-host-net` by the de-`poc` sweep, so the allowlist is empty.
+# exists to stop. The repo already carries a KNOWN legacy `droplet-poc-host-net`
+# debt (slated for retirement by ADR-018 action item 3); the lifecycle-naming
+# check grandfathers that explicit set and FAILS only on NEW occurrences.
 #
 # This is the repo-wide net for rule 17. It is deliberately distinct from the
 # services/pm/-scoped rule-17 sub-check inside `pm-invariants` (that one stays
@@ -848,8 +848,8 @@ test_lifecycle_naming_catches_new_poc_token() {
   # shellcheck disable=SC2064  # capture path values at trap-set time
   trap "(cd '$REPO_ROOT_REAL' && git checkout -- '$compose_rel') 2>/dev/null || true" RETURN EXIT
 
-  # 1. Sanity: lifecycle-naming PASSES on the unmutated tree (no lifecycle
-  #    tokens remain after the droplet-poc-host-net → droplet-host-net rename).
+  # 1. Sanity: lifecycle-naming PASSES on the unmutated tree (the known
+  #    droplet-poc-host-net + comment debt is all grandfathered).
   if ! _assert_check_passes "$REPO_ROOT_REAL" lifecycle-naming; then
     printf "    baseline lifecycle-naming failed against unmodified real repo\n" >&2
     printf "    (the grandfather allowlist is out of sync with the tree — update it)\n" >&2
@@ -1142,27 +1142,26 @@ STUB
 }
 
 # =============================================================================
-# Test: tls-invariants catches a dropped public-CA-leaf clobber guard (ADR-023 PR-2)
+# Test: tls-invariants catches a factory-reset HQ-deregister regression
+# (ADR-023 PR-3)
 # =============================================================================
 #
-# Bug class this guards: the box-side tls-issuance cron installs the HQ-issued
-# publicly-trusted fullchain into docker/certs/droplet.{crt,key}. If a future
-# refactor drops the public-CA-leaf guard from _generate_tls_cert, a setup.sh /
-# --sync-secrets re-run that hits the SAN-incomplete OR expired trigger would
-# silently -newkey a self-signed cert OVER the live LE/ZeroSSL fullchain —
-# reverting the box to self-signed until the next 04:00 issuance and breaking
-# every client that trusted the original cert. The tls-invariants check asserts
-# the guard (the `_cert_is_public_ca_leaf` helper + its call + the openssl
-# self-verify it relies on) is present, so this regression proves it.
+# Original bug: factory-reset.sh Phase 0b sent a BODYLESS `curl -X DELETE
+# …/api/issuance/registration`, which the deployed HQ Worker 422s (it requires
+# a signed TPM-PoP body), so HQ never unbound the device. The fix runs the
+# `tls-deregister` CLI (signed DELETE) while the stack is still up.
 #
-# Synthetic-worktree pattern: copy exactly the files tls-invariants reads into a
-# mktemp worktree (no real-tree mutation), assert it PASSES on the faithful
-# copy, then strip the guard from the copied secrets.sh and assert it FAILS.
-test_tls_invariants_catches_dropped_clobber_guard() {
+# This test builds a synthetic worktree with the real secrets.sh + nginx.conf +
+# factory-reset.sh, asserts the check PASSES, then applies two regressions and
+# asserts each FAILS:
+#   (a) drop the `npm run -s tls-deregister` invocation,
+#   (b) re-introduce a bodyless curl to /api/issuance/registration.
+test_tls_invariants_catches_deregister_regression() {
   local needed=(
     "scripts/lib/secrets.sh"
     "docker/nginx.conf"
     "scripts/factory-reset.sh"
+    "scripts/lib/logging.sh"
   )
   local rel
   for rel in "${needed[@]}"; do
@@ -1177,10 +1176,10 @@ test_tls_invariants_catches_dropped_clobber_guard() {
   # shellcheck disable=SC2064  # capture $synth at trap-set time
   trap "rm -rf '$synth'" RETURN
 
-  # ship-check's main() requires a .git marker at REPO_ROOT.
   mkdir -p "$synth/.git"
   mkdir -p "$synth/scripts/lib" "$synth/docker"
   cp "$REPO_ROOT_REAL/scripts/lib/secrets.sh"   "$synth/scripts/lib/secrets.sh"
+  cp "$REPO_ROOT_REAL/scripts/lib/logging.sh"   "$synth/scripts/lib/logging.sh"
   cp "$REPO_ROOT_REAL/docker/nginx.conf"        "$synth/docker/nginx.conf"
   cp "$REPO_ROOT_REAL/scripts/factory-reset.sh" "$synth/scripts/factory-reset.sh"
 
@@ -1190,19 +1189,41 @@ test_tls_invariants_catches_dropped_clobber_guard() {
     return 1
   fi
 
-  # 2. Regression: strip the guard. Delete every line that carries one of the
-  #    guard's signature tokens (the helper def/call and the openssl self-verify
-  #    it uses) from the copied secrets.sh. The check must now FAIL.
-  grep -vE '_cert_is_public_ca_leaf|openssl[[:space:]]+verify[[:space:]]+-CAfile' \
-    "$synth/scripts/lib/secrets.sh" > "$synth/scripts/lib/secrets.sh.tmp" \
-    && mv "$synth/scripts/lib/secrets.sh.tmp" "$synth/scripts/lib/secrets.sh"
-
-  if grep -qE '_cert_is_public_ca_leaf' "$synth/scripts/lib/secrets.sh"; then
-    printf "    regression mutation no-op — guard tokens still present\n" >&2
+  # 2a. Regression: strip the signed tls-deregister CLI invocation. The check
+  #     must FAIL (factory-reset no longer signs the HQ unbind).
+  local stripped
+  stripped="$(grep -v 'npm run -s tls-deregister' "$synth/scripts/factory-reset.sh")"
+  printf '%s\n' "$stripped" > "$synth/scripts/factory-reset.sh"
+  if ! _assert_check_fails "$synth" tls-invariants; then
+    printf "    expected tls-invariants to FAIL after dropping the tls-deregister CLI\n" >&2
     return 1
   fi
 
-  _assert_check_fails "$synth" tls-invariants
+  # 2b. Regression: restore the CLI line AND re-introduce the bodyless curl to
+  #     /api/issuance/registration (the original 422 bug). The check must FAIL.
+  cp "$REPO_ROOT_REAL/scripts/factory-reset.sh" "$synth/scripts/factory-reset.sh"
+  cat >> "$synth/scripts/factory-reset.sh" <<'BODYLESS'
+# Synthetic regression for the ship-check self-test: the bodyless DELETE the
+# deployed HQ Worker 422s. tls-invariants must catch this.
+curl -sS -X DELETE "${HQ_ISSUANCE_URL%/}/api/issuance/registration?device_id=${DEV}" || true
+BODYLESS
+  if ! _assert_check_fails "$synth" tls-invariants; then
+    printf "    expected tls-invariants to FAIL after re-introducing a bodyless curl\n" >&2
+    return 1
+  fi
+
+  # 2c. A purely EXPLANATORY comment that mentions the old curl must NOT trip a
+  #     false FAIL — the grep strips comment lines first. Restore the faithful
+  #     copy + append only a comment referencing the bodyless curl; PASS again.
+  cp "$REPO_ROOT_REAL/scripts/factory-reset.sh" "$synth/scripts/factory-reset.sh"
+  cat >> "$synth/scripts/factory-reset.sh" <<'COMMENTONLY'
+# was: curl -X DELETE "${HQ_ISSUANCE_URL%/}/api/issuance/registration" (replaced
+# by the signed tls-deregister CLI; HQ 422'd the bodyless DELETE).
+COMMENTONLY
+  if ! _assert_check_passes "$synth" tls-invariants; then
+    printf "    tls-invariants false-FAILed on a comment that only MENTIONS the old curl\n" >&2
+    return 1
+  fi
 }
 
 # =============================================================================
@@ -1257,8 +1278,8 @@ _run_test "Disabling PM strips a previously-appended pm profile (symmetric opt-o
 _run_test "image-pipeline catches a stubbed scripts/build-image.sh (WARP-663)" \
   test_image_pipeline_catches_stubbed_build_image
 
-_run_test "tls-invariants catches a dropped public-CA-leaf clobber guard (ADR-023 PR-2)" \
-  test_tls_invariants_catches_dropped_clobber_guard
+_run_test "tls-invariants catches a factory-reset HQ-deregister regression (ADR-023 PR-3)" \
+  test_tls_invariants_catches_deregister_regression
 
 printf "\n  ──────────────────────────────────\n"
 printf "  Results: %d/%d passed" "$PASSED" "$TOTAL"

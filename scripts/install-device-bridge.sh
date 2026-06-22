@@ -211,6 +211,22 @@ fi
 install -m 0755 "$TLS_RELOAD_SCRIPT_SRC" "$TLS_RELOAD_SCRIPT_DST"
 log "installed $TLS_RELOAD_SCRIPT_DST"
 
+# ADR-023 PR-1: public-FQDN write-back host executor. The orchestrator's
+# tls-issuance service POSTs /host/public-fqdn to the bridge once it has LEARNED
+# the box's opaque per-device FQDN from HQ; the bridge execs this wrapper, which
+# idempotently persists DROPLET_PUBLIC_FQDN into the repo .env and re-registers
+# split-horizon DNS (the orchestrator can't write the host .env itself).
+# Repo-tracked (architecture-guard rule 20), installed here so factory-reset
+# removes it cleanly. Repo source is scripts/host/.
+SET_FQDN_SCRIPT_SRC="$REPO_ROOT/scripts/host/droplet-set-public-fqdn.sh"
+SET_FQDN_SCRIPT_DST="/usr/local/sbin/droplet-set-public-fqdn.sh"
+if [[ ! -f "$SET_FQDN_SCRIPT_SRC" ]]; then
+  log "missing source: $SET_FQDN_SCRIPT_SRC"
+  exit 1
+fi
+install -m 0755 "$SET_FQDN_SCRIPT_SRC" "$SET_FQDN_SCRIPT_DST"
+log "installed $SET_FQDN_SCRIPT_DST"
+
 # --- 2) Ensure the env file exists and contains the needed secrets ---
 install -d -m 0755 "$ENV_DIR"
 if [[ ! -f "$ENV_FILE" ]]; then

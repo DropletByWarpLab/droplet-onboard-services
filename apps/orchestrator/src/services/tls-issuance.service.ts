@@ -36,7 +36,7 @@
  * gRPC, or the network.
  */
 import * as forge from "node-forge";
-import type { DeviceIdentityClient } from "./device-identity.client.js";
+import type { DeviceIdentityClient, DeviceIdentityStatus } from "./device-identity.client.js";
 
 /** The exact bytes signed by the device TPM key, per the issuance contract:
  *  `droplet-cert:v1:<nonce>:<key_fingerprint>:<public_label>`. */
@@ -85,14 +85,37 @@ export interface HqOrderRequest {
 }
 
 /**
+ * ADR-023 PR-3 — DELETE /api/issuance/registration body. The deployed HQ Worker
+ * REQUIRES a signed TPM-PoP body to unbind a device (a bodyless DELETE 422s):
+ * it re-runs the SAME proof-of-possession check as order/renew (`verifyOrderAuth`)
+ * over a fresh single-use challenge nonce. `device_id` travels in BOTH the query
+ * string (read by the router) AND this body (read by the handler).
+ */
+export interface HqDeregisterRequest {
+  device_id: string;
+  nonce: string;
+  /** base64 of the TPM signature over the challenge string. */
+  signature: string;
+  sig_alg: "ecdsa-sha256";
+  key_fingerprint: string;
+}
+
+export interface HqDeregisterResponse {
+  device_id: string;
+  status: "revoked";
+}
+
+/**
  * Plain outbound HTTPS to the HQ fleet-server. The base URL comes from
- * `HQ_ISSUANCE_URL`; this client owns the five endpoints in the contract.
+ * `HQ_ISSUANCE_URL`; this client owns the contract's endpoints.
  */
 export interface HqIssuanceClient {
   challenge(deviceId: string): Promise<HqChallengeResponse>;
   order(req: HqOrderRequest): Promise<HqOrderResponse>;
   poll(orderId: string, deviceId: string): Promise<HqPollResponse>;
   renew(req: HqOrderRequest): Promise<HqOrderResponse>;
+  /** ADR-023 PR-3 — signed unbind on factory reset. */
+  deregister(req: HqDeregisterRequest): Promise<HqDeregisterResponse>;
 }
 
 // --- Persistence seam (the Prisma TlsCertState model) ----------------------
@@ -127,9 +150,21 @@ export interface TlsLogger {
   error(obj: unknown, msg?: string): void;
 }
 
+/**
+ * Split-horizon DNS registrar (ADR-023 C3). Registers the learned per-device
+ * FQDN → the WireGuard-gateway IP with the routing service's dnsmasq on every
+ * successful install, so the one publicly-trusted name resolves to the box on
+ * the LAN AND over the tunnel. Best-effort: a failure here NEVER aborts
+ * issuance (the cert is already installed and serving).
+ */
+export interface DnsRegistrar {
+  register(hostname: string): Promise<void>;
+}
+
 export interface TlsIssuanceDeps {
   /** The opaque per-device FQDN `d-<hmac>.devices.warp-lab.ai`. Empty before
-   *  first HQ contact — runOnce() is a no-op until it is known. */
+   *  first HQ contact — the box LEARNS it from the HQ challenge response and
+   *  (zero-touch) issues a cert + persists the name back to .env. */
   fqdn: string;
   deviceId: string;
   hq: HqIssuanceClient;
@@ -142,6 +177,29 @@ export interface TlsIssuanceDeps {
   /** Trigger the host-side `nginx -s reload` (scripts/lib/tls-reload.sh). */
   reloadNginx(): Promise<void>;
   logger: TlsLogger;
+  /**
+   * ADR-023 PR-1 (Gap 1) — whether the box is wired to a live HQ issuance API
+   * (`!!config.HQ_ISSUANCE_URL`). Gates the ZERO-TOUCH bootstrap path: with an
+   * empty `fqdn`, runOnce only reaches HQ to LEARN its name when HQ is
+   * configured (and the device is provisioned). Optional + defaults false so
+   * dev/CI (and the injected-fakes test harness) keep the pre-existing no-op
+   * posture without setting it.
+   */
+  hqConfigured?: boolean;
+  /**
+   * ADR-023 PR-1 (Gap 1) — persist a freshly-LEARNED fqdn back to `.env`
+   * (`DROPLET_PUBLIC_FQDN`) so the next boot reads it directly. Called only
+   * when the learned name differs from the configured seed. Fire-and-forget:
+   * the implementation swallows + logs its own errors; this service never lets
+   * a write-back failure abort or throw out of a successful issuance.
+   */
+  persistFqdn?: (fqdn: string) => Promise<void>;
+  /**
+   * ADR-023 PR-1 (Gap 2) — register the learned fqdn → WG-gateway IP with the
+   * routing service's split-horizon dnsmasq after every successful install.
+   * Optional + best-effort: a DNS failure NEVER aborts issuance.
+   */
+  dns?: DnsRegistrar;
 }
 
 export interface TlsIssuanceService {
@@ -214,36 +272,183 @@ export function generateKeyPairAndCsr(fqdn: string): {
   };
 }
 
+// --- Shared challenge + sign (PoP) -----------------------------------------
+
+/** The collaborators `signChallenge` needs. A subset of `TlsIssuanceDeps` so
+ *  both the order/renew flow AND the standalone deregister CLI can reuse it. */
+export interface SignChallengeDeps {
+  deviceId: string;
+  hq: Pick<HqIssuanceClient, "challenge">;
+  identity: Pick<
+    DeviceIdentityClient,
+    "signWithDeviceKey" | "getDeviceIdentityStatus"
+  >;
+}
+
+/** The proof-of-possession material HQ checks on order / renew / deregister:
+ *  a single-use `nonce`, the base64 `signature` over the contract string, the
+ *  `sig_alg`, and the device `key_fingerprint`. `fqdn` + `public_label` are the
+ *  learned identity from the SAME challenge response (callers issuing a cert
+ *  reuse them; deregister ignores them). */
+export interface SignedChallenge {
+  nonce: string;
+  signature: string;
+  sig_alg: "ecdsa-sha256";
+  key_fingerprint: string;
+  fqdn: string;
+  public_label: string;
+}
+
+/**
+ * Fetch a FRESH HQ challenge and sign it with the device TPM key. The signed
+ * bytes are pinned by the issuance contract to exactly:
+ *
+ *   `droplet-cert:v1:<nonce>:<key_fingerprint>:<public_label>`
+ *
+ * (verified byte-for-byte against the HQ Worker's `buildSignedMessage`). HQ
+ * nonces are single-use, so this ALWAYS hits `hq.challenge` — never a cached
+ * nonce. Extracted from issueOrRenew so the factory-reset deregister proves
+ * possession the same way the order flow does (the comment in factory-reset.sh
+ * that claimed the box "can't compute the PoP" was wrong — it can, via this).
+ */
+export async function signChallenge(
+  deps: SignChallengeDeps,
+): Promise<SignedChallenge> {
+  const { deviceId, hq, identity } = deps;
+  const ch = await hq.challenge(deviceId);
+  const fingerprint = (await identity.getDeviceIdentityStatus()).certFingerprint;
+  const challengeStr = `${CHALLENGE_PREFIX}${ch.nonce}:${fingerprint}:${ch.public_label}`;
+  const sig = await identity.signWithDeviceKey(
+    new TextEncoder().encode(challengeStr),
+  );
+  return {
+    nonce: ch.nonce,
+    signature: Buffer.from(sig.signature).toString("base64"),
+    sig_alg: "ecdsa-sha256",
+    key_fingerprint: fingerprint,
+    fqdn: ch.fqdn,
+    public_label: ch.public_label,
+  };
+}
+
+// --- Factory-reset HQ deregistration (ADR-023 PR-3) ------------------------
+
+/** Outcome sentinels for `deregisterFromHq`. It NEVER throws (factory-reset
+ *  must always complete), so callers/tests branch on these instead. */
+export const DEREGISTER_RESULT_OK = "ok" as const;
+export const DEREGISTER_RESULT_SKIPPED = "skipped" as const;
+export const DEREGISTER_RESULT_FAILED = "failed" as const;
+export type DeregisterResult =
+  | typeof DEREGISTER_RESULT_OK
+  | typeof DEREGISTER_RESULT_SKIPPED
+  | typeof DEREGISTER_RESULT_FAILED;
+
+export interface DeregisterDeps {
+  deviceId: string;
+  hq: Pick<HqIssuanceClient, "challenge" | "deregister">;
+  identity: Pick<
+    DeviceIdentityClient,
+    "signWithDeviceKey" | "getDeviceIdentityStatus"
+  >;
+  logger: TlsLogger;
+}
+
+/**
+ * Signed unbind of this box from HQ, run during factory-reset (Phase 0b, while
+ * the stack is still UP). Signs a fresh challenge (proving possession of the
+ * device TPM key) and DELETEs the HQ registration with the full PoP body, so HQ
+ * frees the device row and revokes the cert.
+ *
+ * NON-FATAL by contract: a reset MUST complete even if HQ or the device-identity
+ * sidecar is unreachable. Every failure path returns a sentinel and logs a
+ * warning — this function never throws. (HQ also reaps stale registrations
+ * server-side, so a missed deregister is recoverable.)
+ *
+ *   - device not provisioned (no key to sign with)         → SKIPPED
+ *   - challenge / sign / DELETE failed                     → FAILED
+ *   - HQ acknowledged the unbind                           → OK
+ */
+export async function deregisterFromHq(
+  deps: DeregisterDeps,
+): Promise<DeregisterResult> {
+  const { deviceId, hq, identity, logger } = deps;
+  try {
+    // Don't even reach HQ if there's no provisioned identity — the sidecar can
+    // be down at reset time and we have no key to sign the PoP with.
+    const status = await identity.getDeviceIdentityStatus();
+    if (!status.provisioned) {
+      logger.info(
+        { deviceId },
+        "tls-deregister: device identity not provisioned — skipping HQ deregistration (nothing to unbind)",
+      );
+      return DEREGISTER_RESULT_SKIPPED;
+    }
+
+    const signed = await signChallenge({ deviceId, hq, identity });
+    const req: HqDeregisterRequest = {
+      device_id: deviceId,
+      nonce: signed.nonce,
+      signature: signed.signature,
+      sig_alg: signed.sig_alg,
+      key_fingerprint: signed.key_fingerprint,
+    };
+    const res = await hq.deregister(req);
+    logger.info(
+      { deviceId, status: res.status },
+      "tls-deregister: HQ acknowledged deregistration (device row freed, cert revoked)",
+    );
+    return DEREGISTER_RESULT_OK;
+  } catch (err) {
+    logger.warn(
+      { err, deviceId },
+      "tls-deregister: HQ deregistration failed — non-fatal, factory-reset continues (HQ reaps stale registrations server-side)",
+    );
+    return DEREGISTER_RESULT_FAILED;
+  }
+}
+
 export function createTlsIssuanceService(
   deps: TlsIssuanceDeps,
 ): TlsIssuanceService {
-  const { fqdn, deviceId, hq, identity, store, files, reloadNginx, logger } =
-    deps;
+  const {
+    fqdn,
+    deviceId,
+    hq,
+    identity,
+    store,
+    files,
+    reloadNginx,
+    logger,
+    hqConfigured = false,
+    persistFqdn,
+    dns,
+  } = deps;
 
-  /** The full issuance/renewal flow. Returns the new not_after on success. */
-  async function issueOrRenew(mode: "issue" | "renew"): Promise<string> {
-    // 1. Challenge.
-    const ch = await hq.challenge(deviceId);
+  /**
+   * The full issuance/renewal flow. Returns the LEARNED fqdn (from the HQ
+   * challenge response) + the new not_after on success. The learned fqdn is the
+   * authoritative name: a zero-touch box starts with an empty seed and only
+   * learns its opaque name here, so callers MUST key the cert-state row on the
+   * RETURNED fqdn, never on the (possibly-empty) `deps.fqdn`.
+   */
+  async function issueOrRenew(
+    mode: "issue" | "renew",
+  ): Promise<{ fqdn: string; notAfter: string }> {
+    // 1-2. Fetch a fresh challenge + sign the exact contract string with the
+    //      device TPM key (shared with the factory-reset deregister path).
+    const signed = await signChallenge({ deviceId, hq, identity });
 
-    // 2. Sign the exact contract string with the device TPM key.
-    const fingerprint = (await identity.getDeviceIdentityStatus())
-      .certFingerprint;
-    const challengeStr = `${CHALLENGE_PREFIX}${ch.nonce}:${fingerprint}:${ch.public_label}`;
-    const sig = await identity.signWithDeviceKey(
-      new TextEncoder().encode(challengeStr),
-    );
-    const signatureB64 = Buffer.from(sig.signature).toString("base64");
-
-    // 3. Generate keypair + CSR locally (private key never transmitted).
-    const { csrPem, keyPem } = generateKeyPairAndCsr(ch.fqdn);
+    // 3. Generate keypair + CSR locally (private key never transmitted). The
+    //    learned FQDN comes from the SAME challenge response.
+    const { csrPem, keyPem } = generateKeyPairAndCsr(signed.fqdn);
 
     const orderReq: HqOrderRequest = {
       device_id: deviceId,
       csr_pem: csrPem,
-      nonce: ch.nonce,
-      signature: signatureB64,
-      sig_alg: "ecdsa-sha256",
-      key_fingerprint: fingerprint,
+      nonce: signed.nonce,
+      signature: signed.signature,
+      sig_alg: signed.sig_alg,
+      key_fingerprint: signed.key_fingerprint,
     };
 
     // 4. Submit the order (issue vs renew share the body shape).
@@ -285,75 +490,184 @@ export function createTlsIssuanceService(
     // 7. Reload nginx so the new pair is served immediately.
     await reloadNginx();
 
-    return result.not_after;
+    // 8. ADR-023 (C3) — register the learned FQDN with the split-horizon
+    //    dnsmasq (routing/container leg) AFTER the reload, so the publicly-
+    //    trusted name resolves to the box on the LAN AND over the tunnel.
+    //    Best-effort: a DNS failure must NEVER abort issuance — the cert is
+    //    already installed and serving. (The host dnsmasq leg is handled
+    //    separately by droplet-set-public-fqdn.sh → setup_public_fqdn_dns.)
+    if (dns) {
+      try {
+        await dns.register(signed.fqdn);
+      } catch (err) {
+        logger.warn(
+          { err, fqdn: signed.fqdn },
+          "tls-issuance: split-horizon DNS registration failed — cert installed, name resolves on next setup run",
+        );
+      }
+    }
+
+    return { fqdn: signed.fqdn, notAfter: result.not_after };
+  }
+
+  /**
+   * ADR-023 PR-1 (Gap 1) — fire-and-forget write-back of a freshly-LEARNED
+   * fqdn to .env. Only fires when the learned name differs from the configured
+   * seed (`deps.fqdn`). The persister swallows + logs its own errors; we add a
+   * belt-and-braces catch here so a rejected promise can NEVER bubble out of a
+   * successful issuance or churn the cron canary.
+   */
+  async function maybePersistLearnedFqdn(learned: string): Promise<void> {
+    if (!persistFqdn || !learned || learned === fqdn) return;
+    try {
+      await persistFqdn(learned);
+    } catch (err) {
+      logger.warn(
+        { err, fqdn: learned },
+        "tls-issuance: persisting learned DROPLET_PUBLIC_FQDN failed (non-fatal — write-back retries next tick)",
+      );
+    }
   }
 
   return {
     async runOnce() {
-      // No fqdn yet (box hasn't learned its name from HQ) → nothing to do.
-      // The bootstrap self-signed cert keeps the box serving TLS meanwhile.
-      if (!fqdn) {
-        logger.info(
-          {},
-          "tls-issuance: no DROPLET_PUBLIC_FQDN configured yet — skipping (serving bootstrap self-signed cert)",
-        );
-        return;
-      }
+      // The cert-state row is keyed on the fqdn (`TlsCert.fqdn @id`). A
+      // zero-touch box starts with an empty seed and only LEARNS its opaque
+      // name from the HQ challenge, so `seed` may be empty here. The row + the
+      // .env write-back are keyed on the LEARNED name returned by issueOrRenew,
+      // never on the empty seed.
+      const seed = fqdn;
 
-      // Read the explicit state row. A missing row is treated as
-      // BOOTSTRAP_SELF_SIGNED (the box has a self-signed cert from secrets.sh)
-      // — NEVER inferred from a null cert.
-      const existing = await store.get(fqdn);
-      const state: TlsCertStateValue =
-        existing?.state ?? "BOOTSTRAP_SELF_SIGNED";
-
-      // Decide: issue, renew, or no-op.
+      let state: TlsCertStateValue;
+      let existingNotAfter: string | null;
       let mode: "issue" | "renew" | "noop";
-      if (state === "BOOTSTRAP_SELF_SIGNED") {
-        mode = "issue";
-      } else if (state === "LE_ISSUED" || state === "LE_RENEW_FAILED" || state === "LE_RENEWING") {
-        if (state === "LE_RENEW_FAILED" && (existing?.notAfter ?? null) === null) {
-          // First-ever issuance failed (no cert ever issued). Use order(), NOT
-          // renew(): /api/issuance/renew requires an existing cert at HQ; calling
-          // it without one permanently routes this box to the wrong endpoint with
-          // no self-recovery.
-          mode = "issue";
-        } else {
-          // For an issued (or previously-failed / interrupted) cert, renew when
-          // we're inside the 30-day window. A LE_RENEW_FAILED row with time left
-          // also retries via the renew path.
-          mode = daysUntil(existing?.notAfter ?? null) <= RENEW_THRESHOLD_DAYS ? "renew" : "noop";
+
+      if (!seed) {
+        // ZERO-TOUCH bootstrap (Gap 1). No fqdn yet AND no state row to read
+        // (there can't be one — the row keys on the not-yet-known fqdn). Only
+        // reach HQ to learn the name when this box is actually wired for live
+        // issuance (HQ configured) AND its device identity is provisioned. On a
+        // dev laptop / CI / un-provisioned box, keep the pre-existing no-op +
+        // info-log posture (serving the bootstrap self-signed cert).
+        if (!hqConfigured) {
+          logger.info(
+            {},
+            "tls-issuance: no DROPLET_PUBLIC_FQDN configured yet and HQ issuance disabled — skipping (serving bootstrap self-signed cert)",
+          );
+          return;
         }
+        let idStatus: DeviceIdentityStatus;
+        try {
+          idStatus = await identity.getDeviceIdentityStatus();
+        } catch (err) {
+          if (isTransientNetworkError(err)) {
+            logger.info(
+              {},
+              "tls-issuance: device-identity sidecar unreachable on zero-touch provisioning check — will retry on next tick",
+            );
+            return;
+          }
+          throw err;
+        }
+        if (!idStatus.provisioned) {
+          logger.info(
+            {},
+            "tls-issuance: no DROPLET_PUBLIC_FQDN yet and device identity not provisioned — skipping (serving bootstrap self-signed cert)",
+          );
+          return;
+        }
+        // Treat an unseeded-but-HQ-ready box as BOOTSTRAP_SELF_SIGNED → issue.
+        state = "BOOTSTRAP_SELF_SIGNED";
+        existingNotAfter = null;
+        mode = "issue";
       } else {
-        mode = "noop";
+        // Seeded box — the pre-existing state-machine, verbatim. Read the
+        // explicit state row; a missing row is treated as BOOTSTRAP_SELF_SIGNED
+        // (the box has a self-signed cert from secrets.sh) — NEVER inferred
+        // from a null cert.
+        const existing = await store.get(seed);
+        state = existing?.state ?? "BOOTSTRAP_SELF_SIGNED";
+        existingNotAfter = existing?.notAfter ?? null;
+
+        // Decide: issue, renew, or no-op.
+        if (state === "BOOTSTRAP_SELF_SIGNED") {
+          mode = "issue";
+        } else if (
+          state === "LE_ISSUED" ||
+          state === "LE_RENEW_FAILED" ||
+          state === "LE_RENEWING"
+        ) {
+          if (state === "LE_RENEW_FAILED" && existingNotAfter === null) {
+            // First-ever issuance failed (no cert ever issued). Use order(),
+            // NOT renew(): /api/issuance/renew requires an existing cert at HQ;
+            // calling it without one permanently routes this box to the wrong
+            // endpoint with no self-recovery.
+            mode = "issue";
+          } else {
+            // For an issued (or previously-failed / interrupted) cert, renew
+            // when we're inside the 30-day window. A LE_RENEW_FAILED row with
+            // time left also retries via the renew path.
+            mode =
+              daysUntil(existingNotAfter) <= RENEW_THRESHOLD_DAYS
+                ? "renew"
+                : "noop";
+          }
+        } else {
+          mode = "noop";
+        }
       }
 
       if (mode === "noop") {
         logger.info(
-          { fqdn, state, notAfter: existing?.notAfter },
+          { fqdn: seed, state, notAfter: existingNotAfter },
           "tls-issuance: cert healthy, nothing to do",
         );
         return;
       }
 
-      // Mark in-flight so a concurrent observer sees the renewal underway.
-      if (mode === "renew") {
-        await store.upsert(fqdn, "LE_RENEWING", existing?.notAfter ?? null);
+      // Mark in-flight so a concurrent observer sees the renewal underway. Only
+      // a seeded box can renew (a zero-touch box always issues), so `seed` is
+      // guaranteed non-empty here — never upsert an empty-key row.
+      if (mode === "renew" && seed) {
+        await store.upsert(seed, "LE_RENEWING", existingNotAfter);
       }
 
       try {
-        const notAfter = await issueOrRenew(mode);
-        await store.upsert(fqdn, "LE_ISSUED", notAfter);
+        const { fqdn: learnedFqdn, notAfter } = await issueOrRenew(mode);
+        // Key the upsert on the LEARNED fqdn. Guard against an empty key so a
+        // misbehaving HQ response can never write a TlsCert row keyed on ''.
+        if (learnedFqdn) {
+          await store.upsert(learnedFqdn, "LE_ISSUED", notAfter);
+          if (seed && seed !== learnedFqdn) {
+            await store.upsert(seed, "BOOTSTRAP_SELF_SIGNED", null);
+          }
+        } else {
+          logger.warn(
+            { mode },
+            "tls-issuance: HQ returned an empty fqdn — installed cert but skipping state upsert",
+          );
+        }
+        // Persist a newly-learned name back to .env (fire-and-forget).
+        await maybePersistLearnedFqdn(learnedFqdn);
         logger.info(
-          { fqdn, mode, notAfter },
+          { fqdn: learnedFqdn, mode, notAfter },
           "tls-issuance: installed publicly-trusted cert",
         );
       } catch (err) {
-        if (err instanceof TlsIssuancePendingError || isTransientNetworkError(err)) {
-          // Keep serving the current cert; record the failure for the next tick.
-          await store.upsert(fqdn, "LE_RENEW_FAILED", existing?.notAfter ?? null);
+        if (
+          err instanceof TlsIssuancePendingError ||
+          isTransientNetworkError(err)
+        ) {
+          // Keep serving the current cert; record the failure for the next
+          // tick — but ONLY when we have a real key. A zero-touch box that
+          // failed before learning its name has an empty seed: do NOT upsert an
+          // empty-key row (TlsCert.fqdn @id must never be '') — just warn; the
+          // next tick re-attempts the bootstrap from scratch.
+          if (seed) {
+            await store.upsert(seed, "LE_RENEW_FAILED", existingNotAfter);
+          }
           logger.warn(
-            { err, fqdn, mode },
+            { err, fqdn: seed, mode },
             "tls-issuance: HQ unreachable or order not ready — keeping current cert (LE_RENEW_FAILED)",
           );
           return;

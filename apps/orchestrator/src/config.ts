@@ -282,6 +282,15 @@ const envSchema = z.object({
   //   origin (trusted-origin.ts) and the one address that works at home AND
   //   over the WireGuard tunnel.
   DROPLET_PUBLIC_FQDN: z.string().default(""),
+  // DROPLET_PUBLIC_FQDN_IP — the IP the per-device FQDN resolves to via the
+  //   split-horizon dnsmasq (ADR-023 C3). Defaults to the WireGuard gateway
+  //   address 192.168.20.1, which is reachable on the single-box LAN AND over
+  //   the tunnel, so the one FQDN works at home and remotely. The routing-leg
+  //   registrar (createRoutingDnsRegistrar) POSTs {hostname, ip} to
+  //   /dhcp/hostnames with this value; matches the host-leg default in
+  //   scripts/lib/local-dns.sh::setup_public_fqdn_dns. Operators on a multi-box
+  //   LAN whose box IP differs can override it.
+  DROPLET_PUBLIC_FQDN_IP: z.string().default("192.168.20.1"),
   // HQ_ISSUANCE_URL — base URL of the fleet HQ issuance API
   //   (hq.warp-lab.com). Plain outbound HTTPS; does NOT require the fleet
   //   WireGuard tunnel. Empty disables live issuance (the cron skips), which is
