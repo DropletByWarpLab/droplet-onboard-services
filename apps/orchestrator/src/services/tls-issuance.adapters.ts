@@ -19,7 +19,7 @@ import pino from "pino";
 import type { PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
 import { bridgeAuthToken } from "../lib/bridge-errors.js";
-import { routingFetch } from "./openwrt.client.js";
+import { RouterError, routingFetch } from "./openwrt.client.js";
 import type {
   DnsRegistrar,
   HqChallengeResponse,
@@ -323,6 +323,7 @@ export function createRoutingDnsRegistrar(): DnsRegistrar {
           label: "Split-horizon FQDN registration",
         });
       } catch (err) {
+        if (err instanceof RouterError && err.code === "DISABLED") return;
         logger.warn(
           { err, hostname, ip: config.DROPLET_PUBLIC_FQDN_IP },
           "tls-issuance: split-horizon DNS registration failed — cert installed, name resolves on next setup run",

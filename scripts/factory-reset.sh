@@ -269,8 +269,7 @@ if [ -n "$_DEREGISTER_FQDN" ] || [ -n "$_DEREGISTER_DEVICE_ID" ]; then
     # blocks forever here and never reaches Phase 1 `down -v`. A `timeout` exit
     # of 124 (deadline hit) is treated exactly like any other failure: log a warn
     # and PROCEED to the wipe. The whole step stays best-effort + NON-FATAL.
-    # shellcheck disable=SC2086  # word-splitting on $_dereg_env_flag is intended
-    if timeout 90 $DC -f "$COMPOSE_FILE" $_dereg_env_flag exec -T orchestrator \
+    if timeout 90 $DC -f "$COMPOSE_FILE" ${_dereg_env_flag:+$_dereg_env_flag} exec -T orchestrator \
          npm run -s tls-deregister >/dev/null 2>&1; then
       log_success "Sent signed HQ deregistration for ${_DEREGISTER_REAL_DEVICE_ID}"
     else

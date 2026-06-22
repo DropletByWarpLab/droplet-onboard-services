@@ -2154,6 +2154,9 @@ def _valid_public_fqdn(fqdn):
         return False
     if fqdn[0] in ".-" or fqdn[-1] in ".-":
         return False
+    if not all(label and not label.startswith('-') and not label.endswith('-')
+               for label in fqdn.split('.')):
+        return False
     return "." in fqdn
 
 
@@ -2488,7 +2491,7 @@ class Handler(BaseHTTPRequestHandler):
             # host script is ever invoked; a junk fqdn is a 400, never an exec.
             if not self._authed():
                 return self._send(401, {"ok": False, "error": "unauthorized"})
-            n = int(self.headers.get("Content-Length") or 0)
+            n = min(int(self.headers.get("Content-Length") or 0), 4096)
             raw = self.rfile.read(n).decode() if n else ""
             try:
                 j = json.loads(raw) if raw else {}

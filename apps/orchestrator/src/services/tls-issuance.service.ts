@@ -626,6 +626,9 @@ export function createTlsIssuanceService(
         // misbehaving HQ response can never write a TlsCert row keyed on ''.
         if (learnedFqdn) {
           await store.upsert(learnedFqdn, "LE_ISSUED", notAfter);
+          if (seed && seed !== learnedFqdn) {
+            await store.upsert(seed, "LE_ISSUED", notAfter);
+          }
         } else {
           logger.warn(
             { mode },
