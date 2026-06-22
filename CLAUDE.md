@@ -167,7 +167,10 @@ always-relevant gotchas:
   mounts never trip) — and on the shipping **single-box** shape it
   auto-merges `single-box`, which makes ollama, openwrt, switch, and
   camera-discovery default-on. On other shapes, switch/camera-discovery
-  stay opt-in via `full` (real hardware + operator credentials).
+  stay opt-in via `full` (real hardware + operator credentials). The
+  `docs` profile (OnlyOffice `docserver`, in-browser editing/co-authoring,
+  WARP-882) is **default-on** on the 32 GB box (~2 GB additive); a ≤8 GB
+  box drops `docs` AND sets `DOCS_ENABLED=0`.
 - `docker restart` does **not** re-read the env_file — after editing
   `.env` (including `*_MEM_LIMIT` resource limits, ADR-021), recreate:
   `docker compose -f docker/docker-compose.yml --env-file .env up -d --force-recreate <service>`.
@@ -191,6 +194,13 @@ Full per-variable reference (defaults, ports, resource limits):
 - `FILES_API_URL` is the MCP file-tools target (default
   `http://orchestrator:3000/api/files`). Raw Nextcloud cannot serve
   these tools — see WARP-861.
+- `DOCS_ENABLED` is an EXPLICIT boolean (never derived from
+  `DOCS_INTERNAL_URL` emptiness); `ONLYOFFICE_JWT_SECRET` is the shared
+  secret the engine, the Nextcloud `onlyoffice` connector, AND the
+  orchestrator all verify (per-device, never tracked). **License:**
+  OnlyOffice CE (AGPLv3) is what we build/test; an OnlyOffice
+  OEM/commercial license is required before GA (WARP-882). Full row set:
+  `docs/ENVIRONMENT.md`.
 
 ## GTM alignment
 

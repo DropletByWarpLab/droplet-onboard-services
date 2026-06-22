@@ -467,6 +467,52 @@ services:
     cpus: ${NEXTCLOUD_CPUS:-1.0}
     pids_limit: ${NEXTCLOUD_PIDS_LIMIT:-1024}
 
+  # ==========================================================================
+  # WARP-882 / WS-4 — OnlyOffice Document Server (in-browser editing + co-author)
+  # ==========================================================================
+  # The editing ENGINE behind the Nextcloud `onlyoffice` connector (WOPI-style
+  # handshake). Mirrors the `nextcloud` block: default network, NO `ports:`
+  # (reached only via the gateway's `location /docs/` + sibling containers),
+  # env_file, restart: always, shared logging.
+  #
+  # PROFILE: `["docs"]`. The 32 GB box runs this DEFAULT-ON — scripts/setup.sh
+  # appends `docs` to COMPOSE_PROFILES (see .env.example). A ≤8 GB box drops
+  # `docs` (and sets DOCS_ENABLED=0) to reclaim the ~2 GB engine; the dashboard
+  # then renders the "Edit" affordance as unavailable rather than dead.
+  #
+  # LICENSE: this is OnlyOffice Document Server **Community Edition** (AGPLv3),
+  # which we build/test against. Shipping the engine at GA requires an OnlyOffice
+  # OEM/commercial license — see docs/ADR-021 (`docs` profile) + ENVIRONMENT.md.
+  # The integration stays engine-agnostic (WOPI), so the engine is a config
+  # choice, not a code dependency.
+  #
+  # Resource limits are top-level (mem_limit/cpus/pids_limit), NEVER
+  # deploy.resources (silently ignored outside Swarm; scripts/test-security.sh
+  # Test 14 / WARP-569 fails it).
+  docserver:
+    image: onlyoffice/documentserver:8.2
+    profiles: ["docs"]
+    depends_on:
+      nextcloud:
+        condition: service_started
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      # JWT-protected handshake between the connector, the engine, and the
+      # orchestrator. The connector + orchestrator sign with the SAME secret.
+      - JWT_ENABLED=${ONLYOFFICE_JWT_ENABLED:-true}
+      - JWT_SECRET=${ONLYOFFICE_JWT_SECRET:-}
+      - JWT_HEADER=Authorization
+      # The engine is fronted by the gateway under /docs/; it must build its
+      # asset URLs relative to that public path.
+      - DOCSERVER_PUBLISHER_NAME=Droplet
+    restart: always
+    <<: *default-logging
+    mem_limit: ${DOCS_MEM_LIMIT:-2g}
+    cpus: ${DOCS_CPUS:-2.0}
+    pids_limit: ${DOCS_PIDS_LIMIT:-1024}
+
   # --- Infrastructure ---
   db:
     # pgvector/pgvector:pg16 = official postgres 16 image + pgvector extension

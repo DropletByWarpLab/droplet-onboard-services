@@ -103,6 +103,29 @@ Host/kernel reserve target: ~1 GB. Default-profile budget fits within ~6 GB.
 | pm-health | pm | 128 MB | Droplet health sidecar |
 | ollama | single-box | 4 GB | ROCm LLM inference — biggest single consumer |
 | openwrt | single-box | 512 MB | Router-in-container |
+| docserver | docs | 2 GB | OnlyOffice Document Server — in-browser Office editing + co-authoring (WARP-882). Top-level `mem_limit: ${DOCS_MEM_LIMIT:-2g}` / `cpus: ${DOCS_CPUS:-2.0}` / `pids_limit: ${DOCS_PIDS_LIMIT:-1024}`, no `ports:`. See the `docs` profile note below. |
+
+### `docs` profile (in-browser editing + co-authoring) — WARP-882
+
+The `docs` profile adds a single service, `docserver` (OnlyOffice Document
+Server), at a **2 GB** ceiling. It is **additive** on top of the default
+profile — it is NOT in the ~5 GB default-profile budget above.
+
+The shipping **32 GB single-box runs `docs` DEFAULT-ON**: `scripts/setup.sh`
+includes `docs` in `COMPOSE_PROFILES` and `DOCS_ENABLED=1`. With 32 GB of RAM
+the additive 2 GB sits comfortably alongside the default profile + the
+single-box heavies (ollama 4 GB, openwrt 512 MB). A **smaller box (≤8 GB)
+should DROP `docs` from `COMPOSE_PROFILES` AND set `DOCS_ENABLED=0`** to reclaim
+the 2 GB; the dashboard then renders the "Edit" affordance as *unavailable*
+(gated on `GET /api/files/docs/status`) rather than a dead button.
+
+The engine is integrated **engine-agnostically via WOPI** through the Nextcloud
+`onlyoffice` connector, so the engine is a config choice (`DOCS_INTERNAL_URL` +
+the connector's `DocumentServerUrl`), not a code dependency. **License:** the
+image is OnlyOffice Document Server **Community Edition (AGPLv3)**, which is what
+we build and test against; shipping the engine at GA requires an OnlyOffice
+**OEM/commercial license**. There is no license-enforcement code — the swap is
+an ops/packaging decision.
 
 ## Env-variable indirection
 
