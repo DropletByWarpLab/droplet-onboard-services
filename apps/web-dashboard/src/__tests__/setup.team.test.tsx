@@ -76,15 +76,17 @@ afterEach(() => {
 });
 
 describe("setup Team step (PR #381)", () => {
-  it("renders the WizTeam surface — heading, email+role, SSO note, skip", () => {
+  it("renders the WizTeam surface — heading, email+role, SSO note, skip", async () => {
     renderStep();
     expect(screen.getByText(/bring in your team/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/invite by email/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/^role$/i)).toBeInTheDocument();
     // Directory-sync (SSO) alternative — an informational note, not a no-op
     // button (the dead "Connect SSO" control was removed; the card now reflects
-    // real discovery state, see TeamStep.sso.test.tsx).
-    expect(screen.getByText(/sync your directory/i)).toBeInTheDocument();
+    // real discovery state, see TeamStep.sso.test.tsx). `findByText` because the
+    // card shows neutral "Checking…" copy until discovery resolves to [] (no
+    // directory) — flash-free, so the not-connected note appears async.
+    expect(await screen.findByText(/sync your directory/i)).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /connect sso/i }),
     ).not.toBeInTheDocument();

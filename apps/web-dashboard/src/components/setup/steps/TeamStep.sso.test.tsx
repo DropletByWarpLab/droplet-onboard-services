@@ -69,4 +69,12 @@ describe("TeamStep SSO control is honest (connectivity audit D1)", () => {
       screen.queryByRole("button", { name: /connect sso/i }),
     ).not.toBeInTheDocument();
   });
+
+  it("resolves the azuread/microsoft aliases to Microsoft Entra (shared catalog)", async () => {
+    getEnabledSsoProviders.mockResolvedValue(["azuread"]);
+    render(<TeamStep onComplete={() => {}} onSkip={() => {}} />);
+
+    expect(await screen.findByText(/Synced/i)).toBeInTheDocument();
+    expect(screen.getByText(/Microsoft Entra/)).toBeInTheDocument();
+  });
 });

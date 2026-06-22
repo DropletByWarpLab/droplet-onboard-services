@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, Check, ChevronDown, Plus, Users, X } from "lucide-react";
 import { getEnabledSsoProviders, postTeamInvite, InviteError } from "@/lib/api";
+import { ssoProviderName } from "@/lib/sso-providers";
 import type { TeamInviteRole } from "@/lib/types";
 import { StepShell } from "@/components/setup/StepShell";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
@@ -94,23 +95,6 @@ function roleLabel(role: TeamInviteRole): string {
   return ROLE_OPTIONS.find((o) => o.value === role)?.label ?? role;
 }
 
-/** Friendly names for the SSO provider IDs `getEnabledSsoProviders` returns
- *  (WARP-629). Unknown ids fall back to a capitalized id. */
-const SSO_PROVIDER_LABELS: Record<string, string> = {
-  google: "Google Workspace",
-  okta: "Okta",
-  entra: "Microsoft Entra",
-  azuread: "Microsoft Entra",
-  microsoft: "Microsoft Entra",
-};
-
-function ssoLabel(id: string): string {
-  return (
-    SSO_PROVIDER_LABELS[id.toLowerCase()] ??
-    id.charAt(0).toUpperCase() + id.slice(1)
-  );
-}
-
 export function TeamStep({
   onComplete,
   onSkip,
@@ -132,26 +116,33 @@ export function TeamStep({
   // control. There is no in-wizard SSO *configuration* flow yet, so when none is
   // configured we show the option as a note rather than a button that does
   // nothing; when one IS configured we reflect that truthfully.
-  const [ssoProviders, setSsoProviders] = useState<string[]>([]);
+  //
+  // Three states, to avoid a copy FLASH on first paint: `null` = discovery
+  // still in flight (neutral copy, no synced chip), `[]` = resolved with no
+  // directory configured (the local-first "Sync your directory instead" note),
+  // `[...]` = resolved with provider(s) connected ("Directory sync is on").
+  const [ssoProviders, setSsoProviders] = useState<string[] | null>(null);
   useEffect(() => {
     let alive = true;
     // Best-effort: ANY failure — a rejected/timed-out request, or the discovery
-    // client simply being unavailable — leaves the local-first invite path
-    // standing. The try wraps the call itself (not just the promise) so a
-    // synchronous throw is caught too.
+    // client simply being unavailable — resolves to "no directory configured"
+    // (an empty list, NOT loading) so the local-first invite path stands. The
+    // try wraps the call itself (not just the promise) so a synchronous throw is
+    // caught too.
     void (async () => {
       try {
         const providers = await getEnabledSsoProviders();
         if (alive) setSsoProviders(providers);
       } catch {
-        /* no directory configured */
+        if (alive) setSsoProviders([]);
       }
     })();
     return () => {
       alive = false;
     };
   }, []);
-  const ssoConnected = ssoProviders.length > 0;
+  const ssoLoading = ssoProviders === null;
+  const ssoConnected = !ssoLoading && ssoProviders.length > 0;
 
   const normalizedEmail = useMemo(() => email.trim().toLowerCase(), [email]);
 
@@ -209,21 +200,29 @@ export function TeamStep({
       skip={{ label: "I'll invite people later", onClick: onSkip }}
     >
       {/* Directory sync (SSO) — the bulk alternative. WARP-820: fluid bottom
-          gap so the SSO card + invite row + pending list fit without scroll. */}
+          gap so the SSO card + invite row + pending list fit without scroll.
+          Three-state, flash-free: while discovery is in flight (`ssoLoading`)
+          the card shows neutral "Checking…" copy with no synced chip, so a box
+          that HAS a directory never momentarily shows "Sync your directory
+          instead" before flipping to "Directory sync is on". */}
       <div className="flex items-center gap-3.5 rounded-xl border border-accent/20 bg-accent-subtle px-4 py-3.5 mb-[clamp(16px,3vh,24px)]">
         <Users size={20} className="flex-shrink-0 text-accent" />
         <div className="min-w-0 flex-1">
           <p className="type-footnote font-semibold text-label-primary">
-            {ssoConnected
-              ? "Directory sync is on"
-              : "Sync your directory instead"}
+            {ssoLoading
+              ? "Directory sync"
+              : ssoConnected
+                ? "Directory sync is on"
+                : "Sync your directory instead"}
           </p>
           <p className="type-caption-1 text-label-tertiary mt-0.5">
-            {ssoConnected
-              ? `Your directory is mirrored over SSO (${ssoProviders
-                  .map(ssoLabel)
-                  .join(", ")}) — all on the LAN. New people sign in with your provider.`
-              : "Mirror Google Workspace, Microsoft Entra, or Okta over SSO (OIDC) — stays on the LAN."}
+            {ssoLoading
+              ? "Checking whether a directory is connected…"
+              : ssoConnected
+                ? `Your directory is mirrored over SSO (${ssoProviders
+                    .map(ssoProviderName)
+                    .join(", ")}) — all on the LAN. New people sign in with your provider.`
+                : "Mirror Google Workspace, Microsoft Entra, or Okta over SSO (OIDC) — stays on the LAN."}
           </p>
         </div>
         {ssoConnected && (
