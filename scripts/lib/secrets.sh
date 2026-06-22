@@ -931,13 +931,14 @@ _cert_is_public_ca_leaf() {
   # regeneration path mints a fresh self-signed cert, matching pre-PR behaviour
   # for an unreadable cert. (self-verify also fails on garbage, so without this
   # gate the fail-safe-toward-preserve below would wrongly pin a broken file.)
-  if [ -z "$issuer" ] && [ -z "$subject" ]; then
+  # Use || so a partially-parseable truncated cert (one field readable, one not)
+  # is also treated as non-public-CA and triggers regeneration rather than
+  # falling through to return 0 as a spurious public-CA leaf.
+  if [ -z "$issuer" ] || [ -z "$subject" ]; then
     return 1
   fi
 
-  # The cert parses. If we can read both DNs, use the issuer != subject signal;
-  # if we can only read one, fall back to the self-verify signal alone (treat as
-  # public-CA leaf — fail safe toward NOT clobbering a live fullchain).
+  # Both DNs parsed. Use the issuer != subject signal to confirm public-CA.
   if [ -n "$issuer" ] && [ -n "$subject" ]; then
     # Strip the leading `issuer=` / `subject=` label before comparing the DNs.
     if [ "${issuer#issuer=}" = "${subject#subject=}" ]; then
@@ -958,7 +959,7 @@ _write_tls_bootstrap_copy() {
   local cert_file="$1" key_file="$2"
   local boot_cert="$cert_file.bootstrap" boot_key="$key_file.bootstrap"
 
-  if [ -f "$boot_cert" ] && [ -f "$boot_key" ]; then
+  if [ -f "$boot_cert" ] || [ -f "$boot_key" ]; then
     return 0
   fi
   if [ ! -f "$cert_file" ] || [ ! -f "$key_file" ]; then
@@ -1018,6 +1019,10 @@ _generate_tls_cert() {
       log_success "Restored TLS certificate from bootstrap copy:"
       log_info "  Cert: $cert_file"
       log_info "  Key:  $key_file"
+      if ! declare -F reload_gateway_nginx >/dev/null 2>&1; then
+        # shellcheck source=tls-reload.sh
+        source "$(dirname "${BASH_SOURCE[0]}")/tls-reload.sh"
+      fi
       reload_gateway_nginx || true
       return 0
     fi
