@@ -703,8 +703,9 @@ export async function updateWorkItem(
     }
     const scalarChanged =
       (fields.name !== undefined && fields.name !== existing.name) ||
-      fields.descriptionHtml !== undefined ||
-      fields.dueDate !== undefined ||
+      (fields.descriptionHtml !== undefined && fields.descriptionHtml !== existing.descriptionHtml) ||
+      (fields.dueDate !== undefined &&
+        fields.dueDate?.toISOString() !== existing.dueDate?.toISOString()) ||
       fields.assignees !== undefined ||
       fields.labelIds !== undefined;
     if (scalarChanged) {

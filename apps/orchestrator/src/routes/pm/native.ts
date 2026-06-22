@@ -40,8 +40,10 @@ function mapServiceError(err: unknown, res: Response): boolean {
     case "label_not_found":
     case "work_item_not_found":
     case "comment_not_found":
-    case "invalid_parent":
       res.status(404).json({ error: msg });
+      return true;
+    case "invalid_parent":
+      res.status(422).json({ error: msg });
       return true;
     case "identifier_taken":
       res.status(409).json({ error: msg });
