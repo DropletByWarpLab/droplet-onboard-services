@@ -36,6 +36,7 @@ import { createPmOnboardRouter } from "./routes/pm-onboard.js";
 import { createPmProxyRouter } from "./routes/pm-proxy.js";
 import { createPmMobileRouter } from "./routes/mobile/pm.js";
 import { createPmRouter } from "./routes/pm.js";
+import { createPmNativeRouter } from "./routes/pm/native.js";
 import { createScenesRouter } from "./routes/scenes.js";
 import { sendMatterCommand } from "./services/matter.service.js";
 import { createNetworkRouter } from "./routes/network.js";
@@ -249,6 +250,10 @@ export function createApp(prisma: PrismaClient) {
   // factory-reset.sh).
   app.use("/api", createSystemResetRouter(prisma));
   app.use("/api", createMatterRouter(prisma));
+  // ADR-026 — native PM (projects, work-items, states, labels, comments).
+  // Mounted BEFORE the legacy Plane proxy so the native GET /api/pm/workspaces
+  // supersedes it; the embedded Plane surface is removed in P6.
+  app.use("/api", createPmNativeRouter(prisma));
   // WARP-507 — Plane onboarding endpoint for the setup wizard.
   app.use(createPmOnboardRouter());
   // WARP-867 — Plane service-token mint + app-API proxies (workspace
