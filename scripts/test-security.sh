@@ -188,9 +188,18 @@ else
 fi
 
 if [ -f "$ENV_EXAMPLE" ]; then
-  PASSWORD_LINES=$(grep -E '(PASSWORD|SECRET)=' "$ENV_EXAMPLE" | grep -v 'change-me' | grep -v '^#' || true)
+  # A valid placeholder is either the literal `change-me` OR an EMPTY value
+  # (`KEY=` with nothing after). Empty is the SAFEST placeholder — it can never
+  # be a forgeable real secret. Only ONLYOFFICE_JWT_SECRET is explicitly
+  # permitted to ship empty (the orchestrator/connector treat empty as "feature
+  # off" so an un-provisioned box fails safe rather than running on a shared
+  # default). All other secrets must use `change-me` as their placeholder.
+  PASSWORD_LINES=$(grep -E '(PASSWORD|SECRET)=' "$ENV_EXAMPLE" \
+    | grep -v 'change-me' \
+    | grep -vE '^ONLYOFFICE_JWT_SECRET=[[:space:]]*$' \
+    | grep -v '^#' || true)
   if [ -z "$PASSWORD_LINES" ]; then
-    pass ".env.example: all secrets use 'change-me' placeholder"
+    pass ".env.example: all secrets use 'change-me' or empty placeholder"
   else
     fail ".env.example: found non-placeholder secret values"
   fi

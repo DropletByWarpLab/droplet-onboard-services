@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { X, Download, FileText } from "lucide-react";
-import { getDownloadUrl, getThumbnailUrl } from "@/lib/api";
+import { X, Download, FileText, Pencil } from "lucide-react";
+import { getDownloadUrl, getThumbnailUrl, getDocsStatus } from "@/lib/api";
 import { authFetch } from "@/lib/auth";
+import { isEditableOfficeFile } from "@/lib/office-files";
 import type { FileEntryInfo } from "@/lib/types";
 import { ReindexButton } from "./ReindexButton";
 
@@ -11,6 +12,12 @@ interface PreviewPaneProps {
   file: FileEntryInfo;
   onClose: () => void;
   onDownload: () => void;
+  /**
+   * WARP-882 — open the in-browser editor. The "Edit" affordance only renders
+   * when this is supplied AND the doc-server engine is ready AND the file is an
+   * editable Office MIME (no dead buttons).
+   */
+  onEdit?: () => void;
 }
 
 const TEXT_EXTS = new Set([
@@ -41,9 +48,15 @@ function getKind(file: FileEntryInfo): "image" | "pdf" | "video" | "audio" | "te
  * Videos and audio stream directly from the download endpoint. PDFs use a
  * native <object> tag with the browser's PDF viewer — no external JS lib.
  */
-export function PreviewPane({ file, onClose, onDownload }: PreviewPaneProps) {
+export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPaneProps) {
   const [textContent, setTextContent] = useState<string | null>(null);
   const [textError, setTextError] = useState<string | null>(null);
+  // WARP-882: the Edit affordance is gated on engine readiness. We only probe
+  // status when the file is an editable Office MIME AND a handler is wired, so a
+  // non-editable file (or a page that doesn't mount the editor) never makes a
+  // needless call and never shows a dead button.
+  const [docsReady, setDocsReady] = useState(false);
+  const editable = !!onEdit && isEditableOfficeFile(file);
   const kind = getKind(file);
 
   useEffect(() => {
@@ -53,6 +66,24 @@ export function PreviewPane({ file, onClose, onDownload }: PreviewPaneProps) {
     document.addEventListener("keydown", handleKey);
     return () => document.removeEventListener("keydown", handleKey);
   }, [onClose]);
+
+  useEffect(() => {
+    if (!editable) {
+      setDocsReady(false);
+      return;
+    }
+    let cancelled = false;
+    getDocsStatus()
+      .then((s) => {
+        if (!cancelled) setDocsReady(s.state === "ready");
+      })
+      .catch(() => {
+        if (!cancelled) setDocsReady(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [editable, file.path]);
 
   useEffect(() => {
     if (kind !== "text") return;
@@ -94,6 +125,20 @@ export function PreviewPane({ file, onClose, onDownload }: PreviewPaneProps) {
             </p>
           </div>
           <div className="flex items-center gap-1.5">
+            {/* WARP-882: Edit — visible only when the doc-server engine is ready
+                AND the file is an editable Office MIME. The server still decides
+                edit-vs-view when the session is minted; this is the entry point,
+                not an authorization claim. */}
+            {editable && docsReady && (
+              <button
+                onClick={onEdit}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-full bg-accent text-accent-foreground type-footnote hover:bg-accent-hover transition-colors"
+                aria-label="Edit"
+              >
+                <Pencil size={14} />
+                <span className="hidden sm:inline">Edit</span>
+              </button>
+            )}
             {/* WARP-287: admin-only re-index trigger. The orchestrator's
                 /api/admin/files/:id/reindex enforces RBAC + recent-MFA,
                 so non-admins get a 403/401 and the button surfaces the

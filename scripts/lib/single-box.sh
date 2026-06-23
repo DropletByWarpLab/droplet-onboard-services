@@ -399,6 +399,53 @@ configure_single_box_env() {
     *)        merged_profiles="${merged_profiles},eval" ;;
   esac
 
+  # OnlyOffice Document Server (`docs` profile, WARP-882 / ADR-027 WS-4) — RAM
+  # GATED. The engine is OnlyOffice CE (~2 GB always-on image), so it is
+  # DEFAULT-ON on a roomy box and DROPPED on a small one:
+  #   * total RAM > SINGLE_BOX_DOCS_MIN_GIB (default 8 GiB) → the 32 GB / 16 GB
+  #     single-box ABSORBS the engine comfortably: merge `docs` into
+  #     COMPOSE_PROFILES (idempotent, no duplicate) and set DOCS_ENABLED=1.
+  #   * ≤ 8 GiB box → DROP `docs` and set DOCS_ENABLED=0 to reclaim the ~2 GB;
+  #     the dashboard renders "Edit" as unavailable (not dead).
+  # RAM is read the same way as scripts/lib/preflight.sh (MemTotal kB / 1048576).
+  # If /proc/meminfo is unreadable (non-Linux dev), we DROP docs (conservative —
+  # don't bring up a 2 GB engine on an unsized host). The ONLYOFFICE_JWT_SECRET
+  # the connector + engine need is generated unconditionally by
+  # scripts/lib/secrets.sh::generate_env (openssl rand -hex 32), which runs
+  # BEFORE this on every setup — so the docs path always has a strong secret.
+  local docs_min_gib mem_kb mem_gb docs_enabled_val
+  docs_min_gib="${SINGLE_BOX_DOCS_MIN_GIB:-8}"
+  mem_gb=0
+  if [ -r /proc/meminfo ]; then
+    # `|| true`: a no-match grep exits 1 and would abort under set -euo pipefail
+    # inside this function (no inherited ERR trap). Empty → mem_gb stays 0 → drop.
+    mem_kb=$({ grep -E '^MemTotal:' /proc/meminfo || true; } | awk '{print $2}')
+    [ -n "$mem_kb" ] && mem_gb=$((mem_kb / 1048576))
+  fi
+  if [ "$mem_gb" -gt "$docs_min_gib" ]; then
+    # Merge `docs` (idempotent — never duplicate if already present).
+    case ",${merged_profiles}," in
+      *,docs,*) : ;;                                # already present
+      ,,)       merged_profiles="docs" ;;
+      *)        merged_profiles="${merged_profiles},docs" ;;
+    esac
+    docs_enabled_val=1
+    log_info "OnlyOffice doc-server: ON (${mem_gb} GiB > ${docs_min_gib} GiB threshold) — \`docs\` profile + DOCS_ENABLED=1"
+  else
+    # Drop `docs` if a previous run / lib/compose.sh added it; reclaim the engine.
+    local stripped_profiles="" p
+    local IFS_SAVE="$IFS"; IFS=','
+    for p in $merged_profiles; do
+      [ "$p" = "docs" ] && continue
+      [ -z "$p" ] && continue
+      stripped_profiles="${stripped_profiles:+${stripped_profiles},}${p}"
+    done
+    IFS="$IFS_SAVE"
+    merged_profiles="$stripped_profiles"
+    docs_enabled_val=0
+    log_info "OnlyOffice doc-server: OFF (${mem_gb} GiB ≤ ${docs_min_gib} GiB threshold) — dropped \`docs\`, DOCS_ENABLED=0"
+  fi
+
   # One-time descriptive header (idempotent — only on the first write).
   if ! grep -q 'Single-box deployment knobs' "$env_file"; then
     cat >> "$env_file" << 'EOF'
@@ -412,6 +459,12 @@ configure_single_box_env() {
 #                        `eval` by DEFAULT so the rag-eval (RAGAS) service runs
 #                        and /api/admin/rag-eval/* works out-of-the-box
 #                        (bug #15); set RAG_EVAL_DISABLED=1 to pause runs.
+#                        `docs` (OnlyOffice doc-server, WARP-882) is RAM-GATED:
+#                        merged in + DOCS_ENABLED=1 when total RAM > 8 GiB (the
+#                        32 GB / 16 GB box), dropped + DOCS_ENABLED=0 on a ≤8 GB
+#                        box. Override the threshold with SINGLE_BOX_DOCS_MIN_GIB.
+#   DOCS_ENABLED         OnlyOffice doc-server master switch (RAM-gated above).
+#   DOCS_INTERNAL_URL    compose-network engine URL the orchestrator health-probes.
 #   FRIGATE_RENDER_NODE  iGPU renderD129 (dGPU renderD128 is reserved Ollama)
 #   CAMERA_SUBNET        single-box camera network (br-lan 192.168.20.0/24);
 #                        overrides the multi-box VLAN default 192.168.100.0/24
@@ -450,6 +503,12 @@ EOF
   fi
 
   upsert_env COMPOSE_PROFILES    "$merged_profiles"
+  # OnlyOffice doc-server master switch + internal URL, RAM-gated above. The
+  # orchestrator reads DOCS_ENABLED (explicit, never inferred from absence) and
+  # probes DOCS_INTERNAL_URL for the engine's health; on a small box DOCS_ENABLED=0
+  # makes /files/docs/status report "unavailable" and the editor degrade cleanly.
+  upsert_env DOCS_ENABLED        "$docs_enabled_val"
+  upsert_env DOCS_INTERNAL_URL   http://docserver
   upsert_env FRIGATE_RENDER_NODE /dev/dri/renderD129
   # CAMERA_SUBNET: the compose default (192.168.100.0/24) is the multi-box
   # OpenWrt camera VLAN (openwrt/files/etc/config/dhcp `cameras`). The
@@ -574,5 +633,5 @@ EOF
   # reads never depend on docker0 being up.
   upsert_env DEVICE_BRIDGE_URL   "http://${bridge_gw}:9090"
 
-  log_success "Wrote single-box knobs to .env (idempotent upsert — COMPOSE_PROFILES=${merged_profiles}, CAMERA_SUBNET=192.168.20.0/24, WIREGUARD_LAN_CIDR=192.168.20.0/24, WIREGUARD_DNS=192.168.20.1, OLLAMA_URL, FIPS off, TPM=mock, OpenWrt 127.0.0.1:8181, LLM_MODEL=gpt-oss:20b, DROPLET_AP_MODE=hostapd, SWITCH_AUTOPROVISION=1 flat-lan, ROUTING/SWITCH/DISPLAY/DEVICE_BRIDGE URLs → ${bridge_net} gateway ${bridge_gw})"
+  log_success "Wrote single-box knobs to .env (idempotent upsert — COMPOSE_PROFILES=${merged_profiles}, DOCS_ENABLED=${docs_enabled_val} (RAM-gated, ${mem_gb} GiB vs ${docs_min_gib} GiB), CAMERA_SUBNET=192.168.20.0/24, WIREGUARD_LAN_CIDR=192.168.20.0/24, WIREGUARD_DNS=192.168.20.1, OLLAMA_URL, FIPS off, TPM=mock, OpenWrt 127.0.0.1:8181, LLM_MODEL=gpt-oss:20b, DROPLET_AP_MODE=hostapd, SWITCH_AUTOPROVISION=1 flat-lan, ROUTING/SWITCH/DISPLAY/DEVICE_BRIDGE URLs → ${bridge_net} gateway ${bridge_gw})"
 }

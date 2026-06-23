@@ -206,6 +206,13 @@ const MATRIX: GuardedRoute[] = [
   // 403s for family). Read-only roster, no mutation.
   { method: "get", path: "/api/files/share-recipients", allowed: ["owner", "admin", "family"] },
 
+  // ── files: in-browser editing (WARP-882) ── (owner + admin + family) ──
+  // Both are GETs but guarded: opening an editor session is a household-member
+  // capability (guests don't co-author), and the status read gates the dashboard
+  // "Edit" affordance. service is excluded — doc editing is a human action.
+  { method: "get", path: "/api/files/docs/status", allowed: ["owner", "admin", "family"] },
+  { method: "get", path: "/api/files/report.docx/editor-session", allowed: ["owner", "admin", "family"] },
+
   // ── llm sessions (own) ── ──
   // POST /llm/chat: includes `service` because voice-io's principal
   //   posts here (see `services/voice-io/voice/llm.py` — the comment

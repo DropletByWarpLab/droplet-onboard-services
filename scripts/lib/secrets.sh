@@ -38,6 +38,9 @@ generate_env() {
   local pg_password redis_password mqtt_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display service_token_switch service_token_ai_gateway ops_token service_token_mcp service_token_email orchestrator_sampler_token ai_gateway_sampler_token ollama_url openwrt_password
   # WARP-850: orchestrator -> matter-controller sidecar bearer (X-Droplet-Auth).
   local droplet_matter_service_token
+  # WARP-882 / WS-4: shared HS256 secret the OnlyOffice Document Server, the
+  # Nextcloud `onlyoffice` connector, AND the orchestrator all verify.
+  local onlyoffice_jwt_secret
   pg_password=$(_gen_password 24)
   redis_password=$(_gen_password 24)
   mqtt_password=$(_gen_password 24)
@@ -124,6 +127,17 @@ generate_env() {
   # (every cloud-LLM call 451s). Compose wires it to
   # ${AI_GATEWAY_SAMPLER_TOKEN}.
   ai_gateway_sampler_token=$(openssl rand -hex 32)
+  # WARP-882 / WS-4: device-unique HS256 secret for the OnlyOffice in-browser
+  # editing / co-authoring handshake. The Document Server, the Nextcloud
+  # `onlyoffice` connector, AND the orchestrator's docserver.client.ts all sign +
+  # verify document-access JWTs with this ONE value. It MUST be device-unique and
+  # unguessable: a shared/default secret (the old `change-me` placeholder) lets
+  # anyone forge an HS256 token granting access to any document. 32 random bytes
+  # (64 hex chars) clears the orchestrator's JWT-strength floor. The doc-server is
+  # default-ON on the 32 GB box (dropped on ≤8 GB), but we generate the secret
+  # unconditionally so it is always strong (never a placeholder) on every box,
+  # whatever the RAM gate decides about DOCS_ENABLED / the `docs` profile.
+  onlyoffice_jwt_secret=$(openssl rand -hex 32)
 
   # OLLAMA_URL — picks the bundled droplet-ollama container by default
   # (single-box). Override before running setup.sh for a multi-box
@@ -162,6 +176,16 @@ MQTT_BROKER_LOCAL=mqtt://droplet:${mqtt_password}@localhost:1883
 NEXTCLOUD_ADMIN_USER=admin
 NEXTCLOUD_ADMIN_PASSWORD=$nc_password
 NEXTCLOUD_URL=http://nextcloud:80
+
+# --- Document server (WARP-882 / WS-4 — in-browser editing + co-authoring) ---
+# ONLYOFFICE_JWT_SECRET: device-unique HS256 secret the OnlyOffice Document
+# Server, the Nextcloud \`onlyoffice\` connector, AND the orchestrator's
+# docserver.client.ts all sign/verify document-access JWTs with. Generated here
+# unconditionally so the secret is always strong (never a forgeable placeholder)
+# regardless of whether the box runs the engine. The doc-server is DEFAULT-ON on
+# the 32 GB box (DOCS_ENABLED=1 + \`docs\` in COMPOSE_PROFILES, RAM-gated in
+# scripts/lib/single-box.sh) and dropped on ≤8 GB boxes — see .env.example.
+ONLYOFFICE_JWT_SECRET=$onlyoffice_jwt_secret
 
 # --- AI Gateway ---
 AI_GATEWAY_URL=http://ai-gateway:8000
@@ -343,6 +367,7 @@ EOF
   log_info "  OPS_TOKEN         : ${ops_token:0:8}****"
   log_info "  MCP_TOKEN         : ${service_token_mcp:0:8}****"
   log_info "  MATTER_TOKEN      : ${droplet_matter_service_token:0:8}****"
+  log_info "  ONLYOFFICE_JWT    : ${onlyoffice_jwt_secret:0:8}****"
   log_success "Secrets written to $env_file (chmod 600)"
 
   # NOTE: Artifact materialization (mosquitto password/conf, TLS cert, Docker
@@ -450,6 +475,14 @@ migrate_env() {
   # every orchestrator Matter call 401s (dashboard shows the controller
   # as disconnected).
   _migrate_ensure_key DROPLET_MATTER_SERVICE_TOKEN "$(openssl rand -hex 32)"
+  # WARP-882 / WS-4 backfill: already-provisioned boxes predate the OnlyOffice
+  # doc-server JWT secret. Without this key the orchestrator + connector would
+  # fall back to an empty/default secret on the document-access handshake —
+  # forgeable HS256 — so backfill a device-unique 32-byte secret here too. Only
+  # appended when missing (idempotent); a box that already opted in keeps its
+  # value. The doc-server stays OPT-IN / default-OFF — minting the secret does
+  # NOT start the engine (that needs DOCS_ENABLED=1 + \`docs\` in COMPOSE_PROFILES).
+  _migrate_ensure_key ONLYOFFICE_JWT_SECRET "$(openssl rand -hex 32)"
 
   # WARP-230 device-identity. Pick backend based on /dev/tpm0 presence
   # on the host — hosts with a TPM hit 'real', everything else hits

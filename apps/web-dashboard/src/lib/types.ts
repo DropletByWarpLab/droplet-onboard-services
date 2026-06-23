@@ -242,6 +242,22 @@ export interface FileEntryInfo {
   modifiedAt: string;
 }
 
+/** WARP-882 — document-server availability for the gated "Edit" affordance. */
+export interface DocsStatus {
+  state: "ready" | "unavailable";
+  engine: string;
+}
+
+/** WARP-882 — payload that opens the in-browser editor (server-decided mode). */
+export interface DocEditorSession {
+  editorUrl: string;
+  accessToken: string;
+  accessTokenTtl: number;
+  ncFileId: number;
+  mode: "edit" | "view";
+  documentKey: string;
+}
+
 // WARP-883 (ADR-027 WS-5) — Files spaces (My Files / shared Household).
 export type FileSpaceId = "personal" | "shared";
 

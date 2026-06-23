@@ -2702,6 +2702,51 @@ model TlsCert {
   updatedAt DateTime     @updatedAt
 }
 
+/// WARP-882 / WS-4 — one row per OPEN in-browser editing/co-authoring session,
+/// keyed on the Nextcloud numeric fileId. Co-authoring is a single shared
+/// document session: many editors collaborate on one `ncFileId`, so the fileId
+/// is the natural key (the engine's `documentKey` namespaces that session).
+/// Re-opening a file while a session is active upserts this row rather than
+/// creating a duplicate.
+///
+/// `status` is an EXPLICIT enum column, never derived from absence (handbook
+/// "state is explicit"; canonical precedent WARP-218 `BrainMemoryItemStatus`).
+/// `closing` is the non-terminal transition the engine's save-callback drives
+/// before the row settles to `closed`; `closed` rows are retained for audit.
+model FileEditSession {
+  /// Nextcloud numeric fileId — the co-authoring session key.
+  ncFileId    Int                   @id
+  /// Last user observed to open/touch the session (NC username). Audit only.
+  ncUser      String
+  /// Path at session open, for human-readable audit/logs (may go stale on move).
+  filePath    String
+  /// Engine-decided mode the session was opened in.
+  mode        FileEditSessionMode
+  /// EXPLICIT lifecycle state — never inferred from a null column.
+  status      FileEditSessionStatus @default(open)
+  /// Opaque co-authoring document key handed to the engine.
+  documentKey String
+  openedAt    DateTime              @default(now())
+  /// Bumped on every editor-session mint / heartbeat for the same fileId.
+  lastActiveAt DateTime             @default(now())
+  /// Set when the engine's save-callback reports the session fully closed.
+  closedAt    DateTime?
+
+  @@index([status])
+  @@index([ncUser, status])
+}
+
+enum FileEditSessionMode {
+  edit
+  view
+}
+
+enum FileEditSessionStatus {
+  open
+  closing
+  closed
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Native Project Management (ADR-026 — supersedes ADR-010 embedded Plane)
 //
