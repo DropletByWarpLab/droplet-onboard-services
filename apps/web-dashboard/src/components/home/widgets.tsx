@@ -627,6 +627,18 @@ export function NotesWidget() {
   const [hydrated, setHydrated] = useState(false);
   const [status, setStatus] = useState<NotesSaveStatus>("idle");
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Mirror of `val` + a pending-save flag for the unmount flush, which can't
+  // read the latest state through a stale `[]`-effect closure.
+  const valRef = useRef("");
+  const pendingRef = useRef(false);
+
+  const writeStorage = (next: string) => {
+    try {
+      window.localStorage.setItem(NOTES_KEY, next);
+    } catch {
+      /* ignore — private-mode / quota; the in-memory note still works */
+    }
+  };
 
   // Persist `val` immediately and reflect the saved state. Used by both the
   // debounced timer and the explicit "New note" flush so writes never race.
@@ -635,11 +647,8 @@ export function NotesWidget() {
       clearTimeout(timerRef.current);
       timerRef.current = null;
     }
-    try {
-      window.localStorage.setItem(NOTES_KEY, next);
-    } catch {
-      /* ignore — private-mode / quota; the in-memory note still works */
-    }
+    pendingRef.current = false;
+    writeStorage(next);
     setStatus("saved");
   };
 
@@ -656,7 +665,9 @@ export function NotesWidget() {
   // user pauses. The initial hydration pass is skipped so we don't flash
   // a status on first paint.
   useEffect(() => {
+    valRef.current = val;
     if (!hydrated) return;
+    pendingRef.current = true;
     setStatus("saving");
     timerRef.current = setTimeout(() => {
       flush(val);
@@ -666,6 +677,16 @@ export function NotesWidget() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [val, hydrated]);
+
+  // Unmount-only: if a debounced save is still in flight when the widget goes
+  // away (navigate off Home, remove the tile), commit the latest text so we
+  // don't drop up to ~500ms of typing — the old write-every-keystroke code
+  // never lost data on unmount.
+  useEffect(() => {
+    return () => {
+      if (pendingRef.current) writeStorage(valRef.current);
+    };
+  }, []);
 
   const newNote = () => {
     // Flush first so the (now empty) note is committed — never silently

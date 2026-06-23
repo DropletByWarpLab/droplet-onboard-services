@@ -74,6 +74,26 @@ describe("NotesWidget save feedback (Samantha QA #bugs)", () => {
     expect(window.localStorage.getItem(KEY)).toBe("");
   });
 
+  it("flushes the in-flight note to localStorage on unmount (no lost typing)", () => {
+    const { unmount } = render(<NotesWidget />);
+    const ta = screen.getByLabelText("Notes") as HTMLTextAreaElement;
+
+    act(() => {
+      fireEvent.change(ta, { target: { value: "half-typed" } });
+    });
+
+    // Save is still debouncing — nothing in storage yet.
+    expect(window.localStorage.getItem(KEY)).not.toBe("half-typed");
+
+    // Widget goes away before the debounce fires (navigate off Home / remove
+    // tile). The pending edit must still land.
+    act(() => {
+      unmount();
+    });
+
+    expect(window.localStorage.getItem(KEY)).toBe("half-typed");
+  });
+
   it("colors the 'Saved' status with the AA-passing green-text token, not var(--success)", () => {
     // `--success` (#16a34a light) is a background-fill token; as 12px normal
     // text on the home card it lands ~3.0–3.3:1, below WCAG AA 4.5:1. The
