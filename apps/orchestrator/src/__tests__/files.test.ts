@@ -763,6 +763,48 @@ describe("File Operations (Nextcloud-backed routes)", () => {
       );
     });
 
+    it("POST /api/files/share forwards shareWith for a named-member share (shareType:0)", async () => {
+      // WARP-879 / WS-1 — the internal-sharing path: shareType 0 (user) with
+      // a `shareWith` (the recipient's nextcloudUsername). The route must
+      // thread shareWith through to ncCreateShareV2 unchanged.
+      ncMock.ncCreateShareV2.mockResolvedValue({
+        id: 11,
+        url: null,
+        token: null,
+        shareType: 0,
+        permissions: 17,
+        path: "/report.pdf",
+        expireDate: null,
+        hasPassword: false,
+        note: null,
+        shareWith: "romain",
+        shareWithDisplayName: "Romain",
+        uidOwner: "dev",
+        ownerDisplayName: "Admin",
+        stime: 1712860391,
+      });
+
+      const res = await request(app)
+        .post("/api/files/share")
+        .send({
+          path: "/report.pdf",
+          shareType: 0,
+          shareWith: "romain",
+          permissions: 17,
+        });
+      expect(res.status).toBe(200);
+      expect(res.body.shareType).toBe(0);
+      expect(ncMock.ncCreateShareV2).toHaveBeenCalledWith(
+        expect.any(String),
+        "/report.pdf",
+        expect.objectContaining({
+          shareType: 0,
+          shareWith: "romain",
+          permissions: 17,
+        })
+      );
+    });
+
     it("POST /api/files/share surfaces NextcloudOcsError as the upstream status", async () => {
       const { NextcloudOcsError } = nc as typeof import("../services/nextcloud.client.js");
       ncMock.ncCreateShareV2.mockRejectedValue(

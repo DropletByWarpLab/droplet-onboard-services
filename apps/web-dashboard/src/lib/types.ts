@@ -506,6 +506,18 @@ export interface ShareUpdateOptions {
   note?: string;
 }
 
+/**
+ * WARP-879 / WS-1 — a household member the internal-sharing picker can
+ * target. Returned by GET /api/files/share-recipients. `shareWith` is the
+ * member's Nextcloud user id (the OCS shareWith value for a shareType:0
+ * named-member share); `email` is null when the member has none on file.
+ */
+export interface ShareRecipient {
+  shareWith: string;
+  displayName: string;
+  email: string | null;
+}
+
 // --- Storage types ---
 
 export interface StorageStats {

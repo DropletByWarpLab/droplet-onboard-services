@@ -1189,6 +1189,75 @@ export function createFilesRouter(prisma: PrismaClient): Router {
     }
   });
 
+  // ── Share recipients (GET /api/files/share-recipients) ── (WARP-879 / WS-1)
+  //
+  // The internal-sharing UI (ShareDialog "Person" mode) needs a roster of
+  // household members to pick a recipient from. We deliberately do NOT reuse
+  // GET /auth/users / OCS `/cloud/users` here: that surface 403s for the
+  // `family` role, which would leave the picker empty for exactly the people
+  // who share most. Instead we read the LOCAL Prisma `User` table — ADR-013
+  // makes the built-in directory the identity source of truth, with Nextcloud
+  // demoted to downstream-provisioned WebDAV accounts.
+  //
+  // Each recipient's `shareWith` is its `nextcloudUsername` (the OCS user id
+  // ncCreateShareV2 expects for shareType=0), which ADR-013 keeps decoupled
+  // from the local `username`. We resolve the caller's OWN nextcloudUsername
+  // from their User row keyed on `req.user.id` (the local UUID — NOT
+  // getUser(req), which returns the local username) so we can exclude them
+  // from their own picker. The Nextcloud system/database admin
+  // (NEXTCLOUD_ADMIN_USER || "admin") is hidden the same way GET /auth/users
+  // hides it. Rows without a nextcloudUsername (service principals, fresh
+  // invitees pre-first-login) can't receive an OCS share and are excluded.
+  // All three exclusions compare case-insensitively.
+  router.get(
+    "/files/share-recipients",
+    requireRole("owner", "admin", "family"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const callerId = req.user?.id ?? "";
+        const caller = callerId
+          ? await prisma.user.findUnique({
+              where: { id: callerId },
+              select: { nextcloudUsername: true },
+            })
+          : null;
+        const selfNc = caller?.nextcloudUsername?.toLowerCase() ?? null;
+        const systemUser = (process.env.NEXTCLOUD_ADMIN_USER || "admin").toLowerCase();
+
+        const rows = (await prisma.user.findMany({
+          select: {
+            displayName: true,
+            email: true,
+            nextcloudUsername: true,
+          },
+          orderBy: { displayName: "asc" },
+        })) as Array<{
+          displayName: string;
+          email: string | null;
+          nextcloudUsername: string | null;
+        }>;
+
+        const recipients = rows
+          .filter((u) => {
+            if (!u.nextcloudUsername) return false;
+            const nc = u.nextcloudUsername.toLowerCase();
+            if (nc === systemUser) return false;
+            if (selfNc !== null && nc === selfNc) return false;
+            return true;
+          })
+          .map((u) => ({
+            shareWith: u.nextcloudUsername as string,
+            displayName: u.displayName,
+            email: u.email ?? null,
+          }));
+
+        res.json({ recipients });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
   // ────────────────────────────────────────────────────────────
   //  Phase 4 — Semantic content search (pgvector)
   // ────────────────────────────────────────────────────────────
