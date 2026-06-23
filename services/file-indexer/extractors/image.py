@@ -13,7 +13,7 @@ import io
 import os
 
 import pytesseract
-from PIL import Image
+from PIL import Image, ImageOps
 
 from anchor_schema import NoneAnchor
 from extractors.spans import Span
@@ -43,6 +43,26 @@ def _ocr_image(img: Image.Image) -> tuple[str, list[str], float]:
     if mean_conf < OCR_CONFIDENCE_THRESHOLD and text:
         warnings.append("low_confidence_ocr")
     return text, warnings, mean_conf
+
+
+def make_vision_render(raw: bytes, max_px: int = 1024, quality: int = 85) -> bytes:
+    """Normalize an uploaded image into a downscaled, web/cloud-safe JPEG.
+
+    Used by the image-vision path: the chat route base64-encodes this render
+    into an `image_url` block for a vision model. EXIF-rotates so orientation
+    is correct, converts to RGB (JPEG can't hold alpha/palette), shrinks the
+    longest side to <= max_px (never upscales), and re-encodes as JPEG. This
+    keeps payloads small and gives providers a uniform format — raw HEIC/TIFF
+    are not accepted by cloud providers.
+    """
+    img = Image.open(io.BytesIO(raw))
+    img = ImageOps.exif_transpose(img)
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    img.thumbnail((max_px, max_px))  # preserves aspect ratio; downscale-only
+    out = io.BytesIO()
+    img.save(out, format="JPEG", quality=quality)
+    return out.getvalue()
 
 
 def _ocr_image_bytes(jpeg_or_png_bytes: bytes) -> tuple[str, list[str]]:
