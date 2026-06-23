@@ -5,17 +5,16 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncGenerator
 
-import litellm
-
-from providers.base import BaseProvider
+from capabilities import cloud_capabilities
+from providers.base import BaseProvider, to_litellm_messages
 from schemas import ChatMessage, ModelInfo
 
 logger = logging.getLogger(__name__)
 
 ANTHROPIC_MODELS = [
-    ModelInfo(id="claude-sonnet-4-20250514", provider="anthropic", name="Claude Sonnet 4", context_window=200000),
-    ModelInfo(id="claude-3-5-haiku-20241022", provider="anthropic", name="Claude 3.5 Haiku", context_window=200000),
-    ModelInfo(id="claude-3-5-sonnet-20241022", provider="anthropic", name="Claude 3.5 Sonnet", context_window=200000),
+    ModelInfo(id="claude-sonnet-4-20250514", provider="anthropic", name="Claude Sonnet 4", context_window=200000, capabilities=cloud_capabilities("claude-sonnet-4-20250514")),
+    ModelInfo(id="claude-3-5-haiku-20241022", provider="anthropic", name="Claude 3.5 Haiku", context_window=200000, capabilities=cloud_capabilities("claude-3-5-haiku-20241022")),
+    ModelInfo(id="claude-3-5-sonnet-20241022", provider="anthropic", name="Claude 3.5 Sonnet", context_window=200000, capabilities=cloud_capabilities("claude-3-5-sonnet-20241022")),
 ]
 
 
@@ -34,7 +33,9 @@ class AnthropicCloudProvider(BaseProvider):
         if not self.api_key:
             raise ValueError("Anthropic API key not configured. Add your key in Settings.")
 
-        litellm_messages = [{"role": m.role, "content": m.content} for m in messages]
+        import litellm  # lazy: heavy import, only needed on a cloud call
+
+        litellm_messages = to_litellm_messages(messages)
         litellm_model = f"anthropic/{model}" if not model.startswith("anthropic/") else model
 
         # Build optional params
@@ -58,6 +59,8 @@ class AnthropicCloudProvider(BaseProvider):
     async def _stream_chat(
         self, model: str, messages: list[dict], kwargs: dict
     ) -> AsyncGenerator[str, None]:
+        import litellm  # lazy: heavy import, only needed on a cloud call
+
         response = await litellm.acompletion(
             model=model,
             messages=messages,
