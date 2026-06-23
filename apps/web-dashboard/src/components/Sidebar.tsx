@@ -59,6 +59,22 @@ type NavItem = {
    * integration may be unconfigured. Default: no capability gate.
    */
   requiresCapability?: "claudeActivity" | "ragEval";
+  /**
+   * Nested sub-navigation. When present, the desktop sidebar reveals these
+   * children indented under the parent whenever the user is anywhere inside
+   * the parent section (the parent's href OR any child's href). Mirrors the
+   * Files sub-nav pattern, generalized so any section can nest (e.g. Events
+   * under Cameras). Children are rendered flat in the mobile "More" drawer so
+   * every destination stays reachable with a single tap.
+   */
+  children?: NavItem[];
+  /**
+   * Match this item's active state by exact path equality instead of the
+   * default `startsWith` prefix match. Used by section-index sub-items (e.g.
+   * the Cameras index sits at /cameras, but /events is a sibling child — the
+   * index must not light up when a deeper child route is active).
+   */
+  exact?: boolean;
 };
 
 type AuthRole = "owner" | "admin" | "family" | "guest";
@@ -84,7 +100,24 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { href: "/", label: "Home", icon: LayoutDashboard },
       { href: "/chat", label: "Ask AI", icon: MessageSquare },
-      { href: "/files", label: "Files", icon: FolderOpen },
+      {
+        href: "/files",
+        label: "Files",
+        icon: FolderOpen,
+        // Files sub-nav — the original nesting, now expressed via the
+        // generalized `children` mechanism (was the standalone filesSubNav
+        // const). Reveals on any /files/* route. "All files" is `exact` so
+        // it doesn't stay lit while you're in a deeper Files view.
+        children: [
+          { href: "/files", label: "All files", icon: FolderOpen, exact: true },
+          { href: "/files/drives", label: "Drives", icon: HardDrive },
+          { href: "/files/recents", label: "Recents", icon: Clock },
+          { href: "/files/favorites", label: "Favorites", icon: Star },
+          { href: "/files/shared", label: "Shared", icon: Share2 },
+          { href: "/files/trash", label: "Trash", icon: Trash2 },
+          { href: "/files/devices", label: "Sync Devices", icon: Laptop },
+        ],
+      },
       // WARP-837: Email triage surface. Left unrestricted — the backend allows
       // owner/admin/family and RBAC-scopes accounts per user; the send tier is
       // gated to owner/admin in the UI + server. No unread-count badge (the
@@ -106,11 +139,24 @@ const NAV_GROUPS: NavGroup[] = [
   {
     label: "Operations",
     items: [
-      { href: "/cameras", label: "Cameras", icon: Video },
-      // Events replaces the old "Clips" entry — same icon, expanded UX.
-      // The /clips route still resolves (kept as a redirect) so external
-      // links and the LLM tool list_clips don't 404.
-      { href: "/events", label: "Events", icon: Film },
+      // Cameras owns the surveillance section. Events nests beneath it
+      // (Samantha QA #bugs) — they were flat siblings, which read as two
+      // unrelated destinations. The sub-nav reveals on /cameras or /events
+      // (mirrors the Files sub-nav). The Cameras parent link IS the section
+      // index; its default prefix match keeps it lit on /cameras and the
+      // /cameras/[name] detail pages, but NOT on the /events sibling (which
+      // owns its own active state).
+      {
+        href: "/cameras",
+        label: "Cameras",
+        icon: Video,
+        children: [
+          // Events replaces the old "Clips" entry — same icon, expanded UX.
+          // The /clips route still resolves (kept as a redirect) so external
+          // links and the LLM tool list_clips don't 404.
+          { href: "/events", label: "Events", icon: Film },
+        ],
+      },
       { href: "/network", label: "Network", icon: Network },
       // WARP-302: "Devices" uses Cpu (not Home) so it doesn't visually
       // collide with the Home tab's LayoutDashboard glyph at thumb distance.
@@ -174,17 +220,6 @@ const NAV_GROUPS: NavGroup[] = [
 // on `workspace` (Files swaps for Cameras in Business).
 const MOBILE_PRIMARY_HREFS = ["/", "/chat", "/files", "/devices"] as const;
 
-// Sub-navigation rendered under Files when we're on a /files/* route.
-const filesSubNav = [
-  { href: "/files", label: "All files", icon: FolderOpen, exact: true },
-  { href: "/files/drives", label: "Drives", icon: HardDrive, exact: false },
-  { href: "/files/recents", label: "Recents", icon: Clock, exact: false },
-  { href: "/files/favorites", label: "Favorites", icon: Star, exact: false },
-  { href: "/files/shared", label: "Shared", icon: Share2, exact: false },
-  { href: "/files/trash", label: "Trash", icon: Trash2, exact: false },
-  { href: "/files/devices", label: "Sync Devices", icon: Laptop, exact: false },
-];
-
 /** Filter a group's items by current workspace + role. Returns the same
  *  shape with items shaped to render order; empty groups are caller's
  *  responsibility to skip. */
@@ -218,7 +253,20 @@ export function Sidebar() {
   const isActive = (href: string) =>
     href === "/" ? pathname === "/" : pathname.startsWith(href);
 
-  const showFilesSubNav = pathname.startsWith("/files");
+  // Active-state for an individual nav entry, honoring `exact`. Section-index
+  // sub-items (e.g. the Cameras index at /cameras) set `exact` so they don't
+  // stay lit while a deeper sibling child (/events) is the active route.
+  const isItemActive = (item: NavItem) =>
+    item.exact ? pathname === item.href : isActive(item.href);
+
+  // A parent section is "open" — its child sub-nav reveals — whenever the
+  // user is on the parent's own route OR on any of its children's routes.
+  // Generalizes the old Files-only `pathname.startsWith("/files")` check so
+  // Cameras (with the Events child) reveals on /cameras or /events.
+  const isSectionOpen = (item: NavItem) =>
+    !!item.children &&
+    (isActive(item.href) ||
+      item.children.some((child) => isActive(child.href)));
 
   async function handleLogout() {
     setMoreOpen(false);
@@ -249,16 +297,28 @@ export function Sidebar() {
   })).filter((g) => g.items.length > 0);
 
   // Flatten for the "More" drawer — anything not in the bottom-bar
-  // primary set lands here in group order.
+  // primary set lands here in group order. Nested children (e.g. Events
+  // under Cameras) ride along with their parent: they're flattened into
+  // the drawer list right after it so every destination stays reachable
+  // with a single tap. A child whose parent is itself a bottom-tab primary
+  // (e.g. the Files sub-views) is excluded with that parent — the drawer
+  // never orphans a child under an absent parent.
   const drawerGroups = renderedGroups
     .map((g) => ({
       label: g.label,
-      items: g.items.filter(
-        (item) =>
-          !MOBILE_PRIMARY_HREFS.includes(
-            item.href as (typeof MOBILE_PRIMARY_HREFS)[number],
-          ),
-      ),
+      items: g.items
+        .filter(
+          (item) =>
+            !MOBILE_PRIMARY_HREFS.includes(
+              item.href as (typeof MOBILE_PRIMARY_HREFS)[number],
+            ),
+        )
+        .flatMap((item) => {
+          const children = (item.children ?? []).filter(
+            (child) => child.href !== item.href,
+          );
+          return [item, ...children];
+        }),
     }))
     .filter((g) => g.items.length > 0);
 
@@ -334,11 +394,8 @@ export function Sidebar() {
                   <NavLink
                     key={item.href}
                     item={item}
-                    active={isActive(item.href)}
-                    showFilesSubNav={
-                      item.href === "/files" && showFilesSubNav
-                    }
-                    filesSubNav={filesSubNav}
+                    active={isItemActive(item)}
+                    showChildren={isSectionOpen(item)}
                     pathname={pathname}
                   />
                 ))}
@@ -569,14 +626,13 @@ export function Sidebar() {
 function NavLink({
   item,
   active,
-  showFilesSubNav,
-  filesSubNav: subNav,
+  showChildren,
   pathname,
 }: {
   item: NavItem;
   active: boolean;
-  showFilesSubNav?: boolean;
-  filesSubNav?: typeof filesSubNav;
+  /** Reveal the nested `item.children` sub-nav (we're inside this section). */
+  showChildren?: boolean;
   pathname: string;
 }) {
   const Icon = item.icon;
@@ -599,9 +655,9 @@ function NavLink({
         {item.label}
       </Link>
 
-      {showFilesSubNav && subNav && (
+      {showChildren && item.children && (
         <div className="ml-7 mt-1 space-y-0.5">
-          {subNav.map((sub) => {
+          {item.children.map((sub) => {
             const SubIcon = sub.icon;
             const subActive = sub.exact
               ? pathname === sub.href
