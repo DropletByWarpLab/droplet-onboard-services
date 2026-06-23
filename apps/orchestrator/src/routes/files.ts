@@ -156,6 +156,45 @@ function safePublish(topic: string, payload: Record<string, unknown>): void {
   }
 }
 
+// ────────────────────────────────────────────────────────────
+//  WARP-880 / WS-2 — keyword + hybrid content search
+// ────────────────────────────────────────────────────────────
+
+/** Content-search modes for `GET /api/files/search/content` (WARP-880). */
+const FILE_SEARCH_MODES = ["semantic", "keyword", "hybrid"] as const;
+type FileSearchMode = (typeof FILE_SEARCH_MODES)[number];
+
+/**
+ * The lexical/hybrid engine returns one row per matched *chunk*. A single
+ * file is chunked into many rows, so over-fetch by this factor before
+ * collapsing to one hit per file — `limit * CHUNKS_PER_FILE_FACTOR` keeps
+ * enough headroom that the per-file top-K survives dedupe.
+ */
+const CHUNKS_PER_FILE_FACTOR = 5;
+
+/**
+ * Collapse the engine's per-chunk `SearchHit[]` to one result per file,
+ * keeping the best chunk for each path. The service returns rows in score
+ * DESC order, so the first chunk seen for a given `path` is the best one.
+ * Maps the service `snippet` field → `text` so the output shape matches
+ * the existing `SemanticSearchResult` `{ path, score, text }` the
+ * frontend already renders.
+ */
+function dedupeHitsPerFile(
+  hits: Array<{ path: string; score: number; snippet: string }>,
+  limit: number,
+): Array<{ path: string; score: number; text: string }> {
+  const seen = new Set<string>();
+  const out: Array<{ path: string; score: number; text: string }> = [];
+  for (const hit of hits) {
+    if (seen.has(hit.path)) continue;
+    seen.add(hit.path);
+    out.push({ path: hit.path, score: hit.score, text: hit.snippet });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
 /**
  * Map errors from the Nextcloud client + generic fallthroughs to HTTP responses.
  * OCS errors preserve their upstream status (400 for validation, 403 forbidden,
@@ -1515,11 +1554,44 @@ export function createFilesRouter(prisma: PrismaClient): Router {
       );
       const user = getUser(req);
 
-      // Check Redis cache first (60s TTL on identical queries)
-      const cacheKey = `semantic:${user}:${q}:${limit}`;
+      // WARP-880 / WS-2 — three content-search modes:
+      //   semantic (default) → existing inline pgvector SQL (unchanged)
+      //   keyword            → lexical (websearch_to_tsquery + ts_rank_cd),
+      //                        works with the AI gateway down
+      //   hybrid             → embed + RRF fusion of lexical + vector
+      const mode = (req.query.mode as string | undefined)?.trim() || "semantic";
+      if (!FILE_SEARCH_MODES.includes(mode as FileSearchMode)) {
+        res.status(400).json({
+          error: `mode must be one of: ${FILE_SEARCH_MODES.join(", ")}`,
+        });
+        return;
+      }
+
+      // Check Redis cache first (60s TTL on identical queries). The mode is
+      // part of the key so keyword/semantic/hybrid results never collide.
+      const cacheKey = `filesearch:${mode}:${user}:${q}:${limit}`;
       const cached = await cacheGet<Array<{ path: string; score: number; text: string }>>(cacheKey);
       if (cached) {
         res.json({ results: cached });
+        return;
+      }
+
+      // Keyword (lexical) search NEVER touches the gRPC embed — this is the
+      // headline win: full-text search keeps working when the ai-gateway /
+      // LLM stack is down. Placed before the embed block on purpose.
+      if (mode === "keyword") {
+        const { searchByLexical } = await import(
+          "../services/file-search.service.js"
+        );
+        const hits = await searchByLexical(prisma, {
+          userId: user,
+          query: q,
+          limit: limit * CHUNKS_PER_FILE_FACTOR,
+          source: "nextcloud",
+        });
+        const results = dedupeHitsPerFile(hits, limit);
+        await cacheSet(cacheKey, results, 60);
+        res.json({ results });
         return;
       }
 
@@ -1550,6 +1622,25 @@ export function createFilesRouter(prisma: PrismaClient): Router {
       } catch (err) {
         logger.warn({ err }, "Semantic search: embedding failed");
         res.status(503).json({ error: "Embedding service unavailable" });
+        return;
+      }
+
+      // Hybrid (WARP-880 / WS-2): RRF fusion of the lexical + vector arms.
+      // No rerank pipe — keep it low-latency for the interactive Files page.
+      if (mode === "hybrid") {
+        const { searchHybrid } = await import(
+          "../services/file-search.service.js"
+        );
+        const hits = await searchHybrid(prisma, {
+          userId: user,
+          vector: embedVec,
+          query: q,
+          limit: limit * CHUNKS_PER_FILE_FACTOR,
+          source: "nextcloud",
+        });
+        const results = dedupeHitsPerFile(hits, limit);
+        await cacheSet(cacheKey, results, 60);
+        res.json({ results });
         return;
       }
 

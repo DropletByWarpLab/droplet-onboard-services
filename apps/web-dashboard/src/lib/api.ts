@@ -4056,11 +4056,24 @@ export interface SemanticSearchResult {
   text: string;
 }
 
+/**
+ * WARP-880 / WS-2 — content-search modes:
+ *   - semantic: pgvector cosine similarity (needs the AI gateway)
+ *   - keyword:  lexical full-text (websearch_to_tsquery); works gateway-down
+ *   - hybrid:   embed + RRF fusion of lexical + vector arms
+ */
+export type FileSearchMode = "semantic" | "keyword" | "hybrid";
+
 export async function searchFileContent(
   query: string,
-  limit = 20
+  limit = 20,
+  mode: FileSearchMode = "semantic"
 ): Promise<SemanticSearchResult[]> {
-  const params = new URLSearchParams({ q: query, limit: String(limit) });
+  const params = new URLSearchParams({
+    q: query,
+    limit: String(limit),
+    mode,
+  });
   const res = await authFetch(`${BASE}/api/files/search/content?${params}`);
   if (!res.ok) {
     if (res.status === 503) return []; // AI gateway down — graceful degrade
