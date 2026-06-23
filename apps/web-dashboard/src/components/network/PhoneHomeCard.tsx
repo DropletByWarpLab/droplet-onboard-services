@@ -21,6 +21,8 @@ import {
   RefreshCw,
   AlertTriangle,
   Plus,
+  Info,
+  ChevronDown,
 } from "lucide-react";
 import { useAuth, authFetch } from "@/lib/auth";
 
@@ -317,6 +319,29 @@ export function PhoneHomeCard({ onManageGroups }: { onManageGroups?: () => void 
           Owner &amp; admins
         </span>
       </header>
+
+      {/* "Why this matters" — opt-in explainer keeps the card compact while
+          giving a home owner the what + why of phone-home blocking. */}
+      <details className="group border-b border-separator bg-surface-secondary px-5 [&_summary]:list-none [&_summary::-webkit-details-marker]:hidden">
+        <summary className="flex cursor-pointer select-none items-center gap-2 py-2.5 type-caption-1 font-medium text-label-secondary transition-colors duration-150 hover:text-label-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
+          <Info size={13} className="text-label-tertiary" />
+          Why this matters
+          <ChevronDown
+            size={13}
+            className="ml-auto text-label-tertiary transition-transform duration-150 ease-smooth group-open:rotate-180 motion-reduce:transition-none"
+          />
+        </summary>
+        <p
+          data-testid="phone-home-explainer"
+          className="pb-3 pr-1 type-caption-1 leading-relaxed text-label-tertiary"
+        >
+          Many smart devices and cameras quietly send usage data — telemetry —
+          back to the companies that made them. Blocking phone-home keeps that
+          data on your home network instead of leaving it. Essential traffic
+          like time sync and security &amp; firmware updates is always allowed,
+          so your devices stay safe and up to date.
+        </p>
+      </details>
 
       {/* hero + master */}
       <div className="flex items-center gap-4 px-5 py-[18px]">
