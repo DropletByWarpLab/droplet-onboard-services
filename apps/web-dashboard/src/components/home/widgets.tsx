@@ -37,6 +37,7 @@ import {
   Cpu,
   FileSpreadsheet,
   FileText,
+  FilePlus,
   Folder,
   Image as ImageIcon,
   Lightbulb,
@@ -610,34 +611,97 @@ function TasksWidget() {
   );
 }
 
-/* ─────────────────────────── Notes ─────────────────────────── */
-function NotesWidget() {
+/* ─────────────────────────── Notes ───────────────────────────
+ * Single-note scratchpad backed by localStorage. The save is debounced
+ * (~500ms) and surfaced through a small status line so the autosave is
+ * legible — "Saving…" while a write is pending, "Saved" once it lands —
+ * instead of writing on every keystroke with zero feedback. "New note"
+ * flushes the pending save and starts a fresh, empty note.
+ */
+const NOTES_KEY = "droplet-home-notes";
+const NOTES_SAVE_DEBOUNCE_MS = 500;
+type NotesSaveStatus = "idle" | "saving" | "saved";
+
+export function NotesWidget() {
   const [val, setVal] = useState("");
   const [hydrated, setHydrated] = useState(false);
+  const [status, setStatus] = useState<NotesSaveStatus>("idle");
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Persist `val` immediately and reflect the saved state. Used by both the
+  // debounced timer and the explicit "New note" flush so writes never race.
+  const flush = (next: string) => {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    try {
+      window.localStorage.setItem(NOTES_KEY, next);
+    } catch {
+      /* ignore — private-mode / quota; the in-memory note still works */
+    }
+    setStatus("saved");
+  };
+
   useEffect(() => {
     try {
-      setVal(window.localStorage.getItem("droplet-home-notes") ?? "");
+      setVal(window.localStorage.getItem(NOTES_KEY) ?? "");
     } catch {
       /* ignore */
     }
     setHydrated(true);
   }, []);
+
+  // Debounced autosave: mark "Saving…" on each edit, then commit once the
+  // user pauses. The initial hydration pass is skipped so we don't flash
+  // a status on first paint.
   useEffect(() => {
     if (!hydrated) return;
-    try {
-      window.localStorage.setItem("droplet-home-notes", val);
-    } catch {
-      /* ignore */
-    }
+    setStatus("saving");
+    timerRef.current = setTimeout(() => {
+      flush(val);
+    }, NOTES_SAVE_DEBOUNCE_MS);
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [val, hydrated]);
+
+  const newNote = () => {
+    // Flush first so the (now empty) note is committed — never silently
+    // discard the in-flight save.
+    flush("");
+    setVal("");
+  };
+
   return (
-    <textarea
-      className="w-notes"
-      value={val}
-      onChange={(e) => setVal(e.target.value)}
-      aria-label="Notes"
-      placeholder="Jot something down…"
-    />
+    <div className="w-notes-wrap">
+      <textarea
+        className="w-notes"
+        value={val}
+        onChange={(e) => setVal(e.target.value)}
+        aria-label="Notes"
+        placeholder="Jot something down…"
+      />
+      <div className="w-notes-bar">
+        <span
+          className="w-notes-status"
+          role="status"
+          aria-live="polite"
+          data-state={status}
+        >
+          {status === "saving" ? "Saving…" : status === "saved" ? "Saved" : ""}
+        </span>
+        <button
+          className="w-notes-new"
+          type="button"
+          onClick={newNote}
+        >
+          <FilePlus size={13} />
+          New note
+        </button>
+      </div>
+    </div>
   );
 }
 

@@ -867,9 +867,17 @@
 }
 
 /* ---------- Notes ---------- */
-.droplet-home .w-notes {
+.droplet-home .w-notes-wrap {
+  display: flex;
+  flex-direction: column;
   height: 100%;
   width: 100%;
+  min-height: 0;
+}
+.droplet-home .w-notes {
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
   border: none;
   outline: none;
   resize: none;
@@ -881,4 +889,45 @@
 }
 .droplet-home .w-notes::placeholder {
   color: var(--text-muted);
+}
+.droplet-home .w-notes-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 8px;
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+}
+.droplet-home .w-notes-status {
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text-muted);
+  /* Hold layout while empty/idle so the bar doesn't jump. */
+  min-height: 13px;
+  transition: color 0.18s var(--ease);
+}
+.droplet-home .w-notes-status[data-state="saved"] {
+  color: var(--success);
+}
+.droplet-home .w-notes-new {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: none;
+  border-radius: var(--radius-input);
+  background: none;
+  color: var(--text-muted);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  cursor: pointer;
+  transition: color 0.18s var(--ease), background 0.18s var(--ease);
+}
+.droplet-home .w-notes-new:hover {
+  color: var(--brand);
+  background: var(--brand-subtle);
+}
+.droplet-home .w-notes-new svg {
+  color: var(--brand);
 }
