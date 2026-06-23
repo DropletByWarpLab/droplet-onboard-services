@@ -72,9 +72,9 @@ export class DocServerUnavailableError extends Error {
   }
 }
 
-/** True when the engine is configured to run at all (explicit flag + a URL). */
+/** True when the engine is enabled via the explicit DOCS_ENABLED flag. */
 function docsConfigured(): boolean {
-  return config.DOCS_ENABLED === true && config.DOCS_INTERNAL_URL.trim() !== "";
+  return config.DOCS_ENABLED === true;
 }
 
 /**
@@ -85,18 +85,21 @@ function docsConfigured(): boolean {
  */
 export async function docServerHealthy(): Promise<boolean> {
   if (!docsConfigured()) return false;
+  if (!config.DOCS_INTERNAL_URL.trim()) return false;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3000);
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000);
     const url = `${config.DOCS_INTERNAL_URL.replace(/\/$/, "")}/healthcheck`;
     const res = await fetch(url, { signal: controller.signal });
-    clearTimeout(timeout);
     if (!res.ok) return false;
     const body = (await res.text()).trim().toLowerCase();
-    // Document Server returns the literal `true`; tolerate a JSON-wrapped value.
-    return body === "true" || body.includes("true");
+    // Document Server returns the literal `true`; tolerate a JSON-wrapped boolean.
+    if (body === "true") return true;
+    try { return JSON.parse(body) === true; } catch { return false; }
   } catch {
     return false;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -155,6 +158,12 @@ export async function ncMintEditorSession(
     .update(`${ncFileId}:${ncUser}:${filePath}`)
     .digest("hex")
     .slice(0, 20);
+
+  if (!config.ONLYOFFICE_JWT_SECRET.trim()) {
+    throw new DocServerUnavailableError(
+      "ONLYOFFICE_JWT_SECRET is not configured — document editing is unavailable",
+    );
+  }
 
   const accessToken = jwt.sign(
     {

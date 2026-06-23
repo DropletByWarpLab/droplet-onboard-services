@@ -3582,7 +3582,12 @@ export async function getEditorSession(path: string): Promise<DocEditorSession> 
     } catch {
       /* body unavailable */
     }
-    throw new Error(`editor session failed: ${res.status}${detail ? ` (${detail})` : ""}`);
+    // Attach structured props so callers can branch on status/code without
+    // parsing the message string (avoids coupling to the exact message format).
+    throw Object.assign(
+      new Error(`editor session failed: ${res.status}${detail ? ` (${detail})` : ""}`),
+      { status: res.status, code: detail || undefined },
+    );
   }
   return res.json();
 }

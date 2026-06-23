@@ -1307,7 +1307,13 @@ export async function ncListSharedWithMe(
   }
   const data = await resp.json();
   const records = data?.ocs?.data ?? [];
-  return Array.isArray(records) ? records.map(mapShareRecord) : [];
+  // For shared-with-me, `file_target` is the recipient's path (e.g. /report.docx);
+  // `path` in the OCS response is the owner's path (e.g. /Documents/report.docx).
+  // Override `path` with `file_target` so permission lookups in the editor-session
+  // route match what the recipient navigates to.
+  return Array.isArray(records)
+    ? records.map((r) => ({ ...mapShareRecord(r), path: r.file_target ?? r.path ?? "" }))
+    : [];
 }
 
 // ── WebDAV Move / Copy / Rename ──
