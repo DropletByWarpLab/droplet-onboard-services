@@ -138,6 +138,15 @@ export function SubscriptionsPanel() {
         </button>
       </div>
 
+      {/* Calendar UX clarity (Samantha QA #bugs): the Google / iCloud / Outlook
+          framing used to live only inside the hidden add-form, so the section's
+          purpose was invisible until you expanded it. This one-line intro sits
+          directly under the header so the user understands it at a glance. */}
+      <p className="type-caption-1 text-label-tertiary mb-3">
+        Show your Google, iCloud, or Outlook calendar here — paste its share
+        link below.
+      </p>
+
       {showNew && (
         // WARP-308: the previous form conflated protocol with auth ("No
         // auth (public ICS)" vs "Basic auth (CalDAV)"), which implied
@@ -227,7 +236,8 @@ export function SubscriptionsPanel() {
         <div className="type-caption-1 text-label-tertiary">Loading…</div>
       ) : sources.length === 0 ? (
         <div className="type-caption-1 text-label-tertiary py-2">
-          No external calendars subscribed yet.
+          No external calendars subscribed yet. Use the &ldquo;+&rdquo; button
+          above to pull in events from another calendar.
         </div>
       ) : (
         <ul className="flex flex-col gap-2">
@@ -294,8 +304,9 @@ export function SubscriptionsPanel() {
           </button>
         )}
         <p className="type-caption-1 text-label-tertiary mt-2">
-          Use this URL in your phone's "Subscribe to calendar" flow. Your local
-          events will appear automatically.
+          This goes the other direction — paste this URL into your phone's
+          "Subscribe to calendar" flow and your Droplet events show up there
+          automatically.
         </p>
       </div>
 

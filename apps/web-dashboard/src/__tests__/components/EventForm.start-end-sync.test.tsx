@@ -2,6 +2,12 @@
  * WARP-306 — editing the start time slides the end time by the same delta,
  * preserving the event's duration. Editing the end directly stays under
  * the user's control (no slide).
+ *
+ * Updated for the Calendar UX clarity work (Samantha QA #bugs): the Starts /
+ * Ends fields are now the date + 15-minute time dropdown (<DateTimePicker>)
+ * instead of a single native datetime-local input. The duration-slide
+ * *behavior* is unchanged — these tests drive the time <select> and assert the
+ * same invariant.
  */
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
@@ -43,95 +49,96 @@ function makeInitial(startIso: string, endIso: string): CalendarEvent {
   };
 }
 
-function getStartInput(): HTMLInputElement {
-  return screen.getByLabelText(/^Starts$/i) as HTMLInputElement;
+function getStartTime(): HTMLSelectElement {
+  return screen.getByLabelText(/Starts time/i) as HTMLSelectElement;
 }
-function getEndInput(): HTMLInputElement {
-  return screen.getByLabelText(/^Ends$/i) as HTMLInputElement;
+function getEndTime(): HTMLSelectElement {
+  return screen.getByLabelText(/Ends time/i) as HTMLSelectElement;
+}
+
+// Build an ISO that lands on the given local H:M so the dropdown options match.
+function localIso(year: number, month0: number, day: number, h: number, m: number): string {
+  return new Date(year, month0, day, h, m).toISOString();
 }
 
 describe("EventForm — start/end sync (WARP-306)", () => {
   it("moves end forward by the same delta when start moves forward", () => {
-    // 10:00 → 11:00 (1 hour duration)
-    const initial = makeInitial("2026-05-12T10:00:00Z", "2026-05-12T11:00:00Z");
+    // 10:00 → 11:00 (1 hour duration), local time.
+    const initial = makeInitial(
+      localIso(2026, 4, 12, 10, 0),
+      localIso(2026, 4, 12, 11, 0),
+    );
     render(<EventForm open initial={initial} onClose={vi.fn()} onSaved={vi.fn()} />);
 
-    const start = getStartInput();
-    const end = getEndInput();
-    const prevEnd = end.value;
-    const prevStart = start.value;
+    const start = getStartTime();
+    const end = getEndTime();
+    expect(start.value).toBe("10:00");
+    expect(end.value).toBe("11:00");
 
-    // Push start forward by 1 hour. Parse "YYYY-MM-DDTHH:mm" reliably via Date.
-    const newStart = new Date(new Date(prevStart).getTime() + 60 * 60 * 1000);
-    const pad = (n: number) => String(n).padStart(2, "0");
-    const newStartLocal = `${newStart.getFullYear()}-${pad(newStart.getMonth() + 1)}-${pad(newStart.getDate())}T${pad(newStart.getHours())}:${pad(newStart.getMinutes())}`;
-    fireEvent.change(start, { target: { value: newStartLocal } });
+    // Push start forward by 1 hour.
+    fireEvent.change(start, { target: { value: "11:00" } });
 
-    expect(start.value).toBe(newStartLocal);
-    // End should have advanced by 1h compared to its previous value.
-    const newEndMs = new Date(end.value).getTime();
-    const prevEndMs = new Date(prevEnd).getTime();
-    expect(newEndMs - prevEndMs).toBe(60 * 60 * 1000);
+    expect(start.value).toBe("11:00");
+    // End should have advanced by 1h, preserving the duration.
+    expect(end.value).toBe("12:00");
   });
 
   it("moves end backward by the same delta when start moves backward", () => {
-    const initial = makeInitial("2026-05-12T10:00:00Z", "2026-05-12T11:30:00Z");
+    const initial = makeInitial(
+      localIso(2026, 4, 12, 10, 0),
+      localIso(2026, 4, 12, 11, 30),
+    );
     render(<EventForm open initial={initial} onClose={vi.fn()} onSaved={vi.fn()} />);
 
-    const start = getStartInput();
-    const end = getEndInput();
-    const prevEnd = end.value;
-    const prevStart = start.value;
+    const start = getStartTime();
+    const end = getEndTime();
+    expect(start.value).toBe("10:00");
+    expect(end.value).toBe("11:30");
 
-    // Move start back 30 minutes.
-    const newStart = new Date(new Date(prevStart).getTime() - 30 * 60 * 1000);
-    const pad = (n: number) => String(n).padStart(2, "0");
-    const newStartLocal = `${newStart.getFullYear()}-${pad(newStart.getMonth() + 1)}-${pad(newStart.getDate())}T${pad(newStart.getHours())}:${pad(newStart.getMinutes())}`;
-    fireEvent.change(start, { target: { value: newStartLocal } });
+    // Move start back 30 minutes → end follows to 11:00 (still 1h30 duration).
+    fireEvent.change(start, { target: { value: "09:30" } });
 
-    const newEndMs = new Date(end.value).getTime();
-    const prevEndMs = new Date(prevEnd).getTime();
-    expect(newEndMs - prevEndMs).toBe(-30 * 60 * 1000);
+    expect(start.value).toBe("09:30");
+    expect(end.value).toBe("11:00");
   });
 
-  it("does NOT modify end when the user edits the end field directly", () => {
-    const initial = makeInitial("2026-05-12T10:00:00Z", "2026-05-12T11:00:00Z");
+  it("does NOT modify start when the user edits the end field directly", () => {
+    const initial = makeInitial(
+      localIso(2026, 4, 12, 10, 0),
+      localIso(2026, 4, 12, 11, 0),
+    );
     render(<EventForm open initial={initial} onClose={vi.fn()} onSaved={vi.fn()} />);
 
-    const start = getStartInput();
-    const end = getEndInput();
-    const prevStart = start.value;
+    const start = getStartTime();
+    const end = getEndTime();
 
-    const newEnd = new Date(new Date(end.value).getTime() + 90 * 60 * 1000);
-    const pad = (n: number) => String(n).padStart(2, "0");
-    const newEndLocal = `${newEnd.getFullYear()}-${pad(newEnd.getMonth() + 1)}-${pad(newEnd.getDate())}T${pad(newEnd.getHours())}:${pad(newEnd.getMinutes())}`;
-    fireEvent.change(end, { target: { value: newEndLocal } });
+    fireEvent.change(end, { target: { value: "12:30" } });
 
-    expect(end.value).toBe(newEndLocal);
-    expect(start.value).toBe(prevStart);
+    expect(end.value).toBe("12:30");
+    expect(start.value).toBe("10:00");
   });
 
   it("preserves a manually-stretched duration on subsequent start edits", () => {
-    // User edits end to make it a 2h meeting, then later pushes start back.
-    const initial = makeInitial("2026-05-12T10:00:00Z", "2026-05-12T11:00:00Z");
+    // User edits end to make it a 2h meeting, then later pulls start back.
+    const initial = makeInitial(
+      localIso(2026, 4, 12, 10, 0),
+      localIso(2026, 4, 12, 11, 0),
+    );
     render(<EventForm open initial={initial} onClose={vi.fn()} onSaved={vi.fn()} />);
 
-    const start = getStartInput();
-    const end = getEndInput();
-    const pad = (n: number) => String(n).padStart(2, "0");
-    const fmt = (d: Date) =>
-      `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    const start = getStartTime();
+    const end = getEndTime();
 
-    // Step 1: user makes it 2h by editing end alone.
-    const newEnd = new Date(new Date(end.value).getTime() + 60 * 60 * 1000);
-    fireEvent.change(end, { target: { value: fmt(newEnd) } });
+    // Step 1: user makes it 2h (10:00 → 12:00) by editing end alone.
+    fireEvent.change(end, { target: { value: "12:00" } });
+    expect(end.value).toBe("12:00");
+    expect(start.value).toBe("10:00");
 
-    // Step 2: user pulls start back 15 minutes. End should follow by -15 minutes,
-    // preserving the new 2h duration.
-    const earlierStart = new Date(new Date(start.value).getTime() - 15 * 60 * 1000);
-    fireEvent.change(start, { target: { value: fmt(earlierStart) } });
+    // Step 2: user pulls start back 15 minutes → end follows by -15 minutes,
+    // preserving the new 2h duration (09:45 → 11:45).
+    fireEvent.change(start, { target: { value: "09:45" } });
 
-    const finalDurationMs = new Date(end.value).getTime() - new Date(start.value).getTime();
-    expect(finalDurationMs).toBe(2 * 60 * 60 * 1000);
+    expect(start.value).toBe("09:45");
+    expect(end.value).toBe("11:45");
   });
 });
