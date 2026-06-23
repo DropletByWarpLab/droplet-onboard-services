@@ -79,8 +79,8 @@ export class DocServerUnavailableError extends Error {
  * docServerHealthy() and the JWT-secret fail-safe lives in ncMintEditorSession()
  * (empty ONLYOFFICE_JWT_SECRET → DocServerUnavailableError, so no document-access
  * JWT is ever signed with a forgeable empty/default key). DOCS_ENABLED itself is
- * OPT-IN / DEFAULT-OFF (config default "0") — the operator must explicitly turn
- * the ~2 GB AGPLv3 engine on and add `docs` to COMPOSE_PROFILES.
+ * DEFAULT-ON on ≥32 GB boxes (config default "1"; scripts/lib/single-box.sh
+ * overrides to "0" for ≤8 GB). The operator must add `docs` to COMPOSE_PROFILES.
  */
 function docsConfigured(): boolean {
   return config.DOCS_ENABLED === true;

@@ -26,7 +26,7 @@ trust, PM secrets) are summarized in [`CLAUDE.md`](../CLAUDE.md).
 | `FILES_ROOT`         | `.data/files` (local) / `/data/files` (Docker)       |
 | `STORAGE_BACKEND`    | `legacy` or `nextcloud`                              |
 | `NEXTCLOUD_URL`      | Nextcloud instance URL                               |
-| `DOCS_ENABLED`       | EXPLICIT master switch for in-browser editing / co-authoring (WARP-882). **Opt-in / default-OFF** (`0`): the operator sets `1`/`true` AND adds `docs` to `COMPOSE_PROFILES` to run the ~2 GB AGPLv3 engine. NOT derived from `DOCS_INTERNAL_URL` emptiness |
+| `DOCS_ENABLED`       | EXPLICIT master switch for in-browser editing / co-authoring (WARP-882). **Default `1` (ON) on ≥32 GB boxes** — `setup.sh` (`single-box.sh`) writes `DOCS_ENABLED=0` on ≤8 GB boxes. Operator sets `1`/`true` AND adds `docs` to `COMPOSE_PROFILES` to run the ~2 GB AGPLv3 engine. NOT derived from `DOCS_INTERNAL_URL` emptiness |
 | `DOCS_INTERNAL_URL`  | Compose-network base URL the orchestrator probes for the OnlyOffice Document Server engine (default `http://docserver`). Empty → engine treated as unavailable |
 | `DOCS_EDITOR_PUBLIC_PATH` | Public path the gateway fronts the engine on (nginx `location /docs/`); default `/docs/` |
 | `DOCS_ACCESS_TOKEN_TTL_SECONDS` | Per-session editor access-token TTL in seconds (default `1800` = 30 min); the dashboard refreshes before expiry |

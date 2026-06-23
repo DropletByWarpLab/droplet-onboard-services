@@ -135,7 +135,7 @@ DOCS_ENABLED_NORM="$(printf '%s' "${DOCS_ENABLED:-1}" | tr '[:upper:]' '[:lower:
 # to the plain runner when `su` to www-data isn't possible (non-fatal best-effort).
 occ_www() {
   if su -p -s /bin/sh www-data -c 'true' 2>/dev/null; then
-    su -p -s /bin/sh www-data -c "$OCC $*"
+    su -p -s /bin/sh www-data -c '"$0" "$@"' -- "$OCC" "$@"
   else
     $OCC "$@"
   fi
