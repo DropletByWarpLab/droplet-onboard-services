@@ -343,14 +343,17 @@ export default function FilesPage() {
     [fm, files]
   );
 
+  // Double-click / Enter on a row. Folders navigate in; files open the rich
+  // preview modal (Samantha QA #bugs — opening a file used to drop into the
+  // info sidebar, which is the SINGLE-click affordance via handleRowSelect).
   const handleRowOpen = useCallback((file: FileEntryInfo) => {
     if (file.isDirectory) {
       setCurrentPath(file.path);
       fm.clearSelection();
     } else {
-      setSelectedFile(file);
+      handlePreview(file);
     }
-  }, [fm]);
+  }, [fm, handlePreview]);
 
   // ── Context menu ──
   const handleRowContextMenu = useCallback(
