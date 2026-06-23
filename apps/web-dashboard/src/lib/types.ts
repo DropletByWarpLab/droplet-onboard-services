@@ -257,6 +257,25 @@ export interface DocEditorSession {
   mode: "edit" | "view";
 }
 
+// WARP-883 (ADR-027 WS-5) — Files spaces (My Files / shared Household).
+export type FileSpaceId = "personal" | "shared";
+
+/** A browsable Files space as reported by GET /api/files/spaces. */
+export interface FileSpace {
+  id: FileSpaceId;
+  /** Display name ("My Files" or the shared folder name, e.g. "Household"). */
+  name: string;
+  /** Whether the space exists for this user (drives switcher visibility). */
+  available: boolean;
+  /** Home-relative root path for the space ("/" or "/Household"). */
+  root: string;
+}
+
+export interface FileSpacesResponse {
+  sharedAvailable: boolean;
+  spaces: FileSpace[];
+}
+
 export interface TrashItemInfo {
   /** Nextcloud-assigned name used as restore key (e.g. "photo.jpg.d1712860391") */
   name: string;
@@ -274,6 +293,29 @@ export interface FileVersionInfo {
   versionId: string;
   size: number;
   modifiedAt: string;
+}
+
+// --- WARP-881 / WS-3 (ADR-027): native file comments + tags ---
+
+/** A Droplet-owned comment on a file (keyed on the NC fileid server-side). */
+export interface FileCommentInfo {
+  id: string;
+  ncFileId: number;
+  /** Local User UUID of the author (matches AuthUser.id). */
+  authorUserId: string;
+  body: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A Droplet-owned tag on a file. File-scoped — every reader sees every tag. */
+export interface FileTagInfo {
+  id: string;
+  ncFileId: number;
+  label: string;
+  /** Local User UUID of whoever first added the tag (provenance only). */
+  addedByUserId: string;
+  createdAt: string;
 }
 
 export interface BulkOperationResult {
@@ -500,6 +542,18 @@ export interface ShareUpdateOptions {
   password?: string;
   expireDate?: string;
   note?: string;
+}
+
+/**
+ * WARP-879 / WS-1 — a household member the internal-sharing picker can
+ * target. Returned by GET /api/files/share-recipients. `shareWith` is the
+ * member's Nextcloud user id (the OCS shareWith value for a shareType:0
+ * named-member share); `email` is null when the member has none on file.
+ */
+export interface ShareRecipient {
+  shareWith: string;
+  displayName: string;
+  email: string | null;
 }
 
 // --- Storage types ---

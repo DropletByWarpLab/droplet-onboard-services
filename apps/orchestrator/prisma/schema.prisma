@@ -59,14 +59,14 @@ model Drive {
 /// create time.
 model StoragePool {
   /// md device name without the /dev/ prefix (e.g. "md0"). Stable id.
-  device      String        @id
+  device      String       @id
   displayName String
   level       ArrayLevel
-  status      PoolStatus    @default(none)
+  status      PoolStatus   @default(none)
   notes       String?
   members     PoolMember[]
-  createdAt   DateTime      @default(now())
-  updatedAt   DateTime      @updatedAt
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
 
   @@index([status])
 }
@@ -148,24 +148,24 @@ model ChatProject {
 }
 
 model ChatSession {
-  id        String        @id @default(uuid())
-  userId    String
-  title     String?
-  model     String?
-  provider  String?
+  id           String        @id @default(uuid())
+  userId       String
+  title        String?
+  model        String?
+  provider     String?
   /// WARP-845 — optional project membership. SetNull on project delete:
   /// the chats survive, falling back to the ungrouped date list.
-  projectId String?
-  project   ChatProject?  @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  projectId    String?
+  project      ChatProject?  @relation(fields: [projectId], references: [id], onDelete: SetNull)
   /// WARP-844 — the caller-supplied system prompt this conversation is
   /// held under. Persisted from the request's system message on every
   /// turn (latest wins) and returned on GET so the dashboard restores
   /// the textarea when the thread is reloaded. NULL = no custom prompt.
   systemPrompt String?
-  createdAt DateTime      @default(now())
-  updatedAt DateTime      @default(now()) @updatedAt
-  messages  ChatMessage[]
-  pins      ContextPin[]
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @default(now()) @updatedAt
+  messages     ChatMessage[]
+  pins         ContextPin[]
 
   @@index([userId, updatedAt(sort: Desc)])
   /// WARP-845 — Postgres doesn't auto-index FK columns; per-project
@@ -289,8 +289,8 @@ model NetworkThroughputSample {
 /// delta fits comfortably in Int. Retention: a nightly cron prunes
 /// rows older than 30 days alongside the existing daily-purge.
 model DnsBlockSample {
-  ts            DateTime @id @default(now())
-  blockedCount  Int
+  ts           DateTime @id @default(now())
+  blockedCount Int
 
   @@index([ts(sort: Desc)])
 }
@@ -326,21 +326,21 @@ model DnsBlockSample {
 /// turns do not carry reasoning content (small models, tool-only turns,
 /// system messages).
 model ChatMessage {
-  id          String            @id @default(uuid())
+  id          String               @id @default(uuid())
   sessionId   String
-  session     ChatSession       @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  session     ChatSession          @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   role        String
   content     String
   toolCalls   Json?
   toolCallId  String?
   turnId      String?
-  status      ChatMessageStatus @default(completed)
+  status      ChatMessageStatus    @default(completed)
   completedAt DateTime?
   reasoning   String?
   /// WARP-844 — user rating on an assistant turn (explicit column per the
   /// no-guessing rule). NULL = unrated. Feeds the admin RAG-eval loop.
   feedback    ChatMessageFeedback?
-  createdAt   DateTime          @default(now())
+  createdAt   DateTime             @default(now())
 
   @@index([sessionId, createdAt])
   @@index([sessionId, turnId])
@@ -570,20 +570,20 @@ enum ResetJobStatus {
 /// default for the target name (handbook rule 12) — it is read from device
 /// identity at request time.
 model ResetJob {
-  id           String         @id @default(cuid())
-  status       ResetJobStatus @default(requested)
+  id            String         @id @default(cuid())
+  status        ResetJobStatus @default(requested)
   /// User.id (UUID) of the owner who confirmed. Never null in practice — the
   /// route is requireRole("owner") — but nullable so an orphaned audit write
   /// never blocks on a missing session id.
-  requestedBy  String?
+  requestedBy   String?
   /// The device/host name the reset targets + that the owner had to type to
   /// confirm. Recorded for the audit trail.
-  targetName   String
+  targetName    String
   /// Set when status transitions to `failed`; the human-readable dispatch
   /// failure (bridge unreachable / refused). Null while requested/dispatched.
   failureReason String?
-  createdAt    DateTime       @default(now())
-  updatedAt    DateTime       @updatedAt
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
 
   @@index([status, createdAt])
 }
@@ -1277,12 +1277,12 @@ enum ApOnboardBackend {
 // keeping the column lets the dashboard render the "Local" vs "OCS"
 // affordance without a schema migration when mirroring lands.
 model User {
-  id                String   @id @default(uuid())
+  id                 String              @id @default(uuid())
   // Login handle. Unique across the directory. For Nextcloud-mirror
   // rows this matches the OCS user id so `req.user.username` from the
   // auth middleware resolves directly to this row.
-  username          String   @unique
-  displayName       String
+  username           String              @unique
+  displayName        String
   // ADR-013: email is the stable directory login key — the Aurora login
   // (PR #370) sends "Work email" as the identifier and POST /auth/login
   // resolves the row by email before the argon2id verify. Unique so two
@@ -1290,7 +1290,7 @@ model User {
   // Still nullable: service-only principals and locally-minted rows that
   // predate ADR-013 may have no email; the login route fails closed when
   // email or passwordHash is null.
-  email             String?  @unique
+  email              String?             @unique
   // ADR-013: argon2id PHC hash — the built-in directory is the auth
   // source of truth (Nextcloud is demoted to downstream WebDAV
   // provisioning). Written at account-creation (/auth/setup, invite
@@ -1298,7 +1298,7 @@ model User {
   // contains plaintext; NEVER logged. Nullable because service-only
   // principals and pre-first-login invitees may not have one yet — the
   // login route fails closed (no enumeration leak) when it's null.
-  passwordHash      String?
+  passwordHash       String?
   // WARP-485: stable mapping key from the Nextcloud OCS user id
   // (`ocs.data.id`, e.g. `stefan-cruceru`) to this row's UUID. The auth
   // middleware looks up `User` by `nextcloudUsername` on the OCS
@@ -1311,19 +1311,19 @@ model User {
   // from `username` to keep the local display handle decoupled from the
   // OCS-mapping key — they often match today but the dashboard may
   // edit `username` in the future without breaking OCS resolution.
-  nextcloudUsername String?  @unique
-  role              Role     @default(family)
+  nextcloudUsername  String?             @unique
+  role               Role                @default(family)
   // Locally provisioned vs. mirrored from Nextcloud. Today every row
   // is local — the dashboard's People surface is the only writer. The
   // delete handler refuses when isLocal=false to keep OCS-owned
   // identities off-limits.
-  isLocal           Boolean  @default(true)
+  isLocal            Boolean             @default(true)
   // WARP (SCIM directory sync): soft-deactivation status. Defaults ACTIVE
   // so every existing + password/SSO-created row is unaffected. SCIM sets
   // DEACTIVATED on `active:false` / DELETE (soft — never a row delete) and
   // back to ACTIVE on re-activate. The login route + SSO callback fail
   // closed when this is DEACTIVATED. Explicit enum, never IS-NULL-derived.
-  directoryStatus   DirectoryUserStatus @default(ACTIVE)
+  directoryStatus    DirectoryUserStatus @default(ACTIVE)
   // WARP-824: admin-created users get a temporary password and must change
   // it on first login. This is the EXPLICIT persistent signal for that gate
   // — never derived from password age, a null/sentinel hash, or "row was
@@ -1336,9 +1336,9 @@ model User {
   // request, so it can't be bypassed by a stale/forged JWT. Defaults false so
   // every existing row + self-service signup (/auth/setup, invite-accept) is
   // unaffected.
-  mustChangePassword Boolean @default(false)
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  mustChangePassword Boolean             @default(false)
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
 
   // Many-to-many to Group via GroupMembership (explicit join model
   // so future per-membership metadata — joinedAt, addedBy — has a
@@ -1377,7 +1377,7 @@ model User {
   totpCredential TotpCredential?
   // One-time recovery codes (argon2id-hashed). Consumed rows keep an
   // explicit `usedAt` so a replay matches nothing.
-  recoveryCodes RecoveryCode[]
+  recoveryCodes  RecoveryCode[]
 
   @@index([role])
 }
@@ -1454,11 +1454,11 @@ model SsoLoginState {
 // second factor. One row per user; created on enroll, marked enabled on
 // the first successful verify.
 model TotpCredential {
-  id          String   @id @default(uuid())
+  id          String    @id @default(uuid())
   // FK to the owning directory user. Unique → at most one TOTP secret
   // per account. Cascade-delete so removing a user clears their factor.
-  userId      String   @unique
-  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId      String    @unique
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   // The Base32 TOTP secret, encrypted at rest with the aes-256-gcm
   // encryption.service (DEVICE_SECRET_KEY). NEVER plaintext; NEVER logged.
   secretEnc   String
@@ -1467,8 +1467,8 @@ model TotpCredential {
   // on the first successful code. The login gate requires TOTP only when
   // this is non-null.
   confirmedAt DateTime?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 }
 
 // PR #375 — one-time backup codes for the TOTP factor. Each row stores an
@@ -1476,15 +1476,15 @@ model TotpCredential {
 // user exactly once at generation. Single-use: `usedAt` is stamped on
 // consumption so a replay of the same code matches no unused row.
 model RecoveryCode {
-  id        String   @id @default(uuid())
+  id        String    @id @default(uuid())
   userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   // argon2id PHC hash of the code. NEVER plaintext; NEVER logged.
   codeHash  String
   // Explicit consumption marker (no IS-NULL state inference). Null = the
   // code is still spendable; non-null = already used at that timestamp.
   usedAt    DateTime?
-  createdAt DateTime @default(now())
+  createdAt DateTime  @default(now())
 
   // The login/recovery path scans a user's UNUSED codes — index the
   // hot lookup key.
@@ -2091,20 +2091,20 @@ enum EmailDraftStatus {
 /// Nothing secret lives in a tracked file — only the operator-entered,
 /// at-rest-encrypted blob in this DB row.
 model EmailChannelSetting {
-  id           String                @id
-  enabled      Boolean               @default(false)
-  host         String                @default("")
-  port         Int                   @default(587)
-  username     String                @default("")
+  id           String               @id
+  enabled      Boolean              @default(false)
+  host         String               @default("")
+  port         Int                  @default(587)
+  username     String               @default("")
   // aes-256-gcm blob (encryption.service). Empty string = no password set.
-  passwordEnc  String                @default("")
-  fromAddress  String                @default("")
-  fromName     String                @default("Droplet")
-  security     EmailChannelSecurity  @default(starttls)
+  passwordEnc  String               @default("")
+  fromAddress  String               @default("")
+  fromName     String               @default("Droplet")
+  security     EmailChannelSecurity @default(starttls)
   // Last verify/send outcome for the dashboard banner (operator-facing only).
   lastError    String?
   lastTestedAt DateTime?
-  updatedAt    DateTime              @updatedAt
+  updatedAt    DateTime             @updatedAt
   updatedBy    String?
 }
 
@@ -2386,6 +2386,48 @@ model FileCitation {
   @@index([filePath, userId, citedAt(sort: Desc)])
 }
 
+/// WARP-881 / WS-3 (ADR-027) — native file comments. Nextcloud stays dumb
+/// storage (ADR-013); Droplet owns this metadata, exactly like FileCitation
+/// and ActivityRow. Keyed on `ncFileId` (oc:fileid, resolved via
+/// `ncGetFileId`) — the SAME identifier `File.ncFileId` /
+/// `FileContentChunk.ncFileId` use — so a comment SURVIVES a rename/move.
+/// (Deliberately NOT path-keyed like FileCitation, whose rows go stale on
+/// rename.)
+///
+/// IDOR: `authorUserId` is the LOCAL `User.id` UUID (`req.user.id`), NOT the
+/// Nextcloud username (`getUser(req)`). The read filter scopes a non-
+/// privileged user to `{ ncFileId, authorUserId: req.user.id }`; storing the
+/// username while filtering by the UUID would make a `family` user see zero
+/// of their own comments. Owner/admin see every household comment.
+model FileComment {
+  id           String   @id @default(uuid())
+  ncFileId     Int // oc:fileid; resolve via ncGetFileId — survives rename/move
+  authorUserId String // req.user.id (local User UUID), NOT getUser(req)/username
+  body         String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([ncFileId, createdAt(sort: Desc)])
+  @@index([authorUserId])
+}
+
+/// WARP-881 / WS-3 (ADR-027) — native file tags. File-scoped, NOT user-
+/// scoped: every reader sees every tag on a file (a household-shared
+/// taxonomy). `addedByUserId` records provenance only — it does NOT gate
+/// reads. Unique on `(ncFileId, label)` so a re-add is an idempotent upsert
+/// (the original `addedByUserId`/`createdAt` are preserved).
+model FileTag {
+  id            String   @id @default(uuid())
+  ncFileId      Int
+  label         String
+  addedByUserId String // req.user.id (local User UUID)
+  createdAt     DateTime @default(now())
+
+  @@unique([ncFileId, label])
+  @@index([ncFileId])
+  @@index([addedByUserId])
+}
+
 /// WARP-468 — Phase E2. 60 s egress byte counter per off-LAN channel.
 ///
 /// One row per (ts, channel). A 60 s apscheduler tick in
@@ -2432,11 +2474,11 @@ enum WorkspaceType {
 model Workspace {
   // Singleton — exactly one row per Droplet. id = 1 lets every CRUD
   // path use a fixed primary key + prisma upsert without inventing one.
-  id          Int           @id @default(1)
-  type        WorkspaceType @default(HOME)
+  id            Int           @id @default(1)
+  type          WorkspaceType @default(HOME)
   /// Optional human-readable name ("Stefan's Home" / "Acme HQ").
   /// Surfaced in the chrome workspace pill + setup wizard.
-  displayName String?
+  displayName   String?
   /// PR #380 (WARP onb org) — the onboarding ORG step fields. The org step
   /// names this single workspace (the "company brain") and reserves its
   /// `droplet.local/<slug>` host. Everyone the owner invites joins this ONE
@@ -2450,22 +2492,22 @@ model Workspace {
   /// `industry` / `size` are LOCAL smart-default hints ONLY — folder
   /// structure, example tools, camera policy. NEVER sent off the box
   /// (FEATURES.md §10). `logoPath` is the on-NVMe path of the optional logo.
-  slug        String?        @unique
-  tz          String?
-  industry    String?
-  size        String?
-  logoPath    String?
+  slug          String?       @unique
+  tz            String?
+  industry      String?
+  size          String?
+  logoPath      String?
   /// PR #380 — EXPLICIT completion flag for the org step. The wizard / state
   /// machine reads THIS, never `slug IS NULL` (CLAUDE.md no-guessing rule;
   /// WARP-218 / ClaimCodeState precedent). False until the org step persists;
   /// the org step is NOT skippable.
-  orgConfigured Boolean      @default(false)
+  orgConfigured Boolean       @default(false)
   /// Whoever last flipped the type (Nextcloud username from the auth
   /// middleware). Nullable: setup wizard runs before any user exists.
-  setBy       String?
-  setAt       DateTime      @default(now())
-  createdAt   DateTime      @default(now())
-  updatedAt   DateTime      @updatedAt
+  setBy         String?
+  setAt         DateTime      @default(now())
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
 }
 
 /// PR #372 — first-run setup is RESUMABLE and EXPLICIT.
@@ -2513,7 +2555,7 @@ model ApplianceSetup {
   // DEFAULT CURRENT_TIMESTAMP so a raw INSERT omitting `updatedAt` (the
   // singleton migration seed) can't violate NOT NULL; `@updatedAt` still
   // bumps it on every Prisma write.
-  updatedAt         DateTime  @updatedAt @default(now())
+  updatedAt         DateTime  @default(now()) @updatedAt
   createdAt         DateTime  @default(now())
 }
 
@@ -2703,4 +2745,368 @@ enum FileEditSessionStatus {
   open
   closing
   closed
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Native Project Management (ADR-026 — supersedes ADR-010 embedded Plane)
+//
+// First-class, Droplet-owned PM. Replaces the embedded Plane stack: all state
+// lives here (Plane held none — greenfield), the dashboard renders it natively
+// in the bento design system, and the 9 `pm_*` MCP tools read/write it through
+// the orchestrator. RBAC reuses the existing Role enum + requireRole guards.
+//
+// Naming: every model is `Pm`-prefixed to stay clear of the existing dashboard
+// `Workspace`/`WorkspaceType` (ADR-007 dual-workspace) and `ActivityRow`. The
+// PM "workspace" is the Plane-style container the tool contract still keys on
+// via `workspace_slug`; a single `home` workspace is seeded on first boot.
+// User references (leadId/createdById/authorId/actorId/assignee userId) are
+// plain `User.id` strings — same convention as ChatProject.userId /
+// CalendarEvent.userId — not FK relations, to avoid widening the User model.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Top-level PM container. One per home (seeded `home`); the model is kept so
+/// the LLM tool contract's `workspace_slug` stays meaningful and multi-home is
+/// possible later without a schema break.
+model PmWorkspace {
+  id        String      @id @default(uuid())
+  slug      String      @unique
+  name      String
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @default(now()) @updatedAt
+  projects  PmProject[]
+}
+
+/// A project (Plane "project"). `identifier` is the short key prefix (e.g.
+/// "INBOX") combined with a per-project work-item number to form INBOX-42.
+/// `seqCounter` is the monotonic source for that number — bumped in the same
+/// transaction as work-item creation so numbers never collide or reuse.
+model PmProject {
+  id          String      @id @default(uuid())
+  workspaceId String
+  workspace   PmWorkspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name        String
+  identifier  String
+  description String?
+  icon        String?
+  color       String?
+  leadId      String?
+  seqCounter  Int         @default(0)
+  sortOrder   Int         @default(0)
+  archivedAt  DateTime?
+  createdById String?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @default(now()) @updatedAt
+
+  states     PmState[]
+  labels     PmLabel[]
+  workItems  PmWorkItem[]
+  cycles     PmCycle[]
+  modules    PmModule[]
+  properties PmCustomProperty[]
+
+  @@unique([workspaceId, identifier])
+  @@index([workspaceId, sortOrder])
+}
+
+/// Workflow state group — the kanban-column semantics. Explicit enum (no
+/// string-soup per CLAUDE.md "no guessing"); the dashboard groups columns and
+/// the LLM transition tool validates against it.
+enum PmStateGroup {
+  backlog
+  unstarted
+  started
+  completed
+  cancelled
+}
+
+/// Per-project workflow state (kanban column). Default seed set: Backlog /
+/// Todo / In Progress / Done / Cancelled. `isDefault` marks the landing state
+/// for newly created work items.
+///
+/// INVARIANT: at most ONE default state per project. Enforced by a partial
+/// unique index — `UNIQUE ("projectId") WHERE "isDefault" = true` — that lives
+/// in raw migration SQL because Prisma's schema language cannot express a
+/// WHERE-filtered (partial) unique index. See the
+/// `PmState_projectId_isDefault_key` index in the native_pm_foundation
+/// migration. State names are also unique per project (`@@unique` below).
+model PmState {
+  id        String       @id @default(uuid())
+  projectId String
+  project   PmProject    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name      String
+  group     PmStateGroup @default(backlog)
+  color     String?
+  sortOrder Int          @default(0)
+  isDefault Boolean      @default(false)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @default(now()) @updatedAt
+  workItems PmWorkItem[]
+
+  @@unique([projectId, name])
+  @@index([projectId, sortOrder])
+}
+
+/// Per-project label/tag.
+model PmLabel {
+  id        String            @id @default(uuid())
+  projectId String
+  project   PmProject         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name      String
+  color     String?
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @default(now()) @updatedAt
+  items     PmWorkItemLabel[]
+
+  @@unique([projectId, name])
+  @@index([projectId])
+}
+
+/// Work-item priority. Matches the strings the LLM tool contract and dashboard
+/// expect verbatim.
+enum PmPriority {
+  urgent
+  high
+  medium
+  low
+  none
+}
+
+/// The work item (Plane "issue"). `sequenceId` + project.identifier forms the
+/// human key (INBOX-42). `sortOrder` is a float so a kanban drag can insert
+/// between two cards without renumbering the column. Sub-issues via the
+/// self-relation; `state`/`cycle`/`parent` are SetNull so deleting one of those
+/// never cascades away the work itself.
+model PmWorkItem {
+  id              String       @id @default(uuid())
+  projectId       String
+  project         PmProject    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sequenceId      Int
+  name            String
+  descriptionHtml String?
+  stateId         String?
+  state           PmState?     @relation(fields: [stateId], references: [id], onDelete: SetNull)
+  priority        PmPriority   @default(none)
+  parentId        String?
+  parent          PmWorkItem?  @relation("PmSubIssues", fields: [parentId], references: [id], onDelete: SetNull)
+  children        PmWorkItem[] @relation("PmSubIssues")
+  cycleId         String?
+  cycle           PmCycle?     @relation(fields: [cycleId], references: [id], onDelete: SetNull)
+  createdById     String?
+  startDate       DateTime?
+  dueDate         DateTime?
+  sortOrder       Float        @default(0)
+  completedAt     DateTime?
+  archivedAt      DateTime?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @default(now()) @updatedAt
+
+  assignees      PmWorkItemAssignee[]
+  labels         PmWorkItemLabel[]
+  comments       PmComment[]
+  attachments    PmAttachment[]
+  activity       PmActivity[]
+  modules        PmModuleWorkItem[]
+  propertyValues PmWorkItemPropertyValue[]
+
+  @@unique([projectId, sequenceId])
+  @@index([projectId, stateId, sortOrder])
+  @@index([projectId, updatedAt(sort: Desc)])
+  @@index([parentId])
+  @@index([cycleId])
+  @@index([stateId])
+}
+
+/// Work-item ↔ assignee join. `userId` is a User.id.
+model PmWorkItemAssignee {
+  id         String     @id @default(uuid())
+  workItemId String
+  workItem   PmWorkItem @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  userId     String
+  createdAt  DateTime   @default(now())
+
+  @@unique([workItemId, userId])
+  @@index([userId])
+}
+
+/// Work-item ↔ label join.
+model PmWorkItemLabel {
+  id         String     @id @default(uuid())
+  workItemId String
+  workItem   PmWorkItem @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  labelId    String
+  label      PmLabel    @relation(fields: [labelId], references: [id], onDelete: Cascade)
+
+  @@unique([workItemId, labelId])
+  @@index([labelId])
+}
+
+/// A comment on a work item. `authorId` null = system / LLM-authored.
+model PmComment {
+  id          String     @id @default(uuid())
+  workItemId  String
+  workItem    PmWorkItem @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  authorId    String?
+  commentHtml String
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @default(now()) @updatedAt
+
+  @@index([workItemId, createdAt])
+}
+
+/// Cycle / sprint — a time-boxed set of work items.
+enum PmCycleStatus {
+  draft
+  active
+  completed
+}
+
+model PmCycle {
+  id          String        @id @default(uuid())
+  projectId   String
+  project     PmProject     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  startDate   DateTime?
+  endDate     DateTime?
+  status      PmCycleStatus @default(draft)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @default(now()) @updatedAt
+  workItems   PmWorkItem[]
+
+  @@index([projectId])
+}
+
+/// Module — a grouping/epic of work items (many work items per module, and a
+/// work item may belong to several modules → join table).
+enum PmModuleStatus {
+  backlog
+  planned
+  in_progress
+  paused
+  completed
+  cancelled
+}
+
+model PmModule {
+  id          String             @id @default(uuid())
+  projectId   String
+  project     PmProject          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  leadId      String?
+  status      PmModuleStatus     @default(backlog)
+  startDate   DateTime?
+  targetDate  DateTime?
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @default(now()) @updatedAt
+  workItems   PmModuleWorkItem[]
+
+  @@index([projectId])
+}
+
+model PmModuleWorkItem {
+  id         String     @id @default(uuid())
+  moduleId   String
+  module     PmModule   @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+  workItemId String
+  workItem   PmWorkItem @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+
+  @@unique([moduleId, workItemId])
+  @@index([workItemId])
+}
+
+/// Custom field definition on a project. `options` holds the choice list for
+/// select / multi_select types (array of {id,name,color}); null for scalars.
+enum PmPropertyType {
+  text
+  number
+  date
+  boolean
+  select
+  multi_select
+  member
+}
+
+model PmCustomProperty {
+  id        String                    @id @default(uuid())
+  projectId String
+  project   PmProject                 @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name      String
+  type      PmPropertyType
+  options   Json?
+  sortOrder Int                       @default(0)
+  createdAt DateTime                  @default(now())
+  updatedAt DateTime                  @default(now()) @updatedAt
+  values    PmWorkItemPropertyValue[]
+
+  @@unique([projectId, name])
+  @@index([projectId, sortOrder])
+}
+
+/// A custom-field value on a work item. `value` is type-tagged JSON, e.g.
+/// {"text":"…"} | {"number":3} | {"optionIds":[…]} | {"userIds":[…]}.
+model PmWorkItemPropertyValue {
+  id         String           @id @default(uuid())
+  workItemId String
+  workItem   PmWorkItem       @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  propertyId String
+  property   PmCustomProperty @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  value      Json
+  updatedAt  DateTime         @default(now()) @updatedAt
+
+  @@unique([workItemId, propertyId])
+  @@index([propertyId])
+}
+
+/// File attached to a work item. Bytes live on the orchestrator-managed
+/// `pm-attachments` volume keyed by the opaque `storageKey` (never a public
+/// path); served only via the authenticated GET /api/pm/attachments/:id route.
+model PmAttachment {
+  id           String     @id @default(uuid())
+  workItemId   String
+  workItem     PmWorkItem @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  fileName     String
+  mimeType     String
+  sizeBytes    BigInt
+  storageKey   String     @unique
+  uploadedById String?
+  createdAt    DateTime   @default(now())
+
+  @@index([workItemId])
+}
+
+enum PmActivityVerb {
+  created
+  updated
+  state_changed
+  commented
+  assigned
+  unassigned
+  priority_changed
+  due_date_changed
+  title_changed
+  description_changed
+  label_added
+  label_removed
+  archived
+  restored
+  cycle_added
+  cycle_removed
+}
+
+/// Append-only activity/history feed for a work item. `actorId` null = system /
+/// LLM. `verb` is a machine token; for field updates `field`/`oldValue`/
+/// `newValue` capture the diff.
+model PmActivity {
+  id         String          @id @default(uuid())
+  workItemId String
+  workItem   PmWorkItem      @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  actorId    String?
+  verb       PmActivityVerb
+  field      String?
+  oldValue   String?
+  newValue   String?
+  createdAt  DateTime   @default(now())
+
+  @@index([workItemId, createdAt])
 }

@@ -71,6 +71,7 @@ import {
 } from "../services/recovery.service.js";
 import QRCode from "qrcode";
 import { config } from "../config.js";
+import { buildNcGroups, householdGroupName } from "./auth-groups.js";
 import { purgeUserData } from "../services/brain-memory.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { verifyClaimCodePresence } from "../services/setup-claim.service.js";
@@ -754,7 +755,17 @@ export function createPublicAuthRouter(
         },
       });
 
-      await ncInstallAndCreateAdmin(username, password, displayName);
+      // WARP-883: the owner must join the household group too, otherwise the
+      // shared "Household" groupfolder never mounts for the primary user and
+      // GET /api/files/spaces reports sharedAvailable:false for them (the
+      // SpaceSwitcher never appears). buildNcGroups preserves the owner's
+      // existing "admin" group and appends the household group without
+      // duplication — same helper the invite-accept path uses.
+      const ownerGroups = buildNcGroups(
+        "owner",
+        householdGroupName(config.DROPLET_SHARED_FOLDER_NAME),
+      );
+      await ncInstallAndCreateAdmin(username, password, displayName, ownerGroups);
       logger.info({ username }, "Initial admin user created");
 
       res.json({ status: "ok", username });
@@ -1530,12 +1541,15 @@ export function createPublicAuthRouter(
       // for them without ambiguity. `family` (formerly "user") is
       // the empty-groups default so a regular household member lands
       // in Nextcloud's default group set.
-      const groups: string[] =
-        invite.role === "owner" || invite.role === "admin"
-          ? ["admin"]
-          : invite.role === "guest"
-            ? ["guest"]
-            : [];
+      //
+      // WARP-883: ADDITIONALLY add the household group so the shared
+      // "Household" group folder (groupfolders) mounts into the invitee's
+      // home. buildNcGroups preserves the pre-WARP-883 role→group mapping and
+      // appends the household group without duplication.
+      const groups: string[] = buildNcGroups(
+        invite.role as Role,
+        householdGroupName(config.DROPLET_SHARED_FOLDER_NAME),
+      );
 
       try {
         await ncCreateUser(
@@ -2283,7 +2297,15 @@ export function createProtectedAuthRouter(
         },
       });
 
-      await ncCreateUser(token, username, password, displayName);
+      // WARP-883: admin-created users are `family` role — add them to the
+      // household group so the shared "Household" group folder mounts for them.
+      await ncCreateUser(
+        token,
+        username,
+        password,
+        displayName,
+        buildNcGroups("family", householdGroupName(config.DROPLET_SHARED_FOLDER_NAME)),
+      );
 
       res.status(201).json({ status: "ok", username });
     } catch (err: any) {

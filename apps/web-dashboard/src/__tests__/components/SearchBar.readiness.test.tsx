@@ -31,10 +31,17 @@ vi.mock("./Thumbnail", () => ({
 import { SearchBar } from "@/components/FileManager/SearchBar";
 
 function clickToggle() {
-  // The button containing the Sparkles icon — its accessible name is
-  // either "Semantic" or "AI" depending on state.
-  const toggle = screen.getByRole("button", { name: /AI|Semantic/i });
-  fireEvent.click(toggle);
+  // WARP-880 turned the single AI/Semantic toggle into a 3-segment
+  // radiogroup (Name / Keyword / Semantic). "Toggling AI" now means
+  // selecting the Semantic segment to turn it on, or selecting the Name
+  // segment to turn it back off. Mirror that: if Semantic isn't already
+  // the checked radio, switch to it; otherwise switch away (to Name).
+  const semantic = screen.getByRole("radio", { name: /semantic/i });
+  if (semantic.getAttribute("aria-checked") === "true") {
+    fireEvent.click(screen.getByRole("radio", { name: /name/i }));
+  } else {
+    fireEvent.click(semantic);
+  }
 }
 
 describe("SearchBar — AI search readiness pill (WARP-310)", () => {

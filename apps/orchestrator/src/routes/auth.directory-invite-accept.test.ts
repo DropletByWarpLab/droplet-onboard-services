@@ -43,6 +43,7 @@ vi.mock("../config.js", () => ({
     AUTH_ENABLED: true,
     AUTH_MODE: "legacy",
     NEXTCLOUD_URL: "http://nextcloud.test",
+    DROPLET_SHARED_FOLDER_NAME: "Household",
     JWT_SECRET: "test-secret-32-bytes-long-aaaaaaaa",
     JWT_ACCESS_TTL_SECONDS: 900,
     JWT_REFRESH_TTL_SECONDS: 604800,
@@ -334,6 +335,11 @@ describe("ADR-013 — invite-accept writes the argon2id hash to the directory", 
     // on the row.
     expect(row.passwordHash).not.toContain(INVITE_PASSWORD);
     expect(JSON.stringify(row)).not.toContain(INVITE_PASSWORD);
+
+    // WARP-883: the invitee (family role) is added to the household group so
+    // the shared "Household" group folder mounts into their home.
+    const groupsArg = (nc.ncCreateUser as any).mock.calls[0]?.[4] as string[];
+    expect(groupsArg).toContain("household");
   });
 
   it("lets the invited member then sign in via the email-keyed /auth/login (true round-trip)", async () => {

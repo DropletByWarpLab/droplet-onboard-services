@@ -9,8 +9,7 @@ External-IdP sign-in via OIDC for **Google Workspace** and **Microsoft
 Entra**, surfaced by the Aurora login SSO buttons (`flags.ts`). Distinct from
 the legacy "OAuth2" path (which is **Nextcloud's own** `/auth/authorize`) —
 this is real third-party IdP federation, with the orchestrator acting as the
-OIDC **relying party** (the mirror of the `DROPLET_PM_OIDC_*` block, where it
-is the IdP for Plane).
+OIDC **relying party**.
 
 ## Backend contract (as shipped)
 
@@ -103,8 +102,8 @@ discovery base (`openid-client` derives every endpoint + the JWKS from it —
 - Entra: `https://login.microsoftonline.com/<tenant>/v2.0`
 
 **Secrets** (`*_CLIENT_SECRET`) are real provider secrets — they live ONLY in
-`.env` (operator / setup.sh; never tracked), exactly like `OAUTH2_CLIENT_SECRET`
-and `DROPLET_PM_OIDC_CLIENT_SECRET`. They are read, never logged. The callback
+`.env` (operator / setup.sh; never tracked), exactly like `OAUTH2_CLIENT_SECRET`.
+They are read, never logged. The callback
 never logs the code, tokens, or claims.
 
 ## Architecture rules

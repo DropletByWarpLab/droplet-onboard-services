@@ -30,6 +30,7 @@ import {
   ncUpdateShare,
   ncDeleteShare,
   ncListSharedWithMe,
+  ncDirExists,
   NextcloudOcsError,
 } from "../services/nextcloud.client.js";
 import type { BulkOperationResult } from "../types/index.js";
@@ -108,6 +109,49 @@ function getUser(req: Request): string {
   return req.user?.username || "admin";
 }
 
+// ────────────────────────────────────────────────────────────
+//  WARP-883 (ADR-027 WS-5) — Files spaces (My Files / Shared Household)
+// ────────────────────────────────────────────────────────────
+//
+// Every user already has a PRIVATE space — their own Nextcloud home (the
+// per-user `ncCreateUser` account + WebDAV root). What WS-5 adds is a SHARED
+// "Household" space, backed by the Nextcloud `groupfolders` app. The
+// groupfolders app mounts the group folder INTO each assigned member's home as
+// a top-level directory (e.g. `/Household`). So the "shared" space is NOT a
+// separate account or WebDAV root — it is just a well-known path prefix browsed
+// with the user's OWN existing token. That keeps the per-user routing already
+// in place and means a single config var (`DROPLET_SHARED_FOLDER_NAME`) defines
+// the whole feature.
+
+/** The top-level folder name the shared "Household" space lives under. */
+const SHARED_FOLDER_NAME = config.DROPLET_SHARED_FOLDER_NAME;
+/** Absolute home-relative path to the shared space root (e.g. "/Household"). */
+const SHARED_FOLDER_PATH = `/${SHARED_FOLDER_NAME}`;
+
+type Space = "personal" | "shared";
+
+/** Coerce an arbitrary `?space=` value to a known space (default personal). */
+function resolveSpace(raw: unknown): Space {
+  return raw === "shared" ? "shared" : "personal";
+}
+
+/**
+ * Map a (space, requested path) pair to the real WebDAV home-relative path.
+ *
+ * - personal: the path is used verbatim (the user's home root).
+ * - shared:   the path is resolved UNDER the shared-folder prefix, so
+ *             `?space=shared&path=/Trips` → `/Household/Trips` and the bare
+ *             shared root → `/Household`. The prefix is always applied here so
+ *             a caller can never escape the shared mount via this route.
+ */
+function rootForSpace(space: Space, requestedPath: string): string {
+  const rel = requestedPath.replace(/^\/+/, "");
+  if (space === "shared") {
+    return rel ? `${SHARED_FOLDER_PATH}/${rel}` : SHARED_FOLDER_PATH;
+  }
+  return requestedPath || "/";
+}
+
 /** Safely publish an MQTT message — failures are non-fatal. */
 function safePublish(topic: string, payload: Record<string, unknown>): void {
   try {
@@ -115,6 +159,45 @@ function safePublish(topic: string, payload: Record<string, unknown>): void {
   } catch (err) {
     logger.warn({ err, topic }, "MQTT publish failed (non-fatal)");
   }
+}
+
+// ────────────────────────────────────────────────────────────
+//  WARP-880 / WS-2 — keyword + hybrid content search
+// ────────────────────────────────────────────────────────────
+
+/** Content-search modes for `GET /api/files/search/content` (WARP-880). */
+const FILE_SEARCH_MODES = ["semantic", "keyword", "hybrid"] as const;
+type FileSearchMode = (typeof FILE_SEARCH_MODES)[number];
+
+/**
+ * The lexical/hybrid engine returns one row per matched *chunk*. A single
+ * file is chunked into many rows, so over-fetch by this factor before
+ * collapsing to one hit per file — `limit * CHUNKS_PER_FILE_FACTOR` keeps
+ * enough headroom that the per-file top-K survives dedupe.
+ */
+const CHUNKS_PER_FILE_FACTOR = 5;
+
+/**
+ * Collapse the engine's per-chunk `SearchHit[]` to one result per file,
+ * keeping the best chunk for each path. The service returns rows in score
+ * DESC order, so the first chunk seen for a given `path` is the best one.
+ * Maps the service `snippet` field → `text` so the output shape matches
+ * the existing `SemanticSearchResult` `{ path, score, text }` the
+ * frontend already renders.
+ */
+function dedupeHitsPerFile(
+  hits: Array<{ path: string; score: number; snippet: string }>,
+  limit: number,
+): Array<{ path: string; score: number; text: string }> {
+  const seen = new Set<string>();
+  const out: Array<{ path: string; score: number; text: string }> = [];
+  for (const hit of hits) {
+    if (seen.has(hit.path)) continue;
+    seen.add(hit.path);
+    out.push({ path: hit.path, score: hit.score, text: hit.snippet });
+    if (out.length >= limit) break;
+  }
+  return out;
 }
 
 /**
@@ -431,6 +514,240 @@ export function createFilesRouter(prisma: PrismaClient): Router {
     },
   );
 
+  // ────────────────────────────────────────────────────────────
+  //  WARP-881 / WS-3 (ADR-027) — native file comments + tags
+  // ────────────────────────────────────────────────────────────
+  //
+  // Nextcloud stays dumb storage (ADR-013); Droplet owns this metadata in
+  // Prisma, keyed on `ncFileId` (oc:fileid) so it SURVIVES a rename/move —
+  // unlike the path-keyed FileCitation rows above, which go stale on rename.
+  //
+  // IDOR: the owner column is written AND filtered using `req.user.id` (the
+  // local User UUID) — NOT `getUser(req)`, which returns the Nextcloud
+  // username. Filtering by the UUID while storing the username would make a
+  // `family` user see ZERO of their own comments. Mirrors FileCitation's
+  // read filter (`req.user.id`) exactly. No caching — file metadata must be
+  // immediately consistent.
+
+  /** The local User UUID for the requester (NOT the NC username). */
+  const requesterId = (req: Request): string =>
+    (req as { user?: { id?: string } }).user?.id ?? "__none__";
+
+  /** owner/admin see every household row; family is scoped to its own. */
+  const isPrivilegedReq = (req: Request): boolean => {
+    const role = (req as { user?: { role?: string } }).user?.role;
+    return role === "owner" || role === "admin";
+  };
+
+  /**
+   * Resolve a request's `:filePath(*)` param to its Nextcloud numeric file
+   * id via `ncGetFileId(token, ncUser, path)`. Responds 404 and returns
+   * `null` when the path doesn't resolve (mirrors the versions route).
+   * `filePath` arrives WITHOUT a leading slash from the wildcard param.
+   */
+  async function resolveFileIdOr404(
+    req: Request,
+    res: Response,
+    filePath: string,
+  ): Promise<number | null> {
+    const normalizedPath = filePath
+      ? `/${filePath}`.replace(/\/+/g, "/")
+      : "";
+    if (normalizedPath === "" || normalizedPath === "/") {
+      res.status(400).json({ error: "filePath path-param is required" });
+      return null;
+    }
+    const token = await getToken(req);
+    const ncUser = getUser(req);
+    const fileId = await ncGetFileId(token, ncUser, normalizedPath);
+    if (fileId === null) {
+      res.status(404).json({ error: "File not found" });
+      return null;
+    }
+    return fileId;
+  }
+
+  // ── Comment delete (DELETE /api/files/comments/:id) ──
+  // REGISTERED BEFORE the `/files/:filePath(*)/...` routes so the wildcard
+  // doesn't shadow this literal path (`comments` would otherwise be captured
+  // as a filePath segment). Author-or-privileged: a family member may delete
+  // only their own comment; owner/admin may delete any.
+  router.delete(
+    "/files/comments/:id",
+    requireRole("owner", "admin", "family"),
+    async (req, res, next) => {
+      try {
+        const id = req.params.id;
+        const row = await prisma.fileComment.findUnique({ where: { id } });
+        if (!row) {
+          res.status(404).json({ error: "Comment not found" });
+          return;
+        }
+        // Author check uses the UUID owner column, never the username.
+        const isAuthor = row.authorUserId === requesterId(req);
+        if (!isAuthor && !isPrivilegedReq(req)) {
+          res.status(403).json({ error: "Not your comment" });
+          return;
+        }
+        // Re-assert the scope in the delete predicate (defense in depth):
+        // a privileged caller deletes by id; a family author by (id, owner).
+        const where = isPrivilegedReq(req)
+          ? { id }
+          : { id, authorUserId: requesterId(req) };
+        await prisma.fileComment.deleteMany({ where });
+        // Topic carries the {user} segment so the WS bridge forwards it
+        // (it subscribes to `droplet/files/{user}/#`); useFileRealtime then
+        // does its blanket `/api/files`-prefix SWR invalidation.
+        safePublish(`droplet/files/${getUser(req)}/comment-deleted`, {
+          id,
+          ncFileId: row.ncFileId,
+        });
+        res.status(204).end();
+      } catch (err) {
+        handleFileError(err, res, next);
+      }
+    },
+  );
+
+  // ── Comments: list (GET /api/files/:filePath(*)/comments) ──
+  // User-scoped: a family member sees only its own comments; owner/admin see
+  // every household comment on the file.
+  router.get(
+    "/files/:filePath(*)/comments",
+    requireRole("owner", "admin", "family"),
+    async (req, res, next) => {
+      try {
+        const fileId = await resolveFileIdOr404(req, res, req.params.filePath);
+        if (fileId === null) return;
+        const where = isPrivilegedReq(req)
+          ? { ncFileId: fileId }
+          : { ncFileId: fileId, authorUserId: requesterId(req) };
+        const comments = await prisma.fileComment.findMany({
+          where,
+          orderBy: { createdAt: "desc" },
+        });
+        res.json({ ncFileId: fileId, comments });
+      } catch (err) {
+        handleFileError(err, res, next);
+      }
+    },
+  );
+
+  // ── Comments: create (POST /api/files/:filePath(*)/comments) ──
+  router.post(
+    "/files/:filePath(*)/comments",
+    requireRole("owner", "admin", "family"),
+    async (req, res, next) => {
+      try {
+        const schema = z.object({ body: z.string().min(1).max(4000) });
+        const parsed = schema.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({ error: "Comment body is required (1–4000 chars)" });
+          return;
+        }
+        const fileId = await resolveFileIdOr404(req, res, req.params.filePath);
+        if (fileId === null) return;
+        const comment = await prisma.fileComment.create({
+          data: {
+            ncFileId: fileId,
+            authorUserId: requesterId(req),
+            body: parsed.data.body,
+          },
+        });
+        // {user} segment so the WS bridge (droplet/files/{user}/#) forwards
+        // it → useFileRealtime invalidates the file SWR caches.
+        safePublish(`droplet/files/${getUser(req)}/comment-added`, {
+          id: comment.id,
+          ncFileId: fileId,
+          authorUserId: comment.authorUserId,
+        });
+        res.status(201).json({ comment });
+      } catch (err) {
+        handleFileError(err, res, next);
+      }
+    },
+  );
+
+  // ── Tags: list (GET /api/files/:filePath(*)/tags) ──
+  // FILE-scoped (NOT user-scoped): every reader sees every tag on the file —
+  // a household-shared taxonomy. `addedByUserId` is provenance only.
+  router.get(
+    "/files/:filePath(*)/tags",
+    requireRole("owner", "admin", "family"),
+    async (req, res, next) => {
+      try {
+        const fileId = await resolveFileIdOr404(req, res, req.params.filePath);
+        if (fileId === null) return;
+        const tags = await prisma.fileTag.findMany({
+          where: { ncFileId: fileId },
+          orderBy: { createdAt: "asc" },
+        });
+        res.json({ ncFileId: fileId, tags });
+      } catch (err) {
+        handleFileError(err, res, next);
+      }
+    },
+  );
+
+  // ── Tags: create (POST /api/files/:filePath(*)/tags) ──
+  // Upsert on the @@unique(ncFileId, label): a re-add is an idempotent no-op
+  // that preserves the original `addedByUserId` / `createdAt`.
+  router.post(
+    "/files/:filePath(*)/tags",
+    requireRole("owner", "admin", "family"),
+    async (req, res, next) => {
+      try {
+        const schema = z.object({ label: z.string().min(1).max(64) });
+        const parsed = schema.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({ error: "Tag label is required (1–64 chars)" });
+          return;
+        }
+        const fileId = await resolveFileIdOr404(req, res, req.params.filePath);
+        if (fileId === null) return;
+        const tag = await prisma.fileTag.upsert({
+          where: { ncFileId_label: { ncFileId: fileId, label: parsed.data.label } },
+          create: {
+            ncFileId: fileId,
+            label: parsed.data.label,
+            addedByUserId: requesterId(req),
+          },
+          // No-op on conflict — the unique row already exists and its
+          // provenance (addedByUserId/createdAt) must NOT be overwritten.
+          update: {},
+        });
+        safePublish(`droplet/files/${getUser(req)}/tag-added`, {
+          ncFileId: fileId,
+          label: tag.label,
+        });
+        res.status(201).json({ tag });
+      } catch (err) {
+        handleFileError(err, res, next);
+      }
+    },
+  );
+
+  // ── Tags: delete (DELETE /api/files/:filePath(*)/tags/:label) ──
+  router.delete(
+    "/files/:filePath(*)/tags/:label",
+    requireRole("owner", "admin", "family"),
+    async (req, res, next) => {
+      try {
+        const fileId = await resolveFileIdOr404(req, res, req.params.filePath);
+        if (fileId === null) return;
+        const label = req.params.label;
+        await prisma.fileTag.deleteMany({ where: { ncFileId: fileId, label } });
+        safePublish(`droplet/files/${getUser(req)}/tag-removed`, {
+          ncFileId: fileId,
+          label,
+        });
+        res.status(204).end();
+      } catch (err) {
+        handleFileError(err, res, next);
+      }
+    },
+  );
+
   // ── Multer error handler ──
   function handleUpload(req: Request, res: Response, next: NextFunction) {
     upload.array("files", 20)(req, res, (err) => {
@@ -454,11 +771,26 @@ export function createFilesRouter(prisma: PrismaClient): Router {
   }
 
   // ── List directory contents ──
+  //
+  // WARP-883: accepts an optional `?space=personal|shared` (default personal).
+  // `shared` resolves the listing under the Household group-folder prefix; the
+  // user's OWN token still drives the request (groupfolders mounts the folder
+  // into their home). On the My-Files (personal) home ROOT we hide the shared
+  // folder entry so the Household folder isn't shown twice — once as a space in
+  // the switcher and once inline.
   router.get("/files", async (req, res, next) => {
     try {
-      const filePath = (req.query.path as string) || "/";
+      const requestedPath = (req.query.path as string) || "/";
+      const space = resolveSpace(req.query.space);
+      const filePath = rootForSpace(space, requestedPath);
       const user = getUser(req);
+      const isPersonalRoot = space === "personal" && filePath === "/";
 
+      // Cache key is keyed on the RESOLVED path (e.g. "/Household/Trips"), not
+      // the (space, requestedPath) pair — the shared prefix already makes the
+      // path distinct from any personal path, and keeping the same key shape
+      // means the existing write routes' `cacheDel(CACHE_PREFIX + user + ":" +
+      // path)` invalidations still land for shared-space mutations.
       const cacheKey = CACHE_PREFIX + user + ":" + filePath;
       const cached = await cacheGet<FileEntryInfo[]>(cacheKey);
       if (cached) {
@@ -466,11 +798,57 @@ export function createFilesRouter(prisma: PrismaClient): Router {
         return;
       }
 
-      const entries = await ncListFiles(await getToken(req), user, filePath);
+      const raw = await ncListFiles(await getToken(req), user, filePath);
+      // Hide the shared-folder mount from the personal home root only — a
+      // subfolder elsewhere (or inside the shared space) that happens to share
+      // the name must NOT be filtered.
+      const entries = isPersonalRoot
+        ? raw.filter((e) => e.name !== SHARED_FOLDER_NAME)
+        : raw;
       await cacheSet(cacheKey, entries, CACHE_TTL);
       res.json(entries);
     } catch (err) {
       handleFileError(err, res, next, []);
+    }
+  });
+
+  // ── Spaces (GET /api/files/spaces) ──
+  //
+  // WARP-883: tells the dashboard which spaces exist so it can show/hide the
+  // My-Files / Shared switcher. "personal" always exists (every user has a
+  // home); "shared" exists iff the Household group folder mounted into THIS
+  // user's home (the groupfolders provisioning ran + this user is in the
+  // household group). Read-only + degrades to shared-unavailable on a
+  // Nextcloud outage (never 500) — same posture as the other read endpoints.
+  router.get("/files/spaces", async (req, res, next) => {
+    try {
+      const user = getUser(req);
+      let sharedAvailable = false;
+      try {
+        sharedAvailable = await ncDirExists(
+          await getToken(req),
+          user,
+          SHARED_FOLDER_PATH
+        );
+      } catch (err) {
+        if (err instanceof MissingNcTokenError) throw err;
+        logger.warn({ err }, "files/spaces: shared-folder probe failed; reporting unavailable");
+        sharedAvailable = false;
+      }
+      res.json({
+        sharedAvailable,
+        spaces: [
+          { id: "personal", name: "My Files", available: true, root: "/" },
+          {
+            id: "shared",
+            name: SHARED_FOLDER_NAME,
+            available: sharedAvailable,
+            root: SHARED_FOLDER_PATH,
+          },
+        ],
+      });
+    } catch (err) {
+      handleFileError(err, res, next);
     }
   });
 
@@ -1238,6 +1616,75 @@ export function createFilesRouter(prisma: PrismaClient): Router {
     }
   });
 
+  // ── Share recipients (GET /api/files/share-recipients) ── (WARP-879 / WS-1)
+  //
+  // The internal-sharing UI (ShareDialog "Person" mode) needs a roster of
+  // household members to pick a recipient from. We deliberately do NOT reuse
+  // GET /auth/users / OCS `/cloud/users` here: that surface 403s for the
+  // `family` role, which would leave the picker empty for exactly the people
+  // who share most. Instead we read the LOCAL Prisma `User` table — ADR-013
+  // makes the built-in directory the identity source of truth, with Nextcloud
+  // demoted to downstream-provisioned WebDAV accounts.
+  //
+  // Each recipient's `shareWith` is its `nextcloudUsername` (the OCS user id
+  // ncCreateShareV2 expects for shareType=0), which ADR-013 keeps decoupled
+  // from the local `username`. We resolve the caller's OWN nextcloudUsername
+  // from their User row keyed on `req.user.id` (the local UUID — NOT
+  // getUser(req), which returns the local username) so we can exclude them
+  // from their own picker. The Nextcloud system/database admin
+  // (NEXTCLOUD_ADMIN_USER || "admin") is hidden the same way GET /auth/users
+  // hides it. Rows without a nextcloudUsername (service principals, fresh
+  // invitees pre-first-login) can't receive an OCS share and are excluded.
+  // All three exclusions compare case-insensitively.
+  router.get(
+    "/files/share-recipients",
+    requireRole("owner", "admin", "family"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const callerId = req.user?.id ?? "";
+        const caller = callerId
+          ? await prisma.user.findUnique({
+              where: { id: callerId },
+              select: { nextcloudUsername: true },
+            })
+          : null;
+        const selfNc = caller?.nextcloudUsername?.toLowerCase() ?? null;
+        const systemUser = (process.env.NEXTCLOUD_ADMIN_USER || "admin").toLowerCase();
+
+        const rows = (await prisma.user.findMany({
+          select: {
+            displayName: true,
+            email: true,
+            nextcloudUsername: true,
+          },
+          orderBy: { displayName: "asc" },
+        })) as Array<{
+          displayName: string;
+          email: string | null;
+          nextcloudUsername: string | null;
+        }>;
+
+        const recipients = rows
+          .filter((u) => {
+            if (!u.nextcloudUsername) return false;
+            const nc = u.nextcloudUsername.toLowerCase();
+            if (nc === systemUser) return false;
+            if (selfNc !== null && nc === selfNc) return false;
+            return true;
+          })
+          .map((u) => ({
+            shareWith: u.nextcloudUsername as string,
+            displayName: u.displayName,
+            email: u.email ?? null,
+          }));
+
+        res.json({ recipients });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
   // ────────────────────────────────────────────────────────────
   //  Phase 4 — Semantic content search (pgvector)
   // ────────────────────────────────────────────────────────────
@@ -1261,11 +1708,44 @@ export function createFilesRouter(prisma: PrismaClient): Router {
       );
       const user = getUser(req);
 
-      // Check Redis cache first (60s TTL on identical queries)
-      const cacheKey = `semantic:${user}:${q}:${limit}`;
+      // WARP-880 / WS-2 — three content-search modes:
+      //   semantic (default) → existing inline pgvector SQL (unchanged)
+      //   keyword            → lexical (websearch_to_tsquery + ts_rank_cd),
+      //                        works with the AI gateway down
+      //   hybrid             → embed + RRF fusion of lexical + vector
+      const mode = (req.query.mode as string | undefined)?.trim() || "semantic";
+      if (!FILE_SEARCH_MODES.includes(mode as FileSearchMode)) {
+        res.status(400).json({
+          error: `mode must be one of: ${FILE_SEARCH_MODES.join(", ")}`,
+        });
+        return;
+      }
+
+      // Check Redis cache first (60s TTL on identical queries). The mode is
+      // part of the key so keyword/semantic/hybrid results never collide.
+      const cacheKey = `filesearch:${mode}:${user}:${q}:${limit}`;
       const cached = await cacheGet<Array<{ path: string; score: number; text: string }>>(cacheKey);
       if (cached) {
         res.json({ results: cached });
+        return;
+      }
+
+      // Keyword (lexical) search NEVER touches the gRPC embed — this is the
+      // headline win: full-text search keeps working when the ai-gateway /
+      // LLM stack is down. Placed before the embed block on purpose.
+      if (mode === "keyword") {
+        const { searchByLexical } = await import(
+          "../services/file-search.service.js"
+        );
+        const hits = await searchByLexical(prisma, {
+          userId: user,
+          query: q,
+          limit: limit * CHUNKS_PER_FILE_FACTOR,
+          source: "nextcloud",
+        });
+        const results = dedupeHitsPerFile(hits, limit);
+        await cacheSet(cacheKey, results, 60);
+        res.json({ results });
         return;
       }
 
@@ -1296,6 +1776,25 @@ export function createFilesRouter(prisma: PrismaClient): Router {
       } catch (err) {
         logger.warn({ err }, "Semantic search: embedding failed");
         res.status(503).json({ error: "Embedding service unavailable" });
+        return;
+      }
+
+      // Hybrid (WARP-880 / WS-2): RRF fusion of the lexical + vector arms.
+      // No rerank pipe — keep it low-latency for the interactive Files page.
+      if (mode === "hybrid") {
+        const { searchHybrid } = await import(
+          "../services/file-search.service.js"
+        );
+        const hits = await searchHybrid(prisma, {
+          userId: user,
+          vector: embedVec,
+          query: q,
+          limit: limit * CHUNKS_PER_FILE_FACTOR,
+          source: "nextcloud",
+        });
+        const results = dedupeHitsPerFile(hits, limit);
+        await cacheSet(cacheKey, results, 60);
+        res.json({ results });
         return;
       }
 

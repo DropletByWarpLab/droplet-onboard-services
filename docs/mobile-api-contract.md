@@ -311,17 +311,19 @@ If a route gets a breaking change, gate it behind a versioned path
       push (background) + polling.
 - [ ] WebRTC vs HLS for camera streams. Frigate supports both; HLS is
       simpler client-side, WebRTC has lower latency. v1 ships HLS.
-## Project Management (Plane integration)
+## Project Management (native PM)
 
-> Implemented in [WARP-513](https://warp-lab.atlassian.net/browse/WARP-513).
-> ADR: [ADR-010](ADR-010-pm-stack-selection.md). Spec:
-> [`superpowers/specs/2026-05-27-warp-498-pm-stack-design.md`](superpowers/specs/2026-05-27-warp-498-pm-stack-design.md).
+> Backed by the native PM module owned by the orchestrator
+> ([ADR-026](ADR-026-native-pm-supersedes-plane.md), superseding the embedded
+> Plane stack). The mobile read contract below is unchanged — only the backend
+> behind it changed.
 
-V1 = read-only on mobile. The orchestrator wraps Plane's upstream API
-(`X-API-Key`, workspace-slug-centric, `work-items` per spec OQ-set
-verified 2026-05-28) and transforms responses into Droplet's existing
-mobile envelope per OQ4 resolution. iOS/Android/Windows clients call
-the endpoints below; they MUST NOT call Plane directly.
+V1 = read-only on mobile. The orchestrator serves PM from its own Postgres
+(`Pm*` Prisma models) via the native `/api/pm/*` routes and transforms the
+result into Droplet's existing mobile envelope. The mobile surface stays
+workspace-slug-centric, with a single seeded `home` workspace. iOS/Android/
+Windows clients call the `/api/mobile/pm/*` endpoints below behind the normal
+dashboard session/JWT.
 
 ### `GET /api/mobile/pm/workspaces`
 
@@ -360,7 +362,7 @@ Paginated list of projects under a workspace.
 
 ### `GET /api/mobile/pm/work-items?workspace=<slug>&project_id=<id>&state=<id>&assignee=<id>&per_page=<n>`
 
-Paginated list of work items (issues/tickets — Plane's name).
+Paginated list of work items (issues/tickets).
 
 **Query params:**
 - `workspace` (required), `project_id` (required).
@@ -412,12 +414,11 @@ Fetch a single work item with description body.
 - `200` — found.
 - `404` — work item not in this project/workspace.
 - `401` — JWT missing or invalid.
-- `502` — Plane API unreachable (orchestrator logs the upstream error).
+- `500` — orchestrator/database error (logged server-side).
 
 ### Out of scope for V1
 
 - Mobile writes (create/update/comment/transition). Mobile is read-only.
-- Push notifications when work items change. Webhook receiver
-  (WARP-511) lands the event bus; mobile push is a follow-up epic.
-- Custom field reads — orchestrator returns default Plane fields only.
+- Push notifications when work items change — a follow-up epic.
+- Custom field reads — the mobile read endpoints return the default fields only.
 - Native UI for project/work-item editing — out of scope.

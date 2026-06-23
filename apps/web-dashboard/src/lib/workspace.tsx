@@ -106,9 +106,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   // §workspace, GET /api/settings/workspace returns the singleton
   // Workspace row's type, or the HOME default if the wizard hasn't
   // run yet. 404 (Phase 4a not deployed) is a no-op — we keep the
-  // localStorage value. Any error other than 404/network is silently
-  // tolerated; the dashboard already painted with the localStorage
-  // best guess.
+  // localStorage value. Any other non-OK (500/502/503) is a real failure:
+  // we still keep the localStorage best-guess the dashboard already painted
+  // with, but warn so it's debuggable instead of silently masked (WARP-875).
   useEffect(() => {
     if (authLoading || !user) return;
     let cancelled = false;
@@ -117,7 +117,13 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         const res = await fetch("/api/settings/workspace", {
           credentials: "same-origin",
         });
-        if (!res.ok) return;
+        if (res.status === 404) return;
+        if (!res.ok) {
+          console.warn(
+            `Workspace hydration failed: GET /api/settings/workspace → ${res.status}`,
+          );
+          return;
+        }
         const body = (await res.json()) as { workspaceType?: string };
         const next = body.workspaceType === "business" ? "business" : "home";
         if (!cancelled && next !== workspaceType) {

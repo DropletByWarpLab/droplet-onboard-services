@@ -28,7 +28,11 @@ import type {
   MatterDiscoveredDevice,
   MatterGrouped,
   FileEntryInfo,
+  FileSpaceId,
+  FileSpacesResponse,
   FileVersionInfo,
+  FileCommentInfo,
+  FileTagInfo,
   TrashItemInfo,
   BulkOperationResult,
   FirewallConfig,
@@ -52,6 +56,7 @@ import type {
   ShareDetail,
   ShareCreateOptions,
   ShareUpdateOptions,
+  ShareRecipient,
   ApplianceContract,
   ClaimResult,
   OrgInput,
@@ -1623,6 +1628,8 @@ export async function getNetworkTopology(): Promise<NetworkTopology | null> {
   } catch {
     return null;
   }
+}
+
 /** Read-only droplet-ai ubus RPC access. Scope chips reflect the live on-box
  *  ACL. Rotate/Revoke aren't here — they're honest-gated (disabled) in the UI. */
 export interface AiNetworkAccess {
@@ -3537,9 +3544,25 @@ export async function saveEmailChannel(
 
 // --- File operations ---
 
-export async function fetchFiles(path: string): Promise<FileEntryInfo[]> {
-  const res = await authFetch(`${BASE}/api/files?path=${encodeURIComponent(path)}`);
+export async function fetchFiles(
+  path: string,
+  space: FileSpaceId = "personal"
+): Promise<FileEntryInfo[]> {
+  const qs = new URLSearchParams({ path });
+  // Only send the space param for the shared space — keeps the personal
+  // request URL (and its SWR cache key) byte-identical to the pre-WARP-883
+  // shape so nothing else has to change.
+  if (space === "shared") qs.set("space", "shared");
+  const res = await authFetch(`${BASE}/api/files?${qs.toString()}`);
   if (!res.ok) throw new Error(`Failed to fetch files: ${res.status}`);
+  return res.json();
+}
+
+// WARP-883 (ADR-027 WS-5) — which Files spaces exist for this user. Drives the
+// My Files / Shared switcher; the switcher hides itself when shared is absent.
+export async function fetchSpaces(): Promise<FileSpacesResponse> {
+  const res = await authFetch(`${BASE}/api/files/spaces`);
+  if (!res.ok) throw new Error(`Failed to fetch spaces: ${res.status}`);
   return res.json();
 }
 
@@ -3660,11 +3683,14 @@ export async function createShareLink(path: string): Promise<ShareInfo> {
   return res.json();
 }
 
-export async function fetchShares(path: string): Promise<ShareInfo[]> {
+// WARP-883 (WS-1 fast-follow): the backend now returns the full ShareDetail
+// shape for a path's existing shares, so the ShareDialog can render them with
+// expiry/password/permissions. Returns [] on a missing `shares` field.
+export async function fetchShares(path: string): Promise<ShareDetail[]> {
   const res = await authFetch(`${BASE}/api/files/shares?path=${encodeURIComponent(path)}`);
   if (!res.ok) throw new Error(`Failed to fetch shares: ${res.status}`);
   const data = await res.json();
-  return data.shares;
+  return (data.shares ?? []) as ShareDetail[];
 }
 
 // --- File management (Phase 1) — rename / move / copy / bulk / trash / versions ---
@@ -3829,6 +3855,101 @@ export async function restoreVersion(path: string, versionId: string): Promise<v
   if (!res.ok) throw new Error(`Failed to restore version: ${res.status}`);
 }
 
+// --- WARP-881 / WS-3 (ADR-027): native file comments + tags ---
+
+/**
+ * Encode a Nextcloud file path for the `:filePath(*)` wildcard routes:
+ * encode each segment (so `#`, `?`, spaces are safe) but KEEP the slashes
+ * so the server's wildcard still sees the directory structure. Strips a
+ * leading slash — the route re-adds it.
+ */
+function encodeFilePathParam(path: string): string {
+  return path
+    .replace(/^\/+/, "")
+    .split("/")
+    .map((seg) => encodeURIComponent(seg))
+    .join("/");
+}
+
+export async function fetchFileComments(path: string): Promise<FileCommentInfo[]> {
+  const res = await authFetch(
+    `${BASE}/api/files/${encodeFilePathParam(path)}/comments`,
+  );
+  if (!res.ok) {
+    if (res.status === 404) return [];
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to fetch comments: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.comments ?? [];
+}
+
+export async function addFileComment(
+  path: string,
+  body: string,
+): Promise<FileCommentInfo> {
+  const res = await authFetch(
+    `${BASE}/api/files/${encodeFilePathParam(path)}/comments`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ body }),
+    },
+  );
+  if (!res.ok) {
+    const b = await res.json().catch(() => ({}));
+    throw new Error(b.error || `Failed to add comment: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.comment;
+}
+
+export async function deleteFileComment(id: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/files/comments/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok && res.status !== 204) {
+    const b = await res.json().catch(() => ({}));
+    throw new Error(b.error || `Failed to delete comment: ${res.status}`);
+  }
+}
+
+export async function fetchFileTags(path: string): Promise<FileTagInfo[]> {
+  const res = await authFetch(`${BASE}/api/files/${encodeFilePathParam(path)}/tags`);
+  if (!res.ok) {
+    if (res.status === 404) return [];
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to fetch tags: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.tags ?? [];
+}
+
+export async function addFileTag(path: string, label: string): Promise<FileTagInfo> {
+  const res = await authFetch(`${BASE}/api/files/${encodeFilePathParam(path)}/tags`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ label }),
+  });
+  if (!res.ok) {
+    const b = await res.json().catch(() => ({}));
+    throw new Error(b.error || `Failed to add tag: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.tag;
+}
+
+export async function deleteFileTag(path: string, label: string): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/files/${encodeFilePathParam(path)}/tags/${encodeURIComponent(label)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok && res.status !== 204) {
+    const b = await res.json().catch(() => ({}));
+    throw new Error(b.error || `Failed to delete tag: ${res.status}`);
+  }
+}
+
 // --- Phase 2: favorites / recents / search / thumbnails / shares v2 ---
 
 export async function toggleFavorite(path: string, favorite: boolean): Promise<void> {
@@ -3923,6 +4044,21 @@ export async function fetchSharedWithMe(): Promise<ShareDetail[]> {
   return data.shares ?? [];
 }
 
+/**
+ * WARP-879 / WS-1 — household members the internal-sharing picker can target.
+ * The orchestrator reads the local directory (ADR-013), so this is reachable
+ * by every household role, not just admins.
+ */
+export async function fetchShareRecipients(): Promise<ShareRecipient[]> {
+  const res = await authFetch(`${BASE}/api/files/share-recipients`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to fetch share recipients: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.recipients ?? [];
+}
+
 // --- WARP-307: Calendar place autocomplete ---
 
 export interface PlaceSuggestion {
@@ -3962,11 +4098,24 @@ export interface SemanticSearchResult {
   text: string;
 }
 
+/**
+ * WARP-880 / WS-2 — content-search modes:
+ *   - semantic: pgvector cosine similarity (needs the AI gateway)
+ *   - keyword:  lexical full-text (websearch_to_tsquery); works gateway-down
+ *   - hybrid:   embed + RRF fusion of lexical + vector arms
+ */
+export type FileSearchMode = "semantic" | "keyword" | "hybrid";
+
 export async function searchFileContent(
   query: string,
-  limit = 20
+  limit = 20,
+  mode: FileSearchMode = "semantic"
 ): Promise<SemanticSearchResult[]> {
-  const params = new URLSearchParams({ q: query, limit: String(limit) });
+  const params = new URLSearchParams({
+    q: query,
+    limit: String(limit),
+    mode,
+  });
   const res = await authFetch(`${BASE}/api/files/search/content?${params}`);
   if (!res.ok) {
     if (res.status === 503) return []; // AI gateway down — graceful degrade

@@ -203,10 +203,19 @@ export async function ncCreateShare(
   };
 }
 
+/**
+ * List the shares that exist ON a given path.
+ *
+ * WARP-883 (WS-1 fast-follow): returns the FULL ShareDetail shape (via
+ * mapShareRecord) — same record the create/shared-with-me paths return — so
+ * the dashboard's ShareDialog can render existing shares with their expiry,
+ * password flag, permissions, and note, not just a bare url. The OCS list
+ * endpoint returns the same per-share record shape mapShareRecord parses.
+ */
 export async function ncListShares(
   token: string,
   path: string
-): Promise<Array<{ id: number; url: string; shareType: number; permissions: number }>> {
+): Promise<ShareDetail[]> {
   const url = ocsUrl(
     `/ocs/v2.php/apps/files_sharing/api/v1/shares?path=${encodeURIComponent(path)}`
   );
@@ -219,12 +228,7 @@ export async function ncListShares(
   }
 
   const data = await resp.json();
-  return (data.ocs.data || []).map((s: any) => ({
-    id: s.id,
-    url: s.url,
-    shareType: s.share_type,
-    permissions: s.permissions,
-  }));
+  return ((data.ocs.data || []) as any[]).map((s) => mapShareRecord(s));
 }
 
 // ── OCS User Provisioning API ──
@@ -287,7 +291,13 @@ export async function ncCheckSetupRequired(): Promise<boolean> {
 export async function ncInstallAndCreateAdmin(
   username: string,
   password: string,
-  displayName?: string
+  displayName?: string,
+  // WARP-883: the groups the owner joins at create time. Defaults to the
+  // pre-WARP-883 behaviour (the Nextcloud "admin" group only). Callers now pass
+  // the household group alongside "admin" so the shared "Household" groupfolder
+  // mounts for the primary owner — without it the owner is in NEITHER the
+  // literal "admin" nor the household group and the shared space never appears.
+  groups: string[] = ["admin"]
 ): Promise<void> {
   // Nextcloud must be installed before we can use the OCS API.
   // The container creates a default admin account (NEXTCLOUD_ADMIN_USER / NEXTCLOUD_ADMIN_PASSWORD).
@@ -351,7 +361,9 @@ export async function ncInstallAndCreateAdmin(
         ["userid", username],
         ["password", password],
         ["displayName", displayName || username],
-        ["groups[]", "admin"],
+        // OCS accepts repeated `groups[]` form fields; emit one per group so the
+        // owner joins both the "admin" role group AND the household group.
+        ...groups.map((g): [string, string] => ["groups[]", g]),
       ]),
     });
 
@@ -1394,6 +1406,31 @@ export async function ncGetFileId(
   const xml = await resp.text();
   const m = xml.match(/<oc:fileid>(\d+)<\/oc:fileid>/);
   return m ? parseInt(m[1], 10) : null;
+}
+
+/**
+ * WARP-883 (ADR-027 WS-5) — does a directory exist in this user's WebDAV home?
+ *
+ * Used by `GET /api/files/spaces` to detect whether the shared "Household"
+ * group folder mounted into the caller's home (the `groupfolders` app mounts
+ * the group folder as a top-level directory for every assigned member). A
+ * Depth:0 PROPFIND returns 207/2xx when the path exists, 404 when it doesn't.
+ * Any OTHER failure (connection refused, 5xx) THROWS so the route can decide
+ * how to degrade — it must not be silently reported as "exists" or "absent".
+ */
+export async function ncDirExists(
+  token: string,
+  user: string,
+  path: string
+): Promise<boolean> {
+  const url = webdavUrl(user, path);
+  const resp = await fetch(url, {
+    method: "PROPFIND",
+    headers: { ...davHeaders(token), Depth: "0" },
+  });
+  if (resp.ok || resp.status === 207) return true;
+  if (resp.status === 404) return false;
+  throw new Error(`WebDAV PROPFIND failed for ${path}: ${resp.status}`);
 }
 
 // ── Trash ──
