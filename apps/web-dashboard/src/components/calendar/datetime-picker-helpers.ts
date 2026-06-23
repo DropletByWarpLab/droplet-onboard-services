@@ -20,7 +20,7 @@ export interface LocalParts {
 export interface TimeOption {
   /** `HH:mm`, the machine value also fed back into the local-input string. */
   value: string;
-  /** Locale-aware display label, e.g. "9:30 AM". */
+  /** Display label in 24-hour `HH:mm` format, e.g. "09:30". */
   label: string;
 }
 
@@ -54,12 +54,15 @@ export function joinLocalInput(date: string, time: string): string {
 const pad2 = (n: number) => String(n).padStart(2, "0");
 
 /**
- * The 96 quarter-hour slots of a day, 00:00 → 23:45, each with a locale-aware
- * display label. Built off a fixed date so DST never shifts the slot count.
+ * The 96 quarter-hour slots of a day, 00:00 → 23:45, each with a 24-hour
+ * "HH:mm" display label. The locale is pinned to "en-GB" (24 h clock, no
+ * AM/PM) so server-side pre-render and browser hydration always produce
+ * identical option text, preventing React hydration mismatches on locales that
+ * default to a 12-hour clock (e.g. en-US).
  */
 export function quarterHourOptions(): TimeOption[] {
-  const fmt = new Intl.DateTimeFormat(undefined, {
-    hour: "numeric",
+  const fmt = new Intl.DateTimeFormat("en-GB", {
+    hour: "2-digit",
     minute: "2-digit",
   });
   const opts: TimeOption[] = [];

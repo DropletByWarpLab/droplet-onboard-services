@@ -13,10 +13,12 @@
  * pure presentation swap; the stored ISO value is untouched.
  *
  * The two parts are held in local state so the user can pick a date before a
- * time (and vice-versa) without the half-filled value leaking out as a
- * malformed string. onChange fires only once both parts are present. When the
+ * time (and vice-versa) without a malformed string leaking out. onChange fires
+ * with "" when either part is empty (propagating a clear to the parent), and
+ * with a full "YYYY-MM-DDTHH:mm" string once both parts are present. When the
  * parent pushes a new complete `value` (e.g. the end time sliding to follow the
- * start), the parts re-sync from it.
+ * start), the parts re-sync from it — and if the time is off-grid the snap is
+ * propagated back via onChange so the parent's stored value matches the display.
  */
 
 import { useEffect, useId, useState } from "react";
@@ -49,11 +51,16 @@ export function DateTimePicker({ value, onChange, label, disabled }: Props) {
 
   // Re-sync from the parent whenever it pushes a new complete value (the
   // start/end duration slide, opening the form on an existing event, …).
+  // If the incoming time is off the 15-min grid, snap it and notify the parent
+  // so the stored ISO matches what the dropdown displays.
   useEffect(() => {
     const next = splitLocalInput(value);
     setDate(next.date);
-    setTime(snapTimeToQuarter(next.time));
-  }, [value]);
+    const snapped = snapTimeToQuarter(next.time);
+    setTime(snapped);
+    const joined = joinLocalInput(next.date, snapped);
+    if (joined && joined !== value) onChange(joined);
+  }, [value]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const baseId = useId();
   const dateId = `${baseId}-date`;
@@ -62,9 +69,9 @@ export function DateTimePicker({ value, onChange, label, disabled }: Props) {
   function emit(nextDate: string, nextTime: string) {
     setDate(nextDate);
     setTime(nextTime);
-    const joined = joinLocalInput(nextDate, nextTime);
-    // Only surface a fully-formed value; never leak a half-built string.
-    if (joined) onChange(joined);
+    // "" when a field is empty — propagates a clear so the parent doesn't
+    // retain a stale complete value.
+    onChange(joinLocalInput(nextDate, nextTime));
   }
 
   return (
