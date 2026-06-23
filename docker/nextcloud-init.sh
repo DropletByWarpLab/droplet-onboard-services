@@ -135,7 +135,7 @@ DOCS_ENABLED_NORM="$(printf '%s' "${DOCS_ENABLED:-1}" | tr '[:upper:]' '[:lower:
 # to the plain runner when `su` to www-data isn't possible (non-fatal best-effort).
 occ_www() {
   if su -p -s /bin/sh www-data -c 'true' 2>/dev/null; then
-    su -p -s /bin/sh www-data -c '"$0" "$@"' -- "$OCC" "$@"
+    su -p -s /bin/sh www-data -c '"$0" "$@"' -- $OCC "$@"
   else
     $OCC "$@"
   fi
@@ -169,7 +169,8 @@ if { [ "$DOCS_ENABLED_NORM" = "1" ] || [ "$DOCS_ENABLED_NORM" = "true" ]; } \
     # like "already installed") — treat a present app as installed so we still
     # (re)apply config on a reflash even if `app:install` is unhappy.
     if occ_www app:list 2>/dev/null | grep -q 'onlyoffice'; then
-      occ_www app:enable onlyoffice >/dev/null 2>&1 || true
+      occ_www app:enable onlyoffice >/dev/null 2>&1 \
+        || echo "[droplet] WARP-882: warning — app:enable onlyoffice failed; connector present but may stay disabled until manually enabled" >&2
       onlyoffice_installed=1
       break
     fi

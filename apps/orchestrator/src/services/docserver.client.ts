@@ -95,6 +95,7 @@ function docsConfigured(): boolean {
 export async function docServerHealthy(): Promise<boolean> {
   if (!docsConfigured()) return false;
   if (!config.DOCS_INTERNAL_URL.trim()) return false;
+  if (!config.ONLYOFFICE_JWT_SECRET.trim()) return false;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 3000);
   try {
