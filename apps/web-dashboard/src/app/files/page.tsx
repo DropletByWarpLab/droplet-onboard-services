@@ -16,6 +16,8 @@ import {
 import { SelectionToolbar } from "@/components/FileManager/SelectionToolbar";
 import { MoveCopyDialog } from "@/components/FileManager/MoveCopyDialog";
 import { VersionHistoryPanel } from "@/components/FileManager/VersionHistoryPanel";
+import { TagChips } from "@/components/FileManager/TagChips";
+import { CommentsPanel } from "@/components/FileManager/CommentsPanel";
 import { SearchBar } from "@/components/FileManager/SearchBar";
 import { PreviewPane } from "@/components/FileManager/PreviewPane";
 import { ShareDialog } from "@/components/FileManager/ShareDialog";
@@ -705,6 +707,12 @@ export default function FilesPage() {
                   Share…
                 </button>
               </div>
+
+              {/* Tags (WARP-881 / WS-3) */}
+              <TagChips filePath={selectedFile.path} />
+
+              {/* Comments (WARP-881 / WS-3) */}
+              <CommentsPanel filePath={selectedFile.path} />
 
               {/* Version history */}
               <VersionHistoryPanel

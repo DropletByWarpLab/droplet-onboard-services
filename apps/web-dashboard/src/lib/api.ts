@@ -31,6 +31,8 @@ import type {
   FileSpaceId,
   FileSpacesResponse,
   FileVersionInfo,
+  FileCommentInfo,
+  FileTagInfo,
   TrashItemInfo,
   BulkOperationResult,
   FirewallConfig,
@@ -3809,6 +3811,101 @@ export async function restoreVersion(path: string, versionId: string): Promise<v
     body: JSON.stringify({ path, versionId }),
   });
   if (!res.ok) throw new Error(`Failed to restore version: ${res.status}`);
+}
+
+// --- WARP-881 / WS-3 (ADR-027): native file comments + tags ---
+
+/**
+ * Encode a Nextcloud file path for the `:filePath(*)` wildcard routes:
+ * encode each segment (so `#`, `?`, spaces are safe) but KEEP the slashes
+ * so the server's wildcard still sees the directory structure. Strips a
+ * leading slash — the route re-adds it.
+ */
+function encodeFilePathParam(path: string): string {
+  return path
+    .replace(/^\/+/, "")
+    .split("/")
+    .map((seg) => encodeURIComponent(seg))
+    .join("/");
+}
+
+export async function fetchFileComments(path: string): Promise<FileCommentInfo[]> {
+  const res = await authFetch(
+    `${BASE}/api/files/${encodeFilePathParam(path)}/comments`,
+  );
+  if (!res.ok) {
+    if (res.status === 404) return [];
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to fetch comments: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.comments ?? [];
+}
+
+export async function addFileComment(
+  path: string,
+  body: string,
+): Promise<FileCommentInfo> {
+  const res = await authFetch(
+    `${BASE}/api/files/${encodeFilePathParam(path)}/comments`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ body }),
+    },
+  );
+  if (!res.ok) {
+    const b = await res.json().catch(() => ({}));
+    throw new Error(b.error || `Failed to add comment: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.comment;
+}
+
+export async function deleteFileComment(id: string): Promise<void> {
+  const res = await authFetch(`${BASE}/api/files/comments/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok && res.status !== 204) {
+    const b = await res.json().catch(() => ({}));
+    throw new Error(b.error || `Failed to delete comment: ${res.status}`);
+  }
+}
+
+export async function fetchFileTags(path: string): Promise<FileTagInfo[]> {
+  const res = await authFetch(`${BASE}/api/files/${encodeFilePathParam(path)}/tags`);
+  if (!res.ok) {
+    if (res.status === 404) return [];
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to fetch tags: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.tags ?? [];
+}
+
+export async function addFileTag(path: string, label: string): Promise<FileTagInfo> {
+  const res = await authFetch(`${BASE}/api/files/${encodeFilePathParam(path)}/tags`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ label }),
+  });
+  if (!res.ok) {
+    const b = await res.json().catch(() => ({}));
+    throw new Error(b.error || `Failed to add tag: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.tag;
+}
+
+export async function deleteFileTag(path: string, label: string): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/files/${encodeFilePathParam(path)}/tags/${encodeURIComponent(label)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok && res.status !== 204) {
+    const b = await res.json().catch(() => ({}));
+    throw new Error(b.error || `Failed to delete tag: ${res.status}`);
+  }
 }
 
 // --- Phase 2: favorites / recents / search / thumbnails / shares v2 ---
