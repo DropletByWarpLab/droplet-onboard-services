@@ -38,9 +38,11 @@ export function DocEditorPanel({ file, onClose }: DocEditorPanelProps) {
       setState({ kind: "ready", session });
     } catch (err) {
       // A 503 / DOCS_UNAVAILABLE is a calm "editing unavailable" state, not an
-      // error the user did anything wrong to cause.
-      const msg = err instanceof Error ? err.message : String(err);
-      if (/503|DOCS_UNAVAILABLE/i.test(msg)) {
+      // error the user did anything wrong to cause. Check structured props first
+      // (set by getEditorSession) rather than parsing the message string.
+      const status = (err as { status?: unknown }).status;
+      const code = (err as { code?: unknown }).code;
+      if (status === 503 || code === "DOCS_UNAVAILABLE") {
         setState({ kind: "unavailable" });
       } else {
         setState({ kind: "error" });

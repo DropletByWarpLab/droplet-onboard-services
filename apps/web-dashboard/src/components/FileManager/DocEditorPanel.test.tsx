@@ -78,8 +78,15 @@ describe("DocEditorPanel", () => {
   });
 
   it("shows a calm unavailable state (not a raw error) on a 503/DOCS_UNAVAILABLE", async () => {
+    // getEditorSession attaches structured {status, code} props to the thrown
+    // error (see api.ts); DocEditorPanel branches on those props, not on the
+    // message string, so the mock must carry them to exercise the unavailable
+    // path (reviewer finding: don't couple the UI to the exact message format).
     getEditorSessionMock.mockRejectedValue(
-      new Error("editor session failed: 503 (DOCS_UNAVAILABLE)"),
+      Object.assign(new Error("editor session failed: 503 (DOCS_UNAVAILABLE)"), {
+        status: 503,
+        code: "DOCS_UNAVAILABLE",
+      }),
     );
     render(<DocEditorPanel file={makeFile()} onClose={vi.fn()} />);
     await waitFor(() =>

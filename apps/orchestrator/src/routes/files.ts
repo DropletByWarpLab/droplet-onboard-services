@@ -296,25 +296,22 @@ export function createFilesRouter(prisma: PrismaClient): Router {
   router.get(
     "/files/docs/status",
     requireRole("owner", "admin", "family"),
-    async (_req: Request, res: Response, next: NextFunction) => {
-      try {
-        const cached = await cacheGet<{ state: string; engine: string }>(
-          DOCS_STATUS_CACHE_KEY,
-        );
-        if (cached) {
-          res.json(cached);
-          return;
-        }
-        const healthy = await docServerHealthy();
-        const payload = {
-          state: healthy ? "ready" : "unavailable",
-          engine: DOCS_ENGINE,
-        };
-        await cacheSet(DOCS_STATUS_CACHE_KEY, payload, DOCS_STATUS_TTL);
-        res.json(payload);
-      } catch (err) {
-        next(err);
+    async (_req: Request, res: Response, _next: NextFunction) => {
+      // Cache reads/writes are best-effort: Redis unavailability must not 500
+      // this route (the "Never 500s" contract in the comment above).
+      let cached: { state: string; engine: string } | null = null;
+      try { cached = await cacheGet<{ state: string; engine: string }>(DOCS_STATUS_CACHE_KEY); } catch { /* Redis unavailable */ }
+      if (cached) {
+        res.json(cached);
+        return;
       }
+      const healthy = await docServerHealthy();
+      const payload = {
+        state: healthy ? "ready" : "unavailable",
+        engine: DOCS_ENGINE,
+      };
+      try { await cacheSet(DOCS_STATUS_CACHE_KEY, payload, DOCS_STATUS_TTL); } catch { /* Redis unavailable */ }
+      res.json(payload);
     },
   );
 

@@ -73,25 +73,17 @@ export class DocServerUnavailableError extends Error {
 }
 
 /**
- * True when the engine is configured to run at all: the explicit master flag,
- * a reachable URL, AND a non-empty shared JWT secret.
+ * True when the engine is enabled via the explicit DOCS_ENABLED flag.
  *
- * The JWT-secret guard is a SECURITY fail-safe, not just a config check: every
- * editor session JWT is HS256-signed with ONLYOFFICE_JWT_SECRET. An empty (or
- * absent) secret would mint document-access tokens signed with the empty key —
- * trivially forgeable — so we treat an empty secret exactly like a disabled
- * engine: docServerHealthy() returns false and ncMintEditorSession() throws
- * DocServerUnavailableError (→ 503), the dashboard renders "editing
- * unavailable", and NO JWT is ever signed with an empty/default secret. The
- * doc-server is opt-in/default-off; setup.sh generates a device-unique secret,
- * so a correctly-provisioned box that opted in always has one.
+ * State is EXPLICIT (CLAUDE.md): the URL-presence guard lives in
+ * docServerHealthy() and the JWT-secret fail-safe lives in ncMintEditorSession()
+ * (empty ONLYOFFICE_JWT_SECRET → DocServerUnavailableError, so no document-access
+ * JWT is ever signed with a forgeable empty/default key). DOCS_ENABLED itself is
+ * OPT-IN / DEFAULT-OFF (config default "0") — the operator must explicitly turn
+ * the ~2 GB AGPLv3 engine on and add `docs` to COMPOSE_PROFILES.
  */
 function docsConfigured(): boolean {
-  return (
-    config.DOCS_ENABLED === true &&
-    config.DOCS_INTERNAL_URL.trim() !== "" &&
-    config.ONLYOFFICE_JWT_SECRET.trim() !== ""
-  );
+  return config.DOCS_ENABLED === true;
 }
 
 /**
@@ -102,18 +94,21 @@ function docsConfigured(): boolean {
  */
 export async function docServerHealthy(): Promise<boolean> {
   if (!docsConfigured()) return false;
+  if (!config.DOCS_INTERNAL_URL.trim()) return false;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3000);
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000);
     const url = `${config.DOCS_INTERNAL_URL.replace(/\/$/, "")}/healthcheck`;
     const res = await fetch(url, { signal: controller.signal });
-    clearTimeout(timeout);
     if (!res.ok) return false;
     const body = (await res.text()).trim().toLowerCase();
-    // Document Server returns the literal `true`; tolerate a JSON-wrapped value.
-    return body === "true" || body.includes("true");
+    // Document Server returns the literal `true`; tolerate a JSON-wrapped boolean.
+    if (body === "true") return true;
+    try { return JSON.parse(body) === true; } catch { return false; }
   } catch {
     return false;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -185,6 +180,12 @@ export async function ncMintEditorSession(
     .update(`${ncFileId}`)
     .digest("hex")
     .slice(0, 20);
+
+  if (!config.ONLYOFFICE_JWT_SECRET.trim()) {
+    throw new DocServerUnavailableError(
+      "ONLYOFFICE_JWT_SECRET is not configured — document editing is unavailable",
+    );
+  }
 
   const accessToken = jwt.sign(
     {

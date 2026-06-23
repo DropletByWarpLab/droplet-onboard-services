@@ -204,10 +204,12 @@ describe("ncMintEditorSession — DOCS disabled", () => {
   });
 });
 
-// WARP-882 security fail-safe: an empty ONLYOFFICE_JWT_SECRET must be treated
-// exactly like a disabled engine. Every editor JWT is HS256-signed with this
-// secret; an empty secret yields forgeable document-access tokens, so the seam
-// must report unavailable (503) and NEVER sign a token with an empty key.
+// WARP-882 security fail-safe (reviewer finding): an empty ONLYOFFICE_JWT_SECRET
+// must NEVER mint an editor session — every editor JWT is HS256-signed with this
+// secret, so an empty secret would yield a forgeable document-access token. The
+// guard lives in ncMintEditorSession() (the JWT-signing path), so even a reachable
+// engine with an empty secret throws DocServerUnavailableError (→ 503) and no
+// token is ever signed with the empty key.
 describe("ncMintEditorSession — empty JWT secret (security fail-safe)", () => {
   const emptySecretConfig = {
     config: {
@@ -220,33 +222,24 @@ describe("ncMintEditorSession — empty JWT secret (security fail-safe)", () => 
     },
   };
 
-  it("throws DocServerUnavailableError when ONLYOFFICE_JWT_SECRET is empty (no forgeable JWT)", async () => {
+  it("throws DocServerUnavailableError (no forgeable JWT) even when the engine is reachable", async () => {
     vi.resetModules();
     vi.doMock("../config.js", () => emptySecretConfig);
     vi.doMock("../services/nextcloud.client.js", () => ({
+      // fileId resolves AND the engine is healthy below — the ONLY thing wrong
+      // is the empty secret, so this pins that the secret guard (not a missing
+      // file or an unreachable engine) is what refuses the mint.
       ncGetFileId: vi.fn().mockResolvedValue(1),
       ncListSharedWithMe: vi.fn(),
     }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => "true" }),
+    );
     const mod = await import("../services/docserver.client.js");
     await expect(
       mod.ncMintEditorSession("t", "u", "/x.docx", "edit"),
     ).rejects.toBeInstanceOf(mod.DocServerUnavailableError);
-    vi.resetModules();
-  });
-
-  it("docServerHealthy() returns false when ONLYOFFICE_JWT_SECRET is empty (never probes)", async () => {
-    vi.resetModules();
-    vi.doMock("../config.js", () => emptySecretConfig);
-    vi.doMock("../services/nextcloud.client.js", () => ({
-      ncGetFileId: vi.fn(),
-      ncListSharedWithMe: vi.fn(),
-    }));
-    const probe = vi.fn();
-    vi.stubGlobal("fetch", probe);
-    const mod = await import("../services/docserver.client.js");
-    await expect(mod.docServerHealthy()).resolves.toBe(false);
-    // Fail-safe is config-level: it must short-circuit BEFORE any network probe.
-    expect(probe).not.toHaveBeenCalled();
     vi.resetModules();
   });
 });
