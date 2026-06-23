@@ -165,11 +165,24 @@ export async function ncMintEditorSession(
   const editorBase = `${config.NEXTCLOUD_URL.replace(/\/$/, "")}/index.php/apps/onlyoffice/${ncFileId}`;
   const editorUrl = `${editorBase}?mode=${requestedMode}`;
 
-  // Short-lived token the editor presents back. Bound to the fileId + user +
-  // mode so a leaked token can't be replayed against another file or to escalate
-  // a view session to edit. `documentKey` namespaces the co-authoring session.
+  // `documentKey` namespaces the co-authoring session in the engine: OnlyOffice
+  // treats two opens with the SAME documentKey as ONE shared live document
+  // (real-time co-authoring) and two opens with DIFFERENT keys as separate
+  // documents. Co-authoring is the whole point of WS-4, so the key MUST be
+  // identical for every user opening the same file — it is therefore derived
+  // from the stable per-file identity (ncFileId) ONLY, NEVER from ncUser. A
+  // per-user key (the prior `${ncFileId}:${ncUser}:${filePath}` hash) silently
+  // forked every user into their own session, so two people editing one file
+  // never saw each other's changes. The FileEditSession row is likewise keyed on
+  // ncFileId (one shared session per file), so the two now agree.
+  //
+  // ncFileId (not filePath) is the identity: a rename/move changes the path but
+  // not the fileId, so an in-progress shared session survives a move instead of
+  // splitting. The mode/user authorization still rides the JWT claims below
+  // (and is decided server-side), so dropping them from the key does not weaken
+  // access control — the editorUrl + token are still bound to {ncFileId, mode}.
   const documentKey = createHash("sha256")
-    .update(`${ncFileId}:${ncUser}:${filePath}`)
+    .update(`${ncFileId}`)
     .digest("hex")
     .slice(0, 20);
 

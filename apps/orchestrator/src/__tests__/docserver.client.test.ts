@@ -104,6 +104,51 @@ describe("ncMintEditorSession", () => {
     expect(session.mode).toBe("view");
   });
 
+  // WARP-882 co-authoring: the engine joins two opens into ONE live document iff
+  // their documentKey matches. So two DIFFERENT users opening the SAME file must
+  // get the SAME documentKey — otherwise they fork into separate sessions and
+  // never co-author. The key is derived from ncFileId only (never per-user).
+  it("derives the SAME documentKey for two different users on the same file (shared co-authoring session)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => "true" }),
+    );
+    ncGetFileIdMock.mockResolvedValue(4242);
+    const alice = await ncMintEditorSession("nc-token-a", "alice", "/Documents/report.docx", "edit");
+    ncGetFileIdMock.mockResolvedValue(4242);
+    const bob = await ncMintEditorSession("nc-token-b", "bob", "/Documents/report.docx", "edit");
+
+    expect(alice.documentKey).toBe(bob.documentKey);
+    expect(alice.documentKey.length).toBeGreaterThan(0);
+  });
+
+  // Same user, but the path changed (rename/move) — the in-progress shared
+  // session must survive, so the key tracks the stable ncFileId, not the path.
+  it("derives the SAME documentKey when the same fileId is opened under a different path (rename-safe)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => "true" }),
+    );
+    ncGetFileIdMock.mockResolvedValue(99);
+    const before = await ncMintEditorSession("t", "alice", "/Documents/old-name.docx", "edit");
+    ncGetFileIdMock.mockResolvedValue(99);
+    const after = await ncMintEditorSession("t", "alice", "/Documents/new-name.docx", "edit");
+    expect(before.documentKey).toBe(after.documentKey);
+  });
+
+  // Two DIFFERENT files must namespace into DIFFERENT engine sessions.
+  it("derives DIFFERENT documentKeys for different files", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => "true" }),
+    );
+    ncGetFileIdMock.mockResolvedValue(1);
+    const one = await ncMintEditorSession("t", "alice", "/a.docx", "edit");
+    ncGetFileIdMock.mockResolvedValue(2);
+    const two = await ncMintEditorSession("t", "alice", "/b.docx", "edit");
+    expect(one.documentKey).not.toBe(two.documentKey);
+  });
+
   it("throws DocServerUnavailableError when DOCS is unreachable", async () => {
     ncGetFileIdMock.mockResolvedValue(7);
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("ECONNREFUSED")));
