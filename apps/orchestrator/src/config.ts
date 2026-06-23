@@ -417,13 +417,15 @@ const envSchema = z.object({
   //   DOCS_INTERNAL_URL emptiness (handbook "state is explicit, never inferred
   //   from absence"). Same string→bool idiom as DROPLET_CLAIM_GATE_ENABLED:
   //   z.coerce.boolean() would treat "0"/"false" as true. The OnlyOffice
-  //   Document Server is OPT-IN / DEFAULT-OFF (AGPLv3 CE, ~2 GB image), so this
-  //   defaults to "0": the operator must explicitly set DOCS_ENABLED=1 AND add
-  //   `docs` to COMPOSE_PROFILES to run the engine. Only "1"/"true" enable it;
-  //   an absent var defaults OFF via the "0" default.
+  //   Document Server is DEFAULT-ON on the 32 GB box (AGPLv3 CE, ~2 GB image,
+  //   which a 32 GB single-box absorbs comfortably), so this defaults to "1":
+  //   scripts/lib/single-box.sh writes DOCS_ENABLED=1 + adds `docs` to
+  //   COMPOSE_PROFILES above the small-box RAM threshold, and DOCS_ENABLED=0 +
+  //   drops `docs` on a ≤8 GB box. Only "1"/"true" enable it; an explicit "0"
+  //   (or "false"/"no"/"off") disables it on a small box.
   DOCS_ENABLED: z
     .string()
-    .default("0")
+    .default("1")
     .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
   // DOCS_EDITOR_PUBLIC_PATH — public path the gateway fronts the Document
   //   Server on (nginx `location /docs/`). Used to build browser-facing URLs;
