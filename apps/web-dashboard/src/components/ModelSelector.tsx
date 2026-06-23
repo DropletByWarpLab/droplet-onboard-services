@@ -41,8 +41,11 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
             <option>No models available</option>
           )}
           {models.map((m) => (
+            // Native <option> can't render a badge, so mark vision-capable
+            // models inline so they're distinguishable in the dropdown.
             <option key={m.id} value={m.id}>
               {m.name}
+              {m.capabilities?.vision ? " · vision" : ""}
             </option>
           ))}
         </select>
@@ -55,6 +58,14 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
           }`}
         >
           {providerBadge[provider]?.label ?? provider}
+        </span>
+      )}
+
+      {/* Vision pill for the selected model — tells the user this model can
+          see attached images (indigo accent, distinct from provider badges). */}
+      {selected?.capabilities?.vision && (
+        <span className="px-2 py-0.5 rounded-full type-caption-2 font-medium bg-accent-subtle text-accent">
+          Vision
         </span>
       )}
     </div>

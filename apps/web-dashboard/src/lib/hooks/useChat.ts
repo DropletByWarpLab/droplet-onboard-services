@@ -1467,6 +1467,9 @@ export function useChat(options: UseChatOptions = {}) {
         filename: file.name,
         bytes: file.size,
         mimeType: file.type || undefined,
+        // Retained in-memory so the composer chip can show a thumbnail; the
+        // send path only ever transmits { itemId }, never the File.
+        file,
         status: "uploading",
       };
       mutateAttachments((prev) => [...prev, pending]);
