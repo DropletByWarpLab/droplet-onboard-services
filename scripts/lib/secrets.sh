@@ -134,8 +134,9 @@ generate_env() {
   # unguessable: a shared/default secret (the old `change-me` placeholder) lets
   # anyone forge an HS256 token granting access to any document. 32 random bytes
   # (64 hex chars) clears the orchestrator's JWT-strength floor. The doc-server is
-  # opt-in/default-off, but we generate the secret unconditionally so a box that
-  # later flips DOCS_ENABLED=1 already has a strong secret (never a placeholder).
+  # default-ON on the 32 GB box (dropped on ≤8 GB), but we generate the secret
+  # unconditionally so it is always strong (never a placeholder) on every box,
+  # whatever the RAM gate decides about DOCS_ENABLED / the `docs` profile.
   onlyoffice_jwt_secret=$(openssl rand -hex 32)
 
   # OLLAMA_URL — picks the bundled droplet-ollama container by default
@@ -180,9 +181,10 @@ NEXTCLOUD_URL=http://nextcloud:80
 # ONLYOFFICE_JWT_SECRET: device-unique HS256 secret the OnlyOffice Document
 # Server, the Nextcloud \`onlyoffice\` connector, AND the orchestrator's
 # docserver.client.ts all sign/verify document-access JWTs with. Generated here
-# unconditionally so a box that later opts into the doc-server (DOCS_ENABLED=1 +
-# \`docs\` in COMPOSE_PROFILES) already has a strong secret rather than a forgeable
-# placeholder. The doc-server itself is OPT-IN / default-OFF — see .env.example.
+# unconditionally so the secret is always strong (never a forgeable placeholder)
+# regardless of whether the box runs the engine. The doc-server is DEFAULT-ON on
+# the 32 GB box (DOCS_ENABLED=1 + \`docs\` in COMPOSE_PROFILES, RAM-gated in
+# scripts/lib/single-box.sh) and dropped on ≤8 GB boxes — see .env.example.
 ONLYOFFICE_JWT_SECRET=$onlyoffice_jwt_secret
 
 # --- AI Gateway ---
