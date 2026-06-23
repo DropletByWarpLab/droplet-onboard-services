@@ -9,6 +9,7 @@ import { translateError } from "@/lib/friendly-errors";
 import { Dialog } from "@/components/Dialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PlaceCombobox } from "@/components/calendar/PlaceCombobox";
+import { DateTimePicker } from "@/components/calendar/DateTimePicker";
 
 interface Props {
   open: boolean;
@@ -217,26 +218,28 @@ export function EventForm({ open, initial, initialDate, onClose, onSaved }: Prop
           </label>
 
           <div className="grid grid-cols-2 gap-3">
-            <label className="flex flex-col gap-1">
+            <div className="flex flex-col gap-1">
               <span className="type-caption-1 text-label-secondary">Starts</span>
-              <input
-                type="datetime-local"
+              {/* Calendar UX clarity (Samantha QA #bugs): date + 15-minute time
+                  dropdown. Same YYYY-MM-DDTHH:mm local-input contract as the
+                  former datetime-local, so handleStartChange's duration-slide
+                  and localInputToIso keep working unchanged. */}
+              <DateTimePicker
+                label="Starts"
                 value={startsAt}
-                onChange={(e) => handleStartChange(e.target.value)}
+                onChange={handleStartChange}
                 disabled={externallySynced}
-                className="dp-input"
               />
-            </label>
-            <label className="flex flex-col gap-1">
+            </div>
+            <div className="flex flex-col gap-1">
               <span className="type-caption-1 text-label-secondary">Ends</span>
-              <input
-                type="datetime-local"
+              <DateTimePicker
+                label="Ends"
                 value={endsAt}
-                onChange={(e) => setEndsAt(e.target.value)}
+                onChange={setEndsAt}
                 disabled={externallySynced}
-                className="dp-input"
               />
-            </label>
+            </div>
           </div>
 
           <label className="flex flex-col gap-1">

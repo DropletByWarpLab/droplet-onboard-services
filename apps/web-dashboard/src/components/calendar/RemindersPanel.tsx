@@ -6,6 +6,7 @@ import { useReminders, createReminder, patchReminder, deleteReminder } from "@/l
 import { useToast } from "@/components/Toast";
 import { translateError } from "@/lib/friendly-errors";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { DateTimePicker } from "@/components/calendar/DateTimePicker";
 
 function formatRel(iso: string): string {
   const now = Date.now();
@@ -102,12 +103,19 @@ async function performRemove() {
             className="dp-input text-sm"
             maxLength={500}
           />
-          <input
-            type="datetime-local"
+          {/* Calendar UX clarity (Samantha QA #bugs): date + 15-minute time
+              dropdown for the due time. Same YYYY-MM-DDTHH:mm local-input
+              contract — handleCreate still does new Date(newDueAt).toISOString(). */}
+          <DateTimePicker
+            label="Due"
             value={newDueAt}
-            onChange={(e) => setNewDueAt(e.target.value)}
-            className="dp-input text-sm"
+            onChange={setNewDueAt}
           />
+          {/* The Create button is gated on BOTH a title and a due time; without
+              this hint the disabled state reads as "broken" (the QA report). */}
+          <p className="type-caption-2 text-label-tertiary">
+            Add a title and a due time to create a reminder.
+          </p>
           <button onClick={handleCreate} disabled={!newTitle.trim() || !newDueAt} className="dp-btn-primary text-sm">
             Create
           </button>

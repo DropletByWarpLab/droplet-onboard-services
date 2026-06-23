@@ -41,11 +41,14 @@ describe("RemindersPanel — typed error → friendly toast (WARP-294)", () => {
     fireEvent.change(screen.getByPlaceholderText(/reminder title/i), {
       target: { value: "Buy milk" },
     });
-    // datetime-local input — provide a future ISO-ish value.
-    const dateInput = document.querySelector(
-      'input[type="datetime-local"]',
-    ) as HTMLInputElement;
-    fireEvent.change(dateInput, { target: { value: "2030-01-01T10:00" } });
+    // Date + 15-minute time dropdown — provide a future due date/time so the
+    // Create button enables.
+    fireEvent.change(screen.getByLabelText(/due date/i), {
+      target: { value: "2030-01-01" },
+    });
+    fireEvent.change(screen.getByLabelText(/due time/i), {
+      target: { value: "10:00" },
+    });
     fireEvent.click(screen.getByRole("button", { name: /create/i }));
 
     await waitFor(() => {
