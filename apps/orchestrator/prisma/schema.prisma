@@ -784,6 +784,11 @@ model BrainMemoryItem {
   indexedAt         DateTime? // null until extractor finishes
   extractorWarnings String[]          @default([]) // e.g. ["low_confidence_ocr_page_3"]
   hasOriginalBytes  Boolean           @default(true) // toggled false if user opts into bytes-purge
+  // Image-vision: the indexer wrote a normalized vision.jpg render next to the
+  // original (downscaled, web/cloud-safe JPEG). Explicit column (no guessing) —
+  // the chat route reads it to decide whether an image can be sent to a vision
+  // model. False for non-images, pre-feature uploads, or a failed render.
+  hasVisionRender   Boolean           @default(false)
 
   // WARP-218: explicit status (no guessing per CLAUDE.md). The worker
   // updates this; readers query directly. `failureReason` is non-null

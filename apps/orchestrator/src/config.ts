@@ -631,5 +631,17 @@ export const config = {
     parsed.NODE_ENV,
     parsed.DROPLET_PUBLIC_FQDN,
   ),
+  // Image vision (chat). `model` is the preferred LOCAL vision model that image
+  // turns auto-route to when the selected model can't see (and that
+  // model-readiness pulls at startup); empty → no local vision (cloud vision is
+  // still reachable by selecting a cloud vision model explicitly). `maxImages`
+  // caps how many images are re-sent per request, bounding token cost.
+  vision: {
+    model: (process.env.VISION_MODEL ?? "").trim() || null,
+    maxImages: (() => {
+      const n = Number.parseInt(process.env.VISION_MAX_IMAGES ?? "", 10);
+      return Number.isFinite(n) && n >= 1 && n <= 8 ? n : 3;
+    })(),
+  },
 };
 export type Config = typeof config;

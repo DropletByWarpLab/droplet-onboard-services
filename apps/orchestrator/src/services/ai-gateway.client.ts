@@ -1,5 +1,10 @@
 import { config } from "../config.js";
-import type { ChatRequest, ModelsResponse } from "../types/index.js";
+import type {
+  ChatRequest,
+  ModelCapabilities,
+  ModelInfo,
+  ModelsResponse,
+} from "../types/index.js";
 
 const BASE_URL = config.AI_GATEWAY_URL;
 
@@ -70,6 +75,29 @@ export async function listModels(): Promise<ModelsResponse> {
   } catch (err) {
     throw wrapTimeout(err, "listModels", DEFAULT_GATEWAY_TIMEOUT_MS);
   }
+}
+
+// Capability lookup for vision routing. The models list is small and changes
+// rarely, so a short TTL cache keeps per-turn routing off the gateway's hot
+// path. On a gateway error we degrade to "unknown" (undefined) rather than
+// blocking chat — the route then treats the model as non-vision (OCR fallback).
+let _modelsCache: { at: number; models: ModelInfo[] } | null = null;
+const MODELS_CACHE_TTL_MS = 30_000;
+
+export async function getModelCapabilities(
+  model: string,
+  now: number = Date.now(),
+): Promise<ModelCapabilities | undefined> {
+  if (!_modelsCache || now - _modelsCache.at > MODELS_CACHE_TTL_MS) {
+    try {
+      const res = await listModels();
+      _modelsCache = { at: now, models: res.models };
+    } catch {
+      if (!_modelsCache) return undefined; // never populated → unknown
+      // else: serve stale rather than failing the turn
+    }
+  }
+  return _modelsCache?.models.find((m) => m.id === model)?.capabilities;
 }
 
 export async function chat(
