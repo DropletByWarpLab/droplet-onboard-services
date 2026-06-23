@@ -30,7 +30,10 @@ vi.mock("pino", () => ({
   }),
 }));
 
-import { backgroundPull } from "./model-readiness.service.js";
+import {
+  backgroundPull,
+  ensureDefaultModelPulled,
+} from "./model-readiness.service.js";
 
 /**
  * Build a fake streaming Response whose body yields the given NDJSON progress
@@ -130,5 +133,76 @@ describe("model-readiness backgroundPull — progress forwarding", () => {
     await backgroundPull("gpt-oss:20b");
 
     expect(loggedPercents()).toHaveLength(0);
+  });
+});
+
+describe("model-readiness ensureDefaultModelPulled — vision model", () => {
+  const realFetch = global.fetch;
+
+  beforeEach(() => {
+    loggerInfo.mockReset();
+  });
+
+  afterEach(() => {
+    global.fetch = realFetch;
+    vi.unstubAllEnvs();
+  });
+
+  /** URLs of every POST /api/pull request, with the requested model name. */
+  function pullRequests(fetchMock: ReturnType<typeof vi.fn>): string[] {
+    return fetchMock.mock.calls
+      .filter((c) => String(c[0]).endsWith("/api/pull"))
+      .map((c) => JSON.parse((c[1] as RequestInit).body as string).name);
+  }
+
+  it("pulls VISION_MODEL in addition to LLM_MODEL when both are missing", async () => {
+    vi.stubEnv("LLM_MODEL", "mistral:7b-instruct");
+    vi.stubEnv("VISION_MODEL", "llava:7b");
+
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).endsWith("/api/tags")) {
+        // Neither model present yet.
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ models: [] }),
+        } as unknown as Response);
+      }
+      // /api/pull — minimal streaming success.
+      return Promise.resolve(streamingResponse([{ status: "success" }]));
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await ensureDefaultModelPulled();
+    // Flush the fire-and-forget background pulls' first tick.
+    await new Promise((r) => setTimeout(r, 0));
+
+    const pulled = pullRequests(fetchMock);
+    expect(pulled).toContain("mistral:7b-instruct");
+    expect(pulled).toContain("llava:7b");
+  });
+
+  it("does not pull a model that is already present", async () => {
+    vi.stubEnv("LLM_MODEL", "mistral:7b-instruct");
+    vi.stubEnv("VISION_MODEL", "llava:7b");
+
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).endsWith("/api/tags")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () =>
+            Promise.resolve({ models: [{ name: "mistral:7b-instruct" }] }),
+        } as unknown as Response);
+      }
+      return Promise.resolve(streamingResponse([{ status: "success" }]));
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await ensureDefaultModelPulled();
+    await new Promise((r) => setTimeout(r, 0));
+
+    const pulled = pullRequests(fetchMock);
+    expect(pulled).toEqual(["llava:7b"]); // only the missing one
   });
 });

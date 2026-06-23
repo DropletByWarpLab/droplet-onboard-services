@@ -46,7 +46,6 @@ import pino from "pino";
 const logger = pino({ name: "model-readiness" });
 
 const OLLAMA_URL = process.env.OLLAMA_URL ?? "http://host.docker.internal:11434";
-const LLM_MODEL = process.env.LLM_MODEL ?? "";
 
 interface OllamaTagsResponse {
   models?: Array<{ name: string; size?: number; modified_at?: string }>;
@@ -71,12 +70,22 @@ interface OllamaPullProgress {
  * (`useModels` SWR poll) will surface the model once Ollama has it.
  */
 export async function ensureDefaultModelPulled(): Promise<void> {
-  if (!LLM_MODEL) {
-    logger.info("LLM_MODEL unset — skipping model readiness check");
+  // The chat default (LLM_MODEL) plus the optional local vision model
+  // (VISION_MODEL) the image-vision path auto-routes to. Both are ensured at
+  // startup so a fresh box has them ready without manual `ollama pull`.
+  const models = Array.from(
+    new Set(
+      [process.env.LLM_MODEL ?? "", process.env.VISION_MODEL ?? ""].filter(
+        Boolean,
+      ),
+    ),
+  );
+  if (models.length === 0) {
+    logger.info("LLM_MODEL/VISION_MODEL unset — skipping model readiness check");
     return;
   }
 
-  // Step 1 — is the model already in Ollama?
+  // Step 1 — which models are already in Ollama?
   let tags: OllamaTagsResponse;
   try {
     const resp = await fetch(`${OLLAMA_URL}/api/tags`);
@@ -96,20 +105,21 @@ export async function ensureDefaultModelPulled(): Promise<void> {
     return;
   }
 
-  const present = (tags.models ?? []).some((m) => m.name === LLM_MODEL);
-  if (present) {
-    logger.info({ model: LLM_MODEL }, "Model already pulled — ready");
-    return;
+  const present = new Set((tags.models ?? []).map((m) => m.name));
+  for (const model of models) {
+    if (present.has(model)) {
+      logger.info({ model }, "Model already pulled — ready");
+      continue;
+    }
+    // Step 2 — model missing. Kick off a background pull.
+    logger.info(
+      { model, url: OLLAMA_URL },
+      "Model not present — starting background pull (download time depends on model size and network)",
+    );
+    // Fire-and-forget. The `void` makes intent explicit and silences the
+    // floating-promise lint. Errors are caught + logged inside backgroundPull.
+    void backgroundPull(model);
   }
-
-  // Step 2 — model missing. Kick off a background pull.
-  logger.info(
-    { model: LLM_MODEL, url: OLLAMA_URL },
-    "Model not present — starting background pull (download time depends on model size and network)",
-  );
-  // Fire-and-forget. The `void` makes intent explicit and silences the
-  // floating-promise lint. Errors are caught + logged inside backgroundPull.
-  void backgroundPull(LLM_MODEL);
 }
 
 // Exported for testing: the streaming progress parser is the unit under
