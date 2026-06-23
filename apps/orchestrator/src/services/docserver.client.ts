@@ -72,9 +72,26 @@ export class DocServerUnavailableError extends Error {
   }
 }
 
-/** True when the engine is configured to run at all (explicit flag + a URL). */
+/**
+ * True when the engine is configured to run at all: the explicit master flag,
+ * a reachable URL, AND a non-empty shared JWT secret.
+ *
+ * The JWT-secret guard is a SECURITY fail-safe, not just a config check: every
+ * editor session JWT is HS256-signed with ONLYOFFICE_JWT_SECRET. An empty (or
+ * absent) secret would mint document-access tokens signed with the empty key —
+ * trivially forgeable — so we treat an empty secret exactly like a disabled
+ * engine: docServerHealthy() returns false and ncMintEditorSession() throws
+ * DocServerUnavailableError (→ 503), the dashboard renders "editing
+ * unavailable", and NO JWT is ever signed with an empty/default secret. The
+ * doc-server is opt-in/default-off; setup.sh generates a device-unique secret,
+ * so a correctly-provisioned box that opted in always has one.
+ */
 function docsConfigured(): boolean {
-  return config.DOCS_ENABLED === true && config.DOCS_INTERNAL_URL.trim() !== "";
+  return (
+    config.DOCS_ENABLED === true &&
+    config.DOCS_INTERNAL_URL.trim() !== "" &&
+    config.ONLYOFFICE_JWT_SECRET.trim() !== ""
+  );
 }
 
 /**

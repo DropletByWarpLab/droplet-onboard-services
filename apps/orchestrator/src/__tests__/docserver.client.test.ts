@@ -158,3 +158,50 @@ describe("ncMintEditorSession — DOCS disabled", () => {
     vi.resetModules();
   });
 });
+
+// WARP-882 security fail-safe: an empty ONLYOFFICE_JWT_SECRET must be treated
+// exactly like a disabled engine. Every editor JWT is HS256-signed with this
+// secret; an empty secret yields forgeable document-access tokens, so the seam
+// must report unavailable (503) and NEVER sign a token with an empty key.
+describe("ncMintEditorSession — empty JWT secret (security fail-safe)", () => {
+  const emptySecretConfig = {
+    config: {
+      NEXTCLOUD_URL: "http://nextcloud.test",
+      DOCS_INTERNAL_URL: "http://docserver.test",
+      DOCS_ENABLED: true,
+      DOCS_EDITOR_PUBLIC_PATH: "/docs/",
+      DOCS_ACCESS_TOKEN_TTL_SECONDS: 600,
+      ONLYOFFICE_JWT_SECRET: "",
+    },
+  };
+
+  it("throws DocServerUnavailableError when ONLYOFFICE_JWT_SECRET is empty (no forgeable JWT)", async () => {
+    vi.resetModules();
+    vi.doMock("../config.js", () => emptySecretConfig);
+    vi.doMock("../services/nextcloud.client.js", () => ({
+      ncGetFileId: vi.fn().mockResolvedValue(1),
+      ncListSharedWithMe: vi.fn(),
+    }));
+    const mod = await import("../services/docserver.client.js");
+    await expect(
+      mod.ncMintEditorSession("t", "u", "/x.docx", "edit"),
+    ).rejects.toBeInstanceOf(mod.DocServerUnavailableError);
+    vi.resetModules();
+  });
+
+  it("docServerHealthy() returns false when ONLYOFFICE_JWT_SECRET is empty (never probes)", async () => {
+    vi.resetModules();
+    vi.doMock("../config.js", () => emptySecretConfig);
+    vi.doMock("../services/nextcloud.client.js", () => ({
+      ncGetFileId: vi.fn(),
+      ncListSharedWithMe: vi.fn(),
+    }));
+    const probe = vi.fn();
+    vi.stubGlobal("fetch", probe);
+    const mod = await import("../services/docserver.client.js");
+    await expect(mod.docServerHealthy()).resolves.toBe(false);
+    // Fail-safe is config-level: it must short-circuit BEFORE any network probe.
+    expect(probe).not.toHaveBeenCalled();
+    vi.resetModules();
+  });
+});
