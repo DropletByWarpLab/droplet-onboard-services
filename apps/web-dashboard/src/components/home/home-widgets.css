@@ -908,7 +908,14 @@
   transition: color 0.18s var(--ease);
 }
 .droplet-home .w-notes-status[data-state="saved"] {
-  color: var(--success);
+  /* --success (#16a34a) is a background-fill token; as 12px normal text on the
+     home card it lands ~3.0–3.3:1, below WCAG AA. Use the surface's green-TEXT
+     ramp (#15803d light / #4ade80 dark) shared with .w-badge.local and
+     .f-ico.sheet — #15803d clears AA at ~5.0:1 on white. */
+  color: #15803d;
+}
+.dark .droplet-home .w-notes-status[data-state="saved"] {
+  color: #4ade80;
 }
 .droplet-home .w-notes-new {
   display: inline-flex;
