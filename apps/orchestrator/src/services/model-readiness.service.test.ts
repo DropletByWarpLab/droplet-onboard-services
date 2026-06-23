@@ -149,7 +149,7 @@ describe("model-readiness ensureDefaultModelPulled — vision model", () => {
   });
 
   /** URLs of every POST /api/pull request, with the requested model name. */
-  function pullRequests(fetchMock: ReturnType<typeof vi.fn>): string[] {
+  function pullRequests(fetchMock: { mock: { calls: unknown[][] } }): string[] {
     return fetchMock.mock.calls
       .filter((c) => String(c[0]).endsWith("/api/pull"))
       .map((c) => JSON.parse((c[1] as RequestInit).body as string).name);
