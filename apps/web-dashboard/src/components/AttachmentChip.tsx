@@ -1,6 +1,13 @@
 "use client";
 
-import { Loader2, FileText, AlertTriangle, Check, X } from "lucide-react";
+import {
+  Loader2,
+  FileText,
+  Image as ImageIcon,
+  AlertTriangle,
+  Check,
+  X,
+} from "lucide-react";
 import type { ChatAttachment } from "@/lib/types";
 import { translateError } from "@/lib/friendly-errors";
 
@@ -24,7 +31,8 @@ function formatBytes(bytes: number): string {
  * flip (driven by the WebSocket bridge) re-renders the chip in place.
  */
 export function AttachmentChip({ attachment, onRemove }: AttachmentChipProps) {
-  const { localId, filename, bytes, status, error } = attachment;
+  const { localId, filename, bytes, status, error, mimeType } = attachment;
+  const isImage = Boolean(mimeType?.startsWith("image/"));
 
   // Tone-of-voice for the screen-reader-only status string. The dot
   // before each phrase is a non-breaking space + middot for the
@@ -54,11 +62,20 @@ export function AttachmentChip({ attachment, onRemove }: AttachmentChipProps) {
         ${isFailed ? "border-system-orange/60" : "border-separator"}
       `}
     >
-      <FileText
-        size={14}
-        className="flex-shrink-0 text-label-secondary"
-        strokeWidth={2}
-      />
+      {isImage ? (
+        <ImageIcon
+          size={14}
+          className="flex-shrink-0 text-label-secondary"
+          strokeWidth={2}
+          aria-hidden
+        />
+      ) : (
+        <FileText
+          size={14}
+          className="flex-shrink-0 text-label-secondary"
+          strokeWidth={2}
+        />
+      )}
       <span className="truncate text-label-primary" title={filename}>
         {filename}
       </span>

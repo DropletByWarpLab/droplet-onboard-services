@@ -1387,6 +1387,7 @@ export function useChat(options: UseChatOptions = {}) {
           itemId: i.id,
           filename: i.filename,
           bytes: Number((i as { bytes?: number }).bytes ?? 0),
+          mimeType: (i as { mimeType?: string }).mimeType ?? undefined,
           status:
             i.status === "ready"
               ? "ready"
@@ -1454,6 +1455,7 @@ export function useChat(options: UseChatOptions = {}) {
             localId,
             filename: file.name,
             bytes: file.size,
+            mimeType: file.type || undefined,
             status: "failed",
             error: `Attachment limit reached (${MAX_ATTACHMENTS_PER_CONVERSATION} per conversation).`,
           },
@@ -1464,6 +1466,7 @@ export function useChat(options: UseChatOptions = {}) {
         localId,
         filename: file.name,
         bytes: file.size,
+        mimeType: file.type || undefined,
         status: "uploading",
       };
       mutateAttachments((prev) => [...prev, pending]);

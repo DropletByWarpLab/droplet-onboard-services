@@ -118,6 +118,9 @@ export interface ChatAttachment {
   itemId?: string;
   filename: string;
   bytes: number;
+  /** MIME type (from the picked File, or the rehydrated item) — drives the
+   *  chip's leading icon (image vs document). */
+  mimeType?: string;
   status: "pending" | "uploading" | "indexing" | "ready" | "failed";
   /** Error message when status="failed" — surfaced on the chip. */
   error?: string;
