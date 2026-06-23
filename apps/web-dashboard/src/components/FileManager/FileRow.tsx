@@ -190,9 +190,10 @@ export function FileRow({
         // double-click requirement was a Files-page quirk, not a global
         // dashboard pattern). Modifier-clicks still go to selection so
         // Cmd/Ctrl + click and Shift + range-select work on folders for
-        // bulk operations (move, delete, share). Files keep the previous
-        // single-click-selects / double-click-opens behavior because that
-        // preview sidebar is the primary affordance for them.
+        // bulk operations (move, delete, share). For files, a plain
+        // single-click selects (and opens the info sidebar — the primary
+        // affordance for them); double-click "opens" — which the page wires
+        // to the rich PreviewPane modal (Samantha QA #bugs).
         if (file.isDirectory && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
           e.stopPropagation();
           onOpen();

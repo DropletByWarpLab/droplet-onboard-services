@@ -4,9 +4,12 @@
  * The Files page previously needed two clicks to navigate into a folder,
  * which felt off in a web app where every other tree-style UI in the
  * dashboard (network groups, knowledge bases) navigates on a single click.
- * Folders open on single-click; files keep the legacy single-click-selects /
- * double-click-opens behavior because the right-pane preview is the
- * primary affordance for them.
+ * Folders open on single-click; files single-click-selects (showing the
+ * info sidebar) and double-click "opens" — which now means the rich
+ * PreviewPane modal (Samantha QA #bugs; the page routes a file's onOpen to
+ * handlePreview). At the FileRow level the contract is unchanged: a file
+ * double-click fires onOpen; WHERE that lands is the page's concern and is
+ * covered by files-page.doubleclick-preview.test.tsx.
  */
 import { describe, it, expect, vi } from "vitest";
 import { render, fireEvent, screen } from "@testing-library/react";
@@ -93,10 +96,15 @@ describe("FileRow — single-click semantics (WARP-309)", () => {
     expect(h.onOpen).not.toHaveBeenCalled();
   });
 
-  it("double-click on a file still opens it (legacy behavior preserved)", () => {
+  it("double-click on a file fires onOpen (page routes this to the rich preview)", () => {
+    // Samantha QA #bugs: double-clicking a file should open the PreviewPane
+    // modal. FileRow's job is unchanged — it fires onOpen on double-click and
+    // does NOT fire onSelect; the page wires onOpen → handlePreview for files
+    // (asserted in files-page.doubleclick-preview.test.tsx).
     const h = makeHandlers();
     render(<FileRow {...rowProps(makeFile("notes.txt", false), h)} />);
     fireEvent.doubleClick(screen.getByRole("button", { name: /file notes.txt/i }));
     expect(h.onOpen).toHaveBeenCalledTimes(1);
+    expect(h.onSelect).not.toHaveBeenCalled();
   });
 });
