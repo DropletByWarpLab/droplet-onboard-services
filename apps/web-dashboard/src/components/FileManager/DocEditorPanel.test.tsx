@@ -40,6 +40,7 @@ function editSession(overrides: Partial<DocEditorSession> = {}): DocEditorSessio
     accessTokenTtl: 1800,
     ncFileId: 42,
     mode: "edit",
+    documentKey: "a1b2c3d4e5f6a1b2c3d4",
     ...overrides,
   };
 }

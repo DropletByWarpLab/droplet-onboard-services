@@ -255,6 +255,7 @@ export interface DocEditorSession {
   accessTokenTtl: number;
   ncFileId: number;
   mode: "edit" | "view";
+  documentKey: string;
 }
 
 // WARP-883 (ADR-027 WS-5) — Files spaces (My Files / shared Household).

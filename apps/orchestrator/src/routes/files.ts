@@ -378,10 +378,10 @@ export function createFilesRouter(prisma: PrismaClient): Router {
             update: {
               ncUser: user,
               filePath,
-              mode: session.mode,
               status: "open",
               lastActiveAt: new Date(),
               closedAt: null,
+              documentKey: session.documentKey,
             },
           });
         } catch (persistErr) {

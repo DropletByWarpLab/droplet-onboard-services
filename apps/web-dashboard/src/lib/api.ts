@@ -3590,7 +3590,7 @@ export async function getDocsStatus(): Promise<DocsStatus> {
  */
 export async function getEditorSession(path: string): Promise<DocEditorSession> {
   const res = await authFetch(
-    `${BASE}/api/files/${path.split("/").filter(Boolean).map(encodeURIComponent).join("/")}/editor-session`,
+    `${BASE}/api/files/${encodeFilePathParam(path)}/editor-session`,
   );
   if (!res.ok) {
     // Read the body ONCE — a Response stream can't be consumed twice.

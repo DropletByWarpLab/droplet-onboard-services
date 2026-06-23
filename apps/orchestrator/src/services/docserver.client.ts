@@ -141,6 +141,12 @@ export async function ncMintEditorSession(
     throw new DocServerUnavailableError("Document editing is disabled on this appliance");
   }
 
+  if (!config.ONLYOFFICE_JWT_SECRET.trim()) {
+    throw new DocServerUnavailableError(
+      "ONLYOFFICE_JWT_SECRET is not configured — document editing is unavailable",
+    );
+  }
+
   const healthy = await docServerHealthy();
   if (!healthy) {
     throw new DocServerUnavailableError("Document server is not reachable");
@@ -180,12 +186,6 @@ export async function ncMintEditorSession(
     .update(`${ncFileId}`)
     .digest("hex")
     .slice(0, 20);
-
-  if (!config.ONLYOFFICE_JWT_SECRET.trim()) {
-    throw new DocServerUnavailableError(
-      "ONLYOFFICE_JWT_SECRET is not configured — document editing is unavailable",
-    );
-  }
 
   const accessToken = jwt.sign(
     {
