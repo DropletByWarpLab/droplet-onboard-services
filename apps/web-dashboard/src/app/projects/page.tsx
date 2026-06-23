@@ -207,12 +207,15 @@ export default function ProjectsPage(): JSX.Element {
                   projects={projects}
                   summary={summary}
                   loading={projLoading}
-                  error={Boolean(projErr)}
+                  error={projErr}
                   readOnly={readOnly}
                   showArchived={showArchived}
                   onToggleArchived={() => setShowArchived((v) => !v)}
                   onOpenProject={openProject}
                   onNewProject={() => setModal("newproject")}
+                  onRetry={() => {
+                    void mutateProjects();
+                  }}
                 />
               )}
               {view === "board" && (
