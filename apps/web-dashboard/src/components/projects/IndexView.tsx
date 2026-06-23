@@ -121,6 +121,42 @@ function ProjectCard({ p, onOpen }: { p: PmProject; onOpen: (p: PmProject) => vo
   );
 }
 
+/** Map a projects-fetch error to recoverable copy + tone. An auth failure
+ *  (401/403) reads as a session problem; a server fault (any other HTTP status)
+ *  stays alarmingly red; a network/timeout blip (no status on the error) gets a
+ *  calmer tone and connection-oriented copy. Mirrors the Try-again affordance in
+ *  app/error.tsx — the user is never left at a dead end. */
+function describeError(error: Error & { status?: number }): {
+  icon: string;
+  tone?: "error";
+  heading: string;
+  body: string;
+} {
+  const status = error.status;
+  if (status === 401 || status === 403) {
+    return {
+      icon: "alert",
+      tone: "error",
+      heading: "You're signed out.",
+      body: "Your session may have expired — sign in again.",
+    };
+  }
+  if (typeof status === "number") {
+    return {
+      icon: "alert",
+      tone: "error",
+      heading: "Couldn't load your projects.",
+      body: "The appliance hit a server error. Try again in a moment.",
+    };
+  }
+  // No HTTP status → fetch never reached the server (network / timeout).
+  return {
+    icon: "refresh",
+    heading: "Couldn't reach the appliance.",
+    body: "Check your connection and try again.",
+  };
+}
+
 export function IndexView({
   projects,
   summary,
@@ -131,25 +167,37 @@ export function IndexView({
   onToggleArchived,
   onOpenProject,
   onNewProject,
+  onRetry,
 }: {
   projects: PmProject[] | undefined;
   summary: PmSummary | undefined;
   loading: boolean;
-  error: boolean;
+  error: (Error & { status?: number }) | boolean | undefined;
   readOnly: boolean;
   showArchived: boolean;
   onToggleArchived: () => void;
   onOpenProject: (p: PmProject) => void;
   onNewProject: () => void;
+  onRetry?: () => void;
 }): JSX.Element {
   if (error) {
+    const e = typeof error === "object" ? error : (new Error("Request failed") as Error & { status?: number });
+    const { icon, tone, heading, body } = describeError(e);
     return (
       <div className="pm-surface" style={{ padding: 8 }}>
         <EmptyBlock
-          icon="alert"
-          tone="error"
-          heading="Couldn't load your projects."
-          body="Check the appliance connection and try again."
+          icon={icon}
+          tone={tone}
+          heading={heading}
+          body={body}
+          cta={
+            onRetry ? (
+              <button className="pm-btn primary" type="button" onClick={onRetry}>
+                <PmIcon name="refresh" size={14} />
+                Retry
+              </button>
+            ) : undefined
+          }
         />
       </div>
     );

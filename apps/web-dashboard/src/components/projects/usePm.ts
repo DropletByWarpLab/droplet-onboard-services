@@ -16,11 +16,25 @@ import type {
   Person,
 } from "./types";
 
+/** Error thrown by {@link getJson} on a non-2xx response. Carries the HTTP
+ *  status so the UI can tell an auth failure (401/403) from a server/connection
+ *  fault. A genuine network/timeout failure rejects inside `fetch` before we
+ *  reach here, so the surfaced error has no `status` — that absence is itself
+ *  the "couldn't reach the appliance" signal. */
+export class PmRequestError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "PmRequestError";
+    this.status = status;
+  }
+}
+
 async function getJson<T>(url: string): Promise<T> {
   const res = await authFetch(url);
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(body.error ?? `Request failed (${res.status})`);
+    throw new PmRequestError(body.error ?? `Request failed (${res.status})`, res.status);
   }
   return res.json() as Promise<T>;
 }

@@ -1,7 +1,7 @@
 // Unit tests for the native Projects surface — pure helpers + key components.
 
-import { describe, it, expect } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { describe, it, expect, vi } from "vitest";
+import { render, screen, fireEvent } from "@testing-library/react";
 import { canWrite } from "./types";
 import { cardAccent, isOverdue, fmtDate, toneOf, makePerson } from "./config";
 import { StatePill, PriorityFlag, EmptyBlock, PeopleContext } from "./bits";
@@ -208,7 +208,7 @@ describe("IndexView", () => {
         projects={[]}
         summary={{ activeProjects: 0, itemsOpen: 0, doneThisWeek: 0, overdue: 0 }}
         loading={false}
-        error={false}
+        error={undefined}
         readOnly={false}
         showArchived={false}
         onToggleArchived={noop}
@@ -217,5 +217,91 @@ describe("IndexView", () => {
       />,
     );
     expect(screen.getByText("No projects yet.")).toBeInTheDocument();
+  });
+
+  function err(status?: number): Error & { status?: number } {
+    const e = new Error("boom") as Error & { status?: number };
+    if (status !== undefined) e.status = status;
+    return e;
+  }
+
+  function renderError(error: Error & { status?: number }, onRetry = noop) {
+    render(
+      <IndexView
+        projects={undefined}
+        summary={undefined}
+        loading={false}
+        error={error}
+        readOnly={false}
+        showArchived={false}
+        onToggleArchived={noop}
+        onOpenProject={noop}
+        onNewProject={noop}
+        onRetry={onRetry}
+      />,
+    );
+  }
+
+  it("error state shows a Retry button that invokes onRetry", () => {
+    const onRetry = vi.fn();
+    renderError(err(503), onRetry);
+    const retry = screen.getByRole("button", { name: /retry/i });
+    expect(retry).toBeInTheDocument();
+    fireEvent.click(retry);
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
+  it("auth error (401) shows sign-in-oriented copy", () => {
+    renderError(err(401));
+    expect(screen.getByText(/sign in again/i)).toBeInTheDocument();
+  });
+
+  it("auth error (403) shows sign-in-oriented copy", () => {
+    renderError(err(403));
+    expect(screen.getByText(/sign in again/i)).toBeInTheDocument();
+  });
+
+  it("connection error (no status) shows reach-the-appliance copy", () => {
+    renderError(err());
+    expect(screen.getByText(/couldn't reach the appliance/i)).toBeInTheDocument();
+  });
+
+  it("server error (5xx) keeps the alarming error tone", () => {
+    const { container } = render(
+      <IndexView
+        projects={undefined}
+        summary={undefined}
+        loading={false}
+        error={err(500)}
+        readOnly={false}
+        showArchived={false}
+        onToggleArchived={noop}
+        onOpenProject={noop}
+        onNewProject={noop}
+        onRetry={noop}
+      />,
+    );
+    // error tone uses the err token tint on the glyph
+    const glyph = container.querySelector(".pm-empty .glyph") as HTMLElement;
+    expect(glyph.style.color).toContain("--err");
+  });
+
+  it("connection blip uses the calmer (non-error) tone", () => {
+    const { container } = render(
+      <IndexView
+        projects={undefined}
+        summary={undefined}
+        loading={false}
+        error={err()}
+        readOnly={false}
+        showArchived={false}
+        onToggleArchived={noop}
+        onOpenProject={noop}
+        onNewProject={noop}
+        onRetry={noop}
+      />,
+    );
+    const glyph = container.querySelector(".pm-empty .glyph") as HTMLElement;
+    expect(glyph.style.color).not.toContain("--err");
   });
 });
