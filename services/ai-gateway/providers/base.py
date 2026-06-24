@@ -20,20 +20,14 @@ def to_litellm_messages(messages: list) -> list[dict]:
                 for b in content
             ]
         d: dict = {"role": m.role, "content": content}
-        # Preserve the agent-loop replay fields. The orchestrator re-POSTs the
-        # whole message array each ReAct iteration: the assistant turn carries
-        # `tool_calls`, and the following role="tool" results carry
-        # `tool_call_id`. OpenAI/Anthropic REQUIRE tool_call_id on tool messages
-        # and tool_calls on the assistant turn that issued them, so dropping
-        # these (as this function previously did) desyncs / 400s the cloud agent
-        # loop. The local Ollama path already keeps them via model_dump.
-        tool_calls = getattr(m, "tool_calls", None)
+        # preserve tool_calls/tool_call_id — cloud providers require both for agent-loop replay
+        tool_calls = m.tool_calls
         if tool_calls:
             d["tool_calls"] = [
                 tc.model_dump(exclude_none=True) if hasattr(tc, "model_dump") else tc
                 for tc in tool_calls
             ]
-        tool_call_id = getattr(m, "tool_call_id", None)
+        tool_call_id = m.tool_call_id
         if tool_call_id:
             d["tool_call_id"] = tool_call_id
         out.append(d)

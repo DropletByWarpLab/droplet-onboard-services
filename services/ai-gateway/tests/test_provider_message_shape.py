@@ -40,10 +40,6 @@ def test_image_blocks_serialized_to_dicts():
 
 
 def test_tool_calls_and_tool_call_id_preserved():
-    # The orchestrator replays the agent loop through the gateway: the assistant
-    # turn carries tool_calls, and the following role="tool" result carries
-    # tool_call_id. Cloud providers (OpenAI/Anthropic) require both, so the
-    # serialization must keep them (regression for the dropped-fields bug).
     asst = ChatMessage(
         role="assistant",
         content=None,
