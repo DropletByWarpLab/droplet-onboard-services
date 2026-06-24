@@ -251,6 +251,33 @@ function friendlyErrorMessage(err: unknown): string {
   return "Something went wrong on this turn. Try again.";
 }
 
+/**
+ * Map a non-OK pre-stream response from POST /api/llm/chat to friendly copy.
+ *
+ * The orchestrator can reject a turn with a JSON error BEFORE the SSE stream
+ * starts (e.g. a role-narrowed write-tool replay → 403 `forbidden_tool_for_role`
+ * in `apps/orchestrator/src/routes/llm.ts`, or a re-submitted terminal turn →
+ * 409 `turn_already_completed`). Without handling these, the reader sees a
+ * non-stream body and the assistant bubble renders blank. We best-effort parse
+ * the `{ error }` body (it mirrors `runSceneConfirmed` in api.ts) and give the
+ * two well-known codes their own copy.
+ */
+function friendlyPreStreamError(status: number, code: string | undefined): string {
+  if (code === "forbidden_tool_for_role") {
+    return "Your account isn't allowed to run that action. Ask an owner or admin to do it.";
+  }
+  if (code === "turn_already_completed") {
+    return "This reply already finished. Open the conversation again to see it.";
+  }
+  if (status === 401 || status === 403) {
+    return "You're not allowed to do that right now. Try signing in again.";
+  }
+  if (status === 429) {
+    return "The Droplet AI is busy right now. Give it a moment and try again.";
+  }
+  return "Something went wrong on this turn. Try again.";
+}
+
 let attachmentCounter = 0;
 
 /**
@@ -875,6 +902,40 @@ export function useChat(options: UseChatOptions = {}) {
             ),
           );
           userMessage.id = headerUserId;
+        }
+
+        // Pre-stream error guard. The orchestrator can reply with a JSON
+        // error (400/401/403/409/429) BEFORE the SSE stream begins — e.g. a
+        // role-narrowed write-tool replay (403 forbidden_tool_for_role) or a
+        // re-submitted terminal turn (409 turn_already_completed). Reading
+        // that JSON body as an SSE stream yields no frames, leaving a silent
+        // blank assistant bubble. Best-effort parse the `{ error }` body
+        // (mirrors runSceneConfirmed in api.ts) and surface it on the
+        // placeholder exactly like the catch block below, so the FailureChip
+        // + Try-again render.
+        if (!response.ok) {
+          const data = (await response.json().catch(() => ({}))) as {
+            error?: string;
+            message?: string;
+            code?: string;
+          };
+          const code = data.error ?? data.code;
+          const friendly = friendlyPreStreamError(response.status, code);
+          setMessages((prev) => {
+            const updated = [...prev];
+            const idx = updated.findIndex((m) => m.id === assistantMessage.id);
+            if (idx !== -1) {
+              const last = updated[idx];
+              if (last.role === "assistant" && !last.content) {
+                updated[idx] = {
+                  ...last,
+                  error: { message: friendly, retryPrompt: content },
+                };
+              }
+            }
+            return updated;
+          });
+          return;
         }
 
         if (!response.body) {
@@ -1705,6 +1766,31 @@ function applyEvent(
             error: {
               message:
                 "The Droplet AI couldn't finish this turn. Try again, or ask in a different way.",
+              retryPrompt,
+            },
+          };
+          return updated;
+        }
+        // WARP-854 (live path) — a turn that finishes `model_done` or
+        // `iteration_limit` but produced no visible content AND no tool
+        // activity is the live-stream twin of the persisted ghost-turn the
+        // loadConversation path maps to `failureKind: "failed"`. Without
+        // this guard the bubble renders as nothing at all. Set `error`
+        // (not `failureKind` — that field is loadConversation-only) so the
+        // FailureChip + Try-again render, matching the `stop_reason: "error"`
+        // branch above.
+        if (
+          (evt.stop_reason === "model_done" ||
+            evt.stop_reason === "iteration_limit") &&
+          last.content.trim().length === 0 &&
+          (!last.toolCalls || last.toolCalls.length === 0)
+        ) {
+          const updated = [...prev];
+          updated[idx] = {
+            ...last,
+            error: {
+              message:
+                "The Droplet AI finished without a reply. Try again, or ask in a different way.",
               retryPrompt,
             },
           };
