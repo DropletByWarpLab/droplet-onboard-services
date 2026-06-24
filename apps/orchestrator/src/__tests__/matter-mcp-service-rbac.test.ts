@@ -34,7 +34,10 @@ vi.mock("../services/matter.service.js", () => ({
   sendMatterCommand: vi.fn().mockResolvedValue({ status: "success" }),
   discoverDevices: vi.fn().mockResolvedValue([]),
   commissionDevice: vi.fn().mockResolvedValue({ nodeId: "42" }),
-  decommissionDevice: vi.fn().mockResolvedValue(undefined),
+  // Current main's DELETE route maps a falsy return to 404 (the function
+  // returns boolean since WARP-850); resolve `true` so the success path is
+  // exercised.
+  decommissionDevice: vi.fn().mockResolvedValue(true),
   subscribeStateChanges: vi.fn().mockReturnValue(() => {}),
   subscribeConnectionChanges: vi.fn().mockReturnValue(() => {}),
 }));
