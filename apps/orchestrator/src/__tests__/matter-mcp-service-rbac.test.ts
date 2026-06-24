@@ -106,7 +106,9 @@ beforeEach(() => {
   vi.mocked(matterService.isMatterInitialized).mockReturnValue(true);
   vi.mocked(matterService.sendMatterCommand).mockResolvedValue({ status: "success" });
   vi.mocked(matterService.commissionDevice).mockResolvedValue({ nodeId: "42" });
-  vi.mocked(matterService.decommissionDevice).mockResolvedValue(undefined);
+  // Current main's DELETE route 404s on a falsy return (decommissionDevice
+  // returns boolean since WARP-850), so resolve `true` for the happy path.
+  vi.mocked(matterService.decommissionDevice).mockResolvedValue(true);
 });
 
 // Distinct nodeIds per test — the safety-tier rate limiter is in-memory
