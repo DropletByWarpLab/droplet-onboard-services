@@ -17,6 +17,7 @@ os.environ.setdefault("SWITCH_DRIVER", "lantronix")
 os.environ.setdefault("SWITCH_USERNAME", "admin")
 os.environ.setdefault("SWITCH_PASSWORD", "pytest-fake-pw")
 os.environ.setdefault("SERVICE_SECRET", "pytest-fake-secret")
+os.environ.setdefault("ROUTING_SERVICE_TOKEN", "pytest-fake-routing-token")
 
 _SERVICE_DIR = Path(__file__).resolve().parent.parent
 if str(_SERVICE_DIR) not in sys.path:
