@@ -787,6 +787,7 @@ export function useChat(options: UseChatOptions = {}) {
       // WARP-844: persisted assistant row id, captured from the response
       // headers inside the try block; consumed in finally (re-id).
       let headerAssistantId: string | null = null;
+      let preStreamError = false;
       // WARP-329: lazy-ask for Notification permission on the user's first
       // send (never on page load — too aggressive, and Safari is harsh
       // about it). Awaiting here is intentional: we want the prompt to
@@ -919,7 +920,7 @@ export function useChat(options: UseChatOptions = {}) {
             message?: string;
             code?: string;
           };
-          const code = data.error ?? data.code;
+          const code = data.code ?? data.error;
           const friendly = friendlyPreStreamError(response.status, code);
           setMessages((prev) => {
             const updated = [...prev];
@@ -935,6 +936,7 @@ export function useChat(options: UseChatOptions = {}) {
             }
             return updated;
           });
+          preStreamError = true;
           return;
         }
 
@@ -1018,7 +1020,7 @@ export function useChat(options: UseChatOptions = {}) {
         // current conversationId because the user may have already
         // navigated away (background completion is the whole point).
         const justFinished = streamingConversationIdRef.current;
-        if (justFinished) {
+        if (justFinished && !preStreamError) {
           recentlyLocallyCompletedRef.current.set(justFinished, Date.now());
         }
         // WARP-844: swap the assistant placeholder's local id for the
@@ -1085,7 +1087,7 @@ export function useChat(options: UseChatOptions = {}) {
         const prev = idx > 0 ? snapshot[idx - 1] : null;
         if (prev && prev.role === "user") retryPrompt = prev.content;
       }
-      if (retryPrompt == null) return;
+      if (!retryPrompt) return;
 
       // Drop the failed assistant + the user turn immediately before it
       // so the new turn replays a clean thread.
@@ -1783,7 +1785,8 @@ function applyEvent(
           (evt.stop_reason === "model_done" ||
             evt.stop_reason === "iteration_limit") &&
           last.content.trim().length === 0 &&
-          (!last.toolCalls || last.toolCalls.length === 0)
+          (!last.toolCalls || last.toolCalls.length === 0) &&
+          (!last.reasoning || !last.reasoning.trim())
         ) {
           const updated = [...prev];
           updated[idx] = {
