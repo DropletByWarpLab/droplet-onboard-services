@@ -56,6 +56,12 @@ async function main() {
   const core = createMatterControllerCore({
     storagePath: config.MATTER_STORAGE_PATH,
     adminFabricLabel: config.DROPLET_MATTER_CONTROLLER_NAME,
+    // WARP-895: Wi-Fi credentials for BLE-first commissioning (empty ⇒
+    // on-network-only). Resolved per-commission inside the core.
+    wifiSsid: config.DROPLET_MATTER_WIFI_SSID,
+    wifiPsk: config.DROPLET_MATTER_WIFI_PSK,
+    wifiPskFile: config.DROPLET_MATTER_WIFI_PSK_FILE,
+    regulatoryCountryCode: config.DROPLET_MATTER_REGULATORY_COUNTRY,
   });
 
   // Step 3 — controller init, non-fatal (matches the orchestrator's

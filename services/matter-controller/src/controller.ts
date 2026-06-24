@@ -120,8 +120,49 @@ export interface ControllerLike {
 export interface MatterControllerCoreOptions {
   storagePath: string;
   adminFabricLabel: string;
+  /**
+   * WARP-895: Wi-Fi network handed to a BLE-first device during
+   * commissioning so it can move off BLE onto the operational LAN. When
+   * `wifiSsid` is empty, commissioning is on-network-only (the
+   * pre-WARP-895 behaviour). The PSK is resolved at commission time —
+   * `wifiPskFile` first, then `wifiPsk` — so a per-box PSK provisioned
+   * after the sidecar started is still picked up.
+   */
+  wifiSsid?: string;
+  wifiPsk?: string;
+  wifiPskFile?: string;
+  /** ISO-3166 alpha-2 regulatory domain; defaults to "XX" (unspecified). */
+  regulatoryCountryCode?: string;
   /** Test seam — defaults to constructing the real matter.js controller. */
   createController?: () => ControllerLike;
+}
+
+/**
+ * WARP-895: resolve the operational Wi-Fi network a BLE-first device is
+ * handed during commissioning. PSK source order: the file
+ * (`options.wifiPskFile` — the per-box AP PSK provisioned by
+ * droplet-openwrt-attach), then `options.wifiPsk`. Returns undefined —
+ * commissioning then proceeds on-network-only, exactly as before WARP-895
+ * — when no SSID or no PSK is available.
+ */
+function resolveWifiNetwork(
+  options: MatterControllerCoreOptions,
+): { wifiSsid: string; wifiCredentials: string } | undefined {
+  const wifiSsid = (options.wifiSsid ?? "").trim();
+  if (!wifiSsid) return undefined;
+  let psk = "";
+  const pskFile = (options.wifiPskFile ?? "").trim();
+  if (pskFile) {
+    try {
+      psk = fs.readFileSync(pskFile, "utf8").trim();
+    } catch {
+      // File absent/unreadable (e.g. the AP isn't provisioned yet) — fall
+      // back to the env-supplied PSK below rather than failing the add.
+    }
+  }
+  if (!psk) psk = (options.wifiPsk ?? "").trim();
+  if (!psk) return undefined;
+  return { wifiSsid, wifiCredentials: psk };
 }
 
 export interface MatterControllerCore {
@@ -433,6 +474,27 @@ export function createMatterControllerCore(
       const ctl = requireController();
 
       const trimmed = pairingCode.trim();
+
+      // WARP-895: hand a BLE-first device the operational Wi-Fi network so
+      // it can move off BLE onto the LAN (matter.js sends
+      // AddOrUpdateWiFiNetwork only when the device's NetworkCommissioning
+      // cluster needs it; a device already on IP ignores it). Resolved
+      // per-commission so a per-box PSK provisioned after sidecar start is
+      // picked up. Absent ⇒ on-network-only (pre-WARP-895 behaviour).
+      const wifiNetwork = resolveWifiNetwork(options);
+      const commissioning = {
+        regulatoryLocation:
+          GeneralCommissioning.RegulatoryLocationType.IndoorOutdoor,
+        regulatoryCountryCode: options.regulatoryCountryCode ?? "XX",
+        ...(wifiNetwork ? { wifiNetwork } : {}),
+      };
+      if (wifiNetwork) {
+        logger.info(
+          "Commissioning will provision Wi-Fi SSID '%s' for a BLE-first device",
+          wifiNetwork.wifiSsid,
+        );
+      }
+
       let commissioningOptions: NodeCommissioningOptions;
 
       if (trimmed.startsWith("MT:")) {
@@ -441,11 +503,7 @@ export function createMatterControllerCore(
         const qr = qrList[0];
         if (!qr) throw new Error("Invalid QR pairing code");
         commissioningOptions = {
-          commissioning: {
-            regulatoryLocation:
-              GeneralCommissioning.RegulatoryLocationType.IndoorOutdoor,
-            regulatoryCountryCode: "XX",
-          },
+          commissioning,
           discovery: {
             identifierData: { longDiscriminator: qr.discriminator },
           },
@@ -455,11 +513,7 @@ export function createMatterControllerCore(
         // Manual pairing code (11 or 21 digit number)
         const manual = ManualPairingCodeCodec.decode(trimmed);
         commissioningOptions = {
-          commissioning: {
-            regulatoryLocation:
-              GeneralCommissioning.RegulatoryLocationType.IndoorOutdoor,
-            regulatoryCountryCode: "XX",
-          },
+          commissioning,
           discovery: {
             identifierData: { shortDiscriminator: manual.shortDiscriminator },
           },
