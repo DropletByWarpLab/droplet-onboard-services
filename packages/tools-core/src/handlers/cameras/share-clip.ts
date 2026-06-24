@@ -55,7 +55,10 @@ const tool: Tool = {
     "Generate a short-lived signed URL for a saved clip in the user's Nextcloud. Anyone with the link can watch the clip until it expires. Default TTL 60 minutes; max 24 hours.",
   inputSchema,
   requiresWrite: true,
-  requiresConfirmation: false,
+  // Minting a public "anyone with the link" URL to private camera footage
+  // is a footgun if it fires unattended: the resulting signed URL is
+  // unauthenticated for its whole TTL. Require explicit user confirmation.
+  requiresConfirmation: true,
   handler,
 };
 
