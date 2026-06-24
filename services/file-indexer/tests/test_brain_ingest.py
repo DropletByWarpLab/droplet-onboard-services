@@ -294,6 +294,50 @@ def test_handle_uploaded_image_only_is_ready_not_failed(
     assert "image_only" in parsed["extractorWarnings"]
 
 
+def test_handle_uploaded_image_writes_vision_render(
+    fake_io, tmp_path, monkeypatch
+):
+    """Image vision: a valid image gets a normalized vision.jpg render written
+    next to its original bytes and `hasVisionRender` set — regardless of OCR
+    outcome (here dispatch returns None → the image_only path)."""
+    import io as _io
+
+    import brain_ingest
+    from PIL import Image
+
+    item_dir = tmp_path / "alice" / "item-vis"
+    item_dir.mkdir(parents=True, exist_ok=True)
+    img_path = item_dir / "original.png"
+    buf = _io.BytesIO()
+    Image.new("RGB", (1600, 1200), (10, 120, 200)).save(buf, "PNG")
+    img_path.write_bytes(buf.getvalue())
+
+    monkeypatch.setattr(brain_ingest, "dispatch", lambda *a, **k: None)
+    monkeypatch.setattr(brain_ingest, "_fetch_item_status", lambda _i: None)
+    render_flags: list[tuple[str, bool]] = []
+    monkeypatch.setattr(
+        brain_ingest,
+        "set_vision_render",
+        lambda item_id, has=True: render_flags.append((item_id, has)),
+    )
+
+    brain_ingest.handle_brain_uploaded(
+        {
+            "itemId": "item-vis",
+            "userId": "alice",
+            "path": str(img_path),
+            "mimeType": "image/png",
+            "filename": "photo.png",
+        }
+    )
+
+    vision = item_dir / "vision.jpg"
+    assert vision.exists(), "expected a vision.jpg render"
+    r = Image.open(vision)
+    assert r.format == "JPEG" and max(r.size) <= 1024
+    assert ("item-vis", True) in render_flags
+
+
 def test_handle_uploaded_image_with_text_is_ocr_indexed(
     fake_io, tmp_path, monkeypatch
 ):

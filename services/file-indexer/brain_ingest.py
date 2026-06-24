@@ -30,9 +30,11 @@ from chunker import Chunk, chunk_spans, format_chunk_with_header
 from db import (
     delete_chunks_for_brain_item,
     mark_brain_item_indexed,
+    set_vision_render,
     upsert_chunk,
 )
 from embedder import embed_texts
+from extractors.image import make_vision_render
 from extractors.registry import dispatch
 from mqtt_client import publish, subscribe
 
@@ -103,6 +105,33 @@ def _extract_text_path(storage_path: str) -> Path:
 
 def _manifest_path(storage_path: str) -> Path:
     return Path(storage_path).parent / "manifest.json"
+
+
+def _vision_render_path(storage_path: str) -> Path:
+    """Sibling vision.jpg — the normalized render fed to a vision model."""
+    return Path(storage_path).parent / "vision.jpg"
+
+
+_VISION_RENDER_MAX_PX = int(os.environ.get("VISION_RENDER_MAX_PX", "1024"))
+
+
+def _write_vision_render(storage_path: str, item_id: str) -> None:
+    """Best-effort: write a normalized vision.jpg next to an image's original
+    bytes and flag the item ``hasVisionRender``.
+
+    Non-fatal — on any failure the flag stays false and the chat route simply
+    falls back to OCR text for this image (no vision). Runs for every image
+    regardless of OCR outcome, so photos (no OCR text) still become viewable.
+    """
+    try:
+        raw = Path(storage_path).read_bytes()
+        render = make_vision_render(raw, max_px=_VISION_RENDER_MAX_PX)
+        _vision_render_path(storage_path).write_bytes(render)
+        set_vision_render(item_id, True)
+    except Exception as e:  # noqa: BLE001 — render is best-effort
+        logger.warning(
+            "brain_ingest: vision render failed for item=%s: %s", item_id, e
+        )
 
 
 def _full_text_from_doc(doc: dict) -> str:
@@ -237,6 +266,12 @@ def handle_brain_uploaded(payload: dict) -> None:
             logger.warning(
                 "brain_ingest: failed to write image-only manifest: %s", e
             )
+
+    # Image vision: write the normalized render before extraction so even a
+    # textless photo (which takes the image_only path below) is viewable by a
+    # vision model. Best-effort; never blocks indexing.
+    if is_image:
+        _write_vision_render(path, item_id)
 
     # Extract.
     doc = dispatch(path, mime)

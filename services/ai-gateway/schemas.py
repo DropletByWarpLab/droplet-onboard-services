@@ -40,16 +40,55 @@ class ToolCall(BaseModel):
     function: FunctionCall
 
 
+# --- Multimodal content blocks (image vision) ---
+#
+# `content` accepts either a plain string (the common text case, unchanged) or
+# an OpenAI-style list of typed blocks. The orchestrator builds the block form
+# for image-bearing user turns; both LiteLLM (cloud) and Ollama's OpenAI-compat
+# endpoint consume this exact shape, so providers pass it through untouched.
+
+_PER_MESSAGE_TEXT_CHARS = 32_000
+
+
+class TextBlock(BaseModel):
+    type: Literal["text"] = "text"
+    text: str = Field(max_length=_PER_MESSAGE_TEXT_CHARS)
+
+
+class ImageUrl(BaseModel):
+    # Base64 data URL (e.g. "data:image/jpeg;base64,..."). Loose upper bound is
+    # a safety guard only; the orchestrator downscales renders and caps count.
+    url: str = Field(max_length=20_000_000)
+
+
+class ImageUrlBlock(BaseModel):
+    type: Literal["image_url"] = "image_url"
+    image_url: ImageUrl
+
+
+ContentBlock = TextBlock | ImageUrlBlock
+
+
 class ChatMessage(BaseModel):
     role: Literal["system", "user", "assistant", "tool"] = "user"
-    content: str | None = Field(default=None, max_length=32_000)
+    content: str | list[ContentBlock] | None = None
     tool_calls: list[ToolCall] | None = None
     tool_call_id: str | None = None  # for role="tool" messages
 
 
-# Total content size across all messages in a request. Prevents a client from
-# sending 100 messages × 32k chars (= 3.2MB). The per-message cap is 32k; the
-# sum across messages is capped here at 128k which is enough for long chats.
+def _text_len(content: str | list[ContentBlock] | None) -> int:
+    """Length of the *text* in a message — image data URLs don't count."""
+    if content is None:
+        return 0
+    if isinstance(content, str):
+        return len(content)
+    return sum(len(b.text) for b in content if isinstance(b, TextBlock))
+
+
+# Total *text* size across all messages in a request. Prevents a client from
+# sending 100 messages × 32k chars (= 3.2MB). The per-message text cap is 32k;
+# the sum across messages is capped here at 128k. Image bytes are excluded —
+# they are bounded separately by ImageUrl.url and the orchestrator's image cap.
 _MAX_TOTAL_CONTENT_CHARS = 128_000
 
 
@@ -64,7 +103,14 @@ class ChatRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_total_content(self) -> "ChatRequest":
-        total = sum(len(m.content or "") for m in self.messages)
+        total = 0
+        for m in self.messages:
+            n = _text_len(m.content)
+            if isinstance(m.content, str) and n > _PER_MESSAGE_TEXT_CHARS:
+                raise ValueError(
+                    f"Message content exceeds {_PER_MESSAGE_TEXT_CHARS} characters"
+                )
+            total += n
         if total > _MAX_TOTAL_CONTENT_CHARS:
             raise ValueError(
                 f"Total message content exceeds {_MAX_TOTAL_CONTENT_CHARS} characters"
@@ -113,11 +159,19 @@ class ChatChunk(BaseModel):
 # --- Models ---
 
 
+class ModelCapabilities(BaseModel):
+    vision: bool = False
+    tools: bool = False
+
+
 class ModelInfo(BaseModel):
     id: str
     provider: str
     name: str
     context_window: int | None = None
+    # Additive (defaults None for back-compat): which modalities the model
+    # supports. Drives the orchestrator's vision routing + the dashboard badge.
+    capabilities: ModelCapabilities | None = None
 
 
 class ModelsResponse(BaseModel):

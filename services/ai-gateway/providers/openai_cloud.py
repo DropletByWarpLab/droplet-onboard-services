@@ -5,17 +5,16 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncGenerator
 
-import litellm
-
-from providers.base import BaseProvider
+from capabilities import cloud_capabilities
+from providers.base import BaseProvider, to_litellm_messages
 from schemas import ChatMessage, ModelInfo
 
 logger = logging.getLogger(__name__)
 
 OPENAI_MODELS = [
-    ModelInfo(id="gpt-4o", provider="openai", name="GPT-4o", context_window=128000),
-    ModelInfo(id="gpt-4o-mini", provider="openai", name="GPT-4o Mini", context_window=128000),
-    ModelInfo(id="gpt-4-turbo", provider="openai", name="GPT-4 Turbo", context_window=128000),
+    ModelInfo(id="gpt-4o", provider="openai", name="GPT-4o", context_window=128000, capabilities=cloud_capabilities("gpt-4o")),
+    ModelInfo(id="gpt-4o-mini", provider="openai", name="GPT-4o Mini", context_window=128000, capabilities=cloud_capabilities("gpt-4o-mini")),
+    ModelInfo(id="gpt-4-turbo", provider="openai", name="GPT-4 Turbo", context_window=128000, capabilities=cloud_capabilities("gpt-4-turbo")),
 ]
 
 
@@ -34,7 +33,9 @@ class OpenAICloudProvider(BaseProvider):
         if not self.api_key:
             raise ValueError("OpenAI API key not configured. Add your key in Settings.")
 
-        litellm_messages = [{"role": m.role, "content": m.content} for m in messages]
+        import litellm  # lazy: heavy import, only needed on a cloud call
+
+        litellm_messages = to_litellm_messages(messages)
         litellm_model = f"openai/{model}" if not model.startswith("openai/") else model
 
         # Build optional params
@@ -58,6 +59,8 @@ class OpenAICloudProvider(BaseProvider):
     async def _stream_chat(
         self, model: str, messages: list[dict], kwargs: dict
     ) -> AsyncGenerator[str, None]:
+        import litellm  # lazy: heavy import, only needed on a cloud call
+
         response = await litellm.acompletion(
             model=model,
             messages=messages,

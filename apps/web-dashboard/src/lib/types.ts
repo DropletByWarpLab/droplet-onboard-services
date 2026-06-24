@@ -118,6 +118,12 @@ export interface ChatAttachment {
   itemId?: string;
   filename: string;
   bytes: number;
+  /** MIME type (from the picked File, or the rehydrated item) — drives the
+   *  chip's leading icon (image vs document). */
+  mimeType?: string;
+  /** The picked File, kept in-memory only (never serialized) so the composer
+   *  chip can render a local thumbnail for images. Absent on rehydrated chips. */
+  file?: File;
   status: "pending" | "uploading" | "indexing" | "ready" | "failed";
   /** Error message when status="failed" — surfaced on the chip. */
   error?: string;
@@ -155,6 +161,9 @@ export interface ModelInfo {
   provider: string;
   name: string;
   context_window: number | null;
+  /** Modalities the model supports (from the ai-gateway). `vision` drives the
+   *  picker's vision marker so users can tell which models can see images. */
+  capabilities?: { vision?: boolean; tools?: boolean };
 }
 
 export interface ModelsResponse {

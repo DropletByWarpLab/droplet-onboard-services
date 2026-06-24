@@ -229,6 +229,20 @@ def mark_brain_item_indexed(
         )
 
 
+def set_vision_render(brain_item_id: str, has_render: bool = True) -> None:
+    """Flag that a normalized ``vision.jpg`` render exists on disk for this item.
+
+    Image vision: the chat route reads ``hasVisionRender`` to decide whether an
+    image attachment can be forwarded to a vision-capable model. Explicit
+    column (no guessing). Idempotent.
+    """
+    with _db_lock, get_conn().cursor() as cur:
+        cur.execute(
+            'UPDATE "BrainMemoryItem" SET "hasVisionRender" = %s WHERE "id" = %s',
+            (has_render, brain_item_id),
+        )
+
+
 def delete_chunks_for_file(nc_file_id: int) -> None:
     """Remove all chunks for a file (e.g. when it's deleted or re-indexed)."""
     with _db_lock, get_conn().cursor() as cur:

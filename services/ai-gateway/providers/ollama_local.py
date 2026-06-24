@@ -18,8 +18,9 @@ from collections.abc import AsyncGenerator
 
 import httpx
 
+from capabilities import ollama_capabilities_from_show
 from providers.base import BaseProvider
-from schemas import ChatMessage, ModelInfo
+from schemas import ChatMessage, ModelCapabilities, ModelInfo
 
 logger = logging.getLogger(__name__)
 
@@ -309,6 +310,10 @@ class OllamaLocalProvider(BaseProvider):
             timeout=_OLLAMA_TIMEOUT,
             limits=httpx.Limits(max_connections=_MAX_CONNECTIONS),
         )
+        # Per-model capability cache (vision/tools). Model capabilities are
+        # immutable for a given tag, so we probe `/api/show` once per id and
+        # reuse the result across list_models calls.
+        self._caps_cache: dict[str, ModelCapabilities | None] = {}
 
     def _build_sema(self, num_parallel: int) -> None:
         """(Re)build the in-flight semaphore at the requested size."""
@@ -347,20 +352,42 @@ class OllamaLocalProvider(BaseProvider):
         if self._sema is None:
             self._build_sema(self._limits.num_parallel)
 
+    async def _capabilities(self, model: str) -> ModelCapabilities | None:
+        """Best-effort capability probe via Ollama `/api/show`, cached per id.
+
+        Returns None when the daemon is unreachable or errors — callers treat
+        unknown capabilities conservatively (non-vision → OCR fallback).
+        """
+        if model in self._caps_cache:
+            return self._caps_cache[model]
+        caps: ModelCapabilities | None = None
+        try:
+            resp = await self.client.post("/api/show", json={"model": model})
+            resp.raise_for_status()
+            caps = ollama_capabilities_from_show(resp.json())
+        except Exception as e:  # noqa: BLE001 — probe is best-effort
+            logger.debug("ollama /api/show failed for %s: %s", model, e)
+        self._caps_cache[model] = caps
+        return caps
+
     async def list_models(self) -> list[ModelInfo]:
         try:
             resp = await self.client.get("/api/tags")
             resp.raise_for_status()
             data = resp.json()
-            return [
-                ModelInfo(
-                    id=m["name"],
-                    provider="ollama",
-                    name=prettify_ollama_name(m["name"]),
-                    context_window=None,
+            out: list[ModelInfo] = []
+            for m in data.get("models", []):
+                name = m["name"]
+                out.append(
+                    ModelInfo(
+                        id=name,
+                        provider="ollama",
+                        name=prettify_ollama_name(name),
+                        context_window=None,
+                        capabilities=await self._capabilities(name),
+                    )
                 )
-                for m in data.get("models", [])
-            ]
+            return out
         except httpx.ConnectError:
             logger.warning("Ollama unreachable at %s", self.base_url)
             return []

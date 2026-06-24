@@ -18,6 +18,7 @@
  */
 import type { McpClientService } from "./mcp-client.service.js";
 import { runAgent } from "./llm-agent.service.js";
+import { contentToText } from "../types/index.js";
 import * as aiGateway from "./ai-gateway.client.js";
 import type {
   EmailAnalysis,
@@ -184,7 +185,7 @@ export function createEmailAnalysisFn(
           max_iter: 1,
         },
       );
-      const text = result.message.content ?? "";
+      const text = contentToText(result.message.content);
       const parsed = extractJson(text);
       return coerceAnalysis(parsed);
     } catch {

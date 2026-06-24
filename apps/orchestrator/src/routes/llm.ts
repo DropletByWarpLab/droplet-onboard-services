@@ -1,7 +1,13 @@
 import { Router } from "express";
 import { z } from "zod";
 import { BrainMemoryItemStatus, type PrismaClient } from "@prisma/client";
+import { config } from "../config.js";
 import * as aiGateway from "../services/ai-gateway.client.js";
+import {
+  attachImageBlocksToLastUserMessage,
+  buildImageBlocks,
+  decideVisionRoute,
+} from "../services/vision-attachments.service.js";
 import { cacheGet, cacheSet } from "../services/cache.service.js";
 import { runAgent, type AgentDeps } from "../services/llm-agent.service.js";
 import { createEnhancementDeps } from "../services/query-enhancement.service.js";
@@ -12,6 +18,7 @@ import type { McpCallContext } from "../services/mcp-client.service.js";
 import { resolveNcToken } from "../services/nextcloud-session.service.js";
 import { encodeSSE, type SSEEvent } from "../types/sse-events.js";
 import type { ChatMessage, ModelsResponse } from "../types/index.js";
+import { contentToText } from "../types/index.js";
 import {
   ChatPersistenceService,
   type PersistedToolCall,
@@ -624,6 +631,15 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         .find((m) => m.role === "user");
       const persistedUserContent = lastUserMessage?.content ?? null;
 
+      // Working copy the agent loop runs on. Starts as the validated (string-
+      // content) request messages; the pin / attachment / base-prompt splices
+      // and the image-vision injection below build onto THIS array, leaving
+      // `chatReq.messages` intact for the persistence reads above. A copy (not
+      // an alias) so attaching image blocks never mutates the persisted user
+      // text. `agentModel` may be overridden per-turn by vision auto-routing.
+      let agentMessages: ChatMessage[] = [...chatReq.messages];
+      let agentModel = chatReq.model;
+
       let conversationId: string | null = null;
       let assistantMessageId: string | null = null;
 
@@ -894,7 +910,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
                 "scope hints when calling retrieval tools:\n" +
                 lines.join("\n"),
             };
-            chatReq.messages = [pinSystemMessage, ...chatReq.messages];
+            agentMessages = [pinSystemMessage, ...agentMessages];
           }
         } catch (err) {
           // Pin-load failure must NOT block chat — degrade gracefully.
@@ -911,18 +927,75 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // Ownership is enforced inside buildAttachmentContext (query is
       // filtered by the caller's username, matching /api/files/brain).
       if (chatReq.attachments?.length && userId) {
+        // ── Image vision routing ──
+        // For image attachments with a normalized render, send the actual
+        // image to a vision-capable model: the selected model if it can see,
+        // else a configured local VISION_MODEL (auto-route, this turn only).
+        // When no vision model is available, fall back to OCR text + a note.
+        // Gated on actually having a renderable image, so non-image / pre-
+        // feature uploads behave exactly as before.
+        let ocrRefs: { itemId: string }[] = chatReq.attachments;
+        let visionNote: string | null = null;
+        try {
+          const { blocks, usedItemIds } = await buildImageBlocks(
+            prisma,
+            userId,
+            chatReq.attachments.map((a) => a.itemId),
+            { maxImages: config.vision.maxImages },
+          );
+          if (usedItemIds.length > 0) {
+            const [selectedCaps, visionCaps] = await Promise.all([
+              aiGateway.getModelCapabilities(chatReq.model),
+              config.vision.model
+                ? aiGateway.getModelCapabilities(config.vision.model)
+                : Promise.resolve(undefined),
+            ]);
+            const route = decideVisionRoute({
+              hasImages: true,
+              selectedModel: chatReq.model,
+              selectedVision: Boolean(selectedCaps?.vision),
+              visionModel: config.vision.model,
+              visionModelVision: Boolean(visionCaps?.vision),
+            });
+            if (route.mode === "image") {
+              attachImageBlocksToLastUserMessage(agentMessages, blocks);
+              agentModel = route.model;
+              // Don't also inline a "no text could be extracted" note for an
+              // image we're sending visually — OCR only over the rest.
+              ocrRefs = chatReq.attachments.filter(
+                (a) => !usedItemIds.includes(a.itemId),
+              );
+            } else {
+              // mode === "ocr": no vision model available for this image.
+              visionNote =
+                "The user attached an image, but the current model cannot " +
+                "view images. Work from any extracted text below; if asked " +
+                "about the image's visual content, tell the user to switch to " +
+                "a vision-capable model.";
+            }
+          }
+        } catch (err) {
+          // Vision routing must never block chat — fall through to OCR text.
+          // eslint-disable-next-line no-console
+          console.warn("[llm/chat] image-vision routing failed:", err);
+        }
+
+        // ── OCR-text attachment context (documents + non-vision fallback) ──
         try {
           const attachmentContext = await buildAttachmentContext(
             prisma,
             userId,
-            chatReq.attachments,
+            ocrRefs,
           );
-          if (attachmentContext) {
+          const systemParts: string[] = [];
+          if (visionNote) systemParts.push(visionNote);
+          if (attachmentContext) systemParts.push(attachmentContext);
+          if (systemParts.length > 0) {
             const attachmentSystemMessage: ChatMessage = {
               role: "system",
-              content: attachmentContext,
+              content: systemParts.join("\n\n"),
             };
-            chatReq.messages = [attachmentSystemMessage, ...chatReq.messages];
+            agentMessages = [attachmentSystemMessage, ...agentMessages];
           }
         } catch (err) {
           // Attachment-context failure must NOT block chat — the turn
@@ -1008,7 +1081,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           role: "system",
           content: buildBaseSystemPrompt(allowedForUser) + memoryBlock,
         };
-        chatReq.messages = [baseSystemMessage, ...chatReq.messages];
+        agentMessages = [baseSystemMessage, ...agentMessages];
       }
 
       // ── Streaming path ──
@@ -1091,8 +1164,9 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         });
         try {
           const streamResult = await runAgent({ ...deps, onEvent }, {
-            model: chatReq.model,
-            messages: chatReq.messages,
+            // Per-turn vision auto-route may override the user's selected model.
+            model: agentModel,
+            messages: agentMessages,
             temperature: chatReq.temperature,
             // WARP-849 — forward the caller's completion budget (the
             // schema accepted it but the loop never received it).
@@ -1142,8 +1216,9 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       let result;
       try {
         result = await runAgent(deps, {
-          model: chatReq.model,
-          messages: chatReq.messages,
+          // Per-turn vision auto-route may override the user's selected model.
+          model: agentModel,
+          messages: agentMessages,
           temperature: chatReq.temperature,
           // WARP-849 — forward the caller's completion budget (the
           // schema accepted it but the loop never received it). The
@@ -1157,7 +1232,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           captureReasoning: chatReq.captureReasoning,
           citationContext,
         });
-        liveAssistantContent = result.message.content;
+        liveAssistantContent = contentToText(result.message.content);
         // WARP-458 — agent loop populates message.reasoning regardless
         // of captureReasoning; persist whenever present so the
         // dashboard can lazy-load the trace later.
@@ -1177,7 +1252,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // comment). Surface it as an error instead of a silent success.
         if (
           result.stop_reason === "model_done" &&
-          result.message.content.trim().length === 0 &&
+          contentToText(result.message.content).trim().length === 0 &&
           result.trace.length === 0
         ) {
           result = {

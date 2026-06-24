@@ -479,7 +479,8 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // route layer can always persist to `ChatMessage.reasoning`
       // (lazy-load on demand without re-running inference).
       const reasoning = parseReasoningTrace({
-        content: asst.content ?? null,
+        // Assistant responses are always plain text; guard the union anyway.
+        content: typeof asst.content === "string" ? asst.content : null,
         providerReasoning: asst.reasoning_content ?? null,
       });
       if (req.captureReasoning) {

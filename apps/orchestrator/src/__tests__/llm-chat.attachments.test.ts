@@ -179,7 +179,10 @@ function agentMessages(): ChatMessage[] {
  *  present on tool-enabled turns and covered by its own test file). */
 function attachmentSystemMessage(): ChatMessage | undefined {
   return agentMessages().find(
-    (m) => m.role === "system" && m.content.includes("attached"),
+    (m) =>
+      m.role === "system" &&
+      typeof m.content === "string" &&
+      m.content.includes("attached"),
   );
 }
 

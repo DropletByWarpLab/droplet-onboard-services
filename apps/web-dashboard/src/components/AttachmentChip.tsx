@@ -1,6 +1,14 @@
 "use client";
 
-import { Loader2, FileText, AlertTriangle, Check, X } from "lucide-react";
+import { useEffect, useState } from "react";
+import {
+  Loader2,
+  FileText,
+  Image as ImageIcon,
+  AlertTriangle,
+  Check,
+  X,
+} from "lucide-react";
 import type { ChatAttachment } from "@/lib/types";
 import { translateError } from "@/lib/friendly-errors";
 
@@ -24,7 +32,23 @@ function formatBytes(bytes: number): string {
  * flip (driven by the WebSocket bridge) re-renders the chip in place.
  */
 export function AttachmentChip({ attachment, onRemove }: AttachmentChipProps) {
-  const { localId, filename, bytes, status, error } = attachment;
+  const { localId, filename, bytes, status, error, mimeType, file } =
+    attachment;
+  const isImage = Boolean(mimeType?.startsWith("image/"));
+
+  // Local thumbnail for freshly-attached images. The object URL's lifecycle is
+  // owned here: created when the File arrives, revoked on unmount/file change,
+  // so it never leaks. Rehydrated chips have no File and fall back to the icon.
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!isImage || !file) {
+      setPreviewUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(file);
+    setPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [isImage, file]);
 
   // Tone-of-voice for the screen-reader-only status string. The dot
   // before each phrase is a non-breaking space + middot for the
@@ -54,11 +78,27 @@ export function AttachmentChip({ attachment, onRemove }: AttachmentChipProps) {
         ${isFailed ? "border-system-orange/60" : "border-separator"}
       `}
     >
-      <FileText
-        size={14}
-        className="flex-shrink-0 text-label-secondary"
-        strokeWidth={2}
-      />
+      {previewUrl ? (
+        // eslint-disable-next-line @next/next/no-img-element -- transient blob: URL, not an optimizable asset
+        <img
+          src={previewUrl}
+          alt=""
+          className="h-4 w-4 flex-shrink-0 rounded object-cover"
+        />
+      ) : isImage ? (
+        <ImageIcon
+          size={14}
+          className="flex-shrink-0 text-label-secondary"
+          strokeWidth={2}
+          aria-hidden
+        />
+      ) : (
+        <FileText
+          size={14}
+          className="flex-shrink-0 text-label-secondary"
+          strokeWidth={2}
+        />
+      )}
       <span className="truncate text-label-primary" title={filename}>
         {filename}
       </span>

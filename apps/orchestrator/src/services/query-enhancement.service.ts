@@ -19,6 +19,7 @@ import * as aiGateway from "./ai-gateway.client.js";
 import { getRedis } from "./cache.service.js";
 import type { EnhancementDeps } from "./llm-agent.service.js";
 import type { ChatResponse } from "../types/index.js";
+import { contentToText } from "../types/index.js";
 
 // Re-export for type-narrowing call sites.
 export type { QueryClass } from "../types/query-enhancement.js";
@@ -232,7 +233,7 @@ function makeHttpChatAdapter(defaultModel: string): ChatClient {
       });
       if (!res.ok) return { content: "" };
       const data = (await res.json()) as ChatResponse;
-      return { content: data.choices?.[0]?.message?.content ?? "" };
+      return { content: contentToText(data.choices?.[0]?.message?.content) };
     } catch {
       return { content: "" };
     }

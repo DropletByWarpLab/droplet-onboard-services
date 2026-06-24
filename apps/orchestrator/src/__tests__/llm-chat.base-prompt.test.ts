@@ -186,8 +186,9 @@ describe("POST /api/llm/chat — base system prompt + memory injection", () => {
     expect(sys.content).toContain("You are Droplet");
     expect(sys.content).toContain("What the box does");
     // Identity leads; tool guidance follows it.
-    expect(sys.content!.indexOf("You are Droplet")).toBeLessThan(
-      sys.content!.indexOf("Tool guidance:"),
+    const sysText = typeof sys.content === "string" ? sys.content : "";
+    expect(sysText.indexOf("You are Droplet")).toBeLessThan(
+      sysText.indexOf("Tool guidance:"),
     );
   });
 

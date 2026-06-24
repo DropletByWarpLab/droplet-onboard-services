@@ -12,9 +12,34 @@ export interface ToolCall {
   };
 }
 
+// Multimodal content blocks (image vision). A message's content is either a
+// plain string (the common case, unchanged) or an OpenAI-style list of typed
+// blocks. The orchestrator builds the block form only for image-bearing user
+// turns just before dispatch; everything else stays a string.
+export type ContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
+/**
+ * Flatten a message's content to plain text. Assistant/tool responses are
+ * always strings; this is for the handful of internal consumers that read a
+ * message's text and must tolerate the multimodal union (image blocks
+ * contribute their text parts only, joined by newlines).
+ */
+export function contentToText(
+  content: string | ContentBlock[] | null | undefined,
+): string {
+  if (content == null) return "";
+  if (typeof content === "string") return content;
+  return content
+    .filter((b): b is { type: "text"; text: string } => b.type === "text")
+    .map((b) => b.text)
+    .join("\n");
+}
+
 export interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
-  content: string;
+  content: string | ContentBlock[];
   // Only populated on assistant messages that request tool execution.
   tool_calls?: ToolCall[];
   // Set on tool-role messages to correlate the result with the request.
@@ -83,11 +108,19 @@ export interface ChatResponse {
   };
 }
 
+export interface ModelCapabilities {
+  vision?: boolean;
+  tools?: boolean;
+}
+
 export interface ModelInfo {
   id: string;
   provider: string;
   name: string;
   context_window: number | null;
+  // Additive (optional for back-compat): modalities the model supports.
+  // Populated by the ai-gateway; drives vision routing + the dashboard badge.
+  capabilities?: ModelCapabilities;
 }
 
 export interface ModelsResponse {
