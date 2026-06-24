@@ -122,10 +122,16 @@ ROUTING_SERVICE_URL = os.environ.get("ROUTING_SERVICE_URL", "http://localhost:80
 # Bearer the routing service validates on its non-/health routes. This is the
 # routing service's own ROUTING_SERVICE_TOKEN (see services/routing/main.py),
 # NOT this service's SERVICE_SECRET — the two are distinct secrets. The camera
-# cross-check below MUST present this token or routing answers 403 and the
+# cross-check below MUST present this token or routing answers 401 and the
 # segmented profile is wrongly refused. (camera-discovery presents the same
 # ROUTING_SERVICE_TOKEN on its routing calls.)
 ROUTING_SERVICE_TOKEN = os.environ.get("ROUTING_SERVICE_TOKEN", "").strip()
+if not ROUTING_SERVICE_TOKEN:
+    logger.warning(
+        "ROUTING_SERVICE_TOKEN not set — cross-check calls to the routing "
+        "service will send no Authorization header; routing will 401 and the "
+        "segmented VLAN profile will be permanently refused."
+    )
 
 
 def autoprovision_enabled() -> bool:
@@ -177,7 +183,7 @@ class RoutingCamerasCrossCheck:
         from a missing key."""
         # Authenticate with the routing service's OWN token, not this
         # service's SERVICE_SECRET. routing validates ROUTING_SERVICE_TOKEN;
-        # presenting SERVICE_SECRET here 403s and the segmented profile is
+        # presenting SERVICE_SECRET here 401s and the segmented profile is
         # permanently refused.
         headers = {}
         if ROUTING_SERVICE_TOKEN:
@@ -186,7 +192,12 @@ class RoutingCamerasCrossCheck:
             resp = await client.get(
                 f"{self._base_url}/network/interfaces", headers=headers
             )
-            resp.raise_for_status()
+            if not resp.is_success:
+                logger.warning(
+                    "routing /network/interfaces returned %s: %s",
+                    resp.status_code, resp.text,
+                )
+                resp.raise_for_status()
             data = resp.json()
         cameras = data.get("cameras") if isinstance(data, dict) else None
         if isinstance(cameras, dict) and "present" in cameras:

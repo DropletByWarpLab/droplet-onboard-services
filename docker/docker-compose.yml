@@ -951,6 +951,7 @@ services:
       - SWITCH_LIVE_WRITES=${SWITCH_LIVE_WRITES:-0}
       - SWITCH_PROVISION_TIMEOUT=${SWITCH_PROVISION_TIMEOUT:-30}
       - ROUTING_SERVICE_URL=${ROUTING_SERVICE_URL:-http://localhost:8080}
+      - ROUTING_SERVICE_TOKEN=${ROUTING_SERVICE_TOKEN:-}
     # single-box bundles the managed switch so a plugged-in AP auto-provisions
     # onto the LAN instead of stranding on an isolated VLAN (ADR-018 item 9);
     # `full` is the multi-box/explicit-managed shape.
