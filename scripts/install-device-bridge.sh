@@ -254,6 +254,24 @@ fi
 chmod 0600 "$ENV_FILE"
 chown root:root "$ENV_FILE"
 
+# Replace (in place) the first line matching ^#?\s*KEY= with KEY=VALUE.
+# Uses awk + ENVIRON so VALUE is treated as a literal: operator passwords /
+# tokens containing | & or \ can't corrupt the rewrite the way they would if
+# interpolated into a `sed s|...|...|` replacement.
+_set_env_kv() {  # _set_env_kv FILE KEY VALUE
+  local file="$1" k="$2" v="$3" tmp
+  tmp=$(mktemp) || return 1
+  if K="$k" V="$v" awk '
+        BEGIN { k = ENVIRON["K"]; v = ENVIRON["V"]; done = 0 }
+        !done && $0 ~ ("^#?[[:space:]]*" k "=") { print k "=" v; done = 1; next }
+        { print }
+      ' "$file" > "$tmp"; then
+    mv "$tmp" "$file"
+  else
+    rm -f "$tmp"; return 1
+  fi
+}
+
 # Helper: set KEY=VALUE in $ENV_FILE only if the KEY line is empty or missing.
 # Won't clobber an operator-set value.
 set_env_if_blank() {
@@ -265,8 +283,8 @@ set_env_if_blank() {
     return 0
   fi
   if grep -qE "^#?\s*${key}=" "$ENV_FILE"; then
-    # Replace an empty or commented line (GNU sed — the appliance is Ubuntu).
-    sed -i -E "s|^#?\s*${key}=.*|${key}=${value}|" "$ENV_FILE"
+    # Replace an empty or commented line with the literal value.
+    _set_env_kv "$ENV_FILE" "$key" "$value"
   else
     printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"
   fi
@@ -295,7 +313,7 @@ if [[ -f "$REPO_ENV" ]]; then
     elif [[ -n "${DEVICE_SECRET_KEY:-}" ]] && [[ "$current_bridge_token" = "$DEVICE_SECRET_KEY" ]]; then
       # Stale: bridge still using the master key. Rotate to the new
       # dedicated token; operator doesn't need to do anything manual.
-      sed -i -E "s|^BRIDGE_AUTH_TOKEN=.*|BRIDGE_AUTH_TOKEN=${SERVICE_TOKEN_DISPLAY}|" "$ENV_FILE"
+      _set_env_kv "$ENV_FILE" "BRIDGE_AUTH_TOKEN" "$SERVICE_TOKEN_DISPLAY"
       log "rotated BRIDGE_AUTH_TOKEN from DEVICE_SECRET_KEY to SERVICE_TOKEN_DISPLAY (WARP-165)"
     fi
     # Else: operator set a custom value; leave it alone.
