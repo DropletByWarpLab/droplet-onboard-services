@@ -73,27 +73,67 @@ logging.basicConfig(level=logging.INFO)
 # ---------------------------------------------------------------------------
 # Service-to-service authentication
 # ---------------------------------------------------------------------------
+# Shared bearer for orchestrator / camera-discovery → switch.
+# Production bring-up via scripts/setup.sh always provisions a token. When the
+# token is unset the service FAILS CLOSED — every non-/health route returns 503
+# — because the switch service runs network_mode: host, so a missing or failed
+# secret injection at deploy time would otherwise expose every mutation endpoint
+# (VLAN, PoE, port enable/disable) to any host on the LAN. Set
+# SWITCH_ALLOW_NO_AUTH=1 to opt back into open mode for local dev only.
+# Mirrors the routing service's ROUTING_ALLOW_NO_AUTH contract (WARP-36).
 SERVICE_SECRET = os.environ.get("SERVICE_SECRET", "")
+SWITCH_ALLOW_NO_AUTH = os.environ.get("SWITCH_ALLOW_NO_AUTH", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 if not SERVICE_SECRET:
-    logger.warning("SERVICE_SECRET not set — all endpoints are unauthenticated. "
-                    "Set SERVICE_SECRET to enable service-to-service auth.")
+    if SWITCH_ALLOW_NO_AUTH:
+        logger.warning(
+            "SERVICE_SECRET is empty and SWITCH_ALLOW_NO_AUTH is set — auth "
+            "disabled, all endpoints are unauthenticated. Local dev only; "
+            "NEVER set this in production."
+        )
+    else:
+        logger.error(
+            "SERVICE_SECRET is empty — failing closed (503) on all non-/health "
+            "routes. Set the token, or SWITCH_ALLOW_NO_AUTH=1 for local dev."
+        )
 
 
 class ServiceAuthMiddleware(BaseHTTPMiddleware):
-    """Reject requests without a valid SERVICE_SECRET Bearer token."""
+    """Reject requests without a valid SERVICE_SECRET Bearer token.
+
+    Fails CLOSED when no token is configured: an unset SERVICE_SECRET (e.g. a
+    failed secret injection at deploy) yields 503 on every non-/health route
+    rather than silently opening the host-network service. Opt into the old
+    open behaviour for local dev with SWITCH_ALLOW_NO_AUTH=1.
+    """
 
     async def dispatch(self, request: Request, call_next):
         import hmac
         if request.url.path == "/health":
             return await call_next(request)
-        if SERVICE_SECRET:
-            auth = request.headers.get("Authorization", "")
-            token = auth.removeprefix("Bearer ").strip()
-            if not hmac.compare_digest(token, SERVICE_SECRET):
-                return JSONResponse(
-                    status_code=403,
-                    content={"error": "Invalid or missing service token"},
-                )
+        if not SERVICE_SECRET:
+            if SWITCH_ALLOW_NO_AUTH:
+                return await call_next(request)
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": (
+                        "Switch auth is not configured (SERVICE_SECRET unset). "
+                        "Set the token, or SWITCH_ALLOW_NO_AUTH=1 for local dev."
+                    )
+                },
+            )
+        auth = request.headers.get("Authorization", "")
+        token = auth.removeprefix("Bearer ").strip()
+        if not hmac.compare_digest(token, SERVICE_SECRET):
+            return JSONResponse(
+                status_code=403,
+                content={"error": "Invalid or missing service token"},
+            )
         return await call_next(request)
 
 

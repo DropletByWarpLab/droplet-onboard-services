@@ -58,6 +58,29 @@ ROUTING_SERVICE_TOKEN = os.getenv("ROUTING_SERVICE_TOKEN", "").strip()
 FRIGATE_URL = os.getenv("FRIGATE_URL", "http://localhost:5000")
 MQTT_BROKER = os.getenv("MQTT_BROKER", "mqtt://localhost:1883")
 DEVICE_SECRET = os.getenv("DEVICE_SECRET", "")  # Shared secret for auth
+# Fail CLOSED when DEVICE_SECRET is unset: every privileged route returns 403
+# (auth required) rather than silently running unauthenticated, since a failed
+# secret injection at deploy would otherwise expose camera accept/reject/scan/
+# initialize to any LAN host. Opt back into open mode for local dev with
+# CAMERA_ALLOW_NO_AUTH=1. Mirrors routing's ROUTING_ALLOW_NO_AUTH contract.
+CAMERA_ALLOW_NO_AUTH = os.getenv("CAMERA_ALLOW_NO_AUTH", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+if not DEVICE_SECRET:
+    if CAMERA_ALLOW_NO_AUTH:
+        logger.warning(
+            "DEVICE_SECRET is empty and CAMERA_ALLOW_NO_AUTH is set — auth "
+            "disabled on privileged routes. Local dev only; NEVER set this "
+            "in production."
+        )
+    else:
+        logger.error(
+            "DEVICE_SECRET is empty — failing closed (403) on privileged "
+            "routes. Set the secret, or CAMERA_ALLOW_NO_AUTH=1 for local dev."
+        )
 
 # Camera subnet: when set, only scan this subnet for cameras.
 # Default 192.168.100.0/24 matches the OpenWrt VLAN 100 config.
@@ -138,9 +161,22 @@ def _require_auth(request: Request) -> None:
     time. An attacker on the LAN can't realistically exfiltrate a
     DEVICE_SECRET via HTTP timing, but the cost of doing the right
     thing here is a single-line import.
+
+    Fails CLOSED when no secret is configured: an unset DEVICE_SECRET
+    (e.g. a failed secret injection at deploy) yields 403 rather than
+    silently running every privileged route unauthenticated. Opt into
+    the old open behaviour for local dev with ``CAMERA_ALLOW_NO_AUTH=1``.
     """
     if not DEVICE_SECRET:
-        return  # Auth disabled when no secret configured
+        if CAMERA_ALLOW_NO_AUTH:
+            return  # Auth explicitly disabled for local dev
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Camera-discovery auth is not configured (DEVICE_SECRET unset). "
+                "Set the secret, or CAMERA_ALLOW_NO_AUTH=1 for local dev."
+            ),
+        )
     auth = request.headers.get("Authorization", "")
     token = auth.removeprefix("Bearer ").strip()
     if not hmac.compare_digest(token.encode("utf-8"), DEVICE_SECRET.encode("utf-8")):
