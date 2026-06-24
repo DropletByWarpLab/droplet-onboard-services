@@ -19,7 +19,7 @@ import os
 import time
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel
 
 from voice.audio_io import (
@@ -264,6 +264,12 @@ class HealthResponse(BaseModel):
     ok: bool
     inputAvailable: bool
     outputAvailable: bool
+    # Pipeline state machine value (idle | loading | listening | … | error |
+    # no_mic), or None before the pipeline exists. When it's 'error' the
+    # pipeline has latched a transient STT/TTS/LLM failure and drops every
+    # frame, so /health reports ok=False + HTTP 503 to mark the container
+    # unhealthy (see the health() handler).
+    state: Optional[str] = None
     wakeLoaded: bool = False
     sttLoaded: bool = False
     ttsLoaded: bool = False
@@ -340,8 +346,9 @@ class TestToneResponse(BaseModel):
 # ────────────────────────────────────────────────────────────────────
 
 @app.get("/health", response_model=HealthResponse)
-def health() -> HealthResponse:
+def health(response: Response) -> HealthResponse:
     r = _resolve()
+    state: Optional[str] = None
     wake_loaded = False
     stt_loaded = False
     tts_loaded = False
@@ -349,14 +356,25 @@ def health() -> HealthResponse:
     if _pipeline is not None:
         # Cheap atomic read; no I/O on the pipeline thread.
         s = _pipeline.status()
+        state = s.state
         wake_loaded = s.wake_loaded
         stt_loaded = s.stt_loaded
         tts_loaded = s.tts_loaded
         llm_loaded = s.llm_loaded
+    # The pipeline latches state='error' on a transient STT/TTS/LLM failure
+    # and then drops every frame — it never self-recovers. Report degraded
+    # (ok=False + 503) so the Dockerfile healthcheck (`curl -sf`, which fails
+    # on >=400) flags the container unhealthy instead of /health lying with a
+    # 200 forever. Other states (incl. no_mic / loading) stay 200 — they're
+    # not stuck-and-deaf the way 'error' is.
+    degraded = state == "error"
+    if degraded:
+        response.status_code = 503
     return HealthResponse(
-        ok=True,
+        ok=not degraded,
         inputAvailable=r.input_device is not None,
         outputAvailable=r.output_device is not None,
+        state=state,
         wakeLoaded=wake_loaded,
         sttLoaded=stt_loaded,
         ttsLoaded=tts_loaded,
