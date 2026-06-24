@@ -480,7 +480,10 @@ export function createEmailRouter(
           res.status(404).json({ error: "Draft not found" });
           return;
         }
-        if (draft.status !== "queued") {
+        // The terminal status callback may arrive from `queued` (legacy direct
+        // send) or `sending` (WARP-890: the indexer claims queued→sending before
+        // the SMTP send). Both are valid sources for sent/failed.
+        if (draft.status !== "queued" && draft.status !== "sending") {
           // Idempotent: re-asserting a status the row already holds
           // is a 200 no-op (the indexer may redeliver a callback on
           // reconnect). Anything else is a contract violation.
@@ -489,7 +492,7 @@ export function createEmailRouter(
             return;
           }
           res.status(409).json({
-            error: "Draft not in queued state",
+            error: "Draft not in queued or sending state",
             currentStatus: draft.status,
           });
           return;
@@ -503,6 +506,57 @@ export function createEmailRouter(
           },
         })) as unknown as DraftRow;
         res.json({ id: updated.id, status: updated.status });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // POST /api/email/drafts/:id/claim  (service principal)
+  // Atomically transition a queued draft to `sending` so the email-indexer's
+  // outbound poller SMTP-sends it exactly once. A conditional updateMany
+  // (WARP-564 pairing-claim pattern) means a re-tick — or a second poller —
+  // that loses the race gets { claimed: false } and skips, so a lost terminal
+  // status callback can never cause a duplicate re-send (WARP-890).
+  router.post(
+    "/email/drafts/:id/claim",
+    requireRole("service"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const result = await prisma.emailDraft.updateMany({
+          where: { id: req.params.id, status: "queued" },
+          data: { status: "sending" },
+        });
+        res.json({ id: req.params.id, claimed: result.count === 1 });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // POST /api/email/drafts/reconcile-stale-sending  (service principal)
+  // A draft claimed (queued→sending) whose terminal status callback never
+  // landed (indexer crash / lost PATCH) would otherwise strand in `sending`.
+  // Sweep rows stuck in `sending` past a grace window to `failed`. We do NOT
+  // re-queue them: the SMTP send may have completed, and re-queuing would risk
+  // the duplicate this change exists to prevent. The indexer calls this once
+  // per outbound tick. Grace window default 10 min (EMAIL_SENDING_STALE_MS).
+  router.post(
+    "/email/drafts/reconcile-stale-sending",
+    requireRole("service"),
+    async (_req: Request, res: Response, next: NextFunction) => {
+      try {
+        const staleMs = Number(process.env.EMAIL_SENDING_STALE_MS) || 10 * 60 * 1000;
+        const cutoff = new Date(Date.now() - staleMs);
+        const result = await prisma.emailDraft.updateMany({
+          where: { status: "sending", updatedAt: { lt: cutoff } },
+          data: {
+            status: "failed",
+            error:
+              "reconciled: stuck in sending past the grace window (terminal status callback never landed)",
+          },
+        });
+        res.json({ reconciled: result.count });
       } catch (err) {
         next(err);
       }

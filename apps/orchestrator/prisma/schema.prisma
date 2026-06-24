@@ -2077,6 +2077,7 @@ enum EmailTriageStatus {
 enum EmailDraftStatus {
   draft
   queued
+  sending
   sent
   failed
 }

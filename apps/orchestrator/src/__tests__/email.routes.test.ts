@@ -56,7 +56,7 @@ interface DraftRow {
   subject: string;
   body: string;
   draftedByDroplet: boolean;
-  status: "draft" | "queued" | "sent" | "failed";
+  status: "draft" | "queued" | "sending" | "sent" | "failed";
   sentAt: Date | null;
   error: string | null;
   createdAt: Date;
@@ -177,6 +177,26 @@ function createPrismaMock(opts: {
           const merged = { ...existing, ...data, updatedAt: new Date() };
           drafts.set(where.id, merged);
           return merged;
+        },
+      ),
+      updateMany: vi.fn(
+        async ({
+          where,
+          data,
+        }: {
+          where: { id?: string; status?: DraftRow["status"]; updatedAt?: { lt?: Date } };
+          data: Partial<DraftRow>;
+        }) => {
+          let count = 0;
+          for (const [id, row] of drafts) {
+            if (where.id !== undefined && row.id !== where.id) continue;
+            if (where.status !== undefined && row.status !== where.status) continue;
+            if (where.updatedAt?.lt !== undefined && !(row.updatedAt < where.updatedAt.lt))
+              continue;
+            drafts.set(id, { ...row, ...data, updatedAt: new Date() });
+            count++;
+          }
+          return { count };
         },
       ),
     },
@@ -393,8 +413,103 @@ describe("WARP-465 — POST /api/email/:accountId/drafts", () => {
   });
 });
 
+describe("WARP-890 — idempotent outbound (claim + reconcile)", () => {
+  function withDraft(status: DraftRow["status"], updatedAt = new Date()) {
+    return createPrismaMock({
+      accounts: [
+        {
+          id: "a1",
+          userId: "user-family",
+          displayName: "x",
+          address: "a@b.com",
+          imapStatus: "idle",
+          lastIdleAt: new Date(),
+          lastErrorAt: null,
+          lastError: null,
+        },
+      ],
+      drafts: [
+        {
+          id: "d1",
+          accountId: "a1",
+          threadId: null,
+          toAddrs: ["c@d.com"],
+          ccAddrs: null,
+          bccAddrs: null,
+          subject: "Test",
+          body: "Body",
+          draftedByDroplet: false,
+          status,
+          sentAt: null,
+          error: null,
+          createdAt: new Date(),
+          updatedAt,
+        },
+      ],
+    });
+  }
+
+  it("claim flips a queued draft to sending and returns claimed:true", async () => {
+    const prisma = withDraft("queued");
+    const res = await request(buildApp(prisma, ALLOW_GATE, mkUser("service")))
+      .post("/api/email/drafts/d1/claim")
+      .send({});
+    expect(res.status).toBe(200);
+    expect(res.body.claimed).toBe(true);
+    expect(prisma.drafts.get("d1")?.status).toBe("sending");
+  });
+
+  it("claim of a non-queued draft returns claimed:false and leaves it (re-tick is a no-op)", async () => {
+    const prisma = withDraft("sending");
+    const res = await request(buildApp(prisma, ALLOW_GATE, mkUser("service")))
+      .post("/api/email/drafts/d1/claim")
+      .send({});
+    expect(res.status).toBe(200);
+    expect(res.body.claimed).toBe(false);
+    expect(prisma.drafts.get("d1")?.status).toBe("sending"); // unchanged
+  });
+
+  it("claim requires the service role (403 otherwise)", async () => {
+    const prisma = withDraft("queued");
+    const res = await request(buildApp(prisma, ALLOW_GATE, mkUser("admin")))
+      .post("/api/email/drafts/d1/claim")
+      .send({});
+    expect(res.status).toBe(403);
+  });
+
+  it("PATCH /status accepts the sending -> sent transition", async () => {
+    const prisma = withDraft("sending");
+    const res = await request(buildApp(prisma, ALLOW_GATE, mkUser("service")))
+      .patch("/api/email/drafts/d1/status")
+      .send({ status: "sent" });
+    expect(res.status).toBe(200);
+    expect(prisma.drafts.get("d1")?.status).toBe("sent");
+  });
+
+  it("reconcile fails out a sending draft older than the grace window", async () => {
+    const old = new Date(Date.now() - 60 * 60 * 1000); // 1h ago (past default 10m)
+    const prisma = withDraft("sending", old);
+    const res = await request(buildApp(prisma, ALLOW_GATE, mkUser("service")))
+      .post("/api/email/drafts/reconcile-stale-sending")
+      .send({});
+    expect(res.status).toBe(200);
+    expect(res.body.reconciled).toBe(1);
+    expect(prisma.drafts.get("d1")?.status).toBe("failed");
+  });
+
+  it("reconcile leaves a fresh sending draft alone", async () => {
+    const prisma = withDraft("sending", new Date());
+    const res = await request(buildApp(prisma, ALLOW_GATE, mkUser("service")))
+      .post("/api/email/drafts/reconcile-stale-sending")
+      .send({});
+    expect(res.status).toBe(200);
+    expect(res.body.reconciled).toBe(0);
+    expect(prisma.drafts.get("d1")?.status).toBe("sending");
+  });
+});
+
 describe("WARP-465 — POST /api/email/drafts/:id/send", () => {
-  function withDraft(status: "draft" | "queued" | "sent" | "failed" = "draft") {
+  function withDraft(status: "draft" | "queued" | "sending" | "sent" | "failed" = "draft") {
     return createPrismaMock({
       // The send/PATCH routes now run assertAccountAccessible against the
       // draft's accountId (belt-and-braces IDOR check) — the account row
