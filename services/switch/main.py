@@ -119,6 +119,13 @@ SWITCH_DRIVER = os.environ.get("SWITCH_DRIVER", "lantronix")
 SWITCH_PROVISION_TIMEOUT = float(os.environ.get("SWITCH_PROVISION_TIMEOUT", "30"))
 # The switch service runs network_mode: host, so reach routing on loopback.
 ROUTING_SERVICE_URL = os.environ.get("ROUTING_SERVICE_URL", "http://localhost:8080")
+# Bearer the routing service validates on its non-/health routes. This is the
+# routing service's own ROUTING_SERVICE_TOKEN (see services/routing/main.py),
+# NOT this service's SERVICE_SECRET — the two are distinct secrets. The camera
+# cross-check below MUST present this token or routing answers 403 and the
+# segmented profile is wrongly refused. (camera-discovery presents the same
+# ROUTING_SERVICE_TOKEN on its routing calls.)
+ROUTING_SERVICE_TOKEN = os.environ.get("ROUTING_SERVICE_TOKEN", "").strip()
 
 
 def autoprovision_enabled() -> bool:
@@ -168,9 +175,13 @@ class RoutingCamerasCrossCheck:
         """Return cameras.present from /network/interfaces, or None if it can't
         be determined. Presence is the explicit `present` flag — never inferred
         from a missing key."""
+        # Authenticate with the routing service's OWN token, not this
+        # service's SERVICE_SECRET. routing validates ROUTING_SERVICE_TOKEN;
+        # presenting SERVICE_SECRET here 403s and the segmented profile is
+        # permanently refused.
         headers = {}
-        if SERVICE_SECRET:
-            headers["Authorization"] = f"Bearer {SERVICE_SECRET}"
+        if ROUTING_SERVICE_TOKEN:
+            headers["Authorization"] = f"Bearer {ROUTING_SERVICE_TOKEN}"
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.get(
                 f"{self._base_url}/network/interfaces", headers=headers
