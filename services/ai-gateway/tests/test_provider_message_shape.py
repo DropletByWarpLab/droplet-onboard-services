@@ -39,6 +39,29 @@ def test_image_blocks_serialized_to_dicts():
     assert content[1]["image_url"]["url"] == "data:image/jpeg;base64,AAAA"
 
 
+def test_tool_calls_and_tool_call_id_preserved():
+    asst = ChatMessage(
+        role="assistant",
+        content=None,
+        tool_calls=[
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "get_x", "arguments": "{}"},
+            }
+        ],
+    )
+    tool = ChatMessage(role="tool", content="42", tool_call_id="call_1")
+    out = to_litellm_messages([asst, tool])
+    assert out[0]["tool_calls"][0]["id"] == "call_1"
+    assert out[0]["tool_calls"][0]["function"]["name"] == "get_x"
+    assert out[1]["tool_call_id"] == "call_1"
+    # Plain messages must NOT gain the keys.
+    plain = to_litellm_messages([ChatMessage(role="user", content="hi")])
+    assert "tool_calls" not in plain[0]
+    assert "tool_call_id" not in plain[0]
+
+
 def test_cloud_model_lists_report_vision_capability():
     # Importing the cloud providers pulls in litellm; skip where it's absent.
     pytest.importorskip("litellm")

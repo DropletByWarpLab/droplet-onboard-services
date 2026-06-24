@@ -19,7 +19,18 @@ def to_litellm_messages(messages: list) -> list[dict]:
                 b.model_dump(exclude_none=True) if hasattr(b, "model_dump") else b
                 for b in content
             ]
-        out.append({"role": m.role, "content": content})
+        d: dict = {"role": m.role, "content": content}
+        # preserve tool_calls/tool_call_id — cloud providers require both for agent-loop replay
+        tool_calls = m.tool_calls
+        if tool_calls:
+            d["tool_calls"] = [
+                tc.model_dump(exclude_none=True) if hasattr(tc, "model_dump") else tc
+                for tc in tool_calls
+            ]
+        tool_call_id = m.tool_call_id
+        if tool_call_id:
+            d["tool_call_id"] = tool_call_id
+        out.append(d)
     return out
 
 
