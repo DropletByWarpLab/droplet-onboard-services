@@ -52,6 +52,10 @@ const TIER_2_OPERATIONS = new Set([
   // Camera management
   "delete_camera",
   "disable_camera",
+  // Sharing a clip mints a public "anyone with the link" signed URL to private
+  // camera footage that stays unauthenticated for its whole TTL. Tier-2: the AI
+  // must surface an approval chip before the orchestrator signs the URL.
+  "share_clip",
   // Switch — port management
   "switch_port_enable",
   "switch_port_disable",

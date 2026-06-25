@@ -38,7 +38,16 @@ describe("confirmNetworkCommand (WARP-41)", () => {
     operation: string,
     params?: Record<string, unknown>,
   ): Promise<string> {
-    const result = await evaluateNetworkCommand(prisma, entityId, operation, params, "user-1");
+    return issueTokenAs("user-1", entityId, operation, params);
+  }
+
+  async function issueTokenAs(
+    minterId: string,
+    entityId: string,
+    operation: string,
+    params?: Record<string, unknown>,
+  ): Promise<string> {
+    const result = await evaluateNetworkCommand(prisma, entityId, operation, params, minterId);
     expect("confirmationToken" in result).toBe(true);
     return (result as any).confirmationToken as string;
   }
@@ -181,6 +190,94 @@ describe("confirmNetworkCommand (WARP-41)", () => {
     if (!replay.confirmed) {
       expect(replay.code).toBe("TOKEN_MISSING");
     }
+  });
+
+  // ── Agent-proposed (service-minted) ops: agent proposes, human disposes ──
+  //
+  // When the agent dispatches a requiresConfirmation tool through the MCP
+  // principal, the orchestrator mints the pending op under "_service:mcp".
+  // The service principal can never sign/execute its own op, so an AUTHORIZED
+  // human (already gated by the route's role guard) must be able to confirm
+  // it. A same-id rule here would dead-end every agent→human confirmation
+  // with TOKEN_USER_MISMATCH — the bug this branch fixes.
+
+  it("agent flow: a service-minted op (add_port_forward) is confirmable by a human", async () => {
+    const token = await issueTokenAs(
+      "_service:mcp",
+      "firewall.redirect.ssh",
+      "add_port_forward",
+      { name: "ssh", src_port: "2222", dest_ip: "10.0.0.5", dest_port: "22", proto: "tcp" },
+    );
+
+    const result = await confirmNetworkCommand(prisma, token, "u-owner", {
+      operation: "add_port_forward",
+    });
+
+    expect(result.confirmed).toBe(true);
+    if (result.confirmed) {
+      expect(result.operation).toBe("add_port_forward");
+      expect(result.params?.dest_ip).toBe("10.0.0.5");
+    }
+  });
+
+  it("agent flow: the service principal CANNOT self-confirm its own op", async () => {
+    const token = await issueTokenAs(
+      "_service:mcp",
+      "firewall.redirect.ssh",
+      "add_port_forward",
+      { name: "ssh", src_port: "2222", dest_ip: "10.0.0.5", dest_port: "22", proto: "tcp" },
+    );
+
+    const result = await confirmNetworkCommand(prisma, token, "_service:mcp", {
+      operation: "add_port_forward",
+    });
+
+    expect(result.confirmed).toBe(false);
+    if (!result.confirmed) {
+      expect(result.code).toBe("TOKEN_USER_MISMATCH");
+    }
+  });
+
+  it("agent flow: no other service principal can dispose of an agent-minted op", async () => {
+    const token = await issueTokenAs(
+      "_service:mcp",
+      "firewall.redirect.ssh",
+      "add_port_forward",
+      { name: "ssh", src_port: "2222", dest_ip: "10.0.0.5", dest_port: "22", proto: "tcp" },
+    );
+
+    const result = await confirmNetworkCommand(prisma, token, "_service:voice", {
+      operation: "add_port_forward",
+    });
+
+    expect(result.confirmed).toBe(false);
+    if (!result.confirmed) {
+      expect(result.code).toBe("TOKEN_USER_MISMATCH");
+    }
+  });
+
+  it("user-minted ops still require the SAME user (no regression)", async () => {
+    // A human-initiated op (e.g. dashboard add_port_forward where one person
+    // both mints and confirms) keeps the strict same-id binding.
+    const token = await issueTokenAs(
+      "u-owner",
+      "firewall.redirect.ssh",
+      "add_port_forward",
+      { name: "ssh", src_port: "2222", dest_ip: "10.0.0.5", dest_port: "22", proto: "tcp" },
+    );
+
+    const mismatch = await confirmNetworkCommand(prisma, token, "u-admin", {
+      operation: "add_port_forward",
+    });
+    expect(mismatch.confirmed).toBe(false);
+    if (!mismatch.confirmed) {
+      expect(mismatch.code).toBe("TOKEN_USER_MISMATCH");
+    }
+
+    const same = await confirmNetworkCommand(prisma, token, "u-owner", {
+      operation: "add_port_forward",
+    });
+    expect(same.confirmed).toBe(true);
   });
 
   it("confused-deputy scenario: two pending ops, confirming B with A's echo fails", async () => {

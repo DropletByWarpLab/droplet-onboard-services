@@ -35,6 +35,25 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       error: { code: "INVALID_ARGS", message: "invalid_iso8601_or_missing_camera" },
     };
   }
+  // Enforce the documented range contract before forwarding to the cameras
+  // service: ends_at must be strictly after starts_at, and the export window
+  // may not exceed 30 minutes (see this tool's description).
+  const durationMs = endsAt.getTime() - startsAt.getTime();
+  if (durationMs <= 0) {
+    return {
+      ok: false,
+      status: "error",
+      error: { code: "INVALID_ARGS", message: "ends_at_must_be_after_starts_at" },
+    };
+  }
+  const MAX_EXPORT_MS = 30 * 60 * 1000;
+  if (durationMs > MAX_EXPORT_MS) {
+    return {
+      ok: false,
+      status: "error",
+      error: { code: "INVALID_ARGS", message: "export_window_exceeds_30_minutes" },
+    };
+  }
   const headers: Record<string, string> = {
     "X-Nextcloud-Token": ctx.ncToken,
     "X-Nextcloud-User": ctx.userId,
