@@ -85,8 +85,8 @@ logger = logging.getLogger(__name__)
 # that could open the socket (chat, session read, BYOK key CRUD). It is a
 # service-to-service component whose sole legitimate caller is the orchestrator,
 # so we require a shared bearer service token (same proven shape as
-# services/switch/main.py's ServiceAuthMiddleware). Empty token = unauthenticated
-# (logged loudly) so dev/CI keeps working; setup.sh provisions a real one.
+# services/switch/main.py's ServiceAuthMiddleware). Empty token → fail closed
+# (401 on every non-health route) unless AI_GATEWAY_ALLOW_NO_AUTH=1; setup.sh provisions a real one.
 SERVICE_TOKEN_AI_GATEWAY = (os.environ.get("SERVICE_TOKEN_AI_GATEWAY") or "").strip()
 # Fail CLOSED when the service token is unset/blank: every non-health /ai/*
 # route returns 401 (auth required) rather than silently running
