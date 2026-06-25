@@ -125,7 +125,13 @@ This surfaces rough edge #2 (see below): the command says "verify by content, e.
 
 ### Rough edge 2 — Blocker satisfaction: no-PR "Done" tickets
 **Problem:** Step 3 says a blocker is satisfied only when "its PR is **merged to `main`**". WARP-230 is Done in Jira but has no merged PR (hardware/infrastructure work done outside the PR flow). The strict PR check would permanently block WARP-231.  
-**Recommendation:** Fall back to `Jira status == "Done"` when no merged PR exists, and note the assumption in the run log. Not fixed in this dry-run (judgment call needed on policy); flagged for the user.
+**Recommendation (SUPERSEDED):** ~~Fall back to `Jira status == "Done"` when no merged PR exists.~~
+
+> **RESOLUTION — REJECTED (commit `1ded212b`, spec §11.2).** Auto-satisfying a
+> blocker from Jira status violates the binding rule "verify against `main`, never
+> trust Jira status." Shipped behavior instead: a Jira-`Done` blocker with no merged
+> PR is **ambiguous** — the loop STOPs with a handoff so the human confirms before the
+> dependent starts. It never auto-satisfies and never silently skips the dependent.
 
 ### Rough edge 3 — Pagination not mentioned in Step 2
 **Problem:** Step 2 says "search the WARP project for ready tickets" with no mention of pagination. Live WARP has 295+ "To Do" tickets requiring 6 API pages. A controller that assumes a single response would silently truncate the queue.  
@@ -133,6 +139,13 @@ This surfaces rough edge #2 (see below): the command says "verify by content, e.
 
 ---
 
-## Fix applied to `backlog-tick.md`
+## Fixes shipped to `backlog-tick.md` (final — commit `1ded212b`)
 
-Added null-description guard in Step 3. See the in-branch diff for the exact change.
+- **Bug 1 (null description):** Step 3 skips empty-description tickets and logs a
+  `SKIPPED` note; the seed JQL (Step 2) also excludes them (`description IS NOT EMPTY`)
+  and epics (`issuetype != Epic`).
+- **Rough edge 2 (Done-without-PR blocker):** resolved as a **handoff**, NOT an
+  auto-satisfy — see the REJECTED resolution above and spec §11.2.
+- **Rough edge 3 (pagination):** Step 2 now paginates until `hasNextPage == false`.
+
+See commits `22293466` (dry-run) and `1ded212b` (post-dry-run fixes) for the diffs.

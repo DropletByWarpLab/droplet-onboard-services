@@ -282,7 +282,7 @@ seed JQL is `status = "To Do" AND issuetype != Epic AND description IS NOT EMPTY
 epics and unrefined placeholders are kept out of the queue.
 
 **Autonomy boundary:** the loop opens PRs and advances, but **never merges** — the
-human merge gate (§4) is unconditional. It only works tickets whose dependencies are
+human merge gate (§4 pre-merge handoff; §5.6 merge) is unconditional. It only works tickets whose dependencies are
 already merged to `main`; it does **not** use branch stacking (§2.3). This
 self-throttles: the loop yields a set of independent, mergeable PRs, then stops.
 
