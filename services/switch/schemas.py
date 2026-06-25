@@ -13,6 +13,12 @@ class HealthResponse(BaseModel):
     driver: str
     system_info: Optional[dict] = None
     error: Optional[str] = None
+    # Whether SERVICE_SECRET is set (presence ONLY — never the value). /health is
+    # auth-exempt, so it can falsely read "ok" while every privileged route is
+    # failing closed (403) on a missing secret; this lets the orchestrator
+    # health check warn that auth is unconfigured. Defaults True (assume
+    # configured) for the SWITCH_ALLOW_NO_AUTH dev path, where it is irrelevant.
+    auth_configured: bool = True
 
 
 class PortStatus(BaseModel):

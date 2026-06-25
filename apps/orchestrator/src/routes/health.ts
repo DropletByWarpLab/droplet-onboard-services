@@ -5,7 +5,7 @@ import { healthCheck as aiGatewayHealth } from "../services/ai-gateway.client.js
 import { isMatterInitialized } from "../services/matter.service.js";
 import { isRouterHealthy } from "../services/network.service.js";
 import { isFrigateHealthy } from "../services/camera.service.js";
-import { healthCheck as switchHealthCheck } from "../services/switch.client.js";
+import { switchHealthDetail } from "../services/switch.client.js";
 import { getAggregateHealth } from "../services/health-monitor.service.js";
 import type { HealthResponse } from "../types/index.js";
 
@@ -15,7 +15,7 @@ export function createHealthRouter(prisma: PrismaClient): Router {
   const router = Router();
 
   router.get("/health", async (_req, res) => {
-    const [dbOk, redisOk, aiOk, routerOk, frigateOk, switchOk] = await Promise.all([
+    const [dbOk, redisOk, aiOk, routerOk, frigateOk, switchDetail] = await Promise.all([
       prisma.$queryRaw`SELECT 1`
         .then(() => true)
         .catch(() => false),
@@ -23,8 +23,12 @@ export function createHealthRouter(prisma: PrismaClient): Router {
       aiGatewayHealth(),
       isRouterHealthy(),
       isFrigateHealthy(),
-      switchHealthCheck(),
+      // DECISION 2: switchHealthDetail logs a warning when the switch service
+      // reports auth_configured=false (fail-closed deploy) — `switchOk` still
+      // reflects only connectivity, so a missing secret never fails /health.
+      switchHealthDetail(),
     ]);
+    const switchOk = switchDetail.connected;
 
     // WARP-165: display is sourced from the cached health-monitor snapshot
     // (refreshed every 15s) instead of a live probe per request. A hung

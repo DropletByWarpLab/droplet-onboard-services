@@ -90,6 +90,15 @@ export interface SwitchStatus {
   poe_budget_w: number;
   poe_used_w: number;
   poe_ports_active: number;
+  /**
+   * True when the switch service rejected the orchestrator's read with a 403
+   * auth failure (SERVICE_SECRET unset on the service, or a missing/wrong bearer
+   * from the orchestrator) — DISTINCT from `connected:false`, which means the
+   * switch hardware is genuinely absent. Lets the dashboard render a "Switch
+   * auth not configured" banner instead of the calm "no managed switch" empty
+   * state. Absent/false on the happy path and on a real absent switch.
+   */
+  auth_not_configured?: boolean;
 }
 
 /** Per-port PoE block on the §7 port shape (watts, not mW). */
