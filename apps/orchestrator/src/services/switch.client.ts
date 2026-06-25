@@ -6,14 +6,38 @@
  * which in turn talks to the hardware via the active driver.
  */
 
+import pino from "pino";
 import { config } from "../config.js";
 import type { SwitchProvisionConfig, SwitchRawPortStatus } from "../types/switch.js";
+import { SwitchAuthError } from "../types/switch-error.js";
+
+const logger = pino({ name: "switch-client" });
 
 const SWITCH_URL = config.SWITCH_SERVICE_URL;
 const DEFAULT_TIMEOUT = 10_000;
 
 function timeout(ms = DEFAULT_TIMEOUT): AbortSignal {
   return AbortSignal.timeout(ms);
+}
+
+/**
+ * Throw on a non-ok switch response, classifying a 403 as the distinct
+ * SwitchAuthError (PR #709 DECISION 1/3). The switch service fails CLOSED with
+ * 403 when SERVICE_SECRET is unset, or when the orchestrator's bearer is
+ * missing/wrong — both mean the orchestrator↔switch auth seam is broken, which
+ * must surface distinctly rather than be swallowed by the §7 aggregation's
+ * safe() wrapper as "no switch present" (the 503 a genuinely-absent switch
+ * raises stays a generic Error so safe() can degrade it to the empty state).
+ */
+function throwIfNotOk(resp: Response, label: string): void {
+  if (resp.ok) return;
+  if (resp.status === 403) {
+    throw new SwitchAuthError(`${label}: 403 (switch auth not configured)`, {
+      status: 403,
+      label,
+    });
+  }
+  throw new Error(`${label}: ${resp.status}`);
 }
 
 /**
@@ -34,15 +58,45 @@ function authHeaders(): Record<string, string> {
 // --- Health ---
 
 export async function healthCheck(): Promise<boolean> {
+  return (await switchHealthDetail()).connected;
+}
+
+/**
+ * Richer /health read: the switch's connectivity AND whether its SERVICE_SECRET
+ * is configured (presence only — the service never returns the value). The
+ * switch's /health is auth-exempt, so it can read "ok" while every privileged
+ * route fails closed (403) on a missing secret. `authConfigured:false` is a
+ * WARNING surfaced here so a fail-closed deploy doesn't look healthy-but-empty;
+ * it deliberately does NOT flip `connected` (DECISION 2: warn, don't fail).
+ *
+ * `authConfigured` defaults to true when /health doesn't report the field (older
+ * service builds) or is unreachable — we only warn on an explicit false.
+ */
+export async function switchHealthDetail(): Promise<{
+  connected: boolean;
+  authConfigured: boolean;
+}> {
   try {
     const resp = await fetch(`${SWITCH_URL}/health`, {
       signal: AbortSignal.timeout(5000),
     });
-    if (!resp.ok) return false;
-    const data = await resp.json();
-    return data.connected === true;
+    if (!resp.ok) return { connected: false, authConfigured: true };
+    const data = (await resp.json()) as {
+      connected?: boolean;
+      auth_configured?: boolean;
+    };
+    const authConfigured = data.auth_configured !== false;
+    if (!authConfigured) {
+      logger.warn(
+        "switch service reports auth_configured=false — SERVICE_SECRET is not " +
+          "set on the switch service. Privileged switch routes are failing " +
+          "closed (403); the dashboard switch panel will show no data. Set " +
+          "SERVICE_SECRET (or SWITCH_ALLOW_NO_AUTH=1 for local dev).",
+      );
+    }
+    return { connected: data.connected === true, authConfigured };
   } catch {
-    return false;
+    return { connected: false, authConfigured: true };
   }
 }
 
@@ -50,7 +104,7 @@ export async function healthCheck(): Promise<boolean> {
 
 export async function fetchPorts(): Promise<unknown[]> {
   const resp = await fetch(`${SWITCH_URL}/ports`, { headers: authHeaders(), signal: timeout() });
-  if (!resp.ok) throw new Error(`Switch ports: ${resp.status}`);
+  throwIfNotOk(resp, "Switch ports");
   const data = await resp.json();
   return data.ports ?? [];
 }
@@ -64,7 +118,7 @@ export async function fetchPort(port: number): Promise<unknown> {
 /** Live link/speed per port (the §7 aggregation's real link source). */
 export async function fetchPortStatus(): Promise<SwitchRawPortStatus[]> {
   const resp = await fetch(`${SWITCH_URL}/ports/status`, { headers: authHeaders(), signal: timeout() });
-  if (!resp.ok) throw new Error(`Switch port status: ${resp.status}`);
+  throwIfNotOk(resp, "Switch port status");
   const data = (await resp.json()) as { ports?: SwitchRawPortStatus[] };
   return data.ports ?? [];
 }
@@ -91,7 +145,7 @@ export async function disablePort(port: number): Promise<void> {
 
 export async function fetchVlans(): Promise<unknown[]> {
   const resp = await fetch(`${SWITCH_URL}/vlans`, { headers: authHeaders(), signal: timeout() });
-  if (!resp.ok) throw new Error(`Switch VLANs: ${resp.status}`);
+  throwIfNotOk(resp, "Switch VLANs");
   const data = await resp.json();
   return data.vlans ?? [];
 }
@@ -144,7 +198,7 @@ export async function setVlanMembership(
 
 export async function fetchPoeStatus(): Promise<unknown[]> {
   const resp = await fetch(`${SWITCH_URL}/poe`, { headers: authHeaders(), signal: timeout() });
-  if (!resp.ok) throw new Error(`Switch PoE: ${resp.status}`);
+  throwIfNotOk(resp, "Switch PoE");
   const data = await resp.json();
   return data.ports ?? [];
 }
@@ -177,7 +231,7 @@ export async function disablePortPoe(port: number): Promise<void> {
 
 export async function fetchSystemInfo(): Promise<unknown> {
   const resp = await fetch(`${SWITCH_URL}/system/info`, { headers: authHeaders(), signal: timeout() });
-  if (!resp.ok) throw new Error(`Switch system info: ${resp.status}`);
+  throwIfNotOk(resp, "Switch system info");
   return resp.json();
 }
 
@@ -189,7 +243,7 @@ export async function fetchProvisionConfig(): Promise<SwitchProvisionConfig> {
     headers: authHeaders(),
     signal: timeout(),
   });
-  if (!resp.ok) throw new Error(`Switch provision config: ${resp.status}`);
+  throwIfNotOk(resp, "Switch provision config");
   return (await resp.json()) as SwitchProvisionConfig;
 }
 

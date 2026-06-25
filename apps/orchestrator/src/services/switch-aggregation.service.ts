@@ -22,6 +22,7 @@
  */
 
 import * as switchClient from "./switch.client.js";
+import { SwitchAuthError } from "../types/switch-error.js";
 import type {
   SwitchStatus,
   SwitchPort,
@@ -244,27 +245,55 @@ export function aggregateVlans(vlans: RawVlan[], config: SwitchProvisionConfig):
 
 // --- Orchestration (calls the switch client, applies the joins) ------------
 
+/**
+ * Fallback provision-config when the switch service is unreachable / auth is
+ * not configured. The §7 reads still need a config shape to derive port roles
+ * and profile; absence of a switch means a flat, unmanaged default — never
+ * guess a segmented layout. Matches the service's flat-lan default.
+ */
+const DEFAULT_PROVISION_CONFIG: SwitchProvisionConfig = {
+  vlan_profile: "flat-lan",
+  auto_managed: false,
+  protected_port: 0,
+  camera_ports: [],
+  ap_ports: [],
+  client_ports: [],
+  poe_budget_w: 0,
+  last_provisioned_at: null,
+};
+
 export async function fetchSwitchStatus(): Promise<SwitchStatus> {
+  // An auth-config failure (403) must surface DISTINCTLY (auth_not_configured)
+  // rather than be swallowed to the same connected:false empty state a real
+  // absent switch (503) produces — see SwitchAuthError. `tracker` records
+  // whether any read hit a SwitchAuthError so the status can carry the flag.
+  const tracker = newAuthTracker();
   const [connected, systemInfo, poe, config] = await Promise.all([
     switchClient.healthCheck(),
-    safeSystemInfo(),
+    safeSystemInfo(tracker),
     // /poe raises 503 on a disconnected driver — the §7 status must still
     // answer (connected:false) from health + provision-config, so tolerate it.
-    safe(switchClient.fetchPoeStatus() as Promise<SwitchRawPoe[]>, []),
-    switchClient.fetchProvisionConfig(),
+    safe(switchClient.fetchPoeStatus() as Promise<SwitchRawPoe[]>, [], tracker),
+    // /provision/config is disconnect-safe by design, but a 403 auth failure
+    // must NOT 500 the status — fall back + record the auth flag.
+    safe(switchClient.fetchProvisionConfig(), DEFAULT_PROVISION_CONFIG, tracker),
   ]);
-  return aggregateStatus({ connected, systemInfo, poe, config });
+  const status = aggregateStatus({ connected, systemInfo, poe, config });
+  if (tracker.authError) status.auth_not_configured = true;
+  return status;
 }
 
 export async function fetchSwitchPorts(): Promise<SwitchPort[]> {
   // A disconnected switch raises 503 on these reads; the panel gates the port
-  // map on status.connected, so degrade to an empty list rather than 500.
+  // map on status.connected, so degrade to an empty list rather than 500. A 403
+  // auth failure degrades the same way here (the status read carries the
+  // distinct auth_not_configured flag the dashboard banners on).
   const [rawPorts, portStatus, poe, vlans, config] = await Promise.all([
     safe(switchClient.fetchPorts() as Promise<SwitchRawPort[]>, []),
     safe(switchClient.fetchPortStatus(), []),
     safe(switchClient.fetchPoeStatus() as Promise<SwitchRawPoe[]>, []),
     safe(switchClient.fetchVlans() as Promise<RawVlan[]>, []),
-    switchClient.fetchProvisionConfig(),
+    safe(switchClient.fetchProvisionConfig(), DEFAULT_PROVISION_CONFIG),
   ]);
   return aggregatePorts({ rawPorts, portStatus, poe, vlans, config });
 }
@@ -272,9 +301,17 @@ export async function fetchSwitchPorts(): Promise<SwitchPort[]> {
 export async function fetchSwitchVlans(): Promise<SwitchVlan[]> {
   const [vlans, config] = await Promise.all([
     safe(switchClient.fetchVlans() as Promise<RawVlan[]>, []),
-    switchClient.fetchProvisionConfig(),
+    safe(switchClient.fetchProvisionConfig(), DEFAULT_PROVISION_CONFIG),
   ]);
   return aggregateVlans(vlans, config);
+}
+
+/** Mutable flag carrier so `safe()` can record an auth failure across reads. */
+interface AuthTracker {
+  authError: boolean;
+}
+function newAuthTracker(): AuthTracker {
+  return { authError: false };
 }
 
 /**
@@ -283,17 +320,22 @@ export async function fetchSwitchVlans(): Promise<SwitchVlan[]> {
  * SwitchError) on /poe, /ports, /port_status, /vlans, /system/info when no
  * switch is attached — so the §7 reads must tolerate it and still answer
  * (status connected:false, empty port/vlan lists) so the dashboard renders its
- * calm "no managed switch" empty state instead of an error card. The health
- * check and /provision/config are disconnect-safe by design and stay unwrapped.
+ * calm "no managed switch" empty state instead of an error card.
+ *
+ * A `SwitchAuthError` (403) is ALSO swallowed to the fallback so reads never
+ * 500, but — distinct from a 503 — it is recorded on the optional `tracker` so
+ * the §7 status can surface `auth_not_configured: true` and the dashboard can
+ * banner "Switch auth not configured" instead of the calm empty state.
  */
-async function safe<T>(p: Promise<T>, fallback: T): Promise<T> {
+async function safe<T>(p: Promise<T>, fallback: T, tracker?: AuthTracker): Promise<T> {
   try {
     return await p;
-  } catch {
+  } catch (err) {
+    if (tracker && err instanceof SwitchAuthError) tracker.authError = true;
     return fallback;
   }
 }
 
-async function safeSystemInfo(): Promise<RawSystemInfo | null> {
-  return safe(switchClient.fetchSystemInfo() as Promise<RawSystemInfo | null>, null);
+async function safeSystemInfo(tracker?: AuthTracker): Promise<RawSystemInfo | null> {
+  return safe(switchClient.fetchSystemInfo() as Promise<RawSystemInfo | null>, null, tracker);
 }

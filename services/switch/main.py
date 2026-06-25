@@ -73,27 +73,75 @@ logging.basicConfig(level=logging.INFO)
 # ---------------------------------------------------------------------------
 # Service-to-service authentication
 # ---------------------------------------------------------------------------
+# Shared bearer for orchestrator / camera-discovery → switch.
+# Production bring-up via scripts/setup.sh always provisions a token. When the
+# token is unset the service FAILS CLOSED — every non-/health route returns 403
+# (auth-not-configured) — because the switch service runs network_mode: host, so
+# a missing or failed secret injection at deploy time would otherwise expose
+# every mutation endpoint (VLAN, PoE, port enable/disable) to any host on the
+# LAN. 403 (not 503) is used so the orchestrator can tell an auth-config failure
+# apart from a genuinely-absent switch (the hardware reads raise 503): the
+# §7 aggregation swallows 503 to its calm "no managed switch" empty state, so
+# reusing 503 here would silently hide a misconfigured deploy as "no hardware".
+# Mirrors camera-discovery's 403 fail-closed. Set SWITCH_ALLOW_NO_AUTH=1 to opt
+# back into open mode for local dev only. Mirrors the routing service's
+# ROUTING_ALLOW_NO_AUTH contract (WARP-36).
 SERVICE_SECRET = os.environ.get("SERVICE_SECRET", "")
+SWITCH_ALLOW_NO_AUTH = os.environ.get("SWITCH_ALLOW_NO_AUTH", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 if not SERVICE_SECRET:
-    logger.warning("SERVICE_SECRET not set — all endpoints are unauthenticated. "
-                    "Set SERVICE_SECRET to enable service-to-service auth.")
+    if SWITCH_ALLOW_NO_AUTH:
+        logger.warning(
+            "SERVICE_SECRET is empty and SWITCH_ALLOW_NO_AUTH is set — auth "
+            "disabled, all endpoints are unauthenticated. Local dev only; "
+            "NEVER set this in production."
+        )
+    else:
+        logger.error(
+            "SERVICE_SECRET is empty — failing closed (403) on all non-/health "
+            "routes. Set the token, or SWITCH_ALLOW_NO_AUTH=1 for local dev."
+        )
 
 
 class ServiceAuthMiddleware(BaseHTTPMiddleware):
-    """Reject requests without a valid SERVICE_SECRET Bearer token."""
+    """Reject requests without a valid SERVICE_SECRET Bearer token.
+
+    Fails CLOSED when no token is configured: an unset SERVICE_SECRET (e.g. a
+    failed secret injection at deploy) yields 403 on every non-/health route
+    rather than silently opening the host-network service. 403 (not 503) is
+    deliberate: the hardware reads raise 503 when no switch is attached and the
+    orchestrator §7 aggregation swallows that to its calm empty state, so an
+    auth-config 503 would be indistinguishable from "no switch present". Opt
+    into the old open behaviour for local dev with SWITCH_ALLOW_NO_AUTH=1.
+    """
 
     async def dispatch(self, request: Request, call_next):
         import hmac
         if request.url.path == "/health":
             return await call_next(request)
-        if SERVICE_SECRET:
-            auth = request.headers.get("Authorization", "")
-            token = auth.removeprefix("Bearer ").strip()
-            if not hmac.compare_digest(token, SERVICE_SECRET):
-                return JSONResponse(
-                    status_code=403,
-                    content={"error": "Invalid or missing service token"},
-                )
+        if not SERVICE_SECRET:
+            if SWITCH_ALLOW_NO_AUTH:
+                return await call_next(request)
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": (
+                        "Switch auth is not configured (SERVICE_SECRET unset). "
+                        "Set the token, or SWITCH_ALLOW_NO_AUTH=1 for local dev."
+                    )
+                },
+            )
+        auth = request.headers.get("Authorization", "")
+        token = auth.removeprefix("Bearer ").strip()
+        if not hmac.compare_digest(token, SERVICE_SECRET):
+            return JSONResponse(
+                status_code=403,
+                content={"error": "Invalid or missing service token"},
+            )
         return await call_next(request)
 
 
@@ -352,6 +400,12 @@ app.add_middleware(ServiceAuthMiddleware)
 # ---------------------------------------------------------------------------
 @app.get("/health", response_model=HealthResponse)
 async def health():
+    # Presence ONLY — never leak the secret value. /health stays auth-exempt
+    # (it's the Docker healthcheck endpoint) but reports whether auth is
+    # configured so the orchestrator can warn on a fail-closed (403) deploy that
+    # would otherwise read as a healthy-but-unreachable switch. Under
+    # SWITCH_ALLOW_NO_AUTH the field is moot, so report it as configured.
+    auth_configured = bool(SERVICE_SECRET) or SWITCH_ALLOW_NO_AUTH
     if driver_instance is None:
         return HealthResponse(
             status="disconnected",
@@ -359,6 +413,7 @@ async def health():
             switch_host=SWITCH_HOST,
             driver=SWITCH_DRIVER,
             error="Switch not connected at startup",
+            auth_configured=auth_configured,
         )
     try:
         info = await driver_instance.get_system_info()
@@ -368,6 +423,7 @@ async def health():
             switch_host=SWITCH_HOST,
             driver=SWITCH_DRIVER,
             system_info=info,
+            auth_configured=auth_configured,
         )
     except SwitchError as exc:
         return HealthResponse(
@@ -376,6 +432,7 @@ async def health():
             switch_host=SWITCH_HOST,
             driver=SWITCH_DRIVER,
             error=str(exc),
+            auth_configured=auth_configured,
         )
 
 
