@@ -28,6 +28,7 @@ __pycache__/
 # via the `.claude/*` rule above).
 !.claude/agents/
 !.claude/skills/
+!.claude/commands/
 !.claude/settings.json
 .claude/session-state.json
 *.tsbuildinfo
@@ -65,3 +66,6 @@ scripts/image/keys/*.key
 output/
 # build-iso.sh's transient working dir (upstream ISO download + extract tree).
 scripts/image/.build/
+
+# Backlog-driver loop runtime scratch (queue, run-cap counter, audit log)
+.claude/loop-state/
