@@ -631,9 +631,11 @@ EOF
   # /etc/droplet/ap-psk on first boot; wire that via
   # DROPLET_MATTER_WIFI_PSK_FILE + a bind mount once attach's file lifecycle
   # is confirmed (WARP-895). SSID matches the AP written above (~line 201).
-  upsert_env DROPLET_MATTER_WIFI_SSID "Droplet"
+  local _matter_ap_ssid
+  _matter_ap_ssid="$( { grep -E '^DROPLET_AP_SSID=' "${REPO_ROOT:-/nonexistent}/.env" 2>/dev/null || true; } | head -1 | cut -d= -f2-)"
+  upsert_env DROPLET_MATTER_WIFI_SSID "${_matter_ap_ssid:-Droplet}"
   local _matter_ap_psk
-  _matter_ap_psk="$( { grep -E '^DROPLET_AP_PSK=' "${REPO_ROOT:-/nonexistent}/.env" 2>/dev/null || true; } | cut -d= -f2-)"
+  _matter_ap_psk="$( { grep -E '^DROPLET_AP_PSK=' "${REPO_ROOT:-/nonexistent}/.env" 2>/dev/null || true; } | head -1 | cut -d= -f2-)"
   if [ -n "$_matter_ap_psk" ] && [ "$_matter_ap_psk" != "CHANGE_ME_VIA_SETUP_WIZARD" ]; then
     upsert_env DROPLET_MATTER_WIFI_PSK "$_matter_ap_psk"
   fi

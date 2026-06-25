@@ -145,19 +145,21 @@ export interface MatterControllerCoreOptions {
  * commissioning then proceeds on-network-only, exactly as before WARP-895
  * — when no SSID or no PSK is available.
  */
-function resolveWifiNetwork(
+async function resolveWifiNetwork(
   options: MatterControllerCoreOptions,
-): { wifiSsid: string; wifiCredentials: string } | undefined {
+): Promise<{ wifiSsid: string; wifiCredentials: string } | undefined> {
   const wifiSsid = (options.wifiSsid ?? "").trim();
   if (!wifiSsid) return undefined;
   let psk = "";
   const pskFile = (options.wifiPskFile ?? "").trim();
   if (pskFile) {
     try {
-      psk = fs.readFileSync(pskFile, "utf8").trim();
-    } catch {
-      // File absent/unreadable (e.g. the AP isn't provisioned yet) — fall
-      // back to the env-supplied PSK below rather than failing the add.
+      psk = (await fs.promises.readFile(pskFile, "utf8")).trim();
+    } catch (err) {
+      logger.warn(
+        { err, pskFile },
+        "DROPLET_MATTER_WIFI_PSK_FILE is set but unreadable — falling back to DROPLET_MATTER_WIFI_PSK",
+      );
     }
   }
   if (!psk) psk = (options.wifiPsk ?? "").trim();
@@ -481,7 +483,7 @@ export function createMatterControllerCore(
       // cluster needs it; a device already on IP ignores it). Resolved
       // per-commission so a per-box PSK provisioned after sidecar start is
       // picked up. Absent ⇒ on-network-only (pre-WARP-895 behaviour).
-      const wifiNetwork = resolveWifiNetwork(options);
+      const wifiNetwork = await resolveWifiNetwork(options);
       const commissioning = {
         regulatoryLocation:
           GeneralCommissioning.RegulatoryLocationType.IndoorOutdoor,
