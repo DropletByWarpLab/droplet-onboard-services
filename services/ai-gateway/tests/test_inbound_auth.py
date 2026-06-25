@@ -26,14 +26,56 @@ def auth_enabled(monkeypatch):
     yield _TOKEN
 
 
-class TestInboundAuthDisabledByDefault:
-    """With no token configured (dev/CI default) the gate is a no-op so the
-    existing test suite + local dev keep working."""
+class TestInboundAuthDevEscapeHatch:
+    """With no token configured AND AI_GATEWAY_ALLOW_NO_AUTH=1 the gate is a
+    no-op so local dev + the bulk of the suite keep working. conftest sets the
+    opt-in for exactly this reason."""
 
-    async def test_unauthenticated_allowed_when_token_unset(self, client):
-        # conftest never sets SERVICE_TOKEN_AI_GATEWAY → middleware passes through.
+    async def test_unauthenticated_allowed_when_opt_in_set(self, client):
+        # conftest sets AI_GATEWAY_ALLOW_NO_AUTH=1 and no service token →
+        # middleware passes through.
         resp = await client.get("/ai/keys")
         assert resp.status_code == 200
+
+
+class TestInboundAuthFailsClosed:
+    """The HIGH bug this fixes: a blank SERVICE_TOKEN_AI_GATEWAY (failed secret
+    injection in prod) must NOT serve /ai/* unauthenticated. With the opt-in
+    cleared, every non-health route is refused."""
+
+    @pytest.fixture
+    def fail_closed(self, monkeypatch):
+        # Blank token + opt-in off = production-shaped misconfiguration.
+        monkeypatch.setattr(main, "SERVICE_TOKEN_AI_GATEWAY", "")
+        monkeypatch.setattr(main, "AI_GATEWAY_ALLOW_NO_AUTH", False)
+        yield
+
+    async def test_health_still_exempt_when_failing_closed(self, client, fail_closed):
+        # Liveness probe must answer even in the fail-closed state.
+        resp = await client.get("/ai/health")
+        assert resp.status_code == 200
+
+    async def test_keys_refused_when_failing_closed(self, client, fail_closed):
+        resp = await client.get("/ai/keys")
+        assert resp.status_code == 401
+
+    async def test_chat_refused_when_failing_closed(self, client, fail_closed):
+        resp = await client.post(
+            "/ai/chat",
+            json={
+                "model": "llama3:8b",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": False,
+            },
+        )
+        assert resp.status_code == 401
+
+    async def test_refused_even_with_a_bearer_token(self, client, fail_closed):
+        # No configured secret to match against → any presented token is refused.
+        resp = await client.get(
+            "/ai/keys", headers={"Authorization": "Bearer anything"}
+        )
+        assert resp.status_code == 401
 
 
 class TestInboundAuthEnforced:
@@ -60,6 +102,19 @@ class TestInboundAuthEnforced:
     async def test_wrong_token_rejected(self, client, auth_enabled):
         resp = await client.get(
             "/ai/keys", headers={"Authorization": "Bearer not-the-token"}
+        )
+        assert resp.status_code == 401
+
+    async def test_non_ascii_token_rejected_not_500(self, client, auth_enabled):
+        # A non-ASCII Authorization header (raw bytes on the wire, latin-1
+        # decoded by Starlette into a str with non-ASCII codepoints) must
+        # produce a clean 401, not a 500 from hmac.compare_digest raising
+        # TypeError on two str operands. Encoding both operands keeps the
+        # compare byte-safe. Header passed as bytes so httpx forwards it
+        # verbatim instead of ASCII-encoding it client-side.
+        resp = await client.get(
+            "/ai/keys",
+            headers={"Authorization": "Bearer café-tøken-ñ".encode("utf-8")},
         )
         assert resp.status_code == 401
 

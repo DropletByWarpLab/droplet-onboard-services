@@ -85,14 +85,36 @@ logger = logging.getLogger(__name__)
 # that could open the socket (chat, session read, BYOK key CRUD). It is a
 # service-to-service component whose sole legitimate caller is the orchestrator,
 # so we require a shared bearer service token (same proven shape as
-# services/switch/main.py's ServiceAuthMiddleware). Empty token = unauthenticated
-# (logged loudly) so dev/CI keeps working; setup.sh provisions a real one.
+# services/switch/main.py's ServiceAuthMiddleware). Empty token → fail closed
+# (401 on every non-health route) unless AI_GATEWAY_ALLOW_NO_AUTH=1; setup.sh provisions a real one.
 SERVICE_TOKEN_AI_GATEWAY = (os.environ.get("SERVICE_TOKEN_AI_GATEWAY") or "").strip()
+# Fail CLOSED when the service token is unset/blank: every non-health /ai/*
+# route returns 401 (auth required) rather than silently running
+# unauthenticated. A blank token in prod means a failed secret injection at
+# deploy — without this gate that would expose BYOK key CRUD, cloud chat, and
+# session reads to any host that can open the socket, with the per-user
+# namespace coming from the attacker-controlled X-Droplet-User header. Opt back
+# into the old open behaviour for local dev with AI_GATEWAY_ALLOW_NO_AUTH=1.
+# Mirrors camera-discovery's CAMERA_ALLOW_NO_AUTH contract.
+AI_GATEWAY_ALLOW_NO_AUTH = os.environ.get("AI_GATEWAY_ALLOW_NO_AUTH", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 if not SERVICE_TOKEN_AI_GATEWAY:
-    logger.warning(
-        "SERVICE_TOKEN_AI_GATEWAY not set — /ai/* endpoints are unauthenticated. "
-        "Set SERVICE_TOKEN_AI_GATEWAY to enable service-to-service auth."
-    )
+    if AI_GATEWAY_ALLOW_NO_AUTH:
+        logger.warning(
+            "SERVICE_TOKEN_AI_GATEWAY not set and AI_GATEWAY_ALLOW_NO_AUTH is "
+            "set — /ai/* endpoints are unauthenticated. Local dev only; NEVER "
+            "set this in production."
+        )
+    else:
+        logger.error(
+            "SERVICE_TOKEN_AI_GATEWAY not set — failing closed (401) on every "
+            "non-health /ai/* route. Set SERVICE_TOKEN_AI_GATEWAY, or "
+            "AI_GATEWAY_ALLOW_NO_AUTH=1 for local dev."
+        )
 
 # Header the orchestrator sets to forward the end-user principal so the gateway
 # can namespace BYOK keys (WARP-561) and scope session ownership (WARP-560).
@@ -122,11 +144,25 @@ class ServiceAuthMiddleware(BaseHTTPMiddleware):
         if SERVICE_TOKEN_AI_GATEWAY:
             auth = request.headers.get("Authorization", "")
             token = auth.removeprefix("Bearer ").strip()
-            if not hmac.compare_digest(token, SERVICE_TOKEN_AI_GATEWAY):
+            # Encode both operands: a non-ASCII Authorization header (latin-1
+            # decoded by Starlette) makes hmac.compare_digest on two str args
+            # raise TypeError → 500. Comparing bytes keeps it a clean 401.
+            if not hmac.compare_digest(
+                token.encode("utf-8", "ignore"),
+                SERVICE_TOKEN_AI_GATEWAY.encode("utf-8"),
+            ):
                 return JSONResponse(
                     status_code=401,
                     content={"error": "Invalid or missing service token"},
                 )
+        elif not AI_GATEWAY_ALLOW_NO_AUTH:
+            # Fail closed: no token configured and dev escape hatch not set. A
+            # blank token in prod is a failed secret injection — refuse rather
+            # than serve every route unauthenticated.
+            return JSONResponse(
+                status_code=401,
+                content={"error": "Service auth not configured"},
+            )
         principal = request.headers.get(PRINCIPAL_HEADER, "").strip() or None
         request.state.principal = principal
         return await call_next(request)
