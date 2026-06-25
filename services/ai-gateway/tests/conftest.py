@@ -17,6 +17,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ["KEYS_DIR"] = tempfile.mkdtemp(prefix="droplet-test-keys-")
 os.environ["DEVICE_SECRET"] = "test-secret-for-unit-tests"
 os.environ["OLLAMA_URL"] = "http://fake-ollama:11434"
+# The gateway now fails closed when SERVICE_TOKEN_AI_GATEWAY is unset. The bulk
+# of the suite runs tokenless against /ai/* routes, so opt into the dev escape
+# hatch here (mirrors DEVICE_SECRET above). The fail-closed behaviour itself is
+# covered explicitly in test_inbound_auth.py by clearing this flag.
+os.environ["AI_GATEWAY_ALLOW_NO_AUTH"] = "1"
 # No REDIS_URL — forces InMemorySessionStore and in-memory middleware backends
 # High rate limit so tests don't trip over each other
 os.environ["RATE_LIMIT_RPM"] = "10000"
