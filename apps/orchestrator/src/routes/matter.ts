@@ -543,7 +543,11 @@ export function createMatterRouter(prisma: PrismaClient): Router {
   );
 
   // --- Audit log ---
-  router.get("/matter/audit", async (req, res, next) => {
+  // Reading the command audit log (who operated which device, and when) is a
+  // household-admin capability — guard it like the mutating matter routes.
+  // Without this, ANY authenticated principal could pass ?userId=<other>/
+  // ?entityId=<device> and read every user's lock/unlock history (IDOR).
+  router.get("/matter/audit", requireRole("owner", "admin"), async (req, res, next) => {
     try {
       const { entityId, userId, limit, offset } = req.query;
       const effectiveUserId =
