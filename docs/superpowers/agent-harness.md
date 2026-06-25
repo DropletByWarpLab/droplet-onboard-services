@@ -263,3 +263,40 @@ New phases don't require a new dry-run unless the harness itself changes. If the
 If a role prompt produces useless output (e.g. QA ignores the regression suite, UI/UX invents a breakpoint that isn't in the spec), that's a harness bug, not a Dev bug. Fix the prompt file **in the current ticket's branch** — do not kick it to a follow-up.
 
 The WARP-88 dry-run exists precisely to catch these before Phase 1 starts shipping real code.
+
+---
+
+## 8. Backlog-driver loop (unattended sequencing)
+
+§1–§7 describe **one ticket**. The backlog-driver loop runs that sequence across
+the whole backlog unattended, via `/loop /backlog-tick` (self-paced — no interval).
+The loop adds *cross-ticket sequencing only*; it changes nothing within a ticket.
+
+- **Controller:** `.claude/commands/backlog-tick.md` (one ticket per firing).
+- **State:** `.claude/loop-state/{queue.json,run.json,run-log.md}` — gitignored scratch.
+
+**Per tick:** load/seed the queue (hybrid — seed from Jira once, walk it, re-seed on
+drain) → select the top ticket whose dependencies are ALL merged to `main` → run the
+gate sequence (§1, detailed in §5) → Manager opens the PR → record → continue. The
+seed JQL is `status = "To Do" AND issuetype != Epic AND description IS NOT EMPTY` —
+epics and unrefined placeholders are kept out of the queue.
+
+**Autonomy boundary:** the loop opens PRs and advances, but **never merges** — the
+human merge gate (§4 pre-merge handoff; §5.6 merge) is unconditional. It only works tickets whose dependencies are
+already merged to `main`; it does **not** use branch stacking (§2.3). This
+self-throttles: the loop yields a set of independent, mergeable PRs, then stops.
+
+**CI:** watched **inline** inside the tick using the §3 classification table — NOT a
+separate nested `/loop`. Same flake/defect/systemic logic, capped at 6 polls /
+30 min / 3 attempts per check.
+
+**Stop conditions:** backlog drained · all remaining tickets blocked on a human merge
+· a blocker that is Jira-`Done` with no merged PR (ambiguous → handoff, never
+auto-satisfied — Jira status alone never satisfies a dependency) · any other §4 hard
+handoff · run caps (5 tickets or 4h; reset by removing `.claude/loop-state/run.json`).
+Each tick ends with a `LOOP_STATUS: CONTINUE` or `LOOP_STATUS: STOP — <reason>` line.
+
+**Effort/model:** uniform — controller and all five agents inherit the session model
++ reasoning effort (no agent frontmatter pins). Launch the session at Opus + high.
+
+**Design reference:** `docs/superpowers/specs/2026-06-25-backlog-driver-loop-design.md`.
