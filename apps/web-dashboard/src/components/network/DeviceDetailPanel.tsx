@@ -23,9 +23,10 @@ import { OverrideModal } from "./OverrideModal";
 import { ScheduleEditorModal } from "./ScheduleEditorModal";
 import { Dialog } from "@/components/Dialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { authFetch } from "@/lib/auth";
 
 const fetcher = async (url: string) => {
-  const r = await fetch(url);
+  const r = await authFetch(url);
   if (!r.ok) throw new Error(String(r.status));
   return r.json();
 };
