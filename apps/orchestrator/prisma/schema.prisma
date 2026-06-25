@@ -2045,6 +2045,13 @@ model EmailDraft {
   draftedByDroplet Boolean          @default(false)
   status           EmailDraftStatus @default(draft)
   sentAt           DateTime?
+  /// WARP-890 — wall-clock the draft was claimed into `sending` (queued→sending).
+  /// Tamper-proof reconcile clock: the stale-sending sweep keys off THIS column,
+  /// not `updatedAt`, because `@updatedAt` resets on ANY row write (a concurrent
+  /// edit to an unrelated field would silently reset the grace window and strand
+  /// a draft forever). Nullable + additive (no-incidental-state rule): NULL for
+  /// every draft that has never been claimed.
+  claimedAt        DateTime?
   error            String?
   createdAt        DateTime         @default(now())
   updatedAt        DateTime         @updatedAt

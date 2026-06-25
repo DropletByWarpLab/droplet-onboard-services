@@ -23,6 +23,7 @@ import type { PrismaClient } from "@prisma/client";
 import pino from "pino";
 import { requireRole } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
+import { reconcileStaleSending } from "../services/email-reconcile.service.js";
 
 const logger = pino({ name: "email-route" });
 
@@ -121,8 +122,9 @@ interface DraftRow {
   subject: string;
   body: string;
   draftedByDroplet: boolean;
-  status: "draft" | "queued" | "sent" | "failed";
+  status: "draft" | "queued" | "sending" | "sent" | "failed";
   sentAt: Date | null;
+  claimedAt: Date | null;
   error: string | null;
   createdAt: Date;
   updatedAt: Date;
@@ -525,7 +527,11 @@ export function createEmailRouter(
       try {
         const result = await prisma.emailDraft.updateMany({
           where: { id: req.params.id, status: "queued" },
-          data: { status: "sending" },
+          // claimedAt is the tamper-proof reconcile clock (NOT updatedAt, which
+          // @updatedAt resets on any later row write). Set it at the moment of
+          // the claim so the stale-sending sweep measures the grace window from
+          // here. (WARP-890)
+          data: { status: "sending", claimedAt: new Date() },
         });
         res.json({ id: req.params.id, claimed: result.count === 1 });
       } catch (err) {
@@ -540,23 +546,19 @@ export function createEmailRouter(
   // Sweep rows stuck in `sending` past a grace window to `failed`. We do NOT
   // re-queue them: the SMTP send may have completed, and re-queuing would risk
   // the duplicate this change exists to prevent. The indexer calls this once
-  // per outbound tick. Grace window default 10 min (EMAIL_SENDING_STALE_MS).
+  // per outbound tick (belt-and-suspenders); the orchestrator ALSO runs the
+  // same sweep on a cron (see index.ts) so recovery is independent of the
+  // indexer being up. The cutoff keys off the explicit `claimedAt` column, not
+  // `updatedAt`. Grace window default 10 min (EMAIL_SENDING_STALE_MS). The
+  // sweep logic lives in email-reconcile.service so the route and the cron
+  // share exactly one implementation.
   router.post(
     "/email/drafts/reconcile-stale-sending",
     requireRole("service"),
     async (_req: Request, res: Response, next: NextFunction) => {
       try {
-        const staleMs = Number(process.env.EMAIL_SENDING_STALE_MS) || 10 * 60 * 1000;
-        const cutoff = new Date(Date.now() - staleMs);
-        const result = await prisma.emailDraft.updateMany({
-          where: { status: "sending", updatedAt: { lt: cutoff } },
-          data: {
-            status: "failed",
-            error:
-              "reconciled: stuck in sending past the grace window (terminal status callback never landed)",
-          },
-        });
-        res.json({ reconciled: result.count });
+        const reconciled = await reconcileStaleSending(prisma);
+        res.json({ reconciled });
       } catch (err) {
         next(err);
       }

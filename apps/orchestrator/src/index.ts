@@ -33,6 +33,7 @@ import { createDeviceReconcilePoller } from "./services/device-reconcile-poller.
 import { startApDiscoveryPoller } from "./services/ap-discovery-poller.js";
 import { sweepExpiredGuests } from "./services/guest-expiry-sweep.service.js";
 import { purgeCameraArtifacts } from "./services/camera-retention-purge.service.js";
+import { reconcileStaleSending } from "./services/email-reconcile.service.js";
 import { createTlsIssuanceService } from "./services/tls-issuance.service.js";
 import {
   createHqIssuanceClient,
@@ -471,6 +472,30 @@ async function main() {
       }
     },
     { lockKey: "droplet:guest-expiry-sweep" },
+  );
+
+  // WARP-890: stale-sending email reconcile, every 5 min. A draft claimed
+  // (queued→sending) whose terminal status callback never landed strands in
+  // `sending`. The email-indexer runs the same sweep inline on its 10s outbound
+  // tick, but if the indexer is DOWN longer than the grace window those drafts
+  // never recover — so the orchestrator owns an independent recovery path here,
+  // direct via Prisma. The sweep is a single idempotent, conditional updateMany
+  // (status='sending' AND claimedAt < cutoff → 'failed'); running it from both
+  // the indexer and this cron concurrently cannot double-process, because the
+  // loser's WHERE no longer matches once the rows flip to 'failed'.
+  //
+  // Let errors propagate naked to cron-runtime's `safeRun` — same posture as the
+  // pattern-miner / purge handlers: swallowing here would zero out the
+  // per-handler consecutiveFailures canary that downstream alerting reads.
+  cronRuntime.scheduleInterval(
+    5 * 60 * 1000,
+    async () => {
+      const reconciled = await reconcileStaleSending(prisma);
+      if (reconciled > 0) {
+        logger.info({ reconciled }, "email-stale-sending-reconcile failed-out drafts");
+      }
+    },
+    { lockKey: "droplet:email-stale-sending-reconcile" },
   );
 
   // WARP-464 (C3): hourly tool-call pattern miner. Reads the last
