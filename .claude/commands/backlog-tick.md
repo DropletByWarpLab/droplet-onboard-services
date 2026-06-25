@@ -44,12 +44,19 @@ Read `.claude/loop-state/queue.json`. If missing OR no item has `status == "pend
 Walk `items` top-down. For the first `pending` ticket, test each blocker: a blocker
 is satisfied only when its PR is **merged to `main`** — verify by content, e.g.
 `gh pr list --state merged --search "<BLOCKER_KEY>"` and confirm the commits are on
-`main`. Do NOT trust Jira status.
-- Pick the first ticket whose blockers are ALL satisfied. Set its `status` to
-  `in_progress`; persist `queue.json`.
-- If NO pending ticket has all blockers satisfied: print
+`main`. If no merged PR is found but the blocker's Jira status is "Done", also treat
+it as satisfied and note the assumption in `run-log.md` (some infrastructure tickets
+close without a PR).
+- Before selecting a ticket, fetch its Jira description. If the description is null
+  or empty, skip it: append a note to `run-log.md` (`SKIPPED <KEY>: no description —
+  needs spec before dispatch`) and continue to the next `pending` ticket.
+- Pick the first ticket whose blockers are ALL satisfied AND has a non-empty
+  description. Set its `status` to `in_progress`; persist `queue.json`.
+- If NO pending ticket qualifies (all either blocked or missing description): print
   `LOOP_STATUS: STOP — all remaining tickets blocked on your merge`, then list the
   open PRs already produced (from `run-log.md`), and end.
+- Paginate the Jira seed query until `hasNextPage == false`; the backlog may span
+  many pages.
 
 ## Step 4 — Run the harness for the selected ticket
 Fetch the ticket body + AC from Jira. Create the ticket's branch in its own git
