@@ -170,11 +170,31 @@ class TestProbeAll:
         assert results[0].http_status == 429
 
     @pytest.mark.asyncio
-    async def test_5xx_is_down(self, patched_httpx):
+    async def test_503_is_degraded(self, patched_httpx):
+        # 503 from a /health probe = "alive but self-reporting unhealthy"
+        # (e.g. voice-io's latched stuck-and-deaf pipeline returns 503 on
+        # purpose). The container is up and answering, so it's degraded,
+        # not down.
         patched_httpx({"http://a/": (0.0, _FakeResponse(503))})
         results = await svc.probe_all({"a": "http://a/"})
-        assert results[0].status == "down"
+        assert results[0].status == "degraded"
         assert results[0].http_status == 503
+
+    @pytest.mark.asyncio
+    async def test_5xx_is_down(self, patched_httpx):
+        # Non-503 5xx (500/502/504) means the service or its gateway is
+        # genuinely broken, not self-reporting — stays down.
+        patched_httpx({"http://a/": (0.0, _FakeResponse(500))})
+        results = await svc.probe_all({"a": "http://a/"})
+        assert results[0].status == "down"
+        assert results[0].http_status == 500
+
+    @pytest.mark.asyncio
+    async def test_502_is_down(self, patched_httpx):
+        patched_httpx({"http://a/": (0.0, _FakeResponse(502))})
+        results = await svc.probe_all({"a": "http://a/"})
+        assert results[0].status == "down"
+        assert results[0].http_status == 502
 
     @pytest.mark.asyncio
     async def test_transport_error_is_down(self, patched_httpx):

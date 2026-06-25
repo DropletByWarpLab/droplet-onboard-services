@@ -248,6 +248,21 @@ async def _probe_one(
             detail=f"4xx from health endpoint: {code} (service self-reporting unhealthy)",
         )
 
+    if code == 503:
+        # 503 Service Unavailable from a /health probe is the conventional
+        # "I'm alive but reporting myself unhealthy" signal — e.g. voice-io
+        # latches its wake pipeline into a stuck-and-deaf state and returns
+        # 503 on purpose. The container is fully up and answering, so this
+        # is degraded, not down. (Genuine unreachability surfaces as a
+        # transport error / timeout, already classified down above.) Other
+        # 5xx — 500/502/504 — indicate the service or its gateway is broken
+        # rather than self-reporting, so they stay down.
+        return ProbeResult(
+            name=name, url=url, status="degraded",
+            http_status=code, latency_ms=latency_ms,
+            detail=f"503 from health endpoint: {code} (service self-reporting unhealthy)",
+        )
+
     return ProbeResult(
         name=name, url=url, status="down",
         http_status=code, latency_ms=latency_ms,
