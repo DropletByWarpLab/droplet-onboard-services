@@ -265,10 +265,10 @@ class HealthResponse(BaseModel):
     inputAvailable: bool
     outputAvailable: bool
     # Pipeline state machine value (idle | loading | listening | … | error |
-    # no_mic), or None before the pipeline exists. When it's 'error' the
-    # pipeline has latched a transient STT/TTS/LLM failure and drops every
-    # frame, so /health reports ok=False + HTTP 503 to mark the container
-    # unhealthy (see the health() handler).
+    # no_mic), or None before the pipeline exists. When it's 'error' or
+    # 'no_mic' the pipeline drops every frame (stuck-and-deaf), so /health
+    # reports ok=False + HTTP 503 to mark the container unhealthy (see the
+    # health() handler).
     state: Optional[str] = None
     wakeLoaded: bool = False
     sttLoaded: bool = False
@@ -361,13 +361,17 @@ def health(response: Response) -> HealthResponse:
         stt_loaded = s.stt_loaded
         tts_loaded = s.tts_loaded
         llm_loaded = s.llm_loaded
-    # The pipeline latches state='error' on a transient STT/TTS/LLM failure
-    # and then drops every frame — it never self-recovers. Report degraded
-    # (ok=False + 503) so the Dockerfile healthcheck (`curl -sf`, which fails
-    # on >=400) flags the container unhealthy instead of /health lying with a
-    # 200 forever. Other states (incl. no_mic / loading) stay 200 — they're
-    # not stuck-and-deaf the way 'error' is.
-    degraded = state == "error"
+    # Both 'error' and 'no_mic' are stuck-and-deaf: _on_frame drops every
+    # frame for state in ('error', 'no_mic') (voice/pipeline.py), so the
+    # assistant can't hear a wake word in either. 'error' latches on a
+    # transient STT/TTS/LLM failure; 'no_mic' parks when no input device
+    # resolves (there is no supported mic-less / output-only mode — no-mic is
+    # a fault the supervisor keeps retrying, not a configuration). Report
+    # degraded (ok=False + 503) for both so the Dockerfile healthcheck
+    # (`curl -sf`, which fails on >=400) flags the container unhealthy instead
+    # of /health lying with a 200 forever. Other states (loading, listening,
+    # …) stay 200 — they're not stuck-and-deaf.
+    degraded = state in ("error", "no_mic")
     if degraded:
         response.status_code = 503
     return HealthResponse(
