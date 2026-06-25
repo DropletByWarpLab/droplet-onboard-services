@@ -187,3 +187,25 @@ agent-harness.md §6).
 - Per-gate effort differentiation (would require a `Workflow` controller).
 - Cross-ticket parallel execution.
 - Changes to the five role agents or the within-ticket gate logic.
+
+## 11. Post-dry-run refinements (2026-06-25)
+
+The controller-logic dry-run (Task 3 of the implementation plan) ran the seed +
+selection against the live WARP board and surfaced two facts the original design
+didn't anticipate. Both were resolved by the user:
+
+1. **Ready status validated + queue tightened.** The "ready" status is `To Do`
+   (Jira statusCategory `new`), but `status = "To Do"` alone returned ~295 tickets —
+   the whole backlog, including epics and description-less placeholders (e.g. the
+   top-ranked WARP-34 had a null description). The seed JQL is therefore
+   `project = WARP AND status = "To Do" AND issuetype != Epic AND description IS NOT EMPTY ORDER BY rank`,
+   and the seed paginates until `hasNextPage == false`. The Step 3 null-description
+   skip remains as a backstop.
+
+2. **`Done`-without-PR blockers → handoff, never auto-satisfy.** Some completed
+   tickets (e.g. WARP-230) are Jira-`Done` with no merged PR, which would deadlock
+   their dependents under the strict "merged-to-`main` only" rule. Decision: a
+   blocker that is Jira-`Done` with no merged PR is **ambiguous** — the loop does NOT
+   auto-satisfy it from Jira status (the "verify against `main`, not Jira status"
+   rule stands) and does NOT silently skip the dependent; instead it STOPs with a
+   handoff naming the blocker so the human confirms before that dependent starts.
