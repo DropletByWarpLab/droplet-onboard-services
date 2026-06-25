@@ -12,6 +12,9 @@
  * 20202021) so the codec integration is real, not mocked.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { NodeStates } from "@project-chip/matter.js/device";
 import {
   createMatterControllerCore,
@@ -157,6 +160,97 @@ describe("createMatterControllerCore", () => {
       expect(events).toEqual([
         { nodeId: "1", path: "1/onOff/onOff", value: false },
       ]);
+    });
+  });
+
+  describe("Wi-Fi provisioning for BLE-first devices (WARP-895)", () => {
+    function coreWithWifi(
+      wifi: {
+        wifiSsid?: string;
+        wifiPsk?: string;
+        wifiPskFile?: string;
+        regulatoryCountryCode?: string;
+      },
+      ctl: ControllerLike,
+    ): MatterControllerCore {
+      return createMatterControllerCore({
+        storagePath: ".data/matter-controller-test",
+        adminFabricLabel: "Droplet Test",
+        createController: () => ctl,
+        ...wifi,
+      });
+    }
+
+    function optionsOf(ctl: ControllerLike) {
+      return (ctl.commissionNode as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    }
+
+    it("omits wifiNetwork when no SSID is configured (on-network-only, unchanged)", async () => {
+      // `core`/`controller` from the outer beforeEach carry no wifi opts.
+      await core.commission(QR_PAIRING_CODE);
+      expect(optionsOf(controller).commissioning.wifiNetwork).toBeUndefined();
+    });
+
+    it("hands the env-supplied SSID + PSK to matter.js as wifiNetwork", async () => {
+      const ctl = fakeController();
+      const c = coreWithWifi({ wifiSsid: "Droplet", wifiPsk: "s3cret-psk" }, ctl);
+      await c.init();
+      await c.commission(MANUAL_PAIRING_CODE);
+      expect(optionsOf(ctl).commissioning.wifiNetwork).toEqual({
+        wifiSsid: "Droplet",
+        wifiCredentials: "s3cret-psk",
+      });
+    });
+
+    it("prefers the PSK file (per-box AP PSK) over the env PSK and trims it", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "matter-psk-"));
+      const pskFile = join(dir, "ap-psk");
+      writeFileSync(pskFile, "file-psk-value\n");
+      try {
+        const ctl = fakeController();
+        const c = coreWithWifi(
+          { wifiSsid: "Droplet", wifiPsk: "env-psk", wifiPskFile: pskFile },
+          ctl,
+        );
+        await c.init();
+        await c.commission(QR_PAIRING_CODE);
+        expect(optionsOf(ctl).commissioning.wifiNetwork).toEqual({
+          wifiSsid: "Droplet",
+          wifiCredentials: "file-psk-value",
+        });
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("falls back to the env PSK when the file is absent (AP not provisioned yet)", async () => {
+      const ctl = fakeController();
+      const c = coreWithWifi(
+        { wifiSsid: "Droplet", wifiPsk: "env-psk", wifiPskFile: "/nonexistent/ap-psk" },
+        ctl,
+      );
+      await c.init();
+      await c.commission(QR_PAIRING_CODE);
+      expect(optionsOf(ctl).commissioning.wifiNetwork).toEqual({
+        wifiSsid: "Droplet",
+        wifiCredentials: "env-psk",
+      });
+    });
+
+    it("omits wifiNetwork when an SSID is set but no PSK resolves", async () => {
+      const ctl = fakeController();
+      const c = coreWithWifi({ wifiSsid: "Droplet" }, ctl);
+      await c.init();
+      await c.commission(QR_PAIRING_CODE);
+      expect(optionsOf(ctl).commissioning.wifiNetwork).toBeUndefined();
+    });
+
+    it("passes the configured regulatory country through", async () => {
+      const ctl = fakeController();
+      const c = coreWithWifi({ regulatoryCountryCode: "US" }, ctl);
+      await c.init();
+      await c.commission(QR_PAIRING_CODE);
+      expect(optionsOf(ctl).commissioning.regulatoryCountryCode).toBe("US");
     });
   });
 

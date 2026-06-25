@@ -625,6 +625,20 @@ EOF
   # WARP-850: matter-controller is the 4th host-net service on the ladder
   # (:8083) — same WARP-806 reasoning as the three above.
   upsert_env DROPLET_MATTER_SERVICE_URL "http://${bridge_gw}:8083"
+  # WARP-895: hand the Droplet AP's SSID (and an operator-set PSK, if any)
+  # to the Matter controller so BLE-first Matter devices can join the LAN.
+  # The per-box-generated PSK (WARP-819) is NOT known here — it lands at
+  # /etc/droplet/ap-psk on first boot; wire that via
+  # DROPLET_MATTER_WIFI_PSK_FILE + a bind mount once attach's file lifecycle
+  # is confirmed (WARP-895). SSID matches the AP written above (~line 201).
+  local _matter_ap_ssid
+  _matter_ap_ssid="$( { grep -E '^DROPLET_AP_SSID=' "${REPO_ROOT:-/nonexistent}/.env" 2>/dev/null || true; } | head -1 | cut -d= -f2-)"
+  upsert_env DROPLET_MATTER_WIFI_SSID "${_matter_ap_ssid:-Droplet}"
+  local _matter_ap_psk
+  _matter_ap_psk="$( { grep -E '^DROPLET_AP_PSK=' "${REPO_ROOT:-/nonexistent}/.env" 2>/dev/null || true; } | head -1 | cut -d= -f2-)"
+  if [ -n "$_matter_ap_psk" ] && [ "$_matter_ap_psk" != "CHANGE_ME_VIA_SETUP_WIZARD" ]; then
+    upsert_env DROPLET_MATTER_WIFI_PSK "$_matter_ap_psk"
+  fi
   # Device-bridge (host process, binds 0.0.0.0:9090) — same WARP-806 reasoning
   # as the three host services above: the orchestrator's config default is
   # http://host.docker.internal:9090 (docker0), exactly the default WARP-806
