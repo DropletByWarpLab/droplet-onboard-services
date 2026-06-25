@@ -240,7 +240,45 @@ export async function confirmNetworkCommand(
     };
   }
 
-  if (userId && pending.userId && userId !== pending.userId) {
+  // Confirmer-identity check. Two distinct cases:
+  //
+  //  1. USER-minted op (pending.userId is a real human, e.g. "u-owner"):
+  //     the SAME human must confirm. This is the original guard and stays
+  //     intact — no regression for ops a person initiates from the dashboard
+  //     (add_port_forward via the form, etc.), which both mint and confirm
+  //     under that one human id.
+  //
+  //  2. SERVICE-minted op (pending.userId starts with "_service:", e.g. the
+  //     agent dispatching share_clip / add_port_forward through the MCP
+  //     principal): the agent PROPOSES, a human DISPOSES. The service
+  //     principal can never sign/execute its own pending op, so the
+  //     same-id rule would dead-end the legitimate completion path
+  //     (TOKEN_USER_MISMATCH on every human confirm). Instead, an AUTHORIZED
+  //     human may confirm it — the route's own requireRole/requireRoleOrMcp
+  //     guard has already established the confirmer is owner/admin (per the
+  //     op's role tier) and is NOT itself a service principal. We re-assert
+  //     the latter here as defense-in-depth: a "_service:*" confirmer is
+  //     barred so the agent can never self-approve even if a confirm route
+  //     ever admitted it. See network-mcp-service-rbac.test.ts and
+  //     clips-share-confirmation.routes.test.ts.
+  const isServiceMinted =
+    typeof pending.userId === "string" && pending.userId.startsWith("_service:");
+  const isServiceConfirmer =
+    typeof userId === "string" && userId.startsWith("_service:");
+
+  if (isServiceMinted) {
+    if (isServiceConfirmer) {
+      // The service principal (agent) cannot confirm its own — or any —
+      // service-minted op. Only a human disposes.
+      return {
+        confirmed: false,
+        code: "TOKEN_USER_MISMATCH",
+        reason: "Confirmation must come from a signed-in user, not the assistant",
+      };
+    }
+    // Authorized human confirming an agent-proposed op — allowed. The
+    // route-level role guard is the authorization tier.
+  } else if (userId && pending.userId && userId !== pending.userId) {
     return {
       confirmed: false,
       code: "TOKEN_USER_MISMATCH",

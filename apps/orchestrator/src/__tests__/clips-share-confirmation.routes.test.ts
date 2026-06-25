@@ -12,6 +12,12 @@
  * the token as `_service:mcp` is 403. So the agent cannot share a clip in a
  * single (or any) unattended tool call.
  *
+ * Completion invariant pinned here: the agent PROPOSES, a human DISPOSES.
+ * When the MCP principal mints the 202, a DIFFERENT authorized human (owner)
+ * must be able to confirm it and receive the signed URL. The pending-token
+ * store is module-global, so a token minted by the MCP-principal app can be
+ * confirmed by the owner app — exactly the cross-identity agent→human flow.
+ *
  * We keep network-safety.service + clips.service REAL and mock only the
  * Frigate / Nextcloud / config dependencies the cameras router drags in, so
  * the assertions exercise the actual confirmation logic end-to-end.
@@ -171,6 +177,51 @@ describe("POST /api/cameras/clips/share — confirmation re-issue", () => {
     expect(second.status).toBe(200);
     expect(second.body.url).toContain("/api/cameras/clips/share/");
     expect(second.body.expires_at).toBeTruthy();
+  });
+
+  it("the REAL agent flow: MCP mints, a DIFFERENT human (owner) confirms → 200 + signed URL", async () => {
+    // The agent dispatches share_clip through the MCP principal, which mints
+    // the 202 under "_service:mcp" and forwards the originating human's NC
+    // user in X-Nextcloud-User. Before the fix this confirmation dead-ended
+    // at 400 TOKEN_USER_MISMATCH because the human owner's id != the minter's
+    // "_service:mcp". The token store is module-global, so the owner app
+    // confirms the MCP-minted token.
+    const mcpApp = buildApp(mcpPrincipal);
+    const first = await request(mcpApp)
+      .post("/api/cameras/clips/share")
+      .set("X-Nextcloud-User", "stefan")
+      .send({ nc_path: "/Clips/front/x.mp4", ttl_minutes: 60 });
+    expect(first.status).toBe(202);
+    expect(first.body.url).toBeUndefined();
+    const token = first.body.confirmationToken as string;
+    expect(token).toBeTruthy();
+
+    const ownerApp = buildApp(owner);
+    const second = await request(ownerApp)
+      .post("/api/cameras/clips/share")
+      .send({ nc_path: "/Clips/front/x.mp4", ttl_minutes: 60, confirmation_token: token });
+    expect(second.status).toBe(200);
+    expect(second.body.url).toContain("/api/cameras/clips/share/");
+    expect(second.body.expires_at).toBeTruthy();
+  });
+
+  it("an UNAUTHORIZED user (guest) cannot confirm an agent-minted share (403)", async () => {
+    // The route guard (requireRoleOrMcpService owner/admin/family) rejects a
+    // guest before the handler runs, so a guest can never dispose of an
+    // agent-proposed share even with a valid token.
+    const mcpApp = buildApp(mcpPrincipal);
+    const first = await request(mcpApp)
+      .post("/api/cameras/clips/share")
+      .set("X-Nextcloud-User", "stefan")
+      .send({ nc_path: "/Clips/front/x.mp4" });
+    expect(first.status).toBe(202);
+    const token = first.body.confirmationToken as string;
+
+    const second = await request(buildApp(guest))
+      .post("/api/cameras/clips/share")
+      .send({ nc_path: "/Clips/front/x.mp4", confirmation_token: token });
+    expect(second.status).toBe(403);
+    expect(second.body.url).toBeUndefined();
   });
 
   it("the MCP principal CANNOT self-confirm even with a valid token (403)", async () => {
