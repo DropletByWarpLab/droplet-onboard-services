@@ -94,3 +94,52 @@ async def _patch_draft(draft_id: str, body: dict[str, Any]) -> bool:
         resp.status_code, resp.text[:200],
     )
     return False
+
+
+async def claim_draft(draft_id: str) -> bool:
+    """WARP-890: atomically claim a queued draft (queued -> sending) before the
+    SMTP send. Returns True only if THIS call won the claim (the draft was still
+    queued); False if it was already in-flight/sent or on any error — the caller
+    then skips the send, so a lost terminal callback can't cause a duplicate."""
+    headers = _auth_headers()
+    if headers is None:
+        return False
+    url = f"{ORCHESTRATOR_URL}/api/email/drafts/{draft_id}/claim"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(url, headers=headers)
+    except httpx.HTTPError as exc:
+        logger.warning("draft claim POST failed: %s", exc)
+        return False
+    if resp.status_code == 200:
+        try:
+            return bool(resp.json().get("claimed"))
+        except Exception:  # noqa: BLE001
+            return False
+    logger.warning(
+        "draft claim non-2xx: status=%d body=%s", resp.status_code, resp.text[:200]
+    )
+    return False
+
+
+async def reconcile_stale_sending() -> int:
+    """WARP-890: ask the orchestrator to fail-out drafts stranded in `sending`
+    past the grace window (a claimed draft whose terminal callback never landed).
+    Best-effort — returns the count reconciled, or 0 on error."""
+    headers = _auth_headers()
+    if headers is None:
+        return 0
+    url = f"{ORCHESTRATOR_URL}/api/email/drafts/reconcile-stale-sending"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(url, headers=headers)
+    except httpx.HTTPError as exc:
+        logger.warning("reconcile-stale-sending POST failed: %s", exc)
+        return 0
+    if resp.status_code == 200:
+        try:
+            return int(resp.json().get("reconciled", 0))
+        except Exception:  # noqa: BLE001
+            return 0
+    logger.warning("reconcile-stale-sending non-2xx: status=%d", resp.status_code)
+    return 0

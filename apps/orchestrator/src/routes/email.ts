@@ -23,6 +23,7 @@ import type { PrismaClient } from "@prisma/client";
 import pino from "pino";
 import { requireRole } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
+import { reconcileStaleSending } from "../services/email-reconcile.service.js";
 
 const logger = pino({ name: "email-route" });
 
@@ -121,8 +122,9 @@ interface DraftRow {
   subject: string;
   body: string;
   draftedByDroplet: boolean;
-  status: "draft" | "queued" | "sent" | "failed";
+  status: "draft" | "queued" | "sending" | "sent" | "failed";
   sentAt: Date | null;
+  claimedAt: Date | null;
   error: string | null;
   createdAt: Date;
   updatedAt: Date;
@@ -480,7 +482,10 @@ export function createEmailRouter(
           res.status(404).json({ error: "Draft not found" });
           return;
         }
-        if (draft.status !== "queued") {
+        // The terminal status callback may arrive from `queued` (legacy direct
+        // send) or `sending` (WARP-890: the indexer claims queued→sending before
+        // the SMTP send). Both are valid sources for sent/failed.
+        if (draft.status !== "queued" && draft.status !== "sending") {
           // Idempotent: re-asserting a status the row already holds
           // is a 200 no-op (the indexer may redeliver a callback on
           // reconnect). Anything else is a contract violation.
@@ -489,7 +494,7 @@ export function createEmailRouter(
             return;
           }
           res.status(409).json({
-            error: "Draft not in queued state",
+            error: "Draft not in queued or sending state",
             currentStatus: draft.status,
           });
           return;
@@ -503,6 +508,57 @@ export function createEmailRouter(
           },
         })) as unknown as DraftRow;
         res.json({ id: updated.id, status: updated.status });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // POST /api/email/drafts/:id/claim  (service principal)
+  // Atomically transition a queued draft to `sending` so the email-indexer's
+  // outbound poller SMTP-sends it exactly once. A conditional updateMany
+  // (WARP-564 pairing-claim pattern) means a re-tick — or a second poller —
+  // that loses the race gets { claimed: false } and skips, so a lost terminal
+  // status callback can never cause a duplicate re-send (WARP-890).
+  router.post(
+    "/email/drafts/:id/claim",
+    requireRole("service"),
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const result = await prisma.emailDraft.updateMany({
+          where: { id: req.params.id, status: "queued" },
+          // claimedAt is the tamper-proof reconcile clock (NOT updatedAt, which
+          // @updatedAt resets on any later row write). Set it at the moment of
+          // the claim so the stale-sending sweep measures the grace window from
+          // here. (WARP-890)
+          data: { status: "sending", claimedAt: new Date() },
+        });
+        res.json({ id: req.params.id, claimed: result.count === 1 });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // POST /api/email/drafts/reconcile-stale-sending  (service principal)
+  // A draft claimed (queued→sending) whose terminal status callback never
+  // landed (indexer crash / lost PATCH) would otherwise strand in `sending`.
+  // Sweep rows stuck in `sending` past a grace window to `failed`. We do NOT
+  // re-queue them: the SMTP send may have completed, and re-queuing would risk
+  // the duplicate this change exists to prevent. The indexer calls this once
+  // per outbound tick (belt-and-suspenders); the orchestrator ALSO runs the
+  // same sweep on a cron (see index.ts) so recovery is independent of the
+  // indexer being up. The cutoff keys off the explicit `claimedAt` column, not
+  // `updatedAt`. Grace window default 10 min (EMAIL_SENDING_STALE_MS). The
+  // sweep logic lives in email-reconcile.service so the route and the cron
+  // share exactly one implementation.
+  router.post(
+    "/email/drafts/reconcile-stale-sending",
+    requireRole("service"),
+    async (_req: Request, res: Response, next: NextFunction) => {
+      try {
+        const reconciled = await reconcileStaleSending(prisma);
+        res.json({ reconciled });
       } catch (err) {
         next(err);
       }

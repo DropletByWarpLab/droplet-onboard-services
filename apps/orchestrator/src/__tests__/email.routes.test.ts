@@ -56,8 +56,9 @@ interface DraftRow {
   subject: string;
   body: string;
   draftedByDroplet: boolean;
-  status: "draft" | "queued" | "sent" | "failed";
+  status: "draft" | "queued" | "sending" | "sent" | "failed";
   sentAt: Date | null;
+  claimedAt: Date | null;
   error: string | null;
   createdAt: Date;
   updatedAt: Date;
@@ -147,7 +148,7 @@ function createPrismaMock(opts: {
         async ({
           data,
         }: {
-          data: Omit<DraftRow, "id" | "createdAt" | "updatedAt" | "status" | "sentAt" | "error">;
+          data: Omit<DraftRow, "id" | "createdAt" | "updatedAt" | "status" | "sentAt" | "claimedAt" | "error">;
         }) => {
           const id = `draft-${nextId++}`;
           const now = new Date();
@@ -157,6 +158,7 @@ function createPrismaMock(opts: {
             updatedAt: now,
             status: "draft",
             sentAt: null,
+            claimedAt: null,
             error: null,
             ...data,
           };
@@ -177,6 +179,39 @@ function createPrismaMock(opts: {
           const merged = { ...existing, ...data, updatedAt: new Date() };
           drafts.set(where.id, merged);
           return merged;
+        },
+      ),
+      updateMany: vi.fn(
+        async ({
+          where,
+          data,
+        }: {
+          where: {
+            id?: string;
+            status?: DraftRow["status"];
+            updatedAt?: { lt?: Date };
+            claimedAt?: { lt?: Date };
+          };
+          data: Partial<DraftRow>;
+        }) => {
+          let count = 0;
+          for (const [id, row] of drafts) {
+            if (where.id !== undefined && row.id !== where.id) continue;
+            if (where.status !== undefined && row.status !== where.status) continue;
+            if (where.updatedAt?.lt !== undefined && !(row.updatedAt < where.updatedAt.lt))
+              continue;
+            // claimedAt filter: a NULL claimedAt never satisfies `lt cutoff`
+            // (matches Postgres NULL comparison semantics), so an unclaimed
+            // draft is never reconciled.
+            if (
+              where.claimedAt?.lt !== undefined &&
+              !(row.claimedAt !== null && row.claimedAt < where.claimedAt.lt)
+            )
+              continue;
+            drafts.set(id, { ...row, ...data, updatedAt: new Date() });
+            count++;
+          }
+          return { count };
         },
       ),
     },
@@ -393,8 +428,123 @@ describe("WARP-465 — POST /api/email/:accountId/drafts", () => {
   });
 });
 
+describe("WARP-890 — idempotent outbound (claim + reconcile)", () => {
+  function withDraft(status: DraftRow["status"], claimedAt: Date | null = null) {
+    return createPrismaMock({
+      accounts: [
+        {
+          id: "a1",
+          userId: "user-family",
+          displayName: "x",
+          address: "a@b.com",
+          imapStatus: "idle",
+          lastIdleAt: new Date(),
+          lastErrorAt: null,
+          lastError: null,
+        },
+      ],
+      drafts: [
+        {
+          id: "d1",
+          accountId: "a1",
+          threadId: null,
+          toAddrs: ["c@d.com"],
+          ccAddrs: null,
+          bccAddrs: null,
+          subject: "Test",
+          body: "Body",
+          draftedByDroplet: false,
+          status,
+          sentAt: null,
+          claimedAt,
+          error: null,
+          createdAt: new Date(),
+          // updatedAt is deliberately FRESH on every fixture row — the
+          // reconcile must NOT key off it (a fresh updatedAt would otherwise
+          // mask a long-claimed draft); it keys off claimedAt.
+          updatedAt: new Date(),
+        },
+      ],
+    });
+  }
+
+  it("claim flips a queued draft to sending, stamps claimedAt, returns claimed:true", async () => {
+    const prisma = withDraft("queued");
+    const before = Date.now();
+    const res = await request(buildApp(prisma, ALLOW_GATE, mkUser("service")))
+      .post("/api/email/drafts/d1/claim")
+      .send({});
+    expect(res.status).toBe(200);
+    expect(res.body.claimed).toBe(true);
+    expect(prisma.drafts.get("d1")?.status).toBe("sending");
+    const claimedAt = prisma.drafts.get("d1")?.claimedAt;
+    expect(claimedAt).toBeInstanceOf(Date);
+    expect(claimedAt!.getTime()).toBeGreaterThanOrEqual(before);
+  });
+
+  it("claim of a non-queued draft returns claimed:false and leaves it (re-tick is a no-op)", async () => {
+    const prisma = withDraft("sending");
+    const res = await request(buildApp(prisma, ALLOW_GATE, mkUser("service")))
+      .post("/api/email/drafts/d1/claim")
+      .send({});
+    expect(res.status).toBe(200);
+    expect(res.body.claimed).toBe(false);
+    expect(prisma.drafts.get("d1")?.status).toBe("sending"); // unchanged
+  });
+
+  it("claim requires the service role (403 otherwise)", async () => {
+    const prisma = withDraft("queued");
+    const res = await request(buildApp(prisma, ALLOW_GATE, mkUser("admin")))
+      .post("/api/email/drafts/d1/claim")
+      .send({});
+    expect(res.status).toBe(403);
+  });
+
+  it("PATCH /status accepts the sending -> sent transition", async () => {
+    const prisma = withDraft("sending");
+    const res = await request(buildApp(prisma, ALLOW_GATE, mkUser("service")))
+      .patch("/api/email/drafts/d1/status")
+      .send({ status: "sent" });
+    expect(res.status).toBe(200);
+    expect(prisma.drafts.get("d1")?.status).toBe("sent");
+  });
+
+  it("reconcile fails out a sending draft claimed before the grace window", async () => {
+    const old = new Date(Date.now() - 60 * 60 * 1000); // claimed 1h ago (past default 10m)
+    const prisma = withDraft("sending", old);
+    const res = await request(buildApp(prisma, ALLOW_GATE, mkUser("service")))
+      .post("/api/email/drafts/reconcile-stale-sending")
+      .send({});
+    expect(res.status).toBe(200);
+    expect(res.body.reconciled).toBe(1);
+    expect(prisma.drafts.get("d1")?.status).toBe("failed");
+  });
+
+  it("reconcile leaves a freshly-claimed sending draft alone", async () => {
+    const prisma = withDraft("sending", new Date());
+    const res = await request(buildApp(prisma, ALLOW_GATE, mkUser("service")))
+      .post("/api/email/drafts/reconcile-stale-sending")
+      .send({});
+    expect(res.status).toBe(200);
+    expect(res.body.reconciled).toBe(0);
+    expect(prisma.drafts.get("d1")?.status).toBe("sending");
+  });
+
+  it("reconcile ignores a sending draft with a NULL claimedAt (never matches the cutoff)", async () => {
+    // A stale updatedAt must NOT trigger reconcile when claimedAt is unset:
+    // proves the cutoff keys off claimedAt, not updatedAt.
+    const prisma = withDraft("sending", null);
+    const res = await request(buildApp(prisma, ALLOW_GATE, mkUser("service")))
+      .post("/api/email/drafts/reconcile-stale-sending")
+      .send({});
+    expect(res.status).toBe(200);
+    expect(res.body.reconciled).toBe(0);
+    expect(prisma.drafts.get("d1")?.status).toBe("sending");
+  });
+});
+
 describe("WARP-465 — POST /api/email/drafts/:id/send", () => {
-  function withDraft(status: "draft" | "queued" | "sent" | "failed" = "draft") {
+  function withDraft(status: "draft" | "queued" | "sending" | "sent" | "failed" = "draft") {
     return createPrismaMock({
       // The send/PATCH routes now run assertAccountAccessible against the
       // draft's accountId (belt-and-braces IDOR check) — the account row
@@ -424,6 +574,7 @@ describe("WARP-465 — POST /api/email/drafts/:id/send", () => {
           draftedByDroplet: false,
           status,
           sentAt: null,
+          claimedAt: null,
           error: null,
           createdAt: new Date(),
           updatedAt: new Date(),
@@ -511,6 +662,7 @@ describe("WARP-465 — PATCH /api/email/drafts/:id", () => {
           draftedByDroplet: false,
           status: "draft",
           sentAt: null,
+          claimedAt: null,
           error: null,
           createdAt: new Date(),
           updatedAt: new Date(),
@@ -555,6 +707,7 @@ describe("WARP-465 — PATCH /api/email/drafts/:id", () => {
           draftedByDroplet: false,
           status: "sent",
           sentAt: new Date(),
+          claimedAt: null,
           error: null,
           createdAt: new Date(),
           updatedAt: new Date(),

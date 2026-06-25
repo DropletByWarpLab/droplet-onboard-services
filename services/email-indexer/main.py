@@ -65,6 +65,9 @@ _scheduler: AsyncIOScheduler | None = None
 
 
 class OrchestratorStatusCallback(StatusCallback):
+    async def claim(self, draft_id: str) -> bool:
+        return await orchestrator_client.claim_draft(draft_id)
+
     async def mark_sent(self, draft_id: str) -> bool:
         return await orchestrator_client.mark_draft_sent(draft_id)
 
@@ -92,7 +95,10 @@ async def _refresh_accounts() -> None:
 
 
 async def _drain_outbound() -> None:
-    """One outbound-poller tick: SMTP-send every queued draft."""
+    """One outbound-poller tick: reconcile stuck `sending` drafts, then claim +
+    SMTP-send every queued draft (the claim makes a lost-callback re-send
+    impossible — WARP-890)."""
+    await orchestrator_client.reconcile_stale_sending()
     drafts = await db.list_queued_drafts()
     for draft in drafts:
         await send_one_draft(draft, _status_callback)

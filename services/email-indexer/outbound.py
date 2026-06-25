@@ -44,6 +44,7 @@ class DraftToSend:
 
 
 class StatusCallback(Protocol):
+    async def claim(self, draft_id: str) -> bool: ...
     async def mark_sent(self, draft_id: str) -> bool: ...
     async def mark_failed(self, draft_id: str, error: str) -> bool: ...
 
@@ -77,8 +78,18 @@ async def send_one_draft(
     draft: DraftToSend,
     callback: StatusCallback,
 ) -> bool:
-    """Dispatch one draft via SMTP, then notify the orchestrator.
+    """Claim, dispatch one draft via SMTP, then notify the orchestrator.
     Returns True on success."""
+    # WARP-890: atomically claim the draft (queued -> sending) BEFORE doing any
+    # work, so a subsequent poll tick can't re-select and re-send it if the
+    # terminal status callback below is lost. If we don't win the claim (already
+    # in-flight / no longer queued), skip without sending.
+    if not await callback.claim(draft.id):
+        logger.debug(
+            "draft %s not claimed (already in-flight or not queued); skipping",
+            draft.id,
+        )
+        return False
     # Lazy import so the unit tests for build_message / envelope_recipients
     # don't need aiosmtplib installed in the test environment.
     try:
