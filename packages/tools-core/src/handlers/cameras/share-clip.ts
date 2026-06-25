@@ -1,4 +1,5 @@
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
+import { isConfirmationResponse, passThroughConfirmation } from "../../confirmation.js";
 
 const inputSchema = {
   type: "object",
@@ -30,19 +31,30 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     };
   }
   const ttlMin = Math.max(1, Math.min(1440, Number(args.ttl_minutes) || 60));
+  // Route through the ORCHESTRATOR, not the cameras service. Minting a public
+  // "anyone with the link" signed URL to private footage is a Tier-2 action:
+  // the orchestrator's /api/cameras/clips/share endpoint runs it through the
+  // safety-tier evaluator, which answers 202 `confirmation_required` on the
+  // first (unattended) call. Without this hop the agent could sign a URL in a
+  // single tool call, defeating the requiresConfirmation flag (the cameras
+  // service has no share endpoint and applies no confirmation gate). Same
+  // pattern as add_port_forward. The per-user Nextcloud identity rides in the
+  // X-Nextcloud-User header — the orchestrator honors it for the MCP service
+  // principal (req.user.username is `_service:mcp`, not the human's NC user).
   const headers: Record<string, string> = {
     "X-Nextcloud-User": ctx.userId,
   };
-  const res = await ctx.http.cameras.post(
-    "/clips/share",
+  const res = await ctx.http.orchestrator.post(
+    "/api/cameras/clips/share",
     { nc_path: ncPath, ttl_minutes: ttlMin },
     { headers },
   );
+  if (isConfirmationResponse(res)) return passThroughConfirmation(res);
   if (!res.ok) {
     return {
       ok: false,
       status: "error",
-      error: { code: "SHARE_FAILED", message: `cameras returned ${res.status}` },
+      error: { code: "SHARE_FAILED", message: `orchestrator returned ${res.status}` },
     };
   }
   const data = await res.json();

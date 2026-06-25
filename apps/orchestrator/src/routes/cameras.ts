@@ -13,7 +13,7 @@
 import { Router } from "express";
 import { PrismaClient } from "@prisma/client";
 import pino from "pino";
-import { requireRole } from "../middleware/auth.js";
+import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import { loadCameraRetentionPolicy } from "../services/camera-retention-purge.service.js";
 import {
   getCameras,
@@ -65,6 +65,7 @@ import { isUpstreamUnavailable } from "../lib/upstream-unavailable.js";
 import { pipeUpstreamBody } from "../lib/pipe-upstream.js";
 import { config } from "../config.js";
 import { evaluateNetworkCommand, confirmNetworkCommand } from "../services/network-safety.service.js";
+import type { ConfirmNetworkCommandError } from "../services/network-safety.service.js";
 import { exportClip, signShareUrl, verifyShareUrl } from "../services/clips.service.js";
 import { resolveNcToken } from "../services/nextcloud-session.service.js";
 import { ncDownloadFile } from "../services/nextcloud.client.js";
@@ -438,28 +439,113 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.post("/cameras/clips/share", requireRole("owner", "admin", "family"), async (req, res, next) => {
+  // Sharing a clip mints a public "anyone with the link" signed URL to private
+  // footage that is unauthenticated for its whole TTL. This is a Tier-2 action,
+  // so the route runs through the network-safety evaluator and answers a 202
+  // `confirmation_required` (with a confirmation token) on the first call —
+  // exactly like the firewall writes. The AI's share_clip tool (requiresWrite +
+  // requiresConfirmation) reaches this via the MCP service principal, so the
+  // agent can NEVER sign a URL in a single unattended tool call: it must surface
+  // an approval chip and only the human can confirm. (The MCP principal is also
+  // barred from the confirm endpoint, so it can't self-approve — see
+  // network-mcp-service-rbac.test.ts.)
+  router.post("/cameras/clips/share", requireRoleOrMcpService("owner", "admin", "family"), async (req, res, next) => {
     try {
       const schema = z.object({
         nc_path: z.string().min(1).max(2048),
         ttl_minutes: z.number().int().min(1).max(1440).optional(),
+        // Present only on the post-confirmation re-issue: the token the human
+        // received in the first call's 202. Absent → first (unconfirmed) call.
+        confirmation_token: z.string().min(1).max(256).optional(),
       });
       const parsed = schema.safeParse(req.body);
       if (!parsed.success) {
         return res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
       }
-      const userId = req.user?.username;
+
+      const isMcp = req.user?.id === "_service:mcp";
+
+      // Resolve the Nextcloud user the URL is signed for. Human sessions use
+      // their own username; the MCP service principal (req.user.username ===
+      // "_service:mcp") forwards the real human's NC user in X-Nextcloud-User,
+      // honored ONLY for that trusted principal (mirrors the /api/files routes).
+      let userId: string | undefined;
+      if (isMcp) {
+        const hdr = req.header("X-Nextcloud-User");
+        userId = typeof hdr === "string" && hdr.length > 0 ? hdr : undefined;
+      } else {
+        userId = req.user?.username;
+      }
       if (!userId) return res.status(401).json({ error: "unauthenticated" });
 
       // Defense-in-depth path check — mirrors PR #1's validateNcPath logic so
       // a caller can't sign a token whose ncPath traverses out of their own
       // Nextcloud namespace. Whether Sabre/DAV would also reject is immaterial
-      // — we don't want to rely on it.
+      // — we don't want to rely on it. Run BEFORE the confirmation mint so a
+      // malformed path 400s rather than parking a pending token.
       const pathValid = isSafeNcPath(parsed.data.nc_path);
       if (!pathValid.ok) {
         return res.status(400).json({ error: pathValid.error });
       }
 
+      // Post-confirmation re-issue: the caller echoes the token from the 202.
+      // The MCP principal is BARRED from confirming (mirrors the human-only
+      // /network/command/confirm guard) — the whole point is that the agent
+      // can mint a 202 but a human, not the agent, must approve it. Without
+      // this bar the agent could re-call with the token it just received and
+      // self-approve, defeating the gate.
+      if (parsed.data.confirmation_token) {
+        if (isMcp) {
+          return res.status(403).json({
+            error: "share_clip confirmation must come from a signed-in user, not the assistant",
+          });
+        }
+        const confirmRes = await confirmNetworkCommand(
+          prisma,
+          parsed.data.confirmation_token,
+          req.user?.id,
+          { operation: "share_clip", entityId: "camera.clip.share" },
+        );
+        if (!confirmRes.confirmed) {
+          const code: ConfirmNetworkCommandError = confirmRes.code;
+          return res.status(400).json({ error: confirmRes.reason, code });
+        }
+        const ttlSec = (parsed.data.ttl_minutes ?? 60) * 60;
+        const token = signShareUrl(userId, pathValid.path, ttlSec);
+        const filename = pathValid.path.split("/").pop() ?? "clip.mp4";
+        return res.json({
+          url: `/api/cameras/clips/share/${encodeURIComponent(filename)}?t=${encodeURIComponent(token)}`,
+          expires_at: new Date(Date.now() + ttlSec * 1000).toISOString(),
+        });
+      }
+
+      // First call — Tier-2 confirmation gate. evaluateNetworkCommand classifies
+      // share_clip as Tier 2 → requiresConfirmation, and this route answers 202
+      // with a token. The URL is signed only AFTER a human confirms and the
+      // caller re-issues this request with `confirmation_token`.
+      const result = await evaluateNetworkCommand(
+        prisma,
+        "camera.clip.share",
+        "share_clip",
+        { nc_path: pathValid.path, ttl_minutes: parsed.data.ttl_minutes ?? 60 },
+        req.user?.id,
+      );
+      if ("blocked" in result && result.blocked) {
+        return res.status(429).json({ error: result.reason, tier: result.tier, blocked: true });
+      }
+      if ("requiresConfirmation" in result && result.requiresConfirmation) {
+        return res.status(202).json({
+          status: "confirmation_required",
+          operation: "share_clip",
+          tier: result.tier,
+          reason: result.reason,
+          confirmationToken: result.confirmationToken,
+          expiresIn: 60,
+        });
+      }
+
+      // Tier-1 fallthrough (not expected for share_clip, but keep the
+      // contract honest if the classification ever changes).
       const ttlSec = (parsed.data.ttl_minutes ?? 60) * 60;
       const token = signShareUrl(userId, pathValid.path, ttlSec);
       const filename = pathValid.path.split("/").pop() ?? "clip.mp4";

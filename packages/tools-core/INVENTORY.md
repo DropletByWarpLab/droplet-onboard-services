@@ -54,7 +54,7 @@ Authoritative inventory of every tool exposed by `@droplet/tools-core` after the
 | list_clips | cameras | List recent camera clips (events with `has_clip=true`). | false | false | orchestrator |
 | export_clip | cameras | Render a custom-range clip and save it to the user's Nextcloud. | true | false | orchestrator |
 | get_camera_live_url | cameras | Dashboard URL for a live camera view. | false | false | orchestrator |
-| share_clip | cameras | Issue a short-lived signed URL for a saved clip. | true | false | orchestrator |
+| share_clip | cameras | Issue a short-lived signed URL for a saved clip. | true | true | orchestrator |
 | get_switch_ports | switch | Status of all ports on the managed PoE switch. | false | false | gateway |
 | get_switch_vlans | switch | List VLANs and port memberships. | false | false | gateway |
 | set_port_vlan | switch | Assign a switch port to a VLAN (tagged/untagged). | true | true | gateway |
