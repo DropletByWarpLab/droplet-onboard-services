@@ -1,5 +1,8 @@
 # droplet-onboard-services
 
+> ## 🪨 The Foundation (read first)
+> Droplet's founding thesis: **security and an air-gapped mentality first — without being literally air-gapped — made accessible to real customers.** The local AI **sees and manages** the network but is **never exposed** to it; everything crossing the boundary is **screened both ways** (ingress threat, egress exfiltration), default-deny, audited; the VPN runs on a separate network. The hardware is **two physically separate subsystems** — a trusted **Vault** (dual-socket off-the-shelf CPUs + up to 4 off-the-shelf PCIe GPUs/NPUs + all data + the LAN) and an untrusted **WAN/Edge** little computer (its own less-powerful CPU, storage, containers, WAN network); they share no CPU, drive, container host, or network. **Own the structure, buy the silicon** (off-the-shelf socketed CPUs/DIMMs/GPUs/drives on a custom carrier), leased on a 2-year cycle, in **two SKUs** (Full Rack + Mini Rack). When a design disagrees with the foundation, the design is wrong. Canonical: `shared_brain/FOUNDATION.md` + `droplet-hardware/docs/FOUNDATION.md`.
+
 Behavioral guidelines to reduce common LLM coding mistakes. They bias
 toward caution over speed — for trivial tasks, use judgment.
 
