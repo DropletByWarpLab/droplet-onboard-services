@@ -65,7 +65,15 @@ const VALID_ROLES: ReadonlySet<Role> = new Set([
  *     here no longer means "trusted" on the HTTP path.
  */
 export function verifyJwt(token: string, secret: string): Claims {
-  const decoded = jwt.verify(token, secret);
+  // Pin the accepted signing algorithm to HS256. The orchestrator's token
+  // issuer (`apps/orchestrator/src/services/jwt.service.ts`) signs both
+  // `access` and `refresh` tokens with `jwt.sign(payload, JWT_SECRET, ...)`
+  // and no explicit `algorithm` option, which means jsonwebtoken's HS256
+  // default. Without pinning, an attacker could present a token with
+  // `alg: "none"` or coerce a public-key algorithm (RS256) against the
+  // shared HMAC secret — the classic algorithm-confusion bypass. Restricting
+  // to the symmetric algorithm the issuer actually uses closes that.
+  const decoded = jwt.verify(token, secret, { algorithms: ["HS256"] });
   if (typeof decoded === "string") {
     throw new Error("malformed token: payload is a string, expected object");
   }
