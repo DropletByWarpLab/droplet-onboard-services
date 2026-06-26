@@ -190,15 +190,26 @@ export function OverrideModal({
   const [toast, setToast] = useState<string | null>(null);
   const [inlineError, setInlineError] = useState<string | null>(null);
 
+  // Minute-resolution tick so the modal never shows a stale "now" if it stays
+  // open across a schedule transition. All current-time reads in the render
+  // path (transitionInfo, computeEndAt, applyDisabled) route through `nowTick`
+  // so they agree within a render and refresh together every ~60s (WARP-103).
+  const [nowTick, setNowTick] = useState(() => new Date());
+  useEffect(() => {
+    const id = setInterval(() => setNowTick(new Date()), 60_000);
+    return () => clearInterval(id);
+  }, []);
+
   // Compute the "until next transition" chip label from the subject's
   // applicable schedules. If the next transition is >24h out (or doesn't
-  // exist), we substitute a "+30m" fallback chip.
+  // exist), we substitute a "+30m" fallback chip. Recomputed on each 60s tick
+  // (via `nowTick`) so the label and computed endAt don't go stale.
   const transitionInfo = useMemo(() => {
     const all: Schedule[] = schedulesSwr.data?.schedules ?? [];
     if (!subjectSelected) return { kind: "fallback" as const };
     const applicable = all.filter((s) => matchesSubject(s, resolvedSubject));
     if (applicable.length === 0) return { kind: "fallback" as const };
-    const now = new Date();
+    const now = nowTick;
     const next = nextTransitionFor(applicable, now);
     if (!next) return { kind: "fallback" as const };
     const minutesAhead = Math.round((next.at.getTime() - now.getTime()) / 60_000);
@@ -208,9 +219,7 @@ export function OverrideModal({
       at: next.at,
       label: `until ${formatHHMM(next.at)} (${formatRelative(minutesAhead)})`,
     };
-    // Intentionally recompute only when the schedules change; "now" is frozen
-    // to the render time, which is good enough for the modal's lifetime.
-  }, [schedulesSwr.data, subjectSelected, resolvedSubject.type, resolvedSubject.deviceMac, resolvedSubject.groupId]);
+  }, [schedulesSwr.data, subjectSelected, resolvedSubject.type, resolvedSubject.deviceMac, resolvedSubject.groupId, nowTick]);
 
   // ESC closes.
   useEffect(() => {
@@ -226,7 +235,7 @@ export function OverrideModal({
   const currentOverride = activeOverrides[0];
 
   function computeEndAt(): Date | null {
-    const now = new Date();
+    const now = nowTick;
     switch (chip) {
       case "15":
         return new Date(now.getTime() + 15 * 60_000);
@@ -250,10 +259,12 @@ export function OverrideModal({
   }
 
   const endAtDate = computeEndAt();
+  // Base the disable on `nowTick` (not a fresh Date.now()) so the button flips
+  // exactly when the displayed time advances on a tick (WARP-103 AC3).
   const applyDisabled =
     saving ||
     !endAtDate ||
-    endAtDate.getTime() <= Date.now() ||
+    endAtDate.getTime() <= nowTick.getTime() ||
     !subjectSelected;
 
   async function handleApply() {
