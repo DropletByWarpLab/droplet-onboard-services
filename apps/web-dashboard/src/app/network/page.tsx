@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   AlertCircle,
   CalendarClock,
@@ -55,6 +56,7 @@ import {
   type NetworkOperation,
   type NetworkTopology,
 } from "@/lib/api";
+import { parseNetworkTab, type Tab } from "./tab-url";
 import type {
   FirewallConfig,
   FirewallRedirect,
@@ -73,8 +75,6 @@ type OperationStatus =
   // which means a change WAS made and then reverted.
   | { state: "rejected"; id: string; reason: string | null }
   | { state: "rolled_back"; id: string; reason: string | null };
-
-type Tab = "overview" | "privacy" | "devices" | "schedules" | "wifi" | "firewall" | "system";
 
 // WARP-39: user-facing strings keyed by the RouterError.code coming off the hook.
 const ROUTER_ERROR_COPY: Record<string, { title: string; body: string }> = {
@@ -106,7 +106,30 @@ const ROUTER_ERROR_COPY: Record<string, { title: string; body: string }> = {
   },
 };
 
+// WARP-100: useSearchParams must be read under a Suspense boundary (Next.js
+// app-router). Mirror the /knowledge pattern — a thin outer component holds
+// the boundary, the inner component owns all the page logic.
 export default function NetworkPage() {
+  return (
+    <Suspense fallback={<NetworkPageSkeleton />}>
+      <NetworkPageInner />
+    </Suspense>
+  );
+}
+
+function NetworkPageSkeleton() {
+  return (
+    <ShellPage icon={<Router size={15} />} label="Network" title="Network">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        {Array.from({ length: 4 }).map((_, i) => (
+          <div key={i} className="card animate-pulse" style={{ height: 112, background: "var(--surface-2)" }} />
+        ))}
+      </div>
+    </ShellPage>
+  );
+}
+
+function NetworkPageInner() {
   const {
     overview,
     firewall,
@@ -120,7 +143,24 @@ export default function NetworkPage() {
   } = useNetwork();
   const { user } = useAuth();
   const canAuthor = user?.role === "owner" || user?.role === "admin";
-  const [activeTab, setActiveTab] = useState<Tab>("overview");
+
+  // WARP-100: tab state lives in the URL (`/network?tab=schedules`) so
+  // deep-links, browser back/forward, and the cross-tab jump from
+  // DeviceDetailPanel all work. `activeTab` is derived from the URL; switching
+  // tabs pushes a new history entry (router.push) so Back returns to the prior
+  // tab. The name `setActiveTab` is preserved so every existing call site
+  // (simple-mode snap-back, tab click, arrow-key nav, PrivacyTab) is unchanged.
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const activeTab: Tab = parseNetworkTab(searchParams?.get("tab"));
+  const setActiveTab = useCallback(
+    (next: Tab) => {
+      if (next === activeTab) return;
+      // Default to Overview (no ?tab) to keep the canonical URL clean.
+      router.push(next === "overview" ? "/network" : `/network?tab=${next}`);
+    },
+    [router, activeTab],
+  );
   const [opStatus, setOpStatus] = useState<OperationStatus>({ state: "idle" });
   // WARP-871 follow-up: while an owner-initiated reboot is in flight the router
   // is expected to drop for ~30-90s, which makes the status SWR poll fail. Lift
@@ -197,6 +237,61 @@ export default function NetworkPage() {
       clearInterval(interval);
     };
   }, [opStatus, refresh]);
+
+  // WARP-100: after a cross-tab jump (`/network?tab=schedules#schedule-<id>`),
+  // scroll the matching ScheduleRow into view once the Schedules tab has
+  // mounted. The target only exists after SchedulesTab renders its list (SWR
+  // resolves async), so poll briefly for the anchor rather than reading it
+  // synchronously. Keyed on activeTab so the scroll only fires on the
+  // Schedules tab; a short bounded retry avoids racing the SWR fetch.
+  useEffect(() => {
+    if (mode === "simple" || activeTab !== "schedules") return;
+    if (typeof window === "undefined") return;
+    const hash = window.location.hash;
+    if (!hash.startsWith("#schedule-")) return;
+    const id = hash.slice(1); // drop leading '#'
+
+    // Honour prefers-reduced-motion: the CSS global block doesn't override a
+    // programmatic scrollIntoView({behavior:"smooth"}), so gate it here —
+    // reduced-motion users get an instant jump instead of an animated scroll.
+    const reduceMotion =
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    let cancelled = false;
+    let attempts = 0;
+    const tryScroll = () => {
+      if (cancelled) return;
+      const el = document.getElementById(id);
+      if (el) {
+        el.scrollIntoView({
+          behavior: reduceMotion ? "auto" : "smooth",
+          block: "start",
+        });
+        // Land keyboard focus on the row (instant :focus ring — no timed
+        // flash). preventScroll avoids fighting the scrollIntoView above.
+        // Clean up the temporary tabindex on blur so we don't leave stray
+        // focusable artifacts across repeated jumps.
+        if (el instanceof HTMLElement) {
+          el.setAttribute("tabindex", "-1");
+          el.addEventListener(
+            "blur",
+            () => el.removeAttribute("tabindex"),
+            { once: true },
+          );
+          el.focus({ preventScroll: true });
+        }
+        return;
+      }
+      // Anchor not in the DOM yet (SchedulesTab still loading) — retry for
+      // ~2s (20 × 100ms) then give up rather than spin forever.
+      if (attempts++ < 20) setTimeout(tryScroll, 100);
+    };
+    tryScroll();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, mode]);
 
   if (isLoading) {
     return (

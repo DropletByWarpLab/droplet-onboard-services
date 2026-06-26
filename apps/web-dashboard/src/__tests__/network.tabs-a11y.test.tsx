@@ -50,3 +50,27 @@ describe("Network tabs WAI-ARIA (WARP-298)", () => {
     expect(src).toMatch(/case "End"/);
   });
 });
+
+// WARP-100 — tab state lifted to the URL (Option A). These pin the
+// URL-integration + reduced-motion scroll without mounting the hook-heavy
+// page (same rationale as the source-level a11y pins above).
+describe("Network tabs URL integration (WARP-100)", () => {
+  it("reads the active tab from useSearchParams (deep-link + back/forward)", () => {
+    expect(src).toMatch(/useSearchParams/);
+    expect(src).toMatch(/parseNetworkTab\(searchParams\?\.get\("tab"\)\)/);
+  });
+
+  it("switching tabs pushes to the router (back returns to prior tab)", () => {
+    expect(src).toMatch(/useRouter/);
+    expect(src).toMatch(/router\.push\(/);
+  });
+
+  it("wraps the page in a Suspense boundary for useSearchParams", () => {
+    expect(src).toMatch(/<Suspense/);
+  });
+
+  it("cross-tab scroll honours prefers-reduced-motion", () => {
+    expect(src).toMatch(/prefers-reduced-motion: reduce/);
+    expect(src).toMatch(/reduceMotion \? "auto" : "smooth"/);
+  });
+});

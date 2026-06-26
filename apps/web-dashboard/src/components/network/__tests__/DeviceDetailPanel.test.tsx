@@ -2,6 +2,16 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, act, waitFor, within } from "@testing-library/react";
 import { SWRConfig } from "swr";
 import { DeviceDetailPanel } from "../DeviceDetailPanel";
+
+// WARP-100: the cross-tab jump navigates via next/navigation's useRouter.
+// Pin a stable push spy so the jump assertion can read it (the global
+// setup.ts mock returns a fresh vi.fn() per call, which we can't observe).
+const pushMock = vi.fn();
+vi.mock("next/navigation", () => ({
+  usePathname: () => "/network",
+  useRouter: () => ({ push: pushMock, replace: vi.fn(), back: vi.fn() }),
+  useSearchParams: () => new URLSearchParams(),
+}));
 import type {
   EnrichedNetworkDevice,
   DevicePresenceDay,
@@ -71,6 +81,7 @@ describe("DeviceDetailPanel", () => {
     schedulesResponse = [];
     overridesResponse = [];
     groupsResponse = [];
+    pushMock.mockClear();
     fetchMock = vi.fn();
     fetchMock.mockImplementation(async (url: string) => {
       // WARP-85: GroupTypeahead (inside the panel) always fetches
@@ -352,6 +363,22 @@ describe("DeviceDetailPanel", () => {
     });
     const badge = screen.getByTestId("schedule-source-badge");
     expect(badge.textContent).toContain("via Kids");
+  });
+
+  // WARP-100: clicking the effective schedule name navigates to the
+  // Schedules tab with the row anchor, instead of the old silent
+  // location.hash dead-link.
+  it("clicking the schedule name navigates to /network?tab=schedules#schedule-<id>", async () => {
+    schedulesResponse = [makeSchedule({ id: "s1", name: "Bedtime", deviceMac: MAC })];
+    mockFetchOnceJson(fetchMock, { device: makeDevice(), presence: makePresence() });
+    renderPanel();
+    await screen.findByLabelText("Display name");
+
+    const nameBtn = await screen.findByRole("button", { name: "Bedtime" });
+    fireEvent.click(nameBtn);
+
+    expect(pushMock).toHaveBeenCalledTimes(1);
+    expect(pushMock).toHaveBeenCalledWith("/network?tab=schedules#schedule-s1");
   });
 
   it("renders the active override banner + Cancel button when an override is live", async () => {
