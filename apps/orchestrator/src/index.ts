@@ -45,10 +45,8 @@ import {
 } from "./services/tls-issuance.adapters.js";
 import { scheduleTlsBootTick } from "./services/tls-issuance.boot-tick.js";
 import { createDeviceIdentityClient } from "./services/device-identity.client.js";
-import {
-  createScheduleTicker,
-  type FirewallClient,
-} from "./services/schedule-ticker.js";
+import { createScheduleTicker } from "./services/schedule-ticker.js";
+import { createFirewallAdapter } from "./services/firewall-adapter.service.js";
 import {
   createEgressReconciler,
   type EgressClient,
@@ -248,14 +246,7 @@ async function main() {
   // live firewall state and dispatches block/unblock via the openwrt
   // client. A daily 03:00 cron purges old schedule events (>7d) and
   // long-expired overrides (>24h past endAt).
-  const firewall: FirewallClient = {
-    async block(mac) {
-      await openwrt.blockDevice(mac);
-    },
-    async unblock(mac) {
-      await openwrt.unblockDevice(mac);
-    },
-  };
+  const firewall = createFirewallAdapter(openwrt);
   // Critical fix #1: pass prisma so `scheduleInterval`/`scheduleCron` can
   // acquire a pg advisory lock per tick. In multi-instance deploys (K8s
   // replicas, warm standby) only the replica that wins the lock runs
