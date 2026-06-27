@@ -28,7 +28,7 @@ export interface SchedulePreset {
   overrideDurationMin?: number;
 }
 
-export const SCHEDULE_PRESETS: SchedulePreset[] = [
+export const SCHEDULE_PRESETS = [
   {
     id: "bedtime",
     name: "Bedtime",
@@ -61,10 +61,40 @@ export const SCHEDULE_PRESETS: SchedulePreset[] = [
     icon: "Clock",
     overrideDurationMin: 90,
   },
-];
+] as const satisfies readonly SchedulePreset[];
+
+/** Every preset id in the registry (`"bedtime" | "school" | "homework"`). */
+export type SchedulePresetId = (typeof SCHEDULE_PRESETS)[number]["id"];
+
+/**
+ * Ids of the `recurring` presets only (`"bedtime" | "school"`) — the ones that
+ * flow through `ScheduleEditorModal`. Derived from the registry via `as const`
+ * literal preservation, so adding a new `kind: "recurring"` preset to
+ * `SCHEDULE_PRESETS` widens this union automatically with no other edits
+ * (WARP-102). Override presets (e.g. `homework`) are excluded by `Extract`.
+ */
+export type RecurringSchedulePresetId = Extract<
+  (typeof SCHEDULE_PRESETS)[number],
+  { kind: "recurring" }
+>["id"];
 
 export function presetById(
-  id: SchedulePreset["id"],
+  id: SchedulePresetId,
 ): SchedulePreset | undefined {
   return SCHEDULE_PRESETS.find((p) => p.id === id);
+}
+
+/**
+ * Narrowing guard for the recurring presets. `SchedulePreset` declares `id`
+ * and `kind` as independent flat unions (not a discriminated union), so a bare
+ * `preset.kind === "recurring"` check does NOT narrow `preset.id` from the full
+ * `SchedulePresetId` down to `RecurringSchedulePresetId`. This predicate makes
+ * that narrowing explicit so call sites (e.g. `SchedulesTab`) can pass
+ * `preset.id` to a `RecurringSchedulePresetId` slot without an `as` cast
+ * (WARP-102).
+ */
+export function isRecurringPreset(
+  preset: SchedulePreset,
+): preset is SchedulePreset & { id: RecurringSchedulePresetId } {
+  return preset.kind === "recurring";
 }

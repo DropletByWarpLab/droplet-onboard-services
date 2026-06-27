@@ -8,7 +8,7 @@ import { useNetworkGroups } from "@/lib/hooks/useNetworkGroups";
 import type { Schedule } from "@/lib/types";
 import { WeeklyWindowsEditor, type WindowDraft } from "./WeeklyWindowsEditor";
 import { ScheduleHeatmap } from "./ScheduleHeatmap";
-import { presetById } from "./schedule-presets";
+import { presetById, type RecurringSchedulePresetId } from "./schedule-presets";
 import { Dialog } from "@/components/Dialog";
 
 /**
@@ -24,12 +24,6 @@ import { Dialog } from "@/components/Dialog";
  * and keep the form open so the user can fix the offending field.
  */
 
-/** Preset identifier used when creating a new schedule. Mirrors the
- * recurring-preset ids in the shared `SCHEDULE_PRESETS` registry. Override
- * presets (e.g. `homework`) don't flow through this path — they open the
- * `OverrideModal` instead, so they're intentionally excluded here. */
-export type SchedulePresetId = "bedtime" | "school";
-
 /** Subject hint for pre-filling the subject selector on a new schedule. */
 export type InitialSubject =
   | { type: "device"; deviceMac: string }
@@ -42,19 +36,21 @@ interface Props {
    * editing an existing one (subject is immutable post-create). */
   initialSubject?: InitialSubject;
   /** Optional preset flag — pre-fills name + windows on a NEW schedule.
-   * Kept as a string for forward-compat with WARP-99's preset registry. */
-  initialPreset?: SchedulePresetId;
+   * Derived from the recurring entries of the shared `SCHEDULE_PRESETS`
+   * registry (WARP-102), so a new `kind: "recurring"` preset flows through
+   * automatically. */
+  initialPreset?: RecurringSchedulePresetId;
 }
 
 // Preset pre-fill now comes from the shared SCHEDULE_PRESETS registry
 // (WARP-99 / T8) rather than being inlined here.
-function windowsForPreset(preset: SchedulePresetId) {
+function windowsForPreset(preset: RecurringSchedulePresetId) {
   const p = presetById(preset);
   if (p?.windows) return p.windows.map((w) => ({ ...w }));
   return [{ daysOfWeek: 0, startMin: 0, endMin: 60 }];
 }
 
-function nameForPreset(preset: SchedulePresetId): string {
+function nameForPreset(preset: RecurringSchedulePresetId): string {
   return presetById(preset)?.name ?? "";
 }
 
@@ -99,7 +95,7 @@ function serializeWindows(windows: WindowDraft[]) {
 
 function blankForm(
   initialSubject?: InitialSubject,
-  initialPreset?: SchedulePresetId,
+  initialPreset?: RecurringSchedulePresetId,
 ): FormState {
   const windows = initialPreset
     ? windowsForPreset(initialPreset)
