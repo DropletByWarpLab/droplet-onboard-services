@@ -393,7 +393,10 @@ describe("createScheduleApiService (WARP-94)", () => {
   });
 
   describe("updateSchedule", () => {
-    it("rejects any attempt to change subjectType/deviceMac/groupId", async () => {
+    // WARP-110: subject immutability is value-equality, not presence.
+    // Re-sending a subject field with its CURRENT value is a no-op and
+    // must succeed (idempotent PATCH); only a changed value is rejected.
+    it("rejects a CHANGED subjectType/deviceMac/groupId", async () => {
       const s = await svc.createSchedule({
         name: "S",
         subjectType: "device",
@@ -409,6 +412,28 @@ describe("createScheduleApiService (WARP-94)", () => {
       await expect(
         svc.updateSchedule(s.id, { groupId: "grp-1" } as any),
       ).rejects.toMatchObject({ code: "SCHEDULE_SUBJECT_MISMATCH" });
+    });
+
+    it("accepts subject fields re-sent with their current values (idempotent PATCH)", async () => {
+      const s = await svc.createSchedule({
+        name: "S",
+        subjectType: "device",
+        deviceMac: "AA:BB:CC:DD:EE:01",
+        windows: [{ daysOfWeek: 1, startMin: 0, endMin: 60 }],
+      });
+      const updated = await svc.updateSchedule(s.id, {
+        name: "Renamed",
+        enabled: false,
+        // Same shape the dashboard re-sends: subject fields unchanged.
+        subjectType: "device",
+        deviceMac: "AA:BB:CC:DD:EE:01",
+        groupId: null,
+      } as any);
+      expect(updated.name).toBe("Renamed");
+      expect(updated.enabled).toBe(false);
+      expect(updated.subjectType).toBe("device");
+      expect(updated.deviceMac).toBe("AA:BB:CC:DD:EE:01");
+      expect(updated.groupId).toBeNull();
     });
 
     it("replaces windows atomically (deletes old, inserts new)", async () => {

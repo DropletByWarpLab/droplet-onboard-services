@@ -526,6 +526,30 @@ describe("Schedule / override / event / manualBlock API (WARP-94)", () => {
       expect(res.status).toBe(400);
       expect(res.body.error.code).toBe("SCHEDULE_SUBJECT_MISMATCH");
     });
+
+    // WARP-110: re-sending the SAME subject fields (the full shape the
+    // dashboard PATCHes back) is idempotent and must succeed.
+    it("200s when the body re-sends matching subject fields", async () => {
+      const create = await request(app).post("/api/network/schedules").send({
+        name: "S",
+        subjectType: "device",
+        deviceMac: "AA:BB:CC:DD:EE:01",
+        windows: [{ daysOfWeek: 1, startMin: 0, endMin: 60 }],
+      });
+      const id = create.body.schedule.id;
+      const res = await request(app)
+        .patch(`/api/network/schedules/${id}`)
+        .send({
+          name: "Renamed",
+          subjectType: "device",
+          deviceMac: "AA:BB:CC:DD:EE:01",
+          groupId: null,
+        });
+      expect(res.status).toBe(200);
+      expect(res.body.schedule.name).toBe("Renamed");
+      expect(res.body.schedule.subjectType).toBe("device");
+      expect(res.body.schedule.deviceMac).toBe("AA:BB:CC:DD:EE:01");
+    });
   });
 
   // ---------- DELETE /network/schedules/:id ----------
