@@ -6,9 +6,11 @@
  * Business invariants enforced here (not in the route layer):
  *   - subject rule: exactly one of {deviceMac, groupId} must be set, and
  *     must match `subjectType`. Violations → SCHEDULE_SUBJECT_MISMATCH.
- *   - subject immutability: updateSchedule rejects any attempt to change
- *     subjectType / deviceMac / groupId — even when the incoming value
- *     matches the current row. Callers delete + recreate for a re-target.
+ *   - subject immutability: updateSchedule rejects subjectType / deviceMac /
+ *     groupId only when the incoming value DIFFERS from the stored value;
+ *     re-sending the same value is a no-op (idempotent PATCH). Callers
+ *     delete + recreate for a real re-target. Violations →
+ *     SCHEDULE_SUBJECT_MISMATCH.
  *   - window validity: daysOfWeek ∈ [1, 127], startMin/endMin ∈ [0, 1439],
  *     startMin !== endMin (zero-length windows rejected — wrap past
  *     midnight is fine, just not a true zero). Max 7 windows per schedule.
@@ -207,15 +209,25 @@ export function createScheduleApiService(prisma: PrismaClient) {
   }
 
   async function updateSchedule(id: string, patch: UpdateSchedulePatch) {
-    if (
-      Object.prototype.hasOwnProperty.call(patch, "subjectType") ||
-      Object.prototype.hasOwnProperty.call(patch, "deviceMac") ||
-      Object.prototype.hasOwnProperty.call(patch, "groupId")
-    ) {
-      throw DeviceRegistryError.scheduleSubjectMismatch(
-        "subject is immutable after creation — delete + recreate to re-target",
-      );
+    // WARP-110: subject immutability is value-equality, not presence.
+    // Re-sending subjectType / deviceMac / groupId with their CURRENT
+    // value is a no-op (the dashboard PATCHes back the full shape) and
+    // must succeed; only a real change is rejected. Load the existing
+    // row, compare each immutable field, then strip them so they never
+    // reach the update query.
+    const existing = await getSchedule(id);
+    for (const field of ["subjectType", "deviceMac", "groupId"] as const) {
+      const incoming = (patch as Record<string, unknown>)[field];
+      if (incoming !== undefined && incoming !== existing[field]) {
+        throw DeviceRegistryError.scheduleSubjectMismatch(
+          `${field} is immutable after creation — delete + recreate to re-target`,
+        );
+      }
     }
+    delete (patch as Record<string, unknown>).subjectType;
+    delete (patch as Record<string, unknown>).deviceMac;
+    delete (patch as Record<string, unknown>).groupId;
+
     if (patch.windows) validateWindows(patch.windows);
 
     return mapPrismaNotFound("Schedule", id, () =>
