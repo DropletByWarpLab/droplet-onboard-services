@@ -80,6 +80,10 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
   // `?legacy=1` — kept for one release while clients migrate.
   router.get("/network/devices", async (req, res, next) => {
     try {
+      // WARP-111: SWR-friendly caching so the dashboard's 15-30s polling
+      // can serve a short max-age + revalidate window instead of hammering
+      // Prisma on every client tick. Set on both branches of this read.
+      res.set("Cache-Control", "private, max-age=5, stale-while-revalidate=10");
       if (req.query.legacy === "1") {
         const devices = await getConnectedDevices();
         return res.json({ devices });

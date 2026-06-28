@@ -591,4 +591,123 @@ describe("network-device.service", () => {
       ).toBe(false);
     });
   });
+
+  /**
+   * WARP-111: single-flight de-dupe. When Redis is down `withSwrCache`
+   * degrades to passthrough (the noop cache here models that), so without
+   * single-flight every concurrent SWR refresh would hit Prisma. The
+   * service must collapse N concurrent identical reads into ONE underlying
+   * query. Driven deterministically with a manually-resolved producer so
+   * there is no timing flakiness.
+   */
+  describe("WARP-111 single-flight de-dupe", () => {
+    /** A deferred whose Prisma `findMany` only resolves when we say so. */
+    function deferredFindMany() {
+      let resolveFn!: (rows: any[]) => void;
+      const gate = new Promise<any[]>((resolve) => {
+        resolveFn = resolve;
+      });
+      const findMany = vi.fn(async () => gate);
+      return { findMany, resolve: () => resolveFn([]) };
+    }
+
+    it("collapses N concurrent identical listDevices reads into one Prisma call", async () => {
+      const { findMany, resolve } = deferredFindMany();
+      prisma.networkDevice.findMany = findMany;
+
+      // Passthrough cache == Redis-down behavior (producer every time).
+      const flightSvc = createNetworkDeviceService(
+        prisma,
+        async () => snapshot,
+        noopNetworkDeviceCache,
+      );
+
+      // Fire 5 concurrent identical reads before the producer resolves.
+      const calls = Array.from({ length: 5 }, () => flightSvc.listDevices());
+
+      // All 5 share ONE in-flight Prisma query.
+      expect(findMany).toHaveBeenCalledTimes(1);
+
+      resolve();
+      const results = await Promise.all(calls);
+
+      // Every caller observed the same resolved value.
+      expect(results).toHaveLength(5);
+      for (const r of results) {
+        expect(r).toEqual(results[0]);
+      }
+      // Still exactly one underlying query for the whole burst.
+      expect(findMany).toHaveBeenCalledTimes(1);
+    });
+
+    it("clears the in-flight entry once settled so a later read hits Prisma again", async () => {
+      const { findMany, resolve } = deferredFindMany();
+      prisma.networkDevice.findMany = findMany;
+
+      const flightSvc = createNetworkDeviceService(
+        prisma,
+        async () => snapshot,
+        noopNetworkDeviceCache,
+      );
+
+      const first = flightSvc.listDevices();
+      expect(findMany).toHaveBeenCalledTimes(1);
+      resolve();
+      await first;
+
+      // The flight map must have deleted the settled key, so the next read
+      // is a fresh Prisma call rather than a stuck stale promise.
+      const { findMany: findMany2, resolve: resolve2 } = deferredFindMany();
+      prisma.networkDevice.findMany = findMany2;
+      const second = flightSvc.listDevices();
+      expect(findMany2).toHaveBeenCalledTimes(1);
+      resolve2();
+      await second;
+    });
+
+    it("distinct opts do NOT share a flight (different cache key)", async () => {
+      const { findMany, resolve } = deferredFindMany();
+      prisma.networkDevice.findMany = findMany;
+
+      const flightSvc = createNetworkDeviceService(
+        prisma,
+        async () => snapshot,
+        noopNetworkDeviceCache,
+      );
+
+      // onlineOnly:true and the default share neither key nor flight.
+      const a = flightSvc.listDevices({ onlineOnly: true });
+      const b = flightSvc.listDevices();
+      expect(findMany).toHaveBeenCalledTimes(2);
+      resolve();
+      await Promise.all([a, b]);
+    });
+
+    it("removes the in-flight entry when the producer rejects (failures are not cached)", async () => {
+      let rejectFn!: (e: Error) => void;
+      const gate = new Promise<any[]>((_resolve, reject) => {
+        rejectFn = reject;
+      });
+      const findMany = vi.fn(async () => gate);
+      prisma.networkDevice.findMany = findMany;
+
+      const flightSvc = createNetworkDeviceService(
+        prisma,
+        async () => snapshot,
+        noopNetworkDeviceCache,
+      );
+
+      const failing = flightSvc.listDevices();
+      expect(findMany).toHaveBeenCalledTimes(1);
+      rejectFn(new Error("db down"));
+      await expect(failing).rejects.toThrow("db down");
+
+      // A rejected in-flight promise must be evicted — the retry hits Prisma
+      // again instead of replaying the cached rejection.
+      const findMany2 = vi.fn(async () => []);
+      prisma.networkDevice.findMany = findMany2;
+      await flightSvc.listDevices();
+      expect(findMany2).toHaveBeenCalledTimes(1);
+    });
+  });
 });
