@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { SWRConfig } from "swr";
 import { OverrideModal } from "../OverrideModal";
 import type { Schedule, ScheduleOverride } from "@/lib/types";
@@ -345,5 +345,104 @@ describe("OverrideModal", () => {
     await waitFor(() => {
       expect(applyBtn.disabled).toBe(false);
     });
+  });
+
+  // WARP-103: the "until next transition" chip and computed endAt are driven by
+  // a 60s tick so they don't go stale if the modal stays open across the
+  // transition boundary. We fake all timers (so advanceTimersByTime fires the
+  // interval) and flush microtasks via act() rather than using findBy/waitFor,
+  // which poll on real timers that fake timers would stall.
+  it("refreshes the transition chip label as wall-clock advances past the boundary (WARP-103)", async () => {
+    // Tue 20:59 local, one minute before the 21:00-07:00 bedtime window opens.
+    const FIXED = new Date("2026-04-14T20:59:00");
+    vi.useFakeTimers();
+    vi.setSystemTime(FIXED);
+    const schedule: Schedule = {
+      id: "s1",
+      name: "Bedtime",
+      enabled: true,
+      subjectType: "device",
+      deviceMac: "aa:bb:cc:dd:ee:ff",
+      windows: [
+        {
+          id: "w1",
+          daysOfWeek: 1 | 2 | 4 | 8 | 16,
+          startMin: 21 * 60,
+          endMin: 7 * 60,
+        },
+      ],
+      createdAt: "",
+      updatedAt: "",
+    };
+    installDefaultMocks(fetchMock, { schedules: [schedule] });
+    renderModal();
+
+    // Flush the SWR fetch + effects so the schedule-driven chip renders.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // At 20:59 the next transition is 21:00, one minute out.
+    const chip = screen.getByTestId("chip-transition");
+    expect(chip.textContent).toMatch(/until 21:00 \(1m\)/i);
+
+    // Advance two minutes of wall-clock; the 60s interval should fire and force
+    // a re-render. We're now at 21:01 — inside the window — so the next
+    // transition flips to the 07:00 window close the following morning.
+    await act(async () => {
+      vi.advanceTimersByTime(120_000);
+      await Promise.resolve();
+    });
+
+    const refreshed = screen.getByTestId("chip-transition");
+    expect(refreshed.textContent).toMatch(/until 07:00/i);
+    expect(refreshed.textContent).not.toMatch(/until 21:00/i);
+  });
+
+  // WARP-103 AC3: once wall-clock ticks past the selected endAt, Apply flips to
+  // disabled — the disable is driven by the same nowTick, not a stale render.
+  it("disables Apply once the tick crosses the selected endAt (WARP-103)", async () => {
+    // 20:59 local; pick a custom endAt one minute out (21:00).
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-14T20:59:00"));
+    installDefaultMocks(fetchMock);
+    renderModal();
+
+    fireEvent.click(screen.getByRole("button", { name: /custom/i }));
+    const input = screen.getByLabelText(/^end at$/i);
+    fireEvent.change(input, { target: { value: "2026-04-14T21:00" } });
+
+    const applyBtn = screen.getByRole("button", {
+      name: /^apply$/i,
+    }) as HTMLButtonElement;
+    // endAt (21:00) is still ahead of now (20:59) → enabled.
+    expect(applyBtn.disabled).toBe(false);
+
+    // Advance two minutes (to 21:01) so the tick fires and now is past endAt.
+    await act(async () => {
+      vi.advanceTimersByTime(120_000);
+      await Promise.resolve();
+    });
+
+    expect(applyBtn.disabled).toBe(true);
+  });
+
+  // WARP-103 AC4: the 60s interval is cleared on unmount so it stops bumping
+  // state after the modal closes.
+  it("clears the 60s tick interval on unmount (WARP-103)", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-14T20:59:00"));
+    const clearSpy = vi.spyOn(globalThis, "clearInterval");
+    installDefaultMocks(fetchMock);
+    const { unmount } = renderModal();
+    // Let the initial render + effects settle.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const before = clearSpy.mock.calls.length;
+    unmount();
+    expect(clearSpy.mock.calls.length).toBeGreaterThan(before);
+    clearSpy.mockRestore();
   });
 });
