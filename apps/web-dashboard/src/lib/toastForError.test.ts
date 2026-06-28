@@ -17,9 +17,9 @@ describe("toastForError", () => {
     );
   });
 
-  it("preserves the REQUIRES_CONFIRMATION copy the block flow asserts on", () => {
+  it("returns the REQUIRES_CONFIRMATION copy the block flow asserts on", () => {
     expect(toastForError({ code: "REQUIRES_CONFIRMATION" })).toBe(
-      "This action requires confirmation — not wired yet",
+      "Please confirm this action to continue",
     );
   });
 

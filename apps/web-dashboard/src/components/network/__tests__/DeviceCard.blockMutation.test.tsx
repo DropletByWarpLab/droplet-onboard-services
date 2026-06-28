@@ -204,7 +204,7 @@ describe("DeviceCard block/unblock mutation", () => {
     await waitFor(() => expect(onError).toHaveBeenCalled());
     // Friendly copy from TOAST_COPY[REQUIRES_CONFIRMATION]
     expect(onError.mock.calls[0][0]).toBe(
-      "This action requires confirmation — not wired yet",
+      "Please confirm this action to continue",
     );
   });
 });

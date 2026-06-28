@@ -14,12 +14,12 @@ export const TOAST_COPY: Record<string, string> = {
   // Device + group registry errors (was `useDeviceMutations` / `useGroupMutations`).
   INVALID_ICON: "Pick a different icon",
   INVALID_MAC: "Device address is invalid",
-  NOT_FOUND: "Device was forgotten or never seen",
+  NOT_FOUND: "That's no longer available",
   DUPLICATE_GROUP_NAME: "A group with that name already exists",
-  GROUP_IN_USE: "Can't delete — group still has devices",
-  // WARP-41 will wire the confirm flow; until then we want the user to know
-  // why the action didn't go through rather than seeing a raw upstream error.
-  REQUIRES_CONFIRMATION: "This action requires confirmation — not wired yet",
+  GROUP_IN_USE: "Can't delete: this group still has devices",
+  // WARP-41 will wire the confirm flow; the copy stays subject-neutral and
+  // free of internal-state leakage for the home-user persona (WARP-105 UX).
+  REQUIRES_CONFIRMATION: "Please confirm this action to continue",
 
   // Schedule editor errors (was `ScheduleEditorModal`'s local map).
   SCHEDULE_INVALID_WINDOW: "Please check your schedule windows",
