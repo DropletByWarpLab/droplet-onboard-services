@@ -67,10 +67,9 @@ function mapPrismaNotFound<T>(
 // both pass the in-process validateWindows check) fails with Prisma P2002.
 // Translate it to a clean 400 SCHEDULE_INVALID_WINDOW so the client sees the
 // same error shape as the synchronous validation failures.
-// `fn` returns the `any`-typed Prisma promise (the service casts `p.*` models
-// to `any`); we preserve that `any` so callers keep their existing return
-// shape rather than collapsing to `unknown`.
-function mapDuplicateWindow(fn: () => Promise<any>): Promise<any> {
+// Generic so each caller keeps its own Prisma result type through the
+// P2002 translation rather than collapsing to `any`/`unknown`.
+function mapDuplicateWindow<T>(fn: () => Promise<T>): Promise<T> {
   return fn().catch((err) => {
     if (
       err instanceof Prisma.PrismaClientKnownRequestError &&
@@ -188,28 +187,15 @@ export interface ListScheduleEventsOpts {
 }
 
 export function createScheduleApiService(prisma: PrismaClient) {
-  // Prisma's generated types for Schedule / ScheduleOverride / ScheduleEvent
-  // exist — we take `any` here only to keep the route layer ergonomic and
-  // avoid dragging model-level types through every test. The invariants we
-  // care about are enforced above.
-  const p = prisma as unknown as {
-    schedule: any;
-    scheduleWindow: any;
-    scheduleOverride: any;
-    scheduleEvent: any;
-    networkDevice: any;
-    $transaction: (fn: (tx: any) => Promise<any>) => Promise<any>;
-  };
-
   async function listSchedules() {
-    return p.schedule.findMany({
+    return prisma.schedule.findMany({
       include: { windows: true },
       orderBy: [{ enabled: "desc" }, { name: "asc" }],
     });
   }
 
   async function getSchedule(id: string) {
-    const s = await p.schedule.findUnique({
+    const s = await prisma.schedule.findUnique({
       where: { id },
       include: { windows: true },
     });
@@ -221,7 +207,7 @@ export function createScheduleApiService(prisma: PrismaClient) {
     validateSubject(input);
     validateWindows(input.windows);
     return mapDuplicateWindow(() =>
-      p.schedule.create({
+      prisma.schedule.create({
         data: {
           name: input.name,
           enabled: input.enabled ?? true,
@@ -259,7 +245,7 @@ export function createScheduleApiService(prisma: PrismaClient) {
 
     return mapDuplicateWindow(() =>
       mapPrismaNotFound("Schedule", id, () =>
-        p.$transaction(async (tx: any) => {
+        prisma.$transaction(async (tx) => {
           if (patch.windows) {
             await tx.scheduleWindow.deleteMany({ where: { scheduleId: id } });
           }
@@ -279,7 +265,7 @@ export function createScheduleApiService(prisma: PrismaClient) {
 
   async function deleteSchedule(id: string) {
     return mapPrismaNotFound("Schedule", id, () =>
-      p.schedule.delete({ where: { id } }),
+      prisma.schedule.delete({ where: { id } }),
     );
   }
 
@@ -291,7 +277,7 @@ export function createScheduleApiService(prisma: PrismaClient) {
     if (opts.active) {
       where.AND = [{ startAt: { lte: now } }, { endAt: { gt: now } }];
     }
-    return p.scheduleOverride.findMany({
+    return prisma.scheduleOverride.findMany({
       where,
       orderBy: { startAt: "desc" },
     });
@@ -315,7 +301,7 @@ export function createScheduleApiService(prisma: PrismaClient) {
         "override may not exceed 90 days",
       );
     }
-    return p.scheduleOverride.create({
+    return prisma.scheduleOverride.create({
       data: {
         subjectType: input.subjectType,
         deviceMac: input.deviceMac ?? null,
@@ -330,13 +316,13 @@ export function createScheduleApiService(prisma: PrismaClient) {
 
   async function cancelOverride(id: string) {
     return mapPrismaNotFound("Override", id, () =>
-      p.scheduleOverride.delete({ where: { id } }),
+      prisma.scheduleOverride.delete({ where: { id } }),
     );
   }
 
   async function listScheduleEvents(opts: ListScheduleEventsOpts) {
     const take = Math.min(Math.max(opts.limit ?? 50, 1), 200);
-    return p.scheduleEvent.findMany({
+    return prisma.scheduleEvent.findMany({
       where: opts.since ? { occurredAt: { gte: opts.since } } : undefined,
       orderBy: { occurredAt: "desc" },
       take,
@@ -345,7 +331,7 @@ export function createScheduleApiService(prisma: PrismaClient) {
 
   async function setManualBlock(mac: string, blocked: boolean) {
     return mapPrismaNotFound("Device", mac, () =>
-      p.networkDevice.update({
+      prisma.networkDevice.update({
         where: { mac },
         data: { manualBlock: blocked },
         select: { mac: true, manualBlock: true },

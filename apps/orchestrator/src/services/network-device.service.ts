@@ -186,7 +186,7 @@ export function createNetworkDeviceService(
       }
 
       const now = Date.now();
-      const enriched = rows.map((row: any) => {
+      const enriched = rows.map((row) => {
         const online = row.lastSeen.getTime() > now - ONLINE_WINDOW_MS;
         const signal = signalByMac.get(row.mac);
         return {
@@ -196,7 +196,7 @@ export function createNetworkDeviceService(
         };
       });
 
-      return opts.onlineOnly ? enriched.filter((d: any) => d.online) : enriched;
+      return opts.onlineOnly ? enriched.filter((d) => d.online) : enriched;
     }),
     );
   }
@@ -213,7 +213,7 @@ export function createNetworkDeviceService(
     if (!device) {
       throw DeviceRegistryError.notFound(`Device ${mac}`);
     }
-    return { device, presence: (device as any).presenceDays ?? [] };
+    return { device, presence: device.presenceDays ?? [] };
   }
 
   async function updateDevice(

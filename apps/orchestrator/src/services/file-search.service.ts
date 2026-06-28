@@ -128,11 +128,7 @@ export async function searchByVector(
     ORDER BY embedding <=> '${vec}'::vector
     LIMIT $${limitParam}
   `;
-  const rows = await (
-    prisma as unknown as {
-      $queryRawUnsafe: (sql: string, ...params: unknown[]) => Promise<RawSearchRow[]>;
-    }
-  ).$queryRawUnsafe(sql, ...args);
+  const rows = await prisma.$queryRawUnsafe<RawSearchRow[]>(sql, ...args);
 
   return rows
     .filter((r) => Number.isFinite(r.score) && r.score >= params.minSimilarity)
@@ -194,11 +190,7 @@ export async function searchByLexical(
      WHERE ${where.join(" AND ")}
      ORDER BY score DESC
      LIMIT $${limitParam}`;
-  const rows = await (
-    prisma as unknown as {
-      $queryRawUnsafe: (sql: string, ...params: unknown[]) => Promise<RawSearchRow[]>;
-    }
-  ).$queryRawUnsafe(sql, ...args);
+  const rows = await prisma.$queryRawUnsafe<RawSearchRow[]>(sql, ...args);
   return rows.map((r) => ({
     source: r.source,
     path: r.path,
@@ -614,11 +606,7 @@ export async function listRecent(
     ORDER BY source, path, "indexedAt" DESC
     LIMIT $${limitParam}
   `;
-  const rows = await (
-    prisma as unknown as {
-      $queryRawUnsafe: (sql: string, ...params: unknown[]) => Promise<RawRecentRow[]>;
-    }
-  ).$queryRawUnsafe(sql, ...args);
+  const rows = await prisma.$queryRawUnsafe<RawRecentRow[]>(sql, ...args);
 
   // The DISTINCT ON ordering above groups by file; we re-sort by
   // indexedAt DESC for the dashboard's "newest first" expectation,

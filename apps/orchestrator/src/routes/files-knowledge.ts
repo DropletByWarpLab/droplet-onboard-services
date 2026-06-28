@@ -37,7 +37,7 @@
  */
 
 import { Router } from "express";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, type Prisma, type FileContentChunk } from "@prisma/client";
 import pino from "pino";
 
 import { AnchorSchema, type Anchor } from "@droplet/shared-types";
@@ -229,13 +229,17 @@ export function createFilesKnowledgeRouter(prisma: PrismaClient): Router {
       // migration applies, Prisma rejects the field with P2009/P2016.
       // We retry without the column on those errors so the route
       // degrades gracefully on partial deploys.
-      const baseWhere: Record<string, unknown> = { userId: user.username };
+      const baseWhere: Prisma.FileContentChunkWhereInput = {
+        userId: user.username,
+      };
       if (validBefore) baseWhere.indexedAt = { lt: validBefore };
-      const fullWhere = source ? { ...baseWhere, source } : baseWhere;
+      const fullWhere: Prisma.FileContentChunkWhereInput = source
+        ? { ...baseWhere, source }
+        : baseWhere;
 
-      let rows: any[] = [];
+      let rows: FileContentChunk[] = [];
       try {
-        rows = await (prisma as any).fileContentChunk.findMany({
+        rows = await prisma.fileContentChunk.findMany({
           where: fullWhere,
           orderBy: { indexedAt: "desc" },
           take: limit,
@@ -252,7 +256,7 @@ export function createFilesKnowledgeRouter(prisma: PrismaClient): Router {
             { err: msg },
             "FileContentChunk.source not in schema yet — retrying without filter"
           );
-          rows = await (prisma as any).fileContentChunk.findMany({
+          rows = await prisma.fileContentChunk.findMany({
             where: baseWhere,
             orderBy: { indexedAt: "desc" },
             take: limit,

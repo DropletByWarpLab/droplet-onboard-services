@@ -27,7 +27,7 @@ import { mkdir, writeFile, rm, stat } from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import { join, extname, resolve, sep } from "node:path";
 import type { Response } from "express";
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient, Prisma } from "@prisma/client";
 import archiver from "archiver";
 
 export const BRAIN_ROOT =
@@ -189,25 +189,14 @@ export async function streamExportZip(
   opts: StreamExportOpts,
   res: Response,
 ): Promise<void> {
-  const where: Record<string, string> = { userId };
+  const where: Prisma.BrainMemoryItemWhereInput = { userId };
   if (opts.scope.kind === "chat") {
     where.originatingChatId = opts.scope.chatId;
   }
-  // Cast through unknown — Prisma's where type is generic but the
-  // shape we pass is the runtime-correct subset.
-  const items = (await (
-    prisma as unknown as {
-      brainMemoryItem: {
-        findMany: (args: {
-          where: Record<string, unknown>;
-          orderBy?: unknown;
-        }) => Promise<BrainMemoryItemRow[]>;
-      };
-    }
-  ).brainMemoryItem.findMany({
+  const items: BrainMemoryItemRow[] = await prisma.brainMemoryItem.findMany({
     where,
     orderBy: { uploadedAt: "desc" },
-  })) as BrainMemoryItemRow[];
+  });
 
   const zip = archiver("zip");
   // Streaming-only: pipe before any append() so backpressure works.
@@ -222,13 +211,9 @@ export async function streamExportZip(
   const manifestItems: ManifestItem[] = [];
   try {
     for (const item of items) {
-      const chunkCount = await (
-        prisma as unknown as {
-          fileContentChunk: {
-            count: (args: { where: { brainItemId: string } }) => Promise<number>;
-          };
-        }
-      ).fileContentChunk.count({ where: { brainItemId: item.id } });
+      const chunkCount = await prisma.fileContentChunk.count({
+        where: { brainItemId: item.id },
+      });
 
       manifestItems.push({
         id: item.id,
@@ -292,34 +277,13 @@ export async function deleteItem(
   userId: string,
   itemId: string,
 ): Promise<boolean> {
-  const item = (await (
-    prisma as unknown as {
-      brainMemoryItem: {
-        findUnique: (args: {
-          where: { id: string };
-        }) => Promise<BrainMemoryItemRow | null>;
-      };
-    }
-  ).brainMemoryItem.findUnique({ where: { id: itemId } })) as BrainMemoryItemRow | null;
+  const item: BrainMemoryItemRow | null =
+    await prisma.brainMemoryItem.findUnique({ where: { id: itemId } });
   if (!item || item.userId !== userId) {
     return false;
   }
-  await (
-    prisma as unknown as {
-      fileContentChunk: {
-        deleteMany: (args: {
-          where: { brainItemId: string };
-        }) => Promise<{ count: number }>;
-      };
-    }
-  ).fileContentChunk.deleteMany({ where: { brainItemId: itemId } });
-  await (
-    prisma as unknown as {
-      brainMemoryItem: {
-        delete: (args: { where: { id: string } }) => Promise<unknown>;
-      };
-    }
-  ).brainMemoryItem.delete({ where: { id: itemId } });
+  await prisma.fileContentChunk.deleteMany({ where: { brainItemId: itemId } });
+  await prisma.brainMemoryItem.delete({ where: { id: itemId } });
   await purgeItem(userId, itemId);
   return true;
 }
@@ -333,26 +297,12 @@ export async function purgeUserData(
   prisma: PrismaClient,
   userId: string,
 ): Promise<{ items: number; chunks: number }> {
-  const chunkResult = await (
-    prisma as unknown as {
-      fileContentChunk: {
-        deleteMany: (args: {
-          where: { userId: string; source: "brain" };
-        }) => Promise<{ count: number }>;
-      };
-    }
-  ).fileContentChunk.deleteMany({
+  const chunkResult = await prisma.fileContentChunk.deleteMany({
     where: { userId, source: "brain" },
   });
-  const itemResult = await (
-    prisma as unknown as {
-      brainMemoryItem: {
-        deleteMany: (args: {
-          where: { userId: string };
-        }) => Promise<{ count: number }>;
-      };
-    }
-  ).brainMemoryItem.deleteMany({ where: { userId } });
+  const itemResult = await prisma.brainMemoryItem.deleteMany({
+    where: { userId },
+  });
   await purgeUser(userId);
   return { items: itemResult.count, chunks: chunkResult.count };
 }
