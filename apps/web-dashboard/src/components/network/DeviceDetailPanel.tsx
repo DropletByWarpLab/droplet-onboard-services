@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import useSWR from "swr";
 import * as Icons from "lucide-react";
 import type {
@@ -404,6 +405,7 @@ function formatHHMM(d: Date): string {
 }
 
 function ScheduleSection({ mac, deviceGroups, onError }: ScheduleSectionProps) {
+  const router = useRouter();
   const schedulesSwr = useSchedules();
   const overridesSwr = useActiveOverrides({ deviceMac: mac });
   const groupsSwr = useNetworkGroups();
@@ -490,14 +492,32 @@ function ScheduleSection({ mac, deviceGroups, onError }: ScheduleSectionProps) {
   }
 
   function jumpToSchedulesTab(scheduleId: string) {
-    // The network page owns tab state as a useState hook — we don't have a
-    // router hook we can reach in here. Best-effort: set location.hash so
-    // deep-linking can pick it up later, and scroll to a matching element if
-    // one happens to be in the DOM (Schedules tab already rendered).
+    // WARP-100: the Network page reads `?tab` from the URL, so navigating to
+    // `/network?tab=schedules#schedule-<id>` switches the page to the
+    // Schedules tab (mounting SchedulesTab) and, via the hash, scrolls the
+    // matching ScheduleRow into view. Previously this set location.hash only,
+    // which silently dead-linked when the Schedules tab wasn't mounted.
+    const href = `/network?tab=schedules#schedule-${scheduleId}`;
+    router.push(href);
+    // PR #720 review (blocker): App Router's router.push goes through
+    // history.pushState, which does NOT fire `hashchange`. When the user is
+    // ALREADY on the Schedules tab, the page's `activeTab` doesn't change, so
+    // the deps-keyed scroll effect never re-runs and the second jump silently
+    // doesn't scroll. Dispatch a synthetic `hashchange` so the page's listener
+    // re-fires the bounded retry-scroll for the new #schedule-<id> target. The
+    // cross-tab case (Schedules not yet mounted) is still handled by the
+    // effect's tab-change dependency; this only adds the same-tab path.
+    //
+    // router.push commits the live hash a tick later, so carry the intended
+    // target in `newURL` — the page reads it off the event rather than the
+    // not-yet-committed window.location.hash, landing on the right row.
     if (typeof window !== "undefined") {
-      window.location.hash = `schedule-${scheduleId}`;
-      const el = document.getElementById(`schedule-${scheduleId}`);
-      if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+      window.dispatchEvent(
+        new HashChangeEvent("hashchange", {
+          newURL: new URL(href, window.location.href).href,
+          oldURL: window.location.href,
+        }),
+      );
     }
   }
 

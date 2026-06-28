@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   AlertCircle,
   CalendarClock,
@@ -55,6 +56,11 @@ import {
   type NetworkOperation,
   type NetworkTopology,
 } from "@/lib/api";
+import { parseNetworkTab, type Tab } from "./tab-url";
+import {
+  scrollToScheduleAnchor,
+  scheduleHashFromEvent,
+} from "./schedule-anchor-scroll";
 import type {
   FirewallConfig,
   FirewallRedirect,
@@ -73,8 +79,6 @@ type OperationStatus =
   // which means a change WAS made and then reverted.
   | { state: "rejected"; id: string; reason: string | null }
   | { state: "rolled_back"; id: string; reason: string | null };
-
-type Tab = "overview" | "privacy" | "devices" | "schedules" | "wifi" | "firewall" | "system";
 
 // WARP-39: user-facing strings keyed by the RouterError.code coming off the hook.
 const ROUTER_ERROR_COPY: Record<string, { title: string; body: string }> = {
@@ -106,7 +110,30 @@ const ROUTER_ERROR_COPY: Record<string, { title: string; body: string }> = {
   },
 };
 
+// WARP-100: useSearchParams must be read under a Suspense boundary (Next.js
+// app-router). Mirror the /knowledge pattern — a thin outer component holds
+// the boundary, the inner component owns all the page logic.
 export default function NetworkPage() {
+  return (
+    <Suspense fallback={<NetworkPageSkeleton />}>
+      <NetworkPageInner />
+    </Suspense>
+  );
+}
+
+function NetworkPageSkeleton() {
+  return (
+    <ShellPage icon={<Router size={15} />} label="Network" title="Network">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        {Array.from({ length: 4 }).map((_, i) => (
+          <div key={i} className="card animate-pulse" style={{ height: 112, background: "var(--surface-2)" }} />
+        ))}
+      </div>
+    </ShellPage>
+  );
+}
+
+function NetworkPageInner() {
   const {
     overview,
     firewall,
@@ -120,7 +147,33 @@ export default function NetworkPage() {
   } = useNetwork();
   const { user } = useAuth();
   const canAuthor = user?.role === "owner" || user?.role === "admin";
-  const [activeTab, setActiveTab] = useState<Tab>("overview");
+
+  // WARP-100: tab state lives in the URL (`/network?tab=schedules`) so
+  // deep-links, browser back/forward, and the cross-tab jump from
+  // DeviceDetailPanel all work. `activeTab` is derived from the URL; switching
+  // tabs pushes a new history entry (router.push) so Back returns to the prior
+  // tab. The name `setActiveTab` is preserved so every existing call site
+  // (simple-mode snap-back, tab click, arrow-key nav, PrivacyTab) is unchanged.
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const activeTab: Tab = parseNetworkTab(searchParams?.get("tab"));
+  const setActiveTab = useCallback(
+    (next: Tab) => {
+      if (next === activeTab) return;
+      // Default to Overview (no ?tab) to keep the canonical URL clean.
+      router.push(next === "overview" ? "/network" : `/network?tab=${next}`);
+    },
+    [router, activeTab],
+  );
+  // WARP-298 / PR #720 review (a11y): arrow-key tab nav must move focus to the
+  // newly-activated tab — but `aria-selected`/`tabIndex` derive from the
+  // URL-driven `activeTab`, which only updates after router.push re-renders.
+  // Focusing synchronously in the keydown handler lands focus on a button that
+  // still reads aria-selected=false, so an SR announces "not selected" during
+  // the async gap. Instead, record the keyboard target here and focus it in an
+  // effect once `activeTab` reflects it (see below), so the focused tab is
+  // already selected at the moment it receives focus.
+  const keyboardFocusTarget = useRef<Tab | null>(null);
   const [opStatus, setOpStatus] = useState<OperationStatus>({ state: "idle" });
   // WARP-871 follow-up: while an owner-initiated reboot is in flight the router
   // is expected to drop for ~30-90s, which makes the status SWR poll fail. Lift
@@ -197,6 +250,49 @@ export default function NetworkPage() {
       clearInterval(interval);
     };
   }, [opStatus, refresh]);
+
+  // WARP-100: after a jump to `/network?tab=schedules#schedule-<id>`, scroll the
+  // matching ScheduleRow into view once the Schedules tab has mounted. Two ways
+  // in, both handled here:
+  //   • tab/mount change — the deps below re-run the effect (deep-link, or a
+  //     cross-tab jump that switches the active tab to Schedules).
+  //   • hash-only change — a second jump while ALREADY on Schedules pushes a new
+  //     `#schedule-<id>` without changing `activeTab`, so the deps don't fire.
+  //     A `hashchange` listener re-runs the bounded retry-scroll for the new
+  //     target (PR #720 review blocker).
+  // scrollToScheduleAnchor reads the live hash, polls briefly for the anchor
+  // (SchedulesTab's list resolves via SWR), honours prefers-reduced-motion, and
+  // returns a cleanup that cancels the loop + clears its pending timer.
+  useEffect(() => {
+    if (mode === "simple" || activeTab !== "schedules") return;
+    if (typeof window === "undefined") return;
+
+    let cleanup = scrollToScheduleAnchor();
+    const onHashChange = (e: HashChangeEvent) => {
+      cleanup();
+      // Prefer the event's target hash (the same-tab jump dispatches a
+      // synthetic event carrying it, because router.push commits the live hash
+      // a tick later); fall back to window.location.hash for native nav.
+      cleanup = scrollToScheduleAnchor(scheduleHashFromEvent(e));
+    };
+    window.addEventListener("hashchange", onHashChange);
+    return () => {
+      window.removeEventListener("hashchange", onHashChange);
+      cleanup();
+    };
+  }, [activeTab, mode]);
+
+  // WARP-298 / PR #720 review (a11y): once `activeTab` reflects the key-driven
+  // selection, move focus to that tab button. Running this after activation
+  // (not synchronously in the keydown handler) guarantees the button already
+  // reads aria-selected={true} / tabIndex={0} at the moment it receives focus,
+  // honouring the WAI-ARIA "move + activate" contract for an SR user.
+  useEffect(() => {
+    if (keyboardFocusTarget.current === null) return;
+    if (keyboardFocusTarget.current !== activeTab) return;
+    keyboardFocusTarget.current = null;
+    document.getElementById(`network-tab-${activeTab}`)?.focus();
+  }, [activeTab]);
 
   if (isLoading) {
     return (
@@ -436,10 +532,12 @@ export default function NetworkPage() {
                 }
                 if (next !== null) {
                   e.preventDefault();
+                  // PR #720 review (a11y): record the target and let the
+                  // post-activation effect focus it once `activeTab` (and so
+                  // aria-selected/tabIndex) reflects the change — focusing
+                  // synchronously here would land on a still-unselected button.
+                  keyboardFocusTarget.current = tabs[next].id;
                   setActiveTab(tabs[next].id);
-                  document
-                    .getElementById(`network-tab-${tabs[next].id}`)
-                    ?.focus();
                 }
               }}
               className={"tab" + (active ? " active" : "")}

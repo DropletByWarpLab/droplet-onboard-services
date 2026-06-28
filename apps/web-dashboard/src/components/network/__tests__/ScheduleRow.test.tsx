@@ -140,4 +140,14 @@ describe("ScheduleRow", () => {
     fireEvent.click(screen.getByRole("button", { name: /^edit$/i }));
     expect(onEdit).toHaveBeenCalledTimes(1);
   });
+
+  // WARP-100: the row carries a stable `schedule-<id>` anchor so the
+  // cross-tab jump from DeviceDetailPanel can scroll it into view.
+  it("renders a `schedule-<id>` anchor id on the row", () => {
+    mockListEndpoints(fetchMock);
+    const { container } = renderRow(makeSchedule({ id: "s1" }));
+    const row = container.querySelector("#schedule-s1");
+    expect(row).not.toBeNull();
+    expect(row?.tagName).toBe("LI");
+  });
 });

@@ -85,7 +85,11 @@ export function ScheduleRow({ schedule, onEdit }: Props) {
   }
 
   return (
-    <li className="dp-card p-4">
+    // WARP-100: stable anchor so the cross-tab jump from DeviceDetailPanel
+    // (router.push('/network?tab=schedules#schedule-<id>')) can scroll this
+    // row into view once the Schedules tab mounts. scroll-mt-20 (80px) keeps
+    // the row clear of the 56px sticky page top bar when scrolled to the top.
+    <li id={`schedule-${schedule.id}`} className="dp-card p-4 scroll-mt-20">
       <div className="flex items-start gap-3">
         {/* Enabled toggle */}
         <button

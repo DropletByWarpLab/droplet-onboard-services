@@ -2,6 +2,16 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, act, waitFor, within } from "@testing-library/react";
 import { SWRConfig } from "swr";
 import { DeviceDetailPanel } from "../DeviceDetailPanel";
+
+// WARP-100: the cross-tab jump navigates via next/navigation's useRouter.
+// Pin a stable push spy so the jump assertion can read it (the global
+// setup.ts mock returns a fresh vi.fn() per call, which we can't observe).
+const pushMock = vi.fn();
+vi.mock("next/navigation", () => ({
+  usePathname: () => "/network",
+  useRouter: () => ({ push: pushMock, replace: vi.fn(), back: vi.fn() }),
+  useSearchParams: () => new URLSearchParams(),
+}));
 import type {
   EnrichedNetworkDevice,
   DevicePresenceDay,
@@ -71,6 +81,7 @@ describe("DeviceDetailPanel", () => {
     schedulesResponse = [];
     overridesResponse = [];
     groupsResponse = [];
+    pushMock.mockClear();
     fetchMock = vi.fn();
     fetchMock.mockImplementation(async (url: string) => {
       // WARP-85: GroupTypeahead (inside the panel) always fetches
@@ -352,6 +363,50 @@ describe("DeviceDetailPanel", () => {
     });
     const badge = screen.getByTestId("schedule-source-badge");
     expect(badge.textContent).toContain("via Kids");
+  });
+
+  // WARP-100: clicking the effective schedule name navigates to the
+  // Schedules tab with the row anchor, instead of the old silent
+  // location.hash dead-link.
+  it("clicking the schedule name navigates to /network?tab=schedules#schedule-<id>", async () => {
+    schedulesResponse = [makeSchedule({ id: "s1", name: "Bedtime", deviceMac: MAC })];
+    mockFetchOnceJson(fetchMock, { device: makeDevice(), presence: makePresence() });
+    renderPanel();
+    await screen.findByLabelText("Display name");
+
+    const nameBtn = await screen.findByRole("button", { name: "Bedtime" });
+    fireEvent.click(nameBtn);
+
+    expect(pushMock).toHaveBeenCalledTimes(1);
+    expect(pushMock).toHaveBeenCalledWith("/network?tab=schedules#schedule-s1");
+  });
+
+  // WARP-100 PR #720 review (blocker): App Router's router.push uses
+  // history.pushState and never fires `hashchange`, so a second jump while
+  // already on the Schedules tab wouldn't re-trigger the page's scroll effect.
+  // The jump now dispatches a synthetic `hashchange` so the page re-scrolls to
+  // the new #schedule-<id> target even when the active tab doesn't change.
+  it("dispatches a hashchange after the jump so the same-tab re-scroll re-fires", async () => {
+    schedulesResponse = [makeSchedule({ id: "s1", name: "Bedtime", deviceMac: MAC })];
+    mockFetchOnceJson(fetchMock, { device: makeDevice(), presence: makePresence() });
+    renderPanel();
+    await screen.findByLabelText("Display name");
+
+    let captured: HashChangeEvent | null = null;
+    const onHashChange = (e: Event) => {
+      captured = e as HashChangeEvent;
+    };
+    window.addEventListener("hashchange", onHashChange);
+
+    const nameBtn = await screen.findByRole("button", { name: "Bedtime" });
+    fireEvent.click(nameBtn);
+
+    // Fired synchronously alongside router.push, carrying the intended target
+    // in newURL so the page can land on the right row before the live hash
+    // commits.
+    expect(captured).not.toBeNull();
+    expect(captured!.newURL).toContain("#schedule-s1");
+    window.removeEventListener("hashchange", onHashChange);
   });
 
   it("renders the active override banner + Cancel button when an override is live", async () => {
