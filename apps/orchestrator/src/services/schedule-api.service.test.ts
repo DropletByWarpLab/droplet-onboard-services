@@ -567,6 +567,35 @@ describe("createScheduleApiService (WARP-94)", () => {
         }),
       ).rejects.toMatchObject({ code: "OVERRIDE_INVALID_RANGE" });
     });
+
+    // WARP-114: a datetime-picker typo could create a multi-year override that
+    // blocks a device indefinitely. Cap the duration at 90 days.
+    it("rejects endAt - startAt > 90 days", async () => {
+      const start = new Date("2026-04-17T10:00:00Z");
+      const ninetyOneDays = new Date(start.getTime() + 91 * 86400_000);
+      await expect(
+        svc.createOverride({
+          subjectType: "device",
+          deviceMac: "AA:BB:CC:DD:EE:01",
+          action: "allow",
+          startAt: start,
+          endAt: ninetyOneDays,
+        }),
+      ).rejects.toMatchObject({ code: "OVERRIDE_INVALID_RANGE" });
+    });
+
+    it("accepts a range just under 90 days", async () => {
+      const start = new Date("2026-04-17T10:00:00Z");
+      const justUnder = new Date(start.getTime() + 90 * 86400_000 - 60_000);
+      const ovr = await svc.createOverride({
+        subjectType: "device",
+        deviceMac: "AA:BB:CC:DD:EE:01",
+        action: "allow",
+        startAt: start,
+        endAt: justUnder,
+      });
+      expect(ovr.id).toMatch(/^ovr-/);
+    });
   });
 
   describe("cancelOverride", () => {

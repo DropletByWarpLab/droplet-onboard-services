@@ -60,6 +60,10 @@ interface Props {
 
 type DurationChip = "15" | "30" | "60" | "120" | "transition" | "fallback30" | "custom";
 
+// WARP-114: mirror the orchestrator's 90-day override cap so a datetime-picker
+// typo can't slip a multi-year override past Apply and bounce off the server.
+const MAX_OVERRIDE_MS = 90 * 86400_000;
+
 function formatHHMM(d: Date): string {
   return `${d.getHours().toString().padStart(2, "0")}:${d
     .getMinutes()
@@ -241,12 +245,19 @@ export function OverrideModal({
   }
 
   const endAtDate = computeEndAt();
+  // WARP-114: only the custom datetime can realistically exceed 90 days (the
+  // quick chips top out at 2h), so we surface the explanatory hint there.
+  const customExceedsMax =
+    chip === "custom" &&
+    !!endAtDate &&
+    endAtDate.getTime() - nowTick.getTime() > MAX_OVERRIDE_MS;
   // Base the disable on `nowTick` (not a fresh Date.now()) so the button flips
   // exactly when the displayed time advances on a tick (WARP-103 AC3).
   const applyDisabled =
     saving ||
     !endAtDate ||
     endAtDate.getTime() <= nowTick.getTime() ||
+    endAtDate.getTime() - nowTick.getTime() > MAX_OVERRIDE_MS ||
     !subjectSelected;
 
   async function handleApply() {
@@ -535,7 +546,18 @@ export function OverrideModal({
                   onChange={(e) => setCustomEndAt(e.target.value)}
                   className="dp-input"
                   aria-label="End at"
+                  aria-describedby={
+                    customExceedsMax ? "override-end-at-hint" : undefined
+                  }
                 />
+                {customExceedsMax && (
+                  <p
+                    id="override-end-at-hint"
+                    className="type-footnote text-system-red"
+                  >
+                    Overrides can last at most 90 days.
+                  </p>
+                )}
               </div>
             )}
           </fieldset>

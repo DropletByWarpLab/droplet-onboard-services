@@ -6,6 +6,14 @@ import type { Schedule, ScheduleOverride } from "@/lib/types";
 
 type FetchMock = ReturnType<typeof vi.fn>;
 
+/** Format a Date as a local `datetime-local` input value (no timezone). */
+function toLocalInput(d: Date): string {
+  const pad = (n: number) => n.toString().padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(
+    d.getHours(),
+  )}:${pad(d.getMinutes())}`;
+}
+
 function renderModal(
   props: Partial<React.ComponentProps<typeof OverrideModal>> = {},
 ) {
@@ -262,6 +270,38 @@ describe("OverrideModal", () => {
       name: /^apply$/i,
     }) as HTMLButtonElement;
     expect(applyBtn.disabled).toBe(true);
+  });
+
+  // WARP-114: a datetime-picker typo could create a multi-year override. The
+  // service caps it at 90 days; the modal mirrors that by disabling Apply when
+  // the custom endAt is more than 90 days out, and re-enabling just under it.
+  it("disables Apply when the custom endAt exceeds 90 days from now", async () => {
+    const FIXED = new Date("2026-04-14T10:00:00");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(FIXED);
+    installDefaultMocks(fetchMock);
+    renderModal();
+    fireEvent.click(screen.getByRole("button", { name: /custom/i }));
+    const input = await screen.findByLabelText(/^end at$/i);
+    const applyBtn = screen.getByRole("button", {
+      name: /^apply$/i,
+    }) as HTMLButtonElement;
+
+    // 91 days out → past the 90-day cap → Apply disabled + explanatory hint.
+    const tooFar = new Date(FIXED.getTime() + 91 * 86400_000);
+    fireEvent.change(input, {
+      target: { value: toLocalInput(tooFar) },
+    });
+    expect(applyBtn.disabled).toBe(true);
+    expect(screen.getByText(/at most 90 days/i)).toBeInTheDocument();
+
+    // Just under 90 days → Apply enabled again + hint gone.
+    const justUnder = new Date(FIXED.getTime() + 90 * 86400_000 - 60_000);
+    fireEvent.change(input, {
+      target: { value: toLocalInput(justUnder) },
+    });
+    expect(applyBtn.disabled).toBe(false);
+    expect(screen.queryByText(/at most 90 days/i)).not.toBeInTheDocument();
   });
 
   it("does NOT render the subject picker when subject is pre-filled", async () => {
