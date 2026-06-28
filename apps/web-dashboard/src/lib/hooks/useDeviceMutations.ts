@@ -2,25 +2,12 @@
 import { useSWRConfig } from "swr";
 import type { EnrichedNetworkDevice } from "@/lib/types";
 import { apiFetch } from "./apiFetch";
+// WARP-105: single source of truth for typed-error -> friendly toast copy.
+// Re-exported so the long-standing `import { toastForError } from
+// "@/lib/hooks/useDeviceMutations"` call sites keep resolving.
+import { toastForError } from "@/lib/toastForError";
 
-const TOAST_COPY: Record<string, string> = {
-  INVALID_ICON: "Pick a different icon",
-  INVALID_MAC: "Device address is invalid",
-  NOT_FOUND: "Device was forgotten or never seen",
-  DUPLICATE_GROUP_NAME: "A group with that name already exists",
-  GROUP_IN_USE: "Can't delete — group still has devices",
-  // WARP-41 will wire the confirm flow; until then we want the user to know
-  // why the action didn't go through rather than seeing a raw upstream error.
-  REQUIRES_CONFIRMATION: "This action requires confirmation — not wired yet",
-};
-
-export function toastForError(err: unknown, fallback = "Something went wrong"): string {
-  if (err && typeof err === "object" && "code" in err && typeof (err as { code: unknown }).code === "string") {
-    const code = (err as { code: string }).code;
-    return TOAST_COPY[code] ?? fallback;
-  }
-  return fallback;
-}
+export { toastForError };
 
 export function useDeviceMutations() {
   const { mutate } = useSWRConfig();

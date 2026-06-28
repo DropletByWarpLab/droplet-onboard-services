@@ -1,25 +1,13 @@
 "use client";
 import { useSWRConfig } from "swr";
 import { apiFetch } from "./apiFetch";
+// WARP-105: the group CRUD toast copy now lives in the shared map. Re-exported
+// under the historic `groupToastForError` name so `GroupTypeahead` and
+// `GroupManagerDialog` keep resolving without touching their call sites.
+import { toastForError } from "@/lib/toastForError";
 
-// WARP-85: friendly toast copy for typed errors from the group CRUD endpoints.
-// The orchestrator returns `{ error: { code, message } }` on failures; we map
-// the known codes to user-facing strings and fall back to a generic message
-// for anything unrecognized.
-export const GROUP_TOAST_COPY: Record<string, string> = {
-  DUPLICATE_GROUP_NAME: "A group with that name already exists",
-  GROUP_IN_USE: "Can't delete — group still has devices",
-  NOT_FOUND: "Group not found",
-  INVALID_ICON: "Pick a different icon",
-};
-
-export function groupToastForError(err: unknown, fallback = "Something went wrong"): string {
-  if (err && typeof err === "object" && "code" in err && typeof (err as { code: unknown }).code === "string") {
-    const code = (err as { code: string }).code;
-    return GROUP_TOAST_COPY[code] ?? fallback;
-  }
-  return fallback;
-}
+const groupToastForError = toastForError;
+export { groupToastForError };
 
 export function useGroupMutations() {
   const { mutate } = useSWRConfig();
