@@ -94,6 +94,8 @@ export function registerDeviceRoutes(router: Router, deps: DeviceDeps): void {
 
   router.get("/network/groups", async (_req, res, next) => {
     try {
+      // WARP-111: SWR-friendly caching — see /network/devices for rationale.
+      res.set("Cache-Control", "private, max-age=5, stale-while-revalidate=10");
       const groups = await networkDeviceService.listGroups();
       res.json({ groups });
     } catch (err) {

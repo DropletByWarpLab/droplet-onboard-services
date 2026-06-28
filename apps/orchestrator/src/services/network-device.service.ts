@@ -131,6 +131,29 @@ export function createNetworkDeviceService(
   liveSnapshot: LiveSnapshotFn,
   cache: NetworkDeviceCache = defaultNetworkDeviceCache,
 ) {
+  /**
+   * WARP-111: single-flight de-dupe for the list reads. Dashboard SWR
+   * hooks refresh every 15-30s across every open client; when Redis is
+   * down `withSwrCache` degrades to passthrough, so each refresh would
+   * otherwise hit Prisma independently and stampede the DB. This map
+   * collapses concurrent reads that share a cache key into ONE in-flight
+   * promise; the entry is removed in `.finally` (covering BOTH resolve and
+   * reject) so a settled or failed read never gets replayed to later
+   * callers. Keyed on the same cache key the SWR layer uses, so each
+   * distinct opts combination keeps its own flight.
+   */
+  const inFlight = new Map<string, Promise<unknown>>();
+
+  function singleFlight<T>(key: string, run: () => Promise<T>): Promise<T> {
+    const existing = inFlight.get(key) as Promise<T> | undefined;
+    if (existing) return existing;
+    const promise = run().finally(() => {
+      inFlight.delete(key);
+    });
+    inFlight.set(key, promise);
+    return promise;
+  }
+
   async function listDevices(
     opts: { onlineOnly?: boolean; groupId?: string } = {},
   ) {
@@ -141,7 +164,8 @@ export function createNetworkDeviceService(
     const groupSegment = opts.groupId ?? "none";
     const cacheKey = `${DEVICE_LIST_PREFIX}list:${onlineSegment}:${groupSegment}`;
 
-    return cache.withSwrCache(cacheKey, LIST_TTL_SEC, async () => {
+    return singleFlight(cacheKey, () =>
+    cache.withSwrCache(cacheKey, LIST_TTL_SEC, async () => {
       const where = opts.groupId
         ? { groups: { some: { id: opts.groupId } } }
         : undefined;
@@ -173,7 +197,8 @@ export function createNetworkDeviceService(
       });
 
       return opts.onlineOnly ? enriched.filter((d: any) => d.online) : enriched;
-    });
+    }),
+    );
   }
 
   async function getDevice(macRaw: string) {
@@ -238,10 +263,15 @@ export function createNetworkDeviceService(
   }
 
   async function listGroups() {
-    return cache.withSwrCache(`${GROUP_LIST_PREFIX}list`, LIST_TTL_SEC, () =>
-      prisma.deviceGroup.findMany({
-        include: { _count: { select: { devices: true } } },
-      }),
+    const cacheKey = `${GROUP_LIST_PREFIX}list`;
+    // WARP-111: same single-flight collapse as listDevices — the groups
+    // list shape is uniform and read-only, so the dedupe is transparent.
+    return singleFlight(cacheKey, () =>
+      cache.withSwrCache(cacheKey, LIST_TTL_SEC, () =>
+        prisma.deviceGroup.findMany({
+          include: { _count: { select: { devices: true } } },
+        }),
+      ),
     );
   }
 

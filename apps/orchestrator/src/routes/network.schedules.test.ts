@@ -468,6 +468,15 @@ describe("Schedule / override / event / manualBlock API (WARP-94)", () => {
         "Alpha",
       ]);
     });
+
+    // WARP-111: SWR-friendly caching header on the schedules-list read.
+    it("sets Cache-Control: private, max-age=5, stale-while-revalidate=10", async () => {
+      const res = await request(app).get("/api/network/schedules");
+      expect(res.status).toBe(200);
+      expect(res.headers["cache-control"]).toBe(
+        "private, max-age=5, stale-while-revalidate=10",
+      );
+    });
   });
 
   // ---------- GET /network/schedules/:id ----------
@@ -675,6 +684,14 @@ describe("Schedule / override / event / manualBlock API (WARP-94)", () => {
       const res = await request(app).get("/api/network/schedule-events");
       expect(res.status).toBe(200);
       expect(res.body.events).toHaveLength(1);
+    });
+
+    // WARP-111: schedule-events gets a plain max-age (no SWR window) — the
+    // event log is append-only and tolerates a slightly longer cache.
+    it("sets Cache-Control: private, max-age=15", async () => {
+      const res = await request(app).get("/api/network/schedule-events");
+      expect(res.status).toBe(200);
+      expect(res.headers["cache-control"]).toBe("private, max-age=15");
     });
 
     it("respects ?since= and ?limit=", async () => {
