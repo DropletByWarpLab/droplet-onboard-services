@@ -70,7 +70,46 @@ describe("Network tabs URL integration (WARP-100)", () => {
   });
 
   it("cross-tab scroll honours prefers-reduced-motion", () => {
-    expect(src).toMatch(/prefers-reduced-motion: reduce/);
-    expect(src).toMatch(/reduceMotion \? "auto" : "smooth"/);
+    // Reduced-motion gating now lives in the extracted scroll helper; the page
+    // delegates to it. Pin the delegation here and the gating in the helper's
+    // own unit suite (schedule-anchor-scroll.test.ts).
+    expect(src).toMatch(/scrollToScheduleAnchor/);
+  });
+});
+
+// WARP-100 PR #720 review — three behavioural fixes, source-pinned because the
+// page pulls a tower of hooks and the behaviour is exercised directly in
+// schedule-anchor-scroll.test.ts (helper) + DeviceDetailPanel.test.tsx (jump).
+describe("Network tabs reactive-hash + a11y fixes (WARP-100 PR #720)", () => {
+  it("blocker: re-scrolls on hashchange, not just on tab change", () => {
+    // A `hashchange` listener re-fires the bounded retry-scroll so a same-tab /
+    // hash-only jump (router.push doesn't fire hashchange, so the DeviceDetail
+    // jump dispatches one) still scrolls to the new #schedule-<id>. The listener
+    // forwards the event's target hash so it lands on the right row even before
+    // router.push commits the live window.location.hash.
+    expect(src).toMatch(/addEventListener\("hashchange"/);
+    expect(src).toMatch(/removeEventListener\("hashchange"/);
+    expect(src).toMatch(/scheduleHashFromEvent\(e\)/);
+  });
+
+  it("a11y: arrow-key focus moves AFTER activation, not synchronously", () => {
+    // The keydown handler records the target; a post-activation effect keyed on
+    // activeTab focuses it once aria-selected/tabIndex reflect the change. The
+    // old synchronous getElementById(...).focus() inside the handler is gone.
+    expect(src).toMatch(/keyboardFocusTarget\.current = tabs\[next\]\.id/);
+    expect(src).toMatch(/keyboardFocusTarget\.current !== activeTab/);
+    expect(src).toMatch(
+      /document\.getElementById\(`network-tab-\$\{activeTab\}`\)\?\.focus\(\)/,
+    );
+    // Guard against regressing to the synchronous focus-in-handler pattern.
+    expect(src).not.toMatch(
+      /getElementById\(`network-tab-\$\{tabs\[next\]\.id\}`\)\s*\n?\s*\?\.focus/,
+    );
+  });
+
+  it("low: the retry timer is cleaned up (delegated to the helper)", () => {
+    // clearTimeout now lives in the helper's returned cleanup; the page calls
+    // that cleanup on unmount and on each hashchange before re-arming.
+    expect(src).not.toMatch(/setTimeout\(tryScroll, 100\)/);
   });
 });

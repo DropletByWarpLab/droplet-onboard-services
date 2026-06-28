@@ -381,6 +381,34 @@ describe("DeviceDetailPanel", () => {
     expect(pushMock).toHaveBeenCalledWith("/network?tab=schedules#schedule-s1");
   });
 
+  // WARP-100 PR #720 review (blocker): App Router's router.push uses
+  // history.pushState and never fires `hashchange`, so a second jump while
+  // already on the Schedules tab wouldn't re-trigger the page's scroll effect.
+  // The jump now dispatches a synthetic `hashchange` so the page re-scrolls to
+  // the new #schedule-<id> target even when the active tab doesn't change.
+  it("dispatches a hashchange after the jump so the same-tab re-scroll re-fires", async () => {
+    schedulesResponse = [makeSchedule({ id: "s1", name: "Bedtime", deviceMac: MAC })];
+    mockFetchOnceJson(fetchMock, { device: makeDevice(), presence: makePresence() });
+    renderPanel();
+    await screen.findByLabelText("Display name");
+
+    let captured: HashChangeEvent | null = null;
+    const onHashChange = (e: Event) => {
+      captured = e as HashChangeEvent;
+    };
+    window.addEventListener("hashchange", onHashChange);
+
+    const nameBtn = await screen.findByRole("button", { name: "Bedtime" });
+    fireEvent.click(nameBtn);
+
+    // Fired synchronously alongside router.push, carrying the intended target
+    // in newURL so the page can land on the right row before the live hash
+    // commits.
+    expect(captured).not.toBeNull();
+    expect(captured!.newURL).toContain("#schedule-s1");
+    window.removeEventListener("hashchange", onHashChange);
+  });
+
   it("renders the active override banner + Cancel button when an override is live", async () => {
     const now = new Date();
     const endAt = new Date(now.getTime() + 60 * 60_000).toISOString();
