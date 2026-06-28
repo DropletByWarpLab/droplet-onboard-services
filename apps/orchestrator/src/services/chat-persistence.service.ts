@@ -559,6 +559,9 @@ export class ChatPersistenceService {
     await this.prisma.$transaction(async (tx) => {
       const data: Prisma.ChatMessageUpdateInput = {
         content: args.content,
+        // Prisma's Json column accepts arrays via InputJsonValue but its
+        // inferred type doesn't surface the array shape — cast through
+        // `unknown` so the array literal flows through.
         toolCalls:
           args.toolCalls.length > 0
             ? (args.toolCalls as unknown as Prisma.InputJsonValue)
