@@ -15,8 +15,8 @@
  *     startMin !== endMin (zero-length windows rejected — wrap past
  *     midnight is fine, just not a true zero). Max 7 windows per schedule.
  *     Violations → SCHEDULE_INVALID_WINDOW.
- *   - override range: endAt > startAt, action ∈ {"allow", "block"}.
- *     Violations → OVERRIDE_INVALID_RANGE.
+ *   - override range: endAt > startAt, endAt - startAt ≤ 90 days (WARP-114),
+ *     action ∈ {"allow", "block"}. Violations → OVERRIDE_INVALID_RANGE.
  *
  * Error mapping: Prisma P2025 (row not found on update/delete) is
  * translated via `mapPrismaNotFound` to the right DeviceRegistryError
@@ -34,6 +34,10 @@
 import type { PrismaClient } from "@prisma/client";
 import { Prisma } from "@prisma/client";
 import { DeviceRegistryError } from "../types/device-registry-error.js";
+
+// WARP-114: cap override duration at 90 days. A datetime-picker typo could
+// otherwise create a multi-year override that blocks a device indefinitely.
+const MAX_OVERRIDE_MS = 90 * 86400_000;
 
 function mapPrismaNotFound<T>(
   what: "Schedule" | "Override" | "Device",
@@ -304,6 +308,11 @@ export function createScheduleApiService(prisma: PrismaClient) {
     if (input.endAt.getTime() <= startAt.getTime()) {
       throw DeviceRegistryError.overrideInvalidRange(
         "endAt must be after startAt",
+      );
+    }
+    if (input.endAt.getTime() - startAt.getTime() > MAX_OVERRIDE_MS) {
+      throw DeviceRegistryError.overrideInvalidRange(
+        "override may not exceed 90 days",
       );
     }
     return p.scheduleOverride.create({
