@@ -942,6 +942,7 @@ model ScheduleWindow {
   endMin     Int
   schedule   Schedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
 
+  @@unique([scheduleId, daysOfWeek, startMin, endMin]) // WARP-112: no duplicate windows per schedule
   @@index([scheduleId])
 }
 
