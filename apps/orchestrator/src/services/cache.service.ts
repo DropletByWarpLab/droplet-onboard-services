@@ -114,6 +114,61 @@ export async function cacheDel(key: string): Promise<void> {
 }
 
 /**
+ * WARP-116: add `member` to the Redis set at `key` (SADD), and bump the
+ * whole set's TTL so a forgotten/abandoned index self-cleans rather than
+ * leaking refresh-token hashes forever. `EXPIRE … GT` only ever extends the
+ * TTL (never shortens it), so concurrent device logins each push the expiry
+ * out to the longest-lived member without clobbering each other.
+ *
+ * Used to index the live refresh-token sessions for a user so the
+ * revoke-sessions admin endpoint can denylist them all at once. Non-fatal
+ * on Redis error: a missed index write only means that one session can't be
+ * force-revoked early — it still expires on its own ≤7-day TTL.
+ */
+export async function cacheSetAdd(
+  key: string,
+  member: string,
+  ttlSeconds?: number,
+): Promise<void> {
+  try {
+    const client = getRedis();
+    await client.sadd(key, member);
+    if (ttlSeconds && ttlSeconds > 0) {
+      // GT: only extend, never shrink, the set's TTL.
+      await client.expire(key, ttlSeconds, "GT");
+    }
+  } catch {
+    // Cache failures are non-fatal
+  }
+}
+
+/**
+ * WARP-116: remove `member` from the Redis set at `key` (SREM). Used on
+ * logout to drop that device's refresh-token member from the session index.
+ * Non-fatal on Redis error.
+ */
+export async function cacheSetRemove(key: string, member: string): Promise<void> {
+  try {
+    await getRedis().srem(key, member);
+  } catch {
+    // Cache failures are non-fatal
+  }
+}
+
+/**
+ * WARP-116: read every member of the Redis set at `key` (SMEMBERS). Returns
+ * an empty array on a miss or Redis error so callers can treat "no Redis" the
+ * same as "no sessions" without special-casing.
+ */
+export async function cacheSetMembers(key: string): Promise<string[]> {
+  try {
+    return await getRedis().smembers(key);
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Atomic fixed-window increment. Runs INCR and a first-creation-only EXPIRE in
  * a single Lua script (one server round-trip, executed atomically by Redis), so:
  *

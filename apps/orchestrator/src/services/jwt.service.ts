@@ -1,7 +1,15 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import jwt from "jsonwebtoken";
 import { config } from "../config.js";
-import { cacheGet, cacheSet, cacheSetNx } from "./cache.service.js";
+import {
+  cacheGet,
+  cacheSet,
+  cacheSetNx,
+  cacheDel,
+  cacheSetAdd,
+  cacheSetRemove,
+  cacheSetMembers,
+} from "./cache.service.js";
 
 export type Role = "owner" | "admin" | "family" | "guest" | "service";
 
@@ -27,6 +35,11 @@ export const REFRESH_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days
 
 const REFRESH_DENYLIST_PREFIX = "jwt:deny:";
 const REFRESH_LOCK_PREFIX = "jwt:rotate:";
+
+// WARP-116: per-user index of live refresh-token sessions. A Redis set whose
+// members are `${tokenHash}:${exp}` so the revoke path can rebuild each
+// token's remaining TTL from the member alone (the raw token is never stored).
+const SESSION_SET_PREFIX = "jwt:sessions:";
 
 const VALID_ROLES: readonly Role[] = ["owner", "admin", "family", "guest", "service"] as const;
 
@@ -111,6 +124,15 @@ export function signAccessToken(user: {
  * Sign a long-lived refresh token (7 days).
  * Carries username/displayName/role so refresh doesn't need a Nextcloud
  * round-trip and the new access token preserves the user's identity.
+ *
+ * WARP-116: each refresh token carries a random `jti` so two tokens minted
+ * for the same user in the same second (concurrent device logins; a login +
+ * immediate rotation) are still byte-distinct. Distinct tokens → distinct
+ * SHA-256 hashes, which the denylist and the per-user session index both key
+ * on. Without the `jti`, two same-second sessions collapsed to one hash:
+ * denylisting one would silently kill the other, and the session index could
+ * only ever hold a single member per second. The claim is opaque to
+ * `verifyRefreshToken` (it ignores unknown claims) — purely a uniqueness salt.
  */
 export function signRefreshToken(user: {
   id: string;
@@ -125,6 +147,7 @@ export function signRefreshToken(user: {
       displayName: user.displayName,
       role: user.role,
       type: "refresh",
+      jti: randomUUID(),
     },
     getSecret(),
     { expiresIn: REFRESH_TOKEN_TTL_SECONDS },
@@ -239,6 +262,99 @@ export async function claimRefreshRotation(token: string): Promise<boolean> {
   // 30s is long enough to cover the in-flight refresh call; denyRefreshToken
   // will overwrite this with the full remaining token lifetime.
   return cacheSetNx(key, true, 30);
+}
+
+/**
+ * WARP-116 — register a freshly-issued refresh token in the user's live
+ * session set (`jwt:sessions:{userId}`). Called on login and on every refresh
+ * rotation (for the NEW token). The member is `${tokenHash}:${exp}` so the
+ * revoke path can recover each token's remaining TTL without ever storing the
+ * raw token.
+ *
+ * Verifies the token first (rejects forged/expired) so a caller can't poison
+ * the index with garbage members. Non-fatal on any failure — the session
+ * index is an optimization that makes "revoke now" possible; a missed write
+ * just means that one session falls back to its own ≤7-day TTL.
+ */
+export async function registerRefreshSession(
+  userId: string,
+  token: string,
+): Promise<void> {
+  try {
+    const decoded = jwt.verify(token, getSecret()) as jwt.JwtPayload & {
+      type?: string;
+    };
+    if (decoded.type !== "refresh" || !decoded.exp) return;
+    const ttl = decoded.exp - Math.floor(Date.now() / 1000);
+    if (ttl <= 0) return;
+    const member = `${tokenHash(token)}:${decoded.exp}`;
+    await cacheSetAdd(SESSION_SET_PREFIX + userId, member, ttl);
+  } catch {
+    // Invalid signature / expired — nothing to index.
+  }
+}
+
+/**
+ * WARP-116 — drop a single refresh token's member from the user's session set
+ * (logout, or the old token after a refresh rotation). Best-effort: the
+ * denylist is the authoritative revoke; this just keeps the index tidy so a
+ * later `revokeUserSessions` doesn't re-denylist an already-dead token.
+ */
+export async function unregisterRefreshSession(
+  userId: string,
+  token: string,
+): Promise<void> {
+  try {
+    const decoded = jwt.verify(token, getSecret()) as jwt.JwtPayload & {
+      type?: string;
+    };
+    if (decoded.type !== "refresh" || !decoded.exp) return;
+    const member = `${tokenHash(token)}:${decoded.exp}`;
+    await cacheSetRemove(SESSION_SET_PREFIX + userId, member);
+  } catch {
+    // Forged/expired token — nothing indexed under it.
+  }
+}
+
+/**
+ * WARP-116 — immediately revoke every live refresh-token session for a user.
+ * Reads the session set, adds each member's token hash to the denylist with
+ * that token's REMAINING TTL (so the denylist entry can't outlive the token
+ * it shadows, and an already-expired member is skipped), then clears the set.
+ *
+ * Returns the number of tokens denylisted. Used by the admin
+ * revoke-sessions endpoint and wired into the role-change / user-disable
+ * flows so a permission change propagates on the next refresh instead of
+ * waiting out the ≤15-min access-token TTL.
+ *
+ * Note: this revokes REFRESH tokens only. Already-issued access tokens stay
+ * valid until their ≤15-min expiry by design (stateless verification) — the
+ * revoke bites the moment the client tries to refresh.
+ */
+export async function revokeUserSessions(userId: string): Promise<number> {
+  const setKey = SESSION_SET_PREFIX + userId;
+  const members = await cacheSetMembers(setKey);
+  const now = Math.floor(Date.now() / 1000);
+  let revoked = 0;
+  for (const member of members) {
+    // Member shape is `${hash}:${exp}`; the hash is hex (no colon) so split on
+    // the LAST colon to tolerate any future prefix change without corrupting
+    // the hash.
+    const sep = member.lastIndexOf(":");
+    if (sep <= 0) continue;
+    const hash = member.slice(0, sep);
+    const exp = Number(member.slice(sep + 1));
+    if (!Number.isFinite(exp)) continue;
+    const ttl = exp - now;
+    if (ttl <= 0) continue; // Already expired — denylist entry would be a no-op.
+    await cacheSet(REFRESH_DENYLIST_PREFIX + hash, true, ttl);
+    revoked += 1;
+  }
+  // Clear the index whether or not anything was denylisted: leaving stale
+  // (now-denylisted or expired) members would let a later revoke re-walk dead
+  // hashes and would leak the index unbounded.
+  await cacheDel(setKey);
+  return revoked;
 }
 
 /**
