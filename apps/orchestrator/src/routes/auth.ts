@@ -35,6 +35,9 @@ import {
   verifyRefreshToken,
   denyRefreshToken,
   claimRefreshRotation,
+  registerRefreshSession,
+  unregisterRefreshSession,
+  revokeUserSessions,
   ACCESS_TOKEN_TTL_SECONDS,
   REFRESH_TOKEN_TTL_SECONDS,
   roleOutranks,
@@ -1101,6 +1104,9 @@ export function createPublicAuthRouter(
         lastMfaAt: mfaStampIso,
       });
       const refreshToken = signRefreshToken({ id: userId, username, displayName, role });
+      // WARP-116: index this refresh token so an admin "revoke now" (role
+      // change / disable) can denylist every live device session for the user.
+      await registerRefreshSession(userId, refreshToken);
 
       const isHttps = req.secure || req.headers["x-forwarded-proto"] === "https";
 
@@ -1356,11 +1362,28 @@ export function createPublicAuthRouter(
           return;
         }
 
+        // WARP-116 (review fix 1): re-derive the role from the authoritative
+        // DB row, NOT from the role carried in the old refresh token. A
+        // session that escapes the denylist (the revoke-after-clear race, or a
+        // Redis outage that drops the best-effort deny write) would otherwise
+        // keep its stale — possibly higher — role for the full 7-day refresh
+        // TTL, partially defeating the "immediate propagation" promise.
+        // Precedence: DB role wins; the token-carried `role` is only a fallback
+        // for a legitimate rotation where the local row somehow lacks a role
+        // (defensive — `localUser` is non-null and gated past the !localUser /
+        // DEACTIVATED check above, so this fallback is belt-and-suspenders).
+        const effectiveRole: Role = (localUser.role as Role) ?? role;
+
         // Rotate: denylist the old refresh token (overwrites the short-TTL
         // rotation claim with a full-lifetime entry) and issue a new pair.
         await denyRefreshToken(refreshTokenInput);
-        const newRefreshToken = signRefreshToken({ id: sub, username, displayName, role });
-        const newAccessToken = signAccessToken({ id: sub, username, displayName, role });
+        // WARP-116: keep the session index in lockstep with rotation — drop
+        // the old token's member, add the new one — so a later "revoke now"
+        // walks live tokens only and never re-denylists a rotated-out hash.
+        await unregisterRefreshSession(sub, refreshTokenInput);
+        const newRefreshToken = signRefreshToken({ id: sub, username, displayName, role: effectiveRole });
+        const newAccessToken = signAccessToken({ id: sub, username, displayName, role: effectiveRole });
+        await registerRefreshSession(sub, newRefreshToken);
 
         // Extend the NC session token's TTL so it doesn't expire mid-session
         // (the user would otherwise see silent 401s on /api/files after the
@@ -1678,6 +1701,8 @@ export function createPublicAuthRouter(
         displayName: invite.displayName || invite.username,
         role,
       });
+      // WARP-116: index the invite-accept auto-login session too.
+      await registerRefreshSession(userId, refreshToken);
 
       const isHttps = req.secure || req.headers["x-forwarded-proto"] === "https";
       res.cookie(SESSION_COOKIE_NAME, accessToken, {
@@ -2110,6 +2135,13 @@ export function createProtectedAuthRouter(
       const refreshToken = req.cookies?.[REFRESH_COOKIE_NAME];
       if (refreshToken) {
         await denyRefreshToken(refreshToken);
+        // WARP-116: drop this device's member from the session index so a
+        // later "revoke now" doesn't re-denylist an already-dead token. Keyed
+        // by the session subject (req.user.id == JWT.sub == the userId used at
+        // registration); a no-op when no member matches.
+        if (req.user?.id) {
+          await unregisterRefreshSession(req.user.id, refreshToken);
+        }
       }
 
       // Revoke the stored Nextcloud app-password so it can't outlive the
@@ -2432,6 +2464,19 @@ export function createProtectedAuthRouter(
           return;
         }
         await ncSetUserEnabled(token, req.params.username, false);
+        // WARP-116: a disabled user must lose access effectively immediately,
+        // not at their next ≤15-min access-token expiry. Resolve the local
+        // row (the session index is keyed by User.id == JWT.sub) and denylist
+        // every live refresh token so the next /auth/refresh fails. Best-effort
+        // — a missing local row (legacy NC-only account) just means there were
+        // no JWT sessions to revoke.
+        if (prisma) {
+          const row = await prisma.user.findUnique({
+            where: { nextcloudUsername: req.params.username },
+            select: { id: true },
+          });
+          if (row) await revokeUserSessions(row.id);
+        }
         res.json({ status: "disabled", username: req.params.username });
       } catch (err: any) {
         if (err.message?.includes("403") || err.message?.includes("997")) {
@@ -2461,6 +2506,44 @@ export function createProtectedAuthRouter(
           res.status(403).json({ error: "Admin access required" });
           return;
         }
+        next(err);
+      }
+    },
+  );
+
+  // ── Revoke all sessions for a user (admin only) ──
+  // WARP-116: the explicit, opt-in "revoke now" path. v1 RBAC propagates a
+  // role/account change at the next access-token refresh (≤15 min); this
+  // endpoint denylists every live refresh token for the user immediately so
+  // their next /auth/refresh fails and they must re-authenticate. Already-
+  // issued access tokens still expire on their own ≤15-min clock (stateless
+  // verification) — by design. Keyed by username → resolved to the local
+  // User.id the session index uses (== JWT.sub).
+  router.post(
+    "/auth/users/:username/revoke-sessions",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        if (!prisma) {
+          // The session index is keyed by local User.id; without the local
+          // directory we can't resolve the username to revoke. Fail closed.
+          res.status(500).json({
+            error: "Server misconfigured: local user database not wired",
+            code: "USERS_NO_PRISMA",
+          });
+          return;
+        }
+        const row = await prisma.user.findUnique({
+          where: { nextcloudUsername: req.params.username },
+          select: { id: true },
+        });
+        if (!row) {
+          res.status(404).json({ error: "User not found", code: "USER_NOT_FOUND" });
+          return;
+        }
+        const revoked = await revokeUserSessions(row.id);
+        res.json({ status: "ok", username: req.params.username, revoked });
+      } catch (err) {
         next(err);
       }
     },

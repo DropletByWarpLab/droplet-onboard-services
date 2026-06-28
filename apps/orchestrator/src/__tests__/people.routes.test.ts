@@ -43,6 +43,16 @@ vi.mock("../services/activity.singleton.js", () => ({
   recordActivity: recordActivityMock,
 }));
 
+// WARP-116: the role-change route revokes the target's live sessions so the
+// new role propagates immediately. Mock the revoke so we can assert the call
+// without standing up Redis.
+const { revokeUserSessionsMock } = vi.hoisted(() => ({
+  revokeUserSessionsMock: vi.fn().mockResolvedValue(0),
+}));
+vi.mock("../services/jwt.service.js", () => ({
+  revokeUserSessions: revokeUserSessionsMock,
+}));
+
 import { createPeopleRouter } from "../routes/people.js";
 import type { ScopeName } from "../middleware/scope.js";
 
@@ -239,6 +249,7 @@ function buildApp(
 
 beforeEach(() => {
   recordActivityMock.mockClear();
+  revokeUserSessionsMock.mockClear();
 });
 
 describe("GET /api/people", () => {
@@ -403,6 +414,38 @@ describe("PATCH /api/people/:id/role", () => {
       .patch("/api/people/nope/role")
       .send({ role: "admin" });
     expect(res.status).toBe(404);
+  });
+
+  it("WARP-116: revokes the target's live sessions on a real role change", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "u1", username: "alice", role: "family" }),
+    ]);
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .patch("/api/people/u1/role")
+      .send({ role: "admin" });
+
+    expect(res.status).toBe(200);
+    // The new role must propagate immediately — revoke is keyed by the
+    // target's User.id (== JWT.sub == the session-index key).
+    expect(revokeUserSessionsMock).toHaveBeenCalledTimes(1);
+    expect(revokeUserSessionsMock).toHaveBeenCalledWith("u1");
+  });
+
+  it("WARP-116: does NOT revoke on a no-op role re-submit", async () => {
+    const prisma = createPrismaMock([
+      seedUser({ id: "u1", username: "alice", role: "admin" }),
+    ]);
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .patch("/api/people/u1/role")
+      .send({ role: "admin" });
+
+    // No state change → no revoke (mirrors the no-op audit short-circuit).
+    expect(res.status).toBe(200);
+    expect(revokeUserSessionsMock).not.toHaveBeenCalled();
   });
 });
 
