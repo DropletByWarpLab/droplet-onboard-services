@@ -10,6 +10,7 @@ import { WeeklyWindowsEditor, type WindowDraft } from "./WeeklyWindowsEditor";
 import { ScheduleHeatmap } from "./ScheduleHeatmap";
 import { presetById, type RecurringSchedulePresetId } from "./schedule-presets";
 import { Dialog } from "@/components/Dialog";
+import { toastForError } from "@/lib/toastForError";
 
 /**
  * Full-viewport modal for creating and editing a schedule.
@@ -52,22 +53,6 @@ function windowsForPreset(preset: RecurringSchedulePresetId) {
 
 function nameForPreset(preset: RecurringSchedulePresetId): string {
   return presetById(preset)?.name ?? "";
-}
-
-const TOAST_COPY: Record<string, string> = {
-  SCHEDULE_INVALID_WINDOW: "Please check your schedule windows",
-  SCHEDULE_TOO_MANY_WINDOWS: "A schedule can have at most 7 windows",
-  SCHEDULE_SUBJECT_REQUIRED: "Pick a device or group",
-  SCHEDULE_NAME_REQUIRED: "Schedule needs a name",
-  SCHEDULE_NOT_FOUND: "Schedule no longer exists",
-};
-
-function toastForScheduleError(err: unknown, fallback = "Something went wrong"): string {
-  if (err && typeof err === "object" && "code" in err && typeof (err as { code: unknown }).code === "string") {
-    const code = (err as { code: string }).code;
-    return TOAST_COPY[code] ?? fallback;
-  }
-  return fallback;
 }
 
 interface FormState {
@@ -215,7 +200,7 @@ export function ScheduleEditorModal({
       }
       onClose();
     } catch (err) {
-      setToast(toastForScheduleError(err));
+      setToast(toastForError(err));
     } finally {
       setSaving(false);
     }

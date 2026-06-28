@@ -9,6 +9,7 @@ import { useNetworkGroups } from "@/lib/hooks/useNetworkGroups";
 import { nextTransitionFor } from "@/lib/scheduleEval";
 import type { Schedule, ScheduleOverride } from "@/lib/types";
 import { Dialog } from "@/components/Dialog";
+import { toastForError } from "@/lib/toastForError";
 
 /**
  * Compact modal for creating one-off allow/block overrides against a device
@@ -27,8 +28,8 @@ import { Dialog } from "@/components/Dialog";
  * On Apply we compute `endAt` from the selected chip (or the custom
  * datetime-local input), `startAt = now`, and POST via
  * `useOverrideMutations.createOverride`. Typed errors (`OVERRIDE_INVALID_RANGE`,
- * `INVALID_DATE`) surface through a local `TOAST_COPY` map — we intentionally
- * do NOT widen the shared helper here, matching WARP-96's pattern.
+ * `INVALID_DATE`, `OVERRIDE_NOT_FOUND`) surface through the shared
+ * `toastForError` helper (WARP-105 unified the previously-local map).
  */
 
 /**
@@ -55,25 +56,6 @@ interface Props {
    */
   defaultDurationMin?: number;
   onClose: () => void;
-}
-
-const TOAST_COPY: Record<string, string> = {
-  OVERRIDE_INVALID_RANGE: "End time must be after start time",
-  INVALID_DATE: "Please enter a valid date and time",
-  OVERRIDE_NOT_FOUND: "Override no longer exists",
-};
-
-function toastForOverrideError(err: unknown, fallback = "Something went wrong"): string {
-  if (
-    err &&
-    typeof err === "object" &&
-    "code" in err &&
-    typeof (err as { code: unknown }).code === "string"
-  ) {
-    const code = (err as { code: string }).code;
-    return TOAST_COPY[code] ?? fallback;
-  }
-  return fallback;
 }
 
 type DurationChip = "15" | "30" | "60" | "120" | "transition" | "fallback30" | "custom";
@@ -298,7 +280,7 @@ export function OverrideModal({
       });
       onClose();
     } catch (err) {
-      setToast(toastForOverrideError(err));
+      setToast(toastForError(err));
     } finally {
       setSaving(false);
     }
@@ -308,7 +290,7 @@ export function OverrideModal({
     try {
       await cancelOverride(id);
     } catch (err) {
-      setToast(toastForOverrideError(err));
+      setToast(toastForError(err));
     }
   }
 
