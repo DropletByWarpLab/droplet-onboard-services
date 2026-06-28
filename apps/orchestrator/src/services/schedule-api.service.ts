@@ -55,6 +55,27 @@ function mapPrismaNotFound<T>(
   });
 }
 
+// WARP-112: the @@unique([scheduleId, daysOfWeek, startMin, endMin]) on
+// ScheduleWindow makes "no duplicate windows in one schedule" a DB guarantee.
+// A duplicate insert (including the race between two concurrent POSTs that
+// both pass the in-process validateWindows check) fails with Prisma P2002.
+// Translate it to a clean 400 SCHEDULE_INVALID_WINDOW so the client sees the
+// same error shape as the synchronous validation failures.
+// `fn` returns the `any`-typed Prisma promise (the service casts `p.*` models
+// to `any`); we preserve that `any` so callers keep their existing return
+// shape rather than collapsing to `unknown`.
+function mapDuplicateWindow(fn: () => Promise<any>): Promise<any> {
+  return fn().catch((err) => {
+    if (
+      err instanceof Prisma.PrismaClientKnownRequestError &&
+      err.code === "P2002"
+    ) {
+      throw DeviceRegistryError.scheduleInvalidWindow("duplicate window");
+    }
+    throw err;
+  });
+}
+
 function validateSubject(p: {
   subjectType: string;
   deviceMac?: string | null;
@@ -193,17 +214,19 @@ export function createScheduleApiService(prisma: PrismaClient) {
   async function createSchedule(input: CreateScheduleInput) {
     validateSubject(input);
     validateWindows(input.windows);
-    return p.schedule.create({
-      data: {
-        name: input.name,
-        enabled: input.enabled ?? true,
-        subjectType: input.subjectType,
-        deviceMac: input.deviceMac ?? null,
-        groupId: input.groupId ?? null,
-        windows: { create: input.windows },
-      },
-      include: { windows: true },
-    });
+    return mapDuplicateWindow(() =>
+      p.schedule.create({
+        data: {
+          name: input.name,
+          enabled: input.enabled ?? true,
+          subjectType: input.subjectType,
+          deviceMac: input.deviceMac ?? null,
+          groupId: input.groupId ?? null,
+          windows: { create: input.windows },
+        },
+        include: { windows: true },
+      }),
+    );
   }
 
   async function updateSchedule(id: string, patch: UpdateSchedulePatch) {
@@ -218,21 +241,23 @@ export function createScheduleApiService(prisma: PrismaClient) {
     }
     if (patch.windows) validateWindows(patch.windows);
 
-    return mapPrismaNotFound("Schedule", id, () =>
-      p.$transaction(async (tx: any) => {
-        if (patch.windows) {
-          await tx.scheduleWindow.deleteMany({ where: { scheduleId: id } });
-        }
-        return tx.schedule.update({
-          where: { id },
-          data: {
-            name: patch.name,
-            enabled: patch.enabled,
-            windows: patch.windows ? { create: patch.windows } : undefined,
-          },
-          include: { windows: true },
-        });
-      }),
+    return mapDuplicateWindow(() =>
+      mapPrismaNotFound("Schedule", id, () =>
+        p.$transaction(async (tx: any) => {
+          if (patch.windows) {
+            await tx.scheduleWindow.deleteMany({ where: { scheduleId: id } });
+          }
+          return tx.schedule.update({
+            where: { id },
+            data: {
+              name: patch.name,
+              enabled: patch.enabled,
+              windows: patch.windows ? { create: patch.windows } : undefined,
+            },
+            include: { windows: true },
+          });
+        }),
+      ),
     );
   }
 

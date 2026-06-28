@@ -390,6 +390,30 @@ describe("createScheduleApiService (WARP-94)", () => {
         }),
       ).rejects.toMatchObject({ code: "SCHEDULE_INVALID_WINDOW" });
     });
+
+    // WARP-112: the @@unique([scheduleId, daysOfWeek, startMin, endMin])
+    // constraint surfaces a duplicate window as Prisma P2002. The service
+    // must translate that to a clean 400 SCHEDULE_INVALID_WINDOW rather than
+    // letting it bubble as a 5xx.
+    it("translates Prisma P2002 (duplicate window) to SCHEDULE_INVALID_WINDOW", async () => {
+      mock.prisma.schedule.create.mockRejectedValueOnce(
+        new Prisma.PrismaClientKnownRequestError("unique violation", {
+          code: "P2002",
+          clientVersion: "test",
+        }),
+      );
+      await expect(
+        svc.createSchedule({
+          name: "Dup",
+          subjectType: "device",
+          deviceMac: "AA:BB:CC:DD:EE:01",
+          windows: [
+            { daysOfWeek: 1, startMin: 0, endMin: 60 },
+            { daysOfWeek: 1, startMin: 0, endMin: 60 },
+          ],
+        }),
+      ).rejects.toMatchObject({ code: "SCHEDULE_INVALID_WINDOW" });
+    });
   });
 
   describe("updateSchedule", () => {
@@ -430,6 +454,31 @@ describe("createScheduleApiService (WARP-94)", () => {
       expect(updated.windows).toHaveLength(2);
       expect(mock.prisma.$transaction).toHaveBeenCalled();
       expect(mock.prisma.scheduleWindow.deleteMany).toHaveBeenCalled();
+    });
+
+    // WARP-112: same duplicate-window guard on the PATCH path — the windows
+    // create inside the replacement transaction can raise P2002.
+    it("translates Prisma P2002 (duplicate window) to SCHEDULE_INVALID_WINDOW", async () => {
+      const s = await svc.createSchedule({
+        name: "S",
+        subjectType: "device",
+        deviceMac: "AA:BB:CC:DD:EE:01",
+        windows: [{ daysOfWeek: 1, startMin: 0, endMin: 60 }],
+      });
+      mock.prisma.schedule.update.mockRejectedValueOnce(
+        new Prisma.PrismaClientKnownRequestError("unique violation", {
+          code: "P2002",
+          clientVersion: "test",
+        }),
+      );
+      await expect(
+        svc.updateSchedule(s.id, {
+          windows: [
+            { daysOfWeek: 1, startMin: 0, endMin: 60 },
+            { daysOfWeek: 1, startMin: 0, endMin: 60 },
+          ],
+        }),
+      ).rejects.toMatchObject({ code: "SCHEDULE_INVALID_WINDOW" });
     });
   });
 
