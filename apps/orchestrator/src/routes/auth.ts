@@ -1362,6 +1362,18 @@ export function createPublicAuthRouter(
           return;
         }
 
+        // WARP-116 (review fix 1): re-derive the role from the authoritative
+        // DB row, NOT from the role carried in the old refresh token. A
+        // session that escapes the denylist (the revoke-after-clear race, or a
+        // Redis outage that drops the best-effort deny write) would otherwise
+        // keep its stale — possibly higher — role for the full 7-day refresh
+        // TTL, partially defeating the "immediate propagation" promise.
+        // Precedence: DB role wins; the token-carried `role` is only a fallback
+        // for a legitimate rotation where the local row somehow lacks a role
+        // (defensive — `localUser` is non-null and gated past the !localUser /
+        // DEACTIVATED check above, so this fallback is belt-and-suspenders).
+        const effectiveRole: Role = (localUser.role as Role) ?? role;
+
         // Rotate: denylist the old refresh token (overwrites the short-TTL
         // rotation claim with a full-lifetime entry) and issue a new pair.
         await denyRefreshToken(refreshTokenInput);
@@ -1369,8 +1381,8 @@ export function createPublicAuthRouter(
         // the old token's member, add the new one — so a later "revoke now"
         // walks live tokens only and never re-denylists a rotated-out hash.
         await unregisterRefreshSession(sub, refreshTokenInput);
-        const newRefreshToken = signRefreshToken({ id: sub, username, displayName, role });
-        const newAccessToken = signAccessToken({ id: sub, username, displayName, role });
+        const newRefreshToken = signRefreshToken({ id: sub, username, displayName, role: effectiveRole });
+        const newAccessToken = signAccessToken({ id: sub, username, displayName, role: effectiveRole });
         await registerRefreshSession(sub, newRefreshToken);
 
         // Extend the NC session token's TTL so it doesn't expire mid-session

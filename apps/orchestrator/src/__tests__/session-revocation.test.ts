@@ -10,15 +10,20 @@ process.env.JWT_SECRET = "test-jwt-secret-for-unit-tests-only-not-production";
 //    key models the scalar denylist entries. ──
 const scalarStore = new Map<string, unknown>();
 const setStore = new Map<string, Set<string>>();
+// Captures the TTL (3rd arg) passed to cacheSet per key, so a test can assert
+// the denylist entry got the token's REMAINING lifetime, not a fixed constant.
+const scalarTtlStore = new Map<string, number | undefined>();
 
 vi.mock("../services/cache.service.js", () => ({
   cacheGet: vi.fn(async (key: string) => scalarStore.get(key) ?? null),
-  cacheSet: vi.fn(async (key: string, value: unknown) => {
+  cacheSet: vi.fn(async (key: string, value: unknown, ttlSeconds?: number) => {
     scalarStore.set(key, value);
+    scalarTtlStore.set(key, ttlSeconds);
   }),
   cacheDel: vi.fn(async (key: string) => {
     scalarStore.delete(key);
     setStore.delete(key);
+    scalarTtlStore.delete(key);
   }),
   cacheSetNx: vi.fn(async (key: string, value: unknown) => {
     if (scalarStore.has(key)) return false;
@@ -60,6 +65,7 @@ describe("session revocation (WARP-116)", () => {
   beforeEach(() => {
     scalarStore.clear();
     setStore.clear();
+    scalarTtlStore.clear();
     vi.clearAllMocks();
   });
 
@@ -150,15 +156,21 @@ describe("session revocation (WARP-116)", () => {
       await registerRefreshSession("user-1", token);
       await revokeUserSessions("user-1");
 
-      // The denylist entry exists (scalar store) keyed under jwt:deny:.
+      // Exactly one denylist entry, keyed under jwt:deny:.
       const denyKeys = Array.from(scalarStore.keys()).filter((k) =>
         k.startsWith("jwt:deny:"),
       );
       expect(denyKeys).toHaveLength(1);
-      // Remaining TTL of a freshly-minted refresh token is ~7 days; we don't
-      // assert the exact number here (no real Redis), but the member encoded
-      // an exp so revoke had a TTL to use — sanity-check it's positive-shaped.
-      expect(REFRESH_TOKEN_TTL_SECONDS).toBeGreaterThan(0);
+
+      // The captured TTL must be the token's REMAINING lifetime (exp - now ≈
+      // the full 7-day TTL for a freshly-minted token), NOT a fixed constant.
+      // A regression to e.g. `cacheSet(key, true, 3600)` would fail this.
+      const ttl = scalarTtlStore.get(denyKeys[0]);
+      expect(ttl).toBeDefined();
+      // The TTL tracks exp - now (≈ the full refresh TTL for a fresh token),
+      // bounded above by it, with a couple seconds of clock slack.
+      expect(ttl!).toBeGreaterThan(REFRESH_TOKEN_TTL_SECONDS - 5);
+      expect(ttl!).toBeLessThanOrEqual(REFRESH_TOKEN_TTL_SECONDS);
     });
 
     it("skips members whose encoded expiry is already in the past", async () => {

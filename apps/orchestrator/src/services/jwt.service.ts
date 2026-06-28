@@ -330,6 +330,16 @@ export async function unregisterRefreshSession(
  * Note: this revokes REFRESH tokens only. Already-issued access tokens stay
  * valid until their ≤15-min expiry by design (stateless verification) — the
  * revoke bites the moment the client tries to refresh.
+ *
+ * KNOWN RACE (revoke-after-clear TOCTOU, follow-up ticket): a concurrent
+ * /auth/refresh that wins its rotation claim and SADDs the NEW token member
+ * AFTER this function's SMEMBERS+cacheDel has run will survive the revoke — its
+ * member was never read, so it's neither denylisted nor cleared. A full fix
+ * needs a per-user revoked-at fence (or a post-claim denylist re-check in the
+ * refresh path) and is deliberately out of scope here. The privilege impact is
+ * mitigated by the refresh path re-deriving the role from the authoritative DB
+ * row on every rotation (auth.ts, review fix 1): even a surviving session can
+ * only ever mint the user's CURRENT role, not a stale higher one.
  */
 export async function revokeUserSessions(userId: string): Promise<number> {
   const setKey = SESSION_SET_PREFIX + userId;
