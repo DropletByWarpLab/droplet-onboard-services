@@ -88,7 +88,7 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-describe("Devices page — Tier-2 confirm (KAN-5)", () => {
+describe("Devices page — Tier-2 confirmation (KAN-5)", () => {
   it("opens a confirm dialog when a climate setpoint write needs confirmation", async () => {
     command.mockResolvedValue(CONFIRMATION);
     render(<DevicesPage />);

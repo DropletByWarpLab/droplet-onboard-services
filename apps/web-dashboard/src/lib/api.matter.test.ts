@@ -156,7 +156,7 @@ describe("confirmMatterCommand (KAN-5)", () => {
     );
   });
 
-  it("throws the server message on a rejected confirm (e.g. expired token)", async () => {
+  it("throws the server message on a rejected confirmation (e.g. expired token)", async () => {
     authFetchMock.mockResolvedValue(
       res({
         ok: false,

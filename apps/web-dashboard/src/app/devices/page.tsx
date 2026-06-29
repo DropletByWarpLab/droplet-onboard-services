@@ -40,7 +40,7 @@ export default function DevicesPage() {
   // KAN-5: a Tier-2 device write (lock/unlock, climate setpoint >= 30C) answers
   // confirmation_required instead of executing. `request` stages that, opening
   // the confirm dialog below; the device-control sibling of the chat confirm.
-  const { pending, request, confirm, cancel } = useMatterCommandConfirm(
+  const { pending, request, accept, cancel } = useMatterCommandConfirm(
     command,
     refresh,
   );
@@ -51,7 +51,7 @@ export default function DevicesPage() {
   async function onConfirm() {
     setConfirmError(null);
     try {
-      await confirm();
+      await accept();
     } catch (e) {
       // Keep the dialog open (ConfirmDialog swallows the throw) and surface why.
       setConfirmError(e instanceof Error ? e.message : "Couldn't apply that change.");

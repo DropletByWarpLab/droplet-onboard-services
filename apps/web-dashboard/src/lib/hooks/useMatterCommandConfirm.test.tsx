@@ -78,7 +78,7 @@ describe("useMatterCommandConfirm (KAN-5)", () => {
       await result.current.request("12345", "lock");
     });
     await act(async () => {
-      await result.current.confirm();
+      await result.current.accept();
     });
 
     expect(confirmMatterCommand).toHaveBeenCalledWith("12345", "tok-abc", "lock");
@@ -86,7 +86,7 @@ describe("useMatterCommandConfirm (KAN-5)", () => {
     expect(result.current.pending).toBeNull();
   });
 
-  it("cancel clears the pending confirmation without calling confirm", () => {
+  it("cancel clears the pending confirmation without accepting", () => {
     const command = vi.fn().mockResolvedValue(CONFIRMATION);
     const { result } = renderHook(() => useMatterCommandConfirm(command));
 
@@ -109,7 +109,7 @@ describe("useMatterCommandConfirm (KAN-5)", () => {
       await result.current.request("12345", "lock");
     });
     await act(async () => {
-      await expect(result.current.confirm()).rejects.toThrow(/expired/i);
+      await expect(result.current.accept()).rejects.toThrow(/expired/i);
     });
 
     // Still pending so the user can retry or cancel.

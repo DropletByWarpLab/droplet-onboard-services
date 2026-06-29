@@ -36,7 +36,7 @@ export interface MatterCommandConfirm {
    * (leaving `pending` set so the dialog stays open) if the confirm fails — e.g.
    * an expired token — so the caller can surface the error and let the user retry.
    */
-  confirm: () => Promise<void>;
+  accept: () => Promise<void>;
   /** Dismiss the staged confirmation without executing it. */
   cancel: () => void;
 }
@@ -75,7 +75,7 @@ export function useMatterCommandConfirm(
     [command],
   );
 
-  const confirm = useCallback(async (): Promise<void> => {
+  const accept = useCallback(async (): Promise<void> => {
     if (!pending) return;
     // Keep `pending` set across the await so the dialog stays open (and the
     // confirm button shows its working state) until the write resolves. On
@@ -91,5 +91,5 @@ export function useMatterCommandConfirm(
 
   const cancel = useCallback(() => setPending(null), []);
 
-  return { pending, request, confirm, cancel };
+  return { pending, request, accept, cancel };
 }
