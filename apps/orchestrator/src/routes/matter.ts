@@ -426,6 +426,12 @@ export function createMatterRouter(prisma: PrismaClient): Router {
           status: "confirmation_required",
           nodeId: req.params.nodeId,
           command,
+          // KAN-5: echo the SERVICE the confirm route validates against — it is
+          // derived from the same command→{domain,service} mapping used to
+          // classify the tier above, so `set_brightness`→`turn_on` etc. round-
+          // trips. Without it the client can't satisfy POST /confirm's required
+          // `service` echo and the Tier-2 write is silently swallowed.
+          service,
           tier: result.tier,
           reason: result.reason,
           confirmationToken: result.confirmationToken,
