@@ -224,8 +224,8 @@ export function AiStep({
         // healthy box mid-thought, not a failure: surface a soft
         // retryable note. The raw reasoning text is NEVER rendered as
         // the answer.
-        const reasoning = data?.message?.reasoning;
-        if (typeof reasoning === "string" && reasoning.trim()) {
+        const trace = data?.message?.reasoning;
+        if (typeof trace === "string" && trace.trim()) {
           setNotice(
             "The model is still warming up its answer — try once more.",
           );
