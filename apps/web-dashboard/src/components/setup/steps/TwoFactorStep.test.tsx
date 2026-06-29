@@ -125,7 +125,11 @@ describe("TwoFactorStep", () => {
         <TwoFactorStep onComplete={vi.fn()} onSkip={vi.fn()} />
       </SetupNavProvider>,
     );
-    fireEvent.click(screen.getByRole("button", { name: /set up/i }));
+    // Reach the QR whether enrollment is on-mount (WARP-931 auto-enroll) or
+    // behind an intro "Set up" button — keeps this T4 assertion valid however
+    // the 2FA-UX work merges.
+    const setUp = screen.queryByRole("button", { name: /set up/i });
+    if (setUp) fireEvent.click(setUp);
     await screen.findByAltText(/qr code/i);
     fireEvent.change(screen.getByLabelText(/6-digit code/i), {
       target: { value: "123456" },
