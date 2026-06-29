@@ -3,6 +3,8 @@
 import { ChevronDown, ExternalLink, HelpCircle } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 
+import { HELP_PATH } from "@/lib/routing";
+
 /**
  * Inline "how does this work?" callout, reused by every wizard step.
  *
@@ -97,7 +99,7 @@ export function LearnMoreCard({
           // half-filled step intact. (The ExternalLink glyph already signals
           // that it leaves the page; AuthGate renders /help during setup.)
           <a
-            href={`/help#${helpAnchor}`}
+            href={`${HELP_PATH}#${helpAnchor}`}
             target="_blank"
             rel="noopener noreferrer"
             aria-label="Learn more (opens in a new tab)"
