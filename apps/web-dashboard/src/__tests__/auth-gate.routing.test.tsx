@@ -86,7 +86,7 @@ describe("AuthGate — routes off /setup/state (PR #372)", () => {
       setupState: { appliance: "unclaimed", setupStep: "org", userTourCompleted: false },
     });
     const { container } = render(<AuthGate>help content</AuthGate>);
-    expect(replaceMock).not.toHaveBeenCalledWith("/setup");
+    expect(replaceMock).not.toHaveBeenCalled();
     expect(container.textContent).toContain("help content");
   });
 
@@ -98,7 +98,7 @@ describe("AuthGate — routes off /setup/state (PR #372)", () => {
       setupState: { appliance: "unclaimed", setupStep: "org", userTourCompleted: false },
     });
     const { container } = render(<AuthGate>help content</AuthGate>);
-    expect(replaceMock).not.toHaveBeenCalledWith("/setup");
+    expect(replaceMock).not.toHaveBeenCalled();
     expect(container.textContent).toContain("help content");
   });
 
