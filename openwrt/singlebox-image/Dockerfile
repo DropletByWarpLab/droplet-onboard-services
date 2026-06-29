@@ -28,7 +28,8 @@ RUN mkdir -p /var/lock \
       uhttpd uhttpd-mod-ubus rpcd rpcd-mod-rpcsys rpcd-mod-iwinfo rpcd-mod-file \
       umdns \
       wireguard-tools kmod-wireguard luci-proto-wireguard \
-      ddns-scripts luci-app-ddns
+      ddns-scripts luci-app-ddns \
+      miniupnpd
 
 # WARP-868 — bake the droplet rpcd ACL into the image. rpcd's `read '*'` in a
 # login only expands over the acl.d groups that EXIST, so without this file
@@ -49,3 +50,14 @@ COPY files/usr/share/rpcd/acl.d/droplet-ai.json /usr/share/rpcd/acl.d/droplet-ai
 # once on first boot of a fresh container; droplet-openwrt-attach enforces the
 # same value at attach time for containers that predate this image.
 COPY singlebox-image/uci-defaults/60-droplet-uhttpd-limits /etc/uci-defaults/60-droplet-uhttpd-limits
+
+# KAN-9 — miniupnpd now ships in the opkg install list above, which is what
+# lights up the dashboard's UPnP / NAT-PMP card: the routing SDK's
+# upnp_status() degrades a MISSING /etc/config/upnpd to available:false, so the
+# card stays a read-only "Not available" line until the config exists. The
+# stock package ships enable_upnp/enable_natpmp='1', but a privacy appliance
+# must never auto-open ports before the owner asks. This uci-default seeds the
+# upnpd config DISABLED (available:true, enabled:false) on first boot; the owner
+# turns it on via the Tier-2 set_upnp path. uci-defaults scripts run once on
+# first boot of a fresh container, then procd deletes them.
+COPY singlebox-image/uci-defaults/61-droplet-upnp-default /etc/uci-defaults/61-droplet-upnp-default

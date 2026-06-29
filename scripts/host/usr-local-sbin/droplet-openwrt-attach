@@ -434,6 +434,11 @@ docker exec -i \
   # runtime list mirrors openwrt/singlebox-image/Dockerfile). ddns is NOT added
   # to the hard-verify gate below — it is not load-bearing for the AP and must
   # not block AP bring-up.
+  # KAN-9: added miniupnpd so the dashboard UPnP / NAT-PMP card lights up
+  # (the routing SDK reads /etc/config/upnpd; absent it the card is "Not
+  # available"). Like ddns it is NOT load-bearing for the AP, so it stays out of
+  # the hard-verify gate. The image bakes it + a disabled-by-default upnpd
+  # config; this runtime install is the safety net for pre-bake containers.
   NEED_INSTALL=0
   command -v hostapd >/dev/null || NEED_INSTALL=1
   command -v wg >/dev/null      || NEED_INSTALL=1
@@ -478,6 +483,7 @@ docker exec -i \
         umdns \
         wireguard-tools kmod-wireguard luci-proto-wireguard \
         ddns-scripts luci-app-ddns \
+        miniupnpd \
         2>&1)"; _inst_rc=$?
       [ "$_inst_rc" -eq 0 ] && break
       sleep "$_nap"
