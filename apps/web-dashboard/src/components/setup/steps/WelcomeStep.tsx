@@ -3,6 +3,7 @@
 import { Shield, Lock, Check } from "lucide-react";
 import { DropletMark } from "@/components/DropletMark";
 import { StepShell } from "@/components/setup/StepShell";
+import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 
 const TRUST = [
   { icon: Shield, label: "On-prem" },
@@ -54,6 +55,24 @@ export function WelcomeStep({ onContinue }: { onContinue: () => void }) {
         />
         Appliance detected · ready to configure
       </div>
+
+      {/* WARP-914 — the first page now carries a working "Learn more" affordance.
+          It reuses the shared LearnMoreCard so the link opens /help#privacy in a
+          NEW TAB (WARP-930): a same-tab nav would remount the wizard and reset
+          this splash. The privacy topic explains what Droplet is, that the AI
+          runs locally on the customer's own hardware, and how privacy works. */}
+      <LearnMoreCard title="What is Droplet?" helpAnchor="privacy">
+        <p>
+          A single box on your own network that runs your files, conversations,
+          cameras, and smart-home control — your own private cloud, except it
+          never leaves home.
+        </p>
+        <p>
+          The AI runs locally on the hardware in front of you, so your data
+          stays on the box. Tap “Learn more” for the full picture on how
+          Droplet keeps everything private.
+        </p>
+      </LearnMoreCard>
     </StepShell>
   );
 }
