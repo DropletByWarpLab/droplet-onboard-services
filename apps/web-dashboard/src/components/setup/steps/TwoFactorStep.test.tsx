@@ -1,14 +1,14 @@
 /**
- * PR #375 — setup-wizard Two-Factor step.
+ * PR #375 + WARP-931 — setup-wizard Two-Factor step.
  *
- * Three phases:
- *   intro  → explain + "Set up" (calls enrollTotp) / "Skip for now"
- *   enroll → QR + otpauth URI + 6-digit input → "Verify & enable"
- *            (calls verifyTotp)
+ * Two phases (the old "intro" screen was removed in WARP-931 so the QR shows
+ * on the first screen):
+ *   enroll → enrollTotp runs on MOUNT → QR + otpauth URI + 6-digit input →
+ *            "Verify & enable" (calls verifyTotp). "Skip for now" abandons it.
  *   codes  → one-time recovery codes + "I've saved these" → onComplete
  *
- * The api boundary is mocked; these tests assert the phase machine, the
- * single-display of recovery codes, and the skip path.
+ * The api boundary is mocked; these tests assert the auto-enroll, the phase
+ * machine, the single-display of recovery codes, and the skip path.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
@@ -35,21 +35,30 @@ beforeEach(() => {
 });
 
 describe("TwoFactorStep", () => {
-  it("intro → Set up calls enrollTotp and shows the QR + otpauth URI", async () => {
+  it("auto-enrolls on mount and shows the QR + otpauth key on the first screen (WARP-931)", async () => {
     render(<TwoFactorStep onComplete={vi.fn()} onSkip={vi.fn()} />);
 
-    fireEvent.click(screen.getByRole("button", { name: /set up/i }));
-
+    // No "Set up" click — enrollment fires on mount.
     await waitFor(() => expect(enrollTotp).toHaveBeenCalledTimes(1));
     const qr = await screen.findByAltText(/qr code/i);
     expect(qr).toHaveAttribute("src", "data:image/png;base64,QQ==");
-    // The otpauth secret is offered for manual entry.
+    // The otpauth secret is offered for manual entry…
     expect(screen.getByText(/ABC/)).toBeInTheDocument();
+    // …with the clarified copy (T3).
+    expect(
+      screen.getByText(/enter this key into your authenticator app/i),
+    ).toBeInTheDocument();
   });
 
-  it("enroll → entering a code and verifying reveals the one-time recovery codes", async () => {
+  it("links the authenticator how-to (/help#two-factor) on the first screen (WARP-931)", async () => {
     render(<TwoFactorStep onComplete={vi.fn()} onSkip={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: /set up/i }));
+    await screen.findByAltText(/qr code/i);
+    const link = screen.getByRole("link", { name: /learn more/i });
+    expect(link).toHaveAttribute("href", "/help#two-factor");
+  });
+
+  it("entering a code and verifying reveals the one-time recovery codes", async () => {
+    render(<TwoFactorStep onComplete={vi.fn()} onSkip={vi.fn()} />);
     await screen.findByAltText(/qr code/i);
 
     fireEvent.change(screen.getByLabelText(/6-digit code/i), {
@@ -66,7 +75,6 @@ describe("TwoFactorStep", () => {
   it("an invalid code surfaces the error and stays on the enroll phase", async () => {
     verifyTotp.mockRejectedValueOnce(new Error("That code didn't match. Try again."));
     render(<TwoFactorStep onComplete={vi.fn()} onSkip={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: /set up/i }));
     await screen.findByAltText(/qr code/i);
 
     fireEvent.change(screen.getByLabelText(/6-digit code/i), {
@@ -79,10 +87,27 @@ describe("TwoFactorStep", () => {
     expect(screen.queryByText(/aaaa-1111/)).not.toBeInTheDocument();
   });
 
+  it("offers a retry when enrollment fails", async () => {
+    enrollTotp.mockReset();
+    enrollTotp
+      .mockRejectedValueOnce(new Error("boom"))
+      .mockResolvedValueOnce({
+        otpauthUri: "otpauth://totp/Droplet:stefan?secret=ABC&issuer=Droplet",
+        qrDataUrl: "data:image/png;base64,QQ==",
+        issuer: "Droplet",
+      });
+    render(<TwoFactorStep onComplete={vi.fn()} onSkip={vi.fn()} />);
+
+    const retry = await screen.findByRole("button", { name: /try again/i });
+    fireEvent.click(retry);
+    // The retry re-enrolls and the QR appears.
+    expect(await screen.findByAltText(/qr code/i)).toBeInTheDocument();
+    expect(enrollTotp).toHaveBeenCalledTimes(2);
+  });
+
   it("confirming the saved codes calls onComplete", async () => {
     const onComplete = vi.fn();
     render(<TwoFactorStep onComplete={onComplete} onSkip={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: /set up/i }));
     await screen.findByAltText(/qr code/i);
     fireEvent.change(screen.getByLabelText(/6-digit code/i), {
       target: { value: "123456" },
@@ -99,11 +124,14 @@ describe("TwoFactorStep", () => {
     expect(onComplete).toHaveBeenCalledTimes(1);
   });
 
-  it("Skip for now on the intro calls onSkip without enrolling", () => {
+  it("Skip for now calls onSkip (enrollment on mount is harmless — no factor enabled)", async () => {
     const onSkip = vi.fn();
     render(<TwoFactorStep onComplete={vi.fn()} onSkip={onSkip} />);
+    await screen.findByAltText(/qr code/i);
+
     fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
     expect(onSkip).toHaveBeenCalledTimes(1);
-    expect(enrollTotp).not.toHaveBeenCalled();
+    // Skipping never verifies — no factor is turned on.
+    expect(verifyTotp).not.toHaveBeenCalled();
   });
 });
