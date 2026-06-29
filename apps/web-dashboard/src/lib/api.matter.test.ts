@@ -90,7 +90,7 @@ describe("sendMatterCommand (KAN-5)", () => {
   it("returns the 202 confirmation_required body instead of swallowing it", async () => {
     authFetchMock.mockResolvedValue(
       res({
-        ok: false, // a 202 is NOT res.ok, but it is a success the caller must read
+        ok: true, // authFetch returns a native Response; 202 is in 200-299 so ok is always true
         status: 202,
         json: {
           status: "confirmation_required",

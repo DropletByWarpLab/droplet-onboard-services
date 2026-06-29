@@ -2591,9 +2591,9 @@ export async function sendMatterCommand(
       body: JSON.stringify({ command, data }),
     }
   );
-  // 202 carries the confirmation_required body and is a success the caller MUST
-  // read — never collapse it into the error path.
-  if (!res.ok && res.status !== 202) {
+  // authFetch returns a native Response; 202 has ok=true per the Fetch spec so
+  // the plain !res.ok guard is sufficient — the caller always reads the body.
+  if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `Failed to send command: ${res.status}`);
   }
