@@ -12,6 +12,7 @@ import {
   HardDrive,
   MessageSquare,
   Search,
+  ShieldCheck,
   Sparkles,
   Users,
   Video,
@@ -231,6 +232,32 @@ const SECTIONS: Section[] = [
           <strong>Name and address:</strong> the workspace name is what
           people see; the short web address (the &ldquo;slug&rdquo;) is used
           in links. You can rename the workspace later from Settings.
+        </p>
+      </>
+    ),
+  },
+  {
+    anchor: "two-factor",
+    title: "Two-factor sign-in",
+    Icon: ShieldCheck,
+    body: (
+      <>
+        <p>
+          Two-factor sign-in adds a second check when you log in: your
+          password plus a 6-digit code from an app on your phone, so your
+          Droplet stays yours even if your password ever leaks.
+        </p>
+        <p>
+          <strong>Getting an authenticator app:</strong> on an iPhone, open
+          the App Store; on Android, open the Play Store. Search for an
+          authenticator app — Google Authenticator, 1Password, and Authy all
+          work — and install it.
+        </p>
+        <p>
+          <strong>Setting it up:</strong> open the app, scan the QR code shown
+          in setup, then type the 6-digit code it shows to turn two-factor on.
+          Save the one-time recovery codes somewhere safe in case you ever lose
+          your phone.
         </p>
       </>
     ),

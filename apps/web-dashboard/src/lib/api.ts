@@ -561,15 +561,23 @@ export interface TotpVerifyResponse {
 }
 
 /** Begin TOTP enrollment: returns the QR + otpauth URI for the current user. */
-export async function enrollTotp(): Promise<TotpEnrollResponse> {
+export async function enrollTotp(signal?: AbortSignal): Promise<TotpEnrollResponse> {
   const res = await authFetch(`${BASE}/api/auth/totp/enroll`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: "{}",
+    signal,
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || "Could not start two-factor setup");
+    // WARP-931 — preserve the orchestrator's typed code + status so callers can
+    // distinguish e.g. 409 TOTP_ALREADY_ENABLED (returning to an already-set-up
+    // 2FA step) from a genuine enroll failure, instead of dropping it to a bare
+    // message that translateError can't map.
+    throw Object.assign(
+      new Error(data.error || "Could not start two-factor setup"),
+      { ...(typeof data?.code === "string" ? { code: data.code } : {}), status: res.status },
+    );
   }
   return res.json();
 }
@@ -586,7 +594,10 @@ export async function verifyTotp(code: string): Promise<TotpVerifyResponse> {
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || "That code didn't match. Try again.");
+    throw Object.assign(
+      new Error(data.error || "That code didn't match. Try again."),
+      { ...(typeof data?.code === "string" ? { code: data.code } : {}), status: res.status },
+    );
   }
   return res.json();
 }
