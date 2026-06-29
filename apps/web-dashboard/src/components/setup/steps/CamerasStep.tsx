@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertCircle, Video, X } from "lucide-react";
 import {
   fetchDiscoveredCameras,
@@ -62,6 +62,18 @@ export function CamerasStep({
   const [saving, setSaving] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // WARP-933 review — `alive` guards async setState after the customer advances
+  // (the step unmounts while a fetch is still in flight); `savingRef` lets the
+  // discovery poll pause while an accept-all is mid-flight, so a poll tick can't
+  // blank the discovered cards out from under the save.
+  const alive = useRef(true);
+  const savingRef = useRef(false);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -79,6 +91,7 @@ export function CamerasStep({
       // GET /cameras includes pending discovered rows (enabled=false) —
       // filter to enabled so they don't duplicate the discovered cards.
       const enabled = all.filter((c) => c.enabled);
+      if (!alive.current) return;
       setCameras(list);
       setExisting(enabled);
       // WARP-933 — do NOT auto-skip when nothing's found yet. The step stays
@@ -105,8 +118,13 @@ export function CamerasStep({
   // promptly. A transient poll failure is ignored — the next tick retries.
   useEffect(() => {
     const timer = setInterval(() => {
+      // Don't overwrite the cards while an accept-all is in flight (a tick
+      // returning [] mid-save would blank them out under the save).
+      if (savingRef.current) return;
       void fetchDiscoveredCameras()
-        .then((list) => setCameras(list))
+        .then((list) => {
+          if (alive.current && !savingRef.current) setCameras(list);
+        })
         .catch(() => {});
     }, CAMERA_POLL_INTERVAL_MS);
     return () => clearInterval(timer);
@@ -115,6 +133,7 @@ export function CamerasStep({
   async function handleAcceptAll() {
     setError(null);
     setSaving(true);
+    savingRef.current = true;
     try {
       // Per-camera accept — one failure doesn't drop the others. If at
       // least one succeeds the wizard advances; the rest stay pending
@@ -135,6 +154,10 @@ export function CamerasStep({
     } catch (e) {
       setError(e instanceof Error ? e.message : "Save failed. Try again.");
       setSaving(false);
+    } finally {
+      // Resume the discovery poll regardless of outcome (success unmounts; the
+      // accepted===0 / catch paths stay on the step).
+      savingRef.current = false;
     }
   }
 
@@ -153,11 +176,17 @@ export function CamerasStep({
     }
   }
 
-  // Auto-skip path may have fired during load — show a tiny placeholder
-  // so we don't briefly flash an empty page before the unmount.
+  // Initial load — show a skeleton. WARP-933 review: also offer "Skip for now"
+  // so a hung discovery bridge (load never resolves) isn't a dead-end with only
+  // Back as an escape.
   if (loading && cameras.length === 0 && existing.length === 0) {
     return (
-      <StepShell current="cameras" title="Set up your cameras" subtitle="One moment…">
+      <StepShell
+        current="cameras"
+        title="Set up your cameras"
+        subtitle="One moment…"
+        skip={{ label: "Skip for now", onClick: onSkip }}
+      >
         <div className="space-y-2">
           {[0, 1].map((i) => (
             <div
@@ -198,9 +227,10 @@ export function CamerasStep({
               isLoading: saving,
             }
           : {
+              // No discovered cameras → nothing to accept, so `saving` (set only
+              // by handleAcceptAll) can never be true here. Plain Continue.
               label: "Continue",
               onClick: () => onComplete(0),
-              isLoading: saving,
             }
       }
       skip={{ label: "Skip for now", onClick: onSkip }}

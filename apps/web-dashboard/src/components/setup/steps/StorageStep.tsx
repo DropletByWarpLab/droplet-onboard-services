@@ -383,11 +383,17 @@ export function StorageStep({
     }
   }
 
-  // While loading, the auto-skip path may fire before render — show a
-  // tiny placeholder so we don't briefly flash an empty page.
+  // Initial load — show a skeleton. WARP-933 review: also offer "Skip for now"
+  // so a hung storage bridge (load never resolves) isn't a dead-end with only
+  // Back as an escape.
   if (loading && drives.length === 0) {
     return (
-      <StepShell current="storage" title="Name your storage" subtitle="One moment…">
+      <StepShell
+        current="storage"
+        title="Name your storage"
+        subtitle="One moment…"
+        skip={{ label: "Skip for now", onClick: onSkip }}
+      >
         <div className="space-y-2">
           {[0, 1].map((i) => (
             <div
