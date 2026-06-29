@@ -353,10 +353,23 @@ export function StepShell({
                 compact footer; a mobile home user is exactly who needs the 44px
                 target (UX review on #518). */}
             <div>
+              {/* `canShowBack` already implies `navigate` is truthy at runtime,
+                  but the extra `&& navigate` is load-bearing for TYPE narrowing:
+                  `canShowBack` is a `boolean`, so it doesn't narrow the optional
+                  `navigate` for the call in `onClick`. Keep it. */}
               {canShowBack && navigate && (
                 <button
                   type="button"
-                  onClick={() => (back ? back() : navigate(STEPS[idx - 1]))}
+                  // WARP-929 — when the page omits `back`, fall back to the
+                  // previous step but never below the floor. `canShowBack`
+                  // already guarantees `idx > firstNavigable` (so `idx - 1` is
+                  // at/above the floor today), but clamp it explicitly so the
+                  // floor invariant doesn't rely on that arithmetic holding.
+                  onClick={() =>
+                    back
+                      ? back()
+                      : navigate(STEPS[Math.max(idx - 1, firstNavigable)])
+                  }
                   className="dp-btn-secondary type-footnote !px-3"
                 >
                   <ArrowLeft size={16} aria-hidden="true" />

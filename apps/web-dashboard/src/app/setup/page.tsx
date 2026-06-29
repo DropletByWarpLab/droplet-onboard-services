@@ -103,6 +103,15 @@ function persistedStep(step: Step): string | null {
 }
 
 /**
+ * WARP-929 — the navigation floor index. The Workspace (`org`) step is the
+ * lowest step the wizard may navigate back to; welcome/claim/account sit below
+ * it and are a one-way floor (no unclaim, no owner re-create). Computed once at
+ * module load from the canonical `STEPS` order so the page clamp and the nav
+ * context's `firstNavigableIdx` can never drift.
+ */
+const FLOOR_IDX = STEPS.indexOf("org");
+
+/**
  * WARP-867 — the resume gate. The step machine below hydrates its step from
  * `setupState.setupStep` in a useState INITIALIZER, which runs exactly once
  * on first render. AuthGate deliberately renders public pages before the
@@ -211,6 +220,14 @@ function SetupWizard({ initialStep }: { initialStep: Step }) {
   // completed step past it (PR #518 review: the pointer must be monotonic).
   const setStep = useCallback((next: Step) => {
     const cur = stepRef.current;
+    // WARP-929 — the floor is enforced HERE, not just in StepShell's UI: this is
+    // the `navigate` exposed on the SetupNav context, so a caller jumping back to
+    // a below-floor step (e.g. a rail row click `navigate("account")`) would
+    // otherwise unclaim the appliance / re-enter the owner-create form. Block a
+    // move INTO the below-floor zone once we're already at/above the floor; the
+    // initial forward walk (welcome → claim → account → org) is still below the
+    // floor itself, so those legitimate forward steps are unaffected.
+    if (STEPS.indexOf(next) < FLOOR_IDX && STEPS.indexOf(cur) >= FLOOR_IDX) return;
     if (cur !== next && STEPS.indexOf(next) > STEPS.indexOf(cur)) historyRef.current = [...historyRef.current, cur];
     setStepState(next);
     stepRef.current = next;
@@ -250,13 +267,19 @@ function SetupWizard({ initialStep }: { initialStep: Step }) {
     const h = historyRef.current;
     if (h.length > 0) {
       const prev = h[h.length - 1];
+      // WARP-929 — never pop below the floor. The visited stack can hold
+      // below-floor steps (welcome/claim/account were pushed on the way up), so
+      // a caller invoking `back()` past the floor would otherwise re-enter them
+      // and unclaim the appliance. The floor is the invariant, not just the
+      // hidden Back button; bail without navigating.
+      if (STEPS.indexOf(prev) < FLOOR_IDX) return;
       historyRef.current = h.slice(0, -1);
       setStepState(prev);
       stepRef.current = prev;
       return;
     }
     const i = STEPS.indexOf(stepRef.current);
-    if (i > 0) {
+    if (i > FLOOR_IDX) {
       setStepState(STEPS[i - 1]);
       stepRef.current = STEPS[i - 1];
     }
@@ -282,8 +305,9 @@ function SetupWizard({ initialStep }: { initialStep: Step }) {
         back,
         // WARP-929 — the Workspace step is the navigation floor: claim/account
         // (and welcome) can't be revisited, so the appliance can't be unclaimed
-        // and the owner can't be re-created/abandoned from the wizard.
-        firstNavigableIdx: STEPS.indexOf("org"),
+        // and the owner can't be re-created/abandoned from the wizard. Same
+        // `FLOOR_IDX` the page's `back`/`navigate` clamp to (single-sourced).
+        firstNavigableIdx: FLOOR_IDX,
       }}
     >
       {step === "welcome" && (
