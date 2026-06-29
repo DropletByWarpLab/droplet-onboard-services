@@ -151,6 +151,40 @@ describe("setup AI step — reasoning-safe probe (WARP-849 AC2)", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows a collapsed 'Thought process' disclosure when the answer carries reasoning (WARP-934)", async () => {
+    await renderStepAndAsk({
+      message: {
+        role: "assistant",
+        content: "I can help with files.",
+        reasoning: REASONING_TEXT,
+      },
+    });
+
+    // The disclosure toggle renders alongside the answer…
+    const toggle = screen.getByRole("button", { name: /thought process/i });
+    expect(toggle).toBeInTheDocument();
+    // …collapsed by default, so the raw trace is NOT shown as the answer…
+    expect(
+      screen.queryByText(/enumerate the droplet's local capabilities/i),
+    ).not.toBeInTheDocument();
+    // …and expands on click to reveal the trace (parity with /chat).
+    fireEvent.click(toggle);
+    expect(
+      screen.getByText(/enumerate the droplet's local capabilities/i),
+    ).toBeInTheDocument();
+  });
+
+  it("shows no 'Thought process' disclosure when the answer has no reasoning (WARP-934)", async () => {
+    await renderStepAndAsk({
+      message: { role: "assistant", content: "I can help with files." },
+    });
+
+    expect(screen.getByTestId("ai-response")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /thought process/i }),
+    ).not.toBeInTheDocument();
+  });
+
   it("clears the warming-up notice on a successful retry", async () => {
     fetchModelsMock.mockResolvedValue({ models: [LOCAL_MODEL] });
     sendChatMock.mockResolvedValueOnce({
