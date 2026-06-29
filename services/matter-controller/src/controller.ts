@@ -81,6 +81,19 @@ const DEVICE_TYPE_CATEGORY: Record<number, SmartHomeCategory> = {
   0x000f: "vacuum",     // Robotic Vacuum Cleaner
 };
 
+/**
+ * KAN-7: Matter Thermostat SystemMode enum (Matter spec §4.3.9.1.5) keyed by
+ * the HVAC mode labels the dashboard surfaces. Heat/cool/auto are Tier-1
+ * writes; "off" is Tier-2 (gated by the orchestrator's safety rules) because
+ * it can leave a home with no heating/cooling.
+ */
+const HVAC_MODE_TO_SYSTEM_MODE: Record<string, number> = {
+  off: 0,
+  auto: 1,
+  cool: 3,
+  heat: 4,
+};
+
 // Cluster IDs for capability detection
 const CLUSTER_ID = {
   ON_OFF: 0x0006,
@@ -396,6 +409,30 @@ export function createMatterControllerCore(
             setpoint,
           );
         }
+        return { status: "ok" };
+      }
+
+      case "set_hvac_mode": {
+        // Matter Thermostat SystemMode enum (Matter spec §4.3.9.1.5):
+        // 0 = Off, 1 = Auto, 3 = Cool, 4 = Heat. We expose the four modes
+        // the dashboard surfaces; emergency-heat/dry/etc. are intentionally
+        // out of scope here.
+        const mode = String(data?.mode ?? "");
+        const systemMode = HVAC_MODE_TO_SYSTEM_MODE[mode];
+        if (systemMode === undefined)
+          throw new Error(`Unsupported HVAC mode: ${mode}`);
+        const thermoState = (endpoint as any).state?.thermostat;
+        if (!thermoState)
+          throw new Error("Thermostat cluster not found on endpoint");
+        // Surface the sidecar/device error HONESTLY: not every thermostat
+        // accepts every systemMode write, so a rejected write must propagate
+        // the raw matter.js error rather than reporting a fabricated ok.
+        await writeClusterAttribute(
+          endpoint,
+          "thermostat",
+          "systemMode",
+          systemMode,
+        );
         return { status: "ok" };
       }
 
