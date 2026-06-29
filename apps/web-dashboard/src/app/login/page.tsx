@@ -119,6 +119,11 @@ function LoginPageInner() {
   }, []);
 
   async function handleLogin() {
+    // Re-entrancy guard: the submit button is disabled while submitting, but the
+    // email/password/code inputs submit on Enter — without this, mashing Enter
+    // fires concurrent login() calls (e.g. two POSTs of the same single-use
+    // recovery code, the loser flashing a false "didn't match").
+    if (isSubmitting) return;
     setError(null);
 
     // Two-factor challenge in progress: validate the code, not the credentials
@@ -174,6 +179,21 @@ function LoginPageInner() {
               : "That code didn't match. Check your authenticator app and try again.",
           );
         }
+        return;
+      }
+      // On the 2FA challenge step the password field is gone, so the credential-
+      // centric auth fallback ("check your username and password") would be
+      // misleading for a non-TOTP failure. Coded errors (e.g. 429
+      // TOO_MANY_ATTEMPTS) still get their precise copy via translateError; only
+      // a codeless failure (e.g. a 500 during verify), which would otherwise hit
+      // that password fallback, gets a neutral code-appropriate message.
+      if (mfaRequired) {
+        const hasCode = typeof (err as { code?: unknown })?.code === "string";
+        setError(
+          hasCode
+            ? translateError(err, "auth")
+            : "We couldn't verify that code right now. Try again in a moment.",
+        );
         return;
       }
       // WARP-294: never render err.message verbatim — orchestrator may

@@ -237,6 +237,32 @@ describe("LoginPage — two-factor challenge (PR #375)", () => {
     expect(screen.getByLabelText(/recovery code/i)).toBeInTheDocument();
   });
 
+  it("a non-TOTP server error on the challenge shows code-appropriate copy, not the password fallback", async () => {
+    loginMock
+      .mockRejectedValueOnce(totpRequired()) // reveal field
+      .mockRejectedValueOnce(
+        Object.assign(new Error("Internal server error"), { status: 500 }),
+      );
+    render(<LoginPage />);
+
+    signInWith("alice@acme.co", "pw");
+    await screen.findByLabelText(/6-digit code/i);
+    fireEvent.change(screen.getByLabelText(/6-digit code/i), {
+      target: { value: "123456" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^verify$/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/couldn't verify that code/i)).toBeInTheDocument();
+    });
+    // The password-centric fallback must NOT appear on the code panel.
+    expect(
+      screen.queryByText(/check your username and password/i),
+    ).not.toBeInTheDocument();
+    expect(pushMock).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: /^verify$/i })).toBeInTheDocument();
+  });
+
   it("'Use a different account' abandons the challenge back to credentials", async () => {
     loginMock.mockRejectedValueOnce(totpRequired());
     render(<LoginPage />);
