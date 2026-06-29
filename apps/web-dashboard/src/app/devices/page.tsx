@@ -2,16 +2,18 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Plus, RefreshCw, Smartphone, Wifi, Cpu } from "lucide-react";
+import { Plus, RefreshCw, Smartphone, Wifi, Cpu, ShieldCheck } from "lucide-react";
 import { useSmartHome } from "@/lib/hooks/useSmartHome";
 import { useSmartHomeEvents } from "@/lib/hooks/useSmartHomeEvents";
 import { useScenes } from "@/lib/hooks/useScenes";
+import { useMatterCommandConfirm } from "@/lib/hooks/useMatterCommandConfirm";
 import { useAuth } from "@/lib/auth";
 import { DeviceGroup } from "@/components/smart-home/DeviceGroup";
 import { DiscoveryBanner } from "@/components/smart-home/DiscoveryBanner";
 import { DeviceDetailPanel } from "@/components/smart-home/DeviceDetailPanel";
 import { DeviceStats } from "@/components/smart-home/DeviceStats";
 import { RoutinesSection } from "@/components/smart-home/RoutinesSection";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ShellPage } from "@/components/shell/ShellPage";
 import type { MatterDevice } from "@/lib/types";
 
@@ -35,7 +37,27 @@ export default function DevicesPage() {
   const { user } = useAuth();
   const canAuthor = user?.role === "owner" || user?.role === "admin";
 
+  // KAN-5: a Tier-2 device write (lock/unlock, climate setpoint >= 30C) answers
+  // confirmation_required instead of executing. `request` stages that, opening
+  // the confirm dialog below; the device-control sibling of the chat confirm.
+  const { pending, request, accept, cancel } = useMatterCommandConfirm(
+    command,
+    refresh,
+  );
+  const [confirmError, setConfirmError] = useState<string | null>(null);
+
   const [selectedDevice, setSelectedDevice] = useState<MatterDevice | null>(null);
+
+  async function onConfirm() {
+    setConfirmError(null);
+    try {
+      await accept();
+    } catch (e) {
+      // Keep the dialog open (ConfirmDialog swallows the throw) and surface why.
+      setConfirmError(e instanceof Error ? e.message : "Couldn't apply that change.");
+      throw e;
+    }
+  }
 
   const groups = grouped
     ? [
@@ -122,7 +144,7 @@ export default function DevicesPage() {
                 key={group.title}
                 title={group.title}
                 devices={group.devices}
-                onCommand={command}
+                onCommand={request}
                 onDeviceClick={setSelectedDevice}
               />
             ))}
@@ -165,9 +187,54 @@ export default function DevicesPage() {
       {selectedDevice && (
         <DeviceDetailPanel
           device={selectedDevice}
-          onCommand={command}
+          onCommand={request}
           onClose={() => setSelectedDevice(null)}
         />
+      )}
+
+      {/* KAN-5: Tier-2 device-write confirm — reuses <ConfirmDialog> with the
+          same orange Write chip the network/switch Tier-2 writes use. */}
+      {pending && (
+        <ConfirmDialog
+          open
+          title="Confirm this device change?"
+          description={pending.reason}
+          confirmLabel="Confirm & apply"
+          variant="neutral"
+          accessory={
+            <div className="flex items-center gap-2.5">
+              <span className="inline-flex items-center gap-1 type-caption-2 font-semibold text-system-orange bg-system-orange/10 px-2 py-0.5 rounded-full">
+                <ShieldCheck size={10} aria-hidden="true" />
+                Write · confirm to apply
+              </span>
+              <span className="type-caption-2 text-label-tertiary">
+                Logged to Activity
+              </span>
+            </div>
+          }
+          onConfirm={onConfirm}
+          onCancel={() => {
+            setConfirmError(null);
+            cancel();
+          }}
+        />
+      )}
+
+      {confirmError && (
+        <div
+          role="status"
+          className="fixed bottom-4 right-4 bg-label-primary text-surface-primary px-3 py-2 rounded shadow flex items-center gap-2 z-50"
+        >
+          <span className="type-subheadline">{confirmError}</span>
+          <button
+            type="button"
+            onClick={() => setConfirmError(null)}
+            aria-label="Dismiss"
+            className="ml-1 opacity-80 hover:opacity-100"
+          >
+            ×
+          </button>
+        </div>
       )}
     </ShellPage>
   );

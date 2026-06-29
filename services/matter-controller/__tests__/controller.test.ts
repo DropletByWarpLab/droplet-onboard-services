@@ -292,6 +292,83 @@ describe("createMatterControllerCore", () => {
     });
   });
 
+  describe("set_hvac_mode (KAN-7)", () => {
+    // A thermostat endpoint: present `state.thermostat` (the guard the
+    // sidecar uses to know the cluster exists) + a cluster client whose
+    // setAttribute the write lands on.
+    function thermostatEndpoint(setAttribute = vi.fn().mockResolvedValue(undefined)) {
+      return {
+        state: {
+          descriptor: {
+            deviceTypeList: [{ deviceType: 0x0301, revision: 1 }],
+            serverList: [0x0201],
+          },
+          thermostat: { systemMode: 4 },
+        },
+        commands: {},
+        getClusterClient: vi.fn((name: string) =>
+          name === "thermostat" ? { setAttribute } : undefined,
+        ),
+      };
+    }
+
+    function thermostatNode(endpoint: ReturnType<typeof thermostatEndpoint>) {
+      return fakeNode({
+        parts: new Map<number, unknown>([
+          [0, fakeEndpoint({ state: { descriptor: { deviceTypeList: [], serverList: [] } } })],
+          [1, endpoint],
+        ]),
+      });
+    }
+
+    it.each([
+      ["off", 0],
+      ["auto", 1],
+      ["cool", 3],
+      ["heat", 4],
+    ])("writes systemMode=%i for mode %s", async (mode, expectedEnum) => {
+      const setAttribute = vi.fn().mockResolvedValue(undefined);
+      const node = thermostatNode(thermostatEndpoint(setAttribute));
+      (controller.getNode as ReturnType<typeof vi.fn>).mockResolvedValue(node);
+
+      const result = await core.sendCommand("1", "set_hvac_mode", { mode });
+
+      expect(result).toEqual({ status: "ok" });
+      expect(setAttribute).toHaveBeenCalledWith("systemMode", expectedEnum);
+    });
+
+    it("throws honestly when the thermostat cluster is absent (not a thermostat)", async () => {
+      // A plain on/off node — no `state.thermostat`.
+      const node = fakeNode();
+      (controller.getNode as ReturnType<typeof vi.fn>).mockResolvedValue(node);
+      await expect(
+        core.sendCommand("1", "set_hvac_mode", { mode: "heat" }),
+      ).rejects.toThrow(/thermostat cluster/i);
+    });
+
+    it("rejects an unsupported mode without writing", async () => {
+      const setAttribute = vi.fn().mockResolvedValue(undefined);
+      const node = thermostatNode(thermostatEndpoint(setAttribute));
+      (controller.getNode as ReturnType<typeof vi.fn>).mockResolvedValue(node);
+      await expect(
+        core.sendCommand("1", "set_hvac_mode", { mode: "turbo" }),
+      ).rejects.toThrow(/unsupported.*mode|invalid.*mode/i);
+      expect(setAttribute).not.toHaveBeenCalled();
+    });
+
+    it("propagates the sidecar write error HONESTLY when the device rejects the mode", async () => {
+      // Not every thermostat accepts every systemMode write — a device that
+      // rejects `off` must surface the raw matter.js error, not a fabricated ok.
+      const rejected = new Error("Matter status 0x87 (ConstraintError): systemMode not writable");
+      const setAttribute = vi.fn().mockRejectedValue(rejected);
+      const node = thermostatNode(thermostatEndpoint(setAttribute));
+      (controller.getNode as ReturnType<typeof vi.fn>).mockResolvedValue(node);
+      await expect(
+        core.sendCommand("1", "set_hvac_mode", { mode: "off" }),
+      ).rejects.toBe(rejected);
+    });
+  });
+
   describe("sendCommand", () => {
     it("dispatches turn_on to the first functional endpoint's onOff cluster", async () => {
       const node = fakeNode();

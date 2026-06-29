@@ -2642,6 +2642,20 @@ export async function fetchMatterDevice(nodeId: string): Promise<MatterDevice> {
   return res.json();
 }
 
+/**
+ * KAN-5: issue a Matter device command and RETURN the response body.
+ *
+ * A Tier-2 write (lock/unlock, climate setpoint >= 30C) answers HTTP 202
+ * `{ status: "confirmation_required", confirmationToken, service, … }` — which
+ * is NOT `res.ok`, so the old code fell into the error branch / discarded the
+ * body and the write became a silent no-op. We treat 202 as a first-class
+ * success: parse it and hand the confirmation_required body back so the caller
+ * can surface a confirm affordance and complete via {@link confirmMatterCommand}.
+ *
+ * Returns the raw orchestrator body (the Tier-1 success object on 200, or the
+ * confirmation_required object on 202). Genuine error statuses (400/404/429/5xx)
+ * still throw with the server message.
+ */
 export async function sendMatterCommand(
   nodeId: string,
   command: string,
@@ -2655,9 +2669,38 @@ export async function sendMatterCommand(
       body: JSON.stringify({ command, data }),
     }
   );
+  // authFetch returns a native Response; 202 has ok=true per the Fetch spec so
+  // the plain !res.ok guard is sufficient — the caller always reads the body.
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `Failed to send command: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * KAN-5: confirm + execute a Tier-2 Matter command the orchestrator staged with
+ * a 202 `confirmation_required`. POSTs the single-use `confirmationToken` plus
+ * the `service` echoed from that 202 (the confirm route REJECTS a missing or
+ * mismatched service). On success the orchestrator dispatches the command to
+ * the device; the caller should then refresh device state.
+ */
+export async function confirmMatterCommand(
+  nodeId: string,
+  confirmationToken: string,
+  service: string,
+): Promise<{ confirmed: boolean; nodeId: string }> {
+  const res = await authFetch(
+    `${BASE}/api/matter/devices/${nodeId}/confirm`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmationToken, service }),
+    }
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to confirm command: ${res.status}`);
   }
   return res.json();
 }

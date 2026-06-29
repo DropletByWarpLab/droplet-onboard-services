@@ -823,6 +823,31 @@ export interface MatterCapabilities {
   bleCommissioning: boolean;
 }
 
+/**
+ * KAN-5: the result of issuing a Matter device command.
+ *
+ * The orchestrator answers a Tier-2 write (a lock/unlock, or a climate
+ * setpoint >= 30C) with HTTP 202 `{ status: "confirmation_required", … }`
+ * rather than executing it. Callers MUST branch on `status` and, for the
+ * confirmation path, surface a confirm affordance and then echo
+ * `confirmationToken` + `service` back to POST /confirm — dropping the body
+ * (the pre-KAN-5 behavior) makes every Tier-2 command a silent no-op.
+ */
+export type MatterCommandResult =
+  | { status: "ok" }
+  | {
+      status: "confirmation_required";
+      nodeId: string;
+      /** Single-use token minted by the 202; echoed back to /confirm. */
+      confirmationToken: string;
+      /** The service the /confirm route validates against — echo verbatim. */
+      service: string;
+      /** Plain-English why-we're-asking sentence from the safety tier. */
+      reason: string;
+      /** Always 2 for a confirmation_required command; carried for the chip. */
+      tier: number;
+    };
+
 // --- Camera / Frigate types ---
 
 export interface CameraInfo {
