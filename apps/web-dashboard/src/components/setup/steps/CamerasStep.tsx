@@ -12,6 +12,11 @@ import type { CameraInfo, DiscoveredCamera } from "@/lib/types";
 import { StepShell } from "@/components/setup/StepShell";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 
+/** WARP-933 — how often to re-probe discovered cameras while the customer is on
+ *  this step, so a camera plugged in mid-step appears live. Bounded by React
+ *  cleanup; never a while-true. */
+const CAMERA_POLL_INTERVAL_MS = 10_000;
+
 /**
  * Wizard step — pick up any IP cameras the box discovered.
  *
@@ -43,14 +48,12 @@ import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 export function CamerasStep({
   onComplete,
   onSkip,
-  onAutoSkip,
 }: {
   onComplete: (acceptedCount: number) => void;
   onSkip: () => void;
-  /** Invoked when the step skips ITSELF on mount (no cameras found / service
-   *  off) — distinct from the user tapping "Skip for now" (onSkip). Lets the
-   *  wizard advance WITHOUT recording the step in Back history. Falls back to
-   *  onSkip when not provided (older callers/tests). */
+  /** WARP-933 — deprecated/no-op: the step no longer auto-skips when no
+   *  cameras are found (it renders + keeps discovery live instead). Kept in the
+   *  prop type so the page's existing pass stays valid; ignored at runtime. */
   onAutoSkip?: () => void;
 }) {
   const [cameras, setCameras] = useState<DiscoveredCamera[]>([]);
@@ -63,9 +66,8 @@ export function CamerasStep({
   const load = useCallback(async () => {
     try {
       // The cameras list rides along but must not block the step —
-      // discovery is the primary signal, so its failure (service off in
-      // dev) still skips, while a cameras-list error surfaces to the user
-      // instead of silently hiding the "Already set up" section.
+      // discovery is the primary signal. A cameras-list error surfaces to
+      // the user instead of silently hiding the "Already set up" section.
       let all: CameraInfo[];
       try {
         all = await fetchCameras();
@@ -79,22 +81,36 @@ export function CamerasStep({
       const enabled = all.filter((c) => c.enabled);
       setCameras(list);
       setExisting(enabled);
-      if (list.length === 0 && enabled.length === 0) {
-        (onAutoSkip ?? onSkip)();
-      }
+      // WARP-933 — do NOT auto-skip when nothing's found yet. The step stays
+      // visible (with an explicit "looking for cameras" state) and keeps
+      // polling (below), so a camera plugged in DURING this step shows up live
+      // instead of the page silently jumping past it.
     } catch {
-      // camera-discovery service might be off in dev; treat as "no
-      // cameras" and skip silently. Customer can add cameras manually
-      // from the Cameras page later.
-      (onAutoSkip ?? onSkip)();
+      // Discovery service unreachable — surface it with a retry rather than
+      // silently skipping, which read to customers as "the page doesn't work".
+      setError("Couldn't check for cameras right now. Try again in a moment.");
     } finally {
       setLoading(false);
     }
-  }, [onSkip, onAutoSkip]);
+  }, []);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  // WARP-933 — keep discovery LIVE while the customer is on this step, so a
+  // camera powered on / plugged in mid-step appears without a manual refresh.
+  // Bounded by React cleanup (cleared on unmount). camera-discovery runs a ~30s
+  // ONVIF/RTSP probe loop server-side; a 10s client poll surfaces new finds
+  // promptly. A transient poll failure is ignored — the next tick retries.
+  useEffect(() => {
+    const timer = setInterval(() => {
+      void fetchDiscoveredCameras()
+        .then((list) => setCameras(list))
+        .catch(() => {});
+    }, CAMERA_POLL_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, []);
 
   async function handleAcceptAll() {
     setError(null);
@@ -168,7 +184,9 @@ export function CamerasStep({
       subtitle={
         hasDiscovered
           ? `We found ${cameras.length} camera${cameras.length !== 1 ? "s" : ""} on your network.`
-          : `${existing.length} camera${existing.length !== 1 ? "s are" : " is"} still set up from a previous run.`
+          : existing.length > 0
+            ? `${existing.length} camera${existing.length !== 1 ? "s are" : " is"} still set up from a previous run.`
+            : "We're watching your network for cameras — plug one in and it'll appear here."
       }
       primary={
         hasDiscovered
@@ -237,6 +255,22 @@ export function CamerasStep({
               </div>
             ))}
           </>
+        )}
+
+        {/* WARP-933 — explicit, visible empty state (was a silent auto-skip).
+            Discovery keeps polling, so a camera plugged in now appears here. */}
+        {!hasDiscovered && existing.length === 0 && (
+          <div className="dp-card !py-6 flex flex-col items-center gap-2 text-center">
+            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-accent/10">
+              <Video size={20} className="text-accent" />
+            </div>
+            <p className="type-subheadline text-label-primary">No cameras yet</p>
+            <p className="type-caption-1 text-label-tertiary max-w-xs">
+              Connect an IP camera to your network and it&rsquo;ll show up here
+              automatically. You can also add cameras later from the Cameras
+              page.
+            </p>
+          </div>
         )}
 
         {error && (

@@ -71,14 +71,12 @@ import {
 export function StorageStep({
   onComplete,
   onSkip,
-  onAutoSkip,
 }: {
   onComplete: () => void;
   onSkip: () => void;
-  /** Invoked when the step skips ITSELF on mount (no drives / bridge down) —
-   *  distinct from the user tapping "Skip for now" (onSkip). The wizard uses
-   *  this to advance WITHOUT recording the step in Back history, so Back skips
-   *  over it. Falls back to onSkip when not provided (older callers/tests). */
+  /** WARP-933 — deprecated/no-op: the step no longer auto-skips when no drives
+   *  are found (it renders an explicit state instead). Kept in the prop type so
+   *  the page's existing pass stays valid; ignored at runtime. */
   onAutoSkip?: () => void;
 }) {
   const [drives, setDrives] = useState<DriveInfo[]>([]);
@@ -121,6 +119,7 @@ export function StorageStep({
   const [adoptBusy, setAdoptBusy] = useState<string | null>(null);
 
   const load = useCallback(async () => {
+    setError(null);
     try {
       const resp = await fetchDrives();
       const list = resp.drives ?? [];
@@ -139,21 +138,20 @@ export function StorageStep({
       if (groupPhysicalDisks(list).filter((p) => !p.inUse).length >= 2) {
         setRaidOn(true);
       }
-      // Auto-skip when there's nothing to label. Lets the wizard land
-      // on the next step without a "Skip" click on an empty page.
-      if (list.length === 0) {
-        (onAutoSkip ?? onSkip)();
-      }
+      // WARP-933 — do NOT auto-skip on an empty drive list. The step renders an
+      // explicit "no drives to set up" state with Continue, so the page is
+      // visible rather than silently jumped past.
     } catch (e) {
-      // Bridge unreachable / dev-mode without it — treat as "no drives"
-      // and skip silently. Customer can label drives later from /storage.
-      (onAutoSkip ?? onSkip)();
+      // Bridge unreachable — surface it with a retry rather than silently
+      // skipping, which read to customers as "the page doesn't work". They can
+      // still continue or skip deliberately.
+      setError("Couldn't load your drives. Check the connection and try again.");
       const _msg = e instanceof Error ? e.message : String(e);
       void _msg;
     } finally {
       setLoading(false);
     }
-  }, [onSkip, onAutoSkip]);
+  }, []);
 
   useEffect(() => {
     load();
@@ -403,6 +401,59 @@ export function StorageStep({
               </div>
             </div>
           ))}
+        </div>
+      </StepShell>
+    );
+  }
+
+  // WARP-933 — no drives came back (empty list, or the storage bridge couldn't
+  // be reached). Render an explicit, VISIBLE state with Continue/retry instead
+  // of silently auto-skipping the step (which read as "the page doesn't work").
+  if (drives.length === 0) {
+    return (
+      <StepShell
+        current="storage"
+        title="Name your storage"
+        subtitle={
+          error
+            ? "We couldn't read your drives just now."
+            : "Your Droplet's built-in storage is already set up."
+        }
+        primary={{ label: "Continue", onClick: onComplete }}
+        skip={{ label: "Skip for now", onClick: onSkip }}
+      >
+        <div className="dp-card !py-6 flex flex-col items-center gap-3 text-center">
+          <div className="flex h-10 w-10 items-center justify-center rounded-full bg-accent/10">
+            <HardDrive size={20} className="text-accent" />
+          </div>
+          {error ? (
+            <>
+              <p className="type-subheadline text-label-primary">
+                Couldn&rsquo;t load your drives
+              </p>
+              <p className="type-caption-1 text-label-tertiary max-w-xs">
+                {error}
+              </p>
+              <button
+                type="button"
+                onClick={load}
+                className="dp-btn-secondary mt-1"
+              >
+                Try again
+              </button>
+            </>
+          ) : (
+            <>
+              <p className="type-subheadline text-label-primary">
+                No extra drives to set up
+              </p>
+              <p className="type-caption-1 text-label-tertiary max-w-xs">
+                Your Droplet&rsquo;s built-in storage is already configured. Plug
+                in an extra drive to add space — you can manage storage anytime
+                from the Storage page.
+              </p>
+            </>
+          )}
         </div>
       </StepShell>
     );

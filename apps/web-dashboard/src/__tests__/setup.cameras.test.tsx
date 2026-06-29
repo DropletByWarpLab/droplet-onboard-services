@@ -63,6 +63,10 @@ vi.mock("@/lib/api", () => ({
   updateDriveLabel: vi.fn(),
   fetchDiscoveredCameras: () => fetchDiscoveredCamerasMock(),
   acceptDiscoveredCamera: (id: string) => acceptDiscoveredCameraMock(id),
+  // WARP-933 — the step no longer auto-skips, so its existing-cameras fetch
+  // actually runs to render; stub it (and removeCamera) so it loads cleanly.
+  fetchCameras: vi.fn(async () => []),
+  removeCamera: vi.fn(async () => undefined),
   // VPN step is downstream; lands on preCheck (endpointConfigured: false)
   // so tests can navigate it with one extra Skip click.
   fetchVpnStatus: vi.fn(async () => ({
@@ -135,7 +139,13 @@ async function advanceToCameras() {
       screen.getByRole("button", { name: /skip — no remote access/i }),
     );
   });
-  // Storage auto-skip → Discovery → skip
+  // WARP-933 — Storage now RENDERS (no silent auto-skip): skip it, then skip
+  // the Discovery step, to reach Cameras.
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+    fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+  });
   await act(async () => {
     await Promise.resolve();
     await Promise.resolve();
@@ -179,13 +189,19 @@ describe("setup Cameras step (WARP-174)", () => {
     vi.clearAllMocks();
   });
 
-  it("auto-skips when zero discovered cameras", async () => {
+  it("renders a visible empty state (no silent auto-skip) when zero cameras, and Continue advances (WARP-933)", async () => {
     fetchDiscoveredCamerasMock.mockResolvedValue([]);
     render(<SetupPage />);
     await advanceToCameras();
-    // Skipped through to Done — WelcomeFlourish renders.
-    // Cameras step finished. Skip VPN preCheck, then AI, then Team (PR #381),
-    // to reach Done.
+
+    // WARP-933 — the step is VISIBLE, not silently jumped past.
+    expect(screen.getByText(/no cameras yet/i)).toBeInTheDocument();
+
+    // Continue past cameras (nothing to add), then skip VPN, AI, Team → Done.
+    await act(async () => {
+      await Promise.resolve();
+      fireEvent.click(screen.getByRole("button", { name: /^continue$/i }));
+    });
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();

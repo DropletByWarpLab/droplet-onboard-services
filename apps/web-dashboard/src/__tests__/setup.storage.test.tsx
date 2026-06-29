@@ -215,12 +215,12 @@ describe("setup Storage step (WARP-174)", () => {
     vi.clearAllMocks();
   });
 
-  it("auto-skips when bridge returns 0 drives", async () => {
+  it("renders a visible empty state (no silent auto-skip) when 0 drives (WARP-933)", async () => {
     fetchDrivesMock.mockResolvedValue({ drives: [], count: 0 });
     render(<SetupPage />);
     await advanceToStorage();
-    // Landed on Discovery — no Storage UI ever rendered.
-    expect(screen.getByText(/discovering your devices/i)).toBeInTheDocument();
+    // WARP-933 — the Storage step is VISIBLE, not silently jumped to Discovery.
+    expect(screen.getByText(/no extra drives to set up/i)).toBeInTheDocument();
     expect(updateDriveLabelMock).not.toHaveBeenCalled();
   });
 
@@ -372,12 +372,12 @@ describe("setup Storage step (WARP-174)", () => {
     expect(confirmPoolCommandMock).not.toHaveBeenCalled();
   });
 
-  it("OPTIONAL: a no-drive box auto-skips storage and still creates no pool", async () => {
+  it("OPTIONAL: a no-drive box shows the empty state and still creates no pool (WARP-933)", async () => {
     fetchDrivesMock.mockResolvedValue({ drives: [], count: 0 });
     render(<SetupPage />);
     await advanceToStorage();
-    // Auto-skipped to Discovery with zero storage writes of any kind.
-    expect(screen.getByText(/discovering your devices/i)).toBeInTheDocument();
+    // Visible empty state — and zero storage writes of any kind.
+    expect(screen.getByText(/no extra drives to set up/i)).toBeInTheDocument();
     expect(requestCreatePoolMock).not.toHaveBeenCalled();
     expect(updateDriveLabelMock).not.toHaveBeenCalled();
   });
