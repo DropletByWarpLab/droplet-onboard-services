@@ -532,7 +532,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Preserve the orchestrator's typed code + status so translateError can
       // map precise copy (previously only the message survived, so a 401 with
       // no message fell through to the domain fallback).
-      throw Object.assign(new Error(data.error || "Login failed"), {
+      throw Object.assign(new Error(data?.error || "Login failed"), {
         code: typeof data?.code === "string" ? data.code : undefined,
         status: res.status,
       });

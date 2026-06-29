@@ -173,6 +173,9 @@ function LoginPageInner() {
         if (!mfaRequired) {
           setMfaRequired(true);
         } else {
+          // Clear the rejected code so the stale value doesn't re-fire on Enter.
+          if (mfaMode === "recovery") setRecoveryCode("");
+          else setTotpCode("");
           setError(
             mfaMode === "recovery"
               ? "That recovery code didn't match. Try another saved code."

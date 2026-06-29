@@ -169,13 +169,19 @@ export function SignInForm({
             </p>
             <p
               id="login-mfa-help"
-              role="status"
               className="type-caption-1 text-label-secondary"
             >
               {isRecovery
                 ? "Enter one of the recovery codes you saved during setup."
                 : "Enter the 6-digit code from your authenticator app."}
             </p>
+            {/* Separate live region announces mode changes to AT without
+                double-reading the describedby text on focus. */}
+            <span className="sr-only" aria-live="polite" aria-atomic="true">
+              {isRecovery
+                ? "Enter one of the recovery codes you saved during setup."
+                : "Enter the 6-digit code from your authenticator app."}
+            </span>
           </div>
         </div>
 
