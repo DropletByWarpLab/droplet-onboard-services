@@ -38,6 +38,9 @@ import {
   rebootRouter,
   getRouterOperation,
   getAiNetworkAccess,
+  createInterface,
+  editInterface,
+  restartNetwork,
 } from "../services/network.service.js";
 import {
   evaluateNetworkCommand,
@@ -662,6 +665,31 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
           break;
         case "reboot":
           writeResult = await rebootRouter();
+          break;
+        case "create_interface":
+          // KAN-10 Tier-2 confirm for POST /network/interfaces. The pending
+          // record carries the staged fields (incl. `force` for a management-
+          // interface override); the routing service wraps the write in
+          // safe_apply (60s auto-rollback).
+          writeResult = await createInterface({
+            name: params?.name as string,
+            proto: params?.proto as string,
+            device: params?.device as string | undefined,
+            ipaddr: params?.ipaddr as string | undefined,
+            netmask: params?.netmask as string | undefined,
+            gateway: params?.gateway as string | undefined,
+            force: params?.force as boolean | undefined,
+          });
+          break;
+        case "edit_interface": {
+          // KAN-10 Tier-2 confirm for PUT /network/interfaces/:name.
+          const { name: ifName, ...editFields } = params ?? {};
+          writeResult = await editInterface(ifName as string, editFields);
+          break;
+        }
+        case "restart_network":
+          // KAN-10 Tier-3 confirm for POST /network/restart.
+          writeResult = await restartNetwork();
           break;
         default:
           return res.status(400).json({ error: `Unknown operation: ${confirmedOp}` });

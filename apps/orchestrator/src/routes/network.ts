@@ -19,6 +19,7 @@ import { createNetworkDeviceService } from "../services/network-device.service.j
 import { createScheduleApiService } from "../services/schedule-api.service.js";
 import * as openwrt from "../services/openwrt.client.js";
 import { registerStatusRoutes } from "./network-status.routes.js";
+import { registerInterfaceRoutes } from "./network-interface.routes.js";
 import { registerWifiRoutes } from "./network-wifi.routes.js";
 import { registerFirewallRoutes } from "./network-firewall.routes.js";
 import { registerVlanRoutes } from "./network-vlan.routes.js";
@@ -62,6 +63,7 @@ export function createNetworkRouter(prisma: PrismaClient): Router {
   const scheduleApi = createScheduleApiService(prisma);
 
   registerStatusRoutes(router, { prisma, networkDeviceService });
+  registerInterfaceRoutes(router, { prisma });
   registerWifiRoutes(router, { prisma });
   registerFirewallRoutes(router, { prisma });
   registerVlanRoutes(router, {});

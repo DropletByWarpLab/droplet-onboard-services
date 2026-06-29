@@ -361,6 +361,56 @@ export async function setInterfaceDown(name: string): Promise<WriteResult> {
   return opFrom(res);
 }
 
+/** KAN-10: editable fields for an interface create/edit. Only set fields are
+ *  sent on the wire; the routing schema validates shape + protocol. */
+export interface InterfaceWriteFields {
+  proto?: string;
+  device?: string;
+  ipaddr?: string;
+  netmask?: string;
+  gateway?: string;
+  /** Explicit extra-confirm to allow a management-interface write. */
+  force?: boolean;
+}
+
+/** KAN-10: create (or overwrite) a `config interface` section. The routing
+ *  service wraps the write in safe_apply (60s auto-rollback) and refuses a
+ *  management-interface write unless `force` is set. */
+export async function createInterface(
+  name: string,
+  fields: InterfaceWriteFields & { proto: string },
+): Promise<WriteResult> {
+  const res = await postJson(
+    "/network/interfaces",
+    { name, ...fields },
+    `Create interface ${name}`,
+  );
+  return opFrom(res);
+}
+
+/** KAN-10: update only the supplied options on an existing interface. */
+export async function editInterface(
+  name: string,
+  fields: InterfaceWriteFields,
+): Promise<WriteResult> {
+  const res = await routingFetch(`/network/interfaces/${encodeURIComponent(name)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(fields),
+    label: `Edit interface ${name}`,
+  });
+  return opFrom(res);
+}
+
+/** KAN-10: restart the whole networking stack (Tier-3, owner-only). */
+export async function restartNetwork(): Promise<WriteResult> {
+  const res = await routingFetch("/network/restart", {
+    method: "POST",
+    label: "Network restart",
+  });
+  return opFrom(res);
+}
+
 // --- Wireless ---
 
 export async function fetchWirelessStatus(): Promise<WirelessStatus> {
