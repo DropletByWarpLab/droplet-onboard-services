@@ -65,6 +65,8 @@ from schemas import (
     ApplyConfigRequest,
     CreateVlanRequest,
     CameraSubnetSetupRequest,
+    CreateInterfaceRequest,
+    EditInterfaceRequest,
     FirewallZoneCollection,
     FirewallRuleCollection,
     FirewallRedirectCollection,
@@ -532,6 +534,23 @@ def network_topology():
         handle_router_error(exc)
 
 
+# Interfaces the dashboard / orchestrator are reached on. A create/edit that
+# rewrites one of these can sever the management path (the single-box is reached
+# on `lan`/`br-lan`; a multi-box adds `mgmt`), so the interface-write routes
+# refuse it unless the caller passes `force` (the explicit extra-confirm). The
+# set is env-configurable for non-default shapes (no host-specific hardcoding —
+# NET-02), defaulting to the shipped `lan`,`mgmt`. Compared case-insensitively.
+_MANAGEMENT_INTERFACES = frozenset(
+    iface.strip().lower()
+    for iface in os.environ.get("DROPLET_MGMT_INTERFACES", "lan,mgmt").split(",")
+    if iface.strip()
+)
+
+
+def _is_management_interface(name: str) -> bool:
+    return name.strip().lower() in _MANAGEMENT_INTERFACES
+
+
 @app.get("/network/interfaces")
 def network_interfaces():
     try:
@@ -572,6 +591,118 @@ def network_interface_down(name: str):
     try:
         get_router().network.interface_down(name)
         return {"status": "ok", "interface": name, "action": "down"}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# Interface Add / Edit / Restart write path (KAN-10)
+# ---------------------------------------------------------------------------
+# Editing an interface is high blast radius — a wrong proto/address/zone can
+# cut the dashboard's own connectivity. Every write here rides the same
+# blast-radius-safety patterns the VPN/wireless writes use:
+#
+#   * the SDK create/edit stage uci changes inside `safe_apply(timeout=60)`, so a
+#     change that severs the link auto-rolls-back after 60s;
+#   * a write targeting the management interface is REFUSED with 409 unless the
+#     caller passes `force` (the connectivity-self-cut guard);
+#   * a `ConnectionLost` from safe_apply's rollback path surfaces as a 503 with
+#     `rollback_pending`, exactly like `/aps/{mac}/approve`.
+#
+# RBAC (owner-only) + the Tier-2/3 confirm dispatch live one layer up in the
+# orchestrator's `/api/network/*` routes; this service trusts a valid bearer.
+_MANAGEMENT_REFUSAL = {
+    "error": (
+        "This is the interface this dashboard is reached on. Changing it can cut "
+        "your own connection — confirm again to proceed."
+    ),
+    "code": "MANAGEMENT_INTERFACE",
+}
+
+
+@app.post("/network/interfaces")
+def create_network_interface(req: CreateInterfaceRequest, request: Request):
+    """Create (or overwrite) a `config interface` section under `safe_apply`."""
+    if _is_management_interface(req.name) and not req.force:
+        return JSONResponse(status_code=409, content=_MANAGEMENT_REFUSAL)
+    try:
+        r = get_router()
+        r.network.create_interface(
+            req.name,
+            proto=req.proto,
+            device=req.device,
+            ipaddr=req.ipaddr,
+            netmask=req.netmask,
+            gateway=req.gateway,
+        )
+        return {
+            "status": "ok",
+            "name": req.name,
+            "proto": req.proto,
+            "operation_id": getattr(request.state, "operation_id", None),
+        }
+    except ConnectionLost as exc:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "Connectivity lost creating the interface — rolling back",
+                "detail": str(exc),
+                "rollback_pending": True,
+            },
+        )
+    except UbusError as exc:
+        handle_router_error(exc)
+
+
+@app.put("/network/interfaces/{name}")
+def edit_network_interface(name: str, req: EditInterfaceRequest, request: Request):
+    """Update only the supplied options on an existing interface, under `safe_apply`."""
+    if _is_management_interface(name) and not req.force:
+        return JSONResponse(status_code=409, content=_MANAGEMENT_REFUSAL)
+    try:
+        r = get_router()
+        r.network.edit_interface(
+            name,
+            proto=req.proto,
+            device=req.device,
+            ipaddr=req.ipaddr,
+            netmask=req.netmask,
+            gateway=req.gateway,
+        )
+        return {
+            "status": "ok",
+            "name": name,
+            "operation_id": getattr(request.state, "operation_id", None),
+        }
+    except ConnectionLost as exc:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "Connectivity lost editing the interface — rolling back",
+                "detail": str(exc),
+                "rollback_pending": True,
+            },
+        )
+    except UbusError as exc:
+        handle_router_error(exc)
+
+
+@app.post("/network/restart")
+def restart_network(request: Request):
+    """Restart the whole networking stack (ifdown/ifup of every interface).
+
+    A blunt instrument — it briefly drops every interface — so the orchestrator
+    gates it Tier-3 (web-UI-only, owner-only, confirm). The router-side `network
+    restart` ubus call is fire-and-forget; the operation tracker records the
+    apply outcome via the middleware.
+    """
+    try:
+        get_router().network.restart()
+        return {
+            "status": "ok",
+            "action": "network_restart",
+            "operation_id": getattr(request.state, "operation_id", None),
+        }
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
 

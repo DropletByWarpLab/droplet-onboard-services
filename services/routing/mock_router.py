@@ -185,6 +185,16 @@ class _MockNetwork:
     def interface_down(self, name: str) -> None:
         logger.info("mock: interface down %s — no-op", name)
 
+    def create_interface(self, name: str, **kwargs: Any) -> None:
+        logger.info("mock: create_interface %s %s — no-op", name, kwargs)
+
+    def edit_interface(self, name: str, **kwargs: Any) -> None:
+        logger.info("mock: edit_interface %s %s — no-op", name, kwargs)
+
+    def restart(self) -> dict[str, Any]:
+        logger.info("mock: network restart — no-op")
+        return {}
+
 
 class _MockWireless:
     def status(self) -> dict[str, Any]:

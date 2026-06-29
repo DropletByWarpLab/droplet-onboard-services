@@ -728,6 +728,70 @@ class NetworkApi:
         })
         self._r.uci.commit("network")
 
+    def create_interface(
+        self,
+        name: str,
+        proto: str,
+        device: Optional[str] = None,
+        ipaddr: Optional[str] = None,
+        netmask: Optional[str] = None,
+        gateway: Optional[str] = None,
+    ) -> None:
+        """Create (or overwrite) a `config interface` section under `network` (KAN-10).
+
+        Wrapped in ``safe_apply``: writing /etc/config/network can cut the AP/LAN
+        the dashboard rides on, so the change applies with the 60s auto-rollback
+        timer that reverts on lost connectivity — the same blast-radius posture as
+        ``FirewallApi.set_zone_policy`` and the VPN/wireless writes. Only the
+        supplied fields are written; ``proto`` is always required.
+        """
+        values: dict[str, Any] = {"proto": proto}
+        if device is not None:
+            values["device"] = device
+        if ipaddr is not None:
+            values["ipaddr"] = ipaddr
+        if netmask is not None:
+            values["netmask"] = netmask
+        if gateway is not None:
+            values["gateway"] = gateway
+        with self._r.safe_apply(timeout=60):
+            self._r.uci.set("network", name, values)
+            self._r.uci.commit("network")
+
+    def edit_interface(
+        self,
+        name: str,
+        proto: Optional[str] = None,
+        device: Optional[str] = None,
+        ipaddr: Optional[str] = None,
+        netmask: Optional[str] = None,
+        gateway: Optional[str] = None,
+    ) -> None:
+        """Update only the supplied options on an existing `config interface` (KAN-10).
+
+        Same ``safe_apply`` auto-rollback posture as :meth:`create_interface`:
+        flipping an interface's proto/address/zone is exactly how an edit can
+        sever the management path, so a misapply self-reverts after 60s. Raises
+        :class:`ValueError` if no field is supplied (an empty edit is a no-op the
+        route should reject before minting a confirm token).
+        """
+        values: dict[str, Any] = {}
+        if proto is not None:
+            values["proto"] = proto
+        if device is not None:
+            values["device"] = device
+        if ipaddr is not None:
+            values["ipaddr"] = ipaddr
+        if netmask is not None:
+            values["netmask"] = netmask
+        if gateway is not None:
+            values["gateway"] = gateway
+        if not values:
+            raise ValueError("edit_interface requires at least one field to change")
+        with self._r.safe_apply(timeout=60):
+            self._r.uci.set("network", name, values)
+            self._r.uci.commit("network")
+
 
 # ---------------------------------------------------------------------------
 # High-level API: Wireless
