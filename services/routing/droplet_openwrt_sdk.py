@@ -2239,13 +2239,25 @@ class DropletRouter:
         self.uci.apply(timeout=timeout, rollback=True)
 
         # Verify connectivity
+        connected = False
         try:
             self.system.board_info()
+            connected = True
             self.uci.confirm()
             logger.info("Safe apply: changes confirmed.")
         except ConnectionLost:
             logger.warning(
                 "Safe apply: connectivity lost. Auto-rollback in %ds.", timeout
+            )
+            raise
+        except UbusError as exc:
+            # A UbusError during the probe or confirm leaves the rollback timer
+            # running; log it and re-raise so the caller receives a 5xx.
+            logger.warning(
+                "Safe apply: ubus error during %s — auto-rollback in %ds: %s",
+                "confirm" if connected else "connectivity probe",
+                timeout,
+                exc,
             )
             raise
 

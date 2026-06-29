@@ -49,6 +49,7 @@ import {
 } from "../services/network-safety.service.js";
 import type { createNetworkDeviceService } from "../services/network-device.service.js";
 import { handleRegistryError } from "./network-error-handler.js";
+import { RouterError } from "../services/openwrt.client.js";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 
 export interface StatusDeps {
@@ -704,6 +705,11 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
         operationId: writeResult.operationId,
       });
     } catch (err) {
+      // Surface structured routing-service refusals (e.g. 409 MANAGEMENT_INTERFACE)
+      // directly to the caller instead of letting them collapse into a generic 500.
+      if (err instanceof RouterError && err.status === 409) {
+        return res.status(409).json({ error: err.toJSON() });
+      }
       next(err);
     }
   });

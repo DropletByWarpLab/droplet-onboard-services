@@ -35,6 +35,8 @@ export interface InterfaceRouteDeps {
 const INTERFACE_NAME_RE = /^[a-z0-9_]{1,15}$/;
 const INTERFACE_PROTOS = new Set(["static", "dhcp", "dhcpv6", "none", "pppoe"]);
 const IPV4_RE = /^(?:(?:25[0-5]|2[0-4]\d|[01]?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d?\d)$/;
+// Mirrors the routing service's _DEVICE_PATTERN: first char alphanumeric, rest alphanumeric + ._@-
+const DEVICE_RE = /^[A-Za-z0-9][A-Za-z0-9._@-]{0,30}$/;
 
 /** Validate the optional address fields shared by create + edit. Returns an
  *  error message, or null if every supplied field is well-formed. */
@@ -45,11 +47,8 @@ function validateAddressFields(body: Record<string, unknown>): string | null {
       return `'${f}' must be a valid IPv4 address`;
     }
   }
-  if (
-    body.device !== undefined &&
-    (typeof body.device !== "string" || body.device.length === 0 || body.device.length > 31)
-  ) {
-    return "'device' must be a non-empty device name";
+  if (body.device !== undefined && (typeof body.device !== "string" || !DEVICE_RE.test(body.device))) {
+    return "'device' must start with an alphanumeric character and contain only alphanumerics, '.', '_', '@', or '-' (1–31 chars)";
   }
   return null;
 }
