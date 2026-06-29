@@ -561,11 +561,12 @@ export interface TotpVerifyResponse {
 }
 
 /** Begin TOTP enrollment: returns the QR + otpauth URI for the current user. */
-export async function enrollTotp(): Promise<TotpEnrollResponse> {
+export async function enrollTotp(signal?: AbortSignal): Promise<TotpEnrollResponse> {
   const res = await authFetch(`${BASE}/api/auth/totp/enroll`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: "{}",
+    signal,
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));

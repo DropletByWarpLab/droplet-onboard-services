@@ -70,14 +70,15 @@ export function TwoFactorStep({
   // WARP-931 — auto-start enrollment so the QR is on the first screen.
   // Idempotent server-side (the factor isn't active until verify), so a retry
   // just mints a fresh pending secret.
-  const handleStart = useCallback(async () => {
+  const handleStart = useCallback(async (signal?: AbortSignal) => {
     setError(null);
     setEnrolling(true);
     try {
-      const res = await enrollTotp();
+      const res = await enrollTotp(signal);
       setOtpauthUri(res.otpauthUri);
       setQrDataUrl(res.qrDataUrl);
     } catch (err) {
+      if ((err as { name?: string })?.name === "AbortError") return;
       // Returning to an already-completed 2FA step: the orchestrator answers
       // 409 TOTP_ALREADY_ENABLED. Treat it as "done", not an error — otherwise
       // the enroll-failed card loops "Try again" → 409 forever.
@@ -92,7 +93,9 @@ export function TwoFactorStep({
   }, []);
 
   useEffect(() => {
-    void handleStart();
+    const controller = new AbortController();
+    void handleStart(controller.signal);
+    return () => controller.abort();
   }, [handleStart]);
 
   async function handleVerify() {
@@ -195,7 +198,7 @@ export function TwoFactorStep({
               </p>
               <button
                 type="button"
-                onClick={handleStart}
+                onClick={() => void handleStart()}
                 className="dp-btn-secondary"
               >
                 Try again
