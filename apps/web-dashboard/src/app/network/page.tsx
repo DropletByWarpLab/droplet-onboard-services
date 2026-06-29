@@ -1077,10 +1077,12 @@ function SystemTab({
           country). */}
       <SystemControlsCard />
 
-      {/* Interfaces — read-only enumeration of every configured interface.
-          Add/Edit is deferred (UCI network rewrite can cut the served AP/LAN);
-          present:false rows render an honest 'not on this box' state. */}
-      <InterfacesTable />
+      {/* Interfaces — enumeration of every configured interface. KAN-10 adds the
+          owner/admin Add/Edit + owner-only Restart write path: Tier-2/3 confirm,
+          routing-side safe_apply auto-rollback, and an extra confirm before a
+          write to the management interface. present:false rows render an honest
+          'not on this box' state. */}
+      <InterfacesTable canEdit={canEdit} isOwner={user?.role === "owner"} />
 
       {/* AI agent access — read-only droplet-ai RPC scopes from the live ACL.
           Rotate/Revoke are honest-gated (disabled): they'd need a coordinated
