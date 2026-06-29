@@ -206,6 +206,10 @@ function commandToDomainService(
     toggle: "toggle",
     set_brightness: "turn_on",
     set_temperature: "set_temperature",
+    // KAN-7: interactive thermostat mode-switch. Maps to climate.set_mode so
+    // the safety rules can classify "off" as Tier-2 (confirm) and heat/cool/
+    // auto as Tier-1 (direct).
+    set_hvac_mode: "set_mode",
     lock: "lock",
     unlock: "unlock",
   };
@@ -411,6 +415,10 @@ export function createMatterRouter(prisma: PrismaClient): Router {
         service,
         data,
         userId,
+        // KAN-7: pass the original Matter command so a Tier-2 confirm
+        // dispatches it verbatim (set_hvac_mode), not the classification
+        // service (set_mode) which the sidecar wouldn't recognise.
+        command,
       );
 
       if ("blocked" in result && result.blocked) {
@@ -506,10 +514,13 @@ export function createMatterRouter(prisma: PrismaClient): Router {
         return res.status(400).json({ error: result.reason, code: result.code });
       }
 
-      // Use only the command/data from the confirmed token — never from the request body
+      // Use only the command/data from the confirmed token — never from the
+      // request body. KAN-7: dispatch the original device command (e.g.
+      // set_hvac_mode), which may differ from the classification service
+      // (set_mode); for lock/set_temperature the two are identical.
       const cmdResult = await sendMatterCommand(
         req.params.nodeId,
-        result.service,
+        result.command,
         result.data,
       );
       res.json({

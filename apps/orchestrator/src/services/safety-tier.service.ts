@@ -26,6 +26,13 @@ interface PendingConfirmation {
   entityId: string;
   domain: string;
   service: string;
+  /**
+   * KAN-7: the original device command to dispatch on confirm, when it
+   * differs from the safety-classification `service` (e.g. the Matter command
+   * `set_hvac_mode` maps to service `set_mode`). When omitted the command IS
+   * the service (lock, set_temperature, …) — the pre-KAN-7 behaviour.
+   */
+  command?: string;
   data?: Record<string, unknown>;
   userId?: string;
   tier: number;
@@ -50,7 +57,13 @@ export async function evaluateCommand(
   entityId: string,
   service: string,
   data?: Record<string, unknown>,
-  userId?: string
+  userId?: string,
+  /**
+   * KAN-7: the original device command, dispatched verbatim on confirm when it
+   * differs from `service`. Defaults to `service` for the existing callers
+   * where the two are identical.
+   */
+  command?: string
 ): Promise<
   | { allowed: true; tier: number }
   | { allowed: false; requiresConfirmation: true; confirmationToken: string; reason: string; tier: number }
@@ -130,6 +143,7 @@ export async function evaluateCommand(
     entityId,
     domain,
     service,
+    command: command ?? service,
     data,
     userId,
     tier: classification.tier,
@@ -188,7 +202,15 @@ export async function confirmCommand(
   userId?: string,
   expected?: { service?: string; entityId?: string; nodeId?: string }
 ): Promise<
-  | { confirmed: true; entityId: string; domain: string; service: string; data?: Record<string, unknown> }
+  | {
+      confirmed: true;
+      entityId: string;
+      domain: string;
+      service: string;
+      /** KAN-7: the device command to dispatch (may differ from `service`). */
+      command: string;
+      data?: Record<string, unknown>;
+    }
   | { confirmed: false; code: ConfirmCommandError; reason: string }
 > {
   const pending = pendingConfirmations.get(confirmationToken);
@@ -263,6 +285,7 @@ export async function confirmCommand(
     entityId: pending.entityId,
     domain: pending.domain,
     service: pending.service,
+    command: pending.command ?? pending.service,
     data: pending.data,
   };
 }

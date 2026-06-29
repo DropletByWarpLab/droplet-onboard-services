@@ -86,6 +86,24 @@ describe("classifyCommand", () => {
       expect(result.reason).toContain("30");
     });
 
+    // KAN-7: turning a thermostat OFF can leave a home with no heating/cooling,
+    // so it needs the confirm; heat/cool/auto are direct Tier-1 writes.
+    it("classifies climate.set_mode off as Tier 2, requires confirmation", () => {
+      const result = classifyCommand("climate", "set_mode", { mode: "off" });
+      expect(result.tier).toBe(2);
+      expect(result.requiresConfirmation).toBe(true);
+      expect(result.reason).toBeDefined();
+    });
+
+    it.each(["heat", "cool", "auto"])(
+      "classifies climate.set_mode %s as Tier 1, no confirmation",
+      (mode) => {
+        const result = classifyCommand("climate", "set_mode", { mode });
+        expect(result.tier).toBe(1);
+        expect(result.requiresConfirmation).toBe(false);
+      },
+    );
+
     it("classifies climate.set_temperature with temp = 35 as Tier 2", () => {
       const result = classifyCommand("climate", "set_temperature", { temperature: 35 });
       expect(result.tier).toBe(2);
