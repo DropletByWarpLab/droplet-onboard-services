@@ -434,6 +434,11 @@ docker exec -i \
   # runtime list mirrors openwrt/singlebox-image/Dockerfile). ddns is NOT added
   # to the hard-verify gate below — it is not load-bearing for the AP and must
   # not block AP bring-up.
+  # KAN-9: added miniupnpd so the dashboard UPnP / NAT-PMP card lights up
+  # (the routing SDK reads /etc/config/upnpd; absent it the card is "Not
+  # available"). Like ddns it is NOT load-bearing for the AP, so it stays out of
+  # the hard-verify gate. The image bakes it + a disabled-by-default upnpd
+  # config; this runtime install is the safety net for pre-bake containers.
   NEED_INSTALL=0
   command -v hostapd >/dev/null || NEED_INSTALL=1
   command -v wg >/dev/null      || NEED_INSTALL=1
@@ -478,6 +483,7 @@ docker exec -i \
         umdns \
         wireguard-tools kmod-wireguard luci-proto-wireguard \
         ddns-scripts luci-app-ddns \
+        miniupnpd \
         2>&1)"; _inst_rc=$?
       [ "$_inst_rc" -eq 0 ] && break
       sleep "$_nap"
@@ -1267,6 +1273,18 @@ if [ "$(docker exec droplet-openwrt uci -q get uhttpd.main.max_requests 2>/dev/n
     echo "droplet-openwrt-attach: raised uhttpd max_requests to 10 (WARP-868)"
   else
     echo "droplet-openwrt-attach: WARN: could not raise uhttpd max_requests — concurrent ubus calls may reset under load" >&2
+  fi
+fi
+
+# KAN-9: enforce UPnP opt-out default for containers created from pre-bake images.
+# opkg install miniupnpd writes stock enable_upnp='1'/enable_natpmp='1'/enabled='1'
+# to /etc/config/upnpd; uci-defaults only run on first boot so they don't fix it.
+# Mirror the same idempotent-write pattern used for uhttpd max_requests (WARP-868).
+if [ "$(docker exec droplet-openwrt uci -q get upnpd.config.enable_upnp 2>/dev/null)" != "0" ]; then
+  if docker exec droplet-openwrt sh -c "uci set upnpd.config.enabled='0' && uci set upnpd.config.enable_upnp='0' && uci set upnpd.config.enable_natpmp='0' && uci commit upnpd" >/dev/null 2>&1; then
+    echo "droplet-openwrt-attach: enforced UPnP opt-out default for pre-bake container (KAN-9)"
+  else
+    echo "droplet-openwrt-attach: WARN: could not enforce UPnP opt-out — dashboard may show UPnP enabled before owner consents" >&2
   fi
 fi
 

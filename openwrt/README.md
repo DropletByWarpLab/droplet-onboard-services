@@ -28,12 +28,13 @@ a first-boot `opkg install`.
   ACL safety net) lives in
   [`scripts/host/usr-local-sbin/droplet-openwrt-attach`](../scripts/host/usr-local-sbin/droplet-openwrt-attach).
 
-The single-box image COPYs exactly two things from this directory at build time:
+The single-box image COPYs three things from this directory at build time:
 
 | Source | Why |
 |---|---|
 | `files/usr/share/rpcd/acl.d/droplet-ai.json` | Canonical ubus ACL — without it even root sessions are denied `file`/`umdns` reads (the network tab + DDNS step 500). Shared source of truth. |
 | `singlebox-image/uci-defaults/60-droplet-uhttpd-limits` | Raises uhttpd `max_requests` so the orchestrator's network-summary fan-out doesn't get connections reset. |
+| `singlebox-image/uci-defaults/61-droplet-upnp-default` | Seeds a disabled-by-default `upnpd` config so the dashboard UPnP / NAT-PMP card reads `available:true` / `enabled:false` (miniupnpd ships in the image; the SDK degrades a missing config to "not available"). |
 
 It does **not** consume `files/etc/config/*` or `files/etc/uci-defaults/99-droplet-setup`
 — the in-container wireless config is created at runtime.
@@ -70,7 +71,8 @@ openwrt/
 ├── singlebox-image/                    # In-container single-box AP image (ACTIVE)
 │   ├── Dockerfile
 │   └── uci-defaults/
-│       └── 60-droplet-uhttpd-limits
+│       ├── 60-droplet-uhttpd-limits
+│       └── 61-droplet-upnp-default     # UPnP/NAT-PMP off-by-default seed
 ├── files/                              # OpenWrt overlay (legacy router image)
 │   ├── etc/config/
 │   │   ├── network                     # WAN/LAN/bridge + camera VLAN 100
