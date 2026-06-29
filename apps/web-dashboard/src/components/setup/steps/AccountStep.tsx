@@ -293,13 +293,13 @@ export function AccountStep({
         {mode === "create" && (
           <div>
             <label className="type-subheadline text-label-secondary block mb-1.5">
-              Display Name
+              Display name (optional)
             </label>
             <input
               type="text"
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
-              placeholder="Your name (optional)"
+              placeholder="Your name"
               className="dp-input"
             />
           </div>
@@ -360,7 +360,7 @@ export function AccountStep({
         {mode === "create" && (
           <div>
             <label className="type-subheadline text-label-secondary block mb-1.5">
-              Confirm Password
+              Confirm password
             </label>
             <div className="relative">
               <Lock

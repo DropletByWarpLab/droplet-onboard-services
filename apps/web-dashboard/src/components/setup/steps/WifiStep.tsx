@@ -244,6 +244,9 @@ export function WifiStep({
                 spellCheck={false}
               />
             </div>
+            <p className="type-caption-1 text-label-tertiary mt-1.5">
+              Up to {SSID_MAX} characters.
+            </p>
           </div>
 
           <div>
@@ -276,6 +279,9 @@ export function WifiStep({
                 {showWifiPassword ? <EyeOff size={16} /> : <Eye size={16} />}
               </button>
             </div>
+            <p className="type-caption-1 text-label-tertiary mt-1.5">
+              Use at least {PSK_MIN} characters.
+            </p>
           </div>
 
           <div className="flex items-center gap-2 rounded-md border border-separator bg-surface-secondary px-3 py-2 type-caption-1 text-label-tertiary">
