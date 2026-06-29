@@ -2307,6 +2307,13 @@ model SceneSchedule {
   sceneId     String
   scene       Scene     @relation(fields: [sceneId], references: [id], onDelete: Cascade)
   rrule       String
+  /// KAN-6 — IANA timezone the rrule's wall-clock time is interpreted in
+  /// (e.g. "America/Los_Angeles"). The ticker recomputes nextFireAt against
+  /// this zone each fire so a "07:00 local" routine keeps firing at 07:00
+  /// LOCAL across a daylight-saving change instead of drifting an hour.
+  /// Defaults to "UTC" — every pre-KAN-6 row back-fills to UTC and so fires
+  /// at exactly the same instant it did before.
+  timezone    String    @default("UTC")
   nextFireAt  DateTime
   enabled     Boolean   @default(true)
   createdBy   String?

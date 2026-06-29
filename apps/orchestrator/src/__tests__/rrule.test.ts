@@ -108,3 +108,102 @@ describe("WARP-463 — nextFireFromRrule (WEEKLY)", () => {
     expect(nextFireFromRrule("FREQ=WEEKLY;BYDAY=XX", after)).toBeNull();
   });
 });
+
+describe("KAN-6 — nextFireFromRrule (per-row IANA timezone, DST-correct)", () => {
+  // The DST trap (the whole point of KAN-6): a routine authored as "07:00
+  // local" must keep firing at 07:00 LOCAL across a daylight-saving change.
+  // With a stored zone the BYHOUR/BYMINUTE are WALL-CLOCK in that zone, so
+  // the resolved UTC instant shifts by an hour when the offset changes —
+  // it does NOT stay pinned to a frozen UTC instant.
+  //
+  // America/Los_Angeles: PDT (UTC-7) through 2026-11-01 02:00 local, then
+  // PST (UTC-8). So "07:00 local" = 14:00 UTC in summer, 15:00 UTC in winter.
+
+  it("DAILY 07:00 in America/Los_Angeles resolves to 14:00 UTC during PDT (summer)", () => {
+    const after = new Date("2026-07-01T06:00:00Z"); // well before the next fire
+    const next = nextFireFromRrule(
+      "FREQ=DAILY;BYHOUR=7;BYMINUTE=0",
+      after,
+      "America/Los_Angeles",
+    );
+    expect(next?.toISOString()).toBe("2026-07-01T14:00:00.000Z");
+  });
+
+  it("DAILY 07:00 in America/Los_Angeles resolves to 15:00 UTC during PST (winter) — the same wall-clock, one hour later in UTC", () => {
+    const after = new Date("2026-12-01T06:00:00Z");
+    const next = nextFireFromRrule(
+      "FREQ=DAILY;BYHOUR=7;BYMINUTE=0",
+      after,
+      "America/Los_Angeles",
+    );
+    // The DST fix: NOT 14:00 UTC (which would be 06:00 PST = the drift bug).
+    expect(next?.toISOString()).toBe("2026-12-01T15:00:00.000Z");
+  });
+
+  it("crossing the fall-back boundary: the SAME rule fires at 07:00 local on both sides, with the UTC instant shifting by exactly one hour", () => {
+    const rule = "FREQ=DAILY;BYHOUR=7;BYMINUTE=0";
+    // Last fire before DST ends (2026-11-01 02:00 local), and the first after.
+    const beforeDst = nextFireFromRrule(
+      rule,
+      new Date("2026-10-31T06:00:00Z"),
+      "America/Los_Angeles",
+    );
+    const afterDst = nextFireFromRrule(
+      rule,
+      new Date("2026-11-02T06:00:00Z"),
+      "America/Los_Angeles",
+    );
+    expect(beforeDst?.toISOString()).toBe("2026-10-31T14:00:00.000Z"); // PDT
+    expect(afterDst?.toISOString()).toBe("2026-11-02T15:00:00.000Z"); // PST
+    // The UTC instant moved by exactly one hour across the boundary —
+    // because the WALL-CLOCK stayed at 07:00 local. That is the fix.
+    const driftMs =
+      (afterDst!.getTime() % 86_400_000) - (beforeDst!.getTime() % 86_400_000);
+    expect(driftMs).toBe(3_600_000);
+  });
+
+  it("WEEKLY in a zone anchors BYDAY to the LOCAL weekday, not the UTC weekday", () => {
+    // 2026-07-06 is a Monday. A Monday-only 23:00 America/Los_Angeles rule:
+    // 23:00 PDT Monday = 06:00 UTC Tuesday. The fire is still "Monday local".
+    const after = new Date("2026-07-06T00:00:00Z");
+    const next = nextFireFromRrule(
+      "FREQ=WEEKLY;BYDAY=MO;BYHOUR=23;BYMINUTE=0",
+      after,
+      "America/Los_Angeles",
+    );
+    expect(next?.toISOString()).toBe("2026-07-07T06:00:00.000Z");
+    // Sanity: that UTC instant IS Monday 23:00 in LA.
+    const localHour = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Los_Angeles",
+      hourCycle: "h23",
+      weekday: "short",
+      hour: "2-digit",
+    }).formatToParts(next!);
+    const parts = Object.fromEntries(localHour.map((p) => [p.type, p.value]));
+    expect(parts.weekday).toBe("Mon");
+    expect(parts.hour).toBe("23");
+  });
+
+  it("defaults to UTC when no timezone is passed (backward compat for pre-KAN-6 rows)", () => {
+    const after = new Date("2026-05-27T07:30:00Z");
+    const withoutTz = nextFireFromRrule("FREQ=DAILY;BYHOUR=9;BYMINUTE=0", after);
+    const withUtc = nextFireFromRrule(
+      "FREQ=DAILY;BYHOUR=9;BYMINUTE=0",
+      after,
+      "UTC",
+    );
+    expect(withoutTz?.toISOString()).toBe("2026-05-27T09:00:00.000Z");
+    expect(withUtc?.toISOString()).toBe("2026-05-27T09:00:00.000Z");
+  });
+
+  it("treats an unknown / malformed timezone as null (caller disables rather than fire at a wrong instant)", () => {
+    const after = new Date("2026-07-01T06:00:00Z");
+    expect(
+      nextFireFromRrule(
+        "FREQ=DAILY;BYHOUR=7",
+        after,
+        "Not/AZone",
+      ),
+    ).toBeNull();
+  });
+});

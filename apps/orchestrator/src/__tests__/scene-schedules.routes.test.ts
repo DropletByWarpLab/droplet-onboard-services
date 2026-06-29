@@ -32,6 +32,7 @@ interface ScheduleRow {
   id: string;
   sceneId: string;
   rrule: string;
+  timezone: string;
   nextFireAt: Date;
   enabled: boolean;
   createdBy: string | null;
@@ -124,6 +125,7 @@ describe("feat/scene-schedules — GET /api/scenes/:id/schedules", () => {
       schedules: [
         {
           id: "sched-x", sceneId: "s1", rrule: "FREQ=DAILY;BYHOUR=7",
+          timezone: "UTC",
           nextFireAt: new Date("2026-06-20T07:00:00Z"), enabled: true,
           createdBy: "stefan", lastFiredAt: null,
           createdAt: new Date(), updatedAt: new Date(),
@@ -163,6 +165,51 @@ describe("feat/scene-schedules — POST /api/scenes/:id/schedules", () => {
     expect(next.getTime()).toBeGreaterThan(Date.now());
     expect(prisma.schedules).toHaveLength(1);
     expect(recordActivityMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("KAN-6: persists the supplied IANA timezone and computes nextFireAt against it", async () => {
+    const prisma = createPrismaMock({ scenes: [{ id: "s1", name: "Good night" }] });
+    const app = buildApp(prisma, mkUser("admin"));
+    const res = await request(app)
+      .post("/api/scenes/s1/schedules")
+      // 07:00 wall-clock in America/Los_Angeles — the rrule now stores the
+      // LOCAL wall-clock, the timezone says how to read it.
+      .send({ rrule: "FREQ=DAILY;BYHOUR=7;BYMINUTE=0", timezone: "America/Los_Angeles" });
+    expect(res.status).toBe(201);
+    expect(res.body.timezone).toBe("America/Los_Angeles");
+    expect(prisma.schedules[0].timezone).toBe("America/Los_Angeles");
+    // The persisted nextFireAt is a real future instant whose LA wall-clock
+    // is 07:00 — NOT 07:00 UTC.
+    const next = new Date(res.body.nextFireAt);
+    expect(next.getTime()).toBeGreaterThan(Date.now());
+    const laHour = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Los_Angeles",
+      hourCycle: "h23",
+      hour: "2-digit",
+    }).formatToParts(next).find((p) => p.type === "hour")?.value;
+    expect(laHour).toBe("07");
+  });
+
+  it("KAN-6: defaults timezone to 'UTC' when the caller omits it (pre-KAN-6 client compat)", async () => {
+    const prisma = createPrismaMock({ scenes: [{ id: "s1", name: "x" }] });
+    const app = buildApp(prisma, mkUser("admin"));
+    const res = await request(app)
+      .post("/api/scenes/s1/schedules")
+      .send({ rrule: "FREQ=DAILY;BYHOUR=7" });
+    expect(res.status).toBe(201);
+    expect(res.body.timezone).toBe("UTC");
+    // UTC path: BYHOUR=7 → 07:00 UTC, exactly the pre-KAN-6 behaviour.
+    expect(new Date(res.body.nextFireAt).getUTCHours()).toBe(7);
+  });
+
+  it("KAN-6: rejects an unresolvable timezone with 400 before persisting", async () => {
+    const prisma = createPrismaMock({ scenes: [{ id: "s1", name: "x" }] });
+    const app = buildApp(prisma, mkUser("admin"));
+    const res = await request(app)
+      .post("/api/scenes/s1/schedules")
+      .send({ rrule: "FREQ=DAILY;BYHOUR=7", timezone: "Not/AZone" });
+    expect(res.status).toBe(400);
+    expect(prisma.schedules).toHaveLength(0);
   });
 
   it("rejects a malformed RRULE with 400 before persisting (never a row the ticker would disable)", async () => {
@@ -209,6 +256,7 @@ describe("feat/scene-schedules — PATCH /api/scenes/:id/schedules/:sid", () => 
       schedules: [
         {
           id: "sched-1", sceneId: "s1", rrule: "FREQ=DAILY;BYHOUR=7",
+          timezone: "UTC",
           nextFireAt: new Date("2020-01-01T07:00:00Z"), enabled: false,
           createdBy: "stefan", lastFiredAt: null,
           createdAt: new Date(), updatedAt: new Date(),
@@ -230,12 +278,43 @@ describe("feat/scene-schedules — PATCH /api/scenes/:id/schedules/:sid", () => 
     expect(new Date(res.body.nextFireAt).getTime()).toBeGreaterThan(Date.now());
   });
 
+  it("KAN-6: re-enabling recomputes the fresh nextFireAt against the STORED timezone", async () => {
+    const prisma = createPrismaMock({
+      scenes: [{ id: "s1", name: "x" }],
+      schedules: [
+        {
+          id: "sched-tz", sceneId: "s1", rrule: "FREQ=DAILY;BYHOUR=7;BYMINUTE=0",
+          timezone: "America/Los_Angeles",
+          nextFireAt: new Date("2020-01-01T07:00:00Z"), enabled: false,
+          createdBy: "stefan", lastFiredAt: null,
+          createdAt: new Date(), updatedAt: new Date(),
+        },
+      ],
+    });
+    const app = buildApp(prisma, mkUser("owner"));
+    const res = await request(app)
+      .patch("/api/scenes/s1/schedules/sched-tz")
+      .send({ enabled: true });
+    expect(res.status).toBe(200);
+    const next = new Date(res.body.nextFireAt);
+    expect(next.getTime()).toBeGreaterThan(Date.now());
+    // The recomputed instant's LA wall-clock is 07:00 — not 07:00 UTC. If the
+    // route ignored the stored zone this would be 07:00 UTC instead.
+    const laHour = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Los_Angeles",
+      hourCycle: "h23",
+      hour: "2-digit",
+    }).formatToParts(next).find((p) => p.type === "hour")?.value;
+    expect(laHour).toBe("07");
+  });
+
   it("toggles enabled false", async () => {
     const prisma = createPrismaMock({
       scenes: [{ id: "s1", name: "x" }],
       schedules: [
         {
           id: "sched-1", sceneId: "s1", rrule: "FREQ=DAILY;BYHOUR=7",
+          timezone: "UTC",
           nextFireAt: new Date("2030-01-01T07:00:00Z"), enabled: true,
           createdBy: "stefan", lastFiredAt: null,
           createdAt: new Date(), updatedAt: new Date(),
@@ -276,6 +355,7 @@ describe("feat/scene-schedules — DELETE /api/scenes/:id/schedules/:sid", () =>
       schedules: [
         {
           id: "sched-1", sceneId: "s1", rrule: "FREQ=DAILY;BYHOUR=7",
+          timezone: "UTC",
           nextFireAt: new Date("2030-01-01T07:00:00Z"), enabled: true,
           createdBy: "stefan", lastFiredAt: null,
           createdAt: new Date(), updatedAt: new Date(),
@@ -295,6 +375,7 @@ describe("feat/scene-schedules — DELETE /api/scenes/:id/schedules/:sid", () =>
       schedules: [
         {
           id: "sched-1", sceneId: "s1", rrule: "FREQ=DAILY;BYHOUR=7",
+          timezone: "UTC",
           nextFireAt: new Date("2030-01-01T07:00:00Z"), enabled: true,
           createdBy: "stefan", lastFiredAt: null,
           createdAt: new Date(), updatedAt: new Date(),

@@ -23,7 +23,11 @@ import type { PrismaClient } from "@prisma/client";
 import { requireRole } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { executeScene } from "../services/scene-runner.service.js";
-import { isSupportedRrule, nextFireFromRrule } from "../utils/rrule.js";
+import {
+  isSupportedRrule,
+  isSupportedTimezone,
+  nextFireFromRrule,
+} from "../utils/rrule.js";
 import { randomBytes } from "node:crypto";
 
 const sceneActionInputSchema = z.object({
@@ -51,6 +55,12 @@ const patchSceneSchema = z.object({
 // disable.
 const createScheduleSchema = z.object({
   rrule: z.string().min(1).max(512),
+  // KAN-6 — the IANA zone the rrule's wall-clock time is interpreted in.
+  // Optional: omitted → "UTC", which is the column default and the
+  // pre-KAN-6 behaviour, so an older client keeps working unchanged. The
+  // value is validated as a resolvable IANA identifier below (a bad zone
+  // 400s rather than persisting a row the ticker would immediately disable).
+  timezone: z.string().min(1).max(64).optional(),
 });
 const patchScheduleSchema = z.object({
   enabled: z.boolean(),
@@ -60,6 +70,7 @@ interface SceneScheduleRow {
   id: string;
   sceneId: string;
   rrule: string;
+  timezone: string;
   nextFireAt: Date;
   enabled: boolean;
   createdBy: string | null;
@@ -74,6 +85,7 @@ function serializeSchedule(s: SceneScheduleRow) {
     id: s.id,
     sceneId: s.sceneId,
     rrule: s.rrule,
+    timezone: s.timezone,
     nextFireAt: s.nextFireAt,
     enabled: s.enabled,
     createdBy: s.createdBy,
@@ -489,6 +501,18 @@ export function createScenesRouter(
           });
           return;
         }
+        // KAN-6 — the rrule's wall-clock time is interpreted in this zone.
+        // Default to UTC (the column default + pre-KAN-6 behaviour). Reject
+        // an unresolvable identifier before any write so we never persist a
+        // row the ticker would immediately disable.
+        const timezone = parsed.data.timezone ?? "UTC";
+        if (!isSupportedTimezone(timezone)) {
+          res.status(400).json({
+            error: "Invalid timezone",
+            detail: "timezone must be a valid IANA identifier (e.g. America/Los_Angeles).",
+          });
+          return;
+        }
         const scene = await prisma.scene.findUnique({
           where: { id: req.params.id },
         });
@@ -497,7 +521,7 @@ export function createScenesRouter(
           return;
         }
         const now = new Date();
-        const nextFireAt = nextFireFromRrule(parsed.data.rrule, now);
+        const nextFireAt = nextFireFromRrule(parsed.data.rrule, now, timezone);
         if (nextFireAt === null) {
           // Defensive: isSupportedRrule passed but no future fire could be
           // computed. Treat as a bad rule rather than persist a NULL.
@@ -509,6 +533,7 @@ export function createScenesRouter(
           data: {
             sceneId: req.params.id,
             rrule: parsed.data.rrule,
+            timezone,
             nextFireAt,
             enabled: true,
             createdBy: actor,
@@ -565,7 +590,13 @@ export function createScenesRouter(
           enabled: parsed.data.enabled,
         };
         if (parsed.data.enabled && !existing.enabled) {
-          const next = nextFireFromRrule(existing.rrule, new Date());
+          // KAN-6 — recompute against the row's stored zone so a re-enabled
+          // schedule fires at the owner's local wall-clock, DST-correct.
+          const next = nextFireFromRrule(
+            existing.rrule,
+            new Date(),
+            existing.timezone,
+          );
           if (next === null) {
             res.status(400).json({
               error: "Unsupported RRULE",
