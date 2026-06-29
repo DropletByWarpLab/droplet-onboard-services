@@ -161,6 +161,53 @@ describe("TwoFactorStep", () => {
     expect(verifyTotp).not.toHaveBeenCalled();
   });
 
+  // WARP-935 — the disabled "I've saved them — continue" button must TELL the
+  // user why it's disabled: a visible hint tied to the checkbox, with the button
+  // wired to it via aria-describedby. The gating itself (off the checkbox) is
+  // unchanged — this is purely additive feedback.
+  describe("recovery-codes continue is gated WITH feedback (WARP-935)", () => {
+    async function toCodesPhase() {
+      render(<TwoFactorStep onComplete={vi.fn()} onSkip={vi.fn()} />);
+      await screen.findByAltText(/qr code/i);
+      fireEvent.change(screen.getByLabelText(/6-digit code/i), {
+        target: { value: "123456" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: /verify & enable/i }));
+      const continueBtn = await screen.findByRole("button", {
+        name: /saved them — continue/i,
+      });
+      return { continueBtn };
+    }
+
+    it("shows visible helper text telling the user to tick the checkbox to continue", async () => {
+      await toCodesPhase();
+      const hint = screen.getByText(/tick the box.*continue/i);
+      expect(hint).toBeInTheDocument();
+    });
+
+    it("wires aria-describedby from the disabled continue button to that hint", async () => {
+      const { continueBtn } = await toCodesPhase();
+      expect(continueBtn).toBeDisabled();
+
+      const describedBy = continueBtn.getAttribute("aria-describedby");
+      expect(describedBy).toBeTruthy();
+
+      // The id the button points at must resolve to a real, on-screen element
+      // that actually explains the gate.
+      const hint = document.getElementById(describedBy!);
+      expect(hint).not.toBeNull();
+      expect(hint).toBeInTheDocument();
+      expect(hint!.textContent ?? "").toMatch(/box|saved/i);
+    });
+
+    it("drops aria-describedby once the box is ticked (no stale hint on the now-enabled button)", async () => {
+      const { continueBtn } = await toCodesPhase();
+      fireEvent.click(screen.getByRole("checkbox"));
+      await waitFor(() => expect(continueBtn).toBeEnabled());
+      expect(continueBtn).not.toHaveAttribute("aria-describedby");
+    });
+  });
+
   it("hides Back AND rail jumps on the one-time recovery-codes phase, even with the nav provider present (WARP-929 T4)", async () => {
     // With the provider, twofactor (idx 4 > the org floor at 3) would normally
     // show Back / clickable rail rows. The codes phase passes hideBack, so the

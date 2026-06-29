@@ -33,6 +33,13 @@ type Phase = "enroll" | "codes";
 
 const CODE_RE = /^\d{6}$/;
 
+// WARP-935 — stable ids so the gated "continue" button (and the checkbox
+// itself) can point a screen reader at the explanatory hint via
+// aria-describedby. Module-level constants keep the markup and the wiring from
+// drifting apart.
+const SAVED_CHECKBOX_ID = "totp-saved-confirm";
+const SAVED_HINT_ID = "totp-saved-hint";
+
 export function TwoFactorStep({
   onComplete,
   onSkip,
@@ -303,6 +310,11 @@ export function TwoFactorStep({
         onClick: onComplete,
         disabled: !savedConfirmed,
         showArrow: true,
+        // WARP-935 — when the button is gated, point a screen reader (and
+        // sighted users, via the visible hint below the checkbox) at WHY it's
+        // disabled. Cleared once the box is ticked so the now-enabled button
+        // carries no stale "do this first" description.
+        ariaDescribedBy: savedConfirmed ? undefined : SAVED_HINT_ID,
       }}
     >
       <div className="space-y-4">
@@ -328,15 +340,39 @@ export function TwoFactorStep({
           {copied ? "Copied" : "Copy codes"}
         </button>
 
-        <label className="flex items-start gap-2 type-footnote text-label-secondary cursor-pointer">
-          <input
-            type="checkbox"
-            checked={savedConfirmed}
-            onChange={(e) => setSavedConfirmed(e.target.checked)}
-            className="mt-0.5 accent-accent"
-          />
-          <span>I&apos;ve saved these recovery codes somewhere safe.</span>
-        </label>
+        <div className="space-y-1.5">
+          <label
+            htmlFor={SAVED_CHECKBOX_ID}
+            className="flex items-start gap-2 type-footnote text-label-secondary cursor-pointer"
+          >
+            <input
+              id={SAVED_CHECKBOX_ID}
+              type="checkbox"
+              checked={savedConfirmed}
+              onChange={(e) => setSavedConfirmed(e.target.checked)}
+              aria-describedby={savedConfirmed ? undefined : SAVED_HINT_ID}
+              className="mt-0.5 accent-accent"
+            />
+            <span>I&apos;ve saved these recovery codes somewhere safe.</span>
+          </label>
+
+          {/* WARP-935 — the "I've saved them — continue" button is gated on the
+              box above. Without this, a user who skipped the checkbox got no
+              clue why Continue stayed greyed out. The hint is always present
+              (so aria-describedby always resolves) and turns into a prominent
+              accent line once the box is the only thing left to do, so the gate
+              reads as a required step rather than a dead button. Tokens only —
+              no freelance colours. */}
+          <p
+            id={SAVED_HINT_ID}
+            className={`pl-6 type-caption-1 ${
+              savedConfirmed ? "text-label-tertiary" : "text-accent font-medium"
+            }`}
+          >
+            Tick the box above to confirm you&rsquo;ve stored these codes, then
+            continue.
+          </p>
+        </div>
       </div>
     </StepShell>
   );

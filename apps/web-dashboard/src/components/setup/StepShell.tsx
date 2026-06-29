@@ -88,6 +88,13 @@ export interface StepShellAction {
   isLoading?: boolean;
   /** Adds the arrow glyph used by "Get Started" / "Continue". */
   showArrow?: boolean;
+  /**
+   * WARP-935 — id of an element that explains the action (e.g. why it's
+   * disabled). Wired to the button's `aria-describedby` so a screen reader
+   * announces the gate; callers should clear it once the gate is satisfied so a
+   * now-enabled button carries no stale hint.
+   */
+  ariaDescribedBy?: string;
 }
 
 export interface StepShellSkip {
@@ -382,6 +389,7 @@ export function StepShell({
                   type="button"
                   onClick={primary.onClick}
                   disabled={primary.disabled || primary.isLoading}
+                  aria-describedby={primary.ariaDescribedBy}
                   className="dp-btn-primary"
                 >
                   {primary.isLoading
