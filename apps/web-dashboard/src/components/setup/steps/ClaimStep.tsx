@@ -335,7 +335,7 @@ export function ClaimStep({ onComplete }: { onComplete: () => void }) {
         />
         <span className="type-caption-1 text-label-secondary mt-1.5 block">
           Look at the screen on the front of your Droplet — it shows a short
-          code like DRPL-XXXX-XXXX.
+          code like DRPL · XXXX · XXXX.
         </span>
       </label>
 
