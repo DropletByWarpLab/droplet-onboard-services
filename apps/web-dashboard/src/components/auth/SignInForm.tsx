@@ -1,5 +1,13 @@
 import { type ReactNode } from "react";
-import { Lock, Mail, Eye, EyeOff, KeyRound, ArrowRight } from "lucide-react";
+import {
+  Lock,
+  Mail,
+  Eye,
+  EyeOff,
+  KeyRound,
+  ArrowRight,
+  ShieldCheck,
+} from "lucide-react";
 import { ONB_AUTH_FLAGS } from "./flags";
 import {
   SSO_PROVIDER_CATALOG,
@@ -97,6 +105,26 @@ export type SignInFormProps = {
   onPasskey?: () => void;
   /** True while the passkey ceremony is in flight (drives the busy label). */
   passkeyBusy?: boolean;
+  /**
+   * PR #375 — two-factor challenge. When true the form swaps the
+   * email/password/SSO block for the code-entry panel: the password was already
+   * accepted by the orchestrator, which now requires a second factor before it
+   * issues a session. Default false → the form renders exactly as before, so
+   * existing callers/tests are unaffected.
+   */
+  mfaRequired?: boolean;
+  /** Which second factor the challenge panel is collecting. */
+  mfaMode?: "totp" | "recovery";
+  /** The 6-digit authenticator code (controlled). */
+  totpCode?: string;
+  onTotpCodeChange?: (v: string) => void;
+  /** A single-use recovery code (controlled). */
+  recoveryCode?: string;
+  onRecoveryCodeChange?: (v: string) => void;
+  /** Toggle between the authenticator-code and recovery-code inputs. */
+  onToggleMfaMode?: () => void;
+  /** Abandon the challenge and return to the email/password step. */
+  onCancelMfa?: () => void;
 };
 
 export function SignInForm({
@@ -113,7 +141,134 @@ export function SignInForm({
   returnTo,
   onPasskey,
   passkeyBusy = false,
+  mfaRequired = false,
+  mfaMode = "totp",
+  totpCode = "",
+  onTotpCodeChange,
+  recoveryCode = "",
+  onRecoveryCodeChange,
+  onToggleMfaMode,
+  onCancelMfa,
 }: SignInFormProps) {
+  // PR #375 — two-factor challenge. The orchestrator accepted the password and
+  // is now holding the session behind a second factor. Swap the whole
+  // email/password/SSO block for a focused code-entry panel: there is nothing
+  // else to do on this screen until the code is entered, and showing the
+  // (already-accepted) password fields again would only invite confusion.
+  if (mfaRequired) {
+    const isRecovery = mfaMode === "recovery";
+    return (
+      <div className="flex flex-col gap-4">
+        <div className="flex items-center gap-3">
+          <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-accent/10">
+            <ShieldCheck size={18} className="text-accent" aria-hidden="true" />
+          </div>
+          <div>
+            <p className="type-subheadline font-semibold text-label-primary">
+              Two-factor authentication
+            </p>
+            <p className="type-caption-1 text-label-secondary">
+              {isRecovery
+                ? "Enter one of the recovery codes you saved during setup."
+                : "Enter the 6-digit code from your authenticator app."}
+            </p>
+          </div>
+        </div>
+
+        {isRecovery ? (
+          <div>
+            <label
+              htmlFor="login-recovery-code"
+              className="type-footnote font-semibold text-label-secondary block mb-1.5"
+            >
+              Recovery code
+            </label>
+            <div className="relative">
+              <KeyRound
+                size={16}
+                aria-hidden="true"
+                className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary"
+              />
+              <input
+                id="login-recovery-code"
+                type="text"
+                autoComplete="one-time-code"
+                value={recoveryCode}
+                onChange={(e) => onRecoveryCodeChange?.(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && onSubmit()}
+                placeholder="xxxxx-xxxxx"
+                className="dp-input pl-10 font-mono"
+                autoFocus
+              />
+            </div>
+          </div>
+        ) : (
+          <div>
+            <label
+              htmlFor="login-totp-code"
+              className="type-footnote font-semibold text-label-secondary block mb-1.5"
+            >
+              6-digit code
+            </label>
+            <input
+              id="login-totp-code"
+              type="text"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              maxLength={6}
+              value={totpCode}
+              onChange={(e) =>
+                onTotpCodeChange?.(e.target.value.replace(/\D/g, ""))
+              }
+              onKeyDown={(e) => e.key === "Enter" && onSubmit()}
+              placeholder="123456"
+              className="dp-input text-center tracking-[0.5em] font-mono"
+              autoFocus
+            />
+          </div>
+        )}
+
+        {error && (
+          <p
+            role="alert"
+            className="type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2"
+          >
+            {error}
+          </p>
+        )}
+
+        <button
+          type="button"
+          onClick={onSubmit}
+          disabled={submitting}
+          className="dp-btn-primary w-full mt-0.5 disabled:opacity-70"
+        >
+          {submitting ? "Verifying…" : "Verify"}
+          {!submitting && <ArrowRight size={15} aria-hidden="true" />}
+        </button>
+
+        <div className="flex items-center justify-between">
+          <button
+            type="button"
+            onClick={onToggleMfaMode}
+            className="type-caption-1 font-semibold text-accent hover:underline"
+          >
+            {isRecovery
+              ? "Use your authenticator app"
+              : "Use a recovery code instead"}
+          </button>
+          <button
+            type="button"
+            onClick={onCancelMfa}
+            className="type-caption-1 font-semibold text-label-tertiary hover:text-label-secondary"
+          >
+            Use a different account
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   // WARP-629: render exactly the configured providers, in canonical order, by
   // filtering the catalog against the runtime-discovered set. Filtering the
   // catalog (not mapping the wire list) gives canonical order for free and

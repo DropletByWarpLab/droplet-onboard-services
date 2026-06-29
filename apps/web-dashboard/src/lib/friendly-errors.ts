@@ -105,6 +105,19 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "That code didn't match. Check your authenticator app and try again.",
     RECOVERY_INVALID:
       "That recovery code didn't match. Try another one of your saved codes.",
+    // PR #375 — the login second-factor gate. The login page normally catches
+    // TotpRequiredError and reveals the code field BEFORE reaching the
+    // translator, so this is a safety net for any other surface that lets the
+    // raw 401 fall through (without it the message-less 401 maps to the
+    // misleading "check your password" copy even though the password was right).
+    TOTP_REQUIRED:
+      "Enter the 6-digit code from your authenticator app to finish signing in.",
+    // The brute-force throttle (auth.ts → 429). Repeated wrong passwords OR
+    // wrong 2FA codes escalate here; the plain auth fallback ("check your
+    // password") is wrong — the credentials may be fine, the account is just
+    // temporarily locked.
+    TOO_MANY_ATTEMPTS:
+      "Too many attempts. Wait a moment, then try again.",
     TOTP_NOT_ENROLLED:
       "Two-factor setup hasn't started yet. Begin again to get a fresh code.",
     TOTP_ALREADY_ENABLED:
