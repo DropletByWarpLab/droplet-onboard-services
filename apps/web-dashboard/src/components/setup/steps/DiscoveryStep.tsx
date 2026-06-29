@@ -7,6 +7,7 @@ import {
   KeyRound,
   Lightbulb,
   Radar,
+  SearchX,
   ThermometerSun,
   ToggleRight,
   Wifi,
@@ -286,7 +287,12 @@ export function DiscoveryStep({
       title="Discovering your devices"
       subtitle={
         discoveredDevices.length === 0
-          ? "Scanning your network for smart home devices..."
+          ? // WARP-937: don't claim we're still "scanning" once polling has
+            // stopped with nothing found — the body shows a no-devices empty
+            // state, so the subtitle should match instead of contradicting it.
+            scanPhase === "stopped"
+            ? "No smart home devices found yet"
+            : "Scanning your network for smart home devices..."
           : `${discoveredDevices.length} device${
               discoveredDevices.length !== 1 ? "s" : ""
             } found`
@@ -324,9 +330,14 @@ export function DiscoveryStep({
           );
         })}
 
-        {/* Scanning placeholder rows */}
-        {discoveredDevices.length === 0 && (
-          <div className="space-y-2">
+        {/* Scanning placeholder rows. WARP-937: gate on the *active* scanning
+            phases ("active" / "downshifted") — without this guard the skeletons
+            kept pulsing forever after polling stopped with zero results, so the
+            customer couldn't tell whether the box was still scanning or had
+            simply found nothing. Once polling halts (phase "stopped") the
+            zero-results empty state below takes over instead. */}
+        {discoveredDevices.length === 0 && scanPhase !== "stopped" && (
+          <div className="space-y-2" data-testid="discovery-skeletons">
             {[0, 1, 2].map((i) => (
               <div
                 key={i}
@@ -363,13 +374,41 @@ export function DiscoveryStep({
       )}
       {scanPhase === "stopped" && (
         <div
-          className="type-caption-1 text-label-tertiary text-center mb-4"
+          className="text-center mb-4"
           data-testid="discovery-stopped"
         >
-          <p>
-            Stopped automatic scanning after 5 minutes. You can add devices
-            manually from the Devices page later.
-          </p>
+          {discoveredDevices.length === 0 ? (
+            // WARP-937: scanning completed having found nothing. Before this,
+            // the surface just kept the perpetual skeletons pulsing, so the
+            // customer couldn't tell "still scanning" from "found nothing".
+            // Give them a clear, calm empty state (this is expected when no
+            // Matter devices are in pairing mode yet — not an error) plus the
+            // same two recovery paths the rest of the step offers: scan again,
+            // or type a pairing code below.
+            <div
+              className="flex flex-col items-center"
+              data-testid="discovery-empty"
+            >
+              <SearchX
+                size={28}
+                className="text-label-quaternary mb-3"
+                aria-hidden="true"
+              />
+              <p className="type-headline text-label-primary mb-1">
+                Device discovery didn&apos;t find any devices
+              </p>
+              <p className="type-subheadline text-label-secondary max-w-sm">
+                Make sure your smart home devices are powered on and in pairing
+                mode, then scan again. You can also enter a pairing code below,
+                or add devices later from the Devices page.
+              </p>
+            </div>
+          ) : (
+            <p className="type-caption-1 text-label-tertiary">
+              Stopped automatic scanning after 5 minutes. You can add devices
+              manually from the Devices page later.
+            </p>
+          )}
           {/* WARP-302: give the user a way back to active scanning without
               reloading the setup flow. Re-arms startDiscovery, which resets
               scanPhase to "active" and re-mounts the 3s poll. dp-btn-secondary
