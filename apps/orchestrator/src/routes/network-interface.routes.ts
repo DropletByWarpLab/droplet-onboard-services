@@ -19,6 +19,7 @@ import type { PrismaClient } from "@prisma/client";
 import {
   createInterface,
   editInterface,
+  restartNetwork,
 } from "../services/network.service.js";
 import { evaluateNetworkCommand } from "../services/network-safety.service.js";
 import { requireRole } from "../middleware/auth.js";
@@ -211,7 +212,6 @@ export function registerInterfaceRoutes(router: Router, deps: InterfaceRouteDeps
 
       // restart_network is Tier 3 — this direct-apply arm is unreachable from the
       // web UI (which always gets a 202), kept only as a defensive fallthrough.
-      const { restartNetwork } = await import("../services/network.service.js");
       const op = await restartNetwork();
       res.json({ status: "ok", action: "network_restart", tier: result.tier, operationId: op.operationId });
     } catch (err) {
