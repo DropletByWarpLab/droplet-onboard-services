@@ -317,6 +317,85 @@ class CameraSubnetSetupRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Interface Add / Edit (KAN-10)
+# ---------------------------------------------------------------------------
+# UCI `config interface` section name: lowercase letters, digits, underscores —
+# the same grammar CreateVlanRequest.name uses, so a name the SDK can `uci set`.
+_INTERFACE_NAME_PATTERN = r"^[a-z0-9_]+$"
+# Logical L2 device (bridge / vlan / ethernet). Conservative shell-safe charset:
+# alnum plus the device punctuation OpenWrt uses (`-`, `.`, `_`, `@`). Bounds the
+# shape; the SDK normalises nothing here — a bad device fails honestly at apply.
+_DEVICE_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._@-]{0,30}$"
+# The protocols the dashboard interface editor offers. Restricting the set keeps
+# a typo'd proto from writing a section ifup can't bring up (NET-class hazard).
+_INTERFACE_PROTOS = ("static", "dhcp", "dhcpv6", "none", "pppoe")
+
+
+class CreateInterfaceRequest(BaseModel):
+    """Create (or overwrite) a `config interface` section (KAN-10).
+
+    `force` is the explicit extra-confirm for a write that targets the
+    management interface (the interface the dashboard is reached on). The route
+    refuses a management-interface write unless `force` is True — a wrong
+    proto/address there cuts the dashboard's own connectivity.
+    """
+
+    name: str = Field(..., min_length=1, max_length=15, pattern=_INTERFACE_NAME_PATTERN,
+                      description="UCI interface section name (e.g. 'iot')")
+    proto: str = Field(..., description="Protocol: static / dhcp / dhcpv6 / none / pppoe")
+    device: Optional[str] = Field(default=None, pattern=_DEVICE_PATTERN,
+                                  description="Logical L2 device (e.g. 'br-lan.20')")
+    ipaddr: Optional[str] = Field(default=None, pattern=_IPV4_PATTERN,
+                                  description="Static IPv4 (required-ish for proto=static)")
+    netmask: Optional[str] = Field(default=None, pattern=_IPV4_PATTERN,
+                                   description="Subnet mask for a static interface")
+    gateway: Optional[str] = Field(default=None, pattern=_IPV4_PATTERN,
+                                   description="Upstream gateway for a static interface")
+    force: bool = Field(default=False,
+                        description="Explicit extra-confirm to allow a management-interface write")
+
+    @field_validator("proto")
+    @classmethod
+    def _check_proto(cls, v: str) -> str:
+        if v not in _INTERFACE_PROTOS:
+            raise ValueError(f"proto must be one of {', '.join(_INTERFACE_PROTOS)}")
+        return v
+
+
+class EditInterfaceRequest(BaseModel):
+    """Update only the supplied options on an existing `config interface` (KAN-10).
+
+    At least one editable field must be present — an empty edit is a no-op the
+    route rejects before minting a confirm token. `force` carries the same
+    management-interface extra-confirm semantics as CreateInterfaceRequest.
+    """
+
+    proto: Optional[str] = Field(default=None, description="Protocol to switch to")
+    device: Optional[str] = Field(default=None, pattern=_DEVICE_PATTERN)
+    ipaddr: Optional[str] = Field(default=None, pattern=_IPV4_PATTERN)
+    netmask: Optional[str] = Field(default=None, pattern=_IPV4_PATTERN)
+    gateway: Optional[str] = Field(default=None, pattern=_IPV4_PATTERN)
+    force: bool = Field(default=False,
+                        description="Explicit extra-confirm to allow a management-interface edit")
+
+    @field_validator("proto")
+    @classmethod
+    def _check_proto(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in _INTERFACE_PROTOS:
+            raise ValueError(f"proto must be one of {', '.join(_INTERFACE_PROTOS)}")
+        return v
+
+    @model_validator(mode="after")
+    def _require_a_change(self) -> "EditInterfaceRequest":
+        if not any(
+            getattr(self, f) is not None
+            for f in ("proto", "device", "ipaddr", "netmask", "gateway")
+        ):
+            raise ValueError("provide at least one field to change")
+        return self
+
+
+# ---------------------------------------------------------------------------
 # VPN (WireGuard)
 # ---------------------------------------------------------------------------
 #

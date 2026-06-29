@@ -1227,6 +1227,84 @@ export async function fetchInterfaces(): Promise<NetworkInterfaceRow[]> {
   return data.interfaces;
 }
 
+/** KAN-10: editable fields for an interface create/edit. Only set fields are
+ *  sent; `force` is the explicit extra-confirm for a management-interface write. */
+export interface InterfaceWriteFields {
+  proto?: string;
+  device?: string;
+  ipaddr?: string;
+  netmask?: string;
+  gateway?: string;
+  force?: boolean;
+}
+
+/** KAN-10: add a network interface. Tier 2 — answers 202 confirmation_required,
+ *  which the caller confirms via confirmNetworkCommand. Editing /etc/config/network
+ *  is high blast radius (a wrong setting can cut this dashboard's connection), so
+ *  the orchestrator never applies on the first POST. */
+export async function createInterface(
+  name: string,
+  fields: InterfaceWriteFields & { proto: string },
+): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/interfaces`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, ...fields }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok && !data.requiresConfirmation) {
+    throwNetworkWriteError(data, res.status, "Failed to add interface");
+  }
+  return data;
+}
+
+/** KAN-10: edit a network interface. Tier 2 — same confirm dance as create. */
+export async function editInterface(
+  name: string,
+  fields: InterfaceWriteFields,
+): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/interfaces/${encodeURIComponent(name)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(fields),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok && !data.requiresConfirmation) {
+    throwNetworkWriteError(data, res.status, "Failed to edit interface");
+  }
+  return data;
+}
+
+/** KAN-10: restart the whole networking stack. Owner-only, Tier 3 — the
+ *  orchestrator answers the POST with a 202 + token; the Restart click IS the
+ *  consent, so echo it straight back through confirmNetworkCommand. Returns the
+ *  operationId (or null) so the caller can show a "restarting…" state. */
+export async function restartNetwork(): Promise<{ operationId: string | null }> {
+  const res = await authFetch(`${BASE}/api/network/restart`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (res.status === 202) {
+    if (!body?.confirmationToken || !body?.operation) {
+      throw new Error("Unexpected 202 response: missing confirmationToken or operation");
+    }
+    return confirmNetworkCommand(body.confirmationToken, body.operation);
+  }
+  if (res.ok) {
+    return { operationId: body?.operationId ?? null };
+  }
+  if (res.status === 403) {
+    throw new Error(
+      (body as { error?: string }).error || "Only the owner can restart networking.",
+    );
+  }
+  throw new Error(
+    (body as { error?: string }).error || `Failed to restart networking: ${res.status}`,
+  );
+}
+
 /** Read-only host-radio detail. Fields are null when iwinfo doesn't report
  *  them (shown as "not reported"); `supported:false`/`hostRadio:true` is the
  *  single combined-radio shape (no independent enable/disable). */

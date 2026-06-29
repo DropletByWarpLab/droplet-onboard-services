@@ -152,6 +152,44 @@ export async function getAllInterfaces(): Promise<openwrt.NetworkInterfaceRow[]>
   return rows;
 }
 
+// --- Interface write path (KAN-10) ---
+// Thin pass-throughs to the routing service, which wraps each write in
+// safe_apply (60s auto-rollback) and refuses a management-interface write
+// unless `force` is set. The orchestrator route gates owner-only + the Tier-2/3
+// confirm; here we only forward + invalidate the cached interface read so the
+// table reflects the change once it applies.
+
+export async function createInterface(
+  fields: openwrt.InterfaceWriteFields & { name: string; proto: string },
+): Promise<openwrt.WriteResult> {
+  const { name, proto, device, ipaddr, netmask, gateway, force } = fields;
+  const result = await openwrt.createInterface(name, {
+    proto,
+    device,
+    ipaddr,
+    netmask,
+    gateway,
+    force,
+  });
+  await invalidateNetworkCache();
+  return result;
+}
+
+export async function editInterface(
+  name: string,
+  fields: openwrt.InterfaceWriteFields,
+): Promise<openwrt.WriteResult> {
+  const result = await openwrt.editInterface(name, fields);
+  await invalidateNetworkCache();
+  return result;
+}
+
+export async function restartNetwork(): Promise<openwrt.WriteResult> {
+  const result = await openwrt.restartNetwork();
+  await invalidateNetworkCache();
+  return result;
+}
+
 // --- Connected devices ---
 
 export async function getConnectedDevices(): Promise<ConnectedDevice[]> {
