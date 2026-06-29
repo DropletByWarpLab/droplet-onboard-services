@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, HardDrive, Layers, ShieldCheck } from "lucide-react";
 import {
   fetchDrives,
@@ -87,6 +87,10 @@ export function StorageStep({
 
   // BUG-3 / ADR-019 — RAID is OPTIONAL and OFF by default.
   const [raidOn, setRaidOn] = useState(false);
+  // Tracks whether the user has explicitly toggled the RAID switch; load() only
+  // auto-enables RAID before the first interaction so a post-adopt refresh
+  // doesn't silently override an explicit "off" choice.
+  const userToggledRaid = useRef(false);
   const [chosenLevel, setChosenLevel] = useState<RaidLevel | null>(null);
   const [creating, setCreating] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -119,6 +123,7 @@ export function StorageStep({
   const [adoptBusy, setAdoptBusy] = useState<string | null>(null);
 
   const load = useCallback(async () => {
+    setLoading(true);
     setError(null);
     try {
       const resp = await fetchDrives();
@@ -135,7 +140,7 @@ export function StorageStep({
       // below). A box whose drives are all in use by the Droplet has nothing
       // poolable, so we leave the destructive pool toggle OFF rather than
       // landing the customer on a create flow the host will refuse.
-      if (groupPhysicalDisks(list).filter((p) => !p.inUse).length >= 2) {
+      if (!userToggledRaid.current && groupPhysicalDisks(list).filter((p) => !p.inUse).length >= 2) {
         setRaidOn(true);
       }
       // WARP-933 — do NOT auto-skip on an empty drive list. The step renders an
@@ -554,6 +559,7 @@ export function StorageStep({
         <RaidSection
           raidOn={raidOn}
           onToggle={() => {
+            userToggledRaid.current = true;
             setRaidOn((on) => {
               const next = !on;
               // Clear any in-flight create state when switching off.

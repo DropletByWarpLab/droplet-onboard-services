@@ -92,6 +92,7 @@ export function CamerasStep({
       // filter to enabled so they don't duplicate the discovered cards.
       const enabled = all.filter((c) => c.enabled);
       if (!alive.current) return;
+      setError(null); // clear any fetchCameras blip now that discovery succeeded
       setCameras(list);
       setExisting(enabled);
       // WARP-933 — do NOT auto-skip when nothing's found yet. The step stays
@@ -123,7 +124,10 @@ export function CamerasStep({
       if (savingRef.current) return;
       void fetchDiscoveredCameras()
         .then((list) => {
-          if (alive.current && !savingRef.current) setCameras(list);
+          if (alive.current && !savingRef.current) {
+            setError(null);
+            setCameras(list);
+          }
         })
         .catch(() => {});
     }, CAMERA_POLL_INTERVAL_MS);
