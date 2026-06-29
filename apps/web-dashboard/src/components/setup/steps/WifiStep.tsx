@@ -242,8 +242,12 @@ export function WifiStep({
                 maxLength={SSID_MAX}
                 autoComplete="off"
                 spellCheck={false}
+                aria-describedby="wifi-ssid-hint"
               />
             </div>
+            <p id="wifi-ssid-hint" className="type-caption-1 text-label-tertiary mt-1.5">
+              Up to {SSID_MAX} characters.
+            </p>
           </div>
 
           <div>
@@ -264,6 +268,7 @@ export function WifiStep({
                 className="dp-input pl-10 pr-10"
                 maxLength={PSK_MAX}
                 autoComplete="off"
+                aria-describedby="wifi-psk-hint"
               />
               <button
                 type="button"
@@ -276,6 +281,9 @@ export function WifiStep({
                 {showWifiPassword ? <EyeOff size={16} /> : <Eye size={16} />}
               </button>
             </div>
+            <p id="wifi-psk-hint" className="type-caption-1 text-label-tertiary mt-1.5">
+              Use at least {PSK_MIN} characters.
+            </p>
           </div>
 
           <div className="flex items-center gap-2 rounded-md border border-separator bg-surface-secondary px-3 py-2 type-caption-1 text-label-tertiary">
