@@ -164,6 +164,25 @@ class NtpRequest(BaseModel):
     enabled: bool = Field(..., description="Enable the appliance's OpenWrt NTP daemon")
 
 
+class SysupgradeRequest(BaseModel):
+    """KAN-8 — flash a staged OpenWrt sysupgrade image. BRICK RISK.
+
+    `image_path` is the path of an image already staged on the router (e.g. under
+    `/tmp`); this schema only validates the request shape. The owner-only Tier-3
+    confirm AND the PRIMARY_ROUTER deployment-shape gate are enforced in the
+    orchestrator ABOVE this route — the routing service is the SDK's HTTP face.
+    """
+
+    image_path: str = Field(
+        ..., min_length=1, max_length=512,
+        description="Path of the staged sysupgrade image on the router (e.g. /tmp/...img.gz)",
+    )
+    preserve_config: bool = Field(
+        default=True,
+        description="Keep /etc/config across the flash (sysupgrade -v); False adds -n for a clean flash",
+    )
+
+
 class BlockDeviceRequest(BaseModel):
     mac: str = Field(..., pattern=r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$", description="MAC address to block")
     name: Optional[str] = Field(default=None, description="Optional rule name")

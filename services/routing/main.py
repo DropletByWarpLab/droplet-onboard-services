@@ -23,7 +23,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -53,6 +53,7 @@ from schemas import (
     DhcpPoolRequest,
     HostnameRequest,
     NtpRequest,
+    SysupgradeRequest,
     SetDnsRequest,
     DnsHostnameRequest,
     BlockDeviceRequest,
@@ -1779,6 +1780,51 @@ def set_system_ntp(req: NtpRequest):
         r = get_router()
         r.system.set_ntp_enabled(req.enabled)
         return {"status": "ok", "enabled": req.enabled}
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# KAN-8 — router firmware upgrade + factory-reset (multi-box / PRIMARY_ROUTER)
+# ---------------------------------------------------------------------------
+# These are the SDK's HTTP face for the BRICK-RISK upgrade-router.sh semantics.
+# The AUTHORITATIVE gates — owner-only, Tier-3 confirm, AND refusal on any
+# non-PRIMARY_ROUTER deployment shape (the shipping single-box, where a wipe
+# destroys the host hostapd bridge's UCI with no remote recovery) — live in the
+# orchestrator ABOVE this layer. The routing service never enforces RBAC and is
+# bound to the LAN behind the orchestrator; the firmware-check read is safe on
+# any shape, the two writes must only ever be reached through the gated
+# orchestrator route.
+
+
+@app.get("/system/firmware-check")
+def system_firmware_check(
+    pinned_image: str = Query(
+        ..., min_length=1, max_length=512,
+        description="Pinned sysupgrade image name to compare the running release against",
+    ),
+):
+    """Read-only firmware version compare (KAN-8 AC 4). No flash, safe anywhere."""
+    try:
+        return get_router().system.firmware_version_check(pinned_image)
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.post("/system/sysupgrade")
+def system_sysupgrade(req: SysupgradeRequest):
+    """Flash a staged OpenWrt sysupgrade image. ⚠️ BRICK RISK — gated upstream."""
+    try:
+        return get_router().system.sysupgrade(req.image_path, req.preserve_config)
+    except (ConnectionLost, UbusError) as exc:
+        handle_router_error(exc)
+
+
+@app.post("/system/factory-reset")
+def system_factory_reset():
+    """Wipe the OpenWrt overlay + reboot to defaults. ⚠️ BRICK RISK — gated upstream."""
+    try:
+        return get_router().system.factory_reset()
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
 

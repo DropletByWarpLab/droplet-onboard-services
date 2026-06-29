@@ -28,6 +28,7 @@ Usage:
 
 import json
 import os
+import re
 import time
 import logging
 from contextlib import contextmanager
@@ -1495,6 +1496,51 @@ class FirewallApi:
 # ---------------------------------------------------------------------------
 # High-level API: System
 # ---------------------------------------------------------------------------
+# KAN-8: an OpenWrt sysupgrade image name embeds the release it carries, e.g.
+# `openwrt-24.10.0-droplet-squashfs-sysupgrade.img.gz`. We extract that pinned
+# version to compare against the running one — read-only, no flash. A name that
+# carries no parseable version yields an EXPLICIT `None` (undetermined), never a
+# guessed match (rule 10).
+_FIRMWARE_IMAGE_VERSION_RE = re.compile(r"(\d+\.\d+(?:\.\d+)?)")
+
+
+def compare_firmware_version(board: dict, pinned_image: str) -> dict:
+    """Compare the running OpenWrt release against the pinned sysupgrade image.
+
+    KAN-8 AC 4. Pure read: takes a `board_info()`-shaped dict and the pinned
+    image name, returns the compare result the dashboard renders on the
+    Maintenance card BEFORE any owner ever arms a flash.
+
+    Returns ``{current_version, pinned_version, up_to_date, upgrade_available}``.
+    ``up_to_date`` / ``upgrade_available`` are EXPLICIT booleans when both
+    versions are known, and explicit ``None`` (undetermined) when the pinned
+    image name carries no parseable version — we never guess "up to date" from a
+    failed parse (rule 10).
+    """
+    release = board.get("release") if isinstance(board, dict) else None
+    current_version = release.get("version") if isinstance(release, dict) else None
+
+    pinned_match = _FIRMWARE_IMAGE_VERSION_RE.search(pinned_image or "")
+    pinned_version = pinned_match.group(1) if pinned_match else None
+
+    if not current_version or pinned_version is None:
+        # Undetermined — surface explicitly rather than asserting equality.
+        return {
+            "current_version": current_version,
+            "pinned_version": pinned_version,
+            "up_to_date": None,
+            "upgrade_available": None,
+        }
+
+    up_to_date = current_version == pinned_version
+    return {
+        "current_version": current_version,
+        "pinned_version": pinned_version,
+        "up_to_date": up_to_date,
+        "upgrade_available": not up_to_date,
+    }
+
+
 class SystemApi:
     """System-level operations."""
 
@@ -1504,6 +1550,69 @@ class SystemApi:
     def board_info(self) -> dict:
         """Get hardware and OS info (kernel, hostname, model, release)."""
         return self._r._call("system", "board")
+
+    def firmware_version_check(self, pinned_image: str) -> dict:
+        """Read the running firmware version and compare it to the pinned image.
+
+        KAN-8 AC 4. Pure read — issues NO flash and NO exec. Reads the version
+        from the SAME `board_info()` release block that `/system/info` exposes,
+        then delegates to :func:`compare_firmware_version`.
+        """
+        return compare_firmware_version(self.board_info(), pinned_image)
+
+    def sysupgrade(self, image_path: str, preserve_config: bool = True) -> dict:
+        """Flash an OpenWrt sysupgrade image already staged on the router.
+
+        ⚠️ BRICK RISK. Wraps the `openwrt/scripts/upgrade-router.sh` flash step:
+        ``sysupgrade -v [-n] <image>``. ``preserve_config`` keeps ``/etc/config``
+        (the default, ``-v``); ``preserve_config=False`` adds ``-n`` for a clean
+        flash. Dispatch goes through the SAME ``file.exec`` ubus surface the rest
+        of the SDK uses — never a parallel box script.
+
+        The router reboots as it flashes, dropping the ubus/SSH connection; that
+        ``ConnectionLost`` is the EXPECTED success path of a flash, so it is
+        swallowed and reported as ``{"status": "flashing"}``. A genuine fault
+        BEFORE the reboot (e.g. PERMISSION_DENIED) propagates.
+
+        GATING to the PRIMARY_ROUTER deployment shape and the owner-only Tier-3
+        confirm are enforced ABOVE this layer (routing route + orchestrator);
+        this method is the raw mechanism and must never be reached otherwise.
+        """
+        if not image_path or not image_path.strip():
+            raise ValueError("sysupgrade requires a staged image path")
+        params = ["-v"]
+        if not preserve_config:
+            params.append("-n")  # clean flash — do not preserve /etc/config
+        params.append(image_path)
+        try:
+            self._r.exec_command("sysupgrade", params)
+        except ConnectionLost:
+            # Router rebooting into the new image — the connection drop IS success.
+            logger.info("sysupgrade dispatched; router rebooting into new image")
+            return {"status": "flashing", "image": image_path}
+        return {"status": "flashing", "image": image_path}
+
+    def factory_reset(self) -> dict:
+        """Wipe the OpenWrt overlay (UCI config) and reboot — factory defaults.
+
+        ⚠️ THE MOST DANGEROUS SURFACE. Runs ``jffs2reset`` to clear the overlay
+        then ``reboot -f`` to make it take effect, via ``file.exec``. On the
+        shipping single-box this would wipe the named-volume UCI the host hostapd
+        bridge depends on with no remote recovery — which is exactly why the
+        gating ABOVE this layer refuses it on any non-PRIMARY_ROUTER shape.
+
+        Like :meth:`sysupgrade`, the reboot drops the connection; that
+        ``ConnectionLost`` is the expected success path and is swallowed
+        (``{"status": "resetting"}``). A genuine fault before the reboot
+        propagates.
+        """
+        try:
+            self._r.exec_command("jffs2reset", ["-y"])
+            self._r.exec_command("reboot", ["-f"])
+        except ConnectionLost:
+            logger.info("factory_reset dispatched; router rebooting to defaults")
+            return {"status": "resetting"}
+        return {"status": "resetting"}
 
     def resource_info(self) -> dict:
         """Get CPU load, memory usage, and uptime."""
