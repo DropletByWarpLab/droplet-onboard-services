@@ -228,6 +228,15 @@ const envSchema = z.object({
   // disabled" banner instead of spamming retries at a non-existent service.
   ROUTING_MODE: z.enum(["real", "mock", "disabled"]).default("real"),
 
+  // KAN-8: the OpenWrt sysupgrade image this build pins for the router
+  // firmware-check + upgrade path (multi-box / PRIMARY_ROUTER shape only). The
+  // version embedded in this name is what /network/system/firmware-check
+  // compares the running release against. Empty default → firmware-check
+  // reports an undetermined pinned version (never a guessed "up to date"), and
+  // there is no image to flash. The name follows the upgrade-router.sh
+  // convention, e.g. `openwrt-24.10.0-droplet-squashfs-sysupgrade.img.gz`.
+  ROUTER_FIRMWARE_IMAGE: z.string().default(""),
+
   // --- WireGuard / Remote Access ---
   // Hostname or IP that peer .conf files use as their `Endpoint`. Should be
   // reachable from outside the LAN — typically a DuckDNS subdomain (Phase 4)

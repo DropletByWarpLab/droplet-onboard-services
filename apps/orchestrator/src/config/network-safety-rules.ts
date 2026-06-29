@@ -84,6 +84,11 @@ const TIER_2_OPERATIONS = new Set([
 const TIER_3_OPERATIONS = new Set([
   "reboot",
   "factory_reset",
+  // KAN-8: router firmware flash + overlay wipe. Brick-risk, owner-only,
+  // web-UI-only (never AI-triggerable) — same tier as factory_reset. The route
+  // ALSO refuses these on any non-PRIMARY_ROUTER deployment shape before a token
+  // is ever minted (the shipping single-box has no remote recovery from a wipe).
+  "sysupgrade",
   "create_vpn_interface",
   "add_vpn_peer",
   "setup_vpn_firewall",

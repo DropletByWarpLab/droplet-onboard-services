@@ -132,6 +132,12 @@ _SCAN_RESULTS: list[dict[str, Any]] = [
 # ---------------------------------------------------------------------------
 
 class _MockSystem:
+    def __init__(self) -> None:
+        # KAN-8: record the brick-risk dispatches so route tests can assert the
+        # SDK was driven with the right args without flashing anything.
+        self.sysupgrade_calls: list[tuple[str, bool]] = []
+        self.factory_reset_calls: int = 0
+
     def board_info(self) -> dict[str, Any]:
         return _BOARD_INFO
 
@@ -140,6 +146,23 @@ class _MockSystem:
 
     def system_info(self) -> dict[str, Any]:
         return {"board": _BOARD_INFO, "resources": _RESOURCES}
+
+    def firmware_version_check(self, pinned_image: str) -> dict[str, Any]:
+        # Reuse the real compare helper so the mock can't drift from production
+        # semantics (it reads the same release.version off the board fixture).
+        from droplet_openwrt_sdk import compare_firmware_version
+
+        return compare_firmware_version(_BOARD_INFO, pinned_image)
+
+    def sysupgrade(self, image_path: str, preserve_config: bool = True) -> dict[str, Any]:
+        logger.info("mock: sysupgrade %s preserve=%s — no-op", image_path, preserve_config)
+        self.sysupgrade_calls.append((image_path, preserve_config))
+        return {"status": "flashing", "image": image_path}
+
+    def factory_reset(self) -> dict[str, Any]:
+        logger.info("mock: factory_reset — no-op")
+        self.factory_reset_calls += 1
+        return {"status": "resetting"}
 
     def reboot(self) -> None:
         logger.info("mock: reboot requested — no-op")

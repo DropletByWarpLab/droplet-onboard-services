@@ -859,6 +859,76 @@ export async function setNtpEnabled(enabled: boolean): Promise<WriteResult> {
   return opFrom(res);
 }
 
+// --- KAN-8: router firmware upgrade + factory-reset (PRIMARY_ROUTER only) ---
+
+/** Wire shape of GET /system/firmware-check (snake_case from the routing service). */
+interface FirmwareCheckWire {
+  current_version: string | null;
+  pinned_version: string | null;
+  up_to_date: boolean | null;
+  upgrade_available: boolean | null;
+}
+
+export interface FirmwareCheck {
+  currentVersion: string | null;
+  pinnedVersion: string | null;
+  /** Explicit tri-state: null = undetermined (pinned image carries no version). */
+  upToDate: boolean | null;
+  upgradeAvailable: boolean | null;
+}
+
+/**
+ * KAN-8 AC 4 — read the running firmware version and compare it to the pinned
+ * image. Read-only; safe on any deployment shape (the dashboard renders this on
+ * the Maintenance card before the owner ever arms a flash).
+ */
+export async function fetchFirmwareCheck(pinnedImage: string): Promise<FirmwareCheck> {
+  if (!pinnedImage) {
+    // No pinned image configured — return undetermined state without hitting the
+    // routing service (FastAPI's min_length=1 Query would reject an empty string).
+    return { currentVersion: null, pinnedVersion: null, upToDate: null, upgradeAvailable: null };
+  }
+  const raw = await routingFetchJson<FirmwareCheckWire>(
+    `/system/firmware-check?pinned_image=${encodeURIComponent(pinnedImage)}`,
+    { label: "Firmware check" },
+  );
+  return {
+    currentVersion: raw.current_version,
+    pinnedVersion: raw.pinned_version,
+    upToDate: raw.up_to_date,
+    upgradeAvailable: raw.upgrade_available,
+  };
+}
+
+/**
+ * KAN-8 AC 1 — flash a staged OpenWrt sysupgrade image. ⚠️ BRICK RISK. The
+ * deployment-shape gate (PRIMARY_ROUTER) and the owner-only Tier-3 confirm are
+ * enforced in the service/route layer ABOVE; this is the wire call.
+ */
+export async function routerSysupgrade(
+  imagePath: string,
+  preserveConfig: boolean,
+): Promise<WriteResult> {
+  const res = await postJson(
+    "/system/sysupgrade",
+    { image_path: imagePath, preserve_config: preserveConfig },
+    "Router sysupgrade",
+  );
+  return opFrom(res);
+}
+
+/**
+ * KAN-8 AC 1 — wipe the OpenWrt overlay + reboot to defaults. ⚠️ BRICK RISK,
+ * gated upstream (PRIMARY_ROUTER + owner-only Tier-3).
+ */
+export async function routerFactoryReset(): Promise<WriteResult> {
+  const res = await routingFetch("/system/factory-reset", {
+    method: "POST",
+    label: "Router factory reset",
+  });
+  return opFrom(res);
+}
+
 // --- droplet-ai ubus RPC access (read-only) ---
 
 interface AiAccessWire {
