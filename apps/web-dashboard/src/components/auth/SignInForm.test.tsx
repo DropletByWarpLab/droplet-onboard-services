@@ -14,8 +14,8 @@
  * (Superseded the ADR-013 static-flag suite, which asserted all three buttons
  * always rendered live regardless of what the box had configured.)
  */
-import { describe, it, expect } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { describe, it, expect, vi } from "vitest";
+import { render, screen, within, fireEvent } from "@testing-library/react";
 import { SignInForm, type SignInFormProps } from "./SignInForm";
 
 const noopProps: SignInFormProps = {
@@ -112,6 +112,51 @@ describe("SignInForm — discovered providers render as live form POSTs", () => 
   it("shows the directory divider once at least one provider is present", () => {
     renderForm({ ssoProviders: ["google"] });
     expect(screen.getByText(/or use your directory account/i)).toBeInTheDocument();
+  });
+});
+
+describe("SignInForm — two-factor challenge panel (PR #375)", () => {
+  it("swaps credentials for the code field when mfaRequired", () => {
+    renderForm({ mfaRequired: true });
+    expect(screen.getByLabelText(/6-digit code/i)).toBeInTheDocument();
+    // The credential + SSO block is gone on the challenge step.
+    expect(screen.queryByLabelText(/work email/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /^verify$/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("renders the recovery-code input in recovery mode", () => {
+    renderForm({ mfaRequired: true, mfaMode: "recovery" });
+    expect(screen.getByLabelText(/recovery code/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/6-digit code/i)).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /use your authenticator app/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("wires the toggle and cancel affordances", () => {
+    const onToggleMfaMode = vi.fn();
+    const onCancelMfa = vi.fn();
+    renderForm({ mfaRequired: true, onToggleMfaMode, onCancelMfa });
+    fireEvent.click(
+      screen.getByRole("button", { name: /use a recovery code instead/i }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: /use a different account/i }),
+    );
+    expect(onToggleMfaMode).toHaveBeenCalledTimes(1);
+    expect(onCancelMfa).toHaveBeenCalledTimes(1);
+  });
+
+  it("strips non-digits from the authenticator code via onTotpCodeChange", () => {
+    const onTotpCodeChange = vi.fn();
+    renderForm({ mfaRequired: true, onTotpCodeChange });
+    fireEvent.change(screen.getByLabelText(/6-digit code/i), {
+      target: { value: "12x3" },
+    });
+    expect(onTotpCodeChange).toHaveBeenCalledWith("123");
   });
 });
 
