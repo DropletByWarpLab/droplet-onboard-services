@@ -305,9 +305,10 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
   // path added by WARP-930 (AuthGate now renders /help standalone without a
   // session; without this mirror, authFetch 401s from ShellPage would hard-
   // navigate anonymous /help visitors to /login, destroying wizard context).
-  const onPublicPage = ["/login", "/setup", "/help"].some((p) =>
-    window.location.pathname.startsWith(p),
-  );
+  const onPublicPage =
+    ["/login", "/setup"].some((p) =>
+      window.location.pathname.startsWith(p),
+    ) || window.location.pathname === "/help";
   if (!onPublicPage) {
     window.location.assign(
       `/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`,
