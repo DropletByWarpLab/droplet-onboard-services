@@ -1606,12 +1606,15 @@ class SystemApi:
         (``{"status": "resetting"}``). A genuine fault before the reboot
         propagates.
         """
+        # jffs2reset must complete cleanly — a transport error here means the
+        # overlay may not have been wiped, so propagate rather than declaring success.
+        self._r.exec_command("jffs2reset", ["-y"])
         try:
-            self._r.exec_command("jffs2reset", ["-y"])
             self._r.exec_command("reboot", ["-f"])
         except ConnectionLost:
-            logger.info("factory_reset dispatched; router rebooting to defaults")
-            return {"status": "resetting"}
+            # Connection drop on the reboot call is the expected success path.
+            pass
+        logger.info("factory_reset dispatched; router rebooting to defaults")
         return {"status": "resetting"}
 
     def resource_info(self) -> dict:

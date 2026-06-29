@@ -883,6 +883,11 @@ export interface FirmwareCheck {
  * the Maintenance card before the owner ever arms a flash).
  */
 export async function fetchFirmwareCheck(pinnedImage: string): Promise<FirmwareCheck> {
+  if (!pinnedImage) {
+    // No pinned image configured — return undetermined state without hitting the
+    // routing service (FastAPI's min_length=1 Query would reject an empty string).
+    return { currentVersion: null, pinnedVersion: null, upToDate: null, upgradeAvailable: null };
+  }
   const raw = await routingFetchJson<FirmwareCheckWire>(
     `/system/firmware-check?pinned_image=${encodeURIComponent(pinnedImage)}`,
     { label: "Firmware check" },
