@@ -12,10 +12,7 @@ const MODES = ["heat", "cool", "auto", "off"] as const;
 
 // Matter Thermostat SystemMode enum → label. Read from the device's `systemMode`
 // attribute (NOT device.state, which is the temperature string and could never
-// match a mode label, so the pill never highlighted). The tabs stay an honest
-// read-only indicator: writing systemMode needs a sidecar case that isn't
-// verified on hardware yet, and the design's Climate view is read-only — so we
-// don't fake an interactive mode switch.
+// match a mode label, so the pill never highlighted).
 const SYSTEM_MODE_LABEL: Record<number, (typeof MODES)[number]> = {
   0: "off",
   1: "auto",
@@ -46,6 +43,17 @@ export function ClimateControl({ device, onCommand }: ClimateControlProps) {
       temperature: targetTemp + delta,
       mode: isCooling ? 1 : 0,
     });
+  }
+
+  // KAN-7: the mode tabs are interactive. heat/cool/auto are Tier-1 — the
+  // page's command handler applies them directly; "off" is Tier-2 — the same
+  // handler (useMatterCommandConfirm.request) intercepts the orchestrator's
+  // 202 confirmation_required and opens the confirm dialog, so ClimateControl
+  // issues every mode the same way. Re-selecting the active mode is a no-op so
+  // we don't spend a rate-limit slot (or a confirm prompt) on it.
+  function selectMode(mode: (typeof MODES)[number]) {
+    if (mode === hvacMode) return;
+    onCommand("set_hvac_mode", { mode });
   }
 
   return (
@@ -86,23 +94,38 @@ export function ClimateControl({ device, onCommand }: ClimateControlProps) {
         </div>
       )}
 
-      {/* Mode indicator */}
-      <div className="flex gap-1 bg-surface-secondary rounded-lg p-1">
-        {MODES.map((mode) => (
-          <div
-            key={mode}
-            className={`
-              flex-1 py-1.5 px-2 rounded-md type-caption-1 capitalize text-center
-              ${
-                hvacMode === mode
-                  ? "bg-accent text-white font-medium"
-                  : "text-label-secondary"
-              }
-            `}
-          >
-            {mode}
-          </div>
-        ))}
+      {/* Mode switch — heat/cool/auto apply directly; off confirms first. */}
+      <div
+        role="tablist"
+        aria-label="Climate mode"
+        className="flex gap-1 bg-surface-secondary rounded-lg p-1"
+      >
+        {MODES.map((mode) => {
+          const active = hvacMode === mode;
+          return (
+            <button
+              key={mode}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              aria-label={mode}
+              disabled={active}
+              onClick={() => selectMode(mode)}
+              className={`
+                flex-1 py-1.5 px-2 rounded-md type-caption-1 capitalize text-center
+                transition-colors duration-150
+                focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40
+                ${
+                  active
+                    ? "bg-accent text-white font-medium cursor-default"
+                    : "text-label-secondary hover:bg-surface-tertiary hover:text-label-primary"
+                }
+              `}
+            >
+              {mode}
+            </button>
+          );
+        })}
       </div>
     </div>
   );

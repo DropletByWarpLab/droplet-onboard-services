@@ -210,6 +210,62 @@ describe("Matter Tier-2 mint → confirm entityId binding", () => {
     });
   });
 
+  it("set_hvac_mode off stages a Tier-2 confirm (climate.set_mode) and round-trips through /confirm (KAN-7)", async () => {
+    const app = buildApp();
+    vi.mocked(getDevice).mockResolvedValue({
+      nodeId: "42",
+      category: "climate",
+    } as never);
+
+    const minted = await request(app)
+      .post("/api/matter/devices/42/command")
+      .send({ command: "set_hvac_mode", data: { mode: "off" } });
+
+    expect(minted.status).toBe(202);
+    expect(minted.body.status).toBe("confirmation_required");
+    expect(minted.body.tier).toBe(2);
+    // The 202 echoes the MAPPED service the confirm route validates against.
+    expect(minted.body.service).toBe("set_mode");
+    expect(minted.body.command).toBe("set_hvac_mode");
+    // The Tier-2 write must NOT have executed at mint time.
+    expect(sendMatterCommand).not.toHaveBeenCalled();
+
+    const confirm = await request(app)
+      .post("/api/matter/devices/42/confirm")
+      .send({
+        confirmationToken: minted.body.confirmationToken,
+        service: minted.body.service,
+      });
+
+    expect(confirm.status).toBe(200);
+    expect(confirm.body.confirmed).toBe(true);
+    // The original command + data is what gets sent on confirm.
+    expect(sendMatterCommand).toHaveBeenCalledWith("42", "set_hvac_mode", {
+      mode: "off",
+    });
+  });
+
+  it.each(["heat", "cool", "auto"])(
+    "set_hvac_mode %s is Tier-1 and executes directly (KAN-7)",
+    async (mode) => {
+      const app = buildApp();
+      vi.mocked(getDevice).mockResolvedValue({
+        nodeId: "42",
+        category: "climate",
+      } as never);
+
+      const res = await request(app)
+        .post("/api/matter/devices/42/command")
+        .send({ command: "set_hvac_mode", data: { mode } });
+
+      expect(res.status).toBe(200);
+      expect(res.body.tier).toBe(1);
+      expect(sendMatterCommand).toHaveBeenCalledWith("42", "set_hvac_mode", {
+        mode,
+      });
+    },
+  );
+
   it("mints binary_sensor entityIds under their own domain — no silent aliasing onto sensor.*", async () => {
     const prisma = createMockPrisma();
     const app = buildApp(prisma);

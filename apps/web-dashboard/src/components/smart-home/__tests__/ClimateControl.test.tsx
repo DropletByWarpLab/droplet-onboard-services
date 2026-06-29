@@ -69,8 +69,51 @@ describe("ClimateControl", () => {
         onCommand={vi.fn()}
       />,
     );
-    const cool = screen.getByText("cool");
+    const cool = screen.getByRole("tab", { name: /cool/i });
     expect(cool.className).toMatch(/bg-accent/);
-    expect(screen.getByText("heat").className).not.toMatch(/bg-accent/);
+    expect(cool.getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("tab", { name: /heat/i }).className).not.toMatch(/bg-accent/);
+  });
+
+  // KAN-7: the mode tabs are interactive. Heat/cool/auto are Tier-1 (the page's
+  // `request` applies them directly); "off" is Tier-2, but ClimateControl just
+  // issues the command — `request` (from useMatterCommandConfirm) intercepts the
+  // 202 and opens the confirm dialog, so the component fires the same way.
+  it("clicking Heat issues set_hvac_mode with mode heat", () => {
+    const onCommand = vi.fn();
+    render(
+      <ClimateControl
+        // Start in cool so Heat is an inactive, clickable tab.
+        device={thermostat({ localTemperature: 2300, occupiedCoolingSetpoint: 2100, systemMode: 3 })}
+        onCommand={onCommand}
+      />,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: /^heat$/i }));
+    expect(onCommand).toHaveBeenCalledWith("set_hvac_mode", { mode: "heat" });
+  });
+
+  it("clicking Off issues set_hvac_mode with mode off (the Tier-2 confirm path)", () => {
+    const onCommand = vi.fn();
+    render(
+      <ClimateControl
+        device={thermostat({ localTemperature: 2000, occupiedHeatingSetpoint: 2000, systemMode: 4 })}
+        onCommand={onCommand}
+      />,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: /^off$/i }));
+    expect(onCommand).toHaveBeenCalledWith("set_hvac_mode", { mode: "off" });
+  });
+
+  it("does not re-issue a command when clicking the already-active mode", () => {
+    const onCommand = vi.fn();
+    render(
+      <ClimateControl
+        device={thermostat({ localTemperature: 2000, occupiedHeatingSetpoint: 2000, systemMode: 4 })}
+        onCommand={onCommand}
+      />,
+    );
+    // systemMode 4 = heat is already active.
+    fireEvent.click(screen.getByRole("tab", { name: /^heat$/i }));
+    expect(onCommand).not.toHaveBeenCalled();
   });
 });
