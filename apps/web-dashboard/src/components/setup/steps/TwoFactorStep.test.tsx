@@ -13,6 +13,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { TwoFactorStep } from "./TwoFactorStep";
+import { SetupNavProvider } from "@/components/setup/setup-nav";
 
 const enrollTotp = vi.fn();
 const verifyTotp = vi.fn();
@@ -105,5 +106,34 @@ describe("TwoFactorStep", () => {
     fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
     expect(onSkip).toHaveBeenCalledTimes(1);
     expect(enrollTotp).not.toHaveBeenCalled();
+  });
+
+  it("hides Back AND rail jumps on the one-time recovery-codes phase, even with the nav provider present (WARP-929 T4)", async () => {
+    // With the provider, twofactor (idx 4 > the org floor at 3) would normally
+    // show Back / clickable rail rows. The codes phase passes hideBack, so the
+    // confirmed "I've saved them — continue" must be the ONLY way off — going
+    // back from the one-time codes is what stranded the owner with no codes.
+    render(
+      <SetupNavProvider
+        value={{
+          navigate: vi.fn(),
+          maxReachedIdx: 13,
+          back: vi.fn(),
+          firstNavigableIdx: 3,
+        }}
+      >
+        <TwoFactorStep onComplete={vi.fn()} onSkip={vi.fn()} />
+      </SetupNavProvider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /set up/i }));
+    await screen.findByAltText(/qr code/i);
+    fireEvent.change(screen.getByLabelText(/6-digit code/i), {
+      target: { value: "123456" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /verify & enable/i }));
+    await screen.findByText("aaaa-1111"); // we're on the codes phase
+
+    expect(screen.queryByRole("button", { name: /^back$/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Go to / })).toBeNull();
   });
 });
