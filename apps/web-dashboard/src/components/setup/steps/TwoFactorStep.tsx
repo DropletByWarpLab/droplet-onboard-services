@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Copy, Check, KeyRound, Loader2 } from "lucide-react";
+import { Copy, Check, KeyRound, Loader2, ShieldCheck } from "lucide-react";
 import { enrollTotp, verifyTotp } from "@/lib/api";
 import { translateError } from "@/lib/friendly-errors";
 import { StepShell } from "@/components/setup/StepShell";
@@ -53,6 +53,12 @@ export function TwoFactorStep({
   // "Verify & enable" busy state doesn't fire during the initial fetch.
   const [enrolling, setEnrolling] = useState(true);
   const [isBusy, setIsBusy] = useState(false);
+  // WARP-931 — true when enroll comes back 409 TOTP_ALREADY_ENABLED, i.e. the
+  // owner navigated BACK to a 2FA step they already completed (the nav floor
+  // keeps this step reachable). Auto-enroll would otherwise 409 forever behind a
+  // "Try again" loop with the wrong copy; instead we show a calm "already on"
+  // confirmation with a Continue.
+  const [alreadyEnabled, setAlreadyEnabled] = useState(false);
 
   // The otpauth secret, pulled from the URI for manual entry when a camera
   // can't scan the QR (`secret=` query param).
@@ -72,7 +78,14 @@ export function TwoFactorStep({
       setOtpauthUri(res.otpauthUri);
       setQrDataUrl(res.qrDataUrl);
     } catch (err) {
-      setError(translateError(err, "auth"));
+      // Returning to an already-completed 2FA step: the orchestrator answers
+      // 409 TOTP_ALREADY_ENABLED. Treat it as "done", not an error — otherwise
+      // the enroll-failed card loops "Try again" → 409 forever.
+      if ((err as { code?: unknown })?.code === "TOTP_ALREADY_ENABLED") {
+        setAlreadyEnabled(true);
+      } else {
+        setError(translateError(err, "auth"));
+      }
     } finally {
       setEnrolling(false);
     }
@@ -118,6 +131,33 @@ export function TwoFactorStep({
       // Clipboard unavailable (e.g. insecure context) — the codes are still
       // visible on screen for the user to copy by hand.
     }
+  }
+
+  // ── already enabled ─────────────────────────────────────────────────────
+  // Reached by navigating BACK to a 2FA step that was already completed this
+  // run. No QR / no re-enroll — just confirm it's on and let them move forward.
+  if (alreadyEnabled) {
+    return (
+      <StepShell
+        current="twofactor"
+        title="Two-factor is already on"
+        subtitle="You set up two-factor authentication for this account. You're all set."
+        icon={
+          <div className="flex h-14 w-14 items-center justify-center rounded-full bg-accent-subtle">
+            <ShieldCheck size={28} className="text-accent" />
+          </div>
+        }
+        primary={{ label: "Continue", onClick: onComplete, showArrow: true }}
+      >
+        <div className="dp-card p-4">
+          <p className="type-footnote text-label-secondary">
+            Keep your authenticator app — you&rsquo;ll use it the next time you
+            sign in. To change or turn off two-factor, head to Settings after
+            setup.
+          </p>
+        </div>
+      </StepShell>
+    );
   }
 
   // ── enroll ─────────────────────────────────────────────────────────────

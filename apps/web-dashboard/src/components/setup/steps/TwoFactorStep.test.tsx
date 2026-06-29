@@ -124,6 +124,31 @@ describe("TwoFactorStep", () => {
     expect(onComplete).toHaveBeenCalledTimes(1);
   });
 
+  it("returning to an already-enabled 2FA step shows a calm 'already on' confirmation, not a Try-again loop", async () => {
+    enrollTotp.mockReset();
+    // The orchestrator answers 409 TOTP_ALREADY_ENABLED on re-enroll; api.ts
+    // preserves the code on the thrown error.
+    enrollTotp.mockRejectedValue(
+      Object.assign(new Error("Two-factor authentication is already enabled."), {
+        code: "TOTP_ALREADY_ENABLED",
+        status: 409,
+      }),
+    );
+    const onComplete = vi.fn();
+    render(<TwoFactorStep onComplete={onComplete} onSkip={vi.fn()} />);
+
+    expect(await screen.findByText(/two-factor is already on/i)).toBeInTheDocument();
+    // No QR, no "Try again" loop, no misleading credential copy.
+    expect(screen.queryByAltText(/qr code/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /try again/i })).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/check your username and password/i),
+    ).not.toBeInTheDocument();
+    // Continue advances the wizard.
+    fireEvent.click(screen.getByRole("button", { name: /^continue$/i }));
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
   it("Skip for now calls onSkip (enrollment on mount is harmless — no factor enabled)", async () => {
     const onSkip = vi.fn();
     render(<TwoFactorStep onComplete={vi.fn()} onSkip={onSkip} />);
