@@ -176,6 +176,7 @@ export function StepShell({
   children,
   primary,
   skip,
+  hideBack,
 }: {
   /** Which wizard step is active — drives the rail highlight + counter. */
   current: Step;
@@ -186,6 +187,14 @@ export function StepShell({
   children?: ReactNode;
   primary?: StepShellAction;
   skip?: StepShellSkip;
+  /**
+   * WARP-929 (T4) — suppress ALL backward navigation (footer Back + rail jump)
+   * for this render, regardless of the floor. Used by the two-factor
+   * recovery-codes screen: the codes show once, so the only way off is the
+   * confirmed Continue — going back would strand the user on a now-2FA-enabled
+   * account with no codes.
+   */
+  hideBack?: boolean;
 }) {
   const idx = STEPS.indexOf(current);
   const total = STEPS.length;
@@ -204,7 +213,13 @@ export function StepShell({
   const navigate = nav?.navigate;
   const back = nav?.back;
   const maxReached = nav?.maxReachedIdx ?? idx;
-  const showFooter = Boolean(primary || skip || (navigate && idx >= 1));
+  // WARP-929 — backward navigation is fenced below `firstNavigable` (defaults to
+  // 0, i.e. the pre-floor behaviour `idx >= 1`, when no provider sets it). The
+  // page sets it to the Workspace step so claim/account can't be revisited
+  // (no unclaim). `hideBack` is a per-render override (the 2FA codes screen).
+  const firstNavigable = nav?.firstNavigableIdx ?? 0;
+  const canShowBack = Boolean(!hideBack && navigate && idx > firstNavigable);
+  const showFooter = Boolean(primary || skip || canShowBack);
 
   return (
     // `setup-shell` scopes the wizard's fluid `type-*` overrides (globals.css);
@@ -245,7 +260,11 @@ export function StepShell({
                 Icon={meta.Icon}
                 state={state}
                 onClick={
-                  navigate && i !== idx && i <= maxReached
+                  navigate &&
+                  !hideBack &&
+                  i !== idx &&
+                  i <= maxReached &&
+                  i >= firstNavigable
                     ? () => navigate(id)
                     : undefined
                 }
@@ -334,7 +353,7 @@ export function StepShell({
                 compact footer; a mobile home user is exactly who needs the 44px
                 target (UX review on #518). */}
             <div>
-              {navigate && idx >= 1 && (
+              {canShowBack && navigate && (
                 <button
                   type="button"
                   onClick={() => (back ? back() : navigate(STEPS[idx - 1]))}

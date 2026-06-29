@@ -103,3 +103,68 @@ describe("setup wizard navigation (clickable rail + Back)", () => {
     expect(screen.queryByRole("button", { name: "Go to Welcome" })).toBeNull();
   });
 });
+
+/**
+ * WARP-929 — navigation floor (no unclaim) + per-render hideBack (2FA codes).
+ * The page sets `firstNavigableIdx` to the Workspace (org, idx 3) step, so
+ * welcome/claim/account are a one-way floor: no Back, no rail jump back into
+ * them. `hideBack` suppresses backward nav entirely for the render.
+ */
+describe("setup wizard navigation — floor + hideBack (WARP-929)", () => {
+  const ORG_IDX = 3; // welcome=0, claim=1, account=2, org=3, twofactor=4
+
+  function renderWithFloor(
+    current: Parameters<typeof StepShell>[0]["current"],
+    opts: { maxReachedIdx: number; hideBack?: boolean },
+    navigate: (step: string) => void,
+  ) {
+    return render(
+      <SetupNavProvider
+        value={{
+          navigate: navigate as never,
+          maxReachedIdx: opts.maxReachedIdx,
+          firstNavigableIdx: ORG_IDX,
+        }}
+      >
+        <StepShell
+          current={current}
+          title="Title"
+          primary={{ label: "Continue", onClick: () => {} }}
+          hideBack={opts.hideBack}
+        >
+          body
+        </StepShell>
+      </SetupNavProvider>,
+    );
+  }
+
+  it("hides Back on the account step (at/under the floor) — can't go back to unclaim", () => {
+    renderWithFloor("account", { maxReachedIdx: 5 }, vi.fn());
+    expect(screen.queryByRole("button", { name: /^back$/i })).toBeNull();
+  });
+
+  it("hides Back ON the Workspace floor itself (its only backward target is account)", () => {
+    renderWithFloor("org", { maxReachedIdx: 5 }, vi.fn());
+    expect(screen.queryByRole("button", { name: /^back$/i })).toBeNull();
+  });
+
+  it("shows Back from the step after the floor, targeting the floor (not account)", () => {
+    const navigate = vi.fn();
+    renderWithFloor("twofactor", { maxReachedIdx: 5 }, navigate); // idx 4 → org (3)
+    screen.getByRole("button", { name: /^back$/i }).click();
+    expect(navigate).toHaveBeenCalledWith("org");
+  });
+
+  it("makes welcome/claim/account rail rows static even when reached (floor)", () => {
+    renderWithFloor("twofactor", { maxReachedIdx: 5 }, vi.fn());
+    expect(screen.queryByRole("button", { name: "Go to Welcome" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Go to Account" })).toBeNull();
+  });
+
+  it("hideBack suppresses Back AND rail jumps even past the floor (2FA codes screen)", () => {
+    renderWithFloor("twofactor", { maxReachedIdx: 5, hideBack: true }, vi.fn());
+    expect(screen.queryByRole("button", { name: /^back$/i })).toBeNull();
+    // No reached step is clickable while the one-time codes are on screen.
+    expect(screen.queryByRole("button", { name: /^Go to / })).toBeNull();
+  });
+});
