@@ -575,7 +575,7 @@ export async function enrollTotp(): Promise<TotpEnrollResponse> {
     // message that translateError can't map.
     throw Object.assign(
       new Error(data.error || "Could not start two-factor setup"),
-      { code: typeof data?.code === "string" ? data.code : undefined, status: res.status },
+      { ...(typeof data?.code === "string" ? { code: data.code } : {}), status: res.status },
     );
   }
   return res.json();
@@ -593,7 +593,10 @@ export async function verifyTotp(code: string): Promise<TotpVerifyResponse> {
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || "That code didn't match. Try again.");
+    throw Object.assign(
+      new Error(data.error || "That code didn't match. Try again."),
+      { ...(typeof data?.code === "string" ? { code: data.code } : {}), status: res.status },
+    );
   }
   return res.json();
 }

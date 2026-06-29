@@ -253,27 +253,27 @@ export function TwoFactorStep({
                   {error}
                 </p>
               )}
+
+              {/* WARP-931 (T2) — first-timers' guidance + a link to the full how-to
+                  (/help#two-factor). Only shown when the QR is on screen so the
+                  "scan the code above" copy is accurate. */}
+              <LearnMoreCard
+                title="New to authenticator apps?"
+                helpAnchor="two-factor"
+              >
+                <p>
+                  An authenticator app makes a fresh 6-digit code every 30 seconds.
+                  On an iPhone, get one free from the App Store; on Android, from the
+                  Play Store. Popular choices are Google Authenticator, 1Password,
+                  and Authy.
+                </p>
+                <p>
+                  Once it&rsquo;s installed, scan the code above and type the 6
+                  digits it shows.
+                </p>
+              </LearnMoreCard>
             </>
           )}
-
-          {/* WARP-931 (T2) — first-timers' guidance + a link to the full how-to
-              (/help#two-factor). The help link opens in a new tab (WARP-930), so
-              this in-progress step is preserved. */}
-          <LearnMoreCard
-            title="New to authenticator apps?"
-            helpAnchor="two-factor"
-          >
-            <p>
-              An authenticator app makes a fresh 6-digit code every 30 seconds.
-              On an iPhone, get one free from the App Store; on Android, from the
-              Play Store. Popular choices are Google Authenticator, 1Password,
-              and Authy.
-            </p>
-            <p>
-              Once it&rsquo;s installed, scan the code above and type the 6
-              digits it shows.
-            </p>
-          </LearnMoreCard>
         </div>
       </StepShell>
     );
