@@ -102,6 +102,20 @@ describe("AuthGate — routes off /setup/state (PR #372)", () => {
     expect(container.textContent).toContain("help content");
   });
 
+  it("does NOT early-render /help to an anonymous visitor on a CLAIMED box (redirects to login) (WARP-930)", () => {
+    pathnameValue = "/help";
+    setAuth({
+      user: null,
+      isLoading: false,
+      setupState: { appliance: "ready", setupStep: "done", userTourCompleted: true },
+    });
+    const { container } = render(<AuthGate>help content</AuthGate>);
+    // The standalone help render is gated on applianceUnclaimed, so a claimed-box
+    // logged-out visitor falls through to the login redirect, not an early paint.
+    expect(container.textContent).not.toContain("help content");
+    expect(replaceMock).toHaveBeenCalledWith("/login");
+  });
+
   it("waits while loading — no redirect decided yet", () => {
     setAuth({ user: null, isLoading: true, setupState: null });
     render(<AuthGate>child</AuthGate>);

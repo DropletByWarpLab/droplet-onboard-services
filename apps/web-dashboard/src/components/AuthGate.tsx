@@ -71,7 +71,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
     if (
       applianceUnclaimed &&
       pathname !== "/setup" &&
-      !pathname.startsWith("/help")
+      pathname !== "/help"
     ) {
       router.replace("/setup");
       return;
@@ -262,12 +262,15 @@ export function AuthGate({ children }: { children: ReactNode }) {
 
   // WARP-930 — /help must be reachable DURING setup (the LearnMoreCard "Learn
   // more" links on every wizard step point at /help#<anchor>). While the
-  // appliance is unclaimed, or for an anonymous visitor mid-wizard, render the
-  // help page standalone (no sidebar chrome — the wizard owns the look) instead
-  // of returning null or bouncing to /setup. A claimed, authenticated user
-  // falls through to the normal sidebar render below, so post-setup /help is
-  // unchanged.
-  if (pathname.startsWith("/help") && (!user || applianceUnclaimed)) {
+  // appliance is UNCLAIMED (the only setup phase — covers both the anonymous
+  // claim step and the signed-in owner mid-wizard), render the help page
+  // standalone (no sidebar chrome — the wizard owns the look) instead of
+  // bouncing to /setup. A claimed appliance falls through: authed users get the
+  // normal sidebar render below (post-setup /help unchanged), and an anonymous
+  // visitor hits the return-null-while-redirecting path (no early help paint).
+  // Gated on `applianceUnclaimed` (not `!user`) so a claimed-box logged-out
+  // visitor doesn't briefly see the manual before the /login redirect.
+  if (pathname === "/help" && applianceUnclaimed) {
     return <>{children}</>;
   }
 
