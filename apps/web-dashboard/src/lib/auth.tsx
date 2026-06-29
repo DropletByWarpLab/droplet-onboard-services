@@ -135,10 +135,13 @@ export interface SecondFactor {
  * of routing it through `translateError` (whose message-less 401 fallback wrongly
  * tells the user to check a password that was, in fact, correct).
  *
- * A typed class (not a bare `{ code }`) so the page can branch on `instanceof`
- * without string-matching, and so a wrong code on a *retry* — also TOTP_REQUIRED
- * — is distinguished from the first challenge by the page's own state, not by
- * re-parsing the error.
+ * A typed class (not a bare `Error`) so the throw site is self-documenting and
+ * carries the `code` field. The login page dispatches on that `code`
+ * (`isTotpRequired` → `err.code === "TOTP_REQUIRED"`), NOT `instanceof`, so the
+ * check survives module duplication / mocking and doesn't force every
+ * `@/lib/auth` consumer to share one error-class identity. A wrong code on a
+ * *retry* — also TOTP_REQUIRED — is distinguished from the first challenge by
+ * the page's own state, not by re-parsing the error.
  */
 export class TotpRequiredError extends Error {
   readonly code = "TOTP_REQUIRED" as const;

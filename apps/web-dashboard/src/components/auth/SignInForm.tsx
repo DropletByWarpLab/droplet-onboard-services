@@ -167,7 +167,11 @@ export function SignInForm({
             <p className="type-subheadline font-semibold text-label-primary">
               Two-factor authentication
             </p>
-            <p className="type-caption-1 text-label-secondary">
+            <p
+              id="login-mfa-help"
+              role="status"
+              className="type-caption-1 text-label-secondary"
+            >
               {isRecovery
                 ? "Enter one of the recovery codes you saved during setup."
                 : "Enter the 6-digit code from your authenticator app."}
@@ -193,10 +197,11 @@ export function SignInForm({
                 id="login-recovery-code"
                 type="text"
                 autoComplete="one-time-code"
+                aria-describedby="login-mfa-help"
                 value={recoveryCode}
                 onChange={(e) => onRecoveryCodeChange?.(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && onSubmit()}
-                placeholder="xxxxx-xxxxx"
+                placeholder="xxxx-xxxx"
                 className="dp-input pl-10 font-mono"
                 autoFocus
               />
@@ -215,6 +220,7 @@ export function SignInForm({
               type="text"
               inputMode="numeric"
               autoComplete="one-time-code"
+              aria-describedby="login-mfa-help"
               maxLength={6}
               value={totpCode}
               onChange={(e) =>

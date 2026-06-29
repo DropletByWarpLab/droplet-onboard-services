@@ -168,6 +168,75 @@ describe("LoginPage — two-factor challenge (PR #375)", () => {
     });
   });
 
+  it("escalation to 429 during the challenge shows throttle copy, stays on the step", async () => {
+    loginMock
+      .mockRejectedValueOnce(totpRequired()) // reveal field
+      .mockRejectedValueOnce(
+        Object.assign(new Error("Too many attempts. Try again shortly."), {
+          code: "TOO_MANY_ATTEMPTS",
+          status: 429,
+        }),
+      );
+    render(<LoginPage />);
+
+    signInWith("alice@acme.co", "pw");
+    await screen.findByLabelText(/6-digit code/i);
+
+    fireEvent.change(screen.getByLabelText(/6-digit code/i), {
+      target: { value: "000000" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^verify$/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/too many attempts/i)).toBeInTheDocument();
+    });
+    expect(pushMock).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: /^verify$/i })).toBeInTheDocument();
+  });
+
+  it("clicking Verify with an empty code validates locally and does not re-call login", async () => {
+    loginMock.mockRejectedValueOnce(totpRequired());
+    render(<LoginPage />);
+
+    signInWith("alice@acme.co", "pw");
+    await screen.findByLabelText(/6-digit code/i);
+    expect(loginMock).toHaveBeenCalledTimes(1);
+
+    // Submit with the field left blank.
+    fireEvent.click(screen.getByRole("button", { name: /^verify$/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        /enter the 6-digit code to continue/i,
+      );
+    });
+    // No second network call — the empty code never left the client.
+    expect(loginMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("toggling to recovery clears a prior 'didn't match' error", async () => {
+    loginMock
+      .mockRejectedValueOnce(totpRequired()) // reveal field
+      .mockRejectedValueOnce(totpRequired()); // wrong code → error shown
+    render(<LoginPage />);
+
+    signInWith("alice@acme.co", "pw");
+    await screen.findByLabelText(/6-digit code/i);
+
+    fireEvent.change(screen.getByLabelText(/6-digit code/i), {
+      target: { value: "000000" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^verify$/i }));
+    await screen.findByText(/that code didn't match/i);
+
+    // Switching to recovery mode resets the panel — the stale error is gone.
+    fireEvent.click(
+      screen.getByRole("button", { name: /use a recovery code instead/i }),
+    );
+    expect(screen.queryByText(/that code didn't match/i)).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/recovery code/i)).toBeInTheDocument();
+  });
+
   it("'Use a different account' abandons the challenge back to credentials", async () => {
     loginMock.mockRejectedValueOnce(totpRequired());
     render(<LoginPage />);

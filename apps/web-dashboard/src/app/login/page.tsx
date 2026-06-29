@@ -126,10 +126,12 @@ function LoginPageInner() {
     if (mfaRequired) {
       const code = mfaMode === "recovery" ? recoveryCode.trim() : totpCode.trim();
       if (!code) {
+        // Distinct from the panel's standing help subtext (which already says
+        // where the code comes from) — a short prompt to act, not a repeat.
         setError(
           mfaMode === "recovery"
-            ? "Enter one of your saved recovery codes."
-            : "Enter the 6-digit code from your authenticator app.",
+            ? "Enter a recovery code to continue."
+            : "Enter the 6-digit code to continue.",
         );
         return;
       }
@@ -193,9 +195,13 @@ function LoginPageInner() {
   }
 
   // Switch between the authenticator code and a saved recovery code. Clear any
-  // stale "didn't match" error and the other field so the panel reads cleanly.
+  // stale "didn't match" error AND both code fields so the panel reads cleanly
+  // — a half-typed code from the previous mode shouldn't linger (or silently
+  // re-present a just-rejected code when toggling back).
   function handleToggleMfaMode() {
     setMfaMode((m) => (m === "totp" ? "recovery" : "totp"));
+    setTotpCode("");
+    setRecoveryCode("");
     setError(null);
   }
 
