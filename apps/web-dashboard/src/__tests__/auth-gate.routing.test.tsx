@@ -78,6 +78,44 @@ describe("AuthGate — routes off /setup/state (PR #372)", () => {
     expect(replaceMock).toHaveBeenCalledWith("/login?from=setup");
   });
 
+  it("renders /help during setup (unclaimed) instead of bouncing to /setup (WARP-930)", () => {
+    pathnameValue = "/help";
+    setAuth({
+      user: null,
+      isLoading: false,
+      setupState: { appliance: "unclaimed", setupStep: "org", userTourCompleted: false },
+    });
+    const { container } = render(<AuthGate>help content</AuthGate>);
+    expect(replaceMock).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("help content");
+  });
+
+  it("renders /help mid-wizard for the signed-in owner without bouncing (WARP-930)", () => {
+    pathnameValue = "/help";
+    setAuth({
+      user: { id: "u1", username: "ada", displayName: "Ada", role: "owner" },
+      isLoading: false,
+      setupState: { appliance: "unclaimed", setupStep: "org", userTourCompleted: false },
+    });
+    const { container } = render(<AuthGate>help content</AuthGate>);
+    expect(replaceMock).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("help content");
+  });
+
+  it("does NOT early-render /help to an anonymous visitor on a CLAIMED box (redirects to login) (WARP-930)", () => {
+    pathnameValue = "/help";
+    setAuth({
+      user: null,
+      isLoading: false,
+      setupState: { appliance: "ready", setupStep: "done", userTourCompleted: true },
+    });
+    const { container } = render(<AuthGate>help content</AuthGate>);
+    // The standalone help render is gated on applianceUnclaimed, so a claimed-box
+    // logged-out visitor falls through to the login redirect, not an early paint.
+    expect(container.textContent).not.toContain("help content");
+    expect(replaceMock).toHaveBeenCalledWith("/login");
+  });
+
   it("waits while loading — no redirect decided yet", () => {
     setAuth({ user: null, isLoading: true, setupState: null });
     render(<AuthGate>child</AuthGate>);

@@ -14,6 +14,7 @@ import {
 // binding is fully initialized by the time it's called. Same shape as the
 // many components that import from both ./auth and ./api.
 import { patchSetupReady, patchTourCompleted } from "./api";
+import { HELP_PATH } from "./routing";
 
 export interface AuthUser {
   id: string;
@@ -343,10 +344,14 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
   // NOT hard-navigate to /login — AuthGate routes those contextually
   // client-side (unclaimed -> /setup). Without this guard every anonymous
   // cold load of /setup detoured through /login with a full page reload
-  // (PR #549 review). Mirrors AuthGate's PUBLIC_PATHS.
-  const onPublicPage = ["/login", "/setup"].some((p) =>
-    window.location.pathname.startsWith(p),
-  );
+  // (PR #549 review). Mirrors AuthGate's PUBLIC_PATHS + the /help semi-public
+  // path added by WARP-930 (AuthGate now renders /help standalone without a
+  // session; without this mirror, authFetch 401s from ShellPage would hard-
+  // navigate anonymous /help visitors to /login, destroying wizard context).
+  const onPublicPage =
+    ["/login", "/setup"].some((p) =>
+      window.location.pathname.startsWith(p),
+    ) || window.location.pathname === HELP_PATH;
   if (!onPublicPage) {
     window.location.assign(
       `/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`,
