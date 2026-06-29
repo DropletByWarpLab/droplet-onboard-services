@@ -395,6 +395,19 @@ export function createMatterRouter(prisma: PrismaClient): Router {
           .json({ error: "Missing 'command' in request body" });
       }
 
+      // Validate HVAC mode before the safety-tier evaluator — unsupported values
+      // bypass the Tier-2 gate (only 'off' triggers Tier-2) and crash at the
+      // controller with a 500 instead of a 400.
+      if (command === "set_hvac_mode") {
+        const VALID_HVAC_MODES = ["off", "heat", "cool", "auto"] as const;
+        const mode = (data as Record<string, unknown> | undefined)?.mode;
+        if (typeof mode !== "string" || !(VALID_HVAC_MODES as readonly string[]).includes(mode)) {
+          return res.status(400).json({
+            error: `'data.mode' must be one of: ${VALID_HVAC_MODES.join(", ")}`,
+          });
+        }
+      }
+
       // Resolve device category for safety classification
       const device = await getDevice(req.params.nodeId);
       if (!device)

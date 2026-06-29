@@ -269,6 +269,7 @@ export async function confirmCommand(
     entityId: pending.entityId,
     domain: pending.domain,
     service: pending.service,
+    command: pending.command,
     data: pending.data,
     tier: pending.tier,
     confirmed: true,
@@ -276,7 +277,7 @@ export async function confirmCommand(
   });
 
   logger.info(
-    { entityId: pending.entityId, service: pending.service },
+    { entityId: pending.entityId, service: pending.service, command: pending.command },
     "Command confirmed and executing"
   );
 
@@ -317,6 +318,8 @@ async function logCommand(
     entityId: string;
     domain: string;
     service: string;
+    /** The concrete dispatched command when it differs from service (e.g. set_hvac_mode vs set_mode). */
+    command?: string;
     data?: Record<string, unknown>;
     tier: number;
     confirmed: boolean;
@@ -325,13 +328,19 @@ async function logCommand(
   }
 ): Promise<void> {
   try {
+    // When command differs from service (KAN-7+), fold it into the data JSON so
+    // the audit record captures the concrete sidecar call without a schema migration.
+    const auditData =
+      entry.command && entry.command !== entry.service
+        ? { ...(entry.data ?? {}), _command: entry.command }
+        : entry.data;
     await prisma.commandAuditLog.create({
       data: {
         userId: entry.userId || null,
         entityId: entry.entityId,
         domain: entry.domain,
         service: entry.service,
-        data: entry.data ? JSON.parse(JSON.stringify(entry.data)) : undefined,
+        data: auditData ? JSON.parse(JSON.stringify(auditData)) : undefined,
         tier: entry.tier,
         confirmed: entry.confirmed,
         blocked: entry.blocked,
