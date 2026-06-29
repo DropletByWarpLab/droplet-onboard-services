@@ -90,8 +90,17 @@ export function LearnMoreCard({
           {children}
         </div>
         {helpAnchor && (
+          // WARP-930 — open the help page in a NEW TAB. During setup the wizard
+          // owns the current tab; a same-tab navigation to /help remounts the
+          // wizard tree and wipes the in-progress step's fields (the "cleared
+          // out text" symptom on the Workspace step). A new tab keeps the
+          // half-filled step intact. (The ExternalLink glyph already signals
+          // that it leaves the page; AuthGate renders /help during setup.)
           <a
             href={`/help#${helpAnchor}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="Learn more (opens in a new tab)"
             className="type-footnote text-accent hover:underline mt-3 inline-flex items-center gap-1"
           >
             Learn more

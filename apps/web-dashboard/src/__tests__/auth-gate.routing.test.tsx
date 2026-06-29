@@ -78,6 +78,30 @@ describe("AuthGate — routes off /setup/state (PR #372)", () => {
     expect(replaceMock).toHaveBeenCalledWith("/login?from=setup");
   });
 
+  it("renders /help during setup (unclaimed) instead of bouncing to /setup (WARP-930)", () => {
+    pathnameValue = "/help";
+    setAuth({
+      user: null,
+      isLoading: false,
+      setupState: { appliance: "unclaimed", setupStep: "org", userTourCompleted: false },
+    });
+    const { container } = render(<AuthGate>help content</AuthGate>);
+    expect(replaceMock).not.toHaveBeenCalledWith("/setup");
+    expect(container.textContent).toContain("help content");
+  });
+
+  it("renders /help mid-wizard for the signed-in owner without bouncing (WARP-930)", () => {
+    pathnameValue = "/help";
+    setAuth({
+      user: { id: "u1", username: "ada", displayName: "Ada", role: "owner" },
+      isLoading: false,
+      setupState: { appliance: "unclaimed", setupStep: "org", userTourCompleted: false },
+    });
+    const { container } = render(<AuthGate>help content</AuthGate>);
+    expect(replaceMock).not.toHaveBeenCalledWith("/setup");
+    expect(container.textContent).toContain("help content");
+  });
+
   it("waits while loading — no redirect decided yet", () => {
     setAuth({ user: null, isLoading: true, setupState: null });
     render(<AuthGate>child</AuthGate>);
