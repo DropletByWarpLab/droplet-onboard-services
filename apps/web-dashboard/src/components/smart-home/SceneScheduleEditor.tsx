@@ -10,7 +10,6 @@ import {
   buildSceneRrule,
   describeLocalSchedule,
   dayLabel,
-  formatLocalTime,
   isDaily,
   localTimezoneLabel,
   type DayCode,
@@ -21,9 +20,12 @@ import { describeRrule } from "@/lib/rrule-describe";
  * Schedule a routine (Scene) on a recurring cadence — owner/admin only.
  * Wired to GET/POST/PATCH/DELETE /api/scenes/:id/schedules via
  * useSceneSchedules. The owner picks day chips + a local time; the editor
- * converts that LOCAL wall-clock to a UTC RRULE (the orchestrator's parser
- * is UTC-only) and says so plainly, because a "7am" routine that silently
- * fired at 7am UTC would be the single biggest trap here.
+ * stores that LOCAL wall-clock verbatim plus the browser's IANA timezone
+ * (KAN-6). The orchestrator recomputes each fire against that zone, so a
+ * "7am" routine keeps firing at 7am local across a daylight-saving change —
+ * the pre-KAN-6 UTC-only behaviour drifted it an hour, which is why the old
+ * editor carried a DST caveat. That caveat is gone now; the copy just names
+ * the zone.
  *
  * Motion is restraint-first: the Dialog owns the open/close transition and
  * the ToggleSwitch its own 200ms flip — nothing else animates. Chip
@@ -77,7 +79,10 @@ export function SceneScheduleEditor({
     setSaving(true);
     setFormError(null);
     try {
-      await create(built.rrule);
+      // KAN-6 — send the wall-clock rrule AND the browser's IANA zone so the
+      // server stores the zone and recomputes each fire against it (no DST
+      // drift). The orchestrator defaults to UTC if timezone is omitted.
+      await create(built.rrule, built.timezone);
       // Reset to the default cadence for the next add.
       setDays([]);
       setTime("07:00");
@@ -173,18 +178,18 @@ export function SceneScheduleEditor({
             </button>
           </div>
 
-          {/* UTC honesty line — the single most important affordance here. */}
+          {/* Confirmation line — leads with what the routine will do, then
+              names the zone. KAN-6 stores the zone per row, so this fires at
+              the chosen local time and stays correct across daylight-saving
+              changes; no caveat needed. */}
           <p className="flex items-start gap-2 type-caption-1 text-label-tertiary">
             <Clock size={13} className="mt-0.5 flex-shrink-0" aria-hidden />
             <span>
-              {built ? describeLocalSchedule(draft) : "Pick a valid time"} —{" "}
-              shown in <strong className="font-medium text-label-secondary">{tz}</strong> (your
-              local time). Saved in UTC, so it fires at{" "}
-              <strong className="font-medium text-label-secondary">
-                {formatLocalTime(hour, minute)}
-              </strong>{" "}
-              now — after a daylight-saving change the local time may shift by an
-              hour.
+              <span className="text-label-secondary">
+                {built ? describeLocalSchedule(draft) : "Pick a valid time"}
+              </span>{" "}
+              in <strong className="font-medium text-label-secondary">{tz}</strong> (your
+              local time).
             </span>
           </p>
 
@@ -226,7 +231,8 @@ export function SceneScheduleEditor({
               {schedules.map((s) => {
                 let summary: string;
                 try {
-                  summary = describeRrule(s.rrule);
+                  // KAN-6 — the rrule's wall-clock is local to s.timezone.
+                  summary = describeRrule(s.rrule, s.timezone);
                 } catch {
                   summary = PARSE_FAIL;
                 }

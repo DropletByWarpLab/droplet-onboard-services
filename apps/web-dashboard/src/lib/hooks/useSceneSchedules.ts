@@ -30,8 +30,12 @@ export function useSceneSchedules(sceneId: string | null) {
     isLoading,
     error,
     refresh: () => mutate(),
-    create: async (rrule: string) => {
-      const schedule = await createSceneSchedule(sceneId as string, rrule);
+    create: async (rrule: string, timezone?: string) => {
+      const schedule = await createSceneSchedule(
+        sceneId as string,
+        rrule,
+        timezone,
+      );
       await mutate();
       return schedule;
     },
