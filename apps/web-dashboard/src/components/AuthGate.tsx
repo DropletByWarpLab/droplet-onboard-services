@@ -6,6 +6,7 @@ import { useAuth } from "@/lib/auth";
 import { Sidebar } from "@/components/Sidebar";
 import { DropletMark } from "@/components/DropletMark";
 import { HelpLauncher } from "@/components/help/HelpLauncher";
+import { HELP_PATH } from "@/lib/routing";
 
 const PUBLIC_PATHS = ["/setup", "/login"];
 
@@ -71,7 +72,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
     if (
       applianceUnclaimed &&
       pathname !== "/setup" &&
-      pathname !== "/help"
+      pathname !== HELP_PATH
     ) {
       router.replace("/setup");
       return;
@@ -270,7 +271,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
   // visitor hits the return-null-while-redirecting path (no early help paint).
   // Gated on `applianceUnclaimed` (not `!user`) so a claimed-box logged-out
   // visitor doesn't briefly see the manual before the /login redirect.
-  if (pathname === "/help" && applianceUnclaimed) {
+  if (pathname === HELP_PATH && applianceUnclaimed) {
     return <>{children}</>;
   }
 

@@ -14,6 +14,7 @@ import {
 // binding is fully initialized by the time it's called. Same shape as the
 // many components that import from both ./auth and ./api.
 import { patchSetupReady, patchTourCompleted } from "./api";
+import { HELP_PATH } from "./routing";
 
 export interface AuthUser {
   id: string;
@@ -308,7 +309,7 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
   const onPublicPage =
     ["/login", "/setup"].some((p) =>
       window.location.pathname.startsWith(p),
-    ) || window.location.pathname === "/help";
+    ) || window.location.pathname === HELP_PATH;
   if (!onPublicPage) {
     window.location.assign(
       `/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`,
