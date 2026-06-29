@@ -134,6 +134,13 @@ async function advanceToDiscovery() {
       screen.getByRole("button", { name: /skip — no remote access/i }),
     );
   });
+  // WARP-933 — Storage now RENDERS (no silent auto-skip) between address and
+  // discovery; skip it to land on the discovery surface these tests exercise.
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+    fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+  });
 }
 
 describe("setup discovery polling bounds (WARP-298)", () => {

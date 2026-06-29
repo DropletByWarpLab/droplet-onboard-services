@@ -222,7 +222,7 @@ describe("setup network split — wifi → address integration (Onboarding-Flow 
     ).toBeInTheDocument();
   });
 
-  it("skipping the Address step advances past it to storage → discovery", async () => {
+  it("skipping the Address step advances past it to the storage step", async () => {
     render(<SetupPage />);
     await advanceToWifi();
     await skipWifiToAddress();
@@ -232,12 +232,14 @@ describe("setup network split — wifi → address integration (Onboarding-Flow 
         screen.getByRole("button", { name: /skip — no remote access/i }),
       );
     });
-    // storage auto-skips on an empty drive list → discovery surface is shown.
+    // WARP-933 — storage now RENDERS (no silent auto-skip), so skipping address
+    // lands on the visible storage step (empty-drive state) rather than jumping
+    // straight to discovery.
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(screen.getByText(/discovering your devices/i)).toBeInTheDocument();
+    expect(screen.getByText(/no extra drives to set up/i)).toBeInTheDocument();
   });
 
   it("persists both sub-steps as the existing `internet` SetupStep", async () => {

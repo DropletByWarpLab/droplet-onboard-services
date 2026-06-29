@@ -63,6 +63,8 @@ vi.mock("@/lib/api", () => ({
   updateDriveLabel: vi.fn(),
   fetchDiscoveredCameras: vi.fn(async () => []),
   acceptDiscoveredCamera: vi.fn(),
+  fetchCameras: vi.fn(async () => []),
+  removeCamera: vi.fn(async () => undefined),
   fetchVpnStatus: vi.fn(async () => ({
     configured: false,
     endpointConfigured: false,
@@ -133,18 +135,15 @@ async function advanceToAi() {
       screen.getByRole("button", { name: /skip — no remote access/i }),
     );
   });
-  // Storage auto-skip → Discovery → skip → Cameras auto-skip → VPN
-  // preCheck → skip → AI.
-  await act(async () => {
-    await Promise.resolve();
-    await Promise.resolve();
-    fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
-  });
-  await act(async () => {
-    await Promise.resolve();
-    await Promise.resolve();
-    fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
-  });
+  // WARP-933 — Storage and Cameras now RENDER (no silent auto-skip). Skip each:
+  // storage → discovery → cameras → VPN preCheck → AI.
+  for (let i = 0; i < 4; i++) {
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
+  }
   // Let AiStep's fetchModels effect resolve.
   await act(async () => {
     await Promise.resolve();

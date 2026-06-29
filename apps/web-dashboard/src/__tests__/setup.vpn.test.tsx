@@ -64,6 +64,8 @@ vi.mock("@/lib/api", () => ({
   updateDriveLabel: vi.fn(),
   fetchDiscoveredCameras: vi.fn(async () => []),
   acceptDiscoveredCamera: vi.fn(),
+  fetchCameras: vi.fn(async () => []),
+  removeCamera: vi.fn(async () => undefined),
   fetchVpnStatus: () => fetchVpnStatusMock(),
   fetchVpnPeers: vi.fn(async () => ({ peers: [] })),
   createVpnPeer: (label: string) => createVpnPeerMock(label),
@@ -133,12 +135,15 @@ async function advanceToVpn() {
       screen.getByRole("button", { name: /skip — no remote access/i }),
     );
   });
-  // Storage auto-skip → Discovery → skip → Cameras auto-skip → VPN.
-  await act(async () => {
-    await Promise.resolve();
-    await Promise.resolve();
-    fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
-  });
+  // WARP-933 — Storage and Cameras now RENDER (no silent auto-skip). Skip each:
+  // storage → discovery → cameras → VPN.
+  for (let i = 0; i < 3; i++) {
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
+  }
   // Let VpnStep's fetchVpnStatus effect resolve.
   await act(async () => {
     await Promise.resolve();
