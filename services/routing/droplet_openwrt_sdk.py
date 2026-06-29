@@ -1200,7 +1200,10 @@ class FirewallApi:
         without miniupnpd raises (no ``upnpd`` config to write).
         """
         flag = "1" if enabled else "0"
-        self._r.uci.set("upnpd", "config", {"enable_upnp": flag, "enable_natpmp": flag})
+        # Also manage the procd `enabled` gate: the uci-defaults seed now ships
+        # enabled='0' (avoids crash-loop on fresh containers without interfaces),
+        # so set_upnp(True) must flip it to '1' to start the daemon.
+        self._r.uci.set("upnpd", "config", {"enabled": flag, "enable_upnp": flag, "enable_natpmp": flag})
         # uci.apply commits the pending change and triggers ucitrack to reload
         # miniupnpd — exec_service("miniupnpd","restart") maps to file.exec which
         # the droplet-ai ACL does not grant.
