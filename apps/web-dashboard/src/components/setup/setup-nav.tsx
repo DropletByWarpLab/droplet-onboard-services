@@ -28,6 +28,16 @@ export interface SetupNav {
    */
   maxReachedIdx: number;
   /**
+   * WARP-929 — the LOWEST step index the rail/Back may target. Steps before it
+   * (welcome → claim → account → workspace) are a one-way floor: once passed,
+   * the customer can't navigate back to them, so a created owner / claimed
+   * appliance can never be un-done from the wizard. `StepShell` hides Back and
+   * makes the rail rows static for any index at or below this floor. Optional
+   * (and defaulted to 0 in StepShell) so a step rendered without the page
+   * provider behaves exactly as before.
+   */
+  firstNavigableIdx?: number;
+  /**
    * Step back one VISITED step (the Back button). Pops the page's visited
    * stack, which skips hardware steps that auto-skipped themselves on the way
    * forward (storage/cameras with nothing to show) — so Back never lands on a

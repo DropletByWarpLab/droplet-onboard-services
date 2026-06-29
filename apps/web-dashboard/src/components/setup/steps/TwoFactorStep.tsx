@@ -215,6 +215,11 @@ export function TwoFactorStep({
   return (
     <StepShell
       current="twofactor"
+      // WARP-929 (T4) — the one-time recovery codes show once; going back from
+      // here would strand the user on a now-2FA-enabled account with no codes
+      // (and the in-wizard sign-in can't supply a TOTP code). The confirmed
+      // "I've saved them — continue" is the only way off.
+      hideBack
       title="Save your recovery codes"
       subtitle="Each code works once if you ever lose your authenticator. Store them somewhere safe — you won't see them again."
       icon={

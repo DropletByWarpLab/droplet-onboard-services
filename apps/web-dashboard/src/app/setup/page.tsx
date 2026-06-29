@@ -275,7 +275,17 @@ function SetupWizard({ initialStep }: { initialStep: Step }) {
   }
 
   return (
-    <SetupNavProvider value={{ navigate: setStep, maxReachedIdx, back }}>
+    <SetupNavProvider
+      value={{
+        navigate: setStep,
+        maxReachedIdx,
+        back,
+        // WARP-929 — the Workspace step is the navigation floor: claim/account
+        // (and welcome) can't be revisited, so the appliance can't be unclaimed
+        // and the owner can't be re-created/abandoned from the wizard.
+        firstNavigableIdx: STEPS.indexOf("org"),
+      }}
+    >
       {step === "welcome" && (
         <WelcomeStep onContinue={() => setStep("claim")} />
       )}
