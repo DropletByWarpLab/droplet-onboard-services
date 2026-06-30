@@ -195,4 +195,44 @@ describe("StepShell viewport-lock (WARP-820)", () => {
       screen.getByRole("button", { name: /continue/i }),
     ).toBeInTheDocument();
   });
+
+  it("wires a non-empty ariaDescribedBy onto the primary button", () => {
+    render(
+      <StepShell
+        current="storage"
+        title="Choose your storage"
+        primary={{
+          label: "Continue",
+          onClick: () => {},
+          disabled: true,
+          ariaDescribedBy: "why-disabled",
+        }}
+      >
+        body
+      </StepShell>,
+    );
+    expect(screen.getByRole("button", { name: /continue/i })).toHaveAttribute(
+      "aria-describedby",
+      "why-disabled",
+    );
+  });
+
+  it("omits aria-describedby for an empty/whitespace ariaDescribedBy (no invalid empty IDREF)", () => {
+    render(
+      <StepShell
+        current="storage"
+        title="Choose your storage"
+        primary={{
+          label: "Continue",
+          onClick: () => {},
+          ariaDescribedBy: "   ",
+        }}
+      >
+        body
+      </StepShell>,
+    );
+    expect(
+      screen.getByRole("button", { name: /continue/i }),
+    ).not.toHaveAttribute("aria-describedby");
+  });
 });

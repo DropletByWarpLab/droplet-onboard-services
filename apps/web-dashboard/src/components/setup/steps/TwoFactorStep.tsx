@@ -33,6 +33,14 @@ type Phase = "enroll" | "codes";
 
 const CODE_RE = /^\d{6}$/;
 
+// Stable ids so the "saved my codes" checkbox can point a screen reader at the
+// explanatory hint via aria-describedby. The checkbox is the actionable gate,
+// so the description lives there (not on the disabled continue button, whose
+// aria-describedby some screen readers suppress). Module-level constants keep
+// the markup and the wiring from drifting apart.
+const SAVED_CHECKBOX_ID = "totp-saved-confirm";
+const SAVED_HINT_ID = "totp-saved-hint";
+
 export function TwoFactorStep({
   onComplete,
   onSkip,
@@ -328,15 +336,49 @@ export function TwoFactorStep({
           {copied ? "Copied" : "Copy codes"}
         </button>
 
-        <label className="flex items-start gap-2 type-footnote text-label-secondary cursor-pointer">
-          <input
-            type="checkbox"
-            checked={savedConfirmed}
-            onChange={(e) => setSavedConfirmed(e.target.checked)}
-            className="mt-0.5 accent-accent"
-          />
-          <span>I&apos;ve saved these recovery codes somewhere safe.</span>
-        </label>
+        <div className="space-y-1.5">
+          <label
+            htmlFor={SAVED_CHECKBOX_ID}
+            className="flex items-start gap-2 type-footnote text-label-secondary cursor-pointer"
+          >
+            <input
+              id={SAVED_CHECKBOX_ID}
+              type="checkbox"
+              checked={savedConfirmed}
+              onChange={(e) => setSavedConfirmed(e.target.checked)}
+              aria-describedby={savedConfirmed ? undefined : SAVED_HINT_ID}
+              className="mt-0.5 accent-accent"
+            />
+            <span>I&apos;ve saved these recovery codes somewhere safe.</span>
+          </label>
+
+          {/* The "I've saved them — continue" button is gated on the box above.
+              Without this hint, a user who skipped the checkbox got no clue why
+              Continue stayed greyed out. While unticked it reads as a prominent
+              accent line (the gate is a required step, not a dead button); once
+              ticked it flips to a quiet confirmation so a browse-mode screen
+              reader never hears the stale imperative as fact. Tokens only — no
+              freelance colours. */}
+          <p
+            id={SAVED_HINT_ID}
+            className={`pl-6 type-caption-1 ${
+              savedConfirmed ? "text-label-tertiary" : "text-accent font-medium"
+            }`}
+          >
+            {savedConfirmed
+              ? "Saved — you can continue."
+              : "Tick the box above to confirm you’ve stored these codes, then continue."}
+          </p>
+
+          {/* Polite live region: when the box is ticked the visible hint and the
+              now-enabled button are not announced on their own, so without this
+              an AT user gets no feedback that Continue is unlocked (WCAG 4.1.3).
+              Kept off-screen and separate from the describedby text so focusing
+              the checkbox doesn't double-read. */}
+          <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+            {savedConfirmed ? "Recovery codes saved. Continue is now active." : ""}
+          </span>
+        </div>
       </div>
     </StepShell>
   );
