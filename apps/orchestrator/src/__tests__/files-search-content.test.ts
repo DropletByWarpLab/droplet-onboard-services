@@ -65,6 +65,46 @@ vi.mock("../services/file-search.service.js", () => ({
 }));
 
 // ─────────────────────────────────────────────────────────────────────────
+// WARP-940 — keyword mode unions a Nextcloud NAME match (substring) with the
+// lexical content hits. Spread the original module so every other route
+// registered in createApp keeps its real client; override only ncSearchFiles
+// so we can observe the name-search arm without a live Nextcloud.
+// ─────────────────────────────────────────────────────────────────────────
+const { ncSearchFilesSpy } = vi.hoisted(() => ({
+  ncSearchFilesSpy: vi.fn(),
+}));
+
+vi.mock("../services/nextcloud.client.js", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../services/nextcloud.client.js")>();
+  return {
+    ...actual,
+    ncSearchFiles: (...args: unknown[]) => ncSearchFilesSpy(...args),
+  };
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// WARP-940 — the name arm resolves a per-user Nextcloud token via
+// `resolveNcToken`. Stub it so we can drive the "missing NC session" path
+// (returns null → getToken throws MissingNcTokenError → 401) independently
+// of a live cookie/Redis. Default mirrors the AUTH_ENABLED=false dev token.
+// ─────────────────────────────────────────────────────────────────────────
+const { resolveNcTokenSpy } = vi.hoisted(() => ({
+  resolveNcTokenSpy: vi.fn(),
+}));
+
+vi.mock("../services/nextcloud-session.service.js", async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import("../services/nextcloud-session.service.js")
+    >();
+  return {
+    ...actual,
+    resolveNcToken: (...args: unknown[]) => resolveNcTokenSpy(...args),
+  };
+});
+
+// ─────────────────────────────────────────────────────────────────────────
 // Mock the cache so we can assert key isolation across modes. The real
 // cache.service no-ops when REDIS_URL is unset, so a spy is the only way
 // to observe the composed cache key.
@@ -138,10 +178,16 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
     queryRawUnsafeMock.mockReset();
     cacheGetSpy.mockReset();
     cacheSetSpy.mockReset();
+    ncSearchFilesSpy.mockReset();
     // Default: cache miss + accepted write, gateway up.
     cacheGetSpy.mockResolvedValue(null);
     cacheSetSpy.mockResolvedValue(undefined);
     isGrpcAvailableSpy.mockReturnValue(true);
+    // Default: no name matches — keep existing content-only specs unchanged.
+    ncSearchFilesSpy.mockResolvedValue([]);
+    resolveNcTokenSpy.mockReset();
+    // Default: a valid NC session token is present (mirrors dev-mode).
+    resolveNcTokenSpy.mockResolvedValue("dev-mode-token");
   });
 
   // ── 1. keyword calls searchByLexical, never the gRPC embed ──────────────
@@ -287,5 +333,181 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
     const params = searchByLexicalSpy.mock.calls[0][1];
     // AUTH_ENABLED=false → stub user "dev"
     expect(params.userId).toBe("dev");
+  });
+
+  // ── WARP-940: keyword mode must also match by file NAME ──────────────────
+  //
+  // The reported bug: searching "const" returns nothing under Keyword even
+  // though a "Construction Consulting Proposal" PDF is in view. Keyword was
+  // wired ONLY to the lexical content engine (searchByLexical over
+  // FileContentChunk.text_tsv), which (a) never looks at the file name and
+  // (b) is whole-lexeme FTS so "const" ≠ "construction" even in content. The
+  // Nextcloud name arm (ncSearchFiles) already does a `%substring%` match, so
+  // keyword unions it in to honour the AC: "files whose name and/or content
+  // contain the term".
+
+  it("keyword surfaces a file matched by NAME even when content has no lexical hit", async () => {
+    // No content hits — mirrors a PDF whose body never tokenises to "const".
+    searchByLexicalSpy.mockResolvedValueOnce([]);
+    // Nextcloud name search finds the file by substring on its display name.
+    ncSearchFilesSpy.mockResolvedValueOnce([
+      {
+        name: "Construction Consulting Proposal.pdf",
+        path: "/Docs/Construction Consulting Proposal.pdf",
+        isDirectory: false,
+        size: 12345,
+        mimeType: "application/pdf",
+        modifiedAt: "2026-06-01T00:00:00.000Z",
+      },
+    ]);
+
+    const res = await request(app).get(
+      "/api/files/search/content?q=const&mode=keyword",
+    );
+
+    expect(res.status).toBe(200);
+    expect(ncSearchFilesSpy).toHaveBeenCalledTimes(1);
+    const paths = res.body.results.map((r: { path: string }) => r.path);
+    expect(paths).toContain("/Docs/Construction Consulting Proposal.pdf");
+  });
+
+  it("keyword unions name + content hits and dedupes a file matched by both", async () => {
+    // Same file matched by content AND name → must appear exactly once.
+    searchByLexicalSpy.mockResolvedValueOnce([
+      {
+        path: "/Docs/Construction Consulting Proposal.pdf",
+        score: 0.9,
+        snippet: "…construction phase scheduling…",
+        source: "nextcloud",
+        chunkIdx: 0,
+      },
+    ]);
+    ncSearchFilesSpy.mockResolvedValueOnce([
+      {
+        name: "Construction Consulting Proposal.pdf",
+        path: "/Docs/Construction Consulting Proposal.pdf",
+        isDirectory: false,
+        size: 1,
+        mimeType: "application/pdf",
+        modifiedAt: "2026-06-01T00:00:00.000Z",
+      },
+      {
+        name: "constants.txt",
+        path: "/Docs/constants.txt",
+        isDirectory: false,
+        size: 2,
+        mimeType: "text/plain",
+        modifiedAt: "2026-06-01T00:00:00.000Z",
+      },
+    ]);
+
+    const res = await request(app).get(
+      "/api/files/search/content?q=const&mode=keyword&limit=20",
+    );
+
+    expect(res.status).toBe(200);
+    const paths = res.body.results.map((r: { path: string }) => r.path);
+    // The PDF (matched by both arms) appears once; the name-only file is added.
+    expect(paths.filter((p: string) => p === "/Docs/Construction Consulting Proposal.pdf")).toHaveLength(1);
+    expect(paths).toContain("/Docs/constants.txt");
+  });
+
+  it("keyword name arm targets file names (directories excluded) for the authed user", async () => {
+    searchByLexicalSpy.mockResolvedValueOnce([]);
+    ncSearchFilesSpy.mockResolvedValueOnce([]);
+    await request(app).get("/api/files/search/content?q=const&mode=keyword");
+    expect(ncSearchFilesSpy).toHaveBeenCalledTimes(1);
+    // ncSearchFiles(token, user, opts) — user + query forwarded.
+    const call = ncSearchFilesSpy.mock.calls[0];
+    expect(call[1]).toBe("dev"); // AUTH_ENABLED=false → stub user
+    expect(call[2]).toMatchObject({ query: "const" });
+    // WARP-940: over-fetch the name arm too. parseMultiStatus sorts dirs
+    // first and nameHitsToResults drops them, so without headroom a
+    // directory-heavy match yields 0 file results. Mirror the content arm's
+    // CHUNKS_PER_FILE_FACTOR (default limit 20 → 100).
+    expect(call[2].limit).toBe(20 * 5);
+  });
+
+  // ── WARP-940 hardening (pr-reviewer findings) ───────────────────────────
+
+  it("does NOT poison the cache when the name arm degrades (Nextcloud down)", async () => {
+    // Content arm has fewer than `limit` hits, so the name arm runs and fails.
+    searchByLexicalSpy.mockResolvedValueOnce([
+      { path: "/Docs/notes.txt", score: 0.7, snippet: "alpha", source: "nextcloud", chunkIdx: 0 },
+    ]);
+    ncSearchFilesSpy.mockRejectedValueOnce(new Error("nextcloud unreachable"));
+
+    const res = await request(app).get(
+      "/api/files/search/content?q=alpha&mode=keyword&limit=20",
+    );
+
+    // Request still succeeds (content-only degrade) …
+    expect(res.status).toBe(200);
+    expect(res.body.results.map((r: { path: string }) => r.path)).toContain(
+      "/Docs/notes.txt",
+    );
+    // … but the degraded, content-only union must NOT be written to the 60s
+    // cache, or it would serve stale results after Nextcloud recovers.
+    expect(cacheSetSpy).not.toHaveBeenCalled();
+  });
+
+  it("re-throws a missing Nextcloud session as 401 (auth failure ≠ degrade)", async () => {
+    searchByLexicalSpy.mockResolvedValueOnce([
+      { path: "/Docs/notes.txt", score: 0.7, snippet: "alpha", source: "nextcloud", chunkIdx: 0 },
+    ]);
+    // No NC token → getToken throws MissingNcTokenError. This is an auth
+    // failure, not an outage: it must propagate (401), not silently degrade.
+    resolveNcTokenSpy.mockResolvedValueOnce(null);
+
+    const res = await request(app).get(
+      "/api/files/search/content?q=alpha&mode=keyword&limit=20",
+    );
+
+    expect(res.status).toBe(401);
+    // A 401 must never be cached.
+    expect(cacheSetSpy).not.toHaveBeenCalled();
+    // The name arm never fired — the token resolution failed first.
+    expect(ncSearchFilesSpy).not.toHaveBeenCalled();
+  });
+
+  it("skips the name arm entirely when content hits already fill the limit", async () => {
+    // limit=2 and the content arm returns 2 distinct files → name arm would
+    // only produce results that get discarded, so don't pay the WebDAV cost.
+    searchByLexicalSpy.mockResolvedValueOnce([
+      { path: "/Docs/a.txt", score: 0.9, snippet: "a", source: "nextcloud", chunkIdx: 0 },
+      { path: "/Docs/b.txt", score: 0.8, snippet: "b", source: "nextcloud", chunkIdx: 0 },
+    ]);
+
+    const res = await request(app).get(
+      "/api/files/search/content?q=const&mode=keyword&limit=2",
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body.results).toHaveLength(2);
+    expect(ncSearchFilesSpy).not.toHaveBeenCalled();
+  });
+
+  it("keyword still returns content hits when the name arm (Nextcloud) is down", async () => {
+    // Lexical content arm works gateway/Nextcloud-down; a failing name search
+    // must NOT take down the whole keyword response.
+    searchByLexicalSpy.mockResolvedValueOnce([
+      { path: "/Docs/notes.txt", score: 0.7, snippet: "alpha", source: "nextcloud", chunkIdx: 0 },
+    ]);
+    ncSearchFilesSpy.mockRejectedValueOnce(new Error("nextcloud unreachable"));
+
+    const res = await request(app).get(
+      "/api/files/search/content?q=alpha&mode=keyword",
+    );
+
+    expect(res.status).toBe(200);
+    const paths = res.body.results.map((r: { path: string }) => r.path);
+    expect(paths).toContain("/Docs/notes.txt");
+  });
+
+  it("semantic mode does NOT run the name arm (keyword-only behaviour)", async () => {
+    grpcEmbedSpy.mockResolvedValueOnce([[0.1, 0.2, 0.3]]);
+    queryRawUnsafeMock.mockResolvedValueOnce([{ path: "/Docs/s.txt", score: 0.9, text: "s" }]);
+    await request(app).get("/api/files/search/content?q=same&mode=semantic");
+    expect(ncSearchFilesSpy).not.toHaveBeenCalled();
   });
 });

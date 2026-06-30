@@ -221,6 +221,58 @@ function dedupeHitsPerFile(
 }
 
 /**
+ * WARP-940 — keyword score floor for files matched by NAME only.
+ *
+ * `searchByLexical` returns `ts_rank_cd` scores (small positive floats,
+ * typically < 1). A pure name match has no lexical relevance score, so we
+ * give it a fixed sentinel that sorts BELOW any genuine content hit but
+ * ABOVE zero — the file is clearly relevant (its name contains the term),
+ * just less precisely ranked than a body match. The frontend renders the
+ * score as a percentage, so a small non-zero value reads as "matched".
+ */
+const KEYWORD_NAME_MATCH_SCORE = 0.01;
+
+/**
+ * WARP-940 — fold Nextcloud name-search results (`FileEntryInfo[]`) into the
+ * keyword content-search result shape. Directories are dropped (the Files
+ * search popover navigates to files); each surviving file gets the
+ * name-match sentinel score and its display name as the snippet text so the
+ * popover has something to render.
+ */
+function nameHitsToResults(
+  files: FileEntryInfo[],
+): Array<{ path: string; score: number; text: string }> {
+  return files
+    .filter((f) => !f.isDirectory)
+    .map((f) => ({
+      path: f.path,
+      score: KEYWORD_NAME_MATCH_SCORE,
+      text: f.name,
+    }));
+}
+
+/**
+ * WARP-940 — union content hits (already deduped, score DESC) with name-only
+ * hits. A file matched by BOTH arms keeps its content hit (higher score +
+ * real snippet); name-only files are appended in order. Clamped to `limit`.
+ */
+function unionContentAndNameHits(
+  contentResults: Array<{ path: string; score: number; text: string }>,
+  nameResults: Array<{ path: string; score: number; text: string }>,
+  limit: number,
+): Array<{ path: string; score: number; text: string }> {
+  const seen = new Set(contentResults.map((r) => r.path));
+  const out = [...contentResults];
+  for (const nr of nameResults) {
+    if (out.length >= limit) break;
+    if (seen.has(nr.path)) continue;
+    seen.add(nr.path);
+    out.push(nr);
+  }
+  return out.slice(0, limit);
+}
+
+/**
  * Map errors from the Nextcloud client + generic fallthroughs to HTTP responses.
  * OCS errors preserve their upstream status (400 for validation, 403 forbidden,
  * 404 not found, 997 not allowed) so the frontend can render the real message.
@@ -1765,14 +1817,69 @@ export function createFilesRouter(prisma: PrismaClient): Router {
         const { searchByLexical } = await import(
           "../services/file-search.service.js"
         );
-        const hits = await searchByLexical(prisma, {
+        // Two arms:
+        //   1. lexical CONTENT match over FileContentChunk.text_tsv
+        //   2. Nextcloud NAME match (%substring% on display name)
+        // WARP-940: the AC is "files whose name and/or content contain the
+        // term", but keyword used to run arm 1 only — so a partial term like
+        // "const" never surfaced a file named "Construction…", even though
+        // the Name-mode endpoint (same ncSearchFiles) finds it fine.
+        const contentHits = await searchByLexical(prisma, {
           userId: user,
           query: q,
           limit: limit * CHUNKS_PER_FILE_FACTOR,
           source: "nextcloud",
         });
-        const results = dedupeHitsPerFile(hits, limit);
-        await cacheSet(cacheKey, results, 60);
+        const contentResults = dedupeHitsPerFile(contentHits, limit);
+
+        // Arm 2 is a best-effort enhancement. Skip it entirely when the
+        // content arm already filled the page — the union would discard every
+        // name hit anyway, so firing a WebDAV SEARCH there is pure waste.
+        //
+        // The name arm hits Nextcloud (WebDAV), a SEPARATE dependency from
+        // the AI gateway. Keyword's "works gateway-down" promise is about the
+        // AI stack, so a Nextcloud OUTAGE on this arm must NOT fail the
+        // request — it degrades to content-only. An AUTH failure (missing /
+        // expired NC session) is different: it is not an outage, so resolve
+        // the token OUTSIDE the best-effort catch and let a
+        // MissingNcTokenError propagate (→ 401) instead of masking a re-login
+        // prompt as a degraded 200.
+        let nameDegraded = false;
+        let nameResults: Array<{ path: string; score: number; text: string }> =
+          [];
+        if (contentResults.length < limit) {
+          const token = await getToken(req); // auth failure → 401, not degrade
+          try {
+            const nameFiles = await ncSearchFiles(token, user, {
+              query: q,
+              // Over-fetch like the content arm: parseMultiStatus sorts
+              // directories first and nameHitsToResults drops them, so a
+              // directory-heavy match needs headroom to yield `limit` files.
+              limit: limit * CHUNKS_PER_FILE_FACTOR,
+            });
+            nameResults = nameHitsToResults(nameFiles);
+          } catch (nameErr) {
+            // Nextcloud unreachable on the name arm: log + degrade to
+            // content-only, and flag so we DON'T persist the degraded union.
+            nameDegraded = true;
+            logger.warn(
+              { err: nameErr },
+              "keyword search: name arm failed; returning content-only",
+            );
+          }
+        }
+
+        const results = unionContentAndNameHits(
+          contentResults,
+          nameResults,
+          limit,
+        );
+        // Only cache a COMPLETE result set. A degraded (content-only) union
+        // must not be written to the 60s cache, or it would keep serving the
+        // stale, partial result for up to 60s after Nextcloud recovers.
+        if (!nameDegraded) {
+          await cacheSet(cacheKey, results, 60);
+        }
         res.json({ results });
         return;
       }
