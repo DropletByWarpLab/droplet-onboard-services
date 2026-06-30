@@ -1,12 +1,19 @@
 import pinoHttp from "pino-http";
+import { createLogger } from "../lib/logger.js";
 
 const isTest = process.env.NODE_ENV === "test" || !!process.env.VITEST;
 
 export const requestLogger = pinoHttp({
+  logger: createLogger("http"),
   level: isTest ? "silent" : "info",
-  // No transport: "pino-http/lib/transport" is not a resolvable transport
-  // target (pino-http ships no lib/ subpath), so pino's fixTarget threw at
-  // require time and the orchestrator crashed on every NODE_ENV=development
-  // boot. Plain JSON request logs work everywhere; pretty dev logs can be
-  // had by piping through `npx pino-pretty`.
+  // The auto "request completed" line fires on the response `finish` event,
+  // where the ALS context may already have exited — so read the id stashed on
+  // the request by requestIdMiddleware. The per-log object wins over the mixin,
+  // so this line is always tagged. In-handler `req.log.*` lines are covered by
+  // the mixin while the ALS context is live.
+  customProps: (req) => ({
+    requestId:
+      (req as typeof req & { requestId?: string }).requestId ??
+      "no-request-context",
+  }),
 });

@@ -5,6 +5,7 @@ import cookieParser from "cookie-parser";
 import { PrismaClient } from "@prisma/client";
 import { config } from "./config.js";
 import { requestLogger } from "./middleware/request-logger.js";
+import { requestIdMiddleware } from "./middleware/request-id.js";
 import {
   authMiddleware,
   setAuthPrisma,
@@ -124,6 +125,7 @@ export function createApp(
   );
   app.use(helmet());
   app.use(cookieParser());
+  app.use(requestIdMiddleware);
   app.use(requestLogger);
 
   // Parse `application/json` AND `application/scim+json` (Okta's SCIM client
