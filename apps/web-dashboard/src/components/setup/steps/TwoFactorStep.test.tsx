@@ -161,11 +161,11 @@ describe("TwoFactorStep", () => {
     expect(verifyTotp).not.toHaveBeenCalled();
   });
 
-  // WARP-935 — the disabled "I've saved them — continue" button must TELL the
-  // user why it's disabled: a visible hint tied to the checkbox, with the button
-  // wired to it via aria-describedby. The gating itself (off the checkbox) is
-  // unchanged — this is purely additive feedback.
-  describe("recovery-codes continue is gated WITH feedback (WARP-935)", () => {
+  // The disabled "I've saved them — continue" button must TELL the user why
+  // it's gated. The explanation reaches assistive tech through the CHECKBOX's
+  // description (the actionable gate) plus a polite live region — never through
+  // the disabled button, whose aria-describedby some screen readers suppress.
+  describe("recovery-codes continue is gated WITH feedback", () => {
     async function toCodesPhase() {
       render(<TwoFactorStep onComplete={vi.fn()} onSkip={vi.fn()} />);
       await screen.findByAltText(/qr code/i);
@@ -176,7 +176,8 @@ describe("TwoFactorStep", () => {
       const continueBtn = await screen.findByRole("button", {
         name: /saved them — continue/i,
       });
-      return { continueBtn };
+      const checkbox = screen.getByRole("checkbox");
+      return { continueBtn, checkbox };
     }
 
     it("shows visible helper text telling the user to tick the checkbox to continue", async () => {
@@ -185,26 +186,62 @@ describe("TwoFactorStep", () => {
       expect(hint).toBeInTheDocument();
     });
 
-    it("wires aria-describedby from the disabled continue button to that hint", async () => {
-      const { continueBtn } = await toCodesPhase();
+    it("ties the explanatory hint to the CHECKBOX (the actionable gate), not the disabled button", async () => {
+      const { continueBtn, checkbox } = await toCodesPhase();
       expect(continueBtn).toBeDisabled();
 
-      const describedBy = continueBtn.getAttribute("aria-describedby");
+      // The gate explanation is reachable from the checkbox…
+      const describedBy = checkbox.getAttribute("aria-describedby");
       expect(describedBy).toBeTruthy();
-
-      // The id the button points at must resolve to a real, on-screen element
-      // that actually explains the gate.
       const hint = document.getElementById(describedBy!);
       expect(hint).not.toBeNull();
       expect(hint).toBeInTheDocument();
       expect(hint!.textContent ?? "").toMatch(/box|saved/i);
+
+      // …and NOT duplicated onto the disabled button (VoiceOver suppresses
+      // descriptions on disabled controls, and the double-read is noise).
+      expect(continueBtn).not.toHaveAttribute("aria-describedby");
     });
 
-    it("drops aria-describedby once the box is ticked (no stale hint on the now-enabled button)", async () => {
-      const { continueBtn } = await toCodesPhase();
-      fireEvent.click(screen.getByRole("checkbox"));
-      await waitFor(() => expect(continueBtn).toBeEnabled());
-      expect(continueBtn).not.toHaveAttribute("aria-describedby");
+    it("announces via a polite live region that Continue is active once the box is ticked (WCAG 4.1.3)", async () => {
+      const { checkbox } = await toCodesPhase();
+
+      const live = screen.getByRole("status");
+      expect(live).toHaveAttribute("aria-live", "polite");
+      // Before ticking, the live region carries the imperative, not a false
+      // "you're done".
+      expect(live.textContent ?? "").not.toMatch(/now active|now continue/i);
+
+      fireEvent.click(checkbox);
+      await waitFor(() =>
+        expect(live.textContent ?? "").toMatch(/continue.*(active|now)/i),
+      );
+    });
+
+    it("updates the hint text to a completed state once ticked — no stale imperative read as fact", async () => {
+      const { checkbox } = await toCodesPhase();
+
+      // The hint element is the one the checkbox describes.
+      const hintId = checkbox.getAttribute("aria-describedby")!;
+      const hint = document.getElementById(hintId)!;
+      expect(hint.textContent ?? "").toMatch(/tick the box.*continue/i);
+
+      fireEvent.click(checkbox);
+      await waitFor(() =>
+        expect(screen.queryByText(/tick the box.*continue/i)).toBeNull(),
+      );
+      // The same hint element now confirms the saved state rather than telling
+      // an already-done user to go do it.
+      expect(hint.textContent ?? "").toMatch(/saved/i);
+      expect(hint.textContent ?? "").not.toMatch(/tick the box/i);
+    });
+
+    it("keeps the checkbox description out of the way once ticked (no stale hint on the now-confirmed control)", async () => {
+      const { checkbox } = await toCodesPhase();
+      fireEvent.click(checkbox);
+      await waitFor(() =>
+        expect(checkbox).not.toHaveAttribute("aria-describedby"),
+      );
     });
   });
 

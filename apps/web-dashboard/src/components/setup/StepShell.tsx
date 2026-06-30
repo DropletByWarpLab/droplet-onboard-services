@@ -89,10 +89,12 @@ export interface StepShellAction {
   /** Adds the arrow glyph used by "Get Started" / "Continue". */
   showArrow?: boolean;
   /**
-   * WARP-935 — id of an element that explains the action (e.g. why it's
-   * disabled). Wired to the button's `aria-describedby` so a screen reader
-   * announces the gate; callers should clear it once the gate is satisfied so a
-   * now-enabled button carries no stale hint.
+   * Id of an element that describes the action (e.g. why it's disabled). Wired
+   * to the button's `aria-describedby`. An empty or whitespace-only string is
+   * treated as absent so the rendered attribute never carries an invalid empty
+   * IDREF. Prefer surfacing a gate explanation through the actionable control's
+   * own description rather than the disabled button, which some screen readers
+   * skip.
    */
   ariaDescribedBy?: string;
 }
@@ -389,7 +391,7 @@ export function StepShell({
                   type="button"
                   onClick={primary.onClick}
                   disabled={primary.disabled || primary.isLoading}
-                  aria-describedby={primary.ariaDescribedBy}
+                  aria-describedby={primary.ariaDescribedBy?.trim() || undefined}
                   className="dp-btn-primary"
                 >
                   {primary.isLoading
