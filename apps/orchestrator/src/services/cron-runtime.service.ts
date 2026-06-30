@@ -209,7 +209,7 @@ export function createCronRuntime(
     } catch (err) {
       const n = (failureCounts.get(handler) ?? 0) + 1;
       failureCounts.set(handler, n);
-      const ctx = { err, consecutiveFailures: n };
+      const ctx = { err, consecutiveFailures: n, requestId };
       if (err instanceof RouterError) {
         logger.warn(ctx, "cron handler caught RouterError");
       } else {
