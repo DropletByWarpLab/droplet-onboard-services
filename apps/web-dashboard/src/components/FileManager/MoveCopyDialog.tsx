@@ -1,8 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { X, Folder, ChevronRight, ChevronDown, Home } from "lucide-react";
-import { fetchFiles } from "@/lib/api";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  X,
+  Folder,
+  ChevronRight,
+  ChevronDown,
+  Home,
+  FolderPlus,
+} from "lucide-react";
+import { fetchFiles, createDirectory } from "@/lib/api";
 import { translateError } from "@/lib/friendly-errors";
 import type { FileEntryInfo } from "@/lib/types";
 
@@ -47,6 +54,12 @@ export function MoveCopyDialog({
   const [selectedPath, setSelectedPath] = useState<string>(currentDir);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // WARP-938 — inline "New folder" creation at the selected target.
+  const [creatingFolder, setCreatingFolder] = useState(false);
+  const [newFolderName, setNewFolderName] = useState("");
+  const [folderSubmitting, setFolderSubmitting] = useState(false);
+  const newFolderInputRef = useRef<HTMLInputElement>(null);
 
   // Load root on mount
   useEffect(() => {
@@ -112,6 +125,58 @@ export function MoveCopyDialog({
     }
   }, [selectedPath, isForbidden, onConfirm]);
 
+  // WARP-938 — open the inline new-folder form and focus its input.
+  const openNewFolder = useCallback(() => {
+    setError(null);
+    setNewFolderName("");
+    setCreatingFolder(true);
+    // Focus on the next paint, once the input is mounted.
+    requestAnimationFrame(() => newFolderInputRef.current?.focus());
+  }, []);
+
+  const cancelNewFolder = useCallback(() => {
+    setCreatingFolder(false);
+    setNewFolderName("");
+  }, []);
+
+  // Create a folder at the currently-selected target and select it, all without
+  // leaving the dialog. Reuses createDirectory() → POST /api/files/mkdir, the
+  // same endpoint the Files page uses for "New folder".
+  const handleCreateFolder = useCallback(async () => {
+    const name = newFolderName.trim();
+    if (!name) return;
+    const parent = selectedPath || "/";
+    const folderPath = parent === "/" ? `/${name}` : `${parent}/${name}`;
+    setFolderSubmitting(true);
+    setError(null);
+    try {
+      await createDirectory(folderPath);
+      // Optimistically insert the new folder under its parent so it appears in
+      // the tree immediately, then make it the active target.
+      setTree((prev) =>
+        updateNode(prev, parent, (node) => {
+          const existing = node.children ?? [];
+          if (existing.some((c) => c.path === folderPath)) return node;
+          const child: TreeNode = { path: folderPath, name, children: undefined };
+          return {
+            ...node,
+            expanded: true,
+            children: [...existing, child].sort((a, b) =>
+              a.name.localeCompare(b.name),
+            ),
+          };
+        }),
+      );
+      setSelectedPath(folderPath);
+      setCreatingFolder(false);
+      setNewFolderName("");
+    } catch (err) {
+      setError(translateError(err, "files"));
+    } finally {
+      setFolderSubmitting(false);
+    }
+  }, [newFolderName, selectedPath]);
+
   const title = mode === "move" ? "Move to…" : "Copy to…";
   const ctaLabel =
     mode === "move" ? "Move here" : "Copy here";
@@ -153,6 +218,57 @@ export function MoveCopyDialog({
             onSelect={setSelectedPath}
             onToggle={toggleNode}
           />
+        </div>
+
+        {/* New folder — create a destination at the selected target inline. */}
+        <div className="px-3 py-2 border-t border-separator">
+          {creatingFolder ? (
+            <div className="flex items-center gap-2">
+              <FolderPlus
+                size={14}
+                className="text-label-tertiary shrink-0"
+                aria-hidden="true"
+              />
+              <input
+                ref={newFolderInputRef}
+                value={newFolderName}
+                onChange={(e) => setNewFolderName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void handleCreateFolder();
+                  if (e.key === "Escape") cancelNewFolder();
+                }}
+                placeholder="Folder name…"
+                aria-label="New folder name"
+                disabled={folderSubmitting}
+                className="flex-1 min-w-0 bg-surface-secondary rounded-sm px-2 py-1 type-footnote text-label-primary placeholder:text-label-quaternary outline-none focus:ring-1 focus:ring-accent"
+              />
+              <button
+                type="button"
+                onClick={() => void handleCreateFolder()}
+                disabled={folderSubmitting || !newFolderName.trim()}
+                className="type-caption-1 text-accent hover:text-accent-hover disabled:text-label-quaternary px-2 py-1 transition-colors"
+              >
+                {folderSubmitting ? "Creating…" : "Create"}
+              </button>
+              <button
+                type="button"
+                onClick={cancelNewFolder}
+                disabled={folderSubmitting}
+                className="type-caption-1 text-label-tertiary hover:text-label-primary px-1 py-1 transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={openNewFolder}
+              className="flex items-center gap-1.5 type-footnote text-accent hover:text-accent-hover px-1 py-1 transition-colors"
+            >
+              <FolderPlus size={14} aria-hidden="true" />
+              New folder
+            </button>
+          )}
         </div>
 
         {/* Error */}
