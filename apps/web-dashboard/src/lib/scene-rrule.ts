@@ -1,18 +1,14 @@
 /**
- * feat/scene-schedules — build a UTC RRULE from the owner's local choices.
+ * feat/scene-schedules + KAN-6 — build a wall-clock RRULE + IANA timezone
+ * from the owner's local choices.
  *
- * The orchestrator's rrule.ts is UTC-only: BYHOUR/BYMINUTE/BYDAY are all
- * interpreted in UTC. The owner authors in their LOCAL wall-clock (a "7am"
- * routine must fire at 7am where they live), so this helper does the single
- * biggest correctness step: convert the chosen local time to UTC, AND shift
- * the chosen weekdays by the day-delta that conversion induces when it crosses
- * the UTC midnight boundary.
- *
- * Example: a user in UTC-7 (US Pacific) picking Monday 06:00 local. 06:00
- * PDT = 13:00 UTC same day → BYDAY=MO;BYHOUR=13. A user in UTC+9 picking
- * Monday 06:00 local = 21:00 UTC on the *previous* day (Sunday) → BYDAY=SU;
- * BYHOUR=21. Getting the weekday shift wrong fires "Monday 6am" on the wrong
- * day for anyone far enough from UTC.
+ * KAN-6 added a per-row IANA timezone (`SceneSchedule.timezone`), and the
+ * orchestrator now interprets BYHOUR/BYMINUTE as WALL-CLOCK in that zone.
+ * So the editor no longer converts local→UTC (the pre-KAN-6 step that
+ * drifted an hour at every daylight-saving change): it emits the chosen
+ * local time VERBATIM and ships the browser's IANA zone alongside. The
+ * ticker recomputes the next fire against that zone each time, so a "7am"
+ * routine keeps firing at 7am local across a DST boundary.
  *
  * This is intentionally a small pure function so the component stays a thin
  * shell over tested logic.
@@ -35,47 +31,8 @@ export interface ScheduleDraft {
 
 export interface BuiltRrule {
   rrule: string;
-  /** The UTC hour the rule resolves to — surfaced in the UI for honesty. */
-  utcHour: number;
-  utcMinute: number;
-}
-
-/**
- * Convert a local (hour, minute) on a reference date into UTC, returning the
- * UTC hour/minute and the day-delta (−1, 0, or +1) the conversion crossed.
- * Uses the supplied `now` only to anchor the timezone offset (DST-correct for
- * "today"); the cadence itself is recurring.
- */
-function localTimeToUtc(
-  hour: number,
-  minute: number,
-  now: Date = new Date(),
-): { utcHour: number; utcMinute: number; dayDelta: number } {
-  // Build a Date at the chosen LOCAL wall-clock time on `now`'s local day.
-  const local = new Date(
-    now.getFullYear(),
-    now.getMonth(),
-    now.getDate(),
-    hour,
-    minute,
-    0,
-    0,
-  );
-  const utcHour = local.getUTCHours();
-  const utcMinute = local.getUTCMinutes();
-  // Day delta = UTC calendar day − local calendar day for the same instant.
-  const localDay = local.getDate();
-  const utcDay = local.getUTCDate();
-  let dayDelta = utcDay - localDay;
-  // Normalise month-boundary wrap (e.g. local 31st → UTC 1st = +1, not −30).
-  if (dayDelta > 1) dayDelta = -1;
-  if (dayDelta < -1) dayDelta = 1;
-  return { utcHour, utcMinute, dayDelta };
-}
-
-function shiftDay(day: DayCode, delta: number): DayCode {
-  const idx = DAY_CODES.indexOf(day);
-  return DAY_CODES[(idx + delta + 7) % 7];
+  /** The IANA zone the rrule's wall-clock time is interpreted in. */
+  timezone: string;
 }
 
 /** True when the selection means "every day" (none picked, or all 7). */
@@ -84,12 +41,30 @@ export function isDaily(days: DayCode[]): boolean {
 }
 
 /**
- * Build the UTC RRULE for the draft. Returns null if hour/minute are out of
+ * The browser's IANA timezone (e.g. "America/Los_Angeles"), falling back to
+ * "UTC" if the runtime can't resolve one. Persisted with every schedule so
+ * the orchestrator can recompute the next fire in the owner's zone.
+ */
+export function resolveTimezone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+}
+
+/**
+ * Build the wall-clock RRULE for the draft + the timezone to store it under.
+ * BYHOUR/BYMINUTE are the chosen LOCAL time, stored as-is (no UTC shift);
+ * BYDAY is the chosen weekdays, ordered Sunday-first so the rule is stable
+ * regardless of chip click order. Returns null if hour/minute are out of
  * range (defensive — the inputs are clamped, but never persist a bad rule).
+ *
+ * @param timezone optional override; defaults to the browser's IANA zone.
  */
 export function buildSceneRrule(
   draft: ScheduleDraft,
-  now: Date = new Date(),
+  timezone: string = resolveTimezone(),
 ): BuiltRrule | null {
   if (
     !Number.isInteger(draft.hour) ||
@@ -102,36 +77,28 @@ export function buildSceneRrule(
     return null;
   }
 
-  const { utcHour, utcMinute, dayDelta } = localTimeToUtc(
-    draft.hour,
-    draft.minute,
-    now,
-  );
-
-  const timePart = `BYHOUR=${utcHour};BYMINUTE=${utcMinute}`;
+  const timePart = `BYHOUR=${draft.hour};BYMINUTE=${draft.minute}`;
 
   if (isDaily(draft.days)) {
-    return { rrule: `FREQ=DAILY;${timePart}`, utcHour, utcMinute };
+    return { rrule: `FREQ=DAILY;${timePart}`, timezone };
   }
 
-  // Weekly: shift each chosen weekday by the UTC day-delta, dedupe, and order
-  // Sunday-first so the rule is stable regardless of chip click order.
-  const shifted = Array.from(
-    new Set(draft.days.map((d) => shiftDay(d, dayDelta))),
-  ).sort((a, b) => DAY_CODES.indexOf(a) - DAY_CODES.indexOf(b));
+  // Weekly: dedupe + order Sunday-first so the rule is stable regardless of
+  // chip click order. No day-shift — the wall-clock IS the local day.
+  const ordered = Array.from(new Set(draft.days)).sort(
+    (a, b) => DAY_CODES.indexOf(a) - DAY_CODES.indexOf(b),
+  );
 
   return {
-    rrule: `FREQ=WEEKLY;BYDAY=${shifted.join(",")};${timePart}`,
-    utcHour,
-    utcMinute,
+    rrule: `FREQ=WEEKLY;BYDAY=${ordered.join(",")};${timePart}`,
+    timezone,
   };
 }
 
 /**
- * Human summary of a built rrule for the confirmation line, e.g.
+ * Human summary of a draft for the confirmation line, e.g.
  * "Every day at 7:00 AM" / "Weekdays at 6:00 PM". Local-time framing — the
- * caller passes the ORIGINAL local choices so the copy matches what the owner
- * typed, while the rrule it persists is UTC.
+ * draft already holds the owner's local choices.
  */
 export function describeLocalSchedule(draft: ScheduleDraft): string {
   const time = formatLocalTime(draft.hour, draft.minute);

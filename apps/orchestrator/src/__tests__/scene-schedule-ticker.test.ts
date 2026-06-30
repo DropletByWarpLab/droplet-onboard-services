@@ -34,6 +34,7 @@ interface ScheduleRow {
   nextFireAt: Date;
   enabled: boolean;
   lastFiredAt: Date | null;
+  timezone: string;
 }
 interface SceneActionRow {
   id: string;
@@ -142,8 +143,8 @@ describe("feat/scene-schedules — tickSceneSchedules", () => {
     const matter = okMatter();
     const prisma = createPrismaMock({
       schedules: [
-        { id: "due-1", sceneId: "scene-1", rrule: "FREQ=DAILY;BYHOUR=9", nextFireAt: past, enabled: true, lastFiredAt: null },
-        { id: "fut-1", sceneId: "scene-1", rrule: "FREQ=DAILY;BYHOUR=10", nextFireAt: future, enabled: true, lastFiredAt: null },
+        { id: "due-1", sceneId: "scene-1", rrule: "FREQ=DAILY;BYHOUR=9", nextFireAt: past, enabled: true, lastFiredAt: null, timezone: "UTC" },
+        { id: "fut-1", sceneId: "scene-1", rrule: "FREQ=DAILY;BYHOUR=10", nextFireAt: future, enabled: true, lastFiredAt: null, timezone: "UTC" },
       ],
       scenes: [
         sceneWith("scene-1", [
@@ -170,7 +171,7 @@ describe("feat/scene-schedules — tickSceneSchedules", () => {
     const matter = okMatter();
     const prisma = createPrismaMock({
       schedules: [
-        { id: "s", sceneId: "scene-2", rrule: "FREQ=DAILY;BYHOUR=9", nextFireAt: past, enabled: true, lastFiredAt: null },
+        { id: "s", sceneId: "scene-2", rrule: "FREQ=DAILY;BYHOUR=9", nextFireAt: past, enabled: true, lastFiredAt: null, timezone: "UTC" },
       ],
       scenes: [
         sceneWith("scene-2", [
@@ -193,7 +194,7 @@ describe("feat/scene-schedules — tickSceneSchedules", () => {
     const matter = okMatter();
     const prisma = createPrismaMock({
       schedules: [
-        { id: "orphan", sceneId: "gone", rrule: "FREQ=DAILY;BYHOUR=9", nextFireAt: past, enabled: true, lastFiredAt: null },
+        { id: "orphan", sceneId: "gone", rrule: "FREQ=DAILY;BYHOUR=9", nextFireAt: past, enabled: true, lastFiredAt: null, timezone: "UTC" },
       ],
       scenes: [],
     });
@@ -217,7 +218,7 @@ describe("feat/scene-schedules — tickSceneSchedules", () => {
     const matter = okMatter();
     const prisma = createPrismaMock({
       schedules: [
-        { id: "bad", sceneId: "scene-3", rrule: "FREQ=YEARLY", nextFireAt: past, enabled: true, lastFiredAt: null },
+        { id: "bad", sceneId: "scene-3", rrule: "FREQ=YEARLY", nextFireAt: past, enabled: true, lastFiredAt: null, timezone: "UTC" },
       ],
       scenes: [
         sceneWith("scene-3", [
@@ -248,7 +249,7 @@ describe("feat/scene-schedules — tickSceneSchedules", () => {
     const matter = okMatter();
     const prisma = createPrismaMock({
       schedules: [
-        { id: "wk", sceneId: "scene-4", rrule: "FREQ=WEEKLY;BYDAY=MO,FR;BYHOUR=6", nextFireAt: past, enabled: true, lastFiredAt: null },
+        { id: "wk", sceneId: "scene-4", rrule: "FREQ=WEEKLY;BYDAY=MO,FR;BYHOUR=6", nextFireAt: past, enabled: true, lastFiredAt: null, timezone: "UTC" },
       ],
       scenes: [sceneWith("scene-4", [
         { id: "a1", sceneId: "scene-4", idx: 0, deviceNodeId: "n1", command: "toggle", args: null },
@@ -273,7 +274,7 @@ describe("feat/scene-schedules — tickSceneSchedules", () => {
     };
     const prisma = createPrismaMock({
       schedules: [
-        { id: "s", sceneId: "scene-5", rrule: "FREQ=DAILY;BYHOUR=9", nextFireAt: past, enabled: true, lastFiredAt: null },
+        { id: "s", sceneId: "scene-5", rrule: "FREQ=DAILY;BYHOUR=9", nextFireAt: past, enabled: true, lastFiredAt: null, timezone: "UTC" },
       ],
       scenes: [sceneWith("scene-5", [
         { id: "a1", sceneId: "scene-5", idx: 0, deviceNodeId: "n1", command: "toggle", args: null },
@@ -291,5 +292,76 @@ describe("feat/scene-schedules — tickSceneSchedules", () => {
       "2026-05-28T09:00:00.000Z",
     );
     expect(prisma.schedules[0].lastFiredAt).not.toBeNull();
+  });
+});
+
+describe("KAN-6 — tickSceneSchedules recomputes nextFireAt against the stored timezone (DST-correct)", () => {
+  it("advances a 07:00 America/Los_Angeles daily schedule to the DST-correct UTC instant across the fall-back boundary", async () => {
+    // DST ends 2026-11-01 02:00 local, so by `now` we are already in PST.
+    // The schedule's prior fire was the day before (07:00 PDT on Oct 31 =
+    // 14:00 UTC). The NEXT fire must be 07:00 PST = 15:00 UTC, NOT 14:00 UTC
+    // (which is now 06:00 PST — the drift bug). The ticker reads the row's
+    // timezone and recomputes the wall-clock against it.
+    const now = new Date("2026-11-01T06:00:00Z"); // 2026-10-31 23:00 PDT
+    const past = new Date("2026-10-31T14:00:00Z"); // last fire: 07:00 PDT Oct 31
+    const matter = okMatter();
+    const prisma = createPrismaMock({
+      schedules: [
+        {
+          id: "la",
+          sceneId: "scene-tz",
+          rrule: "FREQ=DAILY;BYHOUR=7;BYMINUTE=0",
+          nextFireAt: past,
+          enabled: true,
+          lastFiredAt: null,
+          timezone: "America/Los_Angeles",
+        },
+      ],
+      scenes: [
+        sceneWith("scene-tz", [
+          { id: "a1", sceneId: "scene-tz", idx: 0, deviceNodeId: "n1", command: "toggle", args: null },
+        ]),
+      ],
+    });
+
+    const result = await tickSceneSchedules(prisma as any, matter, now);
+
+    expect(result.fired).toBe(1);
+    // 2026-11-01 07:00 PST = 15:00 UTC — the wall-clock stayed at 07:00 local
+    // and the UTC instant shifted forward an hour because PST is UTC-8. The
+    // pre-KAN-6 frozen-UTC behaviour would have advanced to 14:00 UTC here.
+    expect(prisma.schedules[0].nextFireAt.toISOString()).toBe(
+      "2026-11-01T15:00:00.000Z",
+    );
+  });
+
+  it("a row with the legacy 'UTC' timezone advances exactly as before (no behaviour change)", async () => {
+    const now = new Date("2026-05-27T09:00:00Z");
+    const past = new Date("2026-05-27T08:55:00Z");
+    const matter = okMatter();
+    const prisma = createPrismaMock({
+      schedules: [
+        {
+          id: "legacy",
+          sceneId: "scene-utc",
+          rrule: "FREQ=DAILY;BYHOUR=9;BYMINUTE=0",
+          nextFireAt: past,
+          enabled: true,
+          lastFiredAt: null,
+          timezone: "UTC",
+        },
+      ],
+      scenes: [
+        sceneWith("scene-utc", [
+          { id: "a1", sceneId: "scene-utc", idx: 0, deviceNodeId: "n1", command: "toggle", args: null },
+        ]),
+      ],
+    });
+
+    await tickSceneSchedules(prisma as any, matter, now);
+
+    expect(prisma.schedules[0].nextFireAt.toISOString()).toBe(
+      "2026-05-28T09:00:00.000Z",
+    );
   });
 });

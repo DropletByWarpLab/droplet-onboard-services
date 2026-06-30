@@ -1,12 +1,12 @@
 /**
- * feat/scene-schedules — render a stored UTC RRULE as a human summary.
+ * feat/scene-schedules + KAN-6 — render a stored RRULE as a human summary.
  *
- * The stored rule is UTC (the orchestrator parser is UTC-only). To show the
- * owner when it ACTUALLY runs in their timezone, we resolve the rule's
- * BYHOUR/BYMINUTE (UTC) to local wall-clock and shift the weekday back across
- * the UTC→local midnight boundary — the inverse of scene-rrule.ts's build
- * step. This keeps the list honest: a rule saved as 14:00 UTC reads back as
- * "7:00 AM" for a UTC-7 owner, matching what they typed.
+ * KAN-6: the rrule's BYHOUR/BYMINUTE are the WALL-CLOCK time in the row's
+ * stored IANA timezone (`SceneSchedule.timezone`), and BYDAY is the LOCAL
+ * weekday. So describing a rule is now a direct read — no UTC→local
+ * conversion and no weekday shift (the pre-KAN-6 inverse of the build step).
+ * A rule saved as "07:00 / MO" reads back as "Mon at 7:00 AM" for everyone,
+ * matching what the owner typed, regardless of the viewer's own offset.
  *
  * Throws on a rule outside the supported FREQ=DAILY|WEEKLY subset so the
  * caller can fall back to a neutral label rather than print a wrong time.
@@ -25,77 +25,48 @@ function parse(rule: string): Record<string, string> {
   return out;
 }
 
-function shiftDay(day: DayCode, delta: number): DayCode {
-  const idx = DAY_CODES.indexOf(day);
-  return DAY_CODES[(idx + delta + 7) % 7];
-}
-
 /**
- * Convert a UTC (hour, minute) to local, returning the local time + the
- * day-delta the conversion crossed (so weekly weekdays can be shifted back).
+ * Render the stored RRULE's wall-clock + weekday set as a local summary.
+ *
+ * The `timezone` parameter is accepted for call-site symmetry with the
+ * stored row, but no conversion is applied: the rule's BYHOUR/BYMINUTE are
+ * already the wall-clock time in that zone, so the summary reads them
+ * directly. (Keeping the param means callers can pass `schedule.timezone`
+ * without special-casing, and leaves room for a future "in <zone>" suffix.)
  */
-function utcTimeToLocal(
-  utcHour: number,
-  utcMinute: number,
-  now: Date = new Date(),
-): { localHour: number; localMinute: number; dayDelta: number } {
-  const d = new Date(
-    Date.UTC(
-      now.getUTCFullYear(),
-      now.getUTCMonth(),
-      now.getUTCDate(),
-      utcHour,
-      utcMinute,
-      0,
-      0,
-    ),
-  );
-  const localHour = d.getHours();
-  const localMinute = d.getMinutes();
-  let dayDelta = d.getDate() - d.getUTCDate();
-  if (dayDelta > 1) dayDelta = -1;
-  if (dayDelta < -1) dayDelta = 1;
-  return { localHour, localMinute, dayDelta };
-}
-
-export function describeRrule(rule: string, now: Date = new Date()): string {
+export function describeRrule(rule: string, _timezone?: string): string {
   const p = parse(rule);
   const freq = (p.FREQ ?? "").toUpperCase();
   if (freq !== "DAILY" && freq !== "WEEKLY") {
     throw new Error(`unsupported FREQ: ${freq}`);
   }
-  const utcHour = clampInt(p.BYHOUR, 0, 23);
-  const utcMinute = clampInt(p.BYMINUTE, 0, 59);
-  const { localHour, localMinute, dayDelta } = utcTimeToLocal(
-    utcHour,
-    utcMinute,
-    now,
-  );
-  const time = formatLocalTime(localHour, localMinute);
+  const hour = clampInt(p.BYHOUR, 0, 23);
+  const minute = clampInt(p.BYMINUTE, 0, 59);
+  const time = formatLocalTime(hour, minute);
 
   if (freq === "DAILY") return `Every day at ${time}`;
 
-  const byday = (p.BYDAY ?? "")
+  const days = (p.BYDAY ?? "")
     .toUpperCase()
     .split(",")
     .filter((c): c is DayCode => DAY_CODES.includes(c as DayCode));
-  if (byday.length === 0) throw new Error("weekly rule with no BYDAY");
+  if (days.length === 0) throw new Error("weekly rule with no BYDAY");
 
-  const localDays = Array.from(
-    new Set(byday.map((d) => shiftDay(d, dayDelta))),
-  ).sort((a, b) => DAY_CODES.indexOf(a) - DAY_CODES.indexOf(b));
+  const ordered = Array.from(new Set(days)).sort(
+    (a, b) => DAY_CODES.indexOf(a) - DAY_CODES.indexOf(b),
+  );
 
   const isWeekdays =
-    localDays.length === 5 &&
-    ["MO", "TU", "WE", "TH", "FR"].every((d) => localDays.includes(d as DayCode));
+    ordered.length === 5 &&
+    ["MO", "TU", "WE", "TH", "FR"].every((d) => ordered.includes(d as DayCode));
   if (isWeekdays) return `Weekdays at ${time}`;
   const isWeekend =
-    localDays.length === 2 &&
-    localDays.includes("SA") &&
-    localDays.includes("SU");
+    ordered.length === 2 &&
+    ordered.includes("SA") &&
+    ordered.includes("SU");
   if (isWeekend) return `Weekends at ${time}`;
 
-  return `${localDays.map(dayLabel).join(", ")} at ${time}`;
+  return `${ordered.map(dayLabel).join(", ")} at ${time}`;
 }
 
 function clampInt(raw: string | undefined, lo: number, hi: number): number {

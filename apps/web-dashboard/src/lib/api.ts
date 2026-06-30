@@ -2989,6 +2989,8 @@ export interface SceneSchedule {
   id: string;
   sceneId: string;
   rrule: string;
+  /** KAN-6 — IANA zone the rrule's wall-clock time is interpreted in. */
+  timezone: string;
   nextFireAt: string;
   enabled: boolean;
   createdBy: string | null;
@@ -3010,18 +3012,22 @@ export async function fetchSceneSchedules(
 }
 
 /**
- * Create a schedule for a routine (owner/admin). `rrule` must be a supported
- * UTC RRULE (the server 400s a malformed one); the editor builds it from the
- * owner's chosen days + local time, converted to UTC.
+ * Create a schedule for a routine (owner/admin). `rrule` is a supported
+ * wall-clock RRULE (the server 400s a malformed one) and `timezone` is the
+ * IANA zone its BYHOUR/BYMINUTE are interpreted in — the editor builds both
+ * from the owner's chosen days + local time and the browser's zone (KAN-6).
+ * `timezone` is optional; the server defaults it to "UTC" for an older
+ * client, preserving the pre-KAN-6 behaviour.
  */
 export async function createSceneSchedule(
   sceneId: string,
   rrule: string,
+  timezone?: string,
 ): Promise<SceneSchedule> {
   const res = await authFetch(`${BASE}/api/scenes/${sceneId}/schedules`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ rrule }),
+    body: JSON.stringify(timezone ? { rrule, timezone } : { rrule }),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));

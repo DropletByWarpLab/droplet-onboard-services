@@ -40,6 +40,10 @@ interface ScheduleRow {
   rrule: string;
   nextFireAt: Date;
   enabled: boolean;
+  // KAN-6 — the IANA zone the rrule's wall-clock time is interpreted in.
+  // "UTC" for every pre-KAN-6 row (the column default), so those advance
+  // exactly as before.
+  timezone: string;
 }
 interface SceneActionRow {
   idx: number;
@@ -143,11 +147,16 @@ async function advanceOrDisable(
   schedule: ScheduleRow,
   now: Date,
 ): Promise<boolean> {
-  const next = nextFireFromRrule(schedule.rrule, now);
+  // KAN-6 — recompute against the STORED zone, so a "07:00 local" routine
+  // keeps firing at 07:00 local across a daylight-saving change (the UTC
+  // instant shifts; the wall-clock doesn't). An unresolvable zone returns
+  // null and disables below, same as a malformed rrule.
+  const next = nextFireFromRrule(schedule.rrule, now, schedule.timezone);
   if (next === null) {
-    // Malformed or unsupported rule. Disable + audit so an operator can
-    // fix the editor input rather than the ticker silently spamming the
-    // activity feed. NEVER leave it enabled on a stuck nextFireAt.
+    // Malformed or unsupported rule (or an unknown timezone). Disable +
+    // audit so an operator can fix the editor input rather than the ticker
+    // silently spamming the activity feed. NEVER leave it enabled on a
+    // stuck nextFireAt.
     await prisma.sceneSchedule.update({
       where: { id: schedule.id },
       data: { enabled: false },
