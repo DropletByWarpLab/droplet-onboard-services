@@ -88,6 +88,15 @@ export interface StepShellAction {
   isLoading?: boolean;
   /** Adds the arrow glyph used by "Get Started" / "Continue". */
   showArrow?: boolean;
+  /**
+   * Id of an element that describes the action (e.g. why it's disabled). Wired
+   * to the button's `aria-describedby`. An empty or whitespace-only string is
+   * treated as absent so the rendered attribute never carries an invalid empty
+   * IDREF. Prefer surfacing a gate explanation through the actionable control's
+   * own description rather than the disabled button, which some screen readers
+   * skip.
+   */
+  ariaDescribedBy?: string;
 }
 
 export interface StepShellSkip {
@@ -382,6 +391,7 @@ export function StepShell({
                   type="button"
                   onClick={primary.onClick}
                   disabled={primary.disabled || primary.isLoading}
+                  aria-describedby={primary.ariaDescribedBy?.trim() || undefined}
                   className="dp-btn-primary"
                 >
                   {primary.isLoading
