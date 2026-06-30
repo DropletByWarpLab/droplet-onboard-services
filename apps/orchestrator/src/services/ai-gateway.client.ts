@@ -1,4 +1,5 @@
 import { config } from "../config.js";
+import { getRequestId } from "../lib/request-context.js";
 import type {
   ChatRequest,
   ModelCapabilities,
@@ -29,6 +30,8 @@ function authHeaders(userId?: string): Record<string, string> {
   if (userId) {
     headers["X-Droplet-User"] = userId;
   }
+  const rid = getRequestId();
+  if (rid) headers["x-request-id"] = rid;
   return headers;
 }
 

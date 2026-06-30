@@ -7,6 +7,7 @@
 
 import pino from "pino";
 import { config } from "../config.js";
+import { getRequestId } from "../lib/request-context.js";
 import {
   RouterError,
   routerErrorFromResponse,
@@ -242,6 +243,8 @@ export async function routingFetch(path: string, init: RoutingFetchInit = {}): P
   if (TOKEN) {
     merged["Authorization"] = `Bearer ${TOKEN}`;
   }
+  const rid = getRequestId();
+  if (rid) merged["x-request-id"] = rid;
 
   const url = `${BASE_URL}${path}`;
   const displayLabel = label ?? path;
