@@ -201,6 +201,58 @@ function dedupeHitsPerFile(
 }
 
 /**
+ * WARP-940 — keyword score floor for files matched by NAME only.
+ *
+ * `searchByLexical` returns `ts_rank_cd` scores (small positive floats,
+ * typically < 1). A pure name match has no lexical relevance score, so we
+ * give it a fixed sentinel that sorts BELOW any genuine content hit but
+ * ABOVE zero — the file is clearly relevant (its name contains the term),
+ * just less precisely ranked than a body match. The frontend renders the
+ * score as a percentage, so a small non-zero value reads as "matched".
+ */
+const KEYWORD_NAME_MATCH_SCORE = 0.01;
+
+/**
+ * WARP-940 — fold Nextcloud name-search results (`FileEntryInfo[]`) into the
+ * keyword content-search result shape. Directories are dropped (the Files
+ * search popover navigates to files); each surviving file gets the
+ * name-match sentinel score and its display name as the snippet text so the
+ * popover has something to render.
+ */
+function nameHitsToResults(
+  files: FileEntryInfo[],
+): Array<{ path: string; score: number; text: string }> {
+  return files
+    .filter((f) => !f.isDirectory)
+    .map((f) => ({
+      path: f.path,
+      score: KEYWORD_NAME_MATCH_SCORE,
+      text: f.name,
+    }));
+}
+
+/**
+ * WARP-940 — union content hits (already deduped, score DESC) with name-only
+ * hits. A file matched by BOTH arms keeps its content hit (higher score +
+ * real snippet); name-only files are appended in order. Clamped to `limit`.
+ */
+function unionContentAndNameHits(
+  contentResults: Array<{ path: string; score: number; text: string }>,
+  nameResults: Array<{ path: string; score: number; text: string }>,
+  limit: number,
+): Array<{ path: string; score: number; text: string }> {
+  const seen = new Set(contentResults.map((r) => r.path));
+  const out = [...contentResults];
+  for (const nr of nameResults) {
+    if (out.length >= limit) break;
+    if (seen.has(nr.path)) continue;
+    seen.add(nr.path);
+    out.push(nr);
+  }
+  return out.slice(0, limit);
+}
+
+/**
  * Map errors from the Nextcloud client + generic fallthroughs to HTTP responses.
  * OCS errors preserve their upstream status (400 for validation, 403 forbidden,
  * 404 not found, 997 not allowed) so the frontend can render the real message.
@@ -1735,13 +1787,49 @@ export function createFilesRouter(prisma: PrismaClient): Router {
         const { searchByLexical } = await import(
           "../services/file-search.service.js"
         );
-        const hits = await searchByLexical(prisma, {
-          userId: user,
-          query: q,
-          limit: limit * CHUNKS_PER_FILE_FACTOR,
-          source: "nextcloud",
-        });
-        const results = dedupeHitsPerFile(hits, limit);
+        // Two arms, run in parallel:
+        //   1. lexical CONTENT match over FileContentChunk.text_tsv
+        //   2. Nextcloud NAME match (%substring% on display name)
+        // WARP-940: the AC is "files whose name and/or content contain the
+        // term", but keyword used to run arm 1 only — so a partial term like
+        // "const" never surfaced a file named "Construction…", even though
+        // the Name-mode endpoint (same ncSearchFiles) finds it fine.
+        //
+        // The name arm hits Nextcloud (WebDAV), a SEPARATE dependency from
+        // the AI gateway. Keyword's "works gateway-down" promise is about the
+        // AI stack, so a failing/absent name arm must NOT fail the request —
+        // it degrades to content-only. Each arm is settled independently.
+        const [contentHits, nameFiles] = await Promise.all([
+          searchByLexical(prisma, {
+            userId: user,
+            query: q,
+            limit: limit * CHUNKS_PER_FILE_FACTOR,
+            source: "nextcloud",
+          }),
+          (async (): Promise<FileEntryInfo[]> => {
+            try {
+              return await ncSearchFiles(await getToken(req), user, {
+                query: q,
+                limit,
+              });
+            } catch (nameErr) {
+              // Name arm is best-effort: Nextcloud down / no token must not
+              // sink the content results. Log + degrade to content-only.
+              logger.warn(
+                { err: nameErr },
+                "keyword search: name arm failed; returning content-only",
+              );
+              return [];
+            }
+          })(),
+        ]);
+        const contentResults = dedupeHitsPerFile(contentHits, limit);
+        const nameResults = nameHitsToResults(nameFiles);
+        const results = unionContentAndNameHits(
+          contentResults,
+          nameResults,
+          limit,
+        );
         await cacheSet(cacheKey, results, 60);
         res.json({ results });
         return;
