@@ -2202,11 +2202,31 @@ export function createProtectedAuthRouter(
         return;
       }
 
-      const allUsers = await ncListUsers(token);
       // Hide the Nextcloud system/database admin account — it exists for
       // internal orchestrator use only and must never appear in the UI.
       const systemUser = (process.env.NEXTCLOUD_ADMIN_USER || "admin").toLowerCase();
-      const users = allUsers.filter((u) => u.id.toLowerCase() !== systemUser);
+      // WARP-947: run NC list + DB lookup in parallel; separate maps per column
+      // prevent cross-column key collision (nc username ≠ local username namespace).
+      const [allUsers, localRows] = await Promise.all([
+        ncListUsers(token),
+        prisma
+          ? prisma.user.findMany({ select: { id: true, username: true, nextcloudUsername: true } })
+          : ([] as { id: string; username: string; nextcloudUsername: string | null }[]),
+      ]);
+      const ncUsers = allUsers.filter((u) => u.id.toLowerCase() !== systemUser);
+      const uuidByNcUsername = new Map<string, string>();
+      const uuidByUsername = new Map<string, string>();
+      for (const row of localRows) {
+        if (row.nextcloudUsername) uuidByNcUsername.set(row.nextcloudUsername.toLowerCase(), row.id);
+        uuidByUsername.set(row.username.toLowerCase(), row.id);
+      }
+      const users = ncUsers.map((u) => {
+        const key = u.id.toLowerCase();
+        return {
+          ...u,
+          userId: uuidByNcUsername.get(key) ?? uuidByUsername.get(key) ?? null,
+        };
+      });
       res.json({ users });
     } catch (err: any) {
       if (err.message?.includes("403") || err.message?.includes("997")) {
