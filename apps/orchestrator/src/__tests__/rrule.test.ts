@@ -6,7 +6,12 @@
  * disables rather than fabricate a fire time.
  */
 import { describe, it, expect } from "vitest";
-import { nextFireFromRrule, _parseRruleForTests } from "../utils/rrule.js";
+import {
+  nextFireFromRrule,
+  _parseRruleForTests,
+  _localWallClockToUtcForTests,
+  _normalizeH24ForTests,
+} from "../utils/rrule.js";
 
 describe("WARP-463 — parseRrule", () => {
   it("parses the §7 weekday example", () => {
@@ -205,5 +210,96 @@ describe("KAN-6 — nextFireFromRrule (per-row IANA timezone, DST-correct)", () 
         "Not/AZone",
       ),
     ).toBeNull();
+  });
+});
+
+describe("KAN-6 finding 2 — spring-forward gap snaps to the post-transition instant", () => {
+  // America/Los_Angeles springs forward 2026-03-08 02:00 → 03:00 local. The
+  // wall-clock 02:00–02:59 does NOT exist that day. A schedule authored as
+  // "02:30 local" must resolve to a REAL instant on the post-transition side
+  // (03:00 PDT = 10:00 UTC), as the localWallClockToUtc docstring claims —
+  // NOT the pre-transition 01:30 PST (09:30 UTC) the old 2-pass converger
+  // returned (it walked the offset backwards INTO the gap).
+
+  it("02:30 on the spring-forward day resolves to 10:00 UTC (03:00 PDT), not 09:30 UTC (01:30 PST)", () => {
+    const utc = _localWallClockToUtcForTests(
+      2026,
+      2, // March (0-based)
+      8,
+      2,
+      30,
+      0,
+      "America/Los_Angeles",
+    );
+    // The gap-input snaps forward to the first valid local instant: 03:00 PDT.
+    expect(utc.toISOString()).toBe("2026-03-08T10:00:00.000Z");
+    // And the result is unambiguously on the post-transition (PDT) side: its
+    // wall-clock in LA is NOT 01:30 (the pre-transition mis-resolution).
+    const localHour = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Los_Angeles",
+      hourCycle: "h23",
+      hour: "2-digit",
+      minute: "2-digit",
+    }).formatToParts(utc);
+    const parts = Object.fromEntries(localHour.map((p) => [p.type, p.value]));
+    expect(parts.hour).toBe("03");
+    expect(parts.minute).toBe("00");
+  });
+
+  it("a DAILY 02:30 routine on the gap day still fires (a real future instant, post-gap)", () => {
+    // Right before 02:30 local on the spring-forward day. The fire instant
+    // must exist and be in the future, not a pre-gap instant in the past.
+    const after = new Date("2026-03-08T09:00:00Z"); // 01:00 PST, pre-gap
+    const next = nextFireFromRrule(
+      "FREQ=DAILY;BYHOUR=2;BYMINUTE=30",
+      after,
+      "America/Los_Angeles",
+    );
+    expect(next).not.toBeNull();
+    expect(next!.getTime()).toBeGreaterThan(after.getTime());
+    expect(next!.toISOString()).toBe("2026-03-08T10:00:00.000Z");
+  });
+
+  it("a non-gap wall-clock is unaffected by the gap-snap fix", () => {
+    // 07:00 on the same day is well clear of the gap — must stay 14:00 UTC.
+    const utc = _localWallClockToUtcForTests(
+      2026,
+      2,
+      8,
+      7,
+      0,
+      0,
+      "America/Los_Angeles",
+    );
+    expect(utc.toISOString()).toBe("2026-03-08T14:00:00.000Z");
+  });
+});
+
+describe("KAN-6 finding 3 — hour==24 midnight guard rolls the day forward", () => {
+  // Some ICU builds report midnight as hour 24 of the SAME day rather than
+  // hour 0 of the NEXT day. The old guard reset hour→0 but left the day put,
+  // computing the offset one day early. The fix must roll the day forward.
+
+  it("hour 24 normalizes to hour 0 of the NEXT day", () => {
+    expect(
+      _normalizeH24ForTests({ year: 2026, month: 3, day: 8, hour: 24 }),
+    ).toEqual({ year: 2026, month: 3, day: 9, hour: 0 });
+  });
+
+  it("a normal hour and day are passed through untouched", () => {
+    expect(
+      _normalizeH24ForTests({ year: 2026, month: 3, day: 8, hour: 23 }),
+    ).toEqual({ year: 2026, month: 3, day: 8, hour: 23 });
+    expect(
+      _normalizeH24ForTests({ year: 2026, month: 3, day: 8, hour: 0 }),
+    ).toEqual({ year: 2026, month: 3, day: 8, hour: 0 });
+  });
+
+  it("the day-roll crosses a month boundary via Date.UTC normalisation", () => {
+    // hour 24 on the last day of a month → day+1 is handled by the caller's
+    // Date.UTC, which normalises an out-of-range day into the next month.
+    expect(
+      _normalizeH24ForTests({ year: 2026, month: 1, day: 31, hour: 24 }),
+    ).toEqual({ year: 2026, month: 1, day: 32, hour: 0 });
   });
 });

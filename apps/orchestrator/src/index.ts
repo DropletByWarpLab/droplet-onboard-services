@@ -58,6 +58,7 @@ import {
 import { purgeAuditLogs } from "./services/audit-retention-purge.service.js";
 import { tickToolSchedules } from "./services/tool-schedule-ticker.service.js";
 import { tickSceneSchedules } from "./services/scene-schedule-ticker.service.js";
+import { backfillLegacySceneScheduleTimezones } from "./services/scene-schedule-tz-backfill.service.js";
 import type { MatterDispatcher } from "./routes/scenes.js";
 import { sendMatterCommand } from "./services/matter.service.js";
 import { mcpClient } from "./services/mcp-client.singleton.js";
@@ -145,6 +146,29 @@ async function main() {
     sub: `pid ${process.pid}`,
   });
   logger.info("Activity recorder initialized");
+
+  // KAN-6 — one-shot, idempotent backfill: convert pre-KAN-6 SceneSchedule
+  // rows (which stored the fire HOUR as a UTC value in BYHOUR, timezone='UTC')
+  // to the box's local IANA zone so describeRrule shows the owner's local time
+  // again while the firing instant stays put. Runs here, right after migrations
+  // applied (migrate-and-start.sh's `prisma migrate deploy && node …`) and
+  // BEFORE the scene-schedule ticker starts. Records completion in SystemFlag,
+  // so every later boot short-circuits and UI-authored rows are never touched.
+  // Non-fatal: a backfill must not wedge startup.
+  try {
+    const tzBackfill = await backfillLegacySceneScheduleTimezones(prisma);
+    if (tzBackfill.ran) {
+      logger.info(
+        { converted: tzBackfill.converted, skipped: tzBackfill.skipped },
+        "scene-schedule timezone backfill applied",
+      );
+    }
+  } catch (err) {
+    logger.warn(
+      { err },
+      "scene-schedule timezone backfill threw (continuing startup)",
+    );
+  }
 
   // Initialize services
   initDeviceService(prisma);

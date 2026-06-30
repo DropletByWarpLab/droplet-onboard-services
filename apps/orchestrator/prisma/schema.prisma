@@ -3131,3 +3131,17 @@ model PmActivity {
 
   @@index([workItemId, createdAt])
 }
+
+/// KAN-6 — internal, operator-invisible one-shot markers for data migrations
+/// that can't run as pure SQL (they need runtime-resolved values like the
+/// box's local IANA timezone). NOT a user-facing setting — no route reads or
+/// writes it (unlike WorkspaceSetting, which the Settings surface enumerates).
+/// A backfill writes its `key` once on success and short-circuits on every
+/// later boot, so the conversion runs exactly once even though it lives in the
+/// startup path rather than a SQL migration. State is the presence of the row
+/// (an explicit marker we insert), never an IS-NULL on domain data.
+model SystemFlag {
+  key       String   @id
+  valueJson Json     @default("{}")
+  createdAt DateTime @default(now())
+}
