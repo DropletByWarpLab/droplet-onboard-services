@@ -3,9 +3,9 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-const globals = readFileSync(resolve(__dirname, "../../app/globals.css"), "utf8");
+const globals = readFileSync(resolve(__dirname, "../app/globals.css"), "utf8");
 const projects = readFileSync(
-  resolve(__dirname, "../../app/projects/projects.css"),
+  resolve(__dirname, "../app/projects/projects.css"),
   "utf8",
 );
 
