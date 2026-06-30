@@ -91,7 +91,15 @@ export function AgendaView({ events, onSelect, colorOf, selectedKey }: Props) {
   useEffect(() => {
     if (!selectedKey) return;
     const el = containerRef.current?.querySelector<HTMLElement>(`#${CSS.escape(agendaDayId(selectedKey))}`);
-    el?.scrollIntoView({ behavior: "smooth", block: "start" });
+    // Honour prefers-reduced-motion: the CSS global block doesn't override a
+    // programmatic scrollIntoView({behavior:"smooth"}), so gate it here —
+    // reduced-motion users get an instant jump instead of an animated scroll.
+    // Mirrors network/schedule-anchor-scroll.ts (WARP-100). SSR/jsdom-safe.
+    const reduceMotion =
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    el?.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
   }, [selectedKey, groups]);
 
   if (groups.length === 0) {

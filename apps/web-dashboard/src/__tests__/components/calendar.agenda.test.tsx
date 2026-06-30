@@ -101,4 +101,33 @@ describe("Calendar Agenda view (WARP-944)", () => {
     expect(scrollSpy).toHaveBeenCalled();
     scrollSpy.mockRestore();
   });
+
+  // WARP-944 (UX review): the global reduced-motion CSS block does NOT override a
+  // programmatic scrollIntoView({behavior:"smooth"}) — it has to be gated in JS.
+  // Mirror schedule-anchor-scroll.ts: reduced-motion users get an instant jump.
+  it("uses non-smooth scroll behavior when prefers-reduced-motion is set", () => {
+    HTMLElement.prototype.scrollIntoView = vi.fn();
+    const scrollSpy = vi.spyOn(HTMLElement.prototype, "scrollIntoView");
+
+    const matchMediaMock = vi.fn().mockReturnValue({ matches: true });
+    vi.stubGlobal("matchMedia", matchMediaMock);
+
+    render(<CalendarPage />);
+    fireEvent.click(screen.getByRole("button", { name: /^agenda$/i }));
+
+    const label = evDate.toLocaleDateString(undefined, {
+      weekday: "long",
+      month: "long",
+      day: "numeric",
+    });
+    const dayButtons = screen.getAllByRole("button", { name: label });
+    fireEvent.click(dayButtons[0]);
+
+    expect(matchMediaMock).toHaveBeenCalledWith("(prefers-reduced-motion: reduce)");
+    expect(scrollSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ behavior: "auto" }),
+    );
+    scrollSpy.mockRestore();
+    vi.unstubAllGlobals();
+  });
 });
