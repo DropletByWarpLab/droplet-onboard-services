@@ -1,14 +1,14 @@
 /**
- * WARP-914 — the WelcomeStep "Learn more" link deep-links to /help#privacy,
- * so /help MUST carry a `privacy` section that explains what Droplet is, that
- * the AI runs locally on the customer's own hardware, and how privacy works.
+ * The WelcomeStep "Learn more" link deep-links to /help#privacy, so the
+ * `privacy` section must explain what Droplet is, that the AI runs locally on
+ * the customer's own hardware, and how privacy works.
  *
- * A missing section here is a dead "Learn more" link (the welcome page would
- * land the customer at the top of /help instead of the privacy topic they
- * tapped).
+ * The anchor/TOC/section-element contract for `privacy` (and every other
+ * helpAnchor) is already covered by help.page.test.tsx via SECTION_ANCHORS;
+ * this file only adds the privacy-specific body + search-index coverage.
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render } from "@testing-library/react";
 
 vi.mock("framer-motion", async () => {
   const actual =
