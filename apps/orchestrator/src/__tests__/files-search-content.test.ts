@@ -84,6 +84,27 @@ vi.mock("../services/nextcloud.client.js", async (importOriginal) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────
+// WARP-940 — the name arm resolves a per-user Nextcloud token via
+// `resolveNcToken`. Stub it so we can drive the "missing NC session" path
+// (returns null → getToken throws MissingNcTokenError → 401) independently
+// of a live cookie/Redis. Default mirrors the AUTH_ENABLED=false dev token.
+// ─────────────────────────────────────────────────────────────────────────
+const { resolveNcTokenSpy } = vi.hoisted(() => ({
+  resolveNcTokenSpy: vi.fn(),
+}));
+
+vi.mock("../services/nextcloud-session.service.js", async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import("../services/nextcloud-session.service.js")
+    >();
+  return {
+    ...actual,
+    resolveNcToken: (...args: unknown[]) => resolveNcTokenSpy(...args),
+  };
+});
+
+// ─────────────────────────────────────────────────────────────────────────
 // Mock the cache so we can assert key isolation across modes. The real
 // cache.service no-ops when REDIS_URL is unset, so a spy is the only way
 // to observe the composed cache key.
@@ -164,6 +185,9 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
     isGrpcAvailableSpy.mockReturnValue(true);
     // Default: no name matches — keep existing content-only specs unchanged.
     ncSearchFilesSpy.mockResolvedValue([]);
+    resolveNcTokenSpy.mockReset();
+    // Default: a valid NC session token is present (mirrors dev-mode).
+    resolveNcTokenSpy.mockResolvedValue("dev-mode-token");
   });
 
   // ── 1. keyword calls searchByLexical, never the gRPC embed ──────────────
@@ -397,6 +421,70 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
     const call = ncSearchFilesSpy.mock.calls[0];
     expect(call[1]).toBe("dev"); // AUTH_ENABLED=false → stub user
     expect(call[2]).toMatchObject({ query: "const" });
+    // WARP-940: over-fetch the name arm too. parseMultiStatus sorts dirs
+    // first and nameHitsToResults drops them, so without headroom a
+    // directory-heavy match yields 0 file results. Mirror the content arm's
+    // CHUNKS_PER_FILE_FACTOR (default limit 20 → 100).
+    expect(call[2].limit).toBe(20 * 5);
+  });
+
+  // ── WARP-940 hardening (pr-reviewer findings) ───────────────────────────
+
+  it("does NOT poison the cache when the name arm degrades (Nextcloud down)", async () => {
+    // Content arm has fewer than `limit` hits, so the name arm runs and fails.
+    searchByLexicalSpy.mockResolvedValueOnce([
+      { path: "/Docs/notes.txt", score: 0.7, snippet: "alpha", source: "nextcloud", chunkIdx: 0 },
+    ]);
+    ncSearchFilesSpy.mockRejectedValueOnce(new Error("nextcloud unreachable"));
+
+    const res = await request(app).get(
+      "/api/files/search/content?q=alpha&mode=keyword&limit=20",
+    );
+
+    // Request still succeeds (content-only degrade) …
+    expect(res.status).toBe(200);
+    expect(res.body.results.map((r: { path: string }) => r.path)).toContain(
+      "/Docs/notes.txt",
+    );
+    // … but the degraded, content-only union must NOT be written to the 60s
+    // cache, or it would serve stale results after Nextcloud recovers.
+    expect(cacheSetSpy).not.toHaveBeenCalled();
+  });
+
+  it("re-throws a missing Nextcloud session as 401 (auth failure ≠ degrade)", async () => {
+    searchByLexicalSpy.mockResolvedValueOnce([
+      { path: "/Docs/notes.txt", score: 0.7, snippet: "alpha", source: "nextcloud", chunkIdx: 0 },
+    ]);
+    // No NC token → getToken throws MissingNcTokenError. This is an auth
+    // failure, not an outage: it must propagate (401), not silently degrade.
+    resolveNcTokenSpy.mockResolvedValueOnce(null);
+
+    const res = await request(app).get(
+      "/api/files/search/content?q=alpha&mode=keyword&limit=20",
+    );
+
+    expect(res.status).toBe(401);
+    // A 401 must never be cached.
+    expect(cacheSetSpy).not.toHaveBeenCalled();
+    // The name arm never fired — the token resolution failed first.
+    expect(ncSearchFilesSpy).not.toHaveBeenCalled();
+  });
+
+  it("skips the name arm entirely when content hits already fill the limit", async () => {
+    // limit=2 and the content arm returns 2 distinct files → name arm would
+    // only produce results that get discarded, so don't pay the WebDAV cost.
+    searchByLexicalSpy.mockResolvedValueOnce([
+      { path: "/Docs/a.txt", score: 0.9, snippet: "a", source: "nextcloud", chunkIdx: 0 },
+      { path: "/Docs/b.txt", score: 0.8, snippet: "b", source: "nextcloud", chunkIdx: 0 },
+    ]);
+
+    const res = await request(app).get(
+      "/api/files/search/content?q=const&mode=keyword&limit=2",
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body.results).toHaveLength(2);
+    expect(ncSearchFilesSpy).not.toHaveBeenCalled();
   });
 
   it("keyword still returns content hits when the name arm (Nextcloud) is down", async () => {

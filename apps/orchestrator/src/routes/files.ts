@@ -1817,50 +1817,69 @@ export function createFilesRouter(prisma: PrismaClient): Router {
         const { searchByLexical } = await import(
           "../services/file-search.service.js"
         );
-        // Two arms, run in parallel:
+        // Two arms:
         //   1. lexical CONTENT match over FileContentChunk.text_tsv
         //   2. Nextcloud NAME match (%substring% on display name)
         // WARP-940: the AC is "files whose name and/or content contain the
         // term", but keyword used to run arm 1 only — so a partial term like
         // "const" never surfaced a file named "Construction…", even though
         // the Name-mode endpoint (same ncSearchFiles) finds it fine.
+        const contentHits = await searchByLexical(prisma, {
+          userId: user,
+          query: q,
+          limit: limit * CHUNKS_PER_FILE_FACTOR,
+          source: "nextcloud",
+        });
+        const contentResults = dedupeHitsPerFile(contentHits, limit);
+
+        // Arm 2 is a best-effort enhancement. Skip it entirely when the
+        // content arm already filled the page — the union would discard every
+        // name hit anyway, so firing a WebDAV SEARCH there is pure waste.
         //
         // The name arm hits Nextcloud (WebDAV), a SEPARATE dependency from
         // the AI gateway. Keyword's "works gateway-down" promise is about the
-        // AI stack, so a failing/absent name arm must NOT fail the request —
-        // it degrades to content-only. Each arm is settled independently.
-        const [contentHits, nameFiles] = await Promise.all([
-          searchByLexical(prisma, {
-            userId: user,
-            query: q,
-            limit: limit * CHUNKS_PER_FILE_FACTOR,
-            source: "nextcloud",
-          }),
-          (async (): Promise<FileEntryInfo[]> => {
-            try {
-              return await ncSearchFiles(await getToken(req), user, {
-                query: q,
-                limit,
-              });
-            } catch (nameErr) {
-              // Name arm is best-effort: Nextcloud down / no token must not
-              // sink the content results. Log + degrade to content-only.
-              logger.warn(
-                { err: nameErr },
-                "keyword search: name arm failed; returning content-only",
-              );
-              return [];
-            }
-          })(),
-        ]);
-        const contentResults = dedupeHitsPerFile(contentHits, limit);
-        const nameResults = nameHitsToResults(nameFiles);
+        // AI stack, so a Nextcloud OUTAGE on this arm must NOT fail the
+        // request — it degrades to content-only. An AUTH failure (missing /
+        // expired NC session) is different: it is not an outage, so resolve
+        // the token OUTSIDE the best-effort catch and let a
+        // MissingNcTokenError propagate (→ 401) instead of masking a re-login
+        // prompt as a degraded 200.
+        let nameDegraded = false;
+        let nameResults: Array<{ path: string; score: number; text: string }> =
+          [];
+        if (contentResults.length < limit) {
+          const token = await getToken(req); // auth failure → 401, not degrade
+          try {
+            const nameFiles = await ncSearchFiles(token, user, {
+              query: q,
+              // Over-fetch like the content arm: parseMultiStatus sorts
+              // directories first and nameHitsToResults drops them, so a
+              // directory-heavy match needs headroom to yield `limit` files.
+              limit: limit * CHUNKS_PER_FILE_FACTOR,
+            });
+            nameResults = nameHitsToResults(nameFiles);
+          } catch (nameErr) {
+            // Nextcloud unreachable on the name arm: log + degrade to
+            // content-only, and flag so we DON'T persist the degraded union.
+            nameDegraded = true;
+            logger.warn(
+              { err: nameErr },
+              "keyword search: name arm failed; returning content-only",
+            );
+          }
+        }
+
         const results = unionContentAndNameHits(
           contentResults,
           nameResults,
           limit,
         );
-        await cacheSet(cacheKey, results, 60);
+        // Only cache a COMPLETE result set. A degraded (content-only) union
+        // must not be written to the 60s cache, or it would keep serving the
+        // stale, partial result for up to 60s after Nextcloud recovers.
+        if (!nameDegraded) {
+          await cacheSet(cacheKey, results, 60);
+        }
         res.json({ results });
         return;
       }
