@@ -46,4 +46,18 @@ describe("EventForm ARIA (WARP-289)", () => {
     );
     expect(screen.queryByRole("dialog")).toBeNull();
   });
+
+  it("stacks the Starts/Ends grid on narrow viewports and goes 2-col at sm (WARP-943)", () => {
+    // The date input carries an 8.5rem floor so the year isn't clipped; on a
+    // ~360px phone two such columns overflow the cell, so the grid must stack
+    // (grid-cols-1) and only split side-by-side at the sm breakpoint up.
+    render(
+      <EventForm open onClose={vi.fn()} onSaved={vi.fn()} initial={null} />,
+    );
+    const startsCaption = screen.getByText("Starts", { selector: "span" });
+    const grid = startsCaption.closest("div.grid");
+    expect(grid).not.toBeNull();
+    expect(grid!.className).toContain("grid-cols-1");
+    expect(grid!.className).toContain("sm:grid-cols-2");
+  });
 });

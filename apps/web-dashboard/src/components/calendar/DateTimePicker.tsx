@@ -83,7 +83,8 @@ export function DateTimePicker({ value, onChange, label, disabled }: Props) {
         value={date}
         disabled={disabled}
         onChange={(e) => emit(e.target.value, time)}
-        className="dp-input flex-1 min-w-0"
+        // WARP-943: min-w-0 let flexbox shrink below MM/DD/YYYY+icon; 8.5rem floor keeps the year visible.
+        className="dp-input flex-1 min-w-[8.5rem]"
       />
       <select
         id={timeId}
