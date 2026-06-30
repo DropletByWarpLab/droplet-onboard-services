@@ -101,16 +101,25 @@ function reportWindow(scope: ReportScope, cursor: Date): { from: Date; to: Date;
 export default function CalendarPage() {
   const [view, setView] = useState<View>("month");
   const [cursor, setCursor] = useState(() => new Date());
+  // Day clicked in the mini-month while in Agenda view — drives the scroll-to +
+  // highlight of that day's section.
+  const [selectedKey, setSelectedKey] = useState<string | undefined>(undefined);
   const [hidden, setHidden] = useState<Set<string>>(() => new Set());
   const { toast } = useToast();
 
-  const range =
-    view === "month"
-      ? monthGridRange(cursor)
-      : {
-          from: new Date(new Date().setHours(0, 0, 0, 0)),
-          to: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-        };
+  // Fetch window for the active view. Memoized off the cursor's month so the
+  // SWR key is stable across renders (the old agenda range rebuilt `Date.now()`
+  // every render, churning the cache) and — crucially — so the agenda follows
+  // the navigated month instead of being pinned to a fixed today+30d window.
+  // The agenda covers the visible month plus the rest of the year ahead, so
+  // "up next" style scrolling still works while events for the viewed month
+  // actually populate.
+  const range = useMemo(() => {
+    if (view === "month") return monthGridRange(cursor);
+    const from = new Date(cursor.getFullYear(), cursor.getMonth(), 1, 0, 0, 0, 0);
+    const to = new Date(cursor.getFullYear(), cursor.getMonth() + 12, 0, 23, 59, 59, 999);
+    return { from, to };
+  }, [view, cursor]);
 
   const { events, refresh, isLoading } = useCalendarEvents(range);
   const { sources } = useCalendarSources();
@@ -261,6 +270,15 @@ export default function CalendarPage() {
   const nextMonth = () => setCursor((c) => new Date(c.getFullYear(), c.getMonth() + 1, 1));
   const goToday = () => setCursor(new Date());
 
+  // Mini-month day click: move the cursor (drives the month grid + the agenda
+  // fetch window) and, in Agenda view, mark the picked day so the agenda scrolls
+  // to + highlights it. The previous build only set the cursor, which the agenda
+  // ignored entirely — so picking a date did nothing (WARP-944).
+  const pickDay = useCallback((d: Date) => {
+    setCursor(d);
+    setSelectedKey(dayKey(d));
+  }, []);
+
   const eventCount = events.length;
   const sub =
     eventCount === 0
@@ -347,7 +365,7 @@ export default function CalendarPage() {
       <div className="grid grid-cols-1 lg:grid-cols-[260px_1fr] gap-6">
         {/* Left rail — mini-month, calendars, up next, reminders, subscriptions */}
         <aside className="flex flex-col gap-4 order-2 lg:order-1">
-          <MiniMonth cursor={cursor} eventDays={eventDays} onCursor={(d) => setCursor(d)} />
+          <MiniMonth cursor={cursor} eventDays={eventDays} onCursor={pickDay} />
 
           <div className="card">
             <h2 style={{ fontSize: 14, fontWeight: 600, color: "var(--text)", margin: "0 0 8px" }}>Calendars</h2>
@@ -434,7 +452,12 @@ export default function CalendarPage() {
               colorOf={colorOf}
             />
           ) : (
-            <AgendaView events={visibleEvents} onSelect={openDetail} colorOf={colorOf} />
+            <AgendaView
+              events={visibleEvents}
+              onSelect={openDetail}
+              colorOf={colorOf}
+              selectedKey={selectedKey}
+            />
           )}
 
           {/* Color legend — at-a-glance key beside the grid; chips toggle the
