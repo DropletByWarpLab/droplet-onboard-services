@@ -1799,7 +1799,8 @@ export function createFilesRouter(prisma: PrismaClient): Router {
         // the AI gateway. Keyword's "works gateway-down" promise is about the
         // AI stack, so a failing/absent name arm must NOT fail the request —
         // it degrades to content-only. Each arm is settled independently.
-        const [contentHits, nameFiles] = await Promise.all([
+        let nameArmDegraded = false;
+        const [contentHits, nameFilesRaw] = await Promise.all([
           searchByLexical(prisma, {
             userId: user,
             query: q,
@@ -1810,11 +1811,16 @@ export function createFilesRouter(prisma: PrismaClient): Router {
             try {
               return await ncSearchFiles(await getToken(req), user, {
                 query: q,
-                limit,
+                // Over-fetch to absorb directory entries that nameHitsToResults
+                // filters out (mirrors the content arm's CHUNKS_PER_FILE_FACTOR).
+                limit: limit * CHUNKS_PER_FILE_FACTOR,
               });
             } catch (nameErr) {
-              // Name arm is best-effort: Nextcloud down / no token must not
-              // sink the content results. Log + degrade to content-only.
+              // Re-throw auth failures so callers get a 401, not a silent
+              // content-only degradation with a cached 60 s stale result.
+              if (nameErr instanceof MissingNcTokenError) throw nameErr;
+              // Other errors (Nextcloud down, network timeout) degrade gracefully.
+              nameArmDegraded = true;
               logger.warn(
                 { err: nameErr },
                 "keyword search: name arm failed; returning content-only",
@@ -1824,13 +1830,18 @@ export function createFilesRouter(prisma: PrismaClient): Router {
           })(),
         ]);
         const contentResults = dedupeHitsPerFile(contentHits, limit);
+        // Skip name arm when content already fills the limit to avoid a
+        // no-op union on a full result set.
+        const nameFiles = contentResults.length >= limit ? [] : nameFilesRaw;
         const nameResults = nameHitsToResults(nameFiles);
         const results = unionContentAndNameHits(
           contentResults,
           nameResults,
           limit,
         );
-        await cacheSet(cacheKey, results, 60);
+        // Don't cache a degraded (content-only) result — the name arm may
+        // recover before the TTL expires and the caller would get stale data.
+        if (!nameArmDegraded) await cacheSet(cacheKey, results, 60);
         res.json({ results });
         return;
       }

@@ -397,6 +397,7 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
     const call = ncSearchFilesSpy.mock.calls[0];
     expect(call[1]).toBe("dev"); // AUTH_ENABLED=false → stub user
     expect(call[2]).toMatchObject({ query: "const" });
+    expect(call[2].limit).toBe(100); // default limit(20) * CHUNKS_PER_FILE_FACTOR(5)
   });
 
   it("keyword still returns content hits when the name arm (Nextcloud) is down", async () => {
