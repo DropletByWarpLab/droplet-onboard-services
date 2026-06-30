@@ -54,6 +54,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from auth import keystore
 from auth.byok import save_api_key, delete_api_key
 from middleware.rate_limit import RateLimitMiddleware, close_rate_limiter
+from middleware.request_id import RequestIdMiddleware
 from models.registry import ModelRegistry
 from router import ProviderRouter
 from schemas import (
@@ -270,8 +271,15 @@ app.add_middleware(
     allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Request-Priority", PRINCIPAL_HEADER],
+    allow_headers=["Authorization", "Content-Type", "X-Request-Priority", "x-request-id", PRINCIPAL_HEADER],
 )
+
+# --- Inbound request-id propagation (WARP-108) ---
+# Outermost: pure ASGI (not BaseHTTPMiddleware) so the contextvar it sets is
+# visible in the endpoint and downstream provider calls. Added last so
+# Starlette applies it first/outermost — it must see every request, including
+# ones CORS or auth would reject, so the response always carries x-request-id.
+app.add_middleware(RequestIdMiddleware)
 
 
 # --- Health ---
