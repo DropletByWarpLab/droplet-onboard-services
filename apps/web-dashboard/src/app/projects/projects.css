@@ -207,6 +207,11 @@
 }
 .pm-scope .pm-input::placeholder { color: var(--text-4); }
 .pm-scope .pm-input:focus { outline: none; border-color: color-mix(in srgb, var(--accent) 50%, var(--border)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 24%, transparent); }
+/* Native <select> popup options. `color-scheme: dark` on the theme root paints
+   the popup chrome dark, but some engines ignore it for the option list, so pin
+   the option surface to the OPAQUE canvas token (not the translucent --bg-sunken
+   used by the closed control) + the label token. No hardcoded white. WARP-946. */
+.pm-scope .pm-input option, .pm-scope .pm-input optgroup { background-color: var(--bg-canvas); color: var(--text); }
 .pm-scope textarea.pm-input { height: auto; padding: 9px 11px; line-height: 1.5; resize: vertical; }
 .pm-scope .pm-search { position: relative; display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 10px; background: var(--bg-sunken); border: 1px solid var(--border); border-radius: 8px; color: var(--text-3); }
 .pm-scope .pm-search input { flex: 1; min-width: 0; background: transparent; border: none; outline: none; font-size: 13px; color: var(--text); font-family: inherit; }
