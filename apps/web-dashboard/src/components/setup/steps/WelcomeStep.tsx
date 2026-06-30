@@ -3,6 +3,7 @@
 import { Shield, Lock, Check } from "lucide-react";
 import { DropletMark } from "@/components/DropletMark";
 import { StepShell } from "@/components/setup/StepShell";
+import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 
 const TRUST = [
   { icon: Shield, label: "On-prem" },
@@ -30,9 +31,12 @@ export function WelcomeStep({ onContinue }: { onContinue: () => void }) {
       subtitle="Your private edge AI appliance"
       primary={{ label: "Get Started", onClick: onContinue, showArrow: true }}
     >
-      <p className="type-body text-label-secondary max-w-md">
-        Droplet keeps your files, conversations, and smart home control
-        completely private — powered by local AI running on your hardware.
+      <p
+        data-testid="welcome-privacy-claim"
+        className="type-headline text-label-primary max-w-md"
+      >
+        Your files, conversations, and smart home stay in your home — the AI
+        that runs them lives on your own Droplet and never leaves it.
       </p>
 
       <ul className="mt-6 flex flex-wrap gap-2">
@@ -54,6 +58,19 @@ export function WelcomeStep({ onContinue }: { onContinue: () => void }) {
         />
         Appliance detected · ready to configure
       </div>
+
+      <LearnMoreCard title="What is Droplet?" helpAnchor="privacy">
+        <p>
+          A single box on your own network that runs your files, conversations,
+          cameras, and smart-home control — your own private cloud, except it
+          never leaves home.
+        </p>
+        <p>
+          The AI runs locally on the hardware in front of you, so your data
+          stays on the box. Tap “Learn more” for the full picture on how
+          Droplet keeps everything private.
+        </p>
+      </LearnMoreCard>
     </StepShell>
   );
 }

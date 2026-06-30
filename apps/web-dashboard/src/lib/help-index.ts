@@ -31,6 +31,13 @@ export interface HelpEntry {
 
 export const HELP_INDEX: readonly HelpEntry[] = [
   {
+    id: "privacy",
+    title: "What is Droplet & how privacy works",
+    summary:
+      "Droplet is a private AI appliance that lives on your own network — a single box that runs your files, conversations, video, and smart-home control. The AI runs locally on the hardware in front of you (the GPU inside this Droplet), not on someone else's servers, so by default your messages and the model's replies never leave the box. Everything you store and record stays on the Droplet's own drives; nothing is sent off the appliance unless you explicitly choose to, like adding an optional cloud AI key in Settings. When you're away from home, your phone reaches the Droplet over its own end-to-end-encrypted VPN, without passing through any cloud service.",
+    keywords: ["privacy", "what is droplet", "local ai", "local", "private", "on device", "on-device", "no cloud", "data", "security", "gpu", "hardware", "offline"],
+  },
+  {
     id: "claim",
     title: "Claiming your Droplet",
     summary:

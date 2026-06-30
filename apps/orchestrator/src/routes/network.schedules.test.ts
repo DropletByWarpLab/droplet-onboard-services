@@ -594,7 +594,9 @@ describe("Schedule / override / event / manualBlock API (WARP-94)", () => {
           subjectType: "device",
           deviceMac: "AA:BB:CC:DD:EE:01",
           action: "allow",
-          endAt: "2099-01-01T00:00:00Z",
+          // Within the 90-day ScheduleOverride cap (WARP-114, #729). A stale
+          // far-future literal ("2099-…") now exceeds the cap and 400s.
+          endAt: new Date(Date.now() + 30 * 86400_000).toISOString(),
         });
       expect(res.status).toBe(201);
       expect(res.body.override.action).toBe("allow");
@@ -650,13 +652,13 @@ describe("Schedule / override / event / manualBlock API (WARP-94)", () => {
         subjectType: "device",
         deviceMac: "AA:BB:CC:DD:EE:01",
         action: "allow",
-        endAt: "2099-01-01T00:00:00Z",
+        endAt: new Date(Date.now() + 30 * 86400_000).toISOString(),
       });
       await request(app).post("/api/network/overrides").send({
         subjectType: "device",
         deviceMac: "AA:BB:CC:DD:EE:02",
         action: "block",
-        endAt: "2099-01-01T00:00:00Z",
+        endAt: new Date(Date.now() + 30 * 86400_000).toISOString(),
       });
       const res = await request(app).get(
         "/api/network/overrides?deviceMac=AA:BB:CC:DD:EE:01",
@@ -675,7 +677,7 @@ describe("Schedule / override / event / manualBlock API (WARP-94)", () => {
         subjectType: "device",
         deviceMac: "AA:BB:CC:DD:EE:01",
         action: "allow",
-        endAt: "2099-01-01T00:00:00Z",
+        endAt: new Date(Date.now() + 30 * 86400_000).toISOString(),
       });
       const id = create.body.override.id;
       const res = await request(app).delete(`/api/network/overrides/${id}`);
