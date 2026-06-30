@@ -135,6 +135,42 @@ describe("AuthGate — routes off /setup/state (PR #372)", () => {
 });
 
 /**
+ * Invite acceptance — an invite link (`/invite/<token>`) targets a brand-new
+ * person who has NO session yet and lands on a CLAIMED box (appliance "ready").
+ * `/invite` must be public, like /login and /setup: AuthGate must NOT bounce
+ * the anonymous invitee to /login, and must render the password-set form.
+ * Pre-fix the route was protected, so the link "just went to the sign-in page"
+ * and the invitee could never set a password.
+ */
+describe("AuthGate — public /invite acceptance route", () => {
+  beforeEach(() => {
+    replaceMock.mockReset();
+    useAuthMock.mockReset();
+    pathnameValue = "/";
+  });
+
+  it("renders the invite page for an anonymous visitor on a ready box — no /login bounce", () => {
+    pathnameValue = "/invite/tok_abc123";
+    setAuth({
+      user: null,
+      isLoading: false,
+      setupState: { appliance: "ready", setupStep: "done", userTourCompleted: true },
+    });
+    const { container } = render(<AuthGate>set your password</AuthGate>);
+    expect(replaceMock).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("set your password");
+  });
+
+  it("renders the invite page even before auth has resolved (public, not gated on loading)", () => {
+    pathnameValue = "/invite/tok_abc123";
+    setAuth({ user: null, isLoading: true, setupState: null });
+    const { container } = render(<AuthGate>set your password</AuthGate>);
+    expect(replaceMock).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("set your password");
+  });
+});
+
+/**
  * WARP-867 — an AUTHENTICATED user on an UNCLAIMED appliance must have one
  * stable home: the wizard. The account step auto-logs the owner in, so this
  * combination is the NORMAL state for the entire back half of first-run.
