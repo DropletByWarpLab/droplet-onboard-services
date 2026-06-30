@@ -175,7 +175,19 @@ export default function CalendarPage() {
 
   const eventDays = useMemo(() => {
     const s = new Set<string>();
-    for (const e of visibleEvents) s.add(dayKey(new Date(e.startsAt)));
+    for (const e of visibleEvents) {
+      const start = new Date(e.startsAt);
+      const endMs = e.endsAt && !isNaN(new Date(e.endsAt).getTime())
+        ? Math.max(new Date(e.endsAt).getTime() - 1, start.getTime())
+        : start.getTime();
+      const cur = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+      const lastDay = new Date(endMs);
+      lastDay.setHours(0, 0, 0, 0);
+      for (let g = 0; cur <= lastDay && g < 400; g++) {
+        s.add(dayKey(new Date(cur)));
+        cur.setDate(cur.getDate() + 1);
+      }
+    }
     return s;
   }, [visibleEvents]);
 
@@ -267,7 +279,7 @@ export default function CalendarPage() {
 
   const monthLabel = cursor.toLocaleDateString(undefined, { month: "long", year: "numeric" });
   // Toolbar nav is an implicit deselection: clear `selectedKey` so a stale
-  // scroll target doesn't yank the agenda back after navigating (pr-reviewer #3).
+  // scroll target doesn't yank the agenda back after navigating.
   const prevMonth = () => {
     setCursor((c) => new Date(c.getFullYear(), c.getMonth() - 1, 1));
     setSelectedKey(undefined);
@@ -285,9 +297,8 @@ export default function CalendarPage() {
   // fetch window) and, ONLY in Agenda view, mark the picked day so the agenda
   // scrolls to + highlights it. `selectedKey` is agenda-only context: setting it
   // from Month view (where the agenda isn't rendered) would make a later switch
-  // to Agenda auto-scroll to a stale date the user never selected there
-  // (pr-reviewer #2). The previous build set neither — picking a date did
-  // nothing (WARP-944).
+  // to Agenda auto-scroll to a stale date the user never selected there.
+  // The previous build set neither — picking a date did nothing (WARP-944).
   const pickDay = useCallback(
     (d: Date) => {
       setCursor(d);

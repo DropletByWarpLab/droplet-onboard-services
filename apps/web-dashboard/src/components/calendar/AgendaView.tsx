@@ -31,7 +31,7 @@ export function groupByDay(
     // Treat endsAt as exclusive (−1 ms) so an all-day event ending at next
     // midnight doesn't bleed into the following day; clamp ≥ start for
     // missing/inverted data.
-    const endMs = ev.endsAt
+    const endMs = ev.endsAt && !isNaN(new Date(ev.endsAt).getTime())
       ? Math.max(new Date(ev.endsAt).getTime() - 1, start.getTime())
       : start.getTime();
     const cursor = new Date(start.getFullYear(), start.getMonth(), start.getDate());
@@ -54,7 +54,7 @@ export function groupByDay(
     .map(([key, evs]) => {
       evs.sort((a, b) =>
         a.allDay === b.allDay
-          ? new Date(a.startsAt).getTime() - new Date(b.startsAt).getTime()
+          ? (new Date(a.startsAt).getTime() || 0) - (new Date(b.startsAt).getTime() || 0)
           : a.allDay
             ? -1
             : 1,
@@ -91,7 +91,7 @@ export function AgendaView({ events, onSelect, colorOf, selectedKey }: Props) {
   // once they arrive), but every SWR poll hands us a fresh `events` → new
   // `groups` ref → the effect re-fires. Without this guard the user gets yanked
   // back to `selectedKey` on every poll cycle even after scrolling away. So we
-  // only scroll when the SELECTION genuinely changed (pr-reviewer #1).
+  // only scroll when the SELECTION genuinely changed.
   const lastScrolledKeyRef = useRef<string | undefined>(undefined);
 
   // Scroll the picked day's section into view when the selection changes.
@@ -104,7 +104,12 @@ export function AgendaView({ events, onSelect, colorOf, selectedKey }: Props) {
     }
     if (selectedKey === lastScrolledKeyRef.current) return;
     const el = containerRef.current?.querySelector<HTMLElement>(`#${CSS.escape(agendaDayId(selectedKey))}`);
-    if (!el) return; // events not loaded yet — retry on the next groups change
+    if (!el) {
+      // No section for this key — either events aren't loaded yet or the day is
+      // empty. Mark as scrolled to stop an infinite retry loop on empty days.
+      lastScrolledKeyRef.current = selectedKey;
+      return;
+    }
     // Honour prefers-reduced-motion: the CSS global block doesn't override a
     // programmatic scrollIntoView({behavior:"smooth"}), so gate it here —
     // reduced-motion users get an instant jump instead of an animated scroll.
