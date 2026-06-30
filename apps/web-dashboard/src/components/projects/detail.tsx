@@ -2,7 +2,7 @@
 
 // Work-item detail — rendered in a right slide-over (canonical Dialog).
 
-import { useId, useState } from "react";
+import { useId, useState, useEffect } from "react";
 import { Dialog } from "@/components/Dialog";
 import { useToast } from "@/components/Toast";
 import { PmIcon } from "./icons";
@@ -64,18 +64,25 @@ function LabelsEditor({
   const [editing, setEditing] = useState(false);
   // Optimistic local view of the selected ids so the chips flip instantly;
   // seeded from the item and reconciled to the server response on apply.
-  const [selected, setSelected] = useState<string[]>(() => item.labels.map((l) => l.id));
+  const [selected, setSelected] = useState<string[]>(() => (item.labels ?? []).map((l) => l.id));
   const [busy, setBusy] = useState(false);
+
+  // Re-seed when the parent pushes an updated item (e.g. after SWR revalidation).
+  useEffect(() => {
+    setSelected((item.labels ?? []).map((l) => l.id));
+  }, [item]);
+
+  const actions = pmActions();
 
   const apply = async (next: string[]) => {
     const prev = selected;
     setSelected(next); // optimistic
     setBusy(true);
     try {
-      const { work_item } = await pmActions().updateItem(item.id, { label_ids: next });
+      const { work_item } = await actions.updateItem(item.id, { label_ids: next });
       // Reconcile to the server's authoritative set (handles a label deleted
       // out from under us between read and write).
-      setSelected(work_item.labels.map((l) => l.id));
+      if (work_item) setSelected(work_item.labels.map((l) => l.id));
       onChanged();
     } catch (e) {
       setSelected(prev); // roll back the optimistic flip
@@ -91,8 +98,10 @@ function LabelsEditor({
     void apply(next);
   };
 
-  const chosen = (projectLabels ?? []).filter((l) => selected.includes(l.id));
-  const available = projectLabels ?? [];
+  const labels = projectLabels ?? [];
+  const chosen = projectLabels
+    ? projectLabels.filter((l) => selected.includes(l.id))
+    : item.labels.filter((l) => selected.includes(l.id));
 
   return (
     <span style={{ minWidth: 0, display: "inline-flex", flexDirection: "column", gap: 8 }}>
@@ -116,8 +125,8 @@ function LabelsEditor({
 
       {editing && (
         <span className="pm-row" style={{ gap: 6, flexWrap: "wrap" }}>
-          {available.length ? (
-            available.map((l) => {
+          {labels.length ? (
+            labels.map((l) => {
               const on = selected.includes(l.id);
               return (
                 <button
