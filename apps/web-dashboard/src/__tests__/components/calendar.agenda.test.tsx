@@ -130,4 +130,98 @@ describe("Calendar Agenda view (WARP-944)", () => {
     scrollSpy.mockRestore();
     vi.unstubAllGlobals();
   });
+
+  // pr-reviewer #1: `groups` (a useMemo over `events`) is in the scroll effect's
+  // dep array. Every SWR revalidation hands the page a fresh `events` array →
+  // new `groups` ref → effect re-fires → the user is yanked back to the picked
+  // day on every poll cycle, even after they manually scrolled away. The effect
+  // must only scroll on a GENUINELY new selection, not on a poll re-render.
+  it("does not re-scroll on a background poll re-render when the selection is unchanged", () => {
+    HTMLElement.prototype.scrollIntoView = vi.fn();
+    const scrollSpy = vi.spyOn(HTMLElement.prototype, "scrollIntoView");
+
+    const { rerender } = render(<CalendarPage />);
+    fireEvent.click(screen.getByRole("button", { name: /^agenda$/i }));
+
+    const label = evDate.toLocaleDateString(undefined, {
+      weekday: "long",
+      month: "long",
+      day: "numeric",
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: label })[0]);
+    expect(scrollSpy).toHaveBeenCalledTimes(1); // initial selection scrolls once
+
+    // Simulate an SWR poll: same logical events, fresh array reference (which is
+    // exactly what a revalidation produces) → groups ref changes.
+    useCalendarEventsMock.mockReturnValue({
+      events: [{ ...fixtureEvent }],
+      refresh: vi.fn(),
+      isLoading: false,
+    });
+    rerender(<CalendarPage />);
+
+    // The selection didn't change, so the poll must NOT re-trigger a scroll.
+    expect(scrollSpy).toHaveBeenCalledTimes(1);
+    scrollSpy.mockRestore();
+  });
+
+  // pr-reviewer #2: picking a mini-month day while in MONTH view must not set
+  // `selectedKey` (the agenda isn't even rendered). Otherwise switching to
+  // Agenda later auto-scrolls to that stale date the user never meant as an
+  // agenda selection.
+  it("does not auto-scroll the agenda to a day that was picked while in Month view", () => {
+    HTMLElement.prototype.scrollIntoView = vi.fn();
+    const scrollSpy = vi.spyOn(HTMLElement.prototype, "scrollIntoView");
+
+    render(<CalendarPage />); // starts in Month view
+
+    // Pick a day in the mini-month while still in Month view.
+    const label = evDate.toLocaleDateString(undefined, {
+      weekday: "long",
+      month: "long",
+      day: "numeric",
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: label })[0]);
+
+    // Now switch to Agenda — there must be no auto-scroll from the month-view pick.
+    fireEvent.click(screen.getByRole("button", { name: /^agenda$/i }));
+
+    expect(scrollSpy).not.toHaveBeenCalled();
+    scrollSpy.mockRestore();
+  });
+
+  // pr-reviewer #3: toolbar nav (prev/next/Today) must clear `selectedKey` so a
+  // stale scroll target doesn't re-trigger the scroll effect after navigation.
+  it("clears the agenda selection when the toolbar 'Today' nav is used", () => {
+    HTMLElement.prototype.scrollIntoView = vi.fn();
+    const scrollSpy = vi.spyOn(HTMLElement.prototype, "scrollIntoView");
+
+    const { rerender } = render(<CalendarPage />);
+    fireEvent.click(screen.getByRole("button", { name: /^agenda$/i }));
+
+    const label = evDate.toLocaleDateString(undefined, {
+      weekday: "long",
+      month: "long",
+      day: "numeric",
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: label })[0]);
+    expect(scrollSpy).toHaveBeenCalledTimes(1);
+
+    // Toolbar nav lives in Month view — go back to Month, hit Today (which must
+    // deselect), then return to Agenda. A poll re-render must not re-scroll,
+    // because the selection was cleared by the nav.
+    fireEvent.click(screen.getByRole("button", { name: /^month$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^today$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^agenda$/i }));
+
+    useCalendarEventsMock.mockReturnValue({
+      events: [{ ...fixtureEvent }],
+      refresh: vi.fn(),
+      isLoading: false,
+    });
+    rerender(<CalendarPage />);
+
+    expect(scrollSpy).toHaveBeenCalledTimes(1);
+    scrollSpy.mockRestore();
+  });
 });

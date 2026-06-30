@@ -1,6 +1,7 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import type { CalendarEvent } from "@/lib/hooks/useCalendar";
 import { groupByDay } from "./AgendaView";
+import { dayKey } from "@/lib/calendar";
 
 // Build event times from LOCAL Date objects so the day-bucketing (which is
 // local-time) is asserted independent of the test runner's timezone — mirrors
@@ -61,12 +62,57 @@ describe("groupByDay", () => {
 
   it("labels today and tomorrow distinctly", () => {
     const today = new Date();
-    const tomorrow = new Date(today.getTime() + 86_400_000);
+    const tomorrow = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
     const groups = groupByDay([
       ev("t", new Date(today.getFullYear(), today.getMonth(), today.getDate(), 9), new Date(today.getFullYear(), today.getMonth(), today.getDate(), 10)),
       ev("tm", new Date(tomorrow.getFullYear(), tomorrow.getMonth(), tomorrow.getDate(), 9), new Date(tomorrow.getFullYear(), tomorrow.getMonth(), tomorrow.getDate(), 10)),
     ]);
     expect(groups[0].label).toMatch(/^Today · /);
     expect(groups[1].label).toMatch(/^Tomorrow · /);
+  });
+
+  // WARP-944 (pr-reviewer #6): the "Tomorrow" label must be the next CALENDAR
+  // day, computed with local date arithmetic — NOT `today.getTime() + 86.4M ms`.
+  // On a spring-forward (23-hour) day, adding a fixed 24h of wall-clock skips a
+  // calendar date, so the genuine next day fails to get the "Tomorrow" label and
+  // a day+2 event gets it instead. Pinning the clock to a DST transition makes
+  // the regression deterministic on a DST-observing host; in a no-DST zone
+  // (e.g. UTC CI) it still asserts the correct invariant on both paths.
+  describe("DST-safe Today/Tomorrow labelling", () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("labels the next calendar day 'Tomorrow' across a spring-forward boundary", () => {
+      // 2026-03-07 23:30 local — the evening BEFORE US spring-forward (Mar 8,
+      // 02:00 -> 03:00). The following calendar day (Mar 8) is only 23 hours
+      // long, so the OLD `today.getTime() + 86.4M` overshoots local midnight by
+      // an extra hour and lands on Mar 9 (day+2), skipping Mar 8 — the genuine
+      // "Tomorrow" — entirely. Calendar-date arithmetic is always exact.
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(2026, 2, 7, 23, 30, 0));
+
+      const now = new Date();
+      const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+      const dayAfter = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 2);
+
+      const groups = groupByDay([
+        ev(
+          "tomorrow-ev",
+          new Date(tomorrow.getFullYear(), tomorrow.getMonth(), tomorrow.getDate(), 9),
+          new Date(tomorrow.getFullYear(), tomorrow.getMonth(), tomorrow.getDate(), 10),
+        ),
+        ev(
+          "dayafter-ev",
+          new Date(dayAfter.getFullYear(), dayAfter.getMonth(), dayAfter.getDate(), 9),
+          new Date(dayAfter.getFullYear(), dayAfter.getMonth(), dayAfter.getDate(), 10),
+        ),
+      ]);
+
+      const byKey = Object.fromEntries(groups.map((g) => [g.key, g.label]));
+      // The genuine next calendar day is "Tomorrow"; the day after is never.
+      expect(byKey[dayKey(tomorrow)]).toMatch(/^Tomorrow · /);
+      expect(byKey[dayKey(dayAfter)]).not.toMatch(/^Tomorrow · /);
+    });
   });
 });

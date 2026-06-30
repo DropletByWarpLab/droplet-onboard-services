@@ -266,18 +266,35 @@ export default function CalendarPage() {
   }, [detail, showReport]);
 
   const monthLabel = cursor.toLocaleDateString(undefined, { month: "long", year: "numeric" });
-  const prevMonth = () => setCursor((c) => new Date(c.getFullYear(), c.getMonth() - 1, 1));
-  const nextMonth = () => setCursor((c) => new Date(c.getFullYear(), c.getMonth() + 1, 1));
-  const goToday = () => setCursor(new Date());
+  // Toolbar nav is an implicit deselection: clear `selectedKey` so a stale
+  // scroll target doesn't yank the agenda back after navigating (pr-reviewer #3).
+  const prevMonth = () => {
+    setCursor((c) => new Date(c.getFullYear(), c.getMonth() - 1, 1));
+    setSelectedKey(undefined);
+  };
+  const nextMonth = () => {
+    setCursor((c) => new Date(c.getFullYear(), c.getMonth() + 1, 1));
+    setSelectedKey(undefined);
+  };
+  const goToday = () => {
+    setCursor(new Date());
+    setSelectedKey(undefined);
+  };
 
   // Mini-month day click: move the cursor (drives the month grid + the agenda
-  // fetch window) and, in Agenda view, mark the picked day so the agenda scrolls
-  // to + highlights it. The previous build only set the cursor, which the agenda
-  // ignored entirely — so picking a date did nothing (WARP-944).
-  const pickDay = useCallback((d: Date) => {
-    setCursor(d);
-    setSelectedKey(dayKey(d));
-  }, []);
+  // fetch window) and, ONLY in Agenda view, mark the picked day so the agenda
+  // scrolls to + highlights it. `selectedKey` is agenda-only context: setting it
+  // from Month view (where the agenda isn't rendered) would make a later switch
+  // to Agenda auto-scroll to a stale date the user never selected there
+  // (pr-reviewer #2). The previous build set neither — picking a date did
+  // nothing (WARP-944).
+  const pickDay = useCallback(
+    (d: Date) => {
+      setCursor(d);
+      setSelectedKey(view === "agenda" ? dayKey(d) : undefined);
+    },
+    [view],
+  );
 
   const eventCount = events.length;
   const sub =

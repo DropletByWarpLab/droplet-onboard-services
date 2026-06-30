@@ -45,7 +45,9 @@ export function groupByDay(
 
   const today = new Date();
   const todayKey = dayKey(today);
-  const tomorrowKey = dayKey(new Date(today.getTime() + 86_400_000));
+  // Calendar-date arithmetic, not `+86.4M ms`: on a 23-hour spring-forward day
+  // a fixed 24h offset skips a date, landing "Tomorrow" on day+2 (WARP-944).
+  const tomorrowKey = dayKey(new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1));
 
   return Array.from(buckets.entries())
     .sort((a, b) => a[0].localeCompare(b[0]))
@@ -84,13 +86,25 @@ interface Props {
 export function AgendaView({ events, onSelect, colorOf, selectedKey }: Props) {
   const groups = useMemo(() => groupByDay(events), [events]);
   const containerRef = useRef<HTMLDivElement>(null);
+  // Last day-key we actually scrolled to. `groups` has to stay in the effect's
+  // dep array (a selection made before the events load still needs to scroll
+  // once they arrive), but every SWR poll hands us a fresh `events` → new
+  // `groups` ref → the effect re-fires. Without this guard the user gets yanked
+  // back to `selectedKey` on every poll cycle even after scrolling away. So we
+  // only scroll when the SELECTION genuinely changed (pr-reviewer #1).
+  const lastScrolledKeyRef = useRef<string | undefined>(undefined);
 
-  // Scroll the picked day's section into view when the selection changes. Keyed
-  // on the resolved group keys too, so a selection made before the events load
-  // still scrolls once they arrive.
+  // Scroll the picked day's section into view when the selection changes.
   useEffect(() => {
-    if (!selectedKey) return;
+    // Deselection (toolbar nav, view switch) clears the marker so re-picking the
+    // SAME day later scrolls again instead of being suppressed as "unchanged".
+    if (!selectedKey) {
+      lastScrolledKeyRef.current = undefined;
+      return;
+    }
+    if (selectedKey === lastScrolledKeyRef.current) return;
     const el = containerRef.current?.querySelector<HTMLElement>(`#${CSS.escape(agendaDayId(selectedKey))}`);
+    if (!el) return; // events not loaded yet — retry on the next groups change
     // Honour prefers-reduced-motion: the CSS global block doesn't override a
     // programmatic scrollIntoView({behavior:"smooth"}), so gate it here —
     // reduced-motion users get an instant jump instead of an animated scroll.
@@ -99,7 +113,8 @@ export function AgendaView({ events, onSelect, colorOf, selectedKey }: Props) {
       typeof window !== "undefined" &&
       typeof window.matchMedia === "function" &&
       window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    el?.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
+    el.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
+    lastScrolledKeyRef.current = selectedKey;
   }, [selectedKey, groups]);
 
   if (groups.length === 0) {
