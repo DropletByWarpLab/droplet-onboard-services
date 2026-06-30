@@ -48,12 +48,10 @@ import { DiscoveryStep } from "./DiscoveryStep";
 
 /** Advance fake timers far enough to cross the 5-minute auto-stop bound. */
 async function driveToStopped() {
-  for (let i = 0; i < 305; i++) {
-    await act(async () => {
-      vi.advanceTimersByTime(1000);
-      await Promise.resolve();
-    });
-  }
+  await act(async () => {
+    vi.advanceTimersByTime(305_000);
+    await Promise.resolve();
+  });
 }
 
 describe("DiscoveryStep zero-results empty state (WARP-937)", () => {

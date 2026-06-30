@@ -269,6 +269,8 @@ export function DiscoveryStep({
     }
   }
 
+  const isEmpty = discoveredDevices.length === 0;
+
   return (
     <StepShell
       current="discovery"
@@ -286,7 +288,7 @@ export function DiscoveryStep({
       }
       title="Discovering your devices"
       subtitle={
-        discoveredDevices.length === 0
+        isEmpty
           ? // WARP-937: don't claim we're still "scanning" once polling has
             // stopped with nothing found — the body shows a no-devices empty
             // state, so the subtitle should match instead of contradicting it.
@@ -336,7 +338,7 @@ export function DiscoveryStep({
             customer couldn't tell whether the box was still scanning or had
             simply found nothing. Once polling halts (phase "stopped") the
             zero-results empty state below takes over instead. */}
-        {discoveredDevices.length === 0 && scanPhase !== "stopped" && (
+        {isEmpty && (scanPhase === "active" || scanPhase === "downshifted") && (
           <div className="space-y-2" data-testid="discovery-skeletons">
             {[0, 1, 2].map((i) => (
               <div
@@ -377,7 +379,7 @@ export function DiscoveryStep({
           className="text-center mb-4"
           data-testid="discovery-stopped"
         >
-          {discoveredDevices.length === 0 ? (
+          {isEmpty ? (
             // WARP-937: scanning completed having found nothing. Before this,
             // the surface just kept the perpetual skeletons pulsing, so the
             // customer couldn't tell "still scanning" from "found nothing".
