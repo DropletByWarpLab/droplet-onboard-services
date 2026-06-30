@@ -83,11 +83,7 @@ export function DateTimePicker({ value, onChange, label, disabled }: Props) {
         value={date}
         disabled={disabled}
         onChange={(e) => emit(e.target.value, time)}
-        // WARP-943: floor the width to the intrinsic size of a full "MM/DD/YYYY"
-        // + the native picker icon. The former `min-w-0` let flexbox shrink the
-        // control below its content inside the two-column Starts/Ends grid, so
-        // the native date field clipped its rightmost text (the year), rendering
-        // "06/30/" with no year. `flex-1` still lets it grow to fill the row.
+        // WARP-943: min-w-0 let flexbox shrink below MM/DD/YYYY+icon; 8.5rem floor keeps the year visible.
         className="dp-input flex-1 min-w-[8.5rem]"
       />
       <select
