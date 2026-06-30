@@ -74,7 +74,9 @@ from schemas import (
 from sessions.store import SessionStore, create_session_store
 from scheduler import InferenceScheduler, QueueFullError
 
-logging.basicConfig(level=logging.INFO)
+from request_context import configure_logging
+
+configure_logging()
 logger = logging.getLogger(__name__)
 
 
