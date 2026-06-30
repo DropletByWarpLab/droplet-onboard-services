@@ -75,11 +75,13 @@ request end-to-end.
   header, then `runWithRequestId(id, () => next())`. Mounted in `app.ts`
   **before** `requestLogger` (currently `app.ts:127`).
 - **pino-http config** (`src/middleware/request-logger.ts`): construct it from a
-  mixin-enabled base logger — `pinoHttp({ logger: createLogger("http"), level })` —
-  so that **both** the automatic request/response summary line **and** every
-  `req.log.*` line emitted in route handlers inherit the `requestId` mixin. This
-  runs inside the ALS context because the request-id middleware wraps `next()`.
-  (No separate `customProps` needed — the mixin covers the child logger.)
+  mixin-enabled base logger — `pinoHttp({ logger: createLogger("http"), … })` — so
+  every `req.log.*` line in route handlers inherits the `requestId` mixin while the
+  ALS context is live. The automatic "request completed" line fires on the response
+  `finish` event, where the ALS context may already have exited, so the middleware
+  also stashes the id on the request object and pino-http reads it back via
+  `customProps: (req) => ({ requestId: req.requestId ?? "no-request-context" })`
+  (the per-log object wins over the mixin, so this line is always tagged).
 - **Tick chokepoint** (`src/services/cron-runtime.service.ts`): in the `safeRun`
   wrapper used by `scheduleInterval`/`scheduleCron`, invoke the handler as
   `runWithRequestId(newRequestId(), handler)` and emit `tick-start` / `tick-end`
@@ -103,9 +105,13 @@ request end-to-end.
 - **`request_context.py`** — `request_id_var: ContextVar[str | None]` +
   `get_request_id()`, `set_request_id(id)`, `new_request_id()` (uuid4),
   `sanitize_request_id(raw)`.
-- **`middleware/request_id.py`** — Starlette `BaseHTTPMiddleware`: adopt/generate,
-  `set_request_id(id)`, set the response `x-request-id`. Registered in `main.py`
-  **outermost** (added after CORS so it wraps auth/rate-limit too).
+- **`middleware/request_id.py`** — a **pure ASGI middleware** (not
+  `BaseHTTPMiddleware`: a contextvar set in `BaseHTTPMiddleware.dispatch` is not
+  reliably visible in the endpoint — the known Starlette gotcha — whereas a pure
+  ASGI middleware runs in the same context so the id reaches handlers and provider
+  calls). Adopt/generate, `set_request_id(id)`, append `x-request-id` to the
+  response start headers. Registered in `main.py` **outermost** (added last, after
+  CORS).
 
 ### Changes
 - **Logging** (`main.py:77-78`): replace `logging.basicConfig(level=INFO)` with a
@@ -130,9 +136,10 @@ request end-to-end.
 
 ### New modules
 - **`request_context.py`** — same shape as ai-gateway.
-- **Request-id middleware** in `main.py` — covers **all** methods (the existing
+- **Request-id middleware** in `main.py` — a **pure ASGI middleware** (same
+  contextvar-visibility reason as ai-gateway) covering **all** methods (the existing
   `OperationTrackingMiddleware` only wraps POST/PUT/DELETE), registered outermost,
-  echoes the header. Modeled on `OperationTrackingMiddleware` (`main.py:356-399`).
+  echoes the header.
 
 ### Changes
 - **Logging** (`main.py:81`): same `RequestIdFilter` + formatter install
