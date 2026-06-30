@@ -31,9 +31,12 @@ export function WelcomeStep({ onContinue }: { onContinue: () => void }) {
       subtitle="Your private edge AI appliance"
       primary={{ label: "Get Started", onClick: onContinue, showArrow: true }}
     >
-      <p className="type-body text-label-secondary max-w-md">
-        Droplet keeps your files, conversations, and smart home control
-        completely private — powered by local AI running on your hardware.
+      <p
+        data-testid="welcome-privacy-claim"
+        className="type-headline text-label-primary max-w-md"
+      >
+        Your files, conversations, and smart home stay in your home — the AI
+        that runs them lives on your own Droplet and never leaves it.
       </p>
 
       <ul className="mt-6 flex flex-wrap gap-2">
