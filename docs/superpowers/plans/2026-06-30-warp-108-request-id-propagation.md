@@ -188,15 +188,6 @@ import { describe, it, expect } from "vitest";
 import { createLogger } from "../lib/logger.js";
 import { runWithRequestId } from "../lib/request-context.js";
 
-function capture(fn: (log: ReturnType<typeof createLogger>) => void): any[] {
-  const lines: any[] = [];
-  const log = createLogger("test");
-  // Re-bind to a stream we can read by spying on process.stdout via pino is
-  // awkward; instead assert the mixin output directly.
-  // pino exposes no public mixin getter, so we log to a custom destination.
-  return lines;
-}
-
 describe("createLogger", () => {
   it("stamps requestId from context, no-request-context otherwise", () => {
     const lines: string[] = [];
