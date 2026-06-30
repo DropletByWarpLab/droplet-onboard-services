@@ -29,7 +29,7 @@ import {
   EXTERNAL_COLOR,
 } from "@/lib/calendar";
 import { AgendaView } from "@/components/calendar/AgendaView";
-import { MonthView, monthGridRange } from "@/components/calendar/MonthView";
+import { MonthView, monthGridRange, eventsByDay } from "@/components/calendar/MonthView";
 import { MiniMonth } from "@/components/calendar/MiniMonth";
 import { EventForm } from "@/components/calendar/EventForm";
 import { RemindersPanel } from "@/components/calendar/RemindersPanel";
@@ -178,23 +178,13 @@ export default function CalendarPage() {
     [events, hidden, keyOf],
   );
 
-  const eventDays = useMemo(() => {
-    const s = new Set<string>();
-    for (const e of visibleEvents) {
-      const start = new Date(e.startsAt);
-      const endMs = e.endsAt && !isNaN(new Date(e.endsAt).getTime())
-        ? Math.max(new Date(e.endsAt).getTime() - 1, start.getTime())
-        : start.getTime();
-      const cur = new Date(start.getFullYear(), start.getMonth(), start.getDate());
-      const lastDay = new Date(endMs);
-      lastDay.setHours(0, 0, 0, 0);
-      for (let g = 0; cur <= lastDay && g < 400; g++) {
-        s.add(dayKey(new Date(cur)));
-        cur.setDate(cur.getDate() + 1);
-      }
-    }
-    return s;
-  }, [visibleEvents]);
+  // Day-keys with at least one visible event — drives the mini-month dots.
+  // Reuses the shared `eventsByDay` (single source of truth for the multi-day
+  // span bucketing) instead of a hand-rolled copy.
+  const eventDays = useMemo(
+    () => new Set(eventsByDay(visibleEvents).keys()),
+    [visibleEvents],
+  );
 
   const upcoming = useMemo(() => {
     const now = Date.now();

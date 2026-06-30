@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { Calendar as CalendarIcon, MapPin, Globe } from "lucide-react";
 import type { CalendarEvent } from "@/lib/hooks/useCalendar";
 import { dayKey } from "@/lib/calendar";
+import { eventsByDay } from "./MonthView";
 
 /** Stable DOM id for a day section so the page can scroll the agenda to a
  *  specific date when its mini-month cell is clicked. */
@@ -14,34 +15,15 @@ export function agendaDayId(key: string): string {
 /** Group events into local-day buckets so the agenda reads as
  *  "Today / Tomorrow / Wed Apr 23 / Thu Apr 24 / ...". Groups are returned in
  *  chronological order, events within a day are sorted (all-day first, then by
- *  start time), and a multi-day event is placed on every local day it spans —
- *  matching the month grid's `eventsByDay`, so an event that started before the
- *  range still appears under each covered day instead of vanishing. */
+ *  start time — handled by the shared `eventsByDay`), and a multi-day event is
+ *  placed on every local day it spans, so an event that started before the
+ *  range still appears under each covered day instead of vanishing. Bucketing +
+ *  per-day sorting reuse the month grid's `eventsByDay` (single source of truth);
+ *  this layer only sorts the days chronologically and adds Today/Tomorrow labels. */
 export function groupByDay(
   events: CalendarEvent[],
 ): Array<{ key: string; label: string; events: CalendarEvent[] }> {
-  const buckets = new Map<string, CalendarEvent[]>();
-  const add = (k: string, ev: CalendarEvent) => {
-    const bucket = buckets.get(k);
-    if (bucket) bucket.push(ev);
-    else buckets.set(k, [ev]);
-  };
-  for (const ev of events) {
-    const start = new Date(ev.startsAt);
-    // Treat endsAt as exclusive (−1 ms) so an all-day event ending at next
-    // midnight doesn't bleed into the following day; clamp ≥ start for
-    // missing/inverted data.
-    const endMs = ev.endsAt && !isNaN(new Date(ev.endsAt).getTime())
-      ? Math.max(new Date(ev.endsAt).getTime() - 1, start.getTime())
-      : start.getTime();
-    const cursor = new Date(start.getFullYear(), start.getMonth(), start.getDate());
-    const last = new Date(endMs);
-    const lastDay = new Date(last.getFullYear(), last.getMonth(), last.getDate());
-    for (let guard = 0; cursor <= lastDay && guard < 400; guard++) {
-      add(dayKey(cursor), ev);
-      cursor.setDate(cursor.getDate() + 1);
-    }
-  }
+  const buckets = eventsByDay(events);
 
   const today = new Date();
   const todayKey = dayKey(today);
@@ -52,13 +34,6 @@ export function groupByDay(
   return Array.from(buckets.entries())
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([key, evs]) => {
-      evs.sort((a, b) =>
-        a.allDay === b.allDay
-          ? (new Date(a.startsAt).getTime() || 0) - (new Date(b.startsAt).getTime() || 0)
-          : a.allDay
-            ? -1
-            : 1,
-      );
       const d = new Date(key + "T00:00:00");
       let label = d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
       if (key === todayKey) label = `Today · ${label}`;

@@ -190,6 +190,50 @@ describe("Calendar Agenda view (WARP-944)", () => {
     scrollSpy.mockRestore();
   });
 
+  // pr-reviewer #2 (follow-up): the mini-month prev/next month chevrons use the
+  // dedicated `onMonthNav` prop, which must clear `selectedKey`. Navigating the
+  // mini-month header is "browse a different month", NOT "pick a day", so it must
+  // not leave a stale scroll target that yanks the agenda to / highlights day 1
+  // of the newly-shown month.
+  it("clears the agenda selection (no scroll, no highlight) when the mini-month month chevron is used", () => {
+    HTMLElement.prototype.scrollIntoView = vi.fn();
+    const scrollSpy = vi.spyOn(HTMLElement.prototype, "scrollIntoView");
+
+    const { rerender } = render(<CalendarPage />);
+    fireEvent.click(screen.getByRole("button", { name: /^agenda$/i }));
+
+    const label = evDate.toLocaleDateString(undefined, {
+      weekday: "long",
+      month: "long",
+      day: "numeric",
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: label })[0]);
+    expect(scrollSpy).toHaveBeenCalledTimes(1); // the day pick scrolls once
+
+    // Picking the day highlighted its section header (selected styling).
+    expect(document.querySelector("h3.text-accent")).not.toBeNull();
+
+    // In Agenda view the toolbar nav is hidden, so the ONLY "Next month" button
+    // is the mini-month chevron — which routes through `onMonthNav`.
+    fireEvent.click(screen.getByRole("button", { name: /next month/i }));
+
+    // Navigating the month must NOT count as a new day selection: no extra
+    // scroll, and the day-1 / picked-day highlight is gone.
+    expect(scrollSpy).toHaveBeenCalledTimes(1);
+    expect(document.querySelector("h3.text-accent")).toBeNull();
+
+    // A background poll after the nav must not re-scroll either (selection cleared).
+    useCalendarEventsMock.mockReturnValue({
+      events: [{ ...fixtureEvent }],
+      refresh: vi.fn(),
+      isLoading: false,
+    });
+    rerender(<CalendarPage />);
+    expect(scrollSpy).toHaveBeenCalledTimes(1);
+
+    scrollSpy.mockRestore();
+  });
+
   // pr-reviewer #3: toolbar nav (prev/next/Today) must clear `selectedKey` so a
   // stale scroll target doesn't re-trigger the scroll effect after navigation.
   it("clears the agenda selection when the toolbar 'Today' nav is used", () => {
