@@ -123,6 +123,11 @@ export function useActivity(workItemId: string | null) {
 
 interface DirectoryUser {
   id: string;
+  // WARP-947: the local `User.id` UUID. PM attribution surfaces (activity feed,
+  // comment authors, assignees) reference this UUID — not the Nextcloud
+  // username in `id`. Optional/nullable: a directory user with no local row, or
+  // an older orchestrator that predates the field, yields null.
+  userId?: string | null;
   username: string;
   displayName: string;
 }
@@ -135,7 +140,14 @@ export function usePeople() {
   );
   const map = useMemo(() => {
     const m = new Map<string, Person>();
-    for (const u of data?.users ?? []) m.set(u.id, makePerson(u.id, u.displayName));
+    for (const u of data?.users ?? []) {
+      const person = makePerson(u.id, u.displayName);
+      // PM ids (actorId, authorId, assignees) are the local User.id UUID, so the
+      // UUID is the primary resolution key. Also index the Nextcloud username so
+      // any username-keyed caller still resolves. (WARP-947)
+      if (u.userId) m.set(u.userId, person);
+      m.set(u.id, person);
+    }
     return m;
   }, [data]);
   const person = useCallback(

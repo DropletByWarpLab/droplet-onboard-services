@@ -2206,7 +2206,35 @@ export function createProtectedAuthRouter(
       // Hide the Nextcloud system/database admin account — it exists for
       // internal orchestrator use only and must never appear in the UI.
       const systemUser = (process.env.NEXTCLOUD_ADMIN_USER || "admin").toLowerCase();
-      const users = allUsers.filter((u) => u.id.toLowerCase() !== systemUser);
+      const ncUsers = allUsers.filter((u) => u.id.toLowerCase() !== systemUser);
+
+      // WARP-947: each directory entry's `id` is the Nextcloud username (the
+      // OCS user id) — that's the key the admin People page mutates against
+      // (PUT/DELETE /auth/users/:username). But attribution surfaces (the
+      // Projects activity feed, comment authors, assignees) reference the
+      // local `User.id` UUID (WARP-485 invariant: `req.user.id` is always the
+      // UUID). Without the UUID here, the dashboard's UUID-keyed name lookup
+      // never matched and rendered a cryptic "User <first4>" stub. Join the
+      // local rows by `nextcloudUsername` (falling back to `username`) and
+      // attach `userId` so the UUID-keyed resolution succeeds. Fail-soft:
+      // `userId` is null when prisma isn't wired or no local row matches.
+      const uuidByKey = new Map<string, string>();
+      if (prisma) {
+        const localRows = await prisma.user.findMany({
+          select: { id: true, username: true, nextcloudUsername: true },
+        });
+        for (const row of localRows) {
+          if (row.nextcloudUsername) uuidByKey.set(row.nextcloudUsername.toLowerCase(), row.id);
+          // `username` is a weaker fallback — only fill it when a stronger
+          // nextcloudUsername mapping hasn't already claimed the key.
+          const unameKey = row.username.toLowerCase();
+          if (!uuidByKey.has(unameKey)) uuidByKey.set(unameKey, row.id);
+        }
+      }
+      const users = ncUsers.map((u) => ({
+        ...u,
+        userId: uuidByKey.get(u.id.toLowerCase()) ?? null,
+      }));
       res.json({ users });
     } catch (err: any) {
       if (err.message?.includes("403") || err.message?.includes("997")) {
