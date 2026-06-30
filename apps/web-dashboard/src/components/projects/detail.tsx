@@ -316,7 +316,7 @@ export function DetailDrawer({
       <div className="pm-scope pm-dialog-body is-panel">
         <div
           className="pm-row"
-          style={{ justifyContent: "space-between", padding: "12px 4px 12px 0", borderBottom: "1px solid var(--border)", marginBottom: 18 }}
+          style={{ justifyContent: "space-between", padding: "0 0 12px", borderBottom: "1px solid var(--border)", marginBottom: 18 }}
         >
           <span id={titleId} className="pm-mono" style={{ fontSize: 12.5, color: "var(--text-3)" }}>
             {item.key}

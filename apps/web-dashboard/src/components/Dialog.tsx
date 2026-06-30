@@ -35,6 +35,19 @@ import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
  *   - Honors `useReducedMotion`: skip the framer-motion fade/scale
  *     transition when the user has reduce-motion preference on. The
  *     dialog still mounts/unmounts; only the animation is gated.
+ *
+ * Padding contract (WARP-945 / WARP-949): the dialog CONTAINER is
+ * intentionally padding-free for BOTH placements. Centered modals get a
+ * `dp-card` shell (radius + shadow) and side panels get an edge-to-edge
+ * surface — neither insets the content. This is deliberate so consumers can
+ * render full-width headers / footers with `border-b` / `border-t` dividers
+ * that span the whole surface. The flip side: every consumer MUST pad its
+ * own body — wrap children in a div with the dashboard spacing tokens
+ * (`p-5` ≈ 20px for centered bodies, `p-5` / `px-4 py-3` per section for side
+ * panels; the Projects surface uses its scoped `.pm-dialog-body`). A bare,
+ * unpadded child renders flush against the edge — the exact regression
+ * WARP-945 fixed on the Projects surfaces. Do NOT add padding to the
+ * container here: it would double-pad the ~18 consumers that already self-pad.
  */
 export interface DialogProps {
   /** Whether the dialog is open. */
