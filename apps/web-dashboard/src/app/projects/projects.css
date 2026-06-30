@@ -45,6 +45,21 @@
 
 .pm-scope .pm-page { display: flex; flex-direction: column; min-height: 0; gap: 0; }
 
+/* ── dialog body (WARP-945) ─────────────────────────────────────────────────
+ * Shared padded wrapper for every Projects surface that renders inside the
+ * canonical <Dialog> primitive: the New project / New item / Delete project
+ * modals AND the work-item detail side-panel. The <Dialog> container itself is
+ * intentionally padding-free (so consumers can render edge-to-edge headers /
+ * footers), which left these surfaces flush against the dialog edge. Owning the
+ * inset here — once, on the shared body class — keeps all four consistent and
+ * prevents a new surface from regressing to a bare `.pm-scope` wrapper.
+ * 24px == the design-token spacing step (4/8/12/16/20/24/28/32/44/80). */
+.pm-scope.pm-dialog-body { padding: 24px; }
+/* The detail panel is a full-height, scrolling side-drawer — give it a touch
+ * more breathing room top/bottom so the first/last rows aren't pinned to the
+ * panel edge, matching the dashboard's other right-placement panels. */
+.pm-scope.pm-dialog-body.is-panel { padding: 20px 24px 32px; }
+
 /* ── primitives ─────────────────────────────────────────────────────────── */
 .pm-scope .pm-row { display: flex; align-items: center; }
 .pm-scope .pm-mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
