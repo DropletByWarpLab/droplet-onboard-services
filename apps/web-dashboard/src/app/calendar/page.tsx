@@ -116,7 +116,12 @@ export default function CalendarPage() {
   // actually populate.
   const range = useMemo(() => {
     if (view === "month") return monthGridRange(cursor);
-    const from = new Date(cursor.getFullYear(), cursor.getMonth(), 1, 0, 0, 0, 0);
+    const monthStart = new Date(cursor.getFullYear(), cursor.getMonth(), 1, 0, 0, 0, 0);
+    // Floor at today so the "Up next" rail always has data even when the
+    // user has navigated the mini-month to a future month: events between
+    // now and the cursor's month-start would otherwise fall outside [from, to].
+    const todayMidnight = new Date(); todayMidnight.setHours(0, 0, 0, 0);
+    const from = monthStart <= todayMidnight ? monthStart : todayMidnight;
     const to = new Date(cursor.getFullYear(), cursor.getMonth() + 12, 0, 23, 59, 59, 999);
     return { from, to };
   }, [view, cursor]);
@@ -393,7 +398,12 @@ export default function CalendarPage() {
       <div className="grid grid-cols-1 lg:grid-cols-[260px_1fr] gap-6">
         {/* Left rail — mini-month, calendars, up next, reminders, subscriptions */}
         <aside className="flex flex-col gap-4 order-2 lg:order-1">
-          <MiniMonth cursor={cursor} eventDays={eventDays} onCursor={pickDay} />
+          <MiniMonth
+            cursor={cursor}
+            eventDays={eventDays}
+            onCursor={pickDay}
+            onMonthNav={(d) => { setCursor(d); setSelectedKey(undefined); }}
+          />
 
           <div className="card">
             <h2 style={{ fontSize: 14, fontWeight: 600, color: "var(--text)", margin: "0 0 8px" }}>Calendars</h2>
