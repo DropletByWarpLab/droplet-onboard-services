@@ -45,7 +45,17 @@ interface Props {
  *  follow-up (they need the wifi-config + VLAN backends). */
 export function NetworkSimple({ overview, onOpenAdvanced }: Props) {
   const wan = overview?.interfaces?.wan;
-  const online = !!wan?.up;
+  // The single-box hands its WAN uplink to the appliance host, so the in-box
+  // OpenWrt reports the wan interface as `present:false`. That absence must NOT
+  // read as "internet down" — it's the same honest signal the page-level
+  // `routerConnected` gate already trusts (network.service.getNetworkOverview:
+  // "WAN-absence must never read as offline"). Only a WAN that is genuinely
+  // configured-but-down (`present:true, up:false`) is offline. When no WAN
+  // interface is exposed on this shape, fall back to `routerConnected` — the
+  // box's real connectivity signal — instead of the missing up-flag.
+  const routerConnected = overview?.routerConnected ?? false;
+  const wanPresent = wan?.present !== false;
+  const online = wanPresent ? !!wan?.up : routerConnected;
   const wanIp = wan?.["ipv4-address"]?.[0]?.address ?? "—";
   const uptime = fmtUptime(overview?.system?.resources?.uptime ?? 0);
   const deviceCount = overview?.connectedDeviceCount ?? 0;
@@ -175,7 +185,7 @@ export function NetworkSimple({ overview, onOpenAdvanced }: Props) {
             <div>
               <p className="type-title-3 text-label-primary">Router</p>
               <p className="type-subheadline text-label-secondary">
-                {online ? "Connected" : "Status unknown"}
+                {routerConnected ? "Connected" : "Status unknown"}
               </p>
             </div>
           </div>
