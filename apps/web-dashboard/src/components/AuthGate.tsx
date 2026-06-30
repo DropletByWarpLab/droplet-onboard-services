@@ -8,7 +8,13 @@ import { DropletMark } from "@/components/DropletMark";
 import { HelpLauncher } from "@/components/help/HelpLauncher";
 import { HELP_PATH } from "@/lib/routing";
 
-const PUBLIC_PATHS = ["/setup", "/login"];
+// `/invite` is public: an invite link goes to a brand-new, NOT-yet-authenticated
+// person so they can set their password at `/invite/<token>`. Omitting it made
+// AuthGate treat the page as protected and bounce the invitee to `/login` on a
+// claimed box (appliance "ready"), so the link "just goes to the sign-in page"
+// and they can never set a password. `startsWith` is safe — `/invite` is the
+// only route under that prefix.
+const PUBLIC_PATHS = ["/setup", "/login", "/invite"];
 
 export function AuthGate({ children }: { children: ReactNode }) {
   // PR #372 — route off the explicit `/setup/state` machine. The appliance
