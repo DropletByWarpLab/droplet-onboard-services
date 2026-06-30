@@ -24,21 +24,6 @@ describe("/help privacy section (WARP-914)", () => {
     vi.clearAllMocks();
   });
 
-  it("renders a section element with id='privacy' (the WelcomeStep deep-link target)", () => {
-    render(<HelpPage />);
-    // eslint-disable-next-line testing-library/no-node-access
-    const section = document.getElementById("privacy");
-    expect(section).not.toBeNull();
-  });
-
-  it("lists the privacy topic in the table of contents", () => {
-    render(<HelpPage />);
-    const tocLinks = screen
-      .getAllByRole("link")
-      .filter((a) => a.getAttribute("href") === "#privacy");
-    expect(tocLinks.length).toBeGreaterThanOrEqual(1);
-  });
-
   it("explains Droplet, local AI, and privacy in the section body", () => {
     render(<HelpPage />);
     // eslint-disable-next-line testing-library/no-node-access

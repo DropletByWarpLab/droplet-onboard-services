@@ -56,11 +56,6 @@ export function WelcomeStep({ onContinue }: { onContinue: () => void }) {
         Appliance detected · ready to configure
       </div>
 
-      {/* WARP-914 — the first page now carries a working "Learn more" affordance.
-          It reuses the shared LearnMoreCard so the link opens /help#privacy in a
-          NEW TAB (WARP-930): a same-tab nav would remount the wizard and reset
-          this splash. The privacy topic explains what Droplet is, that the AI
-          runs locally on the customer's own hardware, and how privacy works. */}
       <LearnMoreCard title="What is Droplet?" helpAnchor="privacy">
         <p>
           A single box on your own network that runs your files, conversations,
