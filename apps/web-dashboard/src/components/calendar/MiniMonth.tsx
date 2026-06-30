@@ -14,12 +14,18 @@ interface Props {
   eventDays?: Set<string>;
   /** Navigate the displayed month / jump the main grid to a day. */
   onCursor: (d: Date) => void;
+  /** Called when the prev/next chevrons change the displayed month. When
+   *  omitted, the chevrons fall back to `onCursor`. Separating the two lets
+   *  the parent distinguish "user navigated the mini-month header" from
+   *  "user clicked a day cell" without adding heuristics inside MiniMonth. */
+  onMonthNav?: (d: Date) => void;
 }
 
 /** Compact month picker for the calendar left rail. Mirrors the design-system
  *  handoff's `CalMini`, but driven by the real cursor + event set rather than
  *  fixtures. Navigation is shared with the main month grid via `onCursor`. */
-export function MiniMonth({ cursor, eventDays, onCursor }: Props) {
+export function MiniMonth({ cursor, eventDays, onCursor, onMonthNav }: Props) {
+  const navCursor = onMonthNav ?? onCursor;
   const days = useMemo(() => monthGridDays(cursor), [cursor]);
   const month = cursor.getMonth();
   const todayKey = dayKey(new Date());
@@ -31,14 +37,14 @@ export function MiniMonth({ cursor, eventDays, onCursor }: Props) {
         <span className="type-subheadline font-semibold text-label-primary">{label}</span>
         <div className="flex items-center gap-0.5">
           <button
-            onClick={() => onCursor(new Date(cursor.getFullYear(), cursor.getMonth() - 1, 1))}
+            onClick={() => navCursor(new Date(cursor.getFullYear(), cursor.getMonth() - 1, 1))}
             aria-label="Previous month"
             className="inline-flex items-center justify-center h-6 w-6 rounded text-label-tertiary hover:text-label-primary hover:bg-surface-secondary transition-colors"
           >
             <ChevronLeft size={13} />
           </button>
           <button
-            onClick={() => onCursor(new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1))}
+            onClick={() => navCursor(new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1))}
             aria-label="Next month"
             className="inline-flex items-center justify-center h-6 w-6 rounded text-label-tertiary hover:text-label-primary hover:bg-surface-secondary transition-colors"
           >

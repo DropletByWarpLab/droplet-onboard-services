@@ -36,7 +36,9 @@ export function monthGridRange(cursor: Date): { from: Date; to: Date } {
  *  Bucketing by `startsAt` alone made multi-day events vanish from all but
  *  their first day. `endsAt` is treated as exclusive (−1 ms) so an all-day
  *  event ending at next-midnight doesn't bleed into the following day, and is
- *  clamped ≥ start for missing/inverted data. */
+ *  clamped ≥ start for missing/inverted data. An unparseable `endsAt` (NaN)
+ *  falls back to the start day so the event still appears once instead of
+ *  being dropped (Math.max(NaN, …) is NaN, which would empty its day span). */
 export function eventsByDay(events: CalendarEvent[]): Map<string, CalendarEvent[]> {
   const m = new Map<string, CalendarEvent[]>();
   const add = (k: string, ev: CalendarEvent) => {
@@ -46,7 +48,7 @@ export function eventsByDay(events: CalendarEvent[]): Map<string, CalendarEvent[
   };
   for (const ev of events) {
     const start = new Date(ev.startsAt);
-    const endMs = ev.endsAt
+    const endMs = ev.endsAt && !isNaN(new Date(ev.endsAt).getTime())
       ? Math.max(new Date(ev.endsAt).getTime() - 1, start.getTime())
       : start.getTime();
     const cursor = new Date(start.getFullYear(), start.getMonth(), start.getDate());
