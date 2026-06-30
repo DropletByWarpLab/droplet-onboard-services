@@ -261,6 +261,35 @@ describe("File Operations (Nextcloud-backed routes)", () => {
       const res = await request(app).post("/api/files/mkdir").send({ path: "" });
       expect(res.status).toBe(400);
     });
+
+    // WARP-938 (security): a path containing `..` segments resolves to a
+    // sibling of the intended target via WebDAV, letting an authenticated user
+    // create directories anywhere in their storage. Reject it server-side.
+    it.each([
+      "/Documents/../secret",
+      "/../escape",
+      "/a/b/../../c",
+      "../relative",
+      "/foo/..",
+    ])("rejects a traversal path (%s) with 400", async (badPath) => {
+      const res = await request(app)
+        .post("/api/files/mkdir")
+        .send({ path: badPath });
+      expect(res.status).toBe(400);
+      expect(ncMock.ncCreateDirectory).not.toHaveBeenCalled();
+    });
+
+    it("still accepts a normal nested path", async () => {
+      const res = await request(app)
+        .post("/api/files/mkdir")
+        .send({ path: "/Documents/Invoices" });
+      expect(res.status).toBe(200);
+      expect(ncMock.ncCreateDirectory).toHaveBeenCalledWith(
+        expect.any(String),
+        "dev",
+        "/Documents/Invoices",
+      );
+    });
   });
 
   // ── POST /api/files/upload ──
