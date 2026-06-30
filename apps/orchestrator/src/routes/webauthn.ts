@@ -38,7 +38,6 @@
  */
 import { Router, type Request } from "express";
 import { z } from "zod";
-import pino from "pino";
 import {
   generateRegistrationOptions,
   verifyRegistrationResponse,
@@ -62,8 +61,9 @@ import { SESSION_COOKIE_NAME, REFRESH_COOKIE_NAME } from "../middleware/auth.js"
 import { createChallenge, consumeChallenge } from "../services/webauthn-challenge.service.js";
 import { deriveWebAuthnRp } from "../services/webauthn-config.js";
 import { recordActivity } from "../services/activity.singleton.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "webauthn-routes" });
+const logger = createLogger("webauthn-routes");
 
 /** Caller IP for audit rows — mirrors auth.ts callerIpFromReq. */
 function callerIp(req: Request): string | null {

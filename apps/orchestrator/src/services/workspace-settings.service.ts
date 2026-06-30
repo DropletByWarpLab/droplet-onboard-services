@@ -24,9 +24,9 @@
  * settings table — that's a downstream wiring change tracked elsewhere.
  */
 import type { PrismaClient } from "@prisma/client";
-import pino from "pino";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "workspace-settings" });
+const logger = createLogger("workspace-settings");
 
 /**
  * Public surface for one canonical default. The `section` and `type`

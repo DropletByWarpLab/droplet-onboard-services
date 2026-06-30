@@ -9,7 +9,6 @@
 
 import { Router } from "express";
 import { PrismaClient } from "@prisma/client";
-import pino from "pino";
 import {
   getCommissionedDevices,
   getDevice,
@@ -29,8 +28,9 @@ import {
 } from "../services/safety-tier.service.js";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import { isUpstreamUnavailable } from "../lib/upstream-unavailable.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "matter-routes" });
+const logger = createLogger("matter-routes");
 
 /**
  * Empty grouped-devices payload served when the matter-controller sidecar can't

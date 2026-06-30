@@ -11,7 +11,6 @@
  */
 
 import { randomBytes } from "node:crypto";
-import pino from "pino";
 import { PrismaClient } from "@prisma/client";
 import {
   classifyNetworkCommand,
@@ -20,8 +19,9 @@ import {
   NETWORK_CONFIRMATION_TOKEN_EXPIRY_MS,
 } from "../config/network-safety-rules.js";
 import { recordActivity } from "./activity.singleton.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "network-safety" });
+const logger = createLogger("network-safety");
 
 interface PendingConfirmation {
   token: string;

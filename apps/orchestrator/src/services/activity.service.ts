@@ -21,7 +21,6 @@
  */
 import type { PrismaClient } from "@prisma/client";
 import { Prisma } from "@prisma/client";
-import pino from "pino";
 import {
   hashSignature,
   type ActivityKindName,
@@ -29,8 +28,9 @@ import {
   type ActivityRowSigner,
   type ActivitySeverityName,
 } from "./audit-signing.service.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "activity-recorder" });
+const logger = createLogger("activity-recorder");
 
 /** Canonical set of accepted kinds — must match the Prisma `ActivityKind`
  * enum verbatim. Duplicated as a Set for the runtime guard so a typo

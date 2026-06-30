@@ -1,11 +1,11 @@
 import os from "os";
 import fs from "fs";
 import { PrismaClient } from "@prisma/client";
-import pino from "pino";
 import { cacheDel } from "./cache.service.js";
 import { publish } from "./mqtt.service.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "device-registration" });
+const logger = createLogger("device-registration");
 
 const REFRESH_INTERVAL_MS = 30_000; // 30 seconds
 const CACHE_KEY = "devices:list";

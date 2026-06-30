@@ -23,7 +23,6 @@
 
 import { Router, type Request } from "express";
 import { BrainMemoryItemStatus, type PrismaClient } from "@prisma/client";
-import pino from "pino";
 import {
   getSummary,
   getFull,
@@ -34,8 +33,9 @@ import {
 import { invalidatePrefix } from "../services/cache.service.js";
 import { publish as mqttPublish } from "../services/mqtt.service.js";
 import { publishRunOne } from "../services/transcription-bus.service.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "me-context-stats-route" });
+const logger = createLogger("me-context-stats-route");
 
 // Same retry cap as WARP-218 transcribe-now. Kept in sync intentionally
 // — the route below mirrors that file's semantics so a failed-then-retry

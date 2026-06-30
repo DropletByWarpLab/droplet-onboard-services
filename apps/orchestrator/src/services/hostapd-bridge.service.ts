@@ -34,7 +34,6 @@
  * is used exactly once and never lingers after an error.
  */
 
-import pino from "pino";
 import { config } from "../config.js";
 import { RouterError, routerErrorFromResponse } from "../types/router-error.js";
 import {
@@ -43,8 +42,9 @@ import {
   bridgeAuthToken,
 } from "../lib/bridge-errors.js";
 import type { WriteResult } from "./openwrt.client.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "hostapd-bridge" });
+const logger = createLogger("hostapd-bridge");
 
 const BRIDGE_URL = config.DEVICE_BRIDGE_URL;
 

@@ -24,9 +24,9 @@
 
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import pino from "pino";
+import { createLogger } from "../../lib/logger.js";
 
-const logger = pino({ name: "claude-activity:compliance" });
+const logger = createLogger("claude-activity:compliance");
 
 export type ComplianceStatus =
   | "done"

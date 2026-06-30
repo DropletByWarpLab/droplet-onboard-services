@@ -36,11 +36,11 @@
  *     that could drift past an operator change in the dashboard.
  */
 import type { PrismaClient } from "@prisma/client";
-import pino from "pino";
 import { config } from "../config.js";
 import { recordActivity } from "./activity.singleton.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "camera-retention-purge" });
+const logger = createLogger("camera-retention-purge");
 
 // Read from `config.FRIGATE_URL` so we go through Zod validation and
 // share the same env-var contract as every other Frigate caller

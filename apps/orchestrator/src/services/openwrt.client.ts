@@ -34,12 +34,13 @@ import {
   FirewallRulesSchema,
   FirewallRedirectsSchema,
 } from "../types/firewall-schema.js";
+import { createLogger } from "../lib/logger.js";
 
 export { RouterError } from "../types/router-error.js";
 export type { RouterErrorCode } from "../types/router-error.js";
 export type { SystemControls, NetworkInterfaceRow, AiNetworkAccess } from "../types/network.js";
 
-const logger = pino({ name: "openwrt-client" });
+const logger = createLogger("openwrt-client");
 
 const BASE_URL = config.ROUTING_SERVICE_URL;
 const TOKEN = config.ROUTING_SERVICE_TOKEN;

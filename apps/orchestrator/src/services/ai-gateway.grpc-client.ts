@@ -9,10 +9,10 @@
  */
 
 import * as path from "node:path";
-import pino from "pino";
 import { config } from "../config.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "ai-gateway-grpc" });
+const logger = createLogger("ai-gateway-grpc");
 
 // Dynamic imports for gRPC (optional dependency)
 let grpc: typeof import("@grpc/grpc-js") | null = null;

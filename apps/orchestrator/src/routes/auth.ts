@@ -1,7 +1,6 @@
 import { Router, Request } from "express";
 import { randomBytes, createHash } from "node:crypto";
 import { z } from "zod";
-import pino from "pino";
 import {
   generateInviteToken,
   findInviteByToken,
@@ -84,6 +83,7 @@ import {
   nthUserIdCandidate,
   isReservedUserId,
 } from "@droplet/auth-policy";
+import { createLogger } from "../lib/logger.js";
 
 /** WARP-456: caller IP for auth audit rows. Uses Express's proxy-aware
  *  `req.ip` — `trust proxy` is set in app.ts, so behind the nginx gateway
@@ -94,7 +94,7 @@ export function callerIpFromReq(req: Request): string | undefined {
   return req.ip ?? req.socket?.remoteAddress ?? undefined;
 }
 
-const logger = pino({ name: "auth-route" });
+const logger = createLogger("auth-route");
 
 const usernameField = z
   .string()

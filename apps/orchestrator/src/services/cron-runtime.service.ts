@@ -65,15 +65,15 @@
  * connection.
  */
 import cron, { type ScheduledTask } from "node-cron";
-import pino from "pino";
 import { RouterError } from "../types/router-error.js";
 import {
   newRequestId,
   runWithRequestId,
   getRequestId,
 } from "../lib/request-context.js";
+import { createLogger } from "../lib/logger.js";
 
-const defaultLog = pino({ name: "cron-runtime" });
+const defaultLog = createLogger("cron-runtime");
 
 /** Minimal logger surface `safeRun` needs; pino-compatible. */
 export interface CronRuntimeLogger {

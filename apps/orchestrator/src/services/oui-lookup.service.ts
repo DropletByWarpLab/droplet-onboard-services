@@ -13,9 +13,9 @@
  */
 
 import { readFileSync, existsSync } from "node:fs";
-import pino from "pino";
+import { createLogger } from "../lib/logger.js";
 
-const log = pino({ name: "oui-lookup" });
+const log = createLogger("oui-lookup");
 
 export interface OuiLookup {
   lookup(mac: string): string | null;

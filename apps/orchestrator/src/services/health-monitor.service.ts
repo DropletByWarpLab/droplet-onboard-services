@@ -15,7 +15,6 @@
  * to COMPONENTS and the rest of the plumbing flows.
  */
 
-import pino from "pino";
 import type { PrismaClient } from "@prisma/client";
 import { isRedisHealthy } from "./cache.service.js";
 import { healthCheck as aiGatewayHealth } from "./ai-gateway.client.js";
@@ -23,8 +22,9 @@ import { healthCheck as routingHealth } from "./openwrt.client.js";
 import { healthCheck as displayHealth } from "./display.client.js";
 import { healthCheck as fileIndexerHealth } from "./file-indexer.client.js";
 import { ncPing } from "./nextcloud.client.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "health-monitor" });
+const logger = createLogger("health-monitor");
 
 export type ComponentName =
   | "postgres"

@@ -22,7 +22,6 @@
  */
 import { Router, type Request } from "express";
 import { z } from "zod";
-import pino from "pino";
 
 import {
   isSsoProvider,
@@ -47,8 +46,9 @@ import {
 import { SESSION_COOKIE_NAME, REFRESH_COOKIE_NAME } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { resolveTrustedOriginUrl } from "../lib/trusted-origin.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "sso-oidc-route" });
+const logger = createLogger("sso-oidc-route");
 
 /** Short-lived httpOnly cookie carrying the opaque `state` for the
  *  cookie-side half of the CSRF check (paired with the server-side row). */

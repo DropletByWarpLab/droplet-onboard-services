@@ -30,11 +30,11 @@
  * happen).
  */
 import type { PrismaClient } from "@prisma/client";
-import pino from "pino";
 import { computeDesiredBlocked } from "./schedule.service.js";
 import { RouterError } from "../types/router-error.js";
+import { createLogger } from "../lib/logger.js";
 
-const log = pino({ name: "schedule-ticker" });
+const log = createLogger("schedule-ticker");
 
 export interface FirewallClient {
   block(mac: string): Promise<void>;

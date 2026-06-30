@@ -44,7 +44,6 @@
  */
 import { Router, type Request } from "express";
 import { type PrismaClient } from "@prisma/client";
-import pino from "pino";
 import { z } from "zod";
 import {
   getSetupState,
@@ -72,8 +71,9 @@ import { verifyAccessToken } from "../services/jwt.service.js";
 import { SESSION_COOKIE_NAME } from "../middleware/auth.js";
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
 import { kickScreenQRRefresh } from "../services/screen-qr.service.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "setup-route" });
+const logger = createLogger("setup-route");
 
 // PR #373 / WARP-804 — STEP_AFTER_CLAIM (the wizard step the customer lands on
 // after a successful claim: `account`, since claim slots FIRST) is now owned by

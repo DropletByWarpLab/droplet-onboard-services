@@ -18,11 +18,11 @@
  * an "unconfigured" banner over the panel rather than 500-ing.
  */
 
-import pino from "pino";
 import { config } from "../../config.js";
 import { cacheGet, cacheSet } from "../cache.service.js";
+import { createLogger } from "../../lib/logger.js";
 
-const logger = pino({ name: "claude-activity:jira" });
+const logger = createLogger("claude-activity:jira");
 
 const CACHE_TTL_SECONDS = 60;
 const CACHE_PREFIX = "claude-activity:jira:";

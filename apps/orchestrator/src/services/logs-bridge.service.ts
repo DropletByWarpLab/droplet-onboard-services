@@ -28,12 +28,12 @@
  * up-to-date.
  */
 
-import pino from "pino";
 import { config } from "../config.js";
 import { RouterError } from "../types/router-error.js";
 import { isBridgeConnectionError } from "../lib/bridge-errors.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "logs-bridge" });
+const logger = createLogger("logs-bridge");
 
 const BRIDGE_URL = config.DEVICE_BRIDGE_URL;
 

@@ -26,13 +26,13 @@
  * schedule once.
  */
 import type { PrismaClient } from "@prisma/client";
-import pino from "pino";
 import { recordActivity } from "./activity.singleton.js";
 import { nextFireFromRrule } from "../utils/rrule.js";
 import { executeScene } from "./scene-runner.service.js";
 import type { MatterDispatcher } from "../routes/scenes.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "scene-schedule-ticker" });
+const logger = createLogger("scene-schedule-ticker");
 
 interface ScheduleRow {
   id: string;

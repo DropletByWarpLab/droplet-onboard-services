@@ -86,7 +86,7 @@ import {
   seedWorkspaceSettings,
   seedOffLanChannels,
 } from "./services/workspace-settings.service.js";
-import pino from "pino";
+import { createLogger } from "./lib/logger.js";
 
 export function createApp(
   prisma: PrismaClient,
@@ -402,7 +402,7 @@ export function createApp(
   // if the DB is wedged the orchestrator's later /api/settings calls
   // will surface the failure; we don't want to block app construction
   // on a non-critical bootstrap.
-  const seedLogger = pino({ name: "app:workspace-settings" });
+  const seedLogger = createLogger("app:workspace-settings");
   seedWorkspaceSettings(prisma).catch((err) => {
     seedLogger.warn(
       { err },

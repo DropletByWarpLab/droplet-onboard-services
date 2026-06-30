@@ -36,9 +36,9 @@
  *     auth.ts → 500)
  */
 import type { Request, Response, NextFunction } from "express";
-import pino from "pino";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "require-scope" });
+const logger = createLogger("require-scope");
 
 /**
  * Canonical scope set — must mirror the Prisma `Scope` enum

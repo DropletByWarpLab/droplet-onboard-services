@@ -38,11 +38,11 @@
 
 import { Router } from "express";
 import { PrismaClient, type Prisma, type FileContentChunk } from "@prisma/client";
-import pino from "pino";
 
 import { AnchorSchema, type Anchor } from "@droplet/shared-types";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "files-knowledge-route" });
+const logger = createLogger("files-knowledge-route");
 
 // Hard upper bounds — keep both routes from being used as a denial-of-
 // service amplifier (large `take` => big Postgres scan + big JSON body).

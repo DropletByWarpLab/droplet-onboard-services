@@ -18,9 +18,9 @@
  */
 
 import { Router, Request, Response } from "express";
-import pino from "pino";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "admin-rag-eval" });
+const logger = createLogger("admin-rag-eval");
 
 // Bound the proxy fetch. /run and /bootstrap return 202 immediately
 // (the heavy work is a rag-eval background task), and the GET endpoints

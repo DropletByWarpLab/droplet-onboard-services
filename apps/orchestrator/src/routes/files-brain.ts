@@ -28,7 +28,6 @@ import {
   type BrainMemoryItem,
   type PrismaClient,
 } from "@prisma/client";
-import pino from "pino";
 import {
   writeOriginal,
   writeManifest,
@@ -40,6 +39,7 @@ import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { publish as mqttPublish } from "../services/mqtt.service.js";
 import { publishRunOne } from "../services/transcription-bus.service.js";
+import { createLogger } from "../lib/logger.js";
 
 // WARP-218 — per-item rolling-hour retry cap for /transcribe-now.
 const TRANSCRIBE_NOW_RETRY_WINDOW_MS = 60 * 60 * 1000;
@@ -75,7 +75,7 @@ function isCapHit(
   return { capped: false, retryAfterSeconds: 0 };
 }
 
-const logger = pino({ name: "files-brain-route" });
+const logger = createLogger("files-brain-route");
 
 /**
  * MIME allow-list — must match the extractor set landed in

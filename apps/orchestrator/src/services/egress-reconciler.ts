@@ -29,7 +29,6 @@
  * schedule ticker.
  */
 import type { PrismaClient } from "@prisma/client";
-import pino from "pino";
 import {
   computeDesiredEgress,
   getPhoneHomeSettings,
@@ -37,8 +36,9 @@ import {
   CAMERAS_APPLIED_KEY,
 } from "./egress.service.js";
 import { RouterError } from "../types/router-error.js";
+import { createLogger } from "../lib/logger.js";
 
-const log = pino({ name: "egress-reconciler" });
+const log = createLogger("egress-reconciler");
 
 export interface EgressClient {
   blockPhoneHome(mac: string): Promise<void>;

@@ -17,10 +17,10 @@
  */
 
 import type { PrismaClient } from "@prisma/client";
-import pino from "pino";
 import { publish } from "./mqtt.service.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "notifications" });
+const logger = createLogger("notifications");
 
 export type NotificationKind = "reminder" | "event" | "system" | "ai";
 

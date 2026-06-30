@@ -32,15 +32,15 @@
  */
 import { createHash } from "node:crypto";
 import { networkInterfaces } from "node:os";
-import pino from "pino";
 import type { PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
 import { pushClaimCode, pushCustomImage, showSystem } from "./display.client.js";
 import type { ClaimWifi } from "./display.client.js";
 import { ensureClaimCode, isClaimed } from "./claim-code.service.js";
 import { renderQRToScreenPng } from "./qr-render.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "screen-qr" });
+const logger = createLogger("screen-qr");
 
 /** How often the poller re-evaluates which QR should be on screen. */
 const POLL_INTERVAL_MS = 30_000;

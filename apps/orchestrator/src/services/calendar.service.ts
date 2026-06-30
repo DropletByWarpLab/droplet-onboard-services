@@ -12,11 +12,11 @@
  */
 
 import type { PrismaClient } from "@prisma/client";
-import pino from "pino";
 import { syncCalendarSource } from "./caldav.client.js";
 import { encryptSecret, decryptSecret } from "./encryption.service.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "calendar" });
+const logger = createLogger("calendar");
 
 // ── Local events ──
 

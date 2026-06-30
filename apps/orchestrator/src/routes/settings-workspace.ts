@@ -31,10 +31,10 @@
 
 import { Router, type Request } from "express";
 import { WorkspaceType, type PrismaClient } from "@prisma/client";
-import pino from "pino";
 import { z } from "zod";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "settings-workspace-route" });
+const logger = createLogger("settings-workspace-route");
 
 interface AuthedUser {
   id?: string;

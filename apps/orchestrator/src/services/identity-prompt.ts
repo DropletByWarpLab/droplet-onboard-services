@@ -13,9 +13,9 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import pino from "pino";
+import { createLogger } from "../lib/logger.js";
 
-const log = pino({ name: "identity-prompt" });
+const log = createLogger("identity-prompt");
 
 /** Legacy identity line — also the fail-open fallback. */
 export const FALLBACK_IDENTITY =

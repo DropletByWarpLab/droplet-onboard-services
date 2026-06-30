@@ -23,10 +23,10 @@
 
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import pino from "pino";
 import { z } from "zod";
+import { createLogger } from "../../lib/logger.js";
 
-const logger = pino({ name: "claude-activity:session-state" });
+const logger = createLogger("claude-activity:session-state");
 
 export const SCHEMA_VERSION = 1;
 

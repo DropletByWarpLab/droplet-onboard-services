@@ -19,9 +19,9 @@
  * are out is to drop the socket.
  */
 import { Readable, type Writable } from "node:stream";
-import pino from "pino";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "pipe-upstream" });
+const logger = createLogger("pipe-upstream");
 
 export function pipeUpstreamBody(body: unknown, res: Writable): void {
   const stream = Readable.fromWeb(body as never);

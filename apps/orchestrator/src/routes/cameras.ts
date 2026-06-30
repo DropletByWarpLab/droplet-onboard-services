@@ -12,7 +12,6 @@
 
 import { Router } from "express";
 import { PrismaClient } from "@prisma/client";
-import pino from "pino";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import { loadCameraRetentionPolicy } from "../services/camera-retention-purge.service.js";
 import {
@@ -81,8 +80,9 @@ import {
   type CameraSettingsPatch,
 } from "../services/camera-settings.service.js";
 import { z } from "zod";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "cameras-routes" });
+const logger = createLogger("cameras-routes");
 
 /**
  * Empty CameraSystemStatus served when Frigate is unreachable — the dashboard's

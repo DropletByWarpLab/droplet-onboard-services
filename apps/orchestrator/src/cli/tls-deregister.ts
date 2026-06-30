@@ -19,7 +19,6 @@
  * device-identity gRPC client). The testable decision lives in
  * `runTlsDeregisterCli`; `main()` is the thin always-exit-0 composition root.
  */
-import pino from "pino";
 import { config } from "../config.js";
 import {
   deregisterFromHq,
@@ -29,6 +28,7 @@ import {
 } from "../services/tls-issuance.service.js";
 import { createHqIssuanceClient } from "../services/tls-issuance.adapters.js";
 import { createDeviceIdentityClient } from "../services/device-identity.client.js";
+import { createLogger } from "../lib/logger.js";
 
 export interface RunTlsDeregisterCliArgs {
   /** `!!config.HQ_ISSUANCE_URL` — whether this box is wired to a live HQ. */
@@ -71,7 +71,7 @@ export async function runTlsDeregisterCli(
 }
 
 async function main(): Promise<void> {
-  const logger = pino({ name: "tls-deregister-cli" });
+  const logger = createLogger("tls-deregister-cli");
   try {
     const deps: DeregisterDeps = {
       deviceId: config.DROPLET_DEVICE_ID,

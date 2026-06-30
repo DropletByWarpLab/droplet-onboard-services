@@ -15,11 +15,11 @@
  */
 
 import type { PrismaClient } from "@prisma/client";
-import pino from "pino";
 import { sendNotification } from "./notifications.service.js";
 import { syncSource, findStaleSources } from "./calendar.service.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "reminders-poller" });
+const logger = createLogger("reminders-poller");
 
 const POLL_INTERVAL_SEC = Number(process.env.REMINDER_POLL_INTERVAL_SEC) || 30;
 

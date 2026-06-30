@@ -28,7 +28,6 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
-import pino from "pino";
 import { requireRole } from "../middleware/auth.js";
 import { revokeUserSessions } from "../services/jwt.service.js";
 import { requireScope, type ScopeLoader } from "../middleware/scope.js";
@@ -44,8 +43,9 @@ import {
   type SendOptions,
 } from "../services/email-channel.service.js";
 import { buildInviteUrl } from "../lib/invite-url.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "people-route" });
+const logger = createLogger("people-route");
 
 // The invite-accept URL is built by the shared, host-validated
 // `buildInviteUrl` in lib/invite-url.ts (PR #486 review finding 2). The old

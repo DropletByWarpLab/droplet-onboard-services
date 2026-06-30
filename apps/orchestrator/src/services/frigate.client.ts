@@ -5,10 +5,10 @@
  * camera IPs and RTSP URLs are never exposed to external clients.
  */
 
-import pino from "pino";
 import { config } from "../config.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "frigate-client" });
+const logger = createLogger("frigate-client");
 
 const FRIGATE_URL = config.FRIGATE_URL;
 const DEFAULT_TIMEOUT = 10_000; // 10s for normal calls

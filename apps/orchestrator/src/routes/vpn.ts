@@ -19,7 +19,6 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { PrismaClient } from "@prisma/client";
-import pino from "pino";
 import { config } from "../config.js";
 import {
   vpnSetup,
@@ -38,8 +37,9 @@ import {
 } from "../services/vpn.service.js";
 import { notePeerCreated } from "../services/screen-qr.service.js";
 import { requireRole } from "../middleware/auth.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "vpn-route" });
+const logger = createLogger("vpn-route");
 
 const createPeerSchema = z.object({
   deviceLabel: z.string().trim().min(1).max(64),

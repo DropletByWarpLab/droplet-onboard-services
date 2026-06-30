@@ -12,9 +12,9 @@
  * a chat turn down with it.
  */
 import type { PrismaClient } from "@prisma/client";
-import pino from "pino";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "file-citation" });
+const logger = createLogger("file-citation");
 
 export interface FileCitationContext {
   userId: string;

@@ -25,10 +25,10 @@
  * Romain doesn't have to chase three files to understand a run.
  */
 import type { PrismaClient } from "@prisma/client";
-import pino from "pino";
 import { recordActivity } from "./activity.singleton.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "tool-spec-runner" });
+const logger = createLogger("tool-spec-runner");
 
 export interface StepDispatcher {
   /** Returns the parsed tool result (any JSON shape). Throws on failure. */
