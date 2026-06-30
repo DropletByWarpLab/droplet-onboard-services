@@ -19,6 +19,7 @@ import { HELP_INDEX, searchHelp } from "@/lib/help-index";
 // every topic the page documents — a section without an index entry is silently
 // unsearchable. Keep this list in sync with SECTIONS in app/help/page.tsx.
 const PAGE_SECTION_ANCHORS = [
+  "privacy",
   "claim",
   "workspace",
   "roles",

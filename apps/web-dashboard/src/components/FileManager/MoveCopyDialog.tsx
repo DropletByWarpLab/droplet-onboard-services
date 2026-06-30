@@ -1,8 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { X, Folder, ChevronRight, ChevronDown, Home } from "lucide-react";
-import { fetchFiles } from "@/lib/api";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  X,
+  Folder,
+  ChevronRight,
+  ChevronDown,
+  Home,
+  FolderPlus,
+} from "lucide-react";
+import { fetchFiles, createDirectory } from "@/lib/api";
 import { translateError } from "@/lib/friendly-errors";
 import type { FileEntryInfo } from "@/lib/types";
 
@@ -24,6 +31,14 @@ interface TreeNode {
   children?: TreeNode[];
   loading?: boolean;
   expanded?: boolean;
+  /**
+   * True once this node's children have actually been fetched from the server.
+   * Distinct from `children !== undefined`: an optimistic insert (e.g. the new
+   * folder created inline) seeds `children` without a real fetch, so we must
+   * track "loaded" separately or the lazy-load in `toggleNode` would skip the
+   * real listing and hide every server-side sibling. (WARP-938 review.)
+   */
+  loaded?: boolean;
 }
 
 /**
@@ -48,6 +63,12 @@ export function MoveCopyDialog({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // WARP-938 — inline "New folder" creation at the selected target.
+  const [creatingFolder, setCreatingFolder] = useState(false);
+  const [newFolderName, setNewFolderName] = useState("");
+  const [folderSubmitting, setFolderSubmitting] = useState(false);
+  const newFolderInputRef = useRef<HTMLInputElement>(null);
+
   // Load root on mount
   useEffect(() => {
     loadChildren("/");
@@ -66,6 +87,7 @@ export function MoveCopyDialog({
           ...node,
           children,
           loading: false,
+          loaded: true,
           expanded: true,
         }))
       );
@@ -79,7 +101,10 @@ export function MoveCopyDialog({
 
   const toggleNode = useCallback(
     (node: TreeNode) => {
-      if (node.children === undefined) {
+      // Fetch the real listing the first time a branch is opened. Gated on
+      // `loaded` (not `children === undefined`) so an optimistically-inserted
+      // child folder doesn't suppress the server fetch. (WARP-938 review.)
+      if (!node.loaded) {
         void loadChildren(node.path);
       } else {
         setTree((prev) =>
@@ -111,6 +136,91 @@ export function MoveCopyDialog({
       setSubmitting(false);
     }
   }, [selectedPath, isForbidden, onConfirm]);
+
+  // WARP-938 — open the inline new-folder form. Focus is handled by the effect
+  // below, which runs after the input is committed to the DOM (a bare
+  // requestAnimationFrame can fire before commit under React 18 concurrency).
+  const openNewFolder = useCallback(() => {
+    setError(null);
+    setNewFolderName("");
+    setCreatingFolder(true);
+  }, []);
+
+  // Focus the name input once it's actually mounted.
+  useEffect(() => {
+    if (creatingFolder) newFolderInputRef.current?.focus();
+  }, [creatingFolder]);
+
+  const cancelNewFolder = useCallback(() => {
+    setCreatingFolder(false);
+    setNewFolderName("");
+  }, []);
+
+  // Create a folder at the currently-selected target and select it, all without
+  // leaving the dialog. Reuses createDirectory() → POST /api/files/mkdir, the
+  // same endpoint the Files page uses for "New folder".
+  const handleCreateFolder = useCallback(async () => {
+    const name = newFolderName.trim();
+    if (!name) return;
+    // Reject path separators and `..` segments client-side. Without this a name
+    // like `../secret` or `foo/bar` would be joined into the destination path
+    // and the server's WebDAV layer would resolve it to a sibling of the target
+    // — letting an authenticated user create directories anywhere in their
+    // storage. A folder name is a single path segment, never a path. (WARP-938.)
+    if (!isValidFolderName(name)) {
+      setError("Folder names can't contain “/”, “\\”, or “..”.");
+      return;
+    }
+    const parent = selectedPath || "/";
+    // Don't allow creating inside a forbidden destination (same rule the
+    // confirm button enforces) — otherwise a user could seed a folder under a
+    // prefix they're not allowed to move/copy into. (WARP-938 review.)
+    if (isForbidden(parent)) return;
+    const folderPath = parent === "/" ? `/${name}` : `${parent}/${name}`;
+    const parentWasLoaded = findNode(tree, parent)?.loaded ?? false;
+    setFolderSubmitting(true);
+    setError(null);
+    try {
+      await createDirectory(folderPath);
+      if (parentWasLoaded) {
+        // Parent's listing is already in the tree — optimistically insert the
+        // new folder so it appears immediately without a refetch. The new child
+        // is `loaded: false` (empty, but a later fetch is harmless).
+        setTree((prev) =>
+          updateNode(prev, parent, (node) => {
+            const existing = node.children ?? [];
+            if (existing.some((c) => c.path === folderPath)) return node;
+            const child: TreeNode = {
+              path: folderPath,
+              name,
+              children: undefined,
+              loaded: false,
+            };
+            return {
+              ...node,
+              expanded: true,
+              children: [...existing, child].sort((a, b) =>
+                a.name.localeCompare(b.name),
+              ),
+            };
+          }),
+        );
+      } else {
+        // Parent was never expanded/fetched. Pull its real listing now (the
+        // server already has the new folder) so existing server-side siblings
+        // stay visible AND the parent is correctly marked loaded — an
+        // optimistic insert here would hide those siblings this session.
+        await loadChildren(parent);
+      }
+      setSelectedPath(folderPath);
+      setCreatingFolder(false);
+      setNewFolderName("");
+    } catch (err) {
+      setError(translateError(err, "files"));
+    } finally {
+      setFolderSubmitting(false);
+    }
+  }, [newFolderName, selectedPath, isForbidden, tree, loadChildren]);
 
   const title = mode === "move" ? "Move to…" : "Copy to…";
   const ctaLabel =
@@ -155,6 +265,57 @@ export function MoveCopyDialog({
           />
         </div>
 
+        {/* New folder — create a destination at the selected target inline. */}
+        <div className="px-3 py-2 border-t border-separator">
+          {creatingFolder ? (
+            <div className="flex items-center gap-2">
+              <FolderPlus
+                size={14}
+                className="text-label-tertiary shrink-0"
+                aria-hidden="true"
+              />
+              <input
+                ref={newFolderInputRef}
+                value={newFolderName}
+                onChange={(e) => setNewFolderName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void handleCreateFolder();
+                  if (e.key === "Escape") cancelNewFolder();
+                }}
+                placeholder="Folder name…"
+                aria-label="New folder name"
+                disabled={folderSubmitting}
+                className="flex-1 min-w-0 bg-surface-secondary rounded-sm px-2 py-1 type-footnote text-label-primary placeholder:text-label-quaternary outline-none focus:ring-1 focus:ring-accent"
+              />
+              <button
+                type="button"
+                onClick={() => void handleCreateFolder()}
+                disabled={folderSubmitting || !newFolderName.trim()}
+                className="type-caption-1 text-accent hover:text-accent-hover disabled:text-label-quaternary px-2 py-1 transition-colors"
+              >
+                {folderSubmitting ? "Creating…" : "Create"}
+              </button>
+              <button
+                type="button"
+                onClick={cancelNewFolder}
+                disabled={folderSubmitting}
+                className="type-caption-1 text-label-tertiary hover:text-label-primary px-1 py-1 transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={openNewFolder}
+              className="flex items-center gap-1.5 type-footnote text-accent hover:text-accent-hover px-1 py-1 transition-colors"
+            >
+              <FolderPlus size={14} aria-hidden="true" />
+              New folder
+            </button>
+          )}
+        </div>
+
         {/* Error */}
         {error && (
           <div className="px-4 py-2 type-footnote text-system-red bg-system-red/10 border-t border-system-red/20">
@@ -176,7 +337,7 @@ export function MoveCopyDialog({
           </button>
           <button
             onClick={handleConfirm}
-            disabled={submitting || isForbidden(selectedPath)}
+            disabled={submitting || folderSubmitting || isForbidden(selectedPath)}
             className="dp-btn-primary type-subheadline !min-h-[36px] !py-1.5"
           >
             {submitting ? "Working…" : ctaLabel}
@@ -266,6 +427,32 @@ function TreeNodeView({
       )}
     </div>
   );
+}
+
+// ── Folder-name validation ──
+
+/**
+ * A folder name must be a single path segment. Reject anything containing a
+ * forward/back slash or that is exactly "." / ".." (which would either escape
+ * the target via WebDAV path resolution or be a no-op). Embedded dots in an
+ * otherwise-normal name (e.g. "report.v2") are fine. (WARP-938 security review.)
+ */
+function isValidFolderName(name: string): boolean {
+  if (name.includes("/") || name.includes("\\")) return false;
+  if (name === "." || name === "..") return false;
+  return true;
+}
+
+// ── Tree lookup helper ──
+
+function findNode(node: TreeNode, targetPath: string): TreeNode | undefined {
+  if (node.path === targetPath) return node;
+  if (!node.children) return undefined;
+  for (const child of node.children) {
+    const found = findNode(child, targetPath);
+    if (found) return found;
+  }
+  return undefined;
 }
 
 // ── Tree update helper ──

@@ -152,6 +152,26 @@ function rootForSpace(space: Space, requestedPath: string): string {
   return requestedPath || "/";
 }
 
+/**
+ * WARP-938 (security): true iff `requested` is a home-relative path with no
+ * `..` traversal segment.
+ *
+ * The downstream WebDAV builder only strips leading slashes, so a `..` segment
+ * is resolved by the server and can land the operation outside the intended
+ * target (e.g. `/Documents/../secret` → a sibling at root). A legitimate
+ * create-directory path never needs `..`, so we reject any input that contains
+ * a `..` path segment outright. We check BOTH the raw and the POSIX-normalized
+ * forms (normalize collapses `..`, so the raw check is what actually catches
+ * the traversal; normalize guards odd separators like `//` or trailing `/`).
+ * Plain dots inside a name ("report.v2") and normal nested paths are unaffected.
+ */
+function isSafeUserPath(requested: string): boolean {
+  const rawSegments = requested.split("/");
+  if (rawSegments.includes("..")) return false;
+  const normalized = path.posix.normalize("/" + requested.replace(/^\/+/, ""));
+  return !normalized.split("/").includes("..");
+}
+
 /** Safely publish an MQTT message — failures are non-fatal. */
 function safePublish(topic: string, payload: Record<string, unknown>): void {
   try {
@@ -955,6 +975,16 @@ export function createFilesRouter(prisma: PrismaClient): Router {
         res
           .status(400)
           .json({ error: "path is required", details: parsed.error.flatten() });
+        return;
+      }
+
+      // WARP-938 (security): reject path traversal. The WebDAV layer strips only
+      // leading slashes, so a `..` segment would resolve to a sibling of the
+      // intended target — letting an authenticated user create directories
+      // anywhere in their storage. Normalize and require the result to stay
+      // anchored at root with no `..` segments.
+      if (!isSafeUserPath(parsed.data.path)) {
+        res.status(400).json({ error: "path must not contain '..' segments" });
         return;
       }
 

@@ -10,6 +10,7 @@ import {
   FolderOpen,
   Globe,
   HardDrive,
+  Lock,
   MessageSquare,
   Search,
   ShieldCheck,
@@ -192,6 +193,42 @@ interface Section {
 }
 
 const SECTIONS: Section[] = [
+  {
+    anchor: "privacy",
+    title: "What is Droplet & how privacy works",
+    Icon: Lock,
+    body: (
+      <>
+        <p>
+          Droplet is a private AI appliance that lives on your own network — a
+          single box that runs your files, conversations, cameras, and
+          smart-home control. Think of it as your own cloud, except it never
+          leaves your home or office.
+        </p>
+        <p>
+          <strong>The AI runs locally.</strong> The models that power chat and
+          everything else run on the hardware in front of you — the GPU inside
+          this Droplet — not on someone else&rsquo;s servers. By default your
+          messages and the model&rsquo;s replies never leave the box; there is
+          no hidden &ldquo;send to the cloud&rdquo; step underneath.
+        </p>
+        <p>
+          <strong>Your data stays on the box.</strong> Files you upload,
+          conversations you have, and footage your cameras record all stay on
+          the Droplet&rsquo;s own drives. Nothing is sent off the appliance
+          unless you explicitly choose to — for example, adding a cloud AI key
+          in Settings, which is always optional and clearly labelled.
+        </p>
+        <p>
+          <strong>You&rsquo;re still reachable when you need to be.</strong>{" "}
+          When you&rsquo;re away from home, your phone connects back to the
+          Droplet over its own end-to-end-encrypted VPN — so you reach your
+          data directly, without it passing through any cloud service in
+          between.
+        </p>
+      </>
+    ),
+  },
   {
     anchor: "claim",
     title: "Claiming your Droplet",

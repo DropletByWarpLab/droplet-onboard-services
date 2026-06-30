@@ -32,6 +32,7 @@ import HelpPage from "@/app/help/page";
 // to. Keep this in sync with the `helpAnchor` props in the setup steps + the
 // Network coverage panel — a missing section here is a dead "Learn more" link.
 const SECTION_ANCHORS = [
+  "privacy",
   "claim",
   "workspace",
   "roles",
