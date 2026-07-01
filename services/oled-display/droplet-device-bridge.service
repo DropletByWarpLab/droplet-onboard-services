@@ -122,6 +122,15 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 # append:/var/log/... needs that path writable; StateDirectory above is
 # handled automatically.
 ReadWritePaths=/var/log/droplet-device-bridge.log
+# WARP-985: the FQDN + box-name write-backs must upsert <repo>/.env — POST
+# /host/public-fqdn execs droplet-set-public-fqdn.sh, which mktemp's a sibling
+# next to .env before the atomic mv, so the repo DIRECTORY (not just the file)
+# needs a carve-out from ProtectSystem=strict + ProtectHome=read-only. Without
+# it the write-back dies with EROFS and the orchestrator's tls-issuance logs
+# "device-bridge public-fqdn write-back failed" even though the cert issued.
+# Same @REPO_ROOT@ install-time substitution as ExecStart above; `-` = ignore
+# if missing so the unit still starts on a host where the checkout moved.
+ReadWritePaths=-@REPO_ROOT@
 # Allow reading by-label/by-uuid for drive enumeration, and /proc/mounts.
 # Those are under /dev and /proc respectively — both readable by default.
 

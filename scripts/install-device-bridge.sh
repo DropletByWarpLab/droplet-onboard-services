@@ -9,9 +9,10 @@
 #   /etc/systemd/system/droplet-wifi-rotate.timer
 #   /etc/droplet/device-bridge.env            (0600, root:root)
 #
-# Populates BRIDGE_AUTH_TOKEN, OPENWRT_PASS, and (single-box) DROPLET_AP_MODE
-# from the repo .env if they aren't already set in the target env file, and
-# ensures the host python3 can import qrcode for the pairing-QR render.
+# Populates BRIDGE_AUTH_TOKEN, OPENWRT_PASS, ROUTING_SERVICE_TOKEN, and
+# (single-box) DROPLET_AP_MODE from the repo .env if they aren't already set in
+# the target env file, and ensures the host python3 can import qrcode for the
+# pairing-QR render.
 # Idempotent — safe to re-run after a git pull.
 #
 # Usage:
@@ -345,6 +346,17 @@ if [[ -f "$REPO_ENV" ]]; then
 
   if [[ -n "${OPENWRT_PASSWORD:-}" ]]; then
     set_env_if_blank "OPENWRT_PASS" "$OPENWRT_PASSWORD"
+  fi
+
+  # WARP-985: the public-FQDN write-back (droplet-set-public-fqdn.sh, exec'd
+  # by the bridge's POST /host/public-fqdn) registers split-horizon DNS via the
+  # routing service (POST /dhcp/hostnames in scripts/lib/local-dns.sh), which
+  # authenticates with ROUTING_SERVICE_TOKEN. The host script inherits the
+  # bridge's environment, so mirror the token here — without it the .env upsert
+  # succeeds but the routing-DNS leg 401s. setup.sh writes the token to the
+  # repo .env; set_env_if_blank never clobbers an operator override.
+  if [[ -n "${ROUTING_SERVICE_TOKEN:-}" ]]; then
+    set_env_if_blank "ROUTING_SERVICE_TOKEN" "$ROUTING_SERVICE_TOKEN"
   fi
 
   # Pairing-QR AP source (WARP-654). setup.sh --single-box records
