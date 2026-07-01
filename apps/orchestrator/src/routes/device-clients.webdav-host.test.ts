@@ -15,24 +15,12 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 vi.mock("../config.js", () => ({
   config: {
     WIREGUARD_ENDPOINT_HOST: "",
-    ROUTING_MODE: "real",
     corsAllowedOrigins: ["https://droplet-ai.local"],
   },
 }));
 
-vi.mock("../services/openwrt.client.js", async () => {
-  const actual = await vi.importActual<
-    typeof import("../services/openwrt.client.js")
-  >("../services/openwrt.client.js");
-  return {
-    ...actual,
-    fetchDuckDnsStatus: vi.fn(async () => ({ configured: false as const })),
-  };
-});
-
 import { webdavBaseUrl } from "./device-clients.js";
 import { config } from "../config.js";
-import * as openwrt from "../services/openwrt.client.js";
 import { _resetTrustedOriginCacheForTests } from "../lib/trusted-origin.js";
 
 function fakeReq(opts: {
@@ -57,13 +45,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   _resetTrustedOriginCacheForTests();
   (config as { WIREGUARD_ENDPOINT_HOST: string }).WIREGUARD_ENDPOINT_HOST = "";
-  (config as { ROUTING_MODE: string }).ROUTING_MODE = "real";
   (config as { corsAllowedOrigins: string[] }).corsAllowedOrigins = [
     "https://droplet-ai.local",
   ];
-  vi.mocked(openwrt.fetchDuckDnsStatus).mockResolvedValue({
-    configured: false,
-  });
 });
 
 describe("webdavBaseUrl (device-client WebDAV/server URL)", () => {
@@ -81,11 +65,11 @@ describe("webdavBaseUrl (device-client WebDAV/server URL)", () => {
 
   it("builds the WebDAV URL from the configured canonical origin", async () => {
     (config as { WIREGUARD_ENDPOINT_HOST: string }).WIREGUARD_ENDPOINT_HOST =
-      "studio.duckdns.org";
+      "studio.example.com";
     const url = await webdavBaseUrl(
       fakeReq({ host: "droplet-ai.local", xForwardedProto: "https" }),
     );
-    expect(url).toBe("https://studio.duckdns.org/nextcloud");
+    expect(url).toBe("https://studio.example.com/nextcloud");
   });
 
   it("preserves the legitimate allowlisted dashboard host", async () => {

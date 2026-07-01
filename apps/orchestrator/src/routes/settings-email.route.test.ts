@@ -24,8 +24,9 @@ import express, { Request, Response, NextFunction } from "express";
 vi.mock("../config.js", () => ({
   config: {
     AUTH_ENABLED: false,
-    // PR #486 finding 2: fields the shared invite-url helper reads. Routing
-    // disabled so the DuckDNS sidecar is never dialed in this unit test.
+    // PR #486 finding 2: fields the shared invite-url helper reads. No
+    // canonical-origin env vars are set, so the helper falls back to the
+    // box's trusted origin in this unit test.
     ROUTING_MODE: "disabled",
     WIREGUARD_ENDPOINT_HOST: "",
     corsAllowedOrigins: ["https://droplet-ai.local"],

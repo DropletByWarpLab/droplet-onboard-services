@@ -20,8 +20,9 @@ vi.mock("../config.js", () => ({
     JWT_SECRET: "test-secret-32-bytes-long-aaaaaaaa",
     DEVICE_SECRET_KEY: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
     REDIS_URL: "redis://localhost:6379",
-    // PR #486 finding 2: fields the shared invite-url helper reads. Routing
-    // disabled so the DuckDNS sidecar is never dialed in this unit test.
+    // PR #486 finding 2: fields the shared invite-url helper reads. No
+    // canonical-origin env vars are set, so the helper falls back to the
+    // box's trusted origin in this unit test.
     ROUTING_MODE: "disabled",
     WIREGUARD_ENDPOINT_HOST: "",
     corsAllowedOrigins: ["https://droplet-ai.local"],

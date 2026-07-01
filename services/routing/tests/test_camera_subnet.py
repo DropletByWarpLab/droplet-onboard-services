@@ -5,7 +5,7 @@ Before the fix the endpoint wrapped the whole UCI read in
 `except Exception: return {"enabled": False}`, so an auth failure, transport
 loss, or any ubus error was indistinguishable from "subnet not set up" — the
 dashboard showed "no camera subnet" when the real problem was an unreachable
-router or a wrong token. The fix mirrors `_read_duckdns` / `interface_exists`:
+router or a wrong token. The fix mirrors `interface_exists`:
 only ubus NOT_FOUND/NO_DATA means "not configured"; everything else
 propagates to `handle_router_error`.
 """

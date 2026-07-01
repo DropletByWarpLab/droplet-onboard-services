@@ -69,7 +69,6 @@ import type {
   VpnPeerInfo,
   VpnStatusInfo,
   VpnPeerCreatedInfo,
-  DuckDnsStatus,
   BoxNameCheckResult,
   BoxNameSetResult,
   ToolCatalogResponse,
@@ -1114,7 +1113,7 @@ const ROUTER_UNREACHABLE_CODES: ReadonlySet<RouterErrorCode> = new Set([
 /**
  * The fixed lead-in of the wizard's "router isn't reachable" notice. The
  * trailing destination is supplied per-surface (see {@link routerUnreachableNotice})
- * because the place to finish the work later differs by step — Wi-Fi/DuckDNS
+ * because the place to finish the work later differs by step — Wi-Fi settings
  * live at the "Network" page, WireGuard peers at "Remote Access". The caller
  * renders the destination as a monospaced span, so it is intentionally kept out
  * of this prefix. (WARP-807 UX review: the old single string pointed everyone at
@@ -4493,38 +4492,6 @@ export async function deleteVpnPeer(id: string): Promise<void> {
   }
 }
 
-// --- DuckDNS ---
-
-export async function fetchDuckDnsStatus(): Promise<DuckDnsStatus> {
-  const res = await authFetch(`${BASE}/api/ddns/duckdns`);
-  if (res.status === 403) {
-    // Surface admin-only as a typed condition the page can render specially.
-    throw new Error("403 Admin access required");
-  }
-  if (!res.ok) throw new Error(`Failed to fetch DuckDNS status: ${res.status}`);
-  return res.json();
-}
-
-export async function setDuckDnsConfig(opts: {
-  subdomain: string;
-  // Optional: omit entirely when the customer is keeping a previously
-  // stored token. The orchestrator + routing service preserve the
-  // existing password value in that case rather than rewriting cleartext.
-  token?: string;
-  enabled?: boolean;
-}): Promise<DuckDnsStatus> {
-  const res = await authFetch(`${BASE}/api/ddns/duckdns`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(opts),
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throwNetworkWriteError(body, res.status, "Failed to update DuckDNS");
-  }
-  return res.json();
-}
-
 // --- WARP-979: Secured / name-your-box ---
 
 /**
@@ -4565,8 +4532,6 @@ export async function setBoxName(name: string): Promise<BoxNameSetResult> {
   }
   return res.json();
 }
-
-
 // --- WARP-204: /knowledge view (recent + semantic search + brain memory) ---
 
 /** WARP-214 — source-channel signal: what extractor produced the text. */

@@ -15,24 +15,12 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 vi.mock("../config.js", () => ({
   config: {
     WIREGUARD_ENDPOINT_HOST: "",
-    ROUTING_MODE: "real",
     corsAllowedOrigins: ["https://droplet-ai.local"],
   },
 }));
 
-vi.mock("../services/openwrt.client.js", async () => {
-  const actual = await vi.importActual<
-    typeof import("../services/openwrt.client.js")
-  >("../services/openwrt.client.js");
-  return {
-    ...actual,
-    fetchDuckDnsStatus: vi.fn(async () => ({ configured: false as const })),
-  };
-});
-
 import { buildSsoCallbackUrl } from "./sso.js";
 import { config } from "../config.js";
-import * as openwrt from "../services/openwrt.client.js";
 import { _resetTrustedOriginCacheForTests } from "../lib/trusted-origin.js";
 
 function fakeReq(opts: {
@@ -61,13 +49,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   _resetTrustedOriginCacheForTests();
   (config as { WIREGUARD_ENDPOINT_HOST: string }).WIREGUARD_ENDPOINT_HOST = "";
-  (config as { ROUTING_MODE: string }).ROUTING_MODE = "real";
   (config as { corsAllowedOrigins: string[] }).corsAllowedOrigins = [
     "https://droplet-ai.local",
   ];
-  vi.mocked(openwrt.fetchDuckDnsStatus).mockResolvedValue({
-    configured: false,
-  });
 });
 
 describe("buildSsoCallbackUrl (currentUrl for openid-client)", () => {
@@ -101,7 +85,7 @@ describe("buildSsoCallbackUrl (currentUrl for openid-client)", () => {
 
   it("builds from the configured canonical origin", async () => {
     (config as { WIREGUARD_ENDPOINT_HOST: string }).WIREGUARD_ENDPOINT_HOST =
-      "studio.duckdns.org";
+      "studio.example.com";
     const url = await buildSsoCallbackUrl(
       fakeReq({
         host: "droplet-ai.local",
@@ -109,7 +93,7 @@ describe("buildSsoCallbackUrl (currentUrl for openid-client)", () => {
         originalUrl: CB,
       }),
     );
-    expect(url.host).toBe("studio.duckdns.org");
+    expect(url.host).toBe("studio.example.com");
     expect(url.searchParams.get("code")).toBe("abc123");
   });
 

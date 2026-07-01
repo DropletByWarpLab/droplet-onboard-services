@@ -130,7 +130,7 @@ const MATRIX: GuardedRoute[] = [
   { method: "post", path: "/api/auth/invites", allowed: ["owner", "admin"] },
   { method: "delete", path: "/api/auth/invites/abc", allowed: ["owner", "admin"] },
 
-  // ── network / firewall / vpn / ddns ── (owner + admin) ──
+  // ── network / firewall / vpn ── (owner + admin) ──
   { method: "post", path: "/api/network/wifi/ssid", allowed: ["owner", "admin"] },
   { method: "post", path: "/api/network/wifi/password", allowed: ["owner", "admin"] },
   { method: "post", path: "/api/network/wifi/channel", allowed: ["owner", "admin"] },
@@ -143,9 +143,8 @@ const MATRIX: GuardedRoute[] = [
   { method: "post", path: "/api/network/dhcp/static-lease", allowed: ["owner", "admin"] },
   { method: "post", path: "/api/vpn/peers", allowed: ["owner", "admin"] },
   { method: "delete", path: "/api/vpn/peers/abc", allowed: ["owner", "admin"] },
-  { method: "put", path: "/api/ddns/duckdns", allowed: ["owner", "admin"] },
-  // WARP-446: extender AP onboarding writes — same posture as VPN peers
-  // and DuckDNS, since approving an AP changes the household's
+  // WARP-446: extender AP onboarding writes — same posture as VPN peers,
+  // since approving an AP changes the household's
   // wireless surface (ADR-005 §RBAC).
   { method: "post", path: "/api/aps/AA:BB:CC:DD:EE:FF/approve", allowed: ["owner", "admin"] },
   { method: "post", path: "/api/aps/AA:BB:CC:DD:EE:FF/decommission", allowed: ["owner", "admin"] },

@@ -21,9 +21,9 @@ vi.mock("../config.js", () => ({
     AUTH_ENABLED: false,
     // PR #486 finding 2: the shared invite-url helper reads these. The accept
     // link's host is validated against `corsAllowedOrigins` (the box's trusted
-    // origins) and resolved from the canonical origin (WIREGUARD_ENDPOINT_HOST
-    // -> DuckDNS); a forged X-Forwarded-Host is never embedded. Routing is
-    // disabled so the helper never hits the DuckDNS sidecar in this unit test.
+    // origins) and resolved from the canonical origin (WIREGUARD_ENDPOINT_HOST);
+    // a forged X-Forwarded-Host is never embedded. No canonical-origin env var
+    // is set here, so the helper falls back to the box's trusted origin.
     ROUTING_MODE: "disabled",
     WIREGUARD_ENDPOINT_HOST: "",
     corsAllowedOrigins: ["https://droplet-ai.local"],

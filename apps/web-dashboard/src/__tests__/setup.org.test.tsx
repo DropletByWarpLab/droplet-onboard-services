@@ -46,10 +46,8 @@ vi.mock("@/lib/api", async () => {
     patchSetupStep: vi.fn(async () => undefined),
     ...claimApiMocks(),
     postOrg: (input: unknown) => postOrgMock(input),
-    // Internet step (the step AFTER org) renders its form on an unconfigured
-    // DuckDNS; keep it quiet so the advance assertion can see it.
-    fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
-    setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
+    // The Address step (after org) reads its web address via fetchVpnStatus;
+    // keep it quiet so the advance assertion can see it.
     fetchDrives: vi.fn(async () => ({ drives: [], count: 0 })),
     fetchDiscoveredCameras: vi.fn(async () => []),
     fetchVpnStatus: vi.fn(async () => ({

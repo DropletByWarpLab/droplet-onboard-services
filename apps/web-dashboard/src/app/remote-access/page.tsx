@@ -22,14 +22,11 @@ import {
   fetchVpnPeers,
   createVpnPeer,
   deleteVpnPeer,
-  fetchDuckDnsStatus,
-  setDuckDnsConfig,
 } from "@/lib/api";
 import type {
   VpnPeerInfo,
   VpnStatusInfo,
   VpnPeerCreatedInfo,
-  DuckDnsStatus,
 } from "@/lib/types";
 import { Dialog } from "@/components/Dialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -133,11 +130,11 @@ export default function RemoteAccessPage() {
           <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
             <AlertCircle size={16} style={{ color: "#d9a35c", flexShrink: 0, marginTop: 2 }} />
             <div>
-              <p style={{ fontWeight: 600, color: "var(--text)", fontSize: 13.5 }}>Endpoint host not configured</p>
+              <p style={{ fontWeight: 600, color: "var(--text)", fontSize: 13.5 }}>Web address not ready yet</p>
               <p style={{ fontSize: 12.5, color: "var(--text-muted)", marginTop: 2 }}>
-                Set <code style={{ fontFamily: "var(--font-mono)" }}>WIREGUARD_ENDPOINT_HOST</code> in{" "}
-                <code style={{ fontFamily: "var(--font-mono)" }}>.env</code> to your DuckDNS subdomain or your
-                home router’s public IP, then restart the orchestrator.
+                Your box is still setting up its own web address. Remote access turns
+                on automatically once that’s ready — no settings to enter. If this
+                doesn’t clear on its own, restart the box.
               </p>
             </div>
           </div>
@@ -176,8 +173,8 @@ export default function RemoteAccessPage() {
         )}
       </div>
 
-      {/* DuckDNS card — only renders when the user is an admin. */}
-      <DuckDnsCard />
+      {/* How remote access works — the box's own web address + one-tap Connect. */}
+      <RemoteAddressCard status={status} />
 
       {showAdd && (
         <AddDeviceDialog
@@ -200,176 +197,54 @@ export default function RemoteAccessPage() {
   );
 }
 
-// ─────────────────────── DuckDNS card ────────────────────────
+// ─────────────────────── Remote address card ────────────────────────
 //
-// Two states: unconfigured (form to enter subdomain + token) and configured
-// (read-only summary + "Edit" button to swap to form). Token is write-only —
-// never displayed; the form input is always blank.
+// Read-only status for the new remote-access model (ADR-023 / ADR-025): the box
+// carries its own publicly-trusted web address and reaches you through an
+// outbound relay. There is nothing to configure — no dynamic DNS, no subdomain
+// or token. Away from home, the owner turns on Connect in the Droplet app and
+// opens the SAME address with a green padlock. If the box hasn't learned its
+// address from HQ yet, we describe it generically.
 
-function DuckDnsCard() {
-  const [status, setStatus] = useState<DuckDnsStatus | null>(null);
-  const [adminVisible, setAdminVisible] = useState(true);
-  const [editing, setEditing] = useState(false);
-  const [subdomain, setSubdomain] = useState("");
-  const [token, setToken] = useState("");
-  const [enabled, setEnabled] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  const reload = useCallback(async () => {
-    try {
-      const s = await fetchDuckDnsStatus();
-      setStatus(s);
-      if (s.configured) {
-        setSubdomain(s.subdomain);
-        setEnabled(s.enabled);
-      }
-    } catch (e) {
-      // 403 = non-admin; hide the entire card. Other errors → show.
-      const msg = e instanceof Error ? e.message : "Failed to load DuckDNS status";
-      if (msg.startsWith("403")) {
-        setAdminVisible(false);
-      } else {
-        setErr(translateError(e, "vpn"));
-      }
-    }
-  }, []);
-
-  useEffect(() => {
-    reload();
-  }, [reload]);
-
-  if (!adminVisible) return null;
-
-  const handleSave = async () => {
-    if (!subdomain.trim() || !token.trim()) {
-      setErr("Both subdomain and token are required.");
-      return;
-    }
-    setSaving(true);
-    setErr(null);
-    try {
-      const s = await setDuckDnsConfig({ subdomain: subdomain.trim(), token: token.trim(), enabled });
-      setStatus(s);
-      setToken("");
-      setEditing(false);
-    } catch (e) {
-      setErr(translateError(e, "vpn"));
-    } finally {
-      setSaving(false);
-    }
-  };
+function RemoteAddressCard({ status }: { status: VpnStatusInfo | null }) {
+  const address = status?.publicFqdn?.trim() || null;
 
   return (
     <div className="card" style={{ marginTop: 24 }}>
-      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, marginBottom: 12 }}>
-        <div>
-          <h2 style={{ fontSize: 16, fontWeight: 600, color: "var(--text)" }}>Domain name (DuckDNS)</h2>
-          <p style={{ fontSize: 12.5, color: "var(--text-muted)", marginTop: 4, maxWidth: "32rem" }}>
-            Free dynamic DNS so your tunnel keeps working when your home router&rsquo;s public IP
-            changes. Sign up at{" "}
-            <a href="https://www.duckdns.org/" target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
-              duckdns.org
-            </a>{" "}
-            to get a subdomain and token.
-          </p>
-        </div>
-        {status?.configured && !editing && (
-          <button onClick={() => setEditing(true)} className="btn sm" type="button" style={{ flexShrink: 0 }}>
-            Edit
-          </button>
-        )}
+      <div style={{ marginBottom: 12 }}>
+        <h2 style={{ fontSize: 16, fontWeight: 600, color: "var(--text)" }}>Your box&rsquo;s web address</h2>
+        <p style={{ fontSize: 12.5, color: "var(--text-muted)", marginTop: 4, maxWidth: "34rem" }}>
+          Remote access is automatic. Your Droplet has its own secure web address — the same one
+          works at home and away, with a padlock and nothing to install. When you&rsquo;re out,
+          open the Droplet app and turn on <strong>Connect</strong>, then open that address in your
+          browser. No dynamic DNS, no subdomain or token, and no changes to your home router.
+        </p>
       </div>
 
-      {err && (
-        <div style={{ marginBottom: 12, padding: 10, borderRadius: 10, border: "1px solid rgba(239,68,68,0.25)", background: "rgba(239,68,68,0.08)", color: "#ef4444", fontSize: 13, display: "flex", alignItems: "flex-start", gap: 8 }}>
-          <AlertCircle size={14} style={{ marginTop: 2, flexShrink: 0 }} />
-          <span>{err}</span>
-        </div>
-      )}
-
-      {status?.configured && !editing ? (
-        <div className="grid c3">
-          <Stat label="Domain" value={status.fullDomain} />
-          <Stat label="Token" value={status.tokenSet ? "Stored" : "Missing"} />
-          <Stat label="Status" value={status.enabled ? "Enabled" : "Disabled"} />
+      {address ? (
+        <div className="grid c2">
+          <Stat label="Web address" value={address} />
+          <Stat label="Away from home" value="Turn on Connect in the app" />
         </div>
       ) : (
-        <div className="space-y-3">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div>
-              <label className="type-caption-1 text-label-tertiary mb-1 block">
-                Subdomain
-              </label>
-              <div className="flex items-center gap-2">
-                <input
-                  value={subdomain}
-                  onChange={(e) => setSubdomain(e.target.value.toLowerCase())}
-                  placeholder="my-droplet"
-                  className="dp-input flex-1"
-                  maxLength={63}
-                />
-                <span className="type-footnote text-label-tertiary whitespace-nowrap">
-                  .duckdns.org
-                </span>
-              </div>
-            </div>
-            <div>
-              <label className="type-caption-1 text-label-tertiary mb-1 block">
-                Token{status?.configured && status.tokenSet && " (replace)"}
-              </label>
-              <input
-                type="password"
-                value={token}
-                onChange={(e) => setToken(e.target.value)}
-                placeholder={status?.configured ? "•••••• (stored)" : "Paste DuckDNS token"}
-                className="dp-input"
-                autoComplete="off"
-              />
-            </div>
-          </div>
-          <label className="flex items-center gap-2 type-footnote text-label-secondary cursor-pointer">
-            <input
-              type="checkbox"
-              checked={enabled}
-              onChange={(e) => setEnabled(e.target.checked)}
-              className="rounded"
-            />
-            Run dynamic DNS updates
-          </label>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 8, paddingTop: 4 }}>
-            {editing && (
-              <button
-                onClick={() => {
-                  setEditing(false);
-                  setErr(null);
-                  setToken("");
-                }}
-                className="btn ghost"
-                type="button"
-              >
-                Cancel
-              </button>
-            )}
-            <button onClick={handleSave} disabled={saving} className="btn primary" type="button">
-              {saving ? (
-                <>
-                  <Loader2 size={14} className="animate-spin" />
-                  Saving&hellip;
-                </>
-              ) : (
-                "Save"
-              )}
-            </button>
-          </div>
-          {!status?.configured && (
-            <p className="type-caption-2 text-label-quaternary">
-              After saving here, also set <code className="font-mono">WIREGUARD_ENDPOINT_HOST</code>
-              {" "}in <code className="font-mono">.env</code> to{" "}
-              <code className="font-mono">{subdomain || "yourname"}.duckdns.org</code>
-              {" "}and restart the orchestrator so new peer configs use the hostname.
-            </p>
-          )}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "flex-start",
+            gap: 8,
+            padding: 10,
+            borderRadius: 10,
+            border: "1px solid rgba(217,163,92,0.25)",
+            background: "rgba(217,163,92,0.08)",
+            fontSize: 12.5,
+            color: "var(--text-muted)",
+          }}
+        >
+          <Globe size={14} style={{ marginTop: 2, flexShrink: 0, color: "#d9a35c" }} />
+          <span>
+            Your box is still setting up its web address. This appears automatically once it&rsquo;s
+            ready — nothing to do here.
+          </span>
         </div>
       )}
     </div>

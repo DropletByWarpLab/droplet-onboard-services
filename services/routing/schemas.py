@@ -496,48 +496,6 @@ class VpnPeerDeleteRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# DuckDNS (Dynamic DNS for the WireGuard endpoint hostname)
-# ---------------------------------------------------------------------------
-#
-# DuckDNS is a free dynamic-DNS service. The user picks a subdomain
-# (e.g. `stefan-droplet`), gets a token from duckdns.org, and ddns-scripts
-# pings DuckDNS every few minutes with the WAN IP. From outside the LAN,
-# `stefan-droplet.duckdns.org` then resolves to whatever your home router's
-# public IP is — perfect as the WireGuard `Endpoint`.
-#
-# The token is treated as a secret: PUT writes it, GET returns only
-# whether one is configured. ddns-scripts stores it in cleartext in
-# /etc/config/ddns (the same place as wifi PSKs and OpenVPN secrets,
-# all 0600) so this matches the rest of OpenWrt's secret hygiene.
-_DUCKDNS_SUBDOMAIN_PATTERN = r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
-
-
-class DuckDnsConfigRequest(BaseModel):
-    """Configure the DuckDNS service section.
-
-    `subdomain` is the part *before* `.duckdns.org` — DuckDNS's url template
-    appends the suffix, so passing the full domain would double it up.
-    """
-
-    subdomain: str = Field(
-        ..., min_length=1, max_length=63, pattern=_DUCKDNS_SUBDOMAIN_PATTERN,
-        description="DuckDNS subdomain, e.g. 'stefan-droplet' (no '.duckdns.org' suffix).",
-    )
-    # Optional: when omitted, the handler preserves the existing
-    # /etc/config/ddns password. The dashboard's wizard uses this for
-    # the "keep stored token" path so a returning customer doesn't have
-    # to re-paste the token every time they re-visit the Internet step.
-    token: Optional[str] = Field(
-        default=None, min_length=10, max_length=128,
-        description="DuckDNS account token (UUID-like). Stored in /etc/config/ddns; redacted on read. Omit to keep the currently-stored value.",
-    )
-    enabled: bool = Field(
-        default=True,
-        description="Whether ddns-scripts should run this service on the next start. False stages the config without enabling.",
-    )
-
-
-# ---------------------------------------------------------------------------
 # AP onboarding (WARP-446)
 # ---------------------------------------------------------------------------
 #

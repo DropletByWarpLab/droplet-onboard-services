@@ -1,11 +1,11 @@
 /**
  * Onboarding-Flow redesign — the single "Internet" step is split into a
- * dedicated Home Wi-Fi step and an Internet-address (DuckDNS) step. These tests
+ * dedicated Home Wi-Fi step and a web-address step. These tests
  * cover the Wi-Fi half: the WARP-808 disconnect warning, the optional/skippable
  * behaviour (WARP-809), and the calm error ladder (WARP-807) — all carried over
  * from the old InternetStep, adapted to the dedicated step (fields render
  * directly; there's no longer an "Add a Wi-Fi network" disclosure, and there
- * are no DuckDNS fields here).
+ * are no web-address fields here).
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";

@@ -54,9 +54,9 @@ vi.mock("../services/push-dispatch.service.js", () => ({
 }));
 
 // PR #486 finding 2: webdavBaseUrl now resolves the host via the shared
-// trusted-origin resolver. Mock config so ROUTING_MODE=disabled (the resolver
-// then never dials the DuckDNS sidecar) and provide the box's trusted origin;
-// the WebDAV URL falls back to it for the test's localhost request host.
+// trusted-origin resolver. Mock config with no canonical-origin env vars set
+// and provide the box's trusted origin; the WebDAV URL falls back to it for
+// the test's localhost request host.
 vi.mock("../config.js", () => ({
   config: {
     ROUTING_MODE: "disabled",

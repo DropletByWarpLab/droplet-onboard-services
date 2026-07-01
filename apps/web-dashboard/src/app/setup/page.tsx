@@ -32,8 +32,8 @@ import { SetupNavProvider } from "@/components/setup/setup-nav";
  *
  * Each step is its own component under `components/setup/steps/`. This
  * page only owns:
- *   - the current step + cross-step values (displayName, duckdnsSubdomain,
- *     discoveredCount) that later steps need to render
+ *   - the current step + cross-step values (displayName, discoveredCount)
+ *     that later steps need to render
  *   - the per-step callback wiring that advances `step` on completion
  *
  * The 4-step base flow (welcome → account → discovery → done) shipped in

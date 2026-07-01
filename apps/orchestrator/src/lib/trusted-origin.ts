@@ -22,11 +22,10 @@
  *   1. **Canonical origin** — `DROPLET_PUBLIC_FQDN` (ADR-023: the publicly-
  *      trusted per-device FQDN `d-<hmac>.devices.warp-lab.ai`, the top-priority
  *      source), else `WIREGUARD_ENDPOINT_HOST` (the operator-set public DNS
- *      name, verbatim), else the box's enabled DuckDNS subdomain
- *      (`fullDomain` || `<subdomain>.duckdns.org`). The env→DuckDNS tail of this
- *      order matches `vpn.ts`'s `resolveEndpointHost()`, so every generated URL
- *      and the VPN endpoint agree on "what is this box's public address". When
- *      present, the URL is built from it and the request host is ignored.
+ *      name, verbatim). This env-based order matches `vpn.ts`'s
+ *      `resolveEndpointHost()`, so every generated URL and the VPN endpoint
+ *      agree on "what is this box's public address". When present, the URL is
+ *      built from it and the request host is ignored.
  *   2. **Allowlisted request host** — when there is no canonical origin, the
  *      request's host (`x-forwarded-host` then `host`) is used ONLY if it
  *      matches the allowlist {canonical-origin host} ∪ {hosts of
@@ -44,7 +43,6 @@
 import type { Request } from "express";
 import pino from "pino";
 import { config } from "../config.js";
-import { fetchDuckDnsStatus } from "../services/openwrt.client.js";
 
 const logger = pino({ name: "trusted-origin" });
 
@@ -62,17 +60,11 @@ export interface TrustedOrigin {
 }
 
 /**
- * In-process TTL cache for the canonical-origin resolution. The DuckDNS leg
- * hits the routing service; the cache keeps a burst of URL builds from
- * amplifying onto the Python sidecar. Mirrors `vpn.ts`'s 30 s endpoint cache.
+ * Test-only: retained as a no-op so existing specs keep a stable import.
+ * The canonical origin now resolves from env vars with no I/O, so there is
+ * no longer any TTL cache to reset.
  */
-const ORIGIN_CACHE_TTL_MS = 30_000;
-let _originCache: { value: TrustedOrigin; expiresAt: number } | null = null;
-
-/** Test-only: drop the cache so unit tests can flip env/DuckDNS without TTL waits. */
-export function _resetTrustedOriginCacheForTests(): void {
-  _originCache = null;
-}
+export function _resetTrustedOriginCacheForTests(): void {}
 
 /** Strip a trailing `:port` from a host[:port] and lower-case it. */
 function bareHost(host: string): string {
@@ -118,16 +110,11 @@ function trustedOrigins(): string[] {
 /**
  * Resolve the canonical public origin + the host allowlist.
  *
- * Cached for `ORIGIN_CACHE_TTL_MS`. Routing-service failures are non-fatal:
- * a failed DuckDNS lookup is treated as "no canonical origin" (the env
- * override path is unaffected), exactly like `resolveEndpointHost()`.
+ * The canonical origin comes from env vars (`DROPLET_PUBLIC_FQDN`, then
+ * `WIREGUARD_ENDPOINT_HOST`), read verbatim with no network call. Async
+ * signature is retained so callers and tests are unaffected.
  */
 export async function resolveTrustedOrigin(): Promise<TrustedOrigin> {
-  const now = Date.now();
-  if (_originCache && _originCache.expiresAt > now) {
-    return _originCache.value;
-  }
-
   // Always trust the box's own configured origins (LAN dashboard origin etc.).
   const allowedHosts = new Set<string>();
   for (const origin of trustedOrigins()) {
@@ -137,49 +124,33 @@ export async function resolveTrustedOrigin(): Promise<TrustedOrigin> {
 
   // 0. ADR-023 (C4): the publicly-trusted per-device FQDN
   //    (`d-<hmac>.devices.warp-lab.ai`) is the TOP-priority canonical origin —
-  //    above WIREGUARD_ENDPOINT_HOST and DuckDNS. It is the single address that
-  //    works at home AND over the WireGuard tunnel and carries a publicly-
-  //    trusted cert, so every generated URL should prefer it. Verbatim, no
-  //    network call. Empty until the box learns its FQDN from HQ.
+  //    above WIREGUARD_ENDPOINT_HOST. It is the single address that works at
+  //    home AND over the WireGuard tunnel and carries a publicly-trusted cert,
+  //    so every generated URL should prefer it. Verbatim, no network call.
+  //    Empty until the box learns its FQDN from HQ.
   let canonicalHost: string | null = null;
   const fqdn = (config.DROPLET_PUBLIC_FQDN ?? "").trim();
   if (fqdn) {
     canonicalHost = bareHost(fqdn);
   }
 
-  // 1. Operator-set public DNS name, verbatim, without a network call.
+  // 1. Else the operator-set public DNS name, verbatim, without a network call.
   const envHost = (config.WIREGUARD_ENDPOINT_HOST ?? "").trim();
   if (canonicalHost) {
-    // FQDN already chosen above — skip the lower-priority sources.
+    // FQDN already chosen above — skip the lower-priority source.
   } else if (envHost) {
     canonicalHost = bareHost(envHost);
-  } else if (config.ROUTING_MODE !== "disabled") {
-    // 2. Else derive from an enabled DuckDNS config. Skipped when routing
-    //    supervision is disabled (the call would just throw RouterError.disabled).
-    try {
-      const ddns = await fetchDuckDnsStatus();
-      if (ddns.configured && ddns.enabled) {
-        const derived = ddns.fullDomain || `${ddns.subdomain}.duckdns.org`;
-        canonicalHost = bareHost(derived);
-      }
-    } catch (err) {
-      logger.debug(
-        { err },
-        "trusted-origin: could not check DuckDNS for canonical origin — treating as unconfigured",
-      );
-    }
   }
 
   if (canonicalHost) allowedHosts.add(canonicalHost);
 
   const value: TrustedOrigin = {
     canonicalHost,
-    // The canonical origin is always an https endpoint today (DuckDNS / the
-    // operator's public DNS front the box over TLS).
+    // The canonical origin is always an https endpoint today (the operator's
+    // public DNS / per-device FQDN front the box over TLS).
     canonicalIsHttps: true,
     allowedHosts,
   };
-  _originCache = { value, expiresAt: now + ORIGIN_CACHE_TTL_MS };
   return value;
 }
 
