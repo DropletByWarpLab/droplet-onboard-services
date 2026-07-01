@@ -20,6 +20,7 @@ export interface TypedError extends Error {
   code?: string;
   status?: number;
   body?: unknown;
+  requestId?: string;
 }
 
 export interface ApiFetchOptions extends RequestInit {
@@ -54,7 +55,13 @@ export async function apiFetch<T = unknown>(
   path: string,
   init?: ApiFetchOptions,
 ): Promise<T> {
-  const { timeoutMs = DEFAULT_API_FETCH_TIMEOUT_MS, signal: callerSignal, ...rest } = init ?? {};
+  const {
+    timeoutMs = DEFAULT_API_FETCH_TIMEOUT_MS,
+    signal: callerSignal,
+    headers: callerHeaders,
+    ...rest
+  } = init ?? {};
+  const requestId = crypto.randomUUID();
 
   // Build the effective signal: timeout, caller, or both combined.
   const timeoutSignal: AbortSignal | null = timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : null;
@@ -67,7 +74,11 @@ export async function apiFetch<T = unknown>(
 
   let r: Response;
   try {
-    r = await fetch(path, { ...rest, signal });
+    r = await fetch(path, {
+      ...rest,
+      headers: { ...(callerHeaders as Record<string, string> | undefined), "x-request-id": requestId },
+      signal,
+    });
   } catch (err) {
     // Classify the abort source so callers can distinguish timeout from
     // user-initiated cancel from raw network failure. `signal.aborted` on the
@@ -103,6 +114,7 @@ export async function apiFetch<T = unknown>(
     e.code = typed.code;
     e.status = r.status;
     e.body = body;
+    e.requestId = r.headers?.get("x-request-id") ?? requestId;
     throw e;
   }
   return body as T;
