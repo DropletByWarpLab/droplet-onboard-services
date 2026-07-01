@@ -117,6 +117,48 @@ export interface HqDeregisterResponse {
 }
 
 /**
+ * WARP-983 — POST /api/issuance/provision body. A fresh / factory-reset box
+ * self-enrolls into the HQ registry BEFORE it can ask for a cert: factory-reset
+ * signed the ADR-023 deregister (which DELETED the device from the registry), so
+ * on the next boot the challenge/order flow 404s with `device_id not in
+ * registry`. This re-registers the box with a one-time HQ-minted token + a TPM
+ * proof-of-possession over that token, using the SAME device key + signature
+ * encoding the cert order flow uses (base64 DER ECDSA, `ecdsa-sha256`). The
+ * signed bytes are pinned by the HQ contract (crypto.ts `buildProvisionMessage`)
+ * to exactly `droplet-provision:v1:<token>:<device_id>:<key_fingerprint>` — a
+ * distinct domain prefix from the cert PoP so neither signature can be replayed
+ * as the other. Field names are snake_case on the wire (mirrors HQ types.ts).
+ */
+export interface HqProvisionRequest {
+  device_id: string;
+  /** The device identity's SubjectPublicKeyInfo PEM (extracted from the cert). */
+  public_key_pem: string;
+  key_fingerprint: string;
+  /** The one-time HQ-minted provisioning token (`DROPLET_PROVISION_TOKEN`). */
+  token: string;
+  /** base64 DER ECDSA over `buildProvisionMessage(token, device_id, fingerprint)`. */
+  signature: string;
+  sig_alg: "ecdsa-sha256";
+}
+
+export interface HqProvisionResponse {
+  device_id: string;
+  status: "registered";
+  idempotent: boolean;
+}
+
+/** The provisioning PoP message HQ verifies (crypto.ts `buildProvisionMessage`).
+ *  MUST match the HQ Worker byte-for-byte: a distinct `droplet-provision:v1:`
+ *  domain prefix from the cert challenge's `droplet-cert:v1:`. */
+export function buildProvisionMessage(
+  token: string,
+  deviceId: string,
+  keyFingerprint: string,
+): string {
+  return `droplet-provision:v1:${token}:${deviceId}:${keyFingerprint}`;
+}
+
+/**
  * Plain outbound HTTPS to the HQ fleet-server. The base URL comes from
  * `HQ_ISSUANCE_URL`; this client owns the contract's endpoints.
  */
@@ -127,6 +169,8 @@ export interface HqIssuanceClient {
   renew(req: HqOrderRequest): Promise<HqOrderResponse>;
   /** ADR-023 PR-3 — signed unbind on factory reset. */
   deregister(req: HqDeregisterRequest): Promise<HqDeregisterResponse>;
+  /** WARP-983 — box self-enrolls into the HQ registry with a one-time token. */
+  provision(req: HqProvisionRequest): Promise<HqProvisionResponse>;
 }
 
 // --- Persistence seam (the Prisma TlsCertState model) ----------------------
@@ -181,7 +225,7 @@ export interface TlsIssuanceDeps {
   hq: HqIssuanceClient;
   identity: Pick<
     DeviceIdentityClient,
-    "signWithDeviceKey" | "getDeviceIdentityStatus"
+    "signWithDeviceKey" | "getDeviceIdentityStatus" | "getDeviceCert"
   >;
   store: TlsCertStore;
   files: TlsFileOps;
@@ -219,6 +263,19 @@ export interface TlsIssuanceDeps {
    * fleet-hq follow-up); the opaque-HMAC fallback stays when it's empty.
    */
   requestedName?: string;
+  /**
+   * WARP-983 — the one-time HQ-minted provisioning token
+   * (`config.DROPLET_PROVISION_TOKEN`, empty when self-provision is disabled).
+   * When a fresh / factory-reset box hits the HQ challenge/order flow and HQ
+   * rejects it with 404 `device_id not in registry` (a signed deregister freed
+   * the row on the previous reset), a NON-EMPTY token lets the box re-enroll
+   * itself via `hq.provision()` and RETRY the issuance ONCE. Empty (the default)
+   * disables self-provision — the box keeps serving its bootstrap self-signed
+   * cert and warns, exactly like the "HQ unreachable" path (fail-safe). Optional
+   * + defaults empty so dev/CI + the injected-fakes test harness keep the
+   * pre-existing posture without setting it.
+   */
+  provisionToken?: string;
 }
 
 export interface TlsIssuanceService {
@@ -350,6 +407,80 @@ export async function signChallenge(
   };
 }
 
+// --- Self-provision (WARP-983) ---------------------------------------------
+
+/**
+ * Extract the SubjectPublicKeyInfo PEM from the device-identity cert. HQ's
+ * `provision` verifies the token PoP against `public_key_pem`, so the box needs
+ * to present its identity PUBLIC key — but the device-identity sidecar only
+ * exposes the cert (`getDeviceCert`), NOT a bare public key (there is no
+ * public-key RPC in device_identity.proto). node-forge parses the cert and
+ * re-emits its embedded SPKI as a `PUBLIC KEY` PEM. Key-type-agnostic: it lifts
+ * whatever key the cert carries (EC P-256 in production; RSA in tests).
+ */
+export function extractPublicKeyPem(certPem: string): string {
+  const cert = forge.pki.certificateFromPem(certPem);
+  return forge.pki.publicKeyToPem(cert.publicKey);
+}
+
+/** The exact HQ 404 that a factory-reset box hits when its registration was
+ *  freed by the signed deregister. `hqFetch` throws
+ *  `HQ <path> returned <status>: <body>`; the deployed Worker's challenge
+ *  handler responds 404 with body `{"error":"device_id not in registry"}`
+ *  (handlers.ts::challenge). Match BOTH the 404 status and the not-in-registry
+ *  marker so a different 404 (or a 503/500) never triggers a re-enroll. */
+export function isNotInRegistryError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const m = err.message;
+  return (
+    m.startsWith("HQ ") &&
+    m.includes(" returned 404") &&
+    m.includes("not in registry")
+  );
+}
+
+/** The collaborators `provisionWithHq` needs — a subset of `TlsIssuanceDeps`. */
+export interface ProvisionDeps {
+  deviceId: string;
+  hq: Pick<HqIssuanceClient, "provision">;
+  identity: Pick<
+    DeviceIdentityClient,
+    "signWithDeviceKey" | "getDeviceIdentityStatus" | "getDeviceCert"
+  >;
+  provisionToken: string;
+}
+
+/**
+ * Self-enroll this box into the HQ registry with the one-time provisioning
+ * token. Builds the SAME PoP the cert flow uses (base64 DER ECDSA over a pinned
+ * message, `ecdsa-sha256`) — only the message differs (`droplet-provision:v1:…`
+ * vs `droplet-cert:v1:…`, a distinct domain prefix so signatures can't be
+ * replayed across the two). The `public_key_pem` is the SPKI extracted from the
+ * device-identity cert. Returns HQ's response; throws on any HQ error (the
+ * caller keeps the bootstrap cert on failure — fail-safe, no crash).
+ */
+export async function provisionWithHq(
+  deps: ProvisionDeps,
+): Promise<HqProvisionResponse> {
+  const { deviceId, hq, identity, provisionToken } = deps;
+  const fingerprint = (await identity.getDeviceIdentityStatus()).certFingerprint;
+  const publicKeyPem = extractPublicKeyPem(await identity.getDeviceCert());
+  const message = buildProvisionMessage(provisionToken, deviceId, fingerprint);
+  const sig = await identity.signWithDeviceKey(
+    new TextEncoder().encode(message),
+  );
+  const req: HqProvisionRequest = {
+    device_id: deviceId,
+    public_key_pem: publicKeyPem,
+    key_fingerprint: fingerprint,
+    token: provisionToken,
+    // Same encoding as the cert order signature (signChallenge above).
+    signature: Buffer.from(sig.signature).toString("base64"),
+    sig_alg: "ecdsa-sha256",
+  };
+  return hq.provision(req);
+}
+
 // --- Factory-reset HQ deregistration (ADR-023 PR-3) ------------------------
 
 /** Outcome sentinels for `deregisterFromHq`. It NEVER throws (factory-reset
@@ -442,7 +573,14 @@ export function createTlsIssuanceService(
     persistFqdn,
     dns,
     requestedName,
+    provisionToken = "",
   } = deps;
+
+  // WARP-983 — self-provision is enabled only when a non-empty token is
+  // configured. Guard/trim like the other config-sourced strings so a
+  // whitespace-only hand-edit in .env can never masquerade as a real token.
+  const trimmedProvisionToken = provisionToken.trim();
+  const selfProvisionEnabled = trimmedProvisionToken.length > 0;
 
   // Defense-in-depth (WARP-979 review follow-up): DROPLET_BOX_NAME is normally
   // written only by the validated persist path, but the box treats its own .env
@@ -549,6 +687,46 @@ export function createTlsIssuanceService(
     }
 
     return { fqdn: signed.fqdn, notAfter: result.not_after };
+  }
+
+  /**
+   * WARP-983 — run the issuance/renewal flow, and if HQ rejects the very first
+   * challenge with 404 `device_id not in registry` (a factory-reset deregister
+   * freed this box's registry row), SELF-ENROLL once with the provisioning token
+   * and RETRY exactly ONCE. The retry is bounded to a single attempt: if it 404s
+   * again (e.g. provision succeeded server-side but the registry still can't be
+   * read, or a bogus provision), the error propagates to the normal catch and
+   * the box keeps its bootstrap cert (LE_RENEW_FAILED) — the next daily tick
+   * re-attempts from scratch. Only reached when a non-empty token is configured;
+   * otherwise `issueOrRenew` runs exactly as before (the 404 is caught upstream
+   * as a transient HQ failure).
+   */
+  async function issueOrRenewWithSelfProvision(
+    mode: "issue" | "renew",
+  ): Promise<{ fqdn: string; notAfter: string }> {
+    try {
+      return await issueOrRenew(mode);
+    } catch (err) {
+      if (!selfProvisionEnabled || !isNotInRegistryError(err)) throw err;
+      logger.warn(
+        { deviceId },
+        "tls-issuance: HQ reports this device is not in the registry (a factory-reset deregister freed the row) — self-provisioning with the configured token, then retrying issuance once",
+      );
+      // Re-enroll. A provision failure (invalid/expired/consumed token, 4xx)
+      // throws out here → the outer catch keeps the bootstrap cert (fail-safe).
+      const res = await provisionWithHq({
+        deviceId,
+        hq,
+        identity,
+        provisionToken: trimmedProvisionToken,
+      });
+      logger.info(
+        { deviceId, idempotent: res.idempotent },
+        "tls-issuance: HQ re-registered this device — retrying certificate issuance",
+      );
+      // Single retry. A second not-in-registry here is NOT re-provisioned.
+      return issueOrRenew(mode);
+    }
   }
 
   /**
@@ -674,7 +852,8 @@ export function createTlsIssuanceService(
       }
 
       try {
-        const { fqdn: learnedFqdn, notAfter } = await issueOrRenew(mode);
+        const { fqdn: learnedFqdn, notAfter } =
+          await issueOrRenewWithSelfProvision(mode);
         // Key the upsert on the LEARNED fqdn. Guard against an empty key so a
         // misbehaving HQ response can never write a TlsCert row keyed on ''.
         if (learnedFqdn) {

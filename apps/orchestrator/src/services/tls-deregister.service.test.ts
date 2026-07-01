@@ -62,6 +62,11 @@ function makeHqClient(overrides: Partial<HqIssuanceClient> = {}): HqIssuanceClie
       device_id: DEVICE_ID,
       status: "revoked" as const,
     })),
+    provision: vi.fn(async () => ({
+      device_id: DEVICE_ID,
+      status: "registered" as const,
+      idempotent: false,
+    })),
     ...overrides,
   };
 }
