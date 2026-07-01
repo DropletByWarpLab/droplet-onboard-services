@@ -66,10 +66,20 @@ export function AddressStep({
 
   // Cancel a stale in-flight availability check when the input changes.
   const abortRef = useRef<AbortController | null>(null);
+  // The slug the LATEST render is interested in. A resolving check whose slug no
+  // longer matches this is stale (the owner typed on, possibly into an INVALID
+  // name that fired no new check + no abort) and MUST NOT paint its result over
+  // the current state — otherwise a slow "available" response could overwrite a
+  // freshly-shown "invalid"/"taken", re-enabling Continue for a name that isn't
+  // actually valid. `null` = the current input is empty/invalid (discard any
+  // in-flight result).
+  const wantSlugRef = useRef<string | null>(null);
 
   const runCheck = useCallback((candidate: string) => {
     const v = validateBoxName(candidate);
     if (!v.ok) {
+      wantSlugRef.current = null;
+      abortRef.current?.abort();
       setStatus({
         kind: "invalid",
         message: boxNameReasonMessage(v.reason ?? "empty"),
@@ -82,7 +92,11 @@ export function AddressStep({
     abortRef.current = controller;
     checkBoxName(v.slug, controller.signal)
       .then((res) => {
-        if (controller.signal.aborted) return;
+        // Discard if superseded (aborted) OR if the owner has since moved on to a
+        // different (or invalid) slug — the ref, not just the abort signal, is
+        // authoritative because an invalid keystroke fires no new check to abort
+        // this one.
+        if (controller.signal.aborted || wantSlugRef.current !== v.slug) return;
         if (res.available) {
           setStatus({ kind: "available" });
         } else {
@@ -95,7 +109,11 @@ export function AddressStep({
         }
       })
       .catch((e) => {
-        if (controller.signal.aborted || (e as Error)?.name === "AbortError") {
+        if (
+          controller.signal.aborted ||
+          wantSlugRef.current !== v.slug ||
+          (e as Error)?.name === "AbortError"
+        ) {
           return;
         }
         setStatus({ kind: "error" });
@@ -105,6 +123,8 @@ export function AddressStep({
   // Debounced live validation + availability check as the owner types.
   useEffect(() => {
     if (name.trim().length === 0) {
+      wantSlugRef.current = null;
+      abortRef.current?.abort();
       setStatus({ kind: "idle" });
       return;
     }
@@ -112,12 +132,19 @@ export function AddressStep({
     // only debounce the network availability check.
     const v = validateBoxName(name);
     if (!v.ok) {
+      // Mark the current input as not-checkable and cancel any in-flight check so
+      // a slow prior response can't overwrite this invalid state.
+      wantSlugRef.current = null;
+      abortRef.current?.abort();
       setStatus({
         kind: "invalid",
         message: boxNameReasonMessage(v.reason ?? "empty"),
       });
       return;
     }
+    // Record the slug this render wants an answer for; runCheck discards any
+    // resolution whose slug no longer matches.
+    wantSlugRef.current = v.slug;
     setStatus({ kind: "checking" });
     const t = setTimeout(() => runCheck(name), CHECK_DEBOUNCE_MS);
     return () => clearTimeout(t);

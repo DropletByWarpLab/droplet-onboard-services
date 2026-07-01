@@ -121,6 +121,46 @@ describe("AddressStep — Secured / name your box (WARP-979)", () => {
     expect(onComplete).not.toHaveBeenCalled();
   });
 
+  it("does not let a slow availability response overwrite a newer invalid state (stale-check race)", async () => {
+    // The first check resolves LATE (available); by then the owner has typed on
+    // into an invalid name. The stale "available" result must be discarded so
+    // Continue stays disabled and the invalid message stands.
+    let resolveFirst: (v: unknown) => void = () => {};
+    checkBoxName.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveFirst = resolve;
+        }),
+    );
+    render(<AddressStep onComplete={vi.fn()} onSkip={vi.fn()} />);
+
+    // Type a valid name; let the debounce fire so the (pending) check starts.
+    fireEvent.change(nameInput(), { target: { value: "studio" } });
+    await waitFor(() => expect(checkBoxName).toHaveBeenCalledTimes(1));
+
+    // Owner types on into an invalid name BEFORE the first check resolves.
+    fireEvent.change(nameInput(), { target: { value: "studio!" } });
+    expect(
+      await screen.findByText(/lowercase letters, numbers, and hyphens/i),
+    ).toBeInTheDocument();
+    expect(continueCta()).toBeDisabled();
+
+    // Now the stale first check resolves as available — it must NOT re-enable
+    // Continue or clear the invalid message.
+    resolveFirst({
+      available: true,
+      slug: "studio",
+      fqdn: "studio.droplet-us.com",
+      authoritative: false,
+    });
+    // Give React a tick to (not) apply the stale result.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(continueCta()).toBeDisabled();
+    expect(
+      screen.getByText(/lowercase letters, numbers, and hyphens/i),
+    ).toBeInTheDocument();
+  });
+
   it("allows Skip without choosing a name", () => {
     const onSkip = vi.fn();
     render(<AddressStep onComplete={vi.fn()} onSkip={onSkip} />);
