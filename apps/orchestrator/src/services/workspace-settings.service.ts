@@ -83,7 +83,7 @@ export const WORKSPACE_SETTING_DEFAULTS: readonly WorkspaceSettingDefault[] = [
 
   // ── off_lan ──
   // Off-LAN posture — whether WireGuard peer minting is enabled, the
-  // DDNS hostname (filled in by setup.sh when DuckDNS is configured),
+  // operator-set public hostname (filled in by setup.sh when configured),
   // and how aggressively the orchestrator should renew peer keys.
   { key: "off_lan.vpn_enabled", section: "off_lan", type: "bool", value: false },
   { key: "off_lan.ddns_hostname", section: "off_lan", type: "string", value: "" },

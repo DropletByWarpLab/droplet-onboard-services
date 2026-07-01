@@ -1065,50 +1065,6 @@ export async function deleteVpnPeer(opts: {
   return res.json() as Promise<{ status: "ok"; interface: string; removed: number }>;
 }
 
-// --- DDNS (DuckDNS) ---
-//
-// The token is write-only on this client too: the GET return value carries
-// `tokenSet: boolean` rather than the token itself, matching the routing
-// service contract. Dashboard renders a placeholder password input that
-// shows "stored" instead of dots when tokenSet is true.
-
-export type DuckDnsStatus =
-  | { configured: false }
-  | {
-      configured: true;
-      subdomain: string;
-      fullDomain: string;
-      enabled: boolean;
-      tokenSet: boolean;
-      lastUpdate?: string;
-    };
-
-export async function fetchDuckDnsStatus(): Promise<DuckDnsStatus> {
-  return routingFetchJson<DuckDnsStatus>("/ddns/duckdns", { label: "DuckDNS status" });
-}
-
-export async function setDuckDnsConfig(opts: {
-  subdomain: string;
-  // Optional: when undefined the routing service preserves the existing
-  // /etc/config/ddns password value. Used by the wizard's "keep stored
-  // token" path so returning customers don't have to re-type the token.
-  token?: string;
-  enabled?: boolean;
-}): Promise<DuckDnsStatus & { status: "ok" }> {
-  const body: { subdomain: string; token?: string; enabled: boolean } = {
-    subdomain: opts.subdomain,
-    enabled: opts.enabled ?? true,
-  };
-  if (opts.token !== undefined) body.token = opts.token;
-  const res = await routingFetch("/ddns/duckdns", {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    label: "DuckDNS set",
-  });
-  return res.json() as Promise<DuckDnsStatus & { status: "ok" }>;
-}
-
 /** Fetch the state of a previously-started operation (WARP-40).
  *  `rejected` is the routing service's neutral no-change terminal for a 4xx
  *  (auth / validation): the request was refused before any router change. */

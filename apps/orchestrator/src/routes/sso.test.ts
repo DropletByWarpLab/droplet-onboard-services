@@ -38,9 +38,9 @@ vi.mock("../config.js", () => ({
     JWT_SECRET: "test-secret-32-bytes-long-aaaaaaaa",
     REDIS_URL: "redis://localhost:6379",
     // PR #486 finding 2: the callback now reconstructs currentUrl via the
-    // shared trusted-origin resolver. ROUTING_MODE=disabled keeps that
-    // resolver from dialing the DuckDNS sidecar in this unit test; the host
-    // falls back to the box's trusted origin (corsAllowedOrigins[0]).
+    // shared trusted-origin resolver. With no canonical-origin env vars set,
+    // the host falls back to the box's trusted origin (corsAllowedOrigins[0])
+    // in this unit test.
     ROUTING_MODE: "disabled",
     WIREGUARD_ENDPOINT_HOST: "",
     corsAllowedOrigins: ["https://droplet-ai.local"],

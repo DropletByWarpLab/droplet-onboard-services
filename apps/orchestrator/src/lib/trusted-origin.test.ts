@@ -9,26 +9,9 @@ vi.mock("../config.js", () => ({
     // ADR-023: top-priority canonical origin, above WIREGUARD_ENDPOINT_HOST.
     DROPLET_PUBLIC_FQDN: "",
     WIREGUARD_ENDPOINT_HOST: "",
-    // Production default (config.ts) is "real"; the DuckDNS leg is only
-    // skipped when routing supervision is explicitly disabled. The
-    // ROUTING_MODE-disabled branch is exercised by its own test.
-    ROUTING_MODE: "real",
     corsAllowedOrigins: ["https://droplet-ai.local"],
   },
 }));
-
-// DuckDNS is the second canonical-origin source after the env override. Default
-// each test to "not configured"; the DuckDNS-fallback branch is exercised
-// explicitly where needed.
-vi.mock("../services/openwrt.client.js", async () => {
-  const actual = await vi.importActual<
-    typeof import("../services/openwrt.client.js")
-  >("../services/openwrt.client.js");
-  return {
-    ...actual,
-    fetchDuckDnsStatus: vi.fn(async () => ({ configured: false as const })),
-  };
-});
 
 import {
   resolveTrustedOrigin,
@@ -37,7 +20,6 @@ import {
   _resetTrustedOriginCacheForTests,
 } from "./trusted-origin.js";
 import { config } from "../config.js";
-import * as openwrt from "../services/openwrt.client.js";
 
 /** Minimal Express-request stand-in: only the fields the helper reads. */
 function fakeReq(opts: {
@@ -59,19 +41,13 @@ function fakeReq(opts: {
 }
 
 beforeEach(() => {
-  // Clear call history between tests (the spy accumulates calls across the
-  // file otherwise) before re-establishing the default "not configured" return.
   vi.clearAllMocks();
   _resetTrustedOriginCacheForTests();
   (config as { DROPLET_PUBLIC_FQDN: string }).DROPLET_PUBLIC_FQDN = "";
   (config as { WIREGUARD_ENDPOINT_HOST: string }).WIREGUARD_ENDPOINT_HOST = "";
-  (config as { ROUTING_MODE: string }).ROUTING_MODE = "real";
   (config as { corsAllowedOrigins: string[] }).corsAllowedOrigins = [
     "https://droplet-ai.local",
   ];
-  vi.mocked(openwrt.fetchDuckDnsStatus).mockResolvedValue({
-    configured: false,
-  });
 });
 
 // ── pickTrustedHost: the pure host-allowlist core (no async, no I/O) ──
@@ -120,22 +96,22 @@ describe("pickTrustedHost", () => {
         xForwardedHost: "droplet-ai.local",
       }),
       {
-        canonicalHost: "studio.duckdns.org",
-        allowedHosts: new Set(["studio.duckdns.org", "droplet-ai.local"]),
+        canonicalHost: "studio.example.com",
+        allowedHosts: new Set(["studio.example.com", "droplet-ai.local"]),
       },
     );
-    expect(host).toBe("studio.duckdns.org");
+    expect(host).toBe("studio.example.com");
   });
 
   it("falls back to the canonical host when the request host is forged", () => {
     const host = pickTrustedHost(
       fakeReq({ host: "evil.example", xForwardedHost: "also-evil.example" }),
       {
-        canonicalHost: "studio.duckdns.org",
-        allowedHosts: new Set(["studio.duckdns.org", "droplet-ai.local"]),
+        canonicalHost: "studio.example.com",
+        allowedHosts: new Set(["studio.example.com", "droplet-ai.local"]),
       },
     );
-    expect(host).toBe("studio.duckdns.org");
+    expect(host).toBe("studio.example.com");
   });
 
   it("host-header port is normalised against a bare allowlist host", () => {
@@ -164,17 +140,16 @@ describe("pickTrustedHost", () => {
   });
 });
 
-// ── resolveTrustedOrigin: canonical-origin resolution (FQDN → env → DuckDNS) ──
+// ── resolveTrustedOrigin: canonical-origin resolution (FQDN → env) ──
 describe("resolveTrustedOrigin", () => {
   it("ADR-023: DROPLET_PUBLIC_FQDN is the top-priority canonical host, above WIREGUARD_ENDPOINT_HOST", async () => {
     (config as { DROPLET_PUBLIC_FQDN: string }).DROPLET_PUBLIC_FQDN =
       "d-abc123.devices.warp-lab.ai";
     (config as { WIREGUARD_ENDPOINT_HOST: string }).WIREGUARD_ENDPOINT_HOST =
-      "studio.duckdns.org";
+      "studio.example.com";
     const { canonicalHost } = await resolveTrustedOrigin();
+    // The FQDN wins over WIREGUARD_ENDPOINT_HOST.
     expect(canonicalHost).toBe("d-abc123.devices.warp-lab.ai");
-    // The FQDN wins without ever consulting WIREGUARD_ENDPOINT_HOST or DuckDNS.
-    expect(openwrt.fetchDuckDnsStatus).not.toHaveBeenCalled();
   });
 
   it("ADR-023: the FQDN is added to the allowlist", async () => {
@@ -199,51 +174,14 @@ describe("resolveTrustedOrigin", () => {
 
   it("uses WIREGUARD_ENDPOINT_HOST verbatim as the canonical host", async () => {
     (config as { WIREGUARD_ENDPOINT_HOST: string }).WIREGUARD_ENDPOINT_HOST =
-      "studio.duckdns.org";
+      "studio.example.com";
     const { canonicalHost } = await resolveTrustedOrigin();
-    expect(canonicalHost).toBe("studio.duckdns.org");
-    // Env override wins without ever touching the routing service.
-    expect(openwrt.fetchDuckDnsStatus).not.toHaveBeenCalled();
+    expect(canonicalHost).toBe("studio.example.com");
   });
 
-  it("derives the canonical host from an enabled DuckDNS config", async () => {
-    vi.mocked(openwrt.fetchDuckDnsStatus).mockResolvedValue({
-      configured: true,
-      subdomain: "studio",
-      fullDomain: "studio.duckdns.org",
-      enabled: true,
-      tokenSet: true,
-    });
-    const { canonicalHost } = await resolveTrustedOrigin();
-    expect(canonicalHost).toBe("studio.duckdns.org");
-  });
-
-  it("ignores a DuckDNS config that is configured but not enabled", async () => {
-    vi.mocked(openwrt.fetchDuckDnsStatus).mockResolvedValue({
-      configured: true,
-      subdomain: "studio",
-      fullDomain: "studio.duckdns.org",
-      enabled: false,
-      tokenSet: true,
-    });
+  it("has no canonical host when neither the FQDN nor the env override is set", async () => {
     const { canonicalHost } = await resolveTrustedOrigin();
     expect(canonicalHost).toBeNull();
-  });
-
-  it("treats a routing-service failure as no canonical host (non-fatal)", async () => {
-    vi.mocked(openwrt.fetchDuckDnsStatus).mockRejectedValue(
-      new Error("routing down"),
-    );
-    const { canonicalHost } = await resolveTrustedOrigin();
-    expect(canonicalHost).toBeNull();
-  });
-
-  it("does not dial the routing service when ROUTING_MODE is disabled", async () => {
-    (config as { ROUTING_MODE: string }).ROUTING_MODE = "disabled";
-    const { canonicalHost } = await resolveTrustedOrigin();
-    expect(canonicalHost).toBeNull();
-    expect(openwrt.fetchDuckDnsStatus).not.toHaveBeenCalled();
-    (config as { ROUTING_MODE: string }).ROUTING_MODE = "real";
   });
 
   it("always includes the box's own trusted origins in the allowlist", async () => {
@@ -253,9 +191,9 @@ describe("resolveTrustedOrigin", () => {
 
   it("adds the canonical host to the allowlist", async () => {
     (config as { WIREGUARD_ENDPOINT_HOST: string }).WIREGUARD_ENDPOINT_HOST =
-      "studio.duckdns.org";
+      "studio.example.com";
     const { allowedHosts } = await resolveTrustedOrigin();
-    expect(allowedHosts.has("studio.duckdns.org")).toBe(true);
+    expect(allowedHosts.has("studio.example.com")).toBe(true);
     expect(allowedHosts.has("droplet-ai.local")).toBe(true);
   });
 });
@@ -277,12 +215,12 @@ describe("trustedOriginUrl", () => {
 
   it("builds the URL from the configured canonical origin", async () => {
     (config as { WIREGUARD_ENDPOINT_HOST: string }).WIREGUARD_ENDPOINT_HOST =
-      "studio.duckdns.org";
+      "studio.example.com";
     const url = await trustedOriginUrl(
       fakeReq({ host: "droplet-ai.local", xForwardedProto: "https" }),
       "/api/auth/callback",
     );
-    expect(url).toBe("https://studio.duckdns.org/api/auth/callback");
+    expect(url).toBe("https://studio.example.com/api/auth/callback");
   });
 
   it("preserves a legitimate allowlisted request host", async () => {
@@ -312,7 +250,7 @@ describe("trustedOriginUrl", () => {
 
   it("a canonical https origin forces https even on a plain-http request", async () => {
     (config as { WIREGUARD_ENDPOINT_HOST: string }).WIREGUARD_ENDPOINT_HOST =
-      "studio.duckdns.org";
+      "studio.example.com";
     const url = await trustedOriginUrl(
       fakeReq({ host: "droplet-ai.local", secure: false }),
       "/api/auth/callback",

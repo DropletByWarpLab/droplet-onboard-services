@@ -11,19 +11,6 @@ vi.mock("../config.js", () => ({
   },
 }));
 
-// DuckDNS is the second canonical-origin source after the env override. Default
-// each test to "not configured"; the DuckDNS-fallback branch is exercised
-// explicitly where needed.
-vi.mock("../services/openwrt.client.js", async () => {
-  const actual = await vi.importActual<
-    typeof import("../services/openwrt.client.js")
-  >("../services/openwrt.client.js");
-  return {
-    ...actual,
-    fetchDuckDnsStatus: vi.fn(async () => ({ configured: false as const })),
-  };
-});
-
 import {
   buildInviteUrl,
   resolveInviteOrigin,
@@ -31,7 +18,6 @@ import {
   _resetInviteOriginCacheForTests,
 } from "./invite-url.js";
 import { config } from "../config.js";
-import * as openwrt from "../services/openwrt.client.js";
 
 /** Minimal Express-request stand-in: only the fields the helper reads. */
 function fakeReq(opts: {
@@ -60,9 +46,6 @@ beforeEach(() => {
   (config as { corsAllowedOrigins: string[] }).corsAllowedOrigins = [
     "https://droplet-ai.local",
   ];
-  vi.mocked(openwrt.fetchDuckDnsStatus).mockResolvedValue({
-    configured: false,
-  });
 });
 
 // ── pickInviteHost: the pure host-allowlist core (no async, no I/O) ──
@@ -111,22 +94,22 @@ describe("pickInviteHost", () => {
         xForwardedHost: "droplet-ai.local",
       }),
       {
-        canonicalHost: "studio.duckdns.org",
-        allowedHosts: new Set(["studio.duckdns.org", "droplet-ai.local"]),
+        canonicalHost: "studio.example.com",
+        allowedHosts: new Set(["studio.example.com", "droplet-ai.local"]),
       },
     );
-    expect(host).toBe("studio.duckdns.org");
+    expect(host).toBe("studio.example.com");
   });
 
   it("falls back to the canonical host when the request host is forged", () => {
     const host = pickInviteHost(
       fakeReq({ host: "evil.example", xForwardedHost: "also-evil.example" }),
       {
-        canonicalHost: "studio.duckdns.org",
-        allowedHosts: new Set(["studio.duckdns.org", "droplet-ai.local"]),
+        canonicalHost: "studio.example.com",
+        allowedHosts: new Set(["studio.example.com", "droplet-ai.local"]),
       },
     );
-    expect(host).toBe("studio.duckdns.org");
+    expect(host).toBe("studio.example.com");
   });
 
   it("host-header port is normalised against a bare allowlist host", () => {
@@ -155,45 +138,16 @@ describe("pickInviteHost", () => {
   });
 });
 
-// ── resolveInviteOrigin: canonical-origin resolution (env → DuckDNS) ──
+// ── resolveInviteOrigin: canonical-origin resolution (env only) ──
 describe("resolveInviteOrigin", () => {
   it("uses WIREGUARD_ENDPOINT_HOST verbatim as the canonical host", async () => {
     (config as { WIREGUARD_ENDPOINT_HOST: string }).WIREGUARD_ENDPOINT_HOST =
-      "studio.duckdns.org";
+      "studio.example.com";
     const { canonicalHost } = await resolveInviteOrigin();
-    expect(canonicalHost).toBe("studio.duckdns.org");
-    // Env override wins without ever touching the routing service.
-    expect(openwrt.fetchDuckDnsStatus).not.toHaveBeenCalled();
+    expect(canonicalHost).toBe("studio.example.com");
   });
 
-  it("derives the canonical host from an enabled DuckDNS config", async () => {
-    vi.mocked(openwrt.fetchDuckDnsStatus).mockResolvedValue({
-      configured: true,
-      subdomain: "studio",
-      fullDomain: "studio.duckdns.org",
-      enabled: true,
-      tokenSet: true,
-    });
-    const { canonicalHost } = await resolveInviteOrigin();
-    expect(canonicalHost).toBe("studio.duckdns.org");
-  });
-
-  it("ignores a DuckDNS config that is configured but not enabled", async () => {
-    vi.mocked(openwrt.fetchDuckDnsStatus).mockResolvedValue({
-      configured: true,
-      subdomain: "studio",
-      fullDomain: "studio.duckdns.org",
-      enabled: false,
-      tokenSet: true,
-    });
-    const { canonicalHost } = await resolveInviteOrigin();
-    expect(canonicalHost).toBeNull();
-  });
-
-  it("treats a routing-service failure as no canonical host (non-fatal)", async () => {
-    vi.mocked(openwrt.fetchDuckDnsStatus).mockRejectedValue(
-      new Error("routing down"),
-    );
+  it("has no canonical host when the env override is empty", async () => {
     const { canonicalHost } = await resolveInviteOrigin();
     expect(canonicalHost).toBeNull();
   });
@@ -205,9 +159,9 @@ describe("resolveInviteOrigin", () => {
 
   it("adds the canonical host to the allowlist", async () => {
     (config as { WIREGUARD_ENDPOINT_HOST: string }).WIREGUARD_ENDPOINT_HOST =
-      "studio.duckdns.org";
+      "studio.example.com";
     const { allowedHosts } = await resolveInviteOrigin();
-    expect(allowedHosts.has("studio.duckdns.org")).toBe(true);
+    expect(allowedHosts.has("studio.example.com")).toBe(true);
     expect(allowedHosts.has("droplet-ai.local")).toBe(true);
   });
 });
@@ -229,12 +183,12 @@ describe("buildInviteUrl", () => {
 
   it("builds the link from the configured canonical origin", async () => {
     (config as { WIREGUARD_ENDPOINT_HOST: string }).WIREGUARD_ENDPOINT_HOST =
-      "studio.duckdns.org";
+      "studio.example.com";
     const url = await buildInviteUrl(
       fakeReq({ host: "droplet-ai.local", xForwardedProto: "https" }),
       TOKEN,
     );
-    expect(url).toBe(`https://studio.duckdns.org/invite/${TOKEN}`);
+    expect(url).toBe(`https://studio.example.com/invite/${TOKEN}`);
   });
 
   it("preserves the legitimate nginx-proxy host (https + allowlisted Host)", async () => {
@@ -247,12 +201,12 @@ describe("buildInviteUrl", () => {
 
   it("falls back to the canonical origin when the request host is forged", async () => {
     (config as { WIREGUARD_ENDPOINT_HOST: string }).WIREGUARD_ENDPOINT_HOST =
-      "studio.duckdns.org";
+      "studio.example.com";
     const url = await buildInviteUrl(
       fakeReq({ host: "evil.example", xForwardedHost: "evil.example" }),
       TOKEN,
     );
-    expect(url).toBe(`https://studio.duckdns.org/invite/${TOKEN}`);
+    expect(url).toBe(`https://studio.example.com/invite/${TOKEN}`);
   });
 
   it("falls back to the safe default origin when there is no canonical origin and the host is forged", async () => {
@@ -267,7 +221,7 @@ describe("buildInviteUrl", () => {
 
   it("a canonical https origin forces https even on a plain-http request", async () => {
     (config as { WIREGUARD_ENDPOINT_HOST: string }).WIREGUARD_ENDPOINT_HOST =
-      "studio.duckdns.org";
+      "studio.example.com";
     const url = await buildInviteUrl(
       fakeReq({ host: "droplet-ai.local", secure: false }),
       TOKEN,

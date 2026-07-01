@@ -32,11 +32,6 @@ vi.mock("../services/openwrt.client.js", async () => {
     listVpnPeers: vi.fn(),
     createVpnPeer: vi.fn(),
     deleteVpnPeer: vi.fn(),
-    // WARP-174: resolveEndpointHost() in vpn.ts calls this when the env
-    // override is empty. Default each test to "not configured" so the
-    // env-override path stays in charge unless a test explicitly
-    // exercises the DuckDNS-fallback branch.
-    fetchDuckDnsStatus: vi.fn(async () => ({ configured: false as const })),
   };
 });
 
@@ -146,11 +141,8 @@ function buildApp(prismaMock: any, user = { username: "alice", role: "owner" }) 
 
 beforeEach(() => {
   vi.clearAllMocks();
-  // WARP-174: the resolveEndpointHost() in-process cache (30s TTL) is
-  // shared across tests because it lives on a module-level let. Tests
-  // that flip WIREGUARD_ENDPOINT_HOST or fetchDuckDnsStatus expectations
-  // must drop the cache so the new state takes effect immediately;
-  // otherwise the second-of-two tests sees the first test's cached "".
+  // resolveEndpointHost() now reads WIREGUARD_ENDPOINT_HOST directly with
+  // no cache; this reset is a no-op kept for a stable import.
   _resetEndpointCacheForTests();
 });
 
@@ -289,84 +281,22 @@ describe("POST /api/vpn/peers", () => {
     expect(res.body.peer.assignedIp).toBe("10.13.13.4");
   });
 
-  it("returns 503 if WIREGUARD_ENDPOINT_HOST is empty AND DuckDNS isn't configured", async () => {
+  it("returns 503 if WIREGUARD_ENDPOINT_HOST is empty", async () => {
     setupHappyPath();
     // Override config inside this test only.
     const { config } = await import("../config.js");
     const origHost = config.WIREGUARD_ENDPOINT_HOST;
     (config as any).WIREGUARD_ENDPOINT_HOST = "";
-    // DuckDNS also unconfigured — both fallback paths empty.
-    (openwrt.fetchDuckDnsStatus as any).mockResolvedValue({ configured: false });
     try {
       const app = buildApp(createPrismaMock());
       const res = await request(app)
         .post("/api/vpn/peers")
         .send({ deviceLabel: "iPhone" });
       expect(res.status).toBe(503);
-      // Error message points the customer at the wizard's Internet step
-      // (WARP-174) but still mentions WIREGUARD_ENDPOINT_HOST for the
-      // operator-override audience.
+      // Error message points the operator at WIREGUARD_ENDPOINT_HOST.
       expect(res.body.error).toMatch(/WIREGUARD_ENDPOINT_HOST/);
-      expect(res.body.error).toMatch(/DuckDNS/);
       // Routing service must NOT be called when endpoint is unset; we don't
       // want to leak a peer on the router that nobody can dial.
-      expect(openwrt.createVpnPeer).not.toHaveBeenCalled();
-    } finally {
-      (config as any).WIREGUARD_ENDPOINT_HOST = origHost;
-    }
-  });
-
-  // WARP-174: closes the "set WIREGUARD_ENDPOINT_HOST automatically when
-  // DuckDNS is configured" follow-up. When the env override is empty but
-  // the routing service reports a configured + enabled DuckDNS entry,
-  // resolveEndpointHost() derives `<subdomain>.duckdns.org` and the
-  // wizard's VPN step gets to mint peers without operator intervention.
-  it("auto-derives the endpoint from DuckDNS when env is empty (WARP-174)", async () => {
-    setupHappyPath();
-    const { config } = await import("../config.js");
-    const origHost = config.WIREGUARD_ENDPOINT_HOST;
-    (config as any).WIREGUARD_ENDPOINT_HOST = "";
-    (openwrt.fetchDuckDnsStatus as any).mockResolvedValue({
-      configured: true,
-      subdomain: "yourstudio",
-      fullDomain: "yourstudio.duckdns.org",
-      enabled: true,
-      tokenSet: true,
-    });
-    try {
-      const app = buildApp(createPrismaMock());
-      const res = await request(app)
-        .post("/api/vpn/peers")
-        .send({ deviceLabel: "iPhone" });
-      expect(res.status).toBe(201);
-      // The minted peer's .conf must reference the DuckDNS-derived host.
-      expect(res.body.conf).toMatch(/yourstudio\.duckdns\.org/);
-    } finally {
-      (config as any).WIREGUARD_ENDPOINT_HOST = origHost;
-    }
-  });
-
-  // DuckDNS configured but the customer toggled off auto-update — treat
-  // as "not effectively configured" since the address won't track their
-  // home IP. Mirror behaviour of an empty env: 503.
-  it("treats DuckDNS-configured-but-disabled as no endpoint (WARP-174)", async () => {
-    setupHappyPath();
-    const { config } = await import("../config.js");
-    const origHost = config.WIREGUARD_ENDPOINT_HOST;
-    (config as any).WIREGUARD_ENDPOINT_HOST = "";
-    (openwrt.fetchDuckDnsStatus as any).mockResolvedValue({
-      configured: true,
-      subdomain: "yourstudio",
-      fullDomain: "yourstudio.duckdns.org",
-      enabled: false,
-      tokenSet: true,
-    });
-    try {
-      const app = buildApp(createPrismaMock());
-      const res = await request(app)
-        .post("/api/vpn/peers")
-        .send({ deviceLabel: "iPhone" });
-      expect(res.status).toBe(503);
       expect(openwrt.createVpnPeer).not.toHaveBeenCalled();
     } finally {
       (config as any).WIREGUARD_ENDPOINT_HOST = origHost;

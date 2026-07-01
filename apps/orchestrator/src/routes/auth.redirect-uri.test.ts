@@ -18,24 +18,12 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 vi.mock("../config.js", () => ({
   config: {
     WIREGUARD_ENDPOINT_HOST: "",
-    ROUTING_MODE: "real",
     corsAllowedOrigins: ["https://droplet-ai.local"],
   },
 }));
 
-vi.mock("../services/openwrt.client.js", async () => {
-  const actual = await vi.importActual<
-    typeof import("../services/openwrt.client.js")
-  >("../services/openwrt.client.js");
-  return {
-    ...actual,
-    fetchDuckDnsStatus: vi.fn(async () => ({ configured: false as const })),
-  };
-});
-
 import { getRedirectUri } from "./auth.js";
 import { config } from "../config.js";
-import * as openwrt from "../services/openwrt.client.js";
 import { _resetTrustedOriginCacheForTests } from "../lib/trusted-origin.js";
 
 function fakeReq(opts: {
@@ -60,13 +48,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   _resetTrustedOriginCacheForTests();
   (config as { WIREGUARD_ENDPOINT_HOST: string }).WIREGUARD_ENDPOINT_HOST = "";
-  (config as { ROUTING_MODE: string }).ROUTING_MODE = "real";
   (config as { corsAllowedOrigins: string[] }).corsAllowedOrigins = [
     "https://droplet-ai.local",
   ];
-  vi.mocked(openwrt.fetchDuckDnsStatus).mockResolvedValue({
-    configured: false,
-  });
 });
 
 describe("getRedirectUri (OAuth2 callback redirect_uri)", () => {
@@ -84,11 +68,11 @@ describe("getRedirectUri (OAuth2 callback redirect_uri)", () => {
 
   it("builds the redirect_uri from the configured canonical origin", async () => {
     (config as { WIREGUARD_ENDPOINT_HOST: string }).WIREGUARD_ENDPOINT_HOST =
-      "studio.duckdns.org";
+      "studio.example.com";
     const uri = await getRedirectUri(
       fakeReq({ host: "droplet-ai.local", xForwardedProto: "https" }),
     );
-    expect(uri).toBe("https://studio.duckdns.org/api/auth/callback");
+    expect(uri).toBe("https://studio.example.com/api/auth/callback");
   });
 
   it("preserves the legitimate allowlisted request host (happy path)", async () => {
@@ -111,7 +95,7 @@ describe("getRedirectUri (OAuth2 callback redirect_uri)", () => {
     // Even if the proxy presents different request hosts, the canonical origin
     // pins them to the same value.
     (config as { WIREGUARD_ENDPOINT_HOST: string }).WIREGUARD_ENDPOINT_HOST =
-      "studio.duckdns.org";
+      "studio.example.com";
     const authorize = await getRedirectUri(
       fakeReq({ host: "droplet-ai.local", xForwardedProto: "https" }),
     );
