@@ -599,6 +599,11 @@ async function main() {
     // issues `<name>.droplet-us.com`. Empty when no name chosen (opaque-HMAC
     // fallback). Harmless if HQ ignores it (coupled fleet-hq follow-up).
     requestedName: config.DROPLET_BOX_NAME,
+    // WARP-983 — one-time provisioning token. When set, a fresh / factory-reset
+    // box whose HQ registry row was freed by the ADR-023 deregister self-enrolls
+    // (POST /api/issuance/provision) on the 404 and retries issuance once. Empty
+    // = self-provision disabled (dev/CI + boxes provisioned by another path).
+    provisionToken: config.DROPLET_PROVISION_TOKEN,
   });
   cronRuntime.scheduleCron(
     "0 4 * * *",

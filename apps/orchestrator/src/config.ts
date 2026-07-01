@@ -289,6 +289,19 @@ const envSchema = z.object({
   //   WireGuard tunnel. Empty disables live issuance (the cron skips), which is
   //   the correct posture for dev laptops + CI.
   HQ_ISSUANCE_URL: z.string().default(""),
+  // DROPLET_PROVISION_TOKEN — one-time HQ-minted provisioning token (WARP-983).
+  //   A fresh / factory-reset box has NO registry entry at HQ (factory-reset
+  //   sends the ADR-023 signed deregister, which DELETES the device row), so on
+  //   the next boot the tls-issuance challenge/order flow is rejected with 404
+  //   `device_id not in registry` and the box would otherwise stay on the
+  //   bootstrap self-signed cert forever. When this token is set, tls-issuance
+  //   self-enrolls the box into the HQ registry (POST /api/issuance/provision
+  //   with a TPM proof-of-possession over the token) on that 404, then retries
+  //   issuance once. Empty (the default) = self-provision DISABLED — the correct
+  //   posture for dev laptops + CI + a box that provisions via another path.
+  //   PRESERVED from the provisioning environment across reflash (secrets.sh),
+  //   the SAME way HQ_ISSUANCE_URL / TUNNEL_TOKEN are (WARP-978).
+  DROPLET_PROVISION_TOKEN: z.string().default(""),
   // DROPLET_DEVICE_ID — the device's HQ registry id. Mirrors the value the
   //   device-identity sidecar reads (docker-compose.yml). Defaults to the
   //   hostname-derived `droplet` placeholder (matches scripts/lib/secrets.sh).
