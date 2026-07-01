@@ -47,11 +47,15 @@ die() { err "$*"; exit 1; }
 # --- Strict validation (opaque per-device OR conservative lowercase hostname) -
 # Reject anything that isn't 1..253 chars of [a-z0-9.-], no leading/trailing dot
 # or hyphen, and must contain a dot. The opaque shape is a subset of this.
+# Matched with bash's [[ =~ ]] (whole-string, newline-safe) rather than a
+# `printf | grep -q` pipe — grep is LINE-based, so a newline-bearing arg like
+# 'evil.example<LF>KEY=injected' would pass a grep check on its first line and
+# inject a second .env assignment (mirrors droplet-set-box-name.sh, WARP-988).
 _fqdn_len=${#FQDN}
 if [ "$_fqdn_len" -lt 1 ] || [ "$_fqdn_len" -gt 253 ]; then
   die "fqdn length out of range"
 fi
-if ! printf '%s' "$FQDN" | grep -Eq '^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'; then
+if ! [[ "$FQDN" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]]; then
   die "fqdn '${FQDN}' contains invalid characters"
 fi
 case "$FQDN" in
