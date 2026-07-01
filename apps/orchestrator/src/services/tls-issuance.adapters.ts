@@ -30,6 +30,8 @@ import type {
   HqOrderRequest,
   HqOrderResponse,
   HqPollResponse,
+  HqProvisionRequest,
+  HqProvisionResponse,
   TlsCertRow,
   TlsCertStateValue,
   TlsCertStore,
@@ -109,6 +111,17 @@ export function createHqIssuanceClient(): HqIssuanceClient {
         `/api/issuance/registration?${qs}`,
         { method: "DELETE", body: JSON.stringify(req) },
       );
+    },
+    provision(req: HqProvisionRequest) {
+      // WARP-983: box self-enrolls into the HQ registry with the one-time token
+      // + a TPM PoP over it. Same hqFetch error handling as the other calls — a
+      // non-2xx throws `HQ /api/issuance/provision returned <status>: <body>`,
+      // which the service treats as a fail-safe (keep the bootstrap cert, never
+      // crash). HQ returns { device_id, status: "registered", idempotent }.
+      return hqFetch<HqProvisionResponse>("/api/issuance/provision", {
+        method: "POST",
+        body: JSON.stringify(req),
+      });
     },
   };
 }
