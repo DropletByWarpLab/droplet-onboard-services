@@ -87,9 +87,10 @@ the two points that drove it:
 - **SSO config is secret.** `CLIENT_SECRET` must live in `.env` per the
   secrets-only-via-`.env` rule (no DB/Settings model for secrets); the WireGuard
   endpoint host is non-secret.
-- **No runtime-derivable source.** The WireGuard endpoint could be derived live
-  from DuckDNS state with zero writes; a customer-pasted issuer / client-id /
-  secret has no equivalent source — it must be persisted from operator input.
+- **No runtime-derivable source.** The WireGuard endpoint comes from the box's
+  provisioned named address (`<name>.droplet-us.com`, ADR-025) with zero writes;
+  a customer-pasted issuer / client-id / secret has no equivalent source — it
+  must be persisted from operator input.
 - **One-time provisioning, not a recurring toggle.** This is a single setup-time
   write + restart per box, not a settings surface flipped repeatedly, so the
   "worst UX" objection (a restart on *every* settings change) does not apply.

@@ -22,9 +22,10 @@
   closes that gap.
 
 - **Adjacent milestones already done:** M2.6 WireGuard remote access
-  (`[x]` done — full backend + `/remote-access` page + DuckDNS); my
-  wizard's VPN step is the *first-run wrapper* over an already-shipped
-  feature, not a new feature. Similarly Frigate parity is **complete**
+  (`[x]` done — full backend + `/remote-access` page + the Cloudflare
+  Tunnel relay/named-address model, ADR-025); my wizard's VPN step is the
+  *first-run wrapper* over an already-shipped feature, not a new feature.
+  Similarly Frigate parity is **complete**
   per `docs/FRIGATE_PARITY.md` (April 2026) — my Cameras step surfaces
   the existing capability set, doesn't reinvent it.
 
@@ -147,51 +148,17 @@ When in doubt: **"Name"** for the input label, with placeholder text
 giving a concrete example (`"Wedding Photos"`, `"Stefan's iPhone"`,
 `"Front door"`).
 
-## Architectural gap to close in this branch
+## Endpoint host: provisioned, not derived at runtime
 
-### `WIREGUARD_ENDPOINT_HOST` auto-derivation
-
-`ROADMAP.md` M2.6 §"Open follow-ups (not blocking)" calls this out
-explicitly:
-
-> *"surface a hint to set `WIREGUARD_ENDPOINT_HOST=<duckdns>` in `.env`
-> automatically when DuckDNS is configured."*
-
-The follow-up is "not blocking" for M2.6 because manual env editing is
-acceptable for a power user. But it **does** block my wizard's VPN
-step: a customer who's just configured DuckDNS via the Internet step
-and hits Continue should see VPN step's "Create your first device"
-button enabled — not "Internet not configured" because the orchestrator
-still has an empty `WIREGUARD_ENDPOINT_HOST` env from process start.
-
-Three options, ordered by ambition:
-
-**(a) Derive at request time inside `vpn.ts`** *(recommended).* Tiny
-change. `GET /api/vpn/status` and `POST /api/vpn/peers` already check
-`config.WIREGUARD_ENDPOINT_HOST.trim() !== ""`. Add a fallback: if the
-env is empty AND DuckDNS is configured, derive `<subdomain>.duckdns.org`
-as the endpoint. One helper, two call sites, no new tables, no restarts,
-no DB writes. Survives `docker compose restart` because DuckDNS state
-lives on the OpenWrt side via `ddns-scripts`.
-
-**(b) Settings table in Prisma** — a generic `Settings { key, value }`
-KV that the orchestrator overlays on top of env. Larger surface area,
-useful for other env-vs-runtime tensions later (e.g., admin name
-changes, SSID customisation), but YAGNI for just one variable.
-
-**(c) Write-through to `.env` + restart** — wizard PUT triggers a
-restart of the orchestrator container. Worst UX, simplest code. Hard
-no.
-
-**Going with (a).** It also has the nice property of being correct
-even when the customer skips the wizard's Internet step and configures
-DuckDNS later from `/remote-access` — the VPN page lights up the
-moment DuckDNS is set, no orchestrator restart needed.
-
-Implementation lives inside the existing `vpn.ts` route in the
-Storage commit's same PR (commit 4) — keeps the change adjacent to the
-other backend work. The Internet step (commit 3) sets up DuckDNS;
-commit 4 closes the loop so VPN works against it.
+The earlier draft of this addendum flagged a gap around auto-deriving
+`WIREGUARD_ENDPOINT_HOST` from dynamic-DNS state inside `vpn.ts`. That
+gap no longer exists: remote access moved to the box's provisioned named
+address (`<name>.droplet-us.com`) served over the Cloudflare Tunnel relay
+(ADR-025) with a per-device publicly-trusted cert (ADR-023). The endpoint
+host is set from that named address at provisioning time, so
+`GET /api/vpn/status` reports `endpointConfigured: true` without the
+Internet step having to configure any dynamic DNS — the VPN step's
+"Create your first device" button is enabled from first boot.
 
 ## Inheriting from existing pages
 
@@ -199,7 +166,7 @@ I should not invent UI patterns where the dashboard already has them:
 
 | Wizard step | Lift from |
 |---|---|
-| Internet (DuckDNS) | `/remote-access/page.tsx` DuckDNS admin card (existing). Same `subdomain` + `token` input shapes; same validation rules. |
+| Internet (Home Wi-Fi) | `/network/page.tsx` Wi-Fi SSID + password inputs (existing). Same input shapes; same validation rules. |
 | Storage | None — `Drive` is new. But mirror the visual shape of `NetworkDevice` cards from `/network` (icon + name + secondary). |
 | Cameras | `/cameras/page.tsx` discovery banner + camera card components. Reuse, don't re-render. |
 | VPN | `/remote-access/page.tsx` "Add device" dialog (QR + .conf + private-key-shown-once warning). Reuse via shared component if possible. |

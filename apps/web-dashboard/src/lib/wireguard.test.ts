@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { dashboardIpFromConf, dashboardUrlFromConf } from "./wireguard";
 
 const conf = (dns: string) =>
-  `[Interface]\nPrivateKey = abc\nAddress = 10.66.0.2/32\nDNS = ${dns}\n\n[Peer]\nEndpoint = box.duckdns.org:51820\n`;
+  `[Interface]\nPrivateKey = abc\nAddress = 10.66.0.2/32\nDNS = ${dns}\n\n[Peer]\nEndpoint = home.droplet-us.com:51820\n`;
 
 describe("dashboardIpFromConf", () => {
   it("extracts the single-box gateway from the DNS line", () => {

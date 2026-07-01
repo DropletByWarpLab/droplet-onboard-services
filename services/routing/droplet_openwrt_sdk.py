@@ -74,7 +74,7 @@ class DeploymentTopology(str, Enum):
 
 # The logical interface the SDK treats as the WAN uplink across every shape —
 # the same one `get_all_interface_statuses()`, `_resolve_wan_device`, and the
-# DuckDNS interface selection already interrogate. Named so the probe never
+# WireGuard interface probe already interrogate. Named so the probe never
 # invents a second "which interface is the WAN" path.
 WAN_INTERFACE_NAME = "wan"
 
@@ -2455,7 +2455,7 @@ def detect_deployment_topology(router: DropletRouter) -> dict:
     interface for an upstream gateway — ADR-018 Decision 2.
 
     Reuses ``NetworkApi.get_all_interface_statuses()`` (the SAME shape-detection
-    mechanism `get_network_summary` and the DuckDNS interface selection use, per
+    mechanism `get_network_summary` and the WireGuard interface probe use, per
     ADR-011) so there is exactly one "which interfaces are present" path. The
     posture is an EXPLICIT enum, never inferred from a null/absent field
     (rule 10):

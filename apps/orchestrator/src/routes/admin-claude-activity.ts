@@ -8,7 +8,7 @@
  * `If-Modified-Since`; we honor that with a `Last-Modified` reply.
  *
  * Auth: admin-only. We reuse the same `role === "owner" || role === "admin"`
- * check used by other admin routes (see ddns.ts). LAN-only by ops policy
+ * check used by other admin routes (see activity.ts). LAN-only by ops policy
  * — the gateway is the only inbound path; this endpoint adds nothing past
  * the existing session cookie.
  *

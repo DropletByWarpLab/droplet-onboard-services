@@ -2219,8 +2219,8 @@ class TFTDisplay:
         if has_wifi:
             steps.append(("Join Wi-Fi", str(wifi_ssid or "")[:18]))
         if host:
-            # A DUCKDNS-style hostname overflows the inline slot — wrap the
-            # address onto its own line rather than truncating the /setup
+            # A long named-address hostname overflows the inline slot — wrap
+            # the address onto its own line rather than truncating the /setup
             # path away (in the Wi-Fi layout this text is the only typed
             # setup pointer; the setup QR is deliberately off that card).
             steps.append(("Go to", host[:37]))

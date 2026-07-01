@@ -506,16 +506,16 @@ def test_render_claim_no_qr_variant_is_honest(
 
 
 def test_render_claim_long_host_keeps_setup_path(sim_display: TFTDisplay):
-    # DUCKDNS-style hostnames must keep the /setup path visible (wrapped
+    # Long named-address hostnames must keep the /setup path visible (wrapped
     # onto its own line) instead of truncating it away — in the Wi-Fi layout
     # that text is the only typed setup pointer. Fixed matrix on both
     # renders so only the step text can differ.
     fixed = SETUP_MATRIX
     a = sim_display.render_claim(
-        CLAIM_CODE, "https://droplet-stefan.duckdns.org/setup",
+        CLAIM_CODE, "https://droplet-stefan.droplet-us.com/setup",
         setup_qr_matrix=fixed)
     b = sim_display.render_claim(
-        CLAIM_CODE, "https://droplet-stefan.duckdns.org/other",
+        CLAIM_CODE, "https://droplet-stefan.droplet-us.com/other",
         setup_qr_matrix=fixed)
     assert a.tobytes() != b.tobytes()
 

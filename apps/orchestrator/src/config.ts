@@ -239,9 +239,9 @@ const envSchema = z.object({
 
   // --- WireGuard / Remote Access ---
   // Hostname or IP that peer .conf files use as their `Endpoint`. Should be
-  // reachable from outside the LAN — typically a DuckDNS subdomain (Phase 4)
-  // or your home router's public IP. For inside-LAN testing you can set this
-  // to the OpenWrt LAN IP (192.168.50.1). Empty default makes the orchestrator
+  // reachable from outside the LAN — typically your home router's public IP
+  // or another operator-set public DNS name. For inside-LAN testing you can
+  // set this to the OpenWrt LAN IP (192.168.50.1). Empty default makes the orchestrator
   // refuse to mint peers with a clear error rather than handing out unusable
   // configs that point at "example.com" or similar.
   WIREGUARD_ENDPOINT_HOST: z.string().default(""),

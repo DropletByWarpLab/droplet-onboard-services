@@ -57,8 +57,6 @@ vi.mock("@/lib/api", () => ({
     reserved_host: "droplet.local/acme",
     next_step: "internet",
   })),
-  fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
-  setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
   fetchDrives: vi.fn(async () => ({ drives: [], count: 0 })),
   updateDriveLabel: vi.fn(),
   fetchDiscoveredCameras: vi.fn(async () => []),
@@ -132,7 +130,7 @@ async function advanceToAi() {
     await Promise.resolve();
     await Promise.resolve();
     fireEvent.click(
-      screen.getByRole("button", { name: /skip — no remote access/i }),
+      screen.getByRole("button", { name: /^skip$/i }),
     );
   });
   // WARP-933 — Storage and Cameras now RENDER (no silent auto-skip). Skip each:

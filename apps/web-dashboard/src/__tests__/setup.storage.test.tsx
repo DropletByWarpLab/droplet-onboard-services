@@ -72,8 +72,6 @@ vi.mock("@/lib/api", () => ({
     reserved_host: "droplet.local/acme",
     next_step: "internet",
   })),
-  fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
-  setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
   fetchDrives: () => fetchDrivesMock(),
   updateDriveLabel: (uuid: string, patch: unknown) =>
     updateDriveLabelMock(uuid, patch),
@@ -151,13 +149,11 @@ async function advanceToStorage() {
       screen.getByRole("button", { name: /skip — i'll do this later/i }),
     );
   });
-  // Address step → skip (its fetchDuckDnsStatus effect resolves first).
+  // Address step → skip (its fetchVpnStatus effect resolves first).
   await act(async () => {
     await Promise.resolve();
     await Promise.resolve();
-    fireEvent.click(
-      screen.getByRole("button", { name: /skip — no remote access/i }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: /^skip$/i }));
   });
   // Let StorageStep's fetchDrives effect resolve.
   await act(async () => {

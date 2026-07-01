@@ -2,8 +2,8 @@
  * WARP-174 — VPN step (precheck states aligned to SETUP-WIZARD-SPEC §D).
  *
  * Render-only precheck states (the step never redirects):
- *   - blocked: endpoint not configured → "Remote access needs an internet
- *     address first" + "Set up internet address" + "Skip for now" buttons.
+ *   - blocked: endpoint not configured → "Remote access needs your web
+ *     address first" + "Back to web address" + "Skip for now" buttons.
  *     (Onboarding-Flow redesign: the address is its own step now, so the
  *     precheck jumps back to `address`, not the old combined `internet` step.)
  *   - form: endpoint OK, no peer yet → device-name input + "Create config" CTA.
@@ -58,8 +58,6 @@ vi.mock("@/lib/api", () => ({
     reserved_host: "droplet.local/acme",
     next_step: "internet",
   })),
-  fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
-  setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
   fetchDrives: vi.fn(async () => ({ drives: [], count: 0 })),
   updateDriveLabel: vi.fn(),
   fetchDiscoveredCameras: vi.fn(async () => []),
@@ -132,7 +130,7 @@ async function advanceToVpn() {
     await Promise.resolve();
     await Promise.resolve();
     fireEvent.click(
-      screen.getByRole("button", { name: /skip — no remote access/i }),
+      screen.getByRole("button", { name: /^skip$/i }),
     );
   });
   // WARP-933 — Storage and Cameras now RENDER (no silent auto-skip). Skip each:
@@ -170,10 +168,10 @@ describe("setup VPN step (WARP-174)", () => {
     await advanceToVpn();
 
     expect(
-      screen.getByText(/remote access needs an internet address first/i),
+      screen.getByText(/remote access needs your web address first/i),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: /set up internet address/i }),
+      screen.getByRole("button", { name: /back to web address/i }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: /skip for now/i }),
@@ -181,7 +179,7 @@ describe("setup VPN step (WARP-174)", () => {
     expect(createVpnPeerMock).not.toHaveBeenCalled();
   });
 
-  it("Set up internet address returns the customer to the Address step", async () => {
+  it("Back to web address returns the customer to the Address step", async () => {
     fetchVpnStatusMock.mockResolvedValue({
       configured: false,
       endpointConfigured: false,
@@ -191,15 +189,15 @@ describe("setup VPN step (WARP-174)", () => {
 
     await act(async () => {
       fireEvent.click(
-        screen.getByRole("button", { name: /set up internet address/i }),
+        screen.getByRole("button", { name: /back to web address/i }),
       );
     });
 
     // Onboarding-Flow redesign — the precheck now jumps back to the dedicated
     // Address step (not the old combined Internet step), whose title is
-    // "Give your box a web address".
+    // "Your box has its own web address".
     expect(
-      screen.getByText(/give your box a web address/i),
+      screen.getByText(/your box has its own web address/i),
     ).toBeInTheDocument();
   });
 
@@ -235,7 +233,7 @@ describe("setup VPN step (WARP-174)", () => {
     fetchVpnStatusMock.mockResolvedValue({
       configured: true,
       endpointConfigured: true,
-      endpointHost: "yourstudio.duckdns.org",
+      endpointHost: "yourstudio.droplet-us.com",
       listenPort: 51820,
       peerCount: 0,
       addresses: ["10.13.13.1/24"],
@@ -252,7 +250,7 @@ describe("setup VPN step (WARP-174)", () => {
     ).toBeInTheDocument();
     // Endpoint host shown so the customer can sanity-check.
     expect(
-      screen.getByText(/yourstudio\.duckdns\.org/),
+      screen.getByText(/yourstudio\.droplet-us\.com/),
     ).toBeInTheDocument();
   });
 
@@ -260,7 +258,7 @@ describe("setup VPN step (WARP-174)", () => {
     fetchVpnStatusMock.mockResolvedValue({
       configured: true,
       endpointConfigured: true,
-      endpointHost: "yourstudio.duckdns.org",
+      endpointHost: "yourstudio.droplet-us.com",
     });
     createVpnPeerMock.mockResolvedValue({
       peer: {

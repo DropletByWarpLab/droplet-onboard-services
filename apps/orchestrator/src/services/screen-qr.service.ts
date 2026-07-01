@@ -348,7 +348,7 @@ export function setupUrl(): string {
 
 function lanHostname(): string {
   // Prefer an env override so deployments behind a DNS name can pin
-  // the QR target (DUCKDNS_DOMAIN, custom domain, etc.). The wizard's
+  // the QR target (a custom domain, etc.). The wizard's
   // resolveEndpointHost() pattern already does this for the WG side.
   const override = (process.env.SCREEN_QR_HOST || "").trim();
   if (override) return override;

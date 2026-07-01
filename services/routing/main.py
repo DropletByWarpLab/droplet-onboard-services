@@ -74,7 +74,6 @@ from schemas import (
     VpnSetupRequest,
     VpnPeerCreateRequest,
     VpnPeerDeleteRequest,
-    DuckDnsConfigRequest,
     ApApproveRequest,
     ApTestSeedRequest,
 )
@@ -1162,7 +1161,7 @@ def get_camera_subnet():
     ConnectionLost propagate to `handle_router_error`, so the dashboard
     can tell "no camera subnet" apart from "router unreachable / token
     wrong" instead of mis-rendering both as not-configured. Mirrors the
-    `_read_duckdns` / `interface_exists` discipline.
+    `interface_exists` discipline.
     """
     try:
         r = get_router()
@@ -1540,185 +1539,6 @@ def vpn_delete_peer(req: VpnPeerDeleteRequest):
         except Exception as exc:  # noqa: BLE001
             logger.warning("vpn: uci.apply after delete_peer failed: %s", exc)
         return {"status": "ok", "interface": req.interface, "removed": removed}
-    except (ConnectionLost, UbusError) as exc:
-        handle_router_error(exc)
-
-
-# ---------------------------------------------------------------------------
-# DDNS (DuckDNS)
-# ---------------------------------------------------------------------------
-#
-# Tiny surface — there's only one provider in v1 and one config section.
-# `GET` returns a redacted view (no token); `PUT` upserts the section with
-# the standard DuckDNS template and restarts the ddns service so the
-# rotation kicks in immediately.
-
-DUCKDNS_SECTION = "duckdns"
-
-# Order DuckDNS prefers to bind its watch `interface` to. `wan` first (the
-# router/multi-box shape's uplink), falling back to `lan` for a LAN-only
-# single-box where `wan` isn't a logical interface at all (root-caused live on
-# 192.168.1.87 — its bridges are `br-lan` + a host-carried mgmt uplink). The
-# binding only governs which hotplug events trigger an immediate re-check, so
-# any PRESENT interface is a valid trigger; the published IP itself comes from
-# the `web` ip_source regardless (see `ddns_duckdns_set`).
-_DUCKDNS_INTERFACE_PREFERENCE = ("wan", "lan")
-
-
-def _select_ddns_interface(router) -> str | None:
-    """Pick a logical interface for the DuckDNS section that is PRESENT on this
-    deployment shape, or ``None`` if none of the candidates exist.
-
-    Presence is read from `NetworkApi.get_all_interface_statuses()` — the same
-    shape-detection mechanism `get_network_summary` uses (ADR-011) — so we never
-    invent a second presence path or a new env var. An interface is "present"
-    when its status carries `present: True`; a shape that lacks it returns the
-    `interface_stub(present=False)` placeholder. Returning ``None`` lets the
-    caller omit `interface` entirely rather than bind to a phantom one.
-    """
-    statuses = router.network.get_all_interface_statuses()
-    for name in _DUCKDNS_INTERFACE_PREFERENCE:
-        if statuses.get(name, {}).get("present") is True:
-            return name
-    return None
-
-
-def _read_duckdns(router) -> dict:
-    """Read the duckdns ddns section, returning a redacted view.
-
-    Returns `{"configured": False}` when the section doesn't exist yet,
-    otherwise carries subdomain + enabled + tokenSet (never the token itself).
-    """
-    try:
-        result = router.uci.get("ddns", DUCKDNS_SECTION)
-    except UbusError as exc:
-        if exc.code in (4, 5):  # NOT_FOUND / NO_DATA
-            return {"configured": False}
-        raise
-    if not isinstance(result, dict):
-        return {"configured": False}
-    section = result.get("values", result) if isinstance(result, dict) else {}
-    if not isinstance(section, dict) or not section.get("service_name"):
-        return {"configured": False}
-    return {
-        "configured": True,
-        "subdomain": section.get("domain", ""),
-        "fullDomain": f"{section.get('domain', '')}.duckdns.org" if section.get("domain") else "",
-        "enabled": str(section.get("enabled", "0")) == "1",
-        "tokenSet": bool(section.get("password")),
-        "lastUpdate": section.get("last_update", ""),
-    }
-
-
-@app.get("/ddns/duckdns")
-def ddns_duckdns_status():
-    """Return the DuckDNS section's current config (token redacted)."""
-    try:
-        return _read_duckdns(get_router())
-    except (ConnectionLost, UbusError) as exc:
-        handle_router_error(exc)
-
-
-@app.put("/ddns/duckdns")
-def ddns_duckdns_set(req: DuckDnsConfigRequest):
-    """Upsert the DuckDNS service section + restart ddns-scripts.
-
-    Idempotent: writes the same set of options every time, so calling this
-    repeatedly with the same inputs is a no-op apart from a service restart.
-    """
-    try:
-        r = get_router()
-
-        # uci.set requires the section to exist; use uci.add(name=...) on first
-        # call (mirrors the same pattern used for the wireguard interface).
-        try:
-            existing = r.uci.get("ddns", DUCKDNS_SECTION)
-            section_exists = isinstance(existing, dict) and bool(
-                existing.get("values") or existing.get(".type")
-            )
-        except UbusError as exc:
-            if exc.code in (4, 5):
-                section_exists = False
-            else:
-                raise
-
-        # Bind the section's watch `interface` to one that's actually PRESENT on
-        # this deployment shape (ADR-011). Hardcoding `wan` broke the LAN-only
-        # single-box (192.168.1.87 has no `wan` logical interface), so
-        # ddns-scripts watched a phantom interface and the update path was dead.
-        # Prefer `wan`, fall back to the LAN-facing interface, omit entirely if
-        # neither is present (the `web` ip_source + timer below still drives
-        # updates — `interface` only gates the immediate hotplug re-check).
-        watch_interface = _select_ddns_interface(r)
-
-        # When the caller omits the token, keep the value already on disk
-        # (the wizard's "keep stored token" path so returning customers
-        # don't have to re-type it). Only seed `password` when we have a
-        # new token to write; otherwise uci.set merges the remaining
-        # fields and leaves the existing password untouched.
-        values: dict[str, str] = {
-            "service_name": "duckdns.org",
-            "domain": req.subdomain,
-            "enabled": "1" if req.enabled else "0",
-            # Use `web` (not `network`): the WAN interface address may itself
-            # be a private IP behind another NAT layer (common when the
-            # Droplet is plugged into a home router as a downstream device).
-            # `web` mode has ddns-scripts query a public checker URL so the
-            # IP we publish to DuckDNS is the actual public-facing one.
-            "ip_source": "web",
-            "ip_url": "https://checkip.amazonaws.com",
-            "use_ipv6": "0",
-            # Honest user-agent so DuckDNS's logs show this Droplet rather
-            # than the generic ddns-scripts default. Helps debugging.
-            "use_https": "1",
-            # Update at most once per 10 minutes when the IP hasn't changed,
-            # plus on every IP change. Default is 72h which is too slow.
-            "check_interval": "10",
-            "check_unit": "minutes",
-            "force_interval": "72",
-            "force_unit": "hours",
-        }
-
-        # Only set `interface` when one is present on this shape; omitting it on
-        # a shape with neither `wan` nor `lan` is preferable to binding a phantom
-        # interface (the `web` ip_source + timer above still drive updates).
-        if watch_interface is not None:
-            values["interface"] = watch_interface
-
-        if req.token is not None:
-            values["password"] = req.token
-        elif not section_exists:
-            # First-time setup with no token in the request body is a
-            # programming error: there's nothing on disk to keep, and
-            # ddns-scripts requires a non-empty password to do anything.
-            # Surface a clean 422 rather than write a half-formed section.
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "token is required on first DuckDNS setup; only re-saves "
-                    "of an already-configured DuckDNS section may omit it."
-                ),
-            )
-
-        if section_exists:
-            r.uci.set("ddns", DUCKDNS_SECTION, values)
-        else:
-            r.uci.add("ddns", "service", values=values, name=DUCKDNS_SECTION)
-
-        # uci.apply commits + reloads ddns config (like the DNS hostnames flow).
-        r.uci.apply(timeout=5, rollback=False)
-
-        # Nudge ddns-scripts to pick up the new config without waiting for the
-        # next scheduled run. service_event triggers ucitrack -> /etc/init.d/ddns.
-        try:
-            r._call("service", "event", {
-                "type": "config.change",
-                "data": {"package": "ddns"},
-            })
-        except (ConnectionLost, UbusError) as exc:
-            logger.warning("ddns: reload nudge failed (will pick up on next scheduled run): %s", exc)
-
-        return {"status": "ok", **_read_duckdns(r)}
     except (ConnectionLost, UbusError) as exc:
         handle_router_error(exc)
 

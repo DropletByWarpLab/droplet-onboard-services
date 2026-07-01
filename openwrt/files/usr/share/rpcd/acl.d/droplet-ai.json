@@ -17,7 +17,7 @@
         "luci-rpc": ["getBoardJSON", "getNetworkDevices", "getWirelessDevices", "getDHCPLeases", "getHostHints"],
         "umdns": ["browse", "update"]
       },
-      "uci": ["network", "wireless", "dhcp", "firewall", "system", "ddns"]
+      "uci": ["network", "wireless", "dhcp", "firewall", "system"]
     },
     "write": {
       "ubus": {
@@ -31,7 +31,7 @@
         "hostapd.*": ["del_client"],
         "wireguard": ["*"]
       },
-      "uci": ["network", "wireless", "dhcp", "firewall", "system", "ddns"]
+      "uci": ["network", "wireless", "dhcp", "firewall", "system"]
     }
   }
 }

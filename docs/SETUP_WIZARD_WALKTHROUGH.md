@@ -13,8 +13,9 @@ so a non-technical customer can stand the box up alone, end-to-end:
 
 1. **Internet** ("Set up your network") — name the **Home Wi-Fi the box
    broadcasts** (SSID + password the household joins, since the Droplet is the
-   router), then connect the box to the outside world with a DuckDNS subdomain +
-   token so the VPN endpoint resolves from anywhere.
+   router). Remote access is handled separately by the box's named address
+   (`<name>.droplet-us.com`) served over the Cloudflare Tunnel relay (ADR-025)
+   with a publicly-trusted per-device cert (ADR-023) — no dynamic-DNS setup.
 2. **Storage** — name the drives the box discovered ("Wedding Photos",
    "Headshots", etc.) so they show up labelled in Files.
 3. **Cameras** — auto-detect ONVIF cameras on the LAN; if any are present,
@@ -46,7 +47,6 @@ Each new walkthrough topic also has a *backend* already shipped:
 | Topic | Endpoints | Dashboard API helpers |
 |---|---|---|
 | Home Wi-Fi | `POST /api/network/wifi/ssid`, `POST /api/network/wifi/password` (Tier 2 → `POST /api/network/command/confirm`, `GET /api/network/operations/:id`) | `setWifiSsid`, `setWifiPassword`, `confirmNetworkCommand`, `fetchNetworkOperation` |
-| DuckDNS | `GET/PUT /api/ddns/duckdns` | `fetchDuckDnsStatus`, `setDuckDnsConfig` |
 | Storage | `GET /api/storage`, `GET /api/storage/drives` | `fetchStorageStats`, `fetchDrives` |
 | Cameras | `GET /api/cameras/discovered`, `GET/POST /api/cameras/groups`, `GET/POST /api/cameras/:name/settings` | (search `cameras` in lib/api.ts) |
 | VPN | `GET /api/vpn/status`, `GET/POST/DELETE /api/vpn/peers` | `fetchVpnStatus`, `fetchVpnPeers`, `createVpnPeer`, `deleteVpnPeer` |
@@ -64,11 +64,12 @@ welcome → account → internet → storage → discovery → cameras → vpn �
 
 Rationale:
 - `account` first because every other step needs an authenticated session
-  (Nextcloud OCS token is required for `/api/storage`, ddns RBAC is
+  (Nextcloud OCS token is required for `/api/storage`, network/VPN RBAC is
   admin-only, etc.).
 - `internet` before `vpn` because the VPN peer config must include a
-  reachable `endpoint_host`; DuckDNS is how the customer makes the box
-  reachable from outside.
+  reachable `endpoint_host`; the box's named address
+  (`<name>.droplet-us.com`, served over the ADR-025 relay) is how the
+  customer reaches the box from outside.
 - `storage` before `discovery` because naming drives is fast and
   unambiguous; smart-home / camera discovery is slow and visual.
 - `cameras` AFTER `discovery` (Matter smart-home) because they share a
@@ -88,7 +89,7 @@ Rationale:
 | storage | Yes ("Use defaults") | Default labels work fine; rename is purely cosmetic |
 | discovery | Yes (already does) | Existing Matter flow already has "Skip for now" |
 | cameras | **Auto-skip** if 0 detected | Don't make the customer skip-click on a no-op |
-| vpn | Yes ("Set up later") | Gated on internet step being complete; if no DuckDNS, force-skip with a "configure internet first" message |
+| vpn | Yes ("Set up later") | Gated on internet step being complete; if no reachable endpoint, force-skip with a "configure internet first" message |
 | ai | Yes ("Take me to the dashboard") | Education-only; can be replayed from Help |
 | done | n/a | Terminal state |
 
@@ -129,7 +130,7 @@ apps/web-dashboard/src/components/setup/
 1. **Behavior preserved**: existing `setup.flow.test.tsx` and
    `setup.discovery-bounds.test.tsx` MUST pass without modification after
    the refactor lands.
-2. **Step shape uniform**: every step is a `function StepName({ onComplete, onSkip, ctx })` that lifts its own state but reports completion up. `ctx` carries cross-step values (admin username after account, DuckDNS subdomain after internet) that later steps need.
+2. **Step shape uniform**: every step is a `function StepName({ onComplete, onSkip, ctx })` that lifts its own state but reports completion up. `ctx` carries cross-step values (admin username after account, Wi-Fi SSID after internet) that later steps need.
 3. **No router-based subroutes** — single page, local `step` state machine, same as today. Browser back/forward isn't useful in a forced wizard.
 4. **Auto-advance disabled**: customer always taps "Continue"; no surprise jumps. Exception: `done` redirects to `/` after the WelcomeFlourish animation, same as today.
 
@@ -142,16 +143,16 @@ Each step gets a section. Format:
 - **Edge cases** — what we show when things fail
 - **Tests** — what `__tests__/setup.*` files cover
 
-### Step: Internet — "Set up your network" (Home Wi-Fi + DuckDNS)
+### Step: Internet — "Set up your network" (Home Wi-Fi)
 
-**Purpose** (WARP-657): Two sections, because the Droplet IS the home router.
-First the customer names the **Home Wi-Fi the box broadcasts** (the SSID +
-password every device at home joins). Then they give the box a **web address**
-via DuckDNS (a subdomain + token from their own DuckDNS account) so their phone
-can reach the box from outside. Both sections are optional and skippable.
+**Purpose** (WARP-657): The Droplet IS the home router, so this step names the
+**Home Wi-Fi the box broadcasts** (the SSID + password every device at home
+joins). Remote access is *not* configured here — the box reaches the outside
+world at its named address (`<name>.droplet-us.com`) served over the Cloudflare
+Tunnel relay (ADR-025) with a per-device publicly-trusted cert (ADR-023), set up
+automatically at provisioning. The section is optional and skippable.
 
-**Backend calls**:
-- *Section A — Home Wi-Fi* (only when an SSID is entered):
+**Backend calls** — Home Wi-Fi (only when an SSID is entered):
   - `POST /api/network/wifi/ssid` with `{ ssid }` — Tier 1, applies immediately
     (`setWifiSsid`).
   - `POST /api/network/wifi/password` with `{ password }` — Tier 2
@@ -162,32 +163,16 @@ can reach the box from outside. Both sections are optional and skippable.
     via `POST /api/network/command/confirm` (`confirmNetworkCommand`), then
     polls `GET /api/network/operations/:id` (`fetchNetworkOperation`) until the
     operation reaches a terminal state (`applied` / `rolled_back` / `unknown`).
-- *Section B — DuckDNS* (only when a subdomain is entered):
-  - `GET /api/ddns/duckdns` on mount → `{ configured, subdomain?, tokenSet? }`.
-    If already configured, show "Already set up — `<subdomain>.duckdns.org`".
-  - `PUT /api/ddns/duckdns` with `{ subdomain, token?, enabled }` → validates,
-    persists (`setDuckDnsConfig`). `token` is omitted on the "keep stored token"
-    path. On 2xx we re-fetch status to confirm.
-
-Wi-Fi is submitted before DuckDNS, so a single "Save and continue" applies both.
 
 **UI**:
 ```
 Title:     Set up your network
-Subtitle:  Name the Wi-Fi your Droplet broadcasts at home, then give it a web
-           address you can reach from anywhere.
+Subtitle:  Name the Wi-Fi your Droplet broadcasts at home.
 
 ── HOME WI-FI ──────────────────────────────────  (wifi icon)
 [ Network name (SSID) ] Studio Fotonia
 [ Wi-Fi password      ] ••••••••••  (show/hide)
 🛡 WPA2 / WPA3 · broadcast on 2.4 & 5 GHz — this becomes your home network
-
-────────────────────────────────────────────────  (thin divider)
-
-── INTERNET ADDRESS · DUCKDNS ──────────────────  (globe icon)
-[ Subdomain ] yourstudio  .duckdns.org
-[ Token     ] **********
-☑ Keep the address up to date automatically
 
 [ Save and continue ]
 [ Skip for now ]
@@ -195,12 +180,13 @@ Subtitle:  Name the Wi-Fi your Droplet broadcasts at home, then give it a web
 ╭─ How does this work? ─────────────────────────╮
 │ Your Wi-Fi name and password are what every   │
 │ device at home joins — the Droplet is your    │
-│ router now. DuckDNS then gives the box a       │
-│ permanent web address (yourstudio.duckdns.org) │
-│ that always finds it, even if your home        │
-│ internet's IP changes — that's how your phone  │
-│ reaches the VPN from outside.                  │
-│ → Sign up free at duckdns.org                 │
+│ router now.                                    │
+│                                               │
+│ To reach the box from outside, just tap        │
+│ "Connect" in the Droplet app — it opens a      │
+│ secure relay to your box's own web address     │
+│ (yourstudio.droplet-us.com), no port-forward   │
+│ or dynamic-DNS setup needed.                    │
 ╰───────────────────────────────────────────────╯
 ```
 
@@ -208,27 +194,22 @@ Subtitle:  Name the Wi-Fi your Droplet broadcasts at home, then give it a web
 - SSID: 1–32 chars. PSK: 8–63 chars. Only enforced when an SSID is entered; a
   network name with no password (or a too-short one) is rejected inline without
   an API call.
-- DuckDNS subdomain regex (`[a-z0-9-]`, no leading/trailing hyphen, ≤63);
-  token 10–128 chars (or omitted on the keep-stored path). Only enforced when a
-  subdomain is entered.
 
 **Edge cases**:
 - Wi-Fi password 202 confirmation token expires (60s TTL) or the apply rolls
   back: surfaced as an inline error so the customer doesn't trust a Wi-Fi change
   that didn't land. The step does not crash.
-- DuckDNS PUT 5xx: inline error, keep state, let the user retry.
 - Skipped: the VPN step downstream surfaces a "set up internet first" view and
   points back here.
 
 **Tests** (`__tests__/setup.internet.test.tsx`):
-- Renders the two-section step (Home Wi-Fi inputs + section labels); title is
+- Renders the Home Wi-Fi step (SSID + password inputs + section label); title is
   "Set up your network".
 - SSID > 32 / PSK < 8 → inline validation error, no `setWifiSsid` /
   `setWifiPassword` call.
-- Valid Wi-Fi + DuckDNS → `setWifiSsid` then `setWifiPassword` then
-  `setDuckDnsConfig`.
+- Valid Wi-Fi → `setWifiSsid` then `setWifiPassword`.
 - 202 path → `confirmNetworkCommand` called, `fetchNetworkOperation` polled.
-- Existing "Already configured" view, DuckDNS-only submit, and skip still pass.
+- Skip advances without POSTing.
 
 ### Step: Storage
 
@@ -345,7 +326,7 @@ their phone). Show the QR code, let them download the `.conf`, then teach
 them how to use the WireGuard app.
 
 **Backend calls**:
-- `GET /api/vpn/status` on mount → `{ configured, endpointConfigured, ... }`. If `endpointConfigured === false` (no DuckDNS), show "Set up internet first" and a button back to the Internet step.
+- `GET /api/vpn/status` on mount → `{ configured, endpointConfigured, ... }`. If `endpointConfigured === false` (no reachable endpoint host), show "Set up internet first" and a button back to the Internet step.
 - `POST /api/vpn/peers` with `{ deviceLabel: "Stefan's iPhone" }` → returns `{ ..., conf, publicKey }`. `conf` is the one-time `.conf` blob; we render the QR locally with `qrcode.react` (already a dep — see `remote-access/page.tsx`).
 
 **UI** (after creation):
@@ -378,8 +359,9 @@ Subtitle:  Scan this QR code with the WireGuard app on your phone.
 │    little VPN icon in your status bar.        │
 │                                               │
 │ Once connected, you can reach your Droplet    │
-│ from anywhere — type `droplet.local` or       │
-│ `<yoursubdomain>.duckdns.org` in your browser.│
+│ from anywhere — type `droplet.local` or your  │
+│ box's address `<name>.droplet-us.com` in your │
+│ browser.                                      │
 ╰───────────────────────────────────────────────╯
 ```
 

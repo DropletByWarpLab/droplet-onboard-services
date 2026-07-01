@@ -24,16 +24,12 @@ const fetchVpnStatusMock = vi.fn();
 const fetchVpnPeersMock = vi.fn();
 const createVpnPeerMock = vi.fn();
 const deleteVpnPeerMock = vi.fn();
-const fetchDuckDnsStatusMock = vi.fn();
-const setDuckDnsConfigMock = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   fetchVpnStatus: (...a: any[]) => fetchVpnStatusMock(...a),
   fetchVpnPeers: (...a: any[]) => fetchVpnPeersMock(...a),
   createVpnPeer: (...a: any[]) => createVpnPeerMock(...a),
   deleteVpnPeer: (...a: any[]) => deleteVpnPeerMock(...a),
-  fetchDuckDnsStatus: (...a: any[]) => fetchDuckDnsStatusMock(...a),
-  setDuckDnsConfig: (...a: any[]) => setDuckDnsConfigMock(...a),
   // ShellPage's status chip reads /api/orchestrator/health via this fetcher.
   fetchSystemHealth: () => Promise.resolve({ status: "ok" }),
 }));
@@ -74,8 +70,6 @@ beforeEach(() => {
   fetchVpnPeersMock.mockReset();
   createVpnPeerMock.mockReset();
   deleteVpnPeerMock.mockReset();
-  fetchDuckDnsStatusMock.mockReset();
-  setDuckDnsConfigMock.mockReset();
   fetchVpnStatusMock.mockResolvedValue({
     configured: true,
     endpointConfigured: true,
@@ -84,7 +78,6 @@ beforeEach(() => {
     addresses: ["10.10.0.0/24"],
     serverPublicKey: "key12345abcdef",
   });
-  fetchDuckDnsStatusMock.mockResolvedValue({ configured: false });
 });
 
 describe("Remote Access — PeerRow revoke action (WARP-292)", () => {
