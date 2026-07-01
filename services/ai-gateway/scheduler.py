@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Any
 
+from request_context import get_request_id, set_request_id
+
 logger = logging.getLogger(__name__)
 
 
@@ -40,6 +42,12 @@ class QueuedRequest:
     future: asyncio.Future = field(repr=False)
     request: Any = field(repr=False)
     _seq: int = field(default=0)  # tiebreaker for same-priority FIFO ordering
+    # WARP-108: the submitting task's request id, captured at enqueue() time.
+    # The dispatching task (_process_loop) is a single long-lived task that
+    # resolves futures for many requests over its lifetime, so it has no
+    # per-request context of its own — carrying the id on the queue entry
+    # lets the worker re-stamp it before the provider call runs.
+    request_id: str | None = field(default=None)
 
     def __lt__(self, other: QueuedRequest) -> bool:
         if self.priority != other.priority:
@@ -151,6 +159,7 @@ class InferenceScheduler:
                 future=future,
                 request=request,
                 _seq=self._seq_counter,
+                request_id=get_request_id(),
             )
 
             heapq.heappush(self._queue, item)
@@ -182,6 +191,14 @@ class InferenceScheduler:
                 while self._queue and self._active_count < self._max_concurrent:
                     item = heapq.heappop(self._queue)
                     if not item.future.done():
+                        # WARP-108: _process_loop is a single long-lived task
+                        # dispatching futures for many requests, so it carries
+                        # no per-request context of its own. Re-stamp the
+                        # submitter's captured id here (before resolving the
+                        # future) so it's set in this task's context ahead of
+                        # any provider call that might run from it.
+                        if item.request_id is not None:
+                            set_request_id(item.request_id)
                         item.future.set_result(item.request)
                         self._active_count += 1
 

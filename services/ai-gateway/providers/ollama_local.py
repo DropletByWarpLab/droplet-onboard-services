@@ -20,6 +20,7 @@ import httpx
 
 from capabilities import ollama_capabilities_from_show
 from providers.base import BaseProvider
+from request_context import get_request_id
 from schemas import ChatMessage, ModelCapabilities, ModelInfo
 
 logger = logging.getLogger(__name__)
@@ -431,9 +432,11 @@ class OllamaLocalProvider(BaseProvider):
             ]
 
         if not stream:
+            rid = get_request_id()
+            headers = {"x-request-id": rid} if rid else None
             assert self._sema is not None  # set by _ensure_limits
             async with self._sema:
-                resp = await self.client.post(_CHAT_PATH, json=body)
+                resp = await self.client.post(_CHAT_PATH, json=body, headers=headers)
             if resp.status_code == 503:
                 # Appliance overload (model_loading / circuit_open / queue full).
                 # Refresh limits + rebuild sema, then bubble up so the caller can
@@ -449,10 +452,12 @@ class OllamaLocalProvider(BaseProvider):
 
     async def _stream_chat(self, body: dict) -> AsyncGenerator[str, None]:
         # Streaming path is also semaphore-gated so we don't exceed num_parallel.
+        rid = get_request_id()
+        headers = {"x-request-id": rid} if rid else None
         assert self._sema is not None  # set by _ensure_limits in chat()
         async with self._sema:
             async with self.client.stream(
-                "POST", _CHAT_PATH, json=body
+                "POST", _CHAT_PATH, json=body, headers=headers
             ) as resp:
                 if resp.status_code == 503:
                     # Same handler the non-streaming branch uses, so a scale-up
