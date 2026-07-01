@@ -17,7 +17,7 @@ import { getActivitySigner } from "../services/activity.singleton.js";
 /**
  * WARP-456: owner/admin gate for the activity surface. Same shape as
  * the local `isAdmin(req)` helper used by `admin-claude-activity.ts`
- * and `ddns.ts` — keeps the RBAC contract uniform without needing a
+ * and `admin-claude-activity.ts` — keeps the RBAC contract uniform without needing a
  * generic middleware that doesn't exist in the codebase today.
  */
 function requireOwnerOrAdmin(
