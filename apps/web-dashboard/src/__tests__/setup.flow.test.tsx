@@ -56,6 +56,18 @@ vi.mock("@/lib/api", () => ({
     next_step: "internet",
   })),
   fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
+  // WARP-979 — the reworked AddressStep imports these (this flow skips the step).
+  checkBoxName: vi.fn(async () => ({
+    available: true,
+    slug: "studio",
+    fqdn: "studio.droplet-us.com",
+    authoritative: false,
+  })),
+  setBoxName: vi.fn(async () => ({
+    ok: true,
+    slug: "studio",
+    fqdn: "studio.droplet-us.com",
+  })),
   setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
   // Storage step auto-skips when zero drives — keep the bridge "empty"
   // so the flow test doesn't have to click anything on that step.
@@ -192,8 +204,9 @@ describe("setup flow → done state", () => {
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
+      // WARP-979 — the address step (Secured / name your box) → skip.
       fireEvent.click(
-        screen.getByRole("button", { name: /skip — no remote access/i }),
+        screen.getByRole("button", { name: /skip — i'll do this later/i }),
       );
     });
 

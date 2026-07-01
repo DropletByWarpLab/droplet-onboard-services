@@ -70,6 +70,8 @@ import type {
   VpnStatusInfo,
   VpnPeerCreatedInfo,
   DuckDnsStatus,
+  BoxNameCheckResult,
+  BoxNameSetResult,
   ToolCatalogResponse,
   DocsStatus,
   DocEditorSession,
@@ -4519,6 +4521,47 @@ export async function setDuckDnsConfig(opts: {
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throwNetworkWriteError(body, res.status, "Failed to update DuckDNS");
+  }
+  return res.json();
+}
+
+// --- WARP-979: Secured / name-your-box ---
+
+/**
+ * WARP-979 — check an owner-typed box name against the shared ruleset +
+ * (best-effort) availability. Called debounced from the "Secured" setup step as
+ * the owner types. Public endpoint — runs during first-run onboarding before an
+ * account may exist, so we call `fetch` directly (no auth refresh to ride).
+ * The AbortSignal lets the caller cancel a stale in-flight check.
+ */
+export async function checkBoxName(
+  name: string,
+  signal?: AbortSignal,
+): Promise<BoxNameCheckResult> {
+  const res = await fetch(
+    `${BASE}/api/setup/box-name/check?name=${encodeURIComponent(name)}`,
+    { credentials: "same-origin", signal },
+  );
+  if (!res.ok) throw new Error(`Failed to check box name: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * WARP-979 — persist the chosen box name so the box's tls-issuance requests
+ * `<name>.droplet-us.com`. Public onboarding endpoint (re-gated server-side once
+ * the appliance is claimed). Throws on a non-2xx so the step can surface the
+ * inline error and NOT advance.
+ */
+export async function setBoxName(name: string): Promise<BoxNameSetResult> {
+  const res = await fetch(`${BASE}/api/setup/box-name`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throwNetworkWriteError(body, res.status, "Failed to save box name");
   }
   return res.json();
 }

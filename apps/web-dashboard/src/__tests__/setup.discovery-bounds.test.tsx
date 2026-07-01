@@ -61,6 +61,18 @@ vi.mock("@/lib/api", () => ({
     next_step: "internet",
   })),
   fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
+  // WARP-979 — the reworked AddressStep imports these (this walk skips the step).
+  checkBoxName: vi.fn(async () => ({
+    available: true,
+    slug: "studio",
+    fqdn: "studio.droplet-us.com",
+    authoritative: false,
+  })),
+  setBoxName: vi.fn(async () => ({
+    ok: true,
+    slug: "studio",
+    fqdn: "studio.droplet-us.com",
+  })),
   setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
   // Storage step auto-skips on empty drive list — let it pass straight
   // through so the polling-bounds tests land on discovery as they
@@ -130,8 +142,9 @@ async function advanceToDiscovery() {
   await act(async () => {
     await Promise.resolve();
     await Promise.resolve();
+    // WARP-979 — the address step (Secured / name your box) → skip.
     fireEvent.click(
-      screen.getByRole("button", { name: /skip — no remote access/i }),
+      screen.getByRole("button", { name: /skip — i'll do this later/i }),
     );
   });
   // WARP-933 — Storage now RENDERS (no silent auto-skip) between address and
