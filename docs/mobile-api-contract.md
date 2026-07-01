@@ -25,7 +25,7 @@ mirror the change.
 Native clients store a per-Droplet base URL set during pair flow.
 Format: `https://<host>` where `<host>` is one of:
 - mDNS hostname: `droplet-c4d4df.local` (LAN)
-- DuckDNS subdomain: `mydroplet.duckdns.org` (remote, via TLS or WireGuard)
+- named address: `mydroplet.droplet-us.com` (remote, over the Cloudflare Tunnel relay with a per-device publicly-trusted cert — ADR-025 / ADR-023)
 - raw IP: `192.168.1.5` (manual fallback)
 
 All endpoints below are relative to base URL.
@@ -396,28 +396,15 @@ For phone self-add (writes need an owner/admin session):
   client-side from `conf`.
 - Phone toggles VPN on; app's `server` URL keeps working from outside.
 
-### Dynamic DNS / DuckDNS (`/api/ddns/*`) — owner/admin only
+### Remote access — named address (no dynamic-DNS API)
 
-> Added to doc XR-03. Backs the wizard's Internet step and feeds the WireGuard
-> endpoint host (`VpnStatusInfo.endpointHost` derives from DuckDNS when
-> `WIREGUARD_ENDPOINT_HOST` is unset). **owner/admin only** (WARP-171) — a family
-> user can't repoint the household's domain.
-
-| Method | Path | Auth | Returns / body |
-|---|---|---|---|
-| GET | `/ddns/duckdns` | **owner/admin** | `DuckDnsStatus` (see below) |
-| PUT | `/ddns/duckdns` | **owner/admin** | `{ subdomain, token?, enabled? }` → `DuckDnsStatus & { status: "ok" }` |
-
-```jsonc
-// DuckDnsStatus — two shapes:
-{ "configured": false }
-{ "configured": true, "subdomain": <string>, "fullDomain": <string>,
-  "enabled": <bool>, "tokenSet": <bool>, "lastUpdate"?: <string> }
-```
-
-`subdomain` is the lowercase DuckDNS label (no dots, ≤63 chars). `token` is optional
-on PUT — omit it to keep the stored token (returning-customer path); when present it
-must be 10..128 chars. Invalid input → `400 { error: "Invalid request", details }`.
+> Updated for WARP-974. Remote access no longer uses a dynamic-DNS endpoint. The
+> box is reachable at its provisioned named address `<name>.droplet-us.com` over
+> the outbound Cloudflare Tunnel relay (ADR-025) with a per-device publicly-trusted
+> cert (ADR-023). There is **no `/api/ddns/*` surface** for clients to configure —
+> the named address is set at provisioning and drives `VpnStatusInfo.endpointHost`.
+> Clients toggle the relay from the app's "Connect" control (Cloudflare WARP);
+> there is nothing here to `PUT`.
 
 ### Devices index (`/api/devices`)
 
@@ -475,7 +462,7 @@ machine slug and sometimes a human sentence, set per-handler:
   `confirmation_invalid`, `turn_in_flight`, …
 - **human sentence** (display-only; never switch on it): `"Scene not found"`,
   `"Peer not found"`, `"Invalid camera name"`, `"Invalid request"`,
-  `"Not authenticated"`, `"Configure a DuckDNS subdomain …"`, …
+  `"Not authenticated"`, …
 
 Because of this, the **canonical client mapping is the dashboard's
 `apps/web-dashboard/src/lib/friendly-errors.ts`** — `translateError(err, domain)`.

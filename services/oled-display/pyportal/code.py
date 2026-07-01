@@ -1484,7 +1484,7 @@ def render_claim():
     if has_wifi:
         steps.append(("Join Wi-Fi ", wifi_ssid[:18]))
     if host:
-        # A DUCKDNS-style hostname overflows the inline slot — wrap the
+        # A long named-address hostname overflows the inline slot — wrap the
         # address onto its own line rather than truncating the /setup path
         # away (in the Wi-Fi layout this text is the only typed setup
         # pointer; the setup QR is deliberately off that card).
