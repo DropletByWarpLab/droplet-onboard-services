@@ -307,20 +307,34 @@ export function VpnStep({
           <button
             type="button"
             role="switch"
-            aria-checked={false}
+            aria-checked={submitting}
             aria-label="Turn on remote access"
             disabled={submitting}
             onClick={() => void mintPeer("This device")}
-            className="relative w-[52px] h-[30px] rounded-full flex-none bg-separator transition-colors duration-200 disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className={`relative w-[52px] h-[30px] rounded-full flex-none transition-colors duration-200 disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+              submitting ? "bg-accent" : "bg-separator"
+            }`}
           >
-            <span className="absolute top-[3px] left-[3px] w-6 h-6 rounded-full bg-white shadow transition-[left] duration-200" />
+            {/* Knob slides to the "on" position and the track fills accent while
+                the peer is minting, so the switch genuinely reports + shows an
+                on-state (aria-checked, slid knob) before it advances to the QR —
+                rather than being a permanently-off switch that acts as a launcher
+                (UX note, WARP-979). On mint failure `submitting` reverts to false,
+                sliding it back off = the correct rollback. */}
+            <span
+              className={`absolute top-[3px] w-6 h-6 rounded-full bg-white shadow transition-[left] duration-200 ${
+                submitting ? "left-[25px]" : "left-[3px]"
+              }`}
+            />
           </button>
         </div>
 
-        <div className="mt-3 flex items-center gap-2 dp-card !py-2.5 !px-3">
-          <Globe size={14} className="text-label-tertiary" aria-hidden="true" />
+        {/* flex-wrap so at ~320px the supplemental caption drops to its own line
+            instead of squeezing the truncating FQDN to near-zero (UX note). */}
+        <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 dp-card !py-2.5 !px-3">
+          <Globe size={14} className="text-label-tertiary flex-none" aria-hidden="true" />
           {fqdn ? (
-            <span className="font-mono type-footnote text-label-secondary truncate">
+            <span className="font-mono type-footnote text-label-secondary truncate min-w-0">
               https://{fqdn}
             </span>
           ) : (
@@ -328,7 +342,7 @@ export function VpnStep({
               your secure address
             </span>
           )}
-          <span className="type-caption-1 text-label-quaternary ml-auto whitespace-nowrap">
+          <span className="type-caption-1 text-label-quaternary ml-auto">
             same address, on or off your Wi-Fi
           </span>
         </div>

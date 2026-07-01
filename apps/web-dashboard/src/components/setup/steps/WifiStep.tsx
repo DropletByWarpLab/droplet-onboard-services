@@ -18,10 +18,10 @@ import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
  * WIFI-ADDRESS-THEME-HANDOFF §1a).
  *
  * The old single "Internet" step mixed two unrelated things — the LOCAL Wi-Fi
- * the box broadcasts and the DuckDNS web address that powers REMOTE access.
- * Customers conflated them, so the redesign splits them into two ordered steps.
- * This is the first half: the local home network only. The DuckDNS address is
- * now its own `address` step (`AddressStep.tsx`).
+ * the box broadcasts and the secure address the box gives itself that powers
+ * REMOTE access. Customers conflated them, so the redesign splits them into two
+ * ordered steps. This is the first half: the local home network only. The
+ * secure address is now its own `address` step (`AddressStep.tsx`).
  *
  * The Wi-Fi the box can broadcast is OPTIONAL (WARP-809): the Droplet always
  * runs its own local network for connected gear (switch, cameras); broadcasting
