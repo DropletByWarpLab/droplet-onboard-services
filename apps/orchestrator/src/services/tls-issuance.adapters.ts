@@ -21,6 +21,8 @@ import type { PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
 import { bridgeAuthToken } from "../lib/bridge-errors.js";
 import { RouterError, routingFetch } from "./openwrt.client.js";
+import { claimBoxName, type ClaimBoxNameResult } from "./tls-issuance.service.js";
+import { createDeviceIdentityClient } from "./device-identity.client.js";
 import type {
   DnsRegistrar,
   HqChallengeResponse,
@@ -386,6 +388,31 @@ export function createBridgeBoxNamePersister(): (name: string) => Promise<void> 
     } finally {
       clearTimeout(timer);
     }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// WARP-980 — device-auth box-name claimer (rename → authoritative name claim)
+// ---------------------------------------------------------------------------
+
+/**
+ * Compose the production `claimBoxName` bound to this box's identity: the real HQ
+ * HTTP client + the device-identity gRPC signer + `config.DROPLET_DEVICE_ID`. The
+ * rename endpoint calls this AFTER persisting the chosen name so HQ makes the name
+ * AUTHORITATIVE via device-auth PoP (no token). Injectable into the setup router
+ * so route tests pass a fake (no HQ / device-identity sidecar touched).
+ *
+ * `claimBoxName` is itself fail-safe (never throws), so this is a thin binder — no
+ * extra error handling needed here.
+ */
+export function createBoxNameClaimer(): (raw: string) => Promise<ClaimBoxNameResult> {
+  return function claim(raw: string): Promise<ClaimBoxNameResult> {
+    return claimBoxName(raw, {
+      deviceId: config.DROPLET_DEVICE_ID,
+      hq: createHqIssuanceClient(),
+      identity: createDeviceIdentityClient(),
+      logger,
+    });
   };
 }
 

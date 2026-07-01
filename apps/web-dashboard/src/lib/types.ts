@@ -465,11 +465,25 @@ export interface BoxNameCheckResult {
   message?: string;
 }
 
-/** WARP-979 — response from POST /api/setup/box-name. */
+/**
+ * WARP-979 — response from POST /api/setup/box-name.
+ *
+ * WARP-980 — the persist now also drives a device-auth HQ name CLAIM, so the
+ * response carries the AUTHORITATIVE result: `authoritative` is true only when HQ
+ * device-auth-confirmed the name belongs to this box (false = persisted but fell
+ * back to opaque/bootstrap issuance, e.g. the device isn't registered yet).
+ * `taken` + `suggestions` accompany a 409 when HQ says the name is taken.
+ */
 export interface BoxNameSetResult {
   ok: boolean;
   slug: string;
   fqdn: string;
+  /** WARP-980 — HQ device-auth-confirmed the name (present on the 2xx path). */
+  authoritative?: boolean;
+  /** WARP-980 — true on a 409 name-taken body. */
+  taken?: boolean;
+  /** WARP-980 — alternate names HQ offered on a 409 name-taken. */
+  suggestions?: string[];
 }
 // --- Auth types ---
 

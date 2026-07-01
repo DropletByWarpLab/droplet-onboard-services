@@ -69,10 +69,14 @@ import {
 } from "../services/setup-org.service.js";
 import {
   checkBoxName,
-  persistBoxName,
+  setBoxName,
   BoxNameInvalidError,
+  type BoxNameClaimer,
 } from "../services/box-name.service.js";
-import { createBridgeBoxNamePersister } from "../services/tls-issuance.adapters.js";
+import {
+  createBridgeBoxNamePersister,
+  createBoxNameClaimer,
+} from "../services/tls-issuance.adapters.js";
 import { boxNameReasonMessage } from "@droplet/shared-types";
 import { getApplianceContract } from "../services/appliance-contract.service.js";
 import { verifyAccessToken } from "../services/jwt.service.js";
@@ -283,11 +287,18 @@ const patchSchema = z
  */
 export function createSetupRouter(
   prisma: PrismaClient,
-  deps?: { persistBoxNameToHost?: (name: string) => Promise<void> },
+  deps?: {
+    persistBoxNameToHost?: (name: string) => Promise<void>;
+    /** WARP-980 — device-auth name claimer. Defaults to the production
+     *  `createBoxNameClaimer()` (real HQ + device-identity); route tests inject a
+     *  fake so no HQ / sidecar is touched. */
+    claimBoxName?: BoxNameClaimer;
+  },
 ): Router {
   const router = Router();
   const persistBoxNameToHost =
     deps?.persistBoxNameToHost ?? createBridgeBoxNamePersister();
+  const claimBoxNameToHq = deps?.claimBoxName ?? createBoxNameClaimer();
 
   // ── GET /api/setup/state ───────────────────────────────────────
   router.get("/setup/state", async (_req: Request, res, next) => {
@@ -688,13 +699,20 @@ export function createSetupRouter(
 
   // ── POST /api/setup/box-name { name } ──────────────────────────
   //
-  // WARP-979 — persist the owner-chosen name so the box's tls-issuance ORDER
-  // requests `<name>.droplet-us.com`. Re-validates server-side (never trust the
-  // client), then writes `DROPLET_BOX_NAME=<slug>` to the host .env via the
-  // device-bridge — the SAME transport DROPLET_PUBLIC_FQDN uses.
+  // WARP-979 + WARP-980 — persist the owner-chosen name AND make it AUTHORITATIVE
+  // via a device-auth HQ claim. Re-validates server-side (never trust the
+  // client), writes `DROPLET_BOX_NAME=<slug>` to the host .env via the
+  // device-bridge (so the box's tls-issuance ORDER requests
+  // `<name>.droplet-us.com`), THEN drives the device-auth PoP name claim so HQ
+  // honors the name (the claim is the authoritative step; issuance issues UNDER
+  // the claimed name). The claim is NON-FATAL to persistence — a not-yet-
+  // registered / transient failure still persists locally and reports
+  // `authoritative:false`; a 409 name-taken is surfaced with `suggestions`.
   //
-  //   valid   → 200 { ok, slug, fqdn }
-  //   invalid → 400 { code:"BOX_NAME_INVALID", reason, error }
+  //   valid + claimed → 200 { ok, slug, fqdn, authoritative:true, taken:false }
+  //   valid + fallback→ 200 { ok, slug, fqdn, authoritative:false, taken:false }
+  //   valid + taken   → 409 { code:"BOX_NAME_TAKEN", slug, suggestions, taken:true }
+  //   invalid         → 400 { code:"BOX_NAME_INVALID", reason, error }
   //
   // GATED exactly like the org POST + the appliance:"ready" PATCH: a write is
   // allowed when EITHER a valid dashboard session cookie is present (the wizard
@@ -727,8 +745,37 @@ export function createSetupRouter(
         return;
       }
 
-      const result = await persistBoxName(parsed.data.name, persistBoxNameToHost);
-      res.json({ ok: true, slug: result.slug, fqdn: result.fqdn });
+      const result = await setBoxName(parsed.data.name, {
+        persist: persistBoxNameToHost,
+        claim: claimBoxNameToHq,
+      });
+
+      // HQ authoritatively rejected the name as taken (by another box, or this
+      // box holds a different one). 409 with suggestions so the wizard shows the
+      // real conflict — the name WAS persisted locally, but it is not authoritative.
+      if (result.taken) {
+        res.status(409).json({
+          ok: false,
+          code: "BOX_NAME_TAKEN",
+          slug: result.slug,
+          fqdn: result.fqdn,
+          taken: true,
+          authoritative: result.authoritative,
+          suggestions: result.suggestions,
+          error: "That name is already taken — pick another.",
+        });
+        return;
+      }
+
+      res.json({
+        ok: true,
+        slug: result.slug,
+        fqdn: result.fqdn,
+        // WARP-980 — whether HQ device-auth-confirmed the name (true), or we
+        // could only persist + fall back to opaque/bootstrap issuance (false).
+        authoritative: result.authoritative,
+        taken: false,
+      });
     } catch (err) {
       if (err instanceof BoxNameInvalidError) {
         res.status(400).json({
