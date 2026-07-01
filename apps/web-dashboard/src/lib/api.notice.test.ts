@@ -2,7 +2,7 @@
  * WARP-807 (K3) — UX review follow-up. `routerUnreachableNotice` classifies a
  * router-reachability failure and, when it is one, returns the actionable
  * notice broken into { prefix, destination } so each wizard surface can name
- * the *correct* place to finish later (Wi-Fi/DuckDNS → "Network"; WireGuard →
+ * the *correct* place to finish later (Wi-Fi settings → "Network"; WireGuard →
  * "Remote Access") and monospace just the destination name, mirroring the
  * LearnMoreCards. Non-reachability errors still return null so the caller falls
  * back to the real message.

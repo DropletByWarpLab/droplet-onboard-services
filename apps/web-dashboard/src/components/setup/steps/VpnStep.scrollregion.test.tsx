@@ -33,7 +33,7 @@ beforeEach(() => {
   fetchVpnStatus.mockResolvedValue({
     configured: true,
     endpointConfigured: true,
-    endpointHost: "yourstudio.duckdns.org",
+    endpointHost: "home.droplet-us.com",
     peerCount: 1,
   });
   fetchVpnPeers.mockResolvedValue({

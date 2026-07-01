@@ -317,15 +317,15 @@ function MotifCameras({
 
 // Two remote-access motifs, chosen at render by the live ADR-023 signal
 // (`VpnStatusInfo.publicFqdn`). Until the box learns its publicly-trusted
-// per-device FQDN from HQ, we show the WireGuard/DuckDNS baseline; once it
-// has one, we show the real one-URL-everywhere address with a green padlock.
+// web address from HQ, we show the generic Connect baseline; once it has one,
+// we show the real one-URL-everywhere address with a green padlock.
 
 function MotifRemoteVpn() {
   return (
     <div className="flex w-full items-center gap-4 rounded-[14px] border border-separator bg-surface-secondary p-4 text-left">
       <div className="flex h-[88px] w-[88px] flex-none items-center justify-center rounded-[12px] border border-separator bg-surface-primary text-label-primary">
-        {/* Decorative QR-ish glyph; the real QR is minted on the Remote Access page. */}
-        <Smartphone size={40} aria-hidden="true" />
+        {/* Decorative padlock glyph; the box's real address shows once HQ assigns it. */}
+        <Lock size={40} aria-hidden="true" />
       </div>
       <div className="min-w-0">
         <div className="mb-1 flex items-center gap-2">
@@ -337,11 +337,11 @@ function MotifRemoteVpn() {
             connected
           </span>
         </div>
-        <div className="type-caption-1 font-mono text-label-secondary">
-          yourstudio.duckdns.org
+        <div className="type-caption-1 text-label-secondary">
+          Your box&rsquo;s own secure web address
         </div>
         <div className="mt-1.5 type-caption-1 text-label-tertiary">
-          WireGuard · keys generated on the box
+          One tap on Connect · same address anywhere
         </div>
       </div>
     </div>
@@ -418,8 +418,8 @@ export const TOUR_STEPS: readonly TourStep[] = [
     key: "remote",
     glyph: (cn) => <Globe size={26} className={cn} />,
     kicker: "Remote access",
-    title: "Remote access is end-to-end encrypted",
-    body: "Off your home Wi-Fi, your phone reaches the Droplet over WireGuard — a modern VPN whose keys you generated on the box itself. Add a device from the Remote Access page and scan one QR code to connect.",
+    title: "Remote access is automatic and private",
+    body: "Your box has its own secure web address — the same one at home and away. When you're out, open the Droplet app and turn on Connect: your phone links straight to the box, encrypted end to end, and you open that same address with a green padlock. No dynamic DNS, no subdomain, nothing to install.",
     motif: (_live) => <MotifRemoteVpn />,
   },
 ];
@@ -440,7 +440,7 @@ function withFqdnRemoteStep(
       ? {
           ...s,
           body:
-            "Off your home Wi-Fi, your phone reaches the Droplet over WireGuard — a modern VPN whose keys you generated on the box itself. Add a device from the Remote Access page, scan one QR code, and you're on. You then open the same secure web address at home or away — a real certificate and a green padlock, with no “Not secure” warning and nothing to install on each device.",
+            "Your box answers at its own secure web address, the same one at home and away. When you're out, open the Droplet app and turn on Connect — your phone links straight to the box, encrypted end to end, and you open that same address with a real certificate and a green padlock. No “Not secure” warning, no dynamic DNS, and nothing to install on each device.",
           motif: (_live) => <MotifRemoteFqdn fqdn={fqdn} />,
         }
       : s,
@@ -473,9 +473,9 @@ export function ProductTour({ onComplete }: { onComplete?: () => void } = {}) {
   // Guard the finish path so a double-click can't fire completeTour + navigate twice.
   const finishedRef = useRef(false);
 
-  // ADR-023: ask the box whether it has a publicly-trusted per-device FQDN. When
+  // ADR-023: ask the box whether it has a publicly-trusted web address. When
   // it does, the remote-access beat upgrades to the one-URL/green-padlock story
-  // with the box's real address; until then the WireGuard/DuckDNS default stands.
+  // with the box's real address; until then the generic Connect default stands.
   // Best-effort — a failed/empty fetch just keeps the default (no over-promise).
   const [remoteFqdn, setRemoteFqdn] = useState<string | null>(null);
   useEffect(() => {
@@ -485,7 +485,7 @@ export function ProductTour({ onComplete }: { onComplete?: () => void } = {}) {
         if (alive) setRemoteFqdn(s?.publicFqdn?.trim() || null);
       })
       .catch(() => {
-        /* no signal — keep the WireGuard/DuckDNS baseline */
+        /* no signal — keep the generic Connect baseline */
       });
     return () => {
       alive = false;

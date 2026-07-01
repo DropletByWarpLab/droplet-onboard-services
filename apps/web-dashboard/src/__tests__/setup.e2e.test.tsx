@@ -4,7 +4,7 @@
  * Walks a customer through every step end-to-end with realistic
  * (mocked) backend responses:
  *
- *   welcome → account → wifi (skip) → address (save DuckDNS) →
+ *   welcome → account → wifi (skip) → address (informational, continue) →
  *   storage (rename two drives) → discovery (skip) →
  *   cameras (accept all) → vpn (mint peer, scan, continue) →
  *   ai (ask sample prompt, advance) → done
@@ -37,7 +37,6 @@ const postOrgMock = vi.fn(async () => ({
   reserved_host: "droplet.local/acme",
   next_step: "internet",
 }));
-const setDuckDnsConfigMock = vi.fn();
 const updateDriveLabelMock = vi.fn();
 const acceptDiscoveredCameraMock = vi.fn();
 const createVpnPeerMock = vi.fn();
@@ -78,9 +77,6 @@ vi.mock("@/lib/api", () => ({
   // PR #380 — Org step (account → org → internet). Forwarder so the e2e can
   // assert postOrg actually fired with the workspace name + slug.
   postOrg: (...args: Parameters<typeof postOrgMock>) => postOrgMock(...args),
-
-  fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
-  setDuckDnsConfig: (opts: unknown) => setDuckDnsConfigMock(opts),
 
   fetchDrives: vi.fn(async () => ({
     drives: [
@@ -137,7 +133,8 @@ vi.mock("@/lib/api", () => ({
   fetchVpnStatus: vi.fn(async () => ({
     configured: true,
     endpointConfigured: true,
-    endpointHost: "yourstudio.duckdns.org",
+    endpointHost: "yourstudio.droplet-us.com",
+    publicFqdn: "yourstudio.droplet-us.com",
     listenPort: 51820,
     peerCount: 0,
     addresses: ["10.13.13.1/24"],
@@ -179,7 +176,6 @@ describe("setup wizard E2E happy path (WARP-174)", () => {
     setupAdminMock.mockClear();
     loginUserMock.mockClear();
     postOrgMock.mockClear();
-    setDuckDnsConfigMock.mockClear();
     updateDriveLabelMock.mockClear();
     acceptDiscoveredCameraMock.mockClear();
     createVpnPeerMock.mockClear();
@@ -193,13 +189,6 @@ describe("setup wizard E2E happy path (WARP-174)", () => {
       expires_at: "2026-06-04T00:00:00.000Z",
     });
 
-    setDuckDnsConfigMock.mockResolvedValue({
-      configured: true,
-      subdomain: "yourstudio",
-      fullDomain: "yourstudio.duckdns.org",
-      enabled: true,
-      tokenSet: true,
-    });
     updateDriveLabelMock.mockResolvedValue({
       uuid: "UUID-A",
       displayName: "Wedding Photos",
@@ -314,30 +303,18 @@ describe("setup wizard E2E happy path (WARP-174)", () => {
       fireEvent.click(screen.getByRole("button", { name: /^continue$/i }));
     });
 
-    // 4b. Address → save DuckDNS. (Its fetchDuckDnsStatus effect resolves
-    // first.) The DuckDNS inputs now live on this dedicated address step.
+    // 4b. Address → Continue. This is now an informational step (ADR-023/025):
+    // the box has its own web address and remote access is automatic, so there
+    // is nothing to configure — the customer just reads it and advances.
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    fireEvent.change(screen.getByPlaceholderText(/yourstudio/i), {
-      target: { value: "yourstudio" },
-    });
-    fireEvent.change(screen.getByPlaceholderText(/paste your duckdns token/i), {
-      target: { value: "duck-token-1234567" },
-    });
     await act(async () => {
-      fireEvent.click(
-        screen.getByRole("button", { name: /save and continue/i }),
-      );
+      fireEvent.click(screen.getByRole("button", { name: /^continue$/i }));
       await Promise.resolve();
       await Promise.resolve();
       await Promise.resolve();
-    });
-    expect(setDuckDnsConfigMock).toHaveBeenCalledWith({
-      subdomain: "yourstudio",
-      token: "duck-token-1234567",
-      enabled: true,
     });
 
     // 4. Storage → name two drives + save. #5: 2+ drives default to pooling

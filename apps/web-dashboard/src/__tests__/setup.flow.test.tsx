@@ -25,10 +25,9 @@ vi.mock("@/lib/auth", () => ({
 }));
 
 // API stubs. setupAdmin + loginUser must resolve so the page advances to
-// `internet`; fetchDuckDnsStatus returns "unconfigured" so the wizard's
-// Internet step renders its form (and its "Skip for now" button) without
-// reaching the network; fetchMatterDevices keeps the discovery polling
-// loop quiet.
+// `internet`; fetchVpnStatus feeds the Address step's informational card and
+// the VPN step's precheck without reaching the network; fetchMatterDevices
+// keeps the discovery polling loop quiet.
 vi.mock("@/lib/api", () => ({
   // WARP-867 — AccountStep probes setup status on mount to pick its mode;
   // "required" keeps these walks on the normal create form.
@@ -55,8 +54,6 @@ vi.mock("@/lib/api", () => ({
     reserved_host: "droplet.local/acme",
     next_step: "internet",
   })),
-  fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
-  setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
   // Storage step auto-skips when zero drives — keep the bridge "empty"
   // so the flow test doesn't have to click anything on that step.
   fetchDrives: vi.fn(async () => ({ drives: [], count: 0 })),
@@ -180,7 +177,7 @@ describe("setup flow → done state", () => {
 
     // Onboarding-Flow redesign — the single Internet step is now two: `wifi`
     // then `address`. Skip both to reach `discovery`. The Wi-Fi step has no
-    // async mount load; the Address step's fetchDuckDnsStatus effect resolves
+    // async mount load; the Address step's fetchVpnStatus effect resolves
     // before its skip link is queried (the skip link is always rendered).
     await act(async () => {
       await Promise.resolve();
@@ -193,7 +190,7 @@ describe("setup flow → done state", () => {
       await Promise.resolve();
       await Promise.resolve();
       fireEvent.click(
-        screen.getByRole("button", { name: /skip — no remote access/i }),
+        screen.getByRole("button", { name: /^skip$/i }),
       );
     });
 

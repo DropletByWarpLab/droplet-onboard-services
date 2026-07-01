@@ -37,10 +37,10 @@ import { dashboardUrlFromConf } from "@/lib/wireguard";
  * clickable rail) can never bounce. Navigation away is user-initiated only.
  *
  *   loading   → GET /api/vpn/status in flight (first entry only).
- *   blocked   → endpointConfigured === false: no DuckDNS address yet. Renders a
- *               "Set up internet address" button that is an ordinary back-jump
- *               (onBackToAddress → setStep("address")) — NO redirect, NO
- *               reload (SETUP-WIZARD-SPEC §D.5).
+ *   blocked   → endpointConfigured === false: the box hasn't learned its web
+ *               address yet. Renders a "Back to web address" button that is an
+ *               ordinary back-jump (onBackToAddress → setStep("address")) — NO
+ *               redirect, NO reload (SETUP-WIZARD-SPEC §D.5).
  *   form      → endpointConfigured && no peer yet: device-name input +
  *               "Create config" mints the first peer.
  *   created   → a peer was just minted this session: QR + .conf + how-to-use.
@@ -52,10 +52,9 @@ import { dashboardUrlFromConf } from "@/lib/wireguard";
  *   error     → status fetch failed: "Try again" + "Skip for now". Never
  *               auto-advances or auto-skips on error (SETUP-WIZARD-SPEC §D.3).
  *
- * Hard-gated on the internet-address step (DuckDNS subdomain configured). The
- * WIREGUARD_ENDPOINT_HOST auto-derivation in vpn.ts means
- * `endpointConfigured: true` lights up the moment DuckDNS is set on the
- * internet-address step — no orchestrator restart needed.
+ * Gated on the box having a reachable web address. The endpoint host is derived
+ * on the box (vpn.ts), so `endpointConfigured: true` lights up automatically
+ * once the box knows its public web address — no orchestrator restart needed.
  *
  * Tier-3 reminder (llm-safety-tiers.md): VPN config is blocked for the LLM.
  * This step is by design the customer's only in-wizard path to mint their
@@ -260,18 +259,18 @@ export function VpnStep({
   }
 
   // ──────────────────────────────────────────────────────────────────
-  // blocked — the internet address wasn't configured, so there's no usable
-  // endpoint to mint a peer against. Render the blocked card in place; "Set up
-  // internet address" is a normal back-jump to the address step (no redirect,
-  // no reload — SETUP-WIZARD-SPEC §D.5).
+  // blocked — the box hasn't learned its web address yet, so there's no usable
+  // endpoint to mint a peer against. Render the blocked card in place; "Back to
+  // web address" is a normal back-jump to the address step (no redirect, no
+  // reload — SETUP-WIZARD-SPEC §D.5).
   // ──────────────────────────────────────────────────────────────────
   if (phase === "blocked") {
     return (
       <StepShell
         current="vpn"
-        title="Remote access needs an internet address first"
-        subtitle="No internet address is set up yet."
-        primary={{ label: "Set up internet address", onClick: onBackToAddress }}
+        title="Remote access needs your web address first"
+        subtitle="Your box hasn't finished setting up its web address yet."
+        primary={{ label: "Back to web address", onClick: onBackToAddress }}
         skip={{ label: "Skip for now", onClick: onSkip }}
       >
         <div className="dp-card !p-4 flex items-start gap-3">
@@ -285,11 +284,9 @@ export function VpnStep({
               Why this comes first
             </p>
             <p className="type-footnote text-label-secondary">
-              Your home internet&rsquo;s address can change. DuckDNS gives the
-              box one permanent web address (like{" "}
-              <span className="font-mono">yourstudio.duckdns.org</span>) so your
-              phone can reach it from anywhere. Set that up on the internet-address
-              step and this lights up automatically.
+              Remote access reaches your box at its own secure web address. Once
+              the box knows that address, this lights up automatically — then you
+              just turn on Connect in the Droplet app to reach it from anywhere.
             </p>
           </div>
         </div>

@@ -54,10 +54,8 @@ vi.mock("@/lib/api", async () => {
       reserved_host: "droplet.local/acme",
       next_step: "internet",
     })),
-    // Address step (post-redesign, after wifi) renders on an unconfigured
-    // DuckDNS; wifi itself fetches nothing on mount.
-    fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
-    setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
+    // Address step (post-redesign, after wifi) reads its web address via
+    // fetchVpnStatus; wifi itself fetches nothing on mount.
     fetchDrives: vi.fn(async () => ({ drives: [], count: 0 })),
     fetchDiscoveredCameras: vi.fn(async () => []),
     fetchVpnStatus: vi.fn(async () => ({

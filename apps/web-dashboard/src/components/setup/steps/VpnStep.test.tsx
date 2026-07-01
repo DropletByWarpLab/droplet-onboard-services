@@ -35,7 +35,7 @@ beforeEach(() => {
   // Endpoint configured → land directly on the device-name form.
   fetchVpnStatus.mockResolvedValue({
     endpointConfigured: true,
-    endpointHost: "yourstudio.duckdns.org",
+    endpointHost: "home.droplet-us.com",
   });
 });
 
@@ -136,7 +136,7 @@ describe("VpnStep — router unreachable (WARP-807)", () => {
 });
 
 describe("VpnStep — precheck states (SETUP-WIZARD-SPEC §D)", () => {
-  it("renders the blocked view with spec copy when no internet address is configured", async () => {
+  it("renders the blocked view with spec copy when no web address is configured", async () => {
     fetchVpnStatus.mockResolvedValue({
       configured: false,
       endpointConfigured: false,
@@ -151,12 +151,12 @@ describe("VpnStep — precheck states (SETUP-WIZARD-SPEC §D)", () => {
     );
 
     expect(
-      await screen.findByText(/remote access needs an internet address first/i),
+      await screen.findByText(/remote access needs your web address first/i),
     ).toBeInTheDocument();
-    // "Set up internet address" is a render-only back-jump to the address step —
+    // "Back to web address" is a render-only back-jump to the address step —
     // no redirect, no peer mint.
     fireEvent.click(
-      screen.getByRole("button", { name: /set up internet address/i }),
+      screen.getByRole("button", { name: /back to web address/i }),
     );
     expect(onBackToAddress).toHaveBeenCalledTimes(1);
     expect(createVpnPeer).not.toHaveBeenCalled();
@@ -166,7 +166,7 @@ describe("VpnStep — precheck states (SETUP-WIZARD-SPEC §D)", () => {
     fetchVpnStatus.mockResolvedValue({
       configured: true,
       endpointConfigured: true,
-      endpointHost: "yourstudio.duckdns.org",
+      endpointHost: "home.droplet-us.com",
       peerCount: 1,
     });
     fetchVpnPeers.mockResolvedValue({
@@ -215,7 +215,7 @@ describe("VpnStep — precheck states (SETUP-WIZARD-SPEC §D)", () => {
     fetchVpnStatus.mockResolvedValue({
       configured: true,
       endpointConfigured: true,
-      endpointHost: "x.duckdns.org",
+      endpointHost: "x.droplet-us.com",
       peerCount: 1,
     });
     fetchVpnPeers.mockResolvedValue({

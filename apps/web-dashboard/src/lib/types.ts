@@ -450,19 +450,6 @@ export interface ApDeviceInfo {
   lastOperationId: string | null;
 }
 
-/** DuckDNS status. `tokenSet` is the only signal about the token —
- *  the token itself is never returned by the orchestrator. */
-export type DuckDnsStatus =
-  | { configured: false }
-  | {
-      configured: true;
-      subdomain: string;
-      fullDomain: string;
-      enabled: boolean;
-      tokenSet: boolean;
-      lastUpdate?: string;
-    };
-
 // --- Auth types ---
 
 export interface AuthUser {
