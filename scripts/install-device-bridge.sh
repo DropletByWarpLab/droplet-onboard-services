@@ -244,6 +244,22 @@ fi
 install -m 0755 "$SET_FQDN_SCRIPT_SRC" "$SET_FQDN_SCRIPT_DST"
 log "installed $SET_FQDN_SCRIPT_DST"
 
+# WARP-988: box-name write-back host executor. The orchestrator POSTs
+# /host/box-name to the bridge once the owner has chosen a name in the wizard's
+# "name your box" step (WARP-979); the bridge execs this wrapper, which
+# idempotently persists DROPLET_BOX_NAME into the repo .env (no DNS legs — HQ
+# owns the name's DNS; the orchestrator can't write the host .env itself).
+# Repo-tracked (architecture-guard rule 20), installed here so factory-reset
+# removes it cleanly. Repo source is scripts/host/.
+SET_BOX_NAME_SCRIPT_SRC="$REPO_ROOT/scripts/host/droplet-set-box-name.sh"
+SET_BOX_NAME_SCRIPT_DST="/usr/local/sbin/droplet-set-box-name.sh"
+if [[ ! -f "$SET_BOX_NAME_SCRIPT_SRC" ]]; then
+  log "missing source: $SET_BOX_NAME_SCRIPT_SRC"
+  exit 1
+fi
+install -m 0755 "$SET_BOX_NAME_SCRIPT_SRC" "$SET_BOX_NAME_SCRIPT_DST"
+log "installed $SET_BOX_NAME_SCRIPT_DST"
+
 # --- 2) Ensure the env file exists and contains the needed secrets ---
 install -d -m 0755 "$ENV_DIR"
 if [[ ! -f "$ENV_FILE" ]]; then
