@@ -77,8 +77,10 @@ from schemas import (
 )
 import re
 
+from request_context import configure_logging
+
 logger = logging.getLogger("droplet.routing")
-logging.basicConfig(level=logging.INFO)
+configure_logging()
 
 # ---------------------------------------------------------------------------
 # Router singleton
