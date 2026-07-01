@@ -2,12 +2,12 @@ import { Request, Response, NextFunction } from "express";
 import { Buffer } from "node:buffer";
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
-import pino from "pino";
 import { config } from "../config.js";
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
 import { verifyAccessToken, roleFromGroups, type Role } from "../services/jwt.service.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "auth" });
+const logger = createLogger("auth");
 
 /**
  * WARP-485 — process-wide Prisma reference used by the OCS fallback to

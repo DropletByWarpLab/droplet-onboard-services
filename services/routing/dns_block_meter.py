@@ -43,6 +43,8 @@ import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from droplet_openwrt_sdk import DropletRouter, ConnectionLost, UbusError
+from middleware import with_fresh_request_id
+from request_context import get_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -166,11 +168,15 @@ async def _post_sample(blocked_count: int) -> None:
             )
             _token_warning_logged = True
         return
+    headers = {"Authorization": f"Bearer {ORCHESTRATOR_SAMPLER_TOKEN}"}
+    _rid = get_request_id()
+    if _rid:
+        headers["x-request-id"] = _rid
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.post(
                 f"{ORCHESTRATOR_URL}/api/network/dns-block-sample",
-                headers={"Authorization": f"Bearer {ORCHESTRATOR_SAMPLER_TOKEN}"},
+                headers=headers,
                 json={"blockedCount": blocked_count},
             )
         if resp.status_code >= 400:
@@ -182,6 +188,7 @@ async def _post_sample(blocked_count: int) -> None:
         logger.warning("dns-block-sample POST failed: %s", exc)
 
 
+@with_fresh_request_id
 async def _tick(router: DropletRouter) -> None:
     """One scheduler tick: read counter → derive delta → POST.
     First successful read primes the cache and emits nothing; subsequent

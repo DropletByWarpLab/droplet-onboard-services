@@ -22,10 +22,10 @@
  * 500-ing; partial data is more useful than nothing.
  */
 
-import pino from "pino";
 import { cacheGet, cacheSet } from "../cache.service.js";
+import { createLogger } from "../../lib/logger.js";
 
-const logger = pino({ name: "claude-activity:github" });
+const logger = createLogger("claude-activity:github");
 
 // Hard-coded for our own repo. If we ever multi-tenant the dashboard
 // these become env vars; until then a constant beats one more env knob.

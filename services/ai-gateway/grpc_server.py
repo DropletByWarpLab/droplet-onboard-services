@@ -19,6 +19,7 @@ from grpc import aio as grpc_aio
 # Proto-generated modules (generated from proto/inference.proto)
 from grpc_generated import inference_pb2, inference_pb2_grpc
 
+from request_context import new_request_id, set_request_id
 from router import ProviderRouter
 from schemas import ChatMessage, ChatRequest, ModelInfo
 from scheduler import InferenceScheduler, QueueFullError
@@ -55,6 +56,7 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
 
     async def Chat(self, request, context):
         """Unary chat completion."""
+        set_request_id(new_request_id())
         try:
             # Enqueue with priority
             future = await self._scheduler.enqueue(
@@ -110,6 +112,7 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
 
     async def StreamChat(self, request, context):
         """Server-side streaming chat completion."""
+        set_request_id(new_request_id())
         try:
             future = await self._scheduler.enqueue(
                 priority=request.priority,
@@ -161,6 +164,7 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
 
     async def ListModels(self, request, context):
         """List available models from all providers."""
+        set_request_id(new_request_id())
         try:
             models = await self._router.list_all_models()
             return inference_pb2.ModelList(
@@ -189,6 +193,7 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
         file-indexer's batch workload; a threadpool offload can be added later
         if interactive latency matters.
         """
+        set_request_id(new_request_id())
         try:
             from providers.embeddings import embed_texts
 
@@ -225,6 +230,7 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
         on CPU; we offload to a threadpool to avoid blocking the asyncio
         loop while batches are running.
         """
+        set_request_id(new_request_id())
         # Validate model id up-front. Empty (proto default) maps to the
         # canonical name; anything else is rejected.
         if request.model not in self._RERANK_SUPPORTED_MODELS:
@@ -268,6 +274,7 @@ class InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
         lazy-loads the model (~110 MB int8). Subsequent calls are ~50 ms CPU.
         Returns 'unknown' when confidence falls below CLASSIFIER_CONFIDENCE_FLOOR.
         """
+        set_request_id(new_request_id())
         try:
             query = request.query
             if not query:

@@ -118,6 +118,9 @@ class InferenceScheduler:
 
         Returns:
             Future that resolves when a slot is available and returns the request.
+            The caller's task (inbound middleware) already has the request-id
+            contextvar set, and that same task runs the provider call after
+            `await future`, so the scheduler doesn't need to thread the id.
 
         Raises:
             QueueFullError: If the queue is full or low-priority is rejected.

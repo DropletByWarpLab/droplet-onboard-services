@@ -1,8 +1,8 @@
 import type { Request, Response, NextFunction } from "express";
 import { ZodError } from "zod";
-import pino from "pino";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "error-handler" });
+const logger = createLogger("error-handler");
 
 /**
  * Resolve the HTTP status for an error, in priority order:

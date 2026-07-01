@@ -30,12 +30,12 @@
  */
 
 import type { PrismaClient } from "@prisma/client";
-import pino from "pino";
 import type { OuiLookup } from "./oui-lookup.service.js";
 import { RouterError } from "../types/router-error.js";
 import { normalizeMac } from "../lib/mac.js";
+import { createLogger } from "../lib/logger.js";
 
-const log = pino({ name: "device-registry" });
+const log = createLogger("device-registry");
 
 export interface DhcpLease {
   mac: string;

@@ -1,5 +1,4 @@
 import { Router, Request } from "express";
-import pino from "pino";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { ncGetUserQuota } from "../services/nextcloud.client.js";
@@ -12,6 +11,7 @@ import {
 } from "../services/storage-safety.service.js";
 import { config } from "../config.js";
 import { isBridgeConnectionError } from "../lib/bridge-errors.js";
+import { createLogger } from "../lib/logger.js";
 
 // Drive labels are device-wide config that any user (incl. family
 // accounts) shares, so PATCH is admin-only — mirrors the gate around
@@ -22,7 +22,7 @@ function isAdmin(req: Request): boolean {
   return role === "owner" || role === "admin";
 }
 
-const logger = pino({ name: "storage-route" });
+const logger = createLogger("storage-route");
 
 /**
  * The device-bridge runs on the host and exposes auto-mounted USB drives at

@@ -17,7 +17,6 @@
  * by a shared catch into the SCIM Error envelope (application/scim+json).
  */
 import { Router, type Request, type Response } from "express";
-import pino from "pino";
 
 import { scimAuthMiddleware } from "../middleware/scim-auth.js";
 import {
@@ -38,8 +37,9 @@ import {
   deactivateUser,
   provisionGroup,
 } from "../services/scim.service.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "scim-route" });
+const logger = createLogger("scim-route");
 
 type PrismaClient = import("@prisma/client").PrismaClient;
 

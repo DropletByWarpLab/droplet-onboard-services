@@ -34,11 +34,11 @@
  * not a secret (mirrors DROPLET_AP_UNIFI_CONTROLLER_URL).
  */
 
-import pino from "pino";
 import { config } from "../config.js";
 import { normalizeMac } from "../lib/mac.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "easymesh-controller-client" });
+const logger = createLogger("easymesh-controller-client");
 
 /**
  * An Agent the controller's 1905.1 topology reports as visible / onboarding

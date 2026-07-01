@@ -17,9 +17,9 @@
  * to fail.
  */
 import { type PrismaClient, OffLanChannelKey } from "@prisma/client";
-import pino from "pino";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "off-lan-gate" });
+const logger = createLogger("off-lan-gate");
 
 /** Minimal Prisma surface this gate needs (keeps unit mocking trivial). */
 type OffLanGatePrisma = Pick<PrismaClient, "offLanAllowlistChannel">;

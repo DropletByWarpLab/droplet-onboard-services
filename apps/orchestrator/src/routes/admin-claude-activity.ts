@@ -18,7 +18,6 @@
  */
 
 import { Router, Request, Response, NextFunction } from "express";
-import pino from "pino";
 import { readSessionState } from "../services/claude-activity/session-state.js";
 import {
   getGitHubSnapshot,
@@ -32,8 +31,9 @@ import {
   readComplianceProgress,
   type ComplianceSnapshot,
 } from "../services/claude-activity/compliance-parser.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "admin-claude-activity" });
+const logger = createLogger("admin-claude-activity");
 
 function isAdmin(req: Request): boolean {
   const role = req.user?.role;

@@ -35,7 +35,6 @@
  */
 
 import { EventEmitter } from "node:events";
-import pino from "pino";
 import { config } from "../config.js";
 import type {
   MatterCommissionedDevice,
@@ -43,8 +42,9 @@ import type {
   MatterGrouped,
 } from "../types/smart-home.js";
 import { recordActivity } from "./activity.singleton.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "matter" });
+const logger = createLogger("matter");
 
 // --- Timeouts (ms) ---
 // Health/capabilities are cheap local-host hops; commissioning rides

@@ -20,11 +20,11 @@
  * Zones + motion masks (which need a canvas editor) come in Phase 4.2.
  */
 
-import pino from "pino";
 import { config as appConfig } from "../config.js";
 import { fetchConfig } from "./frigate.client.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "camera-settings" });
+const logger = createLogger("camera-settings");
 
 const FRIGATE_URL = appConfig.FRIGATE_URL;
 

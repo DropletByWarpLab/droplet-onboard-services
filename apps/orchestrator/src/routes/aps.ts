@@ -14,7 +14,6 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
-import pino from "pino";
 import { requireRole } from "../middleware/auth.js";
 import {
   approveAp,
@@ -23,8 +22,9 @@ import {
   DISCOVERED_AP_LRU_CAP,
 } from "../services/ap-onboard.service.js";
 import { normalizeMac } from "../lib/mac.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "aps-route" });
+const logger = createLogger("aps-route");
 
 // Body schema for POST /aps/:mac/approve. Mirror of the routing
 // service's `ApApproveRequest` shape, just camelCased per orchestrator

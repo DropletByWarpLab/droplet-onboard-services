@@ -32,7 +32,6 @@
  */
 
 import { timingSafeEqual } from "node:crypto";
-import pino from "pino";
 import { Prisma } from "@prisma/client";
 import type { PrismaClient, ResetJob } from "@prisma/client";
 import { config } from "../config.js";
@@ -41,8 +40,9 @@ import {
   isBridgeConnectionError,
   isTimeoutOrAbort,
 } from "../lib/bridge-errors.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "reset-service" });
+const logger = createLogger("reset-service");
 
 const BRIDGE_URL = config.DEVICE_BRIDGE_URL;
 const DOMAIN = "system";

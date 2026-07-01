@@ -16,7 +16,6 @@
 import { createHash } from "node:crypto";
 import { open, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import pino from "pino";
 import type { PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
 import { bridgeAuthToken } from "../lib/bridge-errors.js";
@@ -35,8 +34,9 @@ import type {
   TlsCertStore,
   TlsFileOps,
 } from "./tls-issuance.service.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "tls-issuance-adapters" });
+const logger = createLogger("tls-issuance-adapters");
 
 /** docker/certs lives at the repo root; the orchestrator container mounts it
  *  read-write at /app/docker/certs (see docker-compose.yml). The dir is

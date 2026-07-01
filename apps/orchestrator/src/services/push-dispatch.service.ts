@@ -24,12 +24,12 @@
  * (those need platform-specific server keys + auth dances).
  */
 
-import pino from "pino";
 import webpush from "web-push";
 import type { PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "push-dispatch" });
+const logger = createLogger("push-dispatch");
 
 let configured = false;
 let publicKey: string | null = null;

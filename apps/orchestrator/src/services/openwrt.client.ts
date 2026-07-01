@@ -7,6 +7,7 @@
 
 import pino from "pino";
 import { config } from "../config.js";
+import { getRequestId } from "../lib/request-context.js";
 import {
   RouterError,
   routerErrorFromResponse,
@@ -33,12 +34,13 @@ import {
   FirewallRulesSchema,
   FirewallRedirectsSchema,
 } from "../types/firewall-schema.js";
+import { createLogger } from "../lib/logger.js";
 
 export { RouterError } from "../types/router-error.js";
 export type { RouterErrorCode } from "../types/router-error.js";
 export type { SystemControls, NetworkInterfaceRow, AiNetworkAccess } from "../types/network.js";
 
-const logger = pino({ name: "openwrt-client" });
+const logger = createLogger("openwrt-client");
 
 const BASE_URL = config.ROUTING_SERVICE_URL;
 const TOKEN = config.ROUTING_SERVICE_TOKEN;
@@ -242,6 +244,8 @@ export async function routingFetch(path: string, init: RoutingFetchInit = {}): P
   if (TOKEN) {
     merged["Authorization"] = `Bearer ${TOKEN}`;
   }
+  const rid = getRequestId();
+  if (rid) merged["x-request-id"] = rid;
 
   const url = `${BASE_URL}${path}`;
   const displayLabel = label ?? path;

@@ -24,10 +24,10 @@
  * this in one service (rather than inline in the route) gives the dashboard a
  * stable thing to build against and a single place to wire real sources into.
  */
-import pino from "pino";
 import { fetchNetworkSummary } from "./openwrt.client.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "appliance-contract" });
+const logger = createLogger("appliance-contract");
 
 export interface ApplianceSpec {
   /** Short human label, e.g. "Compute". */

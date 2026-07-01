@@ -37,10 +37,10 @@
  * 15-min ceiling is acceptable for a household-tier guest.
  */
 import type { PrismaClient } from "@prisma/client";
-import pino from "pino";
 import { recordActivity } from "./activity.singleton.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "guest-expiry-sweep" });
+const logger = createLogger("guest-expiry-sweep");
 
 export interface SweepResult {
   /** How many rows transitioned ACTIVE → EXPIRED on this tick. */

@@ -21,14 +21,14 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
-import pino from "pino";
 import { requireRole } from "../middleware/auth.js";
 import {
   runToolSpec,
   type StepDispatcher,
 } from "../services/tool-spec-runner.service.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "tools-route" });
+const logger = createLogger("tools-route");
 
 const SPEC_STATUSES = ["live", "draft", "suggested"] as const;
 type SpecStatus = (typeof SPEC_STATUSES)[number];

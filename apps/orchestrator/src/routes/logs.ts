@@ -26,13 +26,13 @@ import {
 } from "express";
 import archiver from "archiver";
 import { z } from "zod";
-import pino from "pino";
 import { fetchLogBundleFromBridge } from "../services/logs-bridge.service.js";
 import { redactSecrets } from "../lib/log-redaction.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { RouterError } from "../types/router-error.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "logs-route" });
+const logger = createLogger("logs-route");
 
 /**
  * Owner/admin gate for the diagnostics surface. Same shape as the local

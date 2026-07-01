@@ -22,9 +22,9 @@
  */
 import type { PrismaClient } from "@prisma/client";
 import { createHash } from "node:crypto";
-import pino from "pino";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "pattern-miner" });
+const logger = createLogger("pattern-miner");
 
 const WINDOW_DAYS = 7;
 const MIN_NGRAM = 2;

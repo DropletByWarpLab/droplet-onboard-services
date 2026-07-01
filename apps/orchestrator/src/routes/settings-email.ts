@@ -33,7 +33,6 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
-import pino from "pino";
 import { requireRole } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { encryptSecret } from "../services/encryption.service.js";
@@ -48,8 +47,9 @@ import {
 } from "../services/email-channel.service.js";
 import { isExpired } from "../services/invite.service.js";
 import { buildInviteUrl } from "../lib/invite-url.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "settings-email-route" });
+const logger = createLogger("settings-email-route");
 
 const SECURITY_VALUES = ["starttls", "tls", "none"] as const;
 

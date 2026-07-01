@@ -17,11 +17,11 @@
  * keeps running and the rest of the activity feed continues to
  * accept signed rows from in-process emitters.
  */
-import pino from "pino";
 import { subscribeToTopic } from "./mqtt.service.js";
 import { recordActivity } from "./activity.singleton.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "activity-file-indexer-bridge" });
+const logger = createLogger("activity-file-indexer-bridge");
 
 interface IndexedPayload {
   path?: string;

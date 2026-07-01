@@ -6,7 +6,6 @@
  * Provides SSE event subscription for the dashboard.
  */
 
-import pino from "pino";
 import mqtt from "mqtt";
 import { PrismaClient } from "@prisma/client";
 import {
@@ -43,8 +42,9 @@ import type {
   ReviewItem,
   TimelineEntry,
 } from "../types/camera.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "camera-service" });
+const logger = createLogger("camera-service");
 
 const CACHE_KEY_CAMERAS = "cameras:list";
 const CACHE_KEY_EVENTS = "cameras:events:recent";

@@ -5,7 +5,6 @@
  * for the routes layer. Follows the same pattern as matter.service.ts.
  */
 
-import pino from "pino";
 import * as openwrt from "./openwrt.client.js";
 import * as hostapdBridge from "./hostapd-bridge.service.js";
 import { cacheGet, cacheSet, cacheDel } from "./cache.service.js";
@@ -27,6 +26,7 @@ import type {
   RouterBoardInfo,
   RouterResources,
 } from "../types/network.js";
+import { createLogger } from "../lib/logger.js";
 
 /**
  * Result envelope (WARP-39). Avoids exceptions crossing the service boundary
@@ -47,7 +47,7 @@ function toRouterError(thrown: unknown, label: string): RouterError {
   );
 }
 
-const logger = pino({ name: "network-service" });
+const logger = createLogger("network-service");
 
 const CACHE_KEYS = {
   overview: "network:overview",

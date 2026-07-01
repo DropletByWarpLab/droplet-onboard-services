@@ -25,11 +25,11 @@
  * / .env), never a tracked default.
  */
 
-import pino from "pino";
 import { config } from "../config.js";
 import { normalizeMac } from "../lib/mac.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "unifi-network-client" });
+const logger = createLogger("unifi-network-client");
 
 /**
  * A device the controller reports as pending adoption (a factory-default

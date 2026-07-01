@@ -22,11 +22,11 @@
 
 import crypto from "node:crypto";
 import path from "node:path";
-import pino from "pino";
 import { ncCreateDirectory, ncUploadFile } from "./nextcloud.client.js";
 import { config } from "../config.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "clips" });
+const logger = createLogger("clips");
 
 const FRIGATE_URL = config.FRIGATE_URL;
 const EXPORT_TIMEOUT_MS = 60_000;

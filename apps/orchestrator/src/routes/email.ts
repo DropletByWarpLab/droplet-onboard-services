@@ -20,12 +20,12 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
-import pino from "pino";
 import { requireRole } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { reconcileStaleSending } from "../services/email-reconcile.service.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "email-route" });
+const logger = createLogger("email-route");
 
 // Owner/admin see every household account; family-and-below are scoped to
 // the accounts they personally own (`EmailAccount.userId`). Matches the

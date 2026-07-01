@@ -279,7 +279,12 @@ async function attemptRefresh(): Promise<boolean> {
 }
 
 export async function authFetch(url: string, init?: RequestInit): Promise<Response> {
-  const res = await fetch(url, { ...init, credentials: "same-origin" });
+  const requestId = crypto.randomUUID();
+  const withRid = (i?: RequestInit): RequestInit => ({
+    ...i,
+    headers: { ...(i?.headers as Record<string, string> | undefined), "x-request-id": requestId },
+  });
+  const res = await fetch(url, { ...withRid(init), credentials: "same-origin" });
 
   // A must-change-password user gets 403 PASSWORD_CHANGE_REQUIRED on every
   // gated call. If a stale cached profile (mustChangePassword:false) let AuthGate
@@ -326,7 +331,7 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
     // request + refresh, and spreading it here would abort the retry instantly.
     const { signal: _staleSignal, ...rest } = init ?? {};
     return fetch(url, {
-      ...rest,
+      ...withRid(rest),
       signal: timeoutSignal(AUTHFETCH_RETRY_TIMEOUT_MS),
       credentials: "same-origin",
     });

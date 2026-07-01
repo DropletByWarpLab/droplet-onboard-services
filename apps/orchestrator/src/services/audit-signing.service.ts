@@ -24,7 +24,8 @@
 import { createHmac, createHash, timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs";
 import path from "node:path";
-import pino, { type Logger } from "pino";
+import { type Logger } from "pino";
+import { createLogger } from "../lib/logger.js";
 
 /** Lucide-icon name (or another agreed display token). */
 export type ActivitySourceIcon = string;
@@ -199,11 +200,11 @@ export const AUDIT_KEY_PATH = "/data/secrets/audit.key";
  * tests can swap in a stub via `_setLoggerForTests`. Mirrors the pattern
  * `activity.service.ts` already uses.
  */
-let logger: Pick<Logger, "warn"> = pino({ name: "audit-signing" });
+let logger: Pick<Logger, "warn"> = createLogger("audit-signing");
 
 /** Exposed only for tests; production code never replaces the logger. */
 export function _setLoggerForTests(next: Pick<Logger, "warn"> | null): void {
-  logger = next ?? pino({ name: "audit-signing" });
+  logger = next ?? createLogger("audit-signing");
 }
 
 /**

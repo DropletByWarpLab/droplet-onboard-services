@@ -79,8 +79,11 @@ from schemas import (
 )
 import re
 
+from request_context import configure_logging
+from middleware import RequestIdMiddleware
+
 logger = logging.getLogger("droplet.routing")
-logging.basicConfig(level=logging.INFO)
+configure_logging()
 
 # ---------------------------------------------------------------------------
 # Router singleton
@@ -408,6 +411,7 @@ app = FastAPI(
     dependencies=[Depends(require_bearer)],
 )
 app.add_middleware(OperationTrackingMiddleware)
+app.add_middleware(RequestIdMiddleware)
 
 
 @app.exception_handler(Exception)

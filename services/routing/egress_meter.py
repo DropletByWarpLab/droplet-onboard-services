@@ -47,6 +47,8 @@ import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from droplet_openwrt_sdk import DropletRouter, ConnectionLost, UbusError
+from middleware import with_fresh_request_id
+from request_context import get_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -178,11 +180,15 @@ async def _post_batch(deltas: dict[str, int]) -> None:
         {"channel": channel, "bytes": bytes_}
         for channel, bytes_ in deltas.items()
     ]
+    headers = {"Authorization": f"Bearer {ORCHESTRATOR_SAMPLER_TOKEN}"}
+    _rid = get_request_id()
+    if _rid:
+        headers["x-request-id"] = _rid
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.post(
                 f"{ORCHESTRATOR_URL}/api/network/off-lan-sample-batch",
-                headers={"Authorization": f"Bearer {ORCHESTRATOR_SAMPLER_TOKEN}"},
+                headers=headers,
                 json={"samples": samples},
             )
         if resp.status_code >= 400:
@@ -194,6 +200,7 @@ async def _post_batch(deltas: dict[str, int]) -> None:
         logger.warning("off-lan-sample-batch POST failed: %s", exc)
 
 
+@with_fresh_request_id
 async def _tick(router: DropletRouter) -> None:
     """One scheduler tick: read counters → derive deltas → POST.
     First successful read primes the cache; subsequent ticks emit a

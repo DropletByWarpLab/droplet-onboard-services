@@ -28,7 +28,6 @@
 
 import { Router } from "express";
 import os from "node:os";
-import pino from "pino";
 import type { PrismaClient } from "@prisma/client";
 import { requireRole } from "../middleware/auth.js";
 import {
@@ -37,8 +36,9 @@ import {
   ResetError,
   type ResetErrorCode,
 } from "../services/reset.service.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "system-reset-route" });
+const logger = createLogger("system-reset-route");
 
 /**
  * The canonical name the reset targets + that the owner must type to confirm.

@@ -13,15 +13,15 @@
  */
 
 import { randomBytes } from "node:crypto";
-import pino from "pino";
 import { PrismaClient } from "@prisma/client";
 import {
   classifyStorageCommand,
   STORAGE_CONFIRMATION_TOKEN_EXPIRY_MS,
   STORAGE_MAX_PENDING_CONFIRMATIONS,
 } from "../config/storage-safety-rules.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "storage-safety" });
+const logger = createLogger("storage-safety");
 
 const DOMAIN = "storage";
 

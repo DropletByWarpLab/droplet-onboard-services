@@ -6,12 +6,13 @@
  * which in turn talks to the hardware via the active driver.
  */
 
-import pino from "pino";
 import { config } from "../config.js";
+import { getRequestId } from "../lib/request-context.js";
 import type { SwitchProvisionConfig, SwitchRawPortStatus } from "../types/switch.js";
 import { SwitchAuthError } from "../types/switch-error.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "switch-client" });
+const logger = createLogger("switch-client");
 
 const SWITCH_URL = config.SWITCH_SERVICE_URL;
 const DEFAULT_TIMEOUT = 10_000;
@@ -52,6 +53,8 @@ function authHeaders(): Record<string, string> {
   if (token) {
     headers["Authorization"] = `Bearer ${token}`;
   }
+  const rid = getRequestId();
+  if (rid) headers["x-request-id"] = rid;
   return headers;
 }
 

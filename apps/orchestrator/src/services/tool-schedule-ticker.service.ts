@@ -23,12 +23,12 @@
  * replicas) only fire each due schedule once.
  */
 import type { PrismaClient } from "@prisma/client";
-import pino from "pino";
 import { runToolSpec, type StepDispatcher } from "./tool-spec-runner.service.js";
 import { recordActivity } from "./activity.singleton.js";
 import { nextFireFromRrule } from "../utils/rrule.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "tool-schedule-ticker" });
+const logger = createLogger("tool-schedule-ticker");
 
 interface ScheduleRow {
   id: string;

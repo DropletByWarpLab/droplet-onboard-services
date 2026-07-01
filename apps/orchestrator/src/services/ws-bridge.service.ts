@@ -1,13 +1,13 @@
 import { Server as HttpServer, IncomingMessage } from "node:http";
 import { Duplex } from "node:stream";
 import { WebSocketServer, WebSocket } from "ws";
-import pino from "pino";
 import {
   SESSION_COOKIE_NAME,
   validateTokenForWs,
   type AuthUser,
 } from "../middleware/auth.js";
 import { subscribeToTopic } from "./mqtt.service.js";
+import { createLogger } from "../lib/logger.js";
 
 /** Minimal RFC 6265 cookie header parser — we only need name/value lookups. */
 function parseCookieHeader(header: string): Record<string, string> {
@@ -27,7 +27,7 @@ function parseCookieHeader(header: string): Record<string, string> {
   return out;
 }
 
-const logger = pino({ name: "ws-bridge" });
+const logger = createLogger("ws-bridge");
 
 const WS_PATH = "/api/ws/events";
 

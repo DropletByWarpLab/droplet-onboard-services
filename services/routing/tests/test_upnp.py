@@ -47,7 +47,10 @@ class TestFirewallApiUpnp:
         FirewallApi(router).set_upnp(True)
         cfg, section, values = router.uci.set.call_args.args
         assert cfg == "upnpd" and section == "config"
-        assert values == {"enable_upnp": "1", "enable_natpmp": "1"}
+        # `enabled` is the procd service gate (seeded '0' by the uci-defaults so
+        # miniupnpd doesn't crash-loop on a fresh box); set_upnp flips it along
+        # with the two protocol flags. See set_upnp() in droplet_openwrt_sdk.py.
+        assert values == {"enabled": "1", "enable_upnp": "1", "enable_natpmp": "1"}
         # uci.apply (not commit + exec_service) — droplet-ai ACL denies file.exec
         router.uci.apply.assert_called_once_with(timeout=5, rollback=False)
         router.uci.commit.assert_not_called()
@@ -65,7 +68,8 @@ class TestFirewallApiUpnp:
         router = MagicMock()
         FirewallApi(router).set_upnp(False)
         _, _, values = router.uci.set.call_args.args
-        assert values == {"enable_upnp": "0", "enable_natpmp": "0"}
+        # Disabling flips the procd `enabled` gate off too (stops the daemon).
+        assert values == {"enabled": "0", "enable_upnp": "0", "enable_natpmp": "0"}
 
 
 # ---------------------------------------------------------------------------

@@ -14,9 +14,9 @@
  */
 import { Router } from "express";
 import { PrismaClient } from "@prisma/client";
-import pino from "pino";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "admin-retrieval-eval" });
+const logger = createLogger("admin-retrieval-eval");
 
 interface SearchResultWire {
   source: "nextcloud" | "brain";

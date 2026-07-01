@@ -39,10 +39,10 @@
  * this replaces.
  */
 import type { Request } from "express";
-import pino from "pino";
 import { config } from "../config.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "invite-url" });
+const logger = createLogger("invite-url");
 
 /** Resolved canonical-origin context for a single link build. */
 export interface InviteOrigin {

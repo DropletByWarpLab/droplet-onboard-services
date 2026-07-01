@@ -1,3 +1,4 @@
+import { createLogger } from "../lib/logger.js";
 /**
  * model-readiness.service.ts — First-boot Ollama model pull.
  *
@@ -41,9 +42,8 @@
  * the manager is unreachable.
  */
 
-import pino from "pino";
 
-const logger = pino({ name: "model-readiness" });
+const logger = createLogger("model-readiness");
 
 const OLLAMA_URL = process.env.OLLAMA_URL ?? "http://host.docker.internal:11434";
 

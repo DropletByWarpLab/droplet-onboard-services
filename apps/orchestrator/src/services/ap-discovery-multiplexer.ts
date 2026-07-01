@@ -35,7 +35,6 @@
  * same as Phase 1.
  */
 
-import pino from "pino";
 import type { PrismaClient } from "@prisma/client";
 import { logRouterError } from "./openwrt.client.js";
 import {
@@ -50,8 +49,9 @@ import {
   EasyMeshControllerError,
   type EasyMeshControllerClient,
 } from "./easymesh-controller.client.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "ap-discovery-multiplexer" });
+const logger = createLogger("ap-discovery-multiplexer");
 
 /**
  * One discovery source = one backend's current snapshot of the LAN.

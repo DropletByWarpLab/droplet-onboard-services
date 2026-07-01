@@ -14,7 +14,6 @@
 
 import { Router } from "express";
 import { PrismaClient } from "@prisma/client";
-import pino from "pino";
 import * as switchClient from "../services/switch.client.js";
 import {
   fetchSwitchStatus,
@@ -26,8 +25,9 @@ import {
   confirmNetworkCommand,
 } from "../services/network-safety.service.js";
 import { requireRole } from "../middleware/auth.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "switch-routes" });
+const logger = createLogger("switch-routes");
 
 /**
  * Protected port: the port the appliance is connected to.

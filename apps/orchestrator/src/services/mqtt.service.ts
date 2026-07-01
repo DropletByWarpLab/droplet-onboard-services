@@ -1,8 +1,8 @@
 import mqtt, { MqttClient } from "mqtt";
-import pino from "pino";
 import { config } from "../config.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "mqtt" });
+const logger = createLogger("mqtt");
 
 let client: MqttClient | null = null;
 

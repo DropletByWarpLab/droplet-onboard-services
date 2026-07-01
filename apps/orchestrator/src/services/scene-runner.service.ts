@@ -20,11 +20,11 @@
  * scheduler ignores the array but relies on the same audit row.
  */
 import type { PrismaClient } from "@prisma/client";
-import pino from "pino";
 import { recordActivity } from "./activity.singleton.js";
 import type { MatterDispatcher } from "../routes/scenes.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "scene-runner" });
+const logger = createLogger("scene-runner");
 
 /** Minimal Scene shape the runner needs — id, name, ordered actions. */
 export interface RunnableScene {

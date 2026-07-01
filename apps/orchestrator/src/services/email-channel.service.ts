@@ -22,10 +22,10 @@
 import nodemailer from "nodemailer";
 import type { Transporter } from "nodemailer";
 import type { PrismaClient } from "@prisma/client";
-import pino from "pino";
 import { decryptSecret } from "./encryption.service.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "email-channel" });
+const logger = createLogger("email-channel");
 
 /** The single config row's pinned primary key (this is a singleton table). */
 export const EMAIL_CHANNEL_SINGLETON_ID = "singleton";

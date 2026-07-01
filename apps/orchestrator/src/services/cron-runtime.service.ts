@@ -65,10 +65,15 @@
  * connection.
  */
 import cron, { type ScheduledTask } from "node-cron";
-import pino from "pino";
 import { RouterError } from "../types/router-error.js";
+import {
+  newRequestId,
+  runWithRequestId,
+  getRequestId,
+} from "../lib/request-context.js";
+import { createLogger } from "../lib/logger.js";
 
-const defaultLog = pino({ name: "cron-runtime" });
+const defaultLog = createLogger("cron-runtime");
 
 /** Minimal logger surface `safeRun` needs; pino-compatible. */
 export interface CronRuntimeLogger {
@@ -189,17 +194,22 @@ export function createCronRuntime(
     handler: () => void | Promise<void>,
     opts?: CronScheduleOpts,
   ) {
+    const requestId = newRequestId();
     try {
-      if (opts?.lockKey) {
-        await withAdvisoryLock(opts.lockKey, handler);
-      } else {
-        await handler();
-      }
+      await runWithRequestId(requestId, async () => {
+        logger.debug?.({ requestId }, "tick-start");
+        if (opts?.lockKey) {
+          await withAdvisoryLock(opts.lockKey, handler);
+        } else {
+          await handler();
+        }
+        logger.debug?.({ requestId }, "tick-end");
+      });
       failureCounts.set(handler, 0);
     } catch (err) {
       const n = (failureCounts.get(handler) ?? 0) + 1;
       failureCounts.set(handler, n);
-      const ctx = { err, consecutiveFailures: n };
+      const ctx = { err, consecutiveFailures: n, requestId };
       if (err instanceof RouterError) {
         logger.warn(ctx, "cron handler caught RouterError");
       } else {

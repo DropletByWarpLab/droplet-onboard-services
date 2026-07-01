@@ -13,12 +13,12 @@
  * staleness on writes, which the spec calls out as acceptable.
  */
 
-import pino from "pino";
 import { invalidatePrefix } from "./cache.service.js";
 import { subscribeToTopic } from "./mqtt.service.js";
 import { userKeyPrefix } from "./context-stats.service.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "context-stats-invalidation" });
+const logger = createLogger("context-stats-invalidation");
 
 export const TOPIC = "droplet/context-stats/invalidate";
 

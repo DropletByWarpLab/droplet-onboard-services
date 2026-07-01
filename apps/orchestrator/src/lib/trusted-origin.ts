@@ -41,10 +41,10 @@
  * https origin; otherwise it honours `req.secure` / `x-forwarded-proto`.
  */
 import type { Request } from "express";
-import pino from "pino";
 import { config } from "../config.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "trusted-origin" });
+const logger = createLogger("trusted-origin");
 
 /** Resolved canonical-origin context for a single URL build. */
 export interface TrustedOrigin {

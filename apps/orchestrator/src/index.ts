@@ -73,8 +73,9 @@ import { startContextStatsInvalidator } from "./services/context-stats-invalidat
 import { initActivityRecorder, recordActivity } from "./services/activity.singleton.js";
 import { attachFileIndexerActivityBridge } from "./services/activity-file-indexer-bridge.js";
 import { ensureDefaultModelPulled } from "./services/model-readiness.service.js";
+import { createLogger } from "./lib/logger.js";
 
-const logger = pino({ name: "orchestrator" });
+const logger = createLogger("orchestrator");
 
 // WARP-572: re-entrancy guard for the graceful-shutdown path. After an
 // uncaughtException the process is (by Node's contract) in an undefined state

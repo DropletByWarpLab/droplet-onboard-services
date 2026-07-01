@@ -2,7 +2,6 @@ import { Router, Request } from "express";
 import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import { PrismaClient } from "@prisma/client";
-import pino from "pino";
 import { config } from "../config.js";
 import {
   ncGenerateAppPassword,
@@ -17,8 +16,9 @@ import {
   getPublicVapidKey,
 } from "../services/push-dispatch.service.js";
 import { trustedOriginUrl } from "../lib/trusted-origin.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "device-clients-route" });
+const logger = createLogger("device-clients-route");
 
 /**
  * Thrown inside the claim transaction when the atomic conditional consume

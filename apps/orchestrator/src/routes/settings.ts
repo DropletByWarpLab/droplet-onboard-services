@@ -30,11 +30,11 @@
  */
 import { Router, Request, Response, NextFunction } from "express";
 import type { PrismaClient } from "@prisma/client";
-import pino from "pino";
 import { requireRole } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "settings-route" });
+const logger = createLogger("settings-route");
 
 // Canonical SettingSection literals — duplicated as TS literals so the
 // router compiles standalone without pulling the Prisma client into the

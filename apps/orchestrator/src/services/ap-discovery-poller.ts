@@ -29,7 +29,6 @@
  * cadence × 3-tick budget). There is exactly ONE scheduler for discovery
  * (ADR-024 §6 — no second poller, no `while True`).
  */
-import pino from "pino";
 import type { PrismaClient } from "@prisma/client";
 import { logRouterError } from "./openwrt.client.js";
 import type { CronRuntime } from "./cron-runtime.service.js";
@@ -42,8 +41,9 @@ import {
 } from "./ap-discovery-multiplexer.js";
 import { createUniFiNetworkClient } from "./unifi-network.client.js";
 import { createEasyMeshControllerClient } from "./easymesh-controller.client.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "ap-discovery-poller" });
+const logger = createLogger("ap-discovery-poller");
 
 /**
  * Narrow surface of the openwrt client the mDNS source needs. Mirrors the

@@ -34,7 +34,6 @@
  */
 
 import type { PrismaClient } from "@prisma/client";
-import pino from "pino";
 import { normalizeMac } from "../lib/mac.js";
 import {
   approveAp as routingApproveAp,
@@ -49,8 +48,9 @@ import {
   createEasyMeshControllerClient,
   type EasyMeshControllerClient,
 } from "./easymesh-controller.client.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "ap-onboard" });
+const logger = createLogger("ap-onboard");
 
 /**
  * Canonical backend keys — mirror the `ApOnboardBackend` Prisma enum

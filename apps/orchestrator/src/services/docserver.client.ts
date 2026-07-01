@@ -27,11 +27,11 @@
  */
 import { createHash } from "node:crypto";
 import jwt from "jsonwebtoken";
-import pino from "pino";
 import { config } from "../config.js";
 import { ncGetFileId } from "./nextcloud.client.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "docserver-client" });
+const logger = createLogger("docserver-client");
 
 /** Editor mode decided SERVER-SIDE by the route layer; never trusted from the client. */
 export type DocEditorMode = "edit" | "view";

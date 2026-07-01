@@ -37,6 +37,8 @@ from http.client import HTTPException
 from typing import Any, Optional
 from urllib.request import Request, urlopen
 
+from request_context import get_request_id
+
 logger = logging.getLogger("droplet.openwrt")
 
 
@@ -306,9 +308,11 @@ class UbusClient:
         own socket; a single retry rides out the transient reset without
         hammering a genuinely-down router).
         """
-        req = Request(
-            self.base_url, data=data, headers={"Content-Type": "application/json"}
-        )
+        _hdrs = {"Content-Type": "application/json"}
+        _rid = get_request_id()
+        if _rid:
+            _hdrs["x-request-id"] = _rid
+        req = Request(self.base_url, data=data, headers=_hdrs)
         last_exc: Exception | None = None
         for attempt in (1, 2):
             try:

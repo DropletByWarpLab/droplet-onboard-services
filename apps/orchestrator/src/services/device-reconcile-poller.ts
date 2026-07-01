@@ -24,7 +24,6 @@
  * take a narrow `OpenwrtClient` surface here so tests can inject mocks
  * without pulling the whole module.
  */
-import pino from "pino";
 import type { DeviceRegistry, FirewallRejectRule } from "./device-registry.service.js";
 import type {
   DhcpLease as OpenwrtDhcpLease,
@@ -34,8 +33,9 @@ import type {
 } from "../types/network.js";
 import { RouterError } from "../types/router-error.js";
 import { logRouterError } from "./openwrt.client.js";
+import { createLogger } from "../lib/logger.js";
 
-const log = pino({ name: "device-reconcile-poller" });
+const log = createLogger("device-reconcile-poller");
 
 /**
  * Narrow surface of the openwrt client the poller needs. Lets tests

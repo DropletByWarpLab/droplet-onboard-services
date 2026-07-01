@@ -7,6 +7,7 @@ from collections.abc import AsyncGenerator
 
 from capabilities import cloud_capabilities
 from providers.base import BaseProvider, to_litellm_messages
+from request_context import get_request_id
 from schemas import ChatMessage, ModelInfo
 
 logger = logging.getLogger(__name__)
@@ -44,12 +45,15 @@ class OpenAICloudProvider(BaseProvider):
             extra["tools"] = [t.model_dump() if hasattr(t, "model_dump") else t for t in kwargs["tools"]]
 
         if not stream:
+            rid = get_request_id()
+            extra_headers = {"x-request-id": rid} if rid else None
             response = await litellm.acompletion(
                 model=litellm_model,
                 messages=litellm_messages,
                 api_key=self.api_key,
                 temperature=kwargs.get("temperature", 0.7),
                 max_tokens=kwargs.get("max_tokens", 4096),
+                extra_headers=extra_headers,
                 **extra,
             )
             return response.model_dump()
@@ -61,12 +65,15 @@ class OpenAICloudProvider(BaseProvider):
     ) -> AsyncGenerator[str, None]:
         import litellm  # lazy: heavy import, only needed on a cloud call
 
+        rid = get_request_id()
+        extra_headers = {"x-request-id": rid} if rid else None
         response = await litellm.acompletion(
             model=model,
             messages=messages,
             api_key=self.api_key,
             temperature=kwargs.get("temperature", 0.7),
             max_tokens=kwargs.get("max_tokens", 4096),
+            extra_headers=extra_headers,
             stream=True,
         )
         async for chunk in response:

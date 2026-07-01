@@ -1,8 +1,8 @@
 import Redis from "ioredis";
-import pino from "pino";
 import { config } from "../config.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "cache" });
+const logger = createLogger("cache");
 
 let redis: Redis | null = null;
 

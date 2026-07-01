@@ -8,7 +8,6 @@
  */
 
 import { randomBytes } from "node:crypto";
-import pino from "pino";
 import { PrismaClient } from "@prisma/client";
 import {
   classifyCommand,
@@ -18,8 +17,9 @@ import {
   CONFIRMATION_TOKEN_EXPIRY_MS,
   type TierClassification,
 } from "../config/safety-rules.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "safety-tier" });
+const logger = createLogger("safety-tier");
 
 interface PendingConfirmation {
   token: string;

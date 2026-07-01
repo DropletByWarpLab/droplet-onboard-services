@@ -31,10 +31,10 @@
  * No crypto. No while-loop.
  */
 import type { PrismaClient } from "@prisma/client";
-import pino from "pino";
 import type { ScopeName } from "../middleware/scope.js";
+import { createLogger } from "../lib/logger.js";
 
-const logger = pino({ name: "scope-loader" });
+const logger = createLogger("scope-loader");
 
 let scopeLoaderPrisma: PrismaClient | null = null;
 
