@@ -28,13 +28,12 @@ RUN mkdir -p /var/lock \
       uhttpd uhttpd-mod-ubus rpcd rpcd-mod-rpcsys rpcd-mod-iwinfo rpcd-mod-file \
       umdns \
       wireguard-tools kmod-wireguard luci-proto-wireguard \
-      ddns-scripts luci-app-ddns \
       miniupnpd
 
 # WARP-868 — bake the droplet rpcd ACL into the image. rpcd's `read '*'` in a
 # login only expands over the acl.d groups that EXIST, so without this file
 # even the root session is denied `file` reads (/dhcp/leases) and `umdns`
-# browse (/aps/discovered) — the network tab and the wizard's DDNS step 500.
+# browse (/aps/discovered) — the network tab 500s.
 # It used to arrive only via a silenced best-effort `docker cp` in
 # droplet-openwrt-attach, which failed on the 2026-06-11 reflash and left the
 # box degraded with zero log signal. The COPY source is the CANONICAL file

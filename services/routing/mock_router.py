@@ -634,7 +634,7 @@ class MockRouter:
 
     def _call(self, obj: str, method: str, args: Any = None) -> dict[str, Any]:
         """Catch-all for raw ubus calls (e.g. `service event` reload nudges
-        used by /vpn/setup and /ddns/duckdns). The real SDK exposes this for
+        used by /vpn/setup). The real SDK exposes this for
         cases the typed sub-APIs don't cover; the mock returns success so
         endpoint code paths that depend on a nudge don't blow up."""
         logger.info("mock: _call %s.%s args=%s — no-op", obj, method, args)

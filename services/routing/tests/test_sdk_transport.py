@@ -6,7 +6,7 @@ surfaces as a NAKED ConnectionResetError — an OSError that is NOT a URLError.
 The old `except URLError` let it escape the SDK, so FastAPI answered an
 untyped 500 instead of the typed 503 the dashboard knows how to soften
 (observed live on the .87 box, 2026-06-11: ConnectionResetError storms while
-/dhcp/leases and the wizard's DDNS write 500'd).
+/dhcp/leases 500'd).
 
 Contract pinned here:
   - one bounded retry on a transport failure (transient reset rides out);

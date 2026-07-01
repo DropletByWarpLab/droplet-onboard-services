@@ -429,14 +429,9 @@ docker exec -i \
   # custom Dockerfile baked into compose build context for production).
   # Phase L: added wireguard-tools, kmod-wireguard, luci-proto-wireguard
   # so the routing service can mint VPN peers against this container.
-  # WARP-839: added ddns-scripts, luci-app-ddns so the single-box container has
-  # the DuckDNS updater (the legacy router image baked these too; this
-  # runtime list mirrors openwrt/singlebox-image/Dockerfile). ddns is NOT added
-  # to the hard-verify gate below — it is not load-bearing for the AP and must
-  # not block AP bring-up.
   # KAN-9: added miniupnpd so the dashboard UPnP / NAT-PMP card lights up
   # (the routing SDK reads /etc/config/upnpd; absent it the card is "Not
-  # available"). Like ddns it is NOT load-bearing for the AP, so it stays out of
+  # available"). Like the VPN packages it is NOT load-bearing for the AP, so it stays out of
   # the hard-verify gate. The image bakes it + a disabled-by-default upnpd
   # config; this runtime install is the safety net for pre-bake containers.
   NEED_INSTALL=0
@@ -482,7 +477,6 @@ docker exec -i \
         uhttpd uhttpd-mod-ubus rpcd rpcd-mod-rpcsys rpcd-mod-iwinfo rpcd-mod-file \
         umdns \
         wireguard-tools kmod-wireguard luci-proto-wireguard \
-        ddns-scripts luci-app-ddns \
         miniupnpd \
         2>&1)"; _inst_rc=$?
       [ "$_inst_rc" -eq 0 ] && break
@@ -1239,7 +1233,7 @@ fi
 # image-baked file is only the fallback when the host source is unreadable.
 # And the path is no longer silenced: the 2026-06-11 reflash hit a docker-cp
 # failure that `>/dev/null 2>&1` swallowed entirely, leaving /dhcp/leases,
-# /aps/discovered and the wizard's DDNS write 500ing with zero log signal.
+# /aps/discovered 500ing with zero log signal.
 # A copy or rpcd-restart failure now logs loudly and FAILS the unit
 # (systemd's on-failure retry re-runs us).
 DROPLET_RPCD_ACL="${DROPLET_RPCD_ACL:-/home/droplet/edge-platform/openwrt/files/usr/share/rpcd/acl.d/droplet-ai.json}"

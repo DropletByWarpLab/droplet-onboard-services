@@ -587,7 +587,7 @@ EOF
   # the single-box (the box only ever brings up the droplet_default bridge,
   # gateway 172.18.0.1). So the compose-default
   # ROUTING/SWITCH/DISPLAY_SERVICE_URL of `http://host.docker.internal:<port>`
-  # is unreachable here and every /api/network, /api/ddns, /api/vpn call dies
+  # is unreachable here and every /api/network, /api/vpn call dies
   # with `ECONNREFUSED 172.17.0.1:8080`. Fix: pin these three URLs to the LIVE
   # droplet_default gateway so the bridged orchestrator reaches the host-bound
   # services on the bridge the box actually has. The gateway is DERIVED from
