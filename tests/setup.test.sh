@@ -1064,6 +1064,23 @@ else
   fi
 fi
 
+# (9) Validation: a newline-bearing name is refused BEFORE any write. grep is
+# LINE-based, so 'ok.example.com<LF>INJECTED=1' passed the old `printf|grep -Eq`
+# check on its first line and appended a second .env assignment; the [[ =~ ]]
+# whole-string match must refuse it outright.
+FQDN_ENV_BEFORE="$(cat "$FQDN_ENV")"
+if DROPLET_PUBLIC_FQDN_ENV_FILE="$FQDN_ENV" DROPLET_PUBLIC_FQDN_SKIP_DNS=1 \
+     bash "$FQDN_SCRIPT" $'ok.example.com\nINJECTED=1' >/dev/null 2>&1; then
+  fail "droplet-set-public-fqdn.sh accepted an fqdn with an embedded newline (env injection)"
+else
+  if [ "$(cat "$FQDN_ENV")" = "$FQDN_ENV_BEFORE" ] \
+     && ! grep -qxF 'INJECTED=1' "$FQDN_ENV"; then
+    pass "droplet-set-public-fqdn.sh refuses a newline-bearing fqdn and writes nothing"
+  else
+    fail "droplet-set-public-fqdn.sh let a newline-bearing fqdn touch the .env (got: $(cat "$FQDN_ENV" 2>/dev/null))"
+  fi
+fi
+
 # --- Behavioural: the sudo guard defers instead of failing silently -----------
 # Source the REAL library, point its host-dnsmasq conf at a fixture, and put a
 # stub `sudo` (always exits 1, so `sudo -n true` fails) first on PATH — the
