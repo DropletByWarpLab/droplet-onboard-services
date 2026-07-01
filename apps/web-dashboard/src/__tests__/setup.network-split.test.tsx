@@ -2,7 +2,7 @@
  * Onboarding-Flow redesign — the network split's INTEGRATION contract.
  *
  * The old single `internet` step was split into two ordered client-only steps,
- * `wifi` (Home Wi-Fi the box broadcasts) then `address` (the box's public web
+ * `wifi` (Home Wi-Fi the box broadcasts) then `address` (the DuckDNS web
  * address). This file used to be `setup.internet.test.tsx` and exercised the
  * single combined step in-flow; the per-component behaviour (validation, the
  * WARP-807/808/809 ladders, field shapes) now lives in
@@ -11,8 +11,8 @@
  * What ONLY the page-level wiring can prove — and so what this file keeps — is
  * that the split is threaded into the state machine correctly:
  *   1. after `twofactor` the wizard lands on WifiStep ("Set up your home Wi-Fi");
- *   2. advancing the Wi-Fi step (Continue/skip) lands on AddressStep ("Your box
- *      has its own web address");
+ *   2. advancing the Wi-Fi step (Continue/skip) lands on AddressStep ("Give your
+ *      box a web address", with the `.duckdns.org` suffix visible);
  *   3. advancing/skipping the address step lands on `storage` (→ discovery);
  *   4. both sub-steps persist as the existing `internet` SetupStep — the Prisma
  *      enum is deliberately NOT migrated for a presentation-only split
@@ -41,6 +41,7 @@ vi.mock("@/lib/auth", () => ({
 // single `internet` SetupStep. The rest of the surface is stubbed so any step
 // we land on mounts quietly.
 const patchSetupStepMock = vi.fn(async (_setupStep: string) => undefined);
+const fetchDuckDnsStatusMock = vi.fn(async () => ({ configured: false }));
 
 vi.mock("@/lib/api", () => ({
   // WARP-867 — AccountStep probes setup status on mount to pick its mode;
@@ -72,6 +73,22 @@ vi.mock("@/lib/api", () => ({
     slug: "acme",
     reserved_host: "droplet.local/acme",
     next_step: "internet",
+  })),
+  // AddressStep calls fetchDuckDnsStatus on mount; WifiStep does not load.
+  fetchDuckDnsStatus: () => fetchDuckDnsStatusMock(),
+  setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
+  // WARP-979 — the reworked AddressStep (Secured / name your box) imports
+  // these; the split tests skip the step so they never actually fire.
+  checkBoxName: vi.fn(async () => ({
+    available: true,
+    slug: "studio",
+    fqdn: "studio.droplet-us.com",
+    authoritative: false,
+  })),
+  setBoxName: vi.fn(async () => ({
+    ok: true,
+    slug: "studio",
+    fqdn: "studio.droplet-us.com",
   })),
   // WARP-657 Wi-Fi clients — present so WifiStep's import resolves; the split
   // tests skip Wi-Fi (blank → Continue) so these are never actually called.
@@ -147,7 +164,7 @@ async function advanceToWifi() {
 }
 
 /** Skip the Wi-Fi step (blank SSID → no write) to land on `address`. The
- *  Address step's fetchVpnStatus effect resolves before we read it. */
+ *  Address step's fetchDuckDnsStatus effect resolves before we read it. */
 async function skipWifiToAddress() {
   await act(async () => {
     await Promise.resolve();
@@ -165,6 +182,8 @@ async function skipWifiToAddress() {
 describe("setup network split — wifi → address integration (Onboarding-Flow redesign)", () => {
   beforeEach(() => {
     patchSetupStepMock.mockClear();
+    fetchDuckDnsStatusMock.mockClear();
+    fetchDuckDnsStatusMock.mockResolvedValue({ configured: false });
   });
 
   afterEach(() => {
@@ -188,16 +207,14 @@ describe("setup network split — wifi → address integration (Onboarding-Flow 
     await advanceToWifi();
     await skipWifiToAddress();
 
+    // WARP-979 — the address step is now the Secured / name-your-box step.
     expect(
-      screen.getByText(/your box has its own web address/i),
+      screen.getByText(/name your secure address/i),
     ).toBeInTheDocument();
-    // The chain diagram + Skip label confirm we're on AddressStep.
-    expect(
-      screen.getByRole("img", { name: /web address \(this step\)/i }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /^skip$/i }),
-    ).toBeInTheDocument();
+    // The .droplet-us.com suffix + name input confirm we're on the reworked
+    // AddressStep (not still on Wi-Fi).
+    expect(screen.getByText(".droplet-us.com")).toBeInTheDocument();
+    expect(screen.getByLabelText(/box name/i)).toBeInTheDocument();
   });
 
   it("advancing the Wi-Fi step with Continue (blank SSID) also lands on Address", async () => {
@@ -214,7 +231,7 @@ describe("setup network split — wifi → address integration (Onboarding-Flow 
     });
 
     expect(
-      screen.getByText(/your box has its own web address/i),
+      screen.getByText(/name your secure address/i),
     ).toBeInTheDocument();
   });
 
@@ -223,8 +240,12 @@ describe("setup network split — wifi → address integration (Onboarding-Flow 
     await advanceToWifi();
     await skipWifiToAddress();
 
+    // WARP-979 — the address step's skip is "Skip — I'll do this later"; it's
+    // the only such button on this (name-your-box) screen.
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /^skip$/i }));
+      fireEvent.click(
+        screen.getByRole("button", { name: /skip — i'll do this later/i }),
+      );
     });
     // WARP-933 — storage now RENDERS (no silent auto-skip), so skipping address
     // lands on the visible storage step (empty-drive state) rather than jumping

@@ -72,6 +72,20 @@ vi.mock("@/lib/api", () => ({
     reserved_host: "droplet.local/acme",
     next_step: "internet",
   })),
+  fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
+  setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
+  // WARP-979 — the reworked AddressStep imports these (skipped here).
+  checkBoxName: vi.fn(async () => ({
+    available: true,
+    slug: "studio",
+    fqdn: "studio.droplet-us.com",
+    authoritative: false,
+  })),
+  setBoxName: vi.fn(async () => ({
+    ok: true,
+    slug: "studio",
+    fqdn: "studio.droplet-us.com",
+  })),
   fetchDrives: () => fetchDrivesMock(),
   updateDriveLabel: (uuid: string, patch: unknown) =>
     updateDriveLabelMock(uuid, patch),
@@ -149,11 +163,13 @@ async function advanceToStorage() {
       screen.getByRole("button", { name: /skip — i'll do this later/i }),
     );
   });
-  // Address step → skip (its fetchVpnStatus effect resolves first).
+  // WARP-979 — the address step (Secured / name your box) → skip.
   await act(async () => {
     await Promise.resolve();
     await Promise.resolve();
-    fireEvent.click(screen.getByRole("button", { name: /^skip$/i }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /skip — i'll do this later/i }),
+    );
   });
   // Let StorageStep's fetchDrives effect resolve.
   await act(async () => {

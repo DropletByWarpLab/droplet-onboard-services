@@ -450,6 +450,27 @@ export interface ApDeviceInfo {
   lastOperationId: string | null;
 }
 
+/**
+ * WARP-979 — response from GET /api/setup/box-name/check. `available` is the
+ * best-effort answer; `authoritative` is false until the HQ device-authed
+ * registry check lands (coupled fleet-hq follow-up), so the UI stays honest.
+ * `reason` + `message` are present only when the name is invalid.
+ */
+export interface BoxNameCheckResult {
+  available: boolean;
+  slug: string;
+  fqdn: string;
+  authoritative: boolean;
+  reason?: string;
+  message?: string;
+}
+
+/** WARP-979 — response from POST /api/setup/box-name. */
+export interface BoxNameSetResult {
+  ok: boolean;
+  slug: string;
+  fqdn: string;
+}
 // --- Auth types ---
 
 export interface AuthUser {

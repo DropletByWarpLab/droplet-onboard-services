@@ -1,13 +1,15 @@
 /**
- * WARP-807 (K3): when the router/routing service is unreachable, minting a
- * WireGuard peer returns 503 + code UNREACHABLE (via RouterStatusError on the
- * client). The VPN step must render the actionable message
- * ("Your router isn't reachable yet — you can finish this from Remote Access
- * later") instead of the raw error, and keep Skip available.
+ * VpnStep — one-tap remote access (WARP-979) + the WARP-807 calm-error ladder.
  *
- * UX review (droplet-ui-ux, CHANGES_REQUESTED): the destination for the VPN
- * surface is "Remote Access" (/remote-access owns WireGuard peers), NOT
- * Settings; and the soft notice must be announced (role="status").
+ * The PRIMARY entry (endpoint configured, no peer yet) is now a single
+ * role="switch" toggle: flipping it on mints the first peer with an auto-derived
+ * label and lands on the QR/.conf view. The advanced named-device form is kept
+ * reachable ("Name a specific device instead" / "Add another device").
+ *
+ * WARP-807: when the router/routing service is unreachable, minting a peer
+ * returns 503 + code UNREACHABLE (RouterStatusError on the client). The step
+ * must render the actionable "finish from Remote Access later" notice
+ * (role="status"), not the raw error, and keep Skip available.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
@@ -19,8 +21,6 @@ const fetchVpnPeers = vi.fn();
 const createVpnPeer = vi.fn();
 
 vi.mock("@/lib/api", async () => {
-  // Spread the real module so RouterStatusError + routerUnreachableNotice keep
-  // their real behavior; only the network-IO functions are mocked.
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
   return {
     ...actual,
@@ -32,42 +32,102 @@ vi.mock("@/lib/api", async () => {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  // Endpoint configured → land directly on the device-name form.
+  // Endpoint configured, no peer → land on the one-tap toggle.
   fetchVpnStatus.mockResolvedValue({
+    configured: true,
     endpointConfigured: true,
-    endpointHost: "home.droplet-us.com",
+    endpointHost: "yourstudio.duckdns.org",
+    peerCount: 0,
+  });
+  createVpnPeer.mockResolvedValue({
+    peer: {
+      id: "p1",
+      userId: "owner",
+      deviceLabel: "This device",
+      publicKey: "PUB=",
+      assignedIp: "10.13.13.2",
+      status: "active",
+      createdAt: "now",
+    },
+    conf: "[Interface]\nPrivateKey=abc\n",
   });
 });
 
-async function reachForm() {
-  await waitFor(() =>
-    expect(screen.getByPlaceholderText(/iPhone/i)).toBeInTheDocument(),
-  );
+const toggle = () => screen.getByRole("switch", { name: /turn on remote access/i });
+
+async function reachToggle() {
+  await waitFor(() => expect(toggle()).toBeInTheDocument());
 }
 
+describe("VpnStep — one-tap remote access (WARP-979)", () => {
+  it("lands on the one-tap toggle (not a form) when no peer exists", async () => {
+    render(
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
+    );
+    await reachToggle();
+    expect(toggle()).toHaveAttribute("aria-checked", "false");
+    // Ported one-tap copy is present.
+    expect(
+      screen.getByText(/one tap connects this device to your droplet/i),
+    ).toBeInTheDocument();
+    // The named-device form is NOT the primary surface.
+    expect(screen.queryByPlaceholderText(/iPhone/i)).not.toBeInTheDocument();
+  });
+
+  it("mints a peer with an auto-derived label and shows the QR when toggled on", async () => {
+    render(
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
+    );
+    await reachToggle();
+    fireEvent.click(toggle());
+
+    await waitFor(() =>
+      expect(createVpnPeer).toHaveBeenCalledWith("This device"),
+    );
+    // Lands on the created (QR) view.
+    expect(await screen.findByTestId("vpn-qr-wrapper")).toBeInTheDocument();
+  });
+
+  it("keeps the advanced named-device form reachable from the toggle view", async () => {
+    render(
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
+    );
+    await reachToggle();
+    fireEvent.click(
+      screen.getByRole("button", { name: /name a specific device instead/i }),
+    );
+    // The advanced form appears with its device-name input.
+    expect(await screen.findByPlaceholderText(/iPhone/i)).toBeInTheDocument();
+    // No peer minted yet — the form path is opt-in.
+    expect(createVpnPeer).not.toHaveBeenCalled();
+  });
+
+  it("allows Skip from the toggle view", async () => {
+    const onSkip = vi.fn();
+    render(
+      <VpnStep onComplete={vi.fn()} onSkip={onSkip} onBackToAddress={vi.fn()} />,
+    );
+    await reachToggle();
+    fireEvent.click(screen.getByRole("button", { name: /i'll do this later/i }));
+    expect(onSkip).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("VpnStep — router unreachable (WARP-807)", () => {
-  it("renders an actionable message (not the raw error) when peer creation returns UNREACHABLE", async () => {
+  it("renders the actionable notice (not the raw error) when the one-tap mint returns UNREACHABLE", async () => {
     createVpnPeer.mockRejectedValueOnce(
       new RouterStatusError("UNREACHABLE", "Create peer: fetch failed", 503),
     );
     render(
       <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
     );
-    await reachForm();
-
-    fireEvent.change(screen.getByPlaceholderText(/iPhone/i), {
-      target: { value: "Stefan's iPhone" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: /create config/i }));
+    await reachToggle();
+    fireEvent.click(toggle());
 
     const notice = await screen.findByText(/router isn't reachable yet/i);
-    expect(notice).toBeInTheDocument();
-    // Per-surface copy: WireGuard peers live at /remote-access ("Remote
-    // Access"), so that — not "Settings" — is the destination we name.
     expect(notice).toHaveTextContent(/finish this from\s+Remote Access later/i);
     expect(notice).not.toHaveTextContent(/Settings/i);
     expect(screen.queryByText(/fetch failed/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/internal server error/i)).not.toBeInTheDocument();
   });
 
   it("announces the soft notice to screen readers (role=status, aria-live=polite)", async () => {
@@ -77,12 +137,8 @@ describe("VpnStep — router unreachable (WARP-807)", () => {
     render(
       <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
     );
-    await reachForm();
-
-    fireEvent.change(screen.getByPlaceholderText(/iPhone/i), {
-      target: { value: "Stefan's iPhone" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: /create config/i }));
+    await reachToggle();
+    fireEvent.click(toggle());
     await screen.findByText(/router isn't reachable yet/i);
 
     const region = screen.getByRole("status");
@@ -90,7 +146,7 @@ describe("VpnStep — router unreachable (WARP-807)", () => {
     expect(region).toHaveAttribute("aria-live", "polite");
   });
 
-  it("keeps the Skip affordance available on an UNREACHABLE failure", async () => {
+  it("keeps Skip available on an UNREACHABLE failure", async () => {
     createVpnPeer.mockRejectedValueOnce(
       new RouterStatusError("UNREACHABLE", "Create peer: fetch failed", 503),
     );
@@ -98,15 +154,11 @@ describe("VpnStep — router unreachable (WARP-807)", () => {
     render(
       <VpnStep onComplete={vi.fn()} onSkip={onSkip} onBackToAddress={vi.fn()} />,
     );
-    await reachForm();
-
-    fireEvent.change(screen.getByPlaceholderText(/iPhone/i), {
-      target: { value: "Stefan's iPhone" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: /create config/i }));
+    await reachToggle();
+    fireEvent.click(toggle());
     await screen.findByText(/router isn't reachable yet/i);
 
-    fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    fireEvent.click(screen.getByRole("button", { name: /i'll do this later/i }));
     expect(onSkip).toHaveBeenCalledTimes(1);
   });
 
@@ -115,17 +167,12 @@ describe("VpnStep — router unreachable (WARP-807)", () => {
     render(
       <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
     );
-    await reachForm();
-
-    fireEvent.change(screen.getByPlaceholderText(/iPhone/i), {
-      target: { value: "Stefan's iPhone" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: /create config/i }));
+    await reachToggle();
+    fireEvent.click(toggle());
 
     expect(
       await screen.findByText(/device name already taken/i),
     ).toBeInTheDocument();
-    // Urgent failure → role="alert".
     expect(screen.getByRole("alert")).toHaveTextContent(
       /device name already taken/i,
     );
@@ -136,7 +183,7 @@ describe("VpnStep — router unreachable (WARP-807)", () => {
 });
 
 describe("VpnStep — precheck states (SETUP-WIZARD-SPEC §D)", () => {
-  it("renders the blocked view with spec copy when no web address is configured", async () => {
+  it("renders the blocked view with spec copy when no internet address is configured", async () => {
     fetchVpnStatus.mockResolvedValue({
       configured: false,
       endpointConfigured: false,
@@ -151,12 +198,10 @@ describe("VpnStep — precheck states (SETUP-WIZARD-SPEC §D)", () => {
     );
 
     expect(
-      await screen.findByText(/remote access needs your web address first/i),
+      await screen.findByText(/remote access needs an internet address first/i),
     ).toBeInTheDocument();
-    // "Back to web address" is a render-only back-jump to the address step —
-    // no redirect, no peer mint.
     fireEvent.click(
-      screen.getByRole("button", { name: /back to web address/i }),
+      screen.getByRole("button", { name: /set up internet address/i }),
     );
     expect(onBackToAddress).toHaveBeenCalledTimes(1);
     expect(createVpnPeer).not.toHaveBeenCalled();
@@ -166,7 +211,7 @@ describe("VpnStep — precheck states (SETUP-WIZARD-SPEC §D)", () => {
     fetchVpnStatus.mockResolvedValue({
       configured: true,
       endpointConfigured: true,
-      endpointHost: "home.droplet-us.com",
+      endpointHost: "yourstudio.duckdns.org",
       peerCount: 1,
     });
     fetchVpnPeers.mockResolvedValue({
@@ -200,11 +245,9 @@ describe("VpnStep — precheck states (SETUP-WIZARD-SPEC §D)", () => {
       />,
     );
 
-    // Active peer is summarised; the revoked one is not listed.
     expect(await screen.findByText("Robin's Pixel")).toBeInTheDocument();
     expect(screen.queryByText("Old laptop")).not.toBeInTheDocument();
     expect(screen.getByText(/remote access is set up/i)).toBeInTheDocument();
-    // Returning must never re-issue the one-shot key.
     expect(createVpnPeer).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: /continue/i }));
@@ -215,7 +258,7 @@ describe("VpnStep — precheck states (SETUP-WIZARD-SPEC §D)", () => {
     fetchVpnStatus.mockResolvedValue({
       configured: true,
       endpointConfigured: true,
-      endpointHost: "x.droplet-us.com",
+      endpointHost: "x.duckdns.org",
       peerCount: 1,
     });
     fetchVpnPeers.mockResolvedValue({
@@ -253,12 +296,10 @@ describe("VpnStep — precheck states (SETUP-WIZARD-SPEC §D)", () => {
     expect(
       await screen.findByText(/couldn't check remote access/i),
     ).toBeInTheDocument();
-    // Hard, must-act failure → assertive alert (not a polite status).
     expect(screen.getByRole("alert")).toBeInTheDocument();
     expect(onSkip).not.toHaveBeenCalled();
     expect(fetchVpnStatus).toHaveBeenCalledTimes(1);
 
-    // "Try again" re-runs the precheck (no auto-advance, no auto-skip).
     fireEvent.click(screen.getByRole("button", { name: /try again/i }));
     await waitFor(() => expect(fetchVpnStatus).toHaveBeenCalledTimes(2));
     expect(

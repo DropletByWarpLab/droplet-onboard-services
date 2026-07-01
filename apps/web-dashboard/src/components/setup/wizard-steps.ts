@@ -49,7 +49,7 @@ export type Step =
 //
 // Onboarding-Flow redesign — the single `internet` step is split into two
 // ordered steps, `wifi` (the local network the box broadcasts) and `address`
-// (the box's public web address for remote access), so each maps to one
+// (the secure address the box gives itself, which powers remote access), so each maps to one
 // backend and one mental model (WIFI-ADDRESS-THEME-HANDOFF §1). Like
 // `twofactor`, both are CLIENT-ONLY steps: the orchestrator's Prisma
 // `SetupStep` enum has no `wifi`/`address` members, so the page persists both

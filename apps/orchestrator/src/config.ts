@@ -264,6 +264,17 @@ const envSchema = z.object({
   //   origin (trusted-origin.ts) and the one address that works at home AND
   //   over the WireGuard tunnel.
   DROPLET_PUBLIC_FQDN: z.string().default(""),
+  // DROPLET_BOX_NAME — the owner-chosen box name (WARP-979). Set on the
+  //   "Secured / name your box" setup step; becomes `<name>.droplet-us.com`
+  //   (publicly-trusted, green padlock). Persisted to the host .env via the
+  //   device-bridge (createBridgeBoxNamePersister), the SAME transport
+  //   DROPLET_PUBLIC_FQDN uses. When set, tls-issuance sends it to HQ as the
+  //   `requested_name` on the cert ORDER so HQ issues `<name>.droplet-us.com`
+  //   instead of the opaque `d-<hmac>` fallback. Empty = no name chosen yet
+  //   (the opaque-HMAC fallback stays in effect). The HQ device-authed name
+  //   CLAIM is a coupled fleet-hq follow-up — until it lands, HQ may ignore
+  //   requested_name and this is harmless.
+  DROPLET_BOX_NAME: z.string().default(""),
   // DROPLET_PUBLIC_FQDN_IP — the IP the per-device FQDN resolves to via the
   //   split-horizon dnsmasq (ADR-023 C3). Defaults to the WireGuard gateway
   //   address 192.168.20.1, which is reachable on the single-box LAN AND over

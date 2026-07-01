@@ -4,7 +4,7 @@
  * Walks a customer through every step end-to-end with realistic
  * (mocked) backend responses:
  *
- *   welcome → account → wifi (skip) → address (informational, continue) →
+ *   welcome → account → wifi (skip) → address (save DuckDNS) →
  *   storage (rename two drives) → discovery (skip) →
  *   cameras (accept all) → vpn (mint peer, scan, continue) →
  *   ai (ask sample prompt, advance) → done
@@ -15,7 +15,7 @@
  * step, etc.) reach the right downstream call.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, act } from "@testing-library/react";
+import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
 import React from "react";
 
 vi.mock("framer-motion", async () => {
@@ -37,6 +37,9 @@ const postOrgMock = vi.fn(async () => ({
   reserved_host: "droplet.local/acme",
   next_step: "internet",
 }));
+const setDuckDnsConfigMock = vi.fn();
+const checkBoxNameMock = vi.fn();
+const setBoxNameMock = vi.fn();
 const updateDriveLabelMock = vi.fn();
 const acceptDiscoveredCameraMock = vi.fn();
 const createVpnPeerMock = vi.fn();
@@ -77,6 +80,13 @@ vi.mock("@/lib/api", () => ({
   // PR #380 — Org step (account → org → internet). Forwarder so the e2e can
   // assert postOrg actually fired with the workspace name + slug.
   postOrg: (...args: Parameters<typeof postOrgMock>) => postOrgMock(...args),
+
+  fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
+  setDuckDnsConfig: (opts: unknown) => setDuckDnsConfigMock(opts),
+
+  // WARP-979 — Secured / name-your-box step (the reworked `address` step).
+  checkBoxName: (name: string) => checkBoxNameMock(name),
+  setBoxName: (name: string) => setBoxNameMock(name),
 
   fetchDrives: vi.fn(async () => ({
     drives: [
@@ -133,8 +143,7 @@ vi.mock("@/lib/api", () => ({
   fetchVpnStatus: vi.fn(async () => ({
     configured: true,
     endpointConfigured: true,
-    endpointHost: "yourstudio.droplet-us.com",
-    publicFqdn: "yourstudio.droplet-us.com",
+    endpointHost: "yourstudio.duckdns.org",
     listenPort: 51820,
     peerCount: 0,
     addresses: ["10.13.13.1/24"],
@@ -176,6 +185,9 @@ describe("setup wizard E2E happy path (WARP-174)", () => {
     setupAdminMock.mockClear();
     loginUserMock.mockClear();
     postOrgMock.mockClear();
+    setDuckDnsConfigMock.mockClear();
+    checkBoxNameMock.mockClear();
+    setBoxNameMock.mockClear();
     updateDriveLabelMock.mockClear();
     acceptDiscoveredCameraMock.mockClear();
     createVpnPeerMock.mockClear();
@@ -189,6 +201,25 @@ describe("setup wizard E2E happy path (WARP-174)", () => {
       expires_at: "2026-06-04T00:00:00.000Z",
     });
 
+    setDuckDnsConfigMock.mockResolvedValue({
+      configured: true,
+      subdomain: "yourstudio",
+      fullDomain: "yourstudio.duckdns.org",
+      enabled: true,
+      tokenSet: true,
+    });
+    // WARP-979 — the Secured step checks then persists the chosen box name.
+    checkBoxNameMock.mockResolvedValue({
+      available: true,
+      slug: "studio",
+      fqdn: "studio.droplet-us.com",
+      authoritative: false,
+    });
+    setBoxNameMock.mockResolvedValue({
+      ok: true,
+      slug: "studio",
+      fqdn: "studio.droplet-us.com",
+    });
     updateDriveLabelMock.mockResolvedValue({
       uuid: "UUID-A",
       displayName: "Wedding Photos",
@@ -303,19 +334,21 @@ describe("setup wizard E2E happy path (WARP-174)", () => {
       fireEvent.click(screen.getByRole("button", { name: /^continue$/i }));
     });
 
-    // 4b. Address → Continue. This is now an informational step (ADR-023/025):
-    // the box has its own web address and remote access is automatic, so there
-    // is nothing to configure — the customer just reads it and advances.
-    await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
+    // 4b. Address → WARP-979 Secured / name-your-box. Type a name; the debounced
+    // availability check enables Continue, which POSTs the chosen name.
+    fireEvent.change(screen.getByLabelText(/box name/i), {
+      target: { value: "studio" },
     });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^continue$/i })).toBeEnabled(),
+    );
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /^continue$/i }));
       await Promise.resolve();
       await Promise.resolve();
       await Promise.resolve();
     });
+    expect(setBoxNameMock).toHaveBeenCalledWith("studio");
 
     // 4. Storage → name two drives + save. #5: 2+ drives default to pooling
     // ON; toggle it OFF to take the name-the-drives-separately path.
@@ -365,23 +398,22 @@ describe("setup wizard E2E happy path (WARP-174)", () => {
     });
     expect(acceptDiscoveredCameraMock).toHaveBeenCalledWith("cam-1");
 
-    // 7. VPN → form (endpoint configured) → mint peer → continue.
+    // 7. VPN → one-tap toggle (endpoint configured, no peer) → mint peer →
+    // continue. WARP-979: the primary entry is now a role="switch" toggle that
+    // mints with an auto-derived label, not a named-device form.
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
-    });
-    fireEvent.change(screen.getByPlaceholderText(/stefan's iphone/i), {
-      target: { value: "iPhone" },
     });
     await act(async () => {
       fireEvent.click(
-        screen.getByRole("button", { name: /create config/i }),
+        screen.getByRole("switch", { name: /turn on remote access/i }),
       );
       await Promise.resolve();
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(createVpnPeerMock).toHaveBeenCalledWith("iPhone");
+    expect(createVpnPeerMock).toHaveBeenCalledWith("This device");
     // Ready phase visible.
     expect(screen.getByTestId("vpn-qr-wrapper")).toBeInTheDocument();
     await act(async () => {

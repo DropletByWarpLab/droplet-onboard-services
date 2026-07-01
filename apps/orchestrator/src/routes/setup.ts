@@ -67,6 +67,13 @@ import {
   SlugInvalidError,
   SlugTakenError,
 } from "../services/setup-org.service.js";
+import {
+  checkBoxName,
+  persistBoxName,
+  BoxNameInvalidError,
+} from "../services/box-name.service.js";
+import { createBridgeBoxNamePersister } from "../services/tls-issuance.adapters.js";
+import { boxNameReasonMessage } from "@droplet/shared-types";
 import { getApplianceContract } from "../services/appliance-contract.service.js";
 import { verifyAccessToken } from "../services/jwt.service.js";
 import { SESSION_COOKIE_NAME } from "../middleware/auth.js";
@@ -225,6 +232,17 @@ const claimSchema = z.object({
   code: z.string().min(1).max(64),
 });
 
+/**
+ * WARP-979 — box-name POST body. `name` is the owner-chosen name for the box's
+ * secured address `<name>.droplet-us.com`. The service re-validates it against
+ * the shared ruleset (`@droplet/shared-types`) before persisting, so the schema
+ * only checks presence/type + a generous length ceiling (the shared validator
+ * enforces the real 3–40 bound so the ONE ruleset owns the message).
+ */
+const boxNameSchema = z.object({
+  name: z.string().min(1).max(120),
+});
+
 /** Map the camelCase domain object onto the snake_case wire contract. */
 function toWire(state: SetupState): {
   appliance: "unclaimed" | "ready";
@@ -258,8 +276,18 @@ const patchSchema = z
     { message: "At least one of setup_step, appliance, user_tour_completed is required" },
   );
 
-export function createSetupRouter(prisma: PrismaClient): Router {
+/**
+ * WARP-979 — the host `.env` writer for the chosen box name. Injectable so the
+ * route test passes a fake (the real one POSTs to the device-bridge). Defaults
+ * to the production bridge persister.
+ */
+export function createSetupRouter(
+  prisma: PrismaClient,
+  deps?: { persistBoxNameToHost?: (name: string) => Promise<void> },
+): Router {
   const router = Router();
+  const persistBoxNameToHost =
+    deps?.persistBoxNameToHost ?? createBridgeBoxNamePersister();
 
   // ── GET /api/setup/state ───────────────────────────────────────
   router.get("/setup/state", async (_req: Request, res, next) => {
@@ -619,6 +647,98 @@ export function createSetupRouter(prisma: PrismaClient): Router {
         return;
       }
       logger.error({ err }, "Failed to persist org settings");
+      next(err);
+    }
+  });
+
+  // ── GET /api/setup/box-name/check?name=<n> ─────────────────────
+  //
+  // WARP-979 — the "Secured / name your box" step polls this (debounced) as the
+  // owner types. Validates `name` against the SHARED ruleset
+  // (@droplet/shared-types, same rules the dashboard runs client-side) and
+  // returns { available, slug, fqdn, reason?, authoritative }.
+  //
+  // MVP posture: format + reserved validity IS the availability answer, with
+  // `authoritative: false` — the AUTHORITATIVE fleet-registry availability check
+  // is a device-authed HQ call that is a COUPLED fleet-hq follow-up. PUBLIC:
+  // this runs during first-run onboarding before any account exists (same
+  // posture as the claim/org steps); it is a read-only validity check that
+  // touches no state and reveals nothing beyond the shared ruleset.
+  router.get("/setup/box-name/check", (req: Request, res, next) => {
+    try {
+      const nameParam = typeof req.query.name === "string" ? req.query.name : "";
+      const result = checkBoxName(nameParam);
+      res.json({
+        available: result.available,
+        slug: result.slug,
+        fqdn: result.fqdn,
+        authoritative: result.authoritative,
+        ...(result.reason
+          ? {
+              reason: result.reason,
+              message: boxNameReasonMessage(result.reason),
+            }
+          : {}),
+      });
+    } catch (err) {
+      logger.error({ err }, "Failed to check box name");
+      next(err);
+    }
+  });
+
+  // ── POST /api/setup/box-name { name } ──────────────────────────
+  //
+  // WARP-979 — persist the owner-chosen name so the box's tls-issuance ORDER
+  // requests `<name>.droplet-us.com`. Re-validates server-side (never trust the
+  // client), then writes `DROPLET_BOX_NAME=<slug>` to the host .env via the
+  // device-bridge — the SAME transport DROPLET_PUBLIC_FQDN uses.
+  //
+  //   valid   → 200 { ok, slug, fqdn }
+  //   invalid → 400 { code:"BOX_NAME_INVALID", reason, error }
+  //
+  // GATED exactly like the org POST + the appliance:"ready" PATCH: a write is
+  // allowed when EITHER a valid dashboard session cookie is present (the wizard
+  // authenticated at the account step, so this POST rides that cookie), OR the
+  // appliance is not yet `ready` (genuine first-run onboarding). Once claimed,
+  // an anonymous LAN client must not be able to silently rename the box's
+  // secured address.
+  router.post("/setup/box-name", async (req: Request, res, next) => {
+    try {
+      const sessionToken = req.cookies?.[SESSION_COOKIE_NAME];
+      const session = sessionToken ? verifyAccessToken(sessionToken) : null;
+      if (!session) {
+        const { appliance } = await getSetupState(prisma);
+        if (appliance === "ready") {
+          res.status(401).json({
+            error: "Naming the box requires an authenticated session.",
+            code: "BOX_NAME_AUTH_REQUIRED",
+          });
+          return;
+        }
+      }
+
+      const parsed = boxNameSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({
+          error: "A box name is required.",
+          code: "BOX_NAME_REQUIRED",
+          details: parsed.error.flatten(),
+        });
+        return;
+      }
+
+      const result = await persistBoxName(parsed.data.name, persistBoxNameToHost);
+      res.json({ ok: true, slug: result.slug, fqdn: result.fqdn });
+    } catch (err) {
+      if (err instanceof BoxNameInvalidError) {
+        res.status(400).json({
+          error: boxNameReasonMessage(err.reason),
+          code: err.code,
+          reason: err.reason,
+        });
+        return;
+      }
+      logger.error({ err }, "Failed to persist box name");
       next(err);
     }
   });

@@ -60,6 +60,20 @@ vi.mock("@/lib/api", () => ({
     reserved_host: "droplet.local/acme",
     next_step: "internet",
   })),
+  fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
+  // WARP-979 — the reworked AddressStep imports these (this walk skips the step).
+  checkBoxName: vi.fn(async () => ({
+    available: true,
+    slug: "studio",
+    fqdn: "studio.droplet-us.com",
+    authoritative: false,
+  })),
+  setBoxName: vi.fn(async () => ({
+    ok: true,
+    slug: "studio",
+    fqdn: "studio.droplet-us.com",
+  })),
+  setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
   // Storage step auto-skips on empty drive list — let it pass straight
   // through so the polling-bounds tests land on discovery as they
   // expect.
@@ -117,7 +131,7 @@ async function advanceToDiscovery() {
   // Onboarding-Flow redesign — the single Internet step is now two (Wi-Fi then
   // Address) between account and discovery. Skip both so the polling-bounds
   // tests land on the discovery surface they exercise. Wi-Fi has no async mount
-  // load; the Address step's fetchVpnStatus effect resolves before its skip.
+  // load; the Address step's fetchDuckDnsStatus effect resolves before its skip.
   await act(async () => {
     await Promise.resolve();
     await Promise.resolve();
@@ -128,8 +142,9 @@ async function advanceToDiscovery() {
   await act(async () => {
     await Promise.resolve();
     await Promise.resolve();
+    // WARP-979 — the address step (Secured / name your box) → skip.
     fireEvent.click(
-      screen.getByRole("button", { name: /^skip$/i }),
+      screen.getByRole("button", { name: /skip — i'll do this later/i }),
     );
   });
   // WARP-933 — Storage now RENDERS (no silent auto-skip) between address and

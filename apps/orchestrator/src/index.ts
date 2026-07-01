@@ -595,6 +595,10 @@ async function main() {
     hqConfigured,
     persistFqdn: createBridgeFqdnPersister(),
     dns: createRoutingDnsRegistrar(),
+    // WARP-979 — send the owner-chosen box name to HQ as `requested_name` so it
+    // issues `<name>.droplet-us.com`. Empty when no name chosen (opaque-HMAC
+    // fallback). Harmless if HQ ignores it (coupled fleet-hq follow-up).
+    requestedName: config.DROPLET_BOX_NAME,
   });
   cronRuntime.scheduleCron(
     "0 4 * * *",

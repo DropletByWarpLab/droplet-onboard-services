@@ -2,8 +2,8 @@
  * WARP-174 — VPN step (precheck states aligned to SETUP-WIZARD-SPEC §D).
  *
  * Render-only precheck states (the step never redirects):
- *   - blocked: endpoint not configured → "Remote access needs your web
- *     address first" + "Back to web address" + "Skip for now" buttons.
+ *   - blocked: endpoint not configured → "Remote access needs an internet
+ *     address first" + "Set up internet address" + "Skip for now" buttons.
  *     (Onboarding-Flow redesign: the address is its own step now, so the
  *     precheck jumps back to `address`, not the old combined `internet` step.)
  *   - form: endpoint OK, no peer yet → device-name input + "Create config" CTA.
@@ -58,6 +58,24 @@ vi.mock("@/lib/api", () => ({
     reserved_host: "droplet.local/acme",
     next_step: "internet",
   })),
+  fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
+  setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
+  // WARP-979 — the reworked AddressStep imports these (the vpn tests skip the
+  // Secured step, so they never actually fire).
+  checkBoxName: vi.fn(async () => ({
+    available: true,
+    slug: "studio",
+    fqdn: "studio.droplet-us.com",
+    authoritative: false,
+  })),
+  setBoxName: vi.fn(async () => ({
+    ok: true,
+    slug: "studio",
+    fqdn: "studio.droplet-us.com",
+  })),
+  // VpnStep calls routerUnreachableNotice in its mint catch; provide the real
+  // "not a router error → null" behaviour so the ordinary-error path works.
+  routerUnreachableNotice: vi.fn(() => null),
   fetchDrives: vi.fn(async () => ({ drives: [], count: 0 })),
   updateDriveLabel: vi.fn(),
   fetchDiscoveredCameras: vi.fn(async () => []),
@@ -129,8 +147,9 @@ async function advanceToVpn() {
   await act(async () => {
     await Promise.resolve();
     await Promise.resolve();
+    // WARP-979 — the address step (Secured / name your box) skip label.
     fireEvent.click(
-      screen.getByRole("button", { name: /^skip$/i }),
+      screen.getByRole("button", { name: /skip — i'll do this later/i }),
     );
   });
   // WARP-933 — Storage and Cameras now RENDER (no silent auto-skip). Skip each:
@@ -168,10 +187,10 @@ describe("setup VPN step (WARP-174)", () => {
     await advanceToVpn();
 
     expect(
-      screen.getByText(/remote access needs your web address first/i),
+      screen.getByText(/remote access needs an internet address first/i),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: /back to web address/i }),
+      screen.getByRole("button", { name: /set up internet address/i }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: /skip for now/i }),
@@ -179,7 +198,7 @@ describe("setup VPN step (WARP-174)", () => {
     expect(createVpnPeerMock).not.toHaveBeenCalled();
   });
 
-  it("Back to web address returns the customer to the Address step", async () => {
+  it("Set up internet address returns the customer to the Address step", async () => {
     fetchVpnStatusMock.mockResolvedValue({
       configured: false,
       endpointConfigured: false,
@@ -189,15 +208,15 @@ describe("setup VPN step (WARP-174)", () => {
 
     await act(async () => {
       fireEvent.click(
-        screen.getByRole("button", { name: /back to web address/i }),
+        screen.getByRole("button", { name: /set up internet address/i }),
       );
     });
 
-    // Onboarding-Flow redesign — the precheck now jumps back to the dedicated
-    // Address step (not the old combined Internet step), whose title is
-    // "Your box has its own web address".
+    // Onboarding-Flow redesign — the precheck jumps back to the dedicated
+    // Address step (not the old combined Internet step). WARP-979 reworked its
+    // title to the Secured / name-your-box step, "Name your secure address".
     expect(
-      screen.getByText(/your box has its own web address/i),
+      screen.getByText(/name your secure address/i),
     ).toBeInTheDocument();
   });
 
@@ -229,11 +248,11 @@ describe("setup VPN step (WARP-174)", () => {
     expect(createVpnPeerMock).not.toHaveBeenCalled();
   });
 
-  it("renders the device-name form when endpoint is configured", async () => {
+  it("renders the one-tap toggle when endpoint is configured (WARP-979)", async () => {
     fetchVpnStatusMock.mockResolvedValue({
       configured: true,
       endpointConfigured: true,
-      endpointHost: "yourstudio.droplet-us.com",
+      endpointHost: "yourstudio.duckdns.org",
       listenPort: 51820,
       peerCount: 0,
       addresses: ["10.13.13.1/24"],
@@ -241,30 +260,28 @@ describe("setup VPN step (WARP-174)", () => {
     render(<SetupPage />);
     await advanceToVpn();
 
-    expect(screen.getByText(/connect your phone/i)).toBeInTheDocument();
+    expect(screen.getByText(/turn on remote access/i)).toBeInTheDocument();
     expect(
-      screen.getByPlaceholderText(/stefan's iphone/i),
+      screen.getByRole("switch", { name: /turn on remote access/i }),
     ).toBeInTheDocument();
+    // The advanced named-device form is reachable but not the primary surface.
+    expect(screen.queryByPlaceholderText(/stefan's iphone/i)).not.toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: /create config/i }),
-    ).toBeInTheDocument();
-    // Endpoint host shown so the customer can sanity-check.
-    expect(
-      screen.getByText(/yourstudio\.droplet-us\.com/),
+      screen.getByRole("button", { name: /name a specific device instead/i }),
     ).toBeInTheDocument();
   });
 
-  it("Create config calls createVpnPeer with the device name + advances to ready", async () => {
+  it("the one-tap toggle mints a peer (auto-derived label) + advances to ready", async () => {
     fetchVpnStatusMock.mockResolvedValue({
       configured: true,
       endpointConfigured: true,
-      endpointHost: "yourstudio.droplet-us.com",
+      endpointHost: "yourstudio.duckdns.org",
     });
     createVpnPeerMock.mockResolvedValue({
       peer: {
         id: "p1",
         userId: "owner",
-        deviceLabel: "Stefan's iPhone",
+        deviceLabel: "This device",
         publicKey: "PUB=",
         assignedIp: "10.13.13.2",
         status: "active",
@@ -275,6 +292,51 @@ describe("setup VPN step (WARP-174)", () => {
     render(<SetupPage />);
     await advanceToVpn();
 
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("switch", { name: /turn on remote access/i }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(createVpnPeerMock).toHaveBeenCalledWith("This device");
+    // Ready phase: QR wrapper + how-to-use list.
+    expect(screen.getByTestId("vpn-qr-wrapper")).toBeInTheDocument();
+    expect(screen.getByText(/scan from qr code/i)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /i'm connected — continue/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("the advanced named-device form still mints with the typed name", async () => {
+    fetchVpnStatusMock.mockResolvedValue({
+      configured: true,
+      endpointConfigured: true,
+    });
+    createVpnPeerMock.mockResolvedValue({
+      peer: {
+        id: "p1",
+        userId: "owner",
+        deviceLabel: "Stefan's iPhone",
+        publicKey: "P=",
+        assignedIp: "10.13.13.2",
+        status: "active",
+        createdAt: "now",
+      },
+      conf: "[Interface]\n",
+    });
+    render(<SetupPage />);
+    await advanceToVpn();
+
+    // Open the advanced form from the toggle view.
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /name a specific device instead/i }),
+      );
+      await Promise.resolve();
+    });
     fireEvent.change(screen.getByPlaceholderText(/stefan's iphone/i), {
       target: { value: "Stefan's iPhone" },
     });
@@ -286,29 +348,7 @@ describe("setup VPN step (WARP-174)", () => {
     });
 
     expect(createVpnPeerMock).toHaveBeenCalledWith("Stefan's iPhone");
-    // Ready phase: QR wrapper + how-to-use list.
     expect(screen.getByTestId("vpn-qr-wrapper")).toBeInTheDocument();
-    expect(screen.getByText(/scan from qr code/i)).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /i'm connected — continue/i }),
-    ).toBeInTheDocument();
-  });
-
-  it("rejects empty device name without calling createVpnPeer", async () => {
-    fetchVpnStatusMock.mockResolvedValue({
-      configured: true,
-      endpointConfigured: true,
-    });
-    render(<SetupPage />);
-    await advanceToVpn();
-
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /create config/i }));
-      await Promise.resolve();
-    });
-
-    expect(screen.getByText(/give this device a name/i)).toBeInTheDocument();
-    expect(createVpnPeerMock).not.toHaveBeenCalled();
   });
 
   it("'I'm connected — continue' from ready advances to done", async () => {
@@ -330,11 +370,10 @@ describe("setup VPN step (WARP-174)", () => {
     });
     render(<SetupPage />);
     await advanceToVpn();
-    fireEvent.change(screen.getByPlaceholderText(/stefan's iphone/i), {
-      target: { value: "iPhone" },
-    });
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /create config/i }));
+      fireEvent.click(
+        screen.getByRole("switch", { name: /turn on remote access/i }),
+      );
       await Promise.resolve();
       await Promise.resolve();
     });

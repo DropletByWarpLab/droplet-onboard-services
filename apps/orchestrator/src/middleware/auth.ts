@@ -128,6 +128,24 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     // de-authed. The handler validates slug shape + uniqueness in
     // routes/setup.ts; it persists locally only (nothing off-box).
     "/api/setup/org",
+    // WARP-979: onboarding SECURED / name-your-box step. The name check
+    // (GET /api/setup/box-name/check) and the persist (POST /api/setup/box-name)
+    // run during first-run onboarding (the account session cookie may not be
+    // durably established yet mid-wizard), so they share the wizard's public
+    // posture — exactly like /api/setup/org. The POST re-gates itself in
+    // routes/setup.ts (session cookie OR appliance not-yet-ready) so a claimed
+    // box can't be silently renamed by an anonymous LAN client; the GET is a
+    // read-only, side-effect-free validity check.
+    //
+    // These are matched by the startsWith() below (a PREFIX match, not exact),
+    // so "/api/setup/box-name" intentionally covers BOTH the persist route AND
+    // "/api/setup/box-name/check". That's safe here because those are the ONLY
+    // two routes mounted under this prefix: the POST self-re-gates (session OR
+    // appliance-not-ready) and the GET is side-effect-free — so a broader
+    // prefix can't accidentally de-auth some future sibling route (there is
+    // none). The explicit "/check" entry is kept for readability/intent.
+    "/api/setup/box-name/check",
+    "/api/setup/box-name",
     "/api/auth/login",
     "/api/auth/authorize",
     "/api/auth/callback",
