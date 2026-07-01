@@ -24,6 +24,8 @@ import { RouterError, routingFetch } from "./openwrt.client.js";
 import type {
   DnsRegistrar,
   HqChallengeResponse,
+  HqClaimNameRequest,
+  HqClaimNameResponse,
   HqDeregisterRequest,
   HqDeregisterResponse,
   HqIssuanceClient,
@@ -32,6 +34,8 @@ import type {
   HqPollResponse,
   HqProvisionRequest,
   HqProvisionResponse,
+  HqReleaseRequest,
+  HqReleaseResponse,
   TlsCertRow,
   TlsCertStateValue,
   TlsCertStore,
@@ -119,6 +123,33 @@ export function createHqIssuanceClient(): HqIssuanceClient {
       // which the service treats as a fail-safe (keep the bootstrap cert, never
       // crash). HQ returns { device_id, status: "registered", idempotent }.
       return hqFetch<HqProvisionResponse>("/api/issuance/provision", {
+        method: "POST",
+        body: JSON.stringify(req),
+      });
+    },
+    claimName(req: HqClaimNameRequest) {
+      // WARP-980: the owner renaming the box RE-CLAIMS a name via device-auth
+      // PoP (no token). The RAW name rides in the body (HQ slugs it); the four
+      // PoP fields authenticate the claim over a fresh nonce. Same hqFetch error
+      // handling — a non-2xx throws `HQ /api/issuance/claim-name returned
+      // <status>: <body>`, which claimBoxName classifies (409 taken +
+      // suggestions, 403 not-registered, 422 invalid, 401 retryable). HQ returns
+      // { device_id, name(slug), fqdn, status: "claimed"|"owned" }.
+      return hqFetch<HqClaimNameResponse>("/api/issuance/claim-name", {
+        method: "POST",
+        body: JSON.stringify(req),
+      });
+    },
+    release(deviceId: string, req: HqReleaseRequest) {
+      // WARP-980: factory-reset's DEFAULT path — frees the NAME + revokes the
+      // cert but KEEPS the device registered/trusted (self-heals). device_id
+      // rides in the QUERY string (read by the router); the body is the PoP-only
+      // proof and MUST NOT carry device_id. Same hqFetch error handling — a
+      // non-2xx throws `HQ /api/issuance/release returned <status>: <body>`,
+      // which releaseFromHq treats as non-fatal (a reset must complete). HQ
+      // returns { device_id, status: "released" }.
+      const qs = new URLSearchParams({ device_id: deviceId }).toString();
+      return hqFetch<HqReleaseResponse>(`/api/issuance/release?${qs}`, {
         method: "POST",
         body: JSON.stringify(req),
       });

@@ -160,6 +160,16 @@ function makeHqClient(overrides: Partial<HqIssuanceClient> = {}): HqIssuanceClie
       status: "registered" as const,
       idempotent: false,
     })),
+    claimName: vi.fn(async (req) => ({
+      device_id: req.device_id,
+      name: req.name,
+      fqdn: `${req.name}.droplet-us.com`,
+      status: "claimed" as const,
+    })),
+    release: vi.fn(async () => ({
+      device_id: DEVICE_ID,
+      status: "released" as const,
+    })),
     ...overrides,
   };
 }
