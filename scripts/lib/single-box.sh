@@ -399,6 +399,20 @@ configure_single_box_env() {
     *)        merged_profiles="${merged_profiles},eval" ;;
   esac
 
+  # Cloudflare Tunnel relay (`relay` profile, WARP-974 / ADR-025) — the outbound
+  # remote-access connector (cloudflared) that replaces DuckDNS + the inbound
+  # WireGuard port. OPT-IN: activate `relay` ONLY when a TUNNEL_TOKEN is present in
+  # .env, so an un-provisioned box never brings up (and crash-loops) a tokenless
+  # connector. The token is provisioned out-of-band (fleet HQ / operator) — the
+  # cloudflared container reads it straight from .env via env_file.
+  if grep -qE '^TUNNEL_TOKEN=.+' "$env_file" 2>/dev/null; then
+    case ",${merged_profiles}," in
+      *,relay,*) : ;;                                # already present — idempotent
+      ,,)        merged_profiles="relay" ;;
+      *)         merged_profiles="${merged_profiles},relay" ;;
+    esac
+  fi
+
   # OnlyOffice Document Server (`docs` profile, WARP-882 / ADR-027 WS-4) — RAM
   # GATED. The engine is OnlyOffice CE (~2 GB always-on image), so it is
   # DEFAULT-ON on a roomy box and DROPPED on a small one:
