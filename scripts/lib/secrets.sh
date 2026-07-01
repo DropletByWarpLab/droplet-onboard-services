@@ -338,6 +338,17 @@ HQ_ISSUANCE_URL=${HQ_ISSUANCE_URL:-}
 #   (cloudflared) when this is set, so an un-provisioned box never brings up a
 #   tokenless connector.
 TUNNEL_TOKEN=${TUNNEL_TOKEN:-}
+# DROPLET_PROVISION_TOKEN: one-time HQ-minted provisioning token (WARP-983).
+#   PRESERVED from the provisioning environment / manifest so a fresh or
+#   FACTORY-RESET box can re-enroll itself into the HQ registry. Factory-reset
+#   sends the ADR-023 signed deregister, which DELETES the device from the HQ
+#   registry — on the next boot tls-issuance is then rejected with 404
+#   `device_id not in registry` and the box would stay on the self-signed
+#   bootstrap cert forever. When this token is set, the orchestrator self-provisions
+#   (POST /api/issuance/provision with a TPM proof-of-possession over the token)
+#   on that 404, then retries issuance and installs its droplet-us.com cert.
+#   Empty disables self-provision (dev / pre-fleet / provisioned by another path).
+DROPLET_PROVISION_TOKEN=${DROPLET_PROVISION_TOKEN:-}
 
 # --- Compose profiles ---
 # Linux defaults to "linux,display,eval":
@@ -451,6 +462,13 @@ migrate_env() {
   # these in, instead of silently regressing to the self-signed bootstrap cert.
   _migrate_ensure_key HQ_ISSUANCE_URL "${HQ_ISSUANCE_URL:-}"
   _migrate_ensure_key TUNNEL_TOKEN "${TUNNEL_TOKEN:-}"
+  # WARP-983: ensure the one-time HQ provisioning token exists on re-run, seeded
+  # from the provisioning environment (empty = self-provision disabled). Pairs
+  # with the seed-block `${DROPLET_PROVISION_TOKEN:-}` above so a fresh or
+  # factory-reset box that was handed a token can re-enroll into the HQ registry
+  # and re-issue its droplet-us.com cert, instead of dead-ending on the 404
+  # `device_id not in registry` and staying on the self-signed bootstrap cert.
+  _migrate_ensure_key DROPLET_PROVISION_TOKEN "${DROPLET_PROVISION_TOKEN:-}"
   # WARP-834 backfill: existing installs predate the per-box OpenWrt password.
   # Without it sync_openwrt_password_secret() writes an empty secret file and
   # the OpenWrt container root pw stays unset (ubus auth never comes up).
