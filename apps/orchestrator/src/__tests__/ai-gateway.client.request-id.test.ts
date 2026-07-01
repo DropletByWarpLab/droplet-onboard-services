@@ -13,7 +13,9 @@ describe("ai-gateway client request-id header", () => {
       ),
     );
   });
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
 
   it("sends x-request-id from the active context", async () => {
     const { listModels } = await import("../services/ai-gateway.client.js");
