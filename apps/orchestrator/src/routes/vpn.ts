@@ -45,25 +45,27 @@ const createPeerSchema = z.object({
 });
 
 /**
- * Resolve the WireGuard endpoint host for peer configs.
+ * Resolve the WireGuard endpoint host for peer configs. Priority order mirrors
+ * `lib/trusted-origin.ts` (FQDN first) so every surface agrees on the box's
+ * address:
  *
- * The endpoint host comes solely from the operator-set
- * `config.WIREGUARD_ENDPOINT_HOST` env var:
+ *   1. `config.DROPLET_PUBLIC_FQDN` — the per-device `<name>.droplet-us.com`
+ *      publicly-trusted address the box learns AUTOMATICALLY from HQ (ADR-023).
+ *      It's the single name that resolves at home and over the relay tunnel, so
+ *      it's the endpoint host by default — no operator action needed.
+ *   2. Else `config.WIREGUARD_ENDPOINT_HOST` — an explicit operator override.
+ *   3. Else empty string — caller surfaces "not configured yet" to the dashboard.
  *
- *   1. If `config.WIREGUARD_ENDPOINT_HOST` env is set, use it verbatim —
- *      operator override always wins.
- *   2. Else, return empty string — caller surfaces "Internet not
- *      configured" to the dashboard.
- *
- * WARP-974: the inbound public hostname is no longer auto-derived from
- * DuckDNS. Remote access now rides an outbound Cloudflare Tunnel relay
- * plus the per-device `<name>.droplet-us.com` publicly-trusted cert
- * (ADR-023/ADR-025), so the box never needs to advertise a DuckDNS
- * subdomain. Set `WIREGUARD_ENDPOINT_HOST` explicitly to expose an
- * inbound WireGuard endpoint.
+ * WARP-974: the inbound public hostname is no longer auto-derived from DuckDNS.
+ * Remote access rides an outbound Cloudflare Tunnel relay + the named FQDN
+ * (ADR-023/ADR-025); the FQDN doubles as the endpoint host so `endpointConfigured`
+ * flips true on its own once the box has issued its cert — which is exactly what
+ * the wizard/help/tour copy promises ("turns on automatically").
  */
 async function resolveEndpointHost(): Promise<string> {
-  return config.WIREGUARD_ENDPOINT_HOST.trim();
+  const fqdn = (config.DROPLET_PUBLIC_FQDN ?? "").trim();
+  if (fqdn) return fqdn;
+  return (config.WIREGUARD_ENDPOINT_HOST ?? "").trim();
 }
 
 // Test-only: retained as a no-op so existing specs that reset per-test
@@ -195,12 +197,12 @@ export function createVpnRouter(prisma: PrismaClient): Router {
         });
       }
       const user = getUser(req);
-      // Env-based endpoint resolution. See resolveEndpointHost above.
+      // FQDN-first endpoint resolution. See resolveEndpointHost above.
       const endpointHost = await resolveEndpointHost();
       if (!endpointHost) {
         return res.status(503).json({
           error:
-            "Set WIREGUARD_ENDPOINT_HOST in .env before issuing peer configs.",
+            "The box hasn't learned its web address yet — remote access turns on automatically once it does. (Operators can set WIREGUARD_ENDPOINT_HOST in .env to override.)",
         });
       }
 

@@ -14,6 +14,7 @@ vi.mock("../config.js", () => ({
     ROUTING_SERVICE_TOKEN: "test-token",
     ROUTING_MODE: "real",
     WIREGUARD_ENDPOINT_HOST: "vpn.example.com",
+    DROPLET_PUBLIC_FQDN: "",
     WIREGUARD_VPN_SUBNET: "10.13.13.0/24",
     WIREGUARD_LISTEN_PORT: 51820,
     WIREGUARD_LAN_CIDR: "192.168.50.0/24",
@@ -36,6 +37,7 @@ vi.mock("../services/openwrt.client.js", async () => {
 });
 
 import { createVpnRouter, _resetEndpointCacheForTests } from "../routes/vpn.js";
+import { config } from "../config.js";
 import * as openwrt from "../services/openwrt.client.js";
 
 // In-memory Prisma stand-in for the VpnPeer table.
@@ -156,6 +158,29 @@ describe("GET /api/vpn/status", () => {
       configured: false,
       endpointConfigured: true,
     });
+  });
+
+  // WARP-974: the named FQDN alone must make endpointConfigured true — the box
+  // learns DROPLET_PUBLIC_FQDN automatically from HQ, so remote access "turns on
+  // automatically" (as the wizard/help copy promises) with NO operator env set.
+  it("reports endpointConfigured=true from DROPLET_PUBLIC_FQDN alone (no WIREGUARD_ENDPOINT_HOST)", async () => {
+    (openwrt.vpnStatus as any).mockResolvedValue(null);
+    const origEnv = config.WIREGUARD_ENDPOINT_HOST;
+    const origFqdn = (config as any).DROPLET_PUBLIC_FQDN;
+    (config as any).WIREGUARD_ENDPOINT_HOST = "";
+    (config as any).DROPLET_PUBLIC_FQDN = "home.droplet-us.com";
+    try {
+      const app = buildApp(createPrismaMock());
+      const res = await request(app).get("/api/vpn/status");
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        endpointConfigured: true,
+        publicFqdn: "home.droplet-us.com",
+      });
+    } finally {
+      (config as any).WIREGUARD_ENDPOINT_HOST = origEnv;
+      (config as any).DROPLET_PUBLIC_FQDN = origFqdn;
+    }
   });
 
   it("returns server info when configured", async () => {
