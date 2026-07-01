@@ -83,6 +83,15 @@ export interface HqOrderRequest {
   signature: string;
   sig_alg: "ecdsa-sha256";
   key_fingerprint: string;
+  /**
+   * WARP-979 — the owner-chosen box name (`DROPLET_BOX_NAME`), sent so HQ can
+   * issue `<name>.droplet-us.com` instead of the opaque `d-<hmac>` fallback.
+   * OPTIONAL: omitted when no name is chosen (opaque-HMAC fallback stays). This
+   * is HARMLESS if HQ ignores it today — the HQ device-authed name CLAIM is a
+   * COUPLED fleet-hq follow-up. When HQ honors it, the SAME PoP-signed challenge
+   * that authorizes the order also authorizes the name claim.
+   */
+  requested_name?: string;
 }
 
 /**
@@ -201,6 +210,14 @@ export interface TlsIssuanceDeps {
    * Optional + best-effort: a DNS failure NEVER aborts issuance.
    */
   dns?: DnsRegistrar;
+  /**
+   * WARP-979 — the owner-chosen box name (`config.DROPLET_BOX_NAME`, empty when
+   * none chosen). Sent to HQ as `requested_name` on the cert ORDER so HQ issues
+   * `<name>.droplet-us.com` rather than the opaque `d-<hmac>` fallback. Optional
+   * + harmless if HQ ignores it (the HQ device-authed name claim is a coupled
+   * fleet-hq follow-up); the opaque-HMAC fallback stays when it's empty.
+   */
+  requestedName?: string;
 }
 
 export interface TlsIssuanceService {
@@ -423,6 +440,7 @@ export function createTlsIssuanceService(
     hqConfigured = false,
     persistFqdn,
     dns,
+    requestedName,
   } = deps;
 
   /**
@@ -450,6 +468,11 @@ export function createTlsIssuanceService(
       signature: signed.signature,
       sig_alg: signed.sig_alg,
       key_fingerprint: signed.key_fingerprint,
+      // WARP-979 — carry the owner-chosen box name so HQ can issue
+      // `<name>.droplet-us.com`. Only when a non-empty name is configured;
+      // otherwise HQ keeps minting the opaque `d-<hmac>` fallback. Harmless if
+      // HQ ignores the field today (coupled fleet-hq device-auth follow-up).
+      ...(requestedName ? { requested_name: requestedName } : {}),
     };
 
     // 4. Submit the order (issue vs renew share the body shape).
