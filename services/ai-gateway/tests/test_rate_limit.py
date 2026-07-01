@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -192,7 +193,28 @@ class TestRateLimitEndpoint:
             assert resp.status_code == 200
             assert "X-RateLimit-Limit" not in resp.headers
 
-    async def test_chat_endpoint_has_rate_limit_headers(self, client):
+    async def test_chat_endpoint_has_rate_limit_headers(self, client, monkeypatch):
+        # The /ai/chat response must carry the rate-limit headers even when the
+        # provider call fails. We force a deterministic provider failure so the
+        # test never makes a REAL network call: httpx's ASGITransport does not
+        # run the app lifespan, so in the full suite this endpoint would reach a
+        # real ProviderRouter left in module state by an earlier test and hang on
+        # a connect to the unreachable OLLAMA_URL (this is the test that has been
+        # cancelling the ai-gateway CI job at ~15m). Mocking the module globals
+        # makes it fast, deterministic, and order-independent.
+        import main
+
+        done: asyncio.Future = asyncio.get_running_loop().create_future()
+        done.set_result(None)
+        fake_scheduler = AsyncMock()
+        fake_scheduler.enqueue = AsyncMock(return_value=done)
+        fake_scheduler.release = AsyncMock()
+        monkeypatch.setattr(main, "inference_scheduler", fake_scheduler)
+
+        fake_router = AsyncMock()
+        fake_router.chat = AsyncMock(side_effect=RuntimeError("provider unreachable"))
+        monkeypatch.setattr(main, "provider_router", fake_router)
+
         resp = await client.post(
             "/ai/chat",
             json={
@@ -200,7 +222,8 @@ class TestRateLimitEndpoint:
                 "messages": [{"role": "user", "content": "hi"}],
             },
         )
-        # Request may fail at provider level (502) but should still have rate-limit headers
-        if resp.status_code != 429:
-            assert "X-RateLimit-Limit" in resp.headers
-            assert "X-RateLimit-Remaining" in resp.headers
+        # Provider failure surfaces as a 502 (GW-08); the rate-limit middleware
+        # still stamps the headers on the way out.
+        assert resp.status_code == 502
+        assert "X-RateLimit-Limit" in resp.headers
+        assert "X-RateLimit-Remaining" in resp.headers
