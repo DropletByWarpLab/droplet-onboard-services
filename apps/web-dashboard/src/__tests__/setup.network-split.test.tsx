@@ -77,6 +77,19 @@ vi.mock("@/lib/api", () => ({
   // AddressStep calls fetchDuckDnsStatus on mount; WifiStep does not load.
   fetchDuckDnsStatus: () => fetchDuckDnsStatusMock(),
   setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
+  // WARP-979 — the reworked AddressStep (Secured / name your box) imports
+  // these; the split tests skip the step so they never actually fire.
+  checkBoxName: vi.fn(async () => ({
+    available: true,
+    slug: "studio",
+    fqdn: "studio.droplet-us.com",
+    authoritative: false,
+  })),
+  setBoxName: vi.fn(async () => ({
+    ok: true,
+    slug: "studio",
+    fqdn: "studio.droplet-us.com",
+  })),
   // WARP-657 Wi-Fi clients — present so WifiStep's import resolves; the split
   // tests skip Wi-Fi (blank → Continue) so these are never actually called.
   setWifiSsid: vi.fn(async () => ({ status: "ok", tier: 1 })),
@@ -194,14 +207,14 @@ describe("setup network split — wifi → address integration (Onboarding-Flow 
     await advanceToWifi();
     await skipWifiToAddress();
 
+    // WARP-979 — the address step is now the Secured / name-your-box step.
     expect(
-      screen.getByText(/give your box a web address/i),
+      screen.getByText(/name your secure address/i),
     ).toBeInTheDocument();
-    // The DuckDNS suffix + dedicated skip label confirm we're on AddressStep.
-    expect(screen.getAllByText(/\.duckdns\.org/).length).toBeGreaterThan(0);
-    expect(
-      screen.getByRole("button", { name: /skip — no remote access/i }),
-    ).toBeInTheDocument();
+    // The .droplet-us.com suffix + name input confirm we're on the reworked
+    // AddressStep (not still on Wi-Fi).
+    expect(screen.getByText(".droplet-us.com")).toBeInTheDocument();
+    expect(screen.getByLabelText(/box name/i)).toBeInTheDocument();
   });
 
   it("advancing the Wi-Fi step with Continue (blank SSID) also lands on Address", async () => {
@@ -218,26 +231,30 @@ describe("setup network split — wifi → address integration (Onboarding-Flow 
     });
 
     expect(
-      screen.getByText(/give your box a web address/i),
+      screen.getByText(/name your secure address/i),
     ).toBeInTheDocument();
   });
 
-  it("skipping the Address step advances past it to storage → discovery", async () => {
+  it("skipping the Address step advances past it to the storage step", async () => {
     render(<SetupPage />);
     await advanceToWifi();
     await skipWifiToAddress();
 
+    // WARP-979 — the address step's skip is "Skip — I'll do this later"; it's
+    // the only such button on this (name-your-box) screen.
     await act(async () => {
       fireEvent.click(
-        screen.getByRole("button", { name: /skip — no remote access/i }),
+        screen.getByRole("button", { name: /skip — i'll do this later/i }),
       );
     });
-    // storage auto-skips on an empty drive list → discovery surface is shown.
+    // WARP-933 — storage now RENDERS (no silent auto-skip), so skipping address
+    // lands on the visible storage step (empty-drive state) rather than jumping
+    // straight to discovery.
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(screen.getByText(/discovering your devices/i)).toBeInTheDocument();
+    expect(screen.getByText(/no extra drives to set up/i)).toBeInTheDocument();
   });
 
   it("persists both sub-steps as the existing `internet` SetupStep", async () => {

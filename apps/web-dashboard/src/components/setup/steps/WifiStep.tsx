@@ -18,10 +18,10 @@ import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
  * WIFI-ADDRESS-THEME-HANDOFF §1a).
  *
  * The old single "Internet" step mixed two unrelated things — the LOCAL Wi-Fi
- * the box broadcasts and the DuckDNS web address that powers REMOTE access.
- * Customers conflated them, so the redesign splits them into two ordered steps.
- * This is the first half: the local home network only. The DuckDNS address is
- * now its own `address` step (`AddressStep.tsx`).
+ * the box broadcasts and the secure address the box gives itself that powers
+ * REMOTE access. Customers conflated them, so the redesign splits them into two
+ * ordered steps. This is the first half: the local home network only. The
+ * secure address is now its own `address` step (`AddressStep.tsx`).
  *
  * The Wi-Fi the box can broadcast is OPTIONAL (WARP-809): the Droplet always
  * runs its own local network for connected gear (switch, cameras); broadcasting
@@ -242,8 +242,12 @@ export function WifiStep({
                 maxLength={SSID_MAX}
                 autoComplete="off"
                 spellCheck={false}
+                aria-describedby="wifi-ssid-hint"
               />
             </div>
+            <p id="wifi-ssid-hint" className="type-caption-1 text-label-tertiary mt-1.5">
+              Up to {SSID_MAX} characters.
+            </p>
           </div>
 
           <div>
@@ -264,6 +268,7 @@ export function WifiStep({
                 className="dp-input pl-10 pr-10"
                 maxLength={PSK_MAX}
                 autoComplete="off"
+                aria-describedby="wifi-psk-hint"
               />
               <button
                 type="button"
@@ -276,6 +281,9 @@ export function WifiStep({
                 {showWifiPassword ? <EyeOff size={16} /> : <Eye size={16} />}
               </button>
             </div>
+            <p id="wifi-psk-hint" className="type-caption-1 text-label-tertiary mt-1.5">
+              Use at least {PSK_MIN} characters.
+            </p>
           </div>
 
           <div className="flex items-center gap-2 rounded-md border border-separator bg-surface-secondary px-3 py-2 type-caption-1 text-label-tertiary">

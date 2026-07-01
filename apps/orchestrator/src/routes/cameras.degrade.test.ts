@@ -31,6 +31,12 @@ vi.mock("../middleware/auth.js", () => ({
     () =>
     (_req: unknown, _res: unknown, next: () => void) =>
       next(),
+  // cameras.ts also gates POST /cameras/clips/share with requireRoleOrMcpService;
+  // stub it pass-through so createCamerasRouter doesn't throw at construction (WARP-912).
+  requireRoleOrMcpService:
+    () =>
+    (_req: unknown, _res: unknown, next: () => void) =>
+      next(),
 }));
 
 vi.mock("../services/camera-retention-purge.service.js", () => ({

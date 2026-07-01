@@ -17,12 +17,11 @@
  * updating the tests):
  *
  *   1. **Canonical origin** — `WIREGUARD_ENDPOINT_HOST` (the operator-set
- *      public DNS name, verbatim), else the box's enabled DuckDNS subdomain
- *      (`fullDomain` || `<subdomain>.duckdns.org`). This is the same
- *      env→DuckDNS order `vpn.ts`'s `resolveEndpointHost()` uses for the
- *      WireGuard endpoint, so the invite link and the VPN endpoint agree on
- *      "what is this box's public address". When present, the link is built
- *      from it and the request host is ignored.
+ *      public DNS name, verbatim). This is the same env-based source
+ *      `vpn.ts`'s `resolveEndpointHost()` uses for the WireGuard endpoint,
+ *      so the invite link and the VPN endpoint agree on "what is this box's
+ *      public address". When present, the link is built from it and the
+ *      request host is ignored.
  *   2. **Allowlisted request host** — when there is no canonical origin, the
  *      request's host (`x-forwarded-host` then `host`) is used ONLY if it
  *      matches the allowlist {canonical-origin host} ∪ {hosts of
@@ -41,7 +40,6 @@
  */
 import type { Request } from "express";
 import { config } from "../config.js";
-import { fetchDuckDnsStatus } from "../services/openwrt.client.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("invite-url");
@@ -60,18 +58,11 @@ export interface InviteOrigin {
 }
 
 /**
- * In-process TTL cache for the canonical-origin resolution. The DuckDNS leg
- * hits the routing service; invite sends are infrequent but the cache keeps a
- * burst of invites (or a polled status page that reuses this) from amplifying
- * onto the Python sidecar. Mirrors `vpn.ts`'s 30 s endpoint cache.
+ * Test-only: retained as a no-op so existing specs keep a stable import.
+ * The canonical origin now resolves from an env var with no I/O, so there
+ * is no longer any TTL cache to reset.
  */
-const ORIGIN_CACHE_TTL_MS = 30_000;
-let _originCache: { value: InviteOrigin; expiresAt: number } | null = null;
-
-/** Test-only: drop the cache so unit tests can flip env/DuckDNS without TTL waits. */
-export function _resetInviteOriginCacheForTests(): void {
-  _originCache = null;
-}
+export function _resetInviteOriginCacheForTests(): void {}
 
 /** Strip a trailing `:port` from a host[:port] and lower-case it. */
 function bareHost(host: string): string {
@@ -117,16 +108,11 @@ function trustedOrigins(): string[] {
 /**
  * Resolve the canonical public origin + the host allowlist for invite links.
  *
- * Cached for `ORIGIN_CACHE_TTL_MS`. Routing-service failures are non-fatal:
- * a failed DuckDNS lookup is treated as "no canonical origin" (the env
- * override path is unaffected), exactly like `resolveEndpointHost()`.
+ * The canonical origin is the operator-set `WIREGUARD_ENDPOINT_HOST`, read
+ * verbatim with no network call. Async signature is retained so callers and
+ * tests are unaffected.
  */
 export async function resolveInviteOrigin(): Promise<InviteOrigin> {
-  const now = Date.now();
-  if (_originCache && _originCache.expiresAt > now) {
-    return _originCache.value;
-  }
-
   // Always trust the box's own configured origins (LAN dashboard origin etc.).
   const allowedHosts = new Set<string>();
   for (const origin of trustedOrigins()) {
@@ -134,38 +120,22 @@ export async function resolveInviteOrigin(): Promise<InviteOrigin> {
     if (h) allowedHosts.add(h);
   }
 
-  // 1. Operator-set public DNS name wins, verbatim, without a network call.
+  // Operator-set public DNS name wins, verbatim, without a network call.
   let canonicalHost: string | null = null;
   const envHost = (config.WIREGUARD_ENDPOINT_HOST ?? "").trim();
   if (envHost) {
     canonicalHost = bareHost(envHost);
-  } else if (config.ROUTING_MODE !== "disabled") {
-    // 2. Else derive from an enabled DuckDNS config. Skipped when routing
-    //    supervision is disabled (the call would just throw RouterError.disabled).
-    try {
-      const ddns = await fetchDuckDnsStatus();
-      if (ddns.configured && ddns.enabled) {
-        const derived = ddns.fullDomain || `${ddns.subdomain}.duckdns.org`;
-        canonicalHost = bareHost(derived);
-      }
-    } catch (err) {
-      logger.debug(
-        { err },
-        "invite-url: could not check DuckDNS for canonical origin — treating as unconfigured",
-      );
-    }
   }
 
   if (canonicalHost) allowedHosts.add(canonicalHost);
 
   const value: InviteOrigin = {
     canonicalHost,
-    // The canonical origin is always an https endpoint today (DuckDNS / the
-    // operator's public DNS front the box over TLS).
+    // The canonical origin is always an https endpoint today (the operator's
+    // public DNS fronts the box over TLS).
     canonicalIsHttps: true,
     allowedHosts,
   };
-  _originCache = { value, expiresAt: now + ORIGIN_CACHE_TTL_MS };
   return value;
 }
 

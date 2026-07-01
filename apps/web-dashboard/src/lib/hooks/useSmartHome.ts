@@ -7,7 +7,11 @@ import {
   discoverMatterDevices,
   commissionMatterDevice,
 } from "../api";
-import type { MatterGrouped, MatterDiscoveredDevice } from "../types";
+import type {
+  MatterGrouped,
+  MatterDiscoveredDevice,
+  MatterCommandResult,
+} from "../types";
 
 const DEVICES_KEY = "/api/matter/devices";
 const DISCOVERED_KEY = "/api/matter/discover";
@@ -34,13 +38,49 @@ export function useSmartHome() {
 
   const discovered = discoveryResult?.devices ?? [];
 
+  /**
+   * KAN-5: issue a device command and return a discriminated result so callers
+   * can detect the Tier-2 `confirmation_required` path instead of swallowing it.
+   *
+   * The orchestrator answers a Tier-2 write (lock/unlock, climate setpoint
+   * >= 30C) with HTTP 202 `{ status: "confirmation_required", confirmationToken,
+   * service, … }`. We surface that body verbatim (typed) so the caller can show
+   * a confirm affordance and complete via `confirmMatterCommand`. A Tier-1 write
+   * executes immediately and we revalidate the device list; the caller gets
+   * `{ status: "ok" }`.
+   */
   async function command(
     nodeId: string,
     cmd: string,
     data?: Record<string, unknown>
-  ) {
-    await sendMatterCommand(nodeId, cmd, data);
+  ): Promise<MatterCommandResult> {
+    const body = (await sendMatterCommand(nodeId, cmd, data)) as
+      | { status?: string }
+      | null;
+
+    if (body?.status === "confirmation_required") {
+      const conf = body as {
+        nodeId: string;
+        confirmationToken: string;
+        service: string;
+        reason: string;
+        tier: number;
+      };
+      // Tier-2 — nothing executed yet, so don't revalidate here; the caller
+      // refreshes after a successful confirm.
+      return {
+        status: "confirmation_required",
+        nodeId: conf.nodeId,
+        confirmationToken: conf.confirmationToken,
+        service: conf.service,
+        reason: conf.reason,
+        tier: conf.tier,
+      };
+    }
+
+    // Tier-1 — executed; revalidate the device list to reflect new state.
     mutate(DEVICES_KEY);
+    return { status: "ok" };
   }
 
   async function commission(pairingCode: string) {

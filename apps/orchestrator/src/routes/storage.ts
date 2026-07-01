@@ -15,8 +15,8 @@ import { createLogger } from "../lib/logger.js";
 
 // Drive labels are device-wide config that any user (incl. family
 // accounts) shares, so PATCH is admin-only — mirrors the gate around
-// PUT /api/ddns/duckdns. Family users can still see the labels via the
-// existing GET routes; they just can't change them.
+// other network-wide config routes. Family users can still see the
+// labels via the existing GET routes; they just can't change them.
 function isAdmin(req: Request): boolean {
   const role = req.user?.role;
   return role === "owner" || role === "admin";

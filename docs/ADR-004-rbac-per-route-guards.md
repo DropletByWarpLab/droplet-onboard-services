@@ -91,7 +91,7 @@ Apply guards at route registration, not inside the handler. Mirror the existing 
 |---|---|
 | `POST/PUT/DELETE /api/auth/users` (admin) | `owner`, `admin` |
 | `POST /api/auth/invites*` | `owner`, `admin` |
-| `POST/PUT/DELETE /api/network/*`, `/api/firewall/*`, `/api/vpn/*`, `/api/ddns/*`, `/api/switch/*` (mutations) | `owner`, `admin` |
+| `POST/PUT/DELETE /api/network/*`, `/api/firewall/*`, `/api/vpn/*`, `/api/switch/*` (mutations) | `owner`, `admin` |
 | `POST /api/services/*/restart` | `owner` |
 | `POST/PUT/DELETE /api/cameras/*`, `/api/matter/*`, `/api/smart-home/*` | `owner`, `admin`, `family` |
 | `POST/PUT/DELETE /api/files/*` (write) | `owner`, `admin`, `family` |

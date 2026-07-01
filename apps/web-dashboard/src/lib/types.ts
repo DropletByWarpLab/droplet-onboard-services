@@ -450,19 +450,27 @@ export interface ApDeviceInfo {
   lastOperationId: string | null;
 }
 
-/** DuckDNS status. `tokenSet` is the only signal about the token —
- *  the token itself is never returned by the orchestrator. */
-export type DuckDnsStatus =
-  | { configured: false }
-  | {
-      configured: true;
-      subdomain: string;
-      fullDomain: string;
-      enabled: boolean;
-      tokenSet: boolean;
-      lastUpdate?: string;
-    };
+/**
+ * WARP-979 — response from GET /api/setup/box-name/check. `available` is the
+ * best-effort answer; `authoritative` is false until the HQ device-authed
+ * registry check lands (coupled fleet-hq follow-up), so the UI stays honest.
+ * `reason` + `message` are present only when the name is invalid.
+ */
+export interface BoxNameCheckResult {
+  available: boolean;
+  slug: string;
+  fqdn: string;
+  authoritative: boolean;
+  reason?: string;
+  message?: string;
+}
 
+/** WARP-979 — response from POST /api/setup/box-name. */
+export interface BoxNameSetResult {
+  ok: boolean;
+  slug: string;
+  fqdn: string;
+}
 // --- Auth types ---
 
 export interface AuthUser {
@@ -822,6 +830,31 @@ export interface MatterDiscoveredDevice {
 export interface MatterCapabilities {
   bleCommissioning: boolean;
 }
+
+/**
+ * KAN-5: the result of issuing a Matter device command.
+ *
+ * The orchestrator answers a Tier-2 write (a lock/unlock, or a climate
+ * setpoint >= 30C) with HTTP 202 `{ status: "confirmation_required", … }`
+ * rather than executing it. Callers MUST branch on `status` and, for the
+ * confirmation path, surface a confirm affordance and then echo
+ * `confirmationToken` + `service` back to POST /confirm — dropping the body
+ * (the pre-KAN-5 behavior) makes every Tier-2 command a silent no-op.
+ */
+export type MatterCommandResult =
+  | { status: "ok" }
+  | {
+      status: "confirmation_required";
+      nodeId: string;
+      /** Single-use token minted by the 202; echoed back to /confirm. */
+      confirmationToken: string;
+      /** The service the /confirm route validates against — echo verbatim. */
+      service: string;
+      /** Plain-English why-we're-asking sentence from the safety tier. */
+      reason: string;
+      /** Always 2 for a confirmation_required command; carried for the chip. */
+      tier: number;
+    };
 
 // --- Camera / Frigate types ---
 

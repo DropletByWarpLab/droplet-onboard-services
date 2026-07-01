@@ -14,6 +14,7 @@ import {
 // binding is fully initialized by the time it's called. Same shape as the
 // many components that import from both ./auth and ./api.
 import { patchSetupReady, patchTourCompleted } from "./api";
+import { HELP_PATH } from "./routing";
 
 export interface AuthUser {
   id: string;
@@ -77,7 +78,15 @@ interface AuthContextValue {
   // rolled back, so the UI shows the failure + a retry instead of silently
   // diverging from the (still `unclaimed`) server. `null` on success.
   completeSetupError: string | null;
-  login: (username: string, password: string) => Promise<void>;
+  // PR #375 — `secondFactor` is supplied only when answering the two-factor
+  // challenge. A first attempt omits it; if the account has 2FA enabled the
+  // call rejects with `TotpRequiredError`, the page reveals the code field, and
+  // a follow-up call passes the entered `totp` (or `recoveryCode`).
+  login: (
+    username: string,
+    password: string,
+    secondFactor?: SecondFactor,
+  ) => Promise<void>;
   // PR #377: hydrate the context after a passwordless passkey sign-in. The
   // orchestrator's authenticate/verify already set the session cookie and
   // returned the user; this mirrors the tail of login() (cache + setUser)
@@ -108,6 +117,40 @@ interface AuthContextValue {
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
+
+/**
+ * A second factor answered at the login challenge — a 6-digit TOTP code OR a
+ * single-use recovery code. The orchestrator accepts either alongside the
+ * already-verified password (PR #375). Exactly one is set per attempt.
+ */
+export interface SecondFactor {
+  totp?: string;
+  recoveryCode?: string;
+}
+
+/**
+ * PR #375 — thrown by `login()` when the password verified but the account has
+ * two-factor ENABLED and no (or an incorrect) second factor was supplied. The
+ * orchestrator answers `401 { code: "TOTP_REQUIRED" }` with NO session cookie;
+ * the login page catches this to reveal the code field and re-submit, instead
+ * of routing it through `translateError` (whose message-less 401 fallback wrongly
+ * tells the user to check a password that was, in fact, correct).
+ *
+ * A typed class (not a bare `Error`) so the throw site is self-documenting and
+ * carries the `code` field. The login page dispatches on that `code`
+ * (`isTotpRequired` → `err.code === "TOTP_REQUIRED"`), NOT `instanceof`, so the
+ * check survives module duplication / mocking and doesn't force every
+ * `@/lib/auth` consumer to share one error-class identity. A wrong code on a
+ * *retry* — also TOTP_REQUIRED — is distinguished from the first challenge by
+ * the page's own state, not by re-parsing the error.
+ */
+export class TotpRequiredError extends Error {
+  readonly code = "TOTP_REQUIRED" as const;
+  constructor() {
+    super("Two-factor authentication required");
+    this.name = "TotpRequiredError";
+  }
+}
 
 const USER_KEY = "droplet-auth-user";
 
@@ -306,10 +349,14 @@ export async function authFetch(url: string, init?: RequestInit): Promise<Respon
   // NOT hard-navigate to /login — AuthGate routes those contextually
   // client-side (unclaimed -> /setup). Without this guard every anonymous
   // cold load of /setup detoured through /login with a full page reload
-  // (PR #549 review). Mirrors AuthGate's PUBLIC_PATHS.
-  const onPublicPage = ["/login", "/setup"].some((p) =>
-    window.location.pathname.startsWith(p),
-  );
+  // (PR #549 review). Mirrors AuthGate's PUBLIC_PATHS + the /help semi-public
+  // path added by WARP-930 (AuthGate now renders /help standalone without a
+  // session; without this mirror, authFetch 401s from ShellPage would hard-
+  // navigate anonymous /help visitors to /login, destroying wizard context).
+  const onPublicPage =
+    ["/login", "/setup"].some((p) =>
+      window.location.pathname.startsWith(p),
+    ) || window.location.pathname === HELP_PATH;
   if (!onPublicPage) {
     window.location.assign(
       `/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`,
@@ -456,17 +503,49 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, [isLoading, setupProbeError, setupState, setupRetryAttempt, probeSetupState]);
 
-  const login = useCallback(async (username: string, password: string) => {
+  const login = useCallback(
+    async (
+      username: string,
+      password: string,
+      secondFactor?: SecondFactor,
+    ) => {
     const res = await fetch("/api/auth/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "same-origin",
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify({
+        username,
+        password,
+        // PR #375: the second factor rides on the SAME login request as the
+        // password — the orchestrator re-verifies the password and then the
+        // code in one call. Only send the field actually being answered so an
+        // empty string never reaches the strict (max-length) login schema.
+        ...(secondFactor?.totp ? { totp: secondFactor.totp } : {}),
+        ...(secondFactor?.recoveryCode
+          ? { recoveryCode: secondFactor.recoveryCode }
+          : {}),
+      }),
     });
 
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
-      throw new Error(data.error || "Login failed");
+      // PR #375 second-factor gate: a CORRECT password on a 2FA-enabled account
+      // returns 401 { code: "TOTP_REQUIRED" } and sets no cookie. Surface it as
+      // a typed signal so the page reveals the code field and re-submits — the
+      // generic throw below would otherwise hit translateError's 401 fallback
+      // ("check your username and password"), which is wrong: the password was
+      // right. A wrong code on the retry returns the same shape and lands here
+      // again; the page treats that as an invalid-code error via its own state.
+      if (res.status === 401 && data?.code === "TOTP_REQUIRED") {
+        throw new TotpRequiredError();
+      }
+      // Preserve the orchestrator's typed code + status so translateError can
+      // map precise copy (previously only the message survived, so a 401 with
+      // no message fell through to the domain fallback).
+      throw Object.assign(new Error(data?.error || "Login failed"), {
+        code: typeof data?.code === "string" ? data.code : undefined,
+        status: res.status,
+      });
     }
 
     const data = await res.json();

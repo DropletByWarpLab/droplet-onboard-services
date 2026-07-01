@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Eye, EyeOff, KeyRound, Lock, Mail, UserCheck } from "lucide-react";
 import {
   setupAdmin,
@@ -65,6 +65,13 @@ export function AccountStep({
   // never appears — and can never block setup — on a box that isn't gated.
   const [claimGateOn, setClaimGateOn] = useState(false);
   const [claimCode, setClaimCode] = useState("");
+  // WARP-929 (A3) — true once THIS session created the owner. After that, the
+  // proactive "owner exists → sign in" probe below must NOT flip the step to the
+  // "Welcome back" sign-in mode: doing so showed a "Welcome back" screen
+  // mid-signup (Romain's report) if the account step ever re-rendered. The nav
+  // floor (WARP-929) already stops back-navigation here, but this is the
+  // belt-and-braces guard for any same-session re-render.
+  const createdHere = useRef(false);
 
   // WARP-867 — proactive owner-exists detection. Tri-state probe: only an
   // EXPLICIT "complete" flips to sign-in; "unknown" (cold boot, 5xx, timeout)
@@ -74,7 +81,10 @@ export function AccountStep({
   useEffect(() => {
     let cancelled = false;
     void checkSetupRequired().then((status) => {
-      if (!cancelled && status === "complete") setMode("signin");
+      // A3: never flip to "Welcome back" after we created the owner this session.
+      if (!cancelled && !createdHere.current && status === "complete") {
+        setMode("signin");
+      }
     });
     return () => {
       cancelled = true;
@@ -155,6 +165,9 @@ export function AccountStep({
       } else {
         await setupAdmin(email, password, displayName || undefined);
       }
+      // WARP-929 (A3) — the owner now exists because WE just made it; from here
+      // the proactive probe must not flip this step to "Welcome back".
+      createdHere.current = true;
       // Auto-login for the authed steps that follow, and adopt the session
       // into the auth context so AuthGate knows the owner is signed in.
       // (Read defensively — step harnesses stub loginUser without a body.)
@@ -293,13 +306,13 @@ export function AccountStep({
         {mode === "create" && (
           <div>
             <label className="type-subheadline text-label-secondary block mb-1.5">
-              Display Name
+              Display name (optional)
             </label>
             <input
               type="text"
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
-              placeholder="Your name (optional)"
+              placeholder="Your name"
               className="dp-input"
             />
           </div>
@@ -360,7 +373,7 @@ export function AccountStep({
         {mode === "create" && (
           <div>
             <label className="type-subheadline text-label-secondary block mb-1.5">
-              Confirm Password
+              Confirm password
             </label>
             <div className="relative">
               <Lock

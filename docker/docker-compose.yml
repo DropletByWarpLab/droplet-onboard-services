@@ -1584,6 +1584,33 @@ services:
     cpus: ${OPENWRT_CPUS:-1.0}
     pids_limit: ${OPENWRT_PIDS_LIMIT:-1024}
 
+  # Cloudflare Tunnel connector (WARP-974 / ADR-025) — the OUTBOUND, serverless
+  # replacement for DuckDNS + the inbound WireGuard port. It dials Cloudflare's
+  # edge (no inbound port, no port-forward, CGNAT-friendly; the home IP is never
+  # published). A Cloudflare WARP client reaches the box's LAN over the tunnel and
+  # the box serves its OWN droplet-us.com cert end-to-end — Cloudflare routes at
+  # L3 and never terminates TLS (see docs/ADR-025). `cloudflared` reads its
+  # connector token from TUNNEL_TOKEN in ../.env (never tracked).
+  #
+  # Gated behind the `relay` profile, which scripts/lib/single-box.sh activates
+  # ONLY when TUNNEL_TOKEN is set — so an unconfigured box never crash-loops a
+  # tokenless connector. Pinned by digest to the image verified on .87 (WARP-974).
+  cloudflared:
+    image: cloudflare/cloudflared@sha256:6d91c121b803126f7a5344005d17a9324788fc09d305b6e2560ec6040a7ae283
+    container_name: droplet-cloudflared
+    profiles: ["relay"]
+    # host netns so the connector reaches the box dashboard (192.168.1.87) and the
+    # AP resolver/LAN (192.168.20.1) that the tunnel's private-network route serves.
+    network_mode: host
+    command: ["tunnel", "--no-autoupdate", "--loglevel", "info", "run"]
+    env_file:
+      - path: ../.env
+        required: false
+    restart: unless-stopped
+    mem_limit: ${CLOUDFLARED_MEM_LIMIT:-128m}
+    cpus: ${CLOUDFLARED_CPUS:-0.5}
+    pids_limit: ${CLOUDFLARED_PIDS_LIMIT:-512}
+
 secrets:
   # WARP-37: OpenWrt router password mounted read-only at /run/secrets/openwrt_password
   # in the routing container. Written by scripts/setup.sh from $OPENWRT_PASSWORD.

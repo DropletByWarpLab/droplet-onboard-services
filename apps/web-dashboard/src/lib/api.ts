@@ -69,7 +69,8 @@ import type {
   VpnPeerInfo,
   VpnStatusInfo,
   VpnPeerCreatedInfo,
-  DuckDnsStatus,
+  BoxNameCheckResult,
+  BoxNameSetResult,
   ToolCatalogResponse,
   DocsStatus,
   DocEditorSession,
@@ -561,15 +562,23 @@ export interface TotpVerifyResponse {
 }
 
 /** Begin TOTP enrollment: returns the QR + otpauth URI for the current user. */
-export async function enrollTotp(): Promise<TotpEnrollResponse> {
+export async function enrollTotp(signal?: AbortSignal): Promise<TotpEnrollResponse> {
   const res = await authFetch(`${BASE}/api/auth/totp/enroll`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: "{}",
+    signal,
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || "Could not start two-factor setup");
+    // WARP-931 — preserve the orchestrator's typed code + status so callers can
+    // distinguish e.g. 409 TOTP_ALREADY_ENABLED (returning to an already-set-up
+    // 2FA step) from a genuine enroll failure, instead of dropping it to a bare
+    // message that translateError can't map.
+    throw Object.assign(
+      new Error(data.error || "Could not start two-factor setup"),
+      { ...(typeof data?.code === "string" ? { code: data.code } : {}), status: res.status },
+    );
   }
   return res.json();
 }
@@ -586,7 +595,10 @@ export async function verifyTotp(code: string): Promise<TotpVerifyResponse> {
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || "That code didn't match. Try again.");
+    throw Object.assign(
+      new Error(data.error || "That code didn't match. Try again."),
+      { ...(typeof data?.code === "string" ? { code: data.code } : {}), status: res.status },
+    );
   }
   return res.json();
 }
@@ -1101,7 +1113,7 @@ const ROUTER_UNREACHABLE_CODES: ReadonlySet<RouterErrorCode> = new Set([
 /**
  * The fixed lead-in of the wizard's "router isn't reachable" notice. The
  * trailing destination is supplied per-surface (see {@link routerUnreachableNotice})
- * because the place to finish the work later differs by step — Wi-Fi/DuckDNS
+ * because the place to finish the work later differs by step — Wi-Fi settings
  * live at the "Network" page, WireGuard peers at "Remote Access". The caller
  * renders the destination as a monospaced span, so it is intentionally kept out
  * of this prefix. (WARP-807 UX review: the old single string pointed everyone at
@@ -1225,6 +1237,84 @@ export async function fetchInterfaces(): Promise<NetworkInterfaceRow[]> {
   if (!res.ok) throw new Error(`Failed to fetch interfaces: ${res.status}`);
   const data = await res.json();
   return data.interfaces;
+}
+
+/** KAN-10: editable fields for an interface create/edit. Only set fields are
+ *  sent; `force` is the explicit extra-confirm for a management-interface write. */
+export interface InterfaceWriteFields {
+  proto?: string;
+  device?: string;
+  ipaddr?: string;
+  netmask?: string;
+  gateway?: string;
+  force?: boolean;
+}
+
+/** KAN-10: add a network interface. Tier 2 — answers 202 confirmation_required,
+ *  which the caller confirms via confirmNetworkCommand. Editing /etc/config/network
+ *  is high blast radius (a wrong setting can cut this dashboard's connection), so
+ *  the orchestrator never applies on the first POST. */
+export async function createInterface(
+  name: string,
+  fields: InterfaceWriteFields & { proto: string },
+): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/interfaces`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, ...fields }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok && !data.requiresConfirmation) {
+    throwNetworkWriteError(data, res.status, "Failed to add interface");
+  }
+  return data;
+}
+
+/** KAN-10: edit a network interface. Tier 2 — same confirm dance as create. */
+export async function editInterface(
+  name: string,
+  fields: InterfaceWriteFields,
+): Promise<NetworkCommandResult> {
+  const res = await authFetch(`${BASE}/api/network/interfaces/${encodeURIComponent(name)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(fields),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok && !data.requiresConfirmation) {
+    throwNetworkWriteError(data, res.status, "Failed to edit interface");
+  }
+  return data;
+}
+
+/** KAN-10: restart the whole networking stack. Owner-only, Tier 3 — the
+ *  orchestrator answers the POST with a 202 + token; the Restart click IS the
+ *  consent, so echo it straight back through confirmNetworkCommand. Returns the
+ *  operationId (or null) so the caller can show a "restarting…" state. */
+export async function restartNetwork(): Promise<{ operationId: string | null }> {
+  const res = await authFetch(`${BASE}/api/network/restart`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (res.status === 202) {
+    if (!body?.confirmationToken || !body?.operation) {
+      throw new Error("Unexpected 202 response: missing confirmationToken or operation");
+    }
+    return confirmNetworkCommand(body.confirmationToken, body.operation);
+  }
+  if (res.ok) {
+    return { operationId: body?.operationId ?? null };
+  }
+  if (res.status === 403) {
+    throw new Error(
+      (body as { error?: string }).error || "Only the owner can restart networking.",
+    );
+  }
+  throw new Error(
+    (body as { error?: string }).error || `Failed to restart networking: ${res.status}`,
+  );
 }
 
 /** Read-only host-radio detail. Fields are null when iwinfo doesn't report
@@ -2564,6 +2654,20 @@ export async function fetchMatterDevice(nodeId: string): Promise<MatterDevice> {
   return res.json();
 }
 
+/**
+ * KAN-5: issue a Matter device command and RETURN the response body.
+ *
+ * A Tier-2 write (lock/unlock, climate setpoint >= 30C) answers HTTP 202
+ * `{ status: "confirmation_required", confirmationToken, service, … }` — which
+ * is NOT `res.ok`, so the old code fell into the error branch / discarded the
+ * body and the write became a silent no-op. We treat 202 as a first-class
+ * success: parse it and hand the confirmation_required body back so the caller
+ * can surface a confirm affordance and complete via {@link confirmMatterCommand}.
+ *
+ * Returns the raw orchestrator body (the Tier-1 success object on 200, or the
+ * confirmation_required object on 202). Genuine error statuses (400/404/429/5xx)
+ * still throw with the server message.
+ */
 export async function sendMatterCommand(
   nodeId: string,
   command: string,
@@ -2577,9 +2681,38 @@ export async function sendMatterCommand(
       body: JSON.stringify({ command, data }),
     }
   );
+  // authFetch returns a native Response; 202 has ok=true per the Fetch spec so
+  // the plain !res.ok guard is sufficient — the caller always reads the body.
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `Failed to send command: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * KAN-5: confirm + execute a Tier-2 Matter command the orchestrator staged with
+ * a 202 `confirmation_required`. POSTs the single-use `confirmationToken` plus
+ * the `service` echoed from that 202 (the confirm route REJECTS a missing or
+ * mismatched service). On success the orchestrator dispatches the command to
+ * the device; the caller should then refresh device state.
+ */
+export async function confirmMatterCommand(
+  nodeId: string,
+  confirmationToken: string,
+  service: string,
+): Promise<{ confirmed: boolean; nodeId: string }> {
+  const res = await authFetch(
+    `${BASE}/api/matter/devices/${nodeId}/confirm`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmationToken, service }),
+    }
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to confirm command: ${res.status}`);
   }
   return res.json();
 }
@@ -2857,6 +2990,8 @@ export interface SceneSchedule {
   id: string;
   sceneId: string;
   rrule: string;
+  /** KAN-6 — IANA zone the rrule's wall-clock time is interpreted in. */
+  timezone: string;
   nextFireAt: string;
   enabled: boolean;
   createdBy: string | null;
@@ -2878,18 +3013,22 @@ export async function fetchSceneSchedules(
 }
 
 /**
- * Create a schedule for a routine (owner/admin). `rrule` must be a supported
- * UTC RRULE (the server 400s a malformed one); the editor builds it from the
- * owner's chosen days + local time, converted to UTC.
+ * Create a schedule for a routine (owner/admin). `rrule` is a supported
+ * wall-clock RRULE (the server 400s a malformed one) and `timezone` is the
+ * IANA zone its BYHOUR/BYMINUTE are interpreted in — the editor builds both
+ * from the owner's chosen days + local time and the browser's zone (KAN-6).
+ * `timezone` is optional; the server defaults it to "UTC" for an older
+ * client, preserving the pre-KAN-6 behaviour.
  */
 export async function createSceneSchedule(
   sceneId: string,
   rrule: string,
+  timezone?: string,
 ): Promise<SceneSchedule> {
   const res = await authFetch(`${BASE}/api/scenes/${sceneId}/schedules`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ rrule }),
+    body: JSON.stringify(timezone ? { rrule, timezone } : { rrule }),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -4353,39 +4492,46 @@ export async function deleteVpnPeer(id: string): Promise<void> {
   }
 }
 
-// --- DuckDNS ---
+// --- WARP-979: Secured / name-your-box ---
 
-export async function fetchDuckDnsStatus(): Promise<DuckDnsStatus> {
-  const res = await authFetch(`${BASE}/api/ddns/duckdns`);
-  if (res.status === 403) {
-    // Surface admin-only as a typed condition the page can render specially.
-    throw new Error("403 Admin access required");
-  }
-  if (!res.ok) throw new Error(`Failed to fetch DuckDNS status: ${res.status}`);
+/**
+ * WARP-979 — check an owner-typed box name against the shared ruleset +
+ * (best-effort) availability. Called debounced from the "Secured" setup step as
+ * the owner types. Public endpoint — runs during first-run onboarding before an
+ * account may exist, so we call `fetch` directly (no auth refresh to ride).
+ * The AbortSignal lets the caller cancel a stale in-flight check.
+ */
+export async function checkBoxName(
+  name: string,
+  signal?: AbortSignal,
+): Promise<BoxNameCheckResult> {
+  const res = await fetch(
+    `${BASE}/api/setup/box-name/check?name=${encodeURIComponent(name)}`,
+    { credentials: "same-origin", signal },
+  );
+  if (!res.ok) throw new Error(`Failed to check box name: ${res.status}`);
   return res.json();
 }
 
-export async function setDuckDnsConfig(opts: {
-  subdomain: string;
-  // Optional: omit entirely when the customer is keeping a previously
-  // stored token. The orchestrator + routing service preserve the
-  // existing password value in that case rather than rewriting cleartext.
-  token?: string;
-  enabled?: boolean;
-}): Promise<DuckDnsStatus> {
-  const res = await authFetch(`${BASE}/api/ddns/duckdns`, {
-    method: "PUT",
+/**
+ * WARP-979 — persist the chosen box name so the box's tls-issuance requests
+ * `<name>.droplet-us.com`. Public onboarding endpoint (re-gated server-side once
+ * the appliance is claimed). Throws on a non-2xx so the step can surface the
+ * inline error and NOT advance.
+ */
+export async function setBoxName(name: string): Promise<BoxNameSetResult> {
+  const res = await fetch(`${BASE}/api/setup/box-name`, {
+    method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(opts),
+    credentials: "same-origin",
+    body: JSON.stringify({ name }),
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throwNetworkWriteError(body, res.status, "Failed to update DuckDNS");
+    throwNetworkWriteError(body, res.status, "Failed to save box name");
   }
   return res.json();
 }
-
-
 // --- WARP-204: /knowledge view (recent + semantic search + brain memory) ---
 
 /** WARP-214 — source-channel signal: what extractor produced the text. */

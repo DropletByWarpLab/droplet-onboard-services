@@ -322,6 +322,78 @@ describe("tls-issuance.service — state machine", () => {
   });
 });
 
+describe("tls-issuance.service — requested_name (WARP-979)", () => {
+  async function orderBodyForName(
+    requestedName: string | undefined,
+  ): Promise<Record<string, unknown>> {
+    const store = makeStore({ fqdn: FQDN, state: "BOOTSTRAP_SELF_SIGNED" });
+    const hq = makeHqClient();
+    const svc = createTlsIssuanceService(makeDeps({ store, hq, requestedName }));
+    await svc.runOnce();
+    expect(hq.order).toHaveBeenCalledTimes(1);
+    return (hq.order as ReturnType<typeof vi.fn>).mock.calls[0][0] as Record<
+      string,
+      unknown
+    >;
+  }
+
+  it("sends the owner-chosen name as requested_name when it is valid", async () => {
+    expect(await orderBodyForName("studio")).toHaveProperty(
+      "requested_name",
+      "studio",
+    );
+  });
+
+  it("normalizes (trim + lowercase) before sending requested_name", async () => {
+    expect(await orderBodyForName("  Studio  ")).toHaveProperty(
+      "requested_name",
+      "studio",
+    );
+  });
+
+  it("omits requested_name when no name is configured (opaque d-<hmac> fallback)", async () => {
+    expect(await orderBodyForName(undefined)).not.toHaveProperty("requested_name");
+  });
+
+  it("omits requested_name when DROPLET_BOX_NAME is set but invalid — defense-in-depth against a hand-edited .env — and warns", async () => {
+    const store = makeStore({ fqdn: FQDN, state: "BOOTSTRAP_SELF_SIGNED" });
+    const hq = makeHqClient();
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const svc = createTlsIssuanceService(
+      // `bad_name` fails the charset gate (underscore) → invalid → omitted.
+      makeDeps({ store, hq, requestedName: "bad_name", logger }),
+    );
+
+    await svc.runOnce();
+
+    const body = (hq.order as ReturnType<typeof vi.fn>).mock.calls[0][0] as Record<
+      string,
+      unknown
+    >;
+    expect(body).not.toHaveProperty("requested_name");
+    expect(logger.warn).toHaveBeenCalled();
+  });
+
+  it("carries requested_name on the RENEW path too", async () => {
+    const store = makeStore({
+      fqdn: FQDN,
+      state: "LE_ISSUED",
+      notAfter: daysFromNow(20),
+    });
+    const hq = makeHqClient();
+    const svc = createTlsIssuanceService(
+      makeDeps({ store, hq, requestedName: "studio" }),
+    );
+
+    await svc.runOnce();
+
+    expect(hq.renew).toHaveBeenCalledTimes(1);
+    expect(
+      (hq.renew as ReturnType<typeof vi.fn>).mock.calls[0][0],
+    ).toHaveProperty("requested_name", "studio");
+  });
+});
+
 describe("tls-issuance.service — failure handling", () => {
   it("HQ unreachable keeps the current cert, sets LE_RENEW_FAILED, logs a warning, does NOT throw", async () => {
     const store = makeStore({

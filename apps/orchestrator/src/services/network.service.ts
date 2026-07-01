@@ -152,6 +152,44 @@ export async function getAllInterfaces(): Promise<openwrt.NetworkInterfaceRow[]>
   return rows;
 }
 
+// --- Interface write path (KAN-10) ---
+// Thin pass-throughs to the routing service, which wraps each write in
+// safe_apply (60s auto-rollback) and refuses a management-interface write
+// unless `force` is set. The orchestrator route gates owner-only + the Tier-2/3
+// confirm; here we only forward + invalidate the cached interface read so the
+// table reflects the change once it applies.
+
+export async function createInterface(
+  fields: openwrt.InterfaceWriteFields & { name: string; proto: string },
+): Promise<openwrt.WriteResult> {
+  const { name, proto, device, ipaddr, netmask, gateway, force } = fields;
+  const result = await openwrt.createInterface(name, {
+    proto,
+    device,
+    ipaddr,
+    netmask,
+    gateway,
+    force,
+  });
+  await invalidateNetworkCache();
+  return result;
+}
+
+export async function editInterface(
+  name: string,
+  fields: openwrt.InterfaceWriteFields,
+): Promise<openwrt.WriteResult> {
+  const result = await openwrt.editInterface(name, fields);
+  await invalidateNetworkCache();
+  return result;
+}
+
+export async function restartNetwork(): Promise<openwrt.WriteResult> {
+  const result = await openwrt.restartNetwork();
+  await invalidateNetworkCache();
+  return result;
+}
+
 // --- Connected devices ---
 
 export async function getConnectedDevices(): Promise<ConnectedDevice[]> {
@@ -420,6 +458,80 @@ export async function setDnsServers(servers: string[]): Promise<openwrt.WriteRes
 // WARP-871: read-only deployment-posture probe (ADR-018). Pass-through.
 export async function getTopology(): Promise<openwrt.NetworkTopology> {
   return openwrt.fetchTopology();
+}
+
+/**
+ * KAN-8 — thrown when a router firmware write (sysupgrade / factory-reset) is
+ * attempted on a deployment shape that is NOT a primary router. The shipping
+ * single-box runs OpenWrt in a container; a `sysupgrade`/`jffs2reset` there
+ * wipes the named-volume UCI the host hostapd bridge depends on, with no remote
+ * recovery. The route maps this to HTTP 409 + a stable `code` so the dashboard
+ * can show "not available on this deployment shape".
+ */
+export class PrimaryRouterRequiredError extends Error {
+  /** Stable, wire-facing classification — never renumber. */
+  readonly code = "PRIMARY_ROUTER_REQUIRED" as const;
+  readonly posture: string;
+
+  constructor(posture: string) {
+    super(
+      `Router firmware operations require a PRIMARY_ROUTER deployment shape; ` +
+        `current posture is ${posture}. This is not available on this deployment shape.`,
+    );
+    this.name = "PrimaryRouterRequiredError";
+    this.posture = posture;
+  }
+}
+
+/**
+ * KAN-8 — HARD gate for the brick-risk firmware writes. Probes the live
+ * deployment posture (GET /network/topology) and throws
+ * {@link PrimaryRouterRequiredError} unless it is exactly `PRIMARY_ROUTER`.
+ *
+ * Fail-closed by design: an UNKNOWN posture (the single-box, where the WAN is
+ * absent) and a DOWNSTREAM_ROUTER both REFUSE — we never flash unless we have
+ * positive evidence the box owns the edge. Every write route MUST call this
+ * before minting a confirmation token, and the confirm dispatcher MUST call it
+ * again before executing, so a posture change between mint and confirm can't
+ * slip a flash onto a non-primary shape.
+ */
+export async function assertPrimaryRouterPosture(): Promise<void> {
+  const topology = await openwrt.fetchTopology();
+  if (topology.posture !== "PRIMARY_ROUTER") {
+    throw new PrimaryRouterRequiredError(topology.posture);
+  }
+}
+
+/**
+ * KAN-8 AC 4 — firmware version compare against the build-pinned image
+ * (`config.ROUTER_FIRMWARE_IMAGE`). Read-only; safe on any shape.
+ */
+export async function getFirmwareCheck(): Promise<openwrt.FirmwareCheck> {
+  return openwrt.fetchFirmwareCheck(config.ROUTER_FIRMWARE_IMAGE);
+}
+
+/**
+ * KAN-8 AC 1 — flash a staged sysupgrade image. ⚠️ BRICK RISK. Callers (the
+ * route + confirm dispatcher) MUST have already passed
+ * {@link assertPrimaryRouterPosture} and the owner-only Tier-3 confirm.
+ */
+export async function routerSysupgrade(
+  imagePath: string,
+  preserveConfig: boolean,
+): Promise<openwrt.WriteResult> {
+  const result = await openwrt.routerSysupgrade(imagePath, preserveConfig);
+  await invalidateNetworkCache();
+  return result;
+}
+
+/**
+ * KAN-8 AC 1 — wipe the OpenWrt overlay + reboot to defaults. ⚠️ BRICK RISK,
+ * gated upstream (PRIMARY_ROUTER + owner-only Tier-3).
+ */
+export async function routerFactoryReset(): Promise<openwrt.WriteResult> {
+  const result = await openwrt.routerFactoryReset();
+  await invalidateNetworkCache();
+  return result;
 }
 
 // WARP-871: local DNS host-records (name → IP). The read is cheap + uncached

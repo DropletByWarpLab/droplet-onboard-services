@@ -51,6 +51,36 @@ const PRESETS = [
   { label: "Full access", bits: PERM_READ | PERM_UPDATE | PERM_CREATE | PERM_DELETE | PERM_SHARE },
 ] as const;
 
+// The bits that distinguish the presets from one another. The SHARE bit (16) is
+// deliberately excluded: Nextcloud attaches it to almost every share regardless
+// of access level, so it must not push a "View only" or "Can edit" share into
+// "Full access".
+const PRESET_MATCH_BITS = PERM_READ | PERM_UPDATE | PERM_CREATE | PERM_DELETE;
+
+/**
+ * Snap a raw Nextcloud OCS permission bitmask onto one of the three presets so
+ * the access-level <select> always has a matching <option>.
+ *
+ * WARP-939: the OCS API returns masks like 17 (READ|SHARE) or 19
+ * (READ|UPDATE|SHARE) that never equal a bare preset value (1 / 3 / 31). A
+ * controlled <select value={rawMask}> then matched no option, fell back to the
+ * first ("View only"), and the user could not see or change the real level.
+ * We choose the most-capable preset whose editing bits are all granted by the
+ * mask, ignoring the ubiquitous SHARE bit.
+ */
+export function presetBitsFor(rawPermissions: number): number {
+  const editing = rawPermissions & PRESET_MATCH_BITS;
+  // Walk presets from most to least capable; first whose editing bits are a
+  // subset of the mask's editing bits wins.
+  for (let i = PRESETS.length - 1; i >= 0; i--) {
+    const presetEditing = PRESETS[i].bits & PRESET_MATCH_BITS;
+    if ((editing & presetEditing) === presetEditing) {
+      return PRESETS[i].bits;
+    }
+  }
+  return PERM_READ;
+}
+
 /**
  * Full sharing dialog (WARP-879 / WS-1). Two modes:
  *   • Person — share with a named household member (OCS shareType 0). The
@@ -246,7 +276,7 @@ export function ShareDialog({
                       </div>
                       <div className="flex items-center gap-2">
                         <select
-                          value={share.permissions}
+                          value={presetBitsFor(share.permissions)}
                           onChange={(e) =>
                             handleUpdatePermissions(share.id, Number(e.target.value))
                           }
@@ -291,7 +321,7 @@ export function ShareDialog({
                       </div>
                       <div className="flex items-center gap-2">
                         <select
-                          value={share.permissions}
+                          value={presetBitsFor(share.permissions)}
                           onChange={(e) =>
                             handleUpdatePermissions(share.id, Number(e.target.value))
                           }

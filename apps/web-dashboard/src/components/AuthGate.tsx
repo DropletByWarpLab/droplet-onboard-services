@@ -6,8 +6,15 @@ import { useAuth } from "@/lib/auth";
 import { Sidebar } from "@/components/Sidebar";
 import { DropletMark } from "@/components/DropletMark";
 import { HelpLauncher } from "@/components/help/HelpLauncher";
+import { HELP_PATH } from "@/lib/routing";
 
-const PUBLIC_PATHS = ["/setup", "/login"];
+// `/invite` is public: an invite link goes to a brand-new, NOT-yet-authenticated
+// person so they can set their password at `/invite/<token>`. Omitting it made
+// AuthGate treat the page as protected and bounce the invitee to `/login` on a
+// claimed box (appliance "ready"), so the link "just goes to the sign-in page"
+// and they can never set a password. `startsWith` is safe — `/invite` is the
+// only route under that prefix.
+const PUBLIC_PATHS = ["/setup", "/login", "/invite"];
 
 export function AuthGate({ children }: { children: ReactNode }) {
   // PR #372 — route off the explicit `/setup/state` machine. The appliance
@@ -63,7 +70,16 @@ export function AuthGate({ children }: { children: ReactNode }) {
 
     // Unclaimed appliance → first-run wizard. The wizard itself hydrates
     // `setupState.setupStep` to resume at the right step (resumability).
-    if (applianceUnclaimed && pathname !== "/setup") {
+    // WARP-930 — /help is exempt: each wizard step's "Learn more" links to
+    // /help#<anchor>, and during the unclaimed phase that navigation would
+    // otherwise bounce straight back to /setup (the link "does nothing", and a
+    // same-tab bounce remounts the wizard and wipes the in-progress form). The
+    // help page renders standalone below for the unclaimed/anonymous case.
+    if (
+      applianceUnclaimed &&
+      pathname !== "/setup" &&
+      pathname !== HELP_PATH
+    ) {
       router.replace("/setup");
       return;
     }
@@ -249,6 +265,20 @@ export function AuthGate({ children }: { children: ReactNode }) {
         </div>
       </div>
     );
+  }
+
+  // WARP-930 — /help must be reachable DURING setup (the LearnMoreCard "Learn
+  // more" links on every wizard step point at /help#<anchor>). While the
+  // appliance is UNCLAIMED (the only setup phase — covers both the anonymous
+  // claim step and the signed-in owner mid-wizard), render the help page
+  // standalone (no sidebar chrome — the wizard owns the look) instead of
+  // bouncing to /setup. A claimed appliance falls through: authed users get the
+  // normal sidebar render below (post-setup /help unchanged), and an anonymous
+  // visitor hits the return-null-while-redirecting path (no early help paint).
+  // Gated on `applianceUnclaimed` (not `!user`) so a claimed-box logged-out
+  // visitor doesn't briefly see the manual before the /login redirect.
+  if (pathname === HELP_PATH && applianceUnclaimed) {
+    return <>{children}</>;
   }
 
   // Not authenticated — show nothing while redirecting

@@ -3,23 +3,25 @@
 import useSWR from "swr";
 import { Cable } from "lucide-react";
 import { fetchInterfaces, type NetworkInterfaceRow } from "@/lib/api";
+import { InterfaceWriteControls } from "./InterfaceWriteControls";
 
 /**
  * Interfaces (Droplet Design System · Network · System).
  *
- * Read-only enumeration of every configured interface (name/device/proto/
- * address/zone/status) — not just lan/wan. Mirrors the FirewallTab read-table
- * idiom. Honesty rules:
+ * Enumeration of every configured interface (name/device/proto/address/zone/
+ * status) — not just lan/wan. Mirrors the FirewallTab read-table idiom. Honesty
+ * rules:
  *  - a `present:false` interface (configured but with no live ubus object on
  *    this box — e.g. a single-box WAN handled by the host) renders an explicit
  *    "not on this box" state, NEVER a fabricated "down" row;
  *  - a null zone/address renders a dash placeholder, never a made-up value.
  *
- * Adding/editing interfaces is intentionally NOT here: a generic interface
- * editor can rewrite /etc/config/network and cut the AP/LAN this dashboard rides
- * on (the single-box UCI-write hazard class) — deferred to a guarded,
- * connectivity-preserving design. There is no Restart-network button either; a
- * read table can't cut connectivity, and restart is its own owner-confirmed flow.
+ * KAN-10: the Add / Edit / Restart write path now rides the same blast-radius
+ * safety the rest of the Network tab uses — owner/admin only, Tier-2/3 confirm,
+ * routing-side safe_apply (60s auto-rollback), and an EXTRA confirm before a
+ * write to the management interface (the one this dashboard is reached on). The
+ * controls render only for an editor; for everyone else the table stays
+ * read-only.
  */
 function StatusChip({ up, present }: { up: boolean; present: boolean }) {
   if (!present) {
@@ -46,8 +48,16 @@ function StatusChip({ up, present }: { up: boolean; present: boolean }) {
   );
 }
 
-export function InterfacesTable() {
-  const { data, isLoading } = useSWR<NetworkInterfaceRow[]>(
+export function InterfacesTable({
+  canEdit = false,
+  isOwner = false,
+}: {
+  /** owner/admin — may add + edit interfaces. */
+  canEdit?: boolean;
+  /** owner only — may also restart networking. */
+  isOwner?: boolean;
+} = {}) {
+  const { data, isLoading, mutate } = useSWR<NetworkInterfaceRow[]>(
     "/api/network/interfaces",
     fetchInterfaces,
     { refreshInterval: 30000 },
@@ -62,8 +72,9 @@ export function InterfacesTable() {
         <h3 className="type-headline text-label-primary">Interfaces</h3>
       </div>
       <p className="type-caption-1 text-label-tertiary mb-4">
-        Every network interface this appliance is configured with. Read-only —
-        interfaces are set up during installation.
+        {canEdit
+          ? "Every network interface this appliance is configured with. Changes here can affect connectivity, so we confirm before applying."
+          : "Every network interface this appliance is configured with."}
       </p>
 
       {rows.length > 0 ? (
@@ -113,6 +124,13 @@ export function InterfacesTable() {
           {isLoading ? "Loading interfaces…" : "No interfaces reported."}
         </p>
       )}
+
+      <InterfaceWriteControls
+        rows={rows}
+        canEdit={canEdit}
+        isOwner={isOwner}
+        onApplied={() => void mutate()}
+      />
     </div>
   );
 }

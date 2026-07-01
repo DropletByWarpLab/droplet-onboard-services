@@ -164,6 +164,25 @@ class NtpRequest(BaseModel):
     enabled: bool = Field(..., description="Enable the appliance's OpenWrt NTP daemon")
 
 
+class SysupgradeRequest(BaseModel):
+    """KAN-8 — flash a staged OpenWrt sysupgrade image. BRICK RISK.
+
+    `image_path` is the path of an image already staged on the router (e.g. under
+    `/tmp`); this schema only validates the request shape. The owner-only Tier-3
+    confirm AND the PRIMARY_ROUTER deployment-shape gate are enforced in the
+    orchestrator ABOVE this route — the routing service is the SDK's HTTP face.
+    """
+
+    image_path: str = Field(
+        ..., min_length=1, max_length=512,
+        description="Path of the staged sysupgrade image on the router (e.g. /tmp/...img.gz)",
+    )
+    preserve_config: bool = Field(
+        default=True,
+        description="Keep /etc/config across the flash (sysupgrade -v); False adds -n for a clean flash",
+    )
+
+
 class BlockDeviceRequest(BaseModel):
     mac: str = Field(..., pattern=r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$", description="MAC address to block")
     name: Optional[str] = Field(default=None, description="Optional rule name")
@@ -317,6 +336,85 @@ class CameraSubnetSetupRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Interface Add / Edit (KAN-10)
+# ---------------------------------------------------------------------------
+# UCI `config interface` section name: lowercase letters, digits, underscores —
+# the same grammar CreateVlanRequest.name uses, so a name the SDK can `uci set`.
+_INTERFACE_NAME_PATTERN = r"^[a-z0-9_]+$"
+# Logical L2 device (bridge / vlan / ethernet). Conservative shell-safe charset:
+# alnum plus the device punctuation OpenWrt uses (`-`, `.`, `_`, `@`). Bounds the
+# shape; the SDK normalises nothing here — a bad device fails honestly at apply.
+_DEVICE_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._@-]{0,30}$"
+# The protocols the dashboard interface editor offers. Restricting the set keeps
+# a typo'd proto from writing a section ifup can't bring up (NET-class hazard).
+_INTERFACE_PROTOS = ("static", "dhcp", "dhcpv6", "none", "pppoe")
+
+
+class CreateInterfaceRequest(BaseModel):
+    """Create (or overwrite) a `config interface` section (KAN-10).
+
+    `force` is the explicit extra-confirm for a write that targets the
+    management interface (the interface the dashboard is reached on). The route
+    refuses a management-interface write unless `force` is True — a wrong
+    proto/address there cuts the dashboard's own connectivity.
+    """
+
+    name: str = Field(..., min_length=1, max_length=15, pattern=_INTERFACE_NAME_PATTERN,
+                      description="UCI interface section name (e.g. 'iot')")
+    proto: str = Field(..., description="Protocol: static / dhcp / dhcpv6 / none / pppoe")
+    device: Optional[str] = Field(default=None, pattern=_DEVICE_PATTERN,
+                                  description="Logical L2 device (e.g. 'br-lan.20')")
+    ipaddr: Optional[str] = Field(default=None, pattern=_IPV4_PATTERN,
+                                  description="Static IPv4 (required-ish for proto=static)")
+    netmask: Optional[str] = Field(default=None, pattern=_IPV4_PATTERN,
+                                   description="Subnet mask for a static interface")
+    gateway: Optional[str] = Field(default=None, pattern=_IPV4_PATTERN,
+                                   description="Upstream gateway for a static interface")
+    force: bool = Field(default=False,
+                        description="Explicit extra-confirm to allow a management-interface write")
+
+    @field_validator("proto")
+    @classmethod
+    def _check_proto(cls, v: str) -> str:
+        if v not in _INTERFACE_PROTOS:
+            raise ValueError(f"proto must be one of {', '.join(_INTERFACE_PROTOS)}")
+        return v
+
+
+class EditInterfaceRequest(BaseModel):
+    """Update only the supplied options on an existing `config interface` (KAN-10).
+
+    At least one editable field must be present — an empty edit is a no-op the
+    route rejects before minting a confirm token. `force` carries the same
+    management-interface extra-confirm semantics as CreateInterfaceRequest.
+    """
+
+    proto: Optional[str] = Field(default=None, description="Protocol to switch to")
+    device: Optional[str] = Field(default=None, pattern=_DEVICE_PATTERN)
+    ipaddr: Optional[str] = Field(default=None, pattern=_IPV4_PATTERN)
+    netmask: Optional[str] = Field(default=None, pattern=_IPV4_PATTERN)
+    gateway: Optional[str] = Field(default=None, pattern=_IPV4_PATTERN)
+    force: bool = Field(default=False,
+                        description="Explicit extra-confirm to allow a management-interface edit")
+
+    @field_validator("proto")
+    @classmethod
+    def _check_proto(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in _INTERFACE_PROTOS:
+            raise ValueError(f"proto must be one of {', '.join(_INTERFACE_PROTOS)}")
+        return v
+
+    @model_validator(mode="after")
+    def _require_a_change(self) -> "EditInterfaceRequest":
+        if not any(
+            getattr(self, f) is not None
+            for f in ("proto", "device", "ipaddr", "netmask", "gateway")
+        ):
+            raise ValueError("provide at least one field to change")
+        return self
+
+
+# ---------------------------------------------------------------------------
 # VPN (WireGuard)
 # ---------------------------------------------------------------------------
 #
@@ -394,48 +492,6 @@ class VpnPeerDeleteRequest(BaseModel):
     public_key: str = Field(
         ..., pattern=_WG_KEY_PATTERN,
         description="Peer's WireGuard public key, base64-encoded (43 chars + '=').",
-    )
-
-
-# ---------------------------------------------------------------------------
-# DuckDNS (Dynamic DNS for the WireGuard endpoint hostname)
-# ---------------------------------------------------------------------------
-#
-# DuckDNS is a free dynamic-DNS service. The user picks a subdomain
-# (e.g. `stefan-droplet`), gets a token from duckdns.org, and ddns-scripts
-# pings DuckDNS every few minutes with the WAN IP. From outside the LAN,
-# `stefan-droplet.duckdns.org` then resolves to whatever your home router's
-# public IP is — perfect as the WireGuard `Endpoint`.
-#
-# The token is treated as a secret: PUT writes it, GET returns only
-# whether one is configured. ddns-scripts stores it in cleartext in
-# /etc/config/ddns (the same place as wifi PSKs and OpenVPN secrets,
-# all 0600) so this matches the rest of OpenWrt's secret hygiene.
-_DUCKDNS_SUBDOMAIN_PATTERN = r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
-
-
-class DuckDnsConfigRequest(BaseModel):
-    """Configure the DuckDNS service section.
-
-    `subdomain` is the part *before* `.duckdns.org` — DuckDNS's url template
-    appends the suffix, so passing the full domain would double it up.
-    """
-
-    subdomain: str = Field(
-        ..., min_length=1, max_length=63, pattern=_DUCKDNS_SUBDOMAIN_PATTERN,
-        description="DuckDNS subdomain, e.g. 'stefan-droplet' (no '.duckdns.org' suffix).",
-    )
-    # Optional: when omitted, the handler preserves the existing
-    # /etc/config/ddns password. The dashboard's wizard uses this for
-    # the "keep stored token" path so a returning customer doesn't have
-    # to re-paste the token every time they re-visit the Internet step.
-    token: Optional[str] = Field(
-        default=None, min_length=10, max_length=128,
-        description="DuckDNS account token (UUID-like). Stored in /etc/config/ddns; redacted on read. Omit to keep the currently-stored value.",
-    )
-    enabled: bool = Field(
-        default=True,
-        description="Whether ddns-scripts should run this service on the next start. False stages the config without enabling.",
     )
 
 

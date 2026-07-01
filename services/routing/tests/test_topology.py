@@ -76,7 +76,7 @@ class _FakeNetwork:
     """A NetworkApi-shaped stub returning a pinned interface-status map.
 
     Mirrors how `test_network_shape.py` drives the SDK without a real router and
-    how `_make_ddns_store_client` pins which interfaces a shape exposes — so the
+    how the network-shape helper pins which interfaces a shape exposes — so the
     detector reads the SAME `get_all_interface_statuses()` contract production does.
     """
 
@@ -181,7 +181,7 @@ class TestDetectDeploymentTopology:
 
     def test_reuses_get_all_interface_statuses_presence_path(self) -> None:
         # Guardrail: the detector must read presence from the SAME mechanism
-        # `get_network_summary` / `_select_ddns_interface` use — not a second
+        # `get_network_summary` uses — not a second
         # presence probe. Asserting the call happened pins that contract.
         net = _FakeNetwork({"lan": dict(_LAN_STATUS), "wan": dict(_WAN_DOWNSTREAM)})
         router = type("R", (), {"network": net})()
@@ -198,7 +198,7 @@ def _topology_client(
     monkeypatch: pytest.MonkeyPatch, statuses: dict[str, dict]
 ) -> TestClient:
     """TestClient backed by a MockRouter whose interface-status map is pinned to
-    `statuses` — same monkeypatch seam `_make_ddns_store_client` uses to pin a
+    `statuses` — same monkeypatch seam the network-shape helper uses to pin a
     shape's present interfaces."""
     router = MockRouter()
     monkeypatch.setattr(

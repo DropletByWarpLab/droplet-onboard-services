@@ -12,3 +12,8 @@ files/usr/share/rpcd/acl.d/*   text eol=lf
 scripts/*.sh                   text eol=lf
 scripts/*.py                   text eol=lf
 scripts/*.service              text eol=lf
+# Single-box image uci-defaults scripts are extensionless `/bin/sh` files baked
+# into /etc/uci-defaults and run by procd on first boot. Same CRLF hazard as the
+# overlay's files/etc/uci-defaults/* above — a Windows checkout (autocrlf=true)
+# would ship `#!/bin/sh\r` and the UCI parse error described above. Pin to LF.
+singlebox-image/uci-defaults/* text eol=lf

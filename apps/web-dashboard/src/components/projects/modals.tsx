@@ -104,7 +104,7 @@ export function NewItemModal({
 
   return (
     <Dialog open onClose={onClose} placement="center" maxWidth="md" labelledBy={titleId}>
-      <div className="pm-scope">
+      <div className="pm-scope pm-dialog-body">
         <h2 id={titleId} style={{ margin: "0 0 16px", fontSize: 18, fontWeight: 600 }}>
           New item
         </h2>
@@ -183,7 +183,7 @@ export function NewProjectModal({ onClose, onCreated }: { onClose: () => void; o
 
   return (
     <Dialog open onClose={onClose} placement="center" maxWidth="md" labelledBy={titleId}>
-      <div className="pm-scope">
+      <div className="pm-scope pm-dialog-body">
         <h2 id={titleId} style={{ margin: "0 0 16px", fontSize: 18, fontWeight: 600 }}>
           New project
         </h2>
@@ -261,7 +261,7 @@ export function ConfirmDeleteProject({
 
   return (
     <Dialog open onClose={onClose} placement="center" maxWidth="sm" labelledBy={titleId}>
-      <div className="pm-scope">
+      <div className="pm-scope pm-dialog-body">
         <h2 id={titleId} style={{ margin: "0 0 16px", fontSize: 18, fontWeight: 600 }}>
           Delete project
         </h2>

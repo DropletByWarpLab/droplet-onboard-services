@@ -58,11 +58,25 @@ vi.mock("@/lib/api", () => ({
     next_step: "internet",
   })),
   fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
+  // WARP-979 — the reworked AddressStep imports these (this walk skips the step).
+  checkBoxName: vi.fn(async () => ({
+    available: true,
+    slug: "studio",
+    fqdn: "studio.droplet-us.com",
+    authoritative: false,
+  })),
+  setBoxName: vi.fn(async () => ({
+    ok: true,
+    slug: "studio",
+    fqdn: "studio.droplet-us.com",
+  })),
   setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
   fetchDrives: vi.fn(async () => ({ drives: [], count: 0 })),
   updateDriveLabel: vi.fn(),
   fetchDiscoveredCameras: vi.fn(async () => []),
   acceptDiscoveredCamera: vi.fn(),
+  fetchCameras: vi.fn(async () => []),
+  removeCamera: vi.fn(async () => undefined),
   fetchVpnStatus: vi.fn(async () => ({
     configured: false,
     endpointConfigured: false,
@@ -129,22 +143,20 @@ async function advanceToAi() {
   await act(async () => {
     await Promise.resolve();
     await Promise.resolve();
+    // WARP-979 — the address step (Secured / name your box) → skip.
     fireEvent.click(
-      screen.getByRole("button", { name: /skip — no remote access/i }),
+      screen.getByRole("button", { name: /skip — i'll do this later/i }),
     );
   });
-  // Storage auto-skip → Discovery → skip → Cameras auto-skip → VPN
-  // preCheck → skip → AI.
-  await act(async () => {
-    await Promise.resolve();
-    await Promise.resolve();
-    fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
-  });
-  await act(async () => {
-    await Promise.resolve();
-    await Promise.resolve();
-    fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
-  });
+  // WARP-933 — Storage and Cameras now RENDER (no silent auto-skip). Skip each:
+  // storage → discovery → cameras → VPN preCheck → AI.
+  for (let i = 0; i < 4; i++) {
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
+  }
   // Let AiStep's fetchModels effect resolve.
   await act(async () => {
     await Promise.resolve();

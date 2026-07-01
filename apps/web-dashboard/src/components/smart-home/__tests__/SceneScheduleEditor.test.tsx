@@ -4,8 +4,9 @@
  * Pins the load-bearing behaviour:
  *   - lists existing schedules (with their local-time summary)
  *   - the empty state invites adding the first schedule
- *   - creating sends a UTC RRULE built from the chosen day chips + local time
- *   - the UI states it converts to UTC (rrule.ts is UTC-only)
+ *   - creating sends a wall-clock RRULE + the browser's IANA timezone
+ *     (KAN-6), built from the chosen day chips + local time
+ *   - the UI names the timezone WITHOUT the old DST caveat (KAN-6 fixed it)
  *   - toggling enabled + deleting call through
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -18,7 +19,8 @@ vi.mock("framer-motion", async () => {
 
 const hookState = {
   schedules: [] as Array<{
-    id: string; sceneId: string; rrule: string; nextFireAt: string;
+    id: string; sceneId: string; rrule: string; timezone: string;
+    nextFireAt: string;
     enabled: boolean; createdBy: string | null; lastFiredAt: string | null;
     createdAt: string; updatedAt: string;
   }>,
@@ -39,6 +41,7 @@ import { SceneScheduleEditor } from "../SceneScheduleEditor";
 function sched(over: Partial<(typeof hookState)["schedules"][number]> = {}) {
   return {
     id: "s1", sceneId: "scene-1", rrule: "FREQ=DAILY;BYHOUR=7;BYMINUTE=0",
+    timezone: "America/Los_Angeles",
     nextFireAt: "2026-06-20T07:00:00.000Z", enabled: true,
     createdBy: "stefan", lastFiredAt: null,
     createdAt: "2026-06-19T00:00:00.000Z", updatedAt: "2026-06-19T00:00:00.000Z",
@@ -70,17 +73,19 @@ describe("SceneScheduleEditor", () => {
     expect(screen.getByRole("button", { name: /remove schedule/i })).toBeTruthy();
   });
 
-  it("states that the chosen time is converted to UTC (the UTC-only trap)", () => {
+  it("names the local timezone WITHOUT the old daylight-saving caveat (KAN-6)", () => {
     render(
       <SceneScheduleEditor sceneId="scene-1" sceneName="Good night" onClose={() => {}} />,
     );
-    // Match the honesty copy specifically — a plain /utc/i is ambiguous when the
-    // runner's own timezone label is literally "UTC" (CI), which renders a second
-    // "UTC" in the "shown in <tz>" line.
-    expect(screen.getByText(/saved in utc/i)).toBeTruthy();
+    // The confident copy frames it as the owner's local time…
+    expect(screen.getByText(/your local time/i)).toBeTruthy();
+    // …and the stopgap UTC/DST caveat is GONE — the per-row zone fixed it.
+    expect(screen.queryByText(/saved in utc/i)).toBeNull();
+    expect(screen.queryByText(/daylight-saving/i)).toBeNull();
+    expect(screen.queryByText(/shift by an hour/i)).toBeNull();
   });
 
-  it("creates a schedule with a UTC RRULE built from the time field", async () => {
+  it("creates a schedule with a wall-clock RRULE + the browser timezone (KAN-6)", async () => {
     render(
       <SceneScheduleEditor sceneId="scene-1" sceneName="Good night" onClose={() => {}} />,
     );
@@ -88,11 +93,12 @@ describe("SceneScheduleEditor", () => {
     fireEvent.change(screen.getByLabelText(/time/i), { target: { value: "07:00" } });
     fireEvent.click(screen.getByRole("button", { name: /add schedule/i }));
     await waitFor(() => expect(hookState.create).toHaveBeenCalledTimes(1));
-    const rrule = hookState.create.mock.calls[0][0] as string;
-    // UTC-converted: contains BYHOUR/BYMINUTE and a supported FREQ.
-    expect(rrule).toMatch(/^FREQ=(DAILY|WEEKLY);/);
-    expect(rrule).toMatch(/BYHOUR=\d+/);
-    expect(rrule).toMatch(/BYMINUTE=0/);
+    const [rrule, timezone] = hookState.create.mock.calls[0] as [string, string];
+    // Wall-clock: the chosen 07:00 is stored verbatim (NOT UTC-shifted).
+    expect(rrule).toBe("FREQ=DAILY;BYHOUR=7;BYMINUTE=0");
+    // The browser's IANA zone is passed alongside so the server stores it.
+    expect(typeof timezone).toBe("string");
+    expect(timezone.length).toBeGreaterThan(0);
   });
 
   it("builds a WEEKLY rrule when specific day chips are selected", async () => {

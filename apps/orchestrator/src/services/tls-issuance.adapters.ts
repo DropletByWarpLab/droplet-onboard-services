@@ -293,6 +293,59 @@ export function createBridgeFqdnPersister(): (fqdn: string) => Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// WARP-979 — persist the owner-chosen box name back to .env via the bridge
+// ---------------------------------------------------------------------------
+
+/**
+ * Write the owner-chosen `DROPLET_BOX_NAME` back to the host `.env` through the
+ * device-bridge's auth-gated POST /host/box-name (the SAME transport
+ * createBridgeFqdnPersister uses for DROPLET_PUBLIC_FQDN — the orchestrator has
+ * no host mount, so host `.env` writes run behind the bridge). tls-issuance
+ * reads this on the next boot and sends it to HQ as `requested_name`.
+ *
+ * Fire-and-forget: every failure (no auth token, bridge unreachable, non-2xx,
+ * host-script refusal) is LOGGED, never thrown — matching the fqdn persister.
+ * The route has already accepted the request; a failed write-back only means
+ * the box keeps its previous name until the owner retries.
+ */
+export function createBridgeBoxNamePersister(): (name: string) => Promise<void> {
+  return async function persistBoxName(name: string): Promise<void> {
+    const token = bridgeAuthToken();
+    if (!token) {
+      logger.warn(
+        {},
+        "box-name: device-bridge auth token not configured — cannot persist DROPLET_BOX_NAME; the box keeps its previous name",
+      );
+      return;
+    }
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), HQ_HTTP_TIMEOUT_MS);
+    try {
+      const r = await fetch(`${config.DEVICE_BRIDGE_URL}/host/box-name`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Droplet-Auth": token },
+        body: JSON.stringify({ name }),
+        signal: ctrl.signal,
+      });
+      if (!r.ok) {
+        const body = await r.text().catch(() => "");
+        logger.warn(
+          { status: r.status, body: body.slice(0, 200), name },
+          "box-name: device-bridge box-name write-back failed — the box keeps its previous name",
+        );
+      }
+    } catch (err) {
+      logger.warn(
+        { err, name },
+        "box-name: could not reach device-bridge to persist DROPLET_BOX_NAME — the box keeps its previous name",
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
 // ADR-023 PR-1 (Gap 2) — split-horizon DNS registrar (routing/container leg)
 // ---------------------------------------------------------------------------
 

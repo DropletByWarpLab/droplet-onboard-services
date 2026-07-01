@@ -235,3 +235,87 @@ describe("ShareDialog — existing shares (WS-1 fast-follow)", () => {
     expect(screen.queryByText(/shared with/i)).not.toBeInTheDocument();
   });
 });
+
+/**
+ * WARP-939 — the access-level dropdown on an EXISTING share must reflect the
+ * share's real Nextcloud permission bitmask, and let the user pick any preset.
+ *
+ * Nextcloud returns raw OCS permission masks that almost always carry the SHARE
+ * bit (16) and, for folders, CREATE/DELETE bits — e.g. a read-only person share
+ * is permissions=17 (READ|SHARE), an editable one is 19 (READ|UPDATE|SHARE).
+ * The dropdown's <option> values were exact-match (1 / 3 / 31), so a real mask
+ * like 17 or 19 matched NO option — the controlled <select> fell back to the
+ * first option ("View only") and edits never reflected. These pin that the
+ * select snaps a raw mask to the nearest preset for both rendering and editing.
+ */
+describe("WARP-939 — existing-share access-level dropdown reflects real masks", () => {
+  function findAccessSelect(): HTMLSelectElement {
+    const select = screen
+      .getAllByRole("combobox")
+      .find((el) =>
+        Array.from((el as HTMLSelectElement).options).some(
+          (o) => o.textContent === "View only",
+        ),
+      ) as HTMLSelectElement | undefined;
+    if (!select) throw new Error("access-level select not found");
+    return select;
+  }
+
+  it("shows 'Can edit' for a person share whose raw mask is 19 (READ|UPDATE|SHARE)", () => {
+    render(
+      <ShareDialog
+        filePath="/report.pdf"
+        fileName="report.pdf"
+        existingShares={[makePersonShare({ permissions: 19 })]}
+        onClose={() => {}}
+      />,
+    );
+    const select = findAccessSelect();
+    const selected = select.options[select.selectedIndex];
+    expect(selected.textContent).toBe("Can edit");
+  });
+
+  it("shows 'View only' for a person share whose raw mask is 17 (READ|SHARE)", () => {
+    render(
+      <ShareDialog
+        filePath="/report.pdf"
+        fileName="report.pdf"
+        existingShares={[makePersonShare({ permissions: 17 })]}
+        onClose={() => {}}
+      />,
+    );
+    const select = findAccessSelect();
+    const selected = select.options[select.selectedIndex];
+    expect(selected.textContent).toBe("View only");
+  });
+
+  it("shows 'Full access' for a folder share whose raw mask is 31 (all bits)", () => {
+    render(
+      <ShareDialog
+        filePath="/Trips"
+        fileName="Trips"
+        existingShares={[makePersonShare({ permissions: 31 })]}
+        onClose={() => {}}
+      />,
+    );
+    const select = findAccessSelect();
+    const selected = select.options[select.selectedIndex];
+    expect(selected.textContent).toBe("Full access");
+  });
+
+  it("never leaves the access-level select unselected for a real mask", () => {
+    render(
+      <ShareDialog
+        filePath="/report.pdf"
+        fileName="report.pdf"
+        existingShares={[makePersonShare({ permissions: 17 })]}
+        onClose={() => {}}
+      />,
+    );
+    const select = findAccessSelect();
+    // A controlled <select> whose value matches no <option> reports
+    // selectedIndex 0 but value "" in jsdom; pin a real selection instead.
+    expect(select.selectedIndex).toBeGreaterThanOrEqual(0);
+    expect(select.value).not.toBe("");
+  });
+});

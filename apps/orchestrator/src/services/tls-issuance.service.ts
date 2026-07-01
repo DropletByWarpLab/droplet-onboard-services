@@ -36,6 +36,7 @@
  * gRPC, or the network.
  */
 import * as forge from "node-forge";
+import { validateBoxName } from "@droplet/shared-types";
 import type { DeviceIdentityClient, DeviceIdentityStatus } from "./device-identity.client.js";
 
 /** The exact bytes signed by the device TPM key, per the issuance contract:
@@ -83,6 +84,15 @@ export interface HqOrderRequest {
   signature: string;
   sig_alg: "ecdsa-sha256";
   key_fingerprint: string;
+  /**
+   * WARP-979 — the owner-chosen box name (`DROPLET_BOX_NAME`), sent so HQ can
+   * issue `<name>.droplet-us.com` instead of the opaque `d-<hmac>` fallback.
+   * OPTIONAL: omitted when no name is chosen (opaque-HMAC fallback stays). This
+   * is HARMLESS if HQ ignores it today — the HQ device-authed name CLAIM is a
+   * COUPLED fleet-hq follow-up. When HQ honors it, the SAME PoP-signed challenge
+   * that authorizes the order also authorizes the name claim.
+   */
+  requested_name?: string;
 }
 
 /**
@@ -201,6 +211,14 @@ export interface TlsIssuanceDeps {
    * Optional + best-effort: a DNS failure NEVER aborts issuance.
    */
   dns?: DnsRegistrar;
+  /**
+   * WARP-979 — the owner-chosen box name (`config.DROPLET_BOX_NAME`, empty when
+   * none chosen). Sent to HQ as `requested_name` on the cert ORDER so HQ issues
+   * `<name>.droplet-us.com` rather than the opaque `d-<hmac>` fallback. Optional
+   * + harmless if HQ ignores it (the HQ device-authed name claim is a coupled
+   * fleet-hq follow-up); the opaque-HMAC fallback stays when it's empty.
+   */
+  requestedName?: string;
 }
 
 export interface TlsIssuanceService {
@@ -423,7 +441,23 @@ export function createTlsIssuanceService(
     hqConfigured = false,
     persistFqdn,
     dns,
+    requestedName,
   } = deps;
+
+  // Defense-in-depth (WARP-979 review follow-up): DROPLET_BOX_NAME is normally
+  // written only by the validated persist path, but the box treats its own .env
+  // as untrusted — a hand-edited value (" ", "UpperCase", an over-long label)
+  // must never reach HQ as a raw `requested_name`. Re-validate once here through
+  // the SAME shared ruleset; an invalid value falls back to the opaque
+  // `d-<hmac>` issuance instead of the box emitting a malformed name.
+  const requestedCheck = requestedName ? validateBoxName(requestedName) : undefined;
+  const requestedSlug = requestedCheck?.ok ? requestedCheck.slug : undefined;
+  if (requestedName && !requestedCheck?.ok) {
+    logger.warn(
+      { reason: requestedCheck?.reason },
+      "tls-issuance: DROPLET_BOX_NAME is set but not a valid box name — omitting requested_name, falling back to opaque issuance",
+    );
+  }
 
   /**
    * The full issuance/renewal flow. Returns the LEARNED fqdn (from the HQ
@@ -450,6 +484,12 @@ export function createTlsIssuanceService(
       signature: signed.signature,
       sig_alg: signed.sig_alg,
       key_fingerprint: signed.key_fingerprint,
+      // WARP-979 — carry the owner-chosen box name so HQ can issue
+      // `<name>.droplet-us.com`. Only when a VALID name is configured (see the
+      // requestedSlug guard above); otherwise HQ keeps minting the opaque
+      // `d-<hmac>` fallback. Harmless if HQ ignores the field today (coupled
+      // fleet-hq device-auth follow-up, WARP-980).
+      ...(requestedSlug ? { requested_name: requestedSlug } : {}),
     };
 
     // 4. Submit the order (issue vs renew share the body shape).

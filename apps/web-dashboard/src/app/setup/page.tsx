@@ -32,8 +32,8 @@ import { SetupNavProvider } from "@/components/setup/setup-nav";
  *
  * Each step is its own component under `components/setup/steps/`. This
  * page only owns:
- *   - the current step + cross-step values (displayName, duckdnsSubdomain,
- *     discoveredCount) that later steps need to render
+ *   - the current step + cross-step values (displayName, discoveredCount)
+ *     that later steps need to render
  *   - the per-step callback wiring that advances `step` on completion
  *
  * The 4-step base flow (welcome → account → discovery → done) shipped in
@@ -245,11 +245,15 @@ function SetupWizard({ initialStep }: { initialStep: Step }) {
   // Back button. Pops the visited stack (auto-skipped steps were never pushed,
   // so they're skipped); falls back to the previous step in STEPS when there's
   // no recorded history (e.g. resumed mid-wizard after a refresh). Never lowers
-  // the persisted pointer.
+  // the persisted pointer. Clamped to firstNavigableIdx ("org") so that
+  // welcome/claim/account can never be reached via direct back() calls (e.g.
+  // a future keyboard handler) independently of the UI guard in StepShell.
   const back = useCallback(() => {
+    const floor = STEPS.indexOf("org");
     const h = historyRef.current;
     if (h.length > 0) {
       const prev = h[h.length - 1];
+      if (STEPS.indexOf(prev) < floor) return;
       historyRef.current = h.slice(0, -1);
       setStepState(prev);
       stepRef.current = prev;
@@ -257,8 +261,10 @@ function SetupWizard({ initialStep }: { initialStep: Step }) {
     }
     const i = STEPS.indexOf(stepRef.current);
     if (i > 0) {
-      setStepState(STEPS[i - 1]);
-      stepRef.current = STEPS[i - 1];
+      const target = STEPS[i - 1];
+      if (STEPS.indexOf(target) < floor) return;
+      setStepState(target);
+      stepRef.current = target;
     }
   }, []);
 
@@ -275,7 +281,17 @@ function SetupWizard({ initialStep }: { initialStep: Step }) {
   }
 
   return (
-    <SetupNavProvider value={{ navigate: setStep, maxReachedIdx, back }}>
+    <SetupNavProvider
+      value={{
+        navigate: setStep,
+        maxReachedIdx,
+        back,
+        // WARP-929 — the Workspace step is the navigation floor: claim/account
+        // (and welcome) can't be revisited, so the appliance can't be unclaimed
+        // and the owner can't be re-created/abandoned from the wizard.
+        firstNavigableIdx: STEPS.indexOf("org"),
+      }}
+    >
       {step === "welcome" && (
         <WelcomeStep onContinue={() => setStep("claim")} />
       )}

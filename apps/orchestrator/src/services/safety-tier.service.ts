@@ -26,6 +26,13 @@ interface PendingConfirmation {
   entityId: string;
   domain: string;
   service: string;
+  /**
+   * KAN-7: the original device command to dispatch on confirm, when it
+   * differs from the safety-classification `service` (e.g. the Matter command
+   * `set_hvac_mode` maps to service `set_mode`). When omitted the command IS
+   * the service (lock, set_temperature, …) — the pre-KAN-7 behaviour.
+   */
+  command?: string;
   data?: Record<string, unknown>;
   userId?: string;
   tier: number;
@@ -50,7 +57,13 @@ export async function evaluateCommand(
   entityId: string,
   service: string,
   data?: Record<string, unknown>,
-  userId?: string
+  userId?: string,
+  /**
+   * KAN-7: the original device command, dispatched verbatim on confirm when it
+   * differs from `service`. Defaults to `service` for the existing callers
+   * where the two are identical.
+   */
+  command?: string
 ): Promise<
   | { allowed: true; tier: number }
   | { allowed: false; requiresConfirmation: true; confirmationToken: string; reason: string; tier: number }
@@ -130,6 +143,7 @@ export async function evaluateCommand(
     entityId,
     domain,
     service,
+    command: command ?? service,
     data,
     userId,
     tier: classification.tier,
@@ -188,7 +202,15 @@ export async function confirmCommand(
   userId?: string,
   expected?: { service?: string; entityId?: string; nodeId?: string }
 ): Promise<
-  | { confirmed: true; entityId: string; domain: string; service: string; data?: Record<string, unknown> }
+  | {
+      confirmed: true;
+      entityId: string;
+      domain: string;
+      service: string;
+      /** KAN-7: the device command to dispatch (may differ from `service`). */
+      command: string;
+      data?: Record<string, unknown>;
+    }
   | { confirmed: false; code: ConfirmCommandError; reason: string }
 > {
   const pending = pendingConfirmations.get(confirmationToken);
@@ -247,6 +269,7 @@ export async function confirmCommand(
     entityId: pending.entityId,
     domain: pending.domain,
     service: pending.service,
+    command: pending.command,
     data: pending.data,
     tier: pending.tier,
     confirmed: true,
@@ -254,7 +277,7 @@ export async function confirmCommand(
   });
 
   logger.info(
-    { entityId: pending.entityId, service: pending.service },
+    { entityId: pending.entityId, service: pending.service, command: pending.command },
     "Command confirmed and executing"
   );
 
@@ -263,6 +286,7 @@ export async function confirmCommand(
     entityId: pending.entityId,
     domain: pending.domain,
     service: pending.service,
+    command: pending.command ?? pending.service,
     data: pending.data,
   };
 }
@@ -294,6 +318,8 @@ async function logCommand(
     entityId: string;
     domain: string;
     service: string;
+    /** The concrete dispatched command when it differs from service (e.g. set_hvac_mode vs set_mode). */
+    command?: string;
     data?: Record<string, unknown>;
     tier: number;
     confirmed: boolean;
@@ -302,13 +328,19 @@ async function logCommand(
   }
 ): Promise<void> {
   try {
+    // When command differs from service (KAN-7+), fold it into the data JSON so
+    // the audit record captures the concrete sidecar call without a schema migration.
+    const auditData =
+      entry.command && entry.command !== entry.service
+        ? { ...(entry.data ?? {}), _command: entry.command }
+        : entry.data;
     await prisma.commandAuditLog.create({
       data: {
         userId: entry.userId || null,
         entityId: entry.entityId,
         domain: entry.domain,
         service: entry.service,
-        data: entry.data ? JSON.parse(JSON.stringify(entry.data)) : undefined,
+        data: auditData ? JSON.parse(JSON.stringify(auditData)) : undefined,
         tier: entry.tier,
         confirmed: entry.confirmed,
         blocked: entry.blocked,

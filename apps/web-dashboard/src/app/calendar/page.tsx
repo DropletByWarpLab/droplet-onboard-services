@@ -29,7 +29,7 @@ import {
   EXTERNAL_COLOR,
 } from "@/lib/calendar";
 import { AgendaView } from "@/components/calendar/AgendaView";
-import { MonthView, monthGridRange } from "@/components/calendar/MonthView";
+import { MonthView, monthGridRange, eventsByDay } from "@/components/calendar/MonthView";
 import { MiniMonth } from "@/components/calendar/MiniMonth";
 import { EventForm } from "@/components/calendar/EventForm";
 import { RemindersPanel } from "@/components/calendar/RemindersPanel";
@@ -101,16 +101,30 @@ function reportWindow(scope: ReportScope, cursor: Date): { from: Date; to: Date;
 export default function CalendarPage() {
   const [view, setView] = useState<View>("month");
   const [cursor, setCursor] = useState(() => new Date());
+  // Day clicked in the mini-month while in Agenda view — drives the scroll-to +
+  // highlight of that day's section.
+  const [selectedKey, setSelectedKey] = useState<string | undefined>(undefined);
   const [hidden, setHidden] = useState<Set<string>>(() => new Set());
   const { toast } = useToast();
 
-  const range =
-    view === "month"
-      ? monthGridRange(cursor)
-      : {
-          from: new Date(new Date().setHours(0, 0, 0, 0)),
-          to: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-        };
+  // Fetch window for the active view. Memoized off the cursor's month so the
+  // SWR key is stable across renders (the old agenda range rebuilt `Date.now()`
+  // every render, churning the cache) and — crucially — so the agenda follows
+  // the navigated month instead of being pinned to a fixed today+30d window.
+  // The agenda covers the visible month plus the rest of the year ahead, so
+  // "up next" style scrolling still works while events for the viewed month
+  // actually populate.
+  const range = useMemo(() => {
+    if (view === "month") return monthGridRange(cursor);
+    const monthStart = new Date(cursor.getFullYear(), cursor.getMonth(), 1, 0, 0, 0, 0);
+    // Floor at today so the "Up next" rail always has data even when the
+    // user has navigated the mini-month to a future month: events between
+    // now and the cursor's month-start would otherwise fall outside [from, to].
+    const todayMidnight = new Date(); todayMidnight.setHours(0, 0, 0, 0);
+    const from = monthStart <= todayMidnight ? monthStart : todayMidnight;
+    const to = new Date(cursor.getFullYear(), cursor.getMonth() + 12, 0, 23, 59, 59, 999);
+    return { from, to };
+  }, [view, cursor]);
 
   const { events, refresh, isLoading } = useCalendarEvents(range);
   const { sources } = useCalendarSources();
@@ -164,11 +178,13 @@ export default function CalendarPage() {
     [events, hidden, keyOf],
   );
 
-  const eventDays = useMemo(() => {
-    const s = new Set<string>();
-    for (const e of visibleEvents) s.add(dayKey(new Date(e.startsAt)));
-    return s;
-  }, [visibleEvents]);
+  // Day-keys with at least one visible event — drives the mini-month dots.
+  // Reuses the shared `eventsByDay` (single source of truth for the multi-day
+  // span bucketing) instead of a hand-rolled copy.
+  const eventDays = useMemo(
+    () => new Set(eventsByDay(visibleEvents).keys()),
+    [visibleEvents],
+  );
 
   const upcoming = useMemo(() => {
     const now = Date.now();
@@ -257,9 +273,34 @@ export default function CalendarPage() {
   }, [detail, showReport]);
 
   const monthLabel = cursor.toLocaleDateString(undefined, { month: "long", year: "numeric" });
-  const prevMonth = () => setCursor((c) => new Date(c.getFullYear(), c.getMonth() - 1, 1));
-  const nextMonth = () => setCursor((c) => new Date(c.getFullYear(), c.getMonth() + 1, 1));
-  const goToday = () => setCursor(new Date());
+  // Toolbar nav is an implicit deselection: clear `selectedKey` so a stale
+  // scroll target doesn't yank the agenda back after navigating.
+  const prevMonth = () => {
+    setCursor((c) => new Date(c.getFullYear(), c.getMonth() - 1, 1));
+    setSelectedKey(undefined);
+  };
+  const nextMonth = () => {
+    setCursor((c) => new Date(c.getFullYear(), c.getMonth() + 1, 1));
+    setSelectedKey(undefined);
+  };
+  const goToday = () => {
+    setCursor(new Date());
+    setSelectedKey(undefined);
+  };
+
+  // Mini-month day click: move the cursor (drives the month grid + the agenda
+  // fetch window) and, ONLY in Agenda view, mark the picked day so the agenda
+  // scrolls to + highlights it. `selectedKey` is agenda-only context: setting it
+  // from Month view (where the agenda isn't rendered) would make a later switch
+  // to Agenda auto-scroll to a stale date the user never selected there.
+  // The previous build set neither — picking a date did nothing (WARP-944).
+  const pickDay = useCallback(
+    (d: Date) => {
+      setCursor(d);
+      setSelectedKey(view === "agenda" ? dayKey(d) : undefined);
+    },
+    [view],
+  );
 
   const eventCount = events.length;
   const sub =
@@ -347,7 +388,12 @@ export default function CalendarPage() {
       <div className="grid grid-cols-1 lg:grid-cols-[260px_1fr] gap-6">
         {/* Left rail — mini-month, calendars, up next, reminders, subscriptions */}
         <aside className="flex flex-col gap-4 order-2 lg:order-1">
-          <MiniMonth cursor={cursor} eventDays={eventDays} onCursor={(d) => setCursor(d)} />
+          <MiniMonth
+            cursor={cursor}
+            eventDays={eventDays}
+            onCursor={pickDay}
+            onMonthNav={(d) => { setCursor(d); setSelectedKey(undefined); }}
+          />
 
           <div className="card">
             <h2 style={{ fontSize: 14, fontWeight: 600, color: "var(--text)", margin: "0 0 8px" }}>Calendars</h2>
@@ -434,7 +480,12 @@ export default function CalendarPage() {
               colorOf={colorOf}
             />
           ) : (
-            <AgendaView events={visibleEvents} onSelect={openDetail} colorOf={colorOf} />
+            <AgendaView
+              events={visibleEvents}
+              onSelect={openDetail}
+              colorOf={colorOf}
+              selectedKey={selectedKey}
+            />
           )}
 
           {/* Color legend — at-a-glance key beside the grid; chips toggle the

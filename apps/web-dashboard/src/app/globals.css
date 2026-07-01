@@ -7,6 +7,13 @@
    ============================================================ */
 
 :root {
+  /* Declare the active color scheme so the browser paints NATIVE chrome
+     (the <select> popup list, date pickers, scrollbars, form controls) to
+     match. Without this, native <select> dropdowns render a white popup even
+     in dark mode — only the *closed* control picks up our surface tokens.
+     WARP-946. */
+  color-scheme: light;
+
   /* Surfaces */
   --color-surface-primary: #ffffff;
   --color-surface-secondary: #f2f2f7;
@@ -95,6 +102,11 @@
 }
 
 .dark {
+  /* Match native chrome to dark mode — the <select> popup list, date pickers,
+     scrollbars and other OS-rendered controls. This is the app-wide fix for
+     dropdown menus rendering a white background in dark mode. WARP-946. */
+  color-scheme: dark;
+
   /* Surfaces */
   --color-surface-primary: #000000;
   --color-surface-secondary: #1c1c1e;
@@ -336,7 +348,7 @@
     @apply flex items-center justify-between px-4 py-3 min-h-[44px];
   }
 
-  /* Text input */
+  /* Text input — also the shared treatment for native <select> controls. */
   .dp-input {
     @apply w-full bg-surface-secondary border border-separator rounded-sm px-3 py-2.5
            text-label-primary placeholder:text-label-tertiary
@@ -344,6 +356,15 @@
            transition-all duration-200 ease-smooth;
     --tw-ring-color: var(--color-accent);
     --tw-ring-opacity: 0.4;
+  }
+  /* Native <select> popup options. `color-scheme` on the theme root makes the
+     browser paint the popup chrome dark, but several engines still ignore it
+     for the option list itself — so pin the option surface + label to our
+     tokens too. No hardcoded white. WARP-946. */
+  .dp-input option,
+  .dp-input optgroup {
+    background-color: var(--color-surface-elevated);
+    color: var(--color-label-primary);
   }
 
   /* Primary button */

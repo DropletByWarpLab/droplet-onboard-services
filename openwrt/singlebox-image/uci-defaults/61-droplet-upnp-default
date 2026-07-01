@@ -1,0 +1,34 @@
+#!/bin/sh
+# KAN-9 — seed a DISABLED-by-default UPnP / NAT-PMP (miniupnpd) config.
+#
+# miniupnpd now ships in the image (openwrt/singlebox-image/Dockerfile). The
+# routing SDK's FirewallApi.upnp_status() reads `upnpd.config.enable_upnp` and
+# degrades a MISSING upnpd config to {available:false}. So the mere presence of
+# /etc/config/upnpd is what flips the dashboard UpnpCard from the read-only
+# "Not available" line to a real toggle.
+#
+# Two things have to be true for that surface to be HONEST:
+#   * the upnpd 'config' section must exist  → available:true;
+#   * UPnP + NAT-PMP must be OFF             → enabled:false.
+# The stock miniupnpd package ships enable_upnp='1'/enable_natpmp='1' (gated by
+# the daemon `enabled` flag). But upnp_status() reads enable_upnp directly, NOT
+# the daemon `enabled` gate — so on a fresh box the card would falsely claim
+# "Apps can open ports automatically" before the owner ever asked. A privacy
+# appliance never opens ports without consent (the card copy promises exactly
+# this), so we pin both protocol flags to 0 here. The owner turns them on via
+# the Tier-2 set_upnp path, which writes the same two flags + uci.apply.
+#
+# `enabled='0'` keeps procd from starting miniupnpd until interfaces are
+# configured by set_upnp — without valid external/internal_iface bindings
+# miniupnpd exits immediately and procd enters a respawn loop on first boot.
+# set_upnp(True) flips this to '1' alongside the protocol flags.
+#
+# Idempotent: named `uci set` on the 'config' section (never `uci add`), so a
+# re-run on a pre-bake container can't stack a second section. uci-defaults run
+# once on first boot of a fresh container, then procd deletes the script.
+uci -q get upnpd.config >/dev/null || uci set upnpd.config='upnpd'
+uci set upnpd.config.enabled='0'
+uci set upnpd.config.enable_upnp='0'
+uci set upnpd.config.enable_natpmp='0'
+uci commit upnpd
+exit 0

@@ -10,6 +10,7 @@ import type { ModelInfo } from "@/lib/types";
 import { CodeBlock } from "@/components/CodeBlock";
 import { StepShell } from "@/components/setup/StepShell";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
+import { ReasoningDisclosure } from "@/components/chat/ReasoningDisclosure";
 
 // Module-level constants so ReactMarkdown receives stable references across
 // re-renders (model-poll ticks, error state toggles). Inline object/array
@@ -98,6 +99,11 @@ export function AiStep({
   const [selectedPrompt, setSelectedPrompt] = useState<number>(0);
   const [customPrompt, setCustomPrompt] = useState<string>("");
   const [response, setResponse] = useState<string>("");
+  // WARP-934 — the model's reasoning ("thinking") trace for this answer, when
+  // it returns one. Rendered as the same collapsed "Thought process" disclosure
+  // the in-app /chat uses, so the wizard shows thinking too (gpt-oss is a
+  // reasoning model). Null when the answer carries no trace.
+  const [reasoning, setReasoning] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // WARP-849 — soft, retryable "warming up" state: the model answered
@@ -186,6 +192,7 @@ export function AiStep({
     setError(null);
     setNotice(null);
     setResponse("");
+    setReasoning(null);
     setSubmitting(true);
     try {
       const res = await sendChat({
@@ -217,8 +224,8 @@ export function AiStep({
         // healthy box mid-thought, not a failure: surface a soft
         // retryable note. The raw reasoning text is NEVER rendered as
         // the answer.
-        const reasoning = data?.message?.reasoning;
-        if (typeof reasoning === "string" && reasoning.trim()) {
+        const trace = data?.message?.reasoning;
+        if (typeof trace === "string" && trace.trim()) {
           setNotice(
             "The model is still warming up its answer — try once more.",
           );
@@ -229,6 +236,12 @@ export function AiStep({
         );
       }
       setResponse(content);
+      // WARP-934 — surface the reasoning trace alongside the answer (same
+      // collapsed disclosure as /chat) when the model returns one.
+      const trace = data?.message?.reasoning;
+      setReasoning(
+        typeof trace === "string" && trace.trim() ? trace : null,
+      );
     } catch (e) {
       setError(
         e instanceof Error
@@ -393,6 +406,9 @@ export function AiStep({
                 {localSelected?.name ?? selectedModel}
               </span>
             </div>
+            {/* WARP-934 — the model's "thinking", collapsed by default, above
+                the answer; identical to the in-app chat. */}
+            {reasoning && <ReasoningDisclosure trace={reasoning} />}
             <div className="chat-markdown type-body text-label-primary max-h-[40vh] overflow-y-auto">
               {/* Same plugin set as ChatMessage so the wizard answer renders
                   identically to the in-app chat (GFM tables, code highlight,

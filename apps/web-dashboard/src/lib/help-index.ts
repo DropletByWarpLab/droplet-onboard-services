@@ -31,6 +31,13 @@ export interface HelpEntry {
 
 export const HELP_INDEX: readonly HelpEntry[] = [
   {
+    id: "privacy",
+    title: "What is Droplet & how privacy works",
+    summary:
+      "Droplet is a private AI appliance that lives on your own network — a single box that runs your files, conversations, video, and smart-home control. The AI runs locally on the hardware in front of you (the GPU inside this Droplet), not on someone else's servers, so by default your messages and the model's replies never leave the box. Everything you store and record stays on the Droplet's own drives; nothing is sent off the appliance unless you explicitly choose to, like adding an optional cloud AI key in Settings. When you're away from home, your phone reaches the Droplet over its own end-to-end-encrypted VPN, without passing through any cloud service.",
+    keywords: ["privacy", "what is droplet", "local ai", "local", "private", "on device", "on-device", "no cloud", "data", "security", "gpu", "hardware", "offline"],
+  },
+  {
     id: "claim",
     title: "Claiming your Droplet",
     summary:
@@ -60,10 +67,10 @@ export const HELP_INDEX: readonly HelpEntry[] = [
   },
   {
     id: "internet",
-    title: "Internet (DuckDNS)",
+    title: "Your box's web address",
     summary:
-      "DuckDNS gives this Droplet a permanent name on the internet that keeps working even when your home internet address changes. Your phone uses this name to dial back to the Droplet's VPN when you're away from home. Sign up free, pick a subdomain, paste the token into the Internet step or the Remote Access page's Domain card. Change it later from Remote Access without a restart.",
-    keywords: ["duckdns", "domain", "subdomain", "dynamic dns", "ddns", "token", "hostname"],
+      "Your Droplet has its own secure web address — the name you gave it during setup — and it works the same at home and away, with a padlock and nothing to install. Remote access is automatic: there's nothing to sign up for and no address to type in. When you're away from home, open the Droplet app and turn on Connect, then open that same address in your browser. No dynamic DNS, no subdomain or token, and no changes to your home router.",
+    keywords: ["web address", "domain", "remote access", "connect", "away from home", "hostname", "url"],
   },
   {
     id: "storage",
@@ -83,7 +90,7 @@ export const HELP_INDEX: readonly HelpEntry[] = [
     id: "vpn",
     title: "Remote Access (WireGuard VPN)",
     summary:
-      "Remote Access uses WireGuard, a modern open-source VPN. Each device gets its own private key and the key never goes through any cloud service. Add a device, name it, and scan the QR code with the WireGuard app to connect. Revoke a device to stop its access immediately — the lost-phone case, or to rotate a key. The Add a device button needs the Internet (DuckDNS) step finished first.",
+      "Remote Access uses WireGuard, a modern open-source VPN. Each device gets its own private key and the key never goes through any cloud service. Add a device, name it, and scan the QR code with the WireGuard app to connect. Revoke a device to stop its access immediately — the lost-phone case, or to rotate a key. The Add a device button needs the box's web address ready first, which happens automatically.",
     keywords: ["vpn", "wireguard", "remote", "remote access", "tunnel", "qr code", "revoke", "rotate key", "away from home"],
   },
   {

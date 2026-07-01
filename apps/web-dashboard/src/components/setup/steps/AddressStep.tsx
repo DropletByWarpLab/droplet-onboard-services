@@ -1,454 +1,354 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Check, Globe, Loader2, Lock, ShieldCheck, X } from "lucide-react";
 import {
-  AlertCircle,
-  ArrowRight,
-  Eye,
-  EyeOff,
-  Globe,
-  Lock,
-  ShieldCheck,
-  Wifi,
-} from "lucide-react";
-import {
-  fetchDuckDnsStatus,
-  routerUnreachableNotice,
-  RouterStatusError,
-  setDuckDnsConfig,
-} from "@/lib/api";
-import type { DuckDnsStatus } from "@/lib/types";
+  validateBoxName,
+  boxNameToFqdn,
+  boxNameReasonMessage,
+  BOX_NAME_SUFFIX,
+} from "@droplet/shared-types";
+import { checkBoxName, setBoxName } from "@/lib/api";
 import { StepShell } from "@/components/setup/StepShell";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 
 /**
- * Wizard step — "Give your box a web address" (Onboarding-Flow redesign,
- * WIFI-ADDRESS-THEME-HANDOFF §1b). The DuckDNS half of the old combined
- * "Internet" step, now its own step after `wifi`.
+ * Wizard step — "Name your secure address" (WARP-979, ported from the design
+ * handoff's `SetSecured`). Reworks the old informational DuckDNS `address` step
+ * into the handoff's flow: the owner TYPES a name for their box and it becomes
+ * `<name>.droplet-us.com` — a publicly-trusted address (real green padlock,
+ * nothing to install on any device).
  *
- * The customer signs up for a free DuckDNS account (their own, not a Droplet
- * cloud feature) and pastes the subdomain + token. We store it on the OpenWrt
- * side via PUT /api/ddns/duckdns; the subsequent `vpn` step uses the resulting
- * `<subdomain>.duckdns.org` as the WireGuard endpoint. An inline three-step
- * diagram (Home Wi-Fi → Internet address → Remote access) makes the mental
- * model explicit — this address is what the remote-access step hands the phone.
+ * The step KEY stays `address` (the STEPS/Step union + state machine are
+ * unchanged — wifi/address still both persist as the single `internet`
+ * SetupStep). Only this step's PURPOSE + UI changed.
  *
- * Skippable. Skipping leaves DuckDNS unconfigured, so the downstream `vpn` step
- * renders its blocked state and points back HERE (the address step), not the
- * Wi-Fi step.
- *
- * DuckDNS validation mirrors the orchestrator's Zod schema in
- * `apps/orchestrator/src/routes/ddns.ts`:
- *   subdomain: /^[a-z0-9-]+$/, no leading/trailing hyphen, 1–63 chars
- *   token: 10–128 chars
+ * Validation mirrors the HQ ruleset via the SHARED `@droplet/shared-types`
+ * box-name util (lowercase DNS-safe slug, 3–40 chars, no leading/trailing/double
+ * hyphen, reserved blocklist, `d-<16hex>` lookalike rejection) so the live
+ * client-side check here and the orchestrator's server-side re-check can never
+ * drift. Availability is checked (debounced) against
+ * GET /api/setup/box-name/check. Continue is disabled until a valid + available
+ * name is chosen; Skip is always allowed. On Continue the chosen name is POSTed
+ * to POST /api/setup/box-name so the box's tls-issuance requests
+ * `<name>.droplet-us.com`.
  */
 
-/** One node in the "what this is for" chain diagram. */
-function ChainNode({
-  icon: Icon,
-  label,
-  caption,
-  hot,
-}: {
-  icon: typeof Globe;
-  label: string;
-  caption: string;
-  hot?: boolean;
-}) {
-  return (
-    <div
-      className={`flex-1 min-w-0 rounded-xl px-3 py-2.5 text-center border ${
-        hot
-          ? "border-accent/30 bg-accent-subtle"
-          : "border-separator bg-surface-secondary"
-      }`}
-    >
-      <Icon
-        size={17}
-        className={`mx-auto ${hot ? "text-accent" : "text-label-tertiary"}`}
-        aria-hidden="true"
-      />
-      <div
-        className={`type-caption-1 font-semibold mt-1.5 ${
-          hot ? "text-accent" : "text-label-secondary"
-        }`}
-      >
-        {label}
-      </div>
-      <div className="type-caption-2 text-label-tertiary mt-0.5">{caption}</div>
-    </div>
-  );
-}
+/** Debounce (ms) before the availability check fires as the owner types. */
+const CHECK_DEBOUNCE_MS = 450;
+
+type CheckStatus =
+  | { kind: "idle" }
+  | { kind: "invalid"; message: string }
+  | { kind: "checking" }
+  | { kind: "available" }
+  | { kind: "taken"; message: string }
+  | { kind: "error" };
 
 export function AddressStep({
   onComplete,
   onSkip,
 }: {
-  // The VpnStep re-fetches the live endpoint via `fetchVpnStatus()` on mount,
-  // so the parent doesn't need to thread the subdomain through.
   onComplete: () => void;
   onSkip: () => void;
 }) {
-  const [subdomain, setSubdomain] = useState("");
-  const [token, setToken] = useState("");
-  const [showToken, setShowToken] = useState(false);
-  const [enabled, setEnabled] = useState(true);
-  const [existing, setExisting] = useState<DuckDnsStatus | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [name, setName] = useState("");
+  const [status, setStatus] = useState<CheckStatus>({ kind: "idle" });
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  // WARP-807: a router-reachability problem is a soft "do this later" notice
-  // (amber), not a destructive validation error (red).
-  const [errorTone, setErrorTone] = useState<"error" | "notice">("error");
-  const [noticeDestination, setNoticeDestination] = useState<string | null>(
-    null,
-  );
-  // The dashboard surface this step's settings live on (WARP-807 UX review).
-  const NETWORK_DESTINATION = "Network";
+  const [saveError, setSaveError] = useState<string | null>(null);
 
-  // Load any prior DuckDNS config so we can pre-fill the form. 403 just means
-  // the auth context hasn't fully hydrated yet — treat as "no config".
-  const load = useCallback(async () => {
-    try {
-      const status = await fetchDuckDnsStatus();
-      setExisting(status);
-      if (status.configured) {
-        setSubdomain(status.subdomain);
-        setEnabled(status.enabled);
-      }
-    } catch {
-      // Non-fatal — render the form as if unconfigured.
-    } finally {
-      setLoading(false);
+  // Normalize for display + validation. We never rewrite the owner's raw input
+  // (they see their own typing); the slug is the normalized form we validate,
+  // check, and persist.
+  const local = validateBoxName(name);
+  const slug = local.slug;
+  const fqdn = boxNameToFqdn(slug || "your-box");
+
+  // Cancel a stale in-flight availability check when the input changes.
+  const abortRef = useRef<AbortController | null>(null);
+  // The slug the LATEST render is interested in. A resolving check whose slug no
+  // longer matches this is stale (the owner typed on, possibly into an INVALID
+  // name that fired no new check + no abort) and MUST NOT paint its result over
+  // the current state — otherwise a slow "available" response could overwrite a
+  // freshly-shown "invalid"/"taken", re-enabling Continue for a name that isn't
+  // actually valid. `null` = the current input is empty/invalid (discard any
+  // in-flight result).
+  const wantSlugRef = useRef<string | null>(null);
+
+  const runCheck = useCallback((candidate: string) => {
+    const v = validateBoxName(candidate);
+    if (!v.ok) {
+      wantSlugRef.current = null;
+      abortRef.current?.abort();
+      setStatus({
+        kind: "invalid",
+        message: boxNameReasonMessage(v.reason ?? "empty"),
+      });
+      return;
     }
+    setStatus({ kind: "checking" });
+    const controller = new AbortController();
+    abortRef.current?.abort();
+    abortRef.current = controller;
+    checkBoxName(v.slug, controller.signal)
+      .then((res) => {
+        // Discard if superseded (aborted) OR if the owner has since moved on to a
+        // different (or invalid) slug — the ref, not just the abort signal, is
+        // authoritative because an invalid keystroke fires no new check to abort
+        // this one.
+        if (controller.signal.aborted || wantSlugRef.current !== v.slug) return;
+        if (res.available) {
+          setStatus({ kind: "available" });
+        } else {
+          setStatus({
+            kind: "taken",
+            message:
+              res.message ??
+              "That name isn't available — pick another.",
+          });
+        }
+      })
+      .catch((e) => {
+        if (
+          controller.signal.aborted ||
+          wantSlugRef.current !== v.slug ||
+          (e as Error)?.name === "AbortError"
+        ) {
+          return;
+        }
+        setStatus({ kind: "error" });
+      });
   }, []);
 
+  // Debounced live validation + availability check as the owner types.
   useEffect(() => {
-    load();
-  }, [load]);
-
-  function validate(): string | null {
-    const sub = subdomain.trim();
-    if (!sub) return null; // blank = skip the address for now.
-    if (sub.length > 63) return "Subdomain must be 63 characters or fewer.";
-    if (!/^[a-z0-9-]+$/.test(sub))
-      return "Subdomain can only contain lowercase letters, numbers, and hyphens.";
-    if (sub.startsWith("-") || sub.endsWith("-"))
-      return "Subdomain can't start or end with a hyphen.";
-
-    // Token is required unless we're keeping a previously-stored one.
-    const tok = token.trim();
-    const keepingStored =
-      existing?.configured === true &&
-      existing.tokenSet === true &&
-      tok.length === 0;
-    if (!keepingStored) {
-      if (tok.length < 10)
-        return "Paste the DuckDNS token from your account (at least 10 characters).";
-      if (tok.length > 128)
-        return "That token is longer than expected. Double-check you copied it cleanly.";
-    }
-    return null;
-  }
-
-  async function handleSave() {
-    const v = validate();
-    if (v) {
-      setErrorTone("error");
-      setError(v);
+    if (name.trim().length === 0) {
+      wantSlugRef.current = null;
+      abortRef.current?.abort();
+      setStatus({ kind: "idle" });
       return;
     }
-    setError(null);
-    setErrorTone("error");
-
-    const sub = subdomain.trim();
-    // Blank = move on without remote access; the VPN step will render blocked.
-    if (!sub) {
-      onComplete();
+    // Validate immediately (no debounce) so bad input reads as invalid at once;
+    // only debounce the network availability check.
+    const v = validateBoxName(name);
+    if (!v.ok) {
+      // Mark the current input as not-checkable and cancel any in-flight check so
+      // a slow prior response can't overwrite this invalid state.
+      wantSlugRef.current = null;
+      abortRef.current?.abort();
+      setStatus({
+        kind: "invalid",
+        message: boxNameReasonMessage(v.reason ?? "empty"),
+      });
       return;
     }
+    // Record the slug this render wants an answer for; runCheck discards any
+    // resolution whose slug no longer matches.
+    wantSlugRef.current = v.slug;
+    setStatus({ kind: "checking" });
+    const t = setTimeout(() => runCheck(name), CHECK_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [name, runCheck]);
 
+  useEffect(() => () => abortRef.current?.abort(), []);
+
+  const isAvailable = status.kind === "available";
+
+  async function handleContinue() {
+    if (!isAvailable) return;
+    setSaveError(null);
     setSaving(true);
     try {
-      // "Keep stored" path: omit `token` so the orchestrator preserves the
-      // existing one (its Zod schema treats token as optional).
-      const keepStored = !token.trim() && existing?.configured === true;
-      const payload: { subdomain: string; token?: string; enabled?: boolean } = {
-        subdomain: sub,
-        enabled,
-      };
-      if (!keepStored) payload.token = token.trim();
-      const result = await setDuckDnsConfig(payload);
-      setExisting(result);
+      await setBoxName(slug);
       onComplete();
     } catch (e) {
-      // WARP-807: an unreachable router throws a RouterStatusError (503 /
-      // UNREACHABLE). Surface the actionable "finish from Network later" notice
-      // in the soft amber tone.
-      const notice = routerUnreachableNotice(e, NETWORK_DESTINATION);
-      if (notice) {
-        setErrorTone("notice");
-        setError(notice.prefix);
-        setNoticeDestination(notice.destination);
-      } else if (
-        // A 4xx refusal carries an actionable, customer-fixable message (bad
-        // subdomain shape, token length) — show it in red, like WifiStep.
-        e instanceof RouterStatusError &&
-        (e.status === 400 || e.status === 422) &&
-        e.message.trim().length > 0
-      ) {
-        setErrorTone("error");
-        setError(e.message);
-      } else if (e instanceof RouterStatusError) {
-        // WARP-869 — any other routing-layer failure on the write. The live
-        // case (2026-06-11 wizard run): the DuckDNS set ROLLED_BACK while
-        // rpcd denied the routing service (WARP-868), and this step rendered
-        // the raw "DuckDNS set: 500 Internal Server Error" in red on a
-        // first-run screen. Mirror WifiStep's calm write-failure ladder rung
-        // instead: amber, skippable, names where to finish later.
-        setErrorTone("notice");
-        setError(
-          "We couldn't save the web address right now. You can skip this step and finish it from",
-        );
-        setNoticeDestination(NETWORK_DESTINATION);
-      } else {
-        setErrorTone("error");
-        setError(
-          e instanceof Error
-            ? e.message
-            : "Could not save. Try again in a moment.",
-        );
-      }
+      setSaveError(
+        e instanceof Error
+          ? e.message
+          : "Couldn't save that name. Try again in a moment.",
+      );
     } finally {
       setSaving(false);
     }
   }
 
-  const alreadyConfigured = existing?.configured === true;
-  // The CTA reads "Continue" when there's nothing new to submit (already
-  // configured and no new token typed) or the address is being skipped (blank).
-  const nothingNewToSubmit =
-    !subdomain.trim() || (alreadyConfigured && token.length === 0);
+  // Ring + status glyph mirror the handoff's live-validation affordance, in our
+  // tokens: accent while checking, green when available, red when invalid/taken.
+  const ringClass =
+    status.kind === "available"
+      ? "border-system-green ring-2 ring-system-green/20"
+      : status.kind === "invalid" || status.kind === "taken"
+        ? "border-system-red ring-2 ring-system-red/20"
+        : "border-separator focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/20";
 
   return (
     <StepShell
       current="address"
-      title="Give your box a web address"
-      subtitle="Optional. Your box already gets a secure web address automatically — DuckDNS is a legacy extra you can skip."
+      title="Name your secure address"
+      subtitle="Your Droplet gives itself a private, publicly-trusted web address — pick the name you want and we'll check it's free. The padlock is real, with nothing to install on any device."
       primary={{
-        label: nothingNewToSubmit ? "Continue" : "Save and continue",
+        label: "Continue",
         loadingLabel: "Saving…",
-        onClick: handleSave,
+        onClick: handleContinue,
         isLoading: saving,
-        disabled: loading,
-        showArrow: !subdomain.trim(),
+        disabled: !isAvailable,
+        showArrow: true,
+        ariaDescribedBy: !isAvailable ? "box-name-status" : undefined,
       }}
-      skip={{ label: "Skip — no remote access", onClick: onSkip }}
+      skip={{ label: "Skip — I'll do this later", onClick: onSkip }}
     >
-      {/* Fixed-content body (chain diagram, subdomain + token fields,
-          auto-update toggle, help card) — NOT an unbounded list, so it is NOT
-          wrapped in a <ScrollRegion>. WARP-847: the onboarding split (#548) had
-          capped this at 40/44dvh, which forced an inner scrollbar over the
-          inputs with dead space below the card — regressing the #546 fix. The
-          StepShell panel is scroll-when-needed instead (fits a normal viewport
-          with no scrollbar; a viewport too short scrolls the whole panel rather
-          than clipping). */}
-      <>
-        {/* The chain, in plain terms — why this step exists. */}
+      {/* Name input with the fixed .droplet-us.com suffix + live status glyph. */}
+      <label className="block">
+        <span className="type-subheadline text-label-secondary block mb-1.5">
+          Choose your address
+        </span>
         <div
-          className="flex items-stretch gap-2 mb-4"
-          role="img"
-          aria-label="Home Wi-Fi, then Internet address (this step), then Remote access"
+          className={`flex items-center gap-2 h-12 px-3.5 rounded-xl bg-surface-primary border transition-[border-color,box-shadow] duration-200 ${ringClass}`}
         >
-          <ChainNode icon={Wifi} label="Home Wi-Fi" caption="on your network" />
-          <ArrowRight
-            size={14}
-            className="self-center flex-none text-label-tertiary"
-            aria-hidden="true"
-          />
-          <ChainNode
-            icon={Globe}
-            label="Internet address"
-            caption="this step"
-            hot
-          />
-          <ArrowRight
-            size={14}
-            className="self-center flex-none text-label-tertiary"
-            aria-hidden="true"
-          />
-          <ChainNode
-            icon={ShieldCheck}
-            label="Remote access"
-            caption="reach it away"
-          />
-        </div>
-
-        {alreadyConfigured && (
-          <div className="dp-card !p-3 mb-4 flex items-start gap-2">
-            <Globe size={14} className="text-system-green flex-shrink-0 mt-1" />
-            <div>
-              <p className="type-footnote text-label-primary">
-                Already set up — your Droplet is reachable at{" "}
-                <span className="font-mono">{existing.fullDomain}</span>.
-              </p>
-              <p className="type-caption-1 text-label-tertiary mt-0.5">
-                Paste a new token below to replace the stored one, or just
-                continue.
-              </p>
-            </div>
-          </div>
-        )}
-
-        <div className="flex items-center gap-2 mb-3">
           <Globe
-            size={15}
-            className="text-accent flex-shrink-0"
+            size={16}
+            className="text-label-tertiary flex-none"
             aria-hidden="true"
           />
-          <span className="type-caption-1 font-bold uppercase tracking-[0.06em] text-label-secondary">
-            Internet address · DuckDNS
+          <input
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="your-box"
+            aria-label="Box name"
+            className="flex-1 min-w-0 border-none outline-none bg-transparent font-mono type-body font-semibold text-label-primary placeholder:text-label-quaternary"
+            autoCapitalize="off"
+            autoComplete="off"
+            autoCorrect="off"
+            spellCheck={false}
+            maxLength={40}
+          />
+          <span className="font-mono type-body text-label-tertiary flex-none">
+            {BOX_NAME_SUFFIX}
+          </span>
+          <span className="flex-none flex items-center ml-auto" aria-hidden="true">
+            {status.kind === "checking" && (
+              <Loader2 size={16} className="text-label-tertiary animate-spin" />
+            )}
+            {status.kind === "available" && (
+              <Check size={16} className="text-system-green" />
+            )}
+            {(status.kind === "invalid" || status.kind === "taken") && (
+              <X size={16} className="text-system-red" />
+            )}
           </span>
         </div>
+      </label>
 
-        <div className="space-y-4">
-          <div>
-            <label className="type-subheadline text-label-secondary block mb-1.5">
-              Subdomain
-            </label>
-            <div className="flex items-center gap-2">
-              <div className="relative flex-1">
-                <Globe
-                  size={16}
-                  className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary"
-                  aria-hidden="true"
-                />
-                <input
-                  type="text"
-                  value={subdomain}
-                  onChange={(e) => setSubdomain(e.target.value.toLowerCase())}
-                  placeholder="yourstudio"
-                  className="dp-input pl-10"
-                  maxLength={63}
-                  autoCapitalize="none"
-                  autoComplete="off"
-                  spellCheck={false}
-                />
-              </div>
-              <span className="type-footnote text-label-tertiary whitespace-nowrap">
-                .duckdns.org
-              </span>
-            </div>
-          </div>
-
-          <div>
-            <label className="type-subheadline text-label-secondary block mb-1.5">
-              Token
-              {alreadyConfigured && existing.tokenSet && (
-                <span className="text-label-tertiary"> (replace, optional)</span>
-              )}
-            </label>
-            <div className="relative">
-              <Lock
-                size={16}
-                className="absolute left-3 top-1/2 -translate-y-1/2 text-label-tertiary"
-                aria-hidden="true"
-              />
-              <input
-                type={showToken ? "text" : "password"}
-                value={token}
-                onChange={(e) => setToken(e.target.value)}
-                placeholder={
-                  alreadyConfigured && existing.tokenSet
-                    ? "•••••• (stored)"
-                    : "Paste your DuckDNS token"
-                }
-                className="dp-input pl-10 pr-10"
-                autoComplete="off"
-              />
-              <button
-                type="button"
-                onClick={() => setShowToken((s) => !s)}
-                aria-label={showToken ? "Hide token" : "Show token"}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-label-tertiary transition-colors duration-200 hover:text-label-secondary"
-              >
-                {showToken ? <EyeOff size={16} /> : <Eye size={16} />}
-              </button>
-            </div>
-          </div>
-
-          <label className="flex items-center gap-2 type-footnote text-label-secondary cursor-pointer">
-            <input
-              type="checkbox"
-              checked={enabled}
-              onChange={(e) => setEnabled(e.target.checked)}
-              className="rounded"
-            />
-            Keep the address up to date automatically
-          </label>
-        </div>
-
-        {errorTone === "notice" && (
-          <div
-            role="status"
-            aria-live="polite"
-            className="mt-4 flex items-start gap-2 type-footnote text-label-primary bg-system-orange/10 rounded-sm px-3 py-2"
-          >
-            <AlertCircle
-              size={14}
-              className="mt-0.5 flex-shrink-0 text-system-orange"
-              aria-hidden="true"
-            />
+      {/* Live status line — announced politely so a screen reader hears the
+          availability result without stealing focus. */}
+      <div
+        id="box-name-status"
+        role="status"
+        aria-live="polite"
+        className="min-h-[1.5rem] mt-2 mb-4 type-footnote"
+      >
+        {status.kind === "checking" && (
+          <span className="text-label-tertiary">
+            Checking <span className="font-mono">{fqdn}</span>…
+          </span>
+        )}
+        {status.kind === "available" && (
+          <span className="text-system-green inline-flex items-center gap-1.5">
+            <Check size={13} aria-hidden="true" />
             <span>
-              {error} <span className="font-mono">{noticeDestination}</span>{" "}
-              later.
+              <span className="font-mono">{fqdn}</span> is available
+            </span>
+          </span>
+        )}
+        {status.kind === "invalid" && (
+          <span className="text-system-red">{status.message}</span>
+        )}
+        {status.kind === "taken" && (
+          <span className="text-system-red">
+            <span className="font-mono">{fqdn}</span> — {status.message}
+          </span>
+        )}
+        {status.kind === "error" && (
+          <span className="text-label-tertiary">
+            Couldn&rsquo;t check that name right now — try again in a moment.
+          </span>
+        )}
+      </div>
+
+      {/* Padlock preview card — dims until a valid, available name is chosen. */}
+      <div
+        className={`dp-card !p-4 flex items-center gap-3.5 mb-4 transition-opacity duration-200 ${
+          isAvailable ? "opacity-100" : "opacity-50"
+        }`}
+      >
+        <span className="w-11 h-11 rounded-xl flex-none flex items-center justify-center bg-system-green/10 text-system-green">
+          <Lock size={22} aria-hidden="true" />
+        </span>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <Lock size={13} className="text-system-green" aria-hidden="true" />
+            <span className="font-mono type-subheadline font-semibold text-label-primary truncate">
+              {fqdn}
             </span>
           </div>
-        )}
+          <p className="type-caption-1 text-label-tertiary mt-0.5">
+            Trusted certificate · auto-issued once you confirm · renews itself
+          </p>
+        </div>
+      </div>
 
-        {error && errorTone === "error" && (
-          <div
-            role="alert"
-            className="mt-4 flex items-start gap-2 type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2"
-          >
-            <AlertCircle
-              size={14}
-              className="mt-0.5 flex-shrink-0"
-              aria-hidden="true"
-            />
-            <span>{error}</span>
+      {/* Two reassurance tiles — ported from the handoff. */}
+      <div className="flex items-stretch gap-2">
+        <div className="flex-1 min-w-0 dp-card !p-3.5">
+          <ShieldCheck size={17} className="text-accent" aria-hidden="true" />
+          <div className="type-footnote font-semibold mt-1.5 text-label-primary">
+            Nothing to install
           </div>
-        )}
+          <div className="type-caption-1 text-label-tertiary mt-0.5 leading-snug">
+            no per-device certificate, no security warning to click through
+          </div>
+        </div>
+        <div className="flex-1 min-w-0 dp-card !p-3.5">
+          <Globe size={17} className="text-accent" aria-hidden="true" />
+          <div className="type-footnote font-semibold mt-1.5 text-label-primary">
+            One address everywhere
+          </div>
+          <div className="type-caption-1 text-label-tertiary mt-0.5 leading-snug">
+            the same trusted address resolves at home and over the VPN
+          </div>
+        </div>
+      </div>
 
-        <LearnMoreCard helpAnchor="internet">
-          <p>
-            Your box now gets its own secure web address automatically — the one
-            you already use at home works over remote access too, with a padlock
-            and nothing to install. <strong>You can skip this step.</strong>
-          </p>
-          <p>
-            <strong>DuckDNS</strong> is a legacy extra: a free service that gives
-            the box a second, custom address like{" "}
-            <span className="font-mono">yourstudio.duckdns.org</span>. Add it only
-            if you specifically want that name; it&rsquo;s no longer required for
-            remote access.
-          </p>
-          <p>
-            Don&rsquo;t have a DuckDNS account?{" "}
-            <a
-              href="https://www.duckdns.org/"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-accent hover:underline"
-            >
-              Sign up free at duckdns.org
-            </a>{" "}
-            — it takes a minute. You sign in with a Google, GitHub, Reddit, or
-            Twitter account, pick a subdomain, and copy the token. Skip this and
-            remote access stays off until you add it later.
-          </p>
-        </LearnMoreCard>
-      </>
+      {saveError && (
+        <div
+          role="alert"
+          className="mt-4 flex items-start gap-2 type-footnote text-system-red bg-system-red/10 rounded-sm px-3 py-2"
+        >
+          <X size={14} className="mt-0.5 flex-shrink-0" aria-hidden="true" />
+          <span>{saveError}</span>
+        </div>
+      )}
+
+      <LearnMoreCard title="What the padlock means" helpAnchor="internet">
+        <p>
+          The padlock in your browser&rsquo;s address bar tells you two things:
+          the connection to this box is <strong>encrypted</strong> (nobody on the
+          network can read it), and the box is <strong>who it says it is</strong>{" "}
+          — its identity was checked against a certificate a trusted authority
+          signed.
+        </p>
+        <p>
+          Older setups served a <strong>self-signed</strong> certificate the
+          browser didn&rsquo;t recognise, so every phone and laptop hit a
+          &ldquo;your connection is not private&rdquo; warning and had to run a
+          trust script. Now the box issues itself a{" "}
+          <strong>publicly-trusted</strong> certificate for its own private
+          address (<span className="font-mono">{"<name>"}{BOX_NAME_SUFFIX}</span>)
+          — a real green padlock, zero install, and nothing is ever published to
+          the public internet.
+        </p>
+      </LearnMoreCard>
     </StepShell>
   );
 }

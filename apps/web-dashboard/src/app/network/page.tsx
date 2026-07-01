@@ -648,6 +648,13 @@ function OverviewTab({ overview }: { overview: NetworkOverview | undefined }) {
   const lanIp = lan?.["ipv4-address"]?.[0]?.address ?? "N/A";
   const wanIp = wan?.["ipv4-address"]?.[0]?.address ?? "N/A";
   const wanProto = wan?.proto ?? "unknown";
+  // Single-box hands the WAN uplink to the appliance host, so the in-box OpenWrt
+  // reports the wan interface as `present:false`. That absence is the shipping
+  // shape, NOT an outage — render it as an honest "handled upstream" state
+  // rather than a red error/"N/A" that reads as the router being offline. A WAN
+  // that is genuinely configured-but-down (`present:true, up:false`) still
+  // surfaces as an error.
+  const wanPresent = wan?.present !== false;
   const uptime = system?.resources?.uptime ?? 0;
   const uptimeHours = Math.floor(uptime / 3600);
   const uptimeDays = Math.floor(uptimeHours / 24);
@@ -688,9 +695,9 @@ function OverviewTab({ overview }: { overview: NetworkOverview | undefined }) {
         <StatusCard
           icon={Globe}
           title="WAN"
-          value={wanIp}
-          subtitle={`Protocol: ${wanProto}`}
-          status={wan?.up ? "ok" : "error"}
+          value={wanPresent ? wanIp : "Provided by Droplet"}
+          subtitle={wanPresent ? `Protocol: ${wanProto}` : "Internet handled by the appliance"}
+          status={wanPresent ? (wan?.up ? "ok" : "error") : "ok"}
         />
         <StatusCard
           icon={Router}
@@ -1077,10 +1084,12 @@ function SystemTab({
           country). */}
       <SystemControlsCard />
 
-      {/* Interfaces — read-only enumeration of every configured interface.
-          Add/Edit is deferred (UCI network rewrite can cut the served AP/LAN);
-          present:false rows render an honest 'not on this box' state. */}
-      <InterfacesTable />
+      {/* Interfaces — enumeration of every configured interface. KAN-10 adds the
+          owner/admin Add/Edit + owner-only Restart write path: Tier-2/3 confirm,
+          routing-side safe_apply auto-rollback, and an extra confirm before a
+          write to the management interface. present:false rows render an honest
+          'not on this box' state. */}
+      <InterfacesTable canEdit={canEdit} isOwner={user?.role === "owner"} />
 
       {/* AI agent access — read-only droplet-ai RPC scopes from the live ACL.
           Rotate/Revoke are honest-gated (disabled): they'd need a coordinated

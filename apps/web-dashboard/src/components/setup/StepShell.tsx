@@ -66,7 +66,8 @@ export const RAIL_LABELS: Record<Step, { label: string; Icon: LucideIcon }> = {
   org: { label: "Workspace", Icon: Building2 },
   twofactor: { label: "2-step", Icon: KeyRound },
   // Onboarding-Flow redesign — the old single "Internet" rail row becomes two:
-  // the local home Wi-Fi the box broadcasts, then the DuckDNS web address.
+  // the local home Wi-Fi the box broadcasts, then the secure address the box
+  // gives itself (<name>.droplet-us.com — no DuckDNS, WARP-979).
   wifi: { label: "Home Wi-Fi", Icon: Wifi },
   address: { label: "Internet address", Icon: Globe },
   storage: { label: "Storage", Icon: HardDrive },
@@ -88,6 +89,15 @@ export interface StepShellAction {
   isLoading?: boolean;
   /** Adds the arrow glyph used by "Get Started" / "Continue". */
   showArrow?: boolean;
+  /**
+   * Id of an element that describes the action (e.g. why it's disabled). Wired
+   * to the button's `aria-describedby`. An empty or whitespace-only string is
+   * treated as absent so the rendered attribute never carries an invalid empty
+   * IDREF. Prefer surfacing a gate explanation through the actionable control's
+   * own description rather than the disabled button, which some screen readers
+   * skip.
+   */
+  ariaDescribedBy?: string;
 }
 
 export interface StepShellSkip {
@@ -176,6 +186,7 @@ export function StepShell({
   children,
   primary,
   skip,
+  hideBack,
 }: {
   /** Which wizard step is active — drives the rail highlight + counter. */
   current: Step;
@@ -186,6 +197,14 @@ export function StepShell({
   children?: ReactNode;
   primary?: StepShellAction;
   skip?: StepShellSkip;
+  /**
+   * WARP-929 (T4) — suppress ALL backward navigation (footer Back + rail jump)
+   * for this render, regardless of the floor. Used by the two-factor
+   * recovery-codes screen: the codes show once, so the only way off is the
+   * confirmed Continue — going back would strand the user on a now-2FA-enabled
+   * account with no codes.
+   */
+  hideBack?: boolean;
 }) {
   const idx = STEPS.indexOf(current);
   const total = STEPS.length;
@@ -204,7 +223,13 @@ export function StepShell({
   const navigate = nav?.navigate;
   const back = nav?.back;
   const maxReached = nav?.maxReachedIdx ?? idx;
-  const showFooter = Boolean(primary || skip || (navigate && idx >= 1));
+  // WARP-929 — backward navigation is fenced below `firstNavigable` (defaults to
+  // 0, i.e. the pre-floor behaviour `idx >= 1`, when no provider sets it). The
+  // page sets it to the Workspace step so claim/account can't be revisited
+  // (no unclaim). `hideBack` is a per-render override (the 2FA codes screen).
+  const firstNavigable = nav?.firstNavigableIdx ?? 0;
+  const canShowBack = Boolean(!hideBack && navigate && idx > firstNavigable);
+  const showFooter = Boolean(primary || skip || canShowBack);
 
   return (
     // `setup-shell` scopes the wizard's fluid `type-*` overrides (globals.css);
@@ -245,7 +270,11 @@ export function StepShell({
                 Icon={meta.Icon}
                 state={state}
                 onClick={
-                  navigate && i !== idx && i <= maxReached
+                  navigate &&
+                  !hideBack &&
+                  i !== idx &&
+                  i <= maxReached &&
+                  i >= firstNavigable
                     ? () => navigate(id)
                     : undefined
                 }
@@ -334,7 +363,7 @@ export function StepShell({
                 compact footer; a mobile home user is exactly who needs the 44px
                 target (UX review on #518). */}
             <div>
-              {navigate && idx >= 1 && (
+              {canShowBack && navigate && (
                 <button
                   type="button"
                   onClick={() => (back ? back() : navigate(STEPS[idx - 1]))}
@@ -363,6 +392,7 @@ export function StepShell({
                   type="button"
                   onClick={primary.onClick}
                   disabled={primary.disabled || primary.isLoading}
+                  aria-describedby={primary.ariaDescribedBy?.trim() || undefined}
                   className="dp-btn-primary"
                 >
                   {primary.isLoading

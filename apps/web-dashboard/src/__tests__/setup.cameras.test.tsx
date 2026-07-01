@@ -58,11 +58,27 @@ vi.mock("@/lib/api", () => ({
     next_step: "internet",
   })),
   fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
+  // WARP-979 — the reworked AddressStep imports these (this walk skips the step).
+  checkBoxName: vi.fn(async () => ({
+    available: true,
+    slug: "studio",
+    fqdn: "studio.droplet-us.com",
+    authoritative: false,
+  })),
+  setBoxName: vi.fn(async () => ({
+    ok: true,
+    slug: "studio",
+    fqdn: "studio.droplet-us.com",
+  })),
   setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
   fetchDrives: vi.fn(async () => ({ drives: [], count: 0 })),
   updateDriveLabel: vi.fn(),
   fetchDiscoveredCameras: () => fetchDiscoveredCamerasMock(),
   acceptDiscoveredCamera: (id: string) => acceptDiscoveredCameraMock(id),
+  // WARP-933 — the step no longer auto-skips, so its existing-cameras fetch
+  // actually runs to render; stub it (and removeCamera) so it loads cleanly.
+  fetchCameras: vi.fn(async () => []),
+  removeCamera: vi.fn(async () => undefined),
   // VPN step is downstream; lands on preCheck (endpointConfigured: false)
   // so tests can navigate it with one extra Skip click.
   fetchVpnStatus: vi.fn(async () => ({
@@ -131,11 +147,18 @@ async function advanceToCameras() {
   await act(async () => {
     await Promise.resolve();
     await Promise.resolve();
+    // WARP-979 — the address step (Secured / name your box) → skip.
     fireEvent.click(
-      screen.getByRole("button", { name: /skip — no remote access/i }),
+      screen.getByRole("button", { name: /skip — i'll do this later/i }),
     );
   });
-  // Storage auto-skip → Discovery → skip
+  // WARP-933 — Storage now RENDERS (no silent auto-skip): skip it, then skip
+  // the Discovery step, to reach Cameras.
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+    fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+  });
   await act(async () => {
     await Promise.resolve();
     await Promise.resolve();
@@ -179,13 +202,19 @@ describe("setup Cameras step (WARP-174)", () => {
     vi.clearAllMocks();
   });
 
-  it("auto-skips when zero discovered cameras", async () => {
+  it("renders a visible empty state (no silent auto-skip) when zero cameras, and Continue advances (WARP-933)", async () => {
     fetchDiscoveredCamerasMock.mockResolvedValue([]);
     render(<SetupPage />);
     await advanceToCameras();
-    // Skipped through to Done — WelcomeFlourish renders.
-    // Cameras step finished. Skip VPN preCheck, then AI, then Team (PR #381),
-    // to reach Done.
+
+    // WARP-933 — the step is VISIBLE, not silently jumped past.
+    expect(screen.getByText(/no cameras yet/i)).toBeInTheDocument();
+
+    // Continue past cameras (nothing to add), then skip VPN, AI, Team → Done.
+    await act(async () => {
+      await Promise.resolve();
+      fireEvent.click(screen.getByRole("button", { name: /^continue$/i }));
+    });
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();

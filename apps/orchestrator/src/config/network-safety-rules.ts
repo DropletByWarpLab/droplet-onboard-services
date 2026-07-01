@@ -46,6 +46,12 @@ const TIER_2_OPERATIONS = new Set([
   "delete_firewall_rule",
   "add_forwarding",
   "interface_down",
+  // KAN-10: interface add/edit. Rewriting /etc/config/network can cut the
+  // dashboard's own connectivity (a wrong proto/address/zone on the management
+  // interface), so confirm + 60s SDK auto-rollback. The management interface
+  // itself is additionally refused/extra-confirmed at the routing layer.
+  "create_interface",
+  "edit_interface",
   // Camera subnet
   "camera_subnet_setup",
   "camera_subnet_teardown",
@@ -78,10 +84,18 @@ const TIER_2_OPERATIONS = new Set([
 const TIER_3_OPERATIONS = new Set([
   "reboot",
   "factory_reset",
+  // KAN-8: router firmware flash + overlay wipe. Brick-risk, owner-only,
+  // web-UI-only (never AI-triggerable) — same tier as factory_reset. The route
+  // ALSO refuses these on any non-PRIMARY_ROUTER deployment shape before a token
+  // is ever minted (the shipping single-box has no remote recovery from a wipe).
+  "sysupgrade",
   "create_vpn_interface",
   "add_vpn_peer",
   "setup_vpn_firewall",
-  "network_restart",
+  // KAN-10: restart the whole networking stack — owner-only, web-UI-only,
+  // confirm. A blunt instrument that briefly drops every interface (this
+  // dashboard included), so it's never AI-triggerable.
+  "restart_network",
   // droplet-ai RPC access management — reserved Tier-3 (web-UI-only, AI-blocked)
   // for the deferred real rotate/revoke. The routing service IS the droplet-ai
   // user, so any rotate/revoke that desyncs the credential self-locks-out the
@@ -93,6 +107,22 @@ const TIER_3_OPERATIONS = new Set([
   // Switch — never let AI disable the port the appliance is on
   "switch_disable_protected_port",
 ]);
+
+/**
+ * Per-operation blast-radius copy surfaced in the Tier-2/3 confirm prompt
+ * (KAN-10 AC4). When an operation has an entry here, `classifyNetworkCommand`
+ * returns it as the `reason` so the dashboard's confirm dialog can show the
+ * concrete consequence instead of the generic "requires confirmation" line.
+ * Operations without an entry fall back to the generic reason.
+ */
+const BLAST_RADIUS_REASON: Record<string, string> = {
+  create_interface:
+    "Adding a network interface changes how the appliance connects. A wrong setting can disconnect devices — and could cut this dashboard's own connection.",
+  edit_interface:
+    "Editing a network interface can disconnect devices on it. If it's the interface this dashboard is on, you could lose your connection until it reverts.",
+  restart_network:
+    "Restarting networking briefly drops every interface and reconnects each device — this dashboard included — for a few seconds.",
+};
 
 /** Rate limit for network commands: max per entity per minute. */
 export const NETWORK_RATE_LIMIT_PER_ENTITY = 5;
@@ -113,7 +143,9 @@ export function classifyNetworkCommand(
     return {
       tier: 3 as SafetyTier,
       requiresConfirmation: true,
-      reason: `Operation '${operation}' is restricted to the web UI for safety`,
+      reason:
+        BLAST_RADIUS_REASON[operation] ??
+        `Operation '${operation}' is restricted to the web UI for safety`,
     };
   }
 
@@ -122,7 +154,9 @@ export function classifyNetworkCommand(
     return {
       tier: 2 as SafetyTier,
       requiresConfirmation: true,
-      reason: `Network operation '${operation}' requires confirmation`,
+      reason:
+        BLAST_RADIUS_REASON[operation] ??
+        `Network operation '${operation}' requires confirmation`,
     };
   }
 

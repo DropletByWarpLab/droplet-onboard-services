@@ -228,11 +228,20 @@ const envSchema = z.object({
   // disabled" banner instead of spamming retries at a non-existent service.
   ROUTING_MODE: z.enum(["real", "mock", "disabled"]).default("real"),
 
+  // KAN-8: the OpenWrt sysupgrade image this build pins for the router
+  // firmware-check + upgrade path (multi-box / PRIMARY_ROUTER shape only). The
+  // version embedded in this name is what /network/system/firmware-check
+  // compares the running release against. Empty default → firmware-check
+  // reports an undetermined pinned version (never a guessed "up to date"), and
+  // there is no image to flash. The name follows the upgrade-router.sh
+  // convention, e.g. `openwrt-24.10.0-droplet-squashfs-sysupgrade.img.gz`.
+  ROUTER_FIRMWARE_IMAGE: z.string().default(""),
+
   // --- WireGuard / Remote Access ---
   // Hostname or IP that peer .conf files use as their `Endpoint`. Should be
-  // reachable from outside the LAN — typically a DuckDNS subdomain (Phase 4)
-  // or your home router's public IP. For inside-LAN testing you can set this
-  // to the OpenWrt LAN IP (192.168.50.1). Empty default makes the orchestrator
+  // reachable from outside the LAN — typically your home router's public IP
+  // or another operator-set public DNS name. For inside-LAN testing you can
+  // set this to the OpenWrt LAN IP (192.168.50.1). Empty default makes the orchestrator
   // refuse to mint peers with a clear error rather than handing out unusable
   // configs that point at "example.com" or similar.
   WIREGUARD_ENDPOINT_HOST: z.string().default(""),
@@ -255,6 +264,17 @@ const envSchema = z.object({
   //   origin (trusted-origin.ts) and the one address that works at home AND
   //   over the WireGuard tunnel.
   DROPLET_PUBLIC_FQDN: z.string().default(""),
+  // DROPLET_BOX_NAME — the owner-chosen box name (WARP-979). Set on the
+  //   "Secured / name your box" setup step; becomes `<name>.droplet-us.com`
+  //   (publicly-trusted, green padlock). Persisted to the host .env via the
+  //   device-bridge (createBridgeBoxNamePersister), the SAME transport
+  //   DROPLET_PUBLIC_FQDN uses. When set, tls-issuance sends it to HQ as the
+  //   `requested_name` on the cert ORDER so HQ issues `<name>.droplet-us.com`
+  //   instead of the opaque `d-<hmac>` fallback. Empty = no name chosen yet
+  //   (the opaque-HMAC fallback stays in effect). The HQ device-authed name
+  //   CLAIM is a coupled fleet-hq follow-up — until it lands, HQ may ignore
+  //   requested_name and this is harmless.
+  DROPLET_BOX_NAME: z.string().default(""),
   // DROPLET_PUBLIC_FQDN_IP — the IP the per-device FQDN resolves to via the
   //   split-horizon dnsmasq (ADR-023 C3). Defaults to the WireGuard gateway
   //   address 192.168.20.1, which is reachable on the single-box LAN AND over

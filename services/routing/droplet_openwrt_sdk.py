@@ -28,6 +28,7 @@ Usage:
 
 import json
 import os
+import re
 import time
 import logging
 from contextlib import contextmanager
@@ -75,7 +76,7 @@ class DeploymentTopology(str, Enum):
 
 # The logical interface the SDK treats as the WAN uplink across every shape —
 # the same one `get_all_interface_statuses()`, `_resolve_wan_device`, and the
-# DuckDNS interface selection already interrogate. Named so the probe never
+# WireGuard interface probe already interrogate. Named so the probe never
 # invents a second "which interface is the WAN" path.
 WAN_INTERFACE_NAME = "wan"
 
@@ -732,6 +733,70 @@ class NetworkApi:
         })
         self._r.uci.commit("network")
 
+    def create_interface(
+        self,
+        name: str,
+        proto: str,
+        device: Optional[str] = None,
+        ipaddr: Optional[str] = None,
+        netmask: Optional[str] = None,
+        gateway: Optional[str] = None,
+    ) -> None:
+        """Create (or overwrite) a `config interface` section under `network` (KAN-10).
+
+        Wrapped in ``safe_apply``: writing /etc/config/network can cut the AP/LAN
+        the dashboard rides on, so the change applies with the 60s auto-rollback
+        timer that reverts on lost connectivity — the same blast-radius posture as
+        ``FirewallApi.set_zone_policy`` and the VPN/wireless writes. Only the
+        supplied fields are written; ``proto`` is always required.
+        """
+        values: dict[str, Any] = {"proto": proto}
+        if device is not None:
+            values["device"] = device
+        if ipaddr is not None:
+            values["ipaddr"] = ipaddr
+        if netmask is not None:
+            values["netmask"] = netmask
+        if gateway is not None:
+            values["gateway"] = gateway
+        with self._r.safe_apply(timeout=60):
+            self._r.uci.set("network", name, values)
+            self._r.uci.commit("network")
+
+    def edit_interface(
+        self,
+        name: str,
+        proto: Optional[str] = None,
+        device: Optional[str] = None,
+        ipaddr: Optional[str] = None,
+        netmask: Optional[str] = None,
+        gateway: Optional[str] = None,
+    ) -> None:
+        """Update only the supplied options on an existing `config interface` (KAN-10).
+
+        Same ``safe_apply`` auto-rollback posture as :meth:`create_interface`:
+        flipping an interface's proto/address/zone is exactly how an edit can
+        sever the management path, so a misapply self-reverts after 60s. Raises
+        :class:`ValueError` if no field is supplied (an empty edit is a no-op the
+        route should reject before minting a confirm token).
+        """
+        values: dict[str, Any] = {}
+        if proto is not None:
+            values["proto"] = proto
+        if device is not None:
+            values["device"] = device
+        if ipaddr is not None:
+            values["ipaddr"] = ipaddr
+        if netmask is not None:
+            values["netmask"] = netmask
+        if gateway is not None:
+            values["gateway"] = gateway
+        if not values:
+            raise ValueError("edit_interface requires at least one field to change")
+        with self._r.safe_apply(timeout=60):
+            self._r.uci.set("network", name, values)
+            self._r.uci.commit("network")
+
 
 # ---------------------------------------------------------------------------
 # High-level API: Wireless
@@ -1204,7 +1269,10 @@ class FirewallApi:
         without miniupnpd raises (no ``upnpd`` config to write).
         """
         flag = "1" if enabled else "0"
-        self._r.uci.set("upnpd", "config", {"enable_upnp": flag, "enable_natpmp": flag})
+        # Also manage the procd `enabled` gate: the uci-defaults seed now ships
+        # enabled='0' (avoids crash-loop on fresh containers without interfaces),
+        # so set_upnp(True) must flip it to '1' to start the daemon.
+        self._r.uci.set("upnpd", "config", {"enabled": flag, "enable_upnp": flag, "enable_natpmp": flag})
         # uci.apply commits the pending change and triggers ucitrack to reload
         # miniupnpd — exec_service("miniupnpd","restart") maps to file.exec which
         # the droplet-ai ACL does not grant.
@@ -1435,6 +1503,51 @@ class FirewallApi:
 # ---------------------------------------------------------------------------
 # High-level API: System
 # ---------------------------------------------------------------------------
+# KAN-8: an OpenWrt sysupgrade image name embeds the release it carries, e.g.
+# `openwrt-24.10.0-droplet-squashfs-sysupgrade.img.gz`. We extract that pinned
+# version to compare against the running one — read-only, no flash. A name that
+# carries no parseable version yields an EXPLICIT `None` (undetermined), never a
+# guessed match (rule 10).
+_FIRMWARE_IMAGE_VERSION_RE = re.compile(r"(\d+\.\d+(?:\.\d+)?)")
+
+
+def compare_firmware_version(board: dict, pinned_image: str) -> dict:
+    """Compare the running OpenWrt release against the pinned sysupgrade image.
+
+    KAN-8 AC 4. Pure read: takes a `board_info()`-shaped dict and the pinned
+    image name, returns the compare result the dashboard renders on the
+    Maintenance card BEFORE any owner ever arms a flash.
+
+    Returns ``{current_version, pinned_version, up_to_date, upgrade_available}``.
+    ``up_to_date`` / ``upgrade_available`` are EXPLICIT booleans when both
+    versions are known, and explicit ``None`` (undetermined) when the pinned
+    image name carries no parseable version — we never guess "up to date" from a
+    failed parse (rule 10).
+    """
+    release = board.get("release") if isinstance(board, dict) else None
+    current_version = release.get("version") if isinstance(release, dict) else None
+
+    pinned_match = _FIRMWARE_IMAGE_VERSION_RE.search(pinned_image or "")
+    pinned_version = pinned_match.group(1) if pinned_match else None
+
+    if not current_version or pinned_version is None:
+        # Undetermined — surface explicitly rather than asserting equality.
+        return {
+            "current_version": current_version,
+            "pinned_version": pinned_version,
+            "up_to_date": None,
+            "upgrade_available": None,
+        }
+
+    up_to_date = current_version == pinned_version
+    return {
+        "current_version": current_version,
+        "pinned_version": pinned_version,
+        "up_to_date": up_to_date,
+        "upgrade_available": not up_to_date,
+    }
+
+
 class SystemApi:
     """System-level operations."""
 
@@ -1444,6 +1557,72 @@ class SystemApi:
     def board_info(self) -> dict:
         """Get hardware and OS info (kernel, hostname, model, release)."""
         return self._r._call("system", "board")
+
+    def firmware_version_check(self, pinned_image: str) -> dict:
+        """Read the running firmware version and compare it to the pinned image.
+
+        KAN-8 AC 4. Pure read — issues NO flash and NO exec. Reads the version
+        from the SAME `board_info()` release block that `/system/info` exposes,
+        then delegates to :func:`compare_firmware_version`.
+        """
+        return compare_firmware_version(self.board_info(), pinned_image)
+
+    def sysupgrade(self, image_path: str, preserve_config: bool = True) -> dict:
+        """Flash an OpenWrt sysupgrade image already staged on the router.
+
+        ⚠️ BRICK RISK. Wraps the `openwrt/scripts/upgrade-router.sh` flash step:
+        ``sysupgrade -v [-n] <image>``. ``preserve_config`` keeps ``/etc/config``
+        (the default, ``-v``); ``preserve_config=False`` adds ``-n`` for a clean
+        flash. Dispatch goes through the SAME ``file.exec`` ubus surface the rest
+        of the SDK uses — never a parallel box script.
+
+        The router reboots as it flashes, dropping the ubus/SSH connection; that
+        ``ConnectionLost`` is the EXPECTED success path of a flash, so it is
+        swallowed and reported as ``{"status": "flashing"}``. A genuine fault
+        BEFORE the reboot (e.g. PERMISSION_DENIED) propagates.
+
+        GATING to the PRIMARY_ROUTER deployment shape and the owner-only Tier-3
+        confirm are enforced ABOVE this layer (routing route + orchestrator);
+        this method is the raw mechanism and must never be reached otherwise.
+        """
+        if not image_path or not image_path.strip():
+            raise ValueError("sysupgrade requires a staged image path")
+        params = ["-v"]
+        if not preserve_config:
+            params.append("-n")  # clean flash — do not preserve /etc/config
+        params.append(image_path)
+        try:
+            self._r.exec_command("sysupgrade", params)
+        except ConnectionLost:
+            # Router rebooting into the new image — the connection drop IS success.
+            logger.info("sysupgrade dispatched; router rebooting into new image")
+            return {"status": "flashing", "image": image_path}
+        return {"status": "flashing", "image": image_path}
+
+    def factory_reset(self) -> dict:
+        """Wipe the OpenWrt overlay (UCI config) and reboot — factory defaults.
+
+        ⚠️ THE MOST DANGEROUS SURFACE. Runs ``jffs2reset`` to clear the overlay
+        then ``reboot -f`` to make it take effect, via ``file.exec``. On the
+        shipping single-box this would wipe the named-volume UCI the host hostapd
+        bridge depends on with no remote recovery — which is exactly why the
+        gating ABOVE this layer refuses it on any non-PRIMARY_ROUTER shape.
+
+        Like :meth:`sysupgrade`, the reboot drops the connection; that
+        ``ConnectionLost`` is the expected success path and is swallowed
+        (``{"status": "resetting"}``). A genuine fault before the reboot
+        propagates.
+        """
+        # jffs2reset must complete cleanly — a transport error here means the
+        # overlay may not have been wiped, so propagate rather than declaring success.
+        self._r.exec_command("jffs2reset", ["-y"])
+        try:
+            self._r.exec_command("reboot", ["-f"])
+        except ConnectionLost:
+            # Connection drop on the reboot call is the expected success path.
+            pass
+        logger.info("factory_reset dispatched; router rebooting to defaults")
+        return {"status": "resetting"}
 
     def resource_info(self) -> dict:
         """Get CPU load, memory usage, and uptime."""
@@ -2179,13 +2358,25 @@ class DropletRouter:
         self.uci.apply(timeout=timeout, rollback=True)
 
         # Verify connectivity
+        connected = False
         try:
             self.system.board_info()
+            connected = True
             self.uci.confirm()
             logger.info("Safe apply: changes confirmed.")
         except ConnectionLost:
             logger.warning(
                 "Safe apply: connectivity lost. Auto-rollback in %ds.", timeout
+            )
+            raise
+        except UbusError as exc:
+            # A UbusError during the probe or confirm leaves the rollback timer
+            # running; log it and re-raise so the caller receives a 5xx.
+            logger.warning(
+                "Safe apply: ubus error during %s — auto-rollback in %ds: %s",
+                "confirm" if connected else "connectivity probe",
+                timeout,
+                exc,
             )
             raise
 
@@ -2268,7 +2459,7 @@ def detect_deployment_topology(router: DropletRouter) -> dict:
     interface for an upstream gateway — ADR-018 Decision 2.
 
     Reuses ``NetworkApi.get_all_interface_statuses()`` (the SAME shape-detection
-    mechanism `get_network_summary` and the DuckDNS interface selection use, per
+    mechanism `get_network_summary` and the WireGuard interface probe use, per
     ADR-011) so there is exactly one "which interfaces are present" path. The
     posture is an EXPLICIT enum, never inferred from a null/absent field
     (rule 10):

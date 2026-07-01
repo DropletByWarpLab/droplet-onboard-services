@@ -53,6 +53,21 @@ function safeNext(next: string | null): string {
   }
 }
 
+/**
+ * PR #375 — the orchestrator's two-factor gate answers a correct password with
+ * `401 { code: "TOTP_REQUIRED" }`. We dispatch on the typed `code` (the same
+ * idiom as friendly-errors and the invite page) rather than `instanceof`, so
+ * the check survives module duplication / mocking and doesn't force every
+ * `@/lib/auth` consumer to share one error-class identity.
+ */
+function isTotpRequired(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { code?: unknown }).code === "TOTP_REQUIRED"
+  );
+}
+
 function LoginPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -64,6 +79,15 @@ function LoginPageInner() {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  // PR #375 — two-factor challenge state. `mfaRequired` flips true the first
+  // time a correct password comes back as TOTP_REQUIRED; the form then shows
+  // the code field. `mfaMode` toggles between the authenticator code and a
+  // saved recovery code. The codes live here (the page owns all auth state)
+  // and ride the next login() call.
+  const [mfaRequired, setMfaRequired] = useState(false);
+  const [mfaMode, setMfaMode] = useState<"totp" | "recovery">("totp");
+  const [totpCode, setTotpCode] = useState("");
+  const [recoveryCode, setRecoveryCode] = useState("");
   // PR #377: passkeys are an alternative passwordless path. The affordance is
   // only shown on browsers that support WebAuthn (detected client-side after
   // mount, so SSR renders nothing and we don't flash an unusable button).
@@ -95,9 +119,28 @@ function LoginPageInner() {
   }, []);
 
   async function handleLogin() {
+    // Re-entrancy guard: the submit button is disabled while submitting, but the
+    // email/password/code inputs submit on Enter — without this, mashing Enter
+    // fires concurrent login() calls (e.g. two POSTs of the same single-use
+    // recovery code, the loser flashing a false "didn't match").
+    if (isSubmitting) return;
     setError(null);
 
-    if (!email.trim() || !password.trim()) {
+    // Two-factor challenge in progress: validate the code, not the credentials
+    // (the orchestrator already accepted the password on the first call).
+    if (mfaRequired) {
+      const code = mfaMode === "recovery" ? recoveryCode.trim() : totpCode.trim();
+      if (!code) {
+        // Distinct from the panel's standing help subtext (which already says
+        // where the code comes from) — a short prompt to act, not a repeat.
+        setError(
+          mfaMode === "recovery"
+            ? "Enter a recovery code to continue."
+            : "Enter the 6-digit code to continue.",
+        );
+        return;
+      }
+    } else if (!email.trim() || !password.trim()) {
       setError("Enter your work email and password to continue.");
       return;
     }
@@ -106,16 +149,83 @@ function LoginPageInner() {
     try {
       // The built-in directory keys on email in a later PR; today the
       // orchestrator validates the identifier as a username, so we pass it
-      // through unchanged.
-      await login(email.trim(), password);
+      // through unchanged. On the 2FA step we resend the same credentials plus
+      // the entered second factor — the orchestrator re-verifies both in one
+      // call (PR #375). The password-only path stays a 2-arg call (no trailing
+      // undefined) so it reads as the plain sign-in it is.
+      if (mfaRequired) {
+        const secondFactor =
+          mfaMode === "recovery"
+            ? { recoveryCode: recoveryCode.trim() }
+            : { totp: totpCode.trim() };
+        await login(email.trim(), password, secondFactor);
+      } else {
+        await login(email.trim(), password);
+      }
       router.push(safeNext(searchParams.get("next")));
     } catch (err) {
+      // PR #375: a correct password on a 2FA account rejects with the typed
+      // TOTP_REQUIRED code. The FIRST time, reveal the code field (no error —
+      // the user hasn't done anything wrong yet). If we're ALREADY on the
+      // challenge step, the same rejection means the code they just entered was
+      // wrong (or the account is now throttled), so show actionable copy.
+      if (isTotpRequired(err)) {
+        if (!mfaRequired) {
+          setMfaRequired(true);
+        } else {
+          // Clear the rejected code so the stale value doesn't re-fire on Enter.
+          if (mfaMode === "recovery") setRecoveryCode("");
+          else setTotpCode("");
+          setError(
+            mfaMode === "recovery"
+              ? "That recovery code didn't match. Try another saved code."
+              : "That code didn't match. Check your authenticator app and try again.",
+          );
+        }
+        return;
+      }
+      // On the 2FA challenge step the password field is gone, so the credential-
+      // centric auth fallback ("check your username and password") would be
+      // misleading for a non-TOTP failure. Coded errors (e.g. 429
+      // TOO_MANY_ATTEMPTS) still get their precise copy via translateError; only
+      // a codeless failure (e.g. a 500 during verify), which would otherwise hit
+      // that password fallback, gets a neutral code-appropriate message.
+      if (mfaRequired) {
+        const hasCode = typeof (err as { code?: unknown })?.code === "string";
+        setError(
+          hasCode
+            ? translateError(err, "auth")
+            : "We couldn't verify that code right now. Try again in a moment.",
+        );
+        return;
+      }
       // WARP-294: never render err.message verbatim — orchestrator may
       // surface terse strings like "OCS 401" / "connect ECONNREFUSED".
       setError(translateError(err, "auth"));
     } finally {
       setIsSubmitting(false);
     }
+  }
+
+  // Abandon the 2FA challenge and return to the credentials step (e.g. wrong
+  // account). Clears the entered codes so they don't leak into a later attempt.
+  function handleCancelMfa() {
+    setMfaRequired(false);
+    setMfaMode("totp");
+    setTotpCode("");
+    setRecoveryCode("");
+    setError(null);
+  }
+
+  // Switch between the authenticator code and a saved recovery code. Clear any
+  // stale "didn't match" error AND both code fields so the panel reads cleanly
+  // — a half-typed code from the previous mode shouldn't linger (or silently
+  // re-present a just-rejected code when toggling back).
+  function handleToggleMfaMode() {
+    setMfaMode((m) => (m === "totp" ? "recovery" : "totp"));
+    setTotpCode("");
+    setRecoveryCode("");
+    setError(null);
   }
 
   async function handlePasskeySignIn() {
@@ -182,6 +292,16 @@ function LoginPageInner() {
             returnTo={safeNext(searchParams.get("next"))}
             onPasskey={passkeyReady ? handlePasskeySignIn : undefined}
             passkeyBusy={passkeyBusy}
+            // PR #375 — two-factor challenge. When mfaRequired the form swaps
+            // the credential block for the code-entry panel.
+            mfaRequired={mfaRequired}
+            mfaMode={mfaMode}
+            totpCode={totpCode}
+            onTotpCodeChange={setTotpCode}
+            recoveryCode={recoveryCode}
+            onRecoveryCodeChange={setRecoveryCode}
+            onToggleMfaMode={handleToggleMfaMode}
+            onCancelMfa={handleCancelMfa}
           />
 
           {/* WARP-629: the local-first promise is true for the password path,

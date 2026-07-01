@@ -79,14 +79,6 @@ Keypair generation is pure Python (Curve25519 via `cryptography`) — no shell-o
 
 After `/vpn/setup` commits the firewall changes, the routing service emits a `service event {type: "config.change", data: {package: "firewall"}}` ubus call. This is a workaround for an OpenWrt 24.10 ordering bug where the wg0 ifup hotplug fires `firewall reload` *before* the firewall config commit lands — without the explicit nudge, fw4 misses the new `Allow-WireGuard` rule on first run. ACL grants `service.event` for this purpose.
 
-### Dynamic DNS (DuckDNS)
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/ddns/duckdns` | Current config: `{configured, subdomain, fullDomain, enabled, tokenSet}`. **Token is never returned** — only `tokenSet: bool`. |
-| PUT | `/ddns/duckdns` | Upsert the duckdns service section + nudge `/etc/init.d/ddns` reload. Body: `{subdomain, token, enabled?}`. |
-
-DuckDNS is the free dynamic-DNS service that solves the "what hostname goes in the WireGuard peer config?" problem when the home router doesn't have a static IP. The routing service writes a stock `service` section pointed at DuckDNS's update URL template (`/usr/share/ddns/default/duckdns.org.json`) and lets `ddns-scripts` handle the rest. ACL grants `uci.* on ddns` config and `service.event` for the reload nudge.
-
 ### System
 | Method | Path | Description |
 |--------|------|-------------|

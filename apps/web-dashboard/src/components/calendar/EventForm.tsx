@@ -217,7 +217,7 @@ export function EventForm({ open, initial, initialDate, onClose, onSaved }: Prop
             All day
           </label>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div className="flex flex-col gap-1">
               <span className="type-caption-1 text-label-secondary">Starts</span>
               {/* Calendar UX clarity (Samantha QA #bugs): date + 15-minute time

@@ -114,4 +114,20 @@ describe("DateTimePicker", () => {
     });
     expect(onChange).toHaveBeenLastCalledWith("2026-06-01T08:00");
   });
+
+  it("gives the date field a width floor so the full date (incl. year) is not clipped", () => {
+    render(
+      <DateTimePicker
+        value="2026-05-12T09:30"
+        onChange={vi.fn()}
+        label="Starts"
+      />,
+    );
+    const date = screen.getByLabelText(/Starts date/i) as HTMLInputElement;
+    // The collapse-enabling class must be gone…
+    expect(date.className).not.toMatch(/\bmin-w-0\b/);
+    // …and a minimum-width floor sized for a full date must be present so the
+    // year always has room to render.
+    expect(date.className).toMatch(/min-w-\[/);
+  });
 });

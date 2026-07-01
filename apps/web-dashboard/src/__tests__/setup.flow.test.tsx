@@ -56,14 +56,29 @@ vi.mock("@/lib/api", () => ({
     next_step: "internet",
   })),
   fetchDuckDnsStatus: vi.fn(async () => ({ configured: false })),
+  // WARP-979 — the reworked AddressStep imports these (this flow skips the step).
+  checkBoxName: vi.fn(async () => ({
+    available: true,
+    slug: "studio",
+    fqdn: "studio.droplet-us.com",
+    authoritative: false,
+  })),
+  setBoxName: vi.fn(async () => ({
+    ok: true,
+    slug: "studio",
+    fqdn: "studio.droplet-us.com",
+  })),
   setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
   // Storage step auto-skips when zero drives — keep the bridge "empty"
   // so the flow test doesn't have to click anything on that step.
   fetchDrives: vi.fn(async () => ({ drives: [], count: 0 })),
   updateDriveLabel: vi.fn(),
-  // Cameras step auto-skips when zero discovered cameras — same idea.
+  // WARP-933 — Storage/Cameras now render (no silent auto-skip); the flow skips
+  // each. Stub the cameras-list + remove calls so the step loads cleanly.
   fetchDiscoveredCameras: vi.fn(async () => []),
   acceptDiscoveredCamera: vi.fn(),
+  fetchCameras: vi.fn(async () => []),
+  removeCamera: vi.fn(async () => undefined),
   // VPN step: endpoint not configured → preCheck phase, "Skip for now"
   // is always present.
   fetchVpnStatus: vi.fn(async () => ({
@@ -189,16 +204,29 @@ describe("setup flow → done state", () => {
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
+      // WARP-979 — the address step (Secured / name your box) → skip.
       fireEvent.click(
-        screen.getByRole("button", { name: /skip — no remote access/i }),
+        screen.getByRole("button", { name: /skip — i'll do this later/i }),
       );
     });
 
-    // We're now on `discovery`. Skip again. Cameras auto-skips on 0,
-    // VPN lands on preCheck (endpointConfigured: false), one more skip
-    // gets us to `done`.
+    // WARP-933 — Storage and Cameras now RENDER (no silent auto-skip). After the
+    // address skip we land on `storage`; skip it → `discovery` → skip →
+    // `cameras` → skip → `vpn`.
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+      await Promise.resolve();
+      await Promise.resolve();
+      fireEvent.click(screen.getByRole("button", { name: /skip for now/i })); // storage
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      fireEvent.click(screen.getByRole("button", { name: /skip for now/i })); // discovery
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      fireEvent.click(screen.getByRole("button", { name: /skip for now/i })); // cameras
     });
     // VPN step preCheck → skip → AI.
     await act(async () => {

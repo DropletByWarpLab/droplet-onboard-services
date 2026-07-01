@@ -48,6 +48,15 @@ const TIER_2_OVERRIDES: Array<{
     },
     reason: "Temperature >= 30C may be unsafe",
   },
+  {
+    // KAN-7: turning a thermostat OFF can leave a home with no heating or
+    // cooling, so it requires confirmation. Switching between
+    // heat/cool/auto stays Tier-1 (direct).
+    domain: "climate",
+    service: "set_mode",
+    condition: (data) => (data?.mode as string | undefined) === "off",
+    reason: "Turning off climate control can leave the home with no heating or cooling",
+  },
 ];
 
 /** Parameter bounds for Tier 1 validation. */

@@ -5,9 +5,10 @@
  * message instead of a dead "Internal server error".
  *
  * Route-level coverage for AC #1: drives `POST /network/wifi/ssid` and
- * `PUT /ddns/duckdns` through the real global `errorHandler` with the
- * service layer stubbed to throw `RouterError.unreachable()`. Asserts the
- * status / code / non-redacted message that the frontend keys off.
+ * `POST /network/wifi/password` through the real global `errorHandler`
+ * with the service layer stubbed to throw `RouterError.unreachable()`.
+ * Asserts the status / code / non-redacted message that the frontend
+ * keys off.
  *
  * Auth is injected by a pre-router middleware that sets `req.user` with the
  * `owner` role, so the real `requireRole("owner","admin")` guard passes
@@ -35,8 +36,9 @@ vi.mock("../config.js", () => ({
   },
 }));
 
-// The wifi SSID route calls evaluateNetworkCommand (safety tier) then
-// setWifiSsid. Allow the command, then have the write throw UNREACHABLE.
+// The wifi SSID + password routes call evaluateNetworkCommand (safety tier)
+// then setWifiSsid / setWifiPassword. Allow the command, then have the writes
+// throw UNREACHABLE.
 vi.mock("../services/network-safety.service.js", () => ({
   evaluateNetworkCommand: vi.fn().mockResolvedValue({ tier: 1 }),
 }));
@@ -49,30 +51,21 @@ vi.mock("../services/network.service.js", async () => {
       .mockRejectedValue(
         RouterError.unreachable("Set SSID: fetch failed", { label: "Set SSID" }),
       ),
-    setWifiPassword: vi.fn(),
+    setWifiPassword: vi
+      .fn()
+      .mockRejectedValue(
+        RouterError.unreachable("Set password: fetch failed", {
+          label: "Set password",
+        }),
+      ),
     setWifiChannel: vi.fn(),
     getWifiSettings: vi.fn(),
     scanWifiNetworks: vi.fn(),
   };
 });
 
-vi.mock("../services/openwrt.client.js", async () => {
-  const { RouterError } = await vi.importActual<any>("../types/router-error.js");
-  return {
-    fetchDuckDnsStatus: vi.fn(),
-    setDuckDnsConfig: vi
-      .fn()
-      .mockRejectedValue(
-        RouterError.unreachable("DuckDNS update: fetch failed", {
-          label: "DuckDNS update",
-        }),
-      ),
-  };
-});
-
 import { errorHandler } from "../middleware/error-handler.js";
 import { registerWifiRoutes } from "./network-wifi.routes.js";
-import { createDdnsRouter } from "./ddns.js";
 
 function buildApp() {
   const app = express();
@@ -89,7 +82,6 @@ function buildApp() {
   });
   const router = express.Router();
   registerWifiRoutes(router, { prisma: {} as never });
-  router.use(createDdnsRouter());
   app.use(router);
   app.use(errorHandler);
   return app;
@@ -111,14 +103,14 @@ describe("network WRITE routes when routing is unreachable (WARP-807)", () => {
     expect(res.body.message).not.toBe("Something went wrong");
   });
 
-  it("PUT /ddns/duckdns → 503 with code UNREACHABLE and an actionable, non-redacted message", async () => {
+  it("POST /network/wifi/password → 503 with code UNREACHABLE and an actionable, non-redacted message", async () => {
     const res = await request(buildApp())
-      .put("/ddns/duckdns")
-      .send({ subdomain: "myhome", token: "tok1234567890" });
+      .post("/network/wifi/password")
+      .send({ password: "hunter2hunter2" });
 
     expect(res.status).toBe(503);
     expect(res.body.code).toBe("UNREACHABLE");
-    expect(res.body.message).toBe("DuckDNS update: fetch failed");
+    expect(res.body.message).toBe("Set password: fetch failed");
     expect(res.body.message).not.toBe("Something went wrong");
   });
 });

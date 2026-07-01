@@ -78,6 +78,44 @@ describe("AuthGate — routes off /setup/state (PR #372)", () => {
     expect(replaceMock).toHaveBeenCalledWith("/login?from=setup");
   });
 
+  it("renders /help during setup (unclaimed) instead of bouncing to /setup (WARP-930)", () => {
+    pathnameValue = "/help";
+    setAuth({
+      user: null,
+      isLoading: false,
+      setupState: { appliance: "unclaimed", setupStep: "org", userTourCompleted: false },
+    });
+    const { container } = render(<AuthGate>help content</AuthGate>);
+    expect(replaceMock).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("help content");
+  });
+
+  it("renders /help mid-wizard for the signed-in owner without bouncing (WARP-930)", () => {
+    pathnameValue = "/help";
+    setAuth({
+      user: { id: "u1", username: "ada", displayName: "Ada", role: "owner" },
+      isLoading: false,
+      setupState: { appliance: "unclaimed", setupStep: "org", userTourCompleted: false },
+    });
+    const { container } = render(<AuthGate>help content</AuthGate>);
+    expect(replaceMock).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("help content");
+  });
+
+  it("does NOT early-render /help to an anonymous visitor on a CLAIMED box (redirects to login) (WARP-930)", () => {
+    pathnameValue = "/help";
+    setAuth({
+      user: null,
+      isLoading: false,
+      setupState: { appliance: "ready", setupStep: "done", userTourCompleted: true },
+    });
+    const { container } = render(<AuthGate>help content</AuthGate>);
+    // The standalone help render is gated on applianceUnclaimed, so a claimed-box
+    // logged-out visitor falls through to the login redirect, not an early paint.
+    expect(container.textContent).not.toContain("help content");
+    expect(replaceMock).toHaveBeenCalledWith("/login");
+  });
+
   it("waits while loading — no redirect decided yet", () => {
     setAuth({ user: null, isLoading: true, setupState: null });
     render(<AuthGate>child</AuthGate>);
@@ -93,6 +131,42 @@ describe("AuthGate — routes off /setup/state (PR #372)", () => {
     });
     render(<AuthGate>child</AuthGate>);
     expect(replaceMock).toHaveBeenCalledWith("/login");
+  });
+});
+
+/**
+ * Invite acceptance — an invite link (`/invite/<token>`) targets a brand-new
+ * person who has NO session yet and lands on a CLAIMED box (appliance "ready").
+ * `/invite` must be public, like /login and /setup: AuthGate must NOT bounce
+ * the anonymous invitee to /login, and must render the password-set form.
+ * Pre-fix the route was protected, so the link "just went to the sign-in page"
+ * and the invitee could never set a password.
+ */
+describe("AuthGate — public /invite acceptance route", () => {
+  beforeEach(() => {
+    replaceMock.mockReset();
+    useAuthMock.mockReset();
+    pathnameValue = "/";
+  });
+
+  it("renders the invite page for an anonymous visitor on a ready box — no /login bounce", () => {
+    pathnameValue = "/invite/tok_abc123";
+    setAuth({
+      user: null,
+      isLoading: false,
+      setupState: { appliance: "ready", setupStep: "done", userTourCompleted: true },
+    });
+    const { container } = render(<AuthGate>set your password</AuthGate>);
+    expect(replaceMock).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("set your password");
+  });
+
+  it("renders the invite page even before auth has resolved (public, not gated on loading)", () => {
+    pathnameValue = "/invite/tok_abc123";
+    setAuth({ user: null, isLoading: true, setupState: null });
+    const { container } = render(<AuthGate>set your password</AuthGate>);
+    expect(replaceMock).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("set your password");
   });
 });
 

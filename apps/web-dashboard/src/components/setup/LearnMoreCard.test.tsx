@@ -147,4 +147,16 @@ describe("LearnMoreCard disclosure (WARP-820)", () => {
     const link = screen.getByRole("link", { name: /learn more/i });
     expect(link).toHaveAttribute("href", "/help#roles");
   });
+
+  it("opens the help link in a new tab so the in-progress wizard step isn't wiped (WARP-930)", () => {
+    mockMatchMedia(() => true);
+    render(
+      <LearnMoreCard helpAnchor="workspace">
+        <p>body</p>
+      </LearnMoreCard>,
+    );
+    const link = screen.getByRole("link", { name: /learn more/i });
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", expect.stringContaining("noopener"));
+  });
 });

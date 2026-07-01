@@ -38,6 +38,14 @@ import {
   rebootRouter,
   getRouterOperation,
   getAiNetworkAccess,
+  createInterface,
+  editInterface,
+  restartNetwork,
+  getFirmwareCheck,
+  assertPrimaryRouterPosture,
+  PrimaryRouterRequiredError,
+  routerSysupgrade,
+  routerFactoryReset,
 } from "../services/network.service.js";
 import {
   evaluateNetworkCommand,
@@ -46,6 +54,7 @@ import {
 } from "../services/network-safety.service.js";
 import type { createNetworkDeviceService } from "../services/network-device.service.js";
 import { handleRegistryError } from "./network-error-handler.js";
+import { RouterError } from "../services/openwrt.client.js";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 
 export interface StatusDeps {
@@ -531,6 +540,125 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
     }
   });
 
+  // --- KAN-8: router firmware upgrade + factory-reset (PRIMARY_ROUTER only) ---
+  //
+  // ⚠️ BRICK RISK. `sysupgrade` flashes the router firmware; `factory_reset`
+  // wipes the OpenWrt overlay (UCI) and reboots. On the shipping single-box the
+  // OpenWrt runs in a container and a wipe destroys the named-volume UCI the host
+  // hostapd bridge depends on — there is NO remote recovery. So both writes are:
+  //   * owner-only (requireRole("owner") — never the MCP/AI principal);
+  //   * Tier-3 (mint a token, execute only on /network/command/confirm);
+  //   * HARD-gated to the PRIMARY_ROUTER deployment posture — refused with 409
+  //     on the single-box / any non-primary shape, BEFORE a token is minted AND
+  //     again at confirm time (assertPrimaryRouterPosture).
+
+  /** Map the PRIMARY_ROUTER gate failure to a 409 the dashboard can render. */
+  const sendPrimaryRouterRequired = (res: import("express").Response, err: PrimaryRouterRequiredError) =>
+    res.status(409).json({ error: err.message, code: err.code, posture: err.posture });
+
+  // Read-only version compare (AC 4). Safe on any shape — NOT gated. The pinned
+  // image (and thus the comparison) comes from config.ROUTER_FIRMWARE_IMAGE.
+  router.get("/network/system/firmware-check", async (_req, res, next) => {
+    try {
+      const check = await getFirmwareCheck();
+      res.json(check);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post(
+    "/network/system/sysupgrade",
+    requireRole("owner"),
+    async (req, res, next) => {
+      try {
+        // GATE FIRST — refuse on any non-PRIMARY_ROUTER shape before minting.
+        await assertPrimaryRouterPosture();
+
+        const { imagePath, preserveConfig } = req.body ?? {};
+        if (typeof imagePath !== "string" || imagePath.trim().length === 0 || imagePath.length > 512) {
+          return res.status(400).json({ error: "Provide a non-empty 'imagePath' for the staged sysupgrade image" });
+        }
+        if (preserveConfig !== undefined && typeof preserveConfig !== "boolean") {
+          return res.status(400).json({ error: "'preserveConfig' must be a boolean when provided" });
+        }
+
+        const userId = req.user?.id;
+        const result = await evaluateNetworkCommand(
+          prisma,
+          "system.sysupgrade",
+          "sysupgrade",
+          { imagePath, preserveConfig: preserveConfig ?? true },
+          userId,
+          "api",
+        );
+
+        if ("requiresConfirmation" in result && result.requiresConfirmation) {
+          return res.status(202).json({
+            status: "confirmation_required",
+            operation: "sysupgrade",
+            tier: result.tier,
+            reason: result.reason,
+            confirmationToken: result.confirmationToken,
+            expiresIn: 60,
+          });
+        }
+
+        if ("blocked" in result && result.blocked) {
+          return res.status(403).json({ error: result.reason, tier: result.tier, blocked: true });
+        }
+
+        // Tier-3 always mints a token for the web UI; this arm is defensive.
+        const op = await routerSysupgrade(imagePath, preserveConfig ?? true);
+        res.json({ status: "ok", operation: "sysupgrade", operationId: op.operationId });
+      } catch (err) {
+        if (err instanceof PrimaryRouterRequiredError) return sendPrimaryRouterRequired(res, err);
+        next(err);
+      }
+    },
+  );
+
+  router.post(
+    "/network/system/factory-reset",
+    requireRole("owner"),
+    async (req, res, next) => {
+      try {
+        await assertPrimaryRouterPosture();
+
+        const userId = req.user?.id;
+        const result = await evaluateNetworkCommand(
+          prisma,
+          "system.factory_reset",
+          "factory_reset",
+          {},
+          userId,
+          "api",
+        );
+
+        if ("requiresConfirmation" in result && result.requiresConfirmation) {
+          return res.status(202).json({
+            status: "confirmation_required",
+            operation: "factory_reset",
+            tier: result.tier,
+            reason: result.reason,
+            confirmationToken: result.confirmationToken,
+            expiresIn: 60,
+          });
+        }
+
+        if ("blocked" in result && result.blocked) {
+          return res.status(403).json({ error: result.reason, tier: result.tier, blocked: true });
+        }
+
+        const op = await routerFactoryReset();
+        res.json({ status: "ok", operation: "factory_reset", operationId: op.operationId });
+      } catch (err) {
+        if (err instanceof PrimaryRouterRequiredError) return sendPrimaryRouterRequired(res, err);
+        next(err);
+      }
+    },
+  );
+
   // --- droplet-ai RPC access (read-only) ---
   // Read-only scope chips + session, parsed from the live on-box ACL. The
   // rotate/revoke writes are reserved Tier-3 (AI-blocked) with NO dispatcher
@@ -663,6 +791,47 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
         case "reboot":
           writeResult = await rebootRouter();
           break;
+        case "create_interface":
+          // KAN-10 Tier-2 confirm for POST /network/interfaces. The pending
+          // record carries the staged fields (incl. `force` for a management-
+          // interface override); the routing service wraps the write in
+          // safe_apply (60s auto-rollback).
+          writeResult = await createInterface({
+            name: params?.name as string,
+            proto: params?.proto as string,
+            device: params?.device as string | undefined,
+            ipaddr: params?.ipaddr as string | undefined,
+            netmask: params?.netmask as string | undefined,
+            gateway: params?.gateway as string | undefined,
+            force: params?.force as boolean | undefined,
+          });
+          break;
+        case "edit_interface": {
+          // KAN-10 Tier-2 confirm for PUT /network/interfaces/:name.
+          const { name: ifName, ...editFields } = params ?? {};
+          writeResult = await editInterface(ifName as string, editFields);
+          break;
+        }
+        case "restart_network":
+          // KAN-10 Tier-3 confirm for POST /network/restart.
+          writeResult = await restartNetwork();
+          break;
+        case "sysupgrade":
+          // KAN-8 ⚠️ BRICK RISK. Re-assert the PRIMARY_ROUTER posture at confirm
+          // time — a posture change (or a single-box that only LOOKED primary at
+          // mint) must not be able to flash through a held token. Throws
+          // PrimaryRouterRequiredError → 409 (handled below).
+          await assertPrimaryRouterPosture();
+          writeResult = await routerSysupgrade(
+            params?.imagePath as string,
+            (params?.preserveConfig as boolean | undefined) ?? true,
+          );
+          break;
+        case "factory_reset":
+          // KAN-8 ⚠️ BRICK RISK. Same confirm-time posture re-check as sysupgrade.
+          await assertPrimaryRouterPosture();
+          writeResult = await routerFactoryReset();
+          break;
         default:
           return res.status(400).json({ error: `Unknown operation: ${confirmedOp}` });
       }
@@ -676,6 +845,17 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
         operationId: writeResult.operationId,
       });
     } catch (err) {
+      // KAN-8: a confirm-time posture re-check that fails (the token was minted
+      // when the box looked primary, but it isn't now) refuses the brick-risk
+      // write with 409 rather than a generic 500.
+      if (err instanceof PrimaryRouterRequiredError) {
+        return res.status(409).json({ error: err.message, code: err.code, posture: err.posture });
+      }
+      // Surface structured routing-service refusals (e.g. 409 MANAGEMENT_INTERFACE)
+      // directly to the caller instead of letting them collapse into a generic 500.
+      if (err instanceof RouterError && err.status === 409) {
+        return res.status(409).json({ error: err.toJSON() });
+      }
       next(err);
     }
   });

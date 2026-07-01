@@ -10,8 +10,10 @@ import {
   FolderOpen,
   Globe,
   HardDrive,
+  Lock,
   MessageSquare,
   Search,
+  ShieldCheck,
   Sparkles,
   Users,
   Video,
@@ -192,6 +194,42 @@ interface Section {
 
 const SECTIONS: Section[] = [
   {
+    anchor: "privacy",
+    title: "What is Droplet & how privacy works",
+    Icon: Lock,
+    body: (
+      <>
+        <p>
+          Droplet is a private AI appliance that lives on your own network — a
+          single box that runs your files, conversations, cameras, and
+          smart-home control. Think of it as your own cloud, except it never
+          leaves your home or office.
+        </p>
+        <p>
+          <strong>The AI runs locally.</strong> The models that power chat and
+          everything else run on the hardware in front of you — the GPU inside
+          this Droplet — not on someone else&rsquo;s servers. By default your
+          messages and the model&rsquo;s replies never leave the box; there is
+          no hidden &ldquo;send to the cloud&rdquo; step underneath.
+        </p>
+        <p>
+          <strong>Your data stays on the box.</strong> Files you upload,
+          conversations you have, and footage your cameras record all stay on
+          the Droplet&rsquo;s own drives. Nothing is sent off the appliance
+          unless you explicitly choose to — for example, adding a cloud AI key
+          in Settings, which is always optional and clearly labelled.
+        </p>
+        <p>
+          <strong>You&rsquo;re still reachable when you need to be.</strong>{" "}
+          When you&rsquo;re away from home, your phone connects back to the
+          Droplet over its own end-to-end-encrypted VPN — so you reach your
+          data directly, without it passing through any cloud service in
+          between.
+        </p>
+      </>
+    ),
+  },
+  {
     anchor: "claim",
     title: "Claiming your Droplet",
     Icon: BadgeCheck,
@@ -231,6 +269,32 @@ const SECTIONS: Section[] = [
           <strong>Name and address:</strong> the workspace name is what
           people see; the short web address (the &ldquo;slug&rdquo;) is used
           in links. You can rename the workspace later from Settings.
+        </p>
+      </>
+    ),
+  },
+  {
+    anchor: "two-factor",
+    title: "Two-factor sign-in",
+    Icon: ShieldCheck,
+    body: (
+      <>
+        <p>
+          Two-factor sign-in adds a second check when you log in: your
+          password plus a 6-digit code from an app on your phone, so your
+          Droplet stays yours even if your password ever leaks.
+        </p>
+        <p>
+          <strong>Getting an authenticator app:</strong> on an iPhone, open
+          the App Store; on Android, open the Play Store. Search for an
+          authenticator app — Google Authenticator, 1Password, and Authy all
+          work — and install it.
+        </p>
+        <p>
+          <strong>Setting it up:</strong> open the app, scan the QR code shown
+          in setup, then type the 6-digit code it shows to turn two-factor on.
+          Save the one-time recovery codes somewhere safe in case you ever lose
+          your phone.
         </p>
       </>
     ),
@@ -283,37 +347,27 @@ const SECTIONS: Section[] = [
   },
   {
     anchor: "internet",
-    title: "Internet (DuckDNS)",
+    title: "Your box's web address",
     Icon: Globe,
     body: (
       <>
         <p>
-          DuckDNS gives this Droplet a permanent name on the internet —
-          like <span className="font-mono">yourstudio.duckdns.org</span> —
-          that keeps working even when your home internet&rsquo;s address
-          changes. Your phone uses this name to dial back to the
-          Droplet&rsquo;s VPN when you&rsquo;re away from home.
+          Your Droplet has its own secure web address — the name you gave
+          it during setup. It&rsquo;s the same address at home and away,
+          with a padlock and nothing to install. There&rsquo;s nothing to
+          sign up for and no address to type in.
         </p>
         <p>
-          <strong>To set it up:</strong> sign up for a free account at{" "}
-          <a
-            href="https://www.duckdns.org/"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-accent hover:underline"
-          >
-            duckdns.org
-          </a>{" "}
-          (Google / GitHub / Reddit / Twitter sign-in, no email needed).
-          Pick a subdomain, copy the token, and paste both into the
-          Internet step of the setup wizard or into the Remote Access
-          page&rsquo;s Domain card.
+          <strong>When you&rsquo;re away from home:</strong> open the
+          Droplet app and turn on <strong>Connect</strong>. Your phone
+          links securely to the box, and you open the same web address you
+          use at home — a real certificate and a green padlock, no
+          &ldquo;Not secure&rdquo; warning.
         </p>
         <p>
-          <strong>To change it later:</strong> open Remote Access in the
-          sidebar, then tap Edit on the Domain card. Saving a new
-          subdomain or token updates everything automatically — the VPN
-          step picks up the new name without a restart.
+          <strong>Nothing to configure:</strong> no dynamic-DNS account, no
+          subdomain or token, and no changes to your home router. Remote
+          access is automatic — just tap Connect when you need it.
         </p>
       </>
     ),
@@ -404,10 +458,9 @@ const SECTIONS: Section[] = [
         </p>
         <p>
           <strong>If the &ldquo;Add a device&rdquo; button is disabled:</strong>{" "}
-          the Internet step (DuckDNS) hasn&rsquo;t been finished yet.
-          The VPN needs a public name to dial back to. Go to the Internet
-          section of this Help page (or revisit the wizard) and complete
-          that first.
+          your box is still setting up its web address, which remote access
+          needs to dial back to. This clears on its own once the box knows
+          its address — see &ldquo;Your box&rsquo;s web address&rdquo; above.
         </p>
       </>
     ),
