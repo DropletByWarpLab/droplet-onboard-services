@@ -35,6 +35,7 @@ import {
   ncUpdateShare,
   ncDeleteShare,
   ncListSharedWithMe,
+  ncEnsureGroup,
 } from "../services/nextcloud.client.js";
 
 /**
@@ -831,5 +832,71 @@ describe("nextcloud.client — shares v2", () => {
 
       expect(await ncListSharedWithMe("t")).toEqual([]);
     });
+  });
+});
+
+describe("nextcloud.client — ncEnsureGroup (WARP-989)", () => {
+  const realFetch = global.fetch;
+  afterEach(() => {
+    global.fetch = realFetch;
+  });
+
+  it("POSTs the group to the OCS groups endpoint with admin basic auth", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      mockResponse({
+        ok: true,
+        status: 200,
+        text: JSON.stringify({ ocs: { meta: { statuscode: 100 } } }),
+      })
+    );
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await ncEnsureGroup("household");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("http://nextcloud.test/ocs/v1.php/cloud/groups?format=json");
+    expect(init.method).toBe("POST");
+    expect(init.headers.Authorization).toMatch(/^Basic /);
+    expect(init.headers["OCS-APIRequest"]).toBe("true");
+    expect(String(init.body)).toBe("groupid=household");
+  });
+
+  it("treats OCS 102 (group already exists) as success — the ensure is idempotent", async () => {
+    global.fetch = vi.fn().mockResolvedValue(
+      mockResponse({
+        ok: true,
+        status: 200,
+        text: JSON.stringify({
+          ocs: { meta: { statuscode: 102, message: "group exists" } },
+        }),
+      })
+    ) as unknown as typeof fetch;
+
+    await expect(ncEnsureGroup("household")).resolves.toBeUndefined();
+  });
+
+  it("throws on any other non-100 OCS status so callers can decide fatality", async () => {
+    global.fetch = vi.fn().mockResolvedValue(
+      mockResponse({
+        ok: true,
+        status: 200,
+        text: JSON.stringify({
+          ocs: { meta: { statuscode: 101, message: "invalid input" } },
+        }),
+      })
+    ) as unknown as typeof fetch;
+
+    await expect(ncEnsureGroup("household")).rejects.toThrow(
+      /OCS error creating group: invalid input/
+    );
+  });
+
+  it("throws on a non-JSON (HTML) response instead of silently passing", async () => {
+    global.fetch = vi.fn().mockResolvedValue(
+      mockResponse({ ok: true, status: 200, text: "<html>setup</html>" })
+    ) as unknown as typeof fetch;
+
+    await expect(ncEnsureGroup("household")).rejects.toThrow(/invalid response/);
   });
 });
