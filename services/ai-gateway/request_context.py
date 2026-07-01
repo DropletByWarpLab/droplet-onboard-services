@@ -24,7 +24,7 @@ def new_request_id() -> str:
 def sanitize_request_id(raw: str | None) -> str | None:
     if not isinstance(raw, str):
         return None
-    return raw if _REQUEST_ID_RE.match(raw) else None
+    return raw if _REQUEST_ID_RE.fullmatch(raw) else None
 
 
 def get_request_id() -> str | None:

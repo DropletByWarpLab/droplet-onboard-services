@@ -15,6 +15,7 @@ def test_sanitize():
     assert sanitize_request_id("short") is None
     assert sanitize_request_id("has space") is None
     assert sanitize_request_id(None) is None
+    assert sanitize_request_id("validid123\n") is None
 
 
 def test_filter_injects():

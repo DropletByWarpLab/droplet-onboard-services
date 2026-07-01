@@ -123,10 +123,10 @@ request end-to-end.
   to `litellm.acompletion(...)` in `providers/anthropic_cloud.py` (lines 47, 64)
   and `providers/openai_cloud.py` (lines 47, 64); pass `headers={...}` on the
   httpx `post`/`stream` calls in `providers/ollama_local.py` (lines 436, 454).
-- **Scheduler async boundary** (`scheduler.py`): the priority queue may run a
-  request body in a different task. Capture `get_request_id()` when enqueuing and
-  `set_request_id(...)` at the top of the worker before the provider call, so
-  provider-call logs stay tagged.
+- **No scheduler plumbing needed** (`scheduler.py`): the `enqueue`d provider call
+  runs in the caller's (endpoint's) asyncio task, not a separate worker task, so
+  it already has the contextvar set by the inbound middleware. No capture/re-set
+  across an async boundary is required — there isn't one.
 - **gRPC — out of scope (noted follow-up):** the chat path is HTTP. The gRPC
   handlers (`grpc_server.py`: `EmbedText`, `Chat`, …) **seed a fresh id per call**
   so no line is untagged, but reading/propagating an id via gRPC **metadata**
@@ -188,9 +188,9 @@ threads it downstream (orchestrator cron-runtime; routing apscheduler ticks).
 - **Invalid / oversized / missing inbound id** → regenerate; never trust verbatim.
 - **No context** (startup, gRPC) → `no-request-context` marker (not a crash).
 - **Async boundaries** — ALS propagates across Promises/`await` in Node;
-  ContextVars copy into asyncio tasks at creation. The one place this needs manual
-  care is ai-gateway's `scheduler.py` worker (capture at enqueue, re-set at
-  dequeue). Documented above.
+  ContextVars copy into asyncio tasks at creation. ai-gateway's `scheduler.py`
+  has no such boundary to manage: the enqueued provider call runs in the
+  caller's own asyncio task, so no capture/re-set is needed. Documented above.
 - **Log injection** — the sanitize regex caps length and forbids control chars, so
   a client- or peer-supplied header cannot forge log lines.
 

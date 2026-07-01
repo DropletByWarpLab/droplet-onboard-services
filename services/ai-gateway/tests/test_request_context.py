@@ -25,6 +25,7 @@ def test_sanitize_accepts_valid_rejects_junk():
     assert sanitize_request_id("bad\nnl") is None
     assert sanitize_request_id("x" * 65) is None
     assert sanitize_request_id(None) is None
+    assert sanitize_request_id("validid123\n") is None
 
 
 def test_get_set_request_id():

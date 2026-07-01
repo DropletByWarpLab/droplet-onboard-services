@@ -114,6 +114,7 @@ export async function apiFetch<T = unknown>(
     e.code = typed.code;
     e.status = r.status;
     e.body = body;
+    // optional chaining guards test mocks lacking .headers; a real Response always has it
     e.requestId = r.headers?.get("x-request-id") ?? requestId;
     throw e;
   }
