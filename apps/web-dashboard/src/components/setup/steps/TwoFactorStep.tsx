@@ -107,6 +107,10 @@ export function TwoFactorStep({
   }, [handleStart]);
 
   async function handleVerify() {
+    // WARP-991 — re-entrancy guard. The footer button is disabled while a
+    // verify is in flight, but the Enter key on the code input is not; a
+    // second concurrent verify could interleave with the first server-side.
+    if (isBusy) return;
     setError(null);
     if (!CODE_RE.test(code.trim())) {
       setError("Enter the 6-digit code from your authenticator app");
@@ -115,8 +119,25 @@ export function TwoFactorStep({
     setIsBusy(true);
     try {
       const res = await verifyTotp(code.trim());
-      setRecoveryCodes(res.recoveryCodes ?? []);
-      setPhase("codes");
+      // WARP-991 — advance ONLY when the response says the factor is ON.
+      // A 2xx that doesn't confirm (defensive — no current server path)
+      // must keep the owner here with an inline error, never let them walk
+      // away believing 2FA is enabled when it isn't.
+      if (res.enabled !== true) {
+        setError(
+          "We couldn't turn on two-factor. Enter the current code from your authenticator app and try again.",
+        );
+        return;
+      }
+      if (res.recoveryCodes && res.recoveryCodes.length > 0) {
+        setRecoveryCodes(res.recoveryCodes);
+        setPhase("codes");
+      } else {
+        // 200 with no codes is the re-challenge contract: the factor was
+        // ALREADY enabled (e.g. a concurrent confirm won). Show the honest
+        // "already on" confirmation instead of an empty codes screen.
+        setAlreadyEnabled(true);
+      }
     } catch (err) {
       // WARP-646: never surface the raw error. A typed orchestrator code
       // (TOTP_INVALID / RECOVERY_INVALID / …) gets precise copy via the
