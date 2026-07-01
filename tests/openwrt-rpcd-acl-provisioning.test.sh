@@ -85,6 +85,23 @@ else
   bad "canonical droplet-ai.json missing or lost its umdns/file grants"
 fi
 
+# 4b. WARP-987: DNS host-record writes must actually reload dnsmasq — the
+#     droplet-ai exec grant is PINNED to the full `/etc/init.d/dnsmasq restart`
+#     command line (rpcd matches path+args against the `file` scope). Guard
+#     both directions of drift: the pinned cmdline disappearing (host-records
+#     go back to committed-but-unserved) and the grant loosening to a bare
+#     `/etc/init.d/dnsmasq` or wildcard exec (blanket exec for the AI session).
+if grep -q '"/etc/init.d/dnsmasq restart": \["exec"\]' "$ACL"; then
+  ok "droplet-ai.json pins the dnsmasq restart exec cmdline (WARP-987)"
+else
+  bad "droplet-ai.json lost the pinned dnsmasq restart exec grant (WARP-987)"
+fi
+if grep -Eq '"/etc/init.d/dnsmasq( \*)?": \["exec"\]|"/(usr/)?(s)?bin[^"]*": \["exec"\]|"\*": \["exec"\]|"/\*?": \["exec"\]' "$ACL"; then
+  bad "droplet-ai.json exec grant loosened beyond the pinned dnsmasq cmdline"
+else
+  ok "droplet-ai.json exec grants stay pinned (no bare-path/wildcard exec)"
+fi
+
 # 5a. uhttpd concurrency bump ships in the image (uci-defaults)…
 if [ -r "$UCI_DEFAULTS" ] && grep -q "max_requests='10'" "$UCI_DEFAULTS" \
    && grep -Eq '^COPY +singlebox-image/uci-defaults/60-droplet-uhttpd-limits' "$DOCKERFILE"; then

@@ -5,6 +5,9 @@ These back the local-DNS feature that lets users reach the Droplet at
   - schema validation (hostname grammar, IPv4 shape)
   - SDK upsert / list / delete semantics (including duplicate pruning)
   - REST layer 400/404/503 paths
+  - WARP-987: lookup NOT_FOUND/NO_DATA treated as absence, same-value
+    re-post idempotency (apply NO_DATA is benign), and the explicit
+    dnsmasq reload after every successful mutation
 """
 
 from __future__ import annotations
@@ -12,7 +15,12 @@ from __future__ import annotations
 import pytest
 
 import main  # noqa: F401 — imported so main.app loads for the REST-layer tests
-from droplet_openwrt_sdk import DHCPApi
+from droplet_openwrt_sdk import (
+    DHCPApi,
+    UBUS_STATUS_NO_DATA,
+    UBUS_STATUS_NOT_FOUND,
+    UbusError,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +151,18 @@ class _FakeUci:
         self.commits.append(config)
 
 
+class _NoDataOnEmptyUci(_FakeUci):
+    """rpcd-build variant that reports an empty lookup as a NO_DATA error
+    instead of `{"values": {}}` — the shape behind the WARP-987 500s. The
+    SDK must treat it as absence (same convention as a missing section)."""
+
+    def get(self, config, section=None, option=None, type=None):
+        result = super().get(config, section=section, option=option, type=type)
+        if not result["values"]:
+            raise UbusError(UBUS_STATUS_NO_DATA, "no data")
+        return result
+
+
 class _FakeRouter:
     def __init__(self):
         self.uci = _FakeUci()
@@ -234,6 +254,54 @@ class TestDHCPApiDomainEntries:
         api, _ = dhcp_api
         assert api.delete_hostrecord("nobody.lan") == 0
 
+    # --- WARP-987: a lookup that finds nothing is absence, not a fault ---
+    @pytest.mark.parametrize("code", [UBUS_STATUS_NOT_FOUND, UBUS_STATUS_NO_DATA])
+    def test_list_treats_lookup_miss_as_absent(self, code):
+        """Depending on the rpcd build / box state, a hostrecord lookup with
+        nothing to return surfaces as NOT_FOUND/NO_DATA rather than an empty
+        result. That means "no entries" — never a 500."""
+        router = _FakeRouter()
+        def _raise(*args, **kwargs):
+            raise UbusError(code, "no data")
+        router.uci.get = _raise
+        api = DHCPApi(router)
+        assert api.list_hostrecords() == []
+
+    def test_list_treats_missing_uci_object_as_absent(self):
+        """A whole missing `uci` ubus object surfaces as the -1 "Object not
+        found" shape (same class `_ubus_object_absent` degrades elsewhere)."""
+        router = _FakeRouter()
+        def _raise(*args, **kwargs):
+            raise UbusError(-1, "Object not found")
+        router.uci.get = _raise
+        api = DHCPApi(router)
+        assert api.list_hostrecords() == []
+
+    def test_list_propagates_real_faults(self):
+        """PERMISSION_DENIED (and friends) are NOT absence — they must
+        propagate so a broken ACL surfaces instead of reading as empty."""
+        router = _FakeRouter()
+        def _raise(*args, **kwargs):
+            raise UbusError(6, "Access denied")
+        router.uci.get = _raise
+        api = DHCPApi(router)
+        with pytest.raises(UbusError):
+            api.list_hostrecords()
+
+    def test_set_creates_when_lookup_reports_no_data(self):
+        """First-ever add on a clean box: set_hostrecord's existing-record
+        lookup gets NO_DATA, treats it as absent, and creates (WARP-987 —
+        this path used to explode before any uci write happened)."""
+        router = _FakeRouter()
+        router.uci = _NoDataOnEmptyUci()
+        api = DHCPApi(router)
+        result = api.set_hostrecord("droplet.lan", "192.168.50.197")
+        assert result["action"] == "created"
+        listed = api.list_hostrecords()
+        assert [(e["hostname"], e["ip"]) for e in listed] == [
+            ("droplet.lan", "192.168.50.197")
+        ]
+
 
 # ---------------------------------------------------------------------------
 # REST endpoints
@@ -255,11 +323,12 @@ class TestDnsHostnameEndpoints:
             ]
         }
 
-    def test_upsert_triggers_uci_apply(self, connected_client, mock_router):
-        """Reload must use uci.apply — NOT file.exec via exec_service — because
-        the droplet-ai rpcd ACL grants uci.apply but denies file.exec. Using
-        exec_service here would cause every POST to return 'Access denied' on
-        production routers (this was the original bug)."""
+    def test_upsert_commits_and_reloads_dnsmasq(self, connected_client, mock_router):
+        """A fresh add must commit (uci.apply) AND explicitly restart dnsmasq
+        (dhcp.reload). apply alone only commits — its procd config.change
+        trigger does not regenerate /var/etc/dnsmasq.conf.* on the appliance,
+        so without the reload the record is committed but never SERVED
+        (WARP-987 live incident)."""
         mock_router.dhcp.set_hostrecord.return_value = {
             "section": "cfg03domain",
             "hostname": "droplet.lan",
@@ -280,7 +349,49 @@ class TestDnsHostnameEndpoints:
             "droplet.lan", "192.168.50.197",
         )
         mock_router.uci.apply.assert_called_once()
-        mock_router.exec_service.assert_not_called()
+        mock_router.dhcp.reload.assert_called_once()
+
+    def test_upsert_same_value_repost_is_idempotent(self, connected_client, mock_router):
+        """THE WARP-987 500: re-posting a record already committed in uci
+        stages nothing (rpcd's `uci set` skips unchanged values), so
+        `uci apply` reports NO_DATA. That's "nothing to commit", not a fault
+        — the endpoint must return 200 and still restart dnsmasq so a
+        committed-but-unserved record self-heals."""
+        fqdn = "d-b5839920cb1b0d09.droplet-us.com"
+        mock_router.dhcp.set_hostrecord.return_value = {
+            "section": "cfg02hostrecord",
+            "hostname": fqdn,
+            "ip": "192.168.20.1",
+            "action": "updated",
+        }
+        mock_router.uci.apply.side_effect = UbusError(UBUS_STATUS_NO_DATA, "no data")
+        resp = connected_client.post(
+            "/dhcp/hostnames",
+            json={"hostname": fqdn, "ip": "192.168.20.1"},
+            headers={"authorization": "Bearer pytest-fake-token"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["status"] == "ok"
+        mock_router.dhcp.reload.assert_called_once()
+
+    def test_upsert_apply_real_fault_still_errors(self, connected_client, mock_router):
+        """Only the no-pending NO_DATA is benign — a genuine apply fault
+        (e.g. PERMISSION_DENIED from a stale ACL) must surface as a 5xx and
+        must NOT be masked by a reload attempt."""
+        mock_router.dhcp.set_hostrecord.return_value = {
+            "section": "cfg03domain",
+            "hostname": "droplet.lan",
+            "ip": "192.168.50.197",
+            "action": "created",
+        }
+        mock_router.uci.apply.side_effect = UbusError(6, "Access denied")
+        resp = connected_client.post(
+            "/dhcp/hostnames",
+            json={"hostname": "droplet.lan", "ip": "192.168.50.197"},
+            headers={"authorization": "Bearer pytest-fake-token"},
+        )
+        assert resp.status_code == 500
+        mock_router.dhcp.reload.assert_not_called()
 
     def test_delete_missing_hostname_is_404(self, connected_client, mock_router):
         mock_router.dhcp.delete_hostrecord.return_value = 0
@@ -290,9 +401,9 @@ class TestDnsHostnameEndpoints:
         )
         assert resp.status_code == 404
         mock_router.uci.apply.assert_not_called()
-        mock_router.exec_service.assert_not_called()
+        mock_router.dhcp.reload.assert_not_called()
 
-    def test_delete_triggers_uci_apply(self, connected_client, mock_router):
+    def test_delete_commits_and_reloads_dnsmasq(self, connected_client, mock_router):
         mock_router.dhcp.delete_hostrecord.return_value = 1
         resp = connected_client.delete(
             "/dhcp/hostnames/droplet.lan",
@@ -300,7 +411,7 @@ class TestDnsHostnameEndpoints:
         )
         assert resp.status_code == 200
         mock_router.uci.apply.assert_called_once()
-        mock_router.exec_service.assert_not_called()
+        mock_router.dhcp.reload.assert_called_once()
 
     def test_delete_rejects_invalid_hostname(self, connected_client, mock_router):
         resp = connected_client.delete(
