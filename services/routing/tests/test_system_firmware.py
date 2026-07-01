@@ -38,17 +38,30 @@ class _RecordingRouter:
     (`exec_command` → `file.exec`); the recorder stands in for that one seam.
     """
 
-    def __init__(self, *, board: dict | None = None, raise_on_exec: Exception | None = None):
+    def __init__(
+        self,
+        *,
+        board: dict | None = None,
+        raise_on_exec: Exception | None = None,
+        raise_on_command: tuple[str, Exception] | None = None,
+    ):
         self.exec_calls: list[tuple[str, list[str] | None]] = []
         self._board = board or {
             "model": "Droplet Router",
             "board_name": "droplet,router-v2-6",
             "release": {"distribution": "OpenWrt", "version": "24.10.0"},
         }
+        # raise_on_exec: raise for EVERY exec (models a fault on the first call).
+        # raise_on_command: raise only for one command, e.g. ("reboot", exc) —
+        # needed for multi-exec flows like factory_reset (jffs2reset then reboot)
+        # where only the reboot is expected to drop the connection.
         self._raise_on_exec = raise_on_exec
+        self._raise_on_command = raise_on_command
 
     def exec_command(self, command: str, params: list[str] | None = None) -> dict:
         self.exec_calls.append((command, params))
+        if self._raise_on_command is not None and command == self._raise_on_command[0]:
+            raise self._raise_on_command[1]
         if self._raise_on_exec is not None:
             raise self._raise_on_exec
         return {"code": 0, "stdout": "", "stderr": ""}
@@ -187,10 +200,18 @@ class TestFactoryResetDispatch:
         assert "jffs2reset" in commands
 
     def test_connection_drop_during_reset_is_expected(self) -> None:
-        router = _RecordingRouter(raise_on_exec=ConnectionLost("rebooting"))
+        # factory_reset runs jffs2reset (must succeed) THEN reboot. Only the
+        # reboot is expected to drop the connection; that ConnectionLost is the
+        # success path and is swallowed. A jffs2reset fault would (correctly)
+        # propagate, so raise ONLY on the reboot call.
+        router = _RecordingRouter(
+            raise_on_command=("reboot", ConnectionLost("rebooting"))
+        )
         api = SystemApi(router)
         result = api.factory_reset()
         assert result["status"] == "resetting"
+        # Both steps were dispatched, in order.
+        assert [c[0] for c in router.exec_calls] == ["jffs2reset", "reboot"]
 
     def test_real_ubus_fault_propagates(self) -> None:
         router = _RecordingRouter(raise_on_exec=UbusError(6, "Permission denied"))
