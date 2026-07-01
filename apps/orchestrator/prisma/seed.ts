@@ -1,6 +1,9 @@
 import os from "os";
 import fs from "fs";
 import { PrismaClient } from "@prisma/client";
+// WARP-992: canonical box name — never os.hostname(), which is the docker
+// container id inside the container and leaks onto the dashboard identity chip.
+import { boxDisplayName } from "../src/lib/box-identity.js";
 // WARP-457: workspace settings seeder. Idempotent — re-running is a
 // no-op once the canonical defaults are in place, and operator-edited
 // values are never overwritten.
@@ -31,7 +34,7 @@ function detectHardwareRev(): string {
 }
 
 async function main() {
-  const hostname = os.hostname();
+  const hostname = boxDisplayName();
   const deviceId = `droplet-${hostname}`;
   const ip = detectIp();
   const hardwareRev = detectHardwareRev();
