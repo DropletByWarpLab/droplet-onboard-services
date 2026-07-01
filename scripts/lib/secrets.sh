@@ -325,10 +325,19 @@ DROPLET_DEVICE_ID=$(hostname 2>/dev/null || echo droplet)
 #   serving TLS, and the FQDN becomes the canonical origin + a bootstrap-SAN
 #   entry once known.
 DROPLET_PUBLIC_FQDN=
-# HQ_ISSUANCE_URL: base URL of the fleet HQ issuance API (hq.warp-lab.com).
-#   Empty disables live issuance (dev / pre-fleet). Plain outbound HTTPS; does
-#   NOT require the fleet WireGuard tunnel.
-HQ_ISSUANCE_URL=
+# HQ_ISSUANCE_URL: base URL of the fleet HQ issuance API. PRESERVED from the
+#   provisioning environment / manifest (${HQ_ISSUANCE_URL:-}) so a fresh or
+#   reflashed box that was handed the HQ URL keeps live issuance. Without this,
+#   factory-reset wipes .env and the box permanently loses its droplet-us.com
+#   cert + FQDN → remote access dead-ends (WARP-978). Empty disables live
+#   issuance (dev / pre-fleet). Plain outbound HTTPS; no WG tunnel required.
+HQ_ISSUANCE_URL=${HQ_ISSUANCE_URL:-}
+# TUNNEL_TOKEN: Cloudflare Tunnel connector token for the remote-access relay
+#   (WARP-974 / ADR-025). PRESERVED from the provisioning environment. Empty =
+#   relay OFF — single-box.sh only activates the `relay` compose profile
+#   (cloudflared) when this is set, so an un-provisioned box never brings up a
+#   tokenless connector.
+TUNNEL_TOKEN=${TUNNEL_TOKEN:-}
 
 # --- Compose profiles ---
 # Linux defaults to "linux,display,eval":
@@ -435,6 +444,13 @@ migrate_env() {
   _migrate_ensure_key ROUTING_SERVICE_TOKEN "$(openssl rand -hex 32)"
   _migrate_ensure_key ROUTING_MODE "$routing_mode_default"
   _migrate_ensure_key COMPOSE_PROFILES "$compose_profiles_default"
+  # WARP-978: ensure the HQ issuance URL + relay tunnel token exist on re-run,
+  # seeded from the provisioning environment (empty = live issuance / relay off).
+  # Pairs with the seed-block `${HQ_ISSUANCE_URL:-}` / `${TUNNEL_TOKEN:-}` above so
+  # a reflashed box keeps its droplet-us.com cert + relay when provisioning hands
+  # these in, instead of silently regressing to the self-signed bootstrap cert.
+  _migrate_ensure_key HQ_ISSUANCE_URL "${HQ_ISSUANCE_URL:-}"
+  _migrate_ensure_key TUNNEL_TOKEN "${TUNNEL_TOKEN:-}"
   # WARP-834 backfill: existing installs predate the per-box OpenWrt password.
   # Without it sync_openwrt_password_secret() writes an empty secret file and
   # the OpenWrt container root pw stays unset (ubus auth never comes up).
