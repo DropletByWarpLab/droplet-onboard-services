@@ -1121,6 +1121,126 @@ else
 fi
 
 # =============================================================================
+# Phase 10: droplet-set-public-fqdn.sh AP-resolver propagation (WARP-986)
+# =============================================================================
+# Live gap on the .87 single-box (2026-07-01): the script's two DNS legs never
+# reach the dnsmasq-ap instance inside the droplet-openwrt container — the ONLY
+# resolver AP (Wi-Fi) clients use — so the learned public FQDN stayed
+# unresolvable on AP Wi-Fi until the next boot. The fix adds a best-effort
+# _propagate_ap_resolver leg: when passwordless sudo is available, re-run
+# droplet-openwrt-attach.service (which now emits the FQDN into
+# /etc/dnsmasq-ap.conf); otherwise log and stay non-fatal. Static assertions
+# verify the wiring; behavioural assertions exercise the REAL function
+# extracted from the script (mirrors the Phase 7 lock-function extraction).
+echo "--- Phase 10: droplet-set-public-fqdn.sh AP-resolver propagation ---"
+
+SET_FQDN_SH="$REPO_ROOT_REAL/scripts/host/droplet-set-public-fqdn.sh"
+
+# (1) Static: privileged host script — syntax must be valid (same posture as
+# install-device-bridge.sh in Phase 4).
+if bash -n "$SET_FQDN_SH" 2>/dev/null; then
+  pass "droplet-set-public-fqdn.sh passes bash -n syntax check"
+else
+  fail "droplet-set-public-fqdn.sh has a bash syntax error"
+fi
+
+# (2) Static: the propagation leg exists, gates on passwordless sudo, and
+# restarts the attach unit (never a hand-rolled dnsmasq poke).
+if grep -qE 'sudo -n true' "$SET_FQDN_SH" \
+   && grep -qE 'systemctl restart droplet-openwrt-attach\.service' "$SET_FQDN_SH"; then
+  pass "propagation leg gates on 'sudo -n true' and restarts droplet-openwrt-attach.service"
+else
+  fail "propagation leg missing the sudo gate or the attach-unit restart (WARP-986)"
+fi
+
+if grep -qE '^_propagate_ap_resolver$' "$SET_FQDN_SH"; then
+  pass "_propagate_ap_resolver is invoked"
+else
+  fail "_propagate_ap_resolver is not invoked"
+fi
+
+# --- Behavioural: extract the real function and exercise it ------------------
+eval "$(awk '/^_propagate_ap_resolver\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$SET_FQDN_SH")"
+
+PF_WORK="$TMP_ROOT/pf"
+PF_STUB_BIN="$PF_WORK/bin"
+mkdir -p "$PF_STUB_BIN"
+
+# sudo stub: '-n true' answers per the sudo-ok flag; '-n systemctl restart <u>'
+# records the unit and answers per the restart-ok flag. systemctl stub exists
+# only so the function's `command -v systemctl` probe succeeds.
+cat > "$PF_STUB_BIN/sudo" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "-n" ] && [ "\$2" = "true" ]; then
+  [ -f "$PF_WORK/sudo-ok" ] && exit 0 || exit 1
+fi
+if [ "\$1" = "-n" ] && [ "\$2" = "systemctl" ] && [ "\$3" = "restart" ]; then
+  printf '%s\n' "\$4" >> "$PF_WORK/restarts"
+  [ -f "$PF_WORK/restart-ok" ] && exit 0 || exit 1
+fi
+exit 0
+EOF
+printf '#!/usr/bin/env bash\nexit 0\n' > "$PF_STUB_BIN/systemctl"
+chmod +x "$PF_STUB_BIN/sudo" "$PF_STUB_BIN/systemctl"
+
+PF_OLD_PATH="$PATH"
+PATH="$PF_STUB_BIN:$PATH"
+FQDN="d-0123456789abcdef.droplet-us.com"
+err() { printf 'droplet-set-public-fqdn: %s\n' "$*" >> "$PF_WORK/err.log"; }
+
+# (3) sudo ok + restart ok -> the attach unit is restarted and success is logged.
+: > "$PF_WORK/restarts"; : > "$PF_WORK/err.log"
+touch "$PF_WORK/sudo-ok" "$PF_WORK/restart-ok"
+PF_OUT="$( (_propagate_ap_resolver) 2>/dev/null || true)"
+if printf '%s' "$PF_OUT" | grep -q 'AP resolver refreshed' \
+   && grep -qx 'droplet-openwrt-attach.service' "$PF_WORK/restarts"; then
+  pass "passwordless sudo -> restarts droplet-openwrt-attach.service (FQDN live for AP clients now)"
+else
+  fail "expected attach-unit restart + success log, got out='$PF_OUT' restarts='$(cat "$PF_WORK/restarts" 2>/dev/null)'"
+fi
+
+# (4) No passwordless sudo (the device-bridge shape) -> non-fatal skip, no
+# restart attempted, next-boot breadcrumb logged.
+: > "$PF_WORK/restarts"; : > "$PF_WORK/err.log"
+rm -f "$PF_WORK/sudo-ok"
+if (_propagate_ap_resolver) >/dev/null 2>&1 \
+   && [ ! -s "$PF_WORK/restarts" ] \
+   && grep -q 'no passwordless sudo' "$PF_WORK/err.log"; then
+  pass "no passwordless sudo -> returns 0, no restart, next-boot breadcrumb logged"
+else
+  fail "sudo-less path wrong (rc/restarts/log): restarts='$(cat "$PF_WORK/restarts" 2>/dev/null)' log='$(cat "$PF_WORK/err.log" 2>/dev/null)'"
+fi
+
+# (5) Restart fails -> still non-fatal (returns 0) with a loud breadcrumb —
+# the .env write-back above it must never be failed by this leg.
+: > "$PF_WORK/restarts"; : > "$PF_WORK/err.log"
+touch "$PF_WORK/sudo-ok"; rm -f "$PF_WORK/restart-ok"
+if (_propagate_ap_resolver) >/dev/null 2>&1 \
+   && grep -q 'restart failed' "$PF_WORK/err.log"; then
+  pass "attach restart failure stays non-fatal (rc 0) with a breadcrumb"
+else
+  fail "restart-failure path wrong: log='$(cat "$PF_WORK/err.log" 2>/dev/null)'"
+fi
+
+# (6) Full-script run with the SKIP_DNS hook: .env upsert happens, exit 0, and
+# the propagation leg is NOT reached (the hook means "write .env only").
+PF_ENV="$PF_WORK/dotenv"
+rm -f "$PF_ENV"; : > "$PF_WORK/restarts"
+touch "$PF_WORK/sudo-ok" "$PF_WORK/restart-ok"
+if DROPLET_PUBLIC_FQDN_SKIP_DNS=1 DROPLET_PUBLIC_FQDN_ENV_FILE="$PF_ENV" \
+     bash "$SET_FQDN_SH" "$FQDN" >/dev/null 2>&1 \
+   && grep -qxF "DROPLET_PUBLIC_FQDN=$FQDN" "$PF_ENV" \
+   && [ ! -s "$PF_WORK/restarts" ]; then
+  pass "SKIP_DNS hook: .env upserted, exit 0, propagation leg not reached"
+else
+  fail "SKIP_DNS run wrong (env='$(cat "$PF_ENV" 2>/dev/null)' restarts='$(cat "$PF_WORK/restarts" 2>/dev/null)')"
+fi
+
+# Restore PATH and drop the test-local err() shadow.
+PATH="$PF_OLD_PATH"
+unset -f err _propagate_ap_resolver
+
+# =============================================================================
 # Results
 # =============================================================================
 echo ""
