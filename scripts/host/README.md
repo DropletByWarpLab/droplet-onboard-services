@@ -38,7 +38,9 @@ surface and stretch the nightly window from minutes to hours. Opt in with
 **Retention** (applied after every backup): `restic forget --prune` with
 **7 daily / 4 weekly / 6 monthly** — a month of fine-grained restore points
 plus half a year of monthly history, bounded on disk. Override with
-`DROPLET_BACKUP_KEEP_{DAILY,WEEKLY,MONTHLY}`.
+`DROPLET_BACKUP_KEEP_{DAILY,WEEKLY,MONTHLY}`. Retention groups `--group-by host`
+so the policy stays global across backup path-set changes over the box's
+lifetime (restic's default `host,paths` grouping would strand stale groups).
 
 **Integrity:** `restic check` runs before *every* restore (before any
 destructive step) and on every drill (with `--read-data-subset`, default 10%).
