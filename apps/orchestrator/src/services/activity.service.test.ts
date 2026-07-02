@@ -45,6 +45,9 @@ interface FakeActivityRow {
   refs: Record<string, unknown> | null;
   signature: string;
   prevSignatureHash: string;
+  actorType: "user" | "ai" | "system" | "anonymous" | null;
+  actorId: string | null;
+  schemaVersion: number;
 }
 
 interface FakePrisma {
@@ -91,6 +94,9 @@ function makePrismaFake(): {
           refs: refsValue,
           signature: data.signature as string,
           prevSignatureHash: data.prevSignatureHash as string,
+          actorType: (data.actorType as FakeActivityRow["actorType"]) ?? null,
+          actorId: (data.actorId as string | null) ?? null,
+          schemaVersion: data.schemaVersion as number,
         };
         rows.push(row);
         return row;
@@ -132,6 +138,7 @@ describe("activity.service.record", () => {
       sourceIcon: "log-in",
       what: "Alice signed in",
       sub: "from 192.168.50.42",
+      actor: { type: "user", id: "uuid-alice" },
     });
     expect(prismaState.rows).toHaveLength(1);
     expect(row.prevSignatureHash).toBe("");
@@ -145,6 +152,9 @@ describe("activity.service.record", () => {
           sub: row.sub,
           kind: row.kind,
           refs: row.refs,
+          actorType: row.actorType,
+          actorId: row.actorId,
+          schemaVersion: row.schemaVersion,
         },
         "",
         row.signature,
@@ -158,12 +168,14 @@ describe("activity.service.record", () => {
       severity: "ok",
       sourceIcon: "message-square",
       what: "Chat turn completed",
+      actor: { type: "user", id: "uuid-alice" },
     });
     const second = await recorder.record({
       kind: "tool_call",
       severity: "ok",
       sourceIcon: "wrench",
       what: "list_files",
+      actor: { type: "ai", id: null },
     });
     expect(second.prevSignatureHash).toBe(hashSignature(first.signature));
   });
@@ -174,12 +186,14 @@ describe("activity.service.record", () => {
       severity: "info",
       sourceIcon: "info",
       what: "Boot",
+      actor: { type: "system" },
     });
     await recorder.record({
       kind: "system",
       severity: "info",
       sourceIcon: "info",
       what: "Second event",
+      actor: { type: "system" },
     });
     expect(prismaState.transactionCount.count).toBe(2);
   });
@@ -191,6 +205,7 @@ describe("activity.service.record", () => {
       sourceIcon: "wrench",
       what: "block_network_device",
       refs: { mac: "AA:BB:CC:DD:EE:FF", reason: "parental control" },
+      actor: { type: "ai", id: null },
     });
     expect(row.refs).toEqual({
       mac: "AA:BB:CC:DD:EE:FF",
@@ -207,6 +222,9 @@ describe("activity.service.record", () => {
           sub: row.sub,
           kind: row.kind,
           refs: { mac: "AA:BB:CC:DD:EE:FF", reason: "parental control" },
+          actorType: row.actorType,
+          actorId: row.actorId,
+          schemaVersion: row.schemaVersion,
         },
         "",
         row.signature,
@@ -222,6 +240,9 @@ describe("activity.service.record", () => {
           sub: row.sub,
           kind: row.kind,
           refs: { mac: "AA:BB:CC:DD:EE:FF", reason: "MUTATED" },
+          actorType: row.actorType,
+          actorId: row.actorId,
+          schemaVersion: row.schemaVersion,
         },
         "",
         row.signature,
@@ -237,6 +258,7 @@ describe("activity.service.record", () => {
         severity: "ok",
         sourceIcon: "wrench",
         what: "bogus",
+        actor: { type: "system" },
       }),
     ).rejects.toThrow(/unknown ActivityKind/i);
   });
@@ -249,6 +271,7 @@ describe("activity.service.record", () => {
         severity: "panic",
         sourceIcon: "wrench",
         what: "bogus",
+        actor: { type: "system" },
       }),
     ).rejects.toThrow(/unknown ActivitySeverity/i);
   });
@@ -262,6 +285,7 @@ describe("activity.service.record", () => {
           severity: "info",
           sourceIcon: "info",
           what: `event-${i}`,
+          actor: { type: "system" },
         }),
       );
     }
@@ -285,6 +309,9 @@ describe("activity.service.record", () => {
             sub: r.sub,
             kind: r.kind,
             refs: r.refs,
+            actorType: r.actorType,
+            actorId: r.actorId,
+            schemaVersion: r.schemaVersion,
           },
           r.prevSignatureHash,
           r.signature,

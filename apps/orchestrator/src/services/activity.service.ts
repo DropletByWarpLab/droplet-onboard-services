@@ -23,6 +23,7 @@ import type { PrismaClient } from "@prisma/client";
 import { Prisma } from "@prisma/client";
 import {
   hashSignature,
+  type ActivityActorTypeName,
   type ActivityKindName,
   type ActivityRowContent,
   type ActivityRowSigner,
@@ -52,6 +53,47 @@ const KNOWN_KINDS: ReadonlySet<ActivityKindName> = new Set<ActivityKindName>([
 const KNOWN_SEVERITIES: ReadonlySet<ActivitySeverityName> =
   new Set<ActivitySeverityName>(["ok", "warn", "err", "info"]);
 
+const KNOWN_ACTOR_TYPES: ReadonlySet<ActivityActorTypeName> =
+  new Set<ActivityActorTypeName>(["user", "ai", "system", "anonymous"]);
+
+/**
+ * WARP-181: the canonical-content version the recorder writes. Bumped
+ * whenever the signature-covered shape changes;
+ * `canonicalizeRowContent` must learn every historical value.
+ */
+export const CURRENT_ACTIVITY_SCHEMA_VERSION = 2;
+
+/**
+ * WARP-181: who performed the action. Required on every record() call
+ * so an emitter can't silently produce an unattributed row.
+ *
+ *   - `user` — an authenticated household member. `id` (canonical user
+ *     UUID) is REQUIRED; the recorder throws without it.
+ *   - `ai` — the agent loop / MCP tool dispatch. `id` is the
+ *     on-behalf-of user UUID when it was already plumbed through,
+ *     else null.
+ *   - `system` — the box itself (boot, tickers, sweeps, purges).
+ *   - `anonymous` — pre-auth surfaces (failed/throttled sign-ins);
+ *     ip/username context stays in `refs` as before.
+ */
+export interface ActivityActor {
+  type: ActivityActorTypeName;
+  id?: string | null;
+}
+
+/**
+ * WARP-181: derive the actor for an emitter running inside an
+ * Express handler. Authenticated caller → `user` with the canonical
+ * UUID; no `req.user` (pre-auth surface) → `anonymous`.
+ */
+export function actorFromRequest(req: {
+  user?: { id: string } | undefined;
+}): ActivityActor {
+  return req.user?.id
+    ? { type: "user", id: req.user.id }
+    : { type: "anonymous" };
+}
+
 export interface RecordParams {
   kind: ActivityKindName;
   severity: ActivitySeverityName;
@@ -59,6 +101,8 @@ export interface RecordParams {
   what: string;
   sub?: string | null;
   refs?: Record<string, unknown> | null;
+  /** WARP-181: required actor attribution — see `ActivityActor`. */
+  actor: ActivityActor;
   /**
    * Optional override for the timestamp. The default is "now" so the
    * recorder controls the ordering in production; tests pass a fixed
@@ -78,6 +122,9 @@ export interface RecordedActivityRow {
   refs: Record<string, unknown> | null;
   signature: string;
   prevSignatureHash: string;
+  actorType: ActivityActorTypeName | null;
+  actorId: string | null;
+  schemaVersion: number;
 }
 
 export interface ActivityRowRecorder {
@@ -106,6 +153,17 @@ export function createActivityRecorder(
           `unknown ActivitySeverity: ${String(params.severity)}`,
         );
       }
+      if (!KNOWN_ACTOR_TYPES.has(params.actor?.type as ActivityActorTypeName)) {
+        throw new Error(
+          `unknown ActivityActorType: ${String(params.actor?.type)}`,
+        );
+      }
+      const actorId = params.actor.id ?? null;
+      if (params.actor.type === "user" && (!actorId || actorId.trim() === "")) {
+        throw new Error(
+          "actor of type 'user' requires a non-empty id (the caller's canonical user UUID)",
+        );
+      }
 
       const at = params.at ?? new Date();
       const content: ActivityRowContent = {
@@ -116,6 +174,12 @@ export function createActivityRecorder(
         sub: params.sub ?? null,
         kind: params.kind,
         refs: params.refs ?? null,
+        actorType: params.actor.type,
+        actorId,
+        // Explicit — never a DB default. The migration backfilled
+        // pre-upgrade rows to 1; everything the recorder writes is
+        // the current version.
+        schemaVersion: CURRENT_ACTIVITY_SCHEMA_VERSION,
       };
 
       // Atomic SELECT-prev + INSERT. The Prisma transaction maps to a
@@ -160,6 +224,9 @@ export function createActivityRecorder(
               : (content.refs as Prisma.InputJsonValue),
           signature,
           prevSignatureHash,
+          actorType: content.actorType,
+          actorId: content.actorId,
+          schemaVersion: content.schemaVersion,
         };
         const created = await tx.activityRow.create({ data });
         return created;
@@ -179,6 +246,9 @@ export function createActivityRecorder(
             : (inserted.refs as Record<string, unknown>),
         signature: inserted.signature,
         prevSignatureHash: inserted.prevSignatureHash,
+        actorType: inserted.actorType as ActivityActorTypeName | null,
+        actorId: inserted.actorId,
+        schemaVersion: inserted.schemaVersion,
       };
     },
   };
