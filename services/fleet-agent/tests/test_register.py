@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import httpx
@@ -54,6 +55,41 @@ async def test_register_survives_portal_down(env):
     # Portal comes back → registration succeeds on a later attempt.
     route.mock(return_value=httpx.Response(201, json=register_response()))
     assert await agent.ensure_registered() is True
+
+
+@respx.mock
+async def test_concurrent_ticks_register_exactly_once(env):
+    """Boot-time alignment: the errors (5s) / commands (15s) / heartbeat
+    (30s) ticks can all await ensure_registered() in the same event-loop
+    slice. The provisioning code is single-use and the portal's
+    consumption check is racy under concurrency — the agent must
+    serialize registration so exactly ONE POST /agents/register ever
+    leaves the box, and the losers adopt the winner's identity instead
+    of burning the code (or logging a false 'code consumed' error)."""
+    route = respx.post(f"{PORTAL_URL}/agents/register").mock(
+        return_value=httpx.Response(201, json=register_response())
+    )
+    agent = build_agent(env)
+
+    # Hold the in-flight register across an event-loop tick so the three
+    # callers genuinely overlap (a respx-mocked request can resolve
+    # without ever yielding control).
+    real_register = agent.portal.register
+
+    async def slow_register(code, payload):
+        await asyncio.sleep(0.02)
+        return await real_register(code, payload)
+
+    agent.portal.register = slow_register
+
+    results = await asyncio.gather(
+        agent.ensure_registered(),
+        agent.ensure_registered(),
+        agent.ensure_registered(),
+    )
+
+    assert results == [True, True, True]
+    assert route.call_count == 1
 
 
 @respx.mock

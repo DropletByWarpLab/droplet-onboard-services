@@ -31,6 +31,7 @@ loop.
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import logging
 from typing import Optional
@@ -92,6 +93,13 @@ class FleetAgent:
         self.errors = errors or ErrorReporter()
         self.spool = DiskSpool(state.spool_path, config.spool_max)
         self._register_permanently_failed = False
+        # Serializes registration: while it is pending, the 5s/15s/30s
+        # ticks align every 30s and can await ensure_registered()
+        # concurrently — without this lock each would POST the SAME
+        # single-use provisioning code (the portal's consumption check
+        # is racy under concurrency → duplicate/orphan Machine rows, and
+        # the loser logs a false "code consumed" error).
+        self._register_lock = asyncio.Lock()
 
         identity = state.identity()
         if identity:
@@ -132,50 +140,60 @@ class FleetAgent:
             if not self.config.provisioning_code:
                 return False
 
-            payload = {
-                "hostname": self.config.hostname,
-                "tier": self.config.tier,
-                "firmware_version": self.config.firmware_version,
-            }
-            if self.config.hardware_revision:
-                payload["hardware_revision"] = self.config.hardware_revision
+            # Only ONE in-flight register, ever: the losing awaiters block
+            # here and re-check identity below, adopting the winner's
+            # result instead of re-POSTing the single-use code.
+            async with self._register_lock:
+                if self.portal.has_identity:
+                    return True
+                if self._register_permanently_failed:
+                    return False
 
-            result = await self.portal.register(
-                self.config.provisioning_code, payload
-            )
-            if result.ok and result.body:
-                machine_id = str(result.body["machine_id"])
-                token = str(result.body["ingest_token"])
-                intervals = dict(result.body.get("config", {}))
-                self.state.save_identity(
-                    machine_id=machine_id,
-                    ingest_token=token,
-                    ingest_endpoint=str(result.body.get("ingest_endpoint", "")),
-                    intervals=intervals,
+                payload = {
+                    "hostname": self.config.hostname,
+                    "tier": self.config.tier,
+                    "firmware_version": self.config.firmware_version,
+                }
+                if self.config.hardware_revision:
+                    payload["hardware_revision"] = self.config.hardware_revision
+
+                result = await self.portal.register(
+                    self.config.provisioning_code, payload
                 )
-                self.portal.adopt_identity(machine_id, token)
-                self._intervals = intervals
-                logger.info("registered with portal as machine_id=%s", machine_id)
-                return True
+                if result.ok and result.body:
+                    machine_id = str(result.body["machine_id"])
+                    token = str(result.body["ingest_token"])
+                    intervals = dict(result.body.get("config", {}))
+                    self.state.save_identity(
+                        machine_id=machine_id,
+                        ingest_token=token,
+                        ingest_endpoint=str(result.body.get("ingest_endpoint", "")),
+                        intervals=intervals,
+                    )
+                    self.portal.adopt_identity(machine_id, token)
+                    self._intervals = intervals
+                    logger.info("registered with portal as machine_id=%s", machine_id)
+                    return True
 
-            if result.status in (401, 403, 409):
-                # Consumed/invalid provisioning code — hammering the portal
-                # will not fix it. Log loudly ONCE, keep the box unbothered.
-                self._register_permanently_failed = True
-                logger.error(
-                    "registration rejected (HTTP %s) — provisioning code is "
-                    "invalid or already consumed; operator must mint a new "
-                    "one in the portal's /settings/tokens",
+                if result.status in (401, 403, 409):
+                    # Consumed/invalid provisioning code — hammering the
+                    # portal will not fix it. Log loudly ONCE, keep the box
+                    # unbothered.
+                    self._register_permanently_failed = True
+                    logger.error(
+                        "registration rejected (HTTP %s) — provisioning code is "
+                        "invalid or already consumed; operator must mint a new "
+                        "one in the portal's /settings/tokens",
+                        result.status,
+                    )
+                    return False
+
+                logger.warning(
+                    "registration attempt failed transiently (status=%s transport_error=%s) — will retry",
                     result.status,
+                    result.transport_error,
                 )
                 return False
-
-            logger.warning(
-                "registration attempt failed transiently (status=%s transport_error=%s) — will retry",
-                result.status,
-                result.transport_error,
-            )
-            return False
         except Exception:  # noqa: BLE001 — fail-open
             logger.exception("ensure_registered failed (fail-open)")
             return False
