@@ -19,6 +19,7 @@ import {
   ncGetCurrentUser,
   ncCreateUser,
   ncDeleteUser,
+  ncEnsureGroup,
   ncListUsers,
   ncUpdateUser,
   ncSetUserEnabled,
@@ -764,17 +765,75 @@ export function createPublicAuthRouter(
       // SpaceSwitcher never appears). buildNcGroups preserves the owner's
       // existing "admin" group and appends the household group without
       // duplication — same helper the invite-accept path uses.
-      const ownerGroups = buildNcGroups(
-        "owner",
-        householdGroupName(config.DROPLET_SHARED_FOLDER_NAME),
-      );
-      await ncInstallAndCreateAdmin(username, password, displayName, ownerGroups);
+      const householdGroup = householdGroupName(config.DROPLET_SHARED_FOLDER_NAME);
+      const ownerGroups = buildNcGroups("owner", householdGroup);
+
+      // WARP-989 belt-and-braces: idempotently ensure the household group
+      // exists BEFORE provisioning the owner into it. On a box where the
+      // occ provisioning script never created it (the WARP-990 trigger),
+      // OCS otherwise rejects the create-user with "Group household does
+      // not exist" and setup dies mid-flight. Best-effort: a transient
+      // ensure failure must not block a setup that would otherwise succeed
+      // (the group usually already exists); if the group is GENUINELY
+      // missing and could not be created, ncInstallAndCreateAdmin below
+      // fails and the atomic rollback keeps setup re-runnable.
+      try {
+        await ncEnsureGroup(householdGroup);
+      } catch (groupErr) {
+        logger.warn(
+          { err: groupErr, householdGroup },
+          "setup: could not ensure the household group exists (continuing — user provisioning is the authority)",
+        );
+      }
+
+      // WARP-989 — setup must be ATOMIC. The local owner row is written
+      // first (idempotent, see the ordering comment above), but the N1
+      // owner-exists guard makes a leftover row a permanent lockout: if
+      // Nextcloud provisioning fails here and the row survives, every
+      // retry answers 409 OWNER_EXISTS while the owner has NO Nextcloud
+      // account (all /api/files/* 401 forever; re-login does not heal —
+      // the exact half-created state from the .87 live incident). So on
+      // NC failure, roll back the just-created owner row and answer a
+      // TYPED error the dashboard can map to honest copy — the appliance
+      // stays re-runnable. No session artifacts exist yet at this point
+      // (the wizard logs in via /auth/login only after setup succeeds).
+      try {
+        await ncInstallAndCreateAdmin(username, password, displayName, ownerGroups);
+      } catch (ncErr: any) {
+        try {
+          // Scoped to the row this request just created: deriveUniqueUserId
+          // guaranteed the username was unused, and the N1 guard guaranteed
+          // zero owner rows existed — so this matches exactly that row (and
+          // deleteMany tolerates it already being gone).
+          await prisma.user.deleteMany({
+            where: { nextcloudUsername: username, role: "owner" },
+          });
+          logger.warn(
+            { username, err: ncErr },
+            "setup: Nextcloud provisioning failed — rolled back the local owner row so setup can be retried (WARP-989)",
+          );
+        } catch (rollbackErr) {
+          // Rollback failed too — the pre-fix half-created state. Log loudly;
+          // the typed error below still tells the user setup didn't finish.
+          logger.error(
+            { username, err: rollbackErr },
+            "setup: FAILED to roll back the local owner row after a Nextcloud provisioning failure — manual cleanup may be required (WARP-989)",
+          );
+        }
+        res.status(500).json({
+          error: ncErr?.message || "Account provisioning failed",
+          code: "SETUP_PROVISIONING_FAILED",
+        });
+        return;
+      }
       logger.info({ username }, "Initial admin user created");
 
       res.json({ status: "ok", username });
     } catch (err: any) {
       logger.error({ err }, "Setup failed");
-      res.status(500).json({ error: err.message || "Setup failed" });
+      // WARP-989: typed so the dashboard never maps a setup 500 to the
+      // misleading "check your username and password" sign-in copy.
+      res.status(500).json({ error: err.message || "Setup failed", code: "SETUP_FAILED" });
     }
   });
 
