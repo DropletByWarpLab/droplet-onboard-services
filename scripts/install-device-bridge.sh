@@ -35,13 +35,14 @@ fi
 log() { printf '[install-bridge] %s\n' "$*"; }
 
 # --- 1) Install the unit files ---
+# (droplet-wifi-watchdog.service/.timer are gone: WARP-1002's unified
+# droplet-watchdog.timer schedules the Wi-Fi wedge helper now — see the
+# migration in step 4b below and scripts/host/droplet-watchdog.sh.)
 for unit in droplet-device-bridge.service \
             droplet-wifi-rotate.service \
             droplet-wifi-rotate.timer \
             droplet-shutdown-screen.service \
-            droplet-storage-pool-apply.service \
-            droplet-wifi-watchdog.service \
-            droplet-wifi-watchdog.timer; do
+            droplet-storage-pool-apply.service; do
   src="$SRC_DIR/$unit"
   dst="$UNIT_DIR/$unit"
   if [[ ! -f "$src" ]]; then
@@ -145,10 +146,11 @@ fi
 install -m 0755 "$GUEST_SCRIPT_SRC" "$GUEST_SCRIPT_DST"
 log "installed $GUEST_SCRIPT_DST"
 
-# --- 1d-ter) Install the Wi-Fi PCI watchdog (WARP-869) ---
+# --- 1d-ter) Install the Wi-Fi PCI watchdog helper (WARP-869) ---
 # Revives a silently-dead Wi-Fi PCI function (driver bound, phy/netdev gone)
 # via remove + rescan, then re-runs droplet-openwrt-attach so hostapd rebinds
-# the AP. Scheduled by droplet-wifi-watchdog.timer (unit installed in step 1).
+# the AP. Since WARP-1002 it is invoked by the unified droplet-watchdog.timer
+# (installed by setup.sh via scripts/lib/single-box.sh), not a timer of its own.
 WIFI_WD_SRC="$REPO_ROOT/scripts/host/usr-local-sbin/droplet-wifi-watchdog"
 WIFI_WD_DST="/usr/local/sbin/droplet-wifi-watchdog"
 if [[ ! -f "$WIFI_WD_SRC" ]]; then
@@ -432,11 +434,18 @@ fi
 # ExecStop fires on the next shutdown). Idempotent. Independent of the bridge.
 systemctl enable --now droplet-shutdown-screen.service
 
-# WARP-869: Wi-Fi PCI watchdog — revives a silently-dead Wi-Fi function
-# (driver bound, phy/netdev gone; seen live on the shipping box) via PCI
-# remove + rescan, then re-runs droplet-openwrt-attach. Always on: the
-# healthy-path cost is a read-only sysfs scan every 2 minutes.
-systemctl enable --now droplet-wifi-watchdog.timer
+# --- 4b) WARP-1002 migration: standalone Wi-Fi watchdog timer superseded ---
+# The WARP-869 helper is now scheduled by the unified droplet-watchdog.timer
+# (installed + enabled by setup.sh via scripts/lib/single-box.sh). Two
+# independent schedulers could race a PCI remove/rescan, so disable and remove
+# the old units if this box still has them. The helper script itself stays
+# (installed in step 1d-ter — it is the watchdog's wifi detect+heal engine).
+systemctl disable --now droplet-wifi-watchdog.timer 2>/dev/null || true
+if [[ -f "$UNIT_DIR/droplet-wifi-watchdog.service" || -f "$UNIT_DIR/droplet-wifi-watchdog.timer" ]]; then
+  rm -f "$UNIT_DIR/droplet-wifi-watchdog.service" "$UNIT_DIR/droplet-wifi-watchdog.timer"
+  systemctl daemon-reload
+  log "removed superseded droplet-wifi-watchdog units (droplet-watchdog.timer owns the schedule)"
+fi
 
 # Wi-Fi key rotation: off by default so saved credentials on phones keep
 # working after a restart. Enable only if the operator opts in via
