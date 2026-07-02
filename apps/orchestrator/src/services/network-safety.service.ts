@@ -19,6 +19,7 @@ import {
   NETWORK_CONFIRMATION_TOKEN_EXPIRY_MS,
 } from "../config/network-safety-rules.js";
 import { recordActivity } from "./activity.singleton.js";
+import type { ActivityActor } from "./activity.service.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("network-safety");
@@ -72,6 +73,7 @@ export async function evaluateNetworkCommand(
         confirmed: false,
         blocked: true,
         reason: classification.reason,
+        source,
       });
       return {
         allowed: false,
@@ -106,6 +108,7 @@ export async function evaluateNetworkCommand(
       confirmed: false,
       blocked: false,
       reason: classification.reason,
+      source,
     });
 
     return {
@@ -131,6 +134,7 @@ export async function evaluateNetworkCommand(
         confirmed: false,
         blocked: true,
         reason: "Rate limit exceeded",
+        source,
       });
       return {
         allowed: false,
@@ -150,6 +154,7 @@ export async function evaluateNetworkCommand(
       tier: 1,
       confirmed: true,
       blocked: false,
+      source,
     });
     return { allowed: true, tier: 1 };
   }
@@ -180,6 +185,7 @@ export async function evaluateNetworkCommand(
     confirmed: false,
     blocked: false,
     reason: classification.reason,
+    source,
   });
 
   logger.info(
@@ -307,6 +313,8 @@ export async function confirmNetworkCommand(
   pendingConfirmations.delete(confirmationToken);
 
   await logNetworkCommand(prisma, {
+    // A confirm always comes from the web UI (the agent can never
+    // self-approve — see the guard above), so this row is user-sourced.
     userId: userId || pending.userId,
     entityId: pending.entityId,
     domain: pending.domain,
@@ -315,6 +323,7 @@ export async function confirmNetworkCommand(
     tier: pending.tier,
     confirmed: true,
     blocked: false,
+    source: "api",
   });
 
   logger.info(
@@ -361,6 +370,8 @@ async function logNetworkCommand(
     tier: number;
     confirmed: boolean;
     blocked: boolean;
+    /** WARP-181: which surface issued the op — drives actor attribution. */
+    source?: "api" | "ai";
     reason?: string;
   }
 ): Promise<void> {
@@ -391,10 +402,26 @@ async function logNetworkCommand(
     : entry.confirmed
       ? "ok"
       : "info";
+  // WARP-181: actor attribution. `entry.userId` is req.user.id from the
+  // route layer — a canonical user UUID, or a "_service:*" principal id
+  // when the op came through the MCP/agent channel. Service principals
+  // and source==="ai" ops are the AI acting; a human UUID under the api
+  // source is the user themselves.
+  const isServicePrincipal =
+    typeof entry.userId === "string" && entry.userId.startsWith("_service:");
+  const onBehalfOfId = entry.userId && !isServicePrincipal ? entry.userId : null;
+  const actor: ActivityActor =
+    entry.source === "ai" || isServicePrincipal
+      ? { type: "ai", id: onBehalfOfId }
+      : onBehalfOfId
+        ? { type: "user", id: onBehalfOfId }
+        : { type: "anonymous" };
+
   await recordActivity({
     kind: "network",
     severity,
     sourceIcon: "wifi",
+    actor,
     what: entry.blocked
       ? `Network ${entry.service} blocked`
       : entry.confirmed

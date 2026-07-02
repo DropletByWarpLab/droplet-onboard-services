@@ -113,6 +113,7 @@ export async function tickToolSchedules(
         severity: "warn",
         sourceIcon: "shield",
         what: "Scheduled run skipped (needs confirmation)",
+        actor: { type: "system" },
         sub: `${spec.name} (writes + !reversible)`,
         refs: {
           specId: spec.id,
@@ -168,6 +169,7 @@ async function advanceOrDisable(
       severity: "warn",
       sourceIcon: "clock",
       what: "Tool schedule disabled (RRULE parse failed)",
+      actor: { type: "system" },
       sub: `schedule ${schedule.id}`,
       refs: {
         specId: schedule.specId,

@@ -32,6 +32,7 @@ import { Router, Request, Response, NextFunction } from "express";
 import type { PrismaClient } from "@prisma/client";
 import { requireRole } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
+import { actorFromRequest } from "../services/activity.service.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("settings-route");
@@ -399,6 +400,7 @@ export function createSettingsRouter(prisma: PrismaClient): Router {
             ? "Off-LAN channel enabled"
             : "Off-LAN channel disabled",
           sub: key,
+          actor: actorFromRequest(req),
           refs: {
             actor,
             channel: key,
@@ -588,6 +590,7 @@ export function createSettingsRouter(prisma: PrismaClient): Router {
             sourceIcon: "settings",
             what: "Setting updated",
             sub: key,
+            actor: actorFromRequest(req),
             refs: {
               actor,
               key,

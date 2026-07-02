@@ -26,6 +26,7 @@ import {
 import { publish as mqttPublish } from "../services/mqtt.service.js";
 import { requireRole } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
+import { actorFromRequest } from "../services/activity.service.js";
 import { visibleAudiences } from "../services/memory-audience.js";
 import { loadIdentityPrompt } from "../services/identity-prompt.js";
 
@@ -832,6 +833,10 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           kind: "chat",
           severity: activitySeverityForTurnStatus(status),
           sourceIcon: "message-square",
+          // WARP-181: the chat turn is attributed to the authenticated
+          // caller (canonical UUID). Service principals carry their
+          // "_service:*" id — still the authenticated caller identity.
+          actor: actorFromRequest(req),
           what:
             status === "completed"
               ? "Chat turn completed"

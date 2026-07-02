@@ -102,6 +102,7 @@ export async function tickSceneSchedules(
         severity: "warn",
         sourceIcon: "clock",
         what: "Scene schedule disabled (routine deleted)",
+        actor: { type: "system" },
         sub: `schedule ${schedule.id}`,
         refs: { sceneId: schedule.sceneId, scheduleId: schedule.id },
       });
@@ -115,7 +116,14 @@ export async function tickSceneSchedules(
       // run the routine through the shared executor. executeScene records
       // the audited `smart_home` row; partial device failures are
       // tolerated there and don't throw.
-      await executeScene(prisma, matter, scene, { triggeredBy: "scheduler" });
+      // WARP-181: an unattended schedule fire is attributed to the AI/
+      // automation surface per the ticket's actor matrix. SceneSchedule
+      // only stores `createdBy` as a username, so no on-behalf-of UUID
+      // is available — id stays null.
+      await executeScene(prisma, matter, scene, {
+        triggeredBy: "scheduler",
+        activityActor: { type: "ai", id: null },
+      });
       fired += 1;
     } catch (err) {
       // A throw here is infrastructure failure (the audit write inside
@@ -166,6 +174,7 @@ async function advanceOrDisable(
       severity: "warn",
       sourceIcon: "clock",
       what: "Scene schedule disabled (RRULE parse failed)",
+      actor: { type: "system" },
       sub: `schedule ${schedule.id}`,
       refs: {
         sceneId: schedule.sceneId,

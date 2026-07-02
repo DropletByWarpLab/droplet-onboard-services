@@ -22,6 +22,7 @@ import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { requireRole } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
+import { actorFromRequest } from "../services/activity.service.js";
 import { executeScene } from "../services/scene-runner.service.js";
 import {
   isSupportedRrule,
@@ -266,6 +267,7 @@ export function createScenesRouter(
           what: "Scene created",
           sub: scene.name,
           refs: { sceneId: scene.id, actionCount: scene.actions.length, actor },
+          actor: actorFromRequest(req),
         });
 
         res.status(201).json(scene);
@@ -429,6 +431,7 @@ export function createScenesRouter(
         const run = await executeScene(prisma, matter, scene, {
           triggeredBy: "user",
           actor: req.user?.username ?? null,
+          activityActor: actorFromRequest(req),
         });
 
         res.json(run);
@@ -552,6 +555,7 @@ export function createScenesRouter(
             rrule: parsed.data.rrule,
             actor,
           },
+          actor: actorFromRequest(req),
         });
 
         res.status(201).json(serializeSchedule(created));

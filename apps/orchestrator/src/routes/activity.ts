@@ -46,8 +46,15 @@ const ACTIVITY_KINDS = [
   "system",
 ] as const;
 
+/** WARP-181: mirrors the Prisma `ActivityActorType` enum verbatim. */
+const ACTIVITY_ACTOR_TYPES = ["user", "ai", "system", "anonymous"] as const;
+
 const listQuerySchema = z.object({
   kind: z.enum(ACTIVITY_KINDS).optional(),
+  /** WARP-181: filter by who performed the action. */
+  actorType: z.enum(ACTIVITY_ACTOR_TYPES).optional(),
+  /** WARP-181: filter by the canonical user UUID of the actor. */
+  actorId: z.string().min(1).max(200).optional(),
   /** ISO-8601 lower bound (inclusive). */
   from: z
     .string()
@@ -95,10 +102,13 @@ export function createActivityRouter(prisma: PrismaClient): Router {
           });
           return;
         }
-        const { kind, from, to, q, limit = 50, cursor } = parsed.data;
+        const { kind, actorType, actorId, from, to, q, limit = 50, cursor } =
+          parsed.data;
 
         const where: Prisma.ActivityRowWhereInput = {};
         if (kind) where.kind = kind;
+        if (actorType) where.actorType = actorType;
+        if (actorId) where.actorId = actorId;
         if (from || to) {
           where.at = {};
           if (from) where.at.gte = new Date(from);
@@ -141,6 +151,8 @@ export function createActivityRouter(prisma: PrismaClient): Router {
           refs: r.refs,
           signature: r.signature,
           prevSignatureHash: r.prevSignatureHash,
+          actorType: r.actorType,
+          actorId: r.actorId,
         }));
 
         const nextCursor =
@@ -183,10 +195,12 @@ export function createActivityRouter(prisma: PrismaClient): Router {
           });
           return;
         }
-        const { kind, from, to, q } = parsed.data;
+        const { kind, actorType, actorId, from, to, q } = parsed.data;
 
         const where: Prisma.ActivityRowWhereInput = {};
         if (kind) where.kind = kind;
+        if (actorType) where.actorType = actorType;
+        if (actorId) where.actorId = actorId;
         if (from || to) {
           where.at = {};
           if (from) where.at.gte = new Date(from);
@@ -216,8 +230,14 @@ export function createActivityRouter(prisma: PrismaClient): Router {
           'attachment; filename="droplet-activity-bundle.jsonl"',
         );
 
+        // WARP-181: bundle format v2 — rows are version-tagged
+        // (`schemaVersion`) and carry signature-covered actor fields;
+        // the offline verifier picks the canonical form PER ROW from
+        // `schemaVersion` (v1 legacy 7-key, v2 actor-bearing 9-key).
+        // The identifier is bumped so a v1-only verifier fails fast at
+        // the manifest instead of reporting false tampering on v2 rows.
         const manifest = {
-          type: "droplet.activity-bundle.v1",
+          type: "droplet.activity-bundle.v2",
           algorithm: "HMAC-SHA256",
           // The HMAC key bytes shipped here ARE symmetric — anyone
           // holding them can also forge. Documented in the spec
@@ -225,7 +245,7 @@ export function createActivityRouter(prisma: PrismaClient): Router {
           // key"). The bundle is meant for the device owner.
           publicKey,
           exportedAt: new Date().toISOString(),
-          filter: { kind, from, to, q },
+          filter: { kind, actorType, actorId, from, to, q },
         };
         res.write(JSON.stringify(manifest) + "\n");
 
@@ -255,6 +275,9 @@ export function createActivityRouter(prisma: PrismaClient): Router {
               refs: r.refs,
               signature: r.signature,
               prevSignatureHash: r.prevSignatureHash,
+              actorType: r.actorType,
+              actorId: r.actorId,
+              schemaVersion: r.schemaVersion,
             };
             res.write(JSON.stringify(out) + "\n");
           }

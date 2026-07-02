@@ -192,6 +192,7 @@ export async function purgeCameraArtifacts(
     severity: "info",
     sourceIcon: "video",
     what: "Camera retention purge",
+    actor: { type: "system" },
     sub: `${clipsDeleted} clips · ${eventsDeleted} events`,
     refs: {
       clipsDays: policy.clipsDays,
