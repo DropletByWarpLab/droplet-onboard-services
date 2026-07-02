@@ -1645,7 +1645,14 @@ services:
   # If procd fails at step 1, re-add SYS_ADMIN first (procd mount ops), then
   # MKNOD (procd/hotplug device-node creation at init) — the two most-likely
   # re-adds from the Docker-default caps that `cap_drop: ALL` intentionally
-  # removes. Rationale for every line:
+  # removes.
+  #   DON'T misdiagnose EROFS: removing `privileged` re-applies Docker's default
+  #   read-only /proc/sys, so runtime sysctl writers NOT covered by the `sysctls:`
+  #   below (netifd per-interface knobs, fw4's net.netfilter.*, procd applying
+  #   /etc/sysctl.d) will log benign `Read-only file system` warnings. Those are
+  #   EXPECTED and are NOT a missing capability — only mount/device errors point
+  #   to a cap re-add.
+  # Rationale for every line:
   #   docs/security/openwrt-container-threat-model.md §6.
   #
   # openwrt-hardened-staged:      # merge these keys INTO `openwrt`, don't run standalone

@@ -215,12 +215,13 @@ Vault-side services (orchestrator, Postgres, the AI). The physical air-gap the
 Foundation calls for is, on this shape, **only a container boundary** — which is
 exactly why that boundary must be as strong as we can make it. `privileged: true`
 + customer-facing UDP **weakens the one boundary that stands in for the two-box
-separation** on the shipping single-box SKU. Hardening it (dropping to a scoped
+separation** on the shipping single-box shape. Hardening it (dropping to a scoped
 cap set, restoring seccomp/AppArmor, and — as a follow-up — isolating it onto its
 own compose network) is the software approximation of the hardware air-gap. The
-multi-box and future v2-6 SKUs restore the physical separation; the single-box
-leans entirely on this container cell, so it carries the most risk and deserves
-the most confinement.
+multi-box shape and the Foundation's dedicated-hardware SKUs (Full Rack + Mini
+Rack) restore the physical separation; the single-box shape leans entirely on
+this container cell, so it carries the most risk and deserves the most
+confinement.
 
 ---
 
@@ -309,6 +310,17 @@ Notes on what is *not* in the list:
   procd/mount failure at boot). `MKNOD`: procd + hotplug create device nodes at
   init; a `cap_drop: ALL` container that needs to `mknod` a `/dev` entry will
   fail without it. Confirm both on hardware before finalizing.
+- **Expect benign sysctl `Read-only file system` (EROFS) warnings — do NOT chase
+  them as a cap problem.** Removing `privileged: true` re-applies Docker's
+  default **read-only `/proc/sys`** mount. The `sysctls:` block above covers
+  ip_forward + `conf.all.forwarding`, but other runtime sysctl writers are
+  *not* expressible as compose `sysctls` and will hit the read-only mount:
+  `netifd` per-interface knobs (e.g. `net.ipv6.conf.<if>.*`), `fw4`'s
+  `net.netfilter.*` tunables, and `procd` applying `/etc/sysctl.d`. These log
+  benign EROFS lines and do not break the AP/router datapath. The WARP-1016
+  engineer should treat an EROFS log line as **expected**, not as the procd boot
+  failure — only genuine **mount/device** errors indicate a missing capability
+  (SYS_ADMIN / MKNOD per the two bullets above).
 
 ### Follow-up ticket — WARP-1016
 Tracked in **WARP-1016** (hardware verification): **stage the cap reduction on a
@@ -334,6 +346,7 @@ listener. Two residuals remain, and the cap reduction does not close either:
   host-escape posture, but non-zero while `NET_ADMIN`/`SYS_ADMIN` remain.
 
 The deeper residual mitigations are architectural and belong to the
-multi-box/v2-6 SKUs (physical WAN/Edge separation) — the single-box accepts a
-higher residual risk in exchange for one-box economics, and this document is the
+multi-box shape and the Foundation's dedicated-hardware SKUs (Full Rack + Mini
+Rack, physical WAN/Edge separation) — the single-box shape accepts a higher
+residual risk in exchange for one-box economics, and this document is the
 record of that accepted trade-off.
