@@ -66,7 +66,7 @@ Should-fix items that move the product toward "clean business application" quali
 - **security** — Gate `/auth/login?return=body` to native clients; `files.ts` stop defaulting to `admin`
 - **security** — Cert-pinned TLS for switch + camera-init (remove `verify=False`)
 - **ops** — Self-signed cert: document trust-flow UX + rotation story
-- **ops/sec** — Threat-model + harden the privileged single-box OpenWrt container
+- **ops/sec** — Threat-model + harden the privileged single-box OpenWrt container (WARP-585) — boundary documented + scoped cap set staged: [`security/openwrt-container-threat-model.md`](security/openwrt-container-threat-model.md)
 - **data** — Retention/seal-and-truncate for `ActivityRow`/`CommandAuditLog`/`NotificationLog`
 - **data** — Verify `FileContentChunk` vector index recreated after DROP; consider HNSW
 - **data** — Make ai-gateway in-memory session fallback fail loud in production

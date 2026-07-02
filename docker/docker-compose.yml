@@ -1553,6 +1553,23 @@ services:
   # network interface manipulation that requires real capabilities. tmpfs
   # for /tmp and /run because OpenWrt expects writable scratch space at
   # init time and these are runtime-state-only.
+  #
+  # WARP-585 (threat model + hardening): this is the riskiest cell in the
+  # compose file — the ONLY service that pairs `privileged: true` with a
+  # customer-facing UDP listener (WireGuard :51820). `privileged: true` is an
+  # OVER-GRANT: it hands the container ALL capabilities (not just the two in
+  # cap_add below — those are redundant while privileged is set), ALL host
+  # devices, and disables the seccomp + AppArmor profiles. procd/netifd only
+  # justify NET_ADMIN (+ likely SYS_ADMIN for procd mounts); the rest is blast
+  # radius. On the single-box shape this container boundary stands in for the
+  # Foundation's physical WAN/Edge-vs-Vault air-gap, so it must be as tight as
+  # possible. Full boundary, attack scenarios, and the exact reduced cap set:
+  #   docs/security/openwrt-container-threat-model.md
+  # The reduced cap set is STAGED (commented) below rather than applied: the
+  # single-box profile is Linux-only and cannot run in CI/macOS, so a cap
+  # reduction cannot be verified here without a real Wi-Fi PHY + host netns
+  # move + kernel WireGuard module. It must be validated on hardware first
+  # (WARP Hardware Test) — see the block after this service.
   openwrt:
     # WARP-826: bake the AP/router packages (hostapd, iw, wpad, umdns, wireguard,
     # uhttpd/rpcd) into the image so a fresh container / post-factory-reset box
@@ -1575,9 +1592,16 @@ services:
     hostname: openwrt
     profiles: ["single-box"]
     command: /sbin/init
+    # WARP-585: over-grant (see the block comment above + the threat-model doc).
+    # The STAGED hardened alternative that replaces this — cap_drop ALL + a
+    # scoped cap_add + no-new-privileges + explicit sysctls — is commented after
+    # this service; do NOT enable it until it passes on a real single-box.
     privileged: true
     restart: unless-stopped
     <<: *default-logging
+    # NOTE: redundant while `privileged: true` is set (privileged already grants
+    # ALL caps). Kept so the intended scoped set is visible; they become the
+    # actual grant only once privileged is removed per the staged block below.
     cap_add:
       - NET_ADMIN
       - SYS_ADMIN
@@ -1595,6 +1619,56 @@ services:
     mem_limit: ${OPENWRT_MEM_LIMIT:-512m}
     cpus: ${OPENWRT_CPUS:-1.0}
     pids_limit: ${OPENWRT_PIDS_LIMIT:-1024}
+
+  # ===========================================================================
+  # WARP-585 — STAGED hardening for the `openwrt` service above. NOT ACTIVE.
+  # ===========================================================================
+  # This is the ready-to-test end state that replaces `privileged: true` with a
+  # scoped capability set, restores the default seccomp + AppArmor profiles, and
+  # blocks setuid elevation. It is intentionally COMMENTED OUT: the single-box
+  # profile is Linux-only and cannot run in CI or on macOS, so this cannot be
+  # verified here without a real Wi-Fi PHY, the host netns move, and the host
+  # kernel WireGuard module. Enabling an unverified cap reduction risks a box
+  # whose AP/WireGuard/procd silently fails to boot.
+  #
+  # HARDWARE-VERIFY BEFORE ENABLING (WARP Hardware Test status): on a real
+  # single-box, delete `privileged: true` + the two `cap_add` entries from the
+  # live `openwrt` service and merge the keys below into it, then confirm:
+  #   1. procd boots clean (no mount errors in `docker logs droplet-openwrt`);
+  #   2. `droplet-openwrt-attach` brings the AP up (hostapd `type AP`, client
+  #      gets a DHCP lease);
+  #   3. WireGuard `:51820/udp` completes a handshake + the VPN client reaches
+  #      the dashboard;
+  #   4. ubus over 127.0.0.1:8181 answers (routing service healthy);
+  #   5. a container restart re-attaches cleanly (overlay + config persist).
+  # If procd fails at step 1, re-add SYS_ADMIN first; it is the most likely
+  # single cap the reduced set still needs. Rationale for every line:
+  #   docs/security/openwrt-container-threat-model.md §6.
+  #
+  # openwrt-hardened-staged:      # merge these keys INTO `openwrt`, don't run standalone
+  #   # Remove `privileged: true` and the redundant cap_add from the live block.
+  #   cap_drop:
+  #     - ALL
+  #   cap_add:
+  #     - NET_ADMIN          # netifd, hostapd (nl80211), fw4/nftables, wg, ip link/addr/route
+  #     - NET_RAW            # hostapd + dnsmasq raw sockets (DHCP)
+  #     - NET_BIND_SERVICE   # uhttpd :80, dnsmasq :53/:67 under cap_drop ALL
+  #     - SYS_ADMIN          # procd early-init mounts. CONFIRM whether droppable on hardware.
+  #     - CHOWN              # passwd root / procd service files
+  #     - DAC_OVERRIDE       # procd + uci writes under /etc, /overlay
+  #     - FOWNER
+  #     - SETUID             # passwd (setuid-root), dnsmasq drop-to-user
+  #     - SETGID
+  #     - KILL               # procd service supervision
+  #   security_opt:
+  #     - no-new-privileges:true   # restores seccomp/AppArmor confinement; verify vs passwd/dnsmasq
+  #   sysctls:
+  #     - net.ipv4.ip_forward=1
+  #     - net.ipv4.conf.all.forwarding=1
+  #   # No devices:/device_cgroup_rules: — the Wi-Fi PHY is moved into the netns
+  #   # host-side (iw phy set netns), and WireGuard is a kernel netdev; neither
+  #   # is a /dev node the container opens.
+  # ===========================================================================
 
   # Cloudflare Tunnel connector (WARP-974 / ADR-025) — the OUTBOUND, serverless
   # replacement for DuckDNS + the inbound WireGuard port. It dials Cloudflare's
