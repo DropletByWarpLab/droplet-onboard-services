@@ -78,6 +78,12 @@ jobs:
       - name: Test @droplet/mcp-server
         run: npm run -w @droplet/mcp-server test
 
+      # WARP-537's update-agent verify suite (once merged) execs the real
+      # cosign binary over golden fixtures — mirror orchestrator-tests.yml.
+      # Harmless before that suite lands; required after.
+      - name: Install cosign (update-agent verify suite)
+        uses: sigstore/cosign-installer@v3
+
       - name: Test @droplet/orchestrator
         run: npm run -w @droplet/orchestrator test
 
