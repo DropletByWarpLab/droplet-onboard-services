@@ -400,6 +400,39 @@ else
 fi
 
 # =============================================================================
+# Test 15: WARP-535 — OTA trust anchor ships in the orchestrator image
+# =============================================================================
+# The update agent verifies release manifests against a baked-in cosign
+# public key. Two invariants, checked statically (this script never needs
+# Docker — the Dockerfile COPY is what puts the file in the built image):
+#   1. The key file exists at its canonical source path.
+#   2. The orchestrator Dockerfile has a real (non-comment) COPY directive
+#      that ships that exact path into the RUNTIME stage. dist/ output
+#      doesn't include non-TS assets, so without the explicit COPY the
+#      built image silently loses the trust anchor and every OTA verify
+#      fails at runtime instead of at CI time.
+# NOTE: until the human key ceremony runs (scripts/README.md, "OTA release
+# signing — key ceremony") this file is a clearly-marked PLACEHOLDER; the
+# update agent's verify path fails closed on the placeholder marker.
+
+COSIGN_PUB="$REPO_ROOT/apps/orchestrator/src/services/update-agent/cosign.pub"
+ORCH_DOCKERFILE="$REPO_ROOT/apps/orchestrator/Dockerfile"
+
+if [ -f "$COSIGN_PUB" ]; then
+  pass "cosign.pub exists at apps/orchestrator/src/services/update-agent/ (WARP-535)"
+else
+  fail "cosign.pub missing from apps/orchestrator/src/services/update-agent/ (WARP-535)"
+fi
+
+if grep -vE '^[[:space:]]*#' "$ORCH_DOCKERFILE" \
+  | grep -E '^[[:space:]]*COPY' \
+  | grep -q 'src/services/update-agent/cosign.pub'; then
+  pass "orchestrator Dockerfile COPYs cosign.pub into the runtime image (WARP-535)"
+else
+  fail "orchestrator Dockerfile does not COPY cosign.pub into the runtime image (WARP-535)"
+fi
+
+# =============================================================================
 # Summary
 # =============================================================================
 printf "\n"
