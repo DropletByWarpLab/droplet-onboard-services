@@ -1,0 +1,48 @@
+name: droplet-watchdog-tests
+
+# WARP-1002 — unified on-box self-heal supervisor. Pure shell tests drive the
+# watchdog against fake sysfs trees, a fake kernel log, and stub docker /
+# xvf_host binaries (no root, hardware, or docker daemon needed), plus a
+# shellcheck pass over the supervisor itself.
+
+on:
+  pull_request:
+    paths:
+      - "scripts/host/droplet-watchdog.sh"
+      - "scripts/host/etc-systemd-system/droplet-watchdog.*"
+      - "scripts/host/etc-default/droplet-watchdog"
+      - "scripts/host/usr-local-sbin/droplet-wifi-watchdog"
+      - "scripts/lib/single-box.sh"
+      - "scripts/install-device-bridge.sh"
+      - "tests/droplet-watchdog.test.sh"
+      - ".github/workflows/droplet-watchdog-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "scripts/host/droplet-watchdog.sh"
+      - "scripts/host/etc-systemd-system/droplet-watchdog.*"
+      - "scripts/host/etc-default/droplet-watchdog"
+      - "scripts/host/usr-local-sbin/droplet-wifi-watchdog"
+      - "scripts/lib/single-box.sh"
+      - "scripts/install-device-bridge.sh"
+      - "tests/droplet-watchdog.test.sh"
+      - ".github/workflows/droplet-watchdog-tests.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: droplet-watchdog-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  droplet-watchdog:
+    runs-on: ubuntu-latest
+    # Everything is local stubs + tmpdirs; a hung test must fail fast.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck the supervisor
+        # warning severity to match ship-check's bar; no global excludes —
+        # waivers live inline per scripts/test/ship-check.sh convention.
+        run: shellcheck --severity=warning scripts/host/droplet-watchdog.sh
+      - name: Run droplet-watchdog shell tests
+        run: bash tests/droplet-watchdog.test.sh

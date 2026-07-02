@@ -1,0 +1,37 @@
+# /etc/default/droplet-watchdog — per-box tuning for the unified self-heal
+# watchdog (WARP-1002). Read by droplet-watchdog.service via EnvironmentFile.
+# Every value here is optional; the defaults baked into
+# /usr/local/sbin/droplet-watchdog are safe on every deployment shape because
+# each check also self-gates on hardware/tooling presence (not_applicable).
+#
+# Installed once by setup.sh (scripts/lib/single-box.sh) and NEVER overwritten
+# on re-runs — operator edits survive. Reference copy:
+# scripts/host/etc-default/droplet-watchdog. No secrets belong in this file.
+
+# Which checks run on this box (space-separated). Anything not listed reports
+# an explicit not_applicable in status.json — never silently absent.
+#DROPLET_WATCHDOG_CHECKS="wifi voice_dsp docker_dns container_crashloop"
+
+# Escalation: consecutive heal failures before a check goes `escalated`
+# (CRITICAL log + suspended heals), and how many runs between suspended
+# re-tries (5 runs ≈ 15 min at the 3-min timer cadence).
+#DROPLET_WATCHDOG_ESCALATE_AFTER=2
+#DROPLET_WATCHDOG_ESCALATED_RETRY_EVERY=5
+
+# XVF3800 voice DSP: path to the xvf_host control tool. The tool historically
+# lived at /tmp/xvf/xvf_host on lab boxes — /tmp does not survive a reboot, so
+# install it somewhere durable and point this at it.
+#DROPLET_WATCHDOG_XVF_HOST=/usr/local/bin/xvf_host
+#DROPLET_WATCHDOG_XHCI_THRESHOLD=3
+
+# Docker DNS probe: hostname to resolve, and (optionally) which running
+# container to probe from (default: first container of the compose project).
+#DROPLET_WATCHDOG_DNS_PROBE=registry-1.docker.io
+#DROPLET_WATCHDOG_DNS_CONTAINER=
+#DROPLET_WATCHDOG_COMPOSE_PROJECT=droplet
+
+# Crash-loop detection: flag a container whose RestartCount grows by MORE
+# than this between two watchdog runs; capture this many log lines once per
+# episode into /var/lib/droplet/watchdog/diagnostics/.
+#DROPLET_WATCHDOG_CRASHLOOP_THRESHOLD=3
+#DROPLET_WATCHDOG_LOG_TAIL=200

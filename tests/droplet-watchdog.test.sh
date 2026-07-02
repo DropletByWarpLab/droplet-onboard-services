@@ -1,0 +1,535 @@
+#!/usr/bin/env bash
+# =============================================================================
+# WARP-1002 — unit tests for scripts/host/droplet-watchdog.sh
+#
+# The unified on-box self-heal supervisor: one timer-driven script running
+# pluggable checks (wifi wedge via the WARP-869 helper, XVF3800 voice-DSP
+# wedge, docker daemon DNS, container crash-loops), writing an explicit
+# per-check status enum to status.json and escalating after consecutive heal
+# failures. These tests drive it against fake sysfs trees, a fake kernel log,
+# and stub docker / xvf_host binaries — no root, no hardware, no docker
+# daemon needed. Mirrors tests/wifi-watchdog.test.sh's harness conventions.
+#
+# Runtime: < 30 seconds.
+# =============================================================================
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT_REAL="$(cd "$SCRIPT_DIR/.." && pwd)"
+WATCHDOG="$REPO_ROOT_REAL/scripts/host/droplet-watchdog.sh"
+WIFI_HELPER_REAL="$REPO_ROOT_REAL/scripts/host/usr-local-sbin/droplet-wifi-watchdog"
+FAILURES=0
+TESTS=0
+
+pass() { TESTS=$((TESTS + 1)); printf "  \033[32m✓\033[0m %s\n" "$1"; }
+fail() { TESTS=$((TESTS + 1)); FAILURES=$((FAILURES + 1)); printf "  \033[31m✗\033[0m %s\n" "$1"; }
+
+# python for JSON validation/extraction (python3 on CI/box; python on some dev hosts)
+PYBIN="$(command -v python3 || command -v python)"
+
+echo ""
+echo "  ================================================"
+echo "  WARP-1002 — droplet-watchdog"
+echo "  ================================================"
+echo ""
+
+if [ ! -f "$WATCHDOG" ]; then
+  fail "scripts/host/droplet-watchdog.sh does not exist"
+  echo ""
+  echo "  1 of 1 tests FAILED"
+  exit 1
+fi
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+# --- helpers -----------------------------------------------------------------
+
+# Reset the per-scenario fixture tree (state survives only when a test wants it).
+reset_work() {
+  rm -rf "${WORK:?}/state" "${WORK:?}/pci" "${WORK:?}/usb" "${WORK:?}/bin" \
+         "${WORK:?}/docker" "${WORK:?}/klog" "${WORK:?}/rescan" \
+         "${WORK:?}/daemon.json"
+  mkdir -p "$WORK/bin" "$WORK/docker"
+  : > "$WORK/klog"
+}
+
+# Fake PCI device factory (same layout the WARP-869 helper reads).
+mk_pci_dev() { # <name> <class> [bound] [netdev|phy]
+  local d="$WORK/pci/$1"
+  mkdir -p "$d"
+  printf '%s\n' "$2" > "$d/class"
+  [ "${3:-}" = "bound" ] && ln -s /dev/null "$d/driver"
+  if [ "${4:-}" = "netdev" ]; then mkdir -p "$d/net/wlan0"; fi
+  if [ "${4:-}" = "phy" ]; then mkdir -p "$d/ieee80211/phy0"; fi
+  return 0
+}
+
+# Fake USB device with an idVendor (XMOS is 20b1).
+mk_usb_dev() { # <name> <vendor>
+  mkdir -p "$WORK/usb/$1"
+  printf '%s\n' "$2" > "$WORK/usb/$1/idVendor"
+}
+
+# xvf_host stub: logs invocations; exit code from $WORK/xvf_exit (default 0).
+mk_xvf_stub() {
+  cat > "$WORK/bin/xvf_host" <<EOF
+#!/bin/sh
+printf 'xvf_host %s\n' "\$*" >> "$WORK/xvf.log"
+exit \$(cat "$WORK/xvf_exit" 2>/dev/null || echo 0)
+EOF
+  chmod +x "$WORK/bin/xvf_host"
+}
+
+# docker stub: dispatches on subcommand, reads fixtures, logs invocations.
+#   $WORK/docker/running        docker ps           (one name per line)
+#   $WORK/docker/all            docker ps -a        (one name per line)
+#   $WORK/docker/restarts       "<name> <count>" per line (docker inspect)
+#   $WORK/docker/dns_exit       exit code for docker exec (default 0)
+#   $WORK/docker/logs           content emitted by docker logs
+mk_docker_stub() {
+  cat > "$WORK/bin/docker" <<EOF
+#!/bin/sh
+printf 'docker %s\n' "\$*" >> "$WORK/docker.log"
+case "\$1" in
+  ps)
+    if echo "\$*" | grep -q -- '-a'; then cat "$WORK/docker/all" 2>/dev/null
+    else cat "$WORK/docker/running" 2>/dev/null; fi
+    exit 0 ;;
+  inspect)
+    # last arg is the container name
+    for last in "\$@"; do :; done
+    awk -v c="\$last" '\$1 == c { print \$2; found=1 } END { exit found ? 0 : 1 }' \
+      "$WORK/docker/restarts" 2>/dev/null ;;
+  exec)
+    exit \$(cat "$WORK/docker/dns_exit" 2>/dev/null || echo 0) ;;
+  logs)
+    cat "$WORK/docker/logs" 2>/dev/null
+    exit 0 ;;
+  *) exit 0 ;;
+esac
+EOF
+  chmod +x "$WORK/bin/docker"
+}
+
+# Run the watchdog with the standard fixture env. Extra VAR=val pairs may be
+# passed as leading args. Never let a non-zero exit kill the test harness.
+run_wd() {
+  env PATH="$WORK/bin:$PATH" \
+      DROPLET_WATCHDOG_STATE_DIR="$WORK/state" \
+      DROPLET_WATCHDOG_WIFI_HELPER="$WIFI_HELPER_REAL" \
+      DROPLET_WIFI_SYS_PCI="$WORK/pci" \
+      DROPLET_WIFI_RESCAN="$WORK/rescan" \
+      DROPLET_WIFI_SETTLE_S=0 \
+      DROPLET_WIFI_WAIT_S=0 \
+      DROPLET_WIFI_AP_IN_CONTAINER=0 \
+      DROPLET_WIFI_ATTACH_UNIT= \
+      DROPLET_WATCHDOG_USB_SYS="$WORK/usb" \
+      DROPLET_WATCHDOG_KLOG_FILE="$WORK/klog" \
+      DROPLET_WATCHDOG_XVF_HOST="$WORK/bin/xvf_host" \
+      DROPLET_WATCHDOG_XVF_COOLDOWN_S=0 \
+      DROPLET_WATCHDOG_DOCKER_DAEMON_JSON="$WORK/daemon.json" \
+      "$@" \
+      bash "$WATCHDOG" 2>&1
+}
+
+STATUS_JSON="$WORK/state/status.json"
+
+# Extract .checks.<name>.<field> from status.json.
+wd_field() { # <check> <field>
+  "$PYBIN" -c '
+import json, sys
+doc = json.load(open(sys.argv[1]))
+print(doc["checks"][sys.argv[2]][sys.argv[3]])
+' "$STATUS_JSON" "$1" "$2"
+}
+
+wd_overall() {
+  "$PYBIN" -c 'import json,sys; print(json.load(open(sys.argv[1]))["overall"])' "$STATUS_JSON"
+}
+
+# =============================================================================
+# Phase 0: static checks
+# =============================================================================
+echo "--- Phase 0: static checks ---"
+
+if bash -n "$WATCHDOG" 2>/dev/null; then
+  pass "droplet-watchdog.sh passes bash -n"
+else
+  fail "droplet-watchdog.sh fails bash -n"
+  exit 1
+fi
+
+# Install wiring: setup.sh's single-box host integration must install the
+# supervisor + timer, and the legacy standalone wifi-watchdog timer must no
+# longer be enabled by install-device-bridge.sh (the unified timer owns the
+# schedule now — two independent schedulers could race a PCI heal).
+if grep -q 'droplet-watchdog.timer' "$REPO_ROOT_REAL/scripts/lib/single-box.sh"; then
+  pass "single-box.sh installs/enables droplet-watchdog.timer"
+else
+  fail "single-box.sh does not reference droplet-watchdog.timer"
+fi
+if grep -Eq 'systemctl enable --now droplet-wifi-watchdog.timer' \
+     "$REPO_ROOT_REAL/scripts/install-device-bridge.sh"; then
+  fail "install-device-bridge.sh still enables the standalone wifi-watchdog timer"
+else
+  pass "install-device-bridge.sh no longer enables the standalone wifi-watchdog timer"
+fi
+for unit in droplet-watchdog.service droplet-watchdog.timer; do
+  if [ -f "$REPO_ROOT_REAL/scripts/host/etc-systemd-system/$unit" ]; then
+    pass "unit file scripts/host/etc-systemd-system/$unit exists"
+  else
+    fail "unit file scripts/host/etc-systemd-system/$unit missing"
+  fi
+done
+
+# =============================================================================
+# Phase 1: status.json shape — every known check explicit, never absent
+# =============================================================================
+echo "--- Phase 1: status.json shape ---"
+
+reset_work
+# No docker stub, no wifi PCI device, no XMOS USB device → everything n/a.
+run_wd DROPLET_WATCHDOG_CHECKS="voice_dsp" >/dev/null || true
+
+if [ -f "$STATUS_JSON" ] && "$PYBIN" -m json.tool "$STATUS_JSON" >/dev/null 2>&1; then
+  pass "status.json exists and is valid JSON"
+else
+  fail "status.json missing or invalid"
+  cat "$STATUS_JSON" 2>/dev/null || true
+  exit 1
+fi
+
+all_present=1
+for c in wifi voice_dsp docker_dns container_crashloop; do
+  s="$(wd_field "$c" status 2>/dev/null || echo MISSING)"
+  case "$s" in
+    ok|healed|heal_failed|escalated|not_applicable) : ;;
+    *) all_present=0 ;;
+  esac
+done
+if [ "$all_present" = 1 ]; then
+  pass "all four checks carry an explicit enum status (none inferred from absence)"
+else
+  fail "a check is missing or carries a non-enum status: $(cat "$STATUS_JSON")"
+fi
+
+# Checks not in DROPLET_WATCHDOG_CHECKS are explicitly not_applicable.
+if [ "$(wd_field wifi status)" = "not_applicable" ] \
+   && [ "$(wd_field docker_dns status)" = "not_applicable" ]; then
+  pass "disabled checks are explicitly not_applicable"
+else
+  fail "disabled checks are not marked not_applicable"
+fi
+
+if [ ! -e "$STATUS_JSON.tmp" ] && ! ls "$WORK/state"/status.json.tmp.* >/dev/null 2>&1; then
+  pass "no leftover temp file from the atomic status write"
+else
+  fail "atomic-write temp file left behind"
+fi
+
+# =============================================================================
+# Phase 2: not_applicable gating (hardware / tooling absent)
+# =============================================================================
+echo "--- Phase 2: not_applicable gating ---"
+
+reset_work
+run_wd >/dev/null || true
+
+[ "$(wd_field wifi status)" = "not_applicable" ] \
+  && pass "wifi is not_applicable with no Wi-Fi-class PCI device" \
+  || fail "wifi expected not_applicable, got $(wd_field wifi status)"
+
+[ "$(wd_field voice_dsp status)" = "not_applicable" ] \
+  && pass "voice_dsp is not_applicable with no XMOS USB device" \
+  || fail "voice_dsp expected not_applicable, got $(wd_field voice_dsp status)"
+
+# docker checks: PATH stub dir has no docker binary. The host running this
+# test may have docker on PATH, so force the CLI lookup to miss via a PATH
+# that still contains the essentials but not docker: we approximate by
+# pointing the compose-project filter at a stub that returns nothing instead.
+mk_docker_stub   # empty fixtures: no containers at all
+run_wd >/dev/null || true
+[ "$(wd_field docker_dns status)" = "not_applicable" ] \
+  && pass "docker_dns is not_applicable with no running containers" \
+  || fail "docker_dns expected not_applicable, got $(wd_field docker_dns status)"
+[ "$(wd_field container_crashloop status)" = "not_applicable" ] \
+  && pass "container_crashloop is not_applicable with no containers" \
+  || fail "container_crashloop expected not_applicable, got $(wd_field container_crashloop status)"
+
+[ "$(wd_overall)" = "ok" ] \
+  && pass "overall is ok when every check is n/a or ok" \
+  || fail "overall expected ok, got $(wd_overall)"
+
+# =============================================================================
+# Phase 3: voice_dsp — detection, heal, cooldown, escalation
+# =============================================================================
+echo "--- Phase 3: voice_dsp (XVF3800) ---"
+
+reset_work
+mk_xvf_stub
+mk_usb_dev "1-3" "20b1"
+# Two overruns < default threshold 3 → ok.
+printf 'xhci_hcd 0000:00:14.0: WARN Event TRB Overrun\nxhci_hcd: isoc overrun\n' > "$WORK/klog"
+run_wd >/dev/null || true
+[ "$(wd_field voice_dsp status)" = "ok" ] \
+  && pass "overrun count below threshold → ok" \
+  || fail "expected ok below threshold, got $(wd_field voice_dsp status)"
+[ ! -f "$WORK/xvf.log" ] \
+  && pass "no DSP reboot issued below threshold" \
+  || fail "xvf_host invoked below threshold: $(cat "$WORK/xvf.log")"
+
+# Threshold hit → heal (xvf_host REBOOT 1) → healed.
+printf 'xhci overrun\nxhci overrun\nxhci Overrun\n' > "$WORK/klog"
+run_wd >/dev/null || true
+[ "$(wd_field voice_dsp status)" = "healed" ] \
+  && pass "wedge signature → healed" \
+  || fail "expected healed, got $(wd_field voice_dsp status)"
+grep -q 'REBOOT 1' "$WORK/xvf.log" 2>/dev/null \
+  && pass "heal issued 'xvf_host REBOOT 1'" \
+  || fail "xvf_host REBOOT 1 not issued: $(cat "$WORK/xvf.log" 2>/dev/null)"
+if [ -f "$WORK/state/heal.log" ] \
+   && grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]+Z .*voice_dsp' "$WORK/state/heal.log"; then
+  pass "heal action logged with a UTC timestamp"
+else
+  fail "heal.log missing or missing timestamped voice_dsp entry: $(cat "$WORK/state/heal.log" 2>/dev/null)"
+fi
+
+# Cooldown: immediately after a heal, the still-dirty log window must NOT
+# trigger a second reboot.
+run_wd DROPLET_WATCHDOG_XVF_COOLDOWN_S=3600 >/dev/null || true
+[ "$(grep -c 'REBOOT 1' "$WORK/xvf.log")" = "1" ] \
+  && pass "cooldown suppresses a back-to-back re-heal" \
+  || fail "re-heal fired inside cooldown: $(cat "$WORK/xvf.log")"
+
+# Persistent wedge after heal (cooldown expired) → heal_failed, then escalated
+# after the second consecutive failure, with a CRITICAL log line.
+reset_work
+mk_xvf_stub
+mk_usb_dev "1-3" "20b1"
+printf 'xhci overrun\nxhci overrun\nxhci overrun\n' > "$WORK/klog"
+run_wd >/dev/null || true          # heal #1 → healed, heal_pending set
+run_wd >/dev/null || true          # still wedged after cooldown → heal_failed (1)
+[ "$(wd_field voice_dsp status)" = "heal_failed" ] \
+  && pass "wedge persisting after a heal → heal_failed" \
+  || fail "expected heal_failed, got $(wd_field voice_dsp status)"
+out="$(run_wd || true)"            # heal_failed (2) → escalated
+[ "$(wd_field voice_dsp status)" = "escalated" ] \
+  && pass "second consecutive heal failure → escalated" \
+  || fail "expected escalated, got $(wd_field voice_dsp status)"
+echo "$out" | grep -q 'CRITICAL' \
+  && pass "escalation logs a CRITICAL line" \
+  || fail "no CRITICAL log on escalation: $out"
+[ "$(wd_overall)" = "escalated" ] \
+  && pass "overall reflects the worst check status" \
+  || fail "overall expected escalated, got $(wd_overall)"
+
+# Suspension: while escalated, heals are NOT retried every run (no retry storm).
+reboots_before="$(grep -c 'REBOOT 1' "$WORK/xvf.log")"
+run_wd DROPLET_WATCHDOG_ESCALATED_RETRY_EVERY=100 >/dev/null || true
+run_wd DROPLET_WATCHDOG_ESCALATED_RETRY_EVERY=100 >/dev/null || true
+reboots_after="$(grep -c 'REBOOT 1' "$WORK/xvf.log")"
+if [ "$reboots_before" = "$reboots_after" ] \
+   && [ "$(wd_field voice_dsp status)" = "escalated" ]; then
+  pass "escalated check suspends heal attempts (no retry storm)"
+else
+  fail "heal retried while escalated ($reboots_before → $reboots_after)"
+fi
+
+# Recovery: signature clears + a retry tick → back to ok, counter reset.
+: > "$WORK/klog"
+run_wd DROPLET_WATCHDOG_ESCALATED_RETRY_EVERY=1 >/dev/null || true
+[ "$(wd_field voice_dsp status)" = "ok" ] \
+  && pass "recovery resets an escalated check to ok" \
+  || fail "expected ok after recovery, got $(wd_field voice_dsp status)"
+[ "$(wd_field voice_dsp consecutive_heal_failures)" = "0" ] \
+  && pass "consecutive failure counter reset on recovery" \
+  || fail "counter not reset: $(wd_field voice_dsp consecutive_heal_failures)"
+
+# Wedge present but xvf_host tool missing → heal_failed (never a crash).
+reset_work
+mk_usb_dev "1-3" "20b1"
+printf 'xhci overrun\nxhci overrun\nxhci overrun\n' > "$WORK/klog"
+run_wd DROPLET_WATCHDOG_XVF_HOST="$WORK/bin/nonexistent-xvf" >/dev/null || true
+[ "$(wd_field voice_dsp status)" = "heal_failed" ] \
+  && pass "wedge with missing xvf_host tool → heal_failed" \
+  || fail "expected heal_failed with missing tool, got $(wd_field voice_dsp status)"
+
+# =============================================================================
+# Phase 4: docker_dns — probe ok, probe fail, pin guidance, escalation
+# =============================================================================
+echo "--- Phase 4: docker_dns ---"
+
+reset_work
+mk_docker_stub
+printf 'droplet-orchestrator-1\n' > "$WORK/docker/running"
+printf 'droplet-orchestrator-1\n' > "$WORK/docker/all"
+echo 0 > "$WORK/docker/dns_exit"
+run_wd >/dev/null || true
+[ "$(wd_field docker_dns status)" = "ok" ] \
+  && pass "container DNS probe success → ok" \
+  || fail "expected ok, got $(wd_field docker_dns status): $(wd_field docker_dns message)"
+grep -q 'exec' "$WORK/docker.log" \
+  && pass "probe ran via docker exec in an already-running container" \
+  || fail "no docker exec probe recorded"
+
+# Probe failure, no DNS pin in daemon.json → heal_failed with pin guidance.
+echo 2 > "$WORK/docker/dns_exit"
+printf '{}\n' > "$WORK/daemon.json"
+run_wd >/dev/null || true
+[ "$(wd_field docker_dns status)" = "heal_failed" ] \
+  && pass "container DNS probe failure → heal_failed (detect-and-report, no auto-heal)" \
+  || fail "expected heal_failed, got $(wd_field docker_dns status)"
+wd_field docker_dns message | grep -q '1.1.1.1' \
+  && pass "failure message documents the daemon.json DNS pin fix" \
+  || fail "no pin guidance in message: $(wd_field docker_dns message)"
+
+# Second consecutive failure → escalated.
+out="$(run_wd || true)"
+[ "$(wd_field docker_dns status)" = "escalated" ] \
+  && pass "second consecutive DNS failure → escalated" \
+  || fail "expected escalated, got $(wd_field docker_dns status)"
+echo "$out" | grep -q 'CRITICAL' \
+  && pass "DNS escalation logs CRITICAL" \
+  || fail "no CRITICAL line on DNS escalation"
+
+# Pin already present → message says pin exists but resolution still fails.
+reset_work
+mk_docker_stub
+printf 'droplet-orchestrator-1\n' > "$WORK/docker/running"
+echo 2 > "$WORK/docker/dns_exit"
+printf '{ "dns": ["1.1.1.1", "8.8.8.8"] }\n' > "$WORK/daemon.json"
+run_wd >/dev/null || true
+wd_field docker_dns message | grep -qi 'pin.*present\|already' \
+  && pass "message distinguishes pin-already-present" \
+  || fail "pin-present not reflected: $(wd_field docker_dns message)"
+
+# =============================================================================
+# Phase 5: container_crashloop — baseline, detection, diagnostics, recovery
+# =============================================================================
+echo "--- Phase 5: container_crashloop ---"
+
+reset_work
+mk_docker_stub
+printf 'droplet-mosquitto-1\ndroplet-routing-1\n' > "$WORK/docker/running"
+printf 'droplet-mosquitto-1\ndroplet-routing-1\n' > "$WORK/docker/all"
+printf 'droplet-mosquitto-1 47\ndroplet-routing-1 2\n' > "$WORK/docker/restarts"
+echo 0 > "$WORK/docker/dns_exit"
+printf 'mosquitto boot loop trace\n' > "$WORK/docker/logs"
+
+# First sight of a container = baseline, even with a big historic RestartCount.
+run_wd >/dev/null || true
+[ "$(wd_field container_crashloop status)" = "ok" ] \
+  && pass "first run baselines RestartCount (no false flag on historic count)" \
+  || fail "expected ok on baseline run, got $(wd_field container_crashloop status)"
+
+# +5 restarts in one window (> default threshold 3) → flagged + logs captured.
+printf 'droplet-mosquitto-1 52\ndroplet-routing-1 2\n' > "$WORK/docker/restarts"
+run_wd >/dev/null || true
+[ "$(wd_field container_crashloop status)" = "heal_failed" ] \
+  && pass "restart delta above threshold → heal_failed (crash-loop flagged)" \
+  || fail "expected heal_failed, got $(wd_field container_crashloop status)"
+wd_field container_crashloop message | grep -q 'droplet-mosquitto-1' \
+  && pass "offending container named in the message" \
+  || fail "offender not named: $(wd_field container_crashloop message)"
+diag_count="$(find "$WORK/state/diagnostics" -name 'droplet-mosquitto-1-*.log' 2>/dev/null | wc -l)"
+if [ "$diag_count" = "1" ] \
+   && grep -q 'mosquitto boot loop trace' "$WORK/state/diagnostics/droplet-mosquitto-1-"*.log; then
+  pass "docker logs tail captured to a diagnostics file on first detection"
+else
+  fail "diagnostics capture missing/wrong (count=$diag_count)"
+fi
+
+# Same loop continuing: flagged already → no duplicate capture on the next run.
+printf 'droplet-mosquitto-1 57\ndroplet-routing-1 2\n' > "$WORK/docker/restarts"
+run_wd >/dev/null || true
+diag_count="$(find "$WORK/state/diagnostics" -name 'droplet-mosquitto-1-*.log' 2>/dev/null | wc -l)"
+[ "$diag_count" = "1" ] \
+  && pass "no duplicate diagnostics capture while the same episode continues" \
+  || fail "diagnostics recaptured (count=$diag_count)"
+
+# Loop stops → back to ok and the episode flag clears. The check escalated on
+# the previous run (2 consecutive detections), so it is suspended until its
+# retry tick — force the retry cadence to 1 to exercise the recovery path.
+run_wd DROPLET_WATCHDOG_ESCALATED_RETRY_EVERY=1 >/dev/null || true
+[ "$(wd_field container_crashloop status)" = "ok" ] \
+  && pass "stable restart count → ok again (on the escalated retry tick)" \
+  || fail "expected ok after loop stops, got $(wd_field container_crashloop status)"
+
+# =============================================================================
+# Phase 6: wifi — via the real WARP-869 helper against a fake sysfs tree
+# =============================================================================
+echo "--- Phase 6: wifi (WARP-869 helper integration) ---"
+
+reset_work
+mk_docker_stub
+mk_pci_dev "0000:0e:00.0" "0x028000" bound netdev
+run_wd >/dev/null || true
+[ "$(wd_field wifi status)" = "ok" ] \
+  && pass "healthy Wi-Fi device → ok (helper silent)" \
+  || fail "expected ok, got $(wd_field wifi status): $(wd_field wifi message)"
+
+# Wedged device that never comes back → helper reports failure → heal_failed.
+reset_work
+mk_docker_stub
+mk_pci_dev "0000:0e:00.0" "0x028000" bound
+run_wd >/dev/null || true
+[ "$(wd_field wifi status)" = "heal_failed" ] \
+  && pass "unrecoverable wedge → heal_failed (helper 'did not come back')" \
+  || fail "expected heal_failed, got $(wd_field wifi status): $(wd_field wifi message)"
+
+# Helper output saying "revived" → healed (classification contract).
+reset_work
+mk_docker_stub
+mk_pci_dev "0000:0e:00.0" "0x028000" bound
+cat > "$WORK/bin/fake-wifi-helper" <<'EOF'
+#!/bin/sh
+echo "droplet-wifi-watchdog: revived 0000:0e:00.0 (wlan0)"
+exit 0
+EOF
+chmod +x "$WORK/bin/fake-wifi-helper"
+run_wd DROPLET_WATCHDOG_WIFI_HELPER="$WORK/bin/fake-wifi-helper" >/dev/null || true
+[ "$(wd_field wifi status)" = "healed" ] \
+  && pass "helper 'revived' output → healed" \
+  || fail "expected healed, got $(wd_field wifi status)"
+grep -q 'wifi' "$WORK/state/heal.log" 2>/dev/null \
+  && pass "wifi heal recorded in heal.log" \
+  || fail "wifi heal not in heal.log"
+
+# Helper missing entirely → not_applicable (first-boot install ordering must
+# not fabricate an escalation).
+reset_work
+mk_docker_stub
+mk_pci_dev "0000:0e:00.0" "0x028000" bound netdev
+run_wd DROPLET_WATCHDOG_WIFI_HELPER="$WORK/bin/nonexistent-helper" >/dev/null || true
+[ "$(wd_field wifi status)" = "not_applicable" ] \
+  && pass "missing helper → not_applicable (with install pointer)" \
+  || fail "expected not_applicable, got $(wd_field wifi status)"
+
+# =============================================================================
+# Phase 7: JSON robustness — messages with quotes/newlines never break the file
+# =============================================================================
+echo "--- Phase 7: JSON robustness ---"
+
+reset_work
+mk_docker_stub
+printf 'we"ird\\name\n' > "$WORK/docker/running"
+printf 'we"ird\\name\n' > "$WORK/docker/all"
+printf 'we"ird\\name 1\n' > "$WORK/docker/restarts"
+echo 2 > "$WORK/docker/dns_exit"
+run_wd >/dev/null || true
+if "$PYBIN" -m json.tool "$STATUS_JSON" >/dev/null 2>&1; then
+  pass "status.json stays valid JSON with quotes/backslashes in messages"
+else
+  fail "status.json broken by special characters: $(cat "$STATUS_JSON")"
+fi
+
+# =============================================================================
+echo ""
+echo "  ------------------------------------------------"
+if [ "$FAILURES" -gt 0 ]; then
+  echo "  $FAILURES of $TESTS tests FAILED"
+  exit 1
+fi
+echo "  All $TESTS tests passed"
+exit 0
