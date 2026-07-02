@@ -105,7 +105,12 @@ if [ -f "$BACKUP_SCRIPT" ] && [ -f "$RESTORE_SCRIPT" ]; then
     ' "$BACKUP_SCRIPT")"
     while IFS= read -r v; do
       [ -z "$v" ] && continue
-      if printf '%s\n' "$real_volumes" | grep -qx "$v"; then
+      # Here-string, NOT `printf ... | grep -q`: under `set -o pipefail` grep -q
+      # exits on first match and closes the pipe, so printf dies with SIGPIPE
+      # (141) and pipefail turns a genuine match into a false-negative fail
+      # ("printf: write error: Broken pipe"). A here-string has no upstream
+      # writer to signal, so the match is deterministic.
+      if grep -qxF "$v" <<< "$real_volumes"; then
         pass "DATA_VOLUMES '$v' is a real compose volume"
       else
         fail "DATA_VOLUMES '$v' is NOT a top-level volume in docker-compose.yml (would auto-create empty)"
@@ -297,10 +302,14 @@ else
       [ "$MODE" = "600" ] && pass "archive mode is 600" || fail "archive mode is $MODE (expected 600)"
 
       LIST="$(tar -tzf "$ARCHIVE")"
-      echo "$LIST" | grep -q 'postgres/main.sql.gz' && pass "main db dump in archive" || fail "main db dump missing"
-      echo "$LIST" | grep -q 'manifest.json'        && pass "manifest in archive"     || fail "manifest missing"
+      # Here-strings, NOT `echo "$LIST" | grep -q`: grep -q short-circuits on the
+      # first match and closes the pipe, so under `set -o pipefail` echo dies with
+      # SIGPIPE and a real match reads as a false-negative fail. $LIST is a full
+      # tar listing (large), so the drop is likely — feed grep directly instead.
+      grep -q 'postgres/main.sql.gz' <<< "$LIST" && pass "main db dump in archive" || fail "main db dump missing"
+      grep -q 'manifest.json'        <<< "$LIST" && pass "manifest in archive"     || fail "manifest missing"
       for v in "${VOLUMES[@]}"; do
-        echo "$LIST" | grep -q "volumes/$v/data.tar" && pass "volume artifact present: $v" || fail "volume artifact missing: $v"
+        grep -q "volumes/$v/data.tar" <<< "$LIST" && pass "volume artifact present: $v" || fail "volume artifact missing: $v"
       done
 
       # --- Mutate ---------------------------------------------------------
