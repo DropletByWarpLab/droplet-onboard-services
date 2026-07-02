@@ -81,6 +81,15 @@ jobs:
       - name: Test @droplet/orchestrator
         run: npm run -w @droplet/orchestrator test
 
+      # matter-controller ships in release.json (scripts/release/
+      # services.json), so its suite gates publishing like every other
+      # released image — mirrors matter-controller-tests.yml.
+      - name: Type-check @droplet/matter-controller
+        run: npm run -w @droplet/matter-controller build
+
+      - name: Test @droplet/matter-controller
+        run: npm run -w @droplet/matter-controller test
+
       - name: Lint dashboard class names
         run: bash scripts/check-dashboard-classes.sh
 
