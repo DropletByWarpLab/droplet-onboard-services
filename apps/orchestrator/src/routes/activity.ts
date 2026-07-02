@@ -109,6 +109,11 @@ export function createActivityRouter(prisma: PrismaClient): Router {
         if (kind) where.kind = kind;
         if (actorType) where.actorType = actorType;
         if (actorId) where.actorId = actorId;
+        // WARP-181: actor predicates only match signed rows — on v1 rows
+        // the actor columns are unsigned (writable without breaking the
+        // chain) and legitimately NULL, so any match would be tampered
+        // data. Behavior-neutral for honest rows.
+        if (actorType || actorId) where.schemaVersion = { gt: 1 };
         if (from || to) {
           where.at = {};
           if (from) where.at.gte = new Date(from);
@@ -207,6 +212,10 @@ export function createActivityRouter(prisma: PrismaClient): Router {
         if (kind) where.kind = kind;
         if (actorType) where.actorType = actorType;
         if (actorId) where.actorId = actorId;
+        // WARP-181: actor predicates only match signed rows (see the
+        // list route) — a poisoned v1 row must not land in a filtered
+        // export bundle either.
+        if (actorType || actorId) where.schemaVersion = { gt: 1 };
         if (from || to) {
           where.at = {};
           if (from) where.at.gte = new Date(from);

@@ -66,6 +66,11 @@ function makeApp(rows: FakeRow[]) {
         if (where?.actorId) {
           filtered = filtered.filter((r) => r.actorId === where.actorId);
         }
+        if (where?.schemaVersion?.gt !== undefined) {
+          filtered = filtered.filter(
+            (r) => r.schemaVersion > where.schemaVersion.gt,
+          );
+        }
         if (where?.at) {
           if (where.at.gte) {
             filtered = filtered.filter((r) => r.at >= where.at.gte);
@@ -226,6 +231,27 @@ describe("GET /api/activity", () => {
     expect(res.body.items[0].actorId).toBe("uuid-alice");
   });
 
+  it("actor filters never match unsigned v1 actor columns (poisoned row excluded)", async () => {
+    // v1 actor columns are the only fields writable without breaking
+    // the chain; legitimate v1 rows have them NULL. A maliciously
+    // decorated v1 row must not surface in \"everything Alice did\".
+    const app = makeApp([
+      makeRow(
+        { schemaVersion: 1, actorType: "user", actorId: "uuid-alice" },
+        1,
+      ),
+      makeRow(
+        { schemaVersion: 2, actorType: "user", actorId: "uuid-alice" },
+        2,
+      ),
+    ]);
+    const byId = await request(app).get("/api/activity?actorId=uuid-alice");
+    expect(byId.status).toBe(200);
+    expect(byId.body.items.map((r: any) => r.id)).toEqual(["2"]);
+    const byType = await request(app).get("/api/activity?actorType=user");
+    expect(byType.body.items.map((r: any) => r.id)).toEqual(["2"]);
+  });
+
   it("nulls actor fields on v1 rows — unsigned actor columns are never served as truth (WARP-181)", async () => {
     // On a schemaVersion=1 row the signature does NOT cover actorType/
     // actorId and the recorder never writes them there — any non-NULL
@@ -335,6 +361,27 @@ describe("POST /api/activity/export", () => {
     expect(lines[1].schemaVersion).toBe(1);
     expect(lines[1].actorType).toBe("user");
     expect(lines[1].actorId).toBe("uuid-mallory");
+  });
+
+  it("export actor filters never match unsigned v1 actor columns (poisoned row excluded)", async () => {
+    const app = makeApp([
+      makeRow(
+        { schemaVersion: 1, actorType: "user", actorId: "uuid-alice" },
+        1,
+      ),
+      makeRow(
+        { schemaVersion: 2, actorType: "user", actorId: "uuid-alice" },
+        2,
+      ),
+    ]);
+    const res = await request(app)
+      .post("/api/activity/export")
+      .send({ actorId: "uuid-alice" });
+    expect(res.status).toBe(200);
+    const lines = res.text.trim().split("\n").map((l) => JSON.parse(l));
+    expect(lines).toHaveLength(2); // manifest + ONLY the v2 row
+    expect(lines[1].id).toBe("2");
+    expect(lines[1].schemaVersion).toBe(2);
   });
 
   it("export accepts actor filters in the body (WARP-181)", async () => {
