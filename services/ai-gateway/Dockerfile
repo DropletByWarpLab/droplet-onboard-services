@@ -26,12 +26,14 @@ COPY services/ai-gateway/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY services/ai-gateway/ .
 
-# WARP-229: ship the FIPS-provider OpenSSL config + shared self-test
-# helper. As with services/file-indexer/Dockerfile, `OPENSSL_CONF` is
-# intentionally NOT set here at image-baseline level — Python's `ssl`
-# module initializes OpenSSL at import and would crash on a config
-# that `.include`s a missing `/etc/ssl/fipsmodule.cnf` (the validated
-# `fips.so` is layered on top by the operator separately).
+# WARP-229/WARP-967: ship the FIPS-provider OpenSSL config + shared
+# self-test helper. As with services/file-indexer/Dockerfile,
+# `OPENSSL_CONF` is intentionally NOT set at image-baseline level:
+# FIPS is a per-customer option, default OFF (Romain, 2026-07-02).
+# The validated fips.so + fipsmodule.cnf ship in this image
+# (WARP-967), so setting `OPENSSL_CONF` baseline-on would activate
+# FIPS for every customer — the activation flip belongs exclusively
+# to WARP-318's `DROPLET_FIPS_MODE` option.
 #
 # To activate FIPS at runtime, the operator sets both env vars in the
 # container env:

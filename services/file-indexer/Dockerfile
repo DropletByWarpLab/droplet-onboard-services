@@ -48,18 +48,14 @@ RUN mkdir -p /app/grpc_generated && \
 
 COPY services/file-indexer/ .
 
-# WARP-229: ship the FIPS-provider OpenSSL config + shared self-test
-# helper. The config file is in place at /etc/ssl/openssl-fips.cnf BUT
-# `OPENSSL_CONF` is intentionally NOT set here. Reasons:
-#   1. The config `.include`s `/etc/ssl/fipsmodule.cnf`, which only
-#      exists once the operator layers the validated FIPS provider on
-#      top of this image. Setting `OPENSSL_CONF` baseline-on would
-#      break Python's `ssl` initialization (and pip-install at build
-#      time) on every image that doesn't have the module yet.
-#   2. The orchestrator's docker-compose service definition (or the
-#      operator's runtime env) is the right place to flip
-#      `OPENSSL_CONF=/etc/ssl/openssl-fips.cnf` AND `DROPLET_FIPS_REQUIRED=true`
-#      together once the FIPS module is in place.
+# WARP-229/WARP-967: ship the FIPS-provider OpenSSL config + shared
+# self-test helper. The config is in place at /etc/ssl/openssl-fips.cnf
+# BUT `OPENSSL_CONF` is intentionally NOT set here: FIPS is a
+# per-customer option, default OFF (Romain, 2026-07-02). The validated
+# fips.so + fipsmodule.cnf ship in this image (WARP-967), so setting
+# `OPENSSL_CONF` baseline-on would activate FIPS for every customer —
+# the activation flip belongs exclusively to WARP-318's
+# `DROPLET_FIPS_MODE` option.
 #
 # To activate FIPS at runtime, set both env vars in the container env:
 #   OPENSSL_CONF=/etc/ssl/openssl-fips.cnf
