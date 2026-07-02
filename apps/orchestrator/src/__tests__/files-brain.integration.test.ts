@@ -11,11 +11,13 @@
  *   1. Seed PRE-FIX state — username-keyed BrainMemoryItem rows AND
  *      username-named `BRAIN_ROOT/<username>/<itemId>/` dirs with real
  *      bytes in a per-suite tempdir.
- *   2. Apply the SQL backfill's row-level effect to the mocked store
- *      (the real `warp_491_brain_memory_userid_backfill` SQL is proven
- *      against a scratch Postgres — see the migration header; vitest
- *      has no Postgres, so the in-memory simulation below mirrors its
- *      three UPDATEs exactly, orphan no-op included).
+ *   2. Apply the SQL backfill's BrainMemoryItem-level effect to the
+ *      mocked store (userId flip + storagePath rewrite, orphan no-op
+ *      included). This is a simplified stand-in, NOT the literal SQL —
+ *      the authoritative validation of the real
+ *      `warp_491_brain_memory_userid_backfill` migration (all three
+ *      UPDATEs, FileContentChunk included) is the scratch-Postgres
+ *      double-apply documented in the migration header.
  *   3. Run the real boot migrator `migrateBrainMemoryDirectoryLayout`.
  *   4. Drive the REAL files-brain router with a UUID-authed request and
  *      assert every pre-fix item is readable — list, manifest, and the
@@ -130,11 +132,25 @@ const UUID_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
- * Row-level twin of the three UPDATEs in
- * `20260702000000_warp_491_brain_memory_userid_backfill/migration.sql`:
- * join userId → User.nextcloudUsername, skip UUID-shaped keys, rewrite
- * `/<username>/<itemId>/` → `/<uuid>/<itemId>/` in storagePath, flip
- * userId. Orphans (no mapping row) fall through untouched.
+ * Simplified in-memory stand-in for the BrainMemoryItem half of
+ * `20260702000000_warp_491_brain_memory_userid_backfill/migration.sql`
+ * (UPDATEs 1+2): join userId → User.nextcloudUsername, skip UUID-shaped
+ * keys, rewrite `/<username>/<itemId>/` → `/<uuid>/<itemId>/` in
+ * storagePath, flip userId. Orphans (no mapping row) fall through
+ * untouched.
+ *
+ * Known divergences from the literal SQL — all unreachable in
+ * production data shapes, so this stays a coherence fixture, not a SQL
+ * test:
+ *   - no FileContentChunk twin (UPDATE 3) — this suite's routes never
+ *     read chunks by userId;
+ *   - `String.replace` rewrites the FIRST occurrence vs Postgres
+ *     `replace()`'s all-occurrences (the needle embeds the cuid itemId,
+ *     which occurs once per path);
+ *   - the UUID-shape guard here is case-insensitive vs the SQL's
+ *     case-sensitive `!~` (our keys are lowercase either way).
+ * The scratch-Postgres double-apply in the migration header is the
+ * authoritative validation of the real SQL.
  */
 function applySqlBackfillEffect(): void {
   for (const row of itemStore.values()) {

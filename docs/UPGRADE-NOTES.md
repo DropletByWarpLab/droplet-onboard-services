@@ -60,9 +60,11 @@ written that way.
   misses UUID-keyed brain chunks while still covering watcher chunks.
 
 Both need one decision — dual-shape reads vs unifying the watcher key —
-tracked in the files-knowledge/search_content brain-visibility
-follow-up ticket. Flipping either alone breaks the (still
-username-keyed) watcher rows: the mirror-image regression.
+tracked in
+[WARP-1014](https://warp-lab.atlassian.net/browse/WARP-1014), the
+files-knowledge/search_content brain-visibility follow-up. Flipping
+either alone breaks the (still username-keyed) watcher rows: the
+mirror-image regression.
 
 **Verification on a deployed device.**
 
