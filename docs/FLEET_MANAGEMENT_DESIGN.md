@@ -329,6 +329,15 @@ Every layer assumes the previous failed:
 > (rationale beneath). Phase 1 day 1 starts when these are confirmed
 > or overridden. Questions 4–5 have built-in answers; included for
 > completeness but no decision needed.
+>
+> **2026-07-01 (WARP-963):**
+> [ADR-028](ADR-028-fleet-telemetry-and-design-answers.md) re-proposes
+> all three answers against the current reality (analytics portal owns
+> telemetry ingest; HQ is a serverless Worker; WARP-974 needs a WG relay
+> VPS anyway) — still **Proposed, NOT accepted**, awaiting the same
+> Romain/Stefan sign-off. The portal-push telemetry half shipped
+> flag-gated as `services/fleet-agent/` without prejudging these
+> questions.
 
 ### 1. HQ host choice
 
