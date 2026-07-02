@@ -123,7 +123,12 @@ export interface ApplyRunner {
   /**
    * Step 1 — write .data/updates/<id>/backup/: previous image refs
    * (rollback pins), the current host configs tree, and a
-   * pg_dump --schema-only of the orchestrator DB.
+   * pg_dump --schema-only of the orchestrator DB. Also generates the
+   * per-target compose overrides (override-release.yml /
+   * override-previous.yml) + the rollback services list (services.txt)
+   * under .data/updates/<id>/ — the pinning contract recreateServices and
+   * recreateSelfDetached execute against (see host-compose-runner.ts,
+   * "PER-TARGET DIGEST PINNING").
    */
   snapshot(opts: {
     updateId: string;

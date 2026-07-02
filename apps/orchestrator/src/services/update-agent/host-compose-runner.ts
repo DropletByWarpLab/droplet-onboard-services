@@ -29,15 +29,39 @@
  * <updatesDir>/<updateId>/ and the script is handed their paths — this
  * dodges both argv length limits and any quoting ambiguity, and it doubles
  * as the rollback backup step 1 writes.
+ *
+ * ── PER-TARGET DIGEST PINNING (the compose-override contract) ──
+ * The appliance compose file defines the first-party services (orchestrator,
+ * web-dashboard, …) as `build:`-only — no `image:` key — so a bare
+ * `docker compose up --force-recreate` would reuse the LOCAL build and
+ * silently ignore any digest `pull-images` fetched: release-vs-previous
+ * would be a no-op. The snapshot step therefore generates, per update:
+ *
+ *   <updatesDir>/<id>/override-release.yml   — every DEPLOYED service pinned
+ *                                              to its manifest digest ref;
+ *   <updatesDir>/<id>/override-previous.yml  — the same services pinned to
+ *                                              the refs that were running
+ *                                              (repo digest or image ID);
+ *   <updatesDir>/<id>/services.txt           — the rollback walk order (one
+ *                                              name per line, orchestrator
+ *                                              LAST — swap-last both ways).
+ *
+ * apply-update.sh consumes them as `-f <compose> -f <override>` — the merge
+ * ADDS an `image:` key to each build:-only service, and together with
+ * `--no-build --pull never` compose recreates the container FROM the pinned
+ * ref that was already pulled (release) or is already present (previous).
+ * Services not running on this box (null previous ref) are pinned NOWHERE:
+ * recreating them would grow the deployment, not update it (apply.ts).
  */
 import { execFile } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type pino from "pino";
 import { createLogger } from "../../lib/logger.js";
-import type {
-  ApplyRunner,
-  RecreateTarget,
+import {
+  SELF_SERVICE_NAME,
+  type ApplyRunner,
+  type RecreateTarget,
 } from "./apply.js";
 import type { ReleaseManifest, ReleaseService } from "./manifest.js";
 
@@ -95,6 +119,57 @@ export function defaultExec(): ExecFn {
 
 const DEFAULT_TIMEOUTS = { quickMs: 60_000, pullMs: 600_000, recreateMs: 300_000 };
 
+/**
+ * Compose service name shape — mirrors apply-update.sh's `validate_services`
+ * (`[a-z0-9-]`, comma-separated there). Anything else never came from a
+ * parsed manifest and must not reach the generated YAML.
+ */
+const SERVICE_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
+
+/**
+ * Image ref / image ID shape safe to embed UNQUOTED in the generated
+ * override YAML: one registry/digest token — no whitespace, quotes, or YAML
+ * structure characters. Covers `ghcr.io/x/y:tag`, `…@sha256:<hex>`, and the
+ * bare `sha256:<hex>` image IDs `docker inspect` reports for local builds.
+ */
+const IMAGE_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._:@/-]*$/;
+
+/**
+ * Render one per-target compose override. Refs come from a cosign-verified
+ * manifest (release) or from `docker inspect` (previous) — a shape violation
+ * here means something upstream is corrupted, so we REFUSE rather than try
+ * to quote around it: a hostile ref must never rewrite the YAML structure
+ * that pins what runs on the box.
+ */
+function composeOverrideYaml(
+  target: RecreateTarget,
+  updateId: string,
+  pins: Array<{ name: string; image: string }>,
+): string {
+  const lines = [
+    `# WARP-539 — GENERATED compose override for update ${updateId}: pins every`,
+    `# service deployed on this box to its ${target} image ref. Consumed by`,
+    `# scripts/lib/apply-update.sh as the second -f (base + override) so`,
+    `# build:-only services are recreated FROM the pinned ref, never from the`,
+    `# local build. DO NOT EDIT — rewritten by the orchestrator's snapshot step.`,
+    "services:",
+  ];
+  for (const pin of pins) {
+    if (!SERVICE_NAME_RE.test(pin.name)) {
+      throw new Error(
+        `OTA override (${target}): unsafe compose service name ${JSON.stringify(pin.name)}`,
+      );
+    }
+    if (!IMAGE_REF_RE.test(pin.image)) {
+      throw new Error(
+        `OTA override (${target}): unsafe image ref ${JSON.stringify(pin.image)} for service "${pin.name}"`,
+      );
+    }
+    lines.push(`  ${pin.name}:`, `    image: ${pin.image}`);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
 export function createHostComposeRunner(opts: HostComposeRunnerOptions): ApplyRunner {
   const log = opts.logger ?? defaultLog;
   const exec = opts.exec ?? defaultExec();
@@ -150,7 +225,8 @@ export function createHostComposeRunner(opts: HostComposeRunnerOptions): ApplyRu
       manifest: ReleaseManifest;
       previousRefs: Record<string, string | null>;
     }): Promise<void> {
-      const backupDir = path.join(updateDir(args.updateId), "backup");
+      const dir = updateDir(args.updateId);
+      const backupDir = path.join(dir, "backup");
       await mkdir(backupDir, { recursive: true });
       // Rollback pins + the verified manifest ride files, not argv.
       await writeFile(
@@ -160,6 +236,39 @@ export function createHostComposeRunner(opts: HostComposeRunnerOptions): ApplyRu
       await writeFile(
         path.join(backupDir, "manifest.json"),
         JSON.stringify(args.manifest, null, 2),
+      );
+      // Per-target compose overrides + the rollback services list (see the
+      // PER-TARGET DIGEST PINNING header note). Only services DEPLOYED on
+      // this box (non-null previous ref) are pinned; the orchestrator is
+      // ordered LAST so the detached helper's rollback walk swaps it last,
+      // mirroring the forward apply order.
+      const deployed = args.manifest.services.filter(
+        (s) => args.previousRefs[s.name] != null,
+      );
+      const ordered = [
+        ...deployed.filter((s) => s.name !== SELF_SERVICE_NAME),
+        ...deployed.filter((s) => s.name === SELF_SERVICE_NAME),
+      ];
+      await writeFile(
+        path.join(dir, "override-release.yml"),
+        composeOverrideYaml(
+          "release",
+          args.updateId,
+          ordered.map((s) => ({ name: s.name, image: s.image })),
+        ),
+      );
+      await writeFile(
+        path.join(dir, "override-previous.yml"),
+        composeOverrideYaml(
+          "previous",
+          args.updateId,
+          // Non-null by the `deployed` filter above.
+          ordered.map((s) => ({ name: s.name, image: args.previousRefs[s.name] as string })),
+        ),
+      );
+      await writeFile(
+        path.join(dir, "services.txt"),
+        `${ordered.map((s) => s.name).join("\n")}\n`,
       );
       // The script captures the host config tree pre-image + a schema-only
       // pg_dump into the same backup dir.

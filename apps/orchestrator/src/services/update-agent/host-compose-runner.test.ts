@@ -119,6 +119,97 @@ describe("createHostComposeRunner (WARP-539)", () => {
     expect(JSON.parse(readFileSync(refsPath, "utf8"))).toEqual(previousRefs);
   });
 
+  it("snapshot writes per-target compose overrides pinning every deployed service", async () => {
+    const { fn } = fakeExec();
+    const runner = makeRunner(fn);
+    const manifest = buildManifest();
+    // web-dashboard came from a registry (repo-digest ref); the orchestrator
+    // is a local build (bare image ID) — BOTH are valid rollback pins and
+    // both must land verbatim in the previous override.
+    const previousRefs = {
+      orchestrator: DIGEST("5"),
+      "web-dashboard": `ghcr.io/x/web-dashboard@${DIGEST("9")}`,
+    };
+
+    await runner.snapshot({ updateId: "du-1", manifest, previousRefs });
+
+    const read = (name: string) =>
+      readFileSync(path.join(workDir, "du-1", name), "utf8");
+    const servicesBlock = (content: string) =>
+      content.slice(content.indexOf("services:"));
+
+    // Release override: every deployed service pinned to the MANIFEST image
+    // (digest ref), orchestrator ordered LAST (swap-last posture, and the
+    // detached helper's rollback loop consumes the same order).
+    expect(servicesBlock(read("override-release.yml"))).toBe(
+      [
+        "services:",
+        "  web-dashboard:",
+        `    image: ghcr.io/x/web-dashboard@${DIGEST("2")}`,
+        "  orchestrator:",
+        `    image: ghcr.io/x/orchestrator@${DIGEST("1")}`,
+        "",
+      ].join("\n"),
+    );
+    // Previous override: the SAME services pinned to what was running.
+    expect(servicesBlock(read("override-previous.yml"))).toBe(
+      [
+        "services:",
+        "  web-dashboard:",
+        `    image: ghcr.io/x/web-dashboard@${DIGEST("9")}`,
+        "  orchestrator:",
+        `    image: ${previousRefs.orchestrator}`,
+        "",
+      ].join("\n"),
+    );
+    // The rollback services list the detached helper walks — one name per
+    // line, orchestrator last.
+    expect(read("services.txt")).toBe("web-dashboard\norchestrator\n");
+  });
+
+  it("snapshot excludes not-deployed services from the overrides and rollback list", async () => {
+    const { fn } = fakeExec();
+    const runner = makeRunner(fn);
+    const manifest = buildManifest();
+    manifest.services.push({
+      name: "frigate",
+      image: `ghcr.io/x/frigate@${DIGEST("3")}`,
+      digest: DIGEST("3"),
+      healthcheck: { type: "http", port: 5000, path: "/api/version" },
+    });
+    // frigate has NO running container on this box (null ref) — recreating
+    // it would GROW the deployment, so it must not be pinned anywhere.
+    const previousRefs = {
+      orchestrator: DIGEST("5"),
+      "web-dashboard": `ghcr.io/x/web-dashboard@${DIGEST("9")}`,
+      frigate: null,
+    };
+
+    await runner.snapshot({ updateId: "du-1", manifest, previousRefs });
+
+    const read = (name: string) =>
+      readFileSync(path.join(workDir, "du-1", name), "utf8");
+    expect(read("override-release.yml")).not.toContain("frigate");
+    expect(read("override-previous.yml")).not.toContain("frigate");
+    expect(read("services.txt")).toBe("web-dashboard\norchestrator\n");
+  });
+
+  it("snapshot refuses an image ref that cannot be safely embedded in the override YAML", async () => {
+    const { fn } = fakeExec();
+    const runner = makeRunner(fn);
+    const manifest = buildManifest();
+    // A ref with whitespace/newline would let a corrupted inspect output
+    // rewrite the generated YAML structure — hard-refuse, never quote around.
+    const previousRefs = {
+      orchestrator: "sha256:abc\n  evil: injected",
+      "web-dashboard": `ghcr.io/x/web-dashboard@${DIGEST("9")}`,
+    };
+
+    await expect(
+      runner.snapshot({ updateId: "du-1", manifest, previousRefs }),
+    ).rejects.toThrow(/image ref/i);
+  });
+
   it("pullImages passes each image ref by digest", async () => {
     const { fn, calls } = fakeExec();
     const runner = makeRunner(fn);

@@ -35,3 +35,9 @@ jobs:
         run: bash tests/setup.test.sh
       - name: Run TLS secrets unit tests
         run: bash scripts/test/secrets-tls.test.sh
+      - name: Run OTA apply helper integration tests
+        # WARP-539: per-target digest pinning + the detached self-swap
+        # helper's wait-then-rollback, driven through a PATH-shimmed fake
+        # docker; the pin-resolution assertions run the real
+        # `docker compose config` client-side (no daemon needed).
+        run: bash scripts/test/apply-update.test.sh

@@ -1,0 +1,449 @@
+#!/usr/bin/env bash
+# =============================================================================
+# Integration tests for scripts/lib/apply-update.sh (WARP-539).
+# =============================================================================
+#
+# Pins the two behaviours a stubbed helper once faked (QA rework findings):
+#
+#   1. PER-TARGET DIGEST PINNING — the appliance compose file defines the
+#      first-party services (orchestrator, web-dashboard, …) as build:-only,
+#      so `recreate-services` MUST drive `docker compose` with
+#      `-f <base> -f <updatesDir>/<id>/override-<target>.yml` and
+#      `--no-build --pull never`; the merged config must RESOLVE each
+#      service to the pinned image ref for BOTH targets (release/previous).
+#      The resolution assertions run the REAL `docker compose config`
+#      (client-side only — no daemon needed).
+#
+#   2. THE DETACHED SELF-SWAP HELPER IS REAL — `recreate-self-detached`
+#      launches a helper that (a) recreates the orchestrator pinned to the
+#      target override, (b) waits BOUNDED on the recreated container's
+#      healthcheck, (c) on timeout rolls EVERY service in services.txt back
+#      to the previous refs. The test extracts the helper's payload + `-e`
+#      environment from the recorded `docker run` argv and EXECUTES it under
+#      the fake docker — both the healthy path and the timeout→rollback path.
+#
+# Harness: PATH-shimmed fake `docker` (same convention as tests/setup.test.sh
+# Phase 3) that records every invocation — one space-joined line in calls.log
+# for substring asserts plus a NUL-separated argv file per call for payload
+# extraction — and answers the small read surface the script needs.
+#
+# Does NOT require a running Docker daemon. Requires the docker CLI with the
+# compose plugin for the config-resolution assertions (present on the box,
+# on ubuntu-latest runners, and anywhere ship-check's compose-config gate
+# already runs) — missing compose FAILS those tests, it never skips.
+# Runtime: < 20 seconds.
+# =============================================================================
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+APPLY_SH="$REPO_ROOT/scripts/lib/apply-update.sh"
+
+FAILURES=0
+TESTS=0
+pass() { TESTS=$((TESTS + 1)); printf "  \033[32m✓\033[0m %s\n" "$1"; }
+fail() { TESTS=$((TESTS + 1)); FAILURES=$((FAILURES + 1)); printf "  \033[31m✗\033[0m %s\n" "$1"; }
+
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+
+# -----------------------------------------------------------------------------
+# Fake docker (PATH shim)
+# -----------------------------------------------------------------------------
+STUB_BIN="$TMP/bin"
+STUB_DIR="$TMP/stub-state"
+mkdir -p "$STUB_BIN" "$STUB_DIR"
+
+cat > "$STUB_BIN/docker" <<'EOF'
+#!/usr/bin/env bash
+# Fake docker for apply-update.test.sh: records every invocation and answers
+# the small read surface apply-update.sh + the self-swap helper payload need.
+set -u
+mkdir -p "$DOCKER_STUB_DIR"
+n=$(( $(cat "$DOCKER_STUB_DIR/count" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$DOCKER_STUB_DIR/count"
+printf '%s\n' "$*" >> "$DOCKER_STUB_DIR/calls.log"
+printf '%s\0' "$@" > "$DOCKER_STUB_DIR/call-$n"
+
+case "${1:-}" in
+  compose)
+    # docker compose … ps -q orchestrator → the scripted container id.
+    case "$*" in
+      *" ps -q "*) printf '%s\n' "${DOCKER_STUB_PS_CID:-}" ;;
+    esac
+    exit 0
+    ;;
+  inspect)
+    case "$*" in
+      *Mounts*)
+        # Mounts listing: scripted "name|source|destination" lines.
+        printf '%s\n' "${DOCKER_STUB_MOUNTS:-}"
+        ;;
+      *State.Health*)
+        # Healthcheck probe: healthy from the Nth call onward.
+        h=$(( $(cat "$DOCKER_STUB_DIR/health-calls" 2>/dev/null || echo 0) + 1 ))
+        echo "$h" > "$DOCKER_STUB_DIR/health-calls"
+        if [ "$h" -ge "${DOCKER_STUB_HEALTHY_AFTER:-999}" ]; then
+          echo healthy
+        else
+          echo starting
+        fi
+        ;;
+    esac
+    exit 0
+    ;;
+  run)
+    echo "stub-helper-cid"
+    exit 0
+    ;;
+esac
+exit 0
+EOF
+chmod +x "$STUB_BIN/docker"
+
+stub_reset() { rm -rf "$STUB_DIR"; mkdir -p "$STUB_DIR"; }
+
+# Run apply-update.sh with the fake docker on PATH + the fixture updates dir.
+run_apply() {
+  PATH="$STUB_BIN:$PATH" \
+  DOCKER_STUB_DIR="$STUB_DIR" \
+  DOCKER_STUB_PS_CID="${DOCKER_STUB_PS_CID:-}" \
+  DOCKER_STUB_MOUNTS="${DOCKER_STUB_MOUNTS:-}" \
+  DROPLET_OTA_UPDATES_DIR="$UPDATES_DIR" \
+  bash "$APPLY_SH" "$@"
+}
+
+# -----------------------------------------------------------------------------
+# Fixtures — a mini build:-only base compose (the exact shape that made the
+# original stub a no-op) + runner-format overrides and services list.
+# -----------------------------------------------------------------------------
+FIXTURE="$TMP/fixture"
+UPDATES_DIR="$FIXTURE/updates"
+UPDATE_ID="du-test-1"
+UDIR="$UPDATES_DIR/$UPDATE_ID"
+mkdir -p "$UDIR" "$FIXTURE/ctx"
+
+COMPOSE_FILE="$FIXTURE/docker-compose.yml"
+cat > "$COMPOSE_FILE" <<EOF
+services:
+  orchestrator:
+    build:
+      context: ./ctx
+  web-dashboard:
+    build:
+      context: ./ctx
+  routing:
+    build:
+      context: ./ctx
+EOF
+
+HEX_A="$(printf 'a%.0s' $(seq 64))"
+HEX_B="$(printf 'b%.0s' $(seq 64))"
+HEX_C="$(printf 'c%.0s' $(seq 64))"
+HEX_D="$(printf 'd%.0s' $(seq 64))"
+HEX_E="$(printf 'e%.0s' $(seq 64))"
+REL_ORCH="ghcr.io/dropletbywarplab/orchestrator@sha256:$HEX_A"
+REL_DASH="ghcr.io/dropletbywarplab/web-dashboard@sha256:$HEX_B"
+REL_ROUTING="ghcr.io/dropletbywarplab/routing@sha256:$HEX_C"
+# Previous refs: one repo-digest ref + two bare image IDs (local builds) —
+# both shapes must pin.
+PREV_ORCH="sha256:$HEX_D"
+PREV_DASH="ghcr.io/dropletbywarplab/web-dashboard@sha256:$HEX_E"
+PREV_ROUTING="sha256:$HEX_A"
+
+cat > "$UDIR/override-release.yml" <<EOF
+# WARP-539 — test fixture in the exact runner-generated format
+# (host-compose-runner.ts composeOverrideYaml).
+services:
+  web-dashboard:
+    image: $REL_DASH
+  routing:
+    image: $REL_ROUTING
+  orchestrator:
+    image: $REL_ORCH
+EOF
+
+cat > "$UDIR/override-previous.yml" <<EOF
+# WARP-539 — test fixture in the exact runner-generated format.
+services:
+  web-dashboard:
+    image: $PREV_DASH
+  routing:
+    image: $PREV_ROUTING
+  orchestrator:
+    image: $PREV_ORCH
+EOF
+
+printf 'web-dashboard\nrouting\norchestrator\n' > "$UDIR/services.txt"
+
+echo ""
+echo "  ================================================"
+echo "  apply-update.sh Integration Tests (WARP-539)"
+echo "  ================================================"
+
+# =============================================================================
+# Phase 1 — recreate-services: per-target pinning via the compose override
+# =============================================================================
+echo ""
+echo "--- Phase 1: recreate-services per-target pinning ---"
+
+stub_reset
+if run_apply recreate-services --compose-file "$COMPOSE_FILE" \
+    --update-id "$UPDATE_ID" --services web-dashboard,routing \
+    --target release >/dev/null 2>&1; then
+  pass "recreate-services --target release exits 0"
+else
+  fail "recreate-services --target release exited non-zero"
+fi
+
+for svc in web-dashboard routing; do
+  if grep -qF -- "compose -f $COMPOSE_FILE -f $UDIR/override-release.yml up -d --no-deps --no-build --pull never --force-recreate $svc" \
+      "$STUB_DIR/calls.log"; then
+    pass "release recreate of $svc rides base + override-release.yml with --no-build --pull never"
+  else
+    fail "release recreate of $svc missing the pinned compose invocation (calls: $(cat "$STUB_DIR/calls.log" 2>/dev/null))"
+  fi
+done
+if grep -q "override-previous.yml" "$STUB_DIR/calls.log"; then
+  fail "release recreate must not touch the previous override"
+else
+  pass "release recreate never references override-previous.yml"
+fi
+
+stub_reset
+if run_apply recreate-services --compose-file "$COMPOSE_FILE" \
+    --update-id "$UPDATE_ID" --services web-dashboard,routing,orchestrator \
+    --target previous >/dev/null 2>&1; then
+  pass "recreate-services --target previous exits 0"
+else
+  fail "recreate-services --target previous exited non-zero"
+fi
+for svc in web-dashboard routing orchestrator; do
+  if grep -qF -- "compose -f $COMPOSE_FILE -f $UDIR/override-previous.yml up -d --no-deps --no-build --pull never --force-recreate $svc" \
+      "$STUB_DIR/calls.log"; then
+    pass "previous recreate of $svc rides base + override-previous.yml"
+  else
+    fail "previous recreate of $svc missing the pinned compose invocation"
+  fi
+done
+
+# Every `up` must carry a per-target override — an unpinned up on a
+# build:-only service is exactly the original no-op bug.
+if grep " up " "$STUB_DIR/calls.log" | grep -qv "override-"; then
+  fail "found an un-pinned 'compose up' invocation (no override -f)"
+else
+  pass "every compose up invocation carries a per-target override"
+fi
+
+stub_reset
+if run_apply recreate-services --compose-file "$COMPOSE_FILE" \
+    --update-id du-missing --services web-dashboard \
+    --target release >/dev/null 2>&1; then
+  fail "recreate-services must die when the per-target override is missing"
+else
+  pass "recreate-services dies when the per-target override is missing"
+fi
+if grep -q " up " "$STUB_DIR/calls.log" 2>/dev/null; then
+  fail "missing override still recreated a service (unpinned!)"
+else
+  pass "missing override recreates nothing"
+fi
+
+if run_apply recreate-services --compose-file "$COMPOSE_FILE" \
+    --update-id "$UPDATE_ID" --services web-dashboard \
+    --target sideways >/dev/null 2>&1; then
+  fail "--target must reject values outside release|previous"
+else
+  pass "--target rejects values outside release|previous"
+fi
+
+# =============================================================================
+# Phase 2 — resolved image refs: base + override must RESOLVE per service
+# (real `docker compose config`, client-side; this is the merge strategy that
+# gives build:-only services their image: key)
+# =============================================================================
+echo ""
+echo "--- Phase 2: merged compose config resolves the pinned refs ---"
+
+resolved_image() { # $1 = override file, $2 = service name
+  docker compose -f "$COMPOSE_FILE" -f "$1" config 2>/dev/null \
+    | awk -v svc="$2" '
+        /^  [a-z0-9-]+:$/ { cur = substr($1, 1, length($1) - 1) }
+        cur == svc && $1 == "image:" { print $2; exit }'
+}
+
+if docker compose version >/dev/null 2>&1; then
+  for spec in \
+      "override-release.yml orchestrator $REL_ORCH" \
+      "override-release.yml web-dashboard $REL_DASH" \
+      "override-release.yml routing $REL_ROUTING" \
+      "override-previous.yml orchestrator $PREV_ORCH" \
+      "override-previous.yml web-dashboard $PREV_DASH" \
+      "override-previous.yml routing $PREV_ROUTING"; do
+    read -r ov svc want <<< "$spec"
+    got="$(resolved_image "$UDIR/$ov" "$svc")"
+    if [ "$got" = "$want" ]; then
+      pass "$ov resolves $svc -> pinned ref"
+    else
+      fail "$ov resolves $svc -> '$got' (wanted '$want')"
+    fi
+  done
+else
+  # FAIL, never skip — the pinning contract is unverifiable without compose.
+  fail "docker compose CLI unavailable — cannot verify the merged image resolution"
+fi
+
+# =============================================================================
+# Phase 3 — recreate-self-detached: launch surface + the helper payload's
+# wait-then-rollback behaviour (executed under the fake docker)
+# =============================================================================
+echo ""
+echo "--- Phase 3: detached self-swap helper ---"
+
+stub_reset
+export DOCKER_STUB_PS_CID="orch-cid-123"
+export DOCKER_STUB_MOUNTS="ota-updates|/var/lib/docker/volumes/ota-updates/_data|$UPDATES_DIR"
+if DROPLET_OTA_SELF_HEALTH_ATTEMPTS=3 DROPLET_OTA_SELF_HEALTH_INTERVAL_SECONDS=0 \
+    run_apply recreate-self-detached --compose-file "$COMPOSE_FILE" \
+    --update-id "$UPDATE_ID" --target release >/dev/null 2>&1; then
+  pass "recreate-self-detached exits 0 after launching the helper"
+else
+  fail "recreate-self-detached exited non-zero"
+fi
+
+RUN_LINE="$(grep '^run ' "$STUB_DIR/calls.log" 2>/dev/null || true)"
+for want in \
+    "-v /var/run/docker.sock:/var/run/docker.sock" \
+    "-v $COMPOSE_FILE:$COMPOSE_FILE:ro" \
+    "-v ota-updates:$UPDATES_DIR:ro" \
+    "docker:27-cli"; do
+  if [[ "$RUN_LINE" == *"$want"* ]]; then
+    pass "helper launch carries '$want'"
+  else
+    fail "helper launch missing '$want' (got: $RUN_LINE)"
+  fi
+done
+
+# Extract the helper's argv: the recorded `docker run …` call.
+HELPER_CALL=""
+for f in "$STUB_DIR"/call-*; do
+  mapfile -d '' -t argv < "$f"
+  if [ "${argv[0]:-}" = "run" ]; then HELPER_CALL="$f"; fi
+done
+if [ -n "$HELPER_CALL" ]; then
+  pass "helper docker run argv captured"
+else
+  fail "no docker run invocation recorded"
+fi
+
+mapfile -d '' -t HELPER_ARGV < "$HELPER_CALL"
+HELPER_PAYLOAD="${HELPER_ARGV[$((${#HELPER_ARGV[@]} - 1))]}"
+HELPER_ENVS=()
+i=0
+while [ "$i" -lt "${#HELPER_ARGV[@]}" ]; do
+  if [ "${HELPER_ARGV[$i]}" = "-e" ]; then
+    HELPER_ENVS+=("${HELPER_ARGV[$((i + 1))]}")
+  fi
+  i=$((i + 1))
+done
+
+# Run the payload EXACTLY as the helper container would: POSIX sh, the -e
+# environment from the recorded launch, docker resolved via PATH.
+run_helper_payload() {
+  (
+    export PATH="$STUB_BIN:$PATH" DOCKER_STUB_DIR="$STUB_DIR"
+    export DOCKER_STUB_PS_CID DOCKER_STUB_MOUNTS DOCKER_STUB_HEALTHY_AFTER
+    local kv
+    for kv in "${HELPER_ENVS[@]}"; do export "${kv?}"; done
+    sh -c "$HELPER_PAYLOAD"
+  )
+}
+
+# --- healthy path: swap holds, nothing rolls back ---
+stub_reset
+DOCKER_STUB_PS_CID="new-orch-cid"
+DOCKER_STUB_HEALTHY_AFTER=2
+if run_helper_payload >/dev/null 2>&1; then
+  pass "helper payload exits 0 when the recreated orchestrator goes healthy"
+else
+  fail "helper payload exited non-zero on the healthy path"
+fi
+if grep -qF -- "compose -f $COMPOSE_FILE -f $UDIR/override-release.yml up -d --no-deps --no-build --pull never --force-recreate orchestrator" \
+    "$STUB_DIR/calls.log"; then
+  pass "helper recreates the orchestrator pinned to the RELEASE override"
+else
+  fail "helper did not recreate the orchestrator on the release override"
+fi
+if grep -q "override-previous.yml" "$STUB_DIR/calls.log"; then
+  fail "healthy path must not roll anything back"
+else
+  pass "healthy path rolls nothing back"
+fi
+
+# --- timeout path: bounded wait, then EVERY service back to previous ---
+stub_reset
+DOCKER_STUB_PS_CID="new-orch-cid"
+DOCKER_STUB_HEALTHY_AFTER=999
+if run_helper_payload >/dev/null 2>&1; then
+  pass "helper payload exits 0 after a successful full rollback"
+else
+  fail "helper payload exited non-zero after the rollback path"
+fi
+if [ "$(cat "$STUB_DIR/health-calls" 2>/dev/null || echo 0)" = "3" ]; then
+  pass "helper polled the healthcheck exactly DROPLET_OTA_SELF_HEALTH_ATTEMPTS (3) times"
+else
+  fail "helper health poll count != 3 (got $(cat "$STUB_DIR/health-calls" 2>/dev/null || echo 0))"
+fi
+for svc in web-dashboard routing orchestrator; do
+  if grep -qF -- "compose -f $COMPOSE_FILE -f $UDIR/override-previous.yml up -d --no-deps --no-build --pull never --force-recreate $svc" \
+      "$STUB_DIR/calls.log"; then
+    pass "timeout rollback recreates $svc on the PREVIOUS override"
+  else
+    fail "timeout rollback missing $svc"
+  fi
+done
+
+# --- launch preconditions: refuse to launch a helper that cannot roll back ---
+stub_reset
+if DROPLET_OTA_SELF_HEALTH_ATTEMPTS=3 DROPLET_OTA_SELF_HEALTH_INTERVAL_SECONDS=0 \
+    run_apply recreate-self-detached --compose-file "$COMPOSE_FILE" \
+    --update-id du-missing --target release >/dev/null 2>&1; then
+  fail "recreate-self-detached must die when overrides/services.txt are missing"
+else
+  pass "recreate-self-detached dies when overrides/services.txt are missing"
+fi
+if grep -q '^run ' "$STUB_DIR/calls.log" 2>/dev/null; then
+  fail "a helper was launched despite missing rollback material"
+else
+  pass "no helper launched when rollback material is missing"
+fi
+
+unset DOCKER_STUB_PS_CID DOCKER_STUB_MOUNTS DOCKER_STUB_HEALTHY_AFTER
+
+# =============================================================================
+# Phase 4 — dry-run hook still short-circuits every daemon op
+# =============================================================================
+echo ""
+echo "--- Phase 4: dry-run hook ---"
+
+DRY_OUT="$(DROPLET_OTA_APPLY_DRY_RUN=1 DROPLET_OTA_UPDATES_DIR="$UPDATES_DIR" \
+  bash "$APPLY_SH" recreate-services --compose-file "$COMPOSE_FILE" \
+  --update-id "$UPDATE_ID" --services web-dashboard --target release 2>/dev/null)"
+if printf '%s\n' "$DRY_OUT" | grep -q "^DRY-RUN: docker compose .*override-release.yml.*web-dashboard"; then
+  pass "dry-run prints the pinned compose command without running it"
+else
+  fail "dry-run output missing the pinned compose command (got: $DRY_OUT)"
+fi
+
+# =============================================================================
+# Summary
+# =============================================================================
+echo ""
+echo "  ================================================"
+if [ "$FAILURES" -eq 0 ]; then
+  printf "  \033[32mAll %d tests passed.\033[0m\n" "$TESTS"
+  exit 0
+else
+  printf "  \033[31m%d of %d tests FAILED.\033[0m\n" "$FAILURES" "$TESTS"
+  exit 1
+fi

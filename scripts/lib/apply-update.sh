@@ -25,12 +25,35 @@
 #   - --services values are validated to be a comma list of compose service
 #     names; --target is one of {release,previous}; nothing is eval'd.
 #
+# ── PER-TARGET DIGEST PINNING (why recreates ride a compose OVERRIDE) ──
+# The appliance compose file defines the first-party services (orchestrator,
+# web-dashboard, …) as `build:`-only — NO `image:` key — so a bare
+# `docker compose up --force-recreate <svc>` would reuse the LOCAL build and
+# silently ignore the digests pull-images fetched: release-vs-previous would
+# be a no-op. The orchestrator's snapshot step (host-compose-runner.ts)
+# therefore generates, per update, under <updatesDir>/<updateId>/:
+#
+#   override-release.yml   — every DEPLOYED service pinned to its manifest
+#                            digest ref;
+#   override-previous.yml  — the same services pinned to the refs that were
+#                            running (repo digest or local image ID);
+#   services.txt           — the rollback walk order (one name per line,
+#                            orchestrator LAST — swap-last both ways).
+#
+# Every recreate here runs `docker compose -f <base> -f <override>` with
+# `--no-build --pull never`: the merge ADDS an `image:` key to each
+# build:-only service, so compose recreates the container FROM the pinned
+# ref that pull-images already fetched (release) or that is still present
+# locally (previous). A missing override is a HARD ERROR — recreating
+# unpinned is exactly the bug this contract exists to kill.
+#
 # ── SUBCOMMANDS (the ApplyRunner port contract) ──
 #   current-image-refs  --services a,b,c
 #       Print a JSON map {service: <running image ref or null>} for the box.
 #   snapshot            --update-id ID --backup-dir DIR
 #       Capture the host config tree pre-image + a schema-only pg_dump into
-#       DIR (the runner has already written previous-refs.json + manifest.json).
+#       DIR (the runner has already written previous-refs.json, manifest.json
+#       and the per-target overrides + services.txt one level up).
 #   pull-images         --images REF [REF ...]
 #       `docker pull` every pinned image ref (by digest).
 #   stage-configs       --update-id ID --configs-tar PATH
@@ -39,21 +62,30 @@
 #   migrate-deploy
 #       `prisma migrate deploy` for this build's migrations.
 #   recreate-services   --update-id ID --services a,b --target release|previous
-#       `docker compose up -d --no-deps --force-recreate` the named services
-#       pinned to the release (manifest) or previous (backup) image refs.
+#       `docker compose -f <base> -f override-<target>.yml up -d --no-deps
+#       --no-build --pull never --force-recreate` each named service — i.e.
+#       ACTUALLY pinned to the release (manifest) or previous (backup) refs.
 #   restore-configs     ID
 #       Restore the backed-up host config tree (rollback step 8).
 #   recreate-self-detached --update-id ID --target release|previous
-#       Launch a DETACHED helper container that recreates the orchestrator
-#       itself, waits on its container healthcheck, and on timeout rolls
-#       EVERY service back to the previous refs — all OUTSIDE the orchestrator
-#       process, so the swap survives the orchestrator's own recreation.
+#       Launch a DETACHED helper container (docker:27-cli, socket + compose
+#       file + updates volume mounted) that: recreates the orchestrator
+#       pinned to override-<target>.yml, waits BOUNDED on the recreated
+#       container's healthcheck (DROPLET_OTA_SELF_HEALTH_ATTEMPTS ×
+#       DROPLET_OTA_SELF_HEALTH_INTERVAL_SECONDS, default 24 × 5s ≈ the TS
+#       health-gate posture), and on timeout rolls EVERY service in
+#       services.txt back to the previous refs — all OUTSIDE the orchestrator
+#       process, so the swap (and its rollback) survive the orchestrator's
+#       own recreation. The DB verdict is written by whichever orchestrator
+#       boots next (resumeInterruptedApply).
 #
 # ── TEST / DRY-RUN HOOK ──
 #   DROPLET_OTA_APPLY_DRY_RUN=1  — print each `docker`/`docker compose` command
 #     it WOULD run (prefixed `DRY-RUN:`) instead of running it, and short-
-#     circuit any daemon read (current-image-refs prints `{}`). Nothing on the
-#     box is touched. Used by scripts/test and the unit smoke test.
+#     circuit any daemon read (current-image-refs prints `{}`) and any
+#     override/services-file existence check. Nothing on the box is touched.
+#     Exercised by scripts/test/apply-update.test.sh, which also drives the
+#     REAL paths through a PATH-shimmed fake `docker`.
 # =============================================================================
 set -euo pipefail
 
@@ -113,11 +145,49 @@ validate_update_id() {
   esac
 }
 
-# --- docker compose wrapper -------------------------------------------------
+validate_positive_int() {
+  # $1 = flag name (for the error), $2 = value.
+  case "$2" in
+    '' | *[!0-9]*) die "invalid $1: $2 (expected a positive integer)" ;;
+  esac
+}
+
+# --- update-dir layout (see the PER-TARGET DIGEST PINNING header note) -------
+
+updates_dir() {
+  printf '%s' "${DROPLET_OTA_UPDATES_DIR:-/data/updates}"
+}
+
+override_file() {
+  # $1 = update id, $2 = target (release|previous).
+  printf '%s/%s/override-%s.yml' "$(updates_dir)" "$1" "$2"
+}
+
+services_file() {
+  printf '%s/%s/services.txt' "$(updates_dir)" "$1"
+}
+
+require_pin_file() {
+  # A missing pin file is a HARD ERROR (never recreate unpinned) — except
+  # under dry-run, where nothing is executed anyway.
+  [ -f "$1" ] || [ -n "$DRY_RUN" ] || \
+    die "missing $2: $1 (the orchestrator's snapshot step writes it)"
+}
+
+# --- docker compose wrappers ------------------------------------------------
 
 dc() {
   [ -n "$COMPOSE_FILE" ] || die "--compose-file is required"
   run docker compose -f "$COMPOSE_FILE" "$@"
+}
+
+# Base compose + a per-target override — the ONLY way this script ever
+# recreates a service, so nothing can come up unpinned.
+dc_pinned() {
+  local override="$1"
+  shift
+  [ -n "$COMPOSE_FILE" ] || die "--compose-file is required"
+  run docker compose -f "$COMPOSE_FILE" -f "$override" "$@"
 }
 
 # =============================================================================
@@ -213,14 +283,22 @@ cmd_recreate_services() {
   validate_update_id "$UPDATE_ID"
   validate_services "$SERVICES"
   validate_target "$TARGET"
-  log "recreate-services [$SERVICES] target=$TARGET"
+  local override
+  override="$(override_file "$UPDATE_ID" "$TARGET")"
+  require_pin_file "$override" "per-target override"
+  log "recreate-services [$SERVICES] target=$TARGET override=$override"
   local svc
   local IFS=','
   for svc in $SERVICES; do
     [ -z "$svc" ] && continue
     # --no-deps: recreate ONLY this service (its deps are already up);
-    # --force-recreate + --pull never: use the image already pulled/pinned.
-    dc up -d --no-deps --force-recreate "$svc"
+    # --no-build: NEVER fall back to the local build — the override's image:
+    #   pin is the whole point (build:-only services would otherwise reuse
+    #   whatever was built on the box and ignore the pulled digest);
+    # --pull never: the release refs were pulled in step 2, the previous
+    #   refs are already present — a pull here could only surprise us;
+    # --force-recreate: swap even when compose thinks nothing changed.
+    dc_pinned "$override" up -d --no-deps --no-build --pull never --force-recreate "$svc"
   done
 }
 
@@ -235,25 +313,101 @@ cmd_restore_configs() {
   fi
 }
 
+# The POSIX-sh supervisor program the detached self-swap helper container
+# runs (docker:27-cli is Alpine/busybox — NO bash, so this must stay POSIX).
+# Single-quoted ON PURPOSE: every $VAR expands INSIDE the helper from the
+# `-e` environment the launch below pins, never in this shell. Behaviour:
+#   1. recreate the orchestrator pinned to the target override;
+#   2. wait BOUNDED on the recreated container's healthcheck;
+#   3. healthy   → exit; the new orchestrator's resume hook commits;
+#      timeout   → roll EVERY service in services.txt back to the previous
+#                  refs; the resumed OLD orchestrator writes the verdict.
+readonly SELF_SWAP_SUPERVISOR='
+set -eu
+say() { echo "[ota-self-swap] $*"; }
+say "recreating the orchestrator (override: $DROPLET_OTA_TARGET_OVERRIDE)"
+docker compose -f "$DROPLET_OTA_COMPOSE_FILE" -f "$DROPLET_OTA_TARGET_OVERRIDE" \
+  up -d --no-deps --no-build --pull never --force-recreate orchestrator
+attempt=0
+while [ "$attempt" -lt "$DROPLET_OTA_SELF_HEALTH_ATTEMPTS" ]; do
+  cid="$(docker compose -f "$DROPLET_OTA_COMPOSE_FILE" ps -q orchestrator 2>/dev/null || true)"
+  if [ -n "$cid" ]; then
+    health="$(docker inspect --format "{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}" "$cid" 2>/dev/null || echo unknown)"
+    if [ "$health" = "healthy" ]; then
+      say "orchestrator healthy on the recreated image — swap holds"
+      exit 0
+    fi
+  fi
+  attempt=$((attempt + 1))
+  sleep "$DROPLET_OTA_SELF_HEALTH_INTERVAL_SECONDS"
+done
+say "orchestrator never went healthy — rolling EVERY service back to the previous refs"
+rc=0
+while IFS= read -r svc; do
+  [ -n "$svc" ] || continue
+  say "rollback: recreating $svc on the previous ref"
+  docker compose -f "$DROPLET_OTA_COMPOSE_FILE" -f "$DROPLET_OTA_PREVIOUS_OVERRIDE" \
+    up -d --no-deps --no-build --pull never --force-recreate "$svc" || rc=1
+done < "$DROPLET_OTA_SERVICES_FILE"
+exit "$rc"
+'
+
 cmd_recreate_self_detached() {
   validate_update_id "$UPDATE_ID"
   validate_target "$TARGET"
+  local attempts="${DROPLET_OTA_SELF_HEALTH_ATTEMPTS:-24}"
+  local interval="${DROPLET_OTA_SELF_HEALTH_INTERVAL_SECONDS:-5}"
+  validate_positive_int "DROPLET_OTA_SELF_HEALTH_ATTEMPTS" "$attempts"
+  validate_positive_int "DROPLET_OTA_SELF_HEALTH_INTERVAL_SECONDS" "$interval"
+
+  # The helper must be ABLE to roll back before it is allowed to swap:
+  # refuse to launch without the target override, the previous override,
+  # and the rollback services list.
+  local target_override previous_override svc_file
+  target_override="$(override_file "$UPDATE_ID" "$TARGET")"
+  previous_override="$(override_file "$UPDATE_ID" previous)"
+  svc_file="$(services_file "$UPDATE_ID")"
+  require_pin_file "$target_override" "target override"
+  require_pin_file "$previous_override" "previous override"
+  require_pin_file "$svc_file" "rollback services list"
+
+  # The helper outlives THIS container, so it cannot read the overrides
+  # through our filesystem — it needs the updates volume mounted itself.
+  # Resolve whatever backs $(updates_dir) on this container (named volume
+  # preferred; bind-mount source as the fallback) via the socket.
+  local updates_src="ota-updates"
+  if [ -z "$DRY_RUN" ]; then
+    local self_cid
+    self_cid="$(run_capture docker compose -f "$COMPOSE_FILE" ps -q orchestrator)"
+    [ -n "$self_cid" ] || die "cannot resolve the orchestrator's own container id"
+    updates_src="$(run_capture docker inspect \
+      --format '{{range .Mounts}}{{.Name}}|{{.Source}}|{{.Destination}}{{printf "\n"}}{{end}}' \
+      "$self_cid" \
+      | awk -F'|' -v dest="$(updates_dir)" \
+          '$3 == dest { if ($1 != "") { print $1 } else { print $2 }; exit }')"
+    [ -n "$updates_src" ] || die "cannot resolve the volume behind $(updates_dir)"
+  fi
+
   log "recreate-self-detached $UPDATE_ID target=$TARGET (launching detached helper)"
-  # A detached helper container (docker:cli image, socket mounted) recreates
-  # the orchestrator, waits on its container healthcheck, and on timeout rolls
-  # every service back to the previous refs. It MUST outlive this process AND
-  # the orchestrator's own recreation, so it runs as its own `docker run -d`
-  # against the host daemon — not a compose service. The DB verdict is written
-  # later by whichever orchestrator boots (resumeInterruptedApply).
+  # A detached helper container (docker:cli image, socket mounted) runs the
+  # SELF_SWAP_SUPERVISOR above. It MUST outlive this process AND the
+  # orchestrator's own recreation, so it runs as its own `docker run -d`
+  # against the host daemon — not a compose service. The DB verdict is
+  # written later by whichever orchestrator boots (resumeInterruptedApply).
   local helper_name="droplet-ota-self-swap-$UPDATE_ID"
   run docker run -d --rm \
     --name "$helper_name" \
     -v /var/run/docker.sock:/var/run/docker.sock \
     -v "$COMPOSE_FILE:$COMPOSE_FILE:ro" \
-    -e "DROPLET_OTA_TARGET=$TARGET" \
+    -v "$updates_src:$(updates_dir):ro" \
     -e "DROPLET_OTA_COMPOSE_FILE=$COMPOSE_FILE" \
+    -e "DROPLET_OTA_TARGET_OVERRIDE=$target_override" \
+    -e "DROPLET_OTA_PREVIOUS_OVERRIDE=$previous_override" \
+    -e "DROPLET_OTA_SERVICES_FILE=$svc_file" \
+    -e "DROPLET_OTA_SELF_HEALTH_ATTEMPTS=$attempts" \
+    -e "DROPLET_OTA_SELF_HEALTH_INTERVAL_SECONDS=$interval" \
     docker:27-cli \
-    docker compose -f "$COMPOSE_FILE" up -d --no-deps --force-recreate orchestrator
+    /bin/sh -c "$SELF_SWAP_SUPERVISOR"
 }
 
 # =============================================================================
