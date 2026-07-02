@@ -1,0 +1,311 @@
+name: publish-release
+
+# WARP-536 — CI half of the OTA update system (WARP-534).
+#
+# On every push to main: re-run the must-pass test suites (gate), build
+# every appliance app image, push to GHCR tagged by commit sha, capture
+# the immutable digests, pack the tracked runtime configs, generate the
+# design-schema-v1 release.json, cosign-sign it, and publish everything
+# as a GitHub Release. The device-side update agent (WARP-537/538) polls
+# Releases `latest`, verifies release.json.sig against the baked-in
+# cosign.pub, and applies by digest.
+#
+# ── FAILS UNTIL THE KEY CEREMONY RUNS ──
+# The sign step requires the COSIGN_PRIVATE_KEY + COSIGN_PASSWORD repo
+# secrets, which are provisioned ONLY by the human key ceremony
+# (scripts/README.md, "OTA release signing — key ceremony"). Until then
+# every run of this workflow fails at "Sign release manifest". That is
+# the intended fail-closed posture — do not stub the signature.
+#
+# ── KNOWN COST / FOLLOW-UP ──
+# The gate jobs duplicate the per-package push-to-main workflows
+# (orchestrator-tests.yml, web-dashboard-tests.yml, *-tests.yml for the
+# Python services). Those are path-filtered, so for any given push some
+# may not run at all — the gate is what actually guarantees "tests green
+# before publish". Follow-up (tracked in the WARP-536 PR): consolidate
+# the push-to-main checks into one ci.yml matrix and drop this inline
+# gate.
+
+on:
+  push:
+    branches: [main]
+
+# One release at a time, never cancelled mid-publish: a cancelled run
+# could leave images pushed but no signed manifest, or a half-uploaded
+# Release. Queued runs each publish their own sha in order.
+concurrency:
+  group: publish-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write # gh release create
+  packages: write # push images to GHCR
+  id-token: write # cosign / future keyless & provenance work
+
+jobs:
+  gate-node:
+    name: gate / node suites
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies (npm workspaces, root install)
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npm run -w @droplet/orchestrator db:generate
+
+      - name: Build @droplet/fips-selftest
+        run: npm run -w @droplet/fips-selftest build
+
+      - name: Build @droplet/tools-core
+        run: npm run -w @droplet/tools-core build
+
+      - name: Build @droplet/mcp-server
+        run: npm run -w @droplet/mcp-server build
+
+      - name: Test @droplet/tools-core
+        run: npm run -w @droplet/tools-core test
+
+      - name: Test @droplet/mcp-server
+        run: npm run -w @droplet/mcp-server test
+
+      # WARP-537's update-agent verify suite (once merged) execs the real
+      # cosign binary over golden fixtures — mirror orchestrator-tests.yml.
+      # Harmless before that suite lands; required after.
+      - name: Install cosign (update-agent verify suite)
+        uses: sigstore/cosign-installer@v3
+
+      - name: Test @droplet/orchestrator
+        run: npm run -w @droplet/orchestrator test
+
+      # matter-controller ships in release.json (scripts/release/
+      # services.json), so its suite gates publishing like every other
+      # released image — mirrors matter-controller-tests.yml.
+      - name: Type-check @droplet/matter-controller
+        run: npm run -w @droplet/matter-controller build
+
+      - name: Test @droplet/matter-controller
+        run: npm run -w @droplet/matter-controller test
+
+      - name: Lint dashboard class names
+        run: bash scripts/check-dashboard-classes.sh
+
+      - name: Test @droplet/web-dashboard
+        run: npm run -w @droplet/web-dashboard test
+
+  gate-python:
+    name: gate / ${{ matrix.service }} pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: ai-gateway
+          - service: routing
+          - service: switch
+          - service: camera-discovery
+          - service: file-indexer
+            # libpq for psycopg build, ffmpeg + libmagic for content sniffing
+            # (mirrors file-indexer-tests.yml)
+            sysdeps: libpq-dev ffmpeg libmagic1
+          - service: voice-io
+            # portaudio/alsa import-time deps (mirrors voice-io-tests.yml)
+            sysdeps: libportaudio2 alsa-utils
+          - service: device-identity-svc
+            # tpm2-pytss builds against tss2-esapi headers
+            # (mirrors device-identity-svc-tests.yml)
+            sysdeps: libtss2-dev pkg-config
+            reqs: requirements.txt
+            extra_pip: pytest
+            needs_pythonpath: "1"
+    defaults:
+      run:
+        working-directory: services/${{ matrix.service }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps
+        if: matrix.sysdeps != ''
+        working-directory: .
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ matrix.sysdeps }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r ${{ matrix.reqs || 'requirements-dev.txt' }}
+          if [ -n "${{ matrix.extra_pip }}" ]; then pip install ${{ matrix.extra_pip }}; fi
+
+      - name: Run pytest
+        env:
+          PYTHONPATH: ${{ matrix.needs_pythonpath == '1' && format('{0}/services/{1}', github.workspace, matrix.service) || '' }}
+        run: pytest -v
+
+  publish:
+    name: build, push, sign, release
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    needs: [gate-node, gate-python]
+    steps:
+      - uses: actions/checkout@v4
+
+      # The manifest generator has its own unit suite (schema shape +
+      # loud-failure paths). A release must never publish from an
+      # untested generator.
+      - name: Test release manifest generator
+        run: |
+          python3 -m pip install --upgrade pip pytest
+          python3 -m pytest scripts/release/ -q
+
+      # ubuntu-latest has ~14GB free. Building every appliance image
+      # fills that before BuildKit finishes (same fix as docker-build.yml
+      # / setup-e2e.yml). Strip the preinstalled toolchains we don't use
+      # to reclaim ~25GB.
+      - name: Free disk space
+        run: |
+          set -eux
+          df -h /
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/powershell \
+            /usr/local/share/chromium \
+            /usr/local/share/boost \
+            "$AGENT_TOOLSDIRECTORY/Ruby" \
+            "$AGENT_TOOLSDIRECTORY/PyPy" \
+            || true
+          sudo apt-get clean
+          df -h /
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Build + push every service in scripts/release/services.json
+      # (canonical list — the generator refuses to publish if this loop
+      # and the list ever drift). Tag = full commit sha; the manifest
+      # pins the pushed DIGEST, which is what devices actually pull.
+      - name: Build and push app images
+        run: |
+          set -euo pipefail
+          owner_lc="${GITHUB_REPOSITORY_OWNER,,}"
+          registry="ghcr.io/${owner_lc}"
+          mkdir -p dist
+          python3 - <<'PY' > dist/services.list
+          import json
+          for s in json.load(open("scripts/release/services.json"))["services"]:
+              print(s["name"], s["context"], s["dockerfile"])
+          PY
+          : > dist/digests.txt
+          while read -r name ctx dockerfile; do
+            image="${registry}/droplet-${name}"
+            echo "::group::build+push ${name}"
+            # compose semantics: dockerfile path is relative to its context
+            docker build --pull -t "${image}:${GITHUB_SHA}" \
+              -f "${ctx}/${dockerfile}" "${ctx}"
+            docker push "${image}:${GITHUB_SHA}"
+            digest="$(docker inspect \
+              --format='{{range .RepoDigests}}{{println .}}{{end}}' \
+              "${image}:${GITHUB_SHA}" | grep "^${image}@" | head -1 | cut -d@ -f2)"
+            if [ -z "${digest}" ]; then
+              echo "::error::no digest captured for ${name}"; exit 1
+            fi
+            echo "${name} ${digest}" >> dist/digests.txt
+            echo "::endgroup::"
+          done < dist/services.list
+          python3 - <<'PY'
+          import json
+          digests = {}
+          for line in open("dist/digests.txt"):
+              name, digest = line.split()
+              digests[name] = digest
+          json.dump(digests, open("dist/digests.json", "w"), indent=2)
+          print(json.dumps(digests, indent=2))
+          PY
+
+      # Tracked runtime configs only: `git archive` can never leak
+      # untracked runtime state (.env, docker/certs, secrets) because it
+      # packs the committed tree, not the working directory.
+      - name: Pack configs
+        run: |
+          set -euo pipefail
+          git archive --format=tar.gz -o dist/configs.tar.gz HEAD docker
+          sha256sum dist/configs.tar.gz
+
+      - name: Generate release.json
+        run: |
+          set -euo pipefail
+          owner_lc="${GITHUB_REPOSITORY_OWNER,,}"
+          python3 scripts/release/gen-release-manifest.py \
+            --services scripts/release/services.json \
+            --digests dist/digests.json \
+            --configs dist/configs.tar.gz \
+            --git-sha "${GITHUB_SHA}" \
+            --channel stable \
+            --registry "ghcr.io/${owner_lc}" \
+            --out dist/release.json
+          cat dist/release.json
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      # FAILS (by design) until the human key ceremony provisions the
+      # secrets — see the header comment + scripts/README.md.
+      #
+      # --tlog-upload=false: these are private product releases; we don't
+      # publish to the public Rekor transparency log. The device-side
+      # verify (WARP-537) is offline key-based verification and passes
+      # --insecure-ignore-tlog accordingly. The images themselves are not
+      # individually signed: they are pinned by digest inside the SIGNED
+      # manifest, which authenticates them transitively.
+      - name: Sign release manifest
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${COSIGN_PRIVATE_KEY}" ]; then
+            echo "::error::COSIGN_PRIVATE_KEY secret is not set — run the key ceremony in scripts/README.md (\"OTA release signing\") before releases can publish"
+            exit 1
+          fi
+          cosign sign-blob --yes \
+            --key env://COSIGN_PRIVATE_KEY \
+            --tlog-upload=false \
+            --output-signature dist/release.json.sig \
+            dist/release.json
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="ota-${GITHUB_RUN_NUMBER}-g${GITHUB_SHA::7}"
+          gh release create "${tag}" \
+            --title "OTA release ${tag}" \
+            --notes "Automated OTA release for ${GITHUB_SHA} (channel: stable). Assets: release.json (signed manifest, schema v1), release.json.sig (cosign signature — verify against apps/orchestrator/src/services/update-agent/cosign.pub), configs.tar.gz (tracked docker/ runtime configs)." \
+            --latest \
+            dist/release.json dist/release.json.sig dist/configs.tar.gz
