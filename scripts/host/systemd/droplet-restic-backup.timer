@@ -1,0 +1,21 @@
+# =============================================================================
+# WARP-254 — daily trigger for droplet-restic-backup.service
+# =============================================================================
+#
+# Daily incremental at 03:15 local time — after the WARP-570 tarball backup
+# (02:30) so the two never contend for pg_dump/IO. Randomized delay avoids a
+# fleet stampede; Persistent=true fires a missed run (box powered off) on the
+# next boot. Retention lives in droplet-backup.sh itself (restic forget).
+# =============================================================================
+[Unit]
+Description=Daily Droplet restic backup
+Documentation=https://warp-lab.atlassian.net/browse/WARP-254
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+RandomizedDelaySec=900
+Persistent=true
+Unit=droplet-restic-backup.service
+
+[Install]
+WantedBy=timers.target
