@@ -1,0 +1,7 @@
+httpx==0.28.1
+# WARP-963: every cadence (heartbeat 30s / metrics 60s / errors 5s /
+# network 5min / inventory 6h / command poll) runs on an AsyncIOScheduler
+# interval job instead of a hand-rolled `while True` loop — the canonical
+# scheduling pattern per CLAUDE.md (architecture-guard rule 9). Pinned to
+# the same version services/routing + services/camera-discovery use.
+APScheduler==3.10.4
