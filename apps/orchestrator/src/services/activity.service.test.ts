@@ -15,6 +15,7 @@
  */
 import { describe, it, expect, beforeEach } from "vitest";
 import {
+  actorFromRequest,
   createActivityRecorder,
   type ActivityRowRecorder,
 } from "./activity.service.js";
@@ -318,5 +319,36 @@ describe("activity.service.record", () => {
         ),
       ).toBe(true);
     }
+  });
+});
+
+describe("actorFromRequest (WARP-181)", () => {
+  it("maps an authenticated human to a user actor with the canonical UUID", () => {
+    expect(
+      actorFromRequest({ user: { id: "uuid-alice", role: "owner" } }),
+    ).toEqual({ type: "user", id: "uuid-alice" });
+  });
+
+  it("maps a service principal to system with a null id (never a user actor)", () => {
+    // AC1: actorId is a canonical user UUID — "_service:*" principal
+    // strings must never land there under type user. `ai` stays
+    // reserved for agent-loop-driven actions, so principals map to
+    // system; the principal string belongs in refs at the call site.
+    expect(
+      actorFromRequest({ user: { id: "_service:voice", role: "service" } }),
+    ).toEqual({ type: "system", id: null });
+    // Defense-in-depth: the id prefix alone is enough even if the
+    // role claim is missing.
+    expect(actorFromRequest({ user: { id: "_service:mcp" } })).toEqual({
+      type: "system",
+      id: null,
+    });
+  });
+
+  it("maps an unauthenticated request to anonymous", () => {
+    expect(actorFromRequest({})).toEqual({ type: "anonymous" });
+    expect(actorFromRequest({ user: undefined })).toEqual({
+      type: "anonymous",
+    });
   });
 });

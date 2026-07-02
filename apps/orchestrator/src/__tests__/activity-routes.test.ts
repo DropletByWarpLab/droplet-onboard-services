@@ -226,6 +226,27 @@ describe("GET /api/activity", () => {
     expect(res.body.items[0].actorId).toBe("uuid-alice");
   });
 
+  it("nulls actor fields on v1 rows — unsigned actor columns are never served as truth (WARP-181)", async () => {
+    // On a schemaVersion=1 row the signature does NOT cover actorType/
+    // actorId and the recorder never writes them there — any non-NULL
+    // value is tampering or a bug. The list API must not present it.
+    const app = makeApp([
+      makeRow(
+        { schemaVersion: 1, actorType: "user", actorId: "uuid-mallory" },
+        1,
+      ),
+      makeRow({ schemaVersion: 2, actorType: "user", actorId: "uuid-alice" }, 2),
+    ]);
+    const res = await request(app).get("/api/activity");
+    expect(res.status).toBe(200);
+    const v1 = res.body.items.find((r: any) => r.id === "1");
+    const v2 = res.body.items.find((r: any) => r.id === "2");
+    expect(v1.actorType).toBeNull();
+    expect(v1.actorId).toBeNull();
+    expect(v2.actorType).toBe("user");
+    expect(v2.actorId).toBe("uuid-alice");
+  });
+
   it("serializes BigInt id as string", async () => {
     const app = makeApp([makeRow({}, 1)]);
     const res = await request(app).get("/api/activity");
@@ -297,6 +318,23 @@ describe("POST /api/activity/export", () => {
     expect(lines[1].schemaVersion).toBe(2);
     expect(lines[2].actorType).toBe("system");
     expect(lines[2].actorId).toBeNull();
+  });
+
+  it("export preserves v1 actor columns verbatim-as-stored (raw sealed bundle)", async () => {
+    // The bundle is the raw table: rows carry schemaVersion, so an
+    // offline verifier knows actor fields are unsigned on v1 rows and
+    // can flag them itself. The exporter must not editorialize.
+    const app = makeApp([
+      makeRow(
+        { schemaVersion: 1, actorType: "user", actorId: "uuid-mallory" },
+        1,
+      ),
+    ]);
+    const res = await request(app).post("/api/activity/export").send({});
+    const lines = res.text.trim().split("\n").map((l) => JSON.parse(l));
+    expect(lines[1].schemaVersion).toBe(1);
+    expect(lines[1].actorType).toBe("user");
+    expect(lines[1].actorId).toBe("uuid-mallory");
   });
 
   it("export accepts actor filters in the body (WARP-181)", async () => {

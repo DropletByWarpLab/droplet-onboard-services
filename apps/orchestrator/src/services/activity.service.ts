@@ -83,15 +83,27 @@ export interface ActivityActor {
 
 /**
  * WARP-181: derive the actor for an emitter running inside an
- * Express handler. Authenticated caller → `user` with the canonical
- * UUID; no `req.user` (pre-auth surface) → `anonymous`.
+ * Express handler.
+ *
+ *   - authenticated human → `user` with the canonical UUID;
+ *   - service principal (`role: "service"` / `_service:*` id, e.g.
+ *     the voice pipeline calling /api/llm/chat) → `system` with a
+ *     null id. AC1 requires `actorId` to be a canonical user UUID,
+ *     so principal strings must never land there under type `user`;
+ *     and `ai` stays reserved for agent-loop-driven actions. Call
+ *     sites that have the principal string keep it in `refs`
+ *     (e.g. `refs.principal`);
+ *   - no `req.user` (pre-auth surface) → `anonymous`.
  */
 export function actorFromRequest(req: {
-  user?: { id: string } | undefined;
+  user?: { id: string; role?: string } | undefined;
 }): ActivityActor {
-  return req.user?.id
-    ? { type: "user", id: req.user.id }
-    : { type: "anonymous" };
+  const user = req.user;
+  if (!user?.id) return { type: "anonymous" };
+  if (user.role === "service" || user.id.startsWith("_service:")) {
+    return { type: "system", id: null };
+  }
+  return { type: "user", id: user.id };
 }
 
 export interface RecordParams {

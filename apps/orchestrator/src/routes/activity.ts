@@ -151,8 +151,14 @@ export function createActivityRouter(prisma: PrismaClient): Router {
           refs: r.refs,
           signature: r.signature,
           prevSignatureHash: r.prevSignatureHash,
-          actorType: r.actorType,
-          actorId: r.actorId,
+          // WARP-181: on v1 rows the signature does NOT cover the actor
+          // columns and the recorder never legitimately writes them
+          // there — any stored value is tampering or a bug, so the
+          // list API never serves it as truth. The export bundle (below)
+          // stays verbatim-as-stored: rows carry schemaVersion, so an
+          // offline verifier knows v1 actor fields are unsigned.
+          actorType: r.schemaVersion === 1 ? null : r.actorType,
+          actorId: r.schemaVersion === 1 ? null : r.actorId,
         }));
 
         const nextCursor =

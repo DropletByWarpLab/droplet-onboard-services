@@ -834,8 +834,9 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           severity: activitySeverityForTurnStatus(status),
           sourceIcon: "message-square",
           // WARP-181: the chat turn is attributed to the authenticated
-          // caller (canonical UUID). Service principals carry their
-          // "_service:*" id — still the authenticated caller identity.
+          // caller (canonical UUID). Service principals (voice etc.)
+          // map to `system` with a null id — the principal string is
+          // preserved in refs.principal below.
           actor: actorFromRequest(req),
           what:
             status === "completed"
@@ -848,6 +849,13 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             : `service • ${chatReq.model}`,
           refs: stripUndefined({
             userId,
+            // WARP-181: service principals are recorded as a `system`
+            // actor (actorId must be a canonical user UUID), so the
+            // principal string lands here instead.
+            principal:
+              role === "service"
+                ? ((req as AuthedRequest).user?.id ?? undefined)
+                : undefined,
             model: chatReq.model,
             conversationId: conversationId ?? undefined,
             messageId: assistantMessageId ?? undefined,
