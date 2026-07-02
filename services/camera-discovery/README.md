@@ -51,6 +51,7 @@ ONVIF WS-Discovery ─────┘      │
 | `MQTT_BROKER` | `mqtt://localhost:1883` | MQTT broker URL (with credentials) |
 | `SCAN_INTERVAL` | `30` | Seconds between discovery scans (min: 5) |
 | `CAMERA_SUBNET` | `192.168.100.0/24` | Subnet to scan (empty = all private) |
+| `CAMERA_INIT_CA_CERT` | (unset) | Path to a CA bundle/cert for TLS verification of the camera first-run (vendor-init) HTTPS clients (WARP-583). When set, httpx verifies the camera cert against it; a set-but-missing path fails closed rather than silently downgrading. When unset, verification is disabled — cameras ship per-device self-signed certs on first run, so pinning is not always feasible — and a warning is logged once per process. Residual risk while unpinned: an on-LAN MITM between this service and the camera VLAN can intercept the first-run admin-password set. Mirrors the switch service's `SWITCH_CA_CERT`. |
 | `DEVICE_SECRET` | (empty) | Auth token for `/drivers/fix` |
 
 ## Files

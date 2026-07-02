@@ -955,6 +955,12 @@ services:
       # file above. Empty default → driver degrades to "disconnected" (non-fatal).
       - SWITCH_PASSWORD=${SWITCH_PASSWORD:-}
       - SWITCH_DRIVER=${SWITCH_DRIVER:-lantronix}
+      # WARP-583: optional CA bundle / cert path enabling TLS verification of
+      # the switch admin session. The path must be visible INSIDE the
+      # container (bind-mount it via a compose override). Unset -> the driver
+      # keeps the historical unverified session (self-signed embedded cert)
+      # with a loud warning; a set-but-missing path fails closed at connect.
+      - SWITCH_CA_CERT=${SWITCH_CA_CERT:-}
       # Dedicated orchestrator → switch bearer (same WARP-165 rationale as
       # the display path): the prior ${DEVICE_SECRET_KEY} wiring put the
       # FIPS-sealed master encryption key on the wire for every switch
@@ -1111,6 +1117,13 @@ services:
       - FRIGATE_URL=http://localhost:5000
       - SCAN_INTERVAL=${CAMERA_SCAN_INTERVAL:-30}
       - CAMERA_SUBNET=${CAMERA_SUBNET:-192.168.100.0/24}
+      # WARP-583: optional CA bundle / cert path enabling TLS verification of
+      # the camera first-run (vendor-init) HTTPS clients. The path must be
+      # visible INSIDE the container (bind-mount it via a compose override).
+      # Unset -> unverified fallback (cameras ship per-device self-signed
+      # certs on first run) with a once-per-process warning; a set-but-missing
+      # path fails closed.
+      - CAMERA_INIT_CA_CERT=${CAMERA_INIT_CA_CERT:-}
     # NOTE: no `depends_on: frigate` — frigate is profile-gated to "linux"
     # (Linux-only). Compose errors on a depends_on whose target isn't in the
     # active profile set, so camera-discovery waits only on broker and treats
