@@ -12,6 +12,7 @@
  */
 import type { PrismaClient } from "@prisma/client";
 import * as os from "node:os";
+import { boxDisplayName } from "../lib/box-identity.js";
 
 export interface HardwareCompute {
   control_plane: string;
@@ -172,7 +173,10 @@ export async function getHardwarePayload(
     settingBool(prisma, "hardware.supply_chain.ndaa_889_compliant"),
   ]);
   return {
-    appliance_id: process.env.DROPLET_DEVICE_ID ?? os.hostname() ?? "droplet",
+    // WARP-992: never `os.hostname()` — inside the container that is the
+    // docker container id, and this field renders on the dashboard hardware
+    // surface. HQ registry id when provisioned, else the canonical box name.
+    appliance_id: (process.env.DROPLET_DEVICE_ID || "").trim() || boxDisplayName(),
     compute: getCompute(),
     storage,
     network: getNetwork(),

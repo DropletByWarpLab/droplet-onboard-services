@@ -12,6 +12,7 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
 import { validatePassword, isValidEmail } from "@droplet/auth-policy";
 import { useDevice } from "@/lib/hooks/useDevice";
+import { boxDisplayHost } from "@/lib/box-identity";
 import { useAuth } from "@/lib/auth";
 import {
   listProviderKeys,
@@ -296,7 +297,11 @@ export default function SettingsPage() {
         <Sect title="Device information" />
         <div className="card" style={{ padding: 0 }}>
           <div className="rows">
-            <InfoRow label="Hostname" value={device?.hostname ?? "Droplet"} />
+            {/* WARP-992: this row is what the factory-reset type-to-confirm
+                modal tells the owner to read, so it must render the same
+                canonical name the server compares against — never a leaked
+                container-id hostname from a stale Device row. */}
+            <InfoRow label="Hostname" value={boxDisplayHost(device?.hostname)} />
             <InfoRow label="Hardware" value={device?.hardwareRev ?? "—"} />
             <InfoRow label="Network mode" value={device?.networkMode ?? "—"} />
             <InfoRow label="IP address" value={device?.ip ?? "Not assigned"} />
