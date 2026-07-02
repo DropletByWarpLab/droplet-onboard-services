@@ -87,8 +87,12 @@ export function wrapFailOpen(inner: Analytics, log: AnalyticsLog): Analytics {
       const out = fn();
       // Defensive: façade methods are declared void, but if an underlying
       // implementation returns a promise, its rejection must not go
-      // unhandled either.
-      if (out instanceof Promise) out.catch(swallow);
+      // unhandled either. Duck-type `.then` rather than `instanceof Promise`
+      // — cross-realm promises and library thenables fail the instanceof
+      // check (PR #802 review). Promise.resolve assimilates any thenable.
+      if (typeof (out as { then?: unknown } | null | undefined)?.then === "function") {
+        void Promise.resolve(out).catch(swallow);
+      }
     } catch (err) {
       swallow(err);
     }
@@ -118,6 +122,25 @@ export function createAnalytics(
   init: AnalyticsInit,
   log: AnalyticsLog = logger,
 ): Analytics {
+  // Structural fail-open (PR #802 review): the module contract "analytics
+  // can NEVER throw into business logic" must hold against FUTURE editors of
+  // this construction path, not by inspection of today's non-throwing code.
+  // WARP-616 edits exactly this path (persisted identity / token
+  // supersession); a throw here would otherwise escape into the first
+  // business call site — or crash boot via initAnalytics(). A broken
+  // analytics setup degrades to Noop, never to a broken orchestrator.
+  try {
+    return buildAnalytics(init, log);
+  } catch (err) {
+    log.warn(
+      { err },
+      "analytics init failed — falling back to no-op (fail-open)",
+    );
+    return new NoopAnalytics();
+  }
+}
+
+function buildAnalytics(init: AnalyticsInit, log: AnalyticsLog): Analytics {
   if (!init.enabled) {
     log.info(
       "analytics: disabled (ANALYTICS_ENABLED=false) — fleet telemetry is a no-op",

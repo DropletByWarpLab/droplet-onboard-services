@@ -83,6 +83,27 @@ describe("createAnalytics — Noop selection (WARP-615 AC 1)", () => {
   it("NoopAnalytics façade calls are safe no-ops", () => {
     expect(() => callAllFacadeMethods(new NoopAnalytics())).not.toThrow();
   });
+
+  it("falls back to NoopAnalytics with a warn when construction itself throws (structural fail-open)", () => {
+    // PR #802 review: the "never throws into business logic" contract must
+    // hold STRUCTURALLY against future editors of the construction path
+    // (WARP-616 edits exactly this), not by inspection of today's
+    // non-throwing code. Sabotage the init so construction throws mid-build.
+    const log = fakeLog();
+    const sabotaged = {
+      ...CONFIGURED,
+      get url(): string {
+        throw new Error("sabotaged init");
+      },
+    } as unknown as Parameters<typeof createAnalytics>[0];
+
+    let a: Analytics | undefined;
+    expect(() => {
+      a = createAnalytics(sabotaged, log);
+    }).not.toThrow();
+    expect(a).toBeInstanceOf(NoopAnalytics);
+    expect(log.warn).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("wrapFailOpen — analytics can NEVER throw into business logic (WARP-615 AC 2)", () => {
@@ -125,6 +146,30 @@ describe("wrapFailOpen — analytics can NEVER throw into business logic (WARP-6
 
     expect(() => callAllFacadeMethods(wrapped)).not.toThrow();
     // Let the rejection handlers run.
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(log.warn.mock.calls.length + log.debug.mock.calls.length).toBe(5);
+  });
+
+  it("catches rejections from a cross-realm-style thenable (not a real Promise instance)", async () => {
+    // PR #802 review: `instanceof Promise` misses thenables from another
+    // realm (or promise libraries). The guard must duck-type `.then`.
+    const log = fakeLog();
+    const rejectingThenable = {
+      then(_onFulfilled: unknown, onRejected: (err: unknown) => void) {
+        onRejected(new Error("thenable boom"));
+      },
+    };
+    const thenableReturning = {
+      event: () => rejectingThenable,
+      metric: () => rejectingThenable,
+      error: () => rejectingThenable,
+      recordLlm: () => rejectingThenable,
+      recordService: () => rejectingThenable,
+    } as unknown as Analytics;
+    const wrapped = wrapFailOpen(thenableReturning, log);
+
+    expect(() => callAllFacadeMethods(wrapped)).not.toThrow();
+    // Let the assimilated thenable's rejection handlers run.
     await new Promise((resolve) => setImmediate(resolve));
     expect(log.warn.mock.calls.length + log.debug.mock.calls.length).toBe(5);
   });
