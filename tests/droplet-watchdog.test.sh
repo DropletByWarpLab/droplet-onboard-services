@@ -404,6 +404,34 @@ wd_field docker_dns message | grep -qi 'pin.*present\|already' \
   && pass "message distinguishes pin-already-present" \
   || fail "pin-present not reflected: $(wd_field docker_dns message)"
 
+# A transient docker-exec failure (container mid-restart / renamed / killed) is
+# NOT a DNS NOTFOUND — only getent's own rc=2 (nslookup rc=1) proves DNS broken.
+# Such codes (125 "No such container", 137 killed, generic 1) must report
+# not_applicable and re-probe next run, never a false DNS heal_failed that would
+# escalate to a spurious CRITICAL + misdirect the operator to the daemon.json pin.
+for exec_rc in 1 125 137; do
+  reset_work
+  mk_docker_stub
+  printf 'droplet-orchestrator-1\n' > "$WORK/docker/running"
+  echo "$exec_rc" > "$WORK/docker/dns_exit"
+  printf '{}\n' > "$WORK/daemon.json"
+  run_wd >/dev/null || true
+  [ "$(wd_field docker_dns status)" = "not_applicable" ] \
+    && pass "transient docker exec rc=$exec_rc → not_applicable (not a false DNS heal_failed)" \
+    || fail "exec rc=$exec_rc expected not_applicable, got $(wd_field docker_dns status): $(wd_field docker_dns message)"
+done
+# Two consecutive transient exec failures must NEVER escalate (no CRITICAL).
+reset_work
+mk_docker_stub
+printf 'droplet-orchestrator-1\n' > "$WORK/docker/running"
+echo 125 > "$WORK/docker/dns_exit"
+printf '{}\n' > "$WORK/daemon.json"
+run_wd >/dev/null || true
+out="$(run_wd || true)"
+echo "$out" | grep -q 'CRITICAL' \
+  && fail "transient docker exec failures should never emit a CRITICAL escalation" \
+  || pass "repeated transient docker exec failures never escalate (no spurious CRITICAL)"
+
 # =============================================================================
 # Phase 5: container_crashloop — baseline, detection, diagnostics, recovery
 # =============================================================================
@@ -455,6 +483,32 @@ run_wd DROPLET_WATCHDOG_ESCALATED_RETRY_EVERY=1 >/dev/null || true
 [ "$(wd_field container_crashloop status)" = "ok" ] \
   && pass "stable restart count → ok again (on the escalated retry tick)" \
   || fail "expected ok after loop stops, got $(wd_field container_crashloop status)"
+
+# Stale-baseline recovery: a container escalates, KEEPS looping through the
+# suspension window, then STOPS. The per-window baseline must be refreshed on
+# suspended ticks (the check body is skipped there) so the retry tick measures
+# delta=0 against the last-seen count — not the count frozen at escalation time,
+# which would falsely re-flag a loop that already ended.
+reset_work
+mk_docker_stub
+printf 'droplet-mosquitto-1\n' > "$WORK/docker/running"
+printf 'droplet-mosquitto-1\n' > "$WORK/docker/all"
+echo 0 > "$WORK/docker/dns_exit"
+printf 'boot loop trace\n' > "$WORK/docker/logs"
+printf 'droplet-mosquitto-1 20\n' > "$WORK/docker/restarts"; run_wd >/dev/null || true   # baseline 20
+printf 'droplet-mosquitto-1 25\n' > "$WORK/docker/restarts"; run_wd >/dev/null || true   # +5 → heal_failed
+printf 'droplet-mosquitto-1 30\n' > "$WORK/docker/restarts"; run_wd >/dev/null || true   # +5 → escalated (fails=2)
+[ "$(wd_field container_crashloop status)" = "escalated" ] \
+  && pass "sustained loop → escalated" \
+  || fail "expected escalated, got $(wd_field container_crashloop status)"
+# Loop continues to 40 during the suspension window (baseline must track it)…
+printf 'droplet-mosquitto-1 35\n' > "$WORK/docker/restarts"; run_wd >/dev/null || true   # suspended tick, refresh → 35
+printf 'droplet-mosquitto-1 40\n' > "$WORK/docker/restarts"; run_wd >/dev/null || true   # suspended tick, refresh → 40
+# …then STOPS (stable at 40). The retry tick must NOT re-flag against a stale 30.
+run_wd DROPLET_WATCHDOG_ESCALATED_RETRY_EVERY=1 >/dev/null || true
+[ "$(wd_field container_crashloop status)" = "ok" ] \
+  && pass "loop that ended during suspension recovers → ok (baseline refreshed on suspended ticks)" \
+  || fail "stale baseline re-flagged an ended loop: got $(wd_field container_crashloop status)"
 
 # =============================================================================
 # Phase 6: wifi — via the real WARP-869 helper against a fake sysfs tree

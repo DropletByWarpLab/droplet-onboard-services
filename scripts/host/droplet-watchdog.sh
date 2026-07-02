@@ -377,10 +377,19 @@ wd_check_docker_dns() {
     return 0
   fi
   # getent first (present in both musl and glibc images); nslookup fallback.
-  # docker exec exits 126/127 when the binary is missing inside the container.
-  local rc=0
+  # Exit-code contract (only the tool's OWN codes prove DNS state):
+  #   getent hosts  -> 0 resolved, 2 NOTFOUND (the real DNS-broken signal),
+  #                    126/127 binary missing (fall back to nslookup).
+  #   nslookup      -> 0 resolved, 1 NOTFOUND, 126/127 binary missing.
+  # ANY other exit (125 "No such container" on a mid-restart container, 137
+  # killed, generic exec failure) is a transient DOCKER-EXEC failure, NOT DNS
+  # breakage — classifying it as heal_failed would emit a spurious CRITICAL +
+  # misdirect the operator with a daemon.json DNS-pin fix. Report those as
+  # not_applicable so the check simply re-probes on the next run.
+  local tool=getent rc=0
   docker exec "$container" getent hosts "$WD_DNS_PROBE" >/dev/null 2>&1 || rc=$?
   if [ "$rc" = 126 ] || [ "$rc" = 127 ]; then
+    tool=nslookup
     rc=0
     docker exec "$container" nslookup "$WD_DNS_PROBE" >/dev/null 2>&1 || rc=$?
     if [ "$rc" = 126 ] || [ "$rc" = 127 ]; then
@@ -394,6 +403,15 @@ wd_check_docker_dns() {
     CHECK_MESSAGE="resolved $WD_DNS_PROBE from container $container"
     return 0
   fi
+  # Only the tool's own NOTFOUND code (getent 2, nslookup 1) proves DNS is
+  # actually broken. Everything else is a transient exec failure.
+  local dns_notfound=2
+  [ "$tool" = nslookup ] && dns_notfound=1
+  if [ "$rc" != "$dns_notfound" ]; then
+    CHECK_OUTCOME=not_applicable
+    CHECK_MESSAGE="DNS probe on container $container returned a transient docker exec failure (rc=$rc, not a $tool NOTFOUND) — re-probing next run, not treating as DNS breakage"
+    return 0
+  fi
   # Detect-and-report only: the durable fix needs a dockerd restart, which
   # would take the entire stack down — an operator decision, not a watchdog's.
   CHECK_OUTCOME=heal_failed
@@ -403,6 +421,33 @@ wd_check_docker_dns() {
     CHECK_MESSAGE="container DNS probe failed ($WD_DNS_PROBE via $container). Durable fix: pin \"dns\": [\"1.1.1.1\", \"8.8.8.8\"] in $WD_DOCKER_DAEMON_JSON and restart dockerd — NOT auto-applied (daemon restart takes the stack down)"
   fi
   return 0
+}
+
+# container_crashloop keeps an out-of-band per-window baseline (the last
+# RestartCount seen for each container). Its "window" is "since the previous
+# watchdog run", so the baseline is only correct if it is refreshed EVERY run.
+# On a suspended (escalated) tick wd_check_container_crashloop is not called, so
+# without this the baseline freezes at escalation time and the retry tick would
+# measure a delta against a stale value — re-flagging a loop that already ended.
+# This helper re-baselines the counts (no flagging, no diagnostics) so suspended
+# ticks keep the window honest. Called from wd_run_check on the suspended path.
+wd_refresh_container_crashloop_baseline() {
+  command -v docker >/dev/null 2>&1 || return 0
+  local containers
+  containers="$(docker ps -a --filter "label=com.docker.compose.project=$WD_COMPOSE_PROJECT" \
+        --format '{{.Names}}' 2>/dev/null)" || return 0
+  [ -n "$containers" ] || containers="$(docker ps -a --format '{{.Names}}' 2>/dev/null)"
+  [ -n "$containers" ] || return 0
+  local counts_file="$WD_KV_DIR/docker-restart-counts"
+  local new_counts="" c count
+  while IFS= read -r c; do
+    [ -n "$c" ] || continue
+    count="$(docker inspect -f '{{.RestartCount}}' "$c" 2>/dev/null)" || continue
+    case "$count" in (*[!0-9]*|'') continue ;; esac
+    new_counts="${new_counts}${c} ${count}
+"
+  done <<< "$containers"
+  printf '%s' "$new_counts" > "$counts_file" 2>/dev/null || true
 }
 
 # --- container_crashloop -----------------------------------------------------------
@@ -483,6 +528,12 @@ wd_run_check() { # <name>
     ticks=$(( $(wd_state_get "$name.ticks" 0) + 1 ))
     wd_state_set "$name.ticks" "$ticks"
     if [ $((ticks % WD_RETRY_EVERY)) -ne 0 ]; then
+      # A check may keep a per-window baseline that only stays honest if it is
+      # refreshed every run; give it a chance to do so even while suspended, so
+      # the retry tick does not measure against a baseline frozen at escalation.
+      if declare -F "wd_refresh_${name}_baseline" >/dev/null 2>&1; then
+        "wd_refresh_${name}_baseline"
+      fi
       wd_finalize "$name" escalated \
         "heal suspended after $fails consecutive failures (re-trying every $WD_RETRY_EVERY runs): $(wd_state_get "$name.last_message" '')" \
         "$fails"
