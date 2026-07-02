@@ -197,6 +197,110 @@ prepare_and_build() {
 }
 
 # =============================================================================
+# Nextcloud Droplet provisioning reconcile (WARP-990)
+# =============================================================================
+# docker/nextcloud-init.sh (household group + "Household" group folder +
+# OnlyOffice connector — WARP-883/882) is mounted into the nextcloud container
+# as the official image's post-installation hook:
+#   /docker-entrypoint-hooks.d/post-installation/init-droplet.sh
+# The image fires post-installation hooks ONLY on the single boot that performs
+# the initial auto-install into an EMPTY nextcloud-data volume. On a reflashed
+# box that window is easy to miss entirely (WARP-990, live on .87 2026-07-01):
+#   * a volume-preserving reset keeps nextcloud-data, so the entrypoint sees an
+#     already-installed Nextcloud and never enters the install path — and
+#     therefore never runs the post-installation hooks;
+#   * even on a genuinely fresh volume the hook races first-boot bring-up
+#     (db/appstore/DNS settling — the #691 fragility) and the image never
+#     re-fires a hook that erred.
+# Either way the box serves a bare Nextcloud (`occ group:list` → only "admin"):
+# no household group, no shared folder, no OnlyOffice connector — which broke
+# the setup wizard's account creation with a 500 (WARP-989).
+#
+# Fix: after EVERY stack bring-up, once `php occ status` reports installed,
+# re-exec the SAME mounted hook script inside the running container. The hook
+# is fully idempotent (every step no-ops when already applied), so this is a
+# reconcile, not a re-install — and docker/nextcloud-init.sh stays the single
+# source of truth (nothing here duplicates its logic). Because it runs from
+# start_stack, every bring-up path converges: fresh install, re-provision,
+# factory-reset --reinstall, and the reflash recipes (all re-run setup.sh).
+#
+# Both execs run as uid 33 (www-data): occ refuses to run as any user other
+# than the config.php owner, and unlike the entrypoint's hook-runner context a
+# plain exec has no root wrapper — uid 33 is exactly how the live-box manual
+# recovery ran the hook cleanly.
+#
+# Sentinel-delimited for unit testing (tests/setup.test.sh extracts the
+# function bodies and runs them against a stubbed compose runner), mirroring
+# wait_for_openwrt_ready in scripts/lib/single-box.sh (WARP-826).
+#
+# Tunables (env, ~150 s default budget on top of start_stack's own NC wait):
+#   NEXTCLOUD_OCC_READY_TRIES     poll attempts (default 30)
+#   NEXTCLOUD_OCC_READY_INTERVAL  seconds between polls (default 5)
+# >>> wait_for_nextcloud_installed (WARP-990)
+wait_for_nextcloud_installed() {
+  local tries="${NEXTCLOUD_OCC_READY_TRIES:-30}"
+  local interval="${NEXTCLOUD_OCC_READY_INTERVAL:-5}"
+  local i=0 occ_out
+  while [ "$i" -lt "$tries" ]; do
+    i=$((i + 1))
+    # `php occ status --output=json` prints {"installed":true,…} once the
+    # auto-install has finished; before that it reports false or occ errors
+    # while the container is still warming up. Output is captured and matched
+    # with a pipe-free `case`: an `… | grep -q` here can SIGPIPE the writer
+    # under `set -o pipefail` and turn a genuine "installed" into a false
+    # negative (the WARP-981 lesson). `|| true` keeps a warming-up occ from
+    # aborting the poll under `set -e`.
+    occ_out=$(run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" \
+      exec -T -u 33 nextcloud php occ status --output=json 2>/dev/null || true)
+    case "$occ_out" in
+      *'"installed":true'* | *'"installed": true'*) return 0 ;;
+    esac
+    sleep "$interval"
+  done
+  return 1
+}
+# <<< wait_for_nextcloud_installed (WARP-990)
+
+# >>> run_nextcloud_post_install_hook (WARP-990)
+run_nextcloud_post_install_hook() {
+  # The mounted hook — the single source of truth (docker/nextcloud-init.sh,
+  # see the nextcloud volumes in docker/docker-compose.yml). Exec THIS path;
+  # never reimplement its steps here.
+  local hook_path="/docker-entrypoint-hooks.d/post-installation/init-droplet.sh"
+  local recover_cmd="docker compose -f docker/docker-compose.yml exec -u 33 nextcloud bash $hook_path"
+
+  log_info "Reconciling Nextcloud Droplet provisioning (household group + shared folder + OnlyOffice connector — WARP-990)..."
+
+  if ! wait_for_nextcloud_installed; then
+    # LOUD but non-fatal — the rest of setup (verify.sh, local DNS) must still
+    # run; a box with a lagging Nextcloud is degraded, not bricked.
+    log_error "Nextcloud never reported installed (php occ status) within budget — SKIPPING the Droplet provisioning reconcile (WARP-990)."
+    log_error "Without it the household group / shared folder / OnlyOffice connector are missing and the setup wizard's account creation fails (WARP-989)."
+    log_error "Recover manually once Nextcloud is up:  $recover_cmd"
+    return 0
+  fi
+
+  # WARP-484 capture-and-branch pattern (see the workspace-settings seeder in
+  # setup.sh): never pipe the exec through `grep … || true` (which swallows
+  # real failures) — capture the transcript and branch on the exit code
+  # explicitly, surfacing it either way.
+  local hook_out="" hook_rc=0
+  hook_out=$(run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" \
+    exec -T -u 33 nextcloud bash "$hook_path" 2>&1) || hook_rc=$?
+  # Keep the full hook transcript in the setup log either way.
+  printf '%s\n' "$hook_out" >> "$LOG_FILE" 2>/dev/null || true
+  if [ "$hook_rc" -eq 0 ]; then
+    log_success "Nextcloud Droplet provisioning reconciled (hook exit 0)"
+  else
+    log_error "Nextcloud Droplet provisioning hook FAILED (exit $hook_rc) — household group / shared folder / OnlyOffice connector may be missing, and the setup wizard's account creation will 500 (WARP-989/990):"
+    printf '%s\n' "$hook_out" | tail -20 >&2
+    log_error "Setup continues; re-run the hook manually once Nextcloud is healthy:  $recover_cmd"
+  fi
+  return 0
+}
+# <<< run_nextcloud_post_install_hook (WARP-990)
+
+# =============================================================================
 # Start
 # =============================================================================
 start_stack() {
@@ -290,6 +394,15 @@ start_stack() {
   if [ $nc_retries -eq 0 ]; then
     log_warn "Nextcloud setup may still be in progress — check: docker compose logs nextcloud"
   fi
+
+  # --- Reconcile Droplet's Nextcloud provisioning (WARP-990) ---
+  # The post-installation hook (docker/nextcloud-init.sh) only fires on the
+  # single boot that auto-installs into an EMPTY nextcloud-data volume — a
+  # volume-preserving reset/reflash never re-enters that window, and a raced
+  # first-boot hook is never re-fired. Re-exec the same mounted hook
+  # (idempotent) on every bring-up so the household group + shared folder +
+  # OnlyOffice connector always converge. Non-fatal on failure, loud in the log.
+  run_nextcloud_post_install_hook
 
   # --- Wait for orchestrator health (via Nginx on port 80) ---
   log_info "Waiting for services to be healthy..."
