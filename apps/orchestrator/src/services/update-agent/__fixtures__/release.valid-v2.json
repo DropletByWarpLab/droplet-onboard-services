@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "release": {
+    "gitSha": "fedcba9876543210fedcba9876543210fedcba98",
+    "builtAt": "2026-05-29T03:00:00Z",
+    "channel": "stable",
+    "minOrchestratorSchema": 1
+  },
+  "services": [
+    {
+      "name": "orchestrator",
+      "image": "ghcr.io/dropletbywarplab/droplet-orchestrator@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "healthcheck": { "type": "http", "port": 3000, "path": "/api/orchestrator/health" }
+    },
+    {
+      "name": "web-dashboard",
+      "image": "ghcr.io/dropletbywarplab/droplet-web-dashboard@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "healthcheck": { "type": "http", "port": 3001, "path": "/healthz" }
+    }
+  ],
+  "configs": {
+    "file": "configs.tar.gz",
+    "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+  }
+}

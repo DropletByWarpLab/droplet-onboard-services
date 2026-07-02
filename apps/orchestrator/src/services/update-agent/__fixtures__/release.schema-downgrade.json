@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 0,
+  "release": {
+    "gitSha": "0123456789abcdef0123456789abcdef01234567",
+    "builtAt": "2026-05-28T03:00:00Z",
+    "channel": "stable",
+    "minOrchestratorSchema": 1
+  },
+  "services": [
+    {
+      "name": "orchestrator",
+      "image": "ghcr.io/dropletbywarplab/droplet-orchestrator@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "healthcheck": { "type": "http", "port": 3000, "path": "/api/orchestrator/health" }
+    }
+  ],
+  "configs": {
+    "file": "configs.tar.gz",
+    "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  }
+}
