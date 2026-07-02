@@ -1631,9 +1631,10 @@ services:
   # kernel WireGuard module. Enabling an unverified cap reduction risks a box
   # whose AP/WireGuard/procd silently fails to boot.
   #
-  # HARDWARE-VERIFY BEFORE ENABLING (WARP Hardware Test status): on a real
-  # single-box, delete `privileged: true` + the two `cap_add` entries from the
-  # live `openwrt` service and merge the keys below into it, then confirm:
+  # HARDWARE-VERIFY BEFORE ENABLING — tracked in WARP-1016 (WARP Hardware Test):
+  # on a real single-box, delete `privileged: true` + the two `cap_add` entries
+  # from the live `openwrt` service and merge the keys below into it, then
+  # confirm:
   #   1. procd boots clean (no mount errors in `docker logs droplet-openwrt`);
   #   2. `droplet-openwrt-attach` brings the AP up (hostapd `type AP`, client
   #      gets a DHCP lease);
@@ -1641,12 +1642,18 @@ services:
   #      the dashboard;
   #   4. ubus over 127.0.0.1:8181 answers (routing service healthy);
   #   5. a container restart re-attaches cleanly (overlay + config persist).
-  # If procd fails at step 1, re-add SYS_ADMIN first; it is the most likely
-  # single cap the reduced set still needs. Rationale for every line:
+  # If procd fails at step 1, re-add SYS_ADMIN first (procd mount ops), then
+  # MKNOD (procd/hotplug device-node creation at init) — the two most-likely
+  # re-adds from the Docker-default caps that `cap_drop: ALL` intentionally
+  # removes. Rationale for every line:
   #   docs/security/openwrt-container-threat-model.md §6.
   #
   # openwrt-hardened-staged:      # merge these keys INTO `openwrt`, don't run standalone
   #   # Remove `privileged: true` and the redundant cap_add from the live block.
+  #   # `cap_drop: ALL` intentionally drops the 14 Docker-default caps too (MKNOD,
+  #   # SETPCAP, SYS_CHROOT, AUDIT_WRITE, FSETID, SETFCAP, ...); the add-back below
+  #   # is only what OpenWrt is expected to need. WARP-1016 re-adds any that an
+  #   # observed boot/runtime failure proves necessary (MKNOD is the likeliest).
   #   cap_drop:
   #     - ALL
   #   cap_add:
@@ -1661,7 +1668,10 @@ services:
   #     - SETGID
   #     - KILL               # procd service supervision
   #   security_opt:
-  #     - no-new-privileges:true   # restores seccomp/AppArmor confinement; verify vs passwd/dnsmasq
+  #     # Blocks ONLY privilege elevation across execve (setuid/setgid/file-caps);
+  #     # verify vs passwd/dnsmasq. The seccomp + docker-default AppArmor profiles
+  #     # come back from REMOVING `privileged`, NOT from this opt.
+  #     - no-new-privileges:true
   #   sysctls:
   #     - net.ipv4.ip_forward=1
   #     - net.ipv4.conf.all.forwarding=1

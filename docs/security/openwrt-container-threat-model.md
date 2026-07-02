@@ -63,7 +63,7 @@ safety net.
    (AP + guest BSS,      │                                       │  SYS_ADMIN                        │  │
     semi-trusted)        │                                       │                                   │  │
                          │                                       │  eth0 = docker bridge veth        │  │
-                         │   127.0.0.1:8181 ──host-only──────────┤  (172.18.0.0/16, DEFAULT compose  │  │
+                         │   127.0.0.1:8181 ──host-only──────────┤  (default compose bridge, DEFAULT │  │
    routing service ─────►│   (ubus JSON-RPC, bearer-gated)       │   network — shared w/ orchestrator│  │
    (network_mode: host,  │                                       │   postgres, redis, gateway, ...)  │  │
     the AI control path) │                                       └───────────────────────────────────┘  │
@@ -77,7 +77,7 @@ safety net.
 | `:51820/udp` WireGuard | The open internet, via the host's customer-facing iface + docker-proxy DNAT | **Untrusted** | Cryptographic (Noise/Curve25519 peer keys). No handshake without a configured peer public key. |
 | Wi-Fi association | AP + guest BSS clients (moved PHY in the container netns) | **Semi-trusted** (household + guests) | WPA2-PSK per-box PSK (WARP-819). Guest BSS is client-isolated + LAN-isolated by a default-deny fw4 zone. |
 | `127.0.0.1:8181` ubus JSON-RPC | The `routing` service (`network_mode: host`) — the AI-side control path | **Trusted** (on-box) | Host-only bind (never published on the customer iface). rpcd session login (root pw from the `openwrt_password` docker secret) + the `droplet-ai` ACL. The routing service itself is bearer-gated (`ROUTING_SERVICE_TOKEN`, fail-closed). |
-| Compose default bridge (172.18.0.0/16) | Any container on the default network | **Trusted-ish** (co-tenant) | None at the network layer — see §4 lateral movement. |
+| Compose default bridge (typically 172.18.0.0/16 — Compose auto-assigns the subnet, `ipam: {}`) | Any container on the default network | **Trusted-ish** (co-tenant) | None at the network layer — see §4 lateral movement. |
 
 ### What the container can touch (blast radius)
 
@@ -86,8 +86,9 @@ safety net.
   intended job.
 - **All host devices + all capabilities + unconfined seccomp/AppArmor** — via
   `privileged: true`. This is the over-grant (see §3).
-- **The compose default network** — `eth0` is a docker bridge veth on
-  172.18.0.0/16, the **same network** as `orchestrator:3000`, `postgres:5432`,
+- **The compose default network** — `eth0` is a docker bridge veth on the
+  default compose bridge (typically 172.18.0.0/16; Compose auto-assigns the
+  subnet), the **same network** as `orchestrator:3000`, `postgres:5432`,
   `redis`, the dashboard `gateway`, etc. (The `routing`, `matter-controller`,
   and other `network_mode: host` services are reachable on host localhost, not
   this bridge.) A process that escapes the OpenWrt userland into the container
@@ -142,24 +143,41 @@ configurations. That is exactly why the reduced cap set below is a
 
 ## 4. Attack scenarios
 
-### S1 — WireGuard vuln → container escape via `privileged`
+### S1 — WireGuard vuln → compromise (kernel path vs userspace path)
 `:51820/udp` is the only cryptographically-authenticated remote surface, but it
-faces the open internet. A memory-safety bug in the WireGuard kernel path or in
-`wg`/`netifd`'s handling of peer config, reached pre-authentication, executes in
-a container that has **all capabilities, all host devices, and no
-seccomp/AppArmor**. In that posture, container→host escape is close to trivial
-(`SYS_MODULE` alone — load a malicious kernel module — is game over for the
-host). **Reducing the cap set + restoring seccomp/AppArmor turns a full host
-compromise into, at worst, a compromised network namespace.** This is the
-single highest-value mitigation in this ticket.
+faces the open internet. The two failure paths have **very different** blast
+radii and the cap reduction only helps one of them — keep them separate:
+
+- **S1a — kernel WireGuard path (cap reduction does NOT help).** The datapath
+  (`kmod-wireguard`, the Curve25519 handshake, the netlink config surface) runs
+  **in the host kernel**, not in the container's userland. A memory-safety bug
+  reached there executes with **host-kernel privilege regardless of the
+  container's caps, seccomp, or AppArmor** — those confine userspace processes,
+  not the kernel a syscall lands in. So this is a **host compromise**, full
+  stop, and no amount of container hardening changes that. The real mitigation
+  story for S1a is **keeping the host kernel patched** and leaning on
+  WireGuard's deliberately small, audited codebase (a few thousand lines, no
+  pre-handshake attack surface for unknown peers) — an architectural property,
+  not something this ticket's compose changes touch.
+- **S1b — userspace surfaces (cap reduction genuinely bites).** The processes
+  that parse config and manage the interface — `wg`, `netifd`, `hostapd`,
+  `dnsmasq` — run **in the container**. A bug reached there executes with the
+  container's privileges. Today that means **all capabilities, all host
+  devices, and no seccomp/AppArmor**, so container→host escape is close to
+  trivial (`SYS_MODULE` alone — load a malicious kernel module — is game over
+  for the host). **Reducing the cap set + restoring the seccomp + AppArmor
+  profiles (the latter come back from removing `privileged`, not from
+  `no-new-privileges`) turns a userspace RCE from a full host compromise into,
+  at worst, a compromised network namespace.** This is the single
+  highest-value mitigation in this ticket — and it applies to S1b, not S1a.
 
 ### S2 — Lateral movement across the compose network
 The container's `eth0` sits on the **default compose bridge** alongside
 `orchestrator`, `postgres`, `redis`, and the dashboard `gateway`. None of those
 enforce network-layer origin checks — Postgres trusts the network, Redis has
 only a password. A foothold inside the OpenWrt container (even without a host
-escape) can scan 172.18.0.0/16 and hit `postgres:5432` / `redis:6379`
-directly. **Mitigation direction (out of scope for this ticket, flagged for
+escape) can scan the default bridge subnet (typically 172.18.0.0/16) and hit
+`postgres:5432` / `redis:6379` directly. **Mitigation direction (out of scope for this ticket, flagged for
 follow-up):** move `openwrt` onto a dedicated `internal: true` compose network
 that carries only the host-published ubus path, so it cannot reach the data
 tier. Noted in §6/Follow-up.
@@ -259,8 +277,9 @@ immediately after the live `openwrt` service. Rationale per line:
       - SETUID             # passwd (setuid-root), dnsmasq drop-to-user
       - SETGID             # dnsmasq/hostapd group drop
       - KILL               # procd service supervision (SIGTERM/SIGHUP)
-    # Restores the default Docker seccomp profile + docker-default AppArmor
-    # (both disabled by privileged today) and blocks setuid elevation.
+    # no-new-privileges ONLY blocks privilege elevation across execve (setuid /
+    # setgid / file-caps). The seccomp + docker-default AppArmor profiles come
+    # back from REMOVING `privileged: true`, not from this opt.
     security_opt:
       - no-new-privileges:true
     # ip_forward is namespaced; set it explicitly instead of relying on the
@@ -271,23 +290,32 @@ immediately after the live `openwrt` service. Rationale per line:
 ```
 
 Notes on what is *not* in the list:
+- **`cap_drop: ALL` also drops the 14 Docker-default caps** (MKNOD, SETPCAP,
+  SYS_CHROOT, AUDIT_WRITE, FSETID, SETFCAP, and the ones re-added above). This
+  is **intentional** — least-privilege means adding back only what OpenWrt is
+  observed to need, not inheriting Docker's default bag. The add-back list is a
+  best-evidence starting point; the hardware test (WARP-1016) is where any
+  missing default gets identified by an observed boot/runtime failure and
+  re-added with a one-line reason.
 - **No `devices:` / `device_cgroup_rules:`** — the Wi-Fi PHY is a netdev moved
   into the container netns **host-side** by `droplet-openwrt-attach`
   (`iw phy … set netns <pid>`), not a `/dev` node the container opens. WireGuard
   is a kernel netdev (no `/dev/net/tun`). So no device grant is needed; verify
   the AP still binds after the drop.
-- **`SYS_ADMIN` is retained as a candidate**, not confidently dropped: procd's
-  container init does mount operations. The compose already provides `tmpfs` for
-  `/tmp` and `/run`, which *may* mean procd no longer needs to mount them itself
-  — the hardware test should try dropping `SYS_ADMIN` and watch for a procd/mount
-  failure at boot before committing to keep it.
+- **`SYS_ADMIN` and `MKNOD` are the two most-likely re-adds** if the reduced set
+  is too tight. `SYS_ADMIN`: procd's container init does mount operations (the
+  compose already provides `tmpfs` for `/tmp` and `/run`, which *may* mean procd
+  no longer needs to mount them itself — try dropping it and watch for a
+  procd/mount failure at boot). `MKNOD`: procd + hotplug create device nodes at
+  init; a `cap_drop: ALL` container that needs to `mknod` a `/dev` entry will
+  fail without it. Confirm both on hardware before finalizing.
 
-### Follow-up ticket (to be filed by the controller)
-See the self-assessment handoff for the proposed ticket body: **stage the cap
-reduction on a real single-box, verify AP + WireGuard + ubus + DHCP + reboot
-persistence, then flip the live service to the hardened definition; and,
-separately, move `openwrt` onto a dedicated `internal:`-scoped compose network
-to close the S2 lateral-movement path.**
+### Follow-up ticket — WARP-1016
+Tracked in **WARP-1016** (hardware verification): **stage the cap reduction on a
+real single-box, verify AP + WireGuard + ubus + DHCP + reboot persistence, then
+flip the live service to the hardened definition; and, separately, move
+`openwrt` onto a dedicated `internal:`-scoped compose network to close the S2
+lateral-movement path.**
 
 ---
 
@@ -295,8 +323,17 @@ to close the S2 lateral-movement path.**
 
 Even with the reduced cap set + seccomp/AppArmor restored, the container still
 holds `NET_ADMIN` (+ likely `SYS_ADMIN`) and terminates an internet-facing UDP
-listener. A kernel-level WireGuard/netlink 0-day could still compromise the
-network namespace. The residual mitigations are architectural and belong to the
+listener. Two residuals remain, and the cap reduction does not close either:
+
+- A **kernel-level** WireGuard/netlink 0-day (S1a) executes in the host kernel,
+  so it is a **full host compromise** — container caps/seccomp/AppArmor are
+  irrelevant to it. The only mitigation is a patched host kernel + WireGuard's
+  small audited surface.
+- Residual **userspace** risk (S1b) is bounded to a compromised network
+  namespace once the cap set is reduced — a large improvement over today's
+  host-escape posture, but non-zero while `NET_ADMIN`/`SYS_ADMIN` remain.
+
+The deeper residual mitigations are architectural and belong to the
 multi-box/v2-6 SKUs (physical WAN/Edge separation) — the single-box accepts a
 higher residual risk in exchange for one-box economics, and this document is the
 record of that accepted trade-off.
