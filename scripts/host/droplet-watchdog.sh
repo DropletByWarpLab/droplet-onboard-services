@@ -239,16 +239,23 @@ wd_check_wifi() {
     CHECK_MESSAGE="wifi helper exited $rc: $(printf '%s' "$out" | tail -n 1)"
     return 0
   fi
+  # Failure/WARN patterns are matched BEFORE 'revived': the helper's
+  # "WARN: revived <addr> but <unit> not in systemd — AP interface not rebound"
+  # line contains the word "revived" but is a FAILURE (the PCI function came
+  # back yet the AP was never rebound), so a bare 'revived' match would
+  # misclassify a still-down AP as healed. This is single-radio and can fire on
+  # a shipping box whenever the attach unit is missing or its restart is skipped.
+  local wifi_fail_re='did not come back|could not remove|rescan write failed|not rebound|restart failed'
+  if printf '%s' "$out" | grep -Eq "$wifi_fail_re"; then
+    CHECK_OUTCOME=heal_failed
+    CHECK_MESSAGE="$(printf '%s' "$out" | grep -E "$wifi_fail_re" | tail -n 1)"
+    wd_log_heal wifi "PCI remove + rescan attempted but not fully recovered: $CHECK_MESSAGE"
+    return 0
+  fi
   if printf '%s' "$out" | grep -q 'revived'; then
     CHECK_OUTCOME=healed
     CHECK_MESSAGE="$(printf '%s' "$out" | grep 'revived' | tail -n 1)"
     wd_log_heal wifi "PCI remove + rescan revived the Wi-Fi function: $CHECK_MESSAGE"
-    return 0
-  fi
-  if printf '%s' "$out" | grep -Eq 'did not come back|could not remove|rescan write failed'; then
-    CHECK_OUTCOME=heal_failed
-    CHECK_MESSAGE="$(printf '%s' "$out" | grep -E 'did not come back|could not remove|rescan write failed' | tail -n 1)"
-    wd_log_heal wifi "PCI remove + rescan attempted but failed: $CHECK_MESSAGE"
     return 0
   fi
   CHECK_OUTCOME=ok

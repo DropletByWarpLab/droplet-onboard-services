@@ -550,6 +550,25 @@ grep -q 'wifi' "$WORK/state/heal.log" 2>/dev/null \
   && pass "wifi heal recorded in heal.log" \
   || fail "wifi heal not in heal.log"
 
+# The helper's "WARN: revived <addr> but <unit> not in systemd — AP interface
+# not rebound" line contains "revived" but is a FAILURE (PCI function is back,
+# AP is not). It must classify as heal_failed, not a false healed — failure/WARN
+# patterns are matched before the bare 'revived' success signal. Single-radio,
+# can fire on a shipping box when the attach unit is missing.
+reset_work
+mk_docker_stub
+mk_pci_dev "0000:0e:00.0" "0x028000" bound
+cat > "$WORK/bin/fake-wifi-helper" <<'EOF'
+#!/bin/sh
+echo "droplet-wifi-watchdog: WARN: revived 0000:0e:00.0 but droplet-openwrt-attach.service not in systemd — AP interface not rebound; run: systemctl daemon-reload && systemctl enable --now droplet-openwrt-attach.service"
+exit 0
+EOF
+chmod +x "$WORK/bin/fake-wifi-helper"
+run_wd DROPLET_WATCHDOG_WIFI_HELPER="$WORK/bin/fake-wifi-helper" >/dev/null || true
+[ "$(wd_field wifi status)" = "heal_failed" ] \
+  && pass "helper 'revived but not rebound' WARN → heal_failed (not a false healed)" \
+  || fail "expected heal_failed for not-rebound WARN, got $(wd_field wifi status): $(wd_field wifi message)"
+
 # Helper missing entirely → not_applicable (first-boot install ordering must
 # not fabricate an escalation).
 reset_work
