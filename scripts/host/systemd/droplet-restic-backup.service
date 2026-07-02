@@ -1,0 +1,30 @@
+# =============================================================================
+# WARP-254 — daily restic backup (oneshot, driven by droplet-restic-backup.timer)
+# =============================================================================
+#
+# Installed + @REPO_ROOT@-substituted + enabled by setup.sh
+# (scripts/lib/backup.sh::install_restic_backup) — never hand-placed.
+#
+# Inspect:
+#   systemctl list-timers droplet-restic-backup.timer
+#   journalctl -u droplet-restic-backup.service
+#
+# The orchestrator's in-container cron-runtime is deliberately NOT used: it
+# cannot pg_dump the sibling db container nor write the host repository path.
+# A host systemd timer is the correct home for a host-level backup.
+# =============================================================================
+[Unit]
+Description=Droplet restic backup (daily incremental)
+Documentation=https://warp-lab.atlassian.net/browse/WARP-254
+Wants=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+Environment=DROPLET_REPO_ROOT=@REPO_ROOT@
+ExecStart=/usr/local/sbin/droplet-backup.sh
+# The staging dir holds DB dumps + the .env travels into the (encrypted)
+# repository; keep every new file owner-only.
+UMask=0077
+Nice=10
+IOSchedulingClass=idle

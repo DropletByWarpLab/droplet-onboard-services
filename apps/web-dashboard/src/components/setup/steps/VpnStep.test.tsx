@@ -113,6 +113,90 @@ describe("VpnStep — one-tap remote access (WARP-979)", () => {
   });
 });
 
+describe("VpnStep — honest away-from-home copy (WARP-993)", () => {
+  // The default fixture omits offLanReachable — the honest default: the
+  // split-horizon FQDN has no public A record (ADR-023 §3), so the minted
+  // conf only works on the home LAN until the ADR-025 relay lands.
+
+  it("does NOT promise 'from anywhere' on the toggle view when offLanReachable is absent/false", async () => {
+    render(
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
+    );
+    await reachToggle();
+    expect(screen.queryAllByText(/from anywhere/i)).toHaveLength(0);
+    // Low-key forward-looking note instead.
+    expect(screen.queryAllByText(/coming soon/i).length).toBeGreaterThan(0);
+    // The one-tap headline copy still anchors the step.
+    expect(
+      screen.getByText(/one tap connects this device to your droplet/i),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the full 'from anywhere' promise on the toggle view when offLanReachable is true", async () => {
+    fetchVpnStatus.mockResolvedValue({
+      configured: true,
+      endpointConfigured: true,
+      endpointHost: "vpn.example.com",
+      peerCount: 0,
+      offLanReachable: true,
+    });
+    render(
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
+    );
+    await reachToggle();
+    expect(screen.queryAllByText(/from anywhere/i).length).toBeGreaterThan(0);
+    expect(screen.queryAllByText(/coming soon/i)).toHaveLength(0);
+  });
+
+  it("gates the QR (created) view copy when offLanReachable is false", async () => {
+    render(
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
+    );
+    await reachToggle();
+    fireEvent.click(toggle());
+    expect(await screen.findByTestId("vpn-qr-wrapper")).toBeInTheDocument();
+
+    expect(screen.queryAllByText(/from anywhere/i)).toHaveLength(0);
+    // Don't send the customer to a coffee shop to "test" a dead endpoint.
+    expect(screen.queryAllByText(/cellular/i)).toHaveLength(0);
+    expect(screen.queryAllByText(/coming soon/i).length).toBeGreaterThan(0);
+  });
+
+  it("keeps the cellular test guidance on the created view when offLanReachable is true", async () => {
+    fetchVpnStatus.mockResolvedValue({
+      configured: true,
+      endpointConfigured: true,
+      endpointHost: "vpn.example.com",
+      peerCount: 0,
+      offLanReachable: true,
+    });
+    render(
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
+    );
+    await reachToggle();
+    fireEvent.click(toggle());
+    expect(await screen.findByTestId("vpn-qr-wrapper")).toBeInTheDocument();
+
+    expect(screen.queryAllByText(/from anywhere/i).length).toBeGreaterThan(0);
+    expect(screen.queryAllByText(/cellular/i).length).toBeGreaterThan(0);
+    expect(screen.queryAllByText(/coming soon/i)).toHaveLength(0);
+  });
+
+  it("does not promise 'from anywhere' on the blocked view either", async () => {
+    fetchVpnStatus.mockResolvedValue({
+      configured: false,
+      endpointConfigured: false,
+    });
+    render(
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
+    );
+    expect(
+      await screen.findByText(/remote access needs an internet address first/i),
+    ).toBeInTheDocument();
+    expect(screen.queryAllByText(/from anywhere/i)).toHaveLength(0);
+  });
+});
+
 describe("VpnStep — router unreachable (WARP-807)", () => {
   it("renders the actionable notice (not the raw error) when the one-tap mint returns UNREACHABLE", async () => {
     createVpnPeer.mockRejectedValueOnce(

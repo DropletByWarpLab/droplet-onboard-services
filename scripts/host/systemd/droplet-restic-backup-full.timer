@@ -1,0 +1,19 @@
+# =============================================================================
+# WARP-254 — weekly trigger for droplet-restic-backup-full.service
+# =============================================================================
+#
+# Sunday 04:15 local — clear of both the WARP-570 tarball (02:30) and the
+# daily incremental (03:15). Persistent=true fires a missed run on next boot.
+# =============================================================================
+[Unit]
+Description=Weekly Droplet restic full backup
+Documentation=https://warp-lab.atlassian.net/browse/WARP-254
+
+[Timer]
+OnCalendar=Sun *-*-* 04:15:00
+RandomizedDelaySec=900
+Persistent=true
+Unit=droplet-restic-backup-full.service
+
+[Install]
+WantedBy=timers.target

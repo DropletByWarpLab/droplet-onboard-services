@@ -3,6 +3,7 @@ import fs from "fs";
 import { PrismaClient } from "@prisma/client";
 import { cacheDel } from "./cache.service.js";
 import { publish } from "./mqtt.service.js";
+import { boxDisplayName } from "../lib/box-identity.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("device-registration");
@@ -49,7 +50,13 @@ function detectHardwareRev(): string {
  */
 async function refreshDeviceState(): Promise<void> {
   try {
-    const hostname = os.hostname();
+    // WARP-992: the canonical box name, never `os.hostname()` — inside the
+    // container that is the docker container id, and this row's `hostname`
+    // is what the dashboard identity chip + Settings → Device information
+    // display. Deriving `deviceId` from it also makes the row stable across
+    // container recreations (the container id changed on every recreate,
+    // leaving a trail of stale self-registrations).
+    const hostname = boxDisplayName();
     const deviceId = `droplet-${hostname}`;
     const ip = detectIp();
     const hardwareRev = detectHardwareRev();

@@ -42,7 +42,16 @@ _valid_hostname() {
   local name="$1"
   # Single label (mDNS host-name) or dotted FQDN, 1-253 chars, no leading/
   # trailing hyphen per label, lowercase ASCII only.
-  printf '%s' "$name" | grep -Eq '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$'
+  #
+  # Matched with bash's [[ =~ ]] (whole-string, newline-safe) rather than a
+  # `printf | grep -Eq` pipe — grep is LINE-based, so a newline-bearing value
+  # like 'droplet-ai<LF>HostName=evil' would pass on its first line and the
+  # injected second line would ride into /etc/avahi/avahi-daemon.conf (via the
+  # sed in _set_avahi_host_name) or the dnsmasq host-record. In [[ =~ ]] the
+  # char classes cannot match a newline and `$` anchors the end of the whole
+  # string, so a multi-line value is rejected. Mirrors the WARP-994 fix to
+  # droplet-set-public-fqdn.sh and the WARP-988 fix to droplet-set-box-name.sh.
+  [[ "$name" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$ ]]
 }
 
 if ! _valid_hostname "$DROPLET_MDNS_HOSTNAME"; then

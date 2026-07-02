@@ -1246,16 +1246,23 @@ run_check_tls_invariants() {
       failures=$((failures + 1))
     fi
 
-    # 4. SIGNED HQ deregistration via the tls-deregister CLI (ADR-023 PR-3).
-    #    Must invoke `tls-deregister` AND must NOT have regressed to a bodyless
-    #    `curl -X DELETE …/api/issuance/registration` (which HQ 422s). Match the
-    #    bodyless curl as a DELETE whose target is the registration endpoint with
-    #    no -d/--data flag on the same logical command — approximated by the
-    #    presence of the registration path on a curl line at all (the CLI does
-    #    the signed DELETE now, so the path should NEVER appear in factory-reset).
-    if ! grep -qE 'npm run -s tls-deregister|run tls-deregister' "$factory_reset"; then
-      printf "  ${_RED}FAIL${_RESET}  %s — factory-reset.sh does not invoke the tls-deregister CLI\n" "$label"
-      printf "    | (ADR-023 PR-3: HQ requires a signed PoP body; run the CLI while the stack is up.)\n" >&2
+    # 4. SIGNED HQ reset via the tls-release / tls-deregister CLIs (WARP-980,
+    #    AMENDS ADR-023 PR-3). The DEFAULT reset path RELEASES the HQ name
+    #    (`tls-release`, device stays registered + self-heals); --decommission
+    #    does the full deregister (`tls-deregister`). BOTH CLIs must be wired
+    #    (factory-reset selects between them by the flag), and neither may have
+    #    regressed to a bodyless `curl -X DELETE …/api/issuance/registration`
+    #    (which HQ 422s). Both CLI names appear in factory-reset's command
+    #    selection; assert both are present so a revert to only-deregister (losing
+    #    the self-heal) OR dropping the deregister path is caught.
+    if ! grep -qE 'tls-release' "$factory_reset"; then
+      printf "  ${_RED}FAIL${_RESET}  %s — factory-reset.sh does not wire the DEFAULT tls-release CLI\n" "$label"
+      printf "    | (WARP-980: reset must RELEASE the HQ name by default — the device stays registered + self-heals.)\n" >&2
+      failures=$((failures + 1))
+    fi
+    if ! grep -qE 'tls-deregister' "$factory_reset"; then
+      printf "  ${_RED}FAIL${_RESET}  %s — factory-reset.sh does not wire the --decommission tls-deregister CLI\n" "$label"
+      printf "    | (ADR-023 PR-3: --decommission must fully deregister via the signed CLI while the stack is up.)\n" >&2
       failures=$((failures + 1))
     fi
     # Strip comment lines before grepping so a future explanatory comment like
@@ -1271,7 +1278,7 @@ run_check_tls_invariants() {
   fi
 
   if [ "$failures" -eq 0 ]; then
-    printf "  ${_GREEN}PASS${_RESET}  %s (FQDN SAN + nginx cert paths + factory-reset FQDN + signed HQ deregister)\n" "$label"
+    printf "  ${_GREEN}PASS${_RESET}  %s (FQDN SAN + nginx cert paths + factory-reset FQDN + signed HQ release/deregister)\n" "$label"
     CHECK_RESULTS[$label]=pass
     return 0
   fi

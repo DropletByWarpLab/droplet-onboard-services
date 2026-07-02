@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "release": {
+    "gitSha": "not-a-git-sha",
+    "builtAt": "2026-05-28T03:00:00Z",
+    "channel": "stable",
+    "minOrchestratorSchema": 1
+  },
+  "services": [],
+  "configs": {
+    "file": "configs.tar.gz",
+    "sha256": "not-a-sha256"
+  }
+}

@@ -717,6 +717,242 @@ else
 fi
 
 # =============================================================================
+# Phase 8: Nextcloud post-install hook reconcile on bring-up (WARP-990)
+# =============================================================================
+# docker/nextcloud-init.sh (household group + "Household" group folder +
+# OnlyOffice connector) is mounted as the official image's post-installation
+# hook, which fires ONLY on the single boot that auto-installs into an EMPTY
+# nextcloud-data volume. A volume-preserving reset/reflash never re-enters
+# that window, so a reflashed box came up with a bare Nextcloud (occ
+# group:list → only "admin") and the setup wizard's account creation 500'd
+# (WARP-989). start_stack must therefore wait for `php occ status` to report
+# installed (bounded retry) and re-exec the SAME mounted hook — idempotent,
+# single source of truth — on every bring-up, loudly surfacing but never
+# fataling on a hook failure. Static wiring asserts + behavioural runs of the
+# sentinel-delimited functions against a stubbed run_docker_compose (mirrors
+# tests/single-box-openwrt-readiness.test.sh).
+echo "--- Phase 8: Nextcloud post-install hook reconcile (WARP-990) ---"
+
+NC_HOOK_PATH="/docker-entrypoint-hooks.d/post-installation/init-droplet.sh"
+
+# (1) Both reconcile functions are present and sentinel-delimited (the markers
+# are the extraction contract for the behavioural asserts below).
+if grep -qF "# >>> wait_for_nextcloud_installed (WARP-990)" "$COMPOSE_LIB" \
+   && grep -qF "# <<< wait_for_nextcloud_installed (WARP-990)" "$COMPOSE_LIB"; then
+  pass "wait_for_nextcloud_installed sentinel markers present in compose.sh"
+else
+  fail "wait_for_nextcloud_installed sentinel markers missing from compose.sh"
+fi
+
+if grep -qF "# >>> run_nextcloud_post_install_hook (WARP-990)" "$COMPOSE_LIB" \
+   && grep -qF "# <<< run_nextcloud_post_install_hook (WARP-990)" "$COMPOSE_LIB"; then
+  pass "run_nextcloud_post_install_hook sentinel markers present in compose.sh"
+else
+  fail "run_nextcloud_post_install_hook sentinel markers missing from compose.sh"
+fi
+
+# (2) start_stack invokes the reconcile — hooked where the stack is brought up
+# (fresh install, re-provision, factory-reset --reinstall, and the reflash
+# recipes all re-run setup.sh → start_stack), not in a one-off installer.
+START_STACK_BODY="$(awk '/^start_stack\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$COMPOSE_LIB")"
+if printf '%s' "$START_STACK_BODY" | grep -q 'run_nextcloud_post_install_hook'; then
+  pass "start_stack invokes run_nextcloud_post_install_hook (every bring-up path reconciles)"
+else
+  fail "start_stack does not invoke run_nextcloud_post_install_hook — a reflashed box stays unprovisioned (WARP-990)"
+fi
+
+# (3) The readiness gate is `php occ status` inside the container (the honest
+# installed signal), not only the curl-based status.php wait.
+if grep -q 'php occ status' "$COMPOSE_LIB"; then
+  pass "compose.sh gates the reconcile on 'php occ status' (installed signal)"
+else
+  fail "compose.sh does not probe 'php occ status' before the reconcile"
+fi
+
+# (4) Single source of truth: compose.sh execs the MOUNTED hook path…
+if grep -qF "$NC_HOOK_PATH" "$COMPOSE_LIB"; then
+  pass "compose.sh execs the mounted hook path ($NC_HOOK_PATH)"
+else
+  fail "compose.sh does not reference the mounted hook path — reconcile must exec $NC_HOOK_PATH"
+fi
+
+# …which docker-compose.yml actually mounts docker/nextcloud-init.sh at…
+if grep -qE '\./nextcloud-init\.sh:/docker-entrypoint-hooks\.d/post-installation/init-droplet\.sh' "$COMPOSE_FILE_REAL"; then
+  pass "docker-compose.yml mounts nextcloud-init.sh at the exec'd hook path (paths agree)"
+else
+  fail "docker-compose.yml no longer mounts nextcloud-init.sh at $NC_HOOK_PATH — the reconcile exec would 404"
+fi
+
+# …and compose.sh never reimplements the hook's occ steps (the script stays
+# the ONLY implementation).
+if grep -qE 'group:add|groupfolders:|app:install' "$COMPOSE_LIB"; then
+  fail "compose.sh duplicates nextcloud-init.sh provisioning logic (group:add/groupfolders/app:install) — single-source-of-truth violated"
+else
+  pass "compose.sh does not duplicate nextcloud-init.sh logic (hook stays the single implementation)"
+fi
+
+# (5) Both execs run as uid 33 (www-data) — occ refuses any user other than
+# the config.php owner (the root-context foot-gun the hook itself documents).
+NC_UID33_COUNT=$(grep -cE 'exec -T -u 33 nextcloud' "$COMPOSE_LIB" || true)
+if [ "$NC_UID33_COUNT" -ge 2 ]; then
+  pass "occ probe + hook exec both run as uid 33 (www-data, config.php owner)"
+else
+  fail "expected >= 2 'exec -T -u 33 nextcloud' calls in compose.sh, found ${NC_UID33_COUNT} (occ owner check would trip)"
+fi
+
+# --- Behavioural: extract the shipping functions, stub run_docker_compose ----
+NC_WORK="$TMP_ROOT/nc-hook"
+mkdir -p "$NC_WORK"
+
+sed -n '/# >>> wait_for_nextcloud_installed (WARP-990)/,/# <<< wait_for_nextcloud_installed (WARP-990)/p' \
+  "$COMPOSE_LIB" > "$NC_WORK/funcs.sh"
+sed -n '/# >>> run_nextcloud_post_install_hook (WARP-990)/,/# <<< run_nextcloud_post_install_hook (WARP-990)/p' \
+  "$COMPOSE_LIB" >> "$NC_WORK/funcs.sh"
+
+if grep -q 'wait_for_nextcloud_installed()' "$NC_WORK/funcs.sh" \
+   && grep -q 'run_nextcloud_post_install_hook()' "$NC_WORK/funcs.sh"; then
+  pass "extracted both WARP-990 function bodies from compose.sh"
+else
+  fail "could not extract the WARP-990 function bodies — skipping behavioural asserts"
+fi
+
+# Shims + a scriptable run_docker_compose. `php occ status` flips to installed
+# once the call count reaches $NC_STUB_STATE/installed_after; the hook exec
+# records its argv and exits with $NC_STUB_STATE/hook_rc.
+cat > "$NC_WORK/stub.sh" <<'NCSTUB'
+log_info()    { :; }
+log_warn()    { :; }
+log_success() { :; }
+log_error()   { printf 'error %s\n' "$*" >&2; }
+sleep()       { :; }
+
+run_docker_compose() {
+  local sd="${NC_STUB_STATE:?NC_STUB_STATE unset}" n
+  case "$*" in
+    *"php occ status"*)
+      n=$(( $(cat "$sd/occ_calls" 2>/dev/null || echo 0) + 1 ))
+      echo "$n" > "$sd/occ_calls"
+      if [ "$n" -ge "$(cat "$sd/installed_after")" ]; then
+        printf '{"installed":true,"versionstring":"29.0.0"}\n'
+      else
+        printf '{"installed":false}\n'
+      fi
+      return 0
+      ;;
+    *"init-droplet.sh"*)
+      n=$(( $(cat "$sd/hook_calls" 2>/dev/null || echo 0) + 1 ))
+      echo "$n" > "$sd/hook_calls"
+      printf '%s' "$*" > "$sd/hook_argv"
+      echo "[droplet] stub hook transcript"
+      return "$(cat "$sd/hook_rc" 2>/dev/null || echo 0)"
+      ;;
+  esac
+  return 0
+}
+NCSTUB
+
+# Run one extracted entrypoint against the stub. State survives the call so
+# assertions can read $NC_WORK/state afterwards. Tunables: NC_TRIES (poll
+# budget, default 8); intervals are zeroed and sleep is shimmed, so the loop
+# never burns wall-clock time.
+run_nc_case() {
+  local installed_after="$1" hook_rc="$2" entry="$3"
+  local sd="$NC_WORK/state"
+  rm -rf "$sd"; mkdir -p "$sd"
+  printf '%s' "$installed_after" > "$sd/installed_after"
+  printf '%s' "$hook_rc" > "$sd/hook_rc"
+  NC_STUB_STATE="$sd" \
+  NEXTCLOUD_OCC_READY_TRIES="${NC_TRIES:-8}" \
+  NEXTCLOUD_OCC_READY_INTERVAL=0 \
+  COMPOSE_FILE=/dev/null \
+  COMPOSE_ENV_FILE=/dev/null \
+  LOG_FILE="$sd/setup.log" \
+  bash -c "
+    set -euo pipefail
+    . '$NC_WORK/stub.sh'
+    . '$NC_WORK/funcs.sh'
+    $entry
+  "
+}
+
+# (B1) Installed on the first probe → wait succeeds immediately.
+if run_nc_case 1 0 wait_for_nextcloud_installed >/dev/null 2>&1; then
+  pass "wait_for_nextcloud_installed succeeds when occ reports installed"
+else
+  fail "wait_for_nextcloud_installed failed for an immediately-installed Nextcloud"
+fi
+
+# (B2) Installed only on the 3rd probe → bounded retry keeps polling (the
+# first-boot install-in-progress window), then succeeds.
+if run_nc_case 3 0 wait_for_nextcloud_installed >/dev/null 2>&1 \
+   && [ "$(cat "$NC_WORK/state/occ_calls" 2>/dev/null || echo 0)" = "3" ]; then
+  pass "wait_for_nextcloud_installed retries past 'not installed yet' and succeeds (bounded poll)"
+else
+  fail "wait_for_nextcloud_installed did not poll through an install-in-progress window"
+fi
+
+# (B3) Never installed → gives up non-zero within the budget (no hang).
+if NC_TRIES=4 run_nc_case 9999 0 wait_for_nextcloud_installed >/dev/null 2>&1; then
+  fail "wait_for_nextcloud_installed returned success for a never-installed Nextcloud"
+else
+  pass "wait_for_nextcloud_installed gives up cleanly (non-zero) when installed never arrives"
+fi
+
+# (B4) Happy path: installed + hook exit 0 → runner succeeds and execs the
+# mounted hook exactly once, as uid 33, in the nextcloud service.
+if run_nc_case 1 0 run_nextcloud_post_install_hook >/dev/null 2>&1; then
+  pass "run_nextcloud_post_install_hook returns 0 on a clean reconcile"
+else
+  fail "run_nextcloud_post_install_hook failed on the happy path"
+fi
+NC_HOOK_CALLS="$(cat "$NC_WORK/state/hook_calls" 2>/dev/null || echo 0)"
+NC_HOOK_ARGV="$(cat "$NC_WORK/state/hook_argv" 2>/dev/null || echo '')"
+if [ "$NC_HOOK_CALLS" = "1" ]; then
+  pass "hook exec'd exactly once per bring-up"
+else
+  fail "hook exec'd ${NC_HOOK_CALLS} times (expected exactly 1)"
+fi
+if printf '%s' "$NC_HOOK_ARGV" | grep -qF -- "-u 33" \
+   && printf '%s' "$NC_HOOK_ARGV" | grep -qF "nextcloud bash $NC_HOOK_PATH"; then
+  pass "hook exec targets the nextcloud service as uid 33 at the mounted path"
+else
+  fail "hook exec argv wrong (got: '${NC_HOOK_ARGV}')"
+fi
+
+# (B5) Hook fails (exit 7) → NON-FATAL to setup (runner still exits 0) but
+# LOUD: the exit code is surfaced on stderr with the manual recovery command.
+NC_ERR="$NC_WORK/hook-fail.stderr"
+if run_nc_case 1 7 run_nextcloud_post_install_hook >/dev/null 2>"$NC_ERR"; then
+  pass "hook failure is non-fatal to setup (runner exits 0)"
+else
+  fail "hook failure aborted the runner — must be non-fatal to setup"
+fi
+if grep -q 'exit 7' "$NC_ERR"; then
+  pass "hook failure surfaces the exit code loudly (exit 7 on stderr)"
+else
+  fail "hook failure did not surface the exit code (stderr: $(head -3 "$NC_ERR" 2>/dev/null))"
+fi
+
+# (B6) Nextcloud never installed → the hook is NOT exec'd (no blind fire),
+# the runner stays non-fatal, and the skip is loud (WARP-990 on stderr).
+NC_ERR2="$NC_WORK/never-installed.stderr"
+if NC_TRIES=3 run_nc_case 9999 0 run_nextcloud_post_install_hook >/dev/null 2>"$NC_ERR2"; then
+  pass "never-installed Nextcloud keeps the runner non-fatal (exits 0)"
+else
+  fail "never-installed Nextcloud aborted the runner — must be non-fatal to setup"
+fi
+if [ ! -f "$NC_WORK/state/hook_calls" ]; then
+  pass "hook is not exec'd when Nextcloud never reports installed (no blind fire)"
+else
+  fail "hook was exec'd against a not-installed Nextcloud"
+fi
+if grep -q 'WARP-990' "$NC_ERR2"; then
+  pass "skipped reconcile is loud (WARP-990 called out on stderr)"
+else
+  fail "skipped reconcile is silent — must be loud on stderr"
+fi
+
+# =============================================================================
 # Results
 # =============================================================================
 echo ""

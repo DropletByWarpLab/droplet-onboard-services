@@ -17,7 +17,18 @@
 #   --reinstall      After wiping, automatically run setup.sh to re-provision
 #   --purge-images   Also remove built Docker images + dangling images/networks
 #   --no-backup      Skip the pre-reset safety backup (WARP-570)
+#   --decommission   Fully DEREGISTER the device at HQ (delete it from the fleet
+#                    registry). DEFAULT (without this flag): RELEASE only — the
+#                    device stays registered/trusted and self-heals (WARP-980).
 #   -h, --help       Show this help message
+#
+# WARP-980 (AMENDS ADR-023 reset behavior — reset ≠ deregister): a factory-reset
+# now RELEASES the box's HQ name + revokes its cert but KEEPS the device
+# REGISTERED and trusted (its durable TPM key stays authoritative), so the box
+# self-heals: after re-provisioning, renaming in setup re-claims a name via
+# device-auth proof-of-possession with NO token. Pass --decommission to instead
+# fully deregister (delete the device from the fleet registry) — a permanent
+# retirement, after which the box needs a fresh first-factory enroll token.
 #
 # Every reset reclaims the Docker build cache (the largest rebuildable disk
 # consumer; `down --rmi all` leaves it behind) so the box returns to a clean
@@ -40,6 +51,10 @@ REINSTALL=false
 PURGE_IMAGES=false
 FORCE_REMOVE=false
 NO_BACKUP=false
+# WARP-980 — default reset RELEASES the HQ name (device stays registered +
+# self-heals). --decommission does the full ADR-023 deregister (deletes the
+# device from the fleet registry).
+DECOMMISSION=false
 
 usage() {
   cat << 'USAGE'
@@ -54,6 +69,9 @@ Options:
   --purge-images   Also remove built Docker images + dangling images/networks
   --force          Restart Docker if volumes cannot be removed (stuck references)
   --no-backup      Skip the pre-reset full-device safety backup (WARP-570)
+  --decommission   Fully DEREGISTER the device at HQ (delete it from the fleet
+                   registry). DEFAULT: RELEASE only — the device stays
+                   registered/trusted and self-heals (WARP-980).
   -h, --help       Show this help message
 
 What gets deleted:
@@ -82,6 +100,7 @@ while [ $# -gt 0 ]; do
     --purge-images)   PURGE_IMAGES=true; shift ;;
     --force)          FORCE_REMOVE=true; shift ;;
     --no-backup)      NO_BACKUP=true; shift ;;
+    --decommission)   DECOMMISSION=true; shift ;;
     -h|--help)        usage ;;
     *)                echo "Unknown option: $1"; usage ;;
   esac
@@ -178,12 +197,17 @@ else
 fi
 
 # =============================================================================
-# Phase 0b: Deregister the split-horizon FQDN + HQ registration (ADR-023 C3)
+# Phase 0b: Release the split-horizon FQDN + HQ name (ADR-023 C3 / WARP-980)
 # =============================================================================
 # MUST run BEFORE Phase 1 stops the stack (the routing service has to be up to
 # accept the DELETE) AND before Phase 3 wipes .env (we read DROPLET_PUBLIC_FQDN
 # + DROPLET_DEVICE_ID from it). Every step is BEST-EFFORT and non-fatal: a reset
 # must complete even if HQ or the router is unreachable.
+#
+# WARP-980 (AMENDS ADR-023 reset behavior — reset ≠ deregister): the DEFAULT HQ
+# step below is now a RELEASE (frees the name, keeps the device registered so it
+# self-heals). --decommission switches it to the full deregister (deletes the
+# device from the fleet registry). The split-horizon DNS legs are unchanged.
 
 _DEREGISTER_FQDN=""
 _DEREGISTER_DEVICE_ID=""
@@ -196,9 +220,14 @@ fi
 # Gate on the FQDN *or* the device id: a zero-touch box (ADR-023 PR-1) issues a
 # cert + learns its FQDN lazily, so DROPLET_PUBLIC_FQDN can still be empty while
 # the box is already REGISTERED at HQ under DROPLET_DEVICE_ID. Gating on the FQDN
-# alone (the old behaviour) skipped HQ deregistration on exactly those boxes.
+# alone (the old behaviour) skipped the HQ step on exactly those boxes.
 if [ -n "$_DEREGISTER_FQDN" ] || [ -n "$_DEREGISTER_DEVICE_ID" ]; then
-  log_step 0 4 "Deregistering public-FQDN DNS + HQ registration (${_DEREGISTER_FQDN:-${_DEREGISTER_DEVICE_ID}})"
+  if [ "$DECOMMISSION" = "true" ]; then
+    _hq_step_label="Deregistering public-FQDN DNS + deleting HQ registration"
+  else
+    _hq_step_label="Releasing public-FQDN DNS + HQ name (device stays registered)"
+  fi
+  log_step 0 4 "${_hq_step_label} (${_DEREGISTER_FQDN:-${_DEREGISTER_DEVICE_ID}})"
 
   # The split-horizon DNS legs (router + host dnsmasq) are FQDN-keyed, so only
   # run them when we actually have a learned FQDN. The HQ deregistration below
@@ -236,24 +265,36 @@ if [ -n "$_DEREGISTER_FQDN" ] || [ -n "$_DEREGISTER_DEVICE_ID" ]; then
     fi
   fi
 
-  # 3. Signed HQ deregistration (ADR-023 PR-3). The box CAN prove possession of
-  #    its device identity: the orchestrator signs a FRESH HQ challenge with the
-  #    device-identity sidecar (the SAME PoP the order flow uses) and DELETEs the
-  #    HQ registration with the required body {device_id, nonce, signature,
-  #    sig_alg, key_fingerprint}. The deployed Worker REQUIRES that body — the old
-  #    bodyless curl 422'd, so HQ never unbound the device. We run this HERE, in
-  #    Phase 0b, *while the stack is still UP* (Phase 1 `down -v` comes later) so
-  #    the orchestrator can reach the sidecar. The CLI always exits 0 and no-ops
-  #    when HQ_ISSUANCE_URL is unset; this whole step is best-effort + NON-FATAL
-  #    (`|| true`) — a reset must complete even if HQ or the sidecar is down (HQ
-  #    also reaps stale registrations server-side).
+  # 3. Signed HQ release OR deregistration (WARP-980, AMENDS ADR-023 PR-3). The
+  #    box CAN prove possession of its device identity: the orchestrator signs a
+  #    FRESH HQ challenge with the device-identity sidecar (the SAME PoP the order
+  #    flow uses) and POSTs the required body {nonce, signature, sig_alg,
+  #    key_fingerprint} (device_id in the query).
+  #
+  #    DEFAULT (release, WARP-980): `tls-release` → POST /api/issuance/release.
+  #    HQ frees the NAME + revokes the cert but KEEPS the device REGISTERED +
+  #    trusted, so the box SELF-HEALS — its durable TPM key stays authoritative
+  #    and the next rename re-claims a name via device-auth PoP with no token.
+  #    A factory-reset is NOT a deregister.
+  #
+  #    --decommission (deregister, ADR-023 PR-3): `tls-deregister` → DELETE
+  #    /api/issuance/registration. HQ DELETES the device from the fleet registry
+  #    (permanent retirement); re-provisioning then needs a fresh first-factory
+  #    enroll token (WARP-983). The deployed Worker REQUIRES the signed body — the
+  #    old bodyless curl 422'd, so HQ never unbound the device.
+  #
+  #    We run this HERE, in Phase 0b, *while the stack is still UP* (Phase 1
+  #    `down -v` comes later) so the orchestrator can reach the sidecar. Both CLIs
+  #    always exit 0 and no-op when HQ_ISSUANCE_URL is unset; this whole step is
+  #    best-effort + NON-FATAL — a reset must complete even if HQ or the sidecar
+  #    is down (HQ also reaps stale names/registrations server-side).
   #    GUARD (ADR-023 PR-3): require BOTH a live HQ url AND a real (non-default)
-  #    device id before we ever sign a DELETE. config.DROPLET_DEVICE_ID has a Zod
+  #    device id before we ever sign the call. config.DROPLET_DEVICE_ID has a Zod
   #    default of "droplet" (apps/orchestrator/src/config.ts), so a partially
   #    provisioned / ID-less box with HQ_ISSUANCE_URL set must NOT be able to send
-  #    a signed DELETE for device_id="droplet" to HQ. `_DEREGISTER_REAL_DEVICE_ID`
-  #    is non-empty only when .env carries a genuine, non-default id. The inner
-  #    `deregisterFromHq` provisioning guard is the suspender to this belt.
+  #    a signed release/DELETE for device_id="droplet" to HQ.
+  #    `_DEREGISTER_REAL_DEVICE_ID` is non-empty only when .env carries a genuine,
+  #    non-default id. The inner service provisioning guard is the suspender.
   _hq_url="${HQ_ISSUANCE_URL:-$(grep -E '^HQ_ISSUANCE_URL=' "$REPO_ROOT/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' || true)}"
   _DEREGISTER_REAL_DEVICE_ID=""
   if [ -n "$_DEREGISTER_DEVICE_ID" ] && [ "$_DEREGISTER_DEVICE_ID" != "droplet" ]; then
@@ -262,6 +303,15 @@ if [ -n "$_DEREGISTER_FQDN" ] || [ -n "$_DEREGISTER_DEVICE_ID" ]; then
   if [ -n "$_hq_url" ] && [ -n "$_DEREGISTER_REAL_DEVICE_ID" ]; then
     _dereg_env_flag_args=()
     [ -f "$REPO_ROOT/.env" ] && _dereg_env_flag_args=(--env-file "$REPO_ROOT/.env")
+    # Select the HQ path: RELEASE by default (self-heal), DEREGISTER only when the
+    # operator asked to fully retire the box with --decommission.
+    if [ "$DECOMMISSION" = "true" ]; then
+      _hq_reset_cmd="tls-deregister"
+      _hq_reset_verb="deregistration (full — device deleted from the fleet registry)"
+    else
+      _hq_reset_cmd="tls-release"
+      _hq_reset_verb="release (name freed, cert revoked, device STAYS registered — self-heals)"
+    fi
     # Bound the whole exec with a shell `timeout` (re-establishing the bound the
     # old `curl --max-time 10` had): the `docker compose exec` has no shell-level
     # deadline, and the underlying gRPC calls to the device-identity sidecar can
@@ -270,10 +320,10 @@ if [ -n "$_DEREGISTER_FQDN" ] || [ -n "$_DEREGISTER_DEVICE_ID" ]; then
     # of 124 (deadline hit) is treated exactly like any other failure: log a warn
     # and PROCEED to the wipe. The whole step stays best-effort + NON-FATAL.
     if timeout 90 $DC -f "$COMPOSE_FILE" "${_dereg_env_flag_args[@]}" exec -T orchestrator \
-         npm run -s tls-deregister >/dev/null 2>&1; then
-      log_success "Sent signed HQ deregistration for ${_DEREGISTER_REAL_DEVICE_ID}"
+         npm run -s "$_hq_reset_cmd" >/dev/null 2>&1; then
+      log_success "Sent signed HQ ${_hq_reset_verb} for ${_DEREGISTER_REAL_DEVICE_ID}"
     else
-      log_warn "Could not run signed HQ deregistration (non-fatal — timed out or HQ/sidecar down; HQ reaps stale registrations)"
+      log_warn "Could not run signed HQ ${_hq_reset_cmd} (non-fatal — timed out or HQ/sidecar down; HQ reaps stale state server-side)"
     fi
   fi
 
@@ -714,6 +764,15 @@ fi
 if [ -f /usr/local/sbin/droplet-set-public-fqdn.sh ]; then
   sudo rm -f /usr/local/sbin/droplet-set-public-fqdn.sh 2>/dev/null || true
   log_success "Removed public-FQDN write-back host executor"
+fi
+
+# Box-name write-back host executor (WARP-988). Remove so a reset truly
+# returns to out-of-box; install-device-bridge.sh reinstalls it on
+# re-provision. It only persists DROPLET_BOX_NAME to .env — the .env itself is
+# wiped elsewhere in this reset, so the next owner names the box afresh.
+if [ -f /usr/local/sbin/droplet-set-box-name.sh ]; then
+  sudo rm -f /usr/local/sbin/droplet-set-box-name.sh 2>/dev/null || true
+  log_success "Removed box-name write-back host executor"
 fi
 
 # Device-bridge state + logs (needs sudo because systemd StateDirectory

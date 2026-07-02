@@ -21,15 +21,17 @@
  * DROPLET_DEV_SEED=1.
  */
 
-import os from "os";
 import { PrismaClient } from "@prisma/client";
+// WARP-992: canonical box name — never os.hostname(), which is the docker
+// container id inside the dev stack and leaks onto the dashboard identity chip.
+import { boxDisplayName } from "../src/lib/box-identity.js";
 
 const prisma = new PrismaClient();
 
 // ─── helpers ─────────────────────────────────────────────────────
 
 async function seedSelfDevice() {
-  const hostname = os.hostname();
+  const hostname = boxDisplayName();
   const deviceId = `droplet-dev-${hostname}`;
   await prisma.device.upsert({
     where: { deviceId },

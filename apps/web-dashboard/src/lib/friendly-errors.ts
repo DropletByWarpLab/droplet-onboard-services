@@ -136,6 +136,15 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "Enter the claim code shown on your device's front panel to finish setup.",
     CLAIM_CODE_INVALID:
       "That claim code doesn't match the one on your device's front panel. Check it and try again.",
+    // WARP-989 — POST /auth/setup died mid-provisioning (typed by the
+    // orchestrator). The plain auth fallback ("check your username and
+    // password") is actively wrong here: the credentials were fine — the box
+    // couldn't finish creating the account. It rolled the half-created
+    // account back, so retrying is both safe and the right next step.
+    SETUP_PROVISIONING_FAILED:
+      "The box couldn't finish creating your account — nothing was saved. Try again in a moment.",
+    SETUP_FAILED:
+      "The box couldn't finish creating your account. Try again in a moment.",
   },
   files: {
     UPLOAD_TOO_LARGE: "That file is too large to upload here.",

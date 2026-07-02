@@ -20,15 +20,23 @@ import type { PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
 import { bridgeAuthToken } from "../lib/bridge-errors.js";
 import { RouterError, routingFetch } from "./openwrt.client.js";
+import { claimBoxName, type ClaimBoxNameResult } from "./tls-issuance.service.js";
+import { createDeviceIdentityClient } from "./device-identity.client.js";
 import type {
   DnsRegistrar,
   HqChallengeResponse,
+  HqClaimNameRequest,
+  HqClaimNameResponse,
   HqDeregisterRequest,
   HqDeregisterResponse,
   HqIssuanceClient,
   HqOrderRequest,
   HqOrderResponse,
   HqPollResponse,
+  HqProvisionRequest,
+  HqProvisionResponse,
+  HqReleaseRequest,
+  HqReleaseResponse,
   TlsCertRow,
   TlsCertStateValue,
   TlsCertStore,
@@ -109,6 +117,44 @@ export function createHqIssuanceClient(): HqIssuanceClient {
         `/api/issuance/registration?${qs}`,
         { method: "DELETE", body: JSON.stringify(req) },
       );
+    },
+    provision(req: HqProvisionRequest) {
+      // WARP-983: box self-enrolls into the HQ registry with the one-time token
+      // + a TPM PoP over it. Same hqFetch error handling as the other calls — a
+      // non-2xx throws `HQ /api/issuance/provision returned <status>: <body>`,
+      // which the service treats as a fail-safe (keep the bootstrap cert, never
+      // crash). HQ returns { device_id, status: "registered", idempotent }.
+      return hqFetch<HqProvisionResponse>("/api/issuance/provision", {
+        method: "POST",
+        body: JSON.stringify(req),
+      });
+    },
+    claimName(req: HqClaimNameRequest) {
+      // WARP-980: the owner renaming the box RE-CLAIMS a name via device-auth
+      // PoP (no token). The RAW name rides in the body (HQ slugs it); the four
+      // PoP fields authenticate the claim over a fresh nonce. Same hqFetch error
+      // handling — a non-2xx throws `HQ /api/issuance/claim-name returned
+      // <status>: <body>`, which claimBoxName classifies (409 taken +
+      // suggestions, 403 not-registered, 422 invalid, 401 retryable). HQ returns
+      // { device_id, name(slug), fqdn, status: "claimed"|"owned" }.
+      return hqFetch<HqClaimNameResponse>("/api/issuance/claim-name", {
+        method: "POST",
+        body: JSON.stringify(req),
+      });
+    },
+    release(deviceId: string, req: HqReleaseRequest) {
+      // WARP-980: factory-reset's DEFAULT path — frees the NAME + revokes the
+      // cert but KEEPS the device registered/trusted (self-heals). device_id
+      // rides in the QUERY string (read by the router); the body is the PoP-only
+      // proof and MUST NOT carry device_id. Same hqFetch error handling — a
+      // non-2xx throws `HQ /api/issuance/release returned <status>: <body>`,
+      // which releaseFromHq treats as non-fatal (a reset must complete). HQ
+      // returns { device_id, status: "released" }.
+      const qs = new URLSearchParams({ device_id: deviceId }).toString();
+      return hqFetch<HqReleaseResponse>(`/api/issuance/release?${qs}`, {
+        method: "POST",
+        body: JSON.stringify(req),
+      });
     },
   };
 }
@@ -342,6 +388,31 @@ export function createBridgeBoxNamePersister(): (name: string) => Promise<void> 
     } finally {
       clearTimeout(timer);
     }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// WARP-980 — device-auth box-name claimer (rename → authoritative name claim)
+// ---------------------------------------------------------------------------
+
+/**
+ * Compose the production `claimBoxName` bound to this box's identity: the real HQ
+ * HTTP client + the device-identity gRPC signer + `config.DROPLET_DEVICE_ID`. The
+ * rename endpoint calls this AFTER persisting the chosen name so HQ makes the name
+ * AUTHORITATIVE via device-auth PoP (no token). Injectable into the setup router
+ * so route tests pass a fake (no HQ / device-identity sidecar touched).
+ *
+ * `claimBoxName` is itself fail-safe (never throws), so this is a thin binder — no
+ * extra error handling needed here.
+ */
+export function createBoxNameClaimer(): (raw: string) => Promise<ClaimBoxNameResult> {
+  return function claim(raw: string): Promise<ClaimBoxNameResult> {
+    return claimBoxName(raw, {
+      deviceId: config.DROPLET_DEVICE_ID,
+      hq: createHqIssuanceClient(),
+      identity: createDeviceIdentityClient(),
+      logger,
+    });
   };
 }
 

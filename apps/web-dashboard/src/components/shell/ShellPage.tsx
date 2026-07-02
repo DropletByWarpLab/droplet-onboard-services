@@ -20,6 +20,7 @@ import type { ReactNode } from "react";
 import useSWR from "swr";
 import { fetchSystemHealth, type SystemHealth } from "@/lib/api";
 import { useDevice } from "@/lib/hooks/useDevice";
+import { boxDisplayHost } from "@/lib/box-identity";
 import { resolveHealthCopy } from "@/app/health-copy";
 import { AmbientLayer } from "@/components/home/AmbientLayer";
 import { Phead } from "./primitives";
@@ -38,7 +39,9 @@ function ShellStatusChip() {
   });
   const status = data?.status ?? "unknown";
   const copy = resolveHealthCopy(status);
-  const host = device?.hostname || "droplet";
+  // WARP-992: canonical display identity — masks a leaked container-id
+  // hostname (stale Device row) and covers the not-yet-loaded state.
+  const host = boxDisplayHost(device?.hostname);
   return (
     <span className={"pt-chip is-" + status}>
       <span className="dot" />

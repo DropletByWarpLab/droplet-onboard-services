@@ -1,0 +1,5 @@
+# WARP-537: golden-fixture bytes are SIGNATURE-COVERED — a cosign
+# signature is over the exact bytes, so line-ending normalization
+# (core.autocrlf on Windows checkouts) silently invalidates every .sig
+# in this directory. Treat everything here as byte-exact.
+* -text

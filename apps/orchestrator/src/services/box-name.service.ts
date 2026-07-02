@@ -27,6 +27,11 @@ import {
   boxNameToFqdn,
   type BoxNameInvalidReason,
 } from "@droplet/shared-types";
+import {
+  CLAIM_RESULT_CLAIMED,
+  CLAIM_RESULT_NAME_TAKEN,
+  type ClaimBoxNameResult,
+} from "./tls-issuance.service.js";
 
 /** The `.env` key the chosen box name is persisted under (host `.env`,
  *  written back via the device-bridge — mirrors DROPLET_PUBLIC_FQDN). */
@@ -120,4 +125,86 @@ export async function persistBoxName(
   }
   await persist(v.slug);
   return { slug: v.slug, fqdn: boxNameToFqdn(v.slug) };
+}
+
+/**
+ * WARP-980 — drive a name CLAIM against HQ via device-auth PoP. Given the RAW
+ * owner-entered name, this is `tls-issuance.claimBoxName` (bound with the box's
+ * device-id + HQ client + device-identity signer). Injected so the service
+ * unit-tests with a fake; in production the route composes the real one.
+ */
+export type BoxNameClaimer = (raw: string) => Promise<ClaimBoxNameResult>;
+
+export interface SetBoxNameDeps {
+  persist: BoxNamePersister;
+  claim: BoxNameClaimer;
+}
+
+export interface SetBoxNameResult {
+  slug: string;
+  fqdn: string;
+  /**
+   * Whether the name is AUTHORITATIVE — HQ device-auth-confirmed it belongs to
+   * this box (claimed/owned) OR authoritatively rejected it as taken. FALSE when
+   * we could only fall back (device not registered yet / a transient failure);
+   * the wizard uses this to be honest about whether the address is truly locked.
+   */
+  authoritative: boolean;
+  /** TRUE when HQ said the name is taken (or the device holds a different one).
+   *  The wizard shows the conflict + any `suggestions`. */
+  taken: boolean;
+  /** Alternate names HQ offered on a taken name (empty otherwise). */
+  suggestions: string[];
+  /** The raw claim result, for callers that want the exact outcome. */
+  claim: ClaimBoxNameResult;
+}
+
+/**
+ * WARP-980 — the authoritative "set the box name" flow the rename endpoint runs:
+ *
+ *   1. Validate + PERSIST the chosen name (DROPLET_BOX_NAME) — same as
+ *      `persistBoxName`. An invalid name throws `BoxNameInvalidError` BEFORE any
+ *      write or claim (never persist/claim a bad name).
+ *   2. Drive the device-auth CLAIM (`droplet-claim:v1` PoP) so HQ makes the name
+ *      AUTHORITATIVE. The subsequent issuance path then issues UNDER the claimed
+ *      name (it already sends `requested_name`; the claim makes HQ honor it).
+ *
+ * The claim is NON-FATAL to persistence — `claimBoxName` never throws, so a
+ * device-not-registered / transient failure still persists the name locally and
+ * simply reports `authoritative:false` (issuance falls back to opaque/bootstrap
+ * and re-claims on the next tick). A 409 name-taken is surfaced as `taken:true`
+ * with `suggestions` so the wizard shows the real availability.
+ *
+ * The persist runs first so the name is durable even if HQ is briefly
+ * unreachable; the claim result then refines what the wizard is told.
+ */
+export async function setBoxName(
+  raw: string,
+  deps: SetBoxNameDeps,
+): Promise<SetBoxNameResult> {
+  const v = validateBoxName(raw);
+  if (!v.ok) {
+    throw new BoxNameInvalidError(v.reason ?? "empty", v.slug);
+  }
+  // 1. Persist the validated slug (best-effort host .env write-back).
+  await deps.persist(v.slug);
+
+  // 2. Device-auth claim with the RAW owner-entered name (HQ slugs it). Never
+  //    throws — branch on the typed outcome.
+  const claim = await deps.claim(raw);
+  const taken = claim.outcome === CLAIM_RESULT_NAME_TAKEN;
+  return {
+    // Prefer HQ's canonical slug/fqdn when it confirmed the claim; otherwise
+    // fall back to the locally-derived slug so the wizard can still show the
+    // chosen name (issuance will re-claim it later).
+    slug: claim.outcome === CLAIM_RESULT_CLAIMED && claim.slug ? claim.slug : v.slug,
+    fqdn:
+      claim.outcome === CLAIM_RESULT_CLAIMED && claim.fqdn
+        ? claim.fqdn
+        : boxNameToFqdn(v.slug),
+    authoritative: claim.authoritative,
+    taken,
+    suggestions: claim.suggestions ?? [],
+    claim,
+  };
 }

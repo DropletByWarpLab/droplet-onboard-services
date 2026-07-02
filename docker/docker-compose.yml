@@ -98,6 +98,18 @@ services:
     environment:
       - PORT=3001
       - NODE_ENV=production
+    # WARP-535 (OTA foundations): liveness probe so the update agent's
+    # future health-gated swap can watch this container. `node` is the
+    # only runtime in the image (no wget/curl) — same rationale as the
+    # orchestrator's check below. /healthz is the dashboard's OWN probe;
+    # /health is the human status page and /api/* is the orchestrator's
+    # surface behind nginx.
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:3001/healthz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))\""]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
     restart: always
     <<: *default-logging
     mem_limit: ${WEB_DASHBOARD_MEM_LIMIT:-384m}

@@ -28,6 +28,12 @@ vi.mock("../services/jwt.service.js", () => ({
 }));
 
 import { createSetupRouter } from "./setup.js";
+import {
+  CLAIM_RESULT_CLAIMED,
+  CLAIM_RESULT_NAME_TAKEN,
+  CLAIM_RESULT_NOT_REGISTERED,
+  type ClaimBoxNameResult,
+} from "../services/tls-issuance.service.js";
 
 // ── In-memory store: applianceSetup singleton (drives the auth gate) ──
 function createPrismaMock() {
@@ -64,16 +70,43 @@ function createPrismaMock() {
   };
 }
 
-function buildApp(prisma: ReturnType<typeof createPrismaMock>) {
+/** A fake device-auth claimer. Defaults to a happy `CLAIMED` (authoritative)
+ *  result; tests override to exercise the taken / fallback branches. The claimer
+ *  receives the RAW owner-entered name (HQ slugs it). */
+function makeClaimResult(over: Partial<ClaimBoxNameResult> = {}): ClaimBoxNameResult {
+  return {
+    outcome: CLAIM_RESULT_CLAIMED,
+    authoritative: true,
+    slug: "studio",
+    fqdn: "studio.droplet-us.com",
+    ...over,
+  };
+}
+
+function buildApp(
+  prisma: ReturnType<typeof createPrismaMock>,
+  claimResult: ClaimBoxNameResult = makeClaimResult(),
+) {
   const persisted: string[] = [];
   const persistBoxNameToHost = vi.fn(async (name: string) => {
     persisted.push(name);
   });
+  const claimed: string[] = [];
+  const claimBoxName = vi.fn(async (raw: string) => {
+    claimed.push(raw);
+    return claimResult;
+  });
   const app = express();
   app.use(cookieParser());
   app.use(express.json());
-  app.use("/api", createSetupRouter(prisma as never, { persistBoxNameToHost }));
-  return { app, persisted, persistBoxNameToHost };
+  app.use(
+    "/api",
+    createSetupRouter(prisma as never, {
+      persistBoxNameToHost,
+      claimBoxName,
+    }),
+  );
+  return { app, persisted, persistBoxNameToHost, claimed, claimBoxName };
 }
 
 describe("GET /api/setup/box-name/check (WARP-979)", () => {
@@ -161,8 +194,9 @@ describe("POST /api/setup/box-name (WARP-979)", () => {
     prisma = createPrismaMock();
   });
 
-  it("validates + persists a valid name (200) and writes DROPLET_BOX_NAME", async () => {
-    const { app, persisted, persistBoxNameToHost } = buildApp(prisma);
+  it("validates + persists + device-auth CLAIMS a valid name (200 authoritative)", async () => {
+    const { app, persisted, persistBoxNameToHost, claimed, claimBoxName } =
+      buildApp(prisma);
     const res = await request(app)
       .post("/api/setup/box-name")
       .send({ name: "Studio" });
@@ -171,9 +205,62 @@ describe("POST /api/setup/box-name (WARP-979)", () => {
     expect(res.body.ok).toBe(true);
     expect(res.body.slug).toBe("studio");
     expect(res.body.fqdn).toBe("studio.droplet-us.com");
+    // WARP-980 — the wizard now gets a REAL authoritative answer.
+    expect(res.body.authoritative).toBe(true);
+    expect(res.body.taken).toBe(false);
     // The chosen name was persisted (host .env write-back), normalized.
     expect(persistBoxNameToHost).toHaveBeenCalledTimes(1);
     expect(persisted).toEqual(["studio"]);
+    // The claim was driven with the RAW owner-entered name (HQ slugs it).
+    expect(claimBoxName).toHaveBeenCalledTimes(1);
+    expect(claimed).toEqual(["Studio"]);
+  });
+
+  it("409s with BOX_NAME_TAKEN + suggestions when HQ says the name is taken", async () => {
+    const { app, persistBoxNameToHost } = buildApp(
+      prisma,
+      makeClaimResult({
+        outcome: CLAIM_RESULT_NAME_TAKEN,
+        authoritative: true,
+        suggestions: ["studio-2", "studio-hq"],
+        slug: undefined,
+        fqdn: undefined,
+      }),
+    );
+    const res = await request(app)
+      .post("/api/setup/box-name")
+      .send({ name: "studio" });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("BOX_NAME_TAKEN");
+    expect(res.body.taken).toBe(true);
+    expect(res.body.suggestions).toEqual(["studio-2", "studio-hq"]);
+    // The name was still persisted locally (best-effort) before the claim.
+    expect(persistBoxNameToHost).toHaveBeenCalledTimes(1);
+  });
+
+  it("200 authoritative:false when the device is not registered yet (graceful fallback)", async () => {
+    const { app } = buildApp(
+      prisma,
+      makeClaimResult({
+        outcome: CLAIM_RESULT_NOT_REGISTERED,
+        authoritative: false,
+        slug: undefined,
+        fqdn: undefined,
+      }),
+    );
+    const res = await request(app)
+      .post("/api/setup/box-name")
+      .send({ name: "studio" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    // Persisted + will issue under opaque/bootstrap; wizard is told it's not
+    // authoritative yet (issuance re-claims on the next tick).
+    expect(res.body.slug).toBe("studio");
+    expect(res.body.fqdn).toBe("studio.droplet-us.com");
+    expect(res.body.authoritative).toBe(false);
+    expect(res.body.taken).toBe(false);
   });
 
   it("400s a reserved name with BOX_NAME_INVALID (no persist)", async () => {
@@ -240,7 +327,10 @@ describe("POST /api/setup/box-name (WARP-979)", () => {
       setupStep: "done",
       userTourCompleted: true,
     });
-    const { app, persisted } = buildApp(prisma);
+    const { app, persisted } = buildApp(
+      prisma,
+      makeClaimResult({ slug: "renamed", fqdn: "renamed.droplet-us.com" }),
+    );
     const res = await request(app)
       .post("/api/setup/box-name")
       .set("Cookie", "droplet_session=valid-session")
@@ -248,6 +338,7 @@ describe("POST /api/setup/box-name (WARP-979)", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.slug).toBe("renamed");
+    expect(res.body.authoritative).toBe(true);
     expect(persisted).toEqual(["renamed"]);
   });
 });

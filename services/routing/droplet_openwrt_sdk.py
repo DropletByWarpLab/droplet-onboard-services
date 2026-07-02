@@ -1165,8 +1165,20 @@ class DHCPApi:
         `config domain` sections exist in the UCI schema but are silently ignored
         by the init script, so entries written there never reach the live
         dnsmasq config file and no DNS answers are served.
+
+        A lookup that finds nothing is ABSENCE, not a fault (WARP-987):
+        depending on the rpcd build / box state the type-filtered get comes
+        back as `{"values": {}}` or as a NOT_FOUND/NO_DATA error (same
+        convention `VPNApi.interface_exists` handles for missing sections).
+        Both mean "no entries" — return [] so the first-ever add and the
+        list endpoint never 500 on an empty box.
         """
-        result = self._r.uci.get("dhcp", type="hostrecord")
+        try:
+            result = self._r.uci.get("dhcp", type="hostrecord")
+        except UbusError as exc:
+            if _ubus_object_absent(exc):
+                return []
+            raise
         values = result.get("values", {}) if isinstance(result, dict) else {}
         entries = []
         for section_name, section in values.items():
@@ -1186,13 +1198,17 @@ class DHCPApi:
         result is exactly one section per hostname. Returns the resulting
         entry with an `action` field of `created` or `updated`.
 
-        IMPORTANT: does NOT commit. The caller must call `uci.apply` after,
-        which both commits to disk AND triggers /sbin/reload_config (which
-        is what regenerates /var/etc/dnsmasq.conf.* and signals dnsmasq).
-        Calling `uci.commit` here and `uci.apply` after makes apply a no-op
-        (NO_DATA) because apply's reload-trigger logic only runs when there
-        are *pending* (uncommitted) changes — pre-committing breaks the
-        reload path without any compensating benefit.
+        IMPORTANT: does NOT commit. The caller must call `uci.apply` after
+        (commits to disk) and then `DHCPApi.reload()` — see the long comment
+        on `_commit_and_reload_dhcp` in services/routing/main.py for why the
+        explicit dnsmasq restart is required for the record to be SERVED.
+        Two apply gotchas (WARP-987, verified against rpcd source):
+          * apply only picks up *pending* (uncommitted) changes — a
+            `uci.commit` here would leave apply nothing to do (NO_DATA);
+          * a re-post of values already committed stages NOTHING, because
+            rpcd's `uci set` skips unchanged options server-side — so apply
+            reports NO_DATA then too. Callers must treat that as a benign
+            "nothing to commit", never a fault.
         """
         existing = [e for e in self.list_hostrecords()
                     if e["hostname"].lower() == hostname.lower()]
@@ -1220,7 +1236,17 @@ class DHCPApi:
         return removed
 
     def reload(self):
-        """Restart dnsmasq to apply DHCP/DNS changes."""
+        """Restart dnsmasq so committed UCI DHCP/DNS changes are actually SERVED.
+
+        Dispatches `/etc/init.d/dnsmasq restart` via `file.exec`. The
+        droplet-ai rpcd ACL pins exactly this command line (rpcd checks the
+        full path+args string against the `file` scope, so this is NOT a
+        blanket exec grant) — see openwrt/files/usr/share/rpcd/acl.d/
+        droplet-ai.json. Required because the procd `config.change` trigger
+        that `uci.apply` emits does not regenerate /var/etc/dnsmasq.conf.*
+        on the appliance container (WARP-987): committed host-records stayed
+        unserved until the init script reran.
+        """
         self._r.exec_service("dnsmasq", "restart")
 
 

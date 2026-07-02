@@ -1,0 +1,95 @@
+{
+  "$comment": "WARP-536 — canonical OTA release service list. Single source of truth for which images publish-release.yml builds/pushes and which entries land in release.json (design schema v1). Contexts/dockerfiles mirror docker/docker-compose.yml build blocks (context is repo-root-relative). healthcheck is what the device-side update agent will probe after a swap: `http` entries are the service's own auth-exempt liveness endpoint on its container-internal port; `none` means the service has no HTTP surface (device-identity-svc is a Unix-socket gRPC sidecar; the openwrt AP container is probed at the network layer, not HTTP). rag-eval is deliberately absent — it is the RAG evaluation harness, not an appliance service. OpenWrt FIRMWARE A/B updates are phase 2 (WARP-534 epic exclusion); the openwrt entry here is the in-container AP image only.",
+  "services": [
+    {
+      "name": "orchestrator",
+      "context": ".",
+      "dockerfile": "apps/orchestrator/Dockerfile",
+      "healthcheck": { "type": "http", "port": 3000, "path": "/api/orchestrator/health" }
+    },
+    {
+      "name": "web-dashboard",
+      "context": ".",
+      "dockerfile": "apps/web-dashboard/Dockerfile",
+      "healthcheck": { "type": "http", "port": 3001, "path": "/healthz" }
+    },
+    {
+      "name": "device-identity-svc",
+      "context": ".",
+      "dockerfile": "services/device-identity-svc/Dockerfile",
+      "healthcheck": { "type": "none" }
+    },
+    {
+      "name": "mcp-server",
+      "context": ".",
+      "dockerfile": "services/mcp-server/Dockerfile",
+      "healthcheck": { "type": "http", "port": 9090, "path": "/health" }
+    },
+    {
+      "name": "ai-gateway",
+      "context": ".",
+      "dockerfile": "services/ai-gateway/Dockerfile",
+      "healthcheck": { "type": "http", "port": 8000, "path": "/ai/health" }
+    },
+    {
+      "name": "file-indexer",
+      "context": ".",
+      "dockerfile": "services/file-indexer/Dockerfile",
+      "healthcheck": { "type": "http", "port": 8090, "path": "/health" }
+    },
+    {
+      "name": "routing",
+      "context": ".",
+      "dockerfile": "services/routing/Dockerfile",
+      "healthcheck": { "type": "http", "port": 8080, "path": "/health" }
+    },
+    {
+      "name": "matter-controller",
+      "context": ".",
+      "dockerfile": "services/matter-controller/Dockerfile",
+      "healthcheck": { "type": "http", "port": 8083, "path": "/health" }
+    },
+    {
+      "name": "email-indexer",
+      "context": ".",
+      "dockerfile": "services/email-indexer/Dockerfile",
+      "healthcheck": { "type": "http", "port": 8086, "path": "/health" }
+    },
+    {
+      "name": "switch",
+      "context": ".",
+      "dockerfile": "services/switch/Dockerfile",
+      "healthcheck": { "type": "http", "port": 8081, "path": "/health" }
+    },
+    {
+      "name": "camera-discovery",
+      "context": ".",
+      "dockerfile": "services/camera-discovery/Dockerfile",
+      "healthcheck": { "type": "http", "port": 8085, "path": "/health" }
+    },
+    {
+      "name": "voice-io",
+      "context": ".",
+      "dockerfile": "services/voice-io/Dockerfile",
+      "healthcheck": { "type": "http", "port": 8086, "path": "/health" }
+    },
+    {
+      "name": "oled-display",
+      "context": ".",
+      "dockerfile": "services/oled-display/Dockerfile",
+      "healthcheck": { "type": "http", "port": 8082, "path": "/health" }
+    },
+    {
+      "name": "ops-console",
+      "context": ".",
+      "dockerfile": "services/ops-console/Dockerfile",
+      "healthcheck": { "type": "http", "port": 8087, "path": "/healthz" }
+    },
+    {
+      "name": "openwrt",
+      "context": "openwrt",
+      "dockerfile": "singlebox-image/Dockerfile",
+      "healthcheck": { "type": "none" }
+    }
+  ]
+}
