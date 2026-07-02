@@ -968,6 +968,122 @@ describe("runAgent", () => {
     expect(chat.mock.calls[0][0]).toMatchObject({ tool_choice: "auto" });
     expect((chat.mock.calls[0][0] as { tools: unknown[] }).tools).toHaveLength(1);
   });
+
+  // WARP-1012 — a turn that exhausts the iteration budget used to return
+  // an EMPTY assistant message (the customer saw a blank bubble while the
+  // model burned every iteration retrying failing file tools). The loop
+  // must emit an honest plain-language fallback instead.
+  describe("iteration_limit honest fallback (WARP-1012)", () => {
+    /** chat mock that ALWAYS issues the same tool call — never finalizes. */
+    function alwaysToolCallChat(toolName: string) {
+      let n = 0;
+      return vi.fn().mockImplementation(async () => ({
+        ok: true,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: `c${++n}`,
+                    type: "function",
+                    function: { name: toolName, arguments: "{}" },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      }));
+    }
+
+    function depsWith(
+      chat: ReturnType<typeof vi.fn>,
+      callTool: ReturnType<typeof vi.fn>,
+      events: SSEEvent[],
+    ): AgentDeps {
+      return {
+        mcp: {
+          listTools: vi.fn().mockResolvedValue([
+            {
+              name: "search_files",
+              description: "...",
+              inputSchema: { type: "object", properties: {} },
+            },
+          ]),
+          callTool,
+        } as never,
+        aiGateway: { chat } as never,
+        onEvent: (e: SSEEvent) => events.push(e),
+      };
+    }
+
+    it("emits a fallback naming the failing tool when tools kept erroring", async () => {
+      const callTool = vi.fn().mockResolvedValue({
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              ok: false,
+              status: "error",
+              error: { code: "SEARCH_FAILED", message: "nextcloud returned 400" },
+            }),
+          },
+        ],
+      });
+      const events: SSEEvent[] = [];
+      const result = await runAgent(
+        depsWith(alwaysToolCallChat("search_files"), callTool, events),
+        {
+          model: "ollama/qwen3",
+          messages: [{ role: "user", content: "find my tax file" }],
+          max_iter: 2,
+        },
+      );
+      expect(result.stop_reason).toBe("iteration_limit");
+      // The customer-visible message must NOT be blank, must be honest
+      // about the failure, and must land as a content_delta BEFORE done
+      // (same ordering as the happy path so streaming persistence and
+      // the non-streaming result both carry it).
+      expect(typeof result.message.content).toBe("string");
+      expect((result.message.content as string).length).toBeGreaterThan(0);
+      expect(result.message.content).toContain("search_files");
+      const deltaIdx = events.findIndex((e) => e.type === "content_delta");
+      const doneIdx = events.findIndex((e) => e.type === "done");
+      expect(deltaIdx).toBeGreaterThanOrEqual(0);
+      expect(doneIdx).toBeGreaterThan(deltaIdx);
+      const delta = events[deltaIdx] as Extract<SSEEvent, { type: "content_delta" }>;
+      expect(delta.text).toBe(result.message.content);
+      const done = events[doneIdx] as Extract<SSEEvent, { type: "done" }>;
+      expect(done.stop_reason).toBe("iteration_limit");
+    });
+
+    it("emits a generic step-limit fallback when tools succeeded but budget ran out", async () => {
+      const callTool = vi.fn().mockResolvedValue({
+        isError: false,
+        content: [
+          { type: "text", text: JSON.stringify({ ok: true, data: { items: [] } }) },
+        ],
+      });
+      const events: SSEEvent[] = [];
+      const result = await runAgent(
+        depsWith(alwaysToolCallChat("search_files"), callTool, events),
+        {
+          model: "ollama/qwen3",
+          messages: [{ role: "user", content: "find my tax file" }],
+          max_iter: 2,
+        },
+      );
+      expect(result.stop_reason).toBe("iteration_limit");
+      expect((result.message.content as string).length).toBeGreaterThan(0);
+      // No failures → don't blame the tools by name.
+      expect(result.message.content).not.toContain("search_files");
+      expect(events.some((e) => e.type === "content_delta")).toBe(true);
+    });
+  });
 });
 
 describe("presetForClass (WARP-437)", () => {

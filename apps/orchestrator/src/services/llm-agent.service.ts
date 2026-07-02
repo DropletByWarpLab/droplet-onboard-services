@@ -725,9 +725,46 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
     }
   }
 
+  // WARP-1012 — honest fallback instead of a blank reply. Reaching this
+  // exit means every iteration ended in tool_calls, so no content_delta was
+  // ever emitted (only the model_done path above emits one) and the
+  // persisted assistant message would otherwise be EMPTY — the customer
+  // sees a blank answer (live repro: search_files/list_recent_files kept
+  // failing, the model burned all iterations retrying, stop_reason
+  // "iteration_limit", empty bubble). Tell the customer what happened in
+  // plain language. stop_reason stays "iteration_limit" so operators and
+  // the trace keep the real signal; only the visible content changes.
+  const failedTools = [
+    ...new Set(
+      trace
+        .filter((t) => {
+          const r = t.result as
+            | { status?: unknown; ok?: unknown; error?: unknown }
+            | null
+            | undefined;
+          if (r === null || typeof r !== "object") return false;
+          // Handler envelopes report status:"error" / ok:false; the
+          // dispatch-throw path (ORCH-05) reports a string `error`.
+          // confirmation_required is a UX pause, not a failure.
+          return (
+            r.status === "error" ||
+            r.ok === false ||
+            typeof r.error === "string"
+          );
+        })
+        .map((t) => t.tool),
+    ),
+  ];
+  const fallbackText =
+    failedTools.length > 0
+      ? `I ran into a problem while working on that — the ${failedTools.join(
+          ", ",
+        )} tool${failedTools.length > 1 ? "s" : ""} kept failing, so I couldn't finish your request. Please try again in a moment.`
+      : "I couldn't finish working through that request within my step limit. Please try again, or ask for a smaller piece of it.";
+  emit({ type: "content_delta", text: fallbackText });
   emit({ type: "done", iterations: maxIter, stop_reason: "iteration_limit" });
   return {
-    message: { role: "assistant", content: "" },
+    message: { role: "assistant", content: fallbackText },
     trace,
     iterations: maxIter,
     stop_reason: "iteration_limit",
