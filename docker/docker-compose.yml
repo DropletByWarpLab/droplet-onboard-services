@@ -1626,6 +1626,13 @@ services:
       # mirroring camera-discovery / ai-gateway.
       context: ..
       dockerfile: services/fleet-agent/Dockerfile
+    # RegisterRequest.hostname is captured ONCE into the portal's
+    # Machine.hostname — the operator-facing fleet identifier. config.py
+    # falls back to socket.gethostname() when DROPLET_HOSTNAME is empty,
+    # and inside a container that is Docker's random hex container id;
+    # pin the container hostname so the fallback is a stable, honest
+    # name instead. Mirrors device-identity's DROPLET_DEVICE_ID default.
+    hostname: ${DROPLET_HOSTNAME:-droplet}
     env_file:
       - path: ../.env
         required: false
@@ -1637,6 +1644,7 @@ services:
       - DROPLET_TELEMETRY_GEO_REGION=${DROPLET_TELEMETRY_GEO_REGION:-}
       - DROPLET_FIRMWARE_VERSION=${DROPLET_FIRMWARE_VERSION:-}
       - DROPLET_TIER=${DROPLET_TIER:-home}
+      - DROPLET_HOSTNAME=${DROPLET_HOSTNAME:-}
     volumes:
       # Ingest token + bounded heartbeat spool. Runtime-only, never tracked.
       - fleet-agent-state:/var/lib/droplet/fleet-agent
