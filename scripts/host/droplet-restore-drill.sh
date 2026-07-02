@@ -137,28 +137,57 @@ if ! docker run -d --name "$SANDBOX" \
   drill_fail "sandbox Postgres container failed to start"
 fi
 
+# The postgres entrypoint's FIRST boot runs a temporary init server that
+# listens ONLY on the unix socket (listen_addresses=''), creates POSTGRES_DB
+# mid-phase, stops it, then starts the real server. A unix-socket pg_isready
+# reports ready during that temp phase, and a replay launched in the window
+# dies mid-boot ("database droplet does not exist" / "the database system is
+# shutting down" / connection refused in the restart gap) — false-failing the
+# drill with "backup is NOT restorable". The temp init server never binds
+# TCP, so -h 127.0.0.1 can only succeed once the REAL server is up.
+# Belt-and-braces: require 2 consecutive successful polls.
 ready=0
+consecutive=0
 for _ in $(seq 1 60); do
-  if docker exec "$SANDBOX" pg_isready -U droplet >/dev/null 2>&1; then
-    ready=1
-    break
+  if docker exec "$SANDBOX" pg_isready -h 127.0.0.1 -U droplet >/dev/null 2>&1; then
+    consecutive=$((consecutive + 1))
+    if [ "$consecutive" -ge 2 ]; then
+      ready=1
+      break
+    fi
+  else
+    consecutive=0
   fi
   sleep 1
 done
 [ "$ready" = "1" ] || drill_fail "sandbox Postgres never became ready"
 
 # --- 4. Replay the dump -----------------------------------------------------------
+# All psql below goes over TCP (-h 127.0.0.1) for the same reason as the
+# readiness poll, with PGPASSWORD supplied in case the image's pg_hba does
+# not trust localhost. Replay stderr is captured and printed on failure —
+# discarding it left this drill's readiness race misdiagnosed for a day.
 log_info "Replaying dump into the sandbox (ON_ERROR_STOP=1)..."
-if ! gunzip -c "$DUMP" | docker exec -i "$SANDBOX" \
-     psql -q -U droplet -d droplet -v ON_ERROR_STOP=1 >/dev/null; then
+REPLAY_ERR="$WORK_DIR/replay-stderr.log"
+if ! gunzip -c "$DUMP" | docker exec -i -e PGPASSWORD="$SANDBOX_PW" "$SANDBOX" \
+     psql -q -h 127.0.0.1 -U droplet -d droplet -v ON_ERROR_STOP=1 >/dev/null 2>"$REPLAY_ERR"; then
+  if [ -s "$REPLAY_ERR" ]; then
+    log_error "psql replay stderr (why the replay failed):"
+    cat "$REPLAY_ERR" >&2
+  fi
   drill_fail "dump replay failed — the backup is NOT restorable"
 fi
 
 # --- 5. Smoke test ------------------------------------------------------------------
-TABLES="$(docker exec "$SANDBOX" psql -U droplet -d droplet -tAc \
-  "SELECT count(*) FROM pg_catalog.pg_tables WHERE schemaname='public';" 2>/dev/null | tr -d '[:space:]' || echo '')"
+SMOKE_ERR="$WORK_DIR/smoke-stderr.log"
+TABLES="$(docker exec -e PGPASSWORD="$SANDBOX_PW" "$SANDBOX" psql -h 127.0.0.1 -U droplet -d droplet -tAc \
+  "SELECT count(*) FROM pg_catalog.pg_tables WHERE schemaname='public';" 2>"$SMOKE_ERR" | tr -d '[:space:]' || echo '')"
 if ! printf '%s' "$TABLES" | grep -qE '^[0-9]+$'; then
   TABLES="null"
+  if [ -s "$SMOKE_ERR" ]; then
+    log_error "psql smoke-query stderr:"
+    cat "$SMOKE_ERR" >&2
+  fi
   drill_fail "smoke query failed (could not count public tables)"
 fi
 if [ "$TABLES" -lt 1 ]; then
@@ -168,7 +197,7 @@ fi
 # Key-table row count when present (the orchestrator's Prisma "User" table).
 # Absence is NOT a failure — a pre-onboarding box legitimately has no users
 # table yet; the count is recorded for the operator either way.
-USERS="$(docker exec "$SANDBOX" psql -U droplet -d droplet -tAc \
+USERS="$(docker exec -e PGPASSWORD="$SANDBOX_PW" "$SANDBOX" psql -h 127.0.0.1 -U droplet -d droplet -tAc \
   "SELECT CASE WHEN to_regclass('public.\"User\"') IS NULL THEN -1 ELSE (SELECT count(*) FROM public.\"User\") END;" \
   2>/dev/null | tr -d '[:space:]' || echo '')"
 printf '%s' "$USERS" | grep -qE '^-?[0-9]+$' || USERS="null"

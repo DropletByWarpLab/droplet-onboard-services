@@ -219,6 +219,65 @@ grep -q 'lib/backup.sh' "$SETUP" && pass "setup.sh sources lib/backup.sh" || fai
 grep -q 'install_restic_backup' "$SETUP" && pass "setup.sh calls install_restic_backup" || fail "setup.sh never calls install_restic_backup"
 
 # =============================================================================
+# Drill sandbox-readiness race (WARP-254 fix-forward) — static, no Docker.
+#
+# The postgres docker-entrypoint's FIRST boot runs a temporary init server
+# that listens ONLY on the unix socket (listen_addresses=''), creates
+# POSTGRES_DB mid-phase, stops it, then starts the real server. A unix-socket
+# `docker exec pg_isready` therefore reports ready during that temp phase, and
+# a replay launched in the window dies mid-boot ("database droplet does not
+# exist" / "the database system is shutting down" / connection refused in the
+# restart gap) — false-failing the drill with "backup is NOT restorable".
+# The temp init server never binds TCP, so -h 127.0.0.1 is the gate: these
+# asserts pin the TCP flag on the readiness poll AND on every psql, the
+# 2-consecutive-successes requirement, and the stderr capture that stops the
+# real psql error from being discarded again.
+# =============================================================================
+echo ""
+echo "--- Drill sandbox-readiness race (WARP-254 fix-forward) ---"
+
+if [ -f "$DRILL_SCRIPT" ]; then
+  drill_code="$(grep -vE '^[[:space:]]*#' "$DRILL_SCRIPT")"
+
+  # Readiness poll must be TCP-gated — removing -h 127.0.0.1 reopens the race.
+  printf '%s\n' "$drill_code" | grep -qE 'pg_isready[[:space:]]+-h[[:space:]]+127\.0\.0\.1' \
+    && pass "drill readiness poll is TCP-gated (pg_isready -h 127.0.0.1)" \
+    || fail "drill readiness poll is not TCP-gated (socket pg_isready passes during the temp init server)"
+
+  # ...and no socket-only pg_isready may remain anywhere in the drill.
+  if printf '%s\n' "$drill_code" | grep 'pg_isready' | grep -vqE '\-h[[:space:]]+127\.0\.0\.1'; then
+    fail "drill still has a socket-only pg_isready (passes during the temp init phase)"
+  else
+    pass "no socket-only pg_isready left in the drill"
+  fi
+
+  # Belt-and-braces: readiness requires 2 consecutive successful polls.
+  grep -qE '\[ "\$consecutive" -ge 2 \]' "$DRILL_SCRIPT" \
+    && pass "drill readiness requires 2 consecutive successful polls" \
+    || fail "drill readiness accepts a single successful poll"
+
+  # EVERY drill psql (replay + smoke queries) must go over TCP too.
+  drill_psql_total="$(printf '%s\n' "$drill_code" | grep -cE '(^|[[:space:]])psql ' || true)"
+  drill_psql_tcp="$(printf '%s\n' "$drill_code" | grep -cE '(^|[[:space:]])psql [^|]*-h 127\.0\.0\.1' || true)"
+  if [ "$drill_psql_total" -gt 0 ] && [ "$drill_psql_total" = "$drill_psql_tcp" ]; then
+    pass "every drill psql connects over TCP ($drill_psql_tcp/$drill_psql_total)"
+  else
+    fail "drill psql without -h 127.0.0.1 ($drill_psql_tcp/$drill_psql_total TCP)"
+  fi
+
+  # Replay stderr must be captured and surfaced on failure — the readiness
+  # race was misdiagnosed for a day because psql's error was discarded.
+  grep -qF '2>"$REPLAY_ERR"' "$DRILL_SCRIPT" \
+    && pass "drill captures replay stderr to a file" \
+    || fail "drill discards replay stderr"
+  grep -qF 'cat "$REPLAY_ERR" >&2' "$DRILL_SCRIPT" \
+    && pass "drill prints captured replay stderr on failure" \
+    || fail "drill never surfaces the captured replay stderr"
+else
+  skip "drill script missing — readiness-race checks"
+fi
+
+# =============================================================================
 # Derivation known-answer test — no Docker needed, only bash + openssl.
 # =============================================================================
 echo ""
@@ -482,17 +541,23 @@ else
     # the drill never pulls the (bigger) production pgvector image in CI. On a
     # real box the default (pgvector/pgvector:pg16 — the stack's own db image,
     # already present) applies instead.
+    # Drill output goes to a capture file, NOT /dev/null: when the drill
+    # fails, the psql/replay stderr is the diagnosis — swallowing it left
+    # the WARP-254 readiness race misdiagnosed for a day. Success stays quiet.
     info "running droplet-restore-drill.sh"
+    DRILL_LOG="$WORK_ROOT/drill-output.log"
     if DROPLET_REPO_ROOT="$FAUX_ROOT" \
        DROPLET_BACKUP_TARGET="$REPO_TARGET" \
        DROPLET_BACKUP_STATE_DIR="$STATE_DIR" \
        DROPLET_BACKUP_RUNTIME_DIR="$RUNTIME_DIR" \
        DROPLET_DRILL_PG_IMAGE="${DRILL_PG_IMAGE:-postgres:16-alpine}" \
        DROPLET_DRILL_READ_DATA_SUBSET=100% \
-       bash "$DRILL_SCRIPT" >/dev/null 2>&1; then
+       bash "$DRILL_SCRIPT" >"$DRILL_LOG" 2>&1; then
       pass "droplet-restore-drill.sh exited 0"
     else
       fail "droplet-restore-drill.sh failed"
+      info "drill output (tail) follows:"
+      tail -n 40 "$DRILL_LOG" 2>/dev/null | sed 's/^/      /'
     fi
     STATUS_FILE="$STATE_DIR/restore-drill-status.json"
     if [ -f "$STATUS_FILE" ]; then
@@ -505,14 +570,17 @@ else
 
     # --- Restore drill: failure path (wrong key) ------------------------------
     info "running drill with the WRONG derivation key (must fail loudly)"
+    DRILL_FAIL_LOG="$WORK_ROOT/drill-wrong-key-output.log"
     if DROPLET_REPO_ROOT="$FAUX_ROOT" \
        DEVICE_SECRET_KEY="the-wrong-key" \
        DROPLET_BACKUP_TARGET="$REPO_TARGET" \
        DROPLET_BACKUP_STATE_DIR="$STATE_DIR" \
        DROPLET_BACKUP_RUNTIME_DIR="$RUNTIME_DIR" \
        DROPLET_DRILL_PG_IMAGE="${DRILL_PG_IMAGE:-postgres:16-alpine}" \
-       bash "$DRILL_SCRIPT" >/dev/null 2>&1; then
+       bash "$DRILL_SCRIPT" >"$DRILL_FAIL_LOG" 2>&1; then
       fail "drill with wrong key exited 0 (must fail)"
+      info "drill output (tail) follows:"
+      tail -n 40 "$DRILL_FAIL_LOG" 2>/dev/null | sed 's/^/      /'
     else
       pass "drill with wrong key exited non-zero"
     fi
