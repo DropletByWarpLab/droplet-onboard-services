@@ -64,42 +64,22 @@ RUN npm run -w @droplet/web-dashboard build
 # rides on whatever cryptographic posture they enforce. WARP-229.
 FROM node:20-bookworm-slim
 
-# Install openssl + ca-certificates so an upstream FIPS provider, when
-# layered onto this image (Ubuntu Pro / source-built fips.so), is loadable.
+# Runtime openssl + ca-certificates: the openssl CLI runs the WARP-967
+# fipsinstall + build-time FIPS self-test below against the validated
+# fips.so that now ships in this image, and provides the system
+# MODULESDIR the module installs into.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       openssl ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-# WARP-229: drop the shared FIPS-provider OpenSSL config in place via a
-# heredoc. The web-dashboard's docker-compose build context is the
-# apps/web-dashboard directory only — `docker/openssl-fips.cnf` is out
-# of reach via COPY. Keep this block in lockstep with the canonical
-# `docker/openssl-fips.cnf` (orchestrator and mcp-server COPY that file
-# directly because their build contexts already include the repo root).
-RUN cat > /etc/ssl/openssl-fips.cnf <<'CNF'
-config_diagnostics = 1
-openssl_conf = openssl_init
-
-.include /etc/ssl/fipsmodule.cnf
-
-[openssl_init]
-providers = provider_sect
-alg_section = algorithm_sect
-
-[provider_sect]
-fips = fips_sect
-base = base_sect
-
-[fips_sect]
-activate = 1
-
-[base_sect]
-activate = 1
-
-[algorithm_sect]
-default_properties = fips=yes
-CNF
+# WARP-229/WARP-967: the shared FIPS-provider OpenSSL config, COPY'd
+# from the canonical docker/openssl-fips.cnf. The dashboard builds from
+# the repo-root context (docker-compose.yml `context: ..`, same as the
+# orchestrator + mcp-server), so the WARP-229-era heredoc duplicate of
+# this file — written when the comment here claimed a per-app build
+# context — is gone along with its lockstep-drift risk.
+COPY docker/openssl-fips.cnf /etc/ssl/openssl-fips.cnf
 
 ENV OPENSSL_CONF=/etc/ssl/openssl-fips.cnf
 

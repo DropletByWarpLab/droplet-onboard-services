@@ -14,8 +14,8 @@
 #   The OpenSSL FIPS provider validated under CMVP certificate #4282 (the
 #   certificate this repo standardized on — see docker/openssl-fips.cnf and
 #   docs/security/fips-allowed-algorithms.md) covers the module as built
-#   from the 3.0.0 / 3.0.8 / 3.0.9 source releases; 3.0.9 is the newest
-#   release on that certificate. Only fips.so is built from 3.0.9 —
+#   from the 3.0.8 / 3.0.9 source releases (the certificate's listed
+#   Software Versions); 3.0.9 is the newest release on that certificate. Only fips.so is built from 3.0.9 —
 #   libcrypto/libssl at runtime stay the distro's. That combination
 #   (validated module + newer compatible 3.x libcrypto) is the deployment
 #   model the OpenSSL security policy describes: the provider API isolates

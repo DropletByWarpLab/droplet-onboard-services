@@ -13,6 +13,11 @@ on:
       - "apps/**/package-lock.json"
       - "services/**/requirements*.txt"
       - "docker/docker-compose.yml"
+      # WARP-967: every shipped image COPYs + RUNs these at build time
+      # (FIPS provider compile/install + the shared activation config) —
+      # an edit to them must rebuild all images.
+      - "docker/fips/**"
+      - "docker/openssl-fips.cnf"
       - ".dockerignore"
       - "proto/**"
       - ".github/workflows/docker-build.yml"
@@ -25,6 +30,8 @@ on:
       - "apps/**/package-lock.json"
       - "services/**/requirements*.txt"
       - "docker/docker-compose.yml"
+      - "docker/fips/**"
+      - "docker/openssl-fips.cnf"
       - ".dockerignore"
       - "proto/**"
       - ".github/workflows/docker-build.yml"
