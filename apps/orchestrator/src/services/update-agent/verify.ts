@@ -31,7 +31,14 @@
  * inject it per-call, production always uses the baked-in file.
  */
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   parseReleaseManifest,
@@ -187,13 +194,23 @@ export async function verifyReleaseSignature(
  * The full WARP-537 trust chain: trust anchor → signature → parse/schema.
  * Only signature-verified bytes ever reach the parser; the returned
  * manifest is safe to act on (WARP-538 poller / WARP-539 apply).
+ *
+ * TOCTOU guard (WARP-537 review): the manifest bytes are read exactly
+ * ONCE; THOSE bytes are verified and THOSE bytes are parsed. The naive
+ * shape — verify the file at `opts.manifestPath`, then re-read the path
+ * to parse — lets any writer swap the file between the two operations
+ * and march unverified bytes straight into the parser. Because `cosign
+ * verify-blob` takes a file path (not bytes), verification runs against
+ * a private copy of the read bytes under a fresh `mkdtemp` directory
+ * that only this process knows; the caller-visible path is never
+ * consulted again after the single read. (`signaturePath` needs no such
+ * treatment: whatever bytes are there, verification only succeeds if
+ * they are a valid signature by the trusted key over the exact bytes we
+ * parse — a swapped signature can never bless different content.)
  */
 export async function verifyAndParseRelease(
   opts: VerifyReleaseOptions,
 ): Promise<VerifyAndParseResult> {
-  const sig = await verifyReleaseSignature(opts);
-  if (!sig.ok) return sig;
-
   let raw: Buffer;
   try {
     raw = readFileSync(opts.manifestPath);
@@ -203,6 +220,24 @@ export async function verifyAndParseRelease(
       failureReason: "malformed_manifest",
       detail: `could not read manifest at ${opts.manifestPath}: ${err instanceof Error ? err.message : String(err)}`,
     };
+  }
+
+  const privateDir = mkdtempSync(
+    path.join(tmpdir(), "droplet-ota-verify-"),
+  );
+  try {
+    const privateManifest = path.join(privateDir, "release.json");
+    writeFileSync(privateManifest, raw, { mode: 0o600 });
+    // Trust-anchor gate still runs before any cosign spawn — inside
+    // verifyReleaseSignature — so the fail-closed order of the refusal
+    // reasons is unchanged; only the blob path cosign sees is different.
+    const sig = await verifyReleaseSignature({
+      ...opts,
+      manifestPath: privateManifest,
+    });
+    if (!sig.ok) return sig;
+  } finally {
+    rmSync(privateDir, { recursive: true, force: true });
   }
 
   return parseReleaseManifest(raw);
