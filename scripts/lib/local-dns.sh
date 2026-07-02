@@ -408,6 +408,18 @@ _write_host_dnsmasq_record() {
     return 0
   fi
 
+  # WARP-985: under the device-bridge's sandbox (User=droplet +
+  # NoNewPrivileges=true) sudo can never elevate, so every sudo below would
+  # fail — previously silently, because the caller treats DNS registration as
+  # best-effort. Detect the no-non-interactive-sudo environment up front and
+  # defer honestly: the .env upsert already persisted the FQDN, so the next
+  # root-context boot/setup run rewrites this record, and the routing-service
+  # leg above still covers clients on the OpenWrt DNS plane.
+  if ! sudo -n true 2>/dev/null; then
+    log_warn "No non-interactive sudo here (sandboxed bridge?) — host dnsmasq host-record for ${DROPLET_PUBLIC_FQDN} deferred to the next boot/setup run"
+    return 0
+  fi
+
   # Strip any prior managed line(s) + their marker, then append the fresh pair.
   # sudo because the file is root-owned (installed by single-box.sh).
   local tmp
