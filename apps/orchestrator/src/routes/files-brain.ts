@@ -161,9 +161,21 @@ interface AuthedUser {
   username?: string;
 }
 
+/**
+ * WARP-493 — brain-memory keys on the local `User.id` UUID.
+ *
+ * `req.user.id` is guaranteed to be the local User UUID on every auth
+ * path since WARP-485 (JWT `sub`; OCS fallback resolves through
+ * `User.nextcloudUsername`). The pre-493 `username ?? id` preference
+ * is what keyed rows/dirs by Nextcloud username — deliberately NOT
+ * preserved anywhere. Pre-fix rows and dirs are converged by the
+ * `warp_491_brain_memory_userid_backfill` SQL migration and the
+ * boot-time `migrateBrainMemoryDirectoryLayout` pass, all shipping in
+ * the same deploy as this flip.
+ */
 function getUserId(req: Request): string | null {
   const user = (req as Request & { user?: AuthedUser }).user;
-  return user?.username ?? user?.id ?? null;
+  return user?.id ?? null;
 }
 
 /** Coerce BigInt to plain number for JSON serialization. */

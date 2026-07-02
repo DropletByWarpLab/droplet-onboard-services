@@ -282,6 +282,10 @@ beforeAll(async () => {
   // we override that with a per-test middleware that stamps the user
   // we want.
   let currentUser = "dev";
+  // WARP-493: optional full identity override for tests that need
+  // req.user.id ≠ req.user.username (the production shape — id is the
+  // local User UUID, username is the Nextcloud display username).
+  let currentIdentity: { id: string; username: string } | null = null;
   getCurrentUser = () => currentUser;
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const express = (await import("express")).default;
@@ -293,10 +297,11 @@ beforeAll(async () => {
   const _app = express();
   _app.use(express.json());
   _app.use((req, _res, next) => {
-    (req as { user?: { id: string; username: string } }).user = {
-      id: currentUser,
-      username: currentUser,
-    };
+    (req as { user?: { id: string; username: string } }).user =
+      currentIdentity ?? {
+        id: currentUser,
+        username: currentUser,
+      };
     next();
   });
   _app.use("/api", createFilesBrainRouter(prisma));
@@ -306,6 +311,14 @@ beforeAll(async () => {
     u: string,
   ) => {
     currentUser = u;
+    currentIdentity = null;
+  };
+  (
+    app as unknown as {
+      __setIdentity: (i: { id: string; username: string }) => void;
+    }
+  ).__setIdentity = (i) => {
+    currentIdentity = i;
   };
 });
 
@@ -892,5 +905,72 @@ describe("GET /api/files/brain/:itemId", () => {
       `/api/files/brain/${aliceUp.body.itemId}`,
     );
     expect(res.status).toBe(404);
+  });
+});
+
+// ── WARP-493 — getUserId flips to req.user.id (UUID) ──
+//
+// Pre-WARP-493, getUserId returned `username ?? id`, so every row, disk
+// dir, and MQTT payload was keyed by the Nextcloud username. The other
+// suites in this file stamp id === username (the dev shape), which
+// can't tell the two apart — these cases stamp the PRODUCTION shape
+// (id = User.id UUID ≠ username) and pin the UUID keying end-to-end.
+describe("WARP-493 — routes key by req.user.id (UUID), never username", () => {
+  const UUID = "9f8e7d6c-5b4a-4210-aedc-ba9876543210";
+  const setIdentity = (i: { id: string; username: string }) =>
+    (
+      app as unknown as {
+        __setIdentity: (i: { id: string; username: string }) => void;
+      }
+    ).__setIdentity(i);
+
+  it("upload keys row + storagePath + MQTT payload by the UUID", async () => {
+    setIdentity({ id: UUID, username: "alice-nc" });
+    const res = await request(app)
+      .post("/api/files/brain/upload")
+      .attach("file", Buffer.from("uuid keyed"), {
+        filename: "u.txt",
+        contentType: "text/plain",
+      });
+    expect(res.status).toBe(202);
+
+    const row = itemStore.get(res.body.itemId);
+    expect(row?.userId).toBe(UUID);
+    expect(row?.storagePath).toContain(`/${UUID}/`);
+    expect(row?.storagePath).not.toContain("alice-nc");
+
+    const uploaded = publishMock.mock.calls.find(
+      (c) => c[0] === "droplet/files/brain/uploaded",
+    );
+    expect(uploaded).toBeDefined();
+    expect(
+      (uploaded?.[1] as { userId: string } | undefined)?.userId,
+    ).toBe(UUID);
+  });
+
+  it("list + manifest read back by the UUID identity (username plays no part)", async () => {
+    setIdentity({ id: UUID, username: "alice-nc" });
+    const up = await request(app)
+      .post("/api/files/brain/upload")
+      .attach("file", Buffer.from("mine"), {
+        filename: "mine.txt",
+        contentType: "text/plain",
+      });
+
+    const list = await request(app).get("/api/files/brain");
+    expect(list.status).toBe(200);
+    expect(list.body.items.length).toBe(1);
+    expect(list.body.items[0].userId).toBe(UUID);
+
+    // A caller whose USERNAME matches the row's old-style key but whose
+    // UUID differs must NOT see the item (RBAC keys purely on id).
+    setIdentity({
+      id: "00000000-0000-4000-8000-000000000000",
+      username: "alice-nc",
+    });
+    const foreign = await request(app).get(
+      `/api/files/brain/${up.body.itemId}`,
+    );
+    expect(foreign.status).toBe(404);
   });
 });

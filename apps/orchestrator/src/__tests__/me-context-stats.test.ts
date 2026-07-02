@@ -354,11 +354,19 @@ vi.mock("@prisma/client", () => {
 
 let app: import("express").Express;
 let setUser: (u: string) => void;
+// WARP-493: full identity override for cases that need req.user.id ≠
+// req.user.username (the production shape — id is the local User UUID).
+let setIdentity: (i: { id: string; username: string }) => void;
 
 beforeAll(async () => {
   let currentUser = "alice";
+  let currentIdentity: { id: string; username: string } | null = null;
   setUser = (u: string) => {
     currentUser = u;
+    currentIdentity = null;
+  };
+  setIdentity = (i) => {
+    currentIdentity = i;
   };
   const express = (await import("express")).default;
   const { PrismaClient } = await import("@prisma/client");
@@ -369,10 +377,11 @@ beforeAll(async () => {
   const _app = express();
   _app.use(express.json());
   _app.use((req, _res, next) => {
-    (req as { user?: { id: string; username: string } }).user = {
-      id: currentUser,
-      username: currentUser,
-    };
+    (req as { user?: { id: string; username: string } }).user =
+      currentIdentity ?? {
+        id: currentUser,
+        username: currentUser,
+      };
     next();
   });
   _app.use("/api", createMeContextStatsRouter(prisma));
@@ -764,5 +773,50 @@ describe("RBAC: cross-user isolation", () => {
     expect(res.body.queued).toBe(1);
     expect(res.body.failed).toBe(1);
     setUser("alice"); // restore
+  });
+});
+
+// ── WARP-493 — getUserId flips to req.user.id (UUID) ──
+//
+// This route file had its own copy of the pre-493 `username ?? id`
+// helper, which keyed every aggregate + the transcribe-retry ownership
+// check by Nextcloud username. The suites above stamp id === username
+// (the dev shape) and can't tell the two apart — these cases stamp the
+// PRODUCTION shape (id = User.id UUID ≠ username) and pin that the
+// UUID is what scopes reads, ownership, and the run-one publish.
+describe("WARP-493 — context-stats keys by req.user.id (UUID), never username", () => {
+  const UUID = "9f8e7d6c-5b4a-4210-aedc-ba9876543210";
+
+  it("summary counts rows keyed by the UUID, not by username", async () => {
+    setIdentity({ id: UUID, username: "alice-nc" });
+    makeItem({ id: "u-1", userId: UUID, indexedAt: new Date() });
+    makeChunk(UUID, "u-1");
+    // A username-keyed row must NOT be visible to the UUID identity.
+    makeItem({ id: "stale-1", userId: "alice-nc", indexedAt: new Date() });
+
+    const res = await request(app).get("/api/me/context-stats");
+    expect(res.status).toBe(200);
+    expect(res.body.files).toBe(1);
+    expect(res.body.chunks).toBe(1);
+  });
+
+  it("failed-retry ownership + run-one publish key by the UUID", async () => {
+    setIdentity({ id: UUID, username: "alice-nc" });
+    makeItem({
+      id: "f-uuid",
+      userId: UUID,
+      mimeType: "audio/mpeg",
+      status: "failed",
+      failureReason: "no_chunks",
+      indexedAt: null,
+    });
+    const res = await request(app).post(
+      "/api/me/context-stats/failed/f-uuid/retry",
+    );
+    expect(res.status).toBe(202);
+    expect(publishMock).toHaveBeenCalledWith(
+      "droplet/transcription/run-one",
+      { itemId: "f-uuid", userId: UUID },
+    );
   });
 });
