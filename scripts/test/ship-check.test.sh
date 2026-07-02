@@ -964,13 +964,18 @@ STUB
 #
 # Original bug: factory-reset.sh Phase 0b sent a BODYLESS `curl -X DELETE
 # …/api/issuance/registration`, which the deployed HQ Worker 422s (it requires
-# a signed TPM-PoP body), so HQ never unbound the device. The fix runs the
-# `tls-deregister` CLI (signed DELETE) while the stack is still up.
+# a signed TPM-PoP body), so HQ never unbound the device. The fix runs a signed
+# HQ CLI while the stack is still up.
+#
+# WARP-980: the DEFAULT reset now RELEASES the HQ name (`tls-release` — the
+# device stays registered + self-heals); --decommission does the full deregister
+# (`tls-deregister`). BOTH CLIs must be wired.
 #
 # This test builds a synthetic worktree with the real secrets.sh + nginx.conf +
-# factory-reset.sh, asserts the check PASSES, then applies two regressions and
+# factory-reset.sh, asserts the check PASSES, then applies regressions and
 # asserts each FAILS:
-#   (a) drop the `npm run -s tls-deregister` invocation,
+#   (a) drop the DEFAULT `tls-release` wiring,
+#   (a2) drop the `tls-deregister` (--decommission) wiring,
 #   (b) re-introduce a bodyless curl to /api/issuance/registration.
 test_tls_invariants_catches_deregister_regression() {
   local needed=(
@@ -1005,10 +1010,21 @@ test_tls_invariants_catches_deregister_regression() {
     return 1
   fi
 
-  # 2a. Regression: strip the signed tls-deregister CLI invocation. The check
-  #     must FAIL (factory-reset no longer signs the HQ unbind).
+  # 2a. Regression: strip the DEFAULT tls-release wiring. The check must FAIL
+  #     (factory-reset no longer releases the HQ name by default — the self-heal
+  #     is gone).
   local stripped
-  stripped="$(grep -v 'npm run -s tls-deregister' "$synth/scripts/factory-reset.sh")"
+  stripped="$(grep -v 'tls-release' "$synth/scripts/factory-reset.sh")"
+  printf '%s\n' "$stripped" > "$synth/scripts/factory-reset.sh"
+  if ! _assert_check_fails "$synth" tls-invariants; then
+    printf "    expected tls-invariants to FAIL after dropping the tls-release CLI\n" >&2
+    return 1
+  fi
+
+  # 2a2. Regression: strip the --decommission tls-deregister wiring. The check
+  #      must FAIL (no way to fully retire a box).
+  cp "$REPO_ROOT_REAL/scripts/factory-reset.sh" "$synth/scripts/factory-reset.sh"
+  stripped="$(grep -v 'tls-deregister' "$synth/scripts/factory-reset.sh")"
   printf '%s\n' "$stripped" > "$synth/scripts/factory-reset.sh"
   if ! _assert_check_fails "$synth" tls-invariants; then
     printf "    expected tls-invariants to FAIL after dropping the tls-deregister CLI\n" >&2

@@ -117,6 +117,127 @@ export interface HqDeregisterResponse {
 }
 
 /**
+ * WARP-983 — POST /api/issuance/provision body. A fresh / factory-reset box
+ * self-enrolls into the HQ registry BEFORE it can ask for a cert: factory-reset
+ * signed the ADR-023 deregister (which DELETED the device from the registry), so
+ * on the next boot the challenge/order flow 404s with `device_id not in
+ * registry`. This re-registers the box with a one-time HQ-minted token + a TPM
+ * proof-of-possession over that token, using the SAME device key + signature
+ * encoding the cert order flow uses (base64 DER ECDSA, `ecdsa-sha256`). The
+ * signed bytes are pinned by the HQ contract (crypto.ts `buildProvisionMessage`)
+ * to exactly `droplet-provision:v1:<token>:<device_id>:<key_fingerprint>` — a
+ * distinct domain prefix from the cert PoP so neither signature can be replayed
+ * as the other. Field names are snake_case on the wire (mirrors HQ types.ts).
+ */
+export interface HqProvisionRequest {
+  device_id: string;
+  /** The device identity's SubjectPublicKeyInfo PEM (extracted from the cert). */
+  public_key_pem: string;
+  key_fingerprint: string;
+  /** The one-time HQ-minted provisioning token (`DROPLET_PROVISION_TOKEN`). */
+  token: string;
+  /** base64 DER ECDSA over `buildProvisionMessage(token, device_id, fingerprint)`. */
+  signature: string;
+  sig_alg: "ecdsa-sha256";
+}
+
+export interface HqProvisionResponse {
+  device_id: string;
+  status: "registered";
+  idempotent: boolean;
+}
+
+/**
+ * WARP-980 — POST /api/issuance/claim-name body. The owner renaming the box in
+ * setup RE-CLAIMS a name via device-auth proof-of-possession (NO token). This is
+ * the AUTHORITATIVE step that makes HQ honor `<name>.droplet-us.com`: the box
+ * proves possession of its trusted device key over a fresh single-use nonce, and
+ * HQ binds the (slugged) name to this device in the fleet registry. `name` is
+ * the RAW owner-entered name — HQ slugs it (the box already validated the shape,
+ * but HQ owns the canonical registry slug). Field names are snake_case on the
+ * wire (mirrors the HQ worker's types).
+ */
+export interface HqClaimNameRequest {
+  device_id: string;
+  /** The RAW owner-entered name (HQ slugs it). Signed VERBATIM in the PoP. */
+  name: string;
+  nonce: string;
+  /** base64 DER ECDSA over `buildClaimNameMessage(...)`. */
+  signature: string;
+  sig_alg: "ecdsa-sha256";
+  key_fingerprint: string;
+}
+
+export interface HqClaimNameResponse {
+  device_id: string;
+  /** The canonical slug HQ bound (may differ from the raw name sent). */
+  name: string;
+  fqdn: string;
+  /** `claimed` = newly bound to this device; `owned` = this device already held it. */
+  status: "claimed" | "owned";
+}
+
+/**
+ * WARP-980 — POST /api/issuance/release body. A factory-reset RELEASES the name
+ * (frees it for re-use) and revokes the cert, but KEEPS the device registered +
+ * trusted (self-heals — the durable TPM key stays authoritative, so the next
+ * rename re-claims via PoP with no token). This replaces the full deregister as
+ * the DEFAULT reset path. `device_id` travels in the QUERY STRING (read by the
+ * router), NOT this body — the body is the PoP-only proof. Signed bytes are
+ * pinned to `droplet-release:v1:<nonce>:<device_id>:<key_fingerprint>` — a
+ * distinct domain prefix from cert/claim/provision so no signature can be
+ * replayed across the four flows.
+ */
+export interface HqReleaseRequest {
+  nonce: string;
+  /** base64 DER ECDSA over `buildReleaseMessage(...)`. */
+  signature: string;
+  sig_alg: "ecdsa-sha256";
+  key_fingerprint: string;
+}
+
+export interface HqReleaseResponse {
+  device_id: string;
+  status: "released";
+}
+
+/** The provisioning PoP message HQ verifies (crypto.ts `buildProvisionMessage`).
+ *  MUST match the HQ Worker byte-for-byte: a distinct `droplet-provision:v1:`
+ *  domain prefix from the cert challenge's `droplet-cert:v1:`. */
+export function buildProvisionMessage(
+  token: string,
+  deviceId: string,
+  keyFingerprint: string,
+): string {
+  return `droplet-provision:v1:${token}:${deviceId}:${keyFingerprint}`;
+}
+
+/** The name-claim PoP message HQ verifies (WARP-980). MUST match the HQ worker
+ *  byte-for-byte: `droplet-claim:v1:<nonce>:<name>:<device_id>:<key_fingerprint>`,
+ *  where `<name>` is the RAW owner-entered name (HQ slugs it). A distinct
+ *  `droplet-claim:v1:` domain prefix from cert/provision/release so signatures
+ *  can never be replayed across flows. */
+export function buildClaimNameMessage(
+  nonce: string,
+  name: string,
+  deviceId: string,
+  keyFingerprint: string,
+): string {
+  return `droplet-claim:v1:${nonce}:${name}:${deviceId}:${keyFingerprint}`;
+}
+
+/** The release PoP message HQ verifies (WARP-980). MUST match the HQ worker
+ *  byte-for-byte: `droplet-release:v1:<nonce>:<device_id>:<key_fingerprint>`. A
+ *  distinct `droplet-release:v1:` domain prefix from cert/provision/claim. */
+export function buildReleaseMessage(
+  nonce: string,
+  deviceId: string,
+  keyFingerprint: string,
+): string {
+  return `droplet-release:v1:${nonce}:${deviceId}:${keyFingerprint}`;
+}
+
+/**
  * Plain outbound HTTPS to the HQ fleet-server. The base URL comes from
  * `HQ_ISSUANCE_URL`; this client owns the contract's endpoints.
  */
@@ -125,8 +246,17 @@ export interface HqIssuanceClient {
   order(req: HqOrderRequest): Promise<HqOrderResponse>;
   poll(orderId: string, deviceId: string): Promise<HqPollResponse>;
   renew(req: HqOrderRequest): Promise<HqOrderResponse>;
-  /** ADR-023 PR-3 — signed unbind on factory reset. */
+  /** ADR-023 PR-3 — signed FULL unbind on factory reset (deletes the device).
+   *  WARP-980: this is now the `--decommission`-only path; the DEFAULT reset
+   *  path uses `release` (frees the name, keeps the device registered). */
   deregister(req: HqDeregisterRequest): Promise<HqDeregisterResponse>;
+  /** WARP-983 — box self-enrolls into the HQ registry with a one-time token. */
+  provision(req: HqProvisionRequest): Promise<HqProvisionResponse>;
+  /** WARP-980 — device-auth PoP name claim (rename → authoritative name). */
+  claimName(req: HqClaimNameRequest): Promise<HqClaimNameResponse>;
+  /** WARP-980 — device-auth PoP release (factory-reset frees the NAME but keeps
+   *  the device registered/trusted). `deviceId` rides in the QUERY string. */
+  release(deviceId: string, req: HqReleaseRequest): Promise<HqReleaseResponse>;
 }
 
 // --- Persistence seam (the Prisma TlsCertState model) ----------------------
@@ -181,7 +311,7 @@ export interface TlsIssuanceDeps {
   hq: HqIssuanceClient;
   identity: Pick<
     DeviceIdentityClient,
-    "signWithDeviceKey" | "getDeviceIdentityStatus"
+    "signWithDeviceKey" | "getDeviceIdentityStatus" | "getDeviceCert"
   >;
   store: TlsCertStore;
   files: TlsFileOps;
@@ -219,6 +349,19 @@ export interface TlsIssuanceDeps {
    * fleet-hq follow-up); the opaque-HMAC fallback stays when it's empty.
    */
   requestedName?: string;
+  /**
+   * WARP-983 — the one-time HQ-minted provisioning token
+   * (`config.DROPLET_PROVISION_TOKEN`, empty when self-provision is disabled).
+   * When a fresh / factory-reset box hits the HQ challenge/order flow and HQ
+   * rejects it with 404 `device_id not in registry` (a signed deregister freed
+   * the row on the previous reset), a NON-EMPTY token lets the box re-enroll
+   * itself via `hq.provision()` and RETRY the issuance ONCE. Empty (the default)
+   * disables self-provision — the box keeps serving its bootstrap self-signed
+   * cert and warns, exactly like the "HQ unreachable" path (fail-safe). Optional
+   * + defaults empty so dev/CI + the injected-fakes test harness keep the
+   * pre-existing posture without setting it.
+   */
+  provisionToken?: string;
 }
 
 export interface TlsIssuanceService {
@@ -350,6 +493,80 @@ export async function signChallenge(
   };
 }
 
+// --- Self-provision (WARP-983) ---------------------------------------------
+
+/**
+ * Extract the SubjectPublicKeyInfo PEM from the device-identity cert. HQ's
+ * `provision` verifies the token PoP against `public_key_pem`, so the box needs
+ * to present its identity PUBLIC key — but the device-identity sidecar only
+ * exposes the cert (`getDeviceCert`), NOT a bare public key (there is no
+ * public-key RPC in device_identity.proto). node-forge parses the cert and
+ * re-emits its embedded SPKI as a `PUBLIC KEY` PEM. Key-type-agnostic: it lifts
+ * whatever key the cert carries (EC P-256 in production; RSA in tests).
+ */
+export function extractPublicKeyPem(certPem: string): string {
+  const cert = forge.pki.certificateFromPem(certPem);
+  return forge.pki.publicKeyToPem(cert.publicKey);
+}
+
+/** The exact HQ 404 that a factory-reset box hits when its registration was
+ *  freed by the signed deregister. `hqFetch` throws
+ *  `HQ <path> returned <status>: <body>`; the deployed Worker's challenge
+ *  handler responds 404 with body `{"error":"device_id not in registry"}`
+ *  (handlers.ts::challenge). Match BOTH the 404 status and the not-in-registry
+ *  marker so a different 404 (or a 503/500) never triggers a re-enroll. */
+export function isNotInRegistryError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const m = err.message;
+  return (
+    m.startsWith("HQ ") &&
+    m.includes(" returned 404") &&
+    m.includes("not in registry")
+  );
+}
+
+/** The collaborators `provisionWithHq` needs — a subset of `TlsIssuanceDeps`. */
+export interface ProvisionDeps {
+  deviceId: string;
+  hq: Pick<HqIssuanceClient, "provision">;
+  identity: Pick<
+    DeviceIdentityClient,
+    "signWithDeviceKey" | "getDeviceIdentityStatus" | "getDeviceCert"
+  >;
+  provisionToken: string;
+}
+
+/**
+ * Self-enroll this box into the HQ registry with the one-time provisioning
+ * token. Builds the SAME PoP the cert flow uses (base64 DER ECDSA over a pinned
+ * message, `ecdsa-sha256`) — only the message differs (`droplet-provision:v1:…`
+ * vs `droplet-cert:v1:…`, a distinct domain prefix so signatures can't be
+ * replayed across the two). The `public_key_pem` is the SPKI extracted from the
+ * device-identity cert. Returns HQ's response; throws on any HQ error (the
+ * caller keeps the bootstrap cert on failure — fail-safe, no crash).
+ */
+export async function provisionWithHq(
+  deps: ProvisionDeps,
+): Promise<HqProvisionResponse> {
+  const { deviceId, hq, identity, provisionToken } = deps;
+  const fingerprint = (await identity.getDeviceIdentityStatus()).certFingerprint;
+  const publicKeyPem = extractPublicKeyPem(await identity.getDeviceCert());
+  const message = buildProvisionMessage(provisionToken, deviceId, fingerprint);
+  const sig = await identity.signWithDeviceKey(
+    new TextEncoder().encode(message),
+  );
+  const req: HqProvisionRequest = {
+    device_id: deviceId,
+    public_key_pem: publicKeyPem,
+    key_fingerprint: fingerprint,
+    token: provisionToken,
+    // Same encoding as the cert order signature (signChallenge above).
+    signature: Buffer.from(sig.signature).toString("base64"),
+    sig_alg: "ecdsa-sha256",
+  };
+  return hq.provision(req);
+}
+
 // --- Factory-reset HQ deregistration (ADR-023 PR-3) ------------------------
 
 /** Outcome sentinels for `deregisterFromHq`. It NEVER throws (factory-reset
@@ -426,6 +643,285 @@ export async function deregisterFromHq(
   }
 }
 
+// --- Device-auth name claim (WARP-980) -------------------------------------
+
+/** Parse the HTTP status embedded in an `hqFetch` error message. hqFetch throws
+ *  `HQ <path> returned <status>: <body>`; return the numeric status, or null for
+ *  anything that isn't a recognizable HQ HTTP error (a network error, a bug). */
+export function parseHqStatus(err: unknown): number | null {
+  if (!(err instanceof Error)) return null;
+  const m = /^HQ .* returned (\d{3})/.exec(err.message);
+  return m ? Number(m[1]) : null;
+}
+
+/** Best-effort extraction of the `suggestions` array HQ returns in a 409
+ *  name-taken body (`… returned 409: {"error":"…","suggestions":[…]}`). Returns
+ *  [] when the body isn't JSON, has no suggestions, or isn't a string array — a
+ *  claim outcome must never crash on a malformed HQ body. */
+export function parseTakenSuggestions(err: unknown): string[] {
+  if (!(err instanceof Error)) return [];
+  const jsonStart = err.message.indexOf("{");
+  if (jsonStart < 0) return [];
+  try {
+    const body = JSON.parse(err.message.slice(jsonStart)) as {
+      suggestions?: unknown;
+    };
+    if (
+      Array.isArray(body.suggestions) &&
+      body.suggestions.every((s) => typeof s === "string")
+    ) {
+      return body.suggestions as string[];
+    }
+  } catch {
+    // Non-JSON / truncated body — no suggestions to surface.
+  }
+  return [];
+}
+
+/** Typed outcomes of a name claim. `claimBoxName` NEVER throws (it must not
+ *  crash issuance / the rename endpoint), so callers branch on these. */
+export const CLAIM_RESULT_CLAIMED = "claimed" as const;
+export const CLAIM_RESULT_NAME_TAKEN = "name_taken" as const;
+export const CLAIM_RESULT_NOT_REGISTERED = "not_registered" as const;
+export const CLAIM_RESULT_INVALID = "invalid" as const;
+export const CLAIM_RESULT_FAILED = "failed" as const;
+export type ClaimOutcome =
+  | typeof CLAIM_RESULT_CLAIMED
+  | typeof CLAIM_RESULT_NAME_TAKEN
+  | typeof CLAIM_RESULT_NOT_REGISTERED
+  | typeof CLAIM_RESULT_INVALID
+  | typeof CLAIM_RESULT_FAILED;
+
+/** The result of a name claim. `authoritative` is TRUE only when HQ actually
+ *  answered (claimed/owned = the name IS ours; name_taken = HQ authoritatively
+ *  says it's taken). It's FALSE when we fell back without HQ confirming
+ *  (not_registered / a transient failure), so the wizard can be honest. */
+export interface ClaimBoxNameResult {
+  outcome: ClaimOutcome;
+  authoritative: boolean;
+  /** HQ's canonical slug + fqdn on success; undefined on failure. */
+  slug?: string;
+  fqdn?: string;
+  /** Alternate names HQ offered on a 409 name-taken. */
+  suggestions?: string[];
+}
+
+export interface ClaimBoxNameDeps {
+  deviceId: string;
+  hq: Pick<HqIssuanceClient, "challenge" | "claimName">;
+  identity: Pick<
+    DeviceIdentityClient,
+    "signWithDeviceKey" | "getDeviceIdentityStatus"
+  >;
+  logger: TlsLogger;
+}
+
+/**
+ * WARP-980 — claim a box name via device-auth proof-of-possession. Given the RAW
+ * owner-entered name, this: fetches a FRESH HQ challenge → signs
+ * `droplet-claim:v1:<nonce>:<name>:<device_id>:<key_fingerprint>` with the device
+ * TPM key (the SAME signing path the cert order flow uses) → POSTs claim-name.
+ * This is the AUTHORITATIVE step that makes HQ honor `<name>.droplet-us.com`; the
+ * subsequent issuance path issues UNDER that claimed name.
+ *
+ * FAIL-SAFE by contract: it NEVER throws (a claim must not crash the rename
+ * endpoint or issuance) — every path returns a typed outcome:
+ *   - device not provisioned (no key to sign) → NOT_REGISTERED (fallback)
+ *   - HQ 200 (claimed/owned)                  → CLAIMED (authoritative)
+ *   - HQ 409 (name taken / holds another)     → NAME_TAKEN (authoritative) + suggestions
+ *   - HQ 403 (not registered / fp mismatch)   → NOT_REGISTERED (graceful fallback)
+ *   - HQ 422 (invalid / reserved)             → INVALID
+ *   - HQ 401 (bad/expired nonce or sig) / net → FAILED (retryable)
+ */
+export async function claimBoxName(
+  rawName: string,
+  deps: ClaimBoxNameDeps,
+): Promise<ClaimBoxNameResult> {
+  const { deviceId, hq, identity, logger } = deps;
+  try {
+    // No provisioned identity → no trusted key to sign the PoP with. The device
+    // isn't claimable yet (e.g. a fresh box before first-factory enroll) — fall
+    // back gracefully (bootstrap/opaque issuance) with a clear log.
+    const status = await identity.getDeviceIdentityStatus();
+    if (!status.provisioned) {
+      logger.warn(
+        { deviceId, name: rawName },
+        "tls-claim: device identity not provisioned — cannot device-auth claim the name yet; falling back to opaque/bootstrap issuance",
+      );
+      return { outcome: CLAIM_RESULT_NOT_REGISTERED, authoritative: false };
+    }
+
+    // Fresh single-use challenge; sign the claim PoP (RAW name, HQ slugs it).
+    const ch = await hq.challenge(deviceId);
+    const fingerprint = status.certFingerprint;
+    const message = buildClaimNameMessage(ch.nonce, rawName, deviceId, fingerprint);
+    const sig = await identity.signWithDeviceKey(
+      new TextEncoder().encode(message),
+    );
+    const req: HqClaimNameRequest = {
+      device_id: deviceId,
+      name: rawName,
+      nonce: ch.nonce,
+      signature: Buffer.from(sig.signature).toString("base64"),
+      sig_alg: "ecdsa-sha256",
+      key_fingerprint: fingerprint,
+    };
+    const res = await hq.claimName(req);
+    logger.info(
+      { deviceId, name: res.name, fqdn: res.fqdn, status: res.status },
+      "tls-claim: HQ bound the name to this device (authoritative)",
+    );
+    return {
+      outcome: CLAIM_RESULT_CLAIMED,
+      authoritative: true,
+      slug: res.name,
+      fqdn: res.fqdn,
+    };
+  } catch (err) {
+    const httpStatus = parseHqStatus(err);
+    if (httpStatus === 409) {
+      // Name taken (or the device holds a DIFFERENT name). Authoritative: HQ
+      // owns the registry. Surface any suggestions so the wizard shows the truth.
+      const suggestions = parseTakenSuggestions(err);
+      logger.warn(
+        { deviceId, name: rawName, suggestions },
+        "tls-claim: HQ rejected the name as taken (409) — surfacing suggestions",
+      );
+      return {
+        outcome: CLAIM_RESULT_NAME_TAKEN,
+        authoritative: true,
+        suggestions,
+      };
+    }
+    if (httpStatus === 403) {
+      // Not registered / fingerprint mismatch — the device isn't trusted for
+      // this claim. Fall back gracefully (opaque/bootstrap issuance).
+      logger.warn(
+        { deviceId, name: rawName },
+        "tls-claim: HQ says this device is not registered / fingerprint mismatch (403) — falling back to opaque/bootstrap issuance",
+      );
+      return { outcome: CLAIM_RESULT_NOT_REGISTERED, authoritative: false };
+    }
+    if (httpStatus === 422) {
+      logger.warn(
+        { deviceId, name: rawName },
+        "tls-claim: HQ rejected the name as invalid/reserved (422)",
+      );
+      return { outcome: CLAIM_RESULT_INVALID, authoritative: true };
+    }
+    // 401 (bad/expired nonce or sig), a network error, or anything else — a
+    // retryable failure. Non-fatal: the box keeps serving, the next issuance
+    // tick re-attempts, and the persisted name is unaffected.
+    logger.warn(
+      { err, deviceId, name: rawName },
+      "tls-claim: name claim failed (non-fatal) — keeping the current cert; the name will be re-claimed on the next issuance tick",
+    );
+    return { outcome: CLAIM_RESULT_FAILED, authoritative: false };
+  }
+}
+
+// --- Factory-reset HQ release (WARP-980) -----------------------------------
+
+/** Outcome sentinels for `releaseFromHq`. Mirrors the deregister sentinels: it
+ *  NEVER throws (a reset must always complete). */
+export const RELEASE_RESULT_OK = "ok" as const;
+export const RELEASE_RESULT_SKIPPED = "skipped" as const;
+export const RELEASE_RESULT_FAILED = "failed" as const;
+export type ReleaseResult =
+  | typeof RELEASE_RESULT_OK
+  | typeof RELEASE_RESULT_SKIPPED
+  | typeof RELEASE_RESULT_FAILED;
+
+export interface ReleaseDeps {
+  deviceId: string;
+  hq: Pick<HqIssuanceClient, "challenge" | "release">;
+  identity: Pick<
+    DeviceIdentityClient,
+    "signWithDeviceKey" | "getDeviceIdentityStatus"
+  >;
+  logger: TlsLogger;
+}
+
+/**
+ * WARP-980 — the DEFAULT factory-reset HQ path: RELEASE (not full deregister).
+ * Signs a fresh challenge (proving possession of the durable device TPM key) and
+ * POSTs /api/issuance/release with `device_id` in the QUERY string + the PoP body
+ * (`droplet-release:v1:…`). HQ frees the NAME and revokes the cert but KEEPS the
+ * device REGISTERED + trusted, so the box self-heals: the next rename re-claims a
+ * name via device-auth PoP (no token). This AMENDS ADR-023 reset behavior —
+ * reset ≠ deregister.
+ *
+ * NON-FATAL by contract (mirrors deregisterFromHq): every failure returns a
+ * sentinel and logs a warning; this function never throws.
+ *   - device not provisioned (no key to sign) → SKIPPED
+ *   - challenge / sign / POST failed          → FAILED
+ *   - HQ acknowledged the release             → OK
+ */
+export async function releaseFromHq(deps: ReleaseDeps): Promise<ReleaseResult> {
+  const { deviceId, hq, identity, logger } = deps;
+  try {
+    const status = await identity.getDeviceIdentityStatus();
+    if (!status.provisioned) {
+      logger.info(
+        { deviceId },
+        "tls-release: device identity not provisioned — skipping HQ release (nothing to release)",
+      );
+      return RELEASE_RESULT_SKIPPED;
+    }
+
+    const signed = await signReleaseChallenge({ deviceId, hq, identity });
+    const req: HqReleaseRequest = {
+      nonce: signed.nonce,
+      signature: signed.signature,
+      sig_alg: signed.sig_alg,
+      key_fingerprint: signed.key_fingerprint,
+    };
+    const res = await hq.release(deviceId, req);
+    logger.info(
+      { deviceId, status: res.status },
+      "tls-release: HQ acknowledged release (name freed, cert revoked, device STAYS registered)",
+    );
+    return RELEASE_RESULT_OK;
+  } catch (err) {
+    logger.warn(
+      { err, deviceId },
+      "tls-release: HQ release failed — non-fatal, factory-reset continues (device stays registered; HQ reaps stale names server-side)",
+    );
+    return RELEASE_RESULT_FAILED;
+  }
+}
+
+/** Fetch a fresh HQ challenge and sign the RELEASE PoP message. Mirrors
+ *  `signChallenge` but signs the `droplet-release:v1:` domain (release carries no
+ *  fqdn/public_label — only the nonce + device id + fingerprint). */
+async function signReleaseChallenge(deps: {
+  deviceId: string;
+  hq: Pick<HqIssuanceClient, "challenge">;
+  identity: Pick<
+    DeviceIdentityClient,
+    "signWithDeviceKey" | "getDeviceIdentityStatus"
+  >;
+}): Promise<{
+  nonce: string;
+  signature: string;
+  sig_alg: "ecdsa-sha256";
+  key_fingerprint: string;
+}> {
+  const { deviceId, hq, identity } = deps;
+  const ch = await hq.challenge(deviceId);
+  const fingerprint = (await identity.getDeviceIdentityStatus()).certFingerprint;
+  const message = buildReleaseMessage(ch.nonce, deviceId, fingerprint);
+  const sig = await identity.signWithDeviceKey(
+    new TextEncoder().encode(message),
+  );
+  return {
+    nonce: ch.nonce,
+    signature: Buffer.from(sig.signature).toString("base64"),
+    sig_alg: "ecdsa-sha256",
+    key_fingerprint: fingerprint,
+  };
+}
+
 export function createTlsIssuanceService(
   deps: TlsIssuanceDeps,
 ): TlsIssuanceService {
@@ -442,7 +938,14 @@ export function createTlsIssuanceService(
     persistFqdn,
     dns,
     requestedName,
+    provisionToken = "",
   } = deps;
+
+  // WARP-983 — self-provision is enabled only when a non-empty token is
+  // configured. Guard/trim like the other config-sourced strings so a
+  // whitespace-only hand-edit in .env can never masquerade as a real token.
+  const trimmedProvisionToken = provisionToken.trim();
+  const selfProvisionEnabled = trimmedProvisionToken.length > 0;
 
   // Defense-in-depth (WARP-979 review follow-up): DROPLET_BOX_NAME is normally
   // written only by the validated persist path, but the box treats its own .env
@@ -549,6 +1052,46 @@ export function createTlsIssuanceService(
     }
 
     return { fqdn: signed.fqdn, notAfter: result.not_after };
+  }
+
+  /**
+   * WARP-983 — run the issuance/renewal flow, and if HQ rejects the very first
+   * challenge with 404 `device_id not in registry` (a factory-reset deregister
+   * freed this box's registry row), SELF-ENROLL once with the provisioning token
+   * and RETRY exactly ONCE. The retry is bounded to a single attempt: if it 404s
+   * again (e.g. provision succeeded server-side but the registry still can't be
+   * read, or a bogus provision), the error propagates to the normal catch and
+   * the box keeps its bootstrap cert (LE_RENEW_FAILED) — the next daily tick
+   * re-attempts from scratch. Only reached when a non-empty token is configured;
+   * otherwise `issueOrRenew` runs exactly as before (the 404 is caught upstream
+   * as a transient HQ failure).
+   */
+  async function issueOrRenewWithSelfProvision(
+    mode: "issue" | "renew",
+  ): Promise<{ fqdn: string; notAfter: string }> {
+    try {
+      return await issueOrRenew(mode);
+    } catch (err) {
+      if (!selfProvisionEnabled || !isNotInRegistryError(err)) throw err;
+      logger.warn(
+        { deviceId },
+        "tls-issuance: HQ reports this device is not in the registry (a factory-reset deregister freed the row) — self-provisioning with the configured token, then retrying issuance once",
+      );
+      // Re-enroll. A provision failure (invalid/expired/consumed token, 4xx)
+      // throws out here → the outer catch keeps the bootstrap cert (fail-safe).
+      const res = await provisionWithHq({
+        deviceId,
+        hq,
+        identity,
+        provisionToken: trimmedProvisionToken,
+      });
+      logger.info(
+        { deviceId, idempotent: res.idempotent },
+        "tls-issuance: HQ re-registered this device — retrying certificate issuance",
+      );
+      // Single retry. A second not-in-registry here is NOT re-provisioned.
+      return issueOrRenew(mode);
+    }
   }
 
   /**
@@ -674,7 +1217,8 @@ export function createTlsIssuanceService(
       }
 
       try {
-        const { fqdn: learnedFqdn, notAfter } = await issueOrRenew(mode);
+        const { fqdn: learnedFqdn, notAfter } =
+          await issueOrRenewWithSelfProvision(mode);
         // Key the upsert on the LEARNED fqdn. Guard against an empty key so a
         // misbehaving HQ response can never write a TlsCert row keyed on ''.
         if (learnedFqdn) {
