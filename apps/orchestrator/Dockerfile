@@ -162,6 +162,14 @@ COPY --from=builder /app/apps/orchestrator/data/oui.csv ./apps/orchestrator/data
 # Droplet identity prompt — leads the base system prompt for every
 # /api/llm/chat surface (identity-prompt.ts reads it at first chat).
 COPY --from=builder /app/apps/orchestrator/data/droplet-identity.md ./apps/orchestrator/data/droplet-identity.md
+# WARP-535: baked-in OTA trust anchor. The update agent verifies
+# cosign-signed release manifests against this public key. dist/ contains
+# only compiled TS, so the .pub must be shipped explicitly; the runtime
+# path mirrors the source path so dev (src/) and container (dist/) resolve
+# the same file (see update-agent/verify.ts). scripts/test-security.sh
+# asserts this COPY stays present. Until the key ceremony replaces the
+# placeholder (scripts/README.md), verify fails closed by design.
+COPY --from=builder /app/apps/orchestrator/src/services/update-agent/cosign.pub ./apps/orchestrator/src/services/update-agent/cosign.pub
 
 WORKDIR /app/apps/orchestrator
 
