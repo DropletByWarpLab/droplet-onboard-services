@@ -92,6 +92,11 @@ export default function RemoteAccessPage() {
 
   const activePeers = peers.filter((p) => p.status === "active");
   const endpointMissing = status && !status.endpointConfigured;
+  // WARP-993: only promise "from anywhere" when the endpoint is actually
+  // routable from outside the home LAN. FQDN-only (split-horizon, no public
+  // A record — ADR-023 §3) reports false until the ADR-025 relay lands.
+  // Missing field (older orchestrator) or status still loading ⇒ stay honest.
+  const offLanReachable = status?.offLanReachable === true;
 
   const addAction = (
     <button
@@ -110,7 +115,11 @@ export default function RemoteAccessPage() {
       icon={<Globe size={15} />}
       label="Remote Access"
       title="Remote Access"
-      sub="Connect your phone or laptop to your home network from anywhere. Add a device, scan the QR code in the WireGuard app, and you’re in."
+      sub={
+        offLanReachable
+          ? "Connect your phone or laptop to your home network from anywhere. Add a device, scan the QR code in the WireGuard app, and you’re in."
+          : "Connect your phone or laptop to your Droplet over your home network. Add a device, scan the QR code in the WireGuard app, and you’re in. Away-from-home access arrives with the secure relay — coming soon."
+      }
       actions={addAction}
     >
       {error && (
@@ -181,6 +190,7 @@ export default function RemoteAccessPage() {
           onClose={() => setShowAdd(false)}
           onAdded={reload}
           publicFqdn={status?.publicFqdn ?? null}
+          offLanReachable={offLanReachable}
         />
       )}
 
@@ -202,29 +212,49 @@ export default function RemoteAccessPage() {
 // Read-only status for the new remote-access model (ADR-023 / ADR-025): the box
 // carries its own publicly-trusted web address and reaches you through an
 // outbound relay. There is nothing to configure — no dynamic DNS, no subdomain
-// or token. Away from home, the owner turns on Connect in the Droplet app and
-// opens the SAME address with a green padlock. If the box hasn't learned its
-// address from HQ yet, we describe it generically.
+// or token. If the box hasn't learned its address from HQ yet, we describe it
+// generically. WARP-993: the "works at home AND away / turn on Connect" story
+// is only told when `offLanReachable` is true — until the ADR-025 relay lands,
+// the address only resolves on the home network and the copy says so.
 
 function RemoteAddressCard({ status }: { status: VpnStatusInfo | null }) {
   const address = status?.publicFqdn?.trim() || null;
+  const offLanReachable = status?.offLanReachable === true;
 
   return (
     <div className="card" style={{ marginTop: 24 }}>
       <div style={{ marginBottom: 12 }}>
         <h2 style={{ fontSize: 16, fontWeight: 600, color: "var(--text)" }}>Your box&rsquo;s web address</h2>
         <p style={{ fontSize: 12.5, color: "var(--text-muted)", marginTop: 4, maxWidth: "34rem" }}>
-          Remote access is automatic. Your Droplet has its own secure web address — the same one
-          works at home and away, with a padlock and nothing to install. When you&rsquo;re out,
-          open the Droplet app and turn on <strong>Connect</strong>, then open that address in your
-          browser. No dynamic DNS, no subdomain or token, and no changes to your home router.
+          {offLanReachable ? (
+            <>
+              Remote access is automatic. Your Droplet has its own secure web address — the same one
+              works at home and away, with a padlock and nothing to install. When you&rsquo;re out,
+              open the Droplet app and turn on <strong>Connect</strong>, then open that address in your
+              browser. No dynamic DNS, no subdomain or token, and no changes to your home router.
+            </>
+          ) : (
+            <>
+              Your Droplet has its own secure web address — it works across your home network,
+              with a padlock and nothing to install. Away-from-home access arrives with the
+              secure relay — coming soon. No dynamic DNS, no subdomain or token, and no changes
+              to your home router.
+            </>
+          )}
         </p>
       </div>
 
       {address ? (
         <div className="grid c2">
           <Stat label="Web address" value={address} />
-          <Stat label="Away from home" value="Turn on Connect in the app" />
+          <Stat
+            label="Away from home"
+            value={
+              offLanReachable
+                ? "Turn on Connect in the app"
+                : "Coming soon — secure relay"
+            }
+          />
         </div>
       ) : (
         <div
@@ -321,10 +351,14 @@ function AddDeviceDialog({
   onClose,
   onAdded,
   publicFqdn,
+  offLanReachable,
 }: {
   onClose: () => void;
   onAdded: () => void;
   publicFqdn: string | null;
+  /** WARP-993: gates the ready-step copy — no "from anywhere" promise while
+   *  the endpoint only resolves on the home network. */
+  offLanReachable: boolean;
 }) {
   const [step, setStep] = useState<"form" | "ready">("form");
   const [deviceLabel, setDeviceLabel] = useState("");
@@ -469,25 +503,36 @@ function AddDeviceDialog({
                       lib/wireguard.ts) until the box learns its FQDN from HQ. */}
                   {dashboardUrlFromConf(created.conf, publicFqdn ?? undefined)}
                 </strong>{" "}
-                in the browser — that&rsquo;s your Droplet from anywhere.
+                in the browser —{" "}
+                {offLanReachable
+                  ? "that’s your Droplet from anywhere."
+                  : "that’s your Droplet on your home network."}
               </li>
             </ol>
             <p className="type-caption-1 text-label-tertiary">
-              {publicFqdn ? (
-                <>
-                  This is the same address you use at home — it works on your
-                  Wi-Fi <em>and</em> over the tunnel, with a secure padlock and
-                  nothing to install. (On this Droplet&rsquo;s own Wi-Fi the
-                  tunnel can&rsquo;t loop back, and you don&rsquo;t need it
-                  there.)
-                </>
+              {offLanReachable ? (
+                publicFqdn ? (
+                  <>
+                    This is the same address you use at home — it works on your
+                    Wi-Fi <em>and</em> over the tunnel, with a secure padlock and
+                    nothing to install. (On this Droplet&rsquo;s own Wi-Fi the
+                    tunnel can&rsquo;t loop back, and you don&rsquo;t need it
+                    there.)
+                  </>
+                ) : (
+                  <>
+                    Test it away from home (cellular works) — on this
+                    Droplet&rsquo;s own Wi-Fi the tunnel can&rsquo;t loop back, and
+                    you don&rsquo;t need it there. Names like{" "}
+                    <span className="font-mono">droplet.local</span> only work at
+                    home, not over the tunnel.
+                  </>
+                )
               ) : (
                 <>
-                  Test it away from home (cellular works) — on this
-                  Droplet&rsquo;s own Wi-Fi the tunnel can&rsquo;t loop back, and
-                  you don&rsquo;t need it there. Names like{" "}
-                  <span className="font-mono">droplet.local</span> only work at
-                  home, not over the tunnel.
+                  This works while you&rsquo;re on your home network.
+                  Away-from-home access arrives with the secure relay — coming
+                  soon; this device will be ready for it.
                 </>
               )}
             </p>

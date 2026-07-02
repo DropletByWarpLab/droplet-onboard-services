@@ -221,10 +221,10 @@ const SECTIONS: Section[] = [
         </p>
         <p>
           <strong>You&rsquo;re still reachable when you need to be.</strong>{" "}
-          When you&rsquo;re away from home, your phone connects back to the
-          Droplet over its own end-to-end-encrypted VPN — so you reach your
-          data directly, without it passing through any cloud service in
-          between.
+          On your home network, your devices connect to the Droplet directly
+          over its own end-to-end-encrypted VPN — so you reach your data
+          without it passing through any cloud service in between.
+          Away-from-home access arrives with the secure relay — coming soon.
         </p>
       </>
     ),
@@ -353,21 +353,20 @@ const SECTIONS: Section[] = [
       <>
         <p>
           Your Droplet has its own secure web address — the name you gave
-          it during setup. It&rsquo;s the same address at home and away,
-          with a padlock and nothing to install. There&rsquo;s nothing to
-          sign up for and no address to type in.
+          it during setup. It works across your home network, with a real
+          certificate, a green padlock, and nothing to install.
+          There&rsquo;s nothing to sign up for and no address to type in.
         </p>
         <p>
-          <strong>When you&rsquo;re away from home:</strong> open the
-          Droplet app and turn on <strong>Connect</strong>. Your phone
-          links securely to the box, and you open the same web address you
-          use at home — a real certificate and a green padlock, no
-          &ldquo;Not secure&rdquo; warning.
+          <strong>Away from home:</strong> away-from-home access arrives
+          with the secure relay — coming soon. When it lands, you&rsquo;ll
+          open the Droplet app, turn on <strong>Connect</strong>, and use
+          the same web address you use at home — no &ldquo;Not
+          secure&rdquo; warning.
         </p>
         <p>
           <strong>Nothing to configure:</strong> no dynamic-DNS account, no
-          subdomain or token, and no changes to your home router. Remote
-          access is automatic — just tap Connect when you need it.
+          subdomain or token, and no changes to your home router.
         </p>
       </>
     ),

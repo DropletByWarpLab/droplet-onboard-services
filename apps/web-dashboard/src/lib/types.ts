@@ -390,6 +390,12 @@ export interface VpnStatusInfo {
    *  Null until the box learns it from HQ. Safe to show to any user (it is
    *  published to Certificate Transparency anyway, carries no PII, has no A record). */
   publicFqdn?: string | null;
+  /** WARP-993: is the minted WireGuard conf actually reachable from OUTSIDE
+   *  the home LAN? False while the box is FQDN-only (split-horizon, no public
+   *  A record — ADR-023 §3) until the ADR-025 relay lands. Every
+   *  "from anywhere" surface gates its copy on this; missing ⇒ treat as false
+   *  (never over-promise against an older orchestrator). */
+  offLanReachable?: boolean;
   listenPort?: number;
   serverPublicKey?: string;
   addresses?: string[];
@@ -404,6 +410,9 @@ export interface VpnPeerCreatedInfo {
   peer: VpnPeerInfo;
   /** Full WireGuard .conf text. Contains the peer's private key. */
   conf: string;
+  /** WARP-993: same honest reachability signal as VpnStatusInfo, echoed on
+   *  the create response so the QR step can gate its copy without a refetch. */
+  offLanReachable?: boolean;
 }
 
 // ── WARP-446: Coverage extender APs ──
