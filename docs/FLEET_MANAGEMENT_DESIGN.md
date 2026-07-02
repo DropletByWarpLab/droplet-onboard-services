@@ -333,8 +333,10 @@ Every layer assumes the previous failed:
 > **2026-07-01 (WARP-963):**
 > [ADR-028](ADR-028-fleet-telemetry-and-design-answers.md) re-proposes
 > all three answers against the current reality (analytics portal owns
-> telemetry ingest; HQ is a serverless Worker; WARP-974 needs a WG relay
-> VPS anyway) — still **Proposed, NOT accepted**, awaiting the same
+> telemetry ingest; HQ is a serverless Worker; NO VPS per the 2026-07-01
+> founder decision — remote access is Cloudflare-native Zero Trust
+> WARP-to-Tunnel over per-box VNETs, ADR-025A in `droplet-fleet-hq`
+> PR #9) — still **Proposed, NOT accepted**, awaiting the same
 > Romain/Stefan sign-off. The portal-push telemetry half shipped
 > flag-gated as `services/fleet-agent/` without prejudging these
 > questions.

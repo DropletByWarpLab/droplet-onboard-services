@@ -13,7 +13,7 @@
   WARP-961 (agent unification decision, blocked on the questions below),
   WARP-538 (orchestrator update poller), WARP-333/334/335 (the three
   open questions as filed), WARP-340 (fleet management parent),
-  WARP-974 (HQ relay epic)
+  WARP-974 (remote-access epic)
 - **Related ADRs / docs:** [`FLEET_MANAGEMENT_DESIGN.md`](FLEET_MANAGEMENT_DESIGN.md)
   (Pattern B design, spec only);
   [ADR-023](ADR-023-public-ca-per-device-tls-via-hq-dns01.md) (HQ is a
@@ -40,6 +40,12 @@ Two facts have changed since that doc was written:
    (ADR-023 cert issuance). There is no Warp Lab VPS today, and Workers
    cannot terminate WireGuard — so the design doc's "one €5 box does
    heartbeat + WG + proxy" shape no longer matches reality.
+3. **2026-07-01 founder decision: NO VPS, no Warp-operated external
+   servers.** WG-shaped relay traffic is dead; remote access is
+   Cloudflare-native — Zero Trust WARP-to-Tunnel over per-box virtual
+   networks (VNETs), per ADR-025A in `droplet-fleet-hq` PR #9. The
+   analytics portal keeps telemetry ingest. Question 1's answer below
+   is aligned to this decision.
 
 WARP-963 (Highest) wants ONE fail-open on-device agent. Waiting for the
 three answers to ship *any* fleet visibility would leave the fleet dark
@@ -80,30 +86,36 @@ This slice neither prejudges nor depends on the three open questions.
 > ⚠ **Proposals only.** Confirm or override each; WARP-961 / Phase 1 of
 > the fleet design unblocks the moment all three are signed off.
 
-### 1. HQ host choice — proposed: split HTTP from WireGuard
+### 1. HQ host choice — proposed: no servers at all (portal for telemetry, Cloudflare-native for remote access)
 
 **Original options:** Hetzner CX22 (€5/mo) vs Cloudflare Worker + D1 vs
 AWS Lightsail, as one host for heartbeat + WG + proxy.
 
-**Proposed answer:** stop treating this as one host.
+**Proposed answer (updated 2026-07-01, founder decision): NO VPS and no
+other Warp-operated external servers.** The original question assumed a
+host; neither traffic shape needs one.
 
 - **HTTP-shaped fleet traffic (heartbeat, metrics, inventory, fleet
   list/detail UI): the analytics portal, as shipped.** The server side
   already exists, is contract-frozen, and is implemented — re-building
-  heartbeat ingest on a new VPS would be a parallel second fleet plane
+  heartbeat ingest anywhere else would be a parallel second fleet plane
   with zero added capability. The design doc's `fleet-server`
   heartbeat/devices routes are **superseded for telemetry** by the
-  portal.
-- **WireGuard-shaped traffic (ops-console proxy back into a box; the
-  ADR-025 / WARP-974 one-tap relay): Hetzner CX22, Frankfurt** — the
-  original proposal, unchanged and still correct: Workers cannot
-  terminate WG (hard veto), EU residency is a one-line auditor answer,
-  vertical scale path CX22→CX52 is plain Linux with no lock-in. One
-  CX22 hosts both the WARP-974 relay and the fleet ops-console proxy;
-  they are the same outbound-tunnel plumbing.
+  portal, which keeps telemetry ingest.
+- **Remote access (ops-console reach into a box; the WARP-974 one-tap
+  path): Cloudflare-native — Zero Trust WARP-to-Tunnel over a per-box
+  virtual network (VNET), per ADR-025A in `droplet-fleet-hq` PR #9.**
+  WG-shaped relay traffic is dead: an earlier draft of this answer (a
+  Hetzner CX22 terminating an outbound WireGuard relay) is withdrawn.
+  The box side is the same outbound `cloudflared` tunnel the box
+  already runs (the `relay` compose profile, WARP-974); the client side
+  is the Cloudflare WARP client enrolled in the Zero Trust org, routed
+  to exactly one box's VNET. No Warp-operated endpoint to run, patch,
+  or scale.
 
-**Cost:** €5/mo (already required by WARP-974 anyway) + portal hosting
-that already exists. Net-new cost of the fleet plane: zero.
+**Cost:** zero net-new servers — the portal hosting that already
+exists, plus the Cloudflare account that already runs HQ and the
+box tunnels.
 
 ### 2. Signing-key custody — proposed: Yubikey 5 NFC × 2 (unchanged)
 
@@ -113,7 +125,7 @@ The original recommendation stands, strengthened by the split above:
   hardware later means rotating trust on every deployed Droplet;
   starting on Yubikey means the key was *never* on disk — a one-line
   auditor proof.
-- The signing key stays **off the portal, off the relay VPS, off HQ**
+- The signing key stays **off the portal, off Cloudflare, off HQ**
   regardless of question 1's outcome (defense assumption: HQ compromise
   must not yield update-signing capability — unchanged from the design
   doc's security posture).
@@ -159,9 +171,9 @@ richer expressions later without migration.
   orchestrator poller) and "how healthy am I" (this agent) report
   through different planes. Accepted as a v1 seam; the unification
   ticket exists precisely to close it.
-- Two fleet surfaces (portal telemetry + future relay VPS) instead of
-  the design doc's single box — the price of the serverless-HQ reality
-  and of not re-implementing a working ingest plane.
+- Two fleet surfaces (portal telemetry + Cloudflare Zero Trust remote
+  access) instead of the design doc's single box — the price of the
+  no-servers posture and of not re-implementing a working ingest plane.
 
 ### Neutral
 
@@ -191,8 +203,10 @@ richer expressions later without migration.
 - Ratify/override the three answers above (Romain + Stefan). Record the
   outcome by flipping this ADR to Accepted (or amending it) and
   updating `FLEET_MANAGEMENT_DESIGN.md`'s open-questions block.
-- On ratification of question 1: provision the CX22 under WARP-974 and
-  point the ops-console proxy work (design doc phase 2) at it.
+- On ratification of question 1: nothing to provision — enroll the
+  fleet in the Cloudflare Zero Trust org and point the ops-console
+  remote-access work (design doc phase 2) at the per-box VNET route
+  (ADR-025A, `droplet-fleet-hq` PR #9).
 - WARP-961 then decides the update-poll mount (WARP-538 poller folding
   into `services/fleet-agent/` as an apscheduler job) — the stub in
   `agent.py` marks the spot.
