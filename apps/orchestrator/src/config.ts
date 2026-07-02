@@ -404,6 +404,25 @@ const envSchema = z.object({
   // .int() rejects sub-day floats and .finite() rejects Infinity.
   DROPLET_AUDIT_RETENTION_DAYS: z.coerce.number().int().min(0).finite().default(90),
 
+  // ── WARP-538: OTA update agent (WARP-534 epic) ──
+  // RELEASES_URL — the GitHub Releases `latest` endpoint the update agent
+  //   polls for cosign-signed OTA release manifests. Default is the
+  //   canonical publisher (this repo's publish-release.yml); overridable
+  //   for forks/mirrors and for the file-served fake in integration tests.
+  // GITHUB_TOKEN — bearer for the private releases repo. Empty = send no
+  //   Authorization header (public repos / the test fake). Injected via
+  //   .env by setup.sh when fleet provisioning lands; never hardcoded.
+  // POLL_INTERVAL — seconds between checks. 900 (15 min) per the design;
+  //   floor of 60 keeps a typo'd "0" from hot-looping the GitHub API.
+  DROPLET_OTA_RELEASES_URL: z
+    .string()
+    .url()
+    .default(
+      "https://api.github.com/repos/DropletByWarpLab/droplet-onboard-services/releases/latest",
+    ),
+  DROPLET_OTA_GITHUB_TOKEN: z.string().default(""),
+  DROPLET_OTA_POLL_INTERVAL: z.coerce.number().int().min(60).finite().default(900),
+
   // WARP-808: which deployment shape broadcasts the home Wi-Fi AP. This is the
   // SAME knob the device-bridge reads (services/oled-display/device-bridge.py)
   // and that single-box.sh's configure_single_box_env upserts into .env.
