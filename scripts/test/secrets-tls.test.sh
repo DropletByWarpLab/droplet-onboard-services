@@ -371,6 +371,107 @@ test_corrupt_cert_is_regenerated_not_preserved() {
 }
 
 # =============================================================================
+# Test 5 (WARP-595): mismatched cert/key pair + valid .bootstrap → restored
+# =============================================================================
+#
+# A torn write (interrupted openssl/mv from a previous run) can leave a VALID,
+# SAN-complete droplet.crt next to a droplet.key from a DIFFERENT keypair. The
+# old skip-guard only ever validated the cert, so this broken pair passed
+# "already exists, is valid" on every re-run FOREVER while nginx failed to
+# load the mismatched pair — the one genuinely non-convergent TLS state.
+# With a valid bootstrap pair present, the fix must restore the bootstrap
+# bytes (keeping trust-store clients connected), not keep the broken pair.
+test_mismatched_pair_restores_bootstrap() {
+  local sandbox certs crt key
+  sandbox="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$sandbox'" RETURN
+  certs="$sandbox/docker/certs"
+  mkdir -p "$certs"
+  crt="$certs/droplet.crt"; key="$certs/droplet.key"
+
+  local full_san="DNS:localhost,DNS:droplet,DNS:droplet.local,DNS:droplet.lan,DNS:droplet-ai,DNS:droplet-ai.local,DNS:droplet-ai.lan,IP:127.0.0.1"
+
+  # Valid bootstrap pair — the trust anchor clients imported.
+  _make_self_signed "$crt.bootstrap" "$key.bootstrap" "$full_san" 3650
+  local boot_crt_sha boot_key_sha
+  boot_crt_sha="$(_sha "$crt.bootstrap")"; boot_key_sha="$(_sha "$key.bootstrap")"
+
+  # Installed: a valid SAN-complete cert whose KEY was then overwritten by a
+  # different keypair's key (the torn-pair shape).
+  _make_self_signed "$crt" "$key" "$full_san" 3650
+  _make_self_signed "$sandbox/unrelated.crt" "$key" "$full_san" 3650
+
+  # Fixture sanity: the installed pair must actually be mismatched.
+  local cert_pub key_pub
+  cert_pub="$(openssl x509 -in "$crt" -noout -pubkey 2>/dev/null)"
+  key_pub="$(openssl pkey -in "$key" -pubout 2>/dev/null)"
+  if [ "$cert_pub" = "$key_pub" ]; then
+    printf "    fixture error: installed cert/key still match\n" >&2
+    return 1
+  fi
+
+  if ! _run_generate_tls_cert "$sandbox"; then
+    printf "    _generate_tls_cert returned non-zero on a mismatched pair + bootstrap\n" >&2
+    return 1
+  fi
+
+  if [ "$(_sha "$crt")" != "$boot_crt_sha" ] || [ "$(_sha "$key")" != "$boot_key_sha" ]; then
+    printf "    mismatched pair was not restored from the bootstrap (skip-guard passed a broken pair)\n" >&2
+    return 1
+  fi
+
+  return 0
+}
+
+# =============================================================================
+# Test 6 (WARP-595): mismatched cert/key pair, NO bootstrap → regenerated
+# =============================================================================
+# Same torn-pair shape as Test 5 but with no bootstrap to restore: the only
+# convergent outcome is a fresh, MATCHING, SAN-complete self-signed pair.
+test_mismatched_pair_regenerates_without_bootstrap() {
+  local sandbox certs crt key
+  sandbox="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$sandbox'" RETURN
+  certs="$sandbox/docker/certs"
+  mkdir -p "$certs"
+  crt="$certs/droplet.crt"; key="$certs/droplet.key"
+
+  local full_san="DNS:localhost,DNS:droplet,DNS:droplet.local,DNS:droplet.lan,DNS:droplet-ai,DNS:droplet-ai.local,DNS:droplet-ai.lan,IP:127.0.0.1"
+  _make_self_signed "$crt" "$key" "$full_san" 3650
+  _make_self_signed "$sandbox/unrelated.crt" "$key" "$full_san" 3650
+
+  local before_sha; before_sha="$(_sha "$crt")"
+
+  if ! _run_generate_tls_cert "$sandbox"; then
+    printf "    _generate_tls_cert returned non-zero on a mismatched pair without bootstrap\n" >&2
+    return 1
+  fi
+
+  # Regenerated (bytes changed) …
+  if [ "$(_sha "$crt")" = "$before_sha" ]; then
+    printf "    mismatched cert was preserved — skip-guard passed a broken pair\n" >&2
+    return 1
+  fi
+  # … the new pair must MATCH …
+  local cert_pub key_pub
+  cert_pub="$(openssl x509 -in "$crt" -noout -pubkey 2>/dev/null)"
+  key_pub="$(openssl pkey -in "$key" -pubout 2>/dev/null)"
+  if [ -z "$cert_pub" ] || [ "$cert_pub" != "$key_pub" ]; then
+    printf "    regenerated cert/key still do not match\n" >&2
+    return 1
+  fi
+  # … and be SAN-complete.
+  if ! openssl x509 -in "$crt" -noout -ext subjectAltName 2>/dev/null | grep -q 'DNS:droplet.lan'; then
+    printf "    regenerated cert is SAN-incomplete (missing droplet.lan)\n" >&2
+    return 1
+  fi
+
+  return 0
+}
+
+# =============================================================================
 # Driver
 # =============================================================================
 printf "\n  ${_BOLD}secrets.sh TLS-clobber regression test suite${_RESET}\n"
@@ -388,6 +489,12 @@ _run_test "expired leaf + valid .bootstrap is restored from bootstrap" \
 
 _run_test "corrupt/unreadable droplet.crt is regenerated, not preserved" \
   test_corrupt_cert_is_regenerated_not_preserved
+
+_run_test "mismatched cert/key pair + valid .bootstrap is restored (WARP-595)" \
+  test_mismatched_pair_restores_bootstrap
+
+_run_test "mismatched cert/key pair without bootstrap is regenerated as a matching pair (WARP-595)" \
+  test_mismatched_pair_regenerates_without_bootstrap
 
 printf "\n  ──────────────────────────────────\n"
 printf "  Results: %d/%d passed" "$PASSED" "$TOTAL"
