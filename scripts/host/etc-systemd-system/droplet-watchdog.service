@@ -1,0 +1,21 @@
+[Unit]
+Description=Droplet unified self-heal watchdog (wifi wedge, voice DSP, docker DNS, crash-loops)
+# WARP-1002: one supervisor for every wedge state with a proven manual heal —
+# Wi-Fi PCI function death (via the WARP-869 helper), XVF3800 voice-DSP wedge
+# (xvf_host REBOOT 1), docker daemon DNS breakage (detect + report), and
+# container crash-loops (RestartCount deltas + log capture). Writes an
+# explicit per-check status enum to /var/lib/droplet/watchdog/status.json.
+# Scheduled by droplet-watchdog.timer — no [Install] section here.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/droplet-watchdog
+# Per-deployment-shape gating + tuning (DROPLET_WATCHDOG_CHECKS etc.).
+# Optional: absent file is fine (the `-` prefix), defaults are built in.
+EnvironmentFile=-/etc/default/droplet-watchdog
+# The wifi heal path (delegated WARP-869 helper) writes /sys/bus/pci/*/remove
+# + /sys/bus/pci/rescan and can block in kernel D-state on a severely wedged
+# slot; D-state ignores SIGKILL, so this timeout is the only exit. Root, no
+# sandbox directives — we need the real sysfs, the real docker socket, and
+# real USB control for xvf_host.
+TimeoutStartSec=300

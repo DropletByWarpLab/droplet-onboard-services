@@ -30,7 +30,9 @@
 # Healthy boxes: a cheap sysfs scan, no writes, no log spam (silent no-op).
 #
 # Repo-tracked (architecture-guard rule 20), installed to /usr/local/sbin by
-# scripts/install-device-bridge.sh, scheduled by droplet-wifi-watchdog.timer.
+# scripts/install-device-bridge.sh (and setup.sh via scripts/lib/single-box.sh).
+# Since WARP-1002 it is invoked by the unified droplet-watchdog supervisor's
+# wifi check on droplet-watchdog.timer — its standalone timer is superseded.
 #
 # Test hooks (tests/wifi-watchdog.test.sh — no root, no real PCI needed):
 #   DROPLET_WIFI_SYS_PCI=...   override /sys/bus/pci/devices (fake sysfs tree)

@@ -2,6 +2,56 @@
 
 Scripts and units that run **on the device host** (not inside a container).
 
+## Self-heal watchdog (WARP-1002)
+
+`droplet-watchdog.sh` is the unified on-box self-heal supervisor: one
+timer-driven pass over pluggable checks, each of which encodes a wedge state
+we have a **proven manual heal** for (all diagnosed live on shipping boxes).
+Installed by `setup.sh` (via `scripts/lib/single-box.sh`) to
+`/usr/local/sbin/droplet-watchdog`, scheduled by
+`etc-systemd-system/droplet-watchdog.timer` every ~3 minutes.
+
+| Check | Detects | Heals |
+|-------|---------|-------|
+| `wifi` | Wi-Fi PCI function silently dead (driver bound, phy/netdev gone — WARP-869) | Delegates detect **and** heal (PCI remove + rescan, the only network-touching heal allowed) to `usr-local-sbin/droplet-wifi-watchdog` and classifies its outcome |
+| `voice_dsp` | ReSpeaker XVF3800 DSP wedge ("listening but never detecting"; xhci overrun spam in the kernel log) | `xvf_host REBOOT 1` over USB (`DROPLET_WATCHDOG_XVF_HOST`); `not_applicable` when the XMOS USB device is absent |
+| `docker_dns` | DNS broken inside containers — `getent hosts` probe via an **already-running** container (no heavy spawns) | Detect-and-report only: the durable fix (daemon.json `"dns": ["1.1.1.1", "8.8.8.8"]` pin) needs a dockerd restart that would take the stack down, so it is documented in the status message, never auto-applied |
+| `container_crashloop` | `docker inspect` RestartCount deltas between runs (persisted); any service restarting more than the threshold per window | Detect-and-report only (docker's restart policy already retries); captures a `docker logs --tail 200` snapshot to `diagnostics/` once per episode |
+
+**Status contract:** every known check ALWAYS appears in
+`/var/lib/droplet/watchdog/status.json` with an explicit enum —
+`ok | healed | heal_failed | escalated | not_applicable` — never inferred
+from absence. Detect-only checks report failures as `heal_failed` with a
+message stating no automatic heal exists. `overall` carries the worst status.
+
+**Escalation:** after 2 consecutive heal failures on the same check
+(`DROPLET_WATCHDOG_ESCALATE_AFTER`) the check goes `escalated` — CRITICAL log
+line on the transition, heals suspended, re-tried only every 5th run
+(`DROPLET_WATCHDOG_ESCALATED_RETRY_EVERY`) so a persistent failure never
+retry-storms. A passing re-try resets it. Every heal action is logged with a
+UTC timestamp to the journal and `/var/lib/droplet/watchdog/heal.log`.
+
+**Per-shape gating:** `DROPLET_WATCHDOG_CHECKS` in
+`/etc/default/droplet-watchdog` (installed once from
+`etc-default/droplet-watchdog`, operator edits never clobbered) selects the
+checks; everything else reports `not_applicable`. Checks also self-gate on
+hardware/tooling presence, so the default (all checks) is safe on any shape.
+
+**WARP-869 migration:** `droplet-wifi-watchdog.timer` is superseded — the
+unified timer owns the schedule (two independent schedulers could race a PCI
+remove/rescan). Both `setup.sh` and `install-device-bridge.sh` disable and
+remove the old units on their next run; the helper script itself stays.
+
+```bash
+# Force a run + inspect
+sudo systemctl start droplet-watchdog.service
+cat /var/lib/droplet/watchdog/status.json
+sudo journalctl -u droplet-watchdog --no-pager -n 50
+
+# Tests (no root/hardware/docker needed)
+bash tests/droplet-watchdog.test.sh
+```
+
 ## Restic backup + restore drill (WARP-254)
 
 The long-term backup home (device-backup.sh below is the tarball MVP that
