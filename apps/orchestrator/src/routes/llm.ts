@@ -935,7 +935,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // pins this must work WITHOUT a persisted conversation — the
       // common case is a file attached before the very first turn.
       // Ownership is enforced inside buildAttachmentContext (query is
-      // filtered by the caller's username, matching /api/files/brain).
+      // filtered by brainOwnerId — the caller's req.user.id UUID —
+      // matching /api/files/brain's post-WARP-493 keying).
       if (chatReq.attachments?.length && brainOwnerId) {
         // ── Image vision routing ──
         // For image attachments with a normalized render, send the actual

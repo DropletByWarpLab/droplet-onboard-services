@@ -98,7 +98,13 @@ UPDATE "FileContentChunk"
 -- Any row STILL non-UUID-keyed after the UPDATEs is an orphan: a username
 -- with no matching `User.nextcloudUsername` (pre-pairing junk, or an OCS
 -- user who has not signed in since WARP-485 — their mapping row is written
--- on first sign-in, after which re-running this migration converges them).
+-- on first sign-in). Converging such late arrivals requires an OPERATOR to
+-- manually re-apply this file's SQL via psql: `prisma migrate deploy`
+-- records this migration as applied and will never re-run it. The manual
+-- re-apply is safe and idempotent (UUID-regex guards; orphan rows retain
+-- both the username userId AND username storagePath, so rewrite-then-flip
+-- still applies). The boot-time fs migrator, by contrast, re-runs every
+-- boot and converges the DIRS automatically.
 -- Counts surface in the migrate output for operator review; nothing is
 -- deleted. Mirrors the boot-time fs migrator's orphan posture.
 DO $$

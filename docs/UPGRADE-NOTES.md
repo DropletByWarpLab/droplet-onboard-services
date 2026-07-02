@@ -43,11 +43,27 @@ tests (scratch-Postgres double-apply + vitest integration suite).
 
 **Orphans.** Rows/dirs keyed by a username with no matching
 `User.nextcloudUsername` are logged (`RAISE NOTICE` / orchestrator boot
-log), NEVER deleted, and converge automatically on a later re-run once
-the user signs in (their mapping row is written at first sign-in).
+log) and NEVER deleted. Convergence after the user's first sign-in
+(which writes their mapping row) differs by layer:
+
+- **Dirs converge automatically** — the boot migrator re-runs on every
+  orchestrator start.
+- **Rows do NOT** — `prisma migrate deploy` runs the backfill exactly
+  once, so an operator must manually re-apply the backfill SQL (psql)
+  for users who sign in after the deploy. Safe and fully convergent:
+  orphan rows retain both the username `userId` and the username
+  `storagePath`, so rewrite-then-flip still applies, and the UUID-regex
+  guards make the re-apply idempotent.
+
 `FileContentChunk` is only flipped for `source = 'brain'` rows —
 nextcloud-watcher chunks are username-keyed by design and keep being
 written that way.
+
+**Known transition window.** Between `prisma migrate deploy` (rows +
+`storagePath` already UUID-rewritten) and the boot-time dir rename, the
+file-indexer's transcription worker can ENOENT a queued pre-fix item
+and mark it `failed` — recoverable via the transcribe-now retry once
+the orchestrator is up.
 
 **Deferred gaps (known, deliberate — do not "fix" ad hoc):**
 
