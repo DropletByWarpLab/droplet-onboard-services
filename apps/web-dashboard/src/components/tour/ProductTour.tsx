@@ -315,12 +315,14 @@ function MotifCameras({
   );
 }
 
-// Two remote-access motifs, chosen at render by the live ADR-023 signal
-// (`VpnStatusInfo.publicFqdn`). Until the box learns its publicly-trusted
-// web address from HQ, we show the generic Connect baseline; once it has one,
-// we show the real one-URL-everywhere address with a green padlock.
+// Two remote-access motifs, chosen at render by the live signals from
+// GET /api/vpn/status. WARP-993: the away-from-home story (and the ADR-023
+// one-URL-everywhere upgrade) is gated on `offLanReachable` — the FQDN alone
+// is split-horizon only (no public A record), so until the ADR-025 relay
+// lands the honest baseline talks about the home network and flags the relay
+// as coming soon.
 
-function MotifRemoteVpn() {
+function MotifRemoteVpn({ away }: { away: boolean }) {
   return (
     <div className="flex w-full items-center gap-4 rounded-[14px] border border-separator bg-surface-secondary p-4 text-left">
       <div className="flex h-[88px] w-[88px] flex-none items-center justify-center rounded-[12px] border border-separator bg-surface-primary text-label-primary">
@@ -341,7 +343,9 @@ function MotifRemoteVpn() {
           Your box&rsquo;s own secure web address
         </div>
         <div className="mt-1.5 type-caption-1 text-label-tertiary">
-          One tap on Connect · same address anywhere
+          {away
+            ? "One tap on Connect · same address anywhere"
+            : "Works across your home Wi-Fi · away access coming soon"}
         </div>
       </div>
     </div>
@@ -419,17 +423,40 @@ export const TOUR_STEPS: readonly TourStep[] = [
     glyph: (cn) => <Globe size={26} className={cn} />,
     kicker: "Remote access",
     title: "Remote access is automatic and private",
-    body: "Your box has its own secure web address — the same one at home and away. When you're out, open the Droplet app and turn on Connect: your phone links straight to the box, encrypted end to end, and you open that same address with a green padlock. No dynamic DNS, no subdomain, nothing to install.",
-    motif: (_live) => <MotifRemoteVpn />,
+    // WARP-993: the honest baseline. Until the box reports offLanReachable
+    // (ADR-025 relay live, or a real public endpoint), the secure address only
+    // resolves on the home network — so the default beat never promises away
+    // access; it flags the relay as coming soon instead.
+    body: "Your box has its own secure web address on your home network. Open it from any of your devices at home — encrypted, with a green padlock, and nothing extra to install. Away-from-home access arrives with the secure relay — coming soon.",
+    motif: (_live) => <MotifRemoteVpn away={false} />,
   },
 ];
 
 /**
+ * The remote-access beat with the away-from-home promise, applied ONLY when
+ * the box reports `offLanReachable: true` (WARP-993). Same beat key/shape, so
+ * the resume index, beat dots, and tests are unaffected.
+ */
+function withAwayRemoteStep(steps: readonly TourStep[]): TourStep[] {
+  return steps.map((s) =>
+    s.key === "remote"
+      ? {
+          ...s,
+          body:
+            "Your box has its own secure web address — the same one at home and away. When you're out, open the Droplet app and turn on Connect: your phone links straight to the box, encrypted end to end, and you open that same address with a green padlock. No dynamic DNS, no subdomain, nothing to install.",
+          motif: (_live) => <MotifRemoteVpn away />,
+        }
+      : s,
+  );
+}
+
+/**
  * The remote-access beat upgraded for a box that has learned its
- * publicly-trusted per-device FQDN (ADR-023). Same WireGuard framing, plus the
- * one-URL-everywhere + green-padlock payoff, showing the box's real address.
- * Returned as a fresh array (same length/keys) so the resume index, beat dots,
- * and tests are unaffected.
+ * publicly-trusted per-device FQDN (ADR-023) AND reports it reachable from
+ * outside the LAN. Same WireGuard framing, plus the one-URL-everywhere +
+ * green-padlock payoff, showing the box's real address. Returned as a fresh
+ * array (same length/keys) so the resume index, beat dots, and tests are
+ * unaffected.
  */
 function withFqdnRemoteStep(
   steps: readonly TourStep[],
@@ -473,19 +500,28 @@ export function ProductTour({ onComplete }: { onComplete?: () => void } = {}) {
   // Guard the finish path so a double-click can't fire completeTour + navigate twice.
   const finishedRef = useRef(false);
 
-  // ADR-023: ask the box whether it has a publicly-trusted web address. When
-  // it does, the remote-access beat upgrades to the one-URL/green-padlock story
-  // with the box's real address; until then the generic Connect default stands.
-  // Best-effort — a failed/empty fetch just keeps the default (no over-promise).
-  const [remoteFqdn, setRemoteFqdn] = useState<string | null>(null);
+  // Ask the box how reachable it really is. WARP-993: the away-from-home
+  // promise keys on `offLanReachable` (honest, deterministic — false while the
+  // FQDN is split-horizon only); the ADR-023 one-URL/green-padlock upgrade
+  // additionally needs the publicly-trusted address itself. Best-effort — a
+  // failed/empty fetch keeps the honest home-network baseline (no over-promise).
+  const [remote, setRemote] = useState<{ fqdn: string | null; away: boolean }>({
+    fqdn: null,
+    away: false,
+  });
   useEffect(() => {
     let alive = true;
     fetchVpnStatus()
       .then((s) => {
-        if (alive) setRemoteFqdn(s?.publicFqdn?.trim() || null);
+        if (alive) {
+          setRemote({
+            fqdn: s?.publicFqdn?.trim() || null,
+            away: s?.offLanReachable === true,
+          });
+        }
       })
       .catch(() => {
-        /* no signal — keep the generic Connect baseline */
+        /* no signal — keep the honest home-network baseline */
       });
     return () => {
       alive = false;
@@ -562,7 +598,13 @@ export function ProductTour({ onComplete }: { onComplete?: () => void } = {}) {
   // Merge the SWR-sourced health into the batched live data passed to motifs.
   const liveData: TourLiveData = { ...live, health: healthData ?? null };
 
-  const steps = remoteFqdn ? withFqdnRemoteStep(TOUR_STEPS, remoteFqdn) : TOUR_STEPS;
+  // WARP-993: honest baseline unless the box is genuinely reachable off-LAN;
+  // then the away promise, upgraded further with the real FQDN when known.
+  const steps = remote.away
+    ? remote.fqdn
+      ? withFqdnRemoteStep(TOUR_STEPS, remote.fqdn)
+      : withAwayRemoteStep(TOUR_STEPS)
+    : TOUR_STEPS;
   const isFirst = index === 0;
   const isLast = index === steps.length - 1;
   const step = steps[index];
