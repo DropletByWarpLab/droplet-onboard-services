@@ -1966,12 +1966,38 @@ export function createProtectedAuthRouter(
       const { secret, otpauthUri } = generateTotpEnrollment(label);
       const secretEnc = encryptTotpSecret(secret);
 
-      // Upsert the pending credential. confirmedAt stays null until verify.
-      await prisma.totpCredential.upsert({
-        where: { userId },
-        create: { userId, secretEnc, confirmedAt: null },
-        update: { secretEnc, confirmedAt: null },
+      // WARP-991 — the (re-)mint must be ATOMIC on "still unconfirmed". The
+      // old check-then-upsert had a TOCTOU hole: an enroll whose pre-check
+      // above read a PENDING row could land its unconditional upsert AFTER a
+      // concurrent verify set confirmedAt, silently flipping an enabled
+      // factor back to pending (and the deleteMany below then wiped the
+      // just-minted recovery codes). The owner walks away believing 2FA is
+      // on while login skips the challenge. The guarded updateMany only
+      // touches a row that is still pending; count 0 with a row present
+      // means verify won the race → honour the 409 contract, never clobber.
+      const reset = await prisma.totpCredential.updateMany({
+        where: { userId, confirmedAt: null },
+        data: { secretEnc },
       });
+      if (reset.count === 0) {
+        const row = await prisma.totpCredential.findUnique({
+          where: { userId },
+        });
+        if (row) {
+          res.status(409).json({
+            error: "Two-factor authentication is already enabled.",
+            code: "TOTP_ALREADY_ENABLED",
+          });
+          return;
+        }
+        // First enrollment — no row yet. A concurrent first-enroll losing
+        // this create races into P2002, which the error handler maps to a
+        // 409 the dashboard's "Try again" retries into the guarded-update
+        // path above — never a clobber.
+        await prisma.totpCredential.create({
+          data: { userId, secretEnc, confirmedAt: null },
+        });
+      }
 
       // Clear any recovery codes from a PRIOR confirmed-then-disabled TOTP
       // credential. The invariant is "recovery codes exist iff a confirmed
@@ -2044,10 +2070,34 @@ export function createProtectedAuthRouter(
       // First successful verify → enable + mint recovery codes. Clear any
       // stale codes from a prior (re-)enrollment so the displayed set is
       // the only valid set.
-      await prisma.totpCredential.update({
-        where: { userId },
+      //
+      // WARP-991 — guarded confirm: only flip the row while it still holds
+      // the EXACT secret this code was verified against and is still
+      // pending. A concurrent re-enroll rotates secretEnc between our read
+      // and this write; a blind `update where {userId}` would stamp
+      // confirmedAt onto a secret no authenticator app ever saw and lock
+      // the owner out at the next login.
+      const confirmed = await prisma.totpCredential.updateMany({
+        where: { userId, secretEnc: cred.secretEnc, confirmedAt: null },
         data: { confirmedAt: new Date() },
       });
+      if (confirmed.count === 0) {
+        const now = await prisma.totpCredential.findUnique({
+          where: { userId },
+        });
+        if (now?.confirmedAt && now.secretEnc === cred.secretEnc) {
+          // A concurrent verify of the SAME enrollment won the confirm —
+          // behave like the re-challenge path rather than failing a
+          // correct code (its winner already carried the recovery codes).
+          res.json({ enabled: true });
+          return;
+        }
+        // The pending secret was rotated under us (concurrent re-enroll) —
+        // this code no longer matches the stored enrollment. Same contract
+        // as a wrong code: the client stays put and re-tries.
+        res.status(401).json({ error: "Invalid code", code: "TOTP_INVALID" });
+        return;
+      }
       const { plaintext, hashes } = await generateRecoveryCodes();
       await prisma.recoveryCode.deleteMany({ where: { userId } });
       await prisma.recoveryCode.createMany({

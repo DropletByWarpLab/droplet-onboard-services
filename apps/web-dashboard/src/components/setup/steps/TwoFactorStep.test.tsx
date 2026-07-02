@@ -88,6 +88,92 @@ describe("TwoFactorStep", () => {
     expect(screen.queryByText(/aaaa-1111/)).not.toBeInTheDocument();
   });
 
+  // ── WARP-991 — the step may advance ONLY on a confirmed verify ──
+  // Live evidence (.87): the 2-step screen advanced while the DB kept
+  // TotpCredential.confirmedAt = NULL — the owner believed 2FA was on and
+  // login skipped the challenge. Every non-confirming outcome must keep the
+  // owner on this step with an inline error.
+  describe("advance is gated on a confirmed verify (WARP-991)", () => {
+    it("a failed verify (500) shows an inline error and never advances — onComplete not called", async () => {
+      verifyTotp.mockRejectedValueOnce(
+        Object.assign(new Error("Internal error"), { status: 500 }),
+      );
+      const onComplete = vi.fn();
+      render(<TwoFactorStep onComplete={onComplete} onSkip={vi.fn()} />);
+      await screen.findByAltText(/qr code/i);
+
+      fireEvent.change(screen.getByLabelText(/6-digit code/i), {
+        target: { value: "123456" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: /verify & enable/i }));
+
+      expect(await screen.findByText(/didn't match/i)).toBeInTheDocument();
+      // Still on the enroll phase — no codes screen, no advancement.
+      expect(screen.queryByText(/save your recovery codes/i)).not.toBeInTheDocument();
+      expect(screen.getByLabelText(/6-digit code/i)).toBeInTheDocument();
+      expect(onComplete).not.toHaveBeenCalled();
+    });
+
+    it("a 2xx without enabled:true stays here with an inline error", async () => {
+      verifyTotp.mockResolvedValueOnce({ enabled: false });
+      const onComplete = vi.fn();
+      render(<TwoFactorStep onComplete={onComplete} onSkip={vi.fn()} />);
+      await screen.findByAltText(/qr code/i);
+
+      fireEvent.change(screen.getByLabelText(/6-digit code/i), {
+        target: { value: "123456" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: /verify & enable/i }));
+
+      expect(
+        await screen.findByText(/couldn't turn on two-factor/i),
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/save your recovery codes/i)).not.toBeInTheDocument();
+      expect(onComplete).not.toHaveBeenCalled();
+    });
+
+    it("a confirmed 200 WITHOUT recovery codes (re-challenge contract: factor already on) shows the honest 'already on' screen, not an empty codes card", async () => {
+      verifyTotp.mockResolvedValueOnce({ enabled: true });
+      const onComplete = vi.fn();
+      render(<TwoFactorStep onComplete={onComplete} onSkip={vi.fn()} />);
+      await screen.findByAltText(/qr code/i);
+
+      fireEvent.change(screen.getByLabelText(/6-digit code/i), {
+        target: { value: "123456" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: /verify & enable/i }));
+
+      expect(
+        await screen.findByText(/two-factor is already on/i),
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/save your recovery codes/i)).not.toBeInTheDocument();
+      // Advancing stays an explicit act.
+      expect(onComplete).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: /^continue$/i }));
+      expect(onComplete).toHaveBeenCalledTimes(1);
+    });
+
+    it("Enter while a verify is in flight does not fire a second, concurrent verify", async () => {
+      let resolveVerify!: (v: unknown) => void;
+      verifyTotp.mockImplementationOnce(
+        () => new Promise((resolve) => (resolveVerify = resolve)),
+      );
+      render(<TwoFactorStep onComplete={vi.fn()} onSkip={vi.fn()} />);
+      await screen.findByAltText(/qr code/i);
+
+      const input = screen.getByLabelText(/6-digit code/i);
+      fireEvent.change(input, { target: { value: "123456" } });
+      // The footer button disables while busy, but the input's Enter key
+      // is not gated by it — the re-entrancy guard must hold there too.
+      fireEvent.keyDown(input, { key: "Enter" });
+      fireEvent.keyDown(input, { key: "Enter" });
+      expect(verifyTotp).toHaveBeenCalledTimes(1);
+
+      resolveVerify({ enabled: true, recoveryCodes: ["aaaa-1111"] });
+      expect(await screen.findByText("aaaa-1111")).toBeInTheDocument();
+    });
+  });
+
   it("offers a retry when enrollment fails", async () => {
     enrollTotp.mockReset();
     enrollTotp
