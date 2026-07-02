@@ -446,6 +446,24 @@ const envSchema = z.object({
     ),
   DROPLET_OTA_GITHUB_TOKEN: z.string().default(""),
   DROPLET_OTA_POLL_INTERVAL: z.coerce.number().int().min(60).finite().default(900),
+  // WARP-539 — apply + health-gated swap + auto-rollback. The apply path is the
+  // ONLY thing that drives the host Docker daemon, and only through the audited
+  // host helper scripts/lib/apply-update.sh over the mounted compose socket
+  // (docker/docker-compose.yml, orchestrator service ONLY — see the WARP-539
+  // volume comment there).
+  //   APPLY_SCRIPT   — absolute path to apply-update.sh as mounted in the
+  //                    orchestrator container. Empty (the default) DISABLES the
+  //                    apply window: the box still polls + tracks pending
+  //                    releases, but never swaps containers. This is the correct
+  //                    posture for dev laptops + CI (no host socket) and until
+  //                    the compose socket mount is provisioned on a box.
+  //   COMPOSE_FILE   — the on-host compose file the helper drives.
+  //   UPDATES_DIR    — root for <updateId>/{backup,configs.tar.gz}; the 7-day
+  //                    backup GC (daily purge cron) reaps terminal-update dirs
+  //                    under it. Maps to a named volume on the box.
+  DROPLET_OTA_APPLY_SCRIPT: z.string().default(""),
+  DROPLET_OTA_COMPOSE_FILE: z.string().default("/opt/droplet/docker/docker-compose.yml"),
+  DROPLET_OTA_UPDATES_DIR: z.string().default("/data/updates"),
 
   // WARP-808: which deployment shape broadcasts the home Wi-Fi AP. This is the
   // SAME knob the device-bridge reads (services/oled-display/device-bridge.py)

@@ -34,8 +34,14 @@ import { startApDiscoveryPoller } from "./services/ap-discovery-poller.js";
 import { sweepExpiredGuests } from "./services/guest-expiry-sweep.service.js";
 import { purgeCameraArtifacts } from "./services/camera-retention-purge.service.js";
 import { reconcileStaleSending } from "./services/email-reconcile.service.js";
-import { checkForUpdate, runApplyWindow } from "./services/update-agent/poller.js";
+import { checkForUpdate } from "./services/update-agent/poller.js";
 import { getUpdateAgentSettings } from "./services/update-agent/settings.js";
+import {
+  applyWindowTick,
+  resumeInterruptedApply,
+} from "./services/update-agent/apply.js";
+import { createHostComposeRunner } from "./services/update-agent/host-compose-runner.js";
+import { purgeUpdateBackups } from "./services/update-agent/purge-update-backups.js";
 import { createTlsIssuanceService } from "./services/tls-issuance.service.js";
 import {
   createHqIssuanceClient,
@@ -457,6 +463,14 @@ async function main() {
         prisma,
         config.DROPLET_AUDIT_RETENTION_DAYS,
       );
+      // WARP-539: 7-day GC of the per-update rollback backups
+      // (<updatesDir>/<id>/backup — previous digests + config pre-image +
+      // schema dump). Only backups for TERMINAL updates older than the
+      // window are reaped; a live rollback target (pending/verifying/applying)
+      // is never touched. No-op on a box that never ran an apply.
+      const backupPurge = await purgeUpdateBackups(prisma, {
+        updatesDir: config.DROPLET_OTA_UPDATES_DIR,
+      });
       logger.info(
         {
           eventsDeleted,
@@ -469,6 +483,7 @@ async function main() {
           commandAuditDeleted: auditPurge.commandAuditDeleted,
           notificationDeleted: auditPurge.notificationDeleted,
           auditRetentionSkipped: auditPurge.skipped,
+          updateBackupsPurged: backupPurge.purged,
         },
         "daily purges complete",
       );
@@ -525,17 +540,58 @@ async function main() {
   // superseding any prior pending. A verification failure writes NO row.
   //
   // Apply window (cron from the persisted update-agent settings, default
-  // 03:00): an HONEST WARP-539 stub — logs the pending release + autoApply
-  // and advances nothing; the health-gated swap + rollback land in
-  // WARP-539. The spec is read once at boot; a settings change applies on
-  // the next orchestrator restart (the WARP-540 routes will note this).
+  // 03:00): WARP-539 — apply + health-gated swap + auto-rollback. When the
+  // apply helper is provisioned (DROPLET_OTA_APPLY_SCRIPT set + the compose
+  // socket mounted on this service ONLY, see docker/docker-compose.yml) the
+  // window runs the full state machine over a production host-compose runner;
+  // on a box/CI without the socket the script path is empty, the runner is
+  // absent, and the window HONESTLY no-ops (the poller still tracks pending
+  // releases — apply just never fires).
   //
   // Both ride cron-runtime (no `while (true)`, per CLAUDE.md) with
   // advisory locks so multi-instance deploys single-fire. Errors propagate
   // naked to safeRun — same consecutiveFailures-canary posture as every
-  // other cron in this file (checkForUpdate itself returns typed outcomes
-  // for expected failures; only genuine bugs throw).
+  // other cron in this file (checkForUpdate + applyWindowTick return typed
+  // outcomes for expected failures; only genuine bugs throw).
   const updateAgentSettings = await getUpdateAgentSettings(prisma);
+  const otaApplyRunner = config.DROPLET_OTA_APPLY_SCRIPT
+    ? createHostComposeRunner({
+        scriptPath: config.DROPLET_OTA_APPLY_SCRIPT,
+        composeFile: config.DROPLET_OTA_COMPOSE_FILE,
+        updatesDir: config.DROPLET_OTA_UPDATES_DIR,
+      })
+    : null;
+  const otaApplyOpts = otaApplyRunner
+    ? {
+        prisma,
+        runner: otaApplyRunner,
+        releasesLatestUrl: config.DROPLET_OTA_RELEASES_URL,
+        githubToken: config.DROPLET_OTA_GITHUB_TOKEN || undefined,
+      }
+    : null;
+
+  // onStart resume hook: if the previous orchestrator process died mid-apply,
+  // this boot is either the freshly-swapped orchestrator (health-gate all +
+  // commit) or the old one after a detached rollback (write the rolled_back /
+  // failed verdict). Runs BEFORE the window cron so a resumed apply settles
+  // before a new window can start. No-op when the row set is clean or apply is
+  // disabled on this box.
+  if (otaApplyOpts) {
+    try {
+      const resumed = await resumeInterruptedApply(otaApplyOpts);
+      if (resumed.outcome !== "nothing_to_resume") {
+        logger.info(
+          { event: "update.resume", outcome: resumed.outcome },
+          "OTA apply resume hook ran at boot",
+        );
+      }
+    } catch (err) {
+      // A resume failure must not block orchestrator boot — log loudly and
+      // let the next window retry (the row's status is still an exact cursor).
+      logger.error({ err, event: "update.resume_failed" }, "OTA apply resume hook threw at boot");
+    }
+  }
+
   cronRuntime.scheduleInterval(
     config.DROPLET_OTA_POLL_INTERVAL * 1000,
     async () => {
@@ -550,7 +606,12 @@ async function main() {
   cronRuntime.scheduleCron(
     updateAgentSettings.applyWindowCron,
     async () => {
-      await runApplyWindow(prisma);
+      if (!otaApplyOpts) {
+        // Apply is disabled on this box (no host compose socket) — the poller
+        // keeps tracking pending releases; the swap just never fires here.
+        return;
+      }
+      await applyWindowTick(otaApplyOpts);
     },
     { lockKey: "droplet:update-agent.apply-window" },
   );
