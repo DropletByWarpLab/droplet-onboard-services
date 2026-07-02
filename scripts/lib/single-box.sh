@@ -414,6 +414,13 @@ configure_single_box_env() {
   # rename(2) is atomic on the same filesystem and no consumer depends on the
   # .env inode; the staging copy is created under umask 077 and chmod'd 600
   # explicitly so the secrets-bearing file never transits world-readable.
+  # Sweep staging siblings a previous interrupted run may have stranded
+  # (process died between creating the stage and the mv) — they carry the same
+  # secrets as .env and must not accumulate. Mirrors the .tmp.* / .migrate.*
+  # sweeps in generate_env / migrate_env. Safe: concurrent runs are excluded
+  # by setup.sh's lockfile, so no live stage can be swept.
+  rm -f "$env_file".upsert.* 2>/dev/null || true
+
   upsert_env() {
     local key="$1" val="$2"
     local stage="${env_file}.upsert.$$"

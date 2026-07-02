@@ -631,8 +631,16 @@ if [ -f "$REPO_ROOT/.env" ]; then
   log_success "Removed .env (device secrets)"
 fi
 
-# .env backups
-for f in "$REPO_ROOT"/.env.bak.*; do
+# .env backups + WARP-595 recovery/staging siblings. The torn-file copies
+# (.env.torn.*) and any staging files stranded by an interrupted setup run
+# (.env.tmp.*, .env.migrate.*, .env.upsert.*) carry the SAME device secrets
+# as .env itself — a factory reset must not leak the prior owner's
+# credentials through them.
+for f in "$REPO_ROOT"/.env.bak.* \
+         "$REPO_ROOT"/.env.torn.* \
+         "$REPO_ROOT"/.env.tmp.* \
+         "$REPO_ROOT"/.env.migrate.* \
+         "$REPO_ROOT"/.env.upsert.*; do
   [ -f "$f" ] && rm -f "$f" && log_success "Removed $(basename "$f")"
 done
 

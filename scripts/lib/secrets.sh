@@ -36,6 +36,16 @@ _ENV_CORE_KEYS=(
 #   * the last line was cut mid-write (no trailing newline), or
 #   * any always-generated core key is missing (truncation is prefix-
 #     preserving, so a cut heredoc loses the tail keys).
+#
+# Known residual window (legacy writers only): a .env cut INSIDE the first
+# header line — i.e. the write died within the first ~100 bytes — fails the
+# header gate above and goes undetected (it just looks operator-authored, so
+# generation is skipped). Only the pre-atomic-write setup versions could
+# produce such a file; the staged+renamed write below can't. Accepted: closing
+# it would require loosening the header match, which risks false positives on
+# genuinely operator-authored files — a worse trade than a sub-100-byte legacy
+# window whose stack was never functional anyway (_validate_env catches it and
+# points at --regenerate-env).
 _env_file_is_torn() {
   local f="$1"
   [ -f "$f" ] || return 1
@@ -1035,7 +1045,22 @@ _generate_tls_cert() {
     # imported the original cert. If the installed cert is a public-CA leaf,
     # leave the fullchain in place and return success.
     if _cert_is_public_ca_leaf "$cert_file"; then
-      log_success "TLS certificate is a publicly-trusted (public-CA) leaf — preserving it (ADR-023)"
+      if _tls_pair_matches "$cert_file" "$key_file"; then
+        log_success "TLS certificate is a publicly-trusted (public-CA) leaf — preserving it (ADR-023)"
+      else
+        # WARP-595: preserving is still correct — setup cannot mint public-CA
+        # material, and clobbering with self-signed would break the trust
+        # story — but this must NEVER read as a clean success. The 04:00
+        # tls-issuance cron does NOT heal a torn pair outside the ≤30-day
+        # renew window (its decision is DB-state-driven; it never checks the
+        # on-disk key), so a broken public-CA pair can sit unloadable for
+        # weeks while nginx fails to load it. Tell the operator to trigger
+        # re-issuance instead of waiting for the renew window.
+        log_warn "TLS certificate is a public-CA leaf but the private key does NOT match it (torn issuance write)"
+        log_warn "  Preserving the fullchain (setup cannot mint public-CA material) — but nginx may fail to"
+        log_warn "  load this pair. Trigger re-issuance manually rather than waiting for the ≤30-day renew"
+        log_warn "  window (the issuance cron never checks the on-disk key)."
+      fi
       return 0
     fi
 

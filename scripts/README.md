@@ -131,8 +131,12 @@ is reclaimed automatically when its PID is dead (no 1-hour wait, no manual
   restored from the newest complete `.env.bak.*` when one exists, otherwise
   regenerated fresh with a loud warning. Docker secret files and the audit
   signing key were already staged+renamed; the TLS cert/key pair is now also
-  verified to *match* — a torn cert/key pair is restored from the
+  verified to *match* — a torn self-signed pair is restored from the
   `.bootstrap` trust anchor (or regenerated) instead of being kept forever.
+  One carve-out: a torn **public-CA** pair is *preserved with a loud
+  warning* (setup cannot mint public-CA material) — it heals via
+  re-issuance, which the operator should trigger rather than waiting for
+  the renew window.
 - **Phase 3 / single-box host files.** Files behind "write only if missing"
   guards (`/etc/default/droplet-openwrt-attach`, `droplet-cameras.conf`,
   udev rules) are staged+renamed, so the guard can never latch onto a

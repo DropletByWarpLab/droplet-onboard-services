@@ -472,6 +472,74 @@ test_mismatched_pair_regenerates_without_bootstrap() {
 }
 
 # =============================================================================
+# Test 7 (WARP-595 QA note): public-CA leaf + mismatched key → preserved, but
+# WARNED — never a silent success
+# =============================================================================
+#
+# Setup cannot mint public-CA material, so preserving the fullchain is correct
+# even when the on-disk key doesn't match (a torn issuance write). But the
+# 04:00 issuance cron only re-issues inside the ≤30-day renew window (its
+# decision is DB-state-driven; it never checks the on-disk key), so a broken
+# public-CA pair can sit unloadable for weeks. The preserve branch must
+# therefore surface the mismatch on stderr as a WARNING telling the operator
+# to trigger re-issuance — not report unqualified success.
+test_public_ca_broken_pair_preserved_but_warned() {
+  local sandbox certs crt key
+  sandbox="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$sandbox'" RETURN
+  certs="$sandbox/docker/certs"
+  mkdir -p "$certs"
+  crt="$certs/droplet.crt"; key="$certs/droplet.key"
+
+  # Public-CA-style leaf (issuer != subject) whose key is then replaced by an
+  # unrelated keypair's key — the torn-issuance shape.
+  _make_ca_signed_leaf "$sandbox" "$crt" "$key" 90
+  local full_san="DNS:localhost,DNS:droplet,DNS:droplet.local,DNS:droplet.lan,DNS:droplet-ai,DNS:droplet-ai.local,DNS:droplet-ai.lan,IP:127.0.0.1"
+  _make_self_signed "$sandbox/unrelated.crt" "$key" "$full_san" 3650
+
+  local before_crt_sha before_key_sha
+  before_crt_sha="$(_sha "$crt")"; before_key_sha="$(_sha "$key")"
+
+  # Run with stderr captured so we can inspect the warning.
+  local err_file="$sandbox/stderr.txt"
+  (
+    set +e
+    # shellcheck source=/dev/null
+    source "$LOGGING_SH" >/dev/null 2>&1 || exit 90
+    reload_gateway_nginx() { return 0; }
+    export REPO_ROOT="$sandbox"
+    # shellcheck source=/dev/null
+    source "$SECRETS_SH" >/dev/null 2>&1 || exit 91
+    _generate_tls_cert >/dev/null 2>"$err_file"
+    exit $?
+  )
+  local rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf "    _generate_tls_cert returned non-zero on a broken public-CA pair (must preserve + continue)\n" >&2
+    return 1
+  fi
+
+  # Preservation is unchanged: both files byte-identical.
+  if [ "$(_sha "$crt")" != "$before_crt_sha" ] || [ "$(_sha "$key")" != "$before_key_sha" ]; then
+    printf "    broken public-CA pair was modified — preservation behaviour must not change\n" >&2
+    return 1
+  fi
+
+  # …but the mismatch must be surfaced as a WARNING mentioning re-issuance.
+  if ! grep -qi 'mismatch\|do not match\|does not match' "$err_file"; then
+    printf "    no pair-mismatch warning on stderr — a broken public-CA pair was reported as clean success\n" >&2
+    return 1
+  fi
+  if ! grep -qi 're-issuance\|reissuance\|issuance' "$err_file"; then
+    printf "    warning does not point the operator at re-issuance\n" >&2
+    return 1
+  fi
+
+  return 0
+}
+
+# =============================================================================
 # Driver
 # =============================================================================
 printf "\n  ${_BOLD}secrets.sh TLS-clobber regression test suite${_RESET}\n"
@@ -495,6 +563,9 @@ _run_test "mismatched cert/key pair + valid .bootstrap is restored (WARP-595)" \
 
 _run_test "mismatched cert/key pair without bootstrap is regenerated as a matching pair (WARP-595)" \
   test_mismatched_pair_regenerates_without_bootstrap
+
+_run_test "public-CA leaf with a mismatched key is preserved but WARNED (WARP-595)" \
+  test_public_ca_broken_pair_preserved_but_warned
 
 printf "\n  ──────────────────────────────────\n"
 printf "  Results: %d/%d passed" "$PASSED" "$TOTAL"

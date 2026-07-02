@@ -1099,6 +1099,46 @@ else
   fail "setup_udev_rules writes 99-droplet-cameras.rules in place behind an existence guard"
 fi
 
+# (10) Behavioural: a stale .env.upsert.* sibling left by an interrupted
+# previous run (the process died between creating the stage and the mv) is
+# cleaned up by the next configure_single_box_env run — it is secrets-bearing
+# litter that would otherwise accumulate forever. Reuses the Phase-3 docker
+# stub machinery (REPO_ROOT is still the Phase-3 sandbox).
+T9_STALE="$TMP_ROOT/.env.upsert.424242"
+printf 'SECRET=leftover\n' > "$T9_STALE"
+cat > "$SB_STUB_BIN/docker" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "network" ] && [ "\$2" = "inspect" ]; then
+  printf '%s\n' "$SB_FAKE_GW"
+  exit 0
+fi
+exit 0
+EOF
+chmod +x "$SB_STUB_BIN/docker"
+PATH="$SB_STUB_BIN:$PATH"
+configure_single_box_env >/dev/null 2>&1 || true
+PATH="$SB_OLD_PATH"
+if [ ! -f "$T9_STALE" ]; then
+  pass "configure_single_box_env removes stale .env.upsert.* siblings from an interrupted run"
+else
+  fail "stale .env.upsert.* sibling survives configure_single_box_env (secrets-bearing litter accumulates)"
+fi
+
+# (11) Static: factory-reset.sh's generated-file wipe must also remove the
+# WARP-595 staging/torn siblings (.env.torn.*, .env.tmp.*, .env.migrate.*,
+# .env.upsert.*) — they carry the same secrets as .env and previously
+# survived a factory reset.
+FACTORY_RESET_SH="$REPO_ROOT_REAL/scripts/factory-reset.sh"
+T9_WIPE_OK=true
+for T9_PAT in '.env.torn.' '.env.tmp.' '.env.migrate.' '.env.upsert.'; do
+  grep -qF "$T9_PAT" "$FACTORY_RESET_SH" || T9_WIPE_OK=false
+done
+if [ "$T9_WIPE_OK" = "true" ]; then
+  pass "factory-reset.sh wipes the .env staging/torn siblings (secrets-bearing)"
+else
+  fail "factory-reset.sh does not wipe all .env staging/torn siblings (.env.{torn,tmp,migrate,upsert}.*)"
+fi
+
 # =============================================================================
 # Results
 # =============================================================================
