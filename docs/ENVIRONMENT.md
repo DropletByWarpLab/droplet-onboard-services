@@ -68,6 +68,15 @@ trust, PM secrets) are summarized in [`CLAUDE.md`](../CLAUDE.md).
 | `DISPLAY_SERVICE_URL`| OLED/TFT display service endpoint (default `http://host.docker.internal:8082` — display runs host-mode on the inference host) |
 | `ROUTING_MODE`       | `real` (default) / `mock` (fixture-driven, no OpenWrt needed) / `disabled` (orchestrator skips router calls). See WARP-44. |
 | `CONTAINER_PIDS_LIMIT` | Global PID limit applied to all services (default `512`). Raise for services with many worker threads. |
+| `ANALYTICS_ENABLED` | Master switch for the fleet-analytics agent (WARP-615, epic WARP-614) — the on-device telemetry producer for the `droplet-analytics` fleet portal. **Default OFF**; explicit string→bool, only `1`/`true` enable (`0`/`false`/unset stay off). Disabled or unconfigured ⇒ the analytics façade is a pure no-op (fail-open, decision D5) with one info log at boot |
+| `ANALYTICS_URL` | Portal base URL including the version path (default `http://host.docker.internal:3000/api/v1` — a LOCAL portal via the host gateway; point at `https://analytics.warp-lab.ai/api/v1` for the fleet portal). Deliberately not schema-validated as a URL: a mangled value degrades to the no-op façade instead of crashing boot |
+| `ANALYTICS_INGEST_TOKEN` | **Secret** bearer for the portal's agent-API (`dpl_<machineId>_<secret>`). Pre-set it to bypass registration; otherwise WARP-616 mints one from the provisioning code. Lives only in `.env`; never logged |
+| `ANALYTICS_PROVISIONING_CODE` | **Secret** single-use code from the portal's `/settings/tokens`, exchanged once at `POST /agents/register` (WARP-616). Either this or `ANALYTICS_INGEST_TOKEN` must be set for the agent to activate |
+| `ANALYTICS_MACHINE_TIER` | Registration tier reported to the portal: `home` (default) / `business` / `enterprise`. Plain string (typo ⇒ registration rejects it, boot unaffected) |
+| `ANALYTICS_HEARTBEAT_INTERVAL_S` | Heartbeat cadence in seconds (default `30`; portal flags `degraded` after 90 s gap, `offline` after 5 min). Consumed by WARP-620 via cron-runtime |
+| `ANALYTICS_METRICS_FLUSH_S` | Metrics batch flush cadence in seconds (default `60` — under the portal's 4/min per-machine limit). Consumed by WARP-617 |
+| `ANALYTICS_EVENTS_FLUSH_S` | Events batch flush cadence in seconds (default `5`, ≤100 events per batch). Consumed by WARP-617 |
+| `ANALYTICS_ERROR_DEDUP_WINDOW_S` | Per-fingerprint error suppression window in seconds (default `60` — keeps a flapping error under the portal's 60/min limit). Consumed by WARP-617 |
 | `GATEWAY_MEM_LIMIT` | nginx mem ceiling (default `128m`) |
 | `WEB_DASHBOARD_MEM_LIMIT` | Next.js mem ceiling (default `384m`) |
 | `ORCHESTRATOR_MEM_LIMIT` | Orchestrator mem ceiling (default `768m`) |
