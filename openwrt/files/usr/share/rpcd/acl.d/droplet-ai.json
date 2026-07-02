@@ -29,7 +29,11 @@
         "service": ["set", "delete", "signal", "event"],
         "session": ["login", "destroy"],
         "hostapd.*": ["del_client"],
-        "wireguard": ["*"]
+        "wireguard": ["*"],
+        "file": ["exec"]
+      },
+      "file": {
+        "/etc/init.d/dnsmasq restart": ["exec"]
       },
       "uci": ["network", "wireless", "dhcp", "firewall", "system"]
     }
