@@ -94,6 +94,11 @@ export interface ActivityActor {
  *     sites that have the principal string keep it in `refs`
  *     (e.g. `refs.principal`);
  *   - no `req.user` (pre-auth surface) → `anonymous`.
+ *
+ * Deliberate divergence: `network-safety.service.ts` maps `_service:*`
+ * principals to `ai` instead — network ops from service principals
+ * arrive through the MCP/agent channel, which IS agent-loop-driven.
+ * Do not "unify" the two mappings; each is surface-appropriate.
  */
 export function actorFromRequest(req: {
   user?: { id: string; role?: string } | undefined;

@@ -12,6 +12,14 @@ import {
   confirmNetworkCommand,
 } from "../services/network-safety.service.js";
 
+// WARP-181: spy on the signed activity emitter so logNetworkCommand's
+// actor derivation runs under assertion (the real recorder singleton is
+// uninitialized in unit tests, which would silently no-op).
+const recordActivityMock = vi.fn().mockResolvedValue(null);
+vi.mock("../services/activity.singleton.js", () => ({
+  recordActivity: (...a: unknown[]) => recordActivityMock(...a),
+}));
+
 function createMockPrisma() {
   const prisma = new PrismaClient() as unknown as PrismaClient & {
     commandAuditLog: {
@@ -313,5 +321,95 @@ describe("confirmNetworkCommand (WARP-41)", () => {
       operation: "add_port_forward",
     });
     expect(b.confirmed).toBe(true);
+  });
+});
+
+describe("logNetworkCommand actor derivation (WARP-181)", () => {
+  let prisma: ReturnType<typeof createMockPrisma>;
+
+  beforeEach(() => {
+    prisma = createMockPrisma();
+    recordActivityMock.mockClear();
+  });
+
+  function lastActivityRow(): Record<string, any> {
+    expect(recordActivityMock).toHaveBeenCalled();
+    return recordActivityMock.mock.calls[
+      recordActivityMock.mock.calls.length - 1
+    ]![0];
+  }
+
+  it("a '_service:*' principal is the AI acting: actor ai with a null on-behalf-of id", async () => {
+    await evaluateNetworkCommand(
+      prisma,
+      "firewall.block.aa:bb:cc:dd:ee:01",
+      "block_device",
+      { mac: "aa:bb:cc:dd:ee:01" },
+      "_service:mcp",
+    );
+    const row = lastActivityRow();
+    expect(row.kind).toBe("network");
+    expect(row.actor).toEqual({ type: "ai", id: null });
+  });
+
+  it("source === 'ai' with a human UUID: actor ai carrying the on-behalf-of id", async () => {
+    await evaluateNetworkCommand(
+      prisma,
+      "firewall.block.aa:bb:cc:dd:ee:02",
+      "block_device",
+      { mac: "aa:bb:cc:dd:ee:02" },
+      "uuid-alice",
+      "ai",
+    );
+    expect(lastActivityRow().actor).toEqual({ type: "ai", id: "uuid-alice" });
+  });
+
+  it("a human UUID under the api source: actor user with the UUID", async () => {
+    await evaluateNetworkCommand(
+      prisma,
+      "firewall.block.aa:bb:cc:dd:ee:03",
+      "block_device",
+      { mac: "aa:bb:cc:dd:ee:03" },
+      "uuid-alice",
+    );
+    expect(lastActivityRow().actor).toEqual({ type: "user", id: "uuid-alice" });
+  });
+
+  it("no caller id under the api source: actor anonymous", async () => {
+    await evaluateNetworkCommand(
+      prisma,
+      "firewall.block.aa:bb:cc:dd:ee:04",
+      "block_device",
+      { mac: "aa:bb:cc:dd:ee:04" },
+      undefined,
+    );
+    expect(lastActivityRow().actor).toEqual({ type: "anonymous" });
+  });
+
+  it("a human confirming a service-minted pending op emits a user actor with the human's UUID", async () => {
+    // Agent PROPOSES: the MCP service principal mints the pending op…
+    const minted = await evaluateNetworkCommand(
+      prisma,
+      "firewall.block.aa:bb:cc:dd:ee:05",
+      "block_device",
+      { mac: "aa:bb:cc:dd:ee:05" },
+      "_service:mcp",
+      "ai",
+    );
+    expect("confirmationToken" in minted).toBe(true);
+    const token = (minted as any).confirmationToken as string;
+    recordActivityMock.mockClear();
+
+    // …a human DISPOSES: the confirm row is attributed to the human,
+    // source api (the agent can never self-approve).
+    const result = await confirmNetworkCommand(prisma, token, "uuid-owner", {
+      operation: "block_device",
+    });
+    expect(result.confirmed).toBe(true);
+    expect(recordActivityMock).toHaveBeenCalledTimes(1);
+    const row = lastActivityRow();
+    expect(row.actor).toEqual({ type: "user", id: "uuid-owner" });
+    expect(row.refs.confirmed).toBe(true);
+    expect(row.refs.blocked).toBe(false);
   });
 });
