@@ -36,6 +36,7 @@ import {
 } from "../services/vpn.service.js";
 import { notePeerCreated } from "../services/screen-qr.service.js";
 import { requireRole } from "../middleware/auth.js";
+import { computeOffLanReachable } from "../lib/remote-access.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("vpn-route");
@@ -117,10 +118,16 @@ export function createVpnRouter(prisma: PrismaClient): Router {
       // the Remote Access page can show the one address that works at home AND
       // over the tunnel. Empty until the box learns it from HQ.
       const publicFqdn = config.DROPLET_PUBLIC_FQDN || null;
+      // WARP-993: is the minted conf actually reachable from OUTSIDE the home
+      // LAN? FQDN-only is split-horizon (no public A record) → false until the
+      // ADR-025 relay lands. Deterministic env inspection — no DNS lookups.
+      // Every "from anywhere" surface in the dashboard gates on this.
+      const offLanReachable = computeOffLanReachable();
       if (!status) {
         return res.json({
           configured: false,
           endpointConfigured,
+          offLanReachable,
           publicFqdn,
           message: "VPN not yet bootstrapped — POST /api/vpn/peers to start.",
         });
@@ -128,6 +135,7 @@ export function createVpnRouter(prisma: PrismaClient): Router {
       res.json({
         configured: true,
         endpointConfigured,
+        offLanReachable,
         endpointHost: exposeEndpointHost ? (endpointHost || null) : null,
         publicFqdn,
         listenPort: status.listen_port,
@@ -292,6 +300,9 @@ export function createVpnRouter(prisma: PrismaClient): Router {
         // Plain text — dashboard renders as QR, mobile WireGuard scans.
         // Returned ONCE. Subsequent GETs do not include `conf` or any priv key.
         conf,
+        // WARP-993: same honest reachability signal as GET /vpn/status, so the
+        // QR step can gate its "from anywhere" copy without a second fetch.
+        offLanReachable: computeOffLanReachable(),
       });
     } catch (err) {
       // VpnIpExhaustedError → 507 (Insufficient Storage is the closest semantic)

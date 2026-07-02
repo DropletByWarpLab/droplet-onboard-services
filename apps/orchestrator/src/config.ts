@@ -253,6 +253,17 @@ const envSchema = z.object({
   // Defaults match the OpenWrt LAN. Override if the LAN is reconfigured.
   WIREGUARD_LAN_CIDR: z.string().default("192.168.50.0/24"),
   WIREGUARD_DNS: z.string().default("192.168.50.1"),
+  // REMOTE_ACCESS_MODE — how a phone reaches this box from OUTSIDE the home
+  // LAN (WARP-993). Drives the honest `offLanReachable` boolean on
+  // /api/vpn/status so the dashboard never promises "from anywhere" it can't
+  // keep:
+  //   "fqdn"  (default) — the per-device FQDN resolves only via the box's own
+  //           split-horizon DNS (ADR-023 §3, no public A record). The minted
+  //           WireGuard conf works on the home LAN but is NOT reachable from
+  //           elsewhere.
+  //   "relay" — the ADR-025 HQ relay is live and the endpoint is publicly
+  //           routable. Flipping this is the relay rollout's job (WARP-974).
+  REMOTE_ACCESS_MODE: z.enum(["fqdn", "relay"]).default("fqdn"),
 
   // --- Public-CA per-device TLS (ADR-023) ---
   // DROPLET_PUBLIC_FQDN — the opaque per-device subdomain
