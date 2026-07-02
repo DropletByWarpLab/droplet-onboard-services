@@ -2,7 +2,7 @@
 
 **Audience:** auditors, security reviewers, future engineers.
 **Question this page answers:** "What cryptography does the Droplet edge appliance use?"
-**Source of truth:** validated against [NIST FIPS 140-3 Implementation Guidance](https://csrc.nist.gov/projects/cryptographic-module-validation-program/standards). Cryptographic provider is the **OpenSSL 3 FIPS provider** (NIST certificate **#4282**), bundled with Debian Bookworm.
+**Source of truth:** validated against [NIST FIPS 140-3 Implementation Guidance](https://csrc.nist.gov/projects/cryptographic-module-validation-program/standards). Cryptographic provider is the **OpenSSL FIPS provider 3.0.9** (NIST certificate **#4282**), source-built and shipped inside every service image on the Debian Bookworm base (WARP-967).
 
 Maintained as part of WARP-229. Updates require a code review + entry in the auditor changelog (see end of page).
 
@@ -26,8 +26,10 @@ Maintained as part of WARP-229. Updates require a code review + entry in the aud
 
 ## Provider
 
-**OpenSSL 3.0.13 FIPS provider** — NIST CMVP certificate #4282.
-- Loaded via `OPENSSL_CONF=/etc/ssl/openssl-fips.cnf` (config file shared across services in `docker/openssl-fips.cnf`).
+**OpenSSL FIPS provider 3.0.9** — NIST CMVP certificate #4282.
+- Source-built from the pinned, sha256-verified `openssl-3.0.9` release tarball (`docker/fips/build-openssl-fips.sh`) and installed as `fips.so` into every shipped service image — orchestrator, mcp-server, web-dashboard, file-indexer, ai-gateway (WARP-967). Only the module comes from 3.0.9; runtime `libcrypto`/`libssl` stay Debian Bookworm's (the provider API isolates the validated boundary inside `fips.so`).
+- Self-tested at image build time: `openssl fipsinstall` runs the module's KATs and emits `/etc/ssl/fipsmodule.cnf`; the build then asserts the provider loads under the FIPS config and that MD5 is rejected (`docker/fips/install-fips-provider.sh`), plus a runtime-native probe (Node bundled OpenSSL / CPython `_hashlib`) per image.
+- Loaded via `OPENSSL_CONF=/etc/ssl/openssl-fips.cnf` (config file shared across services in `docker/openssl-fips.cnf`); Node services additionally need `OPENSSL_MODULES` pointing at the system `ossl-modules` dir because `node` statically links its own OpenSSL. Runtime activation is opt-in and owned by WARP-318.
 - Activation verified at container boot by the per-runtime self-test helper (`@droplet/fips-selftest` for Node services, `services/_shared/fips_selftest.py` for Python services). The container refuses to start if FIPS is not active.
 
 ## Approved digests
@@ -121,3 +123,4 @@ Dead or non-resolving reason-ids fail the lint. Every entry in `fips-exceptions.
 | Date | Change | Reviewer |
 |---|---|---|
 | 2026-05-10 | Initial page published as part of WARP-229. | (TBD) |
+| 2026-07-02 | WARP-967: validated `fips.so` (OpenSSL FIPS provider 3.0.9, CMVP #4282) now source-built into every shipped service image with a build-time KAT self-test; provider section updated (was described as the distro 3.0.13 build). | (TBD) |

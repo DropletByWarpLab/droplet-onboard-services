@@ -448,9 +448,9 @@ npm run dev
 
 ## Security
 
-### FIPS 140-3 cryptographic posture (WARP-229)
+### FIPS 140-3 cryptographic posture (WARP-229 + WARP-967)
 
-Every Droplet application service container ships with the OpenSSL 3 FIPS provider activation apparatus in place: the shared `docker/openssl-fips.cnf` activation config, a per-runtime boot self-test (`@droplet/fips-selftest` for Node, `services/_shared/fips_selftest.py` for Python), and PR-blocking CI lint that rejects non-FIPS-approved algorithms. To actually run in FIPS mode in production the operator layers a NIST-validated `fips.so` (Ubuntu Pro FIPS, Red Hat UBI, or source-built) and sets `OPENSSL_CONF=/etc/ssl/openssl-fips.cnf` + `DROPLET_FIPS_REQUIRED=true` at the container env layer.
+Every Droplet application service container ships with the OpenSSL 3 FIPS provider activation apparatus in place: the shared `docker/openssl-fips.cnf` activation config, a per-runtime boot self-test (`@droplet/fips-selftest` for Node, `services/_shared/fips_selftest.py` for Python), and PR-blocking CI lint that rejects non-FIPS-approved algorithms. The NIST-validated `fips.so` itself (OpenSSL FIPS provider 3.0.9, CMVP certificate #4282) is source-built from a sha256-pinned release tarball and baked into every shipped service image, with `openssl fipsinstall` running the module's KATs at image build time (`docker/fips/`, WARP-967). To actually run in FIPS mode in production the operator sets `OPENSSL_CONF=/etc/ssl/openssl-fips.cnf` + `DROPLET_FIPS_REQUIRED=true` (Node services also `OPENSSL_MODULES`) at the container env layer — runtime activation is WARP-318.
 
 Two single-page references answer the auditor question "what cryptography does this device use?":
 - [`docs/security/fips-allowed-algorithms.md`](docs/security/fips-allowed-algorithms.md) — approved algorithms, key sizes, protocol versions.
