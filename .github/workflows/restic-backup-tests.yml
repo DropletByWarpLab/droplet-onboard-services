@@ -1,0 +1,43 @@
+name: restic-backup-tests
+
+# WARP-254 — restic backup with a device-identity-derived key + monthly
+# sandboxed restore drill. Static checks gate the scripts' structure, the
+# systemd units, the setup.sh install wiring, and the HKDF derivation
+# known-answer test; with Docker + restic present the job also runs the
+# backup → incremental → full → mutate → restore → drill round-trip against a
+# disposable compose project. Docker is available on ubuntu-latest runners;
+# restic comes from apt.
+
+on:
+  pull_request:
+    paths:
+      - "scripts/**"
+      - "docker/**"
+      - "tests/restic-backup.test.sh"
+      - ".github/workflows/restic-backup-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "scripts/**"
+      - "docker/**"
+      - "tests/restic-backup.test.sh"
+      - ".github/workflows/restic-backup-tests.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: restic-backup-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  restic-backup:
+    runs-on: ubuntu-latest
+    # A hung test must fail the job fast. The live round-trip pulls only
+    # postgres:16-alpine + alpine:3.20 (no image build) — 20 min covers the
+    # pulls + three backups + restore + two drills with headroom.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install restic
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq restic
+      - name: Run restic backup + restore drill
+        run: bash tests/restic-backup.test.sh

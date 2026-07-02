@@ -355,5 +355,9 @@ scripts/
     ├── compose.sh         Image pull, build, start, health wait
     ├── systemd.sh         Optional boot service
     ├── camera-drivers.sh  Camera driver library (sourced by setup.sh)
-    └── bluetooth.sh       Host Bluetooth prep for Matter BLE (WARP-850)
+    ├── bluetooth.sh       Host Bluetooth prep for Matter BLE (WARP-850)
+    └── backup.sh          Restic backup host integration (WARP-254):
+                           installs droplet-{backup,restore,restore-drill}.sh
+                           + daily/weekly/monthly timers; repo key derived
+                           from device identity — see scripts/host/README.md
 ```
