@@ -56,8 +56,15 @@ describe("FileEditSession migration (WARP-882)", () => {
     // Strip `--` line comments first: the migration's header legitimately NAMES
     // the invalid idiom as a warning, which must not trip the check. Then
     // constrain the match to a single statement (no semicolon between).
+    //
+    // Split on /\r?\n/, not "\n" (WARP-1008): the checked-in migration is LF
+    // (now pinned via .gitattributes), but a stale Windows working tree can
+    // still be CRLF. A trailing `\r` defeats `/--.*$/` (`.` never matches `\r`
+    // and a non-multiline `$` only matches end-of-string), so the comment
+    // survives and the header warning trips the check. Splitting on either
+    // terminator keeps the guard correct regardless of checkout EOL.
     const sqlNoComments = migrationSql()
-      .split("\n")
+      .split(/\r?\n/)
       .map((line) => line.replace(/--.*$/, ""))
       .join("\n");
     expect(
