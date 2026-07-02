@@ -76,6 +76,7 @@ class TestBuildRegistry:
         for envvar in [
             "OPS_PROBE_ORCHESTRATOR", "OPS_PROBE_AI_GATEWAY",
             "OPS_PROBE_VOICE", "OPS_PROBE_FRIGATE",
+            "OPS_PROBE_WEB_DASHBOARD",
         ]:
             monkeypatch.delenv(envvar, raising=False)
         reg = svc.build_registry()
@@ -91,12 +92,13 @@ class TestBuildRegistry:
         assert reg["ai-gateway"] == "http://ai-gateway:8000/ai/health"
         assert reg["voice-io"] == "http://voice-io:8086/health"
         assert reg["frigate"] == "http://frigate:5000/healthz"
+        # WARP-535: the dashboard ships /healthz, so its probe is populated
+        assert reg["web-dashboard"] == "http://web-dashboard:3001/healthz"
         # Services without HTTP /health (workers, infra) default to empty
         # and therefore surface as `unknown` rather than `down`
         assert reg["db"] == ""
         assert reg["broker"] == ""
         assert reg["file-indexer"] == ""
-        assert reg["web-dashboard"] == ""
 
     def test_env_override_wins(self, monkeypatch):
         monkeypatch.setenv("OPS_PROBE_AI_GATEWAY", "http://override:1234/x")
