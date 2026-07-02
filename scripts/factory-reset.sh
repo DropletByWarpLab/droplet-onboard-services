@@ -716,6 +716,15 @@ if [ -f /usr/local/sbin/droplet-set-public-fqdn.sh ]; then
   log_success "Removed public-FQDN write-back host executor"
 fi
 
+# Box-name write-back host executor (WARP-988). Remove so a reset truly
+# returns to out-of-box; install-device-bridge.sh reinstalls it on
+# re-provision. It only persists DROPLET_BOX_NAME to .env — the .env itself is
+# wiped elsewhere in this reset, so the next owner names the box afresh.
+if [ -f /usr/local/sbin/droplet-set-box-name.sh ]; then
+  sudo rm -f /usr/local/sbin/droplet-set-box-name.sh 2>/dev/null || true
+  log_success "Removed box-name write-back host executor"
+fi
+
 # Device-bridge state + logs (needs sudo because systemd StateDirectory
 # runs as root). Silent if not installed — dev machines won't have this.
 if [ -d /var/lib/droplet-bridge ] || [ -f /etc/droplet/device-bridge.env ]; then

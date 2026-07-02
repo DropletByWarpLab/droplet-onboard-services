@@ -2384,6 +2384,66 @@ def run_set_public_fqdn(fqdn):
     return True, {"message": (out or "").strip() or "public fqdn persisted"}
 
 
+# --- WARP-988: box-name write-back host executor -----------------------------
+# The wizard's "name your box" step (WARP-979) picks the owner's slug; the
+# orchestrator POSTs it to /host/box-name so it can be persisted back to the
+# host .env (DROPLET_BOX_NAME) for the next boot, when tls-issuance sends it to
+# HQ as `requested_name`. The bridge execs the repo-tracked host wrapper
+# (scripts/host/droplet-set-box-name.sh, installed to /usr/local/sbin by
+# install-device-bridge.sh). The orchestrator can't write the host .env itself
+# (no host mount), so — exactly like run_set_public_fqdn — the write has to run
+# on the host.
+#
+# Mirrors run_set_public_fqdn()/run_tls_reload(): allow-listed shape, host-script
+# only, synchronous + bounded, surfaces the script's exit honestly, never raises.
+
+SET_BOX_NAME_SCRIPT = os.environ.get(
+    "DROPLET_SET_BOX_NAME_SCRIPT",
+    "/usr/local/sbin/droplet-set-box-name.sh").strip()
+
+# STRICT validation BEFORE exec. Conservatively mirrors the shared ruleset in
+# packages/shared-types/src/box-name.ts (which the dashboard + orchestrator both
+# import): a lowercase slug of [a-z0-9-], 3-40 chars, no leading/trailing/double
+# hyphen, and never the `d-<16 hex>` opaque per-device lookalike (ADR-023 —
+# a customer name must not impersonate an HQ-minted device identifier). The
+# reserved-word blocklist is policy, enforced upstream (orchestrator + HQ);
+# the bridge's job is the injection-safe SHAPE (defence in depth — the host
+# script validates again). Anything with shell metacharacters, whitespace,
+# uppercase, or dots is refused here and the host script is NEVER invoked.
+_BOX_NAME_SHAPE_RE = re.compile(r'^[a-z0-9]+(?:-[a-z0-9]+)*$')
+_BOX_NAME_DEVICE_LOOKALIKE_RE = re.compile(r'^d-[0-9a-f]{16}$')
+
+
+def _valid_box_name(name):
+    if not isinstance(name, str):
+        return False
+    if not (3 <= len(name) <= 40):
+        return False
+    if not _BOX_NAME_SHAPE_RE.match(name):
+        return False
+    if _BOX_NAME_DEVICE_LOOKALIKE_RE.match(name):
+        return False
+    return True
+
+
+def run_set_box_name(name):
+    """Persist the owner-chosen DROPLET_BOX_NAME to the host .env via the host
+    script. Returns (ok, info); never raises — mirrors run_set_public_fqdn()."""
+    if not _valid_box_name(name):
+        logger.warning("box-name write-back refused: invalid name shape")
+        return False, "invalid name"
+    try:
+        rc, out, err = _run([SET_BOX_NAME_SCRIPT, name], timeout=30)
+    except Exception as e:                                          # noqa: BLE001
+        logger.warning("box-name write-back failed to exec host script: %s", e)
+        return False, "host script unavailable"
+    if rc != 0:
+        msg = (err.strip() or out.strip() or "host script refused")
+        logger.warning("box-name write-back refused/failed (rc=%s): %s", rc, msg)
+        return False, msg
+    return True, {"message": (out or "").strip() or "box name persisted"}
+
+
 def cameras_snapshot():
     out = {
         "online": 0, "total": 0, "events": [],
@@ -2812,6 +2872,33 @@ class Handler(BaseHTTPRequestHandler):
                 # 502: the host script is missing / refused. The learned name is
                 # already in the orchestrator's cert-state row, so a failed
                 # write-back only means the next boot re-learns it from HQ.
+                return self._send(502, {"ok": False, "error": info})
+            return self._send(200, {"ok": True,
+                                    **(info if isinstance(info, dict) else {"info": info})})
+        if self.path == "/host/box-name":
+            # WARP-988: persist the owner-chosen DROPLET_BOX_NAME to the host
+            # .env via the host script. Auth-gated exactly like
+            # /host/public-fqdn + /tls/reload. STRICT name validation happens in
+            # run_set_box_name BEFORE the host script is ever invoked; a junk
+            # name is a 400, never an exec.
+            if not self._authed():
+                return self._send(401, {"ok": False, "error": "unauthorized"})
+            n = min(max(int(self.headers.get("Content-Length") or 0), 0), 4096)
+            raw = self.rfile.read(n).decode() if n else ""
+            try:
+                j = json.loads(raw) if raw else {}
+            except Exception:                                       # noqa: BLE001
+                return self._send(400, {"ok": False, "error": "bad json"})
+            name = j.get("name", "")
+            if not _valid_box_name(name):
+                # 400: the orchestrator sent a malformed name. The host script is
+                # NOT invoked — defence in depth before any exec.
+                return self._send(400, {"ok": False, "error": "invalid name"})
+            ok, info = run_set_box_name(name)
+            if not ok:
+                # 502: the host script is missing / refused. The route already
+                # accepted the name; a failed write-back only means the box keeps
+                # its previous name until the owner retries.
                 return self._send(502, {"ok": False, "error": info})
             return self._send(200, {"ok": True,
                                     **(info if isinstance(info, dict) else {"info": info})})
