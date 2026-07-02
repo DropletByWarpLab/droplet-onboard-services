@@ -24,6 +24,16 @@
 #                           MT7922 -> wlp14s0; AX210 -> wlp7s0.
 # DROPLET_AP_DOMAIN       — DNS suffix dnsmasq-ap answers locally.
 # DROPLET_AP_HOSTNAME     — bare hostname mapped to 192.168.20.1.
+# DROPLET_PUBLIC_FQDN     — ADR-023 public per-device FQDN also mapped to
+#                           192.168.20.1 for AP clients (WARP-986: dnsmasq-ap
+#                           is the ONLY resolver AP Wi-Fi clients use, so the
+#                           green-padlock cert name must be answered there).
+#                           Normally UNSET here: droplet-set-public-fqdn.sh
+#                           persists the learned name into the repo .env and
+#                           the attach script reads it from there. Set here
+#                           only to pin/override the name; it is validated
+#                           (lowercase [a-z0-9.-], dotted, 1-253 chars) and
+#                           dropped if invalid.
 # DROPLET_GATEWAY_CONTAINER — name of the nginx gateway container the
 #                           AP-side DNAT for :80/:443 should point at.
 # OPENWRT_PASSWORD_FILE   — the docker secret file the routing container
