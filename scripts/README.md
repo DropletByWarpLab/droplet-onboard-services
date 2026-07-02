@@ -152,7 +152,12 @@ is reclaimed automatically when its PID is dead (no 1-hour wait, no manual
   credentials** — a stack with data will fail auth after regeneration.
   Recover by restoring the automatic `.env.bak.*`, or factory-reset if the
   data is disposable. Use `--sync-secrets` (not `--regenerate-env`) after
-  hand-editing `.env`.
+  hand-editing `.env`. Hand edits must also keep the six core keys
+  (`POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `MQTT_PASSWORD`,
+  `NEXTCLOUD_ADMIN_PASSWORD`, `DEVICE_SECRET`, `DEVICE_SECRET_KEY`)
+  non-empty and the file's trailing newline intact — otherwise the next
+  re-run classifies the file as torn and restores/regenerates it (the
+  hand-edited version is kept as `.env.torn.*`).
 - **No automatic pre-update backup yet.** A setup.sh re-run does not snapshot
   the box first. The building blocks exist — scheduled restic backups
   (WARP-254, `scripts/lib/backup.sh`) and the pre-reset full-device backup in

@@ -82,6 +82,10 @@ generate_env() {
       local torn_copy
       torn_copy="$env_file.torn.$(date +%s)"
       cp "$env_file" "$torn_copy"
+      # A legacy torn file sits at umask-default 644 (the pre-atomic writer
+      # died BEFORE its chmod) and `cp` preserves that mode — force 600 so the
+      # kept copy's leading secrets block is never world-readable.
+      chmod 600 "$torn_copy"
       local restore_tmp="$env_file.tmp.$$"
       rm -f "$restore_tmp"
       cp "$newest_backup" "$restore_tmp"
@@ -111,6 +115,9 @@ generate_env() {
     # shellcheck disable=SC2155  # `date +%s` cannot meaningfully fail; the masked return value carries no signal we'd act on.
     local backup="$env_file.bak.$(date +%s)"
     cp "$env_file" "$backup"
+    # On the torn-no-backup regen path the source is a legacy 644 torn file
+    # (see the torn_copy chmod above) — force the backup to 600 regardless.
+    chmod 600 "$backup"
     log_info "Backed up existing .env to $backup"
   fi
 

@@ -991,6 +991,17 @@ if [ "$T9A_PERMS" = "600" ]; then
 else
   fail "restored .env permissions are $T9A_PERMS (expected 600)"
 fi
+# The .env.torn.* copy carries the same leading secrets block as .env, and in
+# exactly the target scenario its SOURCE is a legacy torn file sitting at
+# umask-default 644 (the pre-atomic writer died BEFORE its chmod). `cp` alone
+# preserves that world-readable mode, so the recovery copy must be forced 600.
+T9A_TORN_FILE=$(ls "$T9A"/.env.torn.* 2>/dev/null | head -n 1 || true)
+T9A_TORN_PERMS=$(stat -c "%a" "$T9A_TORN_FILE" 2>/dev/null || stat -f "%OLp" "$T9A_TORN_FILE" 2>/dev/null || echo "missing")
+if [ "$T9A_TORN_PERMS" = "600" ]; then
+  pass ".env.torn.* recovery copy is chmod 600 (source was a 644 legacy torn file)"
+else
+  fail ".env.torn.* recovery copy perms are $T9A_TORN_PERMS (expected 600 — world-readable secrets sibling)"
+fi
 
 # (2) Torn .env with NO backup → fresh full regeneration (stack never ran with
 # the truncated secrets on a first-install interruption, so fresh secrets are
@@ -1006,6 +1017,16 @@ if grep -qE '^DEVICE_SECRET_KEY=.' "$T9B/.env" \
   pass "torn .env with no backup is fully regenerated on re-run"
 else
   fail "torn .env with no backup was not regenerated (missing core/tail keys after re-run)"
+fi
+# Same 644-source hazard as the .env.torn.* copy above: on this path the torn
+# file is preserved via the pre-regeneration backup block (`cp` → .env.bak.*),
+# which would otherwise inherit the legacy file's world-readable mode.
+T9B_BAK_FILE=$(ls "$T9B"/.env.bak.* 2>/dev/null | head -n 1 || true)
+T9B_BAK_PERMS=$(stat -c "%a" "$T9B_BAK_FILE" 2>/dev/null || stat -f "%OLp" "$T9B_BAK_FILE" 2>/dev/null || echo "missing")
+if [ "$T9B_BAK_PERMS" = "600" ]; then
+  pass ".env.bak.* pre-regeneration backup is chmod 600 (source was a 644 legacy torn file)"
+else
+  fail ".env.bak.* pre-regeneration backup perms are $T9B_BAK_PERMS (expected 600 — world-readable secrets sibling)"
 fi
 
 # (3) Operator-authored .env (no generated header) is NEVER touched by the
