@@ -16,6 +16,7 @@ real switch is touched.
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 
@@ -94,11 +95,16 @@ def test_connect_uses_cert_path_for_verify(monkeypatch, tmp_path):
     assert _FakeAsyncClient.last_verify == str(cert)
 
 
-def test_connect_unset_keeps_verify_false(monkeypatch):
+def test_connect_unset_keeps_verify_false_and_warns(monkeypatch, caplog):
+    # WARP-583: the insecure fallback must be explicit — connect() logs a
+    # loud warning naming SWITCH_CA_CERT, not just a silent verify=False.
     _patch_client_and_auth(monkeypatch)
     driver = _make_driver(None)
-    asyncio.run(driver.connect())
+    with caplog.at_level(logging.WARNING, logger="droplet.switch.lantronix"):
+        asyncio.run(driver.connect())
     assert _FakeAsyncClient.last_verify is False
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("SWITCH_CA_CERT" in message for message in warnings)
 
 
 def test_connect_missing_cert_fails_closed(monkeypatch, tmp_path):

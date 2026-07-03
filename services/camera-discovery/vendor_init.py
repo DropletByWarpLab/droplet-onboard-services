@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 from dataclasses import dataclass
 from typing import Protocol
 from urllib.parse import quote
@@ -40,6 +41,49 @@ from urllib.parse import quote
 import httpx
 
 logger = logging.getLogger(__name__)
+
+# WARP-583 (launch-readiness audit): TLS verification for the vendor-init
+# HTTPS clients. Cameras ship per-device self-signed certs on first run, so
+# pinning is only possible where the operator has captured the device cert /
+# vendor CA up-front — hence opt-in via CAMERA_INIT_CA_CERT, mirroring the
+# switch service's SWITCH_CA_CERT (services/switch/drivers/lantronix.py).
+# Residual risk when unpinned: an on-LAN MITM between this service and the
+# camera VLAN can intercept the first-run admin-password set. We keep that
+# historical unverified fallback because it is the only workable default for
+# fresh-from-box cameras, but it is explicit and warn-logged — and a
+# configured-but-missing cert path fails closed rather than silently
+# downgrading, which is the false-assurance trap the audit flagged.
+_unverified_tls_warned = False
+
+
+def _tls_verify() -> bool | str:
+    """Resolve the httpx ``verify=`` value for vendor-init clients.
+
+    Returns the CAMERA_INIT_CA_CERT path when configured (httpx then
+    verifies the camera's TLS cert against it), or ``False`` — with a
+    once-per-process warning — when unset. Raises ``ValueError`` when the
+    configured path does not exist.
+    """
+    global _unverified_tls_warned
+    ca_cert = os.environ.get("CAMERA_INIT_CA_CERT", "").strip()
+    if ca_cert:
+        if not os.path.isfile(ca_cert):
+            raise ValueError(
+                f"CAMERA_INIT_CA_CERT is set to '{ca_cert}' but no such file "
+                f"exists; refusing to fall back to unverified TLS. Fix the "
+                f"path or unset CAMERA_INIT_CA_CERT to use the (insecure) "
+                f"self-signed default."
+            )
+        return ca_cert
+    if not _unverified_tls_warned:
+        _unverified_tls_warned = True
+        logger.warning(
+            "TLS certificate verification disabled for camera vendor-init "
+            "(per-device self-signed certs expected on first run). Set "
+            "CAMERA_INIT_CA_CERT to a CA bundle / device cert to enable "
+            "verification. (Warning logged once per process.)"
+        )
+    return False
 
 
 @dataclass
@@ -341,7 +385,8 @@ async def detect_vendor(
 
 async def check_status(ip: str) -> InitStatus | None:
     """Public entry point: identify the vendor and return its status."""
-    async with httpx.AsyncClient(verify=False) as client:  # cameras use self-signed
+    # WARP-583: verify= comes from CAMERA_INIT_CA_CERT (see _tls_verify).
+    async with httpx.AsyncClient(verify=_tls_verify()) as client:
         vendor = await detect_vendor(client, ip)
         if vendor is None:
             return None
@@ -354,10 +399,11 @@ async def initialize_camera(
     """Public entry point: drive the first-run password set.
 
     The caller is responsible for picking ``username`` / ``password``;
-    this function does not consult env vars so unit tests and CLI
-    invocations stay deterministic.
+    this function does not consult env vars for credentials so unit tests
+    and CLI invocations stay deterministic.
     """
-    async with httpx.AsyncClient(verify=False) as client:
+    # WARP-583: verify= comes from CAMERA_INIT_CA_CERT (see _tls_verify).
+    async with httpx.AsyncClient(verify=_tls_verify()) as client:
         vendor = await detect_vendor(client, ip)
         if vendor is None:
             return InitResult(
