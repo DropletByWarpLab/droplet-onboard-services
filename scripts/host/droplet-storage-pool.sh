@@ -557,7 +557,10 @@ case "$OP" in
       "mkfs.${FSTYPE:-ext4}" "$MD"
     fi
     # 4) Mount under the shared /mnt/droplet namespace so it's usable now and
-    #    the device-bridge surfaces it; the udev automount re-mounts on reboot.
+    #    the device-bridge surfaces it. Reboot persistence comes from the udev
+    #    automount rule, which matches WHOLE-DISK nodes as of WARP-936 —
+    #    before that it matched partitions only, so this whole-device
+    #    filesystem went dark on every reboot despite the old comment's claim.
     #    WARP-868: use host_mount so the mount lands in the HOST namespace, not
     #    this unit's private slave-propagation namespace (which is destroyed on
     #    unit exit, leaving the drive unmounted until the next udev automount).
