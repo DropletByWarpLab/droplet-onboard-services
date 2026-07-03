@@ -4,12 +4,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, HardDrive, Layers, ShieldCheck } from "lucide-react";
 import {
   fetchDrives,
+  fetchPools,
   updateDriveLabel,
   requestCreatePool,
   confirmPoolCommand,
   requestAdoptDrive,
 } from "@/lib/api";
-import type { DriveInfo } from "@/lib/types";
+import type { DiskInfo, DiskState, DriveInfo, PoolInfo } from "@/lib/types";
 import { StepShell } from "@/components/setup/StepShell";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -80,6 +81,14 @@ export function StorageStep({
   onAutoSkip?: () => void;
 }) {
   const [drives, setDrives] = useState<DriveInfo[]>([]);
+  // WARP-936 — the orchestrator's whole-disk inventory (present-but-unmounted
+  // disks included). `null` = older stack without the field; the reclaim list
+  // then falls back to grouping the mounted drives (the WARP-662 behaviour).
+  const [bridgeDisks, setBridgeDisks] = useState<DiskInfo[] | null>(null);
+  // WARP-936 — an existing md array must be SURFACED during setup, not
+  // silently ignored (the live box already had md127 and the step said
+  // "No extra drives to set up").
+  const [pools, setPools] = useState<PoolInfo[]>([]);
   const [names, setNames] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -129,18 +138,35 @@ export function StorageStep({
       const resp = await fetchDrives();
       const list = resp.drives ?? [];
       setDrives(list);
+      setBridgeDisks(resp.disks ?? null);
       // Pre-fill with existing displayName (or the FS label as a placeholder).
       const initial: Record<string, string> = {};
       for (const d of list) {
         initial[d.uuid] = d.displayName ?? "";
       }
       setNames(initial);
+      // WARP-936 — surface an existing array. Best-effort: a pools fetch
+      // failure never blocks the step (we just can't show the card).
+      let existingPools: PoolInfo[] = [];
+      try {
+        const poolsResp = await fetchPools();
+        existingPools = poolsResp?.pools ?? [];
+      } catch {
+        existingPools = [];
+      }
+      setPools(existingPools);
       // #5: with 2+ drives we can ACTUALLY pool — i.e. free physical disks —
       // default to pooling ON (a sensible level is pre-selected by the effect
       // below). A box whose drives are all in use by the Droplet has nothing
       // poolable, so we leave the destructive pool toggle OFF rather than
       // landing the customer on a create flow the host will refuse.
-      if (!userToggledRaid.current && groupPhysicalDisks(list).filter((p) => !p.inUse).length >= 2) {
+      // WARP-936: never default it ON when an array ALREADY exists — piling a
+      // second pool onto a box mid-setup is a Settings decision, not a default.
+      if (
+        !userToggledRaid.current &&
+        existingPools.length === 0 &&
+        groupPhysicalDisks(list).filter((p) => !p.inUse).length >= 2
+      ) {
         setRaidOn(true);
       }
       // WARP-933 — do NOT auto-skip on an empty drive list. The step renders an
@@ -178,6 +204,25 @@ export function StorageStep({
   // `nvr` + a `data` filesystem on `sda`) are ONE target — shown once, and
   // wiping it erases both. (WARP-662 / setup honesty.)
   const physicalDisks = useMemo(() => groupPhysicalDisks(drives), [drives]);
+
+  // WARP-936 — reclaim candidates. When the orchestrator provides the
+  // whole-disk inventory we build the list from it (so a present-but-
+  // UNMOUNTED disk is finally offered — the exact gap that hid the live
+  // box's two RAID-member drives); an older stack without the field falls
+  // back to grouping the mounted list (the original WARP-662 behaviour).
+  const reclaimDisks = useMemo<PhysicalDisk[]>(() => {
+    if (bridgeDisks === null) return physicalDisks;
+    return bridgeDisks.map((d) => ({
+      disk: d.name,
+      members: drives.filter(
+        (dr) => (dr.parent_disk || wholeDiskName(dr.device)) === d.name,
+      ),
+      sizeBytes: d.size_bytes,
+      inUse: d.state === "in_use",
+      state: d.state,
+      md: d.md,
+    }));
+  }, [bridgeDisks, drives, physicalDisks]);
 
   // Disks we can actually pool/reclaim here: the box's installed storage
   // (`removable: false`) is excluded — it's in use by the Droplet, not a
@@ -345,6 +390,9 @@ export function StorageStep({
   // we never offer reclaim on the box's installed storage (disk.inUse).
   async function handleStartAdopt(disk: PhysicalDisk) {
     if (disk.inUse) return; // installed box storage — managed from Settings
+    // WARP-936: an md member is pool-routed (format/destroy the POOL), never
+    // individually adoptable — wipefs on an md-held member fails EBUSY anyway.
+    if (disk.state === "pool_member") return;
     const name = disk.disk;
     if (!name) return;
     setAdoptError(null);
@@ -420,7 +468,12 @@ export function StorageStep({
   // WARP-933 — no drives came back (empty list, or the storage bridge couldn't
   // be reached). Render an explicit, VISIBLE state with Continue/retry instead
   // of silently auto-skipping the step (which read as "the page doesn't work").
-  if (drives.length === 0) {
+  // WARP-936: only when there is truly nothing to act on — an unmounted disk
+  // in the inventory or an existing pool means the body must render.
+  if (
+    drives.length === 0 &&
+    (error !== null || (reclaimDisks.length === 0 && pools.length === 0))
+  ) {
     return (
       <StepShell
         current="storage"
@@ -555,6 +608,31 @@ export function StorageStep({
           )}
         </div>
 
+        {/* WARP-936 — an existing array is surfaced, never silently ignored.
+            Setup stays read-only about it: format/destroy live in Settings ›
+            Storage behind the tier-3 confirm flow. */}
+        {pools.length > 0 && (
+          <div className="dp-card !p-4 mt-6 flex items-start gap-3">
+            <span className="flex-none h-9 w-9 rounded-lg bg-accent/10 text-accent flex items-center justify-center">
+              <Layers size={18} />
+            </span>
+            <div className="min-w-0">
+              <p className="type-subheadline text-label-primary">
+                This Droplet already has a storage pool
+              </p>
+              <p className="type-caption-1 text-label-tertiary mt-0.5">
+                {pools.length === 1
+                  ? `A pool with ${pools[0].members.length} ${
+                      pools[0].members.length === 1 ? "drive" : "drives"
+                    } is set up on this box.`
+                  : `${pools.length} pools are set up on this box.`}{" "}
+                You can format or manage it anytime from Settings &rsaquo;
+                Storage.
+              </p>
+            </div>
+          </div>
+        )}
+
         {/* BUG-3 / ADR-019 — optional storage-pool (RAID) setup. Default OFF. */}
         <RaidSection
           raidOn={raidOn}
@@ -589,7 +667,7 @@ export function StorageStep({
               return next;
             });
           }}
-          disks={physicalDisks}
+          disks={reclaimDisks}
           wipeMethods={adoptWipe}
           onWipeMethodChange={(disk, m) =>
             setAdoptWipe((prev) => ({ ...prev, [disk]: m }))
@@ -917,6 +995,12 @@ export interface PhysicalDisk {
    *  (`removable: true`) or an older bridge that omits the flag stays eligible —
    *  the host script remains the real, last-line gate either way. */
   inUse: boolean;
+  /** WARP-936: explicit bridge-classified state when the whole-disk inventory
+   *  is available. Absent on the mounted-drives fallback path. `pool_member`
+   *  is routed to the pool (never individually adoptable). */
+  state?: DiskState;
+  /** md array name (e.g. "md127") when state is pool_member. */
+  md?: string;
 }
 
 /**
@@ -1070,14 +1154,24 @@ function AdoptSection({
                       </span>
                     </p>
                     <p className="type-caption-2 text-label-tertiary truncate">
-                      {disk.inUse
-                        ? `In use by your Droplet · ${disk.disk}`
-                        : disk.members.length > 1
-                          ? `${disk.disk} · wiping this disk clears all ${disk.members.length} folders on it`
-                          : disk.disk}
+                      {disk.state === "pool_member"
+                        ? `Part of your storage pool · ${disk.disk}`
+                        : disk.inUse
+                          ? `In use by your Droplet · ${disk.disk}`
+                          : disk.members.length > 1
+                            ? `${disk.disk} · wiping this disk clears all ${disk.members.length} folders on it`
+                            : disk.disk}
                     </p>
                   </div>
-                  {disk.inUse ? (
+                  {disk.state === "pool_member" ? (
+                    // WARP-936: an md member is managed through the POOL
+                    // (format or remove it from Settings › Storage) — a
+                    // per-disk wipe of a held member fails EBUSY and would
+                    // silently break the array's redundancy anyway.
+                    <span className="flex-none whitespace-nowrap type-caption-1 text-label-tertiary">
+                      In your storage pool
+                    </span>
+                  ) : disk.inUse ? (
                     // Installed box storage — not a "previously-used" foreign
                     // drive. Reclaiming it would tear down storage the Droplet
                     // is actively using, so it's managed from Settings, not here.
