@@ -35,6 +35,22 @@ import {
 import { createHqIssuanceClient } from "../services/tls-issuance.adapters.js";
 import { createDeviceIdentityClient } from "../services/device-identity.client.js";
 
+/**
+ * WARP-1040 — the machine-readable line factory-reset.sh Phase 0b greps.
+ * The CLI ALWAYS exits 0 (reset-must-complete contract), so the exit code says
+ * nothing about whether HQ actually freed the name; the script branches its
+ * operator log (success vs "name may still be reserved at HQ") on this line
+ * instead.
+ */
+export function releaseSentinelLine(result: ReleaseResult): string {
+  return `tls-release: result=${result}`;
+}
+
+/** Default sentinel emitter — a single stdout line the shell can capture. */
+function emitToStdout(line: string): void {
+  process.stdout.write(`${line}\n`);
+}
+
 export interface RunTlsReleaseCliArgs {
   /** `!!config.HQ_ISSUANCE_URL` — whether this box is wired to a live HQ. */
   hqConfigured: boolean;
@@ -42,36 +58,50 @@ export interface RunTlsReleaseCliArgs {
   /** Injected for tests; defaults to the real `releaseFromHq`. */
   release?: (deps: ReleaseDeps) => Promise<ReleaseResult>;
   logger: TlsLogger;
+  /** WARP-1040 — where the sentinel line goes; defaults to stdout. */
+  emit?: (line: string) => void;
 }
 
 /**
  * Pure decision: no-op when HQ is unconfigured, otherwise drive the signed
  * release. Defence-in-depth: even though `releaseFromHq` is itself non-throwing,
  * a thrown collaborator here is still swallowed so the CLI can NEVER bubble a
- * failure into factory-reset.
+ * failure into factory-reset. Every path emits the WARP-1040 stdout sentinel
+ * (`tls-release: result=…`) before returning; a throwing emitter is swallowed
+ * too — telemetry must never break the reset.
  */
 export async function runTlsReleaseCli(
   args: RunTlsReleaseCliArgs,
 ): Promise<ReleaseResult> {
   const { hqConfigured, deps, logger } = args;
   const release = args.release ?? releaseFromHq;
+  const emit = args.emit ?? emitToStdout;
+
+  const finish = (result: ReleaseResult): ReleaseResult => {
+    try {
+      emit(releaseSentinelLine(result));
+    } catch {
+      // A broken stdout pipe must never turn telemetry into a reset failure.
+    }
+    return result;
+  };
 
   if (!hqConfigured) {
     logger.info(
       {},
       "tls-release: HQ_ISSUANCE_URL not configured — nothing to release (no-op)",
     );
-    return "skipped";
+    return finish("skipped");
   }
 
   try {
-    return await release(deps);
+    return finish(await release(deps));
   } catch (err) {
     logger.warn(
       { err },
       "tls-release: unexpected error driving HQ release — non-fatal, factory-reset continues",
     );
-    return "failed";
+    return finish("failed");
   }
 }
 
@@ -90,11 +120,17 @@ async function main(): Promise<void> {
       logger,
     });
   } catch (err) {
-    // The composition itself failed (e.g. config load) — still non-fatal.
+    // The composition itself failed (e.g. config load) — still non-fatal, but
+    // factory-reset.sh must still see a truthful sentinel (WARP-1040).
     logger.warn(
       { err },
       "tls-release: failed to compose release — non-fatal, factory-reset continues",
     );
+    try {
+      process.stdout.write(`${releaseSentinelLine("failed")}\n`);
+    } catch {
+      // Telemetry must never break the reset.
+    }
   }
 }
 
