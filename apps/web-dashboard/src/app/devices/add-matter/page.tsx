@@ -27,6 +27,8 @@ import { ArrowLeft, CheckCircle2, Lightbulb, Loader2 } from "lucide-react";
 import { commissionMatterDevice, fetchMatterCapabilities } from "@/lib/api";
 import { translateError } from "@/lib/friendly-errors";
 import { BleUnavailableNotice } from "@/components/smart-home/BleUnavailableNotice";
+import { commissioningPhaseCopy } from "./commissioning-copy";
+import type { MatterCapabilities } from "@/lib/types";
 
 // WARP-102: lazy-load the QR scanner. `@zxing/browser` + `@zxing/library`
 // are ~200 KB minified each and not tree-shakeable (the decoder pulls a
@@ -68,26 +70,32 @@ export default function AddMatterDevicePage() {
   // an in-flight QR commission. See PR #233 review.
   const commissioningRef = useRef(false);
 
-  // WARP-851: BLE-commissioning capability. `null` = unknown (probe in
-  // flight or failed) — show nothing rather than warn on a guess.
-  // `false` = the box can only add devices already on the home network;
-  // say so above the scanner instead of letting the customer retry a
-  // Bluetooth-only device forever.
-  const [bleAvailable, setBleAvailable] = useState<boolean | null>(null);
+  // WARP-851/WARP-1035: commissioning capabilities. `null` = unknown
+  // (probe in flight or failed) — show nothing rather than warn on a
+  // guess. `bleCommissioning: false` = the box can only add devices
+  // already on the home network; `wifiProvisioning: false` = BLE may
+  // work but a BLE-paired device gets no Wi-Fi handed to it. Both get
+  // an honest notice above the scanner instead of letting the customer
+  // retry a device that can never finish.
+  const [caps, setCaps] = useState<MatterCapabilities | null>(null);
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const caps = await fetchMatterCapabilities();
-        if (!cancelled) setBleAvailable(caps.bleCommissioning);
+        const result = await fetchMatterCapabilities();
+        if (!cancelled) setCaps(result);
       } catch {
-        // Capability unknown — leave the notice hidden.
+        // Capability unknown — leave the notices hidden.
       }
     })();
     return () => {
       cancelled = true;
     };
   }, []);
+  const bleAvailable = caps === null ? null : caps.bleCommissioning;
+  // Absent field (pre-WARP-1035 orchestrator) reads as false — the copy
+  // then simply doesn't promise a Wi-Fi handoff it can't verify.
+  const wifiProvisioning = caps?.wifiProvisioning === true;
 
   const handleCode = useCallback(async (pairingCode: string) => {
     if (commissioningRef.current) return;
@@ -126,6 +134,17 @@ export default function AddMatterDevicePage() {
           lights, and switches that say{" "}
           <em>“Works with Matter”</em> on the box will work.
         </p>
+        {/* WARP-1035: pre-flight network expectations. The user's phone/
+            computer network was never the constraint (commissioning is
+            box-side); say which network actually matters, naming the
+            real AP SSID — and only promise the Droplet-Wi-Fi handoff
+            when the capability says it works. */}
+        <p className="type-footnote text-label-tertiary mt-2">
+          {"Your phone or computer just needs to reach this dashboard — the Droplet does the pairing. " +
+            (wifiProvisioning
+              ? `New devices pair over Bluetooth and join the Droplet's own Wi-Fi (“${caps?.apSsid ?? "Droplet"}”); devices already on your Wi-Fi are added in place.`
+              : "Devices already on your Wi-Fi are added in place.")}
+        </p>
       </div>
 
       {state.phase === "scan" && (
@@ -139,6 +158,14 @@ export default function AddMatterDevicePage() {
           {/* WARP-851: until the box can hear BLE devices (WARP-850),
               be honest about what scanning a code can actually add. */}
           {bleAvailable === false && <BleUnavailableNotice className="mb-4" />}
+          {/* WARP-1035: BLE up but no AP PSK plumbed — a BLE-paired
+              device would have no network to join. Same honesty rule. */}
+          {bleAvailable === true && !wifiProvisioning && (
+            <BleUnavailableNotice
+              variant="no-wifi-provisioning"
+              className="mb-4"
+            />
+          )}
           <MatterQrScanner
             onResult={handleCode}
             disabled={state.phase !== "scan"}
@@ -147,7 +174,10 @@ export default function AddMatterDevicePage() {
       )}
 
       {state.phase === "commission" && (
-        <CommissioningProgress startedAt={state.startedAt} />
+        <CommissioningProgress
+          startedAt={state.startedAt}
+          wifiProvisioning={wifiProvisioning}
+        />
       )}
 
       {state.phase === "done" && (
@@ -196,8 +226,16 @@ function CommissioningErrorBanner({
  * have real progress signals (matter.js emits state events but not a
  * percentage), so we show what's *likely* happening based on elapsed
  * time. Beats a static spinner that makes the customer think it's hung.
+ * WARP-1035: the "Sharing Wi-Fi credentials…" claim is gated on the
+ * wifiProvisioning capability — see commissioning-copy.ts.
  */
-function CommissioningProgress({ startedAt }: { startedAt: number }) {
+function CommissioningProgress({
+  startedAt,
+  wifiProvisioning,
+}: {
+  startedAt: number;
+  wifiProvisioning: boolean;
+}) {
   const [elapsedS, setElapsedS] = useState(0);
   useEffect(() => {
     const t = setInterval(() => setElapsedS(Math.floor((Date.now() - startedAt) / 1000)), 500);
@@ -205,14 +243,7 @@ function CommissioningProgress({ startedAt }: { startedAt: number }) {
   }, [startedAt]);
 
   // Approximate phases, each ~5-10s on typical Wi-Fi devices.
-  const phase =
-    elapsedS < 5
-      ? "Finding the device on your network…"
-      : elapsedS < 15
-        ? "Setting up secure pairing…"
-        : elapsedS < 25
-          ? "Sharing Wi-Fi credentials with the device…"
-          : "Almost done — installing the device certificate…";
+  const phase = commissioningPhaseCopy(elapsedS, wifiProvisioning);
 
   return (
     <div className="bg-fill-quaternary border border-separator-default rounded-xl p-8 text-center space-y-4">

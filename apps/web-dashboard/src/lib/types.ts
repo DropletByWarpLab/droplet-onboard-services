@@ -852,6 +852,18 @@ export interface MatterDiscoveredDevice {
  */
 export interface MatterCapabilities {
   bleCommissioning: boolean;
+  /**
+   * WARP-1035: whether the box can hand a BLE-first device the Droplet
+   * AP's Wi-Fi credentials during commissioning (WARP-895). Optional —
+   * an orchestrator predating WARP-1035 omits it; treat absent as false
+   * (don't promise on a guess).
+   */
+  wifiProvisioning?: boolean;
+  /**
+   * WARP-1035: the Droplet AP's SSID, for naming the network new
+   * devices join in pre-flight copy. Null/absent when unset or unknown.
+   */
+  apSsid?: string | null;
 }
 
 /**

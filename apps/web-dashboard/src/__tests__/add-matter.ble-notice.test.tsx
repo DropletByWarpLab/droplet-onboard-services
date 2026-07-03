@@ -60,6 +60,78 @@ describe("AddMatterDevicePage — BLE-unavailable notice (WARP-851)", () => {
     ).not.toBeInTheDocument();
   });
 
+  // WARP-1035: BLE transport up, but the Droplet AP's PSK isn't plumbed
+  // to the matter-controller — a BLE-paired device would have no network
+  // to join. Say so instead of hiding every notice.
+  it("shows the Wi-Fi-provisioning notice when BLE works but the box can't hand devices Wi-Fi", async () => {
+    capabilitiesSpy.mockResolvedValue({
+      bleCommissioning: true,
+      wifiProvisioning: false,
+      apSsid: "Droplet",
+    });
+    render(<AddMatterDevicePage />);
+
+    const notice = await screen.findByTestId(
+      "wifi-provisioning-unavailable-notice",
+    );
+    expect(notice).toHaveTextContent(/can see bluetooth devices/i);
+    expect(notice).toHaveTextContent(/already on your wi-?fi/i);
+    expect(
+      screen.queryByTestId("ble-unavailable-notice"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows neither notice when BLE and Wi-Fi provisioning are both available", async () => {
+    capabilitiesSpy.mockResolvedValue({
+      bleCommissioning: true,
+      wifiProvisioning: true,
+      apSsid: "Droplet",
+    });
+    render(<AddMatterDevicePage />);
+
+    await waitFor(() => expect(capabilitiesSpy).toHaveBeenCalled());
+    expect(
+      screen.queryByTestId("ble-unavailable-notice"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("wifi-provisioning-unavailable-notice"),
+    ).not.toBeInTheDocument();
+  });
+
+  // WARP-1035: pre-flight copy — the page must say up front which network
+  // matters (the Droplet does the pairing; the user's own device only
+  // needs to reach the dashboard), naming the real AP SSID.
+  it("names the Droplet AP in the pre-flight copy when Wi-Fi provisioning works", async () => {
+    capabilitiesSpy.mockResolvedValue({
+      bleCommissioning: true,
+      wifiProvisioning: true,
+      apSsid: "Droplet-AP7",
+    });
+    render(<AddMatterDevicePage />);
+
+    const preflight = await screen.findByText(
+      /the droplet does the pairing/i,
+    );
+    expect(preflight).toHaveTextContent(/droplet's own wi-?fi/i);
+    expect(preflight).toHaveTextContent("Droplet-AP7");
+    expect(preflight).toHaveTextContent(/already on your wi-?fi are added in place/i);
+  });
+
+  it("keeps the pre-flight copy honest (no own-Wi-Fi promise) when provisioning is unavailable", async () => {
+    capabilitiesSpy.mockResolvedValue({
+      bleCommissioning: true,
+      wifiProvisioning: false,
+      apSsid: "Droplet",
+    });
+    render(<AddMatterDevicePage />);
+
+    const preflight = await screen.findByText(
+      /the droplet does the pairing/i,
+    );
+    expect(preflight).not.toHaveTextContent(/droplet's own wi-?fi/i);
+    expect(preflight).toHaveTextContent(/already on your wi-?fi are added in place/i);
+  });
+
   it("surfaces the network-discovery copy (not factory-reset advice) on a 502 discovery failure", async () => {
     capabilitiesSpy.mockResolvedValue({ bleCommissioning: false });
     // What commissionMatterDevice throws after the orchestrator's
