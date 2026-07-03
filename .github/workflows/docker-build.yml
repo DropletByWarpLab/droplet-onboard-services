@@ -77,6 +77,9 @@ jobs:
   detect:
     name: detect affected images
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read # dorny/paths-filter lists PR files via the API
     outputs:
       images: ${{ steps.plan.outputs.images }}
     steps:
