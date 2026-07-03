@@ -18,11 +18,17 @@
 #      new is pulled), replay the dump with ON_ERROR_STOP=1.
 #   5. Smoke-test the restored DB: public-schema table count must be >= 1;
 #      the "User" row count is recorded when the table exists.
-#   6. Write the EXPLICIT status file (enum ok|failed — never inferred from
+#   6. Replay the nextcloud DB dump when the snapshot carries one (WARP-1013)
+#      into a sandbox `nextcloud` database; record its public table count and
+#      an oc_filecache row count (files-metadata sanity). Absence of the dump
+#      is recorded as null, not failed — pre-WARP-1013 snapshots and boxes
+#      whose nextcloud DB was legitimately absent at backup time stay green.
+#   7. Write the EXPLICIT status file (enum ok|failed — never inferred from
 #      timestamps or absence):
 #        $DROPLET_BACKUP_STATE_DIR/restore-drill-status.json
 #      { "status": "ok"|"failed", "completed_at": ..., "snapshot_id": ...,
-#        "tables": N, "users": N, "message": ... }
+#        "tables": N, "users": N, "nextcloud_tables": N|null,
+#        "filecache_rows": N|null, "message": ... }
 #      written atomically (tmp + mv) so a crashed drill never leaves a
 #      half-written status.
 #
@@ -50,6 +56,8 @@ WORK_DIR=""
 SNAPSHOT_ID="unknown"
 TABLES="null"
 USERS="null"
+NEXTCLOUD_TABLES="null"
+FILECACHE_ROWS="null"
 
 cleanup() {
   docker rm -f "$SANDBOX" >/dev/null 2>&1 || true
@@ -79,6 +87,8 @@ write_status() {
   "repository": "$(_json_escape "${RESTIC_REPOSITORY:-unset}")",
   "tables": $TABLES,
   "users": $USERS,
+  "nextcloud_tables": $NEXTCLOUD_TABLES,
+  "filecache_rows": $FILECACHE_ROWS,
   "message": "$(_json_escape "$message")"
 }
 STATUS
@@ -209,7 +219,53 @@ USERS="$(docker exec -e PGPASSWORD="$SANDBOX_PW" "$SANDBOX" psql -h 127.0.0.1 -U
   2>/dev/null | tr -d '[:space:]' || echo '')"
 printf '%s' "$USERS" | grep -qE '^-?[0-9]+$' || USERS="null"
 
-write_status ok "restored snapshot $SNAPSHOT_ID into sandbox; $TABLES public tables"
-log_success "RESTORE DRILL PASSED: snapshot $SNAPSHOT_ID restorable ($TABLES tables)."
+# --- 6. Nextcloud DB replay (WARP-1013) ----------------------------------------
+# The snapshot's nextcloud dump is replayed into a sandbox `nextcloud` DB the
+# same way. Absence of the dump is recorded (nulls + message), NOT failed:
+# pre-WARP-1013 snapshots and boxes whose nextcloud DB was absent at backup
+# time (legacy pgdata) must not page the operator. A present-but-unreplayable
+# dump IS a failure — that is exactly the skew this drill exists to catch.
+NC_NOTE="nextcloud: $NEXTCLOUD_TABLES tables"
+NC_DUMP="$(find "$WORK_DIR" -type f -name 'nextcloud.sql.gz' -path '*postgres*' 2>/dev/null | head -1 || true)"
+if [ -z "$NC_DUMP" ]; then
+  NC_NOTE="nextcloud: no dump in snapshot"
+  log_warn "snapshot carries no nextcloud DB dump — recorded as null (pre-WARP-1013 snapshot?)"
+else
+  if ! gzip -t "$NC_DUMP" 2>/dev/null; then
+    drill_fail "restored nextcloud dump fails gzip integrity"
+  fi
+  log_info "Replaying nextcloud dump into the sandbox (ON_ERROR_STOP=1)..."
+  if ! docker exec -e PGPASSWORD="$SANDBOX_PW" "$SANDBOX" psql -q -h 127.0.0.1 -U droplet -d droplet -v ON_ERROR_STOP=1 \
+       -c "CREATE DATABASE nextcloud;" >/dev/null 2>&1; then
+    drill_fail "sandbox CREATE DATABASE nextcloud failed"
+  fi
+  NC_REPLAY_ERR="$WORK_DIR/nextcloud-replay-stderr.log"
+  if ! gunzip -c "$NC_DUMP" | docker exec -i -e PGPASSWORD="$SANDBOX_PW" "$SANDBOX" \
+       psql -q -h 127.0.0.1 -U droplet -d nextcloud -v ON_ERROR_STOP=1 >/dev/null 2>"$NC_REPLAY_ERR"; then
+    if [ -s "$NC_REPLAY_ERR" ]; then
+      log_error "psql nextcloud replay stderr (why the replay failed):"
+      cat "$NC_REPLAY_ERR" >&2
+    fi
+    drill_fail "nextcloud dump replay failed — the backup is NOT restorable"
+  fi
+  # Table count is recorded, not gated on >= 1 like droplet: a box whose
+  # Nextcloud never initialized legitimately dumps an empty (but real) DB.
+  NEXTCLOUD_TABLES="$(docker exec -e PGPASSWORD="$SANDBOX_PW" "$SANDBOX" psql -h 127.0.0.1 -U droplet -d nextcloud -tAc \
+    "SELECT count(*) FROM pg_catalog.pg_tables WHERE schemaname='public';" 2>/dev/null | tr -d '[:space:]' || echo '')"
+  if ! printf '%s' "$NEXTCLOUD_TABLES" | grep -qE '^[0-9]+$'; then
+    NEXTCLOUD_TABLES="null"
+    drill_fail "nextcloud smoke query failed (could not count public tables)"
+  fi
+  # Files-metadata sanity row (oc_filecache) — the table whose skew against
+  # the data volume is the WARP-1013 failure mode. Absence recorded as -1.
+  FILECACHE_ROWS="$(docker exec -e PGPASSWORD="$SANDBOX_PW" "$SANDBOX" psql -h 127.0.0.1 -U droplet -d nextcloud -tAc \
+    "SELECT CASE WHEN to_regclass('public.oc_filecache') IS NULL THEN -1 ELSE (SELECT count(*) FROM public.oc_filecache) END;" \
+    2>/dev/null | tr -d '[:space:]' || echo '')"
+  printf '%s' "$FILECACHE_ROWS" | grep -qE '^-?[0-9]+$' || FILECACHE_ROWS="null"
+  NC_NOTE="nextcloud: $NEXTCLOUD_TABLES tables"
+fi
+
+write_status ok "restored snapshot $SNAPSHOT_ID into sandbox; $TABLES public tables; $NC_NOTE"
+log_success "RESTORE DRILL PASSED: snapshot $SNAPSHOT_ID restorable ($TABLES tables; $NC_NOTE)."
 logger -t droplet-restore-drill -p daemon.info \
-  "Droplet restore drill PASSED: snapshot $SNAPSHOT_ID ($TABLES tables)" 2>/dev/null || true
+  "Droplet restore drill PASSED: snapshot $SNAPSHOT_ID ($TABLES tables; $NC_NOTE)" 2>/dev/null || true

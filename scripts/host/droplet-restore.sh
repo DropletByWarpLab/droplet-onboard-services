@@ -3,7 +3,8 @@
 # WARP-254 — restore from the restic repository into the live stack
 # =============================================================================
 #
-# Restores a droplet-backup.sh snapshot: the orchestrator Postgres + the
+# Restores a droplet-backup.sh snapshot: the orchestrator Postgres, the
+# Nextcloud metadata DB (same `db` container, WARP-1013) + the
 # Nextcloud data volume are restored LIVE; the .env + config-dir surfaces are
 # staged to an operator directory (never applied in place — overwriting the
 # .env under a running stack desyncs every container mid-restore; the operator
@@ -24,12 +25,16 @@
 #      copy (the WARP-570 "never after DROP DATABASE" rule).
 #   3. `restic restore` the snapshot to a scratch dir + gzip -t the dump.
 #   4. Confirmation gate (unless --force).
-#   5. Drop + recreate the orchestrator DB, replay the dump.
+#   5. Drop + recreate the orchestrator DB, replay the dump. Same for the
+#      nextcloud DB when the snapshot carries one (WARP-1013) — it must come
+#      from the SAME snapshot as the data-volume tar or the file cache /
+#      shares / users skew against the restored blobs.
 #   6. Wipe + untar the Nextcloud data volume.
 #   7. Stage .env/config copies to $STATE_DIR/restored-config-<ts>/ (0700).
 #   8. Restart affected services (skip with SKIP_SERVICE_RESTART=1).
 #
-# DESTRUCTIVE — overwrites the live DB and the Nextcloud data volume.
+# DESTRUCTIVE — overwrites the live DBs (droplet + nextcloud) and the
+# Nextcloud data volume.
 #
 # Env overrides: DROPLET_REPO_ROOT, DROPLET_BACKUP_TARGET,
 #   DROPLET_BACKUP_STATE_DIR, DROPLET_BACKUP_RUNTIME_DIR,
@@ -117,6 +122,14 @@ if ! gzip -t "$DUMP" 2>/dev/null; then
   log_error "restored Postgres dump fails gzip integrity — refusing to restore"
   exit 1
 fi
+# The nextcloud DB dump is optional (pre-WARP-1013 snapshots, or the DB was
+# absent at backup time) — but when present it must pass integrity HERE,
+# before the first destructive step, like everything else.
+NC_DUMP="$(find "$WORK_DIR" -type f -name 'nextcloud.sql.gz' -path '*postgres*' 2>/dev/null | head -1 || true)"
+if [ -n "$NC_DUMP" ] && ! gzip -t "$NC_DUMP" 2>/dev/null; then
+  log_error "restored nextcloud dump fails gzip integrity — refusing to restore"
+  exit 1
+fi
 log_success "Snapshot restored to scratch; dump passes gzip check."
 
 # --- Confirmation ------------------------------------------------------------
@@ -149,6 +162,24 @@ gunzip -c "$DUMP" \
   | dc exec -T -e "DROPLET_DUMP_USER=${DB_USER:-}" -e "DROPLET_DUMP_DB=${DB_NAME:-}" "$DB_SERVICE" sh -c '
       psql --username="${DROPLET_DUMP_USER:-$POSTGRES_USER}" --dbname="${DROPLET_DUMP_DB:-$POSTGRES_DB}" -v ON_ERROR_STOP=1'
 log_success "Postgres restored."
+
+# --- Restore the Nextcloud metadata DB (WARP-1013) ---------------------------
+# Replayed from the SAME snapshot as the nextcloud-data tar below so file
+# blobs and their metadata (file cache, shares, users, groupfolders) stay
+# paired — restoring only one of the two surfaces as missing/ghost files.
+if [ -n "$NC_DUMP" ]; then
+  log_info "Restoring Postgres database 'nextcloud'..."
+  dc exec -T -e "DROPLET_DUMP_USER=${DB_USER:-}" "$DB_SERVICE" sh -c '
+    psql --username="${DROPLET_DUMP_USER:-$POSTGRES_USER}" --dbname=postgres -v ON_ERROR_STOP=1 \
+      -c "DROP DATABASE IF EXISTS nextcloud WITH (FORCE);" \
+      -c "CREATE DATABASE nextcloud;"'
+  gunzip -c "$NC_DUMP" \
+    | dc exec -T -e "DROPLET_DUMP_USER=${DB_USER:-}" "$DB_SERVICE" sh -c '
+        psql --username="${DROPLET_DUMP_USER:-$POSTGRES_USER}" --dbname=nextcloud -v ON_ERROR_STOP=1'
+  log_success "Postgres database 'nextcloud' restored."
+else
+  log_warn "snapshot carries no nextcloud DB dump (pre-WARP-1013 backup?) — nextcloud metadata left untouched; expect file-cache skew against the restored data volume"
+fi
 
 # --- Restore data volumes -------------------------------------------------------
 # Every volumes/<name>.tar staged by droplet-backup.sh is replayed. The tar is
