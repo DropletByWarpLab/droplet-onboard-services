@@ -106,6 +106,13 @@ if [ -f "$BACKUP_SCRIPT" ] && [ -f "$RESTORE_SCRIPT" ] && [ -f "$DRILL_SCRIPT" ]
     && grep -q -- '--keep-monthly' "$BACKUP_SCRIPT" \
     && pass "backup applies a restic forget retention policy" \
     || fail "backup has no restic forget retention policy"
+  # Retention must be pinned with --group-by host: restic's default (host,paths)
+  # grouping splits snapshots into a NEW retention group whenever the backup path
+  # set changes (config candidates are existence-guarded, .env is conditional),
+  # so stale groups keep their last daily/weekly/monthly snapshots forever.
+  grep -q -- '--group-by' "$BACKUP_SCRIPT" \
+    && pass "retention pins --group-by (stable across path-set drift)" \
+    || fail "restic forget relies on the default host,paths grouping"
   # Weekly full = restic backup --force re-read, tagged distinctly.
   grep -q 'weekly-full' "$BACKUP_SCRIPT" && pass "weekly-full tag present" || fail "no weekly-full tag"
   grep -qE 'restic.*--force|--force.*backup' "$BACKUP_SCRIPT" \
@@ -130,6 +137,17 @@ if [ -f "$BACKUP_SCRIPT" ] && [ -f "$RESTORE_SCRIPT" ] && [ -f "$DRILL_SCRIPT" ]
   fi
   grep -qE '\-\-force' "$RESTORE_SCRIPT" \
     && pass "restore confirm-gated with --force override" || fail "restore has no --force gate"
+  # EVERY psql invocation in the restore path must abort on the first SQL error
+  # (ON_ERROR_STOP=1). Without it psql swallows a mid-replay failure and exits 0,
+  # so after DROP DATABASE a partially-failed replay is reported as
+  # "Restore complete." — a corrupt restore that looks successful.
+  psql_total="$(printf '%s\n' "$restore_code" | grep -cE '(^|[[:space:]])psql ' || true)"
+  psql_stop="$(printf '%s\n' "$restore_code" | grep -cE '(^|[[:space:]])psql [^|]*ON_ERROR_STOP=1' || true)"
+  if [ "$psql_total" -gt 0 ] && [ "$psql_total" = "$psql_stop" ]; then
+    pass "every restore psql sets ON_ERROR_STOP=1 ($psql_stop/$psql_total)"
+  else
+    fail "restore psql without ON_ERROR_STOP=1 ($psql_stop/$psql_total set)"
+  fi
 
   # --- Drill script contract ---
   grep -qE 'restic[^&|;]*check' "$DRILL_SCRIPT" \
@@ -142,6 +160,12 @@ if [ -f "$BACKUP_SCRIPT" ] && [ -f "$RESTORE_SCRIPT" ] && [ -f "$DRILL_SCRIPT" ]
     || fail "drill status file not under /var/lib/droplet/backup"
   grep -q 'logger' "$DRILL_SCRIPT" \
     && pass "drill logs loudly (logger) on failure" || fail "drill has no loud failure log"
+  # The status file is machine-parsed (dashboard/health follow-up). The free-text
+  # message and the repository path flow into JSON string values, so they must be
+  # escaped or a " / \ in either would corrupt the file (JSON injection).
+  grep -qE '_json_escape|json_escape' "$DRILL_SCRIPT" \
+    && pass "drill status file escapes interpolated strings (JSON-safe)" \
+    || fail "drill status file interpolates raw strings into JSON (injection risk)"
 fi
 
 echo ""

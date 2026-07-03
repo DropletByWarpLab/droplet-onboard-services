@@ -57,6 +57,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
+_json_escape() {
+  # Minimal JSON string escaping (backslash FIRST, then double-quote) so a
+  # repository path or free-text message containing " or \ cannot corrupt the
+  # machine-parsed status file.
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
 write_status() {
   # $1 = ok|failed (EXPLICIT enum), $2 = human message
   local status="$1" message="$2" tmp
@@ -65,14 +72,14 @@ write_status() {
   tmp="$STATUS_FILE.tmp.$$"
   cat > "$tmp" <<STATUS
 {
-  "status": "$status",
+  "status": "$(_json_escape "$status")",
   "completed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "warp_ticket": "WARP-254",
-  "snapshot_id": "$SNAPSHOT_ID",
-  "repository": "${RESTIC_REPOSITORY:-unset}",
+  "snapshot_id": "$(_json_escape "$SNAPSHOT_ID")",
+  "repository": "$(_json_escape "${RESTIC_REPOSITORY:-unset}")",
   "tables": $TABLES,
   "users": $USERS,
-  "message": "$message"
+  "message": "$(_json_escape "$message")"
 }
 STATUS
   chmod 600 "$tmp"
