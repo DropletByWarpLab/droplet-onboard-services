@@ -35,6 +35,15 @@ on:
       - ".dockerignore"
       - "proto/**"
       - ".github/workflows/docker-build.yml"
+      # Build inputs the old trigger list missed — each is COPY'd into at
+      # least one image (see the per-image filters in the detect job):
+      - "package.json"
+      - "package-lock.json"
+      - "packages/**"
+      - "services/**/package.json"
+      - "services/_shared/**"
+      - "tests/retrieval-eval/**"
+      - "apps/orchestrator/prisma/**"
   push:
     branches: [main]
     paths:
@@ -49,6 +58,13 @@ on:
       - ".dockerignore"
       - "proto/**"
       - ".github/workflows/docker-build.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "packages/**"
+      - "services/**/package.json"
+      - "services/_shared/**"
+      - "tests/retrieval-eval/**"
+      - "apps/orchestrator/prisma/**"
 
 concurrency:
   group: docker-build-${{ github.ref }}
