@@ -17,12 +17,25 @@ import {
 } from "lucide-react";
 import { useDrives } from "@/lib/hooks/useDrives";
 import { usePools } from "@/lib/hooks/usePools";
-import { ejectDrive, rescanDrives, updateDriveLabel } from "@/lib/api";
+import {
+  adoptDrive,
+  confirmStorageCommand,
+  ejectDrive,
+  requestFormatPool,
+  rescanDrives,
+  updateDriveLabel,
+} from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/components/Toast";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { translateError } from "@/lib/friendly-errors";
-import type { DriveInfo, PoolInfo } from "@/lib/types";
+import type { DiskInfo, DriveInfo, PoolInfo } from "@/lib/types";
+// Shared destructive-flow helpers (same ones the Settings Danger zone reuses):
+// the host script's typed-phrase gate + the calm adopt-refusal copy.
+import {
+  buildConfirmPhrase,
+  friendlyAdoptError,
+} from "@/components/setup/steps/StorageStep";
 import {
   levelLabel,
   levelBlurb,
@@ -122,7 +135,7 @@ function busLabel(bus?: string): string {
 }
 
 export function DrivesPanel() {
-  const { drives, isLoading, bridgeError, refresh } = useDrives();
+  const { drives, disks, isLoading, bridgeError, refresh } = useDrives();
   // BUG-3 / ADR-019: real mdadm pools replace the old client-side byte-sum
   // "pooled storage" fiction. Pools are OPTIONAL — `pools` is [] when none.
   const { pools, refresh: refreshPools } = usePools();
@@ -135,6 +148,109 @@ export function DrivesPanel() {
   const [rescanning, setRescanning] = useState(false);
   const [ejectTarget, setEjectTarget] = useState<DriveInfo | null>(null);
   const [ejecting, setEjecting] = useState<string | null>(null);
+
+  // WARP-936 — erase & adopt an unmounted disk. Two-step: mint a confirm
+  // token (nothing destructive happens), then the owner confirms in the
+  // blast-radius dialog to execute. Same gated flow the setup wizard and the
+  // Settings Danger zone use — one wire path, one contract.
+  const [adoptPending, setAdoptPending] = useState<{
+    token: { confirmationToken: string; service: string; resourceId: string };
+    disk: DiskInfo;
+  } | null>(null);
+  const [adoptBusy, setAdoptBusy] = useState<string | null>(null);
+
+  // WARP-936 — format & mount a created-but-never-formatted pool (the live
+  // box's md127 shape). Same two-step confirm-token flow via pool_format.
+  const [formatPending, setFormatPending] = useState<{
+    token: { confirmationToken: string; service: string; resourceId: string };
+    pool: PoolInfo;
+  } | null>(null);
+  const [formatBusy, setFormatBusy] = useState<string | null>(null);
+
+  // Disks worth surfacing in "Available drives": everything the bridge
+  // reports that is NOT already in use (in-use disks are the mounted drive
+  // cards below — listing them twice would be confusing, not honest).
+  const availableDisks = (disks ?? []).filter((d) => d.state !== "in_use");
+
+  // A pool whose md device backs no mounted filesystem was created but never
+  // formatted+mounted (or lost its mount) — offer the owner a way forward
+  // instead of a dead-end card.
+  const mountedDevices = new Set(drives.map((d) => d.device));
+
+  async function handleStartAdopt(disk: DiskInfo) {
+    if (disk.state !== "foreign" && disk.state !== "available") return;
+    setAdoptBusy(disk.name);
+    try {
+      const token = await adoptDrive({
+        device: disk.name,
+        wipeMethod: "quick",
+        confirmPhrase: buildConfirmPhrase([disk.name]),
+      });
+      setAdoptPending({
+        token: {
+          confirmationToken: token.confirmationToken,
+          service: token.service,
+          resourceId: token.resourceId,
+        },
+        disk,
+      });
+    } catch (err) {
+      toast(friendlyAdoptError(err), "error");
+    } finally {
+      setAdoptBusy(null);
+    }
+  }
+
+  async function doAdopt() {
+    const p = adoptPending;
+    if (!p) return;
+    try {
+      await confirmStorageCommand(p.token);
+      setAdoptPending(null);
+      toast(`${diskTitle(p.disk)} erased and added to your Droplet`, "success");
+      refresh();
+      refreshPools();
+    } catch (err) {
+      setAdoptPending(null);
+      toast(friendlyAdoptError(err), "error");
+    }
+  }
+
+  async function handleStartFormat(pool: PoolInfo) {
+    setFormatBusy(pool.device);
+    try {
+      const token = await requestFormatPool(pool.device, {
+        confirmPhrase: buildConfirmPhrase([pool.device]),
+      });
+      setFormatPending({
+        token: {
+          confirmationToken: token.confirmationToken,
+          service: token.service,
+          resourceId: token.resourceId,
+        },
+        pool,
+      });
+    } catch (err) {
+      toast(translateError(err, "files"), "error");
+    } finally {
+      setFormatBusy(null);
+    }
+  }
+
+  async function doFormat() {
+    const p = formatPending;
+    if (!p) return;
+    try {
+      await confirmStorageCommand(p.token);
+      setFormatPending(null);
+      toast(`${poolName(p.pool)} formatted`, "success");
+      refresh();
+      refreshPools();
+    } catch (err) {
+      setFormatPending(null);
+      toast(translateError(err, "files"), "error");
+    }
+  }
 
   async function onRescan() {
     setRescanning(true);
@@ -182,15 +298,17 @@ export function DrivesPanel() {
     );
   }
 
-  if (bridgeError || drives.length === 0) {
+  // The storage service being unreachable is the ONLY whole-panel dead end —
+  // we can't honestly render pools or disks either. WARP-936: an empty
+  // MOUNTED list is no longer an early return; the box may still have a pool
+  // (the live md127 case) or present-but-unmounted disks to show below.
+  if (bridgeError) {
     return (
       <div className="dp-card p-8 text-center">
         <HardDrive size={28} className="mx-auto text-label-tertiary mb-3" />
-        <h2 className="type-headline text-label-primary mb-1">No drives mounted</h2>
+        <h2 className="type-headline text-label-primary mb-1">Storage is unavailable</h2>
         <p className="type-subheadline text-label-secondary mb-4">
-          {bridgeError
-            ? "The storage service isn't reachable right now."
-            : "Plug in a drive and it mounts automatically."}
+          The storage service isn&rsquo;t reachable right now.
         </p>
         <button
           onClick={onRescan}
@@ -253,7 +371,21 @@ export function DrivesPanel() {
             aria-label="Storage pools"
           >
             {pools.map((p) => (
-              <PoolCard key={p.device} pool={p} />
+              <PoolCard
+                key={p.device}
+                pool={p}
+                // WARP-936: a pool whose md device backs no mounted filesystem
+                // was created but never formatted+mounted — give the owner the
+                // gated way forward. Failed pools get support copy, not a
+                // format button.
+                canFormat={
+                  isAdmin &&
+                  p.status !== "failed" &&
+                  !mountedDevices.has(`/dev/${p.device}`)
+                }
+                formatting={formatBusy === p.device}
+                onFormat={() => handleStartFormat(p)}
+              />
             ))}
           </div>
         )}
@@ -264,23 +396,64 @@ export function DrivesPanel() {
         <h3 className="type-caption-2 uppercase tracking-wide text-label-tertiary mb-2">
           Drives
         </h3>
-        <div
-          className="grid grid-cols-1 sm:grid-cols-2 gap-4"
-          role="list"
-          aria-label="Mounted drives"
-        >
-          {drives.map((d) => (
-            <DriveCard
-              key={d.uuid || d.mount || d.device}
-              drive={d}
-              isAdmin={isAdmin}
-              ejecting={ejecting === d.uuid}
-              onEject={() => setEjectTarget(d)}
-              onRenamed={() => refresh()}
-            />
-          ))}
-        </div>
+        {drives.length === 0 ? (
+          <div className="dp-card p-5 flex items-start gap-3">
+            <span className="flex-none h-10 w-10 rounded-[10px] bg-surface-secondary text-label-tertiary flex items-center justify-center">
+              <HardDrive className="h-5 w-5" />
+            </span>
+            <div>
+              <p className="type-headline text-label-primary">No drives yet</p>
+              <p className="type-subheadline text-label-secondary mt-0.5">
+                Plug in a drive and it mounts automatically.
+              </p>
+            </div>
+          </div>
+        ) : (
+          <div
+            className="grid grid-cols-1 sm:grid-cols-2 gap-4"
+            role="list"
+            aria-label="Mounted drives"
+          >
+            {drives.map((d) => (
+              <DriveCard
+                key={d.uuid || d.mount || d.device}
+                drive={d}
+                isAdmin={isAdmin}
+                ejecting={ejecting === d.uuid}
+                onEject={() => setEjectTarget(d)}
+                onRenamed={() => refresh()}
+              />
+            ))}
+          </div>
+        )}
       </div>
+
+      {/* WARP-936 — present-but-unmounted disks. Read-only inventory with an
+          explicit per-state path forward; nothing here auto-mounts or
+          auto-wipes, and every destructive action goes through the tier-3
+          confirm-token + blast-radius dialog. */}
+      {availableDisks.length > 0 && (
+        <div>
+          <h3 className="type-caption-2 uppercase tracking-wide text-label-tertiary mb-2">
+            Available drives
+          </h3>
+          <div
+            className="grid grid-cols-1 sm:grid-cols-2 gap-4"
+            role="list"
+            aria-label="Available drives"
+          >
+            {availableDisks.map((disk) => (
+              <AvailableDiskCard
+                key={disk.name}
+                disk={disk}
+                isAdmin={isAdmin}
+                busy={adoptBusy === disk.name}
+                onAdopt={() => handleStartAdopt(disk)}
+              />
+            ))}
+          </div>
+        </div>
+      )}
 
       <ConfirmDialog
         open={ejectTarget !== null}
@@ -291,6 +464,117 @@ export function DrivesPanel() {
         confirmLabel="Eject"
         variant="destructive"
       />
+
+      {/* WARP-936 — erase & adopt blast-radius confirm. Names the disk +
+          size so the owner verifies the target before anything runs. */}
+      <ConfirmDialog
+        open={adoptPending !== null}
+        onConfirm={doAdopt}
+        onCancel={() => setAdoptPending(null)}
+        title="Erase and adopt this drive?"
+        description="This permanently erases everything on the drive, then formats it and adds it to your Droplet. This can't be undone — make sure anything you want is backed up first."
+        confirmLabel="Erase & adopt"
+        confirmedIdentifier={
+          adoptPending
+            ? `${diskTitle(adoptPending.disk)} · ${fmtBytes(adoptPending.disk.size_bytes)} · ${adoptPending.disk.name}`
+            : ""
+        }
+        variant="destructive"
+      />
+
+      {/* WARP-936 — format & mount confirm for a never-formatted pool. */}
+      <ConfirmDialog
+        open={formatPending !== null}
+        onConfirm={doFormat}
+        onCancel={() => setFormatPending(null)}
+        title="Format this storage pool?"
+        description="This permanently erases anything on the pool and sets it up as storage for your Droplet. This can't be undone."
+        confirmLabel="Format & mount"
+        confirmedIdentifier={
+          formatPending
+            ? `${poolName(formatPending.pool)} · ${levelLabel(formatPending.pool.level)} · ${formatPending.pool.members.length} ${formatPending.pool.members.length === 1 ? "drive" : "drives"}`
+            : ""
+        }
+        variant="destructive"
+      />
+    </div>
+  );
+}
+
+/** WARP-936 — customer-facing name for an unmounted disk: the hardware model
+ *  when the bridge knows it, else a friendly generic. The raw /dev/ path is
+ *  never rendered; the bare kernel name (sda) appears only as the small
+ *  disambiguating token, mirroring the setup wizard's reclaim rows. */
+function diskTitle(d: DiskInfo): string {
+  const model = (d.model || "").replace(/[-_]+/g, " ").trim();
+  return model || "Drive";
+}
+
+/** One available (unmounted) disk card. States:
+ *    foreign / available — admin gets the gated "Erase & adopt" action
+ *    pool_member         — routed to the pool card above, never adoptable */
+function AvailableDiskCard({
+  disk,
+  isAdmin,
+  busy,
+  onAdopt,
+}: {
+  disk: DiskInfo;
+  isAdmin: boolean;
+  busy: boolean;
+  onAdopt: () => void;
+}) {
+  const adoptable = disk.state === "foreign" || disk.state === "available";
+  const chip =
+    disk.state === "pool_member"
+      ? { label: "In a pool", cls: "bg-accent/10 text-accent" }
+      : disk.state === "foreign"
+        ? { label: "Has data", cls: "bg-system-orange/10 text-system-orange" }
+        : { label: "Empty", cls: "bg-surface-secondary text-label-secondary" };
+  const blurb =
+    disk.state === "pool_member"
+      ? "Part of your storage pool — manage it from the pool above."
+      : disk.state === "foreign"
+        ? "Holds files from another system. Erase it to add its space to your Droplet."
+        : "Empty and ready to be added to your Droplet.";
+  return (
+    <div role="listitem" className="dp-card p-4">
+      <div className="flex items-start gap-3">
+        <span className="flex-none h-10 w-10 rounded-[10px] bg-surface-secondary text-label-secondary flex items-center justify-center">
+          <BusIcon bus={disk.bus} className="h-5 w-5" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <h4 className="type-headline text-label-primary truncate" title={diskTitle(disk)}>
+              {diskTitle(disk)}
+            </h4>
+            <span className="flex-none type-caption-2 uppercase tracking-wide px-1.5 py-0.5 rounded border border-separator text-label-tertiary">
+              {busLabel(disk.bus)}
+            </span>
+          </div>
+          <p className="type-caption-1 text-label-tertiary tabular-nums">
+            {fmtBytes(disk.size_bytes)} ·{" "}
+            <span className="font-mono">{disk.name}</span>
+          </p>
+        </div>
+        <span className={`flex-none type-caption-2 px-2 py-0.5 rounded-full ${chip.cls}`}>
+          {chip.label}
+        </span>
+      </div>
+
+      <p className="mt-3 type-caption-1 text-label-secondary">{blurb}</p>
+
+      {isAdmin && adoptable && (
+        <div className="mt-4 pt-3 border-t border-separator flex justify-end">
+          <button
+            onClick={onAdopt}
+            disabled={busy}
+            className="flex-none whitespace-nowrap rounded-md bg-system-red/90 hover:bg-system-red text-white px-3 py-1.5 type-subheadline font-medium disabled:opacity-60 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-system-red/40"
+          >
+            {busy ? "Working…" : "Erase & adopt"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -579,7 +863,19 @@ function PoolAlarmBanner({
  *  Raw kernel device names (/dev/md*, member /dev/sd*) are deliberately NOT
  *  surfaced — the target user is non-technical (ADR-002; follow-up to WARP-827,
  *  which gave the per-drive DriveCard the same treatment). */
-function PoolCard({ pool }: { pool: PoolInfo }) {
+function PoolCard({
+  pool,
+  canFormat = false,
+  formatting = false,
+  onFormat,
+}: {
+  pool: PoolInfo;
+  /** WARP-936: true when the pool's md device backs no mounted filesystem —
+   *  created but never formatted+mounted. Admin-gated by the caller. */
+  canFormat?: boolean;
+  formatting?: boolean;
+  onFormat?: () => void;
+}) {
   const badge = poolStatusBadge(pool.status);
   const name = poolName(pool);
   const memberCount = pool.members.length;
@@ -612,6 +908,24 @@ function PoolCard({ pool }: { pool: PoolInfo }) {
       </div>
 
       {pool.notes && <p className="mt-2 type-caption-1 text-label-tertiary">{pool.notes}</p>}
+
+      {/* WARP-936: the way forward for a created-but-never-formatted pool.
+          Destructive → tier-3 confirm-token + blast-radius dialog in the
+          parent; this is just the entry point. */}
+      {canFormat && (
+        <div className="mt-4 pt-3 border-t border-separator flex items-center justify-between gap-3 flex-wrap">
+          <p className="type-caption-1 text-label-secondary">
+            This pool isn&rsquo;t set up as storage yet.
+          </p>
+          <button
+            onClick={onFormat}
+            disabled={formatting}
+            className="flex-none whitespace-nowrap rounded-md bg-system-red/90 hover:bg-system-red text-white px-3 py-1.5 type-subheadline font-medium disabled:opacity-60 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-system-red/40"
+          >
+            {formatting ? "Working…" : "Format & mount"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

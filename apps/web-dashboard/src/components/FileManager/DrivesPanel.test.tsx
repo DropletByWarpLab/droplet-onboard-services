@@ -15,7 +15,7 @@
  * admin gate (same pattern as the auth-gate suites).
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import type { DriveInfo } from "@/lib/types";
 
 // next/link → plain anchor so we can assert href without a Next router.
@@ -43,9 +43,26 @@ vi.mock("@/lib/api", () => ({
   updateDriveLabel: vi.fn(),
   ejectDrive: vi.fn(),
   rescanDrives: vi.fn(),
+  // WARP-936 — adopt + format flows on the panel. The remaining names exist
+  // because DrivesPanel imports helpers from StorageStep, whose module-level
+  // imports must all resolve on the mocked module.
+  adoptDrive: vi.fn(),
+  confirmStorageCommand: vi.fn(),
+  requestFormatPool: vi.fn(),
+  fetchDrives: vi.fn(),
+  fetchPools: vi.fn(),
+  requestCreatePool: vi.fn(),
+  confirmPoolCommand: vi.fn(),
+  requestAdoptDrive: vi.fn(),
 }));
 
-import { updateDriveLabel } from "@/lib/api";
+import {
+  updateDriveLabel,
+  adoptDrive,
+  confirmStorageCommand,
+  requestFormatPool,
+} from "@/lib/api";
+import type { DiskInfo, PoolInfo } from "@/lib/types";
 import { DrivesPanel } from "./DrivesPanel";
 
 function makeDrive(overrides: Partial<DriveInfo> = {}): DriveInfo {
@@ -73,15 +90,25 @@ const refresh = vi.fn();
 function setup({
   role = "owner",
   drives = [makeDrive()],
-}: { role?: "owner" | "admin" | "family" | "guest"; drives?: DriveInfo[] } = {}) {
+  disks = [],
+  pools = [],
+  bridgeError = undefined,
+}: {
+  role?: "owner" | "admin" | "family" | "guest";
+  drives?: DriveInfo[];
+  disks?: DiskInfo[];
+  pools?: PoolInfo[];
+  bridgeError?: string;
+} = {}) {
   useAuthMock.mockReturnValue({ user: { id: "u1", username: "u", displayName: "U", role } });
   useDrivesMock.mockReturnValue({
     drives,
+    disks,
     isLoading: false,
-    bridgeError: undefined,
+    bridgeError,
     refresh,
   });
-  usePoolsMock.mockReturnValue({ pools: [], refresh: vi.fn() });
+  usePoolsMock.mockReturnValue({ pools, refresh: vi.fn() });
   return render(<DrivesPanel />);
 }
 
@@ -179,5 +206,167 @@ describe("DrivesPanel — inline rename (WARP-827 AC2)", () => {
     // After the rejected save the original name is restored and an error toast fires.
     await waitFor(() => expect(toastMock).toHaveBeenCalled());
     expect(screen.getByText("Photos")).toBeInTheDocument();
+  });
+});
+
+// =====================================================================
+// WARP-936 — adoptable drives: the panel must never hide a pool (or a
+// present-but-unmounted disk) behind the drives.length===0 early return.
+// The live box's exact shape: drives=[], pools=[md127 resyncing],
+// disks=[sda/sdb pool_member] — and the old panel said "No drives mounted".
+// =====================================================================
+
+const md127: PoolInfo = {
+  device: "md127",
+  level: "raid1",
+  status: "resyncing",
+  members: ["sda", "sdb"],
+  displayName: null,
+  notes: null,
+};
+
+function makeDisk(overrides: Partial<DiskInfo> = {}): DiskInfo {
+  return {
+    name: "sdc",
+    size_bytes: 2_000_000_000_000,
+    state: "foreign",
+    fstype: "ntfs",
+    bus: "usb",
+    model: "Samsung T7",
+    serial: "S-1",
+    ...overrides,
+  };
+}
+
+describe("DrivesPanel — pools stay visible with zero mounted drives (WARP-936)", () => {
+  it("renders the pool card instead of the 'No drives mounted' dead end", () => {
+    setup({ drives: [], pools: [md127], disks: [
+      makeDisk({ name: "sda", state: "pool_member", md: "md127" }),
+      makeDisk({ name: "sdb", state: "pool_member", md: "md127" }),
+    ] });
+    expect(screen.queryByText(/no drives mounted/i)).not.toBeInTheDocument();
+    expect(screen.getAllByText(/storage pool/i).length).toBeGreaterThan(0);
+    // The resyncing banner still fires for the pool that needs attention.
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+  });
+
+  it("keeps the honest bridge-unavailable state", () => {
+    setup({ drives: [], bridgeError: "bridge_unavailable" });
+    expect(
+      // Curly apostrophe in the rendered copy — match around it.
+      screen.getByText(/storage service isn.t reachable/i),
+    ).toBeInTheDocument();
+  });
+
+  it("shows a calm inline empty state for the drives section when nothing is mounted", () => {
+    setup({ drives: [], pools: [md127] });
+    expect(screen.getByText(/plug in a drive/i)).toBeInTheDocument();
+  });
+});
+
+describe("DrivesPanel — available drives + erase & adopt (WARP-936)", () => {
+  it("lists a foreign disk and wires Erase & adopt through the confirm-token flow", async () => {
+    (adoptDrive as ReturnType<typeof vi.fn>).mockResolvedValue({
+      status: "confirmation_required",
+      confirmationToken: "tok-adopt",
+      service: "drive_adopt",
+      resourceId: "sdc",
+    });
+    (confirmStorageCommand as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true });
+    setup({ disks: [makeDisk()] });
+
+    expect(screen.getByText(/available drives/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /erase & adopt/i }));
+
+    await waitFor(() =>
+      expect(adoptDrive).toHaveBeenCalledWith(
+        expect.objectContaining({
+          device: "sdc",
+          wipeMethod: "quick",
+          confirmPhrase: "ERASE sdc",
+        }),
+      ),
+    );
+    // Blast-radius dialog opens; nothing executes until confirmed.
+    expect(confirmStorageCommand).not.toHaveBeenCalled();
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /erase & adopt/i }));
+    await waitFor(() =>
+      expect(confirmStorageCommand).toHaveBeenCalledWith({
+        confirmationToken: "tok-adopt",
+        service: "drive_adopt",
+        resourceId: "sdc",
+      }),
+    );
+  });
+
+  it("offers adopt for an empty (available) disk too", () => {
+    setup({ disks: [makeDisk({ name: "sdd", state: "available", fstype: "", model: "" })] });
+    expect(screen.getByRole("button", { name: /erase & adopt/i })).toBeInTheDocument();
+  });
+
+  it("routes a pool-member disk to the pool card — never an individual adopt", () => {
+    setup({
+      pools: [md127],
+      disks: [
+        makeDisk({ name: "sda", state: "pool_member", md: "md127" }),
+        makeDisk({ name: "sdb", state: "pool_member", md: "md127" }),
+      ],
+    });
+    expect(screen.queryByRole("button", { name: /erase & adopt/i })).not.toBeInTheDocument();
+    expect(screen.getAllByText(/part of .*pool/i).length).toBeGreaterThan(0);
+  });
+
+  it("hides the adopt affordance from non-admins", () => {
+    setup({ role: "family", disks: [makeDisk()] });
+    expect(screen.queryByRole("button", { name: /erase & adopt/i })).not.toBeInTheDocument();
+  });
+
+  it("never renders a raw /dev/ path in the available-drives section", () => {
+    setup({ disks: [makeDisk()] });
+    expect(screen.queryByText(/\/dev\//)).not.toBeInTheDocument();
+  });
+});
+
+describe("DrivesPanel — format & mount an unformatted pool (WARP-936)", () => {
+  it("offers Format & mount on a pool with no mounted filesystem and wires the confirm flow", async () => {
+    (requestFormatPool as ReturnType<typeof vi.fn>).mockResolvedValue({
+      status: "confirmation_required",
+      confirmationToken: "tok-fmt",
+      service: "pool_format",
+      resourceId: "md127",
+    });
+    (confirmStorageCommand as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true });
+    setup({ drives: [], pools: [md127] });
+
+    fireEvent.click(screen.getByRole("button", { name: /format & mount/i }));
+    await waitFor(() =>
+      expect(requestFormatPool).toHaveBeenCalledWith(
+        "md127",
+        expect.objectContaining({ confirmPhrase: "ERASE md127" }),
+      ),
+    );
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /format & mount/i }));
+    await waitFor(() =>
+      expect(confirmStorageCommand).toHaveBeenCalledWith({
+        confirmationToken: "tok-fmt",
+        service: "pool_format",
+        resourceId: "md127",
+      }),
+    );
+  });
+
+  it("does NOT offer Format & mount when the pool is already mounted as a drive", () => {
+    setup({
+      drives: [makeDrive({ device: "/dev/md127", mount: "/mnt/droplet/pool" })],
+      pools: [{ ...md127, status: "active" }],
+    });
+    expect(screen.queryByRole("button", { name: /format & mount/i })).not.toBeInTheDocument();
+  });
+
+  it("hides Format & mount from non-admins", () => {
+    setup({ role: "family", drives: [], pools: [md127] });
+    expect(screen.queryByRole("button", { name: /format & mount/i })).not.toBeInTheDocument();
   });
 });

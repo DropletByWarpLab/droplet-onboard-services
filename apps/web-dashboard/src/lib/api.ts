@@ -886,6 +886,30 @@ export async function requestDestroyPool(
   return res.json();
 }
 
+/** WARP-936 step 1: format an existing (e.g. created-but-never-formatted)
+ *  pool — returns a confirm token (does NOT format yet). The owner confirms
+ *  via confirmPoolCommand / confirmStorageCommand to execute. The host
+ *  script's typed-phrase gate requires `confirmPhrase` to name the md device
+ *  (buildConfirmPhrase(["md127"]) → "ERASE md127"). */
+export async function requestFormatPool(
+  device: string,
+  input: { confirmPhrase: string; fstype?: string },
+): Promise<PoolCommandToken> {
+  const res = await authFetch(
+    `${BASE}/api/storage/pools/${encodeURIComponent(device)}/format`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+  if (res.status !== 202) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Could not start pool format: ${res.status}`);
+  }
+  return res.json();
+}
+
 /** WARP-662 step 1: adopt (wipe + reformat + mount) a previously-used disk —
  *  returns a confirm token (does NOT wipe yet). `device` is the WHOLE-disk
  *  kernel name (e.g. "sdb" / "nvme0n1"), never a partition. The owner confirms

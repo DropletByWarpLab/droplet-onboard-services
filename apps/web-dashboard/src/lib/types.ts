@@ -656,9 +656,36 @@ export interface DriveLabel {
   updatedAt: string;
 }
 
+/** WARP-936: explicit whole-disk state from the device-bridge's lsblk walk.
+ *  The UI branches on this enum — never on a guess or a mount-gated omission:
+ *    in_use      — the disk, a partition, or an md it backs is mounted
+ *    pool_member — carries a RAID-member signature (`md` names the array)
+ *    foreign     — has data from another system, nothing mounted
+ *    available   — no filesystem signature at all */
+export type DiskState = "in_use" | "pool_member" | "foreign" | "available";
+
+/** WARP-936: one WHOLE physical disk (including present-but-unmounted ones
+ *  the mounted `drives` list is blind to). Read-only inventory — every
+ *  destructive action stays behind the tier-3 confirm-token flow. */
+export interface DiskInfo {
+  /** Whole-disk kernel name, e.g. "sda" / "nvme0n1". */
+  name: string;
+  size_bytes: number;
+  state: DiskState;
+  fstype?: string;
+  bus?: string;
+  model?: string;
+  serial?: string;
+  /** md array name (e.g. "md127") when state is pool_member. */
+  md?: string;
+}
+
 export interface DrivesResponse {
   drives: DriveInfo[];
   count: number;
+  /** WARP-936: whole-disk inventory. Absent on an older orchestrator/bridge —
+   *  callers treat that as an empty list. */
+  disks?: DiskInfo[];
   snapshot_at?: string;
   error?: string;
   reason?: string;
