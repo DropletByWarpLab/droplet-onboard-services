@@ -180,6 +180,64 @@ describe("Users page — create local account (WARP-1042)", () => {
     expect(screen.getByDisplayValue(password)).toBeInTheDocument();
   });
 
+  it("sends the canonical family role by default, not the legacy user value", async () => {
+    // Review finding (WARP-1042): the server's "user"→"family" preprocess is
+    // a one-deploy-window compat shim for OLD dashboard builds — brand-new
+    // code must speak the canonical Role vocabulary so the shim can retire.
+    const dialog = await openCreateDialog();
+    const roleSelect = within(dialog).getByLabelText(/role/i) as HTMLSelectElement;
+    expect(roleSelect.value).toBe("family");
+
+    fireEvent.change(within(dialog).getByLabelText(/login email/i), {
+      target: { value: "kid@example.com" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: /create account/i }));
+
+    await waitFor(() => expect(createUserMock).toHaveBeenCalledTimes(1));
+    expect(createUserMock.mock.calls[0]![4]).toBe("family");
+  });
+
+  it("cannot be dismissed while the create request is in flight — the show-once handoff still appears", async () => {
+    // Review finding (WARP-1042): closing mid-flight would let the server
+    // mint the account while the 0-tick reset wipes the show-once temp
+    // password, so the admin never sees the credentials. Escape, backdrop,
+    // and the Cancel/X buttons must all be inert while submitting.
+    let resolveCreate!: () => void;
+    createUserMock.mockImplementation(
+      () => new Promise<void>((resolve) => (resolveCreate = resolve)),
+    );
+
+    const dialog = await openCreateDialog();
+    fireEvent.change(within(dialog).getByLabelText(/login email/i), {
+      target: { value: "bob@example.com" },
+    });
+    const pw = within(dialog).getByLabelText(/temporary password/i) as HTMLInputElement;
+    const password = pw.value;
+    fireEvent.click(within(dialog).getByRole("button", { name: /create account/i }));
+    await waitFor(() => expect(createUserMock).toHaveBeenCalledTimes(1));
+
+    // Escape — dialog must stay.
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    // Backdrop click — dialog must stay.
+    fireEvent.click(dialog.parentElement!);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    // Explicit Cancel — dialog must stay.
+    fireEvent.click(within(dialog).getByRole("button", { name: /cancel/i }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    // Request completes → handoff phase with the intact temp password.
+    resolveCreate();
+    await waitFor(() => {
+      expect(
+        screen.getByText(/give them this email and temporary password/i),
+      ).toBeInTheDocument();
+    });
+    expect(screen.getByDisplayValue(password)).toBeInTheDocument();
+  });
+
   it("calls createUser only once when Create account is clicked twice rapidly", async () => {
     // A request that stays in flight for the whole test window, so the
     // guard is what (and only what) prevents the second submission.

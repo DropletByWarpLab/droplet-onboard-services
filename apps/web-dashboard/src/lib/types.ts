@@ -506,6 +506,14 @@ export interface AuthUser {
 // ── WARP-217 invite types ──
 export type InviteRole = "user" | "admin";
 
+/** WARP-1042: canonical role vocabulary for direct account creation —
+ *  mirrors the orchestrator `Role` enum minus `service` (same shape as
+ *  `TeamInviteRole` below). New code must send these canonical values;
+ *  the legacy `InviteRole` "user" alias only exists so the server's
+ *  one-deploy-window "user"→"family" preprocess can eventually retire.
+ *  Follow-up: canonicalize `InviteRole` itself across the invite modal. */
+export type CreateUserRole = "owner" | "admin" | "family" | "guest";
+
 export interface InviteCreateRequest {
   email: string;
   displayName?: string;

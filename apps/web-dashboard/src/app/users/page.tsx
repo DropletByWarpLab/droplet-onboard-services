@@ -33,6 +33,7 @@ import type {
   AuthUser,
   InviteListItem,
   InviteRole,
+  CreateUserRole,
   InviteCreateResponse,
 } from "@/lib/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -119,7 +120,9 @@ export default function UsersPage() {
   const [createPhase, setCreatePhase] = useState<"form" | "handoff">("form");
   const [createEmail, setCreateEmail] = useState("");
   const [createDisplay, setCreateDisplay] = useState("");
-  const [createRole, setCreateRole] = useState<InviteRole>("user");
+  // Canonical Role vocabulary (review finding): this dialog is NEW code, so
+  // it must not lean on the server's legacy "user"→"family" compat shim.
+  const [createRole, setCreateRole] = useState<CreateUserRole>("family");
   const [createPassword, setCreatePassword] = useState("");
   const [createError, setCreateError] = useState<string | null>(null);
   // WARP-874-style double-submit guard: disable Create + ignore re-entry
@@ -219,7 +222,7 @@ export default function UsersPage() {
   const resetCreateForm = () => {
     setCreateEmail("");
     setCreateDisplay("");
-    setCreateRole("user");
+    setCreateRole("family");
     setCreatePassword("");
     setCreatePhase("form");
     setCreateError(null);
@@ -234,20 +237,26 @@ export default function UsersPage() {
   };
 
   const closeCreate = useCallback(() => {
+    // Review finding (WARP-1042): never dismiss while the create request is
+    // in flight — the server would still mint the account while the 0-tick
+    // reset below wipes the show-once temp password, so the admin never sees
+    // the credentials. Guarding here covers every dismiss path (Escape,
+    // backdrop, X, Cancel).
+    if (createSubmitting) return;
     setShowCreate(false);
     // Reset after the modal unmounts next tick — this also drops the
     // temporary password from state (show-once contract).
     setTimeout(() => {
       setCreateEmail("");
       setCreateDisplay("");
-      setCreateRole("user");
+      setCreateRole("family");
       setCreatePassword("");
       setCreatePhase("form");
       setCreateError(null);
       setCreatePwCopied(false);
     }, 0);
     setTimeout(() => createTriggerRef.current?.focus(), 0);
-  }, []);
+  }, [createSubmitting]);
 
   // Close the create dialog on Escape (mirrors the invite modal).
   useEffect(() => {
@@ -928,10 +937,10 @@ export default function UsersPage() {
                     <select
                       id={createRoleId}
                       value={createRole}
-                      onChange={(e) => setCreateRole(e.target.value as InviteRole)}
+                      onChange={(e) => setCreateRole(e.target.value as CreateUserRole)}
                       className="dp-input"
                     >
-                      <option value="user">User</option>
+                      <option value="family">User</option>
                       <option value="admin">Admin</option>
                     </select>
                   </div>
