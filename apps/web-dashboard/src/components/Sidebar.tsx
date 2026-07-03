@@ -23,7 +23,9 @@ import {
   MessageSquare,
   MoreHorizontal,
   Network,
+  ScrollText,
   Settings,
+  ShieldCheck,
   Sparkles,
   Trash2,
   Star,
@@ -208,6 +210,18 @@ const NAV_GROUPS: NavGroup[] = [
         roles: ["owner", "admin"],
         requiresCapability: "ragEval",
       },
+      // WARP-246: signed activity log viewer. Role-gated to owner/admin
+      // (mirrors the orchestrator's owner/admin gate on /api/activity);
+      // no capability gate — the activity surface always exists.
+      {
+        href: "/admin/audit",
+        label: "Audit log",
+        icon: ScrollText,
+        roles: ["owner", "admin"],
+      },
+      // WARP-246: Trust Center placeholder — visible to every signed-in
+      // household member (support/reference zone, next to Help).
+      { href: "/trust", label: "Trust Center", icon: ShieldCheck },
     ],
   },
 ];
