@@ -7,16 +7,19 @@ import {
   Edit3,
   X,
   Users as UsersIcon,
+  UserPlus,
   ShieldOff,
   Shield,
   Check,
   Copy,
+  RefreshCw,
   Link as LinkIcon,
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { useAuth } from "@/lib/auth";
 import {
   fetchUsers,
+  createUser as apiCreateUser,
   deleteUser as apiDeleteUser,
   updateUser,
   setUserEnabled,
@@ -24,7 +27,7 @@ import {
   listInvites,
   revokeInvite as apiRevokeInvite,
 } from "@/lib/api";
-import { isValidEmail, validatePassword } from "@droplet/auth-policy";
+import { isValidEmail, validatePassword, PASSWORD_MIN } from "@droplet/auth-policy";
 import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
 import type {
   AuthUser,
@@ -42,6 +45,36 @@ const TTL_OPTIONS: Array<{ label: string; hours: number }> = [
   { label: "72 hours", hours: 72 },
   { label: "7 days", hours: 24 * 7 },
 ];
+
+// ── WARP-1042: client-side temporary-password generation ──
+// Three seeded character classes guarantee the @droplet/auth-policy
+// PASSWORD_REQUIRED_CLASSES floor; the remaining characters draw from the
+// combined pool and a crypto-seeded Fisher-Yates shuffle removes the fixed
+// class positions. Ambiguous glyphs (0/O, 1/l/I) are excluded because this
+// string is read aloud or retyped by a human during the handoff.
+const TEMP_PW_LOWER = "abcdefghjkmnpqrstuvwxyz";
+const TEMP_PW_UPPER = "ABCDEFGHJKMNPQRSTUVWXYZ";
+const TEMP_PW_DIGITS = "23456789";
+const TEMP_PW_ALL = TEMP_PW_LOWER + TEMP_PW_UPPER + TEMP_PW_DIGITS;
+
+function generateTempPassword(): string {
+  const length = Math.max(16, PASSWORD_MIN);
+  const rand = new Uint32Array(length * 2);
+  crypto.getRandomValues(rand);
+  const pools = [TEMP_PW_LOWER, TEMP_PW_UPPER, TEMP_PW_DIGITS];
+  const chars: string[] = [];
+  for (let i = 0; i < length; i++) {
+    const pool = i < pools.length ? pools[i] : TEMP_PW_ALL;
+    chars.push(pool[rand[i]! % pool.length]!);
+  }
+  // Fisher-Yates with the second half of the random buffer so the seeded
+  // classes don't sit at predictable positions.
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = rand[length + (length - 1 - i)]! % (i + 1);
+    [chars[i], chars[j]] = [chars[j]!, chars[i]!];
+  }
+  return chars.join("");
+}
 
 /**
  * Admin-only user management page. Non-admin callers get a 403 from the
@@ -77,6 +110,28 @@ export default function UsersPage() {
   const inviteHeadingId = useId();
   // Held so we can restore focus to the trigger on Escape-close.
   const inviteTriggerRef = useRef<HTMLButtonElement | null>(null);
+
+  // WARP-1042: Create-local-account dialog state — "form" and "handoff"
+  // phases (mirrors the invite modal's form/share split). The temporary
+  // password lives ONLY in this state: it is auto-generated on open,
+  // shown once in the handoff phase, and dropped on close.
+  const [showCreate, setShowCreate] = useState(false);
+  const [createPhase, setCreatePhase] = useState<"form" | "handoff">("form");
+  const [createEmail, setCreateEmail] = useState("");
+  const [createDisplay, setCreateDisplay] = useState("");
+  const [createRole, setCreateRole] = useState<InviteRole>("user");
+  const [createPassword, setCreatePassword] = useState("");
+  const [createError, setCreateError] = useState<string | null>(null);
+  // WARP-874-style double-submit guard: disable Create + ignore re-entry
+  // while the request is in flight.
+  const [createSubmitting, setCreateSubmitting] = useState(false);
+  const [createPwCopied, setCreatePwCopied] = useState(false);
+  const createHeadingId = useId();
+  const createDisplayId = useId();
+  const createEmailId = useId();
+  const createRoleId = useId();
+  const createPasswordId = useId();
+  const createTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   // Edit dialog state.
   const [editing, setEditing] = useState<AuthUser | null>(null);
@@ -159,6 +214,96 @@ export default function UsersPage() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [showInvite, closeInvite]);
+
+  // ── WARP-1042: Create-local-account dialog handlers ──
+  const resetCreateForm = () => {
+    setCreateEmail("");
+    setCreateDisplay("");
+    setCreateRole("user");
+    setCreatePassword("");
+    setCreatePhase("form");
+    setCreateError(null);
+    setCreatePwCopied(false);
+  };
+
+  const openCreate = () => {
+    resetCreateForm();
+    // Fresh policy-compliant temp password every time the dialog opens.
+    setCreatePassword(generateTempPassword());
+    setShowCreate(true);
+  };
+
+  const closeCreate = useCallback(() => {
+    setShowCreate(false);
+    // Reset after the modal unmounts next tick — this also drops the
+    // temporary password from state (show-once contract).
+    setTimeout(() => {
+      setCreateEmail("");
+      setCreateDisplay("");
+      setCreateRole("user");
+      setCreatePassword("");
+      setCreatePhase("form");
+      setCreateError(null);
+      setCreatePwCopied(false);
+    }, 0);
+    setTimeout(() => createTriggerRef.current?.focus(), 0);
+  }, []);
+
+  // Close the create dialog on Escape (mirrors the invite modal).
+  useEffect(() => {
+    if (!showCreate) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeCreate();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [showCreate, closeCreate]);
+
+  const handleCreateAccount = async () => {
+    if (createSubmitting) return;
+    setCreateError(null);
+    const email = createEmail.trim().toLowerCase();
+    if (!email || !isValidEmail(email)) {
+      setCreateError("Enter a valid email address.");
+      return;
+    }
+    if (!validatePassword(createPassword).ok) {
+      setCreateError("Password doesn't meet the requirements yet.");
+      return;
+    }
+    setCreateSubmitting(true);
+    try {
+      // mustChangePassword is hard-wired TRUE in this dialog — it only
+      // mints temp-credential handoffs; the person chooses their own
+      // password at first sign-in (WARP-824 forced-change gate).
+      await apiCreateUser(
+        email,
+        createPassword,
+        createDisplay.trim() || undefined,
+        true,
+        createRole,
+      );
+      setCreateEmail(email);
+      setCreatePhase("handoff");
+      // Refresh the roster behind the dialog; non-fatal if it fails.
+      void reload();
+    } catch (err: any) {
+      setCreateError(err?.message || "Failed to create the account");
+    } finally {
+      setCreateSubmitting(false);
+    }
+  };
+
+  const handleCopyTempPassword = async () => {
+    try {
+      await navigator.clipboard.writeText(createPassword);
+      setCreatePwCopied(true);
+      setTimeout(() => setCreatePwCopied(false), 2000);
+    } catch {
+      // Clipboard might be blocked (insecure context); the field stays
+      // selectable so the admin can copy manually.
+    }
+  };
 
   const handleGenerateInvite = async () => {
     setError(null);
@@ -370,18 +515,31 @@ export default function UsersPage() {
       title="Users"
       sub="Manage who can access this Droplet — invite teammates, set their role, and revoke access."
       actions={
-        <button
-          ref={inviteTriggerRef}
-          onClick={() => {
-            resetInviteForm();
-            setShowInvite(true);
-          }}
-          className="btn primary"
-          type="button"
-        >
-          <Plus size={14} />
-          Invite user
-        </button>
+        <div className="flex items-center gap-2">
+          {/* WARP-1042: mint a ready-to-use account with a temporary
+              password — the no-email sibling of the invite flow. */}
+          <button
+            ref={createTriggerRef}
+            onClick={openCreate}
+            className="btn ghost"
+            type="button"
+          >
+            <UserPlus size={14} />
+            Create local account
+          </button>
+          <button
+            ref={inviteTriggerRef}
+            onClick={() => {
+              resetInviteForm();
+              setShowInvite(true);
+            }}
+            className="btn primary"
+            type="button"
+          >
+            <Plus size={14} />
+            Invite user
+          </button>
+        </div>
       }
     >
       {error && (
@@ -685,6 +843,217 @@ export default function UsersPage() {
                   <button
                     onClick={closeInvite}
                     className="dp-btn-primary type-subheadline !min-h-[36px] !py-1.5"
+                  >
+                    Done
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* WARP-1042: Create local account dialog */}
+      {showCreate && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-6"
+          onClick={closeCreate}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={createHeadingId}
+            className="bg-surface-primary rounded-lg max-w-md w-full shadow-xl overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-4 py-3 border-b border-separator">
+              <h3 id={createHeadingId} className="type-headline text-label-primary">
+                {createPhase === "form" ? "Create local account" : "Hand off the sign-in details"}
+              </h3>
+              <button
+                onClick={closeCreate}
+                aria-label="Close dialog"
+                className="p-1 text-label-tertiary hover:text-label-primary"
+                type="button"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {createPhase === "form" ? (
+              <>
+                <div className="p-4 space-y-3">
+                  <div>
+                    <label
+                      htmlFor={createDisplayId}
+                      className="type-caption-1 text-label-tertiary mb-1.5 block"
+                    >
+                      Display name (optional)
+                    </label>
+                    <input
+                      id={createDisplayId}
+                      autoFocus
+                      value={createDisplay}
+                      onChange={(e) => setCreateDisplay(e.target.value)}
+                      placeholder="Display name"
+                      className="dp-input"
+                    />
+                  </div>
+                  <div>
+                    <label
+                      htmlFor={createEmailId}
+                      className="type-caption-1 text-label-tertiary mb-1.5 block"
+                    >
+                      Login email
+                    </label>
+                    <input
+                      id={createEmailId}
+                      type="email"
+                      value={createEmail}
+                      onChange={(e) => setCreateEmail(e.target.value)}
+                      placeholder="alex@example.com"
+                      className="dp-input"
+                    />
+                    <p className="type-caption-1 text-label-tertiary mt-1.5">
+                      Used to sign in — doesn't need to receive mail.
+                    </p>
+                  </div>
+                  <div>
+                    <label
+                      htmlFor={createRoleId}
+                      className="type-caption-1 text-label-tertiary mb-1.5 block"
+                    >
+                      Role
+                    </label>
+                    <select
+                      id={createRoleId}
+                      value={createRole}
+                      onChange={(e) => setCreateRole(e.target.value as InviteRole)}
+                      className="dp-input"
+                    >
+                      <option value="user">User</option>
+                      <option value="admin">Admin</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label
+                      htmlFor={createPasswordId}
+                      className="type-caption-1 text-label-tertiary mb-1.5 block"
+                    >
+                      Temporary password
+                    </label>
+                    <div className="flex items-stretch gap-2">
+                      <input
+                        id={createPasswordId}
+                        value={createPassword}
+                        onChange={(e) => setCreatePassword(e.target.value)}
+                        className="dp-input flex-1 font-mono type-footnote"
+                        autoComplete="off"
+                        spellCheck={false}
+                      />
+                      <button
+                        onClick={() => setCreatePassword(generateTempPassword())}
+                        className="dp-btn-primary type-footnote !min-h-0 !py-2 !px-3 flex-shrink-0"
+                        aria-label="Regenerate password"
+                        type="button"
+                      >
+                        <RefreshCw size={14} /> Regenerate
+                      </button>
+                    </div>
+                    <p className="type-caption-1 text-label-tertiary mt-1.5">
+                      Auto-generated to meet the password rules — you can type your
+                      own instead. They'll be asked to replace it at first sign-in.
+                    </p>
+                    {createPassword && !validatePassword(createPassword).ok && (
+                      <PasswordRulesChecklist password={createPassword} />
+                    )}
+                  </div>
+                  {createError && (
+                    <p role="alert" className="type-footnote text-system-red">
+                      {createError}
+                    </p>
+                  )}
+                </div>
+                <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-separator">
+                  <button
+                    onClick={closeCreate}
+                    className="type-subheadline text-accent hover:text-accent-hover px-3 py-2 transition-colors"
+                    type="button"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleCreateAccount}
+                    disabled={createSubmitting}
+                    className="dp-btn-primary type-subheadline !min-h-[36px] !py-1.5"
+                    type="button"
+                  >
+                    Create account
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div className="p-4 space-y-4">
+                <p className="type-subheadline text-label-secondary">
+                  Give them this email and temporary password — they'll choose
+                  their own the first time they sign in.
+                </p>
+                <div>
+                  <label
+                    htmlFor={createEmailId}
+                    className="type-caption-1 text-label-tertiary mb-1.5 block"
+                  >
+                    Sign-in email
+                  </label>
+                  <input
+                    id={createEmailId}
+                    readOnly
+                    value={createEmail}
+                    className="dp-input font-mono type-footnote"
+                    onFocus={(e) => e.currentTarget.select()}
+                  />
+                </div>
+                <div>
+                  <label
+                    htmlFor={createPasswordId}
+                    className="type-caption-1 text-label-tertiary mb-1.5 block"
+                  >
+                    Temporary password
+                  </label>
+                  <div className="flex items-stretch gap-2">
+                    <input
+                      id={createPasswordId}
+                      readOnly
+                      value={createPassword}
+                      className="dp-input flex-1 font-mono type-footnote"
+                      onFocus={(e) => e.currentTarget.select()}
+                    />
+                    <button
+                      onClick={handleCopyTempPassword}
+                      className="dp-btn-primary type-footnote !min-h-0 !py-2 !px-3 flex-shrink-0"
+                      aria-label="Copy temporary password"
+                      type="button"
+                    >
+                      {createPwCopied ? (
+                        <>
+                          <Check size={14} /> Copied
+                        </>
+                      ) : (
+                        <>
+                          <Copy size={14} /> Copy
+                        </>
+                      )}
+                    </button>
+                  </div>
+                  <p className="type-caption-1 text-label-tertiary mt-1.5">
+                    This password won't be shown again after you close this dialog.
+                  </p>
+                </div>
+                <div className="flex items-center justify-end gap-2 pt-2">
+                  <button
+                    onClick={closeCreate}
+                    className="dp-btn-primary type-subheadline !min-h-[36px] !py-1.5"
+                    type="button"
                   >
                     Done
                   </button>

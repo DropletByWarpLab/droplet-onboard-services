@@ -1,0 +1,251 @@
+/**
+ * WARP-1042 — "Create local account" on the People (/users) page.
+ *
+ * Surfaces the WARP-824 temp-password machinery beside "Invite user": the
+ * dialog collects display name + login email + role, auto-generates a
+ * policy-compliant temporary password (typed override allowed), hard-wires
+ * mustChangePassword=true (no opt-out in THIS dialog), and on success flips
+ * to a handoff phase telling the admin to give the person the email +
+ * temporary password.
+ *
+ * Harness mirrors users.invite.test.tsx; the double-submit guard mirrors
+ * settings.create-user-double-submit.test.tsx.
+ */
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import React from "react";
+import { validatePassword } from "@droplet/auth-policy";
+
+const fetchUsersMock = vi.fn();
+const createInviteMock = vi.fn();
+const listInvitesMock = vi.fn();
+const createUserMock = vi.fn();
+
+vi.mock("@/lib/api", () => ({
+  fetchUsers: (...a: any[]) => fetchUsersMock(...a),
+  createUser: (...a: any[]) => createUserMock(...a),
+  deleteUser: vi.fn(),
+  updateUser: vi.fn(),
+  setUserEnabled: vi.fn(),
+  createInvite: (...a: any[]) => createInviteMock(...a),
+  listInvites: (...a: any[]) => listInvitesMock(...a),
+  revokeInvite: vi.fn(),
+  // ShellPage status chip pulls device + health hooks — keep them callable.
+  fetchSystemHealth: vi.fn().mockResolvedValue({ status: "ok" }),
+  fetchDevices: vi.fn().mockResolvedValue([]),
+  fetchHealth: vi.fn().mockResolvedValue({}),
+}));
+
+vi.mock("@/lib/auth", () => ({
+  useAuth: () => ({
+    user: {
+      id: "admin",
+      username: "admin",
+      displayName: "Admin",
+      role: "owner",
+    },
+  }),
+}));
+
+vi.mock("qrcode.react", () => ({
+  QRCodeSVG: ({ value }: { value: string }) => (
+    <svg data-testid="invite-qr" data-value={value} />
+  ),
+}));
+
+import UsersPage from "@/app/users/page";
+
+beforeEach(() => {
+  fetchUsersMock.mockReset();
+  createInviteMock.mockReset();
+  listInvitesMock.mockReset();
+  createUserMock.mockReset();
+  fetchUsersMock.mockResolvedValue({
+    users: [{ id: "alice", username: "alice", displayName: "Alice" }],
+  });
+  listInvitesMock.mockResolvedValue({ invites: [] });
+  createUserMock.mockResolvedValue(undefined);
+});
+
+async function openCreateDialog() {
+  render(<UsersPage />);
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: /create local account/i }),
+    ).toBeInTheDocument(),
+  );
+  fireEvent.click(screen.getByRole("button", { name: /create local account/i }));
+  return screen.getByRole("dialog");
+}
+
+describe("Users page — create local account (WARP-1042)", () => {
+  it("renders a Create local account action beside Invite user", async () => {
+    render(<UsersPage />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /invite user/i })).toBeInTheDocument(),
+    );
+    expect(
+      screen.getByRole("button", { name: /create local account/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("auto-generates a policy-compliant temporary password on open", async () => {
+    const dialog = await openCreateDialog();
+    const pw = within(dialog).getByLabelText(/temporary password/i) as HTMLInputElement;
+    expect(pw.value.length).toBeGreaterThan(0);
+    expect(validatePassword(pw.value).ok).toBe(true);
+  });
+
+  it("regenerate replaces the password with a fresh, still-compliant one", async () => {
+    const dialog = await openCreateDialog();
+    const pw = within(dialog).getByLabelText(/temporary password/i) as HTMLInputElement;
+    const first = pw.value;
+    fireEvent.click(within(dialog).getByRole("button", { name: /regenerate/i }));
+    expect(pw.value).not.toBe(first);
+    expect(validatePassword(pw.value).ok).toBe(true);
+  });
+
+  it("explains the login email doesn't need to receive mail", async () => {
+    const dialog = await openCreateDialog();
+    expect(dialog.textContent).toMatch(/used to sign in/i);
+    expect(dialog.textContent).toMatch(/doesn't need to receive mail/i);
+  });
+
+  it("rejects an invalid email without calling createUser", async () => {
+    const dialog = await openCreateDialog();
+    fireEvent.change(within(dialog).getByLabelText(/login email/i), {
+      target: { value: "not-an-email" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: /create account/i }));
+
+    await waitFor(() => {
+      expect(within(dialog).getByText(/valid email/i)).toBeInTheDocument();
+    });
+    expect(createUserMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects a typed-override password that fails the policy", async () => {
+    const dialog = await openCreateDialog();
+    fireEvent.change(within(dialog).getByLabelText(/login email/i), {
+      target: { value: "bob@example.com" },
+    });
+    fireEvent.change(within(dialog).getByLabelText(/temporary password/i), {
+      target: { value: "weak" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: /create account/i }));
+
+    await waitFor(() => {
+      expect(within(dialog).getByText(/requirements/i)).toBeInTheDocument();
+    });
+    expect(createUserMock).not.toHaveBeenCalled();
+  });
+
+  it("creates the account with the selected role and hard-wired mustChangePassword=true, then shows the handoff", async () => {
+    const dialog = await openCreateDialog();
+    fireEvent.change(within(dialog).getByLabelText(/display name/i), {
+      target: { value: "Bob" },
+    });
+    fireEvent.change(within(dialog).getByLabelText(/login email/i), {
+      target: { value: "bob@example.com" },
+    });
+    fireEvent.change(within(dialog).getByLabelText(/role/i), {
+      target: { value: "admin" },
+    });
+    const pw = within(dialog).getByLabelText(/temporary password/i) as HTMLInputElement;
+    const password = pw.value;
+
+    // No mustChangePassword opt-out anywhere in this dialog — the forced
+    // first-login change is hard-wired.
+    expect(within(dialog).queryByRole("checkbox")).toBeNull();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: /create account/i }));
+
+    await waitFor(() => expect(createUserMock).toHaveBeenCalledTimes(1));
+    expect(createUserMock).toHaveBeenCalledWith(
+      "bob@example.com",
+      password,
+      "Bob",
+      true,
+      "admin",
+    );
+
+    // Handoff phase: give them the email + temporary password.
+    await waitFor(() => {
+      expect(
+        screen.getByText(/give them this email and temporary password/i),
+      ).toBeInTheDocument();
+    });
+    expect(screen.getByText(/choose their own the first time they sign in/i)).toBeInTheDocument();
+    expect(screen.getByDisplayValue("bob@example.com")).toBeInTheDocument();
+    expect(screen.getByDisplayValue(password)).toBeInTheDocument();
+  });
+
+  it("calls createUser only once when Create account is clicked twice rapidly", async () => {
+    // A request that stays in flight for the whole test window, so the
+    // guard is what (and only what) prevents the second submission.
+    createUserMock.mockImplementation(() => new Promise<void>(() => {}));
+
+    const dialog = await openCreateDialog();
+    fireEvent.change(within(dialog).getByLabelText(/login email/i), {
+      target: { value: "bob@example.com" },
+    });
+    const createBtn = within(dialog).getByRole("button", { name: /create account/i });
+    fireEvent.click(createBtn);
+    fireEvent.click(createBtn);
+
+    await waitFor(() => expect(createUserMock).toHaveBeenCalledTimes(1));
+    expect(createUserMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("disables Create account while the request is in flight", async () => {
+    createUserMock.mockImplementation(() => new Promise<void>(() => {}));
+
+    const dialog = await openCreateDialog();
+    fireEvent.change(within(dialog).getByLabelText(/login email/i), {
+      target: { value: "bob@example.com" },
+    });
+    const createBtn = within(dialog).getByRole("button", { name: /create account/i });
+    fireEvent.click(createBtn);
+
+    await waitFor(() => expect(createBtn).toBeDisabled());
+  });
+
+  it("surfaces a server error (e.g. EMAIL_TAKEN 409) inside the dialog and stays on the form", async () => {
+    createUserMock.mockRejectedValueOnce(
+      Object.assign(new Error("A user with this email already exists"), {
+        code: "EMAIL_TAKEN",
+      }),
+    );
+
+    const dialog = await openCreateDialog();
+    fireEvent.change(within(dialog).getByLabelText(/login email/i), {
+      target: { value: "taken@example.com" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: /create account/i }));
+
+    await waitFor(() => {
+      expect(
+        within(dialog).getByText(/already exists/i),
+      ).toBeInTheDocument();
+    });
+    // Still on the form (no handoff copy), and recoverable.
+    expect(
+      screen.queryByText(/give them this email and temporary password/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("dialog has aria-modal semantics and Escape closes it", async () => {
+    const dialog = await openCreateDialog();
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    const labelledById = dialog.getAttribute("aria-labelledby");
+    expect(labelledById).toBeTruthy();
+    expect(document.getElementById(labelledById!)?.textContent).toMatch(
+      /create local account/i,
+    );
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+  });
+});
