@@ -76,7 +76,12 @@ import {
   createBridgeBoxNamePersister,
   createBoxNameClaimer,
 } from "../services/tls-issuance.adapters.js";
-import { boxNameReasonMessage } from "@droplet/shared-types";
+import {
+  boxNameReasonMessage,
+  boxNameToFqdn,
+  validateBoxName,
+} from "@droplet/shared-types";
+import { config } from "../config.js";
 import { getApplianceContract } from "../services/appliance-contract.service.js";
 import { verifyAccessToken } from "../services/jwt.service.js";
 import { SESSION_COOKIE_NAME } from "../middleware/auth.js";
@@ -293,12 +298,18 @@ export function createSetupRouter(
      *  `createBoxNameClaimer()` (real HQ + device-identity); route tests inject a
      *  fake so no HQ / sidecar is touched. */
     claimBoxName?: BoxNameClaimer;
+    /** WARP-1039 — boot-env fallback for GET /setup/box-name. Defaults to the
+     *  `config` snapshot's DROPLET_BOX_NAME (covers a container restart
+     *  mid-wizard, where the re-read host .env is the only place the name
+     *  survives); tests inject a fake so they never touch the real config. */
+    getEnvBoxName?: () => string;
   },
 ): Router {
   const router = Router();
   const persistBoxNameToHost =
     deps?.persistBoxNameToHost ?? createBridgeBoxNamePersister();
   const claimBoxNameToHq = deps?.claimBoxName ?? createBoxNameClaimer();
+  const getEnvBoxName = deps?.getEnvBoxName ?? (() => config.DROPLET_BOX_NAME);
 
   // ── GET /api/setup/state ───────────────────────────────────────
   router.get("/setup/state", async (_req: Request, res, next) => {
@@ -697,6 +708,52 @@ export function createSetupRouter(
     }
   });
 
+  // ── GET /api/setup/box-name ────────────────────────────────────
+  //
+  // WARP-1039 — surface the CURRENT saved box name back to the wizard:
+  // `{ name, fqdn }`, both null when no name has been chosen yet. Source of
+  // truth is the ApplianceSetup singleton's `boxName` (written by the POST
+  // below), falling back to the boot-env `DROPLET_BOX_NAME` — that covers a
+  // container restart mid-wizard, where the re-read host .env is the only
+  // place the name survived. Values from either source are re-validated with
+  // the shared ruleset (defense-in-depth against a hand-edited .env, same
+  // posture as tls-issuance) and reported as the normalized slug.
+  //
+  // GATED exactly like the POST: a read is allowed when EITHER a valid
+  // dashboard session cookie is present, OR the appliance is not yet `ready`
+  // (genuine first-run onboarding). The FQDN itself is CT-published by design
+  // (vpn.ts), but an anonymous LAN client on a claimed box still gets nothing.
+  router.get("/setup/box-name", async (req: Request, res, next) => {
+    try {
+      const sessionToken = req.cookies?.[SESSION_COOKIE_NAME];
+      const session = sessionToken ? verifyAccessToken(sessionToken) : null;
+      if (!session) {
+        const { appliance } = await getSetupState(prisma);
+        if (appliance === "ready") {
+          res.status(401).json({
+            error: "Reading the box name requires an authenticated session.",
+            code: "BOX_NAME_AUTH_REQUIRED",
+          });
+          return;
+        }
+      }
+
+      const row = await prisma.applianceSetup.findUnique({
+        where: { id: "singleton" },
+      });
+      const candidate = (row?.boxName ?? "").trim() || getEnvBoxName().trim();
+      const v = candidate ? validateBoxName(candidate) : null;
+      if (!v?.ok) {
+        res.json({ name: null, fqdn: null });
+        return;
+      }
+      res.json({ name: v.slug, fqdn: boxNameToFqdn(v.slug) });
+    } catch (err) {
+      logger.error({ err }, "Failed to read box name");
+      next(err);
+    }
+  });
+
   // ── POST /api/setup/box-name { name } ──────────────────────────
   //
   // WARP-979 + WARP-980 — persist the owner-chosen name AND make it AUTHORITATIVE
@@ -765,6 +822,25 @@ export function createSetupRouter(
           error: "That name is already taken — pick another.",
         });
         return;
+      }
+
+      // WARP-1039 — persist the accepted slug on the ApplianceSetup singleton
+      // alongside the host-.env write-back. The .env write only becomes
+      // visible in-process on the next boot (config is a snapshot), so this
+      // row is what GET /setup/box-name reads back for the wizard. NON-FATAL:
+      // the name is already durable on the host, so a DB hiccup must not fail
+      // the request (mirrors the org step's non-fatal step-advance).
+      try {
+        await prisma.applianceSetup.upsert({
+          where: { id: "singleton" },
+          create: { id: "singleton", boxName: result.slug },
+          update: { boxName: result.slug },
+        });
+      } catch (dbErr) {
+        logger.warn(
+          { err: dbErr },
+          "Box name persisted to the host .env but the ApplianceSetup write-back failed",
+        );
       }
 
       res.json({

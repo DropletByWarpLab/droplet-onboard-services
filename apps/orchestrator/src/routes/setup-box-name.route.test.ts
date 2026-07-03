@@ -86,6 +86,7 @@ function makeClaimResult(over: Partial<ClaimBoxNameResult> = {}): ClaimBoxNameRe
 function buildApp(
   prisma: ReturnType<typeof createPrismaMock>,
   claimResult: ClaimBoxNameResult = makeClaimResult(),
+  envBoxName = "",
 ) {
   const persisted: string[] = [];
   const persistBoxNameToHost = vi.fn(async (name: string) => {
@@ -104,6 +105,9 @@ function buildApp(
     createSetupRouter(prisma as never, {
       persistBoxNameToHost,
       claimBoxName,
+      // WARP-1039 — boot-env fallback for GET /setup/box-name, injected so the
+      // tests never touch the real config snapshot.
+      getEnvBoxName: () => envBoxName,
     }),
   );
   return { app, persisted, persistBoxNameToHost, claimed, claimBoxName };
@@ -320,6 +324,42 @@ describe("POST /api/setup/box-name (WARP-979)", () => {
     expect(persistBoxNameToHost).not.toHaveBeenCalled();
   });
 
+  it("writes the accepted slug to the ApplianceSetup singleton on the ok path (WARP-1039)", async () => {
+    const { app } = buildApp(prisma);
+    const res = await request(app)
+      .post("/api/setup/box-name")
+      .send({ name: "Studio" });
+
+    expect(res.status).toBe(200);
+    // The DB singleton now carries the slug so GET /setup/box-name (and any
+    // in-process reader) can surface it without a container restart.
+    const read = await request(app).get("/api/setup/box-name");
+    expect(read.status).toBe(200);
+    expect(read.body.name).toBe("studio");
+    expect(read.body.fqdn).toBe("studio.droplet-us.com");
+  });
+
+  it("does NOT write the DB singleton when HQ says the name is taken (409 path)", async () => {
+    const { app } = buildApp(
+      prisma,
+      makeClaimResult({
+        outcome: CLAIM_RESULT_NAME_TAKEN,
+        authoritative: true,
+        suggestions: ["studio-2"],
+        slug: undefined,
+        fqdn: undefined,
+      }),
+    );
+    const res = await request(app)
+      .post("/api/setup/box-name")
+      .send({ name: "studio" });
+    expect(res.status).toBe(409);
+
+    const read = await request(app).get("/api/setup/box-name");
+    expect(read.status).toBe(200);
+    expect(read.body.name).toBeNull();
+  });
+
   it("allows an AUTHENTICATED owner to set the name on a claimed appliance", async () => {
     prisma._seedSetup({
       id: "singleton",
@@ -340,5 +380,95 @@ describe("POST /api/setup/box-name (WARP-979)", () => {
     expect(res.body.slug).toBe("renamed");
     expect(res.body.authoritative).toBe(true);
     expect(persisted).toEqual(["renamed"]);
+  });
+});
+
+describe("GET /api/setup/box-name (WARP-1039)", () => {
+  let prisma: ReturnType<typeof createPrismaMock>;
+  beforeEach(() => {
+    prisma = createPrismaMock();
+  });
+
+  it("returns empty (name:null, fqdn:null) before any name is saved", async () => {
+    const { app } = buildApp(prisma);
+    const res = await request(app).get("/api/setup/box-name");
+    expect(res.status).toBe(200);
+    expect(res.body.name).toBeNull();
+    expect(res.body.fqdn).toBeNull();
+  });
+
+  it("returns the saved slug + fqdn after a successful POST", async () => {
+    const { app } = buildApp(prisma);
+    await request(app).post("/api/setup/box-name").send({ name: "Studio" });
+
+    const res = await request(app).get("/api/setup/box-name");
+    expect(res.status).toBe(200);
+    expect(res.body.name).toBe("studio");
+    expect(res.body.fqdn).toBe("studio.droplet-us.com");
+  });
+
+  it("falls back to the boot-env DROPLET_BOX_NAME when the DB has no saved name (restart mid-wizard)", async () => {
+    const { app } = buildApp(prisma, makeClaimResult(), "warp");
+    const res = await request(app).get("/api/setup/box-name");
+    expect(res.status).toBe(200);
+    expect(res.body.name).toBe("warp");
+    expect(res.body.fqdn).toBe("warp.droplet-us.com");
+  });
+
+  it("prefers the DB-saved name over the boot-env fallback", async () => {
+    const { app } = buildApp(prisma, makeClaimResult(), "old-name");
+    await request(app).post("/api/setup/box-name").send({ name: "studio" });
+
+    const res = await request(app).get("/api/setup/box-name");
+    expect(res.status).toBe(200);
+    expect(res.body.name).toBe("studio");
+  });
+
+  it("treats an invalid hand-edited boot-env value as no name (defense-in-depth)", async () => {
+    const { app } = buildApp(prisma, makeClaimResult(), "My Box!");
+    const res = await request(app).get("/api/setup/box-name");
+    expect(res.status).toBe(200);
+    expect(res.body.name).toBeNull();
+    expect(res.body.fqdn).toBeNull();
+  });
+
+  it("allows an anonymous GET during first-run (unclaimed) onboarding", async () => {
+    // No setup row → appliance defaults to unclaimed (first run).
+    const { app } = buildApp(prisma, makeClaimResult(), "warp");
+    const res = await request(app).get("/api/setup/box-name");
+    expect(res.status).toBe(200);
+    expect(res.body.name).toBe("warp");
+  });
+
+  it("rejects an anonymous GET once the appliance is `ready` (401) — same gate as the POST", async () => {
+    prisma._seedSetup({
+      id: "singleton",
+      state: "ready",
+      setupStep: "done",
+      userTourCompleted: true,
+      boxName: "studio",
+    });
+    const { app } = buildApp(prisma);
+    const res = await request(app).get("/api/setup/box-name");
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe("BOX_NAME_AUTH_REQUIRED");
+    expect(res.body.name).toBeUndefined();
+  });
+
+  it("allows an AUTHENTICATED session to read the name on a ready appliance", async () => {
+    prisma._seedSetup({
+      id: "singleton",
+      state: "ready",
+      setupStep: "done",
+      userTourCompleted: true,
+      boxName: "studio",
+    });
+    const { app } = buildApp(prisma);
+    const res = await request(app)
+      .get("/api/setup/box-name")
+      .set("Cookie", "droplet_session=valid-session");
+    expect(res.status).toBe(200);
+    expect(res.body.name).toBe("studio");
+    expect(res.body.fqdn).toBe("studio.droplet-us.com");
   });
 });
