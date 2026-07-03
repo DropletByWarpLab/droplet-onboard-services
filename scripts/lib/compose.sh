@@ -181,10 +181,18 @@ prepare_and_build() {
   # only in build_services when its profile is enabled, so the extra --profile
   # flag is harmless otherwise.) Default-profile services are visible
   # regardless of --profile.
+  # CI hook: when DROPLET_COMPOSE_BUILD_EXTRA_FILE is set (setup-e2e.yml),
+  # merge that compose file on top of the main one so builds import the GHCR
+  # BuildKit layer cache that docker-build.yml refreshes on every push to
+  # main. cache_from only — image content is unchanged, and a missing or
+  # stale cache ref just means a cold build. Passed as argv (not env) so it
+  # survives the env_reset sudo path in run_docker_compose. Unset on devices
+  # → argv identical to before, production behavior untouched.
   for svc in "${build_services[@]}"; do
     if ! run_with_spinner "Building $svc" \
       run_docker_compose --profile full --profile linux --profile eval --env-file "$COMPOSE_ENV_FILE" \
         -f "$COMPOSE_FILE" \
+        ${DROPLET_COMPOSE_BUILD_EXTRA_FILE:+-f "$DROPLET_COMPOSE_BUILD_EXTRA_FILE"} \
         build "$svc"; then
       log_error "Failed to build $svc"
       _suggest_build_fix

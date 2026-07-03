@@ -11,6 +11,7 @@ on:
     paths:
       - "scripts/**"
       - "docker/docker-compose.yml"
+      - "docker/docker-compose.build-cache.yml"
       - "apps/**/Dockerfile"
       - "services/**/Dockerfile"
       - ".github/workflows/setup-e2e.yml"
@@ -19,6 +20,7 @@ on:
     paths:
       - "scripts/**"
       - "docker/docker-compose.yml"
+      - "docker/docker-compose.build-cache.yml"
       - "apps/**/Dockerfile"
       - "services/**/Dockerfile"
       - ".github/workflows/setup-e2e.yml"
@@ -31,6 +33,9 @@ concurrency:
 jobs:
   setup-script:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read # pull the GHCR BuildKit layer cache (buildcache:<image>)
     # A hung step must fail the job fast, not burn the 6h default runner
     # allocation. This is the heaviest restored suite: setup.sh's build phase
     # runs a full `docker compose --profile full build` and the ai-gateway
@@ -44,7 +49,9 @@ jobs:
       # (invoked by setup.sh in the build phase) fills that before BuildKit
       # finishes — the ai-gateway image alone pulls ~5GB of CUDA/NCCL libs.
       # Strip the preinstalled toolchains we don't use to reclaim ~25GB.
-      # Mirrors the same step in docker-build.yml.
+      # (docker-build.yml no longer needs this since it went one-image-per-
+      # runner, but this job still builds the whole stack on one disk — the
+      # GHCR layer cache below speeds up builds without shrinking them.)
       - name: Free disk space
         run: |
           set -eux
@@ -66,6 +73,16 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # Read-only login so builds can import the BuildKit layer cache that
+      # docker-build.yml writes to ghcr.io/<repo>/buildcache:<image> on every
+      # push to main. Best-effort: a cold/missing cache only slows the build.
+      - name: Log in to GHCR (layer cache, read-only)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       # --skip-docker   → CI runner has Docker; also tells preflight to skip
       #                   the sudo prompt (unattended path).
       # --skip-drivers  → `modprobe uvcvideo` etc. is blocked inside the GHA
@@ -73,7 +90,13 @@ jobs:
       #                   exit 1 in Phase 3 before ever reaching image builds.
       # --skip-start    → no real router/Nextcloud account, so don't try to
       #                   bring the stack up.
+      # DROPLET_COMPOSE_BUILD_EXTRA_FILE → scripts/lib/compose.sh merges the
+      #                   build-cache overlay so each `compose build` imports
+      #                   the GHCR layer cache (cache_from only; unset on
+      #                   devices).
       - name: Run setup.sh (preflight + secrets + build)
+        env:
+          DROPLET_COMPOSE_BUILD_EXTRA_FILE: ${{ github.workspace }}/docker/docker-compose.build-cache.yml
         run: ./scripts/setup.sh --skip-docker --skip-drivers --skip-start --verbose
 
       - name: Verify .env was generated correctly

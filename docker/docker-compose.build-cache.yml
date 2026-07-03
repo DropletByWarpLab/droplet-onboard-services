@@ -1,0 +1,66 @@
+# CI-only overlay — never used on devices. setup-e2e.yml points
+# DROPLET_COMPOSE_BUILD_EXTRA_FILE here so scripts/lib/compose.sh merges it
+# on top of docker-compose.yml, making runner builds import the BuildKit
+# layer cache that .github/workflows/docker-build.yml writes to
+# ghcr.io/<repo>/buildcache:<image> on every push to main.
+#
+# cache_from is read-only and best-effort: a missing ref (e.g. voice-io /
+# oled-display, which docker-build.yml doesn't cover, or a renamed repo)
+# just logs a warning and builds cold. Nothing here changes image content.
+services:
+  orchestrator:
+    build:
+      cache_from:
+        - type=registry,ref=ghcr.io/dropletbywarplab/droplet-onboard-services/buildcache:orchestrator
+  web-dashboard:
+    build:
+      cache_from:
+        - type=registry,ref=ghcr.io/dropletbywarplab/droplet-onboard-services/buildcache:web-dashboard
+  ai-gateway:
+    build:
+      cache_from:
+        - type=registry,ref=ghcr.io/dropletbywarplab/droplet-onboard-services/buildcache:ai-gateway
+  routing:
+    build:
+      cache_from:
+        - type=registry,ref=ghcr.io/dropletbywarplab/droplet-onboard-services/buildcache:routing
+  matter-controller:
+    build:
+      cache_from:
+        - type=registry,ref=ghcr.io/dropletbywarplab/droplet-onboard-services/buildcache:matter-controller
+  mcp-server:
+    build:
+      cache_from:
+        - type=registry,ref=ghcr.io/dropletbywarplab/droplet-onboard-services/buildcache:mcp-server
+  device-identity-svc:
+    build:
+      cache_from:
+        - type=registry,ref=ghcr.io/dropletbywarplab/droplet-onboard-services/buildcache:device-identity-svc
+  email-indexer:
+    build:
+      cache_from:
+        - type=registry,ref=ghcr.io/dropletbywarplab/droplet-onboard-services/buildcache:email-indexer
+  file-indexer:
+    build:
+      cache_from:
+        - type=registry,ref=ghcr.io/dropletbywarplab/droplet-onboard-services/buildcache:file-indexer
+  switch:
+    build:
+      cache_from:
+        - type=registry,ref=ghcr.io/dropletbywarplab/droplet-onboard-services/buildcache:switch
+  camera-discovery:
+    build:
+      cache_from:
+        - type=registry,ref=ghcr.io/dropletbywarplab/droplet-onboard-services/buildcache:camera-discovery
+  rag-eval:
+    build:
+      cache_from:
+        - type=registry,ref=ghcr.io/dropletbywarplab/droplet-onboard-services/buildcache:rag-eval
+  voice-io:
+    build:
+      cache_from:
+        - type=registry,ref=ghcr.io/dropletbywarplab/droplet-onboard-services/buildcache:voice-io
+  oled-display:
+    build:
+      cache_from:
+        - type=registry,ref=ghcr.io/dropletbywarplab/droplet-onboard-services/buildcache:oled-display
