@@ -216,6 +216,33 @@ else
   fail "second run regenerated the PSK ('$GEN1' -> '$GEN2') — not idempotent"
 fi
 
+# --- WARP-1035: pre-existing EMPTY psk file must not block generation ---------
+# The matter-controller compose service bind-mounts the /etc/droplet DIRECTORY
+# (never the file — a file bind-mount would let Docker create a root-owned
+# directory at the path and hard-break this generator). Even so, an empty file
+# can pre-exist (interrupted write, errant tooling); resolve_ap_psk must treat
+# it as "no persisted PSK" and generate + persist a real one, not read "".
+echo "--- Phase 3b: WARP-1035 pre-existing empty PSK file → still generates ---"
+
+rm -f "$PSK_FILE" "$BRIDGE_ENV"
+: > "$PSK_FILE"
+GEN_EMPTY="$(run_resolve "")"
+if [ -n "$GEN_EMPTY" ]; then
+  pass "empty pre-existing PSK file → a real PSK is generated (not read as empty)"
+else
+  fail "empty pre-existing PSK file produced an empty PSK"
+fi
+if [ -s "$PSK_FILE" ] && [ "$(cat "$PSK_FILE")" = "$GEN_EMPTY" ]; then
+  pass "empty file replaced by the persisted generated PSK"
+else
+  fail "PSK file still empty / differs from the resolved PSK after generation"
+fi
+case "$GEN_EMPTY" in
+  droplet-default-wifi|CHANGE_ME_VIA_SETUP_WIZARD)
+    fail "empty-file path resolved to a shared default/placeholder" ;;
+  *) pass "empty-file path resolved to a real generated PSK" ;;
+esac
+
 # --- Explicit override wins --------------------------------------------------
 echo "--- Phase 4: explicit DROPLET_AP_PSK override is honored ---"
 
