@@ -80,6 +80,13 @@ async function main() {
     core,
     authToken: config.DROPLET_MATTER_SERVICE_TOKEN,
     capabilities,
+    // WARP-1035: same values the core resolves per commission —
+    // /capabilities answers wifiProvisioning from the identical inputs.
+    wifiOptions: {
+      wifiSsid: config.DROPLET_MATTER_WIFI_SSID,
+      wifiPsk: config.DROPLET_MATTER_WIFI_PSK,
+      wifiPskFile: config.DROPLET_MATTER_WIFI_PSK_FILE,
+    },
   });
   const server = createServer(app);
   server.listen(config.PORT, () => {
