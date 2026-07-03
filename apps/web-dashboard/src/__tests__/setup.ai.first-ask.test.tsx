@@ -228,7 +228,13 @@ describe("setup AI step — waking notice after 8 s in flight (WARP-1041)", () =
     expect(screen.getByText(/request failed/i)).toBeInTheDocument();
   });
 
-  it("cleans the timer up on unmount (no late setState)", async () => {
+  it("cleans the timer up on unmount (pending waking timer actually cleared)", async () => {
+    // NOTE: React 18 removed the "setState on an unmounted component"
+    // console.error, so asserting on console output would be vacuous.
+    // Pin the cleanup directly via the fake-timer count instead: the
+    // in-flight ask arms exactly one pending timeout (the 8 s waking
+    // notice — the model list resolved, so the WARP-849 poll interval
+    // is not scheduled), and unmount must clear it.
     deferredChat();
     const { unmount } = render(<AiStep onComplete={vi.fn()} onSkip={vi.fn()} />);
     await flushMicrotasks();
@@ -237,14 +243,11 @@ describe("setup AI step — waking notice after 8 s in flight (WARP-1041)", () =
       fireEvent.click(screen.getByRole("button", { name: /ask the ai/i }));
     });
 
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const pendingBefore = vi.getTimerCount();
+    expect(pendingBefore).toBeGreaterThan(0);
     unmount();
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(60_000);
-    });
-    // A leaked timeout would fire setState on the unmounted component and
-    // React would log an error — the cleanup must prevent that.
-    expect(errorSpy).not.toHaveBeenCalled();
-    errorSpy.mockRestore();
+    // The effect cleanup must have cleared the waking timeout — a deleted
+    // clearTimeout leaves the count unchanged and fails here.
+    expect(vi.getTimerCount()).toBe(pendingBefore - 1);
   });
 });
