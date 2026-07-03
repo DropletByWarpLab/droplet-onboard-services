@@ -1,5 +1,6 @@
 import { Router, Request } from "express";
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
+import { Buffer } from "node:buffer";
 import { z } from "zod";
 import { PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
@@ -16,6 +17,7 @@ import {
   getPublicVapidKey,
 } from "../services/push-dispatch.service.js";
 import { trustedOriginUrl } from "../lib/trusted-origin.js";
+import { SESSION_COOKIE_NAME } from "../middleware/auth.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("device-clients-route");
@@ -118,6 +120,36 @@ const MDNS_HOST = "droplet.local";
  */
 export async function webdavBaseUrl(req: Request): Promise<string> {
   return trustedOriginUrl(req, "/nextcloud", [MDNS_HOST]);
+}
+
+/**
+ * Shared revoke cleanup for BOTH auth paths — the operator session-cookie
+ * delete and the WARP-349 device Basic-auth self-revoke: best-effort revoke
+ * the Nextcloud app password upstream, mark the row revoked, publish the
+ * MQTT event. Idempotent — an already-revoked row is a no-op.
+ */
+async function revokeDeviceClient(
+  prisma: PrismaClient,
+  row: { id: string; userId: string; ncAppPassword: string; status: string },
+): Promise<void> {
+  if (row.status === "revoked") return;
+
+  try {
+    const plaintext = decryptSecret(row.ncAppPassword);
+    await ncDeleteAppPassword(plaintext);
+  } catch (err) {
+    // Best-effort: still mark the row revoked even if Nextcloud can't
+    // kill the token (e.g. already expired). Operators can clean up
+    // stale tokens via the Nextcloud admin UI if needed.
+    logger.warn({ err, deviceId: row.id }, "Failed to revoke Nextcloud app password");
+  }
+
+  await prisma.deviceClient.update({
+    where: { id: row.id },
+    data: { status: "revoked" },
+  });
+
+  safePublish(`droplet/devices/${row.userId}/revoked`, { deviceId: row.id });
 }
 
 export function createDeviceClientsRouter(prisma: PrismaClient): Router {
@@ -419,7 +451,9 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
   // ── DELETE /api/devices/clients/:id ──
   // Revoke a device: decrypt its stored Nextcloud app password, revoke it
   // upstream, and mark the row revoked. Idempotent — revoking an already-
-  // revoked device is a no-op.
+  // revoked device is a no-op. The cleanup itself lives in
+  // `revokeDeviceClient` so this session path and the WARP-349 Basic-auth
+  // self-revoke path stay behaviorally identical after auth.
   router.delete("/devices/clients/:id", async (req, res, next) => {
     try {
       const user = getUser(req);
@@ -431,24 +465,7 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
         return;
       }
 
-      if (row.status !== "revoked") {
-        try {
-          const plaintext = decryptSecret(row.ncAppPassword);
-          await ncDeleteAppPassword(plaintext);
-        } catch (err) {
-          // Best-effort: still mark the row revoked even if Nextcloud can't
-          // kill the token (e.g. already expired). Operators can clean up
-          // stale tokens via the Nextcloud admin UI if needed.
-          logger.warn({ err, deviceId: row.id }, "Failed to revoke Nextcloud app password");
-        }
-
-        await prisma.deviceClient.update({
-          where: { id: row.id },
-          data: { status: "revoked" },
-        });
-
-        safePublish(`droplet/devices/${user}/revoked`, { deviceId: row.id });
-      }
+      await revokeDeviceClient(prisma, row);
 
       res.json({ revoked: row.id });
     } catch (err) {
@@ -549,6 +566,91 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
         tag: "droplet-test",
       });
       res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  return router;
+}
+
+// ── WARP-349: device self-revoke via HTTP Basic auth ─────────────────────
+//
+// A mobile client's "Forget this Droplet" must be able to kill its own
+// server-side credential without a dashboard session. This router mounts
+// BEFORE `authMiddleware` in app.ts (same posture as the SCIM and
+// calendar-publish routers: the request carries its own credential) and
+// handles DELETE /api/devices/clients/:id ONLY when the request presents
+// `Authorization: Basic <ncUsername:appPassword>` and no session cookie.
+// Everything else falls through to the auth middleware + the protected
+// session-path handler above, unchanged.
+//
+// The Basic credential is verified against the TARGET row itself: the
+// presented username must equal the row's owner and the presented password
+// must timing-safe-equal the row's decrypted stored app password. So the
+// path can only ever revoke the device whose credentials were presented.
+// Every failure — unknown id, revoked row, wrong owner, wrong password,
+// malformed header — returns the same 401 body: no existence leak.
+
+/** Uniform Basic-path rejection — identical for every failure mode. */
+const BASIC_REVOKE_401 = { error: "Invalid device credentials" } as const;
+
+export function createDeviceSelfRevokeRouter(prisma: PrismaClient): Router {
+  const router = Router();
+
+  router.delete("/devices/clients/:id", async (req, res, next) => {
+    try {
+      // Only engage for a session-less Basic request. A session cookie means
+      // an authenticated (or about-to-be-authenticated) operator — defer to
+      // the session path so its behavior stays exactly as today. Scheme
+      // match is case-insensitive per RFC 7235.
+      const match = /^Basic\s+(.+)$/i.exec(req.headers.authorization ?? "");
+      if (!match || req.cookies?.[SESSION_COOKIE_NAME]) {
+        next();
+        return;
+      }
+
+      const decoded = Buffer.from(match[1], "base64").toString("utf8");
+      const sep = decoded.indexOf(":");
+      const username = sep > 0 ? decoded.slice(0, sep) : "";
+      const password = sep > 0 ? decoded.slice(sep + 1) : "";
+      if (!username || !password) {
+        res.status(401).json(BASIC_REVOKE_401);
+        return;
+      }
+
+      const row = await prisma.deviceClient.findUnique({
+        where: { id: req.params.id },
+      });
+      // A revoked row's credential must no longer authenticate anything —
+      // including a re-revoke. Same uniform 401 as an unknown id.
+      if (!row || row.status === "revoked" || row.userId !== username) {
+        res.status(401).json(BASIC_REVOKE_401);
+        return;
+      }
+
+      let stored: string;
+      try {
+        stored = decryptSecret(row.ncAppPassword);
+      } catch {
+        // Undecryptable ciphertext (tamper / key mismatch) — can't verify,
+        // so deny like any other credential failure.
+        res.status(401).json(BASIC_REVOKE_401);
+        return;
+      }
+      const presented = Buffer.from(password, "utf8");
+      const expected = Buffer.from(stored, "utf8");
+      if (
+        presented.length !== expected.length ||
+        !timingSafeEqual(presented, expected)
+      ) {
+        res.status(401).json(BASIC_REVOKE_401);
+        return;
+      }
+
+      await revokeDeviceClient(prisma, row);
+
+      res.json({ revoked: row.id });
     } catch (err) {
       next(err);
     }

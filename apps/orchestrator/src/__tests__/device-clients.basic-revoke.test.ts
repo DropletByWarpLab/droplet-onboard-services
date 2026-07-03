@@ -1,0 +1,328 @@
+/**
+ * WARP-349 — server-side device revoke on "Forget this Droplet".
+ *
+ * DELETE /api/devices/clients/:id additionally accepts
+ * `Authorization: Basic <ncUsername:appPassword>` when no authenticated
+ * session is present. The Basic path authenticates by decrypting the target
+ * DeviceClient's stored Nextcloud app password and timing-safe-comparing it
+ * against the presented password, AND requires the presented username to
+ * match the device's owner. It can ONLY revoke the device whose credentials
+ * were presented; every mismatch (wrong password, wrong username, another
+ * device's :id, unknown id, already-revoked row) is a uniform 401 with no
+ * existence leak. The session-cookie path keeps its exact prior behavior.
+ *
+ * The app under test mirrors the production mounting order in app.ts:
+ *   cookieParser → self-revoke router (pre-auth) → authMiddleware stand-in
+ *   → protected device-clients router.
+ */
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import express from "express";
+import cookieParser from "cookie-parser";
+import request from "supertest";
+import { Buffer } from "node:buffer";
+
+// ── Mocks (same set as device-clients.routes.test.ts) ──
+const mockPrisma = {
+  deviceClient: {
+    findUnique: vi.fn(),
+    findMany: vi.fn(),
+    update: vi.fn(),
+  },
+};
+
+vi.mock("../services/nextcloud.client.js", () => ({
+  ncGenerateAppPassword: vi.fn(),
+  ncDeleteAppPassword: vi.fn(),
+}));
+
+vi.mock("../services/nextcloud-session.service.js", () => ({
+  resolveNcToken: vi.fn(),
+}));
+
+vi.mock("../services/encryption.service.js", () => ({
+  encryptSecret: vi.fn((s: string) => `enc:${s}`),
+  decryptSecret: vi.fn((s: string) => {
+    if (!s.startsWith("enc:")) throw new Error("bad ciphertext");
+    return s.slice(4);
+  }),
+}));
+
+// device-clients.ts imports SESSION_COOKIE_NAME from middleware/auth.js,
+// which pulls in jwt.service — mock every cache.service name either module
+// binds so ESM named-import validation stays happy.
+vi.mock("../services/cache.service.js", () => ({
+  cacheGet: vi.fn(),
+  cacheSet: vi.fn(),
+  cacheSetNx: vi.fn(),
+  cacheDel: vi.fn(),
+  cacheSetAdd: vi.fn(),
+  cacheSetRemove: vi.fn(),
+  cacheSetMembers: vi.fn(),
+}));
+
+vi.mock("../services/mqtt.service.js", () => ({
+  publish: vi.fn(),
+}));
+
+vi.mock("../services/push-dispatch.service.js", () => ({
+  dispatchToUser: vi.fn(),
+  getPublicVapidKey: vi.fn(() => "vapid-pub"),
+}));
+
+vi.mock("../config.js", () => ({
+  config: {
+    ROUTING_MODE: "disabled",
+    WIREGUARD_ENDPOINT_HOST: "",
+    corsAllowedOrigins: ["https://droplet-ai.local"],
+  },
+}));
+
+import { ncDeleteAppPassword } from "../services/nextcloud.client.js";
+import { publish } from "../services/mqtt.service.js";
+import {
+  createDeviceClientsRouter,
+  createDeviceSelfRevokeRouter,
+} from "../routes/device-clients.js";
+import { SESSION_COOKIE_NAME } from "../middleware/auth.js";
+
+const mockNcDelete = vi.mocked(ncDeleteAppPassword);
+const mockPublish = vi.mocked(publish);
+
+/**
+ * Production mounting order (app.ts): the self-revoke router mounts BEFORE
+ * the auth middleware; requests it doesn't handle fall through to a stand-in
+ * with authMiddleware's contract (populate req.user for a session, 401
+ * otherwise) and then to the protected device-clients router.
+ */
+function makeApp(sessionUser: string | null = null) {
+  const app = express();
+  app.use(cookieParser());
+  app.use(express.json());
+  app.use("/api", createDeviceSelfRevokeRouter(mockPrisma as never));
+  app.use((req, res, next) => {
+    if (sessionUser) {
+      // Same shape stand-in as device-clients.routes.test.ts — the route
+      // only reads req.user.username via getUser().
+      (req as any).user = { username: sessionUser };
+      next();
+      return;
+    }
+    res.status(401).json({ error: "Missing or invalid authentication" });
+  });
+  app.use("/api", createDeviceClientsRouter(mockPrisma as never));
+  app.use(
+    (
+      _err: unknown,
+      _req: express.Request,
+      res: express.Response,
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      _next: express.NextFunction,
+    ) => {
+      res.status(500).json({ error: "internal" });
+    },
+  );
+  return app;
+}
+
+function deviceRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "dc-1",
+    userId: "owner-1",
+    deviceName: "Pixel 9",
+    deviceType: "mobile",
+    platform: "android",
+    appVersion: "1.0.0",
+    ncAppPassword: "enc:app-pw-123",
+    lastSeen: new Date(),
+    status: "active",
+    createdAt: new Date(),
+    ...overrides,
+  };
+}
+
+function basicAuth(user: string, pass: string): string {
+  return "Basic " + Buffer.from(`${user}:${pass}`, "utf8").toString("base64");
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mockPrisma.deviceClient.update.mockResolvedValue({});
+});
+
+describe("DELETE /api/devices/clients/:id — Basic-auth device self-revoke (WARP-349)", () => {
+  it("revokes the caller's own device with valid Basic credentials and runs the full cleanup", async () => {
+    mockPrisma.deviceClient.findUnique.mockResolvedValue(deviceRow());
+
+    const res = await request(makeApp())
+      .delete("/api/devices/clients/dc-1")
+      .set("Authorization", basicAuth("owner-1", "app-pw-123"));
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ revoked: "dc-1" });
+    // Same cleanup as the session path: upstream revoke, row marked revoked,
+    // MQTT event published.
+    expect(mockNcDelete).toHaveBeenCalledWith("app-pw-123");
+    expect(mockPrisma.deviceClient.update).toHaveBeenCalledWith({
+      where: { id: "dc-1" },
+      data: { status: "revoked" },
+    });
+    expect(mockPublish).toHaveBeenCalledWith("droplet/devices/owner-1/revoked", {
+      deviceId: "dc-1",
+    });
+  });
+
+  it("401s a wrong password without revoking anything", async () => {
+    mockPrisma.deviceClient.findUnique.mockResolvedValue(deviceRow());
+
+    const res = await request(makeApp())
+      .delete("/api/devices/clients/dc-1")
+      .set("Authorization", basicAuth("owner-1", "wrong-password"));
+
+    expect(res.status).toBe(401);
+    expect(mockNcDelete).not.toHaveBeenCalled();
+    expect(mockPrisma.deviceClient.update).not.toHaveBeenCalled();
+  });
+
+  it("401s valid credentials presented against another device's :id (same owner)", async () => {
+    // The target row belongs to the same user but holds a DIFFERENT app
+    // password — the presented credential authenticates dc-1, not dc-2.
+    mockPrisma.deviceClient.findUnique.mockResolvedValue(
+      deviceRow({ id: "dc-2", ncAppPassword: "enc:other-devices-pw" }),
+    );
+
+    const res = await request(makeApp())
+      .delete("/api/devices/clients/dc-2")
+      .set("Authorization", basicAuth("owner-1", "app-pw-123"));
+
+    expect(res.status).toBe(401);
+    expect(mockNcDelete).not.toHaveBeenCalled();
+    expect(mockPrisma.deviceClient.update).not.toHaveBeenCalled();
+  });
+
+  it("401s when the username does not match the target device's owner", async () => {
+    mockPrisma.deviceClient.findUnique.mockResolvedValue(
+      deviceRow({ userId: "someone-else" }),
+    );
+
+    const res = await request(makeApp())
+      .delete("/api/devices/clients/dc-1")
+      .set("Authorization", basicAuth("owner-1", "app-pw-123"));
+
+    expect(res.status).toBe(401);
+    expect(mockNcDelete).not.toHaveBeenCalled();
+    expect(mockPrisma.deviceClient.update).not.toHaveBeenCalled();
+  });
+
+  it("401s an unknown :id with a body identical to the wrong-password case (no existence leak)", async () => {
+    mockPrisma.deviceClient.findUnique.mockResolvedValue(null);
+    const unknown = await request(makeApp())
+      .delete("/api/devices/clients/no-such-device")
+      .set("Authorization", basicAuth("owner-1", "app-pw-123"));
+
+    mockPrisma.deviceClient.findUnique.mockResolvedValue(deviceRow());
+    const wrongPw = await request(makeApp())
+      .delete("/api/devices/clients/dc-1")
+      .set("Authorization", basicAuth("owner-1", "wrong-password"));
+
+    expect(unknown.status).toBe(401);
+    expect(wrongPw.status).toBe(401);
+    expect(unknown.body).toEqual(wrongPw.body);
+    expect(mockNcDelete).not.toHaveBeenCalled();
+  });
+
+  it("401s credentials of an already-revoked device (revoked creds no longer authenticate)", async () => {
+    mockPrisma.deviceClient.findUnique.mockResolvedValue(
+      deviceRow({ status: "revoked" }),
+    );
+
+    const res = await request(makeApp())
+      .delete("/api/devices/clients/dc-1")
+      .set("Authorization", basicAuth("owner-1", "app-pw-123"));
+
+    expect(res.status).toBe(401);
+    expect(mockNcDelete).not.toHaveBeenCalled();
+    expect(mockPrisma.deviceClient.update).not.toHaveBeenCalled();
+  });
+
+  it("401s malformed Basic credentials (no colon, empty username, empty password)", async () => {
+    mockPrisma.deviceClient.findUnique.mockResolvedValue(deviceRow());
+    const app = makeApp();
+
+    const noColon = await request(app)
+      .delete("/api/devices/clients/dc-1")
+      .set(
+        "Authorization",
+        "Basic " + Buffer.from("no-colon-here", "utf8").toString("base64"),
+      );
+    const emptyUser = await request(app)
+      .delete("/api/devices/clients/dc-1")
+      .set("Authorization", basicAuth("", "app-pw-123"));
+    const emptyPass = await request(app)
+      .delete("/api/devices/clients/dc-1")
+      .set("Authorization", basicAuth("owner-1", ""));
+
+    expect(noColon.status).toBe(401);
+    expect(emptyUser.status).toBe(401);
+    expect(emptyPass.status).toBe(401);
+    expect(mockNcDelete).not.toHaveBeenCalled();
+    expect(mockPrisma.deviceClient.update).not.toHaveBeenCalled();
+  });
+
+  it("falls through to the normal auth 401 when no Basic header is present on an unauthenticated request", async () => {
+    const res = await request(makeApp()).delete("/api/devices/clients/dc-1");
+
+    expect(res.status).toBe(401);
+    expect(res.body).toEqual({ error: "Missing or invalid authentication" });
+    expect(mockPrisma.deviceClient.findUnique).not.toHaveBeenCalled();
+  });
+
+  it("defers to the session path when a session cookie is present, even with Basic credentials attached", async () => {
+    // The target device belongs to someone else. The Basic credentials would
+    // authenticate it, but the session cookie means the session path decides:
+    // owner mismatch → the session path's 404, not the Basic path's revoke.
+    mockPrisma.deviceClient.findUnique.mockResolvedValue(
+      deviceRow({ userId: "someone-else" }),
+    );
+
+    const res = await request(makeApp("owner-1"))
+      .delete("/api/devices/clients/dc-1")
+      .set("Cookie", `${SESSION_COOKIE_NAME}=some-session-token`)
+      .set("Authorization", basicAuth("someone-else", "app-pw-123"));
+
+    expect(res.status).toBe(404);
+    expect(mockNcDelete).not.toHaveBeenCalled();
+    expect(mockPrisma.deviceClient.update).not.toHaveBeenCalled();
+  });
+
+  it("keeps the session path intact: an authenticated operator revokes their device without Basic", async () => {
+    mockPrisma.deviceClient.findUnique.mockResolvedValue(deviceRow());
+
+    const res = await request(makeApp("owner-1")).delete(
+      "/api/devices/clients/dc-1",
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ revoked: "dc-1" });
+    expect(mockNcDelete).toHaveBeenCalledWith("app-pw-123");
+    expect(mockPrisma.deviceClient.update).toHaveBeenCalledWith({
+      where: { id: "dc-1" },
+      data: { status: "revoked" },
+    });
+    expect(mockPublish).toHaveBeenCalledWith("droplet/devices/owner-1/revoked", {
+      deviceId: "dc-1",
+    });
+  });
+
+  it("keeps the session path intact: 404 for another user's device via session", async () => {
+    mockPrisma.deviceClient.findUnique.mockResolvedValue(
+      deviceRow({ userId: "someone-else" }),
+    );
+
+    const res = await request(makeApp("owner-1")).delete(
+      "/api/devices/clients/dc-1",
+    );
+
+    expect(res.status).toBe(404);
+    expect(mockNcDelete).not.toHaveBeenCalled();
+  });
+});
