@@ -61,6 +61,9 @@ vi.mock("@/lib/api", () => ({
   fetchDiscoveredCameras: vi.fn(async () => []),
   acceptDiscoveredCamera: vi.fn(),
   fetchVpnStatus: vi.fn(async () => ({ configured: false, endpointConfigured: false })),
+  // WARP-1039 — AddressStep rehydrates from (and the VpnStep blocked precheck
+  // reads) the saved name; null = the pre-existing no-name baseline.
+  fetchBoxName: vi.fn(async () => ({ name: null, fqdn: null })),
   createVpnPeer: vi.fn(),
   fetchModels: vi.fn(async () => ({ models: [] })),
   sendChat: vi.fn(),

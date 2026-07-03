@@ -494,6 +494,18 @@ export interface BoxNameSetResult {
   /** WARP-980 — alternate names HQ offered on a 409 name-taken. */
   suggestions?: string[];
 }
+
+/**
+ * WARP-1039 — response from GET /api/setup/box-name: the CURRENTLY saved box
+ * name (normalized slug) + its fqdn, both null when no name has been chosen
+ * yet. Read by the AddressStep to rehydrate its input on re-entry and by the
+ * VpnStep precheck to render the honest "address is being set up" blocked
+ * view instead of bouncing the customer back to a step they already finished.
+ */
+export interface BoxNameCurrentResult {
+  name: string | null;
+  fqdn: string | null;
+}
 // --- Auth types ---
 
 export interface AuthUser {

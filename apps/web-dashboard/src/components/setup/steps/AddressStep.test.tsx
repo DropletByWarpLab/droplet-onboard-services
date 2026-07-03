@@ -15,6 +15,7 @@ import { AddressStep } from "./AddressStep";
 
 const checkBoxName = vi.fn();
 const setBoxName = vi.fn();
+const fetchBoxName = vi.fn();
 
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
@@ -22,6 +23,7 @@ vi.mock("@/lib/api", async () => {
     ...actual,
     checkBoxName: (...a: unknown[]) => checkBoxName(...a),
     setBoxName: (...a: unknown[]) => setBoxName(...a),
+    fetchBoxName: (...a: unknown[]) => fetchBoxName(...a),
   };
 });
 
@@ -38,6 +40,9 @@ beforeEach(() => {
     slug: "studio",
     fqdn: "studio.droplet-us.com",
   });
+  // WARP-1039 — no saved name by default: every pre-existing test runs against
+  // the empty-input baseline.
+  fetchBoxName.mockResolvedValue({ name: null, fqdn: null });
 });
 
 const nameInput = () => screen.getByLabelText(/box name/i);
@@ -171,5 +176,74 @@ describe("AddressStep — Secured / name your box (WARP-979)", () => {
   it("renders the padlock explanation LearnMore card", () => {
     render(<AddressStep onComplete={vi.fn()} onSkip={vi.fn()} />);
     expect(screen.getByText(/what the padlock means/i)).toBeInTheDocument();
+  });
+});
+
+describe("AddressStep — rehydrates the saved name (WARP-1039)", () => {
+  it("prefills the saved name on mount, shows the current-address hint, and enables Continue", async () => {
+    fetchBoxName.mockResolvedValue({
+      name: "studio",
+      fqdn: "studio.droplet-us.com",
+    });
+    render(<AddressStep onComplete={vi.fn()} onSkip={vi.fn()} />);
+
+    await waitFor(() => expect(nameInput()).toHaveValue("studio"));
+    expect(
+      screen.getByText(/this is your current address/i),
+    ).toBeInTheDocument();
+    // The prefilled name runs through the ordinary debounced availability
+    // check, which enables Continue — the owner can keep the name as-is.
+    await waitFor(() => expect(continueCta()).toBeEnabled());
+    expect(checkBoxName).toHaveBeenCalled();
+  });
+
+  it("leaves the input empty (no hint) when no name is saved yet", async () => {
+    render(<AddressStep onComplete={vi.fn()} onSkip={vi.fn()} />);
+    await waitFor(() => expect(fetchBoxName).toHaveBeenCalledTimes(1));
+    expect(nameInput()).toHaveValue("");
+    expect(
+      screen.queryByText(/this is your current address/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("never overwrites a name the owner already typed (slow GET resolves late)", async () => {
+    let resolveGet: (v: unknown) => void = () => {};
+    fetchBoxName.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveGet = resolve;
+        }),
+    );
+    render(<AddressStep onComplete={vi.fn()} onSkip={vi.fn()} />);
+
+    fireEvent.change(nameInput(), { target: { value: "other-name" } });
+    resolveGet({ name: "studio", fqdn: "studio.droplet-us.com" });
+    // Give React a tick to (not) apply the late prefill.
+    await waitFor(() => expect(nameInput()).toHaveValue("other-name"));
+    expect(
+      screen.queryByText(/this is your current address/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("drops the hint once the owner edits away from the saved name", async () => {
+    fetchBoxName.mockResolvedValue({
+      name: "studio",
+      fqdn: "studio.droplet-us.com",
+    });
+    render(<AddressStep onComplete={vi.fn()} onSkip={vi.fn()} />);
+    await waitFor(() => expect(nameInput()).toHaveValue("studio"));
+
+    fireEvent.change(nameInput(), { target: { value: "new-name" } });
+    expect(
+      screen.queryByText(/this is your current address/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps the empty-input baseline when the GET fails (best-effort rehydration)", async () => {
+    fetchBoxName.mockRejectedValueOnce(new Error("network down"));
+    render(<AddressStep onComplete={vi.fn()} onSkip={vi.fn()} />);
+    await waitFor(() => expect(fetchBoxName).toHaveBeenCalledTimes(1));
+    expect(nameInput()).toHaveValue("");
+    expect(continueCta()).toBeDisabled();
   });
 });

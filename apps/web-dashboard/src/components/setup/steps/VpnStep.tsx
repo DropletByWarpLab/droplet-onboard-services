@@ -16,6 +16,7 @@ import {
   fetchVpnStatus,
   fetchVpnPeers,
   createVpnPeer,
+  fetchBoxName,
   routerUnreachableNotice,
 } from "@/lib/api";
 import type {
@@ -83,6 +84,15 @@ export function VpnStep({
     null,
   );
   const [copied, setCopied] = useState(false);
+  // WARP-1039 — the box name the customer ALREADY saved (null = none). Read in
+  // the blocked precheck only: when a name exists, the blocked view must stop
+  // bouncing the customer back to a step they finished and instead say honestly
+  // that the address is being set up (endpointConfigured stays false until the
+  // box learns DROPLET_PUBLIC_FQDN — a boot-time snapshot, see vpn.ts).
+  const [savedBoxName, setSavedBoxName] = useState<{
+    name: string;
+    fqdn: string;
+  } | null>(null);
   const REMOTE_ACCESS_DESTINATION = "Remote Access";
 
   // WARP-993: only promise "from anywhere" when the minted conf's endpoint is
@@ -97,6 +107,20 @@ export function VpnStep({
       const s = await fetchVpnStatus();
       setStatus(s);
       if (!s.endpointConfigured) {
+        // WARP-1039 — before rendering blocked, learn whether a name is
+        // already saved so the view can be honest instead of bouncing the
+        // customer back to the Address step. Best-effort: a failed read keeps
+        // the pre-existing back-jump variant.
+        try {
+          const saved = await fetchBoxName();
+          setSavedBoxName(
+            saved.name && saved.fqdn
+              ? { name: saved.name, fqdn: saved.fqdn }
+              : null,
+          );
+        } catch {
+          setSavedBoxName(null);
+        }
         setPhase("blocked");
         return;
       }
@@ -243,6 +267,50 @@ export function VpnStep({
   // ──────────────────────────────────────────────────────────────────
   // blocked
   // ──────────────────────────────────────────────────────────────────
+  if (phase === "blocked" && savedBoxName) {
+    // WARP-1039 — the customer ALREADY named their box; the endpoint just
+    // hasn't materialized in this session (cert issuance + the boot-time
+    // config snapshot). Bouncing them back to the Address step is an
+    // unwinnable loop — be honest and let them move on instead.
+    return (
+      <StepShell
+        current="vpn"
+        title="Your address is being set up"
+        subtitle="Nothing to do here — this finishes on its own."
+        primary={{ label: "Continue", onClick: onComplete, showArrow: true }}
+        skip={{ label: "Skip for now", onClick: onSkip }}
+      >
+        <div className="dp-card !p-4 flex items-start gap-3">
+          <Globe
+            size={18}
+            className="text-accent flex-shrink-0 mt-0.5"
+            aria-hidden="true"
+          />
+          <div>
+            <p className="type-subheadline text-label-primary mb-1 font-mono">
+              {savedBoxName.fqdn}
+            </p>
+            <p className="type-footnote text-label-secondary">
+              Your address{" "}
+              <span className="font-mono">{savedBoxName.fqdn}</span> is being
+              set up — remote access lights up automatically once the box
+              finishes issuing its certificate.
+            </p>
+          </div>
+        </div>
+
+        <LearnMoreCard helpAnchor="vpn">
+          <p>
+            You can also come back anytime from{" "}
+            <span className="font-mono">Remote Access</span> in the dashboard —
+            once the certificate is issued, the one-tap toggle appears there and
+            here.
+          </p>
+        </LearnMoreCard>
+      </StepShell>
+    );
+  }
+
   if (phase === "blocked") {
     return (
       <StepShell

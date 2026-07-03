@@ -19,6 +19,7 @@ import { RouterStatusError } from "@/lib/api";
 const fetchVpnStatus = vi.fn();
 const fetchVpnPeers = vi.fn();
 const createVpnPeer = vi.fn();
+const fetchBoxName = vi.fn();
 
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
@@ -27,6 +28,7 @@ vi.mock("@/lib/api", async () => {
     fetchVpnStatus: (...a: unknown[]) => fetchVpnStatus(...a),
     fetchVpnPeers: (...a: unknown[]) => fetchVpnPeers(...a),
     createVpnPeer: (...a: unknown[]) => createVpnPeer(...a),
+    fetchBoxName: (...a: unknown[]) => fetchBoxName(...a),
   };
 });
 
@@ -39,6 +41,9 @@ beforeEach(() => {
     endpointHost: "yourstudio.duckdns.org",
     peerCount: 0,
   });
+  // WARP-1039 — no saved name by default: the blocked precheck keeps its
+  // pre-existing "set up internet address" back-jump baseline.
+  fetchBoxName.mockResolvedValue({ name: null, fqdn: null });
   createVpnPeer.mockResolvedValue({
     peer: {
       id: "p1",
@@ -194,6 +199,101 @@ describe("VpnStep — honest away-from-home copy (WARP-993)", () => {
       await screen.findByText(/remote access needs an internet address first/i),
     ).toBeInTheDocument();
     expect(screen.queryAllByText(/from anywhere/i)).toHaveLength(0);
+  });
+});
+
+describe("VpnStep — blocked precheck honesty when a name IS saved (WARP-1039)", () => {
+  beforeEach(() => {
+    fetchVpnStatus.mockResolvedValue({
+      configured: false,
+      endpointConfigured: false,
+    });
+  });
+
+  it("renders the 'address is being set up' variant instead of the back-jump when a name is saved", async () => {
+    fetchBoxName.mockResolvedValue({
+      name: "studio",
+      fqdn: "studio.droplet-us.com",
+    });
+    const onBackToAddress = vi.fn();
+    render(
+      <VpnStep
+        onComplete={vi.fn()}
+        onSkip={vi.fn()}
+        onBackToAddress={onBackToAddress}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("heading", {
+        name: /your address is being set up/i,
+      }),
+    ).toBeInTheDocument();
+    // The saved fqdn is named so the customer knows exactly what's pending.
+    expect(
+      screen.getAllByText(/studio\.droplet-us\.com/i).length,
+    ).toBeGreaterThan(0);
+    // The honest copy: remote access finishes on its own — no bounce-back.
+    expect(
+      screen.getByText(/lights up automatically/i),
+    ).toBeInTheDocument();
+    // NO back-jump button: the customer already finished the Address step.
+    expect(
+      screen.queryByRole("button", { name: /set up internet address/i }),
+    ).not.toBeInTheDocument();
+    expect(onBackToAddress).not.toHaveBeenCalled();
+    expect(createVpnPeer).not.toHaveBeenCalled();
+  });
+
+  it("Continue advances (onComplete) and Skip skips (onSkip) from the with-name blocked view", async () => {
+    fetchBoxName.mockResolvedValue({
+      name: "studio",
+      fqdn: "studio.droplet-us.com",
+    });
+    const onComplete = vi.fn();
+    const onSkip = vi.fn();
+    render(
+      <VpnStep
+        onComplete={onComplete}
+        onSkip={onSkip}
+        onBackToAddress={vi.fn()}
+      />,
+    );
+    await screen.findByRole("heading", {
+      name: /your address is being set up/i,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^continue$/i }));
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    expect(onSkip).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the existing back-jump blocked view when NO name is saved", async () => {
+    // Default fetchBoxName → { name: null } from beforeEach.
+    render(
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
+    );
+    expect(
+      await screen.findByText(/remote access needs an internet address first/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /set up internet address/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/is being set up/i)).not.toBeInTheDocument();
+  });
+
+  it("falls back to the back-jump blocked view when the name read fails (best-effort)", async () => {
+    fetchBoxName.mockRejectedValueOnce(new Error("network down"));
+    render(
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
+    );
+    expect(
+      await screen.findByText(/remote access needs an internet address first/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /set up internet address/i }),
+    ).toBeInTheDocument();
   });
 });
 
