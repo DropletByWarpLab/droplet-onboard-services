@@ -440,6 +440,18 @@ services:
       # multi-box dev deployments boot cleanly; set to `true` in
       # production .env to re-enable strict FIPS enforcement.
       - DROPLET_FIPS_REQUIRED=${DROPLET_FIPS_REQUIRED:-false}
+      # WARP-967: same override the orchestrator carries (see its
+      # comment above). The image bakes OPENSSL_CONF=/etc/ssl/
+      # openssl-fips.cnf (WARP-229) and now also ships the validated
+      # fips.so + fipsmodule.cnf — so, unlike before WARP-967, that
+      # config LOADS successfully for anything linked against the
+      # system libssl. `node` itself ignores it (nodejs_conf appname),
+      # but the Prisma query engine this container boots links the
+      # system OpenSSL and would come up FIPS-enforcing by default,
+      # hitting the same non-FIPS-cipher clash with Postgres TLS the
+      # orchestrator documents. Pin the stock config until WARP-318
+      # flips activation deliberately.
+      - OPENSSL_CONF=${OPENSSL_CONF:-/etc/ssl/openssl.cnf}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     expose:

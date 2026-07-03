@@ -19,9 +19,10 @@
 config_diagnostics = 1
 openssl_conf = openssl_init
 
-# Reference the FIPS provider configuration. This file is shipped by the
-# Debian `openssl` package — typically at /usr/lib/ssl/fipsmodule.cnf or
-# /etc/ssl/fipsmodule.cnf — and contains the integrity MAC that the
+# Reference the FIPS provider configuration. `openssl fipsinstall`
+# emits this file at image build time after running the module's KATs
+# (docker/fips/install-fips-provider.sh, WARP-967 — the Debian openssl
+# package never shipped it); it carries the integrity MAC that the
 # provider validates against itself at load time.
 .include /etc/ssl/fipsmodule.cnf
 

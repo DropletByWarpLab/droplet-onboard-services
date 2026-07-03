@@ -1,3 +1,15 @@
+# --- FIPS provider build stage (WARP-967) ---
+# Source-builds the NIST-validated OpenSSL FIPS module (fips.so) —
+# OpenSSL 3.0.9, CMVP certificate #4282. The version pin, sha256 pin,
+# and full rationale live in docker/fips/build-openssl-fips.sh. This
+# stage is byte-identical across every shipped service image
+# (orchestrator, mcp-server, web-dashboard, file-indexer, ai-gateway)
+# so BuildKit resolves it to ONE compile per builder/arch instead of
+# five. Keep it in lockstep across those five Dockerfiles.
+FROM debian:bookworm-slim AS fips-builder
+COPY docker/fips/build-openssl-fips.sh /tmp/build-openssl-fips.sh
+RUN sh /tmp/build-openssl-fips.sh /out
+
 # --- Build stage ---
 # Workspace-aware build. The web-dashboard depends on @droplet/shared-types
 # (a workspace package) for `import type` only — the types are erased at
@@ -6,11 +18,12 @@
 # workspace member (see docker/docker-compose.yml `context: ..`). Mirrors
 # the orchestrator's repo-root workspace build (6af516e).
 #
-# Build stage stays on `node:20-alpine` because the Next.js compile is
-# pure JS — no cryptographic operations happen at build time, so there's
-# no FIPS-provider requirement for this layer. Trims ~30 MB off the
-# build cache vs. switching the build image too. WARP-229.
-FROM node:20-alpine AS builder
+# WARP-967: build stage migrated from `node:20-alpine` to
+# `node:20-bookworm-slim` — the last Alpine base among shipped services
+# (WARP-229 kept it as a build-cache optimization; the "no Alpine base
+# remains in shipped services" AC retires that trade-off, and a single
+# base lineage keeps the layer cache shared with the runtime stage).
+FROM node:20-bookworm-slim AS builder
 
 WORKDIR /app
 
@@ -51,44 +64,60 @@ RUN npm run -w @droplet/web-dashboard build
 # rides on whatever cryptographic posture they enforce. WARP-229.
 FROM node:20-bookworm-slim
 
-# Install openssl + ca-certificates so an upstream FIPS provider, when
-# layered onto this image (Ubuntu Pro / source-built fips.so), is loadable.
+# Runtime openssl + ca-certificates: the openssl CLI runs the WARP-967
+# fipsinstall + build-time FIPS self-test below against the validated
+# fips.so that now ships in this image, and provides the system
+# MODULESDIR the module installs into.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       openssl ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-# WARP-229: drop the shared FIPS-provider OpenSSL config in place via a
-# heredoc. The web-dashboard's docker-compose build context is the
-# apps/web-dashboard directory only — `docker/openssl-fips.cnf` is out
-# of reach via COPY. Keep this block in lockstep with the canonical
-# `docker/openssl-fips.cnf` (orchestrator and mcp-server COPY that file
-# directly because their build contexts already include the repo root).
-RUN cat > /etc/ssl/openssl-fips.cnf <<'CNF'
-config_diagnostics = 1
-openssl_conf = openssl_init
-
-.include /etc/ssl/fipsmodule.cnf
-
-[openssl_init]
-providers = provider_sect
-alg_section = algorithm_sect
-
-[provider_sect]
-fips = fips_sect
-base = base_sect
-
-[fips_sect]
-activate = 1
-
-[base_sect]
-activate = 1
-
-[algorithm_sect]
-default_properties = fips=yes
-CNF
+# WARP-229/WARP-967: the shared FIPS-provider OpenSSL config, COPY'd
+# from the canonical docker/openssl-fips.cnf. The dashboard builds from
+# the repo-root context (docker-compose.yml `context: ..`, same as the
+# orchestrator + mcp-server), so the WARP-229-era heredoc duplicate of
+# this file — written when the comment here claimed a per-app build
+# context — is gone along with its lockstep-drift risk.
+COPY docker/openssl-fips.cnf /etc/ssl/openssl-fips.cnf
 
 ENV OPENSSL_CONF=/etc/ssl/openssl-fips.cnf
+
+# WARP-967: install the NIST-validated FIPS provider (fips.so — OpenSSL
+# 3.0.9, CMVP cert #4282, source-built in the fips-builder stage above)
+# and run the build-time FIPS self-test (fipsinstall KATs +
+# provider-active assert + MD5 negative-probe). Any failure fails the
+# image build.
+#
+# Runtime posture note: the ENV above stays baked (re-baking it is
+# WARP-315's scope), and shipping the module does NOT flip this
+# container into FIPS mode — `node` statically links its own bundled
+# OpenSSL, whose baked-in MODULESDIR is not Debian's AND which reads
+# the config under its own `nodejs_conf` appname (absent from the
+# shared config), so startup behaves exactly as before this change
+# (verified: getFips()=0, MD5 available, clean boot). Activation
+# (WARP-318) = NODE_OPTIONS=--openssl-shared-config + OPENSSL_MODULES +
+# DROPLET_FIPS_REQUIRED=true alongside the config.
+COPY --from=fips-builder /out/fips.so /tmp/fips.so
+COPY docker/fips/install-fips-provider.sh /tmp/install-fips-provider.sh
+RUN sh /tmp/install-fips-provider.sh /tmp/fips.so && \
+    rm -f /tmp/fips.so /tmp/install-fips-provider.sh
+
+# WARP-967: probe the exact combination WARP-318 will activate at
+# runtime — Node's BUNDLED OpenSSL loading the validated module. See
+# apps/orchestrator/Dockerfile for the full rationale (OPENSSL_MODULES
+# because node's baked-in MODULESDIR is not Debian's;
+# `--openssl-shared-config` because node reads the config under its own
+# `nodejs_conf` appname). Flag + env vars are scoped to this RUN;
+# runtime posture is unchanged.
+RUN OPENSSL_CONF=/etc/ssl/openssl-fips.cnf \
+    OPENSSL_MODULES="$(openssl version -m | sed -n 's/^MODULESDIR: "\(.*\)"$/\1/p')" \
+    node --openssl-shared-config -e 'const c = require("node:crypto"); \
+      if (c.getFips() !== 1) { console.error("FIPS node self-test FAILED: bundled OpenSSL did not enter FIPS mode"); process.exit(1); } \
+      let md5ok = false; \
+      try { c.createHash("md5").update("probe").digest("hex"); md5ok = true; } catch {} \
+      if (md5ok) { console.error("FIPS node self-test FAILED: MD5 succeeded under the FIPS config"); process.exit(1); } \
+      console.log("FIPS build-time self-test OK (node bundled OpenSSL): provider active, MD5 rejected");'
 
 WORKDIR /app
 
