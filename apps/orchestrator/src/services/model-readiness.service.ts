@@ -59,6 +59,93 @@ interface OllamaPullProgress {
   error?: string;
 }
 
+// ──────────────────────────────────────────────────────────────────
+// WARP-1041 — model pre-warm. Pull ≠ load: a pulled model still costs
+// 30-90 s of GPU load on the first inference after a boot, and the
+// setup wizard's "Ask the AI" probe is exactly that first inference.
+// warmDefaultModel() fires Ollama's documented load-into-memory no-op
+// (POST /api/generate with a model name and NO prompt) so the load
+// happens in the background minutes before the customer asks.
+// ──────────────────────────────────────────────────────────────────
+
+/** Skip re-warming when the last successful attempt was this recent.
+ *  Also blunts abuse via the pre-auth PATCH /setup/state trigger. */
+const WARM_DEBOUNCE_MS = 10 * 60 * 1000;
+
+/** Timestamp of the last warm ATTEMPT (module-level debounce). Reset to
+ *  0 on failure so the next trigger — typically the pull-complete hook
+ *  firing after a first-boot 404 — retries immediately. */
+let lastWarmAttemptAt = 0;
+
+/** Exported for testing: clears the module-level warm debounce. */
+export function resetWarmStateForTests(): void {
+  lastWarmAttemptAt = 0;
+}
+
+/**
+ * Load the configured chat model (LLM_MODEL) into Ollama's memory
+ * without generating anything. Fire-and-forget at every call site;
+ * never throws. The request body is exactly `{model}`:
+ *
+ *   - NO prompt — empty-prompt /api/generate is Ollama's documented
+ *     "just load the model" request; it returns after the load.
+ *   - NO keep_alive — a body value would OVERRIDE the container's
+ *     OLLAMA_KEEP_ALIVE env (24 h on the box); residency policy stays
+ *     owned by the compose file, not this code path.
+ *
+ * All failures (404 while the model is still pulling, ECONNREFUSED
+ * while Ollama boots) are swallowed at debug level: warming is an
+ * optimization, never a dependency.
+ *
+ * When the ollama-manager sidecar (droplet-local-LLM Phase 3c) lands,
+ * prefer its lifecycle API over raw Ollama — same fall-through note as
+ * the pull logic above.
+ */
+export async function warmDefaultModel(): Promise<void> {
+  const model = process.env.LLM_MODEL ?? "";
+  if (!model) {
+    logger.debug("LLM_MODEL unset — skipping model warm");
+    return;
+  }
+  const now = Date.now();
+  if (now - lastWarmAttemptAt < WARM_DEBOUNCE_MS) {
+    return;
+  }
+  // Stamp at attempt start so concurrent triggers debounce against the
+  // in-flight warm rather than stacking duplicate loads.
+  lastWarmAttemptAt = now;
+  const startedAt = Date.now();
+  try {
+    const resp = await fetch(`${OLLAMA_URL}/api/generate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model }),
+    });
+    if (!resp.ok) {
+      // Likely 404: the model isn't pulled yet (first boot mid-pull).
+      // Clear the debounce so the pull-complete hook can warm this boot.
+      lastWarmAttemptAt = 0;
+      logger.debug(
+        { model, status: resp.status },
+        "model_warm_skipped (Ollama non-2xx — model may still be pulling)",
+      );
+      return;
+    }
+    // Drain the body so the socket is released; the response carries no
+    // useful payload for a load-only request.
+    await resp.json().catch(() => undefined);
+    const elapsedSec = Math.floor((Date.now() - startedAt) / 1000);
+    logger.info({ model, elapsedSec }, "model_warm_complete");
+  } catch (err) {
+    // ECONNREFUSED and friends — Ollama not up yet. Non-fatal.
+    lastWarmAttemptAt = 0;
+    logger.debug(
+      { model, err: (err as Error).message },
+      "model_warm_failed (Ollama unreachable — will retry on next trigger)",
+    );
+  }
+}
+
 /**
  * Idempotent: check whether `LLM_MODEL` is already pulled; if not,
  * kick off a background pull and return immediately. Safe to call on
@@ -109,6 +196,13 @@ export async function ensureDefaultModelPulled(): Promise<void> {
   for (const model of models) {
     if (present.has(model)) {
       logger.info({ model }, "Model already pulled — ready");
+      // WARP-1041 — pulled ≠ loaded. Warm the CHAT default so the first
+      // ask after this boot (wizard probe or /chat) skips the 30-90 s
+      // GPU load. Only the LLM_MODEL: warming is chat-first, and the
+      // vision model loads on demand.
+      if (model === process.env.LLM_MODEL) {
+        void warmDefaultModel();
+      }
       continue;
     }
     // Step 2 — model missing. Kick off a background pull.
@@ -201,6 +295,13 @@ export async function backgroundPull(model: string): Promise<void> {
         if (ev.status === "success") {
           const elapsedSec = Math.floor((Date.now() - startedAt) / 1000);
           logger.info({ model, elapsedSec }, "model_pull_complete");
+          // WARP-1041 — the freshly-pulled chat default is on disk but
+          // NOT in GPU memory. Warm it now so a first-boot customer's
+          // wizard probe doesn't pay the cold load (and so a startup
+          // warm that 404'd mid-pull gets its retry this boot).
+          if (model === process.env.LLM_MODEL) {
+            void warmDefaultModel();
+          }
         }
       }
     }
