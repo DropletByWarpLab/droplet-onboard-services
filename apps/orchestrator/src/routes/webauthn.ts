@@ -266,6 +266,7 @@ export function createProtectedWebAuthnRouter(prisma?: PrismaClient): Router {
         what: "Passkey registered",
         sub: `${user.id} • ${callerIp(req) ?? "unknown"}`,
         refs: { outcome: "passkey_registered", userId: user.id, ip: callerIp(req) ?? null },
+        actor: { type: "user", id: user.id },
       });
 
       res.json({ verified: true });
@@ -416,6 +417,8 @@ export function createPublicWebAuthnRouter(prisma?: PrismaClient): Router {
             username: dbUser.username,
             ip: callerIp(req) ?? null,
           },
+          // WARP-181: pre-auth denial — the sign-in did not complete.
+          actor: { type: "anonymous" },
         });
         res.status(401).json({ error: "Invalid credentials" });
         return;
@@ -446,6 +449,7 @@ export function createPublicWebAuthnRouter(prisma?: PrismaClient): Router {
           role: dbUser.role,
           ip: callerIp(req) ?? null,
         },
+        actor: { type: "user", id: dbUser.id },
       });
 
       issueSession(req, res, {

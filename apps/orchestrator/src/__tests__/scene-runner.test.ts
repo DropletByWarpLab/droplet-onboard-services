@@ -49,7 +49,7 @@ describe("executeScene", () => {
         { idx: 0, deviceNodeId: "n1", command: "toggle", args: null },
         { idx: 1, deviceNodeId: "n2", command: "set_brightness", args: { brightness: 50 } },
       ]),
-      { triggeredBy: "scheduler" },
+      { triggeredBy: "scheduler", activityActor: { type: "ai", id: null } },
     );
     expect(calls).toEqual([
       ["n1", "toggle", undefined],
@@ -75,7 +75,7 @@ describe("executeScene", () => {
         { idx: 1, deviceNodeId: "n2", command: "toggle", args: null },
         { idx: 2, deviceNodeId: "n3", command: "toggle", args: null },
       ]),
-      { triggeredBy: "scheduler" },
+      { triggeredBy: "scheduler", activityActor: { type: "ai", id: null } },
     );
     expect(result.successCount).toBe(2);
     expect(result.results[1].ok).toBe(false);
@@ -92,7 +92,7 @@ describe("executeScene", () => {
       {} as any,
       matter,
       scene([{ idx: 0, deviceNodeId: "n1", command: "toggle", args: null }]),
-      { triggeredBy: "scheduler" },
+      { triggeredBy: "scheduler", activityActor: { type: "ai", id: null } },
     );
     expect(recordActivityMock).toHaveBeenCalledTimes(1);
     const row = recordActivityMock.mock.calls[0][0];
@@ -110,8 +110,17 @@ describe("executeScene", () => {
       {} as any,
       matter,
       scene([{ idx: 0, deviceNodeId: "n1", command: "toggle", args: null }]),
-      { triggeredBy: "user", actor: "stefan" },
+      {
+        triggeredBy: "user",
+        actor: "stefan",
+        activityActor: { type: "user", id: "uuid-stefan" },
+      },
     );
     expect(recordActivityMock.mock.calls[0][0].refs.actor).toBe("stefan");
+    // WARP-181: the signed actor attribution rides along with the row.
+    expect(recordActivityMock.mock.calls[0][0].actor).toEqual({
+      type: "user",
+      id: "uuid-stefan",
+    });
   });
 });

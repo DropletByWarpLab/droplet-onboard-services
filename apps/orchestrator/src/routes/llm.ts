@@ -26,6 +26,7 @@ import {
 import { publish as mqttPublish } from "../services/mqtt.service.js";
 import { requireRole } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
+import { actorFromRequest } from "../services/activity.service.js";
 import { visibleAudiences } from "../services/memory-audience.js";
 import { loadIdentityPrompt } from "../services/identity-prompt.js";
 
@@ -832,6 +833,11 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           kind: "chat",
           severity: activitySeverityForTurnStatus(status),
           sourceIcon: "message-square",
+          // WARP-181: the chat turn is attributed to the authenticated
+          // caller (canonical UUID). Service principals (voice etc.)
+          // map to `system` with a null id — the principal string is
+          // preserved in refs.principal below.
+          actor: actorFromRequest(req),
           what:
             status === "completed"
               ? "Chat turn completed"
@@ -843,6 +849,13 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             : `service • ${chatReq.model}`,
           refs: stripUndefined({
             userId,
+            // WARP-181: service principals are recorded as a `system`
+            // actor (actorId must be a canonical user UUID), so the
+            // principal string lands here instead.
+            principal:
+              role === "service"
+                ? ((req as AuthedRequest).user?.id ?? undefined)
+                : undefined,
             model: chatReq.model,
             conversationId: conversationId ?? undefined,
             messageId: assistantMessageId ?? undefined,

@@ -480,6 +480,7 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
         what: `${user.displayName} signed in via ${provider} SSO`,
         sub: `${user.role} • ${provider}`,
         refs: { outcome: "success", userId: user.id, username: user.username, role: user.role, provider },
+        actor: { type: "user", id: user.id },
       });
 
       res.redirect(safeReturnTo(loginState.returnTo));

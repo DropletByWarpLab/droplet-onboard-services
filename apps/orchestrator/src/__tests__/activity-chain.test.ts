@@ -49,6 +49,9 @@ interface StoredRow {
   refs: Record<string, unknown> | null;
   signature: string;
   prevSignatureHash: string;
+  actorType: "user" | "ai" | "system" | "anonymous" | null;
+  actorId: string | null;
+  schemaVersion: number;
 }
 
 function makePrismaFake() {
@@ -78,6 +81,9 @@ function makePrismaFake() {
             refs: refsValue,
             signature: data.signature as string,
             prevSignatureHash: data.prevSignatureHash as string,
+            actorType: (data.actorType as StoredRow["actorType"]) ?? null,
+            actorId: (data.actorId as string | null) ?? null,
+            schemaVersion: data.schemaVersion as number,
           };
           rows.push(row);
           return row;
@@ -116,6 +122,9 @@ function verifyChain(rows: StoredRow[], signer: ActivityRowSigner): number {
       sub: r.sub,
       kind: r.kind,
       refs: r.refs,
+      actorType: r.actorType,
+      actorId: r.actorId,
+      schemaVersion: r.schemaVersion,
     };
     if (!signer.verify(content, expectedPrev, r.signature)) return i;
     expectedPrev = hashSignature(r.signature);
@@ -149,6 +158,7 @@ describe("WARP-456 — full chain integrity", () => {
         what: `event-${i}`,
         sub: i % 3 === 0 ? `iteration ${i}` : null,
         refs: { i },
+        actor: i % 2 === 0 ? { type: "user", id: "uuid-alice" } : { type: "ai", id: null },
       });
       seeded.push(prismaState.rows[i]!);
     }
@@ -173,6 +183,9 @@ describe("WARP-456 — full chain integrity", () => {
         sub: r.sub,
         kind: r.kind,
         refs: r.refs,
+        actorType: r.actorType,
+        actorId: r.actorId,
+        schemaVersion: r.schemaVersion,
       };
       expect(signer.verify(content, r.prevSignatureHash, r.signature)).toBe(
         true,
@@ -201,6 +214,9 @@ describe("WARP-456 — full chain integrity", () => {
       sourceIcon: "message-square",
       sub: null,
       what: "x",
+      actorType: "user",
+      actorId: "uuid-alice",
+      schemaVersion: 2,
     });
     const b = canonicalizeRowContent({
       at: new Date("2026-05-25T12:00:00Z"),
@@ -210,6 +226,9 @@ describe("WARP-456 — full chain integrity", () => {
       sourceIcon: "message-square",
       sub: null,
       what: "x",
+      actorType: "user",
+      actorId: "uuid-alice",
+      schemaVersion: 2,
     });
     expect(a).toBe(b);
   });
@@ -254,6 +273,9 @@ describe("WARP-456 — full chain integrity", () => {
       refs: null,
       signature: "FORGED",
       prevSignatureHash: prismaState.rows[1]!.prevSignatureHash, // copy from a real row
+      actorType: "system",
+      actorId: null,
+      schemaVersion: 2,
     };
     const tampered = [
       prismaState.rows[0]!,
@@ -317,6 +339,7 @@ describe("WARP-456 — full chain integrity", () => {
       severity: "info",
       sourceIcon: "info",
       what: "Boot",
+      actor: { type: "system" },
       // no sub, no refs
     });
     await recorder.record({
@@ -325,6 +348,7 @@ describe("WARP-456 — full chain integrity", () => {
       sourceIcon: "log-in",
       what: "Sign-in",
       sub: "192.168.50.42",
+      actor: { type: "anonymous" },
     });
     await recorder.record({
       kind: "tool_call",
@@ -333,6 +357,7 @@ describe("WARP-456 — full chain integrity", () => {
       what: "list_files",
       sub: "for alice",
       refs: { name: "list_files", userId: "alice" },
+      actor: { type: "ai", id: null },
     });
     expect(verifyChain(prismaState.rows, signer)).toBe(-1);
   });

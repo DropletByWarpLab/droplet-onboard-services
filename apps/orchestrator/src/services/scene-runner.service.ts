@@ -21,6 +21,7 @@
  */
 import type { PrismaClient } from "@prisma/client";
 import { recordActivity } from "./activity.singleton.js";
+import type { ActivityActor } from "./activity.service.js";
 import type { MatterDispatcher } from "../routes/scenes.js";
 import { createLogger } from "../lib/logger.js";
 
@@ -62,6 +63,13 @@ export interface ExecuteSceneOpts {
   triggeredBy: "user" | "scheduler";
   /** Username of the actor on an interactive run; null/omitted for the scheduler. */
   actor?: string | null;
+  /**
+   * WARP-181: signed actor attribution for the activity row. The run
+   * route passes the authed caller; the scene-schedule ticker passes
+   * the AI/automation actor. Required so a new call path can't emit
+   * an unattributed row.
+   */
+  activityActor: ActivityActor;
 }
 
 /**
@@ -116,6 +124,7 @@ export async function executeScene(
     severity: successCount === ordered.length ? "ok" : "warn",
     sourceIcon: "home",
     what: "Scene run",
+    actor: opts.activityActor,
     sub: `${scene.name} (${successCount}/${ordered.length})`,
     refs: {
       sceneId: scene.id,

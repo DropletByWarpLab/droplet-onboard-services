@@ -32,6 +32,7 @@ import { requireRole } from "../middleware/auth.js";
 import { revokeUserSessions } from "../services/jwt.service.js";
 import { requireScope, type ScopeLoader } from "../middleware/scope.js";
 import { recordActivity } from "../services/activity.singleton.js";
+import { actorFromRequest } from "../services/activity.service.js";
 import {
   createTeamInvite,
   isInviteRole,
@@ -313,6 +314,7 @@ export function createPeopleRouter(
             role: invite.role,
             sendStatus: send.status,
           },
+          actor: actorFromRequest(req),
         });
 
         res.json({
@@ -438,6 +440,7 @@ export function createPeopleRouter(
             previousRole: existing.role,
             nextRole: parsed.data.role,
           },
+          actor: actorFromRequest(req),
         });
 
         res.json({ user: result.updated });
@@ -522,6 +525,7 @@ export function createPeopleRouter(
             targetUsername: existing.username,
             scopes: parsed.data.scopes,
           },
+          actor: actorFromRequest(req),
         });
 
         res.json({
@@ -609,6 +613,7 @@ export function createPeopleRouter(
             targetUsername: existing.username,
             role: existing.role,
           },
+          actor: actorFromRequest(req),
         });
 
         res.json({ ok: true, removed: existing.username });

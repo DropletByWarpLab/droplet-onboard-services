@@ -253,6 +253,10 @@ export async function commissionDevice(
     severity: "ok",
     sourceIcon: "plug",
     what: "Commissioned Matter device",
+    // WARP-181: matter.service has no caller identity plumbed through
+    // (commands arrive from routes AND the agent loop); attributed to
+    // the AI/automation surface with a null on-behalf-of id.
+    actor: { type: "ai", id: null },
     sub: `nodeId ${result.nodeId}`,
     refs: { nodeId: result.nodeId },
   });
@@ -288,6 +292,7 @@ export async function decommissionDevice(
     severity: "warn",
     sourceIcon: "unplug",
     what: "Decommissioned Matter device",
+    actor: { type: "ai", id: null },
     sub: `nodeId ${nodeIdStr}`,
     refs: { nodeId: nodeIdStr },
   });
@@ -347,6 +352,7 @@ export async function sendMatterCommand(
       severity: threw ? "err" : "ok",
       sourceIcon: "home",
       what: threw ? `Matter ${command} failed` : `Matter ${command}`,
+      actor: { type: "ai", id: null },
       sub: `nodeId ${nodeIdStr}`,
       refs: {
         nodeId: nodeIdStr,

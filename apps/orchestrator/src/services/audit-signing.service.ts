@@ -44,10 +44,19 @@ export type ActivityKindName =
 
 export type ActivitySeverityName = "ok" | "warn" | "err" | "info";
 
+/** WARP-181: who performed the action — mirrors the Prisma
+ * `ActivityActorType` enum verbatim. */
+export type ActivityActorTypeName = "user" | "ai" | "system" | "anonymous";
+
 /**
  * Subset of an ActivityRow that the signature actually covers. The
  * database `id` is intentionally excluded so signatures remain stable
  * even if the row's primary key is renumbered (e.g. by a restore).
+ *
+ * WARP-181: `actorType` / `actorId` are signature-covered on v2 rows;
+ * `schemaVersion` selects the canonical form (v1 = pre-upgrade legacy
+ * 7-key shape, v2 = actor-bearing 9-key shape) so pre-upgrade rows
+ * keep verifying byte-identically.
  */
 export interface ActivityRowContent {
   at: Date;
@@ -57,6 +66,9 @@ export interface ActivityRowContent {
   sub: string | null;
   kind: ActivityKindName;
   refs: Record<string, unknown> | null;
+  actorType: ActivityActorTypeName | null;
+  actorId: string | null;
+  schemaVersion: number;
 }
 
 /**
@@ -100,18 +112,47 @@ export interface ActivityRowSigner {
  * This shape is stable across orchestrator versions, JS engines, and
  * platforms — anything an offline verifier can re-derive given the row's
  * column values alone.
+ *
+ * WARP-181: the shape is versioned via `content.schemaVersion`.
+ *   - v1 (pre-upgrade rows): the EXACT legacy 7-key form — byte-
+ *     identical to what WARP-456 signed, so existing rows keep
+ *     verifying after the upgrade.
+ *   - v2: adds `actorId` / `actorType` in lexicographic key position.
+ *     `schemaVersion` itself is not a key — the two shapes are
+ *     disjoint, so flipping the version on a stored row changes the
+ *     canonical string and breaks verification anyway.
+ * Any other version throws: a verifier must never guess a shape.
  */
 export function canonicalizeRowContent(content: ActivityRowContent): string {
-  const ordered = {
-    at: content.at.toISOString(),
-    kind: content.kind,
-    refs: content.refs === undefined ? null : sortValue(content.refs),
-    severity: content.severity,
-    sourceIcon: content.sourceIcon,
-    sub: content.sub === undefined ? null : content.sub,
-    what: content.what,
-  };
-  return JSON.stringify(ordered);
+  if (content.schemaVersion === 1) {
+    const ordered = {
+      at: content.at.toISOString(),
+      kind: content.kind,
+      refs: content.refs === undefined ? null : sortValue(content.refs),
+      severity: content.severity,
+      sourceIcon: content.sourceIcon,
+      sub: content.sub === undefined ? null : content.sub,
+      what: content.what,
+    };
+    return JSON.stringify(ordered);
+  }
+  if (content.schemaVersion === 2) {
+    const ordered = {
+      actorId: content.actorId === undefined ? null : content.actorId,
+      actorType: content.actorType === undefined ? null : content.actorType,
+      at: content.at.toISOString(),
+      kind: content.kind,
+      refs: content.refs === undefined ? null : sortValue(content.refs),
+      severity: content.severity,
+      sourceIcon: content.sourceIcon,
+      sub: content.sub === undefined ? null : content.sub,
+      what: content.what,
+    };
+    return JSON.stringify(ordered);
+  }
+  throw new Error(
+    `unknown ActivityRow schemaVersion: ${String(content.schemaVersion)} (this verifier knows 1 and 2)`,
+  );
 }
 
 /**

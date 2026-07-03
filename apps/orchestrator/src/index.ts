@@ -154,6 +154,7 @@ async function main() {
     sourceIcon: "power",
     what: "Orchestrator started",
     sub: `pid ${process.pid}`,
+    actor: { type: "system" },
   });
   logger.info("Activity recorder initialized");
 

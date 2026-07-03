@@ -35,6 +35,7 @@ import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { requireRole } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
+import { actorFromRequest } from "../services/activity.service.js";
 import { encryptSecret } from "../services/encryption.service.js";
 import {
   EMAIL_CHANNEL_SINGLETON_ID,
@@ -178,6 +179,7 @@ export function createSettingsEmailRouter(
           sourceIcon: "mail",
           what: "Outbound email channel updated",
           sub: data.enabled ? `${data.host}:${data.port}` : "disabled",
+          actor: actorFromRequest(req),
           refs: {
             actor,
             enabled: data.enabled,
@@ -273,6 +275,7 @@ export function createSettingsEmailRouter(
               ? "Invite email re-sent"
               : "Invite email re-send failed",
           sub: invite.email,
+          actor: actorFromRequest(req),
           refs: {
             actor: req.user?.username ?? null,
             email: invite.email,
