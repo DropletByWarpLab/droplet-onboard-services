@@ -3,8 +3,9 @@
  *
  *   GET  /api/activity          — paginated, filterable list (AC5)
  *   POST /api/activity/export   — sealed JSON-Lines bundle (AC6)
+ *   GET  /api/activity/verify   — server-side hash-chain walk (WARP-246)
  *
- * Both routes are gated to owner/admin via `requireRole` — the
+ * All routes are gated to owner/admin via `requireRole` — the
  * activity log can reveal cross-user metadata (other family members'
  * file activity, smart-home commands) so guests/family are kept out.
  */
@@ -13,6 +14,12 @@ import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { Prisma } from "@prisma/client";
 import { getActivitySigner } from "../services/activity.singleton.js";
+import {
+  hashSignature,
+  type ActivityKindName,
+  type ActivityRowContent,
+  type ActivitySeverityName,
+} from "../services/audit-signing.service.js";
 
 /**
  * WARP-456: owner/admin gate for the activity surface. Same shape as
@@ -149,6 +156,99 @@ export function createActivityRouter(prisma: PrismaClient): Router {
         res.json({
           items,
           nextCursor,
+        });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // ── GET /api/activity/verify ── (WARP-246)
+  //
+  // Walks the whole chain server-side and reports whether it is intact.
+  // Verification CANNOT run client-side: the chain is HMAC-signed and
+  // the key must never leave the box, so the dashboard's "verified"
+  // badge is a rendering of THIS endpoint's result, not a client-side
+  // re-derivation.
+  //
+  // Semantics mirror the recorder + the retention purge:
+  //   - rows are read in ascending `id` order, chunked (PAGE=200, same
+  //     bound as the export route) so memory stays flat at appliance
+  //     scale;
+  //   - the first row examined is the history origin: its stored
+  //     `prevSignatureHash` is the anchor. Genesis rows carry "", and
+  //     after a retention purge the surviving head references a purged
+  //     signature — both are unverifiable by construction and trusted
+  //     as the origin (see audit-retention-purge.service.ts);
+  //   - every later row must link (`prevSignatureHash ===
+  //     hashSignature(prev row's signature)`) AND its signature must
+  //     verify over the canonical content + that hash.
+  //
+  // Walk stops at the first broken row: everything after an unverified
+  // link is untrustworthy anyway, and stopping bounds the cost of
+  // repeated re-verify clicks against a damaged table.
+  router.get(
+    "/activity/verify",
+    requireOwnerOrAdmin,
+    async (_req, res, next) => {
+      try {
+        const signer = getActivitySigner();
+        if (!signer) {
+          res.status(503).json({ error: "audit signer unavailable" });
+          return;
+        }
+
+        const PAGE = 200;
+        let cursor: bigint | undefined;
+        let prevSignature: string | null = null; // null ⇒ no row seen yet
+        let rowsChecked = 0;
+        let brokenAtId: string | null = null;
+
+        outer: for (;;) {
+          const page = await prisma.activityRow.findMany({
+            where: cursor === undefined ? {} : { id: { gt: cursor } },
+            orderBy: { id: "asc" },
+            take: PAGE,
+          });
+          if (page.length === 0) break;
+
+          for (const r of page) {
+            rowsChecked += 1;
+            // Origin row: trust the stored anchor. Later rows: re-derive
+            // the link from the predecessor's signature.
+            const expectedPrevHash =
+              prevSignature === null
+                ? r.prevSignatureHash
+                : hashSignature(prevSignature);
+            const content: ActivityRowContent = {
+              at: r.at,
+              severity: r.severity as ActivitySeverityName,
+              sourceIcon: r.sourceIcon,
+              what: r.what,
+              sub: r.sub,
+              kind: r.kind as ActivityKindName,
+              refs:
+                r.refs === null ? null : (r.refs as Record<string, unknown>),
+            };
+            if (
+              r.prevSignatureHash !== expectedPrevHash ||
+              !signer.verify(content, expectedPrevHash, r.signature)
+            ) {
+              brokenAtId = r.id.toString();
+              break outer;
+            }
+            prevSignature = r.signature;
+          }
+
+          cursor = page[page.length - 1]!.id;
+          if (page.length < PAGE) break;
+        }
+
+        res.json({
+          ok: brokenAtId === null,
+          rowsChecked,
+          ...(brokenAtId === null ? {} : { brokenAtId }),
+          verifiedAt: new Date().toISOString(),
         });
       } catch (err) {
         next(err);
