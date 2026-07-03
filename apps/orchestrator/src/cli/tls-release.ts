@@ -24,6 +24,7 @@
  * device-identity gRPC client). The testable decision lives in
  * `runTlsReleaseCli`; `main()` is the thin always-exit-0 composition root.
  */
+import fs from "node:fs";
 import pino from "pino";
 import { config } from "../config.js";
 import {
@@ -46,9 +47,16 @@ export function releaseSentinelLine(result: ReleaseResult): string {
   return `tls-release: result=${result}`;
 }
 
-/** Default sentinel emitter — a single stdout line the shell can capture. */
+/**
+ * Default sentinel emitter — a single stdout line the shell can capture.
+ * SYNCHRONOUS on purpose: under `docker compose exec -T` stdout is a pipe, and
+ * the composition root hard-exits with `process.exit(0)` (which per Node docs
+ * can truncate a still-buffered async stdout write). The sentinel is now
+ * load-bearing telemetry for factory-reset.sh Phase 0b, so it must be fully on
+ * the pipe before exit — `fs.writeSync(1, …)` guarantees that.
+ */
 function emitToStdout(line: string): void {
-  process.stdout.write(`${line}\n`);
+  fs.writeSync(1, `${line}\n`);
 }
 
 export interface RunTlsReleaseCliArgs {
@@ -127,7 +135,7 @@ async function main(): Promise<void> {
       "tls-release: failed to compose release — non-fatal, factory-reset continues",
     );
     try {
-      process.stdout.write(`${releaseSentinelLine("failed")}\n`);
+      emitToStdout(releaseSentinelLine("failed"));
     } catch {
       // Telemetry must never break the reset.
     }
@@ -136,6 +144,11 @@ async function main(): Promise<void> {
 
 // Only run when invoked directly (node dist/cli/tls-release.js), not on import
 // from the test. ALWAYS exit 0 — factory-reset must complete regardless.
+// `process.exit(0)` (not `process.exitCode = 0`) is deliberate: the real deps
+// include a grpc-js channel to the device-identity sidecar, which can keep the
+// event loop alive and would otherwise stall the CLI until factory-reset.sh's
+// 90s `timeout` fires on EVERY reset. Truncation of the sentinel is prevented
+// by emitting it via fs.writeSync (see emitToStdout), not by deferring exit.
 const invokedPath = process.argv[1] ?? "";
 if (invokedPath.includes("tls-release")) {
   void main().finally(() => process.exit(0));

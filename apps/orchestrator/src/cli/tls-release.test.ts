@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import fs from "node:fs";
 
 import { runTlsReleaseCli, releaseSentinelLine } from "./tls-release.js";
 import {
@@ -42,6 +43,7 @@ describe("runTlsReleaseCli", () => {
       deps: makeDeps(),
       release,
       logger,
+      emit: vi.fn(),
     });
 
     expect(result).toBe("skipped");
@@ -56,6 +58,7 @@ describe("runTlsReleaseCli", () => {
       deps,
       release,
       logger,
+      emit: vi.fn(),
     });
 
     expect(release).toHaveBeenCalledTimes(1);
@@ -73,6 +76,7 @@ describe("runTlsReleaseCli", () => {
       deps: makeDeps(),
       release,
       logger,
+      emit: vi.fn(),
     });
 
     expect(result).toBe("failed");
@@ -154,10 +158,10 @@ describe("tls-release stdout sentinel (WARP-1040)", () => {
     expect(emit).toHaveBeenCalledWith("tls-release: result=failed");
   });
 
-  it("writes the sentinel to STDOUT by default (what factory-reset.sh captures)", async () => {
+  it("writes the sentinel to STDOUT synchronously by default (fs.writeSync — the composition root process.exit(0) must never truncate a buffered async write on the compose-exec pipe)", async () => {
     const write = vi
-      .spyOn(process.stdout, "write")
-      .mockImplementation(() => true);
+      .spyOn(fs, "writeSync")
+      .mockImplementation(() => 0 as never);
     try {
       await runTlsReleaseCli({
         hqConfigured: true,
@@ -165,7 +169,7 @@ describe("tls-release stdout sentinel (WARP-1040)", () => {
         release: vi.fn(async () => RELEASE_RESULT_OK),
         logger,
       });
-      expect(write).toHaveBeenCalledWith("tls-release: result=ok\n");
+      expect(write).toHaveBeenCalledWith(1, "tls-release: result=ok\n");
     } finally {
       write.mockRestore();
     }
