@@ -31,6 +31,18 @@ scripts/image/keys/*.pub text eol=lf
 scripts/image/autoinstall/* text eol=lf
 scripts/image/grub-autoinstall.cfg text eol=lf
 
+# Prisma migration SQL. file-edit-session.schema.test.ts (and the other
+# *.schema.test.ts guards) read the migration bytes and comment-strip with
+# `/--.*$/` before asserting on the DDL. `.` never matches `\r` and a
+# non-multiline `$` only matches end-of-string, so a Windows checkout
+# (core.autocrlf=true) that materializes migration.sql as CRLF leaves a
+# trailing `\r` on every line — comment-stripping fails and a header line
+# that legitimately NAMES an invalid idiom (`CREATE TYPE ... IF NOT EXISTS`)
+# survives and trips the guard (WARP-1008). Every migration.sql is already
+# committed as LF; pin so a Windows clone materializes it as LF too and the
+# byte-level assertions hold on every platform.
+apps/orchestrator/prisma/migrations/**/migration.sql text eol=lf
+
 # Anchor codegen artifacts. schemas/__tests__/codegen-drift.test.ts re-runs
 # scripts/gen-anchor-schema.mjs and byte-compares its output against the
 # checked-in TS + Python mirrors. The generator always emits LF (Node

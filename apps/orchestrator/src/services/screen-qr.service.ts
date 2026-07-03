@@ -31,9 +31,9 @@
  *     the whole orchestrator without leaking timers.
  */
 import { createHash } from "node:crypto";
-import { networkInterfaces } from "node:os";
 import type { PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
+import { lanSetupHost } from "../lib/box-identity.js";
 import { pushClaimCode, pushCustomImage, showSystem } from "./display.client.js";
 import type { ClaimWifi } from "./display.client.js";
 import { ensureClaimCode, isClaimed } from "./claim-code.service.js";
@@ -333,43 +333,19 @@ export async function decideClaimScreen(
 }
 
 /**
- * Build the setup URL for a freshly-flashed box. Returns
- * `https://<lan-ip>/setup` using the first non-loopback IPv4 we find;
- * falls back to the box's hostname if no IP can be resolved.
+ * Build the setup URL for a freshly-flashed box. Host resolution lives in
+ * `lib/box-identity.ts::lanSetupHost` (WARP-992): SCREEN_QR_HOST override →
+ * first routable LAN IPv4 → the stable `droplet.local` LAN name. Inside the
+ * bridge-networked container the interface scan finds nothing routable, so
+ * the LAN name is the production answer — never `$HOSTNAME`, which is the
+ * docker container id and rendered as "Go to 5639146fdc76/setup" on the OLED.
  *
  * Self-signed-cert browser warning is unavoidable on first scan, but
  * the cert is already what the dashboard uses everywhere — the
  * customer's only going to see it once.
  */
 export function setupUrl(): string {
-  const host = lanHostname();
-  return `https://${host}/setup`;
-}
-
-function lanHostname(): string {
-  // Prefer an env override so deployments behind a DNS name can pin
-  // the QR target (a custom domain, etc.). The wizard's
-  // resolveEndpointHost() pattern already does this for the WG side.
-  const override = (process.env.SCREEN_QR_HOST || "").trim();
-  if (override) return override;
-
-  const nets = networkInterfaces();
-  for (const ifaces of Object.values(nets)) {
-    if (!ifaces) continue;
-    for (const iface of ifaces) {
-      // IPv4, non-loopback, non-docker-bridge.
-      if (
-        iface.family === "IPv4" &&
-        !iface.internal &&
-        !iface.address.startsWith("172.") &&
-        !iface.address.startsWith("169.254.")
-      ) {
-        return iface.address;
-      }
-    }
-  }
-  // Last resort — better than nothing.
-  return process.env.HOSTNAME || "droplet.local";
+  return `https://${lanSetupHost()}/setup`;
 }
 
 /**

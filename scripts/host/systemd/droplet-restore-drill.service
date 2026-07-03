@@ -1,0 +1,26 @@
+# =============================================================================
+# WARP-254 — monthly restore drill (oneshot, driven by droplet-restore-drill.timer)
+# =============================================================================
+#
+# Restores the latest snapshot into a throwaway sandbox Postgres container,
+# smoke-tests the restored DB, and writes the EXPLICIT pass/fail status file
+# (enum ok|failed) to /var/lib/droplet/backup/restore-drill-status.json.
+# A failed drill leaves this unit in a failed state AND logs daemon.err —
+# both alertable surfaces.
+#
+# Installed + @REPO_ROOT@-substituted + enabled by setup.sh
+# (scripts/lib/backup.sh::install_restic_backup) — never hand-placed.
+# =============================================================================
+[Unit]
+Description=Droplet monthly backup restore drill (sandboxed)
+Documentation=https://warp-lab.atlassian.net/browse/WARP-254
+Wants=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+Environment=DROPLET_REPO_ROOT=@REPO_ROOT@
+ExecStart=/usr/local/sbin/droplet-restore-drill.sh
+UMask=0077
+Nice=10
+IOSchedulingClass=idle

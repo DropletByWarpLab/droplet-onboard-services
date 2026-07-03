@@ -42,7 +42,16 @@ _valid_hostname() {
   local name="$1"
   # Single label (mDNS host-name) or dotted FQDN, 1-253 chars, no leading/
   # trailing hyphen per label, lowercase ASCII only.
-  printf '%s' "$name" | grep -Eq '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$'
+  #
+  # Matched with bash's [[ =~ ]] (whole-string, newline-safe) rather than a
+  # `printf | grep -Eq` pipe — grep is LINE-based, so a newline-bearing value
+  # like 'droplet-ai<LF>HostName=evil' would pass on its first line and the
+  # injected second line would ride into /etc/avahi/avahi-daemon.conf (via the
+  # sed in _set_avahi_host_name) or the dnsmasq host-record. In [[ =~ ]] the
+  # char classes cannot match a newline and `$` anchors the end of the whole
+  # string, so a multi-line value is rejected. Mirrors the WARP-994 fix to
+  # droplet-set-public-fqdn.sh and the WARP-988 fix to droplet-set-box-name.sh.
+  [[ "$name" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$ ]]
 }
 
 if ! _valid_hostname "$DROPLET_MDNS_HOSTNAME"; then
@@ -396,6 +405,18 @@ _write_host_dnsmasq_record() {
   # Already present + current? No-op (keeps re-runs clean — no dnsmasq restart).
   if grep -qxF "$desired" "$_HOST_DNSMASQ_CONF" 2>/dev/null; then
     log_info "Host dnsmasq host-record already current for ${DROPLET_PUBLIC_FQDN}"
+    return 0
+  fi
+
+  # WARP-985: under the device-bridge's sandbox (User=droplet +
+  # NoNewPrivileges=true) sudo can never elevate, so every sudo below would
+  # fail — previously silently, because the caller treats DNS registration as
+  # best-effort. Detect the no-non-interactive-sudo environment up front and
+  # defer honestly: the .env upsert already persisted the FQDN, so the next
+  # root-context boot/setup run rewrites this record, and the routing-service
+  # leg above still covers clients on the OpenWrt DNS plane.
+  if ! sudo -n true 2>/dev/null; then
+    log_warn "No non-interactive sudo here (sandboxed bridge?) — host dnsmasq host-record for ${DROPLET_PUBLIC_FQDN} deferred to the next boot/setup run"
     return 0
   fi
 

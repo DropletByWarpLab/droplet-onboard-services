@@ -102,6 +102,35 @@ describe("translateError — auth domain", () => {
     expect(alreadyEnabled.toLowerCase()).toContain("two-factor");
     expect(alreadyEnabled.toLowerCase()).not.toMatch(/username|password/);
   });
+
+  // WARP-989 — a provisioning 500 from POST /auth/setup used to fall through
+  // to the auth fallback ("check your username and password"), telling the
+  // owner their brand-new credentials were wrong when the box simply failed
+  // to finish creating the account (live .87 incident). The orchestrator now
+  // types these; they must map to honest try-again copy, never the sign-in
+  // fallback.
+  it("maps the setup provisioning codes to honest 'couldn't finish creating your account' copy", () => {
+    for (const code of ["SETUP_PROVISIONING_FAILED", "SETUP_FAILED"]) {
+      const result = translateError({ code, status: 500 }, "auth");
+      expect(result.toLowerCase(), code).toContain("creating your account");
+      expect(result.toLowerCase(), code).toContain("try again");
+      // Never the misleading sign-in copy — the credentials were fine.
+      expect(result.toLowerCase(), code).not.toMatch(/username|password|sign you in/);
+    }
+  });
+
+  it("keeps the raw orchestrator OCS message out of the setup-failure copy", () => {
+    const result = translateError(
+      {
+        code: "SETUP_PROVISIONING_FAILED",
+        status: 500,
+        message: "OCS error creating user: Group household does not exist",
+      },
+      "auth",
+    );
+    expect(result).not.toContain("OCS");
+    expect(result).not.toContain("Group household");
+  });
 });
 
 describe("translateError — vpn domain", () => {

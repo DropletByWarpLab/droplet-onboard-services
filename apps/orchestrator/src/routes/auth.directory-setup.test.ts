@@ -70,6 +70,7 @@ vi.mock("../services/nextcloud.client.js", () => {
     ncGetCurrentUser: vi.fn(),
     ncCreateUser: vi.fn().mockResolvedValue(undefined),
     ncDeleteUser: vi.fn(),
+    ncEnsureGroup: vi.fn().mockResolvedValue(undefined),
     ncListUsers: vi.fn(),
     ncUpdateUser: vi.fn(),
     ncSetUserEnabled: vi.fn(),
@@ -168,6 +169,20 @@ function createPrismaMock(seed: any[] = []) {
       };
       users.push(row);
       return row;
+    }),
+    // WARP-989 — the atomic-rollback path deletes the just-created owner row
+    // when Nextcloud provisioning fails. Generic field matcher over the seed
+    // array; count mirrors Prisma's deleteMany result shape.
+    deleteMany: vi.fn(async ({ where }: any = {}) => {
+      callOrder.push("user.deleteMany");
+      const before = users.length;
+      for (let i = users.length - 1; i >= 0; i -= 1) {
+        const matches = Object.entries(where ?? {}).every(
+          ([k, v]) => users[i][k] === v,
+        );
+        if (matches) users.splice(i, 1);
+      }
+      return { count: before - users.length };
     }),
   };
   self._users = users;
@@ -560,5 +575,144 @@ describe("WARP-165 — /auth/setup physical-presence claim gate", () => {
     // The original owner is untouched.
     expect(prisma._users).toHaveLength(1);
     expect(prisma._users[0].passwordHash).toBe("$argon2id$ORIGINAL-HASH");
+  });
+});
+
+/**
+ * WARP-989 — POST /auth/setup must be ATOMIC.
+ *
+ * The local owner row is written before Nextcloud provisioning (idempotent
+ * write first — the PR #279 ordering), but the N1 owner-exists guard turns a
+ * leftover row into a permanent lockout: when ncInstallAndCreateAdmin failed
+ * (live .87 incident: "OCS error creating user: Group household does not
+ * exist"), the owner row survived, every retry answered 409 OWNER_EXISTS,
+ * and the owner had NO Nextcloud account (all /api/files/* 401 forever).
+ *
+ * Coverage:
+ *   1. NC provisioning failure → typed 500 SETUP_PROVISIONING_FAILED and the
+ *      half-created local owner row is rolled back (deleted).
+ *   2. A retry after that failure succeeds — no OWNER_EXISTS lockout.
+ *   3. The household group is idempotently ensured BEFORE the owner is
+ *      provisioned into it (the WARP-990 trigger prevention).
+ *   4. A failed group-ensure alone is best-effort (never blocks a setup that
+ *      would otherwise succeed).
+ *   5. Worst case: even when the rollback itself fails, the typed error still
+ *      reaches the client (never the misleading sign-in copy).
+ */
+describe("WARP-989 — /auth/setup is atomic (NC failure rolls back the local owner)", () => {
+  it("NC failure → 500 SETUP_PROVISIONING_FAILED and the local owner row is NOT persisted", async () => {
+    const prisma = createPrismaMock();
+    (nc.ncInstallAndCreateAdmin as any).mockRejectedValueOnce(
+      new Error("OCS error creating user: Group household does not exist"),
+    );
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .post("/api/auth/setup")
+      .send({ password: "Atomic-secret123", email: "owner@warp.test" });
+
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe("SETUP_PROVISIONING_FAILED");
+    // The rollback targets exactly the row this request created.
+    expect(prisma.user.deleteMany).toHaveBeenCalledWith({
+      where: { nextcloudUsername: "owner", role: "owner" },
+    });
+    // No half-created owner row survives → no OWNER_EXISTS lockout.
+    expect(prisma._users).toHaveLength(0);
+  });
+
+  it("a retry after an NC provisioning failure succeeds (no OWNER_EXISTS lockout)", async () => {
+    const prisma = createPrismaMock();
+    (nc.ncInstallAndCreateAdmin as any)
+      .mockRejectedValueOnce(
+        new Error("OCS error creating user: Group household does not exist"),
+      )
+      .mockResolvedValueOnce(undefined);
+    const app = buildApp(prisma);
+
+    const first = await request(app)
+      .post("/api/auth/setup")
+      .send({ password: "Atomic-secret123", email: "owner@warp.test" });
+    expect(first.status).toBe(500);
+    expect(first.body.code).toBe("SETUP_PROVISIONING_FAILED");
+
+    // Pre-fix this answered 409 OWNER_EXISTS forever; now the wiped slate
+    // lets the same request run to completion.
+    const second = await request(app)
+      .post("/api/auth/setup")
+      .send({ password: "Atomic-secret123", email: "owner@warp.test" });
+    expect(second.status).toBe(200);
+    expect(prisma._users).toHaveLength(1);
+    expect(prisma._users[0].role).toBe("owner");
+  });
+
+  it("idempotently ensures the household group exists BEFORE provisioning the owner into it", async () => {
+    const prisma = createPrismaMock();
+    (nc.ncEnsureGroup as any).mockImplementation(() => {
+      prisma._callOrder.push("ncEnsureGroup");
+      return Promise.resolve();
+    });
+    (nc.ncInstallAndCreateAdmin as any).mockImplementation(() => {
+      prisma._callOrder.push("ncInstallAndCreateAdmin");
+      return Promise.resolve();
+    });
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .post("/api/auth/setup")
+      .send({ password: "Group-secret1234", email: "owner@warp.test" });
+
+    expect(res.status).toBe(200);
+    // The mocked config lacks DROPLET_SHARED_FOLDER_NAME, so
+    // householdGroupName() falls back to the canonical "household".
+    expect(nc.ncEnsureGroup).toHaveBeenCalledWith("household");
+    expect(prisma._callOrder).toEqual([
+      "user.upsert",
+      "ncEnsureGroup",
+      "ncInstallAndCreateAdmin",
+    ]);
+  });
+
+  it("a failed group-ensure alone does NOT block setup (best-effort)", async () => {
+    const prisma = createPrismaMock();
+    (nc.ncEnsureGroup as any).mockRejectedValueOnce(
+      new Error("OCS error creating group: boom"),
+    );
+    (nc.ncInstallAndCreateAdmin as any).mockResolvedValueOnce(undefined);
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .post("/api/auth/setup")
+      .send({ password: "Ensure-secret123", email: "owner@warp.test" });
+
+    expect(res.status).toBe(200);
+    expect(prisma._users).toHaveLength(1);
+  });
+
+  it("worst case: rollback itself fails → the typed SETUP_PROVISIONING_FAILED still reaches the client", async () => {
+    const prisma = createPrismaMock();
+    (nc.ncInstallAndCreateAdmin as any).mockRejectedValueOnce(new Error("NC down"));
+    prisma.user.deleteMany.mockRejectedValueOnce(new Error("db down"));
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .post("/api/auth/setup")
+      .send({ password: "Worst-secret1234", email: "owner@warp.test" });
+
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe("SETUP_PROVISIONING_FAILED");
+  });
+
+  it("a non-NC setup failure carries the typed SETUP_FAILED code", async () => {
+    const prisma = createPrismaMock();
+    prisma.user.upsert.mockRejectedValueOnce(new Error("db down"));
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .post("/api/auth/setup")
+      .send({ password: "Generic-secret12", email: "owner@warp.test" });
+
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe("SETUP_FAILED");
   });
 });

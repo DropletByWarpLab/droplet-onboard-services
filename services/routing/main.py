@@ -952,25 +952,39 @@ def list_dns_hostnames():
         handle_router_error(exc)
 
 
-# Why this specific reload path:
-#   1. `exec_service("dnsmasq","restart")` → `file.exec` — denied by the
-#      droplet-ai rpcd ACL (openwrt/files/usr/share/rpcd/acl.d/droplet-ai.json
-#      deliberately does NOT grant `file.exec`).
+# Why this specific commit + reload path (WARP-987, root-caused live on the
+# box 2026-07-01 and verified against rpcd source):
+#   1. `uci.apply` commits the staged hostrecord delta and emits the procd
+#      `config.change` event — but that trigger does NOT regenerate
+#      /var/etc/dnsmasq.conf.* on the appliance container: records stayed
+#      committed-but-unserved until a manual `/etc/init.d/dnsmasq restart`.
+#      apply alone is commit, not reload.
 #   2. `service.signal` with SIGHUP — permitted, but dnsmasq reads its config
 #      from /var/etc/dnsmasq.conf.cfg*, which is *generated* from /etc/config/
 #      dhcp by the init script at start/reload time. SIGHUP reloads hostnames
-#      from /etc/hosts but NOT the UCI-derived host-records, so our change
+#      from /etc/hosts but NOT the UCI-derived host-records, so the change
 #      would persist in UCI but never reach live DNS.
-#   3. `uci.apply` with pending (uncommitted) changes — permitted, and this
-#      IS what triggers /sbin/reload_config → ucitrack → dnsmasq reload,
-#      which regenerates /var/etc/dnsmasq.conf.*. This is why the SDK's
-#      set_hostrecord deliberately does NOT pre-commit: apply only emits
-#      the reload event when there's something still pending.
+#   3. So after committing we explicitly rerun the init script via
+#      `DHCPApi.reload()` (`file.exec` on `/etc/init.d/dnsmasq restart`).
+#      The droplet-ai rpcd ACL pins exactly that command line — rpcd matches
+#      the full path+args string, so this is NOT a blanket exec grant (see
+#      openwrt/files/usr/share/rpcd/acl.d/droplet-ai.json).
+# Idempotency: a re-post of an already-committed record stages NOTHING —
+# rpcd's `uci set` skips unchanged values server-side, and `uci apply` with
+# zero pending deltas reports NO_DATA. That is "nothing to commit", not a
+# fault: swallow it and still restart dnsmasq, which self-heals any earlier
+# committed-but-unserved record. 500-ing on that NO_DATA is what broke
+# existing-record re-posts on the box (WARP-987).
 # rollback=False so apply doesn't start a rollback timer (there's nothing to
 # rollback against — a bad DNS entry can't partition the router). timeout=5
 # is well under the 30s default and keeps the HTTP response snappy.
 def _commit_and_reload_dhcp(router) -> None:
-    router.uci.apply(timeout=5, rollback=False)
+    try:
+        router.uci.apply(timeout=5, rollback=False)
+    except UbusError as exc:
+        if exc.code != UBUS_STATUS_NO_DATA:
+            raise
+    router.dhcp.reload()
 
 
 @app.post("/dhcp/hostnames")
@@ -1698,6 +1712,14 @@ _AI_ACL_FALLBACK = {
                 "session": ["login", "destroy"],
                 "hostapd.*": ["del_client"],
                 "wireguard": ["*"],
+                "file": ["exec"],
+            },
+            # WARP-987: exec is PINNED to the dnsmasq restart command line —
+            # rpcd matches the full path+args string against this `file`
+            # scope, so nothing else is executable. Keep in lockstep with the
+            # canonical ACL (test_ai_access.py enforces ubus-scope parity).
+            "file": {
+                "/etc/init.d/dnsmasq restart": ["exec"],
             },
         },
     }

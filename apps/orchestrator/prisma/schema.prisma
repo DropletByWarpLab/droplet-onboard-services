@@ -3145,3 +3145,68 @@ model SystemFlag {
   valueJson Json     @default("{}")
   createdAt DateTime @default(now())
 }
+
+// ── WARP-537: OTA update audit table (WARP-534 epic) ──
+
+/// Advance-only lifecycle of one discovered OTA release on this device.
+/// `status` is the canonical state column (CLAUDE.md / WARP-218 pattern —
+/// never derived from absent timestamps). The table is append-only
+/// (WARP-541): rows advance status, they are never deleted.
+///
+///   pending ──► superseded                 (WARP-538: newer release found)
+///   pending ──► verifying ──► applying ──► committed         (WARP-539)
+///                    │             └─────► rolled_back       (WARP-539)
+///                    │                          └─► failed   (rollback also
+///                    │                              failed; the
+///                    │                              degraded_health verdict
+///                    │                              rides `failureReason`)
+///                    └───► rejected        (schema downgrade & friends)
+enum DeviceUpdateStatus {
+  pending
+  superseded
+  verifying
+  applying
+  committed
+  rolled_back
+  failed
+  rejected
+}
+
+/// One row per release the update agent decided to track (signature-verified
+/// at discovery time — a release that fails signature verification writes NO
+/// row, only an `update.signature_failed` log event, per WARP-538).
+///
+/// `manifestJson` snapshots the FULL verified manifest at discovery so the
+/// apply step (WARP-539) acts on exactly the bytes that were verified —
+/// re-fetching at apply time would reopen the verify/use TOCTOU window.
+/// `manifestSha256` is the hex digest over those bytes for the audit trail.
+model DeviceUpdate {
+  id             String             @id @default(cuid())
+  status         DeviceUpdateStatus @default(pending)
+  /// Release channel this row came from. Single `stable` channel today
+  /// (WARP-534); the column keeps history honest if channels ever grow.
+  channel        String             @default("stable")
+  /// GitHub Release tag the manifest was downloaded from (e.g.
+  /// `ota-42-gabc1234`). Nullable: unit-test/manual discoveries may not
+  /// come from a tagged release.
+  releaseTag     String?
+  /// `release.gitSha` from the verified manifest — the commit this release
+  /// was built from.
+  gitSha         String
+  /// `release.builtAt` from the verified manifest.
+  builtAt        DateTime
+  /// Hex sha256 over the verified release.json bytes.
+  manifestSha256 String
+  /// The full verified manifest (design schema v1).
+  manifestJson   Json
+  /// Canonical refusal/failure vocabulary: `UpdateFailureReason` from
+  /// src/services/update-agent/manifest.ts (e.g. `schema_downgrade`), or an
+  /// apply-time verdict such as `degraded_health` (WARP-539). Null while the
+  /// row is healthy.
+  failureReason  String?
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  @@index([status, createdAt])
+  @@index([gitSha])
+}

@@ -239,6 +239,35 @@ EOF
   sudo install -m 0644 "$host_src/etc-avahi/services/droplet.service" \
     /etc/avahi/services/droplet.service
 
+  # --- unified self-heal watchdog (WARP-1002) ------------------------------
+  # One timer-driven supervisor for the proven-heal wedge states (Wi-Fi PCI
+  # death via the WARP-869 helper, XVF3800 voice-DSP wedge, docker DNS,
+  # container crash-loops). Status: /var/lib/droplet/watchdog/status.json.
+  sudo install -m 0755 "$host_src/droplet-watchdog.sh" \
+    /usr/local/sbin/droplet-watchdog
+  # The WARP-869 Wi-Fi wedge helper is the watchdog's wifi detect+heal engine.
+  # install-device-bridge.sh also installs it (idempotent), but landing it
+  # here too closes the first-boot ordering gap — the watchdog timer must
+  # never tick before its helper exists.
+  sudo install -m 0755 "$host_src/usr-local-sbin/droplet-wifi-watchdog" \
+    /usr/local/sbin/droplet-wifi-watchdog
+  sudo install -m 0644 "$host_src/etc-systemd-system/droplet-watchdog.service" \
+    /etc/systemd/system/droplet-watchdog.service
+  sudo install -m 0644 "$host_src/etc-systemd-system/droplet-watchdog.timer" \
+    /etc/systemd/system/droplet-watchdog.timer
+  # Per-box tuning file: install once, never clobber operator edits.
+  if [ ! -f /etc/default/droplet-watchdog ]; then
+    sudo install -m 0644 "$host_src/etc-default/droplet-watchdog" \
+      /etc/default/droplet-watchdog
+  fi
+  # Migration: the standalone WARP-869 timer is superseded — the unified
+  # watchdog invokes the same helper, and two independent schedulers could
+  # race a PCI remove/rescan. The helper script itself stays installed.
+  sudo systemctl disable --now droplet-wifi-watchdog.timer 2>/dev/null || true
+  sudo rm -f /etc/systemd/system/droplet-wifi-watchdog.service \
+             /etc/systemd/system/droplet-wifi-watchdog.timer
+  log_success "Installed /usr/local/sbin/droplet-watchdog (+ units; supersedes droplet-wifi-watchdog.timer)"
+
   # --- Migrate from pre-rename service name if present -------------------
   sudo systemctl disable --now droplet-poc-host-net.service 2>/dev/null || true
   sudo rm -f /etc/systemd/system/droplet-poc-host-net.service \
@@ -251,11 +280,15 @@ EOF
   sudo systemd-tmpfiles --create /etc/tmpfiles.d/droplet.conf 2>/dev/null || true
   sudo systemctl enable droplet-openwrt-attach.service >/dev/null 2>&1
   sudo systemctl enable droplet-host-net.service >/dev/null 2>&1
+  # WARP-1002: unified self-heal watchdog — always on; the healthy-path cost
+  # is a handful of read-only sysfs/docker probes every ~3 minutes.
+  sudo systemctl enable --now droplet-watchdog.timer >/dev/null 2>&1
 
   log_success "single-box host integration installed"
   log_info "  Boot-time:   droplet-openwrt-attach.service + droplet-host-net.service"
+  log_info "  Self-heal:   droplet-watchdog.timer (status: /var/lib/droplet/watchdog/status.json)"
   log_info "  Status:      sudo systemctl status droplet-openwrt-attach droplet-host-net"
-  log_info "  Logs:        sudo journalctl -u droplet-openwrt-attach -u droplet-host-net"
+  log_info "  Logs:        sudo journalctl -u droplet-openwrt-attach -u droplet-host-net -u droplet-watchdog"
 }
 
 # WARP-826: poll for the OpenWrt container to be genuinely READY — Running AND

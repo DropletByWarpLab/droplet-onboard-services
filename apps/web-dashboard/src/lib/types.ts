@@ -390,6 +390,12 @@ export interface VpnStatusInfo {
    *  Null until the box learns it from HQ. Safe to show to any user (it is
    *  published to Certificate Transparency anyway, carries no PII, has no A record). */
   publicFqdn?: string | null;
+  /** WARP-993: is the minted WireGuard conf actually reachable from OUTSIDE
+   *  the home LAN? False while the box is FQDN-only (split-horizon, no public
+   *  A record — ADR-023 §3) until the ADR-025 relay lands. Every
+   *  "from anywhere" surface gates its copy on this; missing ⇒ treat as false
+   *  (never over-promise against an older orchestrator). */
+  offLanReachable?: boolean;
   listenPort?: number;
   serverPublicKey?: string;
   addresses?: string[];
@@ -404,6 +410,9 @@ export interface VpnPeerCreatedInfo {
   peer: VpnPeerInfo;
   /** Full WireGuard .conf text. Contains the peer's private key. */
   conf: string;
+  /** WARP-993: same honest reachability signal as VpnStatusInfo, echoed on
+   *  the create response so the QR step can gate its copy without a refetch. */
+  offLanReachable?: boolean;
 }
 
 // ── WARP-446: Coverage extender APs ──
@@ -465,11 +474,25 @@ export interface BoxNameCheckResult {
   message?: string;
 }
 
-/** WARP-979 — response from POST /api/setup/box-name. */
+/**
+ * WARP-979 — response from POST /api/setup/box-name.
+ *
+ * WARP-980 — the persist now also drives a device-auth HQ name CLAIM, so the
+ * response carries the AUTHORITATIVE result: `authoritative` is true only when HQ
+ * device-auth-confirmed the name belongs to this box (false = persisted but fell
+ * back to opaque/bootstrap issuance, e.g. the device isn't registered yet).
+ * `taken` + `suggestions` accompany a 409 when HQ says the name is taken.
+ */
 export interface BoxNameSetResult {
   ok: boolean;
   slug: string;
   fqdn: string;
+  /** WARP-980 — HQ device-auth-confirmed the name (present on the 2xx path). */
+  authoritative?: boolean;
+  /** WARP-980 — true on a 409 name-taken body. */
+  taken?: boolean;
+  /** WARP-980 — alternate names HQ offered on a 409 name-taken. */
+  suggestions?: string[];
 }
 // --- Auth types ---
 

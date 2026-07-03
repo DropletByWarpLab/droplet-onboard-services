@@ -4,8 +4,10 @@ import * as forge from "node-forge";
 import {
   createTlsIssuanceService,
   CHALLENGE_PREFIX,
+  buildProvisionMessage,
   type TlsIssuanceDeps,
   type HqIssuanceClient,
+  type HqProvisionRequest,
   type TlsCertStore,
   type TlsFileOps,
 } from "./tls-issuance.service.js";
@@ -18,6 +20,36 @@ const FQDN = "d-abc123def456.devices.warp-lab.ai";
 const DEVICE_ID = "droplet-test-01";
 const KEY_FINGERPRINT = "sha256:deadbeef";
 const NONCE = "nonce-xyz";
+const PROVISION_TOKEN = "prov-token-abcdef0123456789";
+
+/**
+ * A device-identity X.509 cert (PEM) plus the SubjectPublicKeyInfo PEM the
+ * service must extract from it for the HQ provision `public_key_pem`. The real
+ * TPM identity key is EC P-256, but the box-side extraction is key-type-agnostic
+ * (it lifts the SPKI straight out of the cert with node-forge), so an RSA cert
+ * exercises the exact code path deterministically. Cached per-module so every
+ * `makeDeviceIdentity()` returns a stable cert/SPKI pair (tests assert the
+ * extracted PEM is forwarded verbatim).
+ */
+let _deviceCert: { certPem: string; spkiPem: string } | null = null;
+function makeDeviceCertPem(): { certPem: string; spkiPem: string } {
+  if (_deviceCert) return _deviceCert;
+  const keys = forge.pki.rsa.generateKeyPair(1024);
+  const cert = forge.pki.createCertificate();
+  cert.publicKey = keys.publicKey;
+  cert.serialNumber = "03";
+  cert.validity.notBefore = new Date();
+  cert.validity.notAfter = new Date(Date.now() + 3650 * 86_400_000);
+  const attrs = [{ name: "commonName", value: "Droplet Device Identity" }];
+  cert.setSubject(attrs);
+  cert.setIssuer(attrs);
+  cert.sign(keys.privateKey, forge.md.sha256.create());
+  _deviceCert = {
+    certPem: forge.pki.certificateToPem(cert),
+    spkiPem: forge.pki.publicKeyToPem(keys.publicKey),
+  };
+  return _deviceCert;
+}
 
 /** A deterministic 90-day-out timestamp. */
 function daysFromNow(days: number): string {
@@ -123,16 +155,70 @@ function makeHqClient(overrides: Partial<HqIssuanceClient> = {}): HqIssuanceClie
       device_id: DEVICE_ID,
       status: "revoked" as const,
     })),
+    provision: vi.fn(async () => ({
+      device_id: DEVICE_ID,
+      status: "registered" as const,
+      idempotent: false,
+    })),
+    claimName: vi.fn(async (req) => ({
+      device_id: req.device_id,
+      name: req.name,
+      fqdn: `${req.name}.droplet-us.com`,
+      status: "claimed" as const,
+    })),
+    release: vi.fn(async () => ({
+      device_id: DEVICE_ID,
+      status: "released" as const,
+    })),
     ...overrides,
   };
 }
 
+/** An HQ client whose challenge (and order/renew) 404s with the exact
+ *  not-in-registry body, until `registered` flips true after a provision. Mirrors
+ *  the live HQ behaviour: a deregistered device 404s on challenge; once the box
+ *  re-provisions, the retry succeeds. */
+function makeNotInRegistryHqClient(): HqIssuanceClient & { registered: boolean } {
+  const notInRegistry = () => {
+    // Exactly what hqFetch throws for the deployed HQ 404 (adapters.ts):
+    //   `HQ <path> returned <status>: <body.slice(0,200)>`
+    throw new Error(
+      'HQ /api/issuance/order/challenge returned 404: {"error":"device_id not in registry"}',
+    );
+  };
+  const base = makeHqClient();
+  const client = {
+    ...base,
+    registered: false,
+    challenge: vi.fn(async (deviceId: string) => {
+      if (!client.registered) return notInRegistry();
+      return {
+        nonce: NONCE,
+        expires_at: daysFromNow(1),
+        public_label: "d-abc123def456",
+        fqdn: FQDN,
+      };
+    }),
+    provision: vi.fn(async (_req: HqProvisionRequest) => {
+      client.registered = true;
+      return {
+        device_id: DEVICE_ID,
+        status: "registered" as const,
+        idempotent: false,
+      };
+    }),
+  } as unknown as HqIssuanceClient & { registered: boolean };
+  return client;
+}
+
 function makeDeviceIdentity() {
+  const { certPem } = makeDeviceCertPem();
   return {
     signWithDeviceKey: vi.fn(async () => ({
       signature: new Uint8Array([1, 2, 3, 4]),
       algorithm: "ecdsa-sha256",
     })),
+    getDeviceCert: vi.fn(async () => certPem),
     getDeviceIdentityStatus: vi.fn(async () => ({
       provisioned: true,
       backend: "mock" as const,
@@ -642,5 +728,171 @@ describe("tls-issuance.service — split-horizon DNS registration", () => {
     await svc.runOnce();
 
     expect(dns.register).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WARP-983 — box self-provision (re-enroll into the HQ registry after a
+// factory-reset deregister freed the device row, then issue the cert)
+// ---------------------------------------------------------------------------
+
+describe("tls-issuance.service — self-provision (WARP-983)", () => {
+  it("(e) buildProvisionMessage equals the HQ contract string", () => {
+    expect(buildProvisionMessage(PROVISION_TOKEN, DEVICE_ID, KEY_FINGERPRINT)).toBe(
+      `droplet-provision:v1:${PROVISION_TOKEN}:${DEVICE_ID}:${KEY_FINGERPRINT}`,
+    );
+  });
+
+  it("(a) not-in-registry + token set → provisions with a correctly-built message, retries → LE_ISSUED", async () => {
+    const store = makeStore({ fqdn: FQDN, state: "BOOTSTRAP_SELF_SIGNED" });
+    const hq = makeNotInRegistryHqClient();
+    const identity = makeDeviceIdentity();
+    const { spkiPem } = makeDeviceCertPem();
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const svc = createTlsIssuanceService(
+      makeDeps({
+        store,
+        hq,
+        identity: identity as unknown as TlsIssuanceDeps["identity"],
+        provisionToken: PROVISION_TOKEN,
+        logger,
+      }),
+    );
+
+    await svc.runOnce();
+
+    // provision() was called exactly once with the correctly-built fields.
+    expect(hq.provision).toHaveBeenCalledTimes(1);
+    const req = (hq.provision as ReturnType<typeof vi.fn>).mock
+      .calls[0][0] as HqProvisionRequest;
+    expect(req.device_id).toBe(DEVICE_ID);
+    expect(req.token).toBe(PROVISION_TOKEN);
+    expect(req.key_fingerprint).toBe(KEY_FINGERPRINT);
+    expect(req.sig_alg).toBe("ecdsa-sha256");
+    expect(typeof req.signature).toBe("string");
+    expect(req.signature.length).toBeGreaterThan(0);
+    // public_key_pem is the SPKI extracted from the device identity cert.
+    expect(req.public_key_pem).toBe(spkiPem);
+    expect(req.public_key_pem).toContain("BEGIN PUBLIC KEY");
+
+    // The signed bytes are the provision PoP message, NOT the cert challenge.
+    const provisionSignCall = (
+      identity.signWithDeviceKey as ReturnType<typeof vi.fn>
+    ).mock.calls
+      .map((c) => Buffer.from(c[0] as Uint8Array).toString("utf8"))
+      .find((s) => s.startsWith("droplet-provision:v1:"));
+    expect(provisionSignCall).toBe(
+      buildProvisionMessage(PROVISION_TOKEN, DEVICE_ID, KEY_FINGERPRINT),
+    );
+
+    // After the successful provision, the issuance retried and installed a cert.
+    expect(hq.challenge).toHaveBeenCalledTimes(2); // first 404, retry succeeds
+    expect((await store.get(FQDN))?.state).toBe("LE_ISSUED");
+  });
+
+  it("(b) not-in-registry + NO token → does NOT provision, stays bootstrap, warns", async () => {
+    const store = makeStore({ fqdn: FQDN, state: "BOOTSTRAP_SELF_SIGNED" });
+    const hq = makeNotInRegistryHqClient();
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    // provisionToken omitted (undefined) → self-provision disabled.
+    const svc = createTlsIssuanceService(makeDeps({ store, hq, logger }));
+
+    await expect(svc.runOnce()).resolves.not.toThrow();
+
+    expect(hq.provision).not.toHaveBeenCalled();
+    // The box stays on the bootstrap cert: the 404 is treated as a transient HQ
+    // failure (LE_RENEW_FAILED), no cert installed, and it warns.
+    expect((await store.get(FQDN))?.state).toBe("LE_RENEW_FAILED");
+    expect(logger.warn).toHaveBeenCalled();
+    // No retry challenge — it 404'd once and gave up.
+    expect(hq.challenge).toHaveBeenCalledTimes(1);
+  });
+
+  it("(c) provision fails (expired/401 token) → no crash, keeps bootstrap, no retry", async () => {
+    const store = makeStore({ fqdn: FQDN, state: "BOOTSTRAP_SELF_SIGNED" });
+    const hq = makeNotInRegistryHqClient();
+    // Override provision to reject like the deployed HQ 401 (invalid/expired token).
+    hq.provision = vi.fn(async () => {
+      throw new Error(
+        'HQ /api/issuance/provision returned 401: {"error":"provisioning token expired"}',
+      );
+    });
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const svc = createTlsIssuanceService(
+      makeDeps({ store, hq, provisionToken: PROVISION_TOKEN, logger }),
+    );
+
+    await expect(svc.runOnce()).resolves.not.toThrow();
+
+    expect(hq.provision).toHaveBeenCalledTimes(1);
+    // provision failed → keep the bootstrap cert, record LE_RENEW_FAILED, warn.
+    expect((await store.get(FQDN))?.state).toBe("LE_RENEW_FAILED");
+    expect(logger.warn).toHaveBeenCalled();
+    // Only the ONE (failed) challenge — provision failed so there is no retry.
+    expect(hq.challenge).toHaveBeenCalledTimes(1);
+  });
+
+  it("(d) already-registered device → provision is NEVER called (happy path unchanged)", async () => {
+    const store = makeStore({ fqdn: FQDN, state: "BOOTSTRAP_SELF_SIGNED" });
+    const hq = makeHqClient(); // default: challenge succeeds
+    const svc = createTlsIssuanceService(
+      makeDeps({ store, hq, provisionToken: PROVISION_TOKEN }),
+    );
+
+    await svc.runOnce();
+
+    expect(hq.provision).not.toHaveBeenCalled();
+    expect((await store.get(FQDN))?.state).toBe("LE_ISSUED");
+  });
+
+  it("provisions at most ONCE — a second not-in-registry after provision does NOT loop", async () => {
+    const store = makeStore({ fqdn: FQDN, state: "BOOTSTRAP_SELF_SIGNED" });
+    const hq = makeNotInRegistryHqClient();
+    // Sabotage: provision returns success but does NOT actually register, so the
+    // retry challenge 404s again. The service must NOT provision a second time.
+    hq.provision = vi.fn(async () => ({
+      device_id: DEVICE_ID,
+      status: "registered" as const,
+      idempotent: false,
+    }));
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const svc = createTlsIssuanceService(
+      makeDeps({ store, hq, provisionToken: PROVISION_TOKEN, logger }),
+    );
+
+    await expect(svc.runOnce()).resolves.not.toThrow();
+
+    expect(hq.provision).toHaveBeenCalledTimes(1);
+    // Two challenges total: the original + the single retry (which 404s again).
+    expect(hq.challenge).toHaveBeenCalledTimes(2);
+    expect((await store.get(FQDN))?.state).toBe("LE_RENEW_FAILED");
+  });
+
+  it("does NOT provision on an unrelated (non-404) HQ error even with a token set", async () => {
+    const store = makeStore({ fqdn: FQDN, state: "BOOTSTRAP_SELF_SIGNED" });
+    const hq = makeHqClient({
+      challenge: vi.fn(async () => {
+        throw new Error("HQ /api/issuance/order/challenge returned 503: down");
+      }),
+    });
+    const svc = createTlsIssuanceService(
+      makeDeps({ store, hq, provisionToken: PROVISION_TOKEN }),
+    );
+
+    await expect(svc.runOnce()).resolves.not.toThrow();
+    expect(hq.provision).not.toHaveBeenCalled();
+    expect((await store.get(FQDN))?.state).toBe("LE_RENEW_FAILED");
+  });
+
+  it("does NOT provision when the token is empty-string (self-provision disabled)", async () => {
+    const store = makeStore({ fqdn: FQDN, state: "BOOTSTRAP_SELF_SIGNED" });
+    const hq = makeNotInRegistryHqClient();
+    const svc = createTlsIssuanceService(
+      makeDeps({ store, hq, provisionToken: "   " }),
+    );
+
+    await expect(svc.runOnce()).resolves.not.toThrow();
+    expect(hq.provision).not.toHaveBeenCalled();
+    expect((await store.get(FQDN))?.state).toBe("LE_RENEW_FAILED");
   });
 });

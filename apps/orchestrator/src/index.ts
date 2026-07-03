@@ -34,6 +34,8 @@ import { startApDiscoveryPoller } from "./services/ap-discovery-poller.js";
 import { sweepExpiredGuests } from "./services/guest-expiry-sweep.service.js";
 import { purgeCameraArtifacts } from "./services/camera-retention-purge.service.js";
 import { reconcileStaleSending } from "./services/email-reconcile.service.js";
+import { checkForUpdate, runApplyWindow } from "./services/update-agent/poller.js";
+import { getUpdateAgentSettings } from "./services/update-agent/settings.js";
 import { createTlsIssuanceService } from "./services/tls-issuance.service.js";
 import {
   createHqIssuanceClient,
@@ -514,6 +516,45 @@ async function main() {
     { lockKey: "droplet:email-stale-sending-reconcile" },
   );
 
+  // WARP-538: OTA update agent — poll + maintenance-window ticks.
+  //
+  // Poll (every DROPLET_OTA_POLL_INTERVAL s, default 15 min): discover the
+  // latest GitHub Release, verify release.json through the WARP-537 trust
+  // chain (baked-in cosign.pub; fails closed on the WARP-535 placeholder
+  // until the key ceremony runs), and track it as a `pending` DeviceUpdate
+  // superseding any prior pending. A verification failure writes NO row.
+  //
+  // Apply window (cron from the persisted update-agent settings, default
+  // 03:00): an HONEST WARP-539 stub — logs the pending release + autoApply
+  // and advances nothing; the health-gated swap + rollback land in
+  // WARP-539. The spec is read once at boot; a settings change applies on
+  // the next orchestrator restart (the WARP-540 routes will note this).
+  //
+  // Both ride cron-runtime (no `while (true)`, per CLAUDE.md) with
+  // advisory locks so multi-instance deploys single-fire. Errors propagate
+  // naked to safeRun — same consecutiveFailures-canary posture as every
+  // other cron in this file (checkForUpdate itself returns typed outcomes
+  // for expected failures; only genuine bugs throw).
+  const updateAgentSettings = await getUpdateAgentSettings(prisma);
+  cronRuntime.scheduleInterval(
+    config.DROPLET_OTA_POLL_INTERVAL * 1000,
+    async () => {
+      await checkForUpdate({
+        prisma,
+        releasesLatestUrl: config.DROPLET_OTA_RELEASES_URL,
+        githubToken: config.DROPLET_OTA_GITHUB_TOKEN || undefined,
+      });
+    },
+    { lockKey: "droplet:update-agent.poll" },
+  );
+  cronRuntime.scheduleCron(
+    updateAgentSettings.applyWindowCron,
+    async () => {
+      await runApplyWindow(prisma);
+    },
+    { lockKey: "droplet:update-agent.apply-window" },
+  );
+
   // WARP-464 (C3): hourly tool-call pattern miner. Reads the last
   // 7 days of kind=tool_call ActivityRow rows, detects repeating
   // N-gram sequences (N=2..5, ≥3 occurrences), writes ToolSpec rows
@@ -600,6 +641,11 @@ async function main() {
     // issues `<name>.droplet-us.com`. Empty when no name chosen (opaque-HMAC
     // fallback). Harmless if HQ ignores it (coupled fleet-hq follow-up).
     requestedName: config.DROPLET_BOX_NAME,
+    // WARP-983 — one-time provisioning token. When set, a fresh / factory-reset
+    // box whose HQ registry row was freed by the ADR-023 deregister self-enrolls
+    // (POST /api/issuance/provision) on the 404 and retries issuance once. Empty
+    // = self-provision disabled (dev/CI + boxes provisioned by another path).
+    provisionToken: config.DROPLET_PROVISION_TOKEN,
   });
   cronRuntime.scheduleCron(
     "0 4 * * *",

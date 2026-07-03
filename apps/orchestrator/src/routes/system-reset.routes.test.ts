@@ -20,7 +20,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import request from "supertest";
 import express from "express";
-import os from "node:os";
 
 vi.mock("../config.js", () => ({
   config: { DEVICE_BRIDGE_URL: "http://bridge.test:9090" },
@@ -29,6 +28,12 @@ vi.mock("../config.js", () => ({
 import { createSystemResetRouter } from "./system-reset.routes.js";
 
 const ORIGINAL_ENV = { ...process.env };
+
+// WARP-992: the confirm target is the CANONICAL box name (lib/box-identity.ts
+// — the same value the Settings → Device information row displays), never
+// os.hostname() (the docker container id in production). Pin the owner name
+// via env so the tests exercise the exact string the owner would read + type.
+const CANONICAL_NAME = "aurora-loft";
 
 function createPrismaMock() {
   const jobs: any[] = [];
@@ -104,6 +109,7 @@ function bridgeOk() {
 
 beforeEach(() => {
   process.env.BRIDGE_AUTH_TOKEN = "tok-123";
+  process.env.DROPLET_BOX_NAME = CANONICAL_NAME;
   delete process.env.SERVICE_TOKEN_DISPLAY;
   vi.restoreAllMocks();
 });
@@ -117,12 +123,11 @@ describe("GET /api/system/reset", () => {
     const prisma = createPrismaMock();
     const res = await request(makeApp(prisma)).get("/api/system/reset");
     expect(res.status).toBe(200);
-    // First + last char + bullets — never the verbatim hostname (the modal
+    // First + last char + bullets — never the verbatim box name (the modal
     // must not be able to display the exact copy/paste-able confirm value).
-    const host = os.hostname();
     expect(res.body.targetHint).toMatch(/^.•+.$|^••$/);
-    expect(res.body.targetHint).not.toBe(host);
-    expect(JSON.stringify(res.body)).not.toContain(host);
+    expect(res.body.targetHint).not.toBe(CANONICAL_NAME);
+    expect(JSON.stringify(res.body)).not.toContain(CANONICAL_NAME);
     expect(res.body.job).toBeNull();
   });
 
@@ -131,13 +136,13 @@ describe("GET /api/system/reset", () => {
     vi.stubGlobal("fetch", bridgeOk());
     const post = await request(makeApp(prisma))
       .post("/api/system/reset")
-      .send({ confirm: os.hostname() });
+      .send({ confirm: CANONICAL_NAME });
     expect(post.status).toBe(202);
 
     const res = await request(makeApp(prisma)).get("/api/system/reset");
     expect(res.status).toBe(200);
     expect(res.body.job).not.toBeNull();
-    expect(JSON.stringify(res.body)).not.toContain(os.hostname());
+    expect(JSON.stringify(res.body)).not.toContain(CANONICAL_NAME);
   });
 });
 
@@ -173,7 +178,7 @@ describe("POST /api/system/reset — happy path", () => {
 
     const res = await request(makeApp(prisma))
       .post("/api/system/reset")
-      .send({ confirm: os.hostname() });
+      .send({ confirm: CANONICAL_NAME });
 
     expect(res.status).toBe(202);
     expect(res.body.status).toBe("dispatched");
@@ -192,12 +197,12 @@ describe("POST /api/system/reset — double-fire", () => {
 
     const first = await request(makeApp(prisma))
       .post("/api/system/reset")
-      .send({ confirm: os.hostname() });
+      .send({ confirm: CANONICAL_NAME });
     expect(first.status).toBe(202);
 
     const second = await request(makeApp(prisma))
       .post("/api/system/reset")
-      .send({ confirm: os.hostname() });
+      .send({ confirm: CANONICAL_NAME });
     expect(second.status).toBe(409);
     expect(second.body.code).toBe("RESET_ALREADY_IN_PROGRESS");
   });
@@ -213,7 +218,7 @@ describe("POST /api/system/reset — bridge token unconfigured", () => {
 
     const res = await request(makeApp(prisma))
       .post("/api/system/reset")
-      .send({ confirm: os.hostname() });
+      .send({ confirm: CANONICAL_NAME });
 
     expect(res.status).toBe(503);
     expect(res.body.code).toBe("BRIDGE_AUTH_UNCONFIGURED");

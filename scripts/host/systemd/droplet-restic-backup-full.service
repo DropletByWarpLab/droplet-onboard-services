@@ -1,0 +1,25 @@
+# =============================================================================
+# WARP-254 — weekly full restic backup (oneshot, driven by
+# droplet-restic-backup-full.timer)
+# =============================================================================
+#
+# `--full` = `restic backup --force`: every file is re-read instead of
+# trusting the parent snapshot's metadata, tagged weekly-full. Storage stays
+# deduplicated; this is the weekly integrity re-read of the source data.
+#
+# Installed + @REPO_ROOT@-substituted + enabled by setup.sh
+# (scripts/lib/backup.sh::install_restic_backup) — never hand-placed.
+# =============================================================================
+[Unit]
+Description=Droplet restic backup (weekly full re-read)
+Documentation=https://warp-lab.atlassian.net/browse/WARP-254
+Wants=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+Environment=DROPLET_REPO_ROOT=@REPO_ROOT@
+ExecStart=/usr/local/sbin/droplet-backup.sh --full
+UMask=0077
+Nice=10
+IOSchedulingClass=idle

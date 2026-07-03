@@ -253,6 +253,17 @@ const envSchema = z.object({
   // Defaults match the OpenWrt LAN. Override if the LAN is reconfigured.
   WIREGUARD_LAN_CIDR: z.string().default("192.168.50.0/24"),
   WIREGUARD_DNS: z.string().default("192.168.50.1"),
+  // REMOTE_ACCESS_MODE — how a phone reaches this box from OUTSIDE the home
+  // LAN (WARP-993). Drives the honest `offLanReachable` boolean on
+  // /api/vpn/status so the dashboard never promises "from anywhere" it can't
+  // keep:
+  //   "fqdn"  (default) — the per-device FQDN resolves only via the box's own
+  //           split-horizon DNS (ADR-023 §3, no public A record). The minted
+  //           WireGuard conf works on the home LAN but is NOT reachable from
+  //           elsewhere.
+  //   "relay" — the ADR-025 HQ relay is live and the endpoint is publicly
+  //           routable. Flipping this is the relay rollout's job (WARP-974).
+  REMOTE_ACCESS_MODE: z.enum(["fqdn", "relay"]).default("fqdn"),
 
   // --- Public-CA per-device TLS (ADR-023) ---
   // DROPLET_PUBLIC_FQDN — the opaque per-device subdomain
@@ -289,6 +300,19 @@ const envSchema = z.object({
   //   WireGuard tunnel. Empty disables live issuance (the cron skips), which is
   //   the correct posture for dev laptops + CI.
   HQ_ISSUANCE_URL: z.string().default(""),
+  // DROPLET_PROVISION_TOKEN — one-time HQ-minted provisioning token (WARP-983).
+  //   A fresh / factory-reset box has NO registry entry at HQ (factory-reset
+  //   sends the ADR-023 signed deregister, which DELETES the device row), so on
+  //   the next boot the tls-issuance challenge/order flow is rejected with 404
+  //   `device_id not in registry` and the box would otherwise stay on the
+  //   bootstrap self-signed cert forever. When this token is set, tls-issuance
+  //   self-enrolls the box into the HQ registry (POST /api/issuance/provision
+  //   with a TPM proof-of-possession over the token) on that 404, then retries
+  //   issuance once. Empty (the default) = self-provision DISABLED — the correct
+  //   posture for dev laptops + CI + a box that provisions via another path.
+  //   PRESERVED from the provisioning environment across reflash (secrets.sh),
+  //   the SAME way HQ_ISSUANCE_URL / TUNNEL_TOKEN are (WARP-978).
+  DROPLET_PROVISION_TOKEN: z.string().default(""),
   // DROPLET_DEVICE_ID — the device's HQ registry id. Mirrors the value the
   //   device-identity sidecar reads (docker-compose.yml). Defaults to the
   //   hostname-derived `droplet` placeholder (matches scripts/lib/secrets.sh).
@@ -403,6 +427,25 @@ const envSchema = z.object({
   // it at startup (fail fast) rather than silently treating it as disable;
   // .int() rejects sub-day floats and .finite() rejects Infinity.
   DROPLET_AUDIT_RETENTION_DAYS: z.coerce.number().int().min(0).finite().default(90),
+
+  // ── WARP-538: OTA update agent (WARP-534 epic) ──
+  // RELEASES_URL — the GitHub Releases `latest` endpoint the update agent
+  //   polls for cosign-signed OTA release manifests. Default is the
+  //   canonical publisher (this repo's publish-release.yml); overridable
+  //   for forks/mirrors and for the file-served fake in integration tests.
+  // GITHUB_TOKEN — bearer for the private releases repo. Empty = send no
+  //   Authorization header (public repos / the test fake). Injected via
+  //   .env by setup.sh when fleet provisioning lands; never hardcoded.
+  // POLL_INTERVAL — seconds between checks. 900 (15 min) per the design;
+  //   floor of 60 keeps a typo'd "0" from hot-looping the GitHub API.
+  DROPLET_OTA_RELEASES_URL: z
+    .string()
+    .url()
+    .default(
+      "https://api.github.com/repos/DropletByWarpLab/droplet-onboard-services/releases/latest",
+    ),
+  DROPLET_OTA_GITHUB_TOKEN: z.string().default(""),
+  DROPLET_OTA_POLL_INTERVAL: z.coerce.number().int().min(60).finite().default(900),
 
   // WARP-808: which deployment shape broadcasts the home Wi-Fi AP. This is the
   // SAME knob the device-bridge reads (services/oled-display/device-bridge.py)

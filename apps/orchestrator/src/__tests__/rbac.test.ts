@@ -18,7 +18,6 @@
  * service-principal flow still works after the guards are wired in.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import os from "node:os";
 import request from "supertest";
 import express, { Request, Response, NextFunction, Router } from "express";
 
@@ -94,6 +93,7 @@ import { requireRole, authMiddleware, type AuthUser } from "../middleware/auth.j
 import type { Role } from "../services/jwt.service.js";
 import { createSwitchRouter } from "../routes/switch.js";
 import { createSystemResetRouter } from "../routes/system-reset.routes.js";
+import { boxDisplayName } from "../lib/box-identity.js";
 
 // ── Test fixtures ──────────────────────────────────────────────────
 
@@ -623,7 +623,9 @@ describe("system-reset router RBAC wiring (WARP-825)", () => {
       const app = buildResetApp(mkUser("owner"));
       const res = await request(app)
         .post("/api/system/reset")
-        .send({ confirm: os.hostname() });
+        // WARP-992: the confirm target is the canonical box name
+        // (lib/box-identity.ts::boxDisplayName), never os.hostname().
+        .send({ confirm: boxDisplayName() });
       expect(res.status).not.toBe(403);
       expect(res.status).toBeLessThan(500);
     } finally {

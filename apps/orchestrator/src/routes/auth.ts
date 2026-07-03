@@ -19,6 +19,7 @@ import {
   ncGetCurrentUser,
   ncCreateUser,
   ncDeleteUser,
+  ncEnsureGroup,
   ncListUsers,
   ncUpdateUser,
   ncSetUserEnabled,
@@ -764,17 +765,75 @@ export function createPublicAuthRouter(
       // SpaceSwitcher never appears). buildNcGroups preserves the owner's
       // existing "admin" group and appends the household group without
       // duplication — same helper the invite-accept path uses.
-      const ownerGroups = buildNcGroups(
-        "owner",
-        householdGroupName(config.DROPLET_SHARED_FOLDER_NAME),
-      );
-      await ncInstallAndCreateAdmin(username, password, displayName, ownerGroups);
+      const householdGroup = householdGroupName(config.DROPLET_SHARED_FOLDER_NAME);
+      const ownerGroups = buildNcGroups("owner", householdGroup);
+
+      // WARP-989 belt-and-braces: idempotently ensure the household group
+      // exists BEFORE provisioning the owner into it. On a box where the
+      // occ provisioning script never created it (the WARP-990 trigger),
+      // OCS otherwise rejects the create-user with "Group household does
+      // not exist" and setup dies mid-flight. Best-effort: a transient
+      // ensure failure must not block a setup that would otherwise succeed
+      // (the group usually already exists); if the group is GENUINELY
+      // missing and could not be created, ncInstallAndCreateAdmin below
+      // fails and the atomic rollback keeps setup re-runnable.
+      try {
+        await ncEnsureGroup(householdGroup);
+      } catch (groupErr) {
+        logger.warn(
+          { err: groupErr, householdGroup },
+          "setup: could not ensure the household group exists (continuing — user provisioning is the authority)",
+        );
+      }
+
+      // WARP-989 — setup must be ATOMIC. The local owner row is written
+      // first (idempotent, see the ordering comment above), but the N1
+      // owner-exists guard makes a leftover row a permanent lockout: if
+      // Nextcloud provisioning fails here and the row survives, every
+      // retry answers 409 OWNER_EXISTS while the owner has NO Nextcloud
+      // account (all /api/files/* 401 forever; re-login does not heal —
+      // the exact half-created state from the .87 live incident). So on
+      // NC failure, roll back the just-created owner row and answer a
+      // TYPED error the dashboard can map to honest copy — the appliance
+      // stays re-runnable. No session artifacts exist yet at this point
+      // (the wizard logs in via /auth/login only after setup succeeds).
+      try {
+        await ncInstallAndCreateAdmin(username, password, displayName, ownerGroups);
+      } catch (ncErr: any) {
+        try {
+          // Scoped to the row this request just created: deriveUniqueUserId
+          // guaranteed the username was unused, and the N1 guard guaranteed
+          // zero owner rows existed — so this matches exactly that row (and
+          // deleteMany tolerates it already being gone).
+          await prisma.user.deleteMany({
+            where: { nextcloudUsername: username, role: "owner" },
+          });
+          logger.warn(
+            { username, err: ncErr },
+            "setup: Nextcloud provisioning failed — rolled back the local owner row so setup can be retried (WARP-989)",
+          );
+        } catch (rollbackErr) {
+          // Rollback failed too — the pre-fix half-created state. Log loudly;
+          // the typed error below still tells the user setup didn't finish.
+          logger.error(
+            { username, err: rollbackErr },
+            "setup: FAILED to roll back the local owner row after a Nextcloud provisioning failure — manual cleanup may be required (WARP-989)",
+          );
+        }
+        res.status(500).json({
+          error: ncErr?.message || "Account provisioning failed",
+          code: "SETUP_PROVISIONING_FAILED",
+        });
+        return;
+      }
       logger.info({ username }, "Initial admin user created");
 
       res.json({ status: "ok", username });
     } catch (err: any) {
       logger.error({ err }, "Setup failed");
-      res.status(500).json({ error: err.message || "Setup failed" });
+      // WARP-989: typed so the dashboard never maps a setup 500 to the
+      // misleading "check your username and password" sign-in copy.
+      res.status(500).json({ error: err.message || "Setup failed", code: "SETUP_FAILED" });
     }
   });
 
@@ -1966,12 +2025,38 @@ export function createProtectedAuthRouter(
       const { secret, otpauthUri } = generateTotpEnrollment(label);
       const secretEnc = encryptTotpSecret(secret);
 
-      // Upsert the pending credential. confirmedAt stays null until verify.
-      await prisma.totpCredential.upsert({
-        where: { userId },
-        create: { userId, secretEnc, confirmedAt: null },
-        update: { secretEnc, confirmedAt: null },
+      // WARP-991 — the (re-)mint must be ATOMIC on "still unconfirmed". The
+      // old check-then-upsert had a TOCTOU hole: an enroll whose pre-check
+      // above read a PENDING row could land its unconditional upsert AFTER a
+      // concurrent verify set confirmedAt, silently flipping an enabled
+      // factor back to pending (and the deleteMany below then wiped the
+      // just-minted recovery codes). The owner walks away believing 2FA is
+      // on while login skips the challenge. The guarded updateMany only
+      // touches a row that is still pending; count 0 with a row present
+      // means verify won the race → honour the 409 contract, never clobber.
+      const reset = await prisma.totpCredential.updateMany({
+        where: { userId, confirmedAt: null },
+        data: { secretEnc },
       });
+      if (reset.count === 0) {
+        const row = await prisma.totpCredential.findUnique({
+          where: { userId },
+        });
+        if (row) {
+          res.status(409).json({
+            error: "Two-factor authentication is already enabled.",
+            code: "TOTP_ALREADY_ENABLED",
+          });
+          return;
+        }
+        // First enrollment — no row yet. A concurrent first-enroll losing
+        // this create races into P2002, which the error handler maps to a
+        // 409 the dashboard's "Try again" retries into the guarded-update
+        // path above — never a clobber.
+        await prisma.totpCredential.create({
+          data: { userId, secretEnc, confirmedAt: null },
+        });
+      }
 
       // Clear any recovery codes from a PRIOR confirmed-then-disabled TOTP
       // credential. The invariant is "recovery codes exist iff a confirmed
@@ -2044,10 +2129,34 @@ export function createProtectedAuthRouter(
       // First successful verify → enable + mint recovery codes. Clear any
       // stale codes from a prior (re-)enrollment so the displayed set is
       // the only valid set.
-      await prisma.totpCredential.update({
-        where: { userId },
+      //
+      // WARP-991 — guarded confirm: only flip the row while it still holds
+      // the EXACT secret this code was verified against and is still
+      // pending. A concurrent re-enroll rotates secretEnc between our read
+      // and this write; a blind `update where {userId}` would stamp
+      // confirmedAt onto a secret no authenticator app ever saw and lock
+      // the owner out at the next login.
+      const confirmed = await prisma.totpCredential.updateMany({
+        where: { userId, secretEnc: cred.secretEnc, confirmedAt: null },
         data: { confirmedAt: new Date() },
       });
+      if (confirmed.count === 0) {
+        const now = await prisma.totpCredential.findUnique({
+          where: { userId },
+        });
+        if (now?.confirmedAt && now.secretEnc === cred.secretEnc) {
+          // A concurrent verify of the SAME enrollment won the confirm —
+          // behave like the re-challenge path rather than failing a
+          // correct code (its winner already carried the recovery codes).
+          res.json({ enabled: true });
+          return;
+        }
+        // The pending secret was rotated under us (concurrent re-enroll) —
+        // this code no longer matches the stored enrollment. Same contract
+        // as a wrong code: the client stays put and re-tries.
+        res.status(401).json({ error: "Invalid code", code: "TOTP_INVALID" });
+        return;
+      }
       const { plaintext, hashes } = await generateRecoveryCodes();
       await prisma.recoveryCode.deleteMany({ where: { userId } });
       await prisma.recoveryCode.createMany({

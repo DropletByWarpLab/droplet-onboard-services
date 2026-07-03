@@ -291,6 +291,53 @@ Standalone tool for managing camera drivers (can be run independently of `setup.
 
 ---
 
+## OTA release signing — key ceremony (WARP-535)
+
+OTA release manifests (`release.json`, published by
+`.github/workflows/publish-release.yml`) are signed with
+[cosign](https://github.com/sigstore/cosign) and verified on-device by the
+orchestrator's update agent against the public key baked into the image at
+`apps/orchestrator/src/services/update-agent/cosign.pub`.
+
+> **The committed `cosign.pub` is a PLACEHOLDER.** The update agent's verify
+> path detects the `DROPLET-OTA-PLACEHOLDER` marker and **fails closed** —
+> no OTA release verifies (and the publish workflow's sign step fails for
+> want of secrets) until a human runs the ceremony below. This is
+> deliberate: the real keypair must never be minted by CI or an agent.
+
+Run the ceremony on a trusted workstation (not a CI runner):
+
+```bash
+# 1. Mint the keypair. cosign prompts for a password that encrypts the
+#    private key (ECDSA P-256 — consistent with the FIPS-allowed set used
+#    by the ADR-020 image-signing keys in scripts/image/keys/).
+cosign generate-key-pair          # writes cosign.key + cosign.pub
+
+# 2. Store the PRIVATE side in GitHub Actions secrets — never in the repo.
+gh secret set COSIGN_PRIVATE_KEY < cosign.key
+gh secret set COSIGN_PASSWORD     # paste the password from step 1
+
+# 3. Commit the PUBLIC side over the placeholder.
+cp cosign.pub apps/orchestrator/src/services/update-agent/cosign.pub
+git add apps/orchestrator/src/services/update-agent/cosign.pub
+git commit -m "chore: install real OTA cosign public key (key ceremony)"
+
+# 4. Destroy the local private key (it now lives only in GH secrets +
+#    whatever escrow the org key-custody policy requires).
+shred -u cosign.key 2>/dev/null || rm cosign.key
+```
+
+Custody and rotation follow the same rules as the ADR-020 appliance-image
+release keys — see `scripts/image/keys/README.md` (escrow the private key
+per org policy; rotation is a superset-trust transition so in-field boxes
+keep verifying through the overlap window). The two trust domains are
+**separate on purpose**: `scripts/image/keys/droplet-release.pub` signs the
+full appliance ISO manifest (OpenSSL ECDSA, ADR-020), while `cosign.pub`
+signs OTA app-update release manifests (WARP-534). Do not reuse one key
+for the other.
+
+---
+
 ## File layout
 
 ```
@@ -308,5 +355,9 @@ scripts/
     ├── compose.sh         Image pull, build, start, health wait
     ├── systemd.sh         Optional boot service
     ├── camera-drivers.sh  Camera driver library (sourced by setup.sh)
-    └── bluetooth.sh       Host Bluetooth prep for Matter BLE (WARP-850)
+    ├── bluetooth.sh       Host Bluetooth prep for Matter BLE (WARP-850)
+    └── backup.sh          Restic backup host integration (WARP-254):
+                           installs droplet-{backup,restore,restore-drill}.sh
+                           + daily/weekly/monthly timers; repo key derived
+                           from device identity — see scripts/host/README.md
 ```

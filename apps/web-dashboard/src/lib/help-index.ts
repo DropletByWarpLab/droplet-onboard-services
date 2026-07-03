@@ -34,7 +34,7 @@ export const HELP_INDEX: readonly HelpEntry[] = [
     id: "privacy",
     title: "What is Droplet & how privacy works",
     summary:
-      "Droplet is a private AI appliance that lives on your own network — a single box that runs your files, conversations, video, and smart-home control. The AI runs locally on the hardware in front of you (the GPU inside this Droplet), not on someone else's servers, so by default your messages and the model's replies never leave the box. Everything you store and record stays on the Droplet's own drives; nothing is sent off the appliance unless you explicitly choose to, like adding an optional cloud AI key in Settings. When you're away from home, your phone reaches the Droplet over its own end-to-end-encrypted VPN, without passing through any cloud service.",
+      "Droplet is a private AI appliance that lives on your own network — a single box that runs your files, conversations, video, and smart-home control. The AI runs locally on the hardware in front of you (the GPU inside this Droplet), not on someone else's servers, so by default your messages and the model's replies never leave the box. Everything you store and record stays on the Droplet's own drives; nothing is sent off the appliance unless you explicitly choose to, like adding an optional cloud AI key in Settings. On your home network, your devices reach the Droplet over its own end-to-end-encrypted VPN, without passing through any cloud service — away-from-home access arrives with the secure relay, coming soon.",
     keywords: ["privacy", "what is droplet", "local ai", "local", "private", "on device", "on-device", "no cloud", "data", "security", "gpu", "hardware", "offline"],
   },
   {
@@ -69,7 +69,7 @@ export const HELP_INDEX: readonly HelpEntry[] = [
     id: "internet",
     title: "Your box's web address",
     summary:
-      "Your Droplet has its own secure web address — the name you gave it during setup — and it works the same at home and away, with a padlock and nothing to install. Remote access is automatic: there's nothing to sign up for and no address to type in. When you're away from home, open the Droplet app and turn on Connect, then open that same address in your browser. No dynamic DNS, no subdomain or token, and no changes to your home router.",
+      "Your Droplet has its own secure web address — the name you gave it during setup — and it works across your home network, with a padlock and nothing to install. There's nothing to sign up for and no address to type in. Away-from-home access arrives with the secure relay — coming soon; when it lands you'll open the Droplet app, turn on Connect, and use the same address you use at home. No dynamic DNS, no subdomain or token, and no changes to your home router.",
     keywords: ["web address", "domain", "remote access", "connect", "away from home", "hostname", "url"],
   },
   {

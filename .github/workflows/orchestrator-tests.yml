@@ -72,5 +72,12 @@ jobs:
       - name: Build @droplet/mcp-server
         run: npm run -w @droplet/mcp-server build
 
+      # WARP-537: the update-agent verify suite execs the REAL cosign
+      # binary over golden fixtures (src/services/update-agent/verify.test.ts)
+      # — mocked exit codes would prove nothing about cryptographic
+      # rejection. Resolution is `cosign` on PATH (or DROPLET_COSIGN_BIN).
+      - name: Install cosign (update-agent verify suite)
+        uses: sigstore/cosign-installer@v3
+
       - name: Run vitest
         run: npm run -w @droplet/orchestrator test

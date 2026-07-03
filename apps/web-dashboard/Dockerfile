@@ -100,6 +100,13 @@ COPY --from=builder /app/apps/web-dashboard/.next/static ./apps/web-dashboard/.n
 COPY --from=builder /app/apps/web-dashboard/public ./apps/web-dashboard/public
 
 ENV PORT=3001
+# Next.js standalone server.js binds to `process.env.HOSTNAME || '0.0.0.0'`.
+# Docker injects HOSTNAME=<container-id>, which resolves to the container's
+# eth0 IP — so without this override nothing listens on loopback and the
+# compose healthcheck's fetch('http://localhost:3001/healthz') fails every
+# probe (container permanently `unhealthy`). Pin the bind address to
+# 0.0.0.0 (canonical Vercel with-docker pattern). WARP-535.
+ENV HOSTNAME=0.0.0.0
 EXPOSE 3001
 
 CMD ["node", "apps/web-dashboard/server.js"]

@@ -410,6 +410,57 @@ export async function ncInstallAndCreateAdmin(
   }
 }
 
+/**
+ * WARP-989 — idempotently ensure an OCS group exists before a user is
+ * provisioned into it. OCS `POST /cloud/groups` answers statuscode 100 on
+ * create and 102 when the group already exists; BOTH are success here (the
+ * add is effectively idempotent). Any other status throws so the caller can
+ * decide whether it's fatal.
+ *
+ * Uses the same env-based admin basic auth as `ncInstallAndCreateAdmin` — the
+ * setup path that needs this runs before any user (and thus any admin token)
+ * exists. This directly prevents the WARP-990 trigger where a missing
+ * "household" group made `ncInstallAndCreateAdmin` fail with
+ * "Group household does not exist" mid-setup.
+ */
+export async function ncEnsureGroup(groupName: string): Promise<void> {
+  const adminUser = process.env.NEXTCLOUD_ADMIN_USER || "admin";
+  const adminPassword = process.env.NEXTCLOUD_ADMIN_PASSWORD || "admin";
+  const adminBasicAuth = Buffer.from(`${adminUser}:${adminPassword}`).toString("base64");
+
+  const resp = await fetch(ocsUrl("/ocs/v1.php/cloud/groups?format=json"), {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${adminBasicAuth}`,
+      "OCS-APIRequest": "true",
+      "Content-Type": "application/x-www-form-urlencoded",
+      Accept: "application/json",
+    },
+    redirect: "error",
+    body: new URLSearchParams([["groupid", groupName]]),
+  });
+
+  const body = await resp.text();
+  let data: any;
+  try {
+    data = JSON.parse(body);
+  } catch {
+    throw new Error(`Nextcloud returned invalid response: ${body.substring(0, 200)}`);
+  }
+
+  const ocsStatus = data?.ocs?.meta?.statuscode;
+  if (ocsStatus === 102) {
+    // Group already exists — the state we wanted.
+    return;
+  }
+  if (ocsStatus !== 100) {
+    throw new NextcloudOcsError(
+      `OCS error creating group: ${data?.ocs?.meta?.message || `status ${ocsStatus}`}`,
+      ocsStatus ?? 0,
+    );
+  }
+}
+
 export async function ncCreateUser(
   adminToken: string,
   username: string,

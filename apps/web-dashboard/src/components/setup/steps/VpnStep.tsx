@@ -85,6 +85,12 @@ export function VpnStep({
   const [copied, setCopied] = useState(false);
   const REMOTE_ACCESS_DESTINATION = "Remote Access";
 
+  // WARP-993: only promise "from anywhere" when the minted conf's endpoint is
+  // actually routable from outside the home LAN. FQDN-only is split-horizon
+  // (no public A record — ADR-023 §3), so the orchestrator reports false until
+  // the ADR-025 relay lands. Missing field (older orchestrator) ⇒ stay honest.
+  const offLanReachable = status?.offLanReachable === true;
+
   const load = useCallback(async () => {
     setPhase("loading");
     try {
@@ -258,8 +264,8 @@ export function VpnStep({
             </p>
             <p className="type-footnote text-label-secondary">
               Your home internet&rsquo;s address can change. A permanent internet
-              address gives the box one reachable endpoint so your phone can find
-              it from anywhere. Set that up on the internet-address step and this
+              address gives the box one reachable endpoint so your devices can
+              always find it. Set that up on the internet-address step and this
               lights up automatically.
             </p>
           </div>
@@ -285,7 +291,11 @@ export function VpnStep({
       <StepShell
         current="vpn"
         title="Turn on remote access"
-        subtitle="One tap connects this device to your Droplet from anywhere — the same secure address you use at home. No address to type, no config file, no port-forwarding."
+        subtitle={
+          offLanReachable
+            ? "One tap connects this device to your Droplet from anywhere — the same secure address you use at home. No address to type, no config file, no port-forwarding."
+            : "One tap connects this device to your Droplet on your home network. No address to type, no config file, no port-forwarding. Away-from-home access arrives with the secure relay — coming soon."
+        }
         skip={{ label: "I'll do this later", onClick: onSkip }}
       >
         {/* The one-tap switch. Flipping on mints the first peer immediately; the
@@ -343,7 +353,9 @@ export function VpnStep({
             </span>
           )}
           <span className="type-caption-1 text-label-quaternary ml-auto">
-            same address, on or off your Wi-Fi
+            {offLanReachable
+              ? "same address, on or off your Wi-Fi"
+              : "works on your home Wi-Fi today"}
           </span>
         </div>
 
@@ -394,14 +406,25 @@ export function VpnStep({
         </button>
 
         <LearnMoreCard title="How does one tap do all that?" helpAnchor="vpn">
-          <p>
-            Turning this on generates a WireGuard key pair, fetches a peer config
-            pointing at the <strong>Warp relay</strong>, and shows you a QR code
-            to import it into your phone&rsquo;s VPN. The box dials{" "}
-            <strong>outbound</strong> to the relay, so there&rsquo;s no
-            port-forward and no public address to expose, and you land on the
-            same trusted address you use at home.
-          </p>
+          {offLanReachable ? (
+            <p>
+              Turning this on generates a WireGuard key pair, fetches a peer config
+              pointing at the <strong>Warp relay</strong>, and shows you a QR code
+              to import it into your phone&rsquo;s VPN. The box dials{" "}
+              <strong>outbound</strong> to the relay, so there&rsquo;s no
+              port-forward and no public address to expose, and you land on the
+              same trusted address you use at home.
+            </p>
+          ) : (
+            <p>
+              Turning this on generates a WireGuard key pair, builds this
+              device&rsquo;s private config, and shows you a QR code to import it
+              into your phone&rsquo;s VPN. Today the tunnel works while
+              you&rsquo;re on your home network; away-from-home access arrives
+              with the secure relay — coming soon, and this same setup will carry
+              over.
+            </p>
+          )}
         </LearnMoreCard>
       </StepShell>
     );
@@ -658,7 +681,10 @@ export function VpnStep({
         <p>
           Once connected, open{" "}
           <span className="font-mono break-all">{dashboardUrl}</span> in your
-          phone&rsquo;s browser — that&rsquo;s this Droplet from anywhere.{" "}
+          phone&rsquo;s browser —{" "}
+          {offLanReachable
+            ? "that’s this Droplet from anywhere."
+            : "that’s this Droplet on your home network."}{" "}
           {hasPublicFqdn ? (
             <>
               Bookmark it: it&rsquo;s the same secure address you use at home,
@@ -675,11 +701,19 @@ export function VpnStep({
           <span className="font-mono">Remote Access</span> in the dashboard — its
           config stops working immediately.
         </p>
-        <p>
-          Test it from cellular or another network. While you&rsquo;re on this
-          Droplet&rsquo;s own Wi-Fi the tunnel can&rsquo;t loop back home — and
-          you don&rsquo;t need it there; everything already works directly.
-        </p>
+        {offLanReachable ? (
+          <p>
+            Test it from cellular or another network. While you&rsquo;re on this
+            Droplet&rsquo;s own Wi-Fi the tunnel can&rsquo;t loop back home — and
+            you don&rsquo;t need it there; everything already works directly.
+          </p>
+        ) : (
+          <p>
+            This works while you&rsquo;re connected to your home network.
+            Away-from-home access arrives with the secure relay — coming soon;
+            this device will be ready for it.
+          </p>
+        )}
         <p className="type-caption-1 text-label-quaternary">
           Heads up: this code is shown once. If you close this page without
           scanning it, you can revoke and create a new one from{" "}

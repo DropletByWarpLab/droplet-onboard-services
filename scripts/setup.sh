@@ -116,6 +116,8 @@ source "$SCRIPT_DIR/lib/bluetooth.sh"
 source "$SCRIPT_DIR/lib/local-dns.sh"
 # shellcheck source=lib/single-box.sh
 source "$SCRIPT_DIR/lib/single-box.sh"
+# shellcheck source=lib/backup.sh
+source "$SCRIPT_DIR/lib/backup.sh"
 
 # --- Single-box mode resolution ---
 # Either the user forced it via --single-box/--no-single-box, or we auto-detect.
@@ -277,6 +279,10 @@ if [ "$DRY_RUN" = "true" ]; then
     log_info "  single-box: would install automount udev rule → /etc/udev/rules.d/99-droplet-automount.rules"
     log_info "                  + droplet-automount@.service + mnt-droplet.mount → /etc/systemd/system/"
   fi
+  log_info "  Would install restic backups (WARP-254, Linux only): restic +"
+  log_info "                  /usr/local/sbin/droplet-{backup,restore,restore-drill}.sh +"
+  log_info "                  6 systemd units (daily 03:15 / weekly-full Sun 04:15 /"
+  log_info "                  monthly restore drill), repo key derived from device identity"
 
   log_step 5 $TOTAL_STEPS "Build container images"
   if [ "$SKIP_BUILD" = "true" ]; then
@@ -443,6 +449,15 @@ main() {
         || log_warn "USB auto-mount install had issues (continuing)"
     fi
   fi
+
+  # WARP-254 restic backup: host scripts + systemd timers (daily incremental,
+  # weekly full, monthly sandboxed restore drill), repository key derived from
+  # the device identity secret. EVERY Linux deployment shape gets backups (not
+  # just single-box) — skipped silently on non-Linux dev hosts. Idempotent;
+  # non-fatal so a transient apt/systemd hiccup never blocks provisioning
+  # (re-running setup.sh self-heals). See scripts/lib/backup.sh.
+  install_restic_backup \
+    || log_warn "restic backup host integration had issues (continuing)"
 
   # --- Phase 5: Build ---
   log_step 5 $total_steps "Build"

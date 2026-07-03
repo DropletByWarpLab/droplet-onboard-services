@@ -27,9 +27,9 @@
  */
 
 import { Router } from "express";
-import os from "node:os";
 import type { PrismaClient } from "@prisma/client";
 import { requireRole } from "../middleware/auth.js";
+import { boxDisplayName } from "../lib/box-identity.js";
 import {
   requestFactoryReset,
   getResetStatus,
@@ -42,13 +42,17 @@ const logger = createLogger("system-reset-route");
 
 /**
  * The canonical name the reset targets + that the owner must type to confirm.
- * Derived from the appliance's own hostname (the same source
- * device-registration.service.ts uses to seed the Device row, and that the
- * Settings → Device Information row displays). Server-derived so the client can
- * never dictate the value the friction check compares against.
+ * Resolved through `lib/box-identity.ts::boxDisplayName` (WARP-992) — the SAME
+ * source device-registration.service.ts uses to seed the Device row, and that
+ * the Settings → Device Information row displays. It MUST stay coupled to that
+ * display: the owner is told to read the name from Settings, so if this were
+ * still `os.hostname()` (the docker container id in production) the typed
+ * confirm could never match and factory reset would be impossible. Server-
+ * derived so the client can never dictate the value the friction check
+ * compares against.
  */
 function canonicalTargetName(): string {
-  return (os.hostname() || "droplet").trim();
+  return boxDisplayName();
 }
 
 /**

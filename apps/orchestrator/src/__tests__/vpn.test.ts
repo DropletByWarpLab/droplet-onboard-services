@@ -15,6 +15,7 @@ vi.mock("../config.js", () => ({
     ROUTING_MODE: "real",
     WIREGUARD_ENDPOINT_HOST: "vpn.example.com",
     DROPLET_PUBLIC_FQDN: "",
+    REMOTE_ACCESS_MODE: "fqdn",
     WIREGUARD_VPN_SUBNET: "10.13.13.0/24",
     WIREGUARD_LISTEN_PORT: 51820,
     WIREGUARD_LAN_CIDR: "192.168.50.0/24",
@@ -183,6 +184,77 @@ describe("GET /api/vpn/status", () => {
     }
   });
 
+  // WARP-993: honest off-LAN reachability. The FQDN is split-horizon only
+  // (ADR-023 §3 — no public A record), so FQDN-only must report
+  // offLanReachable=false even though endpointConfigured=true; the dashboard
+  // gates every "from anywhere" promise on this boolean.
+  describe("offLanReachable (WARP-993)", () => {
+    it("reports true when the operator override is a publicly-routable host", async () => {
+      (openwrt.vpnStatus as any).mockResolvedValue(null);
+      const app = buildApp(createPrismaMock());
+      const res = await request(app).get("/api/vpn/status");
+      expect(res.status).toBe(200);
+      // Fixture default: WIREGUARD_ENDPOINT_HOST=vpn.example.com, no FQDN.
+      expect(res.body.offLanReachable).toBe(true);
+    });
+
+    it("reports false when only the split-horizon FQDN is configured", async () => {
+      (openwrt.vpnStatus as any).mockResolvedValue(null);
+      const origEnv = config.WIREGUARD_ENDPOINT_HOST;
+      const origFqdn = (config as any).DROPLET_PUBLIC_FQDN;
+      (config as any).WIREGUARD_ENDPOINT_HOST = "";
+      (config as any).DROPLET_PUBLIC_FQDN = "home.droplet-us.com";
+      try {
+        const app = buildApp(createPrismaMock());
+        const res = await request(app).get("/api/vpn/status");
+        expect(res.status).toBe(200);
+        // endpointConfigured is true (a conf CAN be minted, it works on-LAN)
+        // but the endpoint is not routable from outside the home network.
+        expect(res.body).toMatchObject({
+          endpointConfigured: true,
+          offLanReachable: false,
+        });
+      } finally {
+        (config as any).WIREGUARD_ENDPOINT_HOST = origEnv;
+        (config as any).DROPLET_PUBLIC_FQDN = origFqdn;
+      }
+    });
+
+    it("reports true in relay mode even when only the FQDN is configured (ADR-025)", async () => {
+      (openwrt.vpnStatus as any).mockResolvedValue(null);
+      const origEnv = config.WIREGUARD_ENDPOINT_HOST;
+      const origFqdn = (config as any).DROPLET_PUBLIC_FQDN;
+      const origMode = (config as any).REMOTE_ACCESS_MODE;
+      (config as any).WIREGUARD_ENDPOINT_HOST = "";
+      (config as any).DROPLET_PUBLIC_FQDN = "home.droplet-us.com";
+      (config as any).REMOTE_ACCESS_MODE = "relay";
+      try {
+        const app = buildApp(createPrismaMock());
+        const res = await request(app).get("/api/vpn/status");
+        expect(res.status).toBe(200);
+        expect(res.body.offLanReachable).toBe(true);
+      } finally {
+        (config as any).WIREGUARD_ENDPOINT_HOST = origEnv;
+        (config as any).DROPLET_PUBLIC_FQDN = origFqdn;
+        (config as any).REMOTE_ACCESS_MODE = origMode;
+      }
+    });
+
+    it("is present on the configured-status response shape too", async () => {
+      (openwrt.vpnStatus as any).mockResolvedValue({
+        interface: "wg0",
+        public_key: "PUBKEY=",
+        listen_port: 51820,
+        addresses: ["10.13.13.1/24"],
+        peer_count: 2,
+      });
+      const app = buildApp(createPrismaMock());
+      const res = await request(app).get("/api/vpn/status");
+      expect(res.status).toBe(200);
+      expect(res.body.offLanReachable).toBe(true);
+    });
+  });
+
   it("returns server info when configured", async () => {
     (openwrt.vpnStatus as any).mockResolvedValue({
       interface: "wg0",
@@ -285,6 +357,17 @@ describe("POST /api/vpn/peers", () => {
     expect(res.body.conf).toContain("Address = 10.13.13.2/32");
     expect(res.body.conf).toContain("AllowedIPs = 192.168.50.0/24, 10.13.13.0/24");
     expect(prisma.rows).toHaveLength(1);
+  });
+
+  it("includes offLanReachable on the created-peer response (WARP-993)", async () => {
+    setupHappyPath();
+    const app = buildApp(createPrismaMock());
+    const res = await request(app)
+      .post("/api/vpn/peers")
+      .send({ deviceLabel: "iPhone" });
+    expect(res.status).toBe(201);
+    // Fixture default: public operator override, no FQDN → reachable off-LAN.
+    expect(res.body.offLanReachable).toBe(true);
   });
 
   it("allocates the next free IP, skipping reserved + active peers", async () => {

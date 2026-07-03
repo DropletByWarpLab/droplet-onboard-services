@@ -1,0 +1,25 @@
+[Unit]
+Description=Run the Droplet unified self-heal watchdog every ~3 minutes
+# WARP-1002 — cadence rationale: every covered failure leaves a user-visible
+# outage (AP dark, voice dead, pulls failing, service flapping) until someone
+# notices, so detection latency is the whole game; the healthy-path cost is a
+# handful of read-only sysfs/docker probes. 120 s after boot lets driver
+# bring-up, droplet-openwrt-attach, and the compose stack settle first so
+# nothing mid-init is mistaken for a wedge (checks also settle-guard
+# internally). Supersedes droplet-wifi-watchdog.timer: the WARP-869 helper is
+# now invoked from this supervisor's wifi check, so a single scheduler owns
+# the PCI heal (two independent timers could race a remove/rescan).
+
+[Timer]
+OnBootSec=120
+# Fires 180 s after the service *deactivates* (normally or via the
+# TimeoutStartSec=300 kill), guaranteeing a real gap between runs.
+# OnUnitActiveSec would fire ~immediately after a timeout kill (the interval
+# already elapsed), creating a tight back-to-back loop when a wedged PCI slot
+# consistently blocks to the timeout boundary — same rationale as the
+# WARP-869 timer this replaces.
+OnUnitInactiveSec=180
+AccuracySec=30
+
+[Install]
+WantedBy=timers.target

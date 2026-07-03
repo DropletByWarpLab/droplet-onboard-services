@@ -133,6 +133,29 @@ describe("AccountStep", () => {
     // The raw error text is never shown to the user.
     expect(screen.queryByText(/kaboom/i)).not.toBeInTheDocument();
   });
+
+  it("shows honest provisioning-failed copy on SETUP_PROVISIONING_FAILED — never the sign-in copy (WARP-989)", async () => {
+    // The live .87 incident shape: the orchestrator's Nextcloud provisioning
+    // died mid-setup and the dashboard told the owner to "check your username
+    // and password" — their brand-new credentials were fine.
+    const err = new Error(
+      "OCS error creating user: Group household does not exist",
+    ) as Error & { code?: string };
+    err.code = "SETUP_PROVISIONING_FAILED";
+    setupAdmin.mockRejectedValueOnce(err);
+    render(<AccountStep onComplete={vi.fn()} />);
+    fill("scruceru@warp-lab.ai", "Warp123!@#xy");
+    fireEvent.click(cta());
+
+    expect(
+      await screen.findByText(/couldn't finish creating your account/i),
+    ).toBeInTheDocument();
+    // Not the misleading sign-in copy, and never the raw OCS cause.
+    expect(screen.queryByText(/couldn't sign you in/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Group household/i)).not.toBeInTheDocument();
+    // The form stays put for the retry (the orchestrator rolled back).
+    expect(cta()).toBeEnabled();
+  });
 });
 
 /**
