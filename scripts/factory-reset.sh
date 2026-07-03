@@ -333,8 +333,18 @@ if [ -n "$_DEREGISTER_FQDN" ] || [ -n "$_DEREGISTER_DEVICE_ID" ]; then
     if [ "$_hq_reset_cmd" = "tls-release" ]; then
       # here-string, NOT a `printf | grep -q` pipeline — under `set -o pipefail`
       # an early-exiting grep can SIGPIPE the writer into a false negative.
-      if grep -q "tls-release: result=ok" <<< "$_hq_reset_output"; then
+      # Sentinels are ^-anchored: the captured output also carries pino JSON
+      # logs (which serialize HQ error bodies), so an unanchored match could
+      # false-positive on an HQ error message that merely CONTAINS the text.
+      # The CLI always writes the sentinel at column 0.
+      if grep -q '^tls-release: result=ok' <<< "$_hq_reset_output"; then
         log_success "HQ confirmed the signed name ${_hq_reset_verb} for ${_DEREGISTER_REAL_DEVICE_ID}"
+      elif grep -q '^tls-release: result=skipped' <<< "$_hq_reset_output"; then
+        # HQ_ISSUANCE_URL was unset INSIDE the container even though the
+        # host-side _hq_url guard passed (e.g. shell-env-only config with an
+        # .env lacking the var). There is no HQ to hold the name — do not
+        # print the misleading "may still be reserved" hint.
+        log_warn "HQ release skipped — HQ_ISSUANCE_URL is not configured inside the orchestrator container (nothing to release at HQ; non-fatal, the reset continues)"
       else
         _reserved_box_name="$(grep -E '^DROPLET_BOX_NAME=' "$REPO_ROOT/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' || true)"
         log_warn "HQ did NOT confirm the name release (non-fatal — timed out, HQ/sidecar down, or HQ rejected it; the reset continues)"
