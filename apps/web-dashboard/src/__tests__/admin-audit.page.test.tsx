@@ -299,4 +299,45 @@ describe("/admin/audit pagination + export", () => {
     // the list, so no Load more control renders.
     expect(screen.queryByRole("button", { name: /load more/i })).toBeNull();
   });
+
+  it("ignores Load more during a filter refetch (stale-cursor request window)", async () => {
+    // The response-side generation guard can't catch this one: while the
+    // NEW filter's first page is still in flight, nextCursor still holds
+    // the OLD filter's cursor. A Load more fired in that window would go
+    // out with new-filter params + old cursor under the current
+    // generation and append a gapped page. loadMore must bail while
+    // `loading` is true (and the button is disabled).
+    let resolveFiltered: (() => void) | null = null;
+    authFetchMock.mockImplementation(async (url: string) => {
+      if (url.startsWith("/api/activity/verify")) {
+        return okJson({ ok: true, rowsChecked: 1, verifiedAt: "2026-06-30T10:05:00.000Z" });
+      }
+      if (url.includes("kind=auth")) {
+        return new Promise((resolve) => {
+          resolveFiltered = () =>
+            resolve(okJson({ items: [makeItem({ id: "20", what: "filtered row", kind: "auth" })], nextCursor: null }));
+        });
+      }
+      return okJson({ items: [makeItem({ id: "9", what: "newest event" })], nextCursor: "9" });
+    });
+
+    render(<AuditPage />);
+    await screen.findByText("newest event");
+
+    fireEvent.change(screen.getByLabelText(/filter by kind/i), {
+      target: { value: "auth" },
+    });
+    await waitFor(() => expect(resolveFiltered).not.toBeNull());
+
+    // The window: filtered first page still pending, old cursor in state.
+    const loadMoreBtn = screen.getByRole("button", { name: /load more/i });
+    expect(loadMoreBtn).toBeDisabled();
+    fireEvent.click(loadMoreBtn);
+    await new Promise((r) => setTimeout(r, 0));
+    const urls = authFetchMock.mock.calls.map((c) => c[0] as string);
+    expect(urls.some((u) => u.includes("cursor="))).toBe(false);
+
+    resolveFiltered!();
+    expect(await screen.findByText("filtered row")).toBeInTheDocument();
+  });
 });

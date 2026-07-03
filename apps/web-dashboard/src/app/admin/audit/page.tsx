@@ -179,7 +179,12 @@ export default function AuditPage() {
   }, [isAdmin, runVerify]);
 
   async function loadMore() {
-    if (!nextCursor || loadingMore) return;
+    // `loading` closes the stale-cursor REQUEST window: after a filter
+    // change, nextCursor still holds the previous filter's cursor until
+    // the new first page resolves — a click in that window would issue
+    // new-filter params with the old cursor under the CURRENT generation
+    // and append a gapped page the response-side guard can't catch.
+    if (loading || !nextCursor || loadingMore) return;
     // Capture the generation: if the filters change (or the page
     // unmounts) while this request is in flight, the result is stale
     // and must be dropped, not appended.
@@ -361,7 +366,7 @@ export default function AuditPage() {
             type="button"
             className="btn ghost"
             onClick={() => void loadMore()}
-            disabled={loadingMore}
+            disabled={loadingMore || loading}
           >
             {loadingMore ? "Loading…" : "Load more"}
           </button>

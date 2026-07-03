@@ -5,7 +5,7 @@
  *   POST /api/activity/export   — sealed JSON-Lines bundle (AC6)
  *   GET  /api/activity/verify   — server-side hash-chain walk (WARP-246)
  *
- * All routes are gated to owner/admin via `requireRole` — the
+ * All routes are gated to owner/admin via `requireOwnerOrAdmin` — the
  * activity log can reveal cross-user metadata (other family members'
  * file activity, smart-home commands) so guests/family are kept out.
  */

@@ -89,7 +89,7 @@ const SECTIONS: TrustSection[] = [
       {
         name: "Tamper-evident activity log",
         detail:
-          "Every important action is signed and hash-chained on the device. Admins can verify the chain any time from the Audit log page.",
+          "Important actions are signed and hash-chained on the device. Admins can verify the chain any time from the Audit log page.",
         status: "shipped",
       },
       {
