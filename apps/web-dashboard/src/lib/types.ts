@@ -415,6 +415,43 @@ export interface VpnPeerCreatedInfo {
   offLanReachable?: boolean;
 }
 
+// ── WARP-1036: Voice assistant ──
+
+/** Snapshot of the voice-io wake pipeline, relayed verbatim by the
+ *  orchestrator's `/api/voice/status` proxy (snake_case keys are the
+ *  voice-io FastAPI response model). The wizard's voice step polls this
+ *  while the customer tries "hey droplet": a `last_wake_at` change is the
+ *  wake confirmation; `last_transcript` / `last_response` land afterwards
+ *  as STT and the reply complete. `state === "no_mic"` drives the
+ *  plug-in-a-mic panel (hot-plug recovery needs no restart). */
+export interface VoiceStatusInfo {
+  state: string;
+  listening: boolean;
+  wake_loaded: boolean;
+  wake_model?: string | null;
+  requested_wake_word?: string | null;
+  using_wake_fallback?: boolean;
+  threshold: number;
+  last_wake_at?: number | null;
+  last_wake_score?: number | null;
+  last_wake_model?: string | null;
+  error_message?: string | null;
+  stt_loaded?: boolean;
+  last_transcript?: string | null;
+  last_transcript_at?: number | null;
+  tts_loaded?: boolean;
+  last_response?: string | null;
+  last_response_at?: number | null;
+  llm_loaded?: boolean;
+}
+
+/** Result of the wizard's speaker test (`POST /api/voice/say`). */
+export interface VoiceSayResult {
+  ok: boolean;
+  duration_s?: number;
+  sample_rate?: number | null;
+}
+
 // ── WARP-446: Coverage extender APs ──
 
 /** State machine values mirrored from the Prisma `ApDeviceStatus` enum.
