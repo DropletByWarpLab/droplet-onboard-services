@@ -2,8 +2,9 @@
  * WARP-225 — `/api/me/context-stats/*` routes.
  *
  * Backs the dashboard's home widget + `/context` page. Per spec §RBAC:
- *   - every endpoint is `WHERE "userId" = req.user.username` at the SQL
- *     layer (the service module is the gatekeeper).
+ *   - every endpoint is `WHERE "userId" = req.user.id` at the SQL
+ *     layer (the service module is the gatekeeper). WARP-493: was
+ *     `req.user.username` pre-cutover.
  *   - cross-user `:itemId` requests return 404 — never 403, never 200
  *     with empty body — to avoid leaking the existence of other users'
  *     items.
@@ -48,9 +49,18 @@ interface AuthedUser {
   username?: string;
 }
 
+/**
+ * WARP-493 — brain-memory keys on the local `User.id` UUID (see the
+ * same-named helper in routes/files-brain.ts for the full rationale).
+ * Every aggregate this router serves reads BrainMemoryItem /
+ * FileContentChunk rows whose userId flips to UUID in the same deploy
+ * (warp_491_brain_memory_userid_backfill), and the transcribe-retry
+ * run-one publish must carry the same key the transcription worker
+ * will find on the row.
+ */
 function getUserId(req: Request): string | null {
   const user = (req as Request & { user?: AuthedUser }).user;
-  return user?.username ?? user?.id ?? null;
+  return user?.id ?? null;
 }
 
 function isCapHit(

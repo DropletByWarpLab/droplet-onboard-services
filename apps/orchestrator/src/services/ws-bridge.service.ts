@@ -96,6 +96,16 @@ export function attachWsBridge(server: HttpServer): WebSocketServer {
     // Subscribe this connection to everything under droplet/{area}/{user}/#
     const topics = [
       `droplet/files/${user.username}/#`,
+      // WARP-493: brain-memory status flips (brain_ingest +
+      // transcription_worker publish to
+      // `droplet/files/<BrainMemoryItem.userId>/brain/indexed`) are keyed
+      // by the local User.id UUID post-cutover, while the
+      // nextcloud-watcher file events above stay username-keyed. Both
+      // subscriptions are needed; skip the extra one in the dev shape
+      // where id === username so messages aren't forwarded twice.
+      ...(user.id && user.id !== user.username
+        ? [`droplet/files/${user.id}/#`]
+        : []),
       `droplet/devices/${user.username}/#`,
       `droplet/index/${user.username}/#`,
       // Calendar/reminder/system toast notifications (PR #2). The

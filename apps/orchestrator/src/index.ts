@@ -80,6 +80,10 @@ import { purgeOffLanEgressSamples } from "./routes/off-lan-network.js";
 import { startContextStatsInvalidator } from "./services/context-stats-invalidation.service.js";
 import { initActivityRecorder, recordActivity } from "./services/activity.singleton.js";
 import { attachFileIndexerActivityBridge } from "./services/activity-file-indexer-bridge.js";
+import {
+  BRAIN_ROOT,
+  migrateBrainMemoryDirectoryLayout,
+} from "./services/brain-memory.service.js";
 import { ensureDefaultModelPulled } from "./services/model-readiness.service.js";
 import { initAnalytics } from "./services/analytics/index.js";
 import { createLogger } from "./lib/logger.js";
@@ -178,6 +182,29 @@ async function main() {
     logger.warn(
       { err },
       "scene-schedule timezone backfill threw (continuing startup)",
+    );
+  }
+
+  // WARP-493 — one-shot rename of pre-WARP-485 username-keyed brain-memory
+  // dirs (`BRAIN_ROOT/<username>/`) to UUID-keyed (`BRAIN_ROOT/<User.id>/`).
+  // Idempotent (UUID-named dirs are skipped); non-fatal — log loud but let
+  // the orchestrator boot so the operator can recover via dashboard / SSH.
+  try {
+    const brainMig = await migrateBrainMemoryDirectoryLayout(prisma, BRAIN_ROOT);
+    if (brainMig.renamed > 0 || brainMig.orphans.length > 0 || brainMig.conflicts.length > 0) {
+      logger.info(
+        {
+          renamed: brainMig.renamed,
+          orphans: brainMig.orphans.length,
+          conflicts: brainMig.conflicts.length,
+        },
+        "WARP-493: brain-memory directory layout migration ran at boot",
+      );
+    }
+  } catch (err) {
+    logger.error(
+      { err },
+      "WARP-493: brain-memory directory layout migration failed — operator review needed",
     );
   }
 

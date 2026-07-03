@@ -106,6 +106,10 @@ import { createLlmRouter } from "../routes/llm.js";
 import type { ChatMessage } from "../types/index.js";
 
 const USERNAME = "test";
+// WARP-493: brain-memory rows are keyed by the local User.id UUID.
+// The synthetic auth middleware below stamps id ≠ username on purpose
+// so these tests can tell which key the route actually uses.
+const USER_ID = "user-uuid";
 
 interface MockBrainItem {
   id: string;
@@ -159,7 +163,7 @@ function buildApp(prisma: ReturnType<typeof createPrismaMock>) {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
-    const asUser = { id: "user-uuid", username: USERNAME, role: "owner" };
+    const asUser = { id: USER_ID, username: USERNAME, role: "owner" };
     (req as unknown as { user?: typeof asUser }).user = asUser;
     next();
   });
@@ -206,7 +210,7 @@ describe("POST /api/llm/chat — attachment context injection", () => {
       [
         {
           id: "bmi-1",
-          userId: USERNAME,
+          userId: USER_ID,
           filename: "report.pdf",
           mimeType: "application/pdf",
           status: "ready",
@@ -279,14 +283,14 @@ describe("POST /api/llm/chat — attachment context injection", () => {
       [
         {
           id: "bmi-indexing",
-          userId: USERNAME,
+          userId: USER_ID,
           filename: "meeting.mp3",
           mimeType: "audio/mpeg",
           status: "queued_for_transcription",
         },
         {
           id: "bmi-failed",
-          userId: USERNAME,
+          userId: USER_ID,
           filename: "broken.pdf",
           mimeType: "application/pdf",
           status: "failed",
@@ -320,7 +324,7 @@ describe("POST /api/llm/chat — attachment context injection", () => {
       [
         {
           id: "bmi-big",
-          userId: USERNAME,
+          userId: USER_ID,
           filename: "novel.txt",
           mimeType: "text/plain",
           status: "ready",
@@ -396,7 +400,7 @@ describe("POST /api/llm/chat — attachment context injection", () => {
       [
         {
           id: "bmi-1",
-          userId: USERNAME,
+          userId: USER_ID,
           filename: "report.pdf",
           mimeType: "application/pdf",
           status: "ready",
@@ -418,7 +422,7 @@ describe("POST /api/llm/chat — attachment context injection", () => {
     expect(prisma.brainMemoryItem.updateMany).toHaveBeenCalledWith({
       where: {
         id: { in: ["bmi-1"] },
-        userId: USERNAME,
+        userId: USER_ID,
         NOT: { originatingChatId: "conv-77" },
       },
       data: { originatingChatId: "conv-77" },
@@ -442,7 +446,7 @@ describe("POST /api/llm/chat — attachment context injection", () => {
       [
         {
           id: "bmi-1",
-          userId: USERNAME,
+          userId: USER_ID,
           filename: "report.pdf",
           mimeType: "application/pdf",
           status: "ready",
@@ -493,7 +497,7 @@ describe("POST /api/llm/chat — attachment context injection", () => {
     expect(prisma.brainMemoryItem.updateMany).toHaveBeenCalledWith({
       where: {
         originatingChatId: "chat-1749600000000",
-        userId: USERNAME,
+        userId: USER_ID,
       },
       data: { originatingChatId: "conv-9" },
     });
@@ -504,7 +508,7 @@ describe("POST /api/llm/chat — attachment context injection", () => {
       [
         {
           id: "bmi-1",
-          userId: USERNAME,
+          userId: USER_ID,
           filename: "report.pdf",
           mimeType: "application/pdf",
           status: "ready",
