@@ -42,42 +42,75 @@ interface FakeRow {
   refs: Record<string, unknown> | null;
   signature: string;
   prevSignatureHash: string;
+  actorType: "user" | "ai" | "system" | "anonymous" | null;
+  actorId: string | null;
+  schemaVersion: number;
 }
 
 const KEY = Buffer.from("warp-246-test-key-bytes-must-be-long", "utf8");
 
-/** Build a properly signed chain of n rows, ids 1..n. */
+/**
+ * Append one properly signed row, mirroring the WARP-181 fixtures
+ * (activity-actor-chain.test.ts): v1 rows carry no actor and sign
+ * under the legacy 7-key canonical form; v2 rows carry
+ * signature-covered actor fields and sign under the 9-key form.
+ */
+function appendRow(
+  rows: FakeRow[],
+  signer: ActivityRowSigner,
+  schemaVersion: 1 | 2,
+): void {
+  const i = rows.length + 1;
+  const tail = rows[rows.length - 1];
+  const prevSignatureHash = tail ? hashSignature(tail.signature) : "";
+  const content: ActivityRowContent = {
+    // Seconds-granularity spread keeps `at` strictly increasing for
+    // up to a day's worth of rows without leaving the fixture date.
+    at: new Date(Date.UTC(2026, 4, 25, 10, Math.floor(i / 60), i % 60)),
+    severity: "info",
+    sourceIcon: "info",
+    what: `event ${i}`,
+    sub: i % 2 === 0 ? `detail ${i}` : null,
+    kind: "system",
+    refs: i % 3 === 0 ? { seq: i } : null,
+    actorType: schemaVersion === 2 ? "user" : null,
+    actorId: schemaVersion === 2 ? "user-uuid-alice" : null,
+    schemaVersion,
+  };
+  const signature = signer.sign(content, prevSignatureHash);
+  rows.push({
+    id: BigInt(i),
+    at: content.at,
+    severity: content.severity,
+    sourceIcon: content.sourceIcon,
+    what: content.what,
+    sub: content.sub,
+    kind: content.kind,
+    refs: content.refs,
+    signature,
+    prevSignatureHash,
+    actorType: content.actorType,
+    actorId: content.actorId,
+    schemaVersion,
+  });
+}
+
+/** Signed chain of n rows, ids 1..n. New-world default: all v2. */
 function buildChain(signer: ActivityRowSigner, n: number): FakeRow[] {
   const rows: FakeRow[] = [];
-  let prevSig = "";
-  for (let i = 1; i <= n; i++) {
-    const content: ActivityRowContent = {
-      // Seconds-granularity spread keeps `at` strictly increasing for
-      // up to a day's worth of rows without leaving the fixture date.
-      at: new Date(Date.UTC(2026, 4, 25, 10, Math.floor(i / 60), i % 60)),
-      severity: "info",
-      sourceIcon: "info",
-      what: `event ${i}`,
-      sub: i % 2 === 0 ? `detail ${i}` : null,
-      kind: "system",
-      refs: i % 3 === 0 ? { seq: i } : null,
-    };
-    const prevSignatureHash = prevSig === "" ? "" : hashSignature(prevSig);
-    const signature = signer.sign(content, prevSignatureHash);
-    rows.push({
-      id: BigInt(i),
-      at: content.at,
-      severity: content.severity,
-      sourceIcon: content.sourceIcon,
-      what: content.what,
-      sub: content.sub,
-      kind: content.kind,
-      refs: content.refs,
-      signature,
-      prevSignatureHash,
-    });
-    prevSig = signature;
-  }
+  for (let i = 0; i < n; i++) appendRow(rows, signer, 2);
+  return rows;
+}
+
+/** Pre-upgrade history: v1Count legacy rows, then v2Count actor rows. */
+function buildMixedChain(
+  signer: ActivityRowSigner,
+  v1Count: number,
+  v2Count: number,
+): FakeRow[] {
+  const rows: FakeRow[] = [];
+  for (let i = 0; i < v1Count; i++) appendRow(rows, signer, 1);
+  for (let i = 0; i < v2Count; i++) appendRow(rows, signer, 2);
   return rows;
 }
 
@@ -218,5 +251,55 @@ describe("GET /api/activity/verify", () => {
     expect(res.body.ok).toBe(false);
     expect(res.body.brokenAtId).toBe("205");
     expect(res.body.rowsChecked).toBe(205);
+  });
+
+  // ── WARP-181 interplay: mixed schema-version chains ──
+
+  it("verifies a mixed v1→v2 chain across the upgrade boundary", async () => {
+    // Pre-upgrade history: rows 1-3 signed under the legacy 7-key v1
+    // form, rows 4-6 under the actor-bearing 9-key v2 form. The route
+    // must dispatch the canonical shape per row via its stored
+    // schemaVersion — one shape for all six would break at either end.
+    const app = makeApp(buildMixedChain(signer, 3, 3));
+    const res = await request(app).get("/api/activity/verify");
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: true, rowsChecked: 6 });
+    expect(res.body.brokenAtId).toBeUndefined();
+  });
+
+  it("catches tamper on a v1 row inside a mixed chain", async () => {
+    const rows = buildMixedChain(signer, 3, 3);
+    rows[1]!.what = "legacy row rewritten after the fact";
+    const app = makeApp(rows);
+    const res = await request(app).get("/api/activity/verify");
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(false);
+    expect(res.body.brokenAtId).toBe("2");
+    expect(res.body.rowsChecked).toBe(2);
+  });
+
+  it("catches actor-field tamper on a v2 row (actor is signature-covered)", async () => {
+    const rows = buildMixedChain(signer, 2, 3);
+    rows[3]!.actorId = "user-uuid-mallory"; // reattribute row 4's action
+    const app = makeApp(rows);
+    const res = await request(app).get("/api/activity/verify");
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(false);
+    expect(res.body.brokenAtId).toBe("4");
+    expect(res.body.rowsChecked).toBe(4);
+  });
+
+  it("catches a v2 row demoted to v1 to shed its actor attribution", async () => {
+    // Flipping schemaVersion changes the canonical form entirely —
+    // the stored signature was minted over the 9-key v2 shape.
+    const rows = buildMixedChain(signer, 2, 3);
+    rows[2]!.schemaVersion = 1;
+    rows[2]!.actorType = null;
+    rows[2]!.actorId = null;
+    const app = makeApp(rows);
+    const res = await request(app).get("/api/activity/verify");
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(false);
+    expect(res.body.brokenAtId).toBe("3");
   });
 });

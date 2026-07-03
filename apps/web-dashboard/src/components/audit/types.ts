@@ -41,6 +41,9 @@ export const KIND_LABELS: Record<ActivityKind, string> = {
   system: "System",
 };
 
+/** WARP-181: who performed the action (null on pre-upgrade v1 rows). */
+export type ActivityActorType = "user" | "ai" | "system" | "anonymous";
+
 export interface ActivityItem {
   id: string;
   at: string;
@@ -52,6 +55,12 @@ export interface ActivityItem {
   refs: Record<string, unknown> | null;
   signature: string;
   prevSignatureHash: string;
+  /** WARP-181 actor attribution — present on the wire since #789,
+   *  nulled on v1 rows. Typed optional until the actor filter UI
+   *  lands (see the TODO(WARP-1009/#789) marker above); no rendering
+   *  consumes them yet. */
+  actorType?: ActivityActorType | null;
+  actorId?: string | null;
 }
 
 export interface ActivityListResponse {

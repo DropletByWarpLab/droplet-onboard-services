@@ -16,6 +16,7 @@ import { Prisma } from "@prisma/client";
 import { getActivitySigner } from "../services/activity.singleton.js";
 import {
   hashSignature,
+  type ActivityActorTypeName,
   type ActivityKindName,
   type ActivityRowContent,
   type ActivitySeverityName,
@@ -243,6 +244,13 @@ export function createActivityRouter(prisma: PrismaClient): Router {
               prevSignature === null
                 ? r.prevSignatureHash
                 : hashSignature(prevSignature);
+            // Rebuild the signature-covered content verbatim from the
+            // stored columns — schemaVersion is passed through so
+            // `canonicalizeRowContent` dispatches the right shape per
+            // row (v1 legacy 7-key, v2 actor-bearing 9-key; WARP-181).
+            // Actor fields stay as-stored, never normalized: on a v1
+            // row they are not signature-covered and the v1 canonical
+            // form ignores them.
             const content: ActivityRowContent = {
               at: r.at,
               severity: r.severity as ActivitySeverityName,
@@ -252,6 +260,9 @@ export function createActivityRouter(prisma: PrismaClient): Router {
               kind: r.kind as ActivityKindName,
               refs:
                 r.refs === null ? null : (r.refs as Record<string, unknown>),
+              actorType: r.actorType as ActivityActorTypeName | null,
+              actorId: r.actorId,
+              schemaVersion: r.schemaVersion,
             };
             if (
               r.prevSignatureHash !== expectedPrevHash ||
