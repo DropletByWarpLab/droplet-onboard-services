@@ -1240,6 +1240,215 @@ fi
 PATH="$PF_OLD_PATH"
 unset -f err _propagate_ap_resolver
 
+
+# =============================================================================
+# Phase 11: interrupted re-run convergence (WARP-595)
+# =============================================================================
+# Re-running setup.sh is the only field-update path; an interruption (power
+# loss, SSH drop, ctrl-C) mid-write must never leave state a re-run can't
+# converge from. Behavioural asserts exercise the torn-.env recovery and the
+# append hygiene; static asserts pin the stage-then-rename write patterns that
+# close the interruption windows themselves (a partial write can't be
+# simulated portably, but the atomic-rename pattern makes it structurally
+# impossible to observe a prefix of the file).
+echo "--- Phase 11: interrupted re-run convergence (WARP-595) ---"
+
+SECRETS_LIB="$REPO_ROOT_REAL/scripts/lib/secrets.sh"
+SINGLE_BOX_LIB="$REPO_ROOT_REAL/scripts/lib/single-box.sh"
+CAMERA_LIB="$REPO_ROOT_REAL/scripts/lib/camera-drivers.sh"
+
+# (1) Torn .env + a complete backup → RESTORED from the backup, not skipped.
+# Interruption scenario: `--regenerate-env` backed up the old .env, then the
+# heredoc write was cut by a power loss. The truncated file has the generated
+# header but is missing core keys; the old behaviour said ".env already exists
+# — skipping" and left the box with a half-.env whose data-store passwords no
+# longer match the running volumes.
+T9A="$TMP_ROOT/warp595-restore"
+mkdir -p "$T9A"
+( export REPO_ROOT="$T9A"; generate_env ) >/dev/null 2>&1
+cp "$T9A/.env" "$T9A/.env.bak.1750000000"
+head -n 8 "$T9A/.env" > "$T9A/.env.head" && mv "$T9A/.env.head" "$T9A/.env"
+( export REPO_ROOT="$T9A"; generate_env ) >/dev/null 2>&1 || true
+if cmp -s "$T9A/.env" "$T9A/.env.bak.1750000000"; then
+  pass "torn .env with a complete .bak backup is restored from the backup"
+else
+  fail "torn .env was not restored from its backup (re-run must converge, not skip)"
+fi
+T9A_PERMS=$(stat -c "%a" "$T9A/.env" 2>/dev/null || stat -f "%OLp" "$T9A/.env" 2>/dev/null || echo "unknown")
+if [ "$T9A_PERMS" = "600" ]; then
+  pass "restored .env keeps 600 permissions"
+else
+  fail "restored .env permissions are $T9A_PERMS (expected 600)"
+fi
+# The .env.torn.* copy carries the same leading secrets block as .env, and in
+# exactly the target scenario its SOURCE is a legacy torn file sitting at
+# umask-default 644 (the pre-atomic writer died BEFORE its chmod). `cp` alone
+# preserves that world-readable mode, so the recovery copy must be forced 600.
+T9A_TORN_FILE=$(ls "$T9A"/.env.torn.* 2>/dev/null | head -n 1 || true)
+T9A_TORN_PERMS=$(stat -c "%a" "$T9A_TORN_FILE" 2>/dev/null || stat -f "%OLp" "$T9A_TORN_FILE" 2>/dev/null || echo "missing")
+if [ "$T9A_TORN_PERMS" = "600" ]; then
+  pass ".env.torn.* recovery copy is chmod 600 (source was a 644 legacy torn file)"
+else
+  fail ".env.torn.* recovery copy perms are $T9A_TORN_PERMS (expected 600 — world-readable secrets sibling)"
+fi
+
+# (2) Torn .env with NO backup → fresh full regeneration (stack never ran with
+# the truncated secrets on a first-install interruption, so fresh secrets are
+# the correct convergence).
+T9B="$TMP_ROOT/warp595-regen"
+mkdir -p "$T9B"
+( export REPO_ROOT="$T9B"; generate_env ) >/dev/null 2>&1
+head -n 8 "$T9B/.env" > "$T9B/.env.head" && mv "$T9B/.env.head" "$T9B/.env"
+( export REPO_ROOT="$T9B"; generate_env ) >/dev/null 2>&1 || true
+if grep -qE '^DEVICE_SECRET_KEY=.' "$T9B/.env" \
+   && grep -qE '^COMPOSE_PROFILES=' "$T9B/.env" \
+   && grep -qE '^POSTGRES_PASSWORD=.' "$T9B/.env"; then
+  pass "torn .env with no backup is fully regenerated on re-run"
+else
+  fail "torn .env with no backup was not regenerated (missing core/tail keys after re-run)"
+fi
+# Same 644-source hazard as the .env.torn.* copy above: on this path the torn
+# file is preserved via the pre-regeneration backup block (`cp` → .env.bak.*),
+# which would otherwise inherit the legacy file's world-readable mode.
+T9B_BAK_FILE=$(ls "$T9B"/.env.bak.* 2>/dev/null | head -n 1 || true)
+T9B_BAK_PERMS=$(stat -c "%a" "$T9B_BAK_FILE" 2>/dev/null || stat -f "%OLp" "$T9B_BAK_FILE" 2>/dev/null || echo "missing")
+if [ "$T9B_BAK_PERMS" = "600" ]; then
+  pass ".env.bak.* pre-regeneration backup is chmod 600 (source was a 644 legacy torn file)"
+else
+  fail ".env.bak.* pre-regeneration backup perms are $T9B_BAK_PERMS (expected 600 — world-readable secrets sibling)"
+fi
+
+# (3) Operator-authored .env (no generated header) is NEVER touched by the
+# torn-file recovery — the detector must key on our own heredoc header.
+T9C="$TMP_ROOT/warp595-operator"
+mkdir -p "$T9C"
+printf 'FOO=bar\n' > "$T9C/.env"
+( export REPO_ROOT="$T9C"; generate_env ) >/dev/null 2>&1 || true
+if [ "$(cat "$T9C/.env")" = "FOO=bar" ]; then
+  pass "operator-authored .env (no generated header) is left untouched"
+else
+  fail "operator-authored .env was modified by generate_env (torn-detector false positive)"
+fi
+
+# (4) migrate_env on a .env whose last line has NO trailing newline (a torn
+# write or hand edit) must not glue the first backfilled key onto the last
+# existing line. Pre-fix: `COMPOSE_PROFILES=evalROUTING_MODE=real` corrupted
+# BOTH keys.
+T9D="$TMP_ROOT/warp595-newline"
+mkdir -p "$T9D"
+( export REPO_ROOT="$T9D"; generate_env ) >/dev/null 2>&1
+printf '%s' "$(cat "$T9D/.env")" > "$T9D/.env"   # strip trailing newline
+( export REPO_ROOT="$T9D"; migrate_env ) >/dev/null 2>&1 || true
+if grep -qE '^ROUTING_MODE=(real|mock)$' "$T9D/.env"; then
+  pass "migrate_env backfills onto its own line when .env lacks a trailing newline"
+else
+  fail "migrate_env glued the backfilled key onto the last line (no trailing-newline guard)"
+fi
+if grep -qE '^COMPOSE_PROFILES=(eval|linux,display,eval)$' "$T9D/.env"; then
+  pass "the pre-existing last line survives a no-trailing-newline append"
+else
+  fail "the pre-existing last line was corrupted by the append (COMPOSE_PROFILES mangled)"
+fi
+
+# (5) Static: generate_env must STAGE the heredoc and rename into place —
+# writing the live .env directly means an interruption leaves a prefix of the
+# file that a re-run mistakes for a complete .env.
+if grep -qE 'cat > "\$env_file" <<' "$SECRETS_LIB"; then
+  fail "secrets.sh writes the live .env directly from the heredoc (non-atomic; torn on interruption)"
+else
+  pass "secrets.sh does not write the live .env directly from the heredoc"
+fi
+
+# (6) Static: single-box upsert_env must not truncate-rewrite the live .env.
+# The old `cat "\${env_file}.tmp" > "\$env_file"` opened .env with O_TRUNC and
+# re-copied it — an interruption mid-copy left a PREFIX of .env (up to and
+# including an empty file), losing live-stack secrets like POSTGRES_PASSWORD.
+if grep -qF 'cat "${env_file}.tmp" > "$env_file"' "$SINGLE_BOX_LIB"; then
+  fail "single-box.sh upsert_env truncate-rewrites the live .env (torn on interruption)"
+else
+  pass "single-box.sh upsert_env does not truncate-rewrite the live .env"
+fi
+
+# (7) Behavioural: the Phase-3 sandbox .env (written via the upsert path) must
+# still be 600 after configure_single_box_env — a rename-into-place rewrite
+# must not silently widen the permissions of the secrets-bearing file.
+T9_UPSERT_PERMS=$(stat -c "%a" "$TMP_ROOT/.env" 2>/dev/null || stat -f "%OLp" "$TMP_ROOT/.env" 2>/dev/null || echo "unknown")
+if [ "$T9_UPSERT_PERMS" = "600" ]; then
+  pass ".env stays 600 after configure_single_box_env upserts"
+else
+  fail ".env permissions are $T9_UPSERT_PERMS after configure_single_box_env (expected 600)"
+fi
+if ls "$TMP_ROOT"/.env.upsert.* >/dev/null 2>&1 || ls "$TMP_ROOT"/.env.tmp* >/dev/null 2>&1; then
+  fail "configure_single_box_env left staging files behind (.env.upsert.*/.env.tmp*)"
+else
+  pass "configure_single_box_env leaves no staging files behind"
+fi
+
+# (8) Static: /etc/default/droplet-openwrt-attach is guarded by an existence
+# check ("exists — keeping rotated value"), so its write MUST be staged +
+# renamed — otherwise a partial file from an interrupted run is kept forever
+# and the AP config (SSID/PSK lines) never converges.
+if grep -qF 'droplet-openwrt-attach.tmp' "$SINGLE_BOX_LIB" \
+   && grep -qF 'sudo mv /etc/default/droplet-openwrt-attach.tmp /etc/default/droplet-openwrt-attach' "$SINGLE_BOX_LIB"; then
+  pass "/etc/default/droplet-openwrt-attach is staged + renamed (guard can't see a partial file)"
+else
+  fail "/etc/default/droplet-openwrt-attach is written in place behind an existence guard (partial file kept forever)"
+fi
+
+# (9) Static: the two existence-guarded camera-driver files
+# (/etc/modules-load.d/droplet-cameras.conf + the udev rules) must be staged +
+# renamed for the same reason as (8).
+if grep -qF '"$conf.tmp"' "$CAMERA_LIB" && grep -qF 'sudo mv "$conf.tmp" "$conf"' "$CAMERA_LIB"; then
+  pass "persist_camera_modules stages + renames droplet-cameras.conf"
+else
+  fail "persist_camera_modules writes droplet-cameras.conf in place behind an existence guard"
+fi
+if grep -qF '"$rules.tmp"' "$CAMERA_LIB" && grep -qF 'sudo mv "$rules.tmp" "$rules"' "$CAMERA_LIB"; then
+  pass "setup_udev_rules stages + renames 99-droplet-cameras.rules"
+else
+  fail "setup_udev_rules writes 99-droplet-cameras.rules in place behind an existence guard"
+fi
+
+# (10) Behavioural: a stale .env.upsert.* sibling left by an interrupted
+# previous run (the process died between creating the stage and the mv) is
+# cleaned up by the next configure_single_box_env run — it is secrets-bearing
+# litter that would otherwise accumulate forever. Reuses the Phase-3 docker
+# stub machinery (REPO_ROOT is still the Phase-3 sandbox).
+T9_STALE="$TMP_ROOT/.env.upsert.424242"
+printf 'SECRET=leftover\n' > "$T9_STALE"
+cat > "$SB_STUB_BIN/docker" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "network" ] && [ "\$2" = "inspect" ]; then
+  printf '%s\n' "$SB_FAKE_GW"
+  exit 0
+fi
+exit 0
+EOF
+chmod +x "$SB_STUB_BIN/docker"
+PATH="$SB_STUB_BIN:$PATH"
+configure_single_box_env >/dev/null 2>&1 || true
+PATH="$SB_OLD_PATH"
+if [ ! -f "$T9_STALE" ]; then
+  pass "configure_single_box_env removes stale .env.upsert.* siblings from an interrupted run"
+else
+  fail "stale .env.upsert.* sibling survives configure_single_box_env (secrets-bearing litter accumulates)"
+fi
+
+# (11) Static: factory-reset.sh's generated-file wipe must also remove the
+# WARP-595 staging/torn siblings (.env.torn.*, .env.tmp.*, .env.migrate.*,
+# .env.upsert.*) — they carry the same secrets as .env and previously
+# survived a factory reset.
+FACTORY_RESET_SH="$REPO_ROOT_REAL/scripts/factory-reset.sh"
+T9_WIPE_OK=true
+for T9_PAT in '.env.torn.' '.env.tmp.' '.env.migrate.' '.env.upsert.'; do
+  grep -qF "$T9_PAT" "$FACTORY_RESET_SH" || T9_WIPE_OK=false
+done
+if [ "$T9_WIPE_OK" = "true" ]; then
+  pass "factory-reset.sh wipes the .env staging/torn siblings (secrets-bearing)"
+else
+  fail "factory-reset.sh does not wipe all .env staging/torn siblings (.env.{torn,tmp,migrate,upsert}.*)"
+fi
+
 # =============================================================================
 # Results
 # =============================================================================

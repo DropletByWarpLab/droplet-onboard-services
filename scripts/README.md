@@ -90,6 +90,87 @@ Dev laptops don't need OpenWrt hardware. Add `ROUTING_MODE=mock` to `.env` and t
 
 ---
 
+## Re-running setup.sh on a deployed device (the field-update path)
+
+Until the OTA update system ships (WARP-534 covers signed app-update
+manifests — see the key ceremony below — and WARP-179 the full image-based
+update path), **re-running `./scripts/setup.sh` is the way a deployed box
+picks up new code**: pull the new checkout, re-run setup, and every phase
+converges the box to the new version. This section is the contract for what
+that re-run does, what it guarantees, and what happens when a run is
+interrupted (power loss, SSH drop, ctrl-C) — WARP-595.
+
+### What a re-run does on an existing device
+
+| Phase | On an existing install |
+|-------|------------------------|
+| **1. Preflight** | Read-only checks; re-run has no side effects |
+| **2. Docker** | No-op when Docker ≥ 25 is present; group membership checked, not re-added |
+| **3. Drivers / Bluetooth** | apt installs skip when present; kernel modules re-loaded (idempotent); guarded files only written when absent |
+| **4. Secrets** | `.env` is **preserved** — never regenerated without `--regenerate-env`. `migrate_env` appends only *missing* keys (never rewrites a value); artifacts (mosquitto passwd/conf, Docker secret files, audit key) are re-materialized deterministically from `.env`; the TLS cert is kept unless invalid (a public-CA leaf is *never* clobbered — ADR-023) |
+| **5. Build** | `docker compose down` then rebuild — this is where new code lands |
+| **6. Start** | `up -d` recreates changed containers; Nextcloud DB creation is existence-guarded; the Nextcloud provisioning hook and workspace-settings seeder are insert-or-skip |
+| **7. Verify / DNS** | Read-only checks + idempotent registrations |
+
+DB schema migrations run **inside the orchestrator container on boot** via
+the guarded entrypoint (`apps/orchestrator/scripts/migrate-and-start.sh`,
+WARP-573: advisory lock + pre-migrate snapshot + loud failure), not from
+setup.sh itself.
+
+### Interruption + re-run convergence (what's guaranteed)
+
+Setup takes a lock (`.data/.setup.lock`); a lock left behind by a killed run
+is reclaimed automatically when its PID is dead (no 1-hour wait, no manual
+`rm`). Per phase, an interruption converges as follows on the next run:
+
+- **Phase 4 (secrets).** All `.env` writes are staged to a temp file and
+  atomically renamed into place — `.env` is always either the previous
+  complete file or the new complete file, never a prefix. A *torn* `.env`
+  left by an older setup version is detected on re-run (generated header
+  present but core keys missing / truncated last line) and recovered:
+  restored from the newest complete `.env.bak.*` when one exists, otherwise
+  regenerated fresh with a loud warning. Docker secret files and the audit
+  signing key were already staged+renamed; the TLS cert/key pair is now also
+  verified to *match* — a torn self-signed pair is restored from the
+  `.bootstrap` trust anchor (or regenerated) instead of being kept forever.
+  One carve-out: a torn **public-CA** pair is *preserved with a loud
+  warning* (setup cannot mint public-CA material) — it heals via
+  re-issuance, which the operator should trigger rather than waiting for
+  the renew window.
+- **Phase 3 / single-box host files.** Files behind "write only if missing"
+  guards (`/etc/default/droplet-openwrt-attach`, `droplet-cameras.conf`,
+  udev rules) are staged+renamed, so the guard can never latch onto a
+  half-written file.
+- **Phases 5–6 (build/start).** Interruptions leave a partially built/started
+  stack; the next run's `down → build → up -d` converges it. No state is
+  keyed on a completion marker that an interruption could strand.
+
+### What is NOT guaranteed (know before you run)
+
+- **`--regenerate-env` rotates data-store passwords** (`POSTGRES_PASSWORD`,
+  `REDIS_PASSWORD`, …) but existing Docker **volumes keep the old
+  credentials** — a stack with data will fail auth after regeneration.
+  Recover by restoring the automatic `.env.bak.*`, or factory-reset if the
+  data is disposable. Use `--sync-secrets` (not `--regenerate-env`) after
+  hand-editing `.env`. Hand edits must also keep the six core keys
+  (`POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `MQTT_PASSWORD`,
+  `NEXTCLOUD_ADMIN_PASSWORD`, `DEVICE_SECRET`, `DEVICE_SECRET_KEY`)
+  non-empty and the file's trailing newline intact — otherwise the next
+  re-run classifies the file as torn and restores/regenerates it (the
+  hand-edited version is kept as `.env.torn.*`).
+- **No automatic pre-update backup yet.** A setup.sh re-run does not snapshot
+  the box first. The building blocks exist — scheduled restic backups
+  (WARP-254, `scripts/lib/backup.sh`) and the pre-reset full-device backup in
+  `factory-reset.sh` (WARP-570) — but wiring an automatic pre-update snapshot
+  into the re-run path is deliberately deferred to the OTA work (WARP-534/179),
+  which owns the update transaction (snapshot → apply → verify → rollback).
+  Until then: `sudo /usr/local/sbin/droplet-backup.sh` before a risky update
+  is the manual equivalent.
+- **Concurrent runs** are excluded by the lockfile, but the check is
+  best-effort (not `flock`-based); don't deliberately race two setups.
+
+---
+
 ## Standalone verification
 
 ```bash
