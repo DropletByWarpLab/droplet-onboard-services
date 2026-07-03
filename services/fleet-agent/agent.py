@@ -219,8 +219,11 @@ class FleetAgent:
 
         # Replay any spooled beats oldest-first BEFORE the live one; the
         # portal is idempotent on (machine_id, ts) so replays are safe.
-        async def _send(entry: dict) -> bool:
-            return (await self.portal.heartbeat(entry)).ok
+        # Return the full PortalResult so drain() can tell a retryable
+        # failure (keep + retry) from a non-retryable 4xx poison pill
+        # (drop), using the same should_spool classification as below.
+        async def _send(entry: dict):
+            return await self.portal.heartbeat(entry)
 
         if not await self.spool.drain(_send):
             # Still can't reach the portal — keep ordering, spool the live

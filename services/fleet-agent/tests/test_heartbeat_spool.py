@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
+from typing import Optional
 
 import httpx
 import respx
@@ -10,6 +12,22 @@ import respx
 from spool import DiskSpool
 
 from .conftest import PORTAL_URL, build_agent, register_response
+
+
+@dataclass
+class _FakeResult:
+    """Minimal PortalResult-shaped stand-in for driving DiskSpool.drain
+    without a live portal — mirrors PortalResult.should_spool semantics."""
+
+    ok: bool
+    status: Optional[int] = None
+    transport_error: bool = False
+
+    @property
+    def should_spool(self) -> bool:
+        if self.transport_error:
+            return True
+        return self.status is not None and (self.status == 429 or self.status >= 500)
 
 
 
@@ -167,3 +185,53 @@ class TestDiskSpool:
         for i in range(5):
             spool.append({"i": i})
         assert [e["i"] for e in spool.entries()] == [2, 3, 4]
+
+    def test_write_is_atomic_no_temp_leftover(self, tmp_path):
+        """Atomic write: the payload lands intact and no .tmp file is left
+        behind (the temp swap target must be os.replace'd away)."""
+        p = tmp_path / "spool.jsonl"
+        spool = DiskSpool(p, max_entries=10)
+        for i in range(4):
+            spool.append({"i": i})
+        assert [e["i"] for e in spool.entries()] == [0, 1, 2, 3]
+        leftovers = [q.name for q in tmp_path.iterdir() if q.name != p.name]
+        assert leftovers == []  # no *.tmp scratch file survives a write
+
+    async def test_drain_drops_4xx_poison_pill_and_keeps_going(self, tmp_path):
+        """A poison-pill entry (non-retryable 4xx) at the head must NOT
+        wedge the queue: drain drops it and delivers everything behind it."""
+        p = tmp_path / "spool.jsonl"
+        spool = DiskSpool(p, max_entries=10)
+        for i in range(3):
+            spool.append({"i": i})
+
+        seen: list[int] = []
+
+        async def sender(entry: dict):
+            seen.append(entry["i"])
+            # The head (i == 0) is a poison pill; the rest succeed.
+            if entry["i"] == 0:
+                return _FakeResult(ok=False, status=422)
+            return _FakeResult(ok=True, status=204)
+
+        drained = await spool.drain(sender)
+        assert drained is True
+        assert seen == [0, 1, 2]  # head was tried, then the rest, in order
+        assert spool.entry_count() == 0  # poison pill dropped, rest delivered
+
+    async def test_drain_retains_on_transient_failure(self, tmp_path):
+        """A transient failure (transport / 5xx) at the head STOPS the
+        drain and keeps the head + everything behind it for the next tick."""
+        p = tmp_path / "spool.jsonl"
+        spool = DiskSpool(p, max_entries=10)
+        for i in range(3):
+            spool.append({"i": i})
+
+        async def sender(entry: dict):
+            if entry["i"] == 0:
+                return _FakeResult(ok=False, transport_error=True)
+            return _FakeResult(ok=True, status=204)
+
+        drained = await spool.drain(sender)
+        assert drained is False
+        assert [e["i"] for e in spool.entries()] == [0, 1, 2]  # nothing lost
