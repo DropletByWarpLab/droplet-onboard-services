@@ -269,6 +269,30 @@ describe("VpnStep — blocked precheck honesty when a name IS saved (WARP-1039)"
     expect(onSkip).toHaveBeenCalledTimes(1);
   });
 
+  it("guards the fqdn against small-viewport overflow (min-w-0 + truncate + break-all)", async () => {
+    fetchBoxName.mockResolvedValue({
+      name: "studio",
+      fqdn: "studio.droplet-us.com",
+    });
+    render(
+      <VpnStep onComplete={vi.fn()} onSkip={vi.fn()} onBackToAddress={vi.fn()} />,
+    );
+    await screen.findByRole("heading", {
+      name: /your address is being set up/i,
+    });
+
+    // A max-length hyphen-less name (40 chars + .droplet-us.com) must not push
+    // the card past a 320px viewport — same convention as the dashboardUrl
+    // break-all further down this file.
+    const nodes = screen.getAllByText("studio.droplet-us.com");
+    const headline = nodes.find((n) => n.tagName === "P");
+    const inline = nodes.find((n) => n.tagName === "SPAN");
+    expect(headline?.className).toContain("truncate");
+    expect(inline?.className).toContain("break-all");
+    // truncate only works when the flex child may shrink below content size.
+    expect(headline?.parentElement?.className).toContain("min-w-0");
+  });
+
   it("keeps the existing back-jump blocked view when NO name is saved", async () => {
     // Default fetchBoxName → { name: null } from beforeEach.
     render(

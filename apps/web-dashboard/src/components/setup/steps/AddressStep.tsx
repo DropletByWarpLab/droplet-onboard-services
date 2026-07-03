@@ -88,6 +88,10 @@ export function AddressStep({
   const local = validateBoxName(name);
   const slug = local.slug;
   const fqdn = boxNameToFqdn(slug || "your-box");
+  // WARP-1039 — true while the input still shows the exact name the box
+  // already saved; drives the current-address hint AND the input's
+  // aria-describedby so screen-reader users hear it too.
+  const showCurrentHint = savedName !== null && slug === savedName;
 
   // Cancel a stale in-flight availability check when the input changes.
   const abortRef = useRef<AbortController | null>(null);
@@ -241,6 +245,9 @@ export function AddressStep({
             onChange={(e) => setName(e.target.value)}
             placeholder="your-box"
             aria-label="Box name"
+            aria-describedby={
+              showCurrentHint ? "box-name-current-hint" : undefined
+            }
             className="flex-1 min-w-0 border-none outline-none bg-transparent font-mono type-body font-semibold text-label-primary placeholder:text-label-quaternary"
             autoCapitalize="off"
             autoComplete="off"
@@ -268,8 +275,11 @@ export function AddressStep({
       {/* WARP-1039 — subtle current-address hint while the input still shows
           the name the box already saved. Static (not in the live region) so it
           doesn't compete with the availability announcement. */}
-      {savedName !== null && slug === savedName && (
-        <p className="type-footnote text-label-tertiary mt-1.5">
+      {showCurrentHint && (
+        <p
+          id="box-name-current-hint"
+          className="type-footnote text-label-secondary mt-1.5"
+        >
           This is your current address — continue to keep it, or pick a new
           name.
         </p>

@@ -286,15 +286,18 @@ export function VpnStep({
             className="text-accent flex-shrink-0 mt-0.5"
             aria-hidden="true"
           />
-          <div>
-            <p className="type-subheadline text-label-primary mb-1 font-mono">
+          {/* min-w-0 lets this flex child shrink so a max-length name
+              truncates/wraps instead of pushing the card past small
+              viewports (same convention as the dashboardUrl below). */}
+          <div className="min-w-0">
+            <p className="type-subheadline text-label-primary mb-1 font-mono truncate">
               {savedBoxName.fqdn}
             </p>
             <p className="type-footnote text-label-secondary">
               Your address{" "}
-              <span className="font-mono">{savedBoxName.fqdn}</span> is being
-              set up — remote access lights up automatically once the box
-              finishes issuing its certificate.
+              <span className="font-mono break-all">{savedBoxName.fqdn}</span>{" "}
+              is being set up — remote access lights up automatically once the
+              box finishes issuing its certificate.
             </p>
           </div>
         </div>

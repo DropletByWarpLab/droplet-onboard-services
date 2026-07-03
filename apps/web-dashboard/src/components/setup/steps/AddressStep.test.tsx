@@ -239,6 +239,33 @@ describe("AddressStep — rehydrates the saved name (WARP-1039)", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("associates the current-address hint with the input for screen readers, at AA contrast", async () => {
+    fetchBoxName.mockResolvedValue({
+      name: "studio",
+      fqdn: "studio.droplet-us.com",
+    });
+    render(<AddressStep onComplete={vi.fn()} onSkip={vi.fn()} />);
+    await waitFor(() => expect(nameInput()).toHaveValue("studio"));
+
+    // SR channel: the input must reference the hint so a screen-reader user
+    // learns the prefilled name is their CURRENT address, not a suggestion.
+    const hint = screen.getByText(/this is your current address/i);
+    expect(hint).toHaveAttribute("id", "box-name-current-hint");
+    expect(nameInput()).toHaveAttribute(
+      "aria-describedby",
+      "box-name-current-hint",
+    );
+    // Contrast: secondary label token (≥4.5:1), not the ~1.7:1 tertiary.
+    expect(hint.className).toContain("text-label-secondary");
+    expect(hint.className).not.toContain("text-label-tertiary");
+  });
+
+  it("drops the aria-describedby association when the hint is not shown", async () => {
+    render(<AddressStep onComplete={vi.fn()} onSkip={vi.fn()} />);
+    await waitFor(() => expect(fetchBoxName).toHaveBeenCalledTimes(1));
+    expect(nameInput()).not.toHaveAttribute("aria-describedby");
+  });
+
   it("keeps the empty-input baseline when the GET fails (best-effort rehydration)", async () => {
     fetchBoxName.mockRejectedValueOnce(new Error("network down"));
     render(<AddressStep onComplete={vi.fn()} onSkip={vi.fn()} />);
