@@ -46,6 +46,29 @@ describe("isLanOnlyHost", () => {
     expect(isLanOnlyHost("172.15.0.1")).toBe(false);
   });
 
+  it("classifies CGNAT 100.64.0.0/10 literals as LAN-only (not publicly routable)", () => {
+    // RFC 6598 shared address space: carrier-grade NAT. A conf minted against
+    // one of these is not reachable from the public internet, so it must never
+    // light up the "from anywhere" copy.
+    expect(isLanOnlyHost("100.64.0.1")).toBe(true);
+    expect(isLanOnlyHost("100.100.100.100")).toBe(true);
+    expect(isLanOnlyHost("100.127.255.254")).toBe(true);
+    // Just OUTSIDE the /10: 100.63.x is public, 100.128.x is public.
+    expect(isLanOnlyHost("100.63.255.255")).toBe(false);
+    expect(isLanOnlyHost("100.128.0.1")).toBe(false);
+  });
+
+  it("classifies IPv4 strings with out-of-range octets as non-routable (never public)", () => {
+    // A malformed literal like "999.1.1.1" passes the 4-part shape but is not a
+    // valid address. It must be rejected as non-routable rather than falling
+    // through to publicly-routable and dishonestly lighting up "from anywhere".
+    expect(isLanOnlyHost("999.1.1.1")).toBe(true);
+    expect(isLanOnlyHost("256.256.256.256")).toBe(true);
+    expect(isLanOnlyHost("203.0.113.300")).toBe(true);
+    // A genuinely in-range public literal is still public (guard the boundary).
+    expect(isLanOnlyHost("203.0.113.255")).toBe(false);
+  });
+
   it("classifies loopback, link-local, and unspecified addresses as LAN-only", () => {
     expect(isLanOnlyHost("127.0.0.1")).toBe(true);
     expect(isLanOnlyHost("169.254.10.10")).toBe(true);
@@ -120,11 +143,33 @@ describe("computeOffLanReachable", () => {
     expect(computeOffLanReachable()).toBe(false);
   });
 
-  it("is true in relay mode regardless of endpoint envs (ADR-025)", () => {
+  it("is true in relay mode once an endpoint is configured (ADR-025)", () => {
+    // The relay makes the named FQDN routable from anywhere. Once the box has
+    // its FQDN (or an operator override), the conf is off-LAN reachable.
     (config as MutableConfig).REMOTE_ACCESS_MODE = "relay";
-    expect(computeOffLanReachable()).toBe(true);
-
     (config as MutableConfig).DROPLET_PUBLIC_FQDN = "home.droplet-us.com";
     expect(computeOffLanReachable()).toBe(true);
+
+    (config as MutableConfig).DROPLET_PUBLIC_FQDN = "";
+    (config as MutableConfig).WIREGUARD_ENDPOINT_HOST = "203.0.113.7";
+    expect(computeOffLanReachable()).toBe(true);
+  });
+
+  it("is false in relay mode when NO endpoint is configured at all", () => {
+    // endpointConfigured:false must never pair with offLanReachable:true — there
+    // is no address to hand out, so the relay has nothing to make routable.
+    (config as MutableConfig).REMOTE_ACCESS_MODE = "relay";
+    (config as MutableConfig).DROPLET_PUBLIC_FQDN = "";
+    (config as MutableConfig).WIREGUARD_ENDPOINT_HOST = "";
+    expect(computeOffLanReachable()).toBe(false);
+  });
+
+  it("is false in relay mode when the only endpoint override is a LAN-only literal", () => {
+    // A relay cannot make a private literal routable — the conf still points at
+    // an unreachable inside-LAN address.
+    (config as MutableConfig).REMOTE_ACCESS_MODE = "relay";
+    (config as MutableConfig).DROPLET_PUBLIC_FQDN = "";
+    (config as MutableConfig).WIREGUARD_ENDPOINT_HOST = "192.168.50.1";
+    expect(computeOffLanReachable()).toBe(false);
   });
 });
