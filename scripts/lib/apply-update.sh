@@ -194,6 +194,39 @@ dc_pinned() {
 # Subcommands
 # =============================================================================
 
+# Resolve the image ref a running container should be PINNED to for rollback.
+# imageRefMatchesDigest (apply.ts) compares this against the manifest's
+# `sha256:<hex>` digest, so it MUST resolve to a registry digest — NOT the
+# local image ID `{{index .Image}}` reports, which never equals a release
+# digest and would make every successful self-swap look like "still on the
+# old image" (bogus rollback) or let a real sabotage go undetected.
+#
+# Order of preference:
+#   1. a RepoDigest (`repo@sha256:<hex>`) — the pinned registry ref. When the
+#      image carries SEVERAL RepoDigests (multiple tags/mirrors of the same
+#      pushed image) any of them is a valid pin; we take the first, and its
+#      `@sha256:` matches the manifest digest via imageRefMatchesDigest.
+#   2. the local image ID (`sha256:<hex>` from `.Id`) — the DOCUMENTED
+#      fallback for a locally-built, never-pushed image with ZERO RepoDigests.
+#      This never matches a release digest (by design — that IS the resume
+#      signal), but it is still the correct `previous`-target rollback pin.
+image_ref_for_cid() {
+  # $1 = container id. Prints the RepoDigest ref, else the image ID, else "".
+  local cid="$1" repo_digests image_id
+  # First RepoDigest, if any (newline-joined; take the first non-empty line).
+  repo_digests="$(run_capture docker inspect \
+    --format '{{range .RepoDigests}}{{println .}}{{end}}' "$cid")"
+  local ref
+  ref="$(printf '%s\n' "$repo_digests" | awk 'NF { print; exit }')"
+  if [ -n "$ref" ]; then
+    printf '%s' "$ref"
+    return 0
+  fi
+  # Zero RepoDigests → locally-built, never-pushed: fall back to the image ID.
+  image_id="$(run_capture docker inspect --format '{{.Id}}' "$cid")"
+  printf '%s' "$image_id"
+}
+
 cmd_current_image_refs() {
   validate_services "$SERVICES"
   if [ -n "$DRY_RUN" ]; then
@@ -201,8 +234,8 @@ cmd_current_image_refs() {
     return 0
   fi
   # Build a JSON object mapping each service to the image ref its running
-  # container reports (repo digest when pulled, image ID for local builds),
-  # or null when the service has no running container on this box.
+  # container reports (registry RepoDigest when pulled/pushed, image ID for a
+  # locally-built image), or null when the service has no running container.
   local first=1
   printf '{'
   local svc cid ref
@@ -211,8 +244,7 @@ cmd_current_image_refs() {
     [ -z "$svc" ] && continue
     cid="$(run_capture docker compose -f "$COMPOSE_FILE" ps -q "$svc")"
     if [ -n "$cid" ]; then
-      # Prefer the RepoDigest (pinned registry ref); fall back to the image ID.
-      ref="$(run_capture docker inspect --format '{{index .Image}}' "$cid")"
+      ref="$(image_ref_for_cid "$cid")"
     else
       ref=""
     fi
@@ -287,7 +319,14 @@ cmd_recreate_services() {
   override="$(override_file "$UPDATE_ID" "$TARGET")"
   require_pin_file "$override" "per-target override"
   log "recreate-services [$SERVICES] target=$TARGET override=$override"
-  local svc
+  # Capture failures PER SERVICE instead of aborting the loop on the first
+  # one. Under `set -e` a single failing `docker compose up` would abort here,
+  # leaving the services BEFORE it on the new digest and the ones AFTER it on
+  # the old digest — an unobservable mixed-version state. Instead we attempt
+  # EVERY service, collect the ones that failed, and return the list to the
+  # caller (JSON on stdout + non-zero exit) so the outcome is actionable.
+  local svc rc=0
+  local failed=()
   local IFS=','
   for svc in $SERVICES; do
     [ -z "$svc" ] && continue
@@ -298,8 +337,25 @@ cmd_recreate_services() {
     # --pull never: the release refs were pulled in step 2, the previous
     #   refs are already present — a pull here could only surprise us;
     # --force-recreate: swap even when compose thinks nothing changed.
-    dc_pinned "$override" up -d --no-deps --no-build --pull never --force-recreate "$svc"
+    # `|| { … }` keeps a failing recreate from tripping `set -e` so the loop
+    # walks every remaining service before we report.
+    if ! dc_pinned "$override" up -d --no-deps --no-build --pull never --force-recreate "$svc"; then
+      log "recreate FAILED for $svc (target=$TARGET) — continuing to the next service"
+      failed+=("$svc")
+      rc=1
+    fi
   done
+  # Structured, observable outcome: {"failed":["svcA",…]} on stdout. The
+  # runner (host-compose-runner.ts) parses this and surfaces a typed error
+  # naming the services that did not swap, instead of a bare mid-loop abort.
+  unset IFS
+  local joined=""
+  local f
+  for f in ${failed[@]+"${failed[@]}"}; do
+    [ -z "$joined" ] && joined="\"$f\"" || joined="$joined,\"$f\""
+  done
+  printf '{"failed":[%s]}\n' "$joined"
+  return "$rc"
 }
 
 cmd_restore_configs() {
@@ -395,7 +451,22 @@ cmd_recreate_self_detached() {
   # against the host daemon — not a compose service. The DB verdict is
   # written later by whichever orchestrator boots (resumeInterruptedApply).
   local helper_name="droplet-ota-self-swap-$UPDATE_ID"
-  run docker run -d --rm \
+
+  # Collision guard: a retried apply for the SAME update id would hit a name
+  # clash on the still-present (see below) previous helper. Remove any prior
+  # helper of this name first — force so a stuck one doesn't block the retry.
+  # Best-effort: no prior helper is the normal case, so a failure here (none
+  # to remove) must not abort the launch.
+  run_capture docker rm -f "$helper_name"
+
+  # NOTE: intentionally NOT `--rm`. On an unattended fleet the helper's own
+  # logs are the ONLY forensic trail if the ROLLBACK itself fails (the DB
+  # verdict is written by the resumed orchestrator, but a failed rollback may
+  # leave no orchestrator to write it). `--rm` would delete that container —
+  # and its logs — the instant it exits. The container is instead reaped by
+  # the collision guard above on the next apply, so `docker logs
+  # droplet-ota-self-swap-<id>` survives for post-mortem in between.
+  run docker run -d \
     --name "$helper_name" \
     -v /var/run/docker.sock:/var/run/docker.sock \
     -v "$COMPOSE_FILE:$COMPOSE_FILE:ro" \

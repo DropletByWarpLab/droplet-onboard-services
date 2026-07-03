@@ -107,7 +107,11 @@ export function defaultExec(): ExecFn {
         { timeout: opts?.timeoutMs ?? 120_000, maxBuffer: 8 * 1024 * 1024 },
         (err, stdout, stderr) => {
           if (err) {
-            (err as Error & { stderr?: string }).stderr = stderr;
+            // Carry BOTH streams onto the error: a non-zero exit can still
+            // print a structured payload on stdout (recreate-services'
+            // {"failed":[…]} list) that the caller needs to surface.
+            (err as Error & { stdout?: string; stderr?: string }).stdout = stdout;
+            (err as Error & { stdout?: string; stderr?: string }).stderr = stderr;
             reject(err);
             return;
           }
@@ -168,6 +172,49 @@ function composeOverrideYaml(
     lines.push(`  ${pin.name}:`, `    image: ${pin.image}`);
   }
   return `${lines.join("\n")}\n`;
+}
+
+/**
+ * Raised when `recreate-services` reports that one or more services failed to
+ * recreate. The script attempts EVERY service (no mid-loop abort) and returns
+ * the failed names as {"failed":[…]}; this error names them so the caller
+ * (and its logs) can see exactly which services did NOT swap, instead of a
+ * bare "command failed" that hides the mixed-version state.
+ */
+export class RecreateServicesError extends Error {
+  readonly failedServices: string[];
+  readonly target: RecreateTarget;
+  constructor(target: RecreateTarget, failedServices: string[], cause?: unknown) {
+    super(
+      `OTA recreate-services (${target}) failed for: ${failedServices.join(", ")}`,
+    );
+    this.name = "RecreateServicesError";
+    this.failedServices = failedServices;
+    this.target = target;
+    if (cause !== undefined) (this as Error & { cause?: unknown }).cause = cause;
+  }
+}
+
+/**
+ * Pull the structured {"failed":[…]} list off a recreate-services result —
+ * from the stdout of a clean run, or from the stdout the script printed
+ * alongside its non-zero exit (attached to the thrown error by defaultExec).
+ * Returns null when there is no parseable payload.
+ */
+function parseFailedServices(text: string | undefined): string[] | null {
+  if (!text) return null;
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start === -1 || end === -1 || end < start) return null;
+  try {
+    const parsed = JSON.parse(text.slice(start, end + 1)) as { failed?: unknown };
+    if (Array.isArray(parsed.failed)) {
+      return parsed.failed.filter((s): s is string => typeof s === "string");
+    }
+  } catch {
+    // Not JSON — fall through to null (an unexpected failure shape).
+  }
+  return null;
 }
 
 export function createHostComposeRunner(opts: HostComposeRunnerOptions): ApplyRunner {
@@ -312,18 +359,34 @@ export function createHostComposeRunner(opts: HostComposeRunnerOptions): ApplyRu
       services: string[];
       target: RecreateTarget;
     }): Promise<void> {
-      await run(
-        "recreate-services",
-        [
-          "--update-id",
-          args.updateId,
-          "--services",
-          args.services.join(","),
-          "--target",
-          args.target,
-        ],
-        timeouts.recreateMs,
-      );
+      const argv = [
+        "--update-id",
+        args.updateId,
+        "--services",
+        args.services.join(","),
+        "--target",
+        args.target,
+      ];
+      let stdout: string;
+      try {
+        stdout = await run("recreate-services", argv, timeouts.recreateMs);
+      } catch (err) {
+        // The script attempts every service and reports the failures as
+        // {"failed":[…]} on stdout even when it exits non-zero. Surface that
+        // list as a typed error naming the services that did not swap; if
+        // there's no parseable list, re-throw the original (some other fault).
+        const failed = parseFailedServices((err as { stdout?: string }).stdout);
+        if (failed && failed.length > 0) {
+          throw new RecreateServicesError(args.target, failed, err);
+        }
+        throw err;
+      }
+      // A clean (exit-0) run still reports {"failed":[]}; a non-empty list on
+      // a zero exit would be a script contract violation — surface it too.
+      const failed = parseFailedServices(stdout);
+      if (failed && failed.length > 0) {
+        throw new RecreateServicesError(args.target, failed);
+      }
     },
 
     async restoreConfigs(args: { updateId: string }): Promise<void> {

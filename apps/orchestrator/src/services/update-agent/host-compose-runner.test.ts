@@ -254,6 +254,52 @@ describe("createHostComposeRunner (WARP-539)", () => {
     expect(calls[0]!.args).toContain("release");
   });
 
+  it("recreateServices surfaces the per-service failure list when a recreate fails", async () => {
+    // The script attempts EVERY service and reports the ones that failed as
+    // {"failed":[…]} on stdout with a non-zero exit (WARP-539 finding 2) —
+    // the runner must turn that into a typed error naming the services that
+    // did not swap, not swallow it into a bare "command failed".
+    const calls: Array<{ file: string; args: string[] }> = [];
+    const failingExec: ExecFn = async (file, args) => {
+      calls.push({ file, args });
+      const err = new Error("Command failed") as Error & {
+        stdout?: string;
+        stderr?: string;
+      };
+      err.stdout = JSON.stringify({ failed: ["routing", "web-dashboard"] });
+      err.stderr = "[apply-update] recreate FAILED for routing";
+      throw err;
+    };
+    const runner = makeRunner(failingExec);
+
+    await expect(
+      runner.recreateServices({
+        updateId: "du-1",
+        services: ["web-dashboard", "routing", "orchestrator"],
+        target: "release",
+      }),
+    ).rejects.toThrow(/routing/);
+    await expect(
+      runner.recreateServices({
+        updateId: "du-1",
+        services: ["web-dashboard", "routing", "orchestrator"],
+        target: "release",
+      }),
+    ).rejects.toThrow(/web-dashboard/);
+  });
+
+  it("recreateServices resolves cleanly when the failure list is empty", async () => {
+    const { fn } = fakeExec({ "recreate-services": JSON.stringify({ failed: [] }) });
+    const runner = makeRunner(fn);
+    await expect(
+      runner.recreateServices({
+        updateId: "du-1",
+        services: ["web-dashboard", "routing"],
+        target: "release",
+      }),
+    ).resolves.toBeUndefined();
+  });
+
   it("recreateSelfDetached launches the self-swap subcommand with the target", async () => {
     const { fn, calls } = fakeExec();
     const runner = makeRunner(fn);

@@ -68,8 +68,17 @@ printf '%s\0' "$@" > "$DOCKER_STUB_DIR/call-$n"
 case "${1:-}" in
   compose)
     # docker compose … ps -q orchestrator → the scripted container id.
+    # docker compose … up …  → fail the recreate of any service named in
+    #   DOCKER_STUB_FAIL_RECREATE (comma list) so the per-service capture
+    #   path is exercised; the failing service is the LAST argv token.
     case "$*" in
       *" ps -q "*) printf '%s\n' "${DOCKER_STUB_PS_CID:-}" ;;
+      *" up "*)
+        svc="${!#}"
+        case ",${DOCKER_STUB_FAIL_RECREATE:-}," in
+          *",$svc,"*) echo "stub: recreate of $svc failed" >&2; exit 1 ;;
+        esac
+        ;;
     esac
     exit 0
     ;;
@@ -78,6 +87,16 @@ case "${1:-}" in
       *Mounts*)
         # Mounts listing: scripted "name|source|destination" lines.
         printf '%s\n' "${DOCKER_STUB_MOUNTS:-}"
+        ;;
+      *RepoDigests*)
+        # RepoDigests listing (current-image-refs): scripted newline-joined
+        # "repo@sha256:…" refs per DOCKER_STUB_REPO_DIGESTS; empty models a
+        # locally-built, never-pushed image (zero RepoDigests).
+        printf '%s' "${DOCKER_STUB_REPO_DIGESTS:-}"
+        ;;
+      *.Id*|*Image*)
+        # Image ID fallback for a zero-RepoDigests image.
+        printf '%s\n' "${DOCKER_STUB_IMAGE_ID:-}"
         ;;
       *State.Health*)
         # Healthcheck probe: healthy from the Nth call onward.
@@ -109,6 +128,9 @@ run_apply() {
   DOCKER_STUB_DIR="$STUB_DIR" \
   DOCKER_STUB_PS_CID="${DOCKER_STUB_PS_CID:-}" \
   DOCKER_STUB_MOUNTS="${DOCKER_STUB_MOUNTS:-}" \
+  DOCKER_STUB_FAIL_RECREATE="${DOCKER_STUB_FAIL_RECREATE:-}" \
+  DOCKER_STUB_REPO_DIGESTS="${DOCKER_STUB_REPO_DIGESTS:-}" \
+  DOCKER_STUB_IMAGE_ID="${DOCKER_STUB_IMAGE_ID:-}" \
   DROPLET_OTA_UPDATES_DIR="$UPDATES_DIR" \
   bash "$APPLY_SH" "$@"
 }
@@ -180,6 +202,69 @@ echo ""
 echo "  ================================================"
 echo "  apply-update.sh Integration Tests (WARP-539)"
 echo "  ================================================"
+
+# =============================================================================
+# Phase 0 — current-image-refs must report the REGISTRY DIGEST (RepoDigests),
+# NOT the local image ID. imageRefMatchesDigest (apply.ts) compares the
+# reported ref against the manifest sha256; a bare image ID never matches a
+# release digest, so a successful self-swap would be misdiagnosed as "still
+# on the old image" and rolled back. (Romain review finding 1, WARP-539.)
+# =============================================================================
+echo ""
+echo "--- Phase 0: current-image-refs reports the RepoDigest ---"
+
+# A pulled/tagged image: docker inspect .RepoDigests carries repo@sha256:… .
+stub_reset
+export DOCKER_STUB_PS_CID="orch-cid"
+REPO_REF="ghcr.io/dropletbywarplab/orchestrator@sha256:$HEX_A"
+OUT="$(DOCKER_STUB_REPO_DIGESTS="$REPO_REF" DOCKER_STUB_IMAGE_ID="sha256:$HEX_D" \
+  run_apply current-image-refs --compose-file "$COMPOSE_FILE" --services orchestrator 2>/dev/null)"
+if [ "$OUT" = "{\"orchestrator\":\"$REPO_REF\"}" ]; then
+  pass "current-image-refs reports the RepoDigest ref for a pulled image"
+else
+  fail "current-image-refs did not report the RepoDigest (got: $OUT)"
+fi
+if grep -q "index .Image" "$STUB_DIR/calls.log" 2>/dev/null; then
+  fail "current-image-refs still inspects the local image ID ({{index .Image}})"
+else
+  pass "current-image-refs no longer inspects {{index .Image}}"
+fi
+
+# Multiple RepoDigests: match must resolve to a RepoDigest ref (not the ID).
+stub_reset
+export DOCKER_STUB_PS_CID="orch-cid"
+MULTI="ghcr.io/mirror/orchestrator@sha256:$HEX_B
+ghcr.io/dropletbywarplab/orchestrator@sha256:$HEX_A"
+OUT="$(DOCKER_STUB_REPO_DIGESTS="$MULTI" DOCKER_STUB_IMAGE_ID="sha256:$HEX_D" \
+  run_apply current-image-refs --compose-file "$COMPOSE_FILE" --services orchestrator 2>/dev/null)"
+case "$OUT" in
+  *"@sha256:$HEX_A"*|*"@sha256:$HEX_B"*)
+    pass "current-image-refs picks a RepoDigest when several are present" ;;
+  *) fail "current-image-refs did not pick a RepoDigest for a multi-digest image (got: $OUT)" ;;
+esac
+
+# Zero RepoDigests (locally-built, never pushed): fall back to the image ID
+# EXPLICITLY (documented) — the previous-target rollback pin still resolves.
+stub_reset
+export DOCKER_STUB_PS_CID="orch-cid"
+OUT="$(DOCKER_STUB_REPO_DIGESTS="" DOCKER_STUB_IMAGE_ID="sha256:$HEX_D" \
+  run_apply current-image-refs --compose-file "$COMPOSE_FILE" --services orchestrator 2>/dev/null)"
+if [ "$OUT" = "{\"orchestrator\":\"sha256:$HEX_D\"}" ]; then
+  pass "current-image-refs falls back to the image ID when RepoDigests is empty"
+else
+  fail "current-image-refs did not fall back to the image ID for a local build (got: $OUT)"
+fi
+
+# No running container → null.
+stub_reset
+export DOCKER_STUB_PS_CID=""
+OUT="$(run_apply current-image-refs --compose-file "$COMPOSE_FILE" --services orchestrator 2>/dev/null)"
+if [ "$OUT" = '{"orchestrator":null}' ]; then
+  pass "current-image-refs reports null for a service with no running container"
+else
+  fail "current-image-refs did not report null for an absent container (got: $OUT)"
+fi
+unset DOCKER_STUB_PS_CID DOCKER_STUB_REPO_DIGESTS DOCKER_STUB_IMAGE_ID
 
 # =============================================================================
 # Phase 1 — recreate-services: per-target pinning via the compose override
@@ -257,6 +342,45 @@ else
   pass "--target rejects values outside release|previous"
 fi
 
+# --- per-service failure capture: one failing recreate must NOT abort the
+#     loop mid-way (leaving later services on the old digest); every service
+#     is attempted and the failures are reported as a structured list.
+#     (Romain review finding 2, WARP-539.) ---
+stub_reset
+FAIL_OUT="$(DOCKER_STUB_FAIL_RECREATE=routing \
+  run_apply recreate-services --compose-file "$COMPOSE_FILE" \
+  --update-id "$UPDATE_ID" --services web-dashboard,routing,orchestrator \
+  --target release 2>/dev/null)"; FAIL_RC=$?
+if [ "$FAIL_RC" -ne 0 ]; then
+  pass "recreate-services exits non-zero when a service fails to recreate"
+else
+  fail "recreate-services returned 0 despite a failed recreate"
+fi
+# Every service is attempted — the loop did NOT abort after routing failed.
+for svc in web-dashboard routing orchestrator; do
+  if grep -qF -- "--force-recreate $svc" "$STUB_DIR/calls.log"; then
+    pass "recreate-services attempted $svc despite an earlier failure"
+  else
+    fail "recreate-services skipped $svc — the loop aborted mid-way"
+  fi
+done
+# The outcome names the failed service in a structured (JSON) failure list.
+if printf '%s' "$FAIL_OUT" | grep -q '"failed"' && printf '%s' "$FAIL_OUT" | grep -q 'routing'; then
+  pass "recreate-services reports a structured failure list naming the failed service"
+else
+  fail "recreate-services failure output not structured/observable (got: $FAIL_OUT)"
+fi
+# A clean run reports no failures (empty list) and exits 0.
+stub_reset
+OK_OUT="$(run_apply recreate-services --compose-file "$COMPOSE_FILE" \
+  --update-id "$UPDATE_ID" --services web-dashboard,routing \
+  --target release 2>/dev/null)"; OK_RC=$?
+if [ "$OK_RC" -eq 0 ] && printf '%s' "$OK_OUT" | grep -q '"failed":\[\]'; then
+  pass "recreate-services reports an empty failure list on a clean run"
+else
+  fail "recreate-services clean run not reported as empty failures (rc=$OK_RC out=$OK_OUT)"
+fi
+
 # =============================================================================
 # Phase 2 — resolved image refs: base + override must RESOLVE per service
 # (real `docker compose config`, client-side; this is the merge strategy that
@@ -323,6 +447,30 @@ for want in \
     fail "helper launch missing '$want' (got: $RUN_LINE)"
   fi
 done
+
+# Rollback forensics (Romain review finding 3): the helper must NOT be
+# launched with --rm (its logs are the only forensic trail if rollback
+# itself fails on an unattended fleet), and a `docker rm -f
+# droplet-ota-self-swap-<id>` collision guard must run BEFORE the launch so
+# a retried apply for the same update id can't hit a name clash.
+if [[ "$RUN_LINE" == *" --rm "* ]]; then
+  fail "helper launch still uses --rm — rollback logs would be destroyed on exit"
+else
+  pass "helper launch drops --rm (logs survive for post-rollback forensics)"
+fi
+if grep -qF -- "rm -f droplet-ota-self-swap-$UPDATE_ID" "$STUB_DIR/calls.log"; then
+  pass "a docker rm -f collision guard runs before the helper launch"
+else
+  fail "no docker rm -f collision guard before the helper launch"
+fi
+# Ordering: the collision guard must precede the launch.
+GUARD_N="$(grep -n "rm -f droplet-ota-self-swap-$UPDATE_ID" "$STUB_DIR/calls.log" | head -1 | cut -d: -f1)"
+RUN_N="$(grep -n '^run ' "$STUB_DIR/calls.log" | head -1 | cut -d: -f1)"
+if [ -n "$GUARD_N" ] && [ -n "$RUN_N" ] && [ "$GUARD_N" -lt "$RUN_N" ]; then
+  pass "collision guard is recorded before the helper launch"
+else
+  fail "collision guard did not precede the helper launch (guard=$GUARD_N run=$RUN_N)"
+fi
 
 # Extract the helper's argv: the recorded `docker run …` call.
 HELPER_CALL=""
