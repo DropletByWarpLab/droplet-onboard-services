@@ -132,6 +132,25 @@ describe("AddMatterDevicePage — BLE-unavailable notice (WARP-851)", () => {
     expect(preflight).toHaveTextContent(/already on your wi-?fi are added in place/i);
   });
 
+  // UX review (WARP-1035): the pre-flight paragraph is load-bearing
+  // instructional copy, not incidental metadata — it must use the
+  // readable secondary label token, not the 0.3-alpha tertiary one
+  // (~1.7:1 at 13 px fails WCAG 1.4.3; see the WARP-611 precedent).
+  it("renders the pre-flight copy with readable-contrast secondary label token", async () => {
+    capabilitiesSpy.mockResolvedValue({
+      bleCommissioning: true,
+      wifiProvisioning: true,
+      apSsid: "Droplet-AP7",
+    });
+    render(<AddMatterDevicePage />);
+
+    const preflight = await screen.findByText(
+      /the droplet does the pairing/i,
+    );
+    expect(preflight).toHaveClass("text-label-secondary");
+    expect(preflight).not.toHaveClass("text-label-tertiary");
+  });
+
   it("surfaces the network-discovery copy (not factory-reset advice) on a 502 discovery failure", async () => {
     capabilitiesSpy.mockResolvedValue({ bleCommissioning: false });
     // What commissionMatterDevice throws after the orchestrator's

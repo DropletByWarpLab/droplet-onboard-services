@@ -139,7 +139,7 @@ export default function AddMatterDevicePage() {
             box-side); say which network actually matters, naming the
             real AP SSID — and only promise the Droplet-Wi-Fi handoff
             when the capability says it works. */}
-        <p className="type-footnote text-label-tertiary mt-2">
+        <p className="type-footnote text-label-secondary mt-2">
           {"Your phone or computer just needs to reach this dashboard — the Droplet does the pairing. " +
             (wifiProvisioning
               ? `New devices pair over Bluetooth and join the Droplet's own Wi-Fi (“${caps?.apSsid ?? "Droplet"}”); devices already on your Wi-Fi are added in place.`
