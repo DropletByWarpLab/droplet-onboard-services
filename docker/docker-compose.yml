@@ -1627,6 +1627,50 @@ services:
     cpus: ${CLOUDFLARED_CPUS:-0.5}
     pids_limit: ${CLOUDFLARED_PIDS_LIMIT:-512}
 
+  # --- Fleet telemetry agent (WARP-963) ---
+  # Outbound-only, fail-open push of operational telemetry (heartbeat /
+  # metrics / errors / inventory / network shape) to the Warp Lab analytics
+  # portal over the frozen droplet-analytics agent API. DOUBLE-gated:
+  # profile `telemetry` (a default box never starts the container) AND
+  # DROPLET_TELEMETRY_ENABLED=1 + credentials inside the process (a started
+  # container with the flag off idles with ZERO egress). v1 answers every
+  # portal command with an explicit "unsupported" — no remote actuation.
+  # Egress audit table: services/fleet-agent/README.md (ADR-012 discipline).
+  fleet-agent:
+    build:
+      # Repo-root context for the shared FIPS config + helper (WARP-229),
+      # mirroring camera-discovery / ai-gateway.
+      context: ..
+      dockerfile: services/fleet-agent/Dockerfile
+    # RegisterRequest.hostname is captured ONCE into the portal's
+    # Machine.hostname — the operator-facing fleet identifier. config.py
+    # falls back to socket.gethostname() when DROPLET_HOSTNAME is empty,
+    # and inside a container that is Docker's random hex container id;
+    # pin the container hostname so the fallback is a stable, honest
+    # name instead. Mirrors device-identity's DROPLET_DEVICE_ID default.
+    hostname: ${DROPLET_HOSTNAME:-droplet}
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      - DROPLET_TELEMETRY_ENABLED=${DROPLET_TELEMETRY_ENABLED:-0}
+      - DROPLET_TELEMETRY_PORTAL_URL=${DROPLET_TELEMETRY_PORTAL_URL:-https://analytics.warp-lab.ai/api/v1}
+      - DROPLET_TELEMETRY_PROVISIONING_CODE=${DROPLET_TELEMETRY_PROVISIONING_CODE:-}
+      - DROPLET_TELEMETRY_GEO_COUNTRY=${DROPLET_TELEMETRY_GEO_COUNTRY:-}
+      - DROPLET_TELEMETRY_GEO_REGION=${DROPLET_TELEMETRY_GEO_REGION:-}
+      - DROPLET_FIRMWARE_VERSION=${DROPLET_FIRMWARE_VERSION:-}
+      - DROPLET_TIER=${DROPLET_TIER:-home}
+      - DROPLET_HOSTNAME=${DROPLET_HOSTNAME:-}
+    volumes:
+      # Ingest token + bounded heartbeat spool. Runtime-only, never tracked.
+      - fleet-agent-state:/var/lib/droplet/fleet-agent
+    profiles: ["telemetry"]
+    restart: unless-stopped
+    <<: *default-logging
+    mem_limit: ${FLEET_AGENT_MEM_LIMIT:-64m}
+    cpus: ${FLEET_AGENT_CPUS:-0.25}
+    pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
+
 secrets:
   # WARP-37: OpenWrt router password mounted read-only at /run/secrets/openwrt_password
   # in the routing container. Written by scripts/setup.sh from $OPENWRT_PASSWORD.
@@ -1678,3 +1722,7 @@ volumes:
   ollama-data:
   openwrt-config:
   openwrt-overlay:
+  # WARP-963 — fleet-agent runtime state: portal ingest token (identity.json,
+  # a credential — named volume, never a tracked file) + the bounded offline
+  # heartbeat spool. Only materialized when the `telemetry` profile is active.
+  fleet-agent-state:
