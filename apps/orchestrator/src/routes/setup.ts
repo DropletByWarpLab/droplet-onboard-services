@@ -82,6 +82,7 @@ import { verifyAccessToken } from "../services/jwt.service.js";
 import { SESSION_COOKIE_NAME } from "../middleware/auth.js";
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
 import { kickScreenQRRefresh } from "../services/screen-qr.service.js";
+import { warmDefaultModel } from "../services/model-readiness.service.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("setup-route");
@@ -266,6 +267,26 @@ function toWire(state: SetupState): {
 // `appliance` only ever moves forward to "ready" (the wizard-finish
 // transition) — "unclaimed" is the boot default and isn't a client-driven
 // target. `user_tour_completed` only flips true (you can't un-see the tour).
+/**
+ * WARP-1041 — wizard steps whose persistence means the customer is in the
+ * BACK HALF of setup: minutes away from the AI step, which is exactly the
+ * lead time the 30-90 s GPU model load needs. Reaching (or resuming at)
+ * any of these fires a fire-and-forget model warm AFTER the response is
+ * sent. `storage` is the primary trigger (storage → discovery → cameras →
+ * vpn → ai is minutes of wizard time); the later steps cover mid-wizard
+ * resumes that land past storage. The warm itself is debounced 10 min
+ * inside model-readiness.service, so repeated PATCHes — including abuse of
+ * this pre-auth route — are free, and the worst an anonymous caller can do
+ * is load the box's own configured model.
+ */
+const WARM_TRIGGER_STEPS = new Set([
+  "storage",
+  "discovery",
+  "cameras",
+  "vpn",
+  "ai",
+]);
+
 const patchSchema = z
   .object({
     setup_step: z.string().min(1).optional(),
@@ -293,12 +314,17 @@ export function createSetupRouter(
      *  `createBoxNameClaimer()` (real HQ + device-identity); route tests inject a
      *  fake so no HQ / sidecar is touched. */
     claimBoxName?: BoxNameClaimer;
+    /** WARP-1041 — fire-and-forget model pre-warm. Defaults to the
+     *  production `warmDefaultModel` (debounced, error-swallowing); route
+     *  tests inject a spy so no Ollama is touched. */
+    warmDefaultModel?: () => Promise<void>;
   },
 ): Router {
   const router = Router();
   const persistBoxNameToHost =
     deps?.persistBoxNameToHost ?? createBridgeBoxNamePersister();
   const claimBoxNameToHq = deps?.claimBoxName ?? createBoxNameClaimer();
+  const warmModel = deps?.warmDefaultModel ?? warmDefaultModel;
 
   // ── GET /api/setup/state ───────────────────────────────────────
   router.get("/setup/state", async (_req: Request, res, next) => {
@@ -386,6 +412,21 @@ export function createSetupRouter(
       // `latest` is guaranteed non-null: the schema's refine() rejects an
       // empty patch, so at least one branch above ran.
       res.json(toWire(latest ?? (await getSetupState(prisma))));
+
+      // WARP-1041 — the wizard just advanced into the back half of setup:
+      // start loading the chat model into GPU memory NOW so the AI step's
+      // first ask lands warm. Strictly after the response (setImmediate),
+      // never awaited — a hung/cold Ollama can never stall the wizard.
+      // Errors are already swallowed inside warmDefaultModel; the extra
+      // catch guards an injected/overridden implementation.
+      if (
+        body.setup_step !== undefined &&
+        WARM_TRIGGER_STEPS.has(body.setup_step)
+      ) {
+        setImmediate(() => {
+          void warmModel().catch(() => undefined);
+        });
+      }
     } catch (err) {
       if (err instanceof InvalidSetupStepError) {
         res.status(400).json({ error: err.message, code: err.code });
