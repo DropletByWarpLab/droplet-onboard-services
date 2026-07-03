@@ -110,13 +110,25 @@ def test_md5_probe_detects_openssl_rejection_despite_builtin_fallback(monkeypatc
     path directly, not `hashlib.new`'s builtin-fallback wrapper."""
     import _hashlib
 
+    seen_kwargs: dict = {}
+
     def _reject(name, *args, **kwargs):
+        seen_kwargs.update(kwargs)
         raise ValueError("[digital envelope routines] unsupported")
 
     monkeypatch.setattr(_hashlib, "new", _reject)
     err = md5_should_fail()
     assert err is not None
     assert "unsupported" in err
+    # Pin that the probe forwards usedforsecurity=True to the OpenSSL
+    # path. Asserted here (after the call) rather than inside the stub:
+    # md5_should_fail() swallows any exception the stub raises, so an
+    # in-stub AssertionError would be masked as a rejection string.
+    # This is not cosmetic — with usedforsecurity=False CPython fetches
+    # MD5 with the "-fips" property, MD5 *succeeds* under a correctly
+    # enforcing provider, and the WARP-1018 boot-refusal symptom returns
+    # via a different path.
+    assert seen_kwargs.get("usedforsecurity") is True
 
 
 def test_md5_probe_reports_generic_reason_when_error_message_empty(monkeypatch):
