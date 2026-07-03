@@ -1413,8 +1413,12 @@ services:
       - OPS_PROBE_AI_GATEWAY=${OPS_PROBE_AI_GATEWAY:-http://ai-gateway:8000/ai/health}
       - OPS_PROBE_VOICE=${OPS_PROBE_VOICE:-http://voice-io:8086/health}
       - OPS_PROBE_FRIGATE=${OPS_PROBE_FRIGATE:-http://frigate:5000/healthz}
+      # WARP-535: dashboard ships /healthz — probe via service DNS. The
+      # default must live HERE too, not just in ops/services.py: this
+      # line injects the env as an empty string when .env omits it, and
+      # an empty (but set) env overrides the Python-side default.
+      - OPS_PROBE_WEB_DASHBOARD=${OPS_PROBE_WEB_DASHBOARD:-http://web-dashboard:3001/healthz}
       # Workers / no-HTTP-by-design — leave defaults empty:
-      - OPS_PROBE_WEB_DASHBOARD=${OPS_PROBE_WEB_DASHBOARD:-}
       - OPS_PROBE_FILE_INDEXER=${OPS_PROBE_FILE_INDEXER:-}
       - OPS_PROBE_CAMERA_DISCOVERY=${OPS_PROBE_CAMERA_DISCOVERY:-}
       - OPS_PROBE_DEVICE_IDENTITY=${OPS_PROBE_DEVICE_IDENTITY:-}
