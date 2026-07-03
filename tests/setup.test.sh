@@ -953,7 +953,296 @@ else
 fi
 
 # =============================================================================
-# Phase 9: interrupted re-run convergence (WARP-595)
+# Phase 9: public-FQDN write-back under the bridge sandbox (WARP-985)
+# =============================================================================
+# The TLS boot-tick issued the cert, then the bridge-exec'd
+# droplet-set-public-fqdn.sh died with mktemp EROFS: the bridge unit's
+# ProtectSystem=strict + ProtectHome=read-only had no writable carve-out for
+# the repo dir where .env lives. Two side gaps rode along: the bridge env
+# never carried ROUTING_SERVICE_TOKEN (routing-DNS leg 401'd), and
+# _write_host_dnsmasq_record's sudo failed silently under NoNewPrivileges.
+# Static assertions verify the wiring; behavioural assertions exercise the
+# REAL host script via its DROPLET_PUBLIC_FQDN_ENV_FILE/SKIP_DNS test hooks.
+echo "--- Phase 9: bridge sandbox FQDN write-back (WARP-985) ---"
+
+FQDN_SCRIPT="$REPO_ROOT_REAL/scripts/host/droplet-set-public-fqdn.sh"
+LOCAL_DNS_LIB="$REPO_ROOT_REAL/scripts/lib/local-dns.sh"
+BRIDGE_UNIT="$REPO_ROOT_REAL/services/oled-display/droplet-device-bridge.service"
+
+# (1) Syntax: both touched scripts must pass bash -n.
+if bash -n "$FQDN_SCRIPT" 2>/dev/null; then
+  pass "droplet-set-public-fqdn.sh passes bash -n syntax check"
+else
+  fail "droplet-set-public-fqdn.sh has a bash syntax error"
+fi
+if bash -n "$LOCAL_DNS_LIB" 2>/dev/null; then
+  pass "local-dns.sh passes bash -n syntax check"
+else
+  fail "local-dns.sh has a bash syntax error"
+fi
+
+# (2) Static: the bridge unit must carve the repo dir out of the read-only
+# sandbox (`-` prefix so a moved checkout doesn't fail unit start). The
+# @REPO_ROOT@ placeholder is substituted by install-device-bridge.sh, same as
+# ExecStart.
+if grep -qxF 'ReadWritePaths=-@REPO_ROOT@' "$BRIDGE_UNIT"; then
+  pass "bridge unit carves the repo dir out of the sandbox (ReadWritePaths=-@REPO_ROOT@)"
+else
+  fail "bridge unit has no ReadWritePaths=-@REPO_ROOT@ — the .env write-back dies with mktemp EROFS"
+fi
+
+# ...without losing the per-unit log carve-out that append:/var/log needs.
+if grep -qxF 'ReadWritePaths=/var/log/droplet-device-bridge.log' "$BRIDGE_UNIT"; then
+  pass "bridge unit keeps the log-file ReadWritePaths carve-out"
+else
+  fail "bridge unit lost ReadWritePaths=/var/log/droplet-device-bridge.log (append: logging breaks)"
+fi
+
+# (3) Static: the installer must mirror ROUTING_SERVICE_TOKEN into the bridge
+# env (same set_env_if_blank mechanism as BRIDGE_AUTH_TOKEN) so the host
+# script's routing-DNS leg authenticates instead of 401ing.
+if grep -qE 'set_env_if_blank "ROUTING_SERVICE_TOKEN"' "$BRIDGE_INSTALL"; then
+  pass "install-device-bridge.sh mirrors ROUTING_SERVICE_TOKEN into the bridge env"
+else
+  fail "install-device-bridge.sh does not mirror ROUTING_SERVICE_TOKEN — POST /dhcp/hostnames 401s from the bridge"
+fi
+
+# (4) Static: _write_host_dnsmasq_record must probe non-interactive sudo before
+# using it (NoNewPrivileges blocks sudo silently under the bridge sandbox).
+if grep -qE 'sudo -n true' "$LOCAL_DNS_LIB"; then
+  pass "local-dns.sh probes non-interactive sudo before the host dnsmasq write"
+else
+  fail "local-dns.sh has no 'sudo -n true' probe — the dnsmasq write fails silently under the bridge sandbox"
+fi
+
+# --- Behavioural: the real host script via its test hooks ---------------------
+FQDN_ENV="$TMP_ROOT/fqdn.env"
+rm -f "$FQDN_ENV"
+
+# (5) Fresh file: a valid opaque per-device FQDN is upserted.
+if DROPLET_PUBLIC_FQDN_ENV_FILE="$FQDN_ENV" DROPLET_PUBLIC_FQDN_SKIP_DNS=1 \
+     bash "$FQDN_SCRIPT" 'd-b5839920cb1b0d09.droplet-us.com' >/dev/null 2>&1 \
+   && grep -qxF 'DROPLET_PUBLIC_FQDN=d-b5839920cb1b0d09.droplet-us.com' "$FQDN_ENV"; then
+  pass "droplet-set-public-fqdn.sh writes DROPLET_PUBLIC_FQDN to a fresh .env"
+else
+  fail "droplet-set-public-fqdn.sh did not write DROPLET_PUBLIC_FQDN (got: $(cat "$FQDN_ENV" 2>/dev/null || echo '<missing>'))"
+fi
+
+# (6) Idempotent: a re-run with the same name leaves the file byte-identical.
+FQDN_ENV_BEFORE="$(cat "$FQDN_ENV" 2>/dev/null || true)"
+if DROPLET_PUBLIC_FQDN_ENV_FILE="$FQDN_ENV" DROPLET_PUBLIC_FQDN_SKIP_DNS=1 \
+     bash "$FQDN_SCRIPT" 'd-b5839920cb1b0d09.droplet-us.com' >/dev/null 2>&1 \
+   && [ "$(cat "$FQDN_ENV")" = "$FQDN_ENV_BEFORE" ]; then
+  pass "droplet-set-public-fqdn.sh re-run is byte-identical (idempotent upsert)"
+else
+  fail "droplet-set-public-fqdn.sh re-run changed the .env (not idempotent)"
+fi
+
+# (7) Replace-in-place: an existing commented/stale line is replaced, and no
+# duplicate key is appended.
+printf '# DROPLET_PUBLIC_FQDN=\nOTHER_KEY=keepme\n' > "$FQDN_ENV"
+if DROPLET_PUBLIC_FQDN_ENV_FILE="$FQDN_ENV" DROPLET_PUBLIC_FQDN_SKIP_DNS=1 \
+     bash "$FQDN_SCRIPT" 'd-b5839920cb1b0d09.droplet-us.com' >/dev/null 2>&1 \
+   && grep -qxF 'DROPLET_PUBLIC_FQDN=d-b5839920cb1b0d09.droplet-us.com' "$FQDN_ENV" \
+   && grep -qxF 'OTHER_KEY=keepme' "$FQDN_ENV" \
+   && [ "$(grep -c 'DROPLET_PUBLIC_FQDN=' "$FQDN_ENV")" -eq 1 ]; then
+  pass "droplet-set-public-fqdn.sh replaces a commented line in place (no dup, keeps other keys)"
+else
+  fail "droplet-set-public-fqdn.sh mishandled an existing commented line (got: $(cat "$FQDN_ENV" 2>/dev/null))"
+fi
+
+# (8) Validation: a metacharacter-bearing name is refused BEFORE any write.
+FQDN_ENV_BEFORE="$(cat "$FQDN_ENV")"
+if DROPLET_PUBLIC_FQDN_ENV_FILE="$FQDN_ENV" DROPLET_PUBLIC_FQDN_SKIP_DNS=1 \
+     bash "$FQDN_SCRIPT" 'evil;rm -rf.example.com' >/dev/null 2>&1; then
+  fail "droplet-set-public-fqdn.sh accepted an fqdn with shell metacharacters"
+else
+  if [ "$(cat "$FQDN_ENV")" = "$FQDN_ENV_BEFORE" ]; then
+    pass "droplet-set-public-fqdn.sh refuses a bad fqdn and writes nothing"
+  else
+    fail "droplet-set-public-fqdn.sh refused the bad fqdn but still modified the .env"
+  fi
+fi
+
+# (9) Validation: a newline-bearing name is refused BEFORE any write. grep is
+# LINE-based, so 'ok.example.com<LF>INJECTED=1' passed the old `printf|grep -Eq`
+# check on its first line and appended a second .env assignment; the [[ =~ ]]
+# whole-string match must refuse it outright.
+FQDN_ENV_BEFORE="$(cat "$FQDN_ENV")"
+if DROPLET_PUBLIC_FQDN_ENV_FILE="$FQDN_ENV" DROPLET_PUBLIC_FQDN_SKIP_DNS=1 \
+     bash "$FQDN_SCRIPT" $'ok.example.com\nINJECTED=1' >/dev/null 2>&1; then
+  fail "droplet-set-public-fqdn.sh accepted an fqdn with an embedded newline (env injection)"
+else
+  if [ "$(cat "$FQDN_ENV")" = "$FQDN_ENV_BEFORE" ] \
+     && ! grep -qxF 'INJECTED=1' "$FQDN_ENV"; then
+    pass "droplet-set-public-fqdn.sh refuses a newline-bearing fqdn and writes nothing"
+  else
+    fail "droplet-set-public-fqdn.sh let a newline-bearing fqdn touch the .env (got: $(cat "$FQDN_ENV" 2>/dev/null))"
+  fi
+fi
+
+# --- Behavioural: the sudo guard defers instead of failing silently -----------
+# Source the REAL library, point its host-dnsmasq conf at a fixture, and put a
+# stub `sudo` (always exits 1, so `sudo -n true` fails) first on PATH — the
+# same environment the bridge sandbox presents. The write must return 0, warn
+# about the deferral, and leave the conf untouched.
+# shellcheck source=../scripts/lib/local-dns.sh
+source "$LOCAL_DNS_LIB"
+
+_HOST_DNSMASQ_CONF="$TMP_ROOT/lan-dhcp.conf"
+printf 'dhcp-range=192.168.20.50,192.168.20.150,12h\n' > "$_HOST_DNSMASQ_CONF"
+DNSMASQ_CONF_BEFORE="$(cat "$_HOST_DNSMASQ_CONF")"
+DROPLET_PUBLIC_FQDN='d-b5839920cb1b0d09.droplet-us.com'
+DROPLET_PUBLIC_FQDN_IP='192.168.20.1'
+
+SUDO_STUB_BIN="$TMP_ROOT/no-sudo-bin"
+mkdir -p "$SUDO_STUB_BIN"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$SUDO_STUB_BIN/sudo"
+chmod +x "$SUDO_STUB_BIN/sudo"
+
+WARN_CAPTURE="$TMP_ROOT/dnsmasq-warn.txt"
+if ( PATH="$SUDO_STUB_BIN:$PATH" _write_host_dnsmasq_record ) \
+     >/dev/null 2>"$WARN_CAPTURE"; then
+  pass "_write_host_dnsmasq_record returns 0 when non-interactive sudo is unavailable"
+else
+  fail "_write_host_dnsmasq_record returned non-zero without sudo (breaks the best-effort contract)"
+fi
+
+if grep -q 'deferred to the next boot/setup run' "$WARN_CAPTURE"; then
+  pass "_write_host_dnsmasq_record warns that the host-record is deferred (no silent no-op)"
+else
+  fail "_write_host_dnsmasq_record did not warn about the deferral (got: $(cat "$WARN_CAPTURE" 2>/dev/null))"
+fi
+
+if [ "$(cat "$_HOST_DNSMASQ_CONF")" = "$DNSMASQ_CONF_BEFORE" ]; then
+  pass "_write_host_dnsmasq_record left the dnsmasq conf untouched without sudo"
+else
+  fail "_write_host_dnsmasq_record modified the dnsmasq conf despite sudo being unavailable"
+fi
+
+# =============================================================================
+# Phase 10: droplet-set-public-fqdn.sh AP-resolver propagation (WARP-986)
+# =============================================================================
+# Live gap on the .87 single-box (2026-07-01): the script's two DNS legs never
+# reach the dnsmasq-ap instance inside the droplet-openwrt container — the ONLY
+# resolver AP (Wi-Fi) clients use — so the learned public FQDN stayed
+# unresolvable on AP Wi-Fi until the next boot. The fix adds a best-effort
+# _propagate_ap_resolver leg: when passwordless sudo is available, re-run
+# droplet-openwrt-attach.service (which now emits the FQDN into
+# /etc/dnsmasq-ap.conf); otherwise log and stay non-fatal. Static assertions
+# verify the wiring; behavioural assertions exercise the REAL function
+# extracted from the script (mirrors the Phase 7 lock-function extraction).
+echo "--- Phase 10: droplet-set-public-fqdn.sh AP-resolver propagation ---"
+
+SET_FQDN_SH="$REPO_ROOT_REAL/scripts/host/droplet-set-public-fqdn.sh"
+
+# (1) Static: privileged host script — syntax must be valid (same posture as
+# install-device-bridge.sh in Phase 4).
+if bash -n "$SET_FQDN_SH" 2>/dev/null; then
+  pass "droplet-set-public-fqdn.sh passes bash -n syntax check"
+else
+  fail "droplet-set-public-fqdn.sh has a bash syntax error"
+fi
+
+# (2) Static: the propagation leg exists, gates on passwordless sudo, and
+# restarts the attach unit (never a hand-rolled dnsmasq poke).
+if grep -qE 'sudo -n true' "$SET_FQDN_SH" \
+   && grep -qE 'systemctl restart droplet-openwrt-attach\.service' "$SET_FQDN_SH"; then
+  pass "propagation leg gates on 'sudo -n true' and restarts droplet-openwrt-attach.service"
+else
+  fail "propagation leg missing the sudo gate or the attach-unit restart (WARP-986)"
+fi
+
+if grep -qE '^_propagate_ap_resolver$' "$SET_FQDN_SH"; then
+  pass "_propagate_ap_resolver is invoked"
+else
+  fail "_propagate_ap_resolver is not invoked"
+fi
+
+# --- Behavioural: extract the real function and exercise it ------------------
+eval "$(awk '/^_propagate_ap_resolver\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$SET_FQDN_SH")"
+
+PF_WORK="$TMP_ROOT/pf"
+PF_STUB_BIN="$PF_WORK/bin"
+mkdir -p "$PF_STUB_BIN"
+
+# sudo stub: '-n true' answers per the sudo-ok flag; '-n systemctl restart <u>'
+# records the unit and answers per the restart-ok flag. systemctl stub exists
+# only so the function's `command -v systemctl` probe succeeds.
+cat > "$PF_STUB_BIN/sudo" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "-n" ] && [ "\$2" = "true" ]; then
+  [ -f "$PF_WORK/sudo-ok" ] && exit 0 || exit 1
+fi
+if [ "\$1" = "-n" ] && [ "\$2" = "systemctl" ] && [ "\$3" = "restart" ]; then
+  printf '%s\n' "\$4" >> "$PF_WORK/restarts"
+  [ -f "$PF_WORK/restart-ok" ] && exit 0 || exit 1
+fi
+exit 0
+EOF
+printf '#!/usr/bin/env bash\nexit 0\n' > "$PF_STUB_BIN/systemctl"
+chmod +x "$PF_STUB_BIN/sudo" "$PF_STUB_BIN/systemctl"
+
+PF_OLD_PATH="$PATH"
+PATH="$PF_STUB_BIN:$PATH"
+FQDN="d-0123456789abcdef.droplet-us.com"
+err() { printf 'droplet-set-public-fqdn: %s\n' "$*" >> "$PF_WORK/err.log"; }
+
+# (3) sudo ok + restart ok -> the attach unit is restarted and success is logged.
+: > "$PF_WORK/restarts"; : > "$PF_WORK/err.log"
+touch "$PF_WORK/sudo-ok" "$PF_WORK/restart-ok"
+PF_OUT="$( (_propagate_ap_resolver) 2>/dev/null || true)"
+if printf '%s' "$PF_OUT" | grep -q 'AP resolver refreshed' \
+   && grep -qx 'droplet-openwrt-attach.service' "$PF_WORK/restarts"; then
+  pass "passwordless sudo -> restarts droplet-openwrt-attach.service (FQDN live for AP clients now)"
+else
+  fail "expected attach-unit restart + success log, got out='$PF_OUT' restarts='$(cat "$PF_WORK/restarts" 2>/dev/null)'"
+fi
+
+# (4) No passwordless sudo (the device-bridge shape) -> non-fatal skip, no
+# restart attempted, next-boot breadcrumb logged.
+: > "$PF_WORK/restarts"; : > "$PF_WORK/err.log"
+rm -f "$PF_WORK/sudo-ok"
+if (_propagate_ap_resolver) >/dev/null 2>&1 \
+   && [ ! -s "$PF_WORK/restarts" ] \
+   && grep -q 'no passwordless sudo' "$PF_WORK/err.log"; then
+  pass "no passwordless sudo -> returns 0, no restart, next-boot breadcrumb logged"
+else
+  fail "sudo-less path wrong (rc/restarts/log): restarts='$(cat "$PF_WORK/restarts" 2>/dev/null)' log='$(cat "$PF_WORK/err.log" 2>/dev/null)'"
+fi
+
+# (5) Restart fails -> still non-fatal (returns 0) with a loud breadcrumb —
+# the .env write-back above it must never be failed by this leg.
+: > "$PF_WORK/restarts"; : > "$PF_WORK/err.log"
+touch "$PF_WORK/sudo-ok"; rm -f "$PF_WORK/restart-ok"
+if (_propagate_ap_resolver) >/dev/null 2>&1 \
+   && grep -q 'restart failed' "$PF_WORK/err.log"; then
+  pass "attach restart failure stays non-fatal (rc 0) with a breadcrumb"
+else
+  fail "restart-failure path wrong: log='$(cat "$PF_WORK/err.log" 2>/dev/null)'"
+fi
+
+# (6) Full-script run with the SKIP_DNS hook: .env upsert happens, exit 0, and
+# the propagation leg is NOT reached (the hook means "write .env only").
+PF_ENV="$PF_WORK/dotenv"
+rm -f "$PF_ENV"; : > "$PF_WORK/restarts"
+touch "$PF_WORK/sudo-ok" "$PF_WORK/restart-ok"
+if DROPLET_PUBLIC_FQDN_SKIP_DNS=1 DROPLET_PUBLIC_FQDN_ENV_FILE="$PF_ENV" \
+     bash "$SET_FQDN_SH" "$FQDN" >/dev/null 2>&1 \
+   && grep -qxF "DROPLET_PUBLIC_FQDN=$FQDN" "$PF_ENV" \
+   && [ ! -s "$PF_WORK/restarts" ]; then
+  pass "SKIP_DNS hook: .env upserted, exit 0, propagation leg not reached"
+else
+  fail "SKIP_DNS run wrong (env='$(cat "$PF_ENV" 2>/dev/null)' restarts='$(cat "$PF_WORK/restarts" 2>/dev/null)')"
+fi
+
+# Restore PATH and drop the test-local err() shadow.
+PATH="$PF_OLD_PATH"
+unset -f err _propagate_ap_resolver
+
+
+# =============================================================================
+# Phase 11: interrupted re-run convergence (WARP-595)
 # =============================================================================
 # Re-running setup.sh is the only field-update path; an interruption (power
 # loss, SSH drop, ctrl-C) mid-write must never leave state a re-run can't
@@ -962,7 +1251,7 @@ fi
 # close the interruption windows themselves (a partial write can't be
 # simulated portably, but the atomic-rename pattern makes it structurally
 # impossible to observe a prefix of the file).
-echo "--- Phase 9: interrupted re-run convergence (WARP-595) ---"
+echo "--- Phase 11: interrupted re-run convergence (WARP-595) ---"
 
 SECRETS_LIB="$REPO_ROOT_REAL/scripts/lib/secrets.sh"
 SINGLE_BOX_LIB="$REPO_ROOT_REAL/scripts/lib/single-box.sh"

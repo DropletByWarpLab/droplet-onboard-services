@@ -6,7 +6,7 @@
 # The host-side entry point the orchestrator's tls-issuance service reaches (via
 # the device-bridge's auth-gated POST /host/public-fqdn) once it has LEARNED the
 # box's opaque per-device FQDN (`d-<hmac>.devices.warp-lab.ai`) from the HQ
-# challenge response. It does two things:
+# challenge response. It does three things:
 #
 #   1. Idempotently writes DROPLET_PUBLIC_FQDN=<fqdn> into the repo .env
 #      (sed-replace-or-append), so the next orchestrator boot reads the learned
@@ -15,6 +15,10 @@
 #      split-horizon DNS (host dnsmasq host-record + the routing/container leg)
 #      registers the FQDN → 192.168.20.1 — the one name resolves at home AND
 #      over the WireGuard tunnel.
+#   3. Best-effort (WARP-986): re-runs droplet-openwrt-attach.service (when
+#      passwordless sudo is available) so the dnsmasq-ap instance inside the
+#      droplet-openwrt container — the ONLY resolver AP Wi-Fi clients use —
+#      serves the name immediately instead of from the next boot.
 #
 # Repo-tracked (architecture-guard rule 20) and installed to
 # /usr/local/sbin/droplet-set-public-fqdn.sh by setup.sh via
@@ -34,6 +38,7 @@
 # Test/dev hooks (so validation + upsert are unit-testable without root / DNS):
 #   DROPLET_PUBLIC_FQDN_ENV_FILE=...  override the .env path (default <repo>/.env)
 #   DROPLET_PUBLIC_FQDN_SKIP_DNS=1    write .env only; skip setup_public_fqdn_dns
+#                                     AND the AP-resolver propagation leg
 # =============================================================================
 set -euo pipefail
 
@@ -122,5 +127,35 @@ if [ -f "$LIB_DIR/logging.sh" ] && [ -f "$LIB_DIR/local-dns.sh" ]; then
 else
   err "local-dns helpers not found under $LIB_DIR — skipped DNS registration"
 fi
+
+# --- Propagate to the AP resolver (WARP-986) ---------------------------------
+# NEITHER leg of setup_public_fqdn_dns reaches the dnsmasq-ap instance inside
+# the droplet-openwrt container — the ONLY resolver AP (Wi-Fi) clients use:
+# the routing-service hostrecord lands in a dnsmasq that is NOT running in
+# single-box AP mode, and the host-net dnsmasq has DNS disabled (port=0).
+# droplet-openwrt-attach now emits the FQDN into /etc/dnsmasq-ap.conf itself
+# (it reads DROPLET_PUBLIC_FQDN back out of the .env written above), so
+# re-running the attach unit makes the name live for AP clients IMMEDIATELY.
+# Best-effort like the DNS legs above (non-fatal): the device-bridge invokes
+# this script as an unprivileged user with NO sudo (NoNewPrivileges — see
+# install-device-bridge.sh), so gate on passwordless sudo; without it the
+# attach regenerates the config on the next boot anyway.
+_propagate_ap_resolver() {
+  if ! command -v systemctl >/dev/null 2>&1; then
+    err "systemctl not available — AP resolver (dnsmasq-ap) serves ${FQDN} from the next attach run (non-fatal)"
+    return 0
+  fi
+  if ! sudo -n true 2>/dev/null; then
+    err "no passwordless sudo — AP resolver (dnsmasq-ap) serves ${FQDN} from the next boot (non-fatal)"
+    return 0
+  fi
+  if sudo -n systemctl restart droplet-openwrt-attach.service >/dev/null 2>&1; then
+    printf 'AP resolver refreshed: dnsmasq-ap now serves %s\n' "$FQDN"
+  else
+    err "droplet-openwrt-attach restart failed — AP resolver serves ${FQDN} from the next boot (non-fatal)"
+  fi
+  return 0
+}
+_propagate_ap_resolver
 
 exit 0

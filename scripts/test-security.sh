@@ -424,12 +424,18 @@ else
   fail "cosign.pub missing from apps/orchestrator/src/services/update-agent/ (WARP-535)"
 fi
 
-if grep -vE '^[[:space:]]*#' "$ORCH_DOCKERFILE" \
-  | grep -E '^[[:space:]]*COPY' \
-  | grep -q 'src/services/update-agent/cosign.pub'; then
-  pass "orchestrator Dockerfile COPYs cosign.pub into the runtime image (WARP-535)"
+# Anchor the COPY check to the RUNTIME stage (everything from the LAST
+# `FROM` onward): a builder-stage COPY does not put the file in the built
+# image, so a stage-agnostic grep would stay green while the runtime image
+# silently loses the trust anchor. awk isolates the final FROM block; the
+# single grep on a here-string (no pipeline) avoids pipefail/SIGPIPE
+# false-negatives, and `[^#]*` keeps a commented-out COPY from counting.
+ORCH_RUNTIME_STAGE="$(awk '/^[[:space:]]*FROM[[:space:]]/ { buf = "" } { buf = buf $0 "\n" } END { printf "%s", buf }' "$ORCH_DOCKERFILE")"
+
+if grep -qE '^[[:space:]]*COPY[^#]*src/services/update-agent/cosign\.pub' <<<"$ORCH_RUNTIME_STAGE"; then
+  pass "orchestrator Dockerfile COPYs cosign.pub into the runtime stage (WARP-535)"
 else
-  fail "orchestrator Dockerfile does not COPY cosign.pub into the runtime image (WARP-535)"
+  fail "orchestrator Dockerfile does not COPY cosign.pub into the RUNTIME stage (WARP-535)"
 fi
 
 # =============================================================================

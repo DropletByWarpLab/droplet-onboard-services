@@ -95,6 +95,59 @@ def test_assert_fips_at_boot_or_exit_exits_on_failure(monkeypatch):
     assert parsed["service"] == "routing"
 
 
+# --- md5_should_fail probe (WARP-1018) --------------------------------------
+#
+# Under an enforcing FIPS provider, the OpenSSL-backed `_hashlib.new("md5")`
+# raises, but `hashlib.new("md5")` catches that ValueError and silently falls
+# back to the builtin `_md5` module — so a probe routed through `hashlib.new`
+# "succeeds" and mis-reports FIPS as not enforcing. These tests simulate the
+# enforcing provider by making `_hashlib.new` raise while the builtin `_md5`
+# stays importable, exactly the shape of the production image.
+
+
+def test_md5_probe_detects_openssl_rejection_despite_builtin_fallback(monkeypatch):
+    """Regression for WARP-1018: the probe must consult the OpenSSL-backed
+    path directly, not `hashlib.new`'s builtin-fallback wrapper."""
+    import _hashlib
+
+    seen_kwargs: dict = {}
+
+    def _reject(name, *args, **kwargs):
+        seen_kwargs.update(kwargs)
+        raise ValueError("[digital envelope routines] unsupported")
+
+    monkeypatch.setattr(_hashlib, "new", _reject)
+    err = md5_should_fail()
+    assert err is not None
+    assert "unsupported" in err
+    # Pin that the probe forwards usedforsecurity=True to the OpenSSL
+    # path. Asserted here (after the call) rather than inside the stub:
+    # md5_should_fail() swallows any exception the stub raises, so an
+    # in-stub AssertionError would be masked as a rejection string.
+    # This is not cosmetic — with usedforsecurity=False CPython fetches
+    # MD5 with the "-fips" property, MD5 *succeeds* under a correctly
+    # enforcing provider, and the WARP-1018 boot-refusal symptom returns
+    # via a different path.
+    assert seen_kwargs.get("usedforsecurity") is True
+
+
+def test_md5_probe_reports_generic_reason_when_error_message_empty(monkeypatch):
+    import _hashlib
+
+    def _reject(name, *args, **kwargs):
+        raise ValueError("")
+
+    monkeypatch.setattr(_hashlib, "new", _reject)
+    assert md5_should_fail() == "md5 rejected"
+
+
+def test_md5_probe_fails_closed_when_openssl_hashlib_missing(monkeypatch):
+    """A CPython built without OpenSSL has no `_hashlib`. Enforcement can't
+    be demonstrated, so the probe must return None → caller fails closed."""
+    monkeypatch.setitem(sys.modules, "_hashlib", None)
+    assert md5_should_fail() is None
+
+
 # --- gated_assert_fips_at_boot ---------------------------------------------
 
 

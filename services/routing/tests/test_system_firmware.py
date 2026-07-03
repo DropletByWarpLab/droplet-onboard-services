@@ -213,6 +213,17 @@ class TestFactoryResetDispatch:
         # Both steps were dispatched, in order.
         assert [c[0] for c in router.exec_calls] == ["jffs2reset", "reboot"]
 
+    def test_connection_drop_during_jffs2reset_propagates(self) -> None:
+        # A transport loss during the overlay WIPE is not the success path — the
+        # reset may be incomplete, so it must surface rather than be masked as a
+        # "resetting" success. Only the reboot phase tolerates a drop.
+        router = _RecordingRouter(
+            raise_on_command=("jffs2reset", ConnectionLost("dropped mid-wipe"))
+        )
+        api = SystemApi(router)
+        with pytest.raises(ConnectionLost):
+            api.factory_reset()
+
     def test_real_ubus_fault_propagates(self) -> None:
         router = _RecordingRouter(raise_on_exec=UbusError(6, "Permission denied"))
         api = SystemApi(router)

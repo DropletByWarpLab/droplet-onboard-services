@@ -20,7 +20,10 @@ import { createSttRouter } from "./routes/stt.js";
 import { createFilesRouter } from "./routes/files.js";
 import { createFilesBrainRouter } from "./routes/files-brain.js";
 import { createFilesKnowledgeRouter } from "./routes/files-knowledge.js";
-import { createDeviceClientsRouter } from "./routes/device-clients.js";
+import {
+  createDeviceClientsRouter,
+  createDeviceSelfRevokeRouter,
+} from "./routes/device-clients.js";
 import { createStorageRouter } from "./routes/storage.js";
 import { createSystemResetRouter } from "./routes/system-reset.routes.js";
 import { createPublicAuthRouter, createProtectedAuthRouter } from "./routes/auth.js";
@@ -170,6 +173,15 @@ export function createApp(
   // session; the HMAC-signed token in ?t=... is the authorization. Mounted
   // BEFORE auth middleware so forwarded links work without a Droplet account.
   app.use("/api", createCameraSharePublicRouter());
+
+  // WARP-349 — device self-revoke on "Forget this Droplet". A paired native
+  // client presents `Authorization: Basic <ncUsername:appPassword>` on
+  // DELETE /api/devices/clients/:id; the credential is verified against the
+  // target row's own stored app password, so the path can only revoke the
+  // device it authenticates as. Mounted BEFORE the auth middleware (which
+  // only understands Bearer/cookie); anything that isn't a session-less
+  // Basic request falls through to the protected session-path handler.
+  app.use("/api", createDeviceSelfRevokeRouter(prisma));
 
   // WARP-229: FIPS status endpoint. Mounted BEFORE auth middleware so a
   // stuck-auth incident doesn't hide the FIPS state from the operator.

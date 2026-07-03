@@ -17,7 +17,7 @@ trust, PM secrets) are summarized in [`CLAUDE.md`](../CLAUDE.md).
 | `MQTT_USER` / `MQTT_PASSWORD` | MQTT broker credentials                     |
 | `NEXTCLOUD_ADMIN_USER` / `NEXTCLOUD_ADMIN_PASSWORD` | Nextcloud admin account bootstrap |
 | `JWT_SECRET`         | Orchestrator JWT signing secret (per-device; `change-me` placeholder in `.env.example`) |
-| `COMPOSE_PROFILES`   | Which optional service groups start (`linux`, `display`, `full`, `single-box`, `pm`, `eval`, `ops`, `docs`). Written by `setup.sh` — semantics per shape in the `docker-stack` skill. `docs` (OnlyOffice editing, WARP-882) is **opt-in / default-OFF**: the operator adds it to `COMPOSE_PROFILES` and sets `DOCS_ENABLED=1` to run the ~2 GB AGPLv3 engine |
+| `COMPOSE_PROFILES`   | Which optional service groups start (`linux`, `display`, `full`, `single-box`, `pm`, `eval`, `ops`, `docs`, `telemetry`). Written by `setup.sh` — semantics per shape in the `docker-stack` skill. `docs` (OnlyOffice editing, WARP-882) is **opt-in / default-OFF**: the operator adds it to `COMPOSE_PROFILES` and sets `DOCS_ENABLED=1` to run the ~2 GB AGPLv3 engine. `telemetry` (fleet-agent, WARP-963) is likewise **opt-in / default-OFF** and additionally gated by `DROPLET_TELEMETRY_ENABLED` |
 | `AI_GATEWAY_URL`     | AI gateway endpoint                                  |
 | `OLLAMA_URL`         | Chat-path Ollama endpoint (default `http://host.docker.internal:11434` locally). Points **direct at Ollama**, not the manager's `/proxy` — see the `debug-ollama-call-path` skill |
 | `OLLAMA_MANAGER_URL` | Optional ollama-manager root for lifecycle/limits, decoupled from the chat `OLLAMA_URL` (XR-05). If `OLLAMA_URL` itself ends in `/proxy`, the manager root is derived from it |
@@ -26,6 +26,8 @@ trust, PM secrets) are summarized in [`CLAUDE.md`](../CLAUDE.md).
 | `VISION_MAX_IMAGES` | Max images re-sent per chat request (most-recent-first), bounding token cost on a small local context window (default `3`, range 1–8). |
 | `EMAIL_SENDING_STALE_MS` | Grace window (ms) before an outbound email draft stuck in `sending` is reconciled to `failed` (WARP-890). A draft is claimed `queued→sending` before the SMTP send; if its terminal status callback never lands (email-indexer crash / lost PATCH) it would strand in `sending`. Both the orchestrator's stale-sending cron (every 5 min) and the email-indexer's outbound tick sweep `sending` rows whose `claimedAt` is older than this window to `failed` (never re-queued — the send may have completed). Default `600000` (10 min). An explicit `0` is honored (reconcile immediately — useful in tests). |
 | `DROPLET_SSO_{GOOGLE,ENTRA,OKTA}_{ISSUER,CLIENT_ID,CLIENT_SECRET,REDIRECT_URI}` | Optional OIDC SSO provider config (commented out by default in `.env.example`) |
+| `DROPLET_TELEMETRY_ENABLED` | Master opt-in for the fleet-agent's portal telemetry (WARP-963). **Default OFF**; only `1`/`true` enables. Even when the `telemetry` compose profile starts the container, the process idles with ZERO egress unless this is set AND credentials exist (`DROPLET_TELEMETRY_PROVISIONING_CODE`, or the identity persisted on the `fleet-agent-state` volume by a prior registration). Full var list + egress-audit table: [`services/fleet-agent/README.md`](../services/fleet-agent/README.md) |
+| `DROPLET_TELEMETRY_PROVISIONING_CODE` | One-time register code minted in the analytics portal's `/settings/tokens`. Consumed on first successful `/agents/register`; the returned ingest token is stored ONLY on the fleet-agent's runtime state volume — never in `.env`, never tracked |
 | `FILES_ROOT`         | `.data/files` (local) / `/data/files` (Docker)       |
 | `STORAGE_BACKEND`    | `legacy` or `nextcloud`                              |
 | `NEXTCLOUD_URL`      | Nextcloud instance URL                               |
@@ -68,6 +70,15 @@ trust, PM secrets) are summarized in [`CLAUDE.md`](../CLAUDE.md).
 | `DISPLAY_SERVICE_URL`| OLED/TFT display service endpoint (default `http://host.docker.internal:8082` — display runs host-mode on the inference host) |
 | `ROUTING_MODE`       | `real` (default) / `mock` (fixture-driven, no OpenWrt needed) / `disabled` (orchestrator skips router calls). See WARP-44. |
 | `CONTAINER_PIDS_LIMIT` | Global PID limit applied to all services (default `512`). Raise for services with many worker threads. |
+| `ANALYTICS_ENABLED` | Master switch for the fleet-analytics agent (WARP-615, epic WARP-614) — the on-device telemetry producer for the `droplet-analytics` fleet portal. **Default OFF**; explicit string→bool, only `1`/`true` enable (`0`/`false`/unset stay off). Disabled or unconfigured ⇒ the analytics façade is a pure no-op (fail-open, decision D5) with one info log at boot |
+| `ANALYTICS_URL` | Portal base URL including the version path (default `http://host.docker.internal:3000/api/v1` — a LOCAL portal via the host gateway; point at `https://analytics.warp-lab.ai/api/v1` for the fleet portal). Deliberately not schema-validated as a URL: a mangled value degrades to the no-op façade instead of crashing boot |
+| `ANALYTICS_INGEST_TOKEN` | **Secret** bearer for the portal's agent-API (`dpl_<machineId>_<secret>`). Pre-set it to bypass registration; otherwise WARP-616 mints one from the provisioning code. Lives only in `.env`; never logged |
+| `ANALYTICS_PROVISIONING_CODE` | **Secret** single-use code from the portal's `/settings/tokens`, exchanged once at `POST /agents/register` (WARP-616). Either this or `ANALYTICS_INGEST_TOKEN` must be set for the agent to activate |
+| `ANALYTICS_MACHINE_TIER` | Registration tier reported to the portal: `home` (default) / `business` / `enterprise`. Plain string (typo ⇒ registration rejects it, boot unaffected) |
+| `ANALYTICS_HEARTBEAT_INTERVAL_S` | Heartbeat cadence in seconds (default `30`; portal flags `degraded` after 90 s gap, `offline` after 5 min). Consumed by WARP-620 via cron-runtime |
+| `ANALYTICS_METRICS_FLUSH_S` | Metrics batch flush cadence in seconds (default `60` — under the portal's 4/min per-machine limit). Consumed by WARP-617 |
+| `ANALYTICS_EVENTS_FLUSH_S` | Events batch flush cadence in seconds (default `5`, ≤100 events per batch). Consumed by WARP-617 |
+| `ANALYTICS_ERROR_DEDUP_WINDOW_S` | Per-fingerprint error suppression window in seconds (default `60` — keeps a flapping error under the portal's 60/min limit). Consumed by WARP-617 |
 | `GATEWAY_MEM_LIMIT` | nginx mem ceiling (default `128m`) |
 | `WEB_DASHBOARD_MEM_LIMIT` | Next.js mem ceiling (default `384m`) |
 | `ORCHESTRATOR_MEM_LIMIT` | Orchestrator mem ceiling (default `768m`) |

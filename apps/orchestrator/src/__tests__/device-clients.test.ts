@@ -405,5 +405,69 @@ describe("Device clients / pairing", () => {
       const res = await request(app).delete("/api/devices/clients/does-not-exist");
       expect(res.status).toBe(404);
     });
+
+    // WARP-349 — the app-level wiring for the Basic-auth self-revoke path:
+    // the self-revoke router mounts BEFORE authMiddleware in app.ts, so a
+    // request presenting `Authorization: Basic <user:appPassword>` and no
+    // session cookie is authenticated against the target row's own stored
+    // (encrypted) app password.
+    it("WARP-349: revokes via Basic <ncUsername:appPassword> with no session", async () => {
+      const id = await pairOne();
+      const res = await request(app)
+        .delete(`/api/devices/clients/${id}`)
+        .auth("dev", "nc-fresh-app-password-ABC");
+      expect(res.status).toBe(200);
+      expect(res.body.revoked).toBe(id);
+      expect(ncMock.ncDeleteAppPassword).toHaveBeenCalledWith(
+        "nc-fresh-app-password-ABC"
+      );
+
+      const listed = await request(app).get("/api/devices/clients");
+      const client = listed.body.clients.find((c: any) => c.id === id);
+      expect(client.status).toBe("revoked");
+    });
+
+    it("WARP-349: Basic path 401s uniformly for wrong password and unknown id", async () => {
+      const id = await pairOne();
+      const wrongPw = await request(app)
+        .delete(`/api/devices/clients/${id}`)
+        .auth("dev", "not-the-app-password");
+      const unknown = await request(app)
+        .delete("/api/devices/clients/does-not-exist")
+        .auth("dev", "nc-fresh-app-password-ABC");
+
+      expect(wrongPw.status).toBe(401);
+      expect(unknown.status).toBe(401);
+      // Uniform body — an attacker can't distinguish "wrong password" from
+      // "device does not exist".
+      expect(wrongPw.body).toEqual(unknown.body);
+      expect(ncMock.ncDeleteAppPassword).not.toHaveBeenCalled();
+
+      // The target row is untouched.
+      const listed = await request(app).get("/api/devices/clients");
+      const client = listed.body.clients.find((c: any) => c.id === id);
+      expect(client.status).toBe("active");
+    });
+
+    it("WARP-349: Basic path can only revoke the device the credentials belong to", async () => {
+      // Two paired devices for the same user, each with its own app password.
+      const firstId = await pairOne();
+      ncMock.ncGenerateAppPassword.mockResolvedValue("nc-second-app-password-XYZ");
+      const secondId = await pairOne();
+
+      // First device's password presented against the second device's id.
+      const res = await request(app)
+        .delete(`/api/devices/clients/${secondId}`)
+        .auth("dev", "nc-fresh-app-password-ABC");
+      expect(res.status).toBe(401);
+      expect(ncMock.ncDeleteAppPassword).not.toHaveBeenCalled();
+
+      const listed = await request(app).get("/api/devices/clients");
+      for (const wanted of [firstId, secondId]) {
+        expect(
+          listed.body.clients.find((c: any) => c.id === wanted).status
+        ).toBe("active");
+      }
+    });
   });
 });

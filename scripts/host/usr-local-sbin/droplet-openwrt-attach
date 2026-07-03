@@ -101,6 +101,51 @@ if [ "${GUEST_ENABLED:-0}" = 1 ]; then
 fi
 # <<< customer_guest_creds
 
+# WARP-986: the dnsmasq-ap instance this script regenerates below is the ONLY
+# resolver AP (Wi-Fi) clients use — the uci hostrecord leg the routing service
+# writes lands in a dnsmasq that is NOT running in single-box AP mode, and the
+# host-net dnsmasq has DNS disabled (port=0). So unless dnsmasq-ap itself
+# answers the ADR-023 public per-device FQDN, AP clients can never resolve the
+# box's publicly-trusted cert name and the green-padlock path is dead on AP
+# Wi-Fi (proven live on the .87 box, 2026-07-01). Resolution order: an explicit
+# DROPLET_PUBLIC_FQDN env (via /etc/default/droplet-openwrt-attach) wins;
+# otherwise read the value droplet-set-public-fqdn.sh persisted into the repo
+# .env (same fixed repo path the OPENWRT_PASSWORD_FILE / DROPLET_RPCD_ACL
+# defaults use). Re-validated here with the SAME conservative shape
+# droplet-set-public-fqdn.sh enforces (1-253 chars of lowercase [a-z0-9.-],
+# no leading/trailing dot or hyphen, must contain a dot) because root must not
+# trust the file and the value is interpolated into the dnsmasq-ap config — an
+# invalid value is dropped (name simply not served), never emitted.
+# Sentinel-delimited so it is unit-testable in isolation
+# (tests/openwrt-attach-public-fqdn.test.sh), mirroring resolve_ap_psk.
+# >>> resolve_public_fqdn (WARP-986)
+PUBLIC_FQDN="${DROPLET_PUBLIC_FQDN:-}"
+REPO_ENV_FILE="${DROPLET_PUBLIC_FQDN_ENV_FILE:-/home/droplet/edge-platform/.env}"
+resolve_public_fqdn() {
+  if [ -z "$PUBLIC_FQDN" ] && [ -f "$REPO_ENV_FILE" ]; then
+    PUBLIC_FQDN="$(grep -m1 '^DROPLET_PUBLIC_FQDN=' "$REPO_ENV_FILE" 2>/dev/null | cut -d= -f2- | tr -d '\r\n')"
+  fi
+  [ -n "$PUBLIC_FQDN" ] || return 0
+  if [ "${#PUBLIC_FQDN}" -gt 253 ] || \
+     ! printf '%s' "$PUBLIC_FQDN" | grep -Eq '^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'; then
+    echo "droplet-openwrt-attach: WARN: DROPLET_PUBLIC_FQDN is not a valid hostname — dnsmasq-ap will not serve it"
+    PUBLIC_FQDN=""
+    return 0
+  fi
+  case "$PUBLIC_FQDN" in
+    *.*)
+      echo "droplet-openwrt-attach: public FQDN resolved — dnsmasq-ap will answer $PUBLIC_FQDN -> 192.168.20.1"
+      ;;
+    *)
+      echo "droplet-openwrt-attach: WARN: DROPLET_PUBLIC_FQDN is not a dotted FQDN — dnsmasq-ap will not serve it"
+      PUBLIC_FQDN=""
+      ;;
+  esac
+  return 0
+}
+resolve_public_fqdn
+# <<< resolve_public_fqdn (WARP-986)
+
 # Which wireless phy to move into the container netns, and what interface name
 # it surfaces with. These are AUTO-DETECTED below (detect_ap_radio) so the
 # attach works on whatever Wi-Fi card the box actually ships — the MT7922
@@ -378,6 +423,7 @@ docker exec -i \
   -e AP_SSID="$AP_SSID" -e AP_PSK="$AP_PSK" \
   -e AP_IFACE="$AP_IFACE" \
   -e AP_DOMAIN="$AP_DOMAIN" -e AP_HOSTNAME="$AP_HOSTNAME" \
+  -e PUBLIC_FQDN="$PUBLIC_FQDN" \
   -e GUEST_SSID="$GUEST_SSID" -e GUEST_PSK="$GUEST_PSK" \
   -e GUEST_ENABLED="$GUEST_ENABLED" -e GUEST_IFACE="$GUEST_IFACE" \
   -e GUEST_GW="$GUEST_GW" \
@@ -1006,6 +1052,21 @@ no-resolv
 address=/$AP_HOSTNAME/192.168.20.1
 address=/$AP_DOMAIN/192.168.20.1
 DNSMASQ
+
+  # WARP-986 / ADR-023: dnsmasq-ap is the ONLY resolver AP clients use, so the
+  # public per-device FQDN must be answered HERE for the green-padlock cert
+  # name to resolve on AP Wi-Fi. Appended only when the outer script resolved
+  # AND validated the name (resolve_public_fqdn); the CHANGED gate below then
+  # bounces dnsmasq so a newly-learned name goes live without a reboot.
+  # NB: NO APOSTROPHES in this block (single-quoted docker exec body).
+  # >>> dnsmasq_ap_public_fqdn (WARP-986)
+  if [ -n "$PUBLIC_FQDN" ]; then
+    cat >> /etc/dnsmasq-ap.conf.new <<DNSMASQFQDN
+# Public per-device FQDN -> openwrt IP (WARP-986 / ADR-023 split horizon)
+address=/$PUBLIC_FQDN/192.168.20.1
+DNSMASQFQDN
+  fi
+  # <<< dnsmasq_ap_public_fqdn (WARP-986)
 
   DNSMASQ_CHANGED=0
   if [ ! -f /etc/dnsmasq-ap.conf ] || ! cmp -s /etc/dnsmasq-ap.conf /etc/dnsmasq-ap.conf.new; then

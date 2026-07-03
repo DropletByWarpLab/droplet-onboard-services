@@ -139,9 +139,15 @@ dc exec -T -e "DROPLET_DUMP_USER=${DB_USER:-}" -e "DROPLET_DUMP_DB=${DB_NAME:-}"
     -c "DROP DATABASE IF EXISTS \"$D\" WITH (FORCE);" \
     -c "CREATE DATABASE \"$D\";"'
 
+# ON_ERROR_STOP=1 aborts the replay on the FIRST SQL error. Without it psql
+# swallows a mid-replay failure and exits 0, so after the DROP/CREATE above a
+# partially-failed replay would still be reported as "Postgres restored." — a
+# corrupt restore that reports success. Safe to enforce: the replay user is the
+# container superuser and the dump is --no-owner --no-privileges, so a healthy
+# replay has no benign expected errors. (The drill already enforces this.)
 gunzip -c "$DUMP" \
   | dc exec -T -e "DROPLET_DUMP_USER=${DB_USER:-}" -e "DROPLET_DUMP_DB=${DB_NAME:-}" "$DB_SERVICE" sh -c '
-      psql --username="${DROPLET_DUMP_USER:-$POSTGRES_USER}" --dbname="${DROPLET_DUMP_DB:-$POSTGRES_DB}"'
+      psql --username="${DROPLET_DUMP_USER:-$POSTGRES_USER}" --dbname="${DROPLET_DUMP_DB:-$POSTGRES_DB}" -v ON_ERROR_STOP=1'
 log_success "Postgres restored."
 
 # --- Restore data volumes -------------------------------------------------------

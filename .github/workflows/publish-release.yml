@@ -305,6 +305,7 @@ jobs:
           set -euo pipefail
           tag="ota-${GITHUB_RUN_NUMBER}-g${GITHUB_SHA::7}"
           gh release create "${tag}" \
+            --target "${GITHUB_SHA}" \
             --title "OTA release ${tag}" \
             --notes "Automated OTA release for ${GITHUB_SHA} (channel: stable). Assets: release.json (signed manifest, schema v1), release.json.sig (cosign signature — verify against apps/orchestrator/src/services/update-agent/cosign.pub), configs.tar.gz (tracked docker/ runtime configs)." \
             --latest \

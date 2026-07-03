@@ -31,12 +31,48 @@ describe("search_files", () => {
     if (!r.ok) expect(r.error.code).toBe("AUTH_REQUIRED");
   });
 
-  it("calls nextcloud /search with query and limit", async () => {
-    const get = vi.fn().mockResolvedValue(new Response(JSON.stringify([]), { status: 200 }));
+  // WARP-1012 — regression. The files API route (`GET /api/files/search`)
+  // requires the search term in `q`, NOT `query`; sending `query=` made the
+  // route 400 before auth was even consulted ("nextcloud returned 400" in
+  // the live repro). And the `_service:mcp` principal must assert the acting
+  // user via X-Nextcloud-User — the route hard-rejects (401) without it.
+  it("calls the files API /search with q, limit, and BOTH per-user headers", async () => {
+    const get = vi.fn().mockResolvedValue(new Response(JSON.stringify({ items: [] }), { status: 200 }));
     await searchFiles.handler({ query: "todo" }, ctxWith(get));
     expect(get).toHaveBeenCalledWith(
-      "/search?query=todo&limit=50",
-      expect.objectContaining({ headers: expect.objectContaining({ "X-Nextcloud-Token": "tok" }) }),
+      "/search?q=todo&limit=50",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          "X-Nextcloud-Token": "tok",
+          "X-Nextcloud-User": "alice",
+        }),
+      }),
     );
+  });
+
+  it("never sends the pre-WARP-1012 `query=` param name", async () => {
+    const get = vi.fn().mockResolvedValue(new Response(JSON.stringify({ items: [] }), { status: 200 }));
+    await searchFiles.handler({ query: "todo" }, ctxWith(get));
+    const [calledPath] = get.mock.calls[0] as [string];
+    expect(calledPath).not.toContain("query=");
+  });
+
+  it("url-encodes the search term", async () => {
+    const get = vi.fn().mockResolvedValue(new Response(JSON.stringify({ items: [] }), { status: 200 }));
+    await searchFiles.handler({ query: "tax 2026 & receipts" }, ctxWith(get));
+    expect(get).toHaveBeenCalledWith(
+      `/search?q=${encodeURIComponent("tax 2026 & receipts")}&limit=50`,
+      expect.anything(),
+    );
+  });
+
+  it("surfaces upstream failure statuses as SEARCH_FAILED", async () => {
+    const get = vi.fn().mockResolvedValue(new Response("nope", { status: 400 }));
+    const r = await searchFiles.handler({ query: "todo" }, ctxWith(get));
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("SEARCH_FAILED");
+      expect(r.error.message).toBe("nextcloud returned 400");
+    }
   });
 });

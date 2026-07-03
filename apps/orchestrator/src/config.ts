@@ -446,6 +446,24 @@ const envSchema = z.object({
     ),
   DROPLET_OTA_GITHUB_TOKEN: z.string().default(""),
   DROPLET_OTA_POLL_INTERVAL: z.coerce.number().int().min(60).finite().default(900),
+  // WARP-539 — apply + health-gated swap + auto-rollback. The apply path is the
+  // ONLY thing that drives the host Docker daemon, and only through the audited
+  // host helper scripts/lib/apply-update.sh over the mounted compose socket
+  // (docker/docker-compose.yml, orchestrator service ONLY — see the WARP-539
+  // volume comment there).
+  //   APPLY_SCRIPT   — absolute path to apply-update.sh as mounted in the
+  //                    orchestrator container. Empty (the default) DISABLES the
+  //                    apply window: the box still polls + tracks pending
+  //                    releases, but never swaps containers. This is the correct
+  //                    posture for dev laptops + CI (no host socket) and until
+  //                    the compose socket mount is provisioned on a box.
+  //   COMPOSE_FILE   — the on-host compose file the helper drives.
+  //   UPDATES_DIR    — root for <updateId>/{backup,configs.tar.gz}; the 7-day
+  //                    backup GC (daily purge cron) reaps terminal-update dirs
+  //                    under it. Maps to a named volume on the box.
+  DROPLET_OTA_APPLY_SCRIPT: z.string().default(""),
+  DROPLET_OTA_COMPOSE_FILE: z.string().default("/opt/droplet/docker/docker-compose.yml"),
+  DROPLET_OTA_UPDATES_DIR: z.string().default("/data/updates"),
 
   // WARP-808: which deployment shape broadcasts the home Wi-Fi AP. This is the
   // SAME knob the device-bridge reads (services/oled-display/device-bridge.py)
@@ -651,6 +669,46 @@ const envSchema = z.object({
   JIRA_HOST: z.string().default(""),
   JIRA_EMAIL: z.string().default(""),
   JIRA_API_TOKEN: z.string().default(""),
+
+  // --- WARP-615: fleet-analytics agent (device → droplet-analytics portal) ---
+  // The on-device analytics agent (services/analytics/) is FAIL-OPEN and OFF
+  // by default (decision D5): with ANALYTICS_ENABLED unset/false — or with no
+  // URL, or neither an ingest token nor a provisioning code — the façade is a
+  // pure no-op and the box behaves exactly as before.
+  //
+  // ENABLED — EXPLICIT string→bool (same idiom as DROPLET_CLAIM_GATE_ENABLED:
+  //   z.coerce.boolean() would treat the non-empty strings "0"/"false" as true
+  //   and silently turn telemetry ON). Only "1"/"true" enable.
+  ANALYTICS_ENABLED: z
+    .string()
+    .default("0")
+    .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
+  // URL — portal base including the version path. Defaults to a LOCAL portal
+  //   via the host gateway (same host.docker.internal rationale as
+  //   ROUTING_SERVICE_URL); point at https://analytics.warp-lab.ai/api/v1 for
+  //   the fleet portal. Plain string (not .url()): an operator-mangled value
+  //   must degrade to the no-op façade, never crash the orchestrator boot.
+  ANALYTICS_URL: z.string().default("http://host.docker.internal:3000/api/v1"),
+  // INGEST_TOKEN — **SECRET** bearer (`dpl_<machineId>_<secret>`). Pre-set it
+  //   to bypass registration entirely; otherwise WARP-616 mints one from the
+  //   provisioning code and persists it. Lives ONLY in .env; never logged.
+  ANALYTICS_INGEST_TOKEN: z.string().default(""),
+  // PROVISIONING_CODE — **SECRET** single-use code generated in the portal's
+  //   /settings/tokens, exchanged once at POST /agents/register (WARP-616).
+  ANALYTICS_PROVISIONING_CODE: z.string().default(""),
+  // MACHINE_TIER — portal registration tier (home | business | enterprise).
+  //   Plain string, not an enum: a typo must not crash boot (fail-open);
+  //   WARP-616 validates it when it builds the register payload.
+  ANALYTICS_MACHINE_TIER: z.string().default("home"),
+  // Cadences (seconds). Consumed by WARP-617 (buffer flush) and WARP-620
+  //   (heartbeat) via cron-runtime — declared here with the skeleton so every
+  //   ANALYTICS_* knob ships together. Defaults sit safely under the portal's
+  //   per-machine rate limits (heartbeat 4/min, metrics 4/min, events 30/min,
+  //   errors 60/min — agent-api.md §11).
+  ANALYTICS_HEARTBEAT_INTERVAL_S: z.coerce.number().int().min(1).default(30),
+  ANALYTICS_METRICS_FLUSH_S: z.coerce.number().int().min(1).default(60),
+  ANALYTICS_EVENTS_FLUSH_S: z.coerce.number().int().min(1).default(5),
+  ANALYTICS_ERROR_DEDUP_WINDOW_S: z.coerce.number().int().min(1).default(60),
 });
 
 // Backward-compat: storage.ts historically read `BRIDGE_URL`; screen-qr read

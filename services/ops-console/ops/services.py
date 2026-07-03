@@ -167,11 +167,14 @@ def build_registry() -> dict[str, str]:
         # what the operator sees in `docker compose ps`.
         "voice-io":          _u("OPS_PROBE_VOICE",             "http://voice-io:8086/health"),
         "frigate":           _u("OPS_PROBE_FRIGATE",           "http://frigate:5000/healthz"),
+        # WARP-535: the dashboard now ships /healthz (Next.js route
+        # handler at apps/web-dashboard/src/app/healthz/route.ts) as the
+        # OTA update agent's liveness signal. This probe dials the compose
+        # service DNS name (container IP), independent of the loopback
+        # bind inside the container. Keep in lockstep with the compose
+        # default (docker/docker-compose.yml ops-console environment).
+        "web-dashboard":     _u("OPS_PROBE_WEB_DASHBOARD",     "http://web-dashboard:3001/healthz"),
         # --- no HTTP /health endpoint exposed; container state is the check ---
-        # web-dashboard is Next.js with no /api/health route shipped today.
-        # If WARP-XXX adds one, populate the env (default URL stays blank
-        # rather than ship a broken default).
-        "web-dashboard":     _u("OPS_PROBE_WEB_DASHBOARD",     ""),
         # file-indexer is a daemon that watches Nextcloud — no HTTP layer.
         "file-indexer":      _u("OPS_PROBE_FILE_INDEXER",      ""),
         # camera-discovery exposes FastAPI but the POC instance was not

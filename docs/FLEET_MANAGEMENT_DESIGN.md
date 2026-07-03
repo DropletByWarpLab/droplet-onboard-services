@@ -329,6 +329,17 @@ Every layer assumes the previous failed:
 > (rationale beneath). Phase 1 day 1 starts when these are confirmed
 > or overridden. Questions 4–5 have built-in answers; included for
 > completeness but no decision needed.
+>
+> **2026-07-01 (WARP-963):**
+> [ADR-028](ADR-028-fleet-telemetry-and-design-answers.md) re-proposes
+> all three answers against the current reality (analytics portal owns
+> telemetry ingest; HQ is a serverless Worker; NO VPS per the 2026-07-01
+> founder decision — remote access is Cloudflare-native Zero Trust
+> WARP-to-Tunnel over per-box VNETs, ADR-025A in `droplet-fleet-hq`
+> PR #9) — still **Proposed, NOT accepted**, awaiting the same
+> Romain/Stefan sign-off. The portal-push telemetry half shipped
+> flag-gated as `services/fleet-agent/` without prejudging these
+> questions.
 
 ### 1. HQ host choice
 
