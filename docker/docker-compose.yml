@@ -233,7 +233,21 @@ services:
       # eval profile" banner. Setting the URL unconditionally is correct;
       # the route detects the connection failure at request time.
       - RAG_EVAL_URL=${RAG_EVAL_URL:-http://rag-eval:8090}
+      # WARP-539 — OTA apply over the host compose socket. APPLY_SCRIPT points
+      # at the helper bind-mounted below; empty DISABLES the apply window (the
+      # box still polls + tracks pending releases). COMPOSE_FILE is the on-host
+      # path to THIS compose file as the host daemon sees it (the runner passes
+      # it to the socket, so it must resolve on the HOST, not in-container).
+      # UPDATES_DIR is the in-container mount of the ota-updates volume.
+      - DROPLET_OTA_APPLY_SCRIPT=${DROPLET_OTA_APPLY_SCRIPT:-}
+      - DROPLET_OTA_COMPOSE_FILE=${DROPLET_OTA_COMPOSE_FILE:-/opt/droplet/docker/docker-compose.yml}
+      - DROPLET_OTA_UPDATES_DIR=/data/updates
     volumes:
+      # WARP-539: the OTA apply host helper, bind-mounted read-only so the
+      # orchestrator can exec it against the docker socket below. Its container
+      # path is what DROPLET_OTA_APPLY_SCRIPT must be set to. Read-only — the
+      # orchestrator only ever execs it, never rewrites it.
+      - ../scripts/lib/apply-update.sh:/opt/droplet/scripts/lib/apply-update.sh:ro
       # WARP-573: pre-migration DB snapshots written by the guarded boot
       # entrypoint (scripts/migrate-and-start.sh) immediately before applying
       # pending migrations, so a power-cut mid-migration can be auto-recovered.
@@ -263,9 +277,39 @@ services:
       # mounts the SAME dir read-only (see the gateway service above) and
       # serves from it — nginx needs zero config change because the LE
       # fullchain overwrites the same droplet.crt the bootstrap wrote. The
-      # orchestrator triggers the nginx reload via the device-bridge, NOT a
-      # docker socket (which is deliberately never mounted here).
+      # orchestrator triggers the nginx reload via the device-bridge (the
+      # nginx reload path deliberately does NOT use the docker socket).
       - ./certs:/app/docker/certs:rw
+      # ─────────────────────────────────────────────────────────────────────
+      # WARP-539 — OTA apply (compose-over-socket). SECURITY-SENSITIVE.
+      # ─────────────────────────────────────────────────────────────────────
+      # The OTA apply path recreates every appliance container — INCLUDING the
+      # orchestrator itself — which requires talking to the host Docker daemon.
+      # This socket mount is what makes that possible.
+      #
+      # A Docker socket is ROOT-EQUIVALENT on the host. It is granted here on a
+      # deliberate, fenced basis:
+      #   * this is the ONLY service in the whole compose file that mounts it —
+      #     no sidecar, no gateway, no ai-gateway ever gets the socket;
+      #   * NOTHING in the codebase talks to the socket directly. Every daemon
+      #     op funnels through host-compose-runner.ts → the single audited host
+      #     helper scripts/lib/apply-update.sh, whose surface is a FIXED set of
+      #     subcommands invoked with an argv array (never a shell string), not
+      #     an arbitrary `docker` passthrough;
+      #   * only a cosign-VERIFIED (WARP-537) release whose configs.tar.gz
+      #     sha256 matches the signed manifest (apply.ts) ever reaches the
+      #     runner — the crypto verify chain is the gate in front of the socket.
+      # Mounted read-only from the orchestrator's side; the daemon still honors
+      # writes over the API, but :ro keeps the container from tampering with the
+      # socket file itself. To DISABLE OTA apply on a box (dev/CI, or until the
+      # key ceremony runs), leave DROPLET_OTA_APPLY_SCRIPT empty — the window
+      # then no-ops even with the socket present.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # WARP-539: per-update rollback backups + staged configs live here
+      # (<updatesDir>/<id>/{backup,configs.tar.gz}). A daily 03:00 cron GCs
+      # terminal-update backups older than 7 days. Named volume so backups
+      # survive the orchestrator's own recreation mid-apply.
+      - ota-updates:/data/updates
     # WARP-43: rolled-up health includes postgres, redis, routing, ai-gateway,
     # nextcloud. A `down` aggregate returns HTTP 503 so Docker restarts this
     # container when a HARD dependency (postgres) is lost.
@@ -1700,6 +1744,11 @@ volumes:
   # boot entrypoint. Wiped on factory reset (see scripts/factory-reset.sh).
   migration-snapshots:
   brain-memory-data:
+  # WARP-539: OTA per-update rollback backups + staged configs
+  # (<id>/{backup,configs.tar.gz}). GC'd by the daily purge cron (terminal
+  # updates, 7-day window). Named so backups survive the orchestrator's own
+  # recreation mid-apply.
+  ota-updates:
   # WARP-RAG-EVAL: per-run RAGAS JSON + Markdown + the bootstrap
   # baselines.candidate.json. Named volume so results survive container
   # restarts during ops work and don't require an operator-created host
