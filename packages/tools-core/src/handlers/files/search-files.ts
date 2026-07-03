@@ -25,9 +25,18 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       error: { code: "AUTH_REQUIRED", message: "user must be authenticated for file search" },
     };
   }
-  const headers: Record<string, string> = { "X-Nextcloud-Token": ctx.ncToken };
+  // WARP-1012: this client targets the orchestrator's /api/files proxy
+  // (see mcp-server baseUrlFor "nextcloud"), whose search route reads the
+  // term from `q` — the old `query=` param name made it 400 before auth
+  // was even consulted. And the `_service:mcp` principal must assert the
+  // acting user via X-Nextcloud-User (same pair list_files sends); the
+  // route's getUser() rejects the service principal without it.
+  const headers: Record<string, string> = {
+    "X-Nextcloud-Token": ctx.ncToken,
+    "X-Nextcloud-User": ctx.userId,
+  };
   const res = await ctx.http.nextcloud.get(
-    `/search?query=${encodeURIComponent(query)}&limit=50`,
+    `/search?q=${encodeURIComponent(query)}&limit=50`,
     { headers },
   );
   if (!res.ok) {

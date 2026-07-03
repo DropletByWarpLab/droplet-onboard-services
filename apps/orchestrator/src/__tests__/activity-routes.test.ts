@@ -26,6 +26,9 @@ interface FakeRow {
   refs: Record<string, unknown> | null;
   signature: string;
   prevSignatureHash: string;
+  actorType: "user" | "ai" | "system" | "anonymous" | null;
+  actorId: string | null;
+  schemaVersion: number;
 }
 
 function makeRow(over: Partial<FakeRow>, id: number): FakeRow {
@@ -40,6 +43,9 @@ function makeRow(over: Partial<FakeRow>, id: number): FakeRow {
     refs: null,
     signature: `sig-${id}`,
     prevSignatureHash: id === 1 ? "" : `hash-${id - 1}`,
+    actorType: "system",
+    actorId: null,
+    schemaVersion: 2,
     ...over,
   };
 }
@@ -53,6 +59,17 @@ function makeApp(rows: FakeRow[]) {
         let filtered = [...rows];
         if (where?.kind) {
           filtered = filtered.filter((r) => r.kind === where.kind);
+        }
+        if (where?.actorType) {
+          filtered = filtered.filter((r) => r.actorType === where.actorType);
+        }
+        if (where?.actorId) {
+          filtered = filtered.filter((r) => r.actorId === where.actorId);
+        }
+        if (where?.schemaVersion?.gt !== undefined) {
+          filtered = filtered.filter(
+            (r) => r.schemaVersion > where.schemaVersion.gt,
+          );
         }
         if (where?.at) {
           if (where.at.gte) {
@@ -174,6 +191,88 @@ describe("GET /api/activity", () => {
     expect(res.status).toBe(400);
   });
 
+  it("filters by actorType (WARP-181)", async () => {
+    const rows = [
+      makeRow({ actorType: "user", actorId: "uuid-alice" }, 1),
+      makeRow({ actorType: "system" }, 2),
+      makeRow({ actorType: "user", actorId: "uuid-bob" }, 3),
+    ];
+    const app = makeApp(rows);
+    const res = await request(app).get("/api/activity?actorType=user");
+    expect(res.status).toBe(200);
+    expect(res.body.items).toHaveLength(2);
+    expect(res.body.items.every((r: any) => r.actorType === "user")).toBe(true);
+  });
+
+  it("filters by actorId (WARP-181)", async () => {
+    const rows = [
+      makeRow({ actorType: "user", actorId: "uuid-alice" }, 1),
+      makeRow({ actorType: "user", actorId: "uuid-bob" }, 2),
+      makeRow({ actorType: "ai", actorId: "uuid-alice" }, 3),
+    ];
+    const app = makeApp(rows);
+    const res = await request(app).get("/api/activity?actorId=uuid-alice");
+    expect(res.status).toBe(200);
+    expect(res.body.items.map((r: any) => r.id)).toEqual(["3", "1"]);
+  });
+
+  it("returns 400 on an invalid actorType", async () => {
+    const app = makeApp([]);
+    const res = await request(app).get("/api/activity?actorType=robot");
+    expect(res.status).toBe(400);
+  });
+
+  it("items carry actorType and actorId (WARP-181)", async () => {
+    const app = makeApp([
+      makeRow({ actorType: "user", actorId: "uuid-alice" }, 1),
+    ]);
+    const res = await request(app).get("/api/activity");
+    expect(res.body.items[0].actorType).toBe("user");
+    expect(res.body.items[0].actorId).toBe("uuid-alice");
+  });
+
+  it("actor filters never match unsigned v1 actor columns (poisoned row excluded)", async () => {
+    // v1 actor columns are the only fields writable without breaking
+    // the chain; legitimate v1 rows have them NULL. A maliciously
+    // decorated v1 row must not surface in \"everything Alice did\".
+    const app = makeApp([
+      makeRow(
+        { schemaVersion: 1, actorType: "user", actorId: "uuid-alice" },
+        1,
+      ),
+      makeRow(
+        { schemaVersion: 2, actorType: "user", actorId: "uuid-alice" },
+        2,
+      ),
+    ]);
+    const byId = await request(app).get("/api/activity?actorId=uuid-alice");
+    expect(byId.status).toBe(200);
+    expect(byId.body.items.map((r: any) => r.id)).toEqual(["2"]);
+    const byType = await request(app).get("/api/activity?actorType=user");
+    expect(byType.body.items.map((r: any) => r.id)).toEqual(["2"]);
+  });
+
+  it("nulls actor fields on v1 rows — unsigned actor columns are never served as truth (WARP-181)", async () => {
+    // On a schemaVersion=1 row the signature does NOT cover actorType/
+    // actorId and the recorder never writes them there — any non-NULL
+    // value is tampering or a bug. The list API must not present it.
+    const app = makeApp([
+      makeRow(
+        { schemaVersion: 1, actorType: "user", actorId: "uuid-mallory" },
+        1,
+      ),
+      makeRow({ schemaVersion: 2, actorType: "user", actorId: "uuid-alice" }, 2),
+    ]);
+    const res = await request(app).get("/api/activity");
+    expect(res.status).toBe(200);
+    const v1 = res.body.items.find((r: any) => r.id === "1");
+    const v2 = res.body.items.find((r: any) => r.id === "2");
+    expect(v1.actorType).toBeNull();
+    expect(v1.actorId).toBeNull();
+    expect(v2.actorType).toBe("user");
+    expect(v2.actorId).toBe("uuid-alice");
+  });
+
   it("serializes BigInt id as string", async () => {
     const app = makeApp([makeRow({}, 1)]);
     const res = await request(app).get("/api/activity");
@@ -197,7 +296,11 @@ describe("POST /api/activity/export", () => {
     expect(res.headers["content-type"]).toContain("application/x-ndjson");
     const lines = res.text.trim().split("\n").map((l) => JSON.parse(l));
     expect(lines).toHaveLength(4); // manifest + 3 rows
-    expect(lines[0].type).toBe("droplet.activity-bundle.v1");
+    // WARP-181: rows are now version-tagged (schemaVersion) and carry
+    // actor fields, so the bundle format identifier is bumped — a
+    // v1-only verifier must fail fast at the manifest instead of
+    // reporting false tampering on v2 rows.
+    expect(lines[0].type).toBe("droplet.activity-bundle.v2");
     expect(lines[0].algorithm).toBe("HMAC-SHA256");
     expect(lines[0].publicKey).not.toBeNull();
     expect(lines[1].id).toBe("1");
@@ -226,6 +329,74 @@ describe("POST /api/activity/export", () => {
       .post("/api/activity/export")
       .send({ kind: "totally-made-up" });
     expect(res.status).toBe(400);
+  });
+
+  it("export rows include actorType, actorId and schemaVersion (WARP-181)", async () => {
+    const rows = [
+      makeRow({ actorType: "user", actorId: "uuid-alice" }, 1),
+      makeRow({ actorType: "system", actorId: null, schemaVersion: 2 }, 2),
+    ];
+    const app = makeApp(rows);
+    const res = await request(app).post("/api/activity/export").send({});
+    const lines = res.text.trim().split("\n").map((l) => JSON.parse(l));
+    expect(lines[1].actorType).toBe("user");
+    expect(lines[1].actorId).toBe("uuid-alice");
+    expect(lines[1].schemaVersion).toBe(2);
+    expect(lines[2].actorType).toBe("system");
+    expect(lines[2].actorId).toBeNull();
+  });
+
+  it("export preserves v1 actor columns verbatim-as-stored (raw sealed bundle)", async () => {
+    // The bundle is the raw table: rows carry schemaVersion, so an
+    // offline verifier knows actor fields are unsigned on v1 rows and
+    // can flag them itself. The exporter must not editorialize.
+    const app = makeApp([
+      makeRow(
+        { schemaVersion: 1, actorType: "user", actorId: "uuid-mallory" },
+        1,
+      ),
+    ]);
+    const res = await request(app).post("/api/activity/export").send({});
+    const lines = res.text.trim().split("\n").map((l) => JSON.parse(l));
+    expect(lines[1].schemaVersion).toBe(1);
+    expect(lines[1].actorType).toBe("user");
+    expect(lines[1].actorId).toBe("uuid-mallory");
+  });
+
+  it("export actor filters never match unsigned v1 actor columns (poisoned row excluded)", async () => {
+    const app = makeApp([
+      makeRow(
+        { schemaVersion: 1, actorType: "user", actorId: "uuid-alice" },
+        1,
+      ),
+      makeRow(
+        { schemaVersion: 2, actorType: "user", actorId: "uuid-alice" },
+        2,
+      ),
+    ]);
+    const res = await request(app)
+      .post("/api/activity/export")
+      .send({ actorId: "uuid-alice" });
+    expect(res.status).toBe(200);
+    const lines = res.text.trim().split("\n").map((l) => JSON.parse(l));
+    expect(lines).toHaveLength(2); // manifest + ONLY the v2 row
+    expect(lines[1].id).toBe("2");
+    expect(lines[1].schemaVersion).toBe(2);
+  });
+
+  it("export accepts actor filters in the body (WARP-181)", async () => {
+    const rows = [
+      makeRow({ actorType: "user", actorId: "uuid-alice" }, 1),
+      makeRow({ actorType: "ai", actorId: null }, 2),
+    ];
+    const app = makeApp(rows);
+    const res = await request(app)
+      .post("/api/activity/export")
+      .send({ actorType: "ai" });
+    expect(res.status).toBe(200);
+    const lines = res.text.trim().split("\n").map((l) => JSON.parse(l));
+    expect(lines).toHaveLength(2); // manifest + 1 row
+    expect(lines[1].actorType).toBe("ai");
   });
 
   it("ships the signer's public bytes so an offline verifier can replay", async () => {

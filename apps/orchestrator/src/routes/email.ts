@@ -22,6 +22,7 @@ import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { requireRole } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
+import { actorFromRequest } from "../services/activity.service.js";
 import { reconcileStaleSending } from "../services/email-reconcile.service.js";
 import { createLogger } from "../lib/logger.js";
 
@@ -433,6 +434,7 @@ export function createEmailRouter(
             accountId: queued.accountId,
             actor: req.user?.username ?? null,
           },
+          actor: actorFromRequest(req),
         });
 
         res.status(202).json({

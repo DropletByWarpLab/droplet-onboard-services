@@ -64,6 +64,10 @@ export function attachFileIndexerActivityBridge(): () => void {
         severity: "info",
         sourceIcon: "file-plus",
         what: `Indexed ${filename}`,
+        // WARP-181: MQTT bridge rows are box housekeeping; the topic's
+        // `user` segment is a Nextcloud username (kept in refs), not a
+        // canonical UUID.
+        actor: { type: "system" },
         sub: subParts.join(" • "),
         refs: stripUndefined({
           userId: user,
@@ -92,6 +96,7 @@ export function attachFileIndexerActivityBridge(): () => void {
         severity: "warn",
         sourceIcon: "file-minus",
         what: `Removed ${filename}`,
+        actor: { type: "system" },
         sub: `for ${user}`,
         refs: stripUndefined({
           userId: user,

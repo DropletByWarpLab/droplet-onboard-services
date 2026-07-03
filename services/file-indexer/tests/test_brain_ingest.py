@@ -18,6 +18,13 @@ from typing import Any
 
 import pytest
 
+# WARP-493: the orchestrator's `droplet/files/brain/uploaded` publisher
+# sends the local User.id UUID as `userId` (pre-493 it was the Nextcloud
+# username). The writer is a payload pass-through, but the fixtures pin
+# the UUID shape end-to-end (payload → upsert_chunk → per-user status
+# topic → manifest) so a regression back to username keys shows up here.
+USER_ID = "aaaaaaaa-1111-1111-1111-111111111111"
+
 
 @pytest.fixture
 def fake_io(monkeypatch, tmp_path):
@@ -79,7 +86,7 @@ def fake_io(monkeypatch, tmp_path):
 
 
 def _write_text_payload(tmp_path: Path, item_id: str, text: str) -> Path:
-    item_dir = tmp_path / "alice" / item_id
+    item_dir = tmp_path / USER_ID / item_id
     item_dir.mkdir(parents=True, exist_ok=True)
     p = item_dir / "original.txt"
     p.write_text(text, encoding="utf-8")
@@ -96,7 +103,7 @@ def test_handle_uploaded_indexes_text_file(fake_io, tmp_path):
     handle_brain_uploaded(
         {
             "itemId": "item-A",
-            "userId": "alice",
+            "userId": USER_ID,
             "path": str(text_path),
             "mimeType": "text/plain",
             "filename": "notes.txt",
@@ -112,7 +119,7 @@ def test_handle_uploaded_indexes_text_file(fake_io, tmp_path):
     for u in fake_io["upserts"]:
         assert u["source"] == "brain"
         assert u["brain_item_id"] == "item-A"
-        assert u["user_id"] == "alice"
+        assert u["user_id"] == USER_ID
         assert u["nc_file_id"] >= (1 << 30)  # synthetic, not real
 
     # BrainMemoryItem marked indexed with status='ready' (WARP-330) —
@@ -127,7 +134,7 @@ def test_handle_uploaded_indexes_text_file(fake_io, tmp_path):
     # WS bridge (subscribed to `droplet/files/<user>/#`) forwards it
     # to the dashboard's open browser sessions.
     assert (
-        "droplet/files/alice/brain/indexed",
+        f"droplet/files/{USER_ID}/brain/indexed",
         {"itemId": "item-A", "status": "ready"},
     ) in fake_io["published"]
 
@@ -138,7 +145,7 @@ def test_handle_uploaded_indexes_text_file(fake_io, tmp_path):
     assert "alpha beta" in extracted.read_text(encoding="utf-8")
     m = json.loads(manifest.read_text(encoding="utf-8"))
     assert m["itemId"] == "item-A"
-    assert m["userId"] == "alice"
+    assert m["userId"] == USER_ID
     assert m["originatingChatId"] == "chat-1"
 
 
@@ -156,7 +163,7 @@ def test_handle_uploaded_publishes_failed_when_file_missing(fake_io, tmp_path):
     handle_brain_uploaded(
         {
             "itemId": "item-missing",
-            "userId": "alice",
+            "userId": USER_ID,
             "path": str(tmp_path / "does-not-exist"),
             "mimeType": "text/plain",
         }
@@ -189,7 +196,7 @@ def test_handle_uploaded_marks_failed_when_extractor_unavailable(
     handle_brain_uploaded(
         {
             "itemId": "item-B",
-            "userId": "alice",
+            "userId": USER_ID,
             "path": str(text_path),
             "mimeType": "application/x-weird",
         }
@@ -236,7 +243,7 @@ def test_handle_uploaded_image_only_is_ready_not_failed(
     # Drop a fake "image" file at the expected path. The stubbed dispatch
     # below answers None, so the handler records the manifest and marks
     # the row ready without touching the bytes.
-    item_dir = tmp_path / "alice" / "item-img"
+    item_dir = tmp_path / USER_ID / "item-img"
     item_dir.mkdir(parents=True, exist_ok=True)
     fake_image = item_dir / "original.png"
     fake_image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
@@ -255,7 +262,7 @@ def test_handle_uploaded_image_only_is_ready_not_failed(
     brain_ingest.handle_brain_uploaded(
         {
             "itemId": "item-img",
-            "userId": "alice",
+            "userId": USER_ID,
             "path": str(fake_image),
             "mimeType": "image/png",
             "filename": "screenshot.png",
@@ -305,7 +312,7 @@ def test_handle_uploaded_image_writes_vision_render(
     import brain_ingest
     from PIL import Image
 
-    item_dir = tmp_path / "alice" / "item-vis"
+    item_dir = tmp_path / USER_ID / "item-vis"
     item_dir.mkdir(parents=True, exist_ok=True)
     img_path = item_dir / "original.png"
     buf = _io.BytesIO()
@@ -324,7 +331,7 @@ def test_handle_uploaded_image_writes_vision_render(
     brain_ingest.handle_brain_uploaded(
         {
             "itemId": "item-vis",
-            "userId": "alice",
+            "userId": USER_ID,
             "path": str(img_path),
             "mimeType": "image/png",
             "filename": "photo.png",
@@ -349,7 +356,7 @@ def test_handle_uploaded_image_with_text_is_ocr_indexed(
     from extractors.spans import Span
     from anchor_schema import NoneAnchor
 
-    item_dir = tmp_path / "alice" / "item-shot"
+    item_dir = tmp_path / USER_ID / "item-shot"
     item_dir.mkdir(parents=True, exist_ok=True)
     fake_image = item_dir / "original.png"
     fake_image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
@@ -370,7 +377,7 @@ def test_handle_uploaded_image_with_text_is_ocr_indexed(
     brain_ingest.handle_brain_uploaded(
         {
             "itemId": "item-shot",
-            "userId": "alice",
+            "userId": USER_ID,
             "path": str(fake_image),
             "mimeType": "image/png",
             "filename": "screenshot.png",
@@ -420,7 +427,7 @@ def test_handle_uploaded_skips_when_status_is_queued_for_transcription(
     brain_ingest.handle_brain_uploaded(
         {
             "itemId": "item-Q",
-            "userId": "alice",
+            "userId": USER_ID,
             "path": str(text_path),
             "mimeType": "audio/wav",
         }
@@ -457,7 +464,7 @@ def test_handle_uploaded_persists_failed_on_empty_extraction(
     brain_ingest.handle_brain_uploaded(
         {
             "itemId": "item-empty",
-            "userId": "alice",
+            "userId": USER_ID,
             "path": str(text_path),
             "mimeType": "text/plain",
         }
@@ -489,7 +496,7 @@ def test_handle_uploaded_persists_failed_on_embed_failure(
     brain_ingest.handle_brain_uploaded(
         {
             "itemId": "item-embed",
-            "userId": "alice",
+            "userId": USER_ID,
             "path": str(text_path),
             "mimeType": "text/plain",
         }
@@ -522,7 +529,7 @@ def test_handle_uploaded_persists_failed_on_db_write_failure(
     brain_ingest.handle_brain_uploaded(
         {
             "itemId": "item-db",
-            "userId": "alice",
+            "userId": USER_ID,
             "path": str(text_path),
             "mimeType": "text/plain",
         }
@@ -572,7 +579,7 @@ def test_handle_uploaded_pdf_end_to_end_no_section_path_exception(
     )
     assert fixture_pdf.exists(), f"missing fixture {fixture_pdf}"
 
-    item_dir = tmp_path / "alice" / "item-pdf"
+    item_dir = tmp_path / USER_ID / "item-pdf"
     item_dir.mkdir(parents=True, exist_ok=True)
     target = item_dir / "original.pdf"
     target.write_bytes(fixture_pdf.read_bytes())
@@ -580,7 +587,7 @@ def test_handle_uploaded_pdf_end_to_end_no_section_path_exception(
     handle_brain_uploaded(
         {
             "itemId": "item-pdf",
-            "userId": "alice",
+            "userId": USER_ID,
             "path": str(target),
             "mimeType": "application/pdf",
             "filename": "sample.pdf",
@@ -606,7 +613,7 @@ def test_handle_uploaded_pdf_end_to_end_no_section_path_exception(
 
     # Ready publish under the per-user namespace.
     assert (
-        "droplet/files/alice/brain/indexed",
+        f"droplet/files/{USER_ID}/brain/indexed",
         {"itemId": "item-pdf", "status": "ready"},
     ) in fake_io["published"]
 
@@ -664,7 +671,7 @@ def test_reindex_one_applies_warp435_contextual_header(monkeypatch, tmp_path):
     import db as db_mod
 
     # Real text file so the production chunker runs and yields real chunks.
-    item_dir = tmp_path / "alice" / "bmi-reindex"
+    item_dir = tmp_path / USER_ID / "bmi-reindex"
     item_dir.mkdir(parents=True, exist_ok=True)
     target = item_dir / "original.txt"
     target.write_text(
@@ -678,7 +685,7 @@ def test_reindex_one_applies_warp435_contextual_header(monkeypatch, tmp_path):
         "fetch_item",
         lambda conn, *, item_id: {
             "id": item_id,
-            "userId": "alice",
+            "userId": USER_ID,
             "storagePath": str(target),
             "mimeType": "text/plain",
         },
@@ -753,7 +760,7 @@ def test_reindex_one_malformed_anchor_falls_back_to_null(monkeypatch, tmp_path):
     import brain_ingest
     import db as db_mod
 
-    item_dir = tmp_path / "alice" / "bmi-bad-anchor"
+    item_dir = tmp_path / USER_ID / "bmi-bad-anchor"
     item_dir.mkdir(parents=True, exist_ok=True)
     target = item_dir / "original.txt"
     target.write_text(
@@ -766,7 +773,7 @@ def test_reindex_one_malformed_anchor_falls_back_to_null(monkeypatch, tmp_path):
         "fetch_item",
         lambda conn, *, item_id: {
             "id": item_id,
-            "userId": "alice",
+            "userId": USER_ID,
             "storagePath": str(target),
             "mimeType": "text/plain",
         },

@@ -32,6 +32,9 @@ const sampleContent: ActivityRowContent = {
   sub: "Alice • llama3.1",
   kind: "chat",
   refs: { conversationId: "abc-123", messageId: "msg-456" },
+  actorType: "user",
+  actorId: "uuid-alice",
+  schemaVersion: 2,
 };
 
 describe("audit-signing.service — canonical content", () => {
@@ -42,12 +45,42 @@ describe("audit-signing.service — canonical content", () => {
       kind: "chat",
       refs: { messageId: "msg-456", conversationId: "abc-123" },
       sub: "Alice • llama3.1",
+      actorId: "uuid-alice",
       what: "Chat turn completed",
       sourceIcon: "message-square",
       severity: "ok",
+      schemaVersion: 2,
+      actorType: "user",
       at: new Date("2026-05-25T12:00:00.000Z"),
     });
     expect(a).toBe(b);
+  });
+
+  it("v1 rows canonicalize to the exact legacy 7-key shape (byte-identical)", () => {
+    // WARP-181 regression guard: pre-upgrade rows were signed under
+    // this exact string — any drift breaks verification of every
+    // existing chain in the field.
+    const c = canonicalizeRowContent({
+      at: new Date("2026-05-25T12:00:00.000Z"),
+      severity: "ok",
+      sourceIcon: "message-square",
+      what: "Chat turn completed",
+      sub: "Alice • llama3.1",
+      kind: "chat",
+      refs: { conversationId: "abc-123", messageId: "msg-456" },
+      actorType: null,
+      actorId: null,
+      schemaVersion: 1,
+    });
+    expect(c).toBe(
+      '{"at":"2026-05-25T12:00:00.000Z","kind":"chat",' +
+        '"refs":{"conversationId":"abc-123","messageId":"msg-456"},' +
+        '"severity":"ok","sourceIcon":"message-square",' +
+        '"sub":"Alice • llama3.1","what":"Chat turn completed"}',
+    );
+    // Actor keys never leak into the v1 form even if set on the row —
+    // a v1 row's actor columns are untrusted decoration, not signed data.
+    expect(c).not.toContain("actor");
   });
 
   it("emits ISO-8601 timestamps so the canonical form is portable", () => {
@@ -64,9 +97,13 @@ describe("audit-signing.service — canonical content", () => {
       sub: null,
       kind: "system",
       refs: null,
+      actorType: "system",
+      actorId: null,
+      schemaVersion: 2,
     });
     expect(c).toContain('"sub":null');
     expect(c).toContain('"refs":null');
+    expect(c).toContain('"actorId":null');
   });
 });
 

@@ -12,6 +12,88 @@ checklist rather than a story.
 
 ---
 
+## WARP-493 — brain-memory username→UUID cutover (atomic; depends on WARP-485)
+
+**Background.** Brain-memory was the last pre-WARP-485 surface keyed by
+Nextcloud username: `BrainMemoryItem.userId` + `.storagePath`,
+brain-sourced `FileContentChunk.userId`, the on-disk
+`BRAIN_ROOT/<username>/` dirs, and the reader/writer code around them.
+
+**All surfaces flip in ONE release — partial deploy = read regression:**
+
+1. SQL backfill `20260702000000_warp_491_brain_memory_userid_backfill`
+   (runs via `prisma migrate deploy` before routes mount). Data-only.
+2. Boot-time `migrateBrainMemoryDirectoryLayout` renames
+   `BRAIN_ROOT/<username>/` → `BRAIN_ROOT/<User.id>/` (atomic rename;
+   UUID-shaped names skipped, so re-boot is a no-op).
+3. Reader/writer flips: `routes/files-brain.ts::getUserId`,
+   `routes/me-context-stats.ts::getUserId`, chat-attachment ownership in
+   `routes/llm.ts` (`brainOwnerId`), ws-bridge extra
+   `droplet/files/<user.id>/#` subscription, and the MQTT
+   `droplet/files/brain/uploaded` publisher (so `brain_ingest.py` writes
+   UUID-keyed rows).
+
+Deploying the code without the migration (or vice-versa) reproduces the
+WARP-488-reviewer scenario: renamed dirs + username-keyed reads (or the
+inverse) = 404/ENOENT on every pre-fix brain item.
+
+**Idempotency.** SQL re-runs update zero rows (UUID-regex `WHERE`
+guard); the dir migrator skips UUID-shaped names; both proven by re-run
+tests (scratch-Postgres double-apply + vitest integration suite).
+
+**Orphans.** Rows/dirs keyed by a username with no matching
+`User.nextcloudUsername` are logged (`RAISE NOTICE` / orchestrator boot
+log) and NEVER deleted. Convergence after the user's first sign-in
+(which writes their mapping row) differs by layer:
+
+- **Dirs converge automatically** — the boot migrator re-runs on every
+  orchestrator start.
+- **Rows do NOT** — `prisma migrate deploy` runs the backfill exactly
+  once, so an operator must manually re-apply the backfill SQL (psql)
+  for users who sign in after the deploy. Safe and fully convergent:
+  orphan rows retain both the username `userId` and the username
+  `storagePath`, so rewrite-then-flip still applies, and the UUID-regex
+  guards make the re-apply idempotent.
+
+`FileContentChunk` is only flipped for `source = 'brain'` rows —
+nextcloud-watcher chunks are username-keyed by design and keep being
+written that way.
+
+**Known transition window.** Between `prisma migrate deploy` (rows +
+`storagePath` already UUID-rewritten) and the boot-time dir rename, the
+file-indexer's transcription worker can ENOENT a queued pre-fix item
+and mark it `failed` — recoverable via the transcribe-now retry once
+the orchestrator is up.
+
+**Deferred gaps (known, deliberate — do not "fix" ad hoc):**
+
+- `/api/files/knowledge/{recent,search}` (`routes/files-knowledge.ts`)
+  still scope `FileContentChunk` by `req.user.username`, so brain-sourced
+  chunks drop out of the knowledge surface post-cutover (chat attachment
+  inlining is unaffected — it reads by `brainItemId`).
+- MCP `search_content` receives the username as `_meta.userId`
+  (`routes/llm.ts` toolCallContext), so its pgvector scope likewise
+  misses UUID-keyed brain chunks while still covering watcher chunks.
+
+Both need one decision — dual-shape reads vs unifying the watcher key —
+tracked in
+[WARP-1014](https://warp-lab.atlassian.net/browse/WARP-1014), the
+files-knowledge/search_content brain-visibility follow-up. Flipping
+either alone breaks the (still username-keyed) watcher rows: the
+mirror-image regression.
+
+**Verification on a deployed device.**
+
+```bash
+# Non-UUID brain item keys (0, or the operator-known orphan count):
+psql -c "SELECT COUNT(*) FROM \"BrainMemoryItem\"
+         WHERE \"userId\" !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';"
+# Username-named dirs left under BRAIN_ROOT (orphans only):
+ls /data/brain-memory/
+```
+
+---
+
 ## WARP-488 — `Camera*.userId` username→UUID backfill (depends on WARP-485)
 
 **Background.** Before WARP-485 the OCS-auth fallback set `req.user.id`
@@ -64,12 +146,6 @@ psql -c "SELECT COUNT(*) FROM \"CameraNotificationPref\"
 Both should return either 0 (clean) or the operator-known orphan count
 (un-paired pre-fix usernames).
 
-**Brain-memory cutover is OUT OF SCOPE for this ticket.** The
-`BRAIN_ROOT/<userId>/` on-disk dirs and the `BrainMemoryItem.userId`
-column are still keyed by Nextcloud username on devices with pre-WARP-485
-history. That cutover is tracked separately in
-[WARP-493](https://warp-lab.atlassian.net/browse/WARP-493) as an atomic
-deploy bundling the boot-time directory migrator, the
-`routes/files-brain.ts::getUserId` flip to UUID, the DB column backfill,
-and the `brain_ingest` writer update — all in one release so reads and
-writes converge in lockstep.
+**Brain-memory cutover is OUT OF SCOPE for this ticket.** It landed as
+[WARP-493](https://warp-lab.atlassian.net/browse/WARP-493) — see the
+section above for the atomic-deploy invariant.

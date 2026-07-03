@@ -6,6 +6,12 @@ embed → upsert pipeline as the Nextcloud watcher — but writes
 FileContentChunk rows with `source=brain` and `brainItemId=<id>` so the
 single cosine search hits both surfaces.
 
+The payload's `userId` (and therefore every row and per-user topic this
+writer keys) is the local `User.id` UUID since WARP-493 — the
+orchestrator's publisher flipped from Nextcloud username to UUID in the
+same deploy as the DB backfill and the BRAIN_ROOT directory migrator.
+The watcher path, by contrast, stays username-keyed.
+
 The handler is invoked on the paho MQTT network thread. It MUST stay
 fast and never raise (the wrapper in `mqtt_client._on_message` swallows
 exceptions, but we publish a `failed` status here on errors so the
@@ -73,6 +79,11 @@ def _indexed_topic(user_id: str) -> str:
     `droplet/files/<user>/#`. Publishing under the per-user namespace
     routes status flips straight to that user's open browser
     sessions without expanding the bridge's subscription set.
+
+    WARP-493: `user_id` is the local `User.id` UUID (from the MQTT
+    payload; pre-493 it was the Nextcloud username). The WS bridge
+    subscribes `droplet/files/<user.id>/#` in addition to its
+    username-keyed set, so these flips still reach the browser.
     """
     return f"droplet/files/{user_id}/brain/indexed"
 

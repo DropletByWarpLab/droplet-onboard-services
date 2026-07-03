@@ -17,6 +17,7 @@ vi.unmock("@prisma/client");
 
 let ActivityKind: Record<string, string>;
 let ActivitySeverity: Record<string, string>;
+let ActivityActorType: Record<string, string>;
 
 beforeAll(async () => {
   const real = await vi.importActual<typeof import("@prisma/client")>(
@@ -25,6 +26,7 @@ beforeAll(async () => {
   const realModule = real as unknown as Record<string, Record<string, string>>;
   ActivityKind = realModule.ActivityKind;
   ActivitySeverity = realModule.ActivitySeverity;
+  ActivityActorType = realModule.ActivityActorType;
 });
 
 describe("Prisma ActivityRow schema", () => {
@@ -48,5 +50,13 @@ describe("Prisma ActivityRow schema", () => {
     expect(ActivitySeverity.warn).toBe("warn");
     expect(ActivitySeverity.err).toBe("err");
     expect(ActivitySeverity.info).toBe("info");
+  });
+
+  it("exposes the WARP-181 ActivityActorType enum values", () => {
+    expect(ActivityActorType).toBeDefined();
+    expect(ActivityActorType.user).toBe("user");
+    expect(ActivityActorType.ai).toBe("ai");
+    expect(ActivityActorType.system).toBe("system");
+    expect(ActivityActorType.anonymous).toBe("anonymous");
   });
 });

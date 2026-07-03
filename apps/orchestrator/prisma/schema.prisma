@@ -1816,11 +1816,42 @@ model ActivityRow {
   // `activity.service.record`.
   prevSignatureHash String
 
+  // ── WARP-181: first-class actor attribution ──
+  // Who performed the action. Nullable ONLY for pre-upgrade v1 rows —
+  // a CHECK constraint in the migration enforces
+  // `schemaVersion = 1 OR actorType IS NOT NULL` (explicit-era rule).
+  actorType         ActivityActorType?
+  // Canonical user UUID when known (`type: user` rows always carry it;
+  // `ai` rows carry the on-behalf-of UUID when it was already plumbed
+  // through, else NULL). Never a username — display names stay in refs.
+  actorId           String?
+  // Canonical-content version this row was signed under. Existing rows
+  // are backfilled to 1 by the migration; the recorder always writes 2
+  // explicitly (no DB default — the migration drops it after backfill).
+  // `canonicalizeRowContent` dispatches on this value so v1 rows keep
+  // verifying byte-identically.
+  schemaVersion     Int
+
   // Composite index for the GET /api/activity range/filter query
   // (sorted by `at` descending within an optional `kind` filter), and
   // a separate `at` index for unfiltered time-range queries.
   @@index([at, kind])
   @@index([at])
+  // WARP-181: "what did this user do" queries (actorId filter + at sort).
+  @@index([actorId, at])
+}
+
+/// WARP-181: who performed the action behind an ActivityRow. `user` =
+/// an authenticated household member (actorId REQUIRED — recorder
+/// enforces it); `ai` = the agent loop / tool dispatch (actorId is the
+/// on-behalf-of user when already available); `system` = the box
+/// itself (boot, tickers, sweeps, purges); `anonymous` = pre-auth
+/// surfaces (failed/throttled sign-ins).
+enum ActivityActorType {
+  user
+  ai
+  system
+  anonymous
 }
 
 /// WARP-456: domain bucket for ActivityRow. Adding a new value here

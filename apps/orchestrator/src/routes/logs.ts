@@ -29,6 +29,7 @@ import { z } from "zod";
 import { fetchLogBundleFromBridge } from "../services/logs-bridge.service.js";
 import { redactSecrets } from "../lib/log-redaction.js";
 import { recordActivity } from "../services/activity.singleton.js";
+import { actorFromRequest } from "../services/activity.service.js";
 import { RouterError } from "../types/router-error.js";
 import { createLogger } from "../lib/logger.js";
 
@@ -192,6 +193,7 @@ export function createLogsRouter(): Router {
       sub: `${bundle.services.length} service(s), last ${bundle.window_hours}h${
         service ? ` · ${service}` : ""
       }`,
+      actor: actorFromRequest(req),
       refs: {
         by: req.user?.id ?? null,
         windowHours: bundle.window_hours,

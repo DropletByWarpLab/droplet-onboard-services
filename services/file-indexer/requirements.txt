@@ -61,3 +61,10 @@ tokenizers>=0.20,<1.0
 # canonical pure-Python pptx parser; depends only on lxml + Pillow,
 # both of which are already pulled in transitively.
 python-pptx>=0.6.23,<1.0
+# WARP-1018 — FIPS boot self-test. services/_shared/fips_selftest.py is
+# COPY'd into this image and its is_fips_enabled() probe reads
+# cryptography's backend `_fips_enabled` flag. The dep was previously
+# satisfied only transitively; pin it explicitly so a dependency-tree
+# shuffle can't silently drop the FIPS provider check. Kept in lockstep
+# with services/ai-gateway's pin.
+cryptography>=42.0.0

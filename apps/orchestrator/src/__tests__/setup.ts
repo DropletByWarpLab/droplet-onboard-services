@@ -102,6 +102,15 @@ vi.mock("@prisma/client", () => {
       telemetry: "telemetry",
       web_fetch: "web_fetch",
     },
+    // WARP-181: actor attribution on ActivityRow. Mirrors the schema's
+    // `enum ActivityActorType` — keep in lockstep or ~200 suites cascade
+    // into 401/500s (the recorder validates against these values).
+    ActivityActorType: {
+      user: "user",
+      ai: "ai",
+      system: "system",
+      anonymous: "anonymous",
+    },
     Prisma: {
       PrismaClientKnownRequestError,
       // Mirrors the generated client's const-object enum — reset.service opens

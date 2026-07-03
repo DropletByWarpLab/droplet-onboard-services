@@ -26,6 +26,7 @@ import {
 import { publish as mqttPublish } from "../services/mqtt.service.js";
 import { requireRole } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
+import { actorFromRequest } from "../services/activity.service.js";
 import { visibleAudiences } from "../services/memory-audience.js";
 import { loadIdentityPrompt } from "../services/identity-prompt.js";
 
@@ -610,6 +611,16 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // path treats `_meta.userId` as authoritative because the
       // orchestrator IS the trust boundary for that channel.
       const userId = (req as AuthedRequest).user?.username;
+      // WARP-493: brain-memory rows/dirs are keyed by the local User.id
+      // UUID (see routes/files-brain.ts::getUserId). The attachment
+      // ownership checks + originatingChatId re-stamps below MUST use
+      // that key or every attachment silently drops out post-cutover.
+      // Deliberately separate from `userId` above: the username still
+      // keys ChatSession persistence and the MCP `_meta.userId`
+      // contract (search_content's FileContentChunk scope spans the
+      // username-keyed nextcloud-watcher rows) until their own
+      // follow-up cutovers land.
+      const brainOwnerId = (req as AuthedRequest).user?.id;
       // WARP-845: also forward the caller's role so role-scoped handlers
       // (memory_recall) can filter what the model may read.
       const toolCallContext: McpCallContext | undefined =
@@ -832,6 +843,11 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           kind: "chat",
           severity: activitySeverityForTurnStatus(status),
           sourceIcon: "message-square",
+          // WARP-181: the chat turn is attributed to the authenticated
+          // caller (canonical UUID). Service principals (voice etc.)
+          // map to `system` with a null id — the principal string is
+          // preserved in refs.principal below.
+          actor: actorFromRequest(req),
           what:
             status === "completed"
               ? "Chat turn completed"
@@ -843,6 +859,13 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             : `service • ${chatReq.model}`,
           refs: stripUndefined({
             userId,
+            // WARP-181: service principals are recorded as a `system`
+            // actor (actorId must be a canonical user UUID), so the
+            // principal string lands here instead.
+            principal:
+              role === "service"
+                ? ((req as AuthedRequest).user?.id ?? undefined)
+                : undefined,
             model: chatReq.model,
             conversationId: conversationId ?? undefined,
             messageId: assistantMessageId ?? undefined,
@@ -925,8 +948,9 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // pins this must work WITHOUT a persisted conversation — the
       // common case is a file attached before the very first turn.
       // Ownership is enforced inside buildAttachmentContext (query is
-      // filtered by the caller's username, matching /api/files/brain).
-      if (chatReq.attachments?.length && userId) {
+      // filtered by brainOwnerId — the caller's req.user.id UUID —
+      // matching /api/files/brain's post-WARP-493 keying).
+      if (chatReq.attachments?.length && brainOwnerId) {
         // ── Image vision routing ──
         // For image attachments with a normalized render, send the actual
         // image to a vision-capable model: the selected model if it can see,
@@ -939,7 +963,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         try {
           const { blocks, usedItemIds } = await buildImageBlocks(
             prisma,
-            userId,
+            brainOwnerId,
             chatReq.attachments.map((a) => a.itemId),
             { maxImages: config.vision.maxImages },
           );
@@ -984,7 +1008,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         try {
           const attachmentContext = await buildAttachmentContext(
             prisma,
-            userId,
+            brainOwnerId,
             ocrRefs,
           );
           const systemParts: string[] = [];
@@ -1010,7 +1034,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // lost on reload. Re-stamping `originatingChatId` to the server
         // conversationId lets the dashboard rehydrate the chip row (and the
         // per-chat export) via GET /api/files/brain?originatingChatId=<id>.
-        // Ownership-scoped by userId, same as the context lookup.
+        // Ownership-scoped by brainOwnerId (UUID), same as the context lookup.
         //
         // SEPARATE try/catch from the context build (pr-reviewer #550 finding):
         // when this was nested under the context build, a transient updateMany
@@ -1024,7 +1048,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             await prisma.brainMemoryItem.updateMany({
               where: {
                 id: { in: chatReq.attachments.map((a) => a.itemId) },
-                userId,
+                userId: brainOwnerId,
                 NOT: { originatingChatId: conversationId },
               },
               data: { originatingChatId: conversationId },
@@ -1048,10 +1072,13 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // send (the row is created at upload-request time, so it exists
       // by now). Ownership-scoped: a forged draftChatId can only ever
       // re-tag the caller's OWN items.
-      if (chatReq.draftChatId && conversationId && userId) {
+      if (chatReq.draftChatId && conversationId && brainOwnerId) {
         try {
           await prisma.brainMemoryItem.updateMany({
-            where: { originatingChatId: chatReq.draftChatId, userId },
+            where: {
+              originatingChatId: chatReq.draftChatId,
+              userId: brainOwnerId,
+            },
             data: { originatingChatId: conversationId },
           });
         } catch (err) {

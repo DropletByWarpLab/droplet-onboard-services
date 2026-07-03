@@ -196,6 +196,9 @@ export async function runToolSpec(
     kind: "tool_run",
     severity: outcome.status === "ok" ? "ok" : "err",
     sourceIcon: "play",
+    // WARP-181: spec runs execute through the tool dispatcher (agent
+    // surface); RunArgs carries no user UUID today, so id stays null.
+    actor: { type: "ai", id: null },
     what:
       outcome.status === "ok"
         ? "Spec run completed"

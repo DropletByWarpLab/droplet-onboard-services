@@ -77,6 +77,7 @@ import { config } from "../config.js";
 import { buildNcGroups, householdGroupName } from "./auth-groups.js";
 import { purgeUserData } from "../services/brain-memory.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
+import { actorFromRequest } from "../services/activity.service.js";
 import { verifyClaimCodePresence } from "../services/setup-claim.service.js";
 import {
   passwordZod,
@@ -904,6 +905,8 @@ export function createPublicAuthRouter(
             username: loginEmail,
             ip: loginIp,
           },
+          // WARP-181: pre-auth surface — no verified identity yet.
+          actor: { type: "anonymous" },
         });
         res
           .status(429)
@@ -947,6 +950,7 @@ export function createPublicAuthRouter(
             username: attempted,
             ip: callerIpFromReq(req) ?? null,
           },
+          actor: { type: "anonymous" },
         });
         res.status(401).json({ error: "Invalid credentials" });
       };
@@ -1104,6 +1108,9 @@ export function createPublicAuthRouter(
               username,
               ip: callerIpFromReq(req) ?? null,
             },
+            // WARP-181: still pre-auth — the second factor hasn't been
+            // presented, so the sign-in has not completed.
+            actor: { type: "anonymous" },
           });
           res.status(401).json({
             error: "Two-factor authentication required",
@@ -1201,6 +1208,7 @@ export function createPublicAuthRouter(
           role,
           ip: callerIpFromReq(req) ?? null,
         },
+        actor: { type: "user", id: userId },
       });
 
       // ADR-008 §3 + action item #2: native mobile clients can't read
@@ -1981,6 +1989,7 @@ export function createProtectedAuthRouter(
           username: localUser.username,
           ip: callerIpFromReq(req) ?? null,
         },
+        actor: { type: "user", id: localUser.id },
       });
 
       res.json({ status: "ok" });
@@ -2170,6 +2179,7 @@ export function createProtectedAuthRouter(
         what: `${req.user.displayName} enabled two-factor authentication`,
         sub: callerIpFromReq(req) ?? null,
         refs: { outcome: "totp_enabled", userId, username: req.user.username },
+        actor: { type: "user", id: userId },
       });
 
       // Recovery codes are returned ONCE here and never persisted in
@@ -2294,6 +2304,7 @@ export function createProtectedAuthRouter(
           userId: req.user?.id ?? null,
           ip: callerIpFromReq(req) ?? null,
         },
+        actor: actorFromRequest(req),
       });
 
       res.json({ status: "ok" });

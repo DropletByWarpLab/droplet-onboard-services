@@ -41,7 +41,9 @@
 # Retention (applied after every backup via `restic forget --prune`):
 #   7 daily / 4 weekly / 6 monthly snapshots — a month of fine-grained
 #   restore points plus half a year of monthly history, bounded on disk.
-#   Override with DROPLET_BACKUP_KEEP_{DAILY,WEEKLY,MONTHLY}.
+#   Override with DROPLET_BACKUP_KEEP_{DAILY,WEEKLY,MONTHLY}. Grouped
+#   --group-by host so retention stays global across backup path-set changes
+#   (restic's default host,paths grouping would strand stale groups forever).
 #
 # Usage:
 #   ./scripts/host/droplet-backup.sh [--full]
@@ -232,7 +234,12 @@ log_success "snapshot created (tag: $TAG)"
 
 # --- Phase 5: retention -------------------------------------------------------
 log_info "Applying retention: ${KEEP_DAILY} daily / ${KEEP_WEEKLY} weekly / ${KEEP_MONTHLY} monthly"
+# --group-by host (not restic's host,paths default): the backup path set changes
+# over the box's lifetime — config-dir candidates are existence-guarded and .env
+# presence is conditional — and per-path-set groups would each retain their last
+# daily/weekly/monthly snapshots forever. Grouping by host keeps retention global.
 restic forget --prune \
+  --group-by host \
   --keep-daily "$KEEP_DAILY" \
   --keep-weekly "$KEEP_WEEKLY" \
   --keep-monthly "$KEEP_MONTHLY"

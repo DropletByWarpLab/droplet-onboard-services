@@ -103,6 +103,7 @@ export async function sweepExpiredGuests(
         severity: "warn",
         sourceIcon: "clock-x",
         what: "Guest expired",
+        actor: { type: "system" },
         sub: row.user?.username ?? row.userId,
         refs: {
           targetUserId: row.userId,

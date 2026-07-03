@@ -131,6 +131,10 @@ export class McpClientService {
         sourceIcon: "wrench",
         what: isError ? `Tool ${name} failed` : `Tool ${name}`,
         sub: context?.userId ? `for ${context.userId}` : null,
+        // WARP-181: agent-loop dispatch. context.userId is the caller's
+        // USERNAME (WARP-202), not a canonical UUID — it stays in refs;
+        // actorId stays null until a UUID is actually plumbed through.
+        actor: { type: "ai", id: null },
         refs: stripUndefined({
           name,
           userId: context?.userId,

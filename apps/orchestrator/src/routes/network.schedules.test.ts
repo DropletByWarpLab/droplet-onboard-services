@@ -32,6 +32,13 @@ vi.mock("../config.js", () => ({
   },
 }));
 
+// WARP-181: spy on the signed activity emitter so the override
+// create/delete audit rows (AC4) can be asserted without a recorder.
+const recordActivityMock = vi.fn().mockResolvedValue(null);
+vi.mock("../services/activity.singleton.js", () => ({
+  recordActivity: (...a: unknown[]) => recordActivityMock(...a),
+}));
+
 vi.mock("../services/ai-gateway.client.js", () => ({
   healthCheck: vi.fn().mockResolvedValue(true),
   listModels: vi.fn().mockResolvedValue({ models: [] }),
@@ -409,6 +416,7 @@ describe("Schedule / override / event / manualBlock API (WARP-94)", () => {
     eventStore.clear();
     netDeviceStore.clear();
     seq = 0;
+    recordActivityMock.mockClear();
   });
 
   // ---------- POST /network/schedules ----------
@@ -641,6 +649,67 @@ describe("Schedule / override / event / manualBlock API (WARP-94)", () => {
         });
       expect(res.status).toBe(400);
       expect(res.body.error.code).toBe("INVALID_DATE");
+    });
+  });
+
+  // ---------- WARP-181 (AC4): override create/delete audit rows ----------
+
+  describe("override create/delete emit signed activity rows (WARP-181)", () => {
+    it("POST /api/network/overrides records a network row with actor + refs", async () => {
+      const endAt = new Date(Date.now() + 30 * 86400_000).toISOString();
+      const res = await request(app).post("/api/network/overrides").send({
+        subjectType: "device",
+        deviceMac: "AA:BB:CC:DD:EE:01",
+        action: "block",
+        endAt,
+      });
+      expect(res.status).toBe(201);
+      expect(recordActivityMock).toHaveBeenCalledTimes(1);
+      const row = recordActivityMock.mock.calls[0][0];
+      expect(row.kind).toBe("network");
+      expect(row.severity).toBe("ok");
+      expect(row.what).toContain("override");
+      // Dev-bypass auth: req.user = { id: "dev", role: "owner" }.
+      expect(row.actor).toEqual({ type: "user", id: "dev" });
+      expect(row.refs.deviceId).toBe("AA:BB:CC:DD:EE:01");
+      expect(row.refs.overrideId).toBe(res.body.override.id);
+      expect(typeof row.refs.startAt).toBe("string");
+      expect(row.refs.endAt).toBe(endAt);
+    });
+
+    it("a failed create (validation 400) emits no activity row", async () => {
+      await request(app).post("/api/network/overrides").send({
+        subjectType: "device",
+        deviceMac: "AA:BB:CC:DD:EE:01",
+        action: "allow",
+        endAt: "garbage",
+      });
+      expect(recordActivityMock).not.toHaveBeenCalled();
+    });
+
+    it("DELETE /api/network/overrides/:id records a network row with actor + refs", async () => {
+      const create = await request(app).post("/api/network/overrides").send({
+        subjectType: "device",
+        deviceMac: "AA:BB:CC:DD:EE:02",
+        action: "allow",
+        endAt: new Date(Date.now() + 30 * 86400_000).toISOString(),
+      });
+      recordActivityMock.mockClear();
+      const id = create.body.override.id;
+      const res = await request(app).delete(`/api/network/overrides/${id}`);
+      expect(res.status).toBe(204);
+      expect(recordActivityMock).toHaveBeenCalledTimes(1);
+      const row = recordActivityMock.mock.calls[0][0];
+      expect(row.kind).toBe("network");
+      expect(row.severity).toBe("ok");
+      expect(row.actor).toEqual({ type: "user", id: "dev" });
+      expect(row.refs.overrideId).toBe(id);
+      expect(row.refs.deviceId).toBe("AA:BB:CC:DD:EE:02");
+    });
+
+    it("a 404 delete emits no activity row", async () => {
+      await request(app).delete("/api/network/overrides/nope");
+      expect(recordActivityMock).not.toHaveBeenCalled();
     });
   });
 

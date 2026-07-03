@@ -10,6 +10,8 @@ import type { createScheduleApiService } from "../services/schedule-api.service.
 import { DeviceRegistryError } from "../types/device-registry-error.js";
 import { handleRegistryError } from "./network-error-handler.js";
 import { requireRole } from "../middleware/auth.js";
+import { recordActivity } from "../services/activity.singleton.js";
+import { actorFromRequest } from "../services/activity.service.js";
 
 export interface ScheduleDeps {
   scheduleApi: ReturnType<typeof createScheduleApiService>;
@@ -128,6 +130,26 @@ export function registerScheduleRoutes(router: Router, deps: ScheduleDeps): void
         body.endAt = d;
       }
       const override = await scheduleApi.createOverride(body);
+      // WARP-181 (AC4): schedule overrides lift/impose connectivity rules
+      // on a device or group — a privileged op that must land on the
+      // signed activity chain with the authed caller as actor.
+      // `recordActivity` swallows its own failures; the override result
+      // is never blocked on the audit write.
+      await recordActivity({
+        kind: "network",
+        severity: "ok",
+        sourceIcon: "clock",
+        what: "Schedule override created",
+        sub: `${override.action} • ${override.deviceMac ?? override.groupId ?? "unknown"}`,
+        refs: {
+          deviceId: override.deviceMac ?? null,
+          groupId: override.groupId ?? null,
+          overrideId: override.id,
+          startAt: override.startAt.toISOString(),
+          endAt: override.endAt.toISOString(),
+        },
+        actor: actorFromRequest(req),
+      });
       res.status(201).json({ override });
     } catch (err) {
       handleRegistryError(err, res, next);
@@ -136,7 +158,23 @@ export function registerScheduleRoutes(router: Router, deps: ScheduleDeps): void
 
   router.delete("/network/overrides/:id", requireRole("owner", "admin"), async (req, res, next) => {
     try {
-      await scheduleApi.cancelOverride(req.params.id);
+      const removed = await scheduleApi.cancelOverride(req.params.id);
+      // WARP-181 (AC4): mirror row for the delete path.
+      await recordActivity({
+        kind: "network",
+        severity: "ok",
+        sourceIcon: "clock",
+        what: "Schedule override removed",
+        sub: `${removed.action} • ${removed.deviceMac ?? removed.groupId ?? "unknown"}`,
+        refs: {
+          deviceId: removed.deviceMac ?? null,
+          groupId: removed.groupId ?? null,
+          overrideId: removed.id,
+          startAt: removed.startAt.toISOString(),
+          endAt: removed.endAt.toISOString(),
+        },
+        actor: actorFromRequest(req),
+      });
       res.status(204).end();
     } catch (err) {
       handleRegistryError(err, res, next);

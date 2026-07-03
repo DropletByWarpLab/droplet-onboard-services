@@ -24,7 +24,9 @@ function res(json: unknown, ok = true, status = 200): Response {
   } as unknown as Response;
 }
 
-beforeEach(() => authFetchMock.mockReset());
+beforeEach(() => {
+  authFetchMock.mockReset();
+});
 
 describe("WARP-883 — Files spaces api", () => {
   it("fetchFiles defaults to the personal URL (no space param)", async () => {
