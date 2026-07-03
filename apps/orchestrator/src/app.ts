@@ -17,6 +17,7 @@ import { createDevicesRouter } from "./routes/devices.js";
 import { createLlmRouter } from "./routes/llm.js";
 import { createMemoryRouter } from "./routes/memory.js";
 import { createSttRouter } from "./routes/stt.js";
+import { createVoiceRouter } from "./routes/voice.js";
 import { createFilesRouter } from "./routes/files.js";
 import { createFilesBrainRouter } from "./routes/files-brain.js";
 import { createFilesKnowledgeRouter } from "./routes/files-knowledge.js";
@@ -230,6 +231,10 @@ export function createApp(
   // WARP-844 — chat voice input (Wyoming STT proxy). 503s gracefully when
   // the whisper sidecar isn't deployed (macOS dev / non-linux profile).
   app.use("/api", createSttRouter());
+  // WARP-1036 — voice-assistant proxy (status / devices / speaker test).
+  // Owner+admin only; 503s voice_unavailable when voice-io isn't deployed
+  // (macOS dev / non-linux profile) so the setup wizard can auto-skip.
+  app.use("/api", createVoiceRouter());
   app.use("/api", createFilesRouter(prisma));
   app.use("/api", createFilesBrainRouter(prisma));
   app.use("/api", createFilesKnowledgeRouter(prisma));
