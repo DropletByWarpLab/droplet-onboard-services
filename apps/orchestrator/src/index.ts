@@ -81,6 +81,7 @@ import { startContextStatsInvalidator } from "./services/context-stats-invalidat
 import { initActivityRecorder, recordActivity } from "./services/activity.singleton.js";
 import { attachFileIndexerActivityBridge } from "./services/activity-file-indexer-bridge.js";
 import { ensureDefaultModelPulled } from "./services/model-readiness.service.js";
+import { initAnalytics } from "./services/analytics/index.js";
 import { createLogger } from "./lib/logger.js";
 
 const logger = createLogger("orchestrator");
@@ -184,6 +185,9 @@ async function main() {
 
   // Start periodic device self-registration (detects hostname, IP, hardware)
   await initDeviceRegistration(prisma);
+
+  // WARP-615: fleet-analytics agent — fail-open; a no-op until configured.
+  initAnalytics();
 
   // Connect Redis (non-fatal if unavailable)
   try {
