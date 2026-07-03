@@ -5,8 +5,12 @@ helper:
 
 1. Confirms the OpenSSL FIPS provider is loaded — by way of
    ``cryptography``'s backend ``_fips_enabled`` flag.
-2. Negative-confirms by attempting an ``hashlib.md5(..., usedforsecurity=True)``
-   and asserting it raises a FIPS-disabled error.
+2. Negative-confirms by attempting an OpenSSL-backed
+   ``_hashlib.new("md5", ..., usedforsecurity=True)`` and asserting it
+   raises a FIPS-disabled error. Deliberately NOT ``hashlib.new`` — that
+   wrapper silently falls back to the builtin ``_md5`` when OpenSSL
+   rejects the digest, masking enforcement (WARP-1018; see
+   :func:`md5_should_fail`).
 3. Emits a structured JSON log line on stdout so the audit-log integration
    (WARP-237) can ingest it retroactively::
 
@@ -70,19 +74,42 @@ def is_fips_enabled() -> bool:
 
 
 def md5_should_fail() -> Optional[str]:
-    """Return the FIPS-disabled error string when MD5 is rejected.
+    """Return the FIPS-disabled error string when OpenSSL rejects MD5.
 
-    Returns None if MD5 succeeded — which means FIPS is *not* enforcing
-    and the caller should fail closed.
+    Returns None if MD5 was *not* proven rejected — which means FIPS is
+    not (demonstrably) enforcing and the caller should fail closed.
+
+    Why this probes ``_hashlib`` directly instead of ``hashlib.new``
+    (WARP-1018): under an enforcing FIPS provider the OpenSSL-backed
+    ``_hashlib.new("md5")`` raises ``ValueError`` (3.12's
+    ``_hashlib.UnsupportedDigestmodError`` subclasses it), but CPython's
+    ``hashlib.__hash_new`` *catches* that ValueError and silently falls
+    back to ``__get_builtin_constructor("md5")`` — the pure-CPython
+    ``_md5`` module, which knows nothing about FIPS. The fallback also
+    drops all kwargs, so even an explicit ``usedforsecurity=True`` never
+    reaches the builtin. Net effect: ``hashlib.new("md5")`` "succeeds"
+    under a correctly-enforcing provider and the self-test mis-reports
+    FIPS as not enforcing. ``_hashlib.new`` is the unambiguous probe:
+    it is the OpenSSL EVP path with no builtin fallback.
     """
-    import hashlib
+    try:
+        import _hashlib
+    except ImportError:
+        # A CPython built without OpenSSL has no `_hashlib`, so the
+        # OpenSSL-backed path — the thing FIPS governs — cannot be
+        # probed at all. Enforcement is undemonstrated; return None so
+        # the caller fails closed, same posture as "md5 succeeded".
+        # Unreachable in our images (python:3.12 links OpenSSL), but
+        # handled explicitly rather than letting an ImportError escape
+        # and masquerade as a probe crash.
+        return None
 
     try:
         # `usedforsecurity=True` is the default; pinning it explicitly so
         # this probe is unambiguous against a future Python that flips
         # the default.
         # fips:allowed: fips-selftest-negative-probe
-        hashlib.new("md5", b"fips-selftest-probe", usedforsecurity=True).hexdigest()
+        _hashlib.new("md5", b"fips-selftest-probe", usedforsecurity=True).hexdigest()
     except ValueError as err:
         return str(err) or "md5 rejected"
     except Exception as err:  # noqa: BLE001 — any reject is acceptable
