@@ -122,6 +122,10 @@ describe("/admin/audit timeline + badge", () => {
     expect(await screen.findByText(/chain broken/i)).toBeInTheDocument();
     const banner = await screen.findByRole("alert");
     expect(banner).toHaveTextContent(/entry #8/i);
+    // rowsChecked INCLUDES the broken row (the route counts before
+    // verifying) — the intact prefix the copy reports is one shorter.
+    expect(banner).toHaveTextContent(/6 entries checked before it verified intact/i);
+    expect(banner).not.toHaveTextContent(/7 entries/i);
   });
 
   it("re-verifies on demand", async () => {
@@ -219,19 +223,23 @@ describe("/admin/audit pagination + export", () => {
     expect(screen.queryByRole("button", { name: /load more/i })).toBeNull();
   });
 
-  it("downloads a client-generated CSV of the fetched rows", async () => {
+  it("downloads a client-generated CSV of the loaded view", async () => {
     wireApi({ items: [makeItem({ what: "exported row" })] });
     const createObjectURL = vi.fn((_blob: Blob) => "blob:droplet-audit");
     const revokeObjectURL = vi.fn();
     vi.stubGlobal("URL", Object.assign(URL, { createObjectURL, revokeObjectURL }));
+    let downloadName = "";
     const clickSpy = vi
       .spyOn(HTMLAnchorElement.prototype, "click")
-      .mockImplementation(() => {});
+      .mockImplementation(function (this: HTMLAnchorElement) {
+        downloadName = this.download;
+      });
 
     render(<AuditPage />);
     await screen.findByText("exported row");
 
-    fireEvent.click(screen.getByRole("button", { name: /export csv/i }));
+    // Honest partial-export labelling: "Export view", not "Export all".
+    fireEvent.click(screen.getByRole("button", { name: /export view/i }));
     expect(createObjectURL).toHaveBeenCalledTimes(1);
     const blob = createObjectURL.mock.calls[0]![0];
     // jsdom's Blob has no .text(); FileReader is the portable read path.
@@ -243,8 +251,52 @@ describe("/admin/audit pagination + export", () => {
     expect(text).toContain("id,at,kind,severity,what,sub");
     expect(text).toContain("exported row");
     expect(clickSpy).toHaveBeenCalled();
+    // Filename carries the row count so a partial export is self-describing.
+    expect(downloadName).toMatch(/^droplet-audit-\d{4}-\d{2}-\d{2}-1rows\.csv$/);
 
     clickSpy.mockRestore();
     vi.unstubAllGlobals();
+  });
+
+  it("drops a stale load-more that resolves after the filters changed", async () => {
+    // Sequence: page 1 loads (cursor 9) → Load more starts but hangs →
+    // user picks kind=auth (new first page) → the old load-more finally
+    // resolves. Its rows belong to the previous filter state and must
+    // neither append nor clobber the fresh nextCursor.
+    let resolveStale: (() => void) | null = null;
+    authFetchMock.mockImplementation(async (url: string) => {
+      if (url.startsWith("/api/activity/verify")) {
+        return okJson({ ok: true, rowsChecked: 2, verifiedAt: "2026-06-30T10:05:00.000Z" });
+      }
+      if (url.includes("cursor=9")) {
+        return new Promise((resolve) => {
+          resolveStale = () =>
+            resolve(okJson({ items: [makeItem({ id: "8", what: "stale row" })], nextCursor: "8" }));
+        });
+      }
+      if (url.includes("kind=auth")) {
+        return okJson({ items: [makeItem({ id: "20", what: "filtered row", kind: "auth" })], nextCursor: null });
+      }
+      return okJson({ items: [makeItem({ id: "9", what: "newest event" })], nextCursor: "9" });
+    });
+
+    render(<AuditPage />);
+    await screen.findByText("newest event");
+
+    fireEvent.click(screen.getByRole("button", { name: /load more/i }));
+    await waitFor(() => expect(resolveStale).not.toBeNull());
+
+    fireEvent.change(screen.getByLabelText(/filter by kind/i), {
+      target: { value: "auth" },
+    });
+    await screen.findByText("filtered row");
+
+    resolveStale!();
+    // Give the stale promise a macrotask to (not) land.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.queryByText("stale row")).toBeNull();
+    // nextCursor was not clobbered back to "8": the filtered page ended
+    // the list, so no Load more control renders.
+    expect(screen.queryByRole("button", { name: /load more/i })).toBeNull();
   });
 });

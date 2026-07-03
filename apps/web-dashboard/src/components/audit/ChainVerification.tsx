@@ -29,7 +29,9 @@ export function ChainVerificationBadge({
   return (
     <div
       style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}
-      aria-live="polite"
+      // The broken phase is announced by the page's role="alert" banner;
+      // keeping the strip live too would double-announce it.
+      aria-live={state.phase === "broken" ? undefined : "polite"}
     >
       {state.phase === "checking" && (
         <Badge kind="muted">
@@ -68,7 +70,10 @@ export function ChainVerificationBadge({
             <ShieldQuestion size={12} aria-hidden />
             Verification unavailable
           </Badge>
-          <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+          <span
+            style={{ fontSize: 12, color: "var(--text-muted)" }}
+            title={state.detail}
+          >
             {state.message}
           </span>
         </>
@@ -97,14 +102,20 @@ export function BrokenChainBanner({
   rowsChecked,
 }: {
   brokenAtId: string;
+  /** Rows the verify walk examined, INCLUDING the broken one. */
   rowsChecked: number;
 }) {
+  // The route increments rowsChecked before verifying, so the broken row
+  // is included in the count; the intact prefix is one shorter. Phrased
+  // as a positional count, never as an id (ids need not start at 1 after
+  // a retention purge).
+  const intactBefore = Math.max(0, rowsChecked - 1);
   return (
     <div
       role="alert"
       className="card"
       style={{
-        borderColor: "color-mix(in srgb, #ef4444 45%, var(--card-bd))",
+        borderColor: "color-mix(in srgb, var(--danger) 45%, var(--card-bd))",
         marginBottom: 16,
       }}
     >
@@ -129,11 +140,16 @@ export function BrokenChainBanner({
             The log&apos;s tamper-evidence seal is broken at entry #{brokenAtId}
           </p>
           <p style={{ fontSize: 12.5, color: "var(--text-muted)", marginTop: 4 }}>
-            The first {rowsChecked.toLocaleString()} entries verified, then the
-            signature chain stopped matching. This usually means the database
-            was restored from a backup; it can also mean someone changed the
-            log by hand. Entries from #{brokenAtId} onward should not be
-            trusted until you know which it was.
+            Verification failed at entry #{brokenAtId}
+            {intactBefore > 0
+              ? `; the ${intactBefore.toLocaleString()} ${
+                  intactBefore === 1 ? "entry" : "entries"
+                } checked before it verified intact.`
+              : "."}{" "}
+            This usually means the database was restored from a backup; it can
+            also mean someone changed the log by hand. Entries from #
+            {brokenAtId} onward should not be trusted until you know which it
+            was.
           </p>
         </div>
       </div>

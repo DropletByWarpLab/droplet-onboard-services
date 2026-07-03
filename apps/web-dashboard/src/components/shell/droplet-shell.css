@@ -362,3 +362,10 @@
 .droplet-shell .sev-ic.err { background: rgba(239,68,68,0.15); color: #b91c1c; }
 .dark .droplet-shell .sev-ic.warn { color: #e6b873; }
 .dark .droplet-shell .sev-ic.err { color: #fca5a5; }
+
+/* Hide redundant inline metadata on narrow phones (WARP-246 UX note:
+   the timeline's kind chip duplicates the kind filter; below 480px it
+   crowds out the row's primary text). */
+@media (max-width: 480px) {
+  .droplet-shell .hide-narrow { display: none; }
+}

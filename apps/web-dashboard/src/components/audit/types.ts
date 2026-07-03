@@ -72,4 +72,6 @@ export type VerifyState =
   | { phase: "checking" }
   | { phase: "ok"; rowsChecked: number; verifiedAt: string }
   | { phase: "broken"; rowsChecked: number; brokenAtId: string; verifiedAt: string }
-  | { phase: "error"; message: string };
+  /** `message` is homeowner-calm copy; `detail` carries the raw cause
+   *  (HTTP status etc.) for a title-attribute tooltip only. */
+  | { phase: "error"; message: string; detail?: string };

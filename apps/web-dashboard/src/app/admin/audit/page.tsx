@@ -17,7 +17,7 @@
 
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Download, ScrollText, Search, ShieldOff } from "lucide-react";
 import { useAuth, authFetch } from "@/lib/auth";
 import { ShellPage } from "@/components/shell/ShellPage";
@@ -48,6 +48,14 @@ const RANGES = [
 
 type RangeKey = (typeof RANGES)[number]["key"];
 
+/** Homeowner-calm failure copy; the raw cause rides in a title attribute. */
+const CALM_ERROR = "Something went wrong on the box. Try again in a moment.";
+
+interface LoadError {
+  message: string;
+  detail?: string;
+}
+
 function isAdminRole(role?: string): boolean {
   return role === "owner" || role === "admin";
 }
@@ -59,7 +67,13 @@ export default function AuditPage() {
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<LoadError | null>(null);
+
+  // Request generation: bumped by every first-page (filter) fetch and on
+  // unmount, and captured by loadMore — a load-more that resolves after
+  // the filters changed must not append old-filter rows or clobber the
+  // fresh nextCursor.
+  const fetchGenRef = useRef(0);
 
   const [kind, setKind] = useState("");
   const [rangeKey, setRangeKey] = useState<RangeKey>("all");
@@ -88,29 +102,39 @@ export default function AuditPage() {
     return params;
   }, [kind, rangeKey, qDebounced]);
 
-  // First page — refetched whenever a filter changes.
+  // First page — refetched whenever a filter changes. Bumping the
+  // generation invalidates any in-flight fetch AND any in-flight
+  // load-more from the previous filter state.
   useEffect(() => {
     if (!isAdmin) return;
-    let cancelled = false;
+    const gen = ++fetchGenRef.current;
+    const fresh = () => fetchGenRef.current === gen;
     setLoading(true);
     (async () => {
       try {
         const res = await authFetch(`/api/activity?${buildParams()}`);
-        if (cancelled) return;
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!fresh()) return;
+        if (!res.ok) {
+          setError({ message: CALM_ERROR, detail: `HTTP ${res.status}` });
+          return;
+        }
         const json = (await res.json()) as ActivityListResponse;
+        if (!fresh()) return;
         setItems(json.items);
         setNextCursor(json.nextCursor);
         setError(null);
       } catch (err) {
-        if (cancelled) return;
-        setError(err instanceof Error ? err.message : "Failed to load activity");
+        if (!fresh()) return;
+        setError({
+          message: CALM_ERROR,
+          detail: err instanceof Error ? err.message : undefined,
+        });
       } finally {
-        if (!cancelled) setLoading(false);
+        if (fresh()) setLoading(false);
       }
     })();
     return () => {
-      cancelled = true;
+      fetchGenRef.current++;
     };
   }, [isAdmin, buildParams]);
 
@@ -120,11 +144,15 @@ export default function AuditPage() {
     try {
       const res = await authFetch("/api/activity/verify");
       if (!res.ok) {
-        throw new Error(
-          res.status === 503
-            ? "The signing service isn't available right now."
-            : `HTTP ${res.status}`,
-        );
+        setVerify({
+          phase: "error",
+          message:
+            res.status === 503
+              ? "The signing service isn't available right now."
+              : CALM_ERROR,
+          detail: `HTTP ${res.status}`,
+        });
+        return;
       }
       const json = (await res.json()) as VerifyResult;
       setVerify(
@@ -140,7 +168,8 @@ export default function AuditPage() {
     } catch (err) {
       setVerify({
         phase: "error",
-        message: err instanceof Error ? err.message : "Request failed",
+        message: CALM_ERROR,
+        detail: err instanceof Error ? err.message : undefined,
       });
     }
   }, []);
@@ -151,17 +180,31 @@ export default function AuditPage() {
 
   async function loadMore() {
     if (!nextCursor || loadingMore) return;
+    // Capture the generation: if the filters change (or the page
+    // unmounts) while this request is in flight, the result is stale
+    // and must be dropped, not appended.
+    const gen = fetchGenRef.current;
+    const fresh = () => fetchGenRef.current === gen;
     setLoadingMore(true);
     try {
       const params = buildParams();
       params.set("cursor", nextCursor);
       const res = await authFetch(`/api/activity?${params}`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!fresh()) return;
+      if (!res.ok) {
+        setError({ message: CALM_ERROR, detail: `HTTP ${res.status}` });
+        return;
+      }
       const json = (await res.json()) as ActivityListResponse;
+      if (!fresh()) return;
       setItems((prev) => [...prev, ...json.items]);
       setNextCursor(json.nextCursor);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load more");
+      if (!fresh()) return;
+      setError({
+        message: CALM_ERROR,
+        detail: err instanceof Error ? err.message : undefined,
+      });
     } finally {
       setLoadingMore(false);
     }
@@ -182,7 +225,10 @@ export default function AuditPage() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `droplet-audit-${new Date().toISOString().slice(0, 10)}.csv`;
+    // Row count in the name keeps the partial-export honest: this is the
+    // loaded view, not the whole table (the sealed full export lives at
+    // POST /api/activity/export).
+    a.download = `droplet-audit-${new Date().toISOString().slice(0, 10)}-${items.length}rows.csv`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -235,9 +281,10 @@ export default function AuditPage() {
           className="btn sm"
           onClick={exportCsv}
           disabled={items.length === 0}
+          title="Download the rows currently loaded in this view as CSV"
         >
           <Download size={13} aria-hidden />
-          Export CSV
+          Export view
         </button>
       }
     >
@@ -291,8 +338,8 @@ export default function AuditPage() {
 
       {error && (
         <div className="card" role="alert" style={{ marginBottom: 16 }}>
-          <p style={{ fontSize: 13, color: "var(--text)" }}>
-            Couldn&apos;t load the audit log ({error}).
+          <p style={{ fontSize: 13, color: "var(--text)" }} title={error.detail}>
+            Couldn&apos;t load the audit log. {error.message}
           </p>
         </div>
       )}

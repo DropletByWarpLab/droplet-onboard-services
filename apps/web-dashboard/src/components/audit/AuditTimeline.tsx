@@ -167,7 +167,12 @@ export function AuditTimeline({
                   </span>
                   {item.severity === "err" && <Badge kind="danger">error</Badge>}
                   {item.severity === "warn" && <Badge kind="warn">warning</Badge>}
-                  <Badge kind="muted">{KIND_LABELS[item.kind] ?? item.kind}</Badge>
+                  {/* The kind chip duplicates the kind filter's vocabulary;
+                      on narrow phones it loses to the `what` text (CSS
+                      utility hides it ≤480px). */}
+                  <span className="hide-narrow">
+                    <Badge kind="muted">{KIND_LABELS[item.kind] ?? item.kind}</Badge>
+                  </span>
                   <span className="rmeta mono" title={new Date(item.at).toLocaleString()}>
                     {timeLabel(item.at)}
                   </span>

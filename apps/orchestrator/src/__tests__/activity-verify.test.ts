@@ -147,6 +147,29 @@ describe("GET /api/activity/verify", () => {
     expect(res.body.brokenAtId).toBeUndefined();
   });
 
+  it("responds with EXACTLY the documented key set (no signature/key leakage)", async () => {
+    // The verify surface must never grow signature bytes, key material,
+    // or row content — pin the exact response shape for both outcomes.
+    const intact = await request(makeApp(buildChain(signer, 3))).get(
+      "/api/activity/verify",
+    );
+    expect(Object.keys(intact.body).sort()).toEqual([
+      "ok",
+      "rowsChecked",
+      "verifiedAt",
+    ]);
+
+    const tampered = buildChain(signer, 3);
+    tampered[1]!.what = "tampered";
+    const broken = await request(makeApp(tampered)).get("/api/activity/verify");
+    expect(Object.keys(broken.body).sort()).toEqual([
+      "brokenAtId",
+      "ok",
+      "rowsChecked",
+      "verifiedAt",
+    ]);
+  });
+
   it("flags a tampered row's content (negative case)", async () => {
     const rows = buildChain(signer, 5);
     rows[2]!.what = "event 3 — REWRITTEN AFTER THE FACT";
