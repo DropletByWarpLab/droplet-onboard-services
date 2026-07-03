@@ -122,6 +122,9 @@ export async function warmDefaultModel(): Promise<void> {
       body: JSON.stringify({ model }),
     });
     if (!resp.ok) {
+      // Drain the error body — under undici an unconsumed body can pin
+      // the socket until GC. Same pattern as the ok branch below.
+      await resp.json().catch(() => undefined);
       // Likely 404: the model isn't pulled yet (first boot mid-pull).
       // Clear the debounce so the pull-complete hook can warm this boot.
       lastWarmAttemptAt = 0;

@@ -314,6 +314,23 @@ describe("model-readiness warmDefaultModel (WARP-1041)", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("drains the error body on a non-ok response (undici socket release)", async () => {
+    vi.stubEnv("LLM_MODEL", "gpt-oss:20b");
+    const fetchMock = global.fetch as ReturnType<typeof vi.fn>;
+    // Under Node's undici fetch an undrained body can pin the socket until
+    // GC — the 404 branch must consume it, same as the ok branch does.
+    const json = vi.fn(() => Promise.resolve({ error: "model not found" }));
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 404,
+      json,
+    } as unknown as Response);
+
+    await warmDefaultModel();
+
+    expect(json).toHaveBeenCalledTimes(1);
+  });
+
   it("swallows a network error (ECONNREFUSED) non-fatally with a debug log", async () => {
     vi.stubEnv("LLM_MODEL", "gpt-oss:20b");
     const fetchMock = global.fetch as ReturnType<typeof vi.fn>;
