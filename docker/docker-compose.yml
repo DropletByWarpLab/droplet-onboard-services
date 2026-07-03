@@ -1244,6 +1244,17 @@ services:
       # untouched; ~2.0 ≈ +6 dB for a quiet chain. Survives chip
       # reboots, unlike xvf_host AUDIO_MGR_MIC_GAIN tweaks.
       - VOICE_INPUT_GAIN=${VOICE_INPUT_GAIN:-}
+      # Flatline watchdog (WARP-1037). The ReSpeaker XVF3800's XMOS DSP
+      # can wedge with the USB stream still open — voice-io keeps
+      # "listening" while every frame is pure digital silence. When the
+      # input sits at/near digital zero (below VOICE_FLATLINE_DBFS,
+      # default -70 dBFS) for VOICE_FLATLINE_WINDOW_S seconds (default
+      # 240) while state=listening, /health degrades to 503 so this
+      # container's healthcheck + the ops-console flag the wedge instead
+      # of reporting healthy-but-deaf. 0 disables. Recovery is automatic
+      # once audio returns (e.g. after an xvf_host DSP reboot).
+      - VOICE_FLATLINE_WINDOW_S=${VOICE_FLATLINE_WINDOW_S:-}
+      - VOICE_FLATLINE_DBFS=${VOICE_FLATLINE_DBFS:-}
       - VOICE_SAMPLE_RATE=${VOICE_SAMPLE_RATE:-16000}
       - VOICE_FRAME_MS=${VOICE_FRAME_MS:-30}
       - DEVICE_RESCAN_INTERVAL=${DEVICE_RESCAN_INTERVAL:-5}

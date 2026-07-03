@@ -96,6 +96,8 @@ USB mic in after the box has already booted.
 | `STT_MAX_RECORD_S` | `3.0` | **Hard cap** on seconds of audio captured per wake. The end-of-speech VAD ends the capture sooner once you stop talking; this cap guarantees it always stops — even in a room with continuous background audio where no silence is ever detected. Kept short so the box doesn't feel like it "keeps listening". |
 | `TTS_URL` | `tcp://wyoming-piper:10200` | Wyoming-protocol Piper server. Set to `__mock__` for silent playback (dev box without a Piper container). |
 | `TTS_VOICE` | `en_US-ryan-medium` | Piper voice name. ~70 MB per voice; downloads on first request and caches in the `piper-voices` volume. Other natural-sounding options: `en_US-lessac-medium`, `en_GB-jenny-medium`. |
+| `VOICE_FLATLINE_WINDOW_S` | `240` | Flatline watchdog (WARP-1037): seconds of at/near-digital-zero input while `state=listening` before `/health` degrades to 503. The ReSpeaker XVF3800's XMOS DSP can wedge with the USB stream still open — the pipeline keeps "listening" while every frame is pure silence. The pipeline measures a rolling input RMS inside its own frame handler (never a second stream on the same hw device) and flags the wedge so the Docker healthcheck + ops-console see it. Recovery is automatic when audio returns. `0` disables. |
+| `VOICE_FLATLINE_DBFS` | `-70.0` | Level (dBFS) below which a frame counts as "no signal" for the flatline watchdog. A healthy capture chain's noise floor sits ≈ -60…-50 dBFS; a wedged DSP emits exact zeros (-120 floor) or ±1-count dither (≈ -90). |
 | `LOG_LEVEL` | `INFO` | Standard Python logging level. |
 
 ## Control API
@@ -105,11 +107,11 @@ reach it via the Docker network).
 
 | Path | Method | Returns |
 |---|---|---|
-| `/health` | GET | `{ ok, inputAvailable, outputAvailable, wakeLoaded, sttLoaded, ttsLoaded }` |
+| `/health` | GET | `{ ok, inputAvailable, outputAvailable, state, wakeLoaded, sttLoaded, ttsLoaded, llmLoaded, inputRmsDbfs, lastAudioAt, inputFlatlined }`. Returns 503 with `ok:false` when the pipeline is stuck-and-deaf: `state` ∈ `error\|no_mic`, or `inputFlatlined` (input at/near digital zero for `VOICE_FLATLINE_WINDOW_S` while listening — the wedged-DSP signature). |
 | `/audio/devices` | GET | List of all detected ALSA devices with their score + the current pick |
 | `/audio/test-tone` | POST | Play a 440 Hz sine wave through the picked output device for 1 s. For "is my speaker wired right" debug. |
 | `/audio/test-record` | POST | Capture 2 s from the picked input, return RMS + peak level. For "is my mic working" debug. |
-| `/voice/status` | GET | Pipeline snapshot: `state` ∈ `idle\|loading\|listening\|wake_detected\|transcribing\|transcript_ready\|speaking\|error\|no_mic`, plus `wake_model`, `threshold`, `last_wake_at`, `last_wake_score`, `stt_loaded`, `last_transcript`, `last_transcript_at`, `tts_loaded`, `last_response`, `last_response_at`. Read-only; safe to poll. |
+| `/voice/status` | GET | Pipeline snapshot: `state` ∈ `idle\|loading\|listening\|wake_detected\|transcribing\|transcript_ready\|speaking\|error\|no_mic`, plus `wake_model`, `threshold`, `last_wake_at`, `last_wake_score`, `stt_loaded`, `last_transcript`, `last_transcript_at`, `tts_loaded`, `last_response`, `last_response_at`, `input_rms_dbfs` (rolling mic level over ~2 s, measured inside the pipeline's frame handler — safe to drive a live level meter), `last_audio_at`, `input_flatlined`. Read-only; safe to poll. |
 | `/voice/say` | POST | `{"text":"hello world","voice":"en_US-ryan-medium"}` — synthesize + play through the picked speaker. Test endpoint until commit 7 wires the LLM-reply path. Returns `{ok, duration_s, sample_rate}`. |
 
 ## Running on the POC box
