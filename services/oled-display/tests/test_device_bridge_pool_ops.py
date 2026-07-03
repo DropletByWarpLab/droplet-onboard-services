@@ -53,6 +53,13 @@ def _fake_executor(spool: Path, rc: int = 0, stdout: str = "", stderr: str = "",
     seen: dict = {}
 
     def fake_run(cmd, timeout=15):
+        # WARP-936: the post-op drives_snapshot(invalidate=True) refresh runs
+        # a READ-ONLY `lsblk -J` for the adoptable-disks inventory. That is
+        # not part of the destructive execution path under assertion here —
+        # degrade it like a host without lsblk (snapshot then carries an
+        # empty disks list).
+        if cmd and cmd[0] == "lsblk":
+            return 1, "", "lsblk unavailable in tests"
         seen["cmd"] = cmd
         assert cmd[0] == "systemctl" and cmd[1] == "start", cmd
         assert "droplet-storage-pool-apply.service" in cmd[2]
