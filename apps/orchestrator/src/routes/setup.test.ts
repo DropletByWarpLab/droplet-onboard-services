@@ -406,3 +406,120 @@ describe("WARP-804 — claim step is satisfied once the box is claimed", () => {
     expect(get.body.setup_step).toBe("claim");
   });
 });
+
+// ──────────────────────────────────────────────────────────────────
+// WARP-1041 — PATCH /setup/state as the wizard's model pre-warm
+// trigger. Persisting a step in the back half of the wizard (storage
+// onward) means the customer is minutes away from the AI step, which
+// is exactly the lead time the 30-90 s GPU model load needs. The warm
+// fn is injected (like persistBoxNameToHost) so these tests spy on it
+// without touching Ollama; the real default is
+// model-readiness.service.warmDefaultModel, which owns the debounce.
+// ──────────────────────────────────────────────────────────────────
+describe("PATCH /api/setup/state — model pre-warm trigger (WARP-1041)", () => {
+  function buildAppWithWarm(
+    prisma: ReturnType<typeof createPrismaMock>,
+    warm: () => Promise<void>,
+  ) {
+    const app = express();
+    app.use(cookieParser());
+    app.use(express.json());
+    app.use(
+      "/api",
+      createSetupRouter(prisma as never, { warmDefaultModel: warm }),
+    );
+    return app;
+  }
+
+  /** The trigger fires on setImmediate AFTER the response — flush one tick. */
+  const flushWarmTick = () => new Promise((r) => setImmediate(r));
+
+  it.each(["storage", "discovery", "cameras", "vpn", "ai"])(
+    "fires the warm exactly once when setup_step advances to %s",
+    async (step) => {
+      const warm = vi.fn(async () => undefined);
+      const app = buildAppWithWarm(createPrismaMock(), warm);
+
+      const res = await request(app)
+        .patch("/api/setup/state")
+        .send({ setup_step: step });
+      await flushWarmTick();
+
+      expect(res.status).toBe(200);
+      expect(res.body.setup_step).toBe(step);
+      expect(warm).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(["welcome", "claim", "account", "org", "internet"])(
+    "does NOT fire the warm on the early step %s",
+    async (step) => {
+      const warm = vi.fn(async () => undefined);
+      const app = buildAppWithWarm(createPrismaMock(), warm);
+
+      const res = await request(app)
+        .patch("/api/setup/state")
+        .send({ setup_step: step });
+      await flushWarmTick();
+
+      expect(res.status).toBe(200);
+      expect(warm).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not fire the warm on an invalid step (400 path)", async () => {
+    const warm = vi.fn(async () => undefined);
+    const app = buildAppWithWarm(createPrismaMock(), warm);
+
+    const res = await request(app)
+      .patch("/api/setup/state")
+      .send({ setup_step: "nonsense" });
+    await flushWarmTick();
+
+    expect(res.status).toBe(400);
+    expect(warm).not.toHaveBeenCalled();
+  });
+
+  it("does not fire the warm on a tour-only patch", async () => {
+    const warm = vi.fn(async () => undefined);
+    const app = buildAppWithWarm(createPrismaMock(), warm);
+
+    const res = await request(app)
+      .patch("/api/setup/state")
+      .send({ user_tour_completed: true });
+    await flushWarmTick();
+
+    expect(res.status).toBe(200);
+    expect(warm).not.toHaveBeenCalled();
+  });
+
+  it("responds without awaiting the warm (a hung Ollama can never stall the wizard)", async () => {
+    // A warm that NEVER settles: if the handler awaited it, this request
+    // would time out instead of returning 200.
+    const warm = vi.fn(() => new Promise<void>(() => undefined));
+    const app = buildAppWithWarm(createPrismaMock(), warm);
+
+    const res = await request(app)
+      .patch("/api/setup/state")
+      .send({ setup_step: "storage" });
+    await flushWarmTick();
+
+    expect(res.status).toBe(200);
+    expect(warm).toHaveBeenCalledTimes(1);
+  });
+
+  it("swallows a rejecting warm without failing the request", async () => {
+    const warm = vi.fn(async () => {
+      throw new Error("ECONNREFUSED");
+    });
+    const app = buildAppWithWarm(createPrismaMock(), warm);
+
+    const res = await request(app)
+      .patch("/api/setup/state")
+      .send({ setup_step: "vpn" });
+    await flushWarmTick();
+
+    expect(res.status).toBe(200);
+    expect(warm).toHaveBeenCalledTimes(1);
+  });
+});

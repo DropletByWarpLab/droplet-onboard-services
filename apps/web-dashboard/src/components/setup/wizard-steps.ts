@@ -29,6 +29,7 @@ export type Step =
   | "cameras"
   | "vpn"
   | "ai"
+  | "voice"
   | "team"
   | "done";
 
@@ -56,6 +57,16 @@ export type Step =
 // as the existing `internet` SetupStep and resumes a persisted `internet` at
 // `wifi` (see `app/setup/page.tsx` resumeStepFrom + persistedStep). The enum
 // is deliberately NOT migrated for a presentation-only split.
+//
+// WARP-1036 — `voice` slots between `ai` and `team` (… → ai → voice → team →
+// done): the customer meets the private AI first, then learns it also answers
+// to "hey droplet". Like wifi/address it is a CLIENT-ONLY step — the Prisma
+// `SetupStep` enum has no `voice` member and is deliberately not migrated —
+// so the page persists it as the preceding persisted step (`ai`) and a
+// mid-step refresh resumes at `ai` (see `app/setup/page.tsx` persistedStep).
+// The step auto-skips only on the orchestrator's explicit 503
+// `voice_unavailable` (voice-io not deployed — macOS dev); per WARP-933 a
+// generic error renders, never silently skips.
 export const STEPS: Step[] = [
   "welcome",
   "claim",
@@ -69,6 +80,7 @@ export const STEPS: Step[] = [
   "cameras",
   "vpn",
   "ai",
+  "voice",
   "team",
   "done",
 ];

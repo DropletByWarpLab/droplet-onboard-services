@@ -49,6 +49,7 @@ import type {
   WirelessScanResult,
   AuthUser,
   InviteCreateRequest,
+  CreateUserRole,
   InviteCreateResponse,
   InvitePublicInfo,
   InviteListItem,
@@ -63,13 +64,14 @@ import type {
   OrgResult,
   TeamInviteRequest,
   TeamInviteResult,
-  TeamInviteRole,
   DeviceClientInfo,
   PairingCodeInfo,
   PairingCodeStatus,
   VpnPeerInfo,
   VpnStatusInfo,
   VpnPeerCreatedInfo,
+  VoiceStatusInfo,
+  VoiceSayResult,
   BoxNameCheckResult,
   BoxNameSetResult,
   ToolCatalogResponse,
@@ -499,10 +501,10 @@ export async function createUser(
   // password on first login. Passed through to POST /auth/users which sets the
   // explicit `User.mustChangePassword` flag.
   mustChangePassword = true,
-  // WARP-1049: the new member's household role (owner/admin/family/guest). The
-  // wizard TeamStep sets this. Omitted from the body when absent so the server
-  // applies its "family" default (and existing callers stay byte-compatible).
-  role?: TeamInviteRole,
+  // WARP-1042: optional CANONICAL role (Role enum minus `service`). Omitted →
+  // the orchestrator defaults to `family`; the server enforces the
+  // roleOutranks cap so a caller can never assign a role above their own.
+  role?: CreateUserRole,
 ): Promise<void> {
   const res = await authFetch(`${BASE}/api/auth/users`, {
     method: "POST",
@@ -512,7 +514,7 @@ export async function createUser(
       password,
       displayName,
       mustChangePassword,
-      ...(role ? { role } : {}),
+      ...(role !== undefined ? { role } : {}),
     }),
   });
   if (!res.ok) {
@@ -893,6 +895,30 @@ export async function requestDestroyPool(
   if (res.status !== 202) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `Could not start pool removal: ${res.status}`);
+  }
+  return res.json();
+}
+
+/** WARP-936 step 1: format an existing (e.g. created-but-never-formatted)
+ *  pool — returns a confirm token (does NOT format yet). The owner confirms
+ *  via confirmPoolCommand / confirmStorageCommand to execute. The host
+ *  script's typed-phrase gate requires `confirmPhrase` to name the md device
+ *  (buildConfirmPhrase(["md127"]) → "ERASE md127"). */
+export async function requestFormatPool(
+  device: string,
+  input: { confirmPhrase: string; fstype?: string },
+): Promise<PoolCommandToken> {
+  const res = await authFetch(
+    `${BASE}/api/storage/pools/${encodeURIComponent(device)}/format`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+  if (res.status !== 202) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Could not start pool format: ${res.status}`);
   }
   return res.json();
 }
@@ -4501,6 +4527,56 @@ export async function deleteVpnPeer(id: string): Promise<void> {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `Failed to revoke peer: ${res.status}`);
   }
+}
+
+// --- WARP-1036: voice assistant (setup-wizard step + status) ---
+
+/**
+ * True when an error thrown by `fetchVoiceStatus` / `sayVoiceTest` means
+ * "voice-io isn't deployed here at all" (the orchestrator proxy's explicit
+ * 503 `voice_unavailable` — macOS dev, or the `linux` compose profile
+ * inactive). The wizard's voice step auto-skips ONLY on this (WARP-933:
+ * a generic error must surface, never silently skip).
+ */
+export function isVoiceUnavailableError(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    (err as Error & { code?: string }).code === "voice_unavailable"
+  );
+}
+
+async function throwVoiceError(res: Response, fallback: string): Promise<never> {
+  const body = await res.json().catch(() => ({}));
+  const e = new Error(
+    typeof body.detail === "string"
+      ? body.detail
+      : body.error || `${fallback}: ${res.status}`,
+  ) as Error & { code?: string; status?: number };
+  if (res.status === 503 && body.error === "voice_unavailable") {
+    e.code = "voice_unavailable";
+  } else if (typeof body.error === "string") {
+    e.code = body.error;
+  }
+  e.status = res.status;
+  throw e;
+}
+
+export async function fetchVoiceStatus(): Promise<VoiceStatusInfo> {
+  const res = await authFetch(`${BASE}/api/voice/status`);
+  if (!res.ok) await throwVoiceError(res, "Failed to fetch voice status");
+  return res.json();
+}
+
+/** Speaker test — the box says `text` out loud through its own speaker.
+ *  Blocks for the playback duration server-side. */
+export async function sayVoiceTest(text: string): Promise<VoiceSayResult> {
+  const res = await authFetch(`${BASE}/api/voice/say`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+  if (!res.ok) await throwVoiceError(res, "Speaker test failed");
+  return res.json();
 }
 
 // --- WARP-979: Secured / name-your-box ---

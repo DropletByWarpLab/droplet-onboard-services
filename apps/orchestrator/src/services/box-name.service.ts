@@ -30,6 +30,7 @@ import {
 import {
   CLAIM_RESULT_CLAIMED,
   CLAIM_RESULT_NAME_TAKEN,
+  CLAIM_RESULT_RENAME_UNSUPPORTED,
   type ClaimBoxNameResult,
 } from "./tls-issuance.service.js";
 
@@ -150,9 +151,16 @@ export interface SetBoxNameResult {
    * the wizard uses this to be honest about whether the address is truly locked.
    */
   authoritative: boolean;
-  /** TRUE when HQ said the name is taken (or the device holds a different one).
-   *  The wizard shows the conflict + any `suggestions`. */
+  /** TRUE when HQ said the name is taken by ANOTHER device. The wizard shows
+   *  the conflict + any `suggestions`. */
   taken: boolean;
+  /** WARP-984 — TRUE when HQ said THIS box already holds a (different) name and
+   *  rename isn't supported yet; distinct from `taken` so the wizard can say
+   *  "factory reset releases it" instead of the false "that name is taken". */
+  renameUnsupported: boolean;
+  /** WARP-984 — the name this box already holds at HQ (when the worker sent
+   *  `current_name` on the rename-unsupported 409). */
+  currentName?: string;
   /** Alternate names HQ offered on a taken name (empty otherwise). */
   suggestions: string[];
   /** The raw claim result, for callers that want the exact outcome. */
@@ -193,6 +201,7 @@ export async function setBoxName(
   //    throws — branch on the typed outcome.
   const claim = await deps.claim(raw);
   const taken = claim.outcome === CLAIM_RESULT_NAME_TAKEN;
+  const renameUnsupported = claim.outcome === CLAIM_RESULT_RENAME_UNSUPPORTED;
   return {
     // Prefer HQ's canonical slug/fqdn when it confirmed the claim; otherwise
     // fall back to the locally-derived slug so the wizard can still show the
@@ -204,6 +213,10 @@ export async function setBoxName(
         : boxNameToFqdn(v.slug),
     authoritative: claim.authoritative,
     taken,
+    renameUnsupported,
+    ...(renameUnsupported && claim.currentName
+      ? { currentName: claim.currentName }
+      : {}),
     suggestions: claim.suggestions ?? [],
     claim,
   };

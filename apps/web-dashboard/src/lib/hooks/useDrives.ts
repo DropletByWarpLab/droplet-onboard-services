@@ -13,6 +13,9 @@ export function useDrives() {
 
   return {
     drives: data?.drives ?? [],
+    // WARP-936: whole-disk inventory (present-but-unmounted disks included).
+    // Empty on an older orchestrator/bridge that predates the field.
+    disks: data?.disks ?? [],
     isLoading,
     error,
     bridgeError:

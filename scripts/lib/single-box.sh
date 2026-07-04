@@ -223,6 +223,16 @@ EOF
     log_info "/etc/default/droplet-openwrt-attach exists — keeping rotated value"
   fi
 
+  # --- /etc/droplet/ (per-box secrets: ap-psk, device-bridge.env) ---------
+  # WARP-1035: must exist BEFORE `compose up` — docker-compose bind-mounts
+  # this DIRECTORY read-only into matter-controller so the sidecar can read
+  # the per-box AP PSK (WARP-819) for BLE-first commissioning (WARP-895).
+  # Pre-creating it host-side keeps ownership/mode deterministic (root
+  # 0755) instead of relying on dockerd's implicit missing-bind-source
+  # creation. The ap-psk file itself is written 0600 by
+  # droplet-openwrt-attach on first boot — never here.
+  sudo install -d -m 0755 /etc/droplet
+
   # --- /etc/droplet-host-net/ -----------------------------------------
   sudo install -d -m 0755 /etc/droplet-host-net
   sudo install -m 0644 "$host_src/etc-droplet-host-net/lan-dhcp.conf" \
@@ -704,10 +714,7 @@ EOF
   upsert_env DROPLET_MATTER_SERVICE_URL "http://${bridge_gw}:8083"
   # WARP-895: hand the Droplet AP's SSID (and an operator-set PSK, if any)
   # to the Matter controller so BLE-first Matter devices can join the LAN.
-  # The per-box-generated PSK (WARP-819) is NOT known here — it lands at
-  # /etc/droplet/ap-psk on first boot; wire that via
-  # DROPLET_MATTER_WIFI_PSK_FILE + a bind mount once attach's file lifecycle
-  # is confirmed (WARP-895). SSID matches the AP written above (~line 201).
+  # SSID matches the AP written above (~line 201).
   local _matter_ap_ssid
   _matter_ap_ssid="$( { grep -E '^DROPLET_AP_SSID=' "${REPO_ROOT:-/nonexistent}/.env" 2>/dev/null || true; } | head -1 | cut -d= -f2-)"
   upsert_env DROPLET_MATTER_WIFI_SSID "${_matter_ap_ssid:-Droplet}"
@@ -716,6 +723,16 @@ EOF
   if [ -n "$_matter_ap_psk" ] && [ "$_matter_ap_psk" != "CHANGE_ME_VIA_SETUP_WIZARD" ]; then
     upsert_env DROPLET_MATTER_WIFI_PSK "$_matter_ap_psk"
   fi
+  # WARP-1035 (closes the WARP-895 follow-up): point the sidecar at the
+  # per-box AP PSK droplet-openwrt-attach generates + persists on first
+  # boot (WARP-819). The compose /etc/droplet DIRECTORY bind mount (ro)
+  # makes the path readable in-container; the sidecar resolves file-first
+  # per commission, so this stays correct even when attach lands the PSK
+  # after the stack is already up. The operator DROPLET_MATTER_WIFI_PSK
+  # env above remains the fallback when the file is absent — and attach
+  # persists an operator override INTO this file anyway, so file and env
+  # can't diverge on a healthy box.
+  upsert_env DROPLET_MATTER_WIFI_PSK_FILE /etc/droplet/ap-psk
   # Device-bridge (host process, binds 0.0.0.0:9090) — same WARP-806 reasoning
   # as the three host services above: the orchestrator's config default is
   # http://host.docker.internal:9090 (docker0), exactly the default WARP-806

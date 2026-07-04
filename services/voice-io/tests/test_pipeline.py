@@ -34,9 +34,12 @@ import pytest
 
 from voice.pipeline import (
     DEFAULT_DEBOUNCE_S,
+    DEFAULT_FLATLINE_DBFS,
+    DEFAULT_FLATLINE_WINDOW_S,
     DEFAULT_STT_MAX_RECORD_S,
     DEFAULT_THRESHOLD,
     DEFAULT_VISUAL_DECAY_S,
+    RMS_DBFS_FLOOR,
     PipelineStatus,
     WakePipeline,
     classify_tool_choice,
@@ -2373,3 +2376,159 @@ class TestTranscriptActionable:
 
     def test_none_input_is_not_actionable(self):
         assert transcript_is_actionable(None) is False  # type: ignore[arg-type]
+
+
+# ────────────────────────────────────────────────────────────────────
+# Input-level tracking — rolling RMS inside the frame handler (WARP-1037)
+# ────────────────────────────────────────────────────────────────────
+#
+# The ReSpeaker XVF3800's XMOS DSP has a known wedge mode: the USB audio
+# stream stays open (so the pipeline sits in 'listening') but every frame
+# is pure digital silence — the box reports healthy while deaf. The
+# pipeline's own frame handler is the ONLY safe place to measure input
+# level (a second InputStream on the same hw device risks ALSA EBUSY),
+# so _on_frame tracks a rolling RMS + the wall time of the last frame
+# carrying real signal, and status() computes a read-time flatline flag.
+
+
+def _audio_frame(amplitude: int) -> np.ndarray:
+    """Constant-amplitude int16 frame — RMS == amplitude exactly."""
+    return np.full(WAKE_FRAME_SAMPLES, amplitude, dtype=np.int16)
+
+
+def _quiet_pipe(**kwargs) -> WakePipeline:
+    """Pipeline whose detector never fires, parked in 'listening'."""
+    pipe = WakePipeline(
+        detector=_ScriptedDetector([{"hey_jarvis": 0.0}]),
+        input_device_index=0,
+        threshold=0.5,
+        **kwargs,
+    )
+    pipe._set_state("listening")
+    return pipe
+
+
+class TestInputLevelTracking:
+    def test_no_frames_yet_reports_none(self):
+        pipe = _quiet_pipe()
+        s = pipe.status()
+        assert s.input_rms_dbfs is None
+        assert s.last_audio_at is None
+
+    def test_zero_frames_report_floor_rms_and_no_audio(self):
+        pipe = _quiet_pipe()
+        for _ in range(3):
+            pipe._on_frame(_silence_frame())
+        s = pipe.status()
+        assert s.input_rms_dbfs == pytest.approx(RMS_DBFS_FLOOR)
+        assert s.last_audio_at is None
+
+    def test_real_audio_updates_rms_and_last_audio_at(self):
+        pipe = _quiet_pipe()
+        before = time.time()
+        pipe._on_frame(_audio_frame(1000))
+        s = pipe.status()
+        # RMS of a constant-1000 frame = 1000 → 20·log10(1000/32768)
+        assert s.input_rms_dbfs == pytest.approx(-30.31, abs=0.05)
+        assert s.last_audio_at is not None
+        assert s.last_audio_at >= before
+
+    def test_rms_is_rolling_across_frames(self):
+        # Half zero frames + half amplitude-1000 frames → rolling RMS
+        # sits between the floor and the single-frame value: RMS of the
+        # combined window is 1000/√2 → ≈ -33.3 dBFS.
+        pipe = _quiet_pipe()
+        for _ in range(5):
+            pipe._on_frame(_silence_frame())
+        for _ in range(5):
+            pipe._on_frame(_audio_frame(1000))
+        s = pipe.status()
+        assert s.input_rms_dbfs == pytest.approx(-33.32, abs=0.05)
+
+    def test_near_zero_dither_does_not_count_as_audio(self):
+        # Amplitude-1 frames are ≈ -90 dBFS — below the default -70
+        # flatline threshold. They must NOT refresh last_audio_at, or a
+        # wedged DSP emitting 1-count dither would never flag.
+        pipe = _quiet_pipe()
+        pipe._on_frame(_audio_frame(1))
+        assert pipe.status().last_audio_at is None
+
+    def test_level_fields_are_json_safe_plain_floats(self):
+        import json
+        pipe = _quiet_pipe()
+        pipe._on_frame(_audio_frame(1000))
+        d = pipe.status().to_dict()
+        assert isinstance(d["input_rms_dbfs"], float)
+        assert isinstance(d["last_audio_at"], float)
+        assert isinstance(d["input_flatlined"], bool)
+        json.dumps(d)  # MUST NOT raise
+
+    def test_default_constants(self):
+        # Drift detectors — README + compose comments document these.
+        assert DEFAULT_FLATLINE_WINDOW_S == 240.0
+        assert DEFAULT_FLATLINE_DBFS == -70.0
+        assert RMS_DBFS_FLOOR == -120.0
+
+
+class TestFlatlineDegraded:
+    def test_not_flatlined_before_window_elapses(self):
+        pipe = _quiet_pipe(flatline_window_s=10.0)
+        pipe._on_frame(_silence_frame())
+        assert pipe.status().input_flatlined is False
+
+    def test_flatlines_after_window_of_zero_frames(self):
+        pipe = _quiet_pipe(flatline_window_s=0.05)
+        pipe._on_frame(_silence_frame())  # baseline: first frame seen
+        time.sleep(0.1)
+        assert pipe.status().input_flatlined is True
+
+    def test_near_zero_dither_still_flatlines(self):
+        # A wedged DSP can emit ±1-count dither instead of exact zeros;
+        # "at/near digital zero" must catch that too.
+        pipe = _quiet_pipe(flatline_window_s=0.05)
+        pipe._on_frame(_audio_frame(1))
+        time.sleep(0.1)
+        assert pipe.status().input_flatlined is True
+
+    def test_real_audio_prevents_flatline(self):
+        pipe = _quiet_pipe(flatline_window_s=0.05)
+        pipe._on_frame(_audio_frame(1000))
+        time.sleep(0.1)
+        pipe._on_frame(_audio_frame(1000))  # refreshes last_audio_at
+        assert pipe.status().input_flatlined is False
+
+    def test_recovery_when_audio_returns(self):
+        # The wedge cleared (DSP rebooted) → frames carry signal again →
+        # the flag must drop without a container restart.
+        pipe = _quiet_pipe(flatline_window_s=0.05)
+        pipe._on_frame(_silence_frame())
+        time.sleep(0.1)
+        assert pipe.status().input_flatlined is True
+        pipe._on_frame(_audio_frame(1000))
+        s = pipe.status()
+        assert s.input_flatlined is False
+        assert s.last_audio_at is not None
+
+    def test_only_listening_state_flatlines(self):
+        # 'speaking' (mic frames dropped by design), 'error', 'no_mic'
+        # must not flag — error/no_mic already 503 on their own, and
+        # speaking is a normal signal-free window.
+        for state in ("speaking", "error", "no_mic", "idle"):
+            pipe = _quiet_pipe(flatline_window_s=0.05)
+            pipe._on_frame(_silence_frame())
+            pipe._set_state(state)
+            time.sleep(0.1)
+            assert pipe.status().input_flatlined is False, state
+
+    def test_zero_window_disables_flatline_detection(self):
+        pipe = _quiet_pipe(flatline_window_s=0.0)
+        pipe._on_frame(_silence_frame())
+        time.sleep(0.05)
+        assert pipe.status().input_flatlined is False
+
+    def test_no_frames_seen_never_flatlines(self):
+        # Baseline is the first frame seen — with no frames at all there
+        # is nothing to measure (that's 'no_mic' territory, not flatline).
+        pipe = _quiet_pipe(flatline_window_s=0.01)
+        time.sleep(0.05)
+        assert pipe.status().input_flatlined is False

@@ -212,6 +212,15 @@ const MATRIX: GuardedRoute[] = [
   { method: "get", path: "/api/files/docs/status", allowed: ["owner", "admin", "family"] },
   { method: "get", path: "/api/files/report.docx/editor-session", allowed: ["owner", "admin", "family"] },
 
+  // WARP-1036: voice-assistant proxy — owner+admin only, INCLUDING the
+  // GETs. Status exposes the household's last transcript + spoken reply
+  // and /say drives the room speaker, so unlike most read routes these
+  // are not open to family/guest, and `service` is denied everywhere
+  // (voice-io itself must never loop back through this proxy).
+  { method: "get", path: "/api/voice/status", allowed: ["owner", "admin"] },
+  { method: "get", path: "/api/voice/devices", allowed: ["owner", "admin"] },
+  { method: "post", path: "/api/voice/say", allowed: ["owner", "admin"] },
+
   // ── llm sessions (own) ── ──
   // POST /llm/chat: includes `service` because voice-io's principal
   //   posts here (see `services/voice-io/voice/llm.py` — the comment

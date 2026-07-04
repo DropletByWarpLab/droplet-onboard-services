@@ -82,7 +82,11 @@ describe("getMatterCapabilities (WARP-851 / WARP-850)", () => {
           { status: 200, headers: { "Content-Type": "application/json" } },
         ),
     );
-    expect(await getMatterCapabilities()).toEqual({ bleCommissioning: true });
+    expect(await getMatterCapabilities()).toEqual({
+      bleCommissioning: true,
+      wifiProvisioning: false,
+      apSsid: null,
+    });
   });
 
   it("reports bleCommissioning=false when the sidecar runs IP-only", async () => {
@@ -96,14 +100,65 @@ describe("getMatterCapabilities (WARP-851 / WARP-850)", () => {
           { status: 200, headers: { "Content-Type": "application/json" } },
         ),
     );
-    expect(await getMatterCapabilities()).toEqual({ bleCommissioning: false });
+    expect(await getMatterCapabilities()).toEqual({
+      bleCommissioning: false,
+      wifiProvisioning: false,
+      apSsid: null,
+    });
   });
 
-  it("degrades to bleCommissioning=false (never throws) when the sidecar is unreachable", async () => {
+  it("degrades to all-false (never throws) when the sidecar is unreachable", async () => {
     stubSidecarCapabilities(() => {
       throw new Error("ECONNREFUSED");
     });
-    expect(await getMatterCapabilities()).toEqual({ bleCommissioning: false });
+    expect(await getMatterCapabilities()).toEqual({
+      bleCommissioning: false,
+      wifiProvisioning: false,
+      apSsid: null,
+    });
+  });
+
+  // WARP-1035: the sidecar now reports whether it can hand a BLE-first
+  // device the Droplet AP's Wi-Fi credentials, plus the AP SSID for the
+  // dashboard's pre-flight copy. Proxy both through untranslated.
+  it("passes through wifiProvisioning=true + apSsid when the sidecar has AP credentials (WARP-1035)", async () => {
+    stubSidecarCapabilities(
+      () =>
+        new Response(
+          JSON.stringify({
+            bleCommissioning: true,
+            reason: "BLE commissioning enabled on hci0",
+            wifiProvisioning: true,
+            apSsid: "Droplet",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    );
+    expect(await getMatterCapabilities()).toEqual({
+      bleCommissioning: true,
+      wifiProvisioning: true,
+      apSsid: "Droplet",
+    });
+  });
+
+  it("normalizes a blank/absent apSsid to null (WARP-1035)", async () => {
+    stubSidecarCapabilities(
+      () =>
+        new Response(
+          JSON.stringify({
+            bleCommissioning: true,
+            reason: "BLE commissioning enabled on hci0",
+            wifiProvisioning: false,
+            apSsid: "   ",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    );
+    expect(await getMatterCapabilities()).toEqual({
+      bleCommissioning: true,
+      wifiProvisioning: false,
+      apSsid: null,
+    });
   });
 });
 
@@ -120,7 +175,11 @@ describe("GET /api/matter/capabilities (WARP-851)", () => {
     });
     const res = await request(buildApp()).get("/api/matter/capabilities");
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ bleCommissioning: false });
+    expect(res.body).toEqual({
+      bleCommissioning: false,
+      wifiProvisioning: false,
+      apSsid: null,
+    });
   });
 
   it("proxies the sidecar's live answer through the unchanged route contract", async () => {
@@ -130,12 +189,18 @@ describe("GET /api/matter/capabilities (WARP-851)", () => {
           JSON.stringify({
             bleCommissioning: true,
             reason: "BLE commissioning enabled on hci0",
+            wifiProvisioning: true,
+            apSsid: "Droplet",
           }),
           { status: 200, headers: { "Content-Type": "application/json" } },
         ),
     );
     const res = await request(buildApp()).get("/api/matter/capabilities");
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ bleCommissioning: true });
+    expect(res.body).toEqual({
+      bleCommissioning: true,
+      wifiProvisioning: true,
+      apSsid: "Droplet",
+    });
   });
 });
