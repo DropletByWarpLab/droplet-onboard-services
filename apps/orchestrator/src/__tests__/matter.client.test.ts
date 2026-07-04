@@ -154,16 +154,24 @@ describe("getMatterCapabilities — sidecar proxy", () => {
           reason: "BLE commissioning enabled on hci0",
         }),
     });
-    expect(await getMatterCapabilities()).toEqual({ bleCommissioning: true });
+    expect(await getMatterCapabilities()).toEqual({
+      bleCommissioning: true,
+      wifiProvisioning: false,
+      apSsid: null,
+    });
   });
 
-  it("degrades to bleCommissioning=false when the sidecar is unreachable", async () => {
+  it("degrades to all-false when the sidecar is unreachable", async () => {
     installFetchMock({
       "/capabilities": () => {
         throw new Error("ECONNREFUSED");
       },
     });
-    expect(await getMatterCapabilities()).toEqual({ bleCommissioning: false });
+    expect(await getMatterCapabilities()).toEqual({
+      bleCommissioning: false,
+      wifiProvisioning: false,
+      apSsid: null,
+    });
   });
 });
 

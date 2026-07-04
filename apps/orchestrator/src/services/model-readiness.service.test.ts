@@ -18,21 +18,25 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-// Capture logger.info so we can assert the pct=0 progress line is emitted.
-// pino is the only logger this module constructs at load.
+// Capture logger.info so we can assert the pct=0 progress line is emitted,
+// and logger.debug for the WARP-1041 warm-swallow assertions. pino is the
+// only logger this module constructs at load.
 const loggerInfo = vi.hoisted(() => vi.fn());
+const loggerDebug = vi.hoisted(() => vi.fn());
 vi.mock("pino", () => ({
   default: () => ({
     info: loggerInfo,
     warn: vi.fn(),
     error: vi.fn(),
-    debug: vi.fn(),
+    debug: loggerDebug,
   }),
 }));
 
 import {
   backgroundPull,
   ensureDefaultModelPulled,
+  warmDefaultModel,
+  resetWarmStateForTests,
 } from "./model-readiness.service.js";
 
 /**
@@ -204,5 +208,241 @@ describe("model-readiness ensureDefaultModelPulled — vision model", () => {
 
     const pulled = pullRequests(fetchMock);
     expect(pulled).toEqual(["llava:7b"]); // only the missing one
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────
+// WARP-1041 — warmDefaultModel: pre-load the configured chat model
+// into GPU memory so the wizard's first "Ask the AI" doesn't eat the
+// 30-90 s cold load behind a frozen "Thinking…" button.
+// ──────────────────────────────────────────────────────────────────
+
+/** URLs of every POST /api/generate (warm) request, as model names. */
+function warmRequests(fetchMock: { mock: { calls: unknown[][] } }): string[] {
+  return fetchMock.mock.calls
+    .filter((c) => String(c[0]).endsWith("/api/generate"))
+    .map((c) => JSON.parse((c[1] as RequestInit).body as string).model);
+}
+
+function okJsonResponse(): Response {
+  return {
+    ok: true,
+    status: 200,
+    json: () => Promise.resolve({}),
+  } as unknown as Response;
+}
+
+describe("model-readiness warmDefaultModel (WARP-1041)", () => {
+  const realFetch = global.fetch;
+
+  beforeEach(() => {
+    loggerInfo.mockReset();
+    loggerDebug.mockReset();
+    resetWarmStateForTests();
+    global.fetch = vi.fn();
+  });
+
+  afterEach(() => {
+    global.fetch = realFetch;
+    vi.unstubAllEnvs();
+    vi.useRealTimers();
+  });
+
+  it("POSTs /api/generate with ONLY the model key — no prompt, no keep_alive", async () => {
+    vi.stubEnv("LLM_MODEL", "gpt-oss:20b");
+    const fetchMock = global.fetch as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValue(okJsonResponse());
+
+    await warmDefaultModel();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(String(url)).toMatch(/\/api\/generate$/);
+    expect(init.method).toBe("POST");
+    const body = JSON.parse(init.body as string) as Record<string, unknown>;
+    // Empty-prompt /api/generate is Ollama's documented "load into memory"
+    // no-op; a keep_alive key would OVERRIDE the container's
+    // OLLAMA_KEEP_ALIVE=24h, so the body must be exactly {model}.
+    expect(body).toEqual({ model: "gpt-oss:20b" });
+  });
+
+  it("is a no-op when LLM_MODEL is unset", async () => {
+    vi.stubEnv("LLM_MODEL", "");
+    const fetchMock = global.fetch as ReturnType<typeof vi.fn>;
+
+    await warmDefaultModel();
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("debounces: a second trigger within 10 minutes does not re-fetch, a later one does", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("LLM_MODEL", "gpt-oss:20b");
+    const fetchMock = global.fetch as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValue(okJsonResponse());
+
+    await warmDefaultModel();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // 5 min later — inside the window, debounced.
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    await warmDefaultModel();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // 6 more min (11 total) — outside the window, fires again.
+    await vi.advanceTimersByTimeAsync(6 * 60_000);
+    await warmDefaultModel();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("swallows a 404 (model not pulled yet) with a debug log, and lets the NEXT trigger retry", async () => {
+    vi.stubEnv("LLM_MODEL", "gpt-oss:20b");
+    const fetchMock = global.fetch as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 404,
+      json: () => Promise.resolve({ error: "model not found" }),
+    } as unknown as Response);
+
+    await expect(warmDefaultModel()).resolves.toBeUndefined();
+    expect(loggerDebug).toHaveBeenCalled();
+
+    // A failed attempt must NOT hold the 10-min debounce — otherwise the
+    // pull-complete hook that fires minutes later would be silently
+    // swallowed and the boot never warms (finding risk 3).
+    await warmDefaultModel();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("drains the error body on a non-ok response (undici socket release)", async () => {
+    vi.stubEnv("LLM_MODEL", "gpt-oss:20b");
+    const fetchMock = global.fetch as ReturnType<typeof vi.fn>;
+    // Under Node's undici fetch an undrained body can pin the socket until
+    // GC — the 404 branch must consume it, same as the ok branch does.
+    const json = vi.fn(() => Promise.resolve({ error: "model not found" }));
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 404,
+      json,
+    } as unknown as Response);
+
+    await warmDefaultModel();
+
+    expect(json).toHaveBeenCalledTimes(1);
+  });
+
+  it("swallows a network error (ECONNREFUSED) non-fatally with a debug log", async () => {
+    vi.stubEnv("LLM_MODEL", "gpt-oss:20b");
+    const fetchMock = global.fetch as ReturnType<typeof vi.fn>;
+    fetchMock.mockRejectedValue(new Error("connect ECONNREFUSED"));
+
+    await expect(warmDefaultModel()).resolves.toBeUndefined();
+    expect(loggerDebug).toHaveBeenCalled();
+
+    // Retryable on the next trigger, same as the 404 case.
+    await warmDefaultModel();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("model-readiness warm hooks (WARP-1041)", () => {
+  const realFetch = global.fetch;
+
+  beforeEach(() => {
+    loggerInfo.mockReset();
+    loggerDebug.mockReset();
+    resetWarmStateForTests();
+  });
+
+  afterEach(() => {
+    global.fetch = realFetch;
+    vi.unstubAllEnvs();
+  });
+
+  /** Fetch router: tags list, streaming pull success, warm 200. */
+  function routedFetch(presentModels: string[]) {
+    return vi.fn((url: string) => {
+      const u = String(url);
+      if (u.endsWith("/api/tags")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () =>
+            Promise.resolve({ models: presentModels.map((name) => ({ name })) }),
+        } as unknown as Response);
+      }
+      if (u.endsWith("/api/generate")) {
+        return Promise.resolve(okJsonResponse());
+      }
+      return Promise.resolve(streamingResponse([{ status: "success" }]));
+    });
+  }
+
+  it("startup: warms when the default chat model is already present", async () => {
+    vi.stubEnv("LLM_MODEL", "gpt-oss:20b");
+    vi.stubEnv("VISION_MODEL", "");
+    const fetchMock = routedFetch(["gpt-oss:20b"]);
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await ensureDefaultModelPulled();
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(warmRequests(fetchMock)).toEqual(["gpt-oss:20b"]);
+  });
+
+  it("startup: does NOT warm when only the vision model is present (chat model still pulling)", async () => {
+    vi.stubEnv("LLM_MODEL", "gpt-oss:20b");
+    vi.stubEnv("VISION_MODEL", "llava:7b");
+    // The chat model's pull stays IN PROGRESS (no "success" event) so the
+    // only warm that could fire here is the present-branch one under test —
+    // the pull-complete hook (covered below) must not muddy this assertion.
+    const fetchMock = vi.fn((url: string) => {
+      const u = String(url);
+      if (u.endsWith("/api/tags")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ models: [{ name: "llava:7b" }] }),
+        } as unknown as Response);
+      }
+      if (u.endsWith("/api/generate")) {
+        return Promise.resolve(okJsonResponse());
+      }
+      return Promise.resolve(
+        streamingResponse([
+          { status: "downloading", total: 1_000, completed: 0 },
+        ]),
+      );
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await ensureDefaultModelPulled();
+    await new Promise((r) => setTimeout(r, 0));
+
+    // The chat model is mid-pull; warming now would 404. The
+    // pull-complete hook owns that boot's warm instead.
+    expect(warmRequests(fetchMock)).toEqual([]);
+  });
+
+  it("backgroundPull: warms right after model_pull_complete for the default model", async () => {
+    vi.stubEnv("LLM_MODEL", "gpt-oss:20b");
+    const fetchMock = routedFetch([]);
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await backgroundPull("gpt-oss:20b");
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(warmRequests(fetchMock)).toEqual(["gpt-oss:20b"]);
+  });
+
+  it("backgroundPull: does not warm after pulling a non-default model", async () => {
+    vi.stubEnv("LLM_MODEL", "gpt-oss:20b");
+    const fetchMock = routedFetch([]);
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await backgroundPull("llava:7b");
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(warmRequests(fetchMock)).toEqual([]);
   });
 });

@@ -121,6 +121,30 @@ describe("AddressStep — Secured / name your box (WARP-979)", () => {
     expect(onComplete).not.toHaveBeenCalled();
   });
 
+  it("shows the rename-unsupported copy when the box already holds a name (WARP-984)", async () => {
+    // The orchestrator answers 409 { code: "BOX_NAME_RENAME_UNSUPPORTED" }; the
+    // api client surfaces it as an error carrying that code. The step must key
+    // its copy off the CODE (not echo whatever message rode along) and show the
+    // honest "already holds an address — factory reset releases it" copy.
+    setBoxName.mockRejectedValueOnce(
+      Object.assign(new Error("Failed to save box name: 409"), {
+        code: "BOX_NAME_RENAME_UNSUPPORTED",
+      }),
+    );
+    const onComplete = vi.fn();
+    render(<AddressStep onComplete={onComplete} onSkip={vi.fn()} />);
+    fireEvent.change(nameInput(), { target: { value: "studio" } });
+
+    await waitFor(() => expect(continueCta()).toBeEnabled());
+    fireEvent.click(continueCta());
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /already holds a secure address/i,
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(/factory reset/i);
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+
   it("does not let a slow availability response overwrite a newer invalid state (stale-check race)", async () => {
     // The first check resolves LATE (available); by then the owner has typed on
     // into an invalid name. The stale "available" result must be discarded so

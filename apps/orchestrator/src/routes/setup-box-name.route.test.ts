@@ -31,6 +31,7 @@ import { createSetupRouter } from "./setup.js";
 import {
   CLAIM_RESULT_CLAIMED,
   CLAIM_RESULT_NAME_TAKEN,
+  CLAIM_RESULT_RENAME_UNSUPPORTED,
   CLAIM_RESULT_NOT_REGISTERED,
   type ClaimBoxNameResult,
 } from "../services/tls-issuance.service.js";
@@ -237,6 +238,53 @@ describe("POST /api/setup/box-name (WARP-979)", () => {
     expect(res.body.suggestions).toEqual(["studio-2", "studio-hq"]);
     // The name was still persisted locally (best-effort) before the claim.
     expect(persistBoxNameToHost).toHaveBeenCalledTimes(1);
+  });
+
+  it("409s with BOX_NAME_RENAME_UNSUPPORTED when THIS box already holds a name (WARP-984)", async () => {
+    const { app, persistBoxNameToHost } = buildApp(
+      prisma,
+      makeClaimResult({
+        outcome: CLAIM_RESULT_RENAME_UNSUPPORTED,
+        authoritative: true,
+        currentName: "scruceru",
+        slug: undefined,
+        fqdn: undefined,
+      }),
+    );
+    const res = await request(app)
+      .post("/api/setup/box-name")
+      .send({ name: "studio" });
+
+    expect(res.status).toBe(409);
+    expect(res.body.ok).toBe(false);
+    expect(res.body.code).toBe("BOX_NAME_RENAME_UNSUPPORTED");
+    // Distinct from a taken name — the wizard can say "this box already holds a
+    // name — factory reset releases it" instead of the false "taken".
+    expect(res.body.taken).toBe(false);
+    expect(res.body.currentName).toBe("scruceru");
+    expect(res.body.authoritative).toBe(true);
+    expect(typeof res.body.error).toBe("string");
+    // The name was still persisted locally (best-effort) before the claim.
+    expect(persistBoxNameToHost).toHaveBeenCalledTimes(1);
+  });
+
+  it("omits currentName on the rename-unsupported 409 when HQ did not send it", async () => {
+    const { app } = buildApp(
+      prisma,
+      makeClaimResult({
+        outcome: CLAIM_RESULT_RENAME_UNSUPPORTED,
+        authoritative: true,
+        slug: undefined,
+        fqdn: undefined,
+      }),
+    );
+    const res = await request(app)
+      .post("/api/setup/box-name")
+      .send({ name: "studio" });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("BOX_NAME_RENAME_UNSUPPORTED");
+    expect(res.body.currentName).toBeUndefined();
   });
 
   it("200 authoritative:false when the device is not registered yet (graceful fallback)", async () => {

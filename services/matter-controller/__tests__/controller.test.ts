@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { NodeStates } from "@project-chip/matter.js/device";
 import {
   createMatterControllerCore,
+  resolveWifiNetwork,
   MATTER_ENV_ID,
   type ControllerLike,
   type MatterControllerCore,
@@ -243,6 +244,26 @@ describe("createMatterControllerCore", () => {
       await c.init();
       await c.commission(QR_PAIRING_CODE);
       expect(optionsOf(ctl).commissioning.wifiNetwork).toBeUndefined();
+    });
+
+    // WARP-1035: resolveWifiNetwork is exported so the /capabilities route
+    // can answer `wifiProvisioning` from the SAME resolution the commission
+    // path uses — one truth, no drift between the wizard's answer and what
+    // commissioning actually does.
+    it("resolveWifiNetwork resolves a network when SSID + PSK are available (capabilities: wifiProvisioning=true)", async () => {
+      await expect(
+        resolveWifiNetwork({ wifiSsid: "Droplet", wifiPsk: "s3cret-psk" }),
+      ).resolves.toEqual({ wifiSsid: "Droplet", wifiCredentials: "s3cret-psk" });
+    });
+
+    it("resolveWifiNetwork is undefined when nothing is configured (capabilities: wifiProvisioning=false)", async () => {
+      await expect(resolveWifiNetwork({})).resolves.toBeUndefined();
+      await expect(
+        resolveWifiNetwork({ wifiSsid: "Droplet" }),
+      ).resolves.toBeUndefined();
+      await expect(
+        resolveWifiNetwork({ wifiPsk: "s3cret-psk" }),
+      ).resolves.toBeUndefined();
     });
 
     it("passes the configured regulatory country through", async () => {

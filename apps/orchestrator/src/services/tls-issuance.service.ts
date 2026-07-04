@@ -678,16 +678,59 @@ export function parseTakenSuggestions(err: unknown): string[] {
   return [];
 }
 
+/**
+ * WARP-984 (box half) — best-effort parse of the 409 conflict body's
+ * discriminator. A worker with rename semantics distinguishes its two 409s:
+ *
+ *   { reason: "name_taken", suggestions?: [...] }            — held by ANOTHER box
+ *   { reason: "device_already_named", current_name?: "..." } — THIS box already
+ *     holds a (different) name; rename isn't supported yet, factory reset frees it
+ *
+ * Fail-open by contract: an absent / non-JSON / unknown `reason` returns
+ * `reason: null` so the caller keeps EXACTLY today's NAME_TAKEN mapping —
+ * deployed workers that predate the discriminator must not break the wizard.
+ */
+export function parseClaimConflict(err: unknown): {
+  reason: "name_taken" | "device_already_named" | null;
+  currentName?: string;
+} {
+  if (!(err instanceof Error)) return { reason: null };
+  const jsonStart = err.message.indexOf("{");
+  if (jsonStart < 0) return { reason: null };
+  try {
+    const body = JSON.parse(err.message.slice(jsonStart)) as {
+      reason?: unknown;
+      current_name?: unknown;
+    };
+    if (body.reason === "name_taken" || body.reason === "device_already_named") {
+      return {
+        reason: body.reason,
+        ...(typeof body.current_name === "string"
+          ? { currentName: body.current_name }
+          : {}),
+      };
+    }
+  } catch {
+    // Non-JSON / truncated body — treat as an undiscriminated 409.
+  }
+  return { reason: null };
+}
+
 /** Typed outcomes of a name claim. `claimBoxName` NEVER throws (it must not
  *  crash issuance / the rename endpoint), so callers branch on these. */
 export const CLAIM_RESULT_CLAIMED = "claimed" as const;
 export const CLAIM_RESULT_NAME_TAKEN = "name_taken" as const;
+/** WARP-984 — THIS box already holds a different name (HQ rename not supported
+ *  yet); distinct from NAME_TAKEN so the wizard can say "factory reset releases
+ *  it" instead of the false "that name is taken". */
+export const CLAIM_RESULT_RENAME_UNSUPPORTED = "rename_unsupported" as const;
 export const CLAIM_RESULT_NOT_REGISTERED = "not_registered" as const;
 export const CLAIM_RESULT_INVALID = "invalid" as const;
 export const CLAIM_RESULT_FAILED = "failed" as const;
 export type ClaimOutcome =
   | typeof CLAIM_RESULT_CLAIMED
   | typeof CLAIM_RESULT_NAME_TAKEN
+  | typeof CLAIM_RESULT_RENAME_UNSUPPORTED
   | typeof CLAIM_RESULT_NOT_REGISTERED
   | typeof CLAIM_RESULT_INVALID
   | typeof CLAIM_RESULT_FAILED;
@@ -704,6 +747,9 @@ export interface ClaimBoxNameResult {
   fqdn?: string;
   /** Alternate names HQ offered on a 409 name-taken. */
   suggestions?: string[];
+  /** WARP-984 — on RENAME_UNSUPPORTED, the name this box already holds at HQ
+   *  (when the worker included `current_name` in the 409 body). */
+  currentName?: string;
 }
 
 export interface ClaimBoxNameDeps {
@@ -780,8 +826,26 @@ export async function claimBoxName(
   } catch (err) {
     const httpStatus = parseHqStatus(err);
     if (httpStatus === 409) {
-      // Name taken (or the device holds a DIFFERENT name). Authoritative: HQ
-      // owns the registry. Surface any suggestions so the wizard shows the truth.
+      // WARP-984 — two distinct conflicts hide behind a 409. A worker with the
+      // rename semantics sends a `reason` discriminator; branch on it so the
+      // wizard can tell "held by another box" from "THIS box already holds a
+      // name". An absent/unparseable reason falls open to NAME_TAKEN — old
+      // deployed workers must keep exactly today's behavior.
+      const conflict = parseClaimConflict(err);
+      if (conflict.reason === "device_already_named") {
+        logger.warn(
+          { deviceId, name: rawName, currentName: conflict.currentName },
+          "tls-claim: HQ says this device already holds a name (409 device_already_named) — rename is not supported yet; a factory reset releases it",
+        );
+        return {
+          outcome: CLAIM_RESULT_RENAME_UNSUPPORTED,
+          authoritative: true,
+          ...(conflict.currentName ? { currentName: conflict.currentName } : {}),
+        };
+      }
+      // Name taken by another device (explicit reason or legacy undiscriminated
+      // body). Authoritative: HQ owns the registry. Surface any suggestions so
+      // the wizard shows the truth.
       const suggestions = parseTakenSuggestions(err);
       logger.warn(
         { deviceId, name: rawName, suggestions },

@@ -86,6 +86,12 @@ const MODEL_POLL_INTERVAL_MS = 8_000;
  *  EMPTY content — the old 400 false-failed the probe on a healthy box.
  *  Local inference is cost-free, so size for reasoning + answer. */
 const SAMPLE_PROMPT_MAX_TOKENS = 2_000;
+
+/** WARP-1041 — how long an in-flight ask stays silent before we explain
+ *  the wait. Past ~8 s the silence is almost certainly the model loading
+ *  into GPU memory (30-90 s cold, the first ask after a boot), not a
+ *  hang — say so instead of leaving a frozen "Thinking…" button. */
+const WAKING_NOTICE_DELAY_MS = 8_000;
 export function AiStep({
   onComplete,
   onSkip,
@@ -111,6 +117,10 @@ export function AiStep({
   // Kept separate from `error` so it renders as a neutral note, not
   // the red failure box.
   const [notice, setNotice] = useState<string | null>(null);
+  // WARP-1041 — honest in-flight state: true once an ask has been silent
+  // for WAKING_NOTICE_DELAY_MS. Kept separate from `notice` (a settled,
+  // retryable outcome) so the two soft states can't clobber each other.
+  const [wakingNotice, setWakingNotice] = useState(false);
 
   // Three curated prompts tuned to the home-user persona — short,
   // sensible, demonstrate that the AI knows what it's running on.
@@ -161,6 +171,22 @@ export function AiStep({
     return () => clearInterval(timer);
   }, [loading, models.length, load]);
 
+  // WARP-1041 — arm the waking-notice timer while an ask is in flight;
+  // clear it (and the notice) the moment the request settles. The
+  // cleanup runs on settle AND unmount, so StrictMode's double-mount and
+  // a mid-ask skip can never leak a late setState.
+  useEffect(() => {
+    if (!submitting) {
+      setWakingNotice(false);
+      return;
+    }
+    const timer = setTimeout(
+      () => setWakingNotice(true),
+      WAKING_NOTICE_DELAY_MS,
+    );
+    return () => clearTimeout(timer);
+  }, [submitting]);
+
   const localModels = useMemo(
     () => models.filter(isLocalModel),
     [models],
@@ -194,6 +220,13 @@ export function AiStep({
     setResponse("");
     setReasoning(null);
     setSubmitting(true);
+    // WARP-1041 — the three CURATED samples need zero tools (the identity
+    // prompt answers all of them), and every advertised tool schema is
+    // prefill the customer waits on (~11k tokens for the full registry).
+    // An explicit [] tells the agent loop to advertise none. A CUSTOM
+    // question keeps today's payload byte-identical — no allowed_tools
+    // key — so "list my devices" still gets the role-default registry.
+    const isSamplePrompt = selectedPrompt !== SAMPLE_PROMPTS.length;
     try {
       const res = await sendChat({
         model: selectedModel,
@@ -201,6 +234,7 @@ export function AiStep({
         stream: false,
         // WARP-849: reasoning-sized budget — see SAMPLE_PROMPT_MAX_TOKENS.
         max_tokens: SAMPLE_PROMPT_MAX_TOKENS,
+        ...(isSamplePrompt ? { allowed_tools: [] } : {}),
         // WARP-174: the wizard's sample prompt is a throwaway "does
         // local AI work on this box" check. Without this flag every
         // first-run customer ends up with the wizard's probe at the
@@ -422,6 +456,29 @@ export function AiStep({
                 {response}
               </ReactMarkdown>
             </div>
+          </div>
+        )}
+
+        {/* WARP-1041 — the ask has been in flight for 8+ s: almost
+            certainly the first inference after a restart, i.e. the model
+            loading into GPU memory. Explain the wait honestly instead of
+            a frozen "Thinking…" button. Same soft-notice styling as the
+            WARP-849 states below — expected behavior, not an error. */}
+        {wakingNotice && (
+          <div
+            data-testid="ai-waking-notice"
+            role="status"
+            className="flex items-start gap-2 type-footnote text-label-secondary bg-surface-secondary rounded-sm px-3 py-2 motion-safe:animate-in motion-safe:fade-in motion-safe:duration-200"
+          >
+            <Loader2
+              size={14}
+              className="mt-0.5 flex-shrink-0 text-label-tertiary motion-safe:animate-spin"
+              aria-hidden="true"
+            />
+            <span>
+              Waking your AI — the first question after a restart takes up
+              to a minute while the model loads into memory.
+            </span>
           </div>
         )}
 
