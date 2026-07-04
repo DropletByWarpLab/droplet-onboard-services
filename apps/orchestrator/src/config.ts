@@ -48,6 +48,12 @@ const envSchema = z.object({
   DATABASE_URL: z.string().default("postgresql://droplet:droplet@localhost:5432/droplet"),
   REDIS_URL: z.string().default("redis://localhost:6379"),
   MQTT_BROKER: z.string().default("mqtt://localhost:1883"),
+  // WARP-236 — internal service-to-service mTLS. Defaults keep dev/CI on plain
+  // HTTP; scripts/setup.sh writes DROPLET_INTERNAL_TLS=1 into a box's .env.
+  DROPLET_INTERNAL_TLS: z.string().default("0"),
+  DROPLET_TLS_CERT: z.string().default("/data/service-tls/cert.pem"),
+  DROPLET_TLS_KEY: z.string().default("/data/service-tls/key.pem"),
+  DROPLET_TLS_CA: z.string().default("/data/service-tls/ca.pem"),
   AI_GATEWAY_URL: z.string().default("http://localhost:8000"),
   PORT: z.coerce.number().default(3000),
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
