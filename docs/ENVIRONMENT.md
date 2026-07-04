@@ -136,3 +136,13 @@ auditor guide is [`docs/fips.md`](fips.md); the essentials:
   [`docs/fips.md`](fips.md).
 - **Dev opt-out.** `DROPLET_FIPS_MODE=0` (default). The boot self-test skips
   silently when `DROPLET_FIPS_REQUIRED` is unset/false.
+
+## At-rest encryption (WARP-232)
+
+See [`security/at-rest-encryption.md`](security/at-rest-encryption.md) for the
+full layout, boot flow, and recovery runbooks.
+
+| Variable | Meaning |
+|---|---|
+| `DROPLET_TPM_PCRS_BIND` | PCR set the LUKS2 data partition + USB drives seal to (default `0+2+4+7`). The `'+'`-separated form of device-identity's `DROPLET_TPM_PCRS` (`0,2,4,7`) — the identical set {0,2,4,7}. Change only in lockstep with `DROPLET_TPM_PCRS` or the seals drift onto different boot-measurement policies. |
+| `DROPLET_LUKS_ALLOW_NO_TPM` | **Dev-only.** `droplet-luks-provision.sh` refuses to provision without a TPM. Set to `1` on a TPM-less dev box to force plain-key provisioning (data will NOT be encrypted). Never set on an appliance. Default `0`. |
