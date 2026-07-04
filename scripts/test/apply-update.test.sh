@@ -120,6 +120,15 @@ exit 0
 EOF
 chmod +x "$STUB_BIN/docker"
 
+cat > "$STUB_BIN/cosign" <<EOF
+#!/usr/bin/env bash
+# Fake cosign for apply-update.test.sh (WARP-244): records the argv into the
+# shared calls.log and obeys COSIGN_STUB_EXIT so tests drive both verdicts.
+printf 'cosign %s\n' "\$*" >> "$STUB_DIR/calls.log"
+exit "\${COSIGN_STUB_EXIT:-0}"
+EOF
+chmod +x "$STUB_BIN/cosign"
+
 stub_reset() { rm -rf "$STUB_DIR"; mkdir -p "$STUB_DIR"; }
 
 # Run apply-update.sh with the fake docker on PATH + the fixture updates dir.
@@ -131,6 +140,7 @@ run_apply() {
   DOCKER_STUB_FAIL_RECREATE="${DOCKER_STUB_FAIL_RECREATE:-}" \
   DOCKER_STUB_REPO_DIGESTS="${DOCKER_STUB_REPO_DIGESTS:-}" \
   DOCKER_STUB_IMAGE_ID="${DOCKER_STUB_IMAGE_ID:-}" \
+  COSIGN_STUB_EXIT="${COSIGN_STUB_EXIT:-0}" \
   DROPLET_OTA_UPDATES_DIR="$UPDATES_DIR" \
   bash "$APPLY_SH" "$@"
 }
@@ -581,6 +591,53 @@ if printf '%s\n' "$DRY_OUT" | grep -q "^DRY-RUN: docker compose .*override-relea
   pass "dry-run prints the pinned compose command without running it"
 else
   fail "dry-run output missing the pinned compose command (got: $DRY_OUT)"
+fi
+
+# =============================================================================
+echo ""
+echo "--- Phase 5: pull-images signature gate (WARP-244) ---"
+
+# 5a. Rejected signature → NO docker pull, non-zero exit, canonical marker.
+stub_reset
+GATE_OUT="$(COSIGN_STUB_EXIT=1 run_apply pull-images --images "$REL_ORCH" "$REL_DASH" 2>&1)"
+GATE_RC=$?
+if [ "$GATE_RC" -ne 0 ] && printf '%s' "$GATE_OUT" | grep -q "image-verify:"; then
+  pass "pull-images refuses a rejected signature (rc=$GATE_RC, image-verify: marker present)"
+else
+  fail "pull-images did not refuse on cosign rejection (rc=$GATE_RC, out: $GATE_OUT)"
+fi
+if grep -q "^pull " "$STUB_DIR/calls.log" 2>/dev/null; then
+  fail "docker pull ran despite a rejected signature (fail-open!)"
+else
+  pass "no docker pull was attempted after the cosign refusal (fail closed)"
+fi
+
+# 5b. Verified signature → verify runs BEFORE pull, with the exact policy flags.
+stub_reset
+run_apply pull-images --images "$REL_ORCH" >/dev/null 2>&1
+VERIFY_LINE=$(grep -n "^cosign verify" "$STUB_DIR/calls.log" 2>/dev/null | head -1 | cut -d: -f1)
+PULL_LINE=$(grep -n "^pull " "$STUB_DIR/calls.log" 2>/dev/null | head -1 | cut -d: -f1)
+if [ -n "$VERIFY_LINE" ] && [ -n "$PULL_LINE" ] && [ "$VERIFY_LINE" -lt "$PULL_LINE" ]; then
+  pass "cosign verify precedes docker pull"
+else
+  fail "verify/pull ordering wrong (verify=$VERIFY_LINE pull=$PULL_LINE, calls: $(cat "$STUB_DIR/calls.log" 2>/dev/null))"
+fi
+if grep "^cosign verify" "$STUB_DIR/calls.log" | grep -q -- "--certificate-identity-regexp" \
+   && grep "^cosign verify" "$STUB_DIR/calls.log" | grep -q "droplet-onboard-services" \
+   && grep "^cosign verify" "$STUB_DIR/calls.log" | grep -q -- "--offline=true"; then
+  pass "verify carries the org-repo identity policy + --offline"
+else
+  fail "verify invocation missing policy flags (calls: $(cat "$STUB_DIR/calls.log" 2>/dev/null))"
+fi
+
+# 5c. Dry-run stays side-effect-free and prints the verify it WOULD run.
+DRY_PULL_OUT="$(DROPLET_OTA_APPLY_DRY_RUN=1 DROPLET_OTA_UPDATES_DIR="$UPDATES_DIR" \
+  bash "$APPLY_SH" pull-images --images "$REL_ORCH" 2>/dev/null)"
+if printf '%s\n' "$DRY_PULL_OUT" | grep -q "^DRY-RUN: cosign verify" \
+   && printf '%s\n' "$DRY_PULL_OUT" | grep -q "^DRY-RUN: docker pull"; then
+  pass "dry-run prints verify + pull without executing either"
+else
+  fail "dry-run output missing verify/pull commands (got: $DRY_PULL_OUT)"
 fi
 
 # =============================================================================
