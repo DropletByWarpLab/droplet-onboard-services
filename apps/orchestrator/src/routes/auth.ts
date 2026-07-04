@@ -2013,6 +2013,30 @@ export function createProtectedAuthRouter(
         data: { passwordHash: newHash, mustChangePassword: false },
       });
 
+      // WARP-247 — a credential change kills every OTHER session immediately
+      // (NIST 800-63B). The CURRENT session survives (exceptSid): it just
+      // proved the old password and set the new one, and killing it would
+      // bounce the WARP-1042/1049 temp-password first-login flow straight
+      // back to the login screen. Other devices' access tokens die at their
+      // next middleware check; their refresh dies with the record.
+      const revokedSessions = await revokeAllSessions(localUser.id, {
+        exceptSid: req.user.sid,
+      });
+      await recordActivity({
+        kind: "auth",
+        severity: "ok",
+        sourceIcon: "shield-check",
+        what: "Other sessions revoked (password changed)",
+        sub: `${revokedSessions} session(s)`,
+        refs: {
+          outcome: "sessions_revoked",
+          reason: "password_change",
+          userId: localUser.id,
+          revoked: revokedSessions,
+        },
+        actor: { type: "user", id: localUser.id },
+      });
+
       // Mirror the new password downstream to Nextcloud for WebDAV (best
       // effort — the directory is the source of truth, so a failed mirror must
       // not fail the rotation; the next login re-provisions the NC session).
@@ -2222,6 +2246,29 @@ export function createProtectedAuthRouter(
       await prisma.recoveryCode.deleteMany({ where: { userId } });
       await prisma.recoveryCode.createMany({
         data: hashes.map((codeHash) => ({ userId, codeHash })),
+      });
+
+      // WARP-247 — enabling a second factor is a credential-strength change:
+      // every session minted BEFORE it never passed the new factor, so kill
+      // them all except the one that just completed enrollment. NOTE for the
+      // future MFA-RESET/disable route (none exists yet): it must call
+      // revokeAllSessions(userId) — no exceptSid — for the same reason.
+      const revokedOnEnroll = await revokeAllSessions(userId, {
+        exceptSid: req.user.sid,
+      });
+      await recordActivity({
+        kind: "auth",
+        severity: "ok",
+        sourceIcon: "shield-check",
+        what: "Other sessions revoked (two-factor enabled)",
+        sub: `${revokedOnEnroll} session(s)`,
+        refs: {
+          outcome: "sessions_revoked",
+          reason: "totp_enrolled",
+          userId,
+          revoked: revokedOnEnroll,
+        },
+        actor: { type: "user", id: userId },
       });
 
       await recordActivity({
