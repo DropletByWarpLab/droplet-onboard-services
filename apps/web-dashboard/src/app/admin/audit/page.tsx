@@ -18,8 +18,9 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Download, ScrollText, Search, ShieldOff } from "lucide-react";
+import { Download, FileLock2, ScrollText, Search, ShieldOff } from "lucide-react";
 import { useAuth, authFetch } from "@/lib/auth";
+import { fetchUsers } from "@/lib/api";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { AuditTimeline } from "@/components/audit/AuditTimeline";
 import {
@@ -28,6 +29,8 @@ import {
 } from "@/components/audit/ChainVerification";
 import {
   ACTIVITY_KINDS,
+  ACTIVITY_ACTOR_TYPES,
+  ACTOR_TYPE_LABELS,
   KIND_LABELS,
   type ActivityItem,
   type ActivityListResponse,
@@ -76,11 +79,20 @@ export default function AuditPage() {
   const fetchGenRef = useRef(0);
 
   const [kind, setKind] = useState("");
+  const [actorType, setActorType] = useState("");
   const [rangeKey, setRangeKey] = useState<RangeKey>("all");
   const [q, setQ] = useState("");
   const [qDebounced, setQDebounced] = useState("");
 
   const [verify, setVerify] = useState<VerifyState>({ phase: "checking" });
+  const [exportingSealed, setExportingSealed] = useState(false);
+
+  // WARP-1009: actorId (user UUID) → display name for the timeline's
+  // "who did this" line. Progressive enhancement — if the directory
+  // fetch fails, rows fall back to the actor's short id.
+  const [userNames, setUserNames] = useState<ReadonlyMap<string, string>>(
+    new Map(),
+  );
 
   const isAdmin = !authLoading && isAdminRole(user?.role);
 
@@ -89,18 +101,45 @@ export default function AuditPage() {
     return () => clearTimeout(t);
   }, [q]);
 
-  const buildParams = useCallback(() => {
-    const params = new URLSearchParams();
-    params.set("limit", String(PAGE_SIZE));
-    if (kind) params.set("kind", kind);
+  useEffect(() => {
+    if (!isAdmin) return;
+    let alive = true;
+    fetchUsers()
+      .then(({ users }) => {
+        if (!alive) return;
+        setUserNames(
+          new Map(users.map((u) => [u.id, u.displayName || u.username])),
+        );
+      })
+      .catch(() => {
+        /* names are optional — short ids render instead */
+      });
+    return () => {
+      alive = false;
+    };
+  }, [isAdmin]);
+
+  /** The active filter set, shared verbatim by the list query (URL
+   *  params) and the sealed export (POST body) so the bundle always
+   *  matches what the operator is looking at. */
+  const buildFilters = useCallback(() => {
+    const filters: Record<string, string> = {};
+    if (kind) filters.kind = kind;
+    if (actorType) filters.actorType = actorType;
     const range = RANGES.find((r) => r.key === rangeKey);
     if (range?.ms) {
-      params.set("from", new Date(Date.now() - range.ms).toISOString());
+      filters.from = new Date(Date.now() - range.ms).toISOString();
     }
     const needle = qDebounced.trim();
-    if (needle) params.set("q", needle);
+    if (needle) filters.q = needle;
+    return filters;
+  }, [kind, actorType, rangeKey, qDebounced]);
+
+  const buildParams = useCallback(() => {
+    const params = new URLSearchParams(buildFilters());
+    params.set("limit", String(PAGE_SIZE));
     return params;
-  }, [kind, rangeKey, qDebounced]);
+  }, [buildFilters]);
 
   // First page — refetched whenever a filter changes. Bumping the
   // generation invalidates any in-flight fetch AND any in-flight
@@ -240,7 +279,44 @@ export default function AuditPage() {
     URL.revokeObjectURL(url);
   }
 
-  const hasFilters = kind !== "" || rangeKey !== "all" || qDebounced.trim() !== "";
+  // WARP-1009: the sealed, offline-verifiable bundle — server-generated
+  // (POST /api/activity/export streams NDJSON with a manifest line),
+  // unlike the CSV which is a client-side snapshot of the loaded view.
+  // Carries the ACTIVE filters so the download matches the screen.
+  async function exportSealedBundle() {
+    if (exportingSealed) return;
+    setExportingSealed(true);
+    try {
+      const res = await authFetch("/api/activity/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(buildFilters()),
+      });
+      if (!res.ok) {
+        setError({ message: CALM_ERROR, detail: `HTTP ${res.status}` });
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "droplet-activity-bundle.jsonl";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError({
+        message: CALM_ERROR,
+        detail: err instanceof Error ? err.message : undefined,
+      });
+    } finally {
+      setExportingSealed(false);
+    }
+  }
+
+  const hasFilters =
+    kind !== "" || actorType !== "" || rangeKey !== "all" || qDebounced.trim() !== "";
   const icon = <ScrollText size={15} />;
   const SUB =
     "Every important action on this box, signed and chained so the history can't be quietly rewritten.";
@@ -281,16 +357,28 @@ export default function AuditPage() {
       title="Audit log"
       sub={SUB}
       actions={
-        <button
-          type="button"
-          className="btn sm"
-          onClick={exportCsv}
-          disabled={items.length === 0}
-          title="Download the rows currently loaded in this view as CSV"
-        >
-          <Download size={13} aria-hidden />
-          Export view
-        </button>
+        <>
+          <button
+            type="button"
+            className="btn sm"
+            onClick={exportCsv}
+            disabled={items.length === 0}
+            title="Download the rows currently loaded in this view as CSV"
+          >
+            <Download size={13} aria-hidden />
+            Export view
+          </button>
+          <button
+            type="button"
+            className="btn sm"
+            onClick={() => void exportSealedBundle()}
+            disabled={exportingSealed}
+            title="Download the signed, offline-verifiable bundle of every matching entry (server-generated NDJSON)"
+          >
+            <FileLock2 size={13} aria-hidden />
+            {exportingSealed ? "Exporting…" : "Export sealed bundle"}
+          </button>
+        </>
       }
     >
       <div style={{ marginBottom: 16 }}>
@@ -313,6 +401,23 @@ export default function AuditPage() {
           {ACTIVITY_KINDS.map((k) => (
             <option key={k} value={k}>
               {KIND_LABELS[k]}
+            </option>
+          ))}
+        </select>
+        {/* WARP-1009: actorType filter. NOTE the API only matches signed
+            (v2+) rows for actor predicates — filtered views exclude
+            pre-upgrade unattributed rows by design. */}
+        <select
+          aria-label="Filter by actor"
+          className="dp-input"
+          style={{ width: "auto" }}
+          value={actorType}
+          onChange={(e) => setActorType(e.target.value)}
+        >
+          <option value="">All actors</option>
+          {ACTIVITY_ACTOR_TYPES.map((a) => (
+            <option key={a} value={a}>
+              {ACTOR_TYPE_LABELS[a]}
             </option>
           ))}
         </select>
@@ -353,8 +458,10 @@ export default function AuditPage() {
         items={items}
         loading={loading}
         hasFilters={hasFilters}
+        userNames={userNames}
         onClearFilters={() => {
           setKind("");
+          setActorType("");
           setRangeKey("all");
           setQ("");
         }}

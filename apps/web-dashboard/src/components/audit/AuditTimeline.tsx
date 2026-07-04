@@ -13,6 +13,32 @@ import * as Icons from "lucide-react";
 import { Badge } from "@/components/shell/primitives";
 import { KIND_LABELS, type ActivityItem } from "./types";
 
+/** WARP-1009 — homeowner-readable "who did this" line. Directory names
+ *  are progressive enhancement: with no `userNames` entry the user's
+ *  short id still identifies the actor; a v1 pre-upgrade row (null
+ *  actor — its actor columns are outside the signature) states that
+ *  explicitly rather than rendering a blank. */
+function actorLabel(
+  item: ActivityItem,
+  userNames?: ReadonlyMap<string, string>,
+): string {
+  switch (item.actorType) {
+    case "user": {
+      const name = item.actorId ? userNames?.get(item.actorId) : undefined;
+      if (name) return `by ${name}`;
+      return item.actorId ? `by user ${item.actorId.slice(0, 8)}…` : "by a person";
+    }
+    case "ai":
+      return "by Droplet AI";
+    case "system":
+      return "by the system";
+    case "anonymous":
+      return "by an anonymous visitor";
+    default:
+      return "unattributed (recorded before actor tracking)";
+  }
+}
+
 /** kebab-case wire icon name ("shield-alert") → lucide component. */
 function iconFor(name: string): Icons.LucideIcon {
   const pascal = name
@@ -86,11 +112,14 @@ export function AuditTimeline({
   loading,
   hasFilters,
   onClearFilters,
+  userNames,
 }: {
   items: ActivityItem[];
   loading: boolean;
   hasFilters: boolean;
   onClearFilters: () => void;
+  /** actorId (user UUID) → display name, resolved by the page. */
+  userNames?: ReadonlyMap<string, string>;
 }) {
   if (loading && items.length === 0) {
     return (
@@ -164,6 +193,9 @@ export function AuditTimeline({
                   <span className="rt">
                     <span className="nm">{item.what}</span>
                     {item.sub ? <span className="sub">{item.sub}</span> : null}
+                    <span className="sub" style={{ fontStyle: "italic" }}>
+                      {actorLabel(item, userNames)}
+                    </span>
                   </span>
                   {item.severity === "err" && <Badge kind="danger">error</Badge>}
                   {item.severity === "warn" && <Badge kind="warn">warning</Badge>}
