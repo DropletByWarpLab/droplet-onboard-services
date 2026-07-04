@@ -1,0 +1,31 @@
+name: osv-nightly
+
+# WARP-243 — nightly known-CVE sweep over dependency manifests: the root +
+# tests npm lockfiles and all 21 requirements*.txt. NOT PR-blocking (Trivy
+# gates what ships in images; Dependabot proposes the fixes) — this lane
+# exists so a newly-published CVE in an existing pin turns the nightly red
+# within 24 h instead of waiting for the next image rebuild.
+# Red-on-findings from day one is intentional; see docs/SECURITY.md#osv.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  osv-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: osv-scanner (recursive, fails on any known vuln not triaged in osv-scanner.toml)
+        uses: google/osv-scanner-action/osv-scanner-action@v2.3.8
+        with:
+          scan-args: |-
+            --config=osv-scanner.toml
+            --recursive
+            ./
