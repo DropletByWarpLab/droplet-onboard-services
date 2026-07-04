@@ -344,6 +344,24 @@ PATH="$WORK/bin:/usr/bin:/bin" bash "$RUNNER" --verify-bundle "$b" > /dev/null 2
   && fail "verify-bundle accepted a TAMPERED bundle" || pass "verify-bundle detects tampering"
 fi
 
+echo ""; echo "--- Docs + CI wiring ---"
+RB="$REPO_ROOT/docs/security/encryption-verification.md"
+[ -f "$RB" ] && pass "runbook exists" || fail "runbook missing"
+for needle in 'droplet-verify-encryption.sh' 'WARP-957' 'release blocker' '--verify-bundle' 'tcpdump'; do
+  grep -qi -e "$needle" "$RB" && pass "runbook covers: $needle" || fail "runbook misses: $needle"
+done
+[ -f "$REPO_ROOT/docs/security/evidence/README.md" ] && pass "evidence README exists" \
+  || fail "evidence README missing"
+grep -q 'test:verify-encryption' "$REPO_ROOT/package.json" \
+  && pass "package.json test:verify-encryption wired" || fail "npm script missing"
+WF="$REPO_ROOT/.github/workflows/verify-encryption-tests.yml"
+[ -f "$WF" ] && pass "CI workflow exists" || fail "CI workflow missing"
+grep -q 'tests/verify-encryption.test.sh' "$WF" && pass "CI runs this suite" || fail "CI wrong cmd"
+grep -q 'scripts/host/droplet-verify-encryption' "$WF" && pass "CI path-filters on the harness" \
+  || fail "CI paths wrong"
+grep -q 'droplet-verify-encryption' "$REPO_ROOT/scripts/host/README.md" \
+  && pass "scripts/host/README.md documents the harness" || fail "host README not updated"
+
 echo ""
 printf "  Results: %d/%d passed\n" "$((TESTS - FAILURES))" "$TESTS"
 exit "$FAILURES"
