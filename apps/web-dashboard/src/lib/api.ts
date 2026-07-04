@@ -63,6 +63,7 @@ import type {
   OrgResult,
   TeamInviteRequest,
   TeamInviteResult,
+  TeamInviteRole,
   DeviceClientInfo,
   PairingCodeInfo,
   PairingCodeStatus,
@@ -498,11 +499,21 @@ export async function createUser(
   // password on first login. Passed through to POST /auth/users which sets the
   // explicit `User.mustChangePassword` flag.
   mustChangePassword = true,
+  // WARP-1049: the new member's household role (owner/admin/family/guest). The
+  // wizard TeamStep sets this. Omitted from the body when absent so the server
+  // applies its "family" default (and existing callers stay byte-compatible).
+  role?: TeamInviteRole,
 ): Promise<void> {
   const res = await authFetch(`${BASE}/api/auth/users`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password, displayName, mustChangePassword }),
+    body: JSON.stringify({
+      email,
+      password,
+      displayName,
+      mustChangePassword,
+      ...(role ? { role } : {}),
+    }),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
