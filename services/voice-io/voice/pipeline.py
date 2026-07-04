@@ -764,6 +764,53 @@ class WakePipeline:
             self._speak_ended_at = time.time()
 
     # ──────────────────────────────────────────────────────────────
+    # Calibration live-apply (WARP-1055)
+    # ──────────────────────────────────────────────────────────────
+
+    def set_input_gain(self, gain: float) -> None:
+        """Live-apply a calibrated digital input gain.
+
+        Driven by POST /voice/calibration (the wizard's single write)
+        and by main.apply_stored_calibration at startup, overriding the
+        VOICE_INPUT_GAIN env default. Nonsense values are ignored — a
+        bad record must never mute the mic (gain 0) or flip the signal
+        (negative). The worker thread reads the float without the lock
+        (atomic under the GIL, same as the construct-time value); the
+        write takes the lock only to pair with status() reads.
+        """
+        try:
+            g = float(gain)
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(g) or g <= 0.0:
+            logger.warning("set_input_gain(%r) ignored — not a usable gain", gain)
+            return
+        with self._lock:
+            self._input_gain = g
+        logger.info("input gain set to %.2f (calibration)", g)
+
+    def set_wake_threshold(self, threshold: float) -> None:
+        """Live-apply a calibrated wake threshold (0 < t ≤ 1).
+
+        Same contract as set_input_gain: calibration overrides the
+        env/engine default, garbage is ignored so a corrupt record
+        can't set an impossible gate (0 fires on everything, >1 never
+        fires under either engine's score semantics).
+        """
+        try:
+            t = float(threshold)
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(t) or not (0.0 < t <= 1.0):
+            logger.warning(
+                "set_wake_threshold(%r) ignored — outside (0, 1]", threshold,
+            )
+            return
+        with self._lock:
+            self._threshold = t
+        logger.info("wake threshold set to %.2f (calibration)", t)
+
+    # ──────────────────────────────────────────────────────────────
     # Status — atomic snapshot
     # ──────────────────────────────────────────────────────────────
 
