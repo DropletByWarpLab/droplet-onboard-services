@@ -68,6 +68,12 @@ case "$OP" in
   # WARP-662: adopt a previously-used disk — deliberately wipe + reformat +
   # mount it into the Droplet ("like a new OS install"). Data-destroying.
   drive_adopt) ;;
+  # WARP-1048: reclaim a pool-member disk — break it out of its md array
+  # (mdadm --fail/--remove + --zero-superblock) THEN run it through the same
+  # adopt (wipe + reformat + mount) path so it's usable on its own again. A
+  # plain drive_adopt on an md-held member fails EBUSY; the detach must run
+  # first. Data-destroying.
+  drive_reclaim) ;;
   "") die "no operation given" ;;
   *)  die "unknown operation: $OP" ;;
 esac
@@ -102,6 +108,7 @@ MEMBER="$(json_field member)"
 CONFIRM="$(json_field confirm_phrase)"
 WIPE_METHOD="$(json_field wipe_method)"   # WARP-662 drive_adopt: quick|secure
 LABEL="$(json_field label)"               # WARP-662 drive_adopt: optional fs label
+RECLAIM_MD="$(json_field md)"             # WARP-1048 drive_reclaim: owning md array
 mapfile -t MEMBERS < <(json_field members)
 
 [ -n "$DEVICE" ] || die "missing 'device'"
@@ -407,6 +414,22 @@ case "$OP" in
       die "refusing: /dev/$DEVICE is (or backs) the OS/boot/system disk — never adoptable"
     fi
     ;;
+  drive_reclaim)
+    # WARP-1048: reclaim a pool-member disk into standalone use. The disk is a
+    # linux_raid_member held by an md array, so a plain adopt would EBUSY on
+    # wipefs — the execute step first detaches it (mdadm --fail/--remove +
+    # --zero-superblock) then runs the adopt flow. Same OS-disk refusal as
+    # adopt (never trust the client), and the owning array MUST be named — we
+    # never guess which array to break the disk out of. As with adopt, has_data
+    # is NOT a refusal (erasing is the point; the typed confirm_phrase naming
+    # this disk is the consent).
+    [ -n "$RECLAIM_MD" ] || die "drive_reclaim requires the owning 'md' array"
+    [[ "$RECLAIM_MD" =~ ^md[0-9]+$ ]] \
+      || die "invalid md '$RECLAIM_MD': must match md[0-9]+"
+    if is_os_disk "/dev/$DEVICE"; then
+      die "refusing: /dev/$DEVICE is (or backs) the OS/boot/system disk — never reclaimable"
+    fi
+    ;;
 esac
 
 # --- Build the real command --------------------------------------------------
@@ -442,6 +465,14 @@ build_cmd() {
       # mkfs → mount under /mnt/droplet.
       printf 'adopt %s: unmount -> wipe(%s) -> mkfs.%s%s -> mount /mnt/droplet' \
         "$MD" "${WIPE_METHOD:-quick}" "${FSTYPE:-ext4}" \
+        "$([ -n "$LABEL" ] && printf ' -L %s' "$LABEL")"
+      ;;
+    drive_reclaim)
+      # detach from the array (fail + remove + zero-superblock) → then the
+      # adopt flow (unmount -> wipe -> mkfs -> mount) so the disk is usable
+      # standalone.
+      printf 'reclaim %s from /dev/%s: mdadm --fail --remove -> --zero-superblock -> wipe(%s) -> mkfs.%s%s -> mount /mnt/droplet' \
+        "$MD" "$RECLAIM_MD" "${WIPE_METHOD:-quick}" "${FSTYPE:-ext4}" \
         "$([ -n "$LABEL" ] && printf ' -L %s' "$LABEL")"
       ;;
   esac
@@ -581,6 +612,40 @@ case "$OP" in
     adopt_mnt="/mnt/droplet/${LABEL:-${adopt_uuid:-$(basename "$MD")}}"
     mkdir -p "$adopt_mnt"
     host_mount "$MD" "$adopt_mnt"
+    ;;
+  drive_reclaim)
+    # WARP-1048: reclaim a pool-member disk into standalone use. It is held by
+    # an md array (linux_raid_member), so a plain wipefs would EBUSY.
+    # 0) DETACH from the array first. --fail marks the member faulty, --remove
+    #    detaches it, --zero-superblock erases its md metadata so no array
+    #    re-assembles it on the next boot. mdadm --fail on an auto-read-only /
+    #    resync=PENDING array (the live md127 shape) succeeds; the array keeps
+    #    running degraded on its remaining members (or is the owner's to destroy
+    #    separately). We do NOT stop the whole array — reclaiming ONE disk must
+    #    not tear down a pool the owner may still want.
+    RECLAIM_MD_DEV="/dev/$RECLAIM_MD"
+    mdadm "$RECLAIM_MD_DEV" --fail "$MD" --remove "$MD"
+    mdadm --zero-superblock "$MD"
+    # 1) Now the disk is free — release any of its mounts (parity with adopt;
+    #    a pool member normally isn't mounted, but be safe + non-lazy).
+    teardown_mounts_of "$MD" "refusing to reclaim $MD"
+    # 2) Wipe (quick: wipefs / secure: blkdiscard then wipefs) — same as adopt.
+    case "${WIPE_METHOD:-quick}" in
+      secure) blkdiscard -f "$MD" 2>/dev/null || true; wipefs -a "$MD" ;;
+      *)      wipefs -a "$MD" ;;
+    esac
+    # 3) Fresh whole-device filesystem, optional owner label — same as adopt.
+    if [ -n "$LABEL" ]; then
+      "mkfs.${FSTYPE:-ext4}" -L "$LABEL" "$MD"
+    else
+      "mkfs.${FSTYPE:-ext4}" "$MD"
+    fi
+    # 4) Mount under the shared /mnt/droplet namespace (host_mount, WARP-868) —
+    #    same as adopt; reboot persistence via the udev whole-disk automount.
+    reclaim_uuid="$(blkid -o value -s UUID "$MD" 2>/dev/null || true)"
+    reclaim_mnt="/mnt/droplet/${LABEL:-${reclaim_uuid:-$(basename "$MD")}}"
+    mkdir -p "$reclaim_mnt"
+    host_mount "$MD" "$reclaim_mnt"
     ;;
 esac
 
