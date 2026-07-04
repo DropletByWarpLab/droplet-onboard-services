@@ -25,7 +25,7 @@ set -uo pipefail  # NOT -e: report + continue (flat harness convention)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+if [ -n "${SABOTAGE_ASSUME_NO_DOCKER:-}" ] || ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
   echo "SKIP: docker unavailable — sabotage proof runs in the Docker-gated CI leg"
   exit 0
 fi

@@ -36,15 +36,15 @@ fi
 #    static-lint CI leg and non-Docker dev boxes stay green. We force this by
 #    running it with an empty PATH-ish shim where `docker` is absent.
 if [ -x "$SABOTAGE" ]; then
-  shim="$(mktemp -d)"
-  # A PATH with only coreutils but NO docker → `command -v docker` fails.
-  out="$(PATH="/usr/bin:/bin" bash "$SABOTAGE" 2>&1)"; rc=$?
+  # Force the docker-absence branch deterministically: a PATH restriction can't
+  # hide docker on CI runners that ship it in /usr/bin, so use the script's own
+  # SABOTAGE_ASSUME_NO_DOCKER test seam instead.
+  out="$(SABOTAGE_ASSUME_NO_DOCKER=1 bash "$SABOTAGE" 2>&1)"; rc=$?
   if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -qi 'SKIP'; then
     pass "skips cleanly (exit 0 + SKIP) when docker is unavailable"
   else
     fail "did not skip cleanly without docker (rc=$rc, out='$out')"
   fi
-  rm -rf "$shim"
 fi
 
 # 3) The embedded Dockerfile must build the module, install via the REAL
