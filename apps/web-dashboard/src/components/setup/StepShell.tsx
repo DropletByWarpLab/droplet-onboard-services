@@ -12,6 +12,7 @@ import {
   HardDrive,
   KeyRound,
   Lightbulb,
+  Mic,
   Shield,
   ShieldCheck,
   Sparkles,
@@ -75,6 +76,9 @@ export const RAIL_LABELS: Record<Step, { label: string; Icon: LucideIcon }> = {
   cameras: { label: "Cameras", Icon: Camera },
   vpn: { label: "Remote access", Icon: ShieldCheck },
   ai: { label: "Private AI", Icon: Sparkles },
+  // WARP-1036 — the always-on "hey droplet" assistant gets its own rail row
+  // between Private AI and Your team.
+  voice: { label: "Voice", Icon: Mic },
   team: { label: "Your team", Icon: Users },
   done: { label: "Done", Icon: Check },
 };

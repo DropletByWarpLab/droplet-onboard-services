@@ -70,6 +70,8 @@ import type {
   VpnPeerInfo,
   VpnStatusInfo,
   VpnPeerCreatedInfo,
+  VoiceStatusInfo,
+  VoiceSayResult,
   BoxNameCheckResult,
   BoxNameSetResult,
   ToolCatalogResponse,
@@ -4501,6 +4503,56 @@ export async function deleteVpnPeer(id: string): Promise<void> {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `Failed to revoke peer: ${res.status}`);
   }
+}
+
+// --- WARP-1036: voice assistant (setup-wizard step + status) ---
+
+/**
+ * True when an error thrown by `fetchVoiceStatus` / `sayVoiceTest` means
+ * "voice-io isn't deployed here at all" (the orchestrator proxy's explicit
+ * 503 `voice_unavailable` — macOS dev, or the `linux` compose profile
+ * inactive). The wizard's voice step auto-skips ONLY on this (WARP-933:
+ * a generic error must surface, never silently skip).
+ */
+export function isVoiceUnavailableError(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    (err as Error & { code?: string }).code === "voice_unavailable"
+  );
+}
+
+async function throwVoiceError(res: Response, fallback: string): Promise<never> {
+  const body = await res.json().catch(() => ({}));
+  const e = new Error(
+    typeof body.detail === "string"
+      ? body.detail
+      : body.error || `${fallback}: ${res.status}`,
+  ) as Error & { code?: string; status?: number };
+  if (res.status === 503 && body.error === "voice_unavailable") {
+    e.code = "voice_unavailable";
+  } else if (typeof body.error === "string") {
+    e.code = body.error;
+  }
+  e.status = res.status;
+  throw e;
+}
+
+export async function fetchVoiceStatus(): Promise<VoiceStatusInfo> {
+  const res = await authFetch(`${BASE}/api/voice/status`);
+  if (!res.ok) await throwVoiceError(res, "Failed to fetch voice status");
+  return res.json();
+}
+
+/** Speaker test — the box says `text` out loud through its own speaker.
+ *  Blocks for the playback duration server-side. */
+export async function sayVoiceTest(text: string): Promise<VoiceSayResult> {
+  const res = await authFetch(`${BASE}/api/voice/say`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+  if (!res.ok) await throwVoiceError(res, "Speaker test failed");
+  return res.json();
 }
 
 // --- WARP-979: Secured / name-your-box ---

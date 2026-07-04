@@ -1,0 +1,199 @@
+/**
+ * VoiceStep — WARP-1036: the wizard's "hey droplet" try-it step.
+ *
+ * Contract under test:
+ *  - happy path renders the wake-phrase hero + live try-it (1 s status poll:
+ *    a `last_wake_at` change is the wake confirmation, then the transcript
+ *    and spoken reply render as they land);
+ *  - speaker test button POSTs the fixed test phrase through /api/voice/say;
+ *  - `state: "no_mic"` renders the plug-in panel (hot-plug needs no restart)
+ *    with Continue always enabled;
+ *  - the explicit 503 `voice_unavailable` (voice-io not deployed) auto-skips
+ *    the step — but a GENERIC error surfaces with a retry instead of a
+ *    silent skip (WARP-933).
+ */
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
+import { VoiceStep } from "./VoiceStep";
+
+const fetchVoiceStatus = vi.fn();
+const sayVoiceTest = vi.fn();
+
+vi.mock("@/lib/api", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
+  return {
+    ...actual,
+    fetchVoiceStatus: (...a: unknown[]) => fetchVoiceStatus(...a),
+    sayVoiceTest: (...a: unknown[]) => sayVoiceTest(...a),
+  };
+});
+
+function listeningStatus(overrides: Record<string, unknown> = {}) {
+  return {
+    state: "listening",
+    listening: true,
+    wake_loaded: true,
+    wake_model: "hey_droplet",
+    using_wake_fallback: false,
+    threshold: 0.7,
+    last_wake_at: null,
+    last_transcript: null,
+    last_transcript_at: null,
+    last_response: null,
+    last_response_at: null,
+    stt_loaded: true,
+    tts_loaded: true,
+    llm_loaded: true,
+    ...overrides,
+  };
+}
+
+function unavailableError() {
+  const e = new Error("voice unavailable") as Error & { code?: string };
+  e.code = "voice_unavailable";
+  return e;
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  fetchVoiceStatus.mockResolvedValue(listeningStatus());
+  sayVoiceTest.mockResolvedValue({ ok: true, duration_s: 1.4 });
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe("VoiceStep — happy path (mic present, listening)", () => {
+  it("renders the wake-phrase hero and Continue advances", async () => {
+    const onComplete = vi.fn();
+    render(
+      <VoiceStep onComplete={onComplete} onSkip={vi.fn()} onAutoSkip={vi.fn()} />,
+    );
+    expect(
+      await screen.findByText(/hey droplet/i),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /^continue$/i }));
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it("plays the fixed test phrase through the box speaker", async () => {
+    render(
+      <VoiceStep onComplete={vi.fn()} onSkip={vi.fn()} onAutoSkip={vi.fn()} />,
+    );
+    const btn = await screen.findByRole("button", {
+      name: /play a test message/i,
+    });
+    fireEvent.click(btn);
+    await waitFor(() =>
+      expect(sayVoiceTest).toHaveBeenCalledWith("Hi — I'm your Droplet"),
+    );
+  });
+
+  it("shows the wake confirmation, then transcript and reply, as the poll sees them land", async () => {
+    vi.useFakeTimers();
+    fetchVoiceStatus
+      // initial load — no wake yet
+      .mockResolvedValueOnce(listeningStatus())
+      // poll 1 — wake fired
+      .mockResolvedValueOnce(listeningStatus({ last_wake_at: 111.1 }))
+      // poll 2 — transcript + reply landed
+      .mockResolvedValue(
+        listeningStatus({
+          last_wake_at: 111.1,
+          last_transcript: "is the front camera online",
+          last_transcript_at: 112.2,
+          last_response: "Yes — the front camera is online.",
+          last_response_at: 114.4,
+        }),
+      );
+
+    render(
+      <VoiceStep onComplete={vi.fn()} onSkip={vi.fn()} onAutoSkip={vi.fn()} />,
+    );
+    // Flush the initial fetch.
+    await act(async () => {});
+    expect(screen.getByText(/hey droplet/i)).toBeInTheDocument();
+    expect(screen.queryByText(/heard you/i)).not.toBeInTheDocument();
+
+    // Poll 1 → wake confirmation.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1100);
+    });
+    expect(screen.getByText(/heard you/i)).toBeInTheDocument();
+
+    // Poll 2 → transcript + spoken reply.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1100);
+    });
+    expect(
+      screen.getByText(/is the front camera online/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/yes — the front camera is online\./i),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("VoiceStep — no microphone", () => {
+  it("renders the plug-in panel with Continue enabled (hot-plug, no restart)", async () => {
+    fetchVoiceStatus.mockResolvedValue(
+      listeningStatus({ state: "no_mic", listening: false, wake_loaded: false }),
+    );
+    const onComplete = vi.fn();
+    render(
+      <VoiceStep onComplete={onComplete} onSkip={vi.fn()} onAutoSkip={vi.fn()} />,
+    );
+    expect(
+      await screen.findByText(/no microphone detected/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/no restart needed/i)).toBeInTheDocument();
+    const cont = screen.getByRole("button", { name: /^continue$/i });
+    expect(cont).toBeEnabled();
+    fireEvent.click(cont);
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("VoiceStep — availability contract (WARP-933)", () => {
+  it("auto-skips on the explicit voice_unavailable error", async () => {
+    fetchVoiceStatus.mockRejectedValue(unavailableError());
+    const onAutoSkip = vi.fn();
+    render(
+      <VoiceStep onComplete={vi.fn()} onSkip={vi.fn()} onAutoSkip={onAutoSkip} />,
+    );
+    await waitFor(() => expect(onAutoSkip).toHaveBeenCalledTimes(1));
+  });
+
+  it("surfaces a generic error with a retry — never a silent skip", async () => {
+    fetchVoiceStatus.mockRejectedValue(new Error("boom"));
+    const onAutoSkip = vi.fn();
+    render(
+      <VoiceStep onComplete={vi.fn()} onSkip={vi.fn()} onAutoSkip={onAutoSkip} />,
+    );
+    expect(
+      await screen.findByText(/couldn.t check the voice assistant/i),
+    ).toBeInTheDocument();
+    expect(onAutoSkip).not.toHaveBeenCalled();
+    // Retry recovers to the happy path.
+    fetchVoiceStatus.mockResolvedValue(listeningStatus());
+    fireEvent.click(screen.getByRole("button", { name: /try again/i }));
+    expect(await screen.findByText(/hey droplet/i)).toBeInTheDocument();
+  });
+
+  it("keeps Skip available while loading", async () => {
+    let resolve!: (v: unknown) => void;
+    fetchVoiceStatus.mockImplementation(
+      () => new Promise((r) => (resolve = r)),
+    );
+    const onSkip = vi.fn();
+    render(
+      <VoiceStep onComplete={vi.fn()} onSkip={onSkip} onAutoSkip={vi.fn()} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    expect(onSkip).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      resolve(listeningStatus());
+    });
+  });
+});
