@@ -37,7 +37,6 @@ import {
   claimRefreshRotation,
   registerRefreshSession,
   unregisterRefreshSession,
-  revokeUserSessions,
   ACCESS_TOKEN_TTL_SECONDS,
   REFRESH_TOKEN_TTL_SECONDS,
   roleOutranks,
@@ -2777,7 +2776,10 @@ export function createProtectedAuthRouter(
             where: { nextcloudUsername: req.params.username },
             select: { id: true },
           });
-          if (row) await revokeUserSessions(row.id);
+          // WARP-247 — kill session RECORDS (access tokens die at the next
+          // middleware check) as well as the refresh denylist (swept
+          // internally by revokeAllSessions).
+          if (row) await revokeAllSessions(row.id);
         }
         res.json({ status: "disabled", username: req.params.username });
       } catch (err: any) {
@@ -2843,7 +2845,10 @@ export function createProtectedAuthRouter(
           res.status(404).json({ error: "User not found", code: "USER_NOT_FOUND" });
           return;
         }
-        const revoked = await revokeUserSessions(row.id);
+        // WARP-247 — kill session RECORDS (access tokens die at the next
+        // middleware check) as well as the refresh denylist (swept internally
+        // by revokeAllSessions).
+        const revoked = await revokeAllSessions(row.id);
         res.json({ status: "ok", username: req.params.username, revoked });
       } catch (err) {
         next(err);
