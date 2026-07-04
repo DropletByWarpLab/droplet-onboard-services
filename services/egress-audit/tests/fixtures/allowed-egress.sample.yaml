@@ -1,0 +1,36 @@
+# WARP-268 test fixture. Mirrors the schema the runtime collector expects
+# from WARP-269's docs/security/allowed-egress.yaml (see allowlist.py
+# docstring + docs/security/egress-audit.md). MUST stay in sync with the
+# WARP-269 spec — reconciled by the orchestrating session.
+schema_version: 1
+entries:
+  - service: ai-gateway
+    destination: api.anthropic.com
+    port: 443
+    protocol: tcp
+    purpose: BYOK cloud LLM calls (user-initiated)
+    ticket: WARP-268
+  - service: ai-gateway
+    destination: "*.openai.com"
+    port: 443
+    protocol: tcp
+    purpose: BYOK cloud LLM calls (user-initiated)
+    ticket: WARP-268
+  - service: host
+    destination: 1.1.1.1
+    port: 53
+    protocol: any
+    purpose: Upstream DNS resolution (dockerd embedded-DNS forwarder)
+    ticket: WARP-268
+  - service: host
+    destination: 0.0.0.0/0
+    port: 123
+    protocol: udp
+    purpose: NTP time sync
+    ticket: WARP-268
+  - service: openwrt
+    destination: downloads.openwrt.org
+    port: 443
+    protocol: tcp
+    purpose: opkg install-if-missing safety net (WARP-826)
+    ticket: WARP-826

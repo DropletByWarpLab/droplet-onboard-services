@@ -1,0 +1,9 @@
+# WARP-268 — knobs for droplet-egress-audit.service, sourced by
+# /usr/local/sbin/droplet-egress-audit. DROPLET_ENV_FILE and
+# DROPLET_EGRESS_ALLOWLIST are filled in by scripts/lib/single-box.sh on
+# first install; operator edits are never clobbered (install-if-absent).
+DROPLET_ENV_FILE=
+DROPLET_EGRESS_ALLOWLIST=
+DROPLET_EGRESS_ORCHESTRATOR_URL=http://127.0.0.1:3000
+DROPLET_EGRESS_LOG_DIR=/var/lib/droplet/egress-audit
+DROPLET_EGRESS_NETWORK=droplet_default

@@ -43,6 +43,10 @@ VERBOSE=false
 DRY_RUN=false
 # Single-box deployment shape — tri-state. "" = auto-detect; "true" = force on; "false" = force off.
 SINGLE_BOX_MODE=""
+# WARP-318 FIPS 140-3 per-customer knob — tri-state. "" = leave whatever .env
+# already has (a re-run WITHOUT --fips/--no-fips is a no-op on FIPS, never a
+# silent flip); "true" = force ON (--fips); "false" = force OFF (--no-fips).
+FIPS_MODE=""
 export VERBOSE REGENERATE_ENV
 
 usage() {
@@ -63,6 +67,18 @@ Options:
                      no separate inference host on the LAN; use this to force or
                      skip auto-detect.
   --no-single-box    Force single-box off (multi-box / v2-6 deployment).
+  --fips             Activate FIPS 140-3 mode (per-customer, default OFF).
+                     Sets DROPLET_FIPS_MODE=1 in .env; setup.sh derives the
+                     per-service OPENSSL_CONF / DROPLET_FIPS_REQUIRED /
+                     OPENSSL_MODULES / NODE_OPTIONS from it. The validated
+                     OpenSSL FIPS provider (CMVP #4282) already ships in every
+                     image, so NO rebuild is needed — on an existing box:
+                     ./scripts/setup.sh --fips --skip-docker --skip-build
+                     --skip-drivers  (rewrites .env, restarts the stack).
+                     FIPS RESTRICTS algorithms for certification; it does not
+                     add strength. See docs/fips.md.
+  --no-fips          Deactivate FIPS mode (DROPLET_FIPS_MODE=0). Restores the
+                     default modern-crypto posture (TLS 1.3, OpenSSL defaults).
   --regenerate-env   Force-regenerate .env (backs up existing)
   --sync-secrets     Only rewrite Docker secret files from .env, then exit
   --verbose          Show full command output
@@ -84,6 +100,8 @@ while [ $# -gt 0 ]; do
     --systemd)          INSTALL_SYSTEMD=true; shift ;;
     --single-box)       SINGLE_BOX_MODE=true; shift ;;
     --no-single-box)    SINGLE_BOX_MODE=false; shift ;;
+    --fips)             FIPS_MODE=true; shift ;;
+    --no-fips)          FIPS_MODE=false; shift ;;
     --regenerate-env)   REGENERATE_ENV=true; shift ;;
     --sync-secrets)     SYNC_SECRETS_ONLY=true; shift ;;
     --verbose)          VERBOSE=true; shift ;;
@@ -405,6 +423,21 @@ main() {
   # See scripts/lib/single-box.sh.
   if [ "$SINGLE_BOX_MODE" = "true" ]; then
     configure_single_box_env
+  fi
+  # WARP-318: FIPS 140-3 per-customer activation. Only acts when the operator
+  # EXPLICITLY passed --fips / --no-fips (FIPS_MODE tri-state; "" = leave .env
+  # as-is, so a re-run without the flag never silently flips FIPS). Runs AFTER
+  # configure_single_box_env so an explicit --fips overrides the single-box
+  # shape's default `OPENSSL_CONF=`/`DROPLET_FIPS_REQUIRED=false` (operator
+  # intent wins over shape default). apply_fips_mode rewrites the derived env
+  # atomically; compose reads the resulting .env on the stack bring-up below,
+  # so NO image rebuild is needed to flip.
+  if [ "$FIPS_MODE" = "true" ]; then
+    log_info "FIPS mode: ON (DROPLET_FIPS_MODE=1) — activating validated OpenSSL provider"
+    apply_fips_mode on
+  elif [ "$FIPS_MODE" = "false" ]; then
+    log_info "FIPS mode: OFF (DROPLET_FIPS_MODE=0) — default modern-crypto posture"
+    apply_fips_mode off
   fi
   # WARP-230 device-identity first-boot enrollment. Idempotent —
   # exits 0 when /var/lib/droplet/tpm/provisioned.json already exists
