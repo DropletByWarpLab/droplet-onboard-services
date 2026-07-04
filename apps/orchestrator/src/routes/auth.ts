@@ -1382,6 +1382,28 @@ export function createPublicAuthRouter(
       // --- Try JWT refresh first ---
       const refreshResult = await verifyRefreshToken(refreshTokenInput);
       if (refreshResult) {
+        // WARP-247 — rotation requires a LIVE server-side session record.
+        // Missing/expired (revoked, idle- or absolute-timed-out) OR a legacy
+        // sid-less token → burn the presented token, clear cookies, force a
+        // fresh login. touch:false — an automatic refresh is NOT user
+        // activity, so it must never slide the idle window. Redis errors
+        // fail OPEN (middleware posture); the denylist check inside
+        // verifyRefreshToken has already run at this point.
+        const sessionCheck = refreshResult.sid
+          ? await checkSession(refreshResult.sid, { touch: false })
+          : ({ kind: "missing" } as const);
+        if (sessionCheck.kind === "missing" || sessionCheck.kind === "expired") {
+          await denyRefreshToken(refreshTokenInput);
+          res.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
+          res.clearCookie(REFRESH_COOKIE_NAME, { path: "/api/auth" });
+          res.status(401).json({
+            error: "Session expired. Please log in again.",
+            code: "SESSION_EXPIRED",
+            reason: sessionCheck.kind === "expired" ? sessionCheck.reason : "revoked",
+          });
+          return;
+        }
+
         // Claim exclusive rotation rights before issuing new tokens. If
         // another concurrent /auth/refresh call (e.g. a browser double-submit
         // on flaky networks) already claimed this token, reject to prevent
@@ -1470,8 +1492,11 @@ export function createPublicAuthRouter(
         // the old token's member, add the new one — so a later "revoke now"
         // walks live tokens only and never re-denylists a rotated-out hash.
         await unregisterRefreshSession(sub, refreshTokenInput);
-        const newRefreshToken = signRefreshToken({ id: sub, username, displayName, role: effectiveRole });
-        const newAccessToken = signAccessToken({ id: sub, username, displayName, role: effectiveRole });
+        // WARP-247 — the rotated pair keeps the SAME sid: rotation continues
+        // a session lineage, it never starts a new one (createdAt — and thus
+        // the absolute clock — is pinned to the original login).
+        const newRefreshToken = signRefreshToken({ id: sub, username, displayName, role: effectiveRole, sid: refreshResult.sid });
+        const newAccessToken = signAccessToken({ id: sub, username, displayName, role: effectiveRole, sid: refreshResult.sid });
         await registerRefreshSession(sub, newRefreshToken);
 
         // Extend the NC session token's TTL so it doesn't expire mid-session
