@@ -40,6 +40,10 @@ trust, PM secrets) are summarized in [`CLAUDE.md`](../CLAUDE.md).
 | `ONLYOFFICE_JWT_ENABLED` | Whether the engine enforces the JWT (default `true`; matched by the connector) |
 | `FILES_API_URL` | Files-API target for the MCP file tools (default `http://orchestrator:3000/api/files`). Despite the client's historical "nextcloud" name, raw Nextcloud can't serve these tools (WARP-861) |
 | `AUTH_ENABLED`       | Enable/disable auth                                  |
+| `SESSION_IDLE_TIMEOUT_ADMIN_SECONDS` | Sliding idle timeout for `owner`/`admin` sessions (default `900` = 15 min). Any authenticated request resets the clock (30 s write granularity); expiry 401s `SESSION_EXPIRED` and is audit-logged (WARP-247) |
+| `SESSION_IDLE_TIMEOUT_USER_SECONDS` | Sliding idle timeout for `family`/`guest` sessions (default `3600` = 60 min) |
+| `SESSION_ABSOLUTE_TIMEOUT_SECONDS` | Hard cap on total session lifetime from login (default `28800` = 8 h). Never extended by activity or token refresh |
+| `SESSION_MAX_CONCURRENT_PER_USER` | Max concurrent sessions per user (default `5`). At login the oldest session is evicted and audit-logged |
 | `PORT`               | Server listen port                                   |
 | `DEVICE_SECRET`      | Device authentication secret                         |
 | `MAX_UPLOAD_SIZE_MB` | Upload size limit in MB                              |

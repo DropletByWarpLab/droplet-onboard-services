@@ -90,26 +90,26 @@ function cfgNum(value: unknown, fallback: number): number {
 export function idleLimitSecondsForRole(role: Role): number {
   if (role === "owner" || role === "admin") {
     return cfgNum(
-      (config as Record<string, unknown>).SESSION_IDLE_TIMEOUT_ADMIN_SECONDS,
+      config.SESSION_IDLE_TIMEOUT_ADMIN_SECONDS,
       DEFAULT_IDLE_TIMEOUT_ADMIN_SECONDS,
     );
   }
   return cfgNum(
-    (config as Record<string, unknown>).SESSION_IDLE_TIMEOUT_USER_SECONDS,
+    config.SESSION_IDLE_TIMEOUT_USER_SECONDS,
     DEFAULT_IDLE_TIMEOUT_USER_SECONDS,
   );
 }
 
 export function absoluteLimitSeconds(): number {
   return cfgNum(
-    (config as Record<string, unknown>).SESSION_ABSOLUTE_TIMEOUT_SECONDS,
+    config.SESSION_ABSOLUTE_TIMEOUT_SECONDS,
     DEFAULT_ABSOLUTE_TIMEOUT_SECONDS,
   );
 }
 
 export function maxConcurrentSessions(): number {
   return cfgNum(
-    (config as Record<string, unknown>).SESSION_MAX_CONCURRENT_PER_USER,
+    config.SESSION_MAX_CONCURRENT_PER_USER,
     DEFAULT_MAX_CONCURRENT_SESSIONS,
   );
 }

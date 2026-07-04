@@ -148,6 +148,19 @@ const envSchema = z.object({
       `JWT_SECRET must be a strong random value in production (at least ${JWT_SECRET_MIN_LENGTH} characters and not a dev placeholder)`,
     ),
 
+  // --- WARP-247: session management hardening (NIST 800-63B) ---
+  // All values in SECONDS except the cap. Admin-class = owner|admin roles;
+  // user-class = family|guest. Idle timeouts are SLIDING (any authenticated
+  // request resets the clock, write-throttled to 30 s granularity); the
+  // absolute timeout is FIXED from login and is never extended by activity
+  // or token refresh. The cap evicts the OLDEST session at login (audited).
+  // Enforced via Redis session records (services/session.service.ts) keyed
+  // by the JWT `sid` claim.
+  SESSION_IDLE_TIMEOUT_ADMIN_SECONDS: z.coerce.number().default(15 * 60),
+  SESSION_IDLE_TIMEOUT_USER_SECONDS: z.coerce.number().default(60 * 60),
+  SESSION_ABSOLUTE_TIMEOUT_SECONDS: z.coerce.number().default(8 * 60 * 60),
+  SESSION_MAX_CONCURRENT_PER_USER: z.coerce.number().default(5),
+
   // --- OAuth2 ---
   AUTH_MODE: z.enum(["oauth2", "legacy"]).default("legacy"),
   OAUTH2_CLIENT_ID: z.string().default(""),
