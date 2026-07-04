@@ -15,7 +15,9 @@ name: docker-build
 #                     to main rebuild every image and refresh it (post-merge,
 #                     so their wall-clock blocks nobody). One image per
 #                     runner also fits in the stock ~14 GB disk, so the old
-#                     "free disk space" step is gone.
+#                     "free disk space" step is gone. Each built image is
+#                     Trivy-scanned (WARP-243): HIGH/CRITICAL vulns with a fix
+#                     available fail the job unless triaged in .trivyignore.
 #   docker-build-ok — stable fan-in check name for branch protection.
 #
 # WARP-316 — arch scope of the build-time FIPS gate: this workflow builds
@@ -313,8 +315,26 @@ jobs:
           file: ${{ steps.meta.outputs.file }}
           pull: true
           push: false
+          load: true
+          tags: droplet-ci/${{ matrix.image }}:scan
           cache-from: type=registry,ref=${{ steps.meta.outputs.cache-ref }}
           cache-to: ${{ github.event_name == 'push' && format('type=registry,ref={0},mode=max,image-manifest=true', steps.meta.outputs.cache-ref) || '' }}
+
+      # WARP-243: image vulnerability gate. HIGH/CRITICAL with an available
+      # fix fails the build. ignore-unfixed keeps un-patchable Debian base
+      # CVEs from blocking; pre-existing language-dep CVEs are triaged in
+      # .trivyignore (one comment per entry, burn-down via Dependabot).
+      # scanners: vuln only — secrets are gitleaks' domain, misconfig is
+      # hadolint's (no double-reporting).
+      - name: Trivy scan ${{ matrix.image }} (block HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@0.36.0
+        with:
+          image-ref: droplet-ci/${{ matrix.image }}:scan
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          scanners: vuln
+          trivyignores: .trivyignore
 
   # Single stable check name for branch protection, whatever the matrix did.
   docker-build-ok:
