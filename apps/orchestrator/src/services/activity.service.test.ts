@@ -6,9 +6,10 @@
  *     computed over content + "".
  *   - every subsequent row reads the most-recent signature and uses
  *     `hashSignature(prev)` as the prev pointer.
- *   - the recorder uses a Prisma transaction so two concurrent
- *     emitters can't both observe the same "latest" row and produce
- *     a broken chain.
+ *   - every record() takes the constant chain-append advisory lock
+ *     BEFORE reading the tail (WARP-1026). True serialization is proven
+ *     against a real Postgres in activity.service.pg.test.ts — this
+ *     fake only pins the statement order and shape.
  *
  * The full route-level coverage (signature verify, tamper detection,
  * replay correctness) lives in `activity-chain.test.ts` per AC7.
@@ -65,9 +66,11 @@ function makePrismaFake(): {
   prisma: FakePrisma;
   rows: FakeActivityRow[];
   transactionCount: { count: number };
+  queries: string[];
 } {
   const rows: FakeActivityRow[] = [];
   const transactionCount = { count: 0 };
+  const queries: string[] = [];
   let nextId = 1n;
 
   const prisma: FakePrisma = {
@@ -103,8 +106,14 @@ function makePrismaFake(): {
         return row;
       },
     },
-    async $queryRawUnsafe<T>() {
-      // Recorder asks for the tail row's signature ordered by id desc.
+    async $queryRawUnsafe<T>(query: string) {
+      queries.push(query);
+      // WARP-1026: first call per record() is the chain-append advisory
+      // lock; its result is ignored by the recorder.
+      if (query.includes("pg_advisory_xact_lock")) {
+        return [{ locked: true }] as unknown as T;
+      }
+      // Tail read: most recent row's signature, id desc.
       if (rows.length === 0) return [] as unknown as T;
       return [{ signature: rows[rows.length - 1]!.signature }] as unknown as T;
     },
@@ -113,7 +122,7 @@ function makePrismaFake(): {
       return fn(prisma);
     },
   };
-  return { prisma, rows, transactionCount };
+  return { prisma, rows, transactionCount, queries };
 }
 
 const KEY = Buffer.from("warp-456-test-key-bytes-must-be-long", "utf8");
@@ -197,6 +206,24 @@ describe("activity.service.record", () => {
       actor: { type: "system" },
     });
     expect(prismaState.transactionCount.count).toBe(2);
+  });
+
+  it("acquires the chain-append advisory lock before reading the tail (WARP-1026)", async () => {
+    await recorder.record({
+      kind: "system",
+      severity: "info",
+      sourceIcon: "info",
+      what: "Boot",
+      actor: { type: "system" },
+    });
+    const q = prismaState.queries;
+    expect(q[0]).toContain(
+      "pg_advisory_xact_lock(hashtext('droplet:activity-chain-append'))",
+    );
+    expect(q[1]).toContain(
+      'SELECT "signature" FROM "ActivityRow" ORDER BY "id" DESC LIMIT 1',
+    );
+    expect(q[1]).not.toContain("FOR UPDATE");
   });
 
   it("refs are persisted and covered by the signature", async () => {
