@@ -16,10 +16,14 @@ set -euo pipefail
 ACTION="${1:-}"
 DEVICE="${2:-}"
 
-MOUNT_BASE="/mnt/droplet"
-STATE_DIR="/var/lib/droplet-automount"
+# Base paths are env-overridable ONLY for the hermetic tests
+# (services/oled-display/tests/test_automount_script.py) — udev/systemd
+# invoke the real unit with a clean environment, so production always uses
+# the defaults.
+MOUNT_BASE="${DROPLET_AUTOMOUNT_BASE:-/mnt/droplet}"
+STATE_DIR="${DROPLET_AUTOMOUNT_STATE_DIR:-/var/lib/droplet-automount}"
 STATE_FILE="${STATE_DIR}/mounts.json"
-LOG_FILE="/var/log/droplet-automount.log"
+LOG_FILE="${DROPLET_AUTOMOUNT_LOG:-/var/log/droplet-automount.log}"
 
 NEXTCLOUD_CONTAINER="${NEXTCLOUD_CONTAINER:-docker-nextcloud-1}"
 NEXTCLOUD_USER="${NEXTCLOUD_USER:-admin}"
@@ -203,6 +207,17 @@ case "$ACTION" in
       log "$DEVICE has no filesystem signature, skipping"
       exit 0
     fi
+    # Signatures that are real but NOT mountable filesystems. The WARP-936
+    # udev widening delivers whole-disk add events, so RAID members, LVM PVs,
+    # LUKS containers and swap now reach this script — each is owned by its
+    # own subsystem (mdadm / LVM / cryptsetup / swapon); attempting `mount`
+    # on them fails and leaves a failed droplet-automount@ unit on every
+    # boot of a box with a pool. Skip cleanly instead.
+    case "$TYPE" in
+      linux_raid_member|LVM2_member|crypto_LUKS|swap)
+        log "skip $DEVICE (signature $TYPE — managed by its own subsystem, not mountable)"
+        exit 0 ;;
+    esac
     # Skip labels that are obviously firmware / boot / display volumes
     # even if udev let them through (belt-and-braces).
     case "${LABEL:-}" in

@@ -1241,11 +1241,113 @@ def _unescape_mount(path: str) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# WARP-936: adoptable-disks inventory. The mounted-drives snapshot above is by
+# construction blind to a present-but-unmounted disk (the live box's two
+# RAID-member WD drives were invisible to every layer). This additive lsblk
+# walk lists every WHOLE disk except the OS disk and <100MB devices, each with
+# an EXPLICIT state enum — the dashboard branches on the enum, never guesses:
+#   in_use      — the disk, a partition, or an md it backs is mounted
+#   pool_member — carries a linux_raid_member signature (md name included)
+#   foreign     — has some fs/RAID/LVM signature but nothing mounted
+#   available   — no signature at all
+# READ-ONLY. Rides the drives_snapshot 10s cache (and its /drives/changed
+# invalidation hook), so it costs one lsblk subprocess per cache refresh.
+
+def _lsblk_disks_json():
+    """Raw `lsblk -J -b` device tree as a parsed dict, or None when lsblk is
+    unavailable / emits garbage. Isolated so tests feed canned topology."""
+    _rc, out, _e = _run(
+        ["lsblk", "-J", "-b", "-o",
+         "NAME,TYPE,SIZE,FSTYPE,MOUNTPOINT,TRAN,MODEL,SERIAL"],
+        timeout=8,
+    )
+    try:
+        parsed = json.loads(out or "")
+        return parsed if isinstance(parsed, dict) else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _walk_block_children(node):
+    """Yield every descendant of an lsblk tree node (partitions, md arrays,
+    dm/LVM volumes), depth-first."""
+    for child in node.get("children") or []:
+        yield child
+        yield from _walk_block_children(child)
+
+
+def classify_disks(lsblk_tree, os_disk):
+    """Classify the lsblk -J tree into the WARP-936 `disks` list.
+
+    Pure function — no subprocess, no host state — so the fixture-driven
+    tests cover every enum branch. Excludes the OS disk (same WARP-827
+    fail-open contract: an empty os_disk hides nothing, but a mounted root
+    still classifies the disk `in_use`, so it is never offered as adoptable)
+    and trivially small devices (<100 MB, CIRCUITPY-class)."""
+    disks = []
+    for dev in (lsblk_tree or {}).get("blockdevices") or []:
+        if (dev.get("type") or "") != "disk":
+            continue  # loop/md/dm top-level nodes are not physical disks
+        name = dev.get("name") or ""
+        if not name:
+            continue
+        if os_disk and name == os_disk:
+            continue  # never surface the OS/boot disk as inventory
+        try:
+            size = int(dev.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        if size < _MIN_DRIVE_BYTES:
+            continue
+        descendants = list(_walk_block_children(dev))
+        mounted = bool(dev.get("mountpoint")) or any(
+            d.get("mountpoint") for d in descendants
+        )
+        signatures = [
+            t for t in [dev.get("fstype")] + [d.get("fstype") for d in descendants]
+            if t
+        ]
+        if mounted:
+            state = "in_use"  # wins over everything — never adoptable
+        elif "linux_raid_member" in signatures:
+            state = "pool_member"
+        elif signatures:
+            state = "foreign"
+        else:
+            state = "available"
+        entry = {
+            "name": name,
+            "size_bytes": size,
+            "state": state,
+            "fstype": dev.get("fstype") or "",
+            "bus": (dev.get("tran") or "").lower(),
+            "model": (dev.get("model") or "").strip(),
+            "serial": (dev.get("serial") or "").strip(),
+        }
+        if state == "pool_member":
+            # Name the array so the dashboard routes the user to the pool
+            # card (format/destroy) instead of a per-disk adopt that would
+            # fail EBUSY on an md-held member anyway.
+            entry["md"] = next(
+                (d.get("name") for d in descendants
+                 if (d.get("name") or "").startswith("md")),
+                "",
+            )
+        disks.append(entry)
+    return disks
+
+
 def drives_snapshot(invalidate=False):
     """Return every 'data' drive mounted on /mnt/*, from both the automount
     state file (hot-plug USB/NVMe) and /proc/mounts (fstab-installed
     storage like /mnt/cameras and /mnt/cloud-storage). Deduplicates by
     mount point when both sources report the same drive.
+
+    WARP-936: additionally carries a top-level `disks` array — the whole-disk
+    inventory with explicit states (see classify_disks) — so unmounted disks
+    are no longer invisible. Additive: older orchestrators ignore the field;
+    the mounted `drives` semantics are unchanged.
     """
     now = time.time()
     if not invalidate and _drives_cache["snap"] and now - _drives_cache["at"] < 10:
@@ -1402,6 +1504,9 @@ def drives_snapshot(invalidate=False):
         "drives": mounts,
         "count": len(mounts),
         "os_disk": os_disk,
+        # WARP-936: whole-disk inventory with explicit states. Degrades to []
+        # (never a missing key, never an error) on a host without lsblk.
+        "disks": classify_disks(_lsblk_disks_json(), os_disk),
         "snapshot_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     _drives_cache["snap"] = snap
@@ -1577,6 +1682,13 @@ def _parse_mdstat(text):
             for t in toks[1:]:
                 if t.startswith("raid") or t == "linear":
                     level_token = t
+                    continue
+                # WARP-936: parenthesised state annotations — e.g.
+                # "(auto-read-only)" on a fresh, never-written array — sit
+                # between the md state and the raid token and are NOT member
+                # disks. The live box's /pools listed "(auto-read-only)" as a
+                # member before this guard.
+                if t.startswith("("):
                     continue
                 # member entries look like "sdb[1]" / "nvme0n1[0]" / with (S)/(F)
                 base = t.split("[")[0]
