@@ -56,4 +56,18 @@ for svc in orchestrator gateway ai-gateway mcp-server voice-io email-indexer rag
            camera-discovery broker frigate; do
   [ -s "$WORK/data/secrets/service-tls/$svc/cert.pem" ] || fail "issue_all missed $svc"
 done
+# 5. rotate-internal-certs.sh --service reissues exactly that bundle
+fp_orch="$(openssl x509 -in "$WORK/data/secrets/service-tls/orchestrator/cert.pem" -noout -fingerprint)"
+fp_ai="$(openssl x509 -in "$WORK/data/secrets/service-tls/ai-gateway/cert.pem" -noout -fingerprint)"
+REPO_ROOT_OVERRIDE="$WORK" bash "$REPO_ROOT/scripts/rotate-internal-certs.sh" --service orchestrator
+[ "$fp_orch" != "$(openssl x509 -in "$WORK/data/secrets/service-tls/orchestrator/cert.pem" -noout -fingerprint)" ] || fail "rotate did not reissue orchestrator"
+[ "$fp_ai"   = "$(openssl x509 -in "$WORK/data/secrets/service-tls/ai-gateway/cert.pem"   -noout -fingerprint)" ] || fail "rotate touched ai-gateway"
+
+# 6. --rebuild-ca mints a new CA and every bundle chains to it
+ca_fp="$(openssl x509 -in "$WORK/data/secrets/internal-ca/ca.pem" -noout -fingerprint)"
+REPO_ROOT_OVERRIDE="$WORK" bash "$REPO_ROOT/scripts/rotate-internal-certs.sh" --rebuild-ca
+[ "$ca_fp" != "$(openssl x509 -in "$WORK/data/secrets/internal-ca/ca.pem" -noout -fingerprint)" ] || fail "CA not rebuilt"
+openssl verify -CAfile "$WORK/data/secrets/internal-ca/ca.pem" \
+  "$WORK/data/secrets/service-tls/broker/cert.pem" >/dev/null || fail "broker not reissued under new CA"
+
 echo "PASS tests/internal-ca.test.sh"
