@@ -214,3 +214,47 @@ $VFY_PLAINTEXT_MAGIC
 EOF
   printf 'PASS|no-plaintext-magic'
 }
+
+# -----------------------------------------------------------------------------
+# Transit probe evaluators: expect-reject, TLS protocol floor, pcap secret scan
+# -----------------------------------------------------------------------------
+
+# vfy_eval_expect_reject EXITCODE STDERR_FILE EXPECT_REGEX
+# A plaintext probe is expected to be REJECTED. Exit 0 means the plaintext
+# connection was accepted -> FAIL. A non-zero exit whose reason matches the
+# policy regex is the ideal PASS; a non-zero exit for some other reason is a
+# qualified PASS (connection did not succeed) that flags the evidence for review.
+vfy_eval_expect_reject() {
+  local rc="$1" f="$2" re="$3"
+  if [ "$rc" -eq 0 ]; then printf 'FAIL|plaintext-accepted (probe exited 0)'; return 0; fi
+  if grep -qE "$re" "$f" 2>/dev/null; then printf 'PASS|rejected-as-required'
+  else printf 'PASS|rejected (rc=%s, reason did not match policy regex — inspect evidence)' "$rc"; fi
+}
+
+# vfy_eval_tls_protocol SCLIENT_FILE WANT_REGEX
+# Parse the "Protocol :" line from `openssl s_client` output; PASS when it
+# matches the required floor, FAIL when it does not (or no TLS was negotiated).
+vfy_eval_tls_protocol() {
+  local f="$1" want="$2" p
+  p="$(grep -m1 -E '^[[:space:]]*Protocol[[:space:]]*:' "$f" 2>/dev/null | awk -F': *' '{print $2}')"
+  if [ -z "$p" ]; then printf 'FAIL|no-tls-negotiated (no Protocol line in s_client output)'; return 0; fi
+  printf '%s' "$p" | grep -qE "$want" && printf 'PASS|protocol=%s' "$p" \
+    || printf 'FAIL|protocol=%s (want %s)' "$p" "$want"
+}
+
+# vfy_eval_pcap_patterns PCAP PATTERNS_TSV(name<TAB>literal)
+# Scan a raw capture for literal byte strings (canary + secret VALUES). The
+# verdict names only the pattern NAMES and match counts — never the values —
+# so no secret can leak into report.json (Global Constraint: no secrets in the
+# bundle report).
+vfy_eval_pcap_patterns() {
+  local pcap="$1" tsv="$2" total=0 fails="" name lit n
+  while IFS="$(printf '\t')" read -r name lit; do
+    [ -n "$name" ] && [ -n "$lit" ] || continue
+    total=$((total + 1))
+    n="$(grep -c -a -F "$lit" "$pcap" 2>/dev/null || true)"
+    [ "${n:-0}" -gt 0 ] && fails="$fails$name:$n,"
+  done < "$tsv"
+  if [ -n "$fails" ]; then printf 'FAIL|%s' "${fails%,}"
+  else printf 'PASS|patterns=%s matches=0' "$total"; fi
+}

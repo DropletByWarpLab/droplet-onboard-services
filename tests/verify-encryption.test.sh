@@ -143,6 +143,31 @@ v="$(vfy_eval_no_plaintext_magic "$WORK/rand.bin")"
 v="$(vfy_eval_no_plaintext_magic "$WORK/pgdump.bin")"
 [ "$v" = "FAIL|found=PGDMP" ] && pass "magic: PGDMP → FAIL" || fail "magic PGDMP: $v"
 
+echo ""; echo "--- Lib: reject/accept + TLS-protocol + pcap evaluators ---"
+v="$(vfy_eval_expect_reject 2 "$FIX/psql-ssl-reject.txt" 'no pg_hba.conf entry.*(SSL off|no encryption)|server does not support SSL')"
+[ "$v" = "PASS|rejected-as-required" ] && pass "expect_reject: pg_hba reject → PASS" || fail "expect_reject: $v"
+v="$(vfy_eval_expect_reject 0 "$FIX/psql-ssl-accept.txt" 'no pg_hba.conf entry')"
+[ "$v" = "FAIL|plaintext-accepted (probe exited 0)" ] && pass "expect_reject: accepted → FAIL" \
+  || fail "expect_reject accepted: $v"
+v="$(vfy_eval_expect_reject 2 "$FIX/redis-conn-refused.txt" 'no pg_hba')"
+case "$v" in PASS\|rejected\ *) pass "expect_reject: refused for another reason → PASS(qualified)";;
+  *) fail "expect_reject other-reason: $v";; esac
+
+v="$(vfy_eval_tls_protocol "$FIX/sclient-tls13.txt" 'TLSv1\.3')"
+[ "$v" = "PASS|protocol=TLSv1.3" ] && pass "tls_protocol: 1.3 → PASS" || fail "tls_protocol: $v"
+v="$(vfy_eval_tls_protocol "$FIX/sclient-no-tls.txt" 'TLSv1\.[23]')"
+case "$v" in FAIL\|no-tls-negotiated*) pass "tls_protocol: no TLS → FAIL";; *) fail "tls_protocol no-tls: $v";; esac
+
+# pcap scan: binary file with/without patterns; names (not values) in verdict.
+printf 'noise %s DROPLET-CANARY-ab12cd34 noise' "$(head -c 64 /dev/urandom | base64)" > "$WORK/dirty.pcap"
+head -c 4096 /dev/urandom > "$WORK/clean.pcap"
+printf 'canary\tDROPLET-CANARY-ab12cd34\nPOSTGRES_PASSWORD\tsupersecretpg\n' > "$WORK/patterns.tsv"
+v="$(vfy_eval_pcap_patterns "$WORK/dirty.pcap" "$WORK/patterns.tsv")"
+[ "$v" = "FAIL|canary:1" ] && pass "pcap: canary found → FAIL names-only" || fail "pcap dirty: $v"
+case "$v" in *supersecretpg*) fail "pcap verdict leaks the secret VALUE";; *) pass "pcap verdict never contains values";; esac
+v="$(vfy_eval_pcap_patterns "$WORK/clean.pcap" "$WORK/patterns.tsv")"
+[ "$v" = "PASS|patterns=2 matches=0" ] && pass "pcap: clean → PASS" || fail "pcap clean: $v"
+
 echo ""
 printf "  Results: %d/%d passed\n" "$((TESTS - FAILURES))" "$TESTS"
 exit "$FAILURES"
