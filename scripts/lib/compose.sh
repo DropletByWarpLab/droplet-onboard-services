@@ -232,7 +232,7 @@ prepare_and_build() {
     local _drift_profile_flags=() _drift_profile _drift_buildable _drift
     while IFS= read -r _drift_profile; do
       [ -n "$_drift_profile" ] && _drift_profile_flags+=(--profile "$_drift_profile")
-    done < <(run_docker_compose -f "$COMPOSE_FILE" config --profiles 2>/dev/null || true)
+    done < <(run_docker_compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" config --profiles 2>/dev/null || true)
     # `|| true` throughout: the guard is best-effort — an enumeration failure
     # must never block a provision; CI's real builds still gate correctness.
     _drift_buildable=$(run_docker_compose ${_drift_profile_flags[@]+"${_drift_profile_flags[@]}"} \
