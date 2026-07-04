@@ -1,0 +1,66 @@
+name: codeql
+
+# WARP-243 — CodeQL SAST for JS/TS + Python (advanced setup: we need the
+# config file's test excludes and an explicit matrix; default setup offers
+# neither). BASELINE: none needed — GitHub's code-scanning PR check only
+# fails on alerts introduced by the PR diff, so pre-existing alerts on main
+# never block. Merge-blocking is wired as a ruleset `code_scanning` rule
+# (NOT a status check) so path-filtered runs don't leave PRs hanging on
+# "Expected" — see docs/SECURITY.md#codeql and WARP-968/969.
+# Path-filtered: at ~10 min/language this is the one expensive lane.
+
+on:
+  pull_request:
+    paths:
+      - "**/*.ts"
+      - "**/*.tsx"
+      - "**/*.js"
+      - "**/*.jsx"
+      - "**/*.mjs"
+      - "**/*.py"
+      - ".github/workflows/codeql.yml"
+      - ".github/codeql/codeql-config.yml"
+  push:
+    branches: [main]
+    paths:
+      - "**/*.ts"
+      - "**/*.tsx"
+      - "**/*.js"
+      - "**/*.jsx"
+      - "**/*.mjs"
+      - "**/*.py"
+      - ".github/workflows/codeql.yml"
+      - ".github/codeql/codeql-config.yml"
+  schedule:
+    - cron: "41 4 * * 1" # weekly full pass so new queries hit unchanged code
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    name: codeql / ${{ matrix.language }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [javascript-typescript, python]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          config-file: ./.github/codeql/codeql-config.yml
+          build-mode: none
+
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
