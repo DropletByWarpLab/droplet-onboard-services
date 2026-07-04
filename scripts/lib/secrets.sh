@@ -124,7 +124,7 @@ generate_env() {
   log_info "Generating device-unique secrets..."
 
   # --- Generate all secrets ---
-  local pg_password redis_password mqtt_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display service_token_switch service_token_ai_gateway ops_token service_token_mcp service_token_email orchestrator_sampler_token ai_gateway_sampler_token ollama_url openwrt_password
+  local pg_password redis_password mqtt_password nc_password device_secret device_secret_key jwt_secret routing_service_token service_token_voice service_token_display service_token_switch service_token_ai_gateway ops_token service_token_mcp service_token_email orchestrator_sampler_token ai_gateway_sampler_token service_token_egress_audit ollama_url openwrt_password
   # WARP-850: orchestrator -> matter-controller sidecar bearer (X-Droplet-Auth).
   local droplet_matter_service_token
   # WARP-882 / WS-4: shared HS256 secret the OnlyOffice Document Server, the
@@ -216,6 +216,9 @@ generate_env() {
   # (every cloud-LLM call 451s). Compose wires it to
   # ${AI_GATEWAY_SAMPLER_TOKEN}.
   ai_gateway_sampler_token=$(openssl rand -hex 32)
+  # WARP-268: host-side egress-audit collector → orchestrator anomaly POST.
+  # The collector reads this from .env via /etc/default/droplet-egress-audit.
+  service_token_egress_audit=$(openssl rand -hex 32)
   # WARP-882 / WS-4: device-unique HS256 secret for the OnlyOffice in-browser
   # editing / co-authoring handshake. The Document Server, the Nextcloud
   # `onlyoffice` connector, AND the orchestrator's docserver.client.ts all sign +
@@ -397,6 +400,13 @@ ORCHESTRATOR_SAMPLER_TOKEN=$orchestrator_sampler_token
 # on GETs to /api/network/off-lan + /api/settings/off-lan. Without it
 # the gate fails closed (every cloud-LLM call 451s).
 AI_GATEWAY_SAMPLER_TOKEN=$ai_gateway_sampler_token
+
+# WARP-268: the host-side egress-audit collector
+# (droplet-egress-audit.service — a systemd unit, NOT a compose service)
+# presents this token on POST /api/security/egress-anomaly. The launcher
+# /usr/local/sbin/droplet-egress-audit greps it out of this .env;
+# authMiddleware sets req.user = _service:egress-audit.
+SERVICE_TOKEN_EGRESS_AUDIT=$service_token_egress_audit
 
 # --- Frigate NVR ---
 FRIGATE_MQTT_USER=droplet

@@ -284,6 +284,32 @@ EOF
              /etc/systemd/system/droplet-wifi-watchdog.timer
   log_success "Installed /usr/local/sbin/droplet-watchdog (+ units; supersedes droplet-wifi-watchdog.timer)"
 
+  # --- WARP-268 egress-audit collector -------------------------------------
+  sudo install -d -m 0755 /usr/local/lib/droplet-egress-audit
+  sudo install -m 0644 "$REPO_ROOT/services/egress-audit/"*.py \
+    /usr/local/lib/droplet-egress-audit/
+  sudo install -m 0755 "$host_src/usr-local-sbin/droplet-egress-audit" \
+    /usr/local/sbin/droplet-egress-audit
+  sudo install -m 0644 "$host_src/etc-systemd-system/droplet-egress-audit.service" \
+    /etc/systemd/system/droplet-egress-audit.service
+  if [ ! -f /etc/default/droplet-egress-audit ]; then
+    sudo install -m 0644 "$host_src/etc-default/droplet-egress-audit" \
+      /etc/default/droplet-egress-audit
+    sudo sed -i \
+      -e "s|^DROPLET_ENV_FILE=.*|DROPLET_ENV_FILE=$REPO_ROOT/.env|" \
+      -e "s|^DROPLET_EGRESS_ALLOWLIST=.*|DROPLET_EGRESS_ALLOWLIST=$REPO_ROOT/docs/security/allowed-egress.yaml|" \
+      /etc/default/droplet-egress-audit
+  fi
+  # Collector deps (best-effort apt — restic precedent in lib/backup.sh: a
+  # transient failure must not abort setup; the unit fails loudly until
+  # they exist and a setup.sh re-run self-heals).
+  if command -v apt-get >/dev/null 2>&1; then
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+      conntrack tcpdump python3-yaml || \
+      log_warn "egress-audit deps missing — droplet-egress-audit.service will fail until 'sudo apt-get install -y conntrack tcpdump python3-yaml' succeeds"
+  fi
+  log_success "Installed droplet-egress-audit collector (WARP-268)"
+
   # --- Migrate from pre-rename service name if present -------------------
   sudo systemctl disable --now droplet-poc-host-net.service 2>/dev/null || true
   sudo rm -f /etc/systemd/system/droplet-poc-host-net.service \
@@ -299,6 +325,11 @@ EOF
   # WARP-1002: unified self-heal watchdog — always on; the healthy-path cost
   # is a handful of read-only sysfs/docker probes every ~3 minutes.
   sudo systemctl enable --now droplet-watchdog.timer >/dev/null 2>&1
+  # WARP-268: runtime egress-audit collector. restart|| true so a missing
+  # apt dep (conntrack/tcpdump/python3-yaml) doesn't fail the whole install;
+  # the unit self-heals on the next setup.sh re-run once the deps land.
+  sudo systemctl enable droplet-egress-audit.service >/dev/null 2>&1
+  sudo systemctl restart droplet-egress-audit.service >/dev/null 2>&1 || true
 
   log_success "single-box host integration installed"
   log_info "  Boot-time:   droplet-openwrt-attach.service + droplet-host-net.service"

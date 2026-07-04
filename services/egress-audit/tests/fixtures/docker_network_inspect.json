@@ -1,0 +1,12 @@
+[
+  {
+    "Name": "droplet_default",
+    "IPAM": { "Config": [ { "Subnet": "172.18.0.0/16", "Gateway": "172.18.0.1" } ] },
+    "Containers": {
+      "1a2b3c": { "Name": "droplet-orchestrator-1", "IPv4Address": "172.18.0.5/16" },
+      "4d5e6f": { "Name": "droplet-ai-gateway-1",   "IPv4Address": "172.18.0.7/16" },
+      "7a8b9c": { "Name": "droplet-db-1",           "IPv4Address": "172.18.0.9/16" },
+      "0d1e2f": { "Name": "droplet-openwrt",        "IPv4Address": "172.18.0.12/16" }
+    }
+  }
+]

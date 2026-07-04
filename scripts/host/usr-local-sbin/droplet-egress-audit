@@ -1,0 +1,31 @@
+#!/bin/bash
+# WARP-268 — launcher for the egress-audit collector
+# (services/egress-audit/, installed to /usr/local/lib/droplet-egress-audit
+# by scripts/lib/single-box.sh). Runs under droplet-egress-audit.service;
+# not intended for interactive use.
+#
+#   1. Enables conntrack byte accounting (nf_conntrack is loaded by dockerd;
+#      the unit orders After=docker.service).
+#   2. Reads SERVICE_TOKEN_EGRESS_AUDIT from the repo .env (host-reads-.env
+#      precedent: scripts/host/droplet-backup-lib.sh).
+#   3. Execs the collector on the host python3 (stdlib + python3-yaml only).
+set -euo pipefail
+
+DEFAULT_FILE="/etc/default/droplet-egress-audit"
+# shellcheck source=/dev/null
+[ -f "$DEFAULT_FILE" ] && . "$DEFAULT_FILE"
+
+: "${DROPLET_ENV_FILE:?DROPLET_ENV_FILE not set — re-run ./scripts/setup.sh}"
+: "${DROPLET_EGRESS_ALLOWLIST:?DROPLET_EGRESS_ALLOWLIST not set — re-run ./scripts/setup.sh}"
+
+sysctl -qw net.netfilter.nf_conntrack_acct=1
+
+SERVICE_TOKEN_EGRESS_AUDIT="$(grep -E '^SERVICE_TOKEN_EGRESS_AUDIT=' "$DROPLET_ENV_FILE" | tail -n1 | cut -d= -f2-)"
+export SERVICE_TOKEN_EGRESS_AUDIT
+export DROPLET_EGRESS_ALLOWLIST
+export DROPLET_EGRESS_ORCHESTRATOR_URL="${DROPLET_EGRESS_ORCHESTRATOR_URL:-http://127.0.0.1:3000}"
+export DROPLET_EGRESS_LOG_DIR="${DROPLET_EGRESS_LOG_DIR:-/var/lib/droplet/egress-audit}"
+export DROPLET_EGRESS_NETWORK="${DROPLET_EGRESS_NETWORK:-droplet_default}"
+
+install -d -m 0750 "$DROPLET_EGRESS_LOG_DIR"
+exec /usr/bin/python3 /usr/local/lib/droplet-egress-audit/collector.py

@@ -654,6 +654,16 @@ const envSchema = z.object({
   // AND in services/ai-gateway's compose env (AI_GATEWAY_SAMPLER_TOKEN).
   AI_GATEWAY_SAMPLER_TOKEN: z.string().default(""),
 
+  // SERVICE_TOKEN_EGRESS_AUDIT — WARP-268. Bearer presented by the
+  // host-side egress-audit collector (droplet-egress-audit.service, a
+  // systemd unit — NOT a compose service) on POST
+  // /api/security/egress-anomaly. The launcher reads the token out of the
+  // repo .env (same host-reads-.env precedent as droplet-backup-lib.sh);
+  // authMiddleware's matchServiceToken sets `_service:egress-audit`. To
+  // rotate: change in .env and restart both the orchestrator and
+  // droplet-egress-audit.service.
+  SERVICE_TOKEN_EGRESS_AUDIT: z.string().default(""),
+
   // --- Web Push (VAPID) ---
   // Pin these in .env after the first orchestrator boot — the push
   // service will generate ephemeral keys and log them on first run if
