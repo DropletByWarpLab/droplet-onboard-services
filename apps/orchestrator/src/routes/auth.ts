@@ -49,6 +49,12 @@ import {
   requireRole,
 } from "../middleware/auth.js";
 import {
+  createSession,
+  deleteSession,
+  revokeAllSessions,
+  checkSession,
+} from "../services/session.service.js";
+import {
   storeNcToken,
   getNcToken,
   deleteNcToken,
@@ -1169,6 +1175,12 @@ export function createPublicAuthRouter(
         );
       }
 
+      // WARP-247 — create the server-side session record FIRST so its sid
+      // rides inside both tokens. createSession enforces the concurrent-
+      // session cap (evicting + auditing the oldest) and starts the
+      // idle/absolute clocks for this login.
+      const { sid } = await createSession({ id: userId, role });
+
       // Issue JWT access + refresh tokens. The access token carries the
       // MFA stamp (PR #375) when a second factor was just satisfied.
       const accessToken = signAccessToken({
@@ -1177,8 +1189,9 @@ export function createPublicAuthRouter(
         displayName,
         role,
         lastMfaAt: mfaStampIso,
+        sid,
       });
-      const refreshToken = signRefreshToken({ id: userId, username, displayName, role });
+      const refreshToken = signRefreshToken({ id: userId, username, displayName, role, sid });
       // WARP-116: index this refresh token so an admin "revoke now" (role
       // change / disable) can denylist every live device session for the user.
       await registerRefreshSession(userId, refreshToken);
@@ -1765,17 +1778,22 @@ export function createPublicAuthRouter(
       });
       const userId = userRow.id; // local UUID — fed into JWT.sub
 
+      // WARP-247 — the invite-accept auto-login is a session mint like any
+      // other: record first, sid into both tokens.
+      const { sid: inviteSid } = await createSession({ id: userId, role });
       const accessToken = signAccessToken({
         id: userId,
         username: invite.username,
         displayName: invite.displayName || invite.username,
         role,
+        sid: inviteSid,
       });
       const refreshToken = signRefreshToken({
         id: userId,
         username: invite.username,
         displayName: invite.displayName || invite.username,
         role,
+        sid: inviteSid,
       });
       // WARP-116: index the invite-accept auto-login session too.
       await registerRefreshSession(userId, refreshToken);
@@ -2270,6 +2288,13 @@ export function createProtectedAuthRouter(
         if (req.user?.id) {
           await unregisterRefreshSession(req.user.id, refreshToken);
         }
+      }
+
+      // WARP-247 — drop this device's session record so the remaining
+      // (≤15-min) access token dies at the next middleware check instead of
+      // riding out its TTL. sid is absent for legacy/OCS sessions — no-op.
+      if (req.user?.id && req.user.sid) {
+        await deleteSession(req.user.id, req.user.sid);
       }
 
       // Revoke the stored Nextcloud app-password so it can't outlive the
