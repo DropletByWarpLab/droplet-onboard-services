@@ -8,6 +8,18 @@
 # `fips:allowed: <reason-id>` comment appears within ±2 lines AND the
 # reason-id resolves to an entry in docs/security/fips-exceptions.md.
 #
+# THIS IS THE STATIC SOURCE LINT — distinct from the BUILD-TIME PROVIDER GATE.
+# Two separate FIPS CI mechanisms, do not conflate them (WARP-316):
+#   * THIS lint (WARP-229, .github/workflows/test-fips.yml) greps SOURCE for
+#     non-FIPS algorithms. No Docker, no images, no runtime.
+#   * The build-time provider gate (docker/fips/install-fips-provider.sh, RUN
+#     in every image, .github/workflows/docker-build.yml) proves the validated
+#     fips.so is PRESENT + its KATs + positive/negative probes pass at build
+#     time. That gate is the required-to-merge one (`docker-build ok` fan-in);
+#     its not-a-no-op sabotage proof is tests/fips-sabotage.test.sh.
+# Runtime ENFORCEMENT is proven separately by the boot self-tests + the
+# full-stack smoke (WARP-317, tests/integration/fips-stack.test.sh).
+#
 # Exit codes:
 #   0 — no violations
 #   1 — at least one unescaped match, or an unresolved/dead reason-id
