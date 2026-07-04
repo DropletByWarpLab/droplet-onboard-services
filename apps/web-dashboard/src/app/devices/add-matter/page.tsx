@@ -96,6 +96,11 @@ export default function AddMatterDevicePage() {
   // Absent field (pre-WARP-1035 orchestrator) reads as false — the copy
   // then simply doesn't promise a Wi-Fi handoff it can't verify.
   const wifiProvisioning = caps?.wifiProvisioning === true;
+  // UX review (WARP-1035): the Wi-Fi handoff rides the BLE pairing, so
+  // promising it (pre-flight copy, spinner phase) requires BOTH the BLE
+  // transport and the plumbed PSK — wifiProvisioning alone would contradict
+  // the WARP-851 notice on a box whose BLE adapter is down.
+  const bleWifiPairing = bleAvailable === true && wifiProvisioning;
 
   const handleCode = useCallback(async (pairingCode: string) => {
     if (commissioningRef.current) return;
@@ -141,7 +146,7 @@ export default function AddMatterDevicePage() {
             when the capability says it works. */}
         <p className="type-footnote text-label-secondary mt-2">
           {"Your phone or computer just needs to reach this dashboard — the Droplet does the pairing. " +
-            (wifiProvisioning
+            (bleWifiPairing
               ? `New devices pair over Bluetooth and join the Droplet's own Wi-Fi (“${caps?.apSsid ?? "Droplet"}”); devices already on your Wi-Fi are added in place.`
               : "Devices already on your Wi-Fi are added in place.")}
         </p>
@@ -176,7 +181,7 @@ export default function AddMatterDevicePage() {
       {state.phase === "commission" && (
         <CommissioningProgress
           startedAt={state.startedAt}
-          wifiProvisioning={wifiProvisioning}
+          bleWifiPairing={bleWifiPairing}
         />
       )}
 
@@ -231,10 +236,12 @@ function CommissioningErrorBanner({
  */
 function CommissioningProgress({
   startedAt,
-  wifiProvisioning,
+  bleWifiPairing,
 }: {
   startedAt: number;
-  wifiProvisioning: boolean;
+  /** BLE transport up AND AP PSK plumbed — only then can the box
+   *  actually hand Wi-Fi credentials to the device. */
+  bleWifiPairing: boolean;
 }) {
   const [elapsedS, setElapsedS] = useState(0);
   useEffect(() => {
@@ -243,7 +250,7 @@ function CommissioningProgress({
   }, [startedAt]);
 
   // Approximate phases, each ~5-10s on typical Wi-Fi devices.
-  const phase = commissioningPhaseCopy(elapsedS, wifiProvisioning);
+  const phase = commissioningPhaseCopy(elapsedS, bleWifiPairing);
 
   return (
     <div className="bg-fill-quaternary border border-separator-default rounded-xl p-8 text-center space-y-4">

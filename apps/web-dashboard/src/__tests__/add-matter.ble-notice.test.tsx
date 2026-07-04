@@ -81,6 +81,34 @@ describe("AddMatterDevicePage — BLE-unavailable notice (WARP-851)", () => {
     ).not.toBeInTheDocument();
   });
 
+  // UX review (WARP-1035): the missing quadrant — the AP PSK is plumbed
+  // (wifiProvisioning true) but the BLE transport is down. The Bluetooth
+  // handoff can't happen, so the pre-flight copy must not promise it;
+  // only the WARP-851 BLE notice shows.
+  it("does not promise the Bluetooth/Wi-Fi handoff when BLE is down even if provisioning is plumbed", async () => {
+    capabilitiesSpy.mockResolvedValue({
+      bleCommissioning: false,
+      wifiProvisioning: true,
+      apSsid: "Droplet-AP7",
+    });
+    render(<AddMatterDevicePage />);
+
+    const notice = await screen.findByTestId("ble-unavailable-notice");
+    expect(notice).toHaveTextContent(
+      /bluetooth for first-time setup aren't supported yet/i,
+    );
+    expect(
+      screen.queryByTestId("wifi-provisioning-unavailable-notice"),
+    ).not.toBeInTheDocument();
+
+    const preflight = screen.getByText(/the droplet does the pairing/i);
+    expect(preflight).not.toHaveTextContent(/droplet's own wi-?fi/i);
+    expect(preflight).not.toHaveTextContent("Droplet-AP7");
+    expect(preflight).toHaveTextContent(
+      /already on your wi-?fi are added in place/i,
+    );
+  });
+
   it("shows neither notice when BLE and Wi-Fi provisioning are both available", async () => {
     capabilitiesSpy.mockResolvedValue({
       bleCommissioning: true,

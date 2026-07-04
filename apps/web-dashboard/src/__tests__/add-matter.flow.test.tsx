@@ -157,6 +157,28 @@ describe("AddMatterDevicePage — three-state flow", () => {
       ).toBeInTheDocument();
     });
 
+    // UX review (WARP-1035): PSK plumbed but BLE transport down — the
+    // credential handoff can't occur (it rides the BLE pairing), so the
+    // spinner must not claim it. Made common on single-box installs by
+    // this very PR's PSK plumbing whenever the BLE adapter is down.
+    it("says 'Waiting for the device to respond…' when BLE is down even if provisioning is plumbed", async () => {
+      capabilitiesSpy.mockResolvedValue({
+        bleCommissioning: false,
+        wifiProvisioning: true,
+        apSsid: "Droplet",
+      });
+      await startPendingCommission();
+      act(() => {
+        vi.advanceTimersByTime(16_000);
+      });
+      expect(
+        screen.getByText(/waiting for the device to respond/i),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByText(/sharing wi-fi credentials/i),
+      ).not.toBeInTheDocument();
+    });
+
     it("says 'Waiting for the device to respond…' instead when it can NOT", async () => {
       capabilitiesSpy.mockResolvedValue({
         bleCommissioning: true,
