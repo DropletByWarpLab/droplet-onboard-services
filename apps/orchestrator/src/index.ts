@@ -81,6 +81,7 @@ import { startContextStatsInvalidator } from "./services/context-stats-invalidat
 import { initActivityRecorder, recordActivity } from "./services/activity.singleton.js";
 import { attachFileIndexerActivityBridge } from "./services/activity-file-indexer-bridge.js";
 import { runDailyRootJob } from "./services/audit-daily-root.service.js";
+import { runNightlyChainVerification } from "./services/audit-verify.service.js";
 import {
   BRAIN_ROOT,
   migrateBrainMemoryDirectoryLayout,
@@ -538,6 +539,16 @@ async function main() {
       }
     },
     { lockKey: "droplet:guest-expiry-sweep" },
+  );
+
+  // WARP-237: nightly tamper detection. 03:25 — after the 03:00 purge
+  // reshapes the chain origin and before the 03:35 root signing.
+  cronRuntime.scheduleCron(
+    "25 3 * * *",
+    async () => {
+      await runNightlyChainVerification(prisma);
+    },
+    { lockKey: "droplet:audit-verify" },
   );
 
   // WARP-237: sign yesterday's audit root with the device identity key.
