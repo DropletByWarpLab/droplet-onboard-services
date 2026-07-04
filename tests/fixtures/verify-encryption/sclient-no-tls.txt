@@ -1,0 +1,4 @@
+CONNECTED(00000003)
+40E7F6ABCD7F0000:error:0A00010B:SSL routines:ssl3_get_record:wrong version number:ssl/record/ssl3_record.c:355:
+---
+no peer certificate available

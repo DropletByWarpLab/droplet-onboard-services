@@ -105,6 +105,44 @@ grep -q 'transit.redis.tls' "$WORK/bundle/report.md" \
   && pass "report.md lists SKIPped checks too (status contract)" \
   || fail "report.md omits SKIP rows"
 
+echo ""; echo "--- Lib: LUKS evaluators (fixtures) ---"
+v="$(vfy_eval_luks_version "$FIX/luksdump-luks2-tpm.txt")"
+[ "$v" = "PASS|version=2" ] && pass "luks_version: LUKS2 → PASS" || fail "luks_version LUKS2: $v"
+v="$(vfy_eval_luks_version "$FIX/luksdump-luks1.txt")"
+[ "$v" = "FAIL|version=1 (LUKS2 required)" ] && pass "luks_version: LUKS1 → FAIL" || fail "luks_version LUKS1: $v"
+v="$(vfy_eval_luks_version /dev/null)"
+case "$v" in FAIL\|no-luks-header*) pass "luks_version: garbage → FAIL no-luks-header";;
+  *) fail "luks_version garbage: $v";; esac
+
+v="$(vfy_eval_luks_cipher "$FIX/luksdump-luks2-tpm.txt")"
+[ "$v" = "PASS|cipher=aes-xts-plain64" ] && pass "luks_cipher: aes-xts → PASS" || fail "luks_cipher: $v"
+
+v="$(vfy_eval_luks_pbkdf "$FIX/luksdump-luks2-tpm.txt")"
+[ "$v" = "PASS|argon2id-keyslots=1" ] && pass "luks_pbkdf: argon2id slot → PASS" || fail "luks_pbkdf: $v"
+v="$(vfy_eval_luks_pbkdf "$FIX/luksdump-luks1.txt")"
+case "$v" in FAIL\|*) pass "luks_pbkdf: LUKS1 → FAIL";; *) fail "luks_pbkdf LUKS1: $v";; esac
+
+v="$(vfy_eval_luks_tpm_token "$FIX/luksdump-luks2-tpm.txt")"
+[ "$v" = "PASS|token=systemd-tpm2 keyslot=1" ] && pass "tpm_token: systemd-tpm2 → PASS" \
+  || fail "tpm_token: $v"
+v="$(vfy_eval_luks_tpm_token "$FIX/luksdump-luks2-no-tpm.txt")"
+[ "$v" = "FAIL|no-tpm2-token-enrolled" ] && pass "tpm_token: absent → FAIL" || fail "tpm_token absent: $v"
+
+echo ""; echo "--- Lib: entropy + plaintext-magic evaluators ---"
+head -c 262144 /dev/urandom > "$WORK/rand.bin"
+"$PYBIN" -c 'open("'"$WORK"'/zero.bin","wb").write(b"\x00"*262144)'
+printf 'PGDMP fake postgres dump header %s' "$(head -c 1000 /dev/zero | tr '\0' 'A')" > "$WORK/pgdump.bin"
+
+v="$(vfy_eval_entropy "$WORK/rand.bin" 7.5)"
+case "$v" in PASS\|entropy=[78].*) pass "entropy: urandom ≥7.5 → PASS ($v)";; *) fail "entropy urandom: $v";; esac
+v="$(vfy_eval_entropy "$WORK/zero.bin" 7.5)"
+case "$v" in FAIL\|entropy=0.0*) pass "entropy: zeros → FAIL ($v)";; *) fail "entropy zeros: $v";; esac
+
+v="$(vfy_eval_no_plaintext_magic "$WORK/rand.bin")"
+[ "$v" = "PASS|no-plaintext-magic" ] && pass "magic: random → PASS" || fail "magic random: $v"
+v="$(vfy_eval_no_plaintext_magic "$WORK/pgdump.bin")"
+[ "$v" = "FAIL|found=PGDMP" ] && pass "magic: PGDMP → FAIL" || fail "magic PGDMP: $v"
+
 echo ""
 printf "  Results: %d/%d passed\n" "$((TESTS - FAILURES))" "$TESTS"
 exit "$FAILURES"

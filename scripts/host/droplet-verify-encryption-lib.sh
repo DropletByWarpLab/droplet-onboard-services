@@ -134,3 +134,83 @@ with open(os.environ["VFY_OUT"], "w") as fh:
     fh.write("\n")
 PYEOF
 }
+
+# -----------------------------------------------------------------------------
+# LUKS header evaluators (grep-anchored against real `cryptsetup luksDump` output
+# so fixture drift is caught, not papered over)
+# -----------------------------------------------------------------------------
+
+vfy_eval_luks_version() {
+  local f="$1" v
+  v="$(grep -m1 -E '^Version:' "$f" 2>/dev/null | grep -oE '[0-9]+' || true)"
+  case "$v" in
+    2) printf 'PASS|version=2';;
+    "") printf 'FAIL|no-luks-header (cryptsetup luksDump produced no Version line)';;
+    *) printf 'FAIL|version=%s (LUKS2 required)' "$v";;
+  esac
+}
+
+vfy_eval_luks_cipher() {
+  local f="$1" c
+  c="$(grep -m1 -E '^[[:space:]]*cipher:' "$f" 2>/dev/null | awk '{print $2}')"
+  [ "$c" = "aes-xts-plain64" ] && printf 'PASS|cipher=aes-xts-plain64' \
+    || printf 'FAIL|cipher=%s (expected aes-xts-plain64)' "${c:-none}"
+}
+
+vfy_eval_luks_pbkdf() {
+  local f="$1" n
+  n="$(grep -cE '^[[:space:]]*PBKDF:[[:space:]]*argon2id' "$f" 2>/dev/null || true)"
+  [ "${n:-0}" -ge 1 ] && printf 'PASS|argon2id-keyslots=%s' "$n" \
+    || printf 'FAIL|no-argon2id-keyslot (WARP-232 requires Argon2id KDF)'
+}
+
+vfy_eval_luks_tpm_token() {
+  local f="$1" tok slot
+  tok="$(grep -m1 -oE '(systemd-tpm2|clevis)' "$f" 2>/dev/null || true)"
+  if [ -z "$tok" ]; then printf 'FAIL|no-tpm2-token-enrolled'; return 0; fi
+  slot="$(awk '/systemd-tpm2|clevis/{intok=1} intok && /Keyslot:/{print $2; exit}' "$f")"
+  printf 'PASS|token=%s keyslot=%s' "$tok" "${slot:-unknown}"
+}
+
+# -----------------------------------------------------------------------------
+# Entropy + plaintext-magic evaluators (raw-partition ciphertext proof)
+# -----------------------------------------------------------------------------
+
+vfy_eval_entropy() {  # FILE MIN_BITS_PER_BYTE
+  local f="$1" min="$2" py
+  py="$(vfy_py)"
+  [ -n "$py" ] || { printf 'SKIP|python3-unavailable'; return 0; }
+  "$py" - "$f" "$min" <<'PYEOF'
+import math, sys
+data = open(sys.argv[1], "rb").read()
+if not data:
+    print("SKIP|empty-sample"); raise SystemExit
+counts = [0] * 256
+for b in data:
+    counts[b] += 1
+n = len(data)
+h = -sum(c / n * math.log2(c / n) for c in counts if c)
+h = h + 0.0  # normalise IEEE-754 signed zero (-0.0 -> 0.0) for clean evidence
+verdict = "PASS" if h >= float(sys.argv[2]) else "FAIL"
+print(f"{verdict}|entropy={h:.2f} min={sys.argv[2]} bytes={n}")
+PYEOF
+}
+
+VFY_PLAINTEXT_MAGIC='PGDMP
+SQLite format 3
+PostgreSQL
+-----BEGIN
+nextcloud
+oc_filecache'
+vfy_eval_no_plaintext_magic() {
+  local f="$1" m
+  while IFS= read -r m; do
+    [ -n "$m" ] || continue
+    if grep -a -q -F "$m" "$f" 2>/dev/null; then
+      printf 'FAIL|found=%s' "$(printf '%s' "$m" | awk '{print $1}')"; return 0
+    fi
+  done <<EOF
+$VFY_PLAINTEXT_MAGIC
+EOF
+  printf 'PASS|no-plaintext-magic'
+}
