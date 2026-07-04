@@ -1,0 +1,26 @@
+# WARP-268 — host-side egress-audit collector. Traces every outbound
+# container flow (conntrack events) + DNS query (port-53 capture),
+# attributes flows to compose services, matches
+# docs/security/allowed-egress.yaml (WARP-269), ships anomalies to the
+# orchestrator's signed activity log. Installed by scripts/lib/single-box.sh.
+[Unit]
+Description=Droplet egress audit collector (WARP-268)
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/local/sbin/droplet-egress-audit
+Restart=on-failure
+RestartSec=10
+# Root is required (conntrack events + packet capture + docker CLI), so
+# confine the writable surface instead. No ProtectKernelTunables — the
+# launcher writes net.netfilter.nf_conntrack_acct.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/droplet/egress-audit
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
