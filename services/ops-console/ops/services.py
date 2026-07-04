@@ -50,6 +50,14 @@ from typing import Any, Literal
 
 import httpx
 
+# WARP-236 — internal mTLS: rewrite first-party probe URLs to https:// and
+# present ops-console's client cert when DROPLET_INTERNAL_TLS=1. Third-party
+# probe targets (frigate :5000, web-dashboard) whose OPS_PROBE_* stay http://
+# are rewritten too when the flag is on and are documented as out-of-scope —
+# operators can point their OPS_PROBE_* at the real health path if a target
+# doesn't speak TLS.
+from _shared.internal_tls import base_url as _internal_base_url, httpx_client_kwargs
+
 logger = logging.getLogger("ops.services")
 
 # Timeouts: tight enough to flag real wedging, loose enough that a
@@ -205,6 +213,9 @@ async def _probe_one(
             detail="no probe URL configured (likely not part of this profile)",
         )
 
+    # WARP-236: rewrite http://→https:// for the probe when internal mTLS is on
+    # (identity when off); the client already carries our cert.
+    url = _internal_base_url(url)
     started = time.monotonic()
     try:
         resp = await client.get(url, timeout=_PROBE_TIMEOUT)
@@ -278,7 +289,7 @@ async def probe_all(registry: dict[str, str] | None = None) -> list[ProbeResult]
     full list (no exceptions escape) so the UI can render even when
     some probes fail."""
     reg = registry or build_registry()
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(**httpx_client_kwargs()) as client:
         tasks = [_probe_one(client, name, url) for name, url in reg.items()]
         return await asyncio.gather(*tasks)
 

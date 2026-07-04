@@ -38,6 +38,10 @@ from droplet_openwrt_sdk import DropletRouter, ConnectionLost, UbusError
 from middleware import with_fresh_request_id
 from request_context import get_request_id
 
+# WARP-236 — internal mTLS: rewrite the orchestrator base URL to https:// and
+# present routing's client cert when DROPLET_INTERNAL_TLS=1.
+from _shared.internal_tls import base_url as _internal_base_url, httpx_client_kwargs
+
 logger = logging.getLogger(__name__)
 
 SAMPLE_INTERVAL_SECONDS = int(os.environ.get("NETWORK_THROUGHPUT_SAMPLE_SEC", "60"))
@@ -47,7 +51,9 @@ SAMPLE_INTERVAL_SECONDS = int(os.environ.get("NETWORK_THROUGHPUT_SAMPLE_SEC", "6
 # mapping. This is the inverse of the pattern documented in CLAUDE.md
 # for routing-from-orchestrator (ROUTING_SERVICE_URL uses
 # host.docker.internal because routing is host-network).
-ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "http://localhost:3000").rstrip("/")
+ORCHESTRATOR_URL = _internal_base_url(
+    os.environ.get("ORCHESTRATOR_URL", "http://localhost:3000").rstrip("/")
+)
 ORCHESTRATOR_SAMPLER_TOKEN = (os.environ.get("ORCHESTRATOR_SAMPLER_TOKEN") or "").strip()
 WAN_DEVICE_NAME = os.environ.get("WAN_DEVICE_NAME", "")
 
@@ -137,7 +143,7 @@ async def _post_sample(wan_down_bps: int, wan_up_bps: int) -> None:
     if _rid:
         headers["x-request-id"] = _rid
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        async with httpx.AsyncClient(timeout=5.0, **httpx_client_kwargs()) as client:
             resp = await client.post(
                 f"{ORCHESTRATOR_URL}/api/network/throughput-sample",
                 headers=headers,

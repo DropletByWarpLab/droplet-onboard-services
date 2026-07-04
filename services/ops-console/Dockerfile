@@ -20,6 +20,10 @@ RUN pip install --no-cache-dir -r /app/requirements-dev.txt
 
 COPY services/ops-console/ /app/
 
+# WARP-236 — shared internal-mTLS helper (ops/services.py imports it).
+COPY services/_shared/__init__.py /app/_shared/__init__.py
+COPY services/_shared/internal_tls.py /app/_shared/internal_tls.py
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 

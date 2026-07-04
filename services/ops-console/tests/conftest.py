@@ -15,6 +15,12 @@ _HERE = Path(__file__).resolve().parent
 _PKG_ROOT = _HERE.parent  # services/ops-console
 if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
+# WARP-236 — ops/services.py imports `_shared.internal_tls`. In-container the
+# helper is COPY'd to /app/_shared; in the repo it lives at services/_shared,
+# so add services/ (the package root's parent) to the path.
+_SERVICES_DIR = _PKG_ROOT.parent
+if str(_SERVICES_DIR) not in sys.path:
+    sys.path.insert(0, str(_SERVICES_DIR))
 
 # Set a deterministic OPS_TOKEN BEFORE importing ops.auth — the module
 # captures it at import time. Tests that need to flip it use the

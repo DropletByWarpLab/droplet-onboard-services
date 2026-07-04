@@ -50,6 +50,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
+# WARP-236 — internal mTLS: rewrite the orchestrator base URL to https:// and
+# present voice-io's client cert when DROPLET_INTERNAL_TLS=1.
+from _shared.internal_tls import base_url as _internal_base_url, httpx_client_kwargs
+
 logger = logging.getLogger("voice.llm")
 
 
@@ -232,7 +236,7 @@ class OrchestratorLLM(LLMClient):
         timezone: str = DEFAULT_TIMEZONE,
         now_provider: Optional[Callable[[], datetime]] = None,
     ):
-        self._base_url = base_url.rstrip("/")
+        self._base_url = _internal_base_url(base_url.rstrip("/"))
         self._chat_path = chat_path
         self._health_path = health_path
         self._model = model
@@ -269,6 +273,7 @@ class OrchestratorLLM(LLMClient):
                 f"{self._base_url}{self._health_path}",
                 timeout=2.0,
                 headers=self._headers(),
+                **httpx_client_kwargs(),
             )
             return resp.is_success
         except (httpx.HTTPError, OSError) as exc:
@@ -320,6 +325,7 @@ class OrchestratorLLM(LLMClient):
                 json=body,
                 timeout=self._timeout_s,
                 headers=self._headers(),
+                **httpx_client_kwargs(),
             )
         except httpx.HTTPError as exc:
             raise LLMUnavailable(f"POST {self._chat_path} failed: {exc}") from exc
