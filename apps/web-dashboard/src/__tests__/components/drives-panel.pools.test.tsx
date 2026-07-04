@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, within, fireEvent, waitFor } from "@testing-library/react";
 
-const { useDrivesMock, usePoolsMock, toastMock } = vi.hoisted(() => ({
+const { useDrivesMock, usePoolsMock, toastMock, useAuthMock } = vi.hoisted(() => ({
   useDrivesMock: vi.fn(),
   usePoolsMock: vi.fn(),
   toastMock: vi.fn(),
+  useAuthMock: vi.fn(),
 }));
 
 vi.mock("@/components/Toast", () => ({ useToast: () => ({ toast: toastMock }) }));
@@ -12,9 +13,10 @@ vi.mock("@/lib/hooks/useDrives", () => ({ useDrives: useDrivesMock }));
 vi.mock("@/lib/hooks/usePools", () => ({ usePools: usePoolsMock }));
 // WARP-827: DrivesPanel now reads useAuth() (admin gate for inline rename) and
 // updateDriveLabel(); mock both so this pools-focused suite renders without an
-// AuthProvider. Default to an admin so the card structure is fully exercised.
+// AuthProvider. Backed by a hoisted vi.fn() so a single test can flip the role
+// (the non-admin reclaim-hiding case) instead of always returning owner.
 vi.mock("@/lib/auth", () => ({
-  useAuth: () => ({ user: { id: "u1", username: "u", displayName: "U", role: "owner" } }),
+  useAuth: () => useAuthMock(),
 }));
 const { reclaimDriveMock, updatePoolLabelMock, confirmStorageCommandMock } = vi.hoisted(() => ({
   reclaimDriveMock: vi.fn(),
@@ -61,6 +63,11 @@ beforeEach(() => {
   updatePoolLabelMock.mockReset();
   confirmStorageCommandMock.mockReset();
   toastMock.mockReset();
+  // Default to owner so the card structure is fully exercised; the non-admin
+  // case re-points this to a family role for its render only.
+  useAuthMock.mockReturnValue({
+    user: { id: "u1", username: "u", displayName: "U", role: "owner" },
+  });
   useDrivesMock.mockReturnValue({
     drives: [drive()],
     disks: [],
@@ -241,13 +248,10 @@ describe("DrivesPanel — reclaim a pool-member drive (WARP-1048)", () => {
   });
 
   it("does not offer Reclaim to a non-admin (read-only member card)", () => {
-    // Re-mock useAuth to a family role for this render only.
-    vi.doMock("@/lib/auth", () => ({
-      useAuth: () => ({ user: { id: "u2", role: "family" } }),
-    }));
-    // The module-level useAuth mock still returns owner in this test file, so
-    // instead assert admin-gating via the button being wired only for admins:
-    // the pool-member card's Reclaim is admin-gated exactly like adopt.
+    // A family (non-admin) user must never see the destructive Reclaim action —
+    // it is admin-gated exactly like adopt (isAdmin === owner || admin). Flip
+    // the hoisted auth mock to a family role for this render only.
+    useAuthMock.mockReturnValue({ user: { id: "u2", role: "family" } });
     useDrivesMock.mockReturnValue({
       drives: [drive()],
       disks: [poolMemberDisk],
@@ -256,7 +260,21 @@ describe("DrivesPanel — reclaim a pool-member drive (WARP-1048)", () => {
       refresh: vi.fn(),
     });
     render(<DrivesPanel />);
-    // Owner (module mock) DOES see it — this asserts the admin path renders it.
+    // The member card still renders (read-only), but with NO Reclaim button.
+    expect(screen.queryByRole("button", { name: /reclaim/i })).toBeNull();
+  });
+
+  it("offers Reclaim to an admin on the same member card (control case)", () => {
+    // The positive counterpart to the non-admin case above: owner (the
+    // beforeEach default) DOES get the gated Reclaim action on the member card.
+    useDrivesMock.mockReturnValue({
+      drives: [drive()],
+      disks: [poolMemberDisk],
+      isLoading: false,
+      bridgeError: undefined,
+      refresh: vi.fn(),
+    });
+    render(<DrivesPanel />);
     expect(screen.getByRole("button", { name: /reclaim/i })).toBeInTheDocument();
   });
 });

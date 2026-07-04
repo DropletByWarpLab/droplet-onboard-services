@@ -42,6 +42,10 @@ def _run(operation: str, params: dict, extra_env: dict | None = None):
         "DROPLET_POOL_TEST_MOUNTED": "",
         "DROPLET_POOL_TEST_HASDATA": "",
         "DROPLET_POOL_TEST_OSDISK": "",
+        # WARP-1048: default the drive_reclaim membership pre-flight to "yes,
+        # the disk is a member" so the happy-path/adopt/pool tests aren't gated
+        # on a real /sys/block/<md>/slaves entry; the refusal test sets it to 0.
+        "DROPLET_POOL_TEST_MDSLAVE": "1",
         # WARP-868: keep the host-namespace nsenter escape OFF so the PATH-shim
         # umount/findmnt stubs are exercised (CI may run in a container whose
         # mount ns differs from PID 1's, which would otherwise trigger nsenter).
@@ -350,6 +354,9 @@ def _exec_run(operation: str, params: dict, tmp_path: Path,
         "DROPLET_POOL_TEST_MOUNTED": "",
         "DROPLET_POOL_TEST_HASDATA": "",
         "DROPLET_POOL_TEST_OSDISK": "",
+        # WARP-1048: reclaim membership pre-flight defaults to "is a member"
+        # (see _run); the execute-path membership-refusal test overrides to 0.
+        "DROPLET_POOL_TEST_MDSLAVE": "1",
         "CMD_LOG": _posix(log),
         "FINDMNT_TABLE": _posix(table),
         "UMOUNT_FAIL": ",".join(umount_fail or []),
@@ -754,3 +761,27 @@ def test_reclaim_confirm_phrase_substring_is_not_enough():
     proc = _run("drive_reclaim", _reclaim_params(confirm_phrase="ERASE sda1"))
     assert proc.returncode != 0
     assert "confirm" in (proc.stderr + proc.stdout).lower()
+
+
+def test_reclaim_refuses_when_disk_is_not_a_member_of_the_named_array():
+    # WARP-1048 hardening: if the disk is NOT actually a member of the named md
+    # (stale dashboard view, disk already left the array, wrong pool named), the
+    # script refuses cleanly BEFORE any mdadm --fail — turning a raw "cannot
+    # find <dev>" mdadm error into an owner-actionable message. Dry-run still
+    # runs the pre-flight, so we can assert the refusal without the stub chain.
+    proc = _run("drive_reclaim", _reclaim_params(),
+                {"DROPLET_POOL_TEST_MDSLAVE": "0"})
+    assert proc.returncode != 0
+    combined = (proc.stderr + proc.stdout).lower()
+    assert "not a member" in combined or "nothing to reclaim" in combined
+
+
+def test_reclaim_execute_non_member_never_touches_mdadm_or_wipes(tmp_path):
+    # The membership refusal must fire before ANY destructive command — no
+    # mdadm --fail/--remove/--zero-superblock, no wipefs, no mkfs.
+    proc, cmds = _exec_run("drive_reclaim", _reclaim_params(), tmp_path,
+                           extra_env={"DROPLET_POOL_TEST_MDSLAVE": "0"})
+    assert proc.returncode != 0
+    assert _first(cmds, "mdadm") == -1, cmds
+    assert _first(cmds, "wipefs") == -1, cmds
+    assert _first(cmds, "mkfs.ext4") == -1, cmds

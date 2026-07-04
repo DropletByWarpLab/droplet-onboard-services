@@ -44,6 +44,8 @@
 #   DROPLET_POOL_TEST_MOUNTED=dev simulate `dev` being mounted
 #   DROPLET_POOL_TEST_HASDATA=dev simulate `dev` holding a populated filesystem
 #   DROPLET_POOL_TEST_OSDISK=dev  simulate `dev` being the OS disk
+#   DROPLET_POOL_TEST_MDSLAVE=1   drive_reclaim membership pre-flight: 1 = the
+#                                 disk IS a slave of the named md; 0 = it is NOT
 #   DROPLET_AUTOMOUNT_STATE=path  override the automount state file the managed
 #                                 teardown prunes (WARP-848 unit tests)
 # In a real (non-dry-run) invocation these hooks are empty and the script uses
@@ -196,6 +198,21 @@ is_os_disk() {
     [ -n "$parent" ] || parent="$(basename "$src")"
     [ "$parent" = "$this_disk" ] && return 0
   done
+  return 1
+}
+
+# is_md_member <md> <disk>: true iff <disk> (short kernel name) is a current
+# member of array <md>, per the kernel sysfs topology
+# (/sys/block/<md>/slaves/<disk>). WARP-1048 defense-in-depth on the destructive
+# reclaim path: assert membership BEFORE `mdadm --fail`, so a wrong/mismatched
+# {disk,md} pair becomes a clean owner-facing refusal instead of a raw mdadm
+# error. Membership comes from the kernel topology, never name-pattern guessing.
+is_md_member() {
+  local md="$1" diskbase="$2"
+  if [ -n "${DROPLET_POOL_TEST_MDSLAVE:-}" ]; then
+    [ "$DROPLET_POOL_TEST_MDSLAVE" = "1" ] && return 0 || return 1
+  fi
+  [ -e "/sys/block/$md/slaves/$diskbase" ] && return 0
   return 1
 }
 
@@ -429,6 +446,15 @@ case "$OP" in
     if is_os_disk "/dev/$DEVICE"; then
       die "refusing: /dev/$DEVICE is (or backs) the OS/boot/system disk — never reclaimable"
     fi
+    # WARP-1048 hardening: the disk MUST actually be a member of the named array
+    # (kernel sysfs topology) before we ever `mdadm --fail` it. A wrong {disk,md}
+    # pair — a stale dashboard view, a disk that already left the array, or the
+    # wrong pool named — otherwise yields a raw "mdadm: cannot find <dev>" the
+    # owner can't act on. Fail closed here, in the pre-flight (so it also refuses
+    # in dry-run), with an owner-actionable message.
+    if ! is_md_member "$RECLAIM_MD" "$(basename "/dev/$DEVICE")"; then
+      die "refusing: /dev/$DEVICE is not a member of $RECLAIM_MD — nothing to reclaim from that pool (it may have already left the array, or the wrong pool was named)"
+    fi
     ;;
 esac
 
@@ -624,6 +650,8 @@ case "$OP" in
     #    separately). We do NOT stop the whole array — reclaiming ONE disk must
     #    not tear down a pool the owner may still want.
     RECLAIM_MD_DEV="/dev/$RECLAIM_MD"
+    # Membership was asserted in the pre-flight (is_md_member) before we reached
+    # here, so --fail can't hit a "cannot find <dev>" on a mismatched {disk,md}.
     mdadm "$RECLAIM_MD_DEV" --fail "$MD" --remove "$MD"
     mdadm --zero-superblock "$MD"
     # 1) Now the disk is free — release any of its mounts (parity with adopt;

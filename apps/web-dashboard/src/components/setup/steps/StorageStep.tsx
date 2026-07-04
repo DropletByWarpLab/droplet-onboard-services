@@ -402,8 +402,10 @@ export function StorageStep({
   // we never offer reclaim on the box's installed storage (disk.inUse).
   async function handleStartAdopt(disk: PhysicalDisk) {
     if (disk.inUse) return; // installed box storage — managed from Settings
-    // WARP-936: an md member is pool-routed (format/destroy the POOL), never
-    // individually adoptable — wipefs on an md-held member fails EBUSY anyway.
+    // WARP-936/1048: a plain adopt is never offered for an md member — wipefs on
+    // an md-held member fails EBUSY. The member's own path is RECLAIM
+    // (handleStartReclaim), which detaches it from the array first; this adopt
+    // handler bails so the two never cross.
     if (disk.state === "pool_member") return;
     const name = disk.disk;
     if (!name) return;
@@ -810,7 +812,7 @@ export function StorageStep({
           setReclaimPending(null);
         }}
         title="Reclaim this drive from the pool?"
-        description="This removes the drive from your storage pool, then permanently erases it and adds it to your Droplet on its own. This can't be undone — make sure anything you want is backed up first."
+        description="This removes the drive from your storage pool, then permanently erases it and adds it to your Droplet on its own. Your pool will have one less drive and won't be protected against a drive failure until you add another. This can't be undone — make sure anything you want is backed up first."
         confirmLabel="Reclaim & erase"
         confirmedIdentifier={
           reclaimPending
@@ -1267,7 +1269,7 @@ function AdoptSection({
                         type="button"
                         onClick={() => onReclaim(disk)}
                         disabled={busy}
-                        className="flex-none whitespace-nowrap rounded-md bg-system-red/90 hover:bg-system-red text-white px-3 py-1.5 text-sm font-medium disabled:opacity-60"
+                        className="flex-none whitespace-nowrap rounded-md bg-system-red/90 hover:bg-system-red text-white px-3 py-1.5 text-sm font-medium disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-system-red/40"
                       >
                         {busy ? "Working…" : "Reclaim"}
                       </button>

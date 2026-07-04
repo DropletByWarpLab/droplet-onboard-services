@@ -584,7 +584,7 @@ export function DrivesPanel() {
         onConfirm={doReclaim}
         onCancel={() => setReclaimPending(null)}
         title="Reclaim this drive from the pool?"
-        description="This removes the drive from your storage pool, then permanently erases it and adds it to your Droplet on its own. This can't be undone — make sure anything you want is backed up first."
+        description="This removes the drive from your storage pool, then permanently erases it and adds it to your Droplet on its own. Your pool will have one less drive and won't be protected against a drive failure until you add another. This can't be undone — make sure anything you want is backed up first."
         confirmLabel="Reclaim & erase"
         confirmedIdentifier={
           reclaimPending
