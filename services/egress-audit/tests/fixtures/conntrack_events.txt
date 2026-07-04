@@ -1,0 +1,6 @@
+[1751600000.123456]	    [NEW] tcp      6 120 SYN_SENT src=172.18.0.7 dst=160.79.104.10 sport=51824 dport=443 [UNREPLIED] src=160.79.104.10 dst=192.168.1.87 sport=443 dport=51824
+[1751600042.654321]	[DESTROY] tcp      6 src=172.18.0.7 dst=160.79.104.10 sport=51824 dport=443 packets=18 bytes=2412 src=160.79.104.10 dst=172.18.0.7 sport=443 dport=51824 packets=16 bytes=9876 [ASSURED]
+[1751600050.000001]	    [NEW] udp      17 30 src=172.18.0.5 dst=8.8.8.8 sport=41234 dport=53 [UNREPLIED] src=8.8.8.8 dst=192.168.1.87 sport=53 dport=41234
+[1751600051.200000]	[DESTROY] udp      17 src=172.18.0.5 dst=8.8.8.8 sport=41234 dport=53 packets=1 bytes=64 src=8.8.8.8 dst=172.18.0.5 sport=53 dport=41234 packets=1 bytes=128
+[1751600060.000000]	 [UPDATE] tcp      6 432000 ESTABLISHED src=172.18.0.7 dst=160.79.104.10 sport=51824 dport=443 src=160.79.104.10 dst=192.168.1.87 sport=443 dport=51824 [ASSURED]
+[1751600070.500000]	    [NEW] tcp      6 120 SYN_SENT src=192.168.1.87 dst=104.16.132.229 sport=40022 dport=443 [UNREPLIED] src=104.16.132.229 dst=192.168.1.87 sport=443 dport=40022 mark=0
