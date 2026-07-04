@@ -39,10 +39,12 @@ import {
 import {
   signAccessToken,
   signRefreshToken,
+  registerRefreshSession,
   ACCESS_TOKEN_TTL_SECONDS,
   REFRESH_TOKEN_TTL_SECONDS,
   type Role,
 } from "../services/jwt.service.js";
+import { createSession } from "../services/session.service.js";
 import { SESSION_COOKIE_NAME, REFRESH_COOKIE_NAME } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { resolveTrustedOriginUrl } from "../lib/trusted-origin.js";
@@ -442,19 +444,26 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
         return;
       }
 
-      // Issue the SAME session cookies as /auth/login.
+      // Issue the SAME session cookies as /auth/login. WARP-247: record
+      // first (cap + idle/absolute clocks), sid into both tokens, and index
+      // the refresh token (WARP-116 — the SSO path previously skipped
+      // registerRefreshSession).
+      const { sid } = await createSession({ id: user.id, role: user.role });
       const accessToken = signAccessToken({
         id: user.id,
         username: user.username,
         displayName: user.displayName,
         role: user.role,
+        sid,
       });
       const refreshToken = signRefreshToken({
         id: user.id,
         username: user.username,
         displayName: user.displayName,
         role: user.role,
+        sid,
       });
+      await registerRefreshSession(user.id, refreshToken);
       const https = isHttps(req);
       res.cookie(SESSION_COOKIE_NAME, accessToken, {
         httpOnly: true,

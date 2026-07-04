@@ -148,6 +148,19 @@ const envSchema = z.object({
       `JWT_SECRET must be a strong random value in production (at least ${JWT_SECRET_MIN_LENGTH} characters and not a dev placeholder)`,
     ),
 
+  // --- WARP-247: session management hardening (NIST 800-63B) ---
+  // All values in SECONDS except the cap. Admin-class = owner|admin roles;
+  // user-class = family|guest. Idle timeouts are SLIDING (any authenticated
+  // request resets the clock, write-throttled to 30 s granularity); the
+  // absolute timeout is FIXED from login and is never extended by activity
+  // or token refresh. The cap evicts the OLDEST session at login (audited).
+  // Enforced via Redis session records (services/session.service.ts) keyed
+  // by the JWT `sid` claim.
+  SESSION_IDLE_TIMEOUT_ADMIN_SECONDS: z.coerce.number().default(15 * 60),
+  SESSION_IDLE_TIMEOUT_USER_SECONDS: z.coerce.number().default(60 * 60),
+  SESSION_ABSOLUTE_TIMEOUT_SECONDS: z.coerce.number().default(8 * 60 * 60),
+  SESSION_MAX_CONCURRENT_PER_USER: z.coerce.number().default(5),
+
   // --- OAuth2 ---
   AUTH_MODE: z.enum(["oauth2", "legacy"]).default("legacy"),
   OAUTH2_CLIENT_ID: z.string().default(""),
@@ -640,6 +653,16 @@ const envSchema = z.object({
   // matchServiceToken sets `_service:ai-gateway`. To rotate: change here
   // AND in services/ai-gateway's compose env (AI_GATEWAY_SAMPLER_TOKEN).
   AI_GATEWAY_SAMPLER_TOKEN: z.string().default(""),
+
+  // SERVICE_TOKEN_EGRESS_AUDIT — WARP-268. Bearer presented by the
+  // host-side egress-audit collector (droplet-egress-audit.service, a
+  // systemd unit — NOT a compose service) on POST
+  // /api/security/egress-anomaly. The launcher reads the token out of the
+  // repo .env (same host-reads-.env precedent as droplet-backup-lib.sh);
+  // authMiddleware's matchServiceToken sets `_service:egress-audit`. To
+  // rotate: change in .env and restart both the orchestrator and
+  // droplet-egress-audit.service.
+  SERVICE_TOKEN_EGRESS_AUDIT: z.string().default(""),
 
   // --- Web Push (VAPID) ---
   // Pin these in .env after the first orchestrator boot — the push

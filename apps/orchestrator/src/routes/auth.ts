@@ -37,7 +37,6 @@ import {
   claimRefreshRotation,
   registerRefreshSession,
   unregisterRefreshSession,
-  revokeUserSessions,
   ACCESS_TOKEN_TTL_SECONDS,
   REFRESH_TOKEN_TTL_SECONDS,
   roleOutranks,
@@ -48,6 +47,12 @@ import {
   REFRESH_COOKIE_NAME,
   requireRole,
 } from "../middleware/auth.js";
+import {
+  createSession,
+  deleteSession,
+  revokeAllSessions,
+  checkSession,
+} from "../services/session.service.js";
 import {
   storeNcToken,
   getNcToken,
@@ -1169,6 +1174,12 @@ export function createPublicAuthRouter(
         );
       }
 
+      // WARP-247 — create the server-side session record FIRST so its sid
+      // rides inside both tokens. createSession enforces the concurrent-
+      // session cap (evicting + auditing the oldest) and starts the
+      // idle/absolute clocks for this login.
+      const { sid } = await createSession({ id: userId, role });
+
       // Issue JWT access + refresh tokens. The access token carries the
       // MFA stamp (PR #375) when a second factor was just satisfied.
       const accessToken = signAccessToken({
@@ -1177,8 +1188,9 @@ export function createPublicAuthRouter(
         displayName,
         role,
         lastMfaAt: mfaStampIso,
+        sid,
       });
-      const refreshToken = signRefreshToken({ id: userId, username, displayName, role });
+      const refreshToken = signRefreshToken({ id: userId, username, displayName, role, sid });
       // WARP-116: index this refresh token so an admin "revoke now" (role
       // change / disable) can denylist every live device session for the user.
       await registerRefreshSession(userId, refreshToken);
@@ -1369,6 +1381,28 @@ export function createPublicAuthRouter(
       // --- Try JWT refresh first ---
       const refreshResult = await verifyRefreshToken(refreshTokenInput);
       if (refreshResult) {
+        // WARP-247 — rotation requires a LIVE server-side session record.
+        // Missing/expired (revoked, idle- or absolute-timed-out) OR a legacy
+        // sid-less token → burn the presented token, clear cookies, force a
+        // fresh login. touch:false — an automatic refresh is NOT user
+        // activity, so it must never slide the idle window. Redis errors
+        // fail OPEN (middleware posture); the denylist check inside
+        // verifyRefreshToken has already run at this point.
+        const sessionCheck = refreshResult.sid
+          ? await checkSession(refreshResult.sid, { touch: false })
+          : ({ kind: "missing" } as const);
+        if (sessionCheck.kind === "missing" || sessionCheck.kind === "expired") {
+          await denyRefreshToken(refreshTokenInput);
+          res.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
+          res.clearCookie(REFRESH_COOKIE_NAME, { path: "/api/auth" });
+          res.status(401).json({
+            error: "Session expired. Please log in again.",
+            code: "SESSION_EXPIRED",
+            reason: sessionCheck.kind === "expired" ? sessionCheck.reason : "revoked",
+          });
+          return;
+        }
+
         // Claim exclusive rotation rights before issuing new tokens. If
         // another concurrent /auth/refresh call (e.g. a browser double-submit
         // on flaky networks) already claimed this token, reject to prevent
@@ -1457,8 +1491,11 @@ export function createPublicAuthRouter(
         // the old token's member, add the new one — so a later "revoke now"
         // walks live tokens only and never re-denylists a rotated-out hash.
         await unregisterRefreshSession(sub, refreshTokenInput);
-        const newRefreshToken = signRefreshToken({ id: sub, username, displayName, role: effectiveRole });
-        const newAccessToken = signAccessToken({ id: sub, username, displayName, role: effectiveRole });
+        // WARP-247 — the rotated pair keeps the SAME sid: rotation continues
+        // a session lineage, it never starts a new one (createdAt — and thus
+        // the absolute clock — is pinned to the original login).
+        const newRefreshToken = signRefreshToken({ id: sub, username, displayName, role: effectiveRole, sid: refreshResult.sid });
+        const newAccessToken = signAccessToken({ id: sub, username, displayName, role: effectiveRole, sid: refreshResult.sid });
         await registerRefreshSession(sub, newRefreshToken);
 
         // Extend the NC session token's TTL so it doesn't expire mid-session
@@ -1765,17 +1802,22 @@ export function createPublicAuthRouter(
       });
       const userId = userRow.id; // local UUID — fed into JWT.sub
 
+      // WARP-247 — the invite-accept auto-login is a session mint like any
+      // other: record first, sid into both tokens.
+      const { sid: inviteSid } = await createSession({ id: userId, role });
       const accessToken = signAccessToken({
         id: userId,
         username: invite.username,
         displayName: invite.displayName || invite.username,
         role,
+        sid: inviteSid,
       });
       const refreshToken = signRefreshToken({
         id: userId,
         username: invite.username,
         displayName: invite.displayName || invite.username,
         role,
+        sid: inviteSid,
       });
       // WARP-116: index the invite-accept auto-login session too.
       await registerRefreshSession(userId, refreshToken);
@@ -1968,6 +2010,30 @@ export function createProtectedAuthRouter(
       await prisma.user.update({
         where: { id: localUser.id },
         data: { passwordHash: newHash, mustChangePassword: false },
+      });
+
+      // WARP-247 — a credential change kills every OTHER session immediately
+      // (NIST 800-63B). The CURRENT session survives (exceptSid): it just
+      // proved the old password and set the new one, and killing it would
+      // bounce the WARP-1042/1049 temp-password first-login flow straight
+      // back to the login screen. Other devices' access tokens die at their
+      // next middleware check; their refresh dies with the record.
+      const revokedSessions = await revokeAllSessions(localUser.id, {
+        exceptSid: req.user.sid,
+      });
+      await recordActivity({
+        kind: "auth",
+        severity: "ok",
+        sourceIcon: "shield-check",
+        what: "Other sessions revoked (password changed)",
+        sub: `${revokedSessions} session(s)`,
+        refs: {
+          outcome: "sessions_revoked",
+          reason: "password_change",
+          userId: localUser.id,
+          revoked: revokedSessions,
+        },
+        actor: { type: "user", id: localUser.id },
       });
 
       // Mirror the new password downstream to Nextcloud for WebDAV (best
@@ -2181,6 +2247,29 @@ export function createProtectedAuthRouter(
         data: hashes.map((codeHash) => ({ userId, codeHash })),
       });
 
+      // WARP-247 — enabling a second factor is a credential-strength change:
+      // every session minted BEFORE it never passed the new factor, so kill
+      // them all except the one that just completed enrollment. NOTE for the
+      // future MFA-RESET/disable route (none exists yet): it must call
+      // revokeAllSessions(userId) — no exceptSid — for the same reason.
+      const revokedOnEnroll = await revokeAllSessions(userId, {
+        exceptSid: req.user.sid,
+      });
+      await recordActivity({
+        kind: "auth",
+        severity: "ok",
+        sourceIcon: "shield-check",
+        what: "Other sessions revoked (two-factor enabled)",
+        sub: `${revokedOnEnroll} session(s)`,
+        refs: {
+          outcome: "sessions_revoked",
+          reason: "totp_enrolled",
+          userId,
+          revoked: revokedOnEnroll,
+        },
+        actor: { type: "user", id: userId },
+      });
+
       await recordActivity({
         kind: "auth",
         severity: "ok",
@@ -2270,6 +2359,13 @@ export function createProtectedAuthRouter(
         if (req.user?.id) {
           await unregisterRefreshSession(req.user.id, refreshToken);
         }
+      }
+
+      // WARP-247 — drop this device's session record so the remaining
+      // (≤15-min) access token dies at the next middleware check instead of
+      // riding out its TTL. sid is absent for legacy/OCS sessions — no-op.
+      if (req.user?.id && req.user.sid) {
+        await deleteSession(req.user.id, req.user.sid);
       }
 
       // Revoke the stored Nextcloud app-password so it can't outlive the
@@ -2680,7 +2776,10 @@ export function createProtectedAuthRouter(
             where: { nextcloudUsername: req.params.username },
             select: { id: true },
           });
-          if (row) await revokeUserSessions(row.id);
+          // WARP-247 — kill session RECORDS (access tokens die at the next
+          // middleware check) as well as the refresh denylist (swept
+          // internally by revokeAllSessions).
+          if (row) await revokeAllSessions(row.id);
         }
         res.json({ status: "disabled", username: req.params.username });
       } catch (err: any) {
@@ -2746,7 +2845,10 @@ export function createProtectedAuthRouter(
           res.status(404).json({ error: "User not found", code: "USER_NOT_FOUND" });
           return;
         }
-        const revoked = await revokeUserSessions(row.id);
+        // WARP-247 — kill session RECORDS (access tokens die at the next
+        // middleware check) as well as the refresh denylist (swept internally
+        // by revokeAllSessions).
+        const revoked = await revokeAllSessions(row.id);
         // WARP-237: admin session revocation is a mandatory-emit
         // privileged action.
         await recordActivity({

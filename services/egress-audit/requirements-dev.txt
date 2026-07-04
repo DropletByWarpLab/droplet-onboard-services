@@ -1,0 +1,6 @@
+# Dev-only. The collector runs on the HOST python3 (Debian) with stdlib +
+# python3-yaml from apt — never pip on the host. PyYAML 6.0.3 is the first
+# release with cp314 wheels (dev Macs run system python 3.14; install with
+# --only-binary=:all: into services/ai-gateway/.venv per repo test convention).
+pytest==8.3.3
+PyYAML==6.0.3

@@ -1,0 +1,6 @@
+[
+  { "ifname": "lo",    "addr_info": [ { "family": "inet", "local": "127.0.0.1" } ] },
+  { "ifname": "eno1",  "addr_info": [ { "family": "inet", "local": "192.168.1.87" } ] },
+  { "ifname": "br-9f2a1b3c4d5e", "addr_info": [ { "family": "inet", "local": "172.18.0.1" } ] },
+  { "ifname": "br-lan", "addr_info": [ { "family": "inet", "local": "192.168.20.1" } ] }
+]

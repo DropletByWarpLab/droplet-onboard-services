@@ -43,6 +43,8 @@ interface TrustItem {
   status: Status;
   /** Label for the (disabled) artifact link, once one will exist. */
   artifact?: string;
+  /** When set, the artifact control renders as a real link. */
+  artifactHref?: string;
 }
 
 interface TrustSection {
@@ -126,11 +128,13 @@ const SECTIONS: TrustSection[] = [
     blurb: "Exactly what software ships on your box, component by component.",
     items: [
       {
-        name: "Per-service SBOMs (CycloneDX)",
+        name: "Per-service SBOMs (CycloneDX 1.5)",
         detail:
-          "A machine-readable inventory for every service in every release, so you can check what runs on your network.",
-        status: "planned",
-        artifact: "Download",
+          "A machine-readable inventory for every service image, plus one aggregated device SBOM, generated and schema-validated in CI and attached to every OTA release.",
+        status: "in-progress",
+        artifact: "Releases",
+        artifactHref:
+          "https://github.com/DropletByWarpLab/droplet-onboard-services/releases",
       },
     ],
   },
@@ -200,7 +204,16 @@ export default function TrustPage() {
                     </span>
                   </span>
                   <Badge kind={badge.kind}>{badge.label}</Badge>
-                  {item.artifact && (
+                  {item.artifact && item.artifactHref ? (
+                    <a
+                      className="btn sm ghost"
+                      href={item.artifactHref}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      {item.artifact}
+                    </a>
+                  ) : item.artifact ? (
                     <button
                       type="button"
                       className="btn sm ghost"
@@ -209,7 +222,7 @@ export default function TrustPage() {
                     >
                       {item.artifact}
                     </button>
-                  )}
+                  ) : null}
                 </div>
               );
             })}

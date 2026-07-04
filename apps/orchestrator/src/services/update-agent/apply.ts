@@ -101,6 +101,7 @@ export type RecreateTarget = "release" | "previous";
 export type ApplyFailureReason =
   | UpdateFailureReason
   | "configs_mismatch"
+  | "image_signature_failed"
   | "health_gate_failed"
   | "degraded_health";
 
@@ -380,6 +381,34 @@ async function fetchConfigsAsset(
 }
 
 /**
+ * WARP-244 — apply-update.sh's pull step dies with this canonical stderr
+ * prefix when cosign refuses an image. Deterministic (attack, wrong-key
+ * build, or workflow-identity drift) — never transient — so it must land
+ * in `rejected`, not the retry loop.
+ */
+const IMAGE_VERIFY_REFUSAL_MARKER = "image-verify:";
+
+function isImageSignatureRefusal(err: unknown): boolean {
+  const e = err as Error & { stderr?: string };
+  if (typeof e?.stderr === "string" && e.stderr.includes(IMAGE_VERIFY_REFUSAL_MARKER)) {
+    return true;
+  }
+  return e instanceof Error && e.message.includes(IMAGE_VERIFY_REFUSAL_MARKER);
+}
+
+function imageSignatureRefusalDetail(err: unknown): string {
+  const e = err as Error & { stderr?: string };
+  const src =
+    typeof e?.stderr === "string" && e.stderr.includes(IMAGE_VERIFY_REFUSAL_MARKER)
+      ? e.stderr
+      : e instanceof Error
+        ? e.message
+        : String(err);
+  const line = src.split("\n").find((l) => l.includes(IMAGE_VERIFY_REFUSAL_MARKER));
+  return (line ?? src).trim().slice(0, 500);
+}
+
+/**
  * Apply the newest pending (or resumable `verifying`) DeviceUpdate row —
  * steps 1-9. Never throws for expected failure shapes: every exit is a
  * typed outcome + a structured `update.*` log event (poller posture).
@@ -483,8 +512,35 @@ export async function applyPendingUpdate(
   const sidecars = deployed.filter((s) => s.name !== SELF_SERVICE_NAME);
   const sidecarNames = sidecars.map((s) => s.name);
 
-  // ── step 2: pull by digest ── step 3: stage configs ── step 4: migrate ──
-  await runner.pullImages(manifest.services);
+  // ── step 2: pull by digest, signature-gated (WARP-244) ──
+  try {
+    await runner.pullImages(manifest.services);
+  } catch (err) {
+    if (isImageSignatureRefusal(err)) {
+      const detail = imageSignatureRefusalDetail(err);
+      await setStatus(prisma, row.id, "rejected", "image_signature_failed");
+      log.warn(
+        {
+          event: "update.rejected",
+          deviceUpdateId: row.id,
+          failureReason: "image_signature_failed",
+          detail,
+        },
+        "OTA apply rejected — a release image failed cosign verification at pull time",
+      );
+      return {
+        outcome: "rejected",
+        deviceUpdateId: row.id,
+        failureReason: "image_signature_failed",
+        detail,
+      };
+    }
+    // Transient (network/registry) — rethrow so the row stays `verifying`
+    // and the next apply window retries, same as every other step-2 error
+    // before this change.
+    throw err;
+  }
+  // ── step 3: stage configs ── step 4: migrate ──
   await runner.stageConfigs({ updateId: row.id, configsTar: configs.configsTar, manifest });
   // minOrchestratorSchema gate: enforced by parseReleaseManifest above
   // (orchestrator_schema_unsupported → rejected before any side effect).

@@ -1,0 +1,451 @@
+# =============================================================================
+# Droplet allowed-egress registry — WARP-269 (CI gate) + WARP-268 (runtime
+# egress audit) single source of truth.
+#
+# THE CONTRACT: customer data never leaves the device. Every outbound
+# destination the codebase can reach must have an entry here, with a
+# data_class proving what (if anything) it carries. The egress-gate CI lane
+# (scripts/check-egress-allowlist.py) fails any PR referencing a destination
+# not registered below. Adding an entry REQUIRES security review on the PR
+# (assign Romain) and a ticket reference.
+#
+# Schema (v1):
+#   id            unique slug
+#   kind          egress | dynamic | reference
+#   service       owning app/service dir name (or "repo" / "ci")
+#   destination:  hosts: [exact or *.wildcard]   (egress/reference)
+#                 cidrs: []                       (optional, for WARP-268)
+#                 ports: []                       (documented for WARP-268)
+#                 protocol: https | quic | udp/ntp | smtp | imaps | ...
+#   config_key    (dynamic only) the env/config var holding the destination
+#   phase         runtime | setup | build | ci
+#   data_class    none | operational-telemetry | user-content-on-request
+#   purpose       one sentence, plain language
+#   ticket        WARP reference that introduced/approved it
+#   added         YYYY-MM-DD
+#   review_by     next annual review date
+#   code_refs     representative files (scanner prints stale-entry notices
+#                 when hosts stop appearing anywhere)
+# =============================================================================
+version: 1
+policy:
+  default: deny
+  review: security-review required on any PR touching this file
+  runtime_enforcement: WARP-268
+
+entries:
+  # ── runtime egress ──────────────────────────────────────────────────────
+  - id: ota-github-releases
+    kind: egress
+    service: orchestrator
+    destination:
+      hosts: [api.github.com, github.com, objects.githubusercontent.com, release-assets.githubusercontent.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: none
+    purpose: OTA update manifest (releases/latest) and signed release asset download
+    ticket: WARP-538
+    added: 2026-07-04
+    review_by: 2027-07-04
+    code_refs: [apps/orchestrator/src/config.ts]
+
+  - id: fleet-telemetry-portal
+    kind: egress
+    service: fleet-agent
+    destination:
+      hosts: [analytics.warp-lab.ai]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: operational-telemetry
+    purpose: >-
+      Fleet health/telemetry portal (ADR-028) — device metrics and update
+      status only; never file contents, camera frames, chat, or credentials.
+    ticket: WARP-961
+    added: 2026-07-04
+    review_by: 2027-07-04
+    code_refs: [services/fleet-agent/config.py, apps/orchestrator/src/services/analytics/client.ts, docker/docker-compose.yml]
+
+  - id: cloudflare-tunnel-edge
+    kind: egress
+    service: cloudflared
+    destination:
+      hosts: ["*.argotunnel.com", api.cloudflare.com]
+      ports: [443, 7844]
+      protocol: quic
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      Outbound-only tunnel transport for remote dashboard access (ADR-025);
+      carries TLS-encrypted user sessions the user initiated. No repo
+      literal — destination comes from the tunnel token consumed by the
+      pinned cloudflare/cloudflared image.
+    ticket: WARP-978
+    added: 2026-07-04
+    review_by: 2027-07-04
+    code_refs: [docker/docker-compose.yml]
+
+  - id: sso-oidc-idps
+    kind: egress
+    service: orchestrator
+    destination:
+      hosts: [accounts.google.com, login.microsoftonline.com, "*.okta.com", okta.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: none
+    purpose: >-
+      OIDC discovery/token/JWKS for admin-configured SSO (Google, Entra,
+      Okta documented defaults; arbitrary issuer covered by
+      sso-custom-issuer below).
+    ticket: WARP-243
+    added: 2026-07-04
+    review_by: 2027-07-04
+    code_refs: [apps/orchestrator/src/config.ts, docs/ONBOARDING_SSO_OIDC.md]
+
+  - id: calendar-location-autocomplete
+    kind: egress
+    service: orchestrator
+    destination:
+      hosts: [nominatim.openstreetmap.org]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      Geocoding for the event-form location combobox (WARP-307): sends only
+      the location query string the user is actively typing; rate-limited
+      1 req/s; identifying User-Agent per OSM ToS.
+    ticket: WARP-307
+    added: 2026-07-04
+    review_by: 2027-07-04
+    code_refs: [apps/orchestrator/src/routes/calendar.ts]
+
+  - id: voice-geolocation
+    kind: egress
+    service: voice-io
+    destination:
+      hosts: [ipapi.co]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: none
+    purpose: >-
+      One call per process lifetime to resolve city/timezone from the
+      appliance egress IP when DROPLET_LOCATION/TZ are unset; payload is
+      empty (GET), response seeds the voice system prompt.
+    ticket: WARP-269
+    added: 2026-07-04
+    review_by: 2027-07-04
+    code_refs: [services/voice-io/voice/geo.py]
+
+  - id: ollama-model-registry
+    kind: egress
+    service: orchestrator
+    destination:
+      hosts: [registry.ollama.ai]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: none
+    purpose: >-
+      First-boot LLM weight download triggered via the local Ollama
+      /api/pull (model-readiness service). No repo literal — the Ollama
+      daemon owns the destination.
+    ticket: WARP-269
+    added: 2026-07-04
+    review_by: 2027-07-04
+    code_refs: [apps/orchestrator/src/services/model-readiness.service.ts]
+
+  - id: cloud-llm-providers-optin
+    kind: egress
+    service: ai-gateway
+    destination:
+      hosts: [api.anthropic.com, api.openai.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      Opt-in cloud LLM providers via LiteLLM SDK defaults (no repo literal).
+      Only reachable when the operator supplies an API key and a user
+      selects a cloud model; off-LAN gating middleware applies.
+    ticket: WARP-269
+    added: 2026-07-04
+    review_by: 2027-07-04
+    code_refs: [services/ai-gateway/providers/anthropic_cloud.py, services/ai-gateway/providers/openai_cloud.py]
+
+  - id: ntp-openwrt-pool
+    kind: egress
+    service: openwrt-router
+    destination:
+      hosts: ["*.openwrt.pool.ntp.org"]
+      ports: [123]
+      protocol: udp/ntp
+    phase: runtime
+    data_class: none
+    purpose: Router + camera-VLAN time sync (the phone-home block carves out NTP — ADR-012)
+    ticket: WARP-269
+    added: 2026-07-04
+    review_by: 2027-07-04
+    code_refs: [openwrt/files/etc/config/system]
+
+  - id: public-dns-resolvers
+    kind: egress
+    service: openwrt-router
+    destination:
+      # IP literals go in hosts so the CI scanner (which matches extracted
+      # IPv4 tokens against destination.hosts) allowlists them; cidrs is the
+      # WARP-268 runtime-audit view of the same addresses.
+      hosts: ["1.1.1.1", "1.0.0.1", "8.8.8.8"]
+      cidrs: [1.1.1.1/32, 1.0.0.1/32, 8.8.8.8/32]
+      ports: [53]
+      protocol: dns
+    phase: runtime
+    data_class: none
+    purpose: >-
+      Cloudflare (1.1.1.1/1.0.0.1) and Google (8.8.8.8) public DNS resolvers
+      handed to LAN clients via dnsmasq, used as the dockerd DNS pin, and as
+      the watchdog/network-status connectivity-probe targets. DNS queries
+      only — no customer content. Admin can override the upstream resolver
+      (WARP-871). These IP literals are matched by the CI scanner, so their
+      exact addresses are listed here.
+    ticket: WARP-269
+    added: 2026-07-04
+    review_by: 2027-07-04
+    code_refs: [scripts/host/etc-dnsmasq.d/droplet-ap.conf, scripts/host/droplet-watchdog.sh, apps/orchestrator/src/routes/network-status.routes.ts, apps/web-dashboard/src/components/network/DnsServersForm.tsx]
+
+  # ── dynamic (config-driven) destinations ────────────────────────────────
+  - id: fleet-hq-issuance
+    kind: dynamic
+    service: orchestrator
+    config_key: HQ_ISSUANCE_URL
+    phase: runtime
+    data_class: none
+    purpose: >-
+      Fleet HQ TLS issuance API (ADR-023 public-CA-per-device via HQ DNS01);
+      CSR/cert material only, operator/fleet-provisioned URL.
+    ticket: WARP-243
+    added: 2026-07-04
+    review_by: 2027-07-04
+    code_refs: [apps/orchestrator/src/services/tls-issuance.adapters.ts]
+
+  - id: user-mail-servers
+    kind: dynamic
+    service: email-indexer
+    config_key: mailbox settings (imapHost/smtpHost per account row)
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      The user's own IMAP/SMTP servers for the mail features they configure
+      — inherently user-directed egress of their own mail.
+    ticket: WARP-465
+    added: 2026-07-04
+    review_by: 2027-07-04
+    code_refs: [services/email-indexer/idle.py, services/email-indexer/outbound.py]
+
+  - id: sso-custom-issuer
+    kind: dynamic
+    service: orchestrator
+    config_key: SSO_OIDC_ISSUER (admin-configured)
+    phase: runtime
+    data_class: none
+    purpose: Arbitrary admin-supplied OIDC issuer beyond the documented IdPs
+    ticket: WARP-243
+    added: 2026-07-04
+    review_by: 2027-07-04
+    code_refs: [apps/orchestrator/src/services/sso-oidc.service.ts]
+
+  # ── build / setup / ci egress ───────────────────────────────────────────
+  - id: build-container-registries
+    kind: egress
+    service: repo
+    destination:
+      hosts: [ghcr.io, docker.io, registry-1.docker.io, auth.docker.io, production.cloudflare.docker.com]
+      ports: [443]
+      protocol: https
+    phase: build
+    data_class: none
+    purpose: Base/service image pulls (compose, docker-build.yml, publish-release.yml)
+    ticket: WARP-243
+    added: 2026-07-04
+    review_by: 2027-07-04
+    code_refs: [docker/docker-compose.yml]
+
+  - id: build-openssl-fips-source
+    kind: egress
+    service: repo
+    destination:
+      hosts: [github.com]
+      ports: [443]
+      protocol: https
+    phase: build
+    data_class: none
+    purpose: OpenSSL 3.0.9 FIPS module source download (sha256-pinned) in every image build
+    ticket: WARP-967
+    added: 2026-07-04
+    review_by: 2027-07-04
+    code_refs: [docker/fips/build-openssl-fips.sh]
+
+  - id: build-vosk-models
+    kind: egress
+    service: voice-io
+    destination:
+      hosts: [alphacephei.com]
+      ports: [443]
+      protocol: https
+    phase: build
+    data_class: none
+    purpose: Vosk speech-model download at image build
+    ticket: WARP-269
+    added: 2026-07-04
+    review_by: 2027-07-04
+    code_refs: [services/voice-io/Dockerfile, services/voice-io/scripts/fetch_vosk_model.py]
+
+  - id: build-apt-postgresql
+    kind: egress
+    service: orchestrator
+    destination:
+      hosts: [apt.postgresql.org]
+      ports: [443]
+      protocol: https
+    phase: build
+    data_class: none
+    purpose: pg client apt repo in the orchestrator image build
+    ticket: WARP-269
+    added: 2026-07-04
+    review_by: 2027-07-04
+    code_refs: [apps/orchestrator/Dockerfile]
+
+  - id: setup-docker-install
+    kind: egress
+    service: repo
+    destination:
+      hosts: [get.docker.com]
+      ports: [443]
+      protocol: https
+    phase: setup
+    data_class: none
+    purpose: Docker engine convenience installer during appliance setup
+    ticket: WARP-269
+    added: 2026-07-04
+    review_by: 2027-07-04
+    code_refs: [scripts/lib/docker.sh]
+
+  - id: build-openwrt-artifacts
+    kind: egress
+    service: openwrt-router
+    destination:
+      hosts: [downloads.openwrt.org]
+      ports: [443]
+      protocol: https
+    phase: build
+    data_class: none
+    purpose: OpenWrt rootfs/package artifacts for the singlebox router image
+    ticket: WARP-269
+    added: 2026-07-04
+    review_by: 2027-07-04
+    code_refs: [docker/docker-compose.yml, openwrt/singlebox-image/Dockerfile]
+
+  - id: image-pipeline-ubuntu
+    kind: egress
+    service: repo
+    destination:
+      hosts: [releases.ubuntu.com]
+      ports: [443]
+      protocol: https
+    phase: build
+    data_class: none
+    purpose: Ubuntu base ISO for the appliance image pipeline (ADR-020)
+    ticket: WARP-269
+    added: 2026-07-04
+    review_by: 2027-07-04
+    code_refs: [scripts/image/build-iso.sh]
+
+  - id: ci-ieee-oui
+    kind: egress
+    service: ci
+    destination:
+      hosts: [standards-oui.ieee.org]
+      ports: [443]
+      protocol: https
+    phase: ci
+    data_class: none
+    purpose: Quarterly OUI vendor-registry refresh (refresh-oui.yml)
+    ticket: WARP-269
+    added: 2026-07-04
+    review_by: 2027-07-04
+    code_refs: [scripts/fetch-oui.sh]
+
+  # ── reference-only (hostnames in the repo that are NOT egress) ──────────
+  - id: ref-xml-namespaces
+    kind: reference
+    service: repo
+    destination:
+      hosts: [www.w3.org, www.onvif.org, nextcloud.org, owncloud.org, json-schema.org]
+    purpose: XML/SVG/SOAP/WebDAV namespace and $schema identifiers in payload bodies
+    ticket: WARP-269
+    added: 2026-07-04
+    review_by: 2027-07-04
+    code_refs: [apps/orchestrator/src/services/nextcloud.client.ts, services/camera-discovery/onvif_scanner.py]
+
+  - id: ref-doc-links
+    kind: reference
+    service: repo
+    destination:
+      hosts: [csrc.nist.gov, www.openssl.org, www.postgresql.org, nextjs.org, www.wireguard.com, warp-lab.atlassian.net, atlassian.net]
+    purpose: Documentation links in code comments and UI help text
+    ticket: WARP-269
+    added: 2026-07-04
+    review_by: 2027-07-04
+    code_refs: [docker/fips/build-openssl-fips.sh, apps/web-dashboard/src/components/setup/steps/VpnStep.tsx]
+
+  - id: ref-brand-and-fleet-domains
+    kind: reference
+    service: repo
+    destination:
+      hosts: [warp-lab.com, droplet-us.com, "*.droplet-us.com", "*.devices.warp-lab.ai"]
+    purpose: >-
+      Nominatim User-Agent string (OSM ToS) and fleet device-FQDN examples
+      in comments/config defaults; device FQDNs are inbound names, not
+      egress destinations.
+    ticket: WARP-269
+    added: 2026-07-04
+    review_by: 2027-07-04
+    code_refs: [apps/orchestrator/src/routes/calendar.ts, docker/docker-compose.yml]
+
+  - id: ref-non-egress-ip-literals
+    kind: reference
+    service: repo
+    destination:
+      # NOT destinations. 4.3.9.1 is a Matter spec section number
+      # ("Matter spec §4.3.9.1.5") in a code comment; 100.64.0.0 is the
+      # RFC 6598 CGNAT range literal used inside a private-address detector
+      # (100.64.0.0/10). Both are matched by the scanner's IPv4 regex and
+      # registered here so they are silenced without loosening the extractor.
+      hosts: ["4.3.9.1", "100.64.0.0"]
+    purpose: Non-egress IPv4 literals — Matter spec section number and an RFC 6598 CIDR constant
+    ticket: WARP-269
+    added: 2026-07-04
+    review_by: 2027-07-04
+    code_refs: [services/matter-controller/src/controller.ts, apps/orchestrator/src/lib/remote-access.ts]
+
+  - id: ref-cosign-oidc-issuer
+    kind: reference
+    service: orchestrator
+    destination:
+      # NOT an egress destination. The OTA image-signature check verifies
+      # OFFLINE against the trust root embedded in the vendored, checksum-pinned
+      # cosign binary (WARP-537) — "no Rekor/TUF egress at verify time" per
+      # apply-update.sh. This host is only the --certificate-oidc-issuer
+      # IDENTITY string matched inside the Fulcio-issued signing cert (GitHub
+      # Actions OIDC); the box never opens a connection to it. cosign's only
+      # network at verify time is in-process HTTPS to ghcr.io (the same
+      # registry the pull itself uses).
+      hosts: [token.actions.githubusercontent.com]
+    purpose: cosign keyless-signature OIDC issuer identity matched during OFFLINE OTA image verification — not a connection the box makes
+    ticket: WARP-244
+    added: 2026-07-04
+    review_by: 2027-07-04
+    code_refs: [scripts/lib/apply-update.sh]

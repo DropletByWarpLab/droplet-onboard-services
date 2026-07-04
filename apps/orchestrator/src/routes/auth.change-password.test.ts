@@ -127,6 +127,21 @@ vi.mock("../services/brain-memory.service.js", () => ({
   purgeUserData: vi.fn().mockResolvedValue({ items: 0, chunks: 0 }),
 }));
 
+// WARP-247 — credential change must revoke every OTHER session.
+const revokeAllSessions = vi.fn(
+  async (_userId?: string, _opts?: { exceptSid?: string }) => 2,
+);
+vi.mock("../services/session.service.js", () => ({
+  createSession: vi.fn(async () => ({ sid: "sid-cp-test", evictedSids: [] })),
+  checkSession: vi.fn(async () => ({
+    kind: "ok",
+    record: { userId: "u-kid", role: "family", createdAt: 0, lastSeenAt: 0 },
+  })),
+  deleteSession: vi.fn(async () => undefined),
+  revokeAllSessions: (...a: unknown[]) =>
+    revokeAllSessions(...(a as [string, { exceptSid?: string }])),
+}));
+
 import {
   createPublicAuthRouter,
   createProtectedAuthRouter,
@@ -232,6 +247,8 @@ beforeEach(() => {
   cacheState.incrReturnsNull = false;
   hashPassword.mockImplementation(async (_pw: string) => "$argon2id$v=19$m=19456,t=2,p=1$bmV3c2FsdA$bmV3aGFzaA");
   verifyDummyPassword.mockResolvedValue(false);
+  // WARP-247 — clearAllMocks wipes the call log; restore the default return.
+  revokeAllSessions.mockResolvedValue(2);
 });
 
 describe("login surfaces the must-change signal", () => {
@@ -497,5 +514,55 @@ describe("passwordChangeBackoffSeconds — pure schedule", () => {
     expect(passwordChangeBackoffSeconds(9)).toBe(300);
     expect(passwordChangeBackoffSeconds(10)).toBe(900);
     expect(passwordChangeBackoffSeconds(100)).toBe(900);
+  });
+});
+
+describe("WARP-247 — change-password revokes other sessions", () => {
+  it("revokes all sessions EXCEPT the current sid and audits it", async () => {
+    const prisma = createPrismaMock([row()]);
+    verifyPassword.mockResolvedValueOnce(true);
+    const app = protectedApp(prisma, {
+      id: "u-kid",
+      username: "kid",
+      displayName: "Kid",
+      role: "family",
+      sid: "sid-current-device",
+    });
+
+    const res = await request(app)
+      .post("/api/auth/change-password")
+      .send({ currentPassword: "temp-Password-1!", newPassword: "brand-New-Password-9!" });
+
+    expect(res.status).toBe(200);
+    expect(revokeAllSessions).toHaveBeenCalledWith("u-kid", {
+      exceptSid: "sid-current-device",
+    });
+    expect(recordActivity).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "auth",
+        refs: expect.objectContaining({
+          outcome: "sessions_revoked",
+          reason: "password_change",
+          userId: "u-kid",
+          revoked: 2,
+        }),
+        actor: { type: "user", id: "u-kid" },
+      }),
+    );
+  });
+
+  it("does NOT revoke anything when the current password check fails", async () => {
+    const prisma = createPrismaMock([row()]);
+    verifyPassword.mockResolvedValueOnce(false);
+    const app = protectedApp(prisma, {
+      id: "u-kid", username: "kid", displayName: "Kid", role: "family", sid: "sid-x",
+    });
+
+    const res = await request(app)
+      .post("/api/auth/change-password")
+      .send({ currentPassword: "wrong", newPassword: "brand-New-Password-9!" });
+
+    expect(res.status).toBe(400);
+    expect(revokeAllSessions).not.toHaveBeenCalled();
   });
 });

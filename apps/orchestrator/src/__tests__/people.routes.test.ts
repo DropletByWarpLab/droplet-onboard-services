@@ -43,14 +43,18 @@ vi.mock("../services/activity.singleton.js", () => ({
   recordActivity: recordActivityMock,
 }));
 
-// WARP-116: the role-change route revokes the target's live sessions so the
-// new role propagates immediately. Mock the revoke so we can assert the call
-// without standing up Redis.
-const { revokeUserSessionsMock } = vi.hoisted(() => ({
-  revokeUserSessionsMock: vi.fn().mockResolvedValue(0),
+// WARP-247: the role-change route revokes the target's live session RECORDS
+// (revokeAllSessions, which also sweeps the WARP-116 refresh denylist) so the
+// new role propagates at the next request. Mock the revoke so we can assert
+// the call without standing up Redis.
+const { revokeAllSessionsMock } = vi.hoisted(() => ({
+  revokeAllSessionsMock: vi.fn().mockResolvedValue(0),
 }));
-vi.mock("../services/jwt.service.js", () => ({
-  revokeUserSessions: revokeUserSessionsMock,
+vi.mock("../services/session.service.js", () => ({
+  createSession: vi.fn(async () => ({ sid: "sid-test", evictedSids: [] })),
+  checkSession: vi.fn(async () => ({ kind: "ok", record: { userId: "x", role: "family", createdAt: 0, lastSeenAt: 0 } })),
+  deleteSession: vi.fn(async () => undefined),
+  revokeAllSessions: revokeAllSessionsMock,
 }));
 
 import { createPeopleRouter } from "../routes/people.js";
@@ -249,7 +253,7 @@ function buildApp(
 
 beforeEach(() => {
   recordActivityMock.mockClear();
-  revokeUserSessionsMock.mockClear();
+  revokeAllSessionsMock.mockClear();
 });
 
 describe("GET /api/people", () => {
@@ -435,8 +439,8 @@ describe("PATCH /api/people/:id/role", () => {
     expect(res.status).toBe(200);
     // The new role must propagate immediately — revoke is keyed by the
     // target's User.id (== JWT.sub == the session-index key).
-    expect(revokeUserSessionsMock).toHaveBeenCalledTimes(1);
-    expect(revokeUserSessionsMock).toHaveBeenCalledWith("u1");
+    expect(revokeAllSessionsMock).toHaveBeenCalledTimes(1);
+    expect(revokeAllSessionsMock).toHaveBeenCalledWith("u1");
   });
 
   it("WARP-116: does NOT revoke on a no-op role re-submit", async () => {
@@ -451,7 +455,7 @@ describe("PATCH /api/people/:id/role", () => {
 
     // No state change → no revoke (mirrors the no-op audit short-circuit).
     expect(res.status).toBe(200);
-    expect(revokeUserSessionsMock).not.toHaveBeenCalled();
+    expect(revokeAllSessionsMock).not.toHaveBeenCalled();
   });
 });
 
