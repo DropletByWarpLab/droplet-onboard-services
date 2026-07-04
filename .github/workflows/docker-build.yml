@@ -1,8 +1,22 @@
 name: docker-build
 
-# Build every image in docker/docker-compose.yml (including services gated
-# behind `profiles: ["full"]`). Fails the PR if any Dockerfile is broken,
+# Build only the compose images a change actually touches (default + full +
+# eval profiles of docker/docker-compose.yml), one runner per image, with a
+# BuildKit layer cache in GHCR — instead of every image serially on one
+# runner (~23 min). Still fails the PR if any affected Dockerfile is broken,
 # without spending time on the full scripts/setup.sh flow.
+#
+#   detect          — validates the compose file, maps changed paths to
+#                     affected images (each image's filter lists what its
+#                     Dockerfile COPYs), and fails if the compose file's
+#                     buildable services drift from the filter list below.
+#   build           — matrix, one image per runner. Layer cache lives at
+#                     ghcr.io/<repo>/buildcache:<image>; PRs read it, pushes
+#                     to main rebuild every image and refresh it (post-merge,
+#                     so their wall-clock blocks nobody). One image per
+#                     runner also fits in the stock ~14 GB disk, so the old
+#                     "free disk space" step is gone.
+#   docker-build-ok — stable fan-in check name for branch protection.
 
 on:
   pull_request:
@@ -21,6 +35,15 @@ on:
       - ".dockerignore"
       - "proto/**"
       - ".github/workflows/docker-build.yml"
+      # Build inputs the old trigger list missed — each is COPY'd into at
+      # least one image (see the per-image filters in the detect job):
+      - "package.json"
+      - "package-lock.json"
+      - "packages/**"
+      - "services/**/package.json"
+      - "services/_shared/**"
+      - "tests/retrieval-eval/**"
+      - "apps/orchestrator/prisma/**"
   push:
     branches: [main]
     paths:
@@ -35,50 +58,250 @@ on:
       - ".dockerignore"
       - "proto/**"
       - ".github/workflows/docker-build.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "packages/**"
+      - "services/**/package.json"
+      - "services/_shared/**"
+      - "tests/retrieval-eval/**"
+      - "apps/orchestrator/prisma/**"
 
 concurrency:
   group: docker-build-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  COMPOSE: docker compose -f docker/docker-compose.yml --profile full --profile eval
+
 jobs:
-  build-all:
-    name: build all images (default + full profile)
+  detect:
+    name: detect affected images
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read # dorny/paths-filter lists PR files via the API
+    outputs:
+      images: ${{ steps.plan.outputs.images }}
     steps:
       - uses: actions/checkout@v4
 
-      # ubuntu-latest has ~14GB free. `docker compose --profile full build`
-      # fills that before BuildKit finishes (see setup-e2e.yml for the same
-      # fix). Strip the preinstalled toolchains we don't use to reclaim ~25GB.
-      - name: Free disk space
+      # Validate compose YAML before eating any build cost. Ignore the
+      # "variable not set" warnings from unbaked secrets — those are only
+      # used at runtime, not at build time. `--profile eval` keeps
+      # services/rag-eval/ gated by CI even though it never auto-starts
+      # at runtime.
+      - name: Validate compose file and enumerate buildable images
+        id: compose
         run: |
-          set -eux
-          df -h /
-          sudo rm -rf \
-            /usr/share/dotnet \
-            /usr/local/lib/android \
-            /opt/ghc \
-            /opt/hostedtoolcache/CodeQL \
-            /usr/local/share/powershell \
-            /usr/local/share/chromium \
-            /usr/local/share/boost \
-            "$AGENT_TOOLSDIRECTORY/Ruby" \
-            "$AGENT_TOOLSDIRECTORY/PyPy" \
-            || true
-          sudo apt-get clean
-          df -h /
+          set -eu
+          $COMPOSE config --quiet
+          buildable=$($COMPOSE config --format json | jq -c '[.services | to_entries[] | select(.value.build) | .key] | sort')
+          echo "buildable=$buildable" >> "$GITHUB_OUTPUT"
+          echo "Buildable images: $buildable"
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      # A new buildable service in the compose file MUST get a path filter
+      # below (and a KNOWN entry here) — otherwise its image would only ever
+      # be built by global changes, silently skipping service-scoped PRs.
+      - name: Fail if compose file and per-image filters drifted
+        env:
+          BUILDABLE: ${{ steps.compose.outputs.buildable }}
+          KNOWN: >-
+            ["ai-gateway","camera-discovery","device-identity-svc",
+            "email-indexer","file-indexer","matter-controller","mcp-server",
+            "orchestrator","rag-eval","routing","switch","web-dashboard"]
+        run: |
+          set -eu
+          if [ "$(jq -cS . <<<"$BUILDABLE")" != "$(jq -cS . <<<"$KNOWN")" ]; then
+            echo "::error file=.github/workflows/docker-build.yml::buildable services in docker-compose.yml ($BUILDABLE) no longer match this workflow's KNOWN list ($KNOWN). Update KNOWN and the per-image filters in the detect job."
+            exit 1
+          fi
 
-      # Validate compose YAML before eating the full build cost.
-      # Ignore the "variable not set" warnings from unbaked secrets —
-      # those are only used at runtime, not at build time.
-      # `--profile eval` covers services/rag-eval/ even though it doesn't
-      # auto-start at runtime — image build is still gated by CI so a
-      # Dockerfile typo in the eval lane fails the PR.
-      - name: Validate compose file
-        run: docker compose -f docker/docker-compose.yml --profile full --profile eval config --quiet
+      # Each image's filter lists its actual build inputs — everything its
+      # Dockerfile COPYs (own dir, workspace manifests, shared _shared/
+      # helpers, proto). FIPS assets (docker/fips/**, openssl-fips.cnf) sit
+      # in `global` because nearly every image copies them. Helper keys
+      # (py-shared, node-workspace) exist only as YAML anchors; the plan
+      # step intersects matches with buildable images, so helpers never
+      # reach the matrix.
+      - name: Map changed paths to affected images
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            # Shared FIPS self-test helper COPY'd into every Python image.
+            py-shared: &py-shared
+              - "services/_shared/**"
+            # Workspace manifests COPY'd into every Node builder stage so
+            # `npm ci` can resolve the workspace graph.
+            node-workspace: &node-workspace
+              - "package.json"
+              - "package-lock.json"
+              - "apps/orchestrator/package.json"
+              - "apps/web-dashboard/package.json"
+              - "services/ai-gateway/package.json"
+              - "services/matter-controller/package.json"
+              - "services/mcp-server/package.json"
+              - "packages/tools-core/package.json"
+              - "packages/fips-selftest/package.json"
+              - "packages/shared-types/package.json"
+              - "packages/auth-policy/package.json"
+            global:
+              - "docker/docker-compose.yml"
+              - "docker/fips/**"
+              - "docker/openssl-fips.cnf"
+              - ".dockerignore"
+              - ".github/workflows/docker-build.yml"
+            orchestrator:
+              - *node-workspace
+              - "apps/orchestrator/**"
+              - "services/mcp-server/**"
+              - "packages/tools-core/**"
+              - "packages/fips-selftest/**"
+              - "packages/shared-types/**"
+              - "packages/auth-policy/**"
+              - "proto/**"
+            web-dashboard:
+              - "package.json"
+              - "package-lock.json"
+              - "apps/web-dashboard/**"
+              - "packages/shared-types/**"
+              - "packages/auth-policy/**"
+            mcp-server:
+              - *node-workspace
+              - "services/mcp-server/**"
+              - "packages/tools-core/**"
+              - "packages/fips-selftest/**"
+              - "apps/orchestrator/prisma/**"
+              - "proto/**"
+            matter-controller:
+              - *node-workspace
+              - "services/matter-controller/**"
+              - "packages/fips-selftest/**"
+            ai-gateway:
+              - *py-shared
+              - "services/ai-gateway/**"
+            camera-discovery:
+              - *py-shared
+              - "services/camera-discovery/**"
+            device-identity-svc:
+              - *py-shared
+              - "services/device-identity-svc/**"
+              - "proto/**"
+            email-indexer:
+              - *py-shared
+              - "services/email-indexer/**"
+            file-indexer:
+              - *py-shared
+              - "services/file-indexer/**"
+              - "proto/**"
+            routing:
+              - *py-shared
+              - "services/routing/**"
+            switch:
+              - *py-shared
+              - "services/switch/**"
+            rag-eval:
+              - "services/rag-eval/**"
+              - "tests/retrieval-eval/**"
 
-      - name: Build all images
-        run: docker compose -f docker/docker-compose.yml --profile full --profile eval build --pull
+      - name: Decide which images to build
+        id: plan
+        env:
+          BUILDABLE: ${{ steps.compose.outputs.buildable }}
+          CHANGED: ${{ steps.filter.outputs.changes }}
+        run: |
+          set -eu
+          if [ "${{ github.event_name }}" = "push" ]; then
+            # Post-merge runs rebuild everything so every image's GHCR layer
+            # cache stays fresh, not just the images the merge touched.
+            images="$BUILDABLE"
+          elif jq -e 'index("global")' <<<"$CHANGED" >/dev/null; then
+            images="$BUILDABLE"
+          else
+            # Intersect matched filters with buildable images (drops the
+            # anchor-only helper filters).
+            images=$(jq -c --argjson b "$BUILDABLE" '[.[] | select(. as $s | $b | index($s))] | sort' <<<"$CHANGED")
+          fi
+          echo "images=$images" >> "$GITHUB_OUTPUT"
+          echo "Images to build: $images"
+
+  build:
+    name: build ${{ matrix.image }}
+    needs: detect
+    if: needs.detect.outputs.images != '[]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # GHCR layer cache; PR tokens degrade to read
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.detect.outputs.images) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Derive build context + Dockerfile from the compose file itself so
+      # the matrix never drifts from what `docker compose build` would do.
+      # `config` normalizes context to an absolute path; dockerfile stays
+      # context-relative.
+      - name: Resolve build context and cache ref
+        id: meta
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          set -eu
+          $COMPOSE config --format json > /tmp/compose-config.json
+          context=$(jq -re --arg s "$IMAGE" '.services[$s].build.context' /tmp/compose-config.json)
+          dockerfile=$(jq -re --arg s "$IMAGE" '.services[$s].build.dockerfile // "Dockerfile"' /tmp/compose-config.json)
+          case "$dockerfile" in
+            /*) file="$dockerfile" ;;
+            *) file="$context/$dockerfile" ;;
+          esac
+          {
+            echo "context=$context"
+            echo "file=$file"
+            echo "cache-ref=ghcr.io/$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')/buildcache:$IMAGE"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR (layer cache)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # push:false — this workflow only validates that images build; nothing
+      # ships from here (publish-release.yml owns that). Only pushes to main
+      # write the cache: PR runs stay read-only, and GHCR sees no per-PR
+      # cache churn.
+      - name: Build ${{ matrix.image }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ steps.meta.outputs.context }}
+          file: ${{ steps.meta.outputs.file }}
+          pull: true
+          push: false
+          cache-from: type=registry,ref=${{ steps.meta.outputs.cache-ref }}
+          cache-to: ${{ github.event_name == 'push' && format('type=registry,ref={0},mode=max,image-manifest=true', steps.meta.outputs.cache-ref) || '' }}
+
+  # Single stable check name for branch protection, whatever the matrix did.
+  docker-build-ok:
+    name: docker-build ok
+    needs: [detect, build]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assert detect and all builds succeeded
+        env:
+          DETECT: ${{ needs.detect.result }}
+          BUILD: ${{ needs.build.result }}
+        run: |
+          set -eu
+          [ "$DETECT" = "success" ] || { echo "detect: $DETECT"; exit 1; }
+          case "$BUILD" in
+            success|skipped) echo "build: $BUILD" ;;
+            *) echo "build: $BUILD"; exit 1 ;;
+          esac
