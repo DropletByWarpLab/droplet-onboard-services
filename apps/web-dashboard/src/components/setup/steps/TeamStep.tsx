@@ -17,6 +17,7 @@ import { getEnabledSsoProviders, postTeamInvite, createUser, InviteError } from 
 import { generateTempPassword } from "@droplet/auth-policy";
 import { ssoProviderName } from "@/lib/sso-providers";
 import type { TeamInviteRole } from "@/lib/types";
+import { useAuth } from "@/lib/auth";
 import { StepShell } from "@/components/setup/StepShell";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 import { ScrollRegion } from "@/components/setup/ScrollRegion";
@@ -81,6 +82,37 @@ const ROLE_OPTIONS: ReadonlyArray<{ value: TeamInviteRole; label: string }> = [
   { value: "owner", label: "Owner" },
 ];
 
+/**
+ * WARP-1049 — role rank, mirroring the orchestrator's `ROLE_RANK`
+ * (auth-groups / jwt.service). The server's `roleOutranks(role, caller)` guard
+ * rejects any assignment whose rank exceeds the caller's own, so the picker
+ * must never OFFER a role the caller cannot actually grant (offer-then-reject
+ * is a worse experience than not offering it). Kept in sync with the server by
+ * value; the server remains the authority (this is defense-in-depth + UX).
+ */
+const ROLE_RANK: Record<TeamInviteRole, number> = {
+  guest: 0,
+  family: 1,
+  admin: 2,
+  owner: 3,
+};
+
+/**
+ * The role options a caller of `callerRole` may actually assign — everything at
+ * or below their own rank, matching the server's `roleOutranks` cap. When the
+ * caller's role is unknown (a pre-WARP-279 cached profile with no `role`), fall
+ * back to the full list and let the server guard be the sole authority rather
+ * than over-restricting a legitimate owner/admin — the picker is a convenience,
+ * never the security boundary.
+ */
+function roleOptionsForCaller(
+  callerRole: TeamInviteRole | undefined,
+): ReadonlyArray<{ value: TeamInviteRole; label: string }> {
+  if (!callerRole) return ROLE_OPTIONS;
+  const cap = ROLE_RANK[callerRole];
+  return ROLE_OPTIONS.filter((o) => ROLE_RANK[o.value] <= cap);
+}
+
 /** Client-side email shape — mirrors onboarding-team-invite.service's EMAIL_SHAPE
  *  so the wizard blocks an obviously-bad address before the round-trip. The
  *  server is authoritative. */
@@ -124,8 +156,29 @@ export function TeamStep({
   onComplete: () => void;
   onSkip: () => void;
 }) {
+  // WARP-1049: cap the role picker to what the CALLER can actually grant. The
+  // server's roleOutranks guard is the authority (it rejects an over-rank
+  // assignment with 403 ROLE_RANK_EXCEEDED regardless of what the client
+  // sends); filtering the options here is defense-in-depth + right-first-time
+  // UX so an admin never sees "Owner" as a selectable option only to be
+  // rejected. `useAuth` is already in scope for sibling wizard steps.
+  const { user } = useAuth();
+  const callerRole = user?.role as TeamInviteRole | undefined;
+  const roleOptions = useMemo(
+    () => roleOptionsForCaller(callerRole),
+    [callerRole],
+  );
+  // A role the caller cannot grant must never be the initial/selected value.
+  // "family" is the natural default and is available to every rank except a
+  // guest caller; clamp to the highest option the caller CAN grant when the
+  // default isn't offered (a guest can only ever create a guest).
+  const defaultRole: TeamInviteRole = useMemo(() => {
+    if (roleOptions.some((o) => o.value === "family")) return "family";
+    return roleOptions[roleOptions.length - 1]?.value ?? "guest";
+  }, [roleOptions]);
+
   const [email, setEmail] = useState("");
-  const [role, setRole] = useState<TeamInviteRole>("family");
+  const [role, setRole] = useState<TeamInviteRole>(defaultRole);
   const [invites, setInvites] = useState<PendingInvite[]>([]);
   const [emailError, setEmailError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
@@ -219,7 +272,7 @@ export function TeamStep({
   const [showAccountDialog, setShowAccountDialog] = useState(false);
   const [acctEmail, setAcctEmail] = useState("");
   const [acctName, setAcctName] = useState("");
-  const [acctRole, setAcctRole] = useState<TeamInviteRole>("family");
+  const [acctRole, setAcctRole] = useState<TeamInviteRole>(defaultRole);
   // The generated temp password is created fresh each time the dialog opens (and
   // on Regenerate). It is a real secret — crypto.getRandomValues via
   // @droplet/auth-policy — and is shown ONCE, then handed off out-of-band.
@@ -239,13 +292,13 @@ export function TeamStep({
   const openAccountDialog = useCallback(() => {
     setAcctEmail("");
     setAcctName("");
-    setAcctRole("family");
+    setAcctRole(defaultRole);
     setAcctPassword(generateTempPassword());
     setAcctError(null);
     setAcctCreated(null);
     setAcctCopied(false);
     setShowAccountDialog(true);
-  }, []);
+  }, [defaultRole]);
 
   const closeAccountDialog = useCallback(() => {
     setShowAccountDialog(false);
@@ -302,11 +355,13 @@ export function TeamStep({
         // strand the operator on a silent failure.
         setAcctError("The temporary password didn't meet the requirements. Regenerate it and try again.");
       } else {
-        setAcctError(
-          err instanceof Error
-            ? err.message
-            : "Couldn't create that account. Try again in a moment.",
-        );
+        // WARP-1049 defensive default: every code THIS route emits today is
+        // mapped above to calm human copy, so this branch is only reached by an
+        // unmapped (e.g. future) code. Surface a calm generic message rather
+        // than the raw `err.message` so a technical/typed string can never
+        // reach a home user — the mapped branches above still render their
+        // tailored copy.
+        setAcctError("Couldn't create that account. Try again in a moment.");
       }
     } finally {
       setAcctCreating(false);
@@ -400,7 +455,7 @@ export function TeamStep({
               onChange={(e) => setRole(e.target.value as TeamInviteRole)}
               className="dp-input appearance-none pr-9"
             >
-              {ROLE_OPTIONS.map((o) => (
+              {roleOptions.map((o) => (
                 <option key={o.value} value={o.value}>
                   {o.label}
                 </option>
@@ -611,7 +666,7 @@ export function TeamStep({
                       onChange={(e) => setAcctRole(e.target.value as TeamInviteRole)}
                       className="dp-input appearance-none pr-9"
                     >
-                      {ROLE_OPTIONS.map((o) => (
+                      {roleOptions.map((o) => (
                         <option key={o.value} value={o.value}>
                           {o.label}
                         </option>

@@ -11,6 +11,16 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 
+// WARP-1049: TeamStep now reads the caller's role via useAuth to cap the role
+// picker. This suite renders TeamStep bare (no AuthProvider), so mock useAuth
+// with a default owner — the full role set — leaving this suite's behaviour
+// unchanged (the picker-cap itself is covered in TeamStep.local-account.test).
+vi.mock("@/lib/auth", () => ({
+  useAuth: () => ({
+    user: { id: "u-owner", username: "owner", displayName: "Owner", role: "owner" },
+  }),
+}));
+
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
   return {

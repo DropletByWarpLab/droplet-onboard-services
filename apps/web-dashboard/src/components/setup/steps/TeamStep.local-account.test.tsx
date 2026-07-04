@@ -21,6 +21,14 @@ const getEnabledSsoProviders = vi.fn();
 const postTeamInvite = vi.fn();
 const createUser = vi.fn();
 
+// WARP-1049: the role picker is capped to the caller's rank via useAuth. Mock
+// it (same pattern as AccountStep.test) so the suite controls the caller role;
+// default owner mirrors the real wizard (the just-created owner is driving).
+let mockUserRole: "owner" | "admin" | "family" | "guest" | undefined = "owner";
+vi.mock("@/lib/auth", () => ({
+  useAuth: () => ({ user: { id: "u-owner", username: "owner", displayName: "Owner", role: mockUserRole } }),
+}));
+
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
   return {
@@ -35,6 +43,7 @@ import { TeamStep } from "./TeamStep";
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockUserRole = "owner";
   getEnabledSsoProviders.mockResolvedValue([]);
   postTeamInvite.mockImplementation(async (input: { email: string; role: string }) => ({
     email: input.email.toLowerCase(),
@@ -149,5 +158,69 @@ describe("TeamStep — Create local account dialog (WARP-1049)", () => {
     });
     fireEvent.click(within(dialog).getByRole("button", { name: /create account/i }));
     expect(await within(dialog).findByRole("alert")).toHaveTextContent(/already in use/i);
+  });
+
+  // WARP-1049 (code-review follow-up 3): the server guards admin→owner with 403
+  // ROLE_RANK_EXCEEDED; the client must render that as calm inline copy, never
+  // the raw code. Force the caller to admin so an "owner" assignment is possible
+  // to attempt at the API layer (the picker cap is asserted separately below).
+  it("surfaces a 403 ROLE_RANK_EXCEEDED from the server as calm inline copy (no raw code)", async () => {
+    mockUserRole = "admin";
+    const err = new Error("You cannot create an account with a role higher than your own") as Error & {
+      code?: string;
+    };
+    err.code = "ROLE_RANK_EXCEEDED";
+    createUser.mockRejectedValueOnce(err);
+    const dialog = await openDialog();
+    fireEvent.change(within(dialog).getByLabelText(/email/i), {
+      target: { value: "boss@warp.test" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: /create account/i }));
+    const alert = await within(dialog).findByRole("alert");
+    expect(alert).toHaveTextContent(/role higher than your own/i);
+    expect(alert).not.toHaveTextContent(/ROLE_RANK_EXCEEDED/);
+  });
+
+  // WARP-1049 (code-review follow-up 1): defense-in-depth + right-first-time UX.
+  // An admin caller must not be OFFERED "Owner" in the role select — the server
+  // would reject it (403), so offering it is offer-then-reject. The owner caller
+  // (default) still sees the full set.
+  it("caps the role select to the caller's rank — an admin does not see Owner", async () => {
+    mockUserRole = "admin";
+    const dialog = await openDialog();
+    const roleSelect = within(dialog).getByLabelText(/^role/i) as HTMLSelectElement;
+    const optionValues = Array.from(roleSelect.options).map((o) => o.value);
+    expect(optionValues).toContain("admin");
+    expect(optionValues).toContain("family");
+    expect(optionValues).toContain("guest");
+    expect(optionValues).not.toContain("owner");
+  });
+
+  it("offers the full role set (including Owner) to an owner caller", async () => {
+    mockUserRole = "owner";
+    const dialog = await openDialog();
+    const roleSelect = within(dialog).getByLabelText(/^role/i) as HTMLSelectElement;
+    const optionValues = Array.from(roleSelect.options).map((o) => o.value);
+    expect(optionValues).toContain("owner");
+    expect(optionValues).toContain("admin");
+  });
+
+  // WARP-1049 (code-review follow-up 2): an UNMAPPED server code must never
+  // surface its raw `err.message` (a technical string) to a home user — the
+  // generic fallback shows calm copy instead.
+  it("shows a calm generic message (never the raw err.message) for an unmapped error code", async () => {
+    const err = new Error("PrismaClientKnownRequestError: P1001 db unreachable") as Error & {
+      code?: string;
+    };
+    err.code = "SOME_FUTURE_CODE";
+    createUser.mockRejectedValueOnce(err);
+    const dialog = await openDialog();
+    fireEvent.change(within(dialog).getByLabelText(/email/i), {
+      target: { value: "kid@warp.test" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: /create account/i }));
+    const alert = await within(dialog).findByRole("alert");
+    expect(alert).toHaveTextContent(/Couldn.t create that account/i);
+    expect(alert).not.toHaveTextContent(/Prisma|P1001|db unreachable/i);
   });
 });
