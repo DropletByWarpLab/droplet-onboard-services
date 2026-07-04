@@ -1,0 +1,42 @@
+name: egress-gate
+
+# WARP-269 — telemetry-free invariant. Statically inventories every
+# outbound destination in the repo (URL literals, config hostnames, public
+# IPs) and fails if any is missing from docs/security/allowed-egress.yaml.
+# The allowlist schema is shared with the WARP-268 runtime egress audit.
+# Runs unfiltered on every PR (job is ~15 s) so it can be a required check
+# (WARP-968/969). Scanner unit tests run first — same pattern as
+# test-fips.yml.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: egress-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  egress-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PyYAML (pinned)
+        run: pip install pyyaml==6.0.2
+
+      - name: Run scanner's own unit tests
+        run: ./tests/test-egress-scan/run.sh
+
+      - name: Enforce the egress allowlist (PR-blocking)
+        run: python3 scripts/check-egress-allowlist.py
