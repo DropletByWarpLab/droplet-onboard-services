@@ -127,6 +127,35 @@ including the drill's failure path (wrong key ⇒ `status: failed` + non-zero
 exit). Static checks + the derivation KAT always run; the live drill SKIPs
 cleanly when Docker or restic is unavailable.
 
+## Encryption verification harness (WARP-966)
+
+`droplet-verify-encryption.sh` (+ `droplet-verify-encryption-lib.sh`) probes
+data-at-rest (LUKS2) and every in-transit hop (Postgres, Redis, MQTT, internal
+service mesh, nginx edge) and emits a **signed, hash-chained evidence bundle**
+satisfying the WARP-966 acceptance criteria (epic WARP-957, GA security
+cut-line). One command on the box:
+
+```bash
+sudo bash scripts/host/droplet-verify-encryption.sh          # full pass
+sudo bash scripts/host/droplet-verify-encryption.sh --list   # show the check registry
+sudo bash scripts/host/droplet-verify-encryption.sh --verify-bundle <dir>   # re-verify later
+```
+
+Every registered check always reports an explicit `PASS | FAIL | SKIP` (same
+status contract as the watchdog). A **FAIL is a documented plaintext path and a
+release blocker** per the AC — expected today because the encryption tickets
+(WARP-232/233/234/235/236) are still in flight, and flips to PASS as each lands.
+Bundles land under `/var/lib/droplet/verify/<UTC-ts>/` (`report.json`,
+`report.md`, `evidence/`, `manifest.sha256`, `manifest.sig`,
+`device-id-cert.pem`); the manifest is signed by the device-identity sidecar
+(WARP-230) and degrades to unsigned if that sidecar is absent.
+
+Full runbook: `docs/security/encryption-verification.md`. Bundle convention:
+`docs/security/evidence/README.md`. Test: `npm run test:verify-encryption` (or
+`bash tests/verify-encryption.test.sh`) — evaluators against committed fixtures
+plus the real runner end-to-end against stub binaries (no root / hardware /
+Docker daemon).
+
 ## Backup & restore (WARP-570)
 
 | Script | Purpose |

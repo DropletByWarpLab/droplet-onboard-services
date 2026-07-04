@@ -1,0 +1,14 @@
+LUKS header information for /dev/nvme0n1p3
+
+Version:       	1
+Cipher name:   	aes
+Cipher mode:   	xts-plain64
+Hash spec:     	sha256
+Payload offset:	4096
+MK bits:       	512
+Key Slot 0: ENABLED
+	Iterations:         	1721612
+	Salt:               	fe ed fa ce fe ed fa ce fe ed fa ce fe ed fa ce
+	Key material offset:	8
+	AF stripes:            	4000
+Key Slot 1: DISABLED

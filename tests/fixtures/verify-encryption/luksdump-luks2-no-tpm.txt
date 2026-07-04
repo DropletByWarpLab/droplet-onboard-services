@@ -1,0 +1,58 @@
+LUKS header information
+Version:       	2
+Epoch:         	5
+Metadata area: 	16384 [bytes]
+Keyslots area: 	16744448 [bytes]
+UUID:          	2c6dfc9c-6f4f-4a9e-9a51-3f3ac9a13579
+Label:         	droplet-data
+Subsystem:     	(no subsystem)
+Flags:       	(no flags)
+
+Data segments:
+  0: crypt
+	offset: 16777216 [bytes]
+	length: (whole device)
+	cipher: aes-xts-plain64
+	sector: 4096 [bytes]
+
+Keyslots:
+  0: luks2
+	Key:        512 bits
+	Priority:   normal
+	Cipher:     aes-xts-plain64
+	Cipher key: 512 bits
+	PBKDF:      argon2id
+	Time cost:  7
+	Memory:     1048576
+	Threads:    4
+	Salt:       de ad be ef de ad be ef de ad be ef de ad be ef
+	            de ad be ef de ad be ef de ad be ef de ad be ef
+	AF stripes: 4000
+	AF hash:    sha256
+	Area offset:32768 [bytes]
+	Area length:258048 [bytes]
+	Digest ID:  0
+  1: luks2
+	Key:        512 bits
+	Priority:   normal
+	Cipher:     aes-xts-plain64
+	Cipher key: 512 bits
+	PBKDF:      pbkdf2
+	Hash:       sha512
+	Iterations: 1000
+	Salt:       ca fe ba be ca fe ba be ca fe ba be ca fe ba be
+	            ca fe ba be ca fe ba be ca fe ba be ca fe ba be
+	AF stripes: 4000
+	AF hash:    sha512
+	Area offset:290816 [bytes]
+	Area length:258048 [bytes]
+	Digest ID:  0
+Tokens:
+Digests:
+  0: pbkdf2
+	Hash:       sha256
+	Iterations: 350000
+	Salt:       01 02 03 04 05 06 07 08 01 02 03 04 05 06 07 08
+	            01 02 03 04 05 06 07 08 01 02 03 04 05 06 07 08
+	Digest:     0a 0b 0c 0d 0a 0b 0c 0d 0a 0b 0c 0d 0a 0b 0c 0d
+	            0a 0b 0c 0d 0a 0b 0c 0d 0a 0b 0c 0d 0a 0b 0c 0d

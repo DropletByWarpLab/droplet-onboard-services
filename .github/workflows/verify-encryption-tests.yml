@@ -1,0 +1,43 @@
+name: verify-encryption-tests
+
+# WARP-966 — on-box encryption verification harness (rest + transit). Pure shell
+# tests drive the evaluators against committed fixtures and the real runner
+# end-to-end against stub docker / cryptsetup / lsblk / findmnt / tcpdump /
+# openssl binaries (no root, hardware, or docker daemon needed), plus a
+# shellcheck pass over the runner + lib.
+
+on:
+  pull_request:
+    paths:
+      - "scripts/host/droplet-verify-encryption.sh"
+      - "scripts/host/droplet-verify-encryption-lib.sh"
+      - "tests/verify-encryption.test.sh"
+      - "tests/fixtures/verify-encryption/**"
+      - ".github/workflows/verify-encryption-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "scripts/host/droplet-verify-encryption.sh"
+      - "scripts/host/droplet-verify-encryption-lib.sh"
+      - "tests/verify-encryption.test.sh"
+      - "tests/fixtures/verify-encryption/**"
+      - ".github/workflows/verify-encryption-tests.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: verify-encryption-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-encryption:
+    runs-on: ubuntu-latest
+    # Everything is local stubs + tmpdirs; a hung test must fail fast.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck the harness
+        # warning severity to match ship-check's bar; no global excludes —
+        # waivers live inline per scripts/test/ship-check.sh convention.
+        run: shellcheck --severity=warning -x scripts/host/droplet-verify-encryption.sh scripts/host/droplet-verify-encryption-lib.sh
+      - name: Run encryption-verification shell tests
+        run: bash tests/verify-encryption.test.sh
