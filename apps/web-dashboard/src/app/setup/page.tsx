@@ -16,6 +16,7 @@ import { DiscoveryStep } from "@/components/setup/steps/DiscoveryStep";
 import { CamerasStep } from "@/components/setup/steps/CamerasStep";
 import { VpnStep } from "@/components/setup/steps/VpnStep";
 import { AiStep } from "@/components/setup/steps/AiStep";
+import { VoiceStep } from "@/components/setup/steps/VoiceStep";
 import { TeamStep } from "@/components/setup/steps/TeamStep";
 import { DoneStep } from "@/components/setup/steps/DoneStep";
 import { STEPS, type Step } from "@/components/setup/wizard-steps";
@@ -93,6 +94,13 @@ function resumeStepFrom(setupStep: string | undefined): Step {
  */
 function persistedStep(step: Step): string | null {
   if (step === "wifi" || step === "address") return "internet";
+  // WARP-1036 — `voice` is a CLIENT-ONLY step slotted between `ai` and `team`
+  // (no `SetupStep` enum member; the enum is deliberately not migrated). Same
+  // pattern as wifi/address: persist it as the nearest PRECEDING persisted
+  // step, `ai`, so the fire-and-forget PATCH never 400s and a mid-step
+  // refresh resumes at `ai` — exactly how a refresh on `address` resumes at
+  // `wifi`. The pointer catches up when the customer reaches `team`.
+  if (step === "voice") return "ai";
   // `twofactor` is client-only with NO SetupStep enum value at all (PR #375)
   // — unlike wifi/address there is nothing to map it to, and sending it gets
   // a silent 400 INVALID_SETUP_STEP on the fire-and-forget PATCH, leaving
@@ -401,8 +409,19 @@ function SetupWizard({ initialStep }: { initialStep: Step }) {
 
       {step === "ai" && (
         <AiStep
+          onComplete={() => setStep("voice")}
+          onSkip={() => setStep("voice")}
+        />
+      )}
+
+      {/* WARP-1036 — meet the "hey droplet" assistant. Auto-skips ONLY on the
+          orchestrator's explicit 503 voice_unavailable (voice-io not deployed
+          — macOS dev); a generic error renders in-step (WARP-933). */}
+      {step === "voice" && (
+        <VoiceStep
           onComplete={() => setStep("team")}
           onSkip={() => setStep("team")}
+          onAutoSkip={() => autoSkip("team")}
         />
       )}
 

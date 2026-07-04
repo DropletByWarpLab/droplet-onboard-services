@@ -45,6 +45,14 @@ const requestDestroyPoolMock = vi.fn();
 const confirmPoolCommandMock = vi.fn();
 // WARP-662 — adopt (wipe + reformat + mount) a previously-used drive.
 const requestAdoptDriveMock = vi.fn();
+// WARP-936 — the step now queries pools so an existing array isn't silently
+// ignored during setup. Default: none (the historic shape).
+const fetchPoolsMock = vi.fn(
+  async (..._a: unknown[]): Promise<{ pools: unknown[]; count: number }> => ({
+    pools: [],
+    count: 0,
+  }),
+);
 
 vi.mock("@/lib/api", () => ({
   // WARP-867 — AccountStep probes setup status on mount to pick its mode;
@@ -93,7 +101,7 @@ vi.mock("@/lib/api", () => ({
   updateDriveLabel: (uuid: string, patch: unknown) =>
     updateDriveLabelMock(uuid, patch),
   // Pool APIs — present so the test can assert the wizard never touches them.
-  fetchPools: vi.fn(async () => ({ pools: [], count: 0 })),
+  fetchPools: (...a: unknown[]) => fetchPoolsMock(...a),
   requestCreatePool: (...a: unknown[]) => requestCreatePoolMock(...a),
   requestDestroyPool: (...a: unknown[]) => requestDestroyPoolMock(...a),
   confirmPoolCommand: (...a: unknown[]) => confirmPoolCommandMock(...a),
@@ -948,6 +956,118 @@ describe("setup Storage step — adopt existing drives (WARP-662)", () => {
       expect(screen.getByText(/in use right now/i)).toBeInTheDocument(),
     );
     expect(screen.queryByText(/system disk/i)).toBeNull();
+  });
+});
+
+// =====================================================================
+// WARP-936 — the reclaim list now comes from the orchestrator's whole-disk
+// inventory (disks field), so a present-but-UNMOUNTED disk is finally
+// offered — the exact gap that made the live box's two RAID-member drives
+// unreachable ("No extra drives to set up"). An existing pool is queried
+// and surfaced instead of silently ignored.
+// =====================================================================
+describe("setup Storage step — unmounted disks + existing pool (WARP-936)", () => {
+  const MD127 = {
+    device: "md127",
+    level: "raid1" as const,
+    status: "resyncing" as const,
+    members: ["sda", "sdb"],
+    displayName: null,
+    notes: null,
+  };
+
+  beforeEach(() => {
+    fetchDrivesMock.mockReset();
+    requestAdoptDriveMock.mockReset();
+    confirmPoolCommandMock.mockReset();
+    requestCreatePoolMock.mockReset();
+    updateDriveLabelMock.mockReset();
+    fetchPoolsMock.mockReset();
+    fetchPoolsMock.mockResolvedValue({ pools: [], count: 0 });
+  });
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function adoptSwitch() {
+    return screen.getByRole("switch", { name: /reclaim existing drives/i });
+  }
+
+  it("offers reclaim for an unmounted foreign disk from the disks inventory", async () => {
+    fetchDrivesMock.mockResolvedValue({
+      drives: [],
+      count: 0,
+      disks: [
+        { name: "sdc", size_bytes: 2_000_000_000_000, state: "foreign", fstype: "ntfs", bus: "usb", model: "Samsung T7" },
+      ],
+    });
+    requestAdoptDriveMock.mockResolvedValue({
+      confirmationToken: "tok-936",
+      service: "drive_adopt",
+      resourceId: "sdc",
+    });
+    render(<SetupPage />);
+    await advanceToStorage();
+
+    // NOT the dead-end empty state — there is a disk to act on.
+    expect(screen.queryByText(/no extra drives to set up/i)).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(adoptSwitch());
+    });
+    const btn = screen.getByRole("button", { name: /erase & adopt/i });
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+    expect(requestAdoptDriveMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        device: "sdc",
+        wipeMethod: "quick",
+        confirmPhrase: "ERASE sdc",
+      }),
+    );
+  });
+
+  it("routes pool-member disks to the pool — never an individual adopt", async () => {
+    fetchDrivesMock.mockResolvedValue({
+      drives: [],
+      count: 0,
+      disks: [
+        { name: "sda", size_bytes: 1_800_000_000_000, state: "pool_member", md: "md127", fstype: "linux_raid_member" },
+        { name: "sdb", size_bytes: 1_800_000_000_000, state: "pool_member", md: "md127", fstype: "linux_raid_member" },
+      ],
+    });
+    fetchPoolsMock.mockResolvedValue({ pools: [MD127], count: 1 });
+    render(<SetupPage />);
+    await advanceToStorage();
+
+    await act(async () => {
+      fireEvent.click(adoptSwitch());
+    });
+    // No destructive per-disk button for md members; honest routing copy.
+    expect(screen.queryByRole("button", { name: /erase & adopt/i })).toBeNull();
+    expect(screen.getAllByText(/in your storage pool/i).length).toBeGreaterThan(0);
+    expect(requestAdoptDriveMock).not.toHaveBeenCalled();
+  });
+
+  it("shows an existing pool during setup instead of ignoring it", async () => {
+    fetchDrivesMock.mockResolvedValue({ drives: [], count: 0, disks: [] });
+    fetchPoolsMock.mockResolvedValue({ pools: [MD127], count: 1 });
+    render(<SetupPage />);
+    await advanceToStorage();
+
+    expect(screen.queryByText(/no extra drives to set up/i)).toBeNull();
+    expect(screen.getByText(/already has a storage pool/i)).toBeInTheDocument();
+    // Surfacing the pool never auto-creates or formats anything.
+    expect(requestCreatePoolMock).not.toHaveBeenCalled();
+    expect(confirmPoolCommandMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps the honest empty state on an older stack with no disks field and no pool", async () => {
+    fetchDrivesMock.mockResolvedValue({ drives: [], count: 0 });
+    render(<SetupPage />);
+    await advanceToStorage();
+    expect(screen.getByText(/no extra drives to set up/i)).toBeInTheDocument();
   });
 });
 

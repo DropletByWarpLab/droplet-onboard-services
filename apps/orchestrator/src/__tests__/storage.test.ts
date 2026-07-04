@@ -513,6 +513,78 @@ describe("storage routes — data-drive inclusion filter (WARP-827)", () => {
   });
 });
 
+describe("storage routes — adoptable-disks passthrough (WARP-936)", () => {
+  // The bridge's /drives snapshot now carries a top-level `disks` array —
+  // whole-disk inventory with explicit states (in_use | pool_member |
+  // foreign | available) — so present-but-unmounted disks are no longer
+  // invisible to the dashboard. The orchestrator forwards it with the same
+  // WARP-827 defense-in-depth: anything matching os_disk is dropped here
+  // too, even though the bridge already excludes it.
+  const disksSnapshot = {
+    os_disk: "nvme0n1",
+    drives: [],
+    count: 0,
+    disks: [
+      { name: "sda", size_bytes: 1.8e12, state: "pool_member", md: "md127", fstype: "linux_raid_member", bus: "sata", model: "WDC WD20EARZ", serial: "WD-A" },
+      { name: "sdb", size_bytes: 1.8e12, state: "pool_member", md: "md127", fstype: "linux_raid_member", bus: "sata", model: "WDC WD20EARZ", serial: "WD-B" },
+      { name: "sdc", size_bytes: 2e12, state: "foreign", fstype: "ntfs", bus: "usb", model: "Samsung T7", serial: "S-1" },
+      { name: "sdd", size_bytes: 1e12, state: "available", fstype: "", bus: "sata", model: "", serial: "" },
+    ],
+    snapshot_at: "2026-07-03T00:00:00Z",
+  };
+
+  it("forwards the bridge's disks array on GET /api/storage/drives", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ ok: true, json: async () => disksSnapshot })),
+    );
+    const app = buildApp(createPrismaMock());
+    const res = await request(app).get("/api/storage/drives");
+    expect(res.status).toBe(200);
+    expect(res.body.disks.map((d: any) => d.name)).toEqual(["sda", "sdb", "sdc", "sdd"]);
+    const sda = res.body.disks.find((d: any) => d.name === "sda");
+    expect(sda.state).toBe("pool_member");
+    expect(sda.md).toBe("md127");
+    // The mounted-drives contract is untouched: still filtered, still counted.
+    expect(res.body.drives).toEqual([]);
+    expect(res.body.count).toBe(0);
+  });
+
+  it("drops a disk matching os_disk (defense in depth over a mis-scoped bridge)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          ...disksSnapshot,
+          disks: [
+            ...disksSnapshot.disks,
+            { name: "nvme0n1", size_bytes: 5e11, state: "in_use", fstype: "", bus: "nvme", model: "OS SSD", serial: "OS-1" },
+          ],
+        }),
+      })),
+    );
+    const app = buildApp(createPrismaMock());
+    const res = await request(app).get("/api/storage/drives");
+    expect(res.status).toBe(200);
+    expect(res.body.disks.map((d: any) => d.name)).not.toContain("nvme0n1");
+  });
+
+  it("OMITS the disks key (not an error) for an older bridge without the field", async () => {
+    // fixtureSnapshot predates WARP-936 — no `disks` key at all. The key must
+    // be ABSENT (not `[]`) in the response: the setup wizard discriminates on
+    // `resp.disks ?? null` to fall back to the WARP-662 mounted-drives reclaim
+    // list, and host-side bridges only update on reflash while this container
+    // updates independently — an empty array would read as an authoritative
+    // "no disks" and silently drop that fallback during setup.
+    const app = buildApp(createPrismaMock());
+    const res = await request(app).get("/api/storage/drives");
+    expect(res.status).toBe(200);
+    expect("disks" in res.body).toBe(false);
+    expect(res.body.drives).toHaveLength(3);
+  });
+});
+
 describe("storage routes — device-bridge URL (WARP-660)", () => {
   // Regression lock: the bridge URL default MUST be the host.docker.internal
   // form, NOT the docker0 gateway (172.17.0.1). On the single-box deployment

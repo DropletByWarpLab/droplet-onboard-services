@@ -191,11 +191,21 @@ export function AddressStep({
       await setBoxName(slug);
       onComplete();
     } catch (e) {
-      setSaveError(
-        e instanceof Error
-          ? e.message
-          : "Couldn't save that name. Try again in a moment.",
-      );
+      // WARP-984 — the orchestrator distinguishes "this box already holds a
+      // (different) name at HQ" from a name taken by another box. Key the copy
+      // off the error CODE so the owner gets the honest story instead of a
+      // misleading "taken".
+      if ((e as { code?: unknown })?.code === "BOX_NAME_RENAME_UNSUPPORTED") {
+        setSaveError(
+          "This box already holds a secure address — renaming isn't supported yet. A factory reset releases it.",
+        );
+      } else {
+        setSaveError(
+          e instanceof Error
+            ? e.message
+            : "Couldn't save that name. Try again in a moment.",
+        );
+      }
     } finally {
       setSaving(false);
     }

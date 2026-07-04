@@ -92,6 +92,19 @@ vi.mock("@/lib/api", () => ({
   // AI step: no models yet → "Skip for now" is always present.
   fetchModels: vi.fn(async () => ({ models: [] })),
   sendChat: vi.fn(),
+  // WARP-1036 — voice slots after ai; healthy listening status so the step
+  // renders (the flow skips it). sayVoiceTest resolves in case it's poked.
+  fetchVoiceStatus: vi.fn(async () => ({
+    state: "listening",
+    listening: true,
+    wake_loaded: true,
+    wake_model: "hey_droplet",
+    threshold: 0.7,
+    last_wake_at: null,
+  })),
+  sayVoiceTest: vi.fn(async () => ({ ok: true, duration_s: 1.0 })),
+  isVoiceUnavailableError: (err: unknown) =>
+    (err as { code?: string } | null)?.code === "voice_unavailable",
   // PR #381 — team slots after ai; TeamStep imports postTeamInvite. The flow
   // test skips the step (no invite), but the import must resolve.
   postTeamInvite: vi.fn(async () => ({
@@ -240,9 +253,16 @@ describe("setup flow → done state", () => {
       await Promise.resolve();
       fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
     });
-    // AI step → skip → Team (PR #381 slots team after ai). fetchModels mocked
-    // empty so the picker just shows "No models available yet"; the Skip link
-    // is always rendered.
+    // AI step → skip → Voice (WARP-1036 slots voice after ai). fetchModels
+    // mocked empty so the picker just shows "No models available yet"; the
+    // Skip link is always rendered.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
+    // Voice step → skip → Team. The status fetch resolves "listening"; the
+    // Skip link is rendered in every phase of the step.
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();

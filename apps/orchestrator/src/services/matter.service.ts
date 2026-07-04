@@ -189,6 +189,22 @@ export interface MatterCapabilities {
    * false when the box is IP-only OR the sidecar is unreachable.
    */
   bleCommissioning: boolean;
+  /**
+   * WARP-1035: whether the sidecar can hand a BLE-first device the
+   * Droplet AP's Wi-Fi credentials during commissioning (WARP-895).
+   * Computed by the sidecar at request time from the same
+   * resolveWifiNetwork() the commission path uses — false means a
+   * BLE-paired device has no network to join, so commissioning is
+   * effectively on-network-only. False too when the sidecar is
+   * unreachable (same honest degrade as bleCommissioning).
+   */
+  wifiProvisioning: boolean;
+  /**
+   * WARP-1035: the Droplet AP's SSID (DROPLET_MATTER_WIFI_SSID) so the
+   * dashboard can name the network new devices join. Null when unset
+   * or the sidecar is unreachable.
+   */
+  apSsid: string | null;
 }
 
 /**
@@ -202,18 +218,25 @@ export interface MatterCapabilities {
  */
 export async function getMatterCapabilities(): Promise<MatterCapabilities> {
   try {
-    const caps = await sidecarJson<{ bleCommissioning?: boolean }>(
-      "/capabilities",
-      {},
-      CAPABILITIES_TIMEOUT_MS,
-    );
-    return { bleCommissioning: caps.bleCommissioning === true };
+    const caps = await sidecarJson<{
+      bleCommissioning?: boolean;
+      wifiProvisioning?: boolean;
+      apSsid?: string | null;
+    }>("/capabilities", {}, CAPABILITIES_TIMEOUT_MS);
+    return {
+      bleCommissioning: caps.bleCommissioning === true,
+      wifiProvisioning: caps.wifiProvisioning === true,
+      apSsid:
+        typeof caps.apSsid === "string" && caps.apSsid.trim() !== ""
+          ? caps.apSsid
+          : null,
+    };
   } catch (err) {
     logger.debug(
       "matter-controller capabilities probe failed: %s",
       (err as Error).message,
     );
-    return { bleCommissioning: false };
+    return { bleCommissioning: false, wifiProvisioning: false, apSsid: null };
   }
 }
 

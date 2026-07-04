@@ -59,9 +59,11 @@ time to play.
 from __future__ import annotations
 
 import logging
+import math
 import re
 import threading
 import time
+from collections import deque
 from dataclasses import asdict, dataclass
 from typing import Any, Callable, Optional
 
@@ -282,6 +284,38 @@ DEFAULT_INPUT_GAIN = 1.0
 DEFAULT_RECOVER_BACKOFF_INITIAL_S = 0.5  # first retry delay after a disconnect
 DEFAULT_RECOVER_BACKOFF_MAX_S = 5.0      # cap — a missing mic retries every 5 s
 
+# Input-level tracking + flatline watchdog (WARP-1037).
+#
+# The ReSpeaker XVF3800's XMOS DSP has a known wedge mode (continuous
+# xhci buffer overruns): the USB audio stream stays open — so the
+# pipeline sits in 'listening' and /health reports 200 — while every
+# delivered frame is pure digital silence. "Healthy but deaf." The
+# device self-heal path above only covers *disconnects*, not a stream
+# that flows zeros. So the frame handler tracks a rolling input RMS
+# (this is the ONLY safe place to measure it — opening a second
+# InputStream on the same hw device risks ALSA EBUSY), and status()
+# computes a read-time flatline flag: input at/near digital zero for
+# the whole window while state=listening ⇒ input_flatlined=True ⇒
+# /health degrades to 503 so the Docker healthcheck + ops-console see
+# the wedge instead of a green light.
+DEFAULT_FLATLINE_WINDOW_S = 240.0  # 4 min of silence while listening = wedged.
+                                   # Long enough that a genuinely silent room
+                                   # never trips it (a real mic's noise floor
+                                   # sits well above the dBFS gate anyway);
+                                   # short enough that ops sees a wedge within
+                                   # minutes. 0 disables. Env: VOICE_FLATLINE_WINDOW_S.
+DEFAULT_FLATLINE_DBFS = -70.0      # frames below this count as "no signal".
+                                   # A healthy capture chain's noise floor is
+                                   # ≈ -60…-50 dBFS; a wedged DSP emits exact
+                                   # zeros (floor) or ±1-count dither (≈ -90).
+                                   # Env: VOICE_FLATLINE_DBFS.
+DEFAULT_RMS_WINDOW_FRAMES = 25     # rolling-RMS window ≈ 2 s of 80 ms frames —
+                                   # smooth enough for a wizard level meter,
+                                   # short enough to feel live.
+RMS_DBFS_FLOOR = -120.0            # reported dBFS for pure digital silence
+                                   # (log10(0) is -inf; JSON can't carry it).
+_INT16_FULL_SCALE = 32768.0
+
 # State enumeration. The string form is what /voice/status exposes so
 # the dashboard can switch on it directly. Kept as a typedef rather
 # than an Enum because all reads cross thread boundaries + JSON, and
@@ -330,6 +364,19 @@ class PipelineStatus:
     # When false the wake → STT path still works (transcripts land in
     # last_transcript) but no spoken reply happens.
     llm_loaded: bool = False
+    # Input-level fields (WARP-1037). `input_rms_dbfs` is a rolling RMS
+    # over the last ~2 s of captured mic frames, measured inside the
+    # pipeline's own frame handler (never a second audio stream — ALSA
+    # EBUSY). None until the first frame arrives. `last_audio_at` is
+    # the wall time of the last frame whose level cleared the flatline
+    # threshold, i.e. carried ANY real signal. `input_flatlined` flips
+    # True when the input has sat at/near digital zero for the whole
+    # flatline window while state=listening — the ReSpeaker XVF3800's
+    # wedged-DSP signature ("listening but deaf"); /health degrades to
+    # 503 on it.
+    input_rms_dbfs: Optional[float] = None
+    last_audio_at: Optional[float] = None
+    input_flatlined: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -375,6 +422,9 @@ class WakePipeline:
         sd_reinit: Optional[Callable[[Any], None]] = None,
         input_downmix: str = DEFAULT_INPUT_DOWNMIX,
         input_gain: float = DEFAULT_INPUT_GAIN,
+        flatline_window_s: float = DEFAULT_FLATLINE_WINDOW_S,
+        flatline_dbfs: float = DEFAULT_FLATLINE_DBFS,
+        rms_window_frames: int = DEFAULT_RMS_WINDOW_FRAMES,
     ):
         self._detector = detector
         self._input_device_index = input_device_index
@@ -435,6 +485,25 @@ class WakePipeline:
             else DEFAULT_INPUT_DOWNMIX
         )
         self._input_gain = input_gain if input_gain > 0 else DEFAULT_INPUT_GAIN
+        # Input-level tracking + flatline watchdog (WARP-1037). See the
+        # DEFAULT_FLATLINE_* docstrings. The rolling window holds
+        # (sum-of-squares, sample-count) per frame; running totals keep
+        # the per-frame cost at scalar arithmetic. The pipeline thread
+        # is the sole writer; the published fields are updated under
+        # _lock so status() reads stay coherent.
+        self._flatline_window_s = max(0.0, flatline_window_s)
+        self._flatline_dbfs = flatline_dbfs
+        self._rms_window_frames = max(1, int(rms_window_frames))
+        self._rms_window: deque[tuple[float, int]] = deque()
+        self._rms_sumsq_total = 0.0
+        self._rms_samples_total = 0
+        self._input_rms_dbfs: Optional[float] = None
+        self._last_audio_at: Optional[float] = None
+        # Baseline for "no real audio seen SINCE …" — set when a capture
+        # session opens (and lazily on the first tracked frame) so the
+        # flatline clock never compares against timestamps from before a
+        # device recovery.
+        self._audio_watch_started_at: Optional[float] = None
 
         self._thread: Optional[threading.Thread] = None
         self._probe_thread: Optional[threading.Thread] = None
@@ -718,6 +787,23 @@ class WakePipeline:
             ):
                 state = "listening"
 
+            # Flatline (WARP-1037) — computed on read, no timer thread.
+            # Only meaningful while 'listening': error/no_mic already
+            # degrade /health on their own, and every other state is a
+            # legitimately signal-free or transient window. The clock
+            # runs from the later of (last real-audio frame, capture-
+            # session start) so a freshly (re)opened stream gets a full
+            # window before it can flag.
+            input_flatlined = False
+            if state == "listening" and self._flatline_window_s > 0:
+                refs = [
+                    t
+                    for t in (self._last_audio_at, self._audio_watch_started_at)
+                    if t is not None
+                ]
+                if refs and now - max(refs) >= self._flatline_window_s:
+                    input_flatlined = True
+
             return PipelineStatus(
                 state=state,
                 # `listening` in the API means "actively consuming audio":
@@ -750,6 +836,9 @@ class WakePipeline:
                 last_response=self._last_response,
                 last_response_at=self._last_response_at,
                 llm_loaded=self._llm_available,
+                input_rms_dbfs=self._input_rms_dbfs,
+                last_audio_at=self._last_audio_at,
+                input_flatlined=input_flatlined,
             )
 
     # ──────────────────────────────────────────────────────────────
@@ -871,6 +960,11 @@ class WakePipeline:
                 self._detector.model_name,
                 self._threshold,
             )
+            # New capture session (fresh open or post-recovery reopen):
+            # restart the flatline clock so stale pre-disconnect
+            # timestamps can't instantly flag a recovered stream.
+            with self._lock:
+                self._audio_watch_started_at = time.time()
             self._set_state("listening")
             while not self._shutdown.is_set():
                 # Tight device-I/O scope: ONLY the read is wrapped, so a
@@ -965,7 +1059,61 @@ class WakePipeline:
             )
         self._input_device_index = new_index
 
+    def _track_input_level(self, frame: np.ndarray) -> None:
+        """Rolling input-level tracking (WARP-1037). Runs on the pipeline
+        thread for EVERY captured frame, in every state — so it must stay
+        cheap. `np.einsum` reduces the int16 frame to a float64
+        sum-of-squares without materialising an intermediate array; the
+        rest is scalar math + one uncontended lock acquire at 12.5 fps.
+
+        Publishes `input_rms_dbfs` (rolling RMS over the last
+        `rms_window_frames` frames) and refreshes `last_audio_at` whenever
+        a frame's own level clears the flatline threshold. status() turns
+        those into the read-time `input_flatlined` flag.
+        """
+        n = int(frame.size)
+        if n == 0:
+            return
+        # Sum of squares in float64 (int16² overflows int16/int32 sums).
+        sumsq = float(np.einsum("i,i->", frame, frame, dtype=np.float64))
+        frame_rms = math.sqrt(sumsq / n)
+        frame_dbfs = (
+            max(RMS_DBFS_FLOOR, 20.0 * math.log10(frame_rms / _INT16_FULL_SCALE))
+            if frame_rms > 0.0
+            else RMS_DBFS_FLOOR
+        )
+        # Rolling-window bookkeeping — pipeline thread is the only writer.
+        if len(self._rms_window) >= self._rms_window_frames:
+            old_sumsq, old_n = self._rms_window.popleft()
+            self._rms_sumsq_total -= old_sumsq
+            self._rms_samples_total -= old_n
+        self._rms_window.append((sumsq, n))
+        self._rms_sumsq_total += sumsq
+        self._rms_samples_total += n
+        rolling_rms = math.sqrt(
+            max(0.0, self._rms_sumsq_total) / self._rms_samples_total
+        )
+        rolling_dbfs = (
+            max(RMS_DBFS_FLOOR, 20.0 * math.log10(rolling_rms / _INT16_FULL_SCALE))
+            if rolling_rms > 0.0
+            else RMS_DBFS_FLOOR
+        )
+        now = time.time()
+        with self._lock:
+            self._input_rms_dbfs = rolling_dbfs
+            if self._audio_watch_started_at is None:
+                # Lazy baseline: first frame ever seen. The capture
+                # session normally sets this at stream-open; this covers
+                # direct _on_frame use (tests) without special-casing.
+                self._audio_watch_started_at = now
+            if frame_dbfs > self._flatline_dbfs:
+                self._last_audio_at = now
+
     def _on_frame(self, frame: np.ndarray) -> None:
+        # Input-level tracking first (WARP-1037): every frame counts,
+        # regardless of which state it dispatches to below — a wedged
+        # DSP flows silence in ALL states.
+        self._track_input_level(frame)
         # Apply visual-decay BEFORE dispatch so a stale wake_detected /
         # transcript_ready that should have decayed actually does. status()
         # decays lazily on read, but the worker thread reads _state

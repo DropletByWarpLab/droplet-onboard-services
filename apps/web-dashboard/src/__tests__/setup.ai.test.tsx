@@ -87,6 +87,18 @@ vi.mock("@/lib/api", () => ({
   createVpnPeer: vi.fn(),
   fetchModels: () => fetchModelsMock(),
   sendChat: (req: unknown) => sendChatMock(req),
+  // WARP-1036 — voice slots after ai; VoiceStep probes status on mount.
+  fetchVoiceStatus: vi.fn(async () => ({
+    state: "listening",
+    listening: true,
+    wake_loaded: true,
+    wake_model: "hey_droplet",
+    threshold: 0.7,
+    last_wake_at: null,
+  })),
+  sayVoiceTest: vi.fn(async () => ({ ok: true, duration_s: 1.0 })),
+  isVoiceUnavailableError: (err: unknown) =>
+    (err as { code?: string } | null)?.code === "voice_unavailable",
   // PR #381 — team slots after ai; TeamStep imports postTeamInvite.
   postTeamInvite: vi.fn(async () => ({
     ok: true, token: "tok", email: "x@acme.co", role: "family",
@@ -279,7 +291,7 @@ describe("setup AI step (WARP-174)", () => {
     ).toBeInTheDocument();
   });
 
-  it("the post-response Continue CTA advances to the team step (PR #381)", async () => {
+  it("the post-response Continue CTA advances to the voice step, then team (WARP-1036)", async () => {
     fetchModelsMock.mockResolvedValue({ models: [LOCAL_MODEL] });
     sendChatMock.mockResolvedValue({
       ok: true,
@@ -298,23 +310,39 @@ describe("setup AI step (WARP-174)", () => {
       fireEvent.click(
         screen.getByRole("button", { name: /^continue$/i }),
       );
+      await Promise.resolve();
+      await Promise.resolve();
     });
 
-    // PR #381 — team now slots after ai (… → ai → team → done), so the AI step
-    // advances onto the Team step, not straight to the done flourish.
+    // WARP-1036 — voice now slots after ai (… → ai → voice → team → done),
+    // so the AI step advances onto the voice try-it step first.
+    expect(screen.getByText(/hey droplet/i)).toBeInTheDocument();
+    await act(async () => {
+      await Promise.resolve();
+      fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
+    // PR #381 — team still follows (voice → team → done).
     expect(screen.getByText(/bring in your team/i)).toBeInTheDocument();
   });
 
-  it("Skip for now advances to the team step without calling sendChat", async () => {
+  it("Skip for now advances to the voice step without calling sendChat (WARP-1036)", async () => {
     fetchModelsMock.mockResolvedValue({ models: [LOCAL_MODEL] });
     render(<SetupPage />);
     await advanceToAi();
 
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+      await Promise.resolve();
+      await Promise.resolve();
     });
 
     expect(sendChatMock).not.toHaveBeenCalled();
+    // WARP-1036 — the step after ai is now voice; team follows on skip.
+    expect(screen.getByText(/hey droplet/i)).toBeInTheDocument();
+    await act(async () => {
+      await Promise.resolve();
+      fireEvent.click(screen.getByRole("button", { name: /skip for now/i }));
+    });
     expect(screen.getByText(/bring in your team/i)).toBeInTheDocument();
   });
 

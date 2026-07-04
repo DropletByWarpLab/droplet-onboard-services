@@ -92,6 +92,19 @@ vi.mock("@/lib/api", () => ({
   // AI step is downstream — empty mock so its Skip link is always present.
   fetchModels: vi.fn(async () => ({ models: [] })),
   sendChat: vi.fn(),
+  // WARP-1036 — voice slots after ai. This suite is about the VPN step, so
+  // voice-io is "not deployed" here: the explicit voice_unavailable makes the
+  // step auto-skip (ai → voice → team collapses to ai → team), keeping the
+  // existing skip chains below valid while ALSO exercising the page-level
+  // auto-skip wiring.
+  fetchVoiceStatus: vi.fn(async () => {
+    const e = new Error("voice unavailable") as Error & { code?: string };
+    e.code = "voice_unavailable";
+    throw e;
+  }),
+  sayVoiceTest: vi.fn(async () => ({ ok: true, duration_s: 1.0 })),
+  isVoiceUnavailableError: (err: unknown) =>
+    (err as { code?: string } | null)?.code === "voice_unavailable",
   // PR #381 — team slots after ai; TeamStep imports postTeamInvite.
   postTeamInvite: vi.fn(async () => ({
     ok: true, token: "tok", email: "x@acme.co", role: "family",

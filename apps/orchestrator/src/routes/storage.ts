@@ -169,6 +169,28 @@ function isUserDataDrive(d: BridgeDrive, osDisk?: string): boolean {
 // bridge that times out or returns garbage) still log louder.
 // (Classifier shared with hostapd-bridge.service.ts — see lib/bridge-errors.ts.)
 
+/** WARP-936: one WHOLE physical disk from the bridge's lsblk inventory —
+ *  including present-but-unmounted disks the mounted-only `drives` list is
+ *  blind to. `state` is an explicit enum the bridge classified (the dashboard
+ *  branches on it, never guesses):
+ *    in_use      — the disk, a partition, or an md it backs is mounted
+ *    pool_member — carries a linux_raid_member signature (`md` names the array)
+ *    foreign     — has some fs/RAID/LVM signature but nothing mounted
+ *    available   — no signature at all
+ *  Read-only inventory — every destructive action stays behind the existing
+ *  tier-3 confirm-token + typed-phrase flow. */
+interface BridgeDisk {
+  name: string;
+  size_bytes: number;
+  state: "in_use" | "pool_member" | "foreign" | "available";
+  fstype?: string;
+  bus?: string;
+  model?: string;
+  serial?: string;
+  /** md array name (e.g. "md127") when state is pool_member. */
+  md?: string;
+}
+
 interface BridgeDrivesSnapshot {
   drives: BridgeDrive[];
   count: number;
@@ -176,6 +198,9 @@ interface BridgeDrivesSnapshot {
    *  orchestrator exclude any drive whose parent_disk matches. Absent when the
    *  bridge can't resolve it (then we hide nothing — fail open). */
   os_disk?: string;
+  /** WARP-936: whole-disk inventory with explicit states. Absent on an older
+   *  bridge — the route then forwards an empty list, never an error. */
+  disks?: BridgeDisk[];
   snapshot_at: string;
 }
 
@@ -362,9 +387,29 @@ export function createStorageRouter(prisma: PrismaClient): Router {
         };
       });
 
+      // WARP-936: forward the whole-disk inventory so the dashboard can
+      // surface present-but-unmounted disks (adopt/pool flows). Same
+      // defense-in-depth as the mounted list: anything matching os_disk is
+      // dropped here too, even though the bridge already excludes it. An
+      // older bridge without the field yields an ABSENT key — never `[]`,
+      // never an error: host-side bridges only update on reflash while this
+      // container updates independently, and the setup wizard discriminates
+      // on `disks ?? null` to fall back to the mounted-drives reclaim list
+      // (WARP-662). An empty array would read as an authoritative "no disks"
+      // and silently drop that fallback.
+      const disks =
+        snap.disks !== undefined
+          ? snap.disks.filter((d) => !snap.os_disk || d.name !== snap.os_disk)
+          : undefined;
+
       // count reflects the FILTERED set the dashboard renders, not the raw
       // bridge count (which may include the junk we just dropped).
-      res.json({ drives, count: drives.length, snapshot_at: snap.snapshot_at });
+      res.json({
+        drives,
+        count: drives.length,
+        ...(disks !== undefined ? { disks } : {}),
+        snapshot_at: snap.snapshot_at,
+      });
     } catch (err) {
       // The device-bridge is optional (OLED/display profile only). A
       // connection refusal means it simply isn't running on this host — an

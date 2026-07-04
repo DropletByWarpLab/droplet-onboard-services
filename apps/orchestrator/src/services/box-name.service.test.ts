@@ -29,6 +29,7 @@ import {
 import {
   CLAIM_RESULT_CLAIMED,
   CLAIM_RESULT_NAME_TAKEN,
+  CLAIM_RESULT_RENAME_UNSUPPORTED,
   CLAIM_RESULT_NOT_REGISTERED,
   CLAIM_RESULT_FAILED,
   type ClaimBoxNameResult,
@@ -191,6 +192,34 @@ describe("box-name.service — setBoxName (WARP-980)", () => {
     expect(result.taken).toBe(true);
     expect(result.authoritative).toBe(true);
     expect(result.suggestions).toEqual(["studio-2", "studio-hq"]);
+  });
+
+  it("threads a rename-unsupported claim through as renameUnsupported:true with currentName (WARP-984)", async () => {
+    const persist = vi.fn(async (_name: string) => {});
+    const claim = claiming({
+      outcome: CLAIM_RESULT_RENAME_UNSUPPORTED,
+      authoritative: true,
+      currentName: "scruceru",
+      slug: undefined,
+      fqdn: undefined,
+    });
+    const result = await setBoxName("studio", { persist, claim });
+
+    // Persistence still happened (best-effort local write), but HQ says this
+    // box already holds a DIFFERENT name — distinct from taken, so the wizard
+    // can say "factory reset releases it" instead of the false "taken".
+    expect(persist).toHaveBeenCalledTimes(1);
+    expect(result.taken).toBe(false);
+    expect(result.renameUnsupported).toBe(true);
+    expect(result.currentName).toBe("scruceru");
+    expect(result.authoritative).toBe(true);
+  });
+
+  it("reports renameUnsupported:false on every other claim outcome", async () => {
+    const persist = vi.fn(async (_name: string) => {});
+    const result = await setBoxName("studio", { persist, claim: claiming({}) });
+    expect(result.renameUnsupported).toBe(false);
+    expect(result.currentName).toBeUndefined();
   });
 
   it("falls back gracefully (authoritative:false) when the device is not registered yet", async () => {

@@ -45,6 +45,8 @@ const acceptDiscoveredCameraMock = vi.fn();
 const createVpnPeerMock = vi.fn();
 const sendChatMock = vi.fn();
 const postTeamInviteMock = vi.fn();
+// WARP-1036 — the voice step's speaker test.
+const sayVoiceTestMock = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   // WARP-867 — AccountStep probes setup status on mount to pick its mode;
@@ -165,6 +167,21 @@ vi.mock("@/lib/api", () => ({
   })),
   sendChat: (req: unknown) => sendChatMock(req),
 
+  // WARP-1036 — voice slots after ai. Healthy listening status; the happy
+  // path plays the speaker test then continues.
+  fetchVoiceStatus: vi.fn(async () => ({
+    state: "listening",
+    listening: true,
+    wake_loaded: true,
+    wake_model: "hey_droplet",
+    threshold: 0.7,
+    last_wake_at: null,
+  })),
+  sayVoiceTest: (...args: Parameters<typeof sayVoiceTestMock>) =>
+    sayVoiceTestMock(...args),
+  isVoiceUnavailableError: (err: unknown) =>
+    (err as { code?: string } | null)?.code === "voice_unavailable",
+
   // PR #381 — team slots after ai. The happy path invites one teammate.
   postTeamInvite: (...args: Parameters<typeof postTeamInviteMock>) =>
     postTeamInviteMock(...args),
@@ -196,6 +213,8 @@ describe("setup wizard E2E happy path (WARP-174)", () => {
     createVpnPeerMock.mockClear();
     sendChatMock.mockClear();
     postTeamInviteMock.mockClear();
+    sayVoiceTestMock.mockClear();
+    sayVoiceTestMock.mockResolvedValue({ ok: true, duration_s: 1.4 });
     postTeamInviteMock.mockResolvedValue({
       ok: true,
       token: "tok-e2e",
@@ -443,6 +462,23 @@ describe("setup wizard E2E happy path (WARP-174)", () => {
       fireEvent.click(
         screen.getByRole("button", { name: /^continue$/i }),
       );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // 8a. Voice (WARP-1036) → wake-phrase hero renders, speaker test plays,
+    // then continue.
+    expect(screen.getByText(/hey droplet/i)).toBeInTheDocument();
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /play a test message/i }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(sayVoiceTestMock).toHaveBeenCalledWith("Hi — I'm your Droplet");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /^continue$/i }));
     });
 
     // 8b. Team (PR #381) → invite one teammate → send invites & continue.

@@ -7,6 +7,7 @@ import {
   buildReleaseMessage,
   CLAIM_RESULT_CLAIMED,
   CLAIM_RESULT_NAME_TAKEN,
+  CLAIM_RESULT_RENAME_UNSUPPORTED,
   CLAIM_RESULT_NOT_REGISTERED,
   CLAIM_RESULT_INVALID,
   CLAIM_RESULT_FAILED,
@@ -248,6 +249,93 @@ describe("claimBoxName", () => {
     const result = await claimBoxName("studio", makeClaimDeps({ hq }));
     expect(result.outcome).toBe(CLAIM_RESULT_NAME_TAKEN);
     expect(result.suggestions).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // WARP-984 (box half) — the 409 body discriminator. A worker that implements
+  // the rename semantics sends `reason: "name_taken" | "device_already_named"`
+  // (+ `current_name`); the box maps device_already_named to a DISTINCT
+  // RENAME_UNSUPPORTED outcome so the wizard can say "this box already holds a
+  // name — factory reset releases it" instead of the false "that name is taken".
+  // Absent / unparseable reason ⇒ EXACTLY today's NAME_TAKEN (fail-open to old
+  // workers).
+  // -------------------------------------------------------------------------
+
+  it("409 reason 'device_already_named' → RENAME_UNSUPPORTED carrying current_name (WARP-984)", async () => {
+    const hq = makeHqClient({
+      claimName: vi.fn(async () => {
+        throw new Error(
+          'HQ /api/issuance/claim-name returned 409: {"error":"device already holds a name","reason":"device_already_named","current_name":"scruceru"}',
+        );
+      }),
+    });
+    const result = await claimBoxName("studio", makeClaimDeps({ hq }));
+    expect(result.outcome).toBe(CLAIM_RESULT_RENAME_UNSUPPORTED);
+    expect(result.authoritative).toBe(true);
+    expect(result.currentName).toBe("scruceru");
+  });
+
+  it("409 reason 'device_already_named' WITHOUT current_name → RENAME_UNSUPPORTED, currentName undefined", async () => {
+    const hq = makeHqClient({
+      claimName: vi.fn(async () => {
+        throw new Error(
+          'HQ /api/issuance/claim-name returned 409: {"reason":"device_already_named"}',
+        );
+      }),
+    });
+    const result = await claimBoxName("studio", makeClaimDeps({ hq }));
+    expect(result.outcome).toBe(CLAIM_RESULT_RENAME_UNSUPPORTED);
+    expect(result.currentName).toBeUndefined();
+  });
+
+  it("409 reason 'name_taken' (explicit discriminator) → NAME_TAKEN with suggestions", async () => {
+    const hq = makeHqClient({
+      claimName: vi.fn(async () => {
+        throw new Error(
+          'HQ /api/issuance/claim-name returned 409: {"error":"name taken","reason":"name_taken","suggestions":["studio-2"]}',
+        );
+      }),
+    });
+    const result = await claimBoxName("studio", makeClaimDeps({ hq }));
+    expect(result.outcome).toBe(CLAIM_RESULT_NAME_TAKEN);
+    expect(result.authoritative).toBe(true);
+    expect(result.suggestions).toEqual(["studio-2"]);
+  });
+
+  it("409 with NO body at all → NAME_TAKEN (fail-open to old workers)", async () => {
+    const hq = makeHqClient({
+      claimName: vi.fn(async () => {
+        throw new Error("HQ /api/issuance/claim-name returned 409: ");
+      }),
+    });
+    const result = await claimBoxName("studio", makeClaimDeps({ hq }));
+    expect(result.outcome).toBe(CLAIM_RESULT_NAME_TAKEN);
+    expect(result.suggestions).toEqual([]);
+  });
+
+  it("409 with a garbage (non-JSON) body → NAME_TAKEN (fail-open to old workers)", async () => {
+    const hq = makeHqClient({
+      claimName: vi.fn(async () => {
+        throw new Error(
+          "HQ /api/issuance/claim-name returned 409: {not json at all",
+        );
+      }),
+    });
+    const result = await claimBoxName("studio", makeClaimDeps({ hq }));
+    expect(result.outcome).toBe(CLAIM_RESULT_NAME_TAKEN);
+    expect(result.suggestions).toEqual([]);
+  });
+
+  it("409 with an UNKNOWN reason value → NAME_TAKEN (fail-open, forward-compatible)", async () => {
+    const hq = makeHqClient({
+      claimName: vi.fn(async () => {
+        throw new Error(
+          'HQ /api/issuance/claim-name returned 409: {"reason":"some_future_reason","current_name":42}',
+        );
+      }),
+    });
+    const result = await claimBoxName("studio", makeClaimDeps({ hq }));
+    expect(result.outcome).toBe(CLAIM_RESULT_NAME_TAKEN);
   });
 
   it("403 not registered / fp mismatch → NOT_REGISTERED (graceful fallback)", async () => {
