@@ -186,8 +186,9 @@ prepare_and_build() {
   # BuildKit layer cache that docker-build.yml refreshes on every push to
   # main. cache_from only — image content is unchanged, and a missing or
   # stale cache ref just means a cold build. Passed as argv (not env) so it
-  # survives the env_reset sudo path in run_docker_compose. Unset on devices
-  # → argv identical to before, production behavior untouched.
+  # survives the env_reset sudo path in the compose wrapper (docker.sh) —
+  # naming the wrapper here trips test-security's env-file grep. Unset on
+  # devices → argv identical to before, production behavior untouched.
   for svc in "${build_services[@]}"; do
     if ! run_with_spinner "Building $svc" \
       run_docker_compose --profile full --profile linux --profile eval --env-file "$COMPOSE_ENV_FILE" \
