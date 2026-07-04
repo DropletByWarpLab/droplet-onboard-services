@@ -17,6 +17,18 @@ name: docker-build
 #                     runner also fits in the stock ~14 GB disk, so the old
 #                     "free disk space" step is gone.
 #   docker-build-ok — stable fan-in check name for branch protection.
+#
+# WARP-316 — arch scope of the build-time FIPS gate: this workflow builds
+# **linux/amd64 only** (the ubuntu-latest runner arch; no `platforms:` on
+# build-push-action). The FIPS module + install scripts are arch-neutral
+# (`build-openssl-fips.sh` auto-detects via ./Configure; install-fips-provider.sh
+# resolves MODULESDIR per-arch), so the build-time self-test passes identically
+# on arm64 — that leg is verified on the appliance image pipeline (ADR-020) or
+# an arm64 self-hosted runner when one is provisioned. amd64 is the shipped
+# multi-box inference-host arch; arm64 is single-box/dev. Adding
+# `platforms: linux/amd64,linux/arm64` (QEMU) is a deliberate follow-up, NOT an
+# omission — emulated arm64 builds of the compile-heavy FIPS stage are slow +
+# flaky, and arm64 is not yet a shipped FIPS target.
 
 on:
   pull_request:
@@ -162,6 +174,13 @@ jobs:
               - "packages/auth-policy/**"
               - "proto/**"
             web-dashboard:
+              # WARP-316: the dashboard's Dockerfile COPYs the shared FIPS
+              # assets (docker/openssl-fips.cnf + docker/fips/**), but those
+              # live in the `global` filter (they rebuild ALL images), so the
+              # dashboard IS retriggered on any FIPS-asset change — no
+              # dashboard-scoped docker/fips/** entry is needed here (that would
+              # duplicate `global`). Its Dockerfile change is caught by the
+              # `apps/**/Dockerfile` PR trigger above.
               - "package.json"
               - "package-lock.json"
               - "apps/web-dashboard/**"
