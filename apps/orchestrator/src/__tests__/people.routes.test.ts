@@ -395,7 +395,13 @@ describe("PATCH /api/people/:id/role", () => {
 
     expect(res.status).toBe(403);
     expect(prisma.user.update).not.toHaveBeenCalled();
-    expect(recordActivityMock).not.toHaveBeenCalled();
+    // WARP-237: the role-change business emit must NOT fire on a denied
+    // request, but requireRole now emits a single "Access denied"
+    // policy-violation row.
+    expect(recordActivityMock).toHaveBeenCalledTimes(1);
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "auth", what: "Access denied" }),
+    );
   });
 
   it("rejects an unknown role value with 400 (zod validation)", async () => {

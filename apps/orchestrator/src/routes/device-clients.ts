@@ -19,6 +19,8 @@ import {
 import { trustedOriginUrl } from "../lib/trusted-origin.js";
 import { SESSION_COOKIE_NAME } from "../middleware/auth.js";
 import { createLogger } from "../lib/logger.js";
+import { recordActivity } from "../services/activity.singleton.js";
+import { actorFromRequest } from "../services/activity.service.js";
 
 const logger = createLogger("device-clients-route");
 
@@ -408,6 +410,18 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
         platform,
       });
 
+      // WARP-237: pairing mints a Nextcloud app-password — a credential
+      // issuance / key operation, mandatory-emit.
+      await recordActivity({
+        kind: "auth",
+        severity: "ok",
+        sourceIcon: "smartphone",
+        what: "Device client paired",
+        sub: deviceName ?? null,
+        refs: { clientId: client.id },
+        actor: actorFromRequest(req),
+      });
+
       const webdavUrl = `${await webdavBaseUrl(req)}/remote.php/dav/files/${callerUser}/`;
       res.json({
         deviceId: client.id,
@@ -466,6 +480,16 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
       }
 
       await revokeDeviceClient(prisma, row);
+
+      // WARP-237: credential revocation — mandatory-emit key operation.
+      await recordActivity({
+        kind: "auth",
+        severity: "warn",
+        sourceIcon: "smartphone",
+        what: "Device client revoked",
+        refs: { clientId: req.params.id },
+        actor: actorFromRequest(req),
+      });
 
       res.json({ revoked: row.id });
     } catch (err) {
@@ -649,6 +673,18 @@ export function createDeviceSelfRevokeRouter(prisma: PrismaClient): Router {
       }
 
       await revokeDeviceClient(prisma, row);
+
+      // WARP-237: device self-revoke over Basic auth (no operator
+      // session) — still a mandatory-emit credential lifecycle event.
+      // The actor is the device itself, so `system`.
+      await recordActivity({
+        kind: "auth",
+        severity: "warn",
+        sourceIcon: "smartphone",
+        what: "Device client revoked",
+        refs: { clientId: req.params.id, via: "device-basic-auth" },
+        actor: { type: "system", id: null },
+      });
 
       res.json({ revoked: row.id });
     } catch (err) {

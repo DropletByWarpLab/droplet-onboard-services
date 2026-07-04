@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach, afterAll } from "vitest";
 import request from "supertest";
 import { PrismaClient } from "@prisma/client";
 
@@ -74,6 +74,13 @@ vi.mock("../services/nextcloud.client.js", async () => {
 import { createApp } from "../app.js";
 import * as nc from "../services/nextcloud.client.js";
 import { initDeviceService } from "../services/device.service.js";
+import { _setActivityRecorderForTests } from "../services/activity.singleton.js";
+import type { RecordParams } from "../services/activity.service.js";
+
+// WARP-237: capture emitted audit rows so the share-create / download
+// emit points can be asserted (and the share password proven never to
+// leak into refs). The singleton is a no-op unless a recorder is wired.
+const recordedActivity: RecordParams[] = [];
 
 type Mocked<T extends (...a: any[]) => any> = T & ReturnType<typeof vi.fn>;
 
@@ -91,7 +98,22 @@ describe("File Operations (Nextcloud-backed routes)", () => {
     app = createApp(prisma);
   });
 
+  afterAll(() => {
+    _setActivityRecorderForTests(null, null);
+  });
+
   beforeEach(() => {
+    // WARP-237: fresh recorder capture per test.
+    recordedActivity.length = 0;
+    _setActivityRecorderForTests(
+      {
+        record: async (p) => {
+          recordedActivity.push(p);
+          return {} as never;
+        },
+      },
+      null,
+    );
     // Reset all nc mocks between tests.
     for (const key of Object.keys(ncMock)) {
       const fn = (ncMock as any)[key];
@@ -347,6 +369,14 @@ describe("File Operations (Nextcloud-backed routes)", () => {
       const res = await request(app).get("/api/files/download?path=/hello.txt");
       expect(res.status).toBe(200);
       expect(res.headers["content-disposition"]).toContain("hello.txt");
+      // WARP-237: file download emits a data-access audit row.
+      expect(recordedActivity).toContainEqual(
+        expect.objectContaining({
+          kind: "file",
+          what: "File downloaded",
+          refs: expect.objectContaining({ path: "/hello.txt" }),
+        }),
+      );
     });
 
     it("returns 400 when path is missing", async () => {
@@ -790,6 +820,19 @@ describe("File Operations (Nextcloud-backed routes)", () => {
           note: "please review",
         })
       );
+      // WARP-237: share creation emits a mandatory audit row that flags
+      // password protection WITHOUT ever carrying the password itself.
+      expect(recordedActivity).toContainEqual(
+        expect.objectContaining({
+          kind: "file",
+          what: "Share created",
+          refs: expect.objectContaining({
+            path: "/a.txt",
+            passwordProtected: true,
+          }),
+        })
+      );
+      expect(JSON.stringify(recordedActivity)).not.toContain("s3cret");
     });
 
     it("POST /api/files/share forwards shareWith for a named-member share (shareType:0)", async () => {

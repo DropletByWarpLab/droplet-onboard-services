@@ -1841,6 +1841,37 @@ model ActivityRow {
   @@index([actorId, at])
 }
 
+// ── WARP-237: device-key-signed daily roots over the activity chain ──
+// One row per UTC day, signed by the device identity key (TPM-backed via
+// device-identity-svc). Anchors the symmetric HMAC chain to a
+// non-extractable asymmetric key at day granularity: an attacker who
+// obtains /data/secrets/audit.key and rewrites ActivityRow still cannot
+// re-produce these ECDSA signatures. Spans are id-anchored (contiguous,
+// firstRowId = previous root's lastRowId + 1) for the same clock-skew
+// reason WARP-586's purge anchors on id, and roots are NEVER purged
+// (~300 bytes/day). rowCount = 0 (firstRowId > lastRowId) attests a
+// quiescent day, so a silently deleted day is detectable.
+model ActivityDailyRoot {
+  id                BigInt   @id @default(autoincrement())
+  // UTC calendar day covered, "YYYY-MM-DD".
+  date              String   @unique
+  firstRowId        BigInt
+  lastRowId         BigInt
+  rowCount          Int
+  // hashSignature(signature of row `lastRowId`) — ties the root to the
+  // chain tail. Repeats the previous root's value on an empty day.
+  tailSignatureHash String
+  // rootHash of the previous root ("" for the first) — roots chain too.
+  prevRootHash      String
+  // base64url SHA-256 of canonicalizeDailyRoot(content).
+  rootHash          String
+  // base64 DER ECDSA signature over the canonical content bytes,
+  // produced by device-identity-svc Sign().
+  signature         String
+  algorithm         String
+  createdAt         DateTime @default(now())
+}
+
 /// WARP-181: who performed the action behind an ActivityRow. `user` =
 /// an authenticated household member (actorId REQUIRED — recorder
 /// enforces it); `ai` = the agent loop / tool dispatch (actorId is the

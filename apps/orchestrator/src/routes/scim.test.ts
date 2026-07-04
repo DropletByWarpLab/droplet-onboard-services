@@ -17,7 +17,7 @@
  * the guard is mounted (the exhaustive bearer matrix lives in
  * middleware/scim-auth.test.ts).
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import request from "supertest";
 import express from "express";
 
@@ -29,6 +29,12 @@ vi.mock("../config.js", () => ({
 }));
 
 import { createScimRouter } from "./scim.js";
+import { _setActivityRecorderForTests } from "../services/activity.singleton.js";
+import type { RecordParams } from "../services/activity.service.js";
+
+// WARP-237: capture audit rows so SCIM provisioning / deactivation emits
+// can be asserted.
+const recordedScim: RecordParams[] = [];
 import {
   SCIM_USER_SCHEMA,
   SCIM_LIST_RESPONSE_SCHEMA,
@@ -130,6 +136,20 @@ const AUTH = ["Authorization", "Bearer scim-token"] as const;
 beforeEach(() => {
   for (const k of Object.keys(mockConfig)) delete mockConfig[k];
   mockConfig.DROPLET_SCIM_BEARER_TOKEN = "scim-token";
+  recordedScim.length = 0;
+  _setActivityRecorderForTests(
+    {
+      record: async (p) => {
+        recordedScim.push(p);
+        return {} as never;
+      },
+    },
+    null,
+  );
+});
+
+afterEach(() => {
+  _setActivityRecorderForTests(null, null);
 });
 
 describe("SCIM auth guard is mounted", () => {
@@ -161,6 +181,15 @@ describe("POST /scim/v2/Users — create + idempotency", () => {
     expect(res.headers.location).toContain(`/scim/v2/Users/${res.body.id}`);
     // SCIM users can't password-login.
     expect(prisma.user.create.mock.calls[0]![0].data.passwordHash ?? null).toBeNull();
+    // WARP-237: provisioning emits a system-actor audit row.
+    expect(recordedScim).toContainEqual(
+      expect.objectContaining({
+        kind: "auth",
+        what: "SCIM user provisioned",
+        actor: { type: "system", id: null },
+        refs: expect.objectContaining({ via: "scim" }),
+      }),
+    );
   });
 
   it("re-POSTing the same user is idempotent (Okta retry) — 200/201, no duplicate row", async () => {
@@ -298,6 +327,15 @@ describe("PUT / PATCH / DELETE /scim/v2/Users/:id — update + soft-deactivation
     expect(res.status).toBe(204);
     expect(prisma._users).toHaveLength(1); // retained
     expect(prisma._users[0].directoryStatus).toBe("DEACTIVATED");
+    // WARP-237: de-provision emits a warn-severity deactivation row.
+    expect(recordedScim).toContainEqual(
+      expect.objectContaining({
+        kind: "auth",
+        severity: "warn",
+        what: "SCIM user deactivated",
+        actor: { type: "system", id: null },
+      }),
+    );
   });
 
   it("DELETE is idempotent (Okta retry) — second DELETE still 204", async () => {

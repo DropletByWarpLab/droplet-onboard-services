@@ -14,6 +14,7 @@ import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { Prisma } from "@prisma/client";
 import { getActivitySigner } from "../services/activity.singleton.js";
+import { verifyActivityChain } from "../services/audit-verify.service.js";
 import {
   hashSignature,
   type ActivityActorTypeName,
@@ -222,66 +223,16 @@ export function createActivityRouter(prisma: PrismaClient): Router {
           return;
         }
 
-        const PAGE = 200;
-        let cursor: bigint | undefined;
-        let prevSignature: string | null = null; // null ⇒ no row seen yet
-        let rowsChecked = 0;
-        let brokenAtId: string | null = null;
-
-        outer: for (;;) {
-          const page = await prisma.activityRow.findMany({
-            where: cursor === undefined ? {} : { id: { gt: cursor } },
-            orderBy: { id: "asc" },
-            take: PAGE,
-          });
-          if (page.length === 0) break;
-
-          for (const r of page) {
-            rowsChecked += 1;
-            // Origin row: trust the stored anchor. Later rows: re-derive
-            // the link from the predecessor's signature.
-            const expectedPrevHash =
-              prevSignature === null
-                ? r.prevSignatureHash
-                : hashSignature(prevSignature);
-            // Rebuild the signature-covered content verbatim from the
-            // stored columns — schemaVersion is passed through so
-            // `canonicalizeRowContent` dispatches the right shape per
-            // row (v1 legacy 7-key, v2 actor-bearing 9-key; WARP-181).
-            // Actor fields stay as-stored, never normalized: on a v1
-            // row they are not signature-covered and the v1 canonical
-            // form ignores them.
-            const content: ActivityRowContent = {
-              at: r.at,
-              severity: r.severity as ActivitySeverityName,
-              sourceIcon: r.sourceIcon,
-              what: r.what,
-              sub: r.sub,
-              kind: r.kind as ActivityKindName,
-              refs:
-                r.refs === null ? null : (r.refs as Record<string, unknown>),
-              actorType: r.actorType as ActivityActorTypeName | null,
-              actorId: r.actorId,
-              schemaVersion: r.schemaVersion,
-            };
-            if (
-              r.prevSignatureHash !== expectedPrevHash ||
-              !signer.verify(content, expectedPrevHash, r.signature)
-            ) {
-              brokenAtId = r.id.toString();
-              break outer;
-            }
-            prevSignature = r.signature;
-          }
-
-          cursor = page[page.length - 1]!.id;
-          if (page.length < PAGE) break;
-        }
-
+        // WARP-237: the chain walk now lives in audit-verify.service so
+        // the nightly tamper-detection cron shares the exact same logic.
+        // Response shape is byte-identical to the pre-extraction handler.
+        const result = await verifyActivityChain(prisma, signer);
         res.json({
-          ok: brokenAtId === null,
-          rowsChecked,
-          ...(brokenAtId === null ? {} : { brokenAtId }),
+          ok: result.ok,
+          rowsChecked: result.rowsChecked,
+          ...(result.brokenAtId === null
+            ? {}
+            : { brokenAtId: result.brokenAtId }),
           verifiedAt: new Date().toISOString(),
         });
       } catch (err) {

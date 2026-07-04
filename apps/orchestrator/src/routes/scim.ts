@@ -38,6 +38,7 @@ import {
   provisionGroup,
 } from "../services/scim.service.js";
 import { createLogger } from "../lib/logger.js";
+import { recordActivity } from "../services/activity.singleton.js";
 
 const logger = createLogger("scim-route");
 
@@ -120,6 +121,17 @@ export function createScimRouter(prisma?: PrismaClient): Router {
     handle(async (req, res) => {
       const parsed = parseScimUser(req.body);
       const { user, created } = await provisionUser(prisma!, parsed);
+      // WARP-237: SCIM callers are IdP service principals, never humans →
+      // actor system; provenance stays in refs.
+      await recordActivity({
+        kind: "auth",
+        severity: "ok",
+        sourceIcon: "users",
+        what: created ? "SCIM user provisioned" : "SCIM user updated",
+        sub: user.username,
+        refs: { via: "scim", userId: user.id },
+        actor: { type: "system", id: null },
+      });
       res
         .status(created ? 201 : 200)
         .type(SCIM_CONTENT_TYPE)
@@ -171,6 +183,16 @@ export function createScimRouter(prisma?: PrismaClient): Router {
           directoryStatus: parsed.active ? "ACTIVE" : "DEACTIVATED",
         },
       });
+      // WARP-237: SCIM full-replace is an admin-directory mutation.
+      await recordActivity({
+        kind: "auth",
+        severity: "ok",
+        sourceIcon: "users",
+        what: "SCIM user updated",
+        sub: updated.username,
+        refs: { via: "scim", userId: updated.id, active: parsed.active },
+        actor: { type: "system", id: null },
+      });
       res.status(200).type(SCIM_CONTENT_TYPE).json(toScimUser(asScimSource(updated)));
     }),
   );
@@ -191,6 +213,17 @@ export function createScimRouter(prisma?: PrismaClient): Router {
         return;
       }
       const updated = await setUserActive(prisma!, existing.id, active);
+      // WARP-237: the op Okta uses here is (de)activation — a privileged
+      // directory mutation. Deactivation is a warn.
+      await recordActivity({
+        kind: "auth",
+        severity: active ? "ok" : "warn",
+        sourceIcon: "users",
+        what: active ? "SCIM user updated" : "SCIM user deactivated",
+        sub: (updated ?? existing).username,
+        refs: { via: "scim", userId: existing.id, active },
+        actor: { type: "system", id: null },
+      });
       res.status(200).type(SCIM_CONTENT_TYPE).json(toScimUser(asScimSource(updated ?? existing)));
     }),
   );
@@ -203,6 +236,17 @@ export function createScimRouter(prisma?: PrismaClient): Router {
     handle(async (req, res) => {
       const result = await deactivateUser(prisma!, req.params.id);
       if (!result) throw ScimError.notFound("User not found");
+      // WARP-237: SCIM de-provision (soft deactivate) — privileged
+      // directory mutation, warn severity.
+      await recordActivity({
+        kind: "auth",
+        severity: "warn",
+        sourceIcon: "users",
+        what: "SCIM user deactivated",
+        sub: result.username,
+        refs: { via: "scim", userId: result.id, active: false },
+        actor: { type: "system", id: null },
+      });
       res.status(204).end();
     }),
   );

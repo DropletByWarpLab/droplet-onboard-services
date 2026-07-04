@@ -84,9 +84,14 @@ import {
   createDeviceSelfRevokeRouter,
 } from "../routes/device-clients.js";
 import { SESSION_COOKIE_NAME } from "../middleware/auth.js";
+import { _setActivityRecorderForTests } from "../services/activity.singleton.js";
+import type { RecordParams } from "../services/activity.service.js";
 
 const mockNcDelete = vi.mocked(ncDeleteAppPassword);
 const mockPublish = vi.mocked(publish);
+
+// WARP-237: capture the self-revoke audit row.
+const recordedRevoke: RecordParams[] = [];
 
 /**
  * Production mounting order (app.ts): the self-revoke router mounts BEFORE
@@ -146,6 +151,16 @@ function basicAuth(user: string, pass: string): string {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  recordedRevoke.length = 0;
+  _setActivityRecorderForTests(
+    {
+      record: async (p) => {
+        recordedRevoke.push(p);
+        return {} as never;
+      },
+    },
+    null,
+  );
   mockPrisma.deviceClient.update.mockResolvedValue({});
 });
 
@@ -169,6 +184,16 @@ describe("DELETE /api/devices/clients/:id — Basic-auth device self-revoke (WAR
     expect(mockPublish).toHaveBeenCalledWith("droplet/devices/owner-1/revoked", {
       deviceId: "dc-1",
     });
+    // WARP-237: device self-revoke over Basic auth is a system-actor
+    // credential-lifecycle emit.
+    expect(recordedRevoke).toContainEqual(
+      expect.objectContaining({
+        kind: "auth",
+        what: "Device client revoked",
+        actor: { type: "system", id: null },
+        refs: expect.objectContaining({ clientId: "dc-1", via: "device-basic-auth" }),
+      }),
+    );
   });
 
   it("401s a wrong password without revoking anything", async () => {
@@ -311,6 +336,14 @@ describe("DELETE /api/devices/clients/:id — Basic-auth device self-revoke (WAR
     expect(mockPublish).toHaveBeenCalledWith("droplet/devices/owner-1/revoked", {
       deviceId: "dc-1",
     });
+    // WARP-237: the session (operator) revoke path emits too.
+    expect(recordedRevoke).toContainEqual(
+      expect.objectContaining({
+        kind: "auth",
+        what: "Device client revoked",
+        refs: expect.objectContaining({ clientId: "dc-1" }),
+      }),
+    );
   });
 
   it("keeps the session path intact: 404 for another user's device via session", async () => {

@@ -65,6 +65,7 @@ import { createMeContextStatsRouter } from "./routes/me-context-stats.js";
 import { createSettingsWorkspaceRouter } from "./routes/settings-workspace.js";
 import { createFipsRouter } from "./routes/fips.js";
 import { createActivityRouter } from "./routes/activity.js";
+import { createAuditRootsRouter } from "./routes/audit-roots.js";
 import { createLogsRouter } from "./routes/logs.js";
 import { createPeopleRouter } from "./routes/people.js";
 import {
@@ -310,6 +311,8 @@ export function createApp(
   app.use("/api", createMeContextStatsRouter(prisma));
   // WARP-456: signed append-only activity feed + export bundle.
   app.use("/api", createActivityRouter(prisma));
+  // WARP-237: device-key-signed daily-root read surface.
+  app.use("/api", createAuditRootsRouter(prisma));
   // WARP-823: owner/admin downloadable, secret-redacted diagnostics log
   // bundle. Sources host logs through the device-bridge; audits the download.
   app.use("/api", createLogsRouter());

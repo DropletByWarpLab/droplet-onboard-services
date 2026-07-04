@@ -94,6 +94,7 @@ vi.mock("../services/brain-memory.service.js", () => ({
 
 import { createProtectedAuthRouter } from "./auth.js";
 import * as nc from "../services/nextcloud.client.js";
+import { recordActivity } from "../services/activity.singleton.js";
 import type { Role } from "../services/jwt.service.js";
 
 /** Prisma stub: findUnique by nextcloudUsername (the username→id resolution). */
@@ -157,6 +158,18 @@ describe("POST /api/auth/users/:username/revoke-sessions", () => {
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ status: "ok", username: "alice", revoked: 2 });
     expect(revokeAllSessions).toHaveBeenCalledWith("u-alice");
+    // WARP-237: admin session revocation emits a mandatory audit row.
+    expect(vi.mocked(recordActivity)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "auth",
+        severity: "warn",
+        what: "Sessions revoked",
+        refs: expect.objectContaining({
+          targetUserId: "u-alice",
+          username: "alice",
+        }),
+      }),
+    );
   });
 
   it("404s for an unknown user (no local directory row)", async () => {

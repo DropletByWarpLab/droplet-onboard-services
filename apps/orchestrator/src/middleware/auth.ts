@@ -7,6 +7,8 @@ import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
 import { verifyAccessToken, roleFromGroups, type Role } from "../services/jwt.service.js";
 import { checkSession } from "../services/session.service.js";
 import { createLogger } from "../lib/logger.js";
+import { recordActivity } from "../services/activity.singleton.js";
+import { actorFromRequest } from "../services/activity.service.js";
 
 const logger = createLogger("auth");
 
@@ -626,11 +628,30 @@ export function requireRole(
   const allowedSet = new Set<string>(allowed);
   return (req: Request, res: Response, next: NextFunction): void => {
     const role = req.user?.role;
+    const deny = (reason: "no-role" | "role-not-permitted"): void => {
+      // WARP-237: ACL denials are mandatory-emit policy violations.
+      // Fire-and-forget (`void`) — the 403 must not wait on the append
+      // lock, and recordActivity is a no-op pre-init so this is safe in
+      // every test/boot ordering. Known trade-off: a misbehaving client
+      // can generate one row per denied request (same posture as the
+      // sign-in-throttle rows); dedup is a follow-up if it proves noisy.
+      void recordActivity({
+        kind: "auth",
+        severity: "warn",
+        sourceIcon: "shield-off",
+        what: "Access denied",
+        sub: `${req.method} ${req.path}`,
+        refs: { path: req.path, method: req.method, role: role ?? null, reason },
+        actor: actorFromRequest(req),
+      });
+    };
     if (typeof role !== "string" || role.length === 0) {
+      deny("no-role");
       res.status(403).json({ error: "Forbidden: no role on session" });
       return;
     }
     if (!allowedSet.has(role)) {
+      deny("role-not-permitted");
       res.status(403).json({ error: "Forbidden: role not permitted" });
       return;
     }

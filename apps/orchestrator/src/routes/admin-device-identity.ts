@@ -22,6 +22,8 @@ import {
 
 import { createRequireRecentMfa } from "../middleware/require-recent-mfa.js";
 import type { DeviceIdentityClient } from "../services/device-identity.client.js";
+import { recordActivity } from "../services/activity.singleton.js";
+import { actorFromRequest } from "../services/activity.service.js";
 
 // Roles allowed to read status + initiate reseal. "owner" is the
 // canonical top-level role in this codebase (see jwt.service Role type);
@@ -78,10 +80,23 @@ export function createAdminDeviceIdentityRouter(
     "/admin/device-identity/reseal",
     requireAdmin,
     requireMfa,
-    async (_req, res) => {
+    async (req, res) => {
       try {
         const nonce = mintOperatorNonce();
         const result = await client.requestReseal(nonce);
+        if (result.resealed) {
+          // WARP-237: a device-identity reseal is a key operation — a
+          // mandatory-emit privileged action. This route carries a real
+          // req.user (admin + recent MFA).
+          await recordActivity({
+            kind: "system",
+            severity: "warn",
+            sourceIcon: "key-round",
+            what: "Device identity key resealed",
+            refs: { surface: "admin-device-identity" },
+            actor: actorFromRequest(req),
+          });
+        }
         res.json(result);
       } catch (err) {
         res.status(503).json({

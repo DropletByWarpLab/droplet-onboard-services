@@ -46,9 +46,12 @@ vi.mock("../services/jwt.service.js", () => ({
 import {
   authMiddleware,
   requirePasswordChangeGate,
+  requireRole,
   _setAuthPrismaForTests,
 } from "./auth.js";
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
+import { _setActivityRecorderForTests } from "../services/activity.singleton.js";
+import type { RecordParams } from "../services/activity.service.js";
 
 function mockReq(token: string): Request {
   return {
@@ -326,5 +329,72 @@ describe("requirePasswordChangeGate — allowed-path matching", () => {
 
     expect((res.status as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(403);
     expect(next).not.toHaveBeenCalled();
+  });
+});
+
+describe("requireRole — policy-violation audit emit (WARP-237)", () => {
+  let recorded: RecordParams[];
+
+  beforeEach(() => {
+    recorded = [];
+    _setActivityRecorderForTests(
+      {
+        record: async (p) => {
+          recorded.push(p);
+          return {} as never;
+        },
+      },
+      null,
+    );
+  });
+
+  afterEach(() => {
+    _setActivityRecorderForTests(null, null);
+  });
+
+  it("emits a policy-violation activity row on a role denial", async () => {
+    const mw = requireRole("owner", "admin");
+    const req = {
+      user: { id: "u-guest", role: "guest" },
+      method: "POST",
+      path: "/api/files/share",
+    } as unknown as Request;
+    const res = mockRes();
+    const next = vi.fn() as unknown as NextFunction;
+
+    mw(req, res, next);
+    await new Promise((r) => setImmediate(r));
+
+    expect((res.status as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(403);
+    expect(next).not.toHaveBeenCalled();
+    expect(recorded).toContainEqual(
+      expect.objectContaining({
+        kind: "auth",
+        severity: "warn",
+        what: "Access denied",
+        refs: expect.objectContaining({
+          path: "/api/files/share",
+          method: "POST",
+          role: "guest",
+        }),
+      }),
+    );
+  });
+
+  it("does not emit or 403 when the role is permitted", async () => {
+    const mw = requireRole("owner", "admin");
+    const req = {
+      user: { id: "u-admin", role: "admin" },
+      method: "POST",
+      path: "/api/files/share",
+    } as unknown as Request;
+    const res = mockRes();
+    const next = vi.fn() as unknown as NextFunction;
+
+    mw(req, res, next);
+    await new Promise((r) => setImmediate(r));
+
+    expect(next).toHaveBeenCalled();
+    expect(recorded).toHaveLength(0);
   });
 });
