@@ -52,6 +52,59 @@ for t in WARP-232 WARP-233 WARP-234 WARP-235 WARP-236; do
   grep -q "$t" "$RUNNER" && pass "registry maps to $t" || fail "no check maps to $t"
 done
 
+# =============================================================================
+# Dynamic section: a per-run scratch dir shared by the lib + runner tests.
+# =============================================================================
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+echo ""; echo "--- Lib: JSON + report rendering ---"
+# shellcheck disable=SC1090
+. "$LIB"
+
+esc="$(vfy_json_escape 'say "hi" \ back')"
+[ "$esc" = 'say \"hi\" \\ back' ] && pass "vfy_json_escape escapes quotes+backslashes" \
+  || fail "vfy_json_escape wrong: $esc"
+
+line="$(vfy_result_line transit.pg.tls13 transit WARP-233 T1.2 \
+  'Postgres negotiates TLSv1.3' FAIL 'server does not support SSL' \
+  'evidence/transit.pg.tls13/sclient-pg.txt')"
+printf '%s' "$line" | "$PYBIN" -c '
+import json,sys
+r = json.loads(sys.stdin.read())
+assert r["id"] == "transit.pg.tls13" and r["status"] == "FAIL", r
+assert r["maps_to"] == ["WARP-233"] and r["threat_ids"] == ["T1.2"], r
+assert r["evidence"] == ["evidence/transit.pg.tls13/sclient-pg.txt"], r
+' && pass "vfy_result_line emits valid NDJSON row" || fail "vfy_result_line invalid JSON"
+
+# Render a 3-row fixture ndjson (PASS/FAIL/SKIP) into report.json + report.md.
+mkdir -p "$WORK/bundle"
+{
+  vfy_result_line rest.luks.header rest WARP-232 T5.8 d1 PASS 'version=2' ''
+  vfy_result_line transit.redis.plaintext-refused transit WARP-234 T5.8 d2 FAIL 'plaintext-pong' ''
+  vfy_result_line transit.redis.tls transit WARP-234 T5.8 d3 SKIP 'tls-port-not-listening' ''
+} > "$WORK/bundle/results.ndjson"
+vfy_render_json "$WORK/bundle/results.ndjson" '{"hostname":"testbox","git_commit":"abc"}' \
+  genesis "$WORK/bundle/report.json"
+"$PYBIN" -c '
+import json,sys
+r = json.load(open(sys.argv[1]))
+assert r["schema"] == "droplet-encryption-evidence/v1", r["schema"]
+assert r["ticket"] == "WARP-966" and r["epic"] == "WARP-957"
+assert r["prev_manifest_sha256"] == "genesis"
+assert r["summary"] == {"pass": 1, "fail": 1, "skip": 1,
+  "release_blockers": ["transit.redis.plaintext-refused"]}, r["summary"]
+assert len(r["checks"]) == 3
+' "$WORK/bundle/report.json" && pass "vfy_render_json: schema, summary, blockers" \
+  || fail "vfy_render_json wrong shape"
+vfy_render_md "$WORK/bundle/results.ndjson" "$WORK/bundle/report.md"
+grep -q 'RELEASE BLOCKER' "$WORK/bundle/report.md" \
+  && pass "report.md flags FAILs as release blockers" \
+  || fail "report.md missing RELEASE BLOCKER marker"
+grep -q 'transit.redis.tls' "$WORK/bundle/report.md" \
+  && pass "report.md lists SKIPped checks too (status contract)" \
+  || fail "report.md omits SKIP rows"
+
 echo ""
 printf "  Results: %d/%d passed\n" "$((TESTS - FAILURES))" "$TESTS"
 exit "$FAILURES"
