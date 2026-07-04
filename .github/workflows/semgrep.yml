@@ -40,7 +40,13 @@ jobs:
           python-version: "3.12"
 
       - name: Install semgrep 1.136.0 (pinned)
-        run: pip install semgrep==1.136.0
+        # semgrep 1.136.0 pulls a transitive opentelemetry-instrumentation
+        # that imports pkg_resources at load time. Python 3.12.13 runners no
+        # longer ship setuptools by default, and setuptools >= 81 removed
+        # pkg_resources entirely — so we pin setuptools < 81, which still
+        # bundles it (otherwise: ModuleNotFoundError: No module named
+        # 'pkg_resources' before semgrep scans anything).
+        run: pip install "setuptools<81" semgrep==1.136.0
 
       - name: Resolve baseline commit
         id: base
