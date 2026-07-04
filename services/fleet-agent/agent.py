@@ -14,18 +14,15 @@ loop.
 # ----------------------------------------------------------------------
 # Update poll — INTENTIONALLY NOT IMPLEMENTED in v1 (WARP-963 scope cut).
 #
-# FLEET_MANAGEMENT_DESIGN.md gives the agent a third duty: poll HQ for a
-# signed git-tag manifest and self-update the compose stack. That half is
-# NOT built here because:
-#   1. WARP-538 tracks the orchestrator-side update poller — the box
-#      already has an owner for "what version should I be on".
-#   2. WARP-961 holds the unification decision (one agent vs. splitting
-#      HQ-heartbeat/update from portal-telemetry) hostage to the three
-#      open questions in docs/FLEET_MANAGEMENT_DESIGN.md — answered as a
-#      PROPOSAL in docs/ADR-028-fleet-telemetry-and-design-answers.md,
-#      awaiting Romain/Stefan ratification.
-# When WARP-961 lands, the update poller mounts here as one more
-# apscheduler job (manifest poll 5 min), NOT as a separate service.
+# FLEET_MANAGEMENT_DESIGN.md gives the agent a third duty: poll for a
+# signed release manifest and self-update the compose stack. That half
+# is NOT built here yet: WARP-538 tracks the orchestrator-side update
+# poller — the box already has an owner for "what version should I be
+# on". WARP-961 resolved the unification decision (2026-07-03,
+# docs/ADR-028-fleet-telemetry-and-design-answers.md, Accepted): the
+# poller mounts HERE as one more apscheduler job (signed-manifest poll,
+# WARP-537 verification), NOT as a separate service — tracked by
+# WARP-1025.
 # ----------------------------------------------------------------------
 """
 
