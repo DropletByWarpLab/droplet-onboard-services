@@ -54,6 +54,28 @@ describe("createUser — mustChangePassword flag", () => {
     const body = JSON.parse((init as RequestInit).body as string);
     expect(body.mustChangePassword).toBe(false);
   });
+
+  // WARP-1049: the wizard TeamStep picks the new member's household role,
+  // so the client must thread `role` through to POST /auth/users.
+  it("sends the chosen role in the POST body", async () => {
+    authFetchMock.mockResolvedValueOnce(okJson({ status: "ok", username: "kid" }));
+
+    await createUser("kid@warp.test", "Temp-secret123", "Kid", true, "admin");
+
+    const [, init] = authFetchMock.mock.calls[0]!;
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(body.role).toBe("admin");
+  });
+
+  it("omits role when not provided (server defaults to family)", async () => {
+    authFetchMock.mockResolvedValueOnce(okJson({ status: "ok", username: "kid" }));
+
+    await createUser("kid@warp.test", "Temp-secret123");
+
+    const [, init] = authFetchMock.mock.calls[0]!;
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(body.role).toBeUndefined();
+  });
 });
 
 describe("changePassword", () => {

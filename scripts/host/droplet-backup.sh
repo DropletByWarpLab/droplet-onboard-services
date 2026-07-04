@@ -23,6 +23,12 @@
 # What is captured:
 #   staging/postgres/droplet.sql.gz   transactional pg_dump of the
 #                                     orchestrator Postgres (compose `db`)
+#   staging/postgres/nextcloud.sql.gz the Nextcloud metadata DB, hosted in the
+#                                     SAME `db` container (WARP-1013): file
+#                                     cache, shares, users, groupfolders. Must
+#                                     travel with nextcloud-data.tar or a
+#                                     restore pairs fresh blobs with a stale
+#                                     metadata DB (missing/ghost files).
 #   staging/volumes/nextcloud-data.tar  the Nextcloud data volume (user files),
 #                                     snapshotted via a throwaway sibling
 #                                     container so no host bind-mount or
@@ -130,29 +136,57 @@ droplet_backup_ensure_repo
 
 dc() { docker compose -p "$PROJECT" -f "$COMPOSE_FILE" "$@"; }
 
-# --- Phase 1: stage the Postgres dump --------------------------------------
-# The staging path is STABLE across runs (never mktemp) so restic's
+# --- Phase 1: stage the Postgres dumps --------------------------------------
+# The staging paths are STABLE across runs (never mktemp) so restic's
 # parent-snapshot change detection sees the same file identity every day.
+#
+# The `db` container hosts TWO databases: `droplet` (orchestrator) and
+# `nextcloud` (init-nextcloud-db.sh). Both are dumped as separate explicit
+# pg_dumps rather than one pg_dumpall (WARP-1013): per-DB files keep stable
+# staging identities for restic's change detection, get individual gzip
+# integrity checks, and restore selectively; pg_dumpall's extra surface
+# (roles/globals) isn't needed — both DBs are owned by the container's
+# env-created superuser, which the postgres entrypoint recreates from .env.
 mkdir -p "$STAGING/postgres" "$STAGING/volumes"
 chmod 700 "$STATE_DIR" "$STAGING" 2>/dev/null || true
 
-DUMP="$STAGING/postgres/droplet.sql.gz"
-log_info "Dumping Postgres service '$DB_SERVICE'..."
-# Overrides ride container env (-e) with in-container fallback to the
-# container's own POSTGRES_USER/POSTGRES_DB — mirrors device-backup.sh's
-# dump_pg (avoids the fragile nested host-side expansion documented there).
-if ! dc exec -T -e "DROPLET_DUMP_USER=${DB_USER:-}" -e "DROPLET_DUMP_DB=${DB_NAME:-}" "$DB_SERVICE" \
-     sh -c 'pg_dump --username="${DROPLET_DUMP_USER:-$POSTGRES_USER}" --dbname="${DROPLET_DUMP_DB:-$POSTGRES_DB}" --format=plain --no-owner --no-privileges' \
-     | gzip --best > "$DUMP"; then
-  log_error "pg_dump of '$DB_SERVICE' failed — aborting (refusing a partial backup)"
-  exit 1
+stage_db_dump() {
+  # $1 = staged file name (postgres/<name>.sql.gz); $2 = in-container DB
+  #      override (empty = the container's own POSTGRES_DB)
+  local name="$1" db="$2" out="$STAGING/postgres/$1.sql.gz"
+  log_info "Dumping Postgres database '$name' from service '$DB_SERVICE'..."
+  # Overrides ride container env (-e) with in-container fallback to the
+  # container's own POSTGRES_USER/POSTGRES_DB — mirrors device-backup.sh's
+  # dump_pg (avoids the fragile nested host-side expansion documented there).
+  if ! dc exec -T -e "DROPLET_DUMP_USER=${DB_USER:-}" -e "DROPLET_DUMP_DB=$db" "$DB_SERVICE" \
+       sh -c 'pg_dump --username="${DROPLET_DUMP_USER:-$POSTGRES_USER}" --dbname="${DROPLET_DUMP_DB:-$POSTGRES_DB}" --format=plain --no-owner --no-privileges' \
+       | gzip --best > "$out"; then
+    log_error "pg_dump of '$name' failed — aborting (refusing a partial backup)"
+    exit 1
+  fi
+  # A truncated dump must never become the newest snapshot.
+  if ! gzip -t "$out" 2>/dev/null; then
+    log_error "staged dump of '$name' failed gzip integrity check — aborting"
+    exit 1
+  fi
+  log_success "database '$name' dumped ($(wc -c < "$out") bytes gzipped)"
+}
+
+stage_db_dump droplet "${DB_NAME:-}"
+
+# GUARD (WARP-1013): a legacy pgdata volume created before init-nextcloud-db.sh
+# landed can lack the nextcloud DB (the init script only runs on first volume
+# creation). Skip explicitly — mirroring stage_volume's absent-volume guard —
+# instead of failing every nightly backup, and drop any stale staged dump so
+# an old copy can't ride along in new snapshots forever.
+if dc exec -T -e "DROPLET_DUMP_USER=${DB_USER:-}" -e "DROPLET_DUMP_DB=${DB_NAME:-}" "$DB_SERVICE" \
+     sh -c 'psql --username="${DROPLET_DUMP_USER:-$POSTGRES_USER}" --dbname="${DROPLET_DUMP_DB:-$POSTGRES_DB}" -tAc "SELECT 1 FROM pg_database WHERE datname='"'"'nextcloud'"'"';"' \
+     2>/dev/null | grep -q 1; then
+  stage_db_dump nextcloud nextcloud
+else
+  log_warn "database 'nextcloud' absent — skipping its dump (legacy pgdata predating init-nextcloud-db.sh?)"
+  rm -f "$STAGING/postgres/nextcloud.sql.gz"
 fi
-# A truncated dump must never become the newest snapshot.
-if ! gzip -t "$DUMP" 2>/dev/null; then
-  log_error "staged Postgres dump failed gzip integrity check — aborting"
-  exit 1
-fi
-log_success "Postgres dumped ($(wc -c < "$DUMP") bytes gzipped)"
 
 # --- Phase 2: stage data volumes --------------------------------------------
 # Snapshot via a throwaway sibling container that mounts the named volume

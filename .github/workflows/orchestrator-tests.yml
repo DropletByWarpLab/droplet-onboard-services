@@ -79,5 +79,11 @@ jobs:
       - name: Install cosign (update-agent verify suite)
         uses: sigstore/cosign-installer@v3
 
+      # WARP-1011: vitest transforms via esbuild and never typechecks —
+      # mirrors ci.yml's orchestrator leg (this workflow retires when
+      # ci-summary becomes the required check, WARP-1007).
+      - name: Typecheck (tsc --noEmit)
+        run: npm run -w @droplet/orchestrator typecheck
+
       - name: Run vitest
         run: npm run -w @droplet/orchestrator test

@@ -11,6 +11,12 @@
  *  - the explicit 503 `voice_unavailable` (voice-io not deployed) auto-skips
  *    the step — but a GENERIC error surfaces with a retry instead of a
  *    silent skip (WARP-933).
+ *
+ * WARP-1050 — a mic present but DEAF (the wedged-DSP flatline #818/WARP-1037
+ * surfaces as `input_flatlined` on /voice/status) must render a distinct
+ * "mic isn't receiving audio" state with reset/replug guidance, instead of
+ * showing the "say Hey Droplet" hero and letting the customer conclude the
+ * wake word is broken.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
@@ -195,5 +201,63 @@ describe("VoiceStep — availability contract (WARP-933)", () => {
     await act(async () => {
       resolve(listeningStatus());
     });
+  });
+});
+
+describe("VoiceStep — dead mic / flatline (WARP-1050)", () => {
+  it("renders the 'mic isn't receiving audio' state when input_flatlined is true", async () => {
+    fetchVoiceStatus.mockResolvedValue(
+      listeningStatus({
+        input_flatlined: true,
+        input_rms_dbfs: -120,
+        last_audio_at: null,
+      }),
+    );
+    const onComplete = vi.fn();
+    render(
+      <VoiceStep onComplete={onComplete} onSkip={vi.fn()} onAutoSkip={vi.fn()} />,
+    );
+    // Honest headline: the mic isn't picking up sound.
+    expect(
+      await screen.findByText(/isn.t (picking up|receiving)/i),
+    ).toBeInTheDocument();
+    // Actionable guidance — reset/replug the mic.
+    expect(screen.getByText(/reset|replug|unplug/i)).toBeInTheDocument();
+    // It must NOT imply the wake word is broken: no "say hey droplet" hero
+    // and no "listening" pulse while the mic is flatlined.
+    expect(screen.queryByText(/say .?hey droplet/i)).not.toBeInTheDocument();
+    // Continue is always reachable — this never blocks setup.
+    const cont = screen.getByRole("button", { name: /^continue$/i });
+    expect(cont).toBeEnabled();
+    fireEvent.click(cont);
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it("recovers to the healthy try-it hero when a later poll clears the flatline", async () => {
+    vi.useFakeTimers();
+    fetchVoiceStatus
+      // initial load — flatlined (dead mic)
+      .mockResolvedValueOnce(
+        listeningStatus({ input_flatlined: true, input_rms_dbfs: -120 }),
+      )
+      // poll — the DSP recovered, real signal is flowing again
+      .mockResolvedValue(
+        listeningStatus({ input_flatlined: false, input_rms_dbfs: -42.5 }),
+      );
+
+    render(
+      <VoiceStep onComplete={vi.fn()} onSkip={vi.fn()} onAutoSkip={vi.fn()} />,
+    );
+    await act(async () => {});
+    expect(screen.getByText(/isn.t (picking up|receiving)/i)).toBeInTheDocument();
+    expect(screen.queryByText(/say .?hey droplet/i)).not.toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1100);
+    });
+    expect(screen.getByText(/say .?hey droplet/i)).toBeInTheDocument();
+    expect(
+      screen.queryByText(/isn.t (picking up|receiving)/i),
+    ).not.toBeInTheDocument();
   });
 });

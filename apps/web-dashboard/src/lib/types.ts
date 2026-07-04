@@ -449,6 +449,19 @@ export interface VoiceStatusInfo {
   last_response?: string | null;
   last_response_at?: number | null;
   llm_loaded?: boolean;
+  /** WARP-1037/#818 — input-level telemetry on `/voice/status`, relayed
+   *  verbatim by the proxy. `input_rms_dbfs` is a rolling mic RMS over
+   *  ~2 s measured INSIDE the pipeline's own frame handler (safe to drive
+   *  a live level meter — never a second capture stream on the held hw
+   *  device, which would EBUSY). `input_flatlined` is the wedged-DSP /
+   *  dead-mic signature: input sat at/near digital zero for the flatline
+   *  window while `state === "listening"`. The wizard uses it (WARP-1050)
+   *  to say "the mic isn't picking up sound" instead of letting the
+   *  customer conclude wake-word detection is broken. `last_audio_at` is
+   *  the wall-clock time a frame last carried real signal (null = never). */
+  input_rms_dbfs?: number | null;
+  last_audio_at?: number | null;
+  input_flatlined?: boolean;
 }
 
 /** Result of the wizard's speaker test (`POST /api/voice/say`). */

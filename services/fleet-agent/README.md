@@ -55,12 +55,12 @@ decision — not a config flip.
 ## Update poll: intentionally not here
 
 `docs/FLEET_MANAGEMENT_DESIGN.md` gives the eventual agent a third duty
-(signed git-tag manifest poll + self-update). That half is NOT in this
-service: WARP-538 tracks the orchestrator-side update poller, and
-WARP-961 owns the decision of unifying it with this agent. The design
-answers required to unblock that are proposed (NOT yet ratified) in
-[`docs/ADR-028-fleet-telemetry-and-design-answers.md`](../../docs/ADR-028-fleet-telemetry-and-design-answers.md).
-See the marked block in [`agent.py`](agent.py).
+(signed release-manifest poll + self-update). That half is NOT in this
+service yet. WARP-961 was ratified 2026-07-03
+([`docs/ADR-028-fleet-telemetry-and-design-answers.md`](../../docs/ADR-028-fleet-telemetry-and-design-answers.md),
+Accepted): the poller mounts HERE as one more apscheduler job — tracked
+by WARP-1025, reconciling WARP-538's orchestrator-side poller. See the
+marked block in [`agent.py`](agent.py).
 
 ## State
 

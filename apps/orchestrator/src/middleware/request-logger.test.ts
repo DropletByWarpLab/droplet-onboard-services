@@ -6,19 +6,20 @@ import { runWithRequestId } from "../lib/request-context.js";
 // Minimal http-ish req/res doubles: pino-http only needs an EventEmitter res
 // (it logs the "request completed" line on the `finish` event) plus method/url
 // on req.
-function mockRes() {
+function mockRes(headers: Record<string, string> = {}) {
   return Object.assign(new EventEmitter(), {
     statusCode: 200,
     getHeader() {},
+    getHeaders: () => headers,
     setHeader() {},
     end() {},
   });
 }
-function mockReq(requestId?: string) {
+function mockReq(requestId?: string, headers: Record<string, string> = {}) {
   return Object.assign(new EventEmitter(), {
     method: "GET",
     url: "/x",
-    headers: {},
+    headers,
     ...(requestId !== undefined ? { requestId } : {}),
   });
 }
@@ -61,5 +62,55 @@ describe("requestLogger requestId tagging (WARP-108)", () => {
     });
     const line = JSON.parse(lines[lines.length - 1]);
     expect(line.requestId).toBe("REAL-HANDLER-ID");
+  });
+});
+
+describe("requestLogger credential redaction (WARP-1015)", () => {
+  // pino-std-serializers' default req serializer emits headers VERBATIM, so
+  // without a redact list every authenticated request writes its Bearer JWT /
+  // Basic app-password / session cookie into production logs (and from there
+  // into WARP-823 log bundles). Seed real-shaped credentials and prove no log
+  // line ever carries them.
+  const BEARER = "Bearer SECRET-ACCESS-JWT-abc123";
+  const COOKIE = "droplet_session=SECRET-SESSION-VALUE";
+  const SET_COOKIE = "droplet_session=SECRET-NEW-SESSION; HttpOnly";
+
+  function runLoggedRequest() {
+    const lines: string[] = [];
+    const logger = createRequestLogger({
+      dest: { write: (s: string) => lines.push(s) },
+      level: "info",
+    });
+    const req = mockReq("REDACT-ID", {
+      authorization: BEARER,
+      cookie: COOKIE,
+    }) as ReturnType<typeof mockReq> & {
+      log: { info: (msg: string) => void };
+    };
+    const res = mockRes({ "set-cookie": SET_COOKIE });
+    runWithRequestId("REDACT-ID", () => {
+      logger(req as never, res as never);
+      req.log.info("in-handler line");
+    });
+    res.emit("finish");
+    return lines;
+  }
+
+  it("never logs the authorization or cookie request headers", () => {
+    const output = runLoggedRequest().join("");
+    expect(output).not.toContain(BEARER);
+    expect(output).not.toContain(COOKIE);
+  });
+
+  it("never logs the set-cookie response header", () => {
+    const output = runLoggedRequest().join("");
+    expect(output).not.toContain(SET_COOKIE);
+  });
+
+  it("replaces the redacted headers with the pino placeholder", () => {
+    const lines = runLoggedRequest();
+    const completion = JSON.parse(lines[lines.length - 1]);
+    expect(completion.req.headers.authorization).toBe("[Redacted]");
+    expect(completion.req.headers.cookie).toBe("[Redacted]");
   });
 });

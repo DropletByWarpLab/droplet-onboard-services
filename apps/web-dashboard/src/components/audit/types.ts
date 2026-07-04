@@ -4,10 +4,7 @@
  * Mirrors the orchestrator's WARP-456 activity surface:
  *   GET /api/activity           (list; id serialized as string)
  *   GET /api/activity/verify    (server-side hash-chain walk)
- *
- * TODO(WARP-1009/#789): actor filter once actorType/actorId land on
- * the ActivityRow shape — the filter bar is built around what the API
- * has today (kind, time range, free-text q over what/sub).
+ *   POST /api/activity/export   (sealed NDJSON bundle, same filters)
  */
 
 export const ACTIVITY_KINDS = [
@@ -42,7 +39,17 @@ export const KIND_LABELS: Record<ActivityKind, string> = {
 };
 
 /** WARP-181: who performed the action (null on pre-upgrade v1 rows). */
-export type ActivityActorType = "user" | "ai" | "system" | "anonymous";
+export const ACTIVITY_ACTOR_TYPES = ["user", "ai", "system", "anonymous"] as const;
+
+export type ActivityActorType = (typeof ACTIVITY_ACTOR_TYPES)[number];
+
+/** Home-user labels for the actor enum (filter dropdown vocabulary). */
+export const ACTOR_TYPE_LABELS: Record<ActivityActorType, string> = {
+  user: "A person",
+  ai: "Droplet AI",
+  system: "The system",
+  anonymous: "Anonymous",
+};
 
 export interface ActivityItem {
   id: string;
@@ -56,9 +63,9 @@ export interface ActivityItem {
   signature: string;
   prevSignatureHash: string;
   /** WARP-181 actor attribution — present on the wire since #789,
-   *  nulled on v1 rows. Typed optional until the actor filter UI
-   *  lands (see the TODO(WARP-1009/#789) marker above); no rendering
-   *  consumes them yet. */
+   *  nulled on v1 rows (their actor columns are outside the signature,
+   *  so the API refuses to serve them as truth). Rendered per row and
+   *  filterable since WARP-1009. */
   actorType?: ActivityActorType | null;
   actorId?: string | null;
 }

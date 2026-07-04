@@ -1450,6 +1450,119 @@ else
 fi
 
 # =============================================================================
+# Phase 12: prepare_and_build build-list parity with docker-compose.yml
+# =============================================================================
+# The build_services list in scripts/lib/compose.sh is hardcoded (jq is not a
+# guaranteed device dependency, so the honest enumeration can't run on every
+# box) and it drifted: mcp-server, device-identity-svc and email-indexer all
+# gained build: sections in docker/docker-compose.yml without landing in the
+# list, so fresh provisions built them lazily at first `up` instead of during
+# setup's build phase. Two layers pin the fix: (a) static parity between the
+# list and the compose file's build: sections (modulo documented exclusions),
+# (b) the runtime drift guard (compute_build_list_drift) that makes the NEXT
+# drift fail setup-e2e in CI.
+echo ""
+echo "--- Phase 12: prepare_and_build build-list parity with docker-compose.yml ---"
+
+# Keep in sync with the exclusion rationale beside the drift guard in
+# scripts/lib/compose.sh: rag-eval is appended at runtime only when the eval
+# profile is active; openwrt (single-box), ops-console (ops) and fleet-agent
+# (telemetry) are profile-gated services no default provision pre-builds.
+BUILD_LIST_EXCLUSIONS="rag-eval,openwrt,ops-console,fleet-agent"
+
+# (1) Daemon-free enumeration of every compose service with a build: section
+# (2-space service keys, 4-space build: — the file's committed style).
+COMPOSE_BUILDABLE="$(awk '
+  /^  [a-zA-Z0-9_-]+:[[:space:]]*$/ { svc=$1; sub(/:$/, "", svc) }
+  /^    build:/ { if (svc != "") print svc }
+' "$COMPOSE_FILE_REAL" | sort)"
+if [ -n "$COMPOSE_BUILDABLE" ]; then
+  pass "enumerated compose build: services without a docker daemon"
+else
+  fail "could not enumerate build: services from docker-compose.yml (indentation style changed?)"
+fi
+
+# (2) Parity: every buildable compose service is either in build_services or
+# a documented exclusion.
+BUILD_LIST_BLOCK="$(awk '/^  local build_services=\(/{f=1} f{print} f&&/^  \)/{exit}' "$COMPOSE_LIB")"
+PARITY_MISSING=""
+while IFS= read -r P12_SVC; do
+  [ -z "$P12_SVC" ] && continue
+  case ",${BUILD_LIST_EXCLUSIONS}," in *",${P12_SVC},"*) continue ;; esac
+  if ! printf '%s\n' "$BUILD_LIST_BLOCK" | grep -qE "^[[:space:]]+${P12_SVC}([[:space:]]|$)"; then
+    PARITY_MISSING="${PARITY_MISSING:+${PARITY_MISSING} }${P12_SVC}"
+  fi
+done <<<"$COMPOSE_BUILDABLE"
+if [ -z "$PARITY_MISSING" ]; then
+  pass "build_services covers every compose build: service (exclusions: ${BUILD_LIST_EXCLUSIONS})"
+else
+  fail "build_services is missing buildable compose services: ${PARITY_MISSING} (add them, or document the exclusion beside the drift guard)"
+fi
+
+# (3) The reverse: no build_services entry without a build: section in the
+# compose file (a renamed/removed service would fail every provision).
+STALE_ENTRIES=""
+while IFS= read -r P12_LINE; do
+  P12_ENTRY="$(printf '%s' "$P12_LINE" | sed -E 's/^[[:space:]]+//; s/[[:space:]]*(#.*)?$//')"
+  case "$P12_ENTRY" in ''|'#'*|'local'*|')') continue ;; esac
+  printf '%s\n' "$COMPOSE_BUILDABLE" | grep -qx "$P12_ENTRY" \
+    || STALE_ENTRIES="${STALE_ENTRIES:+${STALE_ENTRIES} }${P12_ENTRY}"
+done <<<"$BUILD_LIST_BLOCK"
+if [ -z "$STALE_ENTRIES" ]; then
+  pass "every build_services entry has a build: section in docker-compose.yml"
+else
+  fail "build_services entries with no build: section in docker-compose.yml: ${STALE_ENTRIES}"
+fi
+
+# (4) Sentinel markers (the extraction contract for the behavioural asserts).
+if grep -qF "# >>> compute_build_list_drift" "$COMPOSE_LIB" \
+   && grep -qF "# <<< compute_build_list_drift" "$COMPOSE_LIB"; then
+  pass "compute_build_list_drift sentinel markers present in compose.sh"
+else
+  fail "compute_build_list_drift sentinel markers missing from compose.sh"
+fi
+
+# (5) Behavioural: extract the shipping guard function and exercise it.
+eval "$(awk '/^compute_build_list_drift\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$COMPOSE_LIB")"
+if declare -F compute_build_list_drift >/dev/null; then
+  P12_OUT="$(printf 'a\nb\n' | compute_build_list_drift 'a,b,c')"
+  if [ -z "$P12_OUT" ]; then
+    pass "no drift reported when every enumerated service is accounted for"
+  else
+    fail "false-positive drift for fully-accounted services: '$P12_OUT'"
+  fi
+  P12_OUT="$(printf 'a\nshiny-new-svc\n' | compute_build_list_drift 'a,b')"
+  if [ "$P12_OUT" = "shiny-new-svc" ]; then
+    pass "unaccounted compose service is reported as drift"
+  else
+    fail "expected drift 'shiny-new-svc', got '$P12_OUT'"
+  fi
+  P12_OUT="$(printf '' | compute_build_list_drift 'a')"
+  if [ -z "$P12_OUT" ]; then
+    pass "empty enumeration (no jq / config failed) reports no drift — guard stays best-effort"
+  else
+    fail "empty enumeration should report no drift, got '$P12_OUT'"
+  fi
+else
+  fail "compute_build_list_drift not extractable from compose.sh (skipping behavioural asserts)"
+  TESTS=$((TESTS + 3)); FAILURES=$((FAILURES + 3))
+fi
+
+# (6) Wiring: prepare_and_build actually runs the guard, and only CI runs
+# hard-fail on drift (a fleet box mid-provision must warn and continue).
+P12_BUILD_BODY="$(awk '/^prepare_and_build\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$COMPOSE_LIB")"
+if printf '%s' "$P12_BUILD_BODY" | grep -q 'compute_build_list_drift'; then
+  pass "prepare_and_build invokes the drift guard"
+else
+  fail "prepare_and_build never calls compute_build_list_drift — the list can drift silently again"
+fi
+if printf '%s' "$P12_BUILD_BODY" | grep -qF '${CI:-}'; then
+  pass "drift hard-fail is gated on CI (devices warn and continue provisioning)"
+else
+  fail "drift guard has no CI gate — either devices hard-fail on drift or CI never does"
+fi
+
+# =============================================================================
 # Results
 # =============================================================================
 echo ""

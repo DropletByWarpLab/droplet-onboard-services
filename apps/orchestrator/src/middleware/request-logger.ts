@@ -24,6 +24,18 @@ export function createRequestLogger(opts: {
 } = {}) {
   const httpBaseOpts: pino.LoggerOptions = {
     name: "http",
+    // WARP-1015: the default req serializer emits headers verbatim, so
+    // without this list every authenticated request logs its Bearer JWT /
+    // Basic app-password / session cookie (and log bundles carry them off
+    // the device). Redaction must live on THIS base logger — pino-http only
+    // applies its own `redact` option when it creates the logger itself.
+    redact: {
+      paths: [
+        "req.headers.authorization",
+        "req.headers.cookie",
+        'res.headers["set-cookie"]',
+      ],
+    },
     mixin() {
       const id = getRequestId();
       return id !== undefined ? { requestId: id } : {};

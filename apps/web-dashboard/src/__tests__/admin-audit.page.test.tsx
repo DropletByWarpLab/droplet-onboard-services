@@ -62,13 +62,20 @@ function okJson(body: unknown) {
   return { ok: true, status: 200, json: async () => body };
 }
 
-/** Route the two endpoints the page talks to. */
+/** Route the endpoints the page talks to. `users: null` (default) makes
+ *  the directory fetch fail — actor names must degrade to short ids, and
+ *  every pre-WARP-1009 test keeps passing without wiring users. */
 function wireApi({
   items = [makeItem()],
   nextCursor = null as string | null,
   verify = { ok: true, rowsChecked: 42, verifiedAt: "2026-06-30T10:05:00.000Z" } as unknown,
+  users = null as Array<{ id: string; username: string; displayName: string }> | null,
 } = {}) {
   authFetchMock.mockImplementation(async (url: string) => {
+    if (url.includes("/api/auth/users")) {
+      if (users) return okJson({ users });
+      throw new Error("users directory unavailable");
+    }
     if (url.startsWith("/api/activity/verify")) return okJson(verify);
     if (url.startsWith("/api/activity")) return okJson({ items, nextCursor });
     throw new Error(`unexpected fetch: ${url}`);
@@ -201,6 +208,7 @@ describe("/admin/audit pagination + export", () => {
   it("appends the next page via the cursor on Load more", async () => {
     let call = 0;
     authFetchMock.mockImplementation(async (url: string) => {
+      if (url.includes("/api/auth/users")) throw new Error("users directory unavailable");
       if (url.startsWith("/api/activity/verify")) {
         return okJson({ ok: true, rowsChecked: 2, verifiedAt: "2026-06-30T10:05:00.000Z" });
       }
@@ -265,6 +273,7 @@ describe("/admin/audit pagination + export", () => {
     // neither append nor clobber the fresh nextCursor.
     let resolveStale: (() => void) | null = null;
     authFetchMock.mockImplementation(async (url: string) => {
+      if (url.includes("/api/auth/users")) throw new Error("users directory unavailable");
       if (url.startsWith("/api/activity/verify")) {
         return okJson({ ok: true, rowsChecked: 2, verifiedAt: "2026-06-30T10:05:00.000Z" });
       }
@@ -309,6 +318,7 @@ describe("/admin/audit pagination + export", () => {
     // `loading` is true (and the button is disabled).
     let resolveFiltered: (() => void) | null = null;
     authFetchMock.mockImplementation(async (url: string) => {
+      if (url.includes("/api/auth/users")) throw new Error("users directory unavailable");
       if (url.startsWith("/api/activity/verify")) {
         return okJson({ ok: true, rowsChecked: 1, verifiedAt: "2026-06-30T10:05:00.000Z" });
       }
@@ -339,5 +349,101 @@ describe("/admin/audit pagination + export", () => {
 
     resolveFiltered!();
     expect(await screen.findByText("filtered row")).toBeInTheDocument();
+  });
+});
+
+describe("/admin/audit actor attribution (WARP-1009)", () => {
+  it("renders the actor on every row, resolving user ids to directory names", async () => {
+    wireApi({
+      items: [
+        makeItem({ id: "1", what: "File shared", actorType: "user", actorId: "u-42" }),
+        makeItem({ id: "2", what: "Camera armed", actorType: "ai", actorId: null }),
+        makeItem({ id: "3", what: "Nightly purge", actorType: "system", actorId: null }),
+      ],
+      users: [{ id: "u-42", username: "bob", displayName: "Bob Martin" }],
+    });
+    render(<AuditPage />);
+
+    expect(await screen.findByText(/by Bob Martin/i)).toBeInTheDocument();
+    expect(screen.getByText(/by Droplet AI/i)).toBeInTheDocument();
+    expect(screen.getByText(/by the system/i)).toBeInTheDocument();
+  });
+
+  it("degrades a user actor to its short id when the directory is unavailable", async () => {
+    // wireApi default: /api/auth/users rejects — names are progressive
+    // enhancement and must never blank the actor.
+    wireApi({
+      items: [
+        makeItem({ id: "1", what: "File shared", actorType: "user", actorId: "3f2a9c11-dead-beef-0000-000000000000" }),
+      ],
+    });
+    render(<AuditPage />);
+    expect(await screen.findByText(/by user 3f2a9c11/i)).toBeInTheDocument();
+  });
+
+  it("shows an explicit unattributed state on pre-upgrade v1 rows, not a blank", async () => {
+    wireApi({
+      items: [makeItem({ id: "1", what: "Old event", actorType: null, actorId: null })],
+    });
+    render(<AuditPage />);
+    expect(await screen.findByText(/unattributed/i)).toBeInTheDocument();
+  });
+
+  it("re-queries with actorType= when an actor type is picked", async () => {
+    wireApi();
+    render(<AuditPage />);
+    await screen.findByText("Alice signed in");
+
+    fireEvent.change(screen.getByLabelText(/filter by actor/i), {
+      target: { value: "ai" },
+    });
+    await waitFor(() => {
+      const urls = authFetchMock.mock.calls.map((c) => c[0] as string);
+      expect(urls.some((u) => u.includes("actorType=ai"))).toBe(true);
+    });
+  });
+
+  it("downloads the sealed NDJSON bundle via POST /api/activity/export with the active filters", async () => {
+    const bundleBlob = new Blob(['{"manifest":true}\n'], { type: "application/x-ndjson" });
+    authFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.includes("/api/auth/users")) throw new Error("users directory unavailable");
+      if (url.startsWith("/api/activity/verify")) {
+        return okJson({ ok: true, rowsChecked: 1, verifiedAt: "2026-06-30T10:05:00.000Z" });
+      }
+      if (url.startsWith("/api/activity/export")) {
+        expect(init?.method).toBe("POST");
+        const body = JSON.parse(String(init?.body));
+        // The sealed export carries the SAME filters the view shows.
+        expect(body.kind).toBe("auth");
+        return { ok: true, status: 200, blob: async () => bundleBlob };
+      }
+      if (url.startsWith("/api/activity")) {
+        return okJson({ items: [makeItem()], nextCursor: null });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    const createObjectURL = vi.fn((_blob: Blob) => "blob:droplet-bundle");
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("URL", Object.assign(URL, { createObjectURL, revokeObjectURL }));
+    let downloadName = "";
+    const clickSpy = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(function (this: HTMLAnchorElement) {
+        downloadName = this.download;
+      });
+
+    render(<AuditPage />);
+    await screen.findByText("Alice signed in");
+    fireEvent.change(screen.getByLabelText(/filter by kind/i), {
+      target: { value: "auth" },
+    });
+    await screen.findByText("Alice signed in");
+
+    fireEvent.click(screen.getByRole("button", { name: /export sealed bundle/i }));
+    await waitFor(() => expect(createObjectURL).toHaveBeenCalledWith(bundleBlob));
+    expect(downloadName).toBe("droplet-activity-bundle.jsonl");
+
+    clickSpy.mockRestore();
+    vi.unstubAllGlobals();
   });
 });

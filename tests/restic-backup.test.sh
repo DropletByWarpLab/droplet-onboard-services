@@ -95,6 +95,18 @@ if [ -f "$BACKUP_SCRIPT" ] && [ -f "$RESTORE_SCRIPT" ] && [ -f "$DRILL_SCRIPT" ]
     || fail "backup has no DROPLET_BACKUP_TARGET knob"
   grep -q 'nextcloud-data' "$BACKUP_SCRIPT" \
     && pass "backup captures nextcloud-data" || fail "backup omits nextcloud-data"
+  # WARP-1013: the db container hosts BOTH databases. Dumping only droplet
+  # while tarring the nextcloud-data blobs means a restore pairs fresh files
+  # with a stale metadata DB (file cache / shares / users skew — missing or
+  # ghost files after recovery). The nextcloud DB must be dumped too.
+  grep -q 'nextcloud\.sql\.gz' "$BACKUP_SCRIPT" \
+    && pass "backup stages the nextcloud DB dump (nextcloud.sql.gz)" \
+    || fail "backup never dumps the nextcloud DB (WARP-1013)"
+  # ...and a missing nextcloud DB must be an explicit existence-guarded skip
+  # (legacy pgdata predating init-nextcloud-db.sh), mirroring stage_volume.
+  grep -q 'pg_database' "$BACKUP_SCRIPT" \
+    && pass "backup existence-guards the nextcloud DB (pg_database probe)" \
+    || fail "backup has no existence guard for the nextcloud DB"
   # Camera footage EXCLUDED by default, opt-in via flag (size rationale).
   grep -q 'DROPLET_BACKUP_INCLUDE_CAMERA' "$BACKUP_SCRIPT" \
     && pass "camera footage behind DROPLET_BACKUP_INCLUDE_CAMERA opt-in" \
@@ -148,6 +160,11 @@ if [ -f "$BACKUP_SCRIPT" ] && [ -f "$RESTORE_SCRIPT" ] && [ -f "$DRILL_SCRIPT" ]
   else
     fail "restore psql without ON_ERROR_STOP=1 ($psql_stop/$psql_total set)"
   fi
+  # WARP-1013: the restore must replay the nextcloud DB dump when the
+  # snapshot carries one (same-snapshot pairing with the nextcloud-data tar).
+  grep -q 'nextcloud\.sql\.gz' "$RESTORE_SCRIPT" \
+    && pass "restore replays the nextcloud DB dump when present" \
+    || fail "restore never replays the nextcloud DB (WARP-1013)"
 
   # --- Drill script contract ---
   grep -qE 'restic[^&|;]*check' "$DRILL_SCRIPT" \
@@ -166,6 +183,17 @@ if [ -f "$BACKUP_SCRIPT" ] && [ -f "$RESTORE_SCRIPT" ] && [ -f "$DRILL_SCRIPT" ]
   grep -qE '_json_escape|json_escape' "$DRILL_SCRIPT" \
     && pass "drill status file escapes interpolated strings (JSON-safe)" \
     || fail "drill status file interpolates raw strings into JSON (injection risk)"
+  # WARP-1013: the drill must prove the nextcloud DB dump replays too, and
+  # record it explicitly (table count + a files-metadata sanity row).
+  grep -q 'nextcloud\.sql\.gz' "$DRILL_SCRIPT" \
+    && pass "drill replays the nextcloud DB dump" \
+    || fail "drill ignores the nextcloud DB (WARP-1013)"
+  grep -q '"nextcloud_tables"' "$DRILL_SCRIPT" \
+    && pass "drill status records nextcloud_tables" \
+    || fail "drill status has no nextcloud_tables field"
+  grep -q '"filecache_rows"' "$DRILL_SCRIPT" \
+    && pass "drill status records the oc_filecache sanity count" \
+    || fail "drill status has no filecache_rows field"
 fi
 
 echo ""
@@ -425,6 +453,7 @@ wait_healthy() {
 }
 
 db_count() { dc exec -T db sh -c 'psql -U droplet -d droplet -tAc "SELECT count(*) FROM t WHERE id=42;"' 2>/dev/null | tr -d '[:space:]'; }
+nc_db_count() { dc exec -T db sh -c 'psql -U droplet -d nextcloud -tAc "SELECT count(*) FROM oc_filecache WHERE fileid=1;"' 2>/dev/null | tr -d '[:space:]'; }
 nc_marker() { dc exec -T db sh -c '[ -f /var/www/html/marker.txt ] && echo yes || echo no' 2>/dev/null | tr -d '[:space:]'; }
 
 if ! command -v docker >/dev/null 2>&1 || ! have_docker; then
@@ -468,8 +497,12 @@ else
     fail "disposable Postgres did not become healthy"
   else
     dc exec -T db sh -c 'psql -U droplet -d droplet -c "CREATE TABLE IF NOT EXISTS t(id int); INSERT INTO t VALUES (42);"' >/dev/null
+    # Second database in the SAME container, like the live stack's
+    # init-nextcloud-db.sh, with an oc_filecache-shaped sanity table (WARP-1013).
+    dc exec -T db sh -c 'psql -U droplet -d droplet -tAc "SELECT 1 FROM pg_database WHERE datname='"'"'nextcloud'"'"';" | grep -q 1 || psql -U droplet -d droplet -c "CREATE DATABASE nextcloud;"' >/dev/null
+    dc exec -T db sh -c 'psql -U droplet -d nextcloud -c "CREATE TABLE IF NOT EXISTS oc_filecache(fileid int); INSERT INTO oc_filecache VALUES (1);"' >/dev/null
     dc exec -T db sh -c 'echo NEXTCLOUD-MARKER > /var/www/html/marker.txt; echo NVR-FOOTAGE > /data/nvr/footage.bin'
-    pass "seeded the DB + volume markers"
+    pass "seeded both DBs + volume markers"
 
     # --- Backup #1 (daily) --------------------------------------------------
     info "running droplet-backup.sh (daily)"
@@ -498,6 +531,9 @@ else
     latest_files="$(RESTIC_PASSWORD="$DERIVED_PW" restic -r "$REPO_TARGET" ls latest 2>/dev/null || true)"
     printf '%s\n' "$latest_files" | grep -q 'nextcloud-data' \
       && pass "nextcloud-data captured in snapshot" || fail "nextcloud-data missing from snapshot"
+    printf '%s\n' "$latest_files" | grep -q 'nextcloud\.sql\.gz' \
+      && pass "nextcloud DB dump captured in snapshot" \
+      || fail "nextcloud DB dump missing from snapshot (WARP-1013)"
     printf '%s\n' "$latest_files" | grep -q '\.env' \
       && pass ".env captured in snapshot" || fail ".env missing from snapshot"
     printf '%s\n' "$latest_files" | grep -q 'marker.crt' \
@@ -529,16 +565,29 @@ else
     else
       fail "droplet-backup.sh --full failed"
     fi
-    RESTIC_PASSWORD="$DERIVED_PW" restic -r "$REPO_TARGET" snapshots 2>/dev/null | grep -q 'weekly-full' \
-      && pass "full snapshot tagged weekly-full" || fail "no weekly-full tagged snapshot"
+    # Snapshot listing captured to a variable (same pattern as latest_files):
+    # piping restic straight into grep -q SIGPIPEs restic on first match,
+    # which can leave a stale repo lock behind for the next command.
+    full_snaps="$(RESTIC_PASSWORD="$DERIVED_PW" restic -r "$REPO_TARGET" snapshots 2>&1 || true)"
+    if printf '%s\n' "$full_snaps" | grep -q 'weekly-full'; then
+      pass "full snapshot tagged weekly-full"
+    else
+      fail "no weekly-full tagged snapshot"
+      printf '%s\n' "$full_snaps" | tail -n 5 | sed 's/^/      /'
+    fi
 
     # --- Mutate --------------------------------------------------------------
     dc exec -T db sh -c 'psql -U droplet -d droplet -c "DELETE FROM t;"' >/dev/null 2>&1
+    dc exec -T db sh -c 'psql -U droplet -d nextcloud -c "DELETE FROM oc_filecache;"' >/dev/null 2>&1
     dc exec -T db sh -c 'rm -f /var/www/html/marker.txt' >/dev/null 2>&1
     [ "$(db_count)" = "0" ] && pass "data mutated (rows dropped)" || fail "mutation did not take"
+    [ "$(nc_db_count)" = "0" ] && pass "nextcloud DB mutated (rows dropped)" || fail "nextcloud mutation did not take"
 
     # --- Restore --------------------------------------------------------------
+    # Restore output goes to a capture file, NOT /dev/null — same lesson as
+    # the drill below: on failure the restic/psql stderr IS the diagnosis.
     info "running droplet-restore.sh --force"
+    RESTORE_LOG="$WORK_ROOT/restore-output.log"
     if DROPLET_REPO_ROOT="$FAUX_ROOT" \
        PROJECT="$PROJECT" COMPOSE_FILE="$DISPOSABLE_COMPOSE" \
        DB_SERVICE=db DB_USER=droplet DB_NAME=droplet \
@@ -546,12 +595,16 @@ else
        DROPLET_BACKUP_STATE_DIR="$STATE_DIR" \
        DROPLET_BACKUP_RUNTIME_DIR="$RUNTIME_DIR" \
        SKIP_SERVICE_RESTART=1 \
-       bash "$RESTORE_SCRIPT" --force >/dev/null 2>&1; then
+       bash "$RESTORE_SCRIPT" --force >"$RESTORE_LOG" 2>&1; then
       pass "droplet-restore.sh exited 0"
     else
       fail "droplet-restore.sh failed"
+      info "restore output (tail) follows:"
+      tail -n 20 "$RESTORE_LOG" 2>/dev/null | sed 's/^/      /'
     fi
     [ "$(db_count)" = "1" ] && pass "db row restored" || fail "db row NOT restored (count=$(db_count))"
+    [ "$(nc_db_count)" = "1" ] && pass "nextcloud DB row restored (WARP-1013 round-trip)" \
+      || fail "nextcloud DB NOT restored (count=$(nc_db_count))"
     [ "$(nc_marker)" = "yes" ] && pass "nextcloud-data volume restored" || fail "nextcloud-data NOT restored"
     # Config surfaces land in a staging dir for the operator, never applied live.
     if ls "$STATE_DIR"/restored-config-*/.env >/dev/null 2>&1; then
@@ -588,6 +641,12 @@ else
       pass "drill wrote status file"
       grep -q '"status": *"ok"' "$STATUS_FILE" && pass "drill status is ok" || fail "drill status not ok: $(cat "$STATUS_FILE")"
       grep -q '"completed_at"' "$STATUS_FILE" && pass "drill status carries a timestamp" || fail "drill status missing timestamp"
+      grep -qE '"nextcloud_tables": *[1-9]' "$STATUS_FILE" \
+        && pass "drill replayed the nextcloud DB (nextcloud_tables >= 1)" \
+        || fail "drill did not replay the nextcloud DB: $(cat "$STATUS_FILE")"
+      grep -qE '"filecache_rows": *[0-9]' "$STATUS_FILE" \
+        && pass "drill recorded the oc_filecache sanity row count" \
+        || fail "drill status missing filecache_rows: $(cat "$STATUS_FILE")"
     else
       fail "drill status file missing at $STATUS_FILE"
     fi

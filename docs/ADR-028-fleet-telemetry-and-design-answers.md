@@ -1,12 +1,13 @@
 # ADR-028: Fleet telemetry v1 (portal-push agent) + proposed answers to the fleet-design open questions
 
-- **Status:** Proposed — **NOT accepted.** The three recommendations in
-  §"The three open questions" are drafted for human ratification and
-  bind nothing until Romain and Stefan sign off (they are the same
-  three blocking choices `FLEET_MANAGEMENT_DESIGN.md` has carried as
-  "🟡 Awaiting Romain review" since 2026-05-15). The v1 telemetry slice
-  in §"What ships now" is the only part implemented, and it is
-  flag-gated OFF by default.
+- **Status:** **Accepted** — ratified 2026-07-03 by Romain (WARP-961;
+  the answers were proposed for Stefan Cruceru in PR #781, with the
+  question-1 answer aligned to the 2026-07-01 Cloudflare-native founder
+  decision). The three answers in §"The three open questions" are
+  binding; they resolve the choices `FLEET_MANAGEMENT_DESIGN.md`
+  carried as "🟡 Awaiting Romain review" since 2026-05-15
+  (WARP-333/334/335). The v1 telemetry slice in §"What ships now" is
+  implemented and flag-gated OFF by default.
 - **Date:** 2026-07-01
 - **Authors:** Claude (Dev agent), for Stefan Cruceru
 - **Related tickets:** WARP-963 (one on-device agent — this v1 slice),
@@ -81,10 +82,15 @@ operational telemetry to the analytics portal per the frozen contract:
 
 This slice neither prejudges nor depends on the three open questions.
 
-## The three open questions — proposed answers (for ratification)
+## The three open questions — ratified answers
 
-> ⚠ **Proposals only.** Confirm or override each; WARP-961 / Phase 1 of
-> the fleet design unblocks the moment all three are signed off.
+> **Ratified 2026-07-03 (WARP-961).** The three answers below are
+> decided and Phase 1 of the fleet design is unblocked. The agent↔cloud
+> contract is thereby frozen: heartbeat / telemetry / registration is
+> the portal's agent-api v1.0.0 (already frozen and shipped); the
+> update channel is signed release manifests (WARP-537 verification
+> library, `releases` repo), with the poller mounting in
+> `services/fleet-agent/` as an apscheduler job — tracked by WARP-1025.
 
 ### 1. HQ host choice — proposed: no servers at all (portal for telemetry, Cloudflare-native for remote access)
 
@@ -200,9 +206,10 @@ richer expressions later without migration.
 
 ## How to apply
 
-- Ratify/override the three answers above (Romain + Stefan). Record the
-  outcome by flipping this ADR to Accepted (or amending it) and
-  updating `FLEET_MANAGEMENT_DESIGN.md`'s open-questions block.
+- ~~Ratify/override the three answers above (Romain + Stefan).~~
+  **Done 2026-07-03:** ratified by Romain (WARP-961); this ADR is
+  Accepted and `FLEET_MANAGEMENT_DESIGN.md`'s open-questions block
+  records the per-question decisions.
 - On ratification of question 1: nothing to provision — enroll the
   fleet in the Cloudflare Zero Trust org and point the ops-console
   remote-access work (design doc phase 2) at the per-box VNET route

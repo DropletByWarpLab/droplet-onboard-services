@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AlertCircle, Mic, MicOff, Volume2 } from "lucide-react";
+import { AlertCircle, AlertTriangle, Mic, MicOff, Volume2 } from "lucide-react";
 import {
   fetchVoiceStatus,
   sayVoiceTest,
@@ -33,6 +33,15 @@ const SPEAKER_TEST_TEXT = "Hi — I'm your Droplet";
  *  - renders a plug-in panel when `state === "no_mic"` — the pipeline's
  *    hot-plug rescan arms voice the moment a mic appears, no restart, so
  *    Continue stays enabled and the poll keeps watching for the flip;
+ *  - renders a distinct "mic isn't picking up sound" panel when the
+ *    pipeline reports `input_flatlined` (WARP-1050) — a mic is present and
+ *    the pipeline is nominally "listening", but no audio is reaching it
+ *    (the wedged-DSP signature #818/WARP-1037 detects). Without this the
+ *    customer says "hey droplet", nothing happens, and they wrongly
+ *    conclude wake-word detection is broken. We name the real fault (the
+ *    mic isn't receiving audio) and give the fix (reset / replug it); the
+ *    poll keeps watching so a recovery flips straight back to the try-it
+ *    hero, no restart;
  *  - auto-skips ONLY on the orchestrator's explicit 503 `voice_unavailable`
  *    (voice-io not deployed — macOS dev), mirroring how storage/cameras
  *    treat genuinely-absent hardware surfaces. Per WARP-933 a generic
@@ -161,6 +170,13 @@ export function VoiceStep({
       ? status.last_response
       : null;
 
+  // WARP-1050 — a mic is present (not `no_mic`) but the pipeline sees no
+  // audio: `input_flatlined` is voice-io's wedged-DSP / dead-mic signature
+  // (#818). The pipeline still reports "listening", so left alone the
+  // customer would say "hey droplet", get nothing, and blame the wake word.
+  // We render the honest fault + fix instead of the try-it hero.
+  const micFlatlined = status?.input_flatlined === true;
+
   const shellProps = {
     current: "voice" as const,
     title: "Talk to your Droplet",
@@ -231,6 +247,36 @@ export function VoiceStep({
           <p className="type-caption-1 text-label-tertiary max-w-xs">
             Plug in a USB microphone and it goes live right away — no restart
             needed. This page will notice as soon as it&rsquo;s connected.
+          </p>
+        </div>
+      </StepShell>
+    );
+  }
+
+  // Mic present but deaf (WARP-1050) — voice-io is "listening" yet no audio
+  // is reaching the pipeline (`input_flatlined`). Name the real fault and
+  // the fix; DON'T show the "say hey droplet" hero, which would read as
+  // "wake-word detection is broken". The poll keeps running, so the moment
+  // audio flows again this flips back to the try-it hero with no restart.
+  if (micFlatlined) {
+    return (
+      <StepShell
+        {...shellProps}
+        primary={{ label: "Continue", onClick: onComplete, showArrow: true }}
+      >
+        <div className="dp-card !py-6 flex flex-col items-center gap-2 text-center">
+          <div className="flex h-10 w-10 items-center justify-center rounded-full bg-system-orange/10">
+            <AlertTriangle size={20} className="text-system-orange" />
+          </div>
+          <p className="type-subheadline text-label-primary">
+            The microphone isn&rsquo;t picking up sound
+          </p>
+          <p className="type-caption-1 text-label-tertiary max-w-xs">
+            Your Droplet is listening, but the microphone isn&rsquo;t sending
+            any audio — so it can&rsquo;t hear &ldquo;Hey Droplet&rdquo; yet.
+            Try unplugging the microphone and plugging it back in. It goes live
+            again on its own — no restart needed, and this page will notice as
+            soon as it&rsquo;s working.
           </p>
         </div>
       </StepShell>

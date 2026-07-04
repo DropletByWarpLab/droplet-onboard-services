@@ -134,6 +134,16 @@ jobs:
         if: matrix.suite == 'orchestrator'
         uses: sigstore/cosign-installer@v3
 
+      # WARP-1011: vitest transforms via esbuild and never typechecks, so
+      # compile-time contracts (e.g. the activity log's required
+      # RecordParams.actor) were unenforced in CI. Runs after Prisma generate
+      # + workspace builds so tsc resolves the generated client. Dashboard tsc
+      # gating is deferred until its known pre-existing error is fixed
+      # (WARP-1005) — mirrors orchestrator-tests.yml.
+      - name: Typecheck @droplet/orchestrator (tsc --noEmit)
+        if: matrix.suite == 'orchestrator'
+        run: npm run -w @droplet/orchestrator typecheck
+
       - name: Test @droplet/orchestrator
         if: matrix.suite == 'orchestrator'
         run: npm run -w @droplet/orchestrator test

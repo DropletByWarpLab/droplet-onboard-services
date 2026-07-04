@@ -5,10 +5,15 @@
 > `/fleet` page on warp-lab.com. Implementation will land over 3–4
 > focused weeks.
 >
-> **🟡 Awaiting Romain review** on three blocking choices in the
+> **✅ Decided 2026-07-03:** the three blocking choices are ratified as
+> [ADR-028](ADR-028-fleet-telemetry-and-design-answers.md) (Accepted)
+> records them — question 1's ratified answer (no Warp-operated
+> servers; the analytics portal owns telemetry, remote access is
+> Cloudflare-native per ADR-025A in `droplet-fleet-hq`) **supersedes
+> this doc's original Hetzner proposal**; questions 2 and 3 are
+> confirmed as proposed. Per-question record in the
 > [Open questions](#open-questions-before-implementation-starts)
-> section below. Phase 1 day 1 unblocks the moment those three are
-> confirmed or overridden.
+> section below.
 >
 > Filed as: [WARP-333](https://warp-lab.atlassian.net/browse/WARP-333) (HQ host),
 > [WARP-334](https://warp-lab.atlassian.net/browse/WARP-334) (signing key),
@@ -324,24 +329,28 @@ Every layer assumes the previous failed:
 
 ## Open questions before implementation starts
 
-> **Status: awaiting Romain review.**
-> The three blocking choices below each have a proposed answer
-> (rationale beneath). Phase 1 day 1 starts when these are confirmed
-> or overridden. Questions 4–5 have built-in answers; included for
-> completeness but no decision needed.
+> **Status: DECIDED 2026-07-03 (WARP-961).** Romain ratified the three
+> answers as [ADR-028](ADR-028-fleet-telemetry-and-design-answers.md)
+> (Accepted) re-proposed them against current reality: **Q1 — no
+> Warp-operated servers** (the original Hetzner proposal below is
+> superseded; the analytics portal owns telemetry/heartbeat ingest,
+> remote access is Cloudflare-native Zero Trust WARP-to-Tunnel over
+> per-box VNETs, ADR-025A in `droplet-fleet-hq` PR #9); **Q2 — Yubikey
+> 5 NFC × 2**, as proposed; **Q3 — tag-based selectors**, with the tag
+> vocabulary shared with the portal's machine model. Questions 4–5
+> have built-in answers; included for completeness, no decision needed.
 >
-> **2026-07-01 (WARP-963):**
-> [ADR-028](ADR-028-fleet-telemetry-and-design-answers.md) re-proposes
-> all three answers against the current reality (analytics portal owns
-> telemetry ingest; HQ is a serverless Worker; NO VPS per the 2026-07-01
-> founder decision — remote access is Cloudflare-native Zero Trust
-> WARP-to-Tunnel over per-box VNETs, ADR-025A in `droplet-fleet-hq`
-> PR #9) — still **Proposed, NOT accepted**, awaiting the same
-> Romain/Stefan sign-off. The portal-push telemetry half shipped
+> **2026-07-01 (WARP-963):** the portal-push telemetry half shipped
 > flag-gated as `services/fleet-agent/` without prejudging these
 > questions.
 
 ### 1. HQ host choice
+
+> **DECIDED (ADR-028 Q1, 2026-07-03): no servers at all — the proposal
+> below is SUPERSEDED and kept only for the record.** Telemetry and
+> heartbeat ingest is the analytics portal (shipped, agent-api
+> v1.0.0); remote access is Cloudflare-native Zero Trust
+> WARP-to-Tunnel over per-box VNETs (ADR-025A).
 
 **Options considered:** Hetzner CX22 (€5/mo, Frankfurt), Cloudflare
 Worker + D1 (serverless), or AWS Lightsail ($3.50/mo).
@@ -366,6 +375,8 @@ Worker + D1 (serverless), or AWS Lightsail ($3.50/mo).
 
 ### 2. Signing key custody
 
+> **DECIDED as proposed (ADR-028 Q2, 2026-07-03).**
+
 **Options considered:** Yubikey 5 NFC (hardware token, $55 each) or
 1Password + passphrase-encrypted key file.
 
@@ -385,6 +396,11 @@ Worker + D1 (serverless), or AWS Lightsail ($3.50/mo).
   slot config. Single afternoon, never touched again.
 
 ### 3. Manifest scope schema
+
+> **DECIDED as proposed (ADR-028 Q3, 2026-07-03)**, with the tag
+> vocabulary shared with the portal's machine model
+> (`tier`/`channel`/`customer`/`region`/`hw`) so fleet map and rollout
+> targeting speak the same language.
 
 **Options considered:** fixed groups (each customer = a group), or
 tag-based selectors (each device has a set of tags, manifests target
@@ -433,16 +449,15 @@ key; agent applies and reconnects. Build this in phase 1.
 
 ---
 
-### Recommendation summary (for Romain review)
+### Recommendation summary (decided 2026-07-03)
 
-| # | Question | Proposed answer | Cost |
+| # | Question | Decided answer (ADR-028) | Cost |
 |---|---|---|---|
-| 1 | HQ host | Hetzner CX22, Frankfurt | €5/mo |
+| 1 | HQ host | No servers — portal owns telemetry; Cloudflare-native remote access (supersedes Hetzner CX22) | $0 net-new |
 | 2 | Signing key | Yubikey 5 NFC × 2 | $110 one-time |
-| 3 | Manifest scope | Tag-based selectors | none |
+| 3 | Manifest scope | Tag-based selectors (portal machine vocabulary) | none |
 
-**Phase 1 day 1 unblocks the moment all three are confirmed or
-overridden.**
+**Phase 1 is unblocked as of 2026-07-03 (WARP-961).**
 
 ### Proposed 3-day phase 1 ordering once unblocked
 
@@ -477,5 +492,15 @@ overridden.**
   domain, not on the ops box).
 * **2026-05-15:** Three remaining choices (HQ host, signing key,
   manifest scope) received Claude recommendations — Hetzner CX22 /
-  Yubikey × 2 / tag-based selectors. **Awaiting Romain review.**
+  Yubikey × 2 / tag-based selectors. (Ratified 2026-07-03 — next entry.)
+* **2026-07-03:** Romain ratified the three choices as
+  [ADR-028](ADR-028-fleet-telemetry-and-design-answers.md) (Accepted)
+  records them: **no Warp-operated servers** (Q1 — supersedes the
+  Hetzner CX22 recommendation; the analytics portal owns telemetry
+  ingest, remote access is Cloudflare-native per ADR-025A), **Yubikey
+  5 NFC × 2** (Q2), **tag-based selectors with the portal machine
+  vocabulary** (Q3). Recorded via WARP-961; closes WARP-333/334/335.
+  The agent↔cloud contract is frozen: portal agent-api v1.0.0 for
+  heartbeat/telemetry/registration, signed release manifests for
+  updates (poller mounts in `services/fleet-agent/`, WARP-1025).
   Phase 1 implementation paused until confirmed or overridden.
