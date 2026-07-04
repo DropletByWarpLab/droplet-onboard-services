@@ -5,6 +5,7 @@ import type { PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
 import { verifyAccessToken, roleFromGroups, type Role } from "../services/jwt.service.js";
+import { checkSession } from "../services/session.service.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("auth");
@@ -55,6 +56,9 @@ export interface AuthUser {
    * which is the correct fail-closed behavior.
    */
   lastMfaAt?: Date | string | null;
+  /** WARP-247 — session record id from the JWT's sid claim. Undefined for
+   *  legacy tokens, service principals, and the OCS fallback path. */
+  sid?: string;
 }
 
 declare global {
@@ -186,10 +190,13 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     }
   }
 
-  // Try JWT first — self-verifying, no network call
+  // Try JWT first — self-verifying signature, no network call. WARP-247:
+  // tokens minted after session hardening carry a `sid` joining them to a
+  // Redis session record; the record — not the signature — decides whether
+  // the session is still alive (idle/absolute timeout, revocation).
   const jwtPayload = verifyAccessToken(token);
   if (jwtPayload) {
-    req.user = {
+    const user: AuthUser = {
       id: jwtPayload.sub,
       username: jwtPayload.username,
       displayName: jwtPayload.displayName,
@@ -197,8 +204,49 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
       // PR #375 — carry the MFA-challenge timestamp through so
       // require-recent-mfa can gate sensitive routes (WARP-230).
       lastMfaAt: jwtPayload.lastMfaAt ?? null,
+      sid: jwtPayload.sid,
     };
-    next();
+
+    // WARP-247 grace path — sid-less access tokens predate session records.
+    // They are unforgeable without JWT_SECRET and self-expire in ≤15 min
+    // (ACCESS_TOKEN_TTL_SECONDS), so they exist only across the deploy
+    // boundary; their refresh token is refused at /auth/refresh (no sid),
+    // which forces one clean re-login per device. Tokens minted after this
+    // release ALWAYS carry a sid.
+    if (!jwtPayload.sid) {
+      req.user = user;
+      next();
+      return;
+    }
+
+    checkSession(jwtPayload.sid)
+      .then((result) => {
+        if (result.kind === "ok" || result.kind === "error") {
+          // "error" = Redis unreachable → fail OPEN: the JWT itself is a
+          // valid ≤15-min credential and a cache restart must not brick
+          // every route (same availability posture as
+          // requirePasswordChangeGate). session.service already logged it.
+          req.user = user;
+          next();
+          return;
+        }
+        // "expired" (idle/absolute — audited inside checkSession) or
+        // "missing" (revoked / GC'd). Either way this session is dead NOW,
+        // even though the JWT signature is still valid — that immediacy is
+        // the whole point of the server-side record.
+        if (cookieToken) {
+          res.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
+        }
+        res.status(401).json({
+          error: "Session expired",
+          code: "SESSION_EXPIRED",
+          reason: result.kind === "expired" ? result.reason : "revoked",
+        });
+      })
+      .catch((err) => {
+        logger.error({ err }, "Session check failed");
+        res.status(500).json({ error: "Authentication service error" });
+      });
     return;
   }
 
@@ -244,14 +292,21 @@ export async function validateTokenForWs(token: string | null): Promise<AuthUser
   }
   if (!token) return null;
 
-  // Try JWT first
+  // Try JWT first. WARP-247: a sid-carrying token must also present a live
+  // session record — a WS upgrade is user activity, so the default sliding
+  // touch applies. Redis errors fail OPEN (same posture as the HTTP path).
   const jwtPayload = verifyAccessToken(token);
   if (jwtPayload) {
+    if (jwtPayload.sid) {
+      const result = await checkSession(jwtPayload.sid);
+      if (result.kind !== "ok" && result.kind !== "error") return null;
+    }
     return {
       id: jwtPayload.sub,
       username: jwtPayload.username,
       displayName: jwtPayload.displayName,
       role: jwtPayload.role,
+      sid: jwtPayload.sid,
     };
   }
 
