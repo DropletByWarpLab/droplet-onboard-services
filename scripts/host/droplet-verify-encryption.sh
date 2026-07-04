@@ -92,7 +92,8 @@ vfy_compose() { docker compose -p "$VFY_COMPOSE_PROJECT" -f "$VFY_COMPOSE_FILE" 
 
 # vfy_record ID STATUS DETAIL EVIDENCE_CSV — registry supplies family/maps/threats/desc.
 vfy_record() {
-  local id="$1" status="$2" detail="$3" ev="${4:-}" row _ family maps threats desc
+  local id="$1"
+  local status="$2" detail="$3" ev="${4:-}" row _ family maps threats desc
   row="$(printf '%s\n' "$VFY_REGISTRY" | grep -m1 "^$id|")" || return 1
   IFS='|' read -r _ family maps threats desc <<EOF
 $row
@@ -104,7 +105,8 @@ EOF
 # vfy_run_check ID — dispatch to probe_<id with . and - collapsed to _>; contain
 # every error so one probe failing never aborts the pass (status contract).
 vfy_run_check() {
-  local id="$1" fn
+  local id="$1"
+  local fn
   fn="probe_$(printf '%s' "$1" | tr '.-' '__')"
   mkdir -p "$VFY_EVID/$id"
   if ! declare -F "$fn" >/dev/null; then vfy_record "$id" SKIP "no-probe-implemented" ""; return; fi
@@ -114,7 +116,8 @@ vfy_run_check() {
 # vfy_evidence_csv ID — comma-joined relative paths of every file this check
 # has written under evidence/<id>/ (for multi-file probes: mesh, edge, pcap).
 vfy_evidence_csv() {
-  local id="$1" dir="$VFY_EVID/$id" f csv=""
+  local id="$1"
+  local dir="$VFY_EVID/$id" f csv=""
   [ -d "$dir" ] || return 0
   for f in "$dir"/*; do
     [ -f "$f" ] || continue
@@ -135,7 +138,8 @@ vfy_find_raw_luks_device() {
 #     tool/subsystem is a reasoned SKIP, never a crash (status contract). ------
 
 probe_rest_luks_device() {
-  local id="$1" dev
+  local id="$1"
+  local dev
   vfy_have lsblk || { vfy_record "$id" SKIP "lsblk-not-on-path"; return; }
   vfy_have findmnt || { vfy_record "$id" SKIP "findmnt-not-on-path"; return; }
   dev="$(vfy_find_raw_luks_device)"
@@ -144,7 +148,8 @@ probe_rest_luks_device() {
 }
 
 probe_rest_luks_header() {
-  local id="$1" dev out="$VFY_EVID/$id/luksdump.txt" v1 v2 v3
+  local id="$1"
+  local dev out="$VFY_EVID/$id/luksdump.txt" v1 v2 v3
   vfy_have cryptsetup || { vfy_record "$id" SKIP "cryptsetup-not-on-path"; return; }
   dev="$(vfy_find_raw_luks_device)"
   [ -n "$dev" ] || { vfy_record "$id" FAIL "no-luks-device-found (WARP-232 not landed?)" ""; return; }
@@ -159,7 +164,8 @@ probe_rest_luks_header() {
 }
 
 probe_rest_luks_tpm_token() {
-  local id="$1" dev out="$VFY_EVID/$id/luksdump.txt" v
+  local id="$1"
+  local dev out="$VFY_EVID/$id/luksdump.txt" v
   vfy_have cryptsetup || { vfy_record "$id" SKIP "cryptsetup-not-on-path"; return; }
   dev="$(vfy_find_raw_luks_device)"
   [ -n "$dev" ] || { vfy_record "$id" FAIL "no-luks-device-found (WARP-232 not landed?)" ""; return; }
@@ -169,7 +175,8 @@ probe_rest_luks_tpm_token() {
 }
 
 probe_rest_entropy() {
-  local id="$1" dev off worst_h="" worst_line magic_fail="" sample v hv
+  local id="$1"
+  local dev off worst_h="" worst_line magic_fail="" sample v hv
   vfy_have dd || { vfy_record "$id" SKIP "dd-not-on-path"; return; }
   dev="$(vfy_find_raw_luks_device)"
   [ -n "$dev" ] || { vfy_record "$id" FAIL "no-luks-device-found (WARP-232 not landed?)" ""; return; }
@@ -201,7 +208,8 @@ probe_rest_entropy() {
 }
 
 probe_rest_mount_coverage() {
-  local id="$1" p uncovered="" table="$VFY_EVID/$id/mount-map.txt"
+  local id="$1"
+  local p uncovered="" table="$VFY_EVID/$id/mount-map.txt"
   : > "$table"
   for p in $VFY_DATA_PATHS; do
     if [ ! -e "$p" ]; then printf '%s\tabsent\tSKIP\n' "$p" >> "$table"; continue; fi
@@ -215,7 +223,8 @@ probe_rest_mount_coverage() {
 }
 
 probe_rest_usb_luks() {
-  local id="$1" g uncovered="" any=0 table="$VFY_EVID/$id/usb-map.txt"
+  local id="$1"
+  local g uncovered="" any=0 table="$VFY_EVID/$id/usb-map.txt"
   : > "$table"
   for g in $VFY_USB_GLOB; do
     [ -e "$g" ] || continue
@@ -231,7 +240,8 @@ probe_rest_usb_luks() {
 }
 
 probe_transit_pg_plaintext_rejected() {
-  local id="$1" out="$VFY_EVID/$id/psql-disable.txt" rc v pw
+  local id="$1"
+  local out="$VFY_EVID/$id/psql-disable.txt" rc v pw
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
   # Password passed inline in the conninfo (not via `-e PGPASSWORD`) so the
   # exec argv keeps `db psql` adjacent and the value never lands in the process
@@ -248,7 +258,8 @@ probe_transit_pg_plaintext_rejected() {
 }
 
 probe_transit_pg_tls13() {
-  local id="$1" out="$VFY_EVID/$id/sclient-pg.txt" v
+  local id="$1"
+  local out="$VFY_EVID/$id/sclient-pg.txt" v
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
   vfy_compose exec -T db sh -c 'openssl s_client -starttls postgres -connect db:5432 </dev/null' \
     > "$out" 2>&1 || true
@@ -257,7 +268,8 @@ probe_transit_pg_tls13() {
 }
 
 probe_transit_pg_scram() {
-  local id="$1" out="$VFY_EVID/$id/pg-settings.txt" pw
+  local id="$1"
+  local out="$VFY_EVID/$id/pg-settings.txt" pw
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
   pw="$(vfy_env POSTGRES_PASSWORD)"
   vfy_compose exec -T db \
@@ -271,7 +283,8 @@ probe_transit_pg_scram() {
 }
 
 probe_transit_redis_plaintext_refused() {
-  local id="$1" out="$VFY_EVID/$id/redis-plain.txt" rc v pw
+  local id="$1"
+  local out="$VFY_EVID/$id/redis-plain.txt" rc v pw
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
   pw="$(vfy_env REDIS_PASSWORD)"
   vfy_compose exec -T cache redis-cli -h cache -p 6379 -a "$pw" --no-auth-warning PING \
@@ -287,7 +300,8 @@ probe_transit_redis_plaintext_refused() {
 }
 
 probe_transit_redis_tls() {
-  local id="$1" out="$VFY_EVID/$id/redis-tls.txt" pw
+  local id="$1"
+  local out="$VFY_EVID/$id/redis-tls.txt" pw
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
   pw="$(vfy_env REDIS_PASSWORD)"
   vfy_compose exec -T cache redis-cli -h cache --tls -p "$VFY_REDIS_TLS_PORT" \
@@ -300,7 +314,8 @@ probe_transit_redis_tls() {
 }
 
 probe_transit_mqtt_plaintext_closed() {
-  local id="$1" out="$VFY_EVID/$id/mqtt-plain.txt" rc pw
+  local id="$1"
+  local out="$VFY_EVID/$id/mqtt-plain.txt" rc pw
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
   pw="$(vfy_env MQTT_PASSWORD)"
   vfy_compose exec -T broker mosquitto_pub -h broker -p 1883 -u droplet -P "$pw" \
@@ -315,7 +330,8 @@ probe_transit_mqtt_plaintext_closed() {
 }
 
 probe_transit_mqtt_mtls_required() {
-  local id="$1" out="$VFY_EVID/$id/mqtt-nocert.txt" rc ca
+  local id="$1"
+  local out="$VFY_EVID/$id/mqtt-nocert.txt" rc ca
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
   ca="${DROPLET_VFY_MQTT_CA:-/mosquitto/certs/ca.crt}"
   vfy_compose exec -T broker mosquitto_pub -h broker -p 8883 --cafile "$ca" \
@@ -332,7 +348,8 @@ probe_transit_mqtt_mtls_required() {
 }
 
 probe_transit_mesh_plain_http_refused() {
-  local id="$1" t accepted="" out
+  local id="$1"
+  local t accepted="" out
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
   for t in $VFY_MESH_TARGETS; do
     out="$VFY_EVID/$id/mesh-${t//[:\/]/_}.txt"
@@ -351,7 +368,8 @@ probe_transit_mesh_plain_http_refused() {
 }
 
 probe_transit_edge_tls_policy() {
-  local id="$1" o1="$VFY_EVID/$id/sclient-edge.txt" o2="$VFY_EVID/$id/sclient-edge-tls11.txt"
+  local id="$1"
+  local o1="$VFY_EVID/$id/sclient-edge.txt" o2="$VFY_EVID/$id/sclient-edge-tls11.txt"
   local o3="$VFY_EVID/$id/http-redirect.txt" v proto11 redir
   vfy_have openssl || { vfy_record "$id" SKIP "openssl-not-on-path"; return; }
   openssl s_client -connect 127.0.0.1:443 </dev/null > "$o1" 2>&1 || true
@@ -369,7 +387,8 @@ probe_transit_edge_tls_policy() {
 }
 
 probe_transit_pcap_canary() {
-  local id="$1" br pcap="$VFY_EVID/$id/capture.pcap" wl="$VFY_EVID/$id/workload.log"
+  local id="$1"
+  local br pcap="$VFY_EVID/$id/capture.pcap" wl="$VFY_EVID/$id/workload.log"
   local scan="$VFY_EVID/$id/pcap-scan.txt" canary netid tdpid patt v pw
   vfy_have tcpdump || { vfy_record "$id" SKIP "tcpdump-not-installed (apt-get install tcpdump)"; return; }
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
@@ -464,10 +483,15 @@ print(base64.b64encode(resp.signature).decode())
 }
 
 # vfy_prev_manifest_hash ROOT NEW_TS — sha256 of the most recent prior bundle's
-# manifest, or "genesis" if this is the first run.
+# manifest, or "genesis" if this is the first run. Bundle dirs are named by UTC
+# timestamp, so reverse-lexical order == most-recent-first (no ls-parsing).
 vfy_prev_manifest_hash() {
   local root="$1" new="$2" d prev="genesis"
-  for d in $(ls -1dt "$root"/*/ 2>/dev/null); do
+  local dirs=() line
+  while IFS= read -r line; do dirs+=("$line"); done < <(
+    for d in "$root"/*/; do [ -d "$d" ] && printf '%s\n' "$d"; done | LC_ALL=C sort -r
+  )
+  for d in ${dirs[@]+"${dirs[@]}"}; do
     case "$d" in *"$new"/) continue;; esac
     if [ -f "${d}manifest.sha256" ]; then prev="$(vfy_sha256 "${d}manifest.sha256")"; break; fi
   done
@@ -494,7 +518,7 @@ PYEOF
 vfy_list() { printf '%s\n' "$VFY_REGISTRY" | sed '/^$/d'; }
 
 vfy_main() {
-  local only="" ts bundle prev meta hostname krel commit rc=0 id
+  local ts bundle prev meta hostname krel commit rc=0 id
   while [ $# -gt 0 ]; do
     case "$1" in
       --list) vfy_list; return 0;;

@@ -289,7 +289,7 @@ vfy_eval_pcap_patterns() {
 # it prints "<path>\tunknown\tno-tools" and returns 1 — a path we cannot prove
 # encrypted is NOT evidence of encryption (correctly surfaces as a FAIL).
 vfy_path_is_crypt_backed() {
-  local p="$1" src py rc
+  local p="$1" src py rc json
   if ! command -v findmnt >/dev/null 2>&1 || ! command -v lsblk >/dev/null 2>&1; then
     printf '%s\tunknown\tno-tools\n' "$p"; return 1
   fi
@@ -303,8 +303,11 @@ vfy_path_is_crypt_backed() {
     fi
     printf '%s\t%s\tplaintext\n' "$p" "$src"; return 1
   fi
-  if lsblk -J -s -o NAME,TYPE "$src" 2>/dev/null | VFY_SRC="$src" VFY_PATH="$p" "$py" - <<'PYEOF'
-import json, os, sys
+  # Capture the lsblk JSON into a variable and hand it to python on stdin — a
+  # heredoc-as-script would otherwise clobber the piped stdin (SC2259).
+  json="$(lsblk -J -s -o NAME,TYPE "$src" 2>/dev/null)"
+  printf '%s' "$json" | VFY_SRC="$src" VFY_PATH="$p" "$py" -c '
+import json, sys
 try:
     tree = json.load(sys.stdin)
 except Exception:
@@ -317,11 +320,11 @@ def has_crypt(nodes):
             return True
     return False
 sys.exit(0 if has_crypt(tree.get("blockdevices", [])) else 1)
-PYEOF
-  then
+'
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
     printf '%s\t%s\tcrypt\n' "$p" "$src"; return 0
   else
-    rc=$?
     [ "$rc" -eq 2 ] && { printf '%s\t%s\tlsblk-parse-error\n' "$p" "$src"; return 1; }
     printf '%s\t%s\tplaintext\n' "$p" "$src"; return 1
   fi
