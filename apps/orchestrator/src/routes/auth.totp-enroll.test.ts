@@ -98,6 +98,21 @@ vi.mock("../services/brain-memory.service.js", () => ({
   purgeUserData: vi.fn().mockResolvedValue({ items: 0, chunks: 0 }),
 }));
 
+// WARP-247 — enabling a second factor must revoke every OTHER session.
+const revokeAllSessions = vi.fn(
+  async (_userId?: string, _opts?: { exceptSid?: string }) => 1,
+);
+vi.mock("../services/session.service.js", () => ({
+  createSession: vi.fn(async () => ({ sid: "sid-totp-test", evictedSids: [] })),
+  checkSession: vi.fn(async () => ({
+    kind: "ok",
+    record: { userId: "u-1", role: "owner", createdAt: 0, lastSeenAt: 0 },
+  })),
+  deleteSession: vi.fn(async () => undefined),
+  revokeAllSessions: (...a: unknown[]) =>
+    revokeAllSessions(...(a as [string, { exceptSid?: string }])),
+}));
+
 import { createProtectedAuthRouter } from "./auth.js";
 
 interface TotpRow {
@@ -220,6 +235,8 @@ beforeEach(() => {
     plaintext: Array.from({ length: 10 }, (_, i) => `code-${i}`),
     hashes: Array.from({ length: 10 }, (_, i) => `hash-${i}`),
   });
+  // WARP-247 — clearAllMocks wipes the call log; restore the default return.
+  revokeAllSessions.mockResolvedValue(1);
 });
 
 describe("POST /auth/totp/enroll", () => {
@@ -344,6 +361,29 @@ describe("POST /auth/totp/verify", () => {
     expect(prisma.recoveryCode.createMany).toHaveBeenCalledTimes(1);
   });
 
+  it("WARP-247 — first confirmation revokes every OTHER session", async () => {
+    // Arrange exactly as the first-confirmation test above (pending
+    // credential row + verifyTotpCode → true), with the synthetic user
+    // carrying sid "sid-totp-device".
+    verifyTotpCode.mockResolvedValueOnce(true);
+    const prisma = createPrismaMock({
+      totp: [{ id: "t1", userId: "u-1", secretEnc: "enc", confirmedAt: null }],
+    });
+    const app = buildApp(prisma, {
+      id: "u-1",
+      username: "stefan",
+      displayName: "Stefan",
+      role: "owner",
+      sid: "sid-totp-device",
+    });
+
+    const res = await request(app).post("/api/auth/totp/verify").send({ code: "123456" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.enabled).toBe(true);
+    expect(revokeAllSessions).toHaveBeenCalledWith("u-1", { exceptSid: "sid-totp-device" });
+  });
+
   it("invalid code on a pending enrollment → 401, factor stays disabled, no codes", async () => {
     verifyTotpCode.mockResolvedValueOnce(false);
     const prisma = createPrismaMock({
@@ -379,6 +419,8 @@ describe("POST /auth/totp/verify", () => {
     expect(res.body.enabled).toBe(true);
     expect(res.body.recoveryCodes).toBeUndefined();
     expect(generateRecoveryCodes).not.toHaveBeenCalled();
+    // WARP-247 — a re-challenge is not a credential change; no revocation.
+    expect(revokeAllSessions).not.toHaveBeenCalled();
   });
 
   it("missing/garbage code → 400 validation error", async () => {

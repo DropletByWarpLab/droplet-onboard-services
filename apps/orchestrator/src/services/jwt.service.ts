@@ -26,6 +26,14 @@ export interface JwtPayload {
    * gate sensitive routes. Absent for password-only sessions.
    */
   lastMfaAt?: string;
+  /**
+   * WARP-247 — server-side session record id. Present on every token minted
+   * after session hardening shipped; the auth middleware loads
+   * `sess:rec:{sid}` to enforce idle/absolute timeouts and revocation.
+   * Absent on legacy tokens (pre-deploy), which get a bounded grace path:
+   * access tokens self-expire in ≤15 min, refresh is refused outright.
+   */
+  sid?: string;
 }
 
 // Single source of truth for token lifetimes. Both the jwt `expiresIn` option
@@ -103,6 +111,8 @@ export function signAccessToken(user: {
   role: Role;
   /** PR #375 — stamp when this session passed a TOTP/recovery challenge. */
   lastMfaAt?: string;
+  /** WARP-247 — server-side session record id (sess:rec:{sid}). */
+  sid?: string;
 }): string {
   return jwt.sign(
     {
@@ -113,6 +123,7 @@ export function signAccessToken(user: {
       // Only include the claim when present so password-only sessions
       // (and every existing caller) keep their current token shape.
       ...(user.lastMfaAt ? { lastMfaAt: user.lastMfaAt } : {}),
+      ...(user.sid ? { sid: user.sid } : {}),
       type: "access",
     },
     getSecret(),
@@ -139,6 +150,8 @@ export function signRefreshToken(user: {
   username: string;
   displayName: string;
   role: Role;
+  /** WARP-247 — session record id shared across the whole rotation lineage. */
+  sid?: string;
 }): string {
   return jwt.sign(
     {
@@ -146,6 +159,7 @@ export function signRefreshToken(user: {
       username: user.username,
       displayName: user.displayName,
       role: user.role,
+      ...(user.sid ? { sid: user.sid } : {}),
       type: "refresh",
       jti: randomUUID(),
     },
@@ -174,6 +188,7 @@ export function verifyAccessToken(token: string): JwtPayload | null {
       ...(typeof decoded.lastMfaAt === "string"
         ? { lastMfaAt: decoded.lastMfaAt }
         : {}),
+      ...(typeof decoded.sid === "string" ? { sid: decoded.sid } : {}),
     };
   } catch {
     return null;
@@ -208,6 +223,7 @@ export async function verifyRefreshToken(
       username: decoded.username,
       displayName: decoded.displayName ?? decoded.username,
       role: decoded.role as Role,
+      ...(typeof decoded.sid === "string" ? { sid: decoded.sid } : {}),
     };
   } catch {
     return null;

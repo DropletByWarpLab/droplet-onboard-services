@@ -29,7 +29,7 @@ import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { requireRole } from "../middleware/auth.js";
-import { revokeUserSessions } from "../services/jwt.service.js";
+import { revokeAllSessions } from "../services/session.service.js";
 import { requireScope, type ScopeLoader } from "../middleware/scope.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
@@ -419,13 +419,14 @@ export function createPeopleRouter(
           });
         }
 
-        // WARP-116: a role change must propagate effectively immediately, not
-        // wait out the ≤15-min access-token TTL. Denylist every live refresh
-        // token for this user so their next /auth/refresh fails and the
-        // dashboard re-authenticates under the new role. Best-effort (the
-        // service swallows Redis errors); already-issued access tokens still
-        // expire on their own ≤15-min clock, which is the v1 RBAC posture.
-        await revokeUserSessions(req.params.id);
+        // WARP-247: a role change must propagate at the next REQUEST, not
+        // wait out the ≤15-min access-token TTL or the next refresh.
+        // revokeAllSessions deletes this user's session RECORDS (so their
+        // access tokens 401 at the next middleware check and re-auth under
+        // the new role) AND sweeps the WARP-116 refresh denylist internally
+        // as defense-in-depth. Best-effort (the service swallows Redis
+        // errors).
+        await revokeAllSessions(req.params.id);
 
         await recordActivity({
           kind: "system",

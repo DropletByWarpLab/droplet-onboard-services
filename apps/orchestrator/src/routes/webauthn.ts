@@ -53,10 +53,12 @@ import type { PrismaClient, WebAuthnCredential } from "@prisma/client";
 import {
   signAccessToken,
   signRefreshToken,
+  registerRefreshSession,
   ACCESS_TOKEN_TTL_SECONDS,
   REFRESH_TOKEN_TTL_SECONDS,
   type Role,
 } from "../services/jwt.service.js";
+import { createSession } from "../services/session.service.js";
 import { SESSION_COOKIE_NAME, REFRESH_COOKIE_NAME } from "../middleware/auth.js";
 import { createChallenge, consumeChallenge } from "../services/webauthn-challenge.service.js";
 import { deriveWebAuthnRp } from "../services/webauthn-config.js";
@@ -100,13 +102,19 @@ function serializeTransports(transports: AuthenticatorTransportFuture[] | undefi
  * the password path means downstream (auth middleware, refresh, logout) treats
  * a passkey session exactly like a password session.
  */
-function issueSession(
+async function issueSession(
   req: Request,
   res: import("express").Response,
   user: { id: string; username: string; displayName: string; role: Role },
-): void {
-  const accessToken = signAccessToken(user);
-  const refreshToken = signRefreshToken(user);
+): Promise<void> {
+  // WARP-247 — record first so the sid rides inside both tokens; also
+  // index the refresh token (WARP-116) — the passkey path previously
+  // skipped registerRefreshSession, leaving these sessions invisible to
+  // the admin revoke sweep.
+  const { sid } = await createSession({ id: user.id, role: user.role });
+  const accessToken = signAccessToken({ ...user, sid });
+  const refreshToken = signRefreshToken({ ...user, sid });
+  await registerRefreshSession(user.id, refreshToken);
   const isHttps = req.secure || req.headers["x-forwarded-proto"] === "https";
 
   res.cookie(SESSION_COOKIE_NAME, accessToken, {
@@ -452,7 +460,7 @@ export function createPublicWebAuthnRouter(prisma?: PrismaClient): Router {
         actor: { type: "user", id: dbUser.id },
       });
 
-      issueSession(req, res, {
+      await issueSession(req, res, {
         id: dbUser.id,
         username: dbUser.username,
         displayName: dbUser.displayName,

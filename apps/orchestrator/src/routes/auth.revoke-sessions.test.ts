@@ -12,7 +12,7 @@
  * Harness mirrors auth.directory-edituser.test.ts (protected router, synthetic
  * req.user, mocked NC client + password.service so the native argon2 binding is
  * never loaded under vitest). The jwt.service mock spreads the real module and
- * spies `revokeUserSessions` so we can assert the wiring without Redis.
+ * spies `revokeAllSessions` so we can assert the wiring without Redis.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
@@ -55,7 +55,6 @@ vi.mock("../services/nextcloud-session.service.js", () => ({
   resolveNcToken: vi.fn().mockResolvedValue("test-nc-token"),
 }));
 
-const revokeUserSessions = vi.fn(async (_userId: string) => 2);
 vi.mock("../services/jwt.service.js", async () => {
   const actual = await vi.importActual<typeof import("../services/jwt.service.js")>(
     "../services/jwt.service.js",
@@ -66,10 +65,18 @@ vi.mock("../services/jwt.service.js", async () => {
     claimRefreshRotation: vi.fn().mockResolvedValue(true),
     registerRefreshSession: vi.fn().mockResolvedValue(undefined),
     unregisterRefreshSession: vi.fn().mockResolvedValue(undefined),
-    revokeUserSessions: (...args: unknown[]) =>
-      revokeUserSessions(...(args as [string])),
   };
 });
+
+// WARP-247 — the admin surfaces now revoke SESSION RECORDS (which also
+// sweeps the WARP-116 refresh denylist internally).
+const revokeAllSessions = vi.fn(async (_userId: string) => 2);
+vi.mock("../services/session.service.js", () => ({
+  createSession: vi.fn(async () => ({ sid: "sid-test", evictedSids: [] })),
+  checkSession: vi.fn(async () => ({ kind: "ok", record: { userId: "x", role: "family", createdAt: 0, lastSeenAt: 0 } })),
+  deleteSession: vi.fn(async () => undefined),
+  revokeAllSessions: (...args: unknown[]) => revokeAllSessions(...(args as [string])),
+}));
 
 vi.mock("../services/password.service.js", () => ({
   hashPassword: vi.fn(async () => "$argon2id$stub"),
@@ -136,7 +143,7 @@ function seededAlice() {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  revokeUserSessions.mockResolvedValue(2);
+  revokeAllSessions.mockResolvedValue(2);
   (nc.ncSetUserEnabled as any).mockResolvedValue(undefined);
 });
 
@@ -149,7 +156,7 @@ describe("POST /api/auth/users/:username/revoke-sessions", () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ status: "ok", username: "alice", revoked: 2 });
-    expect(revokeUserSessions).toHaveBeenCalledWith("u-alice");
+    expect(revokeAllSessions).toHaveBeenCalledWith("u-alice");
   });
 
   it("404s for an unknown user (no local directory row)", async () => {
@@ -160,7 +167,7 @@ describe("POST /api/auth/users/:username/revoke-sessions", () => {
 
     expect(res.status).toBe(404);
     expect(res.body.code).toBe("USER_NOT_FOUND");
-    expect(revokeUserSessions).not.toHaveBeenCalled();
+    expect(revokeAllSessions).not.toHaveBeenCalled();
   });
 
   it("403s a non-admin caller (admin gate mirrors the other user routes)", async () => {
@@ -170,7 +177,7 @@ describe("POST /api/auth/users/:username/revoke-sessions", () => {
     const res = await request(app).post("/api/auth/users/alice/revoke-sessions");
 
     expect(res.status).toBe(403);
-    expect(revokeUserSessions).not.toHaveBeenCalled();
+    expect(revokeAllSessions).not.toHaveBeenCalled();
   });
 
   it("fails closed (500 USERS_NO_PRISMA) when the directory isn't wired", async () => {
@@ -191,7 +198,7 @@ describe("POST /api/auth/users/:username/revoke-sessions", () => {
 
     expect(res.status).toBe(500);
     expect(res.body.code).toBe("USERS_NO_PRISMA");
-    expect(revokeUserSessions).not.toHaveBeenCalled();
+    expect(revokeAllSessions).not.toHaveBeenCalled();
   });
 });
 
@@ -205,7 +212,7 @@ describe("POST /api/auth/users/:username/disable — revokes sessions", () => {
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ status: "disabled", username: "alice" });
     expect(nc.ncSetUserEnabled).toHaveBeenCalledWith("test-nc-token", "alice", false);
-    expect(revokeUserSessions).toHaveBeenCalledWith("u-alice");
+    expect(revokeAllSessions).toHaveBeenCalledWith("u-alice");
   });
 
   it("still disables a legacy NC-only account with no local row (no revoke)", async () => {
@@ -217,6 +224,6 @@ describe("POST /api/auth/users/:username/disable — revokes sessions", () => {
     expect(res.status).toBe(200);
     expect(nc.ncSetUserEnabled).toHaveBeenCalledWith("test-nc-token", "legacy", false);
     // No local row → nothing to revoke, but the disable itself must succeed.
-    expect(revokeUserSessions).not.toHaveBeenCalled();
+    expect(revokeAllSessions).not.toHaveBeenCalled();
   });
 });

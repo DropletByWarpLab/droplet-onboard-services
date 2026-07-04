@@ -119,6 +119,19 @@ vi.mock("../services/brain-memory.service.js", () => ({
   purgeUserData: vi.fn().mockResolvedValue({ items: 0, chunks: 0 }),
 }));
 
+// WARP-247 — this suite exercises token SHAPE across rotation, not session
+// lifecycle (that's auth.refresh-session.test.ts / session.service.test.ts).
+// Mock the session layer to a live record so refresh rotates.
+vi.mock("../services/session.service.js", () => ({
+  createSession: vi.fn(async () => ({ sid: "sid-jwt-uuid-suite", evictedSids: [] })),
+  checkSession: vi.fn(async () => ({
+    kind: "ok",
+    record: { userId: "any", role: "family", createdAt: 0, lastSeenAt: 0 },
+  })),
+  deleteSession: vi.fn(async () => undefined),
+  revokeAllSessions: vi.fn(async () => 0),
+}));
+
 import { createPublicAuthRouter, createProtectedAuthRouter } from "./auth.js";
 import * as nc from "../services/nextcloud.client.js";
 import {
@@ -491,6 +504,10 @@ describe("WARP-485 round 2 — JWT refresh path", () => {
       username: "ghost",
       displayName: "Ghost",
       role: "family",
+      // WARP-247 — carry a sid so the refresh session-gate (checkSession
+      // mocked → ok) passes through to the WARP-485 no-User branch this test
+      // actually exercises, rather than short-circuiting on a sid-less token.
+      sid: "sid-jwt-uuid-suite",
     });
 
     const app = buildApp(prisma);
@@ -529,6 +546,9 @@ describe("WARP-485 round 2 — JWT refresh path", () => {
       username: "deactivated-user",
       displayName: "Deactivated User",
       role: "family",
+      // WARP-247 — carry a sid so the refresh session-gate passes through to
+      // the DEACTIVATED gate this test exercises (checkSession mocked → ok).
+      sid: "sid-jwt-uuid-suite",
     });
 
     const app = buildApp(prisma);
