@@ -9,6 +9,7 @@ import {
   requestCreatePool,
   confirmPoolCommand,
   requestAdoptDrive,
+  reclaimDrive,
 } from "@/lib/api";
 import type { DiskInfo, DiskState, DriveInfo, PoolInfo } from "@/lib/types";
 import { StepShell } from "@/components/setup/StepShell";
@@ -130,6 +131,17 @@ export function StorageStep({
   const [adoptError, setAdoptError] = useState<string | null>(null);
   // Whole-disk name currently mid-adopt (button spinner), or null.
   const [adoptBusy, setAdoptBusy] = useState<string | null>(null);
+
+  // WARP-1048 — reclaim a pool-MEMBER disk: break it out of its md array, then
+  // adopt it. Distinct confirm dialog + copy from the plain adopt (it removes a
+  // drive from a pool first), but the same owner-gated two-step flow
+  // (reclaimDrive → confirm). Shares adoptBusy/adoptError for the row spinner
+  // and the inline error line.
+  const [reclaimPending, setReclaimPending] = useState<{
+    token: { confirmationToken: string; service: string; resourceId: string };
+    disk: PhysicalDisk;
+  } | null>(null);
+  const [reclaimConfirmOpen, setReclaimConfirmOpen] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -436,6 +448,56 @@ export function StorageStep({
     }
   }
 
+  // WARP-1048 step 1 — reclaim a pool-MEMBER disk: request a confirm token
+  // (does NOT touch the array yet) and open the reclaim blast-radius dialog.
+  // The request carries the owning md so the host script detaches the member
+  // (mdadm --fail/--remove + --zero-superblock) before the adopt flow. A member
+  // is never plain-adopted — wipefs on an md-held member EBUSYs.
+  async function handleStartReclaim(disk: PhysicalDisk) {
+    if (disk.state !== "pool_member" || !disk.md) return;
+    const name = disk.disk;
+    if (!name) return;
+    setAdoptError(null);
+    setAdoptBusy(name);
+    try {
+      const token = await reclaimDrive({
+        device: name,
+        md: disk.md,
+        wipeMethod: adoptWipe[name] ?? "quick",
+        confirmPhrase: buildConfirmPhrase([`/dev/${name}`]),
+      });
+      setReclaimPending({
+        token: {
+          confirmationToken: token.confirmationToken,
+          service: token.service,
+          resourceId: token.resourceId,
+        },
+        disk,
+      });
+      setReclaimConfirmOpen(true);
+    } catch (e) {
+      setAdoptError(friendlyAdoptError(e));
+    } finally {
+      setAdoptBusy(null);
+    }
+  }
+
+  // Step 2 — owner confirmed → execute. On success refresh so the reclaimed
+  // disk re-appears as standalone storage (and the pool shows one fewer member).
+  async function handleConfirmReclaim() {
+    if (!reclaimPending) return;
+    try {
+      await confirmPoolCommand(reclaimPending.token);
+      setReclaimConfirmOpen(false);
+      setReclaimPending(null);
+      await load();
+    } catch (e) {
+      setReclaimConfirmOpen(false);
+      setReclaimPending(null);
+      setAdoptError(friendlyAdoptError(e));
+    }
+  }
+
   // Initial load — show a skeleton. WARP-933 review: also offer "Skip for now"
   // so a hung storage bridge (load never resolves) isn't a dead-end with only
   // Back as an escape.
@@ -673,6 +735,7 @@ export function StorageStep({
             setAdoptWipe((prev) => ({ ...prev, [disk]: m }))
           }
           onAdopt={handleStartAdopt}
+          onReclaim={handleStartReclaim}
           busyDisk={adoptBusy}
           adoptError={adoptError}
         />
@@ -731,6 +794,30 @@ export function StorageStep({
               ((adoptWipe[adoptPending.disk.disk] ?? "quick") === "secure"
                 ? "\n· secure erase"
                 : "")
+            : ""
+        }
+        variant="destructive"
+      />
+
+      {/* WARP-1048 — reclaim a pool member: remove it from the array, then wipe
+          + adopt it on its own. Names the disk + its size so the owner verifies
+          the target before anything runs. */}
+      <ConfirmDialog
+        open={reclaimConfirmOpen}
+        onConfirm={handleConfirmReclaim}
+        onCancel={() => {
+          setReclaimConfirmOpen(false);
+          setReclaimPending(null);
+        }}
+        title="Reclaim this drive from the pool?"
+        description="This removes the drive from your storage pool, then permanently erases it and adds it to your Droplet on its own. This can't be undone — make sure anything you want is backed up first."
+        confirmLabel="Reclaim & erase"
+        confirmedIdentifier={
+          reclaimPending
+            ? `${
+                reclaimPending.disk.members.map((m) => driveName(m)).join(", ") ||
+                reclaimPending.disk.disk
+              } · ${formatBytes(reclaimPending.disk.sizeBytes)} · ${reclaimPending.disk.disk}`
             : ""
         }
         variant="destructive"
@@ -1083,6 +1170,7 @@ function AdoptSection({
   wipeMethods,
   onWipeMethodChange,
   onAdopt,
+  onReclaim,
   busyDisk,
   adoptError,
 }: {
@@ -1092,6 +1180,8 @@ function AdoptSection({
   wipeMethods: Record<string, "quick" | "secure">;
   onWipeMethodChange: (disk: string, m: "quick" | "secure") => void;
   onAdopt: (disk: PhysicalDisk) => void;
+  /** WARP-1048: reclaim a pool member (detach from md, then adopt). */
+  onReclaim: (disk: PhysicalDisk) => void;
   busyDisk: string | null;
   adoptError: string | null;
 }) {
@@ -1155,7 +1245,9 @@ function AdoptSection({
                     </p>
                     <p className="type-caption-2 text-label-tertiary truncate">
                       {disk.state === "pool_member"
-                        ? `Part of your storage pool · ${disk.disk}`
+                        ? disk.md
+                          ? `In your storage pool · reclaiming removes it from the pool · ${disk.disk}`
+                          : `Part of your storage pool · ${disk.disk}`
                         : disk.inUse
                           ? `In use by your Droplet · ${disk.disk}`
                           : disk.members.length > 1
@@ -1164,13 +1256,26 @@ function AdoptSection({
                     </p>
                   </div>
                   {disk.state === "pool_member" ? (
-                    // WARP-936: an md member is managed through the POOL
-                    // (format or remove it from Settings › Storage) — a
-                    // per-disk wipe of a held member fails EBUSY and would
-                    // silently break the array's redundancy anyway.
-                    <span className="flex-none whitespace-nowrap type-caption-1 text-label-tertiary">
-                      In your storage pool
-                    </span>
+                    // WARP-1048: an md member can be RECLAIMED — the host
+                    // script breaks it out of the array (mdadm --fail/--remove
+                    // + --zero-superblock) before wiping it, so the EBUSY a
+                    // plain per-disk wipe would hit is avoided. We can only do
+                    // this when the bridge named the owning array; without `md`
+                    // fall back to the read-only "manage from the pool" copy.
+                    disk.md ? (
+                      <button
+                        type="button"
+                        onClick={() => onReclaim(disk)}
+                        disabled={busy}
+                        className="flex-none whitespace-nowrap rounded-md bg-system-red/90 hover:bg-system-red text-white px-3 py-1.5 text-sm font-medium disabled:opacity-60"
+                      >
+                        {busy ? "Working…" : "Reclaim"}
+                      </button>
+                    ) : (
+                      <span className="flex-none whitespace-nowrap type-caption-1 text-label-tertiary">
+                        In your storage pool
+                      </span>
+                    )
                   ) : disk.inUse ? (
                     // Installed box storage — not a "previously-used" foreign
                     // drive. Reclaiming it would tear down storage the Droplet
