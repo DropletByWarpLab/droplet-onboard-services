@@ -82,7 +82,14 @@ VFY_RESULTS=""   # ndjson accumulator file, set in vfy_main
 VFY_EVID=""      # bundle evidence/ dir, set in vfy_main
 VFY_SIGNING='{"status":"skipped","reason":"signing-not-attempted"}'
 
-vfy_have() { command -v "$1" >/dev/null 2>&1; }
+vfy_have() {
+  # Test-only injection: VFY_ASSUME_MISSING is a space-separated list of tools to
+  # treat as absent regardless of PATH. Lets the unit suite simulate an "empty
+  # world" deterministically on CI runners that ship docker in /usr/bin (which a
+  # PATH restriction cannot hide). Empty/unset in production → normal behavior.
+  case " ${VFY_ASSUME_MISSING:-} " in *" $1 "*) return 1 ;; esac
+  command -v "$1" >/dev/null 2>&1
+}
 
 # vfy_env NAME — read a single value from the repo .env (best-effort).
 vfy_env() { grep -m1 "^$1=" "$VFY_REPO_ROOT/.env" 2>/dev/null | cut -d= -f2-; }

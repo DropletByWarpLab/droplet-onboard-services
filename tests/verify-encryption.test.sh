@@ -195,7 +195,10 @@ newest_bundle() { for d in "$WORK/out"/*/; do printf '%s\n' "${d%/}"; done | LC_
 rm -rf "$WORK/bin" "$WORK/out" "$WORK/repo"; mkdir -p "$WORK/bin" "$WORK/repo/data"
 printf 'POSTGRES_PASSWORD=pgsecret\nREDIS_PASSWORD=redissecret\nMQTT_PASSWORD=mqttsecret\n' > "$WORK/repo/.env"
 # Empty world: every binary "missing" (not on the stub PATH) except coreutils.
-set +e; run_vfy > "$WORK/run1.log" 2>&1; rc=$?; set -e
+# docker + tcpdump are forced-absent via VFY_ASSUME_MISSING because CI runners
+# ship them in /usr/bin, which the stub PATH cannot hide (the at-rest tools are
+# left to natural availability so mount-coverage still records its posture FAIL).
+set +e; run_vfy VFY_ASSUME_MISSING="docker tcpdump" > "$WORK/run1.log" 2>&1; rc=$?; set -e
 [ "$rc" -eq 1 ] && pass "empty world exits 1 (posture FAILs present, no crash)" \
   || fail "empty world rc=$rc (want 1); log: $(tail -3 "$WORK/run1.log")"
 bundle="$(newest_bundle)"
