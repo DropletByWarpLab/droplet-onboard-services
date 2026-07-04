@@ -37,6 +37,7 @@ import type {
   InviteCreateResponse,
 } from "@/lib/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { Dialog } from "@/components/Dialog";
 import { useToast } from "@/components/Toast";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { Badge, type BadgeKind } from "@/components/shell/primitives";
@@ -135,6 +136,15 @@ export default function UsersPage() {
   const createRoleId = useId();
   const createPasswordId = useId();
   const createTriggerRef = useRef<HTMLButtonElement | null>(null);
+  // Auto-focus target when the dialog opens in the form phase.
+  const createDisplayRef = useRef<HTMLInputElement | null>(null);
+  // UX review (WARP-1042): the form→handoff flip unmounts the focused
+  // "Create account" button; without an explicit focus move a keyboard or
+  // screen-reader user is dropped onto document.body OUTSIDE the aria-modal
+  // dialog and has to traverse the whole page to reach the show-once copy
+  // controls. Focus the temp-password field on flip (its onFocus selects
+  // the value, ready to copy).
+  const createHandoffPwRef = useRef<HTMLInputElement | null>(null);
 
   // Edit dialog state.
   const [editing, setEditing] = useState<AuthUser | null>(null);
@@ -255,18 +265,19 @@ export default function UsersPage() {
       setCreateError(null);
       setCreatePwCopied(false);
     }, 0);
-    setTimeout(() => createTriggerRef.current?.focus(), 0);
+    // Escape close + focus restore to the trigger are owned by the
+    // <Dialog> primitive (WARP-289) the create dialog mounts on.
   }, [createSubmitting]);
 
-  // Close the create dialog on Escape (mirrors the invite modal).
+  // Move focus into the handoff phase when the create dialog flips —
+  // <Dialog> only auto-focuses on OPEN, and the previously-focused
+  // "Create account" button unmounts on the flip.
   useEffect(() => {
-    if (!showCreate) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") closeCreate();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [showCreate, closeCreate]);
+    if (!showCreate || createPhase !== "handoff") return;
+    // Defer a tick so the handoff subtree is in the DOM.
+    const t = window.setTimeout(() => createHandoffPwRef.current?.focus(), 0);
+    return () => window.clearTimeout(t);
+  }, [showCreate, createPhase]);
 
   const handleCreateAccount = async () => {
     if (createSubmitting) return;
@@ -862,19 +873,22 @@ export default function UsersPage() {
         </div>
       )}
 
-      {/* WARP-1042: Create local account dialog */}
-      {showCreate && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-6"
-          onClick={closeCreate}
-        >
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby={createHeadingId}
-            className="bg-surface-primary rounded-lg max-w-md w-full shadow-xl overflow-hidden"
-            onClick={(e) => e.stopPropagation()}
-          >
+      {/* WARP-1042: Create local account dialog — mounted on the canonical
+          <Dialog> primitive (WARP-289) so it inherits the focus trap,
+          scroll-lock, Escape close, reduced-motion handling and
+          focus-restore-to-trigger. Backdrop dismissal is disabled during
+          the handoff phase so a stray click can't drop the show-once
+          temporary password (explicit Done / X / Escape still work, and
+          the Edit dialog can reset the password if it is lost anyway). */}
+      <Dialog
+        open={showCreate}
+        onClose={closeCreate}
+        triggerRef={createTriggerRef}
+        labelledBy={createHeadingId}
+        closeOnBackdrop={createPhase === "form"}
+        initialFocusRef={createDisplayRef}
+      >
+        <>
             <div className="flex items-center justify-between px-4 py-3 border-b border-separator">
               <h3 id={createHeadingId} className="type-headline text-label-primary">
                 {createPhase === "form" ? "Create local account" : "Hand off the sign-in details"}
@@ -901,7 +915,7 @@ export default function UsersPage() {
                     </label>
                     <input
                       id={createDisplayId}
-                      autoFocus
+                      ref={createDisplayRef}
                       value={createDisplay}
                       onChange={(e) => setCreateDisplay(e.target.value)}
                       placeholder="Display name"
@@ -923,7 +937,10 @@ export default function UsersPage() {
                       placeholder="alex@example.com"
                       className="dp-input"
                     />
-                    <p className="type-caption-1 text-label-tertiary mt-1.5">
+                    {/* text-label-secondary, not tertiary: load-bearing helper
+                        copy must clear WCAG 1.4.3 (tertiary ≈ 1.7:1 at caption
+                        size — UX review WARP-1042). */}
+                    <p className="type-caption-1 text-label-secondary mt-1.5">
                       Used to sign in — doesn't need to receive mail.
                     </p>
                   </div>
@@ -969,7 +986,7 @@ export default function UsersPage() {
                         <RefreshCw size={14} /> Regenerate
                       </button>
                     </div>
-                    <p className="type-caption-1 text-label-tertiary mt-1.5">
+                    <p className="type-caption-1 text-label-secondary mt-1.5">
                       Auto-generated to meet the password rules — you can type your
                       own instead. They'll be asked to replace it at first sign-in.
                     </p>
@@ -1032,6 +1049,7 @@ export default function UsersPage() {
                   <div className="flex items-stretch gap-2">
                     <input
                       id={createPasswordId}
+                      ref={createHandoffPwRef}
                       readOnly
                       value={createPassword}
                       className="dp-input flex-1 font-mono type-footnote"
@@ -1054,7 +1072,9 @@ export default function UsersPage() {
                       )}
                     </button>
                   </div>
-                  <p className="type-caption-1 text-label-tertiary mt-1.5">
+                  {/* The single most consequence-bearing sentence in the
+                      dialog — secondary emphasis so it clears WCAG 1.4.3. */}
+                  <p className="type-caption-1 text-label-secondary mt-1.5">
                     This password won't be shown again after you close this dialog.
                   </p>
                 </div>
@@ -1069,9 +1089,8 @@ export default function UsersPage() {
                 </div>
               </div>
             )}
-          </div>
-        </div>
-      )}
+        </>
+      </Dialog>
 
       {/* Edit dialog */}
       {editing && (

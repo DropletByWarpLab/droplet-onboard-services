@@ -53,6 +53,18 @@ vi.mock("qrcode.react", () => ({
   ),
 }));
 
+// The create dialog mounts on the canonical <Dialog> primitive (WARP-289),
+// which animates via framer-motion. Stub `useReducedMotion` to true so
+// mount/unmount is synchronous and assertions aren't gated on animation
+// timing (same pattern as Dialog.test.tsx / ConfirmDialog.test.tsx).
+vi.mock("framer-motion", async () => {
+  const actual: any = await vi.importActual("framer-motion");
+  return {
+    ...actual,
+    useReducedMotion: () => true,
+  };
+});
+
 import UsersPage from "@/app/users/page";
 
 beforeEach(() => {
@@ -290,6 +302,98 @@ describe("Users page — create local account (WARP-1042)", () => {
     expect(
       screen.queryByText(/give them this email and temporary password/i),
     ).not.toBeInTheDocument();
+  });
+
+  // ── UX review round (WARP-1042): keyboard + contrast blockers ──
+
+  it("moves focus to the temporary password when the dialog flips to the handoff phase", async () => {
+    // Blocker: the form→handoff flip unmounts the focused "Create account"
+    // button; without an explicit focus move a keyboard/screen-reader user
+    // is dropped onto document.body outside the aria-modal dialog.
+    const dialog = await openCreateDialog();
+    fireEvent.change(within(dialog).getByLabelText(/login email/i), {
+      target: { value: "bob@example.com" },
+    });
+    const password = (
+      within(dialog).getByLabelText(/temporary password/i) as HTMLInputElement
+    ).value;
+    fireEvent.click(within(dialog).getByRole("button", { name: /create account/i }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/give them this email and temporary password/i),
+      ).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(document.activeElement).toBe(screen.getByDisplayValue(password));
+    });
+  });
+
+  it("keeps Tab cycling inside the dialog (focus trap) and locks body scroll", async () => {
+    const dialog = await openCreateDialog();
+    expect(document.body.style.overflow).toBe("hidden");
+
+    // Tab from the LAST focusable (Create account) must wrap to the FIRST
+    // (the X close button), not escape into the background page.
+    const createBtn = within(dialog).getByRole("button", { name: /create account/i });
+    createBtn.focus();
+    fireEvent.keyDown(createBtn, { key: "Tab" });
+    expect(document.activeElement).toBe(
+      within(dialog).getByRole("button", { name: /close dialog/i }),
+    );
+
+    // Shift-Tab from the first focusable wraps back to the last.
+    fireEvent.keyDown(document.activeElement!, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(createBtn);
+  });
+
+  it("ignores backdrop clicks during the handoff phase so a stray click can't drop the show-once password", async () => {
+    const dialog = await openCreateDialog();
+    fireEvent.change(within(dialog).getByLabelText(/login email/i), {
+      target: { value: "bob@example.com" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: /create account/i }));
+    await waitFor(() => {
+      expect(
+        screen.getByText(/give them this email and temporary password/i),
+      ).toBeInTheDocument();
+    });
+
+    const handoffDialog = screen.getByRole("dialog");
+    fireEvent.click(handoffDialog.parentElement!);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    // Explicit dismissal (Done) still works.
+    fireEvent.click(within(handoffDialog).getByRole("button", { name: /done/i }));
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+  });
+
+  it("renders the show-once warning and helper copy at secondary label emphasis (WCAG 1.4.3)", async () => {
+    // Blocker: text-label-tertiary is ~1.74:1 on white at caption size —
+    // load-bearing copy (the show-once warning + the two new helpers) must
+    // use text-label-secondary (~5.9:1).
+    const dialog = await openCreateDialog();
+
+    const emailHelper = within(dialog).getByText(/doesn't need to receive mail/i);
+    expect(emailHelper.className).toContain("text-label-secondary");
+    expect(emailHelper.className).not.toContain("text-label-tertiary");
+
+    const pwHelper = within(dialog).getByText(/auto-generated to meet the password rules/i);
+    expect(pwHelper.className).toContain("text-label-secondary");
+    expect(pwHelper.className).not.toContain("text-label-tertiary");
+
+    fireEvent.change(within(dialog).getByLabelText(/login email/i), {
+      target: { value: "bob@example.com" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: /create account/i }));
+    await waitFor(() => {
+      expect(screen.getByText(/won't be shown again/i)).toBeInTheDocument();
+    });
+    const warning = screen.getByText(/won't be shown again/i);
+    expect(warning.className).toContain("text-label-secondary");
+    expect(warning.className).not.toContain("text-label-tertiary");
   });
 
   it("dialog has aria-modal semantics and Escape closes it", async () => {
