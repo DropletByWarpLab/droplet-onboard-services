@@ -8,13 +8,15 @@
 
 import { config } from "../config.js";
 import { getRequestId } from "../lib/request-context.js";
+import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
 import type { SwitchProvisionConfig, SwitchRawPortStatus } from "../types/switch.js";
 import { SwitchAuthError } from "../types/switch-error.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("switch-client");
 
-const SWITCH_URL = config.SWITCH_SERVICE_URL;
+// WARP-236: https:// + client cert when internal mTLS is on (identity when off).
+const SWITCH_URL = internalBaseUrl(config.SWITCH_SERVICE_URL);
 const DEFAULT_TIMEOUT = 10_000;
 
 function timeout(ms = DEFAULT_TIMEOUT): AbortSignal {
@@ -80,7 +82,7 @@ export async function switchHealthDetail(): Promise<{
   authConfigured: boolean;
 }> {
   try {
-    const resp = await fetch(`${SWITCH_URL}/health`, {
+    const resp = await internalFetch(`${SWITCH_URL}/health`, {
       signal: AbortSignal.timeout(5000),
     });
     if (!resp.ok) return { connected: false, authConfigured: true };
@@ -106,28 +108,28 @@ export async function switchHealthDetail(): Promise<{
 // --- Ports ---
 
 export async function fetchPorts(): Promise<unknown[]> {
-  const resp = await fetch(`${SWITCH_URL}/ports`, { headers: authHeaders(), signal: timeout() });
+  const resp = await internalFetch(`${SWITCH_URL}/ports`, { headers: authHeaders(), signal: timeout() });
   throwIfNotOk(resp, "Switch ports");
   const data = await resp.json();
   return data.ports ?? [];
 }
 
 export async function fetchPort(port: number): Promise<unknown> {
-  const resp = await fetch(`${SWITCH_URL}/ports/${port}`, { headers: authHeaders(), signal: timeout() });
+  const resp = await internalFetch(`${SWITCH_URL}/ports/${port}`, { headers: authHeaders(), signal: timeout() });
   if (!resp.ok) throw new Error(`Switch port ${port}: ${resp.status}`);
   return resp.json();
 }
 
 /** Live link/speed per port (the §7 aggregation's real link source). */
 export async function fetchPortStatus(): Promise<SwitchRawPortStatus[]> {
-  const resp = await fetch(`${SWITCH_URL}/ports/status`, { headers: authHeaders(), signal: timeout() });
+  const resp = await internalFetch(`${SWITCH_URL}/ports/status`, { headers: authHeaders(), signal: timeout() });
   throwIfNotOk(resp, "Switch port status");
   const data = (await resp.json()) as { ports?: SwitchRawPortStatus[] };
   return data.ports ?? [];
 }
 
 export async function enablePort(port: number): Promise<void> {
-  const resp = await fetch(`${SWITCH_URL}/ports/${port}/enable`, {
+  const resp = await internalFetch(`${SWITCH_URL}/ports/${port}/enable`, {
     method: "POST",
     headers: authHeaders(),
     signal: timeout(),
@@ -136,7 +138,7 @@ export async function enablePort(port: number): Promise<void> {
 }
 
 export async function disablePort(port: number): Promise<void> {
-  const resp = await fetch(`${SWITCH_URL}/ports/${port}/disable`, {
+  const resp = await internalFetch(`${SWITCH_URL}/ports/${port}/disable`, {
     method: "POST",
     headers: authHeaders(),
     signal: timeout(),
@@ -147,7 +149,7 @@ export async function disablePort(port: number): Promise<void> {
 // --- VLANs ---
 
 export async function fetchVlans(): Promise<unknown[]> {
-  const resp = await fetch(`${SWITCH_URL}/vlans`, { headers: authHeaders(), signal: timeout() });
+  const resp = await internalFetch(`${SWITCH_URL}/vlans`, { headers: authHeaders(), signal: timeout() });
   throwIfNotOk(resp, "Switch VLANs");
   const data = await resp.json();
   return data.vlans ?? [];
@@ -157,7 +159,7 @@ export async function createVlan(
   vlanId: number,
   name: string
 ): Promise<void> {
-  const resp = await fetch(`${SWITCH_URL}/vlans`, {
+  const resp = await internalFetch(`${SWITCH_URL}/vlans`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ vlan_id: vlanId, name }),
@@ -167,7 +169,7 @@ export async function createVlan(
 }
 
 export async function deleteVlan(vlanId: number): Promise<void> {
-  const resp = await fetch(`${SWITCH_URL}/vlans/${vlanId}`, {
+  const resp = await internalFetch(`${SWITCH_URL}/vlans/${vlanId}`, {
     method: "DELETE",
     headers: authHeaders(),
     signal: timeout(),
@@ -176,7 +178,7 @@ export async function deleteVlan(vlanId: number): Promise<void> {
 }
 
 export async function fetchVlanMembership(vlanId: number): Promise<unknown> {
-  const resp = await fetch(`${SWITCH_URL}/vlans/${vlanId}/membership`, {
+  const resp = await internalFetch(`${SWITCH_URL}/vlans/${vlanId}/membership`, {
     headers: authHeaders(),
     signal: timeout(),
   });
@@ -188,7 +190,7 @@ export async function setVlanMembership(
   vlanId: number,
   ports: { port: number; tagged: boolean; member: boolean }[]
 ): Promise<void> {
-  const resp = await fetch(`${SWITCH_URL}/vlans/${vlanId}/membership`, {
+  const resp = await internalFetch(`${SWITCH_URL}/vlans/${vlanId}/membership`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ ports }),
@@ -200,20 +202,20 @@ export async function setVlanMembership(
 // --- PoE ---
 
 export async function fetchPoeStatus(): Promise<unknown[]> {
-  const resp = await fetch(`${SWITCH_URL}/poe`, { headers: authHeaders(), signal: timeout() });
+  const resp = await internalFetch(`${SWITCH_URL}/poe`, { headers: authHeaders(), signal: timeout() });
   throwIfNotOk(resp, "Switch PoE");
   const data = await resp.json();
   return data.ports ?? [];
 }
 
 export async function fetchPortPoe(port: number): Promise<unknown> {
-  const resp = await fetch(`${SWITCH_URL}/poe/${port}`, { headers: authHeaders(), signal: timeout() });
+  const resp = await internalFetch(`${SWITCH_URL}/poe/${port}`, { headers: authHeaders(), signal: timeout() });
   if (!resp.ok) throw new Error(`Port PoE: ${resp.status}`);
   return resp.json();
 }
 
 export async function enablePortPoe(port: number): Promise<void> {
-  const resp = await fetch(`${SWITCH_URL}/poe/${port}/enable`, {
+  const resp = await internalFetch(`${SWITCH_URL}/poe/${port}/enable`, {
     method: "POST",
     headers: authHeaders(),
     signal: timeout(),
@@ -222,7 +224,7 @@ export async function enablePortPoe(port: number): Promise<void> {
 }
 
 export async function disablePortPoe(port: number): Promise<void> {
-  const resp = await fetch(`${SWITCH_URL}/poe/${port}/disable`, {
+  const resp = await internalFetch(`${SWITCH_URL}/poe/${port}/disable`, {
     method: "POST",
     headers: authHeaders(),
     signal: timeout(),
@@ -233,7 +235,7 @@ export async function disablePortPoe(port: number): Promise<void> {
 // --- System ---
 
 export async function fetchSystemInfo(): Promise<unknown> {
-  const resp = await fetch(`${SWITCH_URL}/system/info`, { headers: authHeaders(), signal: timeout() });
+  const resp = await internalFetch(`${SWITCH_URL}/system/info`, { headers: authHeaders(), signal: timeout() });
   throwIfNotOk(resp, "Switch system info");
   return resp.json();
 }
@@ -242,7 +244,7 @@ export async function fetchSystemInfo(): Promise<unknown> {
 
 /** Read-only echo of the bring-up provisioning config + persisted state. */
 export async function fetchProvisionConfig(): Promise<SwitchProvisionConfig> {
-  const resp = await fetch(`${SWITCH_URL}/provision/config`, {
+  const resp = await internalFetch(`${SWITCH_URL}/provision/config`, {
     headers: authHeaders(),
     signal: timeout(),
   });
@@ -252,7 +254,7 @@ export async function fetchProvisionConfig(): Promise<SwitchProvisionConfig> {
 
 /** Re-run the bring-up provisioner (re-apply the managed layout). */
 export async function provisionSwitch(): Promise<unknown> {
-  const resp = await fetch(`${SWITCH_URL}/provision`, {
+  const resp = await internalFetch(`${SWITCH_URL}/provision`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
     signal: timeout(15_000),
@@ -264,7 +266,7 @@ export async function provisionSwitch(): Promise<unknown> {
 // --- WAN Detection ---
 
 export async function detectWanPort(): Promise<unknown> {
-  const resp = await fetch(`${SWITCH_URL}/wan/detect`, {
+  const resp = await internalFetch(`${SWITCH_URL}/wan/detect`, {
     method: "POST",
     headers: authHeaders(),
     signal: timeout(15_000),
@@ -280,7 +282,7 @@ export async function setupCameraPorts(
   cameraPorts = [1, 2, 3, 4, 5, 6, 7, 8],
   uplinkPorts = [9, 10]
 ): Promise<unknown> {
-  const resp = await fetch(`${SWITCH_URL}/setup/cameras`, {
+  const resp = await internalFetch(`${SWITCH_URL}/setup/cameras`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({

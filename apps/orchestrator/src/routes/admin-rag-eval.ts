@@ -19,6 +19,7 @@
 
 import { Router, Request, Response } from "express";
 import { createLogger } from "../lib/logger.js";
+import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
 
 const logger = createLogger("admin-rag-eval");
 
@@ -36,7 +37,8 @@ function isAdmin(req: Request): boolean {
 function ragEvalBaseUrl(): string | null {
   const url = process.env.RAG_EVAL_URL;
   if (!url || url.trim().length === 0) return null;
-  return url.replace(/\/+$/, "");
+  // WARP-236: https:// + client cert when internal mTLS is on (identity when off).
+  return internalBaseUrl(url.replace(/\/+$/, ""));
 }
 
 /**
@@ -74,7 +76,7 @@ async function proxy(
       };
       init.body = JSON.stringify(body ?? {});
     }
-    const upstream = await fetch(target, init);
+    const upstream = await internalFetch(target, init);
 
     // Relay the upstream status + JSON verbatim. rag-eval always replies
     // JSON (202/409/404/200/500); fall back to an empty object if a body

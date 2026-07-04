@@ -8,6 +8,7 @@
 import pino from "pino";
 import { config } from "../config.js";
 import { getRequestId } from "../lib/request-context.js";
+import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
 import {
   RouterError,
   routerErrorFromResponse,
@@ -42,7 +43,8 @@ export type { SystemControls, NetworkInterfaceRow, AiNetworkAccess } from "../ty
 
 const logger = createLogger("openwrt-client");
 
-const BASE_URL = config.ROUTING_SERVICE_URL;
+// WARP-236: https:// + client cert when internal mTLS is on (identity when off).
+const BASE_URL = internalBaseUrl(config.ROUTING_SERVICE_URL);
 const TOKEN = config.ROUTING_SERVICE_TOKEN;
 
 // ---------------------------------------------------------------------------
@@ -198,7 +200,7 @@ async function singleAttempt(
   label: string,
 ): Promise<AttemptOutcome> {
   try {
-    const res = await fetch(url, init);
+    const res = await internalFetch(url, init);
     if (res.ok) {
       return { kind: "success", res };
     }

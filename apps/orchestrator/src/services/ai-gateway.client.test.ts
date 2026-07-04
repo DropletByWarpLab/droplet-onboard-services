@@ -129,3 +129,39 @@ describe("ai-gateway.client — WARP-303 timeouts", () => {
     expect(isTimeoutError(null)).toBe(false);
   });
 });
+
+// WARP-236 — with internal mTLS on, the base URL is rewritten to https:// and
+// every call routes through internalFetch (which attaches the client-cert
+// dispatcher). We stub the internal-tls seam so the assertion is deterministic
+// without minting real certs: internalBaseUrl rewrites the scheme, internalFetch
+// records the URL + init it received (proving the client wired both in).
+describe("ai-gateway.client — WARP-236 internal mTLS", () => {
+  afterEach(() => {
+    vi.resetModules();
+    vi.doUnmock("../lib/internal-tls.js");
+  });
+
+  it("targets https and routes through internalFetch when mTLS is enabled", async () => {
+    const seen: { url?: string; init?: unknown } = {};
+    const fakeDispatcher = { marker: "internal-dispatcher" };
+
+    vi.doMock("../lib/internal-tls.js", () => ({
+      internalTlsEnabled: () => true,
+      internalBaseUrl: (u: string) =>
+        u.startsWith("http://") ? "https://" + u.slice("http://".length) : u,
+      internalDispatcher: () => fakeDispatcher,
+      internalFetch: (url: string, init?: unknown) => {
+        seen.url = url;
+        seen.init = { ...(init as object), dispatcher: fakeDispatcher };
+        return Promise.resolve(okResponse({ models: [] }));
+      },
+    }));
+
+    vi.resetModules();
+    const { listModels: freshListModels } = await import("./ai-gateway.client.js");
+    await freshListModels();
+
+    expect(seen.url).toMatch(/^https:\/\/ai-gateway\.test:8000\//);
+    expect((seen.init as { dispatcher?: unknown }).dispatcher).toBeDefined();
+  });
+});
