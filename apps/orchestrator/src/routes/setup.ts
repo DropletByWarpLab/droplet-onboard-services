@@ -753,6 +753,8 @@ export function createSetupRouter(
   //   valid + claimed → 200 { ok, slug, fqdn, authoritative:true, taken:false }
   //   valid + fallback→ 200 { ok, slug, fqdn, authoritative:false, taken:false }
   //   valid + taken   → 409 { code:"BOX_NAME_TAKEN", slug, suggestions, taken:true }
+  //   valid + this box already holds a different name (WARP-984)
+  //                   → 409 { code:"BOX_NAME_RENAME_UNSUPPORTED", currentName? }
   //   invalid         → 400 { code:"BOX_NAME_INVALID", reason, error }
   //
   // GATED exactly like the org POST + the appliance:"ready" PATCH: a write is
@@ -791,9 +793,27 @@ export function createSetupRouter(
         claim: claimBoxNameToHq,
       });
 
-      // HQ authoritatively rejected the name as taken (by another box, or this
-      // box holds a different one). 409 with suggestions so the wizard shows the
-      // real conflict — the name WAS persisted locally, but it is not authoritative.
+      // WARP-984 — HQ says THIS box already holds a (different) name and rename
+      // isn't supported yet. Distinct 409 so the wizard can say "factory reset
+      // releases it" instead of the misleading "that name is taken".
+      if (result.renameUnsupported) {
+        res.status(409).json({
+          ok: false,
+          code: "BOX_NAME_RENAME_UNSUPPORTED",
+          slug: result.slug,
+          fqdn: result.fqdn,
+          taken: false,
+          authoritative: result.authoritative,
+          ...(result.currentName ? { currentName: result.currentName } : {}),
+          error:
+            "This box already holds a secure address — a factory reset releases it.",
+        });
+        return;
+      }
+
+      // HQ authoritatively rejected the name as taken by another box. 409 with
+      // suggestions so the wizard shows the real conflict — the name WAS
+      // persisted locally, but it is not authoritative.
       if (result.taken) {
         res.status(409).json({
           ok: false,
