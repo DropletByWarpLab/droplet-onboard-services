@@ -347,7 +347,12 @@ describe("PATCH /api/settings/:section — RBAC + activity emission", () => {
 
     expect(res.status).toBe(403);
     expect(prisma.workspaceSetting.update).not.toHaveBeenCalled();
-    expect(recordActivityMock).not.toHaveBeenCalled();
+    // WARP-237: no settings-change emit on a denied request, but
+    // requireRole now emits a single "Access denied" policy-violation row.
+    expect(recordActivityMock).toHaveBeenCalledTimes(1);
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "auth", what: "Access denied" }),
+    );
   });
 
   it("rejects a PATCH against an unknown section with 404", async () => {
