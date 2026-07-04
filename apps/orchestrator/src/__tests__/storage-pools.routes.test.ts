@@ -326,3 +326,169 @@ describe("destructive pool routes — no execution without a valid confirm token
     }
   });
 });
+
+// WARP-1048 — reclaim a pool-member drive. Same two-step gated flow as
+// drive_adopt; the request additionally carries the owning md array so the
+// host script can detach the disk before wiping. Whole-disk device only; md
+// must look like md<N>.
+describe("POST /api/storage/drives/reclaim (WARP-1048)", () => {
+  it("returns 202 + a confirm token bound to drive_reclaim, and does NOT touch the bridge yet", async () => {
+    const prisma = createPrismaMock();
+    const bridge = bridgePoolsResponse([]);
+    const app = makeApp(prisma, bridge);
+    const res = await request(app)
+      .post("/api/storage/drives/reclaim")
+      .send({ device: "sda", md: "md127", confirmPhrase: "ERASE sda" });
+    expect(res.status).toBe(202);
+    expect(res.body.confirmationToken).toBeTruthy();
+    expect(res.body.service).toBe("drive_reclaim");
+    expect(res.body.resourceId).toBe("sda");
+    const hit = (bridge as any).mock.calls.some((c: any[]) =>
+      String(c[0]).endsWith("/pools/command"),
+    );
+    expect(hit).toBe(false);
+  });
+
+  it("confirm with a matching token reaches the bridge and forwards the md param", async () => {
+    const prisma = createPrismaMock();
+    const bridge = bridgePoolsResponse([]);
+    const app = makeApp(prisma, bridge);
+    const mint = await request(app)
+      .post("/api/storage/drives/reclaim")
+      .send({ device: "sda", md: "md127", wipeMethod: "quick", confirmPhrase: "ERASE sda" });
+    const token = mint.body.confirmationToken;
+    const confirm = await request(app)
+      .post("/api/storage/command/confirm")
+      .send({ confirmationToken: token, service: "drive_reclaim", resourceId: "sda" });
+    expect(confirm.status).toBe(200);
+    const cmdCall = (bridge as any).mock.calls.find((c: any[]) =>
+      String(c[0]).endsWith("/pools/command"),
+    );
+    expect(cmdCall).toBeTruthy();
+    const sent = JSON.parse(cmdCall[1].body);
+    expect(sent.operation).toBe("drive_reclaim");
+    expect(sent.params.md).toBe("md127");
+    expect(sent.params.device).toBe("sda");
+  });
+
+  it("rejects a bad device (partition / md / injection) — whole-disk only", async () => {
+    const prisma = createPrismaMock();
+    const app = makeApp(prisma, bridgePoolsResponse([]));
+    for (const bad of ["sda1", "md127", "/dev/sda", "sda; rm -rf /"]) {
+      const res = await request(app)
+        .post("/api/storage/drives/reclaim")
+        .send({ device: bad, md: "md127", confirmPhrase: `ERASE ${bad}` });
+      expect(res.status).toBe(400);
+    }
+  });
+
+  it("rejects a bad or missing md array name", async () => {
+    const prisma = createPrismaMock();
+    const app = makeApp(prisma, bridgePoolsResponse([]));
+    for (const badMd of [undefined, "", "sdb", "md127; rm -rf /", "/dev/md127"]) {
+      const res = await request(app)
+        .post("/api/storage/drives/reclaim")
+        .send({ device: "sda", md: badMd, confirmPhrase: "ERASE sda" });
+      expect(res.status).toBe(400);
+    }
+  });
+
+  it("is refused for a non-owner/non-admin (family) and never reaches the bridge", async () => {
+    const prisma = createPrismaMock();
+    const bridge = bridgePoolsResponse([]);
+    vi.stubGlobal("fetch", bridge);
+    const app = express();
+    app.use(express.json());
+    app.use((req: any, _res, next) => {
+      req.user = { id: "fam-1", role: "family" };
+      next();
+    });
+    app.use("/api", createStorageRouter(prisma));
+    const res = await request(app)
+      .post("/api/storage/drives/reclaim")
+      .send({ device: "sda", md: "md127", confirmPhrase: "ERASE sda" });
+    expect(res.status).toBe(403);
+    const hit = (bridge as any).mock.calls.some((c: any[]) =>
+      String(c[0]).endsWith("/pools/command"),
+    );
+    expect(hit).toBe(false);
+  });
+});
+
+// WARP-1048 — rename a storage pool. Owner/admin-only, mirrors
+// PATCH /storage/drives/:uuid. Upserts the StoragePool row's displayName/notes;
+// `level` is required on create, so the route resolves it from the live bridge
+// inventory when the row doesn't exist yet.
+describe("PATCH /api/storage/pools/:device (WARP-1048 rename)", () => {
+  function prismaWithPoolUpsert() {
+    const prisma = createPrismaMock();
+    prisma.storagePool.upsert = vi.fn(async ({ where, create, update }: any) => {
+      const existing = prisma.pools.get(where.device);
+      const row = existing
+        ? { ...existing, ...update }
+        : { device: where.device, status: "none", notes: null, ...create };
+      prisma.pools.set(where.device, row);
+      return row;
+    });
+    return prisma;
+  }
+
+  it("upserts the owner's displayName and returns the row", async () => {
+    const prisma = prismaWithPoolUpsert();
+    const app = makeApp(
+      prisma,
+      bridgePoolsResponse([
+        { device: "md127", level: "raid1", status: "resyncing", members: ["sda", "sdb"] },
+      ]),
+    );
+    const res = await request(app)
+      .patch("/api/storage/pools/md127")
+      .send({ displayName: "Family Vault" });
+    expect(res.status).toBe(200);
+    expect(res.body.displayName).toBe("Family Vault");
+    expect(prisma.storagePool.upsert).toHaveBeenCalledTimes(1);
+    // On first create the level is resolved from the live bridge pool (md127
+    // is raid1), never a host-specific default.
+    const call = (prisma.storagePool.upsert as any).mock.calls[0][0];
+    expect(call.create.level).toBe("raid1");
+  });
+
+  it("rejects an invalid pool device name", async () => {
+    const prisma = prismaWithPoolUpsert();
+    const app = makeApp(prisma, bridgePoolsResponse([]));
+    const res = await request(app)
+      .patch("/api/storage/pools/not-an-md")
+      .send({ displayName: "Nope" });
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects an empty displayName", async () => {
+    const prisma = prismaWithPoolUpsert();
+    const app = makeApp(
+      prisma,
+      bridgePoolsResponse([
+        { device: "md127", level: "raid1", status: "none", members: ["sda"] },
+      ]),
+    );
+    const res = await request(app)
+      .patch("/api/storage/pools/md127")
+      .send({ displayName: "   " });
+    expect(res.status).toBe(400);
+  });
+
+  it("is refused for a non-owner/non-admin (family)", async () => {
+    const prisma = prismaWithPoolUpsert();
+    vi.stubGlobal("fetch", bridgePoolsResponse([]));
+    const app = express();
+    app.use(express.json());
+    app.use((req: any, _res, next) => {
+      req.user = { id: "fam-1", role: "family" };
+      next();
+    });
+    app.use("/api", createStorageRouter(prisma));
+    const res = await request(app)
+      .patch("/api/storage/pools/md127")
+      .send({ displayName: "Family Vault" });
+    expect(res.status).toBe(403);
+  });
+});
