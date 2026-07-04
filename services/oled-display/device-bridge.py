@@ -1781,6 +1781,10 @@ _POOL_OPS = frozenset({
     # auth + single-use-confirm-token + host-script-only posture as the pool
     # ops; the host script enforces the OS-disk refusal.
     "drive_adopt",
+    # WARP-1048: reclaim a pool-member disk — detach it from its md array
+    # (mdadm --fail/--remove + --zero-superblock) then adopt it. Same posture;
+    # the host script enforces the OS-disk refusal and requires the owning md.
+    "drive_reclaim",
 })
 
 # ADR-019 follow-up: the bridge CANNOT exec droplet-storage-pool.sh itself —

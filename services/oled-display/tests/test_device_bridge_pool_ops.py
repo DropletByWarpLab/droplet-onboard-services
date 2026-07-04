@@ -126,6 +126,24 @@ def test_drive_adopt_goes_via_spool_and_apply_unit(monkeypatch, tmp_path):
     assert seen["request"]["operation"] == "drive_adopt"
 
 
+def test_drive_reclaim_goes_via_spool_and_apply_unit(monkeypatch, tmp_path):
+    # WARP-1048: drive_reclaim is in the allow-list and rides the same spool +
+    # root-apply-unit path — the bridge never runs mdadm/wipefs/mkfs. Its
+    # params carry the disk + the owning md array verbatim for the executor.
+    bridge, spool = _load_bridge_with_spool(monkeypatch, tmp_path)
+    fake_run, seen = _fake_executor(
+        spool, rc=0, stdout='{"ok": true, "device": "sda"}')
+    monkeypatch.setattr(bridge, "_run", fake_run)
+
+    ok, info = bridge.run_pool_command("drive_reclaim", {
+        "device": "sda", "md": "md127", "fstype": "ext4",
+        "wipe_method": "quick", "confirm_phrase": "ERASE sda",
+    })
+    assert ok is True
+    assert seen["request"]["operation"] == "drive_reclaim"
+    assert seen["request"]["params"]["md"] == "md127"
+
+
 def test_pool_command_rejects_unknown_operation(monkeypatch, tmp_path):
     bridge, spool = _load_bridge_with_spool(monkeypatch, tmp_path)
 
