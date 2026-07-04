@@ -43,6 +43,7 @@ import { sendMatterCommand } from "./services/matter.service.js";
 import { createNetworkRouter } from "./routes/network.js";
 import { createNetworkThroughputRouter } from "./routes/network-throughput.js";
 import { createOffLanNetworkRouter } from "./routes/off-lan-network.js";
+import { createEgressAuditRouter } from "./routes/egress-audit.js";
 import { createCamerasRouter, createCameraSharePublicRouter } from "./routes/cameras.js";
 import { createSwitchRouter } from "./routes/switch.js";
 import { createDisplayRouter } from "./routes/display.js";
@@ -263,6 +264,10 @@ export function createApp(
   // WARP-468: Phase E2 — off-LAN egress byte counter read + sampler push.
   // GET aggregator is admin/family/guest read; sample push is service-only.
   app.use("/api", createOffLanNetworkRouter(prisma));
+  // WARP-268: runtime egress-audit collector pushes unlisted-destination /
+  // allowlist-unavailable anomalies here (service-principal only) → signed
+  // activity log → /admin/audit.
+  app.use("/api", createEgressAuditRouter());
   app.use("/api", createCamerasRouter(prisma));
   app.use("/api", createSwitchRouter(prisma));
   app.use("/api", createDisplayRouter(prisma));

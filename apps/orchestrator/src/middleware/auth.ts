@@ -508,6 +508,20 @@ const SERVICE_PRINCIPALS: readonly ServicePrincipalDef[] = [
       role: "service",
     },
   },
+  {
+    // WARP-268: the host-side egress-audit collector presents this Bearer
+    // on POST /api/security/egress-anomaly (unlisted-destination /
+    // allowlist-unavailable events → signed activity log). Host-side
+    // systemd unit, reaches the orchestrator on 127.0.0.1:3000 like the
+    // WARP-468/470 samplers.
+    token: config.SERVICE_TOKEN_EGRESS_AUDIT,
+    principal: {
+      id: "_service:egress-audit",
+      username: "_service:egress-audit",
+      displayName: "Egress Audit Collector",
+      role: "service",
+    },
+  },
 ];
 
 function matchServiceToken(token: string): AuthUser | null {
