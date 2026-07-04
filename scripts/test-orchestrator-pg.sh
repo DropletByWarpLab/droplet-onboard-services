@@ -29,6 +29,11 @@ PG_PASSWORD="droplet_test_pw"
 PG_DB="droplet_test"
 export DATABASE_URL="postgresql://${PG_USER}:${PG_PASSWORD}@localhost:${PG_PORT}/${PG_DB}?schema=public"
 
+# Predeclared so EXIT traps referencing them are safe under `set -u`.
+PG_BIN=""
+DATA_DIR=""
+SOCK_DIR=""
+
 docker_available() {
   command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1
 }
@@ -78,16 +83,21 @@ run_with_native_pg() {
   export LC_ALL="${LC_ALL:-en_US.UTF-8}"
   export LANG="${LANG:-en_US.UTF-8}"
 
-  local PG_BIN
+  # Script-global (NOT local) so the EXIT trap, which fires outside this
+  # function's scope, still sees them under `set -u`.
   PG_BIN="$(dirname "$(command -v initdb)")"
-  local DATA_DIR
   DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/droplet-warp1026-pgdata.XXXXXX")"
-  local SOCK_DIR
   SOCK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/droplet-warp1026-pgsock.XXXXXX")"
 
   cleanup() {
-    "$PG_BIN/pg_ctl" -D "$DATA_DIR" -m immediate stop >/dev/null 2>&1 || true
-    rm -rf "$DATA_DIR" "$SOCK_DIR" || true
+    [ -n "$PG_BIN" ] && [ -d "$DATA_DIR" ] &&
+      "$PG_BIN/pg_ctl" -D "$DATA_DIR" -m immediate stop >/dev/null 2>&1 || true
+    # Belt-and-braces: if pg_ctl couldn't stop it, kill by pidfile so no
+    # throwaway postmaster leaks onto the test port.
+    if [ -f "$DATA_DIR/postmaster.pid" ]; then
+      kill "$(head -1 "$DATA_DIR/postmaster.pid")" >/dev/null 2>&1 || true
+    fi
+    [ -n "$DATA_DIR" ] && rm -rf "$DATA_DIR" "$SOCK_DIR" || true
   }
   trap cleanup EXIT
 
