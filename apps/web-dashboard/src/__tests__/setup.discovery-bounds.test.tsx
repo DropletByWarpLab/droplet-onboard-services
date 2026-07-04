@@ -73,6 +73,9 @@ vi.mock("@/lib/api", () => ({
     slug: "studio",
     fqdn: "studio.droplet-us.com",
   })),
+  // WARP-1039 — AddressStep rehydrates from (and the VpnStep blocked precheck
+  // reads) the saved name; null = the pre-existing no-name baseline.
+  fetchBoxName: vi.fn(async () => ({ name: null, fqdn: null })),
   setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
   // Storage step auto-skips on empty drive list — let it pass straight
   // through so the polling-bounds tests land on discovery as they

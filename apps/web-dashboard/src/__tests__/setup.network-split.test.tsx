@@ -90,6 +90,9 @@ vi.mock("@/lib/api", () => ({
     slug: "studio",
     fqdn: "studio.droplet-us.com",
   })),
+  // WARP-1039 — AddressStep rehydrates from (and the VpnStep blocked precheck
+  // reads) the saved name; null = the pre-existing no-name baseline.
+  fetchBoxName: vi.fn(async () => ({ name: null, fqdn: null })),
   // WARP-657 Wi-Fi clients — present so WifiStep's import resolves; the split
   // tests skip Wi-Fi (blank → Continue) so these are never actually called.
   setWifiSsid: vi.fn(async () => ({ status: "ok", tier: 1 })),

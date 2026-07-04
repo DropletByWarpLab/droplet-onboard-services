@@ -2603,6 +2603,17 @@ model ApplianceSetup {
   state             String    @default("unclaimed")
   setupStep         SetupStep @default(welcome)
   userTourCompleted Boolean   @default(false)
+  // WARP-1039 — the owner-chosen box name (validated slug), written by
+  // POST /setup/box-name on the ok path alongside the host-.env write-back.
+  // The .env write only becomes visible to the orchestrator on the NEXT boot
+  // (config is a boot-time snapshot), so this column is what lets
+  // GET /setup/box-name surface the saved name back to the wizard in-session
+  // (AddressStep rehydration + VpnStep's honest blocked view). NULLABLE and
+  // additive so the raw-INSERT singleton seed migration (explicit column
+  // list, 20260531150000) stays valid. Null = no name chosen yet — allowed
+  // here because the name genuinely may not exist; the lifecycle columns
+  // above remain the explicit non-derived state.
+  boxName           String?
   // M6 (PR #372 re-review): `@default(now())` emits a DB-level
   // DEFAULT CURRENT_TIMESTAMP so a raw INSERT omitting `updatedAt` (the
   // singleton migration seed) can't violate NOT NULL; `@updatedAt` still

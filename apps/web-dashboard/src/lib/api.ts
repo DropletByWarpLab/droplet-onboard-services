@@ -74,6 +74,7 @@ import type {
   VoiceSayResult,
   BoxNameCheckResult,
   BoxNameSetResult,
+  BoxNameCurrentResult,
   ToolCatalogResponse,
   DocsStatus,
   DocEditorSession,
@@ -4672,6 +4673,22 @@ export async function setBoxName(name: string): Promise<BoxNameSetResult> {
     const body = await res.json().catch(() => ({}));
     throwNetworkWriteError(body, res.status, "Failed to save box name");
   }
+  return res.json();
+}
+
+/**
+ * WARP-1039 — read the CURRENTLY saved box name back: `{ name, fqdn }`, both
+ * null when no name has been chosen yet. Same public-onboarding posture as the
+ * POST (the orchestrator re-gates it once the appliance is claimed), so plain
+ * `fetch` with the session cookie riding along. The AddressStep rehydrates its
+ * input from this on mount; the VpnStep precheck uses it to render the honest
+ * "address is being set up" blocked view.
+ */
+export async function fetchBoxName(): Promise<BoxNameCurrentResult> {
+  const res = await fetch(`${BASE}/api/setup/box-name`, {
+    credentials: "same-origin",
+  });
+  if (!res.ok) throw new Error(`Failed to fetch box name: ${res.status}`);
   return res.json();
 }
 // --- WARP-204: /knowledge view (recent + semantic search + brain memory) ---

@@ -8,7 +8,7 @@ import {
   boxNameReasonMessage,
   BOX_NAME_SUFFIX,
 } from "@droplet/shared-types";
-import { checkBoxName, setBoxName } from "@/lib/api";
+import { checkBoxName, setBoxName, fetchBoxName } from "@/lib/api";
 import { StepShell } from "@/components/setup/StepShell";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 
@@ -56,6 +56,31 @@ export function AddressStep({
   const [status, setStatus] = useState<CheckStatus>({ kind: "idle" });
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // WARP-1039 — the name the box already has saved (null = none yet). Drives
+  // the "this is your current address" hint while the input still shows it.
+  const [savedName, setSavedName] = useState<string | null>(null);
+
+  // WARP-1039 — rehydrate the saved name on mount so re-entering the step
+  // (e.g. from the VPN precheck, the rail, or Back) shows the name the owner
+  // already chose instead of an empty input. Best-effort: a failed GET keeps
+  // the empty-input baseline. Never overwrites what the owner already typed —
+  // a slow response must not stomp live input.
+  useEffect(() => {
+    let cancelled = false;
+    fetchBoxName()
+      .then((r) => {
+        if (cancelled || !r.name) return;
+        const saved = r.name;
+        setSavedName(saved);
+        setName((cur) => (cur.length === 0 ? saved : cur));
+      })
+      .catch(() => {
+        // Best-effort — the empty input is the honest fallback.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Normalize for display + validation. We never rewrite the owner's raw input
   // (they see their own typing); the slug is the normalized form we validate,
@@ -63,6 +88,10 @@ export function AddressStep({
   const local = validateBoxName(name);
   const slug = local.slug;
   const fqdn = boxNameToFqdn(slug || "your-box");
+  // WARP-1039 — true while the input still shows the exact name the box
+  // already saved; drives the current-address hint AND the input's
+  // aria-describedby so screen-reader users hear it too.
+  const showCurrentHint = savedName !== null && slug === savedName;
 
   // Cancel a stale in-flight availability check when the input changes.
   const abortRef = useRef<AbortController | null>(null);
@@ -226,6 +255,9 @@ export function AddressStep({
             onChange={(e) => setName(e.target.value)}
             placeholder="your-box"
             aria-label="Box name"
+            aria-describedby={
+              showCurrentHint ? "box-name-current-hint" : undefined
+            }
             className="flex-1 min-w-0 border-none outline-none bg-transparent font-mono type-body font-semibold text-label-primary placeholder:text-label-quaternary"
             autoCapitalize="off"
             autoComplete="off"
@@ -249,6 +281,19 @@ export function AddressStep({
           </span>
         </div>
       </label>
+
+      {/* WARP-1039 — subtle current-address hint while the input still shows
+          the name the box already saved. Static (not in the live region) so it
+          doesn't compete with the availability announcement. */}
+      {showCurrentHint && (
+        <p
+          id="box-name-current-hint"
+          className="type-footnote text-label-secondary mt-1.5"
+        >
+          This is your current address — continue to keep it, or pick a new
+          name.
+        </p>
+      )}
 
       {/* Live status line — announced politely so a screen reader hears the
           availability result without stealing focus. */}

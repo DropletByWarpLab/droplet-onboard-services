@@ -89,6 +89,9 @@ vi.mock("@/lib/api", () => ({
   // WARP-979 — Secured / name-your-box step (the reworked `address` step).
   checkBoxName: (name: string) => checkBoxNameMock(name),
   setBoxName: (name: string) => setBoxNameMock(name),
+  // WARP-1039 — AddressStep rehydrates from (and the VpnStep blocked precheck
+  // reads) the saved name; null = the pre-existing no-name baseline.
+  fetchBoxName: vi.fn(async () => ({ name: null, fqdn: null })),
 
   fetchDrives: vi.fn(async () => ({
     drives: [

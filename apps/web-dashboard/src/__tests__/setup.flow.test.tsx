@@ -68,6 +68,9 @@ vi.mock("@/lib/api", () => ({
     slug: "studio",
     fqdn: "studio.droplet-us.com",
   })),
+  // WARP-1039 — AddressStep rehydrates from (and the VpnStep blocked precheck
+  // reads) the saved name; null = the pre-existing no-name baseline.
+  fetchBoxName: vi.fn(async () => ({ name: null, fqdn: null })),
   setDuckDnsConfig: vi.fn(async () => ({ configured: false })),
   // Storage step auto-skips when zero drives — keep the bridge "empty"
   // so the flow test doesn't have to click anything on that step.
@@ -229,6 +232,9 @@ describe("setup flow → done state", () => {
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
+      // WARP-1039 — explicit: the NORMAL forward path is unchanged — leaving
+      // Address without a return-to flag lands on storage, never back on VPN.
+      expect(screen.getByText(/name your storage/i)).toBeInTheDocument();
       fireEvent.click(screen.getByRole("button", { name: /skip for now/i })); // storage
     });
     await act(async () => {
