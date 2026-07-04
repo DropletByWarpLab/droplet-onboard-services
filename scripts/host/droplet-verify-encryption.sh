@@ -111,6 +111,18 @@ vfy_run_check() {
   "$fn" "$id" || vfy_record "$id" SKIP "probe-crashed (rc=$?) — harness bug, inspect $VFY_EVID/$id" ""
 }
 
+# vfy_evidence_csv ID — comma-joined relative paths of every file this check
+# has written under evidence/<id>/ (for multi-file probes: mesh, edge, pcap).
+vfy_evidence_csv() {
+  local id="$1" dir="$VFY_EVID/$id" f csv=""
+  [ -d "$dir" ] || return 0
+  for f in "$dir"/*; do
+    [ -f "$f" ] || continue
+    csv="$csv,evidence/$id/$(basename "$f")"
+  done
+  printf '%s' "${csv#,}"
+}
+
 # vfy_find_raw_luks_device — DROPLET_VFY_RAW_DEVICE override, else best-effort
 # lsblk walk for the first LUKS crypt parent. Prints device path or nothing.
 vfy_find_raw_luks_device() {
@@ -119,7 +131,8 @@ vfy_find_raw_luks_device() {
   lsblk -P -o NAME,FSTYPE 2>/dev/null | awk -F'"' '/FSTYPE="crypto_LUKS"/{print "/dev/"$2; exit}'
 }
 
-# --- probes: guard shells (Task 5). Live bodies land in Task 6. --------------
+# --- probes: live capture -> evaluate -> record. Each is guarded so a missing
+#     tool/subsystem is a reasoned SKIP, never a crash (status contract). ------
 
 probe_rest_luks_device() {
   local id="$1" dev
@@ -131,21 +144,60 @@ probe_rest_luks_device() {
 }
 
 probe_rest_luks_header() {
-  local id="$1"
+  local id="$1" dev out="$VFY_EVID/$id/luksdump.txt" v1 v2 v3
   vfy_have cryptsetup || { vfy_record "$id" SKIP "cryptsetup-not-on-path"; return; }
-  vfy_record "$id" FAIL "no-luks-device-found (WARP-232 not landed?)" ""
+  dev="$(vfy_find_raw_luks_device)"
+  [ -n "$dev" ] || { vfy_record "$id" FAIL "no-luks-device-found (WARP-232 not landed?)" ""; return; }
+  cryptsetup luksDump "$dev" > "$out" 2>&1
+  v1="$(vfy_eval_luks_version "$out")"; v2="$(vfy_eval_luks_cipher "$out")"
+  v3="$(vfy_eval_luks_pbkdf "$out")"
+  if [ "${v1%%|*}" = PASS ] && [ "${v2%%|*}" = PASS ] && [ "${v3%%|*}" = PASS ]; then
+    vfy_record "$id" PASS "${v1#*|}; ${v2#*|}; ${v3#*|}" "evidence/$id/luksdump.txt"
+  else
+    vfy_record "$id" FAIL "${v1#*|}; ${v2#*|}; ${v3#*|}" "evidence/$id/luksdump.txt"
+  fi
 }
 
 probe_rest_luks_tpm_token() {
-  local id="$1"
+  local id="$1" dev out="$VFY_EVID/$id/luksdump.txt" v
   vfy_have cryptsetup || { vfy_record "$id" SKIP "cryptsetup-not-on-path"; return; }
-  vfy_record "$id" FAIL "no-luks-device-found (WARP-232 not landed?)" ""
+  dev="$(vfy_find_raw_luks_device)"
+  [ -n "$dev" ] || { vfy_record "$id" FAIL "no-luks-device-found (WARP-232 not landed?)" ""; return; }
+  cryptsetup luksDump "$dev" > "$out" 2>&1
+  v="$(vfy_eval_luks_tpm_token "$out")"
+  vfy_record "$id" "${v%%|*}" "${v#*|}" "evidence/$id/luksdump.txt"
 }
 
 probe_rest_entropy() {
-  local id="$1"
+  local id="$1" dev off worst_h="" worst_line magic_fail="" sample v hv
   vfy_have dd || { vfy_record "$id" SKIP "dd-not-on-path"; return; }
-  vfy_record "$id" FAIL "no-luks-device-found (WARP-232 not landed?)" ""
+  dev="$(vfy_find_raw_luks_device)"
+  [ -n "$dev" ] || { vfy_record "$id" FAIL "no-luks-device-found (WARP-232 not landed?)" ""; return; }
+  # Sample three 4 MiB windows at 32/1024/4096 MiB. Unwritten SSD regions read
+  # zeros even under LUKS, so we take the MAX entropy across the samples.
+  for off in 32 1024 4096; do
+    sample="$VFY_EVID/$id/sample-${off}MiB.raw"
+    # Read 4 MiB from stdout (portable across real dd and the test's stub); the
+    # raw bytes are transient and shredded below — only the entropy value stays.
+    dd if="$dev" bs=1M count=4 skip="$off" status=none 2>/dev/null > "$sample" || true
+    [ -s "$sample" ] || continue
+    v="$(vfy_eval_entropy "$sample" 7.5)"
+    hv="$(printf '%s' "${v#*|}" | sed -n 's/entropy=\([0-9.]*\).*/\1/p')"
+    printf 'offset=%sMiB\t%s\n' "$off" "$v" > "$VFY_EVID/$id/sample-${off}MiB.entropy.txt"
+    if [ -z "$worst_h" ] || vfy_gt "$hv" "$worst_h"; then worst_h="$hv"; worst_line="$v"; fi
+    # Plaintext-magic scan runs on every sample; any hit is a finding.
+    m="$(vfy_eval_no_plaintext_magic "$sample")"
+    [ "${m%%|*}" = FAIL ] && magic_fail="$magic_fail ${m#*|}"
+    rm -f "$sample"   # raw bytes are NOT bundled (only the entropy value is)
+  done
+  if [ -z "$worst_line" ]; then vfy_record "$id" SKIP "no-readable-samples"; return; fi
+  if [ -n "$magic_fail" ]; then
+    vfy_record "$id" FAIL "plaintext-magic-found:${magic_fail# }; max-${worst_line#*|}" \
+      "$(vfy_evidence_csv "$id")"
+    return
+  fi
+  vfy_record "$id" "${worst_line%%|*}" "max-${worst_line#*|} (max across 3 offsets; unwritten regions read zero)" \
+    "$(vfy_evidence_csv "$id")"
 }
 
 probe_rest_mount_coverage() {
@@ -179,55 +231,187 @@ probe_rest_usb_luks() {
 }
 
 probe_transit_pg_plaintext_rejected() {
-  local id="$1"
+  local id="$1" out="$VFY_EVID/$id/psql-disable.txt" rc v pw
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
-  vfy_record "$id" SKIP "not-implemented-yet"
+  # Password passed inline in the conninfo (not via `-e PGPASSWORD`) so the
+  # exec argv keeps `db psql` adjacent and the value never lands in the process
+  # list of the host (it is inside the container's argv only).
+  pw="$(vfy_env POSTGRES_PASSWORD)"
+  vfy_compose exec -T db \
+    psql "host=db user=droplet password=$pw dbname=droplet sslmode=disable" -c 'SELECT 1' \
+    > "$out" 2>&1
+  rc=$?
+  printf '\n[exit=%s]\n' "$rc" >> "$out"
+  v="$(vfy_eval_expect_reject "$rc" "$out" \
+       'no pg_hba.conf entry.*(SSL off|no encryption)|server does not support SSL')"
+  vfy_record "$id" "${v%%|*}" "${v#*|}" "evidence/$id/psql-disable.txt"
 }
+
 probe_transit_pg_tls13() {
-  local id="$1"
+  local id="$1" out="$VFY_EVID/$id/sclient-pg.txt" v
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
-  vfy_record "$id" SKIP "not-implemented-yet"
+  vfy_compose exec -T db sh -c 'openssl s_client -starttls postgres -connect db:5432 </dev/null' \
+    > "$out" 2>&1 || true
+  v="$(vfy_eval_tls_protocol "$out" 'TLSv1\.3')"
+  vfy_record "$id" "${v%%|*}" "${v#*|}" "evidence/$id/sclient-pg.txt"
 }
+
 probe_transit_pg_scram() {
-  local id="$1"
+  local id="$1" out="$VFY_EVID/$id/pg-settings.txt" pw
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
-  vfy_record "$id" SKIP "not-implemented-yet"
+  pw="$(vfy_env POSTGRES_PASSWORD)"
+  vfy_compose exec -T db \
+    psql "host=db user=droplet password=$pw dbname=droplet" -tAc 'SHOW password_encryption; SHOW ssl;' \
+    > "$out" 2>&1 || true
+  if grep -q 'scram-sha-256' "$out" 2>/dev/null; then
+    vfy_record "$id" PASS "password_encryption=scram-sha-256" "evidence/$id/pg-settings.txt"
+  else
+    vfy_record "$id" FAIL "scram-sha-256-not-confirmed" "evidence/$id/pg-settings.txt"
+  fi
 }
+
 probe_transit_redis_plaintext_refused() {
-  local id="$1"
+  local id="$1" out="$VFY_EVID/$id/redis-plain.txt" rc v pw
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
-  vfy_record "$id" SKIP "not-implemented-yet"
+  pw="$(vfy_env REDIS_PASSWORD)"
+  vfy_compose exec -T cache redis-cli -h cache -p 6379 -a "$pw" --no-auth-warning PING \
+    > "$out" 2>&1
+  rc=$?
+  printf '\n[exit=%s]\n' "$rc" >> "$out"
+  if grep -qx 'PONG' "$out" 2>/dev/null; then
+    vfy_record "$id" FAIL "plaintext-pong (6379 answered PONG over plaintext)" "evidence/$id/redis-plain.txt"
+  else
+    v="$(vfy_eval_expect_reject "$rc" "$out" 'Connection refused|NOAUTH|error')"
+    vfy_record "$id" "${v%%|*}" "${v#*|}" "evidence/$id/redis-plain.txt"
+  fi
 }
+
 probe_transit_redis_tls() {
-  local id="$1"
+  local id="$1" out="$VFY_EVID/$id/redis-tls.txt" pw
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
-  vfy_record "$id" SKIP "not-implemented-yet"
+  pw="$(vfy_env REDIS_PASSWORD)"
+  vfy_compose exec -T cache redis-cli -h cache --tls -p "$VFY_REDIS_TLS_PORT" \
+    -a "$pw" --no-auth-warning PING > "$out" 2>&1 || true
+  if grep -qx 'PONG' "$out" 2>/dev/null; then
+    vfy_record "$id" PASS "tls-ping-ok (port $VFY_REDIS_TLS_PORT)" "evidence/$id/redis-tls.txt"
+  else
+    vfy_record "$id" SKIP "tls-port-not-listening (WARP-234 not landed)" "evidence/$id/redis-tls.txt"
+  fi
 }
+
 probe_transit_mqtt_plaintext_closed() {
-  local id="$1"
+  local id="$1" out="$VFY_EVID/$id/mqtt-plain.txt" rc pw
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
-  vfy_record "$id" SKIP "not-implemented-yet"
+  pw="$(vfy_env MQTT_PASSWORD)"
+  vfy_compose exec -T broker mosquitto_pub -h broker -p 1883 -u droplet -P "$pw" \
+    -t droplet/verify/canary -m probe > "$out" 2>&1
+  rc=$?
+  printf '\n[exit=%s]\n' "$rc" >> "$out"
+  if [ "$rc" -eq 0 ]; then
+    vfy_record "$id" FAIL "plaintext-mqtt-accepted (1883 accepted a publish)" "evidence/$id/mqtt-plain.txt"
+  else
+    vfy_record "$id" PASS "plaintext-1883-refused" "evidence/$id/mqtt-plain.txt"
+  fi
 }
+
 probe_transit_mqtt_mtls_required() {
-  local id="$1"
+  local id="$1" out="$VFY_EVID/$id/mqtt-nocert.txt" rc ca
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
-  vfy_record "$id" SKIP "not-implemented-yet"
+  ca="${DROPLET_VFY_MQTT_CA:-/mosquitto/certs/ca.crt}"
+  vfy_compose exec -T broker mosquitto_pub -h broker -p 8883 --cafile "$ca" \
+    -t droplet/verify/canary -m probe > "$out" 2>&1
+  rc=$?
+  printf '\n[exit=%s]\n' "$rc" >> "$out"
+  if [ "$rc" -eq 0 ]; then
+    vfy_record "$id" FAIL "client-cert-not-required (8883 accepted a certless publish)" "evidence/$id/mqtt-nocert.txt"
+  elif grep -qiE 'tls|cert|connection refused' "$out" 2>/dev/null; then
+    vfy_record "$id" PASS "certless-publish-refused" "evidence/$id/mqtt-nocert.txt"
+  else
+    vfy_record "$id" SKIP "8883-not-listening (WARP-235 not landed)" "evidence/$id/mqtt-nocert.txt"
+  fi
 }
+
 probe_transit_mesh_plain_http_refused() {
-  local id="$1"
+  local id="$1" t accepted="" out
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
-  vfy_record "$id" SKIP "not-implemented-yet"
+  for t in $VFY_MESH_TARGETS; do
+    out="$VFY_EVID/$id/mesh-${t//[:\/]/_}.txt"
+    if vfy_compose exec -T orchestrator node -e \
+      "fetch('http://$t/',{signal:AbortSignal.timeout(5000)}).then(r=>{console.log('HTTP',r.status);process.exit(0)}).catch(e=>{console.error(String(e));process.exit(1)})" \
+      > "$out" 2>&1; then
+      accepted="$accepted $t"
+    fi
+  done
+  if [ -n "$accepted" ]; then
+    vfy_record "$id" FAIL "plain-http-accepted-by:${accepted# } (WARP-236 AC: cert-less callers must be refused)" \
+      "$(vfy_evidence_csv "$id")"
+  else
+    vfy_record "$id" PASS "all-mesh-targets-refuse-plain-http" "$(vfy_evidence_csv "$id")"
+  fi
 }
+
 probe_transit_edge_tls_policy() {
-  local id="$1"
+  local id="$1" o1="$VFY_EVID/$id/sclient-edge.txt" o2="$VFY_EVID/$id/sclient-edge-tls11.txt"
+  local o3="$VFY_EVID/$id/http-redirect.txt" v proto11 redir
   vfy_have openssl || { vfy_record "$id" SKIP "openssl-not-on-path"; return; }
-  vfy_record "$id" SKIP "not-implemented-yet"
+  openssl s_client -connect 127.0.0.1:443 </dev/null > "$o1" 2>&1 || true
+  openssl s_client -tls1_1 -connect 127.0.0.1:443 </dev/null > "$o2" 2>&1 || true
+  if vfy_have curl; then curl -sSI http://127.0.0.1/ > "$o3" 2>&1 || true; else : > "$o3"; fi
+  v="$(vfy_eval_tls_protocol "$o1" 'TLSv1\.[23]')"
+  proto11="$(vfy_eval_tls_protocol "$o2" 'TLSv1\.1')"   # PASS here means 1.1 negotiated (BAD)
+  redir="$(grep -m1 -oE 'HTTP/[0-9.]+ (301|308)' "$o3" 2>/dev/null || true)"
+  if [ "${v%%|*}" = PASS ] && [ "${proto11%%|*}" != PASS ]; then
+    vfy_record "$id" PASS "edge=${v#*|}; tls1.1-refused; ${redir:-redirect-unverified}" \
+      "$(vfy_evidence_csv "$id")"
+  else
+    vfy_record "$id" FAIL "edge=${v#*|}; tls1.1=${proto11#*|}" "$(vfy_evidence_csv "$id")"
+  fi
 }
+
 probe_transit_pcap_canary() {
-  local id="$1"
+  local id="$1" br pcap="$VFY_EVID/$id/capture.pcap" wl="$VFY_EVID/$id/workload.log"
+  local scan="$VFY_EVID/$id/pcap-scan.txt" canary netid tdpid patt v pw
   vfy_have tcpdump || { vfy_record "$id" SKIP "tcpdump-not-installed (apt-get install tcpdump)"; return; }
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
-  vfy_record "$id" SKIP "not-implemented-yet"
+  netid="$(docker network inspect "${VFY_COMPOSE_PROJECT}_default" -f '{{.Id}}' 2>/dev/null | cut -c1-12)"
+  [ -n "$netid" ] || { vfy_record "$id" SKIP "bridge-iface-unresolvable"; return; }
+  br="br-$netid"
+  canary="DROPLET-CANARY-$(openssl rand -hex 8 2>/dev/null || echo deadbeefdeadbeef)"
+  : > "$wl"
+  tcpdump -i "$br" -s 0 -w "$pcap" >/dev/null 2>&1 &
+  tdpid=$!
+  # Drive the canary through every hop (all ephemeral, read-mostly).
+  pw="$(vfy_env POSTGRES_PASSWORD)"
+  vfy_compose exec -T db \
+    psql "host=db user=droplet password=$pw dbname=droplet" -tAc "SELECT '$canary'" >> "$wl" 2>&1 || true
+  pw="$(vfy_env REDIS_PASSWORD)"
+  vfy_compose exec -T cache redis-cli -h cache -a "$pw" --no-auth-warning \
+    SET vfy:canary "$canary" >> "$wl" 2>&1 || true
+  vfy_compose exec -T cache redis-cli -h cache -a "$pw" --no-auth-warning GET vfy:canary >> "$wl" 2>&1 || true
+  vfy_compose exec -T cache redis-cli -h cache -a "$pw" --no-auth-warning DEL vfy:canary >> "$wl" 2>&1 || true
+  pw="$(vfy_env MQTT_PASSWORD)"
+  vfy_compose exec -T broker mosquitto_pub -h broker -p 1883 -u droplet -P "$pw" \
+    -t droplet/verify/canary -m "$canary" >> "$wl" 2>&1 || true
+  vfy_compose exec -T orchestrator node -e \
+    "fetch('http://ai-gateway:8000/',{headers:{'x-droplet-canary':'$canary'},signal:AbortSignal.timeout(3000)}).then(()=>0).catch(()=>0)" \
+    >> "$wl" 2>&1 || true
+  sleep "$VFY_PCAP_SECONDS"
+  kill -INT "$tdpid" 2>/dev/null || true
+  wait "$tdpid" 2>/dev/null || true
+  if [ ! -s "$pcap" ]; then vfy_record "$id" SKIP "capture-produced-no-packets" "evidence/$id/workload.log"; return; fi
+  # Build a 0600 patterns file: canary + every secret VALUE by name. The values
+  # never leave this shredded tempfile; the verdict names only pattern names.
+  patt="$(mktemp)"; chmod 600 "$patt"
+  printf 'canary\t%s\n' "$canary" >> "$patt"
+  for name in POSTGRES_PASSWORD REDIS_PASSWORD MQTT_PASSWORD JWT_SECRET DEVICE_SECRET_KEY \
+              $(grep -oE '^SERVICE_TOKEN_[A-Z0-9_]+' "$VFY_REPO_ROOT/.env" 2>/dev/null); do
+    val="$(vfy_env "$name")"
+    [ -n "$val" ] && printf '%s\t%s\n' "$name" "$val" >> "$patt"
+  done
+  v="$(vfy_eval_pcap_patterns "$pcap" "$patt")"
+  printf '%s\n' "$v" > "$scan"
+  { shred -u "$patt" 2>/dev/null || rm -P "$patt" 2>/dev/null || rm -f "$patt"; }
+  vfy_record "$id" "${v%%|*}" "${v#*|}" "evidence/$id/pcap-scan.txt,evidence/$id/workload.log,evidence/$id/capture.pcap"
 }
 
 # vfy_sign_bundle DIR — minimal degrade-to-skipped stub (full Sign RPC lands in
@@ -309,7 +493,7 @@ $(printf '%s\n' "$VFY_REGISTRY" | sed '/^$/d')
 EOF
 
   prev="$(vfy_prev_manifest_hash "$VFY_OUTPUT_ROOT" "$ts")"
-  vfy_render_json "$VFY_RESULTS" "$meta" "$prev" "$bundle/report.json.tmp"
+  vfy_render_json "$VFY_RESULTS" "$meta" "$prev" "$bundle/report.json.tmp" "$bundle"
   vfy_render_md "$VFY_RESULTS" "$bundle/report.md"
 
   # Sign the manifest; the report records the signing status, so signing runs

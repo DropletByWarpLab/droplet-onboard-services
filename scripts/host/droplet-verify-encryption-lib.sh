@@ -43,22 +43,41 @@ vfy_result_line() {
 # dev hosts). Prints the path or nothing.
 vfy_py() { command -v python3 || command -v python || true; }
 
-# vfy_render_json NDJSON META_JSON PREV_MANIFEST_SHA256 OUT
+# vfy_render_json NDJSON META_JSON PREV_MANIFEST_SHA256 OUT [BUNDLE_DIR]
 # Fold the per-check NDJSON rows into the machine-readable report.json:
 #   schema/ticket/epic/generated_at + box meta + prev-chain hash + summary +
 #   the full checks array (status contract: every registered check is present).
+# When BUNDLE_DIR is given, each check gains "evidence_sha256" — the sha256 of
+# every evidence file it lists (relative to the bundle) — so the per-check
+# hashes are embedded in report.json, the first link in the tamper-evidence
+# chain (report.json -> manifest.sha256 -> manifest.sig).
 vfy_render_json() {
-  local ndjson="$1" meta="$2" prev="$3" out="$4" py
+  local ndjson="$1" meta="$2" prev="$3" out="$4" bundle="${5:-}" py
   py="$(vfy_py)"; [ -n "$py" ] || return 1
-  VFY_NDJSON="$ndjson" VFY_META="$meta" VFY_PREV="$prev" VFY_OUT="$out" \
+  VFY_NDJSON="$ndjson" VFY_META="$meta" VFY_PREV="$prev" VFY_OUT="$out" VFY_BUNDLE="$bundle" \
   "$py" - <<'PYEOF'
-import json, os, datetime
+import json, os, datetime, hashlib
 rows = []
 with open(os.environ["VFY_NDJSON"]) as fh:
     for ln in fh:
         ln = ln.strip()
         if ln:
             rows.append(json.loads(ln))
+bundle = os.environ.get("VFY_BUNDLE", "")
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+for r in rows:
+    ev_hashes = {}
+    if bundle:
+        for rel in r.get("evidence", []):
+            fp = os.path.join(bundle, rel)
+            if os.path.isfile(fp):
+                ev_hashes[rel] = sha256_file(fp)
+    r["evidence_sha256"] = ev_hashes
 meta = json.loads(os.environ["VFY_META"] or "{}")
 p = sum(1 for r in rows if r["status"] == "PASS")
 f = sum(1 for r in rows if r["status"] == "FAIL")
@@ -325,4 +344,9 @@ vfy_manifest() {
 # vfy_sha256 FILE — print the hex sha256 of a file (portable).
 vfy_sha256() {
   { sha256sum "$1" 2>/dev/null || shasum -a 256 "$1"; } | awk '{print $1}'
+}
+
+# vfy_gt A B — true when float A > float B (awk; safe with "" / non-numeric).
+vfy_gt() {
+  awk -v a="${1:-0}" -v b="${2:-0}" 'BEGIN{ exit !((a+0) > (b+0)) }'
 }

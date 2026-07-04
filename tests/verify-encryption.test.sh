@@ -238,6 +238,76 @@ b3="$(ls -dt "$WORK/out"/*/ | head -1)"
 grep -q "\"prev_manifest_sha256\": \"$prev\"" "$b3/report.json" \
   && pass "runs hash-chain via prev_manifest_sha256" || fail "chain broken"
 
+echo ""; echo "--- Runner: probes against a faked encrypted box ---"
+rm -rf "$WORK/bin" "$WORK/out"; mkdir -p "$WORK/bin"
+: > "$WORK/stub-calls.log"
+# docker stub: routes on the exec target so each hop replays its fixture.
+cat > "$WORK/bin/docker" <<EOF
+#!/bin/sh
+echo "docker \$*" >> "$WORK/stub-calls.log"
+case "\$*" in
+  *"exec -T db psql"*sslmode=disable*) cat "$FIX/psql-ssl-reject.txt" >&2; exit 2;;
+  *"exec -T db psql"*password_encryption*) echo scram-sha-256; exit 0;;
+  *"exec -T db sh -c"*s_client*) cat "$FIX/sclient-tls13.txt"; exit 0;;
+  *"exec -T cache redis-cli"*--tls*) echo PONG; exit 0;;
+  *"exec -T cache redis-cli"*) cat "$FIX/redis-conn-refused.txt" >&2; exit 1;;
+  *"exec -T broker mosquitto_pub"*8883*) cat "$FIX/mosquitto-cert-required.txt" >&2; exit 1;;
+  *"exec -T broker mosquitto_pub"*) echo "Error: Connection refused" >&2; exit 1;;
+  *"exec -T orchestrator node"*) echo "TypeError: fetch failed" >&2; exit 1;;
+  *"network inspect"*) echo "cafe12345678"; exit 0;;
+  *"exec -i droplet-device-identity-svc python"*) echo "c2lnbmF0dXJlLWJ5dGVz"; exit 0;;
+  *"compose"*"ps"*) echo "db running"; exit 0;;
+  *) exit 0;;
+esac
+EOF
+chmod +x "$WORK/bin/docker"
+mk_stub cryptsetup 0 "$FIX/luksdump-luks2-tpm.txt"
+printf '/dev/mapper/droplet-data\n' > "$WORK/findmnt.out"; mk_stub findmnt 0 "$WORK/findmnt.out"
+cat > "$WORK/lsblk.json" <<'EOF'
+{"blockdevices":[{"name":"droplet-data","type":"crypt","children":[{"name":"nvme0n1p3","type":"part"}]}]}
+EOF
+mk_stub lsblk 0 "$WORK/lsblk.json"
+head -c 4194304 /dev/urandom > "$WORK/dd.out"; mk_stub dd 0 "$WORK/dd.out"
+mk_stub tcpdump 0 /dev/null   # writes nothing; runner treats empty pcap as its own guard
+mk_stub openssl 0 "$FIX/sclient-tls13.txt"
+mkdir -p "$WORK/tpm"; printf 'FAKE-CERT\n' > "$WORK/tpm/device-id-cert.pem"
+
+set +e
+run_vfy DROPLET_VFY_TPM_DIR="$WORK/tpm" DROPLET_VFY_RAW_DEVICE=/dev/nvme0n1p3 \
+  > "$WORK/run3.log" 2>&1
+rc=$?
+set -e
+b="$(ls -dt "$WORK/out"/*/ | head -1)"
+"$PYBIN" - "$b/report.json" <<'PYEOF'
+import json, sys
+by = {c["id"]: c for c in json.load(open(sys.argv[1]))["checks"]}
+expect = {
+  "rest.luks.header": "PASS", "rest.luks.tpm-token": "PASS", "rest.luks.device": "PASS",
+  "rest.entropy": "PASS",
+  "transit.pg.plaintext-rejected": "PASS", "transit.pg.tls13": "PASS",
+  "transit.pg.scram": "PASS", "transit.redis.plaintext-refused": "PASS",
+  "transit.redis.tls": "PASS", "transit.mqtt.plaintext-closed": "PASS",
+  "transit.mqtt.mtls-required": "PASS", "transit.mesh.plain-http-refused": "PASS",
+  "transit.edge.tls-policy": "PASS",
+}
+bad = {k: (by[k]["status"], by[k]["detail"]) for k, v in expect.items() if by[k]["status"] != v}
+assert not bad, bad
+assert by["transit.pg.plaintext-rejected"]["evidence"], "probe captured no evidence"
+PYEOF
+[ $? -eq 0 ] && pass "faked encrypted box → hop checks PASS with evidence" \
+  || fail "posture world verdicts wrong (see $WORK/run3.log)"
+grep -q 'sslmode=disable' "$WORK/stub-calls.log" && pass "pg probe really passes sslmode=disable" \
+  || fail "pg probe never sent sslmode=disable"
+{ grep -q -- '-starttls postgres' "$WORK/stub-calls.log" || grep -q 's_client' "$WORK/stub-calls.log"; } \
+  && pass "pg TLS probe uses openssl s_client" || fail "no s_client call recorded"
+# Evidence files must exist and be hashed into the report
+"$PYBIN" -c '
+import json,sys
+r = json.load(open(sys.argv[1]))
+c = [x for x in r["checks"] if x["id"]=="transit.pg.plaintext-rejected"][0]
+assert c["evidence_sha256"], c
+' "$b/report.json" && pass "evidence hashes embedded per check" || fail "evidence_sha256 missing"
+
 echo ""
 printf "  Results: %d/%d passed\n" "$((TESTS - FAILURES))" "$TESTS"
 exit "$FAILURES"
