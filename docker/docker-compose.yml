@@ -98,6 +98,16 @@ services:
     environment:
       - PORT=3001
       - NODE_ENV=production
+      # WARP-318: FIPS activation env, keyed on the single DROPLET_FIPS_MODE
+      # knob. The dashboard (Next.js standalone) has no boot self-test, but its
+      # bundled OpenSSL must enter FIPS in lockstep with the other Node services
+      # so the orchestrator's /_/fips probe reflects a consistent posture. All
+      # empty/false by default → byte-identical to today; setup.sh --fips fills
+      # them from the knob.
+      - OPENSSL_CONF=${OPENSSL_CONF:-/etc/ssl/openssl.cnf}
+      - OPENSSL_MODULES=${OPENSSL_MODULES:-}
+      - NODE_OPTIONS=${NODE_OPTIONS:-}
+      - DROPLET_FIPS_REQUIRED=${DROPLET_FIPS_REQUIRED:-false}
     # WARP-535 (OTA foundations): liveness probe so the update agent's
     # future health-gated swap can watch this container. `node` is the
     # only runtime in the image (no wget/curl) — same rationale as the
@@ -215,16 +225,43 @@ services:
       # must equal the ai-gateway container's SERVICE_TOKEN_AI_GATEWAY (wired
       # below to the same source). The gateway had no inbound auth before this.
       - SERVICE_TOKEN_AI_GATEWAY=${SERVICE_TOKEN_AI_GATEWAY:-}
-      # The orchestrator's Dockerfile sets OPENSSL_CONF=/etc/ssl/openssl-fips.cnf
-      # for FIPS 140-3 compliance (WARP-229). That cipher set rejects the
-      # non-FIPS ciphers Postgres uses for its TLS handshake — Prisma's
-      # libpq then fails to open ANY connection with P1011: "library has
-      # no ciphers". The single-box compromise: override the openssl config
-      # back to the system default so Prisma can talk to the sibling-
-      # container Postgres over TLS. Production FIPS for orchestrator is
-      # a separate effort (split migration into init container without
-      # FIPS, or get Postgres to use FIPS-approved ciphers server-side).
+      # WARP-318: FIPS 140-3 per-customer activation, keyed on the single
+      # DROPLET_FIPS_MODE knob. Default OFF → the `:-` defaults below render
+      # today's exact byte-identical posture (empty MODULES/NODE_OPTIONS,
+      # DROPLET_FIPS_REQUIRED=false, OPENSSL_CONF=/etc/ssl/openssl.cnf). When
+      # setup.sh --fips writes OPENSSL_CONF=/etc/ssl/openssl-fips.cnf +
+      # OPENSSL_MODULES + NODE_OPTIONS=--openssl-shared-config +
+      # DROPLET_FIPS_REQUIRED=true into .env, the validated provider activates
+      # WITHOUT a rebuild (Node needs all three vars together — its bundled
+      # OpenSSL's MODULESDIR differs from Debian's; see the Dockerfiles).
+      #
+      # ┌─ P1011 orchestrator↔Postgres TLS clash — DECISION FOR ROMAIN ────────┐
+      # │ Under the FIPS openssl config the FIPS cipher set rejects the        │
+      # │ non-FIPS ciphers Postgres uses for its TLS handshake — Prisma's      │
+      # │ libpq then fails to open ANY connection with P1011: "library has no  │
+      # │ ciphers". The WARP-318 plan's decision (A): run the intra-compose    │
+      # │ orchestrator↔`db` hop PLAINTEXT (sslmode=disable) on the private     │
+      # │ container bridge, so the FIPS policy never touches the libpq         │
+      # │ handshake; the FIPS boundary auditors care about (edge TLS,          │
+      # │ data-at-rest, signatures) is unaffected.                             │
+      # │                                                                      │
+      # │ *** UNRESOLVED CROSS-CLUSTER TENSION ***                             │
+      # │ WARP-233 is enforcing Postgres TLS 1.3 + SCRAM and pins             │
+      # │ DATABASE_URL ...?sslmode=REQUIRE (the exact opposite). This PR       │
+      # │ deliberately does NOT edit the DATABASE_URL line (WARP-233 owns it)  │
+      # │ and does NOT force sslmode=disable — decision (A) needs Romain's     │
+      # │ sign-off AND reconciliation with WARP-233 at review. Until then the  │
+      # │ orchestrator keeps the system openssl config (below) so it always    │
+      # │ reaches Postgres; its "boots FIPS-enforcing" AC is descoped (see     │
+      # │ the skip in tests/integration/fips-stack.test.sh, WARP-317).         │
+      # │ To apply (A) once ratified — reversible, FIPS-path-scoped: append    │
+      # │ `?sslmode=disable` to the orchestrator/mcp-server DATABASE_URL ONLY  │
+      # │ when DROPLET_FIPS_MODE=1 (or drop server-side FIPS ciphers, opt B).  │
+      # └──────────────────────────────────────────────────────────────────────┘
       - OPENSSL_CONF=${OPENSSL_CONF:-/etc/ssl/openssl.cnf}
+      - OPENSSL_MODULES=${OPENSSL_MODULES:-}
+      - NODE_OPTIONS=${NODE_OPTIONS:-}
+      - DROPLET_FIPS_REQUIRED=${DROPLET_FIPS_REQUIRED:-false}
       # WARP-519: rag-eval HTTP trigger server. The orchestrator's
       # /api/admin/rag-eval/* route proxies ad-hoc RAGAS runs here. rag-eval
       # is in the `eval` Compose profile — when that profile is inactive the
@@ -452,6 +489,11 @@ services:
       # orchestrator documents. Pin the stock config until WARP-318
       # flips activation deliberately.
       - OPENSSL_CONF=${OPENSSL_CONF:-/etc/ssl/openssl.cnf}
+      # WARP-318: the two extra vars Node's bundled OpenSSL needs to enter FIPS
+      # (system ossl-modules dir + shared-config opt-in). Empty by default →
+      # byte-identical to today; setup.sh --fips populates them from the knob.
+      - OPENSSL_MODULES=${OPENSSL_MODULES:-}
+      - NODE_OPTIONS=${NODE_OPTIONS:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     expose:
@@ -681,6 +723,16 @@ services:
       # the rate limiter trusts. Empty default = trust nothing (key on the real
       # socket peer). Set RATE_LIMIT_TRUSTED_PROXIES to nginx's IP/subnet.
       - RATE_LIMIT_TRUSTED_PROXIES=${RATE_LIMIT_TRUSTED_PROXIES:-}
+      # WARP-318: FIPS activation for the Python stack. Python's `cryptography`
+      # / `_hashlib` use the SYSTEM Debian libcrypto, so OPENSSL_CONF alone
+      # activates FIPS — no MODULES/NODE_OPTIONS needed (that asymmetry is
+      # Node-only). Made explicit here (previously relied on .env) for symmetry
+      # with the other services. Empty/false by default → byte-identical to
+      # today; setup.sh --fips populates from the DROPLET_FIPS_MODE knob. The
+      # boot self-test (services/_shared/fips_selftest.py) enforces on
+      # DROPLET_FIPS_REQUIRED=true.
+      - OPENSSL_CONF=${OPENSSL_CONF:-/etc/ssl/openssl.cnf}
+      - DROPLET_FIPS_REQUIRED=${DROPLET_FIPS_REQUIRED:-false}
     volumes:
       - aikeys:/data/keys
     depends_on:
@@ -726,6 +778,17 @@ services:
       - MQTT_BROKER=mqtt://${MQTT_USER:-droplet}:${MQTT_PASSWORD}@broker:1883
       - NEXTCLOUD_DATA_ROOT=/data/nextcloud/data
       - AI_GATEWAY_GRPC_URL=ai-gateway:50051
+      # WARP-318: FIPS activation for the Python file-indexer (same shape as
+      # ai-gateway — OPENSSL_CONF alone; system libcrypto). Previously relied on
+      # .env with neither in `environment:`; made explicit for symmetry. Empty/
+      # false default → byte-identical to today. NOTE: like the orchestrator,
+      # this container opens a Prisma/libpq connection to `db`, so the P1011
+      # Postgres-TLS-under-FIPS clash (decision A, see the orchestrator comment)
+      # applies to it too — its FIPS enforcement is subject to the same
+      # unresolved WARP-233 reconciliation. The DATABASE_URL line above is left
+      # exactly as-is (WARP-233 owns it).
+      - OPENSSL_CONF=${OPENSSL_CONF:-/etc/ssl/openssl.cnf}
+      - DROPLET_FIPS_REQUIRED=${DROPLET_FIPS_REQUIRED:-false}
     depends_on:
       db:
         condition: service_healthy
@@ -978,6 +1041,12 @@ services:
       - EMAIL_KEY_PATH=/data/secrets/email.key
       - OUTBOUND_POLL_SECONDS=${OUTBOUND_POLL_SECONDS:-10}
       - ACCOUNT_REFRESH_SECONDS=${ACCOUNT_REFRESH_SECONDS:-300}
+      # WARP-318 note: this service's DROPLET_FIPS_REQUIRED default-on
+      # (`:-true`) predates the single knob and is left as-is. When the operator
+      # runs setup.sh --fips/--no-fips, apply_fips_mode writes an explicit
+      # DROPLET_FIPS_REQUIRED into .env that OVERRIDES this `:-true` default in
+      # both directions, so the single DROPLET_FIPS_MODE knob stays the source
+      # of truth. (Behavior unchanged for installs that never touch the flag.)
       - DROPLET_FIPS_REQUIRED=${DROPLET_FIPS_REQUIRED:-true}
     volumes:
       - ../data/secrets:/data/secrets:ro
