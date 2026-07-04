@@ -59,6 +59,38 @@ _validate_env() {
 }
 
 # =============================================================================
+# Build-list drift guard
+# =============================================================================
+# prepare_and_build's build_services list is hardcoded — jq is not a
+# guaranteed device dependency, so the honest enumeration (`compose config
+# --format json`) can't run on every box. Hardcoded lists drift: mcp-server,
+# device-identity-svc and email-indexer all gained build: sections in
+# docker/docker-compose.yml without landing in the list, so fresh provisions
+# built them lazily at first `up` instead of during setup's build phase.
+# This guard re-derives the buildable set wherever jq IS available — dev
+# machines and CI (setup-e2e runs setup.sh on every docker-compose.yml /
+# scripts change) — and prepare_and_build hard-fails on drift in CI only, so
+# the next drift dies in a PR, not on a fleet box mid-provision.
+# Sentinel-delimited for unit testing (tests/setup.test.sh Phase 12).
+# >>> compute_build_list_drift (build-list drift guard)
+# stdin: newline-separated buildable service names from the compose model.
+# $1:    comma-separated accounted-for names (build list + documented skips).
+# stdout: space-separated names from stdin that are not accounted for — the
+# drift. Pure bash (no docker/jq) so the tests exercise the shipping code.
+compute_build_list_drift() {
+  local accounted="$1" svc drift=""
+  while IFS= read -r svc; do
+    [ -z "$svc" ] && continue
+    case ",${accounted}," in
+      *",${svc},"*) ;;
+      *) drift="${drift:+${drift} }${svc}" ;;
+    esac
+  done
+  printf '%s' "$drift"
+}
+# <<< compute_build_list_drift (build-list drift guard)
+
+# =============================================================================
 # Build
 # =============================================================================
 prepare_and_build() {
@@ -139,8 +171,9 @@ prepare_and_build() {
   #
   # Keep this list in sync with the `build:` sections in
   # docker/docker-compose.yml. If you add a new buildable service,
-  # add it here too. (Frigate ships as a pulled image, not a local
-  # build — don't list it.)
+  # add it here too — the drift guard below (compute_build_list_drift)
+  # fails setup-e2e in CI when this list and the compose file disagree.
+  # (Frigate ships as a pulled image, not a local build — don't list it.)
   log_info "Building application containers..."
   local build_services=(
     # default profile
@@ -148,6 +181,12 @@ prepare_and_build() {
     web-dashboard
     ai-gateway
     routing
+    # build-list drift fix: mcp-server (streamable-HTTP MCP surface),
+    # device-identity-svc and email-indexer (below) all had build: sections
+    # but were never pre-built — fresh provisions built them lazily at the
+    # first `up` instead of during this build phase.
+    mcp-server
+    device-identity-svc
     # WARP-850: Matter controller host-network sidecar (BLE + LAN mDNS)
     matter-controller
     # full profile (hardware-facing services)
@@ -155,6 +194,8 @@ prepare_and_build() {
     switch
     camera-discovery
     oled-display
+    # full profile (email ingestion — same drift fix as mcp-server above)
+    email-indexer
     # linux profile (audio-facing services; the OS-specific gate keeps
     # macOS Docker Desktop from trying to mount /dev/snd which doesn't exist)
     voice-io
@@ -173,6 +214,42 @@ prepare_and_build() {
   case ",${active_profiles}," in
     *,eval,*) build_services+=(rag-eval) ;;
   esac
+
+  # --- Build-list drift guard (compute_build_list_drift above) --------------
+  # Deliberately NOT in build_services (accounted for here, not built):
+  #   rag-eval    — appended above only when the eval profile is active
+  #   openwrt     — single-box router image; start_stack's `up` builds it on
+  #                 the one shape whose profiles activate it
+  #   ops-console — operator-workstation `ops` profile, never provisioned
+  #   fleet-agent — opt-in `telemetry` profile (fleet portal plane)
+  # Removing an exclusion here must be mirrored in tests/setup.test.sh
+  # Phase 12 (BUILD_LIST_EXCLUSIONS).
+  if command -v jq >/dev/null 2>&1; then
+    # Activate every profile the compose file declares so the enumeration
+    # sees ALL buildable services regardless of this box's shape. The
+    # `${arr[@]+...}` expansion keeps `set -u` happy on bash 3.2 (macOS dev)
+    # if the profile listing comes back empty.
+    local _drift_profile_flags=() _drift_profile _drift_buildable _drift
+    while IFS= read -r _drift_profile; do
+      [ -n "$_drift_profile" ] && _drift_profile_flags+=(--profile "$_drift_profile")
+    done < <(run_docker_compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" config --profiles 2>/dev/null || true)
+    # `|| true` throughout: the guard is best-effort — an enumeration failure
+    # must never block a provision; CI's real builds still gate correctness.
+    _drift_buildable=$(run_docker_compose ${_drift_profile_flags[@]+"${_drift_profile_flags[@]}"} \
+        --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" config --format json 2>/dev/null \
+      | jq -r '.services | to_entries[] | select(.value.build) | .key' 2>/dev/null || true)
+    _drift=$(compute_build_list_drift \
+      "$(IFS=,; printf '%s' "${build_services[*]}"),rag-eval,openwrt,ops-console,fleet-agent" \
+      <<<"$_drift_buildable")
+    if [ -n "$_drift" ]; then
+      if [ -n "${CI:-}" ]; then
+        log_error "docker-compose.yml has buildable services this build phase doesn't know: ${_drift}"
+        log_error "Add them to build_services in scripts/lib/compose.sh, or document the exclusion beside the drift guard."
+        return 1
+      fi
+      log_warn "build-list drift: ${_drift} missing from build_services — they will build lazily at 'up'; sync scripts/lib/compose.sh"
+    fi
+  fi
 
   # All profiles that carry a buildable service in the list above must be active
   # so compose can see every one. Without --profile linux, `build voice-io`
