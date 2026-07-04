@@ -154,6 +154,12 @@ export interface ChatRequest {
   /** WARP-845 — file a newly-created conversation under this project
    * (first turn only; ownership-validated server-side). */
   projectId?: string;
+  /** WARP-1041 — explicit tool allow-list for the orchestrator's agent
+   * loop. `[]` advertises ZERO tool schemas (the wizard's curated sample
+   * probes need none — cuts ~11k tokens of prefill); OMIT the key
+   * entirely to get the role-default registry. The server distinguishes
+   * `[]` from absent, so only send `[]` when zero tools is meant. */
+  allowed_tools?: string[];
 }
 
 export interface ModelInfo {
