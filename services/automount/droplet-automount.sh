@@ -25,6 +25,11 @@ STATE_DIR="${DROPLET_AUTOMOUNT_STATE_DIR:-/var/lib/droplet-automount}"
 STATE_FILE="${STATE_DIR}/mounts.json"
 LOG_FILE="${DROPLET_AUTOMOUNT_LOG:-/var/log/droplet-automount.log}"
 
+# WARP-232 seams (test-only overrides; production uses the defaults).
+USB_ENROLL="${DROPLET_AUTOMOUNT_USB_ENROLL:-/usr/local/sbin/droplet-usb-enroll.sh}"
+SYSTEMD_CRYPTSETUP="${DROPLET_SYSTEMD_CRYPTSETUP_BIN:-/usr/lib/systemd/systemd-cryptsetup}"
+CRYPTSETUP="${DROPLET_CRYPTSETUP_BIN:-cryptsetup}"
+
 NEXTCLOUD_CONTAINER="${NEXTCLOUD_CONTAINER:-docker-nextcloud-1}"
 NEXTCLOUD_USER="${NEXTCLOUD_USER:-admin}"
 BRIDGE_URL="${BRIDGE_URL:-http://127.0.0.1:9090}"
@@ -103,11 +108,60 @@ notify_bridge() {
   if [ -n "${BRIDGE_AUTH_TOKEN:-}" ]; then
     auth_args=(-H "X-Droplet-Auth: ${BRIDGE_AUTH_TOKEN}")
   fi
-  curl -s -X POST -m 3 "${BRIDGE_URL}/drives/changed" \
-    -H 'Content-Type: application/json' \
-    "${auth_args[@]}" \
-    -d "{\"action\":\"$1\",\"device\":\"$2\",\"mount\":\"$3\"}" \
-    >/dev/null 2>&1 || true
+  # `${auth_args[@]}` on an EMPTY array trips `set -u` under bash < 4.4 (the
+  # macOS 3.2 test host). Guard the expansion so the token-less call still fires
+  # (the branch is identical; only the array plumbing differs by bash version).
+  if [ "${#auth_args[@]}" -gt 0 ]; then
+    curl -s -X POST -m 3 "${BRIDGE_URL}/drives/changed" \
+      -H 'Content-Type: application/json' \
+      "${auth_args[@]}" \
+      -d "{\"action\":\"$1\",\"device\":\"$2\",\"mount\":\"$3\"}" \
+      >/dev/null 2>&1 || true
+  else
+    curl -s -X POST -m 3 "${BRIDGE_URL}/drives/changed" \
+      -H 'Content-Type: application/json' \
+      -d "{\"action\":\"$1\",\"device\":\"$2\",\"mount\":\"$3\"}" \
+      >/dev/null 2>&1 || true
+  fi
+}
+
+# WARP-232: try to unlock a droplet-enrolled LUKS2 drive. Sets the global
+# UNLOCKED_MAPPER (/dev/mapper/droplet-usb-<short-uuid>) and returns 0 on
+# success; returns 1 for a foreign LUKS container (no droplet token, no
+# derivable slot) so the caller can skip it cleanly.
+UNLOCKED_MAPPER=""
+try_unlock_droplet_luks() {
+  local dev="$1"
+  local luks_uuid short mapper
+  luks_uuid="$(blkid -o value -s UUID "$dev" 2>/dev/null || true)"
+  luks_uuid="${luks_uuid//$'\n'/}"
+  short="$(printf '%s' "$luks_uuid" | head -c 8)"
+  [ -z "$short" ] && short="usb"
+  mapper="droplet-usb-${short}"
+
+  # (1) droplet-enrolled? The LUKS2 header carries a systemd-tpm2 token. Attach
+  #     via systemd-cryptsetup (uses the TPM keyslot, no passphrase).
+  if "$CRYPTSETUP" luksDump "$dev" 2>/dev/null | grep -qi 'systemd-tpm2'; then
+    if "$SYSTEMD_CRYPTSETUP" attach "$mapper" "$dev" - tpm2-device=auto 2>/dev/null; then
+      UNLOCKED_MAPPER="/dev/mapper/$mapper"
+      return 0
+    fi
+  fi
+
+  # (2) derived-passphrase fallback: an enrolled drive whose TPM keyslot no
+  #     longer opens (TPM loss) still has the on-box-derivable recovery slot.
+  if [ -x "$USB_ENROLL" ] || command -v "$USB_ENROLL" >/dev/null 2>&1; then
+    local pass
+    pass="$("$USB_ENROLL" derive "$luks_uuid" 2>/dev/null | head -1 || true)"
+    if [ -n "$pass" ] \
+       && printf '%s' "$pass" | "$CRYPTSETUP" open --key-file - "$dev" "$mapper" 2>/dev/null; then
+      UNLOCKED_MAPPER="/dev/mapper/$mapper"
+      return 0
+    fi
+  fi
+
+  # Foreign LUKS: not droplet-enrolled, no derivable slot.
+  return 1
 }
 
 nc_occ() {
@@ -154,10 +208,13 @@ nextcloud_remove() {
 }
 
 state_add() {
-  local device="$1" mount="$2" label="$3" uuid="$4"
-  python3 - "$STATE_FILE" "$device" "$mount" "$label" "$uuid" <<'PYEOF'
+  # WARP-232: 6th arg `trust` — "enrolled" | "trusted" | "untrusted-ro" — so
+  # the device-bridge/dashboard can surface "read-only until you encrypt or
+  # trust it". Defaults to "trusted" for backward compatibility.
+  local device="$1" mount="$2" label="$3" uuid="$4" trust="${5:-trusted}"
+  python3 - "$STATE_FILE" "$device" "$mount" "$label" "$uuid" "$trust" <<'PYEOF'
 import json, os, sys
-path, device, mount, label, uuid = sys.argv[1:6]
+path, device, mount, label, uuid, trust = sys.argv[1:7]
 try:
     with open(path) as f: state = json.load(f)
 except Exception:
@@ -165,6 +222,7 @@ except Exception:
 state["mounts"] = [m for m in state["mounts"] if m.get("device") != device]
 state["mounts"].append({
     "device": device, "mount": mount, "label": label, "uuid": uuid,
+    "trust": trust,
 })
 os.makedirs(os.path.dirname(path), exist_ok=True)
 with open(path, "w") as f: json.dump(state, f, indent=2)
@@ -213,8 +271,26 @@ case "$ACTION" in
     # own subsystem (mdadm / LVM / cryptsetup / swapon); attempting `mount`
     # on them fails and leaves a failed droplet-automount@ unit on every
     # boot of a box with a pool. Skip cleanly instead.
+    # TRUST classifies the mount for the dashboard: enrolled (LUKS we own),
+    # trusted (plain drive on the trust list → rw), untrusted-ro (plain drive
+    # we don't know → read-only). Set below; defaults to trusted for the
+    # historical plain-drive path.
+    TRUST="trusted"
     case "$TYPE" in
-      linux_raid_member|LVM2_member|crypto_LUKS|swap)
+      crypto_LUKS)
+        # WARP-232: droplet-enrolled LUKS2 drives unlock here; everything else
+        # (foreign LUKS) keeps the clean skip. RAID/LVM/swap fall through to the
+        # next case (managed by their own subsystem).
+        if try_unlock_droplet_luks "$DEVICE"; then
+          DEVICE="$UNLOCKED_MAPPER"           # fall through to the mount path
+          TYPE="$(blkid -o value -s TYPE "$DEVICE" 2>/dev/null || echo ext4)"
+          TRUST="enrolled"
+        else
+          log "skip $DEVICE (foreign LUKS container — not droplet-enrolled)"
+          exit 0
+        fi
+        ;;
+      linux_raid_member|LVM2_member|swap)
         log "skip $DEVICE (signature $TYPE — managed by its own subsystem, not mountable)"
         exit 0 ;;
     esac
@@ -233,6 +309,27 @@ case "$ACTION" in
     fi
     MOUNT="${MOUNT_BASE}/${NAME}"
     mkdir -p "$MOUNT"
+
+    # WARP-232 trust decision for PLAIN filesystems (enrolled LUKS is already
+    # TRUST=enrolled from the signature switch). A plain drive is rw only if
+    # its UUID is on the operator's trust list; otherwise it mounts read-only
+    # so an unknown stick can't be written to (and the dashboard can offer
+    # "encrypt" / "trust"). Enrolled drives keep TRUST=enrolled.
+    if [ "$TRUST" != "enrolled" ]; then
+      TRUSTED_LIST="${STATE_DIR}/trusted.list"
+      if [ -n "${UUID:-}" ] && [ -f "$TRUSTED_LIST" ] \
+         && grep -qxF "$UUID" "$TRUSTED_LIST" 2>/dev/null; then
+        TRUST="trusted"
+      else
+        TRUST="untrusted-ro"
+      fi
+    fi
+    # rw for enrolled/trusted drives, ro for untrusted ones.
+    if [ "$TRUST" = "untrusted-ro" ]; then
+      RW_MODE="ro"
+    else
+      RW_MODE="rw"
+    fi
 
     # If udisks or something else already mounted this device elsewhere
     # (common on desktop-oriented distros), unmount it first so we can
@@ -263,22 +360,23 @@ case "$ACTION" in
     else
       # Permissive options for FAT/exFAT/NTFS (common on USB drives).
       # ext4/xfs/btrfs will reject `uid=` options, so branch.
+      # WARP-232: $RW_MODE is ro for untrusted plain drives, rw otherwise.
       case "$TYPE" in
         vfat|exfat|ntfs|msdos)
-          mount -o "rw,noatime,uid=1000,gid=1000,umask=0002,nofail" \
+          mount -o "${RW_MODE},noatime,uid=1000,gid=1000,umask=0002,nofail" \
             "$DEVICE" "$MOUNT" \
             || { log "mount failed for $DEVICE ($TYPE) -> $MOUNT"; rmdir "$MOUNT" 2>/dev/null || true; exit 1; }
           ;;
         *)
-          mount -o "rw,noatime,nofail" "$DEVICE" "$MOUNT" \
+          mount -o "${RW_MODE},noatime,nofail" "$DEVICE" "$MOUNT" \
             || { log "mount failed for $DEVICE ($TYPE) -> $MOUNT"; rmdir "$MOUNT" 2>/dev/null || true; exit 1; }
-          chown -R 1000:1000 "$MOUNT" 2>/dev/null || true
+          [ "$RW_MODE" = "rw" ] && chown -R 1000:1000 "$MOUNT" 2>/dev/null || true
           ;;
       esac
-      log "mounted $DEVICE ($TYPE, label=$LABEL) -> $MOUNT"
+      log "mounted $DEVICE ($TYPE, label=$LABEL, trust=$TRUST) -> $MOUNT"
     fi
 
-    state_add "$DEVICE" "$MOUNT" "$LABEL" "${UUID:-}"
+    state_add "$DEVICE" "$MOUNT" "$LABEL" "${UUID:-}" "$TRUST"
     if [ "$NEXTCLOUD_AUTO_REGISTER" = "1" ]; then
       nextcloud_add "$MOUNT" "$NAME" || log "nextcloud registration skipped"
     else
