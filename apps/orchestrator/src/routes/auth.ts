@@ -2747,6 +2747,17 @@ export function createProtectedAuthRouter(
           return;
         }
         const revoked = await revokeUserSessions(row.id);
+        // WARP-237: admin session revocation is a mandatory-emit
+        // privileged action.
+        await recordActivity({
+          kind: "auth",
+          severity: "warn",
+          sourceIcon: "shield-off",
+          what: "Sessions revoked",
+          sub: `for user ${req.params.username}`,
+          refs: { targetUserId: row.id, username: req.params.username, revoked },
+          actor: actorFromRequest(req),
+        });
         res.json({ status: "ok", username: req.params.username, revoked });
       } catch (err) {
         next(err);

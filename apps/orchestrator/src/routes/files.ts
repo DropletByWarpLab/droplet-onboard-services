@@ -46,6 +46,8 @@ import { config } from "../config.js";
 import type { FileEntryInfo } from "../types/index.js";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import { isUpstreamUnavailable } from "../lib/upstream-unavailable.js";
+import { recordActivity } from "../services/activity.singleton.js";
+import { actorFromRequest } from "../services/activity.service.js";
 
 const logger = pino({ name: "files-route" });
 
@@ -940,6 +942,19 @@ export function createFilesRouter(prisma: PrismaClient): Router {
         return;
       }
 
+      // WARP-237: file-level data-access record (chunk-level RAG reads are
+      // deferred — see the WARP-237 gap analysis). Fire-and-forget so the
+      // byte stream is not delayed by the append lock.
+      void recordActivity({
+        kind: "file",
+        severity: "info",
+        sourceIcon: "download",
+        what: "File downloaded",
+        sub: filePath,
+        refs: { path: filePath },
+        actor: actorFromRequest(req),
+      });
+
       res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
       res.setHeader(
         "Content-Type",
@@ -1087,6 +1102,25 @@ export function createFilesRouter(prisma: PrismaClient): Router {
         password: parsed.data.password,
         note: parsed.data.note,
         shareWith: parsed.data.shareWith,
+      });
+
+      // WARP-237: share creation is a mandatory-emit privileged action.
+      // NEVER put the share password in refs.
+      await recordActivity({
+        kind: "file",
+        severity: "ok",
+        sourceIcon: "share-2",
+        what: "Share created",
+        sub: parsed.data.path,
+        refs: {
+          path: parsed.data.path,
+          shareType: parsed.data.shareType,
+          permissions: parsed.data.permissions,
+          shareWith: parsed.data.shareWith ?? null,
+          expireDate: parsed.data.expireDate ?? null,
+          passwordProtected: parsed.data.password !== undefined,
+        },
+        actor: actorFromRequest(req),
       });
 
       res.json(share);
