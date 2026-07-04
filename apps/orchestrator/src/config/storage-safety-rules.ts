@@ -25,6 +25,9 @@ export const STORAGE_TIER_3_OPERATIONS = new Set([
   // WARP-662: adopt (wipe + reformat + mount) a previously-used disk. Equally
   // destructive — owner-only, AI-blocked, single-use confirm token.
   "drive_adopt",
+  // WARP-1048: reclaim a pool-member disk — detach it from its md array then
+  // adopt it. Equally destructive; same owner-only / AI-blocked / confirm gate.
+  "drive_reclaim",
 ]);
 
 /** Confirm token expiry — short, like the network/smart-home tokens. */

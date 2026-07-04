@@ -45,6 +45,8 @@ const requestDestroyPoolMock = vi.fn();
 const confirmPoolCommandMock = vi.fn();
 // WARP-662 — adopt (wipe + reformat + mount) a previously-used drive.
 const requestAdoptDriveMock = vi.fn();
+// WARP-1048 — reclaim a pool-member drive (detach from md, then adopt).
+const reclaimDriveMock = vi.fn();
 // WARP-936 — the step now queries pools so an existing array isn't silently
 // ignored during setup. Default: none (the historic shape).
 const fetchPoolsMock = vi.fn(
@@ -106,6 +108,7 @@ vi.mock("@/lib/api", () => ({
   requestDestroyPool: (...a: unknown[]) => requestDestroyPoolMock(...a),
   confirmPoolCommand: (...a: unknown[]) => confirmPoolCommandMock(...a),
   requestAdoptDrive: (...a: unknown[]) => requestAdoptDriveMock(...a),
+  reclaimDrive: (...a: unknown[]) => reclaimDriveMock(...a),
   fetchDiscoveredCameras: vi.fn(async () => []),
   acceptDiscoveredCamera: vi.fn(),
   fetchVpnStatus: vi.fn(async () => ({
@@ -979,6 +982,7 @@ describe("setup Storage step — unmounted disks + existing pool (WARP-936)", ()
   beforeEach(() => {
     fetchDrivesMock.mockReset();
     requestAdoptDriveMock.mockReset();
+    reclaimDriveMock.mockReset();
     confirmPoolCommandMock.mockReset();
     requestCreatePoolMock.mockReset();
     updateDriveLabelMock.mockReset();
@@ -1028,7 +1032,7 @@ describe("setup Storage step — unmounted disks + existing pool (WARP-936)", ()
     );
   });
 
-  it("routes pool-member disks to the pool — never an individual adopt", async () => {
+  it("never offers a plain adopt on a pool member (adopt would EBUSY)", async () => {
     fetchDrivesMock.mockResolvedValue({
       drives: [],
       count: 0,
@@ -1044,9 +1048,66 @@ describe("setup Storage step — unmounted disks + existing pool (WARP-936)", ()
     await act(async () => {
       fireEvent.click(adoptSwitch());
     });
-    // No destructive per-disk button for md members; honest routing copy.
+    // A member is reclaimed (detach-then-adopt), never adopted directly —
+    // wipefs on an md-held member EBUSYs. So no "Erase & adopt", and adopt is
+    // never wired for it.
     expect(screen.queryByRole("button", { name: /erase & adopt/i })).toBeNull();
-    expect(screen.getAllByText(/in your storage pool/i).length).toBeGreaterThan(0);
+    expect(requestAdoptDriveMock).not.toHaveBeenCalled();
+  });
+
+  // WARP-1048 — a pool member is no longer a dead-end: it gets a Reclaim
+  // action that detaches it from the array first, then adopts it. The request
+  // carries the owning md so the host script can break it out.
+  it("offers Reclaim on a pool-member disk and wires the md through the gated flow", async () => {
+    fetchDrivesMock.mockResolvedValue({
+      drives: [],
+      count: 0,
+      disks: [
+        { name: "sda", size_bytes: 1_800_000_000_000, state: "pool_member", md: "md127", fstype: "linux_raid_member" },
+        { name: "sdb", size_bytes: 1_800_000_000_000, state: "pool_member", md: "md127", fstype: "linux_raid_member" },
+      ],
+    });
+    fetchPoolsMock.mockResolvedValue({ pools: [MD127], count: 1 });
+    reclaimDriveMock.mockResolvedValue({
+      confirmationToken: "tok-reclaim",
+      service: "drive_reclaim",
+      resourceId: "sda",
+    });
+    confirmPoolCommandMock.mockResolvedValue({ ok: true });
+    render(<SetupPage />);
+    await advanceToStorage();
+
+    await act(async () => {
+      fireEvent.click(adoptSwitch());
+    });
+    const reclaimButtons = screen.getAllByRole("button", { name: /^reclaim$/i });
+    expect(reclaimButtons.length).toBeGreaterThan(0);
+    await act(async () => {
+      fireEvent.click(reclaimButtons[0]);
+    });
+    expect(reclaimDriveMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        device: "sda",
+        md: "md127",
+        confirmPhrase: "ERASE sda",
+      }),
+    );
+
+    // Confirm inside the destructive dialog → executes via the shared gated confirm.
+    const dialog = screen.getByRole("dialog");
+    await act(async () => {
+      fireEvent.click(
+        within(dialog).getByRole("button", { name: /reclaim/i }),
+      );
+    });
+    expect(confirmPoolCommandMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        confirmationToken: "tok-reclaim",
+        service: "drive_reclaim",
+        resourceId: "sda",
+      }),
+    );
+    // A member is reclaimed, never plain-adopted.
     expect(requestAdoptDriveMock).not.toHaveBeenCalled();
   });
 
