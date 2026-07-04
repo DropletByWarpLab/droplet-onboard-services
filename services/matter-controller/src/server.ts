@@ -37,7 +37,11 @@ import express, {
   type Response,
 } from "express";
 import pino from "pino";
-import type { MatterControllerCore } from "./controller.js";
+import {
+  resolveWifiNetwork,
+  type MatterControllerCore,
+  type WifiProvisioningOptions,
+} from "./controller.js";
 import type { BleRegistrationResult } from "./ble.js";
 import type { SidecarErrorBody } from "./types.js";
 
@@ -49,6 +53,14 @@ export interface AppDeps {
   authToken: string;
   /** Computed ONCE at process start by registerBleAtProcessStart. */
   capabilities: BleRegistrationResult;
+  /**
+   * WARP-1035: the SAME Wi-Fi knobs handed to the core (WARP-895).
+   * /capabilities re-runs resolveWifiNetwork on them per request, so
+   * `wifiProvisioning` always mirrors what the next commission would do
+   * — including a per-box AP PSK that landed at /etc/droplet/ap-psk
+   * AFTER this process started (first-boot ordering, no restart).
+   */
+  wifiOptions: WifiProvisioningOptions;
 }
 
 /** Matter node IDs are uint64 — 18446744073709551615 is the ceiling. */
@@ -78,7 +90,7 @@ function constantTimeMatch(expected: string, got: string): boolean {
 }
 
 export function createApp(deps: AppDeps): Express {
-  const { core, authToken, capabilities } = deps;
+  const { core, authToken, capabilities, wifiOptions } = deps;
   const app = express();
   app.use(express.json());
 
@@ -115,11 +127,19 @@ export function createApp(deps: AppDeps): Express {
 
   // --- Capabilities (answers before/without controller init — the
   // dashboard wizard needs the BLE answer while the controller may
-  // still be booting; same contract as WARP-851's orchestrator route) ---
-  app.get("/capabilities", (_req, res) => {
+  // still be booting; same contract as WARP-851's orchestrator route).
+  // WARP-1035: additive fields only — never rename bleCommissioning;
+  // its shape is pinned by WARP-851 tests here, in the orchestrator
+  // service, and in the dashboard api client. ---
+  app.get("/capabilities", async (_req, res) => {
+    // Request-time resolution (file > env) — same helper the commission
+    // path uses, so this answer can never drift from real behaviour.
+    const wifiNetwork = await resolveWifiNetwork(wifiOptions);
     res.json({
       bleCommissioning: capabilities.bleCommissioning,
       reason: capabilities.reason,
+      wifiProvisioning: wifiNetwork !== undefined,
+      apSsid: (wifiOptions.wifiSsid ?? "").trim() || null,
     });
   });
 

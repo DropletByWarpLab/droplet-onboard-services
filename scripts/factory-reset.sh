@@ -319,8 +319,38 @@ if [ -n "$_DEREGISTER_FQDN" ] || [ -n "$_DEREGISTER_DEVICE_ID" ]; then
     # blocks forever here and never reaches Phase 1 `down -v`. A `timeout` exit
     # of 124 (deadline hit) is treated exactly like any other failure: log a warn
     # and PROCEED to the wipe. The whole step stays best-effort + NON-FATAL.
-    if timeout 90 $DC -f "$COMPOSE_FILE" "${_dereg_env_flag_args[@]}" exec -T orchestrator \
-         npm run -s "$_hq_reset_cmd" >/dev/null 2>&1; then
+    # WARP-1040 — capture the CLI output instead of discarding it. The
+    # tls-release CLI ALWAYS exits 0 (reset-must-complete contract), so its exit
+    # code says nothing about whether HQ actually freed the name; it prints a
+    # machine-readable "tls-release: result=ok|skipped|failed" sentinel instead
+    # and we branch the operator log on THAT. Still strictly NON-FATAL: the
+    # capture swallows the exit code (`|| _hq_reset_status=$?`), captured stderr
+    # goes into the variable (never the terminal's error path), and a missing /
+    # unparseable sentinel simply logs the warn — nothing here can abort a reset.
+    _hq_reset_status=0
+    _hq_reset_output="$(timeout 90 $DC -f "$COMPOSE_FILE" "${_dereg_env_flag_args[@]}" exec -T orchestrator \
+         npm run -s "$_hq_reset_cmd" 2>&1)" || _hq_reset_status=$?
+    if [ "$_hq_reset_cmd" = "tls-release" ]; then
+      # here-string, NOT a `printf | grep -q` pipeline — under `set -o pipefail`
+      # an early-exiting grep can SIGPIPE the writer into a false negative.
+      # Sentinels are ^-anchored: the captured output also carries pino JSON
+      # logs (which serialize HQ error bodies), so an unanchored match could
+      # false-positive on an HQ error message that merely CONTAINS the text.
+      # The CLI always writes the sentinel at column 0.
+      if grep -q '^tls-release: result=ok' <<< "$_hq_reset_output"; then
+        log_success "HQ confirmed the signed name ${_hq_reset_verb} for ${_DEREGISTER_REAL_DEVICE_ID}"
+      elif grep -q '^tls-release: result=skipped' <<< "$_hq_reset_output"; then
+        # HQ_ISSUANCE_URL was unset INSIDE the container even though the
+        # host-side _hq_url guard passed (e.g. shell-env-only config with an
+        # .env lacking the var). There is no HQ to hold the name — do not
+        # print the misleading "may still be reserved" hint.
+        log_warn "HQ release skipped — HQ_ISSUANCE_URL is not configured inside the orchestrator container (nothing to release at HQ; non-fatal, the reset continues)"
+      else
+        _reserved_box_name="$(grep -E '^DROPLET_BOX_NAME=' "$REPO_ROOT/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' || true)"
+        log_warn "HQ did NOT confirm the name release (non-fatal — timed out, HQ/sidecar down, or HQ rejected it; the reset continues)"
+        log_warn "The box name${_reserved_box_name:+ '${_reserved_box_name}'} may still be reserved at HQ — it frees when this box re-claims a name, or via an HQ admin release"
+      fi
+    elif [ "$_hq_reset_status" -eq 0 ]; then
       log_success "Sent signed HQ ${_hq_reset_verb} for ${_DEREGISTER_REAL_DEVICE_ID}"
     else
       log_warn "Could not run signed HQ ${_hq_reset_cmd} (non-fatal — timed out or HQ/sidecar down; HQ reaps stale state server-side)"

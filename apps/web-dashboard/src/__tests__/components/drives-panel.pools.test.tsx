@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 
 const { useDrivesMock, usePoolsMock, toastMock } = vi.hoisted(() => ({
   useDrivesMock: vi.fn(),
@@ -20,6 +20,16 @@ vi.mock("@/lib/api", () => ({
   ejectDrive: vi.fn(),
   rescanDrives: vi.fn(),
   updateDriveLabel: vi.fn(),
+  // WARP-936 — adopt/format flows on the panel, plus the api names
+  // StorageStep (whose helpers DrivesPanel imports) pulls at module load.
+  adoptDrive: vi.fn(),
+  confirmStorageCommand: vi.fn(),
+  requestFormatPool: vi.fn(),
+  fetchDrives: vi.fn(),
+  fetchPools: vi.fn(),
+  requestCreatePool: vi.fn(),
+  confirmPoolCommand: vi.fn(),
+  requestAdoptDrive: vi.fn(),
 }));
 
 import { DrivesPanel } from "@/components/FileManager/DrivesPanel";
@@ -160,7 +170,9 @@ describe("DrivesPanel — real pools replace the fake pooled sum (BUG-3)", () =>
     const poolsList = screen.getByRole("list", { name: /storage pools/i });
     expect(poolsList).toHaveTextContent(/storage pool/i);
     expect(poolsList).not.toHaveTextContent(/\bmd0\b/);
-    // Singular member-count copy.
-    expect(poolsList).toHaveTextContent(/1 drive\b/i);
+    // Asserted on the chip element itself: toHaveTextContent joins
+    // siblings without spaces, so the WARP-936 format-footer copy right
+    // after the chip would defeat a word-boundary regex on the joined string.
+    expect(within(poolsList).getByText(/^1 drive$/i)).toBeInTheDocument();
   });
 });

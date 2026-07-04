@@ -151,15 +151,30 @@ export interface MatterControllerCoreOptions {
 }
 
 /**
+ * WARP-1035: the Wi-Fi knobs shared by the commissioning path and the
+ * /capabilities route — both call resolveWifiNetwork on the same values
+ * so the wizard's `wifiProvisioning` answer can never drift from what a
+ * commission actually does.
+ */
+export type WifiProvisioningOptions = Pick<
+  MatterControllerCoreOptions,
+  "wifiSsid" | "wifiPsk" | "wifiPskFile"
+>;
+
+/**
  * WARP-895: resolve the operational Wi-Fi network a BLE-first device is
  * handed during commissioning. PSK source order: the file
  * (`options.wifiPskFile` — the per-box AP PSK provisioned by
  * droplet-openwrt-attach), then `options.wifiPsk`. Returns undefined —
  * commissioning then proceeds on-network-only, exactly as before WARP-895
  * — when no SSID or no PSK is available.
+ *
+ * Exported (WARP-1035) so server.ts /capabilities can compute
+ * `wifiProvisioning` per request; the file re-read means a per-box PSK
+ * that lands after the sidecar started flips the answer with no restart.
  */
-async function resolveWifiNetwork(
-  options: MatterControllerCoreOptions,
+export async function resolveWifiNetwork(
+  options: WifiProvisioningOptions,
 ): Promise<{ wifiSsid: string; wifiCredentials: string } | undefined> {
   const wifiSsid = (options.wifiSsid ?? "").trim();
   if (!wifiSsid) return undefined;

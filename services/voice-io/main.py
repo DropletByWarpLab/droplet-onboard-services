@@ -33,6 +33,8 @@ from voice.devices import (
 )
 from voice.pipeline import (
     DEFAULT_DEBOUNCE_S,
+    DEFAULT_FLATLINE_DBFS,
+    DEFAULT_FLATLINE_WINDOW_S,
     DEFAULT_INPUT_DOWNMIX,
     DEFAULT_INPUT_GAIN,
     DEFAULT_POST_SPEAK_COOLDOWN_S,
@@ -110,6 +112,18 @@ VOICE_INPUT_DOWNMIX = (
 VOICE_INPUT_GAIN = float(
     (os.environ.get("VOICE_INPUT_GAIN") or "").strip()
     or str(DEFAULT_INPUT_GAIN),
+)
+# Flatline watchdog (WARP-1037) — see pipeline.py's DEFAULT_FLATLINE_*
+# docstrings. Window in seconds of at/near-digital-zero input while
+# state=listening before /health degrades (0 disables); dBFS level
+# below which a frame counts as "no signal". Empty env = default.
+VOICE_FLATLINE_WINDOW_S = float(
+    (os.environ.get("VOICE_FLATLINE_WINDOW_S") or "").strip()
+    or str(DEFAULT_FLATLINE_WINDOW_S),
+)
+VOICE_FLATLINE_DBFS = float(
+    (os.environ.get("VOICE_FLATLINE_DBFS") or "").strip()
+    or str(DEFAULT_FLATLINE_DBFS),
 )
 
 app = FastAPI(title="voice-io", version="0.1.0")
@@ -242,6 +256,8 @@ async def startup() -> None:
             resolve_input_device=_reresolve_input_index,
             input_downmix=VOICE_INPUT_DOWNMIX,
             input_gain=VOICE_INPUT_GAIN,
+            flatline_window_s=VOICE_FLATLINE_WINDOW_S,
+            flatline_dbfs=VOICE_FLATLINE_DBFS,
         )
         await asyncio.to_thread(_pipeline.start)
     except Exception as exc:
@@ -277,6 +293,15 @@ class HealthResponse(BaseModel):
     # at startup. Wake + STT still work when this is false, but no
     # spoken replies happen.
     llmLoaded: bool = False
+    # WARP-1037. Rolling input RMS (dBFS) measured inside the pipeline's
+    # frame handler + wall time of the last frame carrying real signal.
+    # `inputFlatlined` is the wedged-DSP signature: input at/near digital
+    # zero for the whole flatline window while state=listening — the
+    # health() handler degrades to 503 on it (the stream is open but the
+    # ReSpeaker's XMOS DSP is delivering pure silence: listening, deaf).
+    inputRmsDbfs: Optional[float] = None
+    lastAudioAt: Optional[float] = None
+    inputFlatlined: bool = False
 
 
 class VoiceStatusResponse(BaseModel):
@@ -314,6 +339,15 @@ class VoiceStatusResponse(BaseModel):
     # was reachable at startup. The dashboard surfaces this so a
     # degraded LLM is visible.
     llm_loaded: bool = False
+    # Input level (WARP-1037). `input_rms_dbfs` is a rolling RMS over the
+    # last ~2 s of mic frames — measured inside the pipeline's own frame
+    # handler, never via a second stream on the same hw device (ALSA
+    # EBUSY). The wizard's live level meter rides this field.
+    # `last_audio_at` is when a frame last carried real signal;
+    # `input_flatlined` is the wedged-DSP flag (see /health).
+    input_rms_dbfs: Optional[float] = None
+    last_audio_at: Optional[float] = None
+    input_flatlined: bool = False
 
 
 class SayRequest(BaseModel):
@@ -353,6 +387,9 @@ def health(response: Response) -> HealthResponse:
     stt_loaded = False
     tts_loaded = False
     llm_loaded = False
+    input_rms_dbfs: Optional[float] = None
+    last_audio_at: Optional[float] = None
+    input_flatlined = False
     if _pipeline is not None:
         # Cheap atomic read; no I/O on the pipeline thread.
         s = _pipeline.status()
@@ -361,6 +398,9 @@ def health(response: Response) -> HealthResponse:
         stt_loaded = s.stt_loaded
         tts_loaded = s.tts_loaded
         llm_loaded = s.llm_loaded
+        input_rms_dbfs = s.input_rms_dbfs
+        last_audio_at = s.last_audio_at
+        input_flatlined = s.input_flatlined
     # Both 'error' and 'no_mic' are stuck-and-deaf: _on_frame drops every
     # frame for state in ('error', 'no_mic') (voice/pipeline.py), so the
     # assistant can't hear a wake word in either. 'error' latches on a
@@ -371,7 +411,14 @@ def health(response: Response) -> HealthResponse:
     # (`curl -sf`, which fails on >=400) flags the container unhealthy instead
     # of /health lying with a 200 forever. Other states (loading, listening,
     # …) stay 200 — they're not stuck-and-deaf.
-    degraded = state in ("error", "no_mic")
+    #
+    # `input_flatlined` (WARP-1037) is a third stuck-and-deaf shape: the
+    # ReSpeaker XVF3800's XMOS DSP wedges with the USB stream still open,
+    # so state stays 'listening' while every frame is digital silence.
+    # The pipeline flags it after the flatline window; degrade the same
+    # way. Recovery is automatic — audio returning flips the flag off on
+    # the next status read, no restart needed.
+    degraded = state in ("error", "no_mic") or input_flatlined
     if degraded:
         response.status_code = 503
     return HealthResponse(
@@ -383,6 +430,9 @@ def health(response: Response) -> HealthResponse:
         sttLoaded=stt_loaded,
         ttsLoaded=tts_loaded,
         llmLoaded=llm_loaded,
+        inputRmsDbfs=input_rms_dbfs,
+        lastAudioAt=last_audio_at,
+        inputFlatlined=input_flatlined,
     )
 
 
@@ -423,6 +473,9 @@ def voice_status() -> VoiceStatusResponse:
         last_response=s.last_response,
         last_response_at=s.last_response_at,
         llm_loaded=s.llm_loaded,
+        input_rms_dbfs=s.input_rms_dbfs,
+        last_audio_at=s.last_audio_at,
+        input_flatlined=s.input_flatlined,
     )
 
 

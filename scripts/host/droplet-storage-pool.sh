@@ -18,7 +18,7 @@
 # Operations (all DATA-DESTROYING):
 #   pool_create     {device, level, members[], confirm_phrase}
 #   pool_destroy    {device, confirm_phrase}
-#   pool_format     {device, fstype?, confirm_phrase}
+#   pool_format     {device, fstype?, confirm_phrase}   (formats AND mounts)
 #   pool_set_level  {device, level, confirm_phrase}
 #   pool_add_spare  {device, member, confirm_phrase}
 #   pool_remove_disk{device, member, confirm_phrase}
@@ -424,7 +424,9 @@ build_cmd() {
       printf 'mdadm --stop %s && mdadm --zero-superblock (members)' "$MD"
       ;;
     pool_format)
-      printf 'mkfs.%s %s' "${FSTYPE:-ext4}" "$MD"
+      # mkfs then mount under /mnt/droplet — mirrors drive_adopt's final step
+      # so the dashboard's "Format & mount" promise is kept (WARP-936).
+      printf 'mkfs.%s %s -> mount /mnt/droplet' "${FSTYPE:-ext4}" "$MD"
       ;;
     pool_set_level)
       printf 'mdadm --grow %s --level=%s' "$MD" "$LEVEL"
@@ -521,6 +523,17 @@ case "$OP" in
     ;;
   pool_format)
     "mkfs.${FSTYPE:-ext4}" "$MD"
+    # Complete the flow (WARP-936 UX review): a formatted-but-unmounted array
+    # is indistinguishable from an unformatted one in the dashboard, turning
+    # "Format & mount" into a destructive dead-end loop. Mount under the shared
+    # /mnt/droplet namespace exactly like drive_adopt step 4 (host_mount so the
+    # mount lands in the HOST namespace, not this unit's private one —
+    # WARP-868). Reboot persistence comes from the udev automount rule, which
+    # matches md array nodes as of WARP-936.
+    pool_uuid="$(blkid -o value -s UUID "$MD" 2>/dev/null || true)"
+    pool_mnt="/mnt/droplet/${pool_uuid:-$(basename "$MD")}"
+    mkdir -p "$pool_mnt"
+    host_mount "$MD" "$pool_mnt"
     ;;
   pool_set_level)
     mdadm --grow "$MD" --level="$LEVEL"
@@ -557,7 +570,10 @@ case "$OP" in
       "mkfs.${FSTYPE:-ext4}" "$MD"
     fi
     # 4) Mount under the shared /mnt/droplet namespace so it's usable now and
-    #    the device-bridge surfaces it; the udev automount re-mounts on reboot.
+    #    the device-bridge surfaces it. Reboot persistence comes from the udev
+    #    automount rule, which matches WHOLE-DISK nodes as of WARP-936 —
+    #    before that it matched partitions only, so this whole-device
+    #    filesystem went dark on every reboot despite the old comment's claim.
     #    WARP-868: use host_mount so the mount lands in the HOST namespace, not
     #    this unit's private slave-propagation namespace (which is destroyed on
     #    unit exit, leaving the drive unmounted until the next udev automount).

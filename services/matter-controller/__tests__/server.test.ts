@@ -12,8 +12,14 @@ import request from "supertest";
 import { EventEmitter } from "node:events";
 import { createServer as createHttpServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createApp } from "../src/server.js";
-import type { MatterControllerCore } from "../src/controller.js";
+import type {
+  MatterControllerCore,
+  WifiProvisioningOptions,
+} from "../src/controller.js";
 
 const TOKEN = "test-token-32-bytes-aaaaaaaaaaaa";
 
@@ -36,11 +42,16 @@ function fakeCore(overrides: Partial<MatterControllerCore> = {}): MatterControll
   };
 }
 
-function buildApp(core: MatterControllerCore, token = TOKEN) {
+function buildApp(
+  core: MatterControllerCore,
+  token = TOKEN,
+  wifiOptions: WifiProvisioningOptions = {},
+) {
   return createApp({
     core,
     authToken: token,
     capabilities: { bleCommissioning: true, reason: "BLE commissioning enabled on hci0" },
+    wifiOptions,
   });
 }
 
@@ -86,6 +97,8 @@ describe("GET /capabilities", () => {
     expect(res.body).toEqual({
       bleCommissioning: true,
       reason: "BLE commissioning enabled on hci0",
+      wifiProvisioning: false,
+      apSsid: null,
     });
   });
 
@@ -95,6 +108,58 @@ describe("GET /capabilities", () => {
       .get("/capabilities")
       .set("X-Droplet-Auth", TOKEN);
     expect(res.status).toBe(200);
+  });
+});
+
+describe("GET /capabilities — Wi-Fi provisioning (WARP-1035)", () => {
+  it("reports wifiProvisioning=true + the AP SSID when an SSID and env PSK are configured", async () => {
+    const res = await request(
+      buildApp(fakeCore(), TOKEN, { wifiSsid: "Droplet", wifiPsk: "s3cret-psk" }),
+    )
+      .get("/capabilities")
+      .set("X-Droplet-Auth", TOKEN);
+    expect(res.body).toEqual({
+      bleCommissioning: true,
+      reason: "BLE commissioning enabled on hci0",
+      wifiProvisioning: true,
+      apSsid: "Droplet",
+    });
+  });
+
+  it("still surfaces apSsid while wifiProvisioning=false when the SSID is set but no PSK resolves", async () => {
+    const res = await request(
+      buildApp(fakeCore(), TOKEN, { wifiSsid: "Droplet" }),
+    )
+      .get("/capabilities")
+      .set("X-Droplet-Auth", TOKEN);
+    expect(res.body.wifiProvisioning).toBe(false);
+    expect(res.body.apSsid).toBe("Droplet");
+  });
+
+  it("resolves the PSK file at REQUEST time — a per-box PSK provisioned after boot flips wifiProvisioning without a restart", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "matter-caps-"));
+    const pskFile = join(dir, "ap-psk");
+    const app = buildApp(fakeCore(), TOKEN, {
+      wifiSsid: "Droplet",
+      wifiPskFile: pskFile,
+    });
+    try {
+      const before = await request(app)
+        .get("/capabilities")
+        .set("X-Droplet-Auth", TOKEN);
+      expect(before.body.wifiProvisioning).toBe(false);
+
+      // droplet-openwrt-attach lands the per-box PSK AFTER the sidecar
+      // started (first boot ordering) — no restart may be required.
+      writeFileSync(pskFile, "per-box-psk\n");
+      const after = await request(app)
+        .get("/capabilities")
+        .set("X-Droplet-Auth", TOKEN);
+      expect(after.body.wifiProvisioning).toBe(true);
+      expect(after.body.apSsid).toBe("Droplet");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

@@ -54,6 +54,18 @@ _MDSTAT_EMPTY = """Personalities : [raid1] [raid6] [raid5] [raid4]
 unused devices: <none>
 """
 
+# The live .87 shape (WARP-936): a freshly-created array that has never been
+# written sits "active (auto-read-only)" with resync=PENDING. The
+# parenthesised state annotation lives BETWEEN the md state and the raid
+# token on the header line and must never be parsed as a member disk.
+_MDSTAT_AUTO_READ_ONLY = """Personalities : [raid1]
+md127 : active (auto-read-only) raid1 sdb[1] sda[0]
+      1953382464 blocks super 1.2 [2/2] [UU]
+      \tresync=PENDING
+
+unused devices: <none>
+"""
+
 
 # ---------------------------------------------------------------------------
 # Status mapping (raw md tokens -> ADR-019 PoolStatus enum)
@@ -135,6 +147,21 @@ def test_parse_mdstat_resyncing(monkeypatch):
 def test_parse_mdstat_empty_returns_no_pools(monkeypatch):
     bridge = _load_bridge(monkeypatch)
     assert bridge._parse_mdstat(_MDSTAT_EMPTY) == []
+
+
+def test_parse_mdstat_auto_read_only_annotation_is_not_a_member(monkeypatch):
+    """WARP-936: the live box's /pools returned members
+    ["(auto-read-only)", "sdb", "sda"] because the parser appended any
+    header token that didn't start with "raid". Parenthesised state
+    annotations are never member disks."""
+    bridge = _load_bridge(monkeypatch)
+    pools = bridge._parse_mdstat(_MDSTAT_AUTO_READ_ONLY)
+    assert len(pools) == 1
+    md127 = pools[0]
+    assert md127["device"] == "md127"
+    assert md127["level"] == "raid1"
+    assert sorted(md127["members"]) == ["sda", "sdb"]
+    assert "(auto-read-only)" not in md127["members"]
 
 
 # ---------------------------------------------------------------------------

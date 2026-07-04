@@ -49,6 +49,7 @@ import type {
   WirelessScanResult,
   AuthUser,
   InviteCreateRequest,
+  CreateUserRole,
   InviteCreateResponse,
   InvitePublicInfo,
   InviteListItem,
@@ -500,11 +501,21 @@ export async function createUser(
   // password on first login. Passed through to POST /auth/users which sets the
   // explicit `User.mustChangePassword` flag.
   mustChangePassword = true,
+  // WARP-1042: optional CANONICAL role (Role enum minus `service`). Omitted →
+  // the orchestrator defaults to `family`; the server enforces the
+  // roleOutranks cap so a caller can never assign a role above their own.
+  role?: CreateUserRole,
 ): Promise<void> {
   const res = await authFetch(`${BASE}/api/auth/users`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password, displayName, mustChangePassword }),
+    body: JSON.stringify({
+      email,
+      password,
+      displayName,
+      mustChangePassword,
+      ...(role !== undefined ? { role } : {}),
+    }),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -884,6 +895,30 @@ export async function requestDestroyPool(
   if (res.status !== 202) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `Could not start pool removal: ${res.status}`);
+  }
+  return res.json();
+}
+
+/** WARP-936 step 1: format an existing (e.g. created-but-never-formatted)
+ *  pool — returns a confirm token (does NOT format yet). The owner confirms
+ *  via confirmPoolCommand / confirmStorageCommand to execute. The host
+ *  script's typed-phrase gate requires `confirmPhrase` to name the md device
+ *  (buildConfirmPhrase(["md127"]) → "ERASE md127"). */
+export async function requestFormatPool(
+  device: string,
+  input: { confirmPhrase: string; fstype?: string },
+): Promise<PoolCommandToken> {
+  const res = await authFetch(
+    `${BASE}/api/storage/pools/${encodeURIComponent(device)}/format`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+  if (res.status !== 202) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Could not start pool format: ${res.status}`);
   }
   return res.json();
 }
