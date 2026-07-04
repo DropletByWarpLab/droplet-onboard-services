@@ -82,6 +82,10 @@ RUN ( curl -fsSL "https://alphacephei.com/vosk/models/${VOSK_MODEL}.zip" -o /tmp
         --rename-to vosk-model-small-en-us && \
     rm -f /tmp/vosk.zip /tmp/fetch_vosk_model.py
 
+# WARP-236 — shared internal-mTLS helper (same COPY pattern as other services).
+COPY services/_shared/__init__.py /app/_shared/__init__.py
+COPY services/_shared/internal_tls.py /app/_shared/internal_tls.py
+
 # The service source.
 COPY services/voice-io/ /app/
 

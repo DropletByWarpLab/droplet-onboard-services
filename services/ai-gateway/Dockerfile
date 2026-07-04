@@ -44,6 +44,7 @@ COPY services/ai-gateway/ .
 COPY docker/openssl-fips.cnf /etc/ssl/openssl-fips.cnf
 COPY services/_shared/__init__.py /app/_shared/__init__.py
 COPY services/_shared/fips_selftest.py /app/_shared/fips_selftest.py
+COPY services/_shared/internal_tls.py /app/_shared/internal_tls.py
 
 # WARP-967: install the NIST-validated FIPS provider (fips.so — OpenSSL
 # 3.0.9, CMVP cert #4282, source-built in the fips-builder stage above)
