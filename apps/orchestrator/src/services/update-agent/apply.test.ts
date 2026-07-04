@@ -504,6 +504,61 @@ describe("applyPendingUpdate (WARP-539)", () => {
     );
   });
 
+  it("rejects with image_signature_failed when the pull step refuses a signature", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    const logger = createLoggerSpy();
+    // WARP-244: apply-update.sh dies with the canonical "image-verify:"
+    // stderr prefix when cosign refuses an image at pull time.
+    runner.pullImages = async () => {
+      const err = new Error("OTA host helper (apply-update.sh) failed") as Error & {
+        stderr?: string;
+      };
+      err.stderr =
+        "[apply-update] ERROR: image-verify: cosign rejected ghcr.io/dropletbywarplab/droplet-orchestrator@sha256:" +
+        "a".repeat(64) +
+        " — only images signed by the publish-release workflow may be pulled (WARP-244, docs/SECURITY.md)";
+      throw err;
+    };
+    await seedPendingRow(prisma, buildManifest());
+
+    const res = await applyPendingUpdate(baseOpts(prisma, runner, logger));
+
+    expect(res.outcome).toBe("rejected");
+    if (res.outcome === "rejected") {
+      expect(res.failureReason).toBe("image_signature_failed");
+      expect(res.detail).toContain("image-verify:");
+    }
+    expect(prisma.deviceUpdate._rows()[0]).toMatchObject({
+      status: "rejected",
+      failureReason: "image_signature_failed",
+    });
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "update.rejected",
+        failureReason: "image_signature_failed",
+      }),
+      expect.any(String),
+    );
+  });
+
+  it("keeps a plain network pull failure on the retry path (throws, row stays verifying)", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    const logger = createLoggerSpy();
+    runner.pullImages = async () => {
+      throw new Error('Get "https://ghcr.io/v2/": dial tcp: i/o timeout');
+    };
+    await seedPendingRow(prisma, buildManifest());
+
+    await expect(applyPendingUpdate(baseOpts(prisma, runner, logger))).rejects.toThrow(
+      "i/o timeout",
+    );
+    // A transient error is NOT a signature rejection: the row must remain
+    // `verifying` so the next apply window retries.
+    expect(prisma.deviceUpdate._rows()[0]!.status).toBe("verifying");
+  });
+
   it("sidecar failing its health gate triggers the inline rollback → rolled_back", async () => {
     const prisma = createPrismaStub();
     const runner = new FakeRunner();

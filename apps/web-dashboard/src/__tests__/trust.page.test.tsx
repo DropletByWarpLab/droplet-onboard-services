@@ -69,6 +69,15 @@ describe("/trust Trust Center placeholder (WARP-246)", () => {
     expect(disabled.length).toBeGreaterThanOrEqual(3);
   });
 
+  it("links the SBOM artifact to the GitHub releases page", () => {
+    render(<TrustPage />);
+    const link = screen.getByRole("link", { name: "Releases" });
+    expect(link).toHaveAttribute(
+      "href",
+      "https://github.com/DropletByWarpLab/droplet-onboard-services/releases",
+    );
+  });
+
   it("does not consult the user's role (any authenticated member can view)", () => {
     // The page must render without an AuthProvider at all — if it
     // reached for useAuth() this render would throw.

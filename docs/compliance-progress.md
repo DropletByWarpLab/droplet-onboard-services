@@ -47,12 +47,12 @@ Legend: ✅ done · 🟡 in progress · 🔵 not started · ❌ blocked or N/A �
 | Audit & monitoring | 5 | 0 | 0 | 5 |
 | Identity & access | 5 | 0 | 0 | 5 |
 | Data protection | 8 | 0 | 0 | 8 |
-| Vulnerability + supply chain | 8 | 0 | 0 | 8 |
+| Vulnerability + supply chain | 8 | 0 | 2 | 6 |
 | Incident response + network | 4 | 0 | 0 | 4 |
 | Privacy + telemetry | 3 | 0 | 0 | 3 |
 | Governance UI + Trust Center | 3 | 0 | 0 | 3 |
 | GRC operations | 6 | 0 | 0 | 6 |
-| **Total** | **50** | **2** | **0** | **48** |
+| **Total** | **50** | **2** | **2** | **46** |
 
 ---
 
@@ -77,8 +77,8 @@ The chain is non-negotiable — each ticket blocks the next.
 | 13 | [WARP-241](https://warp-lab.atlassian.net/browse/WARP-241) | Presidio DLP + medical entity recognizers | Data | 🔵 |
 | 14 | [WARP-242](https://warp-lab.atlassian.net/browse/WARP-242) | Per-document encryption + crypto-shred deletion | Data | 🔵 |
 | 15 | [WARP-243](https://warp-lab.atlassian.net/browse/WARP-243) | PR-blocking security CI (Trivy/Semgrep/CodeQL/...) | VulnMgmt | 🔵 |
-| 16 | [WARP-244](https://warp-lab.atlassian.net/browse/WARP-244) | Sigstore + cosign signed container images | SupplyChain | 🔵 |
-| 17 | [WARP-245](https://warp-lab.atlassian.net/browse/WARP-245) | CycloneDX SBOM per service + per-release | SupplyChain | 🔵 |
+| 16 | [WARP-244](https://warp-lab.atlassian.net/browse/WARP-244) | Sigstore + cosign signed container images | SupplyChain | 🟡 |
+| 17 | [WARP-245](https://warp-lab.atlassian.net/browse/WARP-245) | CycloneDX SBOM per service + per-release | SupplyChain | 🟡 |
 | 18 | [WARP-246](https://warp-lab.atlassian.net/browse/WARP-246) | Audit log viewer + Trust Center placeholder | Governance | 🔵 |
 | 19 | [WARP-247](https://warp-lab.atlassian.net/browse/WARP-247) | Session management hardening | Identity | 🔵 |
 | 20 | [WARP-248](https://warp-lab.atlassian.net/browse/WARP-248) | RBAC matrix expansion + ABAC | Identity | 🔵 |
