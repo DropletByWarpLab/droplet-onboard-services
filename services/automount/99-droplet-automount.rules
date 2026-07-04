@@ -20,10 +20,13 @@ SUBSYSTEM!="block", GOTO="droplet_automount_end"
 # WHOLE-DISK nodes (sda / sdaa / nvme0n1): drive_adopt (WARP-662) makes a
 # whole-device filesystem with no partition table, which previously never
 # re-mounted after a reboot because only partitions matched here (WARP-936).
+# Also accept md ARRAY nodes (md0 / md127): pool_format makes a filesystem on
+# the assembled array and mounts it, and this rule is what re-mounts it after
+# a reboot (mdadm assembles at boot -> add event -> droplet-automount@mdN).
 # Safe: droplet-automount.sh skips devices without a filesystem signature and
 # refuses anything backing the boot disk, so a bare or OS whole-disk add
 # event is a no-op.
-KERNEL!="nvme[0-9]n[0-9]p[0-9]*|nvme[0-9]n[0-9]|sd[a-z][0-9]*|sd[a-z]|sd[a-z][a-z]", GOTO="droplet_automount_end"
+KERNEL!="nvme[0-9]n[0-9]p[0-9]*|nvme[0-9]n[0-9]|sd[a-z][0-9]*|sd[a-z]|sd[a-z][a-z]|md[0-9]*", GOTO="droplet_automount_end"
 
 # Reject the boot medium outright.
 KERNEL=="mmcblk*", GOTO="droplet_automount_end"

@@ -616,3 +616,41 @@ def test_managed_unmount_prunes_the_automount_state(tmp_path):
     assert proc.returncode == 0, proc.stderr
     remaining = json.loads(state.read_text(encoding="utf-8"))["mounts"]
     assert [m["device"] for m in remaining] == ["/dev/sdc1"], remaining
+
+
+# ---------------------------------------------------------------------------
+# WARP-936 UX-review fix — pool_format must complete the flow: mkfs THEN mount
+# under /mnt/droplet, mirroring drive_adopt steps 3-4. Before this, pool_format
+# was mkfs-only: the dashboard's "Format & mount" CTA erased the array and
+# returned the owner to a byte-identical "isn't set up as storage yet" card —
+# a destructive dead-end loop.
+# ---------------------------------------------------------------------------
+
+def _format_params(**over):
+    p = {"device": "md0", "confirm_phrase": "ERASE md0"}
+    p.update(over)
+    return p
+
+
+def test_pool_format_execute_formats_then_mounts(tmp_path):
+    proc, cmds = _exec_run("pool_format", _format_params(), tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout).get("ok") is True
+    fmt = _first(cmds, "mkfs.ext4 /dev/md0")
+    # blkid stub answers UUID cafef00d-848 → mount lands at the by-UUID path
+    # under the shared /mnt/droplet namespace (host_mount, WARP-868).
+    mnt = _first(cmds, "mount /dev/md0 /mnt/droplet/cafef00d-848")
+    assert 0 <= fmt < mnt, cmds
+    assert _first(cmds, "mkdir") >= 0, cmds
+
+
+def test_pool_format_dry_run_reports_mkfs_and_mount():
+    proc = _run("pool_format", _format_params())
+    assert proc.returncode == 0, proc.stderr
+    assert "mkfs" in proc.stderr
+    assert "mount /mnt/droplet" in proc.stderr
+
+
+def test_pool_format_still_refuses_without_confirm_naming_the_array():
+    proc = _run("pool_format", _format_params(confirm_phrase="ERASE md1"))
+    assert proc.returncode != 0
