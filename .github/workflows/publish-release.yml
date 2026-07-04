@@ -205,6 +205,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # WARP-244 — cosign is needed both for the keyless image signing right
+      # after push (below) and the key-based release.json signing later, so
+      # install it once here, immediately after GHCR login.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
       # Build + push every service in scripts/release/services.json
       # (canonical list — the generator refuses to publish if this loop
       # and the list ever drift). Tag = full commit sha; the manifest
@@ -247,6 +253,60 @@ jobs:
           print(json.dumps(digests, indent=2))
           PY
 
+      # WARP-244 — keyless (Sigstore) signature on EVERY pushed image. The
+      # signer is this workflow's GitHub Actions OIDC identity: Fulcio
+      # issues a short-lived certificate bound to
+      #   https://github.com/DropletByWarpLab/droplet-onboard-services/.github/workflows/publish-release.yml@refs/heads/main
+      # and cosign stores signature + certificate + Rekor bundle in GHCR
+      # next to the image. This is a SEPARATE trust layer from the
+      # key-based release.json signature below (WARP-536): the manifest key
+      # is the device's offline OTA trust root ("this digest-set is a
+      # release"); the keyless image signatures are the supply-chain gate
+      # ("this image was built by our CI") that scripts/lib/apply-update.sh
+      # enforces before any docker pull. NOTE: Rekor is a PUBLIC
+      # transparency log — entries expose repo/workflow identity and image
+      # digests (never contents). Mandated by WARP-244.
+      - name: Sign app images (cosign keyless + Rekor)
+        run: |
+          set -euo pipefail
+          owner_lc="${GITHUB_REPOSITORY_OWNER,,}"
+          registry="ghcr.io/${owner_lc}"
+          while read -r name digest; do
+            echo "::group::sign ${name}"
+            cosign sign --yes "${registry}/droplet-${name}@${digest}"
+            echo "::endgroup::"
+          done < dist/digests.txt
+
+      # Self-check with the SAME policy the device enforces (exact identity
+      # + issuer), then capture each image's Rekor log index into
+      # dist/image-signatures.json — the per-release "transparency log
+      # entries" artifact (WARP-244 AC). A signature that our own policy
+      # cannot verify must never ship.
+      - name: Verify image signatures + capture Rekor entries
+        run: |
+          set -euo pipefail
+          owner_lc="${GITHUB_REPOSITORY_OWNER,,}"
+          registry="ghcr.io/${owner_lc}"
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/publish-release.yml@refs/heads/main"
+          issuer="https://token.actions.githubusercontent.com"
+          : > dist/image-verify.jsonl
+          while read -r name digest; do
+            ref="${registry}/droplet-${name}@${digest}"
+            cosign verify \
+              --certificate-identity "${identity}" \
+              --certificate-oidc-issuer "${issuer}" \
+              --output json "${ref}" \
+            | jq -c --arg name "$name" --arg ref "$ref" --arg digest "$digest" \
+                --arg identity "$identity" --arg issuer "$issuer" \
+                '{name: $name, ref: $ref, digest: $digest,
+                  certificateIdentity: $identity,
+                  certificateOidcIssuer: $issuer,
+                  rekorLogIndex: (.[0].optional.Bundle.Payload.logIndex // null)}' \
+              >> dist/image-verify.jsonl
+          done < dist/digests.txt
+          jq -s '{schemaVersion: 1, images: .}' dist/image-verify.jsonl > dist/image-signatures.json
+          cat dist/image-signatures.json
+
       # Tracked runtime configs only: `git archive` can never leak
       # untracked runtime state (.env, docker/certs, secrets) because it
       # packs the committed tree, not the working directory.
@@ -269,9 +329,6 @@ jobs:
             --registry "ghcr.io/${owner_lc}" \
             --out dist/release.json
           cat dist/release.json
-
-      - name: Install cosign
-        uses: sigstore/cosign-installer@v3
 
       # FAILS (by design) until the human key ceremony provisions the
       # secrets — see the header comment + scripts/README.md.
@@ -307,6 +364,8 @@ jobs:
           gh release create "${tag}" \
             --target "${GITHUB_SHA}" \
             --title "OTA release ${tag}" \
-            --notes "Automated OTA release for ${GITHUB_SHA} (channel: stable). Assets: release.json (signed manifest, schema v1), release.json.sig (cosign signature — verify against apps/orchestrator/src/services/update-agent/cosign.pub), configs.tar.gz (tracked docker/ runtime configs)." \
+            --notes "Automated OTA release for ${GITHUB_SHA} (channel: stable). Assets: release.json (signed manifest, schema v1), release.json.sig (cosign signature — verify against cosign.pub, attached), configs.tar.gz (tracked docker/ runtime configs), image-signatures.json (per-image keyless-signature + Rekor transparency-log index, WARP-244 — see docs/SECURITY.md for verification), cosign.pub (OTA manifest trust anchor)." \
             --latest \
-            dist/release.json dist/release.json.sig dist/configs.tar.gz
+            dist/release.json dist/release.json.sig dist/configs.tar.gz \
+            dist/image-signatures.json \
+            apps/orchestrator/src/services/update-agent/cosign.pub
