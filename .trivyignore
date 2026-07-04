@@ -1,0 +1,66 @@
+# .trivyignore — WARP-243 pre-existing image CVE baseline. Every entry MUST
+# carry: package, image(s), and the burn-down path. New CVEs are NOT added
+# here casually — fix the dep; this file only exists so day-one main is
+# green. Burn-down owner: Romain. Remove entries as Dependabot upgrade PRs
+# land.
+#
+# PROVENANCE: this candidate list is derived from the 2026-07-04 OSV
+# cross-check in the WARP-243 audit. The authoritative list is regenerated
+# by the in-PR Trivy bootstrap run (docker-build.yml builds all 12 images
+# when this workflow file changes) — dev-only deps that never reach images
+# drop out, and any additional image CVE found is added with a comment.
+# Fill in <run-url>/<sha> from that bootstrap run before final arming.
+# bootstrap-run: <run-url>
+# bootstrap-sha: <sha>
+
+# litellm 1.30.0 (ai-gateway) — upgrade blocked on LiteLLM API churn; burn-down first.
+CVE-2024-2952
+CVE-2024-5751
+CVE-2026-35030
+CVE-2026-49468
+CVE-2024-4888
+CVE-2026-35029
+CVE-2025-0330
+CVE-2024-8984
+CVE-2025-0628
+CVE-2024-6587
+CVE-2024-9606
+CVE-2024-10188
+CVE-2026-47101
+CVE-2026-47102
+# pillow 10.0 (file-indexer)
+CVE-2023-50447
+CVE-2024-28219
+CVE-2023-4863
+# protobufjs 7.5.4 (orchestrator, mcp-server)
+CVE-2026-41242
+CVE-2026-44293
+CVE-2026-44289
+CVE-2026-44291
+CVE-2026-44290
+CVE-2026-48712
+# next 14.2.35 (web-dashboard)
+CVE-2026-44573
+CVE-2026-44578
+# starlette (camera-discovery, email-indexer, routing, switch)
+CVE-2024-47874
+CVE-2025-62727
+CVE-2026-54283
+CVE-2026-48818
+# python-multipart 0.0.10 (voice-io)
+CVE-2024-53981
+CVE-2026-53539
+CVE-2026-42561
+CVE-2026-24486
+# form-data / ws / fast-uri / @grpc/grpc-js / multer / nodemailer / hono / cryptography
+CVE-2026-12143
+CVE-2026-48779
+CVE-2026-6321
+CVE-2026-6322
+CVE-2026-48068
+CVE-2026-48069
+CVE-2026-5079
+CVE-2025-14874
+CVE-2026-54290
+CVE-2024-26130
+CVE-2026-26007
