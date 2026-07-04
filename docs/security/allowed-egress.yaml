@@ -430,3 +430,22 @@ entries:
     added: 2026-07-04
     review_by: 2027-07-04
     code_refs: [services/matter-controller/src/controller.ts, apps/orchestrator/src/lib/remote-access.ts]
+
+  - id: ref-cosign-oidc-issuer
+    kind: reference
+    service: orchestrator
+    destination:
+      # NOT an egress destination. The OTA image-signature check verifies
+      # OFFLINE against the trust root embedded in the vendored, checksum-pinned
+      # cosign binary (WARP-537) — "no Rekor/TUF egress at verify time" per
+      # apply-update.sh. This host is only the --certificate-oidc-issuer
+      # IDENTITY string matched inside the Fulcio-issued signing cert (GitHub
+      # Actions OIDC); the box never opens a connection to it. cosign's only
+      # network at verify time is in-process HTTPS to ghcr.io (the same
+      # registry the pull itself uses).
+      hosts: [token.actions.githubusercontent.com]
+    purpose: cosign keyless-signature OIDC issuer identity matched during OFFLINE OTA image verification — not a connection the box makes
+    ticket: WARP-244
+    added: 2026-07-04
+    review_by: 2027-07-04
+    code_refs: [scripts/lib/apply-update.sh]
