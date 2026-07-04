@@ -59,6 +59,7 @@ import { useModels } from "@/lib/hooks/useModels";
 import { useRecents } from "@/lib/hooks/useRecents";
 import { useCameras } from "@/lib/hooks/useCameras";
 import { useSmartHome } from "@/lib/hooks/useSmartHome";
+import { useVoiceHealthSummary } from "@/lib/hooks/useVoice";
 import { useCalendarEvents } from "@/lib/hooks/useCalendar";
 import { FEATURES } from "@/lib/feature-flags";
 
@@ -347,15 +348,30 @@ function StatusWidget({ w, h }: WidgetProps) {
   const { models } = useModels();
   const { totalCameras } = useCameras();
   const { totalDevices } = useSmartHome();
+  // WARP-1055 — the Home surface's Voice status line lives inside this
+  // existing system-health tile (design brief §2), not a new tile.
+  const { state: voiceState } = useVoiceHealthSummary();
 
   const local = models.filter((m) => m.provider === "ollama").length;
   const cloud = models.length - local;
+
+  const voiceRow: [LucideIcon, string, string, string, string] =
+    voiceState == null
+      ? [Mic, "Voice", "—", "checking…", "var(--color-label-quaternary)"]
+      : voiceState.kind === "calibrated"
+        ? [Mic, "Voice", "Calibrated", "wake word ready", "var(--success)"]
+        : voiceState.kind === "attention"
+          ? [Mic, "Voice", "Attention", "needs attention", "var(--color-system-orange)"]
+          : voiceState.kind === "broken"
+            ? [Mic, "Voice", "Attention", "microphone not working", "var(--color-system-red)"]
+            : [Mic, "Voice", "—", "not calibrated yet", "var(--color-label-quaternary)"];
 
   const stats: [LucideIcon, string, string, string, string][] = [
     [Folder, "Files", recents.length ? String(recents.length) : "—", "recently indexed", "var(--success)"],
     [Video, "Cameras", totalCameras ? String(totalCameras) : "—", totalCameras ? "live feeds" : "none yet", "var(--brand)"],
     [Network, "Devices", totalDevices ? String(totalDevices) : "—", "smart-home online", "var(--success)"],
     [Cpu, "AI models", models.length ? String(models.length) : "—", `${local} local · ${cloud} cloud`, "var(--success)"],
+    voiceRow,
   ];
 
   if (w <= 2 || h <= 2) {
