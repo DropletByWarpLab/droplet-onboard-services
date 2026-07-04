@@ -17,11 +17,15 @@ from typing import Any, Optional
 
 import httpx
 
+# WARP-236 — internal mTLS: rewrite the orchestrator base URL to https:// and
+# present email-indexer's client cert when DROPLET_INTERNAL_TLS=1.
+from _shared.internal_tls import base_url as _internal_base_url, httpx_client_kwargs
+
 logger = logging.getLogger(__name__)
 
-ORCHESTRATOR_URL = os.environ.get(
-    "ORCHESTRATOR_URL", "http://orchestrator:3000"
-).rstrip("/")
+ORCHESTRATOR_URL = _internal_base_url(
+    os.environ.get("ORCHESTRATOR_URL", "http://orchestrator:3000").rstrip("/")
+)
 SERVICE_TOKEN = (os.environ.get("ORCHESTRATOR_SERVICE_TOKEN") or "").strip()
 
 _token_warning_logged = False
@@ -49,7 +53,7 @@ async def ingest_message(account_id: str, payload: dict[str, Any]) -> bool:
         return False
     url = f"{ORCHESTRATOR_URL}/api/email/{account_id}/messages-ingest"
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, **httpx_client_kwargs()) as client:
             resp = await client.post(url, json=payload, headers=headers)
     except httpx.HTTPError as exc:
         logger.warning("messages-ingest POST failed: %s", exc)
@@ -82,7 +86,7 @@ async def _patch_draft(draft_id: str, body: dict[str, Any]) -> bool:
         return False
     url = f"{ORCHESTRATOR_URL}/api/email/drafts/{draft_id}/status"
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, **httpx_client_kwargs()) as client:
             resp = await client.patch(url, json=body, headers=headers)
     except httpx.HTTPError as exc:
         logger.warning("draft status PATCH failed: %s", exc)
@@ -106,7 +110,7 @@ async def claim_draft(draft_id: str) -> bool:
         return False
     url = f"{ORCHESTRATOR_URL}/api/email/drafts/{draft_id}/claim"
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, **httpx_client_kwargs()) as client:
             resp = await client.post(url, headers=headers)
     except httpx.HTTPError as exc:
         logger.warning("draft claim POST failed: %s", exc)
@@ -131,7 +135,7 @@ async def reconcile_stale_sending() -> int:
         return 0
     url = f"{ORCHESTRATOR_URL}/api/email/drafts/reconcile-stale-sending"
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, **httpx_client_kwargs()) as client:
             resp = await client.post(url, headers=headers)
     except httpx.HTTPError as exc:
         logger.warning("reconcile-stale-sending POST failed: %s", exc)

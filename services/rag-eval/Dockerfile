@@ -39,6 +39,12 @@ COPY tests/retrieval-eval/ragas/ragas_runner.py \
 # Service-local Python: scheduler wiring + main + subprocess runner.
 COPY services/rag-eval/*.py /opt/rag-eval/
 
+# WARP-236 — shared internal-mTLS helper. main.build_uvicorn_config() imports
+# `from _shared.internal_tls import ...`; the WORKDIR is /opt/rag-eval so the
+# package must live there.
+COPY services/_shared/__init__.py /opt/rag-eval/_shared/__init__.py
+COPY services/_shared/internal_tls.py /opt/rag-eval/_shared/internal_tls.py
+
 # /data/rag-eval is mounted from a named volume in the compose file; the
 # scheduler writes per-run JSON + a rolling baselines.candidate.json here.
 RUN mkdir -p /data/rag-eval/runs

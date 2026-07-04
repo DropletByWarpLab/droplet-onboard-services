@@ -1,9 +1,11 @@
 import { createServer } from "node:http";
+import { createServer as createTlsServer } from "node:https";
 import path from "node:path";
 import { PrismaClient } from "@prisma/client";
 import pino from "pino";
 import { assertFipsAtBootOrExit } from "@droplet/fips-selftest";
 import { config } from "./config.js";
+import { internalTlsEnabled, httpsServerOptions } from "./lib/internal-tls.js";
 import { createApp } from "./app.js";
 import { connectRedis } from "./services/cache.service.js";
 import { connectMqtt } from "./services/mqtt.service.js";
@@ -764,7 +766,12 @@ async function main() {
   // feat/scene-schedules: pass the hoisted Matter dispatcher so the scenes
   // router and the scene-schedule ticker share ONE instance.
   const app = createApp(prisma, sceneMatterDispatcher);
-  const server = createServer(app);
+  // WARP-236: when internal mTLS is enabled the SAME port serves HTTPS and
+  // every caller (nginx gateway included) must present a CA-signed client
+  // cert. Dev installs (DROPLET_INTERNAL_TLS unset) keep plain HTTP.
+  const server = internalTlsEnabled()
+    ? createTlsServer(httpsServerOptions(), app)
+    : createServer(app);
   attachWsBridge(server);
   server.listen(config.PORT, () => {
     logger.info("API server listening on port %d", config.PORT);

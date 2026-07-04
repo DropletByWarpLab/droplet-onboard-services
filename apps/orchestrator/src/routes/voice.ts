@@ -21,6 +21,7 @@
 import { Router, type Response } from "express";
 import { requireRole } from "../middleware/auth.js";
 import { createLogger } from "../lib/logger.js";
+import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
 
 const logger = createLogger("voice");
 
@@ -36,7 +37,8 @@ const SAY_TIMEOUT_MS = 30_000;
 const MAX_SAY_TEXT_CHARS = 2000;
 
 function voiceIoBaseUrl(): string {
-  const url = process.env.VOICE_IO_URL ?? DEFAULT_VOICE_IO_URL;
+  // WARP-236: https:// + client cert when internal mTLS is on (identity when off).
+  const url = internalBaseUrl(process.env.VOICE_IO_URL ?? DEFAULT_VOICE_IO_URL);
   return url.replace(/\/+$/, "");
 }
 
@@ -66,7 +68,7 @@ async function proxy(
       };
       init.body = JSON.stringify(body ?? {});
     }
-    const upstream = await fetch(target, init);
+    const upstream = await internalFetch(target, init);
 
     // Relay upstream status + JSON verbatim (FastAPI always answers JSON);
     // fall back to a clean shape if a body somehow isn't parseable.

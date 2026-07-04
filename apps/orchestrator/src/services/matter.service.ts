@@ -36,6 +36,7 @@
 
 import { EventEmitter } from "node:events";
 import { config } from "../config.js";
+import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
 import type {
   MatterCommissionedDevice,
   MatterDiscoveredDevice,
@@ -70,7 +71,8 @@ const stateEvents = new EventEmitter();
 
 function baseUrl(): string {
   // Strip a trailing slash so path joins stay canonical.
-  return config.DROPLET_MATTER_SERVICE_URL.replace(/\/+$/, "");
+  // WARP-236: https:// + client cert when internal mTLS is on (identity when off).
+  return internalBaseUrl(config.DROPLET_MATTER_SERVICE_URL).replace(/\/+$/, "");
 }
 
 function authHeaders(): Record<string, string> {
@@ -116,7 +118,7 @@ async function sidecarJson<T>(
   init: RequestInit = {},
   timeoutMs = DEFAULT_TIMEOUT_MS,
 ): Promise<T> {
-  const res = await fetch(`${baseUrl()}${path}`, {
+  const res = await internalFetch(`${baseUrl()}${path}`, {
     ...init,
     headers: { ...authHeaders(), ...(init.headers ?? {}) },
     signal: AbortSignal.timeout(timeoutMs),
@@ -149,7 +151,7 @@ async function auditQuietly(
 export async function initMatterService(): Promise<void> {
   ensureEventBridge();
 
-  const res = await fetch(`${baseUrl()}/health`, {
+  const res = await internalFetch(`${baseUrl()}/health`, {
     headers: authHeaders(),
     signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
   });
@@ -297,8 +299,7 @@ export async function commissionDevice(
 export async function decommissionDevice(
   nodeIdStr: string,
 ): Promise<boolean> {
-  const res = await fetch(
-    `${baseUrl()}/devices/${encodeURIComponent(nodeIdStr)}`,
+  const res = await internalFetch(`${baseUrl()}/devices/${encodeURIComponent(nodeIdStr)}`,
     {
       method: "DELETE",
       headers: authHeaders(),
@@ -331,8 +332,7 @@ export async function getCommissionedDevices(): Promise<MatterGrouped> {
 export async function getDevice(
   nodeIdStr: string,
 ): Promise<MatterCommissionedDevice | null> {
-  const res = await fetch(
-    `${baseUrl()}/devices/${encodeURIComponent(nodeIdStr)}`,
+  const res = await internalFetch(`${baseUrl()}/devices/${encodeURIComponent(nodeIdStr)}`,
     {
       headers: authHeaders(),
       signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
@@ -420,7 +420,7 @@ function ensureEventBridge(): void {
 async function runEventBridge(signal: AbortSignal): Promise<void> {
   while (!signal.aborted) {
     try {
-      const res = await fetch(`${baseUrl()}/events`, {
+      const res = await internalFetch(`${baseUrl()}/events`, {
         headers: authHeaders(),
         signal,
       });
@@ -456,7 +456,7 @@ async function runEventBridge(signal: AbortSignal): Promise<void> {
 
 async function refreshHealthFlags(): Promise<void> {
   try {
-    const res = await fetch(`${baseUrl()}/health`, {
+    const res = await internalFetch(`${baseUrl()}/health`, {
       headers: authHeaders(),
       signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
     });

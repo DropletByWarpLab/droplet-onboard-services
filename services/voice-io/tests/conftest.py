@@ -15,6 +15,12 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+# WARP-236 — voice/llm.py imports `_shared.internal_tls`. In-container the
+# helper is COPY'd to /app/_shared (sibling of the source); in the repo it
+# lives at services/_shared, so add services/ (ROOT.parent) to the path.
+SERVICES_DIR = ROOT.parent
+if str(SERVICES_DIR) not in sys.path:
+    sys.path.insert(0, str(SERVICES_DIR))
 
 
 class _FakeSoundDevice:

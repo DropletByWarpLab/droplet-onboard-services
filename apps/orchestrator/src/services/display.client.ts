@@ -1,13 +1,17 @@
 /**
  * HTTP client for the OLED Display Service.
  */
+import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
 
 // Match the schema default in config.ts. The display service runs with
 // `network_mode: host` on the inference host, so `localhost` from inside
 // the orchestrator container would never resolve to it — the host gateway
 // alias must be used. Compose sets DISPLAY_SERVICE_URL explicitly; this
 // fallback only trips in local/unit-test contexts where the env isn't set.
-const DISPLAY_URL = process.env.DISPLAY_SERVICE_URL || "http://host.docker.internal:8082";
+// WARP-236: https:// + client cert when internal mTLS is on (identity when off).
+const DISPLAY_URL = internalBaseUrl(
+  process.env.DISPLAY_SERVICE_URL || "http://host.docker.internal:8082",
+);
 // WARP-165: dedicated service-to-service bearer (previously reused
 // DEVICE_SECRET_KEY — the FIPS-sealed AES-256 master encryption key —
 // which put the master key on the wire on every display call). The
@@ -22,7 +26,7 @@ async function displayFetch(path: string, options: RequestInit = {}): Promise<Re
     ...(SERVICE_SECRET ? { Authorization: `Bearer ${SERVICE_SECRET}` } : {}),
     ...(options.headers as Record<string, string> || {}),
   };
-  return fetch(`${DISPLAY_URL}${path}`, { ...options, headers });
+  return internalFetch(`${DISPLAY_URL}${path}`, { ...options, headers });
 }
 
 export async function healthCheck(): Promise<boolean> {
@@ -147,7 +151,7 @@ export async function pushCustomImage(
     // serial USB-serial; under normal load a push completes in ~200 ms.
     // 5s is a generous upper bound that still lets the screen-qr
     // single-flight guard reset and try again next tick.
-    const res = await fetch(`${DISPLAY_URL}/display/custom`, {
+    const res = await internalFetch(`${DISPLAY_URL}/display/custom`, {
       method: "POST",
       body: form,
       headers,

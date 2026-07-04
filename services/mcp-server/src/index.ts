@@ -5,6 +5,7 @@ import { PrismaClient } from "@prisma/client";
 import type { HttpClient } from "@droplet/tools-core";
 import { assertFipsAtBootOrExit } from "@droplet/fips-selftest";
 import { createServer } from "./server.js";
+import { internalBaseUrl, internalFetch } from "./internal-tls.js";
 import { startStdio } from "./transports/stdio.js";
 import { startHttp } from "./transports/http.js";
 import type { ContextDeps } from "./context.js";
@@ -108,7 +109,9 @@ function joinUrl(base: string, path: string, params?: Record<string, unknown>): 
  * is present to avoid silently sending text/plain to FastAPI services.
  */
 function createHttpClient(target: HttpTarget): HttpClient {
-  const base = baseUrlFor(target);
+  // WARP-236: rewrite the internal base URL to https:// and present the
+  // mcp-server's client cert when DROPLET_INTERNAL_TLS=1 (identity when off).
+  const base = internalBaseUrl(baseUrlFor(target));
   // WARP-339: when the target is the orchestrator, attach the
   // service-principal bearer the orchestrator's authMiddleware
   // recognises (matchServiceToken → `_service:mcp` AuthUser). The
@@ -151,7 +154,7 @@ function createHttpClient(target: HttpTarget): HttpClient {
   };
   return {
     async get(path, opts) {
-      return fetch(joinUrl(base, path, opts?.params), {
+      return internalFetch(joinUrl(base, path, opts?.params), {
         method: "GET",
         headers: injectAuth(opts?.headers),
       });
@@ -159,7 +162,7 @@ function createHttpClient(target: HttpTarget): HttpClient {
     async post(path, body, opts) {
       const headers: Record<string, string> = { ...(opts?.headers ?? {}) };
       if (body !== undefined && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
-      return fetch(joinUrl(base, path), {
+      return internalFetch(joinUrl(base, path), {
         method: "POST",
         headers: injectAuth(headers),
         body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -168,14 +171,14 @@ function createHttpClient(target: HttpTarget): HttpClient {
     async patch(path, body, opts) {
       const headers: Record<string, string> = { ...(opts?.headers ?? {}) };
       if (body !== undefined && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
-      return fetch(joinUrl(base, path), {
+      return internalFetch(joinUrl(base, path), {
         method: "PATCH",
         headers: injectAuth(headers),
         body: body !== undefined ? JSON.stringify(body) : undefined,
       });
     },
     async delete(path, opts) {
-      return fetch(joinUrl(base, path), {
+      return internalFetch(joinUrl(base, path), {
         method: "DELETE",
         headers: injectAuth(opts?.headers),
       });

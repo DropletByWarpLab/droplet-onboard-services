@@ -1,5 +1,6 @@
 import { config } from "../config.js";
 import { getRequestId } from "../lib/request-context.js";
+import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
 import type {
   ChatRequest,
   ModelCapabilities,
@@ -7,7 +8,9 @@ import type {
   ModelsResponse,
 } from "../types/index.js";
 
-const BASE_URL = config.AI_GATEWAY_URL;
+// WARP-236: rewrite the internal base URL to https:// and present our client
+// cert when DROPLET_INTERNAL_TLS=1; identity + plain fetch when off.
+const BASE_URL = internalBaseUrl(config.AI_GATEWAY_URL);
 
 /**
  * WARP-560: service-to-service auth headers for the ai-gateway, which now
@@ -69,7 +72,7 @@ function wrapTimeout(err: unknown, op: string, ms: number): Error {
 
 export async function listModels(): Promise<ModelsResponse> {
   try {
-    const res = await fetch(`${BASE_URL}/ai/models`, {
+    const res = await internalFetch(`${BASE_URL}/ai/models`, {
       headers: authHeaders(),
       signal: timeout(),
     });
@@ -116,7 +119,7 @@ export async function chat(
   // the /api/llm/chat route's `req.on("close")`. Aborting it cancels the
   // in-flight inference fetch so a disconnected client doesn't keep the
   // model running.
-  const res = await fetch(`${BASE_URL}/ai/chat`, {
+  const res = await internalFetch(`${BASE_URL}/ai/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders(userId) },
     body: JSON.stringify(request),
@@ -134,7 +137,7 @@ export async function saveKey(
   apiKey: string,
   userId?: string
 ): Promise<void> {
-  const res = await fetch(`${BASE_URL}/ai/keys/${provider}`, {
+  const res = await internalFetch(`${BASE_URL}/ai/keys/${provider}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders(userId) },
     body: JSON.stringify({ api_key: apiKey }),
@@ -148,7 +151,7 @@ export async function saveKey(
 
 export async function listKeys(userId?: string): Promise<string[]> {
   try {
-    const res = await fetch(`${BASE_URL}/ai/keys`, {
+    const res = await internalFetch(`${BASE_URL}/ai/keys`, {
       headers: authHeaders(userId),
       signal: timeout(),
     });
@@ -164,7 +167,7 @@ export async function deleteKey(
   provider: string,
   userId?: string
 ): Promise<void> {
-  const res = await fetch(`${BASE_URL}/ai/keys/${provider}`, {
+  const res = await internalFetch(`${BASE_URL}/ai/keys/${provider}`, {
     method: "DELETE",
     headers: authHeaders(userId),
     signal: timeout(),
@@ -179,7 +182,7 @@ export async function healthCheck(): Promise<boolean> {
   try {
     // /ai/health is the only route the gateway leaves unauthenticated (the
     // compose healthcheck + ops probe hit it tokenless), so no auth header here.
-    const res = await fetch(`${BASE_URL}/ai/health`, {
+    const res = await internalFetch(`${BASE_URL}/ai/health`, {
       signal: AbortSignal.timeout(2000),
     });
     return res.ok;

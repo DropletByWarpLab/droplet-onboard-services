@@ -63,6 +63,7 @@ import { getCameraSystemStatus, type CameraSystemStatus } from "../services/came
 import { isUpstreamUnavailable } from "../lib/upstream-unavailable.js";
 import { pipeUpstreamBody } from "../lib/pipe-upstream.js";
 import { config } from "../config.js";
+import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
 import { evaluateNetworkCommand, confirmNetworkCommand } from "../services/network-safety.service.js";
 import type { ConfirmNetworkCommandError } from "../services/network-safety.service.js";
 import { exportClip, signShareUrl, verifyShareUrl } from "../services/clips.service.js";
@@ -1461,7 +1462,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   // --- Camera subnet isolation ---
   router.get("/cameras/subnet", async (_req, res) => {
     try {
-      const resp = await fetch(`${config.ROUTING_SERVICE_URL}/network/subnets/cameras`, {
+      const resp = await internalFetch(`${internalBaseUrl(config.ROUTING_SERVICE_URL)}/network/subnets/cameras`, {
         headers: serviceAuthHeaders(),
         signal: AbortSignal.timeout(5000),
       });
@@ -1496,7 +1497,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       }
 
       const body = req.body || {};
-      const resp = await fetch(`${config.ROUTING_SERVICE_URL}/network/subnets/cameras/setup`, {
+      const resp = await internalFetch(`${internalBaseUrl(config.ROUTING_SERVICE_URL)}/network/subnets/cameras/setup`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...serviceAuthHeaders() },
         body: JSON.stringify({
@@ -1539,7 +1540,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         });
       }
 
-      const resp = await fetch(`${config.ROUTING_SERVICE_URL}/network/subnets/cameras`, {
+      const resp = await internalFetch(`${internalBaseUrl(config.ROUTING_SERVICE_URL)}/network/subnets/cameras`, {
         method: "DELETE",
         headers: serviceAuthHeaders(),
         signal: AbortSignal.timeout(30000),
@@ -1609,7 +1610,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
           break;
         }
         case "camera_subnet_setup": {
-          const resp = await fetch(`${config.ROUTING_SERVICE_URL}/network/subnets/cameras/setup`, {
+          const resp = await internalFetch(`${internalBaseUrl(config.ROUTING_SERVICE_URL)}/network/subnets/cameras/setup`, {
             method: "POST",
             headers: { "Content-Type": "application/json", ...serviceAuthHeaders() },
             body: JSON.stringify({
@@ -1628,7 +1629,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
           break;
         }
         case "camera_subnet_teardown": {
-          const resp = await fetch(`${config.ROUTING_SERVICE_URL}/network/subnets/cameras`, {
+          const resp = await internalFetch(`${internalBaseUrl(config.ROUTING_SERVICE_URL)}/network/subnets/cameras`, {
             method: "DELETE",
             headers: serviceAuthHeaders(),
             signal: AbortSignal.timeout(30000),
