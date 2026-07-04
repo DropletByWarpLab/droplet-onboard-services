@@ -115,6 +115,66 @@ run_capture() {
   "$@" 2>/dev/null || true
 }
 
+# ── WARP-244: pull-time image signature verification ─────────────────────────
+# Only images keyless-signed by THIS repo's publish-release workflow on main
+# may be pulled. cosign fetches the signature bundle from ghcr.io (the same
+# registry the pull itself needs) and verifies it OFFLINE against the trust
+# root embedded in the vendored, checksum-pinned binary (orchestrator
+# Dockerfile, WARP-537) — no Rekor/TUF egress at verify time.
+#
+# FAIL CLOSED, and deliberately NO bypass env: the rollback path recreates
+# with `--pull never` from images already on the box, so a refusal can only
+# block an UPDATE, never the running stack. Break-glass is a human with host
+# access pulling manually (docs/SECURITY.md). The canonical "image-verify:"
+# stderr prefix is load-bearing: apply.ts classifies it as
+# rejected/image_signature_failed instead of retrying.
+COSIGN_IDENTITY_REGEXP='^https://github\.com/DropletByWarpLab/droplet-onboard-services/\.github/workflows/publish-release\.yml@refs/heads/main$'
+COSIGN_OIDC_ISSUER='https://token.actions.githubusercontent.com'
+
+# Ephemeral registry auth for BOTH cosign (in-process HTTPS to ghcr.io) and
+# `docker pull` (the CLI forwards credentials from DOCKER_CONFIG to the
+# daemon per pull): GHCR packages are private pre-GA. No token env → no-op
+# (anonymous works if/when the packages go public).
+REGISTRY_AUTH_DIR=""
+cleanup_registry_auth() {
+  [ -n "$REGISTRY_AUTH_DIR" ] && rm -rf "$REGISTRY_AUTH_DIR"
+}
+setup_registry_auth() {
+  [ -n "${DROPLET_OTA_GITHUB_TOKEN:-}" ] || return 0
+  REGISTRY_AUTH_DIR="$(mktemp -d)"
+  chmod 0700 "$REGISTRY_AUTH_DIR"
+  trap cleanup_registry_auth EXIT
+  printf '{"auths":{"ghcr.io":{"auth":"%s"}}}\n' \
+    "$(printf 'x-access-token:%s' "$DROPLET_OTA_GITHUB_TOKEN" | base64 | tr -d '\n')" \
+    > "$REGISTRY_AUTH_DIR/config.json"
+  chmod 0600 "$REGISTRY_AUTH_DIR/config.json"
+  export DOCKER_CONFIG="$REGISTRY_AUTH_DIR"
+}
+
+verify_image_signature() {
+  local img="$1"
+  local cosign_bin="${DROPLET_COSIGN_BIN:-cosign}"
+  log "verify $img"
+  # Under dry-run the `run` helper only PRINTS the command it would execute
+  # (to stdout, prefixed DRY-RUN:) — keep that line visible. On the real
+  # path cosign's verification bundle (JSON) is noise, so drop its stdout.
+  if [ -n "$DRY_RUN" ]; then
+    run "$cosign_bin" verify \
+      --certificate-identity-regexp "$COSIGN_IDENTITY_REGEXP" \
+      --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" \
+      --offline=true \
+      "$img"
+    return 0
+  fi
+  if ! run "$cosign_bin" verify \
+      --certificate-identity-regexp "$COSIGN_IDENTITY_REGEXP" \
+      --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" \
+      --offline=true \
+      "$img" >/dev/null; then
+    die "image-verify: cosign rejected $img — only images signed by the publish-release workflow may be pulled (WARP-244, docs/SECURITY.md)"
+  fi
+}
+
 COMPOSE_FILE=""
 UPDATE_ID=""
 BACKUP_DIR=""
@@ -289,8 +349,13 @@ config_root() {
 
 cmd_pull_images() {
   [ "${#IMAGES[@]}" -gt 0 ] || die "pull-images needs at least one --images REF"
+  setup_registry_auth
   local img
   for img in "${IMAGES[@]}"; do
+    # WARP-244: verify-then-pull. The ref is digest-pinned (manifest schema
+    # enforces …@sha256:<64hex>), so the verified ref and the pulled bytes
+    # are the same content by construction.
+    verify_image_signature "$img"
     log "pull $img"
     run docker pull "$img"
   done
