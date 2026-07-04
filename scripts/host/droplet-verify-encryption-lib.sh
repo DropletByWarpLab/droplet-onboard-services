@@ -258,3 +258,71 @@ vfy_eval_pcap_patterns() {
   if [ -n "$fails" ]; then printf 'FAIL|%s' "${fails%,}"
   else printf 'PASS|patterns=%s matches=0' "$total"; fi
 }
+
+# -----------------------------------------------------------------------------
+# Device-chain + manifest helpers
+# -----------------------------------------------------------------------------
+
+# vfy_path_is_crypt_backed PATH  (prints "<path>\t<device>\t<crypt|plaintext|...>",
+# returns 0 when a dm-crypt layer is present in the device chain, else 1).
+# Uses findmnt to resolve the backing device, then walks lsblk -J -s (inverse
+# tree) looking for any ancestor of type "crypt". When findmnt/lsblk are missing
+# it prints "<path>\tunknown\tno-tools" and returns 1 — a path we cannot prove
+# encrypted is NOT evidence of encryption (correctly surfaces as a FAIL).
+vfy_path_is_crypt_backed() {
+  local p="$1" src py rc
+  if ! command -v findmnt >/dev/null 2>&1 || ! command -v lsblk >/dev/null 2>&1; then
+    printf '%s\tunknown\tno-tools\n' "$p"; return 1
+  fi
+  src="$(findmnt -no SOURCE --target "$p" 2>/dev/null | head -1)"
+  [ -n "$src" ] || { printf '%s\tunknown\tno-source\n' "$p"; return 1; }
+  py="$(vfy_py)"
+  if [ -z "$py" ]; then
+    # Fallback: textual lsblk walk (no json) — best-effort ancestor type scan.
+    if lsblk -s -no TYPE "$src" 2>/dev/null | grep -qx crypt; then
+      printf '%s\t%s\tcrypt\n' "$p" "$src"; return 0
+    fi
+    printf '%s\t%s\tplaintext\n' "$p" "$src"; return 1
+  fi
+  if lsblk -J -s -o NAME,TYPE "$src" 2>/dev/null | VFY_SRC="$src" VFY_PATH="$p" "$py" - <<'PYEOF'
+import json, os, sys
+try:
+    tree = json.load(sys.stdin)
+except Exception:
+    sys.exit(2)
+def has_crypt(nodes):
+    for n in nodes:
+        if n.get("type") == "crypt":
+            return True
+        if has_crypt(n.get("children", [])):
+            return True
+    return False
+sys.exit(0 if has_crypt(tree.get("blockdevices", [])) else 1)
+PYEOF
+  then
+    printf '%s\t%s\tcrypt\n' "$p" "$src"; return 0
+  else
+    rc=$?
+    [ "$rc" -eq 2 ] && { printf '%s\t%s\tlsblk-parse-error\n' "$p" "$src"; return 1; }
+    printf '%s\t%s\tplaintext\n' "$p" "$src"; return 1
+  fi
+}
+
+# vfy_manifest DIR — write manifest.sha256 covering every bundle file EXCEPT the
+# manifest itself and its signature (the sig signs the manifest, so it is
+# necessarily outside it). Relative paths, sorted, stable.
+vfy_manifest() {
+  local dir="$1" hasher
+  if command -v sha256sum >/dev/null 2>&1; then hasher="sha256sum"
+  elif command -v shasum >/dev/null 2>&1; then hasher="shasum -a 256"
+  else return 1; fi
+  ( cd "$dir" && find . -type f \
+      ! -name manifest.sha256 ! -name manifest.sig \
+      | sed 's|^\./||' | LC_ALL=C sort \
+      | while IFS= read -r rel; do $hasher "$rel"; done ) > "$dir/manifest.sha256"
+}
+
+# vfy_sha256 FILE — print the hex sha256 of a file (portable).
+vfy_sha256() {
+  { sha256sum "$1" 2>/dev/null || shasum -a 256 "$1"; } | awk '{print $1}'
+}

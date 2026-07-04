@@ -168,6 +168,76 @@ case "$v" in *supersecretpg*) fail "pcap verdict leaks the secret VALUE";; *) pa
 v="$(vfy_eval_pcap_patterns "$WORK/clean.pcap" "$WORK/patterns.tsv")"
 [ "$v" = "PASS|patterns=2 matches=0" ] && pass "pcap: clean → PASS" || fail "pcap clean: $v"
 
+echo ""; echo "--- Runner: status contract + graceful degradation ---"
+mk_stub() {  # NAME EXITCODE OUTPUT_FILE
+  cat > "$WORK/bin/$1" <<EOF
+#!/bin/sh
+printf '%s ' "\$0 \$*" >> "$WORK/stub-calls.log"; echo >> "$WORK/stub-calls.log"
+cat "$3" 2>/dev/null
+exit $2
+EOF
+  chmod +x "$WORK/bin/$1"
+}
+run_vfy() {  # extra env via leading VAR=val words
+  env PATH="$WORK/bin:/usr/bin:/bin" \
+    DROPLET_VFY_OUTPUT_ROOT="$WORK/out" \
+    DROPLET_VFY_REPO_ROOT="$WORK/repo" \
+    DROPLET_VFY_DATA_PATHS="$WORK/repo/data" \
+    DROPLET_VFY_USB_GLOB="$WORK/usb/*" \
+    DROPLET_VFY_PCAP_SECONDS=1 \
+    "$@" bash "$RUNNER"
+}
+
+rm -rf "$WORK/bin" "$WORK/out" "$WORK/repo"; mkdir -p "$WORK/bin" "$WORK/repo/data"
+printf 'POSTGRES_PASSWORD=pgsecret\nREDIS_PASSWORD=redissecret\nMQTT_PASSWORD=mqttsecret\n' > "$WORK/repo/.env"
+# Empty world: every binary "missing" (not on the stub PATH) except coreutils.
+set +e; run_vfy > "$WORK/run1.log" 2>&1; rc=$?; set -e
+[ "$rc" -eq 1 ] && pass "empty world exits 1 (posture FAILs present, no crash)" \
+  || fail "empty world rc=$rc (want 1); log: $(tail -3 "$WORK/run1.log")"
+bundle="$(ls -d "$WORK/out"/*/ | head -1)"
+[ -f "$bundle/report.json" ] && pass "bundle produced even in empty world" || fail "no report.json"
+"$PYBIN" -c '
+import json,sys
+r = json.load(open(sys.argv[1]))
+ids = {c["id"] for c in r["checks"]}
+want = {"rest.luks.device","rest.luks.header","rest.luks.tpm-token","rest.entropy",
+        "rest.mount-coverage","rest.usb-luks","transit.pg.plaintext-rejected",
+        "transit.pg.tls13","transit.pg.scram","transit.redis.plaintext-refused",
+        "transit.redis.tls","transit.mqtt.plaintext-closed","transit.mqtt.mtls-required",
+        "transit.mesh.plain-http-refused","transit.edge.tls-policy","transit.pcap.canary"}
+assert ids == want, ids ^ want
+for c in r["checks"]:
+    assert c["status"] in ("PASS","FAIL","SKIP"), c
+    if c["status"] == "SKIP": assert c["detail"], "SKIP without reason: " + c["id"]
+# docker missing → transit probes must be SKIP with a reason, not FAIL/crash
+by = {c["id"]: c for c in r["checks"]}
+assert by["transit.pg.plaintext-rejected"]["status"] == "SKIP"
+assert "docker" in by["transit.pg.plaintext-rejected"]["detail"]
+assert by["transit.pcap.canary"]["status"] == "SKIP"          # tcpdump missing
+# no LUKS world → rest checks are posture FAILs (plaintext at rest is a finding)
+assert by["rest.mount-coverage"]["status"] == "FAIL"
+assert r["signing"]["status"] == "skipped"
+' "$bundle/report.json" && pass "status contract: all 16 checks, enum-only, SKIP has reason" \
+  || fail "status contract violated"
+[ -f "$bundle/manifest.sha256" ] && pass "manifest written" || fail "manifest missing"
+grep -q 'report.json' "$bundle/manifest.sha256" && pass "manifest covers report.json" \
+  || fail "manifest misses report.json"
+
+# --checks subset + --list
+set +e; run_vfy DROPLET_VFY_CHECKS="transit.edge.tls-policy" > "$WORK/run2.log" 2>&1; rc=$?; set -e
+b2="$(ls -dt "$WORK/out"/*/ | head -1)"
+n="$("$PYBIN" -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["checks"]))' "$b2/report.json")"
+[ "$n" = "1" ] && pass "DROPLET_VFY_CHECKS subsets the registry" || fail "subset ran $n checks"
+PATH="$WORK/bin:/usr/bin:/bin" bash "$RUNNER" --list | grep -q 'transit.pcap.canary|transit|WARP-966' \
+  && pass "--list prints the registry" || fail "--list broken"
+
+# chain: second full run records the first run's manifest hash
+prev="$( { shasum -a 256 "$bundle/manifest.sha256" 2>/dev/null || sha256sum "$bundle/manifest.sha256"; } | awk '{print $1}')"
+set +e; run_vfy > /dev/null 2>&1; set -e
+b3="$(ls -dt "$WORK/out"/*/ | head -1)"
+grep -q "\"prev_manifest_sha256\": \"$prev\"" "$b3/report.json" \
+  && pass "runs hash-chain via prev_manifest_sha256" || fail "chain broken"
+
 echo ""
 printf "  Results: %d/%d passed\n" "$((TESTS - FAILURES))" "$TESTS"
 exit "$FAILURES"
