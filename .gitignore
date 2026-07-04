@@ -69,3 +69,6 @@ scripts/image/.build/
 
 # Backlog-driver loop runtime scratch (queue, run-cap counter, audit log)
 .claude/loop-state/
+# WARP-236 — internal CA + per-service TLS bundles (setup-generated, never tracked)
+data/secrets/
+docker/nginx-internal-scheme.conf

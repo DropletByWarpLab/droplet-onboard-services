@@ -259,6 +259,8 @@ if [ "$DRY_RUN" = "true" ]; then
   fi
   log_info "  Would materialize artifacts (idempotent): MQTT password file,"
   log_info "                  mosquitto.conf, TLS cert, docker/secrets/openwrt_password"
+  log_info "                  WARP-236: internal CA (data/secrets/internal-ca) +"
+  log_info "                  per-service TLS bundles (data/secrets/service-tls/<svc>)"
   if [ "$SINGLE_BOX_MODE" = "true" ]; then
     log_info "  single-box: would append COMPOSE_PROFILES=linux,single-box + knobs to .env"
     log_info "                  (FRIGATE_RENDER_NODE, OLLAMA_URL, OPENSSL_CONF=,"

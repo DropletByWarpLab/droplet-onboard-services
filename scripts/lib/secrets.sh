@@ -2,6 +2,12 @@
 # secrets.sh — Generate device-unique secrets and write .env file.
 # Source this file; do not execute directly.
 
+# WARP-236 — internal CA + per-service TLS bundle issuance. Sourced here (not
+# only from setup.sh) so materialize_artifacts() can call internal_ca_* even
+# when a caller sources secrets.sh standalone (tests, --sync-secrets).
+# shellcheck source=internal-ca.sh
+. "$(dirname "${BASH_SOURCE[0]}")/internal-ca.sh"
+
 # Generate a random alphanumeric password of given length.
 _gen_password() {
   local length="${1:-24}"
@@ -678,6 +684,12 @@ materialize_artifacts() {
 
   _generate_mosquitto_passwd "${MQTT_PASSWORD:-}"
   _write_mosquitto_conf
+  # WARP-236 — mint the internal CA and issue a per-service TLS bundle for
+  # every first-party identity. Idempotent (renews only within 30d of expiry).
+  # DROPLET_BRIDGE_GATEWAY_IP is exported by single-box.sh for the single-box
+  # shape; empty elsewhere (host.docker.internal covers dev/multi-box).
+  internal_ca_ensure
+  internal_ca_issue_all "${DROPLET_BRIDGE_GATEWAY_IP:-}"
   _generate_tls_cert
   sync_openwrt_password_secret
   sync_switch_password_secret
