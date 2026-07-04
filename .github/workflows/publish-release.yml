@@ -307,6 +307,57 @@ jobs:
           jq -s '{schemaVersion: 1, images: .}' dist/image-verify.jsonl > dist/image-signatures.json
           cat dist/image-signatures.json
 
+      # WARP-245 — one CycloneDX 1.5 SBOM per released image (syft over the
+      # locally-built image, source-version = the pushed digest), then ONE
+      # aggregated device SBOM. syft + the CycloneDX validator are pinned
+      # by version + sha256, same posture as the vendored cosign in
+      # apps/orchestrator/Dockerfile.
+      - name: Install syft
+        run: |
+          set -euo pipefail
+          curl --fail -sSL -o /tmp/syft.tar.gz \
+            https://github.com/anchore/syft/releases/download/v1.46.0/syft_1.46.0_linux_amd64.tar.gz
+          echo "d654f678b709eb53c393d38519d5ed7d2e57205529404018614cfefa0fb2b5ca  /tmp/syft.tar.gz" | sha256sum -c -
+          sudo tar -C /usr/local/bin -xzf /tmp/syft.tar.gz syft
+          syft version
+
+      - name: Generate per-image SBOMs (CycloneDX 1.5)
+        run: |
+          set -euo pipefail
+          owner_lc="${GITHUB_REPOSITORY_OWNER,,}"
+          registry="ghcr.io/${owner_lc}"
+          mkdir -p dist/sbom
+          while read -r name digest; do
+            image="${registry}/droplet-${name}"
+            echo "::group::sbom ${name}"
+            syft "docker:${image}:${GITHUB_SHA}" \
+              --source-name "droplet-${name}" \
+              --source-version "${digest}" \
+              -o "cyclonedx-json@1.5=dist/sbom/droplet-${name}.cdx.json"
+            echo "::endgroup::"
+          done < dist/digests.txt
+
+      - name: Aggregate device SBOM + validate all against CycloneDX 1.5
+        run: |
+          set -euo pipefail
+          owner_lc="${GITHUB_REPOSITORY_OWNER,,}"
+          python3 scripts/release/aggregate-sboms.py \
+            --services scripts/release/services.json \
+            --digests dist/digests.json \
+            --sbom-dir dist/sbom \
+            --git-sha "${GITHUB_SHA}" \
+            --registry "ghcr.io/${owner_lc}" \
+            --out dist/sbom/droplet-device.cdx.json
+          curl --fail -sSL -o /tmp/cyclonedx \
+            https://github.com/CycloneDX/cyclonedx-cli/releases/download/v0.32.0/cyclonedx-linux-x64
+          echo "454879e6a4a405c8a13bff49b8982adcb0596f3019b26b0811c66e4d7f0783e1  /tmp/cyclonedx" | sha256sum -c -
+          chmod +x /tmp/cyclonedx
+          for f in dist/sbom/*.cdx.json; do
+            echo "validate ${f}"
+            /tmp/cyclonedx validate --input-file "$f" \
+              --input-format json --input-version v1_5 --fail-on-errors
+          done
+
       # Tracked runtime configs only: `git archive` can never leak
       # untracked runtime state (.env, docker/certs, secrets) because it
       # packs the committed tree, not the working directory.
@@ -364,8 +415,9 @@ jobs:
           gh release create "${tag}" \
             --target "${GITHUB_SHA}" \
             --title "OTA release ${tag}" \
-            --notes "Automated OTA release for ${GITHUB_SHA} (channel: stable). Assets: release.json (signed manifest, schema v1), release.json.sig (cosign signature — verify against cosign.pub, attached), configs.tar.gz (tracked docker/ runtime configs), image-signatures.json (per-image keyless-signature + Rekor transparency-log index, WARP-244 — see docs/SECURITY.md for verification), cosign.pub (OTA manifest trust anchor)." \
+            --notes "Automated OTA release for ${GITHUB_SHA} (channel: stable). Assets: release.json (signed manifest, schema v1), release.json.sig (cosign signature — verify against cosign.pub, attached), configs.tar.gz (tracked docker/ runtime configs), image-signatures.json (per-image keyless-signature + Rekor transparency-log index, WARP-244 — see docs/SECURITY.md for verification), cosign.pub (OTA manifest trust anchor). Plus CycloneDX 1.5 SBOMs: droplet-<service>.cdx.json per image and droplet-device.cdx.json aggregated (WARP-245)." \
             --latest \
             dist/release.json dist/release.json.sig dist/configs.tar.gz \
             dist/image-signatures.json \
-            apps/orchestrator/src/services/update-agent/cosign.pub
+            apps/orchestrator/src/services/update-agent/cosign.pub \
+            dist/sbom/*.cdx.json
