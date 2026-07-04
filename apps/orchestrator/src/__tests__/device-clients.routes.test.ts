@@ -72,6 +72,11 @@ import {
 import { resolveNcToken } from "../services/nextcloud-session.service.js";
 import { cacheGet } from "../services/cache.service.js";
 import { createDeviceClientsRouter } from "../routes/device-clients.js";
+import { _setActivityRecorderForTests } from "../services/activity.singleton.js";
+import type { RecordParams } from "../services/activity.service.js";
+
+// WARP-237: capture pairing/revoke audit rows.
+const recordedDeviceClients: RecordParams[] = [];
 
 const mockNcGenerate = vi.mocked(ncGenerateAppPassword);
 const mockNcDelete = vi.mocked(ncDeleteAppPassword);
@@ -125,6 +130,16 @@ function claim(app: express.Express) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  recordedDeviceClients.length = 0;
+  _setActivityRecorderForTests(
+    {
+      record: async (p) => {
+        recordedDeviceClients.push(p);
+        return {} as never;
+      },
+    },
+    null,
+  );
   // Restore the default transaction runner after clearAllMocks wipes impls.
   mockPrisma.$transaction.mockImplementation(
     async (fn: (tx: typeof mockPrisma) => unknown) => fn(mockPrisma),
@@ -166,6 +181,14 @@ describe("POST /api/devices/pair/claim — atomic single-use (WARP-564)", () => 
     expect(mockPrisma.deviceClient.create).toHaveBeenCalledOnce();
     // Winner keeps the credential — no compensation.
     expect(mockNcDelete).not.toHaveBeenCalled();
+    // WARP-237: pairing (app-password issuance) emits a mandatory row.
+    expect(recordedDeviceClients).toContainEqual(
+      expect.objectContaining({
+        kind: "auth",
+        what: "Device client paired",
+        refs: expect.objectContaining({ clientId: "client-1" }),
+      }),
+    );
   });
 
   it("returns 409 when the conditional consume loses the race (count===0) and compensates the app password", async () => {
