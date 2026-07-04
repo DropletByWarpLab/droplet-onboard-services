@@ -486,14 +486,21 @@ print(base64.b64encode(resp.signature).decode())
 # manifest, or "genesis" if this is the first run. Bundle dirs are named by UTC
 # timestamp, so reverse-lexical order == most-recent-first (no ls-parsing).
 vfy_prev_manifest_hash() {
-  local root="$1" new="$2" d prev="genesis"
-  local dirs=() line
-  while IFS= read -r line; do dirs+=("$line"); done < <(
-    for d in "$root"/*/; do [ -d "$d" ] && printf '%s\n' "$d"; done | LC_ALL=C sort -r
+  local root="$1" new="$2" name prev="genesis"
+  local names=() line
+  # Sort on the bare basename (no trailing slash) so a "-NN" same-second suffix
+  # sorts AFTER its bare timestamp and in numeric order — reverse sort then
+  # yields true most-recent-first (the trailing "/" would otherwise invert it).
+  while IFS= read -r line; do names+=("$line"); done < <(
+    for name in "$root"/*/; do
+      name="${name%/}"; [ -d "$name" ] && printf '%s\n' "$(basename "$name")"
+    done | LC_ALL=C sort -r
   )
-  for d in ${dirs[@]+"${dirs[@]}"}; do
-    case "$d" in *"$new"/) continue;; esac
-    if [ -f "${d}manifest.sha256" ]; then prev="$(vfy_sha256 "${d}manifest.sha256")"; break; fi
+  for name in ${names[@]+"${names[@]}"}; do
+    [ "$name" = "$new" ] && continue
+    if [ -f "$root/$name/manifest.sha256" ]; then
+      prev="$(vfy_sha256 "$root/$name/manifest.sha256")"; break
+    fi
   done
   printf '%s' "$prev"
 }
@@ -534,8 +541,21 @@ vfy_main() {
     shift
   done
 
+  # UTC-timestamp bundle dir. Second granularity keeps the name sortable (so the
+  # prev-manifest chain walk is a plain lexical sort); if two runs land in the
+  # same second, disambiguate with a -NN suffix that still sorts chronologically.
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
   bundle="$VFY_OUTPUT_ROOT/$ts"
+  if [ -d "$bundle" ]; then
+    local n=1 cand
+    while :; do
+      cand="$(printf '%s-%02d' "$ts" "$n")"
+      [ -d "$VFY_OUTPUT_ROOT/$cand" ] || break
+      n=$((n + 1))
+    done
+    ts="$cand"
+    bundle="$VFY_OUTPUT_ROOT/$ts"
+  fi
   VFY_EVID="$bundle/evidence"
   VFY_RESULTS="$bundle/results.ndjson"
   mkdir -p "$VFY_EVID" || { printf 'cannot create bundle dir %s\n' "$bundle" >&2; return 2; }

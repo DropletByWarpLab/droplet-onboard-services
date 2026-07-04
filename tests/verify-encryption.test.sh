@@ -187,6 +187,10 @@ run_vfy() {  # extra env via leading VAR=val words
     DROPLET_VFY_PCAP_SECONDS=1 \
     "$@" bash "$RUNNER"
 }
+# Newest bundle by basename (bundles are named by sortable UTC timestamp, with a
+# -NN suffix on same-second collisions). Deterministic regardless of mtime — the
+# same rule the runner's own prev-manifest walk uses.
+newest_bundle() { for d in "$WORK/out"/*/; do printf '%s\n' "${d%/}"; done | LC_ALL=C sort | tail -1; }
 
 rm -rf "$WORK/bin" "$WORK/out" "$WORK/repo"; mkdir -p "$WORK/bin" "$WORK/repo/data"
 printf 'POSTGRES_PASSWORD=pgsecret\nREDIS_PASSWORD=redissecret\nMQTT_PASSWORD=mqttsecret\n' > "$WORK/repo/.env"
@@ -194,7 +198,7 @@ printf 'POSTGRES_PASSWORD=pgsecret\nREDIS_PASSWORD=redissecret\nMQTT_PASSWORD=mq
 set +e; run_vfy > "$WORK/run1.log" 2>&1; rc=$?; set -e
 [ "$rc" -eq 1 ] && pass "empty world exits 1 (posture FAILs present, no crash)" \
   || fail "empty world rc=$rc (want 1); log: $(tail -3 "$WORK/run1.log")"
-bundle="$(ls -d "$WORK/out"/*/ | head -1)"
+bundle="$(newest_bundle)"
 [ -f "$bundle/report.json" ] && pass "bundle produced even in empty world" || fail "no report.json"
 "$PYBIN" -c '
 import json,sys
@@ -225,16 +229,20 @@ grep -q 'report.json' "$bundle/manifest.sha256" && pass "manifest covers report.
 
 # --checks subset + --list
 set +e; run_vfy DROPLET_VFY_CHECKS="transit.edge.tls-policy" > "$WORK/run2.log" 2>&1; rc=$?; set -e
-b2="$(ls -dt "$WORK/out"/*/ | head -1)"
+b2="$(newest_bundle)"
 n="$("$PYBIN" -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["checks"]))' "$b2/report.json")"
 [ "$n" = "1" ] && pass "DROPLET_VFY_CHECKS subsets the registry" || fail "subset ran $n checks"
 PATH="$WORK/bin:/usr/bin:/bin" bash "$RUNNER" --list | grep -q 'transit.pcap.canary|transit|WARP-966' \
   && pass "--list prints the registry" || fail "--list broken"
 
-# chain: second full run records the first run's manifest hash
-prev="$( { shasum -a 256 "$bundle/manifest.sha256" 2>/dev/null || sha256sum "$bundle/manifest.sha256"; } | awk '{print $1}')"
+# chain: the next full run records the immediately-preceding bundle's manifest
+# hash. Bundles are named by sortable UTC timestamp (with a -NN suffix when two
+# land in the same second), so "newest" == last by basename sort — the same
+# rule the runner uses, and deterministic regardless of same-second mtimes.
+b_prev="$(newest_bundle)"
+prev="$( { shasum -a 256 "$b_prev/manifest.sha256" 2>/dev/null || sha256sum "$b_prev/manifest.sha256"; } | awk '{print $1}')"
 set +e; run_vfy > /dev/null 2>&1; set -e
-b3="$(ls -dt "$WORK/out"/*/ | head -1)"
+b3="$(newest_bundle)"
 grep -q "\"prev_manifest_sha256\": \"$prev\"" "$b3/report.json" \
   && pass "runs hash-chain via prev_manifest_sha256" || fail "chain broken"
 
@@ -277,7 +285,7 @@ run_vfy DROPLET_VFY_TPM_DIR="$WORK/tpm" DROPLET_VFY_RAW_DEVICE=/dev/nvme0n1p3 \
   > "$WORK/run3.log" 2>&1
 rc=$?
 set -e
-b="$(ls -dt "$WORK/out"/*/ | head -1)"
+b="$(newest_bundle)"
 "$PYBIN" - "$b/report.json" <<'PYEOF'
 import json, sys
 by = {c["id"]: c for c in json.load(open(sys.argv[1]))["checks"]}
@@ -331,7 +339,7 @@ EOF
 chmod +x "$WORK/bin/docker"
 set +e; run_vfy DROPLET_VFY_TPM_DIR="$WORK/tpm" DROPLET_VFY_CHECKS="transit.edge.tls-policy" \
   > /dev/null 2>&1; set -e
-b="$(ls -dt "$WORK/out"/*/ | head -1)"
+b="$(newest_bundle)"
 [ -s "$b/manifest.sig" ] && pass "manifest.sig written" || fail "no signature"
 grep -q '"status": "signed"' "$b/report.json" && pass "report records signing=signed" \
   || fail "signing status not recorded"
