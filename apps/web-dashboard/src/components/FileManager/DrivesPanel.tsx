@@ -21,9 +21,11 @@ import {
   adoptDrive,
   confirmStorageCommand,
   ejectDrive,
+  reclaimDrive,
   requestFormatPool,
   rescanDrives,
   updateDriveLabel,
+  updatePoolLabel,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/components/Toast";
@@ -167,6 +169,15 @@ export function DrivesPanel() {
   } | null>(null);
   const [formatBusy, setFormatBusy] = useState<string | null>(null);
 
+  // WARP-1048 — reclaim a pool-MEMBER disk into standalone use: break it out of
+  // its md array, then adopt it. Same two-step confirm-token flow as adopt; the
+  // disk carries its owning `md` so the host script detaches it first.
+  const [reclaimPending, setReclaimPending] = useState<{
+    token: { confirmationToken: string; service: string; resourceId: string };
+    disk: DiskInfo;
+  } | null>(null);
+  const [reclaimBusy, setReclaimBusy] = useState<string | null>(null);
+
   // Focus restore for the destructive confirms (WCAG 2.4.3, UX review). The
   // row CTA is DISABLED while the confirm-token request is in flight, which
   // drops browser focus to <body> before the dialog opens — so the Dialog
@@ -269,6 +280,48 @@ export function DrivesPanel() {
     } catch (err) {
       setFormatPending(null);
       toast(translateError(err, "files"), "error");
+    }
+  }
+
+  async function handleStartReclaim(disk: DiskInfo) {
+    if (disk.state !== "pool_member" || !disk.md) return;
+    destructiveTriggerRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setReclaimBusy(disk.name);
+    try {
+      const token = await reclaimDrive({
+        device: disk.name,
+        md: disk.md,
+        wipeMethod: "quick",
+        confirmPhrase: buildConfirmPhrase([disk.name]),
+      });
+      setReclaimPending({
+        token: {
+          confirmationToken: token.confirmationToken,
+          service: token.service,
+          resourceId: token.resourceId,
+        },
+        disk,
+      });
+    } catch (err) {
+      toast(friendlyAdoptError(err), "error");
+    } finally {
+      setReclaimBusy(null);
+    }
+  }
+
+  async function doReclaim() {
+    const p = reclaimPending;
+    if (!p) return;
+    try {
+      await confirmStorageCommand(p.token);
+      setReclaimPending(null);
+      toast(`${diskTitle(p.disk)} reclaimed and added to your Droplet`, "success");
+      refresh();
+      refreshPools();
+    } catch (err) {
+      setReclaimPending(null);
+      toast(friendlyAdoptError(err), "error");
     }
   }
 
@@ -394,6 +447,7 @@ export function DrivesPanel() {
               <PoolCard
                 key={p.device}
                 pool={p}
+                isAdmin={isAdmin}
                 // WARP-936: a pool whose md device backs no mounted filesystem
                 // was created but never formatted+mounted — give the owner the
                 // gated way forward. Failed pools get support copy, not a
@@ -403,6 +457,7 @@ export function DrivesPanel() {
                 }
                 formatting={formatBusy === p.device}
                 onFormat={() => handleStartFormat(p)}
+                onRenamed={() => refreshPools()}
               />
             ))}
           </div>
@@ -465,8 +520,11 @@ export function DrivesPanel() {
                 key={disk.name}
                 disk={disk}
                 isAdmin={isAdmin}
-                busy={adoptBusy === disk.name}
+                busy={
+                  adoptBusy === disk.name || reclaimBusy === disk.name
+                }
                 onAdopt={() => handleStartAdopt(disk)}
+                onReclaim={() => handleStartReclaim(disk)}
               />
             ))}
           </div>
@@ -517,6 +575,25 @@ export function DrivesPanel() {
         variant="destructive"
         triggerRef={destructiveTriggerRef}
       />
+
+      {/* WARP-1048 — reclaim a pool-member disk: break it out of the pool, then
+          erase + add it on its own. Names the disk + size so the owner verifies
+          the target. */}
+      <ConfirmDialog
+        open={reclaimPending !== null}
+        onConfirm={doReclaim}
+        onCancel={() => setReclaimPending(null)}
+        title="Reclaim this drive from the pool?"
+        description="This removes the drive from your storage pool, then permanently erases it and adds it to your Droplet on its own. Your pool will have one less drive and won't be protected against a drive failure until you add another. This can't be undone — make sure anything you want is backed up first."
+        confirmLabel="Reclaim & erase"
+        confirmedIdentifier={
+          reclaimPending
+            ? `${diskTitle(reclaimPending.disk)} · ${fmtBytes(reclaimPending.disk.size_bytes)} · ${reclaimPending.disk.name}`
+            : ""
+        }
+        variant="destructive"
+        triggerRef={destructiveTriggerRef}
+      />
     </div>
   );
 }
@@ -532,19 +609,27 @@ function diskTitle(d: DiskInfo): string {
 
 /** One available (unmounted) disk card. States:
  *    foreign / available — admin gets the gated "Erase & adopt" action
- *    pool_member         — routed to the pool card above, never adoptable */
+ *    pool_member         — admin gets the gated "Reclaim" action (WARP-1048):
+ *                          break it out of the pool, then adopt it. (Adopting a
+ *                          member directly EBUSYs; reclaim detaches first.) */
 function AvailableDiskCard({
   disk,
   isAdmin,
   busy,
   onAdopt,
+  onReclaim,
 }: {
   disk: DiskInfo;
   isAdmin: boolean;
   busy: boolean;
   onAdopt: () => void;
+  onReclaim: () => void;
 }) {
   const adoptable = disk.state === "foreign" || disk.state === "available";
+  // WARP-1048: a pool member is reclaimable only when we know which array to
+  // break it out of (the bridge names it). Without `md` we can't detach it, so
+  // fall back to the read-only "manage from the pool" guidance.
+  const reclaimable = disk.state === "pool_member" && !!disk.md;
   const chip =
     disk.state === "pool_member"
       ? { label: "In a pool", cls: "bg-accent/10 text-accent" }
@@ -553,7 +638,9 @@ function AvailableDiskCard({
         : { label: "Empty", cls: "bg-surface-secondary text-label-secondary" };
   const blurb =
     disk.state === "pool_member"
-      ? "Part of your storage pool — manage it from the pool above."
+      ? reclaimable
+        ? "Part of your storage pool. Reclaim it to remove it from the pool and use it on its own."
+        : "Part of your storage pool — manage it from the pool above."
       : disk.state === "foreign"
         ? "Holds files from another system. Erase it to add its space to your Droplet."
         : "Empty and ready to be added to your Droplet.";
@@ -584,14 +671,14 @@ function AvailableDiskCard({
 
       <p className="mt-3 type-caption-1 text-label-secondary">{blurb}</p>
 
-      {isAdmin && adoptable && (
+      {isAdmin && (adoptable || reclaimable) && (
         <div className="mt-4 pt-3 border-t border-separator flex justify-end">
           <button
-            onClick={onAdopt}
+            onClick={reclaimable ? onReclaim : onAdopt}
             disabled={busy}
             className="flex-none whitespace-nowrap rounded-md bg-system-red hover:bg-system-red/90 text-white px-3 py-1.5 type-subheadline font-medium disabled:opacity-60 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-system-red/40"
           >
-            {busy ? "Working…" : "Erase & adopt"}
+            {busy ? "Working…" : reclaimable ? "Reclaim" : "Erase & adopt"}
           </button>
         </div>
       )}
@@ -878,27 +965,80 @@ function PoolAlarmBanner({
 }
 
 /** One storage-pool card: name, level + plain-language blurb, health badge,
- *  and a member-count chip. Read-only — destructive actions live behind the
- *  Tier-2 confirm flow (not surfaced here in the read-only view).
+ *  and a member-count chip. Admins additionally get an inline rename (WARP-1048)
+ *  wired to PATCH /api/storage/pools/:device via updatePoolLabel() — the same
+ *  optimistic-then-refetch pattern as the per-drive DriveCard rename.
+ *  Destructive actions (format) live behind the Tier-3 confirm flow.
  *  Raw kernel device names (/dev/md*, member /dev/sd*) are deliberately NOT
  *  surfaced — the target user is non-technical (ADR-002; follow-up to WARP-827,
  *  which gave the per-drive DriveCard the same treatment). */
 function PoolCard({
   pool,
+  isAdmin = false,
   canFormat = false,
   formatting = false,
   onFormat,
+  onRenamed,
 }: {
   pool: PoolInfo;
+  isAdmin?: boolean;
   /** WARP-936: true when the pool's md device backs no mounted filesystem —
    *  created but never formatted+mounted. Admin-gated by the caller. */
   canFormat?: boolean;
   formatting?: boolean;
   onFormat?: () => void;
+  /** WARP-1048: called after a successful rename so the list refetches. */
+  onRenamed?: () => void;
 }) {
+  const { toast } = useToast();
   const badge = poolStatusBadge(pool.status);
-  const name = poolName(pool);
   const memberCount = pool.members.length;
+
+  // Inline rename — mirrors DriveCard (WARP-827). Optimistic name shown until
+  // the pools list refetches; rolled back on failure. Focus returns to the
+  // Rename trigger when edit mode exits (WCAG 2.4.3).
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [optimisticName, setOptimisticName] = useState<string | null>(null);
+  const renameBtnRef = useRef<HTMLButtonElement>(null);
+  const wasEditing = useRef(false);
+  useEffect(() => {
+    if (wasEditing.current && !editing) renameBtnRef.current?.focus();
+    wasEditing.current = editing;
+  }, [editing]);
+
+  const name = poolName(
+    optimisticName != null ? { ...pool, displayName: optimisticName } : pool,
+  );
+  const trimmed = draft.trim();
+  const valid = trimmed.length >= 1 && trimmed.length <= DRIVE_NAME_MAX;
+
+  function beginEdit() {
+    setDraft(optimisticName || pool.displayName || "");
+    setEditing(true);
+  }
+  function cancelEdit() {
+    setEditing(false);
+    setDraft("");
+  }
+  async function save() {
+    if (!valid || saving) return;
+    const previous = optimisticName;
+    setOptimisticName(trimmed); // optimistic
+    setSaving(true);
+    setEditing(false);
+    try {
+      await updatePoolLabel(pool.device, { displayName: trimmed });
+      onRenamed?.();
+    } catch (err) {
+      setOptimisticName(previous); // roll back
+      toast(translateError(err, "files"), "error");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <div role="listitem" className="dp-card p-4">
       <div className="flex items-start gap-3">
@@ -906,19 +1046,66 @@ function PoolCard({
           <Layers className="h-5 w-5" />
         </span>
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2 flex-wrap">
-            <h4 className="type-headline text-label-primary truncate" title={name}>
-              {name}
-            </h4>
-            <span className="flex-none type-caption-2 uppercase tracking-wide px-1.5 py-0.5 rounded border border-separator text-label-tertiary">
-              {levelLabel(pool.level)}
-            </span>
-          </div>
-          <p className="type-caption-1 text-label-tertiary">{levelBlurb(pool.level)}</p>
+          {editing ? (
+            <div className="flex items-center gap-1.5">
+              <input
+                autoFocus
+                aria-label="Pool name"
+                value={draft}
+                maxLength={DRIVE_NAME_MAX}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") save();
+                  if (e.key === "Escape") cancelEdit();
+                }}
+                className="dp-input !py-1.5 !px-2.5 type-subheadline min-w-0 flex-1"
+                placeholder="Pool name"
+              />
+              <button
+                onClick={save}
+                disabled={!valid || saving}
+                aria-label="Save"
+                className="flex-none inline-flex items-center justify-center h-11 w-11 rounded-md text-accent hover:bg-accent-subtle disabled:opacity-40 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              >
+                <Check className="h-4 w-4" />
+              </button>
+              <button
+                onClick={cancelEdit}
+                aria-label="Cancel"
+                className="flex-none inline-flex items-center justify-center h-11 w-11 rounded-md text-label-tertiary hover:bg-surface-secondary transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2 flex-wrap">
+              <h4 className="type-headline text-label-primary truncate" title={name}>
+                {name}
+              </h4>
+              <span className="flex-none type-caption-2 uppercase tracking-wide px-1.5 py-0.5 rounded border border-separator text-label-tertiary">
+                {levelLabel(pool.level)}
+              </span>
+              {isAdmin && (
+                <button
+                  ref={renameBtnRef}
+                  onClick={beginEdit}
+                  aria-label="Rename"
+                  className="flex-none ml-auto inline-flex items-center justify-center h-11 w-11 -my-2.5 -mr-2.5 rounded-md text-label-tertiary hover:text-accent hover:bg-accent-subtle transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                >
+                  <Pencil className="h-4 w-4" />
+                </button>
+              )}
+            </div>
+          )}
+          {!editing && (
+            <p className="type-caption-1 text-label-tertiary">{levelBlurb(pool.level)}</p>
+          )}
         </div>
-        <span className={`flex-none type-caption-2 px-2 py-0.5 rounded-full ${badge.cls}`}>
-          {badge.label}
-        </span>
+        {!editing && (
+          <span className={`flex-none type-caption-2 px-2 py-0.5 rounded-full ${badge.cls}`}>
+            {badge.label}
+          </span>
+        )}
       </div>
 
       <div className="mt-3 flex items-center gap-2 flex-wrap type-caption-2">

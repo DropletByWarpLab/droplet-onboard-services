@@ -42,6 +42,10 @@ def _run(operation: str, params: dict, extra_env: dict | None = None):
         "DROPLET_POOL_TEST_MOUNTED": "",
         "DROPLET_POOL_TEST_HASDATA": "",
         "DROPLET_POOL_TEST_OSDISK": "",
+        # WARP-1048: default the drive_reclaim membership pre-flight to "yes,
+        # the disk is a member" so the happy-path/adopt/pool tests aren't gated
+        # on a real /sys/block/<md>/slaves entry; the refusal test sets it to 0.
+        "DROPLET_POOL_TEST_MDSLAVE": "1",
         # WARP-868: keep the host-namespace nsenter escape OFF so the PATH-shim
         # umount/findmnt stubs are exercised (CI may run in a container whose
         # mount ns differs from PID 1's, which would otherwise trigger nsenter).
@@ -350,6 +354,9 @@ def _exec_run(operation: str, params: dict, tmp_path: Path,
         "DROPLET_POOL_TEST_MOUNTED": "",
         "DROPLET_POOL_TEST_HASDATA": "",
         "DROPLET_POOL_TEST_OSDISK": "",
+        # WARP-1048: reclaim membership pre-flight defaults to "is a member"
+        # (see _run); the execute-path membership-refusal test overrides to 0.
+        "DROPLET_POOL_TEST_MDSLAVE": "1",
         "CMD_LOG": _posix(log),
         "FINDMNT_TABLE": _posix(table),
         "UMOUNT_FAIL": ",".join(umount_fail or []),
@@ -654,3 +661,127 @@ def test_pool_format_dry_run_reports_mkfs_and_mount():
 def test_pool_format_still_refuses_without_confirm_naming_the_array():
     proc = _run("pool_format", _format_params(confirm_phrase="ERASE md1"))
     assert proc.returncode != 0
+
+
+# ---------------------------------------------------------------------------
+# WARP-1048 — drive_reclaim: break a member out of its md array, then reuse the
+# adopt (wipe + reformat + mount) path so the drive is usable on its own again.
+# The live box's two WD drives are linux_raid_member disks of a created-but-
+# unformatted md127; a plain drive_adopt on a member fails EBUSY (the kernel
+# holds it in the array), so reclaim must FIRST fail+remove it from the array
+# and zero its md superblock. The OS disk is NEVER reclaimable; the typed
+# confirm phrase must name the disk being erased.
+# ---------------------------------------------------------------------------
+
+def _reclaim_params(**over):
+    p = {
+        "device": "sda",
+        "md": "md127",
+        "fstype": "ext4",
+        "wipe_method": "quick",
+        "confirm_phrase": "ERASE sda",
+    }
+    p.update(over)
+    return p
+
+
+def test_reclaim_happy_path_dry_run_succeeds():
+    proc = _run("drive_reclaim", _reclaim_params())
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    assert out.get("ok") is True
+    assert out.get("device") == "sda"
+
+
+def test_reclaim_refuses_the_os_disk():
+    # The OS/boot disk is never a pool member we'd reclaim — last-line guard.
+    proc = _run("drive_reclaim", _reclaim_params(),
+                {"DROPLET_POOL_TEST_OSDISK": "/dev/sda"})
+    assert proc.returncode != 0
+    combined = (proc.stderr + proc.stdout).lower()
+    assert "os" in combined or "system" in combined or "boot" in combined
+
+
+def test_reclaim_requires_confirm_naming_the_disk():
+    assert _run("drive_reclaim", _reclaim_params(confirm_phrase="")).returncode != 0
+    bad = _run("drive_reclaim", _reclaim_params(confirm_phrase="yes reclaim it"))
+    assert bad.returncode != 0
+    assert "confirm" in (bad.stderr + bad.stdout).lower()
+
+
+def test_reclaim_requires_the_md_array():
+    # Reclaim has to know WHICH array to break the disk out of — missing md is
+    # a refusal, never a guess.
+    proc = _run("drive_reclaim", _reclaim_params(md=""))
+    assert proc.returncode != 0
+    assert "md" in (proc.stderr + proc.stdout).lower()
+
+
+def test_reclaim_rejects_a_non_md_array_name():
+    # The md field must look like md<N> — never a partition or a shell-injectable
+    # token. (The orchestrator also validates; this is the last line.)
+    proc = _run("drive_reclaim", _reclaim_params(md="sdb; rm -rf /"))
+    assert proc.returncode != 0
+
+
+def test_reclaim_dry_run_reports_fail_remove_then_wipe_and_mkfs():
+    proc = _run("drive_reclaim", _reclaim_params(wipe_method="secure"))
+    assert proc.returncode == 0, proc.stderr
+    combined = (proc.stdout + proc.stderr).lower()
+    assert "dry-run" in combined or json.loads(proc.stdout).get("dry_run") is True
+    # The command plan names the array detach AND the wipe/mkfs reuse.
+    assert "fail" in combined and "remove" in combined
+    assert "wipe" in combined and "mkfs" in combined
+
+
+def test_reclaim_execute_detaches_from_array_before_wiping(tmp_path):
+    # The heart of WARP-1048: mdadm --fail/--remove + --zero-superblock must run
+    # BEFORE wipefs/mkfs, or the wipe hits EBUSY on the array-held member.
+    proc, cmds = _exec_run("drive_reclaim", _reclaim_params(), tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout).get("ok") is True
+    detach = _first(cmds, "mdadm /dev/md127 --fail /dev/sda --remove /dev/sda")
+    zero = _first(cmds, "mdadm --zero-superblock /dev/sda")
+    wipe = _first(cmds, "wipefs")
+    mkfs = _first(cmds, "mkfs.ext4")
+    mount = _first(cmds, "mount /dev/sda")
+    assert 0 <= detach < zero < wipe < mkfs < mount, cmds
+
+
+def test_reclaim_execute_mounts_the_reclaimed_disk(tmp_path):
+    # End state parity with adopt: the reclaimed disk is mkfs'd and mounted
+    # under the shared /mnt/droplet namespace so it's usable immediately.
+    proc, cmds = _exec_run("drive_reclaim", _reclaim_params(), tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert _first(cmds, "mount /dev/sda /mnt/droplet/") >= 0, cmds
+
+
+def test_reclaim_confirm_phrase_substring_is_not_enough():
+    # Phrase names sda1, reclaim target is the DISK sda → refuse (exact token).
+    proc = _run("drive_reclaim", _reclaim_params(confirm_phrase="ERASE sda1"))
+    assert proc.returncode != 0
+    assert "confirm" in (proc.stderr + proc.stdout).lower()
+
+
+def test_reclaim_refuses_when_disk_is_not_a_member_of_the_named_array():
+    # WARP-1048 hardening: if the disk is NOT actually a member of the named md
+    # (stale dashboard view, disk already left the array, wrong pool named), the
+    # script refuses cleanly BEFORE any mdadm --fail — turning a raw "cannot
+    # find <dev>" mdadm error into an owner-actionable message. Dry-run still
+    # runs the pre-flight, so we can assert the refusal without the stub chain.
+    proc = _run("drive_reclaim", _reclaim_params(),
+                {"DROPLET_POOL_TEST_MDSLAVE": "0"})
+    assert proc.returncode != 0
+    combined = (proc.stderr + proc.stdout).lower()
+    assert "not a member" in combined or "nothing to reclaim" in combined
+
+
+def test_reclaim_execute_non_member_never_touches_mdadm_or_wipes(tmp_path):
+    # The membership refusal must fire before ANY destructive command — no
+    # mdadm --fail/--remove/--zero-superblock, no wipefs, no mkfs.
+    proc, cmds = _exec_run("drive_reclaim", _reclaim_params(), tmp_path,
+                           extra_env={"DROPLET_POOL_TEST_MDSLAVE": "0"})
+    assert proc.returncode != 0
+    assert _first(cmds, "mdadm") == -1, cmds
+    assert _first(cmds, "wipefs") == -1, cmds
+    assert _first(cmds, "mkfs.ext4") == -1, cmds

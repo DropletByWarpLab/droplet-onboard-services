@@ -1,6 +1,6 @@
 import { Router, Request } from "express";
 import { z } from "zod";
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient, $Enums } from "@prisma/client";
 import { ncGetUserQuota } from "../services/nextcloud.client.js";
 import { resolveNcToken } from "../services/nextcloud-session.service.js";
 import type { StorageStats } from "../types/index.js";
@@ -233,6 +233,7 @@ const STORAGE_OPS = [
   "pool_add_spare",
   "pool_remove_disk",
   "drive_adopt", // WARP-662: wipe + reformat + mount a previously-used disk
+  "drive_reclaim", // WARP-1048: detach a pool member from its md array, then adopt it
 ] as const;
 type StorageOp = (typeof STORAGE_OPS)[number];
 
@@ -292,6 +293,13 @@ const updateDriveSchema = z.object({
   notes: z.string().trim().max(512).nullable().optional(),
 });
 
+/** WARP-1048: rename / annotate a storage pool. Same shape as the Drive label
+ *  upsert (no icon — a pool has no per-device icon). */
+const updatePoolSchema = z.object({
+  displayName: z.string().trim().min(1).max(64).optional(),
+  notes: z.string().trim().max(512).nullable().optional(),
+});
+
 /**
  * GET /api/storage — return the authenticated user's Nextcloud storage quota.
  *
@@ -301,6 +309,37 @@ const updateDriveSchema = z.object({
  */
 export function createStorageRouter(prisma: PrismaClient): Router {
   const router = Router();
+
+  /**
+   * WARP-1048: resolve a pool's live RAID level from the device-bridge GET
+   * /pools inventory. Used when a first-time rename must create the StoragePool
+   * row (whose `level` is a required explicit enum — never a host default).
+   * Returns the level string when the array is present + its level is a known
+   * ArrayLevel, else undefined (caller refuses rather than fabricating a row).
+   */
+  async function resolveBridgePoolLevel(
+    device: string,
+  ): Promise<$Enums.ArrayLevel | undefined> {
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 4000);
+      const r = await fetch(`${BRIDGE_URL}/pools`, { signal: ctrl.signal });
+      clearTimeout(timer);
+      if (!r.ok) return undefined;
+      const snap = (await r.json()) as BridgePoolsSnapshot;
+      const match = (snap.pools ?? []).find((p) => p.device === device);
+      // Only a level that is a real ArrayLevel enum value is accepted; the
+      // StoragePool row's `level` column is that enum (never a free string).
+      if (match && VALID_LEVELS.has(match.level)) {
+        return match.level as $Enums.ArrayLevel;
+      }
+      return undefined;
+    } catch {
+      // Bridge unreachable / bad JSON — the caller refuses the create. Reads are
+      // best-effort; never throw here.
+      return undefined;
+    }
+  }
 
   router.get("/storage", async (req, res, next) => {
     try {
@@ -675,6 +714,82 @@ export function createStorageRouter(prisma: PrismaClient): Router {
   });
 
   /**
+   * PATCH /api/storage/pools/:device — rename (+ annotate) a storage pool
+   * (WARP-1048). Admin-only, mirroring PATCH /storage/drives/:uuid: the pool
+   * name is device-wide config any family account shares, so only owner/admin
+   * may change it (family users still see it via GET). Non-destructive — this
+   * only writes the owner's chosen label to the StoragePool row; it never
+   * touches mdadm.
+   *
+   * Upsert semantics like the Drive label. `StoragePool.level` is required on
+   * create, so on a first-time rename we resolve the live RAID level from the
+   * device-bridge inventory (never a host-specific default — rule 12). If the
+   * bridge can't confirm the array exists, we refuse rather than fabricate a
+   * row for a pool that isn't there.
+   */
+  router.patch("/storage/pools/:device", async (req, res, next) => {
+    try {
+      if (!isAdmin(req)) {
+        return res.status(403).json({ error: "Admin access required" });
+      }
+      const { device } = req.params;
+      if (!validMdDevice(device)) {
+        return res.status(400).json({ error: "Invalid pool device (expected md<N>)" });
+      }
+      const parsed = updatePoolSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({
+          error: "Invalid request",
+          details: parsed.error.flatten(),
+        });
+      }
+      const { displayName, notes } = parsed.data;
+      if (displayName === undefined && notes === undefined) {
+        return res
+          .status(400)
+          .json({ error: "At least one of displayName / notes is required" });
+      }
+
+      const existing = await prisma.storagePool.findUnique({ where: { device } });
+      if (!existing && displayName === undefined) {
+        return res.status(400).json({
+          error: "displayName is required when first naming a pool",
+        });
+      }
+
+      // First-time create needs the live RAID level (an explicit enum column,
+      // never derived — rule 10/12). Resolve it from the bridge inventory.
+      let level: $Enums.ArrayLevel | undefined;
+      if (!existing) {
+        level = await resolveBridgePoolLevel(device);
+        if (!level) {
+          return res.status(404).json({
+            error: "That storage pool isn't visible right now — try again once it's online.",
+          });
+        }
+      }
+
+      const pool = await prisma.storagePool.upsert({
+        where: { device },
+        create: {
+          device,
+          displayName: displayName!,
+          level: level!,
+          ...(notes !== undefined ? { notes } : {}),
+        },
+        update: {
+          ...(displayName !== undefined ? { displayName } : {}),
+          ...(notes !== undefined ? { notes } : {}),
+        },
+      });
+      res.json(pool);
+    } catch (err) {
+      logger.warn({ err, device: req.params.device }, "Failed to update StoragePool label");
+      next(err);
+    }
+  });
+
+  /**
    * Execute a confirmed destructive storage op against the bridge and surface
    * the result. Shared by the confirm route. The bridge (and the host script
    * behind it) is the real executor + last-line pre-flight; here we only
@@ -864,6 +979,58 @@ export function createStorageRouter(prisma: PrismaClient): Router {
         "drive_adopt",
         device,
         {
+          fstype: fs,
+          wipe_method: wipe,
+          ...(label != null ? { label: String(label) } : {}),
+          confirm_phrase: confirmPhrase ?? "",
+        },
+        req.user?.id,
+      );
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /api/storage/drives/reclaim — reclaim a pool-MEMBER disk into
+  // standalone use (DESTRUCTIVE, WARP-1048). The disk is held by an md array,
+  // so a plain drive_adopt would EBUSY on wipefs; reclaim carries the owning
+  // `md` so the host script detaches it (mdadm --fail/--remove +
+  // --zero-superblock) BEFORE the wipe+reformat+mount adopt flow. Owner/admin
+  // only; mints a confirm token. The OS disk is refused server-side by the
+  // host script — this route never trusts the client's device choice for that
+  // guard. `md` must look like md<N>; the disk must be a whole-disk name.
+  router.post("/storage/drives/reclaim", requireRole("owner", "admin"), async (req, res, next) => {
+    try {
+      const { device, md, fstype, wipeMethod, label, confirmPhrase } = req.body || {};
+      if (!validAdoptDevice(device)) {
+        return res.status(400).json({
+          error: "Invalid drive (expected a whole-disk name like sda or nvme0n1)",
+        });
+      }
+      // `md` is the array the disk currently belongs to — the bare md<N> name
+      // (never /dev/-prefixed, never a partition, never shell-injectable).
+      // Reuse the same shape gate the pool routes apply to their device.
+      if (!validMdDevice(md)) {
+        return res.status(400).json({ error: "Invalid pool array (expected md<N>)" });
+      }
+      const fs = typeof fstype === "string" && fstype ? fstype : "ext4";
+      if (!VALID_FSTYPES.has(fs)) {
+        return res.status(400).json({ error: "Invalid filesystem type" });
+      }
+      const wipe = typeof wipeMethod === "string" && wipeMethod ? wipeMethod : "quick";
+      if (!VALID_WIPE.has(wipe)) {
+        return res.status(400).json({ error: "Invalid wipe method (expected quick or secure)" });
+      }
+      if (label != null && !/^[A-Za-z0-9_-]{1,16}$/.test(String(label))) {
+        return res.status(400).json({ error: "Invalid label (1-16 chars: letters, digits, _ or -)" });
+      }
+      return evalAndRespond(
+        res,
+        prisma,
+        "drive_reclaim",
+        device,
+        {
+          md,
           fstype: fs,
           wipe_method: wipe,
           ...(label != null ? { label: String(label) } : {}),

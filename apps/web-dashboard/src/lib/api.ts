@@ -947,6 +947,33 @@ export async function requestAdoptDrive(input: {
   return res.json();
 }
 
+/** WARP-1048 step 1: reclaim a pool-MEMBER disk into standalone use — returns
+ *  a confirm token (does NOT touch the array yet). `device` is the WHOLE-disk
+ *  kernel name ("sda"); `md` is the bare md<N> array it currently belongs to.
+ *  The host script detaches the member (mdadm --fail/--remove +
+ *  --zero-superblock) before the wipe+reformat+mount adopt flow. The owner
+ *  confirms via confirmStorageCommand to actually execute. The OS disk is
+ *  refused server-side by the host script. */
+export async function reclaimDrive(input: {
+  device: string;
+  md: string;
+  wipeMethod?: "quick" | "secure";
+  fstype?: string;
+  label?: string;
+  confirmPhrase: string;
+}): Promise<PoolCommandToken> {
+  const res = await authFetch(`${BASE}/api/storage/drives/reclaim`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (res.status !== 202) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Could not start drive reclaim: ${res.status}`);
+  }
+  return res.json();
+}
+
 /** Step 2: confirm + execute a queued destructive pool op. */
 export async function confirmPoolCommand(input: {
   confirmationToken: string;
@@ -1060,6 +1087,34 @@ export async function updateDriveLabel(
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `Failed to update drive: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * WARP-1048: rename (+ annotate) a storage pool. Owner/admin-only server-side,
+ * mirrors updateDriveLabel. `device` is the bare md<N> name. First call for a
+ * pool requires `displayName`; the server resolves the pool's live RAID level
+ * from the bridge to create the row. Returns the full StoragePool row.
+ */
+export async function updatePoolLabel(
+  device: string,
+  patch: {
+    displayName?: string;
+    notes?: string | null;
+  },
+): Promise<PoolInfo> {
+  const res = await authFetch(
+    `${BASE}/api/storage/pools/${encodeURIComponent(device)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to update pool: ${res.status}`);
   }
   return res.json();
 }
