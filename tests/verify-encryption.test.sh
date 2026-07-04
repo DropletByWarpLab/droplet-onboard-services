@@ -308,6 +308,42 @@ c = [x for x in r["checks"] if x["id"]=="transit.pg.plaintext-rejected"][0]
 assert c["evidence_sha256"], c
 ' "$b/report.json" && pass "evidence hashes embedded per check" || fail "evidence_sha256 missing"
 
+echo ""; echo "--- Signing + offline verification ---"
+# Real-crypto round trip: generate a P-256 key, stub the signer container call
+# to sign with it, then --verify-bundle must verify with the matching cert.
+if ! command -v openssl >/dev/null 2>&1; then
+  pass "openssl unavailable — signing round-trip skipped on this host"
+else
+openssl ecparam -name prime256v1 -genkey -noout -out "$WORK/id.key" 2>/dev/null
+openssl req -new -x509 -key "$WORK/id.key" -subj "/CN=droplet-test" -days 1 \
+  -out "$WORK/tpm/device-id-cert.pem" 2>/dev/null
+cat > "$WORK/bin/docker" <<EOF
+#!/bin/sh
+case "\$*" in
+  *"ps"*"--format"*) echo "droplet-device-identity-svc"; exit 0;;
+  *"exec -i droplet-device-identity-svc python"*)
+    # stdin = manifest bytes; sign exactly like the sidecar (ECDSA-SHA256, DER, b64)
+    openssl dgst -sha256 -sign "$WORK/id.key" | base64 | tr -d '\n'; echo;;
+  *"network inspect"*) echo "cafe12345678";;
+  *) exit 1;;
+esac
+EOF
+chmod +x "$WORK/bin/docker"
+set +e; run_vfy DROPLET_VFY_TPM_DIR="$WORK/tpm" DROPLET_VFY_CHECKS="transit.edge.tls-policy" \
+  > /dev/null 2>&1; set -e
+b="$(ls -dt "$WORK/out"/*/ | head -1)"
+[ -s "$b/manifest.sig" ] && pass "manifest.sig written" || fail "no signature"
+grep -q '"status": "signed"' "$b/report.json" && pass "report records signing=signed" \
+  || fail "signing status not recorded"
+[ -f "$b/device-id-cert.pem" ] && pass "verifier cert copied into bundle" || fail "cert not bundled"
+PATH="$WORK/bin:/usr/bin:/bin" bash "$RUNNER" --verify-bundle "$b" \
+  && pass "--verify-bundle verifies an intact bundle" || fail "verify-bundle rejects intact bundle"
+# Tamper → must fail
+printf 'tampered' >> "$b/report.md"
+PATH="$WORK/bin:/usr/bin:/bin" bash "$RUNNER" --verify-bundle "$b" > /dev/null 2>&1 \
+  && fail "verify-bundle accepted a TAMPERED bundle" || pass "verify-bundle detects tampering"
+fi
+
 echo ""
 printf "  Results: %d/%d passed\n" "$((TESTS - FAILURES))" "$TESTS"
 exit "$FAILURES"

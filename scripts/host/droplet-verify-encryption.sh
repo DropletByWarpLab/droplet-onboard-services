@@ -414,11 +414,53 @@ probe_transit_pcap_canary() {
   vfy_record "$id" "${v%%|*}" "${v#*|}" "evidence/$id/pcap-scan.txt,evidence/$id/workload.log,evidence/$id/capture.pcap"
 }
 
-# vfy_sign_bundle DIR — minimal degrade-to-skipped stub (full Sign RPC lands in
-# Task 7). If the signer container is not resolvable, the bundle is unsigned.
+# vfy_sign_bundle DIR — decide the signing DISPOSITION and copy the verifier
+# cert into the bundle (so the cert is covered by the manifest). The actual
+# signature over the manifest is produced later by vfy_finalize_signature, once
+# the manifest exists. If the device-identity sidecar (WARP-230) is not
+# available, the bundle is produced UNSIGNED (degrade, don't die).
+#
+# Signing primitive: the sidecar's `rpc Sign` — ECDSA-P256 over SHA-256 with a
+# non-extractable TPM-sealed key — invoked via `docker exec` into the container
+# (proto/device_identity.proto). The orchestrator's symmetric audit HMAC was
+# rejected: it gives no third-party verifiability and reusing that key would
+# weaken WARP-456's key-custody story.
 vfy_sign_bundle() {
-  VFY_SIGNING='{"status":"skipped","reason":"device-identity-svc not running"}'
-  return 0
+  local dir="$1"
+  if ! vfy_have docker \
+     || ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$VFY_SIGNER_CONTAINER"; then
+    VFY_SIGNING='{"status":"skipped","reason":"device-identity-svc not running (bundle is UNSIGNED)"}'
+    return 0
+  fi
+  if [ -f "$VFY_TPM_DIR/device-id-cert.pem" ]; then
+    cp "$VFY_TPM_DIR/device-id-cert.pem" "$dir/device-id-cert.pem" 2>/dev/null || true
+  fi
+  if [ ! -f "$dir/device-id-cert.pem" ]; then
+    VFY_SIGNING='{"status":"skipped","reason":"verifier cert absent at DROPLET_VFY_TPM_DIR (bundle is UNSIGNED)"}'
+    return 0
+  fi
+  VFY_SIGNING='{"status":"signed","algorithm":"ECDSA-P256-SHA256","signer":"device-identity-svc","signature_file":"manifest.sig","cert":"device-id-cert.pem"}'
+}
+
+# vfy_call_sign_rpc DIR — feed manifest.sha256 to the sidecar's Sign RPC and
+# write the DER signature to manifest.sig. Prints nothing; returns non-zero on
+# failure (caller downgrades the report to unsigned).
+vfy_call_sign_rpc() {
+  local dir="$1" sig
+  sig="$(docker exec -i "$VFY_SIGNER_CONTAINER" python -c '
+import sys, base64, grpc
+sys.path.insert(0, "/app")
+from grpc_generated import device_identity_pb2 as pb
+from grpc_generated import device_identity_pb2_grpc as pbg
+payload = sys.stdin.buffer.read()
+stub = pbg.DeviceIdentityServiceStub(
+    grpc.insecure_channel("unix:///var/run/droplet/device-identity.sock"))
+resp = stub.Sign(pb.SignRequest(payload=payload), timeout=10)
+print(base64.b64encode(resp.signature).decode())
+' < "$dir/manifest.sha256" 2>"$dir/signing-error.txt")" || return 1
+  [ -n "$sig" ] || return 1
+  printf '%s' "$sig" | base64 -d > "$dir/manifest.sig" 2>/dev/null || return 1
+  [ -s "$dir/manifest.sig" ]
 }
 
 # vfy_prev_manifest_hash ROOT NEW_TS — sha256 of the most recent prior bundle's
@@ -527,9 +569,59 @@ with open(os.environ["VFY_OUT2"], "w") as fh:
 PYEOF
 }
 
-# vfy_finalize_signature BUNDLE — placeholder extended in Task 7 (writes
-# manifest.sig + copies the cert when the signer is available). No-op here.
-vfy_finalize_signature() { :; }
+# vfy_finalize_signature BUNDLE — when the report says the bundle is signed,
+# produce manifest.sig over the (already written) manifest via the Sign RPC. If
+# the RPC fails, downgrade report.json to signing.status=skipped so the report
+# never claims a signature the bundle does not carry.
+vfy_finalize_signature() {
+  local dir="$1" status
+  status="$(printf '%s' "$VFY_SIGNING" | sed -n 's/.*"status":"\([a-z]*\)".*/\1/p')"
+  [ "$status" = "signed" ] || return 0
+  if vfy_call_sign_rpc "$dir"; then
+    return 0
+  fi
+  # RPC failed after we advertised "signed" — rewrite the report honestly.
+  VFY_SIGNING='{"status":"skipped","reason":"Sign RPC failed — see signing-error.txt (bundle is UNSIGNED)"}'
+  vfy_inject_signing "$dir/report.json" "$VFY_SIGNING" "$dir/report.json.fix" \
+    && mv "$dir/report.json.fix" "$dir/report.json"
+  rm -f "$dir/manifest.sig"
+}
+
+# vfy_verify_bundle BUNDLE_DIR — offline verification. (1) recompute every
+# manifest hash and compare; (2) if a signature is present, verify it against
+# the bundled cert's public key. Exit 0 verified, 1 failed. No network, no
+# sidecar — pure openssl + sha256, so evidence is verifiable by any third party.
+vfy_verify_bundle() {
+  local dir="$1" rc=0
+  [ -d "$dir" ] || { printf 'no such bundle: %s\n' "$dir" >&2; return 1; }
+  [ -f "$dir/manifest.sha256" ] || { printf 'no manifest.sha256 in %s\n' "$dir" >&2; return 1; }
+  if ! ( cd "$dir" && while read -r h f; do
+      [ -n "$h" ] && [ -n "$f" ] || continue
+      calc="$( { sha256sum "$f" 2>/dev/null || shasum -a 256 "$f"; } | awk '{print $1}')"
+      [ "$calc" = "$h" ] || { printf 'HASH MISMATCH: %s\n' "$f" >&2; exit 1; }
+    done < manifest.sha256 ); then
+    printf 'bundle verification FAILED: manifest hash mismatch\n' >&2
+    return 1
+  fi
+  if [ -f "$dir/manifest.sig" ]; then
+    if [ ! -f "$dir/device-id-cert.pem" ]; then
+      printf 'signature present but no device-id-cert.pem to verify it\n' >&2
+      return 1
+    fi
+    openssl x509 -in "$dir/device-id-cert.pem" -pubkey -noout > "$dir/.pub.pem" 2>/dev/null || rc=1
+    if [ "$rc" -eq 0 ] && openssl dgst -sha256 -verify "$dir/.pub.pem" \
+         -signature "$dir/manifest.sig" "$dir/manifest.sha256" >/dev/null 2>&1; then
+      rm -f "$dir/.pub.pem"
+      printf 'bundle verified: hashes + device-identity signature OK\n'
+      return 0
+    fi
+    rm -f "$dir/.pub.pem"
+    printf 'bundle verification FAILED: signature does not verify\n' >&2
+    return 1
+  fi
+  printf 'bundle verified: hashes OK (bundle is UNSIGNED — signing was skipped)\n'
+  return 0
+}
 
 # Only run main when executed directly (not when sourced by the test suite).
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
