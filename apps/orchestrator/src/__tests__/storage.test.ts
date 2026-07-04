@@ -570,12 +570,17 @@ describe("storage routes — adoptable-disks passthrough (WARP-936)", () => {
     expect(res.body.disks.map((d: any) => d.name)).not.toContain("nvme0n1");
   });
 
-  it("yields an empty disks array (not an error) for an older bridge without the field", async () => {
-    // fixtureSnapshot predates WARP-936 — no `disks` key at all.
+  it("OMITS the disks key (not an error) for an older bridge without the field", async () => {
+    // fixtureSnapshot predates WARP-936 — no `disks` key at all. The key must
+    // be ABSENT (not `[]`) in the response: the setup wizard discriminates on
+    // `resp.disks ?? null` to fall back to the WARP-662 mounted-drives reclaim
+    // list, and host-side bridges only update on reflash while this container
+    // updates independently — an empty array would read as an authoritative
+    // "no disks" and silently drop that fallback during setup.
     const app = buildApp(createPrismaMock());
     const res = await request(app).get("/api/storage/drives");
     expect(res.status).toBe(200);
-    expect(res.body.disks).toEqual([]);
+    expect("disks" in res.body).toBe(false);
     expect(res.body.drives).toHaveLength(3);
   });
 });

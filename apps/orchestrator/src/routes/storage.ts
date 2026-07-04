@@ -391,14 +391,25 @@ export function createStorageRouter(prisma: PrismaClient): Router {
       // surface present-but-unmounted disks (adopt/pool flows). Same
       // defense-in-depth as the mounted list: anything matching os_disk is
       // dropped here too, even though the bridge already excludes it. An
-      // older bridge without the field yields an empty list — never an error.
-      const disks = (snap.disks ?? []).filter(
-        (d) => !snap.os_disk || d.name !== snap.os_disk,
-      );
+      // older bridge without the field yields an ABSENT key — never `[]`,
+      // never an error: host-side bridges only update on reflash while this
+      // container updates independently, and the setup wizard discriminates
+      // on `disks ?? null` to fall back to the mounted-drives reclaim list
+      // (WARP-662). An empty array would read as an authoritative "no disks"
+      // and silently drop that fallback.
+      const disks =
+        snap.disks !== undefined
+          ? snap.disks.filter((d) => !snap.os_disk || d.name !== snap.os_disk)
+          : undefined;
 
       // count reflects the FILTERED set the dashboard renders, not the raw
       // bridge count (which may include the junk we just dropped).
-      res.json({ drives, count: drives.length, disks, snapshot_at: snap.snapshot_at });
+      res.json({
+        drives,
+        count: drives.length,
+        ...(disks !== undefined ? { disks } : {}),
+        snapshot_at: snap.snapshot_at,
+      });
     } catch (err) {
       // The device-bridge is optional (OLED/display profile only). A
       // connection refusal means it simply isn't running on this host — an
