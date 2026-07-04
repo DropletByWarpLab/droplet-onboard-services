@@ -327,7 +327,7 @@ jobs:
       # scanners: vuln only — secrets are gitleaks' domain, misconfig is
       # hadolint's (no double-reporting).
       - name: Trivy scan ${{ matrix.image }} (block HIGH/CRITICAL)
-        uses: aquasecurity/trivy-action@0.36.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: droplet-ci/${{ matrix.image }}:scan
           severity: HIGH,CRITICAL
