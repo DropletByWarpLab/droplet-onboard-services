@@ -72,6 +72,10 @@ import type {
   VpnPeerCreatedInfo,
   VoiceStatusInfo,
   VoiceSayResult,
+  VoiceCalibrationInfo,
+  VoiceCalibrationApply,
+  VoiceMeasureResult,
+  VoiceEchoCheckResult,
   BoxNameCheckResult,
   BoxNameSetResult,
   BoxNameCurrentResult,
@@ -4632,6 +4636,63 @@ export async function sayVoiceTest(text: string): Promise<VoiceSayResult> {
     body: JSON.stringify({ text }),
   });
   if (!res.ok) await throwVoiceError(res, "Speaker test failed");
+  return res.json();
+}
+
+// --- WARP-1055: /voice surface — calibration wizard + health checks ---
+
+/** Persisted calibration record, or `{calibrated: false}`. */
+export async function fetchVoiceCalibration(): Promise<VoiceCalibrationInfo> {
+  const res = await authFetch(`${BASE}/api/voice/calibration`);
+  if (!res.ok) await throwVoiceError(res, "Failed to fetch voice calibration");
+  return res.json();
+}
+
+/**
+ * The wizard's SINGLE write (§10 `Write · confirm to apply`) — persists
+ * the measured calibration on the box and applies the tuned input gain
+ * + wake threshold live.
+ */
+export async function applyVoiceCalibration(
+  payload: VoiceCalibrationApply,
+): Promise<VoiceCalibrationInfo> {
+  const res = await authFetch(`${BASE}/api/voice/calibration`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) await throwVoiceError(res, "Failed to apply calibration");
+  return res.json();
+}
+
+/**
+ * One wizard capture — the box records `seconds` of mic audio and
+ * reports RMS + peak in dBFS. Blocks server-side for the capture
+ * window, so callers should show their own countdown/progress UI.
+ */
+export async function measureVoiceLevel(
+  kind: "noise_floor" | "speech_peak",
+  seconds?: number,
+): Promise<VoiceMeasureResult> {
+  const body: { kind: string; seconds?: number } = { kind };
+  if (seconds !== undefined) body.seconds = seconds;
+  const res = await authFetch(`${BASE}/api/voice/measure`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) await throwVoiceError(res, "Measurement failed");
+  return res.json();
+}
+
+/** Fully automatic speaker→mic loop check (wizard step 4). */
+export async function runVoiceEchoCheck(): Promise<VoiceEchoCheckResult> {
+  const res = await authFetch(`${BASE}/api/voice/echo-check`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  if (!res.ok) await throwVoiceError(res, "Echo check failed");
   return res.json();
 }
 
