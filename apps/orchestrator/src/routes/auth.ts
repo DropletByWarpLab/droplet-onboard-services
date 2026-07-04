@@ -171,6 +171,21 @@ const loginSchema = z
     message: "Email and password are required",
   });
 
+// WARP-171 role vocabulary shared by invites and (since WARP-1042) direct
+// user creation. Legacy "user" sent by older dashboard builds is coerced to
+// "family" via the preprocessor so existing clients keep working through one
+// rolling deploy window — the dashboard should be updated to send the
+// canonical names in a follow-up.
+//
+// `service` is excluded because a service principal is never minted by an
+// invite or an admin-created account — those are env-var-only
+// (SERVICE_TOKEN_*). Declared ABOVE createUserSchema because module-level
+// consts initialize top-down.
+const inviteRoleField = z.preprocess(
+  (v) => (v === "user" ? "family" : v),
+  z.enum(["owner", "admin", "family", "guest"]),
+);
+
 const createUserSchema = z.object({
   password: passwordZod,
   displayName: z.string().min(1).max(128).optional(),
@@ -182,6 +197,10 @@ const createUserSchema = z.object({
   // explicitly opts out, so a client that omits the field gets the safe
   // (forced-change) behaviour.
   mustChangePassword: z.boolean().default(true),
+  // WARP-1042: optional role, same vocabulary as invites (minus `service`).
+  // Guarded in the handler by the SAME roleOutranks cap the invite-create
+  // route enforces — an admin must not mint an owner.
+  role: inviteRoleField.default("family"),
 });
 
 // WARP-824 — self-service password change (forced first-login change, or any
@@ -208,18 +227,8 @@ const recoveryConsumeSchema = z.object({
 // ── WARP-217 invite schemas ──
 // WARP-171: widened from the legacy ["user", "admin"] union to the full
 // Role enum so the DB column (now typed as `Role`) and the request body
-// share a vocabulary. Legacy "user" sent by older dashboard builds is
-// coerced to "family" via the preprocessor so existing clients keep
-// working through one rolling deploy window — the dashboard should be
-// updated to send the canonical names in a follow-up.
-//
-// `service` is excluded because a service principal is never minted by
-// an invite — those are env-var-only (SERVICE_TOKEN_*).
-const inviteRoleField = z.preprocess(
-  (v) => (v === "user" ? "family" : v),
-  z.enum(["owner", "admin", "family", "guest"]),
-);
-
+// share a vocabulary. The shared `inviteRoleField` is declared above
+// createUserSchema (WARP-1042 reuses it for direct user creation).
 const createInviteSchema = z.object({
   displayName: z.string().min(1).max(128).optional(),
   // ADR-013: the invite email is the invitee's directory login key on
@@ -2376,7 +2385,23 @@ export function createProtectedAuthRouter(
         return;
       }
 
-      const { email, password, displayName, mustChangePassword } = parsed.data;
+      const { email, password, displayName, mustChangePassword, role } = parsed.data;
+
+      // WARP-1042: privilege-escalation guard — SAME cap as POST /auth/invites.
+      // `requireRole("owner","admin")` proved the caller may create users, but
+      // NOT which role they may assign. Without this an `admin` could mint an
+      // `owner` account (local row role + NC `admin` group) — a straight
+      // privilege escalation. Reject any assigned role that outranks the
+      // caller's own; owner→owner is allowed, admin→owner is not. Fail closed
+      // if the role claim is somehow absent.
+      const creatorRole = req.user?.role;
+      if (!creatorRole || roleOutranks(role, creatorRole)) {
+        res.status(403).json({
+          error: "You cannot create an account with a role higher than your own",
+          code: "ROLE_RANK_EXCEEDED",
+        });
+        return;
+      }
 
       const token = await resolveNcToken(req);
       if (!token) {
@@ -2455,6 +2480,11 @@ export function createProtectedAuthRouter(
           // re-arms the forced-change gate — mirror the create branch so the
           // flag never goes stale on the update path.
           mustChangePassword,
+          // WARP-1042: mirror the role too — a re-created account must not
+          // keep a stale role on the local row while the NC groups below are
+          // rebuilt from the requested role (the two derive session roles
+          // together; diverging silently changes effective permissions).
+          role: role as any,
         },
         create: {
           username,
@@ -2462,22 +2492,45 @@ export function createProtectedAuthRouter(
           email,
           nextcloudUsername: username,
           passwordHash,
-          role: "family" as any,
+          // WARP-1042: caller-selected role (rank-guarded above); was
+          // hardcoded "family" before role selection existed.
+          role: role as any,
           // WARP-824: explicit forced-change-on-first-login flag (default
           // true). The post-auth gate reads this fresh on every request.
           mustChangePassword,
         },
       });
 
-      // WARP-883: admin-created users are `family` role — add them to the
-      // household group so the shared "Household" group folder mounts for them.
+      // WARP-883 + WARP-1042: map the requested role to Nextcloud groups the
+      // same way invite-accept does (owner/admin → NC "admin" group, guest →
+      // "guest", family → none) and ALWAYS add the household group so the
+      // shared "Household" group folder mounts for them.
       await ncCreateUser(
         token,
         username,
         password,
         displayName,
-        buildNcGroups("family", householdGroupName(config.DROPLET_SHARED_FOLDER_NAME)),
+        buildNcGroups(role as Role, householdGroupName(config.DROPLET_SHARED_FOLDER_NAME)),
       );
+
+      // WARP-1042: audit the creation — invite create/accept and
+      // change-password all emit activity rows; direct user creation was the
+      // one unaudited account-lifecycle write.
+      await recordActivity({
+        kind: "auth",
+        severity: "ok",
+        sourceIcon: "user-plus",
+        what: `${displayName || username} account created`,
+        sub: `${role} • by ${req.user?.username ?? "unknown"}`,
+        refs: {
+          actor: req.user?.username ?? null,
+          email,
+          role,
+          mustChangePassword,
+          username,
+        },
+        actor: actorFromRequest(req),
+      });
 
       res.status(201).json({ status: "ok", username });
     } catch (err: any) {
@@ -2487,6 +2540,18 @@ export function createProtectedAuthRouter(
       // unrelated messages that happen to contain "102").
       if (err instanceof NextcloudUserExistsError) {
         res.status(409).json({ error: "User already exists" });
+        return;
+      }
+      // WARP-1042: a P2002 unique-constraint clash from the upsert means the
+      // email (the only user-supplied unique key here — the username is
+      // derived collision-free) is already taken by ANOTHER row. Surface it
+      // as a 409 the dashboard can name, not a masked 500. Body shape mirrors
+      // the NextcloudUserExistsError 409 above, plus a machine-readable code.
+      if ((err as { code?: string })?.code === "P2002") {
+        res.status(409).json({
+          error: "A user with this email already exists",
+          code: "EMAIL_TAKEN",
+        });
         return;
       }
       next(err);

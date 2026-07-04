@@ -98,6 +98,7 @@ vi.mock("../services/brain-memory.service.js", () => ({
 
 import { createProtectedAuthRouter } from "./auth.js";
 import * as nc from "../services/nextcloud.client.js";
+import { recordActivity } from "../services/activity.singleton.js";
 import type { Role } from "../services/jwt.service.js";
 
 /**
@@ -339,5 +340,174 @@ describe("POST /api/auth/users — email-based user creation with derived userid
     expect(res.status).toBe(201);
     const row = prisma._users.find((u: any) => u.email === "kid@warp.test");
     expect(row.mustChangePassword).toBe(true);
+  });
+
+  // ── WARP-1042: role selection + rank guard + audit + duplicate-email 409 ──
+  // POST /auth/users grows an optional `role` (same vocabulary as invites,
+  // minus `service`), guarded by the SAME roleOutranks cap the invite-create
+  // route uses (admin must not mint owner). The role must land on BOTH the
+  // local row and the Nextcloud groups list so session-role derivation stays
+  // consistent with the invite-accept path.
+  describe("role selection (WARP-1042)", () => {
+    it("defaults the created row to the family role when role is omitted", async () => {
+      const prisma = createPrismaMock();
+      const app = buildApp(prisma, "owner");
+
+      const res = await request(app)
+        .post("/api/auth/users")
+        .send({ email: "kid@warp.test", password: "Kid-secret123" });
+
+      expect(res.status).toBe(201);
+      const row = prisma._users.find((u: any) => u.email === "kid@warp.test");
+      expect(row.role).toBe("family");
+      expect(nc.ncCreateUser).toHaveBeenCalledWith(
+        expect.anything(),
+        "kid",
+        "Kid-secret123",
+        undefined,
+        ["household"],
+      );
+    });
+
+    it("threads an explicit role onto the local row AND the Nextcloud groups", async () => {
+      const prisma = createPrismaMock();
+      const app = buildApp(prisma, "owner");
+
+      const res = await request(app)
+        .post("/api/auth/users")
+        .send({ email: "ada@warp.test", password: "Ada-secret123", role: "admin" });
+
+      expect(res.status).toBe(201);
+      const row = prisma._users.find((u: any) => u.email === "ada@warp.test");
+      expect(row.role).toBe("admin");
+      // buildNcGroups("admin", "household") → NC admin group + household,
+      // exactly like the invite-accept path (WARP-883 mapping).
+      expect(nc.ncCreateUser).toHaveBeenCalledWith(
+        expect.anything(),
+        "ada",
+        "Ada-secret123",
+        undefined,
+        ["admin", "household"],
+      );
+    });
+
+    it("coerces the legacy role value 'user' to 'family'", async () => {
+      const prisma = createPrismaMock();
+      const app = buildApp(prisma, "owner");
+
+      const res = await request(app)
+        .post("/api/auth/users")
+        .send({ email: "kid@warp.test", password: "Kid-secret123", role: "user" });
+
+      expect(res.status).toBe(201);
+      const row = prisma._users.find((u: any) => u.email === "kid@warp.test");
+      expect(row.role).toBe("family");
+    });
+
+    it("rejects role 'service' — service principals are env-var-only", async () => {
+      const prisma = createPrismaMock();
+      const app = buildApp(prisma, "owner");
+
+      const res = await request(app)
+        .post("/api/auth/users")
+        .send({ email: "svc@warp.test", password: "Svc-secret1234", role: "service" });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe("INVALID_REQUEST");
+      expect(nc.ncCreateUser).not.toHaveBeenCalled();
+    });
+
+    it("403 ROLE_RANK_EXCEEDED when an admin tries to mint an owner (privilege-escalation guard)", async () => {
+      const prisma = createPrismaMock();
+      const app = buildApp(prisma, "admin");
+
+      const res = await request(app)
+        .post("/api/auth/users")
+        .send({ email: "boss@warp.test", password: "Boss-secret123", role: "owner" });
+
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe("ROLE_RANK_EXCEEDED");
+      expect(prisma.user.upsert).not.toHaveBeenCalled();
+      expect(nc.ncCreateUser).not.toHaveBeenCalled();
+    });
+
+    it("allows an owner to mint another owner (equal rank is not an escalation)", async () => {
+      const prisma = createPrismaMock();
+      const app = buildApp(prisma, "owner");
+
+      const res = await request(app)
+        .post("/api/auth/users")
+        .send({ email: "co@warp.test", password: "Co-secret12345", role: "owner" });
+
+      expect(res.status).toBe(201);
+      const row = prisma._users.find((u: any) => u.email === "co@warp.test");
+      expect(row.role).toBe("owner");
+      expect(nc.ncCreateUser).toHaveBeenCalledWith(
+        expect.anything(),
+        "co",
+        "Co-secret12345",
+        undefined,
+        ["admin", "household"],
+      );
+    });
+  });
+
+  describe("audit event (WARP-1042)", () => {
+    it("records an auth-kind activity row when a user is created", async () => {
+      const prisma = createPrismaMock();
+      const app = buildApp(prisma, "owner");
+
+      const res = await request(app)
+        .post("/api/auth/users")
+        .send({ email: "kid@warp.test", password: "Kid-secret123", role: "family" });
+
+      expect(res.status).toBe(201);
+      expect(recordActivity).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kind: "auth",
+          refs: expect.objectContaining({
+            actor: "user-owner",
+            email: "kid@warp.test",
+            role: "family",
+            mustChangePassword: true,
+          }),
+        }),
+      );
+    });
+
+    it("does NOT record an audit row when the create is rejected by the rank guard", async () => {
+      const prisma = createPrismaMock();
+      const app = buildApp(prisma, "admin");
+
+      await request(app)
+        .post("/api/auth/users")
+        .send({ email: "boss@warp.test", password: "Boss-secret123", role: "owner" });
+
+      expect(recordActivity).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("duplicate email (WARP-1042)", () => {
+    it("maps a prisma P2002 unique-constraint clash to 409 EMAIL_TAKEN (was a 500)", async () => {
+      const prisma = createPrismaMock();
+      prisma.user.upsert = vi.fn(async () => {
+        const e: any = new Error("Unique constraint failed on the fields: (`email`)");
+        e.code = "P2002";
+        throw e;
+      });
+      const app = buildApp(prisma, "owner");
+
+      const res = await request(app)
+        .post("/api/auth/users")
+        .send({ email: "taken@warp.test", password: "Taken-secret123" });
+
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe("EMAIL_TAKEN");
+      // Body shape mirrors the existing NextcloudUserExistsError 409 (an
+      // `error` string), plus the machine-readable code.
+      expect(typeof res.body.error).toBe("string");
+      // The local upsert failed, so Nextcloud provisioning must not run.
+      expect(nc.ncCreateUser).not.toHaveBeenCalled();
+    });
   });
 });
