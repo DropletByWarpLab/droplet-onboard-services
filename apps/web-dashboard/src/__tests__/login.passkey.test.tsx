@@ -1,47 +1,53 @@
 /**
- * PR #377 (WARP-___) — login page "Sign in with a passkey" path.
+ * WARP-1054 — the login page's "Sign in with a passkey" button.
  *
- *   - When passkeys are supported, the login page renders a secondary
+ * As of WARP-1054 the button no longer runs the WebAuthn ceremony inline (which
+ * stranded the user on the unchanged login form). It NAVIGATES to the dedicated
+ * `/login/passkey` approval page, carrying `?next=` through. The ceremony /
+ * state-machine behaviour is covered by login-passkey-page.test.tsx.
+ *
+ *   - When passkeys are supported, the login page renders the secondary
  *     "Sign in with a passkey" action.
- *   - Clicking it runs signInWithPasskey, hydrates the auth context with the
- *     returned user, and routes home — no password required (passwordless).
- *   - A failed/cancelled ceremony surfaces a FRIENDLY translated message, never
- *     the raw error (consistent with the password path's WARP-294 posture).
+ *   - Clicking it pushes `/login/passkey` (with `?next=` when present).
  *   - When the browser can't do WebAuthn the affordance is hidden.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 
 const loginMock = vi.fn();
-const setUserMock = vi.fn();
 vi.mock("@/lib/auth", () => ({
-  useAuth: () => ({ login: loginMock, setUserFromPasskey: setUserMock }),
+  useAuth: () => ({ login: loginMock }),
 }));
 
-const signInWithPasskey = vi.fn();
 const isPasskeySupported = vi.fn();
 vi.mock("@/lib/webauthn", () => ({
-  signInWithPasskey: (...a: unknown[]) => signInWithPasskey(...a),
   isPasskeySupported: (...a: unknown[]) => isPasskeySupported(...a),
 }));
 
+// Local-first, password-only: no SSO configured (discovery covered elsewhere).
+vi.mock("@/lib/api", () => ({
+  getEnabledSsoProviders: () => Promise.resolve([]),
+}));
+
 const pushMock = vi.fn();
+let searchString = "";
 vi.mock("next/navigation", async () => {
   const actual = await vi.importActual<typeof import("next/navigation")>("next/navigation");
   return {
     ...actual,
     useRouter: () => ({ push: pushMock, replace: vi.fn(), back: vi.fn() }),
-    useSearchParams: () => new URLSearchParams(""),
+    useSearchParams: () => new URLSearchParams(searchString),
     usePathname: () => "/login",
   };
 });
 
 import LoginPage from "@/app/login/page";
 
-describe("LoginPage — passkey sign-in (PR #377)", () => {
+describe("LoginPage — passkey button (WARP-1054)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     isPasskeySupported.mockReturnValue(true);
+    searchString = "";
   });
 
   it("renders the passkey action when supported", () => {
@@ -52,34 +58,34 @@ describe("LoginPage — passkey sign-in (PR #377)", () => {
   it("hides the passkey action when the browser can't do WebAuthn", () => {
     isPasskeySupported.mockReturnValue(false);
     render(<LoginPage />);
-    expect(screen.queryByRole("button", { name: /passkey/i })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /passkey/i }),
+    ).not.toBeInTheDocument();
   });
 
-  it("signs in passwordlessly and routes home on success", async () => {
-    const user = { id: "u-1", username: "stefan", displayName: "Stefan", role: "owner" as const };
-    signInWithPasskey.mockResolvedValueOnce(user);
-
+  it("navigates to the dedicated approval page (no inline ceremony)", () => {
     render(<LoginPage />);
     fireEvent.click(screen.getByRole("button", { name: /passkey/i }));
 
-    await waitFor(() => expect(signInWithPasskey).toHaveBeenCalledTimes(1));
-    expect(setUserMock).toHaveBeenCalledWith(user);
-    expect(pushMock).toHaveBeenCalledWith("/");
+    expect(pushMock).toHaveBeenCalledTimes(1);
+    expect(pushMock).toHaveBeenCalledWith("/login/passkey");
     // Password login was NOT used.
     expect(loginMock).not.toHaveBeenCalled();
   });
 
-  it("shows a friendly error and never echoes the raw failure", async () => {
-    const SECRET = "NotAllowedError: ceremony aborted ECONNREFUSED";
-    signInWithPasskey.mockRejectedValueOnce(new Error(SECRET));
-
+  it("carries a present ?next= through to the approval page (encoded)", () => {
+    searchString = "next=/files";
     render(<LoginPage />);
     fireEvent.click(screen.getByRole("button", { name: /passkey/i }));
 
-    await waitFor(() => {
-      expect(screen.getByText(/passkey|try again|didn't work/i)).toBeInTheDocument();
-    });
-    expect(screen.queryByText(SECRET)).not.toBeInTheDocument();
-    expect(screen.queryByText(/ECONNREFUSED/)).not.toBeInTheDocument();
+    expect(pushMock).toHaveBeenCalledWith("/login/passkey?next=%2Ffiles");
+  });
+
+  it("does not append a next param when none is present", () => {
+    searchString = "";
+    render(<LoginPage />);
+    fireEvent.click(screen.getByRole("button", { name: /passkey/i }));
+
+    expect(pushMock).toHaveBeenCalledWith("/login/passkey");
   });
 });
