@@ -167,6 +167,14 @@ export function DrivesPanel() {
   } | null>(null);
   const [formatBusy, setFormatBusy] = useState<string | null>(null);
 
+  // Focus restore for the destructive confirms (WCAG 2.4.3, UX review). The
+  // row CTA is DISABLED while the confirm-token request is in flight, which
+  // drops browser focus to <body> before the dialog opens — so the Dialog
+  // primitive's capture-at-open fallback records <body>, not the button.
+  // Capture the trigger explicitly at click time instead (only one of these
+  // dialogs can be open at once, so a single shared ref is enough).
+  const destructiveTriggerRef = useRef<HTMLElement | null>(null);
+
   // Disks worth surfacing in "Available drives": everything the bridge
   // reports that is NOT already in use (in-use disks are the mounted drive
   // cards below — listing them twice would be confusing, not honest).
@@ -174,11 +182,19 @@ export function DrivesPanel() {
 
   // A pool whose md device backs no mounted filesystem was created but never
   // formatted+mounted (or lost its mount) — offer the owner a way forward
-  // instead of a dead-end card.
-  const mountedDevices = new Set(drives.map((d) => d.device));
+  // instead of a dead-end card. Count a mount of the md node itself OR of one
+  // of its partitions (md127p1) as "backed" (UX review: an exact-node check
+  // re-offered the erase CTA forever for a partitioned pool). Anchored match,
+  // so /dev/md127p1 never counts as a mount of md12.
+  const poolHasMountedFs = (pool: PoolInfo) => {
+    const re = new RegExp(`^/dev/${pool.device}(p\\d+)?$`);
+    return drives.some((d) => re.test(d.device));
+  };
 
   async function handleStartAdopt(disk: DiskInfo) {
     if (disk.state !== "foreign" && disk.state !== "available") return;
+    destructiveTriggerRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setAdoptBusy(disk.name);
     try {
       const token = await adoptDrive({
@@ -217,6 +233,8 @@ export function DrivesPanel() {
   }
 
   async function handleStartFormat(pool: PoolInfo) {
+    destructiveTriggerRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setFormatBusy(pool.device);
     try {
       const token = await requestFormatPool(pool.device, {
@@ -243,7 +261,9 @@ export function DrivesPanel() {
     try {
       await confirmStorageCommand(p.token);
       setFormatPending(null);
-      toast(`${poolName(p.pool)} formatted`, "success");
+      // Honest outcome copy (UX review): pool_format really does mount now —
+      // the host script mkfs-then-host_mounts under /mnt/droplet.
+      toast(`${poolName(p.pool)} formatted and mounted — ready to use`, "success");
       refresh();
       refreshPools();
     } catch (err) {
@@ -379,9 +399,7 @@ export function DrivesPanel() {
                 // gated way forward. Failed pools get support copy, not a
                 // format button.
                 canFormat={
-                  isAdmin &&
-                  p.status !== "failed" &&
-                  !mountedDevices.has(`/dev/${p.device}`)
+                  isAdmin && p.status !== "failed" && !poolHasMountedFs(p)
                 }
                 formatting={formatBusy === p.device}
                 onFormat={() => handleStartFormat(p)}
@@ -480,6 +498,7 @@ export function DrivesPanel() {
             : ""
         }
         variant="destructive"
+        triggerRef={destructiveTriggerRef}
       />
 
       {/* WARP-936 — format & mount confirm for a never-formatted pool. */}
@@ -496,6 +515,7 @@ export function DrivesPanel() {
             : ""
         }
         variant="destructive"
+        triggerRef={destructiveTriggerRef}
       />
     </div>
   );
@@ -569,7 +589,7 @@ function AvailableDiskCard({
           <button
             onClick={onAdopt}
             disabled={busy}
-            className="flex-none whitespace-nowrap rounded-md bg-system-red/90 hover:bg-system-red text-white px-3 py-1.5 type-subheadline font-medium disabled:opacity-60 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-system-red/40"
+            className="flex-none whitespace-nowrap rounded-md bg-system-red hover:bg-system-red/90 text-white px-3 py-1.5 type-subheadline font-medium disabled:opacity-60 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-system-red/40"
           >
             {busy ? "Working…" : "Erase & adopt"}
           </button>
@@ -920,7 +940,7 @@ function PoolCard({
           <button
             onClick={onFormat}
             disabled={formatting}
-            className="flex-none whitespace-nowrap rounded-md bg-system-red/90 hover:bg-system-red text-white px-3 py-1.5 type-subheadline font-medium disabled:opacity-60 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-system-red/40"
+            className="flex-none whitespace-nowrap rounded-md bg-system-red hover:bg-system-red/90 text-white px-3 py-1.5 type-subheadline font-medium disabled:opacity-60 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-system-red/40"
           >
             {formatting ? "Working…" : "Format & mount"}
           </button>

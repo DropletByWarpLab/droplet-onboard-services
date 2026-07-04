@@ -357,12 +357,75 @@ describe("DrivesPanel — format & mount an unformatted pool (WARP-936)", () => 
     );
   });
 
+  it("reports the honest outcome — formatted AND mounted (UX review)", async () => {
+    // pool_format really does mount now (host script mirrors drive_adopt's
+    // final step), so the success toast must say so — a bare "formatted"
+    // contradicted the "Format & mount" button on the same flow.
+    (requestFormatPool as ReturnType<typeof vi.fn>).mockResolvedValue({
+      status: "confirmation_required",
+      confirmationToken: "tok-fmt",
+      service: "pool_format",
+      resourceId: "md127",
+    });
+    (confirmStorageCommand as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true });
+    setup({ drives: [], pools: [md127] });
+
+    fireEvent.click(screen.getByRole("button", { name: /format & mount/i }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /format & mount/i }));
+    await waitFor(() =>
+      expect(toastMock).toHaveBeenCalledWith(
+        expect.stringMatching(/formatted and mounted/i),
+        "success",
+      ),
+    );
+  });
+
+  it("returns focus to the row CTA when the confirm dialog is cancelled (WCAG 2.4.3)", async () => {
+    (requestFormatPool as ReturnType<typeof vi.fn>).mockResolvedValue({
+      status: "confirmation_required",
+      confirmationToken: "tok-fmt",
+      service: "pool_format",
+      resourceId: "md127",
+    });
+    setup({ drives: [], pools: [md127] });
+
+    const cta = screen.getByRole("button", { name: /format & mount/i });
+    cta.focus();
+    fireEvent.click(cta);
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /^cancel$/i }));
+    await waitFor(() => expect(cta).toHaveFocus());
+  });
+
   it("does NOT offer Format & mount when the pool is already mounted as a drive", () => {
     setup({
       drives: [makeDrive({ device: "/dev/md127", mount: "/mnt/droplet/pool" })],
       pools: [{ ...md127, status: "active" }],
     });
     expect(screen.queryByRole("button", { name: /format & mount/i })).not.toBeInTheDocument();
+  });
+
+  it("does NOT offer Format & mount when the pool is mounted via a partition of the array (md127p1)", () => {
+    // UX-review secondary: keying only on the exact md node re-offered the
+    // erase CTA forever for an exotically-partitioned pool.
+    setup({
+      drives: [makeDrive({ device: "/dev/md127p1", mount: "/mnt/droplet/pool" })],
+      pools: [{ ...md127, status: "active" }],
+    });
+    expect(screen.queryByRole("button", { name: /format & mount/i })).not.toBeInTheDocument();
+  });
+
+  it("still offers Format & mount when only a DIFFERENT md pool is mounted (md12 vs md127)", () => {
+    // Prefix-match pitfall: /dev/md127p1 must not count as a mount of md12.
+    setup({
+      drives: [makeDrive({ device: "/dev/md127p1", mount: "/mnt/droplet/pool" })],
+      pools: [
+        { ...md127, status: "active" },
+        { ...md127, device: "md12" },
+      ],
+    });
+    expect(screen.getByRole("button", { name: /format & mount/i })).toBeInTheDocument();
   });
 
   it("hides Format & mount from non-admins", () => {
