@@ -8,13 +8,14 @@
  * calls outside this module are a bug per AC3.
  *
  * Chain integrity is enforced inside a Prisma `$transaction`:
- *   1. SELECT the most recent row's signature with FOR UPDATE so
- *      concurrent emitters serialize at the database boundary
- *      (otherwise two writers could both observe the same prev and
- *      produce a fork in the chain — AC7's tamper test would catch
- *      this on replay).
- *   2. Compute the new row's signature with the injected signer.
- *   3. INSERT the new row.
+ *   1. Take the constant transaction-scoped advisory lock
+ *      `pg_advisory_xact_lock(hashtext('droplet:activity-chain-append'))`
+ *      so concurrent emitters fully serialize (WARP-1026 — a tail-row
+ *      `FOR UPDATE` does NOT serialize appends under READ COMMITTED and
+ *      forked the chain).
+ *   2. Read the current tail row's signature.
+ *   3. Compute the new row's signature with the injected signer.
+ *   4. INSERT the new row. The lock releases at COMMIT/ROLLBACK.
  *
  * The signer is injected so tests can use a fixed key and production
  * pulls from `/data/secrets/audit.key` via `getDefaultSigner()`.
@@ -199,28 +200,39 @@ export function createActivityRecorder(
         schemaVersion: CURRENT_ACTIVITY_SCHEMA_VERSION,
       };
 
-      // Atomic SELECT-prev + INSERT. The Prisma transaction maps to a
-      // single Postgres BEGIN/COMMIT; the FOR UPDATE on the existing
-      // tail row ensures two concurrent calls serialize at the
-      // database level. Without it, both could read the same `latest`
-      // and produce two rows with the same prevSignatureHash — a
-      // chain fork the verifier would flag.
+      // Atomic SELECT-prev + INSERT, serialized by a transaction-scoped
+      // advisory lock (WARP-1026).
+      //
+      // Why NOT `SELECT ... FOR UPDATE` on the tail row (the pre-WARP-1026
+      // approach): under READ COMMITTED a second writer whose SELECT
+      // starts while the first holds the tail lock blocks, then resumes
+      // with its ORIGINAL statement snapshot — EvalPlanQual re-checks only
+      // the locked row, it does NOT re-scan for the newer, higher-id row
+      // the first writer just committed. Both writers then chain from the
+      // same predecessor and fork the chain (permanent "Chain broken" on
+      // /admin/audit). FOR UPDATE also does nothing for two concurrent
+      // genesis writers on an empty table.
+      //
+      // `pg_advisory_xact_lock` (blocking variant — an append must wait,
+      // not skip; contrast cron-runtime.service.ts's try-variant) is held
+      // until COMMIT/ROLLBACK and released by Postgres on the acquiring
+      // backend, so a throwing signer can't leak it. Constant key: every
+      // appender in every orchestrator process contends on the same lock,
+      // which IS the serialization the chain needs. Appliance-scale cost
+      // is one extra round-trip per append (see
+      // audit-insert-bench.pg.test.ts for the p99 budget).
       const inserted = await deps.prisma.$transaction(async (tx) => {
-        // Lock the latest row (if any) so concurrent emitters wait
-        // here. Using $queryRaw because Prisma's `findFirst` doesn't
-        // expose row-level locking. Falls back to no lock when the
-        // table is empty (no row exists to take the lock on; the
-        // INSERT below races on the index, which is fine for a single
-        // genesis row).
-        //
-        // `Prisma.sql` is used inline so the table name isn't
-        // interpolated as user data — keeps the query plan-cached.
+        // `pg_advisory_xact_lock` returns `void`, which Prisma's raw-query
+        // deserializer rejects (P2010, "cannot deserialize column of type
+        // void"). Wrapping in `IS NULL` yields a real boolean column and
+        // is a no-op on the locking behaviour; the recorder ignores the
+        // returned value.
+        await tx.$queryRawUnsafe(
+          "SELECT (pg_advisory_xact_lock(hashtext('droplet:activity-chain-append')) IS NULL) AS locked",
+        );
         const prevRows = await tx.$queryRawUnsafe<
           Array<{ signature: string }>
-        >(
-          // eslint-disable-next-line no-secrets/no-secrets
-          'SELECT "signature" FROM "ActivityRow" ORDER BY "id" DESC LIMIT 1 FOR UPDATE',
-        );
+        >('SELECT "signature" FROM "ActivityRow" ORDER BY "id" DESC LIMIT 1');
         const prevSig = prevRows[0]?.signature ?? "";
         const prevSignatureHash = prevSig === "" ? "" : hashSignature(prevSig);
         const signature = deps.signer.sign(content, prevSignatureHash);
