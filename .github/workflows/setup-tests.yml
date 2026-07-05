@@ -12,6 +12,12 @@ on:
       - "tests/fips-mode.test.sh"
       - "tests/luks2-data-partition.test.sh"
       - "tests/usb-luks-enroll.test.sh"
+      # WARP-235: broker mTLS conf/ACL guards (tracked files + generator parity)
+      - "tests/mosquitto-conf.test.sh"
+      - "docker/mosquitto.conf"
+      - "docker/mosquitto.acl"
+      - "docker/frigate/config.yml"
+      - "docker/docker-compose.yml"
       - ".github/workflows/setup-tests.yml"
   push:
     branches: [main]
@@ -22,6 +28,12 @@ on:
       - "tests/fips-mode.test.sh"
       - "tests/luks2-data-partition.test.sh"
       - "tests/usb-luks-enroll.test.sh"
+      # WARP-235: broker mTLS conf/ACL guards (tracked files + generator parity)
+      - "tests/mosquitto-conf.test.sh"
+      - "docker/mosquitto.conf"
+      - "docker/mosquitto.acl"
+      - "docker/frigate/config.yml"
+      - "docker/docker-compose.yml"
       - ".github/workflows/setup-tests.yml"
   workflow_dispatch:
 
@@ -41,6 +53,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run setup unit tests
         run: bash tests/setup.test.sh
+      - name: Run mosquitto mTLS conf/ACL unit tests
+        # WARP-235: single :8883 mTLS listener, per-CN topic ACLs, generator/
+        # tracked-file parity, shared-password retirement. Pure bash, no Docker.
+        run: bash tests/mosquitto-conf.test.sh
       - name: Run FIPS-mode knob unit tests
         # WARP-318: apply_fips_mode env-write helper (knob → derived vars),
         # idempotency, on↔off convergence, atomic staged-rename, explicit-boolean

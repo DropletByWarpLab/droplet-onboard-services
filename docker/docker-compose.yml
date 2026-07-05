@@ -334,6 +334,10 @@ services:
       # restart-loops. Read-only — the key is loaded once and never
       # mutated.
       - ../data/secrets:/data/secrets:ro
+      # WARP-235/236: this service's own TLS bundle (cert+key+CA, CN =
+      # "orchestrator") from the internal CA. The MQTT clients present it on
+      # mqtts:// brokers; the DROPLET_TLS_* defaults point here.
+      - ../data/secrets/service-tls/orchestrator:/data/service-tls:ro
       # WARP-230: share the device-identity sidecar's Unix-socket dir so
       # the orchestrator's gRPC client can reach it without exposing a
       # network port. Read-only — the orchestrator never writes.
@@ -754,9 +758,20 @@ services:
 
   broker:
     image: eclipse-mosquitto:2
+    ports:
+      # WARP-235: host-LOOPBACK TLS listener for host-network clients
+      # (camera-discovery). Never bound on LAN interfaces. Also fixes the
+      # pre-WARP-235 latent bug where camera-discovery (network_mode: host)
+      # could never reach the unpublished broker at localhost:1883.
+      - "127.0.0.1:8883:8883"
     volumes:
+      # WARP-235: single mTLS listener — client identity is the cert CN
+      # (use_identity_as_username), per-CN topic grants in mosquitto.acl,
+      # server bundle issued by the WARP-236 internal CA. The shared-password
+      # file mount is retired.
       - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
-      - ./mosquitto_passwd_dir:/mosquitto/config/passwd_dir:ro
+      - ./mosquitto.acl:/mosquitto/config/droplet.acl:ro
+      - ../data/secrets/service-tls/broker:/mosquitto/config/tls:ro
     restart: always
     <<: *default-logging
     mem_limit: ${BROKER_MEM_LIMIT:-64m}
@@ -862,12 +877,15 @@ services:
       # written here by the orchestrator and read by file-indexer to
       # run the extract → embed → upsert pipeline.
       - brain-memory-data:/data/brain-memory
+      # WARP-235: this service's own TLS bundle (CN = "file-indexer") for the
+      # mqtts:// broker connection — identity is the cert CN, no password.
+      - ../data/secrets/service-tls/file-indexer:/data/service-tls:ro
     env_file:
       - path: ../.env
         required: false
     environment:
       - DATABASE_URL=postgresql://droplet:${POSTGRES_PASSWORD}@db:5432/droplet
-      - MQTT_BROKER=mqtt://${MQTT_USER:-droplet}:${MQTT_PASSWORD}@broker:1883
+      - MQTT_BROKER=${MQTT_BROKER:-mqtts://broker:8883}
       - NEXTCLOUD_DATA_ROOT=/data/nextcloud/data
       - AI_GATEWAY_GRPC_URL=ai-gateway:50051
       # WARP-318: FIPS activation for the Python file-indexer (same shape as
@@ -1126,10 +1144,11 @@ services:
       # to call the orchestrator"); the orchestrator stores it as
       # SERVICE_TOKEN_EMAIL (TS convention SERVICE_TOKEN_<consumer>).
       - ORCHESTRATOR_SERVICE_TOKEN=${SERVICE_TOKEN_EMAIL:-}
+      # WARP-235: mTLS broker — identity is the client cert CN
+      # ("email-indexer"); the username/password pair is retired.
       - MQTT_HOST=${MQTT_HOST:-broker}
-      - MQTT_PORT=${MQTT_PORT:-1883}
-      - MQTT_USERNAME=${MQTT_USERNAME:-}
-      - MQTT_PASSWORD=${MQTT_PASSWORD:-}
+      - MQTT_PORT=${MQTT_PORT:-8883}
+      - MQTT_TLS=${MQTT_TLS:-1}
       - EMAIL_KEY_PATH=/data/secrets/email.key
       - OUTBOUND_POLL_SECONDS=${OUTBOUND_POLL_SECONDS:-10}
       - ACCOUNT_REFRESH_SECONDS=${ACCOUNT_REFRESH_SECONDS:-300}
@@ -1142,6 +1161,9 @@ services:
       - DROPLET_FIPS_REQUIRED=${DROPLET_FIPS_REQUIRED:-true}
     volumes:
       - ../data/secrets:/data/secrets:ro
+      # WARP-235: this service's own TLS bundle (CN = "email-indexer") for the
+      # mqtts:// broker connection.
+      - ../data/secrets/service-tls/email-indexer:/data/service-tls:ro
     depends_on:
       # `db` / `broker` are the canonical service names. `orchestrator`
       # is required because the indexer POSTs ingest deltas on every
@@ -1291,13 +1313,14 @@ services:
       # and docker-compose skips the mount with a warning.
       - /usr/lib/aarch64-linux-gnu/tegra:/usr/lib/aarch64-linux-gnu/tegra:ro
       - /usr/lib/aarch64-linux-gnu/nvidia:/usr/lib/aarch64-linux-gnu/nvidia:ro
+      # WARP-235: this service's own TLS bundle (CN = "frigate") for the
+      # mqtts:// broker connection — host/port/cert paths are static in
+      # docker/frigate/config.yml now (no env substitution, no password).
+      - ../data/secrets/service-tls/frigate:/data/service-tls:ro
     env_file:
       - path: ../.env
         required: false
     environment:
-      # Static config — FRIGATE_MQTT_USER and FRIGATE_MQTT_PASSWORD from .env
-      - FRIGATE_MQTT_HOST=broker
-      - FRIGATE_MQTT_PORT=1883
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
       # JP6 image only: ``YOLO_MODELS`` triggers the ``trt-model-prepare``
@@ -1333,9 +1356,14 @@ services:
     env_file:
       - path: ../.env
         required: false
+    volumes:
+      # WARP-235: this service's own TLS bundle (CN = "camera-discovery") for
+      # the mqtts:// broker connection over the loopback :8883 publish.
+      - ../data/secrets/service-tls/camera-discovery:/data/service-tls:ro
     environment:
-      # Host-mode service — uses MQTT_BROKER_LOCAL from .env (localhost, not broker)
-      - MQTT_BROKER=${MQTT_BROKER_LOCAL:-mqtt://localhost:1883}
+      # Host-mode service — dials the broker's host-loopback TLS publish
+      # (127.0.0.1:8883) via MQTT_BROKER_LOCAL from .env
+      - MQTT_BROKER=${MQTT_BROKER_LOCAL:-mqtts://localhost:8883}
       - ROUTING_SERVICE_URL=${ROUTING_SERVICE_URL:-http://localhost:8080}
       - ROUTING_SERVICE_TOKEN=${ROUTING_SERVICE_TOKEN:-}
       - FRIGATE_URL=http://localhost:5000

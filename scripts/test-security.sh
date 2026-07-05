@@ -32,7 +32,9 @@ FAIL=0
 pass() { printf "  ${_GREEN}PASS${_RESET}  %s\n" "$1"; PASS=$((PASS + 1)); }
 fail() { printf "  ${_RED}FAIL${_RESET}  %s\n" "$1"; FAIL=$((FAIL + 1)); }
 
-SECRET_VARS="POSTGRES_PASSWORD REDIS_PASSWORD MQTT_PASSWORD NEXTCLOUD_ADMIN_PASSWORD DEVICE_SECRET DEVICE_SECRET_KEY"
+# MQTT_PASSWORD retired by WARP-235 — MQTT identity is the per-service client
+# certificate CN (see docker/mosquitto.acl + docs/security/internal-mtls.md).
+SECRET_VARS="POSTGRES_PASSWORD REDIS_PASSWORD NEXTCLOUD_ADMIN_PASSWORD DEVICE_SECRET DEVICE_SECRET_KEY"
 
 # =============================================================================
 # Test 1: Compose file contains NO :? patterns (always parseable)

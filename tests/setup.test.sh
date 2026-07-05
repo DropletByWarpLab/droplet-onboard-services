@@ -62,17 +62,18 @@ export LOG_FILE
 # shellcheck source=../scripts/lib/logging.sh
 source "$REPO_ROOT_REAL/scripts/lib/logging.sh"
 
-# Stub out Docker/openssl-dependent helpers before sourcing secrets.sh
-_generate_mosquitto_passwd() { return 0; }
+# Stub out artifact-writing helpers before sourcing secrets.sh
+# (_generate_mosquitto_passwd was retired by WARP-235 — MQTT is mTLS-only)
 _write_mosquitto_conf()       { return 0; }
+_write_mosquitto_acl()        { return 0; }
 _generate_tls_cert()          { return 0; }
 
 # shellcheck source=../scripts/lib/secrets.sh
 source "$REPO_ROOT_REAL/scripts/lib/secrets.sh"
 
 # Re-stub after sourcing secrets.sh (it defines these functions — override them)
-_generate_mosquitto_passwd() { return 0; }
 _write_mosquitto_conf()       { return 0; }
+_write_mosquitto_acl()        { return 0; }
 _generate_tls_cert()          { return 0; }
 
 # Run generate_env

@@ -140,13 +140,17 @@ check "Redis" \
       --cert /tmp/redis.crt --key /tmp/redis.key --cacert /tmp/redis-ca.crt \
       -a "${REDIS_PASSWORD:-redis-dev-password}" --no-auth-warning ping || true
 
-# --- MQTT broker ---
-check_warn "MQTT broker" \
+# --- MQTT broker (WARP-235: mTLS listener — identity = client cert CN) ---
+# Probes with the broker's own bundle: a successful CONNECT proves the :8883
+# TLS listener is up and accepting CA-signed client certs. Liveness only —
+# the "broker" CN has no topic grants, so the QoS-0 publish is ACL-dropped.
+check_warn "MQTT broker (mTLS)" \
   _docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" exec -T broker \
-    mosquitto_pub -h localhost \
-    ${MQTT_USER:+-u "$MQTT_USER"} \
-    ${MQTT_PASSWORD:+-P "$MQTT_PASSWORD"} \
-    -t "droplet/test" -m "verify" -q 0
+    mosquitto_pub -h localhost -p 8883 \
+    --cafile /mosquitto/config/tls/ca.pem \
+    --cert /mosquitto/config/tls/cert.pem \
+    --key /mosquitto/config/tls/key.pem \
+    -t "droplet/verify" -m "verify" -q 0
 
 # --- Nginx reverse proxy (single entry point — services are not exposed to host) ---
 check "Nginx → Orchestrator API" \
@@ -205,8 +209,13 @@ check "Docker secret: openwrt_password" \
 check "TLS certificate" \
   bash -c '[ -f "'"$REPO_ROOT/docker/certs/droplet.crt"'" ] && [ -f "'"$REPO_ROOT/docker/certs/droplet.key"'" ]' || true
 
-check "MQTT password file" \
-  bash -c '[ -f "'"$REPO_ROOT/docker/mosquitto_passwd_dir/mosquitto_passwd"'" ]' || true
+# WARP-235: the MQTT password file is retired — the broker mounts its TLS
+# bundle (issued by the WARP-236 internal CA) and the per-CN topic ACL file.
+check "MQTT broker TLS bundle" \
+  bash -c '[ -f "'"$REPO_ROOT/data/secrets/service-tls/broker/cert.pem"'" ] && [ -f "'"$REPO_ROOT/data/secrets/service-tls/broker/key.pem"'" ]' || true
+
+check "MQTT topic ACL file" \
+  bash -c '[ -f "'"$REPO_ROOT/docker/mosquitto.acl"'" ]' || true
 
 # --- Stale .env drift (WARP-36, WARP-44) ---
 # Older installs predate ROUTING_SERVICE_TOKEN — if missing, routing-service
