@@ -128,11 +128,12 @@ auditor guide is [`docs/fips.md`](fips.md); the essentials:
 - **FIPS restricts, it does not add strength.** Turning it on narrows crypto to
   FIPS-approved algorithms for certification; it does not make the system
   "more secure" in the informal sense.
-- **Postgres decision (A) — pending review.** Under FIPS the cipher policy
-  rejects Postgres's TLS handshake ciphers (`P1011` "library has no ciphers"),
-  so the orchestrator's Prisma libpq can't reach `db`. This PR keeps the
-  orchestrator on the stock openssl config and flags the reconciliation with
-  WARP-233's enforced Postgres TLS as a decision for Romain — see
-  [`docs/fips.md`](fips.md).
+- **Postgres under FIPS — clash deferred, not gone.** The orchestrator boots
+  FIPS-enforcing under `--fips` and still reaches `db` because that
+  intra-compose hop is plaintext today (the pgvector image ships no server
+  cert; `sslmode=prefer` falls back). When WARP-233 lands Postgres
+  TLS + `sslmode=require`, the FIPS cipher policy rejects the handshake
+  (`P1011` "library has no ciphers") — reconciling the two is a decision for
+  that review. See [`docs/fips.md`](fips.md).
 - **Dev opt-out.** `DROPLET_FIPS_MODE=0` (default). The boot self-test skips
   silently when `DROPLET_FIPS_REQUIRED` is unset/false.

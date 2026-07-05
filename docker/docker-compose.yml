@@ -258,28 +258,30 @@ services:
       # WITHOUT a rebuild (Node needs all three vars together — its bundled
       # OpenSSL's MODULESDIR differs from Debian's; see the Dockerfiles).
       #
-      # ┌─ P1011 orchestrator↔Postgres TLS clash — DECISION FOR ROMAIN ────────┐
-      # │ Under the FIPS openssl config the FIPS cipher set rejects the        │
-      # │ non-FIPS ciphers Postgres uses for its TLS handshake — Prisma's      │
-      # │ libpq then fails to open ANY connection with P1011: "library has no  │
-      # │ ciphers". The WARP-318 plan's decision (A): run the intra-compose    │
-      # │ orchestrator↔`db` hop PLAINTEXT (sslmode=disable) on the private     │
-      # │ container bridge, so the FIPS policy never touches the libpq         │
-      # │ handshake; the FIPS boundary auditors care about (edge TLS,          │
-      # │ data-at-rest, signatures) is unaffected.                             │
+      # ┌─ Postgres-under-FIPS (P1011) — ACTUAL behavior today (WARP-317) ─────┐
+      # │ Under `setup.sh --fips` the interpolations below DO hand this        │
+      # │ container the FIPS config (OPENSSL_CONF=/etc/ssl/openssl-fips.cnf    │
+      # │ + MODULES + NODE_OPTIONS + REQUIRED=true): the orchestrator boots    │
+      # │ FIPS-enforcing — there is no orchestrator-specific opt-out. (An      │
+      # │ earlier revision of this comment claimed it "keeps the system        │
+      # │ openssl config"; that was wrong — only the `:-` DEFAULTS are the     │
+      # │ stock config, i.e. the OFF path.)                                    │
       # │                                                                      │
-      # │ *** UNRESOLVED CROSS-CLUSTER TENSION ***                             │
-      # │ WARP-233 is enforcing Postgres TLS 1.3 + SCRAM and pins             │
-      # │ DATABASE_URL ...?sslmode=REQUIRE (the exact opposite). This PR       │
-      # │ deliberately does NOT edit the DATABASE_URL line (WARP-233 owns it)  │
-      # │ and does NOT force sslmode=disable — decision (A) needs Romain's     │
-      # │ sign-off AND reconciliation with WARP-233 at review. Until then the  │
-      # │ orchestrator keeps the system openssl config (below) so it always    │
-      # │ reaches Postgres; its "boots FIPS-enforcing" AC is descoped (see     │
-      # │ the skip in tests/integration/fips-stack.test.sh, WARP-317).         │
-      # │ To apply (A) once ratified — reversible, FIPS-path-scoped: append    │
-      # │ `?sslmode=disable` to the orchestrator/mcp-server DATABASE_URL ONLY  │
-      # │ when DROPLET_FIPS_MODE=1 (or drop server-side FIPS ciphers, opt B).  │
+      # │ It still reaches Postgres because the intra-compose `db` hop is      │
+      # │ PLAINTEXT today: the pgvector image ships no server cert (ssl=off),  │
+      # │ so libpq/quaint's default sslmode=prefer falls back to a non-TLS     │
+      # │ connection and the FIPS cipher policy never touches a handshake.     │
+      # │ tests/integration/fips-stack.test.sh asserts exactly this merged     │
+      # │ behavior (orchestrator FIPS-enforcing AND /api/llm/conversations     │
+      # │ serving = Prisma over plaintext-in-bridge).                          │
+      # │                                                                      │
+      # │ THE CLASH IS DEFERRED, NOT GONE: when WARP-233 lands Postgres        │
+      # │ TLS 1.3 + `sslmode=require`, the FIPS cipher set rejects that        │
+      # │ handshake (Prisma P1011 "library has no ciphers"). Reconciliation    │
+      # │ options stay as documented for Romain: (A) FIPS-path-scoped          │
+      # │ `?sslmode=disable` on the private bridge, or (B) server-side         │
+      # │ FIPS-approved Postgres ciphers. This block deliberately does NOT     │
+      # │ edit DATABASE_URL (WARP-233 owns it).                                │
       # └──────────────────────────────────────────────────────────────────────┘
       - OPENSSL_CONF=${OPENSSL_CONF:-/etc/ssl/openssl.cnf}
       - OPENSSL_MODULES=${OPENSSL_MODULES:-}
@@ -408,6 +410,16 @@ services:
       - path: ../.env
         required: false
     environment:
+      # WARP-317: this image ships the FIPS cnf + self-test helper but NOT
+      # the validated fips.so module (only the five provider images +
+      # gateway carry it). The env_file above would leak a FIPS-on .env's
+      # DROPLET_FIPS_REQUIRED=true / OPENSSL_CONF=<fips cnf> straight into
+      # this container — boot self-test exit 1 (restart-loop) and, even
+      # with the gate off, a cnf-without-module libcrypto that fails at
+      # first crypto use. `environment:` beats env_file, so pin both to
+      # the literal OFF posture (identical to the pre-WARP-318 render).
+      DROPLET_FIPS_REQUIRED: "false"
+      OPENSSL_CONF: /etc/ssl/openssl.cnf
       # Backend selection — defaults to 'real' in production. Override
       # to 'mock' on hosts without /dev/tpm0 (Mac dev, CI runners).
       # docker-compose.test.override.yml forces 'mock' for the test lane.
@@ -805,11 +817,11 @@ services:
       # ai-gateway — OPENSSL_CONF alone; system libcrypto). Previously relied on
       # .env with neither in `environment:`; made explicit for symmetry. Empty/
       # false default → byte-identical to today. NOTE: like the orchestrator,
-      # this container opens a Prisma/libpq connection to `db`, so the P1011
-      # Postgres-TLS-under-FIPS clash (decision A, see the orchestrator comment)
-      # applies to it too — its FIPS enforcement is subject to the same
-      # unresolved WARP-233 reconciliation. The DATABASE_URL line above is left
-      # exactly as-is (WARP-233 owns it).
+      # this container connects to `db`, which is PLAINTEXT on the private
+      # bridge today (see the orchestrator's Postgres-under-FIPS box), so it
+      # boots FIPS-enforcing AND reaches Postgres. The P1011 clash returns
+      # when WARP-233 lands Postgres TLS — same deferred reconciliation. The
+      # DATABASE_URL line above is left exactly as-is (WARP-233 owns it).
       - OPENSSL_CONF=${OPENSSL_CONF:-/etc/ssl/openssl.cnf}
       - DROPLET_FIPS_REQUIRED=${DROPLET_FIPS_REQUIRED:-false}
     depends_on:
@@ -1001,11 +1013,17 @@ services:
       - DROPLET_MATTER_WIFI_PSK=${DROPLET_MATTER_WIFI_PSK:-}
       - DROPLET_MATTER_WIFI_PSK_FILE=${DROPLET_MATTER_WIFI_PSK_FILE:-}
       - DROPLET_MATTER_REGULATORY_COUNTRY=${DROPLET_MATTER_REGULATORY_COUNTRY:-XX}
-      # Same FIPS posture note as the orchestrator: the slim image has no
-      # NIST-validated provider module yet, so default to the system
-      # OpenSSL config until provider provisioning lands.
-      - OPENSSL_CONF=${OPENSSL_CONF:-/etc/ssl/openssl.cnf}
-      - DROPLET_FIPS_REQUIRED=${DROPLET_FIPS_REQUIRED:-false}
+      # WARP-317: this image does NOT ship the validated fips.so (only the
+      # five provider images + gateway do — see docker-build.yml), so the
+      # FIPS boot gate is pinned OFF *literally*, never interpolated from
+      # the global knob. Before this pin, `setup.sh --fips` (WARP-318)
+      # wrote DROPLET_FIPS_REQUIRED=true into .env and the old
+      # `${...:-false}` interpolation passed it through → getFips()==false
+      # → exit 1 → restart-loop. Same values as the old OFF-path render, so
+      # the default posture is unchanged. Revisit only if this image gains
+      # the provider (then also add it to tests/integration/fips-stack).
+      - OPENSSL_CONF=/etc/ssl/openssl.cnf
+      - DROPLET_FIPS_REQUIRED=false
     volumes:
       # Fabric continuity (WARP-850 requirement #2): the named volume
       # moves here from the orchestrator UNCHANGED.
@@ -1064,13 +1082,15 @@ services:
       - EMAIL_KEY_PATH=/data/secrets/email.key
       - OUTBOUND_POLL_SECONDS=${OUTBOUND_POLL_SECONDS:-10}
       - ACCOUNT_REFRESH_SECONDS=${ACCOUNT_REFRESH_SECONDS:-300}
-      # WARP-318 note: this service's DROPLET_FIPS_REQUIRED default-on
-      # (`:-true`) predates the single knob and is left as-is. When the operator
-      # runs setup.sh --fips/--no-fips, apply_fips_mode writes an explicit
-      # DROPLET_FIPS_REQUIRED into .env that OVERRIDES this `:-true` default in
-      # both directions, so the single DROPLET_FIPS_MODE knob stays the source
-      # of truth. (Behavior unchanged for installs that never touch the flag.)
-      - DROPLET_FIPS_REQUIRED=${DROPLET_FIPS_REQUIRED:-true}
+      # WARP-317: pinned OFF, replacing the legacy `${...:-true}` default.
+      # This image does not ship the validated fips.so, so REQUIRED=true can
+      # only ever crash-loop it — and because `:-` treats an *empty* .env
+      # value the same as unset, any install that never ran `setup.sh
+      # --fips/--no-fips` rendered `true` here and hit exactly that loop on
+      # the `full` profile. Literal false is the only boot posture this
+      # image can honor; the FIPS boundary (the five provider images +
+      # gateway) is asserted by tests/integration/fips-stack.test.sh.
+      - DROPLET_FIPS_REQUIRED=false
     volumes:
       - ../data/secrets:/data/secrets:ro
     depends_on:
@@ -1265,6 +1285,12 @@ services:
       - path: ../.env
         required: false
     environment:
+      # WARP-317: no validated fips.so in this image — pin the FIPS boot
+      # gate + OpenSSL config to the literal OFF posture so a FIPS-on .env
+      # inherited via env_file can't crash-loop it (see the
+      # device-identity-svc comment; `environment:` beats env_file).
+      - DROPLET_FIPS_REQUIRED=false
+      - OPENSSL_CONF=/etc/ssl/openssl.cnf
       # Host-mode service — uses MQTT_BROKER_LOCAL from .env (localhost, not broker)
       - MQTT_BROKER=${MQTT_BROKER_LOCAL:-mqtt://localhost:1883}
       - ROUTING_SERVICE_URL=${ROUTING_SERVICE_URL:-http://localhost:8080}
@@ -1923,6 +1949,12 @@ services:
       - path: ../.env
         required: false
     environment:
+      # WARP-317: no validated fips.so in this image — pin the FIPS boot
+      # gate + OpenSSL config to the literal OFF posture so a FIPS-on .env
+      # inherited via env_file can't crash-loop it (see the
+      # device-identity-svc comment; `environment:` beats env_file).
+      - DROPLET_FIPS_REQUIRED=false
+      - OPENSSL_CONF=/etc/ssl/openssl.cnf
       - DROPLET_TELEMETRY_ENABLED=${DROPLET_TELEMETRY_ENABLED:-0}
       - DROPLET_TELEMETRY_PORTAL_URL=${DROPLET_TELEMETRY_PORTAL_URL:-https://analytics.warp-lab.ai/api/v1}
       - DROPLET_TELEMETRY_PROVISIONING_CODE=${DROPLET_TELEMETRY_PROVISIONING_CODE:-}
