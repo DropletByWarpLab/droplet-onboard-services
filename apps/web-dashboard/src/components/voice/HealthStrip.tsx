@@ -100,7 +100,7 @@ export function HealthStrip({
                 <Link
                   href="/help"
                   className="vtext-btn"
-                  style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 4 }}
+                  style={{ marginLeft: "auto" }}
                 >
                   Get help <ArrowRight size={12} aria-hidden="true" />
                 </Link>

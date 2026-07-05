@@ -646,7 +646,6 @@ export function CalibrationWizard({
             <button
               type="button"
               className="vtext-btn"
-              style={{ minHeight: 44, display: "inline-flex", alignItems: "center", gap: 4 }}
               onClick={() => goto((step - 1) as Step)}
             >
               <ChevronLeft size={14} aria-hidden="true" /> Back
@@ -658,7 +657,6 @@ export function CalibrationWizard({
             <button
               type="button"
               className="vtext-btn"
-              style={{ minHeight: 44 }}
               onClick={() => {
                 pushFlag(FLAG_ECHO);
                 setEchoOk(false);
@@ -673,7 +671,6 @@ export function CalibrationWizard({
               <button
                 type="button"
                 className="vtext-btn"
-                style={{ minHeight: 44 }}
                 onClick={() => onClose({ applied: false })}
               >
                 Not now

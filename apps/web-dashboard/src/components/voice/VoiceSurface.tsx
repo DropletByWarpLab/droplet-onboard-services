@@ -31,7 +31,9 @@ import {
   deriveHealthChecks,
   deriveVoiceSurfaceState,
   formatClock,
+  NOISE_FLOOR_PASS_DBFS,
   relTime,
+  SPEECH_PEAK_PASS_DBFS,
   type VoiceCheckAction,
 } from "./state";
 import "./voice.css";
@@ -140,7 +142,14 @@ export function VoiceSurface({
       toast("Listening for steady noise…", "info");
       try {
         const r = await measureVoiceLevel("noise_floor", 5);
-        toast(`Loudest steady level right now: ${r.rms_dbfs} dB.`, "info");
+        // Plain word first, measured value as the em-dash aside — a
+        // bare number tells a home user nothing.
+        toast(
+          r.rms_dbfs <= NOISE_FLOOR_PASS_DBFS
+            ? `Background level is steady — quiet enough at ${r.rms_dbfs} dB.`
+            : `A constant noise source is nearby — about ${r.rms_dbfs} dB at the mic.`,
+          "info",
+        );
       } catch {
         toast("Couldn't measure — the microphone didn't respond.", "error");
       }
@@ -150,7 +159,13 @@ export function VoiceSurface({
       toast("Listening — speak normally from where you usually are…", "info");
       try {
         const r = await measureVoiceLevel("speech_peak", 5);
-        toast(`Speech level measured: ${r.peak_dbfs} dB.`, "info");
+        // Mirrors the wizard's step-2 good/faint wording.
+        toast(
+          r.peak_dbfs >= SPEECH_PEAK_PASS_DBFS
+            ? `Speech came through — good at ${r.peak_dbfs} dB.`
+            : `Speech came through — faint at ${r.peak_dbfs} dB. Try from a bit closer.`,
+          "info",
+        );
       } catch {
         toast("Couldn't measure — the microphone didn't respond.", "error");
       }
@@ -309,11 +324,7 @@ export function VoiceSurface({
     // no_mic / unavailable — never launch a wizard that cannot succeed.
     return (
       <>
-        <Link
-          href="/help"
-          className="vtext-btn"
-          style={{ display: "inline-flex", alignItems: "center", gap: 4, minHeight: 44 }}
-        >
+        <Link href="/help" className="vtext-btn">
           Get help <ArrowRight size={13} aria-hidden="true" />
         </Link>
         <button

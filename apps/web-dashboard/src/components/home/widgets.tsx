@@ -363,7 +363,7 @@ function StatusWidget({ w, h }: WidgetProps) {
         : voiceState.kind === "attention"
           ? [Mic, "Voice", "Attention", "needs attention", "var(--color-system-orange)"]
           : voiceState.kind === "broken"
-            ? [Mic, "Voice", "Attention", "microphone not working", "var(--color-system-red)"]
+            ? [Mic, "Voice", "Not working", "microphone not working", "var(--color-system-red)"]
             : [Mic, "Voice", "—", "not calibrated yet", "var(--color-label-quaternary)"];
 
   const stats: [LucideIcon, string, string, string, string][] = [

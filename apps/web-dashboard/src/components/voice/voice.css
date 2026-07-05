@@ -3,9 +3,10 @@
    Ported from the design handoff prototype (shared_brain
    content/brand/handoffs/voice/prototype/voice.css), surface
    pieces only — the shell/sidebar/toolbar/menus come from the
-   real dashboard. Token-driven: colors bind to the globals.css
-   custom properties (light + dark both covered by the token
-   overrides); radii/motion use the design-system scale values
+   real dashboard. Token-driven: colors + shadows bind to the
+   globals.css custom properties (light + dark both covered by the
+   token overrides — cards ride --shadow-tile like their sibling
+   surfaces); radii/motion use the design-system scale values
    (cards 14px · modal 16px · buttons 8px · pills 9999px;
    cubic-bezier(0.25,0.1,0.25,1), 250ms/200ms). No new colors,
    type sizes, or shadows.
@@ -22,19 +23,28 @@
   background: var(--color-surface-primary);
   border: 1px solid var(--color-separator);
   border-radius: 14px;
-  box-shadow: var(--shadow-sm, 0 1px 2px rgba(0, 0, 0, 0.04));
+  /* The production card-shadow token (dark mode swaps in its inset
+     hairline variant) — the prototype's --shadow-sm doesn't exist in
+     globals.css. */
+  box-shadow: var(--shadow-tile);
 }
 .dark .vcard {
   background: var(--color-surface-elevated);
 }
 
-/* Quiet text button (inline card actions). ≥44px hit target via padding. */
+/* Quiet text button (inline card + wizard actions). §8 / WCAG 2.5.5:
+   every action gets its ≥44px hit target from the min-height here —
+   no per-callsite inline overrides. */
 .vtext-btn {
   font-size: 13px;
   font-weight: 500;
   color: var(--color-accent);
   padding: 4px 6px;
-  min-height: 32px;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
   border-radius: 6px;
   background: transparent;
   border: none;
@@ -460,6 +470,9 @@
 
 .vwiz-f {
   display: flex;
+  /* §8 — Back / "Not now" / "Apply calibration" + its sub-caption must
+     survive 375px; wrap instead of clipping. */
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   padding: 16px 20px 18px;
@@ -472,7 +485,9 @@
 .vwiz-f .right {
   margin-left: auto;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: 10px;
 }
 
@@ -580,9 +595,10 @@
 .vzone-meter .vmeter span {
   width: 7px;
 }
+/* Instructional copy under the zone meter stays in the UI font —
+   mono is reserved for measured values. */
 .vzone-lbl {
   font-size: 11px;
-  font-family: var(--font-mono), ui-monospace, monospace;
   color: var(--color-label-tertiary);
   margin: 6px 0 0;
 }
@@ -604,7 +620,8 @@
   border: 2px solid var(--color-separator);
   color: var(--color-label-tertiary);
   font-family: var(--font-mono), ui-monospace, monospace;
-  font-size: 14px;
+  /* §8 — orange (miss) numerals must never render below 15px. */
+  font-size: 15px;
 }
 .vtick.hit {
   border-color: var(--color-system-green);
