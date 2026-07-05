@@ -356,14 +356,43 @@ jobs:
           cache-from: type=registry,ref=${{ steps.meta.outputs.cache-ref }}
           cache-to: ${{ github.event_name == 'push' && format('type=registry,ref={0},mode=max,image-manifest=true', steps.meta.outputs.cache-ref) || '' }}
 
-      # WARP-243: image vulnerability gate. HIGH/CRITICAL with an available
-      # fix fails the build. ignore-unfixed keeps un-patchable Debian base
-      # CVEs from blocking; pre-existing language-dep CVEs are triaged in
-      # .trivyignore (one comment per entry, burn-down via Dependabot).
+      # WARP-243: image vulnerability gate — DETERMINISTIC by construction.
+      #
+      # Blocking on "any fixable HIGH/CRITICAL" against a *rolling* Trivy DB
+      # is non-deterministic over time: the same image + same code goes red
+      # the day the DB adds a CVE for an already-installed package (Debian
+      # point-release lag on libcap2/libgnutls30, new npm/Go-module advisories
+      # for pinned deps). That is the exact "flake-block on pre-existing
+      # findings" the cluster-E spec forbids. Two mechanisms make this gate
+      # reproducible AND still catch genuinely NEW fixable vulns:
+      #
+      #   1. PINNED vuln DB (TRIVY_DB_REPOSITORY at a dated OCI tag). A given
+      #      commit always scans against the same DB snapshot, so "green on
+      #      Monday" stays green on Friday with no code change. Bumping the
+      #      pin is a deliberate, reviewable PR (`.github/trivy-db-version`),
+      #      turning silent drift into an intentional event.
+      #   2. .trivyignore BASELINE — the complete set of fixable HIGH/CRITICAL
+      #      findings present at the pinned-DB snapshot, each with a burn-down
+      #      note. A fixable vuln NOT in the baseline (i.e. one this PR
+      #      introduces, or one the DB bump newly surfaces) still fails the
+      #      build. ignore-unfixed drops un-patchable base CVEs on top.
+      #
       # scanners: vuln only — secrets are gitleaks' domain, misconfig is
-      # hadolint's (no double-reporting).
-      - name: Trivy scan ${{ matrix.image }} (block HIGH/CRITICAL)
+      # hadolint's (no double-reporting). Probe: tests/probe/trivy-newcve.md
+      # documents adding an un-baselined fixable HIGH and watching this fail.
+      - name: Read pinned Trivy DB digest
+        id: trivydb
+        run: echo "ref=$(grep -v '^#' .github/trivy-db-version | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Trivy scan ${{ matrix.image }} (block new HIGH/CRITICAL)
         uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          # Pin the vuln DB by immutable digest so the scan is reproducible
+          # run-to-run — the sole knob is .github/trivy-db-version. (The Java
+          # DB is unused here: no JVM images, scanners:vuln only. Left at the
+          # rolling tag; it never contributes findings to these images.)
+          TRIVY_DB_REPOSITORY: ghcr.io/aquasecurity/trivy-db@${{ steps.trivydb.outputs.ref }}
+          TRIVY_SKIP_VERSION_CHECK: "true"
         with:
           image-ref: droplet-ci/${{ matrix.image }}:scan
           severity: HIGH,CRITICAL
