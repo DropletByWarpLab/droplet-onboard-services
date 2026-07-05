@@ -752,16 +752,41 @@ model FileContentChunk {
   // Read-only from the app side; computed by Postgres on insert/update.
   // Declared as Unsupported() because Prisma has no first-class tsvector type.
   text_tsv    Unsupported("tsvector")?
+  /// WARP-233 @encrypted(aes-256-gcm, dek=brain:<brainItemId>) when
+  /// sensitivity=sensitive: `text` holds a dcv1: blob; excluded from the
+  /// lexical (text_tsv) search arm; snippets are computed app-side post-decrypt.
+  sensitivity ChunkSensitivity           @default(standard)
 
   @@unique([ncFileId, chunkIdx])
   @@index([userId])
   @@index([userId, source, indexedAt]) // recency dashboard query
   @@index([brainItemId])
+  @@index([userId, sensitivity]) // WARP-233: lexical-arm sensitivity filter
 }
 
 enum FileContentSource {
   nextcloud
   brain
+}
+
+/// WARP-233 — explicit sensitivity tag (no guessing / no prefix-sniffing for
+/// policy; the dcv1: prefix is a FORMAT marker, this column is the POLICY).
+enum ChunkSensitivity {
+  standard
+  sensitive
+}
+
+/// WARP-233 — wrapped per-document data-encryption keys (deviation D1: app-layer
+/// AES-256-GCM instead of pg_tde). `keyId` scopes: `brain:<brainItemId>` (one DEK
+/// per chat-attached document), `user-email` (the User.email logical key).
+/// `wrappedDek` = base64(iv‖ct‖tag) of the raw 32-byte DEK sealed under the
+/// device doc-KEK (HKDF of DEVICE_SECRET_KEY) with AAD = keyId.
+/// Crypto-shred = DELETE the row: every ciphertext under that DEK is
+/// permanently unreadable. TPM-sealing the KEK is WARP-1033.
+model DocumentEncryptionKey {
+  keyId      String   @id
+  wrappedDek String
+  createdAt  DateTime @default(now())
 }
 
 // ── WARP-203: Per-user brain memory ──
@@ -1296,7 +1321,18 @@ model User {
   // Still nullable: service-only principals and locally-minted rows that
   // predate ADR-013 may have no email; the login route fails closed when
   // email or passwordHash is null.
-  email              String?             @unique
+  /// WARP-233 @encrypted(aes-256-gcm, dek=user-email): `email` stores a dcv1:
+  /// blob (write path: column-crypto.service.ts encryptColumn; read path:
+  /// decryptColumn). Equality lookups go through emailLookupHash — a
+  /// deterministic HMAC-SHA256 blind index over trim+lowercase(email); the
+  /// plaintext-uniqueness guarantee moves there because GCM ciphertext is
+  /// non-deterministic. `@unique` dropped from email for that reason.
+  email              String?
+  /// WARP-233 — HMAC-SHA256 blind index over trim+lowercase(email). Carries
+  /// the plaintext-uniqueness guarantee that email's @unique used to hold.
+  /// Nullable: service-only principals without an email stay null (Postgres
+  /// treats NULLs as distinct, matching the old email @unique semantics).
+  emailLookupHash    String?             @unique
   // ADR-013: argon2id PHC hash — the built-in directory is the auth
   // source of truth (Nextcloud is demoted to downstream WebDAV
   // provisioning). Written at account-creation (/auth/setup, invite
