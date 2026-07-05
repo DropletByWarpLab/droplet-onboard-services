@@ -59,6 +59,15 @@ yields no readable data" hold for the *derivation inputs*: `DEVICE_SECRET_KEY`
 derives the restic repo password and the USB per-drive recovery slots, so it
 must not sit on the plain root.
 
+The relocation `shred -u`s the plaintext `.env`/`data/secrets` originals on the
+unencrypted root before symlinking, so a disk-pull carve of the root filesystem
+finds no lingering copy. **Residual-free-space caveat:** `shred` overwrites the
+file's *current* blocks but cannot reach blocks the filesystem already freed
+from an earlier copy of the same file, and it is a no-op against copy-on-write /
+log-structured filesystems (the appliance root is ext4, where it is effective).
+For a guaranteed-clean decommission use crypto-shred (destroy the LUKS/TPM keys)
+rather than relying on free-space overwrite — see `docs/security/crypto-shred.md`.
+
 ## Boot flow
 
 1. systemd's `systemd-cryptsetup@droplet\x2ddata\x2dcrypt` reads
