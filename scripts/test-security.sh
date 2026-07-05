@@ -488,6 +488,25 @@ else
 fi
 
 # =============================================================================
+# Test 19: WARP-235 — no compose service may mount the data/secrets ROOT
+# =============================================================================
+# Since WARP-236, data/secrets holds the internal CA PRIVATE key
+# (internal-ca/ca.key) and every service's TLS bundle (service-tls/<svc>/).
+# A container that bind-mounts the ROOT can read the CA key and mint
+# arbitrary service identities, defeating per-service mTLS + the MQTT
+# per-CN ACLs. Only scoped mounts are allowed:
+#   - ../data/secrets/service-tls/<svc>:...   (a service's OWN bundle)
+#   - ../data/secrets/<single-file-key>:...   (e.g. audit.key, email.key)
+# The match targets the exact bare-root bind (../data/secrets:/...), so the
+# scoped patterns above never trip it.
+
+if grep -qE '\.\./data/secrets:' "$COMPOSE_FILE"; then
+  fail "docker-compose.yml: a service mounts the data/secrets ROOT (exposes internal-ca/ca.key — use a scoped service-tls/<svc> or single-key mount)"
+else
+  pass "docker-compose.yml: no service mounts the data/secrets root (CA key stays unmountable)"
+fi
+
+# =============================================================================
 # Summary
 # =============================================================================
 printf "\n"

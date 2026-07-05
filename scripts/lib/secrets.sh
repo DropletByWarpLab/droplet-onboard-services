@@ -855,6 +855,7 @@ materialize_artifacts() {
   sync_openwrt_password_secret
   sync_switch_password_secret
   sync_audit_signing_key
+  sync_email_fernet_key
 }
 
 # Generate /data/secrets/audit.key on first boot for WARP-456.
@@ -881,6 +882,12 @@ sync_audit_signing_key() {
   mkdir -p "$secret_dir"
   chmod 700 "$secret_dir"
 
+  # WARP-235 decision-4: compose bind-mounts this key as a single FILE. A bare
+  # `docker compose up` run before any setup.sh leaves a Docker-created
+  # DIRECTORY at the mount source, which would then block the tmp+mv write
+  # below forever — clear it so setup self-heals.
+  [ -d "$key_file" ] && rm -rf "$key_file"
+
   if [ -f "$key_file" ] && [ -s "$key_file" ]; then
     # Already provisioned — preserve the existing chain. `-s` (size > 0)
     # is the guard against a half-written file from a previous crashed
@@ -898,6 +905,45 @@ sync_audit_signing_key() {
   chmod 600 "$tmp"
   mv "$tmp" "$key_file"
   log_success "Generated audit signing key at $key_file (chmod 600)"
+}
+
+# WARP-465 / WARP-235 decision-4 — generate data/secrets/email.key on first
+# setup. The email-indexer's creds.py decrypts EmailAccount.passwordEnc with
+# this per-device Fernet key (EMAIL_KEY_PATH, mode 0600) and exits non-zero
+# when it's missing. creds.py has ALWAYS documented the key as
+# "generated once by setup.sh", but no generator existed until now — and the
+# WARP-235 mount-narrowing makes it load-bearing: compose bind-mounts the key
+# as a single FILE, so the source must exist before `docker compose up` or
+# Docker manufactures a directory in its place.
+#
+# Idempotent: an existing key is preserved on every re-run — rotating it would
+# orphan every already-encrypted EmailAccount row. A fresh key is only minted
+# when no file exists (no accounts can predate the key: without it the
+# service never booted).
+sync_email_fernet_key() {
+  local secret_dir="$REPO_ROOT/data/secrets"
+  local key_file="$secret_dir/email.key"
+
+  mkdir -p "$secret_dir"
+  chmod 700 "$secret_dir"
+
+  # Same single-file bind-mount self-heal as sync_audit_signing_key: a bare
+  # compose-up before setup leaves a Docker-created directory here.
+  [ -d "$key_file" ] && rm -rf "$key_file"
+
+  if [ -f "$key_file" ] && [ -s "$key_file" ]; then
+    log_success "Email Fernet key already present at $key_file — skipping"
+    return 0
+  fi
+
+  # Fernet key = url-safe base64 of 32 random bytes (44 chars incl. padding).
+  # Stage + rename so a crashed run never leaves a truncated key the
+  # email-indexer would then fail to parse.
+  local tmp="$key_file.tmp"
+  openssl rand -base64 32 | tr '+/' '-_' > "$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$key_file"
+  log_success "Generated email Fernet key at $key_file (chmod 600)"
 }
 
 # Write $OPENWRT_PASSWORD (from env or .env) into docker/secrets/openwrt_password

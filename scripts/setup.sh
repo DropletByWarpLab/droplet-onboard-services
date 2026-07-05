@@ -279,7 +279,8 @@ if [ "$DRY_RUN" = "true" ]; then
   fi
   log_info "  Would materialize artifacts (idempotent): mosquitto.conf +"
   log_info "                  mosquitto.acl (WARP-235 mTLS broker, per-CN topic grants),"
-  log_info "                  TLS cert, docker/secrets/openwrt_password"
+  log_info "                  TLS cert, docker/secrets/openwrt_password,"
+  log_info "                  data/secrets/audit.key + data/secrets/email.key"
   log_info "                  WARP-236: internal CA (data/secrets/internal-ca) +"
   log_info "                  per-service TLS bundles (data/secrets/service-tls/<svc>)"
   if [ "$SINGLE_BOX_MODE" = "true" ]; then

@@ -333,7 +333,12 @@ services:
       # initActivityRecorder() throws at boot and the orchestrator
       # restart-loops. Read-only — the key is loaded once and never
       # mutated.
-      - ../data/secrets:/data/secrets:ro
+      # WARP-235 decision-4 hardening: mount ONLY the audit key, not the
+      # data/secrets ROOT — the root now holds the internal CA private key
+      # (internal-ca/ca.key) and every service's TLS bundle; a root mount
+      # would let this container mint arbitrary service identities.
+      # (Single-file bind: setup.sh materializes audit.key before compose up.)
+      - ../data/secrets/audit.key:/data/secrets/audit.key:ro
       # WARP-235/236: this service's own TLS bundle (cert+key+CA, CN =
       # "orchestrator") from the internal CA. The MQTT clients present it on
       # mqtts:// brokers; the DROPLET_TLS_* defaults point here.
@@ -1160,7 +1165,11 @@ services:
       # of truth. (Behavior unchanged for installs that never touch the flag.)
       - DROPLET_FIPS_REQUIRED=${DROPLET_FIPS_REQUIRED:-true}
     volumes:
-      - ../data/secrets:/data/secrets:ro
+      # WARP-235 decision-4 hardening: mount ONLY the Fernet key this service
+      # reads (creds.py EMAIL_KEY_PATH), never the data/secrets ROOT — the
+      # root holds the internal CA private key + every service's TLS bundle.
+      # (Single-file bind: setup.sh materializes email.key before compose up.)
+      - ../data/secrets/email.key:/data/secrets/email.key:ro
       # WARP-235: this service's own TLS bundle (CN = "email-indexer") for the
       # mqtts:// broker connection.
       - ../data/secrets/service-tls/email-indexer:/data/service-tls:ro
