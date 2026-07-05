@@ -17,6 +17,6 @@ CREATE INDEX "FileContentChunk_userId_sensitivity_idx"
 ALTER TABLE "User" ADD COLUMN "emailLookupHash" TEXT;
 CREATE UNIQUE INDEX "User_emailLookupHash_key" ON "User" ("emailLookupHash");
 DROP INDEX "User_email_key";
--- Plaintext emails remain until apps/orchestrator/scripts/encrypt-existing-phi-columns.ts
+-- Plaintext emails remain until apps/orchestrator/src/scripts/encrypt-existing-phi-columns.ts
 -- backfills (idempotent; see docs/POSTGRES_TLS_AND_COLUMN_ENCRYPTION.md). Readers
 -- accept both forms via the explicit dcv1: format marker during the transition.

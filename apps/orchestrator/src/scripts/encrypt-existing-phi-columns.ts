@@ -9,17 +9,17 @@
  * case-insensitive) is reported and left untouched for operator remediation
  * rather than half-migrated.
  *
- * Run inside the orchestrator container (DATABASE_URL + DEVICE_SECRET_KEY
- * come from the environment):
- *   npx tsx scripts/encrypt-existing-phi-columns.ts        # apply
- *   npx tsx scripts/encrypt-existing-phi-columns.ts --dry  # report only
+ * Ships compiled in the runtime image (src/scripts → dist/scripts). Run inside
+ * the orchestrator container (DATABASE_URL + DEVICE_SECRET_KEY from the env):
+ *   node dist/scripts/encrypt-existing-phi-columns.js        # apply
+ *   node dist/scripts/encrypt-existing-phi-columns.js --dry  # report only
  */
 import { PrismaClient } from "@prisma/client";
 import {
   isEncryptedColumn,
   emailLookupHash,
-} from "../src/services/column-crypto.service.js";
-import { emailWriteData } from "../src/services/user-directory.service.js";
+} from "../services/column-crypto.service.js";
+import { emailWriteData } from "../services/user-directory.service.js";
 
 const DRY = process.argv.includes("--dry");
 

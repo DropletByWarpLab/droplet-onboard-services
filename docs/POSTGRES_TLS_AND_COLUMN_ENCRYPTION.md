@@ -78,7 +78,7 @@ uniqueness only covers backfilled + new rows until it runs:
 
 ```bash
 docker compose -p droplet -f docker/docker-compose.yml exec orchestrator \
-  npx tsx scripts/encrypt-existing-phi-columns.ts        # --dry to preview
+  node apps/orchestrator/dist/scripts/encrypt-existing-phi-columns.js   # --dry to preview
 ```
 
 Idempotent (dcv1 rows are skipped). Duplicate emails that normalize to the
