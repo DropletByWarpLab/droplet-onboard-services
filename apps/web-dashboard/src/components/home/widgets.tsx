@@ -350,21 +350,26 @@ function StatusWidget({ w, h }: WidgetProps) {
   const { totalDevices } = useSmartHome();
   // WARP-1055 — the Home surface's Voice status line lives inside this
   // existing system-health tile (design brief §2), not a new tile.
-  const { state: voiceState } = useVoiceHealthSummary();
+  const { state: voiceState, unavailable: voiceUnavailable } =
+    useVoiceHealthSummary();
 
   const local = models.filter((m) => m.provider === "ollama").length;
   const cloud = models.length - local;
 
   const voiceRow: [LucideIcon, string, string, string, string] =
-    voiceState == null
-      ? [Mic, "Voice", "—", "checking…", "var(--color-label-quaternary)"]
-      : voiceState.kind === "calibrated"
-        ? [Mic, "Voice", "Calibrated", "wake word ready", "var(--success)"]
-        : voiceState.kind === "attention"
-          ? [Mic, "Voice", "Attention", "needs attention", "var(--color-system-orange)"]
-          : voiceState.kind === "broken"
-            ? [Mic, "Voice", "Not working", "microphone not working", "var(--color-system-red)"]
-            : [Mic, "Voice", "—", "not calibrated yet", "var(--color-label-quaternary)"];
+    // Review F7 — voice-io not deployed (macOS/dev installs) is not a
+    // fault: render a quiet em-dash row, never a permanent red.
+    voiceUnavailable
+      ? [Mic, "Voice", "—", "not available", "var(--color-label-quaternary)"]
+      : voiceState == null
+        ? [Mic, "Voice", "—", "checking…", "var(--color-label-quaternary)"]
+        : voiceState.kind === "calibrated"
+          ? [Mic, "Voice", "Calibrated", "wake word ready", "var(--success)"]
+          : voiceState.kind === "attention"
+            ? [Mic, "Voice", "Attention", "needs attention", "var(--color-system-orange)"]
+            : voiceState.kind === "broken"
+              ? [Mic, "Voice", "Not working", "microphone not working", "var(--color-system-red)"]
+              : [Mic, "Voice", "—", "not calibrated yet", "var(--color-label-quaternary)"];
 
   const stats: [LucideIcon, string, string, string, string][] = [
     [Folder, "Files", recents.length ? String(recents.length) : "—", "recently indexed", "var(--success)"],

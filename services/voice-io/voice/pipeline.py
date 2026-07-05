@@ -1038,15 +1038,12 @@ class WakePipeline:
                         mono = np.ascontiguousarray(frames[:, 0])
                 else:
                     mono = frames.reshape(-1)
-                if self._input_gain != 1.0:
-                    # Digital boost for quiet capture chains; clip into
-                    # int16 so an over-eager gain distorts instead of
-                    # wrapping around.
-                    mono = np.clip(
-                        mono.astype(np.float32) * self._input_gain,
-                        -32768.0,
-                        32767.0,
-                    ).astype(np.int16)
+                # The RAW mono frame goes to _on_frame; the digital input
+                # gain is applied THERE, after level tracking, so
+                # input_rms_dbfs stays in the same pre-gain domain as
+                # /audio/measure and the stored calibration floor
+                # (WARP-1055 — a gained RMS compared against a raw floor
+                # read as permanent noise drift on the dashboard).
                 self._on_frame(mono)
 
     def _refresh_audio_enumeration(self, sd: Any) -> None:
@@ -1117,6 +1114,13 @@ class WakePipeline:
         `rms_window_frames` frames) and refreshes `last_audio_at` whenever
         a frame's own level clears the flatline threshold. status() turns
         those into the read-time `input_flatlined` flag.
+
+        Domain contract (WARP-1055): the frame here is the RAW capture,
+        BEFORE the digital input gain — the same domain as
+        /audio/measure and the persisted calibration floor, so the
+        dashboard can compare the live RMS against the calibrated floor
+        without gain math. Flatline semantics are unaffected: a wedged
+        DSP emits digital zeros, which are zeros in any gain domain.
         """
         n = int(frame.size)
         if n == 0:
@@ -1159,8 +1163,19 @@ class WakePipeline:
     def _on_frame(self, frame: np.ndarray) -> None:
         # Input-level tracking first (WARP-1037): every frame counts,
         # regardless of which state it dispatches to below — a wedged
-        # DSP flows silence in ALL states.
+        # DSP flows silence in ALL states. Tracked on the RAW frame,
+        # BEFORE gain (WARP-1055 domain contract — see _track_input_level).
         self._track_input_level(frame)
+        # Digital input gain applies AFTER tracking, so the detector /
+        # VAD / STT paths below see the boosted signal while the
+        # published level stays in the raw capture domain. Clip into
+        # int16 so an over-eager gain distorts instead of wrapping.
+        if self._input_gain != 1.0:
+            frame = np.clip(
+                frame.astype(np.float32) * self._input_gain,
+                -32768.0,
+                32767.0,
+            ).astype(np.int16)
         # Apply visual-decay BEFORE dispatch so a stale wake_detected /
         # transcript_ready that should have decayed actually does. status()
         # decays lazily on read, but the worker thread reads _state

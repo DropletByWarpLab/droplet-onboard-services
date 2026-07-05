@@ -22,13 +22,14 @@ import json
 from dataclasses import dataclass, field
 from typing import Optional
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
 import main
 from voice.calibration import CalibrationStore
 from voice.pipeline import WakePipeline
-from voice.wake import DisabledWakeWordDetector
+from voice.wake import WAKE_FRAME_SAMPLES, DisabledWakeWordDetector
 
 
 @pytest.fixture
@@ -117,6 +118,61 @@ def test_set_wake_threshold_reflected_in_status():
     pipe = _make_pipeline()
     pipe.set_wake_threshold(0.55)
     assert pipe.status().threshold == 0.55
+
+
+# ── gain-domain contract (WARP-1055 review F1) ─────────────────────
+#
+# The dashboard compares the live input_rms_dbfs against the persisted
+# calibration floor (raw /audio/measure domain). If the published RMS
+# were POST-gain, any applied gain > ~4× would read as a permanent
+# "background noise has increased" drift in an unchanged room — and
+# every recalibration would reproduce it. The pipeline therefore tracks
+# the level on the RAW frame and applies the digital gain AFTERWARDS,
+# so the detector/STT still get the boost.
+
+class _FrameSpyDetector:
+    """Minimal detector that records the frames it is asked to score."""
+
+    loaded = True
+    model_name = "spy"
+
+    def __init__(self) -> None:
+        self.frames: list[np.ndarray] = []
+
+    def predict(self, frame: np.ndarray) -> dict:
+        self.frames.append(np.array(frame, copy=True))
+        return {}
+
+    def reset(self) -> None:
+        pass
+
+
+class TestGainDomainContract:
+    def test_input_rms_is_pre_gain(self):
+        # A stored calibration with input_gain 8 (+18 dB) must NOT shift
+        # the published level: RMS of a constant-1000 int16 frame is
+        # 20·log10(1000/32768) ≈ -30.3 dBFS in the raw domain.
+        pipe = WakePipeline(
+            detector=DisabledWakeWordDetector(),
+            input_device_index=0,
+            input_gain=8.0,
+        )
+        pipe._set_state("listening")
+        pipe._on_frame(np.full(WAKE_FRAME_SAMPLES, 1000, dtype=np.int16))
+        s = pipe.status()
+        assert s.input_rms_dbfs == pytest.approx(-30.31, abs=0.05)
+
+    def test_detector_still_receives_gained_frames(self):
+        # The boost still reaches the wake/STT path — only the published
+        # level is raw.
+        spy = _FrameSpyDetector()
+        pipe = WakePipeline(
+            detector=spy, input_device_index=0, input_gain=2.0,
+        )
+        pipe._set_state("listening")
+        pipe._on_frame(np.full(WAKE_FRAME_SAMPLES, 1000, dtype=np.int16))
+        assert len(spy.frames) == 1
+        assert int(spy.frames[0].max()) == 2000
 
 
 # ── startup re-apply ────────────────────────────────────────────────
@@ -226,6 +282,55 @@ def test_echo_check_503_without_input_device(client, monkeypatch):
     )
     resp = client.post("/audio/echo-check")
     assert resp.status_code == 503
+
+
+# ── capture-error mapping + concurrency (WARP-1055 review F5) ───────
+
+def test_measure_maps_portaudio_error_to_503(client, monkeypatch):
+    monkeypatch.setattr(main, "_resolve", lambda: _FakeResolution())
+
+    def boom(**kw):
+        raise main._PortAudioError("Device unavailable [PaErrorCode -9985]")
+
+    monkeypatch.setattr(main, "measure_input_level", boom)
+    resp = client.post("/audio/measure", json={"kind": "noise_floor"})
+    assert resp.status_code == 503
+    # Actionable detail, not a relayed stack trace.
+    assert "try again" in resp.json()["detail"].lower()
+
+
+def test_echo_check_maps_portaudio_error_to_503(client, monkeypatch):
+    monkeypatch.setattr(main, "_resolve", lambda: _FakeResolution())
+
+    def boom(**kw):
+        raise main._PortAudioError("Invalid sample rate [PaErrorCode -9997]")
+
+    monkeypatch.setattr(main, "echo_check", boom)
+    resp = client.post("/audio/echo-check")
+    assert resp.status_code == 503
+    assert "try again" in resp.json()["detail"].lower()
+
+
+def test_concurrent_capture_answers_409(client, monkeypatch):
+    # A capture already holds the lock — a second one must answer 409
+    # ("busy, retry") instead of colliding on the hw device.
+    monkeypatch.setattr(main, "_resolve", lambda: _FakeResolution())
+    monkeypatch.setattr(
+        main,
+        "measure_input_level",
+        lambda **kw: {"rms_dbfs": -50.0, "peak_dbfs": -30.0, "samples": 1},
+    )
+    assert main._capture_lock.acquire(blocking=False)
+    try:
+        resp = client.post("/audio/measure", json={"kind": "noise_floor"})
+        assert resp.status_code == 409
+        resp2 = client.post("/audio/echo-check")
+        assert resp2.status_code == 409
+    finally:
+        main._capture_lock.release()
+    # Lock released → the same request goes through again.
+    resp3 = client.post("/audio/measure", json={"kind": "noise_floor"})
+    assert resp3.status_code == 200
 
 
 # ── GET/POST /voice/calibration ─────────────────────────────────────

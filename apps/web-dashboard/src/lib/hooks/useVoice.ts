@@ -22,7 +22,7 @@ import {
 } from "@/lib/api";
 import {
   deriveVoiceSurfaceState,
-  NOISE_DRIFT_DB,
+  nextNoiseCount,
   NOISE_SUSTAIN_POLLS,
   type VoiceSurfaceState,
 } from "@/components/voice/state";
@@ -72,38 +72,45 @@ export function useVoiceSurfaceData(): VoiceSurfaceData {
     () => fetchVoiceCalibration(),
   );
 
-  // Sustained-noise drift latch (client-side; see NOISE_* docs).
+  // Sustained-noise drift latch. Runs on its own wall-clock timer
+  // (review F9): SWR keeps the data reference stable when payloads are
+  // deep-equal, so an effect keyed on data identity would stall in a
+  // steady room and double-count around calibration revalidations.
+  // The tick decision itself is the pure nextNoiseCount (state.ts),
+  // where the raw/pre-gain domain contract is regression-pinned (F1).
+  const statusRef = useRef<VoiceStatusInfo | null>(null);
+  statusRef.current = status ?? null;
+  const calibrationRef = useRef<VoiceCalibrationInfo | null>(null);
+  calibrationRef.current = calibration ?? null;
   const consecutiveRef = useRef(0);
   const [noiseSustained, setNoiseSustained] = useState(false);
   useEffect(() => {
-    const rms = status?.input_rms_dbfs;
-    const floor = calibration?.noise_floor_dbfs;
-    if (
-      rms == null ||
-      floor == null ||
-      !calibration?.calibrated ||
-      status?.input_flatlined
-    ) {
-      consecutiveRef.current = 0;
-      setNoiseSustained(false);
-      return;
-    }
-    if (rms > floor + NOISE_DRIFT_DB) {
-      consecutiveRef.current += 1;
-      if (consecutiveRef.current >= NOISE_SUSTAIN_POLLS) {
-        setNoiseSustained(true);
-      }
-    } else {
-      consecutiveRef.current = 0;
-      setNoiseSustained(false);
-    }
-  }, [status, calibration]);
+    const timer = setInterval(() => {
+      const next = nextNoiseCount(
+        consecutiveRef.current,
+        statusRef.current,
+        calibrationRef.current,
+      );
+      consecutiveRef.current = next;
+      // Same-value setState is a React no-op — no per-tick re-render.
+      setNoiseSustained(next >= NOISE_SUSTAIN_POLLS);
+    }, SURFACE_POLL_MS);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Review F8 — a calibration fetch failure with NO record in hand must
+  // not fall through to the "Not calibrated yet" hero on a calibrated
+  // box; the honest render is the offline retry card. (Once a record
+  // has loaded, SWR keeps the stale data across transient errors.)
+  const calibrationUnavailable = isVoiceUnavailableError(calibrationError);
+  const calibrationOffline =
+    calibrationError != null && !calibration && !calibrationUnavailable;
 
   return {
     status: status ?? null,
     calibration: calibration ?? null,
     unavailable,
-    offline: statusError != null && !unavailable,
+    offline: (statusError != null && !unavailable) || calibrationOffline,
     loading:
       (statusLoading && !status && !statusError) ||
       (!unavailable && calibrationLoading && !calibration && !calibrationError),

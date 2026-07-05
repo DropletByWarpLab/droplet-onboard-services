@@ -15,6 +15,8 @@ import {
   deriveVoiceSurfaceState,
   deriveHealthChecks,
   meterFractionFromDbfs,
+  nextNoiseCount,
+  NOISE_SUSTAIN_POLLS,
   WAKE_STALE_AFTER_S,
 } from "@/components/voice/state";
 import type { VoiceCalibrationInfo, VoiceStatusInfo } from "@/lib/types";
@@ -259,6 +261,47 @@ describe("deriveHealthChecks (WARP-1055)", () => {
     expect(byId.dsp.actionLabel).toBe("Test again");
     expect(byId.level.status).toBe("dash");
     expect(byId.level.result).toBe("Waiting on the mic processor.");
+  });
+});
+
+describe("nextNoiseCount — raw/pre-gain domain contract (review F1/F9)", () => {
+  it("an applied input_gain of 8 does NOT shift the drift compare", () => {
+    // The pipeline publishes input_rms_dbfs PRE-gain (same domain as
+    // the stored /audio/measure floor), so an unchanged room reads at
+    // its calibrated floor regardless of the applied gain — no
+    // permanent false "needs attention" loop after a big auto-gain.
+    const cal = calibration({ input_gain: 8, noise_floor_dbfs: -50 });
+    const s = status({ input_rms_dbfs: -48 });
+    expect(nextNoiseCount(0, s, cal)).toBe(0);
+    // Even a counter that was mid-climb resets on a quiet tick.
+    expect(nextNoiseCount(NOISE_SUSTAIN_POLLS - 1, s, cal)).toBe(0);
+  });
+
+  it("a genuinely raised room level still climbs toward the latch", () => {
+    const cal = calibration({ input_gain: 8, noise_floor_dbfs: -50 });
+    const s = status({ input_rms_dbfs: -30 });
+    expect(nextNoiseCount(0, s, cal)).toBe(1);
+    expect(nextNoiseCount(NOISE_SUSTAIN_POLLS - 1, s, cal)).toBe(
+      NOISE_SUSTAIN_POLLS,
+    );
+  });
+
+  it("resets without a calibration, on flatline, or without a live rms", () => {
+    expect(
+      nextNoiseCount(10, status({ input_rms_dbfs: -20 }), {
+        calibrated: false,
+      }),
+    ).toBe(0);
+    expect(
+      nextNoiseCount(
+        10,
+        status({ input_rms_dbfs: -20, input_flatlined: true }),
+        calibration(),
+      ),
+    ).toBe(0);
+    expect(
+      nextNoiseCount(10, status({ input_rms_dbfs: null }), calibration()),
+    ).toBe(0);
   });
 });
 

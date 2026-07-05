@@ -298,6 +298,44 @@ const CHECK_LABELS: Record<VoiceCheckModel["id"], string> = {
   dsp: "Mic processor",
 };
 
+/* ── Sustained-noise latch tick ── */
+
+/**
+ * One poll tick of the sustained-noise latch (WARP-1055 review F1/F9).
+ *
+ * Domain contract: BOTH sides of the compare are raw / pre-gain — the
+ * pipeline publishes `input_rms_dbfs` BEFORE applying the digital
+ * input gain, and the stored floor came from the raw /audio/measure
+ * path. `calibration.input_gain` must therefore NEVER enter this
+ * comparison; an applied gain of ×8 leaves an unchanged room exactly
+ * at its calibrated floor. (Regression-pinned in voice.state.test.ts.)
+ *
+ * Called from a wall-clock timer, not from data-change effects — SWR
+ * keeps the data reference stable when payloads are deep-equal, so
+ * counting object-identity changes would stall in a steady room and
+ * double-count around calibration revalidations.
+ *
+ * Returns the new consecutive-tick count; drift is "sustained" once
+ * the count reaches NOISE_SUSTAIN_POLLS.
+ */
+export function nextNoiseCount(
+  count: number,
+  status: VoiceStatusInfo | null,
+  calibration: VoiceCalibrationInfo | null,
+): number {
+  const rms = status?.input_rms_dbfs;
+  const floor = calibration?.noise_floor_dbfs;
+  if (
+    rms == null ||
+    floor == null ||
+    !calibration?.calibrated ||
+    status?.input_flatlined
+  ) {
+    return 0;
+  }
+  return rms > floor + NOISE_DRIFT_DB ? count + 1 : 0;
+}
+
 /* ── Formatting helpers (mono, read-only) ── */
 
 /** Live-meter bar fraction from the rolling RMS: -60 dBFS → 0, -15 → 1. */

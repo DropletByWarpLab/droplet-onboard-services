@@ -252,4 +252,68 @@ describe("CalibrationWizard (WARP-1055)", () => {
       "Echo check skipped — Droplet may hear you less well while it's playing audio.",
     ]);
   });
+
+  it("a step that fails, is skipped, then PASSES applies a flagless record (review F2)", async () => {
+    mockHealthyMeasurements();
+    // First echo run fails (→ Skip flags it); the re-run after Back passes.
+    echoMock
+      .mockResolvedValueOnce({ heard: false, tone_dbfs: -80, floor_dbfs: -60 })
+      .mockResolvedValue({ heard: true, tone_dbfs: -22, floor_dbfs: -57 });
+    applyMock.mockResolvedValue({ calibrated: true });
+    const { rerender, onClose } = renderWizard();
+    await driveWakeHits(rerender, onClose, 3);
+
+    await screen.findByText(
+      "Droplet couldn't hear its own speaker. Check that the speaker isn't muted or disconnected.",
+      undefined,
+      { timeout: 5000 },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Skip this check" }));
+    await screen.findByText("Confirm and apply");
+    expect(screen.getByText("skipped")).toBeInTheDocument();
+
+    // Back to the echo step — this time it passes, which must clear
+    // the sticky skip flag AND flip echo_ok.
+    fireEvent.click(screen.getByRole("button", { name: /Back/ }));
+    await screen.findByText("Confirm and apply", undefined, { timeout: 5000 });
+    await waitFor(() => expect(screen.getByText("tuned")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Apply calibration" }));
+    await screen.findByText("Calibrated", undefined, { timeout: 3000 });
+    const payload = applyMock.mock.calls[0][0];
+    expect(payload.echo_ok).toBe(true);
+    expect(payload.flags).toEqual([]);
+  });
+
+  it("closing while the apply is in flight is ignored — the write lands (review F3)", async () => {
+    mockHealthyMeasurements();
+    let resolveApply: (v: unknown) => void = () => {};
+    applyMock.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveApply = resolve;
+        }) as never,
+    );
+    const { rerender, onClose } = renderWizard();
+    await driveWakeHits(rerender, onClose, 3);
+    await screen.findByText("Confirm and apply", undefined, { timeout: 5000 });
+
+    fireEvent.click(screen.getByRole("button", { name: "Apply calibration" }));
+    expect(applyMock).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Applying…" })).toBeDisabled();
+
+    // Mid-POST: the X is disabled, Esc is a no-op — no cancel path may
+    // fire while voice-io is persisting + applying the record.
+    expect(screen.getByRole("button", { name: "Close" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).not.toHaveBeenCalled();
+
+    // The write lands → result screen → Done reports applied: true.
+    resolveApply({ calibrated: true });
+    await screen.findByText("Calibrated", undefined, { timeout: 3000 });
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledWith({ applied: true });
+  });
 });

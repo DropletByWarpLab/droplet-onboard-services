@@ -208,6 +208,43 @@ def detect_tone(
     }
 
 
+def _resolve_duplex_samplerate(
+    samplerate: int,
+    input_device: int,
+    output_device: int,
+) -> int:
+    """Pick a samplerate the full-duplex pair actually accepts.
+
+    Mirrors play()'s fallback: many USB sinks are 48 kHz-only and
+    reject the voice pipeline's 16 kHz (PortAudioError -9997) — without
+    this, /voice/say works (play() resamples) but the echo check could
+    NEVER pass on such hardware, forcing the user into "Skip this
+    check" forever. Falls back to the output device's default rate
+    (48 kHz when even that can't be queried).
+    """
+    try:
+        _sd.check_output_settings(
+            device=output_device, samplerate=samplerate, channels=1,
+            dtype="float32",
+        )
+        _sd.check_input_settings(
+            device=input_device, samplerate=samplerate, channels=1,
+            dtype="float32",
+        )
+        return samplerate
+    except Exception as exc:
+        try:
+            info = _sd.query_devices(output_device)
+            target = int(info.get("default_samplerate") or 48000)
+        except Exception:
+            target = 48000
+        logger.info(
+            "echo check: device pair rejects %d Hz (%s); using %d Hz",
+            samplerate, exc, target,
+        )
+        return target
+
+
 def echo_check(
     duration_s: float = 2.0,
     samplerate: int = 16000,
@@ -221,26 +258,29 @@ def echo_check(
     Uses sounddevice's full-duplex `playrec` so the capture window is
     guaranteed to overlap the playback — a sequential play-then-record
     would race the room's decay and mostly measure silence. Mirrors
-    /audio/test-record's mono-capture convention (channels=1).
+    /audio/test-record's mono-capture convention (channels=1). The
+    samplerate falls back to the device pair's supported rate when the
+    requested one is rejected (see _resolve_duplex_samplerate).
     """
     _require_sd()
     if input_device is None:
         raise AudioUnavailable("no input device resolved")
     if output_device is None:
         raise AudioUnavailable("no output device resolved")
+    rate = _resolve_duplex_samplerate(samplerate, input_device, output_device)
     t = np.linspace(
-        0, duration_s, int(duration_s * samplerate), endpoint=False,
+        0, duration_s, int(duration_s * rate), endpoint=False,
     )
     # Same 0.3 amplitude as test_tone — audible, not a blast.
     tone = (0.3 * np.sin(2 * np.pi * frequency_hz * t)).astype(np.float32)
     logger.debug(
-        "echo check: %.2fs %.0f Hz, in=%s out=%s",
-        duration_s, frequency_hz, input_device, output_device,
+        "echo check: %.2fs %.0f Hz @ %d Hz, in=%s out=%s",
+        duration_s, frequency_hz, rate, input_device, output_device,
     )
     # Device pair order per sounddevice: (input, output).
     recording = _sd.playrec(
         tone,
-        samplerate=samplerate,
+        samplerate=rate,
         channels=1,
         dtype="float32",
         device=(input_device, output_device),
@@ -248,7 +288,7 @@ def echo_check(
     _sd.wait()
     return detect_tone(
         np.asarray(recording).reshape(-1),
-        samplerate=samplerate,
+        samplerate=rate,
         frequency_hz=frequency_hz,
     )
 

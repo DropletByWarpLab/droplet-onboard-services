@@ -23,8 +23,8 @@ from typing import Any, Optional
 
 logger = logging.getLogger("voice.calibration")
 
-# Default lives under the compose-mounted named volume (voice-io-data →
-# /data) so a calibration survives container restarts + recreates.
+# Default lives under the compose-mounted named volume (`voice-calibration`
+# → /data) so a calibration survives container restarts + recreates.
 # Override via VOICE_CALIBRATION_PATH (tests point it at tmp_path).
 DEFAULT_CALIBRATION_PATH = "/data/calibration.json"
 
@@ -84,6 +84,12 @@ class CalibrationStore:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(record, f, indent=2)
+                # Push the bytes to disk BEFORE the rename — without the
+                # fsync, ext4's delayed allocation can commit the rename
+                # ahead of the data and a crash leaves an EMPTY file,
+                # breaking the old-or-new guarantee claimed above.
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp, self.path)
         except BaseException:
             try:

@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 import time
 from typing import Literal, Optional
 
@@ -28,6 +29,17 @@ from voice.audio_io import (
     measure_input_level,
     test_tone,
 )
+
+# WARP-1055 (F5) — PortAudio's own error type, when the binding exists.
+# A device that's busy / unplugged / rate-rejected raises this out of a
+# capture, which is an operational 503 ("mic didn't respond, try again"),
+# never a raw 500 relayed to the dashboard. The placeholder class keeps
+# the except-clause valid on hosts without PortAudio (macOS dev).
+try:
+    from sounddevice import PortAudioError as _PortAudioError  # type: ignore[import-not-found]
+except Exception:  # pragma: no cover — sounddevice absent on this host
+    class _PortAudioError(Exception):
+        """Stand-in when sounddevice isn't importable."""
 from voice.calibration import CalibrationStore
 from voice.devices import (
     DeviceResolution,
@@ -386,7 +398,10 @@ class VoiceStatusResponse(BaseModel):
     # Input level (WARP-1037). `input_rms_dbfs` is a rolling RMS over the
     # last ~2 s of mic frames — measured inside the pipeline's own frame
     # handler, never via a second stream on the same hw device (ALSA
-    # EBUSY). The wizard's live level meter rides this field.
+    # EBUSY). Domain contract (WARP-1055): PRE-gain / raw capture — the
+    # same domain as /audio/measure and the persisted calibration floor,
+    # so the dashboard's noise-drift compare needs no gain math. The
+    # wizard's live level meter rides this field.
     # `last_audio_at` is when a frame last carried real signal;
     # `input_flatlined` is the wedged-DSP flag (see /health).
     input_rms_dbfs: Optional[float] = None
@@ -685,6 +700,19 @@ def audio_test_record(duration_s: float = 2.0) -> TestRecordResponse:
     )
 
 
+# WARP-1055 (F5) — one wizard capture at a time. Two overlapping
+# sd.rec/playrec calls on the same hw device collide (ALSA EBUSY or
+# interleaved buffers); a second concurrent measure answers 409 so the
+# dashboard can tell "busy, retry" apart from "device broken" (503).
+# threading.Lock works because these endpoints are sync `def`s — FastAPI
+# runs each in its own threadpool thread.
+_capture_lock = threading.Lock()
+
+_CAPTURE_BUSY_DETAIL = (
+    "Another microphone measurement is already running — try again in a few seconds."
+)
+
+
 @app.post("/audio/measure", response_model=MeasureResponse)
 def audio_measure(req: MeasureRequest) -> MeasureResponse:
     """Wizard measurement capture (WARP-1055): noise floor / speech peak.
@@ -702,6 +730,8 @@ def audio_measure(req: MeasureRequest) -> MeasureResponse:
     seconds = (
         req.seconds if req.seconds is not None else DEFAULT_MEASURE_SECONDS
     )
+    if not _capture_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail=_CAPTURE_BUSY_DETAIL)
     try:
         result = measure_input_level(
             duration_s=seconds,
@@ -711,6 +741,18 @@ def audio_measure(req: MeasureRequest) -> MeasureResponse:
         )
     except AudioUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+    except _PortAudioError as exc:
+        # Device unplugged / busy / rate-rejected mid-capture — an
+        # operational fault the caller can retry, not a server bug.
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "The microphone didn't respond (device busy or "
+                f"disconnected: {exc}). Check the mic and try again."
+            ),
+        )
+    finally:
+        _capture_lock.release()
     return MeasureResponse(
         rms_dbfs=result["rms_dbfs"],
         peak_dbfs=result["peak_dbfs"],
@@ -736,6 +778,8 @@ def audio_echo_check() -> EchoCheckResponse:
             status_code=503,
             detail="No output device available. Plug in a speaker / USB audio device.",
         )
+    if not _capture_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail=_CAPTURE_BUSY_DETAIL)
     try:
         result = echo_check(
             samplerate=SAMPLE_RATE,
@@ -744,6 +788,16 @@ def audio_echo_check() -> EchoCheckResponse:
         )
     except AudioUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+    except _PortAudioError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "The speaker/mic pair didn't respond (device busy or "
+                f"disconnected: {exc}). Check both connections and try again."
+            ),
+        )
+    finally:
+        _capture_lock.release()
     return EchoCheckResponse(
         heard=bool(result["heard"]),
         tone_dbfs=float(result["tone_dbfs"]),

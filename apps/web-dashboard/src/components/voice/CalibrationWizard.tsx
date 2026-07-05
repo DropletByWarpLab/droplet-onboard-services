@@ -128,6 +128,13 @@ export function CalibrationWizard({
     setFlags((prev) => (prev.includes(flag) ? prev : [...prev, flag]));
   }, []);
 
+  // Review F2 — a step that PASSES clears its own earlier flag, so a
+  // fail → "Continue anyway" → Back → pass run applies a clean record
+  // instead of a sticky "needs attention" about a fixed problem.
+  const removeFlag = useCallback((flag: string) => {
+    setFlags((prev) => prev.filter((f) => f !== flag));
+  }, []);
+
   const goto = useCallback((next: Step) => {
     setStep(next);
     setPhase("measuring");
@@ -177,6 +184,7 @@ export function CalibrationWizard({
         if (stale) return;
         setNoiseFloor(r.rms_dbfs);
         if (r.rms_dbfs <= NOISE_FLOOR_PASS_DBFS) {
+          removeFlag(FLAG_NOISE); // F2 — a pass clears the earlier fail flag
           passAndAdvance(2, "Room noise measured.");
         } else {
           setFailKind("threshold");
@@ -193,7 +201,7 @@ export function CalibrationWizard({
     return () => {
       stale = true;
     };
-  }, [open, step, attempt, passAndAdvance]);
+  }, [open, step, attempt, passAndAdvance, removeFlag]);
 
   /* ── Step 2 · talk test ── */
   useEffect(() => {
@@ -207,6 +215,7 @@ export function CalibrationWizard({
         setSpeechPeak(r.peak_dbfs);
         setPeakLocked(true);
         if (r.peak_dbfs >= SPEECH_PEAK_PASS_DBFS) {
+          removeFlag(FLAG_SPEECH); // F2
           passAndAdvance(3, "Speech level is good.");
         } else {
           setFailKind("threshold");
@@ -223,7 +232,7 @@ export function CalibrationWizard({
     return () => {
       stale = true;
     };
-  }, [open, step, attempt, passAndAdvance]);
+  }, [open, step, attempt, passAndAdvance, removeFlag]);
 
   /* ── Step 3 · wake word ×3 (passive — watches the live status poll) ── */
   const lastSeenWakeRef = useRef<number | null>(null);
@@ -234,6 +243,7 @@ export function CalibrationWizard({
     (count: number) => {
       setWakeEvaluated(true);
       if (count >= 3) {
+        removeFlag(FLAG_WAKE); // F2 — a clean 3/3 clears an earlier 2/3 note
         passAndAdvance(4, "Wake word responding, 3 of 3.");
       } else if (count === 2) {
         pushFlag(FLAG_WAKE);
@@ -244,7 +254,7 @@ export function CalibrationWizard({
         setAnnounce("The wake word isn't landing.");
       }
     },
-    [passAndAdvance, pushFlag],
+    [passAndAdvance, pushFlag, removeFlag],
   );
 
   useEffect(() => {
@@ -288,6 +298,7 @@ export function CalibrationWizard({
         if (stale) return;
         if (r.heard) {
           setEchoOk(true);
+          removeFlag(FLAG_ECHO); // F2 — a skip flag dies when the re-run passes
           passAndAdvance(5, "Echo cancellation tuned.");
         } else {
           setEchoOk(false);
@@ -306,7 +317,7 @@ export function CalibrationWizard({
     return () => {
       stale = true;
     };
-  }, [open, step, attempt, passAndAdvance]);
+  }, [open, step, attempt, passAndAdvance, removeFlag]);
 
   /* ── Step 5 · the single write ── */
   const ready = noiseFloor != null && speechPeak != null;
@@ -340,6 +351,11 @@ export function CalibrationWizard({
   }
 
   function requestClose() {
+    // Review F3 — the single write is in flight: closing now would
+    // toast "previous settings kept" while voice-io persists + applies
+    // the new record. Ignore Esc / backdrop / the X until it lands
+    // (success shows the result screen; failure stays on step 5).
+    if (applying) return;
     onClose({ applied: step === "result" });
   }
 
@@ -646,6 +662,7 @@ export function CalibrationWizard({
             <button
               type="button"
               className="vtext-btn"
+              disabled={applying}
               onClick={() => goto((step - 1) as Step)}
             >
               <ChevronLeft size={14} aria-hidden="true" /> Back
@@ -671,6 +688,7 @@ export function CalibrationWizard({
               <button
                 type="button"
                 className="vtext-btn"
+                disabled={applying}
                 onClick={() => onClose({ applied: false })}
               >
                 Not now
@@ -732,6 +750,7 @@ export function CalibrationWizard({
             type="button"
             className="close"
             aria-label="Close"
+            disabled={applying}
             onClick={requestClose}
           >
             ×

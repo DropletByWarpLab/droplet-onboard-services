@@ -53,6 +53,10 @@
 .vtext-btn:hover {
   background: var(--color-accent-subtle);
 }
+.vtext-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
 
 /* ── Status hero ── */
 .vhero {

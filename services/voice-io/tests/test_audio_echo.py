@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from voice import audio_io
 from voice.audio_io import detect_tone
 
 SAMPLE_RATE = 16000
@@ -66,3 +67,81 @@ def test_reports_rounded_dbfs_values():
     # One decimal place, JSON-safe floats (matches measure_input_level).
     assert result["tone_dbfs"] == round(result["tone_dbfs"], 1)
     assert result["floor_dbfs"] == round(result["floor_dbfs"], 1)
+
+
+# ── samplerate fallback (WARP-1055 review F4) ───────────────────────
+#
+# play() in this module resamples when the sink rejects the source
+# rate; echo_check needs the equivalent or a 48 kHz-only speaker can
+# NEVER pass step 4 (while /voice/say works fine) — forcing the user
+# into "Skip this check" forever.
+
+class _EchoFakeSd:
+    """Fake sounddevice for the full-duplex echo path."""
+
+    class PortAudioError(Exception):
+        pass
+
+    def __init__(self, reject_rates=(), default_out_rate=48000.0):
+        self.reject_rates = set(reject_rates)
+        self.default_out_rate = default_out_rate
+        self.playrec_calls: list[dict] = []
+
+    def _check(self, samplerate):
+        if samplerate in self.reject_rates:
+            raise self.PortAudioError(
+                f"Invalid sample rate [PaErrorCode -9997]: {samplerate}",
+            )
+
+    def check_output_settings(self, device=None, samplerate=None,
+                              channels=None, dtype=None):
+        self._check(samplerate)
+
+    def check_input_settings(self, device=None, samplerate=None,
+                             channels=None, dtype=None):
+        self._check(samplerate)
+
+    def query_devices(self, device=None):
+        return {"default_samplerate": self.default_out_rate}
+
+    def playrec(self, tone, samplerate=None, channels=None, dtype=None,
+                device=None):
+        self.playrec_calls.append({
+            "samples": int(len(tone)),
+            "samplerate": samplerate,
+            "device": device,
+        })
+        # Simulate the mic hearing the played tone in a quiet room.
+        n = len(tone)
+        t = np.arange(n, dtype=np.float64) / samplerate
+        rec = (0.1 * np.sin(2 * np.pi * TONE_HZ * t)).astype(np.float32)
+        return rec.reshape(-1, 1)
+
+    def wait(self):
+        pass
+
+
+def test_echo_check_falls_back_when_pair_rejects_16k(monkeypatch):
+    fake = _EchoFakeSd(reject_rates={16000})
+    monkeypatch.setattr(audio_io, "_sd", fake)
+    result = audio_io.echo_check(
+        duration_s=1.0, samplerate=16000, input_device=1, output_device=2,
+    )
+    call = fake.playrec_calls[0]
+    assert call["samplerate"] == 48000
+    # The tone is regenerated at the fallback rate — 1.0 s of 48 kHz.
+    assert call["samples"] == 48000
+    assert call["device"] == (1, 2)
+    assert result["heard"] is True
+
+
+def test_echo_check_keeps_requested_rate_when_supported(monkeypatch):
+    fake = _EchoFakeSd()
+    monkeypatch.setattr(audio_io, "_sd", fake)
+    result = audio_io.echo_check(
+        duration_s=1.0, samplerate=16000, input_device=1, output_device=2,
+    )
+    call = fake.playrec_calls[0]
+    assert call["samplerate"] == 16000
+    assert call["samples"] == 16000
+    assert result["heard"] is True
