@@ -311,12 +311,19 @@ probe_transit_redis_tls() {
   local out="$VFY_EVID/$id/redis-tls.txt" pw
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
   pw="$(vfy_env REDIS_PASSWORD)"
-  vfy_compose exec -T cache redis-cli -h cache --tls -p "$VFY_REDIS_TLS_PORT" \
+  # WARP-234: the cache serves a compose-internal-CA leaf (WARP-236 trust
+  # root) that no public root signs — redis-cli must be pointed at the CA
+  # the launch wrapper stages inside the container. REDIS_PASSWORD is the
+  # ping-only `default` ACL user, which is exactly what PING needs.
+  vfy_compose exec -T cache redis-cli -h cache --tls \
+    --cacert /tmp/redis-ca.crt -p "$VFY_REDIS_TLS_PORT" \
     -a "$pw" --no-auth-warning PING > "$out" 2>&1 || true
   if grep -qx 'PONG' "$out" 2>/dev/null; then
     vfy_record "$id" PASS "tls-ping-ok (port $VFY_REDIS_TLS_PORT)" "evidence/$id/redis-tls.txt"
   else
-    vfy_record "$id" SKIP "tls-port-not-listening (WARP-234 not landed)" "evidence/$id/redis-tls.txt"
+    # WARP-234 landed the TLS listener — a non-PONG is a regression now,
+    # not a not-yet-shipped feature.
+    vfy_record "$id" FAIL "tls-ping-failed (port $VFY_REDIS_TLS_PORT)" "evidence/$id/redis-tls.txt"
   fi
 }
 
