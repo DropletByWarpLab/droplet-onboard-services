@@ -46,6 +46,9 @@ function hkdf(info: string): Buffer {
 
 export function deriveDocKek(): Buffer { return hkdf("doc-kek"); }
 export function deriveEmailIndexKey(): Buffer { return hkdf("email-blind-index"); }
+/** Column key for User.email at rest (whole-column logical key — derived,
+ *  not a stored DEK: no per-user shred story, and sync read/write paths). */
+export function deriveEmailColumnKey(): Buffer { return hkdf("user-email-column"); }
 export function generateDek(): Buffer { return randomBytes(32); }
 
 function seal(key: Buffer, plaintext: Buffer, aad?: Buffer): Buffer {

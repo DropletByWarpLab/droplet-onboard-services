@@ -13,6 +13,7 @@
  * loaded under vitest).
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { readUserEmail } from "../services/user-directory.service.js";
 import request from "supertest";
 import express, { Request, Response, NextFunction } from "express";
 
@@ -206,7 +207,8 @@ describe("PUT /api/auth/users/:username — directory-aware edits", () => {
 
     expect(res.status).toBe(200);
     const row = prisma._users.find((u: any) => u.username === "alice");
-    expect(row.email).toBe("newalice@example.com");
+    // WARP-233: stored as a dcv1 blob — decrypt for the assertion.
+    expect(readUserEmail(row.email)).toBe("newalice@example.com");
     expect(nc.ncUpdateUser).toHaveBeenCalledWith("test-nc-token", "alice", "email", "newalice@example.com");
   });
 

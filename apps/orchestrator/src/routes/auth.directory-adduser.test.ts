@@ -11,6 +11,7 @@
  * (needed by deriveUniqueUserId).
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { readUserEmail } from "../services/user-directory.service.js";
 import request from "supertest";
 import express, { Request, Response, NextFunction } from "express";
 
@@ -292,7 +293,7 @@ describe("POST /api/auth/users — email-based user creation with derived userid
       .send({ email: "kid@warp.test", password: "Kid-secret123" });
 
     expect(res.status).toBe(201);
-    const row = prisma._users.find((u: any) => u.email === "kid@warp.test");
+    const row = prisma._users.find((u: any) => readUserEmail(u.email) === "kid@warp.test");
     expect(row.passwordHash).toMatch(/^\$argon2id\$/);
     expect(JSON.stringify(row)).not.toContain("Kid-secret123");
   });
@@ -312,7 +313,7 @@ describe("POST /api/auth/users — email-based user creation with derived userid
       .send({ email: "kid@warp.test", password: "Kid-secret123" });
 
     expect(res.status).toBe(201);
-    const row = prisma._users.find((u: any) => u.email === "kid@warp.test");
+    const row = prisma._users.find((u: any) => readUserEmail(u.email) === "kid@warp.test");
     expect(row.mustChangePassword).toBe(true);
   });
 
@@ -325,7 +326,7 @@ describe("POST /api/auth/users — email-based user creation with derived userid
       .send({ email: "kid@warp.test", password: "Kid-secret123", mustChangePassword: false });
 
     expect(res.status).toBe(201);
-    const row = prisma._users.find((u: any) => u.email === "kid@warp.test");
+    const row = prisma._users.find((u: any) => readUserEmail(u.email) === "kid@warp.test");
     expect(row.mustChangePassword).toBe(false);
   });
 
@@ -338,7 +339,7 @@ describe("POST /api/auth/users — email-based user creation with derived userid
       .send({ email: "kid@warp.test", password: "Kid-secret123", mustChangePassword: true });
 
     expect(res.status).toBe(201);
-    const row = prisma._users.find((u: any) => u.email === "kid@warp.test");
+    const row = prisma._users.find((u: any) => readUserEmail(u.email) === "kid@warp.test");
     expect(row.mustChangePassword).toBe(true);
   });
 
@@ -358,7 +359,7 @@ describe("POST /api/auth/users — email-based user creation with derived userid
         .send({ email: "kid@warp.test", password: "Kid-secret123" });
 
       expect(res.status).toBe(201);
-      const row = prisma._users.find((u: any) => u.email === "kid@warp.test");
+      const row = prisma._users.find((u: any) => readUserEmail(u.email) === "kid@warp.test");
       expect(row.role).toBe("family");
       expect(nc.ncCreateUser).toHaveBeenCalledWith(
         expect.anything(),
@@ -378,7 +379,7 @@ describe("POST /api/auth/users — email-based user creation with derived userid
         .send({ email: "ada@warp.test", password: "Ada-secret123", role: "admin" });
 
       expect(res.status).toBe(201);
-      const row = prisma._users.find((u: any) => u.email === "ada@warp.test");
+      const row = prisma._users.find((u: any) => readUserEmail(u.email) === "ada@warp.test");
       expect(row.role).toBe("admin");
       // buildNcGroups("admin", "household") → NC admin group + household,
       // exactly like the invite-accept path (WARP-883 mapping).
@@ -400,7 +401,7 @@ describe("POST /api/auth/users — email-based user creation with derived userid
         .send({ email: "kid@warp.test", password: "Kid-secret123", role: "user" });
 
       expect(res.status).toBe(201);
-      const row = prisma._users.find((u: any) => u.email === "kid@warp.test");
+      const row = prisma._users.find((u: any) => readUserEmail(u.email) === "kid@warp.test");
       expect(row.role).toBe("family");
     });
 
@@ -440,7 +441,7 @@ describe("POST /api/auth/users — email-based user creation with derived userid
         .send({ email: "co@warp.test", password: "Co-secret12345", role: "owner" });
 
       expect(res.status).toBe(201);
-      const row = prisma._users.find((u: any) => u.email === "co@warp.test");
+      const row = prisma._users.find((u: any) => readUserEmail(u.email) === "co@warp.test");
       expect(row.role).toBe("owner");
       expect(nc.ncCreateUser).toHaveBeenCalledWith(
         expect.anything(),

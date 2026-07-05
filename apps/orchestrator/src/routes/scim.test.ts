@@ -61,16 +61,24 @@ function createPrismaMock(seed: UserRow[] = []) {
   let useq = self._users.length;
   self.user = {
     findUnique: vi.fn(async ({ where }: { where: any }) => {
+      // WARP-233: provisioning resolves users through the blind index.
+      if (where.emailLookupHash !== undefined)
+        return self._users.find((u: any) => u.emailLookupHash === where.emailLookupHash) ?? null;
       if (where.email !== undefined) return self._users.find((u: UserRow) => u.email === where.email) ?? null;
       if (where.id !== undefined) return self._users.find((u: UserRow) => u.id === where.id) ?? null;
       return null;
     }),
+    // WARP-233 pre-backfill fallback probe (plaintext rows, no blind index).
+    findFirst: vi.fn(async ({ where }: { where: any }) =>
+      self._users.find((u: UserRow) => u.email === where.email) ?? null,
+    ),
     create: vi.fn(async ({ data }: { data: any }) => {
-      const row: UserRow = {
+      const row: UserRow & { emailLookupHash?: string | null } = {
         id: data.id ?? `u-${++useq}`,
         username: data.username,
         displayName: data.displayName,
         email: data.email ?? null,
+        emailLookupHash: data.emailLookupHash ?? null,
         passwordHash: data.passwordHash ?? null,
         role: data.role ?? "family",
         isLocal: data.isLocal ?? true,

@@ -78,6 +78,7 @@ import {
   findMatchingRecoveryCodeHash,
 } from "../services/recovery.service.js";
 import QRCode from "qrcode";
+import { findUserByEmail, emailWriteData, emailWriteDataOrNull } from "../services/user-directory.service.js";
 import { config } from "../config.js";
 import { buildNcGroups, householdGroupName } from "./auth-groups.js";
 import { purgeUserData } from "../services/brain-memory.service.js";
@@ -762,12 +763,14 @@ export function createPublicAuthRouter(
         update: {
           displayName: displayName || username,
           passwordHash,
-          email,
+          // WARP-233: dcv1 ciphertext + blind index (the login key lives on
+          // emailLookupHash; findUserByEmail resolves it case-insensitively).
+          ...emailWriteData(email),
         },
         create: {
           username,
           displayName: displayName || username,
-          email,
+          ...emailWriteData(email),
           nextcloudUsername: username,
           passwordHash,
           role: "owner" as any,
@@ -988,9 +991,10 @@ export function createPublicAuthRouter(
       // (anti-enumeration). A user without a passwordHash (service-only
       // principal, pre-first-login invitee) is treated identically — no
       // leak distinguishing "no account" from "account, no password".
-      const localUser = await prisma.user.findUnique({
-        where: { email: loginEmail },
-      });
+      // WARP-233: equality goes through the emailLookupHash blind index
+      // (email at rest is a dcv1 ciphertext; plaintext fallback covers
+      // pre-backfill rows).
+      const localUser = await findUserByEmail(prisma, loginEmail);
       // WARP (SCIM directory sync): a user the directory deactivated
       // (Okta SCIM `active:false` → `directoryStatus = DEACTIVATED`, a SOFT
       // disable, never a row delete) must be denied even if the row + hash
@@ -1786,13 +1790,13 @@ export function createPublicAuthRouter(
           // Also refresh `email` (the email-keyed login key) so a
           // re-acceptance always lands the correct login identifier.
           displayName: invite.displayName || invite.username,
-          email: inviteEmail,
+          ...emailWriteDataOrNull(inviteEmail),
           passwordHash,
         },
         create: {
           username: invite.username,
           displayName: invite.displayName || invite.username,
-          email: inviteEmail,
+          ...emailWriteDataOrNull(inviteEmail),
           nextcloudUsername: invite.username,
           passwordHash,
           role: invite.role as any, // canonical Role enum from the invite
@@ -2569,7 +2573,7 @@ export function createProtectedAuthRouter(
         where: { nextcloudUsername: username },
         update: {
           displayName: displayName || username,
-          email,
+          ...emailWriteData(email),
           passwordHash,
           // WARP-824: a re-issued temp password (idempotent retry, or an
           // operator re-creating the same account with a fresh temp secret)
@@ -2585,7 +2589,7 @@ export function createProtectedAuthRouter(
         create: {
           username,
           displayName: displayName || username,
-          email,
+          ...emailWriteData(email),
           nextcloudUsername: username,
           passwordHash,
           // WARP-1042: caller-selected role (rank-guarded above); was
@@ -2710,7 +2714,8 @@ export function createProtectedAuthRouter(
       if (prisma) {
         const data: Record<string, unknown> = {};
         if (displayName !== undefined) data.displayName = displayName;
-        if (email !== undefined) data.email = email;
+        // WARP-233: an email change re-encrypts + re-indexes atomically.
+        if (email !== undefined) Object.assign(data, emailWriteData(email));
         if (password !== undefined) data.passwordHash = await hashPassword(password);
         if (Object.keys(data).length > 0) {
           const updated = await prisma.user.updateMany({
