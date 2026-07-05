@@ -6,6 +6,7 @@ import type { HttpClient } from "@droplet/tools-core";
 import { assertFipsAtBootOrExit } from "@droplet/fips-selftest";
 import { createServer } from "./server.js";
 import { internalBaseUrl, internalFetch } from "./internal-tls.js";
+import { redisConnectionOptions } from "./redis-tls.js";
 import { startStdio } from "./transports/stdio.js";
 import { startHttp } from "./transports/http.js";
 import type { ContextDeps } from "./context.js";
@@ -220,8 +221,13 @@ async function main(): Promise<void> {
   // `rerankPassages` swallows Redis errors and falls back to live rerank
   // calls without caching.
   const redisUrl = process.env.REDIS_URL;
+  // WARP-234: rediss:// (TLS-only cache) pins trust to the internal CA.
   const redis = redisUrl
-    ? new Redis(redisUrl, { maxRetriesPerRequest: 3, lazyConnect: true })
+    ? new Redis(redisUrl, {
+        maxRetriesPerRequest: 3,
+        lazyConnect: true,
+        ...redisConnectionOptions(redisUrl),
+      })
     : null;
 
   // Connect lazily — the stdio child process should not block the parent's

@@ -47,8 +47,9 @@ INTERNAL_CA_SERVICES=(
   ops-console file-indexer routing switch oled-display matter-controller
   camera-discovery broker frigate
   # WARP-234: Redis server TLS — the compose `cache` service stages this
-  # bundle as its server cert (docker-compose.yml cache.command).
-  cache
+  # bundle as its server cert (docker-compose.yml cache.command); nextcloud
+  # mounts its bundle for the phpredis CA pin (zz-redis-tls.config.php).
+  cache nextcloud
 )
 # Host-network services are dialled as host.docker.internal (multi-box/dev)
 # or the droplet_default bridge-gateway IP (single-box) — extra SANs.
