@@ -168,6 +168,48 @@ after="$(cat "$ENV_FILE")"
   || fail "rejected call mutated .env"
 
 # =============================================================================
+echo "--- Case 7: WARP-233 reconciliation — Postgres DB-hop posture flips with the knob ---"
+# =============================================================================
+# Under FIPS the validated provider's cipher policy breaks Prisma/libpq's TLS
+# handshake to `db` (P1011 "library has no ciphers"). Decision (A), scoped to
+# the knob: FIPS-on flips the intra-compose DB hop to plaintext+SCRAM
+# (PG_SSLMODE=disable, PG_HBA=pg_hba.fips.conf, DATABASE_URL sslmode
+# rewritten); FIPS-off restores full TLS-only enforcement.
+: > "$ENV_FILE"
+printf 'DATABASE_URL=postgresql://droplet:pw@db:5432/droplet?sslmode=require\n' >> "$ENV_FILE"
+apply_fips_mode on >/dev/null 2>&1
+[ "$(kv PG_SSLMODE)" = "disable" ] \
+  && pass "on writes PG_SSLMODE=disable (P1011 decision A)" \
+  || fail "on PG_SSLMODE expected disable, got '$(kv PG_SSLMODE)'"
+[ "$(kv PG_HBA)" = "pg_hba.fips.conf" ] \
+  && pass "on writes PG_HBA=pg_hba.fips.conf" \
+  || fail "on PG_HBA expected pg_hba.fips.conf, got '$(kv PG_HBA)'"
+case "$(kv DATABASE_URL)" in
+  *"sslmode=disable"*) pass "on rewrites DATABASE_URL sslmode to disable" ;;
+  *) fail "on DATABASE_URL sslmode not rewritten (got '$(kv DATABASE_URL)')" ;;
+esac
+apply_fips_mode off >/dev/null 2>&1
+[ "$(kv PG_SSLMODE)" = "require" ] \
+  && pass "off restores PG_SSLMODE=require" \
+  || fail "off PG_SSLMODE expected require, got '$(kv PG_SSLMODE)'"
+[ "$(kv PG_HBA)" = "pg_hba.conf" ] \
+  && pass "off restores PG_HBA=pg_hba.conf" \
+  || fail "off PG_HBA expected pg_hba.conf, got '$(kv PG_HBA)'"
+case "$(kv DATABASE_URL)" in
+  *"sslmode=require"*) pass "off rewrites DATABASE_URL sslmode back to require" ;;
+  *) fail "off DATABASE_URL sslmode not restored (got '$(kv DATABASE_URL)')" ;;
+esac
+# A DATABASE_URL with NO sslmode param must not be invented/mangled by the flip
+# (migrate_env owns the require backfill; apply_fips_mode only rewrites an
+# existing param).
+: > "$ENV_FILE"
+printf 'DATABASE_URL=postgresql://droplet:pw@db:5432/droplet\n' >> "$ENV_FILE"
+apply_fips_mode on >/dev/null 2>&1
+[ "$(kv DATABASE_URL)" = "postgresql://droplet:pw@db:5432/droplet" ] \
+  && pass "on leaves a param-less DATABASE_URL untouched" \
+  || fail "on mangled a param-less DATABASE_URL (got '$(kv DATABASE_URL)')"
+
+# =============================================================================
 echo ""
 echo "  ------------------------------------------------"
 if [ "$FAILURES" -eq 0 ]; then

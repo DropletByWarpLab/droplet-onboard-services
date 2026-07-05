@@ -72,6 +72,19 @@ _upsert_env_kv() {
 # OpenSSL and additionally needs OPENSSL_MODULES (system ossl-modules dir) +
 # NODE_OPTIONS=--openssl-shared-config. All are written here; the OFF path
 # clears them.
+#
+# WARP-233 ⇄ WARP-318 reconciliation (P1011, decision A — pending Romain's
+# ratification): under the FIPS openssl config Prisma/libpq cannot open ANY
+# TLS connection to `db` ("library has no ciphers"), so FIPS-on scopes the
+# intra-compose DB hop to plaintext+SCRAM on the private container bridge:
+#   PG_SSLMODE=disable          → file-indexer's inline DATABASE_URL param
+#   PG_HBA=pg_hba.fips.conf     → db serves docker/postgres/pg_hba.fips.conf
+#                                 (hostssl first; RFC1918+loopback host lines
+#                                 still SCRAM-authed; terminal reject intact)
+#   DATABASE_URL sslmode        → rewritten in-place (orchestrator/mcp-server/
+#                                 email-indexer consume .env's DATABASE_URL)
+# FIPS-off restores the WARP-233 default posture (TLS 1.3-only, sslmode=
+# require). Both directions are idempotent and driven by this ONE knob.
 apply_fips_mode() {
   local mode="${1:-}"
   local ossl_modules
@@ -86,6 +99,9 @@ apply_fips_mode() {
       _upsert_env_kv DROPLET_FIPS_REQUIRED  true
       _upsert_env_kv OPENSSL_MODULES        "$ossl_modules"
       _upsert_env_kv NODE_OPTIONS           --openssl-shared-config
+      _upsert_env_kv PG_SSLMODE             disable
+      _upsert_env_kv PG_HBA                 pg_hba.fips.conf
+      _rewrite_database_url_sslmode         disable
       ;;
     off)
       _upsert_env_kv DROPLET_FIPS_MODE      0
@@ -93,12 +109,33 @@ apply_fips_mode() {
       _upsert_env_kv DROPLET_FIPS_REQUIRED  false
       _upsert_env_kv OPENSSL_MODULES        ""
       _upsert_env_kv NODE_OPTIONS           ""
+      _upsert_env_kv PG_SSLMODE             require
+      _upsert_env_kv PG_HBA                 pg_hba.conf
+      _rewrite_database_url_sslmode         require
       ;;
     *)
       log_error "apply_fips_mode: expected 'on' or 'off', got '${mode:-<none>}'"
       return 1
       ;;
   esac
+}
+
+# WARP-233/318: flip the sslmode param of the .env DATABASE_URL in place.
+# Only rewrites an EXISTING sslmode=<value> param — a param-less URL is
+# migrate_env's job (it backfills ?sslmode=require), and custom operator
+# params are never restructured. Same staged-rename atomicity as
+# _upsert_env_kv.
+_rewrite_database_url_sslmode() {
+  local target="$1"
+  local env_file="${ENV_FILE:-$REPO_ROOT/.env}"
+  local stage="${env_file}.upsert.$$"
+  [ -f "$env_file" ] || return 0
+  grep -qE '^DATABASE_URL=.*sslmode=' "$env_file" || return 0
+  rm -f "${env_file}".upsert.* 2>/dev/null || true
+  ( umask 077; sed -E "s|^(DATABASE_URL=.*[?\&]sslmode=)[A-Za-z-]+|\1${target}|" \
+      "$env_file" > "$stage" )
+  chmod 600 "$stage"
+  mv "$stage" "$env_file"
 }
 
 # WARP-595: core keys that EVERY .env our heredoc has ever written contains

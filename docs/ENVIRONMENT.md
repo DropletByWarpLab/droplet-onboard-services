@@ -27,7 +27,7 @@ trust, PM secrets) are summarized in [`CLAUDE.md`](../CLAUDE.md).
 | `VISION_MODEL` | Preferred LOCAL vision model for chat image attachments. When the selected chat model can't see an attached image, the orchestrator auto-routes that turn to this model and model-readiness pulls it at startup (like `LLM_MODEL`). Unset → no local vision; cloud vision (gpt-4o / Claude) still works by selecting a cloud vision model explicitly. |
 | `VISION_MAX_IMAGES` | Max images re-sent per chat request (most-recent-first), bounding token cost on a small local context window (default `3`, range 1–8). |
 | `EMAIL_SENDING_STALE_MS` | Grace window (ms) before an outbound email draft stuck in `sending` is reconciled to `failed` (WARP-890). A draft is claimed `queued→sending` before the SMTP send; if its terminal status callback never lands (email-indexer crash / lost PATCH) it would strand in `sending`. Both the orchestrator's stale-sending cron (every 5 min) and the email-indexer's outbound tick sweep `sending` rows whose `claimedAt` is older than this window to `failed` (never re-queued — the send may have completed). Default `600000` (10 min). An explicit `0` is honored (reconcile immediately — useful in tests). |
-| `DROPLET_FIPS_MODE` | Per-customer FIPS 140-3 activation (WARP-318). **Default `0` (OFF)** — modern crypto, identical to a non-FIPS install. `1` boots all five services FIPS-enforcing against the in-image validated provider (CMVP #4282, WARP-967); **no rebuild**. Flip via `setup.sh --fips` / `--no-fips` (explicit boolean, never derived). setup.sh derives `OPENSSL_CONF`, `DROPLET_FIPS_REQUIRED`, `OPENSSL_MODULES`, `NODE_OPTIONS` from it — do not hand-edit those. FIPS RESTRICTS algorithms; it does not add strength. Full guide: [`docs/fips.md`](fips.md) |
+| `DROPLET_FIPS_MODE` | Per-customer FIPS 140-3 activation (WARP-318). **Default `0` (OFF)** — modern crypto, identical to a non-FIPS install. `1` boots all five services FIPS-enforcing against the in-image validated provider (CMVP #4282, WARP-967); **no rebuild**. Flip via `setup.sh --fips` / `--no-fips` (explicit boolean, never derived). setup.sh derives `OPENSSL_CONF`, `DROPLET_FIPS_REQUIRED`, `OPENSSL_MODULES`, `NODE_OPTIONS`, `PG_SSLMODE`, `PG_HBA` (+ the `DATABASE_URL` `sslmode` param) from it — do not hand-edit those. FIPS RESTRICTS algorithms; it does not add strength. Full guide: [`docs/fips.md`](fips.md) |
 | `DROPLET_SSO_{GOOGLE,ENTRA,OKTA}_{ISSUER,CLIENT_ID,CLIENT_SECRET,REDIRECT_URI}` | Optional OIDC SSO provider config (commented out by default in `.env.example`) |
 | `DROPLET_TELEMETRY_ENABLED` | Master opt-in for the fleet-agent's portal telemetry (WARP-963). **Default OFF**; only `1`/`true` enables. Even when the `telemetry` compose profile starts the container, the process idles with ZERO egress unless this is set AND credentials exist (`DROPLET_TELEMETRY_PROVISIONING_CODE`, or the identity persisted on the `fleet-agent-state` volume by a prior registration). Full var list + egress-audit table: [`services/fleet-agent/README.md`](../services/fleet-agent/README.md) |
 | `DROPLET_TELEMETRY_PROVISIONING_CODE` | One-time register code minted in the analytics portal's `/settings/tokens`. Consumed on first successful `/agents/register`; the returned ingest token is stored ONLY on the fleet-agent's runtime state volume — never in `.env`, never tracked |
@@ -117,9 +117,11 @@ auditor guide is [`docs/fips.md`](fips.md); the essentials:
 
 - **Single knob.** `DROPLET_FIPS_MODE` (`0`/`1`) is the only thing an operator
   sets. Everything else (`OPENSSL_CONF`, `DROPLET_FIPS_REQUIRED`,
-  `OPENSSL_MODULES`, `NODE_OPTIONS`) is **derived** by `setup.sh` — do not
-  hand-edit those. The flag is an **explicit boolean**, never inferred from
-  ambient state (mirrors `DOCS_ENABLED` / `SINGLE_BOX_MODE`).
+  `OPENSSL_MODULES`, `NODE_OPTIONS`, and — since WARP-233 — `PG_SSLMODE`,
+  `PG_HBA` plus the `sslmode` param of `DATABASE_URL`) is **derived** by
+  `setup.sh` — do not hand-edit those. The flag is an **explicit boolean**,
+  never inferred from ambient state (mirrors `DOCS_ENABLED` /
+  `SINGLE_BOX_MODE`).
 - **Default posture is unchanged.** With `DROPLET_FIPS_MODE=0` (the default) the
   rendered stack is byte-identical to a non-FIPS install: modern crypto,
   TLS 1.3, OpenSSL defaults, `crypto.getFips()===0`, MD5 available.
@@ -130,12 +132,16 @@ auditor guide is [`docs/fips.md`](fips.md); the essentials:
 - **FIPS restricts, it does not add strength.** Turning it on narrows crypto to
   FIPS-approved algorithms for certification; it does not make the system
   "more secure" in the informal sense.
-- **Postgres decision (A) — pending review.** Under FIPS the cipher policy
-  rejects Postgres's TLS handshake ciphers (`P1011` "library has no ciphers"),
-  so the orchestrator's Prisma libpq can't reach `db`. This PR keeps the
-  orchestrator on the stock openssl config and flags the reconciliation with
-  WARP-233's enforced Postgres TLS as a decision for Romain — see
-  [`docs/fips.md`](fips.md).
+- **Postgres decision (A) — implemented, scoped to the knob (WARP-233).**
+  Under FIPS the cipher policy rejects Postgres's TLS handshake ciphers
+  (`P1011` "library has no ciphers"), so Prisma/libpq clients can't do TLS to
+  `db` at all. Default posture: TLS 1.3 + SCRAM only (`hostssl`-only
+  `docker/postgres/pg_hba.conf`, every `DATABASE_URL` pins
+  `sslmode=require`). `setup.sh --fips` flips the intra-compose DB hop to
+  plaintext+SCRAM on the private container bridge (`PG_SSLMODE=disable`,
+  `PG_HBA=pg_hba.fips.conf`, `DATABASE_URL` `sslmode` rewritten); `--no-fips`
+  restores TLS-only. App-layer PHI/PII column encryption (WARP-233) applies
+  in both postures. Decision (A) sign-off tracked on the WARP-233 PR.
 - **Dev opt-out.** `DROPLET_FIPS_MODE=0` (default). The boot self-test skips
   silently when `DROPLET_FIPS_REQUIRED` is unset/false.
 
