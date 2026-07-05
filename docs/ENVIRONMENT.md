@@ -10,7 +10,7 @@ trust, PM secrets) are summarized in [`CLAUDE.md`](../CLAUDE.md).
 
 | Variable             | Description                                          |
 |----------------------|------------------------------------------------------|
-| `DATABASE_URL`       | PostgreSQL connection string                         |
+| `DATABASE_URL`       | PostgreSQL connection string. `?sslmode=require` is mandatory as of WARP-233 — the `db` service rejects non-TLS TCP (`docker/postgres/pg_hba.conf`). Nextcloud needs no param (libpq `sslmode=prefer` auto-upgrades). |
 | `POSTGRES_PASSWORD`  | Main Postgres (`db` service) password                |
 | `REDIS_URL`          | Redis connection string. As of WARP-234 the `cache` service is TLS-only (`rediss://…cache:6380`; plaintext 6379 is closed) with per-service ACLs — the `.env` URL authenticates the ping-only `default` user; real clients get per-identity URLs from `docker-compose.yml`. |
 | `REDIS_PASSWORD` | Password of the ping-only `default` ACL user (health probes, verification harness) |

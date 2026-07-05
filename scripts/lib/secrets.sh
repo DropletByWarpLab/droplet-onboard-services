@@ -368,7 +368,7 @@ generate_env() {
 POSTGRES_USER=droplet
 POSTGRES_PASSWORD=$pg_password
 POSTGRES_DB=droplet
-DATABASE_URL=postgresql://droplet:${pg_password}@db:5432/droplet
+DATABASE_URL=postgresql://droplet:${pg_password}@db:5432/droplet?sslmode=require
 
 # --- Redis ---
 # WARP-234: REDIS_PASSWORD is the ping-only `default` ACL user (health
@@ -807,6 +807,15 @@ migrate_env() {
     chmod 600 "$stage.mqtt"
     mv "$stage.mqtt" "$stage"
     mqtt_migrated=true
+  fi
+
+  # WARP-233: upgrade an existing DATABASE_URL to sslmode=require (idempotent —
+  # only rewrites the exact legacy no-param shape; operators with custom params
+  # keep their value). Runs inside the staged-file+mv atomic write.
+  if grep -qE '^DATABASE_URL=postgresql://[^?]*$' "$stage"; then
+    sed -i.bak -E 's|^(DATABASE_URL=postgresql://[^?]*)$|\1?sslmode=require|' "$stage" && rm -f "$stage.bak"
+    normalized=true
+    log_info "Migrated .env: DATABASE_URL now pins sslmode=require (WARP-233)"
   fi
 
   if [ "$appended_count" -gt 0 ] || [ "$normalized" = "true" ] || [ "$mqtt_migrated" = "true" ]; then
