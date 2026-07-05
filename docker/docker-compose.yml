@@ -258,30 +258,31 @@ services:
       # WITHOUT a rebuild (Node needs all three vars together — its bundled
       # OpenSSL's MODULESDIR differs from Debian's; see the Dockerfiles).
       #
-      # ┌─ Postgres-under-FIPS (P1011) — ACTUAL behavior today (WARP-317) ─────┐
+      # ┌─ Postgres-under-FIPS (P1011) — VERIFIED behavior today (WARP-317) ───┐
       # │ Under `setup.sh --fips` the interpolations below DO hand this        │
       # │ container the FIPS config (OPENSSL_CONF=/etc/ssl/openssl-fips.cnf    │
-      # │ + MODULES + NODE_OPTIONS + REQUIRED=true): the orchestrator boots    │
-      # │ FIPS-enforcing — there is no orchestrator-specific opt-out. (An      │
-      # │ earlier revision of this comment claimed it "keeps the system        │
-      # │ openssl config"; that was wrong — only the `:-` DEFAULTS are the     │
-      # │ stock config, i.e. the OFF path.)                                    │
+      # │ + MODULES + NODE_OPTIONS + REQUIRED=true): the provider loads and    │
+      # │ enforces (the boot self-test passes, MD5 is refused). But the        │
+      # │ orchestrator then CANNOT complete startup: Prisma's `$connect()`     │
+      # │ (before the API server ever listens) throws P1011 "library has no    │
+      # │ ciphers" (OpenSSL 0A0000A1). WARP-317's fips-stack smoke test        │
+      # │ surfaced this in CI and asserts it as the documented exception.      │
       # │                                                                      │
-      # │ It still reaches Postgres because the intra-compose `db` hop is      │
-      # │ PLAINTEXT today: the pgvector image ships no server cert (ssl=off),  │
-      # │ so libpq/quaint's default sslmode=prefer falls back to a non-TLS     │
-      # │ connection and the FIPS cipher policy never touches a handshake.     │
-      # │ tests/integration/fips-stack.test.sh asserts exactly this merged     │
-      # │ behavior (orchestrator FIPS-enforcing AND /api/llm/conversations     │
-      # │ serving = Prisma over plaintext-in-bridge).                          │
+      # │ ROOT CAUSE is NOT the plaintext db hop — it is the shared FIPS        │
+      # │ config: docker/openssl-fips.cnf activates only fips+base and pins    │
+      # │ default_properties=fips=yes, which leaves a DEFAULT client SSL_CTX   │
+      # │ with ZERO usable ciphersuites, so quaint/libpq fails constructing    │
+      # │ the TLS client before it even reaches `db`. (ai-gateway hits the     │
+      # │ same wall in httpx — see its LIBRARY_HAS_NO_CIPHERS at boot.) A      │
+      # │ correct FIPS config needs an ssl_conf/system_default section that    │
+      # │ keeps the FIPS-approved suites available to the default context;     │
+      # │ that fix is WARP-967/WARP-318 provider-config territory, NOT this    │
+      # │ ticket, and NOT a DATABASE_URL edit (WARP-233 owns that line).       │
       # │                                                                      │
-      # │ THE CLASH IS DEFERRED, NOT GONE: when WARP-233 lands Postgres        │
-      # │ TLS 1.3 + `sslmode=require`, the FIPS cipher set rejects that        │
-      # │ handshake (Prisma P1011 "library has no ciphers"). Reconciliation    │
-      # │ options stay as documented for Romain: (A) FIPS-path-scoped          │
-      # │ `?sslmode=disable` on the private bridge, or (B) server-side         │
-      # │ FIPS-approved Postgres ciphers. This block deliberately does NOT     │
-      # │ edit DATABASE_URL (WARP-233 owns it).                                │
+      # │ Once the config is fixed, set EXPECT_FIPS_STACK_BOOTS=1 in the        │
+      # │ fips-stack test to assert the full FIPS-enforcing boot. The separate │
+      # │ WARP-233 clash (Postgres TLS + sslmode=require) still lands on top    │
+      # │ of that and keeps decision (A) `?sslmode=disable` on the FIPS path.  │
       # └──────────────────────────────────────────────────────────────────────┘
       - OPENSSL_CONF=${OPENSSL_CONF:-/etc/ssl/openssl.cnf}
       - OPENSSL_MODULES=${OPENSSL_MODULES:-}
@@ -817,11 +818,12 @@ services:
       # ai-gateway — OPENSSL_CONF alone; system libcrypto). Previously relied on
       # .env with neither in `environment:`; made explicit for symmetry. Empty/
       # false default → byte-identical to today. NOTE: like the orchestrator,
-      # this container connects to `db`, which is PLAINTEXT on the private
-      # bridge today (see the orchestrator's Postgres-under-FIPS box), so it
-      # boots FIPS-enforcing AND reaches Postgres. The P1011 clash returns
-      # when WARP-233 lands Postgres TLS — same deferred reconciliation. The
-      # DATABASE_URL line above is left exactly as-is (WARP-233 owns it).
+      # this container opens a Prisma/libpq connection to `db`, so under
+      # `setup.sh --fips` it hits the SAME shared-FIPS-config no-ciphers wall
+      # (P1011 "library has no ciphers" at TLS-client construction — see the
+      # orchestrator's Postgres-under-FIPS box; root cause is docker/
+      # openssl-fips.cnf offering no default-context ciphers, WARP-967/318, not
+      # this line). DATABASE_URL is left exactly as-is (WARP-233 owns it).
       - OPENSSL_CONF=${OPENSSL_CONF:-/etc/ssl/openssl.cnf}
       - DROPLET_FIPS_REQUIRED=${DROPLET_FIPS_REQUIRED:-false}
     depends_on:

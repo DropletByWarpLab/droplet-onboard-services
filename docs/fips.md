@@ -113,47 +113,57 @@ unit-test lanes, and macOS Docker Desktop never need the provider active.
 If you flipped a dev box on and want out: `./scripts/setup.sh --no-fips
 --skip-docker --skip-build --skip-drivers` and restart the stack.
 
-## Failure mode: "library has no ciphers" (Prisma `P1011`)
+## Failure mode: "library has no ciphers" (`P1011` / `LIBRARY_HAS_NO_CIPHERS`)
 
-**Symptom.** A process under the FIPS config tries to open a TLS connection
-whose cipher list contains no FIPS-approved suite — OpenSSL then reports
-`library has no ciphers`; Prisma surfaces it as `P1011: Error opening a TLS
-connection`. The connection never opens.
+**Symptom.** With FIPS ON, a service that constructs a TLS client at startup
+dies immediately: OpenSSL reports `library has no ciphers` (error `0A0000A1`).
+Prisma surfaces it as `P1011: Error opening a TLS connection`; Python's `ssl`
+raises `ssl.SSLError: [SSL: LIBRARY_HAS_NO_CIPHERS]`. Observed on the
+orchestrator (Prisma `$connect`, before the API server listens) and the
+ai-gateway (httpx `ssl.create_default_context()` building the Ollama client).
 
-**What it means.** Nothing is "broken" in the provider — the policy is doing
-its job: every offered suite was outside the validated set (or the provider
-could not load at all, leaving no usable ciphers).
+**KNOWN OPEN DEFECT (WARP-317 finding, awaiting a WARP-967/WARP-318 fix).**
+This is **not** about a peer offering the wrong suites. The shared FIPS config
+`docker/openssl-fips.cnf` activates only the `fips` + `base` providers and pins
+`default_properties = fips=yes`. Under that config a **default client
+`SSL_CTX` comes up with zero usable ciphersuites**, so *constructing any TLS
+client fails before a peer is contacted*. The validated provider itself is
+fine — it loads and enforces (boot self-tests pass, MD5 is refused); the gap is
+that the config never re-exposes the FIPS-approved TLS suites to the default
+context. **The fix belongs to the provider-config work** (add an
+`ssl_conf`/`system_default` section to `docker/openssl-fips.cnf` that sets a
+FIPS-approved `CipherString`/`Ciphersuites` on the default context), not to any
+one service and not to a `DATABASE_URL` edit. WARP-317's `fips-stack` test
+asserts this failure as the *expected* current behavior and flips to asserting
+a clean boot once `EXPECT_FIPS_STACK_BOOTS=1` is set after the config fix.
 
 **Quick diagnosis.**
 
-1. *Who failed?* Find the service logging the error; check what it was
-   connecting to.
-2. *Is the peer FIPS-capable?* If the peer only offers non-approved suites
-   (ChaCha-only, CBC-with-SHA1, …) the handshake is unfixable without
-   changing the peer or scoping it out of the boundary.
-3. *Is the provider actually loaded?* Inside the container:
+1. *Is the provider loaded + enforcing?* Inside the container:
    `openssl list -providers` (with the container's `OPENSSL_CONF`) must show
-   `fips … version: 3.0.9 … status: active`. If it does not, the image is
-   missing `fips.so`/`fipsmodule.cnf` — a non-provider image received the
-   FIPS env by mistake (see the compose pins below), or the image predates
-   WARP-967.
-4. *Known deferred case — Postgres.* Today the intra-compose `db` hop is
-   **plaintext** (the pgvector image ships no server certificate), so the
-   FIPS-enforcing orchestrator/file-indexer still reach it: libpq/quaint's
-   default `sslmode=prefer` falls back to a non-TLS connection and no cipher
-   negotiation ever happens. The `P1011` clash **returns** the moment
-   WARP-233 lands Postgres TLS + `sslmode=require`; the reconciliation
-   (FIPS-path-scoped `sslmode=disable` on the private bridge vs. server-side
-   FIPS-approved Postgres ciphers) is a decision owned by that review — see
-   the "Postgres-under-FIPS" box on the orchestrator service in
-   `docker/docker-compose.yml`.
+   `fips … version: 3.0.9 … status: active`. If it does **not**, a
+   non-provider image got the FIPS env by mistake (see the compose pins) or
+   the image predates WARP-967 — that is a *different* bug from the one above.
+2. *Where does it throw?* If the traceback is in TLS-client construction
+   (`create_default_context`, `SSL_CTX_new`, Prisma `$connect`) rather than
+   during a handshake with a specific peer, it is the default-context
+   no-ciphers defect above — the config, not the peer.
+3. *Is a specific peer the problem instead?* If a handshake reaches a peer and
+   only *then* fails, check whether that peer offers a FIPS-approved suite
+   (ChaCha-only / CBC-SHA1 peers are unfixable without changing the peer or
+   scoping it out). The **future** Postgres-TLS case (WARP-233 enforcing
+   `sslmode=require`) is this kind — its reconciliation (FIPS-path-scoped
+   `sslmode=disable` vs. server-side FIPS ciphers) is owned by that review and
+   stacks *on top of* fixing the default-context defect first.
 
 ## Scope — which services enforce
 
 | Service | Provider in image | Under `--fips` | Why |
 |---|---|---|---|
-| orchestrator, web-dashboard, mcp-server | ✅ (WARP-967) | boots FIPS-enforcing (Node: all four derived vars) | The FIPS boundary |
-| ai-gateway, file-indexer | ✅ (WARP-967) | boots FIPS-enforcing (`OPENSSL_CONF` alone; system libcrypto) | The FIPS boundary |
+| orchestrator | ✅ (WARP-967) | provider enforces (self-test passes); **app boot currently blocked** by the default-context no-ciphers defect (Prisma `$connect` → `P1011`) | The FIPS boundary |
+| ai-gateway | ✅ (WARP-967) | provider enforces (self-test passes); **app boot currently blocked** (httpx `create_default_context` → `LIBRARY_HAS_NO_CIPHERS`) | The FIPS boundary |
+| web-dashboard, mcp-server | ✅ (WARP-967) | enforce; no boot-time default-context TLS client, so they stay up (mcp-server's Postgres use is lazy) | The FIPS boundary |
+| file-indexer | ✅ (WARP-967) | provider enforces; same Prisma-client boot block as the orchestrator when its watch loop connects | The FIPS boundary |
 | gateway (nginx edge) | ✅ (WARP-1021) | FIPS cipher profile + provider for edge TLS | Customer-facing TLS termination |
 | matter-controller, email-indexer, device-identity-svc, camera-discovery, fleet-agent | ❌ | **pinned OFF** in compose (`DROPLET_FIPS_REQUIRED=false`, stock `OPENSSL_CONF`) | No validated module in the image — the pin prevents a `setup.sh --fips` crash-loop (the boot self-test would exit 1 forever). Enforcement here is a deliberate future decision, not an oversight. |
 | cache (redis:7-alpine) | ❌ | untouched | Terminates no TLS (plaintext on the private bridge, `requirepass`-guarded; WARP-234 owns the Redis-TLS hop) and performs no customer-facing crypto. Alpine/musl has no validated provider path. |

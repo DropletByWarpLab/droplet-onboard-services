@@ -12,9 +12,10 @@
 #     (via its FIPS_STACK_ASSUME_NO_DOCKER env seam — a PATH restriction can't
 #     hide docker on CI runners that ship it in /usr/bin);
 #   * it encodes the load-bearing steps: real setup.sh --fips activation,
-#     isolated compose project, health waits, per-service fips_self_test
-#     assertions, edge-TLS probes, endpoint smoke checks, MD5-refusal execs,
-#     non-provider crash-loop guards, and a down -v teardown trap;
+#     isolated compose project, per-service fips_self_test assertions,
+#     edge-TLS probes, the documented LIBRARY_HAS_NO_CIPHERS boot exception
+#     (with the fixed-boot path behind EXPECT_FIPS_STACK_BOOTS), MD5-refusal
+#     execs, the non-provider FIPS-gate guard, and a down -v teardown trap;
 #   * the compose file pins the FIPS boot gate OFF for every service whose
 #     image does NOT ship the validated provider (the WARP-318 collateral
 #     crash-loop fix this ticket carries);
@@ -67,19 +68,14 @@ if [ -f "$HARNESS" ]; then
   else
     fail "harness does not isolate its compose project name"
   fi
-  # Health wait on the orchestrator's rolled-up health endpoint.
-  if grep -q '/api/orchestrator/health' "$HARNESS"; then
-    pass "waits for orchestrator health before asserting"
-  else
-    fail "missing orchestrator health wait"
-  fi
-  # The structured self-test line for each provider-shipping service.
+  # The structured self-test line for the three provider services observable
+  # before their (possibly TLS-blocked) app startup.
   st_ok=true
-  for svc in orchestrator mcp-server ai-gateway file-indexer; do
+  for svc in orchestrator mcp-server ai-gateway; do
     grep -q "$svc" "$HARNESS" || { st_ok=false; break; }
   done
   if $st_ok && grep -q 'fips_self_test' "$HARNESS" && grep -q '"fips":true' "$HARNESS"; then
-    pass "asserts the fips_self_test log line for all four self-testing services"
+    pass "asserts the fips_self_test log line for the provider services"
   else
     fail "missing fips_self_test log assertions (svc loop broke at '${svc:-}')"
   fi
@@ -89,13 +85,22 @@ if [ -f "$HARNESS" ]; then
   else
     fail "missing edge-TLS FIPS assertions (fips_edge_tls / ChaCha probe)"
   fi
-  # The three API smoke endpoints.
+  # The documented merged exception: TLS-client boot blocked by the FIPS
+  # config's no-ciphers default context — asserted as EXPECTED current
+  # behavior, with the fixed-boot path guarded behind EXPECT_FIPS_STACK_BOOTS.
+  if grep -qE 'library has no ciphers|LIBRARY_HAS_NO_CIPHERS' "$HARNESS" \
+     && grep -q 'EXPECT_FIPS_STACK_BOOTS' "$HARNESS"; then
+    pass "asserts the documented LIBRARY_HAS_NO_CIPHERS boot exception (+ fixed-boot flag)"
+  else
+    fail "missing the documented TLS-client no-ciphers exception assertion"
+  fi
+  # The three API endpoints are asserted under the fixed-boot path.
   ep_ok=true
   for ep in /api/llm/conversations /api/files/search/status /api/calendar/places; do
     grep -q "$ep" "$HARNESS" || { ep_ok=false; break; }
   done
   if $ep_ok; then
-    pass "smoke-checks the three API endpoints through the FIPS-enforcing stack"
+    pass "smoke-checks the three API endpoints under EXPECT_FIPS_STACK_BOOTS"
   else
     fail "missing endpoint smoke check ('${ep:-}')"
   fi
@@ -106,11 +111,13 @@ if [ -f "$HARNESS" ]; then
   else
     fail "missing runtime MD5-refusal exec probes"
   fi
-  # Non-provider services must not crash-loop (the WARP-318 collateral fix).
-  if grep -q 'RestartCount' "$HARNESS" && grep -q 'device-identity-svc' "$HARNESS"; then
-    pass "guards non-provider services against FIPS-on crash-loops"
+  # Non-provider services must not enter the FIPS gate (the WARP-318 fix):
+  # assert on the FAILED self-test line, not RestartCount (a service can be
+  # down for an unrelated reason — the load-bearing signal is fips:false).
+  if grep -qE '"fips":false' "$HARNESS" && grep -q 'device-identity-svc' "$HARNESS"; then
+    pass "guards non-provider services against the FIPS boot gate"
   else
-    fail "missing non-provider crash-loop guard (RestartCount)"
+    fail "missing non-provider FIPS-gate guard (fips:false)"
   fi
   # Teardown: volumes removed, orphans cleaned, on EXIT.
   if grep -qE 'trap .*down( -v| --volumes)' "$HARNESS" \

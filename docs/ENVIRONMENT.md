@@ -128,12 +128,14 @@ auditor guide is [`docs/fips.md`](fips.md); the essentials:
 - **FIPS restricts, it does not add strength.** Turning it on narrows crypto to
   FIPS-approved algorithms for certification; it does not make the system
   "more secure" in the informal sense.
-- **Postgres under FIPS — clash deferred, not gone.** The orchestrator boots
-  FIPS-enforcing under `--fips` and still reaches `db` because that
-  intra-compose hop is plaintext today (the pgvector image ships no server
-  cert; `sslmode=prefer` falls back). When WARP-233 lands Postgres
-  TLS + `sslmode=require`, the FIPS cipher policy rejects the handshake
-  (`P1011` "library has no ciphers") — reconciling the two is a decision for
-  that review. See [`docs/fips.md`](fips.md).
+- **FIPS-on app boot is currently blocked (WARP-317 finding).** Turning FIPS
+  on activates + enforces the validated provider (self-tests pass, MD5
+  refused, edge TLS restricted), but the shared FIPS OpenSSL config leaves a
+  default TLS client context with no ciphers, so services that construct a TLS
+  client at startup — orchestrator (Prisma `$connect` → `P1011` "library has
+  no ciphers") and ai-gateway (httpx) — can't finish booting. This is a
+  provider-config fix (WARP-967/WARP-318), surfaced + asserted by WARP-317's
+  full-stack smoke test. The separate WARP-233 Postgres-TLS clash stacks on
+  top once that boot is fixed. See [`docs/fips.md`](fips.md).
 - **Dev opt-out.** `DROPLET_FIPS_MODE=0` (default). The boot self-test skips
   silently when `DROPLET_FIPS_REQUIRED` is unset/false.
