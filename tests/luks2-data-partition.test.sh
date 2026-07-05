@@ -350,7 +350,9 @@ if [ "$(id -u)" -ne 0 ]; then
     fail "non-root reader cannot read relocated secrets (finding 2 perms regression)"
   fi
   # Container dirs must be traversable (owner-executable) by the install user.
-  dperm="$(stat -f '%Sp' "$RDATA/droplet/env" 2>/dev/null || stat -c '%A' "$RDATA/droplet/env" 2>/dev/null || echo '')"
+  # `ls -ld` perm string is portable across GNU (Linux CI) and BSD (macOS) —
+  # unlike stat, whose -c/-f flags mean opposite things on the two platforms.
+  dperm="$(ls -ld "$RDATA/droplet/env" 2>/dev/null | awk '{print $1}')"
   case "$dperm" in
     ?rwx*) pass "container dir /data/droplet/env is owner-traversable (rwx) [finding 2]" ;;
     *)     fail "container dir not owner-traversable: $dperm" ;;
