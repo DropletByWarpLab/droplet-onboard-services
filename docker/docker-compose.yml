@@ -68,12 +68,35 @@ x-logging: &default-logging
 services:
   # --- Ingress ---
   gateway:
-    image: nginx:alpine
+    # WARP-1021: Bookworm-based nginx with the NIST-validated OpenSSL FIPS
+    # provider (CMVP #4282) baked DORMANT — replaces the pulled nginx:alpine
+    # (Alpine/musl has no validated FIPS path; same reason WARP-229 moved every
+    # service image off Alpine). Repo root as context so the Dockerfile COPYs
+    # the shared docker/fips/** + docker/openssl-fips.cnf exactly like the
+    # five service images. Default posture is byte-identical to the old
+    # gateway: same nginx.conf (mounted below), same cipher lines
+    # (cipher-profile.default.conf is verbatim the old inline pair).
+    build:
+      context: ..
+      dockerfile: docker/nginx/Dockerfile
     ports:
       - "80:80"
       - "443:443"
+    environment:
+      # WARP-1021: /docker-entrypoint.d/00-fips-profile.sh keys the edge-TLS
+      # cipher profile on the single customer knob — 0 (default) → modern
+      # posture, 1 → FIPS-approved suites only. OPENSSL_CONF is the same
+      # setup.sh-derived var the service images consume (belt-and-suspenders:
+      # the entrypoint also exports it when DROPLET_FIPS_MODE=1); nginx links
+      # the SYSTEM OpenSSL 3, so the conf alone activates the provider.
+      - DROPLET_FIPS_MODE=${DROPLET_FIPS_MODE:-0}
+      - OPENSSL_CONF=${OPENSSL_CONF:-/etc/ssl/openssl.cnf}
     volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      # nginx.conf moved docker/nginx.conf → docker/nginx/nginx.conf
+      # (WARP-1021). Still mounted read-only over the baked copy (same file)
+      # so config edits keep applying with a reload, no rebuild — the
+      # ADR-023 cert-swap flow and ops muscle memory are unchanged.
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./certs:/etc/nginx/certs:ro
     depends_on:
       orchestrator:

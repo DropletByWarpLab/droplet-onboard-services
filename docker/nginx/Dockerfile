@@ -9,10 +9,14 @@
 # docker/fips/** + docker/openssl-fips.cnf COPY paths resolve exactly like the
 # service images.
 #
-# Size delta: nginx:alpine ~50 MB → nginx:1.27-bookworm + openssl + baked
-# fips.so ~190-220 MB. The fips-builder stage is DISCARDED (only fips.so ~4 MB +
-# the Debian nginx base ship) and is shared/cached with the five service images
-# (identical first stage), so the incremental build cost is near-zero.
+# Size delta (measured 2026-07-05, linux/arm64, containerd image store):
+# nginx:alpine 92.6 MB → this image 300 MB, of which the nginx:1.27-bookworm
+# base is 284 MB — i.e. the FIPS layers (openssl CLI + ca-certificates +
+# fips.so + fipsmodule.cnf + profiles) add only ~16 MB; the rest is the
+# Alpine→Debian base swap that FIPS validation requires. The fips-builder
+# stage is DISCARDED (only fips.so ~4 MB + the Debian nginx base ship) and is
+# shared/cached with the five service images (identical first stage), so the
+# incremental build cost is near-zero.
 
 # --- FIPS provider build stage (byte-identical to the service images) --------
 FROM debian:bookworm-slim AS fips-builder

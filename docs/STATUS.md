@@ -20,7 +20,7 @@ This file is a walk-through of what's actually implemented in this repo, categor
 ### Security & access control
 - **RBAC with per-route guards.** `Role` enum on the Prisma `User` model (`apps/orchestrator/prisma/schema.prisma`, `enum Role`), `requireRole(...)` middleware (`apps/orchestrator/src/middleware/auth.ts`, scope helper in `middleware/scope.ts`) applied per-route (e.g. `routes/aps.ts`, `routes/activity.ts`, `routes/auth.ts`). Covered by `__tests__/rbac.test.ts` + `__tests__/require-role.middleware.test.ts`.
 - **Postgres-backed append-only audit log.** `ActivityRow` model (`schema.prisma`, WARP-456) with an HMAC-SHA256 hash-chain — each row signs over canonical JSON and hashes the prior signature so the chain is tamper-evident (`apps/orchestrator/src/services/audit-signing.service.ts`). Sealed export via `POST /api/activity/export` (`apps/orchestrator/src/routes/activity.ts`, owner/admin gated).
-- **HTTPS with auto-generated cert + HTTP→HTTPS redirect.** Nginx terminates TLS on `:443` (`docker/nginx.conf`: `listen 443 ssl` with `droplet.crt`/`droplet.key`) and 301-redirects `:80` → `https://` for all paths. The self-signed cert is generated/regenerated on first boot by `_generate_tls_cert` (`scripts/lib/secrets.sh`).
+- **HTTPS with auto-generated cert + HTTP→HTTPS redirect.** Nginx terminates TLS on `:443` (`docker/nginx/nginx.conf`: `listen 443 ssl` with `droplet.crt`/`droplet.key`) and 301-redirects `:80` → `https://` for all paths. The self-signed cert is generated/regenerated on first boot by `_generate_tls_cert` (`scripts/lib/secrets.sh`).
 - **QR/PIN device pairing.** `POST /api/devices/pair` mints a short-lived 6-char code + `droplet://pair?...` QR payload, `GET /api/devices/pair/:code/status` polls, and `POST /api/devices/pair/claim` completes the pairing (`apps/orchestrator/src/routes/device-clients.ts`).
 - **WireGuard remote access.** `VpnPeer` Prisma model (`schema.prisma`) + `routes/vpn.ts` + `services/vpn.service.ts` (IP allocation from `10.13.13.0/24`, `.conf` rendering); router-side keypair/peer provisioning via `services/routing/` (ubus/ACL). Dashboard "Remote Access" page renders the `.conf` as a QR.
 
@@ -46,7 +46,7 @@ This file is a walk-through of what's actually implemented in this repo, categor
 
 ### Infrastructure
 - **Unified Docker Compose stack** — 20 services in a single file (`docker/docker-compose.yml`).
-- Nginx reverse proxy terminating on `:80` and `:443` (`docker/nginx.conf`, `docker/certs/`).
+- Nginx reverse proxy terminating on `:80` and `:443` (`docker/nginx/nginx.conf`, `docker/certs/`).
 - PostgreSQL 16, Redis 7, Mosquitto 2 MQTT broker, Nextcloud 29 (apache), Frigate NVR (`docker/docker-compose.yml`, `docker/frigate/config.yml`, `docker/mosquitto.conf`, `docker/nextcloud-skeleton/`, `docker/init-nextcloud-db.sh`, `docker/nextcloud-init.sh`). Smart-home devices are controlled by the `matter-controller` host-network sidecar (`services/matter-controller/`, ADR-022/WARP-850 — BLE commissioning + LAN mDNS), fronted by the orchestrator's `/api/matter/*` routes.
 - OpenWrt single-box AP container image (`openwrt/singlebox-image/`) + UCI config overlay (`openwrt/files/`, `openwrt/scripts/`, `openwrt/README.md`). The legacy multi-box bare-metal router image builder (`openwrt/build.sh`) has been retired (ADR-011); the router runs in a container on single-box.
 - Setup + factory-reset scripts with flags for `--dry-run`, `--systemd`, `--regenerate-env`, etc. (`scripts/setup.sh`, `scripts/factory-reset.sh`, `scripts/README.md`).

@@ -106,6 +106,64 @@ else
   fail "Dockerfile is missing the nginx cipher-profile self-test"
 fi
 
+# 6) Compose wiring: the gateway service BUILDS the FIPS-capable image (no more
+#    pulled nginx:alpine), passes the knob + OPENSSL_CONF, and mounts the moved
+#    nginx.conf path. Textual assertions (python3+yaml not guaranteed here);
+#    scoped to the `gateway:` service block only.
+compose="$REPO_ROOT/docker/docker-compose.yml"
+gw_block="$(awk '/^  gateway:/{f=1; next} f && /^  [a-zA-Z]/{exit} f{print}' "$compose")"
+if printf '%s\n' "$gw_block" | grep -q 'dockerfile: docker/nginx/Dockerfile' \
+   && ! printf '%s\n' "$gw_block" | grep -q 'image: nginx:alpine'; then
+  pass "compose gateway builds docker/nginx/Dockerfile (nginx:alpine dropped)"
+else
+  fail "compose gateway is not built from docker/nginx/Dockerfile"
+fi
+if printf '%s\n' "$gw_block" | grep -qE 'DROPLET_FIPS_MODE=\$\{DROPLET_FIPS_MODE:-0\}' \
+   && printf '%s\n' "$gw_block" | grep -qE 'OPENSSL_CONF=\$\{OPENSSL_CONF:-'; then
+  pass "compose gateway threads DROPLET_FIPS_MODE (default 0) + OPENSSL_CONF"
+else
+  fail "compose gateway is missing the DROPLET_FIPS_MODE / OPENSSL_CONF env wiring"
+fi
+if printf '%s\n' "$gw_block" | grep -q './nginx/nginx.conf:/etc/nginx/nginx.conf:ro'; then
+  pass "compose gateway mounts the moved docker/nginx/nginx.conf read-only"
+else
+  fail "compose gateway does not mount ./nginx/nginx.conf:ro"
+fi
+
+# 7) CI wiring: docker-build.yml must know the gateway image (KNOWN list +
+#    a per-image path filter + docker/nginx/** in the workflow triggers) —
+#    otherwise the detect job's drift check fails, or gateway-scoped PRs
+#    silently skip the image build.
+dbw="$REPO_ROOT/.github/workflows/docker-build.yml"
+if grep -q '"gateway"' "$dbw"; then
+  pass "docker-build.yml KNOWN list includes gateway"
+else
+  fail "docker-build.yml KNOWN list is missing gateway"
+fi
+if grep -qE '^\s+gateway:' "$dbw" && grep -q '"docker/nginx/\*\*"' "$dbw"; then
+  pass "docker-build.yml has a gateway path filter on docker/nginx/**"
+else
+  fail "docker-build.yml is missing the gateway per-image filter"
+fi
+
+# 8) setup.sh build phase: gateway must be in build_services (the
+#    compute_build_list_drift guard + tests/setup.test.sh Phase 12 parity
+#    check both key off this list).
+if awk '/^  local build_services=\(/{f=1} f{print} f&&/^  \)/{exit}' \
+     "$REPO_ROOT/scripts/lib/compose.sh" | grep -qE '^\s+gateway$'; then
+  pass "scripts/lib/compose.sh build_services includes gateway"
+else
+  fail "scripts/lib/compose.sh build_services is missing gateway"
+fi
+
+# 9) This suite runs in CI: test-fips.yml must invoke it.
+tfy="$REPO_ROOT/.github/workflows/test-fips.yml"
+if grep -q 'tests/nginx-fips.test.sh' "$tfy"; then
+  pass "test-fips.yml runs tests/nginx-fips.test.sh"
+else
+  fail "test-fips.yml does not run tests/nginx-fips.test.sh"
+fi
+
 echo ""
 if [ "$FAILURES" -eq 0 ]; then
   printf "  \033[32mResults: %d passed, 0 failed\033[0m\n\n" "$TESTS"

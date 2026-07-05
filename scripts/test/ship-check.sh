@@ -1203,7 +1203,7 @@ run_check_tls_invariants() {
   #      curl, this FAILs.
   local label="tls-invariants"
   local secrets_sh="$REPO_ROOT/scripts/lib/secrets.sh"
-  local nginx_conf="$REPO_ROOT/docker/nginx.conf"
+  local nginx_conf="$REPO_ROOT/docker/nginx/nginx.conf"
   local factory_reset="$REPO_ROOT/scripts/factory-reset.sh"
   local failures=0
 
@@ -1231,7 +1231,7 @@ run_check_tls_invariants() {
       failures=$((failures + 1))
     fi
   else
-    printf "  ${_RED}FAIL${_RESET}  %s — docker/nginx.conf not found\n" "$label"
+    printf "  ${_RED}FAIL${_RESET}  %s — docker/nginx/nginx.conf not found\n" "$label"
     failures=$((failures + 1))
   fi
 

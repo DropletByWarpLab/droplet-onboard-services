@@ -44,6 +44,9 @@ on:
       # an edit to them must rebuild all images.
       - "docker/fips/**"
       - "docker/openssl-fips.cnf"
+      # WARP-1021: the gateway image bakes docker/nginx/** (Dockerfile,
+      # nginx.conf, cipher profiles, entrypoint hook) — edits must rebuild it.
+      - "docker/nginx/**"
       - ".dockerignore"
       - "proto/**"
       - ".github/workflows/docker-build.yml"
@@ -67,6 +70,7 @@ on:
       - "docker/docker-compose.yml"
       - "docker/fips/**"
       - "docker/openssl-fips.cnf"
+      - "docker/nginx/**"
       - ".dockerignore"
       - "proto/**"
       - ".github/workflows/docker-build.yml"
@@ -119,8 +123,9 @@ jobs:
           BUILDABLE: ${{ steps.compose.outputs.buildable }}
           KNOWN: >-
             ["ai-gateway","camera-discovery","device-identity-svc",
-            "email-indexer","file-indexer","matter-controller","mcp-server",
-            "orchestrator","rag-eval","routing","switch","web-dashboard"]
+            "email-indexer","file-indexer","gateway","matter-controller",
+            "mcp-server","orchestrator","rag-eval","routing","switch",
+            "web-dashboard"]
         run: |
           set -eu
           if [ "$(jq -cS . <<<"$BUILDABLE")" != "$(jq -cS . <<<"$KNOWN")" ]; then
@@ -164,6 +169,11 @@ jobs:
               - "docker/openssl-fips.cnf"
               - ".dockerignore"
               - ".github/workflows/docker-build.yml"
+            # WARP-1021: the FIPS-capable nginx edge. Everything it COPYs
+            # beyond docker/nginx/** (docker/fips/**, docker/openssl-fips.cnf)
+            # lives in `global` above, which rebuilds ALL images anyway.
+            gateway:
+              - "docker/nginx/**"
             orchestrator:
               - *node-workspace
               - "apps/orchestrator/**"
