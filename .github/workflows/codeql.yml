@@ -85,25 +85,44 @@ jobs:
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           fi
 
-  analyze:
-    name: codeql / ${{ matrix.language }}
+  # Two explicit jobs instead of a matrix: a matrix skipped at job level
+  # reports one check literally named "codeql / ${{ matrix.language }}"
+  # (GitHub never expands a matrix it skips), which would break the stable
+  # per-language check names the ruleset wiring expects.
+  analyze-js:
+    name: codeql / javascript-typescript
     needs: preflight
     if: needs.preflight.outputs.enabled == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        language: [javascript-typescript, python]
     steps:
       - uses: actions/checkout@v4
 
       - uses: github/codeql-action/init@v3
         with:
-          languages: ${{ matrix.language }}
+          languages: javascript-typescript
           config-file: ./.github/codeql/codeql-config.yml
           build-mode: none
 
       - uses: github/codeql-action/analyze@v3
         with:
-          category: "/language:${{ matrix.language }}"
+          category: "/language:javascript-typescript"
+
+  analyze-py:
+    name: codeql / python
+    needs: preflight
+    if: needs.preflight.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: python
+          config-file: ./.github/codeql/codeql-config.yml
+          build-mode: none
+
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:python"
