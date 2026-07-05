@@ -23,10 +23,24 @@ file.
 | `semgrep.yml` | semgrep 1.136.0, `p/owasp-top-ten` + `.semgrep/droplet.yaml` | yes (new findings only) | code, excl. tests (`.semgrepignore`) | diff-aware `--baseline-commit`; `// nosemgrep: <rule-id>` with reviewer sign-off |
 | `hadolint.yml` | hadolint 2.14.0 | yes | all tracked Dockerfiles | `.hadolint.yaml` ignored rules (DL3008/DL3059/DL4006, reasons inline) |
 | `docker-build.yml` (Trivy step) | trivy-action 0.36.0 | yes (HIGH/CRITICAL, fixable) | every image the PR rebuilds | `.trivyignore` (comment + burn-down required per entry) |
-| `codeql.yml` | CodeQL (JS/TS + Python) | yes (new alerts, via ruleset code-scanning rule) | code paths | GitHub per-PR alert diffing |
+| `codeql.yml` | CodeQL (JS/TS + Python) | yes (new alerts, via ruleset code-scanning rule) — dormant until Code Security is enabled (D1, below) | code paths | GitHub per-PR alert diffing |
 | `osv-nightly.yml` | osv-scanner 2.3.8 action | no (nightly signal) | lockfiles + requirements | `osv-scanner.toml` |
 | `egress-gate.yml` | `scripts/check-egress-allowlist.py` | yes | outbound destinations | `docs/security/allowed-egress.yaml` (security review required) |
 | Dependabot | `.github/dependabot.yml` | n/a (opens fix PRs) | npm ×2, pip ×13, actions | grouped weekly, limits per ecosystem |
+
+### CodeQL is gated on GitHub Code Security (decision D1) {#codeql}
+
+On this private repo, uploading CodeQL results requires **GitHub Code
+Security** (GHAS — per-committer billing, org-admin enablement). Until it is
+enabled, `codeql.yml`'s preflight job probes the code-scanning API and
+**skips** the analyze matrix (skipped, not red — the run's step summary says
+why). The moment an admin runs
+
+    gh api -X PATCH repos/DropletByWarpLab/droplet-onboard-services \
+      -f 'security_and_analysis[advanced_security][status]=enabled'
+
+the next run analyzes and uploads without any workflow change. Every other
+scanner in this document works regardless of D1.
 
 ## When a gate fails your PR
 

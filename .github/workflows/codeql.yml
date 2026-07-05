@@ -8,6 +8,14 @@ name: codeql
 # (NOT a status check) so path-filtered runs don't leave PRs hanging on
 # "Expected" — see docs/SECURITY.md#codeql and WARP-968/969.
 # Path-filtered: at ~10 min/language this is the one expensive lane.
+#
+# GATED ON D1 (GitHub Code Security / GHAS): on this private repo the SARIF
+# upload is rejected with "Code Security must be enabled for this
+# repository" until an org admin enables the feature (billing decision —
+# docs/SECURITY.md#codeql). The preflight job probes the code-scanning API
+# and SKIPS the analyze matrix while the feature is off, so this lane merges
+# green today and arms itself the moment Code Security is enabled — no
+# workflow edit needed afterwards.
 
 on:
   pull_request:
@@ -44,8 +52,43 @@ permissions:
   security-events: write
 
 jobs:
+  # D1 gate: only the exact "must be enabled" 403 means Code Security is
+  # off; any other response (200 alerts, 404 no-analyses-yet) means the
+  # upload will be accepted, so we analyze. Fails open on purpose — if the
+  # probe breaks we'd rather run CodeQL and see the real error than
+  # silently skip a security gate forever.
+  preflight:
+    name: code-security enabled (D1 gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      enabled: ${{ steps.probe.outputs.enabled }}
+    steps:
+      - name: Probe code-scanning API availability
+        id: probe
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          resp=$(gh api "repos/$GITHUB_REPOSITORY/code-scanning/alerts?per_page=1" 2>&1) || true
+          if printf '%s' "$resp" | grep -qi "must be enabled for this repository"; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "## CodeQL skipped — GitHub Code Security not enabled (decision D1)"
+              echo "The code-scanning API answered: \`$(printf '%s' "$resp" | head -c 300)\`"
+              echo "Enable it (org admin, billing) and this workflow arms itself on the next run:"
+              echo '```'
+              echo "gh api -X PATCH repos/$GITHUB_REPOSITORY -f 'security_and_analysis[advanced_security][status]=enabled'"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
   analyze:
     name: codeql / ${{ matrix.language }}
+    needs: preflight
+    if: needs.preflight.outputs.enabled == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
