@@ -132,16 +132,24 @@ auditor guide is [`docs/fips.md`](fips.md); the essentials:
 - **FIPS restricts, it does not add strength.** Turning it on narrows crypto to
   FIPS-approved algorithms for certification; it does not make the system
   "more secure" in the informal sense.
-- **Postgres decision (A) — implemented, scoped to the knob (WARP-233).**
-  Under FIPS the cipher policy rejects Postgres's TLS handshake ciphers
-  (`P1011` "library has no ciphers"), so Prisma/libpq clients can't do TLS to
-  `db` at all. Default posture: TLS 1.3 + SCRAM only (`hostssl`-only
-  `docker/postgres/pg_hba.conf`, every `DATABASE_URL` pins
-  `sslmode=require`). `setup.sh --fips` flips the intra-compose DB hop to
+- **Postgres + FIPS — two stacked issues.** (1) **WARP-233 decision (A),
+  implemented, scoped to the knob.** Default posture is TLS 1.3 + SCRAM only
+  (`hostssl`-only `docker/postgres/pg_hba.conf`, every `DATABASE_URL` pins
+  `sslmode=require`); `setup.sh --fips` flips the intra-compose DB hop to
   plaintext+SCRAM on the private container bridge (`PG_SSLMODE=disable`,
-  `PG_HBA=pg_hba.fips.conf`, `DATABASE_URL` `sslmode` rewritten); `--no-fips`
-  restores TLS-only. App-layer PHI/PII column encryption (WARP-233) applies
-  in both postures. Decision (A) sign-off tracked on the WARP-233 PR.
+  `PG_HBA=pg_hba.fips.conf`, `DATABASE_URL` `sslmode` rewritten), and `--no-fips`
+  restores TLS-only. App-layer PHI/PII column encryption applies in both
+  postures; decision (A) sign-off is tracked on the WARP-233 PR. (2)
+  **Separately, FIPS-on app boot is currently blocked (WARP-317 finding).**
+  Turning FIPS on activates + enforces the validated provider (self-tests pass,
+  MD5 refused, edge TLS restricted), but the shared FIPS OpenSSL config leaves a
+  default TLS client context with no ciphers, so services that construct a TLS
+  client at startup — orchestrator (Prisma `$connect` → `P1011` "library has no
+  ciphers") and ai-gateway (httpx) — can't finish booting. Root cause is the
+  config (`docker/openssl-fips.cnf`), not the db hop; the fix is
+  WARP-967/WARP-318, surfaced + asserted by WARP-317's full-stack smoke test.
+  Until (2) lands, FIPS-on boot is blocked regardless of (1). See
+  [`docs/fips.md`](fips.md).
 - **Dev opt-out.** `DROPLET_FIPS_MODE=0` (default). The boot self-test skips
   silently when `DROPLET_FIPS_REQUIRED` is unset/false.
 
