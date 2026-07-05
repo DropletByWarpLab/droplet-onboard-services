@@ -459,10 +459,29 @@ else
 fi
 
 # =============================================================================
+# Test 17: WARP-233 — db must enforce TLS 1.3 + SCRAM + custom pg_hba
+# =============================================================================
+# No silent regression to plaintext Postgres. Four invariants, all static:
+#   1-3. the db service command carries the TLS 1.3 / SCRAM / hba_file flags,
+#   4.   pg_hba has the hostssl+scram line AND no plaintext `host all all all`
+#        auth line (only the terminal reject may match `host all all all`).
+
+PG_HBA="$REPO_ROOT/docker/postgres/pg_hba.conf"
+
+if grep -q "ssl_min_protocol_version=TLSv1.3" "$COMPOSE_FILE" &&
+   grep -q "password_encryption=scram-sha-256" "$COMPOSE_FILE" &&
+   grep -q "hba_file=/etc/postgresql/pg_hba.conf" "$COMPOSE_FILE" &&
+   grep -q "hostssl all   all   0.0.0.0/0     scram-sha-256" "$PG_HBA" &&
+   ! grep -qE "^host[[:space:]]+all[[:space:]]+all[[:space:]]+all[[:space:]]+(trust|md5|password|scram-sha-256)" "$PG_HBA"; then
+  pass "db service enforces TLS 1.3 + SCRAM + custom pg_hba (WARP-233)"
+else
+  fail "db service TLS 1.3 / SCRAM / pg_hba invariants regressed (WARP-233)"
+fi
+
+# =============================================================================
 # Test 18: WARP-234 — cache must stay TLS-only with per-service ACLs
 # =============================================================================
-# (Test 17 is the WARP-233 db guard, on the warp-233-postgres-tls-scram
-# branch.) No silent regression to a plaintext/shared-password Redis. All
+# (Test 17 above is the WARP-233 db guard.) No silent regression to a plaintext/shared-password Redis. All
 # static:
 #   1. plaintext listener disabled (--port 0) and TLS listener on 6380,
 #   2. the ACL file is served (--aclfile) and --requirepass is retired,
