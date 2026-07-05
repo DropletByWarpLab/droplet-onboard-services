@@ -41,7 +41,7 @@ edge-platform/
     docker-compose.yml      Unified Compose stack (20 services)
     nginx.conf              Reverse proxy
     frigate/config.yml
-    mosquitto.conf, mosquitto_passwd_dir/
+    mosquitto.conf, mosquitto.acl (WARP-235 per-CN topic grants)
     certs/                  TLS certs
     nextcloud-skeleton/, nextcloud-init.sh, init-nextcloud-db.sh
   proto/
