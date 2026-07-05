@@ -56,6 +56,9 @@ on:
       - ".dockerignore"
       - "proto/**"
       - ".github/workflows/docker-build.yml"
+      # WARP-243: the Trivy baseline changes the scan verdict for every
+      # image - a .trivyignore-only PR must rebuild + rescan to be validated.
+      - ".trivyignore"
       # Build inputs the old trigger list missed — each is COPY'd into at
       # least one image (see the per-image filters in the detect job):
       - "package.json"
@@ -80,6 +83,9 @@ on:
       - ".dockerignore"
       - "proto/**"
       - ".github/workflows/docker-build.yml"
+      # WARP-243: the Trivy baseline changes the scan verdict for every
+      # image - a .trivyignore-only PR must rebuild + rescan to be validated.
+      - ".trivyignore"
       - "package.json"
       - "package-lock.json"
       - "packages/**"
@@ -175,6 +181,7 @@ jobs:
               - "docker/openssl-fips.cnf"
               - ".dockerignore"
               - ".github/workflows/docker-build.yml"
+              - ".trivyignore" # Trivy baseline applies to every image
             # WARP-1021: the FIPS-capable nginx edge. Everything it COPYs
             # beyond docker/nginx/** (docker/fips/**, docker/openssl-fips.cnf)
             # lives in `global` above, which rebuilds ALL images anyway.
