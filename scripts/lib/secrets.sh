@@ -207,6 +207,12 @@ generate_env() {
   local onlyoffice_jwt_secret
   pg_password=$(_gen_password 24)
   redis_password=$(_gen_password 24)
+  # WARP-234: per-service Redis ACL identities (least privilege; the shared
+  # REDIS_PASSWORD becomes the ping-only `default` user for health probes).
+  local redis_orchestrator_password redis_ai_gateway_password redis_mcp_password
+  redis_orchestrator_password=$(_gen_password 24)
+  redis_ai_gateway_password=$(_gen_password 24)
+  redis_mcp_password=$(_gen_password 24)
   mqtt_password=$(_gen_password 24)
   nc_password=$(_gen_password 24)
   # WARP-834: per-device OpenWrt rpcd/root password. _gen_password keeps it
@@ -337,9 +343,15 @@ POSTGRES_DB=droplet
 DATABASE_URL=postgresql://droplet:${pg_password}@db:5432/droplet
 
 # --- Redis ---
+# WARP-234: REDIS_PASSWORD is the ping-only `default` ACL user (health
+# probes / the WARP-966 harness). Real clients authenticate as their own
+# ACL user via the per-service rediss:// URLs in docker-compose.yml.
 REDIS_PASSWORD=$redis_password
-REDIS_URL=redis://:${redis_password}@cache:6379
-# Nextcloud expects this name for the Redis password
+REDIS_URL=rediss://:${redis_password}@cache:6380
+REDIS_PASSWORD_ORCHESTRATOR=$redis_orchestrator_password
+REDIS_PASSWORD_AI_GATEWAY=$redis_ai_gateway_password
+REDIS_PASSWORD_MCP=$redis_mcp_password
+# Nextcloud expects this name for the Redis password (ACL user `nextcloud`)
 REDIS_HOST_PASSWORD=$redis_password
 
 # --- MQTT ---
@@ -731,6 +743,19 @@ migrate_env() {
   _migrate_ensure_key DROPLET_TPM_BACKEND "$di_backend_default"
   _migrate_ensure_key DROPLET_DEVICE_ID "$(hostname 2>/dev/null || echo droplet)"
 
+  # WARP-234: per-service Redis ACL identities for pre-existing installs.
+  _migrate_ensure_key REDIS_PASSWORD_ORCHESTRATOR "$(_gen_password 24)"
+  _migrate_ensure_key REDIS_PASSWORD_AI_GATEWAY "$(_gen_password 24)"
+  _migrate_ensure_key REDIS_PASSWORD_MCP "$(_gen_password 24)"
+  # Upgrade the exact legacy plaintext REDIS_URL shape to the TLS listener.
+  # Only the default-user URL is rewritten (operators with custom URLs keep
+  # theirs); real clients get per-service URLs from docker-compose.yml.
+  if grep -qE '^REDIS_URL=redis://:[^@]*@cache:6379$' "$stage"; then
+    sed -i.bak -E 's|^REDIS_URL=redis://(:[^@]*@cache):6379$|REDIS_URL=rediss://\1:6380|' "$stage" && rm -f "$stage.bak"
+    normalized=true
+    log_info "Migrated .env: REDIS_URL now points at the TLS listener (WARP-234)"
+  fi
+
   # WARP-318: backfill the single FIPS knob (default OFF) so a pre-318 .env
   # gains it on the next setup re-run. Only the knob is migrated — the derived
   # activation vars (OPENSSL_CONF / DROPLET_FIPS_REQUIRED / OPENSSL_MODULES /
@@ -771,6 +796,7 @@ materialize_artifacts() {
 
   _generate_mosquitto_passwd "${MQTT_PASSWORD:-}"
   _write_mosquitto_conf
+  _generate_redis_acl
   # WARP-236 — mint the internal CA and issue a per-service TLS bundle for
   # every first-party identity. Idempotent (renews only within 30d of expiry).
   # DROPLET_BRIDGE_GATEWAY_IP is exported by single-box.sh for the single-box
@@ -911,6 +937,67 @@ sync_switch_password_secret() {
   chmod 600 "$tmp"
   mv "$tmp" "$secret_file"
   log_success "Wrote $secret_file (chmod 600)"
+}
+
+# WARP-234 — materialize the per-service Redis ACL file the `cache` service
+# serves via --aclfile. Passwords land as sha256 hashes (never plaintext), so
+# the file is 0644-safe (redis runs as uid 999 in redis:7-alpine; same
+# rationale as the hashed mosquitto passwd). Idempotent: content is fully
+# derived from the .env passwords, staged + rename(2)d into place.
+#
+# ACL map (from ACTUAL usage, not aspiration):
+#   default       — +ping only. Health probes + the WARP-966 harness
+#                   authenticate with the legacy REDIS_PASSWORD; no data.
+#   orchestrator  — get/set/del/expire/smembers/srem/scan/eval across its
+#                   many prefixes (sessions, ratelimit:login:*, SWR cache) →
+#                   ~* but -@dangerous (KEYS/FLUSH*/CONFIG/... stay denied);
+#                   +info for the ioredis ready check.
+#   ai-gateway    — chat sessions (session:*, sessions:index) + rate-limit
+#                   Lua (ratelimit:*) → exactly those patterns, +@scripting.
+#   mcp-server    — rerank result cache → ~rerank:* with +get +setex only.
+#   nextcloud     — php memcache/locking (instanceid-derived prefixes) → ~*,
+#                   +keys carve-out (phpredis clear()), -@dangerous.
+_generate_redis_acl() {
+  local acl_dir="$REPO_ROOT/data/secrets/redis"
+  local acl_file="$acl_dir/users.acl"
+
+  if [ -z "${REDIS_PASSWORD:-}" ]; then
+    log_warn "REDIS_PASSWORD not set — skipping Redis ACL generation (rerun setup once .env exists)"
+    return 0
+  fi
+  # Pre-WARP-234 .env (fresh generate_env always sets these; migrate_env
+  # backfills on upgrade). Nextcloud reuses REDIS_HOST_PASSWORD.
+  local orch_pw="${REDIS_PASSWORD_ORCHESTRATOR:-}"
+  local aigw_pw="${REDIS_PASSWORD_AI_GATEWAY:-}"
+  local mcp_pw="${REDIS_PASSWORD_MCP:-}"
+  local nc_pw="${REDIS_HOST_PASSWORD:-$REDIS_PASSWORD}"
+  if [ -z "$orch_pw" ] || [ -z "$aigw_pw" ] || [ -z "$mcp_pw" ]; then
+    log_warn "Per-service Redis passwords missing from .env — skipping ACL generation (run setup.sh to migrate .env first)"
+    return 0
+  fi
+
+  _redis_sha() { printf '%s' "$1" | openssl dgst -sha256 -hex | sed 's/^.*= //'; }
+
+  mkdir -p "$acl_dir"
+  chmod 700 "$REPO_ROOT/data/secrets" "$acl_dir" 2>/dev/null || true
+  local stage="$acl_file.tmp.$$"
+  rm -f "$acl_file".tmp.* 2>/dev/null || true
+  cat > "$stage" <<EOF
+# Generated by scripts/lib/secrets.sh (_generate_redis_acl, WARP-234).
+# DO NOT EDIT — regenerated on every setup run from .env. sha256 hashes only.
+user default on #$(_redis_sha "$REDIS_PASSWORD") resetchannels -@all +ping
+user orchestrator on #$(_redis_sha "$orch_pw") ~* resetchannels -@all +@connection +@read +@write +@keyspace +@transaction +@scripting -@dangerous +info +client|setinfo
+user ai-gateway on #$(_redis_sha "$aigw_pw") ~session:* ~sessions:index ~ratelimit:* resetchannels -@all +@connection +@read +@write +@keyspace +@scripting -@dangerous +client|setinfo
+user mcp-server on #$(_redis_sha "$mcp_pw") ~rerank:* resetchannels -@all +@connection +get +setex +info +client|setinfo
+user nextcloud on #$(_redis_sha "$nc_pw") ~* resetchannels -@all +@connection +@read +@write +@keyspace +@string +@scripting -@dangerous +keys +client|setinfo
+EOF
+  chmod 644 "$stage"
+  if [ -f "$acl_file" ] && cmp -s "$stage" "$acl_file"; then
+    rm -f "$stage"
+    return 0
+  fi
+  mv "$stage" "$acl_file"
+  log_success "Redis ACL file generated at $acl_file (5 users, hashed)"
 }
 
 _generate_mosquitto_passwd() {
