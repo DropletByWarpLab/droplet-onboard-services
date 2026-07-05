@@ -43,6 +43,36 @@ RUNTIME_DIR="${DROPLET_USB_RUNTIME_DIR:-/run/droplet}"
 CRYPTSETUP="$(droplet_tpm_cryptsetup)"
 CRYPTENROLL="$(droplet_tpm_cryptenroll)"
 
+# Where .env lives — needed so `derive` can fall back to the on-disk
+# DEVICE_SECRET_KEY when the process env doesn't carry it (the production case:
+# systemd/udev scrub the environment — see droplet_usb_derive_passphrase).
+# Precedence:
+#   1. DROPLET_ENV_FILE (explicit override / hermetic tests)
+#   2. $DROPLET_REPO_ROOT/.env (explicit repo root)
+#   3. first existing .env among the well-known install locations — the enroll
+#      script is installed to /usr/local/sbin, so $SCRIPT_DIR/../.. is /usr and
+#      NOT the repo; probing fixed paths is what makes the automount recovery-
+#      slot fallback actually work (finding 4). The relocated path
+#      (/data/droplet/env/.env) is listed first: after WARP-232 relocation the
+#      canonical .env lives inside the encrypted /data and the repo path is a
+#      symlink to it (either resolves, but prefer the real file).
+_resolve_env_file() {
+  if [ -n "${DROPLET_ENV_FILE:-}" ]; then printf '%s' "$DROPLET_ENV_FILE"; return; fi
+  if [ -n "${DROPLET_REPO_ROOT:-}" ]; then printf '%s' "$DROPLET_REPO_ROOT/.env"; return; fi
+  local c
+  for c in \
+    /data/droplet/env/.env \
+    /home/droplet/edge-platform/.env \
+    /opt/droplet/.env \
+    "$SCRIPT_DIR/../../.env"; do
+    if [ -f "$c" ]; then printf '%s' "$c"; return; fi
+  done
+  # Fall back to the repo-relative guess even if it doesn't exist (keeps the
+  # error message pointing somewhere sensible).
+  printf '%s' "$SCRIPT_DIR/../../.env"
+}
+ENV_FILE="$(_resolve_env_file)"
+
 # The versioned USB derivation salt — disjoint from restic's droplet-restic-v1.
 USB_LUKS_SALT="droplet-usb-luks-v1"
 
@@ -54,11 +84,27 @@ _usb_str_to_hex() { printf '%s' "$1" | od -An -v -t x1 | tr -d ' \n'; }
 _usb_hmac_sha256_hex() { openssl dgst -sha256 -mac HMAC -macopt "hexkey:$1" | awk '{print $NF}'; }
 
 # droplet_usb_derive_passphrase <luks-uuid> — recovery passphrase on stdout.
+#
+# IKM precedence (WARP-232 finding 4): $DEVICE_SECRET_KEY env, else
+# DEVICE_SECRET_KEY= from $ENV_FILE. This MIRRORS droplet-backup-lib.sh's
+# droplet_backup_derive_password — WITHOUT the .env fallback, the production
+# invocation `sudo droplet-usb-enroll.sh enroll` (and `derive`, and the
+# automount recovery-slot fallback, all of which run under systemd/udev with a
+# scrubbed env) had an EMPTY DEVICE_SECRET_KEY, so every derive failed: enroll
+# died under set -e AFTER the TPM slot but BEFORE the recovery slot (stranding a
+# half-enrolled drive), `derive` always exited 2, and the automount derived-slot
+# fallback was dead code.
 droplet_usb_derive_passphrase() {
   local uuid="${1:-}"
   local ikm="${DEVICE_SECRET_KEY:-}"
+  if [ -z "$ikm" ] && [ -f "$ENV_FILE" ]; then
+    # `|| true` keeps a no-match grep (exit 1) from tripping set -euo pipefail;
+    # the empty-check below is the real gate.
+    ikm="$( { grep -E '^DEVICE_SECRET_KEY=' "$ENV_FILE" 2>/dev/null || true; } | head -n 1 | cut -d= -f2-)"
+  fi
   if [ -z "$ikm" ]; then
-    err "DEVICE_SECRET_KEY is empty — cannot derive the USB recovery passphrase."
+    err "DEVICE_SECRET_KEY is empty (env AND $ENV_FILE) — cannot derive the USB recovery passphrase."
+    err "Run ./scripts/setup.sh first (it mints the device identity secrets into .env)."
     return 2
   fi
   if [ -z "$uuid" ]; then
@@ -111,6 +157,20 @@ cmd_enroll() {
   _guard_not_rootfs "$dev"
   _require_tpm
 
+  # WARP-232 (finding 4): FAIL FAST if the recovery passphrase can't be derived,
+  # BEFORE we wipe/format the drive. Deriving needs DEVICE_SECRET_KEY (env or
+  # .env); if it's absent the old flow only discovered that AFTER luksFormat +
+  # the TPM enroll — leaving a drive with a TPM-only slot and no recoverable
+  # unlock path if the TPM is ever lost. We probe derivation here (any uuid — the
+  # gate is only "is DEVICE_SECRET_KEY present"): a failure aborts with the drive
+  # untouched.
+  if ! droplet_usb_derive_passphrase "preflight-probe" >/dev/null 2>&1; then
+    err "cannot derive the recovery passphrase (DEVICE_SECRET_KEY absent in env AND $ENV_FILE)."
+    err "Refusing to format $dev — a drive with only a TPM keyslot is unrecoverable after TPM loss."
+    err "Run ./scripts/setup.sh first, or export DEVICE_SECRET_KEY."
+    exit 2
+  fi
+
   if [ "$force" != "1" ]; then
     printf '  This will DESTROY all data on %s and format it LUKS2/Argon2id.\n' "$dev"
     printf '  Type ENROLL to continue: '
@@ -120,6 +180,12 @@ cmd_enroll() {
 
   mkdir -p "$RUNTIME_DIR"; chmod 700 "$RUNTIME_DIR" 2>/dev/null || true
   local keyfile="$RUNTIME_DIR/.usb-key.$$"
+  local passfile="$RUNTIME_DIR/.usb-pass.$$"
+  # WARP-232 (finding 4): shred the tmpfs key/pass material on ANY exit path so
+  # an interrupted or failed enroll never strands raw key bytes in /run. The
+  # trap is scoped to this function's mapper too (closed below on the happy path).
+  # shellcheck disable=SC2064  # expand keyfile/passfile now, into the trap body.
+  trap "shred -u '$keyfile' '$passfile' 2>/dev/null || rm -f '$keyfile' '$passfile' 2>/dev/null || true" RETURN
   ( umask 077 && openssl rand 64 > "$keyfile" )
 
   log "wiping existing signatures on $dev"
@@ -129,18 +195,23 @@ cmd_enroll() {
   "$CRYPTSETUP" luksFormat --type luks2 --pbkdf argon2id --batch-mode \
     --key-file "$keyfile" "$dev"
 
-  log "enrolling TPM2 keyslot (PCRs $(droplet_tpm_pcrs))"
-  "$CRYPTENROLL" --unlock-key-file="$keyfile" --tpm2-device=auto \
-    --tpm2-pcrs="$(droplet_tpm_pcrs)" "$dev"
-
+  # Order (finding 4): add the DERIVED RECOVERY slot BEFORE the TPM slot. The
+  # recovery slot is the durable, TPM-independent unlock path; enrolling it first
+  # means an interruption after this point still leaves a fully recoverable drive
+  # (the operator can always re-derive the passphrase from .env), whereas the old
+  # order (TPM first, recovery second) left a TPM-only drive unrecoverable if the
+  # run died between the two enrolls.
   local uuid
   uuid="$(blkid -o value -s UUID "$dev" 2>/dev/null || true)"
   uuid="${uuid//$'\n'/}"
   log "adding the derived recovery keyslot (re-derivable on-box from .env)"
-  local passfile="$RUNTIME_DIR/.usb-pass.$$"
   ( umask 077 && droplet_usb_derive_passphrase "$uuid" > "$passfile" )
   "$CRYPTSETUP" luksAddKey --key-file "$keyfile" "$dev" "$passfile"
   rm -f "$passfile"
+
+  log "enrolling TPM2 keyslot (PCRs $(droplet_tpm_pcrs))"
+  "$CRYPTENROLL" --unlock-key-file="$keyfile" --tpm2-device=auto \
+    --tpm2-pcrs="$(droplet_tpm_pcrs)" "$dev"
 
   local mapper="droplet-usb-${uuid:0:8}"
   log "opening + formatting the filesystem"

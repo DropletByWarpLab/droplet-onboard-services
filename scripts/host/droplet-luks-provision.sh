@@ -46,8 +46,12 @@ CRYPTSETUP="$(droplet_tpm_cryptsetup)"
 CRYPTENROLL="$(droplet_tpm_cryptenroll)"
 SYSTEMD_CRYPTSETUP="${DROPLET_SYSTEMD_CRYPTSETUP_BIN:-/usr/lib/systemd/systemd-cryptsetup}"
 
-LV_DEV="/dev/${VG}/${LV}"
-MAPPER_DEV="/dev/mapper/${MAPPER}"
+# LV_DEV / MAPPER_DEV are the production LVM/dm paths; the hermetic harness
+# overrides them (DROPLET_LUKS_LV_DEV / DROPLET_LUKS_MAPPER_DEV) to point at tmp
+# nodes so the existing-LUKS re-run branch (finding 5) can be driven without a
+# real /dev tree. Production never sets these.
+LV_DEV="${DROPLET_LUKS_LV_DEV:-/dev/${VG}/${LV}}"
+MAPPER_DEV="${DROPLET_LUKS_MAPPER_DEV:-/dev/mapper/${MAPPER}}"
 CRYPTTAB="$ETC_DIR/crypttab"
 FSTAB="$ETC_DIR/fstab"
 DOCKER_DROPIN_DIR="$ETC_DIR/systemd/system/docker.service.d"
@@ -74,6 +78,17 @@ _require_tpm() {
 _mapper_active() {
   # Prefer findmnt on the mount target (test-observable); fall back to the node.
   if findmnt -n -o SOURCE "$DATA_MOUNT" >/dev/null 2>&1; then return 0; fi
+  [ -e "$MAPPER_DEV" ]
+}
+
+# _unlock_verified — did an unlock actually succeed? True iff the mapper is now
+# an active dm device (the container opened). Used on the existing-LUKS re-run
+# path (finding 5) to refuse wiring boot config for a container with no working
+# keyslot. `cryptsetup status <mapper>` is the authoritative check; fall back to
+# the mapper device node so the hermetic harness (stubbed cryptsetup) can drive
+# both the opened and the no-keyslot outcomes.
+_unlock_verified() {
+  if "$CRYPTSETUP" status "$MAPPER" >/dev/null 2>&1; then return 0; fi
   [ -e "$MAPPER_DEV" ]
 }
 
@@ -108,10 +123,32 @@ cmd_provision() {
   fi
 
   # If the LUKS LV already exists but is locked, just open + mount it.
+  #
+  # WARP-232 (finding 5): a power cut BETWEEN luksFormat and the keyslot enrolls
+  # (below) leaves a LUKS2 container with ZERO usable keyslots — the tmpfs
+  # install keyfile is gone on reboot, and neither the TPM nor the recovery slot
+  # was ever added. The old re-run path attached/opened with `|| true` and wrote
+  # crypttab/fstab REGARDLESS, so the box booted into a permanent mount failure
+  # with NO recovery key in existence — bricked. Now: VERIFY a working unlock
+  # path (the mapper actually opened) BEFORE writing any boot config. If nothing
+  # unlocks, refuse LOUDLY and leave the box bootable (no crypttab/fstab entry
+  # for a container we can't open, so /data just stays absent → docker gate).
   if [ -e "$LV_DEV" ] && "$CRYPTSETUP" isLuks "$LV_DEV" 2>/dev/null; then
     log "existing LUKS container at $LV_DEV — opening (no re-format)"
     "$SYSTEMD_CRYPTSETUP" attach "$MAPPER" "$LV_DEV" - tpm2-device=auto 2>/dev/null \
       || "$CRYPTSETUP" open "$LV_DEV" "$MAPPER" 2>/dev/null || true
+    if ! _unlock_verified; then
+      err "existing LUKS container at $LV_DEV has NO working unlock path — it"
+      err "did not open via the TPM token or any keyslot. This is the classic"
+      err "power-cut-mid-provision state (luksFormat completed but no keyslot"
+      err "was enrolled). REFUSING to wire crypttab/fstab for an unopenable"
+      err "device — that would brick the NEXT boot with no recovery key."
+      err "Recover with the OFFLINE recovery key, or (if this LV holds no data"
+      err "yet — first boot) wipe it and re-provision:"
+      err "  cryptsetup luksErase $LV_DEV && droplet-luks-provision.sh provision"
+      err "See docs/security/at-rest-encryption.md (power-cut recovery)."
+      exit 2
+    fi
     _mount_and_wire
     return 0
   fi
@@ -135,9 +172,20 @@ cmd_provision() {
   "$CRYPTSETUP" luksFormat --type luks2 --pbkdf argon2id --batch-mode \
     --key-file "$keyfile" "$LV_DEV"
 
-  log "enrolling TPM2 keyslot (PCRs $(droplet_tpm_pcrs))"
-  "$CRYPTENROLL" --unlock-key-file="$keyfile" --tpm2-device=auto \
-    --tpm2-pcrs="$(droplet_tpm_pcrs)" "$LV_DEV"
+  # WARP-232 (finding 6): the TPM enroll must be SKIPPED on a TPM-less dev box
+  # running with DROPLET_LUKS_ALLOW_NO_TPM=1 — `systemd-cryptenroll
+  # --tpm2-device=auto` fails hard with no TPM and (under set -e) would abort
+  # BEFORE the recovery slot is added, stranding a container with only the tmpfs
+  # keyfile that vanishes on reboot. When the flag is set and no TPM is present,
+  # enroll ONLY the recovery key so the dev box still has a durable unlock path.
+  if droplet_tpm_present; then
+    log "enrolling TPM2 keyslot (PCRs $(droplet_tpm_pcrs))"
+    "$CRYPTENROLL" --unlock-key-file="$keyfile" --tpm2-device=auto \
+      --tpm2-pcrs="$(droplet_tpm_pcrs)" "$LV_DEV"
+  else
+    log "DROPLET_LUKS_ALLOW_NO_TPM=1 + no TPM — SKIPPING the TPM2 keyslot (DEV ONLY)."
+    log "  The data partition is NOT TPM-sealed; only the recovery key unlocks it."
+  fi
 
   log "enrolling recovery keyslot — the key is shown ONCE below"
   local recovery
@@ -168,13 +216,25 @@ _mount_and_wire() {
   mkdir -p "$DATA_MOUNT" 2>/dev/null || true
   "$MOUNT" "$MAPPER_DEV" "$DATA_MOUNT" 2>/dev/null || true
 
-  # crypttab: auto-unlock via the TPM2 header token.
+  # crypttab: auto-unlock via the TPM2 header token. `nofail` so a PCR mismatch
+  # (TPM refuses to release the key) does NOT fail the cryptsetup unit hard and
+  # cascade into local-fs.target; the device-timeout bounds the wait.
   _append_if_absent "$CRYPTTAB" "$MAPPER" \
-    "$MAPPER $LV_DEV none tpm2-device=auto,luks,discard"
-  # fstab: mount /data with a bounded device timeout so a locked LUKS device
-  # can't hang the boot forever (it falls to the docker fail-closed gate).
+    "$MAPPER $LV_DEV none tpm2-device=auto,luks,discard,nofail,x-systemd.device-timeout=30s"
+  # fstab: mount /data with `nofail` + a bounded device timeout. `nofail` is the
+  # crux of finding 3: WITHOUT it, a locked /data (PCR mismatch on a headless
+  # box) makes the mount a HARD requirement of local-fs.target → local-fs fails
+  # → the box drops to emergency.target with NO network and NO SSH, so the
+  # documented PCR-mismatch runbook (which SSHes in and unlocks with the
+  # recovery key) is unreachable. WITH nofail the mount is best-effort: a locked
+  # /data just stays absent, the box boots DEGRADED (network + SSH up), and the
+  # docker `RequiresMountsFor=/data` gate below keeps every data-bearing
+  # container down until an operator unlocks. `noauto` is deliberately NOT set —
+  # we still WANT the auto-mount attempt on a healthy boot; nofail only removes
+  # the boot-blocking hard dependency. fsck pass 0: a nofail encrypted mount
+  # should not gate boot on an fsck of a device that may not be present.
   _append_if_absent "$FSTAB" "$DATA_MOUNT ext4" \
-    "$MAPPER_DEV $DATA_MOUNT ext4 defaults,x-systemd.device-timeout=30 0 2"
+    "$MAPPER_DEV $DATA_MOUNT ext4 defaults,nofail,x-systemd.device-timeout=30s 0 0"
   # docker fail-closed gate: no /data ⇒ docker (and every data-bearing
   # container) refuses to start = "falls to recovery" on a PCR mismatch.
   mkdir -p "$DOCKER_DROPIN_DIR"

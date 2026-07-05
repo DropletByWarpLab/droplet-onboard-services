@@ -70,11 +70,31 @@ PYEOF
   || fail "KAT mismatch (bash=$derived python=$expected) — drift bricks every enrolled drive's recovery slot"
 d2="$(DEVICE_SECRET_KEY="$KAT_KEY" bash -c "source '$USB_SCRIPT' --lib && droplet_usb_derive_passphrase 'other-uuid'" 2>/dev/null || true)"
 [ "$derived" != "$d2" ] && pass "distinct drives derive distinct passphrases" || fail "uuid not bound into derivation"
-if DEVICE_SECRET_KEY="" bash -c "source '$USB_SCRIPT' --lib && droplet_usb_derive_passphrase '$KAT_UUID'" >/dev/null 2>&1; then
-  fail "empty DEVICE_SECRET_KEY accepted"
+if DEVICE_SECRET_KEY="" DROPLET_ENV_FILE=/nonexistent bash -c "source '$USB_SCRIPT' --lib && droplet_usb_derive_passphrase '$KAT_UUID'" >/dev/null 2>&1; then
+  fail "empty DEVICE_SECRET_KEY (and no .env) accepted"
 else
-  pass "empty DEVICE_SECRET_KEY refused"
+  pass "empty DEVICE_SECRET_KEY refused when no .env fallback exists"
 fi
+
+# WARP-232 finding 4: production `sudo droplet-usb-enroll.sh` runs with a
+# SCRUBBED env (empty DEVICE_SECRET_KEY). Derive MUST fall back to the on-disk
+# DEVICE_SECRET_KEY from .env — mirroring droplet-backup-lib.sh — or every
+# enroll/derive/automount-recovery path is dead in production. This RUNS the
+# derivation with an empty env but a real .env, and asserts it matches the KAT.
+ENVDIR="$(mktemp -d -t usbenvfallback-XXXXXXXX)"
+printf 'POSTGRES_PASSWORD=pg\nDEVICE_SECRET_KEY=%s\nREDIS_PASSWORD=r\n' "$KAT_KEY" > "$ENVDIR/.env"
+derived_env="$(DEVICE_SECRET_KEY="" DROPLET_ENV_FILE="$ENVDIR/.env" \
+  bash -c "source '$USB_SCRIPT' --lib && droplet_usb_derive_passphrase '$KAT_UUID'" 2>/dev/null || true)"
+[ "$derived_env" = "$expected" ] \
+  && pass "derive falls back to DEVICE_SECRET_KEY from .env when env is empty [finding 4]" \
+  || fail "no .env fallback (finding 4): sudo enroll/derive would fail in production (got '$derived_env')"
+# DROPLET_REPO_ROOT precedence resolves .env under the repo root too.
+derived_root="$(DEVICE_SECRET_KEY="" DROPLET_REPO_ROOT="$ENVDIR" \
+  bash -c "source '$USB_SCRIPT' --lib && droplet_usb_derive_passphrase '$KAT_UUID'" 2>/dev/null || true)"
+[ "$derived_root" = "$expected" ] \
+  && pass "derive resolves .env via DROPLET_REPO_ROOT precedence" \
+  || fail "DROPLET_REPO_ROOT .env resolution failed (got '$derived_root')"
+rm -rf "$ENVDIR"
 fi
 
 # =============================================================================
@@ -146,6 +166,32 @@ grep -qE 'cryptsetup luksFormat --type luks2 --pbkdf argon2id' "$CMD_LOG" && pas
 grep -qE 'systemd-cryptenroll .*--tpm2-pcrs=0\+2\+4\+7' "$CMD_LOG" && pass "TPM keyslot bound to 0+2+4+7" || fail "wrong PCR bind"
 grep -qE 'cryptsetup luksAddKey' "$CMD_LOG" && pass "derived recovery passphrase added as a keyslot" || fail "no recovery keyslot add"
 [ -z "$(ls -A "$RUNTIME" 2>/dev/null)" ] && pass "no keyfile residue in the runtime dir" || fail "keyfile residue"
+
+# WARP-232 finding 4 (ordering): the DURABLE recovery keyslot (luksAddKey) must
+# be enrolled BEFORE the TPM keyslot (cryptenroll --tpm2-device), so an
+# interruption between the two still leaves a re-derivable (recoverable) drive
+# rather than a TPM-only brick.
+addkey_line="$(grep -n 'cryptsetup luksAddKey' "$CMD_LOG" | head -1 | cut -d: -f1)"
+tpm_line="$(grep -n 'systemd-cryptenroll .*--tpm2-device' "$CMD_LOG" | head -1 | cut -d: -f1)"
+if [ -n "$addkey_line" ] && [ -n "$tpm_line" ] && [ "$addkey_line" -lt "$tpm_line" ]; then
+  pass "recovery keyslot enrolled BEFORE the TPM keyslot (interrupt-safe order) [finding 4]"
+else
+  fail "TPM keyslot enrolled before the recovery slot (addkey@$addkey_line tpm@$tpm_line) [finding 4]"
+fi
+
+# WARP-232 finding 4 (fail-fast): with NO DEVICE_SECRET_KEY (env AND .env), enroll
+# must REFUSE before wiping/formatting the drive — never leave a TPM-only drive.
+: > "$CMD_LOG"
+if env "${usb_env[@]}" DEVICE_SECRET_KEY="" DROPLET_ENV_FILE=/nonexistent \
+     "$USB_SCRIPT" enroll --force /dev/sdz1 >/dev/null 2>&1; then
+  fail "enroll proceeded with no derivable recovery key (finding 4)"
+else
+  rc=$?
+  [ "$rc" -eq 2 ] && pass "enroll fails fast when the recovery key is underivable (exit 2) [finding 4]" \
+    || fail "wrong exit code when key underivable ($rc)"
+fi
+grep -qE 'wipefs|luksFormat' "$CMD_LOG" && fail "underivable-key run still wiped/formatted the drive (finding 4)" \
+  || pass "underivable-key run left the drive untouched (no wipefs/luksFormat) [finding 4]"
 
 # enroll on the rootfs-backing device must refuse (exit 2, no destructive calls).
 : > "$CMD_LOG"

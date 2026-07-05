@@ -208,22 +208,30 @@ nextcloud_remove() {
 }
 
 state_add() {
-  # WARP-232: 6th arg `trust` — "enrolled" | "trusted" | "untrusted-ro" — so
-  # the device-bridge/dashboard can surface "read-only until you encrypt or
-  # trust it". Defaults to "trusted" for backward compatibility.
-  local device="$1" mount="$2" label="$3" uuid="$4" trust="${5:-trusted}"
-  python3 - "$STATE_FILE" "$device" "$mount" "$label" "$uuid" "$trust" <<'PYEOF'
+  # Args: device mount label uuid [trust] [mapper]
+  # WARP-232: `device` is the BACKING partition (/dev/sdX1) — for an enrolled
+  # LUKS drive that is the raw partition, NOT the unlocked mapper — so a later
+  # udev REMOVE event (which carries the backing partition) matches, and
+  # crypto-shred luksErases the real LUKS header. `mapper` (7th arg) is the
+  # unlocked dm mapper to `cryptsetup close` on remove; empty for a plain drive.
+  # `trust` (5th arg): "enrolled" | "trusted" | "untrusted-ro". Defaults to
+  # "trusted" for backward compatibility.
+  local device="$1" mount="$2" label="$3" uuid="$4" trust="${5:-trusted}" mapper="${6:-}"
+  python3 - "$STATE_FILE" "$device" "$mount" "$label" "$uuid" "$trust" "$mapper" <<'PYEOF'
 import json, os, sys
-path, device, mount, label, uuid, trust = sys.argv[1:7]
+path, device, mount, label, uuid, trust, mapper = sys.argv[1:8]
 try:
     with open(path) as f: state = json.load(f)
 except Exception:
     state = {"mounts": []}
 state["mounts"] = [m for m in state["mounts"] if m.get("device") != device]
-state["mounts"].append({
+entry = {
     "device": device, "mount": mount, "label": label, "uuid": uuid,
     "trust": trust,
-})
+}
+if mapper:
+    entry["mapper"] = mapper
+state["mounts"].append(entry)
 os.makedirs(os.path.dirname(path), exist_ok=True)
 with open(path, "w") as f: json.dump(state, f, indent=2)
 PYEOF
@@ -231,6 +239,8 @@ PYEOF
 
 state_remove() {
   local device="$1"
+  # Prints, per removed entry, a TAB-separated "<mount>\t<mapper>" line so the
+  # remove path can unmount AND close the mapper (mapper empty for plain drives).
   python3 - "$STATE_FILE" "$device" <<'PYEOF'
 import json, sys
 path, device = sys.argv[1:3]
@@ -242,7 +252,7 @@ removed = [m for m in state["mounts"] if m.get("device") == device]
 state["mounts"] = [m for m in state["mounts"] if m.get("device") != device]
 with open(path, "w") as f: json.dump(state, f, indent=2)
 for m in removed:
-    print(m["mount"])
+    print("%s\t%s" % (m.get("mount", ""), m.get("mapper", "")))
 PYEOF
 }
 
@@ -276,12 +286,21 @@ case "$ACTION" in
     # we don't know → read-only). Set below; defaults to trusted for the
     # historical plain-drive path.
     TRUST="trusted"
+    # BACKING_DEVICE tracks the raw partition udev handed us. For a plain drive
+    # it stays == DEVICE. For an enrolled LUKS drive, DEVICE is swapped to the
+    # unlocked mapper for the mount path below, but BACKING_DEVICE keeps the
+    # /dev/sdX1 that (a) the udev REMOVE event will carry (so state_remove
+    # matches and we can close the mapper), and (b) crypto-shred must luksErase
+    # (the mapper is a plaintext dm node with no LUKS header). WARP-232 finding 7.
+    BACKING_DEVICE="$DEVICE"
+    MAPPER_DEVICE=""
     case "$TYPE" in
       crypto_LUKS)
         # WARP-232: droplet-enrolled LUKS2 drives unlock here; everything else
         # (foreign LUKS) keeps the clean skip. RAID/LVM/swap fall through to the
         # next case (managed by their own subsystem).
         if try_unlock_droplet_luks "$DEVICE"; then
+          MAPPER_DEVICE="$UNLOCKED_MAPPER"
           DEVICE="$UNLOCKED_MAPPER"           # fall through to the mount path
           TYPE="$(blkid -o value -s TYPE "$DEVICE" 2>/dev/null || echo ext4)"
           TRUST="enrolled"
@@ -376,20 +395,33 @@ case "$ACTION" in
       log "mounted $DEVICE ($TYPE, label=$LABEL, trust=$TRUST) -> $MOUNT"
     fi
 
-    state_add "$DEVICE" "$MOUNT" "$LABEL" "${UUID:-}" "$TRUST"
+    # Record the BACKING partition as `device` (so udev remove + crypto-shred
+    # match the raw LUKS partition, not the plaintext mapper) and the mapper
+    # separately (to close on remove). WARP-232 finding 7.
+    state_add "$BACKING_DEVICE" "$MOUNT" "$LABEL" "${UUID:-}" "$TRUST" "$MAPPER_DEVICE"
     if [ "$NEXTCLOUD_AUTO_REGISTER" = "1" ]; then
       nextcloud_add "$MOUNT" "$NAME" || log "nextcloud registration skipped"
     else
       log "nextcloud auto-register disabled (set NEXTCLOUD_AUTO_REGISTER=1 to enable)"
     fi
-    notify_bridge add "$DEVICE" "$MOUNT"
+    notify_bridge add "$BACKING_DEVICE" "$MOUNT"
     ;;
 
   remove)
-    # udev gives us the dev path of the partition that went away. We
-    # look it up in state to find our mountpoint and unmount.
-    mapfile -t old_mounts < <(state_remove "$DEVICE")
-    for m in "${old_mounts[@]}"; do
+    # udev gives us the dev path of the partition that went away — the BACKING
+    # partition (/dev/sdX1) for an enrolled LUKS drive, which is exactly what
+    # state now records as `device`, so this matches (WARP-232 finding 7).
+    # Each state_remove line is "<mount>\t<mapper>"; unmount the mount, then
+    # close the mapper (if any) so a replugged enrolled drive isn't blocked by a
+    # stale open dm device.
+    # `while read` (not mapfile) so this works on bash 3.2 as well as 4+ — the
+    # udev/systemd host runs bash 5, but the hermetic tests + dev boxes may be
+    # older, and mapfile silently no-ops there.
+    while IFS= read -r entry; do
+      [ -z "$entry" ] && continue
+      m="${entry%%$'\t'*}"
+      mapper="${entry#*$'\t'}"
+      [ "$mapper" = "$entry" ] && mapper=""   # no tab → no mapper field
       [ -z "$m" ] && continue
       name="$(basename "$m")"
       nextcloud_remove "$name" || true
@@ -397,7 +429,15 @@ case "$ACTION" in
         umount -l "$m" && log "unmounted $m"
       fi
       rmdir "$m" 2>/dev/null || true
-    done
+      # Close the LUKS mapper so the dm node is released and a replug re-unlocks
+      # cleanly (finding 7: without this the mapper lingered and the drive could
+      # flip to a stale/read-only state on the next add).
+      if [ -n "$mapper" ]; then
+        mapper_name="$(basename "$mapper")"
+        "$CRYPTSETUP" close "$mapper_name" 2>/dev/null \
+          && log "closed LUKS mapper $mapper_name" || true
+      fi
+    done < <(state_remove "$DEVICE")
     notify_bridge remove "$DEVICE" ""
     ;;
 

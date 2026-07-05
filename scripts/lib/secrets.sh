@@ -31,18 +31,31 @@ _gen_fernet_key() {
 _upsert_env_kv() {
   local key="$1" val="$2"
   local env_file="${ENV_FILE:-$REPO_ROOT/.env}"
-  local stage="${env_file}.upsert.$$"
-  rm -f "${env_file}".upsert.* 2>/dev/null || true
+  # WARP-232 (finding 2): once relocate_secrets_to_data has run, $env_file is a
+  # SYMLINK onto the encrypted /data. Staging beside the symlink and `mv`-ing
+  # over it would REPLACE the link with a plain file on the unencrypted root —
+  # moving DEVICE_SECRET_KEY back outside the LUKS boundary AND breaking the
+  # compose `../.env` env_file for the docker-group user. Resolve the link and
+  # write THROUGH it (stage next to the real target, rename onto the target),
+  # so the symlink and the encrypted destination both survive.
+  local target="$env_file"
+  if [ -L "$env_file" ]; then
+    target="$(readlink -f "$env_file" 2>/dev/null || readlink "$env_file")"
+    [ -n "$target" ] || target="$env_file"
+  fi
+  local stage="${target}.upsert.$$"
+  rm -f "${target}".upsert.* 2>/dev/null || true
   # Normalize a missing trailing newline first — appending to a file whose last
   # line was cut mid-write would glue the new key onto it (mirrors the guards in
-  # generate_env / migrate_env / configure_single_box_env).
-  if [ -s "$env_file" ] && [ -n "$(tail -c 1 "$env_file")" ]; then
-    printf '\n' >> "$env_file"
+  # generate_env / migrate_env / configure_single_box_env). Read/write the
+  # target (via the symlink) so this works whether or not $env_file is a link.
+  if [ -s "$target" ] && [ -n "$(tail -c 1 "$target")" ]; then
+    printf '\n' >> "$target"
   fi
-  ( umask 077; { grep -vE "^${key}=" "$env_file" 2>/dev/null || true; \
+  ( umask 077; { grep -vE "^${key}=" "$target" 2>/dev/null || true; \
                  printf '%s=%s\n' "$key" "$val"; } > "$stage" )
   chmod 600 "$stage"
-  mv "$stage" "$env_file"
+  mv "$stage" "$target"
 }
 
 # WARP-318: translate the single DROPLET_FIPS_MODE customer knob into the
@@ -322,8 +335,19 @@ generate_env() {
   # mistake for a complete one — .env is either the previous complete file or
   # the new complete file, never a prefix. The temp file is created empty and
   # chmod'd 600 BEFORE any secret is written into it.
-  local env_tmp="$env_file.tmp.$$"
-  rm -f "$env_file".tmp.* 2>/dev/null || true
+  #
+  # WARP-232 (finding 2): on a --regenerate-env re-run AFTER secrets have been
+  # relocated onto the encrypted /data, $env_file is a SYMLINK. Stage beside and
+  # rename onto the link's REAL target so the regenerated secrets stay inside the
+  # LUKS boundary and the symlink survives — never replace the link with a plain
+  # file on the unencrypted root.
+  local env_write_target="$env_file"
+  if [ -L "$env_file" ]; then
+    env_write_target="$(readlink -f "$env_file" 2>/dev/null || readlink "$env_file")"
+    [ -n "$env_write_target" ] || env_write_target="$env_file"
+  fi
+  local env_tmp="$env_write_target.tmp.$$"
+  rm -f "$env_write_target".tmp.* 2>/dev/null || true
   : > "$env_tmp"
   chmod 600 "$env_tmp"
   cat >> "$env_tmp" << EOF
@@ -554,7 +578,7 @@ DROPLET_PROVISION_TOKEN=${DROPLET_PROVISION_TOKEN:-}
 COMPOSE_PROFILES=$([ "$(uname)" = "Linux" ] && printf 'linux,display,eval' || printf 'eval')
 EOF
 
-  mv "$env_tmp" "$env_file"
+  mv "$env_tmp" "$env_write_target"
   chmod 600 "$env_file"
 
   log_success "Generated unique secrets:"

@@ -181,6 +181,37 @@ else
 fi
 grep -q 'lvcreate' "$CMD_LOG" && fail "TPM-less run still touched LVM" || pass "TPM-less run touched nothing"
 
+# WARP-232 finding 6: no TPM BUT DROPLET_LUKS_ALLOW_NO_TPM=1 (dev override) →
+# provision PROCEEDS, SKIPS the TPM2 keyslot enroll (it would fail hard with no
+# TPM), and STILL enrolls the durable recovery keyslot (so the dev box has a
+# working unlock path). Old bug: the TPM enroll ran unconditionally → died under
+# set -e before the recovery slot, AND the flag was never forwarded through sudo.
+: > "$CMD_LOG"
+if env "${luks_env[@]}" DROPLET_TPM_DEVICE=/nonexistent DROPLET_LUKS_ALLOW_NO_TPM=1 \
+     "$LUKS_SCRIPT" provision >/dev/null 2>&1; then
+  pass "ALLOW_NO_TPM=1 lets provision proceed on a TPM-less box [finding 6]"
+else
+  fail "ALLOW_NO_TPM=1 did not let provision proceed (finding 6)"
+fi
+# The TPM2 keyslot enroll must be SKIPPED (no --tpm2-device cryptenroll call)...
+if grep -qE 'systemd-cryptenroll .*--tpm2-device' "$CMD_LOG"; then
+  fail "TPM enroll still attempted under ALLOW_NO_TPM (finding 6) — fails hard with no TPM"
+else
+  pass "TPM2 keyslot enroll SKIPPED under ALLOW_NO_TPM=1 [finding 6]"
+fi
+# ...but the recovery keyslot MUST still be enrolled (durable unlock path).
+grep -qE 'systemd-cryptenroll .*--recovery-key' "$CMD_LOG" \
+  && pass "recovery keyslot STILL enrolled under ALLOW_NO_TPM=1 (dev box stays unlockable) [finding 6]" \
+  || fail "no recovery keyslot under ALLOW_NO_TPM (finding 6) — dev box would be unrecoverable"
+
+# WARP-232 finding 6 (forwarding): the install lib must forward the flag across
+# the sudo boundary. Static-assert scripts/lib/luks.sh passes it into the sudo
+# invocation as an env assignment (sudo scrubs env, so an un-forwarded flag is
+# inert end to end). Match the assignment form the sudo command uses.
+grep -qE 'DROPLET_LUKS_ALLOW_NO_TPM="\$\{DROPLET_LUKS_ALLOW_NO_TPM' "$INSTALL_LIB" \
+  && pass "install lib forwards DROPLET_LUKS_ALLOW_NO_TPM through sudo [finding 6]" \
+  || fail "install lib does not forward DROPLET_LUKS_ALLOW_NO_TPM (finding 6) — flag inert"
+
 # status surface is stable JSON.
 st="$(env "${luks_env[@]}" STUB_MAPPER_ACTIVE=1 "$LUKS_SCRIPT" status 2>/dev/null || true)"
 printf '%s' "$st" | grep -q '"mounted":true' && pass "status reports mounted:true when mapper active" || fail "status wrong: $st"
@@ -243,6 +274,300 @@ if [ -f "$SHRED" ]; then
 fi
 [ -f "$REPO_ROOT/docs/security/crypto-shred.md" ] && pass "crypto-shred runbook exists" || fail "runbook missing"
 [ -f "$REPO_ROOT/docs/security/at-rest-encryption.md" ] && pass "at-rest-encryption doc exists" || fail "doc missing"
+
+# =============================================================================
+# EXECUTING drill: secrets relocation (WARP-232 review — findings 1, 2, 8)
+#
+# The static grep above only proves relocate_secrets_to_data / _relocate_one
+# EXIST. This section RUNS them against a tmp filesystem with stubbed sudo +
+# findmnt (DROPLET_LUKS_SKIP_OS_GATE bypasses the Linux-only guard), so the
+# real copy/symlink/perms logic is exercised — the bug class the six-finding
+# review flagged (green suite, never-executed logic).
+# =============================================================================
+echo ""
+echo "--- EXECUTING drill: secrets relocation onto the encrypted /data ---"
+RWORK="$(mktemp -d -t relocdrill-XXXXXXXX)"
+trap 'rm -rf "${WORK:-}" "${RWORK:-}" "${PWORK:-}" "${SWORK:-}"' EXIT
+RSTUB="$RWORK/bin"; RREPO="$RWORK/repo"; RDATA="$RWORK/data"
+mkdir -p "$RSTUB" "$RREPO/data/secrets" "$RDATA"
+# sudo stub: strip leading VAR=val assignments, exec the rest as the test user.
+cat > "$RSTUB/sudo" <<'STUB'
+#!/usr/bin/env bash
+while [ $# -gt 0 ]; do case "$1" in *=*) shift ;; *) break ;; esac; done
+exec "$@"
+STUB
+# findmnt stub: /data is the encrypted mapper so relocation proceeds.
+cat > "$RSTUB/findmnt" <<'STUB'
+#!/usr/bin/env bash
+printf '/dev/mapper/droplet-data-crypt\n'
+STUB
+chmod +x "$RSTUB/sudo" "$RSTUB/findmnt"
+
+printf 'DEVICE_SECRET_KEY=drill-device-secret\nPOSTGRES_PASSWORD=pg\n' > "$RREPO/.env"
+printf 'AUDIT_KEY_BYTES_DRILL\n' > "$RREPO/data/secrets/audit.key"
+chmod 600 "$RREPO/.env" "$RREPO/data/secrets/audit.key"
+
+reloc_run() {
+  PATH="$RSTUB:$PATH" \
+  DROPLET_LUKS_SKIP_OS_GATE=1 \
+  REPO_ROOT="$RREPO" \
+  DROPLET_DATA_MOUNT="$RDATA" \
+  DROPLET_LUKS_MAPPER=droplet-data-crypt \
+  DROPLET_RELOCATE_OWNER="$(id -un):$(id -gn)" \
+  bash -c '
+    log_info(){ :; }; log_warn(){ printf "WARN: %s\n" "$*"; }; log_success(){ :; }
+    source "'"$INSTALL_LIB"'"
+    relocate_secrets_to_data
+  '
+}
+reloc_run >/dev/null 2>&1 && pass "relocate_secrets_to_data runs to completion" || fail "relocation drill errored"
+
+# Finding 1: audit.key lands at .../secrets/audit.key, NOT .../secrets/secrets/…
+if [ -f "$RDATA/droplet/secrets/audit.key" ] && [ ! -e "$RDATA/droplet/secrets/secrets" ]; then
+  pass "secrets dir lands at the RIGHT level (no secrets/secrets nesting) [finding 1]"
+else
+  fail "secrets relocation nested one level too deep (finding 1 regression): $(find "$RDATA" -name audit.key)"
+fi
+
+# The .env + audit.key symlinks RESOLVE to the real files (not dangling).
+[ -L "$RREPO/.env" ] && [ -e "$RREPO/.env" ] && pass ".env is a symlink that resolves" || fail ".env symlink missing/dangling"
+[ -L "$RREPO/data/secrets" ] && [ -e "$RREPO/data/secrets/audit.key" ] \
+  && pass "data/secrets symlink resolves to real audit.key" || fail "data/secrets symlink broken"
+[ "$(cat "$RREPO/data/secrets/audit.key" 2>/dev/null)" = "AUDIT_KEY_BYTES_DRILL" ] \
+  && pass "audit.key content survives relocation (loadAuditKeyFromDisk would succeed)" \
+  || fail "audit.key content lost/unreadable through the symlink"
+grep -q '^DEVICE_SECRET_KEY=drill-device-secret' "$RREPO/.env" \
+  && pass ".env content (DEVICE_SECRET_KEY) resolves through the symlink" || fail ".env content lost"
+
+# Finding 2 (perms): a NON-ROOT reader can traverse the container dirs + read
+# the relocated files. We already run as the (non-root) test user, so a plain
+# read that succeeds IS the assertion — with the old root:root 0700 dirs the
+# open() would EACCES. Guard: skip the strict check if the harness is root.
+if [ "$(id -u)" -ne 0 ]; then
+  if cat "$RREPO/.env" >/dev/null 2>&1 && cat "$RREPO/data/secrets/audit.key" >/dev/null 2>&1; then
+    pass "non-root reader can read the relocated .env + secrets [finding 2]"
+  else
+    fail "non-root reader cannot read relocated secrets (finding 2 perms regression)"
+  fi
+  # Container dirs must be traversable (owner-executable) by the install user.
+  dperm="$(stat -f '%Sp' "$RDATA/droplet/env" 2>/dev/null || stat -c '%A' "$RDATA/droplet/env" 2>/dev/null || echo '')"
+  case "$dperm" in
+    ?rwx*) pass "container dir /data/droplet/env is owner-traversable (rwx) [finding 2]" ;;
+    *)     fail "container dir not owner-traversable: $dperm" ;;
+  esac
+else
+  skip "non-root readability (harness is root)"
+fi
+
+# Finding 8: the plaintext original is GONE from the repo root after relocation
+# (shred -u, or rm fallback where shred is absent) — not left as a readable copy.
+[ ! -e "$RREPO/data/secrets/audit.key" ] || [ -L "$RREPO/data/secrets" ] \
+  && pass "plaintext original removed from root-fs after relocation [finding 8]" \
+  || fail "plaintext secrets left behind on root-fs (finding 8)"
+
+# Idempotency: a second run over the now-symlinked paths is a clean no-op.
+reloc_run >/dev/null 2>&1 && pass "relocation is idempotent (re-run over symlinks no-ops)" || fail "second relocation run errored"
+[ "$(cat "$RREPO/data/secrets/audit.key" 2>/dev/null)" = "AUDIT_KEY_BYTES_DRILL" ] \
+  && pass "audit.key intact after idempotent re-run" || fail "re-run corrupted audit.key"
+
+# =============================================================================
+# EXECUTING drill: symlink-aware .env writer (WARP-232 finding 2, second half)
+#
+# After relocation .env is a SYMLINK. The FIPS/single-box atomic env writers
+# (_upsert_env_kv) must write THROUGH the link to the encrypted /data target —
+# NOT replace the link with a plain file on the unencrypted root (which would
+# move DEVICE_SECRET_KEY back outside the LUKS boundary + break the compose
+# ../.env bind). Runs the real _upsert_env_kv from scripts/lib/secrets.sh.
+# =============================================================================
+echo ""
+echo "--- EXECUTING drill: symlink-aware env writer (_upsert_env_kv through a relocated .env) ---"
+SECRETS_LIB="$REPO_ROOT/scripts/lib/secrets.sh"
+if [ -f "$SECRETS_LIB" ]; then
+  env_real="$RDATA/droplet/env/.env"          # the real (encrypted-side) target
+  before_key="$(grep '^DEVICE_SECRET_KEY=' "$env_real" 2>/dev/null || true)"
+  ENV_FILE="$RREPO/.env" REPO_ROOT="$RREPO" bash -c '
+    log_error(){ printf "ERR: %s\n" "$*"; }
+    source "'"$SECRETS_LIB"'"
+    _upsert_env_kv DROPLET_FIPS_MODE 1
+  ' >/dev/null 2>&1
+  [ -L "$RREPO/.env" ] && pass ".env is STILL a symlink after _upsert_env_kv (link not clobbered) [finding 2]" \
+    || fail "_upsert_env_kv replaced the symlink with a plain file (finding 2 regression)"
+  grep -q '^DROPLET_FIPS_MODE=1' "$env_real" \
+    && pass "new key written THROUGH the link onto the encrypted /data target" \
+    || fail "upsert did not reach the encrypted target"
+  [ "$(grep '^DEVICE_SECRET_KEY=' "$env_real" 2>/dev/null)" = "$before_key" ] \
+    && pass "DEVICE_SECRET_KEY stays on the encrypted /data (not moved onto root-fs) [finding 2]" \
+    || fail "DEVICE_SECRET_KEY lost/moved by the env writer"
+  # The root-fs must NOT hold a plain .env file carrying the secret.
+  if [ "$(id -u)" -ne 0 ]; then
+    [ -L "$RREPO/.env" ] && pass "no plaintext .env materialized on the unencrypted root" \
+      || fail "a plaintext .env now sits on the unencrypted root"
+  fi
+else
+  skip "secrets.sh not found — symlink-writer drill"
+fi
+
+# =============================================================================
+# EXECUTING drill: provision RE-RUN refuses to wire boot with NO keyslot
+# (WARP-232 finding 5 — power-cut mid-provision)
+#
+# A LUKS container that exists but does NOT open (zero keyslots — the classic
+# luksFormat-then-power-cut state) must NOT get crypttab/fstab written, or the
+# next boot mount-fails forever with no recovery key. Drives the existing-LUKS
+# re-run branch with a stubbed LV_DEV present + isLuks true + open FAILING.
+# =============================================================================
+echo ""
+echo "--- EXECUTING drill: provision re-run REFUSES a no-keyslot container [finding 5] ---"
+if [ -x "$LUKS_SCRIPT" ]; then
+  PWORK="$(mktemp -d -t provrerun-XXXXXXXX)"
+  PSTUB="$PWORK/bin"; PETC="$PWORK/etc"; PDEV="$PWORK/dev"
+  mkdir -p "$PSTUB" "$PETC" "$PDEV"
+  PCMD="$PWORK/cmd.log"; : > "$PCMD"
+  LVDEV="$PDEV/luks-lv"; : > "$LVDEV"      # existing LUKS "container" node (present)
+  for t in lvcreate mkfs.ext4 mount blkid vgs systemd-cryptenroll; do
+    printf '#!/usr/bin/env bash\nprintf "%s %%s\\n" "$*" >> "%s"\n' "$t" "$PCMD" > "$PSTUB/$t"
+    chmod +x "$PSTUB/$t"
+  done
+  # findmnt: /data NOT mounted (so we don't short-circuit as already-active).
+  printf '#!/usr/bin/env bash\nprintf "findmnt %%s\\n" "$*" >> "%s"\nexit 1\n' "$PCMD" > "$PSTUB/findmnt"
+  chmod +x "$PSTUB/findmnt"
+  # cryptsetup: isLuks TRUE; status FAILS (mapper never opened); open logs+fails.
+  cat > "$PSTUB/cryptsetup" <<STUB
+#!/usr/bin/env bash
+printf 'cryptsetup %s\n' "\$*" >> "$PCMD"
+case " \$* " in
+  *" isLuks "*) exit 0 ;;
+  *" status "*) exit 1 ;;
+  *" open "*)   exit 1 ;;
+esac
+exit 0
+STUB
+  chmod +x "$PSTUB/cryptsetup"
+  # systemd-cryptsetup attach: logs + FAILS (no keyslot to unseal).
+  printf '#!/usr/bin/env bash\nprintf "systemd-cryptsetup %%s\\n" "$*" >> "%s"\nexit 1\n' "$PCMD" > "$PSTUB/systemd-cryptsetup"
+  chmod +x "$PSTUB/systemd-cryptsetup"
+
+  # DROPLET_LUKS_LV_DEV points the existing-LUKS check at our present tmp node,
+  # DROPLET_LUKS_MAPPER_DEV at an ABSENT node so _unlock_verified's fallback also
+  # reports "not open" — together the container "exists, isLuks, but won't open".
+  prov_env=(
+    "PATH=$PSTUB:$PATH"
+    DROPLET_LUKS_SKIP_OS_GATE=1
+    DROPLET_LUKS_VG=ubuntu-vg DROPLET_LUKS_LV=droplet-data
+    DROPLET_LUKS_MAPPER=droplet-data-crypt DROPLET_DATA_MOUNT="$PWORK/data"
+    DROPLET_LUKS_LV_DEV="$LVDEV"
+    DROPLET_LUKS_MAPPER_DEV="$PDEV/mapper-absent"
+    DROPLET_ETC_DIR="$PETC" DROPLET_LUKS_RUNTIME_DIR="$PWORK/run"
+    DROPLET_TPM_DEVICE="$PSTUB/cryptsetup"
+    DROPLET_LVCREATE_BIN="$PSTUB/lvcreate" DROPLET_VGS_BIN="$PSTUB/vgs"
+    DROPLET_MKFS_BIN="$PSTUB/mkfs.ext4" DROPLET_MOUNT_BIN="$PSTUB/mount"
+    DROPLET_CRYPTSETUP_BIN="$PSTUB/cryptsetup"
+    DROPLET_CRYPTENROLL_BIN="$PSTUB/systemd-cryptenroll"
+    DROPLET_SYSTEMD_CRYPTSETUP_BIN="$PSTUB/systemd-cryptsetup"
+    CMD_LOG="$PCMD"
+  )
+  if env "${prov_env[@]}" "$LUKS_SCRIPT" provision >/dev/null 2>&1; then
+    fail "provision re-run PROCEEDED on a no-keyslot container (finding 5 regression)"
+  else
+    rc=$?
+    [ "$rc" -eq 2 ] && pass "provision re-run refuses a no-keyslot container (exit 2) [finding 5]" \
+      || fail "provision re-run wrong exit code on no-keyslot container ($rc)"
+  fi
+  # The refusal must have written NO crypttab / fstab entry.
+  if ! grep -q 'droplet-data-crypt' "$PETC/crypttab" 2>/dev/null \
+     && ! grep -q 'ext4' "$PETC/fstab" 2>/dev/null; then
+    pass "no crypttab/fstab wired for the unopenable container [finding 5]"
+  else
+    fail "provision wrote boot config for a container it could not open (finding 5)"
+  fi
+fi
+
+# =============================================================================
+# Static/exec: fstab + crypttab have `nofail` so a locked /data boots DEGRADED,
+# not into emergency mode (WARP-232 finding 3).
+# =============================================================================
+echo ""
+echo "--- fstab/crypttab nofail (locked /data boots degraded, not emergency) [finding 3] ---"
+grep -q 'nofail' "$LUKS_SCRIPT" && pass "provision writes a nofail mount option" || fail "no nofail in provision"
+# Re-run the happy-path provision drill and assert the WRITTEN fstab line has nofail.
+if [ -x "$LUKS_SCRIPT" ]; then
+  FWORK="$(mktemp -d -t fstabnofail-XXXXXXXX)"; FSTUB="$FWORK/bin"; FETC="$FWORK/etc"
+  mkdir -p "$FSTUB" "$FETC"; FCMD="$FWORK/cmd.log"; : > "$FCMD"
+  for t in lvcreate mkfs.ext4 mount blkid findmnt vgs cryptsetup systemd-cryptenroll systemd-cryptsetup; do
+    printf '#!/usr/bin/env bash\nprintf "%s %%s\\n" "$*" >> "%s"\n' "$t" "$FCMD" > "$FSTUB/$t"; chmod +x "$FSTUB/$t"
+  done
+  printf '#!/usr/bin/env bash\nprintf "vgs %%s\\n" "$*" >> "%s"\nprintf "512\\n"\n' "$FCMD" > "$FSTUB/vgs"; chmod +x "$FSTUB/vgs"
+  printf '#!/usr/bin/env bash\nprintf "findmnt %%s\\n" "$*" >> "%s"\nexit 1\n' "$FCMD" > "$FSTUB/findmnt"; chmod +x "$FSTUB/findmnt"
+  printf '#!/usr/bin/env bash\nprintf "blkid %%s\\n" "$*" >> "%s"\nexit 2\n' "$FCMD" > "$FSTUB/blkid"; chmod +x "$FSTUB/blkid"
+  cat > "$FSTUB/systemd-cryptenroll" <<'STUB'
+#!/usr/bin/env bash
+printf 'systemd-cryptenroll %s\n' "$*" >> "$CMD_LOG"
+for a in "$@"; do [ "$a" = "--recovery-key" ] && { printf 'aaaaa-bbbbb\n'; exit 0; }; done
+exit 0
+STUB
+  chmod +x "$FSTUB/systemd-cryptenroll"
+  env PATH="$FSTUB:$PATH" DROPLET_LUKS_SKIP_OS_GATE=1 DROPLET_LUKS_VG=ubuntu-vg \
+    DROPLET_LUKS_LV=droplet-data DROPLET_LUKS_MAPPER=droplet-data-crypt \
+    DROPLET_DATA_MOUNT=/data DROPLET_ETC_DIR="$FETC" DROPLET_LUKS_RUNTIME_DIR="$FWORK/run" \
+    DROPLET_TPM_DEVICE="$FSTUB/cryptsetup" DROPLET_LVCREATE_BIN="$FSTUB/lvcreate" \
+    DROPLET_VGS_BIN="$FSTUB/vgs" DROPLET_MKFS_BIN="$FSTUB/mkfs.ext4" DROPLET_MOUNT_BIN="$FSTUB/mount" \
+    DROPLET_CRYPTSETUP_BIN="$FSTUB/cryptsetup" DROPLET_CRYPTENROLL_BIN="$FSTUB/systemd-cryptenroll" \
+    DROPLET_SYSTEMD_CRYPTSETUP_BIN="$FSTUB/systemd-cryptsetup" CMD_LOG="$FCMD" \
+    "$LUKS_SCRIPT" provision >/dev/null 2>&1 || true
+  grep -qE '/data ext4 .*nofail' "$FETC/fstab" 2>/dev/null \
+    && pass "written fstab line carries nofail (degraded boot) [finding 3]" \
+    || fail "fstab line missing nofail: $(grep /data "$FETC/fstab" 2>/dev/null)"
+  grep -qE 'droplet-data-crypt .*nofail' "$FETC/crypttab" 2>/dev/null \
+    && pass "written crypttab entry carries nofail [finding 3]" \
+    || fail "crypttab entry missing nofail"
+  rm -rf "$FWORK"
+fi
+
+# =============================================================================
+# EXECUTING drill: crypto-shred targets the LUKS PARTITION recorded in state,
+# not the plaintext mapper (WARP-232 finding 7).
+# =============================================================================
+echo ""
+echo "--- EXECUTING drill: crypto-shred luksErase targets the backing partition [finding 7] ---"
+if [ -x "$SHRED" ]; then
+  SWORK="$(mktemp -d -t shreddrill-XXXXXXXX)"; SSTUB="$SWORK/bin"; SSTATE="$SWORK/state"; SREPO="$SWORK/repo"
+  mkdir -p "$SSTUB" "$SSTATE" "$SREPO"
+  SCMD="$SWORK/cmd.log"; : > "$SCMD"
+  # State records an enrolled drive with device=the BACKING partition + a mapper.
+  cat > "$SSTATE/mounts.json" <<'JSON'
+{"mounts":[{"device":"/dev/sdz1","mount":"/mnt/droplet/usb","label":"usb","uuid":"abcd","trust":"enrolled","mapper":"/dev/mapper/droplet-usb-abcd"}]}
+JSON
+  cat > "$SSTUB/cryptsetup" <<STUB
+#!/usr/bin/env bash
+printf 'cryptsetup %s\n' "\$*" >> "$SCMD"
+STUB
+  for t in systemd-cryptenroll tpm2_clear shred find; do
+    if [ "$t" = "find" ]; then
+      # keep real find on PATH; just log via a wrapper is unnecessary.
+      continue
+    fi
+    printf '#!/usr/bin/env bash\nprintf "%s %%s\\n" "$*" >> "%s"\n' "$t" "$SCMD" > "$SSTUB/$t"; chmod +x "$SSTUB/$t"
+  done
+  chmod +x "$SSTUB/cryptsetup"
+  env PATH="$SSTUB:$PATH" DROPLET_SHRED_ASSUME_CONFIRM=1 \
+    DROPLET_AUTOMOUNT_STATE_DIR="$SSTATE" DROPLET_REPO_ROOT="$SREPO" \
+    DROPLET_LUKS_DEV="/dev/ubuntu-vg/droplet-data" \
+    DROPLET_CRYPTSETUP_BIN="$SSTUB/cryptsetup" \
+    DROPLET_CRYPTENROLL_BIN="$SSTUB/systemd-cryptenroll" \
+    DROPLET_TPM2_CLEAR_BIN="$SSTUB/tpm2_clear" \
+    "$SHRED" --yes-destroy-everything >/dev/null 2>&1 || true
+  # luksErase must target the BACKING partition /dev/sdz1 (the real header) —
+  # NOT the plaintext /dev/mapper/droplet-usb-abcd node (which has no header).
+  if grep -q 'luksErase.*\/dev\/sdz1' "$SCMD" && ! grep -q 'luksErase.*mapper' "$SCMD"; then
+    pass "crypto-shred luksErases the backing partition, not the mapper [finding 7]"
+  else
+    fail "crypto-shred targeted the wrong node (finding 7): $(grep luksErase "$SCMD" || echo none)"
+  fi
+  # And it luksErases the data LV too.
+  grep -q 'luksErase.*droplet-data' "$SCMD" && pass "crypto-shred also erases the data LV header" \
+    || fail "crypto-shred skipped the data LV"
+  rm -rf "$SWORK"
+fi
 
 # =============================================================================
 # Results
