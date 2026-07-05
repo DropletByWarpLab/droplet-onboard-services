@@ -331,8 +331,12 @@ probe_transit_mqtt_plaintext_closed() {
   local id="$1"
   local out="$VFY_EVID/$id/mqtt-plain.txt" rc pw
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
+  # WARP-235 retired MQTT_PASSWORD from .env — fall back to a placeholder so
+  # the probe still ATTEMPTS the plaintext connection (the check is "no 1883
+  # listener", not "wrong credentials"); pre-235 installs still use the real
+  # value so a lingering password listener is caught either way.
   pw="$(vfy_env MQTT_PASSWORD)"
-  vfy_compose exec -T broker mosquitto_pub -h broker -p 1883 -u droplet -P "$pw" \
+  vfy_compose exec -T broker mosquitto_pub -h broker -p 1883 -u droplet -P "${pw:-warp235-retired}" \
     -t droplet/verify/canary -m probe > "$out" 2>&1
   rc=$?
   printf '\n[exit=%s]\n' "$rc" >> "$out"
@@ -347,7 +351,8 @@ probe_transit_mqtt_mtls_required() {
   local id="$1"
   local out="$VFY_EVID/$id/mqtt-nocert.txt" rc ca
   vfy_have docker || { vfy_record "$id" SKIP "docker-not-on-path"; return; }
-  ca="${DROPLET_VFY_MQTT_CA:-/mosquitto/certs/ca.crt}"
+  # WARP-235 mounts the broker bundle at /mosquitto/config/tls (ca.pem).
+  ca="${DROPLET_VFY_MQTT_CA:-/mosquitto/config/tls/ca.pem}"
   vfy_compose exec -T broker mosquitto_pub -h broker -p 8883 --cafile "$ca" \
     -t droplet/verify/canary -m probe > "$out" 2>&1
   rc=$?
