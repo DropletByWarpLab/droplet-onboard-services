@@ -2,6 +2,7 @@
 
 import { HardDrive } from "lucide-react";
 import { useDrives } from "@/lib/hooks/useDrives";
+import { Meter } from "@/components/shell/primitives";
 import type { DriveInfo } from "@/lib/types";
 
 function formatBytes(bytes: number): string {
@@ -28,10 +29,12 @@ function pct(d: DriveInfo): number {
   return Math.max(0, Math.min(100, (d.used_bytes / d.size_bytes) * 100));
 }
 
-function barColor(p: number): string {
-  if (p > 90) return "var(--color-system-red)";
-  if (p > 75) return "var(--color-system-orange)";
-  return "var(--color-accent)";
+// Design Storage meter: the fill turns amber past 80% and red past 95%,
+// so a nearly-full volume reads as a warning at a glance.
+function meterKind(p: number): "" | "warn" | "danger" {
+  if (p > 95) return "danger";
+  if (p > 80) return "warn";
+  return "";
 }
 
 export function VolumesPanel() {
@@ -43,7 +46,8 @@ export function VolumesPanel() {
         {Array.from({ length: 2 }).map((_, i) => (
           <div
             key={i}
-            className="dp-card p-4 h-[92px] animate-pulse bg-surface-secondary"
+            className="card h-[92px] animate-pulse"
+            style={{ background: "var(--inset)" }}
           />
         ))}
       </div>
@@ -64,42 +68,32 @@ export function VolumesPanel() {
         const p = pct(d);
         const name = displayName(d);
         return (
-          <div
-            key={d.mount || d.device}
-            role="listitem"
-            className="dp-card p-4"
-          >
-            <div className="flex items-center gap-2 mb-3">
-              <HardDrive
-                size={14}
-                className="text-label-tertiary flex-shrink-0"
-              />
-              <h3
-                className="type-subheadline text-label-primary truncate"
-                title={name}
-              >
-                {name}
-              </h3>
-            </div>
-
-            <div className="h-[6px] rounded-full overflow-hidden bg-surface-secondary">
-              <div
-                className="h-full rounded-full transition-all duration-700"
-                style={{
-                  width: `${Math.max(2, p)}%`,
-                  background: barColor(p),
-                }}
-              />
-            </div>
-
-            <div className="flex items-center justify-between mt-2 type-caption-1 text-label-tertiary tabular-nums">
-              <span>
-                <span className="text-label-primary">
-                  {formatBytes(d.used_bytes)}
-                </span>{" "}
-                of {formatBytes(d.size_bytes)}
+          <div key={d.mount || d.device} role="listitem" className="card">
+            <div className="card-h">
+              <span className="ci">
+                <HardDrive size={15} />
               </span>
-              <span>{formatBytes(d.free_bytes)} free</span>
+              <span className="ct" title={name}>
+                {name}
+              </span>
+              <span className="cm">{formatBytes(d.free_bytes)} free</span>
+            </div>
+
+            <Meter pct={p} kind={meterKind(p)} />
+
+            <div
+              className="flex items-center justify-between tabular-nums"
+              style={{
+                marginTop: "10px",
+                fontFamily: "var(--font-mono)",
+                fontSize: "12px",
+                color: "var(--text-muted)",
+              }}
+            >
+              <span style={{ color: "var(--text)" }}>
+                {formatBytes(d.used_bytes)}
+              </span>
+              <span>of {formatBytes(d.size_bytes)}</span>
             </div>
           </div>
         );
