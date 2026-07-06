@@ -584,6 +584,19 @@ services:
       # Static Nextcloud config — passwords come from .env via env_file
       - POSTGRES_HOST=db
       - POSTGRES_DB=nextcloud
+      # WARP-233: the db's pg_hba.conf is TLS-only (hostssl + reject plaintext),
+      # so Nextcloud must speak TLS to Postgres or it can never reach
+      # 'installed'. Nextcloud connects via PHP's PDO_pgsql/libpq, which honours
+      # libpq's PGSSLMODE env var for EVERY connection — the entrypoint's
+      # auto-install (occ maintenance:install, before the post-installation
+      # hook runs) AND all ongoing config.php connections. PG_SSLMODE is the same
+      # shared knob the DATABASE_URL producers key on (default `require`, flipped
+      # to `disable` under `setup.sh --fips` where the FIPS pg_hba tolerates
+      # plaintext from the private bridge), so this stays in lockstep with the
+      # orchestrator/file-indexer posture. `require` (encrypt, don't verify CA)
+      # matches those services; the internal CA is NOT mounted into this
+      # container so verify-full is not available here.
+      - PGSSLMODE=${PG_SSLMODE:-require}
       # WARP-234: the entrypoint-written redis.config.php (from REDIS_HOST)
       # still points at plaintext :6379; the zz-redis-tls.config.php mount
       # below overrides the whole `redis` config key with the TLS listener +
