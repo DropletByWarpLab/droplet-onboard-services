@@ -107,6 +107,19 @@
   }
 }
 
+/* Paint the indigo `--bg` on <body> whenever the Home board is mounted, so the
+   background fills the viewport instead of globals.css's `bg-surface-secondary`
+   showing through the transparent `.droplet-home` canvas. Same fix as the shell
+   pages (see droplet-shell.css `body:has(.droplet-shell)`). Values are the
+   `--bg` ramp defined above, kept in lockstep by hand (the tokens are scoped to
+   `.droplet-home`, so they're unreadable from <body>). */
+body:has(.droplet-home) {
+  background: #f5f6fb;
+}
+.dark body:has(.droplet-home) {
+  background: #0f1117;
+}
+
 .droplet-home *,
 .droplet-home *::before,
 .droplet-home *::after {
