@@ -530,6 +530,16 @@ services:
   # bypass auth/HTTPS the gateway enforces.
   nextcloud:
     image: nextcloud:29-apache
+    # WARP-234: the zz-redis-tls.config.php file-mount makes Docker pre-create
+    # config/ as root:root (www-data cannot write config.php -> install fails)
+    # AND, under the TLS-only Postgres (WARP-233, PGSSLMODE=require), the
+    # auto-install runs with HOME=/root so libpq probes /root/.postgresql/
+    # postgresql.crt -> EACCES. Chown config/ + set HOME=/var/www so the
+    # client-cert probe is skipped. Validated live on .87.
+    entrypoint:
+      - bash
+      - -c
+      - 'export HOME=/var/www; chown 33:33 /var/www/html/config 2>/dev/null || true; exec /entrypoint.sh apache2-foreground'
     depends_on:
       db:
         condition: service_healthy

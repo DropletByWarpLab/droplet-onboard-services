@@ -450,6 +450,15 @@ log_divider
 
 log_step 2 4 "Removing Docker volumes"
 
+# WARP-234: a bind-mounted *.config.php inside a named volume (nextcloud
+# redis-TLS config) leaves a STALE bind-mount after `down -v` that Docker
+# does not clean up, so `docker volume rm droplet_nextcloud-data` fails
+# with "device or resource busy" and the reset aborts. Lazy-umount any
+# lingering submounts under our droplet_ volumes before the removal loop.
+for _stale in $(awk '$2 ~ /\/var\/lib\/docker\/volumes\/droplet_.*\/_data\// {print $2}' /proc/mounts 2>/dev/null); do
+  sudo umount -l "$_stale" 2>/dev/null || true
+done
+
 # Project prefixes whose volumes we OWN and may remove. PRIMARY_PROJECT is the
 # live name derived from the compose `name:` in Phase 1; droplet-pi-platform is
 # the retired pre-WARP-605 name whose volumes still linger on long-lived boxes.
