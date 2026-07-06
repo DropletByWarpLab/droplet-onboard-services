@@ -546,7 +546,14 @@ export default function FilesPage() {
               if (e.key === "Escape") setShowNewFolder(false);
             }}
             placeholder="Folder name..."
-            className="dp-input flex-1"
+            className="flex-1 py-2 px-3 outline-none focus:border-[var(--brand)]"
+            style={{
+              background: "var(--surface)",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--radius-input)",
+              color: "var(--text)",
+              fontSize: "13.5px",
+            }}
           />
           <button onClick={handleCreateFolder} className="btn primary" type="button">
             Create
@@ -608,8 +615,14 @@ export default function FilesPage() {
         {/* File list */}
         <div className="flex-1 min-w-0">
           <UploadZone onUpload={handleUpload}>
-            <div className="dp-group min-h-[300px]">
-              <div className="flex items-center gap-3 px-4 py-2 type-caption-1 text-label-tertiary uppercase tracking-wider">
+            <div
+              className="card overflow-hidden min-h-[300px]"
+              style={{ padding: 0 }}
+            >
+              <div
+                className="flex items-center gap-3 px-4 py-2 type-caption-1 uppercase tracking-wider"
+                style={{ color: "var(--text-faint)", borderBottom: "1px solid var(--card-bd)" }}
+              >
                 <span className="flex-1">Name</span>
                 <span className="w-20 text-right hidden sm:block">Size</span>
                 <span className="w-32 text-right hidden md:block">Modified</span>
@@ -617,34 +630,42 @@ export default function FilesPage() {
               </div>
 
               {isLoading ? (
-                <div className="flex items-center justify-center h-48 text-label-tertiary type-subheadline">
+                <div
+                  className="flex items-center justify-center h-48 type-subheadline"
+                  style={{ color: "var(--text-muted)" }}
+                >
                   Loading...
                 </div>
               ) : files.length === 0 ? (
-                <div className="flex flex-col items-center justify-center h-48 text-label-tertiary">
+                <div
+                  className="flex flex-col items-center justify-center h-48"
+                  style={{ color: "var(--text-muted)" }}
+                >
                   <p className="type-subheadline mb-1">This folder is empty</p>
-                  <p className="type-caption-1 text-label-quaternary">
+                  <p className="type-caption-1" style={{ color: "var(--text-faint)" }}>
                     Drag &amp; drop files here, or click <strong>Upload</strong> above
                   </p>
                 </div>
               ) : (
-                files.map((file) => (
-                  <FileRow
-                    key={file.path}
-                    file={file}
-                    isSelected={fm.isSelected(file.path)}
-                    isRenaming={fm.renamingPath === file.path}
-                    favoritedPaths={favoritedPaths}
-                    onSelect={(e) => handleRowSelect(file, e)}
-                    onOpen={() => handleRowOpen(file)}
-                    onDownload={() => handleDownload(file.path)}
-                    onDelete={() => handleDelete(file.path)}
-                    onRename={(name) => handleRenameCommit(file, name)}
-                    onCancelRename={fm.endRename}
-                    onContextMenu={(x, y) => handleRowContextMenu(file, x, y)}
-                    onFavoriteChanged={refreshFavorites}
-                  />
-                ))
+                <div className="rows">
+                  {files.map((file) => (
+                    <FileRow
+                      key={file.path}
+                      file={file}
+                      isSelected={fm.isSelected(file.path)}
+                      isRenaming={fm.renamingPath === file.path}
+                      favoritedPaths={favoritedPaths}
+                      onSelect={(e) => handleRowSelect(file, e)}
+                      onOpen={() => handleRowOpen(file)}
+                      onDownload={() => handleDownload(file.path)}
+                      onDelete={() => handleDelete(file.path)}
+                      onRename={(name) => handleRenameCommit(file, name)}
+                      onCancelRename={fm.endRename}
+                      onContextMenu={(x, y) => handleRowContextMenu(file, x, y)}
+                      onFavoriteChanged={refreshFavorites}
+                    />
+                  ))}
+                </div>
               )}
             </div>
           </UploadZone>

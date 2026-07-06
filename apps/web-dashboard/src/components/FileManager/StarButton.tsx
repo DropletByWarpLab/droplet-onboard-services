@@ -51,11 +51,8 @@ export function StarButton({ path, favorited, onToggle, size = 14 }: StarButtonP
     <button
       onClick={handleClick}
       disabled={pending}
-      className={`p-1.5 rounded-full transition-colors ${
-        current
-          ? "text-system-orange hover:bg-system-orange/10"
-          : "text-label-tertiary hover:text-label-primary hover:bg-surface-secondary"
-      }`}
+      className="p-1.5 rounded-full transition-colors hover:bg-[var(--hover)]"
+      style={{ color: current ? "var(--brand)" : "var(--text-muted)" }}
       aria-label={current ? "Remove from favorites" : "Add to favorites"}
       title={current ? "Remove from favorites" : "Add to favorites"}
     >
