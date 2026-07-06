@@ -76,8 +76,18 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
   return (
     <div
       ref={ref}
-      className="fixed z-50 min-w-[200px] dp-card dp-material py-1 animate-slide-up"
-      style={{ left: x, top: y }}
+      className="card fixed z-50 min-w-[200px] animate-slide-up"
+      style={{
+        left: x,
+        top: y,
+        padding: "4px 0",
+        background: "var(--glass)",
+        backdropFilter: "blur(20px) saturate(150%)",
+        WebkitBackdropFilter: "blur(20px) saturate(150%)",
+        border: "1px solid var(--card-bd)",
+        borderRadius: "var(--radius-card)",
+        boxShadow: "var(--lift)",
+      }}
       onClick={(e) => e.stopPropagation()}
     >
       {items.map((item, idx) => {
@@ -85,7 +95,8 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
           return (
             <div
               key={`sep-${idx}`}
-              className="h-px bg-separator my-1 mx-2"
+              className="h-px my-1 mx-2"
+              style={{ background: "var(--card-bd)" }}
             />
           );
         }
@@ -102,14 +113,19 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
                 onClose();
               }
             }}
-            className={`w-full flex items-center gap-3 px-3 py-2 type-subheadline text-left
+            style={
+              action.destructive && !action.disabled
+                ? { color: "var(--danger)" }
+                : undefined
+            }
+            className={`w-full flex items-center gap-3 px-3 py-2 text-left text-[13px]
               transition-colors duration-150 ease-smooth
               ${
                 action.disabled
-                  ? "text-label-quaternary cursor-not-allowed"
+                  ? "cursor-not-allowed text-[color:var(--text-faint)]"
                   : action.destructive
-                  ? "text-system-red hover:bg-system-red/10"
-                  : "text-label-primary hover:bg-surface-secondary"
+                  ? "hover:bg-[rgba(239,68,68,0.12)] hover:text-[#ef4444]"
+                  : "text-[color:var(--text)] hover:bg-[var(--hover)]"
               }`}
           >
             <Icon size={14} />

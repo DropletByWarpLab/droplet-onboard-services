@@ -47,76 +47,68 @@ export function SelectionToolbar({
   if (count === 0 && !hasClipboard) return null;
 
   return (
-    <div className="mb-4 flex items-center gap-2 p-2 pl-4 dp-card animate-slide-up">
+    <div
+      className="card mb-4 flex items-center gap-2 p-2 pl-4 animate-slide-up"
+      style={{
+        background: "var(--glass)",
+        backdropFilter: "blur(20px) saturate(150%)",
+        WebkitBackdropFilter: "blur(20px) saturate(150%)",
+        border: "1px solid var(--card-bd)",
+        borderRadius: "var(--radius-card)",
+        boxShadow: "var(--lift)",
+      }}
+    >
       {count > 0 && (
         <>
           <button
             onClick={onClear}
-            className="p-1.5 rounded-full text-label-tertiary hover:text-label-primary hover:bg-surface-secondary transition-colors"
+            className="p-1.5 rounded-full text-[color:var(--text-muted)] hover:text-[color:var(--text)] hover:bg-[var(--hover)] transition-colors"
             aria-label="Clear selection"
           >
             <X size={14} />
           </button>
-          <span className="type-footnote text-label-primary font-medium">
+          <span
+            className="font-medium"
+            style={{ color: "var(--text)", fontSize: "13px" }}
+          >
             {count} selected
           </span>
-          <div className="h-5 w-px bg-separator mx-1" />
+          <div
+            className="h-5 w-px mx-1"
+            style={{ background: "var(--card-bd)" }}
+          />
         </>
       )}
 
       <div className="flex items-center gap-1 flex-wrap">
         {canRename && (
-          <button
-            onClick={onRename}
-            className="dp-btn-secondary type-footnote !py-1.5 !px-3 !min-h-[32px]"
-            title="Rename"
-          >
+          <button onClick={onRename} className="btn sm" title="Rename">
             <Edit3 size={14} />
             Rename
           </button>
         )}
         {count > 0 && (
           <>
-            <button
-              onClick={onDownload}
-              className="dp-btn-secondary type-footnote !py-1.5 !px-3 !min-h-[32px]"
-              title="Download"
-            >
+            <button onClick={onDownload} className="btn sm" title="Download">
               <Download size={14} />
               Download
             </button>
-            <button
-              onClick={onMove}
-              className="dp-btn-secondary type-footnote !py-1.5 !px-3 !min-h-[32px]"
-              title="Move to folder"
-            >
+            <button onClick={onMove} className="btn sm" title="Move to folder">
               <FolderInput size={14} />
               Move
             </button>
-            <button
-              onClick={onCopyTo}
-              className="dp-btn-secondary type-footnote !py-1.5 !px-3 !min-h-[32px]"
-              title="Copy to folder"
-            >
+            <button onClick={onCopyTo} className="btn sm" title="Copy to folder">
               <Copy size={14} />
               Copy
             </button>
-            <button
-              onClick={onCut}
-              className="dp-btn-secondary type-footnote !py-1.5 !px-3 !min-h-[32px]"
-              title="Cut"
-            >
+            <button onClick={onCut} className="btn sm" title="Cut">
               <Scissors size={14} />
               Cut
             </button>
           </>
         )}
         {hasClipboard && (
-          <button
-            onClick={onPaste}
-            className="dp-btn-primary type-footnote !py-1.5 !px-3 !min-h-[32px]"
-            title="Paste here"
-          >
+          <button onClick={onPaste} className="btn primary sm" title="Paste here">
             <ClipboardPaste size={14} />
             Paste
           </button>
@@ -128,7 +120,8 @@ export function SelectionToolbar({
           <div className="flex-1" />
           <button
             onClick={onDelete}
-            className="flex items-center gap-1.5 px-3 py-1.5 type-footnote text-system-red hover:bg-system-red/10 rounded-sm transition-colors"
+            className="btn ghost sm"
+            style={{ color: "var(--danger)" }}
             title="Move to trash"
           >
             <Trash2 size={14} />
