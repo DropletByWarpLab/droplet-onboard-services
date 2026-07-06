@@ -74,12 +74,11 @@ export function UploadZone({ onUpload, children }: UploadZoneProps) {
   );
 }
 
+// Rendered only inside ShellPage's `.phead-actions` slot on /files, so the
+// indigo `.btn` classes (scoped under `.droplet-shell`) always apply.
 export function UploadButton({ onClick }: { onClick: () => void }) {
   return (
-    <button
-      onClick={onClick}
-      className="dp-btn-primary type-subheadline !py-2 !px-4 !min-h-[36px]"
-    >
+    <button onClick={onClick} className="btn primary" type="button">
       <Upload size={14} />
       Upload
     </button>

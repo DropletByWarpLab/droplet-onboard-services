@@ -498,6 +498,7 @@ export default function FilesPage() {
       icon={<Folder size={15} />}
       label="Files"
       title="Files"
+      sub="Everything on your Droplet, indexed locally for instant, private search."
       actions={filesActions}
     >
       {/* Search bar */}
