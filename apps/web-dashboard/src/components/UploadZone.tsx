@@ -63,10 +63,23 @@ export function UploadZone({ onUpload, children }: UploadZoneProps) {
       />
 
       {isDragging && (
-        <div className="absolute inset-0 z-10 flex items-center justify-center bg-accent/5 border-2 border-dashed border-accent rounded-lg transition-all duration-200">
+        <div
+          className="absolute inset-0 z-10 flex items-center justify-center transition-opacity duration-200"
+          style={{
+            background: "var(--brand-subtle)",
+            border: "2px dashed var(--brand)",
+            borderRadius: "var(--radius-card)",
+          }}
+        >
           <div className="text-center">
-            <Upload size={32} className="mx-auto text-accent mb-2" />
-            <p className="type-subheadline text-accent">Drop files to upload</p>
+            <Upload
+              size={32}
+              className="mx-auto mb-2"
+              style={{ color: "var(--brand)" }}
+            />
+            <p className="type-subheadline" style={{ color: "var(--text)" }}>
+              Drop files to upload
+            </p>
           </div>
         </div>
       )}

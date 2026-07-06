@@ -18,12 +18,13 @@ const SPACE_ICON: Record<FileSpaceId, typeof FolderLock> = {
  * WARP-883 (ADR-027 WS-5) — segmented control to switch between the user's
  * private "My Files" space and the shared "Household" space.
  *
- * Restraint-first: a quiet inset track (no lone toggle when there's nothing to
- * switch to). The control only renders when the shared space is actually
+ * Restraint-first: the indigo `.pills` segmented control (mirroring the search
+ * mode switcher). The control only renders when the shared space is actually
  * available — with just the personal space there is nothing to toggle, so we
  * render nothing rather than a single dead segment. The active segment carries
- * the indigo accent; inactive segments stay secondary. Transition is colour-
- * only and fast (150ms) so the flip feels purposeful, not playful.
+ * the indigo accent (`var(--brand)` text on a `var(--brand-subtle)` wash);
+ * inactive segments stay muted. Transition is colour-only so the flip feels
+ * purposeful, not playful.
  */
 export function SpaceSwitcher({ spaces, active, onChange }: SpaceSwitcherProps) {
   const visible = spaces.filter((s) => s.available);
@@ -31,11 +32,7 @@ export function SpaceSwitcher({ spaces, active, onChange }: SpaceSwitcherProps) 
   if (visible.length < 2) return null;
 
   return (
-    <div
-      role="tablist"
-      aria-label="File space"
-      className="inline-flex items-center gap-1 rounded-md bg-surface-secondary p-1"
-    >
+    <div role="tablist" aria-label="File space" className="pills">
       {visible.map((space) => {
         const Icon = SPACE_ICON[space.id];
         const isActive = space.id === active;
@@ -46,17 +43,15 @@ export function SpaceSwitcher({ spaces, active, onChange }: SpaceSwitcherProps) 
             role="tab"
             aria-selected={isActive}
             onClick={() => onChange(space.id)}
-            className={`inline-flex items-center gap-1.5 rounded-sm px-3 py-1.5 type-subheadline transition-colors duration-150 ${
-              isActive
-                ? "bg-surface-primary text-accent font-medium shadow-sm"
-                : "text-label-secondary hover:text-label-primary"
-            }`}
+            className={isActive ? "active" : undefined}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              whiteSpace: "nowrap",
+            }}
           >
-            <Icon
-              size={14}
-              aria-hidden="true"
-              className={isActive ? "text-accent" : "text-label-tertiary"}
-            />
+            <Icon size={14} aria-hidden="true" />
             {space.name}
           </button>
         );
