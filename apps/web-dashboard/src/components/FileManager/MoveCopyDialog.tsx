@@ -228,18 +228,33 @@ export function MoveCopyDialog({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-6"
+      className="fixed inset-0 z-50 flex items-center justify-center backdrop-blur-sm p-6"
+      style={{ background: "var(--scrim)" }}
       onClick={onCancel}
     >
       <div
-        className="bg-surface-primary rounded-lg max-w-lg w-full max-h-[80vh] flex flex-col overflow-hidden shadow-xl"
+        className="max-w-lg w-full max-h-[80vh] flex flex-col overflow-hidden"
+        style={{
+          background: "var(--card-bg)",
+          border: "1px solid var(--card-bd)",
+          borderRadius: "var(--radius-card)",
+          boxShadow: "var(--lift)",
+        }}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-separator">
+        <div
+          className="flex items-center justify-between px-4 py-3"
+          style={{ borderBottom: "1px solid var(--card-bd)" }}
+        >
           <div>
-            <h3 className="type-headline text-label-primary">{title}</h3>
-            <p className="type-caption-1 text-label-tertiary mt-0.5 truncate">
+            <h3 className="type-headline" style={{ color: "var(--text)" }}>
+              {title}
+            </h3>
+            <p
+              className="type-caption-1 mt-0.5 truncate"
+              style={{ color: "var(--text-muted)" }}
+            >
               {selectionLabels.length === 1
                 ? selectionLabels[0]
                 : `${selectionLabels.length} items`}
@@ -247,7 +262,8 @@ export function MoveCopyDialog({
           </div>
           <button
             onClick={onCancel}
-            className="p-1 text-label-tertiary hover:text-label-primary"
+            className="icon-btn"
+            aria-label="Close"
           >
             <X size={18} />
           </button>
@@ -266,12 +282,16 @@ export function MoveCopyDialog({
         </div>
 
         {/* New folder — create a destination at the selected target inline. */}
-        <div className="px-3 py-2 border-t border-separator">
+        <div
+          className="px-3 py-2"
+          style={{ borderTop: "1px solid var(--card-bd)" }}
+        >
           {creatingFolder ? (
             <div className="flex items-center gap-2">
               <FolderPlus
                 size={14}
-                className="text-label-tertiary shrink-0"
+                className="shrink-0"
+                style={{ color: "var(--text-muted)" }}
                 aria-hidden="true"
               />
               <input
@@ -285,13 +305,20 @@ export function MoveCopyDialog({
                 placeholder="Folder name…"
                 aria-label="New folder name"
                 disabled={folderSubmitting}
-                className="flex-1 min-w-0 bg-surface-secondary rounded-sm px-2 py-1 type-footnote text-label-primary placeholder:text-label-quaternary outline-none focus:ring-1 focus:ring-accent"
+                className="flex-1 min-w-0 px-2 py-1 type-footnote outline-none focus:border-[var(--brand)]"
+                style={{
+                  background: "var(--surface)",
+                  border: "1px solid var(--border)",
+                  borderRadius: "var(--radius-input)",
+                  color: "var(--text)",
+                }}
               />
               <button
                 type="button"
                 onClick={() => void handleCreateFolder()}
                 disabled={folderSubmitting || !newFolderName.trim()}
-                className="type-caption-1 text-accent hover:text-accent-hover disabled:text-label-quaternary px-2 py-1 transition-colors"
+                className="type-caption-1 px-2 py-1 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                style={{ color: "var(--brand)" }}
               >
                 {folderSubmitting ? "Creating…" : "Create"}
               </button>
@@ -299,7 +326,8 @@ export function MoveCopyDialog({
                 type="button"
                 onClick={cancelNewFolder}
                 disabled={folderSubmitting}
-                className="type-caption-1 text-label-tertiary hover:text-label-primary px-1 py-1 transition-colors"
+                className="type-caption-1 px-1 py-1 transition-colors"
+                style={{ color: "var(--text-muted)" }}
               >
                 Cancel
               </button>
@@ -308,7 +336,8 @@ export function MoveCopyDialog({
             <button
               type="button"
               onClick={openNewFolder}
-              className="flex items-center gap-1.5 type-footnote text-accent hover:text-accent-hover px-1 py-1 transition-colors"
+              className="flex items-center gap-1.5 type-footnote px-1 py-1 transition-colors"
+              style={{ color: "var(--brand)" }}
             >
               <FolderPlus size={14} aria-hidden="true" />
               New folder
@@ -318,27 +347,40 @@ export function MoveCopyDialog({
 
         {/* Error */}
         {error && (
-          <div className="px-4 py-2 type-footnote text-system-red bg-system-red/10 border-t border-system-red/20">
+          <div
+            className="px-4 py-2 type-footnote"
+            style={{
+              color: "#ef4444",
+              background: "rgba(239,68,68,0.1)",
+              borderTop: "1px solid rgba(239,68,68,0.2)",
+            }}
+          >
             {error}
           </div>
         )}
 
         {/* Footer */}
-        <div className="flex items-center justify-between gap-2 px-4 py-3 border-t border-separator">
-          <div className="type-caption-1 text-label-tertiary truncate flex-1 min-w-0">
-            Target: <span className="text-label-primary">{selectedPath}</span>
+        <div
+          className="flex items-center justify-between gap-2 px-4 py-3"
+          style={{ borderTop: "1px solid var(--card-bd)" }}
+        >
+          <div
+            className="type-caption-1 truncate flex-1 min-w-0"
+            style={{ color: "var(--text-muted)" }}
+          >
+            Target: <span style={{ color: "var(--text)" }}>{selectedPath}</span>
           </div>
           <button
             onClick={onCancel}
             disabled={submitting}
-            className="type-subheadline text-accent hover:text-accent-hover px-3 py-2 transition-colors"
+            className="btn ghost"
           >
             Cancel
           </button>
           <button
             onClick={handleConfirm}
             disabled={submitting || folderSubmitting || isForbidden(selectedPath)}
-            className="dp-btn-primary type-subheadline !min-h-[36px] !py-1.5"
+            className="btn primary"
           >
             {submitting ? "Working…" : ctaLabel}
           </button>
@@ -379,15 +421,23 @@ function TreeNodeView({
           if (forbidden) return;
           onSelect(node.path);
         }}
-        className={`flex items-center gap-1 py-1.5 pl-1 pr-2 rounded-sm cursor-pointer transition-colors
+        className={`flex items-center gap-1 py-1.5 pl-1 pr-2 cursor-pointer transition-colors
           ${
             forbidden
-              ? "text-label-quaternary cursor-not-allowed"
+              ? "cursor-not-allowed"
               : selected
-              ? "bg-accent-subtle text-accent"
-              : "hover:bg-surface-secondary text-label-primary"
+              ? ""
+              : "hover:bg-[var(--hover)]"
           }`}
-        style={{ paddingLeft: depth * 16 + 4 }}
+        style={{
+          paddingLeft: depth * 16 + 4,
+          borderRadius: "var(--radius-input)",
+          ...(forbidden
+            ? { color: "var(--text-faint)" }
+            : selected
+            ? { background: "var(--brand-subtle)", color: "var(--brand)" }
+            : { color: "var(--text)" }),
+        }}
       >
         <button
           type="button"
@@ -395,18 +445,24 @@ function TreeNodeView({
             e.stopPropagation();
             onToggle(node);
           }}
-          className="p-0.5 text-label-tertiary hover:text-label-primary"
+          className="p-0.5 transition-colors"
+          style={{ color: "var(--text-muted)" }}
         >
           <Chevron size={12} />
         </button>
         {depth === 0 ? (
-          <Home size={14} className={selected ? "text-accent" : "text-label-secondary"} />
+          <Home
+            size={14}
+            style={{ color: selected ? "var(--brand)" : "var(--text-muted)" }}
+          />
         ) : (
-          <Folder size={14} className={selected ? "text-accent" : "text-system-blue"} />
+          <Folder size={14} style={{ color: "var(--brand)" }} />
         )}
         <span className="type-footnote truncate flex-1">{node.name}</span>
         {node.loading && (
-          <span className="type-caption-2 text-label-tertiary">…</span>
+          <span className="type-caption-2" style={{ color: "var(--text-muted)" }}>
+            …
+          </span>
         )}
       </div>
 
