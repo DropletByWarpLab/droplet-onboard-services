@@ -222,7 +222,7 @@ compose up -d "${BOOT_SERVICES[@]}"
 # blocks, so we can observe it regardless of the boot outcome.
 echo "── structured self-test log lines ──"
 for svc in "${SELFTEST_SERVICES[@]}"; do
-  if wait_for_log "$svc" '"event":"fips_self_test".*"fips":true' 120; then
+  if wait_for_log "$svc" '"event":[[:space:]]*"fips_self_test".*"fips":[[:space:]]*true' 120; then
     echo "  ✓ $svc: fips_self_test fips:true (provider active + enforcing)"
   else
     echo "FAIL: $svc never logged fips_self_test fips:true"; exit 1
@@ -231,7 +231,7 @@ done
 
 # ── 5) Edge TLS under the FIPS cipher profile (WARP-1021) ───────────────────
 echo "── edge TLS ──"
-wait_for_log gateway '"event":"fips_edge_tls".*"fips":true' 60 \
+wait_for_log gateway '"event":[[:space:]]*"fips_edge_tls".*"fips":[[:space:]]*true' 60 \
   || { echo "FAIL: gateway did not log fips_edge_tls fips:true"; exit 1; }
 neg="$(echo | openssl s_client -connect "127.0.0.1:${EDGE_PORT}" -brief 2>&1 || true)"
 printf '%s' "$neg" | grep -qE 'Ciphersuite: TLS_AES_(128|256)_GCM_SHA(256|384)' \
@@ -271,16 +271,16 @@ echo "  ✓ ai-gateway (Python/_hashlib): MD5 refused"
 # existing test-lane TPM perm quirk in device-identity-svc), because the pin's
 # effect is "the self-test is SKIPPED", i.e. no fips line at all.
 echo "── non-provider services stay off the FIPS boot gate (WARP-318 fix) ──"
-if compose logs --no-color 2>/dev/null | grep -qE '"event":"fips_self_test".*"fips":false'; then
+if compose logs --no-color 2>/dev/null | grep -qE '"event":[[:space:]]*"fips_self_test".*"fips":[[:space:]]*false'; then
   echo "FAIL: a service emitted fips_self_test fips:false under FIPS mode —"
   echo "      a non-provider image entered the boot gate (WARP-318 pin regressed):"
-  compose logs --no-color 2>/dev/null | grep -E '"event":"fips_self_test".*"fips":false' | head
+  compose logs --no-color 2>/dev/null | grep -E '"event":[[:space:]]*"fips_self_test".*"fips":[[:space:]]*false' | head
   exit 1
 fi
 # And positively confirm device-identity-svc (a non-provider image we booted)
 # ran WITHOUT ever hitting the gate: it must have logged NO fips_self_test line
 # at all (skipped), never a fips:true (would mean it wrongly got the provider).
-if compose logs --no-color device-identity-svc 2>/dev/null | grep -q '"event":"fips_self_test"'; then
+if compose logs --no-color device-identity-svc 2>/dev/null | grep -qE '"event":[[:space:]]*"fips_self_test"'; then
   echo "FAIL: device-identity-svc ran the FIPS self-test — its pin (no provider) regressed"; exit 1
 fi
 echo "  ✓ no non-provider service entered the FIPS boot gate; device-identity-svc skipped it"
