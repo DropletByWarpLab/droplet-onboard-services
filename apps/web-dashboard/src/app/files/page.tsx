@@ -589,21 +589,44 @@ export default function FilesPage() {
 
       {/* Status messages */}
       {uploadProgress && (
-        <div className="mb-4 p-3 bg-accent-subtle border border-accent/20 rounded type-footnote text-accent">
+        <div
+          className="mb-4 p-3 rounded type-footnote"
+          style={{
+            background: "var(--brand-subtle)",
+            border: "1px solid color-mix(in srgb, var(--brand) 20%, transparent)",
+            color: "var(--brand)",
+          }}
+        >
           <div className="flex items-center gap-2 mb-2">
-            <div className="w-4 h-4 border-2 border-accent/30 border-t-accent rounded-full animate-spin" />
+            <div
+              className="w-4 h-4 border-2 rounded-full animate-spin"
+              style={{
+                borderColor: "color-mix(in srgb, var(--brand) 30%, transparent)",
+                borderTopColor: "var(--brand)",
+              }}
+            />
             {uploadProgress} {uploadPercent > 0 && `${uploadPercent}%`}
           </div>
-          <div className="h-1.5 bg-accent/15 rounded-full overflow-hidden">
+          <div
+            className="h-1.5 rounded-full overflow-hidden"
+            style={{ background: "var(--inset)" }}
+          >
             <div
-              className="h-full bg-accent rounded-full transition-all duration-300 ease-out"
-              style={{ width: `${uploadPercent}%` }}
+              className="h-full rounded-full transition-all duration-300 ease-out"
+              style={{ width: `${uploadPercent}%`, background: "var(--brand)" }}
             />
           </div>
         </div>
       )}
       {error && (
-        <div className="mb-4 p-3 bg-system-red/10 border border-system-red/20 rounded type-footnote text-system-red flex items-center justify-between">
+        <div
+          className="mb-4 p-3 rounded type-footnote flex items-center justify-between"
+          style={{
+            background: "rgba(239,68,68,0.1)",
+            border: "1px solid rgba(239,68,68,0.2)",
+            color: "#ef4444",
+          }}
+        >
           <span>{error}</span>
           <button onClick={() => setError(null)} className="ml-2 hover:opacity-70">
             <X size={14} />
@@ -676,7 +699,10 @@ export default function FilesPage() {
           <div className="hidden lg:block w-72 flex-shrink-0">
             <div className="card sticky top-6 space-y-4">
               <div className="flex items-center justify-between gap-2">
-                <h3 className="type-headline text-label-primary truncate flex-1">
+                <h3
+                  className="type-headline truncate flex-1"
+                  style={{ color: "var(--text)" }}
+                >
                   {selectedFile.name}
                 </h3>
                 <StarButton
@@ -689,7 +715,7 @@ export default function FilesPage() {
                 />
                 <button
                   onClick={() => setSelectedFile(null)}
-                  className="p-1 text-label-tertiary hover:text-label-primary"
+                  className="p-1 text-[color:var(--text-muted)] hover:text-[color:var(--text)]"
                 >
                   <X size={16} />
                 </button>
@@ -702,16 +728,16 @@ export default function FilesPage() {
 
               <div className="space-y-2">
                 <div className="flex justify-between type-footnote">
-                  <span className="text-label-tertiary">Size</span>
-                  <span className="text-label-primary">{formatBytes(selectedFile.size)}</span>
+                  <span style={{ color: "var(--text-muted)" }}>Size</span>
+                  <span style={{ color: "var(--text)" }}>{formatBytes(selectedFile.size)}</span>
                 </div>
                 <div className="flex justify-between type-footnote">
-                  <span className="text-label-tertiary">Type</span>
-                  <span className="text-label-primary">{selectedFile.mimeType || "Unknown"}</span>
+                  <span style={{ color: "var(--text-muted)" }}>Type</span>
+                  <span style={{ color: "var(--text)" }}>{selectedFile.mimeType || "Unknown"}</span>
                 </div>
                 <div className="flex justify-between type-footnote">
-                  <span className="text-label-tertiary">Modified</span>
-                  <span className="text-label-primary">
+                  <span style={{ color: "var(--text-muted)" }}>Modified</span>
+                  <span style={{ color: "var(--text)" }}>
                     {new Date(selectedFile.modifiedAt).toLocaleDateString()}
                   </span>
                 </div>
