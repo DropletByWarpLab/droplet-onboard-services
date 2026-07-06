@@ -14,11 +14,11 @@ const MAX_LABEL = 64;
 
 /**
  * WARP-881 / WS-3 — file tags section for the Files detail panel. Sibling
- * style of VersionHistoryPanel: `pt-4 border-t border-separator` header,
- * `type-footnote` title, design tokens only (indigo accent-subtle chips, no
- * hardcoded hex). Tags are file-scoped — every reader sees every tag — so
- * anyone owner/admin/family can add or remove; a guest sees a read-only
- * empty note (the API would 403 a guest anyway).
+ * style of VersionHistoryPanel: hairline-topped `.sect` header, indigo tokens
+ * only (ported `.chip.on` pills, no hardcoded hex). Tags are file-scoped —
+ * every reader sees every tag — so anyone owner/admin/family can add or
+ * remove; a guest sees a read-only empty note (the API would 403 a guest
+ * anyway).
  */
 export function TagChips({ filePath }: TagChipsProps) {
   const { user } = useAuth();
@@ -55,49 +55,55 @@ export function TagChips({ filePath }: TagChipsProps) {
   };
 
   return (
-    <div className="pt-4 border-t border-separator">
-      <div className="flex items-center gap-2 mb-3">
-        <Tag size={14} className="text-label-tertiary" />
-        <h4 className="type-footnote text-label-secondary font-medium">Tags</h4>
+    <div className="pt-4" style={{ borderTop: "1px solid var(--card-bd)" }}>
+      <div className="sect" style={{ margin: "0 0 12px" }}>
+        <Tag size={14} style={{ color: "var(--text-muted)" }} />
+        <h2>Tags</h2>
       </div>
 
       {isGuest ? (
-        <p className="type-caption-1 text-label-tertiary">
+        <p className="type-caption-1" style={{ color: "var(--text-muted)" }}>
           Tags aren&apos;t available for guests.
         </p>
       ) : (
         <>
           {error && (
-            <p className="type-caption-1 text-system-red mb-2">
+            <p className="type-caption-1 mb-2" style={{ color: "var(--danger)" }}>
               {translateError(error, "files")}
             </p>
           )}
           {actionError && (
-            <p className="type-caption-1 text-system-red mb-2">{actionError}</p>
+            <p className="type-caption-1 mb-2" style={{ color: "var(--danger)" }}>
+              {actionError}
+            </p>
           )}
 
           {isLoading && tags.length === 0 && !error && (
-            <p className="type-caption-1 text-label-tertiary">Loading…</p>
+            <p className="type-caption-1" style={{ color: "var(--text-muted)" }}>
+              Loading…
+            </p>
           )}
 
           {!isLoading && tags.length === 0 && !error && (
-            <p className="type-caption-1 text-label-tertiary mb-2">
+            <p className="type-caption-1 mb-2" style={{ color: "var(--text-muted)" }}>
               No tags yet. Add one to organize this file.
             </p>
           )}
 
           {tags.length > 0 && (
-            <ul className="flex flex-wrap gap-1.5 mb-2">
+            <ul className="chiprow mb-2">
               {tags.map((t) => (
                 <li
                   key={t.id}
-                  className="group inline-flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-full bg-accent-subtle text-accent type-caption-1"
+                  className="chip on"
+                  style={{ height: 28, paddingRight: 6, cursor: "default" }}
                 >
                   <span className="truncate max-w-[10rem]">{t.label}</span>
                   <button
                     type="button"
                     onClick={() => onRemove(t.label)}
-                    className="p-0.5 rounded-full text-accent/70 hover:text-accent hover:bg-accent-subtle transition-colors"
+                    className="inline-flex items-center justify-center rounded-full transition-colors"
+                    style={{ padding: 2, color: "var(--brand)" }}
                     title={`Remove tag "${t.label}"`}
                     aria-label={`Remove tag ${t.label}`}
                   >
@@ -121,13 +127,20 @@ export function TagChips({ filePath }: TagChipsProps) {
                 }
               }}
               placeholder="Add a tag…"
-              className="flex-1 min-w-0 px-2 py-1 rounded-md bg-surface-secondary border border-separator type-caption-1 text-label-primary placeholder:text-label-tertiary focus:outline-none focus:border-accent transition-colors"
+              className="flex-1 min-w-0 type-caption-1 border border-[color:var(--border)] focus:border-[color:var(--brand)] focus:outline-none transition-colors"
+              style={{
+                padding: "5px 10px",
+                background: "var(--surface)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+              }}
             />
             <button
               type="button"
               onClick={() => void submit()}
               disabled={!draft.trim() || adding}
-              className="p-1.5 rounded-full text-label-tertiary hover:text-accent hover:bg-accent-subtle transition-colors disabled:opacity-40 disabled:hover:text-label-tertiary disabled:hover:bg-transparent"
+              className="icon-btn disabled:opacity-40"
+              style={{ width: 30, height: 30 }}
               title="Add tag"
               aria-label="Add tag"
             >

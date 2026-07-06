@@ -111,16 +111,26 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
       onClick={onClose}
     >
       <div
-        className="bg-surface-primary rounded-lg max-w-5xl max-h-[90vh] w-full flex flex-col overflow-hidden shadow-2xl"
+        className="card max-w-5xl max-h-[90vh] w-full flex flex-col overflow-hidden shadow-2xl"
+        style={{ padding: 0, borderRadius: "var(--radius-card)" }}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-separator flex-shrink-0">
+        <div
+          className="flex items-center justify-between px-4 py-3 flex-shrink-0"
+          style={{ borderBottom: "1px solid var(--card-bd)" }}
+        >
           <div className="flex-1 min-w-0">
-            <h3 className="type-headline text-label-primary truncate">
+            <h3
+              className="type-headline truncate"
+              style={{ color: "var(--text)" }}
+            >
               {file.name}
             </h3>
-            <p className="type-caption-1 text-label-tertiary">
+            <p
+              className="type-caption-1"
+              style={{ color: "var(--text-faint)", fontFamily: "var(--font-mono)" }}
+            >
               {file.mimeType || "Unknown type"}
             </p>
           </div>
@@ -130,11 +140,7 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
                 edit-vs-view when the session is minted; this is the entry point,
                 not an authorization claim. */}
             {editable && docsReady && (
-              <button
-                onClick={onEdit}
-                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-full bg-accent text-accent-foreground type-footnote hover:bg-accent-hover transition-colors"
-                aria-label="Edit"
-              >
+              <button onClick={onEdit} className="btn primary sm" aria-label="Edit">
                 <Pencil size={14} />
                 <span className="hidden sm:inline">Edit</span>
               </button>
@@ -146,14 +152,16 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
             <ReindexButton fileId={file.path} />
             <button
               onClick={onDownload}
-              className="p-2.5 rounded-full text-label-tertiary hover:text-accent hover:bg-accent-subtle transition-colors"
+              className="icon-btn"
+              style={{ width: 32, height: 32 }}
               aria-label="Download"
             >
               <Download size={16} />
             </button>
             <button
               onClick={onClose}
-              className="p-2.5 rounded-full text-label-tertiary hover:text-label-primary hover:bg-surface-secondary transition-colors"
+              className="icon-btn"
+              style={{ width: 32, height: 32 }}
               aria-label="Close preview"
             >
               <X size={16} />
@@ -162,7 +170,10 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
         </div>
 
         {/* Body */}
-        <div className="flex-1 overflow-auto bg-surface-secondary">
+        <div
+          className="flex-1 overflow-auto"
+          style={{ background: "var(--inset)" }}
+        >
           {kind === "image" && (
             <div className="flex items-center justify-center min-h-full p-4">
               {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -184,10 +195,13 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
               type="application/pdf"
               className="w-full h-[calc(90vh-64px)]"
             >
-              <div className="flex flex-col items-center justify-center h-full gap-3 p-8 text-label-tertiary">
+              <div
+                className="flex flex-col items-center justify-center h-full gap-3 p-8"
+                style={{ color: "var(--text-muted)" }}
+              >
                 <FileText size={32} />
                 <p className="type-subheadline">Your browser can&apos;t embed PDFs.</p>
-                <button onClick={onDownload} className="dp-btn-primary type-subheadline">
+                <button onClick={onDownload} className="btn primary type-subheadline">
                   Download PDF
                 </button>
               </div>
@@ -206,8 +220,20 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
 
           {kind === "audio" && (
             <div className="flex items-center justify-center min-h-full p-12">
-              <div className="dp-card p-6 max-w-md w-full">
-                <p className="type-headline text-label-primary mb-4 truncate">{file.name}</p>
+              <div
+                className="p-6 max-w-md w-full"
+                style={{
+                  background: "var(--surface)",
+                  border: "1px solid var(--card-bd)",
+                  borderRadius: "var(--radius-card)",
+                }}
+              >
+                <p
+                  className="type-headline mb-4 truncate"
+                  style={{ color: "var(--text)" }}
+                >
+                  {file.name}
+                </p>
                 <audio src={downloadUrl} controls className="w-full" />
               </div>
             </div>
@@ -216,16 +242,25 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
           {kind === "text" && (
             <div className="p-4">
               {textContent === null && !textError && (
-                <p className="type-footnote text-label-tertiary">Loading…</p>
+                <p className="type-footnote" style={{ color: "var(--text-muted)" }}>
+                  Loading…
+                </p>
               )}
               {textError && (
-                <p className="type-footnote text-system-red">{textError}</p>
+                <p className="type-footnote" style={{ color: "var(--danger)" }}>
+                  {textError}
+                </p>
               )}
               {textContent !== null && (
                 <pre
-                  className={`type-footnote text-label-primary whitespace-pre-wrap font-mono bg-surface-primary p-4 rounded ${
+                  className={`type-footnote whitespace-pre-wrap font-mono p-4 ${
                     CODE_EXT[file.name.split(".").pop()?.toLowerCase() as keyof typeof CODE_EXT] ?? ""
                   }`}
+                  style={{
+                    color: "var(--text)",
+                    background: "var(--surface)",
+                    borderRadius: "var(--radius-input)",
+                  }}
                 >
                   {textContent}
                 </pre>
@@ -234,10 +269,12 @@ export function PreviewPane({ file, onClose, onDownload, onEdit }: PreviewPanePr
           )}
 
           {kind === "other" && (
-            <div className="flex flex-col items-center justify-center h-full gap-3 p-12 text-label-tertiary">
-              <FileText size={32} className="text-label-quaternary" />
-              <p className="type-subheadline">No preview available</p>
-              <button onClick={onDownload} className="dp-btn-primary type-subheadline">
+            <div className="empty">
+              <div className="ei">
+                <FileText size={22} />
+              </div>
+              <p className="eh">No preview available</p>
+              <button onClick={onDownload} className="btn primary type-subheadline">
                 <Download size={14} />
                 Download
               </button>
