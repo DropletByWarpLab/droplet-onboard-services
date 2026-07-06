@@ -713,16 +713,10 @@ services:
     # pg_hba.fips.conf, which tolerates plaintext+SCRAM from the private
     # container bridge because Prisma/libpq under the FIPS provider cannot
     # do TLS at all (P1011; decision A — see the orchestrator env comment).
-    command: >
-      bash -c 'install -o postgres -g postgres -m 600 /certs-src/key.pem /tmp/server.key
-               && install -o postgres -g postgres -m 644 /certs-src/cert.pem /tmp/server.crt
-               && exec docker-entrypoint.sh postgres
-                  -c ssl=on
-                  -c ssl_cert_file=/tmp/server.crt
-                  -c ssl_key_file=/tmp/server.key
-                  -c ssl_min_protocol_version=TLSv1.3
-                  -c password_encryption=scram-sha-256
-                  -c hba_file=/etc/postgresql/${PG_HBA:-pg_hba.conf}'
+    command:
+      - bash
+      - -c
+      - install -o postgres -g postgres -m 600 /certs-src/key.pem /tmp/server.key && install -o postgres -g postgres -m 644 /certs-src/cert.pem /tmp/server.crt && exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tmp/server.crt -c ssl_key_file=/tmp/server.key -c ssl_min_protocol_version=TLSv1.3 -c password_encryption=scram-sha-256 -c hba_file=/etc/postgresql/${PG_HBA:-pg_hba.conf}
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./init-nextcloud-db.sh:/docker-entrypoint-initdb.d/init-nextcloud-db.sh:ro
