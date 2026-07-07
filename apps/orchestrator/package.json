@@ -80,7 +80,7 @@
     "supertest": "^7.0.0",
     "ts-proto": "^2.11.7",
     "tsx": "^4.11.0",
-    "typescript": "^5.4.5",
+    "typescript": "^6.0.3",
     "vitest": "^1.6.0",
     "yauzl": "^3.3.0"
   },
