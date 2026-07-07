@@ -131,14 +131,17 @@ export function PairDialog({ onClose, onPaired }: PairDialogProps) {
   return (
     <Dialog open onClose={onClose} labelledBy={headingId} maxWidth="md">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-separator">
-        <h3 id={headingId} className="type-title-3 text-label-primary">
+      <div
+        className="flex items-center justify-between px-4 py-3"
+        style={{ borderBottom: "1px solid var(--card-bd)" }}
+      >
+        <h3 id={headingId} className="type-title-3" style={{ color: "var(--text)" }}>
           Pair a new device
         </h3>
         <button
           onClick={onClose}
           aria-label="Close"
-          className="p-1 text-label-tertiary hover:text-label-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 rounded-sm"
+          className="p-1 text-[var(--text-muted)] hover:text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)] rounded-[var(--radius-input)]"
         >
           <X size={18} />
         </button>
@@ -148,7 +151,10 @@ export function PairDialog({ onClose, onPaired }: PairDialogProps) {
       {step === "form" && (
         <div className="p-5 space-y-4">
           <div>
-            <label className="type-caption-1 text-label-tertiary mb-1.5 block">
+            <label
+              className="type-caption-1 mb-1.5 block"
+              style={{ color: "var(--text-muted)" }}
+            >
               Device name
             </label>
             <input
@@ -156,13 +162,22 @@ export function PairDialog({ onClose, onPaired }: PairDialogProps) {
               value={deviceName}
               onChange={(e) => setDeviceName(e.target.value)}
               placeholder="Alice's MacBook"
-              className="dp-input"
+              className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+              }}
               onKeyDown={(e) => e.key === "Enter" && handleGenerate()}
             />
           </div>
 
           <div>
-            <label className="type-caption-1 text-label-tertiary mb-1.5 block">
+            <label
+              className="type-caption-1 mb-1.5 block"
+              style={{ color: "var(--text-muted)" }}
+            >
               Platform
             </label>
             <div className="grid grid-cols-3 gap-2">
@@ -173,10 +188,10 @@ export function PairDialog({ onClose, onPaired }: PairDialogProps) {
                   <button
                     key={p.value}
                     onClick={() => setPlatform(p.value)}
-                    className={`flex flex-col items-center gap-1 p-3 rounded-sm type-caption-1 transition-colors ${
+                    className={`flex flex-col items-center gap-1 p-3 rounded-[var(--radius-input)] type-caption-1 transition-colors ${
                       selected
-                        ? "bg-accent-subtle text-accent font-medium"
-                        : "bg-surface-secondary text-label-secondary hover:bg-surface-tertiary"
+                        ? "bg-[var(--brand-subtle)] text-[var(--brand)] font-medium"
+                        : "bg-[var(--surface-2)] text-[var(--text-muted)] hover:text-[var(--text)]"
                     }`}
                   >
                     <Icon size={16} />
@@ -188,22 +203,19 @@ export function PairDialog({ onClose, onPaired }: PairDialogProps) {
           </div>
 
           {error && (
-            <div className="p-2 bg-system-red/10 border border-system-red/20 rounded type-footnote text-system-red">
+            <div className="p-2 bg-[rgba(239,68,68,0.1)] border border-[rgba(239,68,68,0.2)] rounded-[var(--radius-input)] type-footnote text-[#ef4444]">
               {error}
             </div>
           )}
 
           <div className="flex items-center justify-end gap-2 pt-2">
-            <button
-              onClick={onClose}
-              className="type-subheadline text-accent hover:text-accent-hover px-3 py-2 transition-colors"
-            >
+            <button onClick={onClose} className="btn ghost">
               Cancel
             </button>
             <button
               onClick={handleGenerate}
               disabled={submitting}
-              className="dp-btn-primary type-subheadline !min-h-[36px] !py-1.5"
+              className="btn primary"
             >
               {submitting ? (
                 <>
@@ -221,13 +233,17 @@ export function PairDialog({ onClose, onPaired }: PairDialogProps) {
       {/* Waiting / QR step */}
       {step === "waiting" && pairing && (
         <div className="p-5 space-y-4">
-          <p className="type-footnote text-label-secondary text-center">
+          <p
+            className="type-footnote text-center"
+            style={{ color: "var(--text-muted)" }}
+          >
             Scan this code with the Droplet app, or copy the link and open it
             on the device you want to pair.
           </p>
 
           <div className="flex justify-center">
-            <div className="p-4 bg-white rounded-lg">
+            {/* Solid white behind the QR — scanner contrast, not a theme surface. */}
+            <div className="p-4 bg-white rounded-[var(--radius-card)]">
               <QRCodeSVG
                 value={pairing.pairUrl}
                 size={192}
@@ -238,11 +254,16 @@ export function PairDialog({ onClose, onPaired }: PairDialogProps) {
           </div>
 
           <div className="text-center">
-            <p className="type-caption-1 text-label-tertiary">Pairing code</p>
-            <p className="type-title-3 text-label-primary font-mono tracking-wider">
+            <p className="type-caption-1" style={{ color: "var(--text-muted)" }}>
+              Pairing code
+            </p>
+            <p
+              className="type-title-3 font-mono tracking-wider"
+              style={{ color: "var(--text)" }}
+            >
               {pairing.code}
             </p>
-            <p className="type-caption-2 text-label-quaternary mt-1">
+            <p className="type-caption-2 mt-1" style={{ color: "var(--text-faint)" }}>
               Expires in ~{expiresInMinutes} min
             </p>
           </div>
@@ -251,12 +272,18 @@ export function PairDialog({ onClose, onPaired }: PairDialogProps) {
             <input
               readOnly
               value={pairing.pairUrl}
-              className="dp-input type-caption-1 flex-1 !py-1.5 font-mono"
+              className="type-caption-1 flex-1 px-3 py-1.5 font-mono outline-none focus:border-[var(--brand)]"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)",
+                color: "var(--text)",
+              }}
               onFocus={(e) => e.currentTarget.select()}
             />
             <button
               onClick={handleCopy}
-              className="p-2 rounded-sm bg-accent/10 text-accent hover:bg-accent/20 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              className="p-2 rounded-[var(--radius-input)] bg-[var(--brand-subtle)] text-[var(--brand)] hover:bg-[rgba(99,102,241,0.2)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
               title="Copy link"
               aria-label="Copy pair link"
             >
@@ -264,7 +291,10 @@ export function PairDialog({ onClose, onPaired }: PairDialogProps) {
             </button>
           </div>
 
-          <div className="flex items-center justify-center gap-2 type-footnote text-label-tertiary">
+          <div
+            className="flex items-center justify-center gap-2 type-footnote"
+            style={{ color: "var(--text-muted)" }}
+          >
             <Loader2 size={14} className="animate-spin" />
             Waiting for the device to claim the code…
           </div>
@@ -275,8 +305,10 @@ export function PairDialog({ onClose, onPaired }: PairDialogProps) {
       {step === "done" && (
         <div className="p-8 flex flex-col items-center gap-3 text-center">
           <CheckCircle2 size={48} className="text-system-green" />
-          <p className="type-headline text-label-primary">Device paired</p>
-          <p className="type-footnote text-label-tertiary">
+          <p className="type-headline" style={{ color: "var(--text)" }}>
+            Device paired
+          </p>
+          <p className="type-footnote" style={{ color: "var(--text-muted)" }}>
             <strong>{deviceName}</strong> is ready to sync.
           </p>
         </div>

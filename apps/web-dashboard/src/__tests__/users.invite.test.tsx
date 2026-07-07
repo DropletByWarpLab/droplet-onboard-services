@@ -167,7 +167,7 @@ describe("Users page — invite UX", () => {
 
     // Confirm the destructive action inside the dialog.
     const dialog = await screen.findByRole("dialog", { name: /Revoke invite/i });
-    const confirmInDialog = dialog.querySelector('button.bg-system-red') as HTMLButtonElement;
+    const confirmInDialog = dialog.querySelector('button.danger') as HTMLButtonElement;
     expect(confirmInDialog).not.toBeNull();
     fireEvent.click(confirmInDialog);
 
@@ -216,7 +216,7 @@ describe("Users page — invite UX", () => {
     // Re-open + confirm — API fires.
     fireEvent.click(screen.getByRole("button", { name: /Revoke invite for/i }));
     const dialog2 = await screen.findByRole("dialog", { name: /Revoke invite/i });
-    const confirmBtn = dialog2.querySelector('button.bg-system-red') as HTMLButtonElement;
+    const confirmBtn = dialog2.querySelector('button.danger') as HTMLButtonElement;
     fireEvent.click(confirmBtn);
     await waitFor(() => {
       expect(revokeInviteMock).toHaveBeenCalledWith("z".repeat(43));
