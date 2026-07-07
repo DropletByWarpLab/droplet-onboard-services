@@ -10,12 +10,14 @@
  * Two hardening rules beyond naive joining:
  *   - RFC 4180 quoting: fields containing `,` `"` `\n` `\r` are quoted
  *     and internal quotes doubled; records are CRLF-delimited.
- *   - Formula-injection neutralization: cells beginning with = + - @
- *     get a leading apostrophe so Excel/Sheets/Numbers render them as
- *     text instead of executing them as formulas (OWASP CSV-injection
- *     guidance). Activity `what`/`sub` strings can contain
- *     attacker-influenced text (filenames, device names), so this is
- *     load-bearing, not paranoia.
+ *   - Formula-injection neutralization: cells whose first
+ *     non-whitespace character is = + - @ get a leading apostrophe so
+ *     Excel/Sheets/Numbers render them as text instead of executing
+ *     them as formulas (OWASP CSV-injection guidance — spreadsheets
+ *     trim leading space/tab/CR before deciding a cell is a formula,
+ *     so whitespace-prefixed leaders count too; WARP-1031). Activity
+ *     `what`/`sub` strings can contain attacker-influenced text
+ *     (filenames, device names), so this is load-bearing, not paranoia.
  */
 
 export interface AuditCsvRow {
@@ -29,12 +31,14 @@ export interface AuditCsvRow {
 
 const COLUMNS = ["id", "at", "kind", "severity", "what", "sub"] as const;
 
-const FORMULA_LEADERS = new Set(["=", "+", "-", "@"]);
+// Leading whitespace included: spreadsheet apps trim space/tab/CR
+// before deciding a cell is a formula, so "\t=cmd" executes like "=cmd".
+const FORMULA_LEADER = /^\s*[=+\-@]/;
 
 function escapeCell(value: string | null): string {
   if (value === null || value === "") return "";
   let out = value;
-  if (FORMULA_LEADERS.has(out[0]!)) out = `'${out}`;
+  if (FORMULA_LEADER.test(out)) out = `'${out}`;
   if (/[",\n\r]/.test(out)) out = `"${out.replace(/"/g, '""')}"`;
   return out;
 }
