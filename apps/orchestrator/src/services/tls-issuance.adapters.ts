@@ -412,6 +412,10 @@ export function createBoxNameClaimer(): (raw: string) => Promise<ClaimBoxNameRes
       hq: createHqIssuanceClient(),
       identity: createDeviceIdentityClient(),
       logger,
+      // WARP-978 — gate the device-auth PoP claim on a live HQ. With an empty
+      // HQ_ISSUANCE_URL the HQ client's base URL is "" and hq.challenge would
+      // throw `TypeError: Failed to parse URL`; short-circuit to NOT_REGISTERED.
+      hqConfigured: !!config.HQ_ISSUANCE_URL,
     });
   };
 }

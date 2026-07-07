@@ -393,6 +393,38 @@ describe("claimBoxName", () => {
     expect(hq.claimName).not.toHaveBeenCalled();
   });
 
+  // WARP-978 — HQ_ISSUANCE_URL empty (dev/CI, or a reflashed box before the
+  // baked default lands): the real HQ client's base URL is "", so hq.challenge
+  // would build a RELATIVE "/api/issuance/order/challenge" and throw
+  // `TypeError: Failed to parse URL`. Short-circuit BEFORE touching HQ so the
+  // name-claim degrades to a non-authoritative NOT_REGISTERED instead of
+  // crashing the rename flow.
+  it("HQ not configured (hqConfigured=false) → NOT_REGISTERED, never reaches HQ, never throws", async () => {
+    const hq = makeHqClient();
+    let result: { outcome: string; authoritative: boolean } | undefined;
+    await expect(
+      (async () => {
+        result = await claimBoxName(
+          "studio",
+          makeClaimDeps({ hq, hqConfigured: false }),
+        );
+      })(),
+    ).resolves.toBeUndefined();
+    expect(result?.outcome).toBe(CLAIM_RESULT_NOT_REGISTERED);
+    expect(result?.authoritative).toBe(false);
+    expect(hq.challenge).not.toHaveBeenCalled();
+    expect(hq.claimName).not.toHaveBeenCalled();
+  });
+
+  it("hqConfigured omitted (undefined) preserves the existing HQ-reaching posture", async () => {
+    // Backward-compat: existing callers/tests never pass hqConfigured. An absent
+    // flag must NOT gate — the claim proceeds to HQ exactly as before.
+    const hq = makeHqClient();
+    const result = await claimBoxName("studio", makeClaimDeps({ hq }));
+    expect(result.outcome).toBe(CLAIM_RESULT_CLAIMED);
+    expect(hq.challenge).toHaveBeenCalledTimes(1);
+  });
+
   it("a challenge/sign network failure → FAILED, never throws (issuance is never crashed)", async () => {
     const hq = makeHqClient({
       challenge: vi.fn(async () => {
