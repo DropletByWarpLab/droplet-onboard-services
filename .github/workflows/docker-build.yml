@@ -400,6 +400,12 @@ jobs:
           exit-code: "1"
           scanners: vuln
           trivyignores: .trivyignore
+          # WARP-243: the trivy-action default is 5m0s, which the ai-gateway
+          # image (ONNX/reranker ML deps → large layers) intermittently blows
+          # during Trivy's layer analysis → "context deadline exceeded", a flaky
+          # red on both main and any PR that rebuilds ai-gateway. Give the scan
+          # headroom so the gate reflects vulns, not runner timing.
+          timeout: "20m0s"
 
   # Single stable check name for branch protection, whatever the matrix did.
   docker-build-ok:
