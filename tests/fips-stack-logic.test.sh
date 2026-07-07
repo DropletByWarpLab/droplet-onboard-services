@@ -74,7 +74,11 @@ if [ -f "$HARNESS" ]; then
   for svc in orchestrator mcp-server ai-gateway; do
     grep -q "$svc" "$HARNESS" || { st_ok=false; break; }
   done
-  if $st_ok && grep -q 'fips_self_test' "$HARNESS" && grep -q '"fips":true' "$HARNESS"; then
+  # The harness greps container logs with a whitespace-tolerant JSON pattern
+  # ("fips":[[:space:]]*true) because Python's json.dumps emits `"fips": true`
+  # with a space while Node emits `"fips":true` without — so match the value
+  # tolerantly here too rather than the literal (they must stay in lockstep).
+  if $st_ok && grep -q 'fips_self_test' "$HARNESS" && grep -qE '"fips":[^,}]*true' "$HARNESS"; then
     pass "asserts the fips_self_test log line for the provider services"
   else
     fail "missing fips_self_test log assertions (svc loop broke at '${svc:-}')"
@@ -114,7 +118,9 @@ if [ -f "$HARNESS" ]; then
   # Non-provider services must not enter the FIPS gate (the WARP-318 fix):
   # assert on the FAILED self-test line, not RestartCount (a service can be
   # down for an unrelated reason — the load-bearing signal is fips:false).
-  if grep -qE '"fips":false' "$HARNESS" && grep -q 'device-identity-svc' "$HARNESS"; then
+  # Same whitespace-tolerant match as the fips:true check above — the harness
+  # asserts the non-provider negative with "fips":[[:space:]]*false.
+  if grep -qE '"fips":[^,}]*false' "$HARNESS" && grep -q 'device-identity-svc' "$HARNESS"; then
     pass "guards non-provider services against the FIPS boot gate"
   else
     fail "missing non-provider FIPS-gate guard (fips:false)"
