@@ -94,6 +94,7 @@ export async function executeScene(
       const r = await matter.sendCommand(
         action.deviceNodeId,
         action.command,
+        opts.activityActor,
         (action.args ?? undefined) as Record<string, unknown> | undefined,
       );
       results.push({

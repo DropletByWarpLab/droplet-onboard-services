@@ -100,8 +100,8 @@ export function createApp(
   // scene-schedule ticker. Tests / callers that pass only `prisma` get the
   // default inline dispatcher, preserving the WARP-474 wiring.
   matter: MatterDispatcher = {
-    sendCommand: (nodeId, command, args) =>
-      sendMatterCommand(nodeId, command, args),
+    sendCommand: (nodeId, command, actor, args) =>
+      sendMatterCommand(nodeId, command, actor, args),
   },
 ) {
   const app = express();

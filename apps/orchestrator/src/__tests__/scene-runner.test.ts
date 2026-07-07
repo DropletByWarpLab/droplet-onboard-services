@@ -35,10 +35,10 @@ beforeEach(() => {
 
 describe("executeScene", () => {
   it("walks actions in idx order, forwards args, returns per-action results", async () => {
-    const calls: Array<[string, string, unknown]> = [];
+    const calls: Array<[string, string, unknown, unknown]> = [];
     const matter: MatterDispatcher = {
-      sendCommand: vi.fn(async (nodeId, command, args) => {
-        calls.push([nodeId, command, args]);
+      sendCommand: vi.fn(async (nodeId, command, actor, args) => {
+        calls.push([nodeId, command, actor, args]);
         return { status: "ok" };
       }),
     };
@@ -51,9 +51,10 @@ describe("executeScene", () => {
       ]),
       { triggeredBy: "scheduler", activityActor: { type: "ai", id: null } },
     );
+    // WARP-1010: the scene's activityActor threads into every dispatch.
     expect(calls).toEqual([
-      ["n1", "toggle", undefined],
-      ["n2", "set_brightness", { brightness: 50 }],
+      ["n1", "toggle", { type: "ai", id: null }, undefined],
+      ["n2", "set_brightness", { type: "ai", id: null }, { brightness: 50 }],
     ]);
     expect(result.successCount).toBe(2);
     expect(result.actionCount).toBe(2);
