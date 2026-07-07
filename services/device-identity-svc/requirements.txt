@@ -1,5 +1,5 @@
 grpcio>=1.62.0
-grpcio-tools>=1.62.0
+grpcio-tools>=1.82.0
 cryptography>=42.0.0
 click>=8.0.0
 # Real backend dep — production only. Builds against libtss2-dev
