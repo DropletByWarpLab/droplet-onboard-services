@@ -408,6 +408,28 @@ else
   fi
 fi
 
+echo "--- WARP-232: autoinstall storage layout leaves VG space for the encrypted data LV ---"
+UD="$REPO_ROOT_REAL/scripts/image/autoinstall/user-data"
+if [ ! -f "$UD" ]; then
+  fail "scripts/image/autoinstall/user-data not present (WARP-232 storage checks)"
+else
+  grep -q 'name: lvm' "$UD" \
+    && fail "user-data still uses the implicit lvm layout (root LV swallows the disk)" \
+    || pass "implicit lvm layout removed"
+  grep -q 'ubuntu-vg' "$UD" && pass "explicit VG ubuntu-vg declared" || fail "no explicit VG"
+  grep -qE 'name: ubuntu-lv' "$UD" && pass "bounded root LV declared" || fail "no explicit root LV"
+  if grep -q 'droplet-data' "$UD"; then
+    fail "user-data must NOT pre-create droplet-data (first boot owns it)"
+  else
+    pass "data LV deliberately absent from autoinstall (setup.sh owns it)"
+  fi
+  if python3 -c "import yaml,sys; yaml.safe_load(open('$UD'))" 2>/dev/null; then
+    pass "user-data is valid YAML"
+  else
+    fail "user-data YAML broken"
+  fi
+fi
+
 # =============================================================================
 # Results
 # =============================================================================

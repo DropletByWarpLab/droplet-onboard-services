@@ -131,7 +131,7 @@ device-identity-svc (unix socket only).
 | T5.5 | T | `db` container hosts BOTH `droplet` + `nextcloud` DBs — single postgres blast radius | Med | Docker-network isolation, no published port; restore integrity now covers both DBs (**WARP-1013**, PR #810) | Mitigated |
 | T5.6 | I/E | TPM key misuse from a compromised container | High | Key non-extractable, sealed to PCRs [0,2,4,7]; device-identity-svc exposes sign-only gRPC over a unix socket, no network listener (WARP-230) | Mitigated |
 | T5.7 | T | Silent tamper with audit chain or its key (`data/secrets/audit.key`, mode 0600) | High | HMAC chain + drill; fork-under-concurrency bug = **WARP-1026**; sealing doc-encryption KEK to Vault TPM = **WARP-1033** (same custody direction for at-rest keys) | Partial → tickets |
-| T5.8 | I | Secrets at rest in plaintext `.env` (chmod 600) on unencrypted disk | High | Per-device generation (ADR-020, no baked creds); disk encryption = **WARP-232** (TPM-sealed LUKS2); per-document DEKs shipped (WARP-242) with TPM KEK sealing = **WARP-1033**; hardware verification = **WARP-966** | Open → tickets |
+| T5.8 | I | Secrets at rest in plaintext `.env` (chmod 600) on unencrypted disk | High | Per-device generation (ADR-020, no baked creds); disk encryption = **WARP-232** LUKS2/Argon2id data partition + TPM-sealed unlock (PCRs 0+2+4+7) **shipped, pending hardware verify** — `.env` + `data/secrets` relocated onto the encrypted `/data`; per-document DEKs = **WARP-242** with TPM KEK sealing = **WARP-1033**; hardware verification = **WARP-966** | Shipped → WARP-966 hw verify |
 | T5.9 | S | BYOK keystore falls back to a hardcoded passphrase when `DEVICE_SECRET` missing | High | **WARP-581** (fail-closed, drop fallback) | Open → ticket |
 
 ## 7. TB6/TB7 — cloud planes (fleet + third-party)
@@ -184,7 +184,7 @@ staged cap reduction (single-box compose):
 | R1 | LAN is a semi-trusted zone (Frigate/Ollama unauthenticated on it) | Product model: the box IS the LAN's security authority; ADR-018 segmentation contains the untrusted classes (cameras/IoT) |
 | R2 | WAN DoS on :443 degrades remote access only | Appliance value is local; remote reach via ZT is best-effort |
 | R3 | Bearer-token concentration in the orchestrator | It is the control plane by design (ADR-009); compensated by no-docker-socket, limits, CI gates |
-| R4 | `.env` plaintext until WARP-232 LUKS2 lands | Physical theft also covered by A8 encrypted off-box backups + planned disk encryption |
+| R4 | WARP-232 LUKS2/Argon2id data partition + `.env`/`data/secrets` relocation shipped (pending WARP-966 hardware verify) | Physical theft covered by TPM-sealed LUKS2 (disk removed → ciphertext only) + A8 encrypted off-box backups; no-TPM dev boxes stay plain with a loud warning |
 | R5 | WebAuthn/SIEM/DLP/pen-test deferred post-GA | WARP-328 long-tail bucket, per the GA cut-line decision |
 
 ## 10. Critical/High register (roll-up)

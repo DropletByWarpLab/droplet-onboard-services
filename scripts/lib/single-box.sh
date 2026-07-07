@@ -433,8 +433,21 @@ configure_single_box_env() {
   # an interrupted previous run — or a hand edit — can leave .env without a
   # trailing newline; appending to it would glue the new content onto the last
   # existing line and corrupt both.
-  if [ -s "$env_file" ] && [ -n "$(tail -c 1 "$env_file")" ]; then
-    printf '\n' >> "$env_file"
+  # WARP-232 (finding 2): after relocate_secrets_to_data, $env_file is a SYMLINK
+  # onto the encrypted /data. All writes below must go THROUGH the link to its
+  # real target — staging beside the link and `mv`-ing over it would replace the
+  # symlink with a plain file on the unencrypted root (moving DEVICE_SECRET_KEY
+  # back outside the LUKS boundary and breaking the compose `../.env` bind for
+  # the docker-group user). Resolve once here; the newline-normalize + upsert_env
+  # below operate on $env_target.
+  local env_target="$env_file"
+  if [ -L "$env_file" ]; then
+    env_target="$(readlink -f "$env_file" 2>/dev/null || readlink "$env_file")"
+    [ -n "$env_target" ] || env_target="$env_file"
+  fi
+
+  if [ -s "$env_target" ] && [ -n "$(tail -c 1 "$env_target")" ]; then
+    printf '\n' >> "$env_target"
   fi
 
   # --- Idempotent upsert of the single-box knobs (WARP-556) ----------------
@@ -460,15 +473,17 @@ configure_single_box_env() {
   # secrets as .env and must not accumulate. Mirrors the .tmp.* / .migrate.*
   # sweeps in generate_env / migrate_env. Safe: concurrent runs are excluded
   # by setup.sh's lockfile, so no live stage can be swept.
-  rm -f "$env_file".upsert.* 2>/dev/null || true
+  rm -f "$env_target".upsert.* 2>/dev/null || true
 
   upsert_env() {
     local key="$1" val="$2"
-    local stage="${env_file}.upsert.$$"
-    ( umask 077; { grep -vE "^${key}=" "$env_file" 2>/dev/null || true; \
+    # Stage next to and rename onto the REAL target (encrypted /data when
+    # relocated), never the symlink itself — see the $env_target note above.
+    local stage="${env_target}.upsert.$$"
+    ( umask 077; { grep -vE "^${key}=" "$env_target" 2>/dev/null || true; \
                    printf '%s=%s\n' "$key" "$val"; } > "$stage" )
     chmod 600 "$stage"
-    mv "$stage" "$env_file"
+    mv "$stage" "$env_target"
   }
 
   # COMPOSE_PROFILES is MERGED, not overwritten: keep whatever lib/compose.sh

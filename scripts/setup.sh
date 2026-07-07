@@ -136,6 +136,8 @@ source "$SCRIPT_DIR/lib/local-dns.sh"
 source "$SCRIPT_DIR/lib/single-box.sh"
 # shellcheck source=lib/backup.sh
 source "$SCRIPT_DIR/lib/backup.sh"
+# shellcheck source=lib/luks.sh
+source "$SCRIPT_DIR/lib/luks.sh"
 
 # --- Single-box mode resolution ---
 # Either the user forced it via --single-box/--no-single-box, or we auto-detect.
@@ -374,6 +376,14 @@ main() {
   log_step 1 $total_steps "Preflight checks"
   preflight_check
 
+  # --- Phase 1.5: Encrypted data partition (WARP-232) ---
+  # Provision the LUKS2/Argon2id data LV + TPM-sealed unlock BEFORE Docker, so
+  # a fresh appliance's docker daemon.json data-root lands on the encrypted
+  # /data before any image exists. Idempotent; refuses loudly without a TPM
+  # (data stays plain), skipped silently on non-Linux. See scripts/lib/luks.sh.
+  install_luks_data_partition \
+    || log_warn "LUKS data-partition provisioning had issues (continuing)"
+
   # --- Phase 2: Docker ---
   log_step 2 $total_steps "Docker"
   if [ "$SKIP_DOCKER" = "true" ]; then
@@ -418,6 +428,13 @@ main() {
   # No-ops on a fresh install; recovers stale installs without --regenerate-env.
   migrate_env
   materialize_artifacts
+  # WARP-232: once /data is a real encrypted mount, relocate the crypto-
+  # sensitive secrets (.env carries DEVICE_SECRET_KEY → restic password;
+  # data/secrets carries the audit key) onto it and symlink them back, so
+  # "disk removed + mounted elsewhere yields no readable data" holds for the
+  # derivation inputs too. No-op unless /data is the LUKS mapper. Idempotent.
+  relocate_secrets_to_data \
+    || log_warn "secrets relocation onto /data had issues (continuing)"
   # Single-box mode: append single-box .env knobs so the `single-box`
   # compose profile activates and the patched services find the right
   # values. Idempotent — re-appends the same block; docker-compose
